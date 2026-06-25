@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://boreal.work/schemas/events/runtime-event.schema.json",
+  "title": "Boreal Runtime Event",
+  "type": "object",
+  "required": ["meta", "type", "subjectId", "subjectType", "payload"],
+  "properties": {
+    "meta": { "type": "object" },
+    "type": { "type": "string", "minLength": 1 },
+    "subjectId": { "type": "string", "minLength": 1 },
+    "subjectType": { "type": "string", "minLength": 1 },
+    "payload": { "type": "object" }
+  }
+}
+

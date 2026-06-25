@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://boreal.work/schemas/policies/runtime-policy.schema.json",
+  "title": "Boreal Runtime Policy",
+  "type": "object",
+  "required": [
+    "requireEvidenceForVerification",
+    "requirePassingVerificationForClose",
+    "preventDependencyCycles",
+    "allowReservationStealing",
+    "maxActiveReservationsPerAgent"
+  ],
+  "properties": {
+    "requireEvidenceForVerification": { "type": "boolean" },
+    "requirePassingVerificationForClose": { "type": "boolean" },
+    "preventDependencyCycles": { "type": "boolean" },
+    "allowReservationStealing": { "type": "boolean" },
+    "maxActiveReservationsPerAgent": { "type": "integer", "minimum": 1 }
+  }
+}
+

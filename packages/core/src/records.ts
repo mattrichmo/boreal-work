@@ -1,0 +1,190 @@
+import type {
+  AgentId,
+  ClaimId,
+  ContentHash,
+  DecisionId,
+  EventId,
+  EvidenceId,
+  GraphEdgeId,
+  KnowledgeSourceId,
+  ProjectionId,
+  ReservationId,
+  VerificationId,
+  WorkId
+} from "./ids.js";
+import type { IsoTimestamp } from "./time.js";
+
+export const BOREAL_SCHEMA_VERSION = "boreal.runtime.v1";
+
+export type ActorKind = "human" | "agent" | "system";
+
+export interface ActorRef {
+  readonly id: AgentId | string;
+  readonly kind: ActorKind;
+  readonly displayName?: string;
+}
+
+export interface SourceRef {
+  readonly uri: string;
+  readonly label?: string;
+  readonly contentHash?: ContentHash;
+}
+
+export interface RecordMeta<TId extends string> {
+  readonly id: TId;
+  readonly schemaVersion: string;
+  readonly createdAt: IsoTimestamp;
+  readonly updatedAt: IsoTimestamp;
+  readonly createdBy: ActorRef;
+  readonly updatedBy: ActorRef;
+  readonly contentHash?: ContentHash;
+  readonly sourceRefs: readonly SourceRef[];
+  readonly tags: readonly string[];
+}
+
+export type WorkKind = "issue" | "task" | "sprint" | "milestone";
+export type WorkPriority = "low" | "normal" | "high" | "critical";
+export type WorkStatus =
+  | "draft"
+  | "ready"
+  | "reserved"
+  | "in_progress"
+  | "blocked"
+  | "needs_verification"
+  | "verified"
+  | "closed"
+  | "cancelled";
+
+export interface WorkItem {
+  readonly meta: RecordMeta<WorkId>;
+  readonly kind: WorkKind;
+  readonly title: string;
+  readonly description: string;
+  readonly status: WorkStatus;
+  readonly priority: WorkPriority;
+  readonly acceptanceCriteria: readonly string[];
+  readonly labels: readonly string[];
+  readonly parentId?: WorkId;
+  readonly dependencyIds: readonly WorkId[];
+  readonly evidenceIds: readonly EvidenceId[];
+  readonly verificationIds: readonly VerificationId[];
+  readonly reservationId?: ReservationId;
+  readonly closedAt?: IsoTimestamp;
+  readonly closedReason?: string;
+}
+
+export type EdgeKind =
+  | "blocks"
+  | "depends_on"
+  | "relates_to"
+  | "supports"
+  | "contradicts"
+  | "verifies"
+  | "references";
+
+export interface GraphEdge {
+  readonly meta: RecordMeta<GraphEdgeId>;
+  readonly kind: EdgeKind;
+  readonly fromId: string;
+  readonly fromType: string;
+  readonly toId: string;
+  readonly toType: string;
+  readonly directed: boolean;
+}
+
+export type EvidenceKind = "command" | "test" | "diff" | "review" | "artifact" | "note";
+export type EvidenceOutcome = "passed" | "failed" | "observed" | "unknown";
+
+export interface EvidenceRecord {
+  readonly meta: RecordMeta<EvidenceId>;
+  readonly subjectId: string;
+  readonly subjectType: string;
+  readonly kind: EvidenceKind;
+  readonly summary: string;
+  readonly outcome: EvidenceOutcome;
+  readonly command?: string;
+  readonly uri?: string;
+  readonly observedAt: IsoTimestamp;
+}
+
+export type VerificationVerdict = "passed" | "failed";
+
+export interface VerificationRecord {
+  readonly meta: RecordMeta<VerificationId>;
+  readonly subjectId: string;
+  readonly subjectType: string;
+  readonly verdict: VerificationVerdict;
+  readonly evidenceIds: readonly EvidenceId[];
+  readonly verifiedAt: IsoTimestamp;
+  readonly notes?: string;
+}
+
+export type KnowledgeSourceKind = "raw" | "document" | "chat" | "code" | "artifact";
+
+export interface KnowledgeSource {
+  readonly meta: RecordMeta<KnowledgeSourceId>;
+  readonly kind: KnowledgeSourceKind;
+  readonly title: string;
+  readonly uri: string;
+  readonly summary: string;
+}
+
+export type ClaimStatus = "proposed" | "accepted" | "rejected" | "stale";
+
+export interface ClaimRecord {
+  readonly meta: RecordMeta<ClaimId>;
+  readonly statement: string;
+  readonly status: ClaimStatus;
+  readonly sourceIds: readonly KnowledgeSourceId[];
+  readonly evidenceIds: readonly EvidenceId[];
+}
+
+export type DecisionStatus = "proposed" | "accepted" | "superseded" | "rejected";
+
+export interface DecisionRecord {
+  readonly meta: RecordMeta<DecisionId>;
+  readonly title: string;
+  readonly status: DecisionStatus;
+  readonly context: string;
+  readonly decision: string;
+  readonly consequences: readonly string[];
+  readonly sourceIds: readonly KnowledgeSourceId[];
+}
+
+export type ReservationStatus = "active" | "released" | "expired";
+
+export interface AgentReservation {
+  readonly meta: RecordMeta<ReservationId>;
+  readonly workId: WorkId;
+  readonly agentId: AgentId | string;
+  readonly status: ReservationStatus;
+  readonly reservedAt: IsoTimestamp;
+  readonly expiresAt?: IsoTimestamp;
+  readonly purpose?: string;
+}
+
+export interface RuntimeEvent {
+  readonly meta: RecordMeta<EventId>;
+  readonly type: string;
+  readonly subjectId: string;
+  readonly subjectType: string;
+  readonly payload: Record<string, unknown>;
+}
+
+export interface ProjectionRecord {
+  readonly meta: RecordMeta<ProjectionId>;
+  readonly kind: string;
+  readonly subjectId: string;
+  readonly value: Record<string, unknown>;
+}
+
+export interface ContextPack {
+  readonly id: ProjectionId;
+  readonly subjectId: string;
+  readonly generatedAt: IsoTimestamp;
+  readonly title: string;
+  readonly summary: string;
+  readonly facts: readonly string[];
+  readonly evidence: readonly string[];
+}
+

@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://boreal.work/schemas/records/work-item.schema.json",
+  "title": "Boreal Work Item",
+  "type": "object",
+  "required": ["meta", "kind", "title", "description", "status", "priority", "acceptanceCriteria", "labels", "dependencyIds", "evidenceIds", "verificationIds"],
+  "properties": {
+    "meta": { "$ref": "#/$defs/meta" },
+    "kind": { "enum": ["issue", "task", "sprint", "milestone"] },
+    "title": { "type": "string", "minLength": 1 },
+    "description": { "type": "string" },
+    "status": { "enum": ["draft", "ready", "reserved", "in_progress", "blocked", "needs_verification", "verified", "closed", "cancelled"] },
+    "priority": { "enum": ["low", "normal", "high", "critical"] },
+    "acceptanceCriteria": { "type": "array", "items": { "type": "string" } },
+    "labels": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
+    "parentId": { "type": "string" },
+    "dependencyIds": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
+    "evidenceIds": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
+    "verificationIds": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
+    "reservationId": { "type": "string" },
+    "closedAt": { "type": "string", "format": "date-time" },
+    "closedReason": { "type": "string" }
+  },
+  "$defs": {
+    "meta": {
+      "type": "object",
+      "required": ["id", "schemaVersion", "createdAt", "updatedAt", "createdBy", "updatedBy", "sourceRefs", "tags"],
+      "properties": {
+        "id": { "type": "string", "pattern": "^bw_work_[a-f0-9]{12,64}$" },
+        "schemaVersion": { "const": "boreal.runtime.v1" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" },
+        "createdBy": { "type": "object" },
+        "updatedBy": { "type": "object" },
+        "contentHash": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" },
+        "sourceRefs": { "type": "array" },
+        "tags": { "type": "array", "items": { "type": "string" } }
+      }
+    }
+  }
+}
+

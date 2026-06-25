@@ -1,0 +1,16 @@
+{
+  "files": [],
+  "references": [
+    { "path": "./packages/core" },
+    { "path": "./packages/storage" },
+    { "path": "./packages/graph-engine" },
+    { "path": "./packages/work-engine" },
+    { "path": "./packages/evidence-engine" },
+    { "path": "./packages/knowledge-engine" },
+    { "path": "./packages/agent-runtime" },
+    { "path": "./packages/search" },
+    { "path": "./packages/ui-model" },
+    { "path": "./packages/engine" }
+  ]
+}
+

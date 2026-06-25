@@ -1,0 +1,35 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2022"],
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "strict": true,
+    "noImplicitOverride": true,
+    "noUncheckedIndexedAccess": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "verbatimModuleSyntax": true,
+    "declaration": true,
+    "declarationMap": true,
+    "sourceMap": true,
+    "composite": true,
+    "skipLibCheck": true,
+    "baseUrl": ".",
+    "paths": {
+      "@boreal/agent-runtime": ["packages/agent-runtime/src/index.ts"],
+      "@boreal/core": ["packages/core/src/index.ts"],
+      "@boreal/engine": ["packages/engine/src/index.ts"],
+      "@boreal/evidence-engine": ["packages/evidence-engine/src/index.ts"],
+      "@boreal/graph-engine": ["packages/graph-engine/src/index.ts"],
+      "@boreal/knowledge-engine": ["packages/knowledge-engine/src/index.ts"],
+      "@boreal/search": ["packages/search/src/index.ts"],
+      "@boreal/storage": ["packages/storage/src/index.ts"],
+      "@boreal/ui-model": ["packages/ui-model/src/index.ts"],
+      "@boreal/work-engine": ["packages/work-engine/src/index.ts"]
+    }
+  }
+}
+

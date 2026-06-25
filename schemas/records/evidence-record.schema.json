@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://boreal.work/schemas/records/evidence-record.schema.json",
+  "title": "Boreal Evidence Record",
+  "type": "object",
+  "required": ["meta", "subjectId", "subjectType", "kind", "summary", "outcome", "observedAt"],
+  "properties": {
+    "meta": { "type": "object" },
+    "subjectId": { "type": "string", "minLength": 1 },
+    "subjectType": { "type": "string", "minLength": 1 },
+    "kind": { "enum": ["command", "test", "diff", "review", "artifact", "note"] },
+    "summary": { "type": "string", "minLength": 1 },
+    "outcome": { "enum": ["passed", "failed", "observed", "unknown"] },
+    "command": { "type": "string" },
+    "uri": { "type": "string" },
+    "observedAt": { "type": "string", "format": "date-time" }
+  }
+}
+

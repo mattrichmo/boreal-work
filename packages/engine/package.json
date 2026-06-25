@@ -1,0 +1,24 @@
+{
+  "name": "@boreal/engine",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@boreal/agent-runtime": "workspace:*",
+    "@boreal/core": "workspace:*",
+    "@boreal/evidence-engine": "workspace:*",
+    "@boreal/graph-engine": "workspace:*",
+    "@boreal/knowledge-engine": "workspace:*",
+    "@boreal/search": "workspace:*",
+    "@boreal/storage": "workspace:*",
+    "@boreal/ui-model": "workspace:*",
+    "@boreal/work-engine": "workspace:*"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  }
+}
+

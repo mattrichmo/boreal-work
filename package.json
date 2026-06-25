@@ -1,0 +1,25 @@
+{
+  "name": "boreal-work",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Git-native project memory and workflow control for humans and agents.",
+  "type": "module",
+  "packageManager": "pnpm@9.15.1",
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "scripts": {
+    "build": "tsc -b",
+    "check": "tsc -b --pretty false",
+    "clean": "pnpm -r exec rm -rf dist tsconfig.tsbuildinfo && rm -rf coverage",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.8"
+  }
+}
+
