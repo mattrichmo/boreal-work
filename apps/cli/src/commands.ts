@@ -18,6 +18,7 @@ import {
   type ReservationStatus,
   type VerificationVerdict,
   type WorkId,
+  type WorkItem,
   type WorkKind,
   type WorkPriority,
   type WorkStatus
@@ -25,6 +26,7 @@ import {
 import type { SearchResult } from "@boreal/search";
 import { breakStaleFileLock, inspectFileLock } from "@boreal/storage";
 import type { WorkItemView } from "@boreal/ui-model";
+import { deriveReadinessStatus } from "@boreal/work-engine";
 
 import { flagValue, flagValues, hasFlag, requiredFlag, type ParsedArgs } from "./args.js";
 import {
@@ -70,6 +72,30 @@ interface ReservationListRow {
   readonly reservedAt: string;
   readonly expiresAt?: string;
   readonly purpose?: string;
+}
+
+interface AgentStatus {
+  readonly agentId: string;
+  readonly labels: readonly string[];
+  readonly policy: {
+    readonly maxActiveReservations: number;
+  };
+  readonly reservations: {
+    readonly activeCount: number;
+    readonly expiredActiveCount: number;
+    readonly capacityRemaining: number;
+    readonly active: readonly ReservationListRow[];
+    readonly expiredActive: readonly ReservationListRow[];
+  };
+  readonly readyWork: {
+    readonly claimableCount: number;
+    readonly next?: WorkListRow;
+  };
+  readonly recommendedAction: {
+    readonly kind: string;
+    readonly command?: string;
+    readonly reason: string;
+  };
 }
 
 export async function runCommand(args: ParsedArgs, output: CliOutput, cwd: string): Promise<CommandResult> {
@@ -121,6 +147,8 @@ export async function runCommand(args: ParsedArgs, output: CliOutput, cwd: strin
       return searchCommand(action, rest, context, args, output, json);
     case "reservation":
       return reservationCommand(action, context, args, output, json);
+    case "agent":
+      return agentCommand(action, context, args, output, json);
     case "export":
       return exportCommand(action, context, args, output, json);
     case "import":
@@ -157,6 +185,23 @@ function commandsCommand(output: CliOutput, json: boolean): CommandResult {
   return { exitCode: 0 };
 }
 
+async function agentCommand(
+  action: string | undefined,
+  context: CliContext,
+  args: ParsedArgs,
+  output: CliOutput,
+  json: boolean
+): Promise<CommandResult> {
+  if (action !== "status") {
+    throw new BorealError("BOREAL_INVALID_INPUT", `Unknown agent command: ${action ?? ""}`);
+  }
+
+  const agentId = flagValue(args, "agent") ?? context.actor.id;
+  const labels = flagValues(args, "label");
+  output.write(formatRecord(await buildAgentStatus(context, agentId, labels), json));
+  return { exitCode: 0 };
+}
+
 async function reservationCommand(
   action: string | undefined,
   context: CliContext,
@@ -189,6 +234,53 @@ async function reservationCommand(
   });
   output.write(json ? formatRecord(rows, true) : table(rows.map(textReservationListRow)));
   return { exitCode: 0 };
+}
+
+async function buildAgentStatus(
+  context: CliContext,
+  agentId: string,
+  labels: readonly string[]
+): Promise<AgentStatus> {
+  const now = Date.now();
+  const maxActiveReservations = context.runtime.policy.maxActiveReservationsPerAgent;
+  return context.store.read(async (reader) => {
+    const [reservations, workItems] = await Promise.all([reader.listReservations(), reader.listWorkItems()]);
+    const workById = new Map(workItems.map((work) => [work.meta.id, work]));
+    const reservationRows = reservations.map((reservation) => reservationListRow(reservation, workById.get(reservation.workId), now));
+    const active = reservationRows
+      .filter((row) => row.agentId === agentId && row.status === "active")
+      .sort(compareReservationRows);
+    const expiredActive = active.filter((row) => row.expired);
+    const claimableWork = [...claimableWorkItems(workItems, labels)].sort(compareWorkItems);
+    const capacityRemaining = Math.max(0, maxActiveReservations - active.length);
+
+    return {
+      agentId,
+      labels,
+      policy: {
+        maxActiveReservations
+      },
+      reservations: {
+        activeCount: active.length,
+        expiredActiveCount: expiredActive.length,
+        capacityRemaining,
+        active,
+        expiredActive
+      },
+      readyWork: {
+        claimableCount: claimableWork.length,
+        next: claimableWork[0] ? workListRow(claimableWork[0]) : undefined
+      },
+      recommendedAction: recommendedAgentAction({
+        agentId,
+        labels,
+        active,
+        expiredActive,
+        capacityRemaining,
+        claimableWork
+      })
+    };
+  });
 }
 
 async function initCommand(
@@ -897,6 +989,10 @@ function optionalWorkId(value: string | undefined): WorkId | undefined {
   return value ? asWorkId(value) : undefined;
 }
 
+function isWorkItem(value: WorkItem | undefined): value is WorkItem {
+  return value !== undefined;
+}
+
 function workListRow(work: {
   readonly meta: { readonly id: string };
   readonly title: string;
@@ -931,6 +1027,23 @@ function reservationListRow(
     expiresAt,
     purpose: reservation.purpose
   };
+}
+
+function claimableWorkItems(workItems: readonly WorkItem[], labels: readonly string[]): readonly WorkItem[] {
+  const workById = new Map(workItems.map((work) => [work.meta.id, work]));
+  return workItems.filter((work) => {
+    if (work.status !== "ready" || work.reservationId) {
+      return false;
+    }
+    if (!labels.every((label) => work.labels.includes(label))) {
+      return false;
+    }
+    const dependencies = work.dependencyIds.map((dependencyId) => workById.get(dependencyId)).filter(isWorkItem);
+    if (dependencies.length !== work.dependencyIds.length) {
+      return false;
+    }
+    return deriveReadinessStatus(work, dependencies) === "ready";
+  });
 }
 
 function workViewListRow(view: WorkItemView): WorkListRow {
@@ -1030,6 +1143,14 @@ function compareReservationRows(left: ReservationListRow, right: ReservationList
   );
 }
 
+function compareWorkItems(left: WorkItem, right: WorkItem): number {
+  return (
+    priorityRank(right.priority) - priorityRank(left.priority) ||
+    left.title.localeCompare(right.title) ||
+    left.meta.id.localeCompare(right.meta.id)
+  );
+}
+
 function reservationStatusRank(status: ReservationStatus): number {
   switch (status) {
     case "active":
@@ -1052,6 +1173,60 @@ function compareOptionalIso(left: string | undefined, right: string | undefined)
     return 1;
   }
   return 0;
+}
+
+function recommendedAgentAction(input: {
+  readonly agentId: string;
+  readonly labels: readonly string[];
+  readonly active: readonly ReservationListRow[];
+  readonly expiredActive: readonly ReservationListRow[];
+  readonly capacityRemaining: number;
+  readonly claimableWork: readonly WorkItem[];
+}): AgentStatus["recommendedAction"] {
+  if (input.expiredActive.length > 0) {
+    return {
+      kind: "repair_expired_reservations",
+      command: "bwrk doctor --fix",
+      reason: "Expired active reservations should be repaired before claiming more work."
+    };
+  }
+  if (input.capacityRemaining <= 0) {
+    return {
+      kind: "release_or_finish_work",
+      command: `bwrk reservation list --agent ${shellArg(input.agentId)} --status active`,
+      reason: "The agent has reached the active reservation limit."
+    };
+  }
+  if (input.active.length > 0) {
+    return {
+      kind: "continue_reserved_work",
+      command: `bwrk work show ${shellArg(input.active[0]?.workId ?? "")}`,
+      reason: "The agent already has active reserved work."
+    };
+  }
+  if (input.claimableWork.length > 0) {
+    return {
+      kind: "claim_work",
+      command: `bwrk work claim --agent ${shellArg(input.agentId)}${labelFlags(input.labels)}`,
+      reason: "The agent has available reservation capacity and claimable ready work."
+    };
+  }
+  return {
+    kind: "wait_for_ready_work",
+    command: "bwrk work list --ready",
+    reason: "The agent has capacity, but no claimable ready work matches the requested filters."
+  };
+}
+
+function labelFlags(labels: readonly string[]): string {
+  return labels.length > 0 ? ` ${labels.map((label) => `--label ${shellArg(label)}`).join(" ")}` : "";
+}
+
+function shellArg(value: string): string {
+  if (/^[A-Za-z0-9_./:@=-]+$/.test(value)) {
+    return value;
+  }
+  return `'${value.replace(/'/g, "'\\''")}'`;
 }
 
 function compareWorkViews(left: WorkItemView, right: WorkItemView): number {
@@ -1106,6 +1281,6 @@ Usage:
 ${COMMAND_DEFINITIONS.map((definition) => `  ${definition.usage}`).join("\n")}
 
 Help:
-  bwrk help [init|work|evidence|source|claim|decision|context|search|reservation|export|import|snapshot|doctor|lock|commands]
+  bwrk help [init|work|evidence|source|claim|decision|context|search|reservation|agent|export|import|snapshot|doctor|lock|commands]
 `;
 }

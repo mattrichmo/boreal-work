@@ -22,6 +22,7 @@ export interface CommandDefinition {
     | "context"
     | "search"
     | "reservation"
+    | "agent"
     | "export"
     | "import"
     | "snapshot"
@@ -473,6 +474,21 @@ export const COMMAND_DEFINITIONS: readonly CommandDefinition[] = [
       flag("status", "value", "Only include reservations with this status. Defaults to active."),
       flag("expired", "boolean", "Only include reservations whose expiration timestamp is in the past."),
       flag("limit", "value", "Maximum number of reservations to print."),
+    ],
+    positionals: { label: "arguments", min: 0, max: 0 },
+    requiresWorkspace: true,
+    supportsJson: true,
+  },
+  {
+    path: ["agent", "status"],
+    category: "agent",
+    summary: "Show agent coordination status.",
+    usage: "bwrk agent status [--agent <agent-id>] [--label <label>...] [--json]",
+    description:
+      "Summarizes an agent's active and expired reservations, claim capacity, claimable ready work, and recommended next action.",
+    flags: [
+      flag("agent", "value", "Agent identifier. Defaults to the CLI actor."),
+      flag("label", "value", "Only consider ready work with this label when computing claimable work.", true),
     ],
     positionals: { label: "arguments", min: 0, max: 0 },
     requiresWorkspace: true,

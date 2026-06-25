@@ -38,6 +38,7 @@ pnpm bwrk work list --status ready --label cli --limit 20
 pnpm bwrk work next --label cli
 pnpm bwrk work claim --label cli --agent agent-a --purpose "start implementation"
 pnpm bwrk reservation list --agent agent-a --status active
+pnpm bwrk agent status --agent agent-a
 pnpm bwrk work renew <work-id> --ttl 2h
 pnpm bwrk work release <work-id>
 pnpm bwrk evidence add <work-id> --summary "pnpm test passed" --kind test --outcome passed --command "pnpm test"
@@ -71,7 +72,7 @@ init -> create work -> add dependency -> derive readiness -> reserve
 
 The file-backed store is also tested for persistence across runtime instances, rollback on failed transactions, concurrent writer serialization, stale-lock recovery, schema drift rejection, invalid JSON rejection, and path escape rejection.
 
-The CLI integration test covers init fail-closed behavior, exact versus discovered workspace resolution, idempotent concurrent init, bounded/filtered listing, next-ready work, atomic claim handoffs, reservation visibility/renewal/release/expiration repair, create/ready/list/evidence/verify/close, source/claim/decision/context commands, fresh-index search, JSON and Markdown export, JSON import, recovery snapshots, projection and search-index repair through `doctor --fix`, and explicit stale lock repair through `lock break --stale-only`.
+The CLI integration test covers init fail-closed behavior, exact versus discovered workspace resolution, idempotent concurrent init, bounded/filtered listing, next-ready work, atomic claim handoffs, reservation visibility/renewal/release/expiration repair, agent coordination status, create/ready/list/evidence/verify/close, source/claim/decision/context commands, fresh-index search, JSON and Markdown export, JSON import, recovery snapshots, projection and search-index repair through `doctor --fix`, and explicit stale lock repair through `lock break --stale-only`.
 
 Several runtime invariants intentionally follow the Beads methodology while staying TypeScript-native:
 

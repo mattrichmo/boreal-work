@@ -75,6 +75,7 @@ bwrk help decision
 bwrk help context
 bwrk help search
 bwrk help reservation
+bwrk help agent
 bwrk help export
 bwrk help import
 bwrk help snapshot
@@ -323,6 +324,24 @@ Filters:
 - `--limit`: maximum number of rows.
 
 Rows include reservation ID, status, computed `expired`, agent ID, work ID, work status, work title, `reservedAt`, optional `expiresAt`, and optional purpose.
+
+## `agent status`
+
+```bash
+bwrk agent status [--agent <agent-id>] [--label <label>] [--json]
+```
+
+Summarizes an agent's coordination state. If `--agent` is omitted, the CLI actor ID is used.
+
+JSON `data` includes:
+
+- `policy.maxActiveReservations`.
+- Active and expired-active reservation counts.
+- Remaining claim capacity under the reservation policy.
+- Active and expired-active reservation rows.
+- Claimable ready-work count for the optional label filter.
+- The next claimable work row when one exists.
+- `recommendedAction` with a `kind`, optional command, and reason.
 
 ## `evidence add`
 

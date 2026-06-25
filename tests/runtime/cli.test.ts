@@ -38,6 +38,7 @@ describe("bwrk cli", () => {
       "## `work release`",
       "## `work renew`",
       "## `reservation list`",
+      "## `agent status`",
       "## `evidence add`",
       "## `work verify`",
       "## `work close`",
@@ -80,7 +81,7 @@ describe("bwrk cli", () => {
     expect(root.exitCode).toBe(0);
     expect(root.stdout).toContain("bwrk - Boreal Work CLI");
     expect(root.stdout).toContain(
-      "bwrk help [init|work|evidence|source|claim|decision|context|search|reservation|export|import|snapshot|doctor|lock|commands]"
+      "bwrk help [init|work|evidence|source|claim|decision|context|search|reservation|agent|export|import|snapshot|doctor|lock|commands]"
     );
     expect(work.exitCode).toBe(0);
     expect(work.stdout).toContain("bwrk work create");
@@ -137,6 +138,7 @@ describe("bwrk cli", () => {
         "work release",
         "work renew",
         "reservation list",
+        "agent status",
         "export json",
         "export markdown",
         "import json",
@@ -598,9 +600,26 @@ describe("bwrk cli", () => {
     const rootDir = await makeTempWorkspace();
     await runCli(rootDir, ["init", "--json"]);
 
+    const claimLabel = "coord $label's";
+    const shellSensitiveAgent = "agent $one's";
     const work = parseData<{ readonly meta: { readonly id: string } }>(
-      (await runCli(rootDir, ["work", "create", "Reservation CLI lifecycle", "--ready", "--json"])).stdout
+      (await runCli(rootDir, ["work", "create", "Reservation CLI lifecycle", "--label", claimLabel, "--ready", "--json"])).stdout
     );
+    const readyStatus = await runCli(rootDir, ["agent", "status", "--agent", shellSensitiveAgent, "--label", claimLabel, "--json"]);
+    const readyStatusPayload = parseData<{
+      readonly reservations: { readonly activeCount: number; readonly capacityRemaining: number };
+      readonly readyWork: { readonly claimableCount: number; readonly next?: { readonly id: string } };
+      readonly recommendedAction: { readonly kind: string; readonly command?: string };
+    }>(readyStatus.stdout);
+    expect(readyStatusPayload.reservations.activeCount).toBe(0);
+    expect(readyStatusPayload.reservations.capacityRemaining).toBe(3);
+    expect(readyStatusPayload.readyWork.claimableCount).toBe(1);
+    expect(readyStatusPayload.readyWork.next?.id).toBe(work.meta.id);
+    expect(readyStatusPayload.recommendedAction.kind).toBe("claim_work");
+    expect(readyStatusPayload.recommendedAction.command).toBe(
+      "bwrk work claim --agent 'agent $one'\\''s' --label 'coord $label'\\''s'"
+    );
+
     const reserved = await runCli(rootDir, ["work", "reserve", work.meta.id, "--agent", "agent-a", "--ttl", "1h", "--json"]);
     const reservedWork = parseData<{ readonly status: string; readonly reservationId: string }>(reserved.stdout);
     expect(reservedWork.status).toBe("reserved");
@@ -628,6 +647,18 @@ describe("bwrk cli", () => {
         workTitle: "Reservation CLI lifecycle"
       })
     );
+    const activeStatus = await runCli(rootDir, ["agent", "status", "--agent", "agent-a", "--json"]);
+    const activeStatusPayload = parseData<{
+      readonly reservations: { readonly activeCount: number; readonly expiredActiveCount: number; readonly capacityRemaining: number };
+      readonly readyWork: { readonly claimableCount: number };
+      readonly recommendedAction: { readonly kind: string; readonly command?: string };
+    }>(activeStatus.stdout);
+    expect(activeStatusPayload.reservations.activeCount).toBe(1);
+    expect(activeStatusPayload.reservations.expiredActiveCount).toBe(0);
+    expect(activeStatusPayload.reservations.capacityRemaining).toBe(2);
+    expect(activeStatusPayload.readyWork.claimableCount).toBe(0);
+    expect(activeStatusPayload.recommendedAction.kind).toBe("continue_reserved_work");
+    expect(activeStatusPayload.recommendedAction.command).toContain(`bwrk work show ${work.meta.id}`);
 
     const renewed = await runCli(rootDir, ["work", "renew", work.meta.id, "--ttl", "2h", "--json"]);
     const renewedPayload = parseData<{
@@ -660,6 +691,19 @@ describe("bwrk cli", () => {
     expect(parseData<Array<{ readonly id: string; readonly status: string; readonly expired: boolean }>>(expiredActiveList.stdout)).toEqual([
       expect.objectContaining({ id: staleReservationId, status: "active", expired: true })
     ]);
+    const expiredStatus = await runCli(rootDir, ["agent", "status", "--agent", "agent-b", "--json"]);
+    const expiredStatusPayload = parseData<{
+      readonly reservations: { readonly activeCount: number; readonly expiredActiveCount: number };
+      readonly recommendedAction: { readonly kind: string; readonly command?: string };
+    }>(expiredStatus.stdout);
+    expect(expiredStatusPayload.reservations.activeCount).toBe(1);
+    expect(expiredStatusPayload.reservations.expiredActiveCount).toBe(1);
+    expect(expiredStatusPayload.recommendedAction).toEqual(
+      expect.objectContaining({
+        kind: "repair_expired_reservations",
+        command: "bwrk doctor --fix"
+      })
+    );
 
     const failingDoctor = await runCli(rootDir, ["doctor", "--json"]);
     const failingPayload = parseData<{
