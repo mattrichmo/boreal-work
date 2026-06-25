@@ -37,6 +37,7 @@ const VALUE_FLAGS = new Set([
   "ttl",
   "uri",
   "verdict",
+  "work",
   "workspace"
 ]);
 

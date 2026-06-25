@@ -1,6 +1,7 @@
 import {
   BorealError,
   isIsoTimestamp,
+  type AgentReservation,
   type ClaimId,
   type ClaimRecord,
   type ClaimStatus,
@@ -14,7 +15,9 @@ import {
   type KnowledgeSource,
   type KnowledgeSourceId,
   type KnowledgeSourceKind,
+  type ReservationStatus,
   type VerificationVerdict,
+  type WorkId,
   type WorkKind,
   type WorkPriority,
   type WorkStatus
@@ -54,6 +57,19 @@ interface WorkListRow {
   readonly priority: string;
   readonly title: string;
   readonly labels: readonly string[];
+}
+
+interface ReservationListRow {
+  readonly id: string;
+  readonly status: ReservationStatus;
+  readonly expired: boolean;
+  readonly agentId: string;
+  readonly workId: string;
+  readonly workStatus?: string;
+  readonly workTitle?: string;
+  readonly reservedAt: string;
+  readonly expiresAt?: string;
+  readonly purpose?: string;
 }
 
 export async function runCommand(args: ParsedArgs, output: CliOutput, cwd: string): Promise<CommandResult> {
@@ -103,6 +119,8 @@ export async function runCommand(args: ParsedArgs, output: CliOutput, cwd: strin
       return contextCommand(action, rest, context, args, output, json);
     case "search":
       return searchCommand(action, rest, context, args, output, json);
+    case "reservation":
+      return reservationCommand(action, context, args, output, json);
     case "export":
       return exportCommand(action, context, args, output, json);
     case "import":
@@ -136,6 +154,40 @@ function commandsCommand(output: CliOutput, json: boolean): CommandResult {
       )
     );
   }
+  return { exitCode: 0 };
+}
+
+async function reservationCommand(
+  action: string | undefined,
+  context: CliContext,
+  args: ParsedArgs,
+  output: CliOutput,
+  json: boolean
+): Promise<CommandResult> {
+  if (action !== "list") {
+    throw new BorealError("BOREAL_INVALID_INPUT", `Unknown reservation command: ${action ?? ""}`);
+  }
+
+  const agentId = flagValue(args, "agent");
+  const workId = optionalWorkId(flagValue(args, "work"));
+  const status = parseReservationStatus(flagValue(args, "status"));
+  const onlyExpired = hasFlag(args, "expired");
+  const limit = parseLimit(flagValue(args, "limit"));
+  const now = Date.now();
+  const rows = await context.store.read(async (reader) => {
+    const reservations = await reader.listReservations();
+    const workItems = await reader.listWorkItems();
+    const workById = new Map(workItems.map((work) => [work.meta.id, work]));
+    return reservations
+      .map((reservation) => reservationListRow(reservation, workById.get(reservation.workId), now))
+      .filter((row) => !agentId || row.agentId === agentId)
+      .filter((row) => !workId || row.workId === workId)
+      .filter((row) => !status || row.status === status)
+      .filter((row) => !onlyExpired || row.expired)
+      .sort(compareReservationRows)
+      .slice(0, limit ?? reservations.length);
+  });
+  output.write(json ? formatRecord(rows, true) : table(rows.map(textReservationListRow)));
   return { exitCode: 0 };
 }
 
@@ -722,6 +774,19 @@ function parseWorkStatus(value: string | undefined): WorkStatus | undefined {
   );
 }
 
+function parseReservationStatus(value: string | undefined): ReservationStatus | undefined {
+  if (!value) {
+    return "active";
+  }
+  if (value === "all") {
+    return undefined;
+  }
+  if (value === "active" || value === "released" || value === "expired") {
+    return value;
+  }
+  throw new BorealError("BOREAL_INVALID_INPUT", "--status must be active, released, expired, or all");
+}
+
 function parseLimit(value: string | undefined): number | undefined {
   if (!value) {
     return undefined;
@@ -828,6 +893,10 @@ function optionalSourceId(value: string | undefined): KnowledgeSourceId | undefi
   return value ? asSourceId(value) : undefined;
 }
 
+function optionalWorkId(value: string | undefined): WorkId | undefined {
+  return value ? asWorkId(value) : undefined;
+}
+
 function workListRow(work: {
   readonly meta: { readonly id: string };
   readonly title: string;
@@ -844,6 +913,26 @@ function workListRow(work: {
   };
 }
 
+function reservationListRow(
+  reservation: AgentReservation,
+  work: { readonly title: string; readonly status: WorkStatus } | undefined,
+  now: number
+): ReservationListRow {
+  const expiresAt = reservation.expiresAt;
+  return {
+    id: reservation.meta.id,
+    status: reservation.status,
+    expired: expiresAt !== undefined && Date.parse(expiresAt) <= now,
+    agentId: String(reservation.agentId),
+    workId: reservation.workId,
+    workStatus: work?.status,
+    workTitle: work?.title,
+    reservedAt: reservation.reservedAt,
+    expiresAt,
+    purpose: reservation.purpose
+  };
+}
+
 function workViewListRow(view: WorkItemView): WorkListRow {
   return {
     id: view.id,
@@ -851,6 +940,20 @@ function workViewListRow(view: WorkItemView): WorkListRow {
     priority: view.priority,
     title: view.title,
     labels: [...view.labels]
+  };
+}
+
+function textReservationListRow(row: ReservationListRow): Record<string, string> {
+  return {
+    id: row.id,
+    status: row.status,
+    expired: row.expired ? "yes" : "no",
+    agent: row.agentId,
+    work: row.workId,
+    workStatus: row.workStatus ?? "",
+    title: row.workTitle ?? "",
+    expiresAt: row.expiresAt ?? "",
+    purpose: row.purpose ?? ""
   };
 }
 
@@ -917,6 +1020,40 @@ function handoffSearchQuery(work: WorkItemView, contextPack: ContextPack): strin
     .trim();
 }
 
+function compareReservationRows(left: ReservationListRow, right: ReservationListRow): number {
+  return (
+    reservationStatusRank(left.status) - reservationStatusRank(right.status) ||
+    Number(right.expired) - Number(left.expired) ||
+    compareOptionalIso(left.expiresAt, right.expiresAt) ||
+    right.reservedAt.localeCompare(left.reservedAt) ||
+    left.id.localeCompare(right.id)
+  );
+}
+
+function reservationStatusRank(status: ReservationStatus): number {
+  switch (status) {
+    case "active":
+      return 0;
+    case "expired":
+      return 1;
+    case "released":
+      return 2;
+  }
+}
+
+function compareOptionalIso(left: string | undefined, right: string | undefined): number {
+  if (left && right) {
+    return left.localeCompare(right);
+  }
+  if (left) {
+    return -1;
+  }
+  if (right) {
+    return 1;
+  }
+  return 0;
+}
+
 function compareWorkViews(left: WorkItemView, right: WorkItemView): number {
   return (
     priorityRank(right.priority) - priorityRank(left.priority) ||
@@ -969,6 +1106,6 @@ Usage:
 ${COMMAND_DEFINITIONS.map((definition) => `  ${definition.usage}`).join("\n")}
 
 Help:
-  bwrk help [init|work|evidence|source|claim|decision|context|search|export|import|snapshot|doctor|lock|commands]
+  bwrk help [init|work|evidence|source|claim|decision|context|search|reservation|export|import|snapshot|doctor|lock|commands]
 `;
 }

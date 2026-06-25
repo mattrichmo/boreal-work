@@ -37,6 +37,7 @@ describe("bwrk cli", () => {
       "## `work claim`",
       "## `work release`",
       "## `work renew`",
+      "## `reservation list`",
       "## `evidence add`",
       "## `work verify`",
       "## `work close`",
@@ -79,7 +80,7 @@ describe("bwrk cli", () => {
     expect(root.exitCode).toBe(0);
     expect(root.stdout).toContain("bwrk - Boreal Work CLI");
     expect(root.stdout).toContain(
-      "bwrk help [init|work|evidence|source|claim|decision|context|search|export|import|snapshot|doctor|lock|commands]"
+      "bwrk help [init|work|evidence|source|claim|decision|context|search|reservation|export|import|snapshot|doctor|lock|commands]"
     );
     expect(work.exitCode).toBe(0);
     expect(work.stdout).toContain("bwrk work create");
@@ -135,6 +136,7 @@ describe("bwrk cli", () => {
         "work claim",
         "work release",
         "work renew",
+        "reservation list",
         "export json",
         "export markdown",
         "import json",
@@ -604,6 +606,29 @@ describe("bwrk cli", () => {
     expect(reservedWork.status).toBe("reserved");
     expect(reservedWork.reservationId).toMatch(/^bw_reservation_/);
 
+    const activeList = await runCli(rootDir, ["reservation", "list", "--agent", "agent-a", "--work", work.meta.id, "--json"]);
+    const activeRows = parseData<
+      Array<{
+        readonly id: string;
+        readonly status: string;
+        readonly expired: boolean;
+        readonly agentId: string;
+        readonly workId: string;
+        readonly workTitle?: string;
+      }>
+    >(activeList.stdout);
+    expect(activeRows).toHaveLength(1);
+    expect(activeRows[0]).toEqual(
+      expect.objectContaining({
+        id: reservedWork.reservationId,
+        status: "active",
+        expired: false,
+        agentId: "agent-a",
+        workId: work.meta.id,
+        workTitle: "Reservation CLI lifecycle"
+      })
+    );
+
     const renewed = await runCli(rootDir, ["work", "renew", work.meta.id, "--ttl", "2h", "--json"]);
     const renewedPayload = parseData<{
       readonly work: { readonly meta: { readonly id: string }; readonly status: string };
@@ -622,9 +647,19 @@ describe("bwrk cli", () => {
     expect(releasedPayload.work.status).toBe("ready");
     expect(releasedPayload.work.reservationId).toBeUndefined();
 
+    const releasedList = await runCli(rootDir, ["reservation", "list", "--status", "released", "--work", work.meta.id, "--json"]);
+    expect(parseData<Array<{ readonly status: string }>>(releasedList.stdout)).toEqual([
+      expect.objectContaining({ status: "released" })
+    ]);
+
     const reservedAgain = await runCli(rootDir, ["work", "reserve", work.meta.id, "--agent", "agent-b", "--ttl", "1h", "--json"]);
     const staleReservationId = parseData<{ readonly reservationId: string }>(reservedAgain.stdout).reservationId;
     await setReservationExpiresAt(rootDir, staleReservationId, "2000-01-01T00:00:00.000Z");
+
+    const expiredActiveList = await runCli(rootDir, ["reservation", "list", "--agent", "agent-b", "--expired", "--json"]);
+    expect(parseData<Array<{ readonly id: string; readonly status: string; readonly expired: boolean }>>(expiredActiveList.stdout)).toEqual([
+      expect.objectContaining({ id: staleReservationId, status: "active", expired: true })
+    ]);
 
     const failingDoctor = await runCli(rootDir, ["doctor", "--json"]);
     const failingPayload = parseData<{
@@ -654,6 +689,11 @@ describe("bwrk cli", () => {
     const shownWork = parseData<{ readonly status: string; readonly activeReservationId?: string }>(shown.stdout);
     expect(shownWork.status).toBe("ready");
     expect(shownWork.activeReservationId).toBeUndefined();
+
+    const expiredList = await runCli(rootDir, ["reservation", "list", "--status", "expired", "--work", work.meta.id, "--json"]);
+    expect(parseData<Array<{ readonly id: string; readonly status: string; readonly expired: boolean }>>(expiredList.stdout)).toEqual([
+      expect.objectContaining({ id: staleReservationId, status: "expired", expired: true })
+    ]);
   });
 
   it("exports, snapshots, imports, and rejects conflicting JSON snapshots", async () => {

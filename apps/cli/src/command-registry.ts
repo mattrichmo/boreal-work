@@ -21,6 +21,7 @@ export interface CommandDefinition {
     | "decision"
     | "context"
     | "search"
+    | "reservation"
     | "export"
     | "import"
     | "snapshot"
@@ -456,6 +457,24 @@ export const COMMAND_DEFINITIONS: readonly CommandDefinition[] = [
     description: "Searches work, evidence, sources, claims, decisions, and context packs using a fresh local index.",
     flags: [flag("limit", "value", "Maximum number of search results to print.")],
     positionals: { label: "query", min: 1 },
+    requiresWorkspace: true,
+    supportsJson: true,
+  },
+  {
+    path: ["reservation", "list"],
+    category: "reservation",
+    summary: "List reservations.",
+    usage:
+      "bwrk reservation list [--agent <agent-id>] [--work <work-id>] [--status active|released|expired|all] [--expired] [--limit <n>] [--json]",
+    description: "Shows reservation ownership and expiration state for multi-agent coordination.",
+    flags: [
+      flag("agent", "value", "Only include reservations for this agent."),
+      flag("work", "value", "Only include reservations for this work item."),
+      flag("status", "value", "Only include reservations with this status. Defaults to active."),
+      flag("expired", "boolean", "Only include reservations whose expiration timestamp is in the past."),
+      flag("limit", "value", "Maximum number of reservations to print."),
+    ],
+    positionals: { label: "arguments", min: 0, max: 0 },
     requiresWorkspace: true,
     supportsJson: true,
   },

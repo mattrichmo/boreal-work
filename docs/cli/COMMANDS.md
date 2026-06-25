@@ -74,6 +74,7 @@ bwrk help claim
 bwrk help decision
 bwrk help context
 bwrk help search
+bwrk help reservation
 bwrk help export
 bwrk help import
 bwrk help snapshot
@@ -249,7 +250,7 @@ Adds a blocking dependency. Dependency cycles are rejected by runtime policy.
 ## `work reserve`
 
 ```bash
-bwrk work reserve <work-id> [--agent <id>] [--purpose <text>] [--force --reason <text>] [--json]
+bwrk work reserve <work-id> [--agent <id>] [--purpose <text>] [--expires-at <iso>|--ttl <duration>] [--force --reason <text>] [--json]
 ```
 
 Reserves a ready work item for an agent. If `--agent` is omitted, the CLI actor ID is used.
@@ -304,6 +305,24 @@ bwrk work renew <work-id> (--expires-at <iso>|--ttl <duration>) [--json]
 ```
 
 Extends the active reservation for a work item. The new expiration must be in the future.
+
+## `reservation list`
+
+```bash
+bwrk reservation list [--agent <agent-id>] [--work <work-id>] [--status active|released|expired|all] [--expired] [--limit <count>] [--json]
+```
+
+Shows reservation ownership and expiration state for multi-agent coordination. By default, only active reservations are shown.
+
+Filters:
+
+- `--agent`: only reservations for one agent.
+- `--work`: only reservations for one work item.
+- `--status`: lifecycle status; use `all` to include active, released, and expired records.
+- `--expired`: only rows whose `expiresAt` timestamp is in the past.
+- `--limit`: maximum number of rows.
+
+Rows include reservation ID, status, computed `expired`, agent ID, work ID, work status, work title, `reservedAt`, optional `expiresAt`, and optional purpose.
 
 ## `evidence add`
 
