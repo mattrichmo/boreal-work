@@ -34,6 +34,7 @@ describe("bwrk cli", () => {
       "## `work show`",
       "## `work block`",
       "## `work reserve`",
+      "## `work claim`",
       "## `evidence add`",
       "## `work verify`",
       "## `work close`",
@@ -129,6 +130,7 @@ describe("bwrk cli", () => {
         "context search",
         "search index",
         "search query",
+        "work claim",
         "export json",
         "export markdown",
         "import json",
@@ -469,6 +471,121 @@ describe("bwrk cli", () => {
     expect(parseData<Array<{ readonly type: string; readonly title: string }>>(repairedSearch.stdout)).toEqual(
       expect.arrayContaining([expect.objectContaining({ type: "source", title: "Stale search note" })])
     );
+  });
+
+  it("claims next work and returns a refreshed handoff bundle", async () => {
+    const rootDir = await makeTempWorkspace();
+    await runCli(rootDir, ["init", "--json"]);
+
+    const work = parseData<{ readonly meta: { readonly id: string } }>(
+      (
+        await runCli(rootDir, [
+          "work",
+          "create",
+          "Claim handoff runtime",
+          "--description",
+          "Return context and retrieval hits after reservation.",
+          "--priority",
+          "critical",
+          "--label",
+          "cli",
+          "--ready",
+          "--json"
+        ])
+      ).stdout
+    );
+    await runCli(rootDir, ["work", "create", "Unrelated docs work", "--label", "docs", "--ready", "--json"]);
+
+    const source = parseData<{ readonly meta: { readonly id: string } }>(
+      (
+        await runCli(rootDir, [
+          "source",
+          "add",
+          "--title",
+          "Claim handoff note",
+          "--uri",
+          "file://claim-handoff.md",
+          "--summary",
+          "Claim commands must return enough context to start safely.",
+          "--json"
+        ])
+      ).stdout
+    );
+    await runCli(rootDir, [
+      "claim",
+      "create",
+      "--statement",
+      "Claim handoff includes refreshed context.",
+      "--status",
+      "accepted",
+      "--source",
+      source.meta.id,
+      "--json"
+    ]);
+    await runCli(rootDir, [
+      "decision",
+      "create",
+      "--title",
+      "Return claim handoff bundle",
+      "--context",
+      "Agents need a single starting payload.",
+      "--decision",
+      "Return claimed work, reservation, context, and focused search results.",
+      "--status",
+      "accepted",
+      "--source",
+      source.meta.id,
+      "--json"
+    ]);
+
+    const claimed = await runCli(rootDir, [
+      "work",
+      "claim",
+      "--label",
+      "cli",
+      "--agent",
+      "agent-a",
+      "--purpose",
+      "start implementation",
+      "--json"
+    ]);
+    const payload = parseData<{
+      readonly claimed: boolean;
+      readonly work: { readonly id: string; readonly status: string; readonly activeReservationId?: string };
+      readonly reservation: { readonly meta: { readonly id: string }; readonly status: string; readonly purpose?: string };
+      readonly contextPack: { readonly subjectId: string; readonly facts: readonly string[] };
+      readonly search: { readonly query: string; readonly results: Array<{ readonly type: string; readonly title: string }> };
+    }>(claimed.stdout);
+
+    expect(claimed.exitCode).toBe(0);
+    expect(payload.claimed).toBe(true);
+    expect(payload.work.id).toBe(work.meta.id);
+    expect(payload.work.status).toBe("reserved");
+    expect(payload.work.activeReservationId).toBe(payload.reservation.meta.id);
+    expect(payload.reservation.status).toBe("active");
+    expect(payload.reservation.purpose).toBe("start implementation");
+    expect(payload.contextPack.subjectId).toBe(work.meta.id);
+    expect(payload.contextPack.facts).toContain("claim: Claim handoff includes refreshed context.");
+    expect(payload.contextPack.facts).toContain(
+      "decision: Return claimed work, reservation, context, and focused search results."
+    );
+    expect(payload.search.query).toContain("Claim handoff runtime");
+    expect(payload.search.results.map((result) => result.type)).toEqual(
+      expect.arrayContaining(["work", "context_pack", "decision"])
+    );
+
+    const searchAfterClaim = await runCli(rootDir, ["search", "query", "focused search results", "--json"]);
+    expect(parseData<Array<{ readonly type: string; readonly title: string }>>(searchAfterClaim.stdout)).toEqual(
+      expect.arrayContaining([expect.objectContaining({ type: "decision", title: "Return claim handoff bundle" })])
+    );
+
+    const missing = await runCli(rootDir, ["work", "claim", "--label", "missing", "--json"]);
+    expect(parseData<{ readonly claimed: boolean; readonly reason: string }>(missing.stdout)).toEqual({
+      claimed: false,
+      reason: "no_ready_work",
+      agentId: expect.any(String),
+      labels: ["missing"]
+    });
   });
 
   it("exports, snapshots, imports, and rejects conflicting JSON snapshots", async () => {

@@ -197,6 +197,25 @@ export const COMMAND_DEFINITIONS: readonly CommandDefinition[] = [
     supportsJson: true,
   },
   {
+    path: ["work", "claim"],
+    category: "work",
+    summary: "Atomically claim next ready work.",
+    usage:
+      "bwrk work claim [--label <label>...] [--agent <agent-id>] [--purpose <text>] [--query <text>] [--limit <n>] [--json]",
+    description:
+      "Finds the next live ready work item, reserves it in one runtime write, refreshes context/search projections, and returns a handoff bundle.",
+    flags: [
+      flag("label", "value", "Only claim work with this label.", true),
+      flag("agent", "value", "Agent identifier taking the reservation. Defaults to the CLI actor."),
+      flag("purpose", "value", "Reservation purpose."),
+      flag("query", "value", "Optional handoff search query. Defaults to the claimed work context."),
+      flag("limit", "value", "Maximum number of handoff search results. Defaults to 8."),
+    ],
+    positionals: { label: "arguments", min: 0, max: 0 },
+    requiresWorkspace: true,
+    supportsJson: true,
+  },
+  {
     path: ["work", "verify"],
     category: "work",
     summary: "Verify work with evidence.",

@@ -26,6 +26,7 @@ const VALUE_FLAGS = new Set([
   "outcome",
   "priority",
   "purpose",
+  "query",
   "reason",
   "source",
   "status",

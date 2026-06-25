@@ -256,6 +256,30 @@ Reserves a ready work item for an agent. If `--agent` is omitted, the CLI actor 
 
 Normal reservation requires `ready` work. `--force` allows a documented reservation of non-ready work only when `--reason` is also supplied. Closed and cancelled work still cannot be reserved.
 
+## `work claim`
+
+```bash
+bwrk work claim [--label <label>] [--agent <id>] [--purpose <text>] [--query <text>] [--limit <count>] [--json]
+```
+
+Atomically finds the next live ready work item, reserves it for the agent, rebuilds context-pack projections, rebuilds the local search index, and returns a handoff bundle.
+
+Selection behavior:
+
+- `--label` may be repeated and all labels must match.
+- Claimed work is ordered by priority, title, then ID.
+- The runtime rechecks blocker-derived readiness inside the same write transaction before reserving.
+- If no work matches, the command exits `0` with `claimed: false`.
+
+Handoff output includes:
+
+- The claimed work view.
+- The reservation record.
+- The refreshed context pack for the claimed work.
+- Focused search results using `--query` or a default query built from the work title, labels, context facts, and evidence.
+
+`--limit` controls the number of returned search results and defaults to `8`.
+
 ## `evidence add`
 
 ```bash

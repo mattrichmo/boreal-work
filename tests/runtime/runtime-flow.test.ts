@@ -199,6 +199,49 @@ describe("boreal runtime proof slice", () => {
     expect(forced.status).toBe("reserved");
   });
 
+  it("atomically claims the next blocker-valid ready work by label and priority", async () => {
+    const store = new InMemoryBorealStore();
+    const runtime = createBorealRuntime({ store, actor });
+    const low = await runtime.createWork({ title: "Low priority claim", priority: "low", labels: ["cli"] });
+    const high = await runtime.createWork({ title: "High priority claim", priority: "high", labels: ["cli"] });
+    const blocker = await runtime.createWork({ title: "Open blocker", labels: ["blocker"] });
+    const blocked = await runtime.createWork({ title: "Stale ready blocked claim", priority: "critical", labels: ["cli"] });
+
+    await runtime.markReady(low.meta.id);
+    await runtime.markReady(high.meta.id);
+    await runtime.markReady(blocker.meta.id);
+    await runtime.addBlockingDependency({
+      blockedWorkId: blocked.meta.id,
+      blockingWorkId: blocker.meta.id
+    });
+    await store.write(async (writer) => {
+      const stale = await writer.getWorkItem(blocked.meta.id);
+      if (!stale) {
+        throw new Error("missing stale fixture");
+      }
+      await writer.putWorkItem({ ...stale, status: "ready" });
+    });
+
+    const claimed = await runtime.claimNextWork({
+      agentId: "agent-a",
+      labels: ["cli"],
+      purpose: "start next slice"
+    });
+    expect(claimed?.work.meta.id).toBe(high.meta.id);
+    expect(claimed?.work.status).toBe("reserved");
+    expect(claimed?.reservation.status).toBe("active");
+    expect(claimed?.reservation.workId).toBe(high.meta.id);
+
+    const second = await runtime.claimNextWork({ agentId: "agent-b", labels: ["cli"] });
+    expect(second?.work.meta.id).toBe(low.meta.id);
+
+    const none = await runtime.claimNextWork({ agentId: "agent-c", labels: ["missing"] });
+    expect(none).toBeUndefined();
+
+    const events = await runtime.listEvents();
+    expect(events.map((event) => event.type)).toContain("work.claimed");
+  });
+
   it("requires passed evidence for passed verification but allows failed verdict evidence", async () => {
     const runtime = createBorealRuntime({ actor });
     const work = await runtime.createWork({ title: "Verify evidence policy" });

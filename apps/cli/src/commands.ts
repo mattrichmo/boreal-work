@@ -3,6 +3,7 @@ import {
   type ClaimId,
   type ClaimRecord,
   type ClaimStatus,
+  type ContextPack,
   type DecisionId,
   type DecisionRecord,
   type DecisionStatus,
@@ -231,6 +232,57 @@ async function workCommand(
         forceReason: flagValue(args, "reason")
       });
       output.write(formatRecord(work, json));
+      return { exitCode: 0 };
+    }
+    case "claim": {
+      const agentId = flagValue(args, "agent") ?? context.actor.id;
+      const labels = flagValues(args, "label");
+      const claim = await context.runtime.claimNextWork({
+        agentId,
+        labels,
+        purpose: flagValue(args, "purpose")
+      });
+      if (!claim) {
+        output.write(
+          formatRecord(
+            {
+              claimed: false,
+              reason: "no_ready_work",
+              agentId,
+              labels
+            },
+            json
+          )
+        );
+        return { exitCode: 0 };
+      }
+
+      await context.runtime.rebuildProjections();
+      const [workView, contextPack] = await Promise.all([
+        context.runtime.getWorkView(claim.work.meta.id),
+        context.runtime.getContextPack(claim.work.meta.id)
+      ]);
+      await writeSearchIndex(context);
+      const query = flagValue(args, "query") ?? handoffSearchQuery(workView, contextPack);
+      const searchResults = await runSearch(context, query, {
+        limit: parseLimit(flagValue(args, "limit")) ?? 8
+      });
+      output.write(
+        formatRecord(
+          {
+            claimed: true,
+            work: workView,
+            reservation: claim.reservation,
+            releasedReservations: claim.releasedReservations,
+            contextPack,
+            search: {
+              query,
+              results: searchResults
+            }
+          },
+          json
+        )
+      );
       return { exitCode: 0 };
     }
     case "verify": {
@@ -796,6 +848,19 @@ function searchResultRow(result: SearchResult): Record<string, string | number> 
     title: result.title,
     matches: result.matches.join(",")
   };
+}
+
+function handoffSearchQuery(work: WorkItemView, contextPack: ContextPack): string {
+  return [
+    work.title,
+    work.labels.join(" "),
+    contextPack.summary,
+    contextPack.facts.join(" "),
+    contextPack.evidence.join(" ")
+  ]
+    .join(" ")
+    .replace(/\s+/gu, " ")
+    .trim();
 }
 
 function compareWorkViews(left: WorkItemView, right: WorkItemView): number {

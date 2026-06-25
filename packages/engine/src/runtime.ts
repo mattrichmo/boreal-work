@@ -7,6 +7,7 @@ import {
   randomId,
   type ActorRef,
   type AgentId,
+  type AgentReservation,
   type ClaimId,
   type ClaimRecord,
   type ContextPack,
@@ -58,6 +59,18 @@ export interface WorkspaceInitializationResult {
   readonly event: RuntimeEvent;
 }
 
+export interface ClaimNextWorkInput {
+  readonly agentId: AgentId | string;
+  readonly labels?: readonly string[];
+  readonly purpose?: string;
+}
+
+export interface ClaimNextWorkResult {
+  readonly work: WorkItem;
+  readonly reservation: AgentReservation;
+  readonly releasedReservations: readonly AgentReservation[];
+}
+
 export interface BorealRuntime {
   readonly policy: RuntimePolicy;
   initWorkspace(): Promise<RuntimeEvent>;
@@ -69,6 +82,7 @@ export interface BorealRuntime {
   }): Promise<WorkItem>;
   markReady(workId: WorkId): Promise<WorkItem>;
   listReadyWork(): Promise<readonly WorkItemView[]>;
+  claimNextWork(input: ClaimNextWorkInput): Promise<ClaimNextWorkResult | undefined>;
   reserveWork(input: {
     readonly workId: WorkId;
     readonly agentId: AgentId | string;
@@ -222,6 +236,54 @@ export function createBorealRuntime(options: BorealRuntimeOptions = {}): BorealR
         const items = await reader.listWorkItems();
         const readyItems = items.filter((item) => item.status === "ready");
         return Promise.all(readyItems.map((item) => makeWorkView(reader, item)));
+      });
+    },
+
+    async claimNextWork(input): Promise<ClaimNextWorkResult | undefined> {
+      return store.write(async (writer) => {
+        const labels = input.labels ?? [];
+        const candidates: WorkItem[] = [];
+        const items = await writer.listWorkItems();
+        for (const item of items) {
+          if (item.status !== "ready" || item.reservationId) {
+            continue;
+          }
+          if (!labels.every((label) => item.labels.includes(label))) {
+            continue;
+          }
+          const dependencies = await loadDependencies(writer, item);
+          if (deriveReadinessStatus(item, dependencies) === "ready") {
+            candidates.push(item);
+          }
+        }
+
+        const work = candidates.sort(compareClaimCandidates)[0];
+        if (!work) {
+          return undefined;
+        }
+
+        const reservationResult = reserveWorkDomain({
+          work,
+          agentId: input.agentId,
+          existingReservationsForWork: await writer.listReservationsForWork(work.meta.id),
+          activeReservationsForAgent: await writer.listActiveReservationsForAgent(input.agentId),
+          policy,
+          actor,
+          now: now(),
+          purpose: input.purpose
+        });
+        for (const released of reservationResult.releasedReservations) {
+          await writer.putReservation(released);
+        }
+        await writer.putReservation(reservationResult.reservation);
+        await writer.putWorkItem(reservationResult.work);
+        await appendEvent(writer, "work.claimed", work.meta.id, "work", {
+          agentId: input.agentId,
+          reservationId: reservationResult.reservation.meta.id,
+          labels,
+          purpose: input.purpose
+        });
+        return reservationResult;
       });
     },
 
@@ -523,6 +585,27 @@ async function makeWorkView(reader: BorealReader, work: WorkItem): Promise<WorkI
   const packs = await reader.listContextPacks();
   const contextPack = packs.find((pack) => pack.subjectId === work.meta.id);
   return toWorkItemView({ work, evidence, verifications, contextPack });
+}
+
+function compareClaimCandidates(left: WorkItem, right: WorkItem): number {
+  return (
+    priorityRank(right.priority) - priorityRank(left.priority) ||
+    left.title.localeCompare(right.title) ||
+    left.meta.id.localeCompare(right.meta.id)
+  );
+}
+
+function priorityRank(priority: WorkItem["priority"]): number {
+  switch (priority) {
+    case "critical":
+      return 4;
+    case "high":
+      return 3;
+    case "normal":
+      return 2;
+    case "low":
+      return 1;
+  }
 }
 
 function systemActor(): ActorRef {
