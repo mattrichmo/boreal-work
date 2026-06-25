@@ -39,6 +39,7 @@ describe("bwrk cli", () => {
       "## `work renew`",
       "## `reservation list`",
       "## `agent guide`",
+      "## `agent finish`",
       "## `agent start`",
       "## `agent status`",
       "## `evidence add`",
@@ -122,6 +123,7 @@ describe("bwrk cli", () => {
       readonly commands: {
         readonly status: string;
         readonly start: string;
+        readonly finish: string;
         readonly evidence: string;
         readonly verify: string;
         readonly release: string;
@@ -138,6 +140,9 @@ describe("bwrk cli", () => {
     expect(payload.commands.start).toBe(
       "bwrk agent start --agent 'agent $one'\\''s' --label 'cli label' --purpose 'start implementation' --json"
     );
+    expect(payload.commands.finish).toBe(
+      "bwrk agent finish <work-id> --agent 'agent $one'\\''s' --summary 'implemented and tested' --command 'pnpm test' --close --reason 'verified by evidence' --json"
+    );
     expect(payload.commands.evidence).toContain("bwrk evidence add <work-id>");
     expect(payload.commands.verify).toContain("bwrk work verify <work-id>");
     expect(payload.commands.release).toBe("bwrk work release <work-id> --json");
@@ -146,8 +151,7 @@ describe("bwrk cli", () => {
       "Check coordination state",
       "Start or resume work",
       "Renew if work continues",
-      "Record evidence",
-      "Verify and close",
+      "Finish with evidence",
       "Release if stopping"
     ]);
     expect(payload.recovery.map((step) => step.command)).toContain("bwrk doctor --fix --json");
@@ -156,6 +160,9 @@ describe("bwrk cli", () => {
     expect(textGuide.exitCode).toBe(0);
     expect(textGuide.stdout).toContain("Boreal agent guide");
     expect(textGuide.stdout).toContain("bwrk agent start --agent agent-a --label cli --purpose 'start implementation' --json");
+    expect(textGuide.stdout).toContain(
+      "bwrk agent finish <work-id> --agent agent-a --summary 'implemented and tested' --command 'pnpm test' --close --reason 'verified by evidence' --json"
+    );
     expect(textGuide.stdout).toContain("bwrk doctor --fix --json");
   });
 
@@ -188,6 +195,7 @@ describe("bwrk cli", () => {
         "work renew",
         "reservation list",
         "agent guide",
+        "agent finish",
         "agent start",
         "agent status",
         "export json",
@@ -769,6 +777,146 @@ describe("bwrk cli", () => {
     expect(missingPayload.reason).toBe("no_ready_work");
     expect(missingPayload.status.readyWork.claimableCount).toBe(0);
     expect(missingPayload.recommendedAction.kind).toBe("wait_for_ready_work");
+  });
+
+  it("finishes reserved agent work with guarded evidence, verification, and cleanup", async () => {
+    const rootDir = await makeTempWorkspace();
+    await runCli(rootDir, ["init", "--json"]);
+
+    const closeWork = parseData<{ readonly meta: { readonly id: string } }>(
+      (await runCli(rootDir, ["work", "create", "Finish and close", "--label", "finish", "--ready", "--json"])).stdout
+    );
+    await runCli(rootDir, ["agent", "start", "--agent", "agent-a", "--label", "finish", "--json"]);
+
+    const missingMode = await runCli(rootDir, [
+      "agent",
+      "finish",
+      closeWork.meta.id,
+      "--agent",
+      "agent-a",
+      "--summary",
+      "missing exit mode",
+      "--json"
+    ]);
+    const missingModePayload = parseJson<{ readonly ok: false; readonly code: string; readonly message: string }>(
+      missingMode.stderr
+    );
+    expect(missingMode.exitCode).toBe(2);
+    expect(missingModePayload.code).toBe("BOREAL_INVALID_INPUT");
+    expect(missingModePayload.message).toContain("requires --close or --release");
+
+    const wrongAgent = await runCli(rootDir, [
+      "agent",
+      "finish",
+      closeWork.meta.id,
+      "--agent",
+      "agent-b",
+      "--summary",
+      "wrong agent attempt",
+      "--release",
+      "--json"
+    ]);
+    const wrongAgentPayload = parseJson<{ readonly ok: false; readonly code: string; readonly message: string }>(
+      wrongAgent.stderr
+    );
+    expect(wrongAgent.exitCode).toBe(1);
+    expect(wrongAgentPayload.ok).toBe(false);
+    expect(wrongAgentPayload.code).toBe("BOREAL_POLICY_VIOLATION");
+    expect(wrongAgentPayload.message).toContain("does not own");
+
+    const finishedClosed = await runCli(rootDir, [
+      "agent",
+      "finish",
+      closeWork.meta.id,
+      "--agent",
+      "agent-a",
+      "--summary",
+      "Implemented and tested finish close.",
+      "--command",
+      "pnpm test",
+      "--close",
+      "--reason",
+      "verified by finish evidence",
+      "--json"
+    ]);
+    const closedPayload = parseData<{
+      readonly finished: boolean;
+      readonly action: string;
+      readonly work: { readonly id: string; readonly status: string; readonly activeReservationId?: string };
+      readonly evidence: { readonly outcome: string; readonly command?: string };
+      readonly verification: { readonly verdict: string };
+      readonly reservation: { readonly status: string };
+      readonly closedWork?: { readonly status: string; readonly closedReason?: string };
+      readonly release?: { readonly reservation: { readonly status: string } };
+      readonly status: { readonly reservations: { readonly activeCount: number } };
+    }>(finishedClosed.stdout);
+
+    expect(finishedClosed.exitCode).toBe(0);
+    expect(closedPayload.finished).toBe(true);
+    expect(closedPayload.action).toBe("verified_and_closed");
+    expect(closedPayload.work.id).toBe(closeWork.meta.id);
+    expect(closedPayload.work.status).toBe("closed");
+    expect(closedPayload.work.activeReservationId).toBeUndefined();
+    expect(closedPayload.evidence).toEqual(expect.objectContaining({ outcome: "passed", command: "pnpm test" }));
+    expect(closedPayload.verification.verdict).toBe("passed");
+    expect(closedPayload.reservation.status).toBe("released");
+    expect(closedPayload.closedWork).toEqual(
+      expect.objectContaining({ status: "closed", closedReason: "verified by finish evidence" })
+    );
+    expect(closedPayload.release?.reservation.status).toBe("released");
+    expect(closedPayload.status.reservations.activeCount).toBe(0);
+
+    const releaseWork = parseData<{ readonly meta: { readonly id: string } }>(
+      (await runCli(rootDir, ["work", "create", "Finish and release", "--label", "release", "--ready", "--json"])).stdout
+    );
+    await runCli(rootDir, ["agent", "start", "--agent", "agent-c", "--label", "release", "--json"]);
+    const finishedReleased = await runCli(rootDir, [
+      "agent",
+      "finish",
+      releaseWork.meta.id,
+      "--agent",
+      "agent-c",
+      "--summary",
+      "Blocked by a failing check.",
+      "--verdict",
+      "failed",
+      "--release",
+      "--json"
+    ]);
+    const releasedPayload = parseData<{
+      readonly action: string;
+      readonly work: { readonly status: string; readonly activeReservationId?: string };
+      readonly evidence: { readonly outcome: string };
+      readonly verification: { readonly verdict: string };
+      readonly release?: { readonly reservation: { readonly status: string } };
+      readonly status: { readonly reservations: { readonly activeCount: number } };
+    }>(finishedReleased.stdout);
+
+    expect(finishedReleased.exitCode).toBe(0);
+    expect(releasedPayload.action).toBe("verified_and_released");
+    expect(releasedPayload.work.status).toBe("needs_verification");
+    expect(releasedPayload.work.activeReservationId).toBeUndefined();
+    expect(releasedPayload.evidence.outcome).toBe("failed");
+    expect(releasedPayload.verification.verdict).toBe("failed");
+    expect(releasedPayload.release?.reservation.status).toBe("released");
+    expect(releasedPayload.status.reservations.activeCount).toBe(0);
+
+    const invalidMode = await runCli(rootDir, [
+      "agent",
+      "finish",
+      releaseWork.meta.id,
+      "--agent",
+      "agent-c",
+      "--summary",
+      "invalid mode",
+      "--close",
+      "--release",
+      "--json"
+    ]);
+    const invalidPayload = parseJson<{ readonly ok: false; readonly code: string; readonly message: string }>(invalidMode.stderr);
+    expect(invalidMode.exitCode).toBe(2);
+    expect(invalidPayload.code).toBe("BOREAL_INVALID_INPUT");
+    expect(invalidPayload.message).toContain("cannot be used together");
   });
 
   it("renews, releases, and repairs expired reservations through the CLI", async () => {

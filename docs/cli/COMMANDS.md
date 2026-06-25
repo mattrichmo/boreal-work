@@ -335,11 +335,36 @@ Prints the compact agent loop without requiring an initialized workspace. The gu
 
 - Checking coordination state with `agent status`.
 - Starting or resuming work with `agent start`.
+- Finishing work with `agent finish`.
 - Renewing active reservations.
-- Recording evidence.
-- Verifying and closing work.
 - Releasing work when stopping early.
 - Running `doctor` and `doctor --fix` for stale reservation recovery.
+
+## `agent finish`
+
+```bash
+bwrk agent finish <work-id> \
+  --summary <text> \
+  (--close --reason <text>|--release) \
+  [--agent <agent-id>] \
+  [--kind command|test|diff|review|artifact|note] \
+  [--outcome passed|failed|observed|unknown] \
+  [--command <cmd>] \
+  [--uri <uri>] \
+  [--verdict passed|failed] \
+  [--notes <text>] \
+  [--json]
+```
+
+Guarded exit workflow for reserved agent work. The command requires the selected agent to own the active, non-expired reservation before it records evidence, verifies the work, and closes or releases anything. One of `--close` or `--release` is required so finish cannot leave an active reservation on non-reserved work.
+
+Behavior:
+
+- Records one evidence item against the work. If `--outcome` is omitted, it defaults to `passed` for a passed verdict and `failed` for a failed verdict.
+- Verifies the work using the new evidence ID.
+- With `--close`, requires a passed verdict and `--reason`, closes the work, then releases the active reservation so closed work does not keep stale ownership.
+- With `--release`, releases the reservation after verification without closing.
+- Rejects `--close --release` together.
 
 ## `agent start`
 

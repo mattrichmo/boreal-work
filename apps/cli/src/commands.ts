@@ -9,6 +9,7 @@ import {
   type DecisionId,
   type DecisionRecord,
   type DecisionStatus,
+  type EvidenceRecord,
   type EvidenceKind,
   type EvidenceOutcome,
   type IsoTimestamp,
@@ -17,6 +18,7 @@ import {
   type KnowledgeSourceKind,
   type ReservationId,
   type ReservationStatus,
+  type VerificationRecord,
   type VerificationVerdict,
   type WorkId,
   type WorkItem,
@@ -111,6 +113,7 @@ interface AgentGuide {
   readonly commands: {
     readonly status: string;
     readonly start: string;
+    readonly finish: string;
     readonly renew: string;
     readonly evidence: string;
     readonly verify: string;
@@ -154,6 +157,24 @@ interface AgentStartReady extends HandoffBundle {
 }
 
 type AgentStartResult = AgentStartBlocked | AgentStartReady;
+
+interface AgentFinishResult {
+  readonly finished: true;
+  readonly action: "verified_and_released" | "verified_and_closed";
+  readonly agentId: string;
+  readonly work: WorkItemView;
+  readonly evidence: EvidenceRecord;
+  readonly verification: VerificationRecord;
+  readonly reservation: AgentReservation;
+  readonly closedWork?: WorkItem;
+  readonly release?: ReservationLifecycleResult;
+  readonly status: AgentStatus;
+}
+
+interface ReservationLifecycleResult {
+  readonly work: WorkItem;
+  readonly reservation: AgentReservation;
+}
 
 export async function runCommand(args: ParsedArgs, output: CliOutput, cwd: string): Promise<CommandResult> {
   if (args.command.length === 0) {
@@ -205,7 +226,7 @@ export async function runCommand(args: ParsedArgs, output: CliOutput, cwd: strin
     case "reservation":
       return reservationCommand(action, context, args, output, json);
     case "agent":
-      return agentCommand(action, context, args, output, json);
+      return agentCommand(action, rest, context, args, output, json);
     case "export":
       return exportCommand(action, context, args, output, json);
     case "import":
@@ -244,6 +265,7 @@ function commandsCommand(output: CliOutput, json: boolean): CommandResult {
 
 async function agentCommand(
   action: string | undefined,
+  rest: readonly string[],
   context: CliContext,
   args: ParsedArgs,
   output: CliOutput,
@@ -255,6 +277,8 @@ async function agentCommand(
       output.write(json ? formatRecord(guide, true) : formatAgentGuide(guide));
       return { exitCode: 0 };
     }
+    case "finish":
+      return agentFinishCommand(rest, context, args, output, json);
     case "start":
       return agentStartCommand(context, args, output, json);
     case "status": {
@@ -335,6 +359,81 @@ async function agentStartCommand(
         releasedReservations: claim.releasedReservations,
         ...handoff
       } satisfies AgentStartResult,
+      json
+    )
+  );
+  return { exitCode: 0 };
+}
+
+async function agentFinishCommand(
+  rest: readonly string[],
+  context: CliContext,
+  args: ParsedArgs,
+  output: CliOutput,
+  json: boolean
+): Promise<CommandResult> {
+  const workId = asWorkId(requiredPositional(rest, 0, "work id"));
+  const agentId = flagValue(args, "agent") ?? context.actor.id;
+  const verdict = parseVerdict(flagValue(args, "verdict"));
+  const close = hasFlag(args, "close");
+  const release = hasFlag(args, "release");
+
+  if (close && release) {
+    throw new BorealError("BOREAL_INVALID_INPUT", "--close and --release cannot be used together");
+  }
+  if (!close && !release) {
+    throw new BorealError("BOREAL_INVALID_INPUT", "Agent finish requires --close or --release");
+  }
+  if (close && verdict !== "passed") {
+    throw new BorealError("BOREAL_INVALID_INPUT", "--close requires a passed verification verdict");
+  }
+
+  const reservation = await requireAgentWorkReservation(context, workId, agentId);
+  const evidence = await context.runtime.recordEvidence({
+    subjectId: workId,
+    subjectType: "work",
+    kind: parseEvidenceKind(flagValue(args, "kind")),
+    summary: requiredFlag(args, "summary"),
+    outcome: parseFinishOutcome(flagValue(args, "outcome"), verdict),
+    command: flagValue(args, "command"),
+    uri: flagValue(args, "uri")
+  });
+  await requireAgentWorkReservation(context, workId, agentId);
+  const verification = await context.runtime.verifyWork({
+    workId,
+    verdict,
+    evidenceIds: [evidence.meta.id],
+    notes: flagValue(args, "notes")
+  });
+  await requireAgentWorkReservation(context, workId, agentId);
+
+  let closedWork: WorkItem | undefined;
+  let releaseResult: ReservationLifecycleResult | undefined;
+  if (close) {
+    closedWork = await context.runtime.closeWork({
+      workId,
+      reason: requiredFlag(args, "reason")
+    });
+    await requireAgentWorkReservation(context, workId, agentId);
+    releaseResult = await context.runtime.releaseWorkReservation(workId);
+  } else if (release) {
+    releaseResult = await context.runtime.releaseWorkReservation(workId);
+  }
+
+  output.write(
+    formatRecord(
+      {
+        finished: true,
+        action: close ? "verified_and_closed" : "verified_and_released",
+        agentId,
+        work: await context.runtime.getWorkView(workId),
+        evidence,
+        verification,
+        reservation: releaseResult?.reservation ?? reservation,
+        closedWork,
+        release: releaseResult,
+        status: await buildAgentStatus(context, agentId, [])
+      } satisfies AgentFinishResult,
       json
     )
   );
@@ -1070,6 +1169,13 @@ function parseOutcome(value: string | undefined): EvidenceOutcome {
   throw new BorealError("BOREAL_INVALID_INPUT", "--outcome must be passed, failed, observed, or unknown");
 }
 
+function parseFinishOutcome(value: string | undefined, verdict: VerificationVerdict): EvidenceOutcome {
+  if (value) {
+    return parseOutcome(value);
+  }
+  return verdict === "passed" ? "passed" : "failed";
+}
+
 function parseSourceKind(value: string | undefined): KnowledgeSourceKind | undefined {
   if (!value) {
     return undefined;
@@ -1124,6 +1230,43 @@ async function requireReservation(context: CliContext, reservationId: string): P
   return reservation;
 }
 
+async function requireAgentWorkReservation(
+  context: CliContext,
+  workId: WorkId,
+  agentId: string
+): Promise<AgentReservation> {
+  return context.store.read(async (reader) => {
+    const work = await reader.getWorkItem(workId);
+    if (!work) {
+      throw new BorealError("BOREAL_NOT_FOUND", "Work item not found", { workId });
+    }
+    const activeReservations = (await reader.listReservationsForWork(workId)).filter((reservation) => reservation.status === "active");
+    const reservation = work.reservationId
+      ? activeReservations.find((entry) => entry.meta.id === work.reservationId)
+      : activeReservations[0];
+    if (!reservation) {
+      throw new BorealError("BOREAL_CONFLICT", "Agent finish requires an active reservation", { workId, agentId });
+    }
+    if (String(reservation.agentId) !== agentId) {
+      throw new BorealError("BOREAL_POLICY_VIOLATION", "Agent does not own the active reservation", {
+        workId,
+        agentId,
+        reservationAgentId: reservation.agentId,
+        reservationId: reservation.meta.id
+      });
+    }
+    if (reservation.expiresAt && Date.parse(reservation.expiresAt) <= Date.now()) {
+      throw new BorealError("BOREAL_POLICY_VIOLATION", "Agent reservation is expired; run `bwrk doctor --fix`", {
+        workId,
+        agentId,
+        reservationId: reservation.meta.id,
+        expiresAt: reservation.expiresAt
+      });
+    }
+    return reservation;
+  });
+}
+
 async function buildHandoffBundle(context: CliContext, workId: WorkId, args: ParsedArgs): Promise<HandoffBundle> {
   await context.runtime.rebuildProjections();
   const [work, contextPack] = await Promise.all([context.runtime.getWorkView(workId), context.runtime.getContextPack(workId)]);
@@ -1164,6 +1307,9 @@ function buildAgentGuide(agentId: string, labels: readonly string[]): AgentGuide
   const commands = {
     status: `bwrk agent status ${scopedFlags} --json`,
     start: `bwrk agent start ${scopedFlags} --purpose ${shellArg("start implementation")} --json`,
+    finish:
+      `bwrk agent finish <work-id> ${agentFlag} --summary ${shellArg("implemented and tested")} ` +
+      `--command ${shellArg("pnpm test")} --close --reason ${shellArg("verified by evidence")} --json`,
     renew: "bwrk work renew <work-id> --ttl 2h --json",
     evidence:
       "bwrk evidence add <work-id> --summary 'implemented and tested' --kind command --outcome passed --command 'pnpm test' --json",
@@ -1194,14 +1340,9 @@ function buildAgentGuide(agentId: string, labels: readonly string[]): AgentGuide
         when: "Use before the reservation TTL expires when the same agent is still actively working."
       },
       {
-        step: "Record evidence",
-        command: commands.evidence,
-        when: "Use after implementation or investigation with the real verification command and outcome."
-      },
-      {
-        step: "Verify and close",
-        command: `${commands.verify}\n${commands.close}`,
-        when: "Use when evidence satisfies acceptance and the work should leave the active queue."
+        step: "Finish with evidence",
+        command: commands.finish,
+        when: "Use after implementation or investigation to record evidence, verify, close, and release in one guarded exit."
       },
       {
         step: "Release if stopping",

@@ -480,6 +480,31 @@ export const COMMAND_DEFINITIONS: readonly CommandDefinition[] = [
     supportsJson: true,
   },
   {
+    path: ["agent", "finish"],
+    category: "agent",
+    summary: "Finish reserved work with evidence and verification.",
+    usage:
+      "bwrk agent finish <work-id> --summary <text> (--close --reason <text>|--release) [--agent <agent-id>] [--kind command|test|diff|review|artifact|note] [--outcome passed|failed|observed|unknown] [--command <cmd>] [--uri <uri>] [--verdict passed|failed] [--notes <text>] [--json]",
+    description:
+      "Requires the requested agent to own the active reservation, records evidence, verifies the work, and closes or releases the reservation.",
+    flags: [
+      flag("summary", "value", "Evidence summary."),
+      flag("agent", "value", "Agent identifier. Defaults to the CLI actor."),
+      flag("kind", "value", "Evidence kind. Defaults to command."),
+      flag("outcome", "value", "Evidence outcome. Defaults to the verification verdict outcome."),
+      flag("command", "value", "Command that produced the evidence."),
+      flag("uri", "value", "Evidence artifact URI."),
+      flag("verdict", "value", "Verification verdict. Defaults to passed."),
+      flag("notes", "value", "Verification notes."),
+      flag("close", "boolean", "Close the work after passing verification and release its reservation."),
+      flag("reason", "value", "Close reason. Required with --close."),
+      flag("release", "boolean", "Release the reservation after verification without closing."),
+    ],
+    positionals: { label: "work id", min: 1, max: 1 },
+    requiresWorkspace: true,
+    supportsJson: true,
+  },
+  {
     path: ["agent", "start"],
     category: "agent",
     summary: "Start or resume safe agent work.",
