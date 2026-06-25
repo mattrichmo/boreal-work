@@ -2,7 +2,7 @@
 
 Git-native project memory and workflow control for humans and agents.
 
-This repository currently contains the backend/runtime scaffold only. Runnable app surfaces under `apps/*` are intentionally left empty until the engine contracts prove stable.
+This repository currently contains the TypeScript runtime and the first command surface under `apps/cli`.
 
 ## Runtime Packages
 
@@ -17,6 +17,30 @@ This repository currently contains the backend/runtime scaffold only. Runnable a
 - `packages/ui-model`: shared view models for future CLI/TUI/console surfaces.
 - `packages/engine`: outer runtime composition used by every future surface.
 
+## CLI Surface
+
+Run the CLI from source:
+
+```bash
+pnpm bwrk --help
+```
+
+The packaged binary is `bwrk` from `@boreal/cli`.
+
+Core commands:
+
+```bash
+pnpm bwrk init
+pnpm bwrk work create "Build CLI surface" --ready
+pnpm bwrk work list --ready
+pnpm bwrk evidence add <work-id> --summary "pnpm test passed" --kind test --outcome passed --command "pnpm test"
+pnpm bwrk work verify <work-id> --evidence <evidence-id>
+pnpm bwrk work close <work-id> --reason "verified by tests"
+pnpm bwrk doctor --fix
+```
+
+Every command accepts `--workspace <path>` and most commands accept `--json` for automation.
+
 ## Verified Proof Slice
 
 The current runtime test covers:
@@ -27,6 +51,8 @@ init -> create work -> add dependency -> derive readiness -> reserve
 ```
 
 The file-backed store is also tested for persistence across runtime instances, rollback on failed transactions, concurrent writer serialization, stale-lock recovery, schema drift rejection, invalid JSON rejection, and path escape rejection.
+
+The CLI integration test covers init fail-closed behavior, nested workspace resolution, create/ready/list/evidence/verify/close, projection repair through `doctor --fix`, and explicit stale lock repair through `lock break --stale-only`.
 
 Several runtime invariants intentionally follow the Beads methodology while staying TypeScript-native:
 

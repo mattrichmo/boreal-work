@@ -1,0 +1,16 @@
+{
+  "name": "@boreal/cli",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "bwrk": "./dist/index.js"
+  },
+  "dependencies": {
+    "@boreal/core": "workspace:*",
+    "@boreal/engine": "workspace:*",
+    "@boreal/storage": "workspace:*",
+    "@boreal/ui-model": "workspace:*",
+    "@boreal/work-engine": "workspace:*"
+  }
+}

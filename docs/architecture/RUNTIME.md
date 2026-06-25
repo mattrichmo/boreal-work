@@ -13,6 +13,10 @@ validate input -> load records -> call domain function -> enforce policy
 -> write transaction/event -> update projections -> return view model
 ```
 
+The first command surface is `apps/cli`, published as the `bwrk` binary. It is intentionally thin: command parsing, workspace resolution, JSON/text output, and operational diagnostics live at the edge, while lifecycle behavior stays in `@boreal/engine`.
+
+The CLI fails closed for uninitialized workspaces, discovers a workspace by walking up to `.boreal`, and accepts `--workspace <path>` for explicit automation. Its `doctor` command validates the file-store schema, section shapes, duplicate IDs within each state section, dangling work references, derived readiness, projections, and runtime locks. `doctor --fix` only performs idempotent repairs: stale-lock removal, readiness recompute, and projection rebuild.
+
 ## Storage Boundary
 
 `@boreal/storage` defines transaction-capable ports. The in-memory store exists to prove contracts and tests. The first durable adapter is `FileBorealStore`, which persists a single atomic snapshot at `.boreal/runtime/state.json`.
@@ -23,6 +27,8 @@ validate input -> load records -> call domain function -> enforce policy
 - A lock directory at `.boreal/runtime/state.lock` protects the full read/modify/write transaction across separate CLI, daemon, MCP, or agent processes.
 
 The lock has bounded wait, retry, stale-lock recovery, owner metadata, and token-based release. Reads stay lock-free because the state file is replaced with atomic rename.
+
+Lock inspection and stale-lock breaking are exposed as explicit storage helpers so operational surfaces can diagnose lock issues without duplicating lock internals. Active locks are not broken by repair commands.
 
 File storage is an adapter, not the domain model. SQLite, Dolt-like, or other transactional backends should fit behind the same store interface without changing domain packages.
 

@@ -10,7 +10,7 @@
     { "path": "./packages/agent-runtime" },
     { "path": "./packages/search" },
     { "path": "./packages/ui-model" },
-    { "path": "./packages/engine" }
+    { "path": "./packages/engine" },
+    { "path": "./apps/cli" }
   ]
 }
-

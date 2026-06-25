@@ -25,11 +25,19 @@ export function normalizeFileLockOptions(input?: Partial<FileLockOptions>): File
   return options;
 }
 
-interface LockOwner {
+export interface LockOwner {
   readonly token: string;
   readonly pid: number;
   readonly hostname: string;
   readonly createdAt: string;
+}
+
+export interface FileLockInspection {
+  readonly exists: boolean;
+  readonly stale: boolean;
+  readonly lockDir: string;
+  readonly owner?: LockOwner;
+  readonly ageMs?: number;
 }
 
 export async function withFileLock<T>(
@@ -43,6 +51,51 @@ export async function withFileLock<T>(
   } finally {
     await releaseFileLock(lockDir, lock.token);
   }
+}
+
+export async function inspectFileLock(
+  lockDir: string,
+  input?: Partial<FileLockOptions>
+): Promise<FileLockInspection> {
+  const options = normalizeFileLockOptions(input);
+  const stats = await stat(lockDir).catch(() => undefined);
+  if (!stats) {
+    return {
+      exists: false,
+      stale: false,
+      lockDir
+    };
+  }
+
+  const owner = await readLockOwner(lockDir);
+  const createdAt = owner ? Date.parse(owner.createdAt) : Number.NaN;
+  const ageMs = Number.isFinite(createdAt) ? Date.now() - createdAt : Date.now() - stats.mtimeMs;
+  return {
+    exists: true,
+    stale: await isLockStale(lockDir, owner, options.staleAfterMs),
+    lockDir,
+    owner,
+    ageMs
+  };
+}
+
+export async function breakStaleFileLock(
+  lockDir: string,
+  input?: Partial<FileLockOptions>
+): Promise<{ readonly removed: boolean; readonly inspection: FileLockInspection }> {
+  const inspection = await inspectFileLock(lockDir, input);
+  if (!inspection.exists) {
+    return { removed: false, inspection };
+  }
+  if (!inspection.stale) {
+    throw new BorealError("BOREAL_CONFLICT", "Refusing to break an active Boreal runtime lock", {
+      lockDir,
+      owner: inspection.owner,
+      ageMs: inspection.ageMs
+    });
+  }
+  await rm(lockDir, { recursive: true, force: true });
+  return { removed: true, inspection };
 }
 
 async function acquireFileLock(lockDir: string, options: FileLockOptions): Promise<LockOwner> {

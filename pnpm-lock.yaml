@@ -21,6 +21,24 @@ importers:
         specifier: ^2.1.8
         version: 2.1.9(@types/node@22.20.0)
 
+  apps/cli:
+    dependencies:
+      '@boreal/core':
+        specifier: workspace:*
+        version: link:../../packages/core
+      '@boreal/engine':
+        specifier: workspace:*
+        version: link:../../packages/engine
+      '@boreal/storage':
+        specifier: workspace:*
+        version: link:../../packages/storage
+      '@boreal/ui-model':
+        specifier: workspace:*
+        version: link:../../packages/ui-model
+      '@boreal/work-engine':
+        specifier: workspace:*
+        version: link:../../packages/work-engine
+
   packages/agent-runtime:
     dependencies:
       '@boreal/core':

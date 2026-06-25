@@ -9,6 +9,7 @@
     "node": ">=22.0.0"
   },
   "scripts": {
+    "bwrk": "tsx --tsconfig tsconfig.base.json apps/cli/src/index.ts",
     "build": "tsc -b",
     "check": "tsc -b --pretty false",
     "clean": "pnpm -r exec rm -rf dist tsconfig.tsbuildinfo && rm -rf coverage",
@@ -22,4 +23,3 @@
     "vitest": "^2.1.8"
   }
 }
-
