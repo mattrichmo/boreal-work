@@ -26,7 +26,14 @@ init -> create work -> add dependency -> derive readiness -> reserve
 -> record evidence -> verify -> close -> rebuild projections -> event trail
 ```
 
-The file-backed store is also tested for persistence across runtime instances, rollback on failed transactions, concurrent writer serialization, stale-lock recovery, and path escape rejection.
+The file-backed store is also tested for persistence across runtime instances, rollback on failed transactions, concurrent writer serialization, stale-lock recovery, schema drift rejection, invalid JSON rejection, and path escape rejection.
+
+Several runtime invariants intentionally follow the Beads methodology while staying TypeScript-native:
+
+- Work IDs include actor, timestamp, and nonce inputs so same-title imports do not collide.
+- Event IDs use random entropy instead of per-process sequence counters.
+- Dependency edges keep deterministic natural-key IDs.
+- Derived readiness has an explicit recompute/repair operation.
 
 Run the checks:
 

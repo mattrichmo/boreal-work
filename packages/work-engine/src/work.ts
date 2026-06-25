@@ -26,6 +26,7 @@ export interface CreateWorkItemInput {
   readonly acceptanceCriteria?: readonly string[];
   readonly labels?: readonly string[];
   readonly parentId?: WorkId;
+  readonly nonce?: number;
   readonly actor: ActorRef;
   readonly now: IsoTimestamp;
 }
@@ -44,7 +45,11 @@ export function createWorkItem(input: CreateWorkItemInput): WorkItem {
   const id = deterministicId<WorkId>("work", {
     title: input.title,
     kind: input.kind ?? "task",
-    parentId: input.parentId ?? null
+    description: input.description?.trim() ?? "",
+    actorId: input.actor.id,
+    createdAt: input.now,
+    parentId: input.parentId ?? null,
+    nonce: input.nonce ?? 0
   });
 
   return withContentHash({
@@ -205,4 +210,3 @@ function assertNonEmpty(value: string, label: string): void {
 function unique<T>(values: readonly T[]): readonly T[] {
   return [...new Set(values)];
 }
-

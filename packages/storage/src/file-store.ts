@@ -1,4 +1,4 @@
-import { mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
+import { mkdir, open, readFile, rename, unlink } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 
 import { BorealError, assertPathInside, resolveWorkspacePaths } from "@boreal/core";
@@ -80,10 +80,14 @@ export class FileBorealStore implements BorealStore {
     const document = snapshotToDocument(snapshot);
     const tempFile = `${this.stateFile}.${Date.now()}.${Math.random().toString(16).slice(2)}.tmp`;
     await mkdir(dirname(this.stateFile), { recursive: true });
-    await writeFile(tempFile, `${JSON.stringify(document, null, 2)}\n`, "utf8");
+    const handle = await open(tempFile, "w", 0o600);
     try {
+      await handle.writeFile(`${JSON.stringify(document, null, 2)}\n`, "utf8");
+      await handle.sync();
+      await handle.close();
       await rename(tempFile, this.stateFile);
     } catch (error) {
+      await handle.close().catch(() => undefined);
       await unlink(tempFile).catch(() => undefined);
       throw error;
     }

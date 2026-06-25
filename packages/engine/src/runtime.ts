@@ -3,8 +3,8 @@ import {
   BorealError,
   DEFAULT_RUNTIME_POLICY,
   createRecordMeta,
-  deterministicId,
   nowIso,
+  randomId,
   type ActorRef,
   type AgentId,
   type ClaimRecord,
@@ -73,6 +73,7 @@ export interface BorealRuntime {
   createClaim(input: Omit<Parameters<typeof createClaim>[0], "actor" | "now">): Promise<ClaimRecord>;
   createDecision(input: Omit<Parameters<typeof createDecision>[0], "actor" | "now">): Promise<DecisionRecord>;
   rebuildProjections(): Promise<readonly WorkItemView[]>;
+  recomputeReadiness(): Promise<{ readonly changed: number }>;
   getWorkView(workId: WorkId): Promise<WorkItemView>;
   listEvents(): Promise<readonly RuntimeEvent[]>;
 }
@@ -82,8 +83,6 @@ export function createBorealRuntime(options: BorealRuntimeOptions = {}): BorealR
   const policy: RuntimePolicy = { ...DEFAULT_RUNTIME_POLICY, ...options.policy };
   const actor = options.actor ?? systemActor();
   const clock = options.clock ?? (() => new Date());
-  let eventSequence = 0;
-
   const now = () => nowIso(clock());
 
   async function appendEvent(
@@ -93,17 +92,10 @@ export function createBorealRuntime(options: BorealRuntimeOptions = {}): BorealR
     subjectType: string,
     payload: Record<string, unknown>
   ): Promise<RuntimeEvent> {
-    eventSequence += 1;
     const eventNow = now();
     const event = withContentHash({
       meta: createRecordMeta({
-        id: deterministicId<EventId>("event", {
-          type,
-          subjectId,
-          eventSequence,
-          eventNow,
-          payload
-        }),
+        id: randomId<EventId>("event"),
         now: eventNow,
         actor
       }),
@@ -130,10 +122,12 @@ export function createBorealRuntime(options: BorealRuntimeOptions = {}): BorealR
 
     async createWork(input): Promise<WorkItem> {
       return store.write(async (writer) => {
-        const work = createWorkItem({ ...input, actor, now: now() });
-        if (await writer.getWorkItem(work.meta.id)) {
-          throw new BorealError("BOREAL_CONFLICT", "Work item already exists", { workId: work.meta.id });
-        }
+        const createdAt = now();
+        const work = await createUniqueWorkItem(writer, {
+          ...input,
+          actor,
+          now: createdAt
+        });
         await writer.putWorkItem(work);
         await appendEvent(writer, "work.created", work.meta.id, "work", { title: work.title, kind: work.kind });
         return work;
@@ -256,7 +250,7 @@ export function createBorealRuntime(options: BorealRuntimeOptions = {}): BorealR
         const verifications = await writer.listVerificationsForSubject(input.workId);
         const closed = closeWorkDomain(work, verifications, policy, now(), actor, input.reason);
         await writer.putWorkItem(closed);
-        await refreshDependents(writer, closed.meta.id);
+        await recomputeAllReadiness(writer);
         await appendEvent(writer, "work.closed", closed.meta.id, "work", { reason: input.reason });
         return closed;
       });
@@ -313,6 +307,14 @@ export function createBorealRuntime(options: BorealRuntimeOptions = {}): BorealR
       });
     },
 
+    async recomputeReadiness(): Promise<{ readonly changed: number }> {
+      return store.write(async (writer) => {
+        const changed = await recomputeAllReadiness(writer);
+        await appendEvent(writer, "work.readiness_recomputed_all", "work", "work", { changed });
+        return { changed };
+      });
+    },
+
     async getWorkView(workId): Promise<WorkItemView> {
       return store.read(async (reader) => makeWorkView(reader, await requireWork(reader, workId)));
     },
@@ -321,6 +323,19 @@ export function createBorealRuntime(options: BorealRuntimeOptions = {}): BorealR
       return store.read((reader) => reader.listEvents());
     }
   };
+}
+
+async function createUniqueWorkItem(
+  reader: BorealReader,
+  input: Parameters<typeof createWorkItem>[0]
+): Promise<WorkItem> {
+  for (let nonce = 0; nonce < 100; nonce += 1) {
+    const work = createWorkItem({ ...input, nonce });
+    if (!(await reader.getWorkItem(work.meta.id))) {
+      return work;
+    }
+  }
+  throw new BorealError("BOREAL_CONFLICT", "Unable to generate a unique work id after nonce retries");
 }
 
 async function requireWork(reader: BorealReader, workId: WorkId): Promise<WorkItem> {
@@ -335,18 +350,29 @@ async function loadDependencies(reader: BorealReader, work: WorkItem): Promise<r
   return Promise.all(work.dependencyIds.map((dependencyId) => requireWork(reader, dependencyId)));
 }
 
-async function refreshDependents(writer: BorealWriter, changedWorkId: WorkId): Promise<void> {
-  const items = await writer.listWorkItems();
-  for (const item of items) {
-    if (!item.dependencyIds.includes(changedWorkId)) {
-      continue;
+async function recomputeAllReadiness(writer: BorealWriter): Promise<number> {
+  let changedTotal = 0;
+
+  for (let pass = 0; pass < 100; pass += 1) {
+    const items = await writer.listWorkItems();
+    let changedThisPass = 0;
+
+    for (const item of items) {
+      const dependencies = await loadDependencies(writer, item);
+      const status = deriveReadinessStatus(item, dependencies);
+      if (status !== item.status) {
+        await writer.putWorkItem({ ...item, status });
+        changedThisPass += 1;
+      }
     }
-    const dependencies = await loadDependencies(writer, item);
-    const status = deriveReadinessStatus(item, dependencies);
-    if (status !== item.status) {
-      await writer.putWorkItem({ ...item, status });
+
+    changedTotal += changedThisPass;
+    if (changedThisPass === 0) {
+      return changedTotal;
     }
   }
+
+  throw new BorealError("BOREAL_INVARIANT", "Readiness recompute did not converge");
 }
 
 async function makeWorkView(reader: BorealReader, work: WorkItem): Promise<WorkItemView> {
@@ -364,4 +390,3 @@ function systemActor(): ActorRef {
     displayName: "Boreal Runtime"
   };
 }
-

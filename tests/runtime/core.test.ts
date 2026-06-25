@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { canonicalJson, deterministicId, hashContent, type WorkId } from "@boreal/core";
+import { canonicalJson, deterministicId, hashContent, randomId, type EventId, type WorkId } from "@boreal/core";
 
 describe("core hashing and ids", () => {
   it("canonicalizes object keys before hashing", () => {
@@ -18,5 +18,12 @@ describe("core hashing and ids", () => {
     expect(first).toBe(second);
     expect(first).toMatch(/^bw_work_[a-f0-9]{16}$/);
   });
-});
 
+  it("creates random event ids for append-only event streams", () => {
+    const first = randomId<EventId>("event");
+    const second = randomId<EventId>("event");
+
+    expect(first).not.toBe(second);
+    expect(first).toMatch(/^bw_event_[a-f0-9]{32}$/);
+  });
+});

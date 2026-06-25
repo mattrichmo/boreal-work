@@ -160,6 +160,24 @@ describe("file-backed store", () => {
     const rootDir = await makeTempWorkspace();
     expect(() => new FileBorealStore({ rootDir, lock: { waitTimeoutMs: 0 } })).toThrow(BorealError);
   });
+
+  it("rejects invalid JSON and unsupported state versions", async () => {
+    const rootDir = await makeTempWorkspace();
+    const statePath = join(rootDir, ".boreal/runtime/state.json");
+    await mkdir(join(rootDir, ".boreal/runtime"), { recursive: true });
+    await writeFile(statePath, "{", "utf8");
+
+    const invalidJsonStore = new FileBorealStore({ rootDir, lock });
+    await expect(invalidJsonStore.read((reader) => reader.listWorkItems())).rejects.toMatchObject({
+      code: "BOREAL_STORAGE_ERROR"
+    } satisfies Partial<BorealError>);
+
+    await writeFile(statePath, JSON.stringify({ schemaVersion: "boreal.file-store.v999" }), "utf8");
+    const futureSchemaStore = new FileBorealStore({ rootDir, lock });
+    await expect(futureSchemaStore.read((reader) => reader.listWorkItems())).rejects.toMatchObject({
+      code: "BOREAL_STORAGE_ERROR"
+    } satisfies Partial<BorealError>);
+  });
 });
 
 async function makeTempWorkspace(): Promise<string> {

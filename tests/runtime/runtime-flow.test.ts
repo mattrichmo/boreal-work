@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import { BorealError, type ActorRef } from "@boreal/core";
 import { createBorealRuntime } from "@boreal/engine";
+import { InMemoryBorealStore } from "@boreal/storage";
 
 const actor: ActorRef = {
   id: "codex-runtime-test",
@@ -106,6 +107,7 @@ describe("boreal runtime proof slice", () => {
     expect(featureView?.contextSummary).toContain("proof slice");
 
     const events = await runtime.listEvents();
+    expect(new Set(events.map((event) => event.meta.id)).size).toBe(events.length);
     expect(events.map((event) => event.type)).toEqual(
       expect.arrayContaining([
         "workspace.initialized",
@@ -119,5 +121,51 @@ describe("boreal runtime proof slice", () => {
       ])
     );
   });
-});
 
+  it("uses nonce-backed work ids for same-title creates in one timestamp", async () => {
+    const runtime = createBorealRuntime({
+      actor,
+      clock: () => new Date("2026-01-01T00:00:00.000Z")
+    });
+
+    const first = await runtime.createWork({
+      title: "Duplicate import title",
+      description: "Same imported description."
+    });
+    const second = await runtime.createWork({
+      title: "Duplicate import title",
+      description: "Same imported description."
+    });
+
+    expect(first.meta.id).not.toBe(second.meta.id);
+  });
+
+  it("repairs stale derived readiness with an explicit recompute", async () => {
+    const store = new InMemoryBorealStore();
+    const runtime = createBorealRuntime({
+      store,
+      actor,
+      clock: () => new Date("2026-01-01T00:00:00.000Z")
+    });
+
+    const blocker = await runtime.createWork({ title: "Open blocker" });
+    const blocked = await runtime.createWork({ title: "Stale ready item" });
+    await runtime.markReady(blocker.meta.id);
+    await runtime.addBlockingDependency({
+      blockedWorkId: blocked.meta.id,
+      blockingWorkId: blocker.meta.id
+    });
+
+    await store.write(async (writer) => {
+      const stale = await writer.getWorkItem(blocked.meta.id);
+      if (!stale) {
+        throw new Error("missing stale fixture");
+      }
+      await writer.putWorkItem({ ...stale, status: "ready" });
+    });
+
+    await expect(runtime.getWorkView(blocked.meta.id)).resolves.toMatchObject({ status: "ready" });
+    await expect(runtime.recomputeReadiness()).resolves.toEqual({ changed: 1 });
+    await expect(runtime.getWorkView(blocked.meta.id)).resolves.toMatchObject({ status: "blocked" });
+  });
+});
