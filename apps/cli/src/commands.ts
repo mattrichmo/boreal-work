@@ -15,6 +15,7 @@ import {
   type KnowledgeSource,
   type KnowledgeSourceId,
   type KnowledgeSourceKind,
+  type ReservationId,
   type ReservationStatus,
   type VerificationVerdict,
   type WorkId,
@@ -97,6 +98,38 @@ interface AgentStatus {
     readonly reason: string;
   };
 }
+
+type AgentStartReason = "expired_active_reservations" | "reservation_capacity_reached" | "no_ready_work";
+
+interface HandoffBundle {
+  readonly work: WorkItemView;
+  readonly contextPack: ContextPack;
+  readonly search: {
+    readonly query: string;
+    readonly results: readonly SearchResult[];
+  };
+}
+
+interface AgentStartBlocked {
+  readonly started: false;
+  readonly reason: AgentStartReason;
+  readonly agentId: string;
+  readonly labels: readonly string[];
+  readonly status: AgentStatus;
+  readonly recommendedAction: AgentStatus["recommendedAction"];
+}
+
+interface AgentStartReady extends HandoffBundle {
+  readonly started: true;
+  readonly action: "claimed_work" | "continue_reserved_work";
+  readonly agentId: string;
+  readonly labels: readonly string[];
+  readonly status: AgentStatus;
+  readonly reservation: AgentReservation;
+  readonly releasedReservations: readonly AgentReservation[];
+}
+
+type AgentStartResult = AgentStartBlocked | AgentStartReady;
 
 export async function runCommand(args: ParsedArgs, output: CliOutput, cwd: string): Promise<CommandResult> {
   if (args.command.length === 0) {
@@ -192,13 +225,90 @@ async function agentCommand(
   output: CliOutput,
   json: boolean
 ): Promise<CommandResult> {
-  if (action !== "status") {
-    throw new BorealError("BOREAL_INVALID_INPUT", `Unknown agent command: ${action ?? ""}`);
+  switch (action) {
+    case "start":
+      return agentStartCommand(context, args, output, json);
+    case "status": {
+      const agentId = flagValue(args, "agent") ?? context.actor.id;
+      const labels = flagValues(args, "label");
+      output.write(formatRecord(await buildAgentStatus(context, agentId, labels), json));
+      return { exitCode: 0 };
+    }
+    default:
+      throw new BorealError("BOREAL_INVALID_INPUT", `Unknown agent command: ${action ?? ""}`);
   }
+}
 
+async function agentStartCommand(
+  context: CliContext,
+  args: ParsedArgs,
+  output: CliOutput,
+  json: boolean
+): Promise<CommandResult> {
   const agentId = flagValue(args, "agent") ?? context.actor.id;
   const labels = flagValues(args, "label");
-  output.write(formatRecord(await buildAgentStatus(context, agentId, labels), json));
+  const status = await buildAgentStatus(context, agentId, labels);
+
+  if (status.reservations.expiredActiveCount > 0) {
+    output.write(formatRecord(agentStartBlocked(agentId, labels, status, "expired_active_reservations"), json));
+    return { exitCode: 1 };
+  }
+
+  const activeReservation = status.reservations.active[0];
+  if (activeReservation) {
+    const reservation = await requireReservation(context, activeReservation.id);
+    const handoff = await buildHandoffBundle(context, asWorkId(activeReservation.workId), args);
+    output.write(
+      formatRecord(
+        {
+          started: true,
+          action: "continue_reserved_work",
+          agentId,
+          labels,
+          status: await buildAgentStatus(context, agentId, labels),
+          reservation,
+          releasedReservations: [],
+          ...handoff
+        } satisfies AgentStartResult,
+        json
+      )
+    );
+    return { exitCode: 0 };
+  }
+
+  if (status.reservations.capacityRemaining <= 0) {
+    output.write(formatRecord(agentStartBlocked(agentId, labels, status, "reservation_capacity_reached"), json));
+    return { exitCode: 1 };
+  }
+
+  const claim = await context.runtime.claimNextWork({
+    agentId,
+    labels,
+    purpose: flagValue(args, "purpose"),
+    expiresAt: parseReservationExpiresAt(args)
+  });
+  if (!claim) {
+    const currentStatus = await buildAgentStatus(context, agentId, labels);
+    output.write(formatRecord(agentStartBlocked(agentId, labels, currentStatus, "no_ready_work"), json));
+    return { exitCode: 0 };
+  }
+
+  const handoff = await buildHandoffBundle(context, claim.work.meta.id, args);
+  output.write(
+    formatRecord(
+      {
+        started: true,
+        action: "claimed_work",
+        agentId,
+        labels,
+        status: await buildAgentStatus(context, agentId, labels),
+        reservation: claim.reservation,
+        releasedReservations: claim.releasedReservations,
+        ...handoff
+      } satisfies AgentStartResult,
+      json
+    )
+  );
   return { exitCode: 0 };
 }
 
@@ -405,28 +515,16 @@ async function workCommand(
         return { exitCode: 0 };
       }
 
-      await context.runtime.rebuildProjections();
-      const [workView, contextPack] = await Promise.all([
-        context.runtime.getWorkView(claim.work.meta.id),
-        context.runtime.getContextPack(claim.work.meta.id)
-      ]);
-      await writeSearchIndex(context);
-      const query = flagValue(args, "query") ?? handoffSearchQuery(workView, contextPack);
-      const searchResults = await runSearch(context, query, {
-        limit: parseLimit(flagValue(args, "limit")) ?? 8
-      });
+      const handoff = await buildHandoffBundle(context, claim.work.meta.id, args);
       output.write(
         formatRecord(
           {
             claimed: true,
-            work: workView,
+            work: handoff.work,
             reservation: claim.reservation,
             releasedReservations: claim.releasedReservations,
-            contextPack,
-            search: {
-              query,
-              results: searchResults
-            }
+            contextPack: handoff.contextPack,
+            search: handoff.search
           },
           json
         )
@@ -987,6 +1085,48 @@ function optionalSourceId(value: string | undefined): KnowledgeSourceId | undefi
 
 function optionalWorkId(value: string | undefined): WorkId | undefined {
   return value ? asWorkId(value) : undefined;
+}
+
+async function requireReservation(context: CliContext, reservationId: string): Promise<AgentReservation> {
+  const reservation = await context.store.read((reader) => reader.getReservation(reservationId as ReservationId));
+  if (!reservation || reservation.status !== "active") {
+    throw new BorealError("BOREAL_CONFLICT", "Active reservation changed while starting agent", { reservationId });
+  }
+  return reservation;
+}
+
+async function buildHandoffBundle(context: CliContext, workId: WorkId, args: ParsedArgs): Promise<HandoffBundle> {
+  await context.runtime.rebuildProjections();
+  const [work, contextPack] = await Promise.all([context.runtime.getWorkView(workId), context.runtime.getContextPack(workId)]);
+  await writeSearchIndex(context);
+  const query = flagValue(args, "query") ?? handoffSearchQuery(work, contextPack);
+  const results = await runSearch(context, query, {
+    limit: parseLimit(flagValue(args, "limit")) ?? 8
+  });
+  return {
+    work,
+    contextPack,
+    search: {
+      query,
+      results
+    }
+  };
+}
+
+function agentStartBlocked(
+  agentId: string,
+  labels: readonly string[],
+  status: AgentStatus,
+  reason: AgentStartReason
+): AgentStartBlocked {
+  return {
+    started: false,
+    reason,
+    agentId,
+    labels,
+    status,
+    recommendedAction: status.recommendedAction
+  };
 }
 
 function isWorkItem(value: WorkItem | undefined): value is WorkItem {

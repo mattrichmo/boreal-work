@@ -325,6 +325,20 @@ Filters:
 
 Rows include reservation ID, status, computed `expired`, agent ID, work ID, work status, work title, `reservedAt`, optional `expiresAt`, and optional purpose.
 
+## `agent start`
+
+```bash
+bwrk agent start [--agent <agent-id>] [--label <label>] [--purpose <text>] [--expires-at <iso>|--ttl <duration>] [--query <text>] [--limit <count>] [--json]
+```
+
+Safe entrypoint for an agent before it starts work:
+
+- Blocks with exit code `1` when the agent has expired active reservations; the response points at `bwrk doctor --fix`.
+- Resumes the agent's existing active reservation before claiming more work.
+- Atomically claims the next ready matching work only when the agent has no active work and has reservation capacity.
+- Returns the selected work view, reservation, context pack, and handoff search results.
+- Returns `started: false` with `reason: "no_ready_work"` when no matching ready work exists.
+
 ## `agent status`
 
 ```bash

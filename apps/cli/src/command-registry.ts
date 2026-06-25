@@ -480,6 +480,27 @@ export const COMMAND_DEFINITIONS: readonly CommandDefinition[] = [
     supportsJson: true,
   },
   {
+    path: ["agent", "start"],
+    category: "agent",
+    summary: "Start or resume safe agent work.",
+    usage:
+      "bwrk agent start [--agent <agent-id>] [--label <label>...] [--purpose <text>] [--expires-at <iso>|--ttl <duration>] [--query <text>] [--limit <n>] [--json]",
+    description:
+      "Preflights reservation state, blocks on stale active reservations, resumes existing active work, or atomically claims ready work and returns a handoff bundle.",
+    flags: [
+      flag("agent", "value", "Agent identifier. Defaults to the CLI actor."),
+      flag("label", "value", "Only claim ready work with this label.", true),
+      flag("purpose", "value", "Reservation purpose when claiming work."),
+      flag("expires-at", "value", "ISO timestamp when a new reservation should expire."),
+      flag("ttl", "value", "Relative reservation duration for a new claim, for example 30m, 2h, or 1d."),
+      flag("query", "value", "Optional handoff search query. Defaults to the selected work context."),
+      flag("limit", "value", "Maximum number of handoff search results. Defaults to 8."),
+    ],
+    positionals: { label: "arguments", min: 0, max: 0 },
+    requiresWorkspace: true,
+    supportsJson: true,
+  },
+  {
     path: ["agent", "status"],
     category: "agent",
     summary: "Show agent coordination status.",

@@ -38,6 +38,7 @@ describe("bwrk cli", () => {
       "## `work release`",
       "## `work renew`",
       "## `reservation list`",
+      "## `agent start`",
       "## `agent status`",
       "## `evidence add`",
       "## `work verify`",
@@ -138,6 +139,7 @@ describe("bwrk cli", () => {
         "work release",
         "work renew",
         "reservation list",
+        "agent start",
         "agent status",
         "export json",
         "export markdown",
@@ -596,6 +598,130 @@ describe("bwrk cli", () => {
     });
   });
 
+  it("starts agents by claiming or resuming with a handoff bundle", async () => {
+    const rootDir = await makeTempWorkspace();
+    await runCli(rootDir, ["init", "--json"]);
+
+    const work = parseData<{ readonly meta: { readonly id: string } }>(
+      (
+        await runCli(rootDir, [
+          "work",
+          "create",
+          "Agent start CLI work",
+          "--description",
+          "Agents should receive context before changing files.",
+          "--priority",
+          "high",
+          "--label",
+          "cli",
+          "--ready",
+          "--json"
+        ])
+      ).stdout
+    );
+    const source = parseData<{ readonly meta: { readonly id: string } }>(
+      (
+        await runCli(rootDir, [
+          "source",
+          "add",
+          "--title",
+          "Agent start note",
+          "--uri",
+          "file://agent-start.md",
+          "--summary",
+          "Agent start should claim or resume with a handoff bundle.",
+          "--json"
+        ])
+      ).stdout
+    );
+    await runCli(rootDir, [
+      "claim",
+      "create",
+      "--statement",
+      "Agent start includes context.",
+      "--status",
+      "accepted",
+      "--source",
+      source.meta.id,
+      "--json"
+    ]);
+
+    const started = await runCli(rootDir, [
+      "agent",
+      "start",
+      "--agent",
+      "agent-a",
+      "--label",
+      "cli",
+      "--purpose",
+      "begin safe work",
+      "--json"
+    ]);
+    const startedPayload = parseData<{
+      readonly started: boolean;
+      readonly action?: string;
+      readonly work?: { readonly id: string; readonly status: string; readonly activeReservationId?: string };
+      readonly reservation?: { readonly meta: { readonly id: string }; readonly status: string; readonly purpose?: string };
+      readonly contextPack?: { readonly subjectId: string; readonly facts: readonly string[] };
+      readonly search?: { readonly query: string; readonly results: Array<{ readonly type: string }> };
+      readonly status: {
+        readonly reservations: { readonly activeCount: number; readonly capacityRemaining: number };
+        readonly readyWork: { readonly claimableCount: number };
+        readonly recommendedAction: { readonly kind: string };
+      };
+    }>(started.stdout);
+
+    expect(started.exitCode).toBe(0);
+    expect(startedPayload.started).toBe(true);
+    expect(startedPayload.action).toBe("claimed_work");
+    expect(startedPayload.work?.id).toBe(work.meta.id);
+    expect(startedPayload.work?.status).toBe("reserved");
+    expect(startedPayload.work?.activeReservationId).toBe(startedPayload.reservation?.meta.id);
+    expect(startedPayload.reservation?.status).toBe("active");
+    expect(startedPayload.reservation?.purpose).toBe("begin safe work");
+    expect(startedPayload.contextPack?.subjectId).toBe(work.meta.id);
+    expect(startedPayload.contextPack?.facts).toContain("claim: Agent start includes context.");
+    expect(startedPayload.search?.query).toContain("Agent start CLI work");
+    expect(startedPayload.search?.results.map((result) => result.type)).toContain("context_pack");
+    expect(startedPayload.status.reservations.activeCount).toBe(1);
+    expect(startedPayload.status.reservations.capacityRemaining).toBe(2);
+    expect(startedPayload.status.readyWork.claimableCount).toBe(0);
+    expect(startedPayload.status.recommendedAction.kind).toBe("continue_reserved_work");
+
+    const resumed = await runCli(rootDir, ["agent", "start", "--agent", "agent-a", "--label", "cli", "--json"]);
+    const resumedPayload = parseData<{
+      readonly started: boolean;
+      readonly action?: string;
+      readonly work?: { readonly id: string; readonly activeReservationId?: string };
+      readonly reservation?: { readonly meta: { readonly id: string } };
+      readonly status: { readonly reservations: { readonly activeCount: number } };
+    }>(resumed.stdout);
+    expect(resumed.exitCode).toBe(0);
+    expect(resumedPayload.started).toBe(true);
+    expect(resumedPayload.action).toBe("continue_reserved_work");
+    expect(resumedPayload.work?.id).toBe(work.meta.id);
+    expect(resumedPayload.reservation?.meta.id).toBe(startedPayload.reservation?.meta.id);
+    expect(resumedPayload.status.reservations.activeCount).toBe(1);
+
+    const activeList = await runCli(rootDir, ["reservation", "list", "--agent", "agent-a", "--status", "active", "--json"]);
+    expect(parseData<Array<{ readonly id: string }>>(activeList.stdout).map((row) => row.id)).toEqual([
+      startedPayload.reservation?.meta.id
+    ]);
+
+    const missing = await runCli(rootDir, ["agent", "start", "--agent", "agent-b", "--label", "missing", "--json"]);
+    const missingPayload = parseData<{
+      readonly started: boolean;
+      readonly reason: string;
+      readonly recommendedAction: { readonly kind: string };
+      readonly status: { readonly readyWork: { readonly claimableCount: number } };
+    }>(missing.stdout);
+    expect(missing.exitCode).toBe(0);
+    expect(missingPayload.started).toBe(false);
+    expect(missingPayload.reason).toBe("no_ready_work");
+    expect(missingPayload.status.readyWork.claimableCount).toBe(0);
+    expect(missingPayload.recommendedAction.kind).toBe("wait_for_ready_work");
+  });
+
   it("renews, releases, and repairs expired reservations through the CLI", async () => {
     const rootDir = await makeTempWorkspace();
     await runCli(rootDir, ["init", "--json"]);
@@ -699,6 +825,23 @@ describe("bwrk cli", () => {
     expect(expiredStatusPayload.reservations.activeCount).toBe(1);
     expect(expiredStatusPayload.reservations.expiredActiveCount).toBe(1);
     expect(expiredStatusPayload.recommendedAction).toEqual(
+      expect.objectContaining({
+        kind: "repair_expired_reservations",
+        command: "bwrk doctor --fix"
+      })
+    );
+    const blockedStart = await runCli(rootDir, ["agent", "start", "--agent", "agent-b", "--json"]);
+    const blockedStartPayload = parseData<{
+      readonly started: boolean;
+      readonly reason: string;
+      readonly recommendedAction: { readonly kind: string; readonly command?: string };
+      readonly status: { readonly reservations: { readonly expiredActiveCount: number } };
+    }>(blockedStart.stdout);
+    expect(blockedStart.exitCode).toBe(1);
+    expect(blockedStartPayload.started).toBe(false);
+    expect(blockedStartPayload.reason).toBe("expired_active_reservations");
+    expect(blockedStartPayload.status.reservations.expiredActiveCount).toBe(1);
+    expect(blockedStartPayload.recommendedAction).toEqual(
       expect.objectContaining({
         kind: "repair_expired_reservations",
         command: "bwrk doctor --fix"
