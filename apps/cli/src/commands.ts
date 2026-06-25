@@ -99,6 +99,30 @@ interface AgentStatus {
   };
 }
 
+interface AgentGuideStep {
+  readonly step: string;
+  readonly command: string;
+  readonly when: string;
+}
+
+interface AgentGuide {
+  readonly agentId: string;
+  readonly labels: readonly string[];
+  readonly commands: {
+    readonly status: string;
+    readonly start: string;
+    readonly renew: string;
+    readonly evidence: string;
+    readonly verify: string;
+    readonly close: string;
+    readonly release: string;
+    readonly doctor: string;
+    readonly repair: string;
+  };
+  readonly loop: readonly AgentGuideStep[];
+  readonly recovery: readonly AgentGuideStep[];
+}
+
 type AgentStartReason = "expired_active_reservations" | "reservation_capacity_reached" | "no_ready_work";
 
 interface HandoffBundle {
@@ -226,6 +250,11 @@ async function agentCommand(
   json: boolean
 ): Promise<CommandResult> {
   switch (action) {
+    case "guide": {
+      const guide = buildAgentGuide(flagValue(args, "agent") ?? context.actor.id, flagValues(args, "label"));
+      output.write(json ? formatRecord(guide, true) : formatAgentGuide(guide));
+      return { exitCode: 0 };
+    }
     case "start":
       return agentStartCommand(context, args, output, json);
     case "status": {
@@ -1127,6 +1156,97 @@ function agentStartBlocked(
     status,
     recommendedAction: status.recommendedAction
   };
+}
+
+function buildAgentGuide(agentId: string, labels: readonly string[]): AgentGuide {
+  const agentFlag = `--agent ${shellArg(agentId)}`;
+  const scopedFlags = `${agentFlag}${labelFlags(labels)}`;
+  const commands = {
+    status: `bwrk agent status ${scopedFlags} --json`,
+    start: `bwrk agent start ${scopedFlags} --purpose ${shellArg("start implementation")} --json`,
+    renew: "bwrk work renew <work-id> --ttl 2h --json",
+    evidence:
+      "bwrk evidence add <work-id> --summary 'implemented and tested' --kind command --outcome passed --command 'pnpm test' --json",
+    verify: "bwrk work verify <work-id> --evidence <evidence-id> --verdict passed --json",
+    close: "bwrk work close <work-id> --reason 'verified by evidence' --json",
+    release: "bwrk work release <work-id> --json",
+    doctor: "bwrk doctor --json",
+    repair: "bwrk doctor --fix --json"
+  };
+  return {
+    agentId,
+    labels,
+    commands,
+    loop: [
+      {
+        step: "Check coordination state",
+        command: commands.status,
+        when: "Use before work and after repair to see stale reservations, capacity, and the next recommended action."
+      },
+      {
+        step: "Start or resume work",
+        command: commands.start,
+        when: "Use as the normal entrypoint; it resumes active work before claiming another ready item."
+      },
+      {
+        step: "Renew if work continues",
+        command: commands.renew,
+        when: "Use before the reservation TTL expires when the same agent is still actively working."
+      },
+      {
+        step: "Record evidence",
+        command: commands.evidence,
+        when: "Use after implementation or investigation with the real verification command and outcome."
+      },
+      {
+        step: "Verify and close",
+        command: `${commands.verify}\n${commands.close}`,
+        when: "Use when evidence satisfies acceptance and the work should leave the active queue."
+      },
+      {
+        step: "Release if stopping",
+        command: commands.release,
+        when: "Use when handing the item back before it is verified or closed."
+      }
+    ],
+    recovery: [
+      {
+        step: "Inspect workspace health",
+        command: commands.doctor,
+        when: "Use when start/status reports stale state, missing projections, or inconsistent reservations."
+      },
+      {
+        step: "Repair safe diagnostics",
+        command: commands.repair,
+        when: "Use for stale active reservations and repairable projections before trying agent start again."
+      },
+      {
+        step: "Recheck coordination state",
+        command: commands.status,
+        when: "Use after repair to confirm capacity and the next recommended action."
+      }
+    ]
+  };
+}
+
+function formatAgentGuide(guide: AgentGuide): string {
+  const labels = guide.labels.length > 0 ? guide.labels.join(", ") : "(none)";
+  return [
+    "Boreal agent guide",
+    "",
+    `Agent: ${guide.agentId}`,
+    `Labels: ${labels}`,
+    "",
+    "Loop:",
+    ...formatGuideSteps(guide.loop),
+    "",
+    "Recovery:",
+    ...formatGuideSteps(guide.recovery)
+  ].join("\n") + "\n";
+}
+
+function formatGuideSteps(steps: readonly AgentGuideStep[]): readonly string[] {
+  return steps.map((step, index) => `${index + 1}. ${step.step}\n   ${step.command.replace(/\n/gu, "\n   ")}\n   ${step.when}`);
 }
 
 function isWorkItem(value: WorkItem | undefined): value is WorkItem {

@@ -38,6 +38,7 @@ describe("bwrk cli", () => {
       "## `work release`",
       "## `work renew`",
       "## `reservation list`",
+      "## `agent guide`",
       "## `agent start`",
       "## `agent status`",
       "## `evidence add`",
@@ -111,6 +112,53 @@ describe("bwrk cli", () => {
     expect(payload.message).toContain("not initialized");
   });
 
+  it("prints the agent guide without an initialized workspace", async () => {
+    const rootDir = await makeTempWorkspace();
+
+    const jsonGuide = await runCli(rootDir, ["agent", "guide", "--agent", "agent $one's", "--label", "cli label", "--json"]);
+    const payload = parseData<{
+      readonly agentId: string;
+      readonly labels: readonly string[];
+      readonly commands: {
+        readonly status: string;
+        readonly start: string;
+        readonly evidence: string;
+        readonly verify: string;
+        readonly release: string;
+        readonly repair: string;
+      };
+      readonly loop: Array<{ readonly step: string; readonly command: string }>;
+      readonly recovery: Array<{ readonly command: string }>;
+    }>(jsonGuide.stdout);
+
+    expect(jsonGuide.exitCode).toBe(0);
+    expect(payload.agentId).toBe("agent $one's");
+    expect(payload.labels).toEqual(["cli label"]);
+    expect(payload.commands.status).toBe("bwrk agent status --agent 'agent $one'\\''s' --label 'cli label' --json");
+    expect(payload.commands.start).toBe(
+      "bwrk agent start --agent 'agent $one'\\''s' --label 'cli label' --purpose 'start implementation' --json"
+    );
+    expect(payload.commands.evidence).toContain("bwrk evidence add <work-id>");
+    expect(payload.commands.verify).toContain("bwrk work verify <work-id>");
+    expect(payload.commands.release).toBe("bwrk work release <work-id> --json");
+    expect(payload.commands.repair).toBe("bwrk doctor --fix --json");
+    expect(payload.loop.map((step) => step.step)).toEqual([
+      "Check coordination state",
+      "Start or resume work",
+      "Renew if work continues",
+      "Record evidence",
+      "Verify and close",
+      "Release if stopping"
+    ]);
+    expect(payload.recovery.map((step) => step.command)).toContain("bwrk doctor --fix --json");
+
+    const textGuide = await runCli(rootDir, ["agent", "guide", "--agent", "agent-a", "--label", "cli"]);
+    expect(textGuide.exitCode).toBe(0);
+    expect(textGuide.stdout).toContain("Boreal agent guide");
+    expect(textGuide.stdout).toContain("bwrk agent start --agent agent-a --label cli --purpose 'start implementation' --json");
+    expect(textGuide.stdout).toContain("bwrk doctor --fix --json");
+  });
+
   it("exposes the registered command surface as JSON", async () => {
     const rootDir = await makeTempWorkspace();
 
@@ -139,6 +187,7 @@ describe("bwrk cli", () => {
         "work release",
         "work renew",
         "reservation list",
+        "agent guide",
         "agent start",
         "agent status",
         "export json",

@@ -325,6 +325,22 @@ Filters:
 
 Rows include reservation ID, status, computed `expired`, agent ID, work ID, work status, work title, `reservedAt`, optional `expiresAt`, and optional purpose.
 
+## `agent guide`
+
+```bash
+bwrk agent guide [--agent <agent-id>] [--label <label>] [--json]
+```
+
+Prints the compact agent loop without requiring an initialized workspace. The guide includes exact command templates for:
+
+- Checking coordination state with `agent status`.
+- Starting or resuming work with `agent start`.
+- Renewing active reservations.
+- Recording evidence.
+- Verifying and closing work.
+- Releasing work when stopping early.
+- Running `doctor` and `doctor --fix` for stale reservation recovery.
+
 ## `agent start`
 
 ```bash

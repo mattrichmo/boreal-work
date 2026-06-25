@@ -501,6 +501,21 @@ export const COMMAND_DEFINITIONS: readonly CommandDefinition[] = [
     supportsJson: true,
   },
   {
+    path: ["agent", "guide"],
+    category: "agent",
+    summary: "Print the recommended agent work loop.",
+    usage: "bwrk agent guide [--agent <agent-id>] [--label <label>...] [--json]",
+    description:
+      "Prints the compact command loop for starting work, recording evidence, verifying, renewing or releasing reservations, and doctor recovery.",
+    flags: [
+      flag("agent", "value", "Agent identifier. Defaults to the CLI actor."),
+      flag("label", "value", "Label filter to include in start and status commands.", true),
+    ],
+    positionals: { label: "arguments", min: 0, max: 0 },
+    requiresWorkspace: false,
+    supportsJson: true,
+  },
+  {
     path: ["agent", "status"],
     category: "agent",
     summary: "Show agent coordination status.",
