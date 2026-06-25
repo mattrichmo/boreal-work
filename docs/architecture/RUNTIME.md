@@ -17,6 +17,13 @@ validate input -> load records -> call domain function -> enforce policy
 
 `@boreal/storage` defines transaction-capable ports. The in-memory store exists to prove contracts and tests. The first durable adapter is `FileBorealStore`, which persists a single atomic snapshot at `.boreal/runtime/state.json`.
 
+`FileBorealStore` serializes writes in two layers:
+
+- An in-process queue preserves call order inside one runtime.
+- A lock directory at `.boreal/runtime/state.lock` protects the full read/modify/write transaction across separate CLI, daemon, MCP, or agent processes.
+
+The lock has bounded wait, retry, stale-lock recovery, owner metadata, and token-based release. Reads stay lock-free because the state file is replaced with atomic rename.
+
 File storage is an adapter, not the domain model. SQLite, Dolt-like, or other transactional backends should fit behind the same store interface without changing domain packages.
 
 Operational work state should not depend on JSONL or Markdown as a hardcoded implementation detail. Human-readable vault formats can be adapters; engine rules must stay behind storage and schema contracts.

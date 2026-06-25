@@ -7,6 +7,7 @@ export interface BorealWorkspacePaths {
   readonly borealDir: string;
   readonly runtimeDir: string;
   readonly stateFile: string;
+  readonly stateLockDir: string;
 }
 
 export function resolveWorkspacePaths(rootDir: string): BorealWorkspacePaths {
@@ -14,11 +15,13 @@ export function resolveWorkspacePaths(rootDir: string): BorealWorkspacePaths {
   const borealDir = join(absoluteRoot, ".boreal");
   const runtimeDir = join(borealDir, "runtime");
   const stateFile = join(runtimeDir, "state.json");
+  const stateLockDir = join(runtimeDir, "state.lock");
   return {
     rootDir: absoluteRoot,
     borealDir,
     runtimeDir,
-    stateFile
+    stateFile,
+    stateLockDir
   };
 }
 
@@ -34,4 +37,3 @@ export function assertPathInside(parentDir: string, childPath: string): void {
     });
   }
 }
-

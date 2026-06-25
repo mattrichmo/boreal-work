@@ -1,10 +1,10 @@
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
 
-import { nowIso, type ActorRef } from "@boreal/core";
+import { BorealError, nowIso, type ActorRef } from "@boreal/core";
 import { createBorealRuntime } from "@boreal/engine";
 import { FileBorealStore } from "@boreal/storage";
 import { createWorkItem } from "@boreal/work-engine";
@@ -21,9 +21,15 @@ afterEach(async () => {
 });
 
 describe("file-backed store", () => {
+  const lock = {
+    waitTimeoutMs: 250,
+    staleAfterMs: 2_000,
+    retryDelayMs: 5
+  };
+
   it("persists runtime state across store instances", async () => {
     const rootDir = await makeTempWorkspace();
-    const store = new FileBorealStore({ rootDir });
+    const store = new FileBorealStore({ rootDir, lock });
     const runtime = createBorealRuntime({ store, actor });
 
     const work = await runtime.createWork({
@@ -50,7 +56,7 @@ describe("file-backed store", () => {
 
   it("does not persist failed transactions", async () => {
     const rootDir = await makeTempWorkspace();
-    const store = new FileBorealStore({ rootDir });
+    const store = new FileBorealStore({ rootDir, lock });
     const work = createWorkItem({
       title: "Do not persist aborted transaction",
       actor,
@@ -69,6 +75,91 @@ describe("file-backed store", () => {
       code: "ENOENT"
     });
   });
+
+  it("serializes writes from separate store instances without losing updates", async () => {
+    const rootDir = await makeTempWorkspace();
+    const storeA = new FileBorealStore({ rootDir, lock });
+    const storeB = new FileBorealStore({ rootDir, lock });
+    const workA = createWorkItem({
+      title: "Concurrent write A",
+      actor,
+      now: nowIso(new Date("2026-01-01T00:00:00.000Z"))
+    });
+    const workB = createWorkItem({
+      title: "Concurrent write B",
+      actor,
+      now: nowIso(new Date("2026-01-01T00:00:01.000Z"))
+    });
+
+    await Promise.all([
+      storeA.write(async (writer) => {
+        await writer.putWorkItem(workA);
+        await sleep(50);
+      }),
+      storeB.write((writer) => writer.putWorkItem(workB))
+    ]);
+
+    const titles = await storeA.read(async (reader) =>
+      (await reader.listWorkItems()).map((work) => work.title).sort()
+    );
+    expect(titles).toEqual(["Concurrent write A", "Concurrent write B"]);
+  });
+
+  it("rejects active locks with a structured conflict error", async () => {
+    const rootDir = await makeTempWorkspace();
+    await writeLockOwner(rootDir, new Date().toISOString());
+    const store = new FileBorealStore({
+      rootDir,
+      lock: {
+        waitTimeoutMs: 25,
+        staleAfterMs: 30_000,
+        retryDelayMs: 5
+      }
+    });
+    const work = createWorkItem({
+      title: "Blocked by active lock",
+      actor,
+      now: nowIso(new Date("2026-01-01T00:00:00.000Z"))
+    });
+
+    await expect(store.write((writer) => writer.putWorkItem(work))).rejects.toMatchObject({
+      code: "BOREAL_CONFLICT"
+    } satisfies Partial<BorealError>);
+  });
+
+  it("breaks stale locks and releases its own lock after writing", async () => {
+    const rootDir = await makeTempWorkspace();
+    await writeLockOwner(rootDir, new Date(Date.now() - 60_000).toISOString());
+    const store = new FileBorealStore({
+      rootDir,
+      lock: {
+        waitTimeoutMs: 250,
+        staleAfterMs: 1,
+        retryDelayMs: 5
+      }
+    });
+    const work = createWorkItem({
+      title: "Recover from stale lock",
+      actor,
+      now: nowIso(new Date("2026-01-01T00:00:00.000Z"))
+    });
+
+    await store.write((writer) => writer.putWorkItem(work));
+    await expect(store.read((reader) => reader.listWorkItems())).resolves.toHaveLength(1);
+    await expect(readFile(join(rootDir, ".boreal/runtime/state.lock/owner.json"), "utf8")).rejects.toMatchObject({
+      code: "ENOENT"
+    });
+  });
+
+  it("rejects state files outside the workspace root", async () => {
+    const rootDir = await makeTempWorkspace();
+    expect(() => new FileBorealStore({ rootDir, stateFile: join(rootDir, "../state.json") })).toThrow(BorealError);
+  });
+
+  it("rejects invalid lock timing options", async () => {
+    const rootDir = await makeTempWorkspace();
+    expect(() => new FileBorealStore({ rootDir, lock: { waitTimeoutMs: 0 } })).toThrow(BorealError);
+  });
 });
 
 async function makeTempWorkspace(): Promise<string> {
@@ -77,3 +168,25 @@ async function makeTempWorkspace(): Promise<string> {
   return dir;
 }
 
+async function writeLockOwner(rootDir: string, createdAt: string): Promise<void> {
+  const lockDir = join(rootDir, ".boreal/runtime/state.lock");
+  await mkdir(lockDir, { recursive: true });
+  await writeFile(
+    join(lockDir, "owner.json"),
+    JSON.stringify(
+      {
+        token: "external-lock",
+        pid: 999_999,
+        hostname: "test-host",
+        createdAt
+      },
+      null,
+      2
+    ),
+    "utf8"
+  );
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
