@@ -30,6 +30,7 @@ describe("bwrk cli", () => {
       "## `work create`",
       "## `work ready`",
       "## `work list`",
+      "## `work next`",
       "## `work show`",
       "## `work block`",
       "## `work reserve`",
@@ -47,6 +48,9 @@ describe("bwrk cli", () => {
       "## `decision show`",
       "## `context rebuild`",
       "## `context show`",
+      "## `context search`",
+      "## `search index`",
+      "## `search query`",
       "## `export json`",
       "## `export markdown`",
       "## `import json`",
@@ -72,7 +76,7 @@ describe("bwrk cli", () => {
     expect(root.exitCode).toBe(0);
     expect(root.stdout).toContain("bwrk - Boreal Work CLI");
     expect(root.stdout).toContain(
-      "bwrk help [init|work|evidence|source|claim|decision|context|export|import|snapshot|doctor|lock|commands]"
+      "bwrk help [init|work|evidence|source|claim|decision|context|search|export|import|snapshot|doctor|lock|commands]"
     );
     expect(work.exitCode).toBe(0);
     expect(work.stdout).toContain("bwrk work create");
@@ -122,6 +126,9 @@ describe("bwrk cli", () => {
         "decision create",
         "context rebuild",
         "context show",
+        "context search",
+        "search index",
+        "search query",
         "export json",
         "export markdown",
         "import json",
@@ -329,6 +336,141 @@ describe("bwrk cli", () => {
     expect(pack.evidence).toContain("passed: context command test passed");
   });
 
+  it("builds a fresh search index, searches context, and rejects stale reads", async () => {
+    const rootDir = await makeTempWorkspace();
+    await runCli(rootDir, ["init", "--json"]);
+
+    const work = parseData<{ readonly meta: { readonly id: string } }>(
+      (
+        await runCli(rootDir, [
+          "work",
+          "create",
+          "Ship search runtime",
+          "--description",
+          "Search must rank context facts.",
+          "--priority",
+          "high",
+          "--label",
+          "cli",
+          "--ready",
+          "--json"
+        ])
+      ).stdout
+    );
+    await runCli(rootDir, ["work", "create", "Write search docs", "--label", "docs", "--ready", "--json"]);
+
+    const next = await runCli(rootDir, ["work", "next", "--label", "cli", "--json"]);
+    expect(parseData<Array<{ readonly id: string }>>(next.stdout).map((row) => row.id)).toEqual([work.meta.id]);
+
+    const source = parseData<{ readonly meta: { readonly id: string } }>(
+      (
+        await runCli(rootDir, [
+          "source",
+          "add",
+          "--title",
+          "Search hardening note",
+          "--uri",
+          "file://search-hardening.md",
+          "--summary",
+          "Search index freshness is part of runtime policy.",
+          "--json"
+        ])
+      ).stdout
+    );
+    await runCli(rootDir, [
+      "claim",
+      "create",
+      "--statement",
+      "Search index must fail closed when stale.",
+      "--status",
+      "accepted",
+      "--source",
+      source.meta.id,
+      "--json"
+    ]);
+    await runCli(rootDir, [
+      "decision",
+      "create",
+      "--title",
+      "Use content hash search",
+      "--context",
+      "Agents need reliable retrieval.",
+      "--decision",
+      "Search query uses a fresh content hash.",
+      "--status",
+      "accepted",
+      "--source",
+      source.meta.id,
+      "--json"
+    ]);
+    await runCli(rootDir, [
+      "evidence",
+      "add",
+      work.meta.id,
+      "--summary",
+      "search integration test passed",
+      "--kind",
+      "test",
+      "--outcome",
+      "passed",
+      "--json"
+    ]);
+    await runCli(rootDir, ["context", "rebuild", "--json"]);
+
+    const missing = await runCli(rootDir, ["search", "query", "content hash", "--json"]);
+    const missingPayload = parseJson<{ readonly ok: false; readonly code: string }>(missing.stderr);
+    expect(missing.exitCode).toBe(1);
+    expect(missingPayload.code).toBe("BOREAL_POLICY_VIOLATION");
+
+    const indexed = await runCli(rootDir, ["search", "index", "--json"]);
+    expect(parseData<{ readonly documentCount: number; readonly tokenCount: number }>(indexed.stdout)).toMatchObject({
+      documentCount: 8
+    });
+
+    const query = await runCli(rootDir, ["search", "query", "content hash", "--json"]);
+    const searchResults = parseData<Array<{ readonly type: string; readonly title: string }>>(query.stdout);
+    expect(searchResults.map((result) => result.type)).toEqual(expect.arrayContaining(["decision", "context_pack"]));
+    expect(searchResults.map((result) => result.title)).toContain("Use content hash search");
+
+    const contextSearch = await runCli(rootDir, ["context", "search", "fail closed stale", "--json"]);
+    const contextResults = parseData<Array<{ readonly type: string; readonly summary: string }>>(contextSearch.stdout);
+    expect(contextResults.every((result) => result.type === "context_pack")).toBe(true);
+    expect(contextResults.some((result) => result.summary.includes("Ship search runtime"))).toBe(true);
+
+    await runCli(rootDir, [
+      "source",
+      "add",
+      "--title",
+      "Stale search note",
+      "--uri",
+      "file://stale-search.md",
+      "--json"
+    ]);
+    const stale = await runCli(rootDir, ["search", "query", "content hash", "--json"]);
+    const stalePayload = parseJson<{ readonly ok: false; readonly code: string; readonly message: string }>(stale.stderr);
+    expect(stale.exitCode).toBe(1);
+    expect(stalePayload.code).toBe("BOREAL_POLICY_VIOLATION");
+    expect(stalePayload.message).toContain("stale");
+
+    const repaired = await runCli(rootDir, ["doctor", "--fix", "--json"]);
+    const repairedPayload = parseData<{
+      readonly ok: boolean;
+      readonly fixed: boolean;
+      readonly diagnostics: Array<{ readonly code: string; readonly severity: string }>;
+    }>(repaired.stdout);
+    expect(repaired.exitCode).toBe(0);
+    expect(repairedPayload.ok).toBe(true);
+    expect(repairedPayload.fixed).toBe(true);
+    expect(repairedPayload.diagnostics).toEqual(
+      expect.arrayContaining([expect.objectContaining({ code: "search.index", severity: "fixed" })])
+    );
+
+    const repairedSearch = await runCli(rootDir, ["search", "query", "Stale search note", "--json"]);
+    expect(parseData<Array<{ readonly type: string; readonly title: string }>>(repairedSearch.stdout)).toEqual(
+      expect.arrayContaining([expect.objectContaining({ type: "source", title: "Stale search note" })])
+    );
+  });
+
   it("exports, snapshots, imports, and rejects conflicting JSON snapshots", async () => {
     const rootDir = await makeTempWorkspace();
     await runCli(rootDir, ["init", "--json"]);
@@ -417,6 +559,17 @@ describe("bwrk cli", () => {
     const importedDoctor = await runCli(targetDir, ["doctor", "--json"]);
     expect(importedDoctor.exitCode).toBe(0);
     expect(parseData<{ readonly ok: boolean }>(importedDoctor.stdout).ok).toBe(true);
+
+    const importedIndex = await runCli(targetDir, ["search", "index", "--json"]);
+    expect(parseData<{ readonly documentCount: number }>(importedIndex.stdout).documentCount).toBeGreaterThan(0);
+    const importedSearch = await runCli(targetDir, ["search", "query", "Export source", "--json"]);
+    expect(parseData<Array<{ readonly type: string; readonly title: string }>>(importedSearch.stdout)).toEqual(
+      expect.arrayContaining([expect.objectContaining({ type: "source", title: "Export source" })])
+    );
+    const importedContextSearch = await runCli(targetDir, ["context", "search", "export import test passed", "--json"]);
+    expect(parseData<Array<{ readonly type: string }>>(importedContextSearch.stdout).map((result) => result.type)).toContain(
+      "context_pack"
+    );
 
     const conflictingPath = join(rootDir, "conflicting-export.json");
     const conflicting = {

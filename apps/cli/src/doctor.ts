@@ -21,6 +21,7 @@ import { deriveReadinessStatus } from "@boreal/work-engine";
 
 import type { CliContext } from "./context.js";
 import { exportDriftDiagnostics } from "./import-export.js";
+import { inspectSearchIndex, writeSearchIndex } from "./search-cli.js";
 
 export type DiagnosticSeverity = "ok" | "warning" | "error" | "fixed";
 
@@ -129,7 +130,74 @@ export async function runDoctor(context: CliContext, fix: boolean): Promise<Doct
     details: drift
   });
 
+  const searchDiagnostics = await validateSearchIndex(context, fix);
+  diagnostics.push(...searchDiagnostics.diagnostics);
+  fixed = fixed || searchDiagnostics.fixed;
+
   return finalize(diagnostics, fixed);
+}
+
+async function validateSearchIndex(
+  context: CliContext,
+  fix: boolean
+): Promise<{
+  readonly fixed: boolean;
+  readonly diagnostics: readonly Diagnostic[];
+}> {
+  try {
+    const inspection = await inspectSearchIndex(context);
+    if (!inspection.exists || inspection.stale || inspection.error) {
+      if (fix) {
+        const rebuilt = await writeSearchIndex(context);
+        return {
+          fixed: true,
+          diagnostics: [
+            {
+              code: "search.index",
+              severity: "fixed",
+              message: "Rebuilt local search index",
+              details: { inspection, rebuilt }
+            }
+          ]
+        };
+      }
+      return {
+        fixed: false,
+        diagnostics: [
+          {
+            code: "search.index",
+            severity: "warning",
+            message: searchIndexDiagnosticMessage(inspection),
+            details: inspection
+          }
+        ]
+      };
+    }
+
+    return {
+      fixed: false,
+      diagnostics: [
+        {
+          code: "search.index",
+          severity: "ok",
+          message: "Local search index is fresh",
+          details: inspection
+        }
+      ]
+    };
+  } catch (error) {
+    return {
+      fixed: false,
+      diagnostics: [
+        {
+          code: "search.index",
+          severity: "warning",
+          message: "Local search index could not be inspected",
+          details: error instanceof Error ? error.message : error
+        }
+      ]
+    };
+  }
 }
 
 async function readStateDocument(
@@ -518,6 +586,23 @@ function diagnosticFromList(code: string, label: string, values: readonly unknow
     message: values.length > 0 ? label : `${label}: none`,
     details: values.length > 0 ? values : undefined
   };
+}
+
+function searchIndexDiagnosticMessage(inspection: {
+  readonly exists: boolean;
+  readonly stale: boolean;
+  readonly error?: string;
+}): string {
+  if (!inspection.exists) {
+    return "Local search index is missing; run `bwrk search index` or `bwrk doctor --fix`";
+  }
+  if (inspection.error) {
+    return "Local search index is invalid; run `bwrk search index` or `bwrk doctor --fix`";
+  }
+  if (inspection.stale) {
+    return "Local search index is stale; run `bwrk search index` or `bwrk doctor --fix`";
+  }
+  return "Local search index is fresh";
 }
 
 function stateSection<T>(state: Record<string, unknown>, section: (typeof STATE_SECTIONS)[number]): readonly T[] {

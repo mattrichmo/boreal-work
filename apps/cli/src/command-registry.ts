@@ -20,6 +20,7 @@ export interface CommandDefinition {
     | "claim"
     | "decision"
     | "context"
+    | "search"
     | "export"
     | "import"
     | "snapshot"
@@ -140,6 +141,20 @@ export const COMMAND_DEFINITIONS: readonly CommandDefinition[] = [
       flag("status", "value", "Only include work with this status."),
       flag("label", "value", "Only include work with this label.", true),
       flag("limit", "value", "Maximum number of work items to print."),
+    ],
+    positionals: { label: "arguments", min: 0, max: 0 },
+    requiresWorkspace: true,
+    supportsJson: true,
+  },
+  {
+    path: ["work", "next"],
+    category: "work",
+    summary: "Show the next ready work.",
+    usage: "bwrk work next [--label <label>...] [--limit <n>] [--json]",
+    description: "Lists claimable ready work from the live runtime view, ordered by priority and title.",
+    flags: [
+      flag("label", "value", "Only include work with this label.", true),
+      flag("limit", "value", "Maximum number of ready work items to print. Defaults to 10."),
     ],
     positionals: { label: "arguments", min: 0, max: 0 },
     requiresWorkspace: true,
@@ -360,6 +375,39 @@ export const COMMAND_DEFINITIONS: readonly CommandDefinition[] = [
     usage: "bwrk context show <work-id> [--json]",
     flags: [],
     positionals: { label: "work id", min: 1, max: 1 },
+    requiresWorkspace: true,
+    supportsJson: true,
+  },
+  {
+    path: ["context", "search"],
+    category: "context",
+    summary: "Search context packs.",
+    usage: "bwrk context search <query> [--limit <n>] [--json]",
+    description: "Searches the fresh local search index but only returns context-pack documents.",
+    flags: [flag("limit", "value", "Maximum number of context results to print.")],
+    positionals: { label: "query", min: 1 },
+    requiresWorkspace: true,
+    supportsJson: true,
+  },
+  {
+    path: ["search", "index"],
+    category: "search",
+    summary: "Build the local search index.",
+    usage: "bwrk search index [--json]",
+    description: "Writes a content-hashed index to .boreal/runtime/search-index.json.",
+    flags: [],
+    positionals: { label: "arguments", min: 0, max: 0 },
+    requiresWorkspace: true,
+    supportsJson: true,
+  },
+  {
+    path: ["search", "query"],
+    category: "search",
+    summary: "Search work and knowledge records.",
+    usage: "bwrk search query <query> [--limit <n>] [--json]",
+    description: "Searches work, evidence, sources, claims, decisions, and context packs using a fresh local index.",
+    flags: [flag("limit", "value", "Maximum number of search results to print.")],
+    positionals: { label: "query", min: 1 },
     requiresWorkspace: true,
     supportsJson: true,
   },

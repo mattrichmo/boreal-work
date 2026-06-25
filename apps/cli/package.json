@@ -9,6 +9,7 @@
   "dependencies": {
     "@boreal/core": "workspace:*",
     "@boreal/engine": "workspace:*",
+    "@boreal/search": "workspace:*",
     "@boreal/storage": "workspace:*",
     "@boreal/ui-model": "workspace:*",
     "@boreal/work-engine": "workspace:*"

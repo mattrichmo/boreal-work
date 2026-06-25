@@ -29,6 +29,9 @@ importers:
       '@boreal/engine':
         specifier: workspace:*
         version: link:../../packages/engine
+      '@boreal/search':
+        specifier: workspace:*
+        version: link:../../packages/search
       '@boreal/storage':
         specifier: workspace:*
         version: link:../../packages/storage

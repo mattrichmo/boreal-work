@@ -73,6 +73,7 @@ bwrk help source
 bwrk help claim
 bwrk help decision
 bwrk help context
+bwrk help search
 bwrk help export
 bwrk help import
 bwrk help snapshot
@@ -218,6 +219,16 @@ JSON `data` shape:
   }
 ]
 ```
+
+## `work next`
+
+```bash
+bwrk work next [--label <label>] [--limit <count>] [--json]
+```
+
+Lists claimable ready work from the live runtime view, ordered by priority and title. `--label` may be repeated and all labels must match. Default `--limit` is `10`.
+
+This command does not use the search index; readiness and reservation-sensitive workflow state are read from current runtime state.
 
 ## `work show`
 
@@ -404,6 +415,36 @@ Shows the stored context pack for a work item. Run `bwrk context rebuild` first 
 
 JSON `data` is the context pack record with `id`, `subjectId`, `generatedAt`, `title`, `summary`, `facts`, and `evidence`.
 
+## `context search`
+
+```bash
+bwrk context search <query> [--limit <count>] [--json]
+```
+
+Searches context-pack documents only. The search index must be fresh; run `bwrk search index` or `bwrk doctor --fix` after imports, writes, or context rebuilds that change searchable content.
+
+JSON `data` is an array of search results with `id`, `type`, `recordId`, `subjectId`, `title`, `summary`, `score`, and `matches`.
+
+## `search index`
+
+```bash
+bwrk search index [--json]
+```
+
+Builds a deterministic local search index at `.boreal/runtime/search-index.json`. The index stores compact weighted tokens and result summaries for work, evidence, sources, claims, decisions, and context packs; it does not store full record bodies.
+
+JSON `data` contains `path`, `schemaVersion`, `builtAt`, `contentHash`, `documentCount`, and `tokenCount`.
+
+## `search query`
+
+```bash
+bwrk search query <query> [--limit <count>] [--json]
+```
+
+Searches work, evidence, sources, claims, decisions, and context packs. Results are ranked by weighted token matches, ID prefix matches, and stable type/title ordering.
+
+The command fails closed when the index is missing, malformed, or stale. Rebuild with `bwrk search index` or `bwrk doctor --fix`.
+
 ## `export json`
 
 ```bash
@@ -482,6 +523,7 @@ Checks:
 - Derived readiness consistency.
 - Missing or stale context-pack projections.
 - Snapshot/export drift between the current export hash and the latest recovery snapshot.
+- Missing, malformed, or stale local search index.
 - Runtime lock state.
 
 `--fix` performs only idempotent repairs:
@@ -489,6 +531,7 @@ Checks:
 - Remove stale runtime locks.
 - Recompute derived readiness.
 - Rebuild context-pack projections.
+- Rebuild the local search index.
 
 Doctor exits `1` when any diagnostic has severity `error`.
 

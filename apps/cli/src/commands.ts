@@ -16,7 +16,9 @@ import {
   type WorkPriority,
   type WorkStatus
 } from "@boreal/core";
+import type { SearchResult } from "@boreal/search";
 import { breakStaleFileLock, inspectFileLock } from "@boreal/storage";
+import type { WorkItemView } from "@boreal/ui-model";
 
 import { flagValue, flagValues, hasFlag, requiredFlag, type ParsedArgs } from "./args.js";
 import {
@@ -37,6 +39,7 @@ import {
   showSnapshot
 } from "./import-export.js";
 import { formatRecord, table, type CliOutput } from "./output.js";
+import { runSearch, writeSearchIndex } from "./search-cli.js";
 
 export interface CommandResult {
   readonly exitCode: number;
@@ -94,7 +97,9 @@ export async function runCommand(args: ParsedArgs, output: CliOutput, cwd: strin
     case "decision":
       return decisionCommand(action, rest, context, args, output, json);
     case "context":
-      return contextCommand(action, rest, context, output, json);
+      return contextCommand(action, rest, context, args, output, json);
+    case "search":
+      return searchCommand(action, rest, context, args, output, json);
     case "export":
       return exportCommand(action, context, args, output, json);
     case "import":
@@ -190,6 +195,18 @@ async function workCommand(
         })
       );
       const rows = items.slice(0, limit ?? items.length).map(workListRow);
+      output.write(json ? formatRecord(rows, true) : table(rows.map(textWorkListRow)));
+      return { exitCode: 0 };
+    }
+    case "next": {
+      const labels = flagValues(args, "label");
+      const limit = parseLimit(flagValue(args, "limit")) ?? 10;
+      const views = await context.runtime.listReadyWork();
+      const rows = views
+        .filter((view) => labels.every((label) => view.labels.includes(label)))
+        .sort(compareWorkViews)
+        .slice(0, limit)
+        .map(workViewListRow);
       output.write(json ? formatRecord(rows, true) : table(rows.map(textWorkListRow)));
       return { exitCode: 0 };
     }
@@ -395,6 +412,7 @@ async function contextCommand(
   action: string | undefined,
   rest: readonly string[],
   context: CliContext,
+  args: ParsedArgs,
   output: CliOutput,
   json: boolean
 ): Promise<CommandResult> {
@@ -409,8 +427,41 @@ async function contextCommand(
       output.write(formatRecord(pack, json));
       return { exitCode: 0 };
     }
+    case "search": {
+      const results = await runSearch(context, rest.join(" "), {
+        limit: parseLimit(flagValue(args, "limit")),
+        type: "context_pack"
+      });
+      output.write(json ? formatRecord(results, true) : table(results.map(searchResultRow)));
+      return { exitCode: 0 };
+    }
     default:
       throw new BorealError("BOREAL_INVALID_INPUT", `Unknown context command: ${action ?? ""}`);
+  }
+}
+
+async function searchCommand(
+  action: string | undefined,
+  rest: readonly string[],
+  context: CliContext,
+  args: ParsedArgs,
+  output: CliOutput,
+  json: boolean
+): Promise<CommandResult> {
+  switch (action) {
+    case "index": {
+      output.write(formatRecord(await writeSearchIndex(context), json));
+      return { exitCode: 0 };
+    }
+    case "query": {
+      const results = await runSearch(context, rest.join(" "), {
+        limit: parseLimit(flagValue(args, "limit"))
+      });
+      output.write(json ? formatRecord(results, true) : table(results.map(searchResultRow)));
+      return { exitCode: 0 };
+    }
+    default:
+      throw new BorealError("BOREAL_INVALID_INPUT", `Unknown search command: ${action ?? ""}`);
   }
 }
 
@@ -687,6 +738,16 @@ function workListRow(work: {
   };
 }
 
+function workViewListRow(view: WorkItemView): WorkListRow {
+  return {
+    id: view.id,
+    status: view.status,
+    priority: view.priority,
+    title: view.title,
+    labels: [...view.labels]
+  };
+}
+
 function textWorkListRow(row: WorkListRow): Record<string, string> {
   return {
     id: row.id,
@@ -726,6 +787,38 @@ function decisionListRow(decision: DecisionRecord): Record<string, string> {
   };
 }
 
+function searchResultRow(result: SearchResult): Record<string, string | number> {
+  return {
+    score: result.score,
+    type: result.type,
+    id: result.recordId,
+    subject: result.subjectId ?? "",
+    title: result.title,
+    matches: result.matches.join(",")
+  };
+}
+
+function compareWorkViews(left: WorkItemView, right: WorkItemView): number {
+  return (
+    priorityRank(right.priority) - priorityRank(left.priority) ||
+    left.title.localeCompare(right.title) ||
+    left.id.localeCompare(right.id)
+  );
+}
+
+function priorityRank(priority: WorkPriority): number {
+  switch (priority) {
+    case "critical":
+      return 4;
+    case "high":
+      return 3;
+    case "normal":
+      return 2;
+    case "low":
+      return 1;
+  }
+}
+
 function formatDiagnostic(diagnostic: Diagnostic): string {
   return `[${diagnostic.severity}] ${diagnostic.code}: ${diagnostic.message}`;
 }
@@ -757,6 +850,6 @@ Usage:
 ${COMMAND_DEFINITIONS.map((definition) => `  ${definition.usage}`).join("\n")}
 
 Help:
-  bwrk help [init|work|evidence|source|claim|decision|context|export|import|snapshot|doctor|lock|commands]
+  bwrk help [init|work|evidence|source|claim|decision|context|search|export|import|snapshot|doctor|lock|commands]
 `;
 }

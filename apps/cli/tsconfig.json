@@ -9,6 +9,7 @@
   "references": [
     { "path": "../../packages/core" },
     { "path": "../../packages/engine" },
+    { "path": "../../packages/search" },
     { "path": "../../packages/storage" },
     { "path": "../../packages/ui-model" },
     { "path": "../../packages/work-engine" }
