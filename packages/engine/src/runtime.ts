@@ -43,10 +43,22 @@ export interface BorealRuntimeOptions {
   readonly clock?: () => Date;
 }
 
+export type CreateWorkInput = Omit<Parameters<typeof createWorkItem>[0], "actor" | "now">;
+
+export interface CreateWorkRuntimeInput extends CreateWorkInput {
+  readonly ready?: boolean;
+}
+
+export interface WorkspaceInitializationResult {
+  readonly initialized: boolean;
+  readonly event: RuntimeEvent;
+}
+
 export interface BorealRuntime {
   readonly policy: RuntimePolicy;
   initWorkspace(): Promise<RuntimeEvent>;
-  createWork(input: Omit<Parameters<typeof createWorkItem>[0], "actor" | "now">): Promise<WorkItem>;
+  ensureWorkspaceInitialized(): Promise<WorkspaceInitializationResult>;
+  createWork(input: CreateWorkRuntimeInput): Promise<WorkItem>;
   addBlockingDependency(input: {
     readonly blockedWorkId: WorkId;
     readonly blockingWorkId: WorkId;
@@ -108,29 +120,53 @@ export function createBorealRuntime(options: BorealRuntimeOptions = {}): BorealR
     return event;
   }
 
+  async function ensureInitialized(): Promise<WorkspaceInitializationResult> {
+    return store.write(async (writer) => {
+      const existing = (await writer.listEvents()).find(
+        (event) => event.type === "workspace.initialized" && event.subjectId === "workspace"
+      );
+      if (existing) {
+        return { initialized: false, event: existing };
+      }
+
+      const event = await appendEvent(writer, "workspace.initialized", "workspace", "workspace", {
+        runtime: "boreal",
+        policy
+      });
+      return { initialized: true, event };
+    });
+  }
+
   return {
     policy,
 
     async initWorkspace(): Promise<RuntimeEvent> {
-      return store.write((writer) =>
-        appendEvent(writer, "workspace.initialized", "workspace", "workspace", {
-          runtime: "boreal",
-          policy
-        })
-      );
+      return (await ensureInitialized()).event;
+    },
+
+    async ensureWorkspaceInitialized(): Promise<WorkspaceInitializationResult> {
+      return ensureInitialized();
     },
 
     async createWork(input): Promise<WorkItem> {
       return store.write(async (writer) => {
+        const { ready, ...workInput } = input;
         const createdAt = now();
         const work = await createUniqueWorkItem(writer, {
-          ...input,
+          ...workInput,
           actor,
           now: createdAt
         });
         await writer.putWorkItem(work);
         await appendEvent(writer, "work.created", work.meta.id, "work", { title: work.title, kind: work.kind });
-        return work;
+        if (ready !== true) {
+          return work;
+        }
+
+        const updated = markWorkReady(work, [], now(), actor);
+        await writer.putWorkItem(updated);
+        await appendEvent(writer, "work.readiness_recomputed", updated.meta.id, "work", { status: updated.status });
+        return updated;
       });
     },
 

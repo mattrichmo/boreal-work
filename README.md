@@ -32,14 +32,14 @@ Core commands:
 ```bash
 pnpm bwrk init
 pnpm bwrk work create "Build CLI surface" --ready
-pnpm bwrk work list --ready
+pnpm bwrk work list --status ready --label cli --limit 20
 pnpm bwrk evidence add <work-id> --summary "pnpm test passed" --kind test --outcome passed --command "pnpm test"
 pnpm bwrk work verify <work-id> --evidence <evidence-id>
 pnpm bwrk work close <work-id> --reason "verified by tests"
 pnpm bwrk doctor --fix
 ```
 
-Every command accepts `--workspace <path>` and most commands accept `--json` for automation.
+Every command accepts `--workspace <path>` and most commands accept `--json` for automation. Without `--workspace`, commands discover the nearest parent `.boreal`; with `--workspace`, the path is treated as the exact workspace root.
 
 ## Verified Proof Slice
 
@@ -52,7 +52,7 @@ init -> create work -> add dependency -> derive readiness -> reserve
 
 The file-backed store is also tested for persistence across runtime instances, rollback on failed transactions, concurrent writer serialization, stale-lock recovery, schema drift rejection, invalid JSON rejection, and path escape rejection.
 
-The CLI integration test covers init fail-closed behavior, nested workspace resolution, create/ready/list/evidence/verify/close, projection repair through `doctor --fix`, and explicit stale lock repair through `lock break --stale-only`.
+The CLI integration test covers init fail-closed behavior, exact versus discovered workspace resolution, idempotent concurrent init, bounded/filtered listing, create/ready/list/evidence/verify/close, projection repair through `doctor --fix`, and explicit stale lock repair through `lock break --stale-only`.
 
 Several runtime invariants intentionally follow the Beads methodology while staying TypeScript-native:
 

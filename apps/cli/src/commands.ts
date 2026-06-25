@@ -1,5 +1,3 @@
-import { existsSync } from "node:fs";
-
 import {
   BorealError,
   type EvidenceKind,
@@ -18,6 +16,14 @@ import { formatRecord, table, type CliOutput } from "./output.js";
 
 export interface CommandResult {
   readonly exitCode: number;
+}
+
+interface WorkListRow {
+  readonly id: string;
+  readonly status: WorkStatus;
+  readonly priority: string;
+  readonly title: string;
+  readonly labels: readonly string[];
 }
 
 export async function runCommand(args: ParsedArgs, output: CliOutput, cwd: string): Promise<CommandResult> {
@@ -55,12 +61,13 @@ async function initCommand(
   json: boolean
 ): Promise<CommandResult> {
   await ensureWorkspaceDirs(context);
-  if (existsSync(context.paths.stateFile)) {
-    output.write(formatRecord({ initialized: false, workspaceRoot: context.workspaceRoot }, json));
-    return { exitCode: 0 };
-  }
-  const event = await context.runtime.initWorkspace();
-  output.write(formatRecord({ initialized: true, workspaceRoot: context.workspaceRoot, eventId: event.meta.id }, json));
+  const result = await context.runtime.ensureWorkspaceInitialized();
+  output.write(
+    formatRecord(
+      { initialized: result.initialized, workspaceRoot: context.workspaceRoot, eventId: result.event.meta.id },
+      json
+    )
+  );
   return { exitCode: 0 };
 }
 
@@ -84,10 +91,10 @@ async function workCommand(
         kind: parseWorkKind(flagValue(args, "kind")),
         priority: parsePriority(flagValue(args, "priority")),
         acceptanceCriteria: flagValues(args, "acceptance"),
-        labels: flagValues(args, "label")
+        labels: flagValues(args, "label"),
+        ready: hasFlag(args, "ready")
       });
-      const ready = hasFlag(args, "ready") ? await context.runtime.markReady(work.meta.id) : work;
-      output.write(formatRecord(ready, json));
+      output.write(formatRecord(work, json));
       return { exitCode: 0 };
     }
     case "ready": {
@@ -96,13 +103,17 @@ async function workCommand(
       return { exitCode: 0 };
     }
     case "list": {
-      if (hasFlag(args, "ready")) {
-        const ready = await context.runtime.listReadyWork();
-        output.write(json ? formatRecord(ready, true) : table(ready.map(workViewRow)));
-        return { exitCode: 0 };
-      }
-      const items = await context.store.read((reader) => reader.listWorkItems());
-      output.write(json ? formatRecord(items, true) : table(items.map(workRow)));
+      const status = listStatus(args);
+      const labels = flagValues(args, "label");
+      const limit = parseLimit(flagValue(args, "limit"));
+      const items = await context.store.read((reader) =>
+        reader.listWorkItems({
+          status,
+          labels: labels.length > 0 ? labels : undefined
+        })
+      );
+      const rows = items.slice(0, limit ?? items.length).map(workListRow);
+      output.write(json ? formatRecord(rows, true) : table(rows.map(textWorkListRow)));
       return { exitCode: 0 };
     }
     case "show": {
@@ -244,6 +255,51 @@ function parsePriority(value: string | undefined): WorkPriority | undefined {
   throw new BorealError("BOREAL_INVALID_INPUT", "--priority must be low, normal, high, or critical");
 }
 
+function listStatus(args: ParsedArgs): WorkStatus | undefined {
+  const status = parseWorkStatus(flagValue(args, "status"));
+  if (!hasFlag(args, "ready")) {
+    return status;
+  }
+  if (status && status !== "ready") {
+    throw new BorealError("BOREAL_INVALID_INPUT", "--ready cannot be combined with a different --status value");
+  }
+  return "ready";
+}
+
+function parseWorkStatus(value: string | undefined): WorkStatus | undefined {
+  if (!value) {
+    return undefined;
+  }
+  if (
+    value === "draft" ||
+    value === "ready" ||
+    value === "reserved" ||
+    value === "in_progress" ||
+    value === "blocked" ||
+    value === "needs_verification" ||
+    value === "verified" ||
+    value === "closed" ||
+    value === "cancelled"
+  ) {
+    return value;
+  }
+  throw new BorealError(
+    "BOREAL_INVALID_INPUT",
+    "--status must be draft, ready, reserved, in_progress, blocked, needs_verification, verified, closed, or cancelled"
+  );
+}
+
+function parseLimit(value: string | undefined): number | undefined {
+  if (!value) {
+    return undefined;
+  }
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed <= 0) {
+    throw new BorealError("BOREAL_INVALID_INPUT", "--limit must be a positive integer");
+  }
+  return parsed;
+}
+
 function parseEvidenceKind(value: string | undefined): EvidenceKind {
   const kind = value ?? "command";
   if (kind === "command" || kind === "test" || kind === "diff" || kind === "review" || kind === "artifact" || kind === "note") {
@@ -268,21 +324,29 @@ function parseVerdict(value: string | undefined): VerificationVerdict {
   throw new BorealError("BOREAL_INVALID_INPUT", "--verdict must be passed or failed");
 }
 
-function workRow(work: { readonly meta: { readonly id: string }; readonly title: string; readonly status: WorkStatus; readonly priority: string }): Record<string, string> {
+function workListRow(work: {
+  readonly meta: { readonly id: string };
+  readonly title: string;
+  readonly status: WorkStatus;
+  readonly priority: string;
+  readonly labels: readonly string[];
+}): WorkListRow {
   return {
     id: work.meta.id,
     status: work.status,
     priority: work.priority,
-    title: work.title
+    title: work.title,
+    labels: [...work.labels]
   };
 }
 
-function workViewRow(view: { readonly id: string; readonly status: WorkStatus; readonly priority: string; readonly title: string }): Record<string, string> {
+function textWorkListRow(row: WorkListRow): Record<string, string> {
   return {
-    id: view.id,
-    status: view.status,
-    priority: view.priority,
-    title: view.title
+    id: row.id,
+    status: row.status,
+    priority: row.priority,
+    title: row.title,
+    labels: row.labels.join(",")
   };
 }
 
@@ -297,7 +361,7 @@ Usage:
   bwrk init [--workspace <path>] [--json]
   bwrk work create <title> [--description <text>] [--label <label>] [--acceptance <text>] [--ready] [--json]
   bwrk work ready <work-id> [--json]
-  bwrk work list [--ready] [--json]
+  bwrk work list [--ready] [--status <status>] [--label <label>] [--limit <count>] [--json]
   bwrk work show <work-id> [--json]
   bwrk work block <blocked-work-id> <blocking-work-id> [--json]
   bwrk work reserve <work-id> [--agent <id>] [--purpose <text>] [--json]

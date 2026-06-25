@@ -6,7 +6,7 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import { BorealError, nowIso, type ActorRef } from "@boreal/core";
 import { createBorealRuntime } from "@boreal/engine";
-import { FileBorealStore } from "@boreal/storage";
+import { FileBorealStore, breakStaleFileLock, inspectFileLock } from "@boreal/storage";
 import { createWorkItem } from "@boreal/work-engine";
 
 const actor: ActorRef = {
@@ -149,6 +149,34 @@ describe("file-backed store", () => {
     await expect(readFile(join(rootDir, ".boreal/runtime/state.lock/owner.json"), "utf8")).rejects.toMatchObject({
       code: "ENOENT"
     });
+  });
+
+  it("coordinates explicit concurrent stale lock breakers", async () => {
+    const rootDir = await makeTempWorkspace();
+    const lockDir = join(rootDir, ".boreal/runtime/state.lock");
+    await writeLockOwner(rootDir, new Date(Date.now() - 60_000).toISOString());
+
+    const results = await Promise.all([
+      breakStaleFileLock(lockDir, { waitTimeoutMs: 250, staleAfterMs: 1, retryDelayMs: 5 }),
+      breakStaleFileLock(lockDir, { waitTimeoutMs: 250, staleAfterMs: 1, retryDelayMs: 5 })
+    ]);
+
+    expect(results.filter((result) => result.removed)).toHaveLength(1);
+    await expect(inspectFileLock(lockDir)).resolves.toMatchObject({ exists: false });
+    await expect(readFile(`${lockDir}.recovery/owner.json`, "utf8")).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("refuses to explicitly break active locks", async () => {
+    const rootDir = await makeTempWorkspace();
+    const lockDir = join(rootDir, ".boreal/runtime/state.lock");
+    await writeLockOwner(rootDir, new Date().toISOString());
+
+    await expect(
+      breakStaleFileLock(lockDir, { waitTimeoutMs: 250, staleAfterMs: 30_000, retryDelayMs: 5 })
+    ).rejects.toMatchObject({
+      code: "BOREAL_CONFLICT"
+    } satisfies Partial<BorealError>);
+    await expect(inspectFileLock(lockDir, { staleAfterMs: 30_000 })).resolves.toMatchObject({ exists: true, stale: false });
   });
 
   it("rejects state files outside the workspace root", async () => {

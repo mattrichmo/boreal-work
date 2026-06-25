@@ -19,7 +19,10 @@ export interface CliContext {
 }
 
 export async function createCliContext(args: ParsedArgs, cwd: string): Promise<CliContext> {
-  const workspaceRoot = resolveWorkspaceRoot(flagValue(args, "workspace") ?? cwd);
+  const explicitWorkspace = flagValue(args, "workspace");
+  const workspaceRoot = explicitWorkspace
+    ? resolveExplicitWorkspaceRoot(explicitWorkspace)
+    : resolveDiscoveredWorkspaceRoot(cwd);
   const paths = resolveWorkspacePaths(workspaceRoot);
   const actor = actorFromArgs(args);
   const store = new FileBorealStore({ rootDir: workspaceRoot });
@@ -39,7 +42,11 @@ export function assertInitialized(context: CliContext): void {
   }
 }
 
-function resolveWorkspaceRoot(start: string): string {
+function resolveExplicitWorkspaceRoot(start: string): string {
+  return resolve(start.replace(/^~(?=$|\/)/, homedir()));
+}
+
+function resolveDiscoveredWorkspaceRoot(start: string): string {
   const absolute = resolve(start.replace(/^~(?=$|\/)/, homedir()));
   const existing = findBorealRoot(absolute);
   return existing ?? absolute;

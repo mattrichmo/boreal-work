@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -101,6 +101,68 @@ describe("bwrk cli", () => {
     const doctor = await runCli(rootDir, ["doctor", "--json"]);
     expect(doctor.exitCode).toBe(0);
     expect(parseJson<{ readonly ok: boolean }>(doctor.stdout).ok).toBe(true);
+  });
+
+  it("keeps explicit workspace paths exact while cwd discovery walks upward", async () => {
+    const rootDir = await makeTempWorkspace();
+    const childDir = join(rootDir, "nested");
+    await mkdir(childDir);
+    await runCli(rootDir, ["init", "--json"]);
+
+    const discovered = await runCli(childDir, ["work", "list", "--json"]);
+    expect(discovered.exitCode).toBe(0);
+
+    const explicit = await runCli(rootDir, ["work", "list", "--workspace", childDir, "--json"]);
+    const payload = parseJson<{ readonly code: string; readonly details: { readonly workspaceRoot: string } }>(
+      explicit.stderr
+    );
+    expect(explicit.exitCode).toBe(2);
+    expect(payload.code).toBe("BOREAL_INVALID_INPUT");
+    expect(payload.details.workspaceRoot).toBe(childDir);
+  });
+
+  it("initializes idempotently under concurrent commands", async () => {
+    const rootDir = await makeTempWorkspace();
+
+    const results = await Promise.all([
+      runCli(rootDir, ["init", "--json"]),
+      runCli(rootDir, ["init", "--json"]),
+      runCli(rootDir, ["init", "--json"])
+    ]);
+    const payloads = results.map((result) => parseJson<{ readonly initialized: boolean }>(result.stdout));
+    const state = parseJson<{ readonly events: Array<{ readonly type: string }> }>(
+      await readFile(join(rootDir, ".boreal/runtime/state.json"), "utf8")
+    );
+
+    expect(results.map((result) => result.exitCode)).toEqual([0, 0, 0]);
+    expect(payloads.filter((payload) => payload.initialized)).toHaveLength(1);
+    expect(state.events.filter((event) => event.type === "workspace.initialized")).toHaveLength(1);
+  });
+
+  it("supports bounded and filtered work lists", async () => {
+    const rootDir = await makeTempWorkspace();
+    await runCli(rootDir, ["init", "--json"]);
+    await runCli(rootDir, ["work", "create", "Ready CLI work", "--label", "cli", "--ready", "--json"]);
+    await runCli(rootDir, ["work", "create", "Draft CLI work", "--label", "cli", "--json"]);
+    await runCli(rootDir, ["work", "create", "Ready docs work", "--label", "docs", "--ready", "--json"]);
+
+    const listed = await runCli(rootDir, [
+      "work",
+      "list",
+      "--status",
+      "ready",
+      "--label",
+      "cli",
+      "--limit",
+      "1",
+      "--json"
+    ]);
+    const rows = parseJson<Array<{ readonly status: string; readonly labels: readonly string[] }>>(listed.stdout);
+
+    expect(listed.exitCode).toBe(0);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.status).toBe("ready");
+    expect(rows[0]?.labels).toContain("cli");
   });
 
   it("repairs stale runtime locks explicitly", async () => {

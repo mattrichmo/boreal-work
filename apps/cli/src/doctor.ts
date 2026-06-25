@@ -3,7 +3,10 @@ import { readFile } from "node:fs/promises";
 
 import {
   BorealError,
+  type ContextPack,
   type EvidenceId,
+  type EvidenceRecord,
+  type VerificationRecord,
   type WorkId,
   type WorkItem
 } from "@boreal/core";
@@ -102,9 +105,10 @@ export async function runDoctor(context: CliContext, fix: boolean): Promise<Doct
   }
 
   validateStateSections(state, diagnostics);
+  validateMissingIds(state, diagnostics);
   validateDuplicateIds(state, diagnostics);
 
-  const storeDiagnostics = await validateStoreRecords(context, fix);
+  const storeDiagnostics = await validateStoreRecords(context, fix, state);
   diagnostics.push(...storeDiagnostics.diagnostics);
   fixed = fixed || storeDiagnostics.fixed;
 
@@ -172,6 +176,29 @@ function validateStateSections(state: Record<string, unknown>, diagnostics: Diag
   }
 }
 
+function validateMissingIds(state: Record<string, unknown>, diagnostics: Diagnostic[]): void {
+  const missing: Array<{ section: string; index: number }> = [];
+
+  for (const section of STATE_SECTIONS) {
+    const values = state[section];
+    if (!Array.isArray(values)) {
+      continue;
+    }
+    values.forEach((value, index) => {
+      if (!readRecordId(value, section)) {
+        missing.push({ section, index });
+      }
+    });
+  }
+
+  diagnostics.push({
+    code: "state.missing_ids",
+    severity: missing.length > 0 ? "error" : "ok",
+    message: missing.length > 0 ? "Records missing IDs found" : "All records expose IDs",
+    details: missing.length > 0 ? missing : undefined
+  });
+}
+
 function validateDuplicateIds(state: Record<string, unknown>, diagnostics: Diagnostic[]): void {
   const duplicates: Array<{ section: string; id: string }> = [];
 
@@ -202,7 +229,11 @@ function validateDuplicateIds(state: Record<string, unknown>, diagnostics: Diagn
   });
 }
 
-async function validateStoreRecords(context: CliContext, fix: boolean): Promise<{
+async function validateStoreRecords(
+  context: CliContext,
+  fix: boolean,
+  state: Record<string, unknown>
+): Promise<{
   readonly fixed: boolean;
   readonly diagnostics: readonly Diagnostic[];
 }> {
@@ -210,14 +241,22 @@ async function validateStoreRecords(context: CliContext, fix: boolean): Promise<
   let fixed = false;
 
   try {
-    const summary = await context.store.read(async (reader) => {
-      const workItems = await reader.listWorkItems();
-      const evidenceById = new Set((await Promise.all(workItems.map((work) => reader.listEvidenceForSubject(work.meta.id))))
-        .flat()
-        .map((record) => record.meta.id));
-      const verificationsById = new Set((await Promise.all(workItems.map((work) => reader.listVerificationsForSubject(work.meta.id))))
-        .flat()
-        .map((record) => record.meta.id));
+    const summary = (() => {
+      const rawWorkItems = stateSection<WorkItem>(state, "workItems");
+      const rawEvidence = stateSection<EvidenceRecord>(state, "evidence");
+      const rawVerifications = stateSection<VerificationRecord>(state, "verifications");
+      const rawContextPacks = stateSection<ContextPack>(state, "contextPacks");
+      const malformedRecords = [
+        ...malformedIndexes(rawWorkItems, isDoctorWorkItem, "workItems"),
+        ...malformedIndexes(rawEvidence, isDoctorEvidence, "evidence"),
+        ...malformedIndexes(rawVerifications, isDoctorVerification, "verifications"),
+        ...malformedIndexes(rawContextPacks, isDoctorContextPack, "contextPacks")
+      ];
+      const workItems = rawWorkItems.filter(isDoctorWorkItem);
+      const evidenceById = new Set(rawEvidence.filter(isDoctorEvidence).map((record) => record.meta.id));
+      const verificationsById = new Set(
+        rawVerifications.filter(isDoctorVerification).map((record) => record.meta.id)
+      );
       const workById = new Map(workItems.map((work) => [work.meta.id, work]));
       const danglingDependencies = workItems.flatMap((work) =>
         work.dependencyIds
@@ -239,27 +278,28 @@ async function validateStoreRecords(context: CliContext, fix: boolean): Promise<
         const expected = deriveReadinessStatus(work, dependencies);
         return expected === work.status ? [] : [{ workId: work.meta.id, actual: work.status, expected }];
       });
-      const contextPacks = await reader.listContextPacks();
-      const contextPackSubjects = new Set(contextPacks.map((pack) => pack.subjectId));
+      const contextPackSubjects = new Set(rawContextPacks.filter(isDoctorContextPack).map((pack) => pack.subjectId));
       const missingContextPacks = workItems
         .filter((work) => !contextPackSubjects.has(work.meta.id))
         .map((work) => work.meta.id);
 
       return {
         workCount: workItems.length,
+        malformedRecords,
         danglingDependencies,
         danglingEvidence,
         danglingVerifications,
         staleReadiness,
         missingContextPacks
       };
-    });
+    })();
 
     diagnostics.push({
       code: "work.count",
       severity: "ok",
       message: `${summary.workCount} work item(s) loaded`
     });
+    diagnostics.push(diagnosticFromList("state.record_shape", "Malformed runtime records", summary.malformedRecords));
     diagnostics.push(diagnosticFromList("work.dangling_dependencies", "Dangling work dependencies", summary.danglingDependencies));
     diagnostics.push(diagnosticFromList("work.dangling_evidence", "Dangling work evidence references", summary.danglingEvidence));
     diagnostics.push(
@@ -342,6 +382,19 @@ function diagnosticFromList(code: string, label: string, values: readonly unknow
   };
 }
 
+function stateSection<T>(state: Record<string, unknown>, section: (typeof STATE_SECTIONS)[number]): readonly T[] {
+  const values = state[section];
+  return Array.isArray(values) ? (values as readonly T[]) : [];
+}
+
+function malformedIndexes<T>(
+  values: readonly T[],
+  predicate: (value: T) => boolean,
+  section: string
+): Array<{ section: string; index: number }> {
+  return values.flatMap((value, index) => (predicate(value) ? [] : [{ section, index }]));
+}
+
 function finalize(diagnostics: readonly Diagnostic[], fixed: boolean): DoctorResult {
   const ok = diagnostics.every((diagnostic) => diagnostic.severity !== "error");
   return { ok, fixed, diagnostics };
@@ -367,6 +420,48 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function isWorkItem(value: WorkItem | undefined): value is WorkItem {
   return value !== undefined;
+}
+
+function isDoctorWorkItem(value: unknown): value is WorkItem {
+  return (
+    isRecord(value) &&
+    readRecordId(value, "workItems") !== undefined &&
+    isWorkStatus(value.status) &&
+    Array.isArray(value.dependencyIds) &&
+    Array.isArray(value.evidenceIds) &&
+    Array.isArray(value.verificationIds)
+  );
+}
+
+function isDoctorEvidence(value: unknown): value is EvidenceRecord {
+  return isRecord(value) && readRecordId(value, "evidence") !== undefined && typeof value.subjectId === "string";
+}
+
+function isDoctorVerification(value: unknown): value is VerificationRecord {
+  return (
+    isRecord(value) &&
+    readRecordId(value, "verifications") !== undefined &&
+    typeof value.subjectId === "string" &&
+    Array.isArray(value.evidenceIds)
+  );
+}
+
+function isDoctorContextPack(value: unknown): value is ContextPack {
+  return isRecord(value) && typeof value.id === "string" && typeof value.subjectId === "string";
+}
+
+function isWorkStatus(value: unknown): value is WorkItem["status"] {
+  return (
+    value === "draft" ||
+    value === "ready" ||
+    value === "reserved" ||
+    value === "in_progress" ||
+    value === "blocked" ||
+    value === "needs_verification" ||
+    value === "verified" ||
+    value === "closed" ||
+    value === "cancelled"
+  );
 }
 
 export function asWorkId(value: string): WorkId {

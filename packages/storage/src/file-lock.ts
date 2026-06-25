@@ -83,22 +83,98 @@ export async function breakStaleFileLock(
   lockDir: string,
   input?: Partial<FileLockOptions>
 ): Promise<{ readonly removed: boolean; readonly inspection: FileLockInspection }> {
-  const inspection = await inspectFileLock(lockDir, input);
-  if (!inspection.exists) {
-    return { removed: false, inspection };
-  }
-  if (!inspection.stale) {
-    throw new BorealError("BOREAL_CONFLICT", "Refusing to break an active Boreal runtime lock", {
-      lockDir,
-      owner: inspection.owner,
-      ageMs: inspection.ageMs
-    });
-  }
-  await rm(lockDir, { recursive: true, force: true });
-  return { removed: true, inspection };
+  return removeStaleFileLock(lockDir, normalizeFileLockOptions(input), true);
 }
 
 async function acquireFileLock(lockDir: string, options: FileLockOptions): Promise<LockOwner> {
+  const startedAt = Date.now();
+  const owner: LockOwner = {
+    token: randomUUID(),
+    pid: process.pid,
+    hostname: hostname(),
+    createdAt: nowIso()
+  };
+
+  await mkdir(dirname(lockDir), { recursive: true });
+
+  while (true) {
+    try {
+      await mkdir(lockDir);
+      try {
+        await writeFile(ownerPath(lockDir), `${JSON.stringify(owner, null, 2)}\n`, "utf8");
+      } catch (error) {
+        await rm(lockDir, { recursive: true, force: true });
+        throw error;
+      }
+      return owner;
+    } catch (error) {
+      if (!isNodeError(error) || error.code !== "EEXIST") {
+        throw error;
+      }
+
+      const currentOwner = await readLockOwner(lockDir);
+      if (await isLockStale(lockDir, currentOwner, options.staleAfterMs)) {
+        const recovery = await removeStaleFileLock(lockDir, options, false);
+        if (recovery.removed || !recovery.inspection.exists) {
+          continue;
+        }
+      }
+
+      if (Date.now() - startedAt >= options.waitTimeoutMs) {
+        throw new BorealError("BOREAL_CONFLICT", "Boreal runtime state is locked by another writer", {
+          lockDir,
+          owner: currentOwner,
+          waitTimeoutMs: options.waitTimeoutMs,
+          staleAfterMs: options.staleAfterMs
+        });
+      }
+
+      await sleep(options.retryDelayMs);
+    }
+  }
+}
+
+async function removeStaleFileLock(
+  lockDir: string,
+  options: FileLockOptions,
+  throwOnActive: boolean
+): Promise<{ readonly removed: boolean; readonly inspection: FileLockInspection }> {
+  return withRecoveryLock(lockDir, options, async () => {
+    const inspection = await inspectFileLock(lockDir, options);
+    if (!inspection.exists) {
+      return { removed: false, inspection };
+    }
+    if (!inspection.stale) {
+      if (throwOnActive) {
+        throw new BorealError("BOREAL_CONFLICT", "Refusing to break an active Boreal runtime lock", {
+          lockDir,
+          owner: inspection.owner,
+          ageMs: inspection.ageMs
+        });
+      }
+      return { removed: false, inspection };
+    }
+
+    await rm(lockDir, { recursive: true, force: true });
+    return { removed: true, inspection };
+  });
+}
+
+async function withRecoveryLock<T>(
+  lockDir: string,
+  options: FileLockOptions,
+  operation: () => Promise<T>
+): Promise<T> {
+  const recoveryDir = `${lockDir}.recovery`;
+  const lock = await acquireRecoveryLock(recoveryDir, options);
+  try {
+    return await operation();
+  } finally {
+    await releaseFileLock(recoveryDir, lock.token);
+  }
+}
+
+async function acquireRecoveryLock(lockDir: string, options: FileLockOptions): Promise<LockOwner> {
   const startedAt = Date.now();
   const owner: LockOwner = {
     token: randomUUID(),
@@ -131,7 +207,7 @@ async function acquireFileLock(lockDir: string, options: FileLockOptions): Promi
       }
 
       if (Date.now() - startedAt >= options.waitTimeoutMs) {
-        throw new BorealError("BOREAL_CONFLICT", "Boreal runtime state is locked by another writer", {
+        throw new BorealError("BOREAL_CONFLICT", "Boreal runtime lock recovery is already in progress", {
           lockDir,
           owner: currentOwner,
           waitTimeoutMs: options.waitTimeoutMs,
