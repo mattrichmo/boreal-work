@@ -1,10 +1,16 @@
-import { reserveWork as reserveWorkDomain } from "@boreal/agent-runtime";
+import {
+  expireReservation,
+  releaseReservation,
+  renewReservation,
+  reserveWork as reserveWorkDomain
+} from "@boreal/agent-runtime";
 import {
   BorealError,
   DEFAULT_RUNTIME_POLICY,
   createRecordMeta,
   nowIso,
   randomId,
+  touchRecord,
   type ActorRef,
   type AgentId,
   type AgentReservation,
@@ -16,6 +22,7 @@ import {
   type EventId,
   type EvidenceId,
   type EvidenceRecord,
+  type IsoTimestamp,
   type KnowledgeSource,
   type KnowledgeSourceId,
   type RuntimeEvent,
@@ -63,12 +70,22 @@ export interface ClaimNextWorkInput {
   readonly agentId: AgentId | string;
   readonly labels?: readonly string[];
   readonly purpose?: string;
+  readonly expiresAt?: IsoTimestamp;
 }
 
 export interface ClaimNextWorkResult {
   readonly work: WorkItem;
   readonly reservation: AgentReservation;
   readonly releasedReservations: readonly AgentReservation[];
+}
+
+export interface ReservationLifecycleResult {
+  readonly work: WorkItem;
+  readonly reservation: AgentReservation;
+}
+
+export interface ExpireReservationsResult {
+  readonly expired: readonly ReservationLifecycleResult[];
 }
 
 export interface BorealRuntime {
@@ -87,9 +104,16 @@ export interface BorealRuntime {
     readonly workId: WorkId;
     readonly agentId: AgentId | string;
     readonly purpose?: string;
+    readonly expiresAt?: IsoTimestamp;
     readonly force?: boolean;
     readonly forceReason?: string;
   }): Promise<WorkItem>;
+  releaseWorkReservation(workId: WorkId): Promise<ReservationLifecycleResult>;
+  renewWorkReservation(input: {
+    readonly workId: WorkId;
+    readonly expiresAt: IsoTimestamp;
+  }): Promise<ReservationLifecycleResult>;
+  expireStaleReservations(): Promise<ExpireReservationsResult>;
   recordEvidence(input: Omit<Parameters<typeof recordEvidenceDomain>[0], "actor" | "now">): Promise<EvidenceRecord>;
   verifyWork(input: {
     readonly workId: WorkId;
@@ -270,7 +294,8 @@ export function createBorealRuntime(options: BorealRuntimeOptions = {}): BorealR
           policy,
           actor,
           now: now(),
-          purpose: input.purpose
+          purpose: input.purpose,
+          expiresAt: input.expiresAt
         });
         for (const released of reservationResult.releasedReservations) {
           await writer.putReservation(released);
@@ -281,7 +306,8 @@ export function createBorealRuntime(options: BorealRuntimeOptions = {}): BorealR
           agentId: input.agentId,
           reservationId: reservationResult.reservation.meta.id,
           labels,
-          purpose: input.purpose
+          purpose: input.purpose,
+          expiresAt: input.expiresAt
         });
         return reservationResult;
       });
@@ -299,6 +325,7 @@ export function createBorealRuntime(options: BorealRuntimeOptions = {}): BorealR
           actor,
           now: now(),
           purpose: input.purpose,
+          expiresAt: input.expiresAt,
           force: input.force,
           forceReason: input.forceReason
         });
@@ -314,6 +341,71 @@ export function createBorealRuntime(options: BorealRuntimeOptions = {}): BorealR
           forceReason: input.forceReason
         });
         return reservationResult.work;
+      });
+    },
+
+    async releaseWorkReservation(workId): Promise<ReservationLifecycleResult> {
+      return store.write(async (writer) => {
+        const work = await requireWork(writer, workId);
+        const reservation = await requireActiveWorkReservation(writer, work);
+        const releasedAt = now();
+        const released = releaseReservation(reservation, releasedAt, actor);
+        const updatedWork = await clearWorkReservation(writer, work, releasedAt, actor);
+        await writer.putReservation(released);
+        await writer.putWorkItem(updatedWork);
+        await appendEvent(writer, "work.reservation_released", work.meta.id, "work", {
+          reservationId: released.meta.id,
+          agentId: released.agentId
+        });
+        return { work: updatedWork, reservation: released };
+      });
+    },
+
+    async renewWorkReservation(input): Promise<ReservationLifecycleResult> {
+      return store.write(async (writer) => {
+        const work = await requireWork(writer, input.workId);
+        const reservation = await requireActiveWorkReservation(writer, work);
+        const renewed = renewReservation({
+          reservation,
+          expiresAt: input.expiresAt,
+          actor,
+          now: now()
+        });
+        await writer.putReservation(renewed);
+        await appendEvent(writer, "work.reservation_renewed", work.meta.id, "work", {
+          reservationId: renewed.meta.id,
+          agentId: renewed.agentId,
+          expiresAt: renewed.expiresAt
+        });
+        return { work, reservation: renewed };
+      });
+    },
+
+    async expireStaleReservations(): Promise<ExpireReservationsResult> {
+      return store.write(async (writer) => {
+        const current = now();
+        const activeReservations = (await writer.listReservations()).filter((reservation) => reservation.status === "active");
+        const expired: ReservationLifecycleResult[] = [];
+        for (const reservation of activeReservations) {
+          if (!reservation.expiresAt || Date.parse(reservation.expiresAt) > Date.parse(current)) {
+            continue;
+          }
+          const work = await writer.getWorkItem(reservation.workId);
+          const expiredReservation = expireReservation(reservation, current, actor);
+          await writer.putReservation(expiredReservation);
+          if (!work || work.reservationId !== reservation.meta.id) {
+            continue;
+          }
+          const updatedWork = await clearWorkReservation(writer, work, current, actor);
+          await writer.putWorkItem(updatedWork);
+          await appendEvent(writer, "work.reservation_expired", work.meta.id, "work", {
+            reservationId: expiredReservation.meta.id,
+            agentId: expiredReservation.agentId,
+            expiresAt: expiredReservation.expiresAt
+          });
+          expired.push({ work: updatedWork, reservation: expiredReservation });
+        }
+        return { expired };
       });
     },
 
@@ -497,6 +589,37 @@ async function requireWork(reader: BorealReader, workId: WorkId): Promise<WorkIt
     throw new BorealError("BOREAL_NOT_FOUND", "Work item not found", { workId });
   }
   return work;
+}
+
+async function requireActiveWorkReservation(reader: BorealReader, work: WorkItem): Promise<AgentReservation> {
+  const activeReservations = (await reader.listReservationsForWork(work.meta.id)).filter(
+    (reservation) => reservation.status === "active"
+  );
+  const reservation = work.reservationId
+    ? activeReservations.find((entry) => entry.meta.id === work.reservationId)
+    : activeReservations[0];
+  if (!reservation) {
+    throw new BorealError("BOREAL_NOT_FOUND", "Work item does not have an active reservation", {
+      workId: work.meta.id,
+      reservationId: work.reservationId
+    });
+  }
+  return reservation;
+}
+
+async function clearWorkReservation(
+  reader: BorealReader,
+  work: WorkItem,
+  now: IsoTimestamp,
+  actor: ActorRef
+): Promise<WorkItem> {
+  const base = {
+    ...work,
+    status: work.status === "reserved" ? ("draft" as const) : work.status,
+    reservationId: undefined
+  };
+  const dependencies = await loadDependencies(reader, base);
+  return touchRecord({ ...base, status: deriveReadinessStatus(base, dependencies) }, now, actor);
 }
 
 async function requireKnowledgeSource(reader: BorealReader, sourceId: KnowledgeSourceId): Promise<KnowledgeSource> {

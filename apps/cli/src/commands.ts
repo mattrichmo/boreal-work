@@ -1,5 +1,6 @@
 import {
   BorealError,
+  isIsoTimestamp,
   type ClaimId,
   type ClaimRecord,
   type ClaimStatus,
@@ -9,6 +10,7 @@ import {
   type DecisionStatus,
   type EvidenceKind,
   type EvidenceOutcome,
+  type IsoTimestamp,
   type KnowledgeSource,
   type KnowledgeSourceId,
   type KnowledgeSourceKind,
@@ -228,6 +230,7 @@ async function workCommand(
         workId: asWorkId(requiredPositional(rest, 0, "work id")),
         agentId: flagValue(args, "agent") ?? context.actor.id,
         purpose: flagValue(args, "purpose"),
+        expiresAt: parseReservationExpiresAt(args),
         force: hasFlag(args, "force"),
         forceReason: flagValue(args, "reason")
       });
@@ -240,7 +243,8 @@ async function workCommand(
       const claim = await context.runtime.claimNextWork({
         agentId,
         labels,
-        purpose: flagValue(args, "purpose")
+        purpose: flagValue(args, "purpose"),
+        expiresAt: parseReservationExpiresAt(args)
       });
       if (!claim) {
         output.write(
@@ -283,6 +287,19 @@ async function workCommand(
           json
         )
       );
+      return { exitCode: 0 };
+    }
+    case "release": {
+      const result = await context.runtime.releaseWorkReservation(asWorkId(requiredPositional(rest, 0, "work id")));
+      output.write(formatRecord(result, json));
+      return { exitCode: 0 };
+    }
+    case "renew": {
+      const result = await context.runtime.renewWorkReservation({
+        workId: asWorkId(requiredPositional(rest, 0, "work id")),
+        expiresAt: requiredReservationExpiresAt(args)
+      });
+      output.write(formatRecord(result, json));
       return { exitCode: 0 };
     }
     case "verify": {
@@ -714,6 +731,43 @@ function parseLimit(value: string | undefined): number | undefined {
     throw new BorealError("BOREAL_INVALID_INPUT", "--limit must be a positive integer");
   }
   return parsed;
+}
+
+function parseReservationExpiresAt(args: ParsedArgs): IsoTimestamp | undefined {
+  const expiresAt = flagValue(args, "expires-at");
+  const ttl = flagValue(args, "ttl");
+  if (expiresAt && ttl) {
+    throw new BorealError("BOREAL_INVALID_INPUT", "--expires-at cannot be combined with --ttl");
+  }
+  if (expiresAt) {
+    if (!isIsoTimestamp(expiresAt)) {
+      throw new BorealError("BOREAL_INVALID_INPUT", "--expires-at must be an ISO timestamp");
+    }
+    return expiresAt;
+  }
+  if (ttl) {
+    return expiresAtFromTtl(ttl);
+  }
+  return undefined;
+}
+
+function requiredReservationExpiresAt(args: ParsedArgs): IsoTimestamp {
+  const expiresAt = parseReservationExpiresAt(args);
+  if (!expiresAt) {
+    throw new BorealError("BOREAL_INVALID_INPUT", "Reservation renewal requires --expires-at or --ttl");
+  }
+  return expiresAt;
+}
+
+function expiresAtFromTtl(value: string): IsoTimestamp {
+  const match = /^([1-9][0-9]*)(s|m|h|d)$/.exec(value.trim());
+  if (!match) {
+    throw new BorealError("BOREAL_INVALID_INPUT", "--ttl must be a positive duration like 30m, 2h, or 1d");
+  }
+  const amount = Number(match[1]);
+  const unit = match[2];
+  const multiplier = unit === "s" ? 1_000 : unit === "m" ? 60_000 : unit === "h" ? 3_600_000 : 86_400_000;
+  return new Date(Date.now() + amount * multiplier).toISOString() as IsoTimestamp;
 }
 
 function parseEvidenceKind(value: string | undefined): EvidenceKind {

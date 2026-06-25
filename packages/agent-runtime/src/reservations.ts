@@ -33,9 +33,23 @@ export interface ReserveWorkResult {
   readonly releasedReservations: readonly AgentReservation[];
 }
 
+export interface RenewReservationInput {
+  readonly reservation: AgentReservation;
+  readonly expiresAt: IsoTimestamp;
+  readonly actor: ActorRef;
+  readonly now: IsoTimestamp;
+}
+
 export function reserveWork(input: ReserveWorkInput): ReserveWorkResult {
   if (input.work.status === "closed" || input.work.status === "cancelled") {
     throw new BorealError("BOREAL_POLICY_VIOLATION", "Closed or cancelled work cannot be reserved");
+  }
+  if (input.expiresAt && Date.parse(input.expiresAt) <= Date.parse(input.now)) {
+    throw new BorealError("BOREAL_INVALID_INPUT", "Reservation expiration must be in the future", {
+      workId: input.work.meta.id,
+      expiresAt: input.expiresAt,
+      now: input.now
+    });
   }
 
   const activeForWork = input.existingReservationsForWork.filter((reservation) => reservation.status === "active");
@@ -84,6 +98,31 @@ export function releaseReservation(
   actor: ActorRef
 ): AgentReservation {
   return touchRecord({ ...reservation, status: "released" as const }, now, actor);
+}
+
+export function expireReservation(
+  reservation: AgentReservation,
+  now: IsoTimestamp,
+  actor: ActorRef
+): AgentReservation {
+  return touchRecord({ ...reservation, status: "expired" as const }, now, actor);
+}
+
+export function renewReservation(input: RenewReservationInput): AgentReservation {
+  if (input.reservation.status !== "active") {
+    throw new BorealError("BOREAL_POLICY_VIOLATION", "Only active reservations can be renewed", {
+      reservationId: input.reservation.meta.id,
+      status: input.reservation.status
+    });
+  }
+  if (Date.parse(input.expiresAt) <= Date.parse(input.now)) {
+    throw new BorealError("BOREAL_INVALID_INPUT", "Reservation expiration must be in the future", {
+      reservationId: input.reservation.meta.id,
+      expiresAt: input.expiresAt,
+      now: input.now
+    });
+  }
+  return touchRecord({ ...input.reservation, expiresAt: input.expiresAt }, input.now, input.actor);
 }
 
 function createReservation(input: ReserveWorkInput): AgentReservation {

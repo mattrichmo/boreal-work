@@ -16,6 +16,7 @@ const VALUE_FLAGS = new Set([
   "decision",
   "description",
   "evidence",
+  "expires-at",
   "from",
   "kind",
   "label",
@@ -33,6 +34,7 @@ const VALUE_FLAGS = new Set([
   "statement",
   "summary",
   "title",
+  "ttl",
   "uri",
   "verdict",
   "workspace"

@@ -460,6 +460,15 @@ async function validateStoreRecords(
       ];
       const dependencyCycles = findDependencyCycles(blockEdges);
       const reservationConsistency = reservationPolicyIssues(workItems, reservations);
+      const expiredActiveReservations = reservations
+        .filter((reservation) => reservation.status === "active")
+        .filter((reservation) => reservation.expiresAt !== undefined && Date.parse(reservation.expiresAt) <= Date.now())
+        .map((reservation) => ({
+          reservationId: reservation.meta.id,
+          workId: reservation.workId,
+          agentId: reservation.agentId,
+          expiresAt: reservation.expiresAt
+        }));
       const verificationPolicy = verificationPolicyIssues(workItems, verifications, evidenceById);
       const closedWithoutReason = workItems
         .filter((work) => work.status === "closed" && !work.closedReason?.trim())
@@ -482,6 +491,7 @@ async function validateStoreRecords(
         blockConsistency,
         dependencyCycles,
         reservationConsistency,
+        expiredActiveReservations,
         verificationPolicy,
         closedWithoutReason
       };
@@ -508,6 +518,31 @@ async function validateStoreRecords(
     diagnostics.push(diagnosticFromList("graph.block_consistency", "Block graph and dependency refs disagree", summary.blockConsistency));
     diagnostics.push(diagnosticFromList("graph.dependency_cycles", "Dependency cycles found", summary.dependencyCycles));
     diagnostics.push(diagnosticFromList("reservation.consistency", "Reservation consistency issues", summary.reservationConsistency));
+    if (summary.expiredActiveReservations.length > 0) {
+      if (fix) {
+        const repair = await context.runtime.expireStaleReservations();
+        diagnostics.push({
+          code: "reservation.expired",
+          severity: "fixed",
+          message: `Expired ${repair.expired.length} stale active reservation(s)`,
+          details: summary.expiredActiveReservations
+        });
+        fixed = true;
+      } else {
+        diagnostics.push({
+          code: "reservation.expired",
+          severity: "error",
+          message: "Expired active reservations found",
+          details: summary.expiredActiveReservations
+        });
+      }
+    } else {
+      diagnostics.push({
+        code: "reservation.expired",
+        severity: "ok",
+        message: "No expired active reservations"
+      });
+    }
     diagnostics.push(diagnosticFromList("verification.policy", "Verification policy issues", summary.verificationPolicy));
     diagnostics.push(diagnosticFromList("work.closed_reason", "Closed work items missing a close reason", summary.closedWithoutReason));
 
@@ -901,7 +936,8 @@ function isDoctorReservation(value: unknown): value is AgentReservation {
     typeof value.workId === "string" &&
     typeof value.agentId === "string" &&
     isReservationStatus(value.status) &&
-    typeof value.reservedAt === "string"
+    typeof value.reservedAt === "string" &&
+    (value.expiresAt === undefined || typeof value.expiresAt === "string")
   );
 }
 

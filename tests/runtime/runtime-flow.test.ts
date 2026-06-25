@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { BorealError, type ActorRef, type EvidenceId, type KnowledgeSourceId } from "@boreal/core";
+import { BorealError, type ActorRef, type EvidenceId, type IsoTimestamp, type KnowledgeSourceId } from "@boreal/core";
 import { createBorealRuntime } from "@boreal/engine";
 import { InMemoryBorealStore } from "@boreal/storage";
 
@@ -240,6 +240,54 @@ describe("boreal runtime proof slice", () => {
 
     const events = await runtime.listEvents();
     expect(events.map((event) => event.type)).toContain("work.claimed");
+  });
+
+  it("renews, releases, and expires active reservations", async () => {
+    let current = new Date("2026-01-01T00:00:00.000Z");
+    const store = new InMemoryBorealStore();
+    const runtime = createBorealRuntime({
+      store,
+      actor,
+      clock: () => current
+    });
+    const work = await runtime.createWork({ title: "Reservation lifecycle target" });
+    await runtime.markReady(work.meta.id);
+
+    await runtime.reserveWork({
+      workId: work.meta.id,
+      agentId: "agent-a",
+      expiresAt: "2026-01-01T00:10:00.000Z" as IsoTimestamp
+    });
+    const renewed = await runtime.renewWorkReservation({
+      workId: work.meta.id,
+      expiresAt: "2026-01-01T00:20:00.000Z" as IsoTimestamp
+    });
+    expect(renewed.reservation.expiresAt).toBe("2026-01-01T00:20:00.000Z");
+
+    const released = await runtime.releaseWorkReservation(work.meta.id);
+    expect(released.reservation.status).toBe("released");
+    expect(released.work.status).toBe("ready");
+    expect(released.work.reservationId).toBeUndefined();
+
+    await runtime.reserveWork({
+      workId: work.meta.id,
+      agentId: "agent-b",
+      expiresAt: "2026-01-01T00:30:00.000Z" as IsoTimestamp
+    });
+    current = new Date("2026-01-01T00:31:00.000Z");
+    const expired = await runtime.expireStaleReservations();
+    expect(expired.expired).toHaveLength(1);
+    expect(expired.expired[0]?.reservation.status).toBe("expired");
+    expect(expired.expired[0]?.work.status).toBe("ready");
+    await expect(runtime.getWorkView(work.meta.id)).resolves.toMatchObject({
+      status: "ready",
+      activeReservationId: undefined
+    });
+
+    const events = await runtime.listEvents();
+    expect(events.map((event) => event.type)).toEqual(
+      expect.arrayContaining(["work.reservation_renewed", "work.reservation_released", "work.reservation_expired"])
+    );
   });
 
   it("requires passed evidence for passed verification but allows failed verdict evidence", async () => {

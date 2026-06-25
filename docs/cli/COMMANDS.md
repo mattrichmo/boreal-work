@@ -256,10 +256,19 @@ Reserves a ready work item for an agent. If `--agent` is omitted, the CLI actor 
 
 Normal reservation requires `ready` work. `--force` allows a documented reservation of non-ready work only when `--reason` is also supplied. Closed and cancelled work still cannot be reserved.
 
+Reservations can expire:
+
+```bash
+bwrk work reserve <work-id> --ttl 2h
+bwrk work reserve <work-id> --expires-at 2026-06-25T22:00:00.000Z
+```
+
+`--ttl` accepts positive durations with `s`, `m`, `h`, or `d` units.
+
 ## `work claim`
 
 ```bash
-bwrk work claim [--label <label>] [--agent <id>] [--purpose <text>] [--query <text>] [--limit <count>] [--json]
+bwrk work claim [--label <label>] [--agent <id>] [--purpose <text>] [--expires-at <iso>|--ttl <duration>] [--query <text>] [--limit <count>] [--json]
 ```
 
 Atomically finds the next live ready work item, reserves it for the agent, rebuilds context-pack projections, rebuilds the local search index, and returns a handoff bundle.
@@ -279,6 +288,22 @@ Handoff output includes:
 - Focused search results using `--query` or a default query built from the work title, labels, context facts, and evidence.
 
 `--limit` controls the number of returned search results and defaults to `8`.
+
+## `work release`
+
+```bash
+bwrk work release <work-id> [--json]
+```
+
+Marks the active reservation released and restores the work item to derived readiness. If the item is still blocked by open dependencies, it returns to `blocked`; otherwise it becomes `ready`.
+
+## `work renew`
+
+```bash
+bwrk work renew <work-id> (--expires-at <iso>|--ttl <duration>) [--json]
+```
+
+Extends the active reservation for a work item. The new expiration must be in the future.
 
 ## `evidence add`
 
@@ -542,6 +567,7 @@ Checks:
 - Dangling knowledge source and claim evidence references.
 - Duplicate graph edges, dangling work graph edges, graph/dependency disagreement, and dependency cycles.
 - Reservation consistency, including active reservations for terminal work and reserved work without active reservations.
+- Expired active reservations.
 - Verification policy drift, including passed verifications without passed evidence.
 - Closed work items without close reasons.
 - Derived readiness consistency.
@@ -556,6 +582,7 @@ Checks:
 - Recompute derived readiness.
 - Rebuild context-pack projections.
 - Rebuild the local search index.
+- Expire stale active reservations and restore affected work to derived readiness.
 
 Doctor exits `1` when any diagnostic has severity `error`.
 

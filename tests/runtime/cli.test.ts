@@ -35,6 +35,8 @@ describe("bwrk cli", () => {
       "## `work block`",
       "## `work reserve`",
       "## `work claim`",
+      "## `work release`",
+      "## `work renew`",
       "## `evidence add`",
       "## `work verify`",
       "## `work close`",
@@ -131,6 +133,8 @@ describe("bwrk cli", () => {
         "search index",
         "search query",
         "work claim",
+        "work release",
+        "work renew",
         "export json",
         "export markdown",
         "import json",
@@ -588,6 +592,70 @@ describe("bwrk cli", () => {
     });
   });
 
+  it("renews, releases, and repairs expired reservations through the CLI", async () => {
+    const rootDir = await makeTempWorkspace();
+    await runCli(rootDir, ["init", "--json"]);
+
+    const work = parseData<{ readonly meta: { readonly id: string } }>(
+      (await runCli(rootDir, ["work", "create", "Reservation CLI lifecycle", "--ready", "--json"])).stdout
+    );
+    const reserved = await runCli(rootDir, ["work", "reserve", work.meta.id, "--agent", "agent-a", "--ttl", "1h", "--json"]);
+    const reservedWork = parseData<{ readonly status: string; readonly reservationId: string }>(reserved.stdout);
+    expect(reservedWork.status).toBe("reserved");
+    expect(reservedWork.reservationId).toMatch(/^bw_reservation_/);
+
+    const renewed = await runCli(rootDir, ["work", "renew", work.meta.id, "--ttl", "2h", "--json"]);
+    const renewedPayload = parseData<{
+      readonly work: { readonly meta: { readonly id: string }; readonly status: string };
+      readonly reservation: { readonly meta: { readonly id: string }; readonly status: string; readonly expiresAt: string };
+    }>(renewed.stdout);
+    expect(renewedPayload.work.meta.id).toBe(work.meta.id);
+    expect(renewedPayload.reservation.status).toBe("active");
+    expect(renewedPayload.reservation.expiresAt).toMatch(/T/);
+
+    const released = await runCli(rootDir, ["work", "release", work.meta.id, "--json"]);
+    const releasedPayload = parseData<{
+      readonly work: { readonly status: string; readonly reservationId?: string };
+      readonly reservation: { readonly status: string };
+    }>(released.stdout);
+    expect(releasedPayload.reservation.status).toBe("released");
+    expect(releasedPayload.work.status).toBe("ready");
+    expect(releasedPayload.work.reservationId).toBeUndefined();
+
+    const reservedAgain = await runCli(rootDir, ["work", "reserve", work.meta.id, "--agent", "agent-b", "--ttl", "1h", "--json"]);
+    const staleReservationId = parseData<{ readonly reservationId: string }>(reservedAgain.stdout).reservationId;
+    await setReservationExpiresAt(rootDir, staleReservationId, "2000-01-01T00:00:00.000Z");
+
+    const failingDoctor = await runCli(rootDir, ["doctor", "--json"]);
+    const failingPayload = parseData<{
+      readonly ok: boolean;
+      readonly diagnostics: Array<{ readonly code: string; readonly severity: string }>;
+    }>(failingDoctor.stdout);
+    expect(failingDoctor.exitCode).toBe(1);
+    expect(failingPayload.ok).toBe(false);
+    expect(failingPayload.diagnostics).toEqual(
+      expect.arrayContaining([expect.objectContaining({ code: "reservation.expired", severity: "error" })])
+    );
+
+    const repairedDoctor = await runCli(rootDir, ["doctor", "--fix", "--json"]);
+    const repairedPayload = parseData<{
+      readonly ok: boolean;
+      readonly fixed: boolean;
+      readonly diagnostics: Array<{ readonly code: string; readonly severity: string }>;
+    }>(repairedDoctor.stdout);
+    expect(repairedDoctor.exitCode).toBe(0);
+    expect(repairedPayload.ok).toBe(true);
+    expect(repairedPayload.fixed).toBe(true);
+    expect(repairedPayload.diagnostics).toEqual(
+      expect.arrayContaining([expect.objectContaining({ code: "reservation.expired", severity: "fixed" })])
+    );
+
+    const shown = await runCli(rootDir, ["work", "show", work.meta.id, "--json"]);
+    const shownWork = parseData<{ readonly status: string; readonly activeReservationId?: string }>(shown.stdout);
+    expect(shownWork.status).toBe("ready");
+    expect(shownWork.activeReservationId).toBeUndefined();
+  });
+
   it("exports, snapshots, imports, and rejects conflicting JSON snapshots", async () => {
     const rootDir = await makeTempWorkspace();
     await runCli(rootDir, ["init", "--json"]);
@@ -843,6 +911,28 @@ async function writeLockOwner(rootDir: string, createdAt: string): Promise<void>
         pid: 999_999,
         hostname: "test-host",
         createdAt
+      },
+      null,
+      2
+    )}\n`,
+    "utf8"
+  );
+}
+
+async function setReservationExpiresAt(rootDir: string, reservationId: string, expiresAt: string): Promise<void> {
+  const statePath = join(rootDir, ".boreal/runtime/state.json");
+  const state = parseJson<{
+    readonly reservations: Array<{ readonly meta: { readonly id: string }; readonly [key: string]: unknown }>;
+    readonly [key: string]: unknown;
+  }>(await readFile(statePath, "utf8"));
+  await writeFile(
+    statePath,
+    `${JSON.stringify(
+      {
+        ...state,
+        reservations: state.reservations.map((reservation) =>
+          reservation.meta.id === reservationId ? { ...reservation, expiresAt } : reservation
+        )
       },
       null,
       2
