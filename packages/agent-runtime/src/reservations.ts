@@ -23,6 +23,8 @@ export interface ReserveWorkInput {
   readonly now: IsoTimestamp;
   readonly purpose?: string;
   readonly expiresAt?: IsoTimestamp;
+  readonly force?: boolean;
+  readonly forceReason?: string;
 }
 
 export interface ReserveWorkResult {
@@ -36,15 +38,29 @@ export function reserveWork(input: ReserveWorkInput): ReserveWorkResult {
     throw new BorealError("BOREAL_POLICY_VIOLATION", "Closed or cancelled work cannot be reserved");
   }
 
-  if (input.activeReservationsForAgent.length >= input.policy.maxActiveReservationsPerAgent) {
-    throw new BorealError("BOREAL_POLICY_VIOLATION", "Agent has reached active reservation limit");
-  }
-
   const activeForWork = input.existingReservationsForWork.filter((reservation) => reservation.status === "active");
   if (activeForWork.length > 0 && !input.policy.allowReservationStealing) {
     throw new BorealError("BOREAL_CONFLICT", "Work already has an active reservation", {
       reservationIds: activeForWork.map((reservation) => reservation.meta.id)
     });
+  }
+
+  if (input.work.status !== "ready") {
+    const forceReason = input.forceReason?.trim();
+    if (!input.force || !forceReason) {
+      throw new BorealError(
+        "BOREAL_POLICY_VIOLATION",
+        "Only ready work can be reserved without --force and --reason",
+        {
+          workId: input.work.meta.id,
+          status: input.work.status
+        }
+      );
+    }
+  }
+
+  if (input.activeReservationsForAgent.length >= input.policy.maxActiveReservationsPerAgent) {
+    throw new BorealError("BOREAL_POLICY_VIOLATION", "Agent has reached active reservation limit");
   }
 
   const releasedReservations = activeForWork.map((reservation) => releaseReservation(reservation, input.now, input.actor));

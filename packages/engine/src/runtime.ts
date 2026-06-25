@@ -69,6 +69,8 @@ export interface BorealRuntime {
     readonly workId: WorkId;
     readonly agentId: AgentId | string;
     readonly purpose?: string;
+    readonly force?: boolean;
+    readonly forceReason?: string;
   }): Promise<WorkItem>;
   recordEvidence(input: Omit<Parameters<typeof recordEvidenceDomain>[0], "actor" | "now">): Promise<EvidenceRecord>;
   verifyWork(input: {
@@ -223,7 +225,9 @@ export function createBorealRuntime(options: BorealRuntimeOptions = {}): BorealR
           policy,
           actor,
           now: now(),
-          purpose: input.purpose
+          purpose: input.purpose,
+          force: input.force,
+          forceReason: input.forceReason
         });
         for (const released of reservationResult.releasedReservations) {
           await writer.putReservation(released);
@@ -232,7 +236,9 @@ export function createBorealRuntime(options: BorealRuntimeOptions = {}): BorealR
         await writer.putWorkItem(reservationResult.work);
         await appendEvent(writer, "work.reserved", work.meta.id, "work", {
           agentId: input.agentId,
-          reservationId: reservationResult.reservation.meta.id
+          reservationId: reservationResult.reservation.meta.id,
+          forced: Boolean(input.force),
+          forceReason: input.forceReason
         });
         return reservationResult.work;
       });

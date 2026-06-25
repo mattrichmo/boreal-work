@@ -168,4 +168,89 @@ describe("boreal runtime proof slice", () => {
     await expect(runtime.recomputeReadiness()).resolves.toEqual({ changed: 1 });
     await expect(runtime.getWorkView(blocked.meta.id)).resolves.toMatchObject({ status: "blocked" });
   });
+
+  it("requires ready work for reservations unless force is documented", async () => {
+    const runtime = createBorealRuntime({ actor });
+
+    const draft = await runtime.createWork({ title: "Draft reservation target" });
+
+    await expect(
+      runtime.reserveWork({
+        workId: draft.meta.id,
+        agentId: "agent-a"
+      })
+    ).rejects.toMatchObject({ code: "BOREAL_POLICY_VIOLATION" } satisfies Partial<BorealError>);
+
+    await expect(
+      runtime.reserveWork({
+        workId: draft.meta.id,
+        agentId: "agent-a",
+        force: true
+      })
+    ).rejects.toMatchObject({ code: "BOREAL_POLICY_VIOLATION" } satisfies Partial<BorealError>);
+
+    const forced = await runtime.reserveWork({
+      workId: draft.meta.id,
+      agentId: "agent-a",
+      force: true,
+      forceReason: "coordinating an import repair"
+    });
+
+    expect(forced.status).toBe("reserved");
+  });
+
+  it("requires passed evidence for passed verification but allows failed verdict evidence", async () => {
+    const runtime = createBorealRuntime({ actor });
+    const work = await runtime.createWork({ title: "Verify evidence policy" });
+    const failedEvidence = await runtime.recordEvidence({
+      subjectId: work.meta.id,
+      subjectType: "work",
+      kind: "test",
+      summary: "test failed",
+      outcome: "failed"
+    });
+
+    await expect(
+      runtime.verifyWork({
+        workId: work.meta.id,
+        verdict: "passed",
+        evidenceIds: [failedEvidence.meta.id]
+      })
+    ).rejects.toMatchObject({ code: "BOREAL_POLICY_VIOLATION" } satisfies Partial<BorealError>);
+
+    const failedVerification = await runtime.verifyWork({
+      workId: work.meta.id,
+      verdict: "failed",
+      evidenceIds: [failedEvidence.meta.id]
+    });
+
+    expect(failedVerification.verdict).toBe("failed");
+  });
+
+  it("treats verified dependencies as resolved during readiness recompute", async () => {
+    const runtime = createBorealRuntime({ actor });
+    const blocker = await runtime.createWork({ title: "Verified blocker" });
+    const blocked = await runtime.createWork({ title: "Downstream item" });
+
+    await runtime.markReady(blocker.meta.id);
+    await runtime.addBlockingDependency({
+      blockedWorkId: blocked.meta.id,
+      blockingWorkId: blocker.meta.id
+    });
+    const evidence = await runtime.recordEvidence({
+      subjectId: blocker.meta.id,
+      subjectType: "work",
+      kind: "test",
+      summary: "verification test passed",
+      outcome: "passed"
+    });
+    await runtime.verifyWork({
+      workId: blocker.meta.id,
+      verdict: "passed",
+      evidenceIds: [evidence.meta.id]
+    });
+
+    await expect(runtime.recomputeReadiness()).resolves.toEqual({ changed: 1 });
+    await expect(runtime.getWorkView(blocked.meta.id)).resolves.toMatchObject({ status: "ready" });
+  });
 });

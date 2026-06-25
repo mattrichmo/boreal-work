@@ -74,10 +74,19 @@ export function verifySubject(input: VerifySubjectInput): VerificationRecord {
     throw new BorealError("BOREAL_POLICY_VIOLATION", "Verification requires evidence");
   }
 
-  const availableIds = new Set(input.availableEvidence.map((record) => record.meta.id));
-  const missingEvidence = input.evidenceIds.filter((id) => !availableIds.has(id));
+  const availableById = new Map(input.availableEvidence.map((record) => [record.meta.id, record]));
+  const missingEvidence = input.evidenceIds.filter((id) => !availableById.has(id));
   if (missingEvidence.length > 0) {
     throw new BorealError("BOREAL_NOT_FOUND", "Verification references missing evidence", { missingEvidence });
+  }
+
+  const selectedEvidence = input.evidenceIds
+    .map((id) => availableById.get(id))
+    .filter((record): record is EvidenceRecord => record !== undefined);
+  if (input.verdict === "passed" && !selectedEvidence.some((record) => record.outcome === "passed")) {
+    throw new BorealError("BOREAL_POLICY_VIOLATION", "Passed verification requires at least one passed evidence", {
+      evidenceIds: input.evidenceIds
+    });
   }
 
   const id = deterministicId<VerificationId>("verification", {
@@ -107,4 +116,3 @@ function assertNonEmpty(value: string, label: string): void {
     throw new BorealError("BOREAL_INVALID_INPUT", `${label} cannot be empty`);
   }
 }
-

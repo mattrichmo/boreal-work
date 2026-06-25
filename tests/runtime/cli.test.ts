@@ -26,6 +26,7 @@ describe("bwrk cli", () => {
     for (const heading of [
       "## Help",
       "## `init`",
+      "## `commands`",
       "## `work create`",
       "## `work ready`",
       "## `work list`",
@@ -53,9 +54,10 @@ describe("bwrk cli", () => {
 
     expect(root.exitCode).toBe(0);
     expect(root.stdout).toContain("bwrk - Boreal Work CLI");
-    expect(root.stdout).toContain("bwrk help [init|work|evidence|doctor|lock]");
+    expect(root.stdout).toContain("bwrk help [init|work|evidence|doctor|lock|commands]");
     expect(work.exitCode).toBe(0);
     expect(work.stdout).toContain("bwrk work create");
+    expect(work.stdout).toContain("--force --reason");
     expect(workWithFlag.exitCode).toBe(0);
     expect(workWithFlag.stdout).toContain("bwrk work create");
     expect(doctor.exitCode).toBe(0);
@@ -78,6 +80,46 @@ describe("bwrk cli", () => {
     expect(payload.ok).toBe(false);
     expect(payload.code).toBe("BOREAL_INVALID_INPUT");
     expect(payload.message).toContain("not initialized");
+  });
+
+  it("exposes the registered command surface as JSON", async () => {
+    const rootDir = await makeTempWorkspace();
+
+    const result = await runCli(rootDir, ["commands", "--json"]);
+    const registry = parseData<{
+      readonly commands: Array<{
+        readonly path: readonly string[];
+        readonly flags: Array<{ readonly name: string; readonly type: string }>;
+      }>;
+    }>(result.stdout);
+    const reserve = registry.commands.find((command) => command.path.join(" ") === "work reserve");
+
+    expect(result.exitCode).toBe(0);
+    expect(registry.commands.map((command) => command.path.join(" "))).toContain("commands");
+    expect(reserve?.flags).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ name: "force", type: "boolean" }),
+        expect.objectContaining({ name: "reason", type: "value" })
+      ])
+    );
+  });
+
+  it("rejects unknown flags and honors explicit false booleans", async () => {
+    const rootDir = await makeTempWorkspace();
+
+    const invalid = await runCli(rootDir, ["work", "create", "Invalid flag", "--prio", "critical", "--json"]);
+    const invalidPayload = parseJson<{ readonly ok: false; readonly code: string; readonly message: string }>(
+      invalid.stderr
+    );
+    expect(invalid.exitCode).toBe(2);
+    expect(invalidPayload.ok).toBe(false);
+    expect(invalidPayload.code).toBe("BOREAL_INVALID_INPUT");
+    expect(invalidPayload.message).toContain("Unknown flag --prio");
+
+    await runCli(rootDir, ["init", "--json"]);
+    const created = await runCli(rootDir, ["work", "create", "Draft via false flag", "--ready=false", "--json"]);
+    expect(created.exitCode).toBe(0);
+    expect(parseData<{ readonly status: string }>(created.stdout).status).toBe("draft");
   });
 
   it("runs the work lifecycle through file-backed commands", async () => {

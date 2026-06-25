@@ -10,6 +10,13 @@ import {
 import { breakStaleFileLock, inspectFileLock } from "@boreal/storage";
 
 import { flagValue, flagValues, hasFlag, requiredFlag, type ParsedArgs } from "./args.js";
+import {
+  COMMAND_DEFINITIONS,
+  commandPath,
+  findCommandDefinition,
+  serializeCommandDefinition,
+  validateCommandFlags
+} from "./command-registry.js";
 import { asEvidenceId, asWorkId, runDoctor, type Diagnostic } from "./doctor.js";
 import { assertInitialized, createCliContext, ensureWorkspaceDirs, type CliContext } from "./context.js";
 import { formatRecord, table, type CliOutput } from "./output.js";
@@ -40,18 +47,28 @@ export async function runCommand(args: ParsedArgs, output: CliOutput, cwd: strin
     return { exitCode: 0 };
   }
 
-  const context = await createCliContext(args, cwd);
+  const definition = findCommandDefinition(args.command);
+  if (!definition) {
+    throw new BorealError("BOREAL_INVALID_INPUT", `Unknown command: ${args.command.join(" ")}`);
+  }
+  validateCommandFlags(args, definition);
   const json = hasFlag(args, "json");
+  if (definition.path[0] === "commands") {
+    return commandsCommand(output, json);
+  }
+
+  const context = await createCliContext(args, cwd);
   const [group, action, ...rest] = args.command;
+  if (definition.requiresWorkspace) {
+    assertInitialized(context);
+  }
 
   switch (group) {
     case "init":
       return initCommand(context, args, output, json);
     case "work":
-      assertInitialized(context);
       return workCommand(action, rest, context, args, output, json);
     case "evidence":
-      assertInitialized(context);
       return evidenceCommand(action, rest, context, args, output, json);
     case "doctor":
       return doctorCommand(context, args, output, json);
@@ -60,6 +77,27 @@ export async function runCommand(args: ParsedArgs, output: CliOutput, cwd: strin
     default:
       throw new BorealError("BOREAL_INVALID_INPUT", `Unknown command: ${group ?? ""}`);
   }
+}
+
+function commandsCommand(output: CliOutput, json: boolean): CommandResult {
+  const registry = {
+    commands: COMMAND_DEFINITIONS.map(serializeCommandDefinition)
+  };
+  if (json) {
+    output.write(formatRecord(registry, true));
+  } else {
+    output.write(
+      table(
+        COMMAND_DEFINITIONS.map((definition) => ({
+          command: commandPath(definition),
+          category: definition.category,
+          workspace: definition.requiresWorkspace ? "yes" : "no",
+          summary: definition.summary
+        }))
+      )
+    );
+  }
+  return { exitCode: 0 };
 }
 
 async function initCommand(
@@ -140,7 +178,9 @@ async function workCommand(
       const work = await context.runtime.reserveWork({
         workId: asWorkId(requiredPositional(rest, 0, "work id")),
         agentId: flagValue(args, "agent") ?? context.actor.id,
-        purpose: flagValue(args, "purpose")
+        purpose: flagValue(args, "purpose"),
+        force: hasFlag(args, "force"),
+        forceReason: flagValue(args, "reason")
       });
       output.write(formatRecord(work, json));
       return { exitCode: 0 };
@@ -363,77 +403,32 @@ function formatDiagnostic(diagnostic: Diagnostic): string {
 }
 
 function helpText(topic?: string): string {
-  switch (topic) {
-    case undefined:
-      return rootHelpText();
-    case "init":
-      return `bwrk init
-
-Usage:
-  bwrk init [--workspace <path>] [--json]
-
-Initializes a Boreal workspace. The operation is idempotent and safe under concurrent init attempts.
-`;
-    case "work":
-      return `bwrk work
-
-Usage:
-  bwrk work create <title> [--description <text>] [--kind issue|task|sprint|milestone] [--priority low|normal|high|critical] [--label <label>] [--acceptance <text>] [--ready] [--json]
-  bwrk work ready <work-id> [--json]
-  bwrk work list [--ready] [--status <status>] [--label <label>] [--limit <count>] [--json]
-  bwrk work show <work-id> [--json]
-  bwrk work block <blocked-work-id> <blocking-work-id> [--json]
-  bwrk work reserve <work-id> [--agent <id>] [--purpose <text>] [--json]
-  bwrk work verify <work-id> --evidence <evidence-id> [--verdict passed|failed] [--notes <text>] [--json]
-  bwrk work close <work-id> --reason <text> [--json]
-`;
-    case "evidence":
-      return `bwrk evidence
-
-Usage:
-  bwrk evidence add <work-id> --summary <text> [--kind command|test|diff|review|artifact|note] [--outcome passed|failed|observed|unknown] [--command <cmd>] [--uri <uri>] [--json]
-`;
-    case "doctor":
-      return `bwrk doctor
-
-Usage:
-  bwrk doctor [--fix] [--json]
-
-Validates workspace state, references, derived readiness, projections, and runtime locks. With --fix, only idempotent repairs run.
-`;
-    case "lock":
-      return `bwrk lock
-
-Usage:
-  bwrk lock inspect [--json]
-  bwrk lock break --stale-only [--json]
-
-Active locks are never broken. Stale lock breaking coordinates through a recovery lock.
-`;
-    default:
-      throw new BorealError("BOREAL_INVALID_INPUT", `Unknown help topic: ${topic}`);
+  if (topic === undefined) {
+    return rootHelpText();
   }
+  const definitions = COMMAND_DEFINITIONS.filter((definition) => definition.path[0] === topic);
+  if (definitions.length === 0) {
+    throw new BorealError("BOREAL_INVALID_INPUT", `Unknown help topic: ${topic}`);
+  }
+  return `${topic === "commands" ? "bwrk commands" : `bwrk ${topic}`}
+
+Usage:
+${definitions.map((definition) => `  ${definition.usage}`).join("\n")}
+${definitions.some((definition) => definition.description)
+    ? `\n${definitions
+        .filter((definition) => definition.description)
+        .map((definition) => definition.description)
+        .join("\n")}\n`
+    : ""}`;
 }
 
 function rootHelpText(): string {
   return `bwrk - Boreal Work CLI
 
 Usage:
-  bwrk init [--workspace <path>] [--json]
-  bwrk work create <title> [--description <text>] [--label <label>] [--acceptance <text>] [--ready] [--json]
-  bwrk work ready <work-id> [--json]
-  bwrk work list [--ready] [--status <status>] [--label <label>] [--limit <count>] [--json]
-  bwrk work show <work-id> [--json]
-  bwrk work block <blocked-work-id> <blocking-work-id> [--json]
-  bwrk work reserve <work-id> [--agent <id>] [--purpose <text>] [--json]
-  bwrk evidence add <work-id> --summary <text> [--kind command|test|diff|review|artifact|note] [--outcome passed|failed|observed|unknown] [--command <cmd>] [--uri <uri>] [--json]
-  bwrk work verify <work-id> --evidence <evidence-id> [--verdict passed|failed] [--notes <text>] [--json]
-  bwrk work close <work-id> --reason <text> [--json]
-  bwrk doctor [--fix] [--json]
-  bwrk lock inspect [--json]
-  bwrk lock break --stale-only [--json]
+${COMMAND_DEFINITIONS.map((definition) => `  ${definition.usage}`).join("\n")}
 
 Help:
-  bwrk help [init|work|evidence|doctor|lock]
+  bwrk help [init|work|evidence|doctor|lock|commands]
 `;
 }

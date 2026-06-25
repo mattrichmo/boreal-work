@@ -24,6 +24,12 @@ Global flags:
 - `--actor-kind human|agent|system`: override the actor kind. Defaults to `human`.
 - `--help`: show root or group help.
 
+Flag parsing:
+
+- Unknown flags are rejected before any command executes.
+- Boolean flags accept explicit false values, for example `--json=false` or `--ready=false`.
+- Non-repeatable flags are rejected when supplied more than once.
+
 Workspace resolution:
 
 - Without `--workspace`, `bwrk` walks upward from the current directory until it finds `.boreal`.
@@ -65,10 +71,44 @@ bwrk help work
 bwrk help evidence
 bwrk help doctor
 bwrk help lock
+bwrk help commands
 bwrk work --help
 ```
 
 Help commands do not require an initialized workspace.
+
+## `commands`
+
+```bash
+bwrk commands [--json]
+```
+
+Prints the registered command surface used by dispatch, help, and strict flag validation.
+
+JSON `data` shape:
+
+```json
+{
+  "commands": [
+    {
+      "path": ["work", "reserve"],
+      "category": "work",
+      "summary": "Reserve ready work for an agent.",
+      "usage": "bwrk work reserve <work-id> --agent <agent-id> [--purpose <text>] [--force --reason <text>] [--json]",
+      "requiresWorkspace": true,
+      "supportsJson": true,
+      "flags": [
+        {
+          "name": "force",
+          "type": "boolean",
+          "repeatable": false,
+          "summary": "Allow a documented reservation of non-ready work."
+        }
+      ]
+    }
+  ]
+}
+```
 
 ## `init`
 
@@ -191,10 +231,12 @@ Adds a blocking dependency. Dependency cycles are rejected by runtime policy.
 ## `work reserve`
 
 ```bash
-bwrk work reserve <work-id> [--agent <id>] [--purpose <text>] [--json]
+bwrk work reserve <work-id> [--agent <id>] [--purpose <text>] [--force --reason <text>] [--json]
 ```
 
 Reserves a ready work item for an agent. If `--agent` is omitted, the CLI actor ID is used.
+
+Normal reservation requires `ready` work. `--force` allows a documented reservation of non-ready work only when `--reason` is also supplied. Closed and cancelled work still cannot be reserved.
 
 ## `evidence add`
 
@@ -222,7 +264,7 @@ bwrk evidence add bw_work_... --summary "pnpm test passed" --kind test --outcome
 bwrk work verify <work-id> --evidence <evidence-id> [--verdict passed|failed] [--notes <text>] [--json]
 ```
 
-Creates a verification record. `--evidence` may be repeated. Verification fails if referenced evidence is not attached to the work item.
+Creates a verification record. `--evidence` may be repeated. Verification fails if referenced evidence is not attached to the work item. A `passed` verdict requires at least one referenced evidence record with outcome `passed`.
 
 ## `work close`
 
@@ -246,8 +288,12 @@ Checks:
 - Runtime state JSON parse and schema version.
 - Required state sections.
 - Missing IDs and duplicate IDs within each state section.
-- Malformed work, evidence, verification, and context-pack records.
+- Malformed work, evidence, verification, context-pack, graph, and reservation records.
 - Dangling work dependencies, evidence references, and verification references.
+- Duplicate graph edges, dangling work graph edges, graph/dependency disagreement, and dependency cycles.
+- Reservation consistency, including active reservations for terminal work and reserved work without active reservations.
+- Verification policy drift, including passed verifications without passed evidence.
+- Closed work items without close reasons.
 - Derived readiness consistency.
 - Missing context-pack projections.
 - Runtime lock state.

@@ -73,7 +73,8 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
 }
 
 export function hasFlag(args: ParsedArgs, name: string): boolean {
-  return args.flags.has(name);
+  const values = args.flags.get(name);
+  return values !== undefined && values.at(-1) !== "false";
 }
 
 export function flagValue(args: ParsedArgs, name: string): string | undefined {

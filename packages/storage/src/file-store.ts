@@ -86,6 +86,7 @@ export class FileBorealStore implements BorealStore {
       await handle.sync();
       await handle.close();
       await rename(tempFile, this.stateFile);
+      await syncParentDirectory(this.stateFile);
     } catch (error) {
       await handle.close().catch(() => undefined);
       await unlink(tempFile).catch(() => undefined);
@@ -151,4 +152,22 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function isNodeError(error: unknown): error is NodeJS.ErrnoException {
   return typeof error === "object" && error !== null && "code" in error;
+}
+
+async function syncParentDirectory(path: string): Promise<void> {
+  let handle;
+  try {
+    handle = await open(dirname(path), "r");
+    await handle.sync();
+  } catch (error) {
+    if (
+      isNodeError(error) &&
+      (error.code === "EINVAL" || error.code === "ENOTSUP" || error.code === "EISDIR" || error.code === "EPERM")
+    ) {
+      return;
+    }
+    throw error;
+  } finally {
+    await handle?.close().catch(() => undefined);
+  }
 }

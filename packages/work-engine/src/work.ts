@@ -187,7 +187,8 @@ export function deriveReadinessStatus(work: WorkItem, dependencies: readonly Wor
   }
 
   const openDependency = dependencies.some(
-    (dependency) => dependency.status !== "closed" && dependency.status !== "cancelled"
+    (dependency) =>
+      dependency.status !== "closed" && dependency.status !== "cancelled" && dependency.status !== "verified"
   );
 
   if (openDependency) {

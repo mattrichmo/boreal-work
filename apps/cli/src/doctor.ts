@@ -3,9 +3,11 @@ import { readFile } from "node:fs/promises";
 
 import {
   BorealError,
+  type AgentReservation,
   type ContextPack,
   type EvidenceId,
   type EvidenceRecord,
+  type GraphEdge,
   type VerificationRecord,
   type WorkId,
   type WorkItem
@@ -246,17 +248,23 @@ async function validateStoreRecords(
       const rawEvidence = stateSection<EvidenceRecord>(state, "evidence");
       const rawVerifications = stateSection<VerificationRecord>(state, "verifications");
       const rawContextPacks = stateSection<ContextPack>(state, "contextPacks");
+      const rawGraphEdges = stateSection<GraphEdge>(state, "graphEdges");
+      const rawReservations = stateSection<AgentReservation>(state, "reservations");
       const malformedRecords = [
         ...malformedIndexes(rawWorkItems, isDoctorWorkItem, "workItems"),
         ...malformedIndexes(rawEvidence, isDoctorEvidence, "evidence"),
         ...malformedIndexes(rawVerifications, isDoctorVerification, "verifications"),
-        ...malformedIndexes(rawContextPacks, isDoctorContextPack, "contextPacks")
+        ...malformedIndexes(rawContextPacks, isDoctorContextPack, "contextPacks"),
+        ...malformedIndexes(rawGraphEdges, isDoctorGraphEdge, "graphEdges"),
+        ...malformedIndexes(rawReservations, isDoctorReservation, "reservations")
       ];
       const workItems = rawWorkItems.filter(isDoctorWorkItem);
-      const evidenceById = new Set(rawEvidence.filter(isDoctorEvidence).map((record) => record.meta.id));
-      const verificationsById = new Set(
-        rawVerifications.filter(isDoctorVerification).map((record) => record.meta.id)
-      );
+      const evidence = rawEvidence.filter(isDoctorEvidence);
+      const verifications = rawVerifications.filter(isDoctorVerification);
+      const graphEdges = rawGraphEdges.filter(isDoctorGraphEdge);
+      const reservations = rawReservations.filter(isDoctorReservation);
+      const evidenceById = new Map(evidence.map((record) => [record.meta.id, record]));
+      const verificationsById = new Map(verifications.map((record) => [record.meta.id, record]));
       const workById = new Map(workItems.map((work) => [work.meta.id, work]));
       const danglingDependencies = workItems.flatMap((work) =>
         work.dependencyIds
@@ -282,6 +290,52 @@ async function validateStoreRecords(
       const missingContextPacks = workItems
         .filter((work) => !contextPackSubjects.has(work.meta.id))
         .map((work) => work.meta.id);
+      const duplicateGraphEdges = duplicateGraphEdgeKeys(graphEdges);
+      const danglingWorkGraphEdges = graphEdges.flatMap((edge) => {
+        const issues: Array<{ edgeId: string; side: "from" | "to"; workId: string }> = [];
+        if (edge.fromType === "work" && !workById.has(edge.fromId as WorkId)) {
+          issues.push({ edgeId: edge.meta.id, side: "from", workId: edge.fromId });
+        }
+        if (edge.toType === "work" && !workById.has(edge.toId as WorkId)) {
+          issues.push({ edgeId: edge.meta.id, side: "to", workId: edge.toId });
+        }
+        return issues;
+      });
+      const blockEdges = graphEdges.filter(
+        (edge) => edge.kind === "blocks" && edge.fromType === "work" && edge.toType === "work"
+      );
+      const blockEdgeKeys = new Set(blockEdges.map((edge) => `${edge.fromId}->${edge.toId}`));
+      const blockConsistency = [
+        ...blockEdges.flatMap((edge) => {
+          const blockedWork = workById.get(edge.toId as WorkId);
+          if (!blockedWork || blockedWork.dependencyIds.includes(edge.fromId as WorkId)) {
+            return [];
+          }
+          return [
+            {
+              issue: "edge_missing_dependency",
+              edgeId: edge.meta.id,
+              workId: edge.toId,
+              dependencyId: edge.fromId
+            }
+          ];
+        }),
+        ...workItems.flatMap((work) =>
+          work.dependencyIds
+            .filter((dependencyId) => workById.has(dependencyId) && !blockEdgeKeys.has(`${dependencyId}->${work.meta.id}`))
+            .map((dependencyId) => ({
+              issue: "dependency_missing_edge",
+              workId: work.meta.id,
+              dependencyId
+            }))
+        )
+      ];
+      const dependencyCycles = findDependencyCycles(blockEdges);
+      const reservationConsistency = reservationPolicyIssues(workItems, reservations);
+      const verificationPolicy = verificationPolicyIssues(workItems, verifications, evidenceById);
+      const closedWithoutReason = workItems
+        .filter((work) => work.status === "closed" && !work.closedReason?.trim())
+        .map((work) => work.meta.id);
 
       return {
         workCount: workItems.length,
@@ -290,7 +344,14 @@ async function validateStoreRecords(
         danglingEvidence,
         danglingVerifications,
         staleReadiness,
-        missingContextPacks
+        missingContextPacks,
+        duplicateGraphEdges,
+        danglingWorkGraphEdges,
+        blockConsistency,
+        dependencyCycles,
+        reservationConsistency,
+        verificationPolicy,
+        closedWithoutReason
       };
     })();
 
@@ -305,6 +366,13 @@ async function validateStoreRecords(
     diagnostics.push(
       diagnosticFromList("work.dangling_verifications", "Dangling work verification references", summary.danglingVerifications)
     );
+    diagnostics.push(diagnosticFromList("graph.duplicate_edges", "Duplicate graph edges", summary.duplicateGraphEdges));
+    diagnostics.push(diagnosticFromList("graph.dangling_work_edges", "Dangling graph work edges", summary.danglingWorkGraphEdges));
+    diagnostics.push(diagnosticFromList("graph.block_consistency", "Block graph and dependency refs disagree", summary.blockConsistency));
+    diagnostics.push(diagnosticFromList("graph.dependency_cycles", "Dependency cycles found", summary.dependencyCycles));
+    diagnostics.push(diagnosticFromList("reservation.consistency", "Reservation consistency issues", summary.reservationConsistency));
+    diagnostics.push(diagnosticFromList("verification.policy", "Verification policy issues", summary.verificationPolicy));
+    diagnostics.push(diagnosticFromList("work.closed_reason", "Closed work items missing a close reason", summary.closedWithoutReason));
 
     if (summary.staleReadiness.length > 0) {
       if (fix) {
@@ -395,6 +463,159 @@ function malformedIndexes<T>(
   return values.flatMap((value, index) => (predicate(value) ? [] : [{ section, index }]));
 }
 
+function duplicateGraphEdgeKeys(graphEdges: readonly GraphEdge[]): Array<{ key: string; edgeIds: readonly string[] }> {
+  const edgeIdsByKey = new Map<string, string[]>();
+  for (const edge of graphEdges) {
+    const key = `${edge.kind}:${edge.fromType}:${edge.fromId}:${edge.toType}:${edge.toId}:${edge.directed}`;
+    edgeIdsByKey.set(key, [...(edgeIdsByKey.get(key) ?? []), edge.meta.id]);
+  }
+  return [...edgeIdsByKey.entries()]
+    .filter(([, edgeIds]) => edgeIds.length > 1)
+    .map(([key, edgeIds]) => ({ key, edgeIds }));
+}
+
+function findDependencyCycles(graphEdges: readonly GraphEdge[]): Array<{ cycle: readonly string[] }> {
+  const adjacency = new Map<string, string[]>();
+  for (const edge of graphEdges) {
+    const values = adjacency.get(edge.fromId) ?? [];
+    values.push(edge.toId);
+    adjacency.set(edge.fromId, values);
+  }
+
+  const visited = new Set<string>();
+  const visiting = new Set<string>();
+  const path: string[] = [];
+  const seenCycles = new Set<string>();
+  const cycles: Array<{ cycle: readonly string[] }> = [];
+
+  const visit = (node: string): void => {
+    if (visiting.has(node)) {
+      const start = path.indexOf(node);
+      const cycle = [...path.slice(start), node];
+      const key = cycle.join("->");
+      if (!seenCycles.has(key)) {
+        seenCycles.add(key);
+        cycles.push({ cycle });
+      }
+      return;
+    }
+    if (visited.has(node)) {
+      return;
+    }
+
+    visiting.add(node);
+    path.push(node);
+    for (const next of adjacency.get(node) ?? []) {
+      visit(next);
+    }
+    path.pop();
+    visiting.delete(node);
+    visited.add(node);
+  };
+
+  for (const node of adjacency.keys()) {
+    visit(node);
+  }
+
+  return cycles;
+}
+
+function reservationPolicyIssues(
+  workItems: readonly WorkItem[],
+  reservations: readonly AgentReservation[]
+): Array<Record<string, unknown>> {
+  const workById = new Map(workItems.map((work) => [work.meta.id, work]));
+  const activeReservations = reservations.filter((reservation) => reservation.status === "active");
+  const activeReservationsById = new Map(activeReservations.map((reservation) => [reservation.meta.id, reservation]));
+  const activeReservationsByWork = new Map<string, AgentReservation[]>();
+
+  for (const reservation of activeReservations) {
+    activeReservationsByWork.set(reservation.workId, [
+      ...(activeReservationsByWork.get(reservation.workId) ?? []),
+      reservation
+    ]);
+  }
+
+  return [
+    ...activeReservations.flatMap((reservation) => {
+      const work = workById.get(reservation.workId);
+      if (!work) {
+        return [{ issue: "active_reservation_missing_work", reservationId: reservation.meta.id, workId: reservation.workId }];
+      }
+      if (work.status === "closed" || work.status === "cancelled") {
+        return [
+          {
+            issue: "active_reservation_for_terminal_work",
+            reservationId: reservation.meta.id,
+            workId: reservation.workId,
+            status: work.status
+          }
+        ];
+      }
+      if (work.status !== "reserved" || work.reservationId !== reservation.meta.id) {
+        return [
+          {
+            issue: "active_reservation_not_reflected_by_work",
+            reservationId: reservation.meta.id,
+            workId: reservation.workId,
+            workStatus: work.status,
+            workReservationId: work.reservationId
+          }
+        ];
+      }
+      return [];
+    }),
+    ...[...activeReservationsByWork.entries()]
+      .filter(([, values]) => values.length > 1)
+      .map(([workId, values]) => ({
+        issue: "multiple_active_reservations_for_work",
+        workId,
+        reservationIds: values.map((reservation) => reservation.meta.id)
+      })),
+    ...workItems.flatMap((work) => {
+      if (work.status === "reserved" && (!work.reservationId || !activeReservationsById.has(work.reservationId))) {
+        return [{ issue: "reserved_work_missing_active_reservation", workId: work.meta.id, reservationId: work.reservationId }];
+      }
+      if (work.reservationId && !reservations.some((reservation) => reservation.meta.id === work.reservationId)) {
+        return [{ issue: "work_reservation_missing_record", workId: work.meta.id, reservationId: work.reservationId }];
+      }
+      return [];
+    })
+  ];
+}
+
+function verificationPolicyIssues(
+  workItems: readonly WorkItem[],
+  verifications: readonly VerificationRecord[],
+  evidenceById: ReadonlyMap<EvidenceId, EvidenceRecord>
+): Array<Record<string, unknown>> {
+  const verificationsById = new Map(verifications.map((verification) => [verification.meta.id, verification]));
+  const passedVerificationHasPassedEvidence = (verification: VerificationRecord): boolean =>
+    verification.verdict === "passed" &&
+    verification.evidenceIds.some((evidenceId) => evidenceById.get(evidenceId)?.outcome === "passed");
+
+  return [
+    ...verifications
+      .filter((verification) => verification.verdict === "passed" && !passedVerificationHasPassedEvidence(verification))
+      .map((verification) => ({
+        issue: "passed_verification_without_passed_evidence",
+        verificationId: verification.meta.id,
+        subjectId: verification.subjectId,
+        evidenceIds: verification.evidenceIds
+      })),
+    ...workItems
+      .filter((work) => work.status === "verified")
+      .filter(
+        (work) =>
+          !work.verificationIds
+            .map((verificationId) => verificationsById.get(verificationId))
+            .filter((verification): verification is VerificationRecord => verification !== undefined)
+            .some(passedVerificationHasPassedEvidence)
+      )
+      .map((work) => ({ issue: "verified_work_without_passed_evidence", workId: work.meta.id }))
+  ];
+}
+
 function finalize(diagnostics: readonly Diagnostic[], fixed: boolean): DoctorResult {
   const ok = diagnostics.every((diagnostic) => diagnostic.severity !== "error");
   return { ok, fixed, diagnostics };
@@ -434,7 +655,12 @@ function isDoctorWorkItem(value: unknown): value is WorkItem {
 }
 
 function isDoctorEvidence(value: unknown): value is EvidenceRecord {
-  return isRecord(value) && readRecordId(value, "evidence") !== undefined && typeof value.subjectId === "string";
+  return (
+    isRecord(value) &&
+    readRecordId(value, "evidence") !== undefined &&
+    typeof value.subjectId === "string" &&
+    isEvidenceOutcome(value.outcome)
+  );
 }
 
 function isDoctorVerification(value: unknown): value is VerificationRecord {
@@ -442,12 +668,37 @@ function isDoctorVerification(value: unknown): value is VerificationRecord {
     isRecord(value) &&
     readRecordId(value, "verifications") !== undefined &&
     typeof value.subjectId === "string" &&
-    Array.isArray(value.evidenceIds)
+    Array.isArray(value.evidenceIds) &&
+    isVerificationVerdict(value.verdict)
   );
 }
 
 function isDoctorContextPack(value: unknown): value is ContextPack {
   return isRecord(value) && typeof value.id === "string" && typeof value.subjectId === "string";
+}
+
+function isDoctorGraphEdge(value: unknown): value is GraphEdge {
+  return (
+    isRecord(value) &&
+    readRecordId(value, "graphEdges") !== undefined &&
+    isEdgeKind(value.kind) &&
+    typeof value.fromId === "string" &&
+    typeof value.fromType === "string" &&
+    typeof value.toId === "string" &&
+    typeof value.toType === "string" &&
+    typeof value.directed === "boolean"
+  );
+}
+
+function isDoctorReservation(value: unknown): value is AgentReservation {
+  return (
+    isRecord(value) &&
+    readRecordId(value, "reservations") !== undefined &&
+    typeof value.workId === "string" &&
+    typeof value.agentId === "string" &&
+    isReservationStatus(value.status) &&
+    typeof value.reservedAt === "string"
+  );
 }
 
 function isWorkStatus(value: unknown): value is WorkItem["status"] {
@@ -462,6 +713,30 @@ function isWorkStatus(value: unknown): value is WorkItem["status"] {
     value === "closed" ||
     value === "cancelled"
   );
+}
+
+function isEdgeKind(value: unknown): value is GraphEdge["kind"] {
+  return (
+    value === "blocks" ||
+    value === "depends_on" ||
+    value === "relates_to" ||
+    value === "supports" ||
+    value === "contradicts" ||
+    value === "verifies" ||
+    value === "references"
+  );
+}
+
+function isReservationStatus(value: unknown): value is AgentReservation["status"] {
+  return value === "active" || value === "released" || value === "expired";
+}
+
+function isEvidenceOutcome(value: unknown): value is EvidenceRecord["outcome"] {
+  return value === "passed" || value === "failed" || value === "observed" || value === "unknown";
+}
+
+function isVerificationVerdict(value: unknown): value is VerificationRecord["verdict"] {
+  return value === "passed" || value === "failed";
 }
 
 export function asWorkId(value: string): WorkId {
