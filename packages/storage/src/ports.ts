@@ -30,8 +30,10 @@ export interface BorealReader {
   getWorkItem(id: WorkId): Promise<WorkItem | undefined>;
   listWorkItems(filter?: WorkItemFilter): Promise<readonly WorkItem[]>;
   getEvidence(id: EvidenceId): Promise<EvidenceRecord | undefined>;
+  listEvidence(): Promise<readonly EvidenceRecord[]>;
   listEvidenceForSubject(subjectId: string): Promise<readonly EvidenceRecord[]>;
   getVerification(id: VerificationId): Promise<VerificationRecord | undefined>;
+  listVerifications(): Promise<readonly VerificationRecord[]>;
   listVerificationsForSubject(subjectId: string): Promise<readonly VerificationRecord[]>;
   getKnowledgeSource(id: KnowledgeSourceId): Promise<KnowledgeSource | undefined>;
   listKnowledgeSources(): Promise<readonly KnowledgeSource[]>;
@@ -43,10 +45,12 @@ export interface BorealReader {
   listGraphEdges(): Promise<readonly GraphEdge[]>;
   listGraphEdgesForSubject(subjectId: string): Promise<readonly GraphEdge[]>;
   getReservation(id: ReservationId): Promise<AgentReservation | undefined>;
+  listReservations(): Promise<readonly AgentReservation[]>;
   listReservationsForWork(workId: WorkId): Promise<readonly AgentReservation[]>;
   listActiveReservationsForAgent(agentId: string): Promise<readonly AgentReservation[]>;
   listEvents(): Promise<readonly RuntimeEvent[]>;
   getProjection(id: ProjectionId): Promise<ProjectionRecord | undefined>;
+  listProjections(): Promise<readonly ProjectionRecord[]>;
   listContextPacks(): Promise<readonly ContextPack[]>;
   getContextPackForSubject(subjectId: string): Promise<ContextPack | undefined>;
 }

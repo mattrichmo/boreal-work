@@ -47,6 +47,12 @@ describe("bwrk cli", () => {
       "## `decision show`",
       "## `context rebuild`",
       "## `context show`",
+      "## `export json`",
+      "## `export markdown`",
+      "## `import json`",
+      "## `snapshot create`",
+      "## `snapshot list`",
+      "## `snapshot show`",
       "## `doctor`",
       "## `lock inspect`",
       "## `lock break`"
@@ -65,7 +71,9 @@ describe("bwrk cli", () => {
 
     expect(root.exitCode).toBe(0);
     expect(root.stdout).toContain("bwrk - Boreal Work CLI");
-    expect(root.stdout).toContain("bwrk help [init|work|evidence|source|claim|decision|context|doctor|lock|commands]");
+    expect(root.stdout).toContain(
+      "bwrk help [init|work|evidence|source|claim|decision|context|export|import|snapshot|doctor|lock|commands]"
+    );
     expect(work.exitCode).toBe(0);
     expect(work.stdout).toContain("bwrk work create");
     expect(work.stdout).toContain("--force --reason");
@@ -108,7 +116,19 @@ describe("bwrk cli", () => {
     expect(result.exitCode).toBe(0);
     expect(registry.commands.map((command) => command.path.join(" "))).toContain("commands");
     expect(registry.commands.map((command) => command.path.join(" "))).toEqual(
-      expect.arrayContaining(["source add", "claim create", "decision create", "context rebuild", "context show"])
+      expect.arrayContaining([
+        "source add",
+        "claim create",
+        "decision create",
+        "context rebuild",
+        "context show",
+        "export json",
+        "export markdown",
+        "import json",
+        "snapshot create",
+        "snapshot list",
+        "snapshot show"
+      ])
     );
     expect(reserve?.flags).toEqual(
       expect.arrayContaining([
@@ -307,6 +327,124 @@ describe("bwrk cli", () => {
     expect(pack.facts).toContain("claim: Context packs include accepted claims.");
     expect(pack.facts).toContain("decision: Expose context packs through the runtime and CLI.");
     expect(pack.evidence).toContain("passed: context command test passed");
+  });
+
+  it("exports, snapshots, imports, and rejects conflicting JSON snapshots", async () => {
+    const rootDir = await makeTempWorkspace();
+    await runCli(rootDir, ["init", "--json"]);
+
+    const work = parseData<{ readonly meta: { readonly id: string } }>(
+      (
+        await runCli(rootDir, [
+          "work",
+          "create",
+          "Exportable work",
+          "--description",
+          "This record should round-trip through import.",
+          "--ready",
+          "--json"
+        ])
+      ).stdout
+    );
+    await runCli(rootDir, [
+      "evidence",
+      "add",
+      work.meta.id,
+      "--summary",
+      "export import test passed",
+      "--kind",
+      "test",
+      "--outcome",
+      "passed",
+      "--json"
+    ]);
+    await runCli(rootDir, [
+      "source",
+      "add",
+      "--title",
+      "Export source",
+      "--uri",
+      "file://export-source.md",
+      "--json"
+    ]);
+    await runCli(rootDir, ["context", "rebuild", "--json"]);
+
+    const exportPath = join(rootDir, "boreal-export.json");
+    const exported = await runCli(rootDir, ["export", "json", "--out", "boreal-export.json", "--json"]);
+    const exportPayload = parseData<{ readonly path: string; readonly contentHash: string }>(exported.stdout);
+    expect(exported.exitCode).toBe(0);
+    expect(exportPayload.path).toBe(exportPath);
+    expect(exportPayload.contentHash).toMatch(/^sha256:/);
+
+    const exportDocument = parseJson<{
+      readonly schemaVersion: string;
+      readonly contentHash: string;
+      readonly state: { readonly workItems: Array<{ readonly meta: { readonly id: string }; readonly title: string }> };
+    }>(await readFile(exportPath, "utf8"));
+    expect(exportDocument.schemaVersion).toBe("boreal.export.v1");
+    expect(exportDocument.state.workItems.map((item) => item.meta.id)).toContain(work.meta.id);
+
+    const markdown = await runCli(rootDir, ["export", "markdown", "--out", "markdown-export", "--json"]);
+    const markdownPayload = parseData<{ readonly outDir: string; readonly files: readonly string[] }>(markdown.stdout);
+    expect(markdownPayload.outDir).toBe(join(rootDir, "markdown-export"));
+    expect(markdownPayload.files.some((file) => file.endsWith(`/work/${work.meta.id}.md`))).toBe(true);
+
+    const snapshot = await runCli(rootDir, ["snapshot", "create", "--name", "baseline", "--json"]);
+    const snapshotPayload = parseData<{ readonly id: string; readonly contentHash: string }>(snapshot.stdout);
+    expect(snapshotPayload.id).toContain("baseline");
+    expect(snapshotPayload.contentHash).toBe(exportPayload.contentHash);
+
+    const snapshots = await runCli(rootDir, ["snapshot", "list", "--json"]);
+    expect(parseData<Array<{ readonly id: string }>>(snapshots.stdout).map((entry) => entry.id)).toContain(
+      snapshotPayload.id
+    );
+
+    const shown = await runCli(rootDir, ["snapshot", "show", snapshotPayload.id, "--json"]);
+    expect(parseData<{ readonly contentHash: string }>(shown.stdout).contentHash).toBe(exportPayload.contentHash);
+
+    const targetDir = await makeTempWorkspace();
+    await runCli(targetDir, ["init", "--json"]);
+    const imported = await runCli(targetDir, ["import", "json", "--from", exportPath, "--json"]);
+    const importPayload = parseData<{ readonly imported: { readonly workItems: number }; readonly skipped: { readonly workItems: number } }>(
+      imported.stdout
+    );
+    expect(importPayload.imported.workItems).toBe(1);
+    expect(importPayload.skipped.workItems).toBe(0);
+
+    const importedAgain = await runCli(targetDir, ["import", "json", "--from", exportPath, "--json"]);
+    expect(parseData<{ readonly skipped: { readonly workItems: number } }>(importedAgain.stdout).skipped.workItems).toBe(1);
+
+    const importedDoctor = await runCli(targetDir, ["doctor", "--json"]);
+    expect(importedDoctor.exitCode).toBe(0);
+    expect(parseData<{ readonly ok: boolean }>(importedDoctor.stdout).ok).toBe(true);
+
+    const conflictingPath = join(rootDir, "conflicting-export.json");
+    const conflicting = {
+      schemaVersion: "boreal.file-store.v1",
+      ...exportDocument.state,
+      workItems: exportDocument.state.workItems.map((item) =>
+        item.meta.id === work.meta.id ? { ...item, title: "Conflicting title" } : item
+      )
+    };
+    await writeFile(conflictingPath, `${JSON.stringify(conflicting, null, 2)}\n`, "utf8");
+    const conflict = await runCli(rootDir, ["import", "json", "--from", conflictingPath, "--json"]);
+    const conflictPayload = parseJson<{ readonly ok: false; readonly code: string }>(conflict.stderr);
+    expect(conflict.exitCode).toBe(1);
+    expect(conflictPayload.code).toBe("BOREAL_CONFLICT");
+
+    const danglingPath = join(rootDir, "dangling-export.json");
+    const dangling = {
+      schemaVersion: "boreal.file-store.v1",
+      ...exportDocument.state,
+      workItems: exportDocument.state.workItems.map((item) =>
+        item.meta.id === work.meta.id ? { ...item, dependencyIds: ["bw_work_deadbeefdead"] } : item
+      )
+    };
+    await writeFile(danglingPath, `${JSON.stringify(dangling, null, 2)}\n`, "utf8");
+    const danglingImport = await runCli(targetDir, ["import", "json", "--from", danglingPath, "--json"]);
+    const danglingPayload = parseJson<{ readonly ok: false; readonly code: string }>(danglingImport.stderr);
+    expect(danglingImport.exitCode).toBe(2);
+    expect(danglingPayload.code).toBe("BOREAL_INVALID_INPUT");
   });
 
   it("keeps explicit workspace paths exact while cwd discovery walks upward", async () => {

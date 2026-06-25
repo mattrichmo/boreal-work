@@ -43,6 +43,10 @@ pnpm bwrk claim create --statement "Context packs include accepted claims" --sta
 pnpm bwrk decision create --title "Expose context" --decision "Expose context packs through the CLI" --source <source-id>
 pnpm bwrk context rebuild
 pnpm bwrk context show <work-id>
+pnpm bwrk export json --out boreal-export.json
+pnpm bwrk export markdown --out .boreal/exports/markdown
+pnpm bwrk snapshot create --name baseline
+pnpm bwrk import json --from boreal-export.json
 pnpm bwrk doctor --fix
 ```
 
@@ -59,7 +63,7 @@ init -> create work -> add dependency -> derive readiness -> reserve
 
 The file-backed store is also tested for persistence across runtime instances, rollback on failed transactions, concurrent writer serialization, stale-lock recovery, schema drift rejection, invalid JSON rejection, and path escape rejection.
 
-The CLI integration test covers init fail-closed behavior, exact versus discovered workspace resolution, idempotent concurrent init, bounded/filtered listing, create/ready/list/evidence/verify/close, source/claim/decision/context commands, projection repair through `doctor --fix`, and explicit stale lock repair through `lock break --stale-only`.
+The CLI integration test covers init fail-closed behavior, exact versus discovered workspace resolution, idempotent concurrent init, bounded/filtered listing, create/ready/list/evidence/verify/close, source/claim/decision/context commands, JSON and Markdown export, JSON import, recovery snapshots, projection repair through `doctor --fix`, and explicit stale lock repair through `lock break --stale-only`.
 
 Several runtime invariants intentionally follow the Beads methodology while staying TypeScript-native:
 

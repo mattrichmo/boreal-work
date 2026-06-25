@@ -73,6 +73,9 @@ bwrk help source
 bwrk help claim
 bwrk help decision
 bwrk help context
+bwrk help export
+bwrk help import
+bwrk help snapshot
 bwrk help doctor
 bwrk help lock
 bwrk help commands
@@ -401,6 +404,60 @@ Shows the stored context pack for a work item. Run `bwrk context rebuild` first 
 
 JSON `data` is the context pack record with `id`, `subjectId`, `generatedAt`, `title`, `summary`, `facts`, and `evidence`.
 
+## `export json`
+
+```bash
+bwrk export json [--out <path>] [--json]
+```
+
+Builds a `boreal.export.v1` document containing a full runtime state snapshot, record counts, and a deterministic content hash. Without `--out`, the export document is printed. With `--out`, the file is written inside the workspace and JSON `data` contains `path`, `contentHash`, and `recordCounts`.
+
+## `export markdown`
+
+```bash
+bwrk export markdown [--out <dir>] [--json]
+```
+
+Writes Git-friendly Markdown files for work, evidence, sources, claims, decisions, and context packs. Default output directory is `.boreal/exports/markdown`.
+
+JSON `data` contains `outDir`, `files`, and `recordCounts`.
+
+## `import json`
+
+```bash
+bwrk import json --from <path> [--json]
+```
+
+Imports a `boreal.export.v1` document or raw `boreal.file-store.v1` state document. Import validates required sections and references before writing. Existing records with identical IDs and identical content are skipped. Existing records with identical IDs and different content are rejected as conflicts.
+
+JSON `data` contains per-section `imported` and `skipped` counts.
+
+## `snapshot create`
+
+```bash
+bwrk snapshot create [--name <slug>] [--json]
+```
+
+Creates a recovery snapshot under `.boreal/snapshots`. Snapshot files are `boreal.export.v1` documents with content hashes.
+
+JSON `data` contains `id`, `path`, `contentHash`, and `recordCounts`.
+
+## `snapshot list`
+
+```bash
+bwrk snapshot list [--json]
+```
+
+Lists recovery snapshots. JSON `data` is an array with `id`, `path`, `createdAt`, `contentHash`, and `sizeBytes` when the snapshot parses cleanly.
+
+## `snapshot show`
+
+```bash
+bwrk snapshot show <snapshot-id> [--json]
+```
+
+Shows one recovery snapshot by ID. JSON `data` is the full `boreal.export.v1` document.
+
 ## `doctor`
 
 ```bash
@@ -424,6 +481,7 @@ Checks:
 - Closed work items without close reasons.
 - Derived readiness consistency.
 - Missing or stale context-pack projections.
+- Snapshot/export drift between the current export hash and the latest recovery snapshot.
 - Runtime lock state.
 
 `--fix` performs only idempotent repairs:

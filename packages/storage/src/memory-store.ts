@@ -95,12 +95,20 @@ class MemoryTransaction implements BorealWriter {
     return cloneMaybe(this.state.evidence.get(id));
   }
 
+  async listEvidence(): Promise<readonly EvidenceRecord[]> {
+    return deepClone([...this.state.evidence.values()]);
+  }
+
   async listEvidenceForSubject(subjectId: string): Promise<readonly EvidenceRecord[]> {
     return deepClone([...this.state.evidence.values()].filter((record) => record.subjectId === subjectId));
   }
 
   async getVerification(id: VerificationId): Promise<VerificationRecord | undefined> {
     return cloneMaybe(this.state.verifications.get(id));
+  }
+
+  async listVerifications(): Promise<readonly VerificationRecord[]> {
+    return deepClone([...this.state.verifications.values()]);
   }
 
   async listVerificationsForSubject(subjectId: string): Promise<readonly VerificationRecord[]> {
@@ -149,6 +157,10 @@ class MemoryTransaction implements BorealWriter {
     return cloneMaybe(this.state.reservations.get(id));
   }
 
+  async listReservations(): Promise<readonly AgentReservation[]> {
+    return deepClone([...this.state.reservations.values()]);
+  }
+
   async listReservationsForWork(workId: WorkId): Promise<readonly AgentReservation[]> {
     return deepClone([...this.state.reservations.values()].filter((record) => record.workId === workId));
   }
@@ -167,6 +179,10 @@ class MemoryTransaction implements BorealWriter {
 
   async getProjection(id: ProjectionId): Promise<ProjectionRecord | undefined> {
     return cloneMaybe(this.state.projections.get(id));
+  }
+
+  async listProjections(): Promise<readonly ProjectionRecord[]> {
+    return deepClone([...this.state.projections.values()]);
   }
 
   async listContextPacks(): Promise<readonly ContextPack[]> {

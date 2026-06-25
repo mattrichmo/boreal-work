@@ -20,6 +20,7 @@ import { breakStaleFileLock, inspectFileLock } from "@boreal/storage";
 import { deriveReadinessStatus } from "@boreal/work-engine";
 
 import type { CliContext } from "./context.js";
+import { exportDriftDiagnostics } from "./import-export.js";
 
 export type DiagnosticSeverity = "ok" | "warning" | "error" | "fixed";
 
@@ -117,6 +118,16 @@ export async function runDoctor(context: CliContext, fix: boolean): Promise<Doct
   const storeDiagnostics = await validateStoreRecords(context, fix, state);
   diagnostics.push(...storeDiagnostics.diagnostics);
   fixed = fixed || storeDiagnostics.fixed;
+
+  const drift = await exportDriftDiagnostics(context);
+  diagnostics.push({
+    code: "snapshot.export_drift",
+    severity: drift.drift ? "warning" : "ok",
+    message: drift.drift
+      ? "Latest snapshot content hash differs from current export state"
+      : "Latest snapshot matches current export state or no snapshots exist",
+    details: drift
+  });
 
   return finalize(diagnostics, fixed);
 }

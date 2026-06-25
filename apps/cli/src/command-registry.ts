@@ -20,6 +20,9 @@ export interface CommandDefinition {
     | "claim"
     | "decision"
     | "context"
+    | "export"
+    | "import"
+    | "snapshot"
     | "doctor"
     | "lock"
     | "meta";
@@ -357,6 +360,66 @@ export const COMMAND_DEFINITIONS: readonly CommandDefinition[] = [
     usage: "bwrk context show <work-id> [--json]",
     flags: [],
     positionals: { label: "work id", min: 1, max: 1 },
+    requiresWorkspace: true,
+    supportsJson: true,
+  },
+  {
+    path: ["export", "json"],
+    category: "export",
+    summary: "Export a stable JSON snapshot.",
+    usage: "bwrk export json [--out <path>] [--json]",
+    flags: [flag("out", "value", "Path to write. Defaults to stdout.")],
+    positionals: { label: "arguments", min: 0, max: 0 },
+    requiresWorkspace: true,
+    supportsJson: true,
+  },
+  {
+    path: ["export", "markdown"],
+    category: "export",
+    summary: "Export records as Markdown files.",
+    usage: "bwrk export markdown [--out <dir>] [--json]",
+    flags: [flag("out", "value", "Directory to write. Defaults to .boreal/exports/markdown.")],
+    positionals: { label: "arguments", min: 0, max: 0 },
+    requiresWorkspace: true,
+    supportsJson: true,
+  },
+  {
+    path: ["import", "json"],
+    category: "import",
+    summary: "Import a JSON snapshot.",
+    usage: "bwrk import json --from <path> [--json]",
+    flags: [flag("from", "value", "JSON export or file-store state document to import.")],
+    positionals: { label: "arguments", min: 0, max: 0 },
+    requiresWorkspace: true,
+    supportsJson: true,
+  },
+  {
+    path: ["snapshot", "create"],
+    category: "snapshot",
+    summary: "Create a recovery snapshot.",
+    usage: "bwrk snapshot create [--name <slug>] [--json]",
+    flags: [flag("name", "value", "Optional snapshot name slug.")],
+    positionals: { label: "arguments", min: 0, max: 0 },
+    requiresWorkspace: true,
+    supportsJson: true,
+  },
+  {
+    path: ["snapshot", "list"],
+    category: "snapshot",
+    summary: "List recovery snapshots.",
+    usage: "bwrk snapshot list [--json]",
+    flags: [],
+    positionals: { label: "arguments", min: 0, max: 0 },
+    requiresWorkspace: true,
+    supportsJson: true,
+  },
+  {
+    path: ["snapshot", "show"],
+    category: "snapshot",
+    summary: "Show one recovery snapshot.",
+    usage: "bwrk snapshot show <snapshot-id> [--json]",
+    flags: [],
+    positionals: { label: "snapshot id", min: 1, max: 1 },
     requiresWorkspace: true,
     supportsJson: true,
   },

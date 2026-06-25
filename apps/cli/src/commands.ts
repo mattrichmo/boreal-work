@@ -28,6 +28,14 @@ import {
 } from "./command-registry.js";
 import { asEvidenceId, asWorkId, runDoctor, type Diagnostic } from "./doctor.js";
 import { assertInitialized, createCliContext, ensureWorkspaceDirs, type CliContext } from "./context.js";
+import {
+  createSnapshot,
+  exportJson,
+  exportMarkdown,
+  importJson,
+  listSnapshots,
+  showSnapshot
+} from "./import-export.js";
 import { formatRecord, table, type CliOutput } from "./output.js";
 
 export interface CommandResult {
@@ -87,6 +95,12 @@ export async function runCommand(args: ParsedArgs, output: CliOutput, cwd: strin
       return decisionCommand(action, rest, context, args, output, json);
     case "context":
       return contextCommand(action, rest, context, output, json);
+    case "export":
+      return exportCommand(action, context, args, output, json);
+    case "import":
+      return importCommand(action, context, args, output, json);
+    case "snapshot":
+      return snapshotCommand(action, rest, context, args, output, json);
     case "doctor":
       return doctorCommand(context, args, output, json);
     case "lock":
@@ -400,6 +414,70 @@ async function contextCommand(
   }
 }
 
+async function exportCommand(
+  action: string | undefined,
+  context: CliContext,
+  args: ParsedArgs,
+  output: CliOutput,
+  json: boolean
+): Promise<CommandResult> {
+  switch (action) {
+    case "json": {
+      output.write(formatRecord(await exportJson(context, flagValue(args, "out")), json));
+      return { exitCode: 0 };
+    }
+    case "markdown": {
+      output.write(formatRecord(await exportMarkdown(context, flagValue(args, "out")), json));
+      return { exitCode: 0 };
+    }
+    default:
+      throw new BorealError("BOREAL_INVALID_INPUT", `Unknown export command: ${action ?? ""}`);
+  }
+}
+
+async function importCommand(
+  action: string | undefined,
+  context: CliContext,
+  args: ParsedArgs,
+  output: CliOutput,
+  json: boolean
+): Promise<CommandResult> {
+  switch (action) {
+    case "json": {
+      output.write(formatRecord(await importJson(context, requiredFlag(args, "from")), json));
+      return { exitCode: 0 };
+    }
+    default:
+      throw new BorealError("BOREAL_INVALID_INPUT", `Unknown import command: ${action ?? ""}`);
+  }
+}
+
+async function snapshotCommand(
+  action: string | undefined,
+  rest: readonly string[],
+  context: CliContext,
+  args: ParsedArgs,
+  output: CliOutput,
+  json: boolean
+): Promise<CommandResult> {
+  switch (action) {
+    case "create": {
+      output.write(formatRecord(await createSnapshot(context, flagValue(args, "name")), json));
+      return { exitCode: 0 };
+    }
+    case "list": {
+      output.write(formatRecord(await listSnapshots(context), json));
+      return { exitCode: 0 };
+    }
+    case "show": {
+      output.write(formatRecord(await showSnapshot(context, requiredPositional(rest, 0, "snapshot id")), json));
+      return { exitCode: 0 };
+    }
+    default:
+      throw new BorealError("BOREAL_INVALID_INPUT", `Unknown snapshot command: ${action ?? ""}`);
+  }
+}
+
 async function doctorCommand(
   context: CliContext,
   args: ParsedArgs,
@@ -679,6 +757,6 @@ Usage:
 ${COMMAND_DEFINITIONS.map((definition) => `  ${definition.usage}`).join("\n")}
 
 Help:
-  bwrk help [init|work|evidence|source|claim|decision|context|doctor|lock|commands]
+  bwrk help [init|work|evidence|source|claim|decision|context|export|import|snapshot|doctor|lock|commands]
 `;
 }
