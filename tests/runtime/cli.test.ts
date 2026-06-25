@@ -20,13 +20,62 @@ afterEach(async () => {
 });
 
 describe("bwrk cli", () => {
+  it("documents every current command group", async () => {
+    const commands = await readFile(new URL("../../docs/cli/COMMANDS.md", import.meta.url), "utf8");
+
+    for (const heading of [
+      "## Help",
+      "## `init`",
+      "## `work create`",
+      "## `work ready`",
+      "## `work list`",
+      "## `work show`",
+      "## `work block`",
+      "## `work reserve`",
+      "## `evidence add`",
+      "## `work verify`",
+      "## `work close`",
+      "## `doctor`",
+      "## `lock inspect`",
+      "## `lock break`"
+    ]) {
+      expect(commands).toContain(heading);
+    }
+  });
+
+  it("prints root and grouped help without a workspace", async () => {
+    const rootDir = await makeTempWorkspace();
+
+    const root = await runCli(rootDir, ["help"]);
+    const work = await runCli(rootDir, ["help", "work"]);
+    const workWithFlag = await runCli(rootDir, ["help", "work", "--help"]);
+    const doctor = await runCli(rootDir, ["doctor", "--help"]);
+
+    expect(root.exitCode).toBe(0);
+    expect(root.stdout).toContain("bwrk - Boreal Work CLI");
+    expect(root.stdout).toContain("bwrk help [init|work|evidence|doctor|lock]");
+    expect(work.exitCode).toBe(0);
+    expect(work.stdout).toContain("bwrk work create");
+    expect(workWithFlag.exitCode).toBe(0);
+    expect(workWithFlag.stdout).toContain("bwrk work create");
+    expect(doctor.exitCode).toBe(0);
+    expect(doctor.stdout).toContain("bwrk doctor");
+
+    const missing = await runCli(rootDir, ["help", "missing", "--json"]);
+    const payload = parseJson<{ readonly ok: false; readonly code: string }>(missing.stderr);
+    expect(missing.exitCode).toBe(2);
+    expect(payload.ok).toBe(false);
+    expect(payload.code).toBe("BOREAL_INVALID_INPUT");
+  });
+
   it("fails closed before init", async () => {
     const rootDir = await makeTempWorkspace();
 
     const result = await runCli(rootDir, ["work", "list", "--json"]);
-    const payload = parseJson<{ readonly code: string; readonly message: string }>(result.stderr);
+    const payload = parseJson<{ readonly ok: false; readonly code: string; readonly message: string }>(result.stderr);
 
     expect(result.exitCode).toBe(2);
+    expect(payload.ok).toBe(false);
     expect(payload.code).toBe("BOREAL_INVALID_INPUT");
     expect(payload.message).toContain("not initialized");
   });
@@ -38,7 +87,7 @@ describe("bwrk cli", () => {
 
     const init = await runCli(rootDir, ["init", "--json"]);
     expect(init.exitCode).toBe(0);
-    expect(parseJson<{ readonly initialized: boolean }>(init.stdout).initialized).toBe(true);
+    expect(parseData<{ readonly initialized: boolean }>(init.stdout).initialized).toBe(true);
 
     const created = await runCli(childDir, [
       "work",
@@ -53,12 +102,12 @@ describe("bwrk cli", () => {
       "--ready",
       "--json"
     ]);
-    const work = parseJson<{ readonly meta: { readonly id: string }; readonly status: string }>(created.stdout);
+    const work = parseData<{ readonly meta: { readonly id: string }; readonly status: string }>(created.stdout);
     expect(created.exitCode).toBe(0);
     expect(work.status).toBe("ready");
 
     const ready = await runCli(rootDir, ["work", "list", "--ready", "--json"]);
-    expect(parseJson<Array<{ readonly id: string }>>(ready.stdout).map((item) => item.id)).toContain(work.meta.id);
+    expect(parseData<Array<{ readonly id: string }>>(ready.stdout).map((item) => item.id)).toContain(work.meta.id);
 
     const evidence = await runCli(rootDir, [
       "evidence",
@@ -74,7 +123,7 @@ describe("bwrk cli", () => {
       "pnpm test",
       "--json"
     ]);
-    const evidenceRecord = parseJson<{ readonly meta: { readonly id: string } }>(evidence.stdout);
+    const evidenceRecord = parseData<{ readonly meta: { readonly id: string } }>(evidence.stdout);
     expect(evidence.exitCode).toBe(0);
 
     const verification = await runCli(rootDir, [
@@ -87,20 +136,20 @@ describe("bwrk cli", () => {
       "Verified by CLI integration test.",
       "--json"
     ]);
-    expect(parseJson<{ readonly verdict: string }>(verification.stdout).verdict).toBe("passed");
+    expect(parseData<{ readonly verdict: string }>(verification.stdout).verdict).toBe("passed");
 
     const closed = await runCli(rootDir, ["work", "close", work.meta.id, "--reason", "verified", "--json"]);
-    expect(parseJson<{ readonly status: string }>(closed.stdout).status).toBe("closed");
+    expect(parseData<{ readonly status: string }>(closed.stdout).status).toBe("closed");
 
     const repaired = await runCli(rootDir, ["doctor", "--fix", "--json"]);
-    const repairedPayload = parseJson<{ readonly ok: boolean; readonly fixed: boolean }>(repaired.stdout);
+    const repairedPayload = parseData<{ readonly ok: boolean; readonly fixed: boolean }>(repaired.stdout);
     expect(repaired.exitCode).toBe(0);
     expect(repairedPayload.ok).toBe(true);
     expect(repairedPayload.fixed).toBe(true);
 
     const doctor = await runCli(rootDir, ["doctor", "--json"]);
     expect(doctor.exitCode).toBe(0);
-    expect(parseJson<{ readonly ok: boolean }>(doctor.stdout).ok).toBe(true);
+    expect(parseData<{ readonly ok: boolean }>(doctor.stdout).ok).toBe(true);
   });
 
   it("keeps explicit workspace paths exact while cwd discovery walks upward", async () => {
@@ -129,7 +178,7 @@ describe("bwrk cli", () => {
       runCli(rootDir, ["init", "--json"]),
       runCli(rootDir, ["init", "--json"])
     ]);
-    const payloads = results.map((result) => parseJson<{ readonly initialized: boolean }>(result.stdout));
+    const payloads = results.map((result) => parseData<{ readonly initialized: boolean }>(result.stdout));
     const state = parseJson<{ readonly events: Array<{ readonly type: string }> }>(
       await readFile(join(rootDir, ".boreal/runtime/state.json"), "utf8")
     );
@@ -157,7 +206,7 @@ describe("bwrk cli", () => {
       "1",
       "--json"
     ]);
-    const rows = parseJson<Array<{ readonly status: string; readonly labels: readonly string[] }>>(listed.stdout);
+    const rows = parseData<Array<{ readonly status: string; readonly labels: readonly string[] }>>(listed.stdout);
 
     expect(listed.exitCode).toBe(0);
     expect(rows).toHaveLength(1);
@@ -171,7 +220,7 @@ describe("bwrk cli", () => {
     await writeLockOwner(rootDir, new Date(Date.now() - 120_000).toISOString());
 
     const failingDoctor = await runCli(rootDir, ["doctor", "--json"]);
-    const failingPayload = parseJson<{ readonly ok: boolean; readonly diagnostics: Array<{ readonly code: string }> }>(
+    const failingPayload = parseData<{ readonly ok: boolean; readonly diagnostics: Array<{ readonly code: string }> }>(
       failingDoctor.stdout
     );
     expect(failingDoctor.exitCode).toBe(1);
@@ -180,10 +229,10 @@ describe("bwrk cli", () => {
 
     const repaired = await runCli(rootDir, ["lock", "break", "--stale-only", "--json"]);
     expect(repaired.exitCode).toBe(0);
-    expect(parseJson<{ readonly removed: boolean }>(repaired.stdout).removed).toBe(true);
+    expect(parseData<{ readonly removed: boolean }>(repaired.stdout).removed).toBe(true);
 
     const inspection = await runCli(rootDir, ["lock", "inspect", "--json"]);
-    expect(parseJson<{ readonly exists: boolean }>(inspection.stdout).exists).toBe(false);
+    expect(parseData<{ readonly exists: boolean }>(inspection.stdout).exists).toBe(false);
   });
 });
 
@@ -210,6 +259,12 @@ async function runCli(cwd: string, argv: readonly string[]): Promise<CommandRun>
 
 function parseJson<T>(text: string): T {
   return JSON.parse(text) as T;
+}
+
+function parseData<T>(text: string): T {
+  const envelope = parseJson<{ readonly ok: true; readonly data: T }>(text);
+  expect(envelope.ok).toBe(true);
+  return envelope.data;
 }
 
 async function writeLockOwner(rootDir: string, createdAt: string): Promise<void> {

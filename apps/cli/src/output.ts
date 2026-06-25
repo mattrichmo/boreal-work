@@ -3,9 +3,14 @@ export interface CliOutput {
   error(text: string): void;
 }
 
+export interface CliSuccessEnvelope {
+  readonly ok: true;
+  readonly data: unknown;
+}
+
 export function formatRecord(value: unknown, json: boolean): string {
   if (json) {
-    return `${JSON.stringify(value, null, 2)}\n`;
+    return `${JSON.stringify({ ok: true, data: value } satisfies CliSuccessEnvelope, null, 2)}\n`;
   }
   if (typeof value === "string") {
     return `${value}\n`;

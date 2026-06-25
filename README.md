@@ -19,6 +19,8 @@ This repository currently contains the TypeScript runtime and the first command 
 
 ## CLI Surface
 
+Full command contract: [docs/cli/COMMANDS.md](docs/cli/COMMANDS.md).
+
 Run the CLI from source:
 
 ```bash

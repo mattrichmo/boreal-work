@@ -27,8 +27,16 @@ interface WorkListRow {
 }
 
 export async function runCommand(args: ParsedArgs, output: CliOutput, cwd: string): Promise<CommandResult> {
-  if (args.command.length === 0 || hasFlag(args, "help")) {
+  if (args.command.length === 0) {
     output.write(helpText());
+    return { exitCode: 0 };
+  }
+  if (args.command[0] === "help") {
+    output.write(helpText(args.command[1]));
+    return { exitCode: 0 };
+  }
+  if (hasFlag(args, "help")) {
+    output.write(helpText(args.command[0]));
     return { exitCode: 0 };
   }
 
@@ -354,7 +362,60 @@ function formatDiagnostic(diagnostic: Diagnostic): string {
   return `[${diagnostic.severity}] ${diagnostic.code}: ${diagnostic.message}`;
 }
 
-function helpText(): string {
+function helpText(topic?: string): string {
+  switch (topic) {
+    case undefined:
+      return rootHelpText();
+    case "init":
+      return `bwrk init
+
+Usage:
+  bwrk init [--workspace <path>] [--json]
+
+Initializes a Boreal workspace. The operation is idempotent and safe under concurrent init attempts.
+`;
+    case "work":
+      return `bwrk work
+
+Usage:
+  bwrk work create <title> [--description <text>] [--kind issue|task|sprint|milestone] [--priority low|normal|high|critical] [--label <label>] [--acceptance <text>] [--ready] [--json]
+  bwrk work ready <work-id> [--json]
+  bwrk work list [--ready] [--status <status>] [--label <label>] [--limit <count>] [--json]
+  bwrk work show <work-id> [--json]
+  bwrk work block <blocked-work-id> <blocking-work-id> [--json]
+  bwrk work reserve <work-id> [--agent <id>] [--purpose <text>] [--json]
+  bwrk work verify <work-id> --evidence <evidence-id> [--verdict passed|failed] [--notes <text>] [--json]
+  bwrk work close <work-id> --reason <text> [--json]
+`;
+    case "evidence":
+      return `bwrk evidence
+
+Usage:
+  bwrk evidence add <work-id> --summary <text> [--kind command|test|diff|review|artifact|note] [--outcome passed|failed|observed|unknown] [--command <cmd>] [--uri <uri>] [--json]
+`;
+    case "doctor":
+      return `bwrk doctor
+
+Usage:
+  bwrk doctor [--fix] [--json]
+
+Validates workspace state, references, derived readiness, projections, and runtime locks. With --fix, only idempotent repairs run.
+`;
+    case "lock":
+      return `bwrk lock
+
+Usage:
+  bwrk lock inspect [--json]
+  bwrk lock break --stale-only [--json]
+
+Active locks are never broken. Stale lock breaking coordinates through a recovery lock.
+`;
+    default:
+      throw new BorealError("BOREAL_INVALID_INPUT", `Unknown help topic: ${topic}`);
+  }
+}
+
+function rootHelpText(): string {
   return `bwrk - Boreal Work CLI
 
 Usage:
@@ -371,5 +432,8 @@ Usage:
   bwrk doctor [--fix] [--json]
   bwrk lock inspect [--json]
   bwrk lock break --stale-only [--json]
+
+Help:
+  bwrk help [init|work|evidence|doctor|lock]
 `;
 }
