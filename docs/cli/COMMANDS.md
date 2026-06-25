@@ -69,6 +69,10 @@ bwrk help
 bwrk help init
 bwrk help work
 bwrk help evidence
+bwrk help source
+bwrk help claim
+bwrk help decision
+bwrk help context
 bwrk help doctor
 bwrk help lock
 bwrk help commands
@@ -274,6 +278,129 @@ bwrk work close <work-id> --reason <text> [--json]
 
 Closes a work item. Runtime policy requires a passing verification before close.
 
+## `source add`
+
+```bash
+bwrk source add \
+  --title <text> \
+  --uri <uri> \
+  [--kind raw|document|chat|code|artifact] \
+  [--summary <text>] \
+  [--json]
+```
+
+Creates a knowledge source. Default `kind` is `document`.
+
+JSON `data` is the full source record, including `meta.id`, `kind`, `title`, `uri`, and `summary`.
+
+## `source list`
+
+```bash
+bwrk source list [--kind raw|document|chat|code|artifact] [--limit <count>] [--json]
+```
+
+Lists knowledge sources. JSON output is an array of rows with `id`, `kind`, `title`, and `uri`.
+
+## `source show`
+
+```bash
+bwrk source show <source-id> [--json]
+```
+
+Shows one knowledge source record.
+
+JSON `data` is the full source record.
+
+## `claim create`
+
+```bash
+bwrk claim create \
+  --statement <text> \
+  [--status proposed|accepted|rejected|stale] \
+  [--source <source-id>] \
+  [--evidence <evidence-id>] \
+  [--json]
+```
+
+Creates a claim. `--source` and `--evidence` may be repeated. Referenced sources and evidence must already exist.
+
+JSON `data` is the full claim record, including `meta.id`, `statement`, `status`, `sourceIds`, and `evidenceIds`.
+
+## `claim list`
+
+```bash
+bwrk claim list [--status proposed|accepted|rejected|stale] [--source <source-id>] [--limit <count>] [--json]
+```
+
+Lists claims, optionally filtered by status and source.
+
+JSON `data` is an array of rows with `id`, `status`, `statement`, `sources`, and `evidence`.
+
+## `claim show`
+
+```bash
+bwrk claim show <claim-id> [--json]
+```
+
+Shows one claim record.
+
+JSON `data` is the full claim record.
+
+## `decision create`
+
+```bash
+bwrk decision create \
+  --title <text> \
+  --decision <text> \
+  [--context <text>] \
+  [--status proposed|accepted|superseded|rejected] \
+  [--consequence <text>] \
+  [--source <source-id>] \
+  [--json]
+```
+
+Creates a decision record. `--consequence` and `--source` may be repeated. Referenced sources must already exist.
+
+JSON `data` is the full decision record, including `meta.id`, `title`, `status`, `context`, `decision`, `consequences`, and `sourceIds`.
+
+## `decision list`
+
+```bash
+bwrk decision list [--status proposed|accepted|superseded|rejected] [--source <source-id>] [--limit <count>] [--json]
+```
+
+Lists decisions, optionally filtered by status and source.
+
+JSON `data` is an array of rows with `id`, `status`, `title`, `decision`, and `sources`.
+
+## `decision show`
+
+```bash
+bwrk decision show <decision-id> [--json]
+```
+
+Shows one decision record.
+
+JSON `data` is the full decision record.
+
+## `context rebuild`
+
+```bash
+bwrk context rebuild [--json]
+```
+
+Rebuilds context-pack projections for all work items. JSON `data` contains `rebuilt` and `views`.
+
+## `context show`
+
+```bash
+bwrk context show <work-id> [--json]
+```
+
+Shows the stored context pack for a work item. Run `bwrk context rebuild` first when the context pack is missing or stale.
+
+JSON `data` is the context pack record with `id`, `subjectId`, `generatedAt`, `title`, `summary`, `facts`, and `evidence`.
+
 ## `doctor`
 
 ```bash
@@ -288,14 +415,15 @@ Checks:
 - Runtime state JSON parse and schema version.
 - Required state sections.
 - Missing IDs and duplicate IDs within each state section.
-- Malformed work, evidence, verification, context-pack, graph, and reservation records.
+- Malformed work, evidence, verification, source, claim, decision, context-pack, graph, and reservation records.
 - Dangling work dependencies, evidence references, and verification references.
+- Dangling knowledge source and claim evidence references.
 - Duplicate graph edges, dangling work graph edges, graph/dependency disagreement, and dependency cycles.
 - Reservation consistency, including active reservations for terminal work and reserved work without active reservations.
 - Verification policy drift, including passed verifications without passed evidence.
 - Closed work items without close reasons.
 - Derived readiness consistency.
-- Missing context-pack projections.
+- Missing or stale context-pack projections.
 - Runtime lock state.
 
 `--fix` performs only idempotent repairs:

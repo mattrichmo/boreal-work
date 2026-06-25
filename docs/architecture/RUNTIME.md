@@ -15,7 +15,7 @@ validate input -> load records -> call domain function -> enforce policy
 
 The first command surface is `apps/cli`, published as the `bwrk` binary. It is intentionally thin: command parsing, workspace resolution, JSON/text output, and operational diagnostics live at the edge, while lifecycle behavior stays in `@boreal/engine`.
 
-The CLI fails closed for uninitialized workspaces, discovers a workspace by walking up to `.boreal`, and treats `--workspace <path>` as an exact root for explicit automation. Initialization is idempotent inside the runtime transaction, and `work create --ready` is a single runtime write. Its `doctor` command validates the file-store schema, section shapes, missing IDs, duplicate IDs within each state section, dangling work references, derived readiness, projections, and runtime locks. `doctor --fix` only performs idempotent repairs: stale-lock removal, readiness recompute, and projection rebuild.
+The CLI fails closed for uninitialized workspaces, discovers a workspace by walking up to `.boreal`, and treats `--workspace <path>` as an exact root for explicit automation. Initialization is idempotent inside the runtime transaction, and `work create --ready` is a single runtime write. Its `doctor` command validates the file-store schema, section shapes, missing IDs, duplicate IDs within each state section, dangling work and knowledge references, graph/dependency consistency, reservation consistency, verification policy drift, derived readiness, context-pack projection drift, and runtime locks. `doctor --fix` only performs idempotent repairs: stale-lock removal, readiness recompute, and projection rebuild.
 
 ## Storage Boundary
 

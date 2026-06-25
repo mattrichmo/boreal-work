@@ -4,14 +4,18 @@ import { readFile } from "node:fs/promises";
 import {
   BorealError,
   type AgentReservation,
+  type ClaimRecord,
   type ContextPack,
+  type DecisionRecord,
   type EvidenceId,
   type EvidenceRecord,
   type GraphEdge,
+  type KnowledgeSource,
   type VerificationRecord,
   type WorkId,
   type WorkItem
 } from "@boreal/core";
+import { buildContextPack } from "@boreal/search";
 import { breakStaleFileLock, inspectFileLock } from "@boreal/storage";
 import { deriveReadinessStatus } from "@boreal/work-engine";
 
@@ -247,6 +251,9 @@ async function validateStoreRecords(
       const rawWorkItems = stateSection<WorkItem>(state, "workItems");
       const rawEvidence = stateSection<EvidenceRecord>(state, "evidence");
       const rawVerifications = stateSection<VerificationRecord>(state, "verifications");
+      const rawKnowledgeSources = stateSection<KnowledgeSource>(state, "knowledgeSources");
+      const rawClaims = stateSection<ClaimRecord>(state, "claims");
+      const rawDecisions = stateSection<DecisionRecord>(state, "decisions");
       const rawContextPacks = stateSection<ContextPack>(state, "contextPacks");
       const rawGraphEdges = stateSection<GraphEdge>(state, "graphEdges");
       const rawReservations = stateSection<AgentReservation>(state, "reservations");
@@ -254,6 +261,9 @@ async function validateStoreRecords(
         ...malformedIndexes(rawWorkItems, isDoctorWorkItem, "workItems"),
         ...malformedIndexes(rawEvidence, isDoctorEvidence, "evidence"),
         ...malformedIndexes(rawVerifications, isDoctorVerification, "verifications"),
+        ...malformedIndexes(rawKnowledgeSources, isDoctorKnowledgeSource, "knowledgeSources"),
+        ...malformedIndexes(rawClaims, isDoctorClaim, "claims"),
+        ...malformedIndexes(rawDecisions, isDoctorDecision, "decisions"),
         ...malformedIndexes(rawContextPacks, isDoctorContextPack, "contextPacks"),
         ...malformedIndexes(rawGraphEdges, isDoctorGraphEdge, "graphEdges"),
         ...malformedIndexes(rawReservations, isDoctorReservation, "reservations")
@@ -261,9 +271,13 @@ async function validateStoreRecords(
       const workItems = rawWorkItems.filter(isDoctorWorkItem);
       const evidence = rawEvidence.filter(isDoctorEvidence);
       const verifications = rawVerifications.filter(isDoctorVerification);
+      const knowledgeSources = rawKnowledgeSources.filter(isDoctorKnowledgeSource);
+      const claims = rawClaims.filter(isDoctorClaim);
+      const decisions = rawDecisions.filter(isDoctorDecision);
       const graphEdges = rawGraphEdges.filter(isDoctorGraphEdge);
       const reservations = rawReservations.filter(isDoctorReservation);
       const evidenceById = new Map(evidence.map((record) => [record.meta.id, record]));
+      const sourceById = new Map(knowledgeSources.map((record) => [record.meta.id, record]));
       const verificationsById = new Map(verifications.map((record) => [record.meta.id, record]));
       const workById = new Map(workItems.map((work) => [work.meta.id, work]));
       const danglingDependencies = workItems.flatMap((work) =>
@@ -290,6 +304,41 @@ async function validateStoreRecords(
       const missingContextPacks = workItems
         .filter((work) => !contextPackSubjects.has(work.meta.id))
         .map((work) => work.meta.id);
+      const contextPackBySubject = new Map(
+        rawContextPacks.filter(isDoctorContextPack).map((pack) => [pack.subjectId, pack])
+      );
+      const contextPackDrift = workItems.flatMap((work) => {
+        const pack = contextPackBySubject.get(work.meta.id);
+        if (!pack) {
+          return [];
+        }
+        const expected = buildContextPack({
+          work,
+          evidence: evidence.filter((record) => record.subjectId === work.meta.id),
+          claims,
+          decisions,
+          actor: context.actor,
+          now: pack.generatedAt
+        });
+        return contextPackMatches(pack, expected)
+          ? []
+          : [{ workId: work.meta.id, contextPackId: pack.id, issue: "context_pack_drift" }];
+      });
+      const danglingClaimSources = claims.flatMap((claim) =>
+        claim.sourceIds
+          .filter((sourceId) => !sourceById.has(sourceId))
+          .map((sourceId) => ({ claimId: claim.meta.id, sourceId }))
+      );
+      const danglingClaimEvidence = claims.flatMap((claim) =>
+        claim.evidenceIds
+          .filter((evidenceId) => !evidenceById.has(evidenceId))
+          .map((evidenceId) => ({ claimId: claim.meta.id, evidenceId }))
+      );
+      const danglingDecisionSources = decisions.flatMap((decision) =>
+        decision.sourceIds
+          .filter((sourceId) => !sourceById.has(sourceId))
+          .map((sourceId) => ({ decisionId: decision.meta.id, sourceId }))
+      );
       const duplicateGraphEdges = duplicateGraphEdgeKeys(graphEdges);
       const danglingWorkGraphEdges = graphEdges.flatMap((edge) => {
         const issues: Array<{ edgeId: string; side: "from" | "to"; workId: string }> = [];
@@ -345,6 +394,10 @@ async function validateStoreRecords(
         danglingVerifications,
         staleReadiness,
         missingContextPacks,
+        contextPackDrift,
+        danglingClaimSources,
+        danglingClaimEvidence,
+        danglingDecisionSources,
         duplicateGraphEdges,
         danglingWorkGraphEdges,
         blockConsistency,
@@ -366,6 +419,11 @@ async function validateStoreRecords(
     diagnostics.push(
       diagnosticFromList("work.dangling_verifications", "Dangling work verification references", summary.danglingVerifications)
     );
+    diagnostics.push(diagnosticFromList("knowledge.dangling_sources", "Dangling knowledge source references", [
+      ...summary.danglingClaimSources,
+      ...summary.danglingDecisionSources
+    ]));
+    diagnostics.push(diagnosticFromList("knowledge.dangling_evidence", "Dangling claim evidence references", summary.danglingClaimEvidence));
     diagnostics.push(diagnosticFromList("graph.duplicate_edges", "Duplicate graph edges", summary.duplicateGraphEdges));
     diagnostics.push(diagnosticFromList("graph.dangling_work_edges", "Dangling graph work edges", summary.danglingWorkGraphEdges));
     diagnostics.push(diagnosticFromList("graph.block_consistency", "Block graph and dependency refs disagree", summary.blockConsistency));
@@ -400,22 +458,23 @@ async function validateStoreRecords(
       });
     }
 
-    if (summary.missingContextPacks.length > 0) {
+    const contextPackIssues = [...summary.missingContextPacks.map((workId) => ({ workId, issue: "missing_context_pack" })), ...summary.contextPackDrift];
+    if (contextPackIssues.length > 0) {
       if (fix) {
         await context.runtime.rebuildProjections();
         diagnostics.push({
           code: "projection.context_pack",
           severity: "fixed",
           message: "Rebuilt context pack projections",
-          details: { missingContextPacks: summary.missingContextPacks }
+          details: { contextPackIssues }
         });
         fixed = true;
       } else {
         diagnostics.push({
           code: "projection.context_pack",
           severity: "warning",
-          message: "Some work items are missing context pack projections",
-          details: { missingContextPacks: summary.missingContextPacks }
+          message: "Some context pack projections are missing or stale",
+          details: { contextPackIssues }
         });
       }
     } else {
@@ -461,6 +520,20 @@ function malformedIndexes<T>(
   section: string
 ): Array<{ section: string; index: number }> {
   return values.flatMap((value, index) => (predicate(value) ? [] : [{ section, index }]));
+}
+
+function contextPackMatches(actual: ContextPack, expected: ContextPack): boolean {
+  return (
+    actual.subjectId === expected.subjectId &&
+    actual.title === expected.title &&
+    actual.summary === expected.summary &&
+    arraysEqual(actual.facts, expected.facts) &&
+    arraysEqual(actual.evidence, expected.evidence)
+  );
+}
+
+function arraysEqual(left: readonly string[], right: readonly string[]): boolean {
+  return left.length === right.length && left.every((value, index) => value === right[index]);
 }
 
 function duplicateGraphEdgeKeys(graphEdges: readonly GraphEdge[]): Array<{ key: string; edgeIds: readonly string[] }> {
@@ -673,6 +746,41 @@ function isDoctorVerification(value: unknown): value is VerificationRecord {
   );
 }
 
+function isDoctorKnowledgeSource(value: unknown): value is KnowledgeSource {
+  return (
+    isRecord(value) &&
+    readRecordId(value, "knowledgeSources") !== undefined &&
+    isKnowledgeSourceKind(value.kind) &&
+    typeof value.title === "string" &&
+    typeof value.uri === "string" &&
+    typeof value.summary === "string"
+  );
+}
+
+function isDoctorClaim(value: unknown): value is ClaimRecord {
+  return (
+    isRecord(value) &&
+    readRecordId(value, "claims") !== undefined &&
+    typeof value.statement === "string" &&
+    isClaimStatus(value.status) &&
+    Array.isArray(value.sourceIds) &&
+    Array.isArray(value.evidenceIds)
+  );
+}
+
+function isDoctorDecision(value: unknown): value is DecisionRecord {
+  return (
+    isRecord(value) &&
+    readRecordId(value, "decisions") !== undefined &&
+    typeof value.title === "string" &&
+    typeof value.context === "string" &&
+    typeof value.decision === "string" &&
+    isDecisionStatus(value.status) &&
+    Array.isArray(value.consequences) &&
+    Array.isArray(value.sourceIds)
+  );
+}
+
 function isDoctorContextPack(value: unknown): value is ContextPack {
   return isRecord(value) && typeof value.id === "string" && typeof value.subjectId === "string";
 }
@@ -737,6 +845,18 @@ function isEvidenceOutcome(value: unknown): value is EvidenceRecord["outcome"] {
 
 function isVerificationVerdict(value: unknown): value is VerificationRecord["verdict"] {
   return value === "passed" || value === "failed";
+}
+
+function isKnowledgeSourceKind(value: unknown): value is KnowledgeSource["kind"] {
+  return value === "raw" || value === "document" || value === "chat" || value === "code" || value === "artifact";
+}
+
+function isClaimStatus(value: unknown): value is ClaimRecord["status"] {
+  return value === "proposed" || value === "accepted" || value === "rejected" || value === "stale";
+}
+
+function isDecisionStatus(value: unknown): value is DecisionRecord["status"] {
+  return value === "proposed" || value === "accepted" || value === "superseded" || value === "rejected";
 }
 
 export function asWorkId(value: string): WorkId {

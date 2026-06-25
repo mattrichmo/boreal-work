@@ -12,7 +12,17 @@ export interface FlagDefinition {
 
 export interface CommandDefinition {
   readonly path: readonly string[];
-  readonly category: "workspace" | "work" | "evidence" | "doctor" | "lock" | "meta";
+  readonly category:
+    | "workspace"
+    | "work"
+    | "evidence"
+    | "source"
+    | "claim"
+    | "decision"
+    | "context"
+    | "doctor"
+    | "lock"
+    | "meta";
   readonly summary: string;
   readonly usage: string;
   readonly description?: string;
@@ -205,6 +215,147 @@ export const COMMAND_DEFINITIONS: readonly CommandDefinition[] = [
       flag("command", "value", "Command that produced the evidence."),
       flag("uri", "value", "URI for external evidence."),
     ],
+    positionals: { label: "work id", min: 1, max: 1 },
+    requiresWorkspace: true,
+    supportsJson: true,
+  },
+  {
+    path: ["source", "add"],
+    category: "source",
+    summary: "Add a knowledge source.",
+    usage:
+      "bwrk source add --title <text> --uri <uri> [--kind raw|document|chat|code|artifact] [--summary <text>] [--json]",
+    flags: [
+      flag("title", "value", "Source title."),
+      flag("uri", "value", "Source URI."),
+      flag("kind", "value", "Source kind. Defaults to document."),
+      flag("summary", "value", "Source summary."),
+    ],
+    positionals: { label: "arguments", min: 0, max: 0 },
+    requiresWorkspace: true,
+    supportsJson: true,
+  },
+  {
+    path: ["source", "list"],
+    category: "source",
+    summary: "List knowledge sources.",
+    usage: "bwrk source list [--kind raw|document|chat|code|artifact] [--limit <n>] [--json]",
+    flags: [
+      flag("kind", "value", "Only include sources with this kind."),
+      flag("limit", "value", "Maximum number of sources to print."),
+    ],
+    positionals: { label: "arguments", min: 0, max: 0 },
+    requiresWorkspace: true,
+    supportsJson: true,
+  },
+  {
+    path: ["source", "show"],
+    category: "source",
+    summary: "Show one knowledge source.",
+    usage: "bwrk source show <source-id> [--json]",
+    flags: [],
+    positionals: { label: "source id", min: 1, max: 1 },
+    requiresWorkspace: true,
+    supportsJson: true,
+  },
+  {
+    path: ["claim", "create"],
+    category: "claim",
+    summary: "Create a knowledge claim.",
+    usage:
+      "bwrk claim create --statement <text> [--status proposed|accepted|rejected|stale] [--source <source-id>...] [--evidence <evidence-id>...] [--json]",
+    flags: [
+      flag("statement", "value", "Claim statement."),
+      flag("status", "value", "Claim status. Defaults to proposed."),
+      flag("source", "value", "Source supporting the claim.", true),
+      flag("evidence", "value", "Evidence supporting the claim.", true),
+    ],
+    positionals: { label: "arguments", min: 0, max: 0 },
+    requiresWorkspace: true,
+    supportsJson: true,
+  },
+  {
+    path: ["claim", "list"],
+    category: "claim",
+    summary: "List knowledge claims.",
+    usage: "bwrk claim list [--status proposed|accepted|rejected|stale] [--source <source-id>] [--limit <n>] [--json]",
+    flags: [
+      flag("status", "value", "Only include claims with this status."),
+      flag("source", "value", "Only include claims referencing this source."),
+      flag("limit", "value", "Maximum number of claims to print."),
+    ],
+    positionals: { label: "arguments", min: 0, max: 0 },
+    requiresWorkspace: true,
+    supportsJson: true,
+  },
+  {
+    path: ["claim", "show"],
+    category: "claim",
+    summary: "Show one knowledge claim.",
+    usage: "bwrk claim show <claim-id> [--json]",
+    flags: [],
+    positionals: { label: "claim id", min: 1, max: 1 },
+    requiresWorkspace: true,
+    supportsJson: true,
+  },
+  {
+    path: ["decision", "create"],
+    category: "decision",
+    summary: "Create a decision record.",
+    usage:
+      "bwrk decision create --title <text> --decision <text> [--context <text>] [--status proposed|accepted|superseded|rejected] [--consequence <text>...] [--source <source-id>...] [--json]",
+    flags: [
+      flag("title", "value", "Decision title."),
+      flag("decision", "value", "Decision text."),
+      flag("context", "value", "Decision context."),
+      flag("status", "value", "Decision status. Defaults to accepted."),
+      flag("consequence", "value", "Decision consequence.", true),
+      flag("source", "value", "Source informing the decision.", true),
+    ],
+    positionals: { label: "arguments", min: 0, max: 0 },
+    requiresWorkspace: true,
+    supportsJson: true,
+  },
+  {
+    path: ["decision", "list"],
+    category: "decision",
+    summary: "List decisions.",
+    usage: "bwrk decision list [--status proposed|accepted|superseded|rejected] [--source <source-id>] [--limit <n>] [--json]",
+    flags: [
+      flag("status", "value", "Only include decisions with this status."),
+      flag("source", "value", "Only include decisions referencing this source."),
+      flag("limit", "value", "Maximum number of decisions to print."),
+    ],
+    positionals: { label: "arguments", min: 0, max: 0 },
+    requiresWorkspace: true,
+    supportsJson: true,
+  },
+  {
+    path: ["decision", "show"],
+    category: "decision",
+    summary: "Show one decision.",
+    usage: "bwrk decision show <decision-id> [--json]",
+    flags: [],
+    positionals: { label: "decision id", min: 1, max: 1 },
+    requiresWorkspace: true,
+    supportsJson: true,
+  },
+  {
+    path: ["context", "rebuild"],
+    category: "context",
+    summary: "Rebuild context pack projections.",
+    usage: "bwrk context rebuild [--json]",
+    flags: [],
+    positionals: { label: "arguments", min: 0, max: 0 },
+    requiresWorkspace: true,
+    supportsJson: true,
+  },
+  {
+    path: ["context", "show"],
+    category: "context",
+    summary: "Show a work context pack.",
+    usage: "bwrk context show <work-id> [--json]",
+    flags: [],
     positionals: { label: "work id", min: 1, max: 1 },
     requiresWorkspace: true,
     supportsJson: true,

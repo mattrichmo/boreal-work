@@ -7,12 +7,16 @@ import {
   randomId,
   type ActorRef,
   type AgentId,
+  type ClaimId,
   type ClaimRecord,
+  type ContextPack,
+  type DecisionId,
   type DecisionRecord,
   type EventId,
   type EvidenceId,
   type EvidenceRecord,
   type KnowledgeSource,
+  type KnowledgeSourceId,
   type RuntimeEvent,
   type RuntimePolicy,
   type VerificationRecord,
@@ -84,9 +88,16 @@ export interface BorealRuntime {
     readonly reason: string;
   }): Promise<WorkItem>;
   createKnowledgeSource(input: Omit<Parameters<typeof createKnowledgeSource>[0], "actor" | "now">): Promise<KnowledgeSource>;
+  listKnowledgeSources(): Promise<readonly KnowledgeSource[]>;
+  getKnowledgeSource(sourceId: KnowledgeSourceId): Promise<KnowledgeSource>;
   createClaim(input: Omit<Parameters<typeof createClaim>[0], "actor" | "now">): Promise<ClaimRecord>;
+  listClaims(): Promise<readonly ClaimRecord[]>;
+  getClaim(claimId: ClaimId): Promise<ClaimRecord>;
   createDecision(input: Omit<Parameters<typeof createDecision>[0], "actor" | "now">): Promise<DecisionRecord>;
+  listDecisions(): Promise<readonly DecisionRecord[]>;
+  getDecision(decisionId: DecisionId): Promise<DecisionRecord>;
   rebuildProjections(): Promise<readonly WorkItemView[]>;
+  getContextPack(workId: WorkId): Promise<ContextPack>;
   recomputeReadiness(): Promise<{ readonly changed: number }>;
   getWorkView(workId: WorkId): Promise<WorkItemView>;
   listEvents(): Promise<readonly RuntimeEvent[]>;
@@ -309,8 +320,18 @@ export function createBorealRuntime(options: BorealRuntimeOptions = {}): BorealR
       });
     },
 
+    async listKnowledgeSources(): Promise<readonly KnowledgeSource[]> {
+      return store.read((reader) => reader.listKnowledgeSources());
+    },
+
+    async getKnowledgeSource(sourceId): Promise<KnowledgeSource> {
+      return store.read((reader) => requireKnowledgeSource(reader, sourceId));
+    },
+
     async createClaim(input): Promise<ClaimRecord> {
       return store.write(async (writer) => {
+        await requireKnowledgeSources(writer, input.sourceIds ?? []);
+        await requireEvidenceRecords(writer, input.evidenceIds ?? []);
         const claim = createClaim({ ...input, actor, now: now() });
         await writer.putClaim(claim);
         await appendEvent(writer, "knowledge.claim_created", claim.meta.id, "claim", { status: claim.status });
@@ -318,8 +339,17 @@ export function createBorealRuntime(options: BorealRuntimeOptions = {}): BorealR
       });
     },
 
+    async listClaims(): Promise<readonly ClaimRecord[]> {
+      return store.read((reader) => reader.listClaims());
+    },
+
+    async getClaim(claimId): Promise<ClaimRecord> {
+      return store.read((reader) => requireClaim(reader, claimId));
+    },
+
     async createDecision(input): Promise<DecisionRecord> {
       return store.write(async (writer) => {
+        await requireKnowledgeSources(writer, input.sourceIds ?? []);
         const decision = createDecision({ ...input, actor, now: now() });
         await writer.putDecision(decision);
         await appendEvent(writer, "knowledge.decision_created", decision.meta.id, "decision", {
@@ -327,6 +357,14 @@ export function createBorealRuntime(options: BorealRuntimeOptions = {}): BorealR
         });
         return decision;
       });
+    },
+
+    async listDecisions(): Promise<readonly DecisionRecord[]> {
+      return store.read((reader) => reader.listDecisions());
+    },
+
+    async getDecision(decisionId): Promise<DecisionRecord> {
+      return store.read((reader) => requireDecision(reader, decisionId));
     },
 
     async rebuildProjections(): Promise<readonly WorkItemView[]> {
@@ -346,6 +384,17 @@ export function createBorealRuntime(options: BorealRuntimeOptions = {}): BorealR
 
         await appendEvent(writer, "projection.rebuilt", "projections", "projection", { count: views.length });
         return views;
+      });
+    },
+
+    async getContextPack(workId): Promise<ContextPack> {
+      return store.read(async (reader) => {
+        await requireWork(reader, workId);
+        const pack = await reader.getContextPackForSubject(workId);
+        if (!pack) {
+          throw new BorealError("BOREAL_NOT_FOUND", "Context pack not found; run `bwrk context rebuild`", { workId });
+        }
+        return pack;
       });
     },
 
@@ -386,6 +435,57 @@ async function requireWork(reader: BorealReader, workId: WorkId): Promise<WorkIt
     throw new BorealError("BOREAL_NOT_FOUND", "Work item not found", { workId });
   }
   return work;
+}
+
+async function requireKnowledgeSource(reader: BorealReader, sourceId: KnowledgeSourceId): Promise<KnowledgeSource> {
+  const source = await reader.getKnowledgeSource(sourceId);
+  if (!source) {
+    throw new BorealError("BOREAL_NOT_FOUND", "Knowledge source not found", { sourceId });
+  }
+  return source;
+}
+
+async function requireClaim(reader: BorealReader, claimId: ClaimId): Promise<ClaimRecord> {
+  const claim = await reader.getClaim(claimId);
+  if (!claim) {
+    throw new BorealError("BOREAL_NOT_FOUND", "Claim not found", { claimId });
+  }
+  return claim;
+}
+
+async function requireDecision(reader: BorealReader, decisionId: DecisionId): Promise<DecisionRecord> {
+  const decision = await reader.getDecision(decisionId);
+  if (!decision) {
+    throw new BorealError("BOREAL_NOT_FOUND", "Decision not found", { decisionId });
+  }
+  return decision;
+}
+
+async function requireKnowledgeSources(
+  reader: BorealReader,
+  sourceIds: readonly KnowledgeSourceId[]
+): Promise<void> {
+  const missingSourceIds: KnowledgeSourceId[] = [];
+  for (const sourceId of sourceIds) {
+    if (!(await reader.getKnowledgeSource(sourceId))) {
+      missingSourceIds.push(sourceId);
+    }
+  }
+  if (missingSourceIds.length > 0) {
+    throw new BorealError("BOREAL_NOT_FOUND", "Knowledge record references missing source", { missingSourceIds });
+  }
+}
+
+async function requireEvidenceRecords(reader: BorealReader, evidenceIds: readonly EvidenceId[]): Promise<void> {
+  const missingEvidenceIds: EvidenceId[] = [];
+  for (const evidenceId of evidenceIds) {
+    if (!(await reader.getEvidence(evidenceId))) {
+      missingEvidenceIds.push(evidenceId);
+    }
+  }
+  if (missingEvidenceIds.length > 0) {
+    throw new BorealError("BOREAL_NOT_FOUND", "Knowledge record references missing evidence", { missingEvidenceIds });
+  }
 }
 
 async function loadDependencies(reader: BorealReader, work: WorkItem): Promise<readonly WorkItem[]> {

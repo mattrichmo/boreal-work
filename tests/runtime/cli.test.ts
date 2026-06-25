@@ -36,6 +36,17 @@ describe("bwrk cli", () => {
       "## `evidence add`",
       "## `work verify`",
       "## `work close`",
+      "## `source add`",
+      "## `source list`",
+      "## `source show`",
+      "## `claim create`",
+      "## `claim list`",
+      "## `claim show`",
+      "## `decision create`",
+      "## `decision list`",
+      "## `decision show`",
+      "## `context rebuild`",
+      "## `context show`",
       "## `doctor`",
       "## `lock inspect`",
       "## `lock break`"
@@ -54,7 +65,7 @@ describe("bwrk cli", () => {
 
     expect(root.exitCode).toBe(0);
     expect(root.stdout).toContain("bwrk - Boreal Work CLI");
-    expect(root.stdout).toContain("bwrk help [init|work|evidence|doctor|lock|commands]");
+    expect(root.stdout).toContain("bwrk help [init|work|evidence|source|claim|decision|context|doctor|lock|commands]");
     expect(work.exitCode).toBe(0);
     expect(work.stdout).toContain("bwrk work create");
     expect(work.stdout).toContain("--force --reason");
@@ -96,6 +107,9 @@ describe("bwrk cli", () => {
 
     expect(result.exitCode).toBe(0);
     expect(registry.commands.map((command) => command.path.join(" "))).toContain("commands");
+    expect(registry.commands.map((command) => command.path.join(" "))).toEqual(
+      expect.arrayContaining(["source add", "claim create", "decision create", "context rebuild", "context show"])
+    );
     expect(reserve?.flags).toEqual(
       expect.arrayContaining([
         expect.objectContaining({ name: "force", type: "boolean" }),
@@ -192,6 +206,107 @@ describe("bwrk cli", () => {
     const doctor = await runCli(rootDir, ["doctor", "--json"]);
     expect(doctor.exitCode).toBe(0);
     expect(parseData<{ readonly ok: boolean }>(doctor.stdout).ok).toBe(true);
+  });
+
+  it("runs the knowledge context lifecycle through file-backed commands", async () => {
+    const rootDir = await makeTempWorkspace();
+    await runCli(rootDir, ["init", "--json"]);
+
+    const sourceResult = await runCli(rootDir, [
+      "source",
+      "add",
+      "--title",
+      "Context design note",
+      "--uri",
+      "file://context-design.md",
+      "--kind",
+      "document",
+      "--summary",
+      "Knowledge context must be visible to agents.",
+      "--json"
+    ]);
+    const source = parseData<{ readonly meta: { readonly id: string }; readonly title: string }>(sourceResult.stdout);
+    expect(sourceResult.exitCode).toBe(0);
+
+    const sourceShow = await runCli(rootDir, ["source", "show", source.meta.id, "--json"]);
+    expect(parseData<{ readonly title: string }>(sourceShow.stdout).title).toBe("Context design note");
+
+    const sourceList = await runCli(rootDir, ["source", "list", "--kind", "document", "--json"]);
+    expect(parseData<Array<{ readonly id: string }>>(sourceList.stdout).map((row) => row.id)).toContain(source.meta.id);
+
+    const claimResult = await runCli(rootDir, [
+      "claim",
+      "create",
+      "--statement",
+      "Context packs include accepted claims.",
+      "--status",
+      "accepted",
+      "--source",
+      source.meta.id,
+      "--json"
+    ]);
+    const claim = parseData<{ readonly meta: { readonly id: string }; readonly status: string }>(claimResult.stdout);
+    expect(claim.status).toBe("accepted");
+
+    const claimShow = await runCli(rootDir, ["claim", "show", claim.meta.id, "--json"]);
+    expect(parseData<{ readonly statement: string }>(claimShow.stdout).statement).toContain("accepted claims");
+
+    const claimList = await runCli(rootDir, ["claim", "list", "--status", "accepted", "--source", source.meta.id, "--json"]);
+    expect(parseData<Array<{ readonly id: string }>>(claimList.stdout).map((row) => row.id)).toContain(claim.meta.id);
+
+    const decisionResult = await runCli(rootDir, [
+      "decision",
+      "create",
+      "--title",
+      "Expose context packs",
+      "--context",
+      "Agents need compact project memory.",
+      "--decision",
+      "Expose context packs through the runtime and CLI.",
+      "--status",
+      "accepted",
+      "--consequence",
+      "CLI users can inspect rebuilt context packs.",
+      "--source",
+      source.meta.id,
+      "--json"
+    ]);
+    const decision = parseData<{ readonly meta: { readonly id: string }; readonly status: string }>(decisionResult.stdout);
+    expect(decision.status).toBe("accepted");
+
+    const decisionShow = await runCli(rootDir, ["decision", "show", decision.meta.id, "--json"]);
+    expect(parseData<{ readonly decision: string }>(decisionShow.stdout).decision).toContain("runtime and CLI");
+
+    const decisionList = await runCli(rootDir, ["decision", "list", "--status", "accepted", "--source", source.meta.id, "--json"]);
+    expect(parseData<Array<{ readonly id: string }>>(decisionList.stdout).map((row) => row.id)).toContain(
+      decision.meta.id
+    );
+
+    const workResult = await runCli(rootDir, ["work", "create", "Build context commands", "--ready", "--json"]);
+    const work = parseData<{ readonly meta: { readonly id: string } }>(workResult.stdout);
+
+    const evidenceResult = await runCli(rootDir, [
+      "evidence",
+      "add",
+      work.meta.id,
+      "--summary",
+      "context command test passed",
+      "--kind",
+      "test",
+      "--outcome",
+      "passed",
+      "--json"
+    ]);
+    expect(evidenceResult.exitCode).toBe(0);
+
+    const rebuild = await runCli(rootDir, ["context", "rebuild", "--json"]);
+    expect(parseData<{ readonly rebuilt: number }>(rebuild.stdout).rebuilt).toBe(1);
+
+    const contextPack = await runCli(rootDir, ["context", "show", work.meta.id, "--json"]);
+    const pack = parseData<{ readonly facts: readonly string[]; readonly evidence: readonly string[] }>(contextPack.stdout);
+    expect(pack.facts).toContain("claim: Context packs include accepted claims.");
+    expect(pack.facts).toContain("decision: Expose context packs through the runtime and CLI.");
+    expect(pack.evidence).toContain("passed: context command test passed");
   });
 
   it("keeps explicit workspace paths exact while cwd discovery walks upward", async () => {

@@ -1,7 +1,16 @@
 import {
   BorealError,
+  type ClaimId,
+  type ClaimRecord,
+  type ClaimStatus,
+  type DecisionId,
+  type DecisionRecord,
+  type DecisionStatus,
   type EvidenceKind,
   type EvidenceOutcome,
+  type KnowledgeSource,
+  type KnowledgeSourceId,
+  type KnowledgeSourceKind,
   type VerificationVerdict,
   type WorkKind,
   type WorkPriority,
@@ -70,6 +79,14 @@ export async function runCommand(args: ParsedArgs, output: CliOutput, cwd: strin
       return workCommand(action, rest, context, args, output, json);
     case "evidence":
       return evidenceCommand(action, rest, context, args, output, json);
+    case "source":
+      return sourceCommand(action, rest, context, args, output, json);
+    case "claim":
+      return claimCommand(action, rest, context, args, output, json);
+    case "decision":
+      return decisionCommand(action, rest, context, args, output, json);
+    case "context":
+      return contextCommand(action, rest, context, output, json);
     case "doctor":
       return doctorCommand(context, args, output, json);
     case "lock":
@@ -234,6 +251,155 @@ async function evidenceCommand(
   return { exitCode: 0 };
 }
 
+async function sourceCommand(
+  action: string | undefined,
+  rest: readonly string[],
+  context: CliContext,
+  args: ParsedArgs,
+  output: CliOutput,
+  json: boolean
+): Promise<CommandResult> {
+  switch (action) {
+    case "add": {
+      const source = await context.runtime.createKnowledgeSource({
+        kind: parseSourceKind(flagValue(args, "kind")) ?? "document",
+        title: requiredFlag(args, "title"),
+        uri: requiredFlag(args, "uri"),
+        summary: flagValue(args, "summary")
+      });
+      output.write(formatRecord(source, json));
+      return { exitCode: 0 };
+    }
+    case "list": {
+      const kind = parseSourceKind(flagValue(args, "kind"));
+      const limit = parseLimit(flagValue(args, "limit"));
+      const sources = await context.runtime.listKnowledgeSources();
+      const rows = sources
+        .filter((source) => !kind || source.kind === kind)
+        .slice(0, limit ?? sources.length)
+        .map(sourceListRow);
+      output.write(json ? formatRecord(rows, true) : table(rows));
+      return { exitCode: 0 };
+    }
+    case "show": {
+      const source = await context.runtime.getKnowledgeSource(asSourceId(requiredPositional(rest, 0, "source id")));
+      output.write(formatRecord(source, json));
+      return { exitCode: 0 };
+    }
+    default:
+      throw new BorealError("BOREAL_INVALID_INPUT", `Unknown source command: ${action ?? ""}`);
+  }
+}
+
+async function claimCommand(
+  action: string | undefined,
+  rest: readonly string[],
+  context: CliContext,
+  args: ParsedArgs,
+  output: CliOutput,
+  json: boolean
+): Promise<CommandResult> {
+  switch (action) {
+    case "create": {
+      const claim = await context.runtime.createClaim({
+        statement: requiredFlag(args, "statement"),
+        status: parseClaimStatus(flagValue(args, "status")),
+        sourceIds: flagValues(args, "source").map(asSourceId),
+        evidenceIds: flagValues(args, "evidence").map(asEvidenceId)
+      });
+      output.write(formatRecord(claim, json));
+      return { exitCode: 0 };
+    }
+    case "list": {
+      const status = parseClaimStatus(flagValue(args, "status"));
+      const sourceId = optionalSourceId(flagValue(args, "source"));
+      const limit = parseLimit(flagValue(args, "limit"));
+      const claims = await context.runtime.listClaims();
+      const rows = claims
+        .filter((claim) => !status || claim.status === status)
+        .filter((claim) => !sourceId || claim.sourceIds.includes(sourceId))
+        .slice(0, limit ?? claims.length)
+        .map(claimListRow);
+      output.write(json ? formatRecord(rows, true) : table(rows));
+      return { exitCode: 0 };
+    }
+    case "show": {
+      const claim = await context.runtime.getClaim(asClaimId(requiredPositional(rest, 0, "claim id")));
+      output.write(formatRecord(claim, json));
+      return { exitCode: 0 };
+    }
+    default:
+      throw new BorealError("BOREAL_INVALID_INPUT", `Unknown claim command: ${action ?? ""}`);
+  }
+}
+
+async function decisionCommand(
+  action: string | undefined,
+  rest: readonly string[],
+  context: CliContext,
+  args: ParsedArgs,
+  output: CliOutput,
+  json: boolean
+): Promise<CommandResult> {
+  switch (action) {
+    case "create": {
+      const decision = await context.runtime.createDecision({
+        title: requiredFlag(args, "title"),
+        context: flagValue(args, "context") ?? "",
+        decision: requiredFlag(args, "decision"),
+        status: parseDecisionStatus(flagValue(args, "status")),
+        consequences: flagValues(args, "consequence"),
+        sourceIds: flagValues(args, "source").map(asSourceId)
+      });
+      output.write(formatRecord(decision, json));
+      return { exitCode: 0 };
+    }
+    case "list": {
+      const status = parseDecisionStatus(flagValue(args, "status"));
+      const sourceId = optionalSourceId(flagValue(args, "source"));
+      const limit = parseLimit(flagValue(args, "limit"));
+      const decisions = await context.runtime.listDecisions();
+      const rows = decisions
+        .filter((decision) => !status || decision.status === status)
+        .filter((decision) => !sourceId || decision.sourceIds.includes(sourceId))
+        .slice(0, limit ?? decisions.length)
+        .map(decisionListRow);
+      output.write(json ? formatRecord(rows, true) : table(rows));
+      return { exitCode: 0 };
+    }
+    case "show": {
+      const decision = await context.runtime.getDecision(asDecisionId(requiredPositional(rest, 0, "decision id")));
+      output.write(formatRecord(decision, json));
+      return { exitCode: 0 };
+    }
+    default:
+      throw new BorealError("BOREAL_INVALID_INPUT", `Unknown decision command: ${action ?? ""}`);
+  }
+}
+
+async function contextCommand(
+  action: string | undefined,
+  rest: readonly string[],
+  context: CliContext,
+  output: CliOutput,
+  json: boolean
+): Promise<CommandResult> {
+  switch (action) {
+    case "rebuild": {
+      const views = await context.runtime.rebuildProjections();
+      output.write(formatRecord({ rebuilt: views.length, views }, json));
+      return { exitCode: 0 };
+    }
+    case "show": {
+      const pack = await context.runtime.getContextPack(asWorkId(requiredPositional(rest, 0, "work id")));
+      output.write(formatRecord(pack, json));
+      return { exitCode: 0 };
+    }
+    default:
+      throw new BorealError("BOREAL_INVALID_INPUT", `Unknown context command: ${action ?? ""}`);
+  }
+}
+
 async function doctorCommand(
   context: CliContext,
   args: ParsedArgs,
@@ -281,6 +447,27 @@ function requiredPositional(values: readonly string[], index: number, label: str
     throw new BorealError("BOREAL_INVALID_INPUT", `Missing ${label}`);
   }
   return value;
+}
+
+function asSourceId(value: string): KnowledgeSourceId {
+  if (!value.startsWith("bw_source_")) {
+    throw new BorealError("BOREAL_INVALID_INPUT", `Expected a source id, got ${value}`);
+  }
+  return value as KnowledgeSourceId;
+}
+
+function asClaimId(value: string): ClaimId {
+  if (!value.startsWith("bw_claim_")) {
+    throw new BorealError("BOREAL_INVALID_INPUT", `Expected a claim id, got ${value}`);
+  }
+  return value as ClaimId;
+}
+
+function asDecisionId(value: string): DecisionId {
+  if (!value.startsWith("bw_decision_")) {
+    throw new BorealError("BOREAL_INVALID_INPUT", `Expected a decision id, got ${value}`);
+  }
+  return value as DecisionId;
 }
 
 function parseWorkKind(value: string | undefined): WorkKind | undefined {
@@ -364,12 +551,46 @@ function parseOutcome(value: string | undefined): EvidenceOutcome {
   throw new BorealError("BOREAL_INVALID_INPUT", "--outcome must be passed, failed, observed, or unknown");
 }
 
+function parseSourceKind(value: string | undefined): KnowledgeSourceKind | undefined {
+  if (!value) {
+    return undefined;
+  }
+  if (value === "raw" || value === "document" || value === "chat" || value === "code" || value === "artifact") {
+    return value;
+  }
+  throw new BorealError("BOREAL_INVALID_INPUT", "--kind must be raw, document, chat, code, or artifact");
+}
+
+function parseClaimStatus(value: string | undefined): ClaimStatus | undefined {
+  if (!value) {
+    return undefined;
+  }
+  if (value === "proposed" || value === "accepted" || value === "rejected" || value === "stale") {
+    return value;
+  }
+  throw new BorealError("BOREAL_INVALID_INPUT", "--status must be proposed, accepted, rejected, or stale");
+}
+
+function parseDecisionStatus(value: string | undefined): DecisionStatus | undefined {
+  if (!value) {
+    return undefined;
+  }
+  if (value === "proposed" || value === "accepted" || value === "superseded" || value === "rejected") {
+    return value;
+  }
+  throw new BorealError("BOREAL_INVALID_INPUT", "--status must be proposed, accepted, superseded, or rejected");
+}
+
 function parseVerdict(value: string | undefined): VerificationVerdict {
   const verdict = value ?? "passed";
   if (verdict === "passed" || verdict === "failed") {
     return verdict;
   }
   throw new BorealError("BOREAL_INVALID_INPUT", "--verdict must be passed or failed");
+}
+
+function optionalSourceId(value: string | undefined): KnowledgeSourceId | undefined {
+  return value ? asSourceId(value) : undefined;
 }
 
 function workListRow(work: {
@@ -395,6 +616,35 @@ function textWorkListRow(row: WorkListRow): Record<string, string> {
     priority: row.priority,
     title: row.title,
     labels: row.labels.join(",")
+  };
+}
+
+function sourceListRow(source: KnowledgeSource): Record<string, string> {
+  return {
+    id: source.meta.id,
+    kind: source.kind,
+    title: source.title,
+    uri: source.uri
+  };
+}
+
+function claimListRow(claim: ClaimRecord): Record<string, string> {
+  return {
+    id: claim.meta.id,
+    status: claim.status,
+    statement: claim.statement,
+    sources: claim.sourceIds.join(","),
+    evidence: claim.evidenceIds.join(",")
+  };
+}
+
+function decisionListRow(decision: DecisionRecord): Record<string, string> {
+  return {
+    id: decision.meta.id,
+    status: decision.status,
+    title: decision.title,
+    decision: decision.decision,
+    sources: decision.sourceIds.join(",")
   };
 }
 
@@ -429,6 +679,6 @@ Usage:
 ${COMMAND_DEFINITIONS.map((definition) => `  ${definition.usage}`).join("\n")}
 
 Help:
-  bwrk help [init|work|evidence|doctor|lock|commands]
+  bwrk help [init|work|evidence|source|claim|decision|context|doctor|lock|commands]
 `;
 }

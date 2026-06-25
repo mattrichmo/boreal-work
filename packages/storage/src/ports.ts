@@ -34,6 +34,7 @@ export interface BorealReader {
   getVerification(id: VerificationId): Promise<VerificationRecord | undefined>;
   listVerificationsForSubject(subjectId: string): Promise<readonly VerificationRecord[]>;
   getKnowledgeSource(id: KnowledgeSourceId): Promise<KnowledgeSource | undefined>;
+  listKnowledgeSources(): Promise<readonly KnowledgeSource[]>;
   getClaim(id: ClaimId): Promise<ClaimRecord | undefined>;
   getDecision(id: DecisionId): Promise<DecisionRecord | undefined>;
   listClaims(): Promise<readonly ClaimRecord[]>;
@@ -47,6 +48,7 @@ export interface BorealReader {
   listEvents(): Promise<readonly RuntimeEvent[]>;
   getProjection(id: ProjectionId): Promise<ProjectionRecord | undefined>;
   listContextPacks(): Promise<readonly ContextPack[]>;
+  getContextPackForSubject(subjectId: string): Promise<ContextPack | undefined>;
 }
 
 export interface BorealWriter extends BorealReader {
@@ -67,4 +69,3 @@ export interface BorealStore {
   read<T>(operation: (reader: BorealReader) => Promise<T> | T): Promise<T>;
   write<T>(operation: (writer: BorealWriter) => Promise<T> | T): Promise<T>;
 }
-

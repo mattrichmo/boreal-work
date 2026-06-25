@@ -111,6 +111,10 @@ class MemoryTransaction implements BorealWriter {
     return cloneMaybe(this.state.knowledgeSources.get(id));
   }
 
+  async listKnowledgeSources(): Promise<readonly KnowledgeSource[]> {
+    return deepClone([...this.state.knowledgeSources.values()]);
+  }
+
   async getClaim(id: ClaimId): Promise<ClaimRecord | undefined> {
     return cloneMaybe(this.state.claims.get(id));
   }
@@ -167,6 +171,10 @@ class MemoryTransaction implements BorealWriter {
 
   async listContextPacks(): Promise<readonly ContextPack[]> {
     return deepClone([...this.state.contextPacks.values()]);
+  }
+
+  async getContextPackForSubject(subjectId: string): Promise<ContextPack | undefined> {
+    return cloneMaybe([...this.state.contextPacks.values()].find((record) => record.subjectId === subjectId));
   }
 
   async putWorkItem(item: WorkItem): Promise<void> {

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { BorealError, type ActorRef } from "@boreal/core";
+import { BorealError, type ActorRef, type EvidenceId, type KnowledgeSourceId } from "@boreal/core";
 import { createBorealRuntime } from "@boreal/engine";
 import { InMemoryBorealStore } from "@boreal/storage";
 
@@ -252,5 +252,71 @@ describe("boreal runtime proof slice", () => {
 
     await expect(runtime.recomputeReadiness()).resolves.toEqual({ changed: 1 });
     await expect(runtime.getWorkView(blocked.meta.id)).resolves.toMatchObject({ status: "ready" });
+  });
+
+  it("includes accepted claims and decisions in rebuilt context packs", async () => {
+    const runtime = createBorealRuntime({ actor });
+    const work = await runtime.createWork({
+      title: "Build context surface",
+      description: "Expose knowledge records through context packs."
+    });
+    const source = await runtime.createKnowledgeSource({
+      kind: "document",
+      title: "Context design note",
+      uri: "file://context-design.md",
+      summary: "Knowledge context must be visible to agents."
+    });
+    const evidence = await runtime.recordEvidence({
+      subjectId: work.meta.id,
+      subjectType: "work",
+      kind: "test",
+      summary: "context pack test passed",
+      outcome: "passed"
+    });
+
+    await runtime.createClaim({
+      statement: "Context packs include accepted claims.",
+      status: "accepted",
+      sourceIds: [source.meta.id],
+      evidenceIds: [evidence.meta.id]
+    });
+    await runtime.createDecision({
+      title: "Expose context packs",
+      context: "Agents need compact project memory.",
+      decision: "Expose context packs through the runtime and CLI.",
+      status: "accepted",
+      sourceIds: [source.meta.id]
+    });
+
+    await runtime.rebuildProjections();
+    const pack = await runtime.getContextPack(work.meta.id);
+
+    expect(pack.facts).toContain("claim: Context packs include accepted claims.");
+    expect(pack.facts).toContain("decision: Expose context packs through the runtime and CLI.");
+    expect(pack.evidence).toContain("passed: context pack test passed");
+  });
+
+  it("rejects dangling knowledge source and evidence references", async () => {
+    const runtime = createBorealRuntime({ actor });
+    const missingSourceId = "bw_source_deadbeefdead" as KnowledgeSourceId;
+    const missingEvidenceId = "bw_evidence_deadbeefdead" as EvidenceId;
+
+    await expect(
+      runtime.createClaim({
+        statement: "This claim has missing references.",
+        status: "accepted",
+        sourceIds: [missingSourceId],
+        evidenceIds: [missingEvidenceId]
+      })
+    ).rejects.toMatchObject({ code: "BOREAL_NOT_FOUND" } satisfies Partial<BorealError>);
+
+    await expect(
+      runtime.createDecision({
+        title: "Missing source decision",
+        context: "Invalid fixture.",
+        decision: "Reject missing sources.",
+        sourceIds: [missingSourceId]
+      })
+    ).rejects.toMatchObject({ code: "BOREAL_NOT_FOUND" } satisfies Partial<BorealError>);
   });
 });
