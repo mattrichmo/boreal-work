@@ -608,10 +608,12 @@ JSON `data` contains `outDir`, `files`, and `recordCounts`.
 ## `import json`
 
 ```bash
-bwrk import json --from <path> [--json]
+bwrk import json --from <path> [--allow-external-read] [--json]
 ```
 
 Imports a `boreal.export.v1` document or raw `boreal.file-store.v1` state document. Import validates required sections and references before writing. Existing records with identical IDs and identical content are skipped. Existing records with identical IDs and different content are rejected as conflicts.
+
+By default, `--from` must resolve inside the workspace, including after symlink resolution. Use `--allow-external-read` for an intentional external file import.
 
 JSON `data` contains per-section `imported` and `skipped` counts.
 

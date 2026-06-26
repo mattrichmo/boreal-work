@@ -579,8 +579,11 @@ export const COMMAND_DEFINITIONS: readonly CommandDefinition[] = [
     path: ["import", "json"],
     category: "import",
     summary: "Import a JSON snapshot.",
-    usage: "bwrk import json --from <path> [--json]",
-    flags: [flag("from", "value", "JSON export or file-store state document to import.")],
+    usage: "bwrk import json --from <path> [--allow-external-read] [--json]",
+    flags: [
+      flag("from", "value", "JSON export or file-store state document to import."),
+      flag("allow-external-read", "boolean", "Allow importing a file outside the workspace."),
+    ],
     positionals: { label: "arguments", min: 0, max: 0 },
     requiresWorkspace: true,
     supportsJson: true,

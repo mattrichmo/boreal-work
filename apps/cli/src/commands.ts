@@ -934,7 +934,14 @@ async function importCommand(
 ): Promise<CommandResult> {
   switch (action) {
     case "json": {
-      output.write(formatRecord(await importJson(context, requiredFlag(args, "from")), json));
+      output.write(
+        formatRecord(
+          await importJson(context, requiredFlag(args, "from"), {
+            allowExternalRead: hasFlag(args, "allow-external-read")
+          }),
+          json
+        )
+      );
       return { exitCode: 0 };
     }
     default:

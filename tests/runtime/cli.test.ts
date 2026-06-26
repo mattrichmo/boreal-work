@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -1163,6 +1163,16 @@ describe("bwrk cli", () => {
     expect(markdownPayload.outDir).toBe(join(rootDir, "markdown-export"));
     expect(markdownPayload.files.some((file) => file.endsWith(`/work/${work.meta.id}.md`))).toBe(true);
 
+    const outsideDir = await makeTempWorkspace();
+    await symlink(outsideDir, join(rootDir, "linked-out"), "dir");
+    const symlinkedExport = await runCli(rootDir, ["export", "markdown", "--out", "linked-out/markdown", "--json"]);
+    const symlinkedExportPayload = parseJson<{ readonly ok: false; readonly code: string; readonly message: string }>(
+      symlinkedExport.stderr
+    );
+    expect(symlinkedExport.exitCode).toBe(2);
+    expect(symlinkedExportPayload.code).toBe("BOREAL_INVALID_INPUT");
+    expect(symlinkedExportPayload.message).toContain("Path escapes Boreal workspace");
+
     const snapshot = await runCli(rootDir, ["snapshot", "create", "--name", "baseline", "--json"]);
     const snapshotPayload = parseData<{ readonly id: string; readonly contentHash: string }>(snapshot.stdout);
     expect(snapshotPayload.id).toContain("baseline");
@@ -1178,14 +1188,22 @@ describe("bwrk cli", () => {
 
     const targetDir = await makeTempWorkspace();
     await runCli(targetDir, ["init", "--json"]);
-    const imported = await runCli(targetDir, ["import", "json", "--from", exportPath, "--json"]);
+    const blockedExternalImport = await runCli(targetDir, ["import", "json", "--from", exportPath, "--json"]);
+    const blockedExternalPayload = parseJson<{ readonly ok: false; readonly code: string; readonly message: string }>(
+      blockedExternalImport.stderr
+    );
+    expect(blockedExternalImport.exitCode).toBe(2);
+    expect(blockedExternalPayload.code).toBe("BOREAL_INVALID_INPUT");
+    expect(blockedExternalPayload.message).toContain("Path escapes Boreal workspace");
+
+    const imported = await runCli(targetDir, ["import", "json", "--from", exportPath, "--allow-external-read", "--json"]);
     const importPayload = parseData<{ readonly imported: { readonly workItems: number }; readonly skipped: { readonly workItems: number } }>(
       imported.stdout
     );
     expect(importPayload.imported.workItems).toBe(1);
     expect(importPayload.skipped.workItems).toBe(0);
 
-    const importedAgain = await runCli(targetDir, ["import", "json", "--from", exportPath, "--json"]);
+    const importedAgain = await runCli(targetDir, ["import", "json", "--from", exportPath, "--allow-external-read", "--json"]);
     expect(parseData<{ readonly skipped: { readonly workItems: number } }>(importedAgain.stdout).skipped.workItems).toBe(1);
 
     const importedDoctor = await runCli(targetDir, ["doctor", "--json"]);
@@ -1226,7 +1244,7 @@ describe("bwrk cli", () => {
       )
     };
     await writeFile(danglingPath, `${JSON.stringify(dangling, null, 2)}\n`, "utf8");
-    const danglingImport = await runCli(targetDir, ["import", "json", "--from", danglingPath, "--json"]);
+    const danglingImport = await runCli(targetDir, ["import", "json", "--from", danglingPath, "--allow-external-read", "--json"]);
     const danglingPayload = parseJson<{ readonly ok: false; readonly code: string }>(danglingImport.stderr);
     expect(danglingImport.exitCode).toBe(2);
     expect(danglingPayload.code).toBe("BOREAL_INVALID_INPUT");

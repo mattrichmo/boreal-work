@@ -4,6 +4,7 @@ import { basename, dirname, join, resolve } from "node:path";
 import {
   BorealError,
   assertPathInside,
+  assertRealPathInside,
   canonicalJson,
   hashContent,
   nowIso
@@ -36,6 +37,10 @@ export interface MarkdownExportResult {
 export interface ImportResult {
   readonly imported: Record<SnapshotSection, number>;
   readonly skipped: Record<SnapshotSection, number>;
+}
+
+export interface ImportJsonOptions {
+  readonly allowExternalRead?: boolean;
 }
 
 export interface SnapshotCreateResult {
@@ -99,7 +104,7 @@ export async function exportJson(context: CliContext, outPath: string | undefine
     return document;
   }
 
-  const resolvedPath = resolveWorkspacePath(context, outPath);
+  const resolvedPath = await resolveWorkspacePath(context, outPath);
   await writeTextFileAtomic(resolvedPath, `${JSON.stringify(document, null, 2)}\n`);
   return {
     path: resolvedPath,
@@ -110,7 +115,7 @@ export async function exportJson(context: CliContext, outPath: string | undefine
 
 export async function exportMarkdown(context: CliContext, outDir: string | undefined): Promise<MarkdownExportResult> {
   const document = await buildExportDocument(context);
-  const resolvedDir = resolveWorkspacePath(context, outDir ?? ".boreal/exports/markdown");
+  const resolvedDir = await resolveWorkspacePath(context, outDir ?? ".boreal/exports/markdown");
   await mkdir(resolvedDir, { recursive: true });
 
   const files: string[] = [];
@@ -128,8 +133,8 @@ export async function exportMarkdown(context: CliContext, outDir: string | undef
   };
 }
 
-export async function importJson(context: CliContext, fromPath: string): Promise<ImportResult> {
-  const resolvedPath = resolveReadablePath(context, fromPath);
+export async function importJson(context: CliContext, fromPath: string, options: ImportJsonOptions = {}): Promise<ImportResult> {
+  const resolvedPath = await resolveReadablePath(context, fromPath, Boolean(options.allowExternalRead));
   const parsed = JSON.parse(await readFile(resolvedPath, "utf8")) as unknown;
   const incoming = parseImportSnapshot(parsed);
   return importSnapshot(context.store, incoming);
@@ -584,14 +589,20 @@ async function snapshotListEntry(path: string): Promise<SnapshotListEntry> {
   }
 }
 
-function resolveWorkspacePath(context: CliContext, path: string): string {
+async function resolveWorkspacePath(context: CliContext, path: string): Promise<string> {
   const resolvedPath = resolve(context.workspaceRoot, path);
   assertPathInside(context.workspaceRoot, resolvedPath);
+  await assertRealPathInside(context.workspaceRoot, resolvedPath);
   return resolvedPath;
 }
 
-function resolveReadablePath(context: CliContext, path: string): string {
-  return resolve(context.workspaceRoot, path);
+async function resolveReadablePath(context: CliContext, path: string, allowExternalRead: boolean): Promise<string> {
+  const resolvedPath = resolve(context.workspaceRoot, path);
+  if (!allowExternalRead) {
+    assertPathInside(context.workspaceRoot, resolvedPath);
+    await assertRealPathInside(context.workspaceRoot, resolvedPath);
+  }
+  return resolvedPath;
 }
 
 async function writeTextFileAtomic(path: string, content: string): Promise<void> {
