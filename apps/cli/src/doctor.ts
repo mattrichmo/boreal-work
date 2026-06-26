@@ -3,6 +3,7 @@ import { existsSync } from "node:fs";
 import {
   BorealError,
   detectSuspiciousUnicode,
+  deterministicId,
   normalizeActorId,
   normalizeLabel,
   readJsonFile,
@@ -15,6 +16,7 @@ import {
   type EvidenceRecord,
   type GraphEdge,
   type KnowledgeSource,
+  type ProjectionId,
   type ProjectionRecord,
   type RuntimeOperation,
   type VerificationRecord,
@@ -26,8 +28,10 @@ import { breakStaleFileLock, inspectFileLock } from "@boreal/storage";
 import { deriveReadinessStatus } from "@boreal/work-engine";
 
 import type { CliContext } from "./context.js";
-import { exportDriftDiagnostics, ledgerStatus } from "./import-export.js";
+import { inspectGitWorktree } from "./git-worktree.js";
+import { exportDriftDiagnostics, ledgerStatus, readGeneratedLedgerTombstones } from "./import-export.js";
 import { inspectSearchIndex, searchIndexLockDir, writeSearchIndex } from "./search-cli.js";
+import { inspectVault } from "./vault.js";
 
 export type DiagnosticSeverity = "ok" | "warning" | "error" | "fixed";
 
@@ -84,6 +88,10 @@ export async function runDoctor(context: CliContext, fix: boolean, strict = fals
   const lockDiagnostics = await validateRuntimeLocks(context, fix);
   diagnostics.push(...lockDiagnostics.diagnostics);
   fixed = fixed || lockDiagnostics.fixed;
+
+  diagnostics.push(await validateGitWorktree(context));
+  diagnostics.push(await validateVaultStructure(context));
+  diagnostics.push(await validateVaultHealth(context));
 
   const state = await readStateDocument(context, diagnostics);
   if (!state) {
@@ -198,6 +206,46 @@ async function validateRuntimeLocks(
   }
 
   return { fixed, diagnostics };
+}
+
+async function validateGitWorktree(context: CliContext): Promise<Diagnostic> {
+  const inspection = await inspectGitWorktree(context);
+  return {
+    code: "git.worktree",
+    severity: inspection.ok ? "ok" : "warning",
+    message: gitWorktreeDiagnosticMessage(inspection),
+    details: inspection
+  };
+}
+
+async function validateVaultStructure(context: CliContext): Promise<Diagnostic> {
+  const inspection = await inspectVault(context);
+  const structureOk = inspection.initialized && inspection.invalidPaths.length === 0;
+  return {
+    code: "vault.structure",
+    severity: structureOk ? "ok" : "warning",
+    message: vaultStructureDiagnosticMessage(inspection),
+    details: inspection
+  };
+}
+
+async function validateVaultHealth(context: CliContext): Promise<Diagnostic> {
+  const inspection = await inspectVault(context);
+  if (!inspection.initialized) {
+    return {
+      code: "vault.health",
+      severity: "warning",
+      message: "Skipped vault health checks because the memory vault is not initialized",
+      details: inspection
+    };
+  }
+  const unhealthy = !inspection.health.ok || inspection.health.hasWarnings;
+  return {
+    code: "vault.health",
+    severity: unhealthy ? "warning" : "ok",
+    message: unhealthy ? "Boreal memory vault has health warnings" : "Boreal memory vault health checks passed",
+    details: inspection.health
+  };
 }
 
 async function validateSearchIndex(
@@ -418,6 +466,7 @@ async function validateStoreRecords(
   let workStateChanged = false;
 
   try {
+    const generatedTombstones = await readGeneratedLedgerTombstones(context);
     const summary = (() => {
       const rawWorkItems = stateSection<WorkItem>(state, "workItems");
       const rawEvidence = stateSection<EvidenceRecord>(state, "evidence");
@@ -494,6 +543,7 @@ async function validateStoreRecords(
       const contextPackSubjects = new Set(rawContextPacks.filter(isDoctorContextPack).map((pack) => pack.subjectId));
       const missingContextPacks = workItems
         .filter((work) => !contextPackSubjects.has(work.meta.id))
+        .filter((work) => !generatedTombstones.contextPackIds.has(expectedContextProjectionId(work.meta.id)))
         .map((work) => work.meta.id);
       const contextPackBySubject = new Map(
         rawContextPacks.filter(isDoctorContextPack).map((pack) => [pack.subjectId, pack])
@@ -503,10 +553,14 @@ async function validateStoreRecords(
       );
       const missingContextProjections = workItems
         .filter((work) => !contextProjectionBySubject.has(work.meta.id))
+        .filter((work) => !generatedTombstones.projectionIds.has(expectedContextProjectionId(work.meta.id)))
         .map((work) => work.meta.id);
       const contextPackDrift = workItems.flatMap((work) => {
         const pack = contextPackBySubject.get(work.meta.id);
         if (!pack) {
+          return [];
+        }
+        if (generatedTombstones.contextPackIds.has(pack.id)) {
           return [];
         }
         const graphWork = { ...work, dependencyIds: expectedDependencyIds.get(work.meta.id) ?? [] };
@@ -526,6 +580,9 @@ async function validateStoreRecords(
       const contextProjectionDrift = workItems.flatMap((work) => {
         const projection = contextProjectionBySubject.get(work.meta.id);
         if (!projection) {
+          return [];
+        }
+        if (generatedTombstones.projectionIds.has(projection.meta.id)) {
           return [];
         }
         const graphWork = { ...work, dependencyIds: expectedDependencyIds.get(work.meta.id) ?? [] };
@@ -844,7 +901,10 @@ async function validateStoreRecords(
     ];
     if (contextPackIssues.length > 0 || contextProjectionIssues.length > 0 || (fix && workStateChanged)) {
       if (fix) {
-        await context.runtime.rebuildProjections();
+        await context.runtime.rebuildProjections({
+          skipContextPackIds: generatedTombstones.contextPackIds,
+          skipProjectionIds: generatedTombstones.projectionIds
+        });
         diagnostics.push({
           code: "projection.context_pack",
           severity: "fixed",
@@ -912,6 +972,32 @@ function ledgerDriftMessage(status: Awaited<ReturnType<typeof ledgerStatus>>): s
     return "JSONL ledger export differs from current runtime state";
   }
   return "JSONL ledger export matches current runtime state";
+}
+
+function gitWorktreeDiagnosticMessage(status: Awaited<ReturnType<typeof inspectGitWorktree>>): string {
+  if (!status.insideWorktree) {
+    return "Workspace is not inside a Git worktree";
+  }
+  if (!status.ok && status.detached) {
+    return "Collaboration ledger or memory paths are dirty on a detached Git HEAD";
+  }
+  if (!status.ok && status.protectedBranch) {
+    return "Collaboration ledger or memory paths are dirty on a protected Git branch";
+  }
+  if (status.protectedBranch) {
+    return "Git worktree is on a protected branch with no dirty collaboration paths";
+  }
+  return "Git worktree collaboration paths are safe";
+}
+
+function vaultStructureDiagnosticMessage(status: Awaited<ReturnType<typeof inspectVault>>): string {
+  if (status.invalidPaths.length > 0) {
+    return "Boreal memory vault has paths with the wrong type";
+  }
+  if (!status.initialized) {
+    return "Boreal memory vault is missing or incomplete; run `bwrk vault init`";
+  }
+  return "Boreal memory vault structure is initialized";
 }
 
 interface MachineStringField {
@@ -1157,6 +1243,13 @@ function contextProjectionMatches(actual: ProjectionRecord, expected: Projection
 
 function stringArrayValue(value: unknown): readonly string[] | undefined {
   return Array.isArray(value) && value.every((entry) => typeof entry === "string") ? value : undefined;
+}
+
+function expectedContextProjectionId(workId: string): ProjectionId {
+  return deterministicId<ProjectionId>("projection", {
+    kind: "context-pack",
+    subjectId: workId
+  });
 }
 
 function arraysEqual(left: readonly string[], right: readonly string[]): boolean {

@@ -27,6 +27,7 @@ export type EntityPrefix =
   | "event"
   | "evidence"
   | "operation"
+  | "page"
   | "projection"
   | "reservation"
   | "source"

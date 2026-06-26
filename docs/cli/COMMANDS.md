@@ -94,6 +94,7 @@ bwrk help context
 bwrk help search
 bwrk help reservation
 bwrk help agent
+bwrk help session
 bwrk help operation
 bwrk help export
 bwrk help import
@@ -101,6 +102,7 @@ bwrk help snapshot
 bwrk help doctor
 bwrk help lock
 bwrk help commands
+bwrk help prime
 bwrk work --help
 ```
 
@@ -386,6 +388,16 @@ Filters:
 
 Rows include reservation ID, status, computed `expired`, agent ID, work ID, work status, work title, `reservedAt`, optional `expiresAt`, and optional purpose.
 
+## `prime`
+
+```bash
+bwrk prime [--agent <agent-id>] [--label <label>] [--json]
+```
+
+Prints the compact startup brief for an agent session without claiming work. The brief includes workspace sync health, agent coordination state, bounded operation history for the active `--session`, copyable protocol commands, and concrete recommended actions.
+
+`prime` is read-only for project state. Like other initialized workspace commands, it is still logged in local operation history for auditability.
+
 ## `agent guide`
 
 ```bash
@@ -459,6 +471,24 @@ JSON `data` includes:
 - Claimable ready-work count for the optional label filter.
 - The next claimable work row when one exists.
 - `recommendedAction` with a `kind`, optional command, and reason.
+
+## `session start`
+
+```bash
+bwrk session start [--id <session-id>] [--agent <agent-id>] [--label <label>] [--json]
+```
+
+Starts the local agent protocol around a normalized session ID. If `--id` is omitted, the command uses `--session`, `BOREAL_SESSION_ID`, or generates a new `session-...` ID. The command logs itself under that same session ID and returns the same brief shape as `prime`.
+
+Use the returned `commands.*` strings for the rest of the run so every operation is grouped under the same session.
+
+## `session end`
+
+```bash
+bwrk session end [--id <session-id>] [--agent <agent-id>] [--label <label>] [--json]
+```
+
+Summarizes the target session without deleting or closing records. The result reports operation totals, failed commands, state/artifact-changing command counts, sync health, current agent reservations, and recommended follow-up commands. When active reservations remain, the recommendations point at reservation review instead of pretending the session is clean.
 
 ## `operation list`
 
@@ -748,6 +778,88 @@ By default, `--from` must resolve inside the workspace, including after symlink 
 
 JSON `data` contains per-section `imported` and `skipped` counts.
 
+## `vault init`
+
+```bash
+bwrk vault init [--json]
+```
+
+Creates the repo-local Boreal memory vault scaffold under `memory/`. The scaffold includes `raw/`, `wiki/`, `work/`, `graph/`, `ledgers/`, `dashboards/`, local `memory/.boreal/` runtime folders, Markdown index pages, and JSONL placeholders for raw source, graph, and ledger records. Existing files are not overwritten.
+
+JSON `data` contains `ok`, `initialized`, `rootDir`, `schemaVersion`, path status lists, and `createdDirectories`, `existingDirectories`, `createdFiles`, and `existingFiles`.
+
+## `vault status`
+
+```bash
+bwrk vault status [--json]
+```
+
+Checks whether the canonical `memory/` vault scaffold exists and whether required paths have the expected file or directory type. It exits `1` when the vault is missing, incomplete, structurally invalid, or has hard content-health failures.
+
+The status also scans raw source JSONL and wiki pages for malformed raw records, broken wikilinks, missing source references, orphan wiki pages, and stale claim pages.
+
+JSON `data` contains `ok`, `initialized`, `rootDir`, `schemaVersion`, `health`, `requiredDirectories`, `requiredFiles`, `missingDirectories`, `missingFiles`, and `invalidPaths`.
+
+## `raw add`
+
+```bash
+bwrk raw add --title <text> [--uri <uri>] [--kind raw|document|chat|code|artifact] [--summary <text>] [--tag <tag>...] [--json]
+```
+
+Appends an immutable raw source record to `memory/raw/index.jsonl`. The memory vault must be initialized first with `bwrk vault init`.
+
+JSON `data` contains `added`, `indexPath`, and the raw source `record` with stable metadata and a content hash.
+
+## `wiki create`
+
+```bash
+bwrk wiki create <title> [--slug <slug>] [--summary <text>] [--source <raw-id>...] [--tag <tag>...] [--json]
+```
+
+Creates a Markdown wiki page under `memory/wiki/` with flat Boreal frontmatter. Existing page slugs are never overwritten. Use `--source` to link the page to raw source records from `memory/raw/index.jsonl`.
+
+JSON `data` contains `created`, `path`, and the created `page` summary.
+
+## `duplicate scan`
+
+```bash
+bwrk duplicate scan [--domain all|work|raw|wiki] [--json]
+```
+
+Scans runtime work items and memory vault raw/wiki records for likely duplicates. Work and wiki duplicates are grouped by normalized title; raw source duplicates are grouped by normalized URI and normalized title. The command is read-only and emits review-only merge plans.
+
+JSON `data` contains `ok`, `domain`, `scanned`, `skipped`, `duplicateGroups`, and `mergePlans`. Each merge plan has `destructive: false` and `strategy: manual_review`.
+
+## `merge plan`
+
+```bash
+bwrk merge plan --domain work|raw|wiki --survivor <id> --duplicate <id>... [--json]
+```
+
+Builds a non-destructive merge review document. It validates command shape and prints the same plan format emitted by `duplicate scan`; it does not mutate runtime state or vault files.
+
+JSON `data` contains `id`, `domain`, `destructive`, `strategy`, `survivorId`, `duplicateIds`, and `commands`.
+
+## `compact analyze`
+
+```bash
+bwrk compact analyze [--domain all|work|wiki] [--older-than-days <n>] [--json]
+```
+
+Finds compaction candidates without mutating runtime state or vault files. Closed work is eligible when it has been closed for at least the age threshold, defaulting to 30 days. Vault wiki pages are eligible when they are orphaned or marked with stale claim frontmatter.
+
+JSON `data` contains `ok`, `domain`, `olderThanDays`, `scanned`, `skipped`, `candidates`, and `plans`. Every plan has `destructive: false`, `strategy: summarize_preserve_sources`, and explicit preservation guarantees for evidence IDs, verification IDs, source refs, wiki links, and original paths.
+
+## `sync status`
+
+```bash
+bwrk sync status [--json]
+```
+
+Checks collaboration readiness without mutating state. The command combines repo-local memory vault readiness and content health, JSONL ledger freshness, generated search-index freshness, and Git worktree safety so agents can see whether the workspace is ready to share and query from one place.
+
+JSON `data` contains `ok`, `workspaceRoot`, `checkedAt`, `vault`, `ledgers`, `searchIndex`, `git`, and `recommendedActions`. It exits `1` when the memory vault is missing/incomplete, when ledgers are missing/stale/invalid, when the local search index is missing/stale/invalid, or when `.boreal/ledgers` or `memory` paths are dirty on a protected branch or detached HEAD. Protected branches default to `main`, `master`, and `trunk`; set `BOREAL_PROTECTED_BRANCHES` to a comma-separated list to override. Recommended repairs are specific commands such as `bwrk vault init --json`, `bwrk export ledgers --json`, `bwrk search index --json`, and `git switch -c boreal/sync-work`.
+
 ## `ledger status`
 
 ```bash
@@ -764,7 +876,7 @@ JSON `data` contains `ok`, `path`, `exists`, `stale`, `expectedContentHash`, `re
 bwrk ledger delete <work|evidence|verification|source|claim|decision|graph-edge|reservation|projection|context-pack> <id> [--reason <text>] [--json]
 ```
 
-Deletes a supported unreferenced record from runtime state, writes a `boreal.ledger-deletion.v1` tombstone to `deletions.jsonl`, and refreshes the JSONL ledger export. Supported record kinds are `work`, `evidence`, `verification`, `source`, `claim`, `decision`, `graph-edge`, `reservation`, `projection`, and `context-pack`. The command fails with `BOREAL_CONFLICT` whenever deletion would leave live runtime references dangling: work references include child/dependency work, evidence, verifications, graph edges, reservations, projections, and context packs; evidence references include work, verifications, claims, and graph edges; verification references include work and graph edges; source references include claims, decisions, and graph edges; claim and decision references include graph edges. Graph-edge deletion updates the affected work dependency projection when deleting a canonical `blocks` edge. Reservation deletion refuses active or work-referenced reservations. Projection and context-pack deletion are generated-artifact cleanup paths; `doctor --fix` can regenerate missing generated projections.
+Deletes a supported unreferenced record from runtime state, writes a `boreal.ledger-deletion.v1` tombstone to `deletions.jsonl`, and refreshes the JSONL ledger export. Supported record kinds are `work`, `evidence`, `verification`, `source`, `claim`, `decision`, `graph-edge`, `reservation`, `projection`, and `context-pack`. The command fails with `BOREAL_CONFLICT` whenever deletion would leave live runtime references dangling: work references include child/dependency work, evidence, verifications, graph edges, reservations, projections, and context packs; evidence references include work, verifications, claims, and graph edges; verification references include work and graph edges; source references include claims, decisions, and graph edges; claim and decision references include graph edges. Graph-edge deletion updates the affected work dependency projection when deleting a canonical `blocks` edge. Reservation deletion refuses active or work-referenced reservations. Projection and context-pack deletion are generated-artifact cleanup paths; CLI projection rebuilds and `doctor --fix` do not recreate generated IDs that already have ledger tombstones.
 
 JSON `data` contains `deleted`, `section`, `id`, `tombstone`, and the refreshed `ledger` export result.
 
@@ -820,11 +932,13 @@ Checks:
 - Unsafe Unicode in machine-facing strings.
 - Label and actor normalization collisions in imported or hand-edited state.
 - Local operation log shape, volume, legacy operation-event links, dangling event references, and retained operation/event causality.
+- Repo-local `memory/` vault scaffold presence, path types, raw source JSONL, wiki links, source references, orphan pages, and stale claims.
 - Derived readiness consistency.
 - Missing or stale context-pack projections.
 - Snapshot/export drift between the current export hash and the latest recovery snapshot.
 - Missing, malformed, or stale local search index.
 - Runtime state and search-index lock state.
+- Git collaboration safety for `.boreal/ledgers` and `memory` paths on protected branches or detached HEAD.
 
 `--fix` performs only idempotent repairs:
 

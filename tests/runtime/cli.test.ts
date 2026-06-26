@@ -1,6 +1,8 @@
+import { execFile } from "node:child_process";
 import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { promisify } from "node:util";
 
 import { afterEach, describe, expect, it } from "vitest";
 
@@ -41,6 +43,7 @@ interface MutableStateForTest {
 }
 
 const tempDirs: string[] = [];
+const execFileAsync = promisify(execFile);
 
 afterEach(async () => {
   await Promise.all(tempDirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
@@ -71,10 +74,13 @@ describe("bwrk cli", () => {
       "## `work release`",
       "## `work renew`",
       "## `reservation list`",
+      "## `prime`",
       "## `agent guide`",
       "## `agent finish`",
       "## `agent start`",
       "## `agent status`",
+      "## `session start`",
+      "## `session end`",
       "## `operation list`",
       "## `operation show`",
       "## `operation prune`",
@@ -101,6 +107,14 @@ describe("bwrk cli", () => {
       "## `export ledgers`",
       "## `import json`",
       "## `import ledgers`",
+      "## `vault init`",
+      "## `vault status`",
+      "## `raw add`",
+      "## `wiki create`",
+      "## `duplicate scan`",
+      "## `merge plan`",
+      "## `compact analyze`",
+      "## `sync status`",
       "## `ledger status`",
       "## `ledger delete`",
       "## `snapshot create`",
@@ -129,7 +143,7 @@ describe("bwrk cli", () => {
     expect(root.exitCode).toBe(0);
     expect(root.stdout).toContain("bwrk - Boreal Work CLI");
     expect(root.stdout).toContain(
-      "bwrk help [init|work|dep|evidence|source|claim|decision|context|search|reservation|agent|operation|export|import|ledger|snapshot|doctor|lock|commands]"
+      "bwrk help [init|work|dep|evidence|source|claim|decision|context|search|reservation|agent|session|operation|export|import|vault|raw|wiki|duplicate|merge|compact|sync|ledger|snapshot|doctor|lock|commands|prime]"
     );
     expect(work.exitCode).toBe(0);
     expect(work.stdout).toContain("bwrk work create");
@@ -156,6 +170,315 @@ describe("bwrk cli", () => {
     expect(payload.ok).toBe(false);
     expect(payload.code).toBe("BOREAL_INVALID_INPUT");
     expect(payload.message).toContain("not initialized");
+  });
+
+  it("initializes and validates the repo-local memory vault", async () => {
+    const rootDir = await makeTempWorkspace();
+    await runCli(rootDir, ["init", "--json"]);
+
+    const missingStatus = await runCli(rootDir, ["vault", "status", "--json"]);
+    const missingPayload = parseData<{
+      readonly ok: boolean;
+      readonly initialized: boolean;
+      readonly missingDirectories: readonly string[];
+      readonly missingFiles: readonly string[];
+    }>(missingStatus.stdout);
+    expect(missingStatus.exitCode).toBe(1);
+    expect(missingPayload.ok).toBe(false);
+    expect(missingPayload.initialized).toBe(false);
+    expect(missingPayload.missingDirectories).toContain("memory/wiki");
+    expect(missingPayload.missingFiles).toContain("memory/raw/index.jsonl");
+
+    const warningDoctor = await runCli(rootDir, ["doctor", "--json"]);
+    expect(parseData<{ readonly diagnostics: Array<{ readonly code: string; readonly severity: string }> }>(
+      warningDoctor.stdout
+    ).diagnostics).toEqual(
+      expect.arrayContaining([expect.objectContaining({ code: "vault.structure", severity: "warning" })])
+    );
+
+    const initialized = await runCli(rootDir, ["vault", "init", "--json"]);
+    const initPayload = parseData<{
+      readonly ok: boolean;
+      readonly initialized: boolean;
+      readonly createdDirectories: readonly string[];
+      readonly createdFiles: readonly string[];
+    }>(initialized.stdout);
+    expect(initialized.exitCode).toBe(0);
+    expect(initPayload.ok).toBe(true);
+    expect(initPayload.initialized).toBe(true);
+    expect(initPayload.createdDirectories).toEqual(expect.arrayContaining(["memory/wiki", "memory/.boreal/cache"]));
+    expect(initPayload.createdFiles).toEqual(
+      expect.arrayContaining(["memory/index.md", "memory/raw/index.jsonl", "memory/graph/relationships.jsonl"])
+    );
+    expect(await readFile(join(rootDir, "memory/index.md"), "utf8")).toContain("Boreal Memory Vault");
+
+    const idempotent = await runCli(rootDir, ["vault", "init", "--json"]);
+    expect(parseData<{ readonly createdDirectories: readonly string[]; readonly createdFiles: readonly string[] }>(
+      idempotent.stdout
+    )).toEqual(expect.objectContaining({ createdDirectories: [], createdFiles: [] }));
+
+    const readyStatus = await runCli(rootDir, ["vault", "status", "--json"]);
+    expect(readyStatus.exitCode).toBe(0);
+    expect(parseData<{ readonly ok: boolean; readonly initialized: boolean }>(readyStatus.stdout)).toEqual(
+      expect.objectContaining({ ok: true, initialized: true })
+    );
+
+    const readyDoctor = await runCli(rootDir, ["doctor", "--json"]);
+    expect(parseData<{ readonly diagnostics: Array<{ readonly code: string; readonly severity: string }> }>(
+      readyDoctor.stdout
+    ).diagnostics).toEqual(
+      expect.arrayContaining([expect.objectContaining({ code: "vault.structure", severity: "ok" })])
+    );
+  });
+
+  it("adds raw vault sources, creates wiki pages, and reports vault health", async () => {
+    const rootDir = await makeTempWorkspace();
+    await runCli(rootDir, ["init", "--json"]);
+    await runCli(rootDir, ["vault", "init", "--json"]);
+
+    const raw = await runCli(rootDir, [
+      "raw",
+      "add",
+      "--title",
+      "Design source",
+      "--uri",
+      "file://design-source.md",
+      "--summary",
+      "Source-backed wiki test.",
+      "--tag",
+      "Design",
+      "--json"
+    ]);
+    const rawPayload = parseData<{
+      readonly added: true;
+      readonly record: { readonly id: string; readonly title: string; readonly tags: readonly string[] };
+    }>(raw.stdout);
+    expect(raw.exitCode).toBe(0);
+    expect(rawPayload.record.title).toBe("Design source");
+    expect(rawPayload.record.tags).toEqual(["design"]);
+    expect(await readFile(join(rootDir, "memory/raw/index.jsonl"), "utf8")).toContain(rawPayload.record.id);
+
+    const wiki = await runCli(rootDir, [
+      "wiki",
+      "create",
+      "Design Principles",
+      "--summary",
+      "This page is backed by a raw source.",
+      "--source",
+      rawPayload.record.id,
+      "--tag",
+      "Design",
+      "--json"
+    ]);
+    const wikiPayload = parseData<{
+      readonly created: true;
+      readonly page: { readonly slug: string; readonly path: string; readonly sourceRefs: readonly string[] };
+    }>(wiki.stdout);
+    expect(wiki.exitCode).toBe(0);
+    expect(wikiPayload.page).toEqual(
+      expect.objectContaining({ slug: "design-principles", path: "memory/wiki/design-principles.md" })
+    );
+    expect(wikiPayload.page.sourceRefs).toEqual([rawPayload.record.id]);
+    const wikiMarkdown = await readFile(join(rootDir, "memory/wiki/design-principles.md"), "utf8");
+    expect(wikiMarkdown).toContain("source_refs:\n  - bw_source_");
+
+    const health = await runCli(rootDir, ["vault", "status", "--json"]);
+    const healthPayload = parseData<{
+      readonly ok: boolean;
+      readonly health: {
+        readonly ok: boolean;
+        readonly hasWarnings: boolean;
+        readonly rawSourceCount: number;
+        readonly wikiPageCount: number;
+        readonly orphanPages: readonly string[];
+        readonly brokenLinks: readonly unknown[];
+        readonly missingSourceRefs: readonly unknown[];
+      };
+    }>(health.stdout);
+    expect(health.exitCode).toBe(0);
+    expect(healthPayload.ok).toBe(true);
+    expect(healthPayload.health).toEqual(
+      expect.objectContaining({
+        ok: true,
+        hasWarnings: true,
+        rawSourceCount: 1,
+        wikiPageCount: 1,
+        brokenLinks: [],
+        missingSourceRefs: [],
+        orphanPages: ["memory/wiki/design-principles.md"]
+      })
+    );
+
+    const doctor = await runCli(rootDir, ["doctor", "--json"]);
+    const doctorPayload = parseData<{
+      readonly diagnostics: Array<{ readonly code: string; readonly severity: string }>;
+    }>(doctor.stdout);
+    expect(doctorPayload.diagnostics).toEqual(
+      expect.arrayContaining([expect.objectContaining({ code: "vault.health", severity: "warning" })])
+    );
+
+    await writeFile(
+      join(rootDir, "memory/wiki/broken.md"),
+      "---\nkind: boreal-wiki-page\nschemaVersion: boreal.vault.v1\nslug: broken\nsource_refs:\n  - bw_source_missing\n---\n\n# Broken\n\n[[Missing Page]]\n",
+      "utf8"
+    );
+    const brokenHealth = await runCli(rootDir, ["vault", "status", "--json"]);
+    const brokenPayload = parseData<{
+      readonly ok: boolean;
+      readonly health: {
+        readonly ok: boolean;
+        readonly brokenLinks: readonly Array<{ readonly target: string }>;
+        readonly missingSourceRefs: readonly Array<{ readonly sourceRef: string }>;
+      };
+    }>(brokenHealth.stdout);
+    expect(brokenHealth.exitCode).toBe(1);
+    expect(brokenPayload.ok).toBe(false);
+    expect(brokenPayload.health.brokenLinks).toEqual(
+      expect.arrayContaining([expect.objectContaining({ target: "Missing Page" })])
+    );
+    expect(brokenPayload.health.missingSourceRefs).toEqual(
+      expect.arrayContaining([expect.objectContaining({ sourceRef: "bw_source_missing" })])
+    );
+  });
+
+  it("scans duplicate work and vault records with non-destructive merge plans", async () => {
+    const rootDir = await makeTempWorkspace();
+    await runCli(rootDir, ["init", "--json"]);
+    await runCli(rootDir, ["vault", "init", "--json"]);
+    await runCli(rootDir, ["work", "create", "Duplicate Task", "--json"]);
+    await runCli(rootDir, ["work", "create", "Duplicate Task", "--json"]);
+    await runCli(rootDir, ["raw", "add", "--title", "Duplicate Source A", "--uri", "file://duplicate.md", "--json"]);
+    await runCli(rootDir, ["raw", "add", "--title", "Duplicate Source B", "--uri", "file://duplicate.md", "--json"]);
+    await runCli(rootDir, ["wiki", "create", "Duplicate Wiki", "--slug", "duplicate-wiki-a", "--json"]);
+    await runCli(rootDir, ["wiki", "create", "Duplicate Wiki", "--slug", "duplicate-wiki-b", "--json"]);
+
+    const scan = await runCli(rootDir, ["duplicate", "scan", "--json"]);
+    const scanPayload = parseData<{
+      readonly ok: boolean;
+      readonly scanned: { readonly work: number; readonly raw: number; readonly wiki: number };
+      readonly duplicateGroups: Array<{
+        readonly domain: string;
+        readonly reason: string;
+        readonly records: Array<{ readonly id: string; readonly title: string }>;
+      }>;
+      readonly mergePlans: Array<{
+        readonly domain: string;
+        readonly destructive: boolean;
+        readonly strategy: string;
+        readonly survivorId: string;
+        readonly duplicateIds: readonly string[];
+        readonly commands: readonly string[];
+      }>;
+    }>(scan.stdout);
+    expect(scan.exitCode).toBe(0);
+    expect(scanPayload.ok).toBe(false);
+    expect(scanPayload.scanned).toEqual(expect.objectContaining({ work: 2, raw: 2, wiki: 2 }));
+    expect(scanPayload.duplicateGroups.map((group) => group.domain)).toEqual(
+      expect.arrayContaining(["work", "raw", "wiki"])
+    );
+    expect(scanPayload.mergePlans).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ domain: "work", destructive: false, strategy: "manual_review" }),
+        expect.objectContaining({ domain: "raw", destructive: false, strategy: "manual_review" }),
+        expect.objectContaining({ domain: "wiki", destructive: false, strategy: "manual_review" })
+      ])
+    );
+
+    const firstPlan = scanPayload.mergePlans[0];
+    expect(firstPlan?.commands[0]).toContain("bwrk merge plan");
+    const planned = await runCli(rootDir, [
+      "merge",
+      "plan",
+      "--domain",
+      firstPlan?.domain ?? "work",
+      "--survivor",
+      firstPlan?.survivorId ?? "",
+      "--duplicate",
+      firstPlan?.duplicateIds[0] ?? "",
+      "--json"
+    ]);
+    const plannedPayload = parseData<{ readonly destructive: boolean; readonly strategy: string }>(planned.stdout);
+    expect(planned.exitCode).toBe(0);
+    expect(plannedPayload).toEqual(expect.objectContaining({ destructive: false, strategy: "manual_review" }));
+  });
+
+  it("analyzes compaction candidates with source preservation guarantees", async () => {
+    const rootDir = await makeTempWorkspace();
+    await runCli(rootDir, ["init", "--json"]);
+    await runCli(rootDir, ["vault", "init", "--json"]);
+    const work = parseData<{ readonly meta: { readonly id: string } }>(
+      (await runCli(rootDir, ["work", "create", "Closed compact candidate", "--json"])).stdout
+    );
+    await updateState(rootDir, (state) => ({
+      ...state,
+      workItems: state.workItems.map((item) =>
+        item.meta.id === work.meta.id
+          ? {
+              ...item,
+              status: "closed",
+              closedAt: "2026-01-01T00:00:00.000Z",
+              evidenceIds: ["bw_evidence_compact"],
+              verificationIds: ["bw_verification_compact"],
+              meta: {
+                ...item.meta,
+                sourceRefs: [{ uri: "file://closed-work.md", label: "source" }]
+              }
+            }
+          : item
+      )
+    }));
+    const raw = parseData<{ readonly record: { readonly id: string } }>(
+      (await runCli(rootDir, ["raw", "add", "--title", "Compact source", "--uri", "file://compact.md", "--json"])).stdout
+    );
+    await runCli(rootDir, ["wiki", "create", "Compact Wiki", "--source", raw.record.id, "--summary", "Candidate wiki page.", "--json"]);
+
+    const analyzed = await runCli(rootDir, ["compact", "analyze", "--older-than-days", "1", "--json"]);
+    const payload = parseData<{
+      readonly ok: true;
+      readonly candidates: Array<{ readonly domain: string; readonly title: string; readonly reason: string }>;
+      readonly plans: Array<{
+        readonly domain: string;
+        readonly destructive: boolean;
+        readonly strategy: string;
+        readonly targetTitle: string;
+        readonly preserves: {
+          readonly evidenceIds: readonly string[];
+          readonly verificationIds: readonly string[];
+          readonly sourceRefs: readonly string[];
+          readonly originalPaths: readonly string[];
+        };
+      }>;
+    }>(analyzed.stdout);
+    expect(analyzed.exitCode).toBe(0);
+    expect(payload.ok).toBe(true);
+    expect(payload.candidates).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ domain: "work", title: "Closed compact candidate" }),
+        expect.objectContaining({ domain: "wiki", title: "Compact Wiki", reason: "wiki page has no inbound links" })
+      ])
+    );
+    expect(payload.plans).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          domain: "work",
+          destructive: false,
+          strategy: "summarize_preserve_sources",
+          preserves: expect.objectContaining({
+            evidenceIds: ["bw_evidence_compact"],
+            verificationIds: ["bw_verification_compact"],
+            sourceRefs: ["source:file://closed-work.md"]
+          })
+        }),
+        expect.objectContaining({
+          domain: "wiki",
+          targetTitle: "Compact Wiki",
+          preserves: expect.objectContaining({
+            sourceRefs: [raw.record.id],
+            originalPaths: ["memory/wiki/compact-wiki.md"]
+          })
+        })
+      ])
+    );
   });
 
   it("prints the agent guide without an initialized workspace", async () => {
@@ -211,6 +534,89 @@ describe("bwrk cli", () => {
     expect(textGuide.stdout).toContain("bwrk doctor --fix --json");
   });
 
+  it("primes and summarizes agent protocol sessions", async () => {
+    const rootDir = await makeTempWorkspace();
+    await runCli(rootDir, ["init", "--json"]);
+    await runCli(rootDir, ["work", "create", "Session protocol work", "--label", "cli", "--ready", "--json"]);
+
+    const primed = await runCli(rootDir, ["prime", "--agent", "agent-a", "--label", "cli", "--json"]);
+    const primePayload = parseData<{
+      readonly kind: string;
+      readonly sessionId: string;
+      readonly sync: { readonly ok: boolean; readonly recommendedActions: readonly string[] };
+      readonly agent: { readonly readyWork: { readonly claimableCount: number } };
+      readonly commands: { readonly sessionEnd: string; readonly agentStart: string };
+      readonly recommendedActions: readonly string[];
+    }>(primed.stdout);
+
+    expect(primed.exitCode).toBe(0);
+    expect(primePayload.kind).toBe("prime");
+    expect(primePayload.sessionId).toBe("local");
+    expect(primePayload.agent.readyWork.claimableCount).toBe(1);
+    expect(primePayload.commands.sessionEnd).toBe("bwrk session end --session local --agent agent-a --label cli --json");
+    expect(primePayload.commands.agentStart).toBe(
+      "bwrk agent start --session local --agent agent-a --label cli --purpose 'start implementation' --json"
+    );
+    expect(primePayload.sync.ok).toBe(false);
+    expect(primePayload.sync.recommendedActions).toEqual(expect.arrayContaining(["bwrk vault init --json"]));
+    expect(primePayload.recommendedActions).toContain("bwrk session end --session local --agent agent-a --label cli --json");
+
+    const started = await runCli(rootDir, ["session", "start", "--agent", "agent-a", "--label", "cli", "--json"]);
+    const startedPayload = parseData<{
+      readonly kind: string;
+      readonly sessionId: string;
+      readonly commands: {
+        readonly prime: string;
+        readonly sessionStart: string;
+        readonly sessionEnd: string;
+        readonly operationList: string;
+      };
+      readonly operations: { readonly sessionId: string; readonly total: number };
+    }>(started.stdout);
+    expect(started.exitCode).toBe(0);
+    expect(startedPayload.kind).toBe("session_start");
+    expect(startedPayload.sessionId).toMatch(/^session-[a-f0-9]{12}$/);
+    expect(startedPayload.operations).toEqual(expect.objectContaining({ sessionId: startedPayload.sessionId, total: 0 }));
+    expect(startedPayload.commands.prime).toContain(`bwrk prime --session ${startedPayload.sessionId} --agent agent-a --label cli --json`);
+    expect(startedPayload.commands.sessionStart).toBe(
+      `bwrk session start --id ${startedPayload.sessionId} --agent agent-a --label cli --json`
+    );
+    expect(startedPayload.commands.sessionEnd).toBe(
+      `bwrk session end --session ${startedPayload.sessionId} --agent agent-a --label cli --json`
+    );
+    expect(startedPayload.commands.operationList).toBe(
+      `bwrk operation list --session ${startedPayload.sessionId} --session-id ${startedPayload.sessionId} --limit 20 --json`
+    );
+
+    await runCli(rootDir, ["work", "list", "--session", startedPayload.sessionId, "--json"]);
+    const ended = await runCli(rootDir, ["session", "end", "--id", startedPayload.sessionId, "--agent", "agent-a", "--label", "cli", "--json"]);
+    const endedPayload = parseData<{
+      readonly kind: string;
+      readonly sessionId: string;
+      readonly operations: {
+        readonly total: number;
+        readonly succeeded: number;
+        readonly failed: number;
+        readonly recent: Array<{ readonly commandPath: string; readonly sessionId: string }>;
+      };
+      readonly recommendedActions: readonly string[];
+    }>(ended.stdout);
+
+    expect(ended.exitCode).toBe(0);
+    expect(endedPayload.kind).toBe("session_end");
+    expect(endedPayload.sessionId).toBe(startedPayload.sessionId);
+    expect(endedPayload.operations.total).toBeGreaterThanOrEqual(2);
+    expect(endedPayload.operations.succeeded).toBeGreaterThanOrEqual(2);
+    expect(endedPayload.operations.failed).toBe(0);
+    expect(endedPayload.operations.recent.map((operation) => operation.commandPath)).toEqual(
+      expect.arrayContaining(["session start", "work list"])
+    );
+    expect(endedPayload.operations.recent.every((operation) => operation.sessionId === startedPayload.sessionId)).toBe(true);
+    expect(endedPayload.recommendedActions).not.toContain(
+      `bwrk session end --session ${startedPayload.sessionId} --agent agent-a --label cli --json`
+    );
+  });
+
   it("exposes the registered command surface as JSON", async () => {
     const rootDir = await makeTempWorkspace();
 
@@ -256,10 +662,13 @@ describe("bwrk cli", () => {
         "work release",
         "work renew",
         "reservation list",
+        "prime",
         "agent guide",
         "agent finish",
         "agent start",
         "agent status",
+        "session start",
+        "session end",
         "operation list",
         "operation show",
         "operation prune",
@@ -269,6 +678,14 @@ describe("bwrk cli", () => {
         "export ledgers",
         "import json",
         "import ledgers",
+        "vault init",
+        "vault status",
+        "raw add",
+        "wiki create",
+        "duplicate scan",
+        "merge plan",
+        "compact analyze",
+        "sync status",
         "ledger status",
         "ledger delete",
         "snapshot create",
@@ -1959,6 +2376,46 @@ describe("bwrk cli", () => {
       })
     );
 
+    await runCli(rootDir, ["vault", "init", "--json"]);
+    const missingIndexSync = await runCli(rootDir, ["sync", "status", "--json"]);
+    const missingIndexSyncPayload = parseData<{
+      readonly ok: boolean;
+      readonly vault: { readonly ok: boolean };
+      readonly ledgers: { readonly ok: boolean };
+      readonly searchIndex: { readonly ok: boolean; readonly exists: boolean; readonly stale: boolean };
+      readonly recommendedActions: readonly string[];
+    }>(missingIndexSync.stdout);
+    expect(missingIndexSync.exitCode).toBe(1);
+    expect(missingIndexSyncPayload).toEqual(
+      expect.objectContaining({
+        ok: false,
+        vault: expect.objectContaining({ ok: true }),
+        ledgers: expect.objectContaining({ ok: true }),
+        searchIndex: expect.objectContaining({ ok: false, exists: false, stale: true }),
+        recommendedActions: ["bwrk search index --json"]
+      })
+    );
+
+    await runCli(rootDir, ["search", "index", "--json"]);
+    const freshSync = await runCli(rootDir, ["sync", "status", "--json"]);
+    const freshSyncPayload = parseData<{
+      readonly ok: boolean;
+      readonly vault: { readonly ok: boolean; readonly initialized: boolean };
+      readonly ledgers: { readonly ok: boolean; readonly stale: boolean };
+      readonly searchIndex: { readonly ok: boolean; readonly stale: boolean };
+      readonly recommendedActions: readonly string[];
+    }>(freshSync.stdout);
+    expect(freshSync.exitCode).toBe(0);
+    expect(freshSyncPayload).toEqual(
+      expect.objectContaining({
+        ok: true,
+        vault: expect.objectContaining({ ok: true, initialized: true }),
+        ledgers: expect.objectContaining({ ok: true, stale: false }),
+        searchIndex: expect.objectContaining({ ok: true, stale: false }),
+        recommendedActions: []
+      })
+    );
+
     const freshDoctor = await runCli(rootDir, ["doctor", "--json"]);
     const freshDoctorPayload = parseData<{
       readonly diagnostics: Array<{ readonly code: string; readonly severity: string }>;
@@ -2059,6 +2516,23 @@ describe("bwrk cli", () => {
     );
     expect(staleLedgerStatus.exitCode).toBe(1);
     expect(staleLedgerPayload).toEqual(expect.objectContaining({ ok: false, exists: true, stale: true }));
+
+    const staleSync = await runCli(rootDir, ["sync", "status", "--json"]);
+    const staleSyncPayload = parseData<{
+      readonly ok: boolean;
+      readonly ledgers: { readonly ok: boolean; readonly stale: boolean };
+      readonly searchIndex: { readonly ok: boolean; readonly stale: boolean };
+      readonly recommendedActions: readonly string[];
+    }>(staleSync.stdout);
+    expect(staleSync.exitCode).toBe(1);
+    expect(staleSyncPayload).toEqual(
+      expect.objectContaining({
+        ok: false,
+        ledgers: expect.objectContaining({ ok: false, stale: true }),
+        searchIndex: expect.objectContaining({ ok: false, stale: true }),
+        recommendedActions: ["bwrk export ledgers --json", "bwrk search index --json"]
+      })
+    );
 
     const staleDoctor = await runCli(rootDir, ["doctor", "--json"]);
     const staleDoctorPayload = parseData<{
@@ -2196,6 +2670,83 @@ describe("bwrk cli", () => {
     expect(malformedImport.exitCode).toBe(2);
     expect(malformedPayload.code).toBe("BOREAL_INVALID_INPUT");
     expect(malformedPayload.message).toContain("schema validation");
+  });
+
+  it("reports dirty collaboration paths on protected git branches", async () => {
+    const rootDir = await makeTempWorkspace();
+    if (!(await gitAvailable(rootDir))) {
+      return;
+    }
+
+    await initGitRepository(rootDir, "main");
+    await runCli(rootDir, ["init", "--json"]);
+    await runCli(rootDir, ["vault", "init", "--json"]);
+    await runCli(rootDir, ["work", "create", "Protected branch ledger work", "--ready", "--json"]);
+    await runCli(rootDir, ["export", "ledgers", "--json"]);
+    await runCli(rootDir, ["search", "index", "--json"]);
+
+    const protectedStatus = await runCli(rootDir, ["sync", "status", "--json"]);
+    const protectedPayload = parseData<{
+      readonly ok: boolean;
+      readonly ledgers: { readonly ok: boolean };
+      readonly searchIndex: { readonly ok: boolean };
+      readonly git: {
+        readonly ok: boolean;
+        readonly insideWorktree: boolean;
+        readonly branch?: string;
+        readonly protectedBranch: boolean;
+        readonly collaborationDirtyPaths: readonly Array<{ readonly path: string }>;
+      };
+      readonly recommendedActions: readonly string[];
+    }>(protectedStatus.stdout);
+    expect(protectedStatus.exitCode).toBe(1);
+    expect(protectedPayload).toEqual(
+      expect.objectContaining({
+        ok: false,
+        ledgers: expect.objectContaining({ ok: true }),
+        searchIndex: expect.objectContaining({ ok: true }),
+        git: expect.objectContaining({
+          ok: false,
+          insideWorktree: true,
+          branch: "main",
+          protectedBranch: true
+        }),
+        recommendedActions: expect.arrayContaining(["git switch -c boreal/sync-work"])
+      })
+    );
+    expect(protectedPayload.git.collaborationDirtyPaths.map((entry) => entry.path).join("\n")).toContain(
+      ".boreal/ledgers"
+    );
+
+    const doctor = await runCli(rootDir, ["doctor", "--json"]);
+    const doctorPayload = parseData<{
+      readonly ok: boolean;
+      readonly diagnostics: Array<{ readonly code: string; readonly severity: string }>;
+    }>(doctor.stdout);
+    expect(doctor.exitCode).toBe(0);
+    expect(doctorPayload.ok).toBe(true);
+    expect(doctorPayload.diagnostics).toEqual(
+      expect.arrayContaining([expect.objectContaining({ code: "git.worktree", severity: "warning" })])
+    );
+
+    const strictDoctor = await runCli(rootDir, ["doctor", "--strict", "--json"]);
+    expect(strictDoctor.exitCode).toBe(1);
+
+    await runGit(rootDir, ["checkout", "-b", "feature/sync-work"]);
+    const featureStatus = await runCli(rootDir, ["sync", "status", "--json"]);
+    const featurePayload = parseData<{
+      readonly ok: boolean;
+      readonly git: { readonly ok: boolean; readonly branch?: string; readonly protectedBranch: boolean };
+      readonly recommendedActions: readonly string[];
+    }>(featureStatus.stdout);
+    expect(featureStatus.exitCode).toBe(0);
+    expect(featurePayload).toEqual(
+      expect.objectContaining({
+        ok: true,
+        git: expect.objectContaining({ ok: true, branch: "feature/sync-work", protectedBranch: false }),
+        recommendedActions: []
+      })
+    );
   });
 
   it("deletes supported unreferenced records through tombstoned ledgers and blocks referenced deletions", async () => {
@@ -2717,6 +3268,30 @@ describe("bwrk cli", () => {
     );
     expect(deletedContextPackPayload.ledger.deletedRecordCounts.contextPacks).toBe(1);
 
+    const tombstoneAwareRebuild = await runCli(rootDir, ["context", "rebuild", "--json"]);
+    expect(tombstoneAwareRebuild.exitCode).toBe(0);
+    const rebuiltGeneratedState = await readState<{
+      readonly projections: Array<{ readonly meta: { readonly id: string } }>;
+      readonly contextPacks: Array<{ readonly id: string }>;
+    }>(rootDir);
+    expect(rebuiltGeneratedState.projections.map((record) => record.meta.id)).not.toContain(projection?.meta.id);
+    expect(rebuiltGeneratedState.contextPacks.map((record) => record.id)).not.toContain(contextPack?.id);
+    const refreshedLedgerExport = await runCli(rootDir, ["export", "ledgers", "--json"]);
+    expect(refreshedLedgerExport.exitCode).toBe(0);
+    expect(
+      parseData<{ readonly deletedRecordCounts: { readonly projections: number; readonly contextPacks: number } }>(
+        refreshedLedgerExport.stdout
+      ).deletedRecordCounts
+    ).toEqual(expect.objectContaining({ projections: 1, contextPacks: 1 }));
+    const tombstoneAwareDoctor = await runCli(rootDir, ["doctor", "--json"]);
+    const tombstoneAwareDoctorPayload = parseData<{
+      readonly diagnostics: Array<{ readonly code: string; readonly severity: string }>;
+    }>(tombstoneAwareDoctor.stdout);
+    expect(tombstoneAwareDoctor.exitCode).toBe(0);
+    expect(tombstoneAwareDoctorPayload.diagnostics).toEqual(
+      expect.arrayContaining([expect.objectContaining({ code: "projection.context_pack", severity: "ok" })])
+    );
+
     const sources = parseData<Array<{ readonly id: string }>>((await runCli(rootDir, ["source", "list", "--json"])).stdout);
     expect(sources.map((source) => source.id)).toContain(referencedSource.meta.id);
     expect(sources.map((source) => source.id)).not.toContain(deletableSource.meta.id);
@@ -3052,6 +3627,33 @@ async function makeTempWorkspace(): Promise<string> {
   const dir = await mkdtemp(join(tmpdir(), "boreal-cli-"));
   tempDirs.push(dir);
   return dir;
+}
+
+async function gitAvailable(cwd: string): Promise<boolean> {
+  try {
+    await runGit(cwd, ["--version"]);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function initGitRepository(cwd: string, branch: string): Promise<void> {
+  try {
+    await runGit(cwd, ["init", "-b", branch]);
+  } catch {
+    await runGit(cwd, ["init"]);
+    await runGit(cwd, ["checkout", "-B", branch]);
+  }
+  await runGit(cwd, ["config", "user.email", "boreal-tests@example.invalid"]);
+  await runGit(cwd, ["config", "user.name", "Boreal Tests"]);
+  await writeFile(join(cwd, "README.md"), "test repository\n", "utf8");
+  await runGit(cwd, ["add", "README.md"]);
+  await runGit(cwd, ["commit", "-m", "Initial commit"]);
+}
+
+async function runGit(cwd: string, args: readonly string[]): Promise<void> {
+  await execFileAsync("git", ["-C", cwd, ...args]);
 }
 
 async function runCli(cwd: string, argv: readonly string[]): Promise<CommandRun> {

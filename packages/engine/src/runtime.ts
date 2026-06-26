@@ -30,6 +30,7 @@ import {
   type KnowledgeSource,
   type KnowledgeSourceId,
   type OperationId,
+  type ProjectionId,
   type RuntimeEvent,
   type RuntimePolicy,
   type VerificationRecord,
@@ -129,6 +130,11 @@ export interface FinishReservedWorkResult {
   readonly release: ReservationLifecycleResult;
 }
 
+export interface RebuildProjectionsOptions {
+  readonly skipContextPackIds?: ReadonlySet<ProjectionId>;
+  readonly skipProjectionIds?: ReadonlySet<ProjectionId>;
+}
+
 export interface BorealRuntime {
   readonly policy: RuntimePolicy;
   initWorkspace(): Promise<RuntimeEvent>;
@@ -178,7 +184,7 @@ export interface BorealRuntime {
   createDecision(input: Omit<Parameters<typeof createDecision>[0], "actor" | "now">): Promise<DecisionRecord>;
   listDecisions(): Promise<readonly DecisionRecord[]>;
   getDecision(decisionId: DecisionId): Promise<DecisionRecord>;
-  rebuildProjections(): Promise<readonly WorkItemView[]>;
+  rebuildProjections(options?: RebuildProjectionsOptions): Promise<readonly WorkItemView[]>;
   getContextPack(workId: WorkId): Promise<ContextPack>;
   recomputeReadiness(): Promise<{ readonly changed: number }>;
   getWorkView(workId: WorkId): Promise<WorkItemView>;
@@ -683,7 +689,7 @@ export function createBorealRuntime(options: BorealRuntimeOptions = {}): BorealR
       return store.read((reader) => requireDecision(reader, decisionId));
     },
 
-    async rebuildProjections(): Promise<readonly WorkItemView[]> {
+    async rebuildProjections(options = {}): Promise<readonly WorkItemView[]> {
       return store.write(async (writer) => {
         const workItems = await writer.listWorkItems();
         const sources = await writer.listKnowledgeSources();
@@ -695,9 +701,16 @@ export function createBorealRuntime(options: BorealRuntimeOptions = {}): BorealR
           const graphWork = await workWithGraphDependencies(writer, work);
           const evidence = await writer.listEvidenceForSubject(work.meta.id);
           const contextPack = buildContextPack({ work: graphWork, evidence, sources, claims, decisions, actor, now: now() });
-          await writer.putContextPack(contextPack);
-          await writer.putProjection(buildContextProjection({ work: graphWork, evidence, sources, claims, decisions, actor, now: now() }));
-          views.push(toWorkItemView({ work: graphWork, evidence, contextPack }));
+          const projection = buildContextProjection({ work: graphWork, evidence, sources, claims, decisions, actor, now: now() });
+          const writeContextPack = !options.skipContextPackIds?.has(contextPack.id);
+          const writeProjection = !options.skipProjectionIds?.has(projection.meta.id);
+          if (writeContextPack) {
+            await writer.putContextPack(contextPack);
+          }
+          if (writeProjection) {
+            await writer.putProjection(projection);
+          }
+          views.push(toWorkItemView({ work: graphWork, evidence, contextPack: writeContextPack ? contextPack : undefined }));
         }
 
         await appendEvent(writer, "projection.rebuilt", "projections", "projection", { count: views.length });

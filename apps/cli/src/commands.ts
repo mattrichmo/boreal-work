@@ -62,8 +62,11 @@ import {
   validateCommandFlags,
   type CommandDefinition
 } from "./command-registry.js";
+import { analyzeCompaction, type CompactDomain } from "./compact.js";
 import { asEvidenceId, asWorkId, runDoctor, type Diagnostic } from "./doctor.js";
 import { assertInitialized, createCliContext, ensureWorkspaceDirs, type CliContext } from "./context.js";
+import { buildManualMergePlan, scanDuplicates, type DuplicateDomain } from "./duplicates.js";
+import { inspectGitWorktree, type GitWorktreeInspection } from "./git-worktree.js";
 import {
   createSnapshot,
   deleteClaimWithTombstone,
@@ -83,10 +86,13 @@ import {
   importJson,
   ledgerStatus,
   listSnapshots,
-  showSnapshot
+  readGeneratedLedgerTombstones,
+  showSnapshot,
+  type LedgerStatusResult
 } from "./import-export.js";
 import { createResultSpoolingOutput, formatRecord, table, type CliOutput } from "./output.js";
-import { runSearch, writeSearchIndex } from "./search-cli.js";
+import { inspectSearchIndex, runSearch, writeSearchIndex, type SearchIndexInspection } from "./search-cli.js";
+import { addRawSource, createWikiPage, initVault, inspectVault, type VaultStatusResult } from "./vault.js";
 
 const DEFAULT_HANDOFF_SEARCH_LIMIT = 8;
 const HANDOFF_SEARCH_MIN_CANDIDATES = 24;
@@ -138,6 +144,17 @@ interface OperationListRow {
   readonly startedAt: string;
   readonly finishedAt: string;
   readonly eventCount: number;
+}
+
+interface SyncStatusResult {
+  readonly ok: boolean;
+  readonly workspaceRoot: string;
+  readonly checkedAt: IsoTimestamp;
+  readonly vault: VaultStatusResult;
+  readonly ledgers: LedgerStatusResult;
+  readonly searchIndex: SearchIndexInspection & { readonly ok: boolean };
+  readonly git: GitWorktreeInspection;
+  readonly recommendedActions: readonly string[];
 }
 
 interface OperationPruneResult {
@@ -283,6 +300,56 @@ interface AgentFinishResult {
   readonly status: AgentStatus;
 }
 
+type AgentProtocolKind = "prime" | "session_start" | "session_end";
+
+interface SyncStatusBrief {
+  readonly ok: boolean;
+  readonly vaultOk: boolean;
+  readonly ledgersOk: boolean;
+  readonly searchIndexOk: boolean;
+  readonly gitOk: boolean;
+  readonly recommendedActions: readonly string[];
+}
+
+interface SessionOperationSummary {
+  readonly sessionId: string;
+  readonly total: number;
+  readonly succeeded: number;
+  readonly failed: number;
+  readonly stateChanged: number;
+  readonly generatedArtifactsChanged: number;
+  readonly startedAt?: string;
+  readonly lastFinishedAt?: string;
+  readonly recent: readonly OperationListRow[];
+}
+
+interface AgentProtocolCommands {
+  readonly prime: string;
+  readonly sessionStart: string;
+  readonly sessionEnd: string;
+  readonly agentStatus: string;
+  readonly agentStart: string;
+  readonly reservationList: string;
+  readonly operationList: string;
+  readonly syncStatus: string;
+  readonly doctor: string;
+  readonly repair: string;
+}
+
+interface AgentProtocolBrief {
+  readonly kind: AgentProtocolKind;
+  readonly workspaceRoot: string;
+  readonly sessionId: string;
+  readonly agentId: string;
+  readonly labels: readonly string[];
+  readonly checkedAt: IsoTimestamp;
+  readonly sync: SyncStatusBrief;
+  readonly agent: AgentStatus;
+  readonly operations: SessionOperationSummary;
+  readonly commands: AgentProtocolCommands;
+  readonly recommendedActions: readonly string[];
+}
+
 interface ReservationLifecycleResult {
   readonly work: WorkItem;
   readonly reservation: AgentReservation;
@@ -314,7 +381,10 @@ export async function runCommand(args: ParsedArgs, output: CliOutput, cwd: strin
 
   const shouldLogOperation = shouldRecordOperation(definition);
   const operationId = shouldLogOperation ? randomId<OperationId>("operation") : undefined;
-  const context = await createCliContext(args, cwd, { operationId });
+  const context = await createCliContext(args, cwd, {
+    operationId,
+    sessionId: operationSessionIdFromArgs(args)
+  });
   const [group, action, ...rest] = args.command;
   if (definition.requiresWorkspace) {
     assertInitialized(context);
@@ -364,8 +434,14 @@ export async function runCommand(args: ParsedArgs, output: CliOutput, cwd: strin
       case "reservation":
         result = await reservationCommand(action, context, args, commandOutput, json);
         break;
+      case "prime":
+        result = await primeCommand(context, args, commandOutput, json);
+        break;
       case "agent":
         result = await agentCommand(action, rest, context, args, commandOutput, json);
+        break;
+      case "session":
+        result = await sessionCommand(action, context, args, commandOutput, json);
         break;
       case "operation":
         result = await operationCommand(action, rest, context, args, commandOutput, json);
@@ -375,6 +451,27 @@ export async function runCommand(args: ParsedArgs, output: CliOutput, cwd: strin
         break;
       case "import":
         result = await importCommand(action, context, args, commandOutput, json);
+        break;
+      case "vault":
+        result = await vaultCommand(action, context, commandOutput, json);
+        break;
+      case "raw":
+        result = await rawCommand(action, context, args, commandOutput, json);
+        break;
+      case "wiki":
+        result = await wikiCommand(action, rest, context, args, commandOutput, json);
+        break;
+      case "duplicate":
+        result = await duplicateCommand(action, context, args, commandOutput, json);
+        break;
+      case "merge":
+        result = await mergeCommand(action, context, args, commandOutput, json);
+        break;
+      case "compact":
+        result = await compactCommand(action, context, args, commandOutput, json);
+        break;
+      case "sync":
+        result = await syncCommand(action, context, commandOutput, json);
         break;
       case "ledger":
         result = await ledgerCommand(action, rest, context, args, commandOutput, json);
@@ -405,6 +502,39 @@ export async function runCommand(args: ParsedArgs, output: CliOutput, cwd: strin
     throw new BorealError("BOREAL_INVARIANT", "Command did not return a result");
   }
   return result;
+}
+
+async function primeCommand(
+  context: CliContext,
+  args: ParsedArgs,
+  output: CliOutput,
+  json: boolean
+): Promise<CommandResult> {
+  const agentId = agentIdFromArgs(args, context.actor.id);
+  const labels = labelsFromArgs(args);
+  output.write(formatRecord(await buildAgentProtocolBrief("prime", context, agentId, labels), json));
+  return { exitCode: 0 };
+}
+
+async function sessionCommand(
+  action: string | undefined,
+  context: CliContext,
+  args: ParsedArgs,
+  output: CliOutput,
+  json: boolean
+): Promise<CommandResult> {
+  const agentId = agentIdFromArgs(args, context.actor.id);
+  const labels = labelsFromArgs(args);
+  switch (action) {
+    case "start":
+      output.write(formatRecord(await buildAgentProtocolBrief("session_start", context, agentId, labels), json));
+      return { exitCode: 0 };
+    case "end":
+      output.write(formatRecord(await buildAgentProtocolBrief("session_end", context, agentId, labels), json));
+      return { exitCode: 0 };
+    default:
+      throw new BorealError("BOREAL_INVALID_INPUT", `Unknown session command: ${action ?? ""}`);
+  }
 }
 
 async function operationCommand(
@@ -1401,7 +1531,7 @@ async function contextCommand(
 ): Promise<CommandResult> {
   switch (action) {
     case "rebuild": {
-      const views = await context.runtime.rebuildProjections();
+      const views = await rebuildProjectionsRespectingTombstones(context);
       output.write(formatRecord({ rebuilt: views.length, views }, json));
       return { exitCode: 0 };
     }
@@ -1508,6 +1638,349 @@ async function importCommand(
     default:
       throw new BorealError("BOREAL_INVALID_INPUT", `Unknown import command: ${action ?? ""}`);
   }
+}
+
+async function syncCommand(
+  action: string | undefined,
+  context: CliContext,
+  output: CliOutput,
+  json: boolean
+): Promise<CommandResult> {
+  switch (action) {
+    case "status": {
+      const status = await buildSyncStatus(context);
+      output.write(formatRecord(status, json));
+      return { exitCode: status.ok ? 0 : 1 };
+    }
+    default:
+      throw new BorealError("BOREAL_INVALID_INPUT", `Unknown sync command: ${action ?? ""}`);
+  }
+}
+
+async function vaultCommand(
+  action: string | undefined,
+  context: CliContext,
+  output: CliOutput,
+  json: boolean
+): Promise<CommandResult> {
+  switch (action) {
+    case "init": {
+      output.write(formatRecord(await initVault(context), json));
+      return { exitCode: 0 };
+    }
+    case "status": {
+      const status = await inspectVault(context);
+      output.write(formatRecord(status, json));
+      return { exitCode: status.ok ? 0 : 1 };
+    }
+    default:
+      throw new BorealError("BOREAL_INVALID_INPUT", `Unknown vault command: ${action ?? ""}`);
+  }
+}
+
+async function rawCommand(
+  action: string | undefined,
+  context: CliContext,
+  args: ParsedArgs,
+  output: CliOutput,
+  json: boolean
+): Promise<CommandResult> {
+  switch (action) {
+    case "add": {
+      output.write(
+        formatRecord(
+          await addRawSource(context, {
+            title: requiredFlag(args, "title"),
+            kind: flagValue(args, "kind"),
+            uri: flagValue(args, "uri"),
+            summary: flagValue(args, "summary"),
+            tags: flagValues(args, "tag")
+          }),
+          json
+        )
+      );
+      return { exitCode: 0 };
+    }
+    default:
+      throw new BorealError("BOREAL_INVALID_INPUT", `Unknown raw command: ${action ?? ""}`);
+  }
+}
+
+async function wikiCommand(
+  action: string | undefined,
+  rest: readonly string[],
+  context: CliContext,
+  args: ParsedArgs,
+  output: CliOutput,
+  json: boolean
+): Promise<CommandResult> {
+  switch (action) {
+    case "create": {
+      output.write(
+        formatRecord(
+          await createWikiPage(context, {
+            title: rest.join(" ").trim(),
+            slug: flagValue(args, "slug"),
+            summary: flagValue(args, "summary"),
+            sourceRefs: flagValues(args, "source"),
+            tags: flagValues(args, "tag")
+          }),
+          json
+        )
+      );
+      return { exitCode: 0 };
+    }
+    default:
+      throw new BorealError("BOREAL_INVALID_INPUT", `Unknown wiki command: ${action ?? ""}`);
+  }
+}
+
+async function duplicateCommand(
+  action: string | undefined,
+  context: CliContext,
+  args: ParsedArgs,
+  output: CliOutput,
+  json: boolean
+): Promise<CommandResult> {
+  switch (action) {
+    case "scan": {
+      const result = await scanDuplicates(context, { domain: parseDuplicateDomain(flagValue(args, "domain") ?? "all") });
+      output.write(formatRecord(result, json));
+      return { exitCode: 0 };
+    }
+    default:
+      throw new BorealError("BOREAL_INVALID_INPUT", `Unknown duplicate command: ${action ?? ""}`);
+  }
+}
+
+async function mergeCommand(
+  action: string | undefined,
+  _context: CliContext,
+  args: ParsedArgs,
+  output: CliOutput,
+  json: boolean
+): Promise<CommandResult> {
+  switch (action) {
+    case "plan": {
+      const duplicateIds = flagValues(args, "duplicate");
+      if (duplicateIds.length === 0) {
+        throw new BorealError("BOREAL_INVALID_INPUT", "merge plan requires at least one --duplicate");
+      }
+      output.write(
+        formatRecord(
+          buildManualMergePlan(parseMergeDomain(requiredFlag(args, "domain")), requiredFlag(args, "survivor"), duplicateIds),
+          json
+        )
+      );
+      return { exitCode: 0 };
+    }
+    default:
+      throw new BorealError("BOREAL_INVALID_INPUT", `Unknown merge command: ${action ?? ""}`);
+  }
+}
+
+async function compactCommand(
+  action: string | undefined,
+  context: CliContext,
+  args: ParsedArgs,
+  output: CliOutput,
+  json: boolean
+): Promise<CommandResult> {
+  switch (action) {
+    case "analyze": {
+      output.write(
+        formatRecord(
+          await analyzeCompaction(context, {
+            domain: parseCompactDomain(flagValue(args, "domain") ?? "all"),
+            olderThanDays: parseOlderThanDays(flagValue(args, "older-than-days"))
+          }),
+          json
+        )
+      );
+      return { exitCode: 0 };
+    }
+    default:
+      throw new BorealError("BOREAL_INVALID_INPUT", `Unknown compact command: ${action ?? ""}`);
+  }
+}
+
+async function buildSyncStatus(context: CliContext): Promise<SyncStatusResult> {
+  const [vault, ledgers, searchIndex, git] = await Promise.all([
+    inspectVault(context),
+    ledgerStatus(context, undefined),
+    inspectSearchIndex(context),
+    inspectGitWorktree(context)
+  ]);
+  const searchIndexOk = searchIndex.exists && !searchIndex.stale && !searchIndex.error;
+  const recommendedActions = syncRecommendedActions(vault, ledgers, searchIndexOk, git);
+  return {
+    ok: vault.ok && ledgers.ok && searchIndexOk && git.ok,
+    workspaceRoot: context.workspaceRoot,
+    checkedAt: nowIso(),
+    vault,
+    ledgers,
+    searchIndex: {
+      ...searchIndex,
+      ok: searchIndexOk
+    },
+    git,
+    recommendedActions
+  };
+}
+
+async function buildAgentProtocolBrief(
+  kind: AgentProtocolKind,
+  context: CliContext,
+  agentId: string,
+  labels: readonly string[]
+): Promise<AgentProtocolBrief> {
+  const [sync, agent, operations] = await Promise.all([
+    buildSyncStatus(context),
+    buildAgentStatus(context, agentId, labels),
+    buildSessionOperationSummary(context, context.sessionId, 10)
+  ]);
+  const commands = buildAgentProtocolCommands(context.sessionId, agent.agentId, agent.labels);
+  return {
+    kind,
+    workspaceRoot: context.workspaceRoot,
+    sessionId: context.sessionId,
+    agentId: agent.agentId,
+    labels: agent.labels,
+    checkedAt: nowIso(),
+    sync: syncStatusBrief(sync),
+    agent,
+    operations,
+    commands,
+    recommendedActions: protocolRecommendedActions(kind, sync, agent, operations, commands)
+  };
+}
+
+async function buildSessionOperationSummary(
+  context: CliContext,
+  sessionId: string,
+  recentLimit: number
+): Promise<SessionOperationSummary> {
+  const rows = await context.store.read(async (reader) => {
+    const operations = await reader.listOperations();
+    return operations
+      .filter((operation) => operation.sessionId === sessionId)
+      .sort(compareOperationsNewestFirst)
+      .map(operationListRow);
+  });
+  const chronologicalRows = [...rows].reverse();
+  return {
+    sessionId,
+    total: rows.length,
+    succeeded: rows.filter((row) => row.status === "succeeded").length,
+    failed: rows.filter((row) => row.status === "failed").length,
+    stateChanged: rows.filter((row) => row.stateChanged).length,
+    generatedArtifactsChanged: rows.filter((row) => row.generatedArtifactsChanged).length,
+    startedAt: chronologicalRows[0]?.startedAt,
+    lastFinishedAt: rows[0]?.finishedAt,
+    recent: rows.slice(0, recentLimit)
+  };
+}
+
+function syncStatusBrief(sync: SyncStatusResult): SyncStatusBrief {
+  return {
+    ok: sync.ok,
+    vaultOk: sync.vault.ok,
+    ledgersOk: sync.ledgers.ok,
+    searchIndexOk: sync.searchIndex.ok,
+    gitOk: sync.git.ok,
+    recommendedActions: sync.recommendedActions
+  };
+}
+
+function buildAgentProtocolCommands(
+  sessionId: string,
+  agentId: string,
+  labels: readonly string[]
+): AgentProtocolCommands {
+  const sessionFlag = `--session ${shellArg(sessionId)}`;
+  const agentFlag = `--agent ${shellArg(agentId)}`;
+  const scopedFlags = `${sessionFlag} ${agentFlag}${labelFlags(labels)}`;
+  return {
+    prime: `bwrk prime ${scopedFlags} --json`,
+    sessionStart: `bwrk session start --id ${shellArg(sessionId)} ${agentFlag}${labelFlags(labels)} --json`,
+    sessionEnd: `bwrk session end ${scopedFlags} --json`,
+    agentStatus: `bwrk agent status ${scopedFlags} --json`,
+    agentStart: `bwrk agent start ${scopedFlags} --purpose ${shellArg("start implementation")} --json`,
+    reservationList: `bwrk reservation list ${sessionFlag} ${agentFlag} --status active --json`,
+    operationList: `bwrk operation list ${sessionFlag} --session-id ${shellArg(sessionId)} --limit 20 --json`,
+    syncStatus: `bwrk sync status ${sessionFlag} --json`,
+    doctor: `bwrk doctor ${sessionFlag} --json`,
+    repair: `bwrk doctor ${sessionFlag} --fix --json`
+  };
+}
+
+function protocolRecommendedActions(
+  kind: AgentProtocolKind,
+  sync: SyncStatusResult,
+  agent: AgentStatus,
+  operations: SessionOperationSummary,
+  commands: AgentProtocolCommands
+): readonly string[] {
+  const actions: string[] = [];
+  if (!sync.ok) {
+    actions.push(...sync.recommendedActions);
+  }
+  if (operations.failed > 0) {
+    actions.push(`${commands.operationList.replace(" --limit 20", " --status failed --limit 20")}`);
+  }
+  const agentAction = protocolAgentAction(kind, agent, commands);
+  if (agentAction) {
+    actions.push(agentAction);
+  }
+  if (kind !== "session_end") {
+    actions.push(commands.sessionEnd);
+  }
+  return uniqueStrings(actions);
+}
+
+function protocolAgentAction(
+  kind: AgentProtocolKind,
+  agent: AgentStatus,
+  commands: AgentProtocolCommands
+): string | undefined {
+  if (agent.reservations.expiredActiveCount > 0) {
+    return commands.repair;
+  }
+  if (kind === "session_end" && agent.reservations.activeCount > 0) {
+    return commands.reservationList;
+  }
+  switch (agent.recommendedAction.kind) {
+    case "claim_work":
+    case "continue_reserved_work":
+      return commands.agentStart;
+    case "release_or_finish_work":
+      return commands.reservationList;
+    case "repair_expired_reservations":
+      return commands.repair;
+    case "wait_for_ready_work":
+      return "bwrk work list --ready --json";
+    default:
+      return agent.recommendedAction.command;
+  }
+}
+
+function syncRecommendedActions(
+  vault: VaultStatusResult,
+  ledgers: LedgerStatusResult,
+  searchIndexOk: boolean,
+  git: GitWorktreeInspection
+): readonly string[] {
+  const actions: string[] = [];
+  if (!vault.ok) {
+    actions.push("bwrk vault init --json");
+  }
+  if (!ledgers.ok) {
+    actions.push("bwrk export ledgers --json");
+  }
+  if (!searchIndexOk) {
+    actions.push("bwrk search index --json");
+  }
+  return [...actions, ...git.recommendedActions];
 }
 
 async function ledgerCommand(
@@ -1910,6 +2383,38 @@ function parseDecisionStatus(value: string | undefined): DecisionStatus | undefi
   throw new BorealError("BOREAL_INVALID_INPUT", "--status must be proposed, accepted, superseded, or rejected");
 }
 
+function parseDuplicateDomain(value: string): DuplicateDomain {
+  if (value === "all" || value === "work" || value === "raw" || value === "wiki") {
+    return value;
+  }
+  throw new BorealError("BOREAL_INVALID_INPUT", "--domain must be all, work, raw, or wiki");
+}
+
+function parseMergeDomain(value: string): Exclude<DuplicateDomain, "all"> {
+  if (value === "work" || value === "raw" || value === "wiki") {
+    return value;
+  }
+  throw new BorealError("BOREAL_INVALID_INPUT", "--domain must be work, raw, or wiki");
+}
+
+function parseCompactDomain(value: string): CompactDomain {
+  if (value === "all" || value === "work" || value === "wiki") {
+    return value;
+  }
+  throw new BorealError("BOREAL_INVALID_INPUT", "--domain must be all, work, or wiki");
+}
+
+function parseOlderThanDays(value: string | undefined): number | undefined {
+  if (!value) {
+    return undefined;
+  }
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed < 0) {
+    throw new BorealError("BOREAL_INVALID_INPUT", "--older-than-days must be a non-negative integer");
+  }
+  return parsed;
+}
+
 function parseVerdict(value: string | undefined): VerificationVerdict {
   const verdict = value ?? "passed";
   if (verdict === "passed" || verdict === "failed") {
@@ -1924,6 +2429,31 @@ function optionalSourceId(value: string | undefined): KnowledgeSourceId | undefi
 
 function agentIdFromArgs(args: ParsedArgs, fallback: string): string {
   return normalizeActorId(flagValue(args, "agent") ?? fallback);
+}
+
+function operationSessionIdFromArgs(args: ParsedArgs): string | undefined {
+  const isSessionCommand = args.command[0] === "session" && (args.command[1] === "start" || args.command[1] === "end");
+  if (!isSessionCommand) {
+    return undefined;
+  }
+
+  const explicitId = flagValue(args, "id");
+  const globalId = flagValue(args, "session");
+  const envId = process.env.BOREAL_SESSION_ID;
+  if (explicitId && globalId && normalizeActorId(explicitId) !== normalizeActorId(globalId)) {
+    throw new BorealError("BOREAL_INVALID_INPUT", "Use either --id or --session for session commands, not conflicting values");
+  }
+  if (explicitId) {
+    return normalizeActorId(explicitId);
+  }
+  if (globalId || envId) {
+    return undefined;
+  }
+  return args.command[1] === "start" ? generatedSessionId() : undefined;
+}
+
+function generatedSessionId(): string {
+  return normalizeActorId(`session-${randomId("operation", 6).replace(/^bw_operation_/u, "")}`);
 }
 
 function optionalAgentIdFromArgs(args: ParsedArgs): string | undefined {
@@ -1947,8 +2477,16 @@ async function requireReservation(context: CliContext, reservationId: string): P
   return reservation;
 }
 
+async function rebuildProjectionsRespectingTombstones(context: CliContext): Promise<readonly WorkItemView[]> {
+  const tombstones = await readGeneratedLedgerTombstones(context);
+  return context.runtime.rebuildProjections({
+    skipContextPackIds: tombstones.contextPackIds,
+    skipProjectionIds: tombstones.projectionIds
+  });
+}
+
 async function buildHandoffBundle(context: CliContext, workId: WorkId, args: ParsedArgs): Promise<HandoffBundle> {
-  await context.runtime.rebuildProjections();
+  await rebuildProjectionsRespectingTombstones(context);
   const [work, contextPack] = await Promise.all([context.runtime.getWorkView(workId), context.runtime.getContextPack(workId)]);
   await writeSearchIndex(context);
   const queryFlag = flagValue(args, "query");
@@ -2538,6 +3076,10 @@ function labelFlags(labels: readonly string[]): string {
   return labels.length > 0 ? ` ${labels.map((label) => `--label ${shellArg(label)}`).join(" ")}` : "";
 }
 
+function uniqueStrings(values: readonly string[]): readonly string[] {
+  return [...new Set(values)];
+}
+
 function shellArg(value: string): string {
   if (/^[A-Za-z0-9_./:@=-]+$/.test(value)) {
     return value;
@@ -2597,6 +3139,6 @@ Usage:
 ${COMMAND_DEFINITIONS.map((definition) => `  ${definition.usage}`).join("\n")}
 
 Help:
-  bwrk help [init|work|dep|evidence|source|claim|decision|context|search|reservation|agent|operation|export|import|ledger|snapshot|doctor|lock|commands]
+  bwrk help [init|work|dep|evidence|source|claim|decision|context|search|reservation|agent|session|operation|export|import|vault|raw|wiki|duplicate|merge|compact|sync|ledger|snapshot|doctor|lock|commands|prime]
 `;
 }

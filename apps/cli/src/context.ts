@@ -29,6 +29,7 @@ export interface CliContext {
 
 export interface CreateCliContextOptions {
   readonly operationId?: OperationId;
+  readonly sessionId?: string;
 }
 
 export async function createCliContext(
@@ -42,7 +43,7 @@ export async function createCliContext(
     : resolveDiscoveredWorkspaceRoot(cwd);
   const paths = resolveWorkspacePaths(workspaceRoot);
   const actor = actorFromArgs(args);
-  const sessionId = sessionIdFromArgs(args);
+  const sessionId = options.sessionId ? normalizeActorId(options.sessionId) : sessionIdFromArgs(args);
   const store = new FileBorealStore({ rootDir: workspaceRoot });
   const runtime = createBorealRuntime({ store, actor, operationId: options.operationId });
   return { cwd, workspaceRoot, paths, store, runtime, actor, sessionId, operationId: options.operationId };

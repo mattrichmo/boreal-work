@@ -132,6 +132,11 @@ export interface LedgerDeleteRecordResult {
   readonly ledger: LedgerExportResult;
 }
 
+export interface GeneratedLedgerTombstones {
+  readonly projectionIds: ReadonlySet<ProjectionId>;
+  readonly contextPackIds: ReadonlySet<ProjectionId>;
+}
+
 export interface ImportResult {
   readonly imported: Record<SnapshotSection, number>;
   readonly skipped: Record<SnapshotSection, number>;
@@ -252,6 +257,23 @@ export async function exportMarkdown(context: CliContext, outDir: string | undef
 
 export async function exportLedgers(context: CliContext, outDir: string | undefined): Promise<LedgerExportResult> {
   return exportLedgersWithAdditionalDeletions(context, outDir, []);
+}
+
+export async function readGeneratedLedgerTombstones(context: CliContext): Promise<GeneratedLedgerTombstones> {
+  const resolvedDir = await resolveWorkspacePath(context, ".boreal/ledgers");
+  const deletions = await readExistingLedgerDeletions(resolvedDir);
+  return {
+    projectionIds: new Set(
+      deletions
+        .filter((record) => record.section === "projections")
+        .map((record) => record.id as ProjectionId)
+    ),
+    contextPackIds: new Set(
+      deletions
+        .filter((record) => record.section === "contextPacks")
+        .map((record) => record.id as ProjectionId)
+    )
+  };
 }
 
 async function exportLedgersWithAdditionalDeletions(
