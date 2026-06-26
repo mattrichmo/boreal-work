@@ -88,6 +88,29 @@ export interface ExpireReservationsResult {
   readonly expired: readonly ReservationLifecycleResult[];
 }
 
+export interface FinishReservedWorkInput {
+  readonly workId: WorkId;
+  readonly agentId: AgentId | string;
+  readonly evidence: Omit<Parameters<typeof recordEvidenceDomain>[0], "actor" | "now" | "subjectId" | "subjectType">;
+  readonly verification: {
+    readonly verdict: VerificationRecord["verdict"];
+    readonly notes?: string;
+  };
+  readonly close?: {
+    readonly reason: string;
+  };
+  readonly release?: boolean;
+}
+
+export interface FinishReservedWorkResult {
+  readonly work: WorkItem;
+  readonly evidence: EvidenceRecord;
+  readonly verification: VerificationRecord;
+  readonly reservation: AgentReservation;
+  readonly closedWork?: WorkItem;
+  readonly release: ReservationLifecycleResult;
+}
+
 export interface BorealRuntime {
   readonly policy: RuntimePolicy;
   initWorkspace(): Promise<RuntimeEvent>;
@@ -125,6 +148,7 @@ export interface BorealRuntime {
     readonly workId: WorkId;
     readonly reason: string;
   }): Promise<WorkItem>;
+  finishReservedWork(input: FinishReservedWorkInput): Promise<FinishReservedWorkResult>;
   createKnowledgeSource(input: Omit<Parameters<typeof createKnowledgeSource>[0], "actor" | "now">): Promise<KnowledgeSource>;
   listKnowledgeSources(): Promise<readonly KnowledgeSource[]>;
   getKnowledgeSource(sourceId: KnowledgeSourceId): Promise<KnowledgeSource>;
@@ -463,6 +487,95 @@ export function createBorealRuntime(options: BorealRuntimeOptions = {}): BorealR
       });
     },
 
+    async finishReservedWork(input): Promise<FinishReservedWorkResult> {
+      if (input.close && input.release) {
+        throw new BorealError("BOREAL_INVALID_INPUT", "finishReservedWork accepts close or release, not both");
+      }
+      if (!input.close && !input.release) {
+        throw new BorealError("BOREAL_INVALID_INPUT", "finishReservedWork requires close or release");
+      }
+
+      return store.write(async (writer) => {
+        const current = now();
+        const work = await requireWork(writer, input.workId);
+        const reservation = await requireAgentWorkReservation(writer, work, input.agentId, current);
+
+        const evidence = recordEvidenceDomain({
+          ...input.evidence,
+          subjectId: input.workId,
+          subjectType: "work",
+          actor,
+          now: current
+        });
+        const workWithEvidence = attachEvidenceToWork(work, evidence.meta.id, current, actor);
+        const availableEvidence = [...(await writer.listEvidenceForSubject(input.workId)), evidence];
+        const verification = verifySubject({
+          subjectId: input.workId,
+          subjectType: "work",
+          verdict: input.verification.verdict,
+          evidenceIds: [evidence.meta.id],
+          availableEvidence,
+          notes: input.verification.notes,
+          policy,
+          actor,
+          now: current
+        });
+        const workWithVerification = attachVerificationToWork(workWithEvidence, verification, current, actor);
+
+        let finalWork = workWithVerification;
+        let closedWork: WorkItem | undefined;
+        if (input.close) {
+          const availableVerifications = [...(await writer.listVerificationsForSubject(input.workId)), verification];
+          closedWork = closeWorkDomain(workWithVerification, availableVerifications, policy, current, actor, input.close.reason);
+          finalWork = closedWork;
+        }
+
+        const releasedReservation = releaseReservation(reservation, current, actor);
+        finalWork = await clearWorkReservation(writer, finalWork, current, actor);
+        closedWork = closedWork ? finalWork : undefined;
+
+        await writer.putEvidence(evidence);
+        await writer.putVerification(verification);
+        await writer.putReservation(releasedReservation);
+        await writer.putWorkItem(finalWork);
+        if (input.close) {
+          await recomputeAllReadiness(writer);
+        }
+        await appendEvent(writer, "evidence.recorded", evidence.meta.id, "evidence", {
+          subjectId: evidence.subjectId,
+          kind: evidence.kind,
+          outcome: evidence.outcome
+        });
+        await appendEvent(writer, "work.verified", input.workId, "work", {
+          verdict: verification.verdict,
+          verificationId: verification.meta.id
+        });
+        if (input.close) {
+          await appendEvent(writer, "work.closed", finalWork.meta.id, "work", { reason: input.close.reason });
+        }
+        await appendEvent(writer, "work.reservation_released", finalWork.meta.id, "work", {
+          reservationId: releasedReservation.meta.id,
+          agentId: releasedReservation.agentId
+        });
+        await appendEvent(writer, "agent.finished", finalWork.meta.id, "work", {
+          agentId: input.agentId,
+          evidenceId: evidence.meta.id,
+          verificationId: verification.meta.id,
+          reservationId: releasedReservation.meta.id,
+          closed: Boolean(input.close)
+        });
+
+        return {
+          work: finalWork,
+          evidence,
+          verification,
+          reservation: releasedReservation,
+          closedWork,
+          release: { work: finalWork, reservation: releasedReservation }
+        };
+      });
+    },
+
     async createKnowledgeSource(input): Promise<KnowledgeSource> {
       return store.write(async (writer) => {
         const source = createKnowledgeSource({ ...input, actor, now: now() });
@@ -602,6 +715,32 @@ async function requireActiveWorkReservation(reader: BorealReader, work: WorkItem
     throw new BorealError("BOREAL_NOT_FOUND", "Work item does not have an active reservation", {
       workId: work.meta.id,
       reservationId: work.reservationId
+    });
+  }
+  return reservation;
+}
+
+async function requireAgentWorkReservation(
+  reader: BorealReader,
+  work: WorkItem,
+  agentId: AgentId | string,
+  current: IsoTimestamp
+): Promise<AgentReservation> {
+  const reservation = await requireActiveWorkReservation(reader, work);
+  if (String(reservation.agentId) !== String(agentId)) {
+    throw new BorealError("BOREAL_POLICY_VIOLATION", "Agent does not own the active reservation", {
+      workId: work.meta.id,
+      agentId,
+      reservationAgentId: reservation.agentId,
+      reservationId: reservation.meta.id
+    });
+  }
+  if (reservation.expiresAt && Date.parse(reservation.expiresAt) <= Date.parse(current)) {
+    throw new BorealError("BOREAL_POLICY_VIOLATION", "Agent reservation is expired; run `bwrk doctor --fix`", {
+      workId: work.meta.id,
+      agentId,
+      reservationId: reservation.meta.id,
+      expiresAt: reservation.expiresAt
     });
   }
   return reservation;

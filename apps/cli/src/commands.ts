@@ -388,37 +388,23 @@ async function agentFinishCommand(
     throw new BorealError("BOREAL_INVALID_INPUT", "--close requires a passed verification verdict");
   }
 
-  const reservation = await requireAgentWorkReservation(context, workId, agentId);
-  const evidence = await context.runtime.recordEvidence({
-    subjectId: workId,
-    subjectType: "work",
-    kind: parseEvidenceKind(flagValue(args, "kind")),
-    summary: requiredFlag(args, "summary"),
-    outcome: parseFinishOutcome(flagValue(args, "outcome"), verdict),
-    command: flagValue(args, "command"),
-    uri: flagValue(args, "uri")
-  });
-  await requireAgentWorkReservation(context, workId, agentId);
-  const verification = await context.runtime.verifyWork({
+  const finished = await context.runtime.finishReservedWork({
     workId,
-    verdict,
-    evidenceIds: [evidence.meta.id],
-    notes: flagValue(args, "notes")
+    agentId,
+    evidence: {
+      kind: parseEvidenceKind(flagValue(args, "kind")),
+      summary: requiredFlag(args, "summary"),
+      outcome: parseFinishOutcome(flagValue(args, "outcome"), verdict),
+      command: flagValue(args, "command"),
+      uri: flagValue(args, "uri")
+    },
+    verification: {
+      verdict,
+      notes: flagValue(args, "notes")
+    },
+    close: close ? { reason: requiredFlag(args, "reason") } : undefined,
+    release
   });
-  await requireAgentWorkReservation(context, workId, agentId);
-
-  let closedWork: WorkItem | undefined;
-  let releaseResult: ReservationLifecycleResult | undefined;
-  if (close) {
-    closedWork = await context.runtime.closeWork({
-      workId,
-      reason: requiredFlag(args, "reason")
-    });
-    await requireAgentWorkReservation(context, workId, agentId);
-    releaseResult = await context.runtime.releaseWorkReservation(workId);
-  } else if (release) {
-    releaseResult = await context.runtime.releaseWorkReservation(workId);
-  }
 
   output.write(
     formatRecord(
@@ -427,11 +413,11 @@ async function agentFinishCommand(
         action: close ? "verified_and_closed" : "verified_and_released",
         agentId,
         work: await context.runtime.getWorkView(workId),
-        evidence,
-        verification,
-        reservation: releaseResult?.reservation ?? reservation,
-        closedWork,
-        release: releaseResult,
+        evidence: finished.evidence,
+        verification: finished.verification,
+        reservation: finished.reservation,
+        closedWork: finished.closedWork,
+        release: finished.release,
         status: await buildAgentStatus(context, agentId, [])
       } satisfies AgentFinishResult,
       json
@@ -1235,43 +1221,6 @@ async function requireReservation(context: CliContext, reservationId: string): P
     throw new BorealError("BOREAL_CONFLICT", "Active reservation changed while starting agent", { reservationId });
   }
   return reservation;
-}
-
-async function requireAgentWorkReservation(
-  context: CliContext,
-  workId: WorkId,
-  agentId: string
-): Promise<AgentReservation> {
-  return context.store.read(async (reader) => {
-    const work = await reader.getWorkItem(workId);
-    if (!work) {
-      throw new BorealError("BOREAL_NOT_FOUND", "Work item not found", { workId });
-    }
-    const activeReservations = (await reader.listReservationsForWork(workId)).filter((reservation) => reservation.status === "active");
-    const reservation = work.reservationId
-      ? activeReservations.find((entry) => entry.meta.id === work.reservationId)
-      : activeReservations[0];
-    if (!reservation) {
-      throw new BorealError("BOREAL_CONFLICT", "Agent finish requires an active reservation", { workId, agentId });
-    }
-    if (String(reservation.agentId) !== agentId) {
-      throw new BorealError("BOREAL_POLICY_VIOLATION", "Agent does not own the active reservation", {
-        workId,
-        agentId,
-        reservationAgentId: reservation.agentId,
-        reservationId: reservation.meta.id
-      });
-    }
-    if (reservation.expiresAt && Date.parse(reservation.expiresAt) <= Date.now()) {
-      throw new BorealError("BOREAL_POLICY_VIOLATION", "Agent reservation is expired; run `bwrk doctor --fix`", {
-        workId,
-        agentId,
-        reservationId: reservation.meta.id,
-        expiresAt: reservation.expiresAt
-      });
-    }
-    return reservation;
-  });
 }
 
 async function buildHandoffBundle(context: CliContext, workId: WorkId, args: ParsedArgs): Promise<HandoffBundle> {

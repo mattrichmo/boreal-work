@@ -34,6 +34,8 @@ Lock inspection and stale-lock breaking are exposed as explicit storage helpers 
 
 File storage is an adapter, not the domain model. SQLite, Dolt-like, or other transactional backends should fit behind the same store interface without changing domain packages.
 
+Agent finish is a single runtime operation: ownership and expiration checks, evidence recording, verification, optional close, reservation release, readiness recompute, and the high-level finish event occur inside one store transaction.
+
 Operational work state should not depend on JSONL or Markdown as a hardcoded implementation detail. Human-readable vault formats can be adapters; engine rules must stay behind storage and schema contracts.
 
 ## Beads-Derived Runtime Rules

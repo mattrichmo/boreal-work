@@ -290,6 +290,77 @@ describe("boreal runtime proof slice", () => {
     );
   });
 
+  it("finishes reserved work atomically from evidence through reservation release", async () => {
+    const store = new InMemoryBorealStore();
+    const runtime = createBorealRuntime({ store, actor });
+    const work = await runtime.createWork({ title: "Atomic finish target" });
+    await runtime.markReady(work.meta.id);
+    await runtime.reserveWork({ workId: work.meta.id, agentId: "agent-a" });
+
+    await expect(
+      runtime.finishReservedWork({
+        workId: work.meta.id,
+        agentId: "agent-b",
+        evidence: {
+          kind: "test",
+          summary: "wrong agent should not write",
+          outcome: "passed"
+        },
+        verification: {
+          verdict: "passed"
+        },
+        release: true
+      })
+    ).rejects.toMatchObject({ code: "BOREAL_POLICY_VIOLATION" } satisfies Partial<BorealError>);
+
+    const afterFailedFinish = await store.read(async (reader) => ({
+      work: await reader.getWorkItem(work.meta.id),
+      evidence: await reader.listEvidenceForSubject(work.meta.id),
+      verifications: await reader.listVerificationsForSubject(work.meta.id),
+      reservations: await reader.listReservationsForWork(work.meta.id)
+    }));
+    expect(afterFailedFinish.work?.status).toBe("reserved");
+    expect(afterFailedFinish.evidence).toHaveLength(0);
+    expect(afterFailedFinish.verifications).toHaveLength(0);
+    expect(afterFailedFinish.reservations).toEqual([expect.objectContaining({ status: "active", agentId: "agent-a" })]);
+
+    const finished = await runtime.finishReservedWork({
+      workId: work.meta.id,
+      agentId: "agent-a",
+      evidence: {
+        kind: "test",
+        summary: "atomic finish test passed",
+        outcome: "passed"
+      },
+      verification: {
+        verdict: "passed",
+        notes: "single runtime write"
+      },
+      close: {
+        reason: "verified atomically"
+      }
+    });
+
+    expect(finished.work.status).toBe("closed");
+    expect(finished.work.reservationId).toBeUndefined();
+    expect(finished.evidence.outcome).toBe("passed");
+    expect(finished.verification.verdict).toBe("passed");
+    expect(finished.reservation.status).toBe("released");
+    expect(finished.release.work.status).toBe("closed");
+    expect(finished.closedWork?.closedReason).toBe("verified atomically");
+
+    const events = await runtime.listEvents();
+    expect(events.map((event) => event.type)).toEqual(
+      expect.arrayContaining([
+        "evidence.recorded",
+        "work.verified",
+        "work.closed",
+        "work.reservation_released",
+        "agent.finished"
+      ])
+    );
+  });
+
   it("requires passed evidence for passed verification but allows failed verdict evidence", async () => {
     const runtime = createBorealRuntime({ actor });
     const work = await runtime.createWork({ title: "Verify evidence policy" });

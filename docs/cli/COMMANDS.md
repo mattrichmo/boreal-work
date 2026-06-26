@@ -356,7 +356,7 @@ bwrk agent finish <work-id> \
   [--json]
 ```
 
-Guarded exit workflow for reserved agent work. The command requires the selected agent to own the active, non-expired reservation before it records evidence, verifies the work, and closes or releases anything. One of `--close` or `--release` is required so finish cannot leave an active reservation on non-reserved work.
+Guarded exit workflow for reserved agent work. The command requires the selected agent to own the active, non-expired reservation before it records evidence, verifies the work, and closes or releases anything. Evidence, verification, optional close, reservation release, readiness repair, and the final `agent.finished` event run as one engine transaction. One of `--close` or `--release` is required so finish cannot leave an active reservation on non-reserved work.
 
 Behavior:
 
