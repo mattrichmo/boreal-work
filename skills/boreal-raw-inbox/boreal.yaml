@@ -1,0 +1,8 @@
+schema_version: boreal.skill.v1
+system: boreal
+skill: boreal-raw-inbox
+display_name: Boreal Raw Inbox
+workflows:
+  - 20-memory/add-raw-source.md
+  - 20-memory/triage-raw-inbox.md
+  - 10-context/retrieve-raw-source.md

@@ -24,6 +24,7 @@ For in-repo and child memory layouts, setup rejects path escapes after symlink r
 - Init and install must use explicit project, memory, and install roots.
 - Workspace-bound commands fail closed when no Boreal workspace is resolved.
 - Skill installs must not read or write sibling repositories unless the user explicitly selects them.
+- Installed skills use `boreal-*` names so Codex and Claude users can distinguish Boreal workflow skills from global or unrelated project skills.
 - Future MCP adapters must bind to one workspace root and must not expose global memory by default.
 
 ## Init Direction

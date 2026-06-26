@@ -1,0 +1,9 @@
+schema_version: boreal.skill.v1
+system: boreal
+skill: boreal-wiki-claim-decision
+display_name: Boreal Wiki Claim Decision
+workflows:
+  - 30-knowledge/create-wiki-page.md
+  - 30-knowledge/create-claim.md
+  - 30-knowledge/capture-decision.md
+  - 30-knowledge/supersede-decision.md

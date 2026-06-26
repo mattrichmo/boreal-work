@@ -1,0 +1,8 @@
+schema_version: boreal.skill.v1
+system: boreal
+skill: boreal-work-execution
+display_name: Boreal Work Execution
+workflows:
+  - 40-work/claim-and-finish-work.md
+  - 40-work/closeout-work.md
+  - 40-work/link-dependencies.md

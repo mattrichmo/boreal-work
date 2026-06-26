@@ -1,0 +1,4 @@
+interface:
+  display_name: "Boreal Router"
+  short_description: "Route requests to Boreal workflows"
+  default_prompt: "Use $boreal-router to run the matching Boreal workflow in this project."

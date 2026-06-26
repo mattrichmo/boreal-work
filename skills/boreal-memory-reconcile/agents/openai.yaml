@@ -1,0 +1,4 @@
+interface:
+  display_name: "Boreal Memory Reconcile"
+  short_description: "Reconcile raw sources into memory"
+  default_prompt: "Use $boreal-memory-reconcile to run the matching Boreal workflow in this project."

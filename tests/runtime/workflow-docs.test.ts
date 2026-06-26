@@ -1,5 +1,5 @@
 import { readdir, readFile, stat } from "node:fs/promises";
-import { join, relative } from "node:path";
+import { basename, dirname, join, relative } from "node:path";
 
 import { describe, expect, it } from "vitest";
 
@@ -81,9 +81,25 @@ describe("workflow, template, and skill docs", () => {
     for (const file of skillFiles) {
       const text = await readFile(file, "utf8");
       const meta = parseFrontmatter(text, file);
-      expect(meta.name).toBeTruthy();
-      expect(meta.workflows.length).toBeGreaterThan(0);
-      for (const workflow of meta.workflows) {
+      const name = meta.name as string;
+      const metadataPath = join(dirname(file), "boreal.yaml");
+      const openAiMetadataPath = join(dirname(file), "agents", "openai.yaml");
+      const borealMeta = parseYamlDocument(await readFile(metadataPath, "utf8"), metadataPath);
+      const openAiMetadata = await readFile(openAiMetadataPath, "utf8");
+      const workflows = borealMeta.workflows as string[];
+
+      expect(name).toMatch(/^boreal-[a-z0-9-]+$/u);
+      expect(basename(dirname(file))).toBe(name);
+      expect(Object.keys(meta).sort()).toEqual(["description", "name"]);
+      expect(borealMeta.schema_version).toBe("boreal.skill.v1");
+      expect(borealMeta.system).toBe("boreal");
+      expect(borealMeta.skill).toBe(name);
+      expect(borealMeta.display_name).toMatch(/^Boreal /u);
+      expect(workflows.length).toBeGreaterThan(0);
+      expect(openAiMetadata).toContain("interface:");
+      expect(openAiMetadata).toContain(`default_prompt: "Use $${name}`);
+
+      for (const workflow of workflows) {
         expect(workflowRefs.has(workflow), `${relative(rootDir, file)} references unknown workflow ${workflow}`).toBe(true);
         expect(text).toContain(`workflows/${workflow}`);
       }
@@ -124,9 +140,13 @@ async function listSkillFiles(dir: string): Promise<string[]> {
 function parseFrontmatter(text: string, file: string): Record<string, string | string[]> {
   const match = /^---\n(?<body>[\s\S]*?)\n---/u.exec(text);
   expect(match?.groups?.body, `${relative(rootDir, file)} missing frontmatter`).toBeTruthy();
+  return parseYamlDocument(match?.groups?.body ?? "", file);
+}
+
+function parseYamlDocument(text: string, file: string): Record<string, string | string[]> {
   const result: Record<string, string | string[]> = {};
   let currentList: string | undefined;
-  for (const line of (match?.groups?.body ?? "").split("\n")) {
+  for (const line of text.split("\n")) {
     const listMatch = /^  - (.*)$/u.exec(line);
     if (listMatch && currentList) {
       (result[currentList] as string[]).push(listMatch[1] ?? "");

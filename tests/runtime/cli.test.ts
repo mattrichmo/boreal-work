@@ -1188,7 +1188,7 @@ describe("bwrk cli", () => {
     expect(plan.files).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
-          destination: expect.stringContaining(".agents/skills/router/SKILL.md"),
+          destination: expect.stringContaining(".agents/skills/boreal-router/SKILL.md"),
           workflowRefs: expect.arrayContaining(["00-agent/route-request.md"])
         })
       ])
@@ -1209,24 +1209,43 @@ describe("bwrk cli", () => {
     const dryRun = await runCli(rootDir, ["install", "skills", "--install-root", dryRunRoot, "--dry-run", "--json"]);
     const codex = await runCli(rootDir, ["install", "codex", "--install-root", codexRoot, "--json"]);
     const claude = await runCli(rootDir, ["install", "claude", "--install-root", claudeRoot, "--json"]);
-    const codexRouter = await readFile(join(codexRoot, "skills/router/SKILL.md"), "utf8");
-    const claudeRouter = await readFile(join(claudeRoot, "router/SKILL.md"), "utf8");
+    const codexRouter = await readFile(join(codexRoot, "skills/boreal-router/SKILL.md"), "utf8");
+    const codexRouterMetadata = await readFile(join(codexRoot, "skills/boreal-router/boreal.yaml"), "utf8");
+    const codexOpenAiMetadata = await readFile(join(codexRoot, "skills/boreal-router/agents/openai.yaml"), "utf8");
+    const claudeRouter = await readFile(join(claudeRoot, "skills/boreal-router/SKILL.md"), "utf8");
+    const claudeRouterMetadata = await readFile(join(claudeRoot, "skills/boreal-router/boreal.yaml"), "utf8");
 
     expect(dryRun.exitCode).toBe(0);
-    expect(await fileMissing(join(dryRunRoot, "router/SKILL.md"))).toBe(true);
-    expect(await fileMissing(join(dryRunRoot, "skills/router/SKILL.md"))).toBe(true);
+    expect(await fileMissing(join(dryRunRoot, "boreal-router/SKILL.md"))).toBe(true);
+    expect(await fileMissing(join(dryRunRoot, "skills/boreal-router/SKILL.md"))).toBe(true);
     expect(codex.exitCode).toBe(0);
     expect(parseData<{ readonly files: readonly unknown[]; readonly issues: readonly unknown[] }>(codex.stdout)).toEqual(
-      expect.objectContaining({ issues: [], files: expect.arrayContaining([expect.objectContaining({ destination: join(codexRoot, "skills/router/SKILL.md") })]) })
+      expect.objectContaining({
+        issues: [],
+        files: expect.arrayContaining([
+          expect.objectContaining({ destination: join(codexRoot, "skills/boreal-router/SKILL.md") }),
+          expect.objectContaining({ destination: join(codexRoot, "skills/boreal-router/agents/openai.yaml") })
+        ])
+      })
     );
-    expect(codexRouter).toContain("name: router");
+    expect(codexRouter).toContain("name: boreal-router");
     expect(codexRouter).toContain("00-agent/route-request.md");
+    expect(codexRouterMetadata).toContain("skill: boreal-router");
+    expect(codexOpenAiMetadata).toContain("default_prompt: \"Use $boreal-router");
     expect(claude.exitCode).toBe(0);
     expect(parseData<{ readonly files: readonly unknown[]; readonly issues: readonly unknown[] }>(claude.stdout)).toEqual(
-      expect.objectContaining({ issues: [], files: expect.arrayContaining([expect.objectContaining({ destination: join(claudeRoot, "router/SKILL.md") })]) })
+      expect.objectContaining({
+        issues: [],
+        files: expect.arrayContaining([
+          expect.objectContaining({ destination: join(claudeRoot, "skills/boreal-router/SKILL.md") }),
+          expect.objectContaining({ destination: join(claudeRoot, "skills/boreal-router/boreal.yaml") })
+        ])
+      })
     );
-    expect(claudeRouter).toContain("name: router");
+    expect(claudeRouter).toContain("name: boreal-router");
     expect(claudeRouter).toContain("00-agent/route-request.md");
+    expect(claudeRouterMetadata).toContain("skill: boreal-router");
+    expect(await fileMissing(join(claudeRoot, "skills/boreal-router/agents/openai.yaml"))).toBe(true);
   });
 
   it("generates a markdown command reference from the registry", async () => {

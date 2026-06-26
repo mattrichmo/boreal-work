@@ -1,0 +1,4 @@
+interface:
+  display_name: "Boreal Handoff Builder"
+  short_description: "Build Boreal handoffs and closeouts"
+  default_prompt: "Use $boreal-handoff-builder to run the matching Boreal workflow in this project."

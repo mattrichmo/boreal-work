@@ -21,8 +21,14 @@ export interface WorkflowAsset {
 export interface SkillAsset {
   readonly path: string;
   readonly name: string;
+  readonly displayName: string;
   readonly workflows: readonly string[];
-  readonly text: string;
+  readonly files: readonly SkillAssetFile[];
+}
+
+export interface SkillAssetFile {
+  readonly source: string;
+  readonly relativePath: string;
 }
 
 export interface AssetValidationIssue {
@@ -113,20 +119,16 @@ export async function buildSkillInstallPlan(input: {
   const root = resolve(input.installRoot);
   const skills = await listSkillAssets();
   const inspection = await inspectWorkflowAssets();
-  const files = skills.map((skill) => {
-    const destination =
-      input.target === "claude"
-        ? join(root, skill.name, "SKILL.md")
-        : input.target === "codex"
-          ? join(root, "skills", skill.name, "SKILL.md")
-          : join(root, skill.name, "SKILL.md");
-    return {
-      source: skill.path,
-      destination,
-      workflowRefs: skill.workflows,
-      wouldWrite: !input.dryRun
-    };
-  });
+  const files = skills.flatMap((skill) =>
+    skill.files
+      .filter((file) => shouldInstallSkillFile(input.target, file))
+      .map((file) => ({
+        source: file.source,
+        destination: skillInstallDestination(root, input.target, skill.name, file.relativePath),
+        workflowRefs: skill.workflows,
+        wouldWrite: !input.dryRun
+      }))
+  );
 
   return { target: input.target, dryRun: input.dryRun, installRoot: root, files, issues: inspection.issues };
 }
@@ -167,19 +169,68 @@ async function listTemplateIds(): Promise<readonly string[]> {
 }
 
 async function listSkillAssets(): Promise<readonly SkillAsset[]> {
-  const files = (await markdownFiles(join(repoRoot, "skills"))).filter((file) => file.endsWith("SKILL.md"));
+  const skillRoot = join(repoRoot, "skills");
+  const entries = await readdir(skillRoot, { withFileTypes: true });
   return Promise.all(
-    files.map(async (file) => {
-      const text = await readFile(file, "utf8");
-      const meta = parseFrontmatter(text);
-      return {
-        path: relative(repoRoot, file),
-        name: requiredScalar(meta, "name"),
-        workflows: listValue(meta, "workflows"),
-        text
-      };
-    })
+    entries
+      .filter((entry) => entry.isDirectory())
+      .map(async (entry) => {
+        const dir = join(skillRoot, entry.name);
+        const skillPath = join(dir, "SKILL.md");
+        const metadataPath = join(dir, "boreal.yaml");
+        const skillText = await readFile(skillPath, "utf8");
+        const meta = parseFrontmatter(skillText);
+        const borealMeta = parseYamlDocument(await readFile(metadataPath, "utf8"));
+        const name = requiredScalar(meta, "name");
+        if (name !== entry.name) {
+          throw new BorealError("BOREAL_INVALID_INPUT", "Skill folder name must match SKILL.md name", {
+            path: relative(repoRoot, skillPath),
+            folder: entry.name,
+            name
+          });
+        }
+        const metadataSkill = requiredScalar(borealMeta, "skill");
+        if (metadataSkill !== name) {
+          throw new BorealError("BOREAL_INVALID_INPUT", "Skill boreal.yaml skill must match SKILL.md name", {
+            path: relative(repoRoot, metadataPath),
+            skill: metadataSkill,
+            name
+          });
+        }
+        const files = await recursiveFiles(dir);
+        const installFiles = files
+          .map((file) => ({
+            source: relative(repoRoot, file),
+            relativePath: relative(dir, file)
+          }))
+          .sort((left, right) => left.relativePath.localeCompare(right.relativePath));
+        return {
+          path: relative(repoRoot, dir),
+          name,
+          displayName: requiredScalar(borealMeta, "display_name"),
+          workflows: listValue(borealMeta, "workflows"),
+          files: installFiles
+        };
+      })
   );
+}
+
+function skillInstallDestination(root: string, target: "codex" | "claude" | "skills", skillName: string, filePath: string): string {
+  switch (target) {
+    case "codex":
+      return join(root, "skills", skillName, filePath);
+    case "claude":
+      return join(root, "skills", skillName, filePath);
+    case "skills":
+      return join(root, skillName, filePath);
+  }
+}
+
+function shouldInstallSkillFile(target: "codex" | "claude" | "skills", file: SkillAssetFile): boolean {
+  if (target === "claude" && file.relativePath.startsWith("agents/")) {
+    return false;
+  }
+  return true;
 }
 
 async function markdownFiles(dir: string): Promise<string[]> {
@@ -201,9 +252,13 @@ function parseFrontmatter(text: string): Map<string, string | string[]> {
   if (!match?.groups?.body) {
     throw new BorealError("BOREAL_INVALID_INPUT", "Markdown asset missing frontmatter");
   }
+  return parseYamlDocument(match.groups.body);
+}
+
+function parseYamlDocument(text: string): Map<string, string | string[]> {
   const values = new Map<string, string | string[]>();
   let listKey: string | undefined;
-  for (const line of match.groups.body.split("\n")) {
+  for (const line of text.split("\n")) {
     const item = /^  - (.*)$/u.exec(line);
     if (item && listKey) {
       (values.get(listKey) as string[]).push(item[1] ?? "");
@@ -225,6 +280,20 @@ function parseFrontmatter(text: string): Map<string, string | string[]> {
     }
   }
   return values;
+}
+
+async function recursiveFiles(dir: string): Promise<string[]> {
+  const entries = await readdir(dir, { withFileTypes: true });
+  const files = await Promise.all(
+    entries.map(async (entry) => {
+      const path = join(dir, entry.name);
+      if (entry.isDirectory()) {
+        return recursiveFiles(path);
+      }
+      return entry.isFile() ? [path] : [];
+    })
+  );
+  return files.flat().sort();
 }
 
 function requiredScalar(values: Map<string, string | string[]>, key: string): string {

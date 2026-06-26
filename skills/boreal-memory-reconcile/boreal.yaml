@@ -1,0 +1,8 @@
+schema_version: boreal.skill.v1
+system: boreal
+skill: boreal-memory-reconcile
+display_name: Boreal Memory Reconcile
+workflows:
+  - 20-memory/reconcile-raw-to-memory.md
+  - 20-memory/update-memory.md
+  - 20-memory/reconcile-chat-thread.md

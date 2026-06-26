@@ -1,0 +1,8 @@
+schema_version: boreal.skill.v1
+system: boreal
+skill: boreal-handoff-builder
+display_name: Boreal Handoff Builder
+workflows:
+  - 50-handoff/build-handoff.md
+  - 50-handoff/session-closeout.md
+  - 50-handoff/project-closeout.md

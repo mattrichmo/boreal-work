@@ -1,0 +1,4 @@
+interface:
+  display_name: "Boreal Wiki Claim Decision"
+  short_description: "Manage Boreal wiki, claims, decisions"
+  default_prompt: "Use $boreal-wiki-claim-decision to run the matching Boreal workflow in this project."

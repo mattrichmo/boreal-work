@@ -1,0 +1,4 @@
+interface:
+  display_name: "Boreal Work Planning"
+  short_description: "Plan Boreal work and dependencies"
+  default_prompt: "Use $boreal-work-planning to run the matching Boreal workflow in this project."

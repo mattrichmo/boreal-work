@@ -1,0 +1,4 @@
+interface:
+  display_name: "Boreal Agent Session"
+  short_description: "Scoped Boreal agent session loop"
+  default_prompt: "Use $boreal-agent-session to run the matching Boreal workflow in this project."

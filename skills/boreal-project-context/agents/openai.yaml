@@ -1,0 +1,4 @@
+interface:
+  display_name: "Boreal Project Context"
+  short_description: "Retrieve Boreal project context"
+  default_prompt: "Use $boreal-project-context to run the matching Boreal workflow in this project."

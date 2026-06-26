@@ -188,7 +188,7 @@ Shows one workflow playbook by exact workflow ID, relative path under `workflows
 bwrk install codex [--install-root <dir>] [--dry-run] [--json]
 ```
 
-Plans or installs Boreal skill adapters for Codex. Defaults to `.agents` under the selected workspace, writing skills below `.agents/skills/<skill>/SKILL.md`. Use `--dry-run` before writing.
+Plans or installs Boreal skill adapters for Codex. Defaults to `.agents` under the selected workspace, writing namespaced skills below `.agents/skills/boreal-*/SKILL.md` plus Codex UI metadata in `agents/openai.yaml`. Use `--dry-run` before writing.
 
 ## `install claude`
 
@@ -196,7 +196,7 @@ Plans or installs Boreal skill adapters for Codex. Defaults to `.agents` under t
 bwrk install claude [--install-root <dir>] [--dry-run] [--json]
 ```
 
-Plans or installs Boreal skill adapters for Claude. Defaults to `.claude` under the selected workspace, writing one folder per skill. Use `--dry-run` before writing.
+Plans or installs Boreal skill adapters for Claude. Defaults to `.claude` under the selected workspace, writing namespaced project skills below `.claude/skills/boreal-*/SKILL.md`. Use `--dry-run` before writing.
 
 ## `install skills`
 
@@ -204,7 +204,7 @@ Plans or installs Boreal skill adapters for Claude. Defaults to `.claude` under 
 bwrk install skills [--install-root <dir>] [--dry-run] [--json]
 ```
 
-Plans or installs generic Boreal skill files into a folder-scoped skill root. Defaults to `.agents/skills` under the selected workspace.
+Plans or installs generic namespaced Boreal skill folders into a folder-scoped skill root. Defaults to `.agents/skills` under the selected workspace.
 
 ## `init`
 

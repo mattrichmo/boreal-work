@@ -1,0 +1,4 @@
+interface:
+  display_name: "Boreal Sprint Launch"
+  short_description: "Launch Boreal sprints with gates"
+  default_prompt: "Use $boreal-sprint-launch to run the matching Boreal workflow in this project."

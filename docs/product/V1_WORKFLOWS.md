@@ -20,5 +20,5 @@ Raw material is captured first, then triaged, then reconciled into durable memor
 - Every common user ask routes to a workflow.
 - Every skill references existing workflow files.
 - Every workflow lists allowed commands, templates, safety constraints, failure handling, and finish criteria.
-- Skill installs are project/folder scoped and never fall back to another repository.
+- Skill installs are project/folder scoped, use `boreal-*` names, and never fall back to another repository.
 - Doctor checks can validate workflow/skill references and install state.

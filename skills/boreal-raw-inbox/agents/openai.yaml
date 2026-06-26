@@ -1,0 +1,4 @@
+interface:
+  display_name: "Boreal Raw Inbox"
+  short_description: "Capture and triage raw sources"
+  default_prompt: "Use $boreal-raw-inbox to run the matching Boreal workflow in this project."

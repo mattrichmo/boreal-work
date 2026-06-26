@@ -61,17 +61,17 @@ const templates = [
 ];
 
 const skills = [
-  ["router", "Boreal Router", ["00-agent/route-request.md"]],
-  ["agent-session", "Boreal Agent Session", ["00-agent/agent-session.md"]],
-  ["project-context", "Boreal Project Context", ["10-context/retrieve-project-context.md", "10-context/retrieve-work-state.md", "10-context/retrieve-decision-history.md"]],
-  ["raw-inbox", "Boreal Raw Inbox", ["20-memory/add-raw-source.md", "20-memory/triage-raw-inbox.md", "10-context/retrieve-raw-source.md"]],
-  ["memory-reconcile", "Boreal Memory Reconcile", ["20-memory/reconcile-raw-to-memory.md", "20-memory/update-memory.md", "20-memory/reconcile-chat-thread.md"]],
-  ["wiki-claim-decision", "Boreal Wiki Claim Decision", ["30-knowledge/create-wiki-page.md", "30-knowledge/create-claim.md", "30-knowledge/capture-decision.md", "30-knowledge/supersede-decision.md"]],
-  ["work-planning", "Boreal Work Planning", ["40-work/create-work-structure.md", "40-work/update-work-structure.md", "40-work/discovery-to-work.md"]],
-  ["sprint-launch", "Boreal Sprint Launch", ["40-work/launch-sprint.md"]],
-  ["work-execution", "Boreal Work Execution", ["40-work/claim-and-finish-work.md", "40-work/closeout-work.md", "40-work/link-dependencies.md"]],
-  ["handoff-builder", "Boreal Handoff Builder", ["50-handoff/build-handoff.md", "50-handoff/session-closeout.md", "50-handoff/project-closeout.md"]],
-  ["health-doctor", "Boreal Health Doctor", ["60-health/sync-and-doctor.md", "60-health/ledger-export-import.md", "60-health/recover-from-failure.md"]]
+  ["boreal-router", "Boreal Router", "Route requests to Boreal workflows", ["00-agent/route-request.md"]],
+  ["boreal-agent-session", "Boreal Agent Session", "Scoped Boreal agent session loop", ["00-agent/agent-session.md"]],
+  ["boreal-project-context", "Boreal Project Context", "Retrieve Boreal project context", ["10-context/retrieve-project-context.md", "10-context/retrieve-work-state.md", "10-context/retrieve-decision-history.md"]],
+  ["boreal-raw-inbox", "Boreal Raw Inbox", "Capture and triage raw sources", ["20-memory/add-raw-source.md", "20-memory/triage-raw-inbox.md", "10-context/retrieve-raw-source.md"]],
+  ["boreal-memory-reconcile", "Boreal Memory Reconcile", "Reconcile raw sources into memory", ["20-memory/reconcile-raw-to-memory.md", "20-memory/update-memory.md", "20-memory/reconcile-chat-thread.md"]],
+  ["boreal-wiki-claim-decision", "Boreal Wiki Claim Decision", "Manage Boreal wiki, claims, decisions", ["30-knowledge/create-wiki-page.md", "30-knowledge/create-claim.md", "30-knowledge/capture-decision.md", "30-knowledge/supersede-decision.md"]],
+  ["boreal-work-planning", "Boreal Work Planning", "Plan Boreal work and dependencies", ["40-work/create-work-structure.md", "40-work/update-work-structure.md", "40-work/discovery-to-work.md"]],
+  ["boreal-sprint-launch", "Boreal Sprint Launch", "Launch Boreal sprints with gates", ["40-work/launch-sprint.md"]],
+  ["boreal-work-execution", "Boreal Work Execution", "Claim, verify, and close Boreal work", ["40-work/claim-and-finish-work.md", "40-work/closeout-work.md", "40-work/link-dependencies.md"]],
+  ["boreal-handoff-builder", "Boreal Handoff Builder", "Build Boreal handoffs and closeouts", ["50-handoff/build-handoff.md", "50-handoff/session-closeout.md", "50-handoff/project-closeout.md"]],
+  ["boreal-health-doctor", "Boreal Health Doctor", "Inspect and repair Boreal health", ["60-health/sync-and-doctor.md", "60-health/ledger-export-import.md", "60-health/recover-from-failure.md"]]
 ];
 
 const docs = new Map([
@@ -91,8 +91,10 @@ for (const [slug, title] of templates) {
   docs.set(join("templates", `${slug}.md`), templateDoc(slug, title));
 }
 
-for (const [slug, title, workflowRefs] of skills) {
+for (const [slug, title, shortDescription, workflowRefs] of skills) {
   docs.set(join("skills", slug, "SKILL.md"), skillDoc(slug, title, workflowRefs));
+  docs.set(join("skills", slug, "boreal.yaml"), skillMetadataDoc(slug, title, workflowRefs));
+  docs.set(join("skills", slug, "agents", "openai.yaml"), openAiSkillMetadataDoc(slug, title, shortDescription));
 }
 
 for (const [path, content] of docs) {
@@ -233,18 +235,10 @@ Name the next Boreal workflow or CLI command to run.
 function skillDoc(slug, title, workflowRefs) {
   return `---
 name: ${slug}
-description: ${title} skill for Boreal project-scoped workflows.
-workflows:
-${workflowRefs.map((workflow) => `  - ${workflow}`).join("\n")}
+description: ${title} skill for Boreal project-scoped workflows. Use when the user asks to run or reason about Boreal memory/workflow commands for: ${workflowRefs.map((workflow) => workflow.replace(/^\d\d-[^/]+\//, "").replace(/\.md$/, "").replace(/-/g, " ")).join(", ")}.
 ---
 
 # ${title}
-
-## When To Use
-
-Use this skill when the user asks for work covered by:
-
-${workflowRefs.map((workflow) => `- \`workflows/${workflow}\``).join("\n")}
 
 ## Required First Step
 
@@ -252,10 +246,15 @@ Confirm the current project context. Prefer \`bwrk prime --json\` when the works
 
 ## Routing Rules
 
+- Read \`boreal.yaml\` in this skill folder to identify the canonical workflow files.
 - Read the referenced workflow file before executing steps.
 - Follow the workflow's allowed commands and finish criteria.
 - Keep this skill as a thin adapter; do not invent steps that belong in the workflow file.
 - If the request crosses repositories, stop and ask for the explicit workspace and memory root.
+
+## Workflow References
+
+${workflowRefs.map((workflow) => `- \`workflows/${workflow}\``).join("\n")}
 
 ## No-Leak Rules
 
@@ -266,6 +265,24 @@ Confirm the current project context. Prefer \`bwrk prime --json\` when the works
 ## Completion
 
 End with the workflow result, verification status, and the next suggested workflow.
+`;
+}
+
+function skillMetadataDoc(slug, title, workflowRefs) {
+  return `schema_version: boreal.skill.v1
+system: boreal
+skill: ${slug}
+display_name: ${title}
+workflows:
+${workflowRefs.map((workflow) => `  - ${workflow}`).join("\n")}
+`;
+}
+
+function openAiSkillMetadataDoc(slug, title, shortDescription) {
+  return `interface:
+  display_name: "${title}"
+  short_description: "${shortDescription}"
+  default_prompt: "Use $${slug} to run the matching Boreal workflow in this project."
 `;
 }
 

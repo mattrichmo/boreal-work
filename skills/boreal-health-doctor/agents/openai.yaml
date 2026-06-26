@@ -1,0 +1,4 @@
+interface:
+  display_name: "Boreal Health Doctor"
+  short_description: "Inspect and repair Boreal health"
+  default_prompt: "Use $boreal-health-doctor to run the matching Boreal workflow in this project."

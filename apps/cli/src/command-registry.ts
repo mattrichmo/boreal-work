@@ -192,7 +192,7 @@ export const COMMAND_DEFINITIONS: readonly CommandDefinition[] = [
     category: "install",
     summary: "Install Boreal skills for Codex.",
     usage: "bwrk install codex [--install-root <dir>] [--dry-run] [--json]",
-    description: "Installs project-scoped Boreal skill adapters for Codex. Defaults to .agents.",
+    description: "Installs project-scoped Boreal skill adapters for Codex. Defaults to .agents and writes .agents/skills/boreal-*.",
     flags: [
       flag("install-root", "value", "Skill install root. Defaults to .agents under the selected workspace."),
       flag("dry-run", "boolean", "Plan install paths without writing files.")
@@ -206,7 +206,7 @@ export const COMMAND_DEFINITIONS: readonly CommandDefinition[] = [
     category: "install",
     summary: "Install Boreal skills for Claude.",
     usage: "bwrk install claude [--install-root <dir>] [--dry-run] [--json]",
-    description: "Installs project-scoped Boreal skill adapters for Claude. Defaults to .claude.",
+    description: "Installs project-scoped Boreal skill adapters for Claude. Defaults to .claude and writes .claude/skills/boreal-*.",
     flags: [
       flag("install-root", "value", "Skill install root. Defaults to .claude under the selected workspace."),
       flag("dry-run", "boolean", "Plan install paths without writing files.")
@@ -220,7 +220,7 @@ export const COMMAND_DEFINITIONS: readonly CommandDefinition[] = [
     category: "install",
     summary: "Install Boreal generic skill files.",
     usage: "bwrk install skills [--install-root <dir>] [--dry-run] [--json]",
-    description: "Installs Boreal skill source files into a folder-scoped skill root. Defaults to .agents/skills.",
+    description: "Installs namespaced Boreal skill source folders into a folder-scoped skill root. Defaults to .agents/skills.",
     flags: [
       flag("install-root", "value", "Skill install root. Defaults to .agents/skills under the selected workspace."),
       flag("dry-run", "boolean", "Plan install paths without writing files.")
