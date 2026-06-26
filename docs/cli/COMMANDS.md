@@ -720,9 +720,9 @@ JSON `data` contains `outDir`, `files`, and `recordCounts`.
 bwrk export ledgers [--out <dir>] [--json]
 ```
 
-Writes a `boreal.ledgers.v1` JSONL bridge: one `.jsonl` file per runtime section plus `manifest.json` with per-file counts, per-file content hashes, and the whole-ledger content hash. Default output directory is `.boreal/ledgers`.
+Writes a `boreal.ledgers.v1` JSONL bridge: one `.jsonl` file per runtime section, a `deletions.jsonl` tombstone ledger, and `manifest.json` with per-file counts, per-file content hashes, deleted-record counts, and the whole-ledger content hash. Default output directory is `.boreal/ledgers`.
 
-JSON `data` contains `outDir`, `manifestPath`, `contentHash`, `recordCounts`, and `files`.
+JSON `data` contains `outDir`, `manifestPath`, `contentHash`, `recordCounts`, `deletedRecordCounts`, `files`, and `deletions`.
 
 ## `import json`
 
@@ -742,7 +742,7 @@ JSON `data` contains per-section `imported` and `skipped` counts.
 bwrk import ledgers --from <dir> [--allow-external-read] [--json]
 ```
 
-Imports a `boreal.ledgers.v1` directory. The importer reads `manifest.json`, verifies every JSONL file count and content hash, reconstructs the snapshot, validates record schemas and references, then merges records with the same conflict rules as `import json`.
+Imports a `boreal.ledgers.v1` directory. The importer reads `manifest.json`, verifies every JSONL file and `deletions.jsonl` count/content hash, reconstructs the snapshot, rejects tombstones that conflict with live records, validates record schemas and references, then merges records with the same conflict rules as `import json`.
 
 By default, `--from` must resolve inside the workspace, including after symlink resolution. Use `--allow-external-read` for an intentional external ledger import.
 
@@ -754,9 +754,9 @@ JSON `data` contains per-section `imported` and `skipped` counts.
 bwrk ledger status [--dir <dir>] [--json]
 ```
 
-Compares an exported JSONL ledger directory with the current runtime state. Missing ledgers, stale content hashes, parse errors, count mismatches, and file hash mismatches return a non-zero exit code. Default directory is `.boreal/ledgers`.
+Compares an exported JSONL ledger directory with the current runtime state. Missing ledgers, stale content hashes, parse errors, count mismatches, file hash mismatches, and invalid tombstones return a non-zero exit code. Default directory is `.boreal/ledgers`.
 
-JSON `data` contains `ok`, `path`, `exists`, `stale`, `expectedContentHash`, and, when present, `contentHash`, `recordCounts`, `files`, or `error`.
+JSON `data` contains `ok`, `path`, `exists`, `stale`, `expectedContentHash`, `reconstructable`, and, when present, `contentHash`, `recordCounts`, `deletedRecordCounts`, `files`, `deletions`, or `error`.
 
 ## `snapshot create`
 

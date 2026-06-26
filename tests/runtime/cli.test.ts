@@ -1913,13 +1913,19 @@ describe("bwrk cli", () => {
       readonly manifestPath: string;
       readonly contentHash: string;
       readonly recordCounts: { readonly workItems: number; readonly events: number };
+      readonly deletedRecordCounts: { readonly workItems: number };
       readonly files: Array<{ readonly section: string; readonly path: string; readonly count: number; readonly contentHash: string }>;
+      readonly deletions: { readonly path: string; readonly count: number; readonly contentHash: string };
     }>(ledgers.stdout);
     expect(ledgers.exitCode).toBe(0);
     expect(ledgerPayload.outDir).toBe(join(rootDir, ".boreal/ledgers"));
     expect(ledgerPayload.manifestPath).toBe(join(rootDir, ".boreal/ledgers/manifest.json"));
     expect(ledgerPayload.contentHash).toMatch(/^sha256:/);
     expect(ledgerPayload.recordCounts.workItems).toBe(1);
+    expect(ledgerPayload.deletedRecordCounts.workItems).toBe(0);
+    expect(ledgerPayload.deletions).toEqual(
+      expect.objectContaining({ path: "deletions.jsonl", count: 0, contentHash: expect.stringMatching(/^sha256:/) })
+    );
     expect(ledgerPayload.files).toEqual(
       expect.arrayContaining([
         expect.objectContaining({ section: "workItems", path: "work-items.jsonl", count: 1 }),
@@ -1928,13 +1934,28 @@ describe("bwrk cli", () => {
     );
     const workLedger = await readFile(join(rootDir, ".boreal/ledgers/work-items.jsonl"), "utf8");
     expect(workLedger).toContain("\"title\":\"Exportable work\"");
+    expect(await readFile(join(rootDir, ".boreal/ledgers/deletions.jsonl"), "utf8")).toBe("");
 
     const freshLedgerStatus = await runCli(rootDir, ["ledger", "status", "--json"]);
-    const freshLedgerPayload = parseData<{ readonly ok: boolean; readonly exists: boolean; readonly stale: boolean }>(
-      freshLedgerStatus.stdout
-    );
+    const freshLedgerPayload = parseData<{
+      readonly ok: boolean;
+      readonly exists: boolean;
+      readonly stale: boolean;
+      readonly reconstructable: boolean;
+      readonly deletedRecordCounts: { readonly workItems: number };
+      readonly deletions: { readonly path: string; readonly count: number };
+    }>(freshLedgerStatus.stdout);
     expect(freshLedgerStatus.exitCode).toBe(0);
-    expect(freshLedgerPayload).toEqual(expect.objectContaining({ ok: true, exists: true, stale: false }));
+    expect(freshLedgerPayload).toEqual(
+      expect.objectContaining({
+        ok: true,
+        exists: true,
+        stale: false,
+        reconstructable: true,
+        deletedRecordCounts: expect.objectContaining({ workItems: 0 }),
+        deletions: expect.objectContaining({ path: "deletions.jsonl", count: 0 })
+      })
+    );
 
     const freshDoctor = await runCli(rootDir, ["doctor", "--json"]);
     const freshDoctorPayload = parseData<{
@@ -1985,6 +2006,26 @@ describe("bwrk cli", () => {
       "--json"
     ]);
     expect(parseData<{ readonly skipped: { readonly workItems: number } }>(importedLedgersAgain.stdout).skipped.workItems).toBe(1);
+
+    await runCli(rootDir, ["export", "ledgers", "--out", "tampered-ledgers", "--json"]);
+    await writeFile(
+      join(rootDir, "tampered-ledgers", "deletions.jsonl"),
+      '{"schemaVersion":"boreal.ledger-deletion.v1","section":"workItems","id":"bw_work_deleted","deletedAt":"2026-01-01T00:00:00.000Z"}\n',
+      "utf8"
+    );
+    const tamperedDeletionImport = await runCli(rootDir, [
+      "import",
+      "ledgers",
+      "--from",
+      "tampered-ledgers",
+      "--json"
+    ]);
+    const tamperedDeletionPayload = parseJson<{ readonly ok: false; readonly code: string; readonly message: string }>(
+      tamperedDeletionImport.stderr
+    );
+    expect(tamperedDeletionImport.exitCode).toBe(2);
+    expect(tamperedDeletionPayload.code).toBe("BOREAL_INVALID_INPUT");
+    expect(tamperedDeletionPayload.message).toContain("Ledger deletions count does not match manifest");
 
     const outsideDir = await makeTempWorkspace();
     await symlink(outsideDir, join(rootDir, "linked-out"), "dir");

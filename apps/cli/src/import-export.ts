@@ -52,13 +52,30 @@ export interface LedgerManifestFile {
   readonly contentHash: string;
 }
 
+export interface LedgerDeletionManifestFile {
+  readonly path: string;
+  readonly count: number;
+  readonly contentHash: string;
+}
+
+export interface LedgerDeletionRecord {
+  readonly schemaVersion: "boreal.ledger-deletion.v1";
+  readonly section: SnapshotSection;
+  readonly id: string;
+  readonly deletedAt: string;
+  readonly reason?: string;
+  readonly deletedContentHash?: string;
+}
+
 export interface LedgerManifest {
   readonly schemaVersion: "boreal.ledgers.v1";
   readonly exportedAt: string;
   readonly workspaceRoot: string;
   readonly contentHash: string;
   readonly recordCounts: Record<SnapshotSection, number>;
+  readonly deletedRecordCounts: Record<SnapshotSection, number>;
   readonly files: Record<SnapshotSection, LedgerManifestFile>;
+  readonly deletions: LedgerDeletionManifestFile;
 }
 
 export interface LedgerExportResult {
@@ -66,7 +83,9 @@ export interface LedgerExportResult {
   readonly manifestPath: string;
   readonly contentHash: string;
   readonly recordCounts: Record<SnapshotSection, number>;
+  readonly deletedRecordCounts: Record<SnapshotSection, number>;
   readonly files: readonly LedgerManifestFile[];
+  readonly deletions: LedgerDeletionManifestFile;
 }
 
 export interface LedgerStatusResult {
@@ -75,9 +94,12 @@ export interface LedgerStatusResult {
   readonly exists: boolean;
   readonly stale: boolean;
   readonly expectedContentHash: string;
+  readonly reconstructable: boolean;
   readonly contentHash?: string;
   readonly recordCounts?: Record<SnapshotSection, number>;
+  readonly deletedRecordCounts?: Record<SnapshotSection, number>;
   readonly files?: readonly LedgerManifestFile[];
+  readonly deletions?: LedgerDeletionManifestFile;
   readonly error?: string;
 }
 
@@ -136,6 +158,7 @@ const SNAPSHOT_SECTIONS: readonly SnapshotSection[] = [
 
 const LEDGER_SCHEMA_VERSION = "boreal.ledgers.v1";
 const LEDGER_MANIFEST_FILE = "manifest.json";
+const LEDGER_DELETIONS_FILE = "deletions.jsonl";
 const LEDGER_FILES: Record<SnapshotSection, string> = {
   workItems: "work-items.jsonl",
   evidence: "evidence.jsonl",
@@ -201,9 +224,11 @@ export async function exportMarkdown(context: CliContext, outDir: string | undef
 export async function exportLedgers(context: CliContext, outDir: string | undefined): Promise<LedgerExportResult> {
   const document = await buildExportDocument(context);
   const resolvedDir = await resolveWorkspacePath(context, outDir ?? ".boreal/ledgers");
+  const existingDeletions = await readExistingLedgerDeletions(resolvedDir);
   await mkdir(resolvedDir, { recursive: true });
 
   const ledgerState = canonicalLedgerSnapshot(document.state);
+  assertNoDeletedLiveRecords(ledgerState, existingDeletions);
   const files = Object.fromEntries(
     await Promise.all(
       SNAPSHOT_SECTIONS.map(async (section) => {
@@ -216,13 +241,17 @@ export async function exportLedgers(context: CliContext, outDir: string | undefi
       })
     )
   ) as Record<SnapshotSection, LedgerManifestFile>;
+  const deletions = ledgerDeletionManifestFile(existingDeletions);
+  await writeTextFileAtomic(join(resolvedDir, deletions.path), ledgerDeletionContent(existingDeletions));
   const manifest: LedgerManifest = {
     schemaVersion: LEDGER_SCHEMA_VERSION,
     exportedAt: document.exportedAt,
     workspaceRoot: context.workspaceRoot,
-    contentHash: ledgerContentHash(ledgerState),
+    contentHash: ledgerContentHash(ledgerState, existingDeletions),
     recordCounts: recordCounts(ledgerState),
-    files
+    deletedRecordCounts: deletionRecordCounts(existingDeletions),
+    files,
+    deletions
   };
   const manifestPath = join(resolvedDir, LEDGER_MANIFEST_FILE);
   await writeTextFileAtomic(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
@@ -231,7 +260,9 @@ export async function exportLedgers(context: CliContext, outDir: string | undefi
     manifestPath,
     contentHash: manifest.contentHash,
     recordCounts: manifest.recordCounts,
-    files: SNAPSHOT_SECTIONS.map((section) => manifest.files[section])
+    deletedRecordCounts: manifest.deletedRecordCounts,
+    files: SNAPSHOT_SECTIONS.map((section) => manifest.files[section]),
+    deletions: manifest.deletions
   };
 }
 
@@ -258,21 +289,27 @@ export async function importLedgers(
 
 export async function ledgerStatus(context: CliContext, dir: string | undefined): Promise<LedgerStatusResult> {
   const document = await buildExportDocument(context);
-  const expectedContentHash = ledgerContentHash(canonicalLedgerSnapshot(document.state));
+  const currentLedgerState = canonicalLedgerSnapshot(document.state);
+  const emptyExpectedContentHash = ledgerContentHash(currentLedgerState, []);
   const resolvedDir = await resolveWorkspacePath(context, dir ?? ".boreal/ledgers");
   const manifestPath = join(resolvedDir, LEDGER_MANIFEST_FILE);
 
   try {
-    const { manifest } = await readLedgerDirectory(resolvedDir);
+    const { manifest, deletions } = await readLedgerDirectory(resolvedDir);
+    assertNoDeletedLiveRecords(currentLedgerState, deletions);
+    const expectedContentHash = ledgerContentHash(currentLedgerState, deletions);
     return {
       ok: manifest.contentHash === expectedContentHash,
       path: manifestPath,
       exists: true,
       stale: manifest.contentHash !== expectedContentHash,
       expectedContentHash,
+      reconstructable: true,
       contentHash: manifest.contentHash,
       recordCounts: manifest.recordCounts,
-      files: SNAPSHOT_SECTIONS.map((section) => manifest.files[section])
+      deletedRecordCounts: manifest.deletedRecordCounts,
+      files: SNAPSHOT_SECTIONS.map((section) => manifest.files[section]),
+      deletions: manifest.deletions
     };
   } catch (error) {
     if (isNodeError(error) && error.code === "ENOENT") {
@@ -281,7 +318,8 @@ export async function ledgerStatus(context: CliContext, dir: string | undefined)
         path: manifestPath,
         exists: false,
         stale: true,
-        expectedContentHash
+        expectedContentHash: emptyExpectedContentHash,
+        reconstructable: false
       };
     }
     return {
@@ -289,7 +327,8 @@ export async function ledgerStatus(context: CliContext, dir: string | undefined)
       path: manifestPath,
       exists: true,
       stale: true,
-      expectedContentHash,
+      expectedContentHash: emptyExpectedContentHash,
+      reconstructable: false,
       error: error instanceof Error ? error.message : String(error)
     };
   }
@@ -385,7 +424,13 @@ async function readSnapshot(reader: BorealReader): Promise<ExportSnapshot> {
   };
 }
 
-async function readLedgerDirectory(dir: string): Promise<{ readonly manifest: LedgerManifest; readonly state: ExportSnapshot }> {
+async function readLedgerDirectory(
+  dir: string
+): Promise<{
+  readonly manifest: LedgerManifest;
+  readonly state: ExportSnapshot;
+  readonly deletions: readonly LedgerDeletionRecord[];
+}> {
   const manifestPath = join(dir, LEDGER_MANIFEST_FILE);
   const manifest = parseLedgerManifest(
     await readJsonFile(manifestPath, {
@@ -402,15 +447,17 @@ async function readLedgerDirectory(dir: string): Promise<{ readonly manifest: Le
       ])
     )
   ) as ExportSnapshot;
+  const deletions = await readLedgerDeletions(dir, manifest.deletions);
   validateSnapshot(state);
-  const contentHash = ledgerContentHash(canonicalLedgerSnapshot(state));
+  assertNoDeletedLiveRecords(state, deletions);
+  const contentHash = ledgerContentHash(canonicalLedgerSnapshot(state), deletions);
   if (contentHash !== manifest.contentHash) {
     throw new BorealError("BOREAL_INVALID_INPUT", "Ledger manifest content hash does not match JSONL records", {
       contentHash: manifest.contentHash,
       expectedHash: contentHash
     });
   }
-  return { manifest, state };
+  return { manifest, state, deletions };
 }
 
 async function readLedgerSection(
@@ -458,6 +505,75 @@ async function readLedgerSection(
   return records;
 }
 
+async function readExistingLedgerDeletions(dir: string): Promise<readonly LedgerDeletionRecord[]> {
+  const manifestPath = join(dir, LEDGER_MANIFEST_FILE);
+  try {
+    const manifest = parseLedgerManifest(
+      await readJsonFile(manifestPath, {
+        schemaName: LEDGER_SCHEMA_VERSION,
+        expectedObject: true,
+        maxBytes: 1024 * 1024
+      })
+    );
+    return readLedgerDeletions(dir, manifest.deletions);
+  } catch (error) {
+    if (isNodeError(error) && error.code === "ENOENT") {
+      return [];
+    }
+    throw error;
+  }
+}
+
+async function readLedgerDeletions(
+  dir: string,
+  file: LedgerDeletionManifestFile
+): Promise<readonly LedgerDeletionRecord[]> {
+  const path = resolve(dir, file.path);
+  assertPathInside(dir, path);
+  await assertRealPathInside(dir, path);
+  let info: Awaited<ReturnType<typeof stat>>;
+  try {
+    info = await stat(path);
+  } catch (error) {
+    if (file.count === 0 && isNodeError(error) && error.code === "ENOENT") {
+      return [];
+    }
+    throw error;
+  }
+  if (!info.isFile()) {
+    throw new BorealError("BOREAL_INVALID_INPUT", "Ledger deletions path must be a regular file", { path });
+  }
+  if (info.size > 50 * 1024 * 1024) {
+    throw new BorealError("BOREAL_INVALID_INPUT", "Ledger deletions file exceeds maximum readable size", {
+      path,
+      sizeBytes: info.size,
+      maxBytes: 50 * 1024 * 1024
+    });
+  }
+  const records = parseJsonlStrict(await readFile(path, "utf8"), {
+    path,
+    schemaName: "boreal.ledger-deletions.v1",
+    expectedObject: true
+  }).map(parseLedgerDeletionRecord);
+  if (records.length !== file.count) {
+    throw new BorealError("BOREAL_INVALID_INPUT", "Ledger deletions count does not match manifest", {
+      path,
+      count: file.count,
+      actualCount: records.length
+    });
+  }
+  const contentHash = hashContent(canonicalLedgerDeletions(records));
+  if (contentHash !== file.contentHash) {
+    throw new BorealError("BOREAL_INVALID_INPUT", "Ledger deletions content hash does not match manifest", {
+      path,
+      contentHash: file.contentHash,
+      expectedHash: contentHash
+    });
+  }
+  assertUniqueDeletions(records);
+  return records;
+}
+
 async function importSnapshot(store: BorealStore, incoming: ExportSnapshot): Promise<ImportResult> {
   validateSnapshot(incoming);
   return store.write(async (writer) => {
@@ -481,6 +597,8 @@ function parseLedgerManifest(value: unknown): LedgerManifest {
   const files = Object.fromEntries(
     SNAPSHOT_SECTIONS.map((section) => [section, parseLedgerManifestFile(section, filesValue[section])])
   ) as Record<SnapshotSection, LedgerManifestFile>;
+  const deletions = parseLedgerDeletionManifestFile(value.deletions);
+  const deletedRecordCounts = parseOptionalDeletionCounts(value.deletedRecordCounts);
   for (const section of SNAPSHOT_SECTIONS) {
     if (recordCounts[section] !== files[section].count) {
       throw new BorealError("BOREAL_INVALID_INPUT", "Ledger manifest section count does not match file count", {
@@ -490,13 +608,21 @@ function parseLedgerManifest(value: unknown): LedgerManifest {
       });
     }
   }
+  if (Object.values(deletedRecordCounts).reduce((sum, count) => sum + count, 0) !== deletions.count) {
+    throw new BorealError("BOREAL_INVALID_INPUT", "Ledger manifest deleted record counts do not match deletions count", {
+      deletedRecordCounts,
+      deletionCount: deletions.count
+    });
+  }
   return {
     schemaVersion: LEDGER_SCHEMA_VERSION,
     exportedAt: typeof value.exportedAt === "string" ? value.exportedAt : "",
     workspaceRoot: typeof value.workspaceRoot === "string" ? value.workspaceRoot : "",
     contentHash: typeof value.contentHash === "string" ? value.contentHash : "",
     recordCounts,
-    files
+    deletedRecordCounts,
+    files,
+    deletions
   };
 }
 
@@ -526,6 +652,35 @@ function parseLedgerManifestFile(section: SnapshotSection, value: unknown): Ledg
   }
   return {
     section,
+    path: value.path,
+    count: value.count,
+    contentHash: value.contentHash
+  };
+}
+
+function parseLedgerDeletionManifestFile(value: unknown): LedgerDeletionManifestFile {
+  if (value === undefined) {
+    return {
+      path: LEDGER_DELETIONS_FILE,
+      count: 0,
+      contentHash: hashContent([])
+    };
+  }
+  if (!isRecord(value)) {
+    throw new BorealError("BOREAL_INVALID_INPUT", "Ledger manifest deletions entry must be an object");
+  }
+  if (typeof value.path !== "string" || value.path.length === 0) {
+    throw new BorealError("BOREAL_INVALID_INPUT", "Ledger manifest deletions entry must include a path");
+  }
+  if (typeof value.count !== "number" || !Number.isInteger(value.count) || value.count < 0) {
+    throw new BorealError("BOREAL_INVALID_INPUT", "Ledger manifest deletions entry must include a non-negative count", {
+      count: value.count
+    });
+  }
+  if (typeof value.contentHash !== "string" || !value.contentHash.startsWith("sha256:")) {
+    throw new BorealError("BOREAL_INVALID_INPUT", "Ledger manifest deletions entry must include a content hash");
+  }
+  return {
     path: value.path,
     count: value.count,
     contentHash: value.contentHash
@@ -951,10 +1106,11 @@ function canonicalLedgerSnapshot(state: ExportSnapshot): ExportSnapshot {
   ) as unknown as ExportSnapshot;
 }
 
-function ledgerContentHash(state: ExportSnapshot): string {
+function ledgerContentHash(state: ExportSnapshot, deletions: readonly LedgerDeletionRecord[]): string {
   return hashContent({
     schemaVersion: LEDGER_SCHEMA_VERSION,
-    sections: state
+    sections: state,
+    deletions: canonicalLedgerDeletions(deletions)
   });
 }
 
@@ -967,11 +1123,32 @@ function ledgerManifestFile(section: SnapshotSection, records: readonly unknown[
   };
 }
 
+function ledgerDeletionManifestFile(records: readonly LedgerDeletionRecord[]): LedgerDeletionManifestFile {
+  return {
+    path: LEDGER_DELETIONS_FILE,
+    count: records.length,
+    contentHash: hashContent(canonicalLedgerDeletions(records))
+  };
+}
+
+function ledgerDeletionContent(records: readonly LedgerDeletionRecord[]): string {
+  const content = canonicalLedgerDeletions(records).map((record) => canonicalJson(record)).join("\n");
+  return content.length > 0 ? `${content}\n` : "";
+}
+
 function recordCounts(state: ExportSnapshot): Record<SnapshotSection, number> {
   return Object.fromEntries(SNAPSHOT_SECTIONS.map((section) => [section, state[section].length])) as Record<
     SnapshotSection,
     number
   >;
+}
+
+function deletionRecordCounts(records: readonly LedgerDeletionRecord[]): Record<SnapshotSection, number> {
+  const counts = emptySectionCounts();
+  for (const record of records) {
+    counts[record.section] += 1;
+  }
+  return counts;
 }
 
 function parseSectionCounts(value: unknown, label: string): Record<SnapshotSection, number> {
@@ -992,8 +1169,107 @@ function parseSectionCounts(value: unknown, label: string): Record<SnapshotSecti
   ) as Record<SnapshotSection, number>;
 }
 
+function parseOptionalDeletionCounts(value: unknown): Record<SnapshotSection, number> {
+  if (value === undefined) {
+    return emptySectionCounts();
+  }
+  return parseSectionCounts(value, "deletedRecordCounts");
+}
+
 function emptySectionCounts(): Record<SnapshotSection, number> {
   return Object.fromEntries(SNAPSHOT_SECTIONS.map((section) => [section, 0])) as Record<SnapshotSection, number>;
+}
+
+function parseLedgerDeletionRecord(value: unknown): LedgerDeletionRecord {
+  if (!isRecord(value) || value.schemaVersion !== "boreal.ledger-deletion.v1") {
+    throw new BorealError("BOREAL_INVALID_INPUT", "Ledger deletion record must be a boreal.ledger-deletion.v1 object");
+  }
+  if (!isSnapshotSection(value.section)) {
+    throw new BorealError("BOREAL_INVALID_INPUT", "Ledger deletion record has an invalid section", {
+      section: value.section
+    });
+  }
+  if (typeof value.id !== "string" || value.id.length === 0) {
+    throw new BorealError("BOREAL_INVALID_INPUT", "Ledger deletion record must include an id", {
+      section: value.section
+    });
+  }
+  if (typeof value.deletedAt !== "string" || value.deletedAt.length === 0) {
+    throw new BorealError("BOREAL_INVALID_INPUT", "Ledger deletion record must include deletedAt", {
+      section: value.section,
+      id: value.id
+    });
+  }
+  if (value.reason !== undefined && typeof value.reason !== "string") {
+    throw new BorealError("BOREAL_INVALID_INPUT", "Ledger deletion reason must be a string", {
+      section: value.section,
+      id: value.id
+    });
+  }
+  if (
+    value.deletedContentHash !== undefined &&
+    (typeof value.deletedContentHash !== "string" || !value.deletedContentHash.startsWith("sha256:"))
+  ) {
+    throw new BorealError("BOREAL_INVALID_INPUT", "Ledger deletion content hash must be a sha256 hash", {
+      section: value.section,
+      id: value.id
+    });
+  }
+  return {
+    schemaVersion: "boreal.ledger-deletion.v1",
+    section: value.section,
+    id: value.id,
+    deletedAt: value.deletedAt,
+    reason: value.reason,
+    deletedContentHash: value.deletedContentHash
+  };
+}
+
+function canonicalLedgerDeletions(records: readonly LedgerDeletionRecord[]): readonly LedgerDeletionRecord[] {
+  return [...records].sort((left, right) => deletionKey(left).localeCompare(deletionKey(right)));
+}
+
+function assertUniqueDeletions(records: readonly LedgerDeletionRecord[]): void {
+  const seen = new Set<string>();
+  for (const record of records) {
+    const key = deletionKey(record);
+    if (seen.has(key)) {
+      throw new BorealError("BOREAL_INVALID_INPUT", "Ledger deletion records contain duplicate tombstones", {
+        section: record.section,
+        id: record.id
+      });
+    }
+    seen.add(key);
+  }
+}
+
+function assertNoDeletedLiveRecords(state: ExportSnapshot, deletions: readonly LedgerDeletionRecord[]): void {
+  const liveIdsBySection = new Map(
+    SNAPSHOT_SECTIONS.map((section) => [
+      section,
+      new Set((state[section] as readonly unknown[]).map((record) => recordId(section, record)).filter(isString))
+    ])
+  );
+  for (const deletion of deletions) {
+    if (liveIdsBySection.get(deletion.section)?.has(deletion.id)) {
+      throw new BorealError("BOREAL_CONFLICT", "Ledger tombstone conflicts with a live record", {
+        section: deletion.section,
+        id: deletion.id
+      });
+    }
+  }
+}
+
+function deletionKey(record: Pick<LedgerDeletionRecord, "section" | "id">): string {
+  return `${record.section}:${record.id}`;
+}
+
+function isSnapshotSection(value: unknown): value is SnapshotSection {
+  return typeof value === "string" && (SNAPSHOT_SECTIONS as readonly string[]).includes(value);
+}
+
+function isString(value: unknown): value is string {
+  return typeof value === "string";
 }
 
 function recordId(section: SnapshotSection, record: unknown): string | undefined {

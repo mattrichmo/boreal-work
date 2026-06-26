@@ -712,7 +712,7 @@ export const COMMAND_DEFINITIONS: readonly CommandDefinition[] = [
     category: "export",
     summary: "Export Git-friendly JSONL ledger files.",
     usage: "bwrk export ledgers [--out <dir>] [--json]",
-    description: "Writes one JSONL file per runtime section plus a manifest with content hashes.",
+    description: "Writes one JSONL file per runtime section, a tombstone ledger, and a manifest with content hashes.",
     flags: [flag("out", "value", "Directory to write. Defaults to .boreal/ledgers.")],
     positionals: { label: "arguments", min: 0, max: 0 },
     requiresWorkspace: true,
@@ -736,7 +736,8 @@ export const COMMAND_DEFINITIONS: readonly CommandDefinition[] = [
     category: "import",
     summary: "Import JSONL ledger files.",
     usage: "bwrk import ledgers --from <dir> [--allow-external-read] [--json]",
-    description: "Reads a boreal.ledgers.v1 manifest and section JSONL files, validates hashes and references, then merges records.",
+    description:
+      "Reads a boreal.ledgers.v1 manifest, section JSONL files, and tombstones, validates hashes and references, then merges records.",
     flags: [
       flag("from", "value", "Ledger directory containing manifest.json to import."),
       flag("allow-external-read", "boolean", "Allow importing a ledger directory outside the workspace."),
@@ -750,7 +751,7 @@ export const COMMAND_DEFINITIONS: readonly CommandDefinition[] = [
     category: "ledger",
     summary: "Compare exported JSONL ledgers with current runtime state.",
     usage: "bwrk ledger status [--dir <dir>] [--json]",
-    description: "Checks whether a boreal.ledgers.v1 manifest is present, parseable, hash-valid, and current.",
+    description: "Checks whether a boreal.ledgers.v1 manifest and tombstone ledger are present, parseable, hash-valid, and current.",
     flags: [flag("dir", "value", "Ledger directory to inspect. Defaults to .boreal/ledgers.")],
     positionals: { label: "arguments", min: 0, max: 0 },
     requiresWorkspace: true,
