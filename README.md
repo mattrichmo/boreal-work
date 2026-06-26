@@ -36,7 +36,21 @@ Run the CLI from source:
 pnpm bwrk --help
 ```
 
-The packaged binary is `bwrk` from `@boreal/cli`.
+Install the local checkout as `bwrk` while the package is still unpublished:
+
+```bash
+pnpm install:local
+bwrk --help
+```
+
+If local pnpm policy checks block script execution, run the same installer directly:
+
+```bash
+node node_modules/typescript/bin/tsc -b
+node tools/install-local-bwrk.mjs
+```
+
+The installer writes an executable shim to `~/.local/bin/bwrk` by default, or to `BOREAL_BIN_DIR` / `--bin-dir <path>` when supplied. The shim runs this checkout's built CLI, so run the command again after moving the repo. The eventual packaged binary is `bwrk` from `@boreal/cli`.
 
 Core commands:
 
