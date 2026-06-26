@@ -174,6 +174,14 @@ interface SyncStatusResult {
   readonly recommendedActions: readonly string[];
 }
 
+interface SyncRefreshResult {
+  readonly refreshed: true;
+  readonly contextViews: number;
+  readonly searchIndex: Awaited<ReturnType<typeof writeSearchIndex>>;
+  readonly ledgers: Awaited<ReturnType<typeof exportLedgers>>;
+  readonly status: SyncStatusResult;
+}
+
 interface OperationPruneResult {
   readonly deleted: number;
   readonly keptBeforeOperationLog: number;
@@ -1854,6 +1862,25 @@ async function syncCommand(
       output.write(formatRecord(status, json));
       return { exitCode: status.ok ? 0 : 1 };
     }
+    case "refresh": {
+      const views = await rebuildProjectionsRespectingTombstones(context);
+      const searchIndex = await writeSearchIndex(context);
+      const ledgers = await exportLedgers(context, undefined);
+      const status = await buildSyncStatus(context);
+      output.write(
+        formatRecord(
+          {
+            refreshed: true,
+            contextViews: views.length,
+            searchIndex,
+            ledgers,
+            status
+          } satisfies SyncRefreshResult,
+          json
+        )
+      );
+      return { exitCode: status.ok ? 0 : 1 };
+    }
     default:
       throw new BorealError("BOREAL_INVALID_INPUT", `Unknown sync command: ${action ?? ""}`);
   }
@@ -2208,11 +2235,8 @@ function syncRecommendedActions(
   if (!vault.ok) {
     actions.push("bwrk vault init --json");
   }
-  if (!ledgers.ok) {
-    actions.push("bwrk export ledgers --json");
-  }
-  if (!searchIndexOk) {
-    actions.push("bwrk search index --json");
+  if (!ledgers.ok || !searchIndexOk) {
+    actions.push("bwrk sync refresh --json");
   }
   return [...actions, ...git.recommendedActions];
 }

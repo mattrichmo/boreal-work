@@ -13,6 +13,7 @@ allowed_commands:
   - work close
   - session end
   - doctor
+  - sync refresh
 templates:
   - verification-note
   - session-closeout
@@ -60,6 +61,7 @@ Use this workflow when the user's request requires close completed work with evi
 - `bwrk work close`
 - `bwrk session end`
 - `bwrk doctor`
+- `bwrk sync refresh`
 
 ## Evidence And Checkpoints
 
@@ -70,7 +72,7 @@ Use this workflow when the user's request requires close completed work with evi
 ## Failure And Repair
 
 - If workspace health fails, switch to `workflows/60-health/sync-and-doctor.md`.
-- If search or context is stale, run `bwrk search index --json` and `bwrk context rebuild --json` after memory, work, context, or search-affecting changes.
+- If generated artifacts are stale, run `bwrk sync refresh --json` after memory, work, context, or search-affecting changes.
 - If locks are stale, inspect before breaking them.
 
 ## Finish Criteria

@@ -658,6 +658,7 @@ export function createBorealRuntime(options: BorealRuntimeOptions = {}): BorealR
         if (input.close) {
           await recomputeAllReadiness(writer);
         }
+        await refreshWorkContext(writer, finalWork, actor, current);
         await appendEvent(writer, "evidence.recorded", evidence.meta.id, "evidence", {
           subjectId: evidence.subjectId,
           kind: evidence.kind,
@@ -761,6 +762,9 @@ export function createBorealRuntime(options: BorealRuntimeOptions = {}): BorealR
 
         for (const work of workItems) {
           const graphWork = await workWithGraphDependencies(writer, work);
+          const dependencies = graphWork.dependencyIds
+            .map((dependencyId) => workItems.find((item) => item.meta.id === dependencyId))
+            .filter(isWorkItem);
           const evidence = await writer.listEvidenceForSubject(work.meta.id);
           const contextPack = buildContextPack({ work: graphWork, evidence, sources, claims, decisions, actor, now: now() });
           const projection = buildContextProjection({ work: graphWork, evidence, sources, claims, decisions, actor, now: now() });
@@ -772,7 +776,7 @@ export function createBorealRuntime(options: BorealRuntimeOptions = {}): BorealR
           if (writeProjection) {
             await writer.putProjection(projection);
           }
-          views.push(toWorkItemView({ work: graphWork, evidence, contextPack: writeContextPack ? contextPack : undefined }));
+          views.push(toWorkItemView({ work: graphWork, dependencies, evidence, contextPack: writeContextPack ? contextPack : undefined }));
         }
 
         await appendEvent(writer, "projection.rebuilt", "projections", "projection", { count: views.length });
@@ -1119,11 +1123,31 @@ async function recomputeAllReadiness(writer: BorealWriter): Promise<number> {
 }
 
 async function makeWorkView(reader: BorealReader, work: WorkItem): Promise<WorkItemView> {
+  const workItems = await reader.listWorkItems();
+  const graphWork = await workWithGraphDependencies(reader, work);
+  const dependencies = graphWork.dependencyIds
+    .map((dependencyId) => workItems.find((item) => item.meta.id === dependencyId))
+    .filter(isWorkItem);
   const evidence = await reader.listEvidenceForSubject(work.meta.id);
   const verifications = await reader.listVerificationsForSubject(work.meta.id);
   const packs = await reader.listContextPacks();
   const contextPack = packs.find((pack) => pack.subjectId === work.meta.id);
-  return toWorkItemView({ work: await workWithGraphDependencies(reader, work), evidence, verifications, contextPack });
+  return toWorkItemView({ work: graphWork, dependencies, evidence, verifications, contextPack });
+}
+
+async function refreshWorkContext(
+  writer: BorealWriter,
+  work: WorkItem,
+  actor: ActorRef,
+  current: IsoTimestamp
+): Promise<void> {
+  const graphWork = await workWithGraphDependencies(writer, work);
+  const evidence = await writer.listEvidenceForSubject(work.meta.id);
+  const sources = await writer.listKnowledgeSources();
+  const claims = await writer.listClaims();
+  const decisions = await writer.listDecisions();
+  await writer.putContextPack(buildContextPack({ work: graphWork, evidence, sources, claims, decisions, actor, now: current }));
+  await writer.putProjection(buildContextProjection({ work: graphWork, evidence, sources, claims, decisions, actor, now: current }));
 }
 
 function compareClaimCandidates(left: WorkItem, right: WorkItem): number {

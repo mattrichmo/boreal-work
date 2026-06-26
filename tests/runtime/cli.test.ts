@@ -463,14 +463,14 @@ describe("bwrk cli", () => {
     expect(healthPayload.health).toEqual(
       expect.objectContaining({
         ok: true,
-        hasWarnings: true,
+        hasWarnings: false,
         rawSourceCount: 1,
         wikiPageCount: 1,
         ledgerEventCount: 0,
         brokenLinks: [],
         missingSourceRefs: [],
         malformedLedgerEvents: [],
-        orphanPages: ["memory/wiki/design-principles.md"]
+        orphanPages: []
       })
     );
 
@@ -478,8 +478,26 @@ describe("bwrk cli", () => {
     const doctorPayload = parseData<{
       readonly diagnostics: Array<{ readonly code: string; readonly severity: string }>;
     }>(doctor.stdout);
-    expect(doctorPayload.diagnostics).toEqual(
-      expect.arrayContaining([expect.objectContaining({ code: "vault.health", severity: "warning" })])
+    expect(doctorPayload.diagnostics.find((diagnostic) => diagnostic.code === "vault.health")).toEqual(
+      expect.objectContaining({ severity: "ok" })
+    );
+
+    await writeFile(
+      join(rootDir, "memory/wiki/unlinked.md"),
+      "---\nkind: boreal-wiki-page\nschemaVersion: boreal.vault.v1\nslug: unlinked\nsource_refs: []\n---\n\n# Unlinked\n\nNo source yet.\n",
+      "utf8"
+    );
+    const orphanHealth = await runCli(rootDir, ["vault", "status", "--json"]);
+    const orphanPayload = parseData<{
+      readonly health: { readonly ok: boolean; readonly hasWarnings: boolean; readonly orphanPages: readonly string[] };
+    }>(orphanHealth.stdout);
+    expect(orphanHealth.exitCode).toBe(0);
+    expect(orphanPayload.health).toEqual(
+      expect.objectContaining({
+        ok: true,
+        hasWarnings: true,
+        orphanPages: ["memory/wiki/unlinked.md"]
+      })
     );
 
     await writeFile(
@@ -756,6 +774,7 @@ describe("bwrk cli", () => {
       (await runCli(rootDir, ["raw", "add", "--title", "Compact source", "--uri", "file://compact.md", "--json"])).stdout
     );
     await runCli(rootDir, ["wiki", "create", "Compact Wiki", "--source", raw.record.id, "--summary", "Candidate wiki page.", "--json"]);
+    await runCli(rootDir, ["wiki", "create", "Unlinked Compact Wiki", "--summary", "Unsourced candidate wiki page.", "--json"]);
 
     const analyzed = await runCli(rootDir, ["compact", "analyze", "--older-than-days", "1", "--json"]);
     const payload = parseData<{
@@ -781,8 +800,11 @@ describe("bwrk cli", () => {
     expect(payload.candidates).toEqual(
       expect.arrayContaining([
         expect.objectContaining({ domain: "work", title: "Closed compact candidate" }),
-        expect.objectContaining({ domain: "wiki", title: "Compact Wiki", reason: "wiki page has no inbound links" })
+        expect.objectContaining({ domain: "wiki", title: "Unlinked Compact Wiki", reason: "wiki page has no inbound links" })
       ])
+    );
+    expect(payload.candidates).not.toEqual(
+      expect.arrayContaining([expect.objectContaining({ domain: "wiki", title: "Compact Wiki" })])
     );
     expect(payload.plans).toEqual(
       expect.arrayContaining([
@@ -798,10 +820,10 @@ describe("bwrk cli", () => {
         }),
         expect.objectContaining({
           domain: "wiki",
-          targetTitle: "Compact Wiki",
+          targetTitle: "Unlinked Compact Wiki",
           preserves: expect.objectContaining({
-            sourceRefs: [raw.record.id],
-            originalPaths: ["memory/wiki/compact-wiki.md"]
+            sourceRefs: [],
+            originalPaths: ["memory/wiki/unlinked-compact-wiki.md"]
           })
         })
       ])
@@ -871,15 +893,15 @@ describe("bwrk cli", () => {
       readonly vaultEvent: { readonly subjectType: string; readonly payload: { readonly archivePath: string } };
     }>(compactedWiki.stdout);
     const wikiArchive = await readFile(join(rootDir, compactedWikiPayload.archivePath), "utf8");
-    const wikiPage = await readFile(join(rootDir, "memory/wiki/compact-wiki.md"), "utf8");
+    const wikiPage = await readFile(join(rootDir, "memory/wiki/unlinked-compact-wiki.md"), "utf8");
     const compactEvents = await readFile(join(rootDir, "memory/ledgers/events.jsonl"), "utf8");
     expect(compactedWiki.exitCode).toBe(0);
-    expect(compactedWikiPayload.archivePath).toMatch(/^memory\/wiki\/archive\/compact-wiki-/);
+    expect(compactedWikiPayload.archivePath).toMatch(/^memory\/wiki\/archive\/unlinked-compact-wiki-/);
     expect(compactedWikiPayload.preserves).toEqual(
-      expect.objectContaining({ sourceRefs: [raw.record.id], originalPaths: ["memory/wiki/compact-wiki.md"] })
+      expect.objectContaining({ sourceRefs: [], originalPaths: ["memory/wiki/unlinked-compact-wiki.md"] })
     );
     expect(compactedWikiPayload.vaultEvent.subjectType).toBe("wiki");
-    expect(wikiArchive).toContain("Candidate wiki page.");
+    expect(wikiArchive).toContain("Unsourced candidate wiki page.");
     expect(wikiPage).toContain("claim_status: compacted");
     expect(wikiPage).toContain("Reviewed compact wiki summary.");
     expect(wikiPage).toContain(compactedWikiPayload.archivePath);
@@ -1074,6 +1096,7 @@ describe("bwrk cli", () => {
     const commands = registry.commands.find((command) => command.path.join(" ") === "commands");
     const searchQuery = registry.commands.find((command) => command.path.join(" ") === "search query");
     const searchIndex = registry.commands.find((command) => command.path.join(" ") === "search index");
+    const agentFinish = registry.commands.find((command) => command.path.join(" ") === "agent finish");
 
     expect(result.exitCode).toBe(0);
     expect(() => validateCommandBehaviorMetadata()).not.toThrow();
@@ -1127,6 +1150,7 @@ describe("bwrk cli", () => {
         "compact analyze",
         "compact apply",
         "sync status",
+        "sync refresh",
         "ledger status",
         "ledger delete",
         "snapshot create",
@@ -1144,12 +1168,20 @@ describe("bwrk cli", () => {
     expect(registry.commands.every((command) => command.behavior.examples.length > 0)).toBe(true);
     expect(registry.commands.every((command) => command.behavior.jsonOutputSchema.startsWith("boreal.cli."))).toBe(true);
     expect(registry.commands.every((command) => command.behavior.maxResultSizeChars > 0)).toBe(true);
+    expect(
+      registry.commands
+        .filter((command) => command.behavior.writesGeneratedArtifacts)
+        .every((command) => command.behavior.requiresLock !== "none")
+    ).toBe(true);
     expect(commands?.behavior.readOnly).toBe(true);
     expect(reserve?.behavior).toEqual(expect.objectContaining({ writesState: true, requiresLock: "state" }));
     expect(searchIndex?.behavior).toEqual(
       expect.objectContaining({ writesGeneratedArtifacts: true, requiresLock: "index" })
     );
     expect(searchQuery?.behavior).toEqual(expect.objectContaining({ readOnly: true, requiresFreshIndex: true }));
+    expect(agentFinish?.behavior).toEqual(
+      expect.objectContaining({ writesGeneratedArtifacts: true, requiresLock: "state+index" })
+    );
   });
 
   it("lists workflows, shows workflow markdown, plans skill installs, and doctors skill assets", async () => {
@@ -1261,6 +1293,8 @@ describe("bwrk cli", () => {
     expect(markdown.stdout).toContain("bwrk work create <title> [--description <text>] [--priority low|normal|high|critical]");
     expect(markdown.stdout).toContain("Output schema: `boreal.cli.work.create.v1`");
     expect(markdown.stdout).toContain("`--label <value>`: Label to attach to the work item. Repeatable.");
+    expect(markdown.stdout).toContain("`--skill-target <value>`: Skill target to record: codex or claude. Repeatable.");
+    expect(markdown.stdout).not.toContain("Repeatable. Repeatable.");
     expect(invalid.exitCode).toBe(2);
     expect(invalidPayload.code).toBe("BOREAL_INVALID_INPUT");
   });
@@ -1632,6 +1666,39 @@ describe("bwrk cli", () => {
     ]);
 
     expect(parseData<readonly unknown[]>((await runCli(rootDir, ["dep", "cycles", "--json"])).stdout)).toEqual([]);
+
+    const blockerEvidence = parseData<{ readonly meta: { readonly id: string } }>(
+      (
+        await runCli(rootDir, [
+          "evidence",
+          "add",
+          blocker.meta.id,
+          "--summary",
+          "Dependency blocker passed verification.",
+          "--outcome",
+          "passed",
+          "--json"
+        ])
+      ).stdout
+    );
+    await runCli(rootDir, ["work", "verify", blocker.meta.id, "--evidence", blockerEvidence.meta.id, "--verdict", "passed", "--json"]);
+    await runCli(rootDir, ["work", "close", blocker.meta.id, "--reason", "dependency satisfied", "--json"]);
+
+    const readyDependent = parseData<{
+      readonly status: string;
+      readonly dependencyIds: readonly string[];
+      readonly activeBlockerIds: readonly string[];
+      readonly blockedBy: readonly string[];
+    }>((await runCli(rootDir, ["work", "show", blocked.meta.id, "--json"])).stdout);
+    expect(readyDependent).toEqual(
+      expect.objectContaining({
+        status: "ready",
+        dependencyIds: [blocker.meta.id],
+        activeBlockerIds: [],
+        blockedBy: []
+      })
+    );
+
     await updateState(rootDir, (state) => {
       const graphEdges = (state.graphEdges as Array<Record<string, unknown>>) ?? [];
       const firstEdge = graphEdges[0] ?? {};
@@ -2597,7 +2664,14 @@ describe("bwrk cli", () => {
     const closedPayload = parseData<{
       readonly finished: boolean;
       readonly action: string;
-      readonly work: { readonly id: string; readonly status: string; readonly activeReservationId?: string };
+      readonly work: {
+        readonly id: string;
+        readonly status: string;
+        readonly evidenceCount: number;
+        readonly verificationCount: number;
+        readonly activeReservationId?: string;
+        readonly contextSummary?: string;
+      };
       readonly evidence: { readonly outcome: string; readonly command?: string };
       readonly verification: { readonly verdict: string };
       readonly reservation: { readonly status: string };
@@ -2612,6 +2686,10 @@ describe("bwrk cli", () => {
     expect(closedPayload.work.id).toBe(closeWork.meta.id);
     expect(closedPayload.work.status).toBe("closed");
     expect(closedPayload.work.activeReservationId).toBeUndefined();
+    expect(closedPayload.work.evidenceCount).toBe(1);
+    expect(closedPayload.work.verificationCount).toBe(1);
+    expect(closedPayload.work.contextSummary).toContain("is closed.");
+    expect(closedPayload.work.contextSummary).not.toContain("is in_progress.");
     expect(closedPayload.evidence).toEqual(expect.objectContaining({ outcome: "passed", command: "pnpm test" }));
     expect(closedPayload.verification.verdict).toBe("passed");
     expect(closedPayload.reservation.status).toBe("released");
@@ -2974,11 +3052,33 @@ describe("bwrk cli", () => {
         vault: expect.objectContaining({ ok: true }),
         ledgers: expect.objectContaining({ ok: true }),
         searchIndex: expect.objectContaining({ ok: false, exists: false, stale: true }),
-        recommendedActions: ["bwrk search index --json"]
+        recommendedActions: ["bwrk sync refresh --json"]
       })
     );
 
-    await runCli(rootDir, ["search", "index", "--json"]);
+    const initialRefresh = await runCli(rootDir, ["sync", "refresh", "--json"]);
+    const initialRefreshPayload = parseData<{
+      readonly refreshed: true;
+      readonly contextViews: number;
+      readonly status: {
+        readonly ok: boolean;
+        readonly ledgers: { readonly ok: boolean; readonly stale: boolean };
+        readonly searchIndex: { readonly ok: boolean; readonly stale: boolean };
+        readonly recommendedActions: readonly string[];
+      };
+    }>(initialRefresh.stdout);
+    expect(initialRefresh.exitCode).toBe(0);
+    expect(initialRefreshPayload.refreshed).toBe(true);
+    expect(initialRefreshPayload.contextViews).toBeGreaterThan(0);
+    expect(initialRefreshPayload.status).toEqual(
+      expect.objectContaining({
+        ok: true,
+        ledgers: expect.objectContaining({ ok: true, stale: false }),
+        searchIndex: expect.objectContaining({ ok: true, stale: false }),
+        recommendedActions: []
+      })
+    );
+
     const freshSync = await runCli(rootDir, ["sync", "status", "--json"]);
     const freshSyncPayload = parseData<{
       readonly ok: boolean;
@@ -3078,10 +3178,14 @@ describe("bwrk cli", () => {
     expect(symlinkedExportPayload.code).toBe("BOREAL_INVALID_INPUT");
     expect(symlinkedExportPayload.message).toContain("Path escapes Boreal workspace");
 
+    const currentExport = await runCli(rootDir, ["export", "json", "--out", "current-export.json", "--json"]);
+    const currentExportPayload = parseData<{ readonly contentHash: string }>(currentExport.stdout);
+    expect(currentExport.exitCode).toBe(0);
+
     const snapshot = await runCli(rootDir, ["snapshot", "create", "--name", "baseline", "--json"]);
     const snapshotPayload = parseData<{ readonly id: string; readonly contentHash: string }>(snapshot.stdout);
     expect(snapshotPayload.id).toContain("baseline");
-    expect(snapshotPayload.contentHash).toBe(exportPayload.contentHash);
+    expect(snapshotPayload.contentHash).toBe(currentExportPayload.contentHash);
 
     const snapshots = await runCli(rootDir, ["snapshot", "list", "--json"]);
     expect(parseData<Array<{ readonly id: string }>>(snapshots.stdout).map((entry) => entry.id)).toContain(
@@ -3089,7 +3193,7 @@ describe("bwrk cli", () => {
     );
 
     const shown = await runCli(rootDir, ["snapshot", "show", snapshotPayload.id, "--json"]);
-    expect(parseData<{ readonly contentHash: string }>(shown.stdout).contentHash).toBe(exportPayload.contentHash);
+    expect(parseData<{ readonly contentHash: string }>(shown.stdout).contentHash).toBe(currentExportPayload.contentHash);
 
     await runCli(rootDir, ["work", "create", "Ledger drift work", "--json"]);
     const staleLedgerStatus = await runCli(rootDir, ["ledger", "status", "--json"]);
@@ -3112,16 +3216,54 @@ describe("bwrk cli", () => {
         ok: false,
         ledgers: expect.objectContaining({ ok: false, stale: true }),
         searchIndex: expect.objectContaining({ ok: false, stale: true }),
-        recommendedActions: ["bwrk export ledgers --json", "bwrk search index --json"]
+        recommendedActions: ["bwrk sync refresh --json"]
       })
     );
 
     const staleDoctor = await runCli(rootDir, ["doctor", "--json"]);
     const staleDoctorPayload = parseData<{
-      readonly diagnostics: Array<{ readonly code: string; readonly severity: string }>;
+      readonly diagnostics: Array<{
+        readonly code: string;
+        readonly severity: string;
+        readonly details?: { readonly repairCommand?: string; readonly repairNote?: string };
+      }>;
     }>(staleDoctor.stdout);
     expect(staleDoctorPayload.diagnostics).toEqual(
-      expect.arrayContaining([expect.objectContaining({ code: "ledger.export_drift", severity: "warning" })])
+      expect.arrayContaining([
+        expect.objectContaining({
+          code: "ledger.export_drift",
+          severity: "warning",
+          details: expect.objectContaining({ repairCommand: "bwrk sync refresh --json" })
+        }),
+        expect.objectContaining({
+          code: "snapshot.export_drift",
+          severity: "warning",
+          details: expect.objectContaining({
+            repairCommand: "bwrk snapshot create --json",
+            repairNote: expect.stringContaining("explicit snapshot baseline")
+          })
+        })
+      ])
+    );
+
+    const driftRefresh = await runCli(rootDir, ["sync", "refresh", "--json"]);
+    const driftRefreshPayload = parseData<{
+      readonly refreshed: true;
+      readonly status: {
+        readonly ok: boolean;
+        readonly ledgers: { readonly ok: boolean; readonly stale: boolean };
+        readonly searchIndex: { readonly ok: boolean; readonly stale: boolean };
+        readonly recommendedActions: readonly string[];
+      };
+    }>(driftRefresh.stdout);
+    expect(driftRefresh.exitCode).toBe(0);
+    expect(driftRefreshPayload.status).toEqual(
+      expect.objectContaining({
+        ok: true,
+        ledgers: expect.objectContaining({ ok: true, stale: false }),
+        searchIndex: expect.objectContaining({ ok: true, stale: false }),
+        recommendedActions: []
+      })
     );
 
     const targetDir = await makeTempWorkspace();
@@ -3201,7 +3343,7 @@ describe("bwrk cli", () => {
     );
     expect(tamperedLedgerImport.exitCode).toBe(2);
     expect(tamperedLedgerPayload.code).toBe("BOREAL_INVALID_INPUT");
-    expect(tamperedLedgerPayload.message).toContain("Ledger file count does not match manifest");
+    expect(tamperedLedgerPayload.message).toContain("Ledger file content hash does not match manifest");
 
     const malformedSchemaPath = join(rootDir, "malformed-schema-export.json");
     await writeFile(

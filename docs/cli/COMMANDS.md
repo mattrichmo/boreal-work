@@ -72,6 +72,8 @@ JSON success envelope:
 }
 ```
 
+Top-level `ok: true` means the command invocation produced a valid response envelope. Commands that act as health or diagnostic gates can still return nested `data.ok: false`; agents should treat nested `data.ok === false` and any nonzero process exit as a failed gate even when stdout is valid JSON.
+
 JSON error envelope:
 
 ```json
@@ -361,7 +363,7 @@ This command does not use the search index; readiness and reservation-sensitive 
 bwrk work show <work-id> [--json]
 ```
 
-Shows the work view for one item, including evidence, verification, and context-pack summary fields when present.
+Shows the work view for one item, including evidence, verification, dependency, active-blocker, and context-pack summary fields when present. In JSON output, `dependencyIds` is the full dependency list, `activeBlockerIds` is the unresolved blocker list, and the legacy `blockedBy` field mirrors `activeBlockerIds`.
 
 ## `work block`
 
@@ -529,6 +531,7 @@ Behavior:
 
 - Records one evidence item against the work. If `--outcome` is omitted, it defaults to `passed` for a passed verdict and `failed` for a failed verdict.
 - Verifies the work using the new evidence ID.
+- Refreshes the work context/projection for the returned view so `work.status`, counts, and `contextSummary` describe the same post-finish state.
 - With `--close`, requires a passed verdict and `--reason`, closes the work, then releases the active reservation so closed work does not keep stale ownership.
 - With `--release`, releases the reservation after verification without closing.
 - Rejects `--close --release` together.
@@ -892,7 +895,7 @@ bwrk vault status [--json]
 
 Checks whether the configured vault scaffold exists and whether required paths have the expected file or directory type. It exits `1` when the vault is missing, incomplete, structurally invalid, or has hard content-health failures.
 
-The status also scans raw source JSONL and wiki pages for malformed raw records, broken wikilinks, missing source references, orphan wiki pages, and stale claim pages.
+The status also scans raw source JSONL and wiki pages for malformed raw records, broken wikilinks, missing source references, orphan wiki pages, and stale claim pages. Wiki pages with valid raw source references are treated as source-backed entry pages, not orphan warnings.
 
 JSON `data` contains `ok`, `initialized`, `rootDir`, `schemaVersion`, `health`, `requiredDirectories`, `requiredFiles`, `missingDirectories`, `missingFiles`, and `invalidPaths`.
 
@@ -912,7 +915,7 @@ JSON `data` contains `added`, `indexPath`, and the raw source `record` with stab
 bwrk wiki create <title> [--slug <slug>] [--summary <text>] [--source <raw-id>...] [--tag <tag>...] [--json]
 ```
 
-Creates a Markdown wiki page under the configured vault wiki directory with flat Boreal frontmatter. Existing page slugs are never overwritten. Use `--source` to link the page to raw source records from the configured raw index.
+Creates a Markdown wiki page under the configured vault wiki directory with flat Boreal frontmatter. Existing page slugs are never overwritten. Slug existence checks and writes are serialized with a vault wiki lock under `.boreal/locks/`. Use `--source` to link the page to raw source records from the configured raw index.
 
 JSON `data` contains `created`, `path`, and the created `page` summary.
 
@@ -982,7 +985,17 @@ bwrk sync status [--json]
 
 Checks collaboration readiness without mutating state. The command combines repo-local memory vault readiness and content health, JSONL ledger freshness, generated search-index freshness, and Git worktree safety so agents can see whether the workspace is ready to share and query from one place.
 
-JSON `data` contains `ok`, `workspaceRoot`, `checkedAt`, `vault`, `ledgers`, `searchIndex`, `git`, and `recommendedActions`. It exits `1` when the memory vault is missing/incomplete, when ledgers are missing/stale/invalid, when the local search index is missing/stale/invalid, or when `.boreal/ledgers` or `memory` paths are dirty on a protected branch or detached HEAD. Protected branches default to `main`, `master`, and `trunk`; set `BOREAL_PROTECTED_BRANCHES` to a comma-separated list to override. Recommended repairs are specific commands such as `bwrk vault init --json`, `bwrk export ledgers --json`, `bwrk search index --json`, and `git switch -c boreal/sync-work`.
+JSON `data` contains `ok`, `workspaceRoot`, `checkedAt`, `vault`, `ledgers`, `searchIndex`, `git`, and `recommendedActions`. It exits `1` when the memory vault is missing/incomplete, when ledgers are missing/stale/invalid, when the local search index is missing/stale/invalid, or when `.boreal/ledgers` or `memory` paths are dirty on a protected branch or detached HEAD. Protected branches default to `main`, `master`, and `trunk`; set `BOREAL_PROTECTED_BRANCHES` to a comma-separated list to override. Recommended repairs are specific commands such as `bwrk vault init --json`, `bwrk sync refresh --json`, and `git switch -c boreal/sync-work`.
+
+## `sync refresh`
+
+```bash
+bwrk sync refresh [--json]
+```
+
+Refreshes generated collaboration artifacts in one closeout command: context-pack projections, the local search index, and the JSONL ledger export. It then returns the same status shape as `sync status` under `data.status`. Snapshot creation remains explicit through `bwrk snapshot create --json` because snapshots are named baselines, not routine cache refreshes.
+
+JSON `data` contains `refreshed`, `contextViews`, `searchIndex`, `ledgers`, and `status`. The command exits `1` if the post-refresh sync status is still not clean, for example because the vault is missing or Git collaboration paths are dirty on a protected branch.
 
 ## `ledger status`
 

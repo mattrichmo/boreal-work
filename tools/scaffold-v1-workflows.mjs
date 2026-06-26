@@ -103,16 +103,17 @@ for (const [path, content] of docs) {
 }
 
 function workflowDoc({ group, slug, id, title, purpose, commands, templateIds }) {
+  const allowedCommands = [...new Set([...commands, "sync refresh"])];
   return `---
 id: ${id}
 title: ${title}
 group: ${group}
 status: v1
-risk: ${commands.some((command) => mutatingCommand(command)) ? "medium" : "low"}
-writes_state: ${commands.some((command) => mutatingCommand(command))}
+risk: ${allowedCommands.some((command) => mutatingCommand(command)) ? "medium" : "low"}
+writes_state: ${allowedCommands.some((command) => mutatingCommand(command))}
 requires_workspace: true
 allowed_commands:
-${commands.map((command) => `  - ${command}`).join("\n")}
+${allowedCommands.map((command) => `  - ${command}`).join("\n")}
 templates:
 ${templateIds.length > 0 ? templateIds.map((template) => `  - ${template}`).join("\n") : "  - none"}
 ---
@@ -153,7 +154,7 @@ Use this workflow when the user's request requires ${purpose.charAt(0).toLowerCa
 
 ## CLI Commands
 
-${commands.map((command) => `- \`bwrk ${command}\``).join("\n")}
+${allowedCommands.map((command) => `- \`bwrk ${command}\``).join("\n")}
 
 ## Evidence And Checkpoints
 
@@ -164,7 +165,7 @@ ${commands.map((command) => `- \`bwrk ${command}\``).join("\n")}
 ## Failure And Repair
 
 - If workspace health fails, switch to \`workflows/60-health/sync-and-doctor.md\`.
-- If search or context is stale, run \`bwrk search index --json\` and \`bwrk context rebuild --json\` after memory, work, context, or search-affecting changes.
+- If generated artifacts are stale, run \`bwrk sync refresh --json\` after memory, work, context, or search-affecting changes.
 - If locks are stale, inspect before breaking them.
 
 ## Finish Criteria

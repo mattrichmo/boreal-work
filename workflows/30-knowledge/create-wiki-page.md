@@ -13,6 +13,7 @@ allowed_commands:
   - context rebuild
   - search index
   - doctor
+  - sync refresh
 templates:
   - wiki-page
 ---
@@ -59,6 +60,7 @@ Use this workflow when the user's request requires write a new stable wiki page 
 - `bwrk context rebuild`
 - `bwrk search index`
 - `bwrk doctor`
+- `bwrk sync refresh`
 
 ## Evidence And Checkpoints
 
@@ -69,7 +71,7 @@ Use this workflow when the user's request requires write a new stable wiki page 
 ## Failure And Repair
 
 - If workspace health fails, switch to `workflows/60-health/sync-and-doctor.md`.
-- If search or context is stale, run `bwrk search index --json` and `bwrk context rebuild --json` after memory, work, context, or search-affecting changes.
+- If generated artifacts are stale, run `bwrk sync refresh --json` after memory, work, context, or search-affecting changes.
 - If locks are stale, inspect before breaking them.
 
 ## Finish Criteria

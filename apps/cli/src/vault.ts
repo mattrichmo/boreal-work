@@ -304,9 +304,6 @@ export async function createWikiPage(context: CliContext, input: WikiCreateInput
   const vaultRelativePath = `wiki/${slug}.md`;
   const path = vaultPath(layout, vaultRelativePath);
   const displayPath = vaultDisplayPath(layout, vaultRelativePath);
-  if (existsSync(path)) {
-    throw new BorealError("BOREAL_CONFLICT", "Wiki page already exists", { path: displayPath, slug });
-  }
   const page = {
     id: randomId("page"),
     slug,
@@ -316,7 +313,12 @@ export async function createWikiPage(context: CliContext, input: WikiCreateInput
     links: [] as readonly string[],
     claimStatus: undefined
   } satisfies WikiPageRecord;
-  await writeTextFileAtomic(path, wikiPageMarkdown({ page, summary, tags }));
+  await withFileLock(vaultPath(layout, ".boreal/locks", "wiki-pages.lock"), VAULT_JSONL_LOCK_OPTIONS, async () => {
+    if (existsSync(path)) {
+      throw new BorealError("BOREAL_CONFLICT", "Wiki page already exists", { path: displayPath, slug });
+    }
+    await writeTextFileAtomic(path, wikiPageMarkdown({ page, summary, tags }));
+  });
   return {
     created: true,
     path,
@@ -500,9 +502,12 @@ async function inspectVaultHealth(context: CliContext): Promise<VaultHealthResul
       .filter((sourceRef) => !rawSourceIds.has(sourceRef))
       .map((sourceRef) => ({ page: page.path, sourceRef }))
   );
+  const hasValidSourceRef = (page: WikiPageRecord): boolean =>
+    page.sourceRefs.length > 0 && page.sourceRefs.every((sourceRef) => rawSourceIds.has(sourceRef));
   const orphanPages = pages
     .filter((page) => page.slug !== "index")
     .filter((page) => page.claimStatus !== "compacted")
+    .filter((page) => !hasValidSourceRef(page))
     .filter((page) => !incoming.has(page.slug))
     .map((page) => page.path);
   const staleClaims = pages.filter((page) => page.claimStatus === "stale").map((page) => page.path);

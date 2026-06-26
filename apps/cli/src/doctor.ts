@@ -115,14 +115,26 @@ export async function runDoctor(context: CliContext, fix: boolean, strict = fals
       message: drift.drift
         ? "Latest snapshot content hash differs from current export state"
         : "Latest snapshot matches current export state or no snapshots exist",
-      details: drift
+      details: drift.drift
+        ? {
+            ...drift,
+            repairCommand: "bwrk snapshot create --json",
+            repairNote: "Create a new explicit snapshot baseline when the current state should replace the previous baseline."
+          }
+        : drift
     });
     const ledgers = await ledgerStatus(context, undefined);
     diagnostics.push({
       code: "ledger.export_drift",
       severity: ledgers.exists && !ledgers.ok ? "warning" : "ok",
       message: ledgerDriftMessage(ledgers),
-      details: ledgers
+      details:
+        ledgers.exists && !ledgers.ok
+          ? {
+              ...ledgers,
+              repairCommand: "bwrk sync refresh --json"
+            }
+          : ledgers
     });
   } else {
     diagnostics.push({

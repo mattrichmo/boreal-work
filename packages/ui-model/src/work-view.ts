@@ -7,6 +7,8 @@ export interface WorkItemView {
   readonly status: WorkItem["status"];
   readonly priority: WorkItem["priority"];
   readonly labels: readonly string[];
+  readonly dependencyIds: readonly string[];
+  readonly activeBlockerIds: readonly string[];
   readonly blockedBy: readonly string[];
   readonly evidenceCount: number;
   readonly verificationCount: number;
@@ -16,10 +18,19 @@ export interface WorkItemView {
 
 export function toWorkItemView(input: {
   readonly work: WorkItem;
+  readonly dependencies?: readonly WorkItem[];
   readonly evidence?: readonly EvidenceRecord[];
   readonly verifications?: readonly VerificationRecord[];
   readonly contextPack?: ContextPack;
 }): WorkItemView {
+  const dependencyIds = input.work.dependencyIds;
+  const dependencies = input.dependencies;
+  const activeBlockerIds = dependencies
+    ? dependencyIds.filter((dependencyId) => {
+        const dependency = dependencies.find((candidate) => candidate.meta.id === dependencyId);
+        return dependency ? !isTerminalDependencyStatus(dependency.status) : true;
+      })
+    : dependencyIds;
   return {
     id: input.work.meta.id,
     title: input.work.title,
@@ -27,7 +38,9 @@ export function toWorkItemView(input: {
     status: input.work.status,
     priority: input.work.priority,
     labels: input.work.labels,
-    blockedBy: input.work.dependencyIds,
+    dependencyIds,
+    activeBlockerIds,
+    blockedBy: activeBlockerIds,
     evidenceCount: input.evidence?.length ?? input.work.evidenceIds.length,
     verificationCount: input.verifications?.length ?? input.work.verificationIds.length,
     activeReservationId: input.work.reservationId,
@@ -35,3 +48,6 @@ export function toWorkItemView(input: {
   };
 }
 
+function isTerminalDependencyStatus(status: WorkItem["status"]): boolean {
+  return status === "closed" || status === "cancelled" || status === "verified";
+}

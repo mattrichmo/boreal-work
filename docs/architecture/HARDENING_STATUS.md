@@ -23,6 +23,12 @@ This file is the current checkpoint for the broad hardening goal. It separates a
 - Block graph edges are canonical for dependencies; `work.dependencyIds` is a projection/cache.
 - `dep add`, `dep remove`, `dep tree`, and `dep cycles` exist as the first-class dependency namespace.
 - `agent finish` is a single runtime transaction for reservation ownership, evidence, verification, optional close/release, readiness recompute, and eventing.
+- `agent finish` refreshes the finished work context/projection before returning its work view, so `contextSummary` cannot lag behind the returned status/counts.
+- Work views separate full `dependencyIds` from `activeBlockerIds`; legacy `blockedBy` now mirrors active blockers rather than all historical dependencies.
+- Source-backed wiki pages with valid raw source references are treated as valid vault entry pages instead of orphan warnings.
+- `sync refresh` is the single generated-artifact closeout command for context projections, search index, and JSONL ledger export.
+- Generated/vault writer commands declare explicit `generated`, `vault`, or `state+generated` lock domains instead of `none`.
+- `wiki create` serializes slug existence checks and page writes with a vault wiki lock.
 - `agent start` and `work claim` degrade handoff failures instead of hiding a successful reservation.
 - Reservations support expiration, renewal, release, stale doctor repair, and `current`/`active` work references.
 - Context packs are capped and scoped instead of copying every accepted claim/decision into every pack.
@@ -55,9 +61,8 @@ This file is the current checkpoint for the broad hardening goal. It separates a
 
 ## Next Priority Slices
 
-1. Make JSONL ledgers a stronger rebuild source: add a doctor/import check that a ledger export can reconstruct the runtime snapshot and make the repair command explicit.
-2. Add optional shared CLI dashboard primitives for status icons, shortcut hints, grouped diagnostics, stepper output, and windowed choice lists without changing JSON or stable plain text defaults.
-3. Add a doc-check command that compares `docs/cli/COMMANDS.md` against the generated command reference.
-4. Expand vault truth: link runtime claims/decisions to `memory/wiki` pages and add doctor checks for stale source-backed assertions.
-5. Add a SQLite cache adapter behind the existing store boundary and prove it is rebuildable from canonical files.
-6. Implement the Boreal JSONL merge driver fixture and document local Git config setup.
+1. Add optional shared CLI dashboard primitives for status icons, shortcut hints, grouped diagnostics, stepper output, and windowed choice lists without changing JSON or stable plain text defaults.
+2. Add a doc-check command that compares `docs/cli/COMMANDS.md` against the generated command reference.
+3. Expand vault truth: link runtime claims/decisions to `memory/wiki` pages and add doctor checks for stale source-backed assertions.
+4. Add a SQLite cache adapter behind the existing store boundary and prove it is rebuildable from canonical files.
+5. Implement the Boreal JSONL merge driver fixture and document local Git config setup.

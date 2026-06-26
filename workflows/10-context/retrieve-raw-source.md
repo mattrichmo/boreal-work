@@ -11,6 +11,7 @@ allowed_commands:
   - source list
   - source show
   - search query
+  - sync refresh
 templates:
   - raw-source-summary
 ---
@@ -55,6 +56,7 @@ Use this workflow when the user's request requires find immutable raw/source mat
 - `bwrk source list`
 - `bwrk source show`
 - `bwrk search query`
+- `bwrk sync refresh`
 
 ## Evidence And Checkpoints
 
@@ -65,7 +67,7 @@ Use this workflow when the user's request requires find immutable raw/source mat
 ## Failure And Repair
 
 - If workspace health fails, switch to `workflows/60-health/sync-and-doctor.md`.
-- If search or context is stale, run `bwrk search index --json` and `bwrk context rebuild --json` after memory, work, context, or search-affecting changes.
+- If generated artifacts are stale, run `bwrk sync refresh --json` after memory, work, context, or search-affecting changes.
 - If locks are stale, inspect before breaking them.
 
 ## Finish Criteria

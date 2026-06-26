@@ -55,7 +55,15 @@ export interface CommandDefinition {
   readonly supportsJson: boolean;
 }
 
-export type CommandLockRequirement = "none" | "state" | "index" | "state+index" | "recovery";
+export type CommandLockRequirement =
+  | "none"
+  | "state"
+  | "index"
+  | "generated"
+  | "vault"
+  | "state+index"
+  | "state+generated"
+  | "recovery";
 export type HumanOutputKind = "table" | "record" | "markdown" | "none";
 
 export interface CommandBehaviorMetadata {
@@ -146,7 +154,7 @@ export const COMMAND_DEFINITIONS: readonly CommandDefinition[] = [
       flag("memory-layout", "value", "Memory layout: in-repo, child, or sibling. Defaults to in-repo."),
       flag("separate-git", "boolean", "Record memory as a separate Git boundary in project setup config."),
       flag("install-root", "value", "Skill install root. Relative paths resolve from the project root. Defaults to .agents/skills."),
-      flag("skill-target", "value", "Skill target to record: codex or claude. Repeatable.", true),
+      flag("skill-target", "value", "Skill target to record: codex or claude.", true),
       flag("folder-scoped", "boolean", "Record skills as folder-scoped for sessions opened inside the install folder."),
       flag("interactive", "boolean", "Prompt for project setup fields in a TTY.")
     ],
@@ -1039,6 +1047,18 @@ export const COMMAND_DEFINITIONS: readonly CommandDefinition[] = [
     supportsJson: true,
   },
   {
+    path: ["sync", "refresh"],
+    category: "sync",
+    summary: "Refresh generated collaboration artifacts.",
+    usage: "bwrk sync refresh [--json]",
+    description:
+      "Runs the safe generated-artifact refresh sequence: context projections, local search index, JSONL ledgers, then sync status.",
+    flags: [],
+    positionals: { label: "arguments", min: 0, max: 0 },
+    requiresWorkspace: true,
+    supportsJson: true,
+  },
+  {
     path: ["ledger", "status"],
     category: "ledger",
     summary: "Compare exported JSONL ledgers with current runtime state.",
@@ -1198,7 +1218,7 @@ const COMMAND_BEHAVIOR: Readonly<Record<string, CommandBehaviorMetadata>> = {
     writesGeneratedArtifacts: true,
     requiresFreshIndex: false,
     concurrencySafe: true,
-    requiresLock: "none",
+    requiresLock: "generated",
     maxResultSizeChars: 250_000,
     humanOutputKind: "record",
     examples: ["bwrk install codex --dry-run --json"],
@@ -1210,7 +1230,7 @@ const COMMAND_BEHAVIOR: Readonly<Record<string, CommandBehaviorMetadata>> = {
     writesGeneratedArtifacts: true,
     requiresFreshIndex: false,
     concurrencySafe: true,
-    requiresLock: "none",
+    requiresLock: "generated",
     maxResultSizeChars: 250_000,
     humanOutputKind: "record",
     examples: ["bwrk install claude --dry-run --json"],
@@ -1222,7 +1242,7 @@ const COMMAND_BEHAVIOR: Readonly<Record<string, CommandBehaviorMetadata>> = {
     writesGeneratedArtifacts: true,
     requiresFreshIndex: false,
     concurrencySafe: true,
-    requiresLock: "none",
+    requiresLock: "generated",
     maxResultSizeChars: 250_000,
     humanOutputKind: "record",
     examples: ["bwrk install skills --dry-run --json"],
@@ -1629,10 +1649,10 @@ const COMMAND_BEHAVIOR: Readonly<Record<string, CommandBehaviorMetadata>> = {
     readOnly: false,
     destructive: false,
     writesState: true,
-    writesGeneratedArtifacts: false,
+    writesGeneratedArtifacts: true,
     requiresFreshIndex: false,
     concurrencySafe: true,
-    requiresLock: "state",
+    requiresLock: "state+index",
     maxResultSizeChars: 100_000,
     humanOutputKind: "record",
     examples: ["bwrk agent finish bw_work_example --agent agent-a --summary 'tests passed' --release --json"],
@@ -1752,7 +1772,7 @@ const COMMAND_BEHAVIOR: Readonly<Record<string, CommandBehaviorMetadata>> = {
     writesGeneratedArtifacts: true,
     requiresFreshIndex: false,
     concurrencySafe: false,
-    requiresLock: "none",
+    requiresLock: "state+generated",
     maxResultSizeChars: 1_000_000,
     humanOutputKind: "record",
     examples: ["bwrk export json --out boreal-export.json --json"],
@@ -1764,7 +1784,7 @@ const COMMAND_BEHAVIOR: Readonly<Record<string, CommandBehaviorMetadata>> = {
     writesGeneratedArtifacts: true,
     requiresFreshIndex: false,
     concurrencySafe: false,
-    requiresLock: "none",
+    requiresLock: "state+generated",
     maxResultSizeChars: 150_000,
     humanOutputKind: "record",
     examples: ["bwrk export markdown --out markdown-export --json"],
@@ -1776,7 +1796,7 @@ const COMMAND_BEHAVIOR: Readonly<Record<string, CommandBehaviorMetadata>> = {
     writesGeneratedArtifacts: true,
     requiresFreshIndex: false,
     concurrencySafe: false,
-    requiresLock: "none",
+    requiresLock: "state+generated",
     maxResultSizeChars: 150_000,
     humanOutputKind: "record",
     examples: ["bwrk export ledgers --json"],
@@ -1812,7 +1832,7 @@ const COMMAND_BEHAVIOR: Readonly<Record<string, CommandBehaviorMetadata>> = {
     writesGeneratedArtifacts: true,
     requiresFreshIndex: false,
     concurrencySafe: true,
-    requiresLock: "none",
+    requiresLock: "vault",
     maxResultSizeChars: 125_000,
     humanOutputKind: "record",
     examples: ["bwrk vault init --json"],
@@ -1836,7 +1856,7 @@ const COMMAND_BEHAVIOR: Readonly<Record<string, CommandBehaviorMetadata>> = {
     writesGeneratedArtifacts: true,
     requiresFreshIndex: false,
     concurrencySafe: true,
-    requiresLock: "none",
+    requiresLock: "vault",
     maxResultSizeChars: 100_000,
     humanOutputKind: "record",
     examples: ["bwrk raw add --title 'Design source' --uri file://design.md --json"],
@@ -1848,7 +1868,7 @@ const COMMAND_BEHAVIOR: Readonly<Record<string, CommandBehaviorMetadata>> = {
     writesGeneratedArtifacts: true,
     requiresFreshIndex: false,
     concurrencySafe: true,
-    requiresLock: "none",
+    requiresLock: "vault",
     maxResultSizeChars: 100_000,
     humanOutputKind: "record",
     examples: ["bwrk wiki create 'Design principles' --source bw_source_example --json"],
@@ -1925,6 +1945,18 @@ const COMMAND_BEHAVIOR: Readonly<Record<string, CommandBehaviorMetadata>> = {
     humanOutputKind: "record",
     examples: ["bwrk sync status --json"],
   }),
+  "sync refresh": commandMetadata("sync refresh", {
+    readOnly: false,
+    destructive: false,
+    writesState: true,
+    writesGeneratedArtifacts: true,
+    requiresFreshIndex: false,
+    concurrencySafe: true,
+    requiresLock: "state+generated",
+    maxResultSizeChars: 300_000,
+    humanOutputKind: "record",
+    examples: ["bwrk sync refresh --json"],
+  }),
   "ledger status": commandMetadata("ledger status", {
     readOnly: true,
     destructive: false,
@@ -1956,7 +1988,7 @@ const COMMAND_BEHAVIOR: Readonly<Record<string, CommandBehaviorMetadata>> = {
     writesGeneratedArtifacts: true,
     requiresFreshIndex: false,
     concurrencySafe: false,
-    requiresLock: "none",
+    requiresLock: "state+generated",
     maxResultSizeChars: 75_000,
     humanOutputKind: "record",
     examples: ["bwrk snapshot create --name before-import --json"],
