@@ -529,33 +529,128 @@ function markdownFiles(document: ExportDocument): Array<{ path: string; content:
     },
     ...document.state.workItems.map((record) => ({
       path: `work/${record.meta.id}.md`,
-      content: frontmatter("work", record.meta.id) + `# ${record.title}\n\nStatus: ${record.status}\nPriority: ${record.priority}\nKind: ${record.kind}\n\n${record.description}\n`
+      content:
+        frontmatter({
+          kind: "work",
+          id: record.meta.id,
+          work_kind: record.kind,
+          status: record.status,
+          priority: record.priority,
+          labels: record.labels,
+          parent_id: record.parentId,
+          depends_on: record.dependencyIds,
+          evidence: record.evidenceIds,
+          verifications: record.verificationIds,
+          reservation_id: record.reservationId,
+          closed_at: record.closedAt,
+          created_at: record.meta.createdAt,
+          updated_at: record.meta.updatedAt,
+          tags: record.meta.tags
+        }) +
+        `# ${record.title}\n\nStatus: ${record.status}\nPriority: ${record.priority}\nKind: ${record.kind}\n\n${record.description}\n`
     })),
     ...document.state.evidence.map((record) => ({
       path: `evidence/${record.meta.id}.md`,
-      content: frontmatter("evidence", record.meta.id) + `# ${record.summary}\n\nOutcome: ${record.outcome}\nKind: ${record.kind}\nSubject: ${record.subjectType}:${record.subjectId}\n\n${record.command ? `Command: \`${record.command}\`\n` : ""}${record.uri ? `URI: ${record.uri}\n` : ""}`
+      content:
+        frontmatter({
+          kind: "evidence",
+          id: record.meta.id,
+          evidence_kind: record.kind,
+          outcome: record.outcome,
+          subject_type: record.subjectType,
+          subject_id: record.subjectId,
+          command: record.command,
+          uri: record.uri,
+          observed_at: record.observedAt,
+          created_at: record.meta.createdAt,
+          updated_at: record.meta.updatedAt,
+          tags: record.meta.tags
+        }) +
+        `# ${record.summary}\n\nOutcome: ${record.outcome}\nKind: ${record.kind}\nSubject: ${record.subjectType}:${record.subjectId}\n\n${record.command ? `Command: \`${record.command}\`\n` : ""}${record.uri ? `URI: ${record.uri}\n` : ""}`
     })),
     ...document.state.knowledgeSources.map((record) => ({
       path: `sources/${record.meta.id}.md`,
-      content: frontmatter("source", record.meta.id) + `# ${record.title}\n\nKind: ${record.kind}\nURI: ${record.uri}\n\n${record.summary}\n`
+      content:
+        frontmatter({
+          kind: "source",
+          id: record.meta.id,
+          source_kind: record.kind,
+          uri: record.uri,
+          created_at: record.meta.createdAt,
+          updated_at: record.meta.updatedAt,
+          tags: record.meta.tags
+        }) + `# ${record.title}\n\nKind: ${record.kind}\nURI: ${record.uri}\n\n${record.summary}\n`
     })),
     ...document.state.claims.map((record) => ({
       path: `claims/${record.meta.id}.md`,
-      content: frontmatter("claim", record.meta.id) + `# Claim\n\nStatus: ${record.status}\n\n${record.statement}\n\nSources: ${record.sourceIds.join(", ")}\nEvidence: ${record.evidenceIds.join(", ")}\n`
+      content:
+        frontmatter({
+          kind: "claim",
+          id: record.meta.id,
+          status: record.status,
+          sources: record.sourceIds,
+          evidence: record.evidenceIds,
+          created_at: record.meta.createdAt,
+          updated_at: record.meta.updatedAt,
+          tags: record.meta.tags
+        }) + `# Claim\n\nStatus: ${record.status}\n\n${record.statement}\n\nSources: ${record.sourceIds.join(", ")}\nEvidence: ${record.evidenceIds.join(", ")}\n`
     })),
     ...document.state.decisions.map((record) => ({
       path: `decisions/${record.meta.id}.md`,
-      content: frontmatter("decision", record.meta.id) + `# ${record.title}\n\nStatus: ${record.status}\n\n## Context\n\n${record.context}\n\n## Decision\n\n${record.decision}\n\n## Consequences\n\n${record.consequences.map((item) => `- ${item}`).join("\n")}\n`
+      content:
+        frontmatter({
+          kind: "decision",
+          id: record.meta.id,
+          status: record.status,
+          sources: record.sourceIds,
+          created_at: record.meta.createdAt,
+          updated_at: record.meta.updatedAt,
+          tags: record.meta.tags
+        }) + `# ${record.title}\n\nStatus: ${record.status}\n\n## Context\n\n${record.context}\n\n## Decision\n\n${record.decision}\n\n## Consequences\n\n${record.consequences.map((item) => `- ${item}`).join("\n")}\n`
     })),
     ...document.state.contextPacks.map((record) => ({
       path: `context/${record.subjectId}.md`,
-      content: frontmatter("context-pack", record.id) + `# ${record.title}\n\n${record.summary}\n\n## Facts\n\n${record.facts.map((fact) => `- ${fact}`).join("\n")}\n\n## Evidence\n\n${record.evidence.map((entry) => `- ${entry}`).join("\n")}\n`
+      content:
+        frontmatter({
+          kind: "context-pack",
+          id: record.id,
+          subject_id: record.subjectId,
+          generated_at: record.generatedAt
+        }) + `# ${record.title}\n\n${record.summary}\n\n## Facts\n\n${record.facts.map((fact) => `- ${fact}`).join("\n")}\n\n## Evidence\n\n${record.evidence.map((entry) => `- ${entry}`).join("\n")}\n`
     }))
   ];
 }
 
-function frontmatter(kind: string, id: string): string {
-  return `---\nkind: ${kind}\nid: ${id}\n---\n\n`;
+type FrontmatterValue = string | number | boolean | undefined | readonly string[];
+
+function frontmatter(fields: Record<string, FrontmatterValue>): string {
+  const lines = ["---"];
+  for (const [key, value] of Object.entries(fields)) {
+    if (value === undefined) {
+      continue;
+    }
+    if (isStringArray(value)) {
+      lines.push(`${key}:`);
+      for (const entry of value) {
+        lines.push(`  - ${yamlScalar(entry)}`);
+      }
+      continue;
+    }
+    lines.push(`${key}: ${yamlScalar(value)}`);
+  }
+  lines.push("---", "");
+  return `${lines.join("\n")}\n`;
+}
+
+function yamlScalar(value: string | number | boolean): string {
+  if (typeof value !== "string") {
+    return String(value);
+  }
+  return /^[A-Za-z0-9_.:/@-]+$/u.test(value) ? value : JSON.stringify(value);
+}
+
+function isStringArray(value: FrontmatterValue): value is readonly string[] {
+  return Array.isArray(value);
 }
 
 function recordCounts(state: Required<StoreSnapshot>): Record<SnapshotSection, number> {

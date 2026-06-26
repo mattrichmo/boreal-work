@@ -1400,6 +1400,8 @@ describe("bwrk cli", () => {
           "Exportable work",
           "--description",
           "This record should round-trip through import.",
+          "--label",
+          "export",
           "--ready",
           "--json"
         ])
@@ -1447,6 +1449,13 @@ describe("bwrk cli", () => {
     const markdownPayload = parseData<{ readonly outDir: string; readonly files: readonly string[] }>(markdown.stdout);
     expect(markdownPayload.outDir).toBe(join(rootDir, "markdown-export"));
     expect(markdownPayload.files.some((file) => file.endsWith(`/work/${work.meta.id}.md`))).toBe(true);
+    const workMarkdown = await readFile(join(rootDir, "markdown-export", "work", `${work.meta.id}.md`), "utf8");
+    expect(workMarkdown).toContain("kind: work");
+    expect(workMarkdown).toContain("work_kind: task");
+    expect(workMarkdown).toContain("status: needs_verification");
+    expect(workMarkdown).toContain("labels:\n  - export");
+    expect(workMarkdown).toContain("evidence:\n  - bw_evidence_");
+    expect(workMarkdown).toContain("created_at:");
 
     const outsideDir = await makeTempWorkspace();
     await symlink(outsideDir, join(rootDir, "linked-out"), "dir");

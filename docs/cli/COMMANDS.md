@@ -634,7 +634,7 @@ Builds a `boreal.export.v1` document containing a full runtime state snapshot, r
 bwrk export markdown [--out <dir>] [--json]
 ```
 
-Writes Git-friendly Markdown files for work, evidence, sources, claims, decisions, and context packs. Default output directory is `.boreal/exports/markdown`.
+Writes Git-friendly Markdown files for work, evidence, sources, claims, decisions, and context packs. Each file includes flat frontmatter with stable IDs, status/kind fields, references, tags, and timestamps where available. Default output directory is `.boreal/exports/markdown`.
 
 JSON `data` contains `outDir`, `files`, and `recordCounts`.
 
