@@ -2198,7 +2198,7 @@ describe("bwrk cli", () => {
     expect(malformedPayload.message).toContain("schema validation");
   });
 
-  it("deletes supported unreferenced records through tombstoned ledgers and blocks referenced source deletion", async () => {
+  it("deletes supported unreferenced records through tombstoned ledgers and blocks referenced deletions", async () => {
     const rootDir = await makeTempWorkspace();
     await runCli(rootDir, ["init", "--json"]);
 
@@ -2420,9 +2420,160 @@ describe("bwrk cli", () => {
     );
     expect(deletedDecisionPayload.ledger.deletedRecordCounts.decisions).toBe(1);
 
+    const deletableWork = parseData<{ readonly meta: { readonly id: string } }>(
+      (await runCli(rootDir, ["work", "create", "Tombstoned work", "--ready", "--json"])).stdout
+    );
+    const attachedEvidence = parseData<{ readonly meta: { readonly id: string } }>(
+      (
+        await runCli(rootDir, [
+          "evidence",
+          "add",
+          deletableWork.meta.id,
+          "--summary",
+          "Evidence blocks tombstone deletion while attached.",
+          "--kind",
+          "test",
+          "--outcome",
+          "passed",
+          "--json"
+        ])
+      ).stdout
+    );
+    const blockedEvidenceDelete = await runCli(rootDir, [
+      "ledger",
+      "delete",
+      "evidence",
+      attachedEvidence.meta.id,
+      "--json"
+    ]);
+    const blockedEvidencePayload = parseJson<{ readonly ok: false; readonly code: string; readonly message: string }>(
+      blockedEvidenceDelete.stderr
+    );
+    expect(blockedEvidenceDelete.exitCode).toBe(1);
+    expect(blockedEvidencePayload.code).toBe("BOREAL_CONFLICT");
+    expect(blockedEvidencePayload.message).toContain("records reference it");
+
+    const attachedVerification = parseData<{ readonly meta: { readonly id: string } }>(
+      (
+        await runCli(rootDir, [
+          "work",
+          "verify",
+          deletableWork.meta.id,
+          "--evidence",
+          attachedEvidence.meta.id,
+          "--json"
+        ])
+      ).stdout
+    );
+    const blockedVerificationDelete = await runCli(rootDir, [
+      "ledger",
+      "delete",
+      "verification",
+      attachedVerification.meta.id,
+      "--json"
+    ]);
+    const blockedVerificationPayload = parseJson<{ readonly ok: false; readonly code: string; readonly message: string }>(
+      blockedVerificationDelete.stderr
+    );
+    expect(blockedVerificationDelete.exitCode).toBe(1);
+    expect(blockedVerificationPayload.code).toBe("BOREAL_CONFLICT");
+    expect(blockedVerificationPayload.message).toContain("records reference it");
+
+    const blockedWorkDelete = await runCli(rootDir, [
+      "ledger",
+      "delete",
+      "work",
+      deletableWork.meta.id,
+      "--json"
+    ]);
+    const blockedWorkPayload = parseJson<{ readonly ok: false; readonly code: string; readonly message: string }>(
+      blockedWorkDelete.stderr
+    );
+    expect(blockedWorkDelete.exitCode).toBe(1);
+    expect(blockedWorkPayload.code).toBe("BOREAL_CONFLICT");
+    expect(blockedWorkPayload.message).toContain("records reference it");
+
+    await updateState(rootDir, (state) => ({
+      ...state,
+      workItems: state.workItems.map((work) =>
+        work.meta.id === deletableWork.meta.id ? { ...work, evidenceIds: [], verificationIds: [] } : work
+      )
+    }));
+
+    const deletedVerification = await runCli(rootDir, [
+      "ledger",
+      "delete",
+      "verification",
+      attachedVerification.meta.id,
+      "--reason",
+      "duplicate-verification",
+      "--json"
+    ]);
+    const deletedVerificationPayload = parseData<{
+      readonly section: string;
+      readonly id: string;
+      readonly ledger: { readonly deletedRecordCounts: { readonly verifications: number } };
+    }>(deletedVerification.stdout);
+    expect(deletedVerification.exitCode).toBe(0);
+    expect(deletedVerificationPayload).toEqual(
+      expect.objectContaining({
+        section: "verifications",
+        id: attachedVerification.meta.id
+      })
+    );
+    expect(deletedVerificationPayload.ledger.deletedRecordCounts.verifications).toBe(1);
+
+    const deletedEvidence = await runCli(rootDir, [
+      "ledger",
+      "delete",
+      "evidence",
+      attachedEvidence.meta.id,
+      "--reason",
+      "duplicate-evidence",
+      "--json"
+    ]);
+    const deletedEvidencePayload = parseData<{
+      readonly section: string;
+      readonly id: string;
+      readonly ledger: { readonly deletedRecordCounts: { readonly evidence: number } };
+    }>(deletedEvidence.stdout);
+    expect(deletedEvidence.exitCode).toBe(0);
+    expect(deletedEvidencePayload).toEqual(
+      expect.objectContaining({
+        section: "evidence",
+        id: attachedEvidence.meta.id
+      })
+    );
+    expect(deletedEvidencePayload.ledger.deletedRecordCounts.evidence).toBe(1);
+
+    const deletedWork = await runCli(rootDir, [
+      "ledger",
+      "delete",
+      "work",
+      deletableWork.meta.id,
+      "--reason",
+      "duplicate-work",
+      "--json"
+    ]);
+    const deletedWorkPayload = parseData<{
+      readonly section: string;
+      readonly id: string;
+      readonly ledger: { readonly deletedRecordCounts: { readonly workItems: number } };
+    }>(deletedWork.stdout);
+    expect(deletedWork.exitCode).toBe(0);
+    expect(deletedWorkPayload).toEqual(
+      expect.objectContaining({
+        section: "workItems",
+        id: deletableWork.meta.id
+      })
+    );
+    expect(deletedWorkPayload.ledger.deletedRecordCounts.workItems).toBe(1);
+
     const sources = parseData<Array<{ readonly id: string }>>((await runCli(rootDir, ["source", "list", "--json"])).stdout);
     expect(sources.map((source) => source.id)).toContain(referencedSource.meta.id);
     expect(sources.map((source) => source.id)).not.toContain(deletableSource.meta.id);
+    const workItems = parseData<Array<{ readonly id: string }>>((await runCli(rootDir, ["work", "list", "--json"])).stdout);
+    expect(workItems.map((work) => work.id)).not.toContain(deletableWork.meta.id);
     const claims = parseData<Array<{ readonly id: string }>>((await runCli(rootDir, ["claim", "list", "--json"])).stdout);
     expect(claims.map((claim) => claim.id)).toContain(graphProtectedClaim.meta.id);
     expect(claims.map((claim) => claim.id)).not.toContain(deletableClaim.meta.id);
@@ -2433,20 +2584,37 @@ describe("bwrk cli", () => {
     expect(deletions).toContain(deletableSource.meta.id);
     expect(deletions).toContain(deletableClaim.meta.id);
     expect(deletions).toContain(deletableDecision.meta.id);
+    expect(deletions).toContain(attachedVerification.meta.id);
+    expect(deletions).toContain(attachedEvidence.meta.id);
+    expect(deletions).toContain(deletableWork.meta.id);
     expect(deletions).toContain("\"reason\":\"duplicate\"");
 
     const status = await runCli(rootDir, ["ledger", "status", "--json"]);
     const statusPayload = parseData<{
       readonly ok: boolean;
       readonly reconstructable: boolean;
-      readonly deletedRecordCounts: { readonly knowledgeSources: number; readonly claims: number; readonly decisions: number };
+      readonly deletedRecordCounts: {
+        readonly workItems: number;
+        readonly evidence: number;
+        readonly verifications: number;
+        readonly knowledgeSources: number;
+        readonly claims: number;
+        readonly decisions: number;
+      };
     }>(status.stdout);
     expect(status.exitCode).toBe(0);
     expect(statusPayload).toEqual(
       expect.objectContaining({
         ok: true,
         reconstructable: true,
-        deletedRecordCounts: expect.objectContaining({ knowledgeSources: 1, claims: 1, decisions: 1 })
+        deletedRecordCounts: expect.objectContaining({
+          workItems: 1,
+          evidence: 1,
+          verifications: 1,
+          knowledgeSources: 1,
+          claims: 1,
+          decisions: 1
+        })
       })
     );
   });

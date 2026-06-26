@@ -35,6 +35,7 @@ import {
   type RuntimeOperation,
   type RuntimeOperationStatus,
   type RuntimeEvent,
+  type VerificationId,
   type VerificationRecord,
   type VerificationVerdict,
   type WorkId,
@@ -65,7 +66,10 @@ import {
   createSnapshot,
   deleteClaimWithTombstone,
   deleteDecisionWithTombstone,
+  deleteEvidenceWithTombstone,
   deleteKnowledgeSourceWithTombstone,
+  deleteVerificationWithTombstone,
+  deleteWorkItemWithTombstone,
   exportLedgers,
   exportJson,
   exportMarkdown,
@@ -1518,6 +1522,18 @@ async function ledgerCommand(
       const kind = requiredPositional(rest, 0, "ledger record kind");
       const id = requiredPositional(rest, 1, "record id");
       const reason = flagValue(args, "reason");
+      if (kind === "work") {
+        output.write(formatRecord(await deleteWorkItemWithTombstone(context, asWorkId(id), reason), json));
+        return { exitCode: 0 };
+      }
+      if (kind === "evidence") {
+        output.write(formatRecord(await deleteEvidenceWithTombstone(context, asEvidenceId(id), reason), json));
+        return { exitCode: 0 };
+      }
+      if (kind === "verification") {
+        output.write(formatRecord(await deleteVerificationWithTombstone(context, asVerificationId(id), reason), json));
+        return { exitCode: 0 };
+      }
       if (kind === "source") {
         output.write(formatRecord(await deleteKnowledgeSourceWithTombstone(context, asSourceId(id), reason), json));
         return { exitCode: 0 };
@@ -1530,7 +1546,11 @@ async function ledgerCommand(
         output.write(formatRecord(await deleteDecisionWithTombstone(context, asDecisionId(id), reason), json));
         return { exitCode: 0 };
       }
-      throw new BorealError("BOREAL_INVALID_INPUT", "ledger delete currently supports source, claim, and decision records", { kind });
+      throw new BorealError(
+        "BOREAL_INVALID_INPUT",
+        "ledger delete currently supports work, evidence, verification, source, claim, and decision records",
+        { kind }
+      );
     }
     default:
       throw new BorealError("BOREAL_INVALID_INPUT", `Unknown ledger command: ${action ?? ""}`);
@@ -1631,6 +1651,13 @@ function asDecisionId(value: string): DecisionId {
     throw new BorealError("BOREAL_INVALID_INPUT", `Expected a decision id, got ${value}`);
   }
   return value as DecisionId;
+}
+
+function asVerificationId(value: string): VerificationId {
+  if (!value.startsWith("bw_verification_")) {
+    throw new BorealError("BOREAL_INVALID_INPUT", `Expected a verification id, got ${value}`);
+  }
+  return value as VerificationId;
 }
 
 function parseWorkKind(value: string | undefined): WorkKind | undefined {

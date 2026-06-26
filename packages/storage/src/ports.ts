@@ -61,8 +61,11 @@ export interface BorealReader {
 
 export interface BorealWriter extends BorealReader {
   putWorkItem(item: WorkItem): Promise<void>;
+  deleteWorkItem(id: WorkId): Promise<boolean>;
   putEvidence(record: EvidenceRecord): Promise<void>;
+  deleteEvidence(id: EvidenceId): Promise<boolean>;
   putVerification(record: VerificationRecord): Promise<void>;
+  deleteVerification(id: VerificationId): Promise<boolean>;
   putKnowledgeSource(record: KnowledgeSource): Promise<void>;
   deleteKnowledgeSource(id: KnowledgeSourceId): Promise<boolean>;
   putClaim(record: ClaimRecord): Promise<void>;

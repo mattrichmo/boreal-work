@@ -16,9 +16,15 @@ import {
   type ClaimRecord,
   type DecisionId,
   type DecisionRecord,
+  type EvidenceId,
+  type EvidenceRecord,
   type KnowledgeSource,
   type KnowledgeSourceId,
-  type RuntimeEvent
+  type RuntimeEvent,
+  type VerificationId,
+  type VerificationRecord,
+  type WorkId,
+  type WorkItem
 } from "@boreal/core";
 import {
   writeTextFileAtomic,
@@ -309,6 +315,141 @@ export async function importLedgers(
   const resolvedDir = await resolveReadablePath(context, fromDir, Boolean(options.allowExternalRead));
   const incoming = (await readLedgerDirectory(resolvedDir)).state;
   return importSnapshot(context.store, incoming);
+}
+
+export async function deleteWorkItemWithTombstone(
+  context: CliContext,
+  workId: WorkId,
+  reason: string | undefined
+): Promise<LedgerDeleteRecordResult> {
+  let deletedWork: WorkItem | undefined;
+  let tombstone: LedgerDeletionRecord | undefined;
+  try {
+    deletedWork = await context.store.write(async (writer) => {
+      const work = await writer.getWorkItem(workId);
+      if (!work) {
+        throw new BorealError("BOREAL_INVALID_INPUT", "Work item does not exist", { workId });
+      }
+      await assertWorkItemCanBeDeleted(writer, workId);
+      const deleted = await writer.deleteWorkItem(workId);
+      if (!deleted) {
+        throw new BorealError("BOREAL_CONFLICT", "Work item changed before deletion", { workId });
+      }
+      return work;
+    });
+    tombstone = {
+      schemaVersion: "boreal.ledger-deletion.v1",
+      section: "workItems",
+      id: workId,
+      deletedAt: nowIso(),
+      reason,
+      deletedContentHash: deletedWork.meta.contentHash ?? hashContent(deletedWork)
+    };
+    const ledger = await exportLedgersWithAdditionalDeletions(context, undefined, [tombstone]);
+    return {
+      deleted: true,
+      section: "workItems",
+      id: workId,
+      tombstone,
+      ledger
+    };
+  } catch (error) {
+    const restoreWork = deletedWork;
+    if (restoreWork && tombstone) {
+      await context.store.write((writer) => writer.putWorkItem(restoreWork));
+    }
+    throw error;
+  }
+}
+
+export async function deleteEvidenceWithTombstone(
+  context: CliContext,
+  evidenceId: EvidenceId,
+  reason: string | undefined
+): Promise<LedgerDeleteRecordResult> {
+  let deletedEvidence: EvidenceRecord | undefined;
+  let tombstone: LedgerDeletionRecord | undefined;
+  try {
+    deletedEvidence = await context.store.write(async (writer) => {
+      const evidence = await writer.getEvidence(evidenceId);
+      if (!evidence) {
+        throw new BorealError("BOREAL_INVALID_INPUT", "Evidence does not exist", { evidenceId });
+      }
+      await assertEvidenceCanBeDeleted(writer, evidenceId);
+      const deleted = await writer.deleteEvidence(evidenceId);
+      if (!deleted) {
+        throw new BorealError("BOREAL_CONFLICT", "Evidence changed before deletion", { evidenceId });
+      }
+      return evidence;
+    });
+    tombstone = {
+      schemaVersion: "boreal.ledger-deletion.v1",
+      section: "evidence",
+      id: evidenceId,
+      deletedAt: nowIso(),
+      reason,
+      deletedContentHash: deletedEvidence.meta.contentHash ?? hashContent(deletedEvidence)
+    };
+    const ledger = await exportLedgersWithAdditionalDeletions(context, undefined, [tombstone]);
+    return {
+      deleted: true,
+      section: "evidence",
+      id: evidenceId,
+      tombstone,
+      ledger
+    };
+  } catch (error) {
+    const restoreEvidence = deletedEvidence;
+    if (restoreEvidence && tombstone) {
+      await context.store.write((writer) => writer.putEvidence(restoreEvidence));
+    }
+    throw error;
+  }
+}
+
+export async function deleteVerificationWithTombstone(
+  context: CliContext,
+  verificationId: VerificationId,
+  reason: string | undefined
+): Promise<LedgerDeleteRecordResult> {
+  let deletedVerification: VerificationRecord | undefined;
+  let tombstone: LedgerDeletionRecord | undefined;
+  try {
+    deletedVerification = await context.store.write(async (writer) => {
+      const verification = await writer.getVerification(verificationId);
+      if (!verification) {
+        throw new BorealError("BOREAL_INVALID_INPUT", "Verification does not exist", { verificationId });
+      }
+      await assertVerificationCanBeDeleted(writer, verificationId);
+      const deleted = await writer.deleteVerification(verificationId);
+      if (!deleted) {
+        throw new BorealError("BOREAL_CONFLICT", "Verification changed before deletion", { verificationId });
+      }
+      return verification;
+    });
+    tombstone = {
+      schemaVersion: "boreal.ledger-deletion.v1",
+      section: "verifications",
+      id: verificationId,
+      deletedAt: nowIso(),
+      reason,
+      deletedContentHash: deletedVerification.meta.contentHash ?? hashContent(deletedVerification)
+    };
+    const ledger = await exportLedgersWithAdditionalDeletions(context, undefined, [tombstone]);
+    return {
+      deleted: true,
+      section: "verifications",
+      id: verificationId,
+      tombstone,
+      ledger
+    };
+  } catch (error) {
+    const restoreVerification = deletedVerification;
+    if (restoreVerification && tombstone) {
+      await context.store.write((writer) => writer.putVerification(restoreVerification));
+    }
+    throw error;
+  }
 }
 
 export async function deleteKnowledgeSourceWithTombstone(
@@ -744,6 +885,110 @@ async function importSnapshot(store: BorealStore, incoming: ExportSnapshot): Pro
   });
 }
 
+async function assertWorkItemCanBeDeleted(reader: BorealReader, workId: WorkId): Promise<void> {
+  const [workItems, evidence, verifications, graphEdges, reservations, projections, contextPacks] = await Promise.all([
+    reader.listWorkItems(),
+    reader.listEvidence(),
+    reader.listVerifications(),
+    reader.listGraphEdges(),
+    reader.listReservations(),
+    reader.listProjections(),
+    reader.listContextPacks()
+  ]);
+  const childWorkIds = workItems.filter((work) => work.parentId === workId).map((work) => work.meta.id);
+  const dependencyWorkIds = workItems
+    .filter((work) => work.dependencyIds.includes(workId))
+    .map((work) => work.meta.id);
+  const evidenceIds = evidence
+    .filter((record) => subjectReferences(record, workId, GRAPH_TYPE_ALIASES.work))
+    .map((record) => record.meta.id);
+  const verificationIds = verifications
+    .filter((record) => subjectReferences(record, workId, GRAPH_TYPE_ALIASES.work))
+    .map((record) => record.meta.id);
+  const graphEdgeIds = graphEdges
+    .filter((edge) => graphEdgeReferences(edge, workId, GRAPH_TYPE_ALIASES.work))
+    .map((edge) => edge.meta.id);
+  const reservationIds = reservations.filter((reservation) => reservation.workId === workId).map((reservation) => reservation.meta.id);
+  const projectionIds = projections
+    .filter((projection) => projection.subjectId === workId)
+    .map((projection) => projection.meta.id);
+  const contextPackIds = contextPacks.filter((pack) => pack.subjectId === workId).map((pack) => pack.id);
+
+  if (
+    childWorkIds.length > 0 ||
+    dependencyWorkIds.length > 0 ||
+    evidenceIds.length > 0 ||
+    verificationIds.length > 0 ||
+    graphEdgeIds.length > 0 ||
+    reservationIds.length > 0 ||
+    projectionIds.length > 0 ||
+    contextPackIds.length > 0
+  ) {
+    throw new BorealError("BOREAL_CONFLICT", "Cannot delete work item while records reference it", {
+      workId,
+      references: {
+        childWork: childWorkIds,
+        dependencyWork: dependencyWorkIds,
+        evidence: evidenceIds,
+        verifications: verificationIds,
+        graphEdges: graphEdgeIds,
+        reservations: reservationIds,
+        projections: projectionIds,
+        contextPacks: contextPackIds
+      }
+    });
+  }
+}
+
+async function assertEvidenceCanBeDeleted(reader: BorealReader, evidenceId: EvidenceId): Promise<void> {
+  const [workItems, verifications, claims, graphEdges] = await Promise.all([
+    reader.listWorkItems(),
+    reader.listVerifications(),
+    reader.listClaims(),
+    reader.listGraphEdges()
+  ]);
+  const workIds = workItems.filter((work) => work.evidenceIds.includes(evidenceId)).map((work) => work.meta.id);
+  const verificationIds = verifications
+    .filter((verification) => verification.evidenceIds.includes(evidenceId))
+    .map((verification) => verification.meta.id);
+  const claimIds = claims.filter((claim) => claim.evidenceIds.includes(evidenceId)).map((claim) => claim.meta.id);
+  const graphEdgeIds = graphEdges
+    .filter((edge) => graphEdgeReferences(edge, evidenceId, GRAPH_TYPE_ALIASES.evidence))
+    .map((edge) => edge.meta.id);
+
+  if (workIds.length > 0 || verificationIds.length > 0 || claimIds.length > 0 || graphEdgeIds.length > 0) {
+    throw new BorealError("BOREAL_CONFLICT", "Cannot delete evidence while records reference it", {
+      evidenceId,
+      references: {
+        workItems: workIds,
+        verifications: verificationIds,
+        claims: claimIds,
+        graphEdges: graphEdgeIds
+      }
+    });
+  }
+}
+
+async function assertVerificationCanBeDeleted(reader: BorealReader, verificationId: VerificationId): Promise<void> {
+  const [workItems, graphEdges] = await Promise.all([reader.listWorkItems(), reader.listGraphEdges()]);
+  const workIds = workItems
+    .filter((work) => work.verificationIds.includes(verificationId))
+    .map((work) => work.meta.id);
+  const graphEdgeIds = graphEdges
+    .filter((edge) => graphEdgeReferences(edge, verificationId, GRAPH_TYPE_ALIASES.verification))
+    .map((edge) => edge.meta.id);
+
+  if (workIds.length > 0 || graphEdgeIds.length > 0) {
+    throw new BorealError("BOREAL_CONFLICT", "Cannot delete verification while records reference it", {
+      verificationId,
+      references: {
+        workItems: workIds,
+        graphEdges: graphEdgeIds
+      }
+    });
+  }
+}
+
 async function assertKnowledgeSourceCanBeDeleted(reader: BorealReader, sourceId: KnowledgeSourceId): Promise<void> {
   const [claims, decisions, graphEdges] = await Promise.all([
     reader.listClaims(),
@@ -768,9 +1013,12 @@ async function assertKnowledgeSourceCanBeDeleted(reader: BorealReader, sourceId:
   }
 }
 
-type DeletableGraphRecordKind = "source" | "claim" | "decision";
+type DeletableGraphRecordKind = "work" | "evidence" | "verification" | "source" | "claim" | "decision";
 
 const GRAPH_TYPE_ALIASES: Record<DeletableGraphRecordKind, readonly string[]> = {
+  work: ["work", "workItem", "workItems"],
+  evidence: ["evidence"],
+  verification: ["verification", "verifications"],
   source: ["source", "knowledgeSource", "knowledge_source", "knowledgeSources"],
   claim: ["claim", "claims"],
   decision: ["decision", "decisions"]
@@ -801,6 +1049,14 @@ function graphEdgeReferences(
   types: readonly string[]
 ): boolean {
   return (types.includes(edge.fromType) && edge.fromId === id) || (types.includes(edge.toType) && edge.toId === id);
+}
+
+function subjectReferences(
+  record: { readonly subjectType: string; readonly subjectId: string },
+  id: string,
+  types: readonly string[]
+): boolean {
+  return types.includes(record.subjectType) && record.subjectId === id;
 }
 
 function parseLedgerManifest(value: unknown): LedgerManifest {
