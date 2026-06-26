@@ -5,6 +5,7 @@ import {
   isIsoTimestamp,
   normalizeActorId,
   normalizeLabels,
+  normalizeMachineString,
   normalizeSearchQuery,
   nowIso,
   randomId,
@@ -30,6 +31,7 @@ import {
   type ReservationId,
   type ReservationStatus,
   type RuntimeOperation,
+  type RuntimeOperationStatus,
   type VerificationRecord,
   type VerificationVerdict,
   type WorkId,
@@ -99,6 +101,29 @@ interface ReservationListRow {
   readonly reservedAt: string;
   readonly expiresAt?: string;
   readonly purpose?: string;
+}
+
+interface OperationListRow {
+  readonly id: string;
+  readonly sessionId: string;
+  readonly commandPath: string;
+  readonly status: RuntimeOperationStatus;
+  readonly exitCode: number;
+  readonly stateChanged: boolean;
+  readonly generatedArtifactsChanged: boolean;
+  readonly actorId: string;
+  readonly startedAt: string;
+  readonly finishedAt: string;
+  readonly eventCount: number;
+}
+
+interface OperationPruneResult {
+  readonly deleted: number;
+  readonly keptBeforeOperationLog: number;
+  readonly remainingAfterOperationLog: number;
+  readonly keep?: number;
+  readonly before?: IsoTimestamp;
+  readonly deletedIds: readonly string[];
 }
 
 interface AgentStatus {
@@ -300,6 +325,9 @@ export async function runCommand(args: ParsedArgs, output: CliOutput, cwd: strin
       case "agent":
         result = await agentCommand(action, rest, context, args, commandOutput, json);
         break;
+      case "operation":
+        result = await operationCommand(action, rest, context, args, commandOutput, json);
+        break;
       case "export":
         result = await exportCommand(action, context, args, commandOutput, json);
         break;
@@ -332,6 +360,136 @@ export async function runCommand(args: ParsedArgs, output: CliOutput, cwd: strin
     throw new BorealError("BOREAL_INVARIANT", "Command did not return a result");
   }
   return result;
+}
+
+async function operationCommand(
+  action: string | undefined,
+  rest: readonly string[],
+  context: CliContext,
+  args: ParsedArgs,
+  output: CliOutput,
+  json: boolean
+): Promise<CommandResult> {
+  switch (action) {
+    case "list": {
+      const sessionId = optionalSessionId(flagValue(args, "session-id"));
+      const command = optionalCommandPath(flagValue(args, "command"));
+      const status = parseOperationStatus(flagValue(args, "status"));
+      const limit = parseLimit(flagValue(args, "limit")) ?? 50;
+      const rows = await context.store.read(async (reader) => {
+        const operations = await reader.listOperations();
+        return [...operations]
+          .filter((operation) => !sessionId || operation.sessionId === sessionId)
+          .filter((operation) => !command || operation.commandPath === command)
+          .filter((operation) => !status || operation.status === status)
+          .sort(compareOperationsNewestFirst)
+          .slice(0, limit)
+          .map(operationListRow);
+      });
+      output.write(json ? formatRecord(rows, true) : table(rows.map(textOperationListRow)));
+      return { exitCode: 0 };
+    }
+    case "show": {
+      const operation = await resolveOperation(context, requiredPositional(rest, 0, "operation id"));
+      output.write(formatRecord(operation, json));
+      return { exitCode: 0 };
+    }
+    case "prune": {
+      output.write(formatRecord(await pruneOperations(context, args), json));
+      return { exitCode: 0 };
+    }
+    default:
+      throw new BorealError("BOREAL_INVALID_INPUT", `Unknown operation command: ${action ?? ""}`);
+  }
+}
+
+async function resolveOperation(context: CliContext, value: string): Promise<RuntimeOperation> {
+  if (!value.startsWith("bw_operation_")) {
+    throw new BorealError("BOREAL_INVALID_INPUT", `Expected an operation id, got ${value}`);
+  }
+  const operations = await context.store.read((reader) => reader.listOperations());
+  const exact = operations.find((operation) => operation.meta.id === value);
+  if (exact) {
+    return exact;
+  }
+  const minPrefixLength = "bw_operation_".length + 12;
+  if (value.length < minPrefixLength) {
+    throw new BorealError("BOREAL_INVALID_INPUT", `Operation id prefix must include at least 12 hex characters, got ${value}`);
+  }
+  const candidates = operations.filter((operation) => operation.meta.id.startsWith(value));
+  if (candidates.length === 0) {
+    throw new BorealError("BOREAL_NOT_FOUND", "Operation not found", { operationId: value });
+  }
+  if (candidates.length > 1) {
+    throw new BorealError("BOREAL_CONFLICT", "Operation id prefix is ambiguous", {
+      operationId: value,
+      candidates: candidates.map((operation) => operation.meta.id)
+    });
+  }
+  return candidates[0] as RuntimeOperation;
+}
+
+async function pruneOperations(context: CliContext, args: ParsedArgs): Promise<OperationPruneResult> {
+  const keep = parseOperationKeep(flagValue(args, "keep"));
+  const before = parseOperationBefore(flagValue(args, "before"));
+  if (keep === undefined && before === undefined) {
+    throw new BorealError("BOREAL_INVALID_INPUT", "operation prune requires --keep or --before");
+  }
+
+  return context.store.write(async (writer) => {
+    const operations = [...(await writer.listOperations())].sort(compareOperationsNewestFirst);
+    const beforeMs = before ? Date.parse(before) : undefined;
+    const eligibleByAge = operations.filter(
+      (operation) => beforeMs === undefined || Date.parse(operation.finishedAt) >= beforeMs
+    );
+    const keepBeforeOperationLog = keep === undefined ? eligibleByAge.length : Math.max(0, keep - 1);
+    const keptIds = new Set(eligibleByAge.slice(0, keepBeforeOperationLog).map((operation) => operation.meta.id));
+    const deleted = operations.filter((operation) => !keptIds.has(operation.meta.id));
+    for (const operation of deleted) {
+      await writer.deleteOperation(operation.meta.id);
+    }
+    const keptBeforeOperationLog = operations.length - deleted.length;
+    return {
+      deleted: deleted.length,
+      keptBeforeOperationLog,
+      remainingAfterOperationLog: keptBeforeOperationLog + 1,
+      keep,
+      before,
+      deletedIds: deleted.map((operation) => operation.meta.id)
+    };
+  });
+}
+
+function operationListRow(operation: RuntimeOperation): OperationListRow {
+  return {
+    id: operation.meta.id,
+    sessionId: operation.sessionId,
+    commandPath: operation.commandPath,
+    status: operation.status,
+    exitCode: operation.exitCode,
+    stateChanged: operation.stateChanged,
+    generatedArtifactsChanged: operation.generatedArtifactsChanged,
+    actorId: operation.actorId,
+    startedAt: operation.startedAt,
+    finishedAt: operation.finishedAt,
+    eventCount: operation.eventIds.length
+  };
+}
+
+function compareOperationsNewestFirst(left: RuntimeOperation, right: RuntimeOperation): number {
+  return (
+    Date.parse(right.finishedAt) - Date.parse(left.finishedAt) ||
+    Date.parse(right.startedAt) - Date.parse(left.startedAt) ||
+    right.meta.id.localeCompare(left.meta.id)
+  );
+}
+
+function optionalSessionId(value: string | undefined): string | undefined {
+  return value ? normalizeActorId(value) : undefined;
+}
+
+function optionalCommandPath(value: string | undefined): string | undefined {
+  return value ? normalizeMachineString(value, "command path", { lowerCase: true }) : undefined;
 }
 
 function shouldRecordOperation(definition: CommandDefinition): boolean {
@@ -1328,6 +1486,16 @@ function parseReservationStatus(value: string | undefined): ReservationStatus | 
   throw new BorealError("BOREAL_INVALID_INPUT", "--status must be active, released, expired, or all");
 }
 
+function parseOperationStatus(value: string | undefined): RuntimeOperationStatus | undefined {
+  if (!value || value === "all") {
+    return undefined;
+  }
+  if (value === "succeeded" || value === "failed") {
+    return value;
+  }
+  throw new BorealError("BOREAL_INVALID_INPUT", "--status must be succeeded, failed, or all");
+}
+
 function parseLimit(value: string | undefined): number | undefined {
   if (!value) {
     return undefined;
@@ -1337,6 +1505,27 @@ function parseLimit(value: string | undefined): number | undefined {
     throw new BorealError("BOREAL_INVALID_INPUT", "--limit must be a positive integer");
   }
   return parsed;
+}
+
+function parseOperationKeep(value: string | undefined): number | undefined {
+  if (!value) {
+    return undefined;
+  }
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed <= 0) {
+    throw new BorealError("BOREAL_INVALID_INPUT", "--keep must be a positive integer");
+  }
+  return parsed;
+}
+
+function parseOperationBefore(value: string | undefined): IsoTimestamp | undefined {
+  if (!value) {
+    return undefined;
+  }
+  if (!isIsoTimestamp(value)) {
+    throw new BorealError("BOREAL_INVALID_INPUT", "--before must be an ISO timestamp");
+  }
+  return value;
 }
 
 function parseReservationExpiresAt(args: ParsedArgs): IsoTimestamp | undefined {
@@ -1859,6 +2048,21 @@ function textReservationListRow(row: ReservationListRow): Record<string, string>
   };
 }
 
+function textOperationListRow(row: OperationListRow): Record<string, string> {
+  return {
+    id: row.id,
+    session: row.sessionId,
+    command: row.commandPath,
+    status: row.status,
+    exit: String(row.exitCode),
+    state: row.stateChanged ? "yes" : "no",
+    artifacts: row.generatedArtifactsChanged ? "yes" : "no",
+    actor: row.actorId,
+    finished: row.finishedAt,
+    events: String(row.eventCount)
+  };
+}
+
 function textWorkListRow(row: WorkListRow): Record<string, string> {
   return {
     id: row.id,
@@ -2070,6 +2274,6 @@ Usage:
 ${COMMAND_DEFINITIONS.map((definition) => `  ${definition.usage}`).join("\n")}
 
 Help:
-  bwrk help [init|work|dep|evidence|source|claim|decision|context|search|reservation|agent|export|import|snapshot|doctor|lock|commands]
+  bwrk help [init|work|dep|evidence|source|claim|decision|context|search|reservation|agent|operation|export|import|snapshot|doctor|lock|commands]
 `;
 }

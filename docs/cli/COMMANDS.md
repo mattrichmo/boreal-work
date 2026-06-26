@@ -94,6 +94,7 @@ bwrk help context
 bwrk help search
 bwrk help reservation
 bwrk help agent
+bwrk help operation
 bwrk help export
 bwrk help import
 bwrk help snapshot
@@ -458,6 +459,38 @@ JSON `data` includes:
 - Claimable ready-work count for the optional label filter.
 - The next claimable work row when one exists.
 - `recommendedAction` with a `kind`, optional command, and reason.
+
+## `operation list`
+
+```bash
+bwrk operation list [--session-id <id>] [--command <path>] [--status succeeded|failed|all] [--limit <count>] [--json]
+```
+
+Lists local command operation records newest first. Default `--limit` is `50`. Filters are exact after normalization:
+
+- `--session-id`: only operations from one session.
+- `--command`: only one command path, for example `work create`.
+- `--status`: `succeeded`, `failed`, or `all`.
+
+JSON rows include operation ID, session ID, command path, status, exit code, state/artifact effect flags, actor ID, timestamps, and event count.
+
+## `operation show`
+
+```bash
+bwrk operation show <operation-id-or-prefix> [--json]
+```
+
+Shows one full local operation record, including redacted argv and generated event IDs. Prefixes must include at least 12 hex characters and be unambiguous.
+
+## `operation prune`
+
+```bash
+bwrk operation prune (--keep <count>|--before <iso>) [--json]
+```
+
+Prunes local operation history without changing exported project records. `--keep` keeps the newest N operations including the prune command's own operation record, so `bwrk operation prune --keep 500` leaves at most 500 operation records after the command finishes. `--before` deletes operations finished before the given ISO timestamp. When both flags are provided, the age filter is applied first and the remaining newest records are capped by `--keep`.
+
+JSON `data` includes `deleted`, `keptBeforeOperationLog`, `remainingAfterOperationLog`, optional `keep`/`before`, and `deletedIds`.
 
 ## `evidence add`
 

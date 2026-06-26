@@ -24,6 +24,7 @@ export interface CommandDefinition {
     | "search"
     | "reservation"
     | "agent"
+    | "operation"
     | "export"
     | "import"
     | "snapshot"
@@ -625,6 +626,48 @@ export const COMMAND_DEFINITIONS: readonly CommandDefinition[] = [
     supportsJson: true,
   },
   {
+    path: ["operation", "list"],
+    category: "operation",
+    summary: "List local command operations.",
+    usage:
+      "bwrk operation list [--session-id <id>] [--command <path>] [--status succeeded|failed|all] [--limit <n>] [--json]",
+    description: "Shows local CLI operation audit records newest first.",
+    flags: [
+      flag("session-id", "value", "Only include operations from this session ID."),
+      flag("command", "value", "Only include operations for this command path, for example 'work create'."),
+      flag("status", "value", "Only include operations with this status. Defaults to all."),
+      flag("limit", "value", "Maximum number of operations to print. Defaults to 50."),
+    ],
+    positionals: { label: "arguments", min: 0, max: 0 },
+    requiresWorkspace: true,
+    supportsJson: true,
+  },
+  {
+    path: ["operation", "show"],
+    category: "operation",
+    summary: "Show one local command operation.",
+    usage: "bwrk operation show <operation-id-or-prefix> [--json]",
+    description: "Shows the full local operation record, including redacted argv and generated event IDs.",
+    flags: [],
+    positionals: { label: "operation id", min: 1, max: 1 },
+    requiresWorkspace: true,
+    supportsJson: true,
+  },
+  {
+    path: ["operation", "prune"],
+    category: "operation",
+    summary: "Prune local command operation records.",
+    usage: "bwrk operation prune (--keep <n>|--before <iso>) [--json]",
+    description: "Bounds local operation history without changing exported project records.",
+    flags: [
+      flag("keep", "value", "Keep the newest N operations, including this prune command's operation record."),
+      flag("before", "value", "Delete operations finished before this ISO timestamp."),
+    ],
+    positionals: { label: "arguments", min: 0, max: 0 },
+    requiresWorkspace: true,
+    supportsJson: true,
+  },
+  {
     path: ["export", "json"],
     category: "export",
     summary: "Export a stable JSON snapshot.",
@@ -1164,6 +1207,42 @@ const COMMAND_BEHAVIOR: Readonly<Record<string, CommandBehaviorMetadata>> = {
     maxResultSizeChars: 100_000,
     humanOutputKind: "record",
     examples: ["bwrk agent status --agent agent-a --label hardening --json"],
+  }),
+  "operation list": commandMetadata("operation list", {
+    readOnly: true,
+    destructive: false,
+    writesState: false,
+    writesGeneratedArtifacts: false,
+    requiresFreshIndex: false,
+    concurrencySafe: true,
+    requiresLock: "none",
+    maxResultSizeChars: 100_000,
+    humanOutputKind: "table",
+    examples: ["bwrk operation list --session-id local --limit 20 --json"],
+  }),
+  "operation show": commandMetadata("operation show", {
+    readOnly: true,
+    destructive: false,
+    writesState: false,
+    writesGeneratedArtifacts: false,
+    requiresFreshIndex: false,
+    concurrencySafe: true,
+    requiresLock: "none",
+    maxResultSizeChars: 50_000,
+    humanOutputKind: "record",
+    examples: ["bwrk operation show bw_operation_example --json"],
+  }),
+  "operation prune": commandMetadata("operation prune", {
+    readOnly: false,
+    destructive: true,
+    writesState: true,
+    writesGeneratedArtifacts: false,
+    requiresFreshIndex: false,
+    concurrencySafe: true,
+    requiresLock: "state",
+    maxResultSizeChars: 100_000,
+    humanOutputKind: "record",
+    examples: ["bwrk operation prune --keep 500 --json"],
   }),
   "export json": commandMetadata("export json", {
     readOnly: false,

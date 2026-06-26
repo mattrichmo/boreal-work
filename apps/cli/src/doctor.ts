@@ -58,6 +58,8 @@ const STATE_SECTIONS = [
   "contextPacks"
 ] as const;
 
+const OPERATION_LOG_WARNING_COUNT = 1_000;
+
 export async function runDoctor(context: CliContext, fix: boolean): Promise<DoctorResult> {
   const diagnostics: Diagnostic[] = [];
   let fixed = false;
@@ -624,6 +626,18 @@ async function validateStoreRecords(
       code: "operation.count",
       severity: "ok",
       message: `${summary.operationCount} operation(s) loaded`
+    });
+    diagnostics.push({
+      code: "operation.volume",
+      severity: summary.operationCount > OPERATION_LOG_WARNING_COUNT ? "warning" : "ok",
+      message:
+        summary.operationCount > OPERATION_LOG_WARNING_COUNT
+          ? `Operation log has more than ${OPERATION_LOG_WARNING_COUNT} records; run \`bwrk operation prune --keep ${OPERATION_LOG_WARNING_COUNT} --json\``
+          : "Operation log volume is within the recommended bound",
+      details:
+        summary.operationCount > OPERATION_LOG_WARNING_COUNT
+          ? { operationCount: summary.operationCount, recommendedKeep: OPERATION_LOG_WARNING_COUNT }
+          : undefined
     });
     diagnostics.push(diagnosticFromList("state.record_shape", "Malformed runtime records", summary.malformedRecords));
     diagnostics.push(diagnosticFromList("work.dangling_dependencies", "Dangling work dependencies", summary.danglingDependencies));

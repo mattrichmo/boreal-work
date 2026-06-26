@@ -245,6 +245,10 @@ class MemoryTransaction implements BorealWriter {
     this.state.operations.set(record.meta.id, deepClone(record));
   }
 
+  async deleteOperation(id: OperationId): Promise<boolean> {
+    return this.state.operations.delete(id);
+  }
+
   async putProjection(record: ProjectionRecord): Promise<void> {
     this.state.projections.set(record.meta.id, deepClone(record));
   }

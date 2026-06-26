@@ -72,6 +72,9 @@ describe("bwrk cli", () => {
       "## `agent finish`",
       "## `agent start`",
       "## `agent status`",
+      "## `operation list`",
+      "## `operation show`",
+      "## `operation prune`",
       "## `evidence add`",
       "## `work verify`",
       "## `work close`",
@@ -114,7 +117,7 @@ describe("bwrk cli", () => {
     expect(root.exitCode).toBe(0);
     expect(root.stdout).toContain("bwrk - Boreal Work CLI");
     expect(root.stdout).toContain(
-      "bwrk help [init|work|dep|evidence|source|claim|decision|context|search|reservation|agent|export|import|snapshot|doctor|lock|commands]"
+      "bwrk help [init|work|dep|evidence|source|claim|decision|context|search|reservation|agent|operation|export|import|snapshot|doctor|lock|commands]"
     );
     expect(work.exitCode).toBe(0);
     expect(work.stdout).toContain("bwrk work create");
@@ -245,6 +248,9 @@ describe("bwrk cli", () => {
         "agent finish",
         "agent start",
         "agent status",
+        "operation list",
+        "operation show",
+        "operation prune",
         "export json",
         "export markdown",
         "import json",
@@ -330,6 +336,55 @@ describe("bwrk cli", () => {
     expect(operation?.argv.join(" ")).not.toContain("Sensitive Label");
     expect(workCreatedEvent).toBeDefined();
     expect(operation?.eventIds).toContain(workCreatedEvent?.meta.id);
+  });
+
+  it("lists, shows, and prunes local command operations", async () => {
+    const rootDir = await makeTempWorkspace();
+
+    await runCli(rootDir, ["init", "--json"]);
+    await runCli(rootDir, [
+      "work",
+      "create",
+      "Inspectable operation",
+      "--ready",
+      "--session",
+      "Run 42",
+      "--actor",
+      "Agent Op",
+      "--actor-kind",
+      "agent",
+      "--json"
+    ]);
+
+    const listed = await runCli(rootDir, ["operation", "list", "--session-id", "Run 42", "--limit", "10", "--json"]);
+    const rows = parseData<Array<{ readonly id: string; readonly commandPath: string; readonly sessionId: string }>>(listed.stdout);
+    const workOperation = rows.find((row) => row.commandPath === "work create");
+    expect(listed.exitCode).toBe(0);
+    expect(workOperation).toEqual(expect.objectContaining({ sessionId: "run 42" }));
+
+    const prefix = workOperation?.id.slice(0, "bw_operation_".length + 12) ?? "";
+    const shown = await runCli(rootDir, ["operation", "show", prefix, "--json"]);
+    const shownOperation = parseData<{ readonly meta: { readonly id: string }; readonly commandPath: string }>(shown.stdout);
+    expect(shown.exitCode).toBe(0);
+    expect(shownOperation.meta.id).toBe(workOperation?.id);
+    expect(shownOperation.commandPath).toBe("work create");
+
+    const pruned = await runCli(rootDir, ["operation", "prune", "--keep", "2", "--json"]);
+    const pruneResult = parseData<{
+      readonly deleted: number;
+      readonly remainingAfterOperationLog: number;
+      readonly keep: number;
+    }>(pruned.stdout);
+    const state = parseJson<{
+      readonly operations: Array<{ readonly commandPath: string }>;
+    }>(await readFile(join(rootDir, ".boreal/runtime/state.json"), "utf8"));
+
+    expect(pruned.exitCode).toBe(0);
+    expect(pruneResult.deleted).toBeGreaterThan(0);
+    expect(pruneResult.keep).toBe(2);
+    expect(pruneResult.remainingAfterOperationLog).toBe(2);
+    expect(state.operations).toHaveLength(2);
+    expect(state.operations.map((operation) => operation.commandPath)).toContain("operation prune");
   });
 
   it("rejects unknown flags and honors explicit false booleans", async () => {

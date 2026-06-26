@@ -70,6 +70,7 @@ export interface BorealWriter extends BorealReader {
   putReservation(record: AgentReservation): Promise<void>;
   putEvent(record: RuntimeEvent): Promise<void>;
   putOperation(record: RuntimeOperation): Promise<void>;
+  deleteOperation(id: OperationId): Promise<boolean>;
   putProjection(record: ProjectionRecord): Promise<void>;
   putContextPack(record: ContextPack): Promise<void>;
 }
