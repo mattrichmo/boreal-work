@@ -221,14 +221,16 @@ Statuses:
 ```text
 draft
 ready
-reserved
 in_progress
+reserved
 blocked
 needs_verification
 verified
 closed
 cancelled
 ```
+
+`in_progress` is the normal status for actively reserved work. `reserved` is still accepted for legacy/imported state, but new reservations use `reservationId` plus `in_progress` instead of overloading status as ownership.
 
 Examples:
 
@@ -285,7 +287,7 @@ bwrk work reserve <work-id> [--agent <id>] [--purpose <text>] [--expires-at <iso
 
 Reserves a ready work item for an agent. If `--agent` is omitted, the CLI actor ID is used.
 
-Normal reservation requires `ready` work. `--force` allows a documented reservation of non-ready work only when `--reason` is also supplied. Closed and cancelled work still cannot be reserved.
+Normal reservation requires `ready` work. A successful reservation writes an active reservation record, stores its ID on the work item, and moves the work to `in_progress`. `--force` allows a documented reservation of non-ready work only when `--reason` is also supplied. Closed and cancelled work still cannot be reserved.
 
 Reservations can expire:
 
@@ -387,7 +389,7 @@ bwrk agent finish <work-id> \
   [--json]
 ```
 
-Guarded exit workflow for reserved agent work. The command requires the selected agent to own the active, non-expired reservation before it records evidence, verifies the work, and closes or releases anything. Evidence, verification, optional close, reservation release, readiness repair, and the final `agent.finished` event run as one engine transaction. One of `--close` or `--release` is required so finish cannot leave an active reservation on non-reserved work.
+Guarded exit workflow for work with an active agent reservation. The command requires the selected agent to own the active, non-expired reservation before it records evidence, verifies the work, and closes or releases anything. Evidence, verification, optional close, reservation release, readiness repair, and the final `agent.finished` event run as one engine transaction. One of `--close` or `--release` is required so finish cannot leave active ownership behind.
 
 Behavior:
 
@@ -695,7 +697,7 @@ Checks:
 - Dangling work dependencies, evidence references, and verification references.
 - Dangling knowledge source and claim evidence references.
 - Duplicate graph edges, dangling work graph edges, graph/dependency disagreement, and dependency cycles.
-- Reservation consistency, including active reservations for terminal work and reserved work without active reservations.
+- Reservation consistency, including active reservations for terminal work, work ownership pointers, and legacy `reserved` work without active reservations.
 - Expired active reservations.
 - Verification policy drift, including passed verifications without passed evidence.
 - Closed work items without close reasons.

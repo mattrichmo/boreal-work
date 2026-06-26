@@ -1072,7 +1072,7 @@ function reservationPolicyIssues(
           }
         ];
       }
-      if (work.status !== "reserved" || work.reservationId !== reservation.meta.id) {
+      if (!isReservationBackedWorkStatus(work.status) || work.reservationId !== reservation.meta.id) {
         return [
           {
             issue: "active_reservation_not_reflected_by_work",
@@ -1093,8 +1093,11 @@ function reservationPolicyIssues(
         reservationIds: values.map((reservation) => reservation.meta.id)
       })),
     ...workItems.flatMap((work) => {
-      if (work.status === "reserved" && (!work.reservationId || !activeReservationsById.has(work.reservationId))) {
-        return [{ issue: "reserved_work_missing_active_reservation", workId: work.meta.id, reservationId: work.reservationId }];
+      if (isReservationBackedWorkStatus(work.status) && work.reservationId && !activeReservationsById.has(work.reservationId)) {
+        return [{ issue: "work_status_missing_active_reservation", workId: work.meta.id, status: work.status, reservationId: work.reservationId }];
+      }
+      if (work.status === "reserved" && !work.reservationId) {
+        return [{ issue: "legacy_reserved_work_missing_reservation", workId: work.meta.id }];
       }
       if (work.reservationId && !reservations.some((reservation) => reservation.meta.id === work.reservationId)) {
         return [{ issue: "work_reservation_missing_record", workId: work.meta.id, reservationId: work.reservationId }];
@@ -1102,6 +1105,10 @@ function reservationPolicyIssues(
       return [];
     })
   ];
+}
+
+function isReservationBackedWorkStatus(status: WorkItem["status"]): boolean {
+  return status === "in_progress" || status === "reserved";
 }
 
 function verificationPolicyIssues(

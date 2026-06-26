@@ -860,7 +860,7 @@ async function clearWorkReservation(
 ): Promise<WorkItem> {
   const base = {
     ...work,
-    status: work.status === "reserved" ? ("draft" as const) : work.status,
+    status: work.status === "reserved" || work.status === "in_progress" ? ("draft" as const) : work.status,
     reservationId: undefined
   };
   const graphBase = await workWithGraphDependencies(reader, base);

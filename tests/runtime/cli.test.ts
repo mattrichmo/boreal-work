@@ -851,7 +851,7 @@ describe("bwrk cli", () => {
     expect(payload.claimed).toBe(true);
     expect(payload.handoffComplete).toBe(true);
     expect(payload.work.id).toBe(work.meta.id);
-    expect(payload.work.status).toBe("reserved");
+    expect(payload.work.status).toBe("in_progress");
     expect(payload.work.activeReservationId).toBe(payload.reservation.meta.id);
     expect(payload.reservation.status).toBe("active");
     expect(payload.reservation.purpose).toBe("start implementation");
@@ -911,7 +911,7 @@ describe("bwrk cli", () => {
     expect(payload.claimed).toBe(true);
     expect(payload.handoffComplete).toBe(false);
     expect(payload.work?.id).toBe(work.meta.id);
-    expect(payload.work?.status).toBe("reserved");
+    expect(payload.work?.status).toBe("in_progress");
     expect(payload.work?.activeReservationId).toBe(payload.reservation?.meta.id);
     expect(payload.reservation?.status).toBe("active");
     expect(payload.warnings).toEqual(expect.arrayContaining([expect.objectContaining({ code: "handoff.failed" })]));
@@ -997,7 +997,7 @@ describe("bwrk cli", () => {
     expect(startedPayload.action).toBe("claimed_work");
     expect(startedPayload.handoffComplete).toBe(true);
     expect(startedPayload.work?.id).toBe(work.meta.id);
-    expect(startedPayload.work?.status).toBe("reserved");
+    expect(startedPayload.work?.status).toBe("in_progress");
     expect(startedPayload.work?.activeReservationId).toBe(startedPayload.reservation?.meta.id);
     expect(startedPayload.reservation?.status).toBe("active");
     expect(startedPayload.reservation?.purpose).toBe("begin safe work");
@@ -1072,7 +1072,7 @@ describe("bwrk cli", () => {
     expect(payload.action).toBe("claimed_work");
     expect(payload.handoffComplete).toBe(false);
     expect(payload.work?.id).toBe(work.meta.id);
-    expect(payload.work?.status).toBe("reserved");
+    expect(payload.work?.status).toBe("in_progress");
     expect(payload.work?.activeReservationId).toBe(payload.reservation?.meta.id);
     expect(payload.reservation?.status).toBe("active");
     expect(payload.warnings).toEqual(
@@ -1083,7 +1083,7 @@ describe("bwrk cli", () => {
 
     const shown = await runCli(rootDir, ["work", "show", work.meta.id, "--json"]);
     expect(parseData<{ readonly status: string; readonly activeReservationId?: string }>(shown.stdout)).toEqual(
-      expect.objectContaining({ status: "reserved", activeReservationId: payload.reservation?.meta.id })
+      expect.objectContaining({ status: "in_progress", activeReservationId: payload.reservation?.meta.id })
     );
   });
 
@@ -1253,7 +1253,7 @@ describe("bwrk cli", () => {
 
     const reserved = await runCli(rootDir, ["work", "reserve", work.meta.id, "--agent", "agent-a", "--ttl", "1h", "--json"]);
     const reservedWork = parseData<{ readonly status: string; readonly reservationId: string }>(reserved.stdout);
-    expect(reservedWork.status).toBe("reserved");
+    expect(reservedWork.status).toBe("in_progress");
     expect(reservedWork.reservationId).toMatch(/^bw_reservation_/);
 
     const activeList = await runCli(rootDir, ["reservation", "list", "--agent", "agent-a", "--work", work.meta.id, "--json"]);

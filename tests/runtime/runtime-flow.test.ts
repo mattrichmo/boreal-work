@@ -92,7 +92,7 @@ describe("boreal runtime proof slice", () => {
       agentId: "agent-a",
       purpose: "finish proof slice"
     });
-    expect(reserved.status).toBe("reserved");
+    expect(reserved.status).toBe("in_progress");
 
     await expect(
       runtime.reserveWork({
@@ -222,7 +222,7 @@ describe("boreal runtime proof slice", () => {
       forceReason: "coordinating an import repair"
     });
 
-    expect(forced.status).toBe("reserved");
+    expect(forced.status).toBe("in_progress");
   });
 
   it("atomically claims the next blocker-valid ready work by label and priority", async () => {
@@ -254,7 +254,7 @@ describe("boreal runtime proof slice", () => {
       purpose: "start next slice"
     });
     expect(claimed?.work.meta.id).toBe(high.meta.id);
-    expect(claimed?.work.status).toBe("reserved");
+    expect(claimed?.work.status).toBe("in_progress");
     expect(claimed?.reservation.status).toBe("active");
     expect(claimed?.reservation.workId).toBe(high.meta.id);
 
@@ -375,7 +375,7 @@ describe("boreal runtime proof slice", () => {
       verifications: await reader.listVerificationsForSubject(work.meta.id),
       reservations: await reader.listReservationsForWork(work.meta.id)
     }));
-    expect(afterFailedFinish.work?.status).toBe("reserved");
+    expect(afterFailedFinish.work?.status).toBe("in_progress");
     expect(afterFailedFinish.evidence).toHaveLength(0);
     expect(afterFailedFinish.verifications).toHaveLength(0);
     expect(afterFailedFinish.reservations).toEqual([expect.objectContaining({ status: "active", agentId: "agent-a" })]);

@@ -512,7 +512,7 @@ export const COMMAND_DEFINITIONS: readonly CommandDefinition[] = [
   {
     path: ["agent", "finish"],
     category: "agent",
-    summary: "Finish reserved work with evidence and verification.",
+    summary: "Finish work with an active reservation using evidence and verification.",
     usage:
       "bwrk agent finish <work-id> --summary <text> (--close --reason <text>|--release) [--agent <agent-id>] [--kind command|test|diff|review|artifact|note] [--outcome passed|failed|observed|unknown] [--command <cmd>] [--uri <uri>] [--verdict passed|failed] [--notes <text>] [--json]",
     description:

@@ -84,7 +84,7 @@ export function reserveWork(input: ReserveWorkInput): ReserveWorkResult {
   const work = touchRecord(
     {
       ...input.work,
-      status: "reserved" as const,
+      status: "in_progress" as const,
       reservationId: reservation.meta.id
     },
     input.now,
