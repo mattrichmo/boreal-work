@@ -893,10 +893,10 @@ export const COMMAND_DEFINITIONS: readonly CommandDefinition[] = [
   {
     path: ["vault", "init"],
     category: "vault",
-    summary: "Initialize the repo-local memory vault.",
+    summary: "Initialize the configured memory vault.",
     usage: "bwrk vault init [--json]",
     description:
-      "Creates the canonical memory/ directories, Markdown indexes, and JSONL placeholders for durable Boreal project memory.",
+      "Creates the configured memory vault directories, Markdown indexes, and JSONL placeholders for durable Boreal project memory.",
     flags: [],
     positionals: { label: "arguments", min: 0, max: 0 },
     requiresWorkspace: true,
@@ -905,9 +905,9 @@ export const COMMAND_DEFINITIONS: readonly CommandDefinition[] = [
   {
     path: ["vault", "status"],
     category: "vault",
-    summary: "Inspect the repo-local memory vault.",
+    summary: "Inspect the configured memory vault.",
     usage: "bwrk vault status [--json]",
-    description: "Checks whether the canonical memory/ vault scaffold is present and structurally valid.",
+    description: "Checks whether the configured memory vault scaffold is present and structurally valid.",
     flags: [],
     positionals: { label: "arguments", min: 0, max: 0 },
     requiresWorkspace: true,
@@ -918,7 +918,7 @@ export const COMMAND_DEFINITIONS: readonly CommandDefinition[] = [
     category: "raw",
     summary: "Append a raw source record to the memory vault.",
     usage: "bwrk raw add --title <text> [--uri <uri>] [--kind raw|document|chat|code|artifact] [--summary <text>] [--tag <tag>...] [--json]",
-    description: "Adds an immutable source record to memory/raw/index.jsonl.",
+    description: "Adds an immutable source record to the configured memory vault raw index.",
     flags: [
       flag("title", "value", "Raw source title."),
       flag("uri", "value", "Source URI or local artifact reference."),
@@ -935,7 +935,7 @@ export const COMMAND_DEFINITIONS: readonly CommandDefinition[] = [
     category: "wiki",
     summary: "Create a memory vault wiki page.",
     usage: "bwrk wiki create <title> [--slug <slug>] [--summary <text>] [--source <raw-id>...] [--tag <tag>...] [--json]",
-    description: "Creates a Markdown page under memory/wiki with Boreal frontmatter.",
+    description: "Creates a Markdown page under the configured memory vault wiki directory with Boreal frontmatter.",
     flags: [
       flag("slug", "value", "Page slug. Defaults to a normalized title slug."),
       flag("summary", "value", "Initial page summary."),

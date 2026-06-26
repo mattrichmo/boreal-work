@@ -19,11 +19,11 @@ templates:
 
 ## Purpose
 
-Capture a source-backed assertion that should be reviewable later.
+Capture a source-backed assertion with enough context for later review.
 
 ## When To Use
 
-Use this workflow when the user's request requires capture a source-backed assertion that should be reviewable later. Do not use it for adjacent work when a narrower workflow exists.
+Use this workflow when the user's request requires capturing a source-backed assertion with enough context for later review. Do not use it for adjacent work when a narrower workflow exists.
 
 ## Inputs Required
 

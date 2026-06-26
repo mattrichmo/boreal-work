@@ -879,7 +879,7 @@ JSON `data` contains per-section `imported` and `skipped` counts.
 bwrk vault init [--json]
 ```
 
-Creates the repo-local Boreal memory vault scaffold under `memory/`. The scaffold includes `raw/`, `wiki/`, `work/`, `graph/`, `ledgers/`, `dashboards/`, local `memory/.boreal/` runtime folders, Markdown index pages, and JSONL placeholders for raw source, graph, and ledger records. Existing files are not overwritten.
+Creates the configured Boreal memory vault scaffold. Without `.boreal/project.json`, this is the repo-local `memory/` directory. With project setup config, the command uses the configured `memoryRoot`, including explicit child or sibling memory roots. The scaffold includes `raw/`, `wiki/`, `work/`, `graph/`, `ledgers/`, `dashboards/`, local `.boreal/` runtime folders, Markdown index pages, and JSONL placeholders for raw source, graph, and ledger records. Existing files are not overwritten.
 
 JSON `data` contains `ok`, `initialized`, `rootDir`, `schemaVersion`, path status lists, and `createdDirectories`, `existingDirectories`, `createdFiles`, and `existingFiles`.
 
@@ -889,7 +889,7 @@ JSON `data` contains `ok`, `initialized`, `rootDir`, `schemaVersion`, path statu
 bwrk vault status [--json]
 ```
 
-Checks whether the canonical `memory/` vault scaffold exists and whether required paths have the expected file or directory type. It exits `1` when the vault is missing, incomplete, structurally invalid, or has hard content-health failures.
+Checks whether the configured vault scaffold exists and whether required paths have the expected file or directory type. It exits `1` when the vault is missing, incomplete, structurally invalid, or has hard content-health failures.
 
 The status also scans raw source JSONL and wiki pages for malformed raw records, broken wikilinks, missing source references, orphan wiki pages, and stale claim pages.
 
@@ -901,7 +901,7 @@ JSON `data` contains `ok`, `initialized`, `rootDir`, `schemaVersion`, `health`, 
 bwrk raw add --title <text> [--uri <uri>] [--kind raw|document|chat|code|artifact] [--summary <text>] [--tag <tag>...] [--json]
 ```
 
-Appends an immutable raw source record to `memory/raw/index.jsonl`. The memory vault must be initialized first with `bwrk vault init`. Concurrent JSONL appends are serialized with repo-local locks under `memory/.boreal/locks/`.
+Appends an immutable raw source record to the configured vault raw index. The memory vault must be initialized first with `bwrk vault init` or `bwrk init --setup-memory`. Concurrent JSONL appends are serialized with locks under the configured vault `.boreal/locks/` directory.
 
 JSON `data` contains `added`, `indexPath`, and the raw source `record` with stable metadata and a content hash.
 
@@ -911,7 +911,7 @@ JSON `data` contains `added`, `indexPath`, and the raw source `record` with stab
 bwrk wiki create <title> [--slug <slug>] [--summary <text>] [--source <raw-id>...] [--tag <tag>...] [--json]
 ```
 
-Creates a Markdown wiki page under `memory/wiki/` with flat Boreal frontmatter. Existing page slugs are never overwritten. Use `--source` to link the page to raw source records from `memory/raw/index.jsonl`.
+Creates a Markdown wiki page under the configured vault wiki directory with flat Boreal frontmatter. Existing page slugs are never overwritten. Use `--source` to link the page to raw source records from the configured raw index.
 
 JSON `data` contains `created`, `path`, and the created `page` summary.
 

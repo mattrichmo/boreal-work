@@ -1,5 +1,5 @@
 import { mkdir, readFile } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { dirname } from "node:path";
 
 import {
   BorealError,
@@ -25,6 +25,9 @@ import {
   appendVaultLedgerEvent,
   inspectVault,
   listVaultWikiPages,
+  resolveVaultDisplayPath,
+  resolveVaultLayout,
+  vaultDisplayPath,
   type VaultLedgerEvent,
   type WikiPageRecord
 } from "./vault.js";
@@ -177,7 +180,8 @@ async function applyWorkCompaction(context: CliContext, plan: CompactPlan, summa
     });
   }
   const now = nowIso();
-  const archivePath = `memory/work/compacted/${plan.targetId}.md`;
+  const layout = await resolveVaultLayout(context);
+  const archivePath = vaultDisplayPath(layout, `work/compacted/${plan.targetId}.md`);
   const currentWork = await context.store.read((reader) => reader.getWorkItem(plan.targetId as WorkId));
   if (!currentWork) {
     throw new BorealError("BOREAL_NOT_FOUND", "Compaction work target not found", { targetId: plan.targetId });
@@ -232,10 +236,14 @@ async function applyWikiCompaction(context: CliContext, plan: CompactPlan, summa
     throw new BorealError("BOREAL_NOT_FOUND", "Compaction wiki target not found", { targetId: plan.targetId });
   }
   const now = nowIso();
-  const archivePath = `memory/wiki/archive/${page.slug}-${safeTimestamp(now)}.md`;
-  const original = await readFile(join(context.workspaceRoot, page.path), "utf8");
+  const layout = await resolveVaultLayout(context);
+  const archivePath = vaultDisplayPath(layout, `wiki/archive/${page.slug}-${safeTimestamp(now)}.md`);
+  const original = await readFile(await resolveVaultDisplayPath(context, page.path), "utf8");
   await writeArchiveFile(context, archivePath, original);
-  await writeTextFileAtomic(join(context.workspaceRoot, page.path), compactedWikiMarkdown(page, plan, summary, archivePath, now));
+  await writeTextFileAtomic(
+    await resolveVaultDisplayPath(context, page.path),
+    compactedWikiMarkdown(page, plan, summary, archivePath, now)
+  );
   const vaultEvent = await appendVaultLedgerEvent(context, {
     type: "compact.applied",
     subjectType: "wiki",
@@ -400,7 +408,7 @@ async function writeWorkArchive(
 }
 
 async function writeArchiveFile(context: CliContext, relativePath: string, content: string): Promise<void> {
-  const absolutePath = join(context.workspaceRoot, relativePath);
+  const absolutePath = await resolveVaultDisplayPath(context, relativePath);
   await mkdir(dirname(absolutePath), { recursive: true });
   await writeTextFileAtomic(absolutePath, content);
 }

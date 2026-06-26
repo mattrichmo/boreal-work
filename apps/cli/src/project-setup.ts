@@ -3,14 +3,14 @@ import { lstat, mkdir, readFile } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { createInterface } from "node:readline/promises";
 
-import { BorealError, assertPathInside, nowIso, safeParseJson } from "@boreal/core";
+import { BorealError, assertPathInside, assertRealPathInside, nowIso, safeParseJson } from "@boreal/core";
 import { writeTextFileAtomic } from "@boreal/storage";
 
 import { flagValue, flagValues, hasFlag, type ParsedArgs } from "./args.js";
 import type { CliContext } from "./context.js";
-import { VAULT_SCHEMA_VERSION } from "./vault.js";
 
 export const PROJECT_SETUP_SCHEMA_VERSION = "boreal.project-setup.v1";
+const VAULT_SCHEMA_VERSION = "boreal.vault.v1";
 
 export type MemoryLayout = "in-repo" | "child" | "sibling";
 export type MemoryGitMode = "shared" | "separate";
@@ -106,6 +106,14 @@ export async function maybeConfigureProjectSetup(
   return applyProjectSetup(input);
 }
 
+export async function readProjectSetupConfig(projectRoot: string): Promise<ProjectSetupConfig | undefined> {
+  const config = await readExistingConfig(join(projectRoot, ".boreal", "project.json"));
+  if (config) {
+    await validateProjectSetupInput(config);
+  }
+  return config;
+}
+
 function shouldConfigureProjectSetup(args: ParsedArgs): boolean {
   return (
     hasFlag(args, "setup-memory") ||
@@ -169,7 +177,7 @@ async function promptProjectSetupInput(context: CliContext, args: ParsedArgs): P
 }
 
 async function applyProjectSetup(input: ProjectSetupInput): Promise<ProjectSetupResult> {
-  validateProjectSetupInput(input);
+  await validateProjectSetupInput(input);
   const now = nowIso();
   const configPath = join(input.projectRoot, ".boreal", "project.json");
   const existingConfig = await readExistingConfig(configPath);
@@ -213,9 +221,10 @@ async function applyProjectSetup(input: ProjectSetupInput): Promise<ProjectSetup
   return { configured: true, configPath, config, createdDirectories, existingDirectories, createdFiles, existingFiles };
 }
 
-function validateProjectSetupInput(input: ProjectSetupInput): void {
+async function validateProjectSetupInput(input: ProjectSetupInput): Promise<void> {
   if (input.memoryLayout === "in-repo") {
     assertPathInside(input.projectRoot, input.memoryRoot);
+    await assertRealPathInside(input.projectRoot, input.memoryRoot);
   }
   if (input.memoryLayout === "child" && dirname(input.memoryRoot) !== input.projectRoot) {
     throw new BorealError("BOREAL_INVALID_INPUT", "--memory-layout child requires --memory-root to be a direct child of the project root", {
@@ -231,6 +240,7 @@ function validateProjectSetupInput(input: ProjectSetupInput): void {
   }
   if (input.memoryLayout !== "sibling") {
     assertPathInside(input.projectRoot, input.memoryRoot);
+    await assertRealPathInside(input.projectRoot, input.memoryRoot);
   }
   if (input.installRoot === input.memoryRoot || input.installRoot.startsWith(`${input.memoryRoot}/`)) {
     throw new BorealError("BOREAL_INVALID_INPUT", "--install-root cannot be inside the memory root");

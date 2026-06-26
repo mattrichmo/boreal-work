@@ -1,11 +1,12 @@
 import { existsSync } from "node:fs";
 import { mkdir, readFile, readdir, stat } from "node:fs/promises";
-import { basename, join } from "node:path";
+import { basename, isAbsolute, join, relative, resolve } from "node:path";
 
 import { BorealError, hashContent, normalizeLabels, normalizeMachineString, nowIso, randomId, safeParseJson } from "@boreal/core";
 import { normalizeFileLockOptions, withFileLock, writeTextFileAtomic } from "@boreal/storage";
 
 import type { CliContext } from "./context.js";
+import { readProjectSetupConfig } from "./project-setup.js";
 
 export const VAULT_SCHEMA_VERSION = "boreal.vault.v1";
 
@@ -27,6 +28,11 @@ export interface VaultStatusResult {
   readonly missingDirectories: readonly string[];
   readonly missingFiles: readonly string[];
   readonly invalidPaths: readonly VaultPathStatus[];
+}
+
+export interface VaultLayout {
+  readonly rootDir: string;
+  readonly displayRoot: string;
 }
 
 export interface VaultInitResult extends VaultStatusResult {
@@ -160,61 +166,62 @@ export interface VaultLedgerEvent {
 const VAULT_JSONL_LOCK_OPTIONS = normalizeFileLockOptions();
 
 const REQUIRED_DIRECTORIES = [
-  "memory",
-  "memory/raw",
-  "memory/wiki",
-  "memory/work",
-  "memory/graph",
-  "memory/ledgers",
-  "memory/dashboards",
-  "memory/.boreal",
-  "memory/.boreal/db",
-  "memory/.boreal/cache",
-  "memory/.boreal/locks",
-  "memory/.boreal/tmp",
-  "memory/.boreal/results"
+  ".",
+  "raw",
+  "wiki",
+  "work",
+  "graph",
+  "ledgers",
+  "dashboards",
+  ".boreal",
+  ".boreal/db",
+  ".boreal/cache",
+  ".boreal/locks",
+  ".boreal/tmp",
+  ".boreal/results"
 ] as const;
 
 const REQUIRED_FILES = [
   {
-    path: "memory/index.md",
+    path: "index.md",
     content: `---\nkind: boreal-vault-index\nschemaVersion: ${VAULT_SCHEMA_VERSION}\n---\n\n# Boreal Memory Vault\n\nThis directory is canonical project memory for Boreal.\n\n`
   },
   {
-    path: "memory/wiki/index.md",
+    path: "wiki/index.md",
     content: `---\nkind: boreal-wiki-index\nschemaVersion: ${VAULT_SCHEMA_VERSION}\n---\n\n# Wiki\n\nStable project knowledge pages live here.\n\n`
   },
   {
-    path: "memory/work/index.md",
+    path: "work/index.md",
     content: `---\nkind: boreal-work-index\nschemaVersion: ${VAULT_SCHEMA_VERSION}\n---\n\n# Work Memory\n\nDurable work summaries and sprint notes live here.\n\n`
   },
   {
-    path: "memory/dashboards/Work Queue.md",
+    path: "dashboards/Work Queue.md",
     content: `---\nkind: boreal-dashboard\nschemaVersion: ${VAULT_SCHEMA_VERSION}\n---\n\n# Work Queue\n\nThis page is reserved for generated or curated work queue summaries.\n\n`
   },
   {
-    path: "memory/.boreal/README.md",
+    path: ".boreal/README.md",
     content: "# Boreal Local Memory Runtime\n\nGenerated local memory cache, lock, and result files live under this directory. Most subdirectories are ignored by Git.\n"
   },
   {
-    path: "memory/raw/index.jsonl",
+    path: "raw/index.jsonl",
     content: ""
   },
   {
-    path: "memory/graph/relationships.jsonl",
+    path: "graph/relationships.jsonl",
     content: ""
   },
   {
-    path: "memory/ledgers/events.jsonl",
+    path: "ledgers/events.jsonl",
     content: ""
   },
   {
-    path: "memory/ledgers/deletions.jsonl",
+    path: "ledgers/deletions.jsonl",
     content: ""
   }
 ] as const;
 
 export async function initVault(context: CliContext): Promise<VaultInitResult> {
+  const layout = await resolveVaultLayout(context);
   const before = await inspectVault(context);
   if (before.invalidPaths.length > 0) {
     throw new BorealError("BOREAL_CONFLICT", "Cannot initialize Boreal vault over paths with the wrong type", {
@@ -225,25 +232,27 @@ export async function initVault(context: CliContext): Promise<VaultInitResult> {
   const createdDirectories: string[] = [];
   const existingDirectories: string[] = [];
   for (const relativePath of REQUIRED_DIRECTORIES) {
-    const absolutePath = join(context.workspaceRoot, relativePath);
+    const absolutePath = vaultPath(layout, relativePath);
+    const displayPath = vaultDisplayPath(layout, relativePath);
     if (existsSync(absolutePath)) {
-      existingDirectories.push(relativePath);
+      existingDirectories.push(displayPath);
       continue;
     }
     await mkdir(absolutePath, { recursive: true });
-    createdDirectories.push(relativePath);
+    createdDirectories.push(displayPath);
   }
 
   const createdFiles: string[] = [];
   const existingFiles: string[] = [];
   for (const file of REQUIRED_FILES) {
-    const absolutePath = join(context.workspaceRoot, file.path);
+    const absolutePath = vaultPath(layout, file.path);
+    const displayPath = vaultDisplayPath(layout, file.path);
     if (existsSync(absolutePath)) {
-      existingFiles.push(file.path);
+      existingFiles.push(displayPath);
       continue;
     }
     await writeTextFileAtomic(absolutePath, file.content);
-    createdFiles.push(file.path);
+    createdFiles.push(displayPath);
   }
 
   return {
@@ -277,7 +286,7 @@ export async function addRawSource(context: CliContext, input: RawAddInput): Pro
     ...baseRecord,
     contentHash: hashContent(baseRecord)
   };
-  const indexPath = await appendVaultJsonlRecord(context, "memory/raw/index.jsonl", "raw-index", record);
+  const indexPath = await appendVaultJsonlRecord(context, "raw/index.jsonl", "raw-index", record);
   return {
     added: true,
     indexPath,
@@ -286,21 +295,23 @@ export async function addRawSource(context: CliContext, input: RawAddInput): Pro
 }
 
 export async function createWikiPage(context: CliContext, input: WikiCreateInput): Promise<WikiCreateResult> {
-  await requireInitializedVault(context);
+  const layout = await requireInitializedVault(context);
   const title = normalizeMachineString(input.title, "wiki title");
   const slug = normalizeWikiSlug(input.slug ?? title);
   const summary = input.summary ? normalizeMachineString(input.summary, "wiki summary") : undefined;
   const sourceRefs = [...new Set((input.sourceRefs ?? []).map((sourceRef) => normalizeMachineString(sourceRef, "source ref")))];
   const tags = normalizeLabels(input.tags ?? []);
-  const path = join(context.workspaceRoot, "memory/wiki", `${slug}.md`);
+  const vaultRelativePath = `wiki/${slug}.md`;
+  const path = vaultPath(layout, vaultRelativePath);
+  const displayPath = vaultDisplayPath(layout, vaultRelativePath);
   if (existsSync(path)) {
-    throw new BorealError("BOREAL_CONFLICT", "Wiki page already exists", { path: `memory/wiki/${slug}.md`, slug });
+    throw new BorealError("BOREAL_CONFLICT", "Wiki page already exists", { path: displayPath, slug });
   }
   const page = {
     id: randomId("page"),
     slug,
     title,
-    path: `memory/wiki/${slug}.md`,
+    path: displayPath,
     sourceRefs,
     links: [] as readonly string[],
     claimStatus: undefined
@@ -314,10 +325,11 @@ export async function createWikiPage(context: CliContext, input: WikiCreateInput
 }
 
 export async function inspectVault(context: CliContext): Promise<VaultStatusResult> {
+  const layout = await resolveVaultLayout(context);
   const requiredDirectories = await Promise.all(
-    REQUIRED_DIRECTORIES.map((relativePath) => pathStatus(context, relativePath, "directory"))
+    REQUIRED_DIRECTORIES.map((relativePath) => pathStatus(layout, relativePath, "directory"))
   );
-  const requiredFiles = await Promise.all(REQUIRED_FILES.map((file) => pathStatus(context, file.path, "file")));
+  const requiredFiles = await Promise.all(REQUIRED_FILES.map((file) => pathStatus(layout, file.path, "file")));
   const missingDirectories = requiredDirectories.filter((entry) => !entry.exists).map((entry) => entry.path);
   const missingFiles = requiredFiles.filter((entry) => !entry.exists).map((entry) => entry.path);
   const invalidPaths = [...requiredDirectories, ...requiredFiles].filter((entry) => entry.exists && !entry.valid);
@@ -326,7 +338,7 @@ export async function inspectVault(context: CliContext): Promise<VaultStatusResu
   return {
     ok: initialized && health.ok,
     initialized,
-    rootDir: join(context.workspaceRoot, "memory"),
+    rootDir: layout.rootDir,
     schemaVersion: VAULT_SCHEMA_VERSION,
     health,
     requiredDirectories,
@@ -368,8 +380,39 @@ export async function appendVaultLedgerEvent(context: CliContext, input: VaultLe
     ...baseRecord,
     contentHash: hashContent(baseRecord)
   };
-  await appendVaultJsonlRecord(context, "memory/ledgers/events.jsonl", "ledger-events", record);
+  await appendVaultJsonlRecord(context, "ledgers/events.jsonl", "ledger-events", record);
   return record;
+}
+
+export async function resolveVaultLayout(context: CliContext): Promise<VaultLayout> {
+  const config = await readProjectSetupConfig(context.workspaceRoot);
+  const rootDir = resolve(config?.memoryRoot ?? join(context.workspaceRoot, "memory"));
+  return {
+    rootDir,
+    displayRoot: vaultDisplayRoot(context.workspaceRoot, rootDir)
+  };
+}
+
+export function vaultPath(layout: VaultLayout, ...parts: readonly string[]): string {
+  return resolve(layout.rootDir, ...parts);
+}
+
+export function vaultDisplayPath(layout: VaultLayout, relativePath: string): string {
+  return relativePath === "." ? layout.displayRoot : join(layout.displayRoot, relativePath);
+}
+
+export async function resolveVaultDisplayPath(context: CliContext, path: string): Promise<string> {
+  if (isAbsolute(path)) {
+    return resolve(path);
+  }
+  const layout = await resolveVaultLayout(context);
+  if (path === layout.displayRoot) {
+    return layout.rootDir;
+  }
+  if (path.startsWith(`${layout.displayRoot}/`)) {
+    return vaultPath(layout, path.slice(layout.displayRoot.length + 1));
+  }
+  return resolve(context.workspaceRoot, path);
 }
 
 async function appendVaultJsonlRecord(
@@ -378,8 +421,9 @@ async function appendVaultJsonlRecord(
   lockName: string,
   record: unknown
 ): Promise<string> {
-  const path = join(context.workspaceRoot, relativePath);
-  const lockDir = join(context.workspaceRoot, "memory/.boreal/locks", `${lockName}.lock`);
+  const layout = await resolveVaultLayout(context);
+  const path = vaultPath(layout, relativePath);
+  const lockDir = vaultPath(layout, ".boreal/locks", `${lockName}.lock`);
   await withFileLock(lockDir, VAULT_JSONL_LOCK_OPTIONS, async () => {
     const existing = await readTextIfExists(path);
     const prefix = existing && !existing.endsWith("\n") ? `${existing}\n` : existing;
@@ -389,15 +433,16 @@ async function appendVaultJsonlRecord(
 }
 
 async function pathStatus(
-  context: CliContext,
+  layout: VaultLayout,
   relativePath: string,
   kind: "directory" | "file"
 ): Promise<VaultPathStatus> {
-  const absolutePath = join(context.workspaceRoot, relativePath);
+  const absolutePath = vaultPath(layout, relativePath);
+  const displayPath = vaultDisplayPath(layout, relativePath);
   try {
     const info = await stat(absolutePath);
     return {
-      path: relativePath,
+      path: displayPath,
       kind,
       exists: true,
       valid: kind === "directory" ? info.isDirectory() : info.isFile()
@@ -405,7 +450,7 @@ async function pathStatus(
   } catch (error) {
     if (isNodeError(error) && error.code === "ENOENT") {
       return {
-        path: relativePath,
+        path: displayPath,
         kind,
         exists: false,
         valid: false
@@ -413,7 +458,7 @@ async function pathStatus(
     }
     if (isNodeError(error) && error.code === "ENOTDIR") {
       return {
-        path: relativePath,
+        path: displayPath,
         kind,
         exists: true,
         valid: false
@@ -423,13 +468,14 @@ async function pathStatus(
   }
 }
 
-async function requireInitializedVault(context: CliContext): Promise<void> {
+async function requireInitializedVault(context: CliContext): Promise<VaultLayout> {
   const status = await inspectVault(context);
   if (!status.initialized || status.invalidPaths.length > 0) {
     throw new BorealError("BOREAL_INVALID_INPUT", "Boreal memory vault is not initialized; run `bwrk vault init`", {
       status
     });
   }
+  return resolveVaultLayout(context);
 }
 
 async function inspectVaultHealth(context: CliContext): Promise<VaultHealthResult> {
@@ -460,7 +506,7 @@ async function inspectVaultHealth(context: CliContext): Promise<VaultHealthResul
     .filter((page) => !incoming.has(page.slug))
     .map((page) => page.path);
   const staleClaims = pages.filter((page) => page.claimStatus === "stale").map((page) => page.path);
-  const missingArchiveRefs = missingArchiveRefsForLedger(context, ledger.records);
+  const missingArchiveRefs = await missingArchiveRefsForLedger(context, ledger.records);
   const missingMergeRefs = missingMergeRefsForLedger(ledger.records, raw.records, pages);
   return {
     ok:
@@ -489,7 +535,9 @@ async function readRawSources(context: CliContext): Promise<{
   readonly records: readonly RawSourceRecord[];
   readonly malformed: readonly VaultMalformedRawRecord[];
 }> {
-  const indexPath = join(context.workspaceRoot, "memory/raw/index.jsonl");
+  const layout = await resolveVaultLayout(context);
+  const indexPath = vaultPath(layout, "raw/index.jsonl");
+  const displayPath = vaultDisplayPath(layout, "raw/index.jsonl");
   const text = await readTextIfExists(indexPath);
   const records: RawSourceRecord[] = [];
   const malformed: VaultMalformedRawRecord[] = [];
@@ -500,7 +548,7 @@ async function readRawSources(context: CliContext): Promise<{
     try {
       const parsed = safeParseJson(line, {
         schemaName: VAULT_SCHEMA_VERSION,
-        path: `memory/raw/index.jsonl:${index + 1}`,
+        path: `${displayPath}:${index + 1}`,
         expectedObject: true
       });
       if (isRawSourceRecord(parsed)) {
@@ -519,7 +567,9 @@ async function readVaultLedgerEvents(context: CliContext): Promise<{
   readonly records: readonly VaultLedgerEvent[];
   readonly malformed: readonly VaultMalformedLedgerEvent[];
 }> {
-  const ledgerPath = join(context.workspaceRoot, "memory/ledgers/events.jsonl");
+  const layout = await resolveVaultLayout(context);
+  const ledgerPath = vaultPath(layout, "ledgers/events.jsonl");
+  const displayPath = vaultDisplayPath(layout, "ledgers/events.jsonl");
   const text = await readTextIfExists(ledgerPath);
   const records: VaultLedgerEvent[] = [];
   const malformed: VaultMalformedLedgerEvent[] = [];
@@ -530,7 +580,7 @@ async function readVaultLedgerEvents(context: CliContext): Promise<{
     try {
       const parsed = safeParseJson(line, {
         schemaName: VAULT_SCHEMA_VERSION,
-        path: `memory/ledgers/events.jsonl:${index + 1}`,
+        path: `${displayPath}:${index + 1}`,
         expectedObject: true
       });
       if (!isVaultLedgerEvent(parsed)) {
@@ -549,37 +599,35 @@ async function readVaultLedgerEvents(context: CliContext): Promise<{
   return { records, malformed };
 }
 
-function missingArchiveRefsForLedger(
+async function missingArchiveRefsForLedger(
   context: CliContext,
   events: readonly VaultLedgerEvent[]
-): readonly VaultMissingArchiveRef[] {
-  return events.flatMap((event) => {
+): Promise<readonly VaultMissingArchiveRef[]> {
+  const missingRefs: VaultMissingArchiveRef[] = [];
+  for (const event of events) {
     if (event.type !== "compact.applied") {
-      return [];
+      continue;
     }
     const archivePath = stringPayloadValue(event.payload, "archivePath");
     if (!archivePath) {
-      return [
-        {
-          eventId: event.id,
-          subjectType: event.subjectType,
-          subjectId: event.subjectId,
-          archivePath: ""
-        }
-      ];
+      missingRefs.push({
+        eventId: event.id,
+        subjectType: event.subjectType,
+        subjectId: event.subjectId,
+        archivePath: ""
+      });
+      continue;
     }
-    if (existsSync(join(context.workspaceRoot, archivePath))) {
-      return [];
-    }
-    return [
-      {
+    if (!existsSync(await resolveVaultDisplayPath(context, archivePath))) {
+      missingRefs.push({
         eventId: event.id,
         subjectType: event.subjectType,
         subjectId: event.subjectId,
         archivePath
-      }
-    ];
-  });
+      });
+    }
+  }
+  return missingRefs;
 }
 
 function missingMergeRefsForLedger(
@@ -609,26 +657,28 @@ function missingMergeRefsForLedger(
 }
 
 async function readWikiPages(context: CliContext): Promise<readonly WikiPageRecord[]> {
-  const wikiDir = join(context.workspaceRoot, "memory/wiki");
+  const layout = await resolveVaultLayout(context);
+  const wikiDir = vaultPath(layout, "wiki");
   const entries = await readdir(wikiDir, { withFileTypes: true });
   return Promise.all(
     entries
       .filter((entry) => entry.isFile() && entry.name.endsWith(".md"))
       .sort((left, right) => left.name.localeCompare(right.name))
-      .map(async (entry) => readWikiPage(context, entry.name))
+      .map(async (entry) => readWikiPage(layout, entry.name))
   );
 }
 
-async function readWikiPage(context: CliContext, fileName: string): Promise<WikiPageRecord> {
-  const relativePath = `memory/wiki/${fileName}`;
-  const text = await readFile(join(context.workspaceRoot, relativePath), "utf8");
+async function readWikiPage(layout: VaultLayout, fileName: string): Promise<WikiPageRecord> {
+  const relativePath = `wiki/${fileName}`;
+  const displayPath = vaultDisplayPath(layout, relativePath);
+  const text = await readFile(vaultPath(layout, relativePath), "utf8");
   const frontmatter = parseFrontmatter(text);
   const slug = normalizeWikiSlug(frontmatter.slug ?? basename(fileName, ".md"));
   return {
     id: frontmatter.id ?? "",
     slug,
     title: frontmatter.title ?? titleFromSlug(slug),
-    path: relativePath,
+    path: displayPath,
     sourceRefs: frontmatter.source_refs ?? [],
     links: extractWikiLinks(text),
     claimStatus: frontmatter.claim_status,
@@ -874,4 +924,15 @@ function unquoteYamlScalar(value: string): string {
 
 function isNodeError(error: unknown): error is NodeJS.ErrnoException {
   return typeof error === "object" && error !== null && "code" in error;
+}
+
+function vaultDisplayRoot(workspaceRoot: string, rootDir: string): string {
+  const relation = relative(workspaceRoot, rootDir);
+  if (relation === "") {
+    return basename(rootDir);
+  }
+  if (!relation.startsWith("..") && !isAbsolute(relation)) {
+    return relation;
+  }
+  return rootDir;
 }

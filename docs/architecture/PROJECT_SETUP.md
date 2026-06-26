@@ -13,6 +13,12 @@ Boreal setup has three roots:
 - Sibling memory repo: `../<project>-memory` with explicit config.
 - Folder-scoped skills: install generated skills under the folder where agent sessions are opened.
 
+## Setup Config
+
+`bwrk init --setup-memory` writes `.boreal/project.json` with explicit absolute `projectRoot`, `memoryRoot`, and `installRoot` values. Vault commands resolve this file before touching memory state. Without the config, vault commands use the repo-local default `<project>/memory`.
+
+For in-repo and child memory layouts, setup rejects path escapes after symlink resolution. Sibling memory roots are allowed only when `memoryLayout` is `sibling` and the memory root shares the project root parent.
+
 ## No-Leak Rules
 
 - Init and install must use explicit project, memory, and install roots.
@@ -22,4 +28,4 @@ Boreal setup has three roots:
 
 ## Init Direction
 
-`bwrk init --interactive` should ask for project root, memory layout, separate Git preference, install root, target agents, and folder-scope. Non-interactive flags should provide the same data for automation.
+`bwrk init --interactive` asks for project root, memory layout, separate Git preference, install root, target agents, and folder-scope. Non-interactive flags provide the same data for automation.

@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -292,6 +292,81 @@ describe("bwrk cli", () => {
     expect(mismatched.exitCode).toBe(2);
     expect(error.code).toBe("BOREAL_INVALID_INPUT");
     expect(error.message).toContain("--memory-layout child");
+
+    const outsideRoot = await makeTempWorkspace();
+    const linkedRoot = join(rootDir, "linked-out");
+    await symlink(outsideRoot, linkedRoot, "dir");
+    const symlinkEscape = await runCli(rootDir, [
+      "init",
+      "--setup-memory",
+      "--memory-root",
+      "linked-out/memory",
+      "--memory-layout",
+      "in-repo",
+      "--json"
+    ]);
+    const symlinkError = parseJson<{ readonly code: string; readonly message: string }>(symlinkEscape.stderr);
+    expect(symlinkEscape.exitCode).toBe(2);
+    expect(symlinkError.code).toBe("BOREAL_INVALID_INPUT");
+    expect(symlinkError.message).toContain("Path escapes Boreal workspace");
+  });
+
+  it("uses configured sibling memory roots for vault, raw, and wiki commands", async () => {
+    const rootDir = await makeTempWorkspace();
+    const siblingRoot = join(rootDir, "..", `${rootDir.split("/").at(-1) ?? "workspace"}-memory`);
+    tempDirs.push(siblingRoot);
+    await runCli(rootDir, [
+      "init",
+      "--setup-memory",
+      "--memory-root",
+      siblingRoot,
+      "--memory-layout",
+      "sibling",
+      "--json"
+    ]);
+
+    const raw = await runCli(rootDir, [
+      "raw",
+      "add",
+      "--title",
+      "Sibling source",
+      "--uri",
+      "file://sibling.md",
+      "--json"
+    ]);
+    const rawPayload = parseData<{ readonly indexPath: string; readonly record: { readonly id: string } }>(raw.stdout);
+    const wiki = await runCli(rootDir, [
+      "wiki",
+      "create",
+      "Sibling Wiki",
+      "--source",
+      rawPayload.record.id,
+      "--json"
+    ]);
+    const wikiPayload = parseData<{ readonly path: string; readonly page: { readonly path: string } }>(wiki.stdout);
+    const status = await runCli(rootDir, ["vault", "status", "--json"]);
+    const statusPayload = parseData<{
+      readonly initialized: boolean;
+      readonly rootDir: string;
+      readonly health: { readonly rawSourceCount: number; readonly wikiPageCount: number };
+    }>(status.stdout);
+
+    expect(raw.exitCode).toBe(0);
+    expect(rawPayload.indexPath).toBe(join(siblingRoot, "raw/index.jsonl"));
+    expect(await readFile(join(siblingRoot, "raw/index.jsonl"), "utf8")).toContain(rawPayload.record.id);
+    expect(await fileMissing(join(rootDir, "memory/raw/index.jsonl"))).toBe(true);
+    expect(wiki.exitCode).toBe(0);
+    expect(wikiPayload.path).toBe(join(siblingRoot, "wiki/sibling-wiki.md"));
+    expect(wikiPayload.page.path).toBe(join(siblingRoot, "wiki/sibling-wiki.md"));
+    expect(await readFile(join(siblingRoot, "wiki/sibling-wiki.md"), "utf8")).toContain("Sibling Wiki");
+    expect(status.exitCode).toBe(0);
+    expect(statusPayload).toEqual(
+      expect.objectContaining({
+        initialized: true,
+        rootDir: siblingRoot,
+        health: expect.objectContaining({ rawSourceCount: 1, wikiPageCount: 1 })
+      })
+    );
   });
 
   it("adds raw vault sources, creates wiki pages, and reports vault health", async () => {
@@ -4157,6 +4232,18 @@ async function makeTempWorkspace(): Promise<string> {
   return dir;
 }
 
+async function fileMissing(path: string): Promise<boolean> {
+  try {
+    await stat(path);
+    return false;
+  } catch (error) {
+    if (isNodeError(error) && error.code === "ENOENT") {
+      return true;
+    }
+    throw error;
+  }
+}
+
 async function gitAvailable(cwd: string): Promise<boolean> {
   try {
     await runGit(cwd, ["--version"]);
@@ -4320,4 +4407,8 @@ function emptyFileStoreState(overrides: Record<string, readonly unknown[]> = {})
     contextPacks: [],
     ...overrides
   };
+}
+
+function isNodeError(error: unknown): error is NodeJS.ErrnoException {
+  return typeof error === "object" && error !== null && "code" in error;
 }
