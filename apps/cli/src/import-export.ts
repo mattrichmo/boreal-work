@@ -1,4 +1,4 @@
-import { mkdir, readdir, stat } from "node:fs/promises";
+import { mkdir, readFile, readdir, stat } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
 
 import {
@@ -8,6 +8,7 @@ import {
   canonicalJson,
   hashContent,
   nowIso,
+  parseJsonlStrict,
   readJsonFile,
   runtimeSnapshotSchemaIssues,
   withContentHash,
@@ -42,6 +43,42 @@ export interface MarkdownExportResult {
   readonly outDir: string;
   readonly files: readonly string[];
   readonly recordCounts: Record<SnapshotSection, number>;
+}
+
+export interface LedgerManifestFile {
+  readonly section: SnapshotSection;
+  readonly path: string;
+  readonly count: number;
+  readonly contentHash: string;
+}
+
+export interface LedgerManifest {
+  readonly schemaVersion: "boreal.ledgers.v1";
+  readonly exportedAt: string;
+  readonly workspaceRoot: string;
+  readonly contentHash: string;
+  readonly recordCounts: Record<SnapshotSection, number>;
+  readonly files: Record<SnapshotSection, LedgerManifestFile>;
+}
+
+export interface LedgerExportResult {
+  readonly outDir: string;
+  readonly manifestPath: string;
+  readonly contentHash: string;
+  readonly recordCounts: Record<SnapshotSection, number>;
+  readonly files: readonly LedgerManifestFile[];
+}
+
+export interface LedgerStatusResult {
+  readonly ok: boolean;
+  readonly path: string;
+  readonly exists: boolean;
+  readonly stale: boolean;
+  readonly expectedContentHash: string;
+  readonly contentHash?: string;
+  readonly recordCounts?: Record<SnapshotSection, number>;
+  readonly files?: readonly LedgerManifestFile[];
+  readonly error?: string;
 }
 
 export interface ImportResult {
@@ -97,6 +134,22 @@ const SNAPSHOT_SECTIONS: readonly SnapshotSection[] = [
   "contextPacks"
 ];
 
+const LEDGER_SCHEMA_VERSION = "boreal.ledgers.v1";
+const LEDGER_MANIFEST_FILE = "manifest.json";
+const LEDGER_FILES: Record<SnapshotSection, string> = {
+  workItems: "work-items.jsonl",
+  evidence: "evidence.jsonl",
+  verifications: "verifications.jsonl",
+  knowledgeSources: "knowledge-sources.jsonl",
+  claims: "claims.jsonl",
+  decisions: "decisions.jsonl",
+  graphEdges: "graph-edges.jsonl",
+  reservations: "reservations.jsonl",
+  events: "events.jsonl",
+  projections: "projections.jsonl",
+  contextPacks: "context-packs.jsonl"
+};
+
 export async function buildExportDocument(context: CliContext): Promise<ExportDocument> {
   const state = await context.store.read((reader) => readSnapshot(reader));
   const contentHash = hashContent(state);
@@ -145,6 +198,43 @@ export async function exportMarkdown(context: CliContext, outDir: string | undef
   };
 }
 
+export async function exportLedgers(context: CliContext, outDir: string | undefined): Promise<LedgerExportResult> {
+  const document = await buildExportDocument(context);
+  const resolvedDir = await resolveWorkspacePath(context, outDir ?? ".boreal/ledgers");
+  await mkdir(resolvedDir, { recursive: true });
+
+  const ledgerState = canonicalLedgerSnapshot(document.state);
+  const files = Object.fromEntries(
+    await Promise.all(
+      SNAPSHOT_SECTIONS.map(async (section) => {
+        const records = ledgerState[section] as readonly unknown[];
+        const file = ledgerManifestFile(section, records);
+        const path = join(resolvedDir, file.path);
+        const content = records.map((record) => canonicalJson(record)).join("\n");
+        await writeTextFileAtomic(path, content.length > 0 ? `${content}\n` : "");
+        return [section, file];
+      })
+    )
+  ) as Record<SnapshotSection, LedgerManifestFile>;
+  const manifest: LedgerManifest = {
+    schemaVersion: LEDGER_SCHEMA_VERSION,
+    exportedAt: document.exportedAt,
+    workspaceRoot: context.workspaceRoot,
+    contentHash: ledgerContentHash(ledgerState),
+    recordCounts: recordCounts(ledgerState),
+    files
+  };
+  const manifestPath = join(resolvedDir, LEDGER_MANIFEST_FILE);
+  await writeTextFileAtomic(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
+  return {
+    outDir: resolvedDir,
+    manifestPath,
+    contentHash: manifest.contentHash,
+    recordCounts: manifest.recordCounts,
+    files: SNAPSHOT_SECTIONS.map((section) => manifest.files[section])
+  };
+}
+
 export async function importJson(context: CliContext, fromPath: string, options: ImportJsonOptions = {}): Promise<ImportResult> {
   const resolvedPath = await resolveReadablePath(context, fromPath, Boolean(options.allowExternalRead));
   const parsed = await readJsonFile(resolvedPath, {
@@ -154,6 +244,55 @@ export async function importJson(context: CliContext, fromPath: string, options:
   });
   const incoming = parseImportSnapshot(parsed);
   return importSnapshot(context.store, incoming);
+}
+
+export async function importLedgers(
+  context: CliContext,
+  fromDir: string,
+  options: ImportJsonOptions = {}
+): Promise<ImportResult> {
+  const resolvedDir = await resolveReadablePath(context, fromDir, Boolean(options.allowExternalRead));
+  const incoming = (await readLedgerDirectory(resolvedDir)).state;
+  return importSnapshot(context.store, incoming);
+}
+
+export async function ledgerStatus(context: CliContext, dir: string | undefined): Promise<LedgerStatusResult> {
+  const document = await buildExportDocument(context);
+  const expectedContentHash = ledgerContentHash(canonicalLedgerSnapshot(document.state));
+  const resolvedDir = await resolveWorkspacePath(context, dir ?? ".boreal/ledgers");
+  const manifestPath = join(resolvedDir, LEDGER_MANIFEST_FILE);
+
+  try {
+    const { manifest } = await readLedgerDirectory(resolvedDir);
+    return {
+      ok: manifest.contentHash === expectedContentHash,
+      path: manifestPath,
+      exists: true,
+      stale: manifest.contentHash !== expectedContentHash,
+      expectedContentHash,
+      contentHash: manifest.contentHash,
+      recordCounts: manifest.recordCounts,
+      files: SNAPSHOT_SECTIONS.map((section) => manifest.files[section])
+    };
+  } catch (error) {
+    if (isNodeError(error) && error.code === "ENOENT") {
+      return {
+        ok: false,
+        path: manifestPath,
+        exists: false,
+        stale: true,
+        expectedContentHash
+      };
+    }
+    return {
+      ok: false,
+      path: manifestPath,
+      exists: true,
+      stale: true,
+      expectedContentHash,
+      error: error instanceof Error ? error.message : String(error)
+    };
+  }
 }
 
 export async function createSnapshot(context: CliContext, name: string | undefined): Promise<SnapshotCreateResult> {
@@ -246,6 +385,79 @@ async function readSnapshot(reader: BorealReader): Promise<ExportSnapshot> {
   };
 }
 
+async function readLedgerDirectory(dir: string): Promise<{ readonly manifest: LedgerManifest; readonly state: ExportSnapshot }> {
+  const manifestPath = join(dir, LEDGER_MANIFEST_FILE);
+  const manifest = parseLedgerManifest(
+    await readJsonFile(manifestPath, {
+      schemaName: LEDGER_SCHEMA_VERSION,
+      expectedObject: true,
+      maxBytes: 1024 * 1024
+    })
+  );
+  const state = Object.fromEntries(
+    await Promise.all(
+      SNAPSHOT_SECTIONS.map(async (section) => [
+        section,
+        await readLedgerSection(dir, section, manifest.files[section])
+      ])
+    )
+  ) as ExportSnapshot;
+  validateSnapshot(state);
+  const contentHash = ledgerContentHash(canonicalLedgerSnapshot(state));
+  if (contentHash !== manifest.contentHash) {
+    throw new BorealError("BOREAL_INVALID_INPUT", "Ledger manifest content hash does not match JSONL records", {
+      contentHash: manifest.contentHash,
+      expectedHash: contentHash
+    });
+  }
+  return { manifest, state };
+}
+
+async function readLedgerSection(
+  dir: string,
+  section: SnapshotSection,
+  file: LedgerManifestFile
+): Promise<readonly unknown[]> {
+  const path = resolve(dir, file.path);
+  assertPathInside(dir, path);
+  await assertRealPathInside(dir, path);
+  const info = await stat(path);
+  if (!info.isFile()) {
+    throw new BorealError("BOREAL_INVALID_INPUT", "Ledger path must be a regular file", { section, path });
+  }
+  if (info.size > 50 * 1024 * 1024) {
+    throw new BorealError("BOREAL_INVALID_INPUT", "Ledger file exceeds maximum readable size", {
+      section,
+      path,
+      sizeBytes: info.size,
+      maxBytes: 50 * 1024 * 1024
+    });
+  }
+  const records = parseJsonlStrict(await readFile(path, "utf8"), {
+    path,
+    schemaName: `boreal.ledgers.${section}.v1`,
+    expectedObject: true
+  });
+  if (records.length !== file.count) {
+    throw new BorealError("BOREAL_INVALID_INPUT", "Ledger file count does not match manifest", {
+      section,
+      path,
+      count: file.count,
+      actualCount: records.length
+    });
+  }
+  const contentHash = hashContent(records);
+  if (contentHash !== file.contentHash) {
+    throw new BorealError("BOREAL_INVALID_INPUT", "Ledger file content hash does not match manifest", {
+      section,
+      path,
+      contentHash: file.contentHash,
+      expectedHash: contentHash
+    });
+  }
+  return records;
+}
+
 async function importSnapshot(store: BorealStore, incoming: ExportSnapshot): Promise<ImportResult> {
   validateSnapshot(incoming);
   return store.write(async (writer) => {
@@ -255,6 +467,69 @@ async function importSnapshot(store: BorealStore, incoming: ExportSnapshot): Pro
     await writeImportedRecords(writer, incoming, merged.importableIds);
     return { imported: merged.imported, skipped: merged.skipped };
   });
+}
+
+function parseLedgerManifest(value: unknown): LedgerManifest {
+  if (!isRecord(value) || value.schemaVersion !== LEDGER_SCHEMA_VERSION) {
+    throw new BorealError("BOREAL_INVALID_INPUT", "Ledger manifest must be a boreal.ledgers.v1 document");
+  }
+  const filesValue = value.files;
+  if (!isRecord(filesValue)) {
+    throw new BorealError("BOREAL_INVALID_INPUT", "Ledger manifest files must be an object");
+  }
+  const recordCounts = parseSectionCounts(value.recordCounts, "recordCounts");
+  const files = Object.fromEntries(
+    SNAPSHOT_SECTIONS.map((section) => [section, parseLedgerManifestFile(section, filesValue[section])])
+  ) as Record<SnapshotSection, LedgerManifestFile>;
+  for (const section of SNAPSHOT_SECTIONS) {
+    if (recordCounts[section] !== files[section].count) {
+      throw new BorealError("BOREAL_INVALID_INPUT", "Ledger manifest section count does not match file count", {
+        section,
+        count: recordCounts[section],
+        fileCount: files[section].count
+      });
+    }
+  }
+  return {
+    schemaVersion: LEDGER_SCHEMA_VERSION,
+    exportedAt: typeof value.exportedAt === "string" ? value.exportedAt : "",
+    workspaceRoot: typeof value.workspaceRoot === "string" ? value.workspaceRoot : "",
+    contentHash: typeof value.contentHash === "string" ? value.contentHash : "",
+    recordCounts,
+    files
+  };
+}
+
+function parseLedgerManifestFile(section: SnapshotSection, value: unknown): LedgerManifestFile {
+  if (!isRecord(value)) {
+    throw new BorealError("BOREAL_INVALID_INPUT", "Ledger manifest file entry must be an object", { section });
+  }
+  if (value.section !== section) {
+    throw new BorealError("BOREAL_INVALID_INPUT", "Ledger manifest file entry has the wrong section", {
+      section,
+      actualSection: value.section
+    });
+  }
+  if (typeof value.path !== "string" || value.path.length === 0) {
+    throw new BorealError("BOREAL_INVALID_INPUT", "Ledger manifest file entry must include a path", { section });
+  }
+  if (typeof value.count !== "number" || !Number.isInteger(value.count) || value.count < 0) {
+    throw new BorealError("BOREAL_INVALID_INPUT", "Ledger manifest file entry must include a non-negative count", {
+      section,
+      count: value.count
+    });
+  }
+  if (typeof value.contentHash !== "string" || !value.contentHash.startsWith("sha256:")) {
+    throw new BorealError("BOREAL_INVALID_INPUT", "Ledger manifest file entry must include a content hash", {
+      section
+    });
+  }
+  return {
+    section,
+    path: value.path,
+    count: value.count,
+    contentHash: value.contentHash
+  };
 }
 
 function parseImportSnapshot(value: unknown): ExportSnapshot {
@@ -665,11 +940,56 @@ function isStringArray(value: FrontmatterValue): value is readonly string[] {
   return Array.isArray(value);
 }
 
+function canonicalLedgerSnapshot(state: ExportSnapshot): ExportSnapshot {
+  return Object.fromEntries(
+    SNAPSHOT_SECTIONS.map((section) => [
+      section,
+      [...(state[section] as readonly unknown[])].sort((left, right) =>
+        (recordId(section, left) ?? "").localeCompare(recordId(section, right) ?? "")
+      )
+    ])
+  ) as unknown as ExportSnapshot;
+}
+
+function ledgerContentHash(state: ExportSnapshot): string {
+  return hashContent({
+    schemaVersion: LEDGER_SCHEMA_VERSION,
+    sections: state
+  });
+}
+
+function ledgerManifestFile(section: SnapshotSection, records: readonly unknown[]): LedgerManifestFile {
+  return {
+    section,
+    path: LEDGER_FILES[section],
+    count: records.length,
+    contentHash: hashContent(records)
+  };
+}
+
 function recordCounts(state: ExportSnapshot): Record<SnapshotSection, number> {
   return Object.fromEntries(SNAPSHOT_SECTIONS.map((section) => [section, state[section].length])) as Record<
     SnapshotSection,
     number
   >;
+}
+
+function parseSectionCounts(value: unknown, label: string): Record<SnapshotSection, number> {
+  if (!isRecord(value)) {
+    throw new BorealError("BOREAL_INVALID_INPUT", `Ledger manifest ${label} must be an object`);
+  }
+  return Object.fromEntries(
+    SNAPSHOT_SECTIONS.map((section) => {
+      const count = value[section];
+      if (typeof count !== "number" || !Number.isInteger(count) || count < 0) {
+        throw new BorealError("BOREAL_INVALID_INPUT", `Ledger manifest ${label} has an invalid count`, {
+          section,
+          count
+        });
+      }
+      return [section, count];
+    })
+  ) as Record<SnapshotSection, number>;
 }
 
 function emptySectionCounts(): Record<SnapshotSection, number> {

@@ -14,6 +14,7 @@ import {
   normalizeLabel,
   normalizeMachineString,
   normalizeSearchQuery,
+  parseJsonlStrict,
   randomId,
   readJsonFile,
   runtimeSnapshotSchemaIssues,
@@ -55,6 +56,27 @@ describe("core hashing and ids", () => {
         details: expect.objectContaining({
           path: "state.json",
           schemaName: "boreal.file-store.v1"
+        })
+      })
+    );
+  });
+
+  it("parses JSONL strictly with line-specific failures", () => {
+    expect(parseJsonlStrict('{"a":1}\n{"b":2}\n', { expectedObject: true })).toEqual([{ a: 1 }, { b: 2 }]);
+    expect(() => parseJsonlStrict('{"a":1}\n\n{"b":2}\n', { path: "records.jsonl" })).toThrow(
+      expect.objectContaining({
+        code: "BOREAL_JSON_PARSE",
+        details: expect.objectContaining({
+          path: "records.jsonl",
+          line: 2
+        })
+      })
+    );
+    expect(() => parseJsonlStrict('{"a":1}\n[]\n', { path: "records.jsonl", expectedObject: true })).toThrow(
+      expect.objectContaining({
+        code: "BOREAL_JSON_PARSE",
+        details: expect.objectContaining({
+          path: "records.jsonl:2"
         })
       })
     );

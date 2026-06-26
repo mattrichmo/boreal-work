@@ -63,9 +63,12 @@ import { asEvidenceId, asWorkId, runDoctor, type Diagnostic } from "./doctor.js"
 import { assertInitialized, createCliContext, ensureWorkspaceDirs, type CliContext } from "./context.js";
 import {
   createSnapshot,
+  exportLedgers,
   exportJson,
   exportMarkdown,
+  importLedgers,
   importJson,
+  ledgerStatus,
   listSnapshots,
   showSnapshot
 } from "./import-export.js";
@@ -355,6 +358,9 @@ export async function runCommand(args: ParsedArgs, output: CliOutput, cwd: strin
         break;
       case "import":
         result = await importCommand(action, context, args, commandOutput, json);
+        break;
+      case "ledger":
+        result = await ledgerCommand(action, context, args, commandOutput, json);
         break;
       case "snapshot":
         result = await snapshotCommand(action, rest, context, args, commandOutput, json);
@@ -1441,6 +1447,10 @@ async function exportCommand(
       output.write(formatRecord(await exportMarkdown(context, flagValue(args, "out")), json));
       return { exitCode: 0 };
     }
+    case "ledgers": {
+      output.write(formatRecord(await exportLedgers(context, flagValue(args, "out")), json));
+      return { exitCode: 0 };
+    }
     default:
       throw new BorealError("BOREAL_INVALID_INPUT", `Unknown export command: ${action ?? ""}`);
   }
@@ -1465,8 +1475,37 @@ async function importCommand(
       );
       return { exitCode: 0 };
     }
+    case "ledgers": {
+      output.write(
+        formatRecord(
+          await importLedgers(context, requiredFlag(args, "from"), {
+            allowExternalRead: hasFlag(args, "allow-external-read")
+          }),
+          json
+        )
+      );
+      return { exitCode: 0 };
+    }
     default:
       throw new BorealError("BOREAL_INVALID_INPUT", `Unknown import command: ${action ?? ""}`);
+  }
+}
+
+async function ledgerCommand(
+  action: string | undefined,
+  context: CliContext,
+  args: ParsedArgs,
+  output: CliOutput,
+  json: boolean
+): Promise<CommandResult> {
+  switch (action) {
+    case "status": {
+      const status = await ledgerStatus(context, flagValue(args, "dir"));
+      output.write(formatRecord(status, json));
+      return { exitCode: status.ok ? 0 : 1 };
+    }
+    default:
+      throw new BorealError("BOREAL_INVALID_INPUT", `Unknown ledger command: ${action ?? ""}`);
   }
 }
 
@@ -2429,6 +2468,6 @@ Usage:
 ${COMMAND_DEFINITIONS.map((definition) => `  ${definition.usage}`).join("\n")}
 
 Help:
-  bwrk help [init|work|dep|evidence|source|claim|decision|context|search|reservation|agent|operation|export|import|snapshot|doctor|lock|commands]
+  bwrk help [init|work|dep|evidence|source|claim|decision|context|search|reservation|agent|operation|export|import|ledger|snapshot|doctor|lock|commands]
 `;
 }

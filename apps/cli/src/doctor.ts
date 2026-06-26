@@ -25,7 +25,7 @@ import { breakStaleFileLock, inspectFileLock } from "@boreal/storage";
 import { deriveReadinessStatus } from "@boreal/work-engine";
 
 import type { CliContext } from "./context.js";
-import { exportDriftDiagnostics } from "./import-export.js";
+import { exportDriftDiagnostics, ledgerStatus } from "./import-export.js";
 import { inspectSearchIndex, searchIndexLockDir, writeSearchIndex } from "./search-cli.js";
 
 export type DiagnosticSeverity = "ok" | "warning" | "error" | "fixed";
@@ -108,11 +108,23 @@ export async function runDoctor(context: CliContext, fix: boolean, strict = fals
         : "Latest snapshot matches current export state or no snapshots exist",
       details: drift
     });
+    const ledgers = await ledgerStatus(context, undefined);
+    diagnostics.push({
+      code: "ledger.export_drift",
+      severity: ledgers.exists && !ledgers.ok ? "warning" : "ok",
+      message: ledgerDriftMessage(ledgers),
+      details: ledgers
+    });
   } else {
     diagnostics.push({
       code: "snapshot.export_drift",
       severity: "warning",
       message: "Skipped snapshot drift check because runtime state failed schema validation"
+    });
+    diagnostics.push({
+      code: "ledger.export_drift",
+      severity: "warning",
+      message: "Skipped ledger drift check because runtime state failed schema validation"
     });
   }
 
@@ -852,6 +864,19 @@ function warningDiagnosticFromList(code: string, label: string, values: readonly
     message: values.length > 0 ? label : `${label}: none`,
     details: values.length > 0 ? values : undefined
   };
+}
+
+function ledgerDriftMessage(status: Awaited<ReturnType<typeof ledgerStatus>>): string {
+  if (!status.exists) {
+    return "No JSONL ledger export exists yet";
+  }
+  if (status.error) {
+    return "JSONL ledger export is invalid";
+  }
+  if (status.stale) {
+    return "JSONL ledger export differs from current runtime state";
+  }
+  return "JSONL ledger export matches current runtime state";
 }
 
 interface MachineStringField {

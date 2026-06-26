@@ -27,6 +27,7 @@ export interface CommandDefinition {
     | "operation"
     | "export"
     | "import"
+    | "ledger"
     | "snapshot"
     | "doctor"
     | "lock"
@@ -700,6 +701,17 @@ export const COMMAND_DEFINITIONS: readonly CommandDefinition[] = [
     supportsJson: true,
   },
   {
+    path: ["export", "ledgers"],
+    category: "export",
+    summary: "Export Git-friendly JSONL ledger files.",
+    usage: "bwrk export ledgers [--out <dir>] [--json]",
+    description: "Writes one JSONL file per runtime section plus a manifest with content hashes.",
+    flags: [flag("out", "value", "Directory to write. Defaults to .boreal/ledgers.")],
+    positionals: { label: "arguments", min: 0, max: 0 },
+    requiresWorkspace: true,
+    supportsJson: true,
+  },
+  {
     path: ["import", "json"],
     category: "import",
     summary: "Import a JSON snapshot.",
@@ -708,6 +720,31 @@ export const COMMAND_DEFINITIONS: readonly CommandDefinition[] = [
       flag("from", "value", "JSON export or file-store state document to import."),
       flag("allow-external-read", "boolean", "Allow importing a file outside the workspace."),
     ],
+    positionals: { label: "arguments", min: 0, max: 0 },
+    requiresWorkspace: true,
+    supportsJson: true,
+  },
+  {
+    path: ["import", "ledgers"],
+    category: "import",
+    summary: "Import JSONL ledger files.",
+    usage: "bwrk import ledgers --from <dir> [--allow-external-read] [--json]",
+    description: "Reads a boreal.ledgers.v1 manifest and section JSONL files, validates hashes and references, then merges records.",
+    flags: [
+      flag("from", "value", "Ledger directory containing manifest.json to import."),
+      flag("allow-external-read", "boolean", "Allow importing a ledger directory outside the workspace."),
+    ],
+    positionals: { label: "arguments", min: 0, max: 0 },
+    requiresWorkspace: true,
+    supportsJson: true,
+  },
+  {
+    path: ["ledger", "status"],
+    category: "ledger",
+    summary: "Compare exported JSONL ledgers with current runtime state.",
+    usage: "bwrk ledger status [--dir <dir>] [--json]",
+    description: "Checks whether a boreal.ledgers.v1 manifest is present, parseable, hash-valid, and current.",
+    flags: [flag("dir", "value", "Ledger directory to inspect. Defaults to .boreal/ledgers.")],
     positionals: { label: "arguments", min: 0, max: 0 },
     requiresWorkspace: true,
     supportsJson: true,
@@ -1295,6 +1332,18 @@ const COMMAND_BEHAVIOR: Readonly<Record<string, CommandBehaviorMetadata>> = {
     humanOutputKind: "record",
     examples: ["bwrk export markdown --out markdown-export --json"],
   }),
+  "export ledgers": commandMetadata("export ledgers", {
+    readOnly: false,
+    destructive: false,
+    writesState: false,
+    writesGeneratedArtifacts: true,
+    requiresFreshIndex: false,
+    concurrencySafe: false,
+    requiresLock: "none",
+    maxResultSizeChars: 150_000,
+    humanOutputKind: "record",
+    examples: ["bwrk export ledgers --json"],
+  }),
   "import json": commandMetadata("import json", {
     readOnly: false,
     destructive: false,
@@ -1306,6 +1355,30 @@ const COMMAND_BEHAVIOR: Readonly<Record<string, CommandBehaviorMetadata>> = {
     maxResultSizeChars: 100_000,
     humanOutputKind: "record",
     examples: ["bwrk import json --from boreal-export.json --json"],
+  }),
+  "import ledgers": commandMetadata("import ledgers", {
+    readOnly: false,
+    destructive: false,
+    writesState: true,
+    writesGeneratedArtifacts: false,
+    requiresFreshIndex: false,
+    concurrencySafe: true,
+    requiresLock: "state",
+    maxResultSizeChars: 100_000,
+    humanOutputKind: "record",
+    examples: ["bwrk import ledgers --from .boreal/ledgers --json"],
+  }),
+  "ledger status": commandMetadata("ledger status", {
+    readOnly: true,
+    destructive: false,
+    writesState: false,
+    writesGeneratedArtifacts: false,
+    requiresFreshIndex: false,
+    concurrencySafe: true,
+    requiresLock: "none",
+    maxResultSizeChars: 100_000,
+    humanOutputKind: "record",
+    examples: ["bwrk ledger status --json"],
   }),
   "snapshot create": commandMetadata("snapshot create", {
     readOnly: false,

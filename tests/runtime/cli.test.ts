@@ -98,7 +98,10 @@ describe("bwrk cli", () => {
       "## `search query`",
       "## `export json`",
       "## `export markdown`",
+      "## `export ledgers`",
       "## `import json`",
+      "## `import ledgers`",
+      "## `ledger status`",
       "## `snapshot create`",
       "## `snapshot list`",
       "## `snapshot show`",
@@ -125,7 +128,7 @@ describe("bwrk cli", () => {
     expect(root.exitCode).toBe(0);
     expect(root.stdout).toContain("bwrk - Boreal Work CLI");
     expect(root.stdout).toContain(
-      "bwrk help [init|work|dep|evidence|source|claim|decision|context|search|reservation|agent|operation|export|import|snapshot|doctor|lock|commands]"
+      "bwrk help [init|work|dep|evidence|source|claim|decision|context|search|reservation|agent|operation|export|import|ledger|snapshot|doctor|lock|commands]"
     );
     expect(work.exitCode).toBe(0);
     expect(work.stdout).toContain("bwrk work create");
@@ -262,7 +265,10 @@ describe("bwrk cli", () => {
         "operation repair",
         "export json",
         "export markdown",
+        "export ledgers",
         "import json",
+        "import ledgers",
+        "ledger status",
         "snapshot create",
         "snapshot list",
         "snapshot show"
@@ -1820,6 +1826,85 @@ describe("bwrk cli", () => {
     expect(workMarkdown).toContain("evidence:\n  - bw_evidence_");
     expect(workMarkdown).toContain("created_at:");
 
+    const ledgers = await runCli(rootDir, ["export", "ledgers", "--json"]);
+    const ledgerPayload = parseData<{
+      readonly outDir: string;
+      readonly manifestPath: string;
+      readonly contentHash: string;
+      readonly recordCounts: { readonly workItems: number; readonly events: number };
+      readonly files: Array<{ readonly section: string; readonly path: string; readonly count: number; readonly contentHash: string }>;
+    }>(ledgers.stdout);
+    expect(ledgers.exitCode).toBe(0);
+    expect(ledgerPayload.outDir).toBe(join(rootDir, ".boreal/ledgers"));
+    expect(ledgerPayload.manifestPath).toBe(join(rootDir, ".boreal/ledgers/manifest.json"));
+    expect(ledgerPayload.contentHash).toMatch(/^sha256:/);
+    expect(ledgerPayload.recordCounts.workItems).toBe(1);
+    expect(ledgerPayload.files).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ section: "workItems", path: "work-items.jsonl", count: 1 }),
+        expect.objectContaining({ section: "events", path: "events.jsonl" })
+      ])
+    );
+    const workLedger = await readFile(join(rootDir, ".boreal/ledgers/work-items.jsonl"), "utf8");
+    expect(workLedger).toContain("\"title\":\"Exportable work\"");
+
+    const freshLedgerStatus = await runCli(rootDir, ["ledger", "status", "--json"]);
+    const freshLedgerPayload = parseData<{ readonly ok: boolean; readonly exists: boolean; readonly stale: boolean }>(
+      freshLedgerStatus.stdout
+    );
+    expect(freshLedgerStatus.exitCode).toBe(0);
+    expect(freshLedgerPayload).toEqual(expect.objectContaining({ ok: true, exists: true, stale: false }));
+
+    const freshDoctor = await runCli(rootDir, ["doctor", "--json"]);
+    const freshDoctorPayload = parseData<{
+      readonly diagnostics: Array<{ readonly code: string; readonly severity: string }>;
+    }>(freshDoctor.stdout);
+    expect(freshDoctorPayload.diagnostics).toEqual(
+      expect.arrayContaining([expect.objectContaining({ code: "ledger.export_drift", severity: "ok" })])
+    );
+
+    const ledgerTargetDir = await makeTempWorkspace();
+    await runCli(ledgerTargetDir, ["init", "--json"]);
+    const blockedLedgerImport = await runCli(ledgerTargetDir, [
+      "import",
+      "ledgers",
+      "--from",
+      join(rootDir, ".boreal/ledgers"),
+      "--json"
+    ]);
+    const blockedLedgerPayload = parseJson<{ readonly ok: false; readonly code: string; readonly message: string }>(
+      blockedLedgerImport.stderr
+    );
+    expect(blockedLedgerImport.exitCode).toBe(2);
+    expect(blockedLedgerPayload.code).toBe("BOREAL_INVALID_INPUT");
+    expect(blockedLedgerPayload.message).toContain("Path escapes Boreal workspace");
+
+    const importedLedgers = await runCli(ledgerTargetDir, [
+      "import",
+      "ledgers",
+      "--from",
+      join(rootDir, ".boreal/ledgers"),
+      "--allow-external-read",
+      "--json"
+    ]);
+    const importedLedgerPayload = parseData<{
+      readonly imported: { readonly workItems: number };
+      readonly skipped: { readonly workItems: number };
+    }>(importedLedgers.stdout);
+    expect(importedLedgers.exitCode).toBe(0);
+    expect(importedLedgerPayload.imported.workItems).toBe(1);
+    expect(importedLedgerPayload.skipped.workItems).toBe(0);
+
+    const importedLedgersAgain = await runCli(ledgerTargetDir, [
+      "import",
+      "ledgers",
+      "--from",
+      join(rootDir, ".boreal/ledgers"),
+      "--allow-external-read",
+      "--json"
+    ]);
+    expect(parseData<{ readonly skipped: { readonly workItems: number } }>(importedLedgersAgain.stdout).skipped.workItems).toBe(1);
+
     const outsideDir = await makeTempWorkspace();
     await symlink(outsideDir, join(rootDir, "linked-out"), "dir");
     const symlinkedExport = await runCli(rootDir, ["export", "markdown", "--out", "linked-out/markdown", "--json"]);
@@ -1842,6 +1927,22 @@ describe("bwrk cli", () => {
 
     const shown = await runCli(rootDir, ["snapshot", "show", snapshotPayload.id, "--json"]);
     expect(parseData<{ readonly contentHash: string }>(shown.stdout).contentHash).toBe(exportPayload.contentHash);
+
+    await runCli(rootDir, ["work", "create", "Ledger drift work", "--json"]);
+    const staleLedgerStatus = await runCli(rootDir, ["ledger", "status", "--json"]);
+    const staleLedgerPayload = parseData<{ readonly ok: boolean; readonly exists: boolean; readonly stale: boolean }>(
+      staleLedgerStatus.stdout
+    );
+    expect(staleLedgerStatus.exitCode).toBe(1);
+    expect(staleLedgerPayload).toEqual(expect.objectContaining({ ok: false, exists: true, stale: true }));
+
+    const staleDoctor = await runCli(rootDir, ["doctor", "--json"]);
+    const staleDoctorPayload = parseData<{
+      readonly diagnostics: Array<{ readonly code: string; readonly severity: string }>;
+    }>(staleDoctor.stdout);
+    expect(staleDoctorPayload.diagnostics).toEqual(
+      expect.arrayContaining([expect.objectContaining({ code: "ledger.export_drift", severity: "warning" })])
+    );
 
     const targetDir = await makeTempWorkspace();
     await runCli(targetDir, ["init", "--json"]);
@@ -1905,6 +2006,22 @@ describe("bwrk cli", () => {
     const danglingPayload = parseJson<{ readonly ok: false; readonly code: string }>(danglingImport.stderr);
     expect(danglingImport.exitCode).toBe(2);
     expect(danglingPayload.code).toBe("BOREAL_INVALID_INPUT");
+
+    await writeFile(join(rootDir, ".boreal/ledgers/work-items.jsonl"), `${workLedger}{"bad":true}\n`, "utf8");
+    const tamperedLedgerImport = await runCli(targetDir, [
+      "import",
+      "ledgers",
+      "--from",
+      join(rootDir, ".boreal/ledgers"),
+      "--allow-external-read",
+      "--json"
+    ]);
+    const tamperedLedgerPayload = parseJson<{ readonly ok: false; readonly code: string; readonly message: string }>(
+      tamperedLedgerImport.stderr
+    );
+    expect(tamperedLedgerImport.exitCode).toBe(2);
+    expect(tamperedLedgerPayload.code).toBe("BOREAL_INVALID_INPUT");
+    expect(tamperedLedgerPayload.message).toContain("Ledger file count does not match manifest");
 
     const malformedSchemaPath = join(rootDir, "malformed-schema-export.json");
     await writeFile(

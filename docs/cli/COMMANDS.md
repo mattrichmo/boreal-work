@@ -712,6 +712,16 @@ Writes Git-friendly Markdown files for work, evidence, sources, claims, decision
 
 JSON `data` contains `outDir`, `files`, and `recordCounts`.
 
+## `export ledgers`
+
+```bash
+bwrk export ledgers [--out <dir>] [--json]
+```
+
+Writes a `boreal.ledgers.v1` JSONL bridge: one `.jsonl` file per runtime section plus `manifest.json` with per-file counts, per-file content hashes, and the whole-ledger content hash. Default output directory is `.boreal/ledgers`.
+
+JSON `data` contains `outDir`, `manifestPath`, `contentHash`, `recordCounts`, and `files`.
+
 ## `import json`
 
 ```bash
@@ -723,6 +733,28 @@ Imports a `boreal.export.v1` document or raw `boreal.file-store.v1` state docume
 By default, `--from` must resolve inside the workspace, including after symlink resolution. Use `--allow-external-read` for an intentional external file import.
 
 JSON `data` contains per-section `imported` and `skipped` counts.
+
+## `import ledgers`
+
+```bash
+bwrk import ledgers --from <dir> [--allow-external-read] [--json]
+```
+
+Imports a `boreal.ledgers.v1` directory. The importer reads `manifest.json`, verifies every JSONL file count and content hash, reconstructs the snapshot, validates record schemas and references, then merges records with the same conflict rules as `import json`.
+
+By default, `--from` must resolve inside the workspace, including after symlink resolution. Use `--allow-external-read` for an intentional external ledger import.
+
+JSON `data` contains per-section `imported` and `skipped` counts.
+
+## `ledger status`
+
+```bash
+bwrk ledger status [--dir <dir>] [--json]
+```
+
+Compares an exported JSONL ledger directory with the current runtime state. Missing ledgers, stale content hashes, parse errors, count mismatches, and file hash mismatches return a non-zero exit code. Default directory is `.boreal/ledgers`.
+
+JSON `data` contains `ok`, `path`, `exists`, `stale`, `expectedContentHash`, and, when present, `contentHash`, `recordCounts`, `files`, or `error`.
 
 ## `snapshot create`
 

@@ -16,6 +16,10 @@ export interface ReadJsonFileOptions extends Omit<SafeParseJsonOptions, "sizeByt
   readonly maxBytes?: number;
 }
 
+export interface ParseJsonlStrictOptions extends Omit<SafeParseJsonOptions, "sizeBytes"> {
+  readonly allowBlankLines?: boolean;
+}
+
 export async function readJsonFile(path: string, options: ReadJsonFileOptions = {}): Promise<unknown> {
   const maxBytes = options.maxBytes ?? DEFAULT_JSON_MAX_BYTES;
   const info = await stat(path);
@@ -65,6 +69,37 @@ export function safeParseJson(text: string, options: SafeParseJsonOptions = {}):
   }
 
   return parsed;
+}
+
+export function parseJsonlStrict(text: string, options: ParseJsonlStrictOptions = {}): readonly unknown[] {
+  const source = (options.stripBom ?? true) && text.startsWith("\uFEFF") ? text.slice(1) : text;
+  const lines = source.split(/\r?\n/u);
+  const records: unknown[] = [];
+
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index] ?? "";
+    const lineNumber = index + 1;
+    if (line.length === 0) {
+      if (lineNumber === lines.length || options.allowBlankLines === true) {
+        continue;
+      }
+      throw new BorealError("BOREAL_JSON_PARSE", "JSONL contains a blank line", {
+        path: options.path,
+        schemaName: options.schemaName,
+        line: lineNumber
+      });
+    }
+    records.push(
+      safeParseJson(line, {
+        ...options,
+        stripBom: false,
+        path: options.path ? `${options.path}:${lineNumber}` : undefined,
+        sizeBytes: Buffer.byteLength(line, "utf8")
+      })
+    );
+  }
+
+  return records;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
