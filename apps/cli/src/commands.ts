@@ -678,7 +678,7 @@ async function workCommand(
         return { exitCode: 0 };
       }
 
-      const handoff = await buildHandoffBundle(context, claim.work.meta.id, args);
+      const handoff = await buildHandoffResult(context, claim.work.meta.id, args, claim.work);
       output.write(
         formatRecord(
           {
@@ -686,8 +686,7 @@ async function workCommand(
             work: handoff.work,
             reservation: claim.reservation,
             releasedReservations: claim.releasedReservations,
-            contextPack: handoff.contextPack,
-            search: handoff.search
+            ...handoff
           },
           json
         )

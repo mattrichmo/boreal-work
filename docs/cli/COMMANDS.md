@@ -305,6 +305,8 @@ Handoff output includes:
 - The refreshed context pack for the claimed work.
 - Focused search results using `--query` or a default query built from the work title, labels, context facts, and evidence.
 
+If context/search handoff generation fails after the reservation is created, the command still exits `0` with `claimed: true`, `handoffComplete: false`, the reservation/work view, a warning, and `repairCommand: "bwrk doctor --fix --json"`.
+
 `--limit` controls the number of returned search results and defaults to `8`.
 
 ## `work release`

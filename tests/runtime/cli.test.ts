@@ -739,6 +739,7 @@ describe("bwrk cli", () => {
     ]);
     const payload = parseData<{
       readonly claimed: boolean;
+      readonly handoffComplete: boolean;
       readonly work: { readonly id: string; readonly status: string; readonly activeReservationId?: string };
       readonly reservation: { readonly meta: { readonly id: string }; readonly status: string; readonly purpose?: string };
       readonly contextPack: { readonly subjectId: string; readonly facts: readonly string[] };
@@ -747,6 +748,7 @@ describe("bwrk cli", () => {
 
     expect(claimed.exitCode).toBe(0);
     expect(payload.claimed).toBe(true);
+    expect(payload.handoffComplete).toBe(true);
     expect(payload.work.id).toBe(work.meta.id);
     expect(payload.work.status).toBe("reserved");
     expect(payload.work.activeReservationId).toBe(payload.reservation.meta.id);
@@ -774,6 +776,45 @@ describe("bwrk cli", () => {
       agentId: expect.any(String),
       labels: ["missing"]
     });
+  });
+
+  it("keeps claimed work reservations when work claim handoff generation fails", async () => {
+    const rootDir = await makeTempWorkspace();
+    await runCli(rootDir, ["init", "--json"]);
+
+    const work = parseData<{ readonly meta: { readonly id: string } }>(
+      (await runCli(rootDir, ["work", "create", "Degraded work claim", "--label", "claim-degraded", "--ready", "--json"]))
+        .stdout
+    );
+    await mkdir(join(rootDir, ".boreal/runtime/search-index.json"), { recursive: true });
+
+    const claimed = await runCli(rootDir, [
+      "work",
+      "claim",
+      "--agent",
+      "agent-claim-degraded",
+      "--label",
+      "claim-degraded",
+      "--json"
+    ]);
+    const payload = parseData<{
+      readonly claimed: boolean;
+      readonly handoffComplete: boolean;
+      readonly work?: { readonly id: string; readonly status: string; readonly activeReservationId?: string };
+      readonly reservation?: { readonly meta: { readonly id: string }; readonly status: string };
+      readonly warnings: Array<{ readonly code: string }>;
+      readonly repairCommand?: string;
+    }>(claimed.stdout);
+
+    expect(claimed.exitCode).toBe(0);
+    expect(payload.claimed).toBe(true);
+    expect(payload.handoffComplete).toBe(false);
+    expect(payload.work?.id).toBe(work.meta.id);
+    expect(payload.work?.status).toBe("reserved");
+    expect(payload.work?.activeReservationId).toBe(payload.reservation?.meta.id);
+    expect(payload.reservation?.status).toBe("active");
+    expect(payload.warnings).toEqual(expect.arrayContaining([expect.objectContaining({ code: "handoff.failed" })]));
+    expect(payload.repairCommand).toBe("bwrk doctor --fix --json");
   });
 
   it("starts agents by claiming or resuming with a handoff bundle", async () => {
