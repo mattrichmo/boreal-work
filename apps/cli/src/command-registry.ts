@@ -171,10 +171,10 @@ export const COMMAND_DEFINITIONS: readonly CommandDefinition[] = [
     category: "work",
     summary: "Create a work item.",
     usage:
-      "bwrk work create <title> [--description <text>] [--priority <n>] [--kind <kind>] [--label <label>...] [--acceptance <text>...] [--ready] [--json]",
+      "bwrk work create <title> [--description <text>] [--priority low|normal|high|critical] [--kind <kind>] [--label <label>...] [--acceptance <text>...] [--ready] [--json]",
     flags: [
       flag("description", "value", "Work description."),
-      flag("priority", "value", "Numeric priority. Higher values sort first."),
+      flag("priority", "value", "Work priority: low, normal, high, or critical."),
       flag("kind", "value", "Work kind."),
       flag("label", "value", "Label to attach to the work item.", true),
       flag("acceptance", "value", "Acceptance criterion.", true),

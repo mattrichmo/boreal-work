@@ -7,7 +7,12 @@ import { promisify } from "node:util";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { flagValue, parseArgs } from "../../apps/cli/src/args.ts";
-import { registryValueFlagNames, validateCommandBehaviorMetadata } from "../../apps/cli/src/command-registry.ts";
+import {
+  COMMAND_DEFINITIONS,
+  commandPath,
+  registryValueFlagNames,
+  validateCommandBehaviorMetadata
+} from "../../apps/cli/src/command-registry.ts";
 import { installJsonStdoutGuard, main } from "../../apps/cli/src/index.ts";
 import type { CliOutput } from "../../apps/cli/src/output.ts";
 
@@ -56,79 +61,10 @@ describe("bwrk cli", () => {
       await readFile(new URL("../../package.json", import.meta.url), "utf8")
     );
 
-    for (const heading of [
-      "## Help",
-      "## `init`",
-      "## `commands`",
-      "## `work create`",
-      "## `work ready`",
-      "## `work list`",
-      "## `work next`",
-      "## `work show`",
-      "## `work block`",
-      "## `dep add`",
-      "## `dep remove`",
-      "## `dep tree`",
-      "## `dep cycles`",
-      "## `work reserve`",
-      "## `work claim`",
-      "## `work release`",
-      "## `work renew`",
-      "## `reservation list`",
-      "## `prime`",
-      "## `agent guide`",
-      "## `agent finish`",
-      "## `agent start`",
-      "## `agent status`",
-      "## `session start`",
-      "## `session end`",
-      "## `operation list`",
-      "## `operation show`",
-      "## `operation prune`",
-      "## `operation repair`",
-      "## `evidence add`",
-      "## `work verify`",
-      "## `work close`",
-      "## `source add`",
-      "## `source list`",
-      "## `source show`",
-      "## `claim create`",
-      "## `claim list`",
-      "## `claim show`",
-      "## `decision create`",
-      "## `decision list`",
-      "## `decision show`",
-      "## `context rebuild`",
-      "## `context show`",
-      "## `context search`",
-      "## `search index`",
-      "## `search query`",
-      "## `export json`",
-      "## `export markdown`",
-      "## `export ledgers`",
-      "## `import json`",
-      "## `import ledgers`",
-      "## `vault init`",
-      "## `vault status`",
-      "## `raw add`",
-      "## `wiki create`",
-      "## `duplicate scan`",
-      "## `merge plan`",
-      "## `merge apply`",
-      "## `compact analyze`",
-      "## `compact apply`",
-      "## `sync status`",
-      "## `ledger status`",
-      "## `ledger delete`",
-      "## `snapshot create`",
-      "## `snapshot list`",
-      "## `snapshot show`",
-      "## `doctor`",
-      "## `lock inspect`",
-      "## `lock break`"
-    ]) {
+    for (const heading of ["## Help", ...COMMAND_DEFINITIONS.map((definition) => `## \`${commandPath(definition)}\``)]) {
       expect(commands).toContain(heading);
     }
+    expect(commands).toContain("[--priority low|normal|high|critical]");
     expect(commands).toContain("pnpm doctor:strict");
     expect(packageJson.scripts["doctor:strict"]).toBe(
       "tsx --tsconfig tsconfig.base.json apps/cli/src/index.ts doctor --workspace . --strict --json"

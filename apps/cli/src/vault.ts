@@ -863,7 +863,8 @@ function unquoteYamlScalar(value: string): string {
   const trimmed = value.trim();
   if (trimmed.startsWith('"') && trimmed.endsWith('"')) {
     try {
-      return JSON.parse(trimmed) as string;
+      const parsed = safeParseJson(trimmed, { schemaName: "boreal.vault.frontmatter.scalar" });
+      return typeof parsed === "string" ? parsed : trimmed.slice(1, -1);
     } catch {
       return trimmed.slice(1, -1);
     }
