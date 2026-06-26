@@ -19,6 +19,21 @@ describe("boreal runtime proof slice", () => {
     ).toThrow(expect.objectContaining({ code: "BOREAL_INVALID_INPUT" }));
   });
 
+  it("resolves work references by exact id, id prefix, and title", async () => {
+    const runtime = createBorealRuntime({ actor });
+    const work = await runtime.createWork({ title: "Runtime reference target" });
+
+    await expect(runtime.resolveWorkReference(work.meta.id)).resolves.toBe(work.meta.id);
+    await expect(runtime.resolveWorkReference(work.meta.id.slice(0, 16))).resolves.toBe(work.meta.id);
+    await expect(runtime.resolveWorkReference("runtime reference target")).resolves.toBe(work.meta.id);
+
+    await runtime.createWork({ title: "Ambiguous reference target" });
+    await runtime.createWork({ title: "Ambiguous reference target" });
+    await expect(runtime.resolveWorkReference("Ambiguous reference target")).rejects.toMatchObject({
+      code: "BOREAL_CONFLICT"
+    } satisfies Partial<BorealError>);
+  });
+
   it("runs create, dependency readiness, reserve, evidence, verify, close, and projections", async () => {
     let tick = 0;
     const runtime = createBorealRuntime({

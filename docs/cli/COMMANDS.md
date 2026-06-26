@@ -39,6 +39,12 @@ Machine-facing strings:
 - Invisible format characters, bidi controls, variation selectors, and unsafe control characters are rejected with `BOREAL_UNSAFE_UNICODE`.
 - Free-form summaries, evidence text, claim statements, and decision bodies are preserved as authored.
 
+Work references:
+
+- Commands that target a work item accept an exact work ID, an unambiguous work ID prefix of at least 12 characters, or an exact normalized title.
+- Ambiguous references fail closed with `BOREAL_CONFLICT` and include candidate work IDs in JSON error details.
+- Missing references fail with `BOREAL_NOT_FOUND`.
+
 Workspace resolution:
 
 - Without `--workspace`, `bwrk` walks upward from the current directory until it finds `.boreal`.

@@ -424,7 +424,7 @@ async function agentFinishCommand(
   output: CliOutput,
   json: boolean
 ): Promise<CommandResult> {
-  const workId = asWorkId(requiredPositional(rest, 0, "work id"));
+  const workId = await resolveWorkId(context, requiredPositional(rest, 0, "work reference"));
   const agentId = agentIdFromArgs(args, context.actor.id);
   const verdict = parseVerdict(flagValue(args, "verdict"));
   const close = hasFlag(args, "close");
@@ -490,7 +490,8 @@ async function reservationCommand(
   }
 
   const agentId = optionalAgentIdFromArgs(args);
-  const workId = optionalWorkId(flagValue(args, "work"));
+  const workRef = flagValue(args, "work");
+  const workId = workRef ? await resolveWorkId(context, workRef) : undefined;
   const status = parseReservationStatus(flagValue(args, "status"));
   const onlyExpired = hasFlag(args, "expired");
   const limit = parseLimit(flagValue(args, "limit"));
@@ -605,7 +606,7 @@ async function workCommand(
       return { exitCode: 0 };
     }
     case "ready": {
-      const work = await context.runtime.markReady(asWorkId(requiredPositional(rest, 0, "work id")));
+      const work = await context.runtime.markReady(await resolveWorkId(context, requiredPositional(rest, 0, "work reference")));
       output.write(formatRecord(work, json));
       return { exitCode: 0 };
     }
@@ -636,20 +637,20 @@ async function workCommand(
       return { exitCode: 0 };
     }
     case "show": {
-      const view = await context.runtime.getWorkView(asWorkId(requiredPositional(rest, 0, "work id")));
+      const view = await context.runtime.getWorkView(await resolveWorkId(context, requiredPositional(rest, 0, "work reference")));
       output.write(formatRecord(view, json));
       return { exitCode: 0 };
     }
     case "block": {
-      const blockedWorkId = asWorkId(requiredPositional(rest, 0, "blocked work id"));
-      const blockingWorkId = asWorkId(requiredPositional(rest, 1, "blocking work id"));
+      const blockedWorkId = await resolveWorkId(context, requiredPositional(rest, 0, "blocked work reference"));
+      const blockingWorkId = await resolveWorkId(context, requiredPositional(rest, 1, "blocking work reference"));
       const work = await context.runtime.addBlockingDependency({ blockedWorkId, blockingWorkId });
       output.write(formatRecord(work, json));
       return { exitCode: 0 };
     }
     case "reserve": {
       const work = await context.runtime.reserveWork({
-        workId: asWorkId(requiredPositional(rest, 0, "work id")),
+        workId: await resolveWorkId(context, requiredPositional(rest, 0, "work reference")),
         agentId: agentIdFromArgs(args, context.actor.id),
         purpose: flagValue(args, "purpose"),
         expiresAt: parseReservationExpiresAt(args),
@@ -699,13 +700,15 @@ async function workCommand(
       return { exitCode: 0 };
     }
     case "release": {
-      const result = await context.runtime.releaseWorkReservation(asWorkId(requiredPositional(rest, 0, "work id")));
+      const result = await context.runtime.releaseWorkReservation(
+        await resolveWorkId(context, requiredPositional(rest, 0, "work reference"))
+      );
       output.write(formatRecord(result, json));
       return { exitCode: 0 };
     }
     case "renew": {
       const result = await context.runtime.renewWorkReservation({
-        workId: asWorkId(requiredPositional(rest, 0, "work id")),
+        workId: await resolveWorkId(context, requiredPositional(rest, 0, "work reference")),
         expiresAt: requiredReservationExpiresAt(args)
       });
       output.write(formatRecord(result, json));
@@ -714,7 +717,7 @@ async function workCommand(
     case "verify": {
       const evidenceIds = flagValues(args, "evidence").map(asEvidenceId);
       const verification = await context.runtime.verifyWork({
-        workId: asWorkId(requiredPositional(rest, 0, "work id")),
+        workId: await resolveWorkId(context, requiredPositional(rest, 0, "work reference")),
         verdict: parseVerdict(flagValue(args, "verdict")),
         evidenceIds,
         notes: flagValue(args, "notes")
@@ -724,7 +727,7 @@ async function workCommand(
     }
     case "close": {
       const work = await context.runtime.closeWork({
-        workId: asWorkId(requiredPositional(rest, 0, "work id")),
+        workId: await resolveWorkId(context, requiredPositional(rest, 0, "work reference")),
         reason: requiredFlag(args, "reason")
       });
       output.write(formatRecord(work, json));
@@ -748,7 +751,7 @@ async function evidenceCommand(
   }
 
   const evidence = await context.runtime.recordEvidence({
-    subjectId: asWorkId(requiredPositional(rest, 0, "work id")),
+    subjectId: await resolveWorkId(context, requiredPositional(rest, 0, "work reference")),
     subjectType: "work",
     kind: parseEvidenceKind(flagValue(args, "kind")),
     summary: requiredFlag(args, "summary"),
@@ -901,7 +904,7 @@ async function contextCommand(
       return { exitCode: 0 };
     }
     case "show": {
-      const pack = await context.runtime.getContextPack(asWorkId(requiredPositional(rest, 0, "work id")));
+      const pack = await context.runtime.getContextPack(await resolveWorkId(context, requiredPositional(rest, 0, "work reference")));
       output.write(formatRecord(pack, json));
       return { exitCode: 0 };
     }
@@ -1277,8 +1280,8 @@ function labelsFromArgs(args: ParsedArgs): readonly string[] {
   return normalizeLabels(flagValues(args, "label"));
 }
 
-function optionalWorkId(value: string | undefined): WorkId | undefined {
-  return value ? asWorkId(value) : undefined;
+async function resolveWorkId(context: CliContext, value: string): Promise<WorkId> {
+  return context.runtime.resolveWorkReference(value);
 }
 
 async function requireReservation(context: CliContext, reservationId: string): Promise<AgentReservation> {

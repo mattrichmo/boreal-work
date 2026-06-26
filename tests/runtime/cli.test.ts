@@ -1647,6 +1647,47 @@ describe("bwrk cli", () => {
     expect(rows[0]?.labels).toContain("cli");
   });
 
+  it("resolves work references by title and id prefix in work commands", async () => {
+    const rootDir = await makeTempWorkspace();
+    await runCli(rootDir, ["init", "--json"]);
+
+    const created = await runCli(rootDir, [
+      "work",
+      "create",
+      "CLI reference target",
+      "--label",
+      "resolver",
+      "--ready",
+      "--json"
+    ]);
+    const work = parseData<{ readonly meta: { readonly id: string }; readonly title: string }>(created.stdout);
+    const prefix = work.meta.id.slice(0, 16);
+
+    const shownByTitle = await runCli(rootDir, ["work", "show", "cli reference target", "--json"]);
+    expect(parseData<{ readonly id: string }>(shownByTitle.stdout).id).toBe(work.meta.id);
+
+    const reservedByPrefix = await runCli(rootDir, ["work", "reserve", prefix, "--agent", "agent-ref", "--json"]);
+    const reservedWork = parseData<{ readonly meta: { readonly id: string }; readonly reservationId: string }>(
+      reservedByPrefix.stdout
+    );
+    expect(reservedWork.meta.id).toBe(work.meta.id);
+
+    const listedByTitle = await runCli(rootDir, ["reservation", "list", "--work", "CLI reference target", "--json"]);
+    expect(parseData<Array<{ readonly workId: string }>>(listedByTitle.stdout)).toEqual([
+      expect.objectContaining({ workId: work.meta.id })
+    ]);
+
+    const releasedByTitle = await runCli(rootDir, ["work", "release", "CLI reference target", "--json"]);
+    expect(parseData<{ readonly work: { readonly status: string } }>(releasedByTitle.stdout).work.status).toBe("ready");
+
+    await runCli(rootDir, ["work", "create", "Ambiguous CLI reference", "--json"]);
+    await runCli(rootDir, ["work", "create", "Ambiguous CLI reference", "--json"]);
+    const ambiguous = await runCli(rootDir, ["work", "show", "Ambiguous CLI reference", "--json"]);
+    const ambiguousPayload = parseJson<{ readonly ok: false; readonly code: string }>(ambiguous.stderr);
+    expect(ambiguous.exitCode).toBe(1);
+    expect(ambiguousPayload.code).toBe("BOREAL_CONFLICT");
+  });
+
   it("repairs stale runtime locks explicitly", async () => {
     const rootDir = await makeTempWorkspace();
     await runCli(rootDir, ["init", "--json"]);

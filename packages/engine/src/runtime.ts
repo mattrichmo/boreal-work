@@ -11,6 +11,7 @@ import {
   createRecordMeta,
   normalizeActorId,
   normalizeLabels,
+  normalizeSearchQuery,
   nowIso,
   randomId,
   touchRecord,
@@ -91,6 +92,13 @@ export interface ExpireReservationsResult {
   readonly expired: readonly ReservationLifecycleResult[];
 }
 
+export interface WorkReferenceCandidate {
+  readonly workId: WorkId;
+  readonly title: string;
+  readonly status: WorkItem["status"];
+  readonly match: "id" | "id_prefix" | "title";
+}
+
 export interface FinishReservedWorkInput {
   readonly workId: WorkId;
   readonly agentId: AgentId | string;
@@ -118,6 +126,7 @@ export interface BorealRuntime {
   readonly policy: RuntimePolicy;
   initWorkspace(): Promise<RuntimeEvent>;
   ensureWorkspaceInitialized(): Promise<WorkspaceInitializationResult>;
+  resolveWorkReference(ref: string): Promise<WorkId>;
   createWork(input: CreateWorkRuntimeInput): Promise<WorkItem>;
   addBlockingDependency(input: {
     readonly blockedWorkId: WorkId;
@@ -225,6 +234,10 @@ export function createBorealRuntime(options: BorealRuntimeOptions = {}): BorealR
 
     async ensureWorkspaceInitialized(): Promise<WorkspaceInitializationResult> {
       return ensureInitialized();
+    },
+
+    async resolveWorkReference(ref): Promise<WorkId> {
+      return store.read(async (reader) => resolveWorkReference(reader, ref));
     },
 
     async createWork(input): Promise<WorkItem> {
@@ -709,6 +722,65 @@ async function requireWork(reader: BorealReader, workId: WorkId): Promise<WorkIt
     throw new BorealError("BOREAL_NOT_FOUND", "Work item not found", { workId });
   }
   return work;
+}
+
+async function resolveWorkReference(reader: BorealReader, ref: string): Promise<WorkId> {
+  const normalizedRef = normalizeSearchQuery(ref);
+  const normalizedLower = normalizedRef.toLocaleLowerCase("en-US");
+  const items = await reader.listWorkItems();
+  const candidates: WorkReferenceCandidate[] = [];
+
+  for (const work of items) {
+    if (work.meta.id === normalizedLower) {
+      candidates.push(workReferenceCandidate(work, "id"));
+      continue;
+    }
+    if (normalizedLower.length >= 12 && work.meta.id.startsWith(normalizedLower)) {
+      candidates.push(workReferenceCandidate(work, "id_prefix"));
+      continue;
+    }
+    if (normalizedTitle(work.title) === normalizedLower) {
+      candidates.push(workReferenceCandidate(work, "title"));
+    }
+  }
+
+  const uniqueCandidates = uniqueCandidatesById(candidates);
+  const onlyCandidate = uniqueCandidates[0];
+  if (uniqueCandidates.length === 1 && onlyCandidate) {
+    return onlyCandidate.workId;
+  }
+  if (uniqueCandidates.length > 1) {
+    throw new BorealError("BOREAL_CONFLICT", "Work reference is ambiguous", {
+      ref: normalizedRef,
+      candidates: uniqueCandidates
+    });
+  }
+  throw new BorealError("BOREAL_NOT_FOUND", "Work reference did not match any work item", { ref: normalizedRef });
+}
+
+function workReferenceCandidate(work: WorkItem, match: WorkReferenceCandidate["match"]): WorkReferenceCandidate {
+  return {
+    workId: work.meta.id,
+    title: work.title,
+    status: work.status,
+    match
+  };
+}
+
+function normalizedTitle(value: string): string | undefined {
+  try {
+    return normalizeSearchQuery(value).toLocaleLowerCase("en-US");
+  } catch {
+    return undefined;
+  }
+}
+
+function uniqueCandidatesById(candidates: readonly WorkReferenceCandidate[]): readonly WorkReferenceCandidate[] {
+  const byId = new Map<WorkId, WorkReferenceCandidate>();
+  for (const candidate of candidates) {
+    byId.set(candidate.workId, byId.get(candidate.workId) ?? candidate);
+  }
+  return [...byId.values()].sort((left, right) => left.workId.localeCompare(right.workId));
 }
 
 async function requireActiveWorkReservation(reader: BorealReader, work: WorkItem): Promise<AgentReservation> {
