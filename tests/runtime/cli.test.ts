@@ -1079,7 +1079,9 @@ describe("bwrk cli", () => {
 
     const searchIndexDocument = parseJson<{
       readonly schemaVersion: string;
+      readonly algorithm: string;
       readonly documentCount: number;
+      readonly documentFrequencies: readonly (readonly [string, number])[];
       readonly documents: Array<{
         readonly type: string;
         readonly title: string;
@@ -1087,7 +1089,10 @@ describe("bwrk cli", () => {
       }>;
     }>(await readFile(join(rootDir, ".boreal/runtime/search-index.json"), "utf8"));
     expect(searchIndexDocument.schemaVersion).toBe("boreal.search-index.v1");
+    expect(searchIndexDocument.algorithm).toBe("boreal.search.rank.v2");
     expect(searchIndexDocument.documentCount).toBe(8);
+    expect(new Map(searchIndexDocument.documentFrequencies).get("search")).toBeGreaterThan(1);
+    expect(new Map(searchIndexDocument.documentFrequencies).get("content")).toBeGreaterThan(1);
     const indexedDecision = searchIndexDocument.documents.find(
       (document) => document.type === "decision" && document.title === "Use content hash search"
     );
@@ -1115,14 +1120,21 @@ describe("bwrk cli", () => {
             readonly matchedToken: string;
             readonly match: string;
             readonly weight: number;
+            readonly idf: number;
             readonly contribution: number;
           }>;
-          readonly scoreBreakdown: Array<{ readonly kind: string; readonly contribution: number }>;
+          readonly scoreBreakdown: Array<{
+            readonly kind: string;
+            readonly baseWeight?: number;
+            readonly documentFrequency?: number;
+            readonly idf?: number;
+            readonly contribution: number;
+          }>;
         };
       }>
     >(explainedQuery.stdout);
     const explainedDecision = explainedSearchResults.find((result) => result.title === "Use content hash search");
-    expect(explainedDecision?.explain?.algorithm).toBe("boreal.search.rank.v1");
+    expect(explainedDecision?.explain?.algorithm).toBe("boreal.search.rank.v2");
     expect(explainedDecision?.explain?.queryTokens).toEqual(["content", "hash"]);
     expect(explainedDecision?.explain?.fieldMatches).toEqual(
       expect.arrayContaining([
@@ -1131,8 +1143,16 @@ describe("bwrk cli", () => {
       ])
     );
     expect(explainedDecision?.explain?.scoreBreakdown).toEqual(
-      expect.arrayContaining([expect.objectContaining({ kind: "token_exact" })])
+      expect.arrayContaining([
+        expect.objectContaining({
+          kind: "token_exact",
+          baseWeight: expect.any(Number),
+          documentFrequency: expect.any(Number),
+          idf: expect.any(Number)
+        })
+      ])
     );
+    expect(explainedDecision?.explain?.fieldMatches.every((match) => match.idf > 0)).toBe(true);
 
     const contextSearch = await runCli(rootDir, ["context", "search", "fail closed stale", "--explain", "--json"]);
     const contextResults = parseData<

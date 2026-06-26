@@ -680,7 +680,7 @@ JSON `data` is an array of search results with `id`, `type`, `recordId`, `subjec
 bwrk search index [--json]
 ```
 
-Builds a deterministic local search index at `.boreal/runtime/search-index.json`. Rebuilds are serialized with `.boreal/runtime/search-index.lock` and use atomic fsync writes. The index stores compact weighted aggregate and per-field tokens plus result summaries for work, evidence, sources, claims, decisions, and context packs; it does not store full record bodies.
+Builds a deterministic local search index at `.boreal/runtime/search-index.json`. Rebuilds are serialized with `.boreal/runtime/search-index.lock` and use atomic fsync writes. The index stores compact weighted aggregate tokens, per-field tokens, document-frequency statistics, and result summaries for work, evidence, sources, claims, decisions, and context packs; it does not store full record bodies.
 
 JSON `data` contains `path`, `schemaVersion`, `builtAt`, `contentHash`, `documentCount`, and `tokenCount`.
 
@@ -690,9 +690,9 @@ JSON `data` contains `path`, `schemaVersion`, `builtAt`, `contentHash`, `documen
 bwrk search query <query> [--limit <count>] [--explain] [--json]
 ```
 
-Searches work, evidence, sources, claims, decisions, and context packs. Results are ranked by weighted token matches, ID prefix matches, and stable type/title ordering.
+Searches work, evidence, sources, claims, decisions, and context packs. Results are ranked by ID prefix matches, field-weighted token matches adjusted by document frequency, and stable type/title ordering.
 
-Use `--explain` to include the normalized query tokens, score contributions, and field-level matches that caused each result to rank.
+Use `--explain` to include the normalized query tokens, score contributions, document frequencies, IDF factors, and field-level matches that caused each result to rank.
 
 The command fails closed when the index is missing, malformed, or stale. Rebuild with `bwrk search index` or `bwrk doctor --fix`.
 

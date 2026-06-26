@@ -14,7 +14,7 @@ import {
 
 export const SEARCH_INDEX_SCHEMA_VERSION = "boreal.search-index.v1";
 
-const SEARCH_INDEX_ALGORITHM = "boreal.search.rank.v1";
+const SEARCH_INDEX_ALGORITHM = "boreal.search.rank.v2";
 const DEFAULT_LIMIT = 20;
 const MAX_INDEXED_TOKENS_PER_DOCUMENT = 400;
 
@@ -36,6 +36,7 @@ export interface SearchIndexDocument {
   readonly contentHash: ContentHash;
   readonly documentCount: number;
   readonly tokenCount: number;
+  readonly documentFrequencies: readonly (readonly [string, number])[];
   readonly documents: readonly SearchIndexEntry[];
 }
 
@@ -87,6 +88,7 @@ export interface SearchResultFieldMatch {
   readonly matchedToken: string;
   readonly match: "exact" | "prefix";
   readonly weight: number;
+  readonly idf: number;
   readonly contribution: number;
 }
 
@@ -94,6 +96,9 @@ export interface SearchResultScoreContribution {
   readonly kind: "id_exact" | "id_prefix" | "token_exact" | "token_prefix";
   readonly token?: string;
   readonly matchedToken?: string;
+  readonly baseWeight?: number;
+  readonly documentFrequency?: number;
+  readonly idf?: number;
   readonly contribution: number;
   readonly fields?: readonly string[];
 }
@@ -102,6 +107,11 @@ interface WeightedText {
   readonly field: string;
   readonly text: string;
   readonly weight: number;
+}
+
+interface SearchScoringStats {
+  readonly documentCount: number;
+  readonly documentFrequencies: ReadonlyMap<string, number>;
 }
 
 const STOP_WORDS = new Set([
@@ -137,6 +147,7 @@ const TYPE_ORDER: Record<SearchDocumentType, number> = {
 
 export function buildSearchIndex(snapshot: SearchCorpusSnapshot, builtAt: IsoTimestamp = nowIso()): SearchIndexDocument {
   const documents = buildSearchEntries(snapshot);
+  const documentFrequencies = buildDocumentFrequencies(documents);
   return {
     schemaVersion: SEARCH_INDEX_SCHEMA_VERSION,
     algorithm: SEARCH_INDEX_ALGORITHM,
@@ -144,15 +155,18 @@ export function buildSearchIndex(snapshot: SearchCorpusSnapshot, builtAt: IsoTim
     contentHash: searchIndexContentHash(snapshot),
     documentCount: documents.length,
     tokenCount: documents.reduce((sum, document) => sum + document.tokenWeights.length, 0),
+    documentFrequencies,
     documents
   };
 }
 
 export function searchIndexContentHash(snapshot: SearchCorpusSnapshot): ContentHash {
   const entries = buildSearchEntries(snapshot);
+  const documentFrequencies = buildDocumentFrequencies(entries);
   return hashContent({
     schemaVersion: SEARCH_INDEX_SCHEMA_VERSION,
     algorithm: SEARCH_INDEX_ALGORITHM,
+    documentFrequencies,
     documents: entries.map((entry) => ({
       id: entry.id,
       type: entry.type,
@@ -178,9 +192,10 @@ export function querySearchIndex(
   }
 
   const limit = options.limit ?? DEFAULT_LIMIT;
+  const scoringStats = searchScoringStats(index);
   const results = index.documents
     .filter((entry) => !options.type || entry.type === options.type)
-    .map((entry) => scoreEntry(entry, normalizedQuery, queryTokens, Boolean(options.explain)))
+    .map((entry) => scoreEntry(entry, normalizedQuery, queryTokens, Boolean(options.explain), scoringStats))
     .filter((result): result is SearchResult => result !== undefined)
     .sort(compareSearchResults);
 
@@ -198,6 +213,8 @@ export function isSearchIndexDocument(value: unknown): value is SearchIndexDocum
     typeof value.contentHash === "string" &&
     typeof value.documentCount === "number" &&
     typeof value.tokenCount === "number" &&
+    Array.isArray(value.documentFrequencies) &&
+    value.documentFrequencies.every(isTokenFrequency) &&
     Array.isArray(value.documents) &&
     value.documents.every(isSearchIndexEntry)
   );
@@ -339,11 +356,29 @@ function tokenWeights(weightedText: readonly WeightedText[]): readonly (readonly
   return [...weights.entries()].sort(([left], [right]) => left.localeCompare(right));
 }
 
+function buildDocumentFrequencies(entries: readonly SearchIndexEntry[]): readonly (readonly [string, number])[] {
+  const frequencies = new Map<string, number>();
+  for (const entry of entries) {
+    for (const [token] of entry.tokenWeights) {
+      frequencies.set(token, (frequencies.get(token) ?? 0) + 1);
+    }
+  }
+  return [...frequencies.entries()].sort(([left], [right]) => left.localeCompare(right));
+}
+
+function searchScoringStats(index: SearchIndexDocument): SearchScoringStats {
+  return {
+    documentCount: index.documentCount,
+    documentFrequencies: new Map(index.documentFrequencies)
+  };
+}
+
 function scoreEntry(
   entry: SearchIndexEntry,
   normalizedQuery: string,
   queryTokens: readonly string[],
-  explain: boolean
+  explain: boolean,
+  stats: SearchScoringStats
 ): SearchResult | undefined {
   const weights = new Map(entry.tokenWeights);
   const matches = new Set<string>();
@@ -365,15 +400,21 @@ function scoreEntry(
   for (const token of queryTokens) {
     const exactWeight = weights.get(token);
     if (exactWeight !== undefined) {
-      score += exactWeight;
+      const documentFrequency = documentFrequencyForToken(stats, token);
+      const idf = inverseDocumentFrequency(stats.documentCount, documentFrequency);
+      const contribution = exactWeight * idf;
+      score += contribution;
       matches.add(token);
-      const exactFieldMatches = fieldMatchesForToken(entry, token, token, "exact", exactWeight);
+      const exactFieldMatches = fieldMatchesForToken(entry, token, token, "exact", idf);
       fieldMatches.push(...exactFieldMatches);
       scoreBreakdown.push({
         kind: "token_exact",
         token,
         matchedToken: token,
-        contribution: exactWeight,
+        baseWeight: exactWeight,
+        documentFrequency,
+        idf,
+        contribution,
         fields: exactFieldMatches.map((match) => match.field)
       });
       continue;
@@ -381,15 +422,20 @@ function scoreEntry(
 
     const prefixMatch = prefixTokenMatch(weights, token);
     if (prefixMatch) {
-      const contribution = prefixMatch.weight / 2;
+      const documentFrequency = documentFrequencyForToken(stats, prefixMatch.token);
+      const idf = inverseDocumentFrequency(stats.documentCount, documentFrequency);
+      const contribution = (prefixMatch.weight * idf) / 2;
       score += contribution;
       matches.add(`${token}*`);
-      const prefixFieldMatches = fieldMatchesForToken(entry, token, prefixMatch.token, "prefix", prefixMatch.weight);
+      const prefixFieldMatches = fieldMatchesForToken(entry, token, prefixMatch.token, "prefix", idf);
       fieldMatches.push(...prefixFieldMatches);
       scoreBreakdown.push({
         kind: "token_prefix",
         token,
         matchedToken: prefixMatch.token,
+        baseWeight: prefixMatch.weight,
+        documentFrequency,
+        idf,
         contribution,
         fields: prefixFieldMatches.map((match) => match.field)
       });
@@ -435,7 +481,7 @@ function fieldMatchesForToken(
   queryToken: string,
   matchedToken: string,
   match: SearchResultFieldMatch["match"],
-  aggregateWeight: number
+  idf: number
 ): readonly SearchResultFieldMatch[] {
   const fields = entry.fieldWeights ?? [];
   const matches = fields.flatMap((field) => {
@@ -451,11 +497,23 @@ function fieldMatchesForToken(
         matchedToken,
         match,
         weight,
-        contribution: match === "exact" && weight === aggregateWeight ? weight : weight / 2
+        idf,
+        contribution: match === "exact" ? weight * idf : (weight * idf) / 2
       }
     ];
   });
   return matches.sort((left, right) => right.weight - left.weight || left.field.localeCompare(right.field));
+}
+
+function documentFrequencyForToken(stats: SearchScoringStats, token: string): number {
+  return stats.documentFrequencies.get(token) ?? 0;
+}
+
+function inverseDocumentFrequency(documentCount: number, documentFrequency: number): number {
+  if (documentCount <= 0) {
+    return 0;
+  }
+  return Math.log(1 + (documentCount - documentFrequency + 0.5) / (documentFrequency + 0.5));
 }
 
 function dedupeFieldMatches(matches: readonly SearchResultFieldMatch[]): readonly SearchResultFieldMatch[] {
@@ -525,6 +583,17 @@ function isSearchIndexFieldWeights(value: unknown): value is SearchIndexFieldWei
     typeof value.weight === "number" &&
     Array.isArray(value.tokenWeights) &&
     value.tokenWeights.every(isTokenWeight)
+  );
+}
+
+function isTokenFrequency(value: unknown): value is readonly [string, number] {
+  return (
+    Array.isArray(value) &&
+    value.length === 2 &&
+    typeof value[0] === "string" &&
+    typeof value[1] === "number" &&
+    Number.isInteger(value[1]) &&
+    value[1] >= 0
   );
 }
 
