@@ -753,7 +753,7 @@ Shows one recovery snapshot by ID. JSON `data` is the full `boreal.export.v1` do
 ## `doctor`
 
 ```bash
-bwrk doctor [--fix] [--json]
+bwrk doctor [--fix] [--strict] [--json]
 ```
 
 Validates workspace health.
@@ -775,6 +775,7 @@ Checks:
 - Closed work items without close reasons.
 - Unsafe Unicode in machine-facing strings.
 - Label and actor normalization collisions in imported or hand-edited state.
+- Local operation log shape, volume, legacy operation-event links, dangling event references, and retained operation/event causality.
 - Derived readiness consistency.
 - Missing or stale context-pack projections.
 - Snapshot/export drift between the current export hash and the latest recovery snapshot.
@@ -790,7 +791,9 @@ Checks:
 - Rebuild the local search index.
 - Expire stale active reservations and restore affected work to derived readiness.
 
-Doctor exits `1` when any diagnostic has severity `error`.
+`--strict` treats warnings as a failing doctor result for CI and hardening gates. Diagnostic severities are not rewritten; JSON `data.ok` and the command exit code fail when any `warning` remains.
+
+Without `--strict`, doctor exits `1` when any diagnostic has severity `error`.
 
 ## `lock inspect`
 

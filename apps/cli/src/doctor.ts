@@ -39,6 +39,7 @@ export interface Diagnostic {
 
 export interface DoctorResult {
   readonly ok: boolean;
+  readonly strict: boolean;
   readonly fixed: boolean;
   readonly diagnostics: readonly Diagnostic[];
 }
@@ -60,7 +61,7 @@ const STATE_SECTIONS = [
 
 const OPERATION_LOG_WARNING_COUNT = 1_000;
 
-export async function runDoctor(context: CliContext, fix: boolean): Promise<DoctorResult> {
+export async function runDoctor(context: CliContext, fix: boolean, strict = false): Promise<DoctorResult> {
   const diagnostics: Diagnostic[] = [];
   let fixed = false;
 
@@ -76,7 +77,7 @@ export async function runDoctor(context: CliContext, fix: boolean): Promise<Doct
       severity: "error",
       message: "Missing .boreal directory; run `bwrk init`"
     });
-    return finalize(diagnostics, fixed);
+    return finalize(diagnostics, fixed, strict);
   }
 
   const lockDiagnostics = await validateRuntimeLocks(context, fix);
@@ -85,7 +86,7 @@ export async function runDoctor(context: CliContext, fix: boolean): Promise<Doct
 
   const state = await readStateDocument(context, diagnostics);
   if (!state) {
-    return finalize(diagnostics, fixed);
+    return finalize(diagnostics, fixed, strict);
   }
 
   validateStateSections(state, diagnostics);
@@ -119,7 +120,7 @@ export async function runDoctor(context: CliContext, fix: boolean): Promise<Doct
   diagnostics.push(...searchDiagnostics.diagnostics);
   fixed = fixed || searchDiagnostics.fixed;
 
-  return finalize(diagnostics, fixed);
+  return finalize(diagnostics, fixed, strict);
 }
 
 async function validateRuntimeLocks(
@@ -1278,9 +1279,9 @@ function verificationPolicyIssues(
   ];
 }
 
-function finalize(diagnostics: readonly Diagnostic[], fixed: boolean): DoctorResult {
-  const ok = diagnostics.every((diagnostic) => diagnostic.severity !== "error");
-  return { ok, fixed, diagnostics };
+function finalize(diagnostics: readonly Diagnostic[], fixed: boolean, strict: boolean): DoctorResult {
+  const ok = diagnostics.every((diagnostic) => diagnostic.severity !== "error" && (!strict || diagnostic.severity !== "warning"));
+  return { ok, strict, fixed, diagnostics };
 }
 
 function readRecordId(value: unknown, section: string): string | undefined {

@@ -455,6 +455,19 @@ describe("bwrk cli", () => {
       expect.arrayContaining([expect.objectContaining({ code: "operation.legacy_events", severity: "warning" })])
     );
 
+    const strictDoctor = await runCli(rootDir, ["doctor", "--strict", "--json"]);
+    const strictPayload = parseData<{
+      readonly ok: boolean;
+      readonly strict: boolean;
+      readonly diagnostics: Array<{ readonly code: string; readonly severity: string }>;
+    }>(strictDoctor.stdout);
+    expect(strictDoctor.exitCode).toBe(1);
+    expect(strictPayload.ok).toBe(false);
+    expect(strictPayload.strict).toBe(true);
+    expect(strictPayload.diagnostics).toEqual(
+      expect.arrayContaining([expect.objectContaining({ code: "operation.legacy_events", severity: "warning" })])
+    );
+
     await runCli(rootDir, ["export", "json", "--out", "repair-export.json", "--json"]);
     const exported = parseJson<{
       readonly state: { readonly events: Array<{ readonly operationId?: string; readonly operationLink?: string }> };

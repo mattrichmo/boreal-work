@@ -1502,7 +1502,7 @@ async function doctorCommand(
   output: CliOutput,
   json: boolean
 ): Promise<CommandResult> {
-  const result = await runDoctor(context, hasFlag(args, "fix"));
+  const result = await runDoctor(context, hasFlag(args, "fix"), hasFlag(args, "strict"));
   if (json) {
     output.write(formatRecord(result, true));
   } else {

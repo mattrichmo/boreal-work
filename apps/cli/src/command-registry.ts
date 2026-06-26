@@ -746,9 +746,12 @@ export const COMMAND_DEFINITIONS: readonly CommandDefinition[] = [
     path: ["doctor"],
     category: "doctor",
     summary: "Inspect workspace integrity.",
-    usage: "bwrk doctor [--fix] [--json]",
+    usage: "bwrk doctor [--fix] [--strict] [--json]",
     description: "Checks state shape, references, graph consistency, reservations, verification policy, and stale readiness.",
-    flags: [flag("fix", "boolean", "Apply supported safe repairs.")],
+    flags: [
+      flag("fix", "boolean", "Apply supported safe repairs."),
+      flag("strict", "boolean", "Treat warnings as a failing doctor result."),
+    ],
     positionals: { label: "arguments", min: 0, max: 0 },
     requiresWorkspace: false,
     supportsJson: true,
@@ -1350,7 +1353,7 @@ const COMMAND_BEHAVIOR: Readonly<Record<string, CommandBehaviorMetadata>> = {
     requiresLock: "state+index",
     maxResultSizeChars: 250_000,
     humanOutputKind: "record",
-    examples: ["bwrk doctor --json", "bwrk doctor --fix --json"],
+    examples: ["bwrk doctor --json", "bwrk doctor --strict --json", "bwrk doctor --fix --json"],
   }),
   "lock inspect": commandMetadata("lock inspect", {
     readOnly: true,
