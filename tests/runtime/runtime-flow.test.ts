@@ -528,6 +528,59 @@ describe("boreal runtime proof slice", () => {
     expect(pack.evidence).toContain("passed: context pack test passed");
   });
 
+  it("prioritizes directly linked knowledge in context packs without relying on token overlap", async () => {
+    const runtime = createBorealRuntime({ actor });
+    const work = await runtime.createWork({
+      title: "Calibrate telemetry lane",
+      description: "Prepare the runtime handoff surface."
+    });
+    const source = await runtime.createKnowledgeSource({
+      kind: "document",
+      title: "Direct source note",
+      uri: "file://direct-source.md",
+      summary: "URI anchored source for projection selection."
+    });
+    const evidence = await runtime.recordEvidence({
+      subjectId: work.meta.id,
+      subjectType: "work",
+      kind: "artifact",
+      summary: "binary fixture passed",
+      outcome: "passed",
+      uri: source.uri
+    });
+
+    await runtime.createClaim({
+      statement: "Lunch menu uses barley.",
+      status: "accepted",
+      evidenceIds: [evidence.meta.id]
+    });
+    await runtime.createDecision({
+      title: "Finance approval route",
+      context: "Budget owners need a path.",
+      decision: "Escalate budget approvals weekly.",
+      status: "accepted",
+      sourceIds: [source.meta.id]
+    });
+    await runtime.createClaim({
+      statement: "Orchard tickets require ladder review.",
+      status: "accepted"
+    });
+    await runtime.createDecision({
+      title: "Warehouse receiving policy",
+      context: "Inventory team workflow.",
+      decision: "Route receiving changes through inventory.",
+      status: "accepted"
+    });
+
+    await runtime.rebuildProjections();
+    const pack = await runtime.getContextPack(work.meta.id);
+
+    expect(pack.facts).toContain("claim: Lunch menu uses barley.");
+    expect(pack.facts).toContain("decision: Escalate budget approvals weekly.");
+    expect(pack.facts).not.toContain("claim: Orchard tickets require ladder review.");
+    expect(pack.facts).not.toContain("decision: Route receiving changes through inventory.");
+  });
+
   it("rejects dangling knowledge source and evidence references", async () => {
     const runtime = createBorealRuntime({ actor });
     const missingSourceId = "bw_source_deadbeefdead" as KnowledgeSourceId;

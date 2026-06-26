@@ -686,6 +686,7 @@ export function createBorealRuntime(options: BorealRuntimeOptions = {}): BorealR
     async rebuildProjections(): Promise<readonly WorkItemView[]> {
       return store.write(async (writer) => {
         const workItems = await writer.listWorkItems();
+        const sources = await writer.listKnowledgeSources();
         const claims = await writer.listClaims();
         const decisions = await writer.listDecisions();
         const views: WorkItemView[] = [];
@@ -693,9 +694,9 @@ export function createBorealRuntime(options: BorealRuntimeOptions = {}): BorealR
         for (const work of workItems) {
           const graphWork = await workWithGraphDependencies(writer, work);
           const evidence = await writer.listEvidenceForSubject(work.meta.id);
-          const contextPack = buildContextPack({ work: graphWork, evidence, claims, decisions, actor, now: now() });
+          const contextPack = buildContextPack({ work: graphWork, evidence, sources, claims, decisions, actor, now: now() });
           await writer.putContextPack(contextPack);
-          await writer.putProjection(buildContextProjection({ work: graphWork, evidence, claims, decisions, actor, now: now() }));
+          await writer.putProjection(buildContextProjection({ work: graphWork, evidence, sources, claims, decisions, actor, now: now() }));
           views.push(toWorkItemView({ work: graphWork, evidence, contextPack }));
         }
 

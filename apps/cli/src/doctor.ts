@@ -491,6 +491,7 @@ async function validateStoreRecords(
         const expected = buildContextPack({
           work: graphWork,
           evidence: evidence.filter((record) => record.subjectId === work.meta.id),
+          sources: knowledgeSources,
           claims,
           decisions,
           actor: context.actor,

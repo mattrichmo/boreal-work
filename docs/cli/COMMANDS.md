@@ -662,7 +662,7 @@ bwrk context show <work-id> [--json]
 Shows the stored context pack for a work item. Run `bwrk context rebuild` first when the context pack is missing or stale.
 
 JSON `data` is the context pack record with `id`, `subjectId`, `generatedAt`, `title`, `summary`, `facts`, and `evidence`.
-Context facts always include work status and priority, plus capped accepted claims and decisions that overlap the work title, description, labels, acceptance criteria, or evidence summaries. Unrelated accepted knowledge is not copied into every work pack by default.
+Context facts always include work status and priority, plus capped accepted claims and decisions selected by direct evidence/source references first, then overlap with the work title, description, labels, acceptance criteria, and evidence. Unrelated accepted knowledge is not copied into every work pack by default.
 
 ## `context search`
 

@@ -7,6 +7,7 @@ import {
   type DecisionRecord,
   type EvidenceRecord,
   type IsoTimestamp,
+  type KnowledgeSource,
   type ProjectionId,
   type WorkItem
 } from "@boreal/core";
@@ -14,6 +15,7 @@ import {
 export interface BuildContextPackInput {
   readonly work: WorkItem;
   readonly evidence: readonly EvidenceRecord[];
+  readonly sources?: readonly KnowledgeSource[];
   readonly claims?: readonly ClaimRecord[];
   readonly decisions?: readonly DecisionRecord[];
   readonly policy?: Partial<ContextPackPolicy>;
@@ -42,9 +44,9 @@ export function buildContextPack(input: BuildContextPackInput): ContextPack {
   });
 
   const policy = { ...DEFAULT_CONTEXT_PACK_POLICY, ...input.policy };
-  const contextTokens = workContextTokens(input.work, input.evidence);
-  const acceptedClaims = selectRelevantClaims(input.claims ?? [], contextTokens, policy);
-  const acceptedDecisions = selectRelevantDecisions(input.decisions ?? [], contextTokens, policy);
+  const context = workContext(input.work, input.evidence, input.sources ?? []);
+  const acceptedClaims = selectRelevantClaims(input.claims ?? [], context, policy);
+  const acceptedDecisions = selectRelevantDecisions(input.decisions ?? [], context, policy);
   const evidenceSummaries = input.evidence.map((record) => `${record.outcome}: ${record.summary}`);
 
   return {
@@ -89,12 +91,12 @@ function summarizeWork(work: WorkItem): string {
 
 function selectRelevantClaims(
   claims: readonly ClaimRecord[],
-  contextTokens: ReadonlySet<string>,
+  context: WorkContextRelevance,
   policy: ContextPackPolicy
 ): readonly ClaimRecord[] {
   return claims
     .filter((claim) => claim.status === "accepted")
-    .map((claim) => ({ claim, score: policy.includeGlobalAcceptedClaims ? 1 : relevanceScore(claimTokens(claim), contextTokens) }))
+    .map((claim) => ({ claim, score: claimRelevanceScore(claim, context, policy) }))
     .filter((entry) => entry.score > 0)
     .sort((left, right) => right.score - left.score || left.claim.meta.id.localeCompare(right.claim.meta.id))
     .slice(0, policy.maxClaims)
@@ -103,19 +105,56 @@ function selectRelevantClaims(
 
 function selectRelevantDecisions(
   decisions: readonly DecisionRecord[],
-  contextTokens: ReadonlySet<string>,
+  context: WorkContextRelevance,
   policy: ContextPackPolicy
 ): readonly DecisionRecord[] {
   return decisions
     .filter((decision) => decision.status === "accepted")
-    .map((decision) => ({
-      decision,
-      score: policy.includeGlobalAcceptedDecisions ? 1 : relevanceScore(decisionTokens(decision), contextTokens)
-    }))
+    .map((decision) => ({ decision, score: decisionRelevanceScore(decision, context, policy) }))
     .filter((entry) => entry.score > 0)
     .sort((left, right) => right.score - left.score || left.decision.meta.id.localeCompare(right.decision.meta.id))
     .slice(0, policy.maxDecisions)
     .map((entry) => entry.decision);
+}
+
+interface WorkContextRelevance {
+  readonly tokens: ReadonlySet<string>;
+  readonly evidenceIds: ReadonlySet<string>;
+  readonly sourceIds: ReadonlySet<string>;
+}
+
+function claimRelevanceScore(
+  claim: ClaimRecord,
+  context: WorkContextRelevance,
+  policy: ContextPackPolicy
+): number {
+  if (policy.includeGlobalAcceptedClaims) {
+    return 1;
+  }
+  return (
+    directReferenceScore(claim.evidenceIds, context.evidenceIds, 100) +
+    directReferenceScore(claim.sourceIds, context.sourceIds, 80) +
+    relevanceScore(claimTokens(claim), context.tokens)
+  );
+}
+
+function decisionRelevanceScore(
+  decision: DecisionRecord,
+  context: WorkContextRelevance,
+  policy: ContextPackPolicy
+): number {
+  if (policy.includeGlobalAcceptedDecisions) {
+    return 1;
+  }
+  return directReferenceScore(decision.sourceIds, context.sourceIds, 80) + relevanceScore(decisionTokens(decision), context.tokens);
+}
+
+function directReferenceScore(
+  candidateIds: readonly string[],
+  contextIds: ReadonlySet<string>,
+  weight: number
+): number {
+  return candidateIds.reduce((score, id) => score + (contextIds.has(id) ? weight : 0), 0);
 }
 
 function relevanceScore(candidateTokens: ReadonlySet<string>, contextTokens: ReadonlySet<string>): number {
@@ -128,17 +167,31 @@ function relevanceScore(candidateTokens: ReadonlySet<string>, contextTokens: Rea
   return score;
 }
 
-function workContextTokens(work: WorkItem, evidence: readonly EvidenceRecord[]): ReadonlySet<string> {
-  return tokens([
-    work.meta.id,
-    work.title,
-    work.description,
-    work.kind,
-    work.priority,
-    work.labels.join(" "),
-    work.acceptanceCriteria.join(" "),
-    evidence.map((record) => record.summary).join(" ")
+function workContext(
+  work: WorkItem,
+  evidence: readonly EvidenceRecord[],
+  sources: readonly KnowledgeSource[]
+): WorkContextRelevance {
+  const sourceUris = new Set([
+    ...work.meta.sourceRefs.map((sourceRef) => sourceRef.uri),
+    ...evidence.map((record) => record.uri).filter(isString)
   ]);
+  const sourceIds = new Set(sources.filter((source) => sourceUris.has(source.uri)).map((source) => source.meta.id));
+  return {
+    tokens: tokens([
+      work.meta.id,
+      work.title,
+      work.description,
+      work.kind,
+      work.priority,
+      work.labels.join(" "),
+      work.acceptanceCriteria.join(" "),
+      work.meta.sourceRefs.map((sourceRef) => sourceRef.uri).join(" "),
+      evidence.map((record) => [record.meta.id, record.summary, record.command ?? "", record.uri ?? ""].join(" ")).join(" ")
+    ]),
+    evidenceIds: new Set(evidence.map((record) => record.meta.id)),
+    sourceIds
+  };
 }
 
 function claimTokens(claim: ClaimRecord): ReadonlySet<string> {
@@ -183,3 +236,7 @@ const STOP_WORDS = new Set([
   "through",
   "with"
 ]);
+
+function isString(value: string | undefined): value is string {
+  return typeof value === "string" && value.length > 0;
+}
