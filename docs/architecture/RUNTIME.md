@@ -28,7 +28,7 @@ The CLI fails closed for uninitialized workspaces, discovers a workspace by walk
 
 The lock has bounded wait, retry, stale-lock recovery, owner metadata, and token-based release. Reads stay lock-free because the state file is replaced with atomic rename.
 
-Generated artifacts use the same fsync atomic-write helper. The local search index is rebuilt under `.boreal/runtime/search-index.lock`, then replaced with atomic rename so concurrent rebuilds do not leave partial JSON behind.
+Generated artifacts use the same fsync atomic-write helper. The local search index is rebuilt under `.boreal/runtime/search-index.lock`, then replaced with atomic rename so concurrent rebuilds do not leave partial JSON behind. Search tokenization preserves compact tokens while adding camelCase, path/URI, underscore, and alpha-numeric split variants. Context packs are indexed as both summary documents and capped per-pack chunk documents so focused retrieval does not depend on one large context blob.
 
 Lock inspection and stale-lock breaking are exposed as explicit storage helpers so operational surfaces can diagnose lock issues without duplicating lock internals. Active locks are not broken by repair commands. Stale-lock recovery uses an adjacent recovery lock so concurrent repair attempts cannot both remove the same stale lock or delete a fresh replacement from another Boreal process.
 

@@ -14,11 +14,13 @@ import {
 
 export const SEARCH_INDEX_SCHEMA_VERSION = "boreal.search-index.v1";
 
-const SEARCH_INDEX_ALGORITHM = "boreal.search.rank.v2";
+const SEARCH_INDEX_ALGORITHM = "boreal.search.rank.v3";
 const DEFAULT_LIMIT = 20;
 const MAX_INDEXED_TOKENS_PER_DOCUMENT = 400;
+const MAX_CONTEXT_CHUNKS_PER_PACK = 8;
+const MAX_CONTEXT_CHUNK_CHARS = 700;
 
-export type SearchDocumentType = "work" | "evidence" | "source" | "claim" | "decision" | "context_pack";
+export type SearchDocumentType = "work" | "evidence" | "source" | "claim" | "decision" | "context_pack" | "context_chunk";
 
 export interface SearchCorpusSnapshot {
   readonly workItems: readonly WorkItem[];
@@ -54,6 +56,7 @@ export interface SearchIndexEntry {
 export interface SearchQueryOptions {
   readonly limit?: number;
   readonly type?: SearchDocumentType;
+  readonly types?: readonly SearchDocumentType[];
   readonly explain?: boolean;
 }
 
@@ -139,10 +142,11 @@ const STOP_WORDS = new Set([
 const TYPE_ORDER: Record<SearchDocumentType, number> = {
   work: 0,
   context_pack: 1,
-  decision: 2,
-  claim: 3,
-  evidence: 4,
-  source: 5
+  context_chunk: 2,
+  decision: 3,
+  claim: 4,
+  evidence: 5,
+  source: 6
 };
 
 export function buildSearchIndex(snapshot: SearchCorpusSnapshot, builtAt: IsoTimestamp = nowIso()): SearchIndexDocument {
@@ -193,8 +197,9 @@ export function querySearchIndex(
 
   const limit = options.limit ?? DEFAULT_LIMIT;
   const scoringStats = searchScoringStats(index);
+  const allowedTypes = searchDocumentTypeFilter(options);
   const results = index.documents
-    .filter((entry) => !options.type || entry.type === options.type)
+    .filter((entry) => !allowedTypes || allowedTypes.has(entry.type))
     .map((entry) => scoreEntry(entry, normalizedQuery, queryTokens, Boolean(options.explain), scoringStats))
     .filter((result): result is SearchResult => result !== undefined)
     .sort(compareSearchResults);
@@ -227,7 +232,7 @@ function buildSearchEntries(snapshot: SearchCorpusSnapshot): readonly SearchInde
     ...snapshot.knowledgeSources.map(sourceEntry),
     ...snapshot.claims.map(claimEntry),
     ...snapshot.decisions.map(decisionEntry),
-    ...snapshot.contextPacks.map(contextPackEntry)
+    ...snapshot.contextPacks.flatMap(contextPackEntries)
   ].sort((left, right) => left.id.localeCompare(right.id));
 }
 
@@ -308,6 +313,48 @@ function contextPackEntry(pack: ContextPack): SearchIndexEntry {
     ],
     pack.subjectId
   );
+}
+
+function contextPackEntries(pack: ContextPack): readonly SearchIndexEntry[] {
+  return [contextPackEntry(pack), ...contextChunkEntries(pack)];
+}
+
+function contextChunkEntries(pack: ContextPack): readonly SearchIndexEntry[] {
+  const chunks: SearchIndexEntry[] = [];
+
+  const addChunk = (key: string, label: string, field: string, text: string, weight: number) => {
+    if (chunks.length >= MAX_CONTEXT_CHUNKS_PER_PACK) {
+      return;
+    }
+    const boundedText = trimContextChunk(text);
+    if (!boundedText) {
+      return;
+    }
+    const weightedText = [
+      { field: "id", text: `${pack.id} ${key}`, weight: 10 },
+      { field: "subjectId", text: pack.subjectId, weight: 8 },
+      { field: "title", text: `${pack.title} ${label}`, weight: 7 },
+      { field, text: boundedText, weight }
+    ];
+    chunks.push({
+      id: `context_chunk:${pack.id}:${key}`,
+      type: "context_chunk",
+      recordId: pack.id,
+      subjectId: pack.subjectId,
+      title: `${pack.title} (${label})`,
+      summary: trimSummary(boundedText),
+      tokenWeights: tokenWeights(weightedText),
+      fieldWeights: fieldWeights(weightedText)
+    });
+  };
+
+  addChunk("summary", "summary", "summary", pack.summary, 6);
+  pack.facts.forEach((fact, index) => addChunk(`fact-${index.toString().padStart(3, "0")}`, `fact ${index + 1}`, "facts", fact, 8));
+  pack.evidence.forEach((evidence, index) =>
+    addChunk(`evidence-${index.toString().padStart(3, "0")}`, `evidence ${index + 1}`, "evidence", evidence, 7)
+  );
+
+  return chunks;
 }
 
 function entry(
@@ -544,18 +591,50 @@ function compareSearchResults(left: SearchResult, right: SearchResult): number {
 }
 
 function tokenize(text: string): readonly string[] {
-  return normalizeText(text)
-    .split(/[^a-z0-9_]+/u)
-    .filter((token) => token.length > 1 && !STOP_WORDS.has(token));
+  const tokens: string[] = [];
+  const seen = new Set<string>();
+  for (const candidate of [normalizeText(text), normalizeText(expandTokenBoundaries(text))]) {
+    for (const rawToken of candidate.split(/[^a-z0-9_]+/u)) {
+      for (const token of tokenVariants(rawToken)) {
+        if (token.length <= 1 || STOP_WORDS.has(token) || seen.has(token)) {
+          continue;
+        }
+        seen.add(token);
+        tokens.push(token);
+      }
+    }
+  }
+  return tokens;
 }
 
 function normalizeText(text: string): string {
   return normalizeGeneratedSearchText(text);
 }
 
+function expandTokenBoundaries(text: string): string {
+  return text
+    .replace(/([A-Z]+)([A-Z][a-z])/gu, "$1 $2")
+    .replace(/([a-z0-9])([A-Z])/gu, "$1 $2")
+    .replace(/([A-Za-z])([0-9])/gu, "$1 $2")
+    .replace(/([0-9])([A-Za-z])/gu, "$1 $2")
+    .replace(/[./:@?#&=+~|-]+/gu, " ");
+}
+
+function tokenVariants(token: string): readonly string[] {
+  if (!token.includes("_")) {
+    return [token];
+  }
+  return [token, ...token.split("_")];
+}
+
 function trimSummary(value: string): string {
   const compact = value.replace(/\s+/gu, " ").trim();
   return compact.length > 180 ? `${compact.slice(0, 177)}...` : compact;
+}
+
+function trimContextChunk(value: string): string {
+  const compact = value.replace(/\s+/gu, " ").trim();
+  return compact.length > MAX_CONTEXT_CHUNK_CHARS ? `${compact.slice(0, MAX_CONTEXT_CHUNK_CHARS - 3)}...` : compact;
 }
 
 function isSearchIndexEntry(value: unknown): value is SearchIndexEntry {
@@ -608,8 +687,14 @@ function isSearchDocumentType(value: unknown): value is SearchDocumentType {
     value === "source" ||
     value === "claim" ||
     value === "decision" ||
-    value === "context_pack"
+    value === "context_pack" ||
+    value === "context_chunk"
   );
+}
+
+function searchDocumentTypeFilter(options: SearchQueryOptions): ReadonlySet<SearchDocumentType> | undefined {
+  const types = [...(options.type ? [options.type] : []), ...(options.types ?? [])];
+  return types.length > 0 ? new Set(types) : undefined;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

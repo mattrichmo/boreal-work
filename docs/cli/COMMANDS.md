@@ -670,7 +670,7 @@ Context facts always include work status and priority, plus capped accepted clai
 bwrk context search <query> [--limit <count>] [--explain] [--json]
 ```
 
-Searches context-pack documents only. The search index must be fresh; run `bwrk search index` or `bwrk doctor --fix` after imports, writes, or context rebuilds that change searchable content.
+Searches context-pack summary documents and bounded context-chunk documents only. The search index must be fresh; run `bwrk search index` or `bwrk doctor --fix` after imports, writes, or context rebuilds that change searchable content.
 
 JSON `data` is an array of search results with `id`, `type`, `recordId`, `subjectId`, `title`, `summary`, `score`, and `matches`. With `--explain`, each result also includes `explain.algorithm`, `queryTokens`, `scoreBreakdown`, and `fieldMatches`.
 
@@ -680,7 +680,7 @@ JSON `data` is an array of search results with `id`, `type`, `recordId`, `subjec
 bwrk search index [--json]
 ```
 
-Builds a deterministic local search index at `.boreal/runtime/search-index.json`. Rebuilds are serialized with `.boreal/runtime/search-index.lock` and use atomic fsync writes. The index stores compact weighted aggregate tokens, per-field tokens, document-frequency statistics, and result summaries for work, evidence, sources, claims, decisions, and context packs; it does not store full record bodies.
+Builds a deterministic local search index at `.boreal/runtime/search-index.json`. Rebuilds are serialized with `.boreal/runtime/search-index.lock` and use atomic fsync writes. The index stores compact weighted aggregate tokens, per-field tokens, document-frequency statistics, and result summaries for work, evidence, sources, claims, decisions, context packs, and bounded context chunks; it does not store full record bodies.
 
 JSON `data` contains `path`, `schemaVersion`, `builtAt`, `contentHash`, `documentCount`, and `tokenCount`.
 
@@ -690,7 +690,7 @@ JSON `data` contains `path`, `schemaVersion`, `builtAt`, `contentHash`, `documen
 bwrk search query <query> [--limit <count>] [--explain] [--json]
 ```
 
-Searches work, evidence, sources, claims, decisions, and context packs. Results are ranked by ID prefix matches, field-weighted token matches adjusted by document frequency, and stable type/title ordering.
+Searches work, evidence, sources, claims, decisions, context packs, and bounded context chunks. Results are ranked by ID prefix matches, field-weighted token matches adjusted by document frequency, and stable type/title ordering. Tokenization preserves compact tokens while adding camelCase, path/URI, underscore, and alpha-numeric split variants.
 
 Use `--explain` to include the normalized query tokens, score contributions, document frequencies, IDF factors, and field-level matches that caused each result to rank.
 

@@ -75,6 +75,10 @@ import {
 import { createResultSpoolingOutput, formatRecord, table, type CliOutput } from "./output.js";
 import { runSearch, writeSearchIndex } from "./search-cli.js";
 
+const DEFAULT_HANDOFF_SEARCH_LIMIT = 8;
+const HANDOFF_SEARCH_MIN_CANDIDATES = 24;
+const HANDOFF_CONTEXT_CHUNK_LIMIT_RATIO = 3;
+
 export interface CommandResult {
   readonly exitCode: number;
 }
@@ -1396,7 +1400,7 @@ async function contextCommand(
     case "search": {
       const results = await runSearch(context, rest.join(" "), {
         limit: parseLimit(flagValue(args, "limit")),
-        type: "context_pack",
+        types: ["context_pack", "context_chunk"],
         explain: hasFlag(args, "explain")
       });
       output.write(json ? formatRecord(results, true) : table(results.map(searchResultRow)));
@@ -1857,15 +1861,16 @@ async function buildHandoffBundle(context: CliContext, workId: WorkId, args: Par
   await writeSearchIndex(context);
   const queryFlag = flagValue(args, "query");
   const query = queryFlag ? normalizeSearchQuery(queryFlag) : handoffSearchQuery(work, contextPack);
-  const results = await runSearch(context, query, {
-    limit: parseLimit(flagValue(args, "limit")) ?? 8
+  const resultLimit = parseLimit(flagValue(args, "limit")) ?? DEFAULT_HANDOFF_SEARCH_LIMIT;
+  const candidates = await runSearch(context, query, {
+    limit: Math.max(resultLimit * HANDOFF_CONTEXT_CHUNK_LIMIT_RATIO, HANDOFF_SEARCH_MIN_CANDIDATES)
   });
   return {
     work,
     contextPack,
     search: {
       query,
-      results
+      results: diversifyHandoffSearchResults(candidates, resultLimit)
     }
   };
 }
@@ -2320,6 +2325,36 @@ function handoffSearchQuery(work: WorkItemView, contextPack: ContextPack): strin
     .join(" ")
     .replace(/\s+/gu, " ")
     .trim();
+}
+
+function diversifyHandoffSearchResults(results: readonly SearchResult[], limit: number): readonly SearchResult[] {
+  const selected: SearchResult[] = [];
+  const deferredContextChunks: SearchResult[] = [];
+  const contextChunkLimit = Math.max(1, Math.floor(limit / HANDOFF_CONTEXT_CHUNK_LIMIT_RATIO));
+  let contextChunkCount = 0;
+
+  for (const result of results) {
+    if (result.type === "context_chunk") {
+      if (contextChunkCount >= contextChunkLimit) {
+        deferredContextChunks.push(result);
+        continue;
+      }
+      contextChunkCount += 1;
+    }
+    selected.push(result);
+    if (selected.length >= limit) {
+      return selected;
+    }
+  }
+
+  for (const result of deferredContextChunks) {
+    selected.push(result);
+    if (selected.length >= limit) {
+      break;
+    }
+  }
+
+  return selected;
 }
 
 function compareReservationRows(left: ReservationListRow, right: ReservationListRow): number {

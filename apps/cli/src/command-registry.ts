@@ -504,7 +504,7 @@ export const COMMAND_DEFINITIONS: readonly CommandDefinition[] = [
     category: "context",
     summary: "Search context packs.",
     usage: "bwrk context search <query> [--limit <n>] [--explain] [--json]",
-    description: "Searches the fresh local search index but only returns context-pack documents.",
+    description: "Searches the fresh local search index but only returns context pack and bounded context chunk documents.",
     flags: [
       flag("limit", "value", "Maximum number of context results to print."),
       flag("explain", "boolean", "Include query tokens, score breakdown, and field-level matches in JSON output."),
@@ -529,7 +529,7 @@ export const COMMAND_DEFINITIONS: readonly CommandDefinition[] = [
     category: "search",
     summary: "Search work and knowledge records.",
     usage: "bwrk search query <query> [--limit <n>] [--explain] [--json]",
-    description: "Searches work, evidence, sources, claims, decisions, and context packs using a fresh local index.",
+    description: "Searches work, evidence, sources, claims, decisions, context packs, and bounded context chunks using a fresh local index.",
     flags: [
       flag("limit", "value", "Maximum number of search results to print."),
       flag("explain", "boolean", "Include query tokens, score breakdown, and field-level matches in JSON output."),
