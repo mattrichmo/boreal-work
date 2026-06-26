@@ -27,6 +27,14 @@ Global flags:
 
 In JSON mode, successful commands write one JSON envelope to stdout, errors write one JSON envelope to stderr, and unexpected raw stdout writes are redirected to stderr so stdout stays parseable. If a JSON result exceeds the command's `behavior.maxResultSizeChars`, Boreal writes the full envelope under `.boreal/results/` and returns compact data with `truncated`, `preview`, `fullResultPath`, and `fullResultBytes`.
 
+Result limits:
+
+- List commands default to `100` rows and reject `--limit` values over `1000`.
+- `operation list` defaults to `50` rows and rejects `--limit` values over `1000`.
+- `work next` defaults to `10` rows and rejects `--limit` values over `1000`.
+- `context search` and `search query` reject `--limit` values over `100`.
+- `work claim` and `agent start` handoff search output defaults to `8` results and rejects `--limit` values over `50`.
+
 Initialized workspace commands append local runtime operation records to `.boreal/runtime/state.json`. Operation records include the command path, session ID, actor, timing, exit status, declared state/artifact effects, redacted argv, and event IDs created by the command. Runtime events created during the same command store that local operation ID so local event history can point back to the exact CLI invocation. Operation records and event operation IDs are local audit data and are excluded from portable exports and snapshot content hashes.
 
 Flag parsing:
@@ -220,7 +228,7 @@ Recomputes readiness for one work item and marks it `ready` if its dependencies 
 bwrk work list [--ready] [--status <status>] [--label <label>] [--limit <count>] [--json]
 ```
 
-Lists work items. `--label` may be repeated and all labels must match.
+Lists work items. `--label` may be repeated and all labels must match. Default `--limit` is `100`; max is `1000`.
 
 Statuses:
 
@@ -265,7 +273,7 @@ JSON `data` shape:
 bwrk work next [--label <label>] [--limit <count>] [--json]
 ```
 
-Lists claimable ready work from the live runtime view, ordered by priority and title. `--label` may be repeated and all labels must match. Default `--limit` is `10`.
+Lists claimable ready work from the live runtime view, ordered by priority and title. `--label` may be repeated and all labels must match. Default `--limit` is `10`; max is `1000`.
 
 This command does not use the search index; readiness and reservation-sensitive workflow state are read from current runtime state.
 
@@ -352,7 +360,7 @@ Handoff output includes:
 
 If context/search handoff generation fails after the reservation is created, the command still exits `0` with `claimed: true`, `handoffComplete: false`, the reservation/work view, a warning, and `repairCommand: "bwrk doctor --fix --json"`.
 
-`--limit` controls the number of returned search results and defaults to `8`.
+`--limit` controls the number of returned search results, defaults to `8`, and is capped at `50`. Limit validation happens before claiming work so invalid input cannot create a reservation.
 
 ## `work release`
 
@@ -384,7 +392,7 @@ Filters:
 - `--work`: only reservations for one work item.
 - `--status`: lifecycle status; use `all` to include active, released, and expired records.
 - `--expired`: only rows whose `expiresAt` timestamp is in the past.
-- `--limit`: maximum number of rows.
+- `--limit`: maximum number of rows. Default is `100`; max is `1000`.
 
 Rows include reservation ID, status, computed `expired`, agent ID, work ID, work status, work title, `reservedAt`, optional `expiresAt`, and optional purpose.
 
@@ -454,6 +462,8 @@ Safe entrypoint for an agent before it starts work:
 - If context/search handoff generation fails after a reservation is claimed or resumed, returns the reservation with `handoffComplete: false`, a warning, and `repairCommand: "bwrk doctor --fix --json"` instead of losing the successful claim behind an error.
 - Returns `started: false` with `reason: "no_ready_work"` when no matching ready work exists.
 
+`--limit` controls returned handoff search results, defaults to `8`, and is capped at `50`. Limit validation happens before resuming or claiming work so invalid input cannot create a reservation.
+
 ## `agent status`
 
 ```bash
@@ -496,7 +506,7 @@ Summarizes the target session without deleting or closing records. The result re
 bwrk operation list [--session-id <id>] [--command <path>] [--status succeeded|failed|all] [--limit <count>] [--json]
 ```
 
-Lists local command operation records newest first. Default `--limit` is `50`. Filters are exact after normalization:
+Lists local command operation records newest first. Default `--limit` is `50`; max is `1000`. Filters are exact after normalization:
 
 - `--session-id`: only operations from one session.
 - `--command`: only one command path, for example `work create`.
@@ -591,7 +601,7 @@ JSON `data` is the full source record, including `meta.id`, `kind`, `title`, `ur
 bwrk source list [--kind raw|document|chat|code|artifact] [--limit <count>] [--json]
 ```
 
-Lists knowledge sources. JSON output is an array of rows with `id`, `kind`, `title`, and `uri`.
+Lists knowledge sources. Default `--limit` is `100`; max is `1000`. JSON output is an array of rows with `id`, `kind`, `title`, and `uri`.
 
 ## `source show`
 
@@ -624,7 +634,7 @@ JSON `data` is the full claim record, including `meta.id`, `statement`, `status`
 bwrk claim list [--status proposed|accepted|rejected|stale] [--source <source-id>] [--limit <count>] [--json]
 ```
 
-Lists claims, optionally filtered by status and source.
+Lists claims, optionally filtered by status and source. Default `--limit` is `100`; max is `1000`.
 
 JSON `data` is an array of rows with `id`, `status`, `statement`, `sources`, and `evidence`.
 
@@ -661,7 +671,7 @@ JSON `data` is the full decision record, including `meta.id`, `title`, `status`,
 bwrk decision list [--status proposed|accepted|superseded|rejected] [--source <source-id>] [--limit <count>] [--json]
 ```
 
-Lists decisions, optionally filtered by status and source.
+Lists decisions, optionally filtered by status and source. Default `--limit` is `100`; max is `1000`.
 
 JSON `data` is an array of rows with `id`, `status`, `title`, `decision`, and `sources`.
 
@@ -700,7 +710,7 @@ Context facts always include work status and priority, plus capped accepted clai
 bwrk context search <query> [--limit <count>] [--explain] [--json]
 ```
 
-Searches context-pack summary documents and bounded context-chunk documents only. The search index must be fresh; run `bwrk search index` or `bwrk doctor --fix` after imports, writes, or context rebuilds that change searchable content.
+Searches context-pack summary documents and bounded context-chunk documents only. `--limit` is capped at `100`. The search index must be fresh; run `bwrk search index` or `bwrk doctor --fix` after imports, writes, or context rebuilds that change searchable content.
 
 JSON `data` is an array of search results with `id`, `type`, `recordId`, `subjectId`, `title`, `summary`, `score`, and `matches`. With `--explain`, each result also includes `explain.algorithm`, `queryTokens`, `scoreBreakdown`, and `fieldMatches`.
 
@@ -720,7 +730,7 @@ JSON `data` contains `path`, `schemaVersion`, `builtAt`, `contentHash`, `documen
 bwrk search query <query> [--limit <count>] [--explain] [--json]
 ```
 
-Searches work, evidence, sources, claims, decisions, context packs, and bounded context chunks. Results are ranked by ID prefix matches, field-weighted token matches adjusted by document frequency, deterministic vector-lite similarity, and stable type/title ordering. Tokenization preserves compact tokens while adding camelCase, path/URI, underscore, and alpha-numeric split variants.
+Searches work, evidence, sources, claims, decisions, context packs, and bounded context chunks. `--limit` is capped at `100`. Results are ranked by ID prefix matches, field-weighted token matches adjusted by document frequency, deterministic vector-lite similarity, and stable type/title ordering. Tokenization preserves compact tokens while adding camelCase, path/URI, underscore, and alpha-numeric split variants.
 
 Use `--explain` to include the normalized query tokens, score contributions, document frequencies, IDF factors, vector similarity, and field-level matches that caused each result to rank.
 

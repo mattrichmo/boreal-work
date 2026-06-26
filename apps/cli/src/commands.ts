@@ -97,6 +97,12 @@ import { addRawSource, createWikiPage, initVault, inspectVault, type VaultStatus
 const DEFAULT_HANDOFF_SEARCH_LIMIT = 8;
 const HANDOFF_SEARCH_MIN_CANDIDATES = 24;
 const HANDOFF_CONTEXT_CHUNK_LIMIT_RATIO = 3;
+const DEFAULT_LIST_LIMIT = 100;
+const DEFAULT_OPERATION_LIST_LIMIT = 50;
+const DEFAULT_READY_WORK_LIMIT = 10;
+const MAX_LIST_LIMIT = 1_000;
+const MAX_SEARCH_LIMIT = 100;
+const MAX_HANDOFF_SEARCH_LIMIT = 50;
 
 export interface CommandResult {
   readonly exitCode: number;
@@ -550,7 +556,7 @@ async function operationCommand(
       const sessionId = optionalSessionId(flagValue(args, "session-id"));
       const command = optionalCommandPath(flagValue(args, "command"));
       const status = parseOperationStatus(flagValue(args, "status"));
-      const limit = parseLimit(flagValue(args, "limit")) ?? 50;
+      const limit = parseLimit(flagValue(args, "limit")) ?? DEFAULT_OPERATION_LIST_LIMIT;
       const rows = await context.store.read(async (reader) => {
         const operations = await reader.listOperations();
         return [...operations]
@@ -941,6 +947,7 @@ async function agentStartCommand(
 ): Promise<CommandResult> {
   const agentId = agentIdFromArgs(args, context.actor.id);
   const labels = labelsFromArgs(args);
+  const handoffResultLimit = parseHandoffResultLimit(args);
   const status = await buildAgentStatus(context, agentId, labels);
 
   if (status.reservations.expiredActiveCount > 0) {
@@ -951,7 +958,7 @@ async function agentStartCommand(
   const activeReservation = status.reservations.active[0];
   if (activeReservation) {
     const reservation = await requireReservation(context, activeReservation.id);
-    const handoff = await buildHandoffResult(context, asWorkId(activeReservation.workId), args);
+    const handoff = await buildHandoffResult(context, asWorkId(activeReservation.workId), args, handoffResultLimit);
     output.write(
       formatRecord(
         {
@@ -987,7 +994,7 @@ async function agentStartCommand(
     return { exitCode: 0 };
   }
 
-  const handoff = await buildHandoffResult(context, claim.work.meta.id, args, claim.work);
+  const handoff = await buildHandoffResult(context, claim.work.meta.id, args, handoffResultLimit, claim.work);
   output.write(
     formatRecord(
       {
@@ -1083,7 +1090,7 @@ async function reservationCommand(
   const workId = workRef ? await resolveWorkId(context, workRef) : undefined;
   const status = parseReservationStatus(flagValue(args, "status"));
   const onlyExpired = hasFlag(args, "expired");
-  const limit = parseLimit(flagValue(args, "limit"));
+  const limit = parseLimit(flagValue(args, "limit")) ?? DEFAULT_LIST_LIMIT;
   const now = Date.now();
   const rows = await context.store.read(async (reader) => {
     const reservations = await reader.listReservations();
@@ -1096,7 +1103,7 @@ async function reservationCommand(
       .filter((row) => !status || row.status === status)
       .filter((row) => !onlyExpired || row.expired)
       .sort(compareReservationRows)
-      .slice(0, limit ?? reservations.length);
+      .slice(0, limit);
   });
   output.write(json ? formatRecord(rows, true) : table(rows.map(textReservationListRow)));
   return { exitCode: 0 };
@@ -1206,20 +1213,20 @@ async function workCommand(
     case "list": {
       const status = listStatus(args);
       const labels = labelsFromArgs(args);
-      const limit = parseLimit(flagValue(args, "limit"));
+      const limit = parseLimit(flagValue(args, "limit")) ?? DEFAULT_LIST_LIMIT;
       const items = await context.store.read((reader) =>
         reader.listWorkItems({
           status,
           labels: labels.length > 0 ? labels : undefined
         })
       );
-      const rows = items.slice(0, limit ?? items.length).map(workListRow);
+      const rows = items.slice(0, limit).map(workListRow);
       output.write(json ? formatRecord(rows, true) : table(rows.map(textWorkListRow)));
       return { exitCode: 0 };
     }
     case "next": {
       const labels = labelsFromArgs(args);
-      const limit = parseLimit(flagValue(args, "limit")) ?? 10;
+      const limit = parseLimit(flagValue(args, "limit")) ?? DEFAULT_READY_WORK_LIMIT;
       const views = await context.runtime.listReadyWork();
       const rows = views
         .filter((view) => labels.every((label) => view.labels.includes(label)))
@@ -1256,6 +1263,7 @@ async function workCommand(
     case "claim": {
       const agentId = agentIdFromArgs(args, context.actor.id);
       const labels = labelsFromArgs(args);
+      const handoffResultLimit = parseHandoffResultLimit(args);
       const claim = await context.runtime.claimNextWork({
         agentId,
         labels,
@@ -1277,7 +1285,7 @@ async function workCommand(
         return { exitCode: 0 };
       }
 
-      const handoff = await buildHandoffResult(context, claim.work.meta.id, args, claim.work);
+      const handoff = await buildHandoffResult(context, claim.work.meta.id, args, handoffResultLimit, claim.work);
       output.write(
         formatRecord(
           {
@@ -1416,11 +1424,11 @@ async function sourceCommand(
     }
     case "list": {
       const kind = parseSourceKind(flagValue(args, "kind"));
-      const limit = parseLimit(flagValue(args, "limit"));
+      const limit = parseLimit(flagValue(args, "limit")) ?? DEFAULT_LIST_LIMIT;
       const sources = await context.runtime.listKnowledgeSources();
       const rows = sources
         .filter((source) => !kind || source.kind === kind)
-        .slice(0, limit ?? sources.length)
+        .slice(0, limit)
         .map(sourceListRow);
       output.write(json ? formatRecord(rows, true) : table(rows));
       return { exitCode: 0 };
@@ -1457,12 +1465,12 @@ async function claimCommand(
     case "list": {
       const status = parseClaimStatus(flagValue(args, "status"));
       const sourceId = optionalSourceId(flagValue(args, "source"));
-      const limit = parseLimit(flagValue(args, "limit"));
+      const limit = parseLimit(flagValue(args, "limit")) ?? DEFAULT_LIST_LIMIT;
       const claims = await context.runtime.listClaims();
       const rows = claims
         .filter((claim) => !status || claim.status === status)
         .filter((claim) => !sourceId || claim.sourceIds.includes(sourceId))
-        .slice(0, limit ?? claims.length)
+        .slice(0, limit)
         .map(claimListRow);
       output.write(json ? formatRecord(rows, true) : table(rows));
       return { exitCode: 0 };
@@ -1501,12 +1509,12 @@ async function decisionCommand(
     case "list": {
       const status = parseDecisionStatus(flagValue(args, "status"));
       const sourceId = optionalSourceId(flagValue(args, "source"));
-      const limit = parseLimit(flagValue(args, "limit"));
+      const limit = parseLimit(flagValue(args, "limit")) ?? DEFAULT_LIST_LIMIT;
       const decisions = await context.runtime.listDecisions();
       const rows = decisions
         .filter((decision) => !status || decision.status === status)
         .filter((decision) => !sourceId || decision.sourceIds.includes(sourceId))
-        .slice(0, limit ?? decisions.length)
+        .slice(0, limit)
         .map(decisionListRow);
       output.write(json ? formatRecord(rows, true) : table(rows));
       return { exitCode: 0 };
@@ -1542,7 +1550,7 @@ async function contextCommand(
     }
     case "search": {
       const results = await runSearch(context, rest.join(" "), {
-        limit: parseLimit(flagValue(args, "limit")),
+        limit: parseLimit(flagValue(args, "limit"), { max: MAX_SEARCH_LIMIT }),
         types: ["context_pack", "context_chunk"],
         explain: hasFlag(args, "explain")
       });
@@ -1569,7 +1577,7 @@ async function searchCommand(
     }
     case "query": {
       const results = await runSearch(context, rest.join(" "), {
-        limit: parseLimit(flagValue(args, "limit")),
+        limit: parseLimit(flagValue(args, "limit"), { max: MAX_SEARCH_LIMIT }),
         explain: hasFlag(args, "explain")
       });
       output.write(json ? formatRecord(results, true) : table(results.map(searchResultRow)));
@@ -2293,7 +2301,7 @@ function parseOperationStatus(value: string | undefined): RuntimeOperationStatus
   throw new BorealError("BOREAL_INVALID_INPUT", "--status must be succeeded, failed, or all");
 }
 
-function parseLimit(value: string | undefined): number | undefined {
+function parseLimit(value: string | undefined, options: { readonly max?: number } = {}): number | undefined {
   if (!value) {
     return undefined;
   }
@@ -2301,7 +2309,15 @@ function parseLimit(value: string | undefined): number | undefined {
   if (!Number.isInteger(parsed) || parsed <= 0) {
     throw new BorealError("BOREAL_INVALID_INPUT", "--limit must be a positive integer");
   }
+  const max = options.max ?? MAX_LIST_LIMIT;
+  if (parsed > max) {
+    throw new BorealError("BOREAL_INVALID_INPUT", `--limit must be at most ${max}`);
+  }
   return parsed;
+}
+
+function parseHandoffResultLimit(args: ParsedArgs): number {
+  return parseLimit(flagValue(args, "limit"), { max: MAX_HANDOFF_SEARCH_LIMIT }) ?? DEFAULT_HANDOFF_SEARCH_LIMIT;
 }
 
 function parseOperationKeep(value: string | undefined): number | undefined {
@@ -2524,13 +2540,17 @@ async function rebuildProjectionsRespectingTombstones(context: CliContext): Prom
   });
 }
 
-async function buildHandoffBundle(context: CliContext, workId: WorkId, args: ParsedArgs): Promise<HandoffBundle> {
+async function buildHandoffBundle(
+  context: CliContext,
+  workId: WorkId,
+  args: ParsedArgs,
+  resultLimit: number
+): Promise<HandoffBundle> {
   await rebuildProjectionsRespectingTombstones(context);
   const [work, contextPack] = await Promise.all([context.runtime.getWorkView(workId), context.runtime.getContextPack(workId)]);
   await writeSearchIndex(context);
   const queryFlag = flagValue(args, "query");
   const query = queryFlag ? normalizeSearchQuery(queryFlag) : handoffSearchQuery(work, contextPack);
-  const resultLimit = parseLimit(flagValue(args, "limit")) ?? DEFAULT_HANDOFF_SEARCH_LIMIT;
   const candidates = await runSearch(context, query, {
     limit: Math.max(resultLimit * HANDOFF_CONTEXT_CHUNK_LIMIT_RATIO, HANDOFF_SEARCH_MIN_CANDIDATES)
   });
@@ -2548,13 +2568,14 @@ async function buildHandoffResult(
   context: CliContext,
   workId: WorkId,
   args: ParsedArgs,
+  resultLimit: number,
   fallbackWork?: WorkItem
 ): Promise<HandoffResult> {
   try {
     return {
       handoffComplete: true,
       warnings: [],
-      ...(await buildHandoffBundle(context, workId, args))
+      ...(await buildHandoffBundle(context, workId, args, resultLimit))
     };
   } catch (error) {
     return {

@@ -3656,6 +3656,98 @@ describe("bwrk cli", () => {
     expect(rows[0]?.labels).toContain("cli");
   });
 
+  it("caps high-volume list and search result limits", async () => {
+    const rootDir = await makeTempWorkspace();
+    await runCli(rootDir, ["init", "--json"]);
+
+    for (let index = 0; index < 101; index += 1) {
+      await runCli(rootDir, [
+        "work",
+        "create",
+        `Volume CLI work ${String(index).padStart(3, "0")}`,
+        "--label",
+        "volume",
+        "--json"
+      ]);
+    }
+
+    const defaultList = await runCli(rootDir, ["work", "list", "--label", "volume", "--json"]);
+    expect(defaultList.exitCode).toBe(0);
+    expect(parseData<Array<{ readonly id: string }>>(defaultList.stdout)).toHaveLength(100);
+
+    const explicitList = await runCli(rootDir, ["work", "list", "--label", "volume", "--limit", "101", "--json"]);
+    expect(explicitList.exitCode).toBe(0);
+    expect(parseData<Array<{ readonly id: string }>>(explicitList.stdout)).toHaveLength(101);
+
+    const excessiveList = await runCli(rootDir, ["work", "list", "--limit", "1001", "--json"]);
+    const excessiveListPayload = parseJson<{ readonly ok: false; readonly code: string; readonly message: string }>(
+      excessiveList.stderr
+    );
+    expect(excessiveList.exitCode).toBe(2);
+    expect(excessiveListPayload.code).toBe("BOREAL_INVALID_INPUT");
+    expect(excessiveListPayload.message).toContain("--limit must be at most 1000");
+
+    const excessiveSearch = await runCli(rootDir, ["search", "query", "volume", "--limit", "101", "--json"]);
+    const excessiveSearchPayload = parseJson<{ readonly ok: false; readonly code: string; readonly message: string }>(
+      excessiveSearch.stderr
+    );
+    expect(excessiveSearch.exitCode).toBe(2);
+    expect(excessiveSearchPayload.code).toBe("BOREAL_INVALID_INPUT");
+    expect(excessiveSearchPayload.message).toContain("--limit must be at most 100");
+  });
+
+  it("rejects excessive handoff limits before claiming work", async () => {
+    const rootDir = await makeTempWorkspace();
+    await runCli(rootDir, ["init", "--json"]);
+    await runCli(rootDir, ["work", "create", "Handoff limit guard", "--label", "limit-guard", "--ready", "--json"]);
+
+    const invalidClaim = await runCli(rootDir, [
+      "work",
+      "claim",
+      "--agent",
+      "agent-limit",
+      "--label",
+      "limit-guard",
+      "--limit",
+      "51",
+      "--json"
+    ]);
+    const invalidClaimPayload = parseJson<{ readonly ok: false; readonly code: string; readonly message: string }>(
+      invalidClaim.stderr
+    );
+    expect(invalidClaim.exitCode).toBe(2);
+    expect(invalidClaimPayload.code).toBe("BOREAL_INVALID_INPUT");
+    expect(invalidClaimPayload.message).toContain("--limit must be at most 50");
+
+    const invalidStart = await runCli(rootDir, [
+      "agent",
+      "start",
+      "--agent",
+      "agent-limit",
+      "--label",
+      "limit-guard",
+      "--limit",
+      "51",
+      "--json"
+    ]);
+    const invalidStartPayload = parseJson<{ readonly ok: false; readonly code: string; readonly message: string }>(
+      invalidStart.stderr
+    );
+    expect(invalidStart.exitCode).toBe(2);
+    expect(invalidStartPayload.code).toBe("BOREAL_INVALID_INPUT");
+    expect(invalidStartPayload.message).toContain("--limit must be at most 50");
+
+    const workRows = parseData<Array<{ readonly status: string }>>(
+      (await runCli(rootDir, ["work", "list", "--label", "limit-guard", "--json"])).stdout
+    );
+    expect(workRows).toEqual([expect.objectContaining({ status: "ready" })]);
+
+    const reservations = parseData<Array<{ readonly id: string }>>(
+      (await runCli(rootDir, ["reservation", "list", "--agent", "agent-limit", "--status", "all", "--json"])).stdout
+    );
+    expect(reservations).toEqual([]);
+  });
+
   it("resolves work references by title and id prefix in work commands", async () => {
     const rootDir = await makeTempWorkspace();
     await runCli(rootDir, ["init", "--json"]);
