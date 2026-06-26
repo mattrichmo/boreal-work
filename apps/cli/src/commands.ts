@@ -9,7 +9,9 @@ import {
   normalizeSearchQuery,
   nowIso,
   randomId,
+  touchRecord,
   withContentHash,
+  type ActorRef,
   type AgentReservation,
   type ClaimId,
   type ClaimRecord,
@@ -32,6 +34,7 @@ import {
   type ReservationStatus,
   type RuntimeOperation,
   type RuntimeOperationStatus,
+  type RuntimeEvent,
   type VerificationRecord,
   type VerificationVerdict,
   type WorkId,
@@ -124,6 +127,24 @@ interface OperationPruneResult {
   readonly keep?: number;
   readonly before?: IsoTimestamp;
   readonly deletedIds: readonly string[];
+}
+
+interface OperationRepairResult {
+  readonly dryRun: boolean;
+  readonly inspected: {
+    readonly operations: number;
+    readonly events: number;
+  };
+  readonly linkedEvents: readonly string[];
+  readonly markedLegacyEvents: readonly string[];
+  readonly repairedOperations: readonly string[];
+  readonly removedDanglingEventRefs: Array<{ readonly operationId: string; readonly eventId: string }>;
+  readonly removedConflictingEventRefs: Array<{
+    readonly operationId: string;
+    readonly eventId: string;
+    readonly eventOperationId: string;
+  }>;
+  readonly ambiguousEvents: Array<{ readonly eventId: string; readonly operationIds: readonly string[] }>;
 }
 
 interface AgentStatus {
@@ -399,6 +420,10 @@ async function operationCommand(
       output.write(formatRecord(await pruneOperations(context, args), json));
       return { exitCode: 0 };
     }
+    case "repair": {
+      output.write(formatRecord(await repairOperationLinks(context, hasFlag(args, "dry-run")), json));
+      return { exitCode: 0 };
+    }
     default:
       throw new BorealError("BOREAL_INVALID_INPUT", `Unknown operation command: ${action ?? ""}`);
   }
@@ -459,6 +484,134 @@ async function pruneOperations(context: CliContext, args: ParsedArgs): Promise<O
       deletedIds: deleted.map((operation) => operation.meta.id)
     };
   });
+}
+
+async function repairOperationLinks(context: CliContext, dryRun: boolean): Promise<OperationRepairResult> {
+  return context.store.write(async (writer) => {
+    const events = await writer.listEvents();
+    const operations = await writer.listOperations();
+    const eventById = new Map(events.map((event) => [event.meta.id, event]));
+    const operationById = new Map(operations.map((operation) => [operation.meta.id, operation]));
+    const operationIdsByEvent = eventOperationReferences(operations);
+
+    const updatedEvents = new Map<string, RuntimeEvent>();
+    const updatedOperations = new Map<string, RuntimeOperation>();
+    const linkedEvents: string[] = [];
+    const markedLegacyEvents: string[] = [];
+    const removedDanglingEventRefs: Array<{ operationId: string; eventId: string }> = [];
+    const removedConflictingEventRefs: Array<{ operationId: string; eventId: string; eventOperationId: string }> = [];
+    const ambiguousEvents: Array<{ eventId: string; operationIds: readonly string[] }> = [];
+    const repairNow = nowIso();
+
+    for (const operation of operations) {
+      const nextEventIds = operation.eventIds.filter((eventId) => {
+        const event = eventById.get(eventId);
+        if (!event) {
+          removedDanglingEventRefs.push({ operationId: operation.meta.id, eventId });
+          return false;
+        }
+        if (event.operationId && event.operationId !== operation.meta.id) {
+          removedConflictingEventRefs.push({
+            operationId: operation.meta.id,
+            eventId,
+            eventOperationId: event.operationId
+          });
+          return false;
+        }
+        return true;
+      });
+      if (!arraysEqual(nextEventIds, operation.eventIds)) {
+        updatedOperations.set(operation.meta.id, touchRecord({ ...operation, eventIds: nextEventIds }, repairNow, context.actor));
+      }
+    }
+
+    for (const event of events) {
+      const referencedBy = operationIdsByEvent.get(event.meta.id) ?? [];
+      const retainedOperation = event.operationId ? operationById.get(event.operationId) : undefined;
+      if (event.operationId && retainedOperation) {
+        if (!retainedOperation.eventIds.some((eventId) => eventId === event.meta.id)) {
+          const existing = updatedOperations.get(retainedOperation.meta.id) ?? retainedOperation;
+          updatedOperations.set(
+            retainedOperation.meta.id,
+            touchRecord({ ...existing, eventIds: [...existing.eventIds, event.meta.id] }, repairNow, context.actor)
+          );
+        }
+        if (event.operationLink === "legacy") {
+          const { operationLink: _operationLink, ...nextEvent } = event;
+          updatedEvents.set(event.meta.id, touchRecord(nextEvent, repairNow, context.actor));
+        }
+        continue;
+      }
+
+      if (event.operationId && !retainedOperation) {
+        const { operationId: _operationId, ...legacyEvent } = event;
+        updatedEvents.set(event.meta.id, legacyEventRecord(legacyEvent, repairNow, context.actor));
+        markedLegacyEvents.push(event.meta.id);
+        continue;
+      }
+
+      if (referencedBy.length === 1) {
+        const nextEvent = { ...event, operationId: referencedBy[0] as OperationId, operationLink: undefined };
+        updatedEvents.set(event.meta.id, touchRecord(nextEvent, repairNow, context.actor));
+        linkedEvents.push(event.meta.id);
+        continue;
+      }
+
+      if (referencedBy.length > 1) {
+        ambiguousEvents.push({ eventId: event.meta.id, operationIds: referencedBy });
+      }
+
+      if (event.operationLink !== "legacy") {
+        updatedEvents.set(event.meta.id, legacyEventRecord(event, repairNow, context.actor));
+        markedLegacyEvents.push(event.meta.id);
+      }
+    }
+
+    if (!dryRun) {
+      for (const event of updatedEvents.values()) {
+        await writer.putEvent(event);
+      }
+      for (const operation of updatedOperations.values()) {
+        await writer.putOperation(operation);
+      }
+    }
+
+    return {
+      dryRun,
+      inspected: {
+        operations: operations.length,
+        events: events.length
+      },
+      linkedEvents,
+      markedLegacyEvents,
+      repairedOperations: [...updatedOperations.keys()],
+      removedDanglingEventRefs,
+      removedConflictingEventRefs,
+      ambiguousEvents
+    };
+  });
+}
+
+function eventOperationReferences(operations: readonly RuntimeOperation[]): ReadonlyMap<string, readonly OperationId[]> {
+  const result = new Map<string, OperationId[]>();
+  for (const operation of operations) {
+    for (const eventId of operation.eventIds) {
+      result.set(eventId, [...(result.get(eventId) ?? []), operation.meta.id]);
+    }
+  }
+  return result;
+}
+
+function arraysEqual<T>(left: readonly T[], right: readonly T[]): boolean {
+  return left.length === right.length && left.every((value, index) => value === right[index]);
+}
+
+function legacyEventRecord<TEvent extends RuntimeEvent | Omit<RuntimeEvent, "operationId">>(
+  event: TEvent,
+  now: IsoTimestamp,
+  actor: ActorRef
+): TEvent {
+  return touchRecord({ ...event, operationLink: "legacy" }, now, actor) as TEvent;
 }
 
 function operationListRow(operation: RuntimeOperation): OperationListRow {

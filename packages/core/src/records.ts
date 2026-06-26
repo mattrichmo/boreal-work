@@ -170,6 +170,7 @@ export interface RuntimeEvent {
   readonly subjectId: string;
   readonly subjectType: string;
   readonly operationId?: OperationId;
+  readonly operationLink?: "legacy";
   readonly payload: Record<string, unknown>;
 }
 

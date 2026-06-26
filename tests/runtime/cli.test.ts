@@ -75,6 +75,7 @@ describe("bwrk cli", () => {
       "## `operation list`",
       "## `operation show`",
       "## `operation prune`",
+      "## `operation repair`",
       "## `evidence add`",
       "## `work verify`",
       "## `work close`",
@@ -251,6 +252,7 @@ describe("bwrk cli", () => {
         "operation list",
         "operation show",
         "operation prune",
+        "operation repair",
         "export json",
         "export markdown",
         "import json",
@@ -386,6 +388,78 @@ describe("bwrk cli", () => {
     expect(pruneResult.remainingAfterOperationLog).toBe(2);
     expect(state.operations).toHaveLength(2);
     expect(state.operations.map((operation) => operation.commandPath)).toContain("operation prune");
+  });
+
+  it("repairs legacy operation-event links and marks unlinked events", async () => {
+    const rootDir = await makeTempWorkspace();
+    await runCli(rootDir, ["init", "--json"]);
+    await runCli(rootDir, ["work", "create", "Repair operation links", "--ready", "--json"]);
+
+    let createdEventId = "";
+    let createdOperationId = "";
+    let legacyEventId = "";
+    await updateState(rootDir, (state) => {
+      const events = (state.events as Array<Record<string, unknown>>) ?? [];
+      const operations = (state.operations as Array<Record<string, unknown>>) ?? [];
+      const createdEvent = events.find((event) => event.type === "work.created");
+      const initEvent = events.find((event) => event.type === "workspace.initialized");
+      createdEventId = String((createdEvent?.meta as Record<string, unknown> | undefined)?.id ?? "");
+      legacyEventId = String((initEvent?.meta as Record<string, unknown> | undefined)?.id ?? "");
+      const createdOperation = operations.find((operation) =>
+        ((operation.eventIds as readonly string[] | undefined) ?? []).includes(createdEventId)
+      );
+      createdOperationId = String((createdOperation?.meta as Record<string, unknown> | undefined)?.id ?? "");
+      return {
+        ...state,
+        events: events.map((event) => {
+          if (event.type === "work.created" || event.type === "workspace.initialized") {
+            const { operationId: _operationId, operationLink: _operationLink, ...legacyEvent } = event;
+            return legacyEvent;
+          }
+          return event;
+        }),
+        operations: operations.map((operation) => ({
+          ...operation,
+          eventIds: ((operation.eventIds as readonly string[] | undefined) ?? []).filter((eventId) => eventId !== legacyEventId)
+        }))
+      };
+    });
+
+    const repaired = await runCli(rootDir, ["operation", "repair", "--json"]);
+    const repairedPayload = parseData<{
+      readonly linkedEvents: readonly string[];
+      readonly markedLegacyEvents: readonly string[];
+    }>(repaired.stdout);
+    const state = parseJson<{
+      readonly events: Array<{ readonly meta: { readonly id: string }; readonly operationId?: string; readonly operationLink?: string }>;
+    }>(await readFile(join(rootDir, ".boreal/runtime/state.json"), "utf8"));
+    const createdEvent = state.events.find((event) => event.meta.id === createdEventId);
+    const legacyEvent = state.events.find((event) => event.meta.id === legacyEventId);
+
+    expect(repaired.exitCode).toBe(0);
+    expect(repairedPayload.linkedEvents).toContain(createdEventId);
+    expect(repairedPayload.markedLegacyEvents).toContain(legacyEventId);
+    expect(createdEvent?.operationId).toBe(createdOperationId);
+    expect(createdEvent?.operationLink).toBeUndefined();
+    expect(legacyEvent?.operationId).toBeUndefined();
+    expect(legacyEvent?.operationLink).toBe("legacy");
+
+    const doctor = await runCli(rootDir, ["doctor", "--json"]);
+    const doctorPayload = parseData<{
+      readonly ok: boolean;
+      readonly diagnostics: Array<{ readonly code: string; readonly severity: string }>;
+    }>(doctor.stdout);
+    expect(doctor.exitCode).toBe(0);
+    expect(doctorPayload.ok).toBe(true);
+    expect(doctorPayload.diagnostics).toEqual(
+      expect.arrayContaining([expect.objectContaining({ code: "operation.legacy_events", severity: "warning" })])
+    );
+
+    await runCli(rootDir, ["export", "json", "--out", "repair-export.json", "--json"]);
+    const exported = parseJson<{
+      readonly state: { readonly events: Array<{ readonly operationId?: string; readonly operationLink?: string }> };
+    }>(await readFile(join(rootDir, "repair-export.json"), "utf8"));
+    expect(exported.state.events.every((event) => event.operationId === undefined && event.operationLink === undefined)).toBe(true);
   });
 
   it("rejects unknown flags and honors explicit false booleans", async () => {
@@ -714,6 +788,23 @@ describe("bwrk cli", () => {
     expect(payload.diagnostics).toEqual(
       expect.arrayContaining([expect.objectContaining({ code: "operation.event_causality", severity: "error" })])
     );
+
+    const repaired = await runCli(rootDir, ["operation", "repair", "--json"]);
+    const repairPayload = parseData<{
+      readonly removedConflictingEventRefs: readonly unknown[];
+      readonly markedLegacyEvents: readonly string[];
+    }>(repaired.stdout);
+    const repairedDoctor = await runCli(rootDir, ["doctor", "--json"]);
+    const repairedDoctorPayload = parseData<{
+      readonly ok: boolean;
+      readonly diagnostics: Array<{ readonly code: string; readonly severity: string }>;
+    }>(repairedDoctor.stdout);
+
+    expect(repaired.exitCode).toBe(0);
+    expect(repairPayload.removedConflictingEventRefs.length).toBeGreaterThan(0);
+    expect(repairPayload.markedLegacyEvents.length).toBeGreaterThan(0);
+    expect(repairedDoctor.exitCode).toBe(0);
+    expect(repairedDoctorPayload.ok).toBe(true);
   });
 
   it("spools oversized json command output to a result file", async () => {

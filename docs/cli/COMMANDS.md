@@ -492,6 +492,18 @@ Prunes local operation history without changing exported project records. `--kee
 
 JSON `data` includes `deleted`, `keptBeforeOperationLog`, `remainingAfterOperationLog`, optional `keep`/`before`, and `deletedIds`.
 
+## `operation repair`
+
+```bash
+bwrk operation repair [--dry-run] [--json]
+```
+
+Repairs local operation/event causality after upgrading older workspaces. The command backfills event `operationId` when exactly one retained operation references the event, repairs operation records that are missing a retained event reference, removes operation references to missing events, and marks events with no unambiguous retained operation as `operationLink: "legacy"`.
+
+Use `--dry-run` to inspect the planned changes without applying repair writes. The command itself is still recorded in the local operation log.
+
+JSON `data` includes inspected counts, linked event IDs, legacy-marked event IDs, repaired operation IDs, removed dangling/conflicting references, and ambiguous events.
+
 ## `evidence add`
 
 ```bash

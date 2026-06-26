@@ -571,6 +571,21 @@ async function validateStoreRecords(
           .filter((eventId) => !eventIds.has(eventId))
           .map((eventId) => ({ operationId: operation.meta.id, eventId }))
       );
+      const operationIdsByEvent = operationIdsByEventId(operations);
+      const legacyOperationEvents = rawEvents.flatMap((event) => {
+        const eventId = readRecordId(event, "events");
+        if (!eventId) {
+          return [];
+        }
+        if (event.operationLink === "legacy") {
+          return [{ issue: "legacy_operation_link", eventId }];
+        }
+        const operationIds = operationIdsByEvent.get(eventId) ?? [];
+        if (event.operationId === undefined && operationIds.length > 0) {
+          return [{ issue: "unmarked_legacy_operation_link", eventId, operationIds }];
+        }
+        return [];
+      });
       const operationById = new Map<string, RuntimeOperation>(operations.map((operation) => [operation.meta.id, operation]));
       const operationEventCausality = [
         ...operations.flatMap((operation) =>
@@ -649,6 +664,7 @@ async function validateStoreRecords(
         verificationPolicy,
         closedWithoutReason,
         danglingOperationEvents,
+        legacyOperationEvents,
         operationEventCausality,
         stringSafety,
         labelCollisions,
@@ -743,6 +759,7 @@ async function validateStoreRecords(
     diagnostics.push(diagnosticFromList("verification.policy", "Verification policy issues", summary.verificationPolicy));
     diagnostics.push(diagnosticFromList("work.closed_reason", "Closed work items missing a close reason", summary.closedWithoutReason));
     diagnostics.push(diagnosticFromList("operation.dangling_events", "Operation event references missing runtime events", summary.danglingOperationEvents));
+    diagnostics.push(warningDiagnosticFromList("operation.legacy_events", "Legacy operation/event links", summary.legacyOperationEvents));
     diagnostics.push(diagnosticFromList("operation.event_causality", "Operation and event causality links disagree", summary.operationEventCausality));
     diagnostics.push(diagnosticFromList("string.suspicious_unicode", "Unsafe Unicode in machine-facing strings", summary.stringSafety));
     diagnostics.push(warningDiagnosticFromList("label.normalization_collision", "Label normalization collisions", summary.labelCollisions));
@@ -1070,6 +1087,16 @@ function duplicateGraphEdgeKeys(graphEdges: readonly GraphEdge[]): Array<{ key: 
   return [...edgeIdsByKey.entries()]
     .filter(([, edgeIds]) => edgeIds.length > 1)
     .map(([key, edgeIds]) => ({ key, edgeIds }));
+}
+
+function operationIdsByEventId(operations: readonly RuntimeOperation[]): ReadonlyMap<string, readonly string[]> {
+  const result = new Map<string, string[]>();
+  for (const operation of operations) {
+    for (const eventId of operation.eventIds) {
+      result.set(eventId, [...(result.get(eventId) ?? []), operation.meta.id]);
+    }
+  }
+  return result;
 }
 
 function dependencyIdsByWorkFromGraph(

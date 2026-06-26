@@ -122,6 +122,9 @@ export function runtimeEventSchemaIssues(value: unknown, path = "$"): readonly S
   if (value.operationId !== undefined) {
     issues.push(...patternStringIssue(value.operationId, `${path}.operationId`, schemaId, /^bw_operation_[a-f0-9]{12,64}$/));
   }
+  if (value.operationLink !== undefined) {
+    issues.push(...enumIssue(value.operationLink, `${path}.operationLink`, schemaId, ["legacy"]));
+  }
   return issues;
 }
 

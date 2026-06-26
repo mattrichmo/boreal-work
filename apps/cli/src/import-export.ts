@@ -316,10 +316,10 @@ function normalizeSnapshot(value: unknown): ExportSnapshot {
 }
 
 function portableEvent<T>(value: T): T {
-  if (!isRecord(value) || value.operationId === undefined) {
+  if (!isRecord(value) || (value.operationId === undefined && value.operationLink === undefined)) {
     return value;
   }
-  const { operationId: _operationId, ...event } = value;
+  const { operationId: _operationId, operationLink: _operationLink, ...event } = value;
   return isRecord(event.meta) ? (withContentHash(event as unknown as RuntimeEvent) as T) : (event as T);
 }
 

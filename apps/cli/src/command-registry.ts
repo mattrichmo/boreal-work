@@ -668,6 +668,18 @@ export const COMMAND_DEFINITIONS: readonly CommandDefinition[] = [
     supportsJson: true,
   },
   {
+    path: ["operation", "repair"],
+    category: "operation",
+    summary: "Repair local operation-event causality links.",
+    usage: "bwrk operation repair [--dry-run] [--json]",
+    description:
+      "Backfills unambiguous legacy event links and marks unlinked local operation history as legacy.",
+    flags: [flag("dry-run", "boolean", "Report repair actions without writing them.")],
+    positionals: { label: "arguments", min: 0, max: 0 },
+    requiresWorkspace: true,
+    supportsJson: true,
+  },
+  {
     path: ["export", "json"],
     category: "export",
     summary: "Export a stable JSON snapshot.",
@@ -1243,6 +1255,18 @@ const COMMAND_BEHAVIOR: Readonly<Record<string, CommandBehaviorMetadata>> = {
     maxResultSizeChars: 100_000,
     humanOutputKind: "record",
     examples: ["bwrk operation prune --keep 500 --json"],
+  }),
+  "operation repair": commandMetadata("operation repair", {
+    readOnly: false,
+    destructive: false,
+    writesState: true,
+    writesGeneratedArtifacts: false,
+    requiresFreshIndex: false,
+    concurrencySafe: true,
+    requiresLock: "state",
+    maxResultSizeChars: 100_000,
+    humanOutputKind: "record",
+    examples: ["bwrk operation repair --json", "bwrk operation repair --dry-run --json"],
   }),
   "export json": commandMetadata("export json", {
     readOnly: false,
