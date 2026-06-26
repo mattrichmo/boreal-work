@@ -22,6 +22,17 @@ interface CommandRun {
   readonly stderr: string;
 }
 
+interface DoctorPayload {
+  readonly ok: boolean;
+  readonly fixed: boolean;
+  readonly diagnostics: readonly Array<{
+    readonly code: string;
+    readonly severity: string;
+    readonly message: string;
+    readonly details?: unknown;
+  }>;
+}
+
 interface MutableActorForTest {
   id: string;
   [key: string]: unknown;
@@ -398,6 +409,146 @@ describe("bwrk cli", () => {
     expect(missingRemote.exitCode).toBe(2);
     expect(error.code).toBe("BOREAL_INVALID_INPUT");
     expect(error.message).toContain("--memory-remote");
+  });
+
+  it("doctors project setup git drift and repairs safe guards", async () => {
+    const rootDir = await makeTempWorkspace();
+    await runCli(rootDir, [
+      "init",
+      "--setup-memory",
+      "--memory-root",
+      "memory",
+      "--memory-layout",
+      "child",
+      "--json"
+    ]);
+    await rm(join(rootDir, "memory/.git"), { recursive: true, force: true });
+    await writeFile(join(rootDir, ".gitignore"), "# user ignore\n", "utf8");
+    await writeFile(join(rootDir, "memory/.gitignore"), "# memory ignore\n", "utf8");
+
+    const failing = await runCli(rootDir, ["doctor", "--json"]);
+    const failingPayload = parseData<DoctorPayload>(failing.stdout);
+
+    expect(failing.exitCode).toBe(1);
+    expect(failingPayload.ok).toBe(false);
+    expect(doctorDiagnostic(failingPayload, "project_setup.memory_repo")).toEqual(
+      expect.objectContaining({ severity: "error" })
+    );
+    expect(doctorDiagnostic(failingPayload, "project_setup.gitignore")).toEqual(
+      expect.objectContaining({ severity: "error" })
+    );
+
+    const fixed = await runCli(rootDir, ["doctor", "--fix", "--json"]);
+    const fixedPayload = parseData<DoctorPayload>(fixed.stdout);
+
+    expect(fixed.exitCode).toBe(0);
+    expect(fixedPayload.fixed).toBe(true);
+    expect(doctorDiagnostic(fixedPayload, "project_setup.memory_repo")).toEqual(
+      expect.objectContaining({ severity: "fixed" })
+    );
+    expect(doctorDiagnostic(fixedPayload, "project_setup.gitignore")).toEqual(
+      expect.objectContaining({ severity: "fixed" })
+    );
+    expect(await fileMissing(join(rootDir, "memory/.git"))).toBe(false);
+    expect(await readFile(join(rootDir, ".gitignore"), "utf8")).toContain("/memory/");
+    expect(await readFile(join(rootDir, "memory/.gitignore"), "utf8")).toContain(".boreal/locks/");
+  });
+
+  it("reports child separate memory tracked by the project git index", async () => {
+    const rootDir = await makeTempWorkspace();
+    if (!(await gitAvailable(rootDir))) {
+      return;
+    }
+    await initGitRepository(rootDir, "main");
+    await runCli(rootDir, [
+      "init",
+      "--setup-memory",
+      "--memory-root",
+      "memory",
+      "--memory-layout",
+      "child",
+      "--json"
+    ]);
+    await runGit(join(rootDir, "memory"), ["config", "user.email", "boreal-tests@example.invalid"]);
+    await runGit(join(rootDir, "memory"), ["config", "user.name", "Boreal Tests"]);
+    await runGit(join(rootDir, "memory"), ["add", "index.md"]);
+    await runGit(join(rootDir, "memory"), ["commit", "-m", "Initial memory commit"]);
+    await runGit(rootDir, ["add", "-f", "memory"]);
+
+    const doctor = await runCli(rootDir, ["doctor", "--json"]);
+    const payload = parseData<DoctorPayload>(doctor.stdout);
+
+    expect(doctor.exitCode).toBe(1);
+    expect(doctorDiagnostic(payload, "project_setup.child_tracking")).toEqual(
+      expect.objectContaining({ severity: "error" })
+    );
+  });
+
+  it("repairs stale child memory submodule metadata through doctor fix", async () => {
+    const rootDir = await makeTempWorkspace();
+    await initGitRepository(rootDir, "main");
+    await runCli(rootDir, [
+      "init",
+      "--setup-memory",
+      "--memory-root",
+      "memory",
+      "--memory-layout",
+      "child",
+      "--memory-git-mode",
+      "submodule",
+      "--memory-remote",
+      "git@example.com:example/project-memory.git",
+      "--json"
+    ]);
+    await writeFile(
+      join(rootDir, ".gitmodules"),
+      '[submodule "memory"]\n\tpath = memory\n\turl = git@example.com:example/stale-memory.git\n',
+      "utf8"
+    );
+
+    const failing = await runCli(rootDir, ["doctor", "--json"]);
+    const failingPayload = parseData<DoctorPayload>(failing.stdout);
+
+    expect(failing.exitCode).toBe(1);
+    expect(doctorDiagnostic(failingPayload, "project_setup.gitmodules")).toEqual(
+      expect.objectContaining({ severity: "error" })
+    );
+
+    const fixed = await runCli(rootDir, ["doctor", "--fix", "--json"]);
+    const fixedPayload = parseData<DoctorPayload>(fixed.stdout);
+
+    expect(fixed.exitCode).toBe(0);
+    expect(doctorDiagnostic(fixedPayload, "project_setup.gitmodules")).toEqual(
+      expect.objectContaining({ severity: "fixed" })
+    );
+    expect(await readFile(join(rootDir, ".gitmodules"), "utf8")).toContain(
+      "url = git@example.com:example/project-memory.git"
+    );
+  });
+
+  it("fails closed on project setup config root mismatches", async () => {
+    const rootDir = await makeTempWorkspace();
+    await runCli(rootDir, ["init", "--setup-memory", "--json"]);
+    const configPath = join(rootDir, ".boreal/project.json");
+    const config = parseJson<Record<string, unknown>>(await readFile(configPath, "utf8"));
+    await writeFile(configPath, `${JSON.stringify({ ...config, projectRoot: join(rootDir, "other-project") }, null, 2)}\n`, "utf8");
+
+    const doctor = await runCli(rootDir, ["doctor", "--json"]);
+    const payload = parseData<DoctorPayload>(doctor.stdout);
+
+    expect(doctor.exitCode).toBe(1);
+    expect(doctorDiagnostic(payload, "project_setup.config")).toEqual(
+      expect.objectContaining({ severity: "error" })
+    );
+    expect(doctorDiagnostic(payload, "vault.structure")).toEqual(
+      expect.objectContaining({ severity: "warning" })
+    );
+
+    const vault = await runCli(rootDir, ["vault", "status", "--json"]);
+    const error = parseJson<{ readonly code: string; readonly message: string }>(vault.stderr);
+    expect(vault.exitCode).toBe(2);
+    expect(error.code).toBe("BOREAL_INVALID_INPUT");
+    expect(error.message).toContain("different project root");
   });
 
   it("prints a readable init setup summary in human mode", async () => {
@@ -4653,6 +4804,10 @@ function parseData<T>(text: string): T {
   const envelope = parseJson<{ readonly ok: true; readonly data: T }>(text);
   expect(envelope.ok).toBe(true);
   return envelope.data;
+}
+
+function doctorDiagnostic(payload: DoctorPayload, code: string): DoctorPayload["diagnostics"][number] | undefined {
+  return payload.diagnostics.find((diagnostic) => diagnostic.code === code);
 }
 
 async function writeLockOwner(rootDir: string, createdAt: string, lockName = "state.lock"): Promise<void> {

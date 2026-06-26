@@ -30,6 +30,7 @@ import { deriveReadinessStatus } from "@boreal/work-engine";
 import type { CliContext } from "./context.js";
 import { inspectGitWorktree } from "./git-worktree.js";
 import { exportDriftDiagnostics, ledgerStatus, readGeneratedLedgerTombstones } from "./import-export.js";
+import { inspectProjectSetupDrift, type ProjectSetupDriftInspection } from "./project-setup.js";
 import { inspectSearchIndex, searchIndexLockDir, writeSearchIndex } from "./search-cli.js";
 import { inspectVault } from "./vault.js";
 
@@ -90,6 +91,9 @@ export async function runDoctor(context: CliContext, fix: boolean, strict = fals
   fixed = fixed || lockDiagnostics.fixed;
 
   diagnostics.push(await validateGitWorktree(context));
+  const projectSetupDiagnostics = await validateProjectSetup(context, fix);
+  diagnostics.push(...projectSetupDiagnostics.diagnostics);
+  fixed = fixed || projectSetupDiagnostics.fixed;
   diagnostics.push(await validateVaultStructure(context));
   diagnostics.push(await validateVaultHealth(context));
 
@@ -230,19 +234,97 @@ async function validateGitWorktree(context: CliContext): Promise<Diagnostic> {
   };
 }
 
+async function validateProjectSetup(
+  context: CliContext,
+  fix: boolean
+): Promise<{
+  readonly fixed: boolean;
+  readonly diagnostics: readonly Diagnostic[];
+}> {
+  const inspection = await inspectProjectSetupDrift(context, fix);
+  const diagnostics: Diagnostic[] = [];
+  const repairedKinds = new Set(inspection.repairs.map((repair) => repair.kind));
+
+  if (!inspection.configured) {
+    diagnostics.push({
+      code: "project_setup.config",
+      severity: "ok",
+      message: "No project setup config is present; default repo-local memory resolution is active",
+      details: { configPath: inspection.configPath }
+    });
+    return { fixed: false, diagnostics };
+  }
+
+  if (!inspection.configValid || !inspection.config) {
+    diagnostics.push({
+      code: "project_setup.config",
+      severity: "error",
+      message: projectSetupConfigDiagnosticMessage(inspection),
+      details: inspection
+    });
+    return { fixed: inspection.fixed, diagnostics };
+  }
+
+  diagnostics.push({
+    code: "project_setup.config",
+    severity: "ok",
+    message: "Project setup config matches this workspace root",
+    details: {
+      configPath: inspection.configPath,
+      projectRoot: inspection.config.projectRoot,
+      memoryRoot: inspection.config.memoryRoot,
+      memoryLayout: inspection.config.memoryLayout,
+      memoryGitMode: inspection.config.memoryGitMode
+    }
+  });
+
+  diagnostics.push(projectSetupMemoryRootDiagnostic(inspection));
+  diagnostics.push(projectSetupMemoryRepoDiagnostic(inspection, repairedKinds));
+  diagnostics.push(projectSetupGitignoreDiagnostic(inspection, repairedKinds));
+  diagnostics.push(projectSetupChildTrackingDiagnostic(inspection));
+  diagnostics.push(projectSetupGitmodulesDiagnostic(inspection, repairedKinds));
+
+  return { fixed: inspection.fixed, diagnostics };
+}
+
 async function validateVaultStructure(context: CliContext): Promise<Diagnostic> {
-  const inspection = await inspectVault(context);
-  const structureOk = inspection.initialized && inspection.invalidPaths.length === 0;
-  return {
-    code: "vault.structure",
-    severity: structureOk ? "ok" : "warning",
-    message: vaultStructureDiagnosticMessage(inspection),
-    details: inspection
-  };
+  try {
+    const inspection = await inspectVault(context);
+    const structureOk = inspection.initialized && inspection.invalidPaths.length === 0;
+    return {
+      code: "vault.structure",
+      severity: structureOk ? "ok" : "warning",
+      message: vaultStructureDiagnosticMessage(inspection),
+      details: inspection
+    };
+  } catch (error) {
+    if (error instanceof BorealError) {
+      return {
+        code: "vault.structure",
+        severity: "warning",
+        message: "Skipped vault structure checks because the memory vault could not be resolved",
+        details: { code: error.code, message: error.message, details: error.details }
+      };
+    }
+    throw error;
+  }
 }
 
 async function validateVaultHealth(context: CliContext): Promise<Diagnostic> {
-  const inspection = await inspectVault(context);
+  let inspection: Awaited<ReturnType<typeof inspectVault>>;
+  try {
+    inspection = await inspectVault(context);
+  } catch (error) {
+    if (error instanceof BorealError) {
+      return {
+        code: "vault.health",
+        severity: "warning",
+        message: "Skipped vault health checks because the memory vault could not be resolved",
+        details: { code: error.code, message: error.message, details: error.details }
+      };
+    }
+    throw error;
+  }
   if (!inspection.initialized) {
     return {
       code: "vault.health",
@@ -258,6 +340,241 @@ async function validateVaultHealth(context: CliContext): Promise<Diagnostic> {
     message: unhealthy ? "Boreal memory vault has health warnings" : "Boreal memory vault health checks passed",
     details: inspection.health
   };
+}
+
+function projectSetupConfigDiagnosticMessage(inspection: ProjectSetupDriftInspection): string {
+  if (inspection.configError) {
+    return "Project setup config is invalid";
+  }
+  if (inspection.projectRootMatches === false) {
+    return "Project setup config belongs to a different project root";
+  }
+  if (inspection.validationError) {
+    return "Project setup config failed validation";
+  }
+  return "Project setup config is invalid";
+}
+
+function projectSetupMemoryRootDiagnostic(inspection: ProjectSetupDriftInspection): Diagnostic {
+  const memoryRoot = inspection.memoryRoot;
+  if (!memoryRoot) {
+    return {
+      code: "project_setup.memory_root",
+      severity: "warning",
+      message: "Skipped memory root checks because project setup config is invalid"
+    };
+  }
+  if (!memoryRoot.exists) {
+    return {
+      code: "project_setup.memory_root",
+      severity: "error",
+      message: "Configured memory root is missing; rerun `bwrk init --setup-memory` or repair the path",
+      details: memoryRoot
+    };
+  }
+  if (!memoryRoot.isDirectory) {
+    return {
+      code: "project_setup.memory_root",
+      severity: "error",
+      message: "Configured memory root is not a directory",
+      details: memoryRoot
+    };
+  }
+  return {
+    code: "project_setup.memory_root",
+    severity: "ok",
+    message: "Configured memory root exists",
+    details: memoryRoot
+  };
+}
+
+function projectSetupMemoryRepoDiagnostic(
+  inspection: ProjectSetupDriftInspection,
+  repairedKinds: ReadonlySet<ProjectSetupRepairKind>
+): Diagnostic {
+  if (!inspection.memoryRepoExpected) {
+    return {
+      code: "project_setup.memory_repo",
+      severity: "ok",
+      message: "Shared memory mode does not require a separate memory Git repository"
+    };
+  }
+  if (!inspection.memoryRoot?.isDirectory) {
+    return {
+      code: "project_setup.memory_repo",
+      severity: "warning",
+      message: "Skipped memory Git repository check because the memory root is missing or invalid"
+    };
+  }
+  if (repairedKinds.has("memory_repo")) {
+    return {
+      code: "project_setup.memory_repo",
+      severity: "fixed",
+      message: "Initialized missing memory Git repository",
+      details: projectSetupRepairs(inspection, "memory_repo")
+    };
+  }
+  if (!inspection.memoryRepoExists) {
+    return {
+      code: "project_setup.memory_repo",
+      severity: "error",
+      message: "Configured memory Git mode requires a memory repository, but `.git` is missing",
+      details: {
+        memoryRoot: inspection.config?.memoryRoot,
+        memoryGitMode: inspection.config?.memoryGitMode,
+        repairCommand: "bwrk doctor --fix --json"
+      }
+    };
+  }
+  return {
+    code: "project_setup.memory_repo",
+    severity: "ok",
+    message: "Memory Git repository boundary exists"
+  };
+}
+
+function projectSetupGitignoreDiagnostic(
+  inspection: ProjectSetupDriftInspection,
+  repairedKinds: ReadonlySet<ProjectSetupRepairKind>
+): Diagnostic {
+  if (repairedKinds.has("project_gitignore") || repairedKinds.has("memory_gitignore")) {
+    return {
+      code: "project_setup.gitignore",
+      severity: "fixed",
+      message: "Restored project setup `.gitignore` guards",
+      details: projectSetupRepairs(inspection, "project_gitignore", "memory_gitignore")
+    };
+  }
+  const missing = {
+    project: {
+      path: inspection.projectGitignorePath,
+      missingPatterns: inspection.projectGitignoreMissingPatterns
+    },
+    memory: {
+      path: inspection.memoryGitignorePath,
+      missingPatterns: inspection.memoryGitignoreMissingPatterns
+    }
+  };
+  const missingCount = inspection.projectGitignoreMissingPatterns.length + inspection.memoryGitignoreMissingPatterns.length;
+  return {
+    code: "project_setup.gitignore",
+    severity: missingCount > 0 ? "error" : "ok",
+    message: missingCount > 0 ? "Project setup `.gitignore` guards are missing" : "Project setup `.gitignore` guards are present",
+    details: missingCount > 0 ? { ...missing, repairCommand: "bwrk doctor --fix --json" } : missing
+  };
+}
+
+function projectSetupChildTrackingDiagnostic(inspection: ProjectSetupDriftInspection): Diagnostic {
+  const config = inspection.config;
+  const tracking = inspection.childTracking;
+  if (!config || config.memoryLayout !== "child" || config.memoryGitMode === "shared") {
+    return {
+      code: "project_setup.child_tracking",
+      severity: "ok",
+      message: "Child memory tracking guard is not required for this setup mode"
+    };
+  }
+  if (!tracking?.checked) {
+    return {
+      code: "project_setup.child_tracking",
+      severity: "warning",
+      message: "Skipped child memory Git tracking check because the project Git index could not be inspected",
+      details: tracking
+    };
+  }
+
+  const violatingPaths = config.memoryGitMode === "submodule" ? tracking.plainTrackedPaths : tracking.trackedPaths;
+  if (violatingPaths.length > 0) {
+    return {
+      code: "project_setup.child_tracking",
+      severity: "error",
+      message:
+        config.memoryGitMode === "submodule"
+          ? "Child memory contains project-tracked files instead of only a submodule gitlink"
+          : "Child memory is tracked by the project Git index despite separate memory mode",
+      details: {
+        expectedPath: tracking.expectedPath,
+        trackedPaths: violatingPaths,
+        repairCommand: `git rm -r --cached -- ${tracking.expectedPath ?? "memory"}`
+      }
+    };
+  }
+
+  return {
+    code: "project_setup.child_tracking",
+    severity: "ok",
+    message:
+      config.memoryGitMode === "submodule"
+        ? "Child memory has no project-tracked files outside an optional submodule gitlink"
+        : "Child memory is not tracked by the project Git index",
+    details: tracking
+  };
+}
+
+function projectSetupGitmodulesDiagnostic(
+  inspection: ProjectSetupDriftInspection,
+  repairedKinds: ReadonlySet<ProjectSetupRepairKind>
+): Diagnostic {
+  const gitmodules = inspection.gitmodules;
+  const config = inspection.config;
+  if (!gitmodules || !config) {
+    return {
+      code: "project_setup.gitmodules",
+      severity: "warning",
+      message: "Skipped `.gitmodules` checks because project setup config is invalid"
+    };
+  }
+  if (repairedKinds.has("gitmodules")) {
+    return {
+      code: "project_setup.gitmodules",
+      severity: "fixed",
+      message: "Repaired child memory `.gitmodules` metadata",
+      details: { gitmodules, repairs: projectSetupRepairs(inspection, "gitmodules") }
+    };
+  }
+  if (gitmodules.error) {
+    return {
+      code: "project_setup.gitmodules",
+      severity: config.memoryGitMode === "submodule" ? "error" : "warning",
+      message: "Could not inspect `.gitmodules`",
+      details: gitmodules
+    };
+  }
+  if (config.memoryGitMode === "submodule" && !gitmodules.ok) {
+    return {
+      code: "project_setup.gitmodules",
+      severity: "error",
+      message: "Child submodule setup has missing or stale `.gitmodules` metadata",
+      details: { ...gitmodules, repairCommand: "bwrk doctor --fix --json" }
+    };
+  }
+  if (gitmodules.unexpected) {
+    return {
+      code: "project_setup.gitmodules",
+      severity: "warning",
+      message: "Stale `.gitmodules` metadata references memory, but setup mode is not submodule",
+      details: gitmodules
+    };
+  }
+  return {
+    code: "project_setup.gitmodules",
+    severity: "ok",
+    message:
+      config.memoryGitMode === "submodule"
+        ? "Child memory `.gitmodules` metadata is current"
+        : "No stale child memory `.gitmodules` metadata found",
+    details: gitmodules
+  };
+}
+
+type ProjectSetupRepairKind = ProjectSetupDriftInspection["repairs"][number]["kind"];
+
+function projectSetupRepairs(
+  inspection: ProjectSetupDriftInspection,
+  ...kinds: readonly ProjectSetupRepairKind[]
+): readonly ProjectSetupDriftInspection["repairs"][number][] {
+  const allowed = new Set(kinds);
+  return inspection.repairs.filter((repair) => allowed.has(repair.kind));
 }
 
 async function validateSearchIndex(

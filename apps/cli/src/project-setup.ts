@@ -69,6 +69,77 @@ export interface ProjectGitSetupResult {
   readonly gitmodulesPath?: string;
 }
 
+export interface ProjectSetupRepair {
+  readonly kind: "project_gitignore" | "memory_gitignore" | "memory_repo" | "gitmodules";
+  readonly path: string;
+  readonly details?: unknown;
+}
+
+export interface ProjectSetupPathInspection {
+  readonly path: string;
+  readonly exists: boolean;
+  readonly isDirectory: boolean;
+  readonly isFile: boolean;
+  readonly error?: string;
+}
+
+export interface ProjectSetupTrackedPath {
+  readonly mode: string;
+  readonly path: string;
+}
+
+export interface ProjectSetupChildTrackingInspection {
+  readonly checked: boolean;
+  readonly available: boolean;
+  readonly insideWorktree: boolean;
+  readonly expectedPath?: string;
+  readonly trackedPaths: readonly ProjectSetupTrackedPath[];
+  readonly plainTrackedPaths: readonly ProjectSetupTrackedPath[];
+  readonly gitlinkPaths: readonly ProjectSetupTrackedPath[];
+  readonly error?: string;
+}
+
+export interface ProjectGitmodulesEntry {
+  readonly name: string;
+  readonly path?: string;
+  readonly url?: string;
+}
+
+export interface ProjectGitmodulesInspection {
+  readonly path: string;
+  readonly exists: boolean;
+  readonly expectedPath?: string;
+  readonly expectedUrl?: string;
+  readonly entries: readonly ProjectGitmodulesEntry[];
+  readonly matchingEntry?: ProjectGitmodulesEntry;
+  readonly ok: boolean;
+  readonly missing: boolean;
+  readonly stale: boolean;
+  readonly unexpected: boolean;
+  readonly error?: string;
+}
+
+export interface ProjectSetupDriftInspection {
+  readonly configured: boolean;
+  readonly configPath: string;
+  readonly config?: ProjectSetupConfig;
+  readonly configValid: boolean;
+  readonly configError?: string;
+  readonly validationError?: string;
+  readonly projectRootMatches?: boolean;
+  readonly memoryRoot?: ProjectSetupPathInspection;
+  readonly memoryRepoExpected?: boolean;
+  readonly memoryRepoExists?: boolean;
+  readonly memoryGitignorePath?: string;
+  readonly memoryGitignoreMissingPatterns: readonly string[];
+  readonly projectGitignorePath?: string;
+  readonly projectGitignoreMissingPatterns: readonly string[];
+  readonly childTracking?: ProjectSetupChildTrackingInspection;
+  readonly gitmodules?: ProjectGitmodulesInspection;
+  readonly repairs: readonly ProjectSetupRepair[];
+  readonly fixed: boolean;
+}
+
 const MEMORY_DIRECTORIES = [
   ".",
   "raw",
@@ -213,9 +284,136 @@ export async function maybeConfigureProjectSetup(
 export async function readProjectSetupConfig(projectRoot: string): Promise<ProjectSetupConfig | undefined> {
   const config = await readExistingConfig(join(projectRoot, ".boreal", "project.json"));
   if (config) {
+    assertProjectSetupRootMatches(projectRoot, config);
     await validateProjectSetupInput(config);
   }
   return config;
+}
+
+export async function inspectProjectSetupDrift(
+  context: CliContext,
+  fix: boolean
+): Promise<ProjectSetupDriftInspection> {
+  const configPath = join(context.workspaceRoot, ".boreal", "project.json");
+  const empty = {
+    configPath,
+    memoryGitignoreMissingPatterns: [],
+    projectGitignoreMissingPatterns: [],
+    repairs: [],
+    fixed: false
+  } satisfies Omit<ProjectSetupDriftInspection, "configured" | "configValid">;
+
+  let config: ProjectSetupConfig | undefined;
+  try {
+    config = await readExistingConfig(configPath);
+  } catch (error) {
+    return {
+      ...empty,
+      configured: true,
+      configValid: false,
+      configError: error instanceof Error ? error.message : String(error)
+    };
+  }
+
+  if (!config) {
+    return {
+      ...empty,
+      configured: false,
+      configValid: true
+    };
+  }
+
+  const projectRootMatches = projectRootsMatch(context.workspaceRoot, config.projectRoot);
+  let validationError: string | undefined;
+  try {
+    assertProjectSetupRootMatches(context.workspaceRoot, config);
+    await validateProjectSetupInput(config);
+  } catch (error) {
+    validationError = error instanceof Error ? error.message : String(error);
+  }
+
+  if (!projectRootMatches || validationError) {
+    return {
+      ...empty,
+      configured: true,
+      config,
+      configValid: false,
+      validationError,
+      projectRootMatches
+    };
+  }
+
+  const repairs: ProjectSetupRepair[] = [];
+  const memoryRoot = await inspectPath(config.memoryRoot);
+  const memoryRepoExpected = config.memoryGitMode !== "shared";
+  let memoryRepoExists = memoryRepoExpected ? existsSync(join(config.memoryRoot, ".git")) : false;
+  let projectGitignoreMissingPatterns = await missingIgnorePatterns(join(config.projectRoot, ".gitignore"), projectIgnorePatterns(config));
+  let memoryGitignoreMissingPatterns = memoryRoot.isDirectory
+    ? await missingIgnorePatterns(join(config.memoryRoot, ".gitignore"), MEMORY_GITIGNORE_PATTERNS)
+    : [];
+
+  if (fix && projectGitignoreMissingPatterns.length > 0) {
+    await ensureIgnoreFile(join(config.projectRoot, ".gitignore"), projectIgnorePatterns(config));
+    repairs.push({
+      kind: "project_gitignore",
+      path: join(config.projectRoot, ".gitignore"),
+      details: { addedPatterns: projectGitignoreMissingPatterns }
+    });
+    projectGitignoreMissingPatterns = [];
+  }
+
+  if (fix && memoryRoot.isDirectory && memoryGitignoreMissingPatterns.length > 0) {
+    await ensureIgnoreFile(join(config.memoryRoot, ".gitignore"), MEMORY_GITIGNORE_PATTERNS);
+    repairs.push({
+      kind: "memory_gitignore",
+      path: join(config.memoryRoot, ".gitignore"),
+      details: { addedPatterns: memoryGitignoreMissingPatterns }
+    });
+    memoryGitignoreMissingPatterns = [];
+  }
+
+  if (fix && memoryRoot.isDirectory && memoryRepoExpected && !memoryRepoExists) {
+    await ensureGitRepository(config.memoryRoot, "memory root");
+    repairs.push({
+      kind: "memory_repo",
+      path: config.memoryRoot
+    });
+    memoryRepoExists = true;
+  }
+
+  const childTracking = await inspectChildMemoryTracking(config);
+  let gitmodules = await inspectProjectGitmodules(config);
+  if (fix && config.memoryGitMode === "submodule" && !gitmodules.ok) {
+    await ensureSubmoduleConfig(config.projectRoot, config.memoryRoot, config.memoryRemote ?? "");
+    repairs.push({
+      kind: "gitmodules",
+      path: join(config.projectRoot, ".gitmodules"),
+      details: {
+        expectedPath: gitmodules.expectedPath,
+        expectedUrl: gitmodules.expectedUrl
+      }
+    });
+    gitmodules = await inspectProjectGitmodules(config);
+  }
+
+  return {
+    configured: true,
+    configPath,
+    config,
+    configValid: true,
+    projectRootMatches,
+    memoryRoot,
+    memoryRepoExpected,
+    memoryRepoExists,
+    memoryGitignorePath: join(config.memoryRoot, ".gitignore"),
+    memoryGitignoreMissingPatterns,
+    projectGitignorePath: join(config.projectRoot, ".gitignore"),
+    projectGitignoreMissingPatterns,
+    childTracking,
+    gitmodules,
+    repairs,
+    fixed: repairs.length > 0
+  };
 }
 
 function shouldConfigureProjectSetup(args: ParsedArgs): boolean {
@@ -400,6 +598,21 @@ async function readExistingConfig(configPath: string): Promise<ProjectSetupConfi
   return parsed;
 }
 
+function assertProjectSetupRootMatches(projectRoot: string, config: ProjectSetupConfig): void {
+  if (projectRootsMatch(projectRoot, config.projectRoot)) {
+    return;
+  }
+  throw new BorealError("BOREAL_INVALID_INPUT", "Project setup config belongs to a different project root", {
+    expectedProjectRoot: resolve(projectRoot),
+    configuredProjectRoot: resolve(config.projectRoot),
+    repairCommand: "bwrk init --setup-memory --interactive"
+  });
+}
+
+function projectRootsMatch(left: string, right: string): boolean {
+  return resolve(left) === resolve(right);
+}
+
 function isProjectSetupConfig(value: unknown): value is ProjectSetupConfig {
   if (typeof value !== "object" || value === null) {
     return false;
@@ -574,17 +787,30 @@ async function ensureGitRepository(path: string, label: string): Promise<boolean
 async function ensureSubmoduleConfig(projectRoot: string, memoryRoot: string, memoryRemote: string): Promise<boolean> {
   const gitmodulesPath = join(projectRoot, ".gitmodules");
   const submodulePath = projectRelativePath(projectRoot, memoryRoot);
-  const block = [
-    `[submodule "${submodulePath}"]`,
-    `\tpath = ${submodulePath}`,
-    `\turl = ${memoryRemote}`
-  ].join("\n");
-  const existing = existsSync(gitmodulesPath) ? await readFile(gitmodulesPath, "utf8") : "";
-  if (existing.includes(`[submodule "${submodulePath}"]`)) {
+  const before = await inspectProjectGitmodules({
+    schemaVersion: PROJECT_SETUP_SCHEMA_VERSION,
+    projectRoot,
+    memoryRoot,
+    memoryLayout: "child",
+    memoryGitMode: "submodule",
+    memoryRemote,
+    installRoot: projectRoot,
+    skillTargets: [],
+    folderScoped: false,
+    createdAt: "",
+    updatedAt: ""
+  });
+  if (before.ok) {
     return false;
   }
-  const prefix = existing.length === 0 || existing.endsWith("\n") ? existing : `${existing}\n`;
-  await writeTextFileAtomic(gitmodulesPath, `${prefix}${block}\n`);
+  await runGitOrThrow(projectRoot, ["config", "-f", gitmodulesPath, `submodule.${submodulePath}.path`, submodulePath], {
+    action: "write submodule path",
+    path: gitmodulesPath
+  });
+  await runGitOrThrow(projectRoot, ["config", "-f", gitmodulesPath, `submodule.${submodulePath}.url`, memoryRemote], {
+    action: "write submodule URL",
+    path: gitmodulesPath
+  });
   return true;
 }
 
@@ -594,4 +820,215 @@ function projectRelativePath(projectRoot: string, path: string): string {
     throw new BorealError("BOREAL_INVALID_INPUT", "Path must be inside project root", { projectRoot, path });
   }
   return relativePath;
+}
+
+async function inspectPath(path: string): Promise<ProjectSetupPathInspection> {
+  try {
+    const info = await lstat(path);
+    return {
+      path,
+      exists: true,
+      isDirectory: info.isDirectory(),
+      isFile: info.isFile()
+    };
+  } catch (error) {
+    if (isNodeError(error) && error.code === "ENOENT") {
+      return {
+        path,
+        exists: false,
+        isDirectory: false,
+        isFile: false
+      };
+    }
+    return {
+      path,
+      exists: false,
+      isDirectory: false,
+      isFile: false,
+      error: error instanceof Error ? error.message : String(error)
+    };
+  }
+}
+
+async function missingIgnorePatterns(path: string, patterns: readonly string[]): Promise<readonly string[]> {
+  const existing = existsSync(path) ? await readFile(path, "utf8") : "";
+  return patterns.filter((pattern) => !ignoreFileHasPattern(existing, pattern));
+}
+
+async function inspectChildMemoryTracking(config: ProjectSetupConfig): Promise<ProjectSetupChildTrackingInspection> {
+  if (config.memoryLayout !== "child" || config.memoryGitMode === "shared") {
+    return {
+      checked: false,
+      available: true,
+      insideWorktree: false,
+      trackedPaths: [],
+      plainTrackedPaths: [],
+      gitlinkPaths: []
+    };
+  }
+
+  const expectedPath = projectRelativePath(config.projectRoot, config.memoryRoot);
+  const result = await runGit(config.projectRoot, ["ls-files", "--stage", "--", expectedPath]);
+  if (!result.ok) {
+    return {
+      checked: false,
+      available: !isMissingGit(result),
+      insideWorktree: false,
+      expectedPath,
+      trackedPaths: [],
+      plainTrackedPaths: [],
+      gitlinkPaths: [],
+      error: result.error
+    };
+  }
+
+  const trackedPaths = parseLsFilesStage(result.stdout);
+  const plainTrackedPaths = trackedPaths.filter((entry) => entry.mode !== "160000");
+  const gitlinkPaths = trackedPaths.filter((entry) => entry.mode === "160000");
+  return {
+    checked: true,
+    available: true,
+    insideWorktree: true,
+    expectedPath,
+    trackedPaths,
+    plainTrackedPaths,
+    gitlinkPaths
+  };
+}
+
+async function inspectProjectGitmodules(config: ProjectSetupConfig): Promise<ProjectGitmodulesInspection> {
+  const gitmodulesPath = join(config.projectRoot, ".gitmodules");
+  const expectedPath = config.memoryLayout === "child" ? projectRelativePath(config.projectRoot, config.memoryRoot) : undefined;
+  const expectedUrl = config.memoryGitMode === "submodule" ? config.memoryRemote : undefined;
+  const entriesResult = await readGitmodulesEntries(config.projectRoot);
+  const matchingEntry = expectedPath
+    ? entriesResult.entries.find((entry) => entry.name === expectedPath) ?? entriesResult.entries.find((entry) => entry.path === expectedPath)
+    : undefined;
+  const submoduleMissing =
+    config.memoryGitMode === "submodule" &&
+    (!entriesResult.exists || !matchingEntry || matchingEntry.path !== expectedPath || matchingEntry.url !== expectedUrl);
+  const unexpected =
+    config.memoryGitMode !== "submodule" &&
+    expectedPath !== undefined &&
+    entriesResult.entries.some((entry) => entry.name === expectedPath || entry.path === expectedPath);
+
+  return {
+    path: gitmodulesPath,
+    exists: entriesResult.exists,
+    expectedPath,
+    expectedUrl,
+    entries: entriesResult.entries,
+    matchingEntry,
+    ok: entriesResult.error === undefined && !submoduleMissing && !unexpected,
+    missing: submoduleMissing,
+    stale: submoduleMissing || unexpected,
+    unexpected,
+    error: entriesResult.error
+  };
+}
+
+async function readGitmodulesEntries(projectRoot: string): Promise<{
+  readonly exists: boolean;
+  readonly entries: readonly ProjectGitmodulesEntry[];
+  readonly error?: string;
+}> {
+  const gitmodulesPath = join(projectRoot, ".gitmodules");
+  if (!existsSync(gitmodulesPath)) {
+    return { exists: false, entries: [] };
+  }
+  const result = await runGit(projectRoot, ["config", "-f", gitmodulesPath, "--get-regexp", "^submodule\\..*\\.(path|url)$"]);
+  if (!result.ok && result.stdout.trim().length === 0 && result.code === 1) {
+    return { exists: true, entries: [] };
+  }
+  if (!result.ok) {
+    return { exists: true, entries: [], error: result.error };
+  }
+
+  const entriesByName = new Map<string, { path?: string; url?: string }>();
+  for (const line of result.stdout.split(/\r?\n/u).filter(Boolean)) {
+    const separator = line.indexOf(" ");
+    if (separator < 0) {
+      continue;
+    }
+    const key = line.slice(0, separator);
+    const value = line.slice(separator + 1);
+    const match = /^submodule\.(.+)\.(path|url)$/u.exec(key);
+    if (!match) {
+      continue;
+    }
+    const name = match[1];
+    const field = match[2];
+    if (!name || (field !== "path" && field !== "url")) {
+      continue;
+    }
+    const entry = entriesByName.get(name) ?? {};
+    entriesByName.set(name, field === "path" ? { ...entry, path: value } : { ...entry, url: value });
+  }
+
+  return {
+    exists: true,
+    entries: [...entriesByName.entries()].map(([name, entry]) => ({ name, ...entry }))
+  };
+}
+
+function parseLsFilesStage(stdout: string): readonly ProjectSetupTrackedPath[] {
+  return stdout
+    .split(/\r?\n/u)
+    .filter(Boolean)
+    .flatMap((line) => {
+      const match = /^(\d{6})\s+[0-9a-f]+\s+\d+\t(.+)$/u.exec(line);
+      const mode = match?.[1];
+      const path = match?.[2];
+      return mode && path ? [{ mode, path }] : [];
+    });
+}
+
+async function runGitOrThrow(
+  cwd: string,
+  args: readonly string[],
+  details: { readonly action: string; readonly path: string }
+): Promise<void> {
+  const result = await runGit(cwd, args);
+  if (!result.ok) {
+    throw new BorealError("BOREAL_CONFLICT", `Unable to ${details.action}`, {
+      path: details.path,
+      error: result.error
+    });
+  }
+}
+
+interface GitCommandResult {
+  readonly ok: boolean;
+  readonly stdout: string;
+  readonly stderr: string;
+  readonly error?: string;
+  readonly code?: string | number;
+}
+
+async function runGit(cwd: string, args: readonly string[]): Promise<GitCommandResult> {
+  try {
+    const result = await execFileAsync("git", ["-C", cwd, ...args], { maxBuffer: 5 * 1024 * 1024 });
+    return {
+      ok: true,
+      stdout: String(result.stdout),
+      stderr: String(result.stderr)
+    };
+  } catch (error) {
+    const record = error as { readonly stdout?: unknown; readonly stderr?: unknown; readonly message?: string; readonly code?: string | number };
+    return {
+      ok: false,
+      stdout: typeof record.stdout === "string" ? record.stdout : "",
+      stderr: typeof record.stderr === "string" ? record.stderr : "",
+      error: (typeof record.stderr === "string" && record.stderr.trim()) || record.message || String(error),
+      code: record.code
+    };
+  }
+}
+
+function isMissingGit(result: GitCommandResult): boolean {
+  return result.code === "ENOENT";
+}
+
+function isNodeError(error: unknown): error is NodeJS.ErrnoException {
+  return typeof error === "object" && error !== null && "code" in error;
 }

@@ -1074,6 +1074,7 @@ Checks:
 
 - `.boreal` and runtime state presence.
 - Runtime state JSON parse and schema version.
+- Project setup drift: config root mismatch, configured memory root presence, expected memory Git repository boundary, project/memory `.gitignore` guards, child memory accidentally tracked by the project Git index, and child submodule `.gitmodules` metadata.
 - Integrated schema validation for all persisted runtime state sections and runtime policy payloads.
 - Required state sections.
 - Missing IDs and duplicate IDs within each state section.
@@ -1104,6 +1105,11 @@ Checks:
 - Rebuild context-pack projections.
 - Rebuild the local search index.
 - Expire stale active reservations and restore affected work to derived readiness.
+- Restore missing project/memory `.gitignore` guards.
+- Initialize a missing memory Git repository when setup mode is `separate` or `submodule` and the memory root exists.
+- Repair missing or stale child submodule `.gitmodules` path/URL metadata.
+
+`--fix` does not remove child memory from the project Git index and does not delete stale non-submodule `.gitmodules` entries. Those are reported with exact Git details so a human can decide whether to run commands such as `git rm -r --cached -- memory`.
 
 `--strict` treats warnings as a failing doctor result for CI and hardening gates. Diagnostic severities are not rewritten; JSON `data.ok` and the command exit code fail when any `warning` remains.
 

@@ -36,7 +36,7 @@ This file is the current checkpoint for the broad hardening goal. It separates a
 - JSONL ledger export/import/delete/status exists as a bridge toward Git-native collaboration.
 - Repo-local `memory/` vault scaffolding, raw source index, wiki pages, duplicate scan, merge plans, and compaction plans exist.
 - Project setup now separates memory Git history by default with sibling memory repos, child ignored memory repos, child submodule metadata, generated `.gitignore` guards, and explicit `shared` opt-in for mixed project history.
-- Doctor validates schema shape, IDs, references, dependencies, reservations, context drift, ledger drift, search freshness, operation/event causality, and locks.
+- Doctor validates project setup drift, schema shape, IDs, references, dependencies, reservations, context drift, ledger drift, search freshness, operation/event causality, and locks.
 
 ## Hardened In This Checkpoint
 
@@ -47,6 +47,7 @@ This file is the current checkpoint for the broad hardening goal. It separates a
 - Runtime schema IDs are backed by published schema files, and tests enforce that every published ID has a matching file.
 - `bwrk commands --format markdown` emits a generated command reference from `COMMAND_DEFINITIONS`.
 - Claude Code sourcemap material is now treated as an ignored research artifact only; Boreal has a separate CLI UX direction document for original prompt/dashboard primitives, with richer views kept opt-in behind stable JSON and plain text command contracts.
+- `bwrk doctor` now detects project setup drift for copied configs, missing memory Git repositories, missing ignore guards, child memory tracked by project Git, and stale child submodule metadata; `doctor --fix` repairs the safe/idempotent subset.
 
 ## Remaining Architecture Work
 

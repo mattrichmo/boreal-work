@@ -31,12 +31,18 @@ The project setup config is a local binding and setup adds `.boreal/project.json
 - `shared`: does not initialize a memory Git repository. Memory files are ordinary project files. This is the default only for `--memory-layout in-repo`.
 - `--separate-git`: compatibility alias for `--memory-git-mode separate`.
 
+## Doctor Drift Checks
+
+`bwrk doctor` validates setup drift whenever `.boreal/project.json` exists. It reports copied or moved configs whose `projectRoot` no longer matches the active workspace, missing memory roots, missing memory Git repositories for `separate` and `submodule` modes, missing project or memory `.gitignore` guards, child memory paths tracked by the project Git index, and missing or stale `.gitmodules` metadata.
+
+`bwrk doctor --fix` restores missing ignore guards, initializes a missing memory Git repository when the memory root exists, and rewrites stale child submodule path/URL metadata. It intentionally does not remove memory paths from the project Git index or delete non-submodule `.gitmodules` entries because those are project-history decisions.
+
 ## No-Leak Rules
 
 - Init and install must use explicit project, memory, and install roots.
 - Workspace-bound commands fail closed when no Boreal workspace is resolved.
 - Skill installs must not read or write sibling repositories unless the user explicitly selects them.
-- Memory commands use the configured memory root from `.boreal/project.json` and should not fall back to global or unrelated project memory once setup exists.
+- Memory commands use the configured memory root from `.boreal/project.json`, fail closed when the config belongs to another project root, and should not fall back to global or unrelated project memory once setup exists.
 - Installed skills use `boreal-*` names so Codex and Claude users can distinguish Boreal workflow skills from global or unrelated project skills.
 - Future MCP adapters must bind to one workspace root and must not expose global memory by default.
 
