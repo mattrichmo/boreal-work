@@ -82,7 +82,7 @@ describe("bwrk cli", () => {
     expect(root.exitCode).toBe(0);
     expect(root.stdout).toContain("bwrk - Boreal Work CLI");
     expect(root.stdout).toContain(
-      "bwrk help [init|work|dep|evidence|source|claim|decision|context|search|reservation|agent|session|operation|export|import|vault|raw|wiki|duplicate|merge|compact|sync|ledger|snapshot|doctor|lock|commands|prime]"
+      "bwrk help [init|work|dep|evidence|source|claim|decision|context|search|reservation|agent|session|operation|workflows|install|export|import|vault|raw|wiki|duplicate|merge|compact|sync|ledger|snapshot|doctor|lock|commands|prime]"
     );
     expect(work.exitCode).toBe(0);
     expect(work.stdout).toContain("bwrk work create");
@@ -885,6 +885,11 @@ describe("bwrk cli", () => {
         "operation show",
         "operation prune",
         "operation repair",
+        "workflows list",
+        "workflows show",
+        "install codex",
+        "install claude",
+        "install skills",
         "export json",
         "export markdown",
         "export ledgers",
@@ -904,7 +909,8 @@ describe("bwrk cli", () => {
         "ledger delete",
         "snapshot create",
         "snapshot list",
-        "snapshot show"
+        "snapshot show",
+        "doctor skills"
       ])
     );
     expect(reserve?.flags).toEqual(
@@ -922,6 +928,54 @@ describe("bwrk cli", () => {
       expect.objectContaining({ writesGeneratedArtifacts: true, requiresLock: "index" })
     );
     expect(searchQuery?.behavior).toEqual(expect.objectContaining({ readOnly: true, requiresFreshIndex: true }));
+  });
+
+  it("lists workflows, shows workflow markdown, plans skill installs, and doctors skill assets", async () => {
+    const rootDir = await makeTempWorkspace();
+
+    const workflows = await runCli(rootDir, ["workflows", "list", "--json"]);
+    const workflowRows = parseData<Array<{ readonly id: string; readonly path: string }>>(workflows.stdout);
+    const shown = await runCli(rootDir, ["workflows", "show", "launch-sprint"]);
+    const installPlan = await runCli(rootDir, ["install", "skills", "--dry-run", "--json"]);
+    const plan = parseData<{
+      readonly dryRun: boolean;
+      readonly files: Array<{ readonly destination: string; readonly workflowRefs: readonly string[] }>;
+      readonly issues: readonly unknown[];
+    }>(installPlan.stdout);
+    const doctor = await runCli(rootDir, ["doctor", "skills", "--json"]);
+    const doctorPayload = parseData<{
+      readonly ok: boolean;
+      readonly workflowCount: number;
+      readonly templateCount: number;
+      readonly skillCount: number;
+      readonly issues: readonly unknown[];
+    }>(doctor.stdout);
+
+    expect(workflows.exitCode).toBe(0);
+    expect(workflowRows).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ id: "boreal.workflow.launch-sprint.v1", path: "40-work/launch-sprint.md" })
+      ])
+    );
+    expect(shown.exitCode).toBe(0);
+    expect(shown.stdout).toContain("# Launch Sprint");
+    expect(shown.stdout).toContain("bwrk session start");
+    expect(installPlan.exitCode).toBe(0);
+    expect(plan.dryRun).toBe(true);
+    expect(plan.issues).toEqual([]);
+    expect(plan.files).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          destination: expect.stringContaining(".agents/skills/router/SKILL.md"),
+          workflowRefs: expect.arrayContaining(["00-agent/route-request.md"])
+        })
+      ])
+    );
+    expect(doctor.exitCode).toBe(0);
+    expect(doctorPayload).toEqual(
+      expect.objectContaining({ ok: true, workflowCount: expect.any(Number), templateCount: expect.any(Number), skillCount: expect.any(Number) })
+    );
+    expect(doctorPayload.issues).toEqual([]);
   });
 
   it("generates a markdown command reference from the registry", async () => {

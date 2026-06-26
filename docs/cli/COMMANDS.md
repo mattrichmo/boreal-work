@@ -166,6 +166,46 @@ JSON `data` shape:
 }
 ```
 
+## `workflows list`
+
+```bash
+bwrk workflows list [--json]
+```
+
+Lists the checked-in Boreal v1 workflow playbooks. JSON rows include workflow ID, title, group, relative path, allowed-command count, and template count.
+
+## `workflows show`
+
+```bash
+bwrk workflows show <workflow-id|path|slug> [--json]
+```
+
+Shows one workflow playbook by exact workflow ID, relative path under `workflows/`, or filename slug. Human output is the Markdown workflow text; JSON output includes metadata and text.
+
+## `install codex`
+
+```bash
+bwrk install codex [--install-root <dir>] [--dry-run] [--json]
+```
+
+Plans or installs Boreal skill adapters for Codex. Defaults to `.agents` under the selected workspace, writing skills below `.agents/skills/<skill>/SKILL.md`. Use `--dry-run` before writing.
+
+## `install claude`
+
+```bash
+bwrk install claude [--install-root <dir>] [--dry-run] [--json]
+```
+
+Plans or installs Boreal skill adapters for Claude. Defaults to `.claude` under the selected workspace, writing one folder per skill. Use `--dry-run` before writing.
+
+## `install skills`
+
+```bash
+bwrk install skills [--install-root <dir>] [--dry-run] [--json]
+```
+
+Plans or installs generic Boreal skill files into a folder-scoped skill root. Defaults to `.agents/skills` under the selected workspace.
+
 ## `init`
 
 ```bash
@@ -967,7 +1007,7 @@ Checks:
 
 - `.boreal` and runtime state presence.
 - Runtime state JSON parse and schema version.
-- Integrated schema validation for work, evidence, runtime events, and runtime policy payloads.
+- Integrated schema validation for all persisted runtime state sections and runtime policy payloads.
 - Required state sections.
 - Missing IDs and duplicate IDs within each state section.
 - Malformed work, evidence, verification, source, claim, decision, context-pack, graph, and reservation records.
@@ -1009,6 +1049,14 @@ pnpm doctor:strict
 ```
 
 Runs `bwrk doctor --workspace . --strict --json` from the repository root.
+
+## `doctor skills`
+
+```bash
+bwrk doctor skills [--json]
+```
+
+Validates the checked-in workflow, template, and skill source files without requiring an initialized workspace. It checks duplicate workflow IDs, workflow command references, workflow template references, and skill workflow references.
 
 ## `lock inspect`
 

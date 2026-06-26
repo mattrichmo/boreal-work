@@ -1,3 +1,5 @@
+import { join, resolve } from "node:path";
+
 import {
   BorealError,
   createRecordMeta,
@@ -93,6 +95,14 @@ import {
 import { createResultSpoolingOutput, formatRecord, table, type CliOutput } from "./output.js";
 import { inspectSearchIndex, runSearch, writeSearchIndex, type SearchIndexInspection } from "./search-cli.js";
 import { addRawSource, createWikiPage, initVault, inspectVault, type VaultStatusResult } from "./vault.js";
+import {
+  buildSkillInstallPlan,
+  getWorkflowAsset,
+  inspectWorkflowAssets,
+  installSkillsFromPlan,
+  listWorkflowAssets,
+  type SkillInstallPlan
+} from "./workflow-assets.js";
 
 const DEFAULT_HANDOFF_SEARCH_LIMIT = 8;
 const HANDOFF_SEARCH_MIN_CANDIDATES = 24;
@@ -452,6 +462,12 @@ export async function runCommand(args: ParsedArgs, output: CliOutput, cwd: strin
       case "operation":
         result = await operationCommand(action, rest, context, args, commandOutput, json);
         break;
+      case "workflows":
+        result = await workflowsCommand(action, rest, commandOutput, json);
+        break;
+      case "install":
+        result = await installCommand(action, context, args, commandOutput, json);
+        break;
       case "export":
         result = await exportCommand(action, context, args, commandOutput, json);
         break;
@@ -486,7 +502,7 @@ export async function runCommand(args: ParsedArgs, output: CliOutput, cwd: strin
         result = await snapshotCommand(action, rest, context, args, commandOutput, json);
         break;
       case "doctor":
-        result = await doctorCommand(context, args, commandOutput, json);
+        result = await doctorCommand(action, context, args, commandOutput, json);
         break;
       case "lock":
         result = await lockCommand(action, context, args, commandOutput, json);
@@ -964,6 +980,88 @@ function commandsMarkdown(): string {
   }
 
   return `${lines.join("\n").trimEnd()}\n`;
+}
+
+async function workflowsCommand(
+  action: string | undefined,
+  rest: readonly string[],
+  output: CliOutput,
+  json: boolean
+): Promise<CommandResult> {
+  switch (action) {
+    case "list": {
+      const workflows = await listWorkflowAssets();
+      const rows = workflows.map((workflow) => ({
+        id: workflow.id,
+        title: workflow.title,
+        group: workflow.group,
+        path: workflow.path,
+        commands: workflow.allowedCommands.length,
+        templates: workflow.templates.filter((template) => template !== "none").length
+      }));
+      output.write(json ? formatRecord(rows, true) : table(rows));
+      return { exitCode: 0 };
+    }
+    case "show": {
+      const workflow = await getWorkflowAsset(requiredPositional(rest, 0, "workflow reference"));
+      output.write(json ? formatRecord(workflow, true) : workflow.text);
+      return { exitCode: 0 };
+    }
+    default:
+      throw new BorealError("BOREAL_INVALID_INPUT", `Unknown workflows command: ${action ?? ""}`);
+  }
+}
+
+async function installCommand(
+  action: string | undefined,
+  context: CliContext,
+  args: ParsedArgs,
+  output: CliOutput,
+  json: boolean
+): Promise<CommandResult> {
+  const target = installTarget(action);
+  const dryRun = hasFlag(args, "dry-run");
+  const plan = await buildSkillInstallPlan({
+    target,
+    dryRun,
+    installRoot: installRootFromArgs(context, args, target)
+  });
+  const result = dryRun ? plan : await installSkillsFromPlan(plan);
+  output.write(json ? formatRecord(result, true) : formatSkillInstallPlan(result));
+  return { exitCode: result.issues.length === 0 ? 0 : 1 };
+}
+
+function installTarget(action: string | undefined): "codex" | "claude" | "skills" {
+  if (action === "codex" || action === "claude" || action === "skills") {
+    return action;
+  }
+  throw new BorealError("BOREAL_INVALID_INPUT", `Unknown install command: ${action ?? ""}`);
+}
+
+function installRootFromArgs(context: CliContext, args: ParsedArgs, target: "codex" | "claude" | "skills"): string {
+  const explicit = flagValue(args, "install-root");
+  if (explicit) {
+    return resolve(context.workspaceRoot, explicit);
+  }
+  switch (target) {
+    case "codex":
+      return join(context.workspaceRoot, ".agents");
+    case "claude":
+      return join(context.workspaceRoot, ".claude");
+    case "skills":
+      return join(context.workspaceRoot, ".agents", "skills");
+  }
+}
+
+function formatSkillInstallPlan(plan: SkillInstallPlan): string {
+  return [
+    `target: ${plan.target}`,
+    `dryRun: ${plan.dryRun}`,
+    `installRoot: ${plan.installRoot}`,
+    `issues: ${plan.issues.length}`,
+    "files:",
+    ...plan.files.map((file) => `- ${file.destination} (${file.workflowRefs.length} workflows)`)
+  ].join("\n") + "\n";
 }
 
 async function agentCommand(
@@ -2183,11 +2281,20 @@ async function snapshotCommand(
 }
 
 async function doctorCommand(
+  action: string | undefined,
   context: CliContext,
   args: ParsedArgs,
   output: CliOutput,
   json: boolean
 ): Promise<CommandResult> {
+  if (action === "skills") {
+    const result = await inspectWorkflowAssets();
+    output.write(json ? formatRecord(result, true) : formatSkillDoctor(result));
+    return { exitCode: result.ok ? 0 : 1 };
+  }
+  if (action !== undefined) {
+    throw new BorealError("BOREAL_INVALID_INPUT", `Unknown doctor command: ${action}`);
+  }
   const result = await runDoctor(context, hasFlag(args, "fix"), hasFlag(args, "strict"));
   if (json) {
     output.write(formatRecord(result, true));
@@ -2195,6 +2302,16 @@ async function doctorCommand(
     output.write(result.diagnostics.map(formatDiagnostic).join("\n") + "\n");
   }
   return { exitCode: result.ok ? 0 : 1 };
+}
+
+function formatSkillDoctor(result: Awaited<ReturnType<typeof inspectWorkflowAssets>>): string {
+  return [
+    `[${result.ok ? "ok" : "error"}] workflow assets`,
+    `workflows: ${result.workflowCount}`,
+    `templates: ${result.templateCount}`,
+    `skills: ${result.skillCount}`,
+    ...result.issues.map((issue) => `[error] ${issue.code}: ${issue.path}: ${issue.message}`)
+  ].join("\n") + "\n";
 }
 
 async function lockCommand(
@@ -3267,6 +3384,6 @@ Usage:
 ${COMMAND_DEFINITIONS.map((definition) => `  ${definition.usage}`).join("\n")}
 
 Help:
-  bwrk help [init|work|dep|evidence|source|claim|decision|context|search|reservation|agent|session|operation|export|import|vault|raw|wiki|duplicate|merge|compact|sync|ledger|snapshot|doctor|lock|commands|prime]
+  bwrk help [init|work|dep|evidence|source|claim|decision|context|search|reservation|agent|session|operation|workflows|install|export|import|vault|raw|wiki|duplicate|merge|compact|sync|ledger|snapshot|doctor|lock|commands|prime]
 `;
 }
