@@ -1,9 +1,9 @@
 import { randomUUID } from "node:crypto";
-import { mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, rm, stat, writeFile } from "node:fs/promises";
 import { hostname } from "node:os";
 import { dirname, join } from "node:path";
 
-import { BorealError, nowIso } from "@boreal/core";
+import { BorealError, nowIso, readJsonFile } from "@boreal/core";
 
 export interface FileLockOptions {
   readonly waitTimeoutMs: number;
@@ -230,8 +230,11 @@ async function releaseFileLock(lockDir: string, token: string): Promise<void> {
 
 async function readLockOwner(lockDir: string): Promise<LockOwner | undefined> {
   try {
-    const raw = await readFile(ownerPath(lockDir), "utf8");
-    const parsed = JSON.parse(raw) as unknown;
+    const parsed = await readJsonFile(ownerPath(lockDir), {
+      schemaName: "boreal.lock-owner.v1",
+      expectedObject: true,
+      maxBytes: 16 * 1024
+    });
     if (!isLockOwner(parsed)) {
       return undefined;
     }
@@ -240,7 +243,7 @@ async function readLockOwner(lockDir: string): Promise<LockOwner | undefined> {
     if (isNodeError(error) && error.code === "ENOENT") {
       return undefined;
     }
-    if (error instanceof SyntaxError) {
+    if (error instanceof BorealError && error.code === "BOREAL_JSON_PARSE") {
       return undefined;
     }
     throw error;

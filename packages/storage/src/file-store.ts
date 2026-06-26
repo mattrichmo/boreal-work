@@ -1,7 +1,6 @@
-import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 
-import { BorealError, assertPathInside, resolveWorkspacePaths } from "@boreal/core";
+import { BorealError, assertPathInside, readJsonFile, resolveWorkspacePaths } from "@boreal/core";
 
 import { normalizeFileLockOptions, withFileLock, type FileLockOptions } from "./file-lock.js";
 import { InMemoryBorealStore, type StoreSnapshot } from "./memory-store.js";
@@ -62,16 +61,16 @@ export class FileBorealStore implements BorealStore {
 
   private async loadSnapshot(): Promise<StoreSnapshot> {
     try {
-      const raw = await readFile(this.stateFile, "utf8");
-      return documentToSnapshot(JSON.parse(raw) as unknown);
+      return documentToSnapshot(
+        await readJsonFile(this.stateFile, {
+          schemaName: "boreal.file-store.v1",
+          expectedObject: true,
+          maxBytes: 50 * 1024 * 1024
+        })
+      );
     } catch (error) {
       if (isNodeError(error) && error.code === "ENOENT") {
         return {};
-      }
-      if (error instanceof SyntaxError) {
-        throw new BorealError("BOREAL_STORAGE_ERROR", "Boreal state file contains invalid JSON", {
-          stateFile: this.stateFile
-        });
       }
       throw error;
     }

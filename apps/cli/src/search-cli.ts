@@ -1,8 +1,7 @@
 import { existsSync } from "node:fs";
-import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 
-import { BorealError, nowIso, type ContentHash } from "@boreal/core";
+import { BorealError, nowIso, readJsonFile, type ContentHash } from "@boreal/core";
 import {
   buildSearchIndex,
   isSearchIndexDocument,
@@ -136,7 +135,11 @@ async function loadFreshSearchIndex(context: CliContext): Promise<SearchIndexDoc
 }
 
 async function readSearchIndex(path: string): Promise<SearchIndexDocument> {
-  const parsed = JSON.parse(await readFile(path, "utf8")) as unknown;
+  const parsed = await readJsonFile(path, {
+    schemaName: "boreal.search-index.v1",
+    expectedObject: true,
+    maxBytes: 50 * 1024 * 1024
+  });
   if (!isSearchIndexDocument(parsed)) {
     throw new BorealError("BOREAL_INVALID_INPUT", "Search index has an unsupported shape", { path });
   }

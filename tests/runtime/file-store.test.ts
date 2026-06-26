@@ -197,7 +197,7 @@ describe("file-backed store", () => {
 
     const invalidJsonStore = new FileBorealStore({ rootDir, lock });
     await expect(invalidJsonStore.read((reader) => reader.listWorkItems())).rejects.toMatchObject({
-      code: "BOREAL_STORAGE_ERROR"
+      code: "BOREAL_JSON_PARSE"
     } satisfies Partial<BorealError>);
 
     await writeFile(statePath, JSON.stringify({ schemaVersion: "boreal.file-store.v999" }), "utf8");

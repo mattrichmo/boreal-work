@@ -1,6 +1,20 @@
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
 import { describe, expect, it } from "vitest";
 
-import { canonicalJson, deterministicId, hashContent, randomId, type EventId, type WorkId } from "@boreal/core";
+import {
+  BorealError,
+  canonicalJson,
+  deterministicId,
+  hashContent,
+  randomId,
+  readJsonFile,
+  safeParseJson,
+  type EventId,
+  type WorkId
+} from "@boreal/core";
 
 describe("core hashing and ids", () => {
   it("canonicalizes object keys before hashing", () => {
@@ -25,5 +39,31 @@ describe("core hashing and ids", () => {
 
     expect(first).not.toBe(second);
     expect(first).toMatch(/^bw_event_[a-f0-9]{32}$/);
+  });
+
+  it("reports structured JSON parse failures", () => {
+    expect(() => safeParseJson("{", { path: "state.json", schemaName: "boreal.file-store.v1" })).toThrow(BorealError);
+    expect(() => safeParseJson("{", { path: "state.json", schemaName: "boreal.file-store.v1" })).toThrow(
+      expect.objectContaining({
+        code: "BOREAL_JSON_PARSE",
+        details: expect.objectContaining({
+          path: "state.json",
+          schemaName: "boreal.file-store.v1"
+        })
+      })
+    );
+  });
+
+  it("enforces JSON file size limits before parsing", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "boreal-json-"));
+    try {
+      const path = join(dir, "large.json");
+      await writeFile(path, JSON.stringify({ ok: true }), "utf8");
+      await expect(readJsonFile(path, { maxBytes: 2 })).rejects.toMatchObject({
+        code: "BOREAL_INVALID_INPUT"
+      } satisfies Partial<BorealError>);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 });

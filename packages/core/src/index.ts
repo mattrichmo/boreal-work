@@ -3,6 +3,7 @@ export * from "./errors.js";
 export * from "./factory.js";
 export * from "./hash.js";
 export * from "./ids.js";
+export * from "./json-safe.js";
 export * from "./policies.js";
 export * from "./records.js";
 export * from "./time.js";

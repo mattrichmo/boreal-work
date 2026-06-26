@@ -1,8 +1,8 @@
 import { existsSync } from "node:fs";
-import { readFile } from "node:fs/promises";
 
 import {
   BorealError,
+  readJsonFile,
   type AgentReservation,
   type ClaimRecord,
   type ContextPack,
@@ -246,7 +246,11 @@ async function readStateDocument(
   }
 
   try {
-    const parsed = JSON.parse(await readFile(context.paths.stateFile, "utf8")) as unknown;
+    const parsed = await readJsonFile(context.paths.stateFile, {
+      schemaName: "boreal.file-store.v1",
+      expectedObject: true,
+      maxBytes: 50 * 1024 * 1024
+    });
     if (!isRecord(parsed)) {
       diagnostics.push({
         code: "state.shape",

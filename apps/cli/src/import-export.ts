@@ -1,4 +1,4 @@
-import { mkdir, readdir, readFile, stat } from "node:fs/promises";
+import { mkdir, readdir, stat } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
 
 import {
@@ -7,7 +7,8 @@ import {
   assertRealPathInside,
   canonicalJson,
   hashContent,
-  nowIso
+  nowIso,
+  readJsonFile
 } from "@boreal/core";
 import {
   writeTextFileAtomic,
@@ -141,7 +142,11 @@ export async function exportMarkdown(context: CliContext, outDir: string | undef
 
 export async function importJson(context: CliContext, fromPath: string, options: ImportJsonOptions = {}): Promise<ImportResult> {
   const resolvedPath = await resolveReadablePath(context, fromPath, Boolean(options.allowExternalRead));
-  const parsed = JSON.parse(await readFile(resolvedPath, "utf8")) as unknown;
+  const parsed = await readJsonFile(resolvedPath, {
+    schemaName: "boreal.export.v1",
+    expectedObject: true,
+    maxBytes: 50 * 1024 * 1024
+  });
   const incoming = parseImportSnapshot(parsed);
   return importSnapshot(context.store, incoming);
 }
@@ -185,7 +190,11 @@ export async function listSnapshots(context: CliContext): Promise<readonly Snaps
 export async function showSnapshot(context: CliContext, id: string): Promise<ExportDocument> {
   const safeId = parseSnapshotId(id);
   const path = join(context.paths.borealDir, "snapshots", `${safeId}.json`);
-  const parsed = JSON.parse(await readFile(path, "utf8")) as unknown;
+  const parsed = await readJsonFile(path, {
+    schemaName: "boreal.export.v1",
+    expectedObject: true,
+    maxBytes: 50 * 1024 * 1024
+  });
   const snapshot = parseExportDocument(parsed);
   return {
     schemaVersion: "boreal.export.v1",
@@ -581,7 +590,11 @@ async function snapshotListEntry(path: string): Promise<SnapshotListEntry> {
   const info = await stat(path);
   const id = basename(path, ".json");
   try {
-    const parsed = JSON.parse(await readFile(path, "utf8")) as unknown;
+    const parsed = await readJsonFile(path, {
+      schemaName: "boreal.export.v1",
+      expectedObject: true,
+      maxBytes: 50 * 1024 * 1024
+    });
     const document = parseExportDocument(parsed);
     return {
       id,

@@ -4,6 +4,7 @@ export type BorealErrorCode =
   | "BOREAL_CONFLICT"
   | "BOREAL_POLICY_VIOLATION"
   | "BOREAL_STORAGE_ERROR"
+  | "BOREAL_JSON_PARSE"
   | "BOREAL_INVARIANT";
 
 export class BorealError extends Error {
@@ -33,4 +34,3 @@ export function invariant(
 export function isBorealError(error: unknown): error is BorealError {
   return error instanceof BorealError;
 }
-
