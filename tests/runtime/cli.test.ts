@@ -1177,6 +1177,35 @@ describe("bwrk cli", () => {
     expect(doctorPayload.issues).toEqual([]);
   });
 
+  it("installs Codex and Claude skill files and keeps dry-run read-only", async () => {
+    const rootDir = await makeTempWorkspace();
+    const dryRunRoot = join(rootDir, "dry-run-skills");
+    const codexRoot = join(rootDir, "codex-home");
+    const claudeRoot = join(rootDir, "claude-home");
+
+    const dryRun = await runCli(rootDir, ["install", "skills", "--install-root", dryRunRoot, "--dry-run", "--json"]);
+    const codex = await runCli(rootDir, ["install", "codex", "--install-root", codexRoot, "--json"]);
+    const claude = await runCli(rootDir, ["install", "claude", "--install-root", claudeRoot, "--json"]);
+    const codexRouter = await readFile(join(codexRoot, "skills/router/SKILL.md"), "utf8");
+    const claudeRouter = await readFile(join(claudeRoot, "router/SKILL.md"), "utf8");
+
+    expect(dryRun.exitCode).toBe(0);
+    expect(await fileMissing(join(dryRunRoot, "router/SKILL.md"))).toBe(true);
+    expect(await fileMissing(join(dryRunRoot, "skills/router/SKILL.md"))).toBe(true);
+    expect(codex.exitCode).toBe(0);
+    expect(parseData<{ readonly files: readonly unknown[]; readonly issues: readonly unknown[] }>(codex.stdout)).toEqual(
+      expect.objectContaining({ issues: [], files: expect.arrayContaining([expect.objectContaining({ destination: join(codexRoot, "skills/router/SKILL.md") })]) })
+    );
+    expect(codexRouter).toContain("name: router");
+    expect(codexRouter).toContain("00-agent/route-request.md");
+    expect(claude.exitCode).toBe(0);
+    expect(parseData<{ readonly files: readonly unknown[]; readonly issues: readonly unknown[] }>(claude.stdout)).toEqual(
+      expect.objectContaining({ issues: [], files: expect.arrayContaining([expect.objectContaining({ destination: join(claudeRoot, "router/SKILL.md") })]) })
+    );
+    expect(claudeRouter).toContain("name: router");
+    expect(claudeRouter).toContain("00-agent/route-request.md");
+  });
+
   it("generates a markdown command reference from the registry", async () => {
     const rootDir = await makeTempWorkspace();
 
