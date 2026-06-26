@@ -1,8 +1,26 @@
 .DS_Store
 node_modules/
+**/node_modules/
 dist/
+**/dist/
 coverage/
 .turbo/
 .pnpm-store/
 *.tsbuildinfo
 
+# Boreal generated runtime/cache artifacts
+.boreal/runtime/*.lock
+.boreal/runtime/state.lock/
+.boreal/runtime/search-index.json
+.boreal/cache/
+.boreal/tmp/
+.boreal/results/
+.boreal/**/*.db
+.boreal/**/*.db-*
+
+# Future repo-local memory generated artifacts
+memory/.boreal/db/
+memory/.boreal/cache/
+memory/.boreal/locks/
+memory/.boreal/tmp/
+memory/.boreal/results/

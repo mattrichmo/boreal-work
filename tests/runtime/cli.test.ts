@@ -4,6 +4,8 @@ import { join } from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
 
+import { flagValue, parseArgs } from "../../apps/cli/src/args.ts";
+import { registryValueFlagNames } from "../../apps/cli/src/command-registry.ts";
 import { main } from "../../apps/cli/src/index.ts";
 import type { CliOutput } from "../../apps/cli/src/output.ts";
 
@@ -230,6 +232,27 @@ describe("bwrk cli", () => {
     const created = await runCli(rootDir, ["work", "create", "Draft via false flag", "--ready=false", "--json"]);
     expect(created.exitCode).toBe(0);
     expect(parseData<{ readonly status: string }>(created.stdout).status).toBe("draft");
+  });
+
+  it("parses value flags from the command registry and honors json=true errors", async () => {
+    const rootDir = await makeTempWorkspace();
+    const parsed = parseArgs(["agent", "finish", "bw_work_example", "--summary", "done", "--release", "--json=true"]);
+
+    expect(registryValueFlagNames()).toContain("summary");
+    expect(flagValue(parsed, "summary")).toBe("done");
+    expect(flagValue(parsed, "json")).toBe("true");
+
+    const jsonError = await runCli(rootDir, ["unknown", "--json=true"]);
+    const jsonPayload = parseJson<{ readonly ok: false; readonly code: string; readonly message: string }>(jsonError.stderr);
+    expect(jsonError.exitCode).toBe(2);
+    expect(jsonError.stdout).toBe("");
+    expect(jsonPayload.ok).toBe(false);
+    expect(jsonPayload.code).toBe("BOREAL_INVALID_INPUT");
+    expect(jsonPayload.message).toContain("Unknown command");
+
+    const humanError = await runCli(rootDir, ["unknown", "--json=false"]);
+    expect(humanError.exitCode).toBe(2);
+    expect(humanError.stderr).toContain("BOREAL_INVALID_INPUT: Unknown command");
   });
 
   it("runs the work lifecycle through file-backed commands", async () => {

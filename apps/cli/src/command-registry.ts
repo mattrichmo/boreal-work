@@ -662,6 +662,14 @@ export const findCommandDefinition = (command: readonly string[]): CommandDefini
 
 export const commandPath = (definition: CommandDefinition): string => definition.path.join(" ");
 
+export function registryValueFlagNames(): ReadonlySet<string> {
+  return new Set(
+    [...GLOBAL_FLAGS, ...COMMAND_DEFINITIONS.flatMap((definition) => definition.flags)]
+      .filter((definition) => definition.type === "value")
+      .map((definition) => definition.name)
+  );
+}
+
 export const serializeCommandDefinition = (definition: CommandDefinition) => ({
   path: definition.path,
   category: definition.category,

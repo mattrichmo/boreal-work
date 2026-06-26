@@ -4,6 +4,15 @@ Git-native project memory and workflow control for humans and agents.
 
 This repository currently contains the TypeScript runtime and the first command surface under `apps/cli`.
 
+## Artifact Policy
+
+This repo is a source workspace, not a checked-in runnable bundle. Do not commit `node_modules/`, `dist/`, `*.tsbuildinfo`, or `.boreal/runtime` cache artifacts. Rebuild local artifacts with:
+
+```bash
+pnpm install
+pnpm build
+```
+
 ## Runtime Packages
 
 - `packages/core`: durable record types, deterministic IDs, canonical hashing, timestamps, errors, policies.

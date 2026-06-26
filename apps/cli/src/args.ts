@@ -1,49 +1,16 @@
 import { BorealError } from "@boreal/core";
 
+import { registryValueFlagNames } from "./command-registry.js";
+
 export interface ParsedArgs {
   readonly command: readonly string[];
   readonly flags: ReadonlyMap<string, readonly string[]>;
 }
 
-const VALUE_FLAGS = new Set([
-  "acceptance",
-  "actor",
-  "actor-kind",
-  "agent",
-  "command",
-  "consequence",
-  "context",
-  "decision",
-  "description",
-  "evidence",
-  "expires-at",
-  "from",
-  "kind",
-  "label",
-  "limit",
-  "name",
-  "notes",
-  "out",
-  "outcome",
-  "priority",
-  "purpose",
-  "query",
-  "reason",
-  "source",
-  "status",
-  "statement",
-  "summary",
-  "title",
-  "ttl",
-  "uri",
-  "verdict",
-  "work",
-  "workspace"
-]);
-
 export function parseArgs(argv: readonly string[]): ParsedArgs {
   const command: string[] = [];
   const flags = new Map<string, string[]>();
+  const valueFlags = registryValueFlagNames();
 
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
@@ -68,7 +35,7 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
       continue;
     }
 
-    if (VALUE_FLAGS.has(raw)) {
+    if (valueFlags.has(raw)) {
       const value = argv[index + 1];
       if (!value || value.startsWith("--")) {
         throw new BorealError("BOREAL_INVALID_INPUT", `--${raw} requires a value`);
@@ -82,6 +49,21 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
   }
 
   return { command, flags };
+}
+
+export function wantsJsonOutput(argv: readonly string[]): boolean {
+  for (const arg of argv) {
+    if (arg === "--") {
+      return false;
+    }
+    if (arg === "--json") {
+      return true;
+    }
+    if (arg.startsWith("--json=")) {
+      return arg.slice("--json=".length) !== "false";
+    }
+  }
+  return false;
 }
 
 export function hasFlag(args: ParsedArgs, name: string): boolean {

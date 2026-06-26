@@ -21,12 +21,24 @@ export interface CreateGraphEdgeInput {
   readonly tags?: readonly string[];
 }
 
-export function makeGraphEdgeId(input: Pick<CreateGraphEdgeInput, "kind" | "fromId" | "toId">): GraphEdgeId {
-  return deterministicId<GraphEdgeId>("edge", input);
+type GraphEdgeIdentityInput = Pick<CreateGraphEdgeInput, "kind" | "fromId" | "fromType" | "toId" | "toType"> & {
+  readonly directed?: boolean;
+};
+
+export function makeGraphEdgeId(input: GraphEdgeIdentityInput): GraphEdgeId {
+  return deterministicId<GraphEdgeId>("edge", {
+    kind: input.kind,
+    fromId: input.fromId,
+    fromType: input.fromType,
+    toId: input.toId,
+    toType: input.toType,
+    directed: input.directed ?? true
+  });
 }
 
 export function createGraphEdge(input: CreateGraphEdgeInput): GraphEdge {
-  const id = makeGraphEdgeId(input);
+  const directed = input.directed ?? true;
+  const id = makeGraphEdgeId({ ...input, directed });
   return withContentHash({
     meta: createRecordMeta({
       id,
@@ -39,7 +51,7 @@ export function createGraphEdge(input: CreateGraphEdgeInput): GraphEdge {
     fromType: input.fromType,
     toId: input.toId,
     toType: input.toType,
-    directed: input.directed ?? true
+    directed
   });
 }
 
@@ -87,4 +99,3 @@ function addEdge(adjacency: Map<string, string[]>, fromId: string, toId: string)
   current.push(toId);
   adjacency.set(fromId, current);
 }
-

@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { BorealError, isBorealError } from "@boreal/core";
 
-import { parseArgs } from "./args.js";
+import { parseArgs, wantsJsonOutput } from "./args.js";
 import { runCommand } from "./commands.js";
 import type { CliOutput } from "./output.js";
 
@@ -15,7 +15,7 @@ export async function main(
     const result = await runCommand(parsed, output, cwd);
     return result.exitCode;
   } catch (error) {
-    const json = argv.includes("--json");
+    const json = wantsJsonOutput(argv);
     if (json) {
       output.error(`${JSON.stringify(errorPayload(error), null, 2)}\n`);
     } else {

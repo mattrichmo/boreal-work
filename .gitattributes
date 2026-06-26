@@ -1,0 +1,12 @@
+* text=auto eol=lf
+
+# Future append-only ledgers should use the Boreal JSONL merge driver when configured.
+.boreal/ledgers/*.jsonl merge=boreal-jsonl
+memory/ledgers/*.jsonl merge=boreal-jsonl
+memory/graph/*.jsonl merge=boreal-jsonl
+memory/raw/index.jsonl merge=boreal-jsonl
+
+# Generated exports should stay diffable and normalized.
+*.json text eol=lf
+*.jsonl text eol=lf
+*.md text eol=lf
