@@ -256,6 +256,29 @@ describe("bwrk cli", () => {
     expect(invalidConfigPayload.message).toContain("Existing project setup config is invalid");
   });
 
+  it("prints a readable init setup summary in human mode", async () => {
+    const rootDir = await makeTempWorkspace();
+    const initialized = await runCli(rootDir, [
+      "init",
+      "--setup-memory",
+      "--memory-root",
+      "memory",
+      "--memory-layout",
+      "child",
+      "--install-root",
+      ".agents/skills"
+    ]);
+
+    expect(initialized.exitCode).toBe(0);
+    expect(initialized.stdout).toContain("Boreal workspace initialized");
+    expect(initialized.stdout).toContain(`workspace: ${rootDir}`);
+    expect(initialized.stdout).toContain("Project setup");
+    expect(initialized.stdout).toContain(`memory: ${join(rootDir, "memory")}`);
+    expect(initialized.stdout).toContain("layout: child");
+    expect(initialized.stdout).toContain(`skills: ${join(rootDir, ".agents/skills")}`);
+    expect(initialized.stdout.trimStart()).not.toMatch(/^\{/u);
+  });
+
   it("allows explicit sibling memory setup and rejects mismatched layouts", async () => {
     const rootDir = await makeTempWorkspace();
     const siblingRoot = join(rootDir, "..", `${rootDir.split("/").at(-1) ?? "workspace"}-memory`);

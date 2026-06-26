@@ -93,7 +93,7 @@ import {
   type LedgerStatusResult
 } from "./import-export.js";
 import { createResultSpoolingOutput, formatRecord, table, type CliOutput } from "./output.js";
-import { maybeConfigureProjectSetup } from "./project-setup.js";
+import { maybeConfigureProjectSetup, type ProjectSetupResult } from "./project-setup.js";
 import { inspectSearchIndex, runSearch, writeSearchIndex, type SearchIndexInspection } from "./search-cli.js";
 import { addRawSource, createWikiPage, initVault, inspectVault, type VaultStatusResult } from "./vault.js";
 import {
@@ -1326,18 +1326,43 @@ async function initCommand(
   await ensureWorkspaceDirs(context);
   const result = await context.runtime.ensureWorkspaceInitialized();
   const projectSetup = await maybeConfigureProjectSetup(context, args);
-  output.write(
-    formatRecord(
-      {
-        initialized: result.initialized,
-        workspaceRoot: context.workspaceRoot,
-        eventId: result.event.meta.id,
-        projectSetup
-      },
-      json
-    )
-  );
+  const initResult = {
+    initialized: result.initialized,
+    workspaceRoot: context.workspaceRoot,
+    eventId: result.event.meta.id,
+    projectSetup
+  };
+  output.write(json ? formatRecord(initResult, true) : formatInitResult(initResult));
   return { exitCode: 0 };
+}
+
+function formatInitResult(result: {
+  readonly initialized: boolean;
+  readonly workspaceRoot: string;
+  readonly eventId: string;
+  readonly projectSetup?: ProjectSetupResult;
+}): string {
+  const lines = [
+    "Boreal workspace initialized",
+    `workspace: ${result.workspaceRoot}`,
+    `event: ${result.eventId}`
+  ];
+  if (result.projectSetup) {
+    lines.push(
+      "",
+      "Project setup",
+      `config: ${result.projectSetup.configPath}`,
+      `memory: ${result.projectSetup.config.memoryRoot}`,
+      `layout: ${result.projectSetup.config.memoryLayout}`,
+      `memory git: ${result.projectSetup.config.memoryGitMode}`,
+      `skills: ${result.projectSetup.config.installRoot}`,
+      `targets: ${result.projectSetup.config.skillTargets.join(", ")}`,
+      `folder scoped: ${result.projectSetup.config.folderScoped ? "yes" : "no"}`,
+      `created: ${result.projectSetup.createdDirectories.length} directories, ${result.projectSetup.createdFiles.length} files`,
+      `existing: ${result.projectSetup.existingDirectories.length} directories, ${result.projectSetup.existingFiles.length} files`
+    );
+  }
+  return `${lines.join("\n")}\n`;
 }
 
 async function workCommand(

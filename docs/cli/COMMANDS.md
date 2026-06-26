@@ -222,8 +222,9 @@ Behavior:
 - With setup flags, writes `.boreal/project.json` and scaffolds the selected memory root.
 - `--memory-layout child` requires the memory root to be a direct child of the project root.
 - `--memory-layout sibling` requires the memory root to share the project root parent and must be explicit for out-of-project memory.
-- `--interactive` prompts for the same setup fields and requires a TTY.
+- `--interactive` prompts for the same setup fields and requires a TTY. Path fields use editable text prompts; choice fields use arrow-key selectors with descriptions. Use Space to toggle multiple skill targets and Enter to accept.
 - Returns the existing initialization event when the workspace is already initialized.
+- Human output is a short setup summary. Use `--json` when automation needs the full `projectSetup` object.
 
 Common setup examples:
 
