@@ -3,7 +3,14 @@ import { mkdir } from "node:fs/promises";
 import { homedir, userInfo } from "node:os";
 import { dirname, resolve } from "node:path";
 
-import { BorealError, normalizeActorId, resolveWorkspacePaths, type ActorKind, type ActorRef } from "@boreal/core";
+import {
+  BorealError,
+  normalizeActorId,
+  resolveWorkspacePaths,
+  type ActorKind,
+  type ActorRef,
+  type OperationId
+} from "@boreal/core";
 import { createBorealRuntime } from "@boreal/engine";
 import { FileBorealStore } from "@boreal/storage";
 
@@ -17,9 +24,18 @@ export interface CliContext {
   readonly runtime: ReturnType<typeof createBorealRuntime>;
   readonly actor: ActorRef;
   readonly sessionId: string;
+  readonly operationId?: OperationId;
 }
 
-export async function createCliContext(args: ParsedArgs, cwd: string): Promise<CliContext> {
+export interface CreateCliContextOptions {
+  readonly operationId?: OperationId;
+}
+
+export async function createCliContext(
+  args: ParsedArgs,
+  cwd: string,
+  options: CreateCliContextOptions = {}
+): Promise<CliContext> {
   const explicitWorkspace = flagValue(args, "workspace");
   const workspaceRoot = explicitWorkspace
     ? resolveExplicitWorkspaceRoot(explicitWorkspace)
@@ -28,8 +44,8 @@ export async function createCliContext(args: ParsedArgs, cwd: string): Promise<C
   const actor = actorFromArgs(args);
   const sessionId = sessionIdFromArgs(args);
   const store = new FileBorealStore({ rootDir: workspaceRoot });
-  const runtime = createBorealRuntime({ store, actor });
-  return { cwd, workspaceRoot, paths, store, runtime, actor, sessionId };
+  const runtime = createBorealRuntime({ store, actor, operationId: options.operationId });
+  return { cwd, workspaceRoot, paths, store, runtime, actor, sessionId, operationId: options.operationId };
 }
 
 export async function ensureWorkspaceDirs(context: CliContext): Promise<void> {

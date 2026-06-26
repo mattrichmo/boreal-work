@@ -299,7 +299,7 @@ describe("bwrk cli", () => {
     expect(created.exitCode).toBe(0);
 
     const state = parseJson<{
-      readonly events: Array<{ readonly meta: { readonly id: string }; readonly type: string }>;
+      readonly events: Array<{ readonly meta: { readonly id: string }; readonly type: string; readonly operationId?: string }>;
       readonly operations: Array<{
         readonly meta: { readonly id: string; readonly contentHash: string };
         readonly sessionId: string;
@@ -336,6 +336,7 @@ describe("bwrk cli", () => {
     expect(operation?.argv.join(" ")).not.toContain("Sensitive Label");
     expect(workCreatedEvent).toBeDefined();
     expect(operation?.eventIds).toContain(workCreatedEvent?.meta.id);
+    expect(workCreatedEvent?.operationId).toBe(operation?.meta.id);
   });
 
   it("lists, shows, and prunes local command operations", async () => {
@@ -688,6 +689,30 @@ describe("bwrk cli", () => {
         expect.objectContaining({ code: "state.record_shape", severity: "error" }),
         expect.objectContaining({ code: "snapshot.export_drift", severity: "warning" })
       ])
+    );
+  });
+
+  it("reports operation event causality mismatches in doctor", async () => {
+    const rootDir = await makeTempWorkspace();
+    await runCli(rootDir, ["init", "--json"]);
+    await runCli(rootDir, ["work", "create", "Causality mismatch", "--ready", "--json"]);
+    await updateState(rootDir, (state) => {
+      const events = ((state.events as Array<Record<string, unknown>> | undefined) ?? []).map((event) =>
+        event.type === "work.created" ? { ...event, operationId: "bw_operation_deadbeefdead" } : event
+      );
+      return { ...state, events };
+    });
+
+    const doctor = await runCli(rootDir, ["doctor", "--json"]);
+    const payload = parseData<{
+      readonly ok: boolean;
+      readonly diagnostics: Array<{ readonly code: string; readonly severity: string }>;
+    }>(doctor.stdout);
+
+    expect(doctor.exitCode).toBe(1);
+    expect(payload.ok).toBe(false);
+    expect(payload.diagnostics).toEqual(
+      expect.arrayContaining([expect.objectContaining({ code: "operation.event_causality", severity: "error" })])
     );
   });
 
@@ -1663,10 +1688,14 @@ describe("bwrk cli", () => {
     const exportDocument = parseJson<{
       readonly schemaVersion: string;
       readonly contentHash: string;
-      readonly state: { readonly workItems: Array<{ readonly meta: { readonly id: string }; readonly title: string }> };
+      readonly state: {
+        readonly workItems: Array<{ readonly meta: { readonly id: string }; readonly title: string }>;
+        readonly events: Array<{ readonly operationId?: string }>;
+      };
     }>(await readFile(exportPath, "utf8"));
     expect(exportDocument.schemaVersion).toBe("boreal.export.v1");
     expect(exportDocument.state.workItems.map((item) => item.meta.id)).toContain(work.meta.id);
+    expect(exportDocument.state.events.every((event) => event.operationId === undefined)).toBe(true);
 
     const markdown = await runCli(rootDir, ["export", "markdown", "--out", "markdown-export", "--json"]);
     const markdownPayload = parseData<{ readonly outDir: string; readonly files: readonly string[] }>(markdown.stdout);

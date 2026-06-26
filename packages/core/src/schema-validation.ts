@@ -112,13 +112,17 @@ export function runtimeEventSchemaIssues(value: unknown, path = "$"): readonly S
   if (!isRecord(value)) {
     return [issue(schemaId, path, "must be an object")];
   }
-  return [
+  const issues: SchemaValidationIssue[] = [
     ...recordMetaIssues(value.meta, `${path}.meta`, schemaId, /^bw_event_[a-f0-9]{12,64}$/),
     ...nonEmptyStringIssue(value.type, `${path}.type`, schemaId),
     ...nonEmptyStringIssue(value.subjectId, `${path}.subjectId`, schemaId),
     ...nonEmptyStringIssue(value.subjectType, `${path}.subjectType`, schemaId),
     ...recordIssue(value.payload, `${path}.payload`, schemaId)
   ];
+  if (value.operationId !== undefined) {
+    issues.push(...patternStringIssue(value.operationId, `${path}.operationId`, schemaId, /^bw_operation_[a-f0-9]{12,64}$/));
+  }
+  return issues;
 }
 
 export function runtimeOperationSchemaIssues(value: unknown, path = "$"): readonly SchemaValidationIssue[] {

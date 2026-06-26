@@ -441,7 +441,14 @@ async function validateStoreRecords(
       const sourceById = new Map(knowledgeSources.map((record) => [record.meta.id, record]));
       const verificationsById = new Map(verifications.map((record) => [record.meta.id, record]));
       const workById = new Map(workItems.map((work) => [work.meta.id, work]));
-      const eventIds = new Set(rawEvents.map((event) => readRecordId(event, "events")).filter(isString));
+      const eventById = new Map<string, Record<string, unknown>>();
+      for (const event of rawEvents) {
+        const eventId = readRecordId(event, "events");
+        if (eventId) {
+          eventById.set(eventId, event);
+        }
+      }
+      const eventIds = new Set(eventById.keys());
       const danglingDependencies = workItems.flatMap((work) =>
         work.dependencyIds
           .filter((dependencyId) => !workById.has(dependencyId))
@@ -564,6 +571,37 @@ async function validateStoreRecords(
           .filter((eventId) => !eventIds.has(eventId))
           .map((eventId) => ({ operationId: operation.meta.id, eventId }))
       );
+      const operationById = new Map<string, RuntimeOperation>(operations.map((operation) => [operation.meta.id, operation]));
+      const operationEventCausality = [
+        ...operations.flatMap((operation) =>
+          operation.eventIds.flatMap((eventId) => {
+            const event = eventById.get(eventId);
+            if (!event || event.operationId === undefined || event.operationId === operation.meta.id) {
+              return [];
+            }
+            return [
+              {
+                issue: "event_points_to_different_operation",
+                operationId: operation.meta.id,
+                eventId,
+                eventOperationId: event.operationId
+              }
+            ];
+          })
+        ),
+        ...rawEvents.flatMap((event) => {
+          const eventId = readRecordId(event, "events");
+          const operationId = event.operationId;
+          if (!eventId || typeof operationId !== "string") {
+            return [];
+          }
+          const operation = operationById.get(operationId);
+          if (!operation || operation.eventIds.some((id) => id === eventId)) {
+            return [];
+          }
+          return [{ issue: "operation_missing_event_id", operationId, eventId }];
+        })
+      ];
       const stringSafety = stringSafetyIssues({
         workItems,
         evidence,
@@ -611,6 +649,7 @@ async function validateStoreRecords(
         verificationPolicy,
         closedWithoutReason,
         danglingOperationEvents,
+        operationEventCausality,
         stringSafety,
         labelCollisions,
         actorCollisions
@@ -704,6 +743,7 @@ async function validateStoreRecords(
     diagnostics.push(diagnosticFromList("verification.policy", "Verification policy issues", summary.verificationPolicy));
     diagnostics.push(diagnosticFromList("work.closed_reason", "Closed work items missing a close reason", summary.closedWithoutReason));
     diagnostics.push(diagnosticFromList("operation.dangling_events", "Operation event references missing runtime events", summary.danglingOperationEvents));
+    diagnostics.push(diagnosticFromList("operation.event_causality", "Operation and event causality links disagree", summary.operationEventCausality));
     diagnostics.push(diagnosticFromList("string.suspicious_unicode", "Unsafe Unicode in machine-facing strings", summary.stringSafety));
     diagnostics.push(warningDiagnosticFromList("label.normalization_collision", "Label normalization collisions", summary.labelCollisions));
     diagnostics.push(warningDiagnosticFromList("actor.normalization_collision", "Actor normalization collisions", summary.actorCollisions));
@@ -1236,10 +1276,6 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function isWorkItem(value: WorkItem | undefined): value is WorkItem {
   return value !== undefined;
-}
-
-function isString(value: unknown): value is string {
-  return typeof value === "string";
 }
 
 function isDoctorWorkItem(value: unknown): value is WorkItem {

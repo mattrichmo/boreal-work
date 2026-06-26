@@ -271,12 +271,13 @@ export async function runCommand(args: ParsedArgs, output: CliOutput, cwd: strin
     return commandsCommand(output, json);
   }
 
-  const context = await createCliContext(args, cwd);
+  const shouldLogOperation = shouldRecordOperation(definition);
+  const operationId = shouldLogOperation ? randomId<OperationId>("operation") : undefined;
+  const context = await createCliContext(args, cwd, { operationId });
   const [group, action, ...rest] = args.command;
   if (definition.requiresWorkspace) {
     assertInitialized(context);
   }
-  const shouldLogOperation = shouldRecordOperation(definition);
   const startedAt = shouldLogOperation ? nowIso() : undefined;
   const eventIdsBefore = shouldLogOperation ? await listEventIds(context) : new Set<EventId>();
   const spoolingOutput = json
@@ -349,8 +350,8 @@ export async function runCommand(args: ParsedArgs, output: CliOutput, cwd: strin
   } catch (error) {
     thrown = error;
   }
-  if (shouldLogOperation && startedAt) {
-    await recordCliOperation(context, definition, args, startedAt, eventIdsBefore, result, thrown);
+  if (operationId && startedAt) {
+    await recordCliOperation(context, operationId, definition, args, startedAt, eventIdsBefore, result, thrown);
   }
   if (thrown) {
     throw thrown;
@@ -498,6 +499,7 @@ function shouldRecordOperation(definition: CommandDefinition): boolean {
 
 async function recordCliOperation(
   context: CliContext,
+  operationId: OperationId,
   definition: CommandDefinition,
   args: ParsedArgs,
   startedAt: IsoTimestamp,
@@ -511,7 +513,7 @@ async function recordCliOperation(
   const status = exitCode === 0 ? "succeeded" : "failed";
   const operation = {
     meta: createRecordMeta({
-      id: randomId<OperationId>("operation"),
+      id: operationId,
       now: finishedAt,
       actor: context.actor,
       tags: ["operation"]
@@ -532,8 +534,8 @@ async function recordCliOperation(
 
   await context.store.write(async (writer) => {
     const eventIds = (await writer.listEvents())
-      .map((event) => event.meta.id)
-      .filter((id) => !eventIdsBefore.has(id));
+      .filter((event) => !eventIdsBefore.has(event.meta.id) && event.operationId === operationId)
+      .map((event) => event.meta.id);
     await writer.putOperation(withContentHash({ ...operation, eventIds } satisfies RuntimeOperation));
   });
 }

@@ -169,6 +169,7 @@ export interface RuntimeEvent {
   readonly type: string;
   readonly subjectId: string;
   readonly subjectType: string;
+  readonly operationId?: OperationId;
   readonly payload: Record<string, unknown>;
 }
 

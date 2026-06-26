@@ -29,6 +29,7 @@ import {
   type IsoTimestamp,
   type KnowledgeSource,
   type KnowledgeSourceId,
+  type OperationId,
   type RuntimeEvent,
   type RuntimePolicy,
   type VerificationRecord,
@@ -56,6 +57,7 @@ export interface BorealRuntimeOptions {
   readonly store?: BorealStore;
   readonly policy?: Partial<RuntimePolicy>;
   readonly actor?: ActorRef;
+  readonly operationId?: OperationId;
   readonly clock?: () => Date;
 }
 
@@ -188,6 +190,7 @@ export function createBorealRuntime(options: BorealRuntimeOptions = {}): BorealR
   const policy: RuntimePolicy = { ...DEFAULT_RUNTIME_POLICY, ...options.policy };
   assertValidRuntimePolicy(policy);
   const actor = normalizeActorRef(options.actor ?? systemActor());
+  const operationId = options.operationId;
   const clock = options.clock ?? (() => new Date());
   const now = () => nowIso(clock());
 
@@ -208,6 +211,7 @@ export function createBorealRuntime(options: BorealRuntimeOptions = {}): BorealR
       type,
       subjectId,
       subjectType,
+      operationId,
       payload
     });
     await writer.putEvent(event);

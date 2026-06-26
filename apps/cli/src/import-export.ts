@@ -9,7 +9,9 @@ import {
   hashContent,
   nowIso,
   readJsonFile,
-  runtimeSnapshotSchemaIssues
+  runtimeSnapshotSchemaIssues,
+  withContentHash,
+  type RuntimeEvent
 } from "@boreal/core";
 import {
   writeTextFileAtomic,
@@ -238,7 +240,7 @@ async function readSnapshot(reader: BorealReader): Promise<ExportSnapshot> {
     decisions: await reader.listDecisions(),
     graphEdges: await reader.listGraphEdges(),
     reservations: await reader.listReservations(),
-    events: await reader.listEvents(),
+    events: (await reader.listEvents()).map(portableEvent),
     projections: await reader.listProjections(),
     contextPacks: await reader.listContextPacks()
   };
@@ -307,10 +309,18 @@ function normalizeSnapshot(value: unknown): ExportSnapshot {
       if (!Array.isArray(sectionValue)) {
         throw new BorealError("BOREAL_INVALID_INPUT", "Snapshot section must be an array", { section });
       }
-      return [section, sectionValue];
+      return [section, section === "events" ? sectionValue.map(portableEvent) : sectionValue];
     })
   ) as unknown as ExportSnapshot;
   return snapshot;
+}
+
+function portableEvent<T>(value: T): T {
+  if (!isRecord(value) || value.operationId === undefined) {
+    return value;
+  }
+  const { operationId: _operationId, ...event } = value;
+  return isRecord(event.meta) ? (withContentHash(event as unknown as RuntimeEvent) as T) : (event as T);
 }
 
 function validateSnapshot(snapshot: ExportSnapshot): void {
