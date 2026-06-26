@@ -761,9 +761,9 @@ export const COMMAND_DEFINITIONS: readonly CommandDefinition[] = [
     path: ["ledger", "delete"],
     category: "ledger",
     summary: "Delete a supported record and write a tombstone.",
-    usage: "bwrk ledger delete source <source-id> [--reason <text>] [--json]",
+    usage: "bwrk ledger delete <source|claim|decision> <id> [--reason <text>] [--json]",
     description:
-      "Deletes an unreferenced knowledge source from runtime state, records a tombstone in deletions.jsonl, and refreshes JSONL ledgers.",
+      "Deletes a supported unreferenced record from runtime state, records a tombstone in deletions.jsonl, and refreshes JSONL ledgers.",
     flags: [flag("reason", "value", "Optional deletion reason stored in the tombstone.")],
     positionals: { label: "record kind and id", min: 2, max: 2 },
     requiresWorkspace: true,

@@ -761,10 +761,10 @@ JSON `data` contains `ok`, `path`, `exists`, `stale`, `expectedContentHash`, `re
 ## `ledger delete`
 
 ```bash
-bwrk ledger delete source <source-id> [--reason <text>] [--json]
+bwrk ledger delete <source|claim|decision> <id> [--reason <text>] [--json]
 ```
 
-Deletes an unreferenced knowledge source from runtime state, writes a `boreal.ledger-deletion.v1` tombstone to `deletions.jsonl`, and refreshes the JSONL ledger export. The command fails with `BOREAL_CONFLICT` when any claim, decision, or graph edge still references the source.
+Deletes a supported unreferenced record from runtime state, writes a `boreal.ledger-deletion.v1` tombstone to `deletions.jsonl`, and refreshes the JSONL ledger export. Supported record kinds are `source`, `claim`, and `decision`. Source deletion fails with `BOREAL_CONFLICT` when any claim, decision, or graph edge still references the source. Claim and decision deletion fail when graph edges reference the record.
 
 JSON `data` contains `deleted`, `section`, `id`, `tombstone`, and the refreshed `ledger` export result.
 

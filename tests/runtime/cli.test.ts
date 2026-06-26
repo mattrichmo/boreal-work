@@ -2198,7 +2198,7 @@ describe("bwrk cli", () => {
     expect(malformedPayload.message).toContain("schema validation");
   });
 
-  it("deletes unreferenced sources through tombstoned ledgers and blocks referenced source deletion", async () => {
+  it("deletes supported unreferenced records through tombstoned ledgers and blocks referenced source deletion", async () => {
     const rootDir = await makeTempWorkspace();
     await runCli(rootDir, ["init", "--json"]);
 
@@ -2284,25 +2284,169 @@ describe("bwrk cli", () => {
     );
     expect(deletedPayload.ledger.deletedRecordCounts.knowledgeSources).toBe(1);
 
+    const graphProtectedClaim = parseData<{ readonly meta: { readonly id: string } }>(
+      (
+        await runCli(rootDir, [
+          "claim",
+          "create",
+          "--statement",
+          "Graph-referenced claim must stay.",
+          "--json"
+        ])
+      ).stdout
+    );
+    await appendGraphEdge(rootDir, {
+      id: "bw_edge_111111111111",
+      fromId: "manual-node",
+      fromType: "external",
+      toId: graphProtectedClaim.meta.id,
+      toType: "claims"
+    });
+    const blockedClaimDelete = await runCli(rootDir, [
+      "ledger",
+      "delete",
+      "claim",
+      graphProtectedClaim.meta.id,
+      "--json"
+    ]);
+    const blockedClaimPayload = parseJson<{ readonly ok: false; readonly code: string; readonly message: string }>(
+      blockedClaimDelete.stderr
+    );
+    expect(blockedClaimDelete.exitCode).toBe(1);
+    expect(blockedClaimPayload.code).toBe("BOREAL_CONFLICT");
+    expect(blockedClaimPayload.message).toContain("graph edges reference it");
+
+    const deletableClaim = parseData<{ readonly meta: { readonly id: string } }>(
+      (
+        await runCli(rootDir, [
+          "claim",
+          "create",
+          "--statement",
+          "Duplicate claim can be tombstoned.",
+          "--json"
+        ])
+      ).stdout
+    );
+    const deletedClaim = await runCli(rootDir, [
+      "ledger",
+      "delete",
+      "claim",
+      deletableClaim.meta.id,
+      "--reason",
+      "duplicate-claim",
+      "--json"
+    ]);
+    const deletedClaimPayload = parseData<{
+      readonly section: string;
+      readonly id: string;
+      readonly ledger: { readonly deletedRecordCounts: { readonly claims: number } };
+    }>(deletedClaim.stdout);
+    expect(deletedClaim.exitCode).toBe(0);
+    expect(deletedClaimPayload).toEqual(
+      expect.objectContaining({
+        section: "claims",
+        id: deletableClaim.meta.id
+      })
+    );
+    expect(deletedClaimPayload.ledger.deletedRecordCounts.claims).toBe(1);
+
+    const graphProtectedDecision = parseData<{ readonly meta: { readonly id: string } }>(
+      (
+        await runCli(rootDir, [
+          "decision",
+          "create",
+          "--title",
+          "Graph-referenced decision",
+          "--decision",
+          "Keep the decision while a graph edge references it.",
+          "--json"
+        ])
+      ).stdout
+    );
+    await appendGraphEdge(rootDir, {
+      id: "bw_edge_222222222222",
+      fromId: graphProtectedDecision.meta.id,
+      fromType: "decisions",
+      toId: "manual-node",
+      toType: "external"
+    });
+    const blockedDecisionDelete = await runCli(rootDir, [
+      "ledger",
+      "delete",
+      "decision",
+      graphProtectedDecision.meta.id,
+      "--json"
+    ]);
+    const blockedDecisionPayload = parseJson<{ readonly ok: false; readonly code: string; readonly message: string }>(
+      blockedDecisionDelete.stderr
+    );
+    expect(blockedDecisionDelete.exitCode).toBe(1);
+    expect(blockedDecisionPayload.code).toBe("BOREAL_CONFLICT");
+    expect(blockedDecisionPayload.message).toContain("graph edges reference it");
+
+    const deletableDecision = parseData<{ readonly meta: { readonly id: string } }>(
+      (
+        await runCli(rootDir, [
+          "decision",
+          "create",
+          "--title",
+          "Duplicate decision",
+          "--decision",
+          "Delete the duplicate decision.",
+          "--json"
+        ])
+      ).stdout
+    );
+    const deletedDecision = await runCli(rootDir, [
+      "ledger",
+      "delete",
+      "decision",
+      deletableDecision.meta.id,
+      "--reason",
+      "duplicate-decision",
+      "--json"
+    ]);
+    const deletedDecisionPayload = parseData<{
+      readonly section: string;
+      readonly id: string;
+      readonly ledger: { readonly deletedRecordCounts: { readonly decisions: number } };
+    }>(deletedDecision.stdout);
+    expect(deletedDecision.exitCode).toBe(0);
+    expect(deletedDecisionPayload).toEqual(
+      expect.objectContaining({
+        section: "decisions",
+        id: deletableDecision.meta.id
+      })
+    );
+    expect(deletedDecisionPayload.ledger.deletedRecordCounts.decisions).toBe(1);
+
     const sources = parseData<Array<{ readonly id: string }>>((await runCli(rootDir, ["source", "list", "--json"])).stdout);
     expect(sources.map((source) => source.id)).toContain(referencedSource.meta.id);
     expect(sources.map((source) => source.id)).not.toContain(deletableSource.meta.id);
+    const claims = parseData<Array<{ readonly id: string }>>((await runCli(rootDir, ["claim", "list", "--json"])).stdout);
+    expect(claims.map((claim) => claim.id)).toContain(graphProtectedClaim.meta.id);
+    expect(claims.map((claim) => claim.id)).not.toContain(deletableClaim.meta.id);
+    const decisions = parseData<Array<{ readonly id: string }>>((await runCli(rootDir, ["decision", "list", "--json"])).stdout);
+    expect(decisions.map((decision) => decision.id)).toContain(graphProtectedDecision.meta.id);
+    expect(decisions.map((decision) => decision.id)).not.toContain(deletableDecision.meta.id);
     const deletions = await readFile(join(rootDir, ".boreal/ledgers/deletions.jsonl"), "utf8");
     expect(deletions).toContain(deletableSource.meta.id);
+    expect(deletions).toContain(deletableClaim.meta.id);
+    expect(deletions).toContain(deletableDecision.meta.id);
     expect(deletions).toContain("\"reason\":\"duplicate\"");
 
     const status = await runCli(rootDir, ["ledger", "status", "--json"]);
     const statusPayload = parseData<{
       readonly ok: boolean;
       readonly reconstructable: boolean;
-      readonly deletedRecordCounts: { readonly knowledgeSources: number };
+      readonly deletedRecordCounts: { readonly knowledgeSources: number; readonly claims: number; readonly decisions: number };
     }>(status.stdout);
     expect(status.exitCode).toBe(0);
     expect(statusPayload).toEqual(
       expect.objectContaining({
         ok: true,
         reconstructable: true,
-        deletedRecordCounts: expect.objectContaining({ knowledgeSources: 1 })
+        deletedRecordCounts: expect.objectContaining({ knowledgeSources: 1, claims: 1, decisions: 1 })
       })
     );
   });
@@ -2608,6 +2752,46 @@ async function updateState(
   const statePath = join(rootDir, ".boreal/runtime/state.json");
   const state = parseJson<MutableStateForTest>(await readFile(statePath, "utf8"));
   await writeFile(statePath, `${JSON.stringify(update(state), null, 2)}\n`, "utf8");
+}
+
+async function appendGraphEdge(
+  rootDir: string,
+  edge: {
+    readonly id: string;
+    readonly fromId: string;
+    readonly fromType: string;
+    readonly toId: string;
+    readonly toType: string;
+  }
+): Promise<void> {
+  await updateState(rootDir, (state) => ({
+    ...state,
+    graphEdges: [
+      ...((state.graphEdges as readonly unknown[] | undefined) ?? []),
+      {
+        meta: testMeta(edge.id),
+        kind: "references",
+        fromId: edge.fromId,
+        fromType: edge.fromType,
+        toId: edge.toId,
+        toType: edge.toType,
+        directed: true
+      }
+    ]
+  }));
+}
+
+function testMeta(id: string): Record<string, unknown> {
+  return {
+    id,
+    schemaVersion: "boreal.runtime.v1",
+    createdAt: "2026-01-01T00:00:00.000Z",
+    updatedAt: "2026-01-01T00:00:00.000Z",
+    createdBy: { id: "test", kind: "system" },
+    updatedBy: { id: "test", kind: "system" },
+    sourceRefs: [],
+    tags: []
+  };
 }
 
 function emptyFileStoreState(overrides: Record<string, readonly unknown[]> = {}): Record<string, unknown> {

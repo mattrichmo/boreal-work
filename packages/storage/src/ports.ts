@@ -66,7 +66,9 @@ export interface BorealWriter extends BorealReader {
   putKnowledgeSource(record: KnowledgeSource): Promise<void>;
   deleteKnowledgeSource(id: KnowledgeSourceId): Promise<boolean>;
   putClaim(record: ClaimRecord): Promise<void>;
+  deleteClaim(id: ClaimId): Promise<boolean>;
   putDecision(record: DecisionRecord): Promise<void>;
+  deleteDecision(id: DecisionId): Promise<boolean>;
   putGraphEdge(record: GraphEdge): Promise<void>;
   putReservation(record: AgentReservation): Promise<void>;
   putEvent(record: RuntimeEvent): Promise<void>;

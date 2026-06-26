@@ -12,6 +12,10 @@ import {
   readJsonFile,
   runtimeSnapshotSchemaIssues,
   withContentHash,
+  type ClaimId,
+  type ClaimRecord,
+  type DecisionId,
+  type DecisionRecord,
   type KnowledgeSource,
   type KnowledgeSourceId,
   type RuntimeEvent
@@ -105,10 +109,10 @@ export interface LedgerStatusResult {
   readonly error?: string;
 }
 
-export interface LedgerDeleteSourceResult {
+export interface LedgerDeleteRecordResult {
   readonly deleted: true;
-  readonly section: "knowledgeSources";
-  readonly id: KnowledgeSourceId;
+  readonly section: SnapshotSection;
+  readonly id: string;
   readonly tombstone: LedgerDeletionRecord;
   readonly ledger: LedgerExportResult;
 }
@@ -311,7 +315,7 @@ export async function deleteKnowledgeSourceWithTombstone(
   context: CliContext,
   sourceId: KnowledgeSourceId,
   reason: string | undefined
-): Promise<LedgerDeleteSourceResult> {
+): Promise<LedgerDeleteRecordResult> {
   let deletedSource: KnowledgeSource | undefined;
   let tombstone: LedgerDeletionRecord | undefined;
   try {
@@ -347,6 +351,96 @@ export async function deleteKnowledgeSourceWithTombstone(
     const restoreSource = deletedSource;
     if (restoreSource && tombstone) {
       await context.store.write((writer) => writer.putKnowledgeSource(restoreSource));
+    }
+    throw error;
+  }
+}
+
+export async function deleteClaimWithTombstone(
+  context: CliContext,
+  claimId: ClaimId,
+  reason: string | undefined
+): Promise<LedgerDeleteRecordResult> {
+  let deletedClaim: ClaimRecord | undefined;
+  let tombstone: LedgerDeletionRecord | undefined;
+  try {
+    deletedClaim = await context.store.write(async (writer) => {
+      const claim = await writer.getClaim(claimId);
+      if (!claim) {
+        throw new BorealError("BOREAL_INVALID_INPUT", "Claim does not exist", { claimId });
+      }
+      await assertRecordHasNoGraphEdges(writer, "claim", claimId);
+      const deleted = await writer.deleteClaim(claimId);
+      if (!deleted) {
+        throw new BorealError("BOREAL_CONFLICT", "Claim changed before deletion", { claimId });
+      }
+      return claim;
+    });
+    tombstone = {
+      schemaVersion: "boreal.ledger-deletion.v1",
+      section: "claims",
+      id: claimId,
+      deletedAt: nowIso(),
+      reason,
+      deletedContentHash: deletedClaim.meta.contentHash ?? hashContent(deletedClaim)
+    };
+    const ledger = await exportLedgersWithAdditionalDeletions(context, undefined, [tombstone]);
+    return {
+      deleted: true,
+      section: "claims",
+      id: claimId,
+      tombstone,
+      ledger
+    };
+  } catch (error) {
+    const restoreClaim = deletedClaim;
+    if (restoreClaim && tombstone) {
+      await context.store.write((writer) => writer.putClaim(restoreClaim));
+    }
+    throw error;
+  }
+}
+
+export async function deleteDecisionWithTombstone(
+  context: CliContext,
+  decisionId: DecisionId,
+  reason: string | undefined
+): Promise<LedgerDeleteRecordResult> {
+  let deletedDecision: DecisionRecord | undefined;
+  let tombstone: LedgerDeletionRecord | undefined;
+  try {
+    deletedDecision = await context.store.write(async (writer) => {
+      const decision = await writer.getDecision(decisionId);
+      if (!decision) {
+        throw new BorealError("BOREAL_INVALID_INPUT", "Decision does not exist", { decisionId });
+      }
+      await assertRecordHasNoGraphEdges(writer, "decision", decisionId);
+      const deleted = await writer.deleteDecision(decisionId);
+      if (!deleted) {
+        throw new BorealError("BOREAL_CONFLICT", "Decision changed before deletion", { decisionId });
+      }
+      return decision;
+    });
+    tombstone = {
+      schemaVersion: "boreal.ledger-deletion.v1",
+      section: "decisions",
+      id: decisionId,
+      deletedAt: nowIso(),
+      reason,
+      deletedContentHash: deletedDecision.meta.contentHash ?? hashContent(deletedDecision)
+    };
+    const ledger = await exportLedgersWithAdditionalDeletions(context, undefined, [tombstone]);
+    return {
+      deleted: true,
+      section: "decisions",
+      id: decisionId,
+      tombstone,
+      ledger
+    };
+  } catch (error) {
+    const restoreDecision = deletedDecision;
+    if (restoreDecision && tombstone) {
+      await context.store.write((writer) => writer.putDecision(restoreDecision));
     }
     throw error;
   }
@@ -659,11 +753,7 @@ async function assertKnowledgeSourceCanBeDeleted(reader: BorealReader, sourceId:
   const claimIds = claims.filter((claim) => claim.sourceIds.includes(sourceId)).map((claim) => claim.meta.id);
   const decisionIds = decisions.filter((decision) => decision.sourceIds.includes(sourceId)).map((decision) => decision.meta.id);
   const graphEdgeIds = graphEdges
-    .filter(
-      (edge) =>
-        (edge.fromType === "source" && edge.fromId === sourceId) ||
-        (edge.toType === "source" && edge.toId === sourceId)
-    )
+    .filter((edge) => graphEdgeReferences(edge, sourceId, GRAPH_TYPE_ALIASES.source))
     .map((edge) => edge.meta.id);
 
   if (claimIds.length > 0 || decisionIds.length > 0 || graphEdgeIds.length > 0) {
@@ -676,6 +766,41 @@ async function assertKnowledgeSourceCanBeDeleted(reader: BorealReader, sourceId:
       }
     });
   }
+}
+
+type DeletableGraphRecordKind = "source" | "claim" | "decision";
+
+const GRAPH_TYPE_ALIASES: Record<DeletableGraphRecordKind, readonly string[]> = {
+  source: ["source", "knowledgeSource", "knowledge_source", "knowledgeSources"],
+  claim: ["claim", "claims"],
+  decision: ["decision", "decisions"]
+};
+
+async function assertRecordHasNoGraphEdges(
+  reader: BorealReader,
+  recordType: DeletableGraphRecordKind,
+  recordId: string
+): Promise<void> {
+  const graphEdgeIds = (await reader.listGraphEdges())
+    .filter((edge) => graphEdgeReferences(edge, recordId, GRAPH_TYPE_ALIASES[recordType]))
+    .map((edge) => edge.meta.id);
+  if (graphEdgeIds.length > 0) {
+    throw new BorealError("BOREAL_CONFLICT", "Cannot delete record while graph edges reference it", {
+      recordType,
+      recordId,
+      references: {
+        graphEdges: graphEdgeIds
+      }
+    });
+  }
+}
+
+function graphEdgeReferences(
+  edge: { readonly fromType: string; readonly fromId: string; readonly toType: string; readonly toId: string },
+  id: string,
+  types: readonly string[]
+): boolean {
+  return (types.includes(edge.fromType) && edge.fromId === id) || (types.includes(edge.toType) && edge.toId === id);
 }
 
 function parseLedgerManifest(value: unknown): LedgerManifest {

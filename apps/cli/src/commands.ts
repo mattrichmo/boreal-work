@@ -63,6 +63,8 @@ import { asEvidenceId, asWorkId, runDoctor, type Diagnostic } from "./doctor.js"
 import { assertInitialized, createCliContext, ensureWorkspaceDirs, type CliContext } from "./context.js";
 import {
   createSnapshot,
+  deleteClaimWithTombstone,
+  deleteDecisionWithTombstone,
   deleteKnowledgeSourceWithTombstone,
   exportLedgers,
   exportJson,
@@ -1514,16 +1516,21 @@ async function ledgerCommand(
     }
     case "delete": {
       const kind = requiredPositional(rest, 0, "ledger record kind");
-      if (kind !== "source") {
-        throw new BorealError("BOREAL_INVALID_INPUT", "ledger delete currently supports source records only", { kind });
+      const id = requiredPositional(rest, 1, "record id");
+      const reason = flagValue(args, "reason");
+      if (kind === "source") {
+        output.write(formatRecord(await deleteKnowledgeSourceWithTombstone(context, asSourceId(id), reason), json));
+        return { exitCode: 0 };
       }
-      const result = await deleteKnowledgeSourceWithTombstone(
-        context,
-        asSourceId(requiredPositional(rest, 1, "source id")),
-        flagValue(args, "reason")
-      );
-      output.write(formatRecord(result, json));
-      return { exitCode: 0 };
+      if (kind === "claim") {
+        output.write(formatRecord(await deleteClaimWithTombstone(context, asClaimId(id), reason), json));
+        return { exitCode: 0 };
+      }
+      if (kind === "decision") {
+        output.write(formatRecord(await deleteDecisionWithTombstone(context, asDecisionId(id), reason), json));
+        return { exitCode: 0 };
+      }
+      throw new BorealError("BOREAL_INVALID_INPUT", "ledger delete currently supports source, claim, and decision records", { kind });
     }
     default:
       throw new BorealError("BOREAL_INVALID_INPUT", `Unknown ledger command: ${action ?? ""}`);
