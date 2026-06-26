@@ -53,6 +53,7 @@ Machine-facing strings:
 Work references:
 
 - Commands that target a work item accept an exact work ID, an unambiguous work ID prefix of at least 12 characters, or an exact normalized title.
+- `current` and `active` resolve to the selected actor or agent's single non-expired active reservation. Agent-aware commands such as `agent finish` use `--agent` for this shortcut.
 - Ambiguous references fail closed with `BOREAL_CONFLICT` and include candidate work IDs in JSON error details.
 - Missing references fail with `BOREAL_NOT_FOUND`.
 
@@ -437,7 +438,7 @@ bwrk agent finish <work-id> \
   [--json]
 ```
 
-Guarded exit workflow for work with an active agent reservation. The command requires the selected agent to own the active, non-expired reservation before it records evidence, verifies the work, and closes or releases anything. Evidence, verification, optional close, reservation release, readiness repair, and the final `agent.finished` event run as one engine transaction. One of `--close` or `--release` is required so finish cannot leave active ownership behind.
+Guarded exit workflow for work with an active agent reservation. The command requires the selected agent to own the active, non-expired reservation before it records evidence, verifies the work, and closes or releases anything. Use `current` or `active` as the work reference when the selected `--agent` has exactly one non-expired active reservation. Evidence, verification, optional close, reservation release, readiness repair, and the final `agent.finished` event run as one engine transaction. One of `--close` or `--release` is required so finish cannot leave active ownership behind.
 
 Behavior:
 

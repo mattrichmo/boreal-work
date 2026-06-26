@@ -1020,8 +1020,8 @@ async function agentFinishCommand(
   output: CliOutput,
   json: boolean
 ): Promise<CommandResult> {
-  const workId = await resolveWorkId(context, requiredPositional(rest, 0, "work reference"));
   const agentId = agentIdFromArgs(args, context.actor.id);
+  const workId = await resolveWorkId(context, requiredPositional(rest, 0, "work reference"), { agentId });
   const verdict = parseVerdict(flagValue(args, "verdict"));
   const close = hasFlag(args, "close");
   const release = hasFlag(args, "release");
@@ -1087,7 +1087,7 @@ async function reservationCommand(
 
   const agentId = optionalAgentIdFromArgs(args);
   const workRef = flagValue(args, "work");
-  const workId = workRef ? await resolveWorkId(context, workRef) : undefined;
+  const workId = workRef ? await resolveWorkId(context, workRef, agentId ? { agentId } : undefined) : undefined;
   const status = parseReservationStatus(flagValue(args, "status"));
   const onlyExpired = hasFlag(args, "expired");
   const limit = parseLimit(flagValue(args, "limit")) ?? DEFAULT_LIST_LIMIT;
@@ -2520,8 +2520,12 @@ function labelsFromArgs(args: ParsedArgs): readonly string[] {
   return normalizeLabels(flagValues(args, "label"));
 }
 
-async function resolveWorkId(context: CliContext, value: string): Promise<WorkId> {
-  return context.runtime.resolveWorkReference(value);
+async function resolveWorkId(
+  context: CliContext,
+  value: string,
+  options?: { readonly agentId?: string }
+): Promise<WorkId> {
+  return context.runtime.resolveWorkReference(value, options);
 }
 
 async function requireReservation(context: CliContext, reservationId: string): Promise<AgentReservation> {

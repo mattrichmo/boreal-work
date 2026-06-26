@@ -27,6 +27,21 @@ describe("boreal runtime proof slice", () => {
     await expect(runtime.resolveWorkReference(work.meta.id.slice(0, 16))).resolves.toBe(work.meta.id);
     await expect(runtime.resolveWorkReference("runtime reference target")).resolves.toBe(work.meta.id);
 
+    await runtime.markReady(work.meta.id);
+    await runtime.claimNextWork({ agentId: actor.id });
+    await expect(runtime.resolveWorkReference("current")).resolves.toBe(work.meta.id);
+    await expect(runtime.resolveWorkReference("active", { agentId: actor.id })).resolves.toBe(work.meta.id);
+
+    const secondActive = await runtime.createWork({ title: "Second active reference target", ready: true });
+    const secondClaim = await runtime.claimNextWork({ agentId: actor.id });
+    expect(secondClaim?.work.meta.id).toBe(secondActive.meta.id);
+    await expect(runtime.resolveWorkReference("current")).rejects.toMatchObject({
+      code: "BOREAL_CONFLICT"
+    } satisfies Partial<BorealError>);
+    await expect(runtime.resolveWorkReference("current", { agentId: "agent-without-work" })).rejects.toMatchObject({
+      code: "BOREAL_NOT_FOUND"
+    } satisfies Partial<BorealError>);
+
     await runtime.createWork({ title: "Ambiguous reference target" });
     await runtime.createWork({ title: "Ambiguous reference target" });
     await expect(runtime.resolveWorkReference("Ambiguous reference target")).rejects.toMatchObject({

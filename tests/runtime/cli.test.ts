@@ -2276,7 +2276,7 @@ describe("bwrk cli", () => {
     const finishedClosed = await runCli(rootDir, [
       "agent",
       "finish",
-      closeWork.meta.id,
+      "current",
       "--agent",
       "agent-a",
       "--summary",

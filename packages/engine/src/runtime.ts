@@ -104,7 +104,11 @@ export interface WorkReferenceCandidate {
   readonly workId: WorkId;
   readonly title: string;
   readonly status: WorkItem["status"];
-  readonly match: "id" | "id_prefix" | "title";
+  readonly match: "id" | "id_prefix" | "title" | "active";
+}
+
+export interface ResolveWorkReferenceOptions {
+  readonly agentId?: AgentId | string;
 }
 
 export interface FinishReservedWorkInput {
@@ -139,7 +143,7 @@ export interface BorealRuntime {
   readonly policy: RuntimePolicy;
   initWorkspace(): Promise<RuntimeEvent>;
   ensureWorkspaceInitialized(): Promise<WorkspaceInitializationResult>;
-  resolveWorkReference(ref: string): Promise<WorkId>;
+  resolveWorkReference(ref: string, options?: ResolveWorkReferenceOptions): Promise<WorkId>;
   createWork(input: CreateWorkRuntimeInput): Promise<WorkItem>;
   addBlockingDependency(input: {
     readonly blockedWorkId: WorkId;
@@ -252,8 +256,13 @@ export function createBorealRuntime(options: BorealRuntimeOptions = {}): BorealR
       return ensureInitialized();
     },
 
-    async resolveWorkReference(ref): Promise<WorkId> {
-      return store.read(async (reader) => resolveWorkReference(reader, ref));
+    async resolveWorkReference(ref, options): Promise<WorkId> {
+      return store.read(async (reader) =>
+        resolveWorkReference(reader, ref, {
+          agentId: normalizeActorId(String(options?.agentId ?? actor.id)),
+          now: now()
+        })
+      );
     },
 
     async createWork(input): Promise<WorkItem> {
@@ -768,9 +777,24 @@ async function requireWork(reader: BorealReader, workId: WorkId): Promise<WorkIt
   return work;
 }
 
-async function resolveWorkReference(reader: BorealReader, ref: string): Promise<WorkId> {
+interface ResolveWorkReferenceInternalOptions {
+  readonly agentId: string;
+  readonly now: IsoTimestamp;
+}
+
+const ACTIVE_WORK_REFERENCE_ALIASES = new Set(["active", "current"]);
+
+async function resolveWorkReference(
+  reader: BorealReader,
+  ref: string,
+  options: ResolveWorkReferenceInternalOptions
+): Promise<WorkId> {
   const normalizedRef = normalizeSearchQuery(ref);
   const normalizedLower = normalizedRef.toLocaleLowerCase("en-US");
+  if (ACTIVE_WORK_REFERENCE_ALIASES.has(normalizedLower)) {
+    return resolveActiveWorkReference(reader, normalizedRef, options);
+  }
+
   const items = await reader.listWorkItems();
   const candidates: WorkReferenceCandidate[] = [];
 
@@ -800,6 +824,40 @@ async function resolveWorkReference(reader: BorealReader, ref: string): Promise<
     });
   }
   throw new BorealError("BOREAL_NOT_FOUND", "Work reference did not match any work item", { ref: normalizedRef });
+}
+
+async function resolveActiveWorkReference(
+  reader: BorealReader,
+  ref: string,
+  options: ResolveWorkReferenceInternalOptions
+): Promise<WorkId> {
+  const activeReservations = (await reader.listActiveReservationsForAgent(options.agentId))
+    .filter((reservation) => !reservation.expiresAt || Date.parse(reservation.expiresAt) > Date.parse(options.now))
+    .sort((left, right) => left.reservedAt.localeCompare(right.reservedAt) || left.meta.id.localeCompare(right.meta.id));
+  const candidates: WorkReferenceCandidate[] = [];
+  for (const reservation of activeReservations) {
+    const work = await reader.getWorkItem(reservation.workId);
+    if (work) {
+      candidates.push(workReferenceCandidate(work, "active"));
+    }
+  }
+
+  const uniqueCandidates = uniqueCandidatesById(candidates);
+  const onlyCandidate = uniqueCandidates[0];
+  if (uniqueCandidates.length === 1 && onlyCandidate) {
+    return onlyCandidate.workId;
+  }
+  if (uniqueCandidates.length > 1) {
+    throw new BorealError("BOREAL_CONFLICT", "Active work reference is ambiguous", {
+      ref,
+      agentId: options.agentId,
+      candidates: uniqueCandidates
+    });
+  }
+  throw new BorealError("BOREAL_NOT_FOUND", "Active work reference did not match any non-expired reservation", {
+    ref,
+    agentId: options.agentId
+  });
 }
 
 function workReferenceCandidate(work: WorkItem, match: WorkReferenceCandidate["match"]): WorkReferenceCandidate {
