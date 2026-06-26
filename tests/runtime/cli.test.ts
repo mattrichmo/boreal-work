@@ -170,6 +170,130 @@ describe("bwrk cli", () => {
     );
   });
 
+  it("configures project setup and scoped memory roots from init flags", async () => {
+    const rootDir = await makeTempWorkspace();
+    const initialized = await runCli(rootDir, [
+      "init",
+      "--setup-memory",
+      "--memory-root",
+      "memory",
+      "--memory-layout",
+      "child",
+      "--separate-git",
+      "--install-root",
+      ".agents/skills",
+      "--skill-target",
+      "codex",
+      "--skill-target",
+      "claude",
+      "--folder-scoped",
+      "--json"
+    ]);
+    const payload = parseData<{
+      readonly initialized: boolean;
+      readonly projectSetup: {
+        readonly configured: true;
+        readonly configPath: string;
+        readonly config: {
+          readonly schemaVersion: string;
+          readonly projectRoot: string;
+          readonly memoryRoot: string;
+          readonly memoryLayout: string;
+          readonly memoryGitMode: string;
+          readonly installRoot: string;
+          readonly skillTargets: readonly string[];
+          readonly folderScoped: boolean;
+        };
+        readonly createdDirectories: readonly string[];
+        readonly createdFiles: readonly string[];
+      };
+    }>(initialized.stdout);
+    const config = parseJson<typeof payload.projectSetup.config>(await readFile(join(rootDir, ".boreal/project.json"), "utf8"));
+
+    expect(initialized.exitCode).toBe(0);
+    expect(payload.initialized).toBe(true);
+    expect(payload.projectSetup.configPath).toBe(join(rootDir, ".boreal/project.json"));
+    expect(payload.projectSetup.config).toEqual(
+      expect.objectContaining({
+        schemaVersion: "boreal.project-setup.v1",
+        projectRoot: rootDir,
+        memoryRoot: join(rootDir, "memory"),
+        memoryLayout: "child",
+        memoryGitMode: "separate",
+        installRoot: join(rootDir, ".agents/skills"),
+        skillTargets: ["codex", "claude"],
+        folderScoped: true
+      })
+    );
+    expect(config).toEqual(expect.objectContaining(payload.projectSetup.config));
+    expect(payload.projectSetup.createdDirectories).toEqual(
+      expect.arrayContaining(["memory", "wiki", ".boreal/cache"])
+    );
+    expect(payload.projectSetup.createdFiles).toEqual(
+      expect.arrayContaining(["index.md", "raw/index.jsonl", "graph/relationships.jsonl"])
+    );
+    expect(await readFile(join(rootDir, "memory/index.md"), "utf8")).toContain("Boreal Memory Vault");
+    expect(await readFile(join(rootDir, "memory/raw/index.jsonl"), "utf8")).toBe("");
+
+    const idempotent = await runCli(rootDir, ["init", "--setup-memory", "--memory-root", "memory", "--memory-layout", "child", "--json"]);
+    const idempotentPayload = parseData<{
+      readonly projectSetup: {
+        readonly config: { readonly createdAt: string; readonly updatedAt: string };
+        readonly createdDirectories: readonly string[];
+        readonly createdFiles: readonly string[];
+      };
+    }>(
+      idempotent.stdout
+    ).projectSetup;
+    expect(idempotentPayload).toEqual(expect.objectContaining({ createdDirectories: [], createdFiles: [] }));
+    expect(idempotentPayload.config.createdAt).toBe(config.createdAt);
+
+    await writeFile(join(rootDir, ".boreal/project.json"), "{\"schemaVersion\":\"wrong\"}\n", "utf8");
+    const invalidConfig = await runCli(rootDir, ["init", "--setup-memory", "--memory-root", "memory", "--json"]);
+    const invalidConfigPayload = parseJson<{ readonly code: string; readonly message: string }>(invalidConfig.stderr);
+    expect(invalidConfig.exitCode).toBe(1);
+    expect(invalidConfigPayload.code).toBe("BOREAL_CONFLICT");
+    expect(invalidConfigPayload.message).toContain("Existing project setup config is invalid");
+  });
+
+  it("allows explicit sibling memory setup and rejects mismatched layouts", async () => {
+    const rootDir = await makeTempWorkspace();
+    const siblingRoot = join(rootDir, "..", `${rootDir.split("/").at(-1) ?? "workspace"}-memory`);
+    tempDirs.push(siblingRoot);
+
+    const sibling = await runCli(rootDir, [
+      "init",
+      "--setup-memory",
+      "--memory-root",
+      siblingRoot,
+      "--memory-layout",
+      "sibling",
+      "--json"
+    ]);
+    const siblingPayload = parseData<{
+      readonly projectSetup: { readonly config: { readonly memoryRoot: string; readonly memoryLayout: string } };
+    }>(sibling.stdout);
+    expect(sibling.exitCode).toBe(0);
+    expect(siblingPayload.projectSetup.config).toEqual(
+      expect.objectContaining({ memoryRoot: siblingRoot, memoryLayout: "sibling" })
+    );
+    expect(await readFile(join(siblingRoot, "wiki/index.md"), "utf8")).toContain("Stable project knowledge pages");
+
+    const mismatched = await runCli(rootDir, [
+      "init",
+      "--setup-memory",
+      "--memory-root",
+      "../not-a-direct-child",
+      "--memory-layout",
+      "child",
+      "--json"
+    ]);
+    const error = parseJson<{ readonly code: string; readonly message: string }>(mismatched.stderr);
+    expect(mismatched.exitCode).toBe(2);
+    expect(error.code).toBe("BOREAL_INVALID_INPUT");
+    expect(error.message).toContain("--memory-layout child");
+  });
+
   it("adds raw vault sources, creates wiki pages, and reports vault health", async () => {
     const rootDir = await makeTempWorkspace();
     await runCli(rootDir, ["init", "--json"]);

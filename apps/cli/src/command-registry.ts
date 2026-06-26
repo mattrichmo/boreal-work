@@ -135,9 +135,21 @@ export const COMMAND_DEFINITIONS: readonly CommandDefinition[] = [
     path: ["init"],
     category: "workspace",
     summary: "Initialize a Boreal workspace.",
-    usage: "bwrk init [--workspace <dir>] [--json]",
-    description: "Creates the workspace metadata directory and state store if they do not already exist.",
-    flags: [],
+    usage:
+      "bwrk init [--workspace <dir>|--project-root <dir>] [--setup-memory] [--memory-root <dir>] [--memory-layout in-repo|child|sibling] [--separate-git] [--install-root <dir>] [--skill-target codex|claude...] [--folder-scoped] [--interactive] [--json]",
+    description:
+      "Creates the workspace metadata directory and state store. With setup flags, also writes .boreal/project.json and scaffolds the selected memory root.",
+    flags: [
+      flag("project-root", "value", "Project root alias for --workspace during setup."),
+      flag("setup-memory", "boolean", "Write project setup config and scaffold the selected memory root."),
+      flag("memory-root", "value", "Memory root path. Relative paths resolve from the project root. Defaults to memory."),
+      flag("memory-layout", "value", "Memory layout: in-repo, child, or sibling. Defaults to in-repo."),
+      flag("separate-git", "boolean", "Record memory as a separate Git boundary in project setup config."),
+      flag("install-root", "value", "Skill install root. Relative paths resolve from the project root. Defaults to .agents/skills."),
+      flag("skill-target", "value", "Skill target to record: codex or claude. Repeatable.", true),
+      flag("folder-scoped", "boolean", "Record skills as folder-scoped for sessions opened inside the install folder."),
+      flag("interactive", "boolean", "Prompt for project setup fields in a TTY.")
+    ],
     positionals: { label: "arguments", min: 0, max: 0 },
     requiresWorkspace: false,
     supportsJson: true,
@@ -1132,13 +1144,16 @@ const COMMAND_BEHAVIOR: Readonly<Record<string, CommandBehaviorMetadata>> = {
     readOnly: false,
     destructive: false,
     writesState: true,
-    writesGeneratedArtifacts: false,
+    writesGeneratedArtifacts: true,
     requiresFreshIndex: false,
     concurrencySafe: true,
     requiresLock: "state",
     maxResultSizeChars: 20_000,
     humanOutputKind: "record",
-    examples: ["bwrk init --json"],
+    examples: [
+      "bwrk init --json",
+      "bwrk init --setup-memory --memory-root memory --install-root .agents/skills --skill-target codex --folder-scoped --json",
+    ],
   }),
   commands: commandMetadata("commands", {
     readOnly: true,

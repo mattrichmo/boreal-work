@@ -93,6 +93,7 @@ import {
   type LedgerStatusResult
 } from "./import-export.js";
 import { createResultSpoolingOutput, formatRecord, table, type CliOutput } from "./output.js";
+import { maybeConfigureProjectSetup } from "./project-setup.js";
 import { inspectSearchIndex, runSearch, writeSearchIndex, type SearchIndexInspection } from "./search-cli.js";
 import { addRawSource, createWikiPage, initVault, inspectVault, type VaultStatusResult } from "./vault.js";
 import {
@@ -1318,15 +1319,21 @@ async function buildAgentStatus(
 
 async function initCommand(
   context: CliContext,
-  _args: ParsedArgs,
+  args: ParsedArgs,
   output: CliOutput,
   json: boolean
 ): Promise<CommandResult> {
   await ensureWorkspaceDirs(context);
   const result = await context.runtime.ensureWorkspaceInitialized();
+  const projectSetup = await maybeConfigureProjectSetup(context, args);
   output.write(
     formatRecord(
-      { initialized: result.initialized, workspaceRoot: context.workspaceRoot, eventId: result.event.meta.id },
+      {
+        initialized: result.initialized,
+        workspaceRoot: context.workspaceRoot,
+        eventId: result.event.meta.id,
+        projectSetup
+      },
       json
     )
   );

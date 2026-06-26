@@ -209,7 +209,7 @@ Plans or installs generic Boreal skill files into a folder-scoped skill root. De
 ## `init`
 
 ```bash
-bwrk init [--workspace <path>] [--json]
+bwrk init [--workspace <path>|--project-root <path>] [--setup-memory] [--memory-root <path>] [--memory-layout in-repo|child|sibling] [--separate-git] [--install-root <path>] [--skill-target codex|claude...] [--folder-scoped] [--interactive] [--json]
 ```
 
 Initializes a Boreal workspace by creating durable runtime state under `.boreal/runtime/state.json`.
@@ -218,7 +218,19 @@ Behavior:
 
 - Idempotent.
 - Safe under concurrent init attempts.
+- Plain `bwrk init` does not create memory files; use `bwrk vault init` for the repo-local default vault or `--setup-memory` for explicit project setup.
+- With setup flags, writes `.boreal/project.json` and scaffolds the selected memory root.
+- `--memory-layout child` requires the memory root to be a direct child of the project root.
+- `--memory-layout sibling` requires the memory root to share the project root parent and must be explicit for out-of-project memory.
+- `--interactive` prompts for the same setup fields and requires a TTY.
 - Returns the existing initialization event when the workspace is already initialized.
+
+Common setup examples:
+
+```bash
+bwrk init --setup-memory --memory-root memory --memory-layout child --install-root .agents/skills --skill-target codex --folder-scoped --json
+bwrk init --project-root /repo/app --setup-memory --memory-root /repo/app-memory --memory-layout sibling --separate-git --json
+```
 
 JSON `data` shape:
 
@@ -226,9 +238,31 @@ JSON `data` shape:
 {
   "initialized": true,
   "workspaceRoot": "/absolute/path",
-  "eventId": "bw_event_..."
+  "eventId": "bw_event_...",
+  "projectSetup": {
+    "configured": true,
+    "configPath": "/absolute/path/.boreal/project.json",
+    "config": {
+      "schemaVersion": "boreal.project-setup.v1",
+      "projectRoot": "/absolute/path",
+      "memoryRoot": "/absolute/path/memory",
+      "memoryLayout": "child",
+      "memoryGitMode": "shared",
+      "installRoot": "/absolute/path/.agents/skills",
+      "skillTargets": ["codex"],
+      "folderScoped": true,
+      "createdAt": "2026-06-26T00:00:00.000Z",
+      "updatedAt": "2026-06-26T00:00:00.000Z"
+    },
+    "createdDirectories": ["memory", "raw", "wiki"],
+    "existingDirectories": [],
+    "createdFiles": ["index.md", "raw/index.jsonl"],
+    "existingFiles": []
+  }
 }
 ```
+
+`projectSetup` is omitted when no setup flags are supplied.
 
 ## `work create`
 

@@ -37,7 +37,7 @@ export async function createCliContext(
   cwd: string,
   options: CreateCliContextOptions = {}
 ): Promise<CliContext> {
-  const explicitWorkspace = flagValue(args, "workspace");
+  const explicitWorkspace = flagValue(args, "workspace") ?? flagValue(args, "project-root");
   const workspaceRoot = explicitWorkspace
     ? resolveExplicitWorkspaceRoot(explicitWorkspace)
     : resolveDiscoveredWorkspaceRoot(cwd);
