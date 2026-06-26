@@ -102,6 +102,7 @@ describe("bwrk cli", () => {
       "## `import json`",
       "## `import ledgers`",
       "## `ledger status`",
+      "## `ledger delete`",
       "## `snapshot create`",
       "## `snapshot list`",
       "## `snapshot show`",
@@ -269,6 +270,7 @@ describe("bwrk cli", () => {
         "import json",
         "import ledgers",
         "ledger status",
+        "ledger delete",
         "snapshot create",
         "snapshot list",
         "snapshot show"
@@ -2194,6 +2196,115 @@ describe("bwrk cli", () => {
     expect(malformedImport.exitCode).toBe(2);
     expect(malformedPayload.code).toBe("BOREAL_INVALID_INPUT");
     expect(malformedPayload.message).toContain("schema validation");
+  });
+
+  it("deletes unreferenced sources through tombstoned ledgers and blocks referenced source deletion", async () => {
+    const rootDir = await makeTempWorkspace();
+    await runCli(rootDir, ["init", "--json"]);
+
+    const referencedSource = parseData<{ readonly meta: { readonly id: string } }>(
+      (
+        await runCli(rootDir, [
+          "source",
+          "add",
+          "--title",
+          "Referenced source",
+          "--uri",
+          "file://referenced.md",
+          "--json"
+        ])
+      ).stdout
+    );
+    await runCli(rootDir, [
+      "claim",
+      "create",
+      "--statement",
+      "Referenced source must stay.",
+      "--source",
+      referencedSource.meta.id,
+      "--json"
+    ]);
+    const blockedDelete = await runCli(rootDir, [
+      "ledger",
+      "delete",
+      "source",
+      referencedSource.meta.id,
+      "--reason",
+      "cleanup",
+      "--json"
+    ]);
+    const blockedPayload = parseJson<{ readonly ok: false; readonly code: string; readonly message: string }>(
+      blockedDelete.stderr
+    );
+    expect(blockedDelete.exitCode).toBe(1);
+    expect(blockedPayload.code).toBe("BOREAL_CONFLICT");
+    expect(blockedPayload.message).toContain("records reference it");
+
+    const deletableSource = parseData<{ readonly meta: { readonly id: string } }>(
+      (
+        await runCli(rootDir, [
+          "source",
+          "add",
+          "--title",
+          "Duplicate source",
+          "--uri",
+          "file://duplicate.md",
+          "--json"
+        ])
+      ).stdout
+    );
+    const deleted = await runCli(rootDir, [
+      "ledger",
+      "delete",
+      "source",
+      deletableSource.meta.id,
+      "--reason",
+      "duplicate",
+      "--json"
+    ]);
+    const deletedPayload = parseData<{
+      readonly deleted: true;
+      readonly section: string;
+      readonly id: string;
+      readonly tombstone: { readonly section: string; readonly id: string; readonly reason?: string };
+      readonly ledger: { readonly deletedRecordCounts: { readonly knowledgeSources: number } };
+    }>(deleted.stdout);
+    expect(deleted.exitCode).toBe(0);
+    expect(deletedPayload).toEqual(
+      expect.objectContaining({
+        deleted: true,
+        section: "knowledgeSources",
+        id: deletableSource.meta.id,
+        tombstone: expect.objectContaining({
+          section: "knowledgeSources",
+          id: deletableSource.meta.id,
+          reason: "duplicate"
+        })
+      })
+    );
+    expect(deletedPayload.ledger.deletedRecordCounts.knowledgeSources).toBe(1);
+
+    const sources = parseData<Array<{ readonly id: string }>>((await runCli(rootDir, ["source", "list", "--json"])).stdout);
+    expect(sources.map((source) => source.id)).toContain(referencedSource.meta.id);
+    expect(sources.map((source) => source.id)).not.toContain(deletableSource.meta.id);
+    const deletions = await readFile(join(rootDir, ".boreal/ledgers/deletions.jsonl"), "utf8");
+    expect(deletions).toContain(deletableSource.meta.id);
+    expect(deletions).toContain("\"reason\":\"duplicate\"");
+
+    const status = await runCli(rootDir, ["ledger", "status", "--json"]);
+    const statusPayload = parseData<{
+      readonly ok: boolean;
+      readonly reconstructable: boolean;
+      readonly deletedRecordCounts: { readonly knowledgeSources: number };
+    }>(status.stdout);
+    expect(status.exitCode).toBe(0);
+    expect(statusPayload).toEqual(
+      expect.objectContaining({
+        ok: true,
+        reconstructable: true,
+        deletedRecordCounts: expect.objectContaining({ knowledgeSources: 1 })
+      })
+    );
   });
 
   it("keeps explicit workspace paths exact while cwd discovery walks upward", async () => {

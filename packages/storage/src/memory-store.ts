@@ -221,6 +221,10 @@ class MemoryTransaction implements BorealWriter {
     this.state.knowledgeSources.set(record.meta.id, deepClone(record));
   }
 
+  async deleteKnowledgeSource(id: KnowledgeSourceId): Promise<boolean> {
+    return this.state.knowledgeSources.delete(id);
+  }
+
   async putClaim(record: ClaimRecord): Promise<void> {
     this.state.claims.set(record.meta.id, deepClone(record));
   }

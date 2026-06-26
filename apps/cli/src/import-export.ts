@@ -12,6 +12,8 @@ import {
   readJsonFile,
   runtimeSnapshotSchemaIssues,
   withContentHash,
+  type KnowledgeSource,
+  type KnowledgeSourceId,
   type RuntimeEvent
 } from "@boreal/core";
 import {
@@ -101,6 +103,14 @@ export interface LedgerStatusResult {
   readonly files?: readonly LedgerManifestFile[];
   readonly deletions?: LedgerDeletionManifestFile;
   readonly error?: string;
+}
+
+export interface LedgerDeleteSourceResult {
+  readonly deleted: true;
+  readonly section: "knowledgeSources";
+  readonly id: KnowledgeSourceId;
+  readonly tombstone: LedgerDeletionRecord;
+  readonly ledger: LedgerExportResult;
 }
 
 export interface ImportResult {
@@ -222,13 +232,23 @@ export async function exportMarkdown(context: CliContext, outDir: string | undef
 }
 
 export async function exportLedgers(context: CliContext, outDir: string | undefined): Promise<LedgerExportResult> {
+  return exportLedgersWithAdditionalDeletions(context, outDir, []);
+}
+
+async function exportLedgersWithAdditionalDeletions(
+  context: CliContext,
+  outDir: string | undefined,
+  additionalDeletions: readonly LedgerDeletionRecord[]
+): Promise<LedgerExportResult> {
   const document = await buildExportDocument(context);
   const resolvedDir = await resolveWorkspacePath(context, outDir ?? ".boreal/ledgers");
   const existingDeletions = await readExistingLedgerDeletions(resolvedDir);
+  const ledgerDeletions = canonicalLedgerDeletions([...existingDeletions, ...additionalDeletions]);
+  assertUniqueDeletions(ledgerDeletions);
   await mkdir(resolvedDir, { recursive: true });
 
   const ledgerState = canonicalLedgerSnapshot(document.state);
-  assertNoDeletedLiveRecords(ledgerState, existingDeletions);
+  assertNoDeletedLiveRecords(ledgerState, ledgerDeletions);
   const files = Object.fromEntries(
     await Promise.all(
       SNAPSHOT_SECTIONS.map(async (section) => {
@@ -241,15 +261,15 @@ export async function exportLedgers(context: CliContext, outDir: string | undefi
       })
     )
   ) as Record<SnapshotSection, LedgerManifestFile>;
-  const deletions = ledgerDeletionManifestFile(existingDeletions);
-  await writeTextFileAtomic(join(resolvedDir, deletions.path), ledgerDeletionContent(existingDeletions));
+  const deletions = ledgerDeletionManifestFile(ledgerDeletions);
+  await writeTextFileAtomic(join(resolvedDir, deletions.path), ledgerDeletionContent(ledgerDeletions));
   const manifest: LedgerManifest = {
     schemaVersion: LEDGER_SCHEMA_VERSION,
     exportedAt: document.exportedAt,
     workspaceRoot: context.workspaceRoot,
-    contentHash: ledgerContentHash(ledgerState, existingDeletions),
+    contentHash: ledgerContentHash(ledgerState, ledgerDeletions),
     recordCounts: recordCounts(ledgerState),
-    deletedRecordCounts: deletionRecordCounts(existingDeletions),
+    deletedRecordCounts: deletionRecordCounts(ledgerDeletions),
     files,
     deletions
   };
@@ -285,6 +305,51 @@ export async function importLedgers(
   const resolvedDir = await resolveReadablePath(context, fromDir, Boolean(options.allowExternalRead));
   const incoming = (await readLedgerDirectory(resolvedDir)).state;
   return importSnapshot(context.store, incoming);
+}
+
+export async function deleteKnowledgeSourceWithTombstone(
+  context: CliContext,
+  sourceId: KnowledgeSourceId,
+  reason: string | undefined
+): Promise<LedgerDeleteSourceResult> {
+  let deletedSource: KnowledgeSource | undefined;
+  let tombstone: LedgerDeletionRecord | undefined;
+  try {
+    deletedSource = await context.store.write(async (writer) => {
+      const source = await writer.getKnowledgeSource(sourceId);
+      if (!source) {
+        throw new BorealError("BOREAL_INVALID_INPUT", "Knowledge source does not exist", { sourceId });
+      }
+      await assertKnowledgeSourceCanBeDeleted(writer, sourceId);
+      const deleted = await writer.deleteKnowledgeSource(sourceId);
+      if (!deleted) {
+        throw new BorealError("BOREAL_CONFLICT", "Knowledge source changed before deletion", { sourceId });
+      }
+      return source;
+    });
+    tombstone = {
+      schemaVersion: "boreal.ledger-deletion.v1",
+      section: "knowledgeSources",
+      id: sourceId,
+      deletedAt: nowIso(),
+      reason,
+      deletedContentHash: deletedSource.meta.contentHash ?? hashContent(deletedSource)
+    };
+    const ledger = await exportLedgersWithAdditionalDeletions(context, undefined, [tombstone]);
+    return {
+      deleted: true,
+      section: "knowledgeSources",
+      id: sourceId,
+      tombstone,
+      ledger
+    };
+  } catch (error) {
+    const restoreSource = deletedSource;
+    if (restoreSource && tombstone) {
+      await context.store.write((writer) => writer.putKnowledgeSource(restoreSource));
+    }
+    throw error;
+  }
 }
 
 export async function ledgerStatus(context: CliContext, dir: string | undefined): Promise<LedgerStatusResult> {
@@ -583,6 +648,34 @@ async function importSnapshot(store: BorealStore, incoming: ExportSnapshot): Pro
     await writeImportedRecords(writer, incoming, merged.importableIds);
     return { imported: merged.imported, skipped: merged.skipped };
   });
+}
+
+async function assertKnowledgeSourceCanBeDeleted(reader: BorealReader, sourceId: KnowledgeSourceId): Promise<void> {
+  const [claims, decisions, graphEdges] = await Promise.all([
+    reader.listClaims(),
+    reader.listDecisions(),
+    reader.listGraphEdges()
+  ]);
+  const claimIds = claims.filter((claim) => claim.sourceIds.includes(sourceId)).map((claim) => claim.meta.id);
+  const decisionIds = decisions.filter((decision) => decision.sourceIds.includes(sourceId)).map((decision) => decision.meta.id);
+  const graphEdgeIds = graphEdges
+    .filter(
+      (edge) =>
+        (edge.fromType === "source" && edge.fromId === sourceId) ||
+        (edge.toType === "source" && edge.toId === sourceId)
+    )
+    .map((edge) => edge.meta.id);
+
+  if (claimIds.length > 0 || decisionIds.length > 0 || graphEdgeIds.length > 0) {
+    throw new BorealError("BOREAL_CONFLICT", "Cannot delete knowledge source while records reference it", {
+      sourceId,
+      references: {
+        claims: claimIds,
+        decisions: decisionIds,
+        graphEdges: graphEdgeIds
+      }
+    });
+  }
 }
 
 function parseLedgerManifest(value: unknown): LedgerManifest {

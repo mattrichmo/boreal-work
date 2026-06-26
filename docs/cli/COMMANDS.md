@@ -758,6 +758,16 @@ Compares an exported JSONL ledger directory with the current runtime state. Miss
 
 JSON `data` contains `ok`, `path`, `exists`, `stale`, `expectedContentHash`, `reconstructable`, and, when present, `contentHash`, `recordCounts`, `deletedRecordCounts`, `files`, `deletions`, or `error`.
 
+## `ledger delete`
+
+```bash
+bwrk ledger delete source <source-id> [--reason <text>] [--json]
+```
+
+Deletes an unreferenced knowledge source from runtime state, writes a `boreal.ledger-deletion.v1` tombstone to `deletions.jsonl`, and refreshes the JSONL ledger export. The command fails with `BOREAL_CONFLICT` when any claim, decision, or graph edge still references the source.
+
+JSON `data` contains `deleted`, `section`, `id`, `tombstone`, and the refreshed `ledger` export result.
+
 ## `snapshot create`
 
 ```bash

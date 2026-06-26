@@ -758,6 +758,18 @@ export const COMMAND_DEFINITIONS: readonly CommandDefinition[] = [
     supportsJson: true,
   },
   {
+    path: ["ledger", "delete"],
+    category: "ledger",
+    summary: "Delete a supported record and write a tombstone.",
+    usage: "bwrk ledger delete source <source-id> [--reason <text>] [--json]",
+    description:
+      "Deletes an unreferenced knowledge source from runtime state, records a tombstone in deletions.jsonl, and refreshes JSONL ledgers.",
+    flags: [flag("reason", "value", "Optional deletion reason stored in the tombstone.")],
+    positionals: { label: "record kind and id", min: 2, max: 2 },
+    requiresWorkspace: true,
+    supportsJson: true,
+  },
+  {
     path: ["snapshot", "create"],
     category: "snapshot",
     summary: "Create a recovery snapshot.",
@@ -1389,6 +1401,18 @@ const COMMAND_BEHAVIOR: Readonly<Record<string, CommandBehaviorMetadata>> = {
     maxResultSizeChars: 100_000,
     humanOutputKind: "record",
     examples: ["bwrk ledger status --json"],
+  }),
+  "ledger delete": commandMetadata("ledger delete", {
+    readOnly: false,
+    destructive: true,
+    writesState: true,
+    writesGeneratedArtifacts: true,
+    requiresFreshIndex: false,
+    concurrencySafe: true,
+    requiresLock: "state",
+    maxResultSizeChars: 100_000,
+    humanOutputKind: "record",
+    examples: ["bwrk ledger delete source bw_source_example --reason duplicate --json"],
   }),
   "snapshot create": commandMetadata("snapshot create", {
     readOnly: false,

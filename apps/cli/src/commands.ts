@@ -63,6 +63,7 @@ import { asEvidenceId, asWorkId, runDoctor, type Diagnostic } from "./doctor.js"
 import { assertInitialized, createCliContext, ensureWorkspaceDirs, type CliContext } from "./context.js";
 import {
   createSnapshot,
+  deleteKnowledgeSourceWithTombstone,
   exportLedgers,
   exportJson,
   exportMarkdown,
@@ -364,7 +365,7 @@ export async function runCommand(args: ParsedArgs, output: CliOutput, cwd: strin
         result = await importCommand(action, context, args, commandOutput, json);
         break;
       case "ledger":
-        result = await ledgerCommand(action, context, args, commandOutput, json);
+        result = await ledgerCommand(action, rest, context, args, commandOutput, json);
         break;
       case "snapshot":
         result = await snapshotCommand(action, rest, context, args, commandOutput, json);
@@ -1499,6 +1500,7 @@ async function importCommand(
 
 async function ledgerCommand(
   action: string | undefined,
+  rest: readonly string[],
   context: CliContext,
   args: ParsedArgs,
   output: CliOutput,
@@ -1509,6 +1511,19 @@ async function ledgerCommand(
       const status = await ledgerStatus(context, flagValue(args, "dir"));
       output.write(formatRecord(status, json));
       return { exitCode: status.ok ? 0 : 1 };
+    }
+    case "delete": {
+      const kind = requiredPositional(rest, 0, "ledger record kind");
+      if (kind !== "source") {
+        throw new BorealError("BOREAL_INVALID_INPUT", "ledger delete currently supports source records only", { kind });
+      }
+      const result = await deleteKnowledgeSourceWithTombstone(
+        context,
+        asSourceId(requiredPositional(rest, 1, "source id")),
+        flagValue(args, "reason")
+      );
+      output.write(formatRecord(result, json));
+      return { exitCode: 0 };
     }
     default:
       throw new BorealError("BOREAL_INVALID_INPUT", `Unknown ledger command: ${action ?? ""}`);
