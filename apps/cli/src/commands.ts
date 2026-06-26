@@ -34,6 +34,7 @@ import { deriveReadinessStatus } from "@boreal/work-engine";
 import { flagValue, flagValues, hasFlag, requiredFlag, type ParsedArgs } from "./args.js";
 import {
   COMMAND_DEFINITIONS,
+  commandBehavior,
   commandPath,
   findCommandDefinition,
   serializeCommandDefinition,
@@ -49,7 +50,7 @@ import {
   listSnapshots,
   showSnapshot
 } from "./import-export.js";
-import { formatRecord, table, type CliOutput } from "./output.js";
+import { createResultSpoolingOutput, formatRecord, table, type CliOutput } from "./output.js";
 import { runSearch, writeSearchIndex } from "./search-cli.js";
 
 export interface CommandResult {
@@ -227,41 +228,67 @@ export async function runCommand(args: ParsedArgs, output: CliOutput, cwd: strin
   if (definition.requiresWorkspace) {
     assertInitialized(context);
   }
+  const spoolingOutput = json
+    ? createResultSpoolingOutput(output, {
+        workspaceRoot: context.workspaceRoot,
+        command: commandPath(definition),
+        maxResultSizeChars: commandBehavior(definition).maxResultSizeChars
+      })
+    : undefined;
+  const commandOutput = spoolingOutput ?? output;
 
+  let result: CommandResult;
   switch (group) {
     case "init":
-      return initCommand(context, args, output, json);
+      result = await initCommand(context, args, commandOutput, json);
+      break;
     case "work":
-      return workCommand(action, rest, context, args, output, json);
+      result = await workCommand(action, rest, context, args, commandOutput, json);
+      break;
     case "evidence":
-      return evidenceCommand(action, rest, context, args, output, json);
+      result = await evidenceCommand(action, rest, context, args, commandOutput, json);
+      break;
     case "source":
-      return sourceCommand(action, rest, context, args, output, json);
+      result = await sourceCommand(action, rest, context, args, commandOutput, json);
+      break;
     case "claim":
-      return claimCommand(action, rest, context, args, output, json);
+      result = await claimCommand(action, rest, context, args, commandOutput, json);
+      break;
     case "decision":
-      return decisionCommand(action, rest, context, args, output, json);
+      result = await decisionCommand(action, rest, context, args, commandOutput, json);
+      break;
     case "context":
-      return contextCommand(action, rest, context, args, output, json);
+      result = await contextCommand(action, rest, context, args, commandOutput, json);
+      break;
     case "search":
-      return searchCommand(action, rest, context, args, output, json);
+      result = await searchCommand(action, rest, context, args, commandOutput, json);
+      break;
     case "reservation":
-      return reservationCommand(action, context, args, output, json);
+      result = await reservationCommand(action, context, args, commandOutput, json);
+      break;
     case "agent":
-      return agentCommand(action, rest, context, args, output, json);
+      result = await agentCommand(action, rest, context, args, commandOutput, json);
+      break;
     case "export":
-      return exportCommand(action, context, args, output, json);
+      result = await exportCommand(action, context, args, commandOutput, json);
+      break;
     case "import":
-      return importCommand(action, context, args, output, json);
+      result = await importCommand(action, context, args, commandOutput, json);
+      break;
     case "snapshot":
-      return snapshotCommand(action, rest, context, args, output, json);
+      result = await snapshotCommand(action, rest, context, args, commandOutput, json);
+      break;
     case "doctor":
-      return doctorCommand(context, args, output, json);
+      result = await doctorCommand(context, args, commandOutput, json);
+      break;
     case "lock":
-      return lockCommand(action, context, args, output, json);
+      result = await lockCommand(action, context, args, commandOutput, json);
+      break;
     default:
       throw new BorealError("BOREAL_INVALID_INPUT", `Unknown command: ${group ?? ""}`);
   }
+  await spoolingOutput?.flush();
+  return result;
 }
 
 function commandsCommand(output: CliOutput, json: boolean): CommandResult {

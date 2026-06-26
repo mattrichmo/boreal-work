@@ -367,6 +367,48 @@ describe("bwrk cli", () => {
     expect(parseData<{ readonly ok: boolean }>(doctor.stdout).ok).toBe(true);
   });
 
+  it("spools oversized json command output to a result file", async () => {
+    const rootDir = await makeTempWorkspace();
+    await runCli(rootDir, ["init", "--json"]);
+    const longTitle = "x".repeat(500);
+
+    for (let index = 0; index < 80; index += 1) {
+      const created = await runCli(rootDir, [
+        "work",
+        "create",
+        `Spool output ${index} ${longTitle}`,
+        "--label",
+        "spool",
+        "--ready",
+        "--json"
+      ]);
+      expect(created.exitCode).toBe(0);
+    }
+
+    const listed = await runCli(rootDir, ["work", "list", "--label", "spool", "--json"]);
+    const payload = parseData<{
+      readonly truncated: boolean;
+      readonly command: string;
+      readonly fullResultPath: string;
+      readonly fullResultBytes: number;
+      readonly preview: { readonly kind: string; readonly length: number };
+    }>(listed.stdout);
+
+    expect(listed.exitCode).toBe(0);
+    expect(payload.truncated).toBe(true);
+    expect(payload.command).toBe("work list");
+    expect(payload.fullResultPath).toMatch(/^\.boreal\/results\/result-/);
+    expect(payload.fullResultBytes).toBeGreaterThan(25_000);
+    expect(payload.preview).toEqual(expect.objectContaining({ kind: "array", length: 80 }));
+
+    const fullResult = parseJson<{ readonly ok: true; readonly data: Array<{ readonly title: string }> }>(
+      await readFile(join(rootDir, payload.fullResultPath), "utf8")
+    );
+    expect(fullResult.ok).toBe(true);
+    expect(fullResult.data).toHaveLength(80);
+    expect(fullResult.data[0]?.title).toContain("Spool output");
+  });
+
   it("runs the knowledge context lifecycle through file-backed commands", async () => {
     const rootDir = await makeTempWorkspace();
     await runCli(rootDir, ["init", "--json"]);

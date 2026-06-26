@@ -738,7 +738,7 @@ const COMMAND_BEHAVIOR: Readonly<Record<string, CommandBehaviorMetadata>> = {
     requiresFreshIndex: false,
     concurrencySafe: true,
     requiresLock: "none",
-    maxResultSizeChars: 100_000,
+    maxResultSizeChars: 25_000,
     humanOutputKind: "table",
     examples: ["bwrk work list --status ready --limit 10 --json"],
   }),
