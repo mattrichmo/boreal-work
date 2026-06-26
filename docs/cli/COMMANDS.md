@@ -667,12 +667,12 @@ Context facts always include work status and priority, plus capped accepted clai
 ## `context search`
 
 ```bash
-bwrk context search <query> [--limit <count>] [--json]
+bwrk context search <query> [--limit <count>] [--explain] [--json]
 ```
 
 Searches context-pack documents only. The search index must be fresh; run `bwrk search index` or `bwrk doctor --fix` after imports, writes, or context rebuilds that change searchable content.
 
-JSON `data` is an array of search results with `id`, `type`, `recordId`, `subjectId`, `title`, `summary`, `score`, and `matches`.
+JSON `data` is an array of search results with `id`, `type`, `recordId`, `subjectId`, `title`, `summary`, `score`, and `matches`. With `--explain`, each result also includes `explain.algorithm`, `queryTokens`, `scoreBreakdown`, and `fieldMatches`.
 
 ## `search index`
 
@@ -680,17 +680,19 @@ JSON `data` is an array of search results with `id`, `type`, `recordId`, `subjec
 bwrk search index [--json]
 ```
 
-Builds a deterministic local search index at `.boreal/runtime/search-index.json`. Rebuilds are serialized with `.boreal/runtime/search-index.lock` and use atomic fsync writes. The index stores compact weighted tokens and result summaries for work, evidence, sources, claims, decisions, and context packs; it does not store full record bodies.
+Builds a deterministic local search index at `.boreal/runtime/search-index.json`. Rebuilds are serialized with `.boreal/runtime/search-index.lock` and use atomic fsync writes. The index stores compact weighted aggregate and per-field tokens plus result summaries for work, evidence, sources, claims, decisions, and context packs; it does not store full record bodies.
 
 JSON `data` contains `path`, `schemaVersion`, `builtAt`, `contentHash`, `documentCount`, and `tokenCount`.
 
 ## `search query`
 
 ```bash
-bwrk search query <query> [--limit <count>] [--json]
+bwrk search query <query> [--limit <count>] [--explain] [--json]
 ```
 
 Searches work, evidence, sources, claims, decisions, and context packs. Results are ranked by weighted token matches, ID prefix matches, and stable type/title ordering.
+
+Use `--explain` to include the normalized query tokens, score contributions, and field-level matches that caused each result to rank.
 
 The command fails closed when the index is missing, malformed, or stale. Rebuild with `bwrk search index` or `bwrk doctor --fix`.
 

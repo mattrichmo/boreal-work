@@ -47,11 +47,13 @@ export interface SearchIndexEntry {
   readonly title: string;
   readonly summary: string;
   readonly tokenWeights: readonly (readonly [string, number])[];
+  readonly fieldWeights?: readonly SearchIndexFieldWeights[];
 }
 
 export interface SearchQueryOptions {
   readonly limit?: number;
   readonly type?: SearchDocumentType;
+  readonly explain?: boolean;
 }
 
 export interface SearchResult {
@@ -63,9 +65,41 @@ export interface SearchResult {
   readonly summary: string;
   readonly score: number;
   readonly matches: readonly string[];
+  readonly explain?: SearchResultExplain;
+}
+
+export interface SearchIndexFieldWeights {
+  readonly field: string;
+  readonly weight: number;
+  readonly tokenWeights: readonly (readonly [string, number])[];
+}
+
+export interface SearchResultExplain {
+  readonly algorithm: typeof SEARCH_INDEX_ALGORITHM;
+  readonly queryTokens: readonly string[];
+  readonly fieldMatches: readonly SearchResultFieldMatch[];
+  readonly scoreBreakdown: readonly SearchResultScoreContribution[];
+}
+
+export interface SearchResultFieldMatch {
+  readonly field: string;
+  readonly token: string;
+  readonly matchedToken: string;
+  readonly match: "exact" | "prefix";
+  readonly weight: number;
+  readonly contribution: number;
+}
+
+export interface SearchResultScoreContribution {
+  readonly kind: "id_exact" | "id_prefix" | "token_exact" | "token_prefix";
+  readonly token?: string;
+  readonly matchedToken?: string;
+  readonly contribution: number;
+  readonly fields?: readonly string[];
 }
 
 interface WeightedText {
+  readonly field: string;
   readonly text: string;
   readonly weight: number;
 }
@@ -126,7 +160,8 @@ export function searchIndexContentHash(snapshot: SearchCorpusSnapshot): ContentH
       subjectId: entry.subjectId,
       title: entry.title,
       summary: entry.summary,
-      tokenWeights: entry.tokenWeights
+      tokenWeights: entry.tokenWeights,
+      fieldWeights: entry.fieldWeights
     }))
   });
 }
@@ -145,7 +180,7 @@ export function querySearchIndex(
   const limit = options.limit ?? DEFAULT_LIMIT;
   const results = index.documents
     .filter((entry) => !options.type || entry.type === options.type)
-    .map((entry) => scoreEntry(entry, normalizedQuery, queryTokens))
+    .map((entry) => scoreEntry(entry, normalizedQuery, queryTokens, Boolean(options.explain)))
     .filter((result): result is SearchResult => result !== undefined)
     .sort(compareSearchResults);
 
@@ -181,12 +216,12 @@ function buildSearchEntries(snapshot: SearchCorpusSnapshot): readonly SearchInde
 
 function workEntry(work: WorkItem): SearchIndexEntry {
   return entry("work", work.meta.id, work.title, work.description, [
-    { text: work.meta.id, weight: 10 },
-    { text: work.title, weight: 8 },
-    { text: work.labels.join(" "), weight: 6 },
-    { text: work.acceptanceCriteria.join(" "), weight: 5 },
-    { text: `${work.kind} ${work.status} ${work.priority}`, weight: 4 },
-    { text: work.description, weight: 3 }
+    { field: "id", text: work.meta.id, weight: 10 },
+    { field: "title", text: work.title, weight: 8 },
+    { field: "labels", text: work.labels.join(" "), weight: 6 },
+    { field: "acceptanceCriteria", text: work.acceptanceCriteria.join(" "), weight: 5 },
+    { field: "state", text: `${work.kind} ${work.status} ${work.priority}`, weight: 4 },
+    { field: "description", text: work.description, weight: 3 }
   ]);
 }
 
@@ -197,12 +232,12 @@ function evidenceEntry(record: EvidenceRecord): SearchIndexEntry {
     `${record.outcome} evidence`,
     record.summary,
     [
-      { text: record.meta.id, weight: 10 },
-      { text: record.subjectId, weight: 7 },
-      { text: record.summary, weight: 6 },
-      { text: record.command ?? "", weight: 5 },
-      { text: record.uri ?? "", weight: 4 },
-      { text: `${record.kind} ${record.outcome}`, weight: 3 }
+      { field: "id", text: record.meta.id, weight: 10 },
+      { field: "subjectId", text: record.subjectId, weight: 7 },
+      { field: "summary", text: record.summary, weight: 6 },
+      { field: "command", text: record.command ?? "", weight: 5 },
+      { field: "uri", text: record.uri ?? "", weight: 4 },
+      { field: "state", text: `${record.kind} ${record.outcome}`, weight: 3 }
     ],
     record.subjectId
   );
@@ -210,33 +245,33 @@ function evidenceEntry(record: EvidenceRecord): SearchIndexEntry {
 
 function sourceEntry(source: KnowledgeSource): SearchIndexEntry {
   return entry("source", source.meta.id, source.title, source.summary, [
-    { text: source.meta.id, weight: 10 },
-    { text: source.title, weight: 8 },
-    { text: source.summary, weight: 5 },
-    { text: source.uri, weight: 4 },
-    { text: source.kind, weight: 3 }
+    { field: "id", text: source.meta.id, weight: 10 },
+    { field: "title", text: source.title, weight: 8 },
+    { field: "summary", text: source.summary, weight: 5 },
+    { field: "uri", text: source.uri, weight: 4 },
+    { field: "kind", text: source.kind, weight: 3 }
   ]);
 }
 
 function claimEntry(claim: ClaimRecord): SearchIndexEntry {
   return entry("claim", claim.meta.id, trimSummary(claim.statement), claim.statement, [
-    { text: claim.meta.id, weight: 10 },
-    { text: claim.statement, weight: 8 },
-    { text: claim.status, weight: 4 },
-    { text: claim.sourceIds.join(" "), weight: 3 },
-    { text: claim.evidenceIds.join(" "), weight: 3 }
+    { field: "id", text: claim.meta.id, weight: 10 },
+    { field: "statement", text: claim.statement, weight: 8 },
+    { field: "status", text: claim.status, weight: 4 },
+    { field: "sourceIds", text: claim.sourceIds.join(" "), weight: 3 },
+    { field: "evidenceIds", text: claim.evidenceIds.join(" "), weight: 3 }
   ]);
 }
 
 function decisionEntry(decision: DecisionRecord): SearchIndexEntry {
   return entry("decision", decision.meta.id, decision.title, decision.decision, [
-    { text: decision.meta.id, weight: 10 },
-    { text: decision.title, weight: 8 },
-    { text: decision.decision, weight: 7 },
-    { text: decision.context, weight: 5 },
-    { text: decision.consequences.join(" "), weight: 4 },
-    { text: decision.status, weight: 3 },
-    { text: decision.sourceIds.join(" "), weight: 3 }
+    { field: "id", text: decision.meta.id, weight: 10 },
+    { field: "title", text: decision.title, weight: 8 },
+    { field: "decision", text: decision.decision, weight: 7 },
+    { field: "context", text: decision.context, weight: 5 },
+    { field: "consequences", text: decision.consequences.join(" "), weight: 4 },
+    { field: "status", text: decision.status, weight: 3 },
+    { field: "sourceIds", text: decision.sourceIds.join(" "), weight: 3 }
   ]);
 }
 
@@ -247,12 +282,12 @@ function contextPackEntry(pack: ContextPack): SearchIndexEntry {
     pack.title,
     pack.summary,
     [
-      { text: pack.id, weight: 10 },
-      { text: pack.subjectId, weight: 8 },
-      { text: pack.title, weight: 8 },
-      { text: pack.facts.join(" "), weight: 7 },
-      { text: pack.evidence.join(" "), weight: 6 },
-      { text: pack.summary, weight: 5 }
+      { field: "id", text: pack.id, weight: 10 },
+      { field: "subjectId", text: pack.subjectId, weight: 8 },
+      { field: "title", text: pack.title, weight: 8 },
+      { field: "facts", text: pack.facts.join(" "), weight: 7 },
+      { field: "evidence", text: pack.evidence.join(" "), weight: 6 },
+      { field: "summary", text: pack.summary, weight: 5 }
     ],
     pack.subjectId
   );
@@ -273,8 +308,19 @@ function entry(
     subjectId,
     title: title.trim(),
     summary: trimSummary(summary),
-    tokenWeights: tokenWeights(weightedText)
+    tokenWeights: tokenWeights(weightedText),
+    fieldWeights: fieldWeights(weightedText)
   };
+}
+
+function fieldWeights(weightedText: readonly WeightedText[]): readonly SearchIndexFieldWeights[] {
+  return weightedText
+    .map(({ field, text, weight }) => ({
+      field,
+      weight,
+      tokenWeights: tokenWeights([{ field, text, weight }])
+    }))
+    .filter((entry) => entry.tokenWeights.length > 0);
 }
 
 function tokenWeights(weightedText: readonly WeightedText[]): readonly (readonly [string, number])[] {
@@ -296,19 +342,24 @@ function tokenWeights(weightedText: readonly WeightedText[]): readonly (readonly
 function scoreEntry(
   entry: SearchIndexEntry,
   normalizedQuery: string,
-  queryTokens: readonly string[]
+  queryTokens: readonly string[],
+  explain: boolean
 ): SearchResult | undefined {
   const weights = new Map(entry.tokenWeights);
   const matches = new Set<string>();
+  const fieldMatches: SearchResultFieldMatch[] = [];
+  const scoreBreakdown: SearchResultScoreContribution[] = [];
   let score = 0;
   const normalizedRecordId = normalizeText(entry.recordId);
 
   if (normalizedRecordId === normalizedQuery) {
     score += 100;
     matches.add(entry.recordId);
+    scoreBreakdown.push({ kind: "id_exact", contribution: 100 });
   } else if (normalizedRecordId.startsWith(normalizedQuery)) {
     score += 60;
     matches.add(entry.recordId);
+    scoreBreakdown.push({ kind: "id_prefix", contribution: 60 });
   }
 
   for (const token of queryTokens) {
@@ -316,13 +367,32 @@ function scoreEntry(
     if (exactWeight !== undefined) {
       score += exactWeight;
       matches.add(token);
+      const exactFieldMatches = fieldMatchesForToken(entry, token, token, "exact", exactWeight);
+      fieldMatches.push(...exactFieldMatches);
+      scoreBreakdown.push({
+        kind: "token_exact",
+        token,
+        matchedToken: token,
+        contribution: exactWeight,
+        fields: exactFieldMatches.map((match) => match.field)
+      });
       continue;
     }
 
-    const prefixWeight = prefixTokenWeight(weights, token);
-    if (prefixWeight > 0) {
-      score += prefixWeight / 2;
+    const prefixMatch = prefixTokenMatch(weights, token);
+    if (prefixMatch) {
+      const contribution = prefixMatch.weight / 2;
+      score += contribution;
       matches.add(`${token}*`);
+      const prefixFieldMatches = fieldMatchesForToken(entry, token, prefixMatch.token, "prefix", prefixMatch.weight);
+      fieldMatches.push(...prefixFieldMatches);
+      scoreBreakdown.push({
+        kind: "token_prefix",
+        token,
+        matchedToken: prefixMatch.token,
+        contribution,
+        fields: prefixFieldMatches.map((match) => match.field)
+      });
     }
   }
 
@@ -338,18 +408,72 @@ function scoreEntry(
     title: entry.title,
     summary: entry.summary,
     score,
-    matches: [...matches].sort()
+    matches: [...matches].sort(),
+    explain: explain && queryTokens.length > 0
+      ? {
+          algorithm: SEARCH_INDEX_ALGORITHM,
+          queryTokens,
+          fieldMatches: dedupeFieldMatches(fieldMatches),
+          scoreBreakdown
+        }
+      : undefined
   };
 }
 
-function prefixTokenWeight(weights: ReadonlyMap<string, number>, token: string): number {
-  let max = 0;
+function prefixTokenMatch(weights: ReadonlyMap<string, number>, token: string): { readonly token: string; readonly weight: number } | undefined {
+  let best: { token: string; weight: number } | undefined;
   for (const [candidate, weight] of weights) {
-    if (candidate.startsWith(token)) {
-      max = Math.max(max, weight);
+    if (candidate.startsWith(token) && (!best || weight > best.weight || (weight === best.weight && candidate.localeCompare(best.token) < 0))) {
+      best = { token: candidate, weight };
     }
   }
-  return max;
+  return best;
+}
+
+function fieldMatchesForToken(
+  entry: SearchIndexEntry,
+  queryToken: string,
+  matchedToken: string,
+  match: SearchResultFieldMatch["match"],
+  aggregateWeight: number
+): readonly SearchResultFieldMatch[] {
+  const fields = entry.fieldWeights ?? [];
+  const matches = fields.flatMap((field) => {
+    const fieldWeightsByToken = new Map(field.tokenWeights);
+    const weight = fieldWeightsByToken.get(matchedToken);
+    if (weight === undefined || weight <= 0) {
+      return [];
+    }
+    return [
+      {
+        field: field.field,
+        token: queryToken,
+        matchedToken,
+        match,
+        weight,
+        contribution: match === "exact" && weight === aggregateWeight ? weight : weight / 2
+      }
+    ];
+  });
+  return matches.sort((left, right) => right.weight - left.weight || left.field.localeCompare(right.field));
+}
+
+function dedupeFieldMatches(matches: readonly SearchResultFieldMatch[]): readonly SearchResultFieldMatch[] {
+  const byKey = new Map<string, SearchResultFieldMatch>();
+  for (const match of matches) {
+    const key = `${match.field}:${match.token}:${match.matchedToken}:${match.match}`;
+    const existing = byKey.get(key);
+    if (!existing || match.weight > existing.weight) {
+      byKey.set(key, match);
+    }
+  }
+  return [...byKey.values()].sort(
+    (left, right) =>
+      right.contribution - left.contribution ||
+      left.field.localeCompare(right.field) ||
+      left.token.localeCompare(right.token) ||
+      left.matchedToken.localeCompare(right.matchedToken)
+  );
 }
 
 function compareSearchResults(left: SearchResult, right: SearchResult): number {
@@ -387,6 +511,18 @@ function isSearchIndexEntry(value: unknown): value is SearchIndexEntry {
     (value.subjectId === undefined || typeof value.subjectId === "string") &&
     typeof value.title === "string" &&
     typeof value.summary === "string" &&
+    Array.isArray(value.tokenWeights) &&
+    value.tokenWeights.every(isTokenWeight) &&
+    (value.fieldWeights === undefined ||
+      (Array.isArray(value.fieldWeights) && value.fieldWeights.every(isSearchIndexFieldWeights)))
+  );
+}
+
+function isSearchIndexFieldWeights(value: unknown): value is SearchIndexFieldWeights {
+  return (
+    isRecord(value) &&
+    typeof value.field === "string" &&
+    typeof value.weight === "number" &&
     Array.isArray(value.tokenWeights) &&
     value.tokenWeights.every(isTokenWeight)
   );

@@ -1077,21 +1077,76 @@ describe("bwrk cli", () => {
       expect(parseData<{ readonly documentCount: number }>(result.stdout).documentCount).toBe(8);
     }
 
-    const searchIndexDocument = parseJson<{ readonly schemaVersion: string; readonly documentCount: number }>(
-      await readFile(join(rootDir, ".boreal/runtime/search-index.json"), "utf8")
-    );
+    const searchIndexDocument = parseJson<{
+      readonly schemaVersion: string;
+      readonly documentCount: number;
+      readonly documents: Array<{
+        readonly type: string;
+        readonly title: string;
+        readonly fieldWeights?: Array<{ readonly field: string; readonly tokenWeights: readonly unknown[] }>;
+      }>;
+    }>(await readFile(join(rootDir, ".boreal/runtime/search-index.json"), "utf8"));
     expect(searchIndexDocument.schemaVersion).toBe("boreal.search-index.v1");
     expect(searchIndexDocument.documentCount).toBe(8);
+    const indexedDecision = searchIndexDocument.documents.find(
+      (document) => document.type === "decision" && document.title === "Use content hash search"
+    );
+    expect(indexedDecision?.fieldWeights?.map((field) => field.field)).toEqual(
+      expect.arrayContaining(["id", "title", "decision", "context"])
+    );
 
     const query = await runCli(rootDir, ["search", "query", "content hash", "--json"]);
-    const searchResults = parseData<Array<{ readonly type: string; readonly title: string }>>(query.stdout);
+    const searchResults = parseData<Array<{ readonly type: string; readonly title: string; readonly explain?: unknown }>>(query.stdout);
     expect(searchResults.map((result) => result.type)).toEqual(expect.arrayContaining(["decision", "context_pack"]));
     expect(searchResults.map((result) => result.title)).toContain("Use content hash search");
+    expect(searchResults.every((result) => result.explain === undefined)).toBe(true);
 
-    const contextSearch = await runCli(rootDir, ["context", "search", "fail closed stale", "--json"]);
-    const contextResults = parseData<Array<{ readonly type: string; readonly summary: string }>>(contextSearch.stdout);
+    const explainedQuery = await runCli(rootDir, ["search", "query", "content hash", "--explain", "--json"]);
+    const explainedSearchResults = parseData<
+      Array<{
+        readonly type: string;
+        readonly title: string;
+        readonly explain?: {
+          readonly algorithm: string;
+          readonly queryTokens: readonly string[];
+          readonly fieldMatches: Array<{
+            readonly field: string;
+            readonly token: string;
+            readonly matchedToken: string;
+            readonly match: string;
+            readonly weight: number;
+            readonly contribution: number;
+          }>;
+          readonly scoreBreakdown: Array<{ readonly kind: string; readonly contribution: number }>;
+        };
+      }>
+    >(explainedQuery.stdout);
+    const explainedDecision = explainedSearchResults.find((result) => result.title === "Use content hash search");
+    expect(explainedDecision?.explain?.algorithm).toBe("boreal.search.rank.v1");
+    expect(explainedDecision?.explain?.queryTokens).toEqual(["content", "hash"]);
+    expect(explainedDecision?.explain?.fieldMatches).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ field: "title", token: "content", matchedToken: "content", match: "exact" }),
+        expect.objectContaining({ field: "decision", token: "hash", matchedToken: "hash", match: "exact" })
+      ])
+    );
+    expect(explainedDecision?.explain?.scoreBreakdown).toEqual(
+      expect.arrayContaining([expect.objectContaining({ kind: "token_exact" })])
+    );
+
+    const contextSearch = await runCli(rootDir, ["context", "search", "fail closed stale", "--explain", "--json"]);
+    const contextResults = parseData<
+      Array<{
+        readonly type: string;
+        readonly summary: string;
+        readonly explain?: { readonly fieldMatches: Array<{ readonly field: string }> };
+      }>
+    >(contextSearch.stdout);
     expect(contextResults.every((result) => result.type === "context_pack")).toBe(true);
     expect(contextResults.some((result) => result.summary.includes("Ship search runtime"))).toBe(true);
+    expect(contextResults.flatMap((result) => result.explain?.fieldMatches.map((match) => match.field) ?? [])).toEqual(
+      expect.arrayContaining(["facts"])
+    );
 
     await runCli(rootDir, [
       "source",

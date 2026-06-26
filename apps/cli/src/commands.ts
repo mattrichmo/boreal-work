@@ -1396,7 +1396,8 @@ async function contextCommand(
     case "search": {
       const results = await runSearch(context, rest.join(" "), {
         limit: parseLimit(flagValue(args, "limit")),
-        type: "context_pack"
+        type: "context_pack",
+        explain: hasFlag(args, "explain")
       });
       output.write(json ? formatRecord(results, true) : table(results.map(searchResultRow)));
       return { exitCode: 0 };
@@ -1421,7 +1422,8 @@ async function searchCommand(
     }
     case "query": {
       const results = await runSearch(context, rest.join(" "), {
-        limit: parseLimit(flagValue(args, "limit"))
+        limit: parseLimit(flagValue(args, "limit")),
+        explain: hasFlag(args, "explain")
       });
       output.write(json ? formatRecord(results, true) : table(results.map(searchResultRow)));
       return { exitCode: 0 };

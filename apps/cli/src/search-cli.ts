@@ -40,6 +40,7 @@ export interface SearchIndexInspection {
 export interface SearchCommandOptions {
   readonly limit?: number;
   readonly type?: SearchDocumentType;
+  readonly explain?: boolean;
 }
 
 export async function writeSearchIndex(context: CliContext): Promise<SearchIndexWriteResult> {
