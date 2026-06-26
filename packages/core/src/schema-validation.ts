@@ -1,0 +1,242 @@
+import { BorealError } from "./errors.js";
+import type { RuntimePolicy } from "./policies.js";
+
+export interface SchemaValidationIssue {
+  readonly schemaId: string;
+  readonly path: string;
+  readonly message: string;
+}
+
+export const RUNTIME_SCHEMA_IDS = {
+  workItem: "https://boreal.work/schemas/records/work-item.schema.json",
+  evidenceRecord: "https://boreal.work/schemas/records/evidence-record.schema.json",
+  runtimeEvent: "https://boreal.work/schemas/events/runtime-event.schema.json",
+  runtimePolicy: "https://boreal.work/schemas/policies/runtime-policy.schema.json"
+} as const;
+
+export function runtimeSnapshotSchemaIssues(snapshot: {
+  readonly workItems?: readonly unknown[];
+  readonly evidence?: readonly unknown[];
+  readonly events?: readonly unknown[];
+}): readonly SchemaValidationIssue[] {
+  return [
+    ...arrayItems(snapshot.workItems ?? [], RUNTIME_SCHEMA_IDS.workItem, "workItems", workItemSchemaIssues),
+    ...arrayItems(snapshot.evidence ?? [], RUNTIME_SCHEMA_IDS.evidenceRecord, "evidence", evidenceRecordSchemaIssues),
+    ...arrayItems(snapshot.events ?? [], RUNTIME_SCHEMA_IDS.runtimeEvent, "events", runtimeEventSchemaIssues),
+    ...(snapshot.events ?? []).flatMap((event, index) => workspaceInitializedPolicyIssues(event, `events[${index}]`))
+  ];
+}
+
+export function workItemSchemaIssues(value: unknown, path = "$"): readonly SchemaValidationIssue[] {
+  const schemaId = RUNTIME_SCHEMA_IDS.workItem;
+  if (!isRecord(value)) {
+    return [issue(schemaId, path, "must be an object")];
+  }
+
+  const issues: SchemaValidationIssue[] = [
+    ...recordMetaIssues(value.meta, `${path}.meta`, schemaId, /^bw_work_[a-f0-9]{12,64}$/),
+    ...enumIssue(value.kind, `${path}.kind`, schemaId, ["issue", "task", "sprint", "milestone"]),
+    ...nonEmptyStringIssue(value.title, `${path}.title`, schemaId),
+    ...stringIssue(value.description, `${path}.description`, schemaId),
+    ...enumIssue(value.status, `${path}.status`, schemaId, [
+      "draft",
+      "ready",
+      "reserved",
+      "in_progress",
+      "blocked",
+      "needs_verification",
+      "verified",
+      "closed",
+      "cancelled"
+    ]),
+    ...enumIssue(value.priority, `${path}.priority`, schemaId, ["low", "normal", "high", "critical"]),
+    ...stringArrayIssue(value.acceptanceCriteria, `${path}.acceptanceCriteria`, schemaId),
+    ...uniqueStringArrayIssue(value.labels, `${path}.labels`, schemaId),
+    ...uniqueStringArrayIssue(value.dependencyIds, `${path}.dependencyIds`, schemaId),
+    ...uniqueStringArrayIssue(value.evidenceIds, `${path}.evidenceIds`, schemaId),
+    ...uniqueStringArrayIssue(value.verificationIds, `${path}.verificationIds`, schemaId)
+  ];
+
+  if (value.parentId !== undefined) {
+    issues.push(...stringIssue(value.parentId, `${path}.parentId`, schemaId));
+  }
+  if (value.reservationId !== undefined) {
+    issues.push(...stringIssue(value.reservationId, `${path}.reservationId`, schemaId));
+  }
+  if (value.closedAt !== undefined) {
+    issues.push(...stringIssue(value.closedAt, `${path}.closedAt`, schemaId));
+  }
+  if (value.closedReason !== undefined) {
+    issues.push(...stringIssue(value.closedReason, `${path}.closedReason`, schemaId));
+  }
+
+  return issues;
+}
+
+export function evidenceRecordSchemaIssues(value: unknown, path = "$"): readonly SchemaValidationIssue[] {
+  const schemaId = RUNTIME_SCHEMA_IDS.evidenceRecord;
+  if (!isRecord(value)) {
+    return [issue(schemaId, path, "must be an object")];
+  }
+
+  const issues: SchemaValidationIssue[] = [
+    ...recordMetaIssues(value.meta, `${path}.meta`, schemaId, /^bw_evidence_[a-f0-9]{12,64}$/),
+    ...nonEmptyStringIssue(value.subjectId, `${path}.subjectId`, schemaId),
+    ...nonEmptyStringIssue(value.subjectType, `${path}.subjectType`, schemaId),
+    ...enumIssue(value.kind, `${path}.kind`, schemaId, ["command", "test", "diff", "review", "artifact", "note"]),
+    ...nonEmptyStringIssue(value.summary, `${path}.summary`, schemaId),
+    ...enumIssue(value.outcome, `${path}.outcome`, schemaId, ["passed", "failed", "observed", "unknown"]),
+    ...stringIssue(value.observedAt, `${path}.observedAt`, schemaId)
+  ];
+
+  if (value.command !== undefined) {
+    issues.push(...stringIssue(value.command, `${path}.command`, schemaId));
+  }
+  if (value.uri !== undefined) {
+    issues.push(...stringIssue(value.uri, `${path}.uri`, schemaId));
+  }
+
+  return issues;
+}
+
+export function runtimeEventSchemaIssues(value: unknown, path = "$"): readonly SchemaValidationIssue[] {
+  const schemaId = RUNTIME_SCHEMA_IDS.runtimeEvent;
+  if (!isRecord(value)) {
+    return [issue(schemaId, path, "must be an object")];
+  }
+  return [
+    ...recordMetaIssues(value.meta, `${path}.meta`, schemaId, /^bw_event_[a-f0-9]{12,64}$/),
+    ...nonEmptyStringIssue(value.type, `${path}.type`, schemaId),
+    ...nonEmptyStringIssue(value.subjectId, `${path}.subjectId`, schemaId),
+    ...nonEmptyStringIssue(value.subjectType, `${path}.subjectType`, schemaId),
+    ...recordIssue(value.payload, `${path}.payload`, schemaId)
+  ];
+}
+
+export function runtimePolicySchemaIssues(value: unknown, path = "$"): readonly SchemaValidationIssue[] {
+  const schemaId = RUNTIME_SCHEMA_IDS.runtimePolicy;
+  if (!isRecord(value)) {
+    return [issue(schemaId, path, "must be an object")];
+  }
+  return [
+    ...booleanIssue(value.requireEvidenceForVerification, `${path}.requireEvidenceForVerification`, schemaId),
+    ...booleanIssue(value.requirePassingVerificationForClose, `${path}.requirePassingVerificationForClose`, schemaId),
+    ...booleanIssue(value.preventDependencyCycles, `${path}.preventDependencyCycles`, schemaId),
+    ...booleanIssue(value.allowReservationStealing, `${path}.allowReservationStealing`, schemaId),
+    ...integerAtLeastIssue(value.maxActiveReservationsPerAgent, `${path}.maxActiveReservationsPerAgent`, schemaId, 1)
+  ];
+}
+
+export function assertValidRuntimePolicy(policy: RuntimePolicy): void {
+  const issues = runtimePolicySchemaIssues(policy);
+  if (issues.length > 0) {
+    throw new BorealError("BOREAL_INVALID_INPUT", "Runtime policy failed schema validation", { issues });
+  }
+}
+
+function workspaceInitializedPolicyIssues(value: unknown, path: string): readonly SchemaValidationIssue[] {
+  if (!isRecord(value) || value.type !== "workspace.initialized" || !isRecord(value.payload) || value.payload.policy === undefined) {
+    return [];
+  }
+  return runtimePolicySchemaIssues(value.payload.policy, `${path}.payload.policy`);
+}
+
+function recordMetaIssues(
+  value: unknown,
+  path: string,
+  schemaId: string,
+  idPattern: RegExp
+): readonly SchemaValidationIssue[] {
+  if (!isRecord(value)) {
+    return [issue(schemaId, path, "must be an object")];
+  }
+  return [
+    ...patternStringIssue(value.id, `${path}.id`, schemaId, idPattern),
+    ...literalIssue(value.schemaVersion, `${path}.schemaVersion`, schemaId, "boreal.runtime.v1"),
+    ...stringIssue(value.createdAt, `${path}.createdAt`, schemaId),
+    ...stringIssue(value.updatedAt, `${path}.updatedAt`, schemaId),
+    ...recordIssue(value.createdBy, `${path}.createdBy`, schemaId),
+    ...recordIssue(value.updatedBy, `${path}.updatedBy`, schemaId),
+    ...arrayIssue(value.sourceRefs, `${path}.sourceRefs`, schemaId),
+    ...stringArrayIssue(value.tags, `${path}.tags`, schemaId),
+    ...(value.contentHash === undefined
+      ? []
+      : patternStringIssue(value.contentHash, `${path}.contentHash`, schemaId, /^sha256:[a-f0-9]{64}$/))
+  ];
+}
+
+function arrayItems(
+  values: readonly unknown[],
+  schemaId: string,
+  section: string,
+  validate: (value: unknown, path: string) => readonly SchemaValidationIssue[]
+): readonly SchemaValidationIssue[] {
+  if (!Array.isArray(values)) {
+    return [issue(schemaId, section, "must be an array")];
+  }
+  return values.flatMap((value, index) => validate(value, `${section}[${index}]`));
+}
+
+function enumIssue(value: unknown, path: string, schemaId: string, allowed: readonly string[]): readonly SchemaValidationIssue[] {
+  return typeof value === "string" && allowed.includes(value)
+    ? []
+    : [issue(schemaId, path, `must be one of: ${allowed.join(", ")}`)];
+}
+
+function literalIssue(value: unknown, path: string, schemaId: string, expected: string): readonly SchemaValidationIssue[] {
+  return value === expected ? [] : [issue(schemaId, path, `must be ${expected}`)];
+}
+
+function nonEmptyStringIssue(value: unknown, path: string, schemaId: string): readonly SchemaValidationIssue[] {
+  return typeof value === "string" && value.length > 0 ? [] : [issue(schemaId, path, "must be a non-empty string")];
+}
+
+function stringIssue(value: unknown, path: string, schemaId: string): readonly SchemaValidationIssue[] {
+  return typeof value === "string" ? [] : [issue(schemaId, path, "must be a string")];
+}
+
+function patternStringIssue(value: unknown, path: string, schemaId: string, pattern: RegExp): readonly SchemaValidationIssue[] {
+  return typeof value === "string" && pattern.test(value) ? [] : [issue(schemaId, path, `must match ${pattern.source}`)];
+}
+
+function recordIssue(value: unknown, path: string, schemaId: string): readonly SchemaValidationIssue[] {
+  return isRecord(value) ? [] : [issue(schemaId, path, "must be an object")];
+}
+
+function booleanIssue(value: unknown, path: string, schemaId: string): readonly SchemaValidationIssue[] {
+  return typeof value === "boolean" ? [] : [issue(schemaId, path, "must be a boolean")];
+}
+
+function integerAtLeastIssue(value: unknown, path: string, schemaId: string, minimum: number): readonly SchemaValidationIssue[] {
+  return Number.isInteger(value) && Number(value) >= minimum
+    ? []
+    : [issue(schemaId, path, `must be an integer >= ${minimum}`)];
+}
+
+function arrayIssue(value: unknown, path: string, schemaId: string): readonly SchemaValidationIssue[] {
+  return Array.isArray(value) ? [] : [issue(schemaId, path, "must be an array")];
+}
+
+function stringArrayIssue(value: unknown, path: string, schemaId: string): readonly SchemaValidationIssue[] {
+  if (!Array.isArray(value)) {
+    return [issue(schemaId, path, "must be an array")];
+  }
+  return value.flatMap((entry, index) => stringIssue(entry, `${path}[${index}]`, schemaId));
+}
+
+function uniqueStringArrayIssue(value: unknown, path: string, schemaId: string): readonly SchemaValidationIssue[] {
+  const issues = stringArrayIssue(value, path, schemaId);
+  if (!Array.isArray(value)) {
+    return issues;
+  }
+  const uniqueValues = new Set(value);
+  return uniqueValues.size === value.length ? issues : [...issues, issue(schemaId, path, "must contain unique values")];
+}
+
+function issue(schemaId: string, path: string, message: string): SchemaValidationIssue {
+  return { schemaId, path, message };
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}

@@ -11,6 +11,14 @@ const actor: ActorRef = {
 };
 
 describe("boreal runtime proof slice", () => {
+  it("rejects runtime policies that do not match the schema", () => {
+    expect(() =>
+      createBorealRuntime({
+        policy: { maxActiveReservationsPerAgent: 0 }
+      })
+    ).toThrow(expect.objectContaining({ code: "BOREAL_INVALID_INPUT" }));
+  });
+
   it("runs create, dependency readiness, reserve, evidence, verify, close, and projections", async () => {
     let tick = 0;
     const runtime = createBorealRuntime({

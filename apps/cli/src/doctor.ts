@@ -6,6 +6,7 @@ import {
   normalizeActorId,
   normalizeLabel,
   readJsonFile,
+  runtimeSnapshotSchemaIssues,
   type AgentReservation,
   type ClaimRecord,
   type ContextPack,
@@ -86,6 +87,7 @@ export async function runDoctor(context: CliContext, fix: boolean): Promise<Doct
   validateStateSections(state, diagnostics);
   validateMissingIds(state, diagnostics);
   validateDuplicateIds(state, diagnostics);
+  validateSchemaConformance(state, diagnostics);
 
   const storeDiagnostics = await validateStoreRecords(context, fix, state);
   diagnostics.push(...storeDiagnostics.diagnostics);
@@ -350,6 +352,21 @@ function validateDuplicateIds(state: Record<string, unknown>, diagnostics: Diagn
     severity: duplicates.length > 0 ? "error" : "ok",
     message: duplicates.length > 0 ? "Duplicate record IDs found" : "No duplicate record IDs found",
     details: duplicates.length > 0 ? duplicates : undefined
+  });
+}
+
+function validateSchemaConformance(state: Record<string, unknown>, diagnostics: Diagnostic[]): void {
+  const issues = runtimeSnapshotSchemaIssues({
+    workItems: stateSection(state, "workItems"),
+    evidence: stateSection(state, "evidence"),
+    events: stateSection(state, "events")
+  });
+
+  diagnostics.push({
+    code: "state.schema_validation",
+    severity: issues.length > 0 ? "error" : "ok",
+    message: issues.length > 0 ? "Runtime state failed schema validation" : "Runtime state matches integrated schemas",
+    details: issues.length > 0 ? { issues: issues.slice(0, 50), issueCount: issues.length } : undefined
   });
 }
 

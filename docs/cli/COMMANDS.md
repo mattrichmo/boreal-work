@@ -682,6 +682,7 @@ Checks:
 
 - `.boreal` and runtime state presence.
 - Runtime state JSON parse and schema version.
+- Integrated schema validation for work, evidence, runtime events, and runtime policy payloads.
 - Required state sections.
 - Missing IDs and duplicate IDs within each state section.
 - Malformed work, evidence, verification, source, claim, decision, context-pack, graph, and reservation records.

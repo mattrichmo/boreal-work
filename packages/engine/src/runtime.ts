@@ -7,6 +7,7 @@ import {
 import {
   BorealError,
   DEFAULT_RUNTIME_POLICY,
+  assertValidRuntimePolicy,
   createRecordMeta,
   normalizeActorId,
   normalizeLabels,
@@ -170,6 +171,7 @@ export interface BorealRuntime {
 export function createBorealRuntime(options: BorealRuntimeOptions = {}): BorealRuntime {
   const store = options.store ?? new InMemoryBorealStore();
   const policy: RuntimePolicy = { ...DEFAULT_RUNTIME_POLICY, ...options.policy };
+  assertValidRuntimePolicy(policy);
   const actor = normalizeActorRef(options.actor ?? systemActor());
   const clock = options.clock ?? (() => new Date());
   const now = () => nowIso(clock());

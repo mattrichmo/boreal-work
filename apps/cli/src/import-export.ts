@@ -8,7 +8,8 @@ import {
   canonicalJson,
   hashContent,
   nowIso,
-  readJsonFile
+  readJsonFile,
+  runtimeSnapshotSchemaIssues
 } from "@boreal/core";
 import {
   writeTextFileAtomic,
@@ -311,6 +312,14 @@ function normalizeSnapshot(value: unknown): Required<StoreSnapshot> {
 }
 
 function validateSnapshot(snapshot: Required<StoreSnapshot>): void {
+  const schemaIssues = runtimeSnapshotSchemaIssues(snapshot);
+  if (schemaIssues.length > 0) {
+    throw new BorealError("BOREAL_INVALID_INPUT", "Snapshot failed schema validation", {
+      issues: schemaIssues.slice(0, 50),
+      issueCount: schemaIssues.length
+    });
+  }
+
   const ids = new Map<SnapshotSection, Set<string>>();
   for (const section of SNAPSHOT_SECTIONS) {
     const seen = new Set<string>();

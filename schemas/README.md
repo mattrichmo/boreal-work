@@ -1,5 +1,14 @@
 # Schemas
 
-These JSON schemas describe the durable record envelopes used by the TypeScript runtime. The TypeScript source in `packages/core/src/records.ts` is the implementation source for now; these files document the first external contract for future vault, import, and adapter work.
+These JSON schemas describe the durable record envelopes used by the TypeScript runtime. The TypeScript source in `packages/core/src/records.ts` remains the domain type source, and `packages/core/src/schema-validation.ts` enforces the currently published schema subset at runtime, import, and doctor boundaries.
 
 The current runtime types cover work, graph edges, evidence, verification, knowledge sources, claims, decisions, reservations, events, and projections.
+
+Currently enforced schemas:
+
+- `schemas/records/work-item.schema.json`
+- `schemas/records/evidence-record.schema.json`
+- `schemas/events/runtime-event.schema.json`
+- `schemas/policies/runtime-policy.schema.json`
+
+Schemas not listed here are not yet externalized; add validator coverage with each new published schema file so schemas do not become documentation-only contracts.

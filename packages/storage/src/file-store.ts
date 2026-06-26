@@ -1,6 +1,6 @@
 import { resolve } from "node:path";
 
-import { BorealError, assertPathInside, readJsonFile, resolveWorkspacePaths } from "@boreal/core";
+import { BorealError, assertPathInside, readJsonFile, resolveWorkspacePaths, runtimeSnapshotSchemaIssues } from "@boreal/core";
 
 import { normalizeFileLockOptions, withFileLock, type FileLockOptions } from "./file-lock.js";
 import { InMemoryBorealStore, type StoreSnapshot } from "./memory-store.js";
@@ -110,7 +110,7 @@ function documentToSnapshot(value: unknown): StoreSnapshot {
     });
   }
 
-  return {
+  const snapshot: StoreSnapshot = {
     workItems: readArray(value, "workItems"),
     evidence: readArray(value, "evidence"),
     verifications: readArray(value, "verifications"),
@@ -123,6 +123,14 @@ function documentToSnapshot(value: unknown): StoreSnapshot {
     projections: readArray(value, "projections"),
     contextPacks: readArray(value, "contextPacks")
   };
+  const schemaIssues = runtimeSnapshotSchemaIssues(snapshot);
+  if (schemaIssues.length > 0) {
+    throw new BorealError("BOREAL_STORAGE_ERROR", "Boreal state file failed schema validation", {
+      issues: schemaIssues.slice(0, 50),
+      issueCount: schemaIssues.length
+    });
+  }
+  return snapshot;
 }
 
 function readArray<T = unknown>(value: Record<string, unknown>, key: string): readonly T[] {

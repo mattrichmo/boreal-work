@@ -205,6 +205,44 @@ describe("file-backed store", () => {
     await expect(futureSchemaStore.read((reader) => reader.listWorkItems())).rejects.toMatchObject({
       code: "BOREAL_STORAGE_ERROR"
     } satisfies Partial<BorealError>);
+
+    await writeFile(
+      statePath,
+      JSON.stringify(
+        emptyStateDocument({
+          workItems: [
+            {
+              meta: {
+                id: "bw_work_deadbeefdead",
+                schemaVersion: "boreal.runtime.v1",
+                createdAt: "2026-01-01T00:00:00.000Z",
+                updatedAt: "2026-01-01T00:00:00.000Z",
+                createdBy: {},
+                updatedBy: {},
+                sourceRefs: [],
+                tags: []
+              },
+              kind: "task",
+              title: "Malformed status",
+              description: "",
+              status: "not_ready",
+              priority: "normal",
+              acceptanceCriteria: [],
+              labels: [],
+              dependencyIds: [],
+              evidenceIds: [],
+              verificationIds: []
+            }
+          ]
+        })
+      ),
+      "utf8"
+    );
+    const invalidSchemaStore = new FileBorealStore({ rootDir, lock });
+    await expect(invalidSchemaStore.read((reader) => reader.listWorkItems())).rejects.toMatchObject({
+      code: "BOREAL_STORAGE_ERROR",
+      details: expect.objectContaining({ issueCount: expect.any(Number) })
+    } satisfies Partial<BorealError>);
   });
 });
 
@@ -235,4 +273,22 @@ async function writeLockOwner(rootDir: string, createdAt: string): Promise<void>
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function emptyStateDocument(overrides: Record<string, readonly unknown[]> = {}): Record<string, unknown> {
+  return {
+    schemaVersion: "boreal.file-store.v1",
+    workItems: [],
+    evidence: [],
+    verifications: [],
+    knowledgeSources: [],
+    claims: [],
+    decisions: [],
+    graphEdges: [],
+    reservations: [],
+    events: [],
+    projections: [],
+    contextPacks: [],
+    ...overrides
+  };
 }

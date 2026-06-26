@@ -1533,6 +1533,56 @@ describe("bwrk cli", () => {
     const danglingPayload = parseJson<{ readonly ok: false; readonly code: string }>(danglingImport.stderr);
     expect(danglingImport.exitCode).toBe(2);
     expect(danglingPayload.code).toBe("BOREAL_INVALID_INPUT");
+
+    const malformedSchemaPath = join(rootDir, "malformed-schema-export.json");
+    await writeFile(
+      malformedSchemaPath,
+      `${JSON.stringify(
+        emptyFileStoreState({
+          workItems: [
+            {
+              meta: {
+                id: "bw_work_deadbeefdead",
+                schemaVersion: "boreal.runtime.v1",
+                createdAt: "2026-01-01T00:00:00.000Z",
+                updatedAt: "2026-01-01T00:00:00.000Z",
+                createdBy: {},
+                updatedBy: {},
+                sourceRefs: [],
+                tags: []
+              },
+              kind: "task",
+              title: "Malformed imported status",
+              description: "",
+              status: "not_ready",
+              priority: "normal",
+              acceptanceCriteria: [],
+              labels: [],
+              dependencyIds: [],
+              evidenceIds: [],
+              verificationIds: []
+            }
+          ]
+        }),
+        null,
+        2
+      )}\n`,
+      "utf8"
+    );
+    const malformedImport = await runCli(targetDir, [
+      "import",
+      "json",
+      "--from",
+      malformedSchemaPath,
+      "--allow-external-read",
+      "--json"
+    ]);
+    const malformedPayload = parseJson<{ readonly ok: false; readonly code: string; readonly message: string }>(
+      malformedImport.stderr
+    );
+    expect(malformedImport.exitCode).toBe(2);
+    expect(malformedPayload.code).toBe("BOREAL_INVALID_INPUT");
+    expect(malformedPayload.message).toContain("schema validation");
   });
 
   it("keeps explicit workspace paths exact while cwd discovery walks upward", async () => {
@@ -1730,4 +1780,22 @@ async function updateState(
   const statePath = join(rootDir, ".boreal/runtime/state.json");
   const state = parseJson<MutableStateForTest>(await readFile(statePath, "utf8"));
   await writeFile(statePath, `${JSON.stringify(update(state), null, 2)}\n`, "utf8");
+}
+
+function emptyFileStoreState(overrides: Record<string, readonly unknown[]> = {}): Record<string, unknown> {
+  return {
+    schemaVersion: "boreal.file-store.v1",
+    workItems: [],
+    evidence: [],
+    verifications: [],
+    knowledgeSources: [],
+    claims: [],
+    decisions: [],
+    graphEdges: [],
+    reservations: [],
+    events: [],
+    projections: [],
+    contextPacks: [],
+    ...overrides
+  };
 }

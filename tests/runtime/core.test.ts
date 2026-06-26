@@ -16,6 +16,7 @@ import {
   normalizeSearchQuery,
   randomId,
   readJsonFile,
+  runtimeSnapshotSchemaIssues,
   safeParseJson,
   type EventId,
   type WorkId
@@ -82,6 +83,44 @@ describe("core hashing and ids", () => {
     expect(findings).toEqual([expect.objectContaining({ codePoint: "U+200B", kind: "invisible_format" })]);
     expect(() => normalizeMachineString("bad\u202etitle", "title")).toThrow(
       expect.objectContaining({ code: "BOREAL_UNSAFE_UNICODE" })
+    );
+  });
+
+  it("reports schema validation issues for malformed runtime snapshots", () => {
+    const issues = runtimeSnapshotSchemaIssues({
+      workItems: [
+        {
+          meta: {
+            id: "bw_work_deadbeefdead",
+            schemaVersion: "boreal.runtime.v1",
+            createdAt: "2026-01-01T00:00:00.000Z",
+            updatedAt: "2026-01-01T00:00:00.000Z",
+            createdBy: {},
+            updatedBy: {},
+            sourceRefs: [],
+            tags: []
+          },
+          kind: "task",
+          title: "Invalid status",
+          description: "",
+          status: "not_ready",
+          priority: "normal",
+          acceptanceCriteria: [],
+          labels: [],
+          dependencyIds: [],
+          evidenceIds: [],
+          verificationIds: []
+        }
+      ]
+    });
+
+    expect(issues).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          path: "workItems[0].status",
+          schemaId: "https://boreal.work/schemas/records/work-item.schema.json"
+        })
+      ])
     );
   });
 });
