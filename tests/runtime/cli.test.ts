@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { flagValue, parseArgs } from "../../apps/cli/src/args.ts";
-import { registryValueFlagNames } from "../../apps/cli/src/command-registry.ts";
+import { registryValueFlagNames, validateCommandBehaviorMetadata } from "../../apps/cli/src/command-registry.ts";
 import { installJsonStdoutGuard, main } from "../../apps/cli/src/index.ts";
 import type { CliOutput } from "../../apps/cli/src/output.ts";
 
@@ -176,11 +176,25 @@ describe("bwrk cli", () => {
       readonly commands: Array<{
         readonly path: readonly string[];
         readonly flags: Array<{ readonly name: string; readonly type: string }>;
+        readonly behavior: {
+          readonly readOnly: boolean;
+          readonly writesState: boolean;
+          readonly writesGeneratedArtifacts: boolean;
+          readonly requiresFreshIndex: boolean;
+          readonly requiresLock: string;
+          readonly maxResultSizeChars: number;
+          readonly jsonOutputSchema: string;
+          readonly examples: readonly string[];
+        };
       }>;
     }>(result.stdout);
     const reserve = registry.commands.find((command) => command.path.join(" ") === "work reserve");
+    const commands = registry.commands.find((command) => command.path.join(" ") === "commands");
+    const searchQuery = registry.commands.find((command) => command.path.join(" ") === "search query");
+    const searchIndex = registry.commands.find((command) => command.path.join(" ") === "search index");
 
     expect(result.exitCode).toBe(0);
+    expect(() => validateCommandBehaviorMetadata()).not.toThrow();
     expect(registry.commands.map((command) => command.path.join(" "))).toContain("commands");
     expect(registry.commands.map((command) => command.path.join(" "))).toEqual(
       expect.arrayContaining([
@@ -214,6 +228,15 @@ describe("bwrk cli", () => {
         expect.objectContaining({ name: "reason", type: "value" })
       ])
     );
+    expect(registry.commands.every((command) => command.behavior.examples.length > 0)).toBe(true);
+    expect(registry.commands.every((command) => command.behavior.jsonOutputSchema.startsWith("boreal.cli."))).toBe(true);
+    expect(registry.commands.every((command) => command.behavior.maxResultSizeChars > 0)).toBe(true);
+    expect(commands?.behavior.readOnly).toBe(true);
+    expect(reserve?.behavior).toEqual(expect.objectContaining({ writesState: true, requiresLock: "state" }));
+    expect(searchIndex?.behavior).toEqual(
+      expect.objectContaining({ writesGeneratedArtifacts: true, requiresLock: "index" })
+    );
+    expect(searchQuery?.behavior).toEqual(expect.objectContaining({ readOnly: true, requiresFreshIndex: true }));
   });
 
   it("rejects unknown flags and honors explicit false booleans", async () => {

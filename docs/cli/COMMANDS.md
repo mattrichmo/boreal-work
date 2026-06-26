@@ -109,6 +109,20 @@ JSON `data` shape:
       "usage": "bwrk work reserve <work-id> --agent <agent-id> [--purpose <text>] [--force --reason <text>] [--json]",
       "requiresWorkspace": true,
       "supportsJson": true,
+      "behavior": {
+        "readOnly": false,
+        "destructive": false,
+        "writesState": true,
+        "writesGeneratedArtifacts": false,
+        "requiresFreshIndex": false,
+        "concurrencySafe": true,
+        "requiresLock": "state",
+        "supportsExplain": false,
+        "maxResultSizeChars": 50000,
+        "jsonOutputSchema": "boreal.cli.work.reserve.v1",
+        "humanOutputKind": "record",
+        "examples": ["bwrk work reserve bw_work_example --agent agent-a --ttl 2h --json"]
+      },
       "flags": [
         {
           "name": "force",
