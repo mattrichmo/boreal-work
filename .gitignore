@@ -25,3 +25,5 @@ memory/.boreal/cache/
 memory/.boreal/locks/
 memory/.boreal/tmp/
 memory/.boreal/results/
+
+claude-code-sourcemap-main

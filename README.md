@@ -29,6 +29,7 @@ pnpm build
 ## CLI Surface
 
 Full command contract: [docs/cli/COMMANDS.md](docs/cli/COMMANDS.md).
+CLI prompt and dashboard direction: [docs/architecture/CLI_UX.md](docs/architecture/CLI_UX.md).
 
 Run the CLI from source:
 

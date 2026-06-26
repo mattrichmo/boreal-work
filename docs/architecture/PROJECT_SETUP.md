@@ -29,3 +29,5 @@ For in-repo and child memory layouts, setup rejects path escapes after symlink r
 ## Init Direction
 
 `bwrk init --interactive` asks for project root, memory layout, separate Git preference, install root, target agents, and folder-scope. Non-interactive flags provide the same data for automation.
+
+The interactive flow should continue toward an opt-in wizard-style installer: arrow-key choices with active descriptions, back/cancel handling, a final write plan, and setup notes for non-fatal path or shell issues. JSON output and noninteractive flags remain the primary contract for agents, automation, and CI.

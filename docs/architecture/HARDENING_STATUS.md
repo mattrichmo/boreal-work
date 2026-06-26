@@ -39,6 +39,7 @@ This file is the current checkpoint for the broad hardening goal. It separates a
 - Runtime schema validation now covers all persisted state sections, not just work/evidence/events/operations.
 - Runtime schema IDs are backed by published schema files, and tests enforce that every published ID has a matching file.
 - `bwrk commands --format markdown` emits a generated command reference from `COMMAND_DEFINITIONS`.
+- Claude Code sourcemap material is now treated as an ignored research artifact only; Boreal has a separate CLI UX direction document for original prompt/dashboard primitives, with richer views kept opt-in behind stable JSON and plain text command contracts.
 
 ## Remaining Architecture Work
 
@@ -55,7 +56,8 @@ This file is the current checkpoint for the broad hardening goal. It separates a
 ## Next Priority Slices
 
 1. Make JSONL ledgers a stronger rebuild source: add a doctor/import check that a ledger export can reconstruct the runtime snapshot and make the repair command explicit.
-2. Add a doc-check command that compares `docs/cli/COMMANDS.md` against the generated command reference.
-3. Expand vault truth: link runtime claims/decisions to `memory/wiki` pages and add doctor checks for stale source-backed assertions.
-4. Add a SQLite cache adapter behind the existing store boundary and prove it is rebuildable from canonical files.
-5. Implement the Boreal JSONL merge driver fixture and document local Git config setup.
+2. Add optional shared CLI dashboard primitives for status icons, shortcut hints, grouped diagnostics, stepper output, and windowed choice lists without changing JSON or stable plain text defaults.
+3. Add a doc-check command that compares `docs/cli/COMMANDS.md` against the generated command reference.
+4. Expand vault truth: link runtime claims/decisions to `memory/wiki` pages and add doctor checks for stale source-backed assertions.
+5. Add a SQLite cache adapter behind the existing store boundary and prove it is rebuildable from canonical files.
+6. Implement the Boreal JSONL merge driver fixture and document local Git config setup.
