@@ -680,7 +680,7 @@ JSON `data` is an array of search results with `id`, `type`, `recordId`, `subjec
 bwrk search index [--json]
 ```
 
-Builds a deterministic local search index at `.boreal/runtime/search-index.json`. Rebuilds are serialized with `.boreal/runtime/search-index.lock` and use atomic fsync writes. The index stores compact weighted aggregate tokens, per-field tokens, document-frequency statistics, and result summaries for work, evidence, sources, claims, decisions, context packs, and bounded context chunks; it does not store full record bodies.
+Builds a deterministic local search index at `.boreal/runtime/search-index.json`. Rebuilds are serialized with `.boreal/runtime/search-index.lock` and use atomic fsync writes. The index stores compact weighted aggregate tokens, per-field tokens, document-frequency statistics, compact vector-lite weights, and result summaries for work, evidence, sources, claims, decisions, context packs, and bounded context chunks; it does not store full record bodies.
 
 JSON `data` contains `path`, `schemaVersion`, `builtAt`, `contentHash`, `documentCount`, and `tokenCount`.
 
@@ -690,9 +690,9 @@ JSON `data` contains `path`, `schemaVersion`, `builtAt`, `contentHash`, `documen
 bwrk search query <query> [--limit <count>] [--explain] [--json]
 ```
 
-Searches work, evidence, sources, claims, decisions, context packs, and bounded context chunks. Results are ranked by ID prefix matches, field-weighted token matches adjusted by document frequency, and stable type/title ordering. Tokenization preserves compact tokens while adding camelCase, path/URI, underscore, and alpha-numeric split variants.
+Searches work, evidence, sources, claims, decisions, context packs, and bounded context chunks. Results are ranked by ID prefix matches, field-weighted token matches adjusted by document frequency, deterministic vector-lite similarity, and stable type/title ordering. Tokenization preserves compact tokens while adding camelCase, path/URI, underscore, and alpha-numeric split variants.
 
-Use `--explain` to include the normalized query tokens, score contributions, document frequencies, IDF factors, and field-level matches that caused each result to rank.
+Use `--explain` to include the normalized query tokens, score contributions, document frequencies, IDF factors, vector similarity, and field-level matches that caused each result to rank.
 
 The command fails closed when the index is missing, malformed, or stale. Rebuild with `bwrk search index` or `bwrk doctor --fix`.
 

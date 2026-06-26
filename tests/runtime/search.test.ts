@@ -72,6 +72,32 @@ describe("search ranking", () => {
     expect(needleBreakdown?.idf).toBeGreaterThan(commonBreakdown?.idf ?? 0);
   });
 
+  it("uses vector-lite similarity for near-token retrieval with explain output", () => {
+    const work = createWorkItem({
+      title: "Reserve lease ownership",
+      description: "Coordinate stale locks before an agent claims work.",
+      actor,
+      now
+    });
+    const index = buildSearchIndex({
+      workItems: [work],
+      evidence: [],
+      knowledgeSources: [],
+      claims: [],
+      decisions: [],
+      contextPacks: []
+    });
+
+    const results = querySearchIndex(index, "reservation", { explain: true });
+    const vectorBreakdown = results[0]?.explain?.scoreBreakdown.find((entry) => entry.kind === "vector_similarity");
+
+    expect(index.documents[0]?.vectorWeights.length).toBeGreaterThan(0);
+    expect(results[0]?.recordId).toBe(work.meta.id);
+    expect(results[0]?.matches).toContain("vector");
+    expect(vectorBreakdown?.contribution).toBeGreaterThan(0);
+    expect(vectorBreakdown?.matchedDimensions).toBeGreaterThan(0);
+  });
+
   it("adds bounded context chunks that can outrank the full context pack", () => {
     const pack: ContextPack = {
       id: "projection_context_chunk_test" as ProjectionId,

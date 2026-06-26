@@ -22,7 +22,7 @@ pnpm build
 - `packages/knowledge-engine`: sources, claims, and decisions.
 - `packages/graph-engine`: deterministic relationship edges and cycle checks.
 - `packages/agent-runtime`: reservations and collision policy.
-- `packages/search`: context-pack projection helpers and deterministic local search-index ranking.
+- `packages/search`: context-pack projection helpers and deterministic hybrid local search-index ranking.
 - `packages/ui-model`: shared view models for future CLI/TUI/console surfaces.
 - `packages/engine`: outer runtime composition used by every future surface.
 

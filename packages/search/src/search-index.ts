@@ -14,11 +14,17 @@ import {
 
 export const SEARCH_INDEX_SCHEMA_VERSION = "boreal.search-index.v1";
 
-const SEARCH_INDEX_ALGORITHM = "boreal.search.rank.v3";
+const SEARCH_INDEX_ALGORITHM = "boreal.search.hybrid.v1";
 const DEFAULT_LIMIT = 20;
 const MAX_INDEXED_TOKENS_PER_DOCUMENT = 400;
 const MAX_CONTEXT_CHUNKS_PER_PACK = 8;
 const MAX_CONTEXT_CHUNK_CHARS = 700;
+const VECTOR_DIMENSIONS = 4096;
+const VECTOR_TOKEN_WEIGHT = 1;
+const VECTOR_PREFIX_WEIGHT = 0.7;
+const VECTOR_TRIGRAM_WEIGHT = 0.3;
+const VECTOR_SCORE_WEIGHT = 4;
+const MIN_VECTOR_SIMILARITY = 0.06;
 
 export type SearchDocumentType = "work" | "evidence" | "source" | "claim" | "decision" | "context_pack" | "context_chunk";
 
@@ -50,6 +56,7 @@ export interface SearchIndexEntry {
   readonly title: string;
   readonly summary: string;
   readonly tokenWeights: readonly (readonly [string, number])[];
+  readonly vectorWeights: readonly (readonly [number, number])[];
   readonly fieldWeights?: readonly SearchIndexFieldWeights[];
 }
 
@@ -96,12 +103,14 @@ export interface SearchResultFieldMatch {
 }
 
 export interface SearchResultScoreContribution {
-  readonly kind: "id_exact" | "id_prefix" | "token_exact" | "token_prefix";
+  readonly kind: "id_exact" | "id_prefix" | "token_exact" | "token_prefix" | "vector_similarity";
   readonly token?: string;
   readonly matchedToken?: string;
   readonly baseWeight?: number;
   readonly documentFrequency?: number;
   readonly idf?: number;
+  readonly similarity?: number;
+  readonly matchedDimensions?: number;
   readonly contribution: number;
   readonly fields?: readonly string[];
 }
@@ -115,6 +124,11 @@ interface WeightedText {
 interface SearchScoringStats {
   readonly documentCount: number;
   readonly documentFrequencies: ReadonlyMap<string, number>;
+}
+
+interface VectorSimilarity {
+  readonly similarity: number;
+  readonly matchedDimensions: number;
 }
 
 const STOP_WORDS = new Set([
@@ -179,6 +193,7 @@ export function searchIndexContentHash(snapshot: SearchCorpusSnapshot): ContentH
       title: entry.title,
       summary: entry.summary,
       tokenWeights: entry.tokenWeights,
+      vectorWeights: entry.vectorWeights,
       fieldWeights: entry.fieldWeights
     }))
   });
@@ -198,9 +213,10 @@ export function querySearchIndex(
   const limit = options.limit ?? DEFAULT_LIMIT;
   const scoringStats = searchScoringStats(index);
   const allowedTypes = searchDocumentTypeFilter(options);
+  const queryVectorWeights = vectorWeights(queryTokens.map((token) => [token, 1] as const));
   const results = index.documents
     .filter((entry) => !allowedTypes || allowedTypes.has(entry.type))
-    .map((entry) => scoreEntry(entry, normalizedQuery, queryTokens, Boolean(options.explain), scoringStats))
+    .map((entry) => scoreEntry(entry, normalizedQuery, queryTokens, queryVectorWeights, Boolean(options.explain), scoringStats))
     .filter((result): result is SearchResult => result !== undefined)
     .sort(compareSearchResults);
 
@@ -336,6 +352,7 @@ function contextChunkEntries(pack: ContextPack): readonly SearchIndexEntry[] {
       { field: "title", text: `${pack.title} ${label}`, weight: 7 },
       { field, text: boundedText, weight }
     ];
+    const weights = tokenWeights(weightedText);
     chunks.push({
       id: `context_chunk:${pack.id}:${key}`,
       type: "context_chunk",
@@ -343,7 +360,8 @@ function contextChunkEntries(pack: ContextPack): readonly SearchIndexEntry[] {
       subjectId: pack.subjectId,
       title: `${pack.title} (${label})`,
       summary: trimSummary(boundedText),
-      tokenWeights: tokenWeights(weightedText),
+      tokenWeights: weights,
+      vectorWeights: vectorWeights(weights),
       fieldWeights: fieldWeights(weightedText)
     });
   };
@@ -365,6 +383,7 @@ function entry(
   weightedText: readonly WeightedText[],
   subjectId?: string
 ): SearchIndexEntry {
+  const weights = tokenWeights(weightedText);
   return {
     id: `${type}:${recordId}`,
     type,
@@ -372,7 +391,8 @@ function entry(
     subjectId,
     title: title.trim(),
     summary: trimSummary(summary),
-    tokenWeights: tokenWeights(weightedText),
+    tokenWeights: weights,
+    vectorWeights: vectorWeights(weights),
     fieldWeights: fieldWeights(weightedText)
   };
 }
@@ -413,6 +433,48 @@ function buildDocumentFrequencies(entries: readonly SearchIndexEntry[]): readonl
   return [...frequencies.entries()].sort(([left], [right]) => left.localeCompare(right));
 }
 
+function vectorWeights(tokenWeights: readonly (readonly [string, number])[]): readonly (readonly [number, number])[] {
+  const weights = new Map<number, number>();
+  for (const [token, weight] of tokenWeights) {
+    const scaledWeight = Math.sqrt(Math.max(weight, 0));
+    addVectorFeature(weights, `token:${token}`, VECTOR_TOKEN_WEIGHT * scaledWeight);
+    if (token.length >= 5) {
+      addVectorFeature(weights, `prefix:${token.slice(0, 5)}`, VECTOR_PREFIX_WEIGHT * scaledWeight);
+    }
+    for (const trigram of tokenTrigrams(token)) {
+      addVectorFeature(weights, `trigram:${trigram}`, VECTOR_TRIGRAM_WEIGHT * scaledWeight);
+    }
+  }
+  return [...weights.entries()]
+    .filter(([, weight]) => weight > 0)
+    .sort(([left], [right]) => left - right);
+}
+
+function addVectorFeature(weights: Map<number, number>, feature: string, weight: number): void {
+  const dimension = hashVectorFeature(feature) % VECTOR_DIMENSIONS;
+  weights.set(dimension, (weights.get(dimension) ?? 0) + weight);
+}
+
+function tokenTrigrams(token: string): readonly string[] {
+  if (token.length < 3) {
+    return [];
+  }
+  const trigrams = new Set<string>();
+  for (let index = 0; index <= token.length - 3; index += 1) {
+    trigrams.add(token.slice(index, index + 3));
+  }
+  return [...trigrams];
+}
+
+function hashVectorFeature(value: string): number {
+  let hash = 0x811c9dc5;
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return hash >>> 0;
+}
+
 function searchScoringStats(index: SearchIndexDocument): SearchScoringStats {
   return {
     documentCount: index.documentCount,
@@ -424,6 +486,7 @@ function scoreEntry(
   entry: SearchIndexEntry,
   normalizedQuery: string,
   queryTokens: readonly string[],
+  queryVectorWeights: readonly (readonly [number, number])[],
   explain: boolean,
   stats: SearchScoringStats
 ): SearchResult | undefined {
@@ -489,6 +552,19 @@ function scoreEntry(
     }
   }
 
+  const vector = vectorSimilarity(entry.vectorWeights, queryVectorWeights);
+  if (vector.similarity >= MIN_VECTOR_SIMILARITY) {
+    const contribution = vector.similarity * VECTOR_SCORE_WEIGHT;
+    score += contribution;
+    matches.add("vector");
+    scoreBreakdown.push({
+      kind: "vector_similarity",
+      similarity: vector.similarity,
+      matchedDimensions: vector.matchedDimensions,
+      contribution
+    });
+  }
+
   if (score <= 0) {
     return undefined;
   }
@@ -511,6 +587,46 @@ function scoreEntry(
         }
       : undefined
   };
+}
+
+function vectorSimilarity(
+  documentWeights: readonly (readonly [number, number])[],
+  queryWeights: readonly (readonly [number, number])[]
+): VectorSimilarity {
+  if (documentWeights.length === 0 || queryWeights.length === 0) {
+    return { similarity: 0, matchedDimensions: 0 };
+  }
+
+  const documentByDimension = new Map(documentWeights);
+  let dotProduct = 0;
+  let matchedDimensions = 0;
+  for (const [dimension, queryWeight] of queryWeights) {
+    const documentWeight = documentByDimension.get(dimension);
+    if (documentWeight === undefined) {
+      continue;
+    }
+    dotProduct += documentWeight * queryWeight;
+    matchedDimensions += 1;
+  }
+
+  if (dotProduct <= 0) {
+    return { similarity: 0, matchedDimensions: 0 };
+  }
+
+  const documentNorm = vectorNorm(documentWeights);
+  const queryNorm = vectorNorm(queryWeights);
+  if (documentNorm <= 0 || queryNorm <= 0) {
+    return { similarity: 0, matchedDimensions: 0 };
+  }
+
+  return {
+    similarity: dotProduct / (documentNorm * queryNorm),
+    matchedDimensions
+  };
+}
+
+function vectorNorm(weights: readonly (readonly [number, number])[]): number {
+  return Math.sqrt(weights.reduce((sum, [, weight]) => sum + weight * weight, 0));
 }
 
 function prefixTokenMatch(weights: ReadonlyMap<string, number>, token: string): { readonly token: string; readonly weight: number } | undefined {
@@ -650,6 +766,8 @@ function isSearchIndexEntry(value: unknown): value is SearchIndexEntry {
     typeof value.summary === "string" &&
     Array.isArray(value.tokenWeights) &&
     value.tokenWeights.every(isTokenWeight) &&
+    Array.isArray(value.vectorWeights) &&
+    value.vectorWeights.every(isVectorWeight) &&
     (value.fieldWeights === undefined ||
       (Array.isArray(value.fieldWeights) && value.fieldWeights.every(isSearchIndexFieldWeights)))
   );
@@ -678,6 +796,18 @@ function isTokenFrequency(value: unknown): value is readonly [string, number] {
 
 function isTokenWeight(value: unknown): value is readonly [string, number] {
   return Array.isArray(value) && value.length === 2 && typeof value[0] === "string" && typeof value[1] === "number";
+}
+
+function isVectorWeight(value: unknown): value is readonly [number, number] {
+  return (
+    Array.isArray(value) &&
+    value.length === 2 &&
+    Number.isInteger(value[0]) &&
+    value[0] >= 0 &&
+    value[0] < VECTOR_DIMENSIONS &&
+    typeof value[1] === "number" &&
+    Number.isFinite(value[1])
+  );
 }
 
 function isSearchDocumentType(value: unknown): value is SearchDocumentType {

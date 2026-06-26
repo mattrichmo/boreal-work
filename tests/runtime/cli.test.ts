@@ -1083,17 +1083,19 @@ describe("bwrk cli", () => {
       readonly documents: Array<{
         readonly type: string;
         readonly title: string;
+        readonly vectorWeights?: readonly unknown[];
         readonly fieldWeights?: Array<{ readonly field: string; readonly tokenWeights: readonly unknown[] }>;
       }>;
     }>(await readFile(join(rootDir, ".boreal/runtime/search-index.json"), "utf8"));
     expect(searchIndexDocument.schemaVersion).toBe("boreal.search-index.v1");
-    expect(searchIndexDocument.algorithm).toBe("boreal.search.rank.v3");
+    expect(searchIndexDocument.algorithm).toBe("boreal.search.hybrid.v1");
     expect(searchIndexDocument.documentCount).toBeGreaterThan(8);
     expect(new Map(searchIndexDocument.documentFrequencies).get("search")).toBeGreaterThan(1);
     expect(new Map(searchIndexDocument.documentFrequencies).get("content")).toBeGreaterThan(1);
     const indexedDecision = searchIndexDocument.documents.find(
       (document) => document.type === "decision" && document.title === "Use content hash search"
     );
+    expect(indexedDecision?.vectorWeights?.length).toBeGreaterThan(0);
     expect(indexedDecision?.fieldWeights?.map((field) => field.field)).toEqual(
       expect.arrayContaining(["id", "title", "decision", "context"])
     );
@@ -1132,7 +1134,7 @@ describe("bwrk cli", () => {
       }>
     >(explainedQuery.stdout);
     const explainedDecision = explainedSearchResults.find((result) => result.title === "Use content hash search");
-    expect(explainedDecision?.explain?.algorithm).toBe("boreal.search.rank.v3");
+    expect(explainedDecision?.explain?.algorithm).toBe("boreal.search.hybrid.v1");
     expect(explainedDecision?.explain?.queryTokens).toEqual(["content", "hash"]);
     expect(explainedDecision?.explain?.fieldMatches).toEqual(
       expect.arrayContaining([
@@ -1147,6 +1149,11 @@ describe("bwrk cli", () => {
           baseWeight: expect.any(Number),
           documentFrequency: expect.any(Number),
           idf: expect.any(Number)
+        }),
+        expect.objectContaining({
+          kind: "vector_similarity",
+          similarity: expect.any(Number),
+          matchedDimensions: expect.any(Number)
         })
       ])
     );

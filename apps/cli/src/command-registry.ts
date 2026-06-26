@@ -529,7 +529,8 @@ export const COMMAND_DEFINITIONS: readonly CommandDefinition[] = [
     category: "search",
     summary: "Search work and knowledge records.",
     usage: "bwrk search query <query> [--limit <n>] [--explain] [--json]",
-    description: "Searches work, evidence, sources, claims, decisions, context packs, and bounded context chunks using a fresh local index.",
+    description:
+      "Searches work, evidence, sources, claims, decisions, context packs, and bounded context chunks using a fresh hybrid local index.",
     flags: [
       flag("limit", "value", "Maximum number of search results to print."),
       flag("explain", "boolean", "Include query tokens, score breakdown, and field-level matches in JSON output."),
