@@ -190,7 +190,7 @@ Shows one workflow playbook by exact workflow ID, relative path under `workflows
 bwrk install codex [--install-root <dir>] [--dry-run] [--json]
 ```
 
-Plans or installs Boreal skill adapters for Codex. Defaults to `.agents` under the selected workspace, writing namespaced skills below `.agents/skills/boreal-*/SKILL.md` plus Codex UI metadata in `agents/openai.yaml`. Use `--dry-run` before writing.
+Plans or installs Boreal skill adapters for Codex. Defaults to the configured `.agents/skills` root when project setup exists, otherwise `.agents` under the selected workspace. Both `.agents` and `.agents/skills` are accepted; the actual scanned skill root is reported as `skillRoot`. Installed skills include Codex UI metadata in `agents/openai.yaml`. Use `--dry-run` before writing.
 
 ## `install claude`
 
@@ -198,7 +198,7 @@ Plans or installs Boreal skill adapters for Codex. Defaults to `.agents` under t
 bwrk install claude [--install-root <dir>] [--dry-run] [--json]
 ```
 
-Plans or installs Boreal skill adapters for Claude. Defaults to `.claude` under the selected workspace, writing namespaced project skills below `.claude/skills/boreal-*/SKILL.md`. Use `--dry-run` before writing.
+Plans or installs Boreal skill adapters for Claude. Defaults to a configured `.claude/skills` root when project setup uses one, otherwise `.claude` under the selected workspace. Both `.claude` and `.claude/skills` are accepted; the actual scanned skill root is reported as `skillRoot`. Codex-specific `agents/openai.yaml` files are omitted. Use `--dry-run` before writing.
 
 ## `install skills`
 
@@ -206,7 +206,7 @@ Plans or installs Boreal skill adapters for Claude. Defaults to `.claude` under 
 bwrk install skills [--install-root <dir>] [--dry-run] [--json]
 ```
 
-Plans or installs generic namespaced Boreal skill folders into a folder-scoped skill root. Defaults to `.agents/skills` under the selected workspace.
+Plans or installs generic namespaced Boreal skill folders into a folder-scoped skill root. Defaults to the configured install root when project setup exists, otherwise `.agents/skills` under the selected workspace.
 
 ## `init`
 
@@ -221,7 +221,7 @@ Behavior:
 - Idempotent.
 - Safe under concurrent init attempts.
 - Plain `bwrk init` does not create memory files; use `bwrk vault init` for the repo-local default vault or `--setup-memory` for explicit project setup.
-- With setup flags, writes `.boreal/project.json`, scaffolds the selected memory root, writes memory `.gitignore` guards, and applies the selected memory Git mode.
+- With setup flags, writes `.boreal/project.json`, scaffolds the selected memory root, writes memory `.gitignore` guards, applies the selected memory Git mode, and installs the selected skill targets.
 - Default setup uses sibling memory at `../<project>-memory` with `--memory-git-mode separate`, so memory history does not mix with application history.
 - Supplying `--memory-root` without `--memory-layout` keeps the legacy explicit-root default of `--memory-layout in-repo`.
 - `--memory-layout child` requires the memory root to be a direct child of the project root.
@@ -231,6 +231,7 @@ Behavior:
 - `--memory-git-mode shared` keeps memory in the project repository and is only the default for `--memory-layout in-repo`.
 - `--separate-git` is retained as a compatibility alias for `--memory-git-mode separate`.
 - `--interactive` prompts for the same setup fields and requires a TTY. Path fields use editable text prompts; choice fields use arrow-key selectors with descriptions. Use Space to toggle multiple skill targets and Enter to accept.
+- `--skill-target codex` installs to `.agents/skills`; `--skill-target claude` installs to `.claude/skills` unless the configured install root is already Claude-shaped.
 - Returns the existing initialization event when the workspace is already initialized.
 - Human output is a short setup summary with Git guard status. Use `--json` when automation needs the full `projectSetup` object.
 
@@ -280,7 +281,15 @@ JSON `data` shape:
     "existingDirectories": [],
     "createdFiles": ["index.md", "raw/index.jsonl"],
     "existingFiles": []
-  }
+  },
+  "skillInstalls": [
+    {
+      "target": "codex",
+      "installRoot": "/absolute/path/.agents/skills",
+      "skillRoot": "/absolute/path/.agents/skills",
+      "fileCount": 33
+    }
+  ]
 }
 ```
 

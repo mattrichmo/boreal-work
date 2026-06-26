@@ -37,8 +37,10 @@ Skill text must reference workflow files and must not duplicate detailed workflo
 
 The installer renders skills into target-specific locations:
 
-- Codex: `<install-root>/skills/<boreal-skill>/SKILL.md`, with `agents/openai.yaml`.
-- Claude: `<install-root>/skills/<boreal-skill>/SKILL.md`, without Codex-specific `agents/openai.yaml`.
+- Codex: `<install-root>/skills/<boreal-skill>/SKILL.md`, with `agents/openai.yaml`. If `<install-root>` already ends in `skills`, it writes `<install-root>/<boreal-skill>/SKILL.md` instead of nesting another `skills/` directory.
+- Claude: `<install-root>/skills/<boreal-skill>/SKILL.md`, without Codex-specific `agents/openai.yaml`. If `<install-root>` already ends in `skills`, it writes `<install-root>/<boreal-skill>/SKILL.md` instead.
 - Generic skill root: `<install-root>/<boreal-skill>/SKILL.md`, with full Boreal source metadata.
+
+Project setup installs the selected skill targets after writing `.boreal/project.json`. A Codex-shaped setup root such as `.agents/skills` is used for Codex, while Claude installs fall back to `.claude/skills` unless the configured root is already under `.claude`.
 
 Dry-run mode reports target files and source workflow references without writing.

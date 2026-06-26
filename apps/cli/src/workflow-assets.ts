@@ -1,6 +1,6 @@
 import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
-import { dirname, join, relative, resolve } from "node:path";
+import { basename, dirname, join, relative, resolve } from "node:path";
 
 import { BorealError, assertPathInside, assertRealPathInside } from "@boreal/core";
 
@@ -41,6 +41,7 @@ export interface SkillInstallPlan {
   readonly target: "codex" | "claude" | "skills";
   readonly dryRun: boolean;
   readonly installRoot: string;
+  readonly skillRoot: string;
   readonly files: readonly {
     readonly source: string;
     readonly destination: string;
@@ -117,6 +118,7 @@ export async function buildSkillInstallPlan(input: {
   readonly dryRun: boolean;
 }): Promise<SkillInstallPlan> {
   const root = resolve(input.installRoot);
+  const skillRoot = skillRootForInstall(root, input.target);
   const skills = await listSkillAssets();
   const inspection = await inspectWorkflowAssets();
   const files = skills.flatMap((skill) =>
@@ -124,13 +126,13 @@ export async function buildSkillInstallPlan(input: {
       .filter((file) => shouldInstallSkillFile(input.target, file))
       .map((file) => ({
         source: file.source,
-        destination: skillInstallDestination(root, input.target, skill.name, file.relativePath),
+        destination: skillInstallDestination(skillRoot, skill.name, file.relativePath),
         workflowRefs: skill.workflows,
         wouldWrite: !input.dryRun
       }))
   );
 
-  return { target: input.target, dryRun: input.dryRun, installRoot: root, files, issues: inspection.issues };
+  return { target: input.target, dryRun: input.dryRun, installRoot: root, skillRoot, files, issues: inspection.issues };
 }
 
 export async function installSkillsFromPlan(plan: SkillInstallPlan): Promise<SkillInstallPlan> {
@@ -215,15 +217,15 @@ async function listSkillAssets(): Promise<readonly SkillAsset[]> {
   );
 }
 
-function skillInstallDestination(root: string, target: "codex" | "claude" | "skills", skillName: string, filePath: string): string {
-  switch (target) {
-    case "codex":
-      return join(root, "skills", skillName, filePath);
-    case "claude":
-      return join(root, "skills", skillName, filePath);
-    case "skills":
-      return join(root, skillName, filePath);
+function skillRootForInstall(root: string, target: "codex" | "claude" | "skills"): string {
+  if (target === "skills" || basename(root) === "skills") {
+    return root;
   }
+  return join(root, "skills");
+}
+
+function skillInstallDestination(skillRoot: string, skillName: string, filePath: string): string {
+  return join(skillRoot, skillName, filePath);
 }
 
 function shouldInstallSkillFile(target: "codex" | "claude" | "skills", file: SkillAssetFile): boolean {

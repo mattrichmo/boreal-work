@@ -146,7 +146,7 @@ export const COMMAND_DEFINITIONS: readonly CommandDefinition[] = [
     usage:
       "bwrk init [--workspace <dir>|--project-root <dir>] [--setup-memory] [--memory-root <dir>] [--memory-layout in-repo|child|sibling] [--memory-git-mode shared|separate|submodule] [--memory-remote <url>] [--separate-git] [--install-root <dir>] [--skill-target codex|claude...] [--folder-scoped] [--interactive] [--json]",
     description:
-      "Creates the workspace metadata directory and state store. With setup flags, also writes .boreal/project.json and scaffolds the selected memory root.",
+      "Creates the workspace metadata directory and state store. With setup flags, also writes .boreal/project.json, scaffolds the selected memory root, and installs selected agent skills.",
     flags: [
       flag("project-root", "value", "Project root alias for --workspace during setup."),
       flag("setup-memory", "boolean", "Write project setup config and scaffold the selected memory root."),
@@ -156,7 +156,7 @@ export const COMMAND_DEFINITIONS: readonly CommandDefinition[] = [
       flag("memory-remote", "value", "Remote URL to write for child submodule memory."),
       flag("separate-git", "boolean", "Deprecated alias for --memory-git-mode separate."),
       flag("install-root", "value", "Skill install root. Relative paths resolve from the project root. Defaults to .agents/skills."),
-      flag("skill-target", "value", "Skill target to record: codex or claude.", true),
+      flag("skill-target", "value", "Skill target to install and record: codex or claude.", true),
       flag("folder-scoped", "boolean", "Record skills as folder-scoped for sessions opened inside the install folder."),
       flag("interactive", "boolean", "Prompt for project setup fields in a TTY.")
     ],
@@ -202,9 +202,9 @@ export const COMMAND_DEFINITIONS: readonly CommandDefinition[] = [
     category: "install",
     summary: "Install Boreal skills for Codex.",
     usage: "bwrk install codex [--install-root <dir>] [--dry-run] [--json]",
-    description: "Installs project-scoped Boreal skill adapters for Codex. Defaults to .agents and writes .agents/skills/boreal-*.",
+    description: "Installs project-scoped Boreal skill adapters for Codex. Defaults to .agents and writes .agents/skills/boreal-*; also accepts .agents/skills as the install root.",
     flags: [
-      flag("install-root", "value", "Skill install root. Defaults to .agents under the selected workspace."),
+      flag("install-root", "value", "Skill install root. Defaults to configured .agents/skills or .agents under the selected workspace."),
       flag("dry-run", "boolean", "Plan install paths without writing files.")
     ],
     positionals: { label: "arguments", min: 0, max: 0 },
@@ -216,9 +216,9 @@ export const COMMAND_DEFINITIONS: readonly CommandDefinition[] = [
     category: "install",
     summary: "Install Boreal skills for Claude.",
     usage: "bwrk install claude [--install-root <dir>] [--dry-run] [--json]",
-    description: "Installs project-scoped Boreal skill adapters for Claude. Defaults to .claude and writes .claude/skills/boreal-*.",
+    description: "Installs project-scoped Boreal skill adapters for Claude. Defaults to .claude and writes .claude/skills/boreal-*; also accepts .claude/skills as the install root.",
     flags: [
-      flag("install-root", "value", "Skill install root. Defaults to .claude under the selected workspace."),
+      flag("install-root", "value", "Skill install root. Defaults to configured .claude/skills or .claude under the selected workspace."),
       flag("dry-run", "boolean", "Plan install paths without writing files.")
     ],
     positionals: { label: "arguments", min: 0, max: 0 },

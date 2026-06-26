@@ -4,7 +4,7 @@ Boreal setup has three roots:
 
 - Project root: the repository whose work and memory are being managed.
 - Memory root: the vault, either in-repo, child repo, or sibling repo.
-- Install root: where agent skills are written, such as `.agents/skills` or `.claude`.
+- Install root: where project skill setup starts. Codex repo skills are written under `.agents/skills`; Claude Code project skills are written under `.claude/skills`.
 
 The default project setup is intentionally conservative: `bwrk init --setup-memory` creates a sibling memory repository at `../<project>-memory`, initializes Git inside that memory root, and writes local project guards so application Git history and memory Git history do not mix.
 
@@ -18,7 +18,7 @@ The default project setup is intentionally conservative: `bwrk init --setup-memo
 
 ## Setup Config
 
-`bwrk init --setup-memory` writes `.boreal/project.json` with explicit absolute `projectRoot`, `memoryRoot`, `memoryLayout`, `memoryGitMode`, and `installRoot` values. Vault commands resolve this file before touching memory state. Without the config, vault commands use the repo-local default `<project>/memory`.
+`bwrk init --setup-memory` writes `.boreal/project.json` with explicit absolute `projectRoot`, `memoryRoot`, `memoryLayout`, `memoryGitMode`, and `installRoot` values. It also installs the selected skill targets so setup output and filesystem state agree. Vault commands resolve this file before touching memory state. Without the config, vault commands use the repo-local default `<project>/memory`.
 
 For in-repo and child memory layouts, setup rejects path escapes after symlink resolution. Sibling memory roots are allowed only when `memoryLayout` is `sibling` and the memory root shares the project root parent.
 
@@ -44,6 +44,7 @@ The project setup config is a local binding and setup adds `.boreal/project.json
 - Skill installs must not read or write sibling repositories unless the user explicitly selects them.
 - Memory commands use the configured memory root from `.boreal/project.json`, fail closed when the config belongs to another project root, and should not fall back to global or unrelated project memory once setup exists.
 - Installed skills use `boreal-*` names so Codex and Claude users can distinguish Boreal workflow skills from global or unrelated project skills.
+- Installer output must report the actual scanned skill root. Passing `.agents/skills` must write `.agents/skills/<skill>/SKILL.md`, not `.agents/skills/skills/<skill>/SKILL.md`.
 - Future MCP adapters must bind to one workspace root and must not expose global memory by default.
 
 ## Init Direction

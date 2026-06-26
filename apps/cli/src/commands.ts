@@ -1,4 +1,4 @@
-import { join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 
 import {
   BorealError,
@@ -93,7 +93,7 @@ import {
   type LedgerStatusResult
 } from "./import-export.js";
 import { createResultSpoolingOutput, formatRecord, table, type CliOutput } from "./output.js";
-import { maybeConfigureProjectSetup, type ProjectSetupResult } from "./project-setup.js";
+import { maybeConfigureProjectSetup, readProjectSetupConfig, type ProjectSetupResult } from "./project-setup.js";
 import { inspectSearchIndex, runSearch, writeSearchIndex, type SearchIndexInspection } from "./search-cli.js";
 import { addRawSource, createWikiPage, initVault, inspectVault, type VaultStatusResult } from "./vault.js";
 import {
@@ -256,6 +256,13 @@ interface AgentGuide {
   };
   readonly loop: readonly AgentGuideStep[];
   readonly recovery: readonly AgentGuideStep[];
+}
+
+interface SkillInstallSummary {
+  readonly target: "codex" | "claude" | "skills";
+  readonly installRoot: string;
+  readonly skillRoot: string;
+  readonly fileCount: number;
 }
 
 type AgentStartReason = "expired_active_reservations" | "reservation_capacity_reached" | "no_ready_work";
@@ -1033,7 +1040,7 @@ async function installCommand(
   const plan = await buildSkillInstallPlan({
     target,
     dryRun,
-    installRoot: installRootFromArgs(context, args, target)
+    installRoot: await installRootFromArgs(context, args, target)
   });
   const result = dryRun ? plan : await installSkillsFromPlan(plan);
   output.write(json ? formatRecord(result, true) : formatSkillInstallPlan(result));
@@ -1047,19 +1054,35 @@ function installTarget(action: string | undefined): "codex" | "claude" | "skills
   throw new BorealError("BOREAL_INVALID_INPUT", `Unknown install command: ${action ?? ""}`);
 }
 
-function installRootFromArgs(context: CliContext, args: ParsedArgs, target: "codex" | "claude" | "skills"): string {
+async function installRootFromArgs(context: CliContext, args: ParsedArgs, target: "codex" | "claude" | "skills"): Promise<string> {
   const explicit = flagValue(args, "install-root");
   if (explicit) {
     return resolve(context.workspaceRoot, explicit);
   }
+  const config = await readProjectSetupConfig(context.workspaceRoot);
+  if (config?.installRoot && configuredInstallRootMatchesTarget(config.installRoot, target)) {
+    return config.installRoot;
+  }
+  return defaultInstallRoot(context.workspaceRoot, target);
+}
+
+function defaultInstallRoot(workspaceRoot: string, target: "codex" | "claude" | "skills"): string {
   switch (target) {
     case "codex":
-      return join(context.workspaceRoot, ".agents");
+      return join(workspaceRoot, ".agents");
     case "claude":
-      return join(context.workspaceRoot, ".claude");
+      return join(workspaceRoot, ".claude");
     case "skills":
-      return join(context.workspaceRoot, ".agents", "skills");
+      return join(workspaceRoot, ".agents", "skills");
   }
+}
+
+function configuredInstallRootMatchesTarget(root: string, target: "codex" | "claude" | "skills"): boolean {
+  if (target === "skills") {
+    return true;
+  }
+  const container = basename(root) === "skills" ? basename(dirname(root)) : basename(root);
+  return target === "codex" ? container === ".agents" : container === ".claude";
 }
 
 function formatSkillInstallPlan(plan: SkillInstallPlan): string {
@@ -1067,6 +1090,7 @@ function formatSkillInstallPlan(plan: SkillInstallPlan): string {
     `target: ${plan.target}`,
     `dryRun: ${plan.dryRun}`,
     `installRoot: ${plan.installRoot}`,
+    `skillRoot: ${plan.skillRoot}`,
     `issues: ${plan.issues.length}`,
     "files:",
     ...plan.files.map((file) => `- ${file.destination} (${file.workflowRefs.length} workflows)`)
@@ -1334,14 +1358,34 @@ async function initCommand(
   await ensureWorkspaceDirs(context);
   const result = await context.runtime.ensureWorkspaceInitialized();
   const projectSetup = await maybeConfigureProjectSetup(context, args);
+  const skillInstalls = projectSetup ? await installProjectSetupSkills(context, projectSetup) : undefined;
   const initResult = {
     initialized: result.initialized,
     workspaceRoot: context.workspaceRoot,
     eventId: result.event.meta.id,
-    projectSetup
+    projectSetup,
+    skillInstalls
   };
   output.write(json ? formatRecord(initResult, true) : formatInitResult(initResult));
   return { exitCode: 0 };
+}
+
+async function installProjectSetupSkills(context: CliContext, projectSetup: ProjectSetupResult): Promise<readonly SkillInstallSummary[]> {
+  const results: SkillInstallSummary[] = [];
+  for (const target of projectSetup.config.skillTargets) {
+    const installRoot = configuredInstallRootMatchesTarget(projectSetup.config.installRoot, target)
+      ? projectSetup.config.installRoot
+      : defaultInstallRoot(context.workspaceRoot, target);
+    const plan = await buildSkillInstallPlan({ target, dryRun: false, installRoot });
+    const installed = await installSkillsFromPlan(plan);
+    results.push({
+      target: installed.target,
+      installRoot: installed.installRoot,
+      skillRoot: installed.skillRoot,
+      fileCount: installed.files.length
+    });
+  }
+  return results;
 }
 
 function formatInitResult(result: {
@@ -1349,6 +1393,7 @@ function formatInitResult(result: {
   readonly workspaceRoot: string;
   readonly eventId: string;
   readonly projectSetup?: ProjectSetupResult;
+  readonly skillInstalls?: readonly SkillInstallSummary[];
 }): string {
   const lines = [
     "Boreal workspace initialized",
@@ -1371,6 +1416,13 @@ function formatInitResult(result: {
       `folder scoped: ${result.projectSetup.config.folderScoped ? "yes" : "no"}`,
       `created: ${result.projectSetup.createdDirectories.length} directories, ${result.projectSetup.createdFiles.length} files`,
       `existing: ${result.projectSetup.existingDirectories.length} directories, ${result.projectSetup.existingFiles.length} files`
+    );
+  }
+  if (result.skillInstalls && result.skillInstalls.length > 0) {
+    lines.push(
+      "",
+      "Skill installs",
+      ...result.skillInstalls.map((install) => `${install.target}: ${install.skillRoot} (${install.fileCount} files)`)
     );
   }
   return `${lines.join("\n")}\n`;

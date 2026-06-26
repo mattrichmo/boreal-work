@@ -227,6 +227,12 @@ describe("bwrk cli", () => {
         readonly createdDirectories: readonly string[];
         readonly createdFiles: readonly string[];
       };
+      readonly skillInstalls: readonly Array<{
+        readonly target: string;
+        readonly installRoot: string;
+        readonly skillRoot: string;
+        readonly fileCount: number;
+      }>;
     }>(initialized.stdout);
     const config = parseJson<typeof payload.projectSetup.config>(await readFile(join(rootDir, ".boreal/project.json"), "utf8"));
 
@@ -246,6 +252,20 @@ describe("bwrk cli", () => {
       })
     );
     expect(config).toEqual(expect.objectContaining(payload.projectSetup.config));
+    expect(payload.skillInstalls).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          target: "codex",
+          installRoot: join(rootDir, ".agents/skills"),
+          skillRoot: join(rootDir, ".agents/skills")
+        }),
+        expect.objectContaining({
+          target: "claude",
+          installRoot: join(rootDir, ".claude"),
+          skillRoot: join(rootDir, ".claude/skills")
+        })
+      ])
+    );
     expect(payload.projectSetup.createdDirectories).toEqual(
       expect.arrayContaining(["memory", "wiki", ".boreal/cache"])
     );
@@ -264,6 +284,8 @@ describe("bwrk cli", () => {
       })
     );
     expect(await readFile(join(rootDir, "memory/index.md"), "utf8")).toContain("Boreal Memory Vault");
+    expect(await fileMissing(join(rootDir, ".agents/skills/boreal-router/SKILL.md"))).toBe(false);
+    expect(await fileMissing(join(rootDir, ".claude/skills/boreal-router/SKILL.md"))).toBe(false);
     expect(await readFile(join(rootDir, "memory/raw/index.jsonl"), "utf8")).toBe("");
     expect(await readFile(join(rootDir, "memory/.gitignore"), "utf8")).toContain(".boreal/locks/");
     expect(await fileMissing(join(rootDir, "memory/.git"))).toBe(false);
@@ -1577,6 +1599,63 @@ describe("bwrk cli", () => {
     expect(await fileMissing(join(claudeRoot, "skills/boreal-router/agents/openai.yaml"))).toBe(true);
   });
 
+  it("uses configured skill roots without nesting skills directories twice", async () => {
+    const rootDir = await makeTempWorkspace();
+    const configured = await runCli(rootDir, [
+      "init",
+      "--setup-memory",
+      "--memory-root",
+      "memory",
+      "--memory-layout",
+      "child",
+      "--install-root",
+      ".agents/skills",
+      "--skill-target",
+      "codex",
+      "--json"
+    ]);
+    const codex = await runCli(rootDir, ["install", "codex", "--dry-run", "--json"]);
+    const claude = await runCli(rootDir, ["install", "claude", "--dry-run", "--json"]);
+    const explicitCodex = await runCli(rootDir, ["install", "codex", "--install-root", ".agents/skills", "--dry-run", "--json"]);
+    const codexPlan = parseData<{
+      readonly installRoot: string;
+      readonly skillRoot: string;
+      readonly files: Array<{ readonly destination: string }>;
+    }>(codex.stdout);
+    const claudePlan = parseData<{
+      readonly installRoot: string;
+      readonly skillRoot: string;
+      readonly files: Array<{ readonly destination: string }>;
+    }>(claude.stdout);
+    const explicitCodexPlan = parseData<{
+      readonly installRoot: string;
+      readonly skillRoot: string;
+      readonly files: Array<{ readonly destination: string }>;
+    }>(explicitCodex.stdout);
+
+    expect(configured.exitCode).toBe(0);
+    expect(codex.exitCode).toBe(0);
+    expect(codexPlan.installRoot).toBe(join(rootDir, ".agents/skills"));
+    expect(codexPlan.skillRoot).toBe(join(rootDir, ".agents/skills"));
+    expect(codexPlan.files).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ destination: join(rootDir, ".agents/skills/boreal-router/SKILL.md") })
+      ])
+    );
+    expect(codex.stdout).not.toContain(".agents/skills/skills/");
+    expect(claude.exitCode).toBe(0);
+    expect(claudePlan.installRoot).toBe(join(rootDir, ".claude"));
+    expect(claudePlan.skillRoot).toBe(join(rootDir, ".claude/skills"));
+    expect(claudePlan.files).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ destination: join(rootDir, ".claude/skills/boreal-router/SKILL.md") })
+      ])
+    );
+    expect(explicitCodex.exitCode).toBe(0);
+    expect(explicitCodexPlan.skillRoot).toBe(join(rootDir, ".agents/skills"));
+    expect(explicitCodex.stdout).not.toContain(".agents/skills/skills/");
+  });
+
   it("generates a markdown command reference from the registry", async () => {
     const rootDir = await makeTempWorkspace();
 
@@ -1590,7 +1669,7 @@ describe("bwrk cli", () => {
     expect(markdown.stdout).toContain("bwrk work create <title> [--description <text>] [--priority low|normal|high|critical]");
     expect(markdown.stdout).toContain("Output schema: `boreal.cli.work.create.v1`");
     expect(markdown.stdout).toContain("`--label <value>`: Label to attach to the work item. Repeatable.");
-    expect(markdown.stdout).toContain("`--skill-target <value>`: Skill target to record: codex or claude. Repeatable.");
+    expect(markdown.stdout).toContain("`--skill-target <value>`: Skill target to install and record: codex or claude. Repeatable.");
     expect(markdown.stdout).not.toContain("Repeatable. Repeatable.");
     expect(invalid.exitCode).toBe(2);
     expect(invalidPayload.code).toBe("BOREAL_INVALID_INPUT");
