@@ -292,9 +292,11 @@ describe("bwrk cli", () => {
         readonly hasWarnings: boolean;
         readonly rawSourceCount: number;
         readonly wikiPageCount: number;
+        readonly ledgerEventCount: number;
         readonly orphanPages: readonly string[];
         readonly brokenLinks: readonly unknown[];
         readonly missingSourceRefs: readonly unknown[];
+        readonly malformedLedgerEvents: readonly unknown[];
       };
     }>(health.stdout);
     expect(health.exitCode).toBe(0);
@@ -305,8 +307,10 @@ describe("bwrk cli", () => {
         hasWarnings: true,
         rawSourceCount: 1,
         wikiPageCount: 1,
+        ledgerEventCount: 0,
         brokenLinks: [],
         missingSourceRefs: [],
+        malformedLedgerEvents: [],
         orphanPages: ["memory/wiki/design-principles.md"]
       })
     );
@@ -340,6 +344,20 @@ describe("bwrk cli", () => {
     );
     expect(brokenPayload.health.missingSourceRefs).toEqual(
       expect.arrayContaining([expect.objectContaining({ sourceRef: "bw_source_missing" })])
+    );
+
+    await writeFile(join(rootDir, "memory/ledgers/events.jsonl"), "{\"bad\":true}\n", "utf8");
+    const malformedLedgerHealth = await runCli(rootDir, ["vault", "status", "--json"]);
+    const malformedLedgerPayload = parseData<{
+      readonly ok: boolean;
+      readonly health: {
+        readonly malformedLedgerEvents: readonly Array<{ readonly line: number; readonly error: string }>;
+      };
+    }>(malformedLedgerHealth.stdout);
+    expect(malformedLedgerHealth.exitCode).toBe(1);
+    expect(malformedLedgerPayload.ok).toBe(false);
+    expect(malformedLedgerPayload.health.malformedLedgerEvents).toEqual(
+      expect.arrayContaining([expect.objectContaining({ line: 1, error: expect.stringContaining("unsupported shape") })])
     );
   });
 
@@ -504,6 +522,14 @@ describe("bwrk cli", () => {
     expect(rawLedgerEvents).toContain(rawPlan?.id ?? "");
     expect(rawIndex).toContain(rawPlan?.survivorId ?? "");
     expect(rawIndex).toContain(rawPlan?.duplicateIds[0] ?? "");
+
+    const postMergeScan = await runCli(rootDir, ["duplicate", "scan", "--json"]);
+    const postMergePayload = parseData<{
+      readonly duplicateGroups: Array<{ readonly domain: string; readonly records: Array<{ readonly id: string }> }>;
+    }>(postMergeScan.stdout);
+    const postMergeWorkIds = postMergePayload.duplicateGroups.find((group) => group.domain === "work")?.records.map((record) => record.id) ?? [];
+    expect(postMergeWorkIds).not.toContain(workPlan?.duplicateIds[0]);
+    expect(postMergePayload.duplicateGroups.find((group) => group.domain === "raw")).toBeUndefined();
   });
 
   it("analyzes compaction candidates with source preservation guarantees", async () => {
@@ -664,6 +690,33 @@ describe("bwrk cli", () => {
     expect(wikiPage).toContain(compactedWikiPayload.archivePath);
     expect(compactEvents).toContain(workPlan?.id ?? "");
     expect(compactEvents).toContain(wikiPlan?.id ?? "");
+
+    const postCompactAnalyze = await runCli(rootDir, ["compact", "analyze", "--older-than-days", "1", "--json"]);
+    const postCompactPayload = parseData<{
+      readonly candidates: Array<{ readonly domain: string; readonly id: string }>;
+    }>(postCompactAnalyze.stdout);
+    expect(postCompactPayload.candidates).not.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ domain: "work", id: work.meta.id }),
+        expect.objectContaining({ domain: "wiki", id: wikiPlan?.targetId })
+      ])
+    );
+
+    await rm(join(rootDir, compactedWikiPayload.archivePath));
+    const missingArchiveHealth = await runCli(rootDir, ["vault", "status", "--json"]);
+    const missingArchivePayload = parseData<{
+      readonly ok: boolean;
+      readonly health: {
+        readonly missingArchiveRefs: readonly Array<{ readonly archivePath: string; readonly subjectType: string }>;
+      };
+    }>(missingArchiveHealth.stdout);
+    expect(missingArchiveHealth.exitCode).toBe(1);
+    expect(missingArchivePayload.ok).toBe(false);
+    expect(missingArchivePayload.health.missingArchiveRefs).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ archivePath: compactedWikiPayload.archivePath, subjectType: "wiki" })
+      ])
+    );
   });
 
   it("prints the agent guide without an initialized workspace", async () => {

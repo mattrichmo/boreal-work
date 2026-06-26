@@ -19,6 +19,7 @@ import type { CliContext } from "./context.js";
 import {
   appendVaultLedgerEvent,
   inspectVault,
+  listVaultLedgerEvents,
   listVaultRawSources,
   listVaultWikiPages,
   type RawSourceRecord,
@@ -151,6 +152,7 @@ export async function scanDuplicates(context: CliContext, options: DuplicateScan
   const vault = await inspectVault(context);
   const rawSources = includeRaw && vault.initialized ? await listVaultRawSources(context) : [];
   const wikiPages = includeWiki && vault.initialized ? await listVaultWikiPages(context) : [];
+  const ledgerEvents = vault.initialized && (includeRaw || includeWiki) ? await listVaultLedgerEvents(context) : [];
   if (!vault.initialized && includeRaw) {
     skipped.push({ domain: "raw", reason: "memory vault is not initialized" });
   }
@@ -158,8 +160,8 @@ export async function scanDuplicates(context: CliContext, options: DuplicateScan
     skipped.push({ domain: "wiki", reason: "memory vault is not initialized" });
   }
 
-  groups.push(...rawDuplicateGroups(rawSources));
-  groups.push(...wikiDuplicateGroups(wikiPages));
+  groups.push(...rawDuplicateGroups(rawSources, mergedVaultDuplicateIds(ledgerEvents, "raw")));
+  groups.push(...wikiDuplicateGroups(wikiPages, mergedVaultDuplicateIds(ledgerEvents, "wiki")));
   const sortedGroups = groups.sort(compareDuplicateGroups);
   return {
     ok: sortedGroups.length === 0,
@@ -178,7 +180,7 @@ export async function scanDuplicates(context: CliContext, options: DuplicateScan
 function workDuplicateGroups(workItems: readonly WorkItem[]): readonly DuplicateGroup[] {
   return duplicateGroups(
     "work",
-    workItems,
+    workItems.filter((work) => !isArchivedMergeWork(work) && !isCompactedWork(work)),
     (work) => `title:${duplicateKey(work.title)}`,
     (work) => ({
       id: work.meta.id,
@@ -303,18 +305,19 @@ async function assertVaultRecordsExist(context: CliContext, plan: DuplicateMerge
   }
 }
 
-function rawDuplicateGroups(records: readonly RawSourceRecord[]): readonly DuplicateGroup[] {
+function rawDuplicateGroups(records: readonly RawSourceRecord[], mergedIds: ReadonlySet<string>): readonly DuplicateGroup[] {
+  const activeRecords = records.filter((record) => !mergedIds.has(record.id));
   return [
     ...duplicateGroups(
       "raw",
-      records.filter((record) => record.uri),
+      activeRecords.filter((record) => record.uri),
       (record) => `uri:${duplicateKey(record.uri ?? "")}`,
       rawDuplicateRecord,
       "raw source records share the same normalized URI"
     ),
     ...duplicateGroups(
       "raw",
-      records,
+      activeRecords,
       (record) => `title:${duplicateKey(record.title)}`,
       rawDuplicateRecord,
       "raw source records share the same normalized title"
@@ -322,10 +325,10 @@ function rawDuplicateGroups(records: readonly RawSourceRecord[]): readonly Dupli
   ];
 }
 
-function wikiDuplicateGroups(pages: readonly WikiPageRecord[]): readonly DuplicateGroup[] {
+function wikiDuplicateGroups(pages: readonly WikiPageRecord[], mergedIds: ReadonlySet<string>): readonly DuplicateGroup[] {
   return duplicateGroups(
     "wiki",
-    pages.filter((page) => page.slug !== "index"),
+    pages.filter((page) => page.slug !== "index" && page.claimStatus !== "compacted" && !mergedIds.has(page.id || page.path)),
     (page) => `title:${duplicateKey(page.title)}`,
     (page) => ({
       id: page.id || page.path,
@@ -334,6 +337,25 @@ function wikiDuplicateGroups(pages: readonly WikiPageRecord[]): readonly Duplica
     }),
     "wiki pages share the same normalized title"
   );
+}
+
+function mergedVaultDuplicateIds(events: readonly VaultLedgerEvent[], domain: "raw" | "wiki"): ReadonlySet<string> {
+  const ids = events
+    .filter((event) => event.type === "merge.applied" && event.subjectType === domain)
+    .flatMap((event) => stringArrayPayloadValue(event.payload, "duplicateIds"));
+  return new Set(ids);
+}
+
+function isArchivedMergeWork(work: WorkItem): boolean {
+  return (
+    work.labels.includes("merged-duplicate") ||
+    work.meta.tags.includes("merged-duplicate") ||
+    (work.status === "cancelled" && work.closedReason?.startsWith("Merged into ") === true)
+  );
+}
+
+function isCompactedWork(work: WorkItem): boolean {
+  return work.labels.includes("compacted") || work.meta.tags.includes("compacted");
 }
 
 function rawDuplicateRecord(record: RawSourceRecord): DuplicateRecord {
@@ -405,6 +427,11 @@ function mergeAppliedEvent(context: CliContext, plan: DuplicateMergePlan, now: I
 
 function uniqueStrings<T extends string>(values: readonly T[]): readonly T[] {
   return [...new Set(values)];
+}
+
+function stringArrayPayloadValue(payload: Record<string, unknown>, key: string): readonly string[] {
+  const value = payload[key];
+  return Array.isArray(value) ? value.filter((entry): entry is string => typeof entry === "string") : [];
 }
 
 function uniqueSourceRefs(values: readonly SourceRef[]): readonly SourceRef[] {

@@ -258,6 +258,7 @@ function oldClosedWorkCandidates(workItems: readonly WorkItem[], olderThanDays: 
   const cutoff = Date.now() - olderThanDays * 24 * 60 * 60 * 1000;
   return workItems
     .filter((work) => work.status === "closed")
+    .filter((work) => !isCompactedWork(work))
     .filter((work) => Boolean(work.closedAt) && Date.parse(work.closedAt ?? "") <= cutoff)
     .map((work) => ({
       domain: "work",
@@ -276,6 +277,7 @@ function vaultPageCandidates(
   const staleClaimPaths = new Set(health.staleClaims);
   return pages
     .filter((page) => page.slug !== "index")
+    .filter((page) => page.claimStatus !== "compacted")
     .filter((page) => orphanPaths.has(page.path) || staleClaimPaths.has(page.path))
     .map((page) => ({
       domain: "wiki",
@@ -502,6 +504,10 @@ function safeTimestamp(value: string): string {
 
 function uniqueStrings<T extends string>(values: readonly T[]): readonly T[] {
   return [...new Set(values)];
+}
+
+function isCompactedWork(work: WorkItem): boolean {
+  return work.labels.includes("compacted") || work.meta.tags.includes("compacted");
 }
 
 function yamlScalar(value: string): string {

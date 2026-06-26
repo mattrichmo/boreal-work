@@ -79,6 +79,8 @@ export interface WikiPageRecord {
   readonly sourceRefs: readonly string[];
   readonly links: readonly string[];
   readonly claimStatus?: string;
+  readonly compactionPlan?: string;
+  readonly compactionArchive?: string;
 }
 
 export interface WikiCreateResult {
@@ -92,11 +94,15 @@ export interface VaultHealthResult {
   readonly hasWarnings: boolean;
   readonly rawSourceCount: number;
   readonly wikiPageCount: number;
+  readonly ledgerEventCount: number;
   readonly brokenLinks: readonly VaultBrokenLink[];
   readonly orphanPages: readonly string[];
   readonly missingSourceRefs: readonly VaultMissingSourceRef[];
   readonly staleClaims: readonly string[];
   readonly malformedRawRecords: readonly VaultMalformedRawRecord[];
+  readonly malformedLedgerEvents: readonly VaultMalformedLedgerEvent[];
+  readonly missingArchiveRefs: readonly VaultMissingArchiveRef[];
+  readonly missingMergeRefs: readonly VaultMissingMergeRef[];
 }
 
 export interface VaultBrokenLink {
@@ -112,6 +118,24 @@ export interface VaultMissingSourceRef {
 export interface VaultMalformedRawRecord {
   readonly line: number;
   readonly error: string;
+}
+
+export interface VaultMalformedLedgerEvent {
+  readonly line: number;
+  readonly error: string;
+}
+
+export interface VaultMissingArchiveRef {
+  readonly eventId: string;
+  readonly subjectType: string;
+  readonly subjectId: string;
+  readonly archivePath: string;
+}
+
+export interface VaultMissingMergeRef {
+  readonly eventId: string;
+  readonly subjectType: string;
+  readonly missingIds: readonly string[];
 }
 
 export interface VaultLedgerEventInput {
@@ -321,6 +345,10 @@ export async function listVaultWikiPages(context: CliContext): Promise<readonly 
   return readWikiPages(context);
 }
 
+export async function listVaultLedgerEvents(context: CliContext): Promise<readonly VaultLedgerEvent[]> {
+  return (await readVaultLedgerEvents(context)).records;
+}
+
 export async function appendVaultLedgerEvent(context: CliContext, input: VaultLedgerEventInput): Promise<VaultLedgerEvent> {
   await requireInitializedVault(context);
   const type = normalizeMachineString(input.type, "vault event type", { lowerCase: true });
@@ -392,6 +420,7 @@ async function requireInitializedVault(context: CliContext): Promise<void> {
 
 async function inspectVaultHealth(context: CliContext): Promise<VaultHealthResult> {
   const raw = await readRawSources(context);
+  const ledger = await readVaultLedgerEvents(context);
   const pages = await readWikiPages(context);
   const pageSlugs = new Set(pages.map((page) => page.slug));
   const incoming = new Set<string>();
@@ -413,19 +442,32 @@ async function inspectVaultHealth(context: CliContext): Promise<VaultHealthResul
   );
   const orphanPages = pages
     .filter((page) => page.slug !== "index")
+    .filter((page) => page.claimStatus !== "compacted")
     .filter((page) => !incoming.has(page.slug))
     .map((page) => page.path);
   const staleClaims = pages.filter((page) => page.claimStatus === "stale").map((page) => page.path);
+  const missingArchiveRefs = missingArchiveRefsForLedger(context, ledger.records);
+  const missingMergeRefs = missingMergeRefsForLedger(ledger.records, raw.records, pages);
   return {
-    ok: brokenLinks.length === 0 && missingSourceRefs.length === 0 && raw.malformed.length === 0,
+    ok:
+      brokenLinks.length === 0 &&
+      missingSourceRefs.length === 0 &&
+      raw.malformed.length === 0 &&
+      ledger.malformed.length === 0 &&
+      missingArchiveRefs.length === 0 &&
+      missingMergeRefs.length === 0,
     hasWarnings: orphanPages.length > 0 || staleClaims.length > 0,
     rawSourceCount: raw.records.length,
     wikiPageCount: pages.filter((page) => page.slug !== "index").length,
+    ledgerEventCount: ledger.records.length,
     brokenLinks,
     orphanPages,
     missingSourceRefs,
     staleClaims,
-    malformedRawRecords: raw.malformed
+    malformedRawRecords: raw.malformed,
+    malformedLedgerEvents: ledger.malformed,
+    missingArchiveRefs,
+    missingMergeRefs
   };
 }
 
@@ -459,6 +501,99 @@ async function readRawSources(context: CliContext): Promise<{
   return { records, malformed };
 }
 
+async function readVaultLedgerEvents(context: CliContext): Promise<{
+  readonly records: readonly VaultLedgerEvent[];
+  readonly malformed: readonly VaultMalformedLedgerEvent[];
+}> {
+  const ledgerPath = join(context.workspaceRoot, "memory/ledgers/events.jsonl");
+  const text = await readTextIfExists(ledgerPath);
+  const records: VaultLedgerEvent[] = [];
+  const malformed: VaultMalformedLedgerEvent[] = [];
+  text.split(/\r?\n/u).forEach((line, index) => {
+    if (!line.trim()) {
+      return;
+    }
+    try {
+      const parsed = safeParseJson(line, {
+        schemaName: VAULT_SCHEMA_VERSION,
+        path: `memory/ledgers/events.jsonl:${index + 1}`,
+        expectedObject: true
+      });
+      if (!isVaultLedgerEvent(parsed)) {
+        malformed.push({ line: index + 1, error: "Vault ledger event has an unsupported shape" });
+        return;
+      }
+      if (parsed.contentHash !== hashVaultLedgerEvent(parsed)) {
+        malformed.push({ line: index + 1, error: "Vault ledger event contentHash does not match its content" });
+        return;
+      }
+      records.push(parsed);
+    } catch (error) {
+      malformed.push({ line: index + 1, error: error instanceof Error ? error.message : String(error) });
+    }
+  });
+  return { records, malformed };
+}
+
+function missingArchiveRefsForLedger(
+  context: CliContext,
+  events: readonly VaultLedgerEvent[]
+): readonly VaultMissingArchiveRef[] {
+  return events.flatMap((event) => {
+    if (event.type !== "compact.applied") {
+      return [];
+    }
+    const archivePath = stringPayloadValue(event.payload, "archivePath");
+    if (!archivePath) {
+      return [
+        {
+          eventId: event.id,
+          subjectType: event.subjectType,
+          subjectId: event.subjectId,
+          archivePath: ""
+        }
+      ];
+    }
+    if (existsSync(join(context.workspaceRoot, archivePath))) {
+      return [];
+    }
+    return [
+      {
+        eventId: event.id,
+        subjectType: event.subjectType,
+        subjectId: event.subjectId,
+        archivePath
+      }
+    ];
+  });
+}
+
+function missingMergeRefsForLedger(
+  events: readonly VaultLedgerEvent[],
+  rawSources: readonly RawSourceRecord[],
+  pages: readonly WikiPageRecord[]
+): readonly VaultMissingMergeRef[] {
+  const rawIds = new Set(rawSources.map((record) => record.id));
+  const wikiIds = new Set(pages.map((page) => page.id || page.path));
+  return events.flatMap((event) => {
+    if (event.type !== "merge.applied" || (event.subjectType !== "raw" && event.subjectType !== "wiki")) {
+      return [];
+    }
+    const ids = [event.subjectId, ...stringArrayPayloadValue(event.payload, "duplicateIds")];
+    const knownIds = event.subjectType === "raw" ? rawIds : wikiIds;
+    const missingIds = ids.filter((id) => !knownIds.has(id));
+    return missingIds.length > 0
+      ? [
+          {
+            eventId: event.id,
+            subjectType: event.subjectType,
+            missingIds
+          }
+        ]
+      : [];
+  });
+}
+
 async function readWikiPages(context: CliContext): Promise<readonly WikiPageRecord[]> {
   const wikiDir = join(context.workspaceRoot, "memory/wiki");
   const entries = await readdir(wikiDir, { withFileTypes: true });
@@ -482,7 +617,9 @@ async function readWikiPage(context: CliContext, fileName: string): Promise<Wiki
     path: relativePath,
     sourceRefs: frontmatter.source_refs ?? [],
     links: extractWikiLinks(text),
-    claimStatus: frontmatter.claim_status
+    claimStatus: frontmatter.claim_status,
+    compactionPlan: frontmatter.compaction_plan,
+    compactionArchive: frontmatter.compaction_archive
   };
 }
 
@@ -492,6 +629,8 @@ function parseFrontmatter(text: string): {
   readonly title?: string;
   readonly source_refs?: readonly string[];
   readonly claim_status?: string;
+  readonly compaction_plan?: string;
+  readonly compaction_archive?: string;
 } {
   if (!text.startsWith("---\n")) {
     return {};
@@ -507,6 +646,8 @@ function parseFrontmatter(text: string): {
     title?: string;
     source_refs?: string[];
     claim_status?: string;
+    compaction_plan?: string;
+    compaction_archive?: string;
   } = {};
   for (let index = 0; index < lines.length; index += 1) {
     const line = lines[index] ?? "";
@@ -530,7 +671,14 @@ function parseFrontmatter(text: string): {
       }
       continue;
     }
-    if (key === "id" || key === "slug" || key === "title" || key === "claim_status") {
+    if (
+      key === "id" ||
+      key === "slug" ||
+      key === "title" ||
+      key === "claim_status" ||
+      key === "compaction_plan" ||
+      key === "compaction_archive"
+    ) {
       result[key] = unquoteYamlScalar(value);
     }
   }
@@ -611,11 +759,15 @@ function emptyVaultHealth(): VaultHealthResult {
     hasWarnings: false,
     rawSourceCount: 0,
     wikiPageCount: 0,
+    ledgerEventCount: 0,
     brokenLinks: [],
     orphanPages: [],
     missingSourceRefs: [],
     staleClaims: [],
-    malformedRawRecords: []
+    malformedRawRecords: [],
+    malformedLedgerEvents: [],
+    missingArchiveRefs: [],
+    missingMergeRefs: []
   };
 }
 
@@ -633,6 +785,52 @@ function isRawSourceRecord(value: unknown): value is RawSourceRecord {
     typeof (value as { actorId?: unknown }).actorId === "string" &&
     typeof (value as { contentHash?: unknown }).contentHash === "string"
   );
+}
+
+function isVaultLedgerEvent(value: unknown): value is VaultLedgerEvent {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return false;
+  }
+  const record = value as {
+    schemaVersion?: unknown;
+    id?: unknown;
+    type?: unknown;
+    subjectType?: unknown;
+    subjectId?: unknown;
+    createdAt?: unknown;
+    actorId?: unknown;
+    payload?: unknown;
+    contentHash?: unknown;
+  };
+  return (
+    record.schemaVersion === VAULT_SCHEMA_VERSION &&
+    typeof record.id === "string" &&
+    record.id.startsWith("bw_event_") &&
+    typeof record.type === "string" &&
+    typeof record.subjectType === "string" &&
+    typeof record.subjectId === "string" &&
+    typeof record.createdAt === "string" &&
+    typeof record.actorId === "string" &&
+    typeof record.payload === "object" &&
+    record.payload !== null &&
+    !Array.isArray(record.payload) &&
+    typeof record.contentHash === "string"
+  );
+}
+
+function hashVaultLedgerEvent(record: VaultLedgerEvent): string {
+  const { contentHash: _contentHash, ...content } = record;
+  return hashContent(content);
+}
+
+function stringPayloadValue(payload: Record<string, unknown>, key: string): string | undefined {
+  const value = payload[key];
+  return typeof value === "string" ? value : undefined;
+}
+
+function stringArrayPayloadValue(payload: Record<string, unknown>, key: string): readonly string[] {
+  const value = payload[key];
+  return Array.isArray(value) ? value.filter((entry): entry is string => typeof entry === "string") : [];
 }
 
 function titleFromSlug(slug: string): string {
