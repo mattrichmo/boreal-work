@@ -21,7 +21,7 @@ import { deriveReadinessStatus } from "@boreal/work-engine";
 
 import type { CliContext } from "./context.js";
 import { exportDriftDiagnostics } from "./import-export.js";
-import { inspectSearchIndex, writeSearchIndex } from "./search-cli.js";
+import { inspectSearchIndex, searchIndexLockDir, writeSearchIndex } from "./search-cli.js";
 
 export type DiagnosticSeverity = "ok" | "warning" | "error" | "fixed";
 
@@ -71,41 +71,9 @@ export async function runDoctor(context: CliContext, fix: boolean): Promise<Doct
     return finalize(diagnostics, fixed);
   }
 
-  const lockInspection = await inspectFileLock(context.paths.stateLockDir);
-  if (lockInspection.exists) {
-    if (lockInspection.stale) {
-      if (fix) {
-        await breakStaleFileLock(context.paths.stateLockDir);
-        diagnostics.push({
-          code: "lock.stale",
-          severity: "fixed",
-          message: "Removed stale runtime state lock",
-          details: lockInspection
-        });
-        fixed = true;
-      } else {
-        diagnostics.push({
-          code: "lock.stale",
-          severity: "error",
-          message: "Runtime state lock is stale; run `bwrk doctor --fix` or `bwrk lock break --stale-only`",
-          details: lockInspection
-        });
-      }
-    } else {
-      diagnostics.push({
-        code: "lock.active",
-        severity: "warning",
-        message: "Runtime state lock is currently active",
-        details: lockInspection
-      });
-    }
-  } else {
-    diagnostics.push({
-      code: "lock.absent",
-      severity: "ok",
-      message: "No runtime state lock present"
-    });
-  }
+  const lockDiagnostics = await validateRuntimeLocks(context, fix);
+  diagnostics.push(...lockDiagnostics.diagnostics);
+  fixed = fixed || lockDiagnostics.fixed;
 
   const state = await readStateDocument(context, diagnostics);
   if (!state) {
@@ -135,6 +103,70 @@ export async function runDoctor(context: CliContext, fix: boolean): Promise<Doct
   fixed = fixed || searchDiagnostics.fixed;
 
   return finalize(diagnostics, fixed);
+}
+
+async function validateRuntimeLocks(
+  context: CliContext,
+  fix: boolean
+): Promise<{
+  readonly fixed: boolean;
+  readonly diagnostics: readonly Diagnostic[];
+}> {
+  const diagnostics: Diagnostic[] = [];
+  let fixed = false;
+
+  for (const target of [
+    {
+      codePrefix: "lock",
+      path: context.paths.stateLockDir,
+      label: "runtime state",
+      breakHint: " or `bwrk lock break --stale-only`"
+    },
+    {
+      codePrefix: "lock.search_index",
+      path: searchIndexLockDir(context),
+      label: "search index",
+      breakHint: ""
+    }
+  ]) {
+    const lockInspection = await inspectFileLock(target.path);
+    if (lockInspection.exists) {
+      if (lockInspection.stale) {
+        if (fix) {
+          await breakStaleFileLock(target.path);
+          diagnostics.push({
+            code: `${target.codePrefix}.stale`,
+            severity: "fixed",
+            message: `Removed stale ${target.label} lock`,
+            details: lockInspection
+          });
+          fixed = true;
+        } else {
+          diagnostics.push({
+            code: `${target.codePrefix}.stale`,
+            severity: "error",
+            message: `${capitalize(target.label)} lock is stale; run \`bwrk doctor --fix\`${target.breakHint}`,
+            details: lockInspection
+          });
+        }
+      } else {
+        diagnostics.push({
+          code: `${target.codePrefix}.active`,
+          severity: "warning",
+          message: `${capitalize(target.label)} lock is currently active`,
+          details: lockInspection
+        });
+      }
+    } else {
+      diagnostics.push({
+        code: `${target.codePrefix}.absent`,
+        severity: "ok",
+        message: `No ${target.label} lock present`
+      });
+    }
+  }
+
+  return { fixed, diagnostics };
 }
 
 async function validateSearchIndex(
@@ -989,6 +1021,10 @@ function isClaimStatus(value: unknown): value is ClaimRecord["status"] {
 
 function isDecisionStatus(value: unknown): value is DecisionRecord["status"] {
   return value === "proposed" || value === "accepted" || value === "superseded" || value === "rejected";
+}
+
+function capitalize(value: string): string {
+  return `${value.slice(0, 1).toUpperCase()}${value.slice(1)}`;
 }
 
 export function asWorkId(value: string): WorkId {

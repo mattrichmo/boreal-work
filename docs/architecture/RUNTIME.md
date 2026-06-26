@@ -28,6 +28,8 @@ The CLI fails closed for uninitialized workspaces, discovers a workspace by walk
 
 The lock has bounded wait, retry, stale-lock recovery, owner metadata, and token-based release. Reads stay lock-free because the state file is replaced with atomic rename.
 
+Generated artifacts use the same fsync atomic-write helper. The local search index is rebuilt under `.boreal/runtime/search-index.lock`, then replaced with atomic rename so concurrent rebuilds do not leave partial JSON behind.
+
 Lock inspection and stale-lock breaking are exposed as explicit storage helpers so operational surfaces can diagnose lock issues without duplicating lock internals. Active locks are not broken by repair commands. Stale-lock recovery uses an adjacent recovery lock so concurrent repair attempts cannot both remove the same stale lock or delete a fresh replacement from another Boreal process.
 
 File storage is an adapter, not the domain model. SQLite, Dolt-like, or other transactional backends should fit behind the same store interface without changing domain packages.

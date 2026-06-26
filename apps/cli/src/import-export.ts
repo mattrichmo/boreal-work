@@ -1,4 +1,4 @@
-import { mkdir, open, readdir, readFile, rename, stat, unlink } from "node:fs/promises";
+import { mkdir, readdir, readFile, stat } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
 
 import {
@@ -9,7 +9,13 @@ import {
   hashContent,
   nowIso
 } from "@boreal/core";
-import type { BorealReader, BorealStore, BorealWriter, StoreSnapshot } from "@boreal/storage";
+import {
+  writeTextFileAtomic,
+  type BorealReader,
+  type BorealStore,
+  type BorealWriter,
+  type StoreSnapshot
+} from "@boreal/storage";
 
 import type { CliContext } from "./context.js";
 
@@ -603,22 +609,6 @@ async function resolveReadablePath(context: CliContext, path: string, allowExter
     await assertRealPathInside(context.workspaceRoot, resolvedPath);
   }
   return resolvedPath;
-}
-
-async function writeTextFileAtomic(path: string, content: string): Promise<void> {
-  await mkdir(dirname(path), { recursive: true });
-  const tempFile = `${path}.${Date.now()}.${Math.random().toString(16).slice(2)}.tmp`;
-  const handle = await open(tempFile, "w", 0o600);
-  try {
-    await handle.writeFile(content, "utf8");
-    await handle.sync();
-    await handle.close();
-    await rename(tempFile, path);
-  } catch (error) {
-    await handle.close().catch(() => undefined);
-    await unlink(tempFile).catch(() => undefined);
-    throw error;
-  }
 }
 
 function slugify(value: string): string {

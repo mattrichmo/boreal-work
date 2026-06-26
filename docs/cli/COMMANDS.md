@@ -573,7 +573,7 @@ JSON `data` is an array of search results with `id`, `type`, `recordId`, `subjec
 bwrk search index [--json]
 ```
 
-Builds a deterministic local search index at `.boreal/runtime/search-index.json`. The index stores compact weighted tokens and result summaries for work, evidence, sources, claims, decisions, and context packs; it does not store full record bodies.
+Builds a deterministic local search index at `.boreal/runtime/search-index.json`. Rebuilds are serialized with `.boreal/runtime/search-index.lock` and use atomic fsync writes. The index stores compact weighted tokens and result summaries for work, evidence, sources, claims, decisions, and context packs; it does not store full record bodies.
 
 JSON `data` contains `path`, `schemaVersion`, `builtAt`, `contentHash`, `documentCount`, and `tokenCount`.
 
@@ -669,11 +669,11 @@ Checks:
 - Missing or stale context-pack projections.
 - Snapshot/export drift between the current export hash and the latest recovery snapshot.
 - Missing, malformed, or stale local search index.
-- Runtime lock state.
+- Runtime state and search-index lock state.
 
 `--fix` performs only idempotent repairs:
 
-- Remove stale runtime locks.
+- Remove stale runtime and search-index locks.
 - Recompute derived readiness.
 - Rebuild context-pack projections.
 - Rebuild the local search index.

@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 
 import { BorealError, nowIso, type ContentHash } from "@boreal/core";
@@ -13,6 +13,7 @@ import {
   type SearchIndexDocument,
   type SearchResult
 } from "@boreal/search";
+import { normalizeFileLockOptions, withFileLock, writeTextFileAtomic } from "@boreal/storage";
 
 import type { CliContext } from "./context.js";
 
@@ -43,18 +44,13 @@ export interface SearchCommandOptions {
 }
 
 export async function writeSearchIndex(context: CliContext): Promise<SearchIndexWriteResult> {
-  const snapshot = await readSearchSnapshot(context);
-  const index = buildSearchIndex(snapshot, nowIso());
-  const path = searchIndexPath(context);
-  const tmpPath = `${path}.${process.pid}.${Date.now()}.tmp`;
-  await mkdir(context.paths.runtimeDir, { recursive: true });
-  try {
-    await writeFile(tmpPath, `${JSON.stringify(index, null, 2)}\n`, "utf8");
-    await rename(tmpPath, path);
-  } finally {
-    await rm(tmpPath, { force: true });
-  }
-  return indexWriteResult(path, index);
+  return withFileLock(searchIndexLockDir(context), normalizeFileLockOptions(), async () => {
+    const snapshot = await readSearchSnapshot(context);
+    const index = buildSearchIndex(snapshot, nowIso());
+    const path = searchIndexPath(context);
+    await writeTextFileAtomic(path, `${JSON.stringify(index, null, 2)}\n`);
+    return indexWriteResult(path, index);
+  });
 }
 
 export async function inspectSearchIndex(context: CliContext): Promise<SearchIndexInspection> {
@@ -109,6 +105,10 @@ export async function runSearch(
 
 export function searchIndexPath(context: CliContext): string {
   return join(context.paths.runtimeDir, "search-index.json");
+}
+
+export function searchIndexLockDir(context: CliContext): string {
+  return join(context.paths.runtimeDir, "search-index.lock");
 }
 
 async function loadFreshSearchIndex(context: CliContext): Promise<SearchIndexDocument> {

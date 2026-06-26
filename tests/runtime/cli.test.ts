@@ -519,6 +519,22 @@ describe("bwrk cli", () => {
       documentCount: 8
     });
 
+    const concurrentIndexes = await Promise.all([
+      runCli(rootDir, ["search", "index", "--json"]),
+      runCli(rootDir, ["search", "index", "--json"]),
+      runCli(rootDir, ["search", "index", "--json"])
+    ]);
+    expect(concurrentIndexes.map((result) => result.exitCode)).toEqual([0, 0, 0]);
+    for (const result of concurrentIndexes) {
+      expect(parseData<{ readonly documentCount: number }>(result.stdout).documentCount).toBe(8);
+    }
+
+    const searchIndexDocument = parseJson<{ readonly schemaVersion: string; readonly documentCount: number }>(
+      await readFile(join(rootDir, ".boreal/runtime/search-index.json"), "utf8")
+    );
+    expect(searchIndexDocument.schemaVersion).toBe("boreal.search-index.v1");
+    expect(searchIndexDocument.documentCount).toBe(8);
+
     const query = await runCli(rootDir, ["search", "query", "content hash", "--json"]);
     const searchResults = parseData<Array<{ readonly type: string; readonly title: string }>>(query.stdout);
     expect(searchResults.map((result) => result.type)).toEqual(expect.arrayContaining(["decision", "context_pack"]));
@@ -1332,6 +1348,38 @@ describe("bwrk cli", () => {
     const inspection = await runCli(rootDir, ["lock", "inspect", "--json"]);
     expect(parseData<{ readonly exists: boolean }>(inspection.stdout).exists).toBe(false);
   });
+
+  it("repairs stale generated search index locks through doctor", async () => {
+    const rootDir = await makeTempWorkspace();
+    await runCli(rootDir, ["init", "--json"]);
+    await writeLockOwner(rootDir, new Date(Date.now() - 120_000).toISOString(), "search-index.lock");
+
+    const failingDoctor = await runCli(rootDir, ["doctor", "--json"]);
+    const failingPayload = parseData<{ readonly ok: boolean; readonly diagnostics: Array<{ readonly code: string }> }>(
+      failingDoctor.stdout
+    );
+    expect(failingDoctor.exitCode).toBe(1);
+    expect(failingPayload.ok).toBe(false);
+    expect(failingPayload.diagnostics.map((diagnostic) => diagnostic.code)).toContain("lock.search_index.stale");
+
+    const repairedDoctor = await runCli(rootDir, ["doctor", "--fix", "--json"]);
+    const repairedPayload = parseData<{
+      readonly ok: boolean;
+      readonly fixed: boolean;
+      readonly diagnostics: Array<{ readonly code: string; readonly severity: string }>;
+    }>(repairedDoctor.stdout);
+    expect(repairedDoctor.exitCode).toBe(0);
+    expect(repairedPayload.ok).toBe(true);
+    expect(repairedPayload.fixed).toBe(true);
+    expect(repairedPayload.diagnostics).toEqual(
+      expect.arrayContaining([expect.objectContaining({ code: "lock.search_index.stale", severity: "fixed" })])
+    );
+
+    const searchIndexDocument = parseJson<{ readonly schemaVersion: string }>(
+      await readFile(join(rootDir, ".boreal/runtime/search-index.json"), "utf8")
+    );
+    expect(searchIndexDocument.schemaVersion).toBe("boreal.search-index.v1");
+  });
 });
 
 async function makeTempWorkspace(): Promise<string> {
@@ -1365,8 +1413,8 @@ function parseData<T>(text: string): T {
   return envelope.data;
 }
 
-async function writeLockOwner(rootDir: string, createdAt: string): Promise<void> {
-  const lockDir = join(rootDir, ".boreal/runtime/state.lock");
+async function writeLockOwner(rootDir: string, createdAt: string, lockName = "state.lock"): Promise<void> {
+  const lockDir = join(rootDir, ".boreal/runtime", lockName);
   await mkdir(lockDir, { recursive: true });
   await writeFile(
     join(lockDir, "owner.json"),

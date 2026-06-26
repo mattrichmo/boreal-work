@@ -1,11 +1,12 @@
-import { mkdir, open, readFile, rename, unlink } from "node:fs/promises";
-import { dirname, resolve } from "node:path";
+import { readFile } from "node:fs/promises";
+import { resolve } from "node:path";
 
 import { BorealError, assertPathInside, resolveWorkspacePaths } from "@boreal/core";
 
 import { normalizeFileLockOptions, withFileLock, type FileLockOptions } from "./file-lock.js";
 import { InMemoryBorealStore, type StoreSnapshot } from "./memory-store.js";
 import type { BorealReader, BorealStore, BorealWriter } from "./ports.js";
+import { writeTextFileAtomic } from "./atomic-write.js";
 
 export interface FileBorealStoreOptions {
   readonly rootDir: string;
@@ -78,20 +79,7 @@ export class FileBorealStore implements BorealStore {
 
   private async saveSnapshot(snapshot: StoreSnapshot): Promise<void> {
     const document = snapshotToDocument(snapshot);
-    const tempFile = `${this.stateFile}.${Date.now()}.${Math.random().toString(16).slice(2)}.tmp`;
-    await mkdir(dirname(this.stateFile), { recursive: true });
-    const handle = await open(tempFile, "w", 0o600);
-    try {
-      await handle.writeFile(`${JSON.stringify(document, null, 2)}\n`, "utf8");
-      await handle.sync();
-      await handle.close();
-      await rename(tempFile, this.stateFile);
-      await syncParentDirectory(this.stateFile);
-    } catch (error) {
-      await handle.close().catch(() => undefined);
-      await unlink(tempFile).catch(() => undefined);
-      throw error;
-    }
+    await writeTextFileAtomic(this.stateFile, `${JSON.stringify(document, null, 2)}\n`);
   }
 }
 
@@ -152,22 +140,4 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function isNodeError(error: unknown): error is NodeJS.ErrnoException {
   return typeof error === "object" && error !== null && "code" in error;
-}
-
-async function syncParentDirectory(path: string): Promise<void> {
-  let handle;
-  try {
-    handle = await open(dirname(path), "r");
-    await handle.sync();
-  } catch (error) {
-    if (
-      isNodeError(error) &&
-      (error.code === "EINVAL" || error.code === "ENOTSUP" || error.code === "EISDIR" || error.code === "EPERM")
-    ) {
-      return;
-    }
-    throw error;
-  } finally {
-    await handle?.close().catch(() => undefined);
-  }
 }

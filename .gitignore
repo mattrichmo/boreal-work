@@ -10,6 +10,7 @@ coverage/
 
 # Boreal generated runtime/cache artifacts
 .boreal/runtime/*.lock
+.boreal/runtime/*.lock.recovery
 .boreal/runtime/state.lock/
 .boreal/runtime/search-index.json
 .boreal/cache/
