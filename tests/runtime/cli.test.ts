@@ -924,6 +924,23 @@ describe("bwrk cli", () => {
     expect(searchQuery?.behavior).toEqual(expect.objectContaining({ readOnly: true, requiresFreshIndex: true }));
   });
 
+  it("generates a markdown command reference from the registry", async () => {
+    const rootDir = await makeTempWorkspace();
+
+    const markdown = await runCli(rootDir, ["commands", "--format", "markdown"]);
+    const invalid = await runCli(rootDir, ["commands", "--format", "xml", "--json"]);
+    const invalidPayload = parseJson<{ readonly ok: false; readonly code: string }>(invalid.stderr);
+
+    expect(markdown.exitCode).toBe(0);
+    expect(markdown.stdout).toContain("# Boreal Command Reference");
+    expect(markdown.stdout).toContain("## `work create`");
+    expect(markdown.stdout).toContain("bwrk work create <title> [--description <text>] [--priority low|normal|high|critical]");
+    expect(markdown.stdout).toContain("Output schema: `boreal.cli.work.create.v1`");
+    expect(markdown.stdout).toContain("`--label <value>`: Label to attach to the work item. Repeatable.");
+    expect(invalid.exitCode).toBe(2);
+    expect(invalidPayload.code).toBe("BOREAL_INVALID_INPUT");
+  });
+
   it("records local command operations with session, redacted argv, and generated event ids", async () => {
     const rootDir = await makeTempWorkspace();
 

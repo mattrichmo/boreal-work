@@ -382,7 +382,7 @@ export async function runCommand(args: ParsedArgs, output: CliOutput, cwd: strin
   validateCommandFlags(args, definition);
   const json = hasFlag(args, "json");
   if (definition.path[0] === "commands") {
-    return commandsCommand(output, json);
+    return commandsCommand(args, output, json);
   }
 
   const shouldLogOperation = shouldRecordOperation(definition);
@@ -889,12 +889,15 @@ function redactedArgv(definition: CommandDefinition, args: ParsedArgs): readonly
   return values;
 }
 
-function commandsCommand(output: CliOutput, json: boolean): CommandResult {
+function commandsCommand(args: ParsedArgs, output: CliOutput, json: boolean): CommandResult {
+  const format = commandsFormat(args);
   const registry = {
     commands: COMMAND_DEFINITIONS.map(serializeCommandDefinition)
   };
   if (json) {
     output.write(formatRecord(registry, true));
+  } else if (format === "markdown") {
+    output.write(commandsMarkdown());
   } else {
     output.write(
       table(
@@ -908,6 +911,59 @@ function commandsCommand(output: CliOutput, json: boolean): CommandResult {
     );
   }
   return { exitCode: 0 };
+}
+
+function commandsFormat(args: ParsedArgs): "table" | "markdown" {
+  const format = flagValue(args, "format") ?? "table";
+  if (format === "table" || format === "markdown") {
+    return format;
+  }
+  throw new BorealError("BOREAL_INVALID_INPUT", "--format must be table or markdown");
+}
+
+function commandsMarkdown(): string {
+  const lines = [
+    "# Boreal Command Reference",
+    "",
+    "Generated from `COMMAND_DEFINITIONS`; use the hand-written CLI guide for workflow notes.",
+    ""
+  ];
+
+  for (const definition of COMMAND_DEFINITIONS) {
+    const behavior = commandBehavior(definition);
+    lines.push(
+      `## \`${commandPath(definition)}\``,
+      "",
+      "```bash",
+      definition.usage,
+      "```",
+      "",
+      definition.description ?? definition.summary,
+      "",
+      `- Category: \`${definition.category}\``,
+      `- Requires workspace: \`${definition.requiresWorkspace ? "yes" : "no"}\``,
+      `- Supports JSON: \`${definition.supportsJson ? "yes" : "no"}\``,
+      `- Lock: \`${behavior.requiresLock}\``,
+      `- Output schema: \`${behavior.jsonOutputSchema}\``
+    );
+
+    if (definition.flags.length > 0) {
+      lines.push("", "Flags:");
+      for (const flag of definition.flags) {
+        const valueSuffix = flag.type === "value" ? " <value>" : "";
+        const repeatable = flag.repeatable ? " Repeatable." : "";
+        lines.push(`- \`--${flag.name}${valueSuffix}\`: ${flag.summary}${repeatable}`);
+      }
+    }
+
+    lines.push("", "Examples:");
+    for (const example of behavior.examples) {
+      lines.push(`- \`${example}\``);
+    }
+    lines.push("");
+  }
+
+  return `${lines.join("\n").trimEnd()}\n`;
 }
 
 async function agentCommand(

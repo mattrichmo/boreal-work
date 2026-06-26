@@ -37,6 +37,8 @@ This file is the current checkpoint for the broad hardening goal. It separates a
 - CLI docs coverage is derived from `COMMAND_DEFINITIONS` so command additions cannot silently miss documentation headings.
 - `work create --priority` registry/docs now match the actual accepted enum values.
 - Runtime schema validation now covers all persisted state sections, not just work/evidence/events/operations.
+- Runtime schema IDs are backed by published schema files, and tests enforce that every published ID has a matching file.
+- `bwrk commands --format markdown` emits a generated command reference from `COMMAND_DEFINITIONS`.
 
 ## Remaining Architecture Work
 
@@ -45,14 +47,15 @@ This file is the current checkpoint for the broad hardening goal. It separates a
 - Schema validation is still hand-written. It is integrated into storage/import/doctor, but schemas are not generated from TypeScript nor are TypeScript validators generated from schema files.
 - Vault/wiki knowledge is present as a scaffold and CLI surface, but core domain rules still treat runtime JSON records as primary for claims and decisions.
 - Global project/bucket registry is not implemented.
-- Shell completion generation and generated command documentation are not implemented.
+- Shell completion generation is not implemented.
+- The hand-written CLI guide is not fully generated yet; `bwrk commands --format markdown` now provides the registry-backed reference surface.
 - Work lifecycle semantics still retain legacy `reserved` as an accepted imported state; the live runtime uses reservation leases plus `in_progress`.
 - Beads-style JSONL merge driver behavior is reserved in `.gitattributes` but not implemented as an executable merge tool.
 
 ## Next Priority Slices
 
 1. Make JSONL ledgers a stronger rebuild source: add a doctor/import check that a ledger export can reconstruct the runtime snapshot and make the repair command explicit.
-2. Add generated command docs or a doc-check command from the registry so `docs/cli/COMMANDS.md` cannot drift beyond heading coverage.
+2. Add a doc-check command that compares `docs/cli/COMMANDS.md` against the generated command reference.
 3. Expand vault truth: link runtime claims/decisions to `memory/wiki` pages and add doctor checks for stale source-backed assertions.
 4. Add a SQLite cache adapter behind the existing store boundary and prove it is rebuildable from canonical files.
 5. Implement the Boreal JSONL merge driver fixture and document local Git config setup.

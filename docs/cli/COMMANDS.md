@@ -120,10 +120,12 @@ Help commands do not require an initialized workspace.
 ## `commands`
 
 ```bash
-bwrk commands [--json]
+bwrk commands [--format table|markdown] [--json]
 ```
 
-Prints the registered command surface used by dispatch, help, and strict flag validation.
+Prints the registered command surface used by dispatch, help, strict flag validation, and generated documentation references.
+
+Human output defaults to a compact table. `--format markdown` emits a generated command reference from `COMMAND_DEFINITIONS`, including usage, flags, behavior metadata, output schema IDs, and examples. JSON mode returns the machine registry envelope and ignores the human format.
 
 JSON `data` shape:
 
