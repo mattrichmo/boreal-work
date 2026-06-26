@@ -1,6 +1,9 @@
 import {
   BorealError,
   isIsoTimestamp,
+  normalizeActorId,
+  normalizeLabels,
+  normalizeSearchQuery,
   type AgentReservation,
   type ClaimId,
   type ClaimRecord,
@@ -322,7 +325,7 @@ async function agentCommand(
 ): Promise<CommandResult> {
   switch (action) {
     case "guide": {
-      const guide = buildAgentGuide(flagValue(args, "agent") ?? context.actor.id, flagValues(args, "label"));
+      const guide = buildAgentGuide(agentIdFromArgs(args, context.actor.id), labelsFromArgs(args));
       output.write(json ? formatRecord(guide, true) : formatAgentGuide(guide));
       return { exitCode: 0 };
     }
@@ -331,8 +334,8 @@ async function agentCommand(
     case "start":
       return agentStartCommand(context, args, output, json);
     case "status": {
-      const agentId = flagValue(args, "agent") ?? context.actor.id;
-      const labels = flagValues(args, "label");
+      const agentId = agentIdFromArgs(args, context.actor.id);
+      const labels = labelsFromArgs(args);
       output.write(formatRecord(await buildAgentStatus(context, agentId, labels), json));
       return { exitCode: 0 };
     }
@@ -347,8 +350,8 @@ async function agentStartCommand(
   output: CliOutput,
   json: boolean
 ): Promise<CommandResult> {
-  const agentId = flagValue(args, "agent") ?? context.actor.id;
-  const labels = flagValues(args, "label");
+  const agentId = agentIdFromArgs(args, context.actor.id);
+  const labels = labelsFromArgs(args);
   const status = await buildAgentStatus(context, agentId, labels);
 
   if (status.reservations.expiredActiveCount > 0) {
@@ -422,7 +425,7 @@ async function agentFinishCommand(
   json: boolean
 ): Promise<CommandResult> {
   const workId = asWorkId(requiredPositional(rest, 0, "work id"));
-  const agentId = flagValue(args, "agent") ?? context.actor.id;
+  const agentId = agentIdFromArgs(args, context.actor.id);
   const verdict = parseVerdict(flagValue(args, "verdict"));
   const close = hasFlag(args, "close");
   const release = hasFlag(args, "release");
@@ -486,7 +489,7 @@ async function reservationCommand(
     throw new BorealError("BOREAL_INVALID_INPUT", `Unknown reservation command: ${action ?? ""}`);
   }
 
-  const agentId = flagValue(args, "agent");
+  const agentId = optionalAgentIdFromArgs(args);
   const workId = optionalWorkId(flagValue(args, "work"));
   const status = parseReservationStatus(flagValue(args, "status"));
   const onlyExpired = hasFlag(args, "expired");
@@ -514,6 +517,8 @@ async function buildAgentStatus(
   agentId: string,
   labels: readonly string[]
 ): Promise<AgentStatus> {
+  const normalizedAgentId = normalizeActorId(agentId);
+  const normalizedLabels = normalizeLabels(labels);
   const now = Date.now();
   const maxActiveReservations = context.runtime.policy.maxActiveReservationsPerAgent;
   return context.store.read(async (reader) => {
@@ -521,15 +526,15 @@ async function buildAgentStatus(
     const workById = new Map(workItems.map((work) => [work.meta.id, work]));
     const reservationRows = reservations.map((reservation) => reservationListRow(reservation, workById.get(reservation.workId), now));
     const active = reservationRows
-      .filter((row) => row.agentId === agentId && row.status === "active")
+      .filter((row) => row.agentId === normalizedAgentId && row.status === "active")
       .sort(compareReservationRows);
     const expiredActive = active.filter((row) => row.expired);
-    const claimableWork = [...claimableWorkItems(workItems, labels)].sort(compareWorkItems);
+    const claimableWork = [...claimableWorkItems(workItems, normalizedLabels)].sort(compareWorkItems);
     const capacityRemaining = Math.max(0, maxActiveReservations - active.length);
 
     return {
-      agentId,
-      labels,
+      agentId: normalizedAgentId,
+      labels: normalizedLabels,
       policy: {
         maxActiveReservations
       },
@@ -545,8 +550,8 @@ async function buildAgentStatus(
         next: claimableWork[0] ? workListRow(claimableWork[0]) : undefined
       },
       recommendedAction: recommendedAgentAction({
-        agentId,
-        labels,
+        agentId: normalizedAgentId,
+        labels: normalizedLabels,
         active,
         expiredActive,
         capacityRemaining,
@@ -593,7 +598,7 @@ async function workCommand(
         kind: parseWorkKind(flagValue(args, "kind")),
         priority: parsePriority(flagValue(args, "priority")),
         acceptanceCriteria: flagValues(args, "acceptance"),
-        labels: flagValues(args, "label"),
+        labels: labelsFromArgs(args),
         ready: hasFlag(args, "ready")
       });
       output.write(formatRecord(work, json));
@@ -606,7 +611,7 @@ async function workCommand(
     }
     case "list": {
       const status = listStatus(args);
-      const labels = flagValues(args, "label");
+      const labels = labelsFromArgs(args);
       const limit = parseLimit(flagValue(args, "limit"));
       const items = await context.store.read((reader) =>
         reader.listWorkItems({
@@ -619,7 +624,7 @@ async function workCommand(
       return { exitCode: 0 };
     }
     case "next": {
-      const labels = flagValues(args, "label");
+      const labels = labelsFromArgs(args);
       const limit = parseLimit(flagValue(args, "limit")) ?? 10;
       const views = await context.runtime.listReadyWork();
       const rows = views
@@ -645,7 +650,7 @@ async function workCommand(
     case "reserve": {
       const work = await context.runtime.reserveWork({
         workId: asWorkId(requiredPositional(rest, 0, "work id")),
-        agentId: flagValue(args, "agent") ?? context.actor.id,
+        agentId: agentIdFromArgs(args, context.actor.id),
         purpose: flagValue(args, "purpose"),
         expiresAt: parseReservationExpiresAt(args),
         force: hasFlag(args, "force"),
@@ -655,8 +660,8 @@ async function workCommand(
       return { exitCode: 0 };
     }
     case "claim": {
-      const agentId = flagValue(args, "agent") ?? context.actor.id;
-      const labels = flagValues(args, "label");
+      const agentId = agentIdFromArgs(args, context.actor.id);
+      const labels = labelsFromArgs(args);
       const claim = await context.runtime.claimNextWork({
         agentId,
         labels,
@@ -1259,6 +1264,19 @@ function optionalSourceId(value: string | undefined): KnowledgeSourceId | undefi
   return value ? asSourceId(value) : undefined;
 }
 
+function agentIdFromArgs(args: ParsedArgs, fallback: string): string {
+  return normalizeActorId(flagValue(args, "agent") ?? fallback);
+}
+
+function optionalAgentIdFromArgs(args: ParsedArgs): string | undefined {
+  const value = flagValue(args, "agent");
+  return value ? normalizeActorId(value) : undefined;
+}
+
+function labelsFromArgs(args: ParsedArgs): readonly string[] {
+  return normalizeLabels(flagValues(args, "label"));
+}
+
 function optionalWorkId(value: string | undefined): WorkId | undefined {
   return value ? asWorkId(value) : undefined;
 }
@@ -1275,7 +1293,8 @@ async function buildHandoffBundle(context: CliContext, workId: WorkId, args: Par
   await context.runtime.rebuildProjections();
   const [work, contextPack] = await Promise.all([context.runtime.getWorkView(workId), context.runtime.getContextPack(workId)]);
   await writeSearchIndex(context);
-  const query = flagValue(args, "query") ?? handoffSearchQuery(work, contextPack);
+  const queryFlag = flagValue(args, "query");
+  const query = queryFlag ? normalizeSearchQuery(queryFlag) : handoffSearchQuery(work, contextPack);
   const results = await runSearch(context, query, {
     limit: parseLimit(flagValue(args, "limit")) ?? 8
   });
@@ -1364,8 +1383,10 @@ function agentStartBlocked(
 }
 
 function buildAgentGuide(agentId: string, labels: readonly string[]): AgentGuide {
-  const agentFlag = `--agent ${shellArg(agentId)}`;
-  const scopedFlags = `${agentFlag}${labelFlags(labels)}`;
+  const normalizedAgentId = normalizeActorId(agentId);
+  const normalizedLabels = normalizeLabels(labels);
+  const agentFlag = `--agent ${shellArg(normalizedAgentId)}`;
+  const scopedFlags = `${agentFlag}${labelFlags(normalizedLabels)}`;
   const commands = {
     status: `bwrk agent status ${scopedFlags} --json`,
     start: `bwrk agent start ${scopedFlags} --purpose ${shellArg("start implementation")} --json`,
@@ -1382,8 +1403,8 @@ function buildAgentGuide(agentId: string, labels: readonly string[]): AgentGuide
     repair: "bwrk doctor --fix --json"
   };
   return {
-    agentId,
-    labels,
+    agentId: normalizedAgentId,
+    labels: normalizedLabels,
     commands,
     loop: [
       {

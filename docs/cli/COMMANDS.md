@@ -32,6 +32,13 @@ Flag parsing:
 - Boolean flags accept explicit false values, for example `--json=false` or `--ready=false`.
 - Non-repeatable flags are rejected when supplied more than once.
 
+Machine-facing strings:
+
+- Work/source/decision titles, labels/tags, actor and agent IDs, source/evidence URIs, and search queries are Unicode-normalized before storage or matching.
+- Labels and actor/agent IDs are lowercased after normalization; repeated normalized labels collapse to one value.
+- Invisible format characters, bidi controls, variation selectors, and unsafe control characters are rejected with `BOREAL_UNSAFE_UNICODE`.
+- Free-form summaries, evidence text, claim statements, and decision bodies are preserved as authored.
+
 Workspace resolution:
 
 - Without `--workspace`, `bwrk` walks upward from the current directory until it finds `.boreal`.
@@ -685,6 +692,8 @@ Checks:
 - Expired active reservations.
 - Verification policy drift, including passed verifications without passed evidence.
 - Closed work items without close reasons.
+- Unsafe Unicode in machine-facing strings.
+- Label and actor normalization collisions in imported or hand-edited state.
 - Derived readiness consistency.
 - Missing or stale context-pack projections.
 - Snapshot/export drift between the current export hash and the latest recovery snapshot.

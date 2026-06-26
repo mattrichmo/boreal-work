@@ -2,6 +2,9 @@ import { existsSync } from "node:fs";
 
 import {
   BorealError,
+  detectSuspiciousUnicode,
+  normalizeActorId,
+  normalizeLabel,
   readJsonFile,
   type AgentReservation,
   type ClaimRecord,
@@ -509,6 +512,28 @@ async function validateStoreRecords(
       const closedWithoutReason = workItems
         .filter((work) => work.status === "closed" && !work.closedReason?.trim())
         .map((work) => work.meta.id);
+      const stringSafety = stringSafetyIssues({
+        workItems,
+        evidence,
+        verifications,
+        knowledgeSources,
+        claims,
+        decisions,
+        graphEdges,
+        reservations,
+        contextPacks: rawContextPacks.filter(isDoctorContextPack)
+      });
+      const labelCollisions = labelNormalizationCollisions(workItems);
+      const actorCollisions = actorNormalizationCollisions({
+        workItems,
+        evidence,
+        verifications,
+        knowledgeSources,
+        claims,
+        decisions,
+        graphEdges,
+        reservations
+      });
 
       return {
         workCount: workItems.length,
@@ -529,7 +554,10 @@ async function validateStoreRecords(
         reservationConsistency,
         expiredActiveReservations,
         verificationPolicy,
-        closedWithoutReason
+        closedWithoutReason,
+        stringSafety,
+        labelCollisions,
+        actorCollisions
       };
     })();
 
@@ -581,6 +609,9 @@ async function validateStoreRecords(
     }
     diagnostics.push(diagnosticFromList("verification.policy", "Verification policy issues", summary.verificationPolicy));
     diagnostics.push(diagnosticFromList("work.closed_reason", "Closed work items missing a close reason", summary.closedWithoutReason));
+    diagnostics.push(diagnosticFromList("string.suspicious_unicode", "Unsafe Unicode in machine-facing strings", summary.stringSafety));
+    diagnostics.push(warningDiagnosticFromList("label.normalization_collision", "Label normalization collisions", summary.labelCollisions));
+    diagnostics.push(warningDiagnosticFromList("actor.normalization_collision", "Actor normalization collisions", summary.actorCollisions));
 
     if (summary.staleReadiness.length > 0) {
       if (fix) {
@@ -657,6 +688,182 @@ function diagnosticFromList(code: string, label: string, values: readonly unknow
     message: values.length > 0 ? label : `${label}: none`,
     details: values.length > 0 ? values : undefined
   };
+}
+
+function warningDiagnosticFromList(code: string, label: string, values: readonly unknown[]): Diagnostic {
+  return {
+    code,
+    severity: values.length > 0 ? "warning" : "ok",
+    message: values.length > 0 ? label : `${label}: none`,
+    details: values.length > 0 ? values : undefined
+  };
+}
+
+interface MachineStringField {
+  readonly section: string;
+  readonly id: string;
+  readonly field: string;
+  readonly value: string;
+}
+
+interface StringSafetyInput {
+  readonly workItems: readonly WorkItem[];
+  readonly evidence: readonly EvidenceRecord[];
+  readonly verifications: readonly VerificationRecord[];
+  readonly knowledgeSources: readonly KnowledgeSource[];
+  readonly claims: readonly ClaimRecord[];
+  readonly decisions: readonly DecisionRecord[];
+  readonly graphEdges: readonly GraphEdge[];
+  readonly reservations: readonly AgentReservation[];
+  readonly contextPacks: readonly ContextPack[];
+}
+
+function stringSafetyIssues(input: StringSafetyInput): Array<Record<string, unknown>> {
+  const fields: MachineStringField[] = [
+    ...input.workItems.flatMap((work) => [
+      ...metaStringFields("workItems", work.meta.id, work),
+      stringField("workItems", work.meta.id, "title", work.title),
+      ...work.labels.map((label, index) => stringField("workItems", work.meta.id, `labels[${index}]`, label))
+    ]),
+    ...input.evidence.flatMap((evidence) => [
+      ...metaStringFields("evidence", evidence.meta.id, evidence),
+      ...(evidence.uri ? [stringField("evidence", evidence.meta.id, "uri", evidence.uri)] : [])
+    ]),
+    ...input.verifications.flatMap((verification) => metaStringFields("verifications", verification.meta.id, verification)),
+    ...input.knowledgeSources.flatMap((source) => [
+      ...metaStringFields("knowledgeSources", source.meta.id, source),
+      stringField("knowledgeSources", source.meta.id, "title", source.title),
+      stringField("knowledgeSources", source.meta.id, "uri", source.uri)
+    ]),
+    ...input.claims.flatMap((claim) => metaStringFields("claims", claim.meta.id, claim)),
+    ...input.decisions.flatMap((decision) => [
+      ...metaStringFields("decisions", decision.meta.id, decision),
+      stringField("decisions", decision.meta.id, "title", decision.title)
+    ]),
+    ...input.graphEdges.flatMap((edge) => metaStringFields("graphEdges", edge.meta.id, edge)),
+    ...input.reservations.flatMap((reservation) => [
+      ...metaStringFields("reservations", reservation.meta.id, reservation),
+      stringField("reservations", reservation.meta.id, "agentId", String(reservation.agentId))
+    ]),
+    ...input.contextPacks.map((pack) => stringField("contextPacks", pack.id, "title", pack.title))
+  ];
+
+  return fields.flatMap((field) => {
+    const findings = detectSuspiciousUnicode(field.value);
+    return findings.length > 0
+      ? [
+          {
+            section: field.section,
+            id: field.id,
+            field: field.field,
+            findings
+          }
+        ]
+      : [];
+  });
+}
+
+function labelNormalizationCollisions(workItems: readonly WorkItem[]): Array<Record<string, unknown>> {
+  const entries = workItems.flatMap((work) => [
+    ...work.labels.map((value, index) => ({
+      value,
+      section: "workItems",
+      id: work.meta.id,
+      field: `labels[${index}]`
+    })),
+    ...work.meta.tags.map((value, index) => ({
+      value,
+      section: "workItems",
+      id: work.meta.id,
+      field: `meta.tags[${index}]`
+    }))
+  ]);
+  return normalizationCollisions(entries, normalizeLabel);
+}
+
+function actorNormalizationCollisions(input: Omit<StringSafetyInput, "contextPacks">): Array<Record<string, unknown>> {
+  const records = [
+    ...input.workItems.map((record) => ({ section: "workItems", id: record.meta.id, record })),
+    ...input.evidence.map((record) => ({ section: "evidence", id: record.meta.id, record })),
+    ...input.verifications.map((record) => ({ section: "verifications", id: record.meta.id, record })),
+    ...input.knowledgeSources.map((record) => ({ section: "knowledgeSources", id: record.meta.id, record })),
+    ...input.claims.map((record) => ({ section: "claims", id: record.meta.id, record })),
+    ...input.decisions.map((record) => ({ section: "decisions", id: record.meta.id, record })),
+    ...input.graphEdges.map((record) => ({ section: "graphEdges", id: record.meta.id, record })),
+    ...input.reservations.map((record) => ({ section: "reservations", id: record.meta.id, record }))
+  ];
+  const actorEntries = records.flatMap(({ section, id, record }) => [
+    {
+      value: String(record.meta.createdBy.id),
+      section,
+      id,
+      field: "meta.createdBy.id"
+    },
+    {
+      value: String(record.meta.updatedBy.id),
+      section,
+      id,
+      field: "meta.updatedBy.id"
+    }
+  ]);
+  const reservationEntries = input.reservations.map((reservation) => ({
+    value: String(reservation.agentId),
+    section: "reservations",
+    id: reservation.meta.id,
+    field: "agentId"
+  }));
+  return normalizationCollisions([...actorEntries, ...reservationEntries], normalizeActorId);
+}
+
+function metaStringFields(
+  section: string,
+  id: string,
+  record: { readonly meta: { readonly createdBy: { readonly id: unknown }; readonly updatedBy: { readonly id: unknown }; readonly tags: readonly string[] } }
+): readonly MachineStringField[] {
+  return [
+    stringField(section, id, "meta.createdBy.id", String(record.meta.createdBy.id)),
+    stringField(section, id, "meta.updatedBy.id", String(record.meta.updatedBy.id)),
+    ...record.meta.tags.map((tag, index) => stringField(section, id, `meta.tags[${index}]`, tag))
+  ];
+}
+
+function stringField(section: string, id: string, field: string, value: string): MachineStringField {
+  return { section, id, field, value };
+}
+
+function normalizationCollisions(
+  entries: readonly MachineStringField[],
+  normalize: (value: string) => string
+): Array<Record<string, unknown>> {
+  const byNormalized = new Map<string, MachineStringField[]>();
+  for (const entry of entries) {
+    const normalized = tryNormalize(entry.value, normalize);
+    if (!normalized) {
+      continue;
+    }
+    byNormalized.set(normalized, [...(byNormalized.get(normalized) ?? []), entry]);
+  }
+
+  return [...byNormalized.entries()].flatMap(([normalized, values]) => {
+    const rawValues = [...new Set(values.map((entry) => entry.value))].sort();
+    return rawValues.length > 1
+      ? [
+          {
+            normalized,
+            rawValues,
+            fields: values.map(({ section, id, field, value }) => ({ section, id, field, value }))
+          }
+        ]
+      : [];
+  });
+}
+
+function tryNormalize(value: string, normalize: (value: string) => string): string | undefined {
+  try {
+    return normalize(value);
+  } catch {
+    return undefined;
+  }
 }
 
 function searchIndexDiagnosticMessage(inspection: {

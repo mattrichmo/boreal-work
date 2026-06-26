@@ -2,6 +2,9 @@ import {
   BorealError,
   createRecordMeta,
   deterministicId,
+  normalizeActorId,
+  normalizeLabels,
+  normalizeMachineString,
   touchRecord,
   type ActorRef,
   type EvidenceId,
@@ -41,12 +44,15 @@ export interface AddBlockingDependencyInput {
 }
 
 export function createWorkItem(input: CreateWorkItemInput): WorkItem {
-  assertNonEmpty(input.title, "title");
+  const title = normalizeMachineString(input.title, "title");
+  const description = input.description?.trim() ?? "";
+  const labels = normalizeLabels(input.labels ?? []);
+  const actorId = normalizeActorId(String(input.actor.id));
   const id = deterministicId<WorkId>("work", {
-    title: input.title,
+    title,
     kind: input.kind ?? "task",
-    description: input.description?.trim() ?? "",
-    actorId: input.actor.id,
+    description,
+    actorId,
     createdAt: input.now,
     parentId: input.parentId ?? null,
     nonce: input.nonce ?? 0
@@ -57,15 +63,15 @@ export function createWorkItem(input: CreateWorkItemInput): WorkItem {
       id,
       now: input.now,
       actor: input.actor,
-      tags: input.labels ?? []
+      tags: labels
     }),
     kind: input.kind ?? "task",
-    title: input.title.trim(),
-    description: input.description?.trim() ?? "",
+    title,
+    description,
     status: "draft",
     priority: input.priority ?? "normal",
     acceptanceCriteria: input.acceptanceCriteria ?? [],
-    labels: input.labels ?? [],
+    labels,
     parentId: input.parentId,
     dependencyIds: [],
     evidenceIds: [],
@@ -200,12 +206,6 @@ export function deriveReadinessStatus(work: WorkItem, dependencies: readonly Wor
 
 export function setWorkStatus(work: WorkItem, status: WorkStatus, now: IsoTimestamp, actor: ActorRef): WorkItem {
   return touchRecord({ ...work, status }, now, actor);
-}
-
-function assertNonEmpty(value: string, label: string): void {
-  if (value.trim().length === 0) {
-    throw new BorealError("BOREAL_INVALID_INPUT", `${label} cannot be empty`);
-  }
 }
 
 function unique<T>(values: readonly T[]): readonly T[] {

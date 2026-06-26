@@ -15,6 +15,31 @@ interface CommandRun {
   readonly stderr: string;
 }
 
+interface MutableActorForTest {
+  id: string;
+  [key: string]: unknown;
+}
+
+interface MutableMetaForTest {
+  readonly id: string;
+  readonly createdBy: MutableActorForTest;
+  readonly updatedBy: MutableActorForTest;
+  readonly tags: readonly string[];
+  readonly [key: string]: unknown;
+}
+
+interface MutableWorkForTest {
+  readonly meta: MutableMetaForTest;
+  readonly title: string;
+  readonly labels: readonly string[];
+  readonly [key: string]: unknown;
+}
+
+interface MutableStateForTest {
+  readonly workItems: readonly MutableWorkForTest[];
+  readonly [key: string]: unknown;
+}
+
 const tempDirs: string[] = [];
 
 afterEach(async () => {
@@ -365,6 +390,82 @@ describe("bwrk cli", () => {
     const doctor = await runCli(rootDir, ["doctor", "--json"]);
     expect(doctor.exitCode).toBe(0);
     expect(parseData<{ readonly ok: boolean }>(doctor.stdout).ok).toBe(true);
+  });
+
+  it("normalizes cli machine strings and rejects unsafe unicode input", async () => {
+    const rootDir = await makeTempWorkspace();
+    await runCli(rootDir, ["init", "--json"]);
+
+    const created = await runCli(rootDir, [
+      "work",
+      "create",
+      "  Ｓｈｉｐ   Runtime  ",
+      "--label",
+      "CLI Work",
+      "--ready",
+      "--json"
+    ]);
+    const work = parseData<{ readonly meta: { readonly id: string }; readonly title: string; readonly labels: readonly string[] }>(
+      created.stdout
+    );
+    expect(created.exitCode).toBe(0);
+    expect(work.title).toBe("Ship Runtime");
+    expect(work.labels).toEqual(["cli work"]);
+
+    const listed = await runCli(rootDir, ["work", "list", "--label", "cli work", "--json"]);
+    expect(parseData<Array<{ readonly id: string }>>(listed.stdout).map((row) => row.id)).toContain(work.meta.id);
+
+    const unsafeTitle = await runCli(rootDir, ["work", "create", "Bad\u200bTitle", "--json"]);
+    const unsafeTitlePayload = parseJson<{ readonly ok: false; readonly code: string }>(unsafeTitle.stderr);
+    expect(unsafeTitle.exitCode).toBe(2);
+    expect(unsafeTitlePayload.code).toBe("BOREAL_UNSAFE_UNICODE");
+
+    await runCli(rootDir, ["search", "index", "--json"]);
+    const unsafeQuery = await runCli(rootDir, ["search", "query", "Ship\u200bRuntime", "--json"]);
+    const unsafeQueryPayload = parseJson<{ readonly ok: false; readonly code: string }>(unsafeQuery.stderr);
+    expect(unsafeQuery.exitCode).toBe(2);
+    expect(unsafeQueryPayload.code).toBe("BOREAL_UNSAFE_UNICODE");
+  });
+
+  it("reports unsafe imported machine strings and normalization collisions in doctor", async () => {
+    const rootDir = await makeTempWorkspace();
+    await runCli(rootDir, ["init", "--json"]);
+    await runCli(rootDir, ["work", "create", "Doctor string safety", "--label", "cli", "--ready", "--json"]);
+
+    await updateState(rootDir, (state) => ({
+      ...state,
+      workItems: state.workItems.map((work, index) =>
+        index === 0
+          ? {
+              ...work,
+              title: "Doctor\u200b string safety",
+              labels: ["CLI", "cli"],
+              meta: {
+                ...work.meta,
+                tags: ["CLI", "cli"],
+                createdBy: { ...work.meta.createdBy, id: "Agent-A" },
+                updatedBy: { ...work.meta.updatedBy, id: "agent-a" }
+              }
+            }
+          : work
+      )
+    }));
+
+    const doctor = await runCli(rootDir, ["doctor", "--json"]);
+    const payload = parseData<{
+      readonly ok: boolean;
+      readonly diagnostics: Array<{ readonly code: string; readonly severity: string }>;
+    }>(doctor.stdout);
+
+    expect(doctor.exitCode).toBe(1);
+    expect(payload.ok).toBe(false);
+    expect(payload.diagnostics).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ code: "string.suspicious_unicode", severity: "error" }),
+        expect.objectContaining({ code: "label.normalization_collision", severity: "warning" }),
+        expect.objectContaining({ code: "actor.normalization_collision", severity: "warning" })
+      ])
+    );
   });
 
   it("spools oversized json command output to a result file", async () => {
@@ -1620,4 +1721,13 @@ async function setReservationExpiresAt(rootDir: string, reservationId: string, e
     )}\n`,
     "utf8"
   );
+}
+
+async function updateState(
+  rootDir: string,
+  update: (state: MutableStateForTest) => MutableStateForTest
+): Promise<void> {
+  const statePath = join(rootDir, ".boreal/runtime/state.json");
+  const state = parseJson<MutableStateForTest>(await readFile(statePath, "utf8"));
+  await writeFile(statePath, `${JSON.stringify(update(state), null, 2)}\n`, "utf8");
 }

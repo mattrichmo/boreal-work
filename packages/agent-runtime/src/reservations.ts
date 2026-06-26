@@ -2,6 +2,7 @@ import {
   BorealError,
   createRecordMeta,
   deterministicId,
+  normalizeActorId,
   touchRecord,
   type ActorRef,
   type AgentId,
@@ -41,6 +42,7 @@ export interface RenewReservationInput {
 }
 
 export function reserveWork(input: ReserveWorkInput): ReserveWorkResult {
+  const agentId = normalizeActorId(String(input.agentId));
   if (input.work.status === "closed" || input.work.status === "cancelled") {
     throw new BorealError("BOREAL_POLICY_VIOLATION", "Closed or cancelled work cannot be reserved");
   }
@@ -78,7 +80,7 @@ export function reserveWork(input: ReserveWorkInput): ReserveWorkResult {
   }
 
   const releasedReservations = activeForWork.map((reservation) => releaseReservation(reservation, input.now, input.actor));
-  const reservation = createReservation(input);
+  const reservation = createReservation({ ...input, agentId });
   const work = touchRecord(
     {
       ...input.work,
@@ -126,9 +128,10 @@ export function renewReservation(input: RenewReservationInput): AgentReservation
 }
 
 function createReservation(input: ReserveWorkInput): AgentReservation {
+  const agentId = normalizeActorId(String(input.agentId));
   const id = deterministicId<ReservationId>("reservation", {
     workId: input.work.meta.id,
-    agentId: input.agentId,
+    agentId,
     reservedAt: input.now,
     purpose: input.purpose ?? null
   });
@@ -140,7 +143,7 @@ function createReservation(input: ReserveWorkInput): AgentReservation {
       actor: input.actor
     }),
     workId: input.work.meta.id,
-    agentId: input.agentId,
+    agentId,
     status: "active",
     reservedAt: input.now,
     expiresAt: input.expiresAt,

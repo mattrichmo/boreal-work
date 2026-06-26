@@ -6,5 +6,6 @@ export * from "./ids.js";
 export * from "./json-safe.js";
 export * from "./policies.js";
 export * from "./records.js";
+export * from "./string-safety.js";
 export * from "./time.js";
 export * from "./workspace.js";

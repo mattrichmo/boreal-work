@@ -3,7 +3,7 @@ import { mkdir } from "node:fs/promises";
 import { homedir, userInfo } from "node:os";
 import { dirname, resolve } from "node:path";
 
-import { BorealError, resolveWorkspacePaths, type ActorKind, type ActorRef } from "@boreal/core";
+import { BorealError, normalizeActorId, resolveWorkspacePaths, type ActorKind, type ActorRef } from "@boreal/core";
 import { createBorealRuntime } from "@boreal/engine";
 import { FileBorealStore } from "@boreal/storage";
 
@@ -67,7 +67,7 @@ function findBorealRoot(start: string): string | undefined {
 }
 
 function actorFromArgs(args: ParsedArgs): ActorRef {
-  const id = flagValue(args, "actor") ?? process.env.BOREAL_ACTOR ?? userInfo().username;
+  const id = normalizeActorId(flagValue(args, "actor") ?? process.env.BOREAL_ACTOR ?? userInfo().username);
   const kind = (flagValue(args, "actor-kind") ?? "human") as ActorKind;
   if (kind !== "human" && kind !== "agent" && kind !== "system") {
     throw new BorealError("BOREAL_INVALID_INPUT", "--actor-kind must be human, agent, or system");

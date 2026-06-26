@@ -2,6 +2,7 @@ import {
   BorealError,
   createRecordMeta,
   deterministicId,
+  normalizeMachineString,
   type ActorRef,
   type ClaimRecord,
   type ClaimStatus,
@@ -45,12 +46,12 @@ export interface CreateDecisionInput {
 }
 
 export function createKnowledgeSource(input: CreateKnowledgeSourceInput): KnowledgeSource {
-  assertNonEmpty(input.title, "title");
-  assertNonEmpty(input.uri, "uri");
+  const title = normalizeMachineString(input.title, "title");
+  const uri = normalizeMachineString(input.uri, "uri");
   const id = deterministicId<KnowledgeSourceId>("source", {
     kind: input.kind,
-    title: input.title,
-    uri: input.uri
+    title,
+    uri
   });
 
   return withContentHash({
@@ -60,8 +61,8 @@ export function createKnowledgeSource(input: CreateKnowledgeSourceInput): Knowle
       actor: input.actor
     }),
     kind: input.kind,
-    title: input.title.trim(),
-    uri: input.uri.trim(),
+    title,
+    uri,
     summary: input.summary?.trim() ?? ""
   });
 }
@@ -87,10 +88,10 @@ export function createClaim(input: CreateClaimInput): ClaimRecord {
 }
 
 export function createDecision(input: CreateDecisionInput): DecisionRecord {
-  assertNonEmpty(input.title, "title");
+  const title = normalizeMachineString(input.title, "title");
   assertNonEmpty(input.decision, "decision");
   const id = deterministicId<DecisionRecord["meta"]["id"]>("decision", {
-    title: input.title,
+    title,
     decision: input.decision
   });
 
@@ -100,7 +101,7 @@ export function createDecision(input: CreateDecisionInput): DecisionRecord {
       now: input.now,
       actor: input.actor
     }),
-    title: input.title.trim(),
+    title,
     status: input.status ?? "accepted",
     context: input.context.trim(),
     decision: input.decision.trim(),
@@ -114,4 +115,3 @@ function assertNonEmpty(value: string, label: string): void {
     throw new BorealError("BOREAL_INVALID_INPUT", `${label} cannot be empty`);
   }
 }
-

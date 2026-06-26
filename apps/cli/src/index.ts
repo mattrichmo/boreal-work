@@ -23,7 +23,9 @@ export async function main(
     } else {
       guardedOutput.error(`${formatError(error)}\n`);
     }
-    return isBorealError(error) && error.code === "BOREAL_INVALID_INPUT" ? 2 : 1;
+    return isBorealError(error) && (error.code === "BOREAL_INVALID_INPUT" || error.code === "BOREAL_UNSAFE_UNICODE")
+      ? 2
+      : 1;
   } finally {
     stdoutGuard.release();
   }

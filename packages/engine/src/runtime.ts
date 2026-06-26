@@ -8,6 +8,8 @@ import {
   BorealError,
   DEFAULT_RUNTIME_POLICY,
   createRecordMeta,
+  normalizeActorId,
+  normalizeLabels,
   nowIso,
   randomId,
   touchRecord,
@@ -168,7 +170,7 @@ export interface BorealRuntime {
 export function createBorealRuntime(options: BorealRuntimeOptions = {}): BorealRuntime {
   const store = options.store ?? new InMemoryBorealStore();
   const policy: RuntimePolicy = { ...DEFAULT_RUNTIME_POLICY, ...options.policy };
-  const actor = options.actor ?? systemActor();
+  const actor = normalizeActorRef(options.actor ?? systemActor());
   const clock = options.clock ?? (() => new Date());
   const now = () => nowIso(clock());
 
@@ -289,7 +291,8 @@ export function createBorealRuntime(options: BorealRuntimeOptions = {}): BorealR
 
     async claimNextWork(input): Promise<ClaimNextWorkResult | undefined> {
       return store.write(async (writer) => {
-        const labels = input.labels ?? [];
+        const labels = normalizeLabels(input.labels ?? []);
+        const agentId = normalizeActorId(String(input.agentId));
         const candidates: WorkItem[] = [];
         const items = await writer.listWorkItems();
         for (const item of items) {
@@ -312,9 +315,9 @@ export function createBorealRuntime(options: BorealRuntimeOptions = {}): BorealR
 
         const reservationResult = reserveWorkDomain({
           work,
-          agentId: input.agentId,
+          agentId,
           existingReservationsForWork: await writer.listReservationsForWork(work.meta.id),
-          activeReservationsForAgent: await writer.listActiveReservationsForAgent(input.agentId),
+          activeReservationsForAgent: await writer.listActiveReservationsForAgent(agentId),
           policy,
           actor,
           now: now(),
@@ -327,7 +330,7 @@ export function createBorealRuntime(options: BorealRuntimeOptions = {}): BorealR
         await writer.putReservation(reservationResult.reservation);
         await writer.putWorkItem(reservationResult.work);
         await appendEvent(writer, "work.claimed", work.meta.id, "work", {
-          agentId: input.agentId,
+          agentId,
           reservationId: reservationResult.reservation.meta.id,
           labels,
           purpose: input.purpose,
@@ -339,12 +342,13 @@ export function createBorealRuntime(options: BorealRuntimeOptions = {}): BorealR
 
     async reserveWork(input): Promise<WorkItem> {
       return store.write(async (writer) => {
+        const agentId = normalizeActorId(String(input.agentId));
         const work = await requireWork(writer, input.workId);
         const reservationResult = reserveWorkDomain({
           work,
-          agentId: input.agentId,
+          agentId,
           existingReservationsForWork: await writer.listReservationsForWork(input.workId),
-          activeReservationsForAgent: await writer.listActiveReservationsForAgent(input.agentId),
+          activeReservationsForAgent: await writer.listActiveReservationsForAgent(agentId),
           policy,
           actor,
           now: now(),
@@ -359,7 +363,7 @@ export function createBorealRuntime(options: BorealRuntimeOptions = {}): BorealR
         await writer.putReservation(reservationResult.reservation);
         await writer.putWorkItem(reservationResult.work);
         await appendEvent(writer, "work.reserved", work.meta.id, "work", {
-          agentId: input.agentId,
+          agentId,
           reservationId: reservationResult.reservation.meta.id,
           forced: Boolean(input.force),
           forceReason: input.forceReason
@@ -498,7 +502,8 @@ export function createBorealRuntime(options: BorealRuntimeOptions = {}): BorealR
       return store.write(async (writer) => {
         const current = now();
         const work = await requireWork(writer, input.workId);
-        const reservation = await requireAgentWorkReservation(writer, work, input.agentId, current);
+        const agentId = normalizeActorId(String(input.agentId));
+        const reservation = await requireAgentWorkReservation(writer, work, agentId, current);
 
         const evidence = recordEvidenceDomain({
           ...input.evidence,
@@ -558,7 +563,7 @@ export function createBorealRuntime(options: BorealRuntimeOptions = {}): BorealR
           agentId: releasedReservation.agentId
         });
         await appendEvent(writer, "agent.finished", finalWork.meta.id, "work", {
-          agentId: input.agentId,
+          agentId,
           evidenceId: evidence.meta.id,
           verificationId: verification.meta.id,
           reservationId: releasedReservation.meta.id,
@@ -726,11 +731,12 @@ async function requireAgentWorkReservation(
   agentId: AgentId | string,
   current: IsoTimestamp
 ): Promise<AgentReservation> {
+  const normalizedAgentId = normalizeActorId(String(agentId));
   const reservation = await requireActiveWorkReservation(reader, work);
-  if (String(reservation.agentId) !== String(agentId)) {
+  if (String(reservation.agentId) !== normalizedAgentId) {
     throw new BorealError("BOREAL_POLICY_VIOLATION", "Agent does not own the active reservation", {
       workId: work.meta.id,
-      agentId,
+      agentId: normalizedAgentId,
       reservationAgentId: reservation.agentId,
       reservationId: reservation.meta.id
     });
@@ -738,7 +744,7 @@ async function requireAgentWorkReservation(
   if (reservation.expiresAt && Date.parse(reservation.expiresAt) <= Date.parse(current)) {
     throw new BorealError("BOREAL_POLICY_VIOLATION", "Agent reservation is expired; run `bwrk doctor --fix`", {
       workId: work.meta.id,
-      agentId,
+      agentId: normalizedAgentId,
       reservationId: reservation.meta.id,
       expiresAt: reservation.expiresAt
     });
@@ -875,5 +881,14 @@ function systemActor(): ActorRef {
     id: "boreal-system",
     kind: "system",
     displayName: "Boreal Runtime"
+  };
+}
+
+function normalizeActorRef(actor: ActorRef): ActorRef {
+  const id = normalizeActorId(String(actor.id));
+  return {
+    ...actor,
+    id,
+    displayName: actor.displayName ?? id
   };
 }

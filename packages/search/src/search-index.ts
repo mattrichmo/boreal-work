@@ -1,5 +1,6 @@
 import {
   hashContent,
+  normalizeGeneratedSearchText,
   nowIso,
   type ClaimRecord,
   type ContentHash,
@@ -367,7 +368,7 @@ function tokenize(text: string): readonly string[] {
 }
 
 function normalizeText(text: string): string {
-  return text.trim().toLowerCase();
+  return normalizeGeneratedSearchText(text);
 }
 
 function trimSummary(value: string): string {

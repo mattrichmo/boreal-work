@@ -1,7 +1,7 @@
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 
-import { BorealError, nowIso, readJsonFile, type ContentHash } from "@boreal/core";
+import { BorealError, normalizeSearchQuery, nowIso, readJsonFile, type ContentHash } from "@boreal/core";
 import {
   buildSearchIndex,
   isSearchIndexDocument,
@@ -93,7 +93,7 @@ export async function runSearch(
   query: string,
   options: SearchCommandOptions = {}
 ): Promise<readonly SearchResult[]> {
-  const normalizedQuery = query.trim();
+  const normalizedQuery = normalizeSearchQuery(query);
   if (!normalizedQuery) {
     throw new BorealError("BOREAL_INVALID_INPUT", "Search query is required");
   }

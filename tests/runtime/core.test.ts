@@ -8,7 +8,12 @@ import {
   BorealError,
   canonicalJson,
   deterministicId,
+  detectSuspiciousUnicode,
   hashContent,
+  normalizeActorId,
+  normalizeLabel,
+  normalizeMachineString,
+  normalizeSearchQuery,
   randomId,
   readJsonFile,
   safeParseJson,
@@ -65,5 +70,18 @@ describe("core hashing and ids", () => {
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
+  });
+
+  it("normalizes machine-facing strings and rejects invisible unicode", () => {
+    expect(normalizeMachineString("  Ｓｈｉｐ   runtime  ", "title")).toBe("Ship runtime");
+    expect(normalizeLabel("  CLI  Work ")).toBe("cli work");
+    expect(normalizeActorId(" Agent-A ")).toBe("agent-a");
+    expect(normalizeSearchQuery("  content   hash  ")).toBe("content hash");
+
+    const findings = detectSuspiciousUnicode("bad\u200btitle");
+    expect(findings).toEqual([expect.objectContaining({ codePoint: "U+200B", kind: "invisible_format" })]);
+    expect(() => normalizeMachineString("bad\u202etitle", "title")).toThrow(
+      expect.objectContaining({ code: "BOREAL_UNSAFE_UNICODE" })
+    );
   });
 });

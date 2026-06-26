@@ -5,6 +5,7 @@ export type BorealErrorCode =
   | "BOREAL_POLICY_VIOLATION"
   | "BOREAL_STORAGE_ERROR"
   | "BOREAL_JSON_PARSE"
+  | "BOREAL_UNSAFE_UNICODE"
   | "BOREAL_INVARIANT";
 
 export class BorealError extends Error {

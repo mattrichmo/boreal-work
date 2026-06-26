@@ -1,6 +1,7 @@
 import { hashContent } from "./hash.js";
 import type { ContentHash } from "./ids.js";
 import { BOREAL_SCHEMA_VERSION, type ActorRef, type RecordMeta, type SourceRef } from "./records.js";
+import { normalizeActorId, normalizeLabels } from "./string-safety.js";
 import type { IsoTimestamp } from "./time.js";
 
 export interface RecordMetaInput<TId extends string> {
@@ -12,15 +13,16 @@ export interface RecordMetaInput<TId extends string> {
 }
 
 export function createRecordMeta<TId extends string>(input: RecordMetaInput<TId>): RecordMeta<TId> {
+  const actor = normalizeActorRef(input.actor);
   return {
     id: input.id,
     schemaVersion: BOREAL_SCHEMA_VERSION,
     createdAt: input.now,
     updatedAt: input.now,
-    createdBy: input.actor,
-    updatedBy: input.actor,
+    createdBy: actor,
+    updatedBy: actor,
     sourceRefs: input.sourceRefs ?? [],
-    tags: input.tags ?? []
+    tags: normalizeLabels(input.tags ?? [])
   };
 }
 
@@ -40,12 +42,13 @@ export function touchRecord<TRecord extends { readonly meta: RecordMeta<string> 
   now: IsoTimestamp,
   actor: ActorRef
 ): TRecord {
+  const normalizedActor = normalizeActorRef(actor);
   return withContentHash({
     ...record,
     meta: {
       ...record.meta,
       updatedAt: now,
-      updatedBy: actor
+      updatedBy: normalizedActor
     }
   });
 }
@@ -60,3 +63,11 @@ function hashRecord(record: { readonly meta: RecordMeta<string> }): ContentHash 
   });
 }
 
+function normalizeActorRef(actor: ActorRef): ActorRef {
+  const id = normalizeActorId(String(actor.id));
+  return {
+    ...actor,
+    id,
+    displayName: actor.displayName ?? id
+  };
+}
