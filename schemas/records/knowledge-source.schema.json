@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://boreal.work/schemas/records/knowledge-source.schema.json",
+  "title": "Boreal Knowledge Source",
+  "type": "object",
+  "required": ["meta", "kind", "title", "uri", "summary"],
+  "properties": {
+    "meta": { "type": "object" },
+    "kind": { "enum": ["raw", "document", "chat", "code", "artifact"] },
+    "title": { "type": "string", "minLength": 1 },
+    "uri": { "type": "string", "minLength": 1 },
+    "summary": { "type": "string" }
+  }
+}

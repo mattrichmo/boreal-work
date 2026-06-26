@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://boreal.work/schemas/operations/runtime-operation.schema.json",
+  "title": "Boreal Runtime Operation",
+  "type": "object",
+  "required": [
+    "meta",
+    "sessionId",
+    "commandPath",
+    "argv",
+    "actorId",
+    "startedAt",
+    "finishedAt",
+    "exitCode",
+    "status",
+    "stateChanged",
+    "generatedArtifactsChanged",
+    "eventIds"
+  ],
+  "properties": {
+    "meta": { "type": "object" },
+    "sessionId": { "type": "string", "minLength": 1 },
+    "commandPath": { "type": "string", "minLength": 1 },
+    "argv": { "type": "array", "items": { "type": "string" } },
+    "actorId": { "type": "string", "minLength": 1 },
+    "startedAt": { "type": "string", "format": "date-time" },
+    "finishedAt": { "type": "string", "format": "date-time" },
+    "exitCode": { "type": "integer", "minimum": 0 },
+    "status": { "enum": ["succeeded", "failed"] },
+    "stateChanged": { "type": "boolean" },
+    "generatedArtifactsChanged": { "type": "boolean" },
+    "eventIds": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
+    "errorCode": { "type": "string" },
+    "errorMessage": { "type": "string" }
+  }
+}

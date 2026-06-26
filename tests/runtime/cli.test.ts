@@ -1301,7 +1301,7 @@ describe("bwrk cli", () => {
           ...graphEdges,
           {
             ...firstEdge,
-            meta: { ...firstMeta, id: "bw_edge_manualcycle" },
+            meta: { ...firstMeta, id: "bw_edge_deadbeefcafe" },
             fromId: blocked.meta.id,
             fromType: "work",
             toId: blocker.meta.id,

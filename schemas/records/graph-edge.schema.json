@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://boreal.work/schemas/records/graph-edge.schema.json",
+  "title": "Boreal Graph Edge",
+  "type": "object",
+  "required": ["meta", "kind", "fromId", "fromType", "toId", "toType", "directed"],
+  "properties": {
+    "meta": { "type": "object" },
+    "kind": { "enum": ["blocks", "depends_on", "relates_to", "supports", "contradicts", "verifies", "references"] },
+    "fromId": { "type": "string", "minLength": 1 },
+    "fromType": { "type": "string", "minLength": 1 },
+    "toId": { "type": "string", "minLength": 1 },
+    "toType": { "type": "string", "minLength": 1 },
+    "directed": { "type": "boolean" }
+  }
+}

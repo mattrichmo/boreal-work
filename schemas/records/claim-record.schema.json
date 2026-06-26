@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://boreal.work/schemas/records/claim-record.schema.json",
+  "title": "Boreal Claim Record",
+  "type": "object",
+  "required": ["meta", "statement", "status", "sourceIds", "evidenceIds"],
+  "properties": {
+    "meta": { "type": "object" },
+    "statement": { "type": "string", "minLength": 1 },
+    "status": { "enum": ["proposed", "accepted", "rejected", "stale"] },
+    "sourceIds": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
+    "evidenceIds": { "type": "array", "items": { "type": "string" }, "uniqueItems": true }
+  }
+}

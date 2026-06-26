@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://boreal.work/schemas/records/verification-record.schema.json",
+  "title": "Boreal Verification Record",
+  "type": "object",
+  "required": ["meta", "subjectId", "subjectType", "verdict", "evidenceIds", "verifiedAt"],
+  "properties": {
+    "meta": { "type": "object" },
+    "subjectId": { "type": "string", "minLength": 1 },
+    "subjectType": { "type": "string", "minLength": 1 },
+    "verdict": { "enum": ["passed", "failed"] },
+    "evidenceIds": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
+    "verifiedAt": { "type": "string", "format": "date-time" },
+    "notes": { "type": "string" }
+  }
+}

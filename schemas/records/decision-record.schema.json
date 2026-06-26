@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://boreal.work/schemas/records/decision-record.schema.json",
+  "title": "Boreal Decision Record",
+  "type": "object",
+  "required": ["meta", "title", "status", "context", "decision", "consequences", "sourceIds"],
+  "properties": {
+    "meta": { "type": "object" },
+    "title": { "type": "string", "minLength": 1 },
+    "status": { "enum": ["proposed", "accepted", "superseded", "rejected"] },
+    "context": { "type": "string" },
+    "decision": { "type": "string", "minLength": 1 },
+    "consequences": { "type": "array", "items": { "type": "string" } },
+    "sourceIds": { "type": "array", "items": { "type": "string" }, "uniqueItems": true }
+  }
+}

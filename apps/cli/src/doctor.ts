@@ -440,8 +440,16 @@ function validateSchemaConformance(
   const issues = runtimeSnapshotSchemaIssues({
     workItems: stateSection(state, "workItems"),
     evidence: stateSection(state, "evidence"),
+    verifications: stateSection(state, "verifications"),
+    knowledgeSources: stateSection(state, "knowledgeSources"),
+    claims: stateSection(state, "claims"),
+    decisions: stateSection(state, "decisions"),
+    graphEdges: stateSection(state, "graphEdges"),
+    reservations: stateSection(state, "reservations"),
     events: stateSection(state, "events"),
-    operations: stateSection(state, "operations")
+    operations: stateSection(state, "operations"),
+    projections: stateSection(state, "projections"),
+    contextPacks: stateSection(state, "contextPacks")
   });
 
   diagnostics.push({

@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://boreal.work/schemas/projections/context-pack.schema.json",
+  "title": "Boreal Context Pack",
+  "type": "object",
+  "required": ["id", "subjectId", "generatedAt", "title", "summary", "facts", "evidence"],
+  "properties": {
+    "id": { "type": "string", "pattern": "^bw_projection_[a-f0-9]{12,64}$" },
+    "subjectId": { "type": "string", "minLength": 1 },
+    "generatedAt": { "type": "string", "format": "date-time" },
+    "title": { "type": "string" },
+    "summary": { "type": "string" },
+    "facts": { "type": "array", "items": { "type": "string" } },
+    "evidence": { "type": "array", "items": { "type": "string" } }
+  }
+}

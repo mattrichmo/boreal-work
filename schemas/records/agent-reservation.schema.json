@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://boreal.work/schemas/records/agent-reservation.schema.json",
+  "title": "Boreal Agent Reservation",
+  "type": "object",
+  "required": ["meta", "workId", "agentId", "status", "reservedAt"],
+  "properties": {
+    "meta": { "type": "object" },
+    "workId": { "type": "string", "pattern": "^bw_work_[a-f0-9]{12,64}$" },
+    "agentId": { "type": "string", "minLength": 1 },
+    "status": { "enum": ["active", "released", "expired"] },
+    "reservedAt": { "type": "string", "format": "date-time" },
+    "expiresAt": { "type": "string", "format": "date-time" },
+    "purpose": { "type": "string" }
+  }
+}

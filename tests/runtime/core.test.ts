@@ -1,4 +1,4 @@
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -17,6 +17,7 @@ import {
   parseJsonlStrict,
   randomId,
   readJsonFile,
+  RUNTIME_SCHEMA_IDS,
   runtimeSnapshotSchemaIssues,
   safeParseJson,
   type EventId,
@@ -133,6 +134,35 @@ describe("core hashing and ids", () => {
           evidenceIds: [],
           verificationIds: []
         }
+      ],
+      knowledgeSources: [
+        {
+          meta: runtimeMeta("bw_source_deadbeefdead"),
+          kind: "unsupported",
+          title: "Bad source",
+          uri: "file://source",
+          summary: ""
+        }
+      ],
+      graphEdges: [
+        {
+          meta: runtimeMeta("bw_edge_deadbeefdead"),
+          kind: "blocks",
+          fromId: "bw_work_deadbeefdead",
+          fromType: "work",
+          toId: "bw_work_cafebabecafe",
+          toType: "work",
+          directed: "yes"
+        }
+      ],
+      reservations: [
+        {
+          meta: runtimeMeta("bw_reservation_deadbeefdead"),
+          workId: "not-a-work-id",
+          agentId: "agent-a",
+          status: "busy",
+          reservedAt: "2026-01-01T00:00:00.000Z"
+        }
       ]
     });
 
@@ -141,8 +171,45 @@ describe("core hashing and ids", () => {
         expect.objectContaining({
           path: "workItems[0].status",
           schemaId: "https://boreal.work/schemas/records/work-item.schema.json"
+        }),
+        expect.objectContaining({
+          path: "knowledgeSources[0].kind",
+          schemaId: "https://boreal.work/schemas/records/knowledge-source.schema.json"
+        }),
+        expect.objectContaining({
+          path: "graphEdges[0].directed",
+          schemaId: "https://boreal.work/schemas/records/graph-edge.schema.json"
+        }),
+        expect.objectContaining({
+          path: "reservations[0].status",
+          schemaId: "https://boreal.work/schemas/records/agent-reservation.schema.json"
         })
       ])
     );
   });
+
+  it("keeps published runtime schema IDs backed by schema files", async () => {
+    for (const schemaId of Object.values(RUNTIME_SCHEMA_IDS)) {
+      const schemaPath = schemaId.replace("https://boreal.work/schemas/", "../../schemas/");
+      const schema = safeParseJson(await readFile(new URL(schemaPath, import.meta.url), "utf8"), {
+        schemaName: schemaId,
+        expectedObject: true
+      }) as { readonly $id?: string };
+
+      expect(schema.$id).toBe(schemaId);
+    }
+  });
 });
+
+function runtimeMeta(id: string): Record<string, unknown> {
+  return {
+    id,
+    schemaVersion: "boreal.runtime.v1",
+    createdAt: "2026-01-01T00:00:00.000Z",
+    updatedAt: "2026-01-01T00:00:00.000Z",
+    createdBy: { id: "agent-a", kind: "agent", displayName: "agent-a" },
+    updatedBy: { id: "agent-a", kind: "agent", displayName: "agent-a" },
+    sourceRefs: [],
+    tags: []
+  };
+}

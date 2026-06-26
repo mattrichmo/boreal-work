@@ -7,8 +7,17 @@ The current runtime types cover work, graph edges, evidence, verification, knowl
 Currently enforced schemas:
 
 - `schemas/records/work-item.schema.json`
+- `schemas/records/graph-edge.schema.json`
 - `schemas/records/evidence-record.schema.json`
+- `schemas/records/verification-record.schema.json`
+- `schemas/records/knowledge-source.schema.json`
+- `schemas/records/claim-record.schema.json`
+- `schemas/records/decision-record.schema.json`
+- `schemas/records/agent-reservation.schema.json`
 - `schemas/events/runtime-event.schema.json`
+- `schemas/operations/runtime-operation.schema.json`
+- `schemas/projections/projection-record.schema.json`
+- `schemas/projections/context-pack.schema.json`
 - `schemas/policies/runtime-policy.schema.json`
 
-Schemas not listed here are not yet externalized; add validator coverage with each new published schema file so schemas do not become documentation-only contracts.
+Add validator coverage with each new published schema file so schemas do not become documentation-only contracts.

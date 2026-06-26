@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://boreal.work/schemas/projections/projection-record.schema.json",
+  "title": "Boreal Projection Record",
+  "type": "object",
+  "required": ["meta", "kind", "subjectId", "value"],
+  "properties": {
+    "meta": { "type": "object" },
+    "kind": { "type": "string", "minLength": 1 },
+    "subjectId": { "type": "string", "minLength": 1 },
+    "value": { "type": "object" }
+  }
+}
