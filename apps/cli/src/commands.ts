@@ -1356,6 +1356,14 @@ async function depCommand(
       output.write(formatRecord({ type, work }, json));
       return { exitCode: 0 };
     }
+    case "remove": {
+      const type = dependencyTypeFromArgs(args);
+      const blockedWorkId = await resolveWorkId(context, requiredPositional(rest, 0, "dependent work reference"));
+      const blockingWorkId = await resolveWorkId(context, requiredPositional(rest, 1, "dependency work reference"));
+      const work = await context.runtime.removeBlockingDependency({ blockedWorkId, blockingWorkId });
+      output.write(formatRecord({ type, work }, json));
+      return { exitCode: 0 };
+    }
     case "tree": {
       const workId = await resolveWorkId(context, requiredPositional(rest, 0, "work reference"));
       const tree = await context.store.read(async (reader) =>

@@ -43,6 +43,14 @@ export interface AddBlockingDependencyInput {
   readonly now: IsoTimestamp;
 }
 
+export interface RemoveBlockingDependencyInput {
+  readonly blockedWork: WorkItem;
+  readonly blockingWork: WorkItem;
+  readonly remainingDependencies: readonly WorkItem[];
+  readonly actor: ActorRef;
+  readonly now: IsoTimestamp;
+}
+
 export function createWorkItem(input: CreateWorkItemInput): WorkItem {
   const title = normalizeMachineString(input.title, "title");
   const description = input.description?.trim() ?? "";
@@ -126,6 +134,19 @@ export function addBlockingDependency(input: AddBlockingDependencyInput): {
     ),
     edge
   };
+}
+
+export function removeBlockingDependency(input: RemoveBlockingDependencyInput): WorkItem {
+  const dependencyIds = input.blockedWork.dependencyIds.filter((id) => id !== input.blockingWork.meta.id);
+  return touchRecord(
+    {
+      ...input.blockedWork,
+      dependencyIds,
+      status: deriveReadinessStatus({ ...input.blockedWork, dependencyIds }, input.remainingDependencies)
+    },
+    input.now,
+    input.actor
+  );
 }
 
 export function attachEvidenceToWork(

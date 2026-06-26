@@ -302,6 +302,14 @@ bwrk dep add <work-id> <depends-on-work-id> [--type blocks] [--json]
 
 Adds a canonical `blocks` dependency edge between work items. This is the dependency-focused alias for `work block`; readiness still derives from the block graph.
 
+## `dep remove`
+
+```bash
+bwrk dep remove <work-id> <depends-on-work-id> [--type blocks] [--json]
+```
+
+Removes a canonical `blocks` dependency edge between work items. The dependent work's `dependencyIds` projection and readiness are recomputed from the remaining block graph in the same runtime transaction. Missing dependencies fail closed with `BOREAL_NOT_FOUND`.
+
 ## `dep tree`
 
 ```bash

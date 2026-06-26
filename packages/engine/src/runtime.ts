@@ -51,7 +51,8 @@ import {
   closeWork as closeWorkDomain,
   createWorkItem,
   deriveReadinessStatus,
-  markWorkReady
+  markWorkReady,
+  removeBlockingDependency as removeBlockingDependencyDomain
 } from "@boreal/work-engine";
 
 export interface BorealRuntimeOptions {
@@ -146,6 +147,10 @@ export interface BorealRuntime {
   resolveWorkReference(ref: string, options?: ResolveWorkReferenceOptions): Promise<WorkId>;
   createWork(input: CreateWorkRuntimeInput): Promise<WorkItem>;
   addBlockingDependency(input: {
+    readonly blockedWorkId: WorkId;
+    readonly blockingWorkId: WorkId;
+  }): Promise<WorkItem>;
+  removeBlockingDependency(input: {
     readonly blockedWorkId: WorkId;
     readonly blockingWorkId: WorkId;
   }): Promise<WorkItem>;
@@ -307,6 +312,54 @@ export function createBorealRuntime(options: BorealRuntimeOptions = {}): BorealR
           edgeId: result.edge.meta.id
         });
         return result.blockedWork;
+      });
+    },
+
+    async removeBlockingDependency(input): Promise<WorkItem> {
+      return store.write(async (writer) => {
+        const blockedWork = await workWithGraphDependencies(writer, await requireWork(writer, input.blockedWorkId));
+        const blockingWork = await requireWork(writer, input.blockingWorkId);
+        const matchingEdges = (await writer.listGraphEdges()).filter(
+          (edge) =>
+            edge.kind === "blocks" &&
+            edge.fromType === "work" &&
+            edge.toType === "work" &&
+            edge.fromId === blockingWork.meta.id &&
+            edge.toId === blockedWork.meta.id
+        );
+        if (matchingEdges.length === 0) {
+          throw new BorealError("BOREAL_NOT_FOUND", "Blocking dependency not found", {
+            blockedWorkId: blockedWork.meta.id,
+            blockingWorkId: blockingWork.meta.id
+          });
+        }
+        if (matchingEdges.length > 1) {
+          throw new BorealError("BOREAL_CONFLICT", "Multiple matching blocking dependency edges found", {
+            blockedWorkId: blockedWork.meta.id,
+            blockingWorkId: blockingWork.meta.id,
+            edgeIds: matchingEdges.map((edge) => edge.meta.id)
+          });
+        }
+
+        const edge = matchingEdges[0]!;
+        await writer.deleteGraphEdge(edge.meta.id);
+        const remainingDependencies = await loadDependencies(writer, {
+          ...blockedWork,
+          dependencyIds: blockedWork.dependencyIds.filter((dependencyId) => dependencyId !== blockingWork.meta.id)
+        });
+        const updatedWork = removeBlockingDependencyDomain({
+          blockedWork,
+          blockingWork,
+          remainingDependencies,
+          actor,
+          now: now()
+        });
+        await writer.putWorkItem(updatedWork);
+        await appendEvent(writer, "work.dependency_removed", updatedWork.meta.id, "work", {
+          blockingWorkId: blockingWork.meta.id,
+          edgeId: edge.meta.id
+        });
+        return updatedWork;
       });
     },
 

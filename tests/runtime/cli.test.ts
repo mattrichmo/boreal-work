@@ -67,6 +67,7 @@ describe("bwrk cli", () => {
       "## `work show`",
       "## `work block`",
       "## `dep add`",
+      "## `dep remove`",
       "## `dep tree`",
       "## `dep cycles`",
       "## `work reserve`",
@@ -930,6 +931,7 @@ describe("bwrk cli", () => {
         "search index",
         "search query",
         "dep add",
+        "dep remove",
         "dep tree",
         "dep cycles",
         "work claim",
@@ -1382,6 +1384,33 @@ describe("bwrk cli", () => {
         })
       ])
     );
+
+    const removed = await runCli(rootDir, ["dep", "remove", blocked.meta.id, blocker.meta.id, "--json"]);
+    const removedPayload = parseData<{
+      readonly type: string;
+      readonly work: { readonly meta: { readonly id: string }; readonly status: string; readonly dependencyIds: readonly string[] };
+    }>(removed.stdout);
+    expect(removed.exitCode).toBe(0);
+    expect(removedPayload).toEqual(
+      expect.objectContaining({
+        type: "blocks",
+        work: expect.objectContaining({
+          meta: expect.objectContaining({ id: blocked.meta.id }),
+          status: "ready",
+          dependencyIds: []
+        })
+      })
+    );
+
+    const removedTree = parseData<{ readonly dependencies: readonly unknown[] }>(
+      (await runCli(rootDir, ["dep", "tree", blocked.meta.id, "--json"])).stdout
+    );
+    expect(removedTree.dependencies).toEqual([]);
+
+    const missingRemove = await runCli(rootDir, ["dep", "remove", blocked.meta.id, blocker.meta.id, "--json"]);
+    const missingPayload = parseJson<{ readonly ok: false; readonly code: string }>(missingRemove.stderr);
+    expect(missingRemove.exitCode).toBe(1);
+    expect(missingPayload.code).toBe("BOREAL_NOT_FOUND");
   });
 
   it("normalizes cli machine strings and rejects unsafe unicode input", async () => {

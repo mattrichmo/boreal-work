@@ -313,6 +313,39 @@ describe("boreal runtime proof slice", () => {
     });
   });
 
+  it("removes canonical block graph dependencies and restores readiness", async () => {
+    const runtime = createBorealRuntime({ actor });
+    const blocker = await runtime.createWork({ title: "Removable graph blocker" });
+    const blocked = await runtime.createWork({ title: "Removable graph blocked", ready: true });
+    await runtime.markReady(blocker.meta.id);
+
+    await expect(
+      runtime.addBlockingDependency({ blockedWorkId: blocked.meta.id, blockingWorkId: blocker.meta.id })
+    ).resolves.toMatchObject({
+      status: "blocked",
+      dependencyIds: [blocker.meta.id]
+    });
+
+    await expect(
+      runtime.removeBlockingDependency({ blockedWorkId: blocked.meta.id, blockingWorkId: blocker.meta.id })
+    ).resolves.toMatchObject({
+      status: "ready",
+      dependencyIds: []
+    });
+    await expect(runtime.getWorkView(blocked.meta.id)).resolves.toMatchObject({
+      blockedBy: [],
+      status: "ready"
+    });
+    await expect(
+      runtime.removeBlockingDependency({ blockedWorkId: blocked.meta.id, blockingWorkId: blocker.meta.id })
+    ).rejects.toMatchObject({
+      code: "BOREAL_NOT_FOUND"
+    } satisfies Partial<BorealError>);
+
+    const events = await runtime.listEvents();
+    expect(events.map((event) => event.type)).toContain("work.dependency_removed");
+  });
+
   it("renews, releases, and expires active reservations", async () => {
     let current = new Date("2026-01-01T00:00:00.000Z");
     const store = new InMemoryBorealStore();
