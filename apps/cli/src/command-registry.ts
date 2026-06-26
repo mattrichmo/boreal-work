@@ -83,6 +83,11 @@ export const GLOBAL_FLAGS: readonly FlagDefinition[] = [
     summary: "Actor kind to record in command events.",
   },
   {
+    name: "session",
+    type: "value",
+    summary: "Session identifier to group local command operations.",
+  },
+  {
     name: "help",
     type: "boolean",
     summary: "Show command help.",

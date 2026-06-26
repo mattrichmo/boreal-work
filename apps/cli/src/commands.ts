@@ -1,9 +1,14 @@
 import {
   BorealError,
+  createRecordMeta,
+  isBorealError,
   isIsoTimestamp,
   normalizeActorId,
   normalizeLabels,
   normalizeSearchQuery,
+  nowIso,
+  randomId,
+  withContentHash,
   type AgentReservation,
   type ClaimId,
   type ClaimRecord,
@@ -12,6 +17,7 @@ import {
   type DecisionId,
   type DecisionRecord,
   type DecisionStatus,
+  type EventId,
   type EvidenceRecord,
   type EvidenceKind,
   type EvidenceOutcome,
@@ -20,8 +26,10 @@ import {
   type KnowledgeSource,
   type KnowledgeSourceId,
   type KnowledgeSourceKind,
+  type OperationId,
   type ReservationId,
   type ReservationStatus,
+  type RuntimeOperation,
   type VerificationRecord,
   type VerificationVerdict,
   type WorkId,
@@ -41,8 +49,10 @@ import {
   commandBehavior,
   commandPath,
   findCommandDefinition,
+  registryValueFlagNames,
   serializeCommandDefinition,
-  validateCommandFlags
+  validateCommandFlags,
+  type CommandDefinition
 } from "./command-registry.js";
 import { asEvidenceId, asWorkId, runDoctor, type Diagnostic } from "./doctor.js";
 import { assertInitialized, createCliContext, ensureWorkspaceDirs, type CliContext } from "./context.js";
@@ -241,6 +251,9 @@ export async function runCommand(args: ParsedArgs, output: CliOutput, cwd: strin
   if (definition.requiresWorkspace) {
     assertInitialized(context);
   }
+  const shouldLogOperation = shouldRecordOperation(definition);
+  const startedAt = shouldLogOperation ? nowIso() : undefined;
+  const eventIdsBefore = shouldLogOperation ? await listEventIds(context) : new Set<EventId>();
   const spoolingOutput = json
     ? createResultSpoolingOutput(output, {
         workspaceRoot: context.workspaceRoot,
@@ -250,61 +263,158 @@ export async function runCommand(args: ParsedArgs, output: CliOutput, cwd: strin
     : undefined;
   const commandOutput = spoolingOutput ?? output;
 
-  let result: CommandResult;
-  switch (group) {
-    case "init":
-      result = await initCommand(context, args, commandOutput, json);
-      break;
-    case "work":
-      result = await workCommand(action, rest, context, args, commandOutput, json);
-      break;
-    case "dep":
-      result = await depCommand(action, rest, context, args, commandOutput, json);
-      break;
-    case "evidence":
-      result = await evidenceCommand(action, rest, context, args, commandOutput, json);
-      break;
-    case "source":
-      result = await sourceCommand(action, rest, context, args, commandOutput, json);
-      break;
-    case "claim":
-      result = await claimCommand(action, rest, context, args, commandOutput, json);
-      break;
-    case "decision":
-      result = await decisionCommand(action, rest, context, args, commandOutput, json);
-      break;
-    case "context":
-      result = await contextCommand(action, rest, context, args, commandOutput, json);
-      break;
-    case "search":
-      result = await searchCommand(action, rest, context, args, commandOutput, json);
-      break;
-    case "reservation":
-      result = await reservationCommand(action, context, args, commandOutput, json);
-      break;
-    case "agent":
-      result = await agentCommand(action, rest, context, args, commandOutput, json);
-      break;
-    case "export":
-      result = await exportCommand(action, context, args, commandOutput, json);
-      break;
-    case "import":
-      result = await importCommand(action, context, args, commandOutput, json);
-      break;
-    case "snapshot":
-      result = await snapshotCommand(action, rest, context, args, commandOutput, json);
-      break;
-    case "doctor":
-      result = await doctorCommand(context, args, commandOutput, json);
-      break;
-    case "lock":
-      result = await lockCommand(action, context, args, commandOutput, json);
-      break;
-    default:
-      throw new BorealError("BOREAL_INVALID_INPUT", `Unknown command: ${group ?? ""}`);
+  let result: CommandResult | undefined;
+  let thrown: unknown;
+  try {
+    switch (group) {
+      case "init":
+        result = await initCommand(context, args, commandOutput, json);
+        break;
+      case "work":
+        result = await workCommand(action, rest, context, args, commandOutput, json);
+        break;
+      case "dep":
+        result = await depCommand(action, rest, context, args, commandOutput, json);
+        break;
+      case "evidence":
+        result = await evidenceCommand(action, rest, context, args, commandOutput, json);
+        break;
+      case "source":
+        result = await sourceCommand(action, rest, context, args, commandOutput, json);
+        break;
+      case "claim":
+        result = await claimCommand(action, rest, context, args, commandOutput, json);
+        break;
+      case "decision":
+        result = await decisionCommand(action, rest, context, args, commandOutput, json);
+        break;
+      case "context":
+        result = await contextCommand(action, rest, context, args, commandOutput, json);
+        break;
+      case "search":
+        result = await searchCommand(action, rest, context, args, commandOutput, json);
+        break;
+      case "reservation":
+        result = await reservationCommand(action, context, args, commandOutput, json);
+        break;
+      case "agent":
+        result = await agentCommand(action, rest, context, args, commandOutput, json);
+        break;
+      case "export":
+        result = await exportCommand(action, context, args, commandOutput, json);
+        break;
+      case "import":
+        result = await importCommand(action, context, args, commandOutput, json);
+        break;
+      case "snapshot":
+        result = await snapshotCommand(action, rest, context, args, commandOutput, json);
+        break;
+      case "doctor":
+        result = await doctorCommand(context, args, commandOutput, json);
+        break;
+      case "lock":
+        result = await lockCommand(action, context, args, commandOutput, json);
+        break;
+      default:
+        throw new BorealError("BOREAL_INVALID_INPUT", `Unknown command: ${group ?? ""}`);
+    }
+  } catch (error) {
+    thrown = error;
+  }
+  if (shouldLogOperation && startedAt) {
+    await recordCliOperation(context, definition, args, startedAt, eventIdsBefore, result, thrown);
+  }
+  if (thrown) {
+    throw thrown;
   }
   await spoolingOutput?.flush();
+  if (!result) {
+    throw new BorealError("BOREAL_INVARIANT", "Command did not return a result");
+  }
   return result;
+}
+
+function shouldRecordOperation(definition: CommandDefinition): boolean {
+  return definition.requiresWorkspace || definition.path[0] === "init";
+}
+
+async function recordCliOperation(
+  context: CliContext,
+  definition: CommandDefinition,
+  args: ParsedArgs,
+  startedAt: IsoTimestamp,
+  eventIdsBefore: ReadonlySet<EventId>,
+  result: CommandResult | undefined,
+  error: unknown
+): Promise<void> {
+  const finishedAt = nowIso();
+  const exitCode = error ? commandErrorExitCode(error) : result?.exitCode ?? 1;
+  const behavior = commandBehavior(definition);
+  const status = exitCode === 0 ? "succeeded" : "failed";
+  const operation = {
+    meta: createRecordMeta({
+      id: randomId<OperationId>("operation"),
+      now: finishedAt,
+      actor: context.actor,
+      tags: ["operation"]
+    }),
+    sessionId: context.sessionId,
+    commandPath: commandPath(definition),
+    argv: redactedArgv(definition, args),
+    actorId: String(context.actor.id),
+    startedAt,
+    finishedAt,
+    exitCode,
+    status,
+    stateChanged: status === "succeeded" && behavior.writesState,
+    generatedArtifactsChanged: status === "succeeded" && behavior.writesGeneratedArtifacts,
+    eventIds: [],
+    ...operationErrorFields(error, exitCode)
+  } satisfies RuntimeOperation;
+
+  await context.store.write(async (writer) => {
+    const eventIds = (await writer.listEvents())
+      .map((event) => event.meta.id)
+      .filter((id) => !eventIdsBefore.has(id));
+    await writer.putOperation(withContentHash({ ...operation, eventIds } satisfies RuntimeOperation));
+  });
+}
+
+async function listEventIds(context: CliContext): Promise<ReadonlySet<EventId>> {
+  return new Set((await context.store.read((reader) => reader.listEvents())).map((event) => event.meta.id));
+}
+
+function commandErrorExitCode(error: unknown): number {
+  return isBorealError(error) && (error.code === "BOREAL_INVALID_INPUT" || error.code === "BOREAL_UNSAFE_UNICODE")
+    ? 2
+    : 1;
+}
+
+function operationErrorFields(error: unknown, exitCode: number): Pick<RuntimeOperation, "errorCode" | "errorMessage"> {
+  if (error) {
+    return {
+      errorCode: isBorealError(error) ? error.code : "BOREAL_UNEXPECTED_ERROR",
+      errorMessage: isBorealError(error) ? error.code : "Unexpected command failure"
+    };
+  }
+  return exitCode === 0 ? {} : { errorCode: "BOREAL_COMMAND_EXIT_NONZERO", errorMessage: "Command returned a non-zero exit code" };
+}
+
+function redactedArgv(definition: CommandDefinition, args: ParsedArgs): readonly string[] {
+  const values: string[] = [...definition.path];
+  const valueFlags = registryValueFlagNames();
+  for (const [name, flagValuesForName] of args.flags.entries()) {
+    for (const value of flagValuesForName) {
+      if (valueFlags.has(name)) {
+        values.push(`--${name}`, "<redacted>");
+      } else if (value === "false") {
+        values.push(`--${name}=false`);
+      } else {
+        values.push(`--${name}`);
+      }
+    }
+  }
+  return values;
 }
 
 function commandsCommand(output: CliOutput, json: boolean): CommandResult {

@@ -304,6 +304,7 @@ function emptyStateDocument(overrides: Record<string, readonly unknown[]> = {}):
     graphEdges: [],
     reservations: [],
     events: [],
+    operations: [],
     projections: [],
     contextPacks: [],
     ...overrides

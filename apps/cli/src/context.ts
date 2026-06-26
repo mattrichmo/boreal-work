@@ -16,6 +16,7 @@ export interface CliContext {
   readonly store: FileBorealStore;
   readonly runtime: ReturnType<typeof createBorealRuntime>;
   readonly actor: ActorRef;
+  readonly sessionId: string;
 }
 
 export async function createCliContext(args: ParsedArgs, cwd: string): Promise<CliContext> {
@@ -25,9 +26,10 @@ export async function createCliContext(args: ParsedArgs, cwd: string): Promise<C
     : resolveDiscoveredWorkspaceRoot(cwd);
   const paths = resolveWorkspacePaths(workspaceRoot);
   const actor = actorFromArgs(args);
+  const sessionId = sessionIdFromArgs(args);
   const store = new FileBorealStore({ rootDir: workspaceRoot });
   const runtime = createBorealRuntime({ store, actor });
-  return { cwd, workspaceRoot, paths, store, runtime, actor };
+  return { cwd, workspaceRoot, paths, store, runtime, actor, sessionId };
 }
 
 export async function ensureWorkspaceDirs(context: CliContext): Promise<void> {
@@ -77,4 +79,8 @@ function actorFromArgs(args: ParsedArgs): ActorRef {
     kind,
     displayName: id
   };
+}
+
+function sessionIdFromArgs(args: ParsedArgs): string {
+  return normalizeActorId(flagValue(args, "session") ?? process.env.BOREAL_SESSION_ID ?? "local");
 }

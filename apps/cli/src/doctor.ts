@@ -15,6 +15,7 @@ import {
   type EvidenceRecord,
   type GraphEdge,
   type KnowledgeSource,
+  type RuntimeOperation,
   type VerificationRecord,
   type WorkId,
   type WorkItem
@@ -52,6 +53,7 @@ const STATE_SECTIONS = [
   "graphEdges",
   "reservations",
   "events",
+  "operations",
   "projections",
   "contextPacks"
 ] as const;
@@ -87,21 +89,29 @@ export async function runDoctor(context: CliContext, fix: boolean): Promise<Doct
   validateStateSections(state, diagnostics);
   validateMissingIds(state, diagnostics);
   validateDuplicateIds(state, diagnostics);
-  validateSchemaConformance(state, diagnostics);
+  const schemaIssues = validateSchemaConformance(state, diagnostics);
 
   const storeDiagnostics = await validateStoreRecords(context, fix, state);
   diagnostics.push(...storeDiagnostics.diagnostics);
   fixed = fixed || storeDiagnostics.fixed;
 
-  const drift = await exportDriftDiagnostics(context);
-  diagnostics.push({
-    code: "snapshot.export_drift",
-    severity: drift.drift ? "warning" : "ok",
-    message: drift.drift
-      ? "Latest snapshot content hash differs from current export state"
-      : "Latest snapshot matches current export state or no snapshots exist",
-    details: drift
-  });
+  if (schemaIssues.length === 0) {
+    const drift = await exportDriftDiagnostics(context);
+    diagnostics.push({
+      code: "snapshot.export_drift",
+      severity: drift.drift ? "warning" : "ok",
+      message: drift.drift
+        ? "Latest snapshot content hash differs from current export state"
+        : "Latest snapshot matches current export state or no snapshots exist",
+      details: drift
+    });
+  } else {
+    diagnostics.push({
+      code: "snapshot.export_drift",
+      severity: "warning",
+      message: "Skipped snapshot drift check because runtime state failed schema validation"
+    });
+  }
 
   const searchDiagnostics = await validateSearchIndex(context, fix);
   diagnostics.push(...searchDiagnostics.diagnostics);
@@ -292,7 +302,11 @@ async function readStateDocument(
 
 function validateStateSections(state: Record<string, unknown>, diagnostics: Diagnostic[]): void {
   for (const section of STATE_SECTIONS) {
-    if (!Array.isArray(state[section])) {
+    const value = state[section];
+    if (value === undefined && section === "operations") {
+      continue;
+    }
+    if (!Array.isArray(value)) {
       diagnostics.push({
         code: "state.section",
         severity: "error",
@@ -355,11 +369,15 @@ function validateDuplicateIds(state: Record<string, unknown>, diagnostics: Diagn
   });
 }
 
-function validateSchemaConformance(state: Record<string, unknown>, diagnostics: Diagnostic[]): void {
+function validateSchemaConformance(
+  state: Record<string, unknown>,
+  diagnostics: Diagnostic[]
+): ReturnType<typeof runtimeSnapshotSchemaIssues> {
   const issues = runtimeSnapshotSchemaIssues({
     workItems: stateSection(state, "workItems"),
     evidence: stateSection(state, "evidence"),
-    events: stateSection(state, "events")
+    events: stateSection(state, "events"),
+    operations: stateSection(state, "operations")
   });
 
   diagnostics.push({
@@ -368,6 +386,7 @@ function validateSchemaConformance(state: Record<string, unknown>, diagnostics: 
     message: issues.length > 0 ? "Runtime state failed schema validation" : "Runtime state matches integrated schemas",
     details: issues.length > 0 ? { issues: issues.slice(0, 50), issueCount: issues.length } : undefined
   });
+  return issues;
 }
 
 async function validateStoreRecords(
@@ -393,6 +412,8 @@ async function validateStoreRecords(
       const rawContextPacks = stateSection<ContextPack>(state, "contextPacks");
       const rawGraphEdges = stateSection<GraphEdge>(state, "graphEdges");
       const rawReservations = stateSection<AgentReservation>(state, "reservations");
+      const rawEvents = stateSection<Record<string, unknown>>(state, "events");
+      const rawOperations = stateSection<RuntimeOperation>(state, "operations");
       const malformedRecords = [
         ...malformedIndexes(rawWorkItems, isDoctorWorkItem, "workItems"),
         ...malformedIndexes(rawEvidence, isDoctorEvidence, "evidence"),
@@ -402,7 +423,8 @@ async function validateStoreRecords(
         ...malformedIndexes(rawDecisions, isDoctorDecision, "decisions"),
         ...malformedIndexes(rawContextPacks, isDoctorContextPack, "contextPacks"),
         ...malformedIndexes(rawGraphEdges, isDoctorGraphEdge, "graphEdges"),
-        ...malformedIndexes(rawReservations, isDoctorReservation, "reservations")
+        ...malformedIndexes(rawReservations, isDoctorReservation, "reservations"),
+        ...malformedIndexes(rawOperations, isDoctorOperation, "operations")
       ];
       const workItems = rawWorkItems.filter(isDoctorWorkItem);
       const evidence = rawEvidence.filter(isDoctorEvidence);
@@ -412,10 +434,12 @@ async function validateStoreRecords(
       const decisions = rawDecisions.filter(isDoctorDecision);
       const graphEdges = rawGraphEdges.filter(isDoctorGraphEdge);
       const reservations = rawReservations.filter(isDoctorReservation);
+      const operations = rawOperations.filter(isDoctorOperation);
       const evidenceById = new Map(evidence.map((record) => [record.meta.id, record]));
       const sourceById = new Map(knowledgeSources.map((record) => [record.meta.id, record]));
       const verificationsById = new Map(verifications.map((record) => [record.meta.id, record]));
       const workById = new Map(workItems.map((work) => [work.meta.id, work]));
+      const eventIds = new Set(rawEvents.map((event) => readRecordId(event, "events")).filter(isString));
       const danglingDependencies = workItems.flatMap((work) =>
         work.dependencyIds
           .filter((dependencyId) => !workById.has(dependencyId))
@@ -533,6 +557,11 @@ async function validateStoreRecords(
       const closedWithoutReason = workItems
         .filter((work) => work.status === "closed" && !work.closedReason?.trim())
         .map((work) => work.meta.id);
+      const danglingOperationEvents = operations.flatMap((operation) =>
+        operation.eventIds
+          .filter((eventId) => !eventIds.has(eventId))
+          .map((eventId) => ({ operationId: operation.meta.id, eventId }))
+      );
       const stringSafety = stringSafetyIssues({
         workItems,
         evidence,
@@ -542,6 +571,7 @@ async function validateStoreRecords(
         decisions,
         graphEdges,
         reservations,
+        operations,
         contextPacks: rawContextPacks.filter(isDoctorContextPack)
       });
       const labelCollisions = labelNormalizationCollisions(workItems);
@@ -553,11 +583,13 @@ async function validateStoreRecords(
         claims,
         decisions,
         graphEdges,
-        reservations
+        reservations,
+        operations
       });
 
       return {
         workCount: workItems.length,
+        operationCount: operations.length,
         malformedRecords,
         danglingDependencies,
         danglingEvidence,
@@ -576,6 +608,7 @@ async function validateStoreRecords(
         expiredActiveReservations,
         verificationPolicy,
         closedWithoutReason,
+        danglingOperationEvents,
         stringSafety,
         labelCollisions,
         actorCollisions
@@ -586,6 +619,11 @@ async function validateStoreRecords(
       code: "work.count",
       severity: "ok",
       message: `${summary.workCount} work item(s) loaded`
+    });
+    diagnostics.push({
+      code: "operation.count",
+      severity: "ok",
+      message: `${summary.operationCount} operation(s) loaded`
     });
     diagnostics.push(diagnosticFromList("state.record_shape", "Malformed runtime records", summary.malformedRecords));
     diagnostics.push(diagnosticFromList("work.dangling_dependencies", "Dangling work dependencies", summary.danglingDependencies));
@@ -651,6 +689,7 @@ async function validateStoreRecords(
     }
     diagnostics.push(diagnosticFromList("verification.policy", "Verification policy issues", summary.verificationPolicy));
     diagnostics.push(diagnosticFromList("work.closed_reason", "Closed work items missing a close reason", summary.closedWithoutReason));
+    diagnostics.push(diagnosticFromList("operation.dangling_events", "Operation event references missing runtime events", summary.danglingOperationEvents));
     diagnostics.push(diagnosticFromList("string.suspicious_unicode", "Unsafe Unicode in machine-facing strings", summary.stringSafety));
     diagnostics.push(warningDiagnosticFromList("label.normalization_collision", "Label normalization collisions", summary.labelCollisions));
     diagnostics.push(warningDiagnosticFromList("actor.normalization_collision", "Actor normalization collisions", summary.actorCollisions));
@@ -758,6 +797,7 @@ interface StringSafetyInput {
   readonly decisions: readonly DecisionRecord[];
   readonly graphEdges: readonly GraphEdge[];
   readonly reservations: readonly AgentReservation[];
+  readonly operations: readonly RuntimeOperation[];
   readonly contextPacks: readonly ContextPack[];
 }
 
@@ -787,6 +827,13 @@ function stringSafetyIssues(input: StringSafetyInput): Array<Record<string, unkn
     ...input.reservations.flatMap((reservation) => [
       ...metaStringFields("reservations", reservation.meta.id, reservation),
       stringField("reservations", reservation.meta.id, "agentId", String(reservation.agentId))
+    ]),
+    ...input.operations.flatMap((operation) => [
+      ...metaStringFields("operations", operation.meta.id, operation),
+      stringField("operations", operation.meta.id, "sessionId", operation.sessionId),
+      stringField("operations", operation.meta.id, "commandPath", operation.commandPath),
+      stringField("operations", operation.meta.id, "actorId", operation.actorId),
+      ...operation.argv.map((entry, index) => stringField("operations", operation.meta.id, `argv[${index}]`, entry))
     ]),
     ...input.contextPacks.map((pack) => stringField("contextPacks", pack.id, "title", pack.title))
   ];
@@ -833,7 +880,8 @@ function actorNormalizationCollisions(input: Omit<StringSafetyInput, "contextPac
     ...input.claims.map((record) => ({ section: "claims", id: record.meta.id, record })),
     ...input.decisions.map((record) => ({ section: "decisions", id: record.meta.id, record })),
     ...input.graphEdges.map((record) => ({ section: "graphEdges", id: record.meta.id, record })),
-    ...input.reservations.map((record) => ({ section: "reservations", id: record.meta.id, record }))
+    ...input.reservations.map((record) => ({ section: "reservations", id: record.meta.id, record })),
+    ...input.operations.map((record) => ({ section: "operations", id: record.meta.id, record }))
   ];
   const actorEntries = records.flatMap(({ section, id, record }) => [
     {
@@ -855,7 +903,13 @@ function actorNormalizationCollisions(input: Omit<StringSafetyInput, "contextPac
     id: reservation.meta.id,
     field: "agentId"
   }));
-  return normalizationCollisions([...actorEntries, ...reservationEntries], normalizeActorId);
+  const operationEntries = input.operations.map((operation) => ({
+    value: operation.actorId,
+    section: "operations",
+    id: operation.meta.id,
+    field: "actorId"
+  }));
+  return normalizationCollisions([...actorEntries, ...reservationEntries, ...operationEntries], normalizeActorId);
 }
 
 function metaStringFields(
@@ -1170,6 +1224,10 @@ function isWorkItem(value: WorkItem | undefined): value is WorkItem {
   return value !== undefined;
 }
 
+function isString(value: unknown): value is string {
+  return typeof value === "string";
+}
+
 function isDoctorWorkItem(value: unknown): value is WorkItem {
   return (
     isRecord(value) &&
@@ -1261,6 +1319,24 @@ function isDoctorReservation(value: unknown): value is AgentReservation {
     isReservationStatus(value.status) &&
     typeof value.reservedAt === "string" &&
     (value.expiresAt === undefined || typeof value.expiresAt === "string")
+  );
+}
+
+function isDoctorOperation(value: unknown): value is RuntimeOperation {
+  return (
+    isRecord(value) &&
+    readRecordId(value, "operations") !== undefined &&
+    typeof value.sessionId === "string" &&
+    typeof value.commandPath === "string" &&
+    Array.isArray(value.argv) &&
+    typeof value.actorId === "string" &&
+    typeof value.startedAt === "string" &&
+    typeof value.finishedAt === "string" &&
+    Number.isInteger(value.exitCode) &&
+    (value.status === "succeeded" || value.status === "failed") &&
+    typeof value.stateChanged === "boolean" &&
+    typeof value.generatedArtifactsChanged === "boolean" &&
+    Array.isArray(value.eventIds)
   );
 }
 

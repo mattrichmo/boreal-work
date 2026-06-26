@@ -22,9 +22,12 @@ Global flags:
 - `--json`: emit a stable JSON envelope for automation.
 - `--actor <id>`: override the actor ID stored on new records.
 - `--actor-kind human|agent|system`: override the actor kind. Defaults to `human`.
+- `--session <id>`: group local command operation records under a session ID. Defaults to `BOREAL_SESSION_ID` or `local`.
 - `--help`: show root or group help.
 
 In JSON mode, successful commands write one JSON envelope to stdout, errors write one JSON envelope to stderr, and unexpected raw stdout writes are redirected to stderr so stdout stays parseable. If a JSON result exceeds the command's `behavior.maxResultSizeChars`, Boreal writes the full envelope under `.boreal/results/` and returns compact data with `truncated`, `preview`, `fullResultPath`, and `fullResultBytes`.
+
+Initialized workspace commands append local runtime operation records to `.boreal/runtime/state.json`. Operation records include the command path, session ID, actor, timing, exit status, declared state/artifact effects, redacted argv, and event IDs created by the command. They are local audit data and are excluded from portable exports and snapshot content hashes.
 
 Flag parsing:
 

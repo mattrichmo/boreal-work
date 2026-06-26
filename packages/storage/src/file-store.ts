@@ -109,6 +109,7 @@ function snapshotToDocument(snapshot: StoreSnapshot): StateDocument {
     graphEdges: snapshot.graphEdges ?? [],
     reservations: snapshot.reservations ?? [],
     events: snapshot.events ?? [],
+    operations: snapshot.operations ?? [],
     projections: snapshot.projections ?? [],
     contextPacks: snapshot.contextPacks ?? []
   };
@@ -135,6 +136,7 @@ function documentToSnapshot(value: unknown): StoreSnapshot {
     graphEdges: readArray(value, "graphEdges"),
     reservations: readArray(value, "reservations"),
     events: readArray(value, "events"),
+    operations: readOptionalArray(value, "operations"),
     projections: readArray(value, "projections"),
     contextPacks: readArray(value, "contextPacks")
   };
@@ -150,6 +152,17 @@ function documentToSnapshot(value: unknown): StoreSnapshot {
 
 function readArray<T = unknown>(value: Record<string, unknown>, key: string): readonly T[] {
   const candidate = value[key];
+  if (!Array.isArray(candidate)) {
+    throw new BorealError("BOREAL_STORAGE_ERROR", "Boreal state file section must be an array", { key });
+  }
+  return candidate as readonly T[];
+}
+
+function readOptionalArray<T = unknown>(value: Record<string, unknown>, key: string): readonly T[] {
+  const candidate = value[key];
+  if (candidate === undefined) {
+    return [];
+  }
   if (!Array.isArray(candidate)) {
     throw new BorealError("BOREAL_STORAGE_ERROR", "Boreal state file section must be an array", { key });
   }

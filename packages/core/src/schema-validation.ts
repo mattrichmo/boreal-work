@@ -11,6 +11,7 @@ export const RUNTIME_SCHEMA_IDS = {
   workItem: "https://boreal.work/schemas/records/work-item.schema.json",
   evidenceRecord: "https://boreal.work/schemas/records/evidence-record.schema.json",
   runtimeEvent: "https://boreal.work/schemas/events/runtime-event.schema.json",
+  runtimeOperation: "https://boreal.work/schemas/operations/runtime-operation.schema.json",
   runtimePolicy: "https://boreal.work/schemas/policies/runtime-policy.schema.json"
 } as const;
 
@@ -18,11 +19,18 @@ export function runtimeSnapshotSchemaIssues(snapshot: {
   readonly workItems?: readonly unknown[];
   readonly evidence?: readonly unknown[];
   readonly events?: readonly unknown[];
+  readonly operations?: readonly unknown[];
 }): readonly SchemaValidationIssue[] {
   return [
     ...arrayItems(snapshot.workItems ?? [], RUNTIME_SCHEMA_IDS.workItem, "workItems", workItemSchemaIssues),
     ...arrayItems(snapshot.evidence ?? [], RUNTIME_SCHEMA_IDS.evidenceRecord, "evidence", evidenceRecordSchemaIssues),
     ...arrayItems(snapshot.events ?? [], RUNTIME_SCHEMA_IDS.runtimeEvent, "events", runtimeEventSchemaIssues),
+    ...arrayItems(
+      snapshot.operations ?? [],
+      RUNTIME_SCHEMA_IDS.runtimeOperation,
+      "operations",
+      runtimeOperationSchemaIssues
+    ),
     ...(snapshot.events ?? []).flatMap((event, index) => workspaceInitializedPolicyIssues(event, `events[${index}]`))
   ];
 }
@@ -111,6 +119,37 @@ export function runtimeEventSchemaIssues(value: unknown, path = "$"): readonly S
     ...nonEmptyStringIssue(value.subjectType, `${path}.subjectType`, schemaId),
     ...recordIssue(value.payload, `${path}.payload`, schemaId)
   ];
+}
+
+export function runtimeOperationSchemaIssues(value: unknown, path = "$"): readonly SchemaValidationIssue[] {
+  const schemaId = RUNTIME_SCHEMA_IDS.runtimeOperation;
+  if (!isRecord(value)) {
+    return [issue(schemaId, path, "must be an object")];
+  }
+
+  const issues: SchemaValidationIssue[] = [
+    ...recordMetaIssues(value.meta, `${path}.meta`, schemaId, /^bw_operation_[a-f0-9]{12,64}$/),
+    ...nonEmptyStringIssue(value.sessionId, `${path}.sessionId`, schemaId),
+    ...nonEmptyStringIssue(value.commandPath, `${path}.commandPath`, schemaId),
+    ...stringArrayIssue(value.argv, `${path}.argv`, schemaId),
+    ...nonEmptyStringIssue(value.actorId, `${path}.actorId`, schemaId),
+    ...stringIssue(value.startedAt, `${path}.startedAt`, schemaId),
+    ...stringIssue(value.finishedAt, `${path}.finishedAt`, schemaId),
+    ...integerAtLeastIssue(value.exitCode, `${path}.exitCode`, schemaId, 0),
+    ...enumIssue(value.status, `${path}.status`, schemaId, ["succeeded", "failed"]),
+    ...booleanIssue(value.stateChanged, `${path}.stateChanged`, schemaId),
+    ...booleanIssue(value.generatedArtifactsChanged, `${path}.generatedArtifactsChanged`, schemaId),
+    ...uniqueStringArrayIssue(value.eventIds, `${path}.eventIds`, schemaId)
+  ];
+
+  if (value.errorCode !== undefined) {
+    issues.push(...stringIssue(value.errorCode, `${path}.errorCode`, schemaId));
+  }
+  if (value.errorMessage !== undefined) {
+    issues.push(...stringIssue(value.errorMessage, `${path}.errorMessage`, schemaId));
+  }
+
+  return issues;
 }
 
 export function runtimePolicySchemaIssues(value: unknown, path = "$"): readonly SchemaValidationIssue[] {

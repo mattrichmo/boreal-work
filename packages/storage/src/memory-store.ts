@@ -12,10 +12,12 @@ import type {
   GraphEdgeId,
   KnowledgeSource,
   KnowledgeSourceId,
+  OperationId,
   ProjectionId,
   ProjectionRecord,
   ReservationId,
   RuntimeEvent,
+  RuntimeOperation,
   VerificationId,
   VerificationRecord,
   WorkId,
@@ -34,6 +36,7 @@ interface StoreState {
   readonly graphEdges: Map<GraphEdgeId, GraphEdge>;
   readonly reservations: Map<ReservationId, AgentReservation>;
   readonly events: Map<string, RuntimeEvent>;
+  readonly operations: Map<OperationId, RuntimeOperation>;
   readonly projections: Map<ProjectionId, ProjectionRecord>;
   readonly contextPacks: Map<ProjectionId, ContextPack>;
 }
@@ -73,6 +76,7 @@ export interface StoreSnapshot {
   readonly graphEdges?: readonly GraphEdge[];
   readonly reservations?: readonly AgentReservation[];
   readonly events?: readonly RuntimeEvent[];
+  readonly operations?: readonly RuntimeOperation[];
   readonly projections?: readonly ProjectionRecord[];
   readonly contextPacks?: readonly ContextPack[];
 }
@@ -177,6 +181,14 @@ class MemoryTransaction implements BorealWriter {
     return deepClone([...this.state.events.values()]);
   }
 
+  async getOperation(id: OperationId): Promise<RuntimeOperation | undefined> {
+    return cloneMaybe(this.state.operations.get(id));
+  }
+
+  async listOperations(): Promise<readonly RuntimeOperation[]> {
+    return deepClone([...this.state.operations.values()]);
+  }
+
   async getProjection(id: ProjectionId): Promise<ProjectionRecord | undefined> {
     return cloneMaybe(this.state.projections.get(id));
   }
@@ -229,6 +241,10 @@ class MemoryTransaction implements BorealWriter {
     this.state.events.set(record.meta.id, deepClone(record));
   }
 
+  async putOperation(record: RuntimeOperation): Promise<void> {
+    this.state.operations.set(record.meta.id, deepClone(record));
+  }
+
   async putProjection(record: ProjectionRecord): Promise<void> {
     this.state.projections.set(record.meta.id, deepClone(record));
   }
@@ -249,6 +265,7 @@ function createState(seed?: PartialStoreSeed): StoreState {
     graphEdges: new Map((seed?.graphEdges ?? []).map((record) => [record.meta.id, deepClone(record)])),
     reservations: new Map((seed?.reservations ?? []).map((record) => [record.meta.id, deepClone(record)])),
     events: new Map((seed?.events ?? []).map((record) => [record.meta.id, deepClone(record)])),
+    operations: new Map((seed?.operations ?? []).map((record) => [record.meta.id, deepClone(record)])),
     projections: new Map((seed?.projections ?? []).map((record) => [record.meta.id, deepClone(record)])),
     contextPacks: new Map((seed?.contextPacks ?? []).map((record) => [record.id, deepClone(record)]))
   };
@@ -269,6 +286,7 @@ function stateToSnapshot(state: StoreState): StoreSnapshot {
     graphEdges: [...state.graphEdges.values()],
     reservations: [...state.reservations.values()],
     events: [...state.events.values()],
+    operations: [...state.operations.values()],
     projections: [...state.projections.values()],
     contextPacks: [...state.contextPacks.values()]
   };

@@ -11,10 +11,12 @@ import type {
   GraphEdgeId,
   KnowledgeSource,
   KnowledgeSourceId,
+  OperationId,
   ProjectionId,
   ProjectionRecord,
   ReservationId,
   RuntimeEvent,
+  RuntimeOperation,
   VerificationId,
   VerificationRecord,
   WorkId,
@@ -49,6 +51,8 @@ export interface BorealReader {
   listReservationsForWork(workId: WorkId): Promise<readonly AgentReservation[]>;
   listActiveReservationsForAgent(agentId: string): Promise<readonly AgentReservation[]>;
   listEvents(): Promise<readonly RuntimeEvent[]>;
+  getOperation(id: OperationId): Promise<RuntimeOperation | undefined>;
+  listOperations(): Promise<readonly RuntimeOperation[]>;
   getProjection(id: ProjectionId): Promise<ProjectionRecord | undefined>;
   listProjections(): Promise<readonly ProjectionRecord[]>;
   listContextPacks(): Promise<readonly ContextPack[]>;
@@ -65,6 +69,7 @@ export interface BorealWriter extends BorealReader {
   putGraphEdge(record: GraphEdge): Promise<void>;
   putReservation(record: AgentReservation): Promise<void>;
   putEvent(record: RuntimeEvent): Promise<void>;
+  putOperation(record: RuntimeOperation): Promise<void>;
   putProjection(record: ProjectionRecord): Promise<void>;
   putContextPack(record: ContextPack): Promise<void>;
 }

@@ -13,6 +13,7 @@ export type EventId = Brand<string, "EventId">;
 export type EvidenceId = Brand<string, "EvidenceId">;
 export type GraphEdgeId = Brand<string, "GraphEdgeId">;
 export type KnowledgeSourceId = Brand<string, "KnowledgeSourceId">;
+export type OperationId = Brand<string, "OperationId">;
 export type ProjectionId = Brand<string, "ProjectionId">;
 export type ReservationId = Brand<string, "ReservationId">;
 export type VerificationId = Brand<string, "VerificationId">;
@@ -25,6 +26,7 @@ export type EntityPrefix =
   | "edge"
   | "event"
   | "evidence"
+  | "operation"
   | "projection"
   | "reservation"
   | "source"

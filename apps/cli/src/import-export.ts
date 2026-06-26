@@ -27,7 +27,7 @@ export interface ExportDocument {
   readonly workspaceRoot: string;
   readonly contentHash: string;
   readonly recordCounts: Record<SnapshotSection, number>;
-  readonly state: Required<StoreSnapshot>;
+  readonly state: ExportSnapshot;
 }
 
 export interface ExportWriteResult {
@@ -78,6 +78,8 @@ export type SnapshotSection =
   | "events"
   | "projections"
   | "contextPacks";
+
+type ExportSnapshot = Required<Pick<StoreSnapshot, SnapshotSection>>;
 
 const SNAPSHOT_SECTIONS: readonly SnapshotSection[] = [
   "workItems",
@@ -226,7 +228,7 @@ export async function exportDriftDiagnostics(context: CliContext): Promise<{
   };
 }
 
-async function readSnapshot(reader: BorealReader): Promise<Required<StoreSnapshot>> {
+async function readSnapshot(reader: BorealReader): Promise<ExportSnapshot> {
   return {
     workItems: await reader.listWorkItems(),
     evidence: await reader.listEvidence(),
@@ -242,7 +244,7 @@ async function readSnapshot(reader: BorealReader): Promise<Required<StoreSnapsho
   };
 }
 
-async function importSnapshot(store: BorealStore, incoming: Required<StoreSnapshot>): Promise<ImportResult> {
+async function importSnapshot(store: BorealStore, incoming: ExportSnapshot): Promise<ImportResult> {
   validateSnapshot(incoming);
   return store.write(async (writer) => {
     const current = await readSnapshot(writer);
@@ -253,7 +255,7 @@ async function importSnapshot(store: BorealStore, incoming: Required<StoreSnapsh
   });
 }
 
-function parseImportSnapshot(value: unknown): Required<StoreSnapshot> {
+function parseImportSnapshot(value: unknown): ExportSnapshot {
   if (!isRecord(value)) {
     throw new BorealError("BOREAL_INVALID_INPUT", "Import file must contain a JSON object");
   }
@@ -292,7 +294,7 @@ function parseExportDocument(value: unknown): ExportDocument {
   };
 }
 
-function normalizeSnapshot(value: unknown): Required<StoreSnapshot> {
+function normalizeSnapshot(value: unknown): ExportSnapshot {
   if (!isRecord(value)) {
     throw new BorealError("BOREAL_INVALID_INPUT", "Snapshot state must be an object");
   }
@@ -307,11 +309,11 @@ function normalizeSnapshot(value: unknown): Required<StoreSnapshot> {
       }
       return [section, sectionValue];
     })
-  ) as unknown as Required<StoreSnapshot>;
+  ) as unknown as ExportSnapshot;
   return snapshot;
 }
 
-function validateSnapshot(snapshot: Required<StoreSnapshot>): void {
+function validateSnapshot(snapshot: ExportSnapshot): void {
   const schemaIssues = runtimeSnapshotSchemaIssues(snapshot);
   if (schemaIssues.length > 0) {
     throw new BorealError("BOREAL_INVALID_INPUT", "Snapshot failed schema validation", {
@@ -436,10 +438,10 @@ function assertReferences(label: string, recordId: string, values: readonly stri
 }
 
 function mergeSnapshot(
-  current: Required<StoreSnapshot>,
-  incoming: Required<StoreSnapshot>
+  current: ExportSnapshot,
+  incoming: ExportSnapshot
 ): {
-  readonly state: Required<StoreSnapshot>;
+  readonly state: ExportSnapshot;
   readonly imported: Record<SnapshotSection, number>;
   readonly skipped: Record<SnapshotSection, number>;
   readonly importableIds: Record<SnapshotSection, ReadonlySet<string>>;
@@ -483,7 +485,7 @@ function mergeSnapshot(
 
 async function writeImportedRecords(
   writer: BorealWriter,
-  incoming: Required<StoreSnapshot>,
+  incoming: ExportSnapshot,
   importableIds: Record<SnapshotSection, ReadonlySet<string>>
 ): Promise<void> {
   for (const record of incoming.workItems.filter((entry) => importableIds.workItems.has(entry.meta.id))) {
@@ -653,7 +655,7 @@ function isStringArray(value: FrontmatterValue): value is readonly string[] {
   return Array.isArray(value);
 }
 
-function recordCounts(state: Required<StoreSnapshot>): Record<SnapshotSection, number> {
+function recordCounts(state: ExportSnapshot): Record<SnapshotSection, number> {
   return Object.fromEntries(SNAPSHOT_SECTIONS.map((section) => [section, state[section].length])) as Record<
     SnapshotSection,
     number

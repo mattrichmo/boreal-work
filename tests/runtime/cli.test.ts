@@ -270,6 +270,68 @@ describe("bwrk cli", () => {
     expect(searchQuery?.behavior).toEqual(expect.objectContaining({ readOnly: true, requiresFreshIndex: true }));
   });
 
+  it("records local command operations with session, redacted argv, and generated event ids", async () => {
+    const rootDir = await makeTempWorkspace();
+
+    const init = await runCli(rootDir, ["init", "--session", "Session One", "--actor", "Agent Op", "--actor-kind", "agent", "--json"]);
+    expect(init.exitCode).toBe(0);
+    const created = await runCli(rootDir, [
+      "work",
+      "create",
+      "Operation tracked work",
+      "--label",
+      "Sensitive Label",
+      "--ready",
+      "--session",
+      "Run 42",
+      "--actor",
+      "Agent Op",
+      "--actor-kind",
+      "agent",
+      "--json"
+    ]);
+    expect(created.exitCode).toBe(0);
+
+    const state = parseJson<{
+      readonly events: Array<{ readonly meta: { readonly id: string }; readonly type: string }>;
+      readonly operations: Array<{
+        readonly meta: { readonly id: string; readonly contentHash: string };
+        readonly sessionId: string;
+        readonly commandPath: string;
+        readonly argv: readonly string[];
+        readonly actorId: string;
+        readonly exitCode: number;
+        readonly status: string;
+        readonly stateChanged: boolean;
+        readonly generatedArtifactsChanged: boolean;
+        readonly eventIds: readonly string[];
+      }>;
+    }>(await readFile(join(rootDir, ".boreal/runtime/state.json"), "utf8"));
+    const workCreatedEvent = state.events.find((event) => event.type === "work.created");
+    const operation = state.operations.find((entry) => entry.commandPath === "work create");
+
+    expect(state.operations.map((entry) => entry.commandPath)).toEqual(expect.arrayContaining(["init", "work create"]));
+    expect(operation).toEqual(
+      expect.objectContaining({
+        sessionId: "run 42",
+        actorId: "agent op",
+        exitCode: 0,
+        status: "succeeded",
+        stateChanged: true,
+        generatedArtifactsChanged: false
+      })
+    );
+    expect(operation?.meta.id).toMatch(/^bw_operation_/);
+    expect(operation?.meta.contentHash).toMatch(/^sha256:/);
+    expect(operation?.argv).toEqual(
+      expect.arrayContaining(["work", "create", "--label", "<redacted>", "--ready", "--session", "<redacted>", "--actor", "<redacted>"])
+    );
+    expect(operation?.argv.join(" ")).not.toContain("Operation tracked work");
+    expect(operation?.argv.join(" ")).not.toContain("Sensitive Label");
+    expect(workCreatedEvent).toBeDefined();
+    expect(operation?.eventIds).toContain(workCreatedEvent?.meta.id);
+  });
+
   it("rejects unknown flags and honors explicit false booleans", async () => {
     const rootDir = await makeTempWorkspace();
 
@@ -543,6 +605,33 @@ describe("bwrk cli", () => {
         expect.objectContaining({ code: "string.suspicious_unicode", severity: "error" }),
         expect.objectContaining({ code: "label.normalization_collision", severity: "warning" }),
         expect.objectContaining({ code: "actor.normalization_collision", severity: "warning" })
+      ])
+    );
+  });
+
+  it("reports malformed operation records in doctor without masking diagnostics", async () => {
+    const rootDir = await makeTempWorkspace();
+    await runCli(rootDir, ["init", "--json"]);
+    await updateState(rootDir, (state) => {
+      const operations = ((state.operations as Array<Record<string, unknown>> | undefined) ?? []).map((operation, index) =>
+        index === 0 ? { ...operation, status: "sideways" } : operation
+      );
+      return { ...state, operations };
+    });
+
+    const doctor = await runCli(rootDir, ["doctor", "--json"]);
+    const payload = parseData<{
+      readonly ok: boolean;
+      readonly diagnostics: Array<{ readonly code: string; readonly severity: string }>;
+    }>(doctor.stdout);
+
+    expect(doctor.exitCode).toBe(1);
+    expect(payload.ok).toBe(false);
+    expect(payload.diagnostics).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ code: "state.schema_validation", severity: "error" }),
+        expect.objectContaining({ code: "state.record_shape", severity: "error" }),
+        expect.objectContaining({ code: "snapshot.export_drift", severity: "warning" })
       ])
     );
   });
@@ -1988,6 +2077,7 @@ function emptyFileStoreState(overrides: Record<string, readonly unknown[]> = {})
     graphEdges: [],
     reservations: [],
     events: [],
+    operations: [],
     projections: [],
     contextPacks: [],
     ...overrides

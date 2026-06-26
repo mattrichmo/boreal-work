@@ -7,6 +7,7 @@ import type {
   EvidenceId,
   GraphEdgeId,
   KnowledgeSourceId,
+  OperationId,
   ProjectionId,
   ReservationId,
   VerificationId,
@@ -171,6 +172,25 @@ export interface RuntimeEvent {
   readonly payload: Record<string, unknown>;
 }
 
+export type RuntimeOperationStatus = "succeeded" | "failed";
+
+export interface RuntimeOperation {
+  readonly meta: RecordMeta<OperationId>;
+  readonly sessionId: string;
+  readonly commandPath: string;
+  readonly argv: readonly string[];
+  readonly actorId: string;
+  readonly startedAt: IsoTimestamp;
+  readonly finishedAt: IsoTimestamp;
+  readonly exitCode: number;
+  readonly status: RuntimeOperationStatus;
+  readonly stateChanged: boolean;
+  readonly generatedArtifactsChanged: boolean;
+  readonly eventIds: readonly EventId[];
+  readonly errorCode?: string;
+  readonly errorMessage?: string;
+}
+
 export interface ProjectionRecord {
   readonly meta: RecordMeta<ProjectionId>;
   readonly kind: string;
@@ -187,4 +207,3 @@ export interface ContextPack {
   readonly facts: readonly string[];
   readonly evidence: readonly string[];
 }
-
