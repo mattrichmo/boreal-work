@@ -816,7 +816,7 @@ JSON `data` contains `ok`, `initialized`, `rootDir`, `schemaVersion`, `health`, 
 bwrk raw add --title <text> [--uri <uri>] [--kind raw|document|chat|code|artifact] [--summary <text>] [--tag <tag>...] [--json]
 ```
 
-Appends an immutable raw source record to `memory/raw/index.jsonl`. The memory vault must be initialized first with `bwrk vault init`.
+Appends an immutable raw source record to `memory/raw/index.jsonl`. The memory vault must be initialized first with `bwrk vault init`. Concurrent JSONL appends are serialized with repo-local locks under `memory/.boreal/locks/`.
 
 JSON `data` contains `added`, `indexPath`, and the raw source `record` with stable metadata and a content hash.
 

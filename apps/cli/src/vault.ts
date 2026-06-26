@@ -3,7 +3,7 @@ import { mkdir, readFile, readdir, stat } from "node:fs/promises";
 import { basename, join } from "node:path";
 
 import { BorealError, hashContent, normalizeLabels, normalizeMachineString, nowIso, randomId, safeParseJson } from "@boreal/core";
-import { writeTextFileAtomic } from "@boreal/storage";
+import { normalizeFileLockOptions, withFileLock, writeTextFileAtomic } from "@boreal/storage";
 
 import type { CliContext } from "./context.js";
 
@@ -157,6 +157,8 @@ export interface VaultLedgerEvent {
   readonly contentHash: string;
 }
 
+const VAULT_JSONL_LOCK_OPTIONS = normalizeFileLockOptions();
+
 const REQUIRED_DIRECTORIES = [
   "memory",
   "memory/raw",
@@ -275,9 +277,7 @@ export async function addRawSource(context: CliContext, input: RawAddInput): Pro
     ...baseRecord,
     contentHash: hashContent(baseRecord)
   };
-  const indexPath = join(context.workspaceRoot, "memory/raw/index.jsonl");
-  const existing = await readTextIfExists(indexPath);
-  await writeTextFileAtomic(indexPath, `${existing}${existing && !existing.endsWith("\n") ? "\n" : ""}${JSON.stringify(record)}\n`);
+  const indexPath = await appendVaultJsonlRecord(context, "memory/raw/index.jsonl", "raw-index", record);
   return {
     added: true,
     indexPath,
@@ -368,10 +368,24 @@ export async function appendVaultLedgerEvent(context: CliContext, input: VaultLe
     ...baseRecord,
     contentHash: hashContent(baseRecord)
   };
-  const ledgerPath = join(context.workspaceRoot, "memory/ledgers/events.jsonl");
-  const existing = await readTextIfExists(ledgerPath);
-  await writeTextFileAtomic(ledgerPath, `${existing}${existing && !existing.endsWith("\n") ? "\n" : ""}${JSON.stringify(record)}\n`);
+  await appendVaultJsonlRecord(context, "memory/ledgers/events.jsonl", "ledger-events", record);
   return record;
+}
+
+async function appendVaultJsonlRecord(
+  context: CliContext,
+  relativePath: string,
+  lockName: string,
+  record: unknown
+): Promise<string> {
+  const path = join(context.workspaceRoot, relativePath);
+  const lockDir = join(context.workspaceRoot, "memory/.boreal/locks", `${lockName}.lock`);
+  await withFileLock(lockDir, VAULT_JSONL_LOCK_OPTIONS, async () => {
+    const existing = await readTextIfExists(path);
+    const prefix = existing && !existing.endsWith("\n") ? `${existing}\n` : existing;
+    await writeTextFileAtomic(path, `${prefix}${JSON.stringify(record)}\n`);
+  });
+  return path;
 }
 
 async function pathStatus(

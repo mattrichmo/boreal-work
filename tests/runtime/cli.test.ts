@@ -361,6 +361,42 @@ describe("bwrk cli", () => {
     );
   });
 
+  it("serializes concurrent vault raw source appends", async () => {
+    const rootDir = await makeTempWorkspace();
+    await runCli(rootDir, ["init", "--json"]);
+    await runCli(rootDir, ["vault", "init", "--json"]);
+
+    const results = await Promise.all(
+      Array.from({ length: 24 }, (_, index) =>
+        runCli(rootDir, [
+          "raw",
+          "add",
+          "--title",
+          `Concurrent raw source ${index}`,
+          "--uri",
+          `file://concurrent-${index}.md`,
+          "--json"
+        ])
+      )
+    );
+
+    expect(results.map((result) => result.exitCode)).toEqual(Array.from({ length: 24 }, () => 0));
+
+    const records = (await readFile(join(rootDir, "memory/raw/index.jsonl"), "utf8"))
+      .trim()
+      .split(/\r?\n/u)
+      .map((line) => parseJson<{ readonly id: string }>(line));
+    expect(records).toHaveLength(24);
+    expect(new Set(records.map((record) => record.id)).size).toBe(24);
+
+    const status = await runCli(rootDir, ["vault", "status", "--json"]);
+    const payload = parseData<{
+      readonly health: { readonly rawSourceCount: number; readonly malformedRawRecords: readonly unknown[] };
+    }>(status.stdout);
+    expect(payload.health.rawSourceCount).toBe(24);
+    expect(payload.health.malformedRawRecords).toEqual([]);
+  });
+
   it("scans duplicate work and vault records with non-destructive merge plans", async () => {
     const rootDir = await makeTempWorkspace();
     await runCli(rootDir, ["init", "--json"]);
