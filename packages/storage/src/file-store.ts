@@ -1,6 +1,13 @@
 import { resolve } from "node:path";
 
-import { BorealError, assertPathInside, readJsonFile, resolveWorkspacePaths, runtimeSnapshotSchemaIssues } from "@boreal/core";
+import {
+  BorealError,
+  assertPathInside,
+  assertRealPathInside,
+  readJsonFile,
+  resolveWorkspacePaths,
+  runtimeSnapshotSchemaIssues
+} from "@boreal/core";
 
 import { normalizeFileLockOptions, withFileLock, type FileLockOptions } from "./file-lock.js";
 import { InMemoryBorealStore, type StoreSnapshot } from "./memory-store.js";
@@ -51,6 +58,7 @@ export class FileBorealStore implements BorealStore {
   }
 
   private async writeOnce<T>(operation: (writer: BorealWriter) => Promise<T> | T): Promise<T> {
+    await this.assertSafePaths();
     return withFileLock(this.lockDir, this.lockOptions, async () => {
       const memory = new InMemoryBorealStore(await this.loadSnapshot());
       const result = await memory.write(operation);
@@ -60,6 +68,7 @@ export class FileBorealStore implements BorealStore {
   }
 
   private async loadSnapshot(): Promise<StoreSnapshot> {
+    await assertRealPathInside(this.rootDir, this.stateFile);
     try {
       return documentToSnapshot(
         await readJsonFile(this.stateFile, {
@@ -78,7 +87,13 @@ export class FileBorealStore implements BorealStore {
 
   private async saveSnapshot(snapshot: StoreSnapshot): Promise<void> {
     const document = snapshotToDocument(snapshot);
+    await assertRealPathInside(this.rootDir, this.stateFile);
     await writeTextFileAtomic(this.stateFile, `${JSON.stringify(document, null, 2)}\n`);
+  }
+
+  private async assertSafePaths(): Promise<void> {
+    await assertRealPathInside(this.rootDir, this.stateFile);
+    await assertRealPathInside(this.rootDir, this.lockDir);
   }
 }
 

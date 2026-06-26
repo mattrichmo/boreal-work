@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -182,6 +182,23 @@ describe("file-backed store", () => {
   it("rejects state files outside the workspace root", async () => {
     const rootDir = await makeTempWorkspace();
     expect(() => new FileBorealStore({ rootDir, stateFile: join(rootDir, "../state.json") })).toThrow(BorealError);
+  });
+
+  it("rejects symlinked runtime paths outside the workspace root", async () => {
+    const rootDir = await makeTempWorkspace();
+    const outsideDir = await makeTempWorkspace();
+    await symlink(outsideDir, join(rootDir, ".boreal"), "dir");
+    const store = new FileBorealStore({ rootDir, lock });
+    const work = createWorkItem({
+      title: "Reject symlinked state path",
+      actor,
+      now: nowIso(new Date("2026-01-01T00:00:00.000Z"))
+    });
+
+    await expect(store.write((writer) => writer.putWorkItem(work))).rejects.toMatchObject({
+      code: "BOREAL_INVALID_INPUT"
+    } satisfies Partial<BorealError>);
+    await expect(readFile(join(outsideDir, "runtime/state.json"), "utf8")).rejects.toMatchObject({ code: "ENOENT" });
   });
 
   it("rejects invalid lock timing options", async () => {
