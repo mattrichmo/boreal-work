@@ -25,11 +25,13 @@ import {
   type EvidenceKind,
   type EvidenceOutcome,
   type GraphEdge,
+  type GraphEdgeId,
   type IsoTimestamp,
   type KnowledgeSource,
   type KnowledgeSourceId,
   type KnowledgeSourceKind,
   type OperationId,
+  type ProjectionId,
   type ReservationId,
   type ReservationStatus,
   type RuntimeOperation,
@@ -67,7 +69,11 @@ import {
   deleteClaimWithTombstone,
   deleteDecisionWithTombstone,
   deleteEvidenceWithTombstone,
+  deleteContextPackWithTombstone,
+  deleteGraphEdgeWithTombstone,
   deleteKnowledgeSourceWithTombstone,
+  deleteProjectionWithTombstone,
+  deleteReservationWithTombstone,
   deleteVerificationWithTombstone,
   deleteWorkItemWithTombstone,
   exportLedgers,
@@ -1546,9 +1552,25 @@ async function ledgerCommand(
         output.write(formatRecord(await deleteDecisionWithTombstone(context, asDecisionId(id), reason), json));
         return { exitCode: 0 };
       }
+      if (kind === "graph-edge") {
+        output.write(formatRecord(await deleteGraphEdgeWithTombstone(context, asGraphEdgeId(id), reason), json));
+        return { exitCode: 0 };
+      }
+      if (kind === "reservation") {
+        output.write(formatRecord(await deleteReservationWithTombstone(context, asReservationId(id), reason), json));
+        return { exitCode: 0 };
+      }
+      if (kind === "projection") {
+        output.write(formatRecord(await deleteProjectionWithTombstone(context, asProjectionId(id), reason), json));
+        return { exitCode: 0 };
+      }
+      if (kind === "context-pack") {
+        output.write(formatRecord(await deleteContextPackWithTombstone(context, asProjectionId(id), reason), json));
+        return { exitCode: 0 };
+      }
       throw new BorealError(
         "BOREAL_INVALID_INPUT",
-        "ledger delete currently supports work, evidence, verification, source, claim, and decision records",
+        "ledger delete currently supports work, evidence, verification, source, claim, decision, graph-edge, reservation, projection, and context-pack records",
         { kind }
       );
     }
@@ -1658,6 +1680,27 @@ function asVerificationId(value: string): VerificationId {
     throw new BorealError("BOREAL_INVALID_INPUT", `Expected a verification id, got ${value}`);
   }
   return value as VerificationId;
+}
+
+function asGraphEdgeId(value: string): GraphEdgeId {
+  if (!value.startsWith("bw_edge_")) {
+    throw new BorealError("BOREAL_INVALID_INPUT", `Expected a graph edge id, got ${value}`);
+  }
+  return value as GraphEdgeId;
+}
+
+function asReservationId(value: string): ReservationId {
+  if (!value.startsWith("bw_reservation_")) {
+    throw new BorealError("BOREAL_INVALID_INPUT", `Expected a reservation id, got ${value}`);
+  }
+  return value as ReservationId;
+}
+
+function asProjectionId(value: string): ProjectionId {
+  if (!value.startsWith("bw_projection_")) {
+    throw new BorealError("BOREAL_INVALID_INPUT", `Expected a projection id, got ${value}`);
+  }
+  return value as ProjectionId;
 }
 
 function parseWorkKind(value: string | undefined): WorkKind | undefined {

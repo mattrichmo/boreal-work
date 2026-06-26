@@ -73,12 +73,16 @@ export interface BorealWriter extends BorealReader {
   putDecision(record: DecisionRecord): Promise<void>;
   deleteDecision(id: DecisionId): Promise<boolean>;
   putGraphEdge(record: GraphEdge): Promise<void>;
+  deleteGraphEdge(id: GraphEdgeId): Promise<boolean>;
   putReservation(record: AgentReservation): Promise<void>;
+  deleteReservation(id: ReservationId): Promise<boolean>;
   putEvent(record: RuntimeEvent): Promise<void>;
   putOperation(record: RuntimeOperation): Promise<void>;
   deleteOperation(id: OperationId): Promise<boolean>;
   putProjection(record: ProjectionRecord): Promise<void>;
+  deleteProjection(id: ProjectionId): Promise<boolean>;
   putContextPack(record: ContextPack): Promise<void>;
+  deleteContextPack(id: ProjectionId): Promise<boolean>;
 }
 
 export interface BorealStore {

@@ -15,12 +15,13 @@ import {
   type EvidenceRecord,
   type GraphEdge,
   type KnowledgeSource,
+  type ProjectionRecord,
   type RuntimeOperation,
   type VerificationRecord,
   type WorkId,
   type WorkItem
 } from "@boreal/core";
-import { buildContextPack } from "@boreal/search";
+import { buildContextPack, buildContextProjection } from "@boreal/search";
 import { breakStaleFileLock, inspectFileLock } from "@boreal/storage";
 import { deriveReadinessStatus } from "@boreal/work-engine";
 
@@ -429,6 +430,7 @@ async function validateStoreRecords(
       const rawReservations = stateSection<AgentReservation>(state, "reservations");
       const rawEvents = stateSection<Record<string, unknown>>(state, "events");
       const rawOperations = stateSection<RuntimeOperation>(state, "operations");
+      const rawProjections = stateSection<ProjectionRecord>(state, "projections");
       const malformedRecords = [
         ...malformedIndexes(rawWorkItems, isDoctorWorkItem, "workItems"),
         ...malformedIndexes(rawEvidence, isDoctorEvidence, "evidence"),
@@ -439,7 +441,8 @@ async function validateStoreRecords(
         ...malformedIndexes(rawContextPacks, isDoctorContextPack, "contextPacks"),
         ...malformedIndexes(rawGraphEdges, isDoctorGraphEdge, "graphEdges"),
         ...malformedIndexes(rawReservations, isDoctorReservation, "reservations"),
-        ...malformedIndexes(rawOperations, isDoctorOperation, "operations")
+        ...malformedIndexes(rawOperations, isDoctorOperation, "operations"),
+        ...malformedIndexes(rawProjections, isDoctorProjection, "projections")
       ];
       const workItems = rawWorkItems.filter(isDoctorWorkItem);
       const evidence = rawEvidence.filter(isDoctorEvidence);
@@ -450,6 +453,7 @@ async function validateStoreRecords(
       const graphEdges = rawGraphEdges.filter(isDoctorGraphEdge);
       const reservations = rawReservations.filter(isDoctorReservation);
       const operations = rawOperations.filter(isDoctorOperation);
+      const projections = rawProjections.filter(isDoctorProjection);
       const evidenceById = new Map(evidence.map((record) => [record.meta.id, record]));
       const sourceById = new Map(knowledgeSources.map((record) => [record.meta.id, record]));
       const verificationsById = new Map(verifications.map((record) => [record.meta.id, record]));
@@ -494,6 +498,12 @@ async function validateStoreRecords(
       const contextPackBySubject = new Map(
         rawContextPacks.filter(isDoctorContextPack).map((pack) => [pack.subjectId, pack])
       );
+      const contextProjectionBySubject = new Map(
+        projections.filter((projection) => projection.kind === "context-pack").map((projection) => [projection.subjectId, projection])
+      );
+      const missingContextProjections = workItems
+        .filter((work) => !contextProjectionBySubject.has(work.meta.id))
+        .map((work) => work.meta.id);
       const contextPackDrift = workItems.flatMap((work) => {
         const pack = contextPackBySubject.get(work.meta.id);
         if (!pack) {
@@ -512,6 +522,25 @@ async function validateStoreRecords(
         return contextPackMatches(pack, expected)
           ? []
           : [{ workId: work.meta.id, contextPackId: pack.id, issue: "context_pack_drift" }];
+      });
+      const contextProjectionDrift = workItems.flatMap((work) => {
+        const projection = contextProjectionBySubject.get(work.meta.id);
+        if (!projection) {
+          return [];
+        }
+        const graphWork = { ...work, dependencyIds: expectedDependencyIds.get(work.meta.id) ?? [] };
+        const expected = buildContextProjection({
+          work: graphWork,
+          evidence: evidence.filter((record) => record.subjectId === work.meta.id),
+          sources: knowledgeSources,
+          claims,
+          decisions,
+          actor: context.actor,
+          now: projection.meta.updatedAt
+        });
+        return contextProjectionMatches(projection, expected)
+          ? []
+          : [{ workId: work.meta.id, projectionId: projection.meta.id, issue: "context_projection_drift" }];
       });
       const danglingClaimSources = claims.flatMap((claim) =>
         claim.sourceIds
@@ -666,6 +695,8 @@ async function validateStoreRecords(
         staleReadiness,
         missingContextPacks,
         contextPackDrift,
+        missingContextProjections,
+        contextProjectionDrift,
         danglingClaimSources,
         danglingClaimEvidence,
         danglingDecisionSources,
@@ -807,14 +838,18 @@ async function validateStoreRecords(
     }
 
     const contextPackIssues = [...summary.missingContextPacks.map((workId) => ({ workId, issue: "missing_context_pack" })), ...summary.contextPackDrift];
-    if (contextPackIssues.length > 0 || (fix && workStateChanged)) {
+    const contextProjectionIssues = [
+      ...summary.missingContextProjections.map((workId) => ({ workId, issue: "missing_context_projection" })),
+      ...summary.contextProjectionDrift
+    ];
+    if (contextPackIssues.length > 0 || contextProjectionIssues.length > 0 || (fix && workStateChanged)) {
       if (fix) {
         await context.runtime.rebuildProjections();
         diagnostics.push({
           code: "projection.context_pack",
           severity: "fixed",
           message: "Rebuilt context pack projections",
-          details: { contextPackIssues, workStateChanged }
+          details: { contextPackIssues, contextProjectionIssues, workStateChanged }
         });
         fixed = true;
       } else {
@@ -822,7 +857,7 @@ async function validateStoreRecords(
           code: "projection.context_pack",
           severity: "warning",
           message: "Some context pack projections are missing or stale",
-          details: { contextPackIssues }
+          details: { contextPackIssues, contextProjectionIssues }
         });
       }
     } else {
@@ -1099,6 +1134,29 @@ function contextPackMatches(actual: ContextPack, expected: ContextPack): boolean
     arraysEqual(actual.facts, expected.facts) &&
     arraysEqual(actual.evidence, expected.evidence)
   );
+}
+
+function contextProjectionMatches(actual: ProjectionRecord, expected: ProjectionRecord): boolean {
+  const actualFacts = stringArrayValue(actual.value.facts);
+  const actualEvidence = stringArrayValue(actual.value.evidence);
+  const expectedFacts = stringArrayValue(expected.value.facts);
+  const expectedEvidence = stringArrayValue(expected.value.evidence);
+  return (
+    actual.subjectId === expected.subjectId &&
+    actual.kind === expected.kind &&
+    actual.value.title === expected.value.title &&
+    actual.value.summary === expected.value.summary &&
+    actualFacts !== undefined &&
+    actualEvidence !== undefined &&
+    expectedFacts !== undefined &&
+    expectedEvidence !== undefined &&
+    arraysEqual(actualFacts, expectedFacts) &&
+    arraysEqual(actualEvidence, expectedEvidence)
+  );
+}
+
+function stringArrayValue(value: unknown): readonly string[] | undefined {
+  return Array.isArray(value) && value.every((entry) => typeof entry === "string") ? value : undefined;
 }
 
 function arraysEqual(left: readonly string[], right: readonly string[]): boolean {
@@ -1399,6 +1457,16 @@ function isDoctorDecision(value: unknown): value is DecisionRecord {
 
 function isDoctorContextPack(value: unknown): value is ContextPack {
   return isRecord(value) && typeof value.id === "string" && typeof value.subjectId === "string";
+}
+
+function isDoctorProjection(value: unknown): value is ProjectionRecord {
+  return (
+    isRecord(value) &&
+    readRecordId(value, "projections") !== undefined &&
+    typeof value.kind === "string" &&
+    typeof value.subjectId === "string" &&
+    isRecord(value.value)
+  );
 }
 
 function isDoctorGraphEdge(value: unknown): value is GraphEdge {

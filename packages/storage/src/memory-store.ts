@@ -257,8 +257,16 @@ class MemoryTransaction implements BorealWriter {
     this.state.graphEdges.set(record.meta.id, deepClone(record));
   }
 
+  async deleteGraphEdge(id: GraphEdgeId): Promise<boolean> {
+    return this.state.graphEdges.delete(id);
+  }
+
   async putReservation(record: AgentReservation): Promise<void> {
     this.state.reservations.set(record.meta.id, deepClone(record));
+  }
+
+  async deleteReservation(id: ReservationId): Promise<boolean> {
+    return this.state.reservations.delete(id);
   }
 
   async putEvent(record: RuntimeEvent): Promise<void> {
@@ -277,8 +285,16 @@ class MemoryTransaction implements BorealWriter {
     this.state.projections.set(record.meta.id, deepClone(record));
   }
 
+  async deleteProjection(id: ProjectionId): Promise<boolean> {
+    return this.state.projections.delete(id);
+  }
+
   async putContextPack(record: ContextPack): Promise<void> {
     this.state.contextPacks.set(record.id, deepClone(record));
+  }
+
+  async deleteContextPack(id: ProjectionId): Promise<boolean> {
+    return this.state.contextPacks.delete(id);
   }
 }
 

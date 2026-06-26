@@ -2569,6 +2569,154 @@ describe("bwrk cli", () => {
     );
     expect(deletedWorkPayload.ledger.deletedRecordCounts.workItems).toBe(1);
 
+    const graphBlocker = parseData<{ readonly meta: { readonly id: string } }>(
+      (await runCli(rootDir, ["work", "create", "Ledger delete graph blocker", "--ready", "--json"])).stdout
+    );
+    const graphBlocked = parseData<{ readonly meta: { readonly id: string } }>(
+      (await runCli(rootDir, ["work", "create", "Ledger delete graph blocked", "--ready", "--json"])).stdout
+    );
+    await runCli(rootDir, ["dep", "add", graphBlocked.meta.id, graphBlocker.meta.id, "--json"]);
+    const blockState = await readState<{
+      readonly graphEdges: Array<{ readonly meta: { readonly id: string }; readonly kind: string; readonly fromId: string; readonly toId: string }>;
+    }>(rootDir);
+    const blockEdge = blockState.graphEdges.find(
+      (edge) => edge.kind === "blocks" && edge.fromId === graphBlocker.meta.id && edge.toId === graphBlocked.meta.id
+    );
+    expect(blockEdge).toBeDefined();
+    const deletedGraphEdge = await runCli(rootDir, [
+      "ledger",
+      "delete",
+      "graph-edge",
+      blockEdge?.meta.id ?? "",
+      "--reason",
+      "remove-block",
+      "--json"
+    ]);
+    const deletedGraphEdgePayload = parseData<{
+      readonly section: string;
+      readonly id: string;
+      readonly ledger: { readonly deletedRecordCounts: { readonly graphEdges: number } };
+    }>(deletedGraphEdge.stdout);
+    expect(deletedGraphEdge.exitCode).toBe(0);
+    expect(deletedGraphEdgePayload).toEqual(
+      expect.objectContaining({
+        section: "graphEdges",
+        id: blockEdge?.meta.id
+      })
+    );
+    expect(deletedGraphEdgePayload.ledger.deletedRecordCounts.graphEdges).toBe(1);
+    const unblockedWork = parseData<{ readonly status: string; readonly blockedBy: readonly string[] }>(
+      (await runCli(rootDir, ["work", "show", graphBlocked.meta.id, "--json"])).stdout
+    );
+    expect(unblockedWork).toEqual(expect.objectContaining({ status: "ready", blockedBy: [] }));
+
+    const reservationWork = parseData<{ readonly meta: { readonly id: string } }>(
+      (await runCli(rootDir, ["work", "create", "Ledger delete reservation", "--ready", "--json"])).stdout
+    );
+    await runCli(rootDir, ["work", "reserve", reservationWork.meta.id, "--agent", "reservation-delete-test", "--json"]);
+    const activeReservationState = await readState<{
+      readonly reservations: Array<{ readonly meta: { readonly id: string }; readonly workId: string; readonly status: string }>;
+    }>(rootDir);
+    const activeReservation = activeReservationState.reservations.find(
+      (reservation) => reservation.workId === reservationWork.meta.id
+    );
+    expect(activeReservation).toBeDefined();
+    const blockedReservationDelete = await runCli(rootDir, [
+      "ledger",
+      "delete",
+      "reservation",
+      activeReservation?.meta.id ?? "",
+      "--json"
+    ]);
+    const blockedReservationPayload = parseJson<{ readonly ok: false; readonly code: string; readonly message: string }>(
+      blockedReservationDelete.stderr
+    );
+    expect(blockedReservationDelete.exitCode).toBe(1);
+    expect(blockedReservationPayload.code).toBe("BOREAL_CONFLICT");
+    expect(blockedReservationPayload.message).toContain("active or referenced");
+
+    await runCli(rootDir, ["work", "release", reservationWork.meta.id, "--json"]);
+    const deletedReservation = await runCli(rootDir, [
+      "ledger",
+      "delete",
+      "reservation",
+      activeReservation?.meta.id ?? "",
+      "--reason",
+      "released-cleanup",
+      "--json"
+    ]);
+    const deletedReservationPayload = parseData<{
+      readonly section: string;
+      readonly id: string;
+      readonly ledger: { readonly deletedRecordCounts: { readonly reservations: number } };
+    }>(deletedReservation.stdout);
+    expect(deletedReservation.exitCode).toBe(0);
+    expect(deletedReservationPayload).toEqual(
+      expect.objectContaining({
+        section: "reservations",
+        id: activeReservation?.meta.id
+      })
+    );
+    expect(deletedReservationPayload.ledger.deletedRecordCounts.reservations).toBe(1);
+
+    const projectionWork = parseData<{ readonly meta: { readonly id: string } }>(
+      (await runCli(rootDir, ["work", "create", "Ledger delete generated projection", "--ready", "--json"])).stdout
+    );
+    await runCli(rootDir, ["context", "rebuild", "--json"]);
+    const generatedState = await readState<{
+      readonly projections: Array<{ readonly meta: { readonly id: string }; readonly subjectId: string }>;
+      readonly contextPacks: Array<{ readonly id: string; readonly subjectId: string }>;
+    }>(rootDir);
+    const projection = generatedState.projections.find((record) => record.subjectId === projectionWork.meta.id);
+    const contextPack = generatedState.contextPacks.find((record) => record.subjectId === projectionWork.meta.id);
+    expect(projection).toBeDefined();
+    expect(contextPack).toBeDefined();
+    const deletedProjection = await runCli(rootDir, [
+      "ledger",
+      "delete",
+      "projection",
+      projection?.meta.id ?? "",
+      "--reason",
+      "generated-cleanup",
+      "--json"
+    ]);
+    const deletedProjectionPayload = parseData<{
+      readonly section: string;
+      readonly id: string;
+      readonly ledger: { readonly deletedRecordCounts: { readonly projections: number } };
+    }>(deletedProjection.stdout);
+    expect(deletedProjection.exitCode).toBe(0);
+    expect(deletedProjectionPayload).toEqual(
+      expect.objectContaining({
+        section: "projections",
+        id: projection?.meta.id
+      })
+    );
+    expect(deletedProjectionPayload.ledger.deletedRecordCounts.projections).toBe(1);
+
+    const deletedContextPack = await runCli(rootDir, [
+      "ledger",
+      "delete",
+      "context-pack",
+      contextPack?.id ?? "",
+      "--reason",
+      "generated-cleanup",
+      "--json"
+    ]);
+    const deletedContextPackPayload = parseData<{
+      readonly section: string;
+      readonly id: string;
+      readonly ledger: { readonly deletedRecordCounts: { readonly contextPacks: number } };
+    }>(deletedContextPack.stdout);
+    expect(deletedContextPack.exitCode).toBe(0);
+    expect(deletedContextPackPayload).toEqual(
+      expect.objectContaining({
+        section: "contextPacks",
+        id: contextPack?.id
+      })
+    );
+    expect(deletedContextPackPayload.ledger.deletedRecordCounts.contextPacks).toBe(1);
+
     const sources = parseData<Array<{ readonly id: string }>>((await runCli(rootDir, ["source", "list", "--json"])).stdout);
     expect(sources.map((source) => source.id)).toContain(referencedSource.meta.id);
     expect(sources.map((source) => source.id)).not.toContain(deletableSource.meta.id);
@@ -2587,6 +2735,10 @@ describe("bwrk cli", () => {
     expect(deletions).toContain(attachedVerification.meta.id);
     expect(deletions).toContain(attachedEvidence.meta.id);
     expect(deletions).toContain(deletableWork.meta.id);
+    expect(deletions).toContain(blockEdge?.meta.id);
+    expect(deletions).toContain(activeReservation?.meta.id);
+    expect(deletions).toContain(projection?.meta.id);
+    expect(deletions).toContain(contextPack?.id);
     expect(deletions).toContain("\"reason\":\"duplicate\"");
 
     const status = await runCli(rootDir, ["ledger", "status", "--json"]);
@@ -2600,6 +2752,10 @@ describe("bwrk cli", () => {
         readonly knowledgeSources: number;
         readonly claims: number;
         readonly decisions: number;
+        readonly graphEdges: number;
+        readonly reservations: number;
+        readonly projections: number;
+        readonly contextPacks: number;
       };
     }>(status.stdout);
     expect(status.exitCode).toBe(0);
@@ -2613,7 +2769,11 @@ describe("bwrk cli", () => {
           verifications: 1,
           knowledgeSources: 1,
           claims: 1,
-          decisions: 1
+          decisions: 1,
+          graphEdges: 1,
+          reservations: 1,
+          projections: 1,
+          contextPacks: 1
         })
       })
     );
@@ -2720,6 +2880,53 @@ describe("bwrk cli", () => {
     const ambiguousPayload = parseJson<{ readonly ok: false; readonly code: string }>(ambiguous.stderr);
     expect(ambiguous.exitCode).toBe(1);
     expect(ambiguousPayload.code).toBe("BOREAL_CONFLICT");
+  });
+
+  it("repairs missing generated projection records through doctor", async () => {
+    const rootDir = await makeTempWorkspace();
+    await runCli(rootDir, ["init", "--json"]);
+    const work = parseData<{ readonly meta: { readonly id: string } }>(
+      (await runCli(rootDir, ["work", "create", "Doctor generated projection", "--ready", "--json"])).stdout
+    );
+    await runCli(rootDir, ["context", "rebuild", "--json"]);
+
+    const state = await readState<{
+      readonly projections: Array<{ readonly meta: { readonly id: string }; readonly subjectId: string }>;
+    }>(rootDir);
+    const projection = state.projections.find((record) => record.subjectId === work.meta.id);
+    expect(projection).toBeDefined();
+    await updateState(rootDir, (current) => ({
+      ...current,
+      projections: ((current.projections as typeof state.projections | undefined) ?? []).filter(
+        (record) => record.meta.id !== projection?.meta.id
+      )
+    }));
+
+    const warningDoctor = await runCli(rootDir, ["doctor", "--json"]);
+    const warningPayload = parseData<{
+      readonly ok: boolean;
+      readonly diagnostics: Array<{ readonly code: string; readonly severity: string }>;
+    }>(warningDoctor.stdout);
+    expect(warningDoctor.exitCode).toBe(0);
+    expect(warningPayload.ok).toBe(true);
+    expect(warningPayload.diagnostics).toEqual(
+      expect.arrayContaining([expect.objectContaining({ code: "projection.context_pack", severity: "warning" })])
+    );
+
+    const fixedDoctor = await runCli(rootDir, ["doctor", "--fix", "--json"]);
+    const fixedPayload = parseData<{
+      readonly ok: boolean;
+      readonly diagnostics: Array<{ readonly code: string; readonly severity: string }>;
+    }>(fixedDoctor.stdout);
+    expect(fixedDoctor.exitCode).toBe(0);
+    expect(fixedPayload.ok).toBe(true);
+    expect(fixedPayload.diagnostics).toEqual(
+      expect.arrayContaining([expect.objectContaining({ code: "projection.context_pack", severity: "fixed" })])
+    );
+    const fixedState = await readState<{
+      readonly projections: Array<{ readonly meta: { readonly id: string }; readonly subjectId: string }>;
+    }>(rootDir);
+    expect(fixedState.projections.map((record) => record.meta.id)).toContain(projection?.meta.id);
   });
 
   it("repairs dependency projection drift from canonical block graph edges", async () => {
@@ -2913,12 +3120,16 @@ async function setReservationExpiresAt(rootDir: string, reservationId: string, e
   );
 }
 
+async function readState<T = MutableStateForTest>(rootDir: string): Promise<T> {
+  return parseJson<T>(await readFile(join(rootDir, ".boreal/runtime/state.json"), "utf8"));
+}
+
 async function updateState(
   rootDir: string,
   update: (state: MutableStateForTest) => MutableStateForTest
 ): Promise<void> {
   const statePath = join(rootDir, ".boreal/runtime/state.json");
-  const state = parseJson<MutableStateForTest>(await readFile(statePath, "utf8"));
+  const state = await readState(rootDir);
   await writeFile(statePath, `${JSON.stringify(update(state), null, 2)}\n`, "utf8");
 }
 

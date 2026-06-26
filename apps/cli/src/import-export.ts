@@ -11,15 +11,23 @@ import {
   parseJsonlStrict,
   readJsonFile,
   runtimeSnapshotSchemaIssues,
+  touchRecord,
   withContentHash,
+  type AgentReservation,
   type ClaimId,
   type ClaimRecord,
+  type ContextPack,
   type DecisionId,
   type DecisionRecord,
   type EvidenceId,
   type EvidenceRecord,
+  type GraphEdge,
+  type GraphEdgeId,
   type KnowledgeSource,
   type KnowledgeSourceId,
+  type ProjectionId,
+  type ProjectionRecord,
+  type ReservationId,
   type RuntimeEvent,
   type VerificationId,
   type VerificationRecord,
@@ -33,6 +41,7 @@ import {
   type BorealWriter,
   type StoreSnapshot
 } from "@boreal/storage";
+import { deriveReadinessStatus } from "@boreal/work-engine";
 
 import type { CliContext } from "./context.js";
 
@@ -587,6 +596,190 @@ export async function deleteDecisionWithTombstone(
   }
 }
 
+export async function deleteGraphEdgeWithTombstone(
+  context: CliContext,
+  edgeId: GraphEdgeId,
+  reason: string | undefined
+): Promise<LedgerDeleteRecordResult> {
+  let deletedEdge: GraphEdge | undefined;
+  let repairedWorkBefore: WorkItem | undefined;
+  let tombstone: LedgerDeletionRecord | undefined;
+  try {
+    deletedEdge = await context.store.write(async (writer) => {
+      const edge = await writer.getGraphEdge(edgeId);
+      if (!edge) {
+        throw new BorealError("BOREAL_INVALID_INPUT", "Graph edge does not exist", { edgeId });
+      }
+      const deleted = await writer.deleteGraphEdge(edgeId);
+      if (!deleted) {
+        throw new BorealError("BOREAL_CONFLICT", "Graph edge changed before deletion", { edgeId });
+      }
+      repairedWorkBefore = await repairWorkAfterGraphEdgeDelete(writer, edge, context);
+      return edge;
+    });
+    tombstone = {
+      schemaVersion: "boreal.ledger-deletion.v1",
+      section: "graphEdges",
+      id: edgeId,
+      deletedAt: nowIso(),
+      reason,
+      deletedContentHash: deletedEdge.meta.contentHash ?? hashContent(deletedEdge)
+    };
+    const ledger = await exportLedgersWithAdditionalDeletions(context, undefined, [tombstone]);
+    return {
+      deleted: true,
+      section: "graphEdges",
+      id: edgeId,
+      tombstone,
+      ledger
+    };
+  } catch (error) {
+    const restoreEdge = deletedEdge;
+    if (restoreEdge && tombstone) {
+      await context.store.write(async (writer) => {
+        await writer.putGraphEdge(restoreEdge);
+        if (repairedWorkBefore) {
+          await writer.putWorkItem(repairedWorkBefore);
+        }
+      });
+    }
+    throw error;
+  }
+}
+
+export async function deleteReservationWithTombstone(
+  context: CliContext,
+  reservationId: ReservationId,
+  reason: string | undefined
+): Promise<LedgerDeleteRecordResult> {
+  let deletedReservation: AgentReservation | undefined;
+  let tombstone: LedgerDeletionRecord | undefined;
+  try {
+    deletedReservation = await context.store.write(async (writer) => {
+      const reservation = await writer.getReservation(reservationId);
+      if (!reservation) {
+        throw new BorealError("BOREAL_INVALID_INPUT", "Reservation does not exist", { reservationId });
+      }
+      await assertReservationCanBeDeleted(writer, reservation);
+      const deleted = await writer.deleteReservation(reservationId);
+      if (!deleted) {
+        throw new BorealError("BOREAL_CONFLICT", "Reservation changed before deletion", { reservationId });
+      }
+      return reservation;
+    });
+    tombstone = {
+      schemaVersion: "boreal.ledger-deletion.v1",
+      section: "reservations",
+      id: reservationId,
+      deletedAt: nowIso(),
+      reason,
+      deletedContentHash: deletedReservation.meta.contentHash ?? hashContent(deletedReservation)
+    };
+    const ledger = await exportLedgersWithAdditionalDeletions(context, undefined, [tombstone]);
+    return {
+      deleted: true,
+      section: "reservations",
+      id: reservationId,
+      tombstone,
+      ledger
+    };
+  } catch (error) {
+    const restoreReservation = deletedReservation;
+    if (restoreReservation && tombstone) {
+      await context.store.write((writer) => writer.putReservation(restoreReservation));
+    }
+    throw error;
+  }
+}
+
+export async function deleteProjectionWithTombstone(
+  context: CliContext,
+  projectionId: ProjectionId,
+  reason: string | undefined
+): Promise<LedgerDeleteRecordResult> {
+  let deletedProjection: ProjectionRecord | undefined;
+  let tombstone: LedgerDeletionRecord | undefined;
+  try {
+    deletedProjection = await context.store.write(async (writer) => {
+      const projection = await writer.getProjection(projectionId);
+      if (!projection) {
+        throw new BorealError("BOREAL_INVALID_INPUT", "Projection does not exist", { projectionId });
+      }
+      const deleted = await writer.deleteProjection(projectionId);
+      if (!deleted) {
+        throw new BorealError("BOREAL_CONFLICT", "Projection changed before deletion", { projectionId });
+      }
+      return projection;
+    });
+    tombstone = {
+      schemaVersion: "boreal.ledger-deletion.v1",
+      section: "projections",
+      id: projectionId,
+      deletedAt: nowIso(),
+      reason,
+      deletedContentHash: deletedProjection.meta.contentHash ?? hashContent(deletedProjection)
+    };
+    const ledger = await exportLedgersWithAdditionalDeletions(context, undefined, [tombstone]);
+    return {
+      deleted: true,
+      section: "projections",
+      id: projectionId,
+      tombstone,
+      ledger
+    };
+  } catch (error) {
+    const restoreProjection = deletedProjection;
+    if (restoreProjection && tombstone) {
+      await context.store.write((writer) => writer.putProjection(restoreProjection));
+    }
+    throw error;
+  }
+}
+
+export async function deleteContextPackWithTombstone(
+  context: CliContext,
+  contextPackId: ProjectionId,
+  reason: string | undefined
+): Promise<LedgerDeleteRecordResult> {
+  let deletedContextPack: ContextPack | undefined;
+  let tombstone: LedgerDeletionRecord | undefined;
+  try {
+    deletedContextPack = await context.store.write(async (writer) => {
+      const contextPack = (await writer.listContextPacks()).find((pack) => pack.id === contextPackId);
+      if (!contextPack) {
+        throw new BorealError("BOREAL_INVALID_INPUT", "Context pack does not exist", { contextPackId });
+      }
+      const deleted = await writer.deleteContextPack(contextPackId);
+      if (!deleted) {
+        throw new BorealError("BOREAL_CONFLICT", "Context pack changed before deletion", { contextPackId });
+      }
+      return contextPack;
+    });
+    tombstone = {
+      schemaVersion: "boreal.ledger-deletion.v1",
+      section: "contextPacks",
+      id: contextPackId,
+      deletedAt: nowIso(),
+      reason,
+      deletedContentHash: hashContent(deletedContextPack)
+    };
+    const ledger = await exportLedgersWithAdditionalDeletions(context, undefined, [tombstone]);
+    return {
+      deleted: true,
+      section: "contextPacks",
+      id: contextPackId,
+      tombstone,
+      ledger
+    };
+  } catch (error) {
+    const restoreContextPack = deletedContextPack;
+    if (restoreContextPack && tombstone) {
+      await context.store.write((writer) => writer.putContextPack(restoreContextPack));
+    }
+    throw error;
+  }
+}
+
 export async function ledgerStatus(context: CliContext, dir: string | undefined): Promise<LedgerStatusResult> {
   const document = await buildExportDocument(context);
   const currentLedgerState = canonicalLedgerSnapshot(document.state);
@@ -989,6 +1182,50 @@ async function assertVerificationCanBeDeleted(reader: BorealReader, verification
   }
 }
 
+async function repairWorkAfterGraphEdgeDelete(
+  writer: BorealWriter,
+  edge: GraphEdge,
+  context: CliContext
+): Promise<WorkItem | undefined> {
+  if (edge.kind !== "blocks" || edge.fromType !== "work" || edge.toType !== "work") {
+    return undefined;
+  }
+  const work = await writer.getWorkItem(edge.toId as WorkId);
+  if (!work) {
+    return undefined;
+  }
+  const workItems = await writer.listWorkItems();
+  const workById = new Map(workItems.map((item) => [item.meta.id, item]));
+  const dependencyIds = uniqueStrings(
+    (await writer.listGraphEdges())
+      .filter((candidate) => candidate.kind === "blocks" && candidate.fromType === "work" && candidate.toType === "work")
+      .filter((candidate) => candidate.toId === work.meta.id && workById.has(candidate.fromId as WorkId))
+      .map((candidate) => candidate.fromId)
+  ) as readonly WorkId[];
+  const dependencies = dependencyIds.map((dependencyId) => workById.get(dependencyId)).filter(isWorkItem);
+  const status = deriveReadinessStatus({ ...work, dependencyIds }, dependencies);
+  if (arraysEqual(work.dependencyIds, dependencyIds) && work.status === status) {
+    return undefined;
+  }
+  await writer.putWorkItem(touchRecord({ ...work, dependencyIds, status }, nowIso(), context.actor));
+  return work;
+}
+
+async function assertReservationCanBeDeleted(reader: BorealReader, reservation: AgentReservation): Promise<void> {
+  const referencingWorkIds = (await reader.listWorkItems())
+    .filter((work) => work.reservationId === reservation.meta.id)
+    .map((work) => work.meta.id);
+  if (reservation.status === "active" || referencingWorkIds.length > 0) {
+    throw new BorealError("BOREAL_CONFLICT", "Cannot delete reservation while it is active or referenced by work", {
+      reservationId: reservation.meta.id,
+      status: reservation.status,
+      references: {
+        workItems: referencingWorkIds
+      }
+    });
+  }
+}
+
 async function assertKnowledgeSourceCanBeDeleted(reader: BorealReader, sourceId: KnowledgeSourceId): Promise<void> {
   const [claims, decisions, graphEdges] = await Promise.all([
     reader.listClaims(),
@@ -1057,6 +1294,18 @@ function subjectReferences(
   types: readonly string[]
 ): boolean {
   return types.includes(record.subjectType) && record.subjectId === id;
+}
+
+function uniqueStrings(values: readonly string[]): readonly string[] {
+  return [...new Set(values)].sort((left, right) => left.localeCompare(right));
+}
+
+function arraysEqual(left: readonly string[], right: readonly string[]): boolean {
+  return left.length === right.length && left.every((value, index) => value === right[index]);
+}
+
+function isWorkItem(value: WorkItem | undefined): value is WorkItem {
+  return value !== undefined;
 }
 
 function parseLedgerManifest(value: unknown): LedgerManifest {
