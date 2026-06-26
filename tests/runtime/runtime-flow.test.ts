@@ -449,12 +449,26 @@ describe("boreal runtime proof slice", () => {
       status: "accepted",
       sourceIds: [source.meta.id]
     });
+    await runtime.createClaim({
+      statement: "Payroll approvals require finance review.",
+      status: "accepted",
+      sourceIds: [source.meta.id]
+    });
+    await runtime.createDecision({
+      title: "Payroll approval policy",
+      context: "Finance owns payroll controls.",
+      decision: "Route payroll approvals through finance.",
+      status: "accepted",
+      sourceIds: [source.meta.id]
+    });
 
     await runtime.rebuildProjections();
     const pack = await runtime.getContextPack(work.meta.id);
 
     expect(pack.facts).toContain("claim: Context packs include accepted claims.");
     expect(pack.facts).toContain("decision: Expose context packs through the runtime and CLI.");
+    expect(pack.facts).not.toContain("claim: Payroll approvals require finance review.");
+    expect(pack.facts).not.toContain("decision: Route payroll approvals through finance.");
     expect(pack.evidence).toContain("passed: context pack test passed");
   });
 
