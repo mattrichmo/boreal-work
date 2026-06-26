@@ -10,18 +10,22 @@ export async function main(
   output: CliOutput = processOutput(),
   cwd = process.cwd()
 ): Promise<number> {
+  const json = wantsJsonOutput(argv);
+  const stdoutGuard = installJsonStdoutGuard({ enabled: json });
+  const guardedOutput = json ? guardedJsonOutput(output, stdoutGuard) : output;
   try {
     const parsed = parseArgs(argv);
-    const result = await runCommand(parsed, output, cwd);
+    const result = await runCommand(parsed, guardedOutput, cwd);
     return result.exitCode;
   } catch (error) {
-    const json = wantsJsonOutput(argv);
     if (json) {
-      output.error(`${JSON.stringify(errorPayload(error), null, 2)}\n`);
+      guardedOutput.error(`${JSON.stringify(errorPayload(error), null, 2)}\n`);
     } else {
-      output.error(`${formatError(error)}\n`);
+      guardedOutput.error(`${formatError(error)}\n`);
     }
     return isBorealError(error) && error.code === "BOREAL_INVALID_INPUT" ? 2 : 1;
+  } finally {
+    stdoutGuard.release();
   }
 }
 
@@ -39,6 +43,89 @@ function processOutput(): CliOutput {
       process.stderr.write(text);
     }
   };
+}
+
+export interface JsonStdoutGuard {
+  allowStdoutWrite<T>(operation: () => T): T;
+  release(): void;
+}
+
+export interface JsonStdoutGuardOptions {
+  readonly enabled: boolean;
+  readonly stderrWrite?: (text: string) => void;
+}
+
+export function installJsonStdoutGuard(options: JsonStdoutGuardOptions): JsonStdoutGuard {
+  if (!options.enabled) {
+    return {
+      allowStdoutWrite<T>(operation: () => T): T {
+        return operation();
+      },
+      release() {
+        return;
+      }
+    };
+  }
+
+  const stderrWrite = options.stderrWrite ?? ((text: string) => process.stderr.write(text));
+  const originalWrite = process.stdout.write;
+  let allowDepth = 0;
+  let released = false;
+
+  process.stdout.write = ((...args: Parameters<typeof process.stdout.write>) => {
+    if (allowDepth > 0) {
+      return originalWrite.apply(process.stdout, args);
+    }
+
+    stderrWrite(stdoutChunkToString(args[0], args[1]));
+    const callback = stdoutWriteCallback(args);
+    callback?.();
+    return true;
+  }) as typeof process.stdout.write;
+
+  return {
+    allowStdoutWrite<T>(operation: () => T): T {
+      allowDepth += 1;
+      try {
+        return operation();
+      } finally {
+        allowDepth -= 1;
+      }
+    },
+    release() {
+      if (released) {
+        return;
+      }
+      process.stdout.write = originalWrite;
+      released = true;
+    }
+  };
+}
+
+function guardedJsonOutput(output: CliOutput, guard: JsonStdoutGuard): CliOutput {
+  return {
+    write(text) {
+      guard.allowStdoutWrite(() => output.write(text));
+    },
+    error(text) {
+      output.error(text);
+    }
+  };
+}
+
+function stdoutChunkToString(chunk: unknown, encoding: unknown): string {
+  if (typeof chunk === "string") {
+    return chunk;
+  }
+  if (chunk instanceof Uint8Array) {
+    return Buffer.from(chunk).toString(typeof encoding === "string" ? (encoding as BufferEncoding) : undefined);
+  }
+  return String(chunk);
+}
+
+function stdoutWriteCallback(args: Parameters<typeof process.stdout.write>): (() => void) | undefined {
+  const callback = typeof args[1] === "function" ? args[1] : typeof args[2] === "function" ? args[2] : undefined;
+  return callback ? () => callback() : undefined;
 }
 
 function formatError(error: unknown): string {

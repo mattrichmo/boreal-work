@@ -24,6 +24,8 @@ Global flags:
 - `--actor-kind human|agent|system`: override the actor kind. Defaults to `human`.
 - `--help`: show root or group help.
 
+In JSON mode, successful commands write one JSON envelope to stdout, errors write one JSON envelope to stderr, and unexpected raw stdout writes are redirected to stderr so stdout stays parseable.
+
 Flag parsing:
 
 - Unknown flags are rejected before any command executes.

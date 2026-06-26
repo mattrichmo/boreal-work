@@ -6,7 +6,7 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import { flagValue, parseArgs } from "../../apps/cli/src/args.ts";
 import { registryValueFlagNames } from "../../apps/cli/src/command-registry.ts";
-import { main } from "../../apps/cli/src/index.ts";
+import { installJsonStdoutGuard, main } from "../../apps/cli/src/index.ts";
 import type { CliOutput } from "../../apps/cli/src/output.ts";
 
 interface CommandRun {
@@ -253,6 +253,23 @@ describe("bwrk cli", () => {
     const humanError = await runCli(rootDir, ["unknown", "--json=false"]);
     expect(humanError.exitCode).toBe(2);
     expect(humanError.stderr).toContain("BOREAL_INVALID_INPUT: Unknown command");
+  });
+
+  it("redirects unexpected stdout while a json stdout guard is active", () => {
+    let redirected = "";
+    const guard = installJsonStdoutGuard({
+      enabled: true,
+      stderrWrite(text) {
+        redirected += text;
+      }
+    });
+    try {
+      process.stdout.write("accidental stdout\n");
+    } finally {
+      guard.release();
+    }
+
+    expect(redirected).toBe("accidental stdout\n");
   });
 
   it("runs the work lifecycle through file-backed commands", async () => {
