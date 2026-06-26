@@ -1,13 +1,12 @@
 import { existsSync } from "node:fs";
 import { lstat, mkdir, readFile } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
-import { emitKeypressEvents } from "node:readline";
-import { createInterface } from "node:readline/promises";
 
 import { BorealError, assertPathInside, assertRealPathInside, nowIso, safeParseJson } from "@boreal/core";
 import { writeTextFileAtomic } from "@boreal/storage";
 
 import { flagValue, flagValues, hasFlag, type ParsedArgs } from "./args.js";
+import { withPromptSession, type CliSelectOption } from "./cli-ui.js";
 import type { CliContext } from "./context.js";
 
 export const PROJECT_SETUP_SCHEMA_VERSION = "boreal.project-setup.v1";
@@ -48,12 +47,6 @@ interface ProjectSetupInput {
   readonly installRoot: string;
   readonly skillTargets: readonly SkillTarget[];
   readonly folderScoped: boolean;
-}
-
-interface SelectOption<T extends string> {
-  readonly value: T;
-  readonly label: string;
-  readonly description: string;
 }
 
 const MEMORY_DIRECTORIES = [
@@ -100,7 +93,7 @@ const MEMORY_FILES = [
   { path: "ledgers/deletions.jsonl", content: "" }
 ] as const;
 
-const MEMORY_LAYOUT_OPTIONS: readonly SelectOption<MemoryLayout>[] = [
+const MEMORY_LAYOUT_OPTIONS: readonly CliSelectOption<MemoryLayout>[] = [
   {
     value: "in-repo",
     label: "In repo",
@@ -118,7 +111,7 @@ const MEMORY_LAYOUT_OPTIONS: readonly SelectOption<MemoryLayout>[] = [
   }
 ];
 
-const MEMORY_GIT_OPTIONS: readonly SelectOption<MemoryGitMode>[] = [
+const MEMORY_GIT_OPTIONS: readonly CliSelectOption<MemoryGitMode>[] = [
   {
     value: "shared",
     label: "Shared with project",
@@ -131,7 +124,7 @@ const MEMORY_GIT_OPTIONS: readonly SelectOption<MemoryGitMode>[] = [
   }
 ];
 
-const SKILL_TARGET_OPTIONS: readonly SelectOption<SkillTarget>[] = [
+const SKILL_TARGET_OPTIONS: readonly CliSelectOption<SkillTarget>[] = [
   {
     value: "codex",
     label: "Codex",
@@ -144,7 +137,7 @@ const SKILL_TARGET_OPTIONS: readonly SelectOption<SkillTarget>[] = [
   }
 ];
 
-const YES_NO_OPTIONS: readonly SelectOption<"yes" | "no">[] = [
+const YES_NO_OPTIONS: readonly CliSelectOption<"yes" | "no">[] = [
   {
     value: "yes",
     label: "Yes",
@@ -213,14 +206,13 @@ async function promptProjectSetupInput(context: CliContext, args: ParsedArgs): P
     throw new BorealError("BOREAL_INVALID_INPUT", "--interactive requires a TTY; use noninteractive init flags in automation");
   }
   const defaults = projectSetupInputFromArgs(context, args);
-  const rl = createInterface({ input: process.stdin, output: process.stdout });
-  try {
-    process.stdout.write("Boreal project setup\n\nUse arrow keys to choose options. Press Enter to accept.\n\n");
+  return withPromptSession({ input: process.stdin, output: process.stdout }, async (prompt) => {
+    prompt.writeIntro("Boreal project setup", "Use arrow keys to choose options. Press Enter to accept.");
     const projectRoot = resolveUserPath(
       context.workspaceRoot,
-      await askWithDefault(rl, "Project root", defaults.projectRoot)
+      await prompt.text("Project root", defaults.projectRoot)
     );
-    const memoryLayout = await selectOne(
+    const memoryLayout = await prompt.select(
       "Memory layout",
       MEMORY_LAYOUT_OPTIONS,
       defaults.memoryLayout
@@ -228,23 +220,21 @@ async function promptProjectSetupInput(context: CliContext, args: ParsedArgs): P
     const memoryRootDefault = flagValue(args, "memory-root")
       ? defaults.memoryRoot
       : defaultMemoryRoot(projectRoot, memoryLayout);
-    const memoryRoot = resolveUserPath(projectRoot, await askWithDefault(rl, "Memory root", memoryRootDefault));
-    const memoryGitMode = await selectOne(
+    const memoryRoot = resolveUserPath(projectRoot, await prompt.text("Memory root", memoryRootDefault));
+    const memoryGitMode = await prompt.select(
       "Memory git mode",
       MEMORY_GIT_OPTIONS,
       defaults.memoryGitMode
     );
-    const installRoot = resolveUserPath(projectRoot, await askWithDefault(rl, "Skill install root", defaults.installRoot));
-    const skillTargets = await selectMany(
+    const installRoot = resolveUserPath(projectRoot, await prompt.text("Skill install root", defaults.installRoot));
+    const skillTargets = await prompt.multiselect(
       "Skill targets",
       SKILL_TARGET_OPTIONS,
       defaults.skillTargets
     );
-    const folderScoped = (await selectOne("Folder scoped skills", YES_NO_OPTIONS, defaults.folderScoped ? "yes" : "no")) === "yes";
+    const folderScoped = (await prompt.select("Folder scoped skills", YES_NO_OPTIONS, defaults.folderScoped ? "yes" : "no")) === "yes";
     return { projectRoot, memoryRoot, memoryLayout, memoryGitMode, installRoot, skillTargets, folderScoped };
-  } finally {
-    rl.close();
-  }
+  });
 }
 
 async function applyProjectSetup(input: ProjectSetupInput): Promise<ProjectSetupResult> {
@@ -414,141 +404,6 @@ function defaultMemoryRoot(projectRoot: string, memoryLayout: MemoryLayout): str
       return join(projectRoot, "memory");
     case "sibling":
       return join(dirname(projectRoot), `${basename(projectRoot)}-memory`);
-  }
-}
-
-async function askWithDefault(
-  rl: ReturnType<typeof createInterface>,
-  label: string,
-  defaultValue: string
-): Promise<string> {
-  const answer = await rl.question(`${label} [${defaultValue}]: `);
-  return answer.trim() || defaultValue;
-}
-
-async function selectOne<T extends string>(
-  label: string,
-  options: readonly SelectOption<T>[],
-  defaultValue: T
-): Promise<T> {
-  const selected = await selectValues(label, options, [defaultValue], { multiple: false });
-  return selected[0] ?? defaultValue;
-}
-
-async function selectMany<T extends string>(
-  label: string,
-  options: readonly SelectOption<T>[],
-  defaultValues: readonly T[]
-): Promise<readonly T[]> {
-  return selectValues(label, options, defaultValues, { multiple: true });
-}
-
-async function selectValues<T extends string>(
-  label: string,
-  options: readonly SelectOption<T>[],
-  defaultValues: readonly T[],
-  input: { readonly multiple: boolean }
-): Promise<readonly T[]> {
-  const stdin = process.stdin;
-  const stdout = process.stdout;
-  const defaultSet = new Set(defaultValues);
-  const selected = new Set(options.filter((option) => defaultSet.has(option.value)).map((option) => option.value));
-  if (selected.size === 0 && options[0]) {
-    selected.add(options[0].value);
-  }
-  let index = Math.max(0, options.findIndex((option) => selected.has(option.value)));
-  const wasRaw = stdin.isRaw;
-  let renderedLines = 0;
-
-  emitKeypressEvents(stdin);
-  stdin.setRawMode(true);
-  stdin.resume();
-  stdout.write("\x1B[?25l");
-  renderedLines = renderSelect(label, options, index, selected, input.multiple, renderedLines);
-
-  try {
-    return await new Promise<readonly T[]>((resolveSelection) => {
-      const onKeypress = (_text: string, key: { readonly name?: string; readonly ctrl?: boolean }) => {
-        if (key.ctrl && key.name === "c") {
-          stdout.write("\x1B[?25h\n");
-          process.exit(130);
-        }
-        if (key.name === "up" || key.name === "k") {
-          index = (index - 1 + options.length) % options.length;
-          selectActiveOption(options, index, selected, input.multiple);
-          renderedLines = renderSelect(label, options, index, selected, input.multiple, renderedLines);
-          return;
-        }
-        if (key.name === "down" || key.name === "j") {
-          index = (index + 1) % options.length;
-          selectActiveOption(options, index, selected, input.multiple);
-          renderedLines = renderSelect(label, options, index, selected, input.multiple, renderedLines);
-          return;
-        }
-        if (input.multiple && key.name === "space") {
-          const current = options[index];
-          if (current) {
-            if (selected.has(current.value) && selected.size > 1) {
-              selected.delete(current.value);
-            } else {
-              selected.add(current.value);
-            }
-          }
-          renderedLines = renderSelect(label, options, index, selected, input.multiple, renderedLines);
-          return;
-        }
-        if (key.name === "return" || key.name === "enter") {
-          stdin.off("keypress", onKeypress);
-          stdout.write("\x1B[?25h\n");
-          resolveSelection(options.filter((option) => selected.has(option.value)).map((option) => option.value));
-        }
-      };
-      stdin.on("keypress", onKeypress);
-    });
-  } finally {
-    stdin.setRawMode(wasRaw);
-  }
-}
-
-function renderSelect<T extends string>(
-  label: string,
-  options: readonly SelectOption<T>[],
-  index: number,
-  selected: ReadonlySet<T>,
-  multiple: boolean,
-  previousLineCount: number
-): number {
-  const active = options[index];
-  const lines = [
-    `${label}:`,
-    ...options.map((option, optionIndex) => {
-      const cursor = optionIndex === index ? ">" : " ";
-      const marker = multiple ? (selected.has(option.value) ? "[x]" : "[ ]") : selected.has(option.value) ? "(*)" : "( )";
-      return `${cursor} ${marker} ${option.label}`;
-    }),
-    "",
-    active ? active.description : "",
-    multiple ? "Space toggles. Enter accepts." : "Enter accepts.",
-    ""
-  ];
-  const prefix = previousLineCount > 0 ? `\x1B[${previousLineCount}F\x1B[J` : "";
-  process.stdout.write(`${prefix}${lines.join("\n")}`);
-  return lines.length;
-}
-
-function selectActiveOption<T extends string>(
-  options: readonly SelectOption<T>[],
-  index: number,
-  selected: Set<T>,
-  multiple: boolean
-): void {
-  if (multiple) {
-    return;
-  }
-  const active = options[index];
-  if (active) {
-    selected.clear();
-    selected.add(active.value);
   }
 }
 
