@@ -62,10 +62,10 @@ import {
   validateCommandFlags,
   type CommandDefinition
 } from "./command-registry.js";
-import { analyzeCompaction, type CompactDomain } from "./compact.js";
+import { analyzeCompaction, applyCompaction, type CompactDomain } from "./compact.js";
 import { asEvidenceId, asWorkId, runDoctor, type Diagnostic } from "./doctor.js";
 import { assertInitialized, createCliContext, ensureWorkspaceDirs, type CliContext } from "./context.js";
-import { buildManualMergePlan, scanDuplicates, type DuplicateDomain } from "./duplicates.js";
+import { applyManualMerge, buildManualMergePlan, scanDuplicates, type DuplicateDomain } from "./duplicates.js";
 import { inspectGitWorktree, type GitWorktreeInspection } from "./git-worktree.js";
 import {
   createSnapshot,
@@ -1755,7 +1755,7 @@ async function duplicateCommand(
 
 async function mergeCommand(
   action: string | undefined,
-  _context: CliContext,
+  context: CliContext,
   args: ParsedArgs,
   output: CliOutput,
   json: boolean
@@ -1769,6 +1769,22 @@ async function mergeCommand(
       output.write(
         formatRecord(
           buildManualMergePlan(parseMergeDomain(requiredFlag(args, "domain")), requiredFlag(args, "survivor"), duplicateIds),
+          json
+        )
+      );
+      return { exitCode: 0 };
+    }
+    case "apply": {
+      const duplicateIds = flagValues(args, "duplicate");
+      output.write(
+        formatRecord(
+          await applyManualMerge(context, {
+            domain: parseMergeDomain(requiredFlag(args, "domain")),
+            survivorId: requiredFlag(args, "survivor"),
+            duplicateIds,
+            planId: requiredFlag(args, "plan"),
+            confirm: hasFlag(args, "confirm")
+          }),
           json
         )
       );
@@ -1792,6 +1808,22 @@ async function compactCommand(
         formatRecord(
           await analyzeCompaction(context, {
             domain: parseCompactDomain(flagValue(args, "domain") ?? "all"),
+            olderThanDays: parseOlderThanDays(flagValue(args, "older-than-days"))
+          }),
+          json
+        )
+      );
+      return { exitCode: 0 };
+    }
+    case "apply": {
+      output.write(
+        formatRecord(
+          await applyCompaction(context, {
+            domain: parseCompactApplyDomain(requiredFlag(args, "domain")),
+            targetId: requiredFlag(args, "target"),
+            planId: requiredFlag(args, "plan"),
+            summary: requiredFlag(args, "summary"),
+            confirm: hasFlag(args, "confirm"),
             olderThanDays: parseOlderThanDays(flagValue(args, "older-than-days"))
           }),
           json
@@ -2402,6 +2434,13 @@ function parseCompactDomain(value: string): CompactDomain {
     return value;
   }
   throw new BorealError("BOREAL_INVALID_INPUT", "--domain must be all, work, or wiki");
+}
+
+function parseCompactApplyDomain(value: string): Exclude<CompactDomain, "all"> {
+  if (value === "work" || value === "wiki") {
+    return value;
+  }
+  throw new BorealError("BOREAL_INVALID_INPUT", "--domain must be work or wiki");
 }
 
 function parseOlderThanDays(value: string | undefined): number | undefined {

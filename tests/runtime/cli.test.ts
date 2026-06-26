@@ -113,7 +113,9 @@ describe("bwrk cli", () => {
       "## `wiki create`",
       "## `duplicate scan`",
       "## `merge plan`",
+      "## `merge apply`",
       "## `compact analyze`",
+      "## `compact apply`",
       "## `sync status`",
       "## `ledger status`",
       "## `ledger delete`",
@@ -362,6 +364,7 @@ describe("bwrk cli", () => {
         readonly records: Array<{ readonly id: string; readonly title: string }>;
       }>;
       readonly mergePlans: Array<{
+        readonly id: string;
         readonly domain: string;
         readonly destructive: boolean;
         readonly strategy: string;
@@ -400,6 +403,107 @@ describe("bwrk cli", () => {
     const plannedPayload = parseData<{ readonly destructive: boolean; readonly strategy: string }>(planned.stdout);
     expect(planned.exitCode).toBe(0);
     expect(plannedPayload).toEqual(expect.objectContaining({ destructive: false, strategy: "manual_review" }));
+
+    const workPlan = scanPayload.mergePlans.find((plan) => plan.domain === "work");
+    const unconfirmed = await runCli(rootDir, [
+      "merge",
+      "apply",
+      "--domain",
+      "work",
+      "--survivor",
+      workPlan?.survivorId ?? "",
+      "--duplicate",
+      workPlan?.duplicateIds[0] ?? "",
+      "--plan",
+      workPlan?.id ?? "",
+      "--json"
+    ]);
+    expect(unconfirmed.exitCode).toBe(2);
+    expect(parseJson<{ readonly code: string; readonly message: string }>(unconfirmed.stderr)).toEqual(
+      expect.objectContaining({ code: "BOREAL_INVALID_INPUT", message: expect.stringContaining("--confirm") })
+    );
+
+    const appliedWork = await runCli(rootDir, [
+      "merge",
+      "apply",
+      "--domain",
+      "work",
+      "--survivor",
+      workPlan?.survivorId ?? "",
+      "--duplicate",
+      workPlan?.duplicateIds[0] ?? "",
+      "--plan",
+      workPlan?.id ?? "",
+      "--confirm",
+      "--json"
+    ]);
+    const appliedWorkPayload = parseData<{
+      readonly applied: true;
+      readonly mode: string;
+      readonly changedWorkIds: readonly string[];
+      readonly event: { readonly type: string; readonly operationId: string };
+    }>(appliedWork.stdout);
+    const mergedState = await readState<{
+      readonly workItems: Array<{
+        readonly meta: { readonly id: string; readonly tags: readonly string[] };
+        readonly status: string;
+        readonly labels: readonly string[];
+        readonly description: string;
+        readonly closedReason?: string;
+      }>;
+    }>(rootDir);
+    const survivor = mergedState.workItems.find((item) => item.meta.id === workPlan?.survivorId);
+    const duplicate = mergedState.workItems.find((item) => item.meta.id === workPlan?.duplicateIds[0]);
+    expect(appliedWork.exitCode).toBe(0);
+    expect(appliedWorkPayload).toEqual(
+      expect.objectContaining({ applied: true, mode: "state_archive", changedWorkIds: expect.arrayContaining([workPlan?.survivorId]) })
+    );
+    expect(appliedWorkPayload.event.type).toBe("merge.applied");
+    expect(appliedWorkPayload.event.operationId).toMatch(/^bw_operation_/);
+    expect(survivor?.labels).toContain("merged-survivor");
+    expect(survivor?.description).toContain("Merge Archive");
+    expect(duplicate).toEqual(
+      expect.objectContaining({
+        status: "cancelled",
+        closedReason: `Merged into ${workPlan?.survivorId} by ${workPlan?.id}`
+      })
+    );
+    expect(duplicate?.labels).toContain("merged-duplicate");
+
+    const rawPlan = scanPayload.mergePlans.find((plan) => plan.domain === "raw");
+    const appliedRaw = await runCli(rootDir, [
+      "merge",
+      "apply",
+      "--domain",
+      "raw",
+      "--survivor",
+      rawPlan?.survivorId ?? "",
+      "--duplicate",
+      rawPlan?.duplicateIds[0] ?? "",
+      "--plan",
+      rawPlan?.id ?? "",
+      "--confirm",
+      "--json"
+    ]);
+    const appliedRawPayload = parseData<{
+      readonly applied: true;
+      readonly mode: string;
+      readonly vaultEvent: { readonly type: string; readonly subjectType: string; readonly payload: { readonly planId: string } };
+    }>(appliedRaw.stdout);
+    const rawLedgerEvents = await readFile(join(rootDir, "memory/ledgers/events.jsonl"), "utf8");
+    const rawIndex = await readFile(join(rootDir, "memory/raw/index.jsonl"), "utf8");
+    expect(appliedRaw.exitCode).toBe(0);
+    expect(appliedRawPayload.mode).toBe("vault_event");
+    expect(appliedRawPayload.vaultEvent).toEqual(
+      expect.objectContaining({
+        type: "merge.applied",
+        subjectType: "raw",
+        payload: expect.objectContaining({ planId: rawPlan?.id })
+      })
+    );
+    expect(rawLedgerEvents).toContain(rawPlan?.id ?? "");
+    expect(rawIndex).toContain(rawPlan?.survivorId ?? "");
+    expect(rawIndex).toContain(rawPlan?.duplicateIds[0] ?? "");
   });
 
   it("analyzes compaction candidates with source preservation guarantees", async () => {
@@ -437,9 +541,11 @@ describe("bwrk cli", () => {
       readonly ok: true;
       readonly candidates: Array<{ readonly domain: string; readonly title: string; readonly reason: string }>;
       readonly plans: Array<{
+        readonly id: string;
         readonly domain: string;
         readonly destructive: boolean;
         readonly strategy: string;
+        readonly targetId: string;
         readonly targetTitle: string;
         readonly preserves: {
           readonly evidenceIds: readonly string[];
@@ -479,6 +585,85 @@ describe("bwrk cli", () => {
         })
       ])
     );
+
+    const workPlan = payload.plans.find((plan) => plan.domain === "work");
+    const compactedWork = await runCli(rootDir, [
+      "compact",
+      "apply",
+      "--domain",
+      "work",
+      "--target",
+      workPlan?.targetId ?? "",
+      "--plan",
+      workPlan?.id ?? "",
+      "--summary",
+      "Reviewed compact work summary.",
+      "--older-than-days",
+      "1",
+      "--confirm",
+      "--json"
+    ]);
+    const compactedWorkPayload = parseData<{
+      readonly applied: true;
+      readonly archivePath: string;
+      readonly preserves: { readonly evidenceIds: readonly string[]; readonly sourceRefs: readonly string[] };
+      readonly event: { readonly type: string; readonly operationId: string };
+      readonly vaultEvent: { readonly type: string; readonly payload: { readonly archivePath: string } };
+    }>(compactedWork.stdout);
+    const compactedState = await readState<{
+      readonly workItems: Array<{ readonly meta: { readonly id: string; readonly tags: readonly string[] }; readonly description: string; readonly labels: readonly string[] }>;
+    }>(rootDir);
+    const compactedWorkRecord = compactedState.workItems.find((item) => item.meta.id === work.meta.id);
+    const workArchive = await readFile(join(rootDir, compactedWorkPayload.archivePath), "utf8");
+    expect(compactedWork.exitCode).toBe(0);
+    expect(compactedWorkPayload.archivePath).toBe(`memory/work/compacted/${work.meta.id}.md`);
+    expect(compactedWorkPayload.preserves.evidenceIds).toEqual(["bw_evidence_compact"]);
+    expect(compactedWorkPayload.preserves.sourceRefs).toEqual(["source:file://closed-work.md"]);
+    expect(compactedWorkPayload.event.type).toBe("compact.applied");
+    expect(compactedWorkPayload.event.operationId).toMatch(/^bw_operation_/);
+    expect(compactedWorkPayload.vaultEvent.payload.archivePath).toBe(compactedWorkPayload.archivePath);
+    expect(workArchive).toContain("Original Description");
+    expect(workArchive).toContain("Reviewed compact work summary.");
+    expect(compactedWorkRecord?.description).toContain("Reviewed compact work summary.");
+    expect(compactedWorkRecord?.description).toContain("Preserved evidence IDs");
+    expect(compactedWorkRecord?.labels).toContain("compacted");
+
+    const wikiPlan = payload.plans.find((plan) => plan.domain === "wiki");
+    const compactedWiki = await runCli(rootDir, [
+      "compact",
+      "apply",
+      "--domain",
+      "wiki",
+      "--target",
+      wikiPlan?.targetId ?? "",
+      "--plan",
+      wikiPlan?.id ?? "",
+      "--summary",
+      "Reviewed compact wiki summary.",
+      "--confirm",
+      "--json"
+    ]);
+    const compactedWikiPayload = parseData<{
+      readonly applied: true;
+      readonly archivePath: string;
+      readonly preserves: { readonly sourceRefs: readonly string[]; readonly originalPaths: readonly string[] };
+      readonly vaultEvent: { readonly subjectType: string; readonly payload: { readonly archivePath: string } };
+    }>(compactedWiki.stdout);
+    const wikiArchive = await readFile(join(rootDir, compactedWikiPayload.archivePath), "utf8");
+    const wikiPage = await readFile(join(rootDir, "memory/wiki/compact-wiki.md"), "utf8");
+    const compactEvents = await readFile(join(rootDir, "memory/ledgers/events.jsonl"), "utf8");
+    expect(compactedWiki.exitCode).toBe(0);
+    expect(compactedWikiPayload.archivePath).toMatch(/^memory\/wiki\/archive\/compact-wiki-/);
+    expect(compactedWikiPayload.preserves).toEqual(
+      expect.objectContaining({ sourceRefs: [raw.record.id], originalPaths: ["memory/wiki/compact-wiki.md"] })
+    );
+    expect(compactedWikiPayload.vaultEvent.subjectType).toBe("wiki");
+    expect(wikiArchive).toContain("Candidate wiki page.");
+    expect(wikiPage).toContain("claim_status: compacted");
+    expect(wikiPage).toContain("Reviewed compact wiki summary.");
+    expect(wikiPage).toContain(compactedWikiPayload.archivePath);
+    expect(compactEvents).toContain(workPlan?.id ?? "");
+    expect(compactEvents).toContain(wikiPlan?.id ?? "");
   });
 
   it("prints the agent guide without an initialized workspace", async () => {
@@ -684,7 +869,9 @@ describe("bwrk cli", () => {
         "wiki create",
         "duplicate scan",
         "merge plan",
+        "merge apply",
         "compact analyze",
+        "compact apply",
         "sync status",
         "ledger status",
         "ledger delete",

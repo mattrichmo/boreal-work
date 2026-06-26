@@ -840,6 +840,20 @@ Builds a non-destructive merge review document. It validates command shape and p
 
 JSON `data` contains `id`, `domain`, `destructive`, `strategy`, `survivorId`, `duplicateIds`, and `commands`.
 
+## `merge apply`
+
+```bash
+bwrk merge apply --domain work|raw|wiki --survivor <id> --duplicate <id>... --plan <plan-id> --confirm [--json]
+```
+
+Applies a reviewed merge plan only when the exact current plan ID and `--confirm` are supplied. The command recomputes the plan from the provided inputs and refuses mismatches so stale review output cannot be applied accidentally.
+
+Behavior:
+
+- `work`: archives duplicate work items by marking them `cancelled`, keeps the survivor, unions labels, acceptance criteria, evidence IDs, verification IDs, and source refs onto the survivor, and records a runtime `merge.applied` event.
+- `raw` and `wiki`: preserve source records/pages and append a merge event to `memory/ledgers/events.jsonl`.
+- Active, reserved, or in-progress duplicate work fails closed instead of cancelling someone else's reservation.
+
 ## `compact analyze`
 
 ```bash
@@ -849,6 +863,20 @@ bwrk compact analyze [--domain all|work|wiki] [--older-than-days <n>] [--json]
 Finds compaction candidates without mutating runtime state or vault files. Closed work is eligible when it has been closed for at least the age threshold, defaulting to 30 days. Vault wiki pages are eligible when they are orphaned or marked with stale claim frontmatter.
 
 JSON `data` contains `ok`, `domain`, `olderThanDays`, `scanned`, `skipped`, `candidates`, and `plans`. Every plan has `destructive: false`, `strategy: summarize_preserve_sources`, and explicit preservation guarantees for evidence IDs, verification IDs, source refs, wiki links, and original paths.
+
+## `compact apply`
+
+```bash
+bwrk compact apply --domain work|wiki --target <id> --plan <plan-id> --summary <text> --confirm [--older-than-days <n>] [--json]
+```
+
+Applies one reviewed compaction plan only when the target is still eligible and the exact plan ID plus `--confirm` are supplied. The memory vault must be initialized because apply archives original content before summarizing the target.
+
+Behavior:
+
+- `work`: writes `memory/work/compacted/<work-id>.md`, replaces the work description with the reviewed summary plus preservation references, tags the work as compacted, and records runtime/vault compaction events.
+- `wiki`: writes `memory/wiki/archive/<slug>-<timestamp>.md`, rewrites the page body to the reviewed summary, keeps source refs and links visible, and records a vault compaction event.
+- The command is non-destructive: original content is kept in the archive path returned in JSON.
 
 ## `sync status`
 

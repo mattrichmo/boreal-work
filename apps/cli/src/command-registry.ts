@@ -884,6 +884,25 @@ export const COMMAND_DEFINITIONS: readonly CommandDefinition[] = [
     supportsJson: true,
   },
   {
+    path: ["merge", "apply"],
+    category: "merge",
+    summary: "Apply a reviewed merge plan with source-preserving guards.",
+    usage:
+      "bwrk merge apply --domain work|raw|wiki --survivor <id> --duplicate <id>... --plan <plan-id> --confirm [--json]",
+    description:
+      "Applies a reviewed merge plan only when the exact plan ID and --confirm are supplied. Work duplicates are archived, and vault merges retain source records while recording the merge relation.",
+    flags: [
+      flag("domain", "value", "Domain being merged."),
+      flag("survivor", "value", "Record ID to keep."),
+      flag("duplicate", "value", "Duplicate record ID to merge.", true),
+      flag("plan", "value", "Exact plan ID produced by merge plan or duplicate scan."),
+      flag("confirm", "boolean", "Required confirmation gate for applying the merge.")
+    ],
+    positionals: { label: "arguments", min: 0, max: 0 },
+    requiresWorkspace: true,
+    supportsJson: true,
+  },
+  {
     path: ["compact", "analyze"],
     category: "compact",
     summary: "Analyze compaction candidates without mutating records.",
@@ -893,6 +912,26 @@ export const COMMAND_DEFINITIONS: readonly CommandDefinition[] = [
     flags: [
       flag("domain", "value", "Domain to analyze. Defaults to all."),
       flag("older-than-days", "value", "Closed-work age threshold. Defaults to 30.")
+    ],
+    positionals: { label: "arguments", min: 0, max: 0 },
+    requiresWorkspace: true,
+    supportsJson: true,
+  },
+  {
+    path: ["compact", "apply"],
+    category: "compact",
+    summary: "Apply a reviewed compaction plan with archive preservation.",
+    usage:
+      "bwrk compact apply --domain work|wiki --target <id> --plan <plan-id> --summary <text> --confirm [--older-than-days <n>] [--json]",
+    description:
+      "Applies one compaction plan only when the target is still eligible and the exact plan ID plus --confirm are supplied. Original content is archived before the target is summarized.",
+    flags: [
+      flag("domain", "value", "Domain being compacted. Must be work or wiki."),
+      flag("target", "value", "Target record or page ID from the compaction plan."),
+      flag("plan", "value", "Exact plan ID produced by compact analyze."),
+      flag("summary", "value", "Reviewed summary to keep on the compacted target."),
+      flag("confirm", "boolean", "Required confirmation gate for applying compaction."),
+      flag("older-than-days", "value", "Closed-work age threshold used to recompute the plan. Defaults to 30.")
     ],
     positionals: { label: "arguments", min: 0, max: 0 },
     requiresWorkspace: true,
@@ -1663,6 +1702,18 @@ const COMMAND_BEHAVIOR: Readonly<Record<string, CommandBehaviorMetadata>> = {
     humanOutputKind: "record",
     examples: ["bwrk merge plan --domain work --survivor bw_work_keep --duplicate bw_work_dup --json"],
   }),
+  "merge apply": commandMetadata("merge apply", {
+    readOnly: false,
+    destructive: false,
+    writesState: true,
+    writesGeneratedArtifacts: true,
+    requiresFreshIndex: false,
+    concurrencySafe: true,
+    requiresLock: "state",
+    maxResultSizeChars: 100_000,
+    humanOutputKind: "record",
+    examples: ["bwrk merge apply --domain work --survivor bw_work_keep --duplicate bw_work_dup --plan merge_plan_example --confirm --json"],
+  }),
   "compact analyze": commandMetadata("compact analyze", {
     readOnly: true,
     destructive: false,
@@ -1674,6 +1725,18 @@ const COMMAND_BEHAVIOR: Readonly<Record<string, CommandBehaviorMetadata>> = {
     maxResultSizeChars: 150_000,
     humanOutputKind: "record",
     examples: ["bwrk compact analyze --older-than-days 30 --json"],
+  }),
+  "compact apply": commandMetadata("compact apply", {
+    readOnly: false,
+    destructive: false,
+    writesState: true,
+    writesGeneratedArtifacts: true,
+    requiresFreshIndex: false,
+    concurrencySafe: true,
+    requiresLock: "state",
+    maxResultSizeChars: 125_000,
+    humanOutputKind: "record",
+    examples: ["bwrk compact apply --domain work --target bw_work_example --plan compact_plan_example --summary 'Preserved summary' --confirm --json"],
   }),
   "sync status": commandMetadata("sync status", {
     readOnly: true,

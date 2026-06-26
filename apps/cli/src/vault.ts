@@ -114,6 +114,25 @@ export interface VaultMalformedRawRecord {
   readonly error: string;
 }
 
+export interface VaultLedgerEventInput {
+  readonly type: string;
+  readonly subjectType: string;
+  readonly subjectId: string;
+  readonly payload: Record<string, unknown>;
+}
+
+export interface VaultLedgerEvent {
+  readonly schemaVersion: typeof VAULT_SCHEMA_VERSION;
+  readonly id: string;
+  readonly type: string;
+  readonly subjectType: string;
+  readonly subjectId: string;
+  readonly createdAt: string;
+  readonly actorId: string;
+  readonly payload: Record<string, unknown>;
+  readonly contentHash: string;
+}
+
 const REQUIRED_DIRECTORIES = [
   "memory",
   "memory/raw",
@@ -300,6 +319,31 @@ export async function listVaultRawSources(context: CliContext): Promise<readonly
 
 export async function listVaultWikiPages(context: CliContext): Promise<readonly WikiPageRecord[]> {
   return readWikiPages(context);
+}
+
+export async function appendVaultLedgerEvent(context: CliContext, input: VaultLedgerEventInput): Promise<VaultLedgerEvent> {
+  await requireInitializedVault(context);
+  const type = normalizeMachineString(input.type, "vault event type", { lowerCase: true });
+  const subjectType = normalizeMachineString(input.subjectType, "vault event subject type", { lowerCase: true });
+  const subjectId = normalizeMachineString(input.subjectId, "vault event subject id");
+  const baseRecord = {
+    schemaVersion: VAULT_SCHEMA_VERSION,
+    id: randomId("event"),
+    type,
+    subjectType,
+    subjectId,
+    createdAt: nowIso(),
+    actorId: String(context.actor.id),
+    payload: input.payload
+  } as const;
+  const record: VaultLedgerEvent = {
+    ...baseRecord,
+    contentHash: hashContent(baseRecord)
+  };
+  const ledgerPath = join(context.workspaceRoot, "memory/ledgers/events.jsonl");
+  const existing = await readTextIfExists(ledgerPath);
+  await writeTextFileAtomic(ledgerPath, `${existing}${existing && !existing.endsWith("\n") ? "\n" : ""}${JSON.stringify(record)}\n`);
+  return record;
 }
 
 async function pathStatus(
