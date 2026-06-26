@@ -15,6 +15,7 @@ import {
   type EvidenceRecord,
   type EvidenceKind,
   type EvidenceOutcome,
+  type GraphEdge,
   type IsoTimestamp,
   type KnowledgeSource,
   type KnowledgeSourceId,
@@ -523,14 +524,18 @@ async function buildAgentStatus(
   const now = Date.now();
   const maxActiveReservations = context.runtime.policy.maxActiveReservationsPerAgent;
   return context.store.read(async (reader) => {
-    const [reservations, workItems] = await Promise.all([reader.listReservations(), reader.listWorkItems()]);
+    const [reservations, workItems, graphEdges] = await Promise.all([
+      reader.listReservations(),
+      reader.listWorkItems(),
+      reader.listGraphEdges()
+    ]);
     const workById = new Map(workItems.map((work) => [work.meta.id, work]));
     const reservationRows = reservations.map((reservation) => reservationListRow(reservation, workById.get(reservation.workId), now));
     const active = reservationRows
       .filter((row) => row.agentId === normalizedAgentId && row.status === "active")
       .sort(compareReservationRows);
     const expiredActive = active.filter((row) => row.expired);
-    const claimableWork = [...claimableWorkItems(workItems, normalizedLabels)].sort(compareWorkItems);
+    const claimableWork = [...claimableWorkItems(workItems, normalizedLabels, graphEdges)].sort(compareWorkItems);
     const capacityRemaining = Math.max(0, maxActiveReservations - active.length);
 
     return {
@@ -1516,8 +1521,13 @@ function reservationListRow(
   };
 }
 
-function claimableWorkItems(workItems: readonly WorkItem[], labels: readonly string[]): readonly WorkItem[] {
+function claimableWorkItems(
+  workItems: readonly WorkItem[],
+  labels: readonly string[],
+  graphEdges: readonly GraphEdge[]
+): readonly WorkItem[] {
   const workById = new Map(workItems.map((work) => [work.meta.id, work]));
+  const dependencyIdsByWork = dependencyIdsByWorkFromGraph(workItems, graphEdges);
   return workItems.filter((work) => {
     if (work.status !== "ready" || work.reservationId) {
       return false;
@@ -1525,12 +1535,37 @@ function claimableWorkItems(workItems: readonly WorkItem[], labels: readonly str
     if (!labels.every((label) => work.labels.includes(label))) {
       return false;
     }
-    const dependencies = work.dependencyIds.map((dependencyId) => workById.get(dependencyId)).filter(isWorkItem);
-    if (dependencies.length !== work.dependencyIds.length) {
+    const dependencyIds = dependencyIdsByWork.get(work.meta.id) ?? [];
+    const dependencies = dependencyIds.map((dependencyId) => workById.get(dependencyId)).filter(isWorkItem);
+    if (dependencies.length !== dependencyIds.length) {
       return false;
     }
-    return deriveReadinessStatus(work, dependencies) === "ready";
+    return deriveReadinessStatus({ ...work, dependencyIds }, dependencies) === "ready";
   });
+}
+
+function dependencyIdsByWorkFromGraph(
+  workItems: readonly WorkItem[],
+  graphEdges: readonly GraphEdge[]
+): ReadonlyMap<WorkId, readonly WorkId[]> {
+  const workIds = new Set(workItems.map((work) => work.meta.id));
+  const dependencyIdsByWork = new Map<WorkId, WorkId[]>();
+  for (const work of workItems) {
+    dependencyIdsByWork.set(work.meta.id, []);
+  }
+  for (const edge of graphEdges) {
+    if (edge.kind !== "blocks" || edge.fromType !== "work" || edge.toType !== "work" || !workIds.has(edge.toId as WorkId)) {
+      continue;
+    }
+    const workId = edge.toId as WorkId;
+    dependencyIdsByWork.set(workId, [...(dependencyIdsByWork.get(workId) ?? []), edge.fromId as WorkId]);
+  }
+  return new Map(
+    [...dependencyIdsByWork.entries()].map(([workId, dependencyIds]) => [
+      workId,
+      [...new Set(dependencyIds)].sort((left, right) => left.localeCompare(right))
+    ])
+  );
 }
 
 function workViewListRow(view: WorkItemView): WorkListRow {

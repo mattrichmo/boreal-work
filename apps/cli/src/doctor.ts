@@ -380,6 +380,7 @@ async function validateStoreRecords(
 }> {
   const diagnostics: Diagnostic[] = [];
   let fixed = false;
+  let workStateChanged = false;
 
   try {
     const summary = (() => {
@@ -430,9 +431,14 @@ async function validateStoreRecords(
           .filter((verificationId) => !verificationsById.has(verificationId))
           .map((verificationId) => ({ workId: work.meta.id, verificationId }))
       );
+      const blockEdges = graphEdges.filter(
+        (edge) => edge.kind === "blocks" && edge.fromType === "work" && edge.toType === "work"
+      );
+      const expectedDependencyIds = dependencyIdsByWorkFromGraph(workItems, blockEdges);
       const staleReadiness = workItems.flatMap((work) => {
-        const dependencies = work.dependencyIds.map((dependencyId) => workById.get(dependencyId)).filter(isWorkItem);
-        const expected = deriveReadinessStatus(work, dependencies);
+        const dependencyIds = expectedDependencyIds.get(work.meta.id) ?? [];
+        const dependencies = dependencyIds.map((dependencyId) => workById.get(dependencyId)).filter(isWorkItem);
+        const expected = deriveReadinessStatus({ ...work, dependencyIds }, dependencies);
         return expected === work.status ? [] : [{ workId: work.meta.id, actual: work.status, expected }];
       });
       const contextPackSubjects = new Set(rawContextPacks.filter(isDoctorContextPack).map((pack) => pack.subjectId));
@@ -447,8 +453,9 @@ async function validateStoreRecords(
         if (!pack) {
           return [];
         }
+        const graphWork = { ...work, dependencyIds: expectedDependencyIds.get(work.meta.id) ?? [] };
         const expected = buildContextPack({
-          work,
+          work: graphWork,
           evidence: evidence.filter((record) => record.subjectId === work.meta.id),
           claims,
           decisions,
@@ -485,9 +492,6 @@ async function validateStoreRecords(
         }
         return issues;
       });
-      const blockEdges = graphEdges.filter(
-        (edge) => edge.kind === "blocks" && edge.fromType === "work" && edge.toType === "work"
-      );
       const blockEdgeKeys = new Set(blockEdges.map((edge) => `${edge.fromId}->${edge.toId}`));
       const blockConsistency = [
         ...blockEdges.flatMap((edge) => {
@@ -596,12 +600,33 @@ async function validateStoreRecords(
     diagnostics.push(diagnosticFromList("knowledge.dangling_evidence", "Dangling claim evidence references", summary.danglingClaimEvidence));
     diagnostics.push(diagnosticFromList("graph.duplicate_edges", "Duplicate graph edges", summary.duplicateGraphEdges));
     diagnostics.push(diagnosticFromList("graph.dangling_work_edges", "Dangling graph work edges", summary.danglingWorkGraphEdges));
-    diagnostics.push(diagnosticFromList("graph.block_consistency", "Block graph and dependency refs disagree", summary.blockConsistency));
+    if (summary.blockConsistency.length > 0) {
+      if (fix) {
+        const repaired = await context.runtime.repairDependencyProjection();
+        workStateChanged = workStateChanged || repaired.dependencyChanged > 0 || repaired.readinessChanged > 0;
+        diagnostics.push({
+          code: "graph.block_consistency",
+          severity: "fixed",
+          message: "Repaired work dependency projection from block graph",
+          details: { issues: summary.blockConsistency, repaired }
+        });
+        fixed = true;
+      } else {
+        diagnostics.push(diagnosticFromList("graph.block_consistency", "Block graph and dependency refs disagree", summary.blockConsistency));
+      }
+    } else {
+      diagnostics.push({
+        code: "graph.block_consistency",
+        severity: "ok",
+        message: "Block graph and dependency refs agree"
+      });
+    }
     diagnostics.push(diagnosticFromList("graph.dependency_cycles", "Dependency cycles found", summary.dependencyCycles));
     diagnostics.push(diagnosticFromList("reservation.consistency", "Reservation consistency issues", summary.reservationConsistency));
     if (summary.expiredActiveReservations.length > 0) {
       if (fix) {
         const repair = await context.runtime.expireStaleReservations();
+        workStateChanged = workStateChanged || repair.expired.length > 0;
         diagnostics.push({
           code: "reservation.expired",
           severity: "fixed",
@@ -633,6 +658,7 @@ async function validateStoreRecords(
     if (summary.staleReadiness.length > 0) {
       if (fix) {
         const repair = await context.runtime.recomputeReadiness();
+        workStateChanged = workStateChanged || repair.changed > 0;
         diagnostics.push({
           code: "work.readiness",
           severity: "fixed",
@@ -657,14 +683,14 @@ async function validateStoreRecords(
     }
 
     const contextPackIssues = [...summary.missingContextPacks.map((workId) => ({ workId, issue: "missing_context_pack" })), ...summary.contextPackDrift];
-    if (contextPackIssues.length > 0) {
+    if (contextPackIssues.length > 0 || (fix && workStateChanged)) {
       if (fix) {
         await context.runtime.rebuildProjections();
         diagnostics.push({
           code: "projection.context_pack",
           severity: "fixed",
           message: "Rebuilt context pack projections",
-          details: { contextPackIssues }
+          details: { contextPackIssues, workStateChanged }
         });
         fixed = true;
       } else {
@@ -936,6 +962,36 @@ function duplicateGraphEdgeKeys(graphEdges: readonly GraphEdge[]): Array<{ key: 
   return [...edgeIdsByKey.entries()]
     .filter(([, edgeIds]) => edgeIds.length > 1)
     .map(([key, edgeIds]) => ({ key, edgeIds }));
+}
+
+function dependencyIdsByWorkFromGraph(
+  workItems: readonly WorkItem[],
+  graphEdges: readonly GraphEdge[]
+): ReadonlyMap<WorkId, readonly WorkId[]> {
+  const workIds = new Set(workItems.map((work) => work.meta.id));
+  const dependencyIdsByWork = new Map<WorkId, WorkId[]>();
+  for (const work of workItems) {
+    dependencyIdsByWork.set(work.meta.id, []);
+  }
+  for (const edge of graphEdges) {
+    if (
+      edge.kind !== "blocks" ||
+      edge.fromType !== "work" ||
+      edge.toType !== "work" ||
+      !workIds.has(edge.fromId as WorkId) ||
+      !workIds.has(edge.toId as WorkId)
+    ) {
+      continue;
+    }
+    const workId = edge.toId as WorkId;
+    dependencyIdsByWork.set(workId, [...(dependencyIdsByWork.get(workId) ?? []), edge.fromId as WorkId]);
+  }
+  return new Map(
+    [...dependencyIdsByWork.entries()].map(([workId, dependencyIds]) => [
+      workId,
+      [...new Set(dependencyIds)].sort((left, right) => left.localeCompare(right))
+    ])
+  );
 }
 
 function findDependencyCycles(graphEdges: readonly GraphEdge[]): Array<{ cycle: readonly string[] }> {

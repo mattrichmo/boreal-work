@@ -710,6 +710,7 @@ Checks:
 `--fix` performs only idempotent repairs:
 
 - Remove stale runtime and search-index locks.
+- Repair `work.dependencyIds` from canonical `blocks` graph edges.
 - Recompute derived readiness.
 - Rebuild context-pack projections.
 - Rebuild the local search index.

@@ -92,6 +92,11 @@ export interface ExpireReservationsResult {
   readonly expired: readonly ReservationLifecycleResult[];
 }
 
+export interface RepairDependencyProjectionResult {
+  readonly dependencyChanged: number;
+  readonly readinessChanged: number;
+}
+
 export interface WorkReferenceCandidate {
   readonly workId: WorkId;
   readonly title: string;
@@ -149,6 +154,7 @@ export interface BorealRuntime {
     readonly expiresAt: IsoTimestamp;
   }): Promise<ReservationLifecycleResult>;
   expireStaleReservations(): Promise<ExpireReservationsResult>;
+  repairDependencyProjection(): Promise<RepairDependencyProjectionResult>;
   recordEvidence(input: Omit<Parameters<typeof recordEvidenceDomain>[0], "actor" | "now">): Promise<EvidenceRecord>;
   verifyWork(input: {
     readonly workId: WorkId;
@@ -264,7 +270,7 @@ export function createBorealRuntime(options: BorealRuntimeOptions = {}): BorealR
 
     async addBlockingDependency(input): Promise<WorkItem> {
       return store.write(async (writer) => {
-        const blockedWork = await requireWork(writer, input.blockedWorkId);
+        const blockedWork = await workWithGraphDependencies(writer, await requireWork(writer, input.blockedWorkId));
         const blockingWork = await requireWork(writer, input.blockingWorkId);
         const existingEdges = await writer.listGraphEdges();
         const result = addBlockingDependencyDomain({
@@ -287,7 +293,7 @@ export function createBorealRuntime(options: BorealRuntimeOptions = {}): BorealR
 
     async markReady(workId): Promise<WorkItem> {
       return store.write(async (writer) => {
-        const work = await requireWork(writer, workId);
+        const work = await workWithGraphDependencies(writer, await requireWork(writer, workId));
         const dependencies = await loadDependencies(writer, work);
         const updated = markWorkReady(work, dependencies, now(), actor);
         await writer.putWorkItem(updated);
@@ -299,7 +305,17 @@ export function createBorealRuntime(options: BorealRuntimeOptions = {}): BorealR
     async listReadyWork(): Promise<readonly WorkItemView[]> {
       return store.read(async (reader) => {
         const items = await reader.listWorkItems();
-        const readyItems = items.filter((item) => item.status === "ready");
+        const readyItems: WorkItem[] = [];
+        for (const item of items) {
+          if (item.status !== "ready" || item.reservationId) {
+            continue;
+          }
+          const graphItem = await workWithGraphDependencies(reader, item);
+          const dependencies = await loadDependencies(reader, graphItem);
+          if (deriveReadinessStatus(graphItem, dependencies) === "ready") {
+            readyItems.push(graphItem);
+          }
+        }
         return Promise.all(readyItems.map((item) => makeWorkView(reader, item)));
       });
     },
@@ -317,9 +333,10 @@ export function createBorealRuntime(options: BorealRuntimeOptions = {}): BorealR
           if (!labels.every((label) => item.labels.includes(label))) {
             continue;
           }
-          const dependencies = await loadDependencies(writer, item);
-          if (deriveReadinessStatus(item, dependencies) === "ready") {
-            candidates.push(item);
+          const graphItem = await workWithGraphDependencies(writer, item);
+          const dependencies = await loadDependencies(writer, graphItem);
+          if (deriveReadinessStatus(graphItem, dependencies) === "ready") {
+            candidates.push(graphItem);
           }
         }
 
@@ -449,6 +466,14 @@ export function createBorealRuntime(options: BorealRuntimeOptions = {}): BorealR
           expired.push({ work: updatedWork, reservation: expiredReservation });
         }
         return { expired };
+      });
+    },
+
+    async repairDependencyProjection(): Promise<RepairDependencyProjectionResult> {
+      return store.write(async (writer) => {
+        const repaired = await repairDependencyProjection(writer);
+        await appendEvent(writer, "work.dependencies_repaired", "work", "work", { ...repaired });
+        return repaired;
       });
     },
 
@@ -662,11 +687,12 @@ export function createBorealRuntime(options: BorealRuntimeOptions = {}): BorealR
         const views: WorkItemView[] = [];
 
         for (const work of workItems) {
+          const graphWork = await workWithGraphDependencies(writer, work);
           const evidence = await writer.listEvidenceForSubject(work.meta.id);
-          const contextPack = buildContextPack({ work, evidence, claims, decisions, actor, now: now() });
+          const contextPack = buildContextPack({ work: graphWork, evidence, claims, decisions, actor, now: now() });
           await writer.putContextPack(contextPack);
-          await writer.putProjection(buildContextProjection({ work, evidence, claims, decisions, actor, now: now() }));
-          views.push(toWorkItemView({ work, evidence, contextPack }));
+          await writer.putProjection(buildContextProjection({ work: graphWork, evidence, claims, decisions, actor, now: now() }));
+          views.push(toWorkItemView({ work: graphWork, evidence, contextPack }));
         }
 
         await appendEvent(writer, "projection.rebuilt", "projections", "projection", { count: views.length });
@@ -837,8 +863,9 @@ async function clearWorkReservation(
     status: work.status === "reserved" ? ("draft" as const) : work.status,
     reservationId: undefined
   };
-  const dependencies = await loadDependencies(reader, base);
-  return touchRecord({ ...base, status: deriveReadinessStatus(base, dependencies) }, now, actor);
+  const graphBase = await workWithGraphDependencies(reader, base);
+  const dependencies = await loadDependencies(reader, graphBase);
+  return touchRecord({ ...graphBase, status: deriveReadinessStatus(graphBase, dependencies) }, now, actor);
 }
 
 async function requireKnowledgeSource(reader: BorealReader, sourceId: KnowledgeSourceId): Promise<KnowledgeSource> {
@@ -893,7 +920,48 @@ async function requireEvidenceRecords(reader: BorealReader, evidenceIds: readonl
 }
 
 async function loadDependencies(reader: BorealReader, work: WorkItem): Promise<readonly WorkItem[]> {
-  return Promise.all(work.dependencyIds.map((dependencyId) => requireWork(reader, dependencyId)));
+  return Promise.all((await graphDependencyIds(reader, work.meta.id)).map((dependencyId) => requireWork(reader, dependencyId)));
+}
+
+async function graphDependencyIds(reader: BorealReader, workId: WorkId): Promise<readonly WorkId[]> {
+  const edges = await reader.listGraphEdges();
+  return unique(
+    edges
+      .filter((edge) => edge.kind === "blocks" && edge.fromType === "work" && edge.toType === "work" && edge.toId === workId)
+      .map((edge) => edge.fromId as WorkId)
+  ).sort((left, right) => left.localeCompare(right));
+}
+
+async function workWithGraphDependencies(reader: BorealReader, work: WorkItem): Promise<WorkItem> {
+  return { ...work, dependencyIds: await graphDependencyIds(reader, work.meta.id) };
+}
+
+async function repairDependencyProjection(writer: BorealWriter): Promise<RepairDependencyProjectionResult> {
+  const workItems = await writer.listWorkItems();
+  const workById = new Map(workItems.map((work) => [work.meta.id, work]));
+  const graphEdges = await writer.listGraphEdges();
+  let dependencyChanged = 0;
+  let readinessChanged = 0;
+
+  for (const work of workItems) {
+    const dependencyIds = unique(
+      graphEdges
+        .filter((edge) => edge.kind === "blocks" && edge.fromType === "work" && edge.toType === "work" && edge.toId === work.meta.id)
+        .map((edge) => edge.fromId as WorkId)
+        .filter((dependencyId) => workById.has(dependencyId))
+    ).sort((left, right) => left.localeCompare(right));
+    const dependencies = dependencyIds.map((dependencyId) => workById.get(dependencyId)).filter(isWorkItem);
+    const status = deriveReadinessStatus({ ...work, dependencyIds }, dependencies);
+    const changedDependencies = !arraysEqual(work.dependencyIds, dependencyIds);
+    const changedReadiness = status !== work.status;
+    if (changedDependencies || changedReadiness) {
+      await writer.putWorkItem({ ...work, dependencyIds, status });
+      dependencyChanged += changedDependencies ? 1 : 0;
+      readinessChanged += changedReadiness ? 1 : 0;
+    }
+  }
+
+  return { dependencyChanged, readinessChanged };
 }
 
 async function recomputeAllReadiness(writer: BorealWriter): Promise<number> {
@@ -926,7 +994,7 @@ async function makeWorkView(reader: BorealReader, work: WorkItem): Promise<WorkI
   const verifications = await reader.listVerificationsForSubject(work.meta.id);
   const packs = await reader.listContextPacks();
   const contextPack = packs.find((pack) => pack.subjectId === work.meta.id);
-  return toWorkItemView({ work, evidence, verifications, contextPack });
+  return toWorkItemView({ work: await workWithGraphDependencies(reader, work), evidence, verifications, contextPack });
 }
 
 function compareClaimCandidates(left: WorkItem, right: WorkItem): number {
@@ -948,6 +1016,18 @@ function priorityRank(priority: WorkItem["priority"]): number {
     case "low":
       return 1;
   }
+}
+
+function isWorkItem(value: WorkItem | undefined): value is WorkItem {
+  return value !== undefined;
+}
+
+function unique<T>(values: readonly T[]): T[] {
+  return [...new Set(values)];
+}
+
+function arraysEqual(left: readonly string[], right: readonly string[]): boolean {
+  return left.length === right.length && left.every((value, index) => value === right[index]);
 }
 
 function systemActor(): ActorRef {

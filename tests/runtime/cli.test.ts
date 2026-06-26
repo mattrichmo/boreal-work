@@ -1688,6 +1688,71 @@ describe("bwrk cli", () => {
     expect(ambiguousPayload.code).toBe("BOREAL_CONFLICT");
   });
 
+  it("repairs dependency projection drift from canonical block graph edges", async () => {
+    const rootDir = await makeTempWorkspace();
+    await runCli(rootDir, ["init", "--json"]);
+    const blocker = parseData<{ readonly meta: { readonly id: string } }>(
+      (await runCli(rootDir, ["work", "create", "Doctor graph blocker", "--ready", "--json"])).stdout
+    );
+    const blocked = parseData<{ readonly meta: { readonly id: string } }>(
+      (await runCli(rootDir, ["work", "create", "Doctor graph blocked", "--ready", "--json"])).stdout
+    );
+    await runCli(rootDir, ["work", "block", blocked.meta.id, blocker.meta.id, "--json"]);
+
+    await updateState(rootDir, (state) => ({
+      ...state,
+      workItems: state.workItems.map((work) =>
+        work.meta.id === blocked.meta.id ? { ...work, dependencyIds: [], status: "ready" } : work
+      )
+    }));
+    await runCli(rootDir, ["context", "rebuild", "--json"]);
+
+    const nextRows = parseData<Array<{ readonly id: string }>>((await runCli(rootDir, ["work", "next", "--json"])).stdout);
+    expect(nextRows.map((row) => row.id)).not.toContain(blocked.meta.id);
+    const agentStatus = parseData<{
+      readonly readyWork: { readonly claimableCount: number; readonly next?: { readonly id: string } };
+    }>((await runCli(rootDir, ["agent", "status", "--agent", "graph-doctor", "--json"])).stdout);
+    expect(agentStatus.readyWork.claimableCount).toBe(1);
+    expect(agentStatus.readyWork.next?.id).toBe(blocker.meta.id);
+
+    const failingDoctor = await runCli(rootDir, ["doctor", "--json"]);
+    const failingPayload = parseData<{
+      readonly ok: boolean;
+      readonly diagnostics: Array<{ readonly code: string; readonly severity: string }>;
+    }>(failingDoctor.stdout);
+    expect(failingDoctor.exitCode).toBe(1);
+    expect(failingPayload.ok).toBe(false);
+    expect(failingPayload.diagnostics).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ code: "graph.block_consistency", severity: "error" }),
+        expect.objectContaining({ code: "work.readiness", severity: "error" })
+      ])
+    );
+
+    const repairedDoctor = await runCli(rootDir, ["doctor", "--fix", "--json"]);
+    const repairedPayload = parseData<{
+      readonly ok: boolean;
+      readonly diagnostics: Array<{ readonly code: string; readonly severity: string }>;
+    }>(repairedDoctor.stdout);
+    expect(repairedDoctor.exitCode).toBe(0);
+    expect(repairedPayload.ok).toBe(true);
+    expect(repairedPayload.diagnostics).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ code: "graph.block_consistency", severity: "fixed" }),
+        expect.objectContaining({ code: "projection.context_pack", severity: "fixed" })
+      ])
+    );
+
+    const shown = await runCli(rootDir, ["work", "show", blocked.meta.id, "--json"]);
+    expect(parseData<{ readonly status: string; readonly blockedBy: readonly string[] }>(shown.stdout)).toEqual(
+      expect.objectContaining({ status: "blocked", blockedBy: [blocker.meta.id] })
+    );
+    const pack = parseData<{ readonly facts: readonly string[] }>(
+      (await runCli(rootDir, ["context", "show", blocked.meta.id, "--json"])).stdout
+    );
+    expect(pack.facts).toContain("status: blocked");
+  });
+
   it("repairs stale runtime locks explicitly", async () => {
     const rootDir = await makeTempWorkspace();
     await runCli(rootDir, ["init", "--json"]);

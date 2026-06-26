@@ -184,10 +184,13 @@ describe("boreal runtime proof slice", () => {
       if (!stale) {
         throw new Error("missing stale fixture");
       }
-      await writer.putWorkItem({ ...stale, status: "ready" });
+      await writer.putWorkItem({ ...stale, dependencyIds: [], status: "ready" });
     });
 
     await expect(runtime.getWorkView(blocked.meta.id)).resolves.toMatchObject({ status: "ready" });
+    await expect(runtime.listReadyWork()).resolves.not.toEqual(
+      expect.arrayContaining([expect.objectContaining({ id: blocked.meta.id })])
+    );
     await expect(runtime.recomputeReadiness()).resolves.toEqual({ changed: 1 });
     await expect(runtime.getWorkView(blocked.meta.id)).resolves.toMatchObject({ status: "blocked" });
   });
@@ -263,6 +266,36 @@ describe("boreal runtime proof slice", () => {
 
     const events = await runtime.listEvents();
     expect(events.map((event) => event.type)).toContain("work.claimed");
+  });
+
+  it("repairs dependency ids from canonical block graph edges", async () => {
+    const store = new InMemoryBorealStore();
+    const runtime = createBorealRuntime({ store, actor });
+    const blocker = await runtime.createWork({ title: "Canonical graph blocker" });
+    const blocked = await runtime.createWork({ title: "Canonical graph blocked" });
+    await runtime.markReady(blocker.meta.id);
+    await runtime.addBlockingDependency({ blockedWorkId: blocked.meta.id, blockingWorkId: blocker.meta.id });
+
+    await store.write(async (writer) => {
+      const stale = await writer.getWorkItem(blocked.meta.id);
+      if (!stale) {
+        throw new Error("missing blocked fixture");
+      }
+      await writer.putWorkItem({ ...stale, dependencyIds: [], status: "ready" });
+    });
+
+    await expect(runtime.getWorkView(blocked.meta.id)).resolves.toMatchObject({
+      blockedBy: [blocker.meta.id],
+      status: "ready"
+    });
+    await expect(runtime.repairDependencyProjection()).resolves.toEqual({
+      dependencyChanged: 1,
+      readinessChanged: 1
+    });
+    await expect(runtime.getWorkView(blocked.meta.id)).resolves.toMatchObject({
+      blockedBy: [blocker.meta.id],
+      status: "blocked"
+    });
   });
 
   it("renews, releases, and expires active reservations", async () => {
