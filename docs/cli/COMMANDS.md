@@ -279,6 +279,30 @@ bwrk work block <blocked-work-id> <blocking-work-id> [--json]
 
 Adds a blocking dependency. Dependency cycles are rejected by runtime policy.
 
+## `dep add`
+
+```bash
+bwrk dep add <work-id> <depends-on-work-id> [--type blocks] [--json]
+```
+
+Adds a canonical `blocks` dependency edge between work items. This is the dependency-focused alias for `work block`; readiness still derives from the block graph.
+
+## `dep tree`
+
+```bash
+bwrk dep tree <work-id> [--json]
+```
+
+Shows the recursive blocker tree for one work item from canonical `blocks` graph edges. JSON output is a nested tree with `id`, optional `title`/`status`, and `dependencies`.
+
+## `dep cycles`
+
+```bash
+bwrk dep cycles [--json]
+```
+
+Lists dependency cycles in canonical `blocks` graph edges.
+
 ## `work reserve`
 
 ```bash

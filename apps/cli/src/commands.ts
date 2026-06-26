@@ -69,6 +69,15 @@ interface WorkListRow {
   readonly labels: readonly string[];
 }
 
+interface DependencyTreeNode {
+  readonly id: string;
+  readonly title?: string;
+  readonly status?: WorkStatus;
+  readonly missing?: boolean;
+  readonly cycle?: boolean;
+  readonly dependencies: readonly DependencyTreeNode[];
+}
+
 interface ReservationListRow {
   readonly id: string;
   readonly status: ReservationStatus;
@@ -248,6 +257,9 @@ export async function runCommand(args: ParsedArgs, output: CliOutput, cwd: strin
       break;
     case "work":
       result = await workCommand(action, rest, context, args, commandOutput, json);
+      break;
+    case "dep":
+      result = await depCommand(action, rest, context, args, commandOutput, json);
       break;
     case "evidence":
       result = await evidenceCommand(action, rest, context, args, commandOutput, json);
@@ -743,6 +755,45 @@ async function workCommand(
   }
 }
 
+async function depCommand(
+  action: string | undefined,
+  rest: readonly string[],
+  context: CliContext,
+  args: ParsedArgs,
+  output: CliOutput,
+  json: boolean
+): Promise<CommandResult> {
+  switch (action) {
+    case "add": {
+      const type = dependencyTypeFromArgs(args);
+      const blockedWorkId = await resolveWorkId(context, requiredPositional(rest, 0, "dependent work reference"));
+      const blockingWorkId = await resolveWorkId(context, requiredPositional(rest, 1, "dependency work reference"));
+      const work = await context.runtime.addBlockingDependency({ blockedWorkId, blockingWorkId });
+      output.write(formatRecord({ type, work }, json));
+      return { exitCode: 0 };
+    }
+    case "tree": {
+      const workId = await resolveWorkId(context, requiredPositional(rest, 0, "work reference"));
+      const tree = await context.store.read(async (reader) =>
+        dependencyTreeForWork(workId, await reader.listWorkItems(), await reader.listGraphEdges())
+      );
+      output.write(json ? formatRecord(tree, true) : table(dependencyTreeRows(tree)));
+      return { exitCode: 0 };
+    }
+    case "cycles": {
+      const cycles = await context.store.read(async (reader) => dependencyCyclesFromGraph(await reader.listGraphEdges()));
+      output.write(
+        json
+          ? formatRecord(cycles, true)
+          : table(cycles.map((cycle, index) => ({ cycle: index + 1, path: cycle.cycle.join(" -> ") })))
+      );
+      return { exitCode: 0 };
+    }
+    default:
+      throw new BorealError("BOREAL_INVALID_INPUT", `Unknown dep command: ${action ?? ""}`);
+  }
+}
+
 async function evidenceCommand(
   action: string | undefined,
   rest: readonly string[],
@@ -1144,6 +1195,14 @@ function parseWorkStatus(value: string | undefined): WorkStatus | undefined {
     "BOREAL_INVALID_INPUT",
     "--status must be draft, ready, reserved, in_progress, blocked, needs_verification, verified, closed, or cancelled"
   );
+}
+
+function dependencyTypeFromArgs(args: ParsedArgs): "blocks" {
+  const type = flagValue(args, "type") ?? "blocks";
+  if (type !== "blocks") {
+    throw new BorealError("BOREAL_INVALID_INPUT", "Only --type blocks is currently supported");
+  }
+  return "blocks";
 }
 
 function parseReservationStatus(value: string | undefined): ReservationStatus | undefined {
@@ -1568,6 +1627,104 @@ function dependencyIdsByWorkFromGraph(
   );
 }
 
+function dependencyTreeForWork(
+  workId: WorkId,
+  workItems: readonly WorkItem[],
+  graphEdges: readonly GraphEdge[]
+): DependencyTreeNode {
+  const workById = new Map(workItems.map((work) => [work.meta.id, work]));
+  const dependencyIdsByWork = dependencyIdsByWorkFromGraph(workItems, graphEdges);
+  return dependencyTreeNode(workId, workById, dependencyIdsByWork, []);
+}
+
+function dependencyTreeNode(
+  workId: WorkId,
+  workById: ReadonlyMap<WorkId, WorkItem>,
+  dependencyIdsByWork: ReadonlyMap<WorkId, readonly WorkId[]>,
+  path: readonly WorkId[]
+): DependencyTreeNode {
+  const work = workById.get(workId);
+  if (path.includes(workId)) {
+    return {
+      id: workId,
+      title: work?.title,
+      status: work?.status,
+      missing: work === undefined ? true : undefined,
+      cycle: true,
+      dependencies: []
+    };
+  }
+  return {
+    id: workId,
+    title: work?.title,
+    status: work?.status,
+    missing: work === undefined ? true : undefined,
+    dependencies: (dependencyIdsByWork.get(workId) ?? []).map((dependencyId) =>
+      dependencyTreeNode(dependencyId, workById, dependencyIdsByWork, [...path, workId])
+    )
+  };
+}
+
+function dependencyTreeRows(tree: DependencyTreeNode): Array<Record<string, string | number>> {
+  const rows: Array<Record<string, string | number>> = [];
+  const visit = (node: DependencyTreeNode, depth: number): void => {
+    rows.push({
+      depth,
+      id: node.id,
+      status: node.status ?? (node.missing ? "missing" : ""),
+      title: node.title ?? "",
+      flags: [node.cycle ? "cycle" : "", node.missing ? "missing" : ""].filter(Boolean).join(",")
+    });
+    for (const dependency of node.dependencies) {
+      visit(dependency, depth + 1);
+    }
+  };
+  visit(tree, 0);
+  return rows;
+}
+
+function dependencyCyclesFromGraph(graphEdges: readonly GraphEdge[]): Array<{ readonly cycle: readonly string[] }> {
+  const adjacency = new Map<string, string[]>();
+  for (const edge of graphEdges) {
+    if (edge.kind !== "blocks" || edge.fromType !== "work" || edge.toType !== "work") {
+      continue;
+    }
+    adjacency.set(edge.fromId, [...(adjacency.get(edge.fromId) ?? []), edge.toId].sort((left, right) => left.localeCompare(right)));
+  }
+
+  const cycles = new Map<string, readonly string[]>();
+  const visited = new Set<string>();
+  const path: string[] = [];
+  const visit = (workId: string): void => {
+    const existingIndex = path.indexOf(workId);
+    if (existingIndex >= 0) {
+      const cycle = [...path.slice(existingIndex), workId];
+      cycles.set(cycleKey(cycle), cycle);
+      return;
+    }
+    if (visited.has(workId)) {
+      return;
+    }
+    path.push(workId);
+    for (const next of adjacency.get(workId) ?? []) {
+      visit(next);
+    }
+    path.pop();
+    visited.add(workId);
+  };
+
+  for (const workId of [...adjacency.keys()].sort((left, right) => left.localeCompare(right))) {
+    visit(workId);
+  }
+  return [...cycles.values()].map((cycle) => ({ cycle })).sort((left, right) => left.cycle.join("|").localeCompare(right.cycle.join("|")));
+}
+
+function cycleKey(cycle: readonly string[]): string {
+  const values = cycle.slice(0, -1);
+  const rotations = values.map((_, index) => [...values.slice(index), ...values.slice(0, index)].join("|"));
+  return rotations.sort()[0] ?? cycle.join("|");
+}
+
 function workViewListRow(view: WorkItemView): WorkListRow {
   return {
     id: view.id,
@@ -1803,6 +1960,6 @@ Usage:
 ${COMMAND_DEFINITIONS.map((definition) => `  ${definition.usage}`).join("\n")}
 
 Help:
-  bwrk help [init|work|evidence|source|claim|decision|context|search|reservation|agent|export|import|snapshot|doctor|lock|commands]
+  bwrk help [init|work|dep|evidence|source|claim|decision|context|search|reservation|agent|export|import|snapshot|doctor|lock|commands]
 `;
 }

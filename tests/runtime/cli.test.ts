@@ -60,6 +60,9 @@ describe("bwrk cli", () => {
       "## `work next`",
       "## `work show`",
       "## `work block`",
+      "## `dep add`",
+      "## `dep tree`",
+      "## `dep cycles`",
       "## `work reserve`",
       "## `work claim`",
       "## `work release`",
@@ -111,7 +114,7 @@ describe("bwrk cli", () => {
     expect(root.exitCode).toBe(0);
     expect(root.stdout).toContain("bwrk - Boreal Work CLI");
     expect(root.stdout).toContain(
-      "bwrk help [init|work|evidence|source|claim|decision|context|search|reservation|agent|export|import|snapshot|doctor|lock|commands]"
+      "bwrk help [init|work|dep|evidence|source|claim|decision|context|search|reservation|agent|export|import|snapshot|doctor|lock|commands]"
     );
     expect(work.exitCode).toBe(0);
     expect(work.stdout).toContain("bwrk work create");
@@ -231,6 +234,9 @@ describe("bwrk cli", () => {
         "context search",
         "search index",
         "search query",
+        "dep add",
+        "dep tree",
+        "dep cycles",
         "work claim",
         "work release",
         "work renew",
@@ -390,6 +396,79 @@ describe("bwrk cli", () => {
     const doctor = await runCli(rootDir, ["doctor", "--json"]);
     expect(doctor.exitCode).toBe(0);
     expect(parseData<{ readonly ok: boolean }>(doctor.stdout).ok).toBe(true);
+  });
+
+  it("manages dependency graph through the dep namespace", async () => {
+    const rootDir = await makeTempWorkspace();
+    await runCli(rootDir, ["init", "--json"]);
+    const blocker = parseData<{ readonly meta: { readonly id: string }; readonly status: string }>(
+      (await runCli(rootDir, ["work", "create", "Dependency namespace blocker", "--ready", "--json"])).stdout
+    );
+    const blocked = parseData<{ readonly meta: { readonly id: string }; readonly status: string }>(
+      (await runCli(rootDir, ["work", "create", "Dependency namespace blocked", "--ready", "--json"])).stdout
+    );
+
+    const added = await runCli(rootDir, ["dep", "add", blocked.meta.id, blocker.meta.id, "--json"]);
+    const addedPayload = parseData<{
+      readonly type: string;
+      readonly work: { readonly meta: { readonly id: string }; readonly status: string; readonly dependencyIds: readonly string[] };
+    }>(added.stdout);
+    expect(added.exitCode).toBe(0);
+    expect(addedPayload).toEqual(
+      expect.objectContaining({
+        type: "blocks",
+        work: expect.objectContaining({
+          meta: expect.objectContaining({ id: blocked.meta.id }),
+          status: "blocked",
+          dependencyIds: [blocker.meta.id]
+        })
+      })
+    );
+
+    const tree = parseData<{
+      readonly id: string;
+      readonly title: string;
+      readonly dependencies: Array<{ readonly id: string; readonly title: string; readonly dependencies: readonly unknown[] }>;
+    }>((await runCli(rootDir, ["dep", "tree", blocked.meta.id, "--json"])).stdout);
+    expect(tree.id).toBe(blocked.meta.id);
+    expect(tree.dependencies).toEqual([
+      expect.objectContaining({
+        id: blocker.meta.id,
+        title: "Dependency namespace blocker",
+        dependencies: []
+      })
+    ]);
+
+    expect(parseData<readonly unknown[]>((await runCli(rootDir, ["dep", "cycles", "--json"])).stdout)).toEqual([]);
+    await updateState(rootDir, (state) => {
+      const graphEdges = (state.graphEdges as Array<Record<string, unknown>>) ?? [];
+      const firstEdge = graphEdges[0] ?? {};
+      const firstMeta = firstEdge.meta as Record<string, unknown> | undefined;
+      return {
+        ...state,
+        graphEdges: [
+          ...graphEdges,
+          {
+            ...firstEdge,
+            meta: { ...firstMeta, id: "bw_edge_manualcycle" },
+            fromId: blocked.meta.id,
+            fromType: "work",
+            toId: blocker.meta.id,
+            toType: "work",
+            kind: "blocks",
+            directed: true
+          }
+        ]
+      };
+    });
+    const cycles = parseData<Array<{ readonly cycle: readonly string[] }>>((await runCli(rootDir, ["dep", "cycles", "--json"])).stdout);
+    expect(cycles).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          cycle: expect.arrayContaining([blocker.meta.id, blocked.meta.id])
+        })
+      ])
+    );
   });
 
   it("normalizes cli machine strings and rejects unsafe unicode input", async () => {
