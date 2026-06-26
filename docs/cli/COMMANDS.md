@@ -795,6 +795,14 @@ Checks:
 
 Without `--strict`, doctor exits `1` when any diagnostic has severity `error`.
 
+Package script:
+
+```bash
+pnpm doctor:strict
+```
+
+Runs `bwrk doctor --workspace . --strict --json` from the repository root.
+
 ## `lock inspect`
 
 ```bash

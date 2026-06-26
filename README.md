@@ -98,5 +98,8 @@ Run the checks:
 ```bash
 pnpm check
 pnpm test
+pnpm doctor:strict
 pnpm build
 ```
+
+`pnpm doctor:strict` runs `bwrk doctor --workspace . --strict --json` as a CI-style hardening gate. It fails on warnings as well as errors, so run `pnpm bwrk init` first when a fresh workspace has not been initialized.

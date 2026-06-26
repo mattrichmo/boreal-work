@@ -49,6 +49,9 @@ afterEach(async () => {
 describe("bwrk cli", () => {
   it("documents every current command group", async () => {
     const commands = await readFile(new URL("../../docs/cli/COMMANDS.md", import.meta.url), "utf8");
+    const packageJson = parseJson<{ readonly scripts: Record<string, string> }>(
+      await readFile(new URL("../../package.json", import.meta.url), "utf8")
+    );
 
     for (const heading of [
       "## Help",
@@ -105,6 +108,10 @@ describe("bwrk cli", () => {
     ]) {
       expect(commands).toContain(heading);
     }
+    expect(commands).toContain("pnpm doctor:strict");
+    expect(packageJson.scripts["doctor:strict"]).toBe(
+      "tsx --tsconfig tsconfig.base.json apps/cli/src/index.ts doctor --workspace . --strict --json"
+    );
   });
 
   it("prints root and grouped help without a workspace", async () => {

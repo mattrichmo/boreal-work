@@ -13,6 +13,7 @@
     "build": "tsc -b",
     "check": "tsc -b --pretty false",
     "clean": "pnpm -r exec rm -rf dist tsconfig.tsbuildinfo && rm -rf coverage",
+    "doctor:strict": "tsx --tsconfig tsconfig.base.json apps/cli/src/index.ts doctor --workspace . --strict --json",
     "test": "vitest run",
     "test:watch": "vitest"
   },
