@@ -211,7 +211,7 @@ Plans or installs generic namespaced Boreal skill folders into a folder-scoped s
 ## `init`
 
 ```bash
-bwrk init [--workspace <path>|--project-root <path>] [--setup-memory] [--memory-root <path>] [--memory-layout in-repo|child|sibling] [--separate-git] [--install-root <path>] [--skill-target codex|claude...] [--folder-scoped] [--interactive] [--json]
+bwrk init [--workspace <path>|--project-root <path>] [--setup-memory] [--memory-root <path>] [--memory-layout in-repo|child|sibling] [--memory-git-mode shared|separate|submodule] [--memory-remote <url>] [--separate-git] [--install-root <path>] [--skill-target codex|claude...] [--folder-scoped] [--interactive] [--json]
 ```
 
 Initializes a Boreal workspace by creating durable runtime state under `.boreal/runtime/state.json`.
@@ -221,18 +221,25 @@ Behavior:
 - Idempotent.
 - Safe under concurrent init attempts.
 - Plain `bwrk init` does not create memory files; use `bwrk vault init` for the repo-local default vault or `--setup-memory` for explicit project setup.
-- With setup flags, writes `.boreal/project.json` and scaffolds the selected memory root.
+- With setup flags, writes `.boreal/project.json`, scaffolds the selected memory root, writes memory `.gitignore` guards, and applies the selected memory Git mode.
+- Default setup uses sibling memory at `../<project>-memory` with `--memory-git-mode separate`, so memory history does not mix with application history.
+- Supplying `--memory-root` without `--memory-layout` keeps the legacy explicit-root default of `--memory-layout in-repo`.
 - `--memory-layout child` requires the memory root to be a direct child of the project root.
-- `--memory-layout sibling` requires the memory root to share the project root parent and must be explicit for out-of-project memory.
+- `--memory-layout child` defaults to `--memory-git-mode separate`, initializes the child memory Git repo, and adds the child path to the project `.gitignore`.
+- `--memory-layout sibling` requires the memory root to share the project root parent and always uses `--memory-git-mode separate`.
+- `--memory-git-mode submodule` requires `--memory-layout child` and `--memory-remote`; setup writes `.gitmodules` metadata but leaves normal Git staging and the gitlink commit to the user.
+- `--memory-git-mode shared` keeps memory in the project repository and is only the default for `--memory-layout in-repo`.
+- `--separate-git` is retained as a compatibility alias for `--memory-git-mode separate`.
 - `--interactive` prompts for the same setup fields and requires a TTY. Path fields use editable text prompts; choice fields use arrow-key selectors with descriptions. Use Space to toggle multiple skill targets and Enter to accept.
 - Returns the existing initialization event when the workspace is already initialized.
-- Human output is a short setup summary. Use `--json` when automation needs the full `projectSetup` object.
+- Human output is a short setup summary with Git guard status. Use `--json` when automation needs the full `projectSetup` object.
 
 Common setup examples:
 
 ```bash
-bwrk init --setup-memory --memory-root memory --memory-layout child --install-root .agents/skills --skill-target codex --folder-scoped --json
-bwrk init --project-root /repo/app --setup-memory --memory-root /repo/app-memory --memory-layout sibling --separate-git --json
+bwrk init --setup-memory --install-root .agents/skills --skill-target codex --folder-scoped --json
+bwrk init --setup-memory --memory-root memory --memory-layout child --memory-git-mode separate --json
+bwrk init --setup-memory --memory-root memory --memory-layout child --memory-git-mode submodule --memory-remote git@example.com:team/project-memory.git --json
 ```
 
 JSON `data` shape:
@@ -248,16 +255,28 @@ JSON `data` shape:
     "config": {
       "schemaVersion": "boreal.project-setup.v1",
       "projectRoot": "/absolute/path",
-      "memoryRoot": "/absolute/path/memory",
-      "memoryLayout": "child",
-      "memoryGitMode": "shared",
+      "memoryRoot": "/absolute/path-memory",
+      "memoryLayout": "sibling",
+      "memoryGitMode": "separate",
       "installRoot": "/absolute/path/.agents/skills",
       "skillTargets": ["codex"],
       "folderScoped": true,
       "createdAt": "2026-06-26T00:00:00.000Z",
       "updatedAt": "2026-06-26T00:00:00.000Z"
     },
-    "createdDirectories": ["memory", "raw", "wiki"],
+    "gitSetup": {
+      "memoryGitMode": "separate",
+      "memoryRepoInitialized": true,
+      "memoryRepoExisting": false,
+      "memoryGitignoreUpdated": true,
+      "projectGitignoreUpdated": true,
+      "gitmodulesUpdated": false,
+      "ignoredByProject": false,
+      "memoryGitDir": "/absolute/path-memory/.git",
+      "memoryGitignorePath": "/absolute/path-memory/.gitignore",
+      "projectGitignorePath": "/absolute/path/.gitignore"
+    },
+    "createdDirectories": ["path-memory", "raw", "wiki"],
     "existingDirectories": [],
     "createdFiles": ["index.md", "raw/index.jsonl"],
     "existingFiles": []

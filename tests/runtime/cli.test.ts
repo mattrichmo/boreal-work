@@ -1,7 +1,7 @@
 import { execFile } from "node:child_process";
 import { mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { promisify } from "node:util";
 
 import { afterEach, describe, expect, it } from "vitest";
@@ -204,6 +204,15 @@ describe("bwrk cli", () => {
           readonly skillTargets: readonly string[];
           readonly folderScoped: boolean;
         };
+        readonly gitSetup: {
+          readonly memoryGitMode: string;
+          readonly memoryRepoInitialized: boolean;
+          readonly memoryRepoExisting: boolean;
+          readonly memoryGitignoreUpdated: boolean;
+          readonly projectGitignoreUpdated: boolean;
+          readonly gitmodulesUpdated: boolean;
+          readonly ignoredByProject: boolean;
+        };
         readonly createdDirectories: readonly string[];
         readonly createdFiles: readonly string[];
       };
@@ -232,13 +241,40 @@ describe("bwrk cli", () => {
     expect(payload.projectSetup.createdFiles).toEqual(
       expect.arrayContaining(["index.md", "raw/index.jsonl", "graph/relationships.jsonl"])
     );
+    expect(payload.projectSetup.gitSetup).toEqual(
+      expect.objectContaining({
+        memoryGitMode: "separate",
+        memoryRepoInitialized: true,
+        memoryRepoExisting: false,
+        memoryGitignoreUpdated: true,
+        projectGitignoreUpdated: true,
+        gitmodulesUpdated: false,
+        ignoredByProject: true
+      })
+    );
     expect(await readFile(join(rootDir, "memory/index.md"), "utf8")).toContain("Boreal Memory Vault");
     expect(await readFile(join(rootDir, "memory/raw/index.jsonl"), "utf8")).toBe("");
+    expect(await readFile(join(rootDir, "memory/.gitignore"), "utf8")).toContain(".boreal/locks/");
+    expect(await fileMissing(join(rootDir, "memory/.git"))).toBe(false);
+    const projectGitignore = await readFile(join(rootDir, ".gitignore"), "utf8");
+    expect(projectGitignore).toContain(".boreal/project.json");
+    expect(projectGitignore).toContain("/memory/");
+    expect(await fileMissing(join(rootDir, ".gitmodules"))).toBe(true);
 
-    const idempotent = await runCli(rootDir, ["init", "--setup-memory", "--memory-root", "memory", "--memory-layout", "child", "--json"]);
+    const idempotent = await runCli(rootDir, [
+      "init",
+      "--setup-memory",
+      "--memory-root",
+      "memory",
+      "--memory-layout",
+      "child",
+      "--separate-git",
+      "--json"
+    ]);
     const idempotentPayload = parseData<{
       readonly projectSetup: {
         readonly config: { readonly createdAt: string; readonly updatedAt: string };
+        readonly gitSetup: { readonly memoryRepoInitialized: boolean; readonly memoryRepoExisting: boolean; readonly projectGitignoreUpdated: boolean };
         readonly createdDirectories: readonly string[];
         readonly createdFiles: readonly string[];
       };
@@ -247,6 +283,9 @@ describe("bwrk cli", () => {
     ).projectSetup;
     expect(idempotentPayload).toEqual(expect.objectContaining({ createdDirectories: [], createdFiles: [] }));
     expect(idempotentPayload.config.createdAt).toBe(config.createdAt);
+    expect(idempotentPayload.gitSetup).toEqual(
+      expect.objectContaining({ memoryRepoInitialized: false, memoryRepoExisting: true, projectGitignoreUpdated: false })
+    );
 
     await writeFile(join(rootDir, ".boreal/project.json"), "{\"schemaVersion\":\"wrong\"}\n", "utf8");
     const invalidConfig = await runCli(rootDir, ["init", "--setup-memory", "--memory-root", "memory", "--json"]);
@@ -254,6 +293,111 @@ describe("bwrk cli", () => {
     expect(invalidConfig.exitCode).toBe(1);
     expect(invalidConfigPayload.code).toBe("BOREAL_CONFLICT");
     expect(invalidConfigPayload.message).toContain("Existing project setup config is invalid");
+  });
+
+  it("defaults setup memory to a sibling separate repo with local project git guards", async () => {
+    const rootDir = await makeTempWorkspace();
+    const siblingRoot = join(dirname(rootDir), `${rootDir.split("/").at(-1) ?? "workspace"}-memory`);
+    tempDirs.push(siblingRoot);
+
+    const initialized = await runCli(rootDir, ["init", "--setup-memory", "--json"]);
+    const payload = parseData<{
+      readonly projectSetup: {
+        readonly config: { readonly memoryRoot: string; readonly memoryLayout: string; readonly memoryGitMode: string };
+        readonly gitSetup: {
+          readonly memoryRepoInitialized: boolean;
+          readonly ignoredByProject: boolean;
+          readonly projectGitignoreUpdated: boolean;
+          readonly gitmodulesUpdated: boolean;
+        };
+      };
+    }>(initialized.stdout);
+
+    expect(initialized.exitCode).toBe(0);
+    expect(payload.projectSetup.config).toEqual(
+      expect.objectContaining({ memoryRoot: siblingRoot, memoryLayout: "sibling", memoryGitMode: "separate" })
+    );
+    expect(payload.projectSetup.gitSetup).toEqual(
+      expect.objectContaining({
+        memoryRepoInitialized: true,
+        ignoredByProject: false,
+        projectGitignoreUpdated: true,
+        gitmodulesUpdated: false
+      })
+    );
+    expect(await fileMissing(join(siblingRoot, ".git"))).toBe(false);
+    expect(await readFile(join(siblingRoot, ".gitignore"), "utf8")).toContain(".boreal/cache/");
+    const projectGitignore = await readFile(join(rootDir, ".gitignore"), "utf8");
+    expect(projectGitignore).toContain(".boreal/project.json");
+    expect(projectGitignore).not.toContain("/memory/");
+  });
+
+  it("sets up child memory submodules with gitmodules metadata", async () => {
+    const rootDir = await makeTempWorkspace();
+    await initGitRepository(rootDir, "main");
+
+    const initialized = await runCli(rootDir, [
+      "init",
+      "--setup-memory",
+      "--memory-root",
+      "memory",
+      "--memory-layout",
+      "child",
+      "--memory-git-mode",
+      "submodule",
+      "--memory-remote",
+      "git@example.com:example/project-memory.git",
+      "--json"
+    ]);
+    const payload = parseData<{
+      readonly projectSetup: {
+        readonly config: { readonly memoryGitMode: string; readonly memoryRemote?: string };
+        readonly gitSetup: {
+          readonly memoryRepoInitialized: boolean;
+          readonly ignoredByProject: boolean;
+          readonly projectGitignoreUpdated: boolean;
+          readonly gitmodulesUpdated: boolean;
+        };
+      };
+    }>(initialized.stdout);
+
+    expect(initialized.exitCode).toBe(0);
+    expect(payload.projectSetup.config).toEqual(
+      expect.objectContaining({
+        memoryGitMode: "submodule",
+        memoryRemote: "git@example.com:example/project-memory.git"
+      })
+    );
+    expect(payload.projectSetup.gitSetup).toEqual(
+      expect.objectContaining({
+        memoryRepoInitialized: true,
+        ignoredByProject: false,
+        projectGitignoreUpdated: true,
+        gitmodulesUpdated: true
+      })
+    );
+    const gitmodules = await readFile(join(rootDir, ".gitmodules"), "utf8");
+    expect(gitmodules).toContain('[submodule "memory"]');
+    expect(gitmodules).toContain("path = memory");
+    expect(gitmodules).toContain("url = git@example.com:example/project-memory.git");
+    expect(await readFile(join(rootDir, ".gitignore"), "utf8")).not.toContain("/memory/");
+    expect(await fileMissing(join(rootDir, "memory/.git"))).toBe(false);
+
+    const missingRemote = await runCli(rootDir, [
+      "init",
+      "--setup-memory",
+      "--memory-root",
+      "other-memory",
+      "--memory-layout",
+      "child",
+      "--memory-git-mode",
+      "submodule",
+      "--json"
+    ]);
+    const error = parseJson<{ readonly code: string; readonly message: string }>(missingRemote.stderr);
+    expect(missingRemote.exitCode).toBe(2);
+    expect(error.code).toBe("BOREAL_INVALID_INPUT");
+    expect(error.message).toContain("--memory-remote");
   });
 
   it("prints a readable init setup summary in human mode", async () => {
@@ -275,6 +419,8 @@ describe("bwrk cli", () => {
     expect(initialized.stdout).toContain("Project setup");
     expect(initialized.stdout).toContain(`memory: ${join(rootDir, "memory")}`);
     expect(initialized.stdout).toContain("layout: child");
+    expect(initialized.stdout).toContain("memory git: separate");
+    expect(initialized.stdout).toContain("memory repo initialized: yes");
     expect(initialized.stdout).toContain(`skills: ${join(rootDir, ".agents/skills")}`);
     expect(initialized.stdout.trimStart()).not.toMatch(/^\{/u);
   });

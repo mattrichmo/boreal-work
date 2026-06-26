@@ -35,6 +35,7 @@ This file is the current checkpoint for the broad hardening goal. It separates a
 - Search has deterministic hybrid ranking, field weights, vector-lite similarity, and `--explain` field-level output.
 - JSONL ledger export/import/delete/status exists as a bridge toward Git-native collaboration.
 - Repo-local `memory/` vault scaffolding, raw source index, wiki pages, duplicate scan, merge plans, and compaction plans exist.
+- Project setup now separates memory Git history by default with sibling memory repos, child ignored memory repos, child submodule metadata, generated `.gitignore` guards, and explicit `shared` opt-in for mixed project history.
 - Doctor validates schema shape, IDs, references, dependencies, reservations, context drift, ledger drift, search freshness, operation/event causality, and locks.
 
 ## Hardened In This Checkpoint
