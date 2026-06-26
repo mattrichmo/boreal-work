@@ -28,7 +28,7 @@ import {
 } from "@boreal/core";
 import type { SearchResult } from "@boreal/search";
 import { breakStaleFileLock, inspectFileLock } from "@boreal/storage";
-import type { WorkItemView } from "@boreal/ui-model";
+import { toWorkItemView, type WorkItemView } from "@boreal/ui-model";
 import { deriveReadinessStatus } from "@boreal/work-engine";
 
 import { flagValue, flagValues, hasFlag, requiredFlag, type ParsedArgs } from "./args.js";
@@ -137,6 +137,26 @@ interface HandoffBundle {
   };
 }
 
+interface HandoffWarning {
+  readonly code: string;
+  readonly message: string;
+  readonly details?: unknown;
+}
+
+interface HandoffSuccess extends HandoffBundle {
+  readonly handoffComplete: true;
+  readonly warnings: readonly HandoffWarning[];
+}
+
+interface HandoffFailure {
+  readonly handoffComplete: false;
+  readonly work?: WorkItemView;
+  readonly warnings: readonly HandoffWarning[];
+  readonly repairCommand: string;
+}
+
+type HandoffResult = HandoffSuccess | HandoffFailure;
+
 interface AgentStartBlocked {
   readonly started: false;
   readonly reason: AgentStartReason;
@@ -146,7 +166,7 @@ interface AgentStartBlocked {
   readonly recommendedAction: AgentStatus["recommendedAction"];
 }
 
-interface AgentStartReady extends HandoffBundle {
+interface AgentStartReadyBase {
   readonly started: true;
   readonly action: "claimed_work" | "continue_reserved_work";
   readonly agentId: string;
@@ -155,6 +175,8 @@ interface AgentStartReady extends HandoffBundle {
   readonly reservation: AgentReservation;
   readonly releasedReservations: readonly AgentReservation[];
 }
+
+type AgentStartReady = AgentStartReadyBase & HandoffResult;
 
 type AgentStartResult = AgentStartBlocked | AgentStartReady;
 
@@ -310,7 +332,7 @@ async function agentStartCommand(
   const activeReservation = status.reservations.active[0];
   if (activeReservation) {
     const reservation = await requireReservation(context, activeReservation.id);
-    const handoff = await buildHandoffBundle(context, asWorkId(activeReservation.workId), args);
+    const handoff = await buildHandoffResult(context, asWorkId(activeReservation.workId), args);
     output.write(
       formatRecord(
         {
@@ -346,7 +368,7 @@ async function agentStartCommand(
     return { exitCode: 0 };
   }
 
-  const handoff = await buildHandoffBundle(context, claim.work.meta.id, args);
+  const handoff = await buildHandoffResult(context, claim.work.meta.id, args, claim.work);
   output.write(
     formatRecord(
       {
@@ -1239,6 +1261,64 @@ async function buildHandoffBundle(context: CliContext, workId: WorkId, args: Par
       results
     }
   };
+}
+
+async function buildHandoffResult(
+  context: CliContext,
+  workId: WorkId,
+  args: ParsedArgs,
+  fallbackWork?: WorkItem
+): Promise<HandoffResult> {
+  try {
+    return {
+      handoffComplete: true,
+      warnings: [],
+      ...(await buildHandoffBundle(context, workId, args))
+    };
+  } catch (error) {
+    return {
+      handoffComplete: false,
+      work: await fallbackWorkView(context, workId, fallbackWork),
+      warnings: [handoffFailureWarning(error)],
+      repairCommand: "bwrk doctor --fix --json"
+    };
+  }
+}
+
+async function fallbackWorkView(
+  context: CliContext,
+  workId: WorkId,
+  fallbackWork: WorkItem | undefined
+): Promise<WorkItemView | undefined> {
+  if (fallbackWork) {
+    return toWorkItemView({ work: fallbackWork });
+  }
+  const work = await context.store.read((reader) => reader.getWorkItem(workId));
+  return work ? toWorkItemView({ work }) : undefined;
+}
+
+function handoffFailureWarning(error: unknown): HandoffWarning {
+  return {
+    code: "handoff.failed",
+    message: "Handoff generation failed after reservation; run the repair command before relying on context or search.",
+    details: errorDetails(error)
+  };
+}
+
+function errorDetails(error: unknown): unknown {
+  if (error instanceof BorealError) {
+    return {
+      code: error.code,
+      message: error.message,
+      details: error.details
+    };
+  }
+  if (error instanceof Error) {
+    return {
+      message: error.message
+    };
+  }
+  return String(error);
 }
 
 function agentStartBlocked(

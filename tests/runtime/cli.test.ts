@@ -756,6 +756,7 @@ describe("bwrk cli", () => {
     const startedPayload = parseData<{
       readonly started: boolean;
       readonly action?: string;
+      readonly handoffComplete: boolean;
       readonly work?: { readonly id: string; readonly status: string; readonly activeReservationId?: string };
       readonly reservation?: { readonly meta: { readonly id: string }; readonly status: string; readonly purpose?: string };
       readonly contextPack?: { readonly subjectId: string; readonly facts: readonly string[] };
@@ -770,6 +771,7 @@ describe("bwrk cli", () => {
     expect(started.exitCode).toBe(0);
     expect(startedPayload.started).toBe(true);
     expect(startedPayload.action).toBe("claimed_work");
+    expect(startedPayload.handoffComplete).toBe(true);
     expect(startedPayload.work?.id).toBe(work.meta.id);
     expect(startedPayload.work?.status).toBe("reserved");
     expect(startedPayload.work?.activeReservationId).toBe(startedPayload.reservation?.meta.id);
@@ -788,6 +790,7 @@ describe("bwrk cli", () => {
     const resumedPayload = parseData<{
       readonly started: boolean;
       readonly action?: string;
+      readonly handoffComplete: boolean;
       readonly work?: { readonly id: string; readonly activeReservationId?: string };
       readonly reservation?: { readonly meta: { readonly id: string } };
       readonly status: { readonly reservations: { readonly activeCount: number } };
@@ -795,6 +798,7 @@ describe("bwrk cli", () => {
     expect(resumed.exitCode).toBe(0);
     expect(resumedPayload.started).toBe(true);
     expect(resumedPayload.action).toBe("continue_reserved_work");
+    expect(resumedPayload.handoffComplete).toBe(true);
     expect(resumedPayload.work?.id).toBe(work.meta.id);
     expect(resumedPayload.reservation?.meta.id).toBe(startedPayload.reservation?.meta.id);
     expect(resumedPayload.status.reservations.activeCount).toBe(1);
@@ -816,6 +820,47 @@ describe("bwrk cli", () => {
     expect(missingPayload.reason).toBe("no_ready_work");
     expect(missingPayload.status.readyWork.claimableCount).toBe(0);
     expect(missingPayload.recommendedAction.kind).toBe("wait_for_ready_work");
+  });
+
+  it("keeps claimed reservations when agent start handoff generation fails", async () => {
+    const rootDir = await makeTempWorkspace();
+    await runCli(rootDir, ["init", "--json"]);
+
+    const work = parseData<{ readonly meta: { readonly id: string } }>(
+      (await runCli(rootDir, ["work", "create", "Degraded handoff work", "--label", "degraded", "--ready", "--json"])).stdout
+    );
+    await mkdir(join(rootDir, ".boreal/runtime/search-index.json"), { recursive: true });
+
+    const started = await runCli(rootDir, ["agent", "start", "--agent", "agent-degraded", "--label", "degraded", "--json"]);
+    const payload = parseData<{
+      readonly started: boolean;
+      readonly action?: string;
+      readonly handoffComplete: boolean;
+      readonly work?: { readonly id: string; readonly status: string; readonly activeReservationId?: string };
+      readonly reservation?: { readonly meta: { readonly id: string }; readonly status: string };
+      readonly warnings: Array<{ readonly code: string; readonly message: string }>;
+      readonly repairCommand?: string;
+      readonly status: { readonly reservations: { readonly activeCount: number } };
+    }>(started.stdout);
+
+    expect(started.exitCode).toBe(0);
+    expect(payload.started).toBe(true);
+    expect(payload.action).toBe("claimed_work");
+    expect(payload.handoffComplete).toBe(false);
+    expect(payload.work?.id).toBe(work.meta.id);
+    expect(payload.work?.status).toBe("reserved");
+    expect(payload.work?.activeReservationId).toBe(payload.reservation?.meta.id);
+    expect(payload.reservation?.status).toBe("active");
+    expect(payload.warnings).toEqual(
+      expect.arrayContaining([expect.objectContaining({ code: "handoff.failed" })])
+    );
+    expect(payload.repairCommand).toBe("bwrk doctor --fix --json");
+    expect(payload.status.reservations.activeCount).toBe(1);
+
+    const shown = await runCli(rootDir, ["work", "show", work.meta.id, "--json"]);
+    expect(parseData<{ readonly status: string; readonly activeReservationId?: string }>(shown.stdout)).toEqual(
+      expect.objectContaining({ status: "reserved", activeReservationId: payload.reservation?.meta.id })
+    );
   });
 
   it("finishes reserved agent work with guarded evidence, verification, and cleanup", async () => {

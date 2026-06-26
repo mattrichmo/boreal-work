@@ -378,6 +378,7 @@ Safe entrypoint for an agent before it starts work:
 - Resumes the agent's existing active reservation before claiming more work.
 - Atomically claims the next ready matching work only when the agent has no active work and has reservation capacity.
 - Returns the selected work view, reservation, context pack, and handoff search results.
+- If context/search handoff generation fails after a reservation is claimed or resumed, returns the reservation with `handoffComplete: false`, a warning, and `repairCommand: "bwrk doctor --fix --json"` instead of losing the successful claim behind an error.
 - Returns `started: false` with `reason: "no_ready_work"` when no matching ready work exists.
 
 ## `agent status`
