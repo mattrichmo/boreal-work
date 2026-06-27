@@ -51,6 +51,24 @@ Use this workflow when the user's request requires create issues, tasks, sprints
 5. Rebuild derived artifacts when the workflow changes memory, context, or search.
 6. Run `bwrk doctor --strict --json` unless the workflow is explicitly read-only and no generated artifacts changed.
 
+## Command Sequences
+
+Use exact create output IDs from JSON responses; do not invent parent, sprint, or task IDs.
+
+1. Create a container when the request describes a program, backlog, milestone, or issue group:
+   `bwrk work create "<container title>" --kind issue --label <label> --json`
+2. Capture the returned container ID from `data.meta.id`.
+3. Create each task or issue with concrete acceptance criteria:
+   `bwrk work create "<task title>" --kind task --priority normal --label <label> --acceptance "<criterion>" --json`
+4. Link container and blockers explicitly:
+   `bwrk dep add <container-id> <child-work-id> --json`
+   `bwrk dep add <blocked-work-id> <blocker-work-id> --json`
+5. Mark only claimable leaf work ready:
+   `bwrk work ready <child-work-id> --json`
+6. Verify structure before handoff:
+   `bwrk dep tree <container-id> --json`
+
+
 ## CLI Commands
 
 - `bwrk work create`

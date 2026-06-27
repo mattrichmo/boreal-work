@@ -199,11 +199,15 @@ const PROJECT_GITIGNORE_PATTERNS = [
   "# Boreal local workspace binding and runtime artifacts",
   ".boreal/project.json",
   ".boreal/runtime/",
+  ".boreal/ledgers/",
   ".boreal/cache/",
   ".boreal/tmp/",
   ".boreal/results/",
   ".boreal/**/*.db",
-  ".boreal/**/*.db-*"
+  ".boreal/**/*.db-*",
+  ".agents/",
+  ".claude/",
+  "dump/"
 ] as const;
 
 const MEMORY_LAYOUT_OPTIONS: readonly CliSelectOption<MemoryLayout>[] = [
@@ -766,7 +770,20 @@ async function ensureIgnoreFile(path: string, patterns: readonly string[]): Prom
 }
 
 function ignoreFileHasPattern(text: string, pattern: string): boolean {
-  return text.split(/\r?\n/u).some((line) => line.trim() === pattern);
+  const canonicalPattern = canonicalIgnorePattern(pattern);
+  return text.split(/\r?\n/u).some((line) => {
+    const candidate = line.trim();
+    return candidate === pattern || canonicalIgnorePattern(candidate) === canonicalPattern;
+  });
+}
+
+function canonicalIgnorePattern(pattern: string): string {
+  const trimmed = pattern.trim();
+  if (!trimmed || trimmed.startsWith("#") || trimmed.startsWith("!") || /[*?[\]{}]/u.test(trimmed)) {
+    return trimmed;
+  }
+  const withoutLeadingRoot = trimmed.replace(/^\/+/u, "");
+  return trimmed.endsWith("/") ? withoutLeadingRoot.replace(/\/+$/u, "/") : withoutLeadingRoot;
 }
 
 async function ensureGitRepository(path: string, label: string): Promise<boolean> {

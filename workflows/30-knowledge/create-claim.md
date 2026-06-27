@@ -20,11 +20,11 @@ templates:
 
 ## Purpose
 
-Capture a source-backed assertion with enough context for later review.
+Capture a source-backed assertion that should be reviewable later.
 
 ## When To Use
 
-Use this workflow when the user's request requires capturing a source-backed assertion with enough context for later review. Do not use it for adjacent work when a narrower workflow exists.
+Use this workflow when the user's request requires capture a source-backed assertion that should be reviewable later. Do not use it for adjacent work when a narrower workflow exists.
 
 ## Inputs Required
 
@@ -49,6 +49,8 @@ Use this workflow when the user's request requires capturing a source-backed ass
 4. Attach evidence or source references for any durable claim, decision, or closed work.
 5. Rebuild derived artifacts when the workflow changes memory, context, or search.
 6. Run `bwrk doctor --strict --json` unless the workflow is explicitly read-only and no generated artifacts changed.
+
+
 
 ## CLI Commands
 

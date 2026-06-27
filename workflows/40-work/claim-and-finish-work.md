@@ -55,6 +55,20 @@ Use this workflow when the user's request requires claim work, gather evidence, 
 5. Rebuild derived artifacts when the workflow changes memory, context, or search.
 6. Run `bwrk doctor --strict --json` unless the workflow is explicitly read-only and no generated artifacts changed.
 
+## Command Sequences
+
+Prefer `agent finish` for normal reserved work closeout because it records evidence, verifies, closes or releases, and clears the active reservation in one transaction.
+
+1. Start or resume work:
+   `bwrk agent start --agent <agent-id> --purpose "<purpose>" --json`
+   `bwrk work claim --label <label> --agent <agent-id> --purpose "<purpose>" --json`
+2. Finish the single active reservation after implementation and verification:
+   `bwrk agent finish current --agent <agent-id> --summary "<implemented and tested>" --kind test --command "<verification command>" --verdict passed --close --reason "<close reason>" --json`
+3. Use release instead of close when the work is verified but must remain open:
+   `bwrk agent finish current --agent <agent-id> --summary "<partial verification>" --kind command --command "<verification command>" --verdict passed --release --json`
+4. Use manual `evidence add`, `work verify`, and `work close` only when no active reservation exists or when attaching additional evidence after `agent finish`.
+
+
 ## CLI Commands
 
 - `bwrk agent start`

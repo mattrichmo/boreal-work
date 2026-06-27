@@ -52,6 +52,8 @@ Use this workflow when the user's request requires review raw inbox items and de
 5. Rebuild derived artifacts when the workflow changes memory, context, or search.
 6. Run `bwrk doctor --strict --json` unless the workflow is explicitly read-only and no generated artifacts changed.
 
+
+
 ## CLI Commands
 
 - `bwrk vault status`

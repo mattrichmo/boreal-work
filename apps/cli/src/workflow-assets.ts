@@ -23,6 +23,7 @@ export interface SkillAsset {
   readonly name: string;
   readonly displayName: string;
   readonly workflows: readonly string[];
+  readonly text: string;
   readonly files: readonly SkillAssetFile[];
 }
 
@@ -35,6 +36,20 @@ export interface AssetValidationIssue {
   readonly code: string;
   readonly path: string;
   readonly message: string;
+}
+
+export interface InstalledSkillRootValidationInput {
+  readonly target: "codex" | "claude" | "skills";
+  readonly installRoot: string;
+}
+
+export interface InstalledSkillRootInspection {
+  readonly target: "codex" | "claude" | "skills";
+  readonly installRoot: string;
+  readonly skillRoot: string;
+  readonly skillCount: number;
+  readonly expectedFileCount: number;
+  readonly checkedFileCount: number;
 }
 
 export interface SkillInstallPlan {
@@ -70,11 +85,14 @@ export async function getWorkflowAsset(ref: string): Promise<WorkflowAsset> {
   throw new BorealError("BOREAL_NOT_FOUND", "Workflow not found", { ref });
 }
 
-export async function inspectWorkflowAssets(): Promise<{
+export async function inspectWorkflowAssets(input: {
+  readonly installChecks?: readonly InstalledSkillRootValidationInput[];
+} = {}): Promise<{
   readonly ok: boolean;
   readonly workflowCount: number;
   readonly templateCount: number;
   readonly skillCount: number;
+  readonly installedChecks: readonly InstalledSkillRootInspection[];
   readonly issues: readonly AssetValidationIssue[];
 }> {
   const [workflows, templates, skills] = await Promise.all([listWorkflowAssets(), listTemplateIds(), listSkillAssets()]);
@@ -99,17 +117,42 @@ export async function inspectWorkflowAssets(): Promise<{
         issues.push({ code: "workflow.unknown_template", path: workflow.path, message: `Unknown template ${template}` });
       }
     }
-  }
-
-  for (const skill of skills) {
-    for (const workflow of skill.workflows) {
-      if (!workflowRefs.has(workflow)) {
-        issues.push({ code: "skill.unknown_workflow", path: skill.path, message: `Unknown workflow ${workflow}` });
+    for (const workflowRef of workflowReferencesFromMarkdown(workflow.text)) {
+      if (!workflowRefs.has(workflowRef)) {
+        issues.push({ code: "workflow.unknown_workflow_reference", path: workflow.path, message: `Unknown workflow reference ${workflowRef}` });
       }
     }
   }
 
-  return { ok: issues.length === 0, workflowCount: workflows.length, templateCount: templates.length, skillCount: skills.length, issues };
+  for (const skill of skills) {
+    const markdownWorkflowRefs = workflowReferencesFromMarkdown(skill.text);
+    if (!skill.text.includes("bwrk workflows show <ref>")) {
+      issues.push({
+        code: "skill.missing_workflow_resolver",
+        path: skill.path,
+        message: "Skill must explain how to resolve workflow refs when installed workflow files are not local"
+      });
+    }
+    for (const workflow of skill.workflows) {
+      if (!workflowRefs.has(workflow)) {
+        issues.push({ code: "skill.unknown_workflow", path: skill.path, message: `Unknown workflow ${workflow}` });
+      }
+      if (!markdownWorkflowRefs.has(workflow)) {
+        issues.push({ code: "skill.missing_workflow_reference", path: skill.path, message: `SKILL.md does not reference workflow ${workflow}` });
+      }
+    }
+    for (const workflowRef of markdownWorkflowRefs) {
+      if (!workflowRefs.has(workflowRef)) {
+        issues.push({ code: "skill.unknown_workflow_reference", path: skill.path, message: `Unknown workflow reference ${workflowRef}` });
+      }
+    }
+  }
+
+  const installedChecks = await Promise.all(
+    (input.installChecks ?? []).map((check) => validateInstalledSkillRoot(check, skills, issues))
+  );
+
+  return { ok: issues.length === 0, workflowCount: workflows.length, templateCount: templates.length, skillCount: skills.length, installedChecks, issues };
 }
 
 export async function buildSkillInstallPlan(input: {
@@ -121,18 +164,76 @@ export async function buildSkillInstallPlan(input: {
   const skillRoot = skillRootForInstall(root, input.target);
   const skills = await listSkillAssets();
   const inspection = await inspectWorkflowAssets();
-  const files = skills.flatMap((skill) =>
-    skill.files
-      .filter((file) => shouldInstallSkillFile(input.target, file))
-      .map((file) => ({
-        source: file.source,
-        destination: skillInstallDestination(skillRoot, skill.name, file.relativePath),
-        workflowRefs: skill.workflows,
-        wouldWrite: !input.dryRun
-      }))
-  );
+  const files = skills.flatMap((skill) => expectedSkillInstallFiles(skillRoot, input.target, skill, !input.dryRun));
 
   return { target: input.target, dryRun: input.dryRun, installRoot: root, skillRoot, files, issues: inspection.issues };
+}
+
+export async function validateInstalledSkillRoot(
+  input: InstalledSkillRootValidationInput,
+  skills?: readonly SkillAsset[],
+  issues: AssetValidationIssue[] = []
+): Promise<InstalledSkillRootInspection> {
+  const installRoot = resolve(input.installRoot);
+  const skillRoot = skillRootForInstall(installRoot, input.target);
+  const skillAssets = skills ?? await listSkillAssets();
+  const expectedFiles = skillAssets.flatMap((skill) => expectedSkillInstallFiles(skillRoot, input.target, skill, false));
+  let checkedFileCount = 0;
+
+  for (const file of expectedFiles) {
+    const sourceText = await readFile(resolve(repoRoot, file.source), "utf8");
+    let installedText: string | undefined;
+    try {
+      installedText = await readFile(file.destination, "utf8");
+      checkedFileCount += 1;
+    } catch {
+      issues.push({
+        code: "installed_skill.missing_file",
+        path: relative(repoRoot, file.destination),
+        message: `Missing installed skill file expected from ${file.source}`
+      });
+      continue;
+    }
+    if (installedText !== sourceText) {
+      issues.push({
+        code: "installed_skill.stale_file",
+        path: relative(repoRoot, file.destination),
+        message: `Installed skill file differs from ${file.source}`
+      });
+    }
+    if (file.destination.endsWith("/SKILL.md") && !installedText.includes("bwrk workflows show <ref>")) {
+      issues.push({
+        code: "installed_skill.missing_workflow_resolver",
+        path: relative(repoRoot, file.destination),
+        message: "Installed SKILL.md does not explain the workflow resolver fallback"
+      });
+    }
+  }
+
+  if (input.target === "claude") {
+    for (const skill of skillAssets) {
+      const unexpected = join(skillRoot, skill.name, "agents", "openai.yaml");
+      try {
+        await readFile(unexpected, "utf8");
+        issues.push({
+          code: "installed_skill.unexpected_openai_metadata",
+          path: relative(repoRoot, unexpected),
+          message: "Claude installs must not include Codex agents/openai.yaml metadata"
+        });
+      } catch {
+        // Expected for Claude installs.
+      }
+    }
+  }
+
+  return {
+    target: input.target,
+    installRoot,
+    skillRoot,
+    skillCount: skillAssets.length,
+    expectedFileCount: expectedFiles.length,
+    checkedFileCount
+  };
 }
 
 export async function installSkillsFromPlan(plan: SkillInstallPlan): Promise<SkillInstallPlan> {
@@ -211,10 +312,22 @@ async function listSkillAssets(): Promise<readonly SkillAsset[]> {
           name,
           displayName: requiredScalar(borealMeta, "display_name"),
           workflows: listValue(borealMeta, "workflows"),
+          text: skillText,
           files: installFiles
         };
       })
   );
+}
+
+function workflowReferencesFromMarkdown(text: string): Set<string> {
+  const refs = new Set<string>();
+  for (const match of text.matchAll(/`workflows\/([^`\s]+\.md)`/gu)) {
+    const ref = match[1];
+    if (ref) {
+      refs.add(ref);
+    }
+  }
+  return refs;
 }
 
 function skillRootForInstall(root: string, target: "codex" | "claude" | "skills"): string {
@@ -233,6 +346,22 @@ function shouldInstallSkillFile(target: "codex" | "claude" | "skills", file: Ski
     return false;
   }
   return true;
+}
+
+function expectedSkillInstallFiles(
+  skillRoot: string,
+  target: "codex" | "claude" | "skills",
+  skill: SkillAsset,
+  wouldWrite: boolean
+): SkillInstallPlan["files"] {
+  return skill.files
+    .filter((file) => shouldInstallSkillFile(target, file))
+    .map((file) => ({
+      source: file.source,
+      destination: skillInstallDestination(skillRoot, skill.name, file.relativePath),
+      workflowRefs: skill.workflows,
+      wouldWrite
+    }));
 }
 
 async function markdownFiles(dir: string): Promise<string[]> {

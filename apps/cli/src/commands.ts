@@ -102,8 +102,10 @@ import {
   inspectWorkflowAssets,
   installSkillsFromPlan,
   listWorkflowAssets,
+  validateInstalledSkillRoot,
   type SkillInstallPlan
 } from "./workflow-assets.js";
+import { formatVersionInfo, getVersionInfo } from "./version.js";
 
 const DEFAULT_HANDOFF_SEARCH_LIMIT = 8;
 const HANDOFF_SEARCH_MIN_CANDIDATES = 24;
@@ -176,6 +178,9 @@ interface SyncStatusResult {
 
 interface SyncRefreshResult {
   readonly refreshed: true;
+  readonly refreshOk: true;
+  readonly postRefreshStatusOk: boolean;
+  readonly exitReason: "ok" | "post_refresh_status_unhealthy";
   readonly contextViews: number;
   readonly searchIndex: Awaited<ReturnType<typeof writeSearchIndex>>;
   readonly ledgers: Awaited<ReturnType<typeof exportLedgers>>;
@@ -409,6 +414,10 @@ export async function runCommand(args: ParsedArgs, output: CliOutput, cwd: strin
   const json = hasFlag(args, "json");
   if (definition.path[0] === "commands") {
     return commandsCommand(args, output, json);
+  }
+  if (definition.path[0] === "version") {
+    output.write(json ? formatRecord(getVersionInfo(), true) : formatVersionInfo());
+    return { exitCode: 0 };
   }
 
   const shouldLogOperation = shouldRecordOperation(definition);
@@ -1926,6 +1935,9 @@ async function syncCommand(
         formatRecord(
           {
             refreshed: true,
+            refreshOk: true,
+            postRefreshStatusOk: status.ok,
+            exitReason: status.ok ? "ok" : "post_refresh_status_unhealthy",
             contextViews: views.length,
             searchIndex,
             ledgers,
@@ -2399,7 +2411,9 @@ async function doctorCommand(
   json: boolean
 ): Promise<CommandResult> {
   if (action === "skills") {
-    const result = await inspectWorkflowAssets();
+    const result = await inspectWorkflowAssets({
+      installChecks: await installedSkillChecks(context, args)
+    });
     output.write(json ? formatRecord(result, true) : formatSkillDoctor(result));
     return { exitCode: result.ok ? 0 : 1 };
   }
@@ -2421,8 +2435,42 @@ function formatSkillDoctor(result: Awaited<ReturnType<typeof inspectWorkflowAsse
     `workflows: ${result.workflowCount}`,
     `templates: ${result.templateCount}`,
     `skills: ${result.skillCount}`,
+    ...result.installedChecks.map(
+      (check) =>
+        `installed ${check.target}: ${check.skillCount} skills, ${check.expectedFileCount} expected files at ${check.skillRoot}`
+    ),
     ...result.issues.map((issue) => `[error] ${issue.code}: ${issue.path}: ${issue.message}`)
   ].join("\n") + "\n";
+}
+
+async function installedSkillChecks(
+  context: CliContext,
+  args: ParsedArgs
+): Promise<readonly Parameters<typeof validateInstalledSkillRoot>[0][]> {
+  const targets = installedSkillTargets(flagValues(args, "skill-target"));
+  const explicitRoot = flagValue(args, "install-root");
+  if (!explicitRoot && targets.length === 0) {
+    return [];
+  }
+  const resolvedTargets = targets.length > 0 ? targets : (["skills"] as const);
+  return Promise.all(
+    resolvedTargets.map(async (target) => ({
+      target,
+      installRoot: explicitRoot ? resolve(context.workspaceRoot, explicitRoot) : await installRootFromArgs(context, args, target)
+    }))
+  );
+}
+
+function installedSkillTargets(values: readonly string[]): readonly ("codex" | "claude" | "skills")[] {
+  const targets = values.flatMap((value) => value.split(",")).map((value) => value.trim()).filter(Boolean);
+  const seen = new Set<"codex" | "claude" | "skills">();
+  for (const value of targets) {
+    if (value !== "codex" && value !== "claude" && value !== "skills") {
+      throw new BorealError("BOREAL_INVALID_INPUT", "--skill-target must be codex, claude, or skills");
+    }
+    seen.add(value);
+  }
+  return [...seen];
 }
 
 async function lockCommand(
