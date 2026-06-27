@@ -23,9 +23,6 @@ importers:
 
   apps/cli:
     dependencies:
-      '@boreal/console':
-        specifier: workspace:*
-        version: link:../console
       '@boreal/core':
         specifier: workspace:*
         version: link:../../packages/core

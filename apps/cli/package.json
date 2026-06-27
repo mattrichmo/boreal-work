@@ -8,7 +8,6 @@
   },
   "dependencies": {
     "@boreal/core": "workspace:*",
-    "@boreal/console": "workspace:*",
     "@boreal/daemon": "workspace:*",
     "@boreal/engine": "workspace:*",
     "@boreal/search": "workspace:*",

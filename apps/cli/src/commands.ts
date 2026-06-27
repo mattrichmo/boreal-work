@@ -90,7 +90,6 @@ import {
   type WorkItemView
 } from "@boreal/ui-model";
 import { deriveReadinessStatus } from "@boreal/work-engine";
-import { listenConsole } from "@boreal/console/server";
 
 import { flagValue, flagValues, hasFlag, requiredFlag, type ParsedArgs } from "./args.js";
 import {
@@ -3611,21 +3610,53 @@ async function serveDashboardCommand(context: CliContext, args: ParsedArgs, outp
   const port = parsePort(flagValue(args, "port")) ?? 4318;
   const mode = flagValue(args, "mode") === "fixture" ? "fixture" : "live";
   const liveCacheTtlMs = parseNonNegativeInteger(flagValue(args, "live-cache-ttl-ms"), "--live-cache-ttl-ms") ?? 60_000;
-  const running = await listenConsole({
+  const url = `http://${host}:${port}`;
+  const child = spawnDashboardServer({
     workspaceRoot: context.workspaceRoot,
     host,
     port,
     mode,
     liveCacheTtlMs
   });
-  output.write(`Boreal dashboard running at ${running.url}\n`);
+  output.write(`Boreal dashboard starting at ${url}\n`);
   output.write("Press Ctrl+C to stop.\n");
   if (!hasFlag(args, "no-open")) {
-    openBrowser(running.url);
+    setTimeout(() => openBrowser(url), 750);
   }
-  await waitForTermination();
-  await running.close();
-  return { exitCode: 0 };
+  return {
+    exitCode: await waitForDashboardProcess(child)
+  };
+}
+
+function spawnDashboardServer(input: {
+  readonly workspaceRoot: string;
+  readonly host: string;
+  readonly port: number;
+  readonly mode: "live" | "fixture";
+  readonly liveCacheTtlMs: number;
+}) {
+  const sourceRoot = resolve(dirname(import.meta.url.replace(/^file:\/\//u, "")), "..", "..", "..");
+  const tsxBin = join(sourceRoot, "node_modules", ".bin", process.platform === "win32" ? "tsx.cmd" : "tsx");
+  const serverEntrypoint = join(sourceRoot, "apps", "console", "src", "server.ts");
+  const serverTsconfig = join(sourceRoot, "apps", "console", "tsconfig.json");
+  return spawn(tsxBin, [
+    "--tsconfig",
+    serverTsconfig,
+    serverEntrypoint,
+    "--workspace",
+    input.workspaceRoot,
+    "--host",
+    input.host,
+    "--port",
+    String(input.port),
+    "--mode",
+    input.mode,
+    "--live-cache-ttl-ms",
+    String(input.liveCacheTtlMs)
+  ], {
+    cwd: sourceRoot,
+    stdio: "inherit"
+  });
 }
 
 function openBrowser(url: string): void {
@@ -3639,15 +3670,25 @@ function openBrowser(url: string): void {
   }
 }
 
-function waitForTermination(): Promise<void> {
+function waitForDashboardProcess(child: ReturnType<typeof spawn>): Promise<number> {
   return new Promise((resolvePromise) => {
     const done = () => {
       process.off("SIGINT", done);
       process.off("SIGTERM", done);
-      resolvePromise();
+      child.kill("SIGTERM");
     };
     process.once("SIGINT", done);
     process.once("SIGTERM", done);
+    child.once("exit", (code, signal) => {
+      process.off("SIGINT", done);
+      process.off("SIGTERM", done);
+      resolvePromise(signal ? 0 : code ?? 0);
+    });
+    child.once("error", () => {
+      process.off("SIGINT", done);
+      process.off("SIGTERM", done);
+      resolvePromise(1);
+    });
   });
 }
 

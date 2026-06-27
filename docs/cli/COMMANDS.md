@@ -346,6 +346,24 @@ bwrk registry doctor [--registry-root <dir>] [--json]
 
 Validates registered project roots, Boreal runtime files, project setup config paths, memory roots, memory runtime directories, install roots, and setup mismatches. It exits nonzero when registered projects are stale, moved, invalid, or inconsistent with their `.boreal/project.json`.
 
+## `dashboard`
+
+```bash
+bwrk dashboard [--host <host>] [--port <n>] [--no-open] [--mode live|fixture] [--live-cache-ttl-ms <ms>]
+```
+
+Starts the local Boreal browser console for the selected workspace. By default it binds to `127.0.0.1:4318`, prints the URL, and opens the dashboard in your browser.
+
+This command is an interactive human surface and does not support `--json`. Use `bwrk dashboard global --json` when an agent or dashboard adapter needs the bounded dashboard data payload.
+
+Options:
+
+- `--host`: bind address. Defaults to `127.0.0.1`.
+- `--port`: port number. Defaults to `4318`.
+- `--no-open`: print the URL without launching a browser.
+- `--mode`: `live` for workspace data or `fixture` for demo data. Defaults to `live`.
+- `--live-cache-ttl-ms`: live dashboard cache TTL between route clicks. Defaults to `60000`.
+
 ## `dashboard global`
 
 ```bash
