@@ -30,6 +30,7 @@ export interface CreateClaimInput {
   readonly status?: ClaimStatus;
   readonly sourceIds?: readonly KnowledgeSourceId[];
   readonly evidenceIds?: readonly EvidenceId[];
+  readonly wikiPageIds?: readonly string[];
   readonly actor: ActorRef;
   readonly now: IsoTimestamp;
 }
@@ -41,6 +42,7 @@ export interface CreateDecisionInput {
   readonly decision: string;
   readonly consequences?: readonly string[];
   readonly sourceIds?: readonly KnowledgeSourceId[];
+  readonly wikiPageIds?: readonly string[];
   readonly actor: ActorRef;
   readonly now: IsoTimestamp;
 }
@@ -83,7 +85,8 @@ export function createClaim(input: CreateClaimInput): ClaimRecord {
     statement: input.statement.trim(),
     status: input.status ?? "proposed",
     sourceIds: input.sourceIds ?? [],
-    evidenceIds: input.evidenceIds ?? []
+    evidenceIds: input.evidenceIds ?? [],
+    wikiPageIds: input.wikiPageIds ?? []
   });
 }
 
@@ -106,7 +109,8 @@ export function createDecision(input: CreateDecisionInput): DecisionRecord {
     context: input.context.trim(),
     decision: input.decision.trim(),
     consequences: input.consequences ?? [],
-    sourceIds: input.sourceIds ?? []
+    sourceIds: input.sourceIds ?? [],
+    wikiPageIds: input.wikiPageIds ?? []
   });
 }
 

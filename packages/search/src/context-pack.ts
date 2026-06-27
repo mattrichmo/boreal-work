@@ -195,7 +195,7 @@ function workContext(
 }
 
 function claimTokens(claim: ClaimRecord): ReadonlySet<string> {
-  return tokens([claim.meta.id, claim.statement, claim.sourceIds.join(" "), claim.evidenceIds.join(" ")]);
+  return tokens([claim.meta.id, claim.statement, claim.sourceIds.join(" "), claim.evidenceIds.join(" "), (claim.wikiPageIds ?? []).join(" ")]);
 }
 
 function decisionTokens(decision: DecisionRecord): ReadonlySet<string> {
@@ -205,7 +205,8 @@ function decisionTokens(decision: DecisionRecord): ReadonlySet<string> {
     decision.context,
     decision.decision,
     decision.consequences.join(" "),
-    decision.sourceIds.join(" ")
+    decision.sourceIds.join(" "),
+    (decision.wikiPageIds ?? []).join(" ")
   ]);
 }
 

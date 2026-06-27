@@ -5,7 +5,7 @@ import { parseArgs, wantsJsonOutput } from "./args.js";
 import { runCommand } from "./commands.js";
 import { formatRecord } from "./output.js";
 import type { CliOutput } from "./output.js";
-import { formatVersionInfo, getVersionInfo } from "./version.js";
+import { formatVersionProbe, getVersionInfo } from "./version.js";
 
 export async function main(
   argv = process.argv.slice(2),
@@ -17,7 +17,7 @@ export async function main(
   const guardedOutput = json ? guardedJsonOutput(output, stdoutGuard) : output;
   try {
     if (argv.includes("--version")) {
-      guardedOutput.write(json ? formatRecord(getVersionInfo(), true) : formatVersionInfo());
+      guardedOutput.write(json ? formatRecord(getVersionInfo(), true) : formatVersionProbe());
       return 0;
     }
     const parsed = parseArgs(argv);

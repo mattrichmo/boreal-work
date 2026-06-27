@@ -9,6 +9,7 @@
     "statement": { "type": "string", "minLength": 1 },
     "status": { "enum": ["proposed", "accepted", "rejected", "stale"] },
     "sourceIds": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
-    "evidenceIds": { "type": "array", "items": { "type": "string" }, "uniqueItems": true }
+    "evidenceIds": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
+    "wikiPageIds": { "type": "array", "items": { "type": "string" }, "uniqueItems": true }
   }
 }

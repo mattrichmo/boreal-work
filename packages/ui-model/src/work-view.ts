@@ -13,7 +13,16 @@ export interface WorkItemView {
   readonly evidenceCount: number;
   readonly verificationCount: number;
   readonly activeReservationId?: string;
+  readonly activeReservation?: WorkReservationView;
   readonly contextSummary?: string;
+}
+
+export interface WorkReservationView {
+  readonly id: string;
+  readonly agentId: string;
+  readonly reservedAt?: string;
+  readonly expiresAt?: string;
+  readonly expired?: boolean;
 }
 
 export function toWorkItemView(input: {

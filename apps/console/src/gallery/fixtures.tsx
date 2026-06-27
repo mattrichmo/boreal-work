@@ -1,6 +1,10 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import type {
   DashboardHealthView,
+  GlobalActivityView,
+  GlobalHealthView,
+  GlobalSearchView,
+  GlobalWorkQueuesView,
   LockDashboardView,
   ProjectRegistryView,
   SprintBoardView,
@@ -14,8 +18,12 @@ import {
   Card,
   DashboardHealthPanel,
   DiffViewer,
+  ActorActivityPanel,
+  GlobalDriftPanel,
+  GlobalHealthSummaryPanel,
   GlobalOverviewMetrics,
-  GlobalReadyQueue,
+  GlobalSearchPanel,
+  GlobalWorkQueues,
   LockStatusPanel,
   MetricCard,
   Notice,
@@ -54,6 +62,7 @@ export function ConsoleGallery({ viewport = "desktop" }: { readonly viewport?: C
   const board = sprintBoardView(work);
   const registry = registryView();
   const health = healthView();
+  const globalHealth = globalHealthView();
   const sync = syncView();
   const locks = lockView();
 
@@ -76,7 +85,11 @@ export function ConsoleGallery({ viewport = "desktop" }: { readonly viewport?: C
       <section data-gallery-family="global-dashboard">
         <h2>Global Dashboard</h2>
         <GlobalOverviewMetrics view={registry} />
-        <GlobalReadyQueue view={workDashboardView(work)} />
+        <GlobalWorkQueues view={globalQueuesView(work)} />
+        <GlobalSearchPanel view={globalSearchView(work)} />
+        <GlobalHealthSummaryPanel view={globalHealth} />
+        <GlobalDriftPanel view={globalHealth} />
+        <ActorActivityPanel view={globalActivityView()} />
       </section>
 
       <section data-gallery-family="sprint-board">
@@ -170,28 +183,185 @@ function sprintBoardView(work: WorkItemView): SprintBoardView {
   };
 }
 
-function workDashboardView(work: WorkItemView) {
+function globalQueuesView(work: WorkItemView): GlobalWorkQueuesView {
   return {
-    labels: ["sprint-03"],
     queues: [
-      { id: "ready" as const, title: "Ready", count: 1, items: [work] },
-      { id: "blocked" as const, title: "Blocked", count: 0, items: [] },
-      { id: "in_progress" as const, title: "In Progress", count: 0, items: [] },
-      { id: "needs_verification" as const, title: "Needs Verification", count: 0, items: [] },
-      { id: "verified" as const, title: "Verified", count: 0, items: [] },
-      { id: "closed" as const, title: "Closed", count: 0, items: [] }
+      {
+        id: "ready",
+        title: "Ready to claim",
+        count: 1,
+        items: [
+          {
+            id: `project-gallery:${work.id}`,
+            projectId: "project-gallery",
+            projectName: "Gallery Project",
+            projectRoot: "/repo/gallery",
+            work,
+            claimCommand: `bwrk --workspace /repo/gallery work reserve ${work.id} --purpose 'Claim from Boreal Console' --json`
+          }
+        ]
+      },
+      { id: "blocked", title: "Blocked", count: 0, items: [] },
+      { id: "needs_verification", title: "Needs verification", count: 0, items: [] }
     ],
     summary: {
       total: 1,
       ready: 1,
       blocked: 0,
-      inProgress: 0,
-      needsVerification: 0,
-      verified: 0,
-      closed: 0,
-      activeReservations: 0,
-      expiredReservations: 0
+      needsVerification: 0
     }
+  };
+}
+
+function globalSearchView(work: WorkItemView): GlobalSearchView {
+  return {
+    query: "component import",
+    count: 1,
+    results: [
+      {
+        id: `project-gallery:work:${work.id}`,
+        projectId: "project-gallery",
+        projectName: "Gallery Project",
+        projectRoot: "/repo/gallery",
+        sourceKind: "work",
+        recordId: work.id,
+        title: work.title,
+        summary: "Gallery search result with explicit project and source kind.",
+        score: 18.2
+      }
+    ]
+  };
+}
+
+function globalActivityView(): GlobalActivityView {
+  return {
+    items: [
+      activityItem("human", "cybertron", "work list"),
+      activityItem("agent", "codex", "agent start"),
+      activityItem("system", "system", "sync refresh")
+    ],
+    summary: {
+      total: 3,
+      human: 1,
+      agent: 1,
+      system: 1,
+      unknown: 0,
+      failed: 0,
+      stateChanged: 1,
+      generatedArtifactsChanged: 1
+    }
+  };
+}
+
+function globalHealthView(): GlobalHealthView {
+  return {
+    projects: [
+      {
+        projectId: "project-gallery",
+        projectName: "Gallery Project",
+        projectRoot: "/repo/gallery",
+        memoryRoot: "/repo/gallery/memory",
+        health: "warning",
+        stale: true,
+        syncFreshness: "stale",
+        syncOk: false,
+        vaultOk: true,
+        ledgersOk: false,
+        searchIndexOk: true,
+        gitOk: true,
+        findingCount: 2
+      }
+    ],
+    findings: [
+      {
+        id: "project-gallery:ledger.export_drift",
+        projectId: "project-gallery",
+        projectName: "Gallery Project",
+        projectRoot: "/repo/gallery",
+        workspaceRoot: "/repo/gallery",
+        category: "ledger",
+        code: "ledger.export_drift",
+        title: "ledger.export_drift",
+        severity: "warning",
+        status: "warning",
+        message: "JSONL ledger export is stale.",
+        sourcePath: "/repo/gallery/.boreal/ledgers",
+        actions: [
+          {
+            label: "Refresh projections",
+            command: "bwrk --workspace /repo/gallery sync refresh --json",
+            mutatesState: true,
+            requiresConfirmation: true
+          }
+        ]
+      }
+    ],
+    driftGroups: [
+      {
+        category: "ledger",
+        title: "Ledgers and snapshots",
+        count: 1,
+        findings: [
+          {
+            id: "project-gallery:ledger.export_drift",
+            projectId: "project-gallery",
+            projectName: "Gallery Project",
+            projectRoot: "/repo/gallery",
+            workspaceRoot: "/repo/gallery",
+            category: "ledger",
+            code: "ledger.export_drift",
+            title: "ledger.export_drift",
+            severity: "warning",
+            status: "warning",
+            message: "JSONL ledger export is stale.",
+            sourcePath: "/repo/gallery/.boreal/ledgers",
+            actions: [
+              {
+                label: "Refresh projections",
+                command: "bwrk --workspace /repo/gallery sync refresh --json",
+                mutatesState: true,
+                requiresConfirmation: true
+              }
+            ]
+          }
+        ]
+      }
+    ],
+    summary: {
+      totalProjects: 1,
+      healthyProjects: 0,
+      warningProjects: 1,
+      errorProjects: 0,
+      staleProjects: 1,
+      findings: 1,
+      errors: 0,
+      warnings: 1,
+      fixableActions: 1,
+      lockFindings: 0,
+      searchFindings: 0,
+      ledgerFindings: 1,
+      setupFindings: 0
+    }
+  };
+}
+
+function activityItem(actorKind: "human" | "agent" | "system", actorId: string, commandPath: string) {
+  return {
+    id: `project-gallery:${commandPath}`,
+    projectId: "project-gallery",
+    projectName: "Gallery Project",
+    projectRoot: "/repo/gallery",
+    sessionId: "local",
+    commandPath,
+    status: "succeeded",
+    exitCode: 0,
+    stateChanged: actorKind === "agent",
+    generatedArtifactsChanged: actorKind === "system",
+    actorId,
+    actorKind,
+    startedAt: "2026-06-27T00:00:00.000Z",
+    finishedAt: "2026-06-27T00:00:01.000Z",
+    eventCount: actorKind === "human" ? 0 : 1
   };
 }
 
@@ -204,6 +374,8 @@ function registryView(): ProjectRegistryView {
       warningProjects: 0,
       errorProjects: 0,
       missingProjects: 0,
+      staleProjects: 0,
+      openWorkCount: 3,
       readyWorkCount: 3,
       blockedWorkCount: 0,
       activeReservationCount: 1

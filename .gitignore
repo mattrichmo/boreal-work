@@ -10,13 +10,16 @@ coverage/
 
 # Boreal local workspace binding and runtime artifacts
 .boreal/project.json
+.boreal/mcp.json
 .boreal/runtime/
 .boreal/ledgers/
 .boreal/cache/
 .boreal/tmp/
+.boreal/tmp-install-bin/
 .boreal/results/
 .boreal/**/*.db
 .boreal/**/*.db-*
+apps/console/.boreal/
 .agents/
 .claude/
 dump/

@@ -1,8 +1,19 @@
 import { existsSync } from "node:fs";
-import { mkdir, readFile, readdir, stat } from "node:fs/promises";
+import { mkdir, open, readFile, readdir, stat } from "node:fs/promises";
 import { basename, isAbsolute, join, relative, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
-import { BorealError, hashContent, normalizeLabels, normalizeMachineString, nowIso, randomId, safeParseJson } from "@boreal/core";
+import {
+  BorealError,
+  assertPathInside,
+  assertRealPathInside,
+  hashContent,
+  normalizeLabels,
+  normalizeMachineString,
+  nowIso,
+  randomId,
+  safeParseJson
+} from "@boreal/core";
 import { normalizeFileLockOptions, withFileLock, writeTextFileAtomic } from "@boreal/storage";
 
 import type { CliContext } from "./context.js";
@@ -61,6 +72,55 @@ export interface RawSourceRecord {
   readonly addedAt: string;
   readonly actorId: string;
   readonly contentHash: string;
+}
+
+export type RawProcessingStatus = "queued" | "linked";
+
+export interface RawSourceRow {
+  readonly id: string;
+  readonly title: string;
+  readonly kind: string;
+  readonly uri?: string;
+  readonly summary?: string;
+  readonly tags: readonly string[];
+  readonly addedAt: string;
+  readonly actorId: string;
+  readonly contentHash: string;
+  readonly sourceBacked: true;
+  readonly immutable: true;
+  readonly processingStatus: RawProcessingStatus;
+  readonly linkedPageCount: number;
+  readonly retrievalCommand: string;
+  readonly previewCommand: string;
+}
+
+export type RawPreviewStatus =
+  | "available"
+  | "empty"
+  | "external"
+  | "missing"
+  | "outside_workspace"
+  | "truncated"
+  | "unsupported";
+
+export type RawPreviewMediaType = "binary" | "directory" | "external" | "missing" | "none" | "text";
+
+export interface RawSourcePreviewResult {
+  readonly status: RawPreviewStatus;
+  readonly mediaType: RawPreviewMediaType;
+  readonly message: string;
+  readonly uri?: string;
+  readonly path?: string;
+  readonly body?: string;
+  readonly bytes?: number;
+  readonly totalBytes?: number;
+  readonly maxBytes: number;
+  readonly truncated: boolean;
+}
+
+export interface RawSourceDetail extends RawSourceRow {
+  readonly linkedPages: readonly WikiPageRecord[];
+  readonly preview: RawSourcePreviewResult;
 }
 
 export interface RawAddResult {
@@ -164,6 +224,7 @@ export interface VaultLedgerEvent {
 }
 
 const VAULT_JSONL_LOCK_OPTIONS = normalizeFileLockOptions();
+const DEFAULT_RAW_PREVIEW_BYTES = 4_096;
 
 const REQUIRED_DIRECTORIES = [
   ".",
@@ -355,6 +416,37 @@ export async function listVaultRawSources(context: CliContext): Promise<readonly
   return (await readRawSources(context)).records;
 }
 
+export async function listRawSourceRows(
+  context: CliContext,
+  options: { readonly limit?: number } = {}
+): Promise<readonly RawSourceRow[]> {
+  await requireInitializedVault(context);
+  const [rawSources, wikiPages] = await Promise.all([listVaultRawSources(context), listVaultWikiPages(context)]);
+  const linkedPageCounts = rawLinkedPageCounts(rawSources, wikiPages);
+  return rawSources
+    .slice(0, options.limit ?? rawSources.length)
+    .map((record) => rawSourceRow(record, linkedPageCounts.get(record.id) ?? 0));
+}
+
+export async function getRawSourceDetail(
+  context: CliContext,
+  sourceId: string,
+  options: { readonly previewBytes?: number } = {}
+): Promise<RawSourceDetail> {
+  await requireInitializedVault(context);
+  const [rawSources, wikiPages] = await Promise.all([listVaultRawSources(context), listVaultWikiPages(context)]);
+  const record = rawSources.find((source) => source.id === sourceId);
+  if (!record) {
+    throw new BorealError("BOREAL_NOT_FOUND", "Raw source not found", { sourceId });
+  }
+  const linkedPages = wikiPages.filter((page) => page.sourceRefs.includes(record.id));
+  return {
+    ...rawSourceRow(record, linkedPages.length),
+    linkedPages,
+    preview: await previewRawSource(context, record, options.previewBytes ?? DEFAULT_RAW_PREVIEW_BYTES)
+  };
+}
+
 export async function listVaultWikiPages(context: CliContext): Promise<readonly WikiPageRecord[]> {
   return readWikiPages(context);
 }
@@ -534,6 +626,253 @@ async function inspectVaultHealth(context: CliContext): Promise<VaultHealthResul
     missingArchiveRefs,
     missingMergeRefs
   };
+}
+
+function rawLinkedPageCounts(
+  rawSources: readonly RawSourceRecord[],
+  wikiPages: readonly WikiPageRecord[]
+): ReadonlyMap<string, number> {
+  const knownRawIds = new Set(rawSources.map((record) => record.id));
+  const counts = new Map<string, number>();
+  for (const page of wikiPages) {
+    for (const sourceRef of page.sourceRefs) {
+      if (knownRawIds.has(sourceRef)) {
+        counts.set(sourceRef, (counts.get(sourceRef) ?? 0) + 1);
+      }
+    }
+  }
+  return counts;
+}
+
+function rawSourceRow(record: RawSourceRecord, linkedPageCount: number): RawSourceRow {
+  return {
+    id: record.id,
+    title: record.title,
+    kind: record.kind,
+    uri: record.uri,
+    summary: record.summary,
+    tags: record.tags,
+    addedAt: record.addedAt,
+    actorId: record.actorId,
+    contentHash: record.contentHash,
+    sourceBacked: true,
+    immutable: true,
+    processingStatus: linkedPageCount > 0 ? "linked" : "queued",
+    linkedPageCount,
+    retrievalCommand: `bwrk raw show ${record.id} --json`,
+    previewCommand: `bwrk raw show ${record.id} --preview-bytes ${DEFAULT_RAW_PREVIEW_BYTES} --json`
+  };
+}
+
+async function previewRawSource(
+  context: CliContext,
+  record: RawSourceRecord,
+  maxBytes: number
+): Promise<RawSourcePreviewResult> {
+  const limit = Math.max(1, maxBytes);
+  if (!record.uri) {
+    return rawPreview({
+      status: "unsupported",
+      mediaType: "none",
+      message: "Raw source has no local URI to preview.",
+      maxBytes: limit,
+      uri: record.uri
+    });
+  }
+  const local = rawUriToLocalPath(context, record.uri);
+  if (local.kind !== "local") {
+    return rawPreview({
+      status: local.status,
+      mediaType: local.mediaType,
+      message: local.message,
+      maxBytes: limit,
+      uri: record.uri
+    });
+  }
+  const layout = await resolveVaultLayout(context);
+  if (!(await rawPreviewPathAllowed(context, layout, local.path))) {
+    return rawPreview({
+      status: "outside_workspace",
+      mediaType: "none",
+      message: "Local preview path is outside the workspace and configured memory root.",
+      maxBytes: limit,
+      uri: record.uri,
+      path: local.path
+    });
+  }
+
+  let info: Awaited<ReturnType<typeof stat>>;
+  try {
+    info = await stat(local.path);
+  } catch (error) {
+    if (isNodeError(error) && error.code === "ENOENT") {
+      return rawPreview({
+        status: "missing",
+        mediaType: "missing",
+        message: "Local preview file is missing.",
+        maxBytes: limit,
+        uri: record.uri,
+        path: local.path
+      });
+    }
+    throw error;
+  }
+
+  if (info.isDirectory()) {
+    return rawPreview({
+      status: "unsupported",
+      mediaType: "directory",
+      message: "Directories are not previewed.",
+      maxBytes: limit,
+      uri: record.uri,
+      path: local.path,
+      totalBytes: info.size
+    });
+  }
+  if (!info.isFile()) {
+    return rawPreview({
+      status: "unsupported",
+      mediaType: "binary",
+      message: "Only regular text files can be previewed.",
+      maxBytes: limit,
+      uri: record.uri,
+      path: local.path,
+      totalBytes: info.size
+    });
+  }
+
+  const bytesToRead = Math.min(info.size, limit);
+  const buffer = await readFilePrefix(local.path, bytesToRead);
+  if (looksBinary(buffer)) {
+    return rawPreview({
+      status: "unsupported",
+      mediaType: "binary",
+      message: "Binary or non-UTF-8 assets are listed but not rendered inline.",
+      maxBytes: limit,
+      uri: record.uri,
+      path: local.path,
+      bytes: buffer.length,
+      totalBytes: info.size
+    });
+  }
+  const body = buffer.toString("utf8");
+  if (body.length === 0) {
+    return rawPreview({
+      status: "empty",
+      mediaType: "text",
+      message: "Local preview file is empty.",
+      maxBytes: limit,
+      uri: record.uri,
+      path: local.path,
+      bytes: 0,
+      totalBytes: info.size
+    });
+  }
+  const truncated = info.size > buffer.length;
+  return rawPreview({
+    status: truncated ? "truncated" : "available",
+    mediaType: "text",
+    message: truncated ? `Preview truncated to ${buffer.length} of ${info.size} bytes.` : "Text preview available.",
+    maxBytes: limit,
+    uri: record.uri,
+    path: local.path,
+    body,
+    bytes: buffer.length,
+    totalBytes: info.size
+  });
+}
+
+function rawPreview(input: Omit<RawSourcePreviewResult, "truncated">): RawSourcePreviewResult {
+  return {
+    ...input,
+    truncated: input.status === "truncated"
+  };
+}
+
+type RawUriResolution =
+  | { readonly kind: "local"; readonly path: string }
+  | {
+      readonly kind: "nonLocal";
+      readonly status: "external" | "unsupported";
+      readonly mediaType: "external" | "none";
+      readonly message: string;
+    };
+
+function rawUriToLocalPath(context: CliContext, uri: string): RawUriResolution {
+  const trimmed = uri.trim();
+  if (!trimmed) {
+    return {
+      kind: "nonLocal",
+      status: "unsupported",
+      mediaType: "none",
+      message: "Raw source URI is empty."
+    };
+  }
+  if (trimmed.startsWith("file://")) {
+    try {
+      const url = new URL(trimmed);
+      if (url.hostname && url.hostname !== "localhost" && url.pathname !== "/" && url.pathname !== "") {
+        return {
+          kind: "nonLocal",
+          status: "unsupported",
+          mediaType: "none",
+          message: "File URIs with remote hosts are not previewed."
+        };
+      }
+      if (url.hostname && url.hostname !== "localhost" && (url.pathname === "/" || url.pathname === "")) {
+        return { kind: "local", path: resolve(context.workspaceRoot, url.hostname) };
+      }
+      return { kind: "local", path: fileURLToPath(url) };
+    } catch {
+      return { kind: "local", path: resolve(context.workspaceRoot, trimmed.slice("file://".length)) };
+    }
+  }
+  if (/^[A-Za-z][A-Za-z0-9+.-]*:/u.test(trimmed)) {
+    return {
+      kind: "nonLocal",
+      status: "external",
+      mediaType: "external",
+      message: "External URIs are not fetched by local preview."
+    };
+  }
+  return { kind: "local", path: resolve(context.workspaceRoot, trimmed) };
+}
+
+async function rawPreviewPathAllowed(context: CliContext, layout: VaultLayout, path: string): Promise<boolean> {
+  const roots = [...new Set([resolve(context.workspaceRoot), resolve(layout.rootDir)])];
+  for (const root of roots) {
+    try {
+      assertPathInside(root, path);
+      await assertRealPathInside(root, path);
+      return true;
+    } catch (error) {
+      if (!(error instanceof BorealError) || error.code !== "BOREAL_INVALID_INPUT") {
+        throw error;
+      }
+    }
+  }
+  return false;
+}
+
+async function readFilePrefix(path: string, bytesToRead: number): Promise<Buffer> {
+  if (bytesToRead <= 0) {
+    return Buffer.alloc(0);
+  }
+  const handle = await open(path, "r");
+  try {
+    const buffer = Buffer.alloc(bytesToRead);
+    const { bytesRead } = await handle.read(buffer, 0, bytesToRead, 0);
+    return buffer.subarray(0, bytesRead);
+  } finally {
+    await handle.close();
+  }
+}
+
+function looksBinary(buffer: Buffer): boolean {
+  if (buffer.includes(0)) {
+    return true;
+  }
+  return buffer.toString("utf8").includes("\uFFFD");
 }
 
 async function readRawSources(context: CliContext): Promise<{

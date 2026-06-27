@@ -2,7 +2,7 @@
 
 These JSON schemas describe the durable record envelopes used by the TypeScript runtime. The TypeScript source in `packages/core/src/records.ts` remains the domain type source, and `packages/core/src/schema-validation.ts` enforces the currently published schema subset at runtime, import, and doctor boundaries.
 
-The current runtime types cover work, graph edges, evidence, verification, knowledge sources, claims, decisions, reservations, events, and projections.
+The current runtime types cover work, graph edges, evidence, verification, knowledge sources, claims, decisions, reservations, events, and projections. The project registry schema is a machine-local coordination contract for known Boreal workspaces and is intentionally separate from runtime snapshots.
 
 Currently enforced schemas:
 
@@ -19,5 +19,6 @@ Currently enforced schemas:
 - `schemas/projections/projection-record.schema.json`
 - `schemas/projections/context-pack.schema.json`
 - `schemas/policies/runtime-policy.schema.json`
+- `schemas/projects/project-registry.schema.json`
 
-Add validator coverage with each new published schema file so schemas do not become documentation-only contracts.
+Published schema parity is enforced through `PUBLISHED_SCHEMA_CONTRACTS` in `packages/core/src/schema-validation.ts`. Each entry binds a schema ID, schema file path, and validator function; runtime snapshot schemas also bind the state section they validate. CI fails when a `.schema.json` file is missing from that registry, when a registry entry points at the wrong `$id`, or when a validator no longer reports issues under its published schema ID.

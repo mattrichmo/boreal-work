@@ -116,6 +116,10 @@ describe("workflow, template, and skill docs", () => {
       }
       expect(text).toContain("No-Leak Rules");
       expect(text).toContain("Do not read sibling");
+      expect(text).toContain("Keep this skill as a thin adapter");
+      for (const workflowBodyHeading of ["## Steps", "## Command Sequences", "## CLI Commands", "## Finish Criteria"]) {
+        expect(text, `${relative(rootDir, file)} duplicates ${workflowBodyHeading}`).not.toContain(workflowBodyHeading);
+      }
     }
   });
 
@@ -136,6 +140,56 @@ describe("workflow, template, and skill docs", () => {
     expect(claimFinish).toContain("Use manual `evidence add`, `work verify`, and `work close` only when no active reservation exists");
     expect(closeout).toContain("Capture the evidence ID from `data.meta.id`");
     expect(closeout).toContain("bwrk work verify <work-id> --evidence <evidence-id> --verdict passed");
+  });
+
+  it("keeps board transition contracts behind safe CLI commands", async () => {
+    const dashboardContracts = await readFile(join(rootDir, "docs/architecture/DASHBOARD_COMMAND_CONTRACTS.md"), "utf8");
+
+    expect(dashboardContracts).toContain("## Board Transition Contract");
+    expect(dashboardContracts).toContain("UI cannot mutate `.boreal/runtime/state.json`");
+    expect(dashboardContracts).toContain("`mutatesState`");
+    expect(dashboardContracts).toContain("`requiresConfirmation`");
+    expect(dashboardContracts).toContain("bwrk sprint board [<sprint-ref>] --json");
+    expect(dashboardContracts).toContain("bwrk sprint activate <sprint-ref> --json");
+    expect(dashboardContracts).toContain("bwrk work reserve <work-id> --agent <agent-id> --purpose <text> --json");
+    expect(dashboardContracts).toContain("bwrk evidence add <work-id>");
+    expect(dashboardContracts).toContain("bwrk work verify <work-id> --evidence <evidence-id> --verdict passed --json");
+    expect(dashboardContracts).toContain("bwrk work close <work-id> --reason <text> --json");
+    expect(dashboardContracts).toContain("bwrk agent finish current --agent <agent-id>");
+    expect(dashboardContracts).toContain("passed verification requires passed evidence");
+    expect(dashboardContracts).toContain("Board UI must not run broad `work claim` for a card");
+    expect(dashboardContracts).toContain("`activeBlockerIds` remains the derived unresolved-blocker subset");
+  });
+
+  it("keeps runtime versioning and migration policy explicit", async () => {
+    const runtime = await readFile(join(rootDir, "docs/architecture/RUNTIME.md"), "utf8");
+    const commands = await readFile(join(rootDir, "docs/cli/COMMANDS.md"), "utf8");
+
+    expect(runtime).toContain("## Versioning And Migration Policy");
+    expect(runtime).toContain("bwrk version --json");
+    expect(runtime).toContain("boreal.cli.version.v1");
+    expect(runtime).toContain("boreal.runtime.v1");
+    expect(runtime).toContain("boreal.file-store.v1");
+    expect(runtime).toContain("Migrations that cannot be cleanly reversed must create a `boreal.export.v1` recovery snapshot");
+    expect(runtime).toContain("Breaking persisted runtime or adapter changes require a new schema version");
+    expect(commands).toContain("`boreal.cli.version.v1`");
+    expect(commands).toContain("Non-reversible migrations must be snapshot-backed by a `boreal.export.v1` recovery snapshot");
+  });
+
+  it("keeps dashboard usage docs distinct from JSON and plain CLI modes", async () => {
+    const consoleApp = await readFile(join(rootDir, "docs/architecture/CONSOLE_APP.md"), "utf8");
+    const commands = await readFile(join(rootDir, "docs/cli/COMMANDS.md"), "utf8");
+
+    expect(consoleApp).toContain("## CLI Output Modes");
+    expect(consoleApp).toContain("JSON mode is the canonical contract for agents and the console");
+    expect(consoleApp).toContain("Plain CLI mode is the default terminal format");
+    expect(consoleApp).toContain("Dashboard human mode is an opt-in terminal view");
+    expect(consoleApp).toContain("bwrk dashboard global --json");
+    expect(consoleApp).toContain("It is different from `--view dashboard`");
+    expect(commands).toContain("Output modes:");
+    expect(commands).toContain("JSON mode is the stable automation contract");
+    expect(commands).toContain("Plain mode is the default human output");
+    expect(commands).toContain("Dashboard mode is opt-in human rendering");
   });
 });
 

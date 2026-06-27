@@ -198,6 +198,7 @@ const MEMORY_GITIGNORE_PATTERNS = [
 const PROJECT_GITIGNORE_PATTERNS = [
   "# Boreal local workspace binding and runtime artifacts",
   ".boreal/project.json",
+  ".boreal/mcp.json",
   ".boreal/runtime/",
   ".boreal/ledgers/",
   ".boreal/cache/",

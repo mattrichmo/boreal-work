@@ -4,7 +4,11 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "build": "tsc -b"
+    "build": "tsc -b",
+    "browser-smoke": "pnpm build && node dist/browser-smoke.js --workspace ../..",
+    "dev": "pnpm build && node dist/server.js --workspace ../..",
+    "render": "pnpm build && node dist/render-file.js --workspace ../..",
+    "smoke": "pnpm build && node dist/smoke.js --workspace ../.."
   },
   "dependencies": {
     "@boreal/ui-model": "workspace:*",
@@ -16,6 +20,10 @@
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
+    },
+    "./server": {
+      "types": "./dist/server.d.ts",
+      "import": "./dist/server.js"
     }
   },
   "devDependencies": {

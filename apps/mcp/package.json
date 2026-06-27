@@ -1,0 +1,22 @@
+{
+  "name": "@boreal/mcp",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "boreal-mcp": "./dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc -b",
+    "dev": "pnpm build && node dist/index.js --workspace ../.."
+  },
+  "dependencies": {
+    "@boreal/core": "workspace:*"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  }
+}

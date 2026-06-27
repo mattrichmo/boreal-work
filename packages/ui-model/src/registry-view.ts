@@ -5,6 +5,7 @@ import type { DashboardFinding } from "./health-view.js";
 export type ProjectMemoryLayout = "in-repo" | "child" | "sibling";
 export type ProjectMemoryGitMode = "shared" | "separate" | "submodule";
 export type ProjectHealthState = "ok" | "warning" | "error" | "missing";
+export type ProjectSyncFreshness = "fresh" | "stale" | "unknown";
 
 export interface ProjectRegistryEntry {
   readonly id: string;
@@ -15,6 +16,8 @@ export interface ProjectRegistryEntry {
   readonly memoryGitMode: ProjectMemoryGitMode;
   readonly installRoot?: string;
   readonly health: ProjectHealthState;
+  readonly stale: boolean;
+  readonly syncFreshness: ProjectSyncFreshness;
   readonly openWorkCount: number;
   readonly readyWorkCount: number;
   readonly blockedWorkCount: number;
@@ -29,6 +32,8 @@ export interface ProjectRegistrySummary {
   readonly warningProjects: number;
   readonly errorProjects: number;
   readonly missingProjects: number;
+  readonly staleProjects: number;
+  readonly openWorkCount: number;
   readonly readyWorkCount: number;
   readonly blockedWorkCount: number;
   readonly activeReservationCount: number;
@@ -54,6 +59,8 @@ export function buildProjectRegistryView(input: {
       warningProjects: countHealth(entries, "warning"),
       errorProjects: countHealth(entries, "error"),
       missingProjects: countHealth(entries, "missing"),
+      staleProjects: entries.filter((entry) => entry.stale || entry.syncFreshness === "stale").length,
+      openWorkCount: sum(entries, (entry) => entry.openWorkCount),
       readyWorkCount: sum(entries, (entry) => entry.readyWorkCount),
       blockedWorkCount: sum(entries, (entry) => entry.blockedWorkCount),
       activeReservationCount: sum(entries, (entry) => entry.activeReservationCount)

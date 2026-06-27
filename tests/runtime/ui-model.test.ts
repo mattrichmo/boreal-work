@@ -10,6 +10,11 @@ import {
   borealIconStrategy,
   borealInteractionRules,
   buildDashboardHealthView,
+  buildGlobalActivityView,
+  buildGlobalHealthView,
+  buildGlobalSearchView,
+  buildGlobalSettingsView,
+  buildGlobalWorkQueuesView,
   buildProjectRegistryView,
   buildSprintBoardView,
   buildWorkDashboardView,
@@ -43,7 +48,7 @@ describe("ui model dashboard contracts", () => {
     const view = buildWorkDashboardView({
       work: [readyHigh, blocked, readyCritical],
       labels: ["v1-remainder"],
-      reservations: [reservation("active"), reservation("expired")]
+      reservations: [reservation("active", readyHigh.id), reservation("expired")]
     });
 
     expect(view.summary).toMatchObject({
@@ -57,6 +62,13 @@ describe("ui model dashboard contracts", () => {
       readyCritical.id,
       readyHigh.id
     ]);
+    expect(view.queues.find((queue) => queue.id === "ready")?.items.find((item) => item.id === readyHigh.id)?.activeReservation)
+      .toMatchObject({
+        id: "bw_reservation_active00",
+        agentId: "agent-a",
+        reservedAt: "2026-01-01T00:00:00.000Z",
+        expiresAt: "2099-01-01T00:00:00.000Z"
+      });
   });
 
   it("builds sprint board lanes with phase and active blocker counts", () => {
@@ -82,6 +94,215 @@ describe("ui model dashboard contracts", () => {
       closed: 1
     });
     expect(board.lanes.find((lane) => lane.id === "blocked")?.items).toEqual([blocked]);
+  });
+
+  it("builds project-scoped global work queues with explicit workspace claim commands", () => {
+    const view = buildGlobalWorkQueuesView({
+      generatedAt: "2026-06-27T00:00:00.000Z",
+      projects: [
+        {
+          projectId: "project-a",
+          projectName: "A Project",
+          projectRoot: "/repo/a",
+          work: [
+            workView({ id: "bw_work_same", title: "Ready A", status: "ready" }),
+            workView({ id: "bw_work_blocked", title: "Blocked A", status: "blocked" })
+          ]
+        },
+        {
+          projectId: "project-b",
+          projectName: "B Project",
+          projectRoot: "/repo with space/b",
+          work: [
+            workView({ id: "bw_work_same", title: "Ready B", status: "ready" }),
+            workView({ id: "bw_work_verify", title: "Verify B", status: "needs_verification" })
+          ]
+        }
+      ]
+    });
+
+    const ready = view.queues.find((queue) => queue.id === "ready");
+    expect(view.summary).toEqual({ total: 4, ready: 2, blocked: 1, needsVerification: 1 });
+    expect(ready?.items.map((item) => item.id)).toEqual(["project-a:bw_work_same", "project-b:bw_work_same"]);
+    expect(ready?.items[0]?.claimCommand).toBe(
+      "bwrk --workspace /repo/a work reserve bw_work_same --purpose 'Claim from Boreal Console' --json"
+    );
+    expect(ready?.items[1]?.claimCommand).toContain("--workspace '/repo with space/b'");
+  });
+
+  it("caps each project-scoped global work queue", () => {
+    const view = buildGlobalWorkQueuesView({
+      limit: 2,
+      projects: [
+        {
+          projectId: "project-a",
+          projectName: "A Project",
+          projectRoot: "/repo/a",
+          work: [
+            workView({ id: "bw_work_ready1", title: "Ready 1", status: "ready" }),
+            workView({ id: "bw_work_ready2", title: "Ready 2", status: "ready" }),
+            workView({ id: "bw_work_ready3", title: "Ready 3", status: "ready" }),
+            workView({ id: "bw_work_block1", title: "Blocked 1", status: "blocked" }),
+            workView({ id: "bw_work_block2", title: "Blocked 2", status: "blocked" }),
+            workView({ id: "bw_work_block3", title: "Blocked 3", status: "blocked" })
+          ]
+        }
+      ]
+    });
+
+    expect(view.queues.find((queue) => queue.id === "ready")?.items).toHaveLength(2);
+    expect(view.queues.find((queue) => queue.id === "blocked")?.items).toHaveLength(2);
+    expect(view.summary).toMatchObject({ total: 4, ready: 2, blocked: 2 });
+  });
+
+  it("builds project-scoped global search and activity views", () => {
+    const search = buildGlobalSearchView({
+      query: "registry",
+      projects: [
+        {
+          projectId: "project-a",
+          projectName: "A Project",
+          projectRoot: "/repo/a",
+          results: [
+            {
+              id: "work:bw_work_1",
+              type: "work",
+              recordId: "bw_work_1",
+              title: "Work result",
+              score: 10
+            }
+          ]
+        },
+        {
+          projectId: "project-b",
+          projectName: "B Project",
+          projectRoot: "/repo/b",
+          results: [
+            {
+              id: "work:bw_work_1",
+              type: "context_pack",
+              recordId: "bw_work_1",
+              title: "Context result",
+              score: 9
+            }
+          ]
+        }
+      ]
+    });
+    const activity = buildGlobalActivityView({
+      projects: [
+        {
+          projectId: "project-a",
+          projectName: "A Project",
+          projectRoot: "/repo/a",
+          operations: [
+            operationRow("bw_operation_human", "human"),
+            operationRow("bw_operation_agent", "agent")
+          ]
+        },
+        {
+          projectId: "project-b",
+          projectName: "B Project",
+          projectRoot: "/repo/b",
+          operations: [
+            operationRow("bw_operation_system", "system")
+          ]
+        }
+      ]
+    });
+
+    expect(search.results.map((result) => result.id)).toEqual([
+      "project-a:work:bw_work_1",
+      "project-b:work:bw_work_1"
+    ]);
+    expect(search.results[1]).toMatchObject({ projectName: "B Project", sourceKind: "context_pack" });
+    expect(activity.summary).toMatchObject({ total: 3, human: 1, agent: 1, system: 1, unknown: 0 });
+    expect(activity.items.map((item) => item.actorKind).sort()).toEqual(["agent", "human", "system"]);
+  });
+
+  it("builds scoped global health and drift views", () => {
+    const view = buildGlobalHealthView({
+      projects: [
+        {
+          projectId: "project-a",
+          projectName: "A Project",
+          projectRoot: "/repo/a",
+          memoryRoot: "/repo/a/memory",
+          health: "warning",
+          stale: true,
+          syncFreshness: "stale",
+          syncOk: false,
+          vaultOk: true,
+          ledgersOk: false,
+          searchIndexOk: true,
+          gitOk: true,
+          findings: [
+            {
+              code: "ledger.export_drift",
+              title: "ledger.export_drift",
+              severity: "warning",
+              status: "warning",
+              message: "Ledger export is stale.",
+              source: "/repo/a/.boreal/ledgers",
+              actions: [{ label: "Refresh", command: "bwrk sync refresh --json" }]
+            }
+          ],
+          locks: [
+            {
+              domain: "lock.state",
+              path: "/repo/a/.boreal/runtime/state.lock",
+              status: "stale",
+              repairCommand: "bwrk doctor --fix --json"
+            }
+          ]
+        }
+      ]
+    });
+
+    expect(view.summary).toMatchObject({
+      totalProjects: 1,
+      warningProjects: 1,
+      staleProjects: 1,
+      lockFindings: 1,
+      ledgerFindings: 2,
+      fixableActions: 4
+    });
+    expect(view.findings.map((finding) => finding.sourcePath)).toContain("/repo/a/.boreal/ledgers");
+    expect(view.findings.flatMap((finding) => finding.actions.map((action) => action.command))).toEqual(
+      expect.arrayContaining([
+        "bwrk --workspace /repo/a sync refresh --json",
+        "bwrk --workspace /repo/a doctor --fix --json"
+      ])
+    );
+    expect(view.findings.every((finding) => finding.projectRoot === "/repo/a")).toBe(true);
+    expect(view.driftGroups.map((group) => group.category)).toEqual(expect.arrayContaining(["ledger", "lock", "sync"]));
+  });
+
+  it("builds guarded global settings rows with memory mode explanations", () => {
+    const view = buildGlobalSettingsView({
+      projects: [
+        {
+          projectId: "project-a",
+          projectName: "A Project",
+          projectRoot: "/repo with space/a",
+          memoryRoot: "/repo with space/a/memory",
+          memoryLayout: "child",
+          memoryGitMode: "separate",
+          health: "ok",
+          stale: false
+        }
+      ]
+    });
+
+    expect(view.memoryModes.map((mode) => mode.id)).toEqual(["separate", "submodule", "shared"]);
+    expect(view.memoryModes.find((mode) => mode.id === "shared")?.risk).toContain("mixed");
+    expect(view.projects[0]).toMatchObject({
+      validateCommand: "bwrk --workspace '/repo with space/a' doctor --json",
+      importSetupCommand: "bwrk --workspace '/repo with space/a' registry import-setup --json",
+      requiresConfirmation: true
+    });
+    expect(view.projects[0]?.applySetupCommand).toContain("--memory-git-mode separate");
+    expect(view.addProjectAction).toBe("/api/settings/projects/add");
   });
 
   it("summarizes health findings and fixable actions", () => {
@@ -135,6 +356,8 @@ describe("ui model dashboard contracts", () => {
           memoryLayout: "child",
           memoryGitMode: "separate",
           health: "warning",
+          stale: true,
+          syncFreshness: "stale",
           openWorkCount: workSummary.openWorkCount,
           readyWorkCount: workSummary.readyWorkCount,
           blockedWorkCount: workSummary.blockedWorkCount,
@@ -149,6 +372,8 @@ describe("ui model dashboard contracts", () => {
           memoryLayout: "sibling",
           memoryGitMode: "separate",
           health: "ok",
+          stale: false,
+          syncFreshness: "fresh",
           openWorkCount: 0,
           readyWorkCount: 0,
           blockedWorkCount: 0,
@@ -164,6 +389,8 @@ describe("ui model dashboard contracts", () => {
       totalProjects: 2,
       healthyProjects: 1,
       warningProjects: 1,
+      staleProjects: 1,
+      openWorkCount: 2,
       readyWorkCount: 1,
       blockedWorkCount: 1,
       activeReservationCount: 2
@@ -290,7 +517,7 @@ function workView(input: Partial<WorkItemView> & Pick<WorkItemView, "id" | "titl
   };
 }
 
-function reservation(status: AgentReservation["status"]): AgentReservation {
+function reservation(status: AgentReservation["status"], workId: string = "bw_work_reserved000"): AgentReservation {
   return {
     meta: {
       id: `bw_reservation_${status}00` as AgentReservation["meta"]["id"],
@@ -302,9 +529,27 @@ function reservation(status: AgentReservation["status"]): AgentReservation {
       sourceRefs: [],
       tags: []
     },
-    workId: "bw_work_reserved000" as AgentReservation["workId"],
+    workId: workId as AgentReservation["workId"],
     agentId: "agent-a",
     status,
-    reservedAt: "2026-01-01T00:00:00.000Z"
+    reservedAt: "2026-01-01T00:00:00.000Z",
+    expiresAt: "2099-01-01T00:00:00.000Z"
+  };
+}
+
+function operationRow(id: string, actorKind: "human" | "agent" | "system") {
+  return {
+    id,
+    sessionId: "local",
+    commandPath: actorKind === "system" ? "sync refresh" : "agent start",
+    status: "succeeded",
+    exitCode: 0,
+    stateChanged: actorKind === "agent",
+    generatedArtifactsChanged: actorKind === "system",
+    actorId: actorKind,
+    actorKind,
+    startedAt: `2026-06-27T00:00:0${actorKind.length}.000Z`,
+    finishedAt: `2026-06-27T00:00:0${actorKind.length}.500Z`,
+    eventCount: actorKind === "human" ? 0 : 1
   };
 }

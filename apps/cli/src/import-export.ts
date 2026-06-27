@@ -35,6 +35,7 @@ import {
   type WorkItem
 } from "@boreal/core";
 import {
+  FILE_STORE_SCHEMA_VERSION,
   writeTextFileAtomic,
   type BorealReader,
   type BorealStore,
@@ -46,7 +47,7 @@ import { deriveReadinessStatus } from "@boreal/work-engine";
 import type { CliContext } from "./context.js";
 
 export interface ExportDocument {
-  readonly schemaVersion: "boreal.export.v1";
+  readonly schemaVersion: typeof EXPORT_SCHEMA_VERSION;
   readonly exportedAt: string;
   readonly workspaceRoot: string;
   readonly contentHash: string;
@@ -80,7 +81,7 @@ export interface LedgerDeletionManifestFile {
 }
 
 export interface LedgerDeletionRecord {
-  readonly schemaVersion: "boreal.ledger-deletion.v1";
+  readonly schemaVersion: typeof LEDGER_DELETION_SCHEMA_VERSION;
   readonly section: SnapshotSection;
   readonly id: string;
   readonly deletedAt: string;
@@ -89,7 +90,7 @@ export interface LedgerDeletionRecord {
 }
 
 export interface LedgerManifest {
-  readonly schemaVersion: "boreal.ledgers.v1";
+  readonly schemaVersion: typeof LEDGER_SCHEMA_VERSION;
   readonly exportedAt: string;
   readonly workspaceRoot: string;
   readonly contentHash: string;
@@ -190,7 +191,9 @@ const SNAPSHOT_SECTIONS: readonly SnapshotSection[] = [
   "contextPacks"
 ];
 
-const LEDGER_SCHEMA_VERSION = "boreal.ledgers.v1";
+export const EXPORT_SCHEMA_VERSION = "boreal.export.v1";
+export const LEDGER_SCHEMA_VERSION = "boreal.ledgers.v1";
+export const LEDGER_DELETION_SCHEMA_VERSION = "boreal.ledger-deletion.v1";
 const LEDGER_MANIFEST_FILE = "manifest.json";
 const LEDGER_DELETIONS_FILE = "deletions.jsonl";
 const LEDGER_FILES: Record<SnapshotSection, string> = {
@@ -211,7 +214,7 @@ export async function buildExportDocument(context: CliContext): Promise<ExportDo
   const state = await context.store.read((reader) => readSnapshot(reader));
   const contentHash = hashContent(state);
   return {
-    schemaVersion: "boreal.export.v1",
+    schemaVersion: EXPORT_SCHEMA_VERSION,
     exportedAt: nowIso(),
     workspaceRoot: context.workspaceRoot,
     contentHash,
@@ -330,7 +333,7 @@ async function exportLedgersWithAdditionalDeletions(
 export async function importJson(context: CliContext, fromPath: string, options: ImportJsonOptions = {}): Promise<ImportResult> {
   const resolvedPath = await resolveReadablePath(context, fromPath, Boolean(options.allowExternalRead));
   const parsed = await readJsonFile(resolvedPath, {
-    schemaName: "boreal.export.v1",
+    schemaName: EXPORT_SCHEMA_VERSION,
     expectedObject: true,
     maxBytes: 50 * 1024 * 1024
   });
@@ -369,7 +372,7 @@ export async function deleteWorkItemWithTombstone(
       return work;
     });
     tombstone = {
-      schemaVersion: "boreal.ledger-deletion.v1",
+      schemaVersion: LEDGER_DELETION_SCHEMA_VERSION,
       section: "workItems",
       id: workId,
       deletedAt: nowIso(),
@@ -414,7 +417,7 @@ export async function deleteEvidenceWithTombstone(
       return evidence;
     });
     tombstone = {
-      schemaVersion: "boreal.ledger-deletion.v1",
+      schemaVersion: LEDGER_DELETION_SCHEMA_VERSION,
       section: "evidence",
       id: evidenceId,
       deletedAt: nowIso(),
@@ -459,7 +462,7 @@ export async function deleteVerificationWithTombstone(
       return verification;
     });
     tombstone = {
-      schemaVersion: "boreal.ledger-deletion.v1",
+      schemaVersion: LEDGER_DELETION_SCHEMA_VERSION,
       section: "verifications",
       id: verificationId,
       deletedAt: nowIso(),
@@ -504,7 +507,7 @@ export async function deleteKnowledgeSourceWithTombstone(
       return source;
     });
     tombstone = {
-      schemaVersion: "boreal.ledger-deletion.v1",
+      schemaVersion: LEDGER_DELETION_SCHEMA_VERSION,
       section: "knowledgeSources",
       id: sourceId,
       deletedAt: nowIso(),
@@ -549,7 +552,7 @@ export async function deleteClaimWithTombstone(
       return claim;
     });
     tombstone = {
-      schemaVersion: "boreal.ledger-deletion.v1",
+      schemaVersion: LEDGER_DELETION_SCHEMA_VERSION,
       section: "claims",
       id: claimId,
       deletedAt: nowIso(),
@@ -594,7 +597,7 @@ export async function deleteDecisionWithTombstone(
       return decision;
     });
     tombstone = {
-      schemaVersion: "boreal.ledger-deletion.v1",
+      schemaVersion: LEDGER_DELETION_SCHEMA_VERSION,
       section: "decisions",
       id: decisionId,
       deletedAt: nowIso(),
@@ -640,7 +643,7 @@ export async function deleteGraphEdgeWithTombstone(
       return edge;
     });
     tombstone = {
-      schemaVersion: "boreal.ledger-deletion.v1",
+      schemaVersion: LEDGER_DELETION_SCHEMA_VERSION,
       section: "graphEdges",
       id: edgeId,
       deletedAt: nowIso(),
@@ -690,7 +693,7 @@ export async function deleteReservationWithTombstone(
       return reservation;
     });
     tombstone = {
-      schemaVersion: "boreal.ledger-deletion.v1",
+      schemaVersion: LEDGER_DELETION_SCHEMA_VERSION,
       section: "reservations",
       id: reservationId,
       deletedAt: nowIso(),
@@ -734,7 +737,7 @@ export async function deleteProjectionWithTombstone(
       return projection;
     });
     tombstone = {
-      schemaVersion: "boreal.ledger-deletion.v1",
+      schemaVersion: LEDGER_DELETION_SCHEMA_VERSION,
       section: "projections",
       id: projectionId,
       deletedAt: nowIso(),
@@ -778,7 +781,7 @@ export async function deleteContextPackWithTombstone(
       return contextPack;
     });
     tombstone = {
-      schemaVersion: "boreal.ledger-deletion.v1",
+      schemaVersion: LEDGER_DELETION_SCHEMA_VERSION,
       section: "contextPacks",
       id: contextPackId,
       deletedAt: nowIso(),
@@ -889,13 +892,13 @@ export async function showSnapshot(context: CliContext, id: string): Promise<Exp
   const safeId = parseSnapshotId(id);
   const path = join(context.paths.borealDir, "snapshots", `${safeId}.json`);
   const parsed = await readJsonFile(path, {
-    schemaName: "boreal.export.v1",
+    schemaName: EXPORT_SCHEMA_VERSION,
     expectedObject: true,
     maxBytes: 50 * 1024 * 1024
   });
   const snapshot = parseExportDocument(parsed);
   return {
-    schemaVersion: "boreal.export.v1",
+    schemaVersion: EXPORT_SCHEMA_VERSION,
     exportedAt: snapshot.exportedAt,
     workspaceRoot: snapshot.workspaceRoot,
     contentHash: snapshot.contentHash,
@@ -1436,10 +1439,10 @@ function parseImportSnapshot(value: unknown): ExportSnapshot {
   if (!isRecord(value)) {
     throw new BorealError("BOREAL_INVALID_INPUT", "Import file must contain a JSON object");
   }
-  if (value.schemaVersion === "boreal.export.v1") {
+  if (value.schemaVersion === EXPORT_SCHEMA_VERSION) {
     return parseExportDocument(value).state;
   }
-  if (value.schemaVersion === "boreal.file-store.v1") {
+  if (value.schemaVersion === FILE_STORE_SCHEMA_VERSION) {
     return normalizeSnapshot(value);
   }
   throw new BorealError("BOREAL_INVALID_INPUT", "Unsupported import schema version", {
@@ -1448,7 +1451,7 @@ function parseImportSnapshot(value: unknown): ExportSnapshot {
 }
 
 function parseExportDocument(value: unknown): ExportDocument {
-  if (!isRecord(value) || value.schemaVersion !== "boreal.export.v1") {
+  if (!isRecord(value) || value.schemaVersion !== EXPORT_SCHEMA_VERSION) {
     throw new BorealError("BOREAL_INVALID_INPUT", "Snapshot file must be a boreal.export.v1 document");
   }
   const state = normalizeSnapshot(value.state);
@@ -1462,7 +1465,7 @@ function parseExportDocument(value: unknown): ExportDocument {
   }
   validateSnapshot(state);
   return {
-    schemaVersion: "boreal.export.v1",
+    schemaVersion: EXPORT_SCHEMA_VERSION,
     exportedAt: typeof value.exportedAt === "string" ? value.exportedAt : "",
     workspaceRoot: typeof value.workspaceRoot === "string" ? value.workspaceRoot : "",
     contentHash,
@@ -1926,7 +1929,7 @@ function emptySectionCounts(): Record<SnapshotSection, number> {
 }
 
 function parseLedgerDeletionRecord(value: unknown): LedgerDeletionRecord {
-  if (!isRecord(value) || value.schemaVersion !== "boreal.ledger-deletion.v1") {
+  if (!isRecord(value) || value.schemaVersion !== LEDGER_DELETION_SCHEMA_VERSION) {
     throw new BorealError("BOREAL_INVALID_INPUT", "Ledger deletion record must be a boreal.ledger-deletion.v1 object");
   }
   if (!isSnapshotSection(value.section)) {
@@ -1961,7 +1964,7 @@ function parseLedgerDeletionRecord(value: unknown): LedgerDeletionRecord {
     });
   }
   return {
-    schemaVersion: "boreal.ledger-deletion.v1",
+    schemaVersion: LEDGER_DELETION_SCHEMA_VERSION,
     section: value.section,
     id: value.id,
     deletedAt: value.deletedAt,
@@ -2048,7 +2051,7 @@ async function snapshotListEntry(path: string): Promise<SnapshotListEntry> {
   const id = basename(path, ".json");
   try {
     const parsed = await readJsonFile(path, {
-      schemaName: "boreal.export.v1",
+      schemaName: EXPORT_SCHEMA_VERSION,
       expectedObject: true,
       maxBytes: 50 * 1024 * 1024
     });

@@ -1,8 +1,13 @@
+import { mkdir } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
 
 import {
   BorealError,
+  assertPathInside,
+  assertRealPathInside,
   createRecordMeta,
+  deterministicId,
+  hashContent,
   isBorealError,
   isIsoTimestamp,
   normalizeActorId,
@@ -14,6 +19,7 @@ import {
   touchRecord,
   withContentHash,
   type ActorRef,
+  type ActorKind,
   type AgentReservation,
   type ClaimId,
   type ClaimRecord,
@@ -33,12 +39,15 @@ import {
   type KnowledgeSourceId,
   type KnowledgeSourceKind,
   type OperationId,
+  type ProjectRegistryEntry as CoreProjectRegistryEntry,
   type ProjectionId,
+  type ProjectionRecord,
   type ReservationId,
   type ReservationStatus,
   type RuntimeOperation,
   type RuntimeOperationStatus,
   type RuntimeEvent,
+  type SourceRef,
   type VerificationId,
   type VerificationRecord,
   type VerificationVerdict,
@@ -48,9 +57,35 @@ import {
   type WorkPriority,
   type WorkStatus
 } from "@boreal/core";
+import { inspectDaemonStatus, type DaemonStatusResult } from "@boreal/daemon";
 import type { SearchResult } from "@boreal/search";
-import { breakStaleFileLock, inspectFileLock } from "@boreal/storage";
-import { toWorkItemView, type WorkItemView } from "@boreal/ui-model";
+import {
+  breakStaleFileLock,
+  inspectFileLock,
+  rebuildSQLiteCache,
+  writeTextFileAtomic,
+  type BorealReader,
+  type SQLiteCacheRebuildResult
+} from "@boreal/storage";
+import {
+  buildGlobalActivityView,
+  buildGlobalHealthView,
+  buildGlobalSearchView,
+  buildGlobalSettingsView,
+  buildGlobalWorkQueuesView,
+  buildProjectRegistryView,
+  buildSprintBoardView,
+  toWorkItemView,
+  type DashboardFinding,
+  type GlobalActivitySourceRow,
+  type GlobalSearchSourceRow,
+  type GlobalSettingsProjectInput,
+  type LockDashboardView,
+  type ProjectRegistryEntry as DashboardProjectRegistryEntry,
+  type ProjectSyncFreshness,
+  type SyncDashboardView,
+  type WorkItemView
+} from "@boreal/ui-model";
 import { deriveReadinessStatus } from "@boreal/work-engine";
 
 import { flagValue, flagValues, hasFlag, requiredFlag, type ParsedArgs } from "./args.js";
@@ -65,13 +100,21 @@ import {
   type CommandDefinition
 } from "./command-registry.js";
 import { analyzeCompaction, applyCompaction, type CompactDomain } from "./compact.js";
+import { COMPLETION_SHELLS, generateShellCompletion, isCompletionShell } from "./completion.js";
 import { asEvidenceId, asWorkId, runDoctor, type Diagnostic } from "./doctor.js";
 import { assertInitialized, createCliContext, ensureWorkspaceDirs, type CliContext } from "./context.js";
 import { keyValueRows, resultSummary, section, withPromptSession, type CliSelectOption } from "./cli-ui.js";
 import { applyManualMerge, buildManualMergePlan, scanDuplicates, type DuplicateDomain } from "./duplicates.js";
 import { inspectGitWorktree, type GitWorktreeInspection } from "./git-worktree.js";
 import {
+  inspectBorealInstallStatus,
+  installStatusHealthy,
+  installStatusSummary,
+  type InstallStatus
+} from "./install-status.js";
+import {
   createSnapshot,
+  buildExportDocument,
   deleteClaimWithTombstone,
   deleteDecisionWithTombstone,
   deleteEvidenceWithTombstone,
@@ -95,8 +138,31 @@ import {
 } from "./import-export.js";
 import { createResultSpoolingOutput, formatRecord, table, type CliOutput } from "./output.js";
 import { maybeConfigureProjectSetup, readProjectSetupConfig, type ProjectSetupResult } from "./project-setup.js";
+import {
+  addProjectRegistryEntry,
+  doctorProjectRegistry,
+  importProjectSetupRegistryEntry,
+  listProjectRegistry,
+  removeProjectRegistryEntry,
+  type RegistryAddResult,
+  type RegistryDoctorResult,
+  type RegistryImportSetupResult,
+  type RegistryListResult,
+  type RegistryRemoveResult
+} from "./registry.js";
 import { inspectSearchIndex, runSearch, writeSearchIndex, type SearchIndexInspection } from "./search-cli.js";
-import { addRawSource, createWikiPage, initVault, inspectVault, type VaultStatusResult } from "./vault.js";
+import {
+  addRawSource,
+  createWikiPage,
+  getRawSourceDetail,
+  initVault,
+  inspectVault,
+  listVaultWikiPages,
+  listRawSourceRows,
+  type RawSourceRow,
+  type WikiPageRecord,
+  type VaultStatusResult
+} from "./vault.js";
 import {
   buildSkillInstallPlan,
   getWorkflowAsset,
@@ -114,9 +180,29 @@ const HANDOFF_CONTEXT_CHUNK_LIMIT_RATIO = 3;
 const DEFAULT_LIST_LIMIT = 100;
 const DEFAULT_OPERATION_LIST_LIMIT = 50;
 const DEFAULT_READY_WORK_LIMIT = 10;
+const DEFAULT_DASHBOARD_PROJECT_LIMIT = 100;
+const DEFAULT_DASHBOARD_WORK_LIMIT = 250;
+const DEFAULT_DASHBOARD_QUEUE_LIMIT = 200;
+const DEFAULT_DASHBOARD_SEARCH_LIMIT = 10;
+const DEFAULT_DASHBOARD_ACTIVITY_LIMIT = 20;
+const DEFAULT_SPRINT_LIST_LIMIT = 200;
+const DEFAULT_SPRINT_SCOPE_LIMIT = 500;
+const DEFAULT_RAW_PREVIEW_BYTES = 4_096;
 const MAX_LIST_LIMIT = 1_000;
+const MAX_RAW_PREVIEW_BYTES = 65_536;
+const MAX_DASHBOARD_PROJECT_LIMIT = 100;
+const MAX_SPRINT_LIST_LIMIT = 200;
+const MAX_SPRINT_SCOPE_LIMIT = 500;
 const MAX_SEARCH_LIMIT = 100;
 const MAX_HANDOFF_SEARCH_LIMIT = 50;
+const ACTIVE_SPRINT_PROJECTION_KIND = "active-sprint";
+const ACTIVE_SPRINT_PROJECTION_ID = deterministicId<ProjectionId>("projection", {
+  kind: ACTIVE_SPRINT_PROJECTION_KIND,
+  subjectId: "workspace"
+});
+type SprintReportFormat = "markdown" | "html";
+const SPRINT_REPORT_SCHEMA_VERSION = "boreal.cli.sprint.report.v1";
+const SPRINT_REPORT_FORMATS = new Set<SprintReportFormat>(["markdown", "html"]);
 const INSTALL_CONFIRM_OPTIONS: readonly CliSelectOption<"yes" | "no">[] = [
   {
     value: "yes",
@@ -148,6 +234,7 @@ interface DependencyTreeNode {
   readonly status?: WorkStatus;
   readonly missing?: boolean;
   readonly cycle?: boolean;
+  readonly shared?: boolean;
   readonly dependencies: readonly DependencyTreeNode[];
 }
 
@@ -173,9 +260,99 @@ interface OperationListRow {
   readonly stateChanged: boolean;
   readonly generatedArtifactsChanged: boolean;
   readonly actorId: string;
+  readonly actorKind: ActorKind;
   readonly startedAt: string;
   readonly finishedAt: string;
   readonly eventCount: number;
+}
+
+interface SprintListRow extends WorkListRow {
+  readonly active: boolean;
+}
+
+interface SprintScope {
+  readonly directChildren: readonly WorkItemView[];
+  readonly descendants: readonly WorkItemView[];
+  readonly totalDescendants: number;
+  readonly truncated: boolean;
+}
+
+interface SprintReportWorkRow extends WorkItemView {
+  readonly description: string;
+  readonly acceptanceCriteria: readonly string[];
+}
+
+interface SprintReportEvidenceRow {
+  readonly id: string;
+  readonly subjectId: string;
+  readonly kind: EvidenceKind;
+  readonly outcome: EvidenceOutcome;
+  readonly summary: string;
+  readonly command?: string;
+  readonly uri?: string;
+  readonly observedAt: string;
+}
+
+interface SprintReportDecisionRow {
+  readonly id: string;
+  readonly title: string;
+  readonly status: DecisionStatus;
+  readonly decision: string;
+  readonly consequences: readonly string[];
+  readonly sourceIds: readonly string[];
+}
+
+interface SprintReportBlockerRow {
+  readonly work: SprintReportWorkRow;
+  readonly blockers: readonly SprintReportWorkRow[];
+}
+
+interface SprintReportDocument {
+  readonly schemaVersion: typeof SPRINT_REPORT_SCHEMA_VERSION;
+  readonly generatedAt: string;
+  readonly workspaceRoot: string;
+  readonly format: SprintReportFormat;
+  readonly sprint: SprintReportWorkRow;
+  readonly active: boolean;
+  readonly activeSprintId?: string;
+  readonly scope: {
+    readonly directChildCount: number;
+    readonly totalDescendants: number;
+    readonly truncated: boolean;
+    readonly limit: number;
+  };
+  readonly summary: {
+    readonly total: number;
+    readonly completed: number;
+    readonly open: number;
+    readonly blocked: number;
+    readonly needsVerification: number;
+    readonly evidence: number;
+    readonly decisions: number;
+    readonly nextSprintCandidates: number;
+  };
+  readonly completedWork: readonly SprintReportWorkRow[];
+  readonly openWork: readonly SprintReportWorkRow[];
+  readonly unresolvedBlockers: readonly SprintReportBlockerRow[];
+  readonly nextSprintCandidates: readonly SprintReportWorkRow[];
+  readonly evidence: readonly SprintReportEvidenceRow[];
+  readonly decisions: readonly SprintReportDecisionRow[];
+  readonly closeoutEvidence: {
+    readonly doctor: SprintReportEvidenceRow;
+    readonly sync: SprintReportEvidenceRow;
+  };
+}
+
+interface SprintReportResult {
+  readonly schemaVersion: typeof SPRINT_REPORT_SCHEMA_VERSION;
+  readonly generatedAt: string;
+  readonly workspaceRoot: string;
+  readonly format: SprintReportFormat;
+  readonly path?: string;
+  readonly contentHash: string;
+  readonly sizeBytes: number;
+  readonly report: SprintReportDocument;
+  readonly content?: string;
 }
 
 interface SyncStatusResult {
@@ -197,6 +374,7 @@ interface SyncRefreshResult {
   readonly contextViews: number;
   readonly searchIndex: Awaited<ReturnType<typeof writeSearchIndex>>;
   readonly ledgers: Awaited<ReturnType<typeof exportLedgers>>;
+  readonly sqliteCache: SQLiteCacheRebuildResult;
   readonly status: SyncStatusResult;
 }
 
@@ -428,6 +606,9 @@ export async function runCommand(args: ParsedArgs, output: CliOutput, cwd: strin
   if (definition.path[0] === "commands") {
     return commandsCommand(args, output, json);
   }
+  if (definition.path[0] === "completion") {
+    return completionCommand(args, output, json);
+  }
   if (definition.path[0] === "version") {
     output.write(json ? formatRecord(getVersionInfo(), true) : formatVersionInfo());
     return { exitCode: 0 };
@@ -506,6 +687,18 @@ export async function runCommand(args: ParsedArgs, output: CliOutput, cwd: strin
       case "install":
         result = await installCommand(action, context, args, commandOutput, json);
         break;
+      case "registry":
+        result = await registryCommand(action, rest, context, args, commandOutput, json);
+        break;
+      case "dashboard":
+        result = await dashboardCommand(action, context, args, commandOutput, json);
+        break;
+      case "daemon":
+        result = await daemonCommand(action, context, commandOutput, json);
+        break;
+      case "sprint":
+        result = await sprintCommand(action, rest, context, args, commandOutput, json);
+        break;
       case "export":
         result = await exportCommand(action, context, args, commandOutput, json);
         break;
@@ -516,7 +709,7 @@ export async function runCommand(args: ParsedArgs, output: CliOutput, cwd: strin
         result = await vaultCommand(action, context, commandOutput, json);
         break;
       case "raw":
-        result = await rawCommand(action, context, args, commandOutput, json);
+        result = await rawCommand(action, rest, context, args, commandOutput, json);
         break;
       case "wiki":
         result = await wikiCommand(action, rest, context, args, commandOutput, json);
@@ -837,6 +1030,7 @@ function operationListRow(operation: RuntimeOperation): OperationListRow {
     stateChanged: operation.stateChanged,
     generatedArtifactsChanged: operation.generatedArtifactsChanged,
     actorId: operation.actorId,
+    actorKind: operation.meta.createdBy.kind,
     startedAt: operation.startedAt,
     finishedAt: operation.finishedAt,
     eventCount: operation.eventIds.length
@@ -975,6 +1169,24 @@ function commandsFormat(args: ParsedArgs): "table" | "markdown" {
   throw new BorealError("BOREAL_INVALID_INPUT", "--format must be table or markdown");
 }
 
+function completionCommand(args: ParsedArgs, output: CliOutput, json: boolean): CommandResult {
+  const shell = args.command[1] ?? "";
+  if (!isCompletionShell(shell)) {
+    throw new BorealError("BOREAL_INVALID_INPUT", `Completion shell must be one of: ${COMPLETION_SHELLS.join(", ")}`, {
+      shell
+    });
+  }
+  const name = flagValue(args, "name") ?? "bwrk";
+  if (!/^[A-Za-z0-9_.-]+$/.test(name)) {
+    throw new BorealError("BOREAL_INVALID_INPUT", "--name must contain only letters, numbers, dots, underscores, or dashes", {
+      name
+    });
+  }
+  const result = generateShellCompletion(shell, name);
+  output.write(json ? formatRecord(result, true) : result.script);
+  return { exitCode: 0 };
+}
+
 function commandsMarkdown(): string {
   const lines = [
     "# Boreal Command Reference",
@@ -1058,6 +1270,17 @@ async function installCommand(
   output: CliOutput,
   json: boolean
 ): Promise<CommandResult> {
+  if (action === "status") {
+    const status = await inspectBorealInstallStatus({
+      workspaceRoot: context.workspaceRoot,
+      checkedAt: nowIso(),
+      binDir: flagValue(args, "bin-dir"),
+      envPath: flagValue(args, "path")
+    });
+    output.write(json ? formatRecord(status, true) : formatInstallStatus(status));
+    return { exitCode: installStatusHealthy(status) ? 0 : 1 };
+  }
+
   const target = installTarget(action);
   const dryRun = hasFlag(args, "dry-run");
   const interactive = hasFlag(args, "interactive");
@@ -1082,6 +1305,56 @@ function installTarget(action: string | undefined): "codex" | "claude" | "skills
     return action;
   }
   throw new BorealError("BOREAL_INVALID_INPUT", `Unknown install command: ${action ?? ""}`);
+}
+
+function formatInstallStatus(status: InstallStatus): string {
+  const globalProbe = status.globalCommand.probe;
+  return [
+    resultSummary({
+      status: installStatusHealthy(status) ? "success" : "warning",
+      title: "bwrk install status",
+      detail: installStatusSummary(status)
+    }),
+    section(
+      "Package",
+      keyValueRows([
+        { key: "name", value: status.package.name },
+        { key: "version", value: status.package.version },
+        { key: "node", value: status.package.node },
+        { key: "packageManager", value: status.package.packageManager ?? "unknown" }
+      ]).split("\n")
+    ),
+    section(
+      "Local source runner",
+      keyValueRows([
+        { key: "available", value: status.localSource.available },
+        { key: "command", value: status.localSource.command },
+        { key: "sourceRoot", value: status.localSource.sourceRoot },
+        { key: "packageScript", value: status.localSource.packageScript || "missing" },
+        { key: "reason", value: status.localSource.reason ?? "none" }
+      ]).split("\n")
+    ),
+    section(
+      "Global command",
+      keyValueRows([
+        { key: "found", value: status.globalCommand.found },
+        { key: "path", value: status.globalCommand.path ?? "not found" },
+        { key: "probe", value: globalProbe ? (globalProbe.ok ? "passed" : "failed") : "not run" },
+        { key: "versionOutput", value: globalProbe?.stdout || "none" },
+        { key: "probeError", value: globalProbe?.error ?? "none" }
+      ]).split("\n")
+    ),
+    section(
+      "PATH",
+      keyValueRows([
+        { key: "shimPath", value: status.localShim.path },
+        { key: "shimExecutable", value: status.localShim.executable },
+        { key: "binDirOnPath", value: status.path.binDirOnPath },
+        { key: "addToPath", value: status.path.addToPathCommand ?? "none" }
+      ]).split("\n")
+    ),
+    section("Recommended actions", status.recommendedActions.length > 0 ? status.recommendedActions : ["none"])
+  ].join("\n\n") + "\n";
 }
 
 async function installRootFromArgs(context: CliContext, args: ParsedArgs, target: "codex" | "claude" | "skills"): Promise<string> {
@@ -1647,6 +1920,7 @@ async function workCommand(
         priority: parsePriority(flagValue(args, "priority")),
         acceptanceCriteria: flagValues(args, "acceptance"),
         labels: labelsFromArgs(args),
+        sourceRefs: sourceRefsFromArgs(args),
         ready: hasFlag(args, "ready")
       });
       output.write(formatRecord(work, json));
@@ -1908,11 +2182,13 @@ async function claimCommand(
 ): Promise<CommandResult> {
   switch (action) {
     case "create": {
+      const wikiPageIds = await resolveWikiPageIds(context, flagValues(args, "wiki"));
       const claim = await context.runtime.createClaim({
         statement: requiredFlag(args, "statement"),
         status: parseClaimStatus(flagValue(args, "status")),
         sourceIds: flagValues(args, "source").map(asSourceId),
-        evidenceIds: flagValues(args, "evidence").map(asEvidenceId)
+        evidenceIds: flagValues(args, "evidence").map(asEvidenceId),
+        wikiPageIds
       });
       output.write(formatRecord(claim, json));
       return { exitCode: 0 };
@@ -1927,7 +2203,7 @@ async function claimCommand(
         .filter((claim) => !sourceId || claim.sourceIds.includes(sourceId))
         .slice(0, limit)
         .map(claimListRow);
-      output.write(json ? formatRecord(rows, true) : table(rows));
+      output.write(json ? formatRecord(rows, true) : table(rows.map(textClaimListRow)));
       return { exitCode: 0 };
     }
     case "show": {
@@ -1950,13 +2226,15 @@ async function decisionCommand(
 ): Promise<CommandResult> {
   switch (action) {
     case "create": {
+      const wikiPageIds = await resolveWikiPageIds(context, flagValues(args, "wiki"));
       const decision = await context.runtime.createDecision({
         title: requiredFlag(args, "title"),
         context: flagValue(args, "context") ?? "",
         decision: requiredFlag(args, "decision"),
         status: parseDecisionStatus(flagValue(args, "status")),
         consequences: flagValues(args, "consequence"),
-        sourceIds: flagValues(args, "source").map(asSourceId)
+        sourceIds: flagValues(args, "source").map(asSourceId),
+        wikiPageIds
       });
       output.write(formatRecord(decision, json));
       return { exitCode: 0 };
@@ -1971,7 +2249,7 @@ async function decisionCommand(
         .filter((decision) => !sourceId || decision.sourceIds.includes(sourceId))
         .slice(0, limit)
         .map(decisionListRow);
-      output.write(json ? formatRecord(rows, true) : table(rows));
+      output.write(json ? formatRecord(rows, true) : table(rows.map(textDecisionListRow)));
       return { exitCode: 0 };
     }
     case "show": {
@@ -2120,6 +2398,12 @@ async function syncCommand(
       const views = await rebuildProjectionsRespectingTombstones(context);
       const searchIndex = await writeSearchIndex(context);
       const ledgers = await exportLedgers(context, undefined);
+      const cacheDocument = await buildExportDocument(context);
+      const sqliteCache = await rebuildSQLiteCache({
+        rootDir: context.workspaceRoot,
+        snapshot: cacheDocument.state,
+        sourceContentHash: cacheDocument.contentHash
+      });
       const status = await buildSyncStatus(context);
       output.write(
         formatRecord(
@@ -2131,6 +2415,7 @@ async function syncCommand(
             contextViews: views.length,
             searchIndex,
             ledgers,
+            sqliteCache,
             status
           } satisfies SyncRefreshResult,
           json
@@ -2166,12 +2451,26 @@ async function vaultCommand(
 
 async function rawCommand(
   action: string | undefined,
+  rest: readonly string[],
   context: CliContext,
   args: ParsedArgs,
   output: CliOutput,
   json: boolean
 ): Promise<CommandResult> {
   switch (action) {
+    case "list": {
+      const limit = parseLimit(flagValue(args, "limit")) ?? DEFAULT_LIST_LIMIT;
+      const rows = await listRawSourceRows(context, { limit });
+      output.write(json ? formatRecord(rows, true) : table(rows.map(textRawSourceRow)));
+      return { exitCode: 0 };
+    }
+    case "show": {
+      const detail = await getRawSourceDetail(context, requiredPositional(rest, 0, "raw source id"), {
+        previewBytes: parsePreviewBytes(flagValue(args, "preview-bytes"))
+      });
+      output.write(formatRecord(detail, json));
+      return { exitCode: 0 };
+    }
     case "add": {
       output.write(
         formatRecord(
@@ -2201,6 +2500,20 @@ async function wikiCommand(
   json: boolean
 ): Promise<CommandResult> {
   switch (action) {
+    case "list": {
+      const limit = parseLimit(flagValue(args, "limit")) ?? DEFAULT_LIST_LIMIT;
+      const pages = await listVaultWikiPages(context);
+      const rows = wikiPageRows(pages).slice(0, limit);
+      output.write(json ? formatRecord(rows, true) : table(rows.map(textWikiPageRow)));
+      return { exitCode: 0 };
+    }
+    case "show": {
+      const pages = await listVaultWikiPages(context);
+      const page = resolveWikiPage(pages, requiredPositional(rest, 0, "wiki page reference"));
+      const detail = wikiPageDetail(page, pages);
+      output.write(formatRecord(detail, json));
+      return { exitCode: 0 };
+    }
     case "create": {
       output.write(
         formatRecord(
@@ -2665,6 +2978,1640 @@ function installedSkillTargets(values: readonly string[]): readonly ("codex" | "
   return [...seen];
 }
 
+async function registryCommand(
+  action: string | undefined,
+  rest: readonly string[],
+  context: CliContext,
+  args: ParsedArgs,
+  output: CliOutput,
+  json: boolean
+): Promise<CommandResult> {
+  const options = { registryRoot: flagValue(args, "registry-root") };
+  switch (action) {
+    case "list": {
+      const result = await listProjectRegistry(options);
+      output.write(json ? formatRecord(result, true) : formatRegistryList(result));
+      return { exitCode: 0 };
+    }
+    case "add": {
+      const result = await addProjectRegistryEntry({
+        ...options,
+        workspaceRoot: requiredFlag(args, "workspace"),
+        name: flagValue(args, "name"),
+        labels: flagValues(args, "label")
+      });
+      output.write(json ? formatRecord(result, true) : formatRegistryAdd(result));
+      return { exitCode: 0 };
+    }
+    case "import-setup": {
+      const result = await importProjectSetupRegistryEntry({
+        ...options,
+        workspaceRoot: context.workspaceRoot,
+        name: flagValue(args, "name"),
+        labels: flagValues(args, "label")
+      });
+      output.write(json ? formatRecord(result, true) : formatRegistryImport(result));
+      return { exitCode: 0 };
+    }
+    case "remove": {
+      const result = await removeProjectRegistryEntry(requiredPositional(rest, 0, "project id"), options);
+      output.write(json ? formatRecord(result, true) : formatRegistryRemove(result));
+      return { exitCode: 0 };
+    }
+    case "doctor": {
+      const result = await doctorProjectRegistry(options);
+      output.write(json ? formatRecord(result, true) : formatRegistryDoctor(result));
+      return { exitCode: result.ok ? 0 : 1 };
+    }
+    default:
+      throw new BorealError("BOREAL_INVALID_INPUT", `Unknown registry command: ${action ?? ""}`);
+  }
+}
+
+function formatRegistryList(result: RegistryListResult): string {
+  if (result.entries.length === 0) {
+    return `No registered projects at ${result.storage.registryFile}\n`;
+  }
+  return table(
+    result.entries.map((entry) => ({
+      id: entry.id,
+      name: entry.display.name,
+      projectRoot: entry.projectRoot,
+      memoryRoot: entry.memoryRoot,
+      git: entry.memoryGitMode
+    }))
+  );
+}
+
+function formatRegistryAdd(result: RegistryAddResult): string {
+  return `${result.added ? "Added" : result.replaced ? "Updated" : "Registered"} ${result.entry.display.name} (${result.entry.id})\n`;
+}
+
+function formatRegistryImport(result: RegistryImportSetupResult): string {
+  const action = result.changed ? result.added ? "Imported" : "Updated" : "Already registered";
+  return `${action} ${result.entry.display.name} (${result.entry.id})\n`;
+}
+
+function formatRegistryRemove(result: RegistryRemoveResult): string {
+  return `Removed ${result.entry.display.name} (${result.entry.id})\n`;
+}
+
+function formatRegistryDoctor(result: RegistryDoctorResult): string {
+  const header = `[${result.ok ? "ok" : "error"}] registry: ${result.entryCount} project(s) at ${result.storage.registryFile}`;
+  if (result.findings.length === 0) {
+    return `${header}\n`;
+  }
+  return `${header}\n${result.findings.map((finding) => {
+    const project = finding.projectId ? ` ${finding.projectId}` : "";
+    const path = finding.path ? ` ${finding.path}` : "";
+    return `[${finding.severity}] ${finding.code}${project}:${path} ${finding.message}`.trimEnd();
+  }).join("\n")}\n`;
+}
+
+async function dashboardCommand(
+  action: string | undefined,
+  context: CliContext,
+  args: ParsedArgs,
+  output: CliOutput,
+  json: boolean
+): Promise<CommandResult> {
+  switch (action) {
+    case "global": {
+      const result = await buildGlobalDashboardResult(context, args);
+      output.write(json ? formatRecord(result, true) : formatGlobalDashboardSummary(result));
+      return { exitCode: 0 };
+    }
+    default:
+      throw new BorealError("BOREAL_INVALID_INPUT", `Unknown dashboard command: ${action ?? ""}`);
+  }
+}
+
+async function daemonCommand(
+  action: string | undefined,
+  context: CliContext,
+  output: CliOutput,
+  json: boolean
+): Promise<CommandResult> {
+  switch (action) {
+    case "status":
+      output.write(formatRecord(await inspectDaemonStatus({ workspaceRoot: context.workspaceRoot }), json));
+      return { exitCode: 0 };
+    default:
+      throw new BorealError("BOREAL_INVALID_INPUT", `Unknown daemon command: ${action ?? ""}`);
+  }
+}
+
+interface GlobalDashboardProjectOverview {
+  readonly entry: DashboardProjectRegistryEntry;
+  readonly settings: GlobalSettingsProjectInput;
+  readonly work: readonly WorkItemView[];
+  readonly searchResults: readonly GlobalSearchSourceRow[];
+  readonly activityRows: readonly GlobalActivitySourceRow[];
+  readonly sync: SyncDashboardView;
+  readonly locks: LockDashboardView;
+  readonly daemon: DaemonStatusResult;
+}
+
+async function buildGlobalDashboardResult(context: CliContext, args: ParsedArgs) {
+  const generatedAt = nowIso();
+  const projectLimit = parseLimit(flagValue(args, "limit"), { max: MAX_DASHBOARD_PROJECT_LIMIT }) ?? DEFAULT_DASHBOARD_PROJECT_LIMIT;
+  const registryOptions = { registryRoot: flagValue(args, "registry-root") };
+  const [registryList, registryDoctor] = await Promise.all([
+    listProjectRegistry(registryOptions),
+    doctorProjectRegistry(registryOptions)
+  ]);
+  const registryEntries = registryList.entries.length > 0
+    ? registryList.entries
+    : [await currentWorkspaceDashboardRegistryEntry(context, generatedAt)];
+  const limitedRegistryEntries = registryEntries.slice(0, projectLimit);
+  const registryFindings = dashboardRegistryFindingsByProject(registryDoctor);
+  const searchQuery = "v1-remainder global dashboard registry";
+  const overviews = await Promise.all(
+    limitedRegistryEntries.map((entry) =>
+      buildGlobalDashboardProjectOverview({
+        parentContext: context,
+        entry,
+        registryFindings: registryFindings.get(entry.id) ?? [],
+        generatedAt,
+        searchQuery
+      })
+    )
+  );
+
+  return {
+    schemaVersion: "boreal.cli.dashboard.global.v1",
+    generatedAt,
+    workspaceRoot: context.workspaceRoot,
+    searchQuery,
+    limits: {
+      projects: projectLimit,
+      workPerProject: DEFAULT_DASHBOARD_WORK_LIMIT,
+      queueRowsPerQueue: DEFAULT_DASHBOARD_QUEUE_LIMIT,
+      searchPerProject: DEFAULT_DASHBOARD_SEARCH_LIMIT,
+      activityPerProject: DEFAULT_DASHBOARD_ACTIVITY_LIMIT
+    },
+    truncated: {
+      projects: registryEntries.length > limitedRegistryEntries.length
+    },
+    registry: buildProjectRegistryView({
+      generatedAt,
+      entries: overviews.map((project) => project.entry)
+    }),
+    globalQueues: buildGlobalWorkQueuesView({
+      generatedAt,
+      limit: DEFAULT_DASHBOARD_QUEUE_LIMIT,
+      projects: overviews.map((project) => ({
+        projectId: project.entry.id,
+        projectName: project.entry.name,
+        projectRoot: project.entry.projectRoot,
+        work: project.work
+      }))
+    }),
+    globalSearch: buildGlobalSearchView({
+      generatedAt,
+      query: searchQuery,
+      projects: overviews.map((project) => ({
+        projectId: project.entry.id,
+        projectName: project.entry.name,
+        projectRoot: project.entry.projectRoot,
+        results: project.searchResults
+      }))
+    }),
+    globalActivity: buildGlobalActivityView({
+      generatedAt,
+      projects: overviews.map((project) => ({
+        projectId: project.entry.id,
+        projectName: project.entry.name,
+        projectRoot: project.entry.projectRoot,
+        operations: project.activityRows
+      }))
+    }),
+    globalHealth: buildGlobalHealthView({
+      generatedAt,
+      projects: overviews.map((project) => ({
+        projectId: project.entry.id,
+        projectName: project.entry.name,
+        projectRoot: project.entry.projectRoot,
+        memoryRoot: project.entry.memoryRoot,
+        health: project.entry.health,
+        stale: project.entry.stale,
+        syncFreshness: project.entry.syncFreshness,
+        syncOk: project.sync.ok,
+        vaultOk: project.sync.vaultOk,
+        ledgersOk: project.sync.ledgersOk,
+        searchIndexOk: project.sync.searchIndexOk,
+        gitOk: project.sync.gitOk,
+        findings: project.entry.findings,
+        locks: project.locks.locks
+      }))
+    }),
+    daemonStatus: {
+      generatedAt,
+      projects: overviews.map((project) => ({
+        projectId: project.entry.id,
+        projectName: project.entry.name,
+        projectRoot: project.entry.projectRoot,
+        state: project.daemon.state,
+        pid: project.daemon.pid,
+        processAlive: project.daemon.processAlive,
+        statusPath: project.daemon.statusPath,
+        findings: project.daemon.findings,
+        recommendedActions: project.daemon.recommendedActions
+      }))
+    },
+    globalSettings: buildGlobalSettingsView({
+      generatedAt,
+      projects: overviews.map((project) => project.settings)
+    })
+  };
+}
+
+async function buildGlobalDashboardProjectOverview(input: {
+  readonly parentContext: CliContext;
+  readonly entry: CoreProjectRegistryEntry;
+  readonly registryFindings: readonly DashboardFinding[];
+  readonly generatedAt: string;
+  readonly searchQuery: string;
+}): Promise<GlobalDashboardProjectOverview> {
+  try {
+    const projectContext = await dashboardProjectContext(input.parentContext, input.entry.projectRoot);
+    assertInitialized(projectContext);
+    const [work, reservations, sync, doctor, operations, searchResults, daemon] = await Promise.all([
+      dashboardWork(projectContext),
+      projectContext.store.read((reader) => reader.listReservations()),
+      buildSyncStatus(projectContext),
+      runDoctor(projectContext, false, false),
+      dashboardOperations(projectContext),
+      dashboardSearch(projectContext, input.searchQuery),
+      inspectDaemonStatus({ workspaceRoot: projectContext.workspaceRoot })
+    ]);
+    const syncView = syncDashboardViewFromStatus(sync, input.generatedAt);
+    const findings = [
+      ...input.registryFindings,
+      ...dashboardFindingsFromDiagnostics(doctor.diagnostics)
+    ];
+    const entry = dashboardEntryFromMetrics({
+      entry: input.entry,
+      generatedAt: input.generatedAt,
+      work,
+      sync: syncView,
+      findings,
+      activeReservationCount: reservations.filter((reservation) => reservation.status === "active").length
+    });
+    return {
+      entry,
+      settings: dashboardSettingsFromEntry(input.entry, entry),
+      work,
+      searchResults,
+      activityRows: operations,
+      sync: syncView,
+      locks: lockDashboardViewFromDiagnostics(doctor.diagnostics, input.entry.projectRoot, input.generatedAt),
+      daemon
+    };
+  } catch (error) {
+    const sync = syncDashboardViewFromFailure(input.entry.projectRoot, input.generatedAt);
+    const findings = [
+      ...input.registryFindings,
+      {
+        code: "dashboard.project_unreadable",
+        title: "dashboard.project_unreadable",
+        severity: "error" as const,
+        status: "failed" as const,
+        message: error instanceof Error ? error.message : String(error),
+        source: input.entry.projectRoot,
+        actions: []
+      }
+    ];
+    const entry = dashboardEntryFromMetrics({
+      entry: input.entry,
+      generatedAt: input.generatedAt,
+      work: [],
+      sync,
+      findings,
+      activeReservationCount: 0
+    });
+    return {
+      entry,
+      settings: dashboardSettingsFromEntry(input.entry, entry),
+      work: [],
+      searchResults: [],
+      activityRows: [],
+      sync,
+      locks: { generatedAt: input.generatedAt, ok: true, workspaceRoot: input.entry.projectRoot, locks: [] },
+      daemon: daemonStatusUnavailable(input.entry.projectRoot, input.generatedAt, error)
+    };
+  }
+}
+
+function daemonStatusUnavailable(workspaceRoot: string, generatedAt: string, error: unknown): DaemonStatusResult {
+  return {
+    schemaVersion: "boreal.daemon.status.v1",
+    generatedAt,
+    workspaceRoot,
+    statusPath: join(resolve(workspaceRoot), ".boreal", "daemon", "status.json"),
+    state: "missing",
+    locks: {
+      runtime: {
+        path: join(resolve(workspaceRoot), ".boreal", "runtime", "state.lock"),
+        exists: false,
+        stale: false,
+        status: "clear"
+      },
+      searchIndex: {
+        path: join(resolve(workspaceRoot), ".boreal", "runtime", "search-index.lock"),
+        exists: false,
+        stale: false,
+        status: "clear"
+      }
+    },
+    watch: {
+      paths: [],
+      writesTruth: false,
+      repairsAreCommandMediated: true
+    },
+    findings: [
+      {
+        code: "daemon.project_unreadable",
+        severity: "error",
+        message: error instanceof Error ? error.message : String(error)
+      }
+    ],
+    recommendedActions: []
+  };
+}
+
+async function dashboardProjectContext(parentContext: CliContext, workspaceRoot: string): Promise<CliContext> {
+  if (resolve(workspaceRoot) === parentContext.workspaceRoot) {
+    return parentContext;
+  }
+  return createCliContext({
+    command: [],
+    flags: new Map<string, readonly string[]>([
+      ["workspace", [workspaceRoot]],
+      ["session", [parentContext.sessionId]],
+      ["actor", [parentContext.actor.id]],
+      ["actor-kind", [parentContext.actor.kind]]
+    ])
+  }, parentContext.cwd, { sessionId: parentContext.sessionId });
+}
+
+async function dashboardWork(context: CliContext): Promise<readonly WorkItemView[]> {
+  const work = await context.store.read((reader) => reader.listWorkItems());
+  return work.map((item) => toWorkItemView({ work: item })).sort(compareWorkViews).slice(0, DEFAULT_DASHBOARD_WORK_LIMIT);
+}
+
+async function dashboardOperations(context: CliContext): Promise<readonly GlobalActivitySourceRow[]> {
+  return context.store.read(async (reader) => {
+    const operations = await reader.listOperations();
+    return [...operations]
+      .sort(compareOperationsNewestFirst)
+      .slice(0, DEFAULT_DASHBOARD_ACTIVITY_LIMIT)
+      .map(operationListRow);
+  });
+}
+
+async function dashboardSearch(context: CliContext, query: string): Promise<readonly GlobalSearchSourceRow[]> {
+  try {
+    return (await runSearch(context, query, { limit: DEFAULT_DASHBOARD_SEARCH_LIMIT })).map((result) => ({
+      id: result.id,
+      type: result.type,
+      recordId: result.recordId,
+      title: result.title,
+      summary: result.summary,
+      score: result.score
+    }));
+  } catch {
+    return [];
+  }
+}
+
+function dashboardEntryFromMetrics(input: {
+  readonly entry: CoreProjectRegistryEntry;
+  readonly generatedAt: string;
+  readonly work: readonly WorkItemView[];
+  readonly sync: SyncDashboardView;
+  readonly findings: readonly DashboardFinding[];
+  readonly activeReservationCount: number;
+}): DashboardProjectRegistryEntry {
+  const openWorkCount = input.work.filter((item) => isOpenWorkStatus(item.status)).length;
+  const readyWorkCount = input.work.filter((item) => item.status === "ready").length;
+  const blockedWorkCount = input.work.filter((item) => item.status === "blocked").length;
+  const syncFreshness: ProjectSyncFreshness = input.sync.ok ? "fresh" : "stale";
+  const stale = syncFreshness === "stale" || input.findings.some((finding) => finding.severity !== "info");
+  return {
+    id: input.entry.id,
+    name: input.entry.display.name,
+    projectRoot: input.entry.projectRoot,
+    memoryRoot: input.entry.memoryRoot,
+    memoryLayout: input.entry.memoryLayout,
+    memoryGitMode: input.entry.memoryGitMode,
+    installRoot: input.entry.installRoot,
+    health: projectHealthState(input.sync.ok, input.findings),
+    stale,
+    syncFreshness,
+    openWorkCount,
+    readyWorkCount,
+    blockedWorkCount,
+    activeReservationCount: input.activeReservationCount,
+    findings: input.findings,
+    lastSeenAt: input.entry.lastSeenAt ?? input.generatedAt
+  };
+}
+
+function dashboardSettingsFromEntry(
+  entry: CoreProjectRegistryEntry,
+  dashboardEntry: DashboardProjectRegistryEntry
+): GlobalSettingsProjectInput {
+  return {
+    projectId: dashboardEntry.id,
+    projectName: dashboardEntry.name,
+    projectRoot: dashboardEntry.projectRoot,
+    memoryRoot: dashboardEntry.memoryRoot,
+    memoryLayout: dashboardEntry.memoryLayout,
+    memoryGitMode: dashboardEntry.memoryGitMode,
+    memoryRemote: entry.memoryRemote,
+    installRoot: dashboardEntry.installRoot,
+    source: entry.source,
+    health: dashboardEntry.health,
+    stale: dashboardEntry.stale
+  };
+}
+
+function syncDashboardViewFromStatus(sync: SyncStatusResult, generatedAt: string): SyncDashboardView {
+  return {
+    generatedAt,
+    ok: sync.ok,
+    workspaceRoot: sync.workspaceRoot,
+    vaultOk: sync.vault.ok,
+    ledgersOk: sync.ledgers.ok,
+    searchIndexOk: sync.searchIndex.ok,
+    gitOk: sync.git.ok,
+    recommendedActions: sync.recommendedActions.map((command) => ({ label: command, command })),
+    findings: []
+  };
+}
+
+function syncDashboardViewFromFailure(workspaceRoot: string, generatedAt: string): SyncDashboardView {
+  return {
+    generatedAt,
+    ok: false,
+    workspaceRoot,
+    vaultOk: false,
+    ledgersOk: false,
+    searchIndexOk: false,
+    gitOk: false,
+    recommendedActions: [],
+    findings: []
+  };
+}
+
+function dashboardFindingsFromDiagnostics(diagnostics: readonly Diagnostic[]): readonly DashboardFinding[] {
+  return diagnostics.flatMap((diagnostic): readonly DashboardFinding[] => {
+    const severity = dashboardDiagnosticSeverity(diagnostic.severity);
+    if (severity === "info") {
+      return [];
+    }
+    return [{
+      code: diagnostic.code,
+      title: diagnostic.code,
+      severity,
+      status: severity === "error" ? "failed" : severity === "warning" ? "warning" : "ok",
+      message: diagnostic.message,
+      source: diagnosticSourcePath(diagnostic),
+      actions: diagnosticRepairCommand(diagnostic) ? [{ label: "Repair", command: diagnosticRepairCommand(diagnostic) }] : []
+    }];
+  });
+}
+
+function dashboardRegistryFindingsByProject(result: RegistryDoctorResult): ReadonlyMap<string, readonly DashboardFinding[]> {
+  const byProject = new Map<string, DashboardFinding[]>();
+  for (const finding of result.findings) {
+    if (finding.severity === "ok") {
+      continue;
+    }
+    const projectId = finding.projectId ?? "registry";
+    byProject.set(projectId, [
+      ...(byProject.get(projectId) ?? []),
+      {
+        code: finding.code,
+        title: finding.code,
+        severity: dashboardDiagnosticSeverity(finding.severity),
+        status: finding.severity === "error" ? "failed" : "warning",
+        message: finding.message,
+        source: finding.path,
+        actions: diagnosticRepairCommand(finding) ? [{ label: "Repair", command: diagnosticRepairCommand(finding) }] : []
+      }
+    ]);
+  }
+  return byProject;
+}
+
+function lockDashboardViewFromDiagnostics(
+  diagnostics: readonly Diagnostic[],
+  workspaceRoot: string,
+  generatedAt: string
+): LockDashboardView {
+  const locks = diagnostics.flatMap((diagnostic) => {
+    if (!diagnostic.code.startsWith("lock.")) {
+      return [];
+    }
+    return [{
+      domain: diagnostic.code,
+      path: ".boreal/locks",
+      status: diagnostic.severity === "ok" ? "clear" as const : "stale" as const,
+      repairCommand: diagnostic.severity === "ok" ? undefined : "bwrk doctor --fix --json"
+    }];
+  });
+  return {
+    generatedAt,
+    ok: locks.every((lock) => lock.status === "clear"),
+    workspaceRoot,
+    locks
+  };
+}
+
+function dashboardDiagnosticSeverity(value: string): DashboardFinding["severity"] {
+  if (value === "error" || value === "warning") {
+    return value;
+  }
+  return "info";
+}
+
+function diagnosticSourcePath(diagnostic: { readonly details?: unknown; readonly path?: string }): string | undefined {
+  if (typeof diagnostic.path === "string") {
+    return diagnostic.path;
+  }
+  const details = diagnostic.details;
+  if (details && typeof details === "object" && !Array.isArray(details)) {
+    const record = details as Record<string, unknown>;
+    for (const key of ["path", "configPath", "projectRoot", "workspaceRoot", "memoryRoot", "gitRoot", "rootDir", "statePath", "indexPath", "file"]) {
+      const value = record[key];
+      if (typeof value === "string" && value.length > 0) {
+        return value;
+      }
+    }
+  }
+  return undefined;
+}
+
+function diagnosticRepairCommand(diagnostic: { readonly details?: unknown; readonly repairCommand?: string }): string | undefined {
+  if (typeof diagnostic.repairCommand === "string") {
+    return diagnostic.repairCommand;
+  }
+  const details = diagnostic.details;
+  if (details && typeof details === "object" && !Array.isArray(details)) {
+    const repairCommand = (details as Record<string, unknown>).repairCommand;
+    return typeof repairCommand === "string" ? repairCommand : undefined;
+  }
+  return undefined;
+}
+
+async function currentWorkspaceDashboardRegistryEntry(
+  context: CliContext,
+  generatedAt: string
+): Promise<CoreProjectRegistryEntry> {
+  let config: Awaited<ReturnType<typeof readProjectSetupConfig>>;
+  try {
+    config = await readProjectSetupConfig(context.workspaceRoot);
+  } catch {
+    config = undefined;
+  }
+  const projectRoot = context.workspaceRoot;
+  const memoryRoot = resolve(config?.memoryRoot ?? join(projectRoot, "memory"));
+  return {
+    id: "project_current",
+    display: {
+      name: basename(projectRoot),
+      labels: []
+    },
+    projectRoot,
+    borealDir: join(projectRoot, ".boreal"),
+    runtimeDir: join(projectRoot, ".boreal", "runtime"),
+    runtimeStateFile: join(projectRoot, ".boreal", "runtime", "state.json"),
+    projectConfigPath: join(projectRoot, ".boreal", "project.json"),
+    memoryRoot,
+    memoryBorealDir: join(memoryRoot, ".boreal"),
+    memoryLayout: config?.memoryLayout ?? "in-repo",
+    memoryGitMode: config?.memoryGitMode ?? "separate",
+    memoryRemote: config?.memoryRemote,
+    installRoot: resolve(config?.installRoot ?? join(projectRoot, ".agents", "skills")),
+    skillTargets: config?.skillTargets ?? [],
+    folderScoped: config?.folderScoped ?? false,
+    source: config ? "project-setup" : "explicit",
+    addedAt: generatedAt,
+    updatedAt: generatedAt,
+    lastSeenAt: generatedAt
+  };
+}
+
+function isOpenWorkStatus(status: WorkItemView["status"]): boolean {
+  return status !== "closed" && status !== "cancelled" && status !== "verified";
+}
+
+function projectHealthState(syncOk: boolean, findings: readonly DashboardFinding[]): DashboardProjectRegistryEntry["health"] {
+  if (findings.some((finding) => finding.severity === "error")) {
+    return "error";
+  }
+  if (!syncOk || findings.some((finding) => finding.severity === "warning")) {
+    return "warning";
+  }
+  return "ok";
+}
+
+function formatGlobalDashboardSummary(result: Awaited<ReturnType<typeof buildGlobalDashboardResult>>): string {
+  return table(
+    result.registry.entries.map((entry) => ({
+      project: entry.name,
+      health: entry.health,
+      open: entry.openWorkCount,
+      ready: entry.readyWorkCount,
+      blocked: entry.blockedWorkCount,
+      stale: entry.stale ? "yes" : "no"
+    }))
+  );
+}
+
+async function sprintCommand(
+  action: string | undefined,
+  rest: readonly string[],
+  context: CliContext,
+  args: ParsedArgs,
+  output: CliOutput,
+  json: boolean
+): Promise<CommandResult> {
+  switch (action) {
+    case "list": {
+      const result = await sprintListResult(context, args);
+      output.write(json ? formatRecord(result, true) : formatSprintList(result));
+      return { exitCode: 0 };
+    }
+    case "show": {
+      const sprint = await resolveSprintWork(context, requiredPositional(rest, 0, "sprint reference"));
+      const result = await sprintShowResult(context, sprint, sprintScopeLimit(args));
+      output.write(json ? formatRecord(result, true) : formatSprintShow(result));
+      return { exitCode: 0 };
+    }
+    case "current": {
+      const result = await sprintCurrentResult(context);
+      output.write(json ? formatRecord(result, true) : formatSprintCurrent(result));
+      return { exitCode: 0 };
+    }
+    case "activate": {
+      const result = await activateSprint(context, requiredPositional(rest, 0, "sprint reference"));
+      output.write(json ? formatRecord(result, true) : formatSprintActivated(result));
+      return { exitCode: 0 };
+    }
+    case "board": {
+      const sprint = await resolveSprintWork(context, rest[0] ?? "current");
+      const result = await sprintBoardResult(context, sprint, sprintScopeLimit(args));
+      output.write(json ? formatRecord(result, true) : formatSprintBoard(result));
+      return { exitCode: 0 };
+    }
+    case "report": {
+      const sprint = await resolveSprintWork(context, rest[0] ?? "current");
+      const result = await sprintReportResult(context, sprint, args);
+      output.write(json ? formatRecord(result, true) : formatSprintReport(result));
+      return { exitCode: 0 };
+    }
+    default:
+      throw new BorealError("BOREAL_INVALID_INPUT", `Unknown sprint command: ${action ?? ""}`);
+  }
+}
+
+async function sprintListResult(context: CliContext, args: ParsedArgs) {
+  const generatedAt = nowIso();
+  const limit = parseLimit(flagValue(args, "limit"), { max: MAX_SPRINT_LIST_LIMIT }) ?? DEFAULT_SPRINT_LIST_LIMIT;
+  return context.store.read(async (reader) => {
+    const active = await activeSprintProjection(reader);
+    const activeSprintId = activeSprintIdFromProjection(active);
+    const allSprints = (await reader.listWorkItems())
+      .filter((work) => work.kind === "sprint")
+      .sort(compareSprintWork);
+    const sprints = allSprints
+      .slice(0, limit)
+      .map((work): SprintListRow => ({
+        ...workListRow(work),
+        active: work.meta.id === activeSprintId
+      }));
+    return {
+      schemaVersion: "boreal.cli.sprint.list.v1",
+      generatedAt,
+      workspaceRoot: context.workspaceRoot,
+      activeSprintId,
+      truncated: allSprints.length > sprints.length,
+      count: sprints.length,
+      sprints
+    };
+  });
+}
+
+async function sprintShowResult(context: CliContext, sprint: WorkItem, limit: number) {
+  const generatedAt = nowIso();
+  const active = await context.store.read((reader) => activeSprintProjection(reader));
+  const scope = await buildSprintScope(context, sprint, limit);
+  return {
+    schemaVersion: "boreal.cli.sprint.show.v1",
+    generatedAt,
+    workspaceRoot: context.workspaceRoot,
+    active: sprint.meta.id === activeSprintIdFromProjection(active),
+    sprint: await context.runtime.getWorkView(sprint.meta.id),
+    scope
+  };
+}
+
+async function sprintCurrentResult(context: CliContext) {
+  const generatedAt = nowIso();
+  const active = await context.store.read(async (reader) => {
+    const projection = await activeSprintProjection(reader);
+    const sprintId = activeSprintIdFromProjection(projection);
+    const sprint = sprintId ? await reader.getWorkItem(sprintId) : undefined;
+    return { projection, sprintId, sprint };
+  });
+  if (!active.projection || !active.sprintId) {
+    return {
+      schemaVersion: "boreal.cli.sprint.current.v1",
+      generatedAt,
+      workspaceRoot: context.workspaceRoot,
+      active: false,
+      stale: false
+    };
+  }
+  if (!active.sprint || active.sprint.kind !== "sprint") {
+    return {
+      schemaVersion: "boreal.cli.sprint.current.v1",
+      generatedAt,
+      workspaceRoot: context.workspaceRoot,
+      active: false,
+      stale: true,
+      activeSprintId: active.sprintId,
+      projection: sprintProjectionSummary(active.projection)
+    };
+  }
+  return {
+    schemaVersion: "boreal.cli.sprint.current.v1",
+    generatedAt,
+    workspaceRoot: context.workspaceRoot,
+    active: true,
+    stale: false,
+    activeSprintId: active.sprintId,
+    projection: sprintProjectionSummary(active.projection),
+    sprint: await context.runtime.getWorkView(active.sprint.meta.id),
+    scope: await buildSprintScope(context, active.sprint, DEFAULT_SPRINT_SCOPE_LIMIT)
+  };
+}
+
+async function sprintBoardResult(context: CliContext, sprint: WorkItem, limit: number) {
+  const generatedAt = nowIso();
+  const [active, scope, reservations, sprintView] = await Promise.all([
+    context.store.read((reader) => activeSprintProjection(reader)),
+    buildSprintScope(context, sprint, limit),
+    context.store.read((reader) => reader.listReservations()),
+    context.runtime.getWorkView(sprint.meta.id)
+  ]);
+  const scopedWorkIds = new Set(scope.descendants.map((work) => work.id));
+  const scopedReservations = reservations.filter((reservation) => scopedWorkIds.has(reservation.workId));
+  return {
+    schemaVersion: "boreal.cli.sprint.board.v1",
+    generatedAt,
+    workspaceRoot: context.workspaceRoot,
+    active: sprint.meta.id === activeSprintIdFromProjection(active),
+    activeSprintId: activeSprintIdFromProjection(active),
+    selectedSprintId: sprint.meta.id,
+    scope: {
+      directChildCount: scope.directChildren.length,
+      totalDescendants: scope.totalDescendants,
+      truncated: scope.truncated,
+      limit
+    },
+    board: buildSprintBoardView({
+      sprint: sprintView,
+      work: scope.descendants,
+      reservations: scopedReservations,
+      generatedAt
+    })
+  };
+}
+
+async function sprintReportResult(context: CliContext, sprint: WorkItem, args: ParsedArgs): Promise<SprintReportResult> {
+  const format = parseSprintReportFormat(flagValue(args, "format"));
+  const limit = sprintScopeLimit(args);
+  const doctorEvidenceId = asEvidenceId(requiredFlag(args, "doctor-evidence"));
+  const syncEvidenceId = asEvidenceId(requiredFlag(args, "sync-evidence"));
+  if (doctorEvidenceId === syncEvidenceId) {
+    throw new BorealError("BOREAL_INVALID_INPUT", "Sprint report requires distinct doctor and sync evidence records");
+  }
+
+  const document = await buildSprintReportDocument(context, sprint, {
+    format,
+    limit,
+    doctorEvidenceId,
+    syncEvidenceId
+  });
+  const content = renderSprintReportContent(document);
+  const contentHash = String(hashContent({ format, content }));
+  const out = flagValue(args, "out");
+  const path = out ? await writeSprintReportArtifact(context, out, content) : undefined;
+  return {
+    schemaVersion: SPRINT_REPORT_SCHEMA_VERSION,
+    generatedAt: document.generatedAt,
+    workspaceRoot: context.workspaceRoot,
+    format,
+    path,
+    contentHash,
+    sizeBytes: Buffer.byteLength(content, "utf8"),
+    report: document,
+    content: path ? undefined : content
+  };
+}
+
+async function buildSprintReportDocument(
+  context: CliContext,
+  sprint: WorkItem,
+  input: {
+    readonly format: SprintReportFormat;
+    readonly limit: number;
+    readonly doctorEvidenceId: EvidenceRecord["meta"]["id"];
+    readonly syncEvidenceId: EvidenceRecord["meta"]["id"];
+  }
+): Promise<SprintReportDocument> {
+  const generatedAt = nowIso();
+  const [active, scope, sprintView, snapshot] = await Promise.all([
+    context.store.read((reader) => activeSprintProjection(reader)),
+    buildSprintScope(context, sprint, input.limit),
+    context.runtime.getWorkView(sprint.meta.id),
+    context.store.read(async (reader) => ({
+      workItems: await reader.listWorkItems(),
+      evidence: await reader.listEvidence(),
+      decisions: await reader.listDecisions(),
+      graphEdges: await reader.listGraphEdges(),
+      sources: await reader.listKnowledgeSources()
+    }))
+  ]);
+  const workById = new Map(snapshot.workItems.map((work) => [work.meta.id, work]));
+  const scopedWorkIds = new Set<string>([sprint.meta.id, ...scope.descendants.map((work) => work.id)]);
+  const scopedWork = [reportWorkRow(sprintView, sprint), ...scope.descendants.map((work) => reportWorkRow(work, workById.get(work.id as WorkId)))]
+    .sort(compareReportWorkRows);
+  const descendantWork = scopedWork.filter((work) => work.id !== sprint.meta.id);
+  const scopedEvidence = snapshot.evidence
+    .filter((record) => record.subjectType === "work" && scopedWorkIds.has(record.subjectId))
+    .map(evidenceRow)
+    .sort(compareEvidenceRows);
+  const closeoutEvidence = {
+    doctor: resolveCloseoutEvidence(snapshot.evidence, scopedWorkIds, input.doctorEvidenceId, "doctor"),
+    sync: resolveCloseoutEvidence(snapshot.evidence, scopedWorkIds, input.syncEvidenceId, "sync")
+  };
+  const scopedEvidenceIds = new Set(scopedEvidence.map((record) => record.id));
+  const scopedSourceIds = sourceIdsForSprintScope({
+    workItems: snapshot.workItems.filter((work) => scopedWorkIds.has(work.meta.id)),
+    evidence: snapshot.evidence.filter((record) => scopedEvidenceIds.has(record.meta.id)),
+    sources: snapshot.sources
+  });
+  const decisions = snapshot.decisions
+    .filter((decision) =>
+      decision.status !== "rejected" &&
+      sprintDecisionIsRelevant(decision, snapshot.graphEdges, scopedWorkIds, scopedEvidenceIds, scopedSourceIds)
+    )
+    .map(decisionRow)
+    .sort((left, right) => left.title.localeCompare(right.title) || left.id.localeCompare(right.id));
+  const completedWork = descendantWork.filter((work) => isCompletedReportStatus(work.status));
+  const openWork = descendantWork.filter((work) => isOpenReportStatus(work.status));
+  const unresolvedBlockers = openWork
+    .filter((work) => work.status === "blocked" || work.activeBlockerIds.length > 0)
+    .map((work): SprintReportBlockerRow => ({
+      work,
+      blockers: work.activeBlockerIds
+        .map((id) => {
+          const view = scope.descendants.find((candidate) => candidate.id === id);
+          const raw = workById.get(id as WorkId);
+          return view ? reportWorkRow(view, raw) : raw ? reportWorkRow(toWorkItemView({ work: raw }), raw) : undefined;
+        })
+        .filter(isReportWorkRow)
+    }));
+  const nextSprintCandidates = openWork
+    .filter((work) => work.status !== "cancelled")
+    .sort(compareReportWorkRows);
+
+  return {
+    schemaVersion: SPRINT_REPORT_SCHEMA_VERSION,
+    generatedAt,
+    workspaceRoot: context.workspaceRoot,
+    format: input.format,
+    sprint: reportWorkRow(sprintView, sprint),
+    active: sprint.meta.id === activeSprintIdFromProjection(active),
+    activeSprintId: activeSprintIdFromProjection(active),
+    scope: {
+      directChildCount: scope.directChildren.length,
+      totalDescendants: scope.totalDescendants,
+      truncated: scope.truncated,
+      limit: input.limit
+    },
+    summary: {
+      total: descendantWork.length,
+      completed: completedWork.length,
+      open: openWork.length,
+      blocked: openWork.filter((work) => work.status === "blocked").length,
+      needsVerification: openWork.filter((work) => work.status === "needs_verification").length,
+      evidence: scopedEvidence.length,
+      decisions: decisions.length,
+      nextSprintCandidates: nextSprintCandidates.length
+    },
+    completedWork,
+    openWork,
+    unresolvedBlockers,
+    nextSprintCandidates,
+    evidence: scopedEvidence,
+    decisions,
+    closeoutEvidence
+  };
+}
+
+function resolveCloseoutEvidence(
+  records: readonly EvidenceRecord[],
+  scopedWorkIds: ReadonlySet<string>,
+  evidenceId: EvidenceRecord["meta"]["id"],
+  requiredKind: "doctor" | "sync"
+): SprintReportEvidenceRow {
+  const record = records.find((candidate) => candidate.meta.id === evidenceId);
+  if (!record) {
+    throw new BorealError("BOREAL_NOT_FOUND", `Sprint report ${requiredKind} evidence was not found`, { evidenceId });
+  }
+  if (record.subjectType !== "work" || !scopedWorkIds.has(record.subjectId)) {
+    throw new BorealError("BOREAL_INVALID_INPUT", `Sprint report ${requiredKind} evidence must belong to the sprint scope`, {
+      evidenceId,
+      subjectType: record.subjectType,
+      subjectId: record.subjectId
+    });
+  }
+  if (record.outcome !== "passed") {
+    throw new BorealError("BOREAL_INVALID_INPUT", `Sprint report ${requiredKind} evidence must have passed outcome`, {
+      evidenceId,
+      outcome: record.outcome
+    });
+  }
+  const text = `${record.summary} ${record.command ?? ""} ${record.uri ?? ""}`.toLowerCase();
+  if (!text.includes(requiredKind)) {
+    throw new BorealError("BOREAL_INVALID_INPUT", `Sprint report ${requiredKind} evidence must reference ${requiredKind}`, {
+      evidenceId
+    });
+  }
+  return evidenceRow(record);
+}
+
+function sourceIdsForSprintScope(input: {
+  readonly workItems: readonly WorkItem[];
+  readonly evidence: readonly EvidenceRecord[];
+  readonly sources: readonly KnowledgeSource[];
+}): ReadonlySet<string> {
+  const sourceUris = new Set([
+    ...input.workItems.flatMap((work) => work.meta.sourceRefs.map((sourceRef) => sourceRef.uri)),
+    ...input.evidence.map((record) => record.uri).filter(isString)
+  ]);
+  return new Set(input.sources.filter((source) => sourceUris.has(source.uri)).map((source) => source.meta.id));
+}
+
+function sprintDecisionIsRelevant(
+  decision: DecisionRecord,
+  graphEdges: readonly GraphEdge[],
+  scopedWorkIds: ReadonlySet<string>,
+  scopedEvidenceIds: ReadonlySet<string>,
+  scopedSourceIds: ReadonlySet<string>
+): boolean {
+  if (decision.sourceIds.some((sourceId) => scopedSourceIds.has(sourceId))) {
+    return true;
+  }
+  return graphEdges.some((edge) => {
+    if (edge.fromId === decision.meta.id && edge.fromType === "decision") {
+      return scopedGraphTarget(edge.toType, edge.toId, scopedWorkIds, scopedEvidenceIds, scopedSourceIds);
+    }
+    if (edge.toId === decision.meta.id && edge.toType === "decision") {
+      return scopedGraphTarget(edge.fromType, edge.fromId, scopedWorkIds, scopedEvidenceIds, scopedSourceIds);
+    }
+    return false;
+  });
+}
+
+function scopedGraphTarget(
+  type: string,
+  id: string,
+  scopedWorkIds: ReadonlySet<string>,
+  scopedEvidenceIds: ReadonlySet<string>,
+  scopedSourceIds: ReadonlySet<string>
+): boolean {
+  return (
+    ((type === "work" || type === "works") && scopedWorkIds.has(id)) ||
+    ((type === "evidence" || type === "evidences") && scopedEvidenceIds.has(id)) ||
+    ((type === "source" || type === "sources" || type === "knowledgeSource" || type === "knowledgeSources") &&
+      scopedSourceIds.has(id))
+  );
+}
+
+function reportWorkRow(view: WorkItemView, raw: WorkItem | undefined): SprintReportWorkRow {
+  return {
+    ...view,
+    description: raw?.description ?? "",
+    acceptanceCriteria: raw?.acceptanceCriteria ?? []
+  };
+}
+
+function evidenceRow(record: EvidenceRecord): SprintReportEvidenceRow {
+  return {
+    id: record.meta.id,
+    subjectId: record.subjectId,
+    kind: record.kind,
+    outcome: record.outcome,
+    summary: record.summary,
+    command: record.command,
+    uri: record.uri,
+    observedAt: record.observedAt
+  };
+}
+
+function decisionRow(record: DecisionRecord): SprintReportDecisionRow {
+  return {
+    id: record.meta.id,
+    title: record.title,
+    status: record.status,
+    decision: record.decision,
+    consequences: record.consequences,
+    sourceIds: record.sourceIds
+  };
+}
+
+function isReportWorkRow(value: SprintReportWorkRow | undefined): value is SprintReportWorkRow {
+  return value !== undefined;
+}
+
+function isString(value: string | undefined): value is string {
+  return typeof value === "string" && value.length > 0;
+}
+
+function compareEvidenceRows(left: SprintReportEvidenceRow, right: SprintReportEvidenceRow): number {
+  return right.observedAt.localeCompare(left.observedAt) || left.summary.localeCompare(right.summary) || left.id.localeCompare(right.id);
+}
+
+function compareReportWorkRows(left: SprintReportWorkRow, right: SprintReportWorkRow): number {
+  const priority = priorityRank(right.priority) - priorityRank(left.priority);
+  return priority || left.status.localeCompare(right.status) || left.title.localeCompare(right.title) || left.id.localeCompare(right.id);
+}
+
+function isCompletedReportStatus(status: WorkStatus): boolean {
+  return status === "closed" || status === "verified";
+}
+
+function isOpenReportStatus(status: WorkStatus): boolean {
+  return status !== "closed" && status !== "verified" && status !== "cancelled";
+}
+
+function renderSprintReportContent(document: SprintReportDocument): string {
+  return document.format === "html" ? renderSprintReportHtml(document) : renderSprintReportMarkdown(document);
+}
+
+function renderSprintReportMarkdown(document: SprintReportDocument): string {
+  return [
+    `# Sprint Closeout: ${document.sprint.title}`,
+    "",
+    `- Schema: ${document.schemaVersion}`,
+    `- Generated: ${document.generatedAt}`,
+    `- Workspace: ${document.workspaceRoot}`,
+    `- Sprint: ${document.sprint.id}`,
+    `- Active: ${document.active ? "yes" : "no"}`,
+    `- Scope: ${document.scope.totalDescendants}${document.scope.truncated ? ` (truncated to ${document.scope.limit})` : ""}`,
+    `- Doctor evidence: ${document.closeoutEvidence.doctor.id}`,
+    `- Sync evidence: ${document.closeoutEvidence.sync.id}`,
+    "",
+    "## Summary",
+    "",
+    `- Total scoped work: ${document.summary.total}`,
+    `- Completed work: ${document.summary.completed}`,
+    `- Open work: ${document.summary.open}`,
+    `- Blocked work: ${document.summary.blocked}`,
+    `- Needs verification: ${document.summary.needsVerification}`,
+    `- Evidence records: ${document.summary.evidence}`,
+    `- Decisions: ${document.summary.decisions}`,
+    `- Next sprint candidates: ${document.summary.nextSprintCandidates}`,
+    "",
+    "## Completed Work",
+    "",
+    markdownWorkList(document.completedWork),
+    "",
+    "## Open Work",
+    "",
+    markdownWorkList(document.openWork),
+    "",
+    "## Unresolved Blockers",
+    "",
+    markdownBlockerList(document.unresolvedBlockers),
+    "",
+    "## Decisions",
+    "",
+    markdownDecisionList(document.decisions),
+    "",
+    "## Evidence",
+    "",
+    markdownEvidenceList(document.evidence),
+    "",
+    "## Next Sprint Candidates",
+    "",
+    markdownWorkList(document.nextSprintCandidates)
+  ].join("\n") + "\n";
+}
+
+function markdownWorkList(rows: readonly SprintReportWorkRow[]): string {
+  if (rows.length === 0) {
+    return "None.";
+  }
+  return rows
+    .map((row) => {
+      const blockers = row.activeBlockerIds.length > 0 ? ` blockers: ${row.activeBlockerIds.join(", ")}` : "";
+      return `- ${row.title} (${row.id}) - ${row.status}, ${row.priority}, evidence ${row.evidenceCount}, verifications ${row.verificationCount}${blockers}`;
+    })
+    .join("\n");
+}
+
+function markdownBlockerList(rows: readonly SprintReportBlockerRow[]): string {
+  if (rows.length === 0) {
+    return "None.";
+  }
+  return rows
+    .map((row) => {
+      const blockers = row.blockers.length > 0
+        ? row.blockers.map((blocker) => `${blocker.title} (${blocker.id})`).join(", ")
+        : row.work.activeBlockerIds.join(", ");
+      return `- ${row.work.title} (${row.work.id}) blocked by ${blockers}`;
+    })
+    .join("\n");
+}
+
+function markdownDecisionList(rows: readonly SprintReportDecisionRow[]): string {
+  if (rows.length === 0) {
+    return "None.";
+  }
+  return rows
+    .map((row) => `- ${row.title} (${row.id}) - ${row.status}: ${row.decision}`)
+    .join("\n");
+}
+
+function markdownEvidenceList(rows: readonly SprintReportEvidenceRow[]): string {
+  if (rows.length === 0) {
+    return "None.";
+  }
+  return rows
+    .map((row) => `- ${row.summary} (${row.id}) - ${row.outcome}, ${row.kind}, subject ${row.subjectId}`)
+    .join("\n");
+}
+
+function renderSprintReportHtml(document: SprintReportDocument): string {
+  return [
+    "<!doctype html>",
+    '<html lang="en">',
+    "<head>",
+    '<meta charset="utf-8">',
+    '<meta name="viewport" content="width=device-width, initial-scale=1">',
+    `<title>${escapeHtml(`Sprint Closeout: ${document.sprint.title}`)}</title>`,
+    "<style>",
+    "body{margin:0;font-family:Inter,Arial,sans-serif;background:#f6f3ee;color:#17201c;line-height:1.45}",
+    "main{max-width:1120px;margin:0 auto;padding:32px 20px 48px}",
+    "h1,h2{letter-spacing:0;margin:0 0 12px}h1{font-size:30px}h2{font-size:19px;margin-top:28px}",
+    ".meta,.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:10px}",
+    ".pill,.card{border:1px solid #d8d1c4;border-radius:8px;background:#fffdf8;padding:10px}",
+    ".pill strong,.card strong{display:block;color:#4d3f2f;font-size:12px;text-transform:uppercase}",
+    "table{width:100%;border-collapse:collapse;background:#fffdf8;border:1px solid #d8d1c4;border-radius:8px;overflow:hidden}",
+    "th,td{text-align:left;border-bottom:1px solid #e4ded3;padding:8px;vertical-align:top;overflow-wrap:anywhere}",
+    "th{font-size:12px;text-transform:uppercase;color:#4d3f2f;background:#eee7da}",
+    "tr:last-child td{border-bottom:0}.empty{color:#6f6a62}.section{margin-top:18px}",
+    "@media (max-width:720px){main{padding:22px 12px}h1{font-size:24px}th,td{font-size:13px}}",
+    "</style>",
+    "</head>",
+    "<body>",
+    "<main>",
+    `<h1>${escapeHtml(document.sprint.title)}</h1>`,
+    '<div class="meta">',
+    htmlPill("Generated", document.generatedAt),
+    htmlPill("Sprint", document.sprint.id),
+    htmlPill("Scope", `${document.scope.totalDescendants}${document.scope.truncated ? ` truncated to ${document.scope.limit}` : ""}`),
+    htmlPill("Doctor evidence", document.closeoutEvidence.doctor.id),
+    htmlPill("Sync evidence", document.closeoutEvidence.sync.id),
+    "</div>",
+    '<section class="section"><h2>Summary</h2><div class="grid">',
+    htmlPill("Total work", String(document.summary.total)),
+    htmlPill("Completed", String(document.summary.completed)),
+    htmlPill("Open", String(document.summary.open)),
+    htmlPill("Blocked", String(document.summary.blocked)),
+    htmlPill("Needs verification", String(document.summary.needsVerification)),
+    htmlPill("Decisions", String(document.summary.decisions)),
+    "</div></section>",
+    htmlWorkSection("Completed Work", document.completedWork),
+    htmlWorkSection("Open Work", document.openWork),
+    htmlBlockerSection(document.unresolvedBlockers),
+    htmlDecisionSection(document.decisions),
+    htmlEvidenceSection(document.evidence),
+    htmlWorkSection("Next Sprint Candidates", document.nextSprintCandidates),
+    "</main>",
+    "</body>",
+    "</html>"
+  ].join("\n") + "\n";
+}
+
+function htmlPill(label: string, value: string): string {
+  return `<div class="pill"><strong>${escapeHtml(label)}</strong>${escapeHtml(value)}</div>`;
+}
+
+function htmlWorkSection(title: string, rows: readonly SprintReportWorkRow[]): string {
+  return [
+    `<section class="section"><h2>${escapeHtml(title)}</h2>`,
+    rows.length === 0
+      ? '<p class="empty">None.</p>'
+      : htmlTable(
+          ["Title", "Status", "Priority", "Evidence", "Verifications"],
+          rows.map((row) => [
+            `${row.title} (${row.id})`,
+            row.status,
+            row.priority,
+            String(row.evidenceCount),
+            String(row.verificationCount)
+          ])
+        ),
+    "</section>"
+  ].join("\n");
+}
+
+function htmlBlockerSection(rows: readonly SprintReportBlockerRow[]): string {
+  return [
+    '<section class="section"><h2>Unresolved Blockers</h2>',
+    rows.length === 0
+      ? '<p class="empty">None.</p>'
+      : htmlTable(
+          ["Work", "Blockers"],
+          rows.map((row) => [
+            `${row.work.title} (${row.work.id})`,
+            row.blockers.length > 0
+              ? row.blockers.map((blocker) => `${blocker.title} (${blocker.id})`).join(", ")
+              : row.work.activeBlockerIds.join(", ")
+          ])
+        ),
+    "</section>"
+  ].join("\n");
+}
+
+function htmlDecisionSection(rows: readonly SprintReportDecisionRow[]): string {
+  return [
+    '<section class="section"><h2>Decisions</h2>',
+    rows.length === 0
+      ? '<p class="empty">None.</p>'
+      : htmlTable(
+          ["Title", "Status", "Decision"],
+          rows.map((row) => [`${row.title} (${row.id})`, row.status, row.decision])
+        ),
+    "</section>"
+  ].join("\n");
+}
+
+function htmlEvidenceSection(rows: readonly SprintReportEvidenceRow[]): string {
+  return [
+    '<section class="section"><h2>Evidence</h2>',
+    rows.length === 0
+      ? '<p class="empty">None.</p>'
+      : htmlTable(
+          ["Summary", "Outcome", "Kind", "Subject"],
+          rows.map((row) => [`${row.summary} (${row.id})`, row.outcome, row.kind, row.subjectId])
+        ),
+    "</section>"
+  ].join("\n");
+}
+
+function htmlTable(headers: readonly string[], rows: readonly (readonly string[])[]): string {
+  return [
+    "<table>",
+    "<thead><tr>",
+    ...headers.map((header) => `<th>${escapeHtml(header)}</th>`),
+    "</tr></thead>",
+    "<tbody>",
+    ...rows.map((row) => `<tr>${row.map((cell) => `<td>${escapeHtml(cell)}</td>`).join("")}</tr>`),
+    "</tbody>",
+    "</table>"
+  ].join("");
+}
+
+function escapeHtml(value: string): string {
+  return value
+    .replace(/&/gu, "&amp;")
+    .replace(/</gu, "&lt;")
+    .replace(/>/gu, "&gt;")
+    .replace(/"/gu, "&quot;")
+    .replace(/'/gu, "&#39;");
+}
+
+function parseSprintReportFormat(value: string | undefined): SprintReportFormat {
+  if (!value) {
+    return "markdown";
+  }
+  if (SPRINT_REPORT_FORMATS.has(value as SprintReportFormat)) {
+    return value as SprintReportFormat;
+  }
+  throw new BorealError("BOREAL_INVALID_INPUT", "Sprint report format must be markdown or html", { format: value });
+}
+
+async function writeSprintReportArtifact(context: CliContext, outPath: string, content: string): Promise<string> {
+  const resolvedPath = resolve(context.workspaceRoot, outPath);
+  assertPathInside(context.workspaceRoot, resolvedPath);
+  await assertRealPathInside(context.workspaceRoot, resolvedPath);
+  await mkdir(dirname(resolvedPath), { recursive: true });
+  await writeTextFileAtomic(resolvedPath, content);
+  return resolvedPath;
+}
+
+async function activateSprint(context: CliContext, sprintReference: string) {
+  const sprint = await resolveSprintWork(context, sprintReference);
+  const generatedAt = nowIso();
+  return context.store.write(async (writer) => {
+    const previousProjection = await activeSprintProjection(writer);
+    const previousSprintId = activeSprintIdFromProjection(previousProjection);
+    const event = withContentHash({
+      meta: createRecordMeta({
+        id: randomId<EventId>("event"),
+        now: generatedAt,
+        actor: context.actor
+      }),
+      type: "sprint.activated",
+      subjectId: sprint.meta.id,
+      subjectType: "sprint",
+      operationId: context.operationId,
+      payload: {
+        workspaceRoot: context.workspaceRoot,
+        previousSprintId,
+        sprintId: sprint.meta.id
+      }
+    } satisfies RuntimeEvent);
+    await writer.putEvent(event);
+
+    const projectionValue = {
+      workspaceRoot: context.workspaceRoot,
+      sprintId: sprint.meta.id,
+      activatedAt: generatedAt,
+      activatedBy: String(context.actor.id),
+      previousSprintId,
+      eventId: event.meta.id
+    };
+    const projection = activeSprintProjectionRecord(previousProjection, projectionValue, generatedAt, context.actor);
+    await writer.putProjection(projection);
+    return {
+      schemaVersion: "boreal.cli.sprint.activate.v1",
+      generatedAt,
+      workspaceRoot: context.workspaceRoot,
+      activated: true,
+      previousSprintId,
+      activeSprintId: sprint.meta.id,
+      projectionId: projection.meta.id,
+      eventId: event.meta.id,
+      sprint: toWorkItemView({ work: sprint })
+    };
+  });
+}
+
+async function resolveSprintWork(context: CliContext, value: string): Promise<WorkItem> {
+  const workId = value === "current"
+    ? await context.store.read(async (reader) => {
+        const projection = await activeSprintProjection(reader);
+        const sprintId = activeSprintIdFromProjection(projection);
+        if (!sprintId) {
+          throw new BorealError("BOREAL_NOT_FOUND", "No active sprint is selected");
+        }
+        return sprintId;
+      })
+    : await resolveWorkId(context, value);
+  const work = await context.store.read((reader) => reader.getWorkItem(workId));
+  if (!work) {
+    throw new BorealError("BOREAL_NOT_FOUND", "Sprint not found", { sprintId: workId });
+  }
+  if (work.kind !== "sprint") {
+    throw new BorealError("BOREAL_INVALID_INPUT", "Sprint reference must resolve to work with kind sprint", {
+      workId: work.meta.id,
+      kind: work.kind
+    });
+  }
+  return work;
+}
+
+async function buildSprintScope(context: CliContext, sprint: WorkItem, limit: number): Promise<SprintScope> {
+  return context.store.read(async (reader) => {
+    const [workItems, graphEdges, evidence, verifications] = await Promise.all([
+      reader.listWorkItems(),
+      reader.listGraphEdges(),
+      reader.listEvidence(),
+      reader.listVerifications()
+    ]);
+    const workById = new Map(workItems.map((item) => [item.meta.id, item]));
+    const evidenceByWork = recordsByWorkSubject(evidence);
+    const verificationsByWork = recordsByWorkSubject(verifications);
+    const directChildIds = dependencyIdsForWork(sprint, graphEdges);
+    const descendants: WorkItem[] = [];
+    const visited = new Set<string>();
+    const visit = (workId: string): void => {
+      if (visited.has(workId)) {
+        return;
+      }
+      const work = workById.get(workId as WorkId);
+      if (!work) {
+        return;
+      }
+      visited.add(workId);
+      descendants.push(work);
+      for (const childId of dependencyIdsForWork(work, graphEdges)) {
+        visit(childId);
+      }
+    };
+    for (const childId of directChildIds) {
+      visit(childId);
+    }
+    const limitedDescendants = descendants.slice(0, limit);
+    const directChildren = directChildIds
+      .map((id) => workById.get(id))
+      .filter(isWorkItem)
+      .map((work) => sprintWorkView(work, workById, graphEdges, evidenceByWork, verificationsByWork))
+      .sort(compareWorkViews);
+    return {
+      directChildren,
+      descendants: limitedDescendants
+        .map((work) => sprintWorkView(work, workById, graphEdges, evidenceByWork, verificationsByWork))
+        .sort(compareWorkViews),
+      totalDescendants: descendants.length,
+      truncated: descendants.length > limitedDescendants.length
+    };
+  });
+}
+
+function dependencyIdsForWork(work: WorkItem, graphEdges: readonly GraphEdge[]): readonly WorkId[] {
+  const ids = new Set<string>(work.dependencyIds);
+  for (const edge of graphEdges) {
+    if (
+      edge.kind === "blocks" &&
+      edge.fromType === "work" &&
+      edge.toType === "work" &&
+      edge.toId === work.meta.id
+    ) {
+      ids.add(edge.fromId);
+    }
+  }
+  return [...ids] as WorkId[];
+}
+
+function sprintWorkView(
+  work: WorkItem,
+  workById: ReadonlyMap<WorkId, WorkItem>,
+  graphEdges: readonly GraphEdge[],
+  evidenceByWork: ReadonlyMap<string, readonly EvidenceRecord[]>,
+  verificationsByWork: ReadonlyMap<string, readonly VerificationRecord[]>
+): WorkItemView {
+  const dependencyIds = dependencyIdsForWork(work, graphEdges);
+  return toWorkItemView({
+    work: { ...work, dependencyIds },
+    dependencies: dependencyIds.map((id) => workById.get(id)).filter(isWorkItem),
+    evidence: evidenceByWork.get(work.meta.id) ?? [],
+    verifications: verificationsByWork.get(work.meta.id) ?? []
+  });
+}
+
+function recordsByWorkSubject<TRecord extends { readonly subjectId: string; readonly subjectType: string }>(
+  records: readonly TRecord[]
+): ReadonlyMap<string, readonly TRecord[]> {
+  const byWork = new Map<string, TRecord[]>();
+  for (const record of records) {
+    if (record.subjectType !== "work") {
+      continue;
+    }
+    byWork.set(record.subjectId, [...(byWork.get(record.subjectId) ?? []), record]);
+  }
+  return byWork;
+}
+
+async function activeSprintProjection(reader: BorealReader): Promise<ProjectionRecord | undefined> {
+  const deterministic = await reader.getProjection(ACTIVE_SPRINT_PROJECTION_ID);
+  if (deterministic?.kind === ACTIVE_SPRINT_PROJECTION_KIND) {
+    return deterministic;
+  }
+  return (await reader.listProjections()).find(
+    (projection) => projection.kind === ACTIVE_SPRINT_PROJECTION_KIND && projection.subjectId === "workspace"
+  );
+}
+
+function activeSprintIdFromProjection(projection: ProjectionRecord | undefined): WorkId | undefined {
+  const sprintId = projectionValueString(projection, "sprintId");
+  return sprintId?.startsWith("bw_work_") ? sprintId as WorkId : undefined;
+}
+
+function activeSprintProjectionRecord(
+  existing: ProjectionRecord | undefined,
+  value: Record<string, unknown>,
+  now: IsoTimestamp,
+  actor: ActorRef
+): ProjectionRecord {
+  const record = existing?.meta.id === ACTIVE_SPRINT_PROJECTION_ID
+    ? touchRecord({
+        ...existing,
+        kind: ACTIVE_SPRINT_PROJECTION_KIND,
+        subjectId: "workspace",
+        value
+      }, now, actor)
+    : {
+        meta: createRecordMeta({
+          id: ACTIVE_SPRINT_PROJECTION_ID,
+          now,
+          actor
+        }),
+        kind: ACTIVE_SPRINT_PROJECTION_KIND,
+        subjectId: "workspace",
+        value
+      };
+  return withContentHash(record satisfies ProjectionRecord);
+}
+
+function sprintProjectionSummary(projection: ProjectionRecord) {
+  return {
+    id: projection.meta.id,
+    updatedAt: projection.meta.updatedAt,
+    sprintId: projectionValueString(projection, "sprintId"),
+    activatedAt: projectionValueString(projection, "activatedAt"),
+    activatedBy: projectionValueString(projection, "activatedBy"),
+    eventId: projectionValueString(projection, "eventId")
+  };
+}
+
+function projectionValueString(projection: ProjectionRecord | undefined, key: string): string | undefined {
+  const value = projection?.value[key];
+  return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
+function compareSprintWork(left: WorkItem, right: WorkItem): number {
+  return (
+    left.status.localeCompare(right.status) ||
+    left.title.localeCompare(right.title) ||
+    left.meta.id.localeCompare(right.meta.id)
+  );
+}
+
+function formatSprintList(result: Awaited<ReturnType<typeof sprintListResult>>): string {
+  if (result.sprints.length === 0) {
+    return "No sprints found\n";
+  }
+  return table(
+    result.sprints.map((row) => ({
+      id: row.id,
+      status: row.status,
+      priority: row.priority,
+      active: row.active ? "yes" : "no",
+      title: row.title
+    }))
+  );
+}
+
+function formatSprintShow(result: Awaited<ReturnType<typeof sprintShowResult>>): string {
+  return [
+    `Sprint: ${result.sprint.title} (${result.sprint.id})`,
+    `Status: ${result.sprint.status}`,
+    `Active: ${result.active ? "yes" : "no"}`,
+    `Scope: ${result.scope.totalDescendants}${result.scope.truncated ? " (truncated)" : ""}`
+  ].join("\n") + "\n";
+}
+
+function formatSprintCurrent(result: Awaited<ReturnType<typeof sprintCurrentResult>>): string {
+  const sprint = "sprint" in result ? result.sprint : undefined;
+  if (result.active !== true || !sprint) {
+    const suffix = result.stale ? ` stale projection ${result.activeSprintId ?? ""}` : "none";
+    return `Active sprint: ${suffix}\n`;
+  }
+  return `Active sprint: ${sprint.title} (${sprint.id})\n`;
+}
+
+function formatSprintActivated(result: Awaited<ReturnType<typeof activateSprint>>): string {
+  const previous = result.previousSprintId ? ` previous ${result.previousSprintId}` : "";
+  return `Activated sprint ${result.activeSprintId}${previous}\n`;
+}
+
+function formatSprintBoard(result: Awaited<ReturnType<typeof sprintBoardResult>>): string {
+  const lines = [
+    `Sprint board: ${result.board.sprint.title} (${result.board.sprint.id})`,
+    `Scope: ${result.scope.totalDescendants}${result.scope.truncated ? ` (truncated to ${result.scope.limit})` : ""}`,
+    table(result.board.lanes.map((lane) => ({ lane: lane.title, count: lane.count }))).trimEnd()
+  ];
+  return `${lines.join("\n")}\n`;
+}
+
+function formatSprintReport(result: SprintReportResult): string {
+  if (!result.path) {
+    return result.content ?? "";
+  }
+  return [
+    `Sprint report written: ${result.path}`,
+    `Format: ${result.format}`,
+    `Hash: ${result.contentHash}`,
+    `Bytes: ${result.sizeBytes}`
+  ].join("\n") + "\n";
+}
+
+function sprintScopeLimit(args: ParsedArgs): number {
+  return parseLimit(flagValue(args, "limit"), { max: MAX_SPRINT_SCOPE_LIMIT }) ?? DEFAULT_SPRINT_SCOPE_LIMIT;
+}
+
 async function lockCommand(
   action: string | undefined,
   context: CliContext,
@@ -2844,6 +4791,20 @@ function parseLimit(value: string | undefined, options: { readonly max?: number 
   const max = options.max ?? MAX_LIST_LIMIT;
   if (parsed > max) {
     throw new BorealError("BOREAL_INVALID_INPUT", `--limit must be at most ${max}`);
+  }
+  return parsed;
+}
+
+function parsePreviewBytes(value: string | undefined): number {
+  if (!value) {
+    return DEFAULT_RAW_PREVIEW_BYTES;
+  }
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed <= 0) {
+    throw new BorealError("BOREAL_INVALID_INPUT", "--preview-bytes must be a positive integer");
+  }
+  if (parsed > MAX_RAW_PREVIEW_BYTES) {
+    throw new BorealError("BOREAL_INVALID_INPUT", `--preview-bytes must be at most ${MAX_RAW_PREVIEW_BYTES}`);
   }
   return parsed;
 }
@@ -3050,6 +5011,10 @@ function optionalAgentIdFromArgs(args: ParsedArgs): string | undefined {
 
 function labelsFromArgs(args: ParsedArgs): readonly string[] {
   return normalizeLabels(flagValues(args, "label"));
+}
+
+function sourceRefsFromArgs(args: ParsedArgs): readonly SourceRef[] {
+  return flagValues(args, "source").map((source) => ({ uri: normalizeMachineString(source, "source ref uri") }));
 }
 
 async function resolveWorkId(
@@ -3360,14 +5325,15 @@ function dependencyTreeForWork(
 ): DependencyTreeNode {
   const workById = new Map(workItems.map((work) => [work.meta.id, work]));
   const dependencyIdsByWork = dependencyIdsByWorkFromGraph(workItems, graphEdges);
-  return dependencyTreeNode(workId, workById, dependencyIdsByWork, []);
+  return dependencyTreeNode(workId, workById, dependencyIdsByWork, [], new Set());
 }
 
 function dependencyTreeNode(
   workId: WorkId,
   workById: ReadonlyMap<WorkId, WorkItem>,
   dependencyIdsByWork: ReadonlyMap<WorkId, readonly WorkId[]>,
-  path: readonly WorkId[]
+  path: readonly WorkId[],
+  expanded: Set<WorkId>
 ): DependencyTreeNode {
   const work = workById.get(workId);
   if (path.includes(workId)) {
@@ -3380,13 +5346,24 @@ function dependencyTreeNode(
       dependencies: []
     };
   }
+  if (expanded.has(workId)) {
+    return {
+      id: workId,
+      title: work?.title,
+      status: work?.status,
+      missing: work === undefined ? true : undefined,
+      shared: true,
+      dependencies: []
+    };
+  }
+  expanded.add(workId);
   return {
     id: workId,
     title: work?.title,
     status: work?.status,
     missing: work === undefined ? true : undefined,
     dependencies: (dependencyIdsByWork.get(workId) ?? []).map((dependencyId) =>
-      dependencyTreeNode(dependencyId, workById, dependencyIdsByWork, [...path, workId])
+      dependencyTreeNode(dependencyId, workById, dependencyIdsByWork, [...path, workId], expanded)
     )
   };
 }
@@ -3399,7 +5376,7 @@ function dependencyTreeRows(tree: DependencyTreeNode): Array<Record<string, stri
       id: node.id,
       status: node.status ?? (node.missing ? "missing" : ""),
       title: node.title ?? "",
-      flags: [node.cycle ? "cycle" : "", node.missing ? "missing" : ""].filter(Boolean).join(",")
+      flags: [node.cycle ? "cycle" : "", node.missing ? "missing" : "", node.shared ? "shared" : ""].filter(Boolean).join(",")
     });
     for (const dependency of node.dependencies) {
       visit(dependency, depth + 1);
@@ -3500,6 +5477,208 @@ function textWorkListRow(row: WorkListRow): Record<string, string> {
   };
 }
 
+function textRawSourceRow(row: RawSourceRow): Record<string, string> {
+  return {
+    id: row.id,
+    status: row.processingStatus,
+    kind: row.kind,
+    title: row.title,
+    uri: row.uri ?? "",
+    linked: String(row.linkedPageCount),
+    addedAt: row.addedAt
+  };
+}
+
+interface WikiPageRow {
+  readonly id: string;
+  readonly slug: string;
+  readonly title: string;
+  readonly path: string;
+  readonly sourceRefs: readonly string[];
+  readonly links: readonly string[];
+  readonly claimStatus?: string;
+  readonly truthStatus: string;
+  readonly sourceRefCount: number;
+  readonly outboundLinkCount: number;
+  readonly backlinkCount: number;
+  readonly showCommand: string;
+}
+
+interface WikiPageDetail extends WikiPageRow {
+  readonly backlinks: readonly WikiLinkedPage[];
+  readonly outboundPages: readonly WikiLinkedPage[];
+  readonly missingOutboundLinks: readonly string[];
+}
+
+interface WikiLinkedPage {
+  readonly id: string;
+  readonly slug: string;
+  readonly title: string;
+  readonly path: string;
+  readonly truthStatus: string;
+}
+
+function wikiPageRows(pages: readonly WikiPageRecord[]): readonly WikiPageRow[] {
+  return pages.map((page) => wikiPageRow(page, pages)).sort(compareWikiPageRows);
+}
+
+function wikiPageDetail(page: WikiPageRecord, pages: readonly WikiPageRecord[]): WikiPageDetail {
+  const row = wikiPageRow(page, pages);
+  const outbound = page.links.map((link) => ({ link, page: findWikiPageByLink(pages, link) }));
+  return {
+    ...row,
+    backlinks: wikiBacklinks(page, pages).map(wikiLinkedPage),
+    outboundPages: outbound.map((entry) => entry.page).filter(isWikiPageRecord).map(wikiLinkedPage),
+    missingOutboundLinks: outbound.filter((entry) => !entry.page).map((entry) => entry.link)
+  };
+}
+
+function wikiPageRow(page: WikiPageRecord, pages: readonly WikiPageRecord[]): WikiPageRow {
+  return {
+    id: wikiPageRuntimeId(page),
+    slug: page.slug,
+    title: page.title,
+    path: page.path,
+    sourceRefs: page.sourceRefs,
+    links: page.links,
+    claimStatus: page.claimStatus,
+    truthStatus: wikiTruthStatus(page),
+    sourceRefCount: page.sourceRefs.length,
+    outboundLinkCount: page.links.length,
+    backlinkCount: wikiBacklinks(page, pages).length,
+    showCommand: `bwrk wiki show ${wikiPageRuntimeId(page)} --json`
+  };
+}
+
+function wikiBacklinks(page: WikiPageRecord, pages: readonly WikiPageRecord[]): readonly WikiPageRecord[] {
+  return pages.filter((candidate) =>
+    candidate.path !== page.path && candidate.links.some((link) => wikiLinkTargetsPage(link, page))
+  );
+}
+
+async function resolveWikiPageIds(context: CliContext, references: readonly string[]): Promise<readonly string[]> {
+  if (references.length === 0) {
+    return [];
+  }
+  const vaultStatus = await inspectVault(context);
+  if (!vaultStatus.initialized) {
+    throw new BorealError("BOREAL_NOT_FOUND", "Wiki page references require an initialized Boreal memory vault", {
+      references,
+      missingDirectories: vaultStatus.missingDirectories,
+      missingFiles: vaultStatus.missingFiles
+    });
+  }
+  const pages = await listVaultWikiPages(context);
+  const ids: string[] = [];
+  const seen = new Set<string>();
+  for (const reference of references) {
+    const pageId = wikiPageRuntimeId(resolveWikiPage(pages, reference));
+    if (!seen.has(pageId)) {
+      ids.push(pageId);
+      seen.add(pageId);
+    }
+  }
+  return ids;
+}
+
+function resolveWikiPage(pages: readonly WikiPageRecord[], reference: string): WikiPageRecord {
+  const normalized = normalizeWikiReference(reference);
+  const page = pages.find((candidate) =>
+    candidate.id === reference ||
+    candidate.slug === reference ||
+    normalizeWikiReference(candidate.title) === normalized ||
+    normalizeWikiReference(candidate.path) === normalized
+  );
+  if (!page) {
+    throw new BorealError("BOREAL_NOT_FOUND", "Wiki page not found", { reference });
+  }
+  return page;
+}
+
+function findWikiPageByLink(pages: readonly WikiPageRecord[], link: string): WikiPageRecord | undefined {
+  const normalized = normalizeWikiReference(link);
+  return pages.find((page) =>
+    normalizeWikiReference(page.slug) === normalized ||
+    normalizeWikiReference(page.title) === normalized ||
+    normalizeWikiReference(page.path) === normalized ||
+    page.id === link
+  );
+}
+
+function wikiLinkTargetsPage(link: string, page: WikiPageRecord): boolean {
+  const normalized = normalizeWikiReference(link);
+  return (
+    normalized === normalizeWikiReference(page.slug) ||
+    normalized === normalizeWikiReference(page.title) ||
+    normalized === normalizeWikiReference(page.path) ||
+    link === page.id
+  );
+}
+
+function wikiTruthStatus(page: WikiPageRecord): string {
+  if (page.claimStatus === "accepted") return "accepted";
+  if (page.claimStatus === "proposed") return "proposed";
+  if (page.claimStatus === "stale") return "stale";
+  if (page.claimStatus === "rejected") return "rejected";
+  return "draft";
+}
+
+function wikiLinkedPage(page: WikiPageRecord): WikiLinkedPage {
+  return {
+    id: wikiPageRuntimeId(page),
+    slug: page.slug,
+    title: page.title,
+    path: page.path,
+    truthStatus: wikiTruthStatus(page)
+  };
+}
+
+function compareWikiPageRows(left: WikiPageRow, right: WikiPageRow): number {
+  return (
+    wikiTruthRank(left.truthStatus) - wikiTruthRank(right.truthStatus) ||
+    right.backlinkCount - left.backlinkCount ||
+    right.sourceRefCount - left.sourceRefCount ||
+    left.title.localeCompare(right.title) ||
+    left.slug.localeCompare(right.slug)
+  );
+}
+
+function wikiTruthRank(status: string): number {
+  if (status === "accepted") return 0;
+  if (status === "proposed") return 1;
+  if (status === "draft") return 2;
+  if (status === "stale") return 3;
+  return 4;
+}
+
+function normalizeWikiReference(value: string): string {
+  const fileName = basename(value.trim().replace(/\\/gu, "/"), ".md");
+  return fileName
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/gu, "-")
+    .replace(/^-+|-+$/gu, "");
+}
+
+function wikiPageRuntimeId(page: WikiPageRecord): string {
+  return page.id || page.slug;
+}
+
+function isWikiPageRecord(value: WikiPageRecord | undefined): value is WikiPageRecord {
+  return Boolean(value);
+}
+
+function textWikiPageRow(row: WikiPageRow): Record<string, string> {
+  return {
+    id: row.id,
+    status: row.truthStatus,
+    title: row.title,
+    path: row.path,
+    sources: String(row.sourceRefCount),
+    backlinks: String(row.backlinkCount),
+    outbound: String(row.outboundLinkCount)
+  };
+}
+
 function sourceListRow(source: KnowledgeSource): Record<string, string> {
   return {
     id: source.meta.id,
@@ -3509,24 +5688,82 @@ function sourceListRow(source: KnowledgeSource): Record<string, string> {
   };
 }
 
-function claimListRow(claim: ClaimRecord): Record<string, string> {
+function claimListRow(claim: ClaimRecord): Record<string, string | number | readonly string[]> {
+  const wikiPageIds = claim.wikiPageIds ?? [];
   return {
     id: claim.meta.id,
     status: claim.status,
     statement: claim.statement,
     sources: claim.sourceIds.join(","),
-    evidence: claim.evidenceIds.join(",")
+    sourceIds: claim.sourceIds,
+    sourceCount: claim.sourceIds.length,
+    evidence: claim.evidenceIds.join(","),
+    evidenceIds: claim.evidenceIds,
+    evidenceCount: claim.evidenceIds.length,
+    wikiPages: wikiPageIds.join(","),
+    wikiPageIds,
+    wikiPageCount: wikiPageIds.length,
+    reviewState: claimReviewState(claim.status),
+    updatedAt: claim.meta.updatedAt
   };
 }
 
-function decisionListRow(decision: DecisionRecord): Record<string, string> {
+function textClaimListRow(row: Record<string, string | number | readonly string[]>): Record<string, string | number> {
+  return {
+    id: String(row.id ?? ""),
+    status: String(row.status ?? ""),
+    statement: String(row.statement ?? ""),
+    sources: String(row.sources ?? ""),
+    evidence: String(row.evidence ?? ""),
+    wiki: String(row.wikiPages ?? ""),
+    review: String(row.reviewState ?? "")
+  };
+}
+
+function decisionListRow(decision: DecisionRecord): Record<string, string | number | readonly string[]> {
+  const wikiPageIds = decision.wikiPageIds ?? [];
   return {
     id: decision.meta.id,
     status: decision.status,
     title: decision.title,
+    context: decision.context,
     decision: decision.decision,
-    sources: decision.sourceIds.join(",")
+    consequences: decision.consequences,
+    consequenceCount: decision.consequences.length,
+    sources: decision.sourceIds.join(","),
+    sourceIds: decision.sourceIds,
+    sourceCount: decision.sourceIds.length,
+    wikiPages: wikiPageIds.join(","),
+    wikiPageIds,
+    wikiPageCount: wikiPageIds.length,
+    reviewState: decisionReviewState(decision.status),
+    supersessionStatus: decision.status === "superseded" ? "superseded" : "none",
+    updatedAt: decision.meta.updatedAt
   };
+}
+
+function textDecisionListRow(row: Record<string, string | number | readonly string[]>): Record<string, string | number> {
+  return {
+    id: String(row.id ?? ""),
+    status: String(row.status ?? ""),
+    title: String(row.title ?? ""),
+    decision: String(row.decision ?? ""),
+    sources: String(row.sources ?? ""),
+    wiki: String(row.wikiPages ?? ""),
+    review: String(row.reviewState ?? "")
+  };
+}
+
+function claimReviewState(status: ClaimRecord["status"]): string {
+  if (status === "proposed") return "needs_review";
+  if (status === "stale") return "needs_refresh";
+  return status;
+}
+
+function decisionReviewState(status: DecisionRecord["status"]): string {
+  if (status === "proposed") return "needs_review";
+  if (status === "superseded") return "superseded";
+  return status;
 }
 
 function searchResultRow(result: SearchResult): Record<string, string | number> {
@@ -3735,6 +5972,6 @@ Usage:
 ${COMMAND_DEFINITIONS.map((definition) => `  ${definition.usage}`).join("\n")}
 
 Help:
-  bwrk help [init|work|dep|evidence|source|claim|decision|context|search|reservation|agent|session|operation|workflows|install|export|import|vault|raw|wiki|duplicate|merge|compact|sync|ledger|snapshot|doctor|lock|commands|prime]
+  bwrk help [init|work|dep|evidence|source|claim|decision|context|search|reservation|agent|session|operation|workflows|install|registry|dashboard|daemon|sprint|export|import|vault|raw|wiki|duplicate|merge|compact|sync|ledger|snapshot|doctor|lock|commands|completion|prime]
 `;
 }

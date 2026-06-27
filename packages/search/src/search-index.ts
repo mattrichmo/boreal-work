@@ -297,7 +297,8 @@ function claimEntry(claim: ClaimRecord): SearchIndexEntry {
     { field: "statement", text: claim.statement, weight: 8 },
     { field: "status", text: claim.status, weight: 4 },
     { field: "sourceIds", text: claim.sourceIds.join(" "), weight: 3 },
-    { field: "evidenceIds", text: claim.evidenceIds.join(" "), weight: 3 }
+    { field: "evidenceIds", text: claim.evidenceIds.join(" "), weight: 3 },
+    { field: "wikiPageIds", text: (claim.wikiPageIds ?? []).join(" "), weight: 3 }
   ]);
 }
 
@@ -309,7 +310,8 @@ function decisionEntry(decision: DecisionRecord): SearchIndexEntry {
     { field: "context", text: decision.context, weight: 5 },
     { field: "consequences", text: decision.consequences.join(" "), weight: 4 },
     { field: "status", text: decision.status, weight: 3 },
-    { field: "sourceIds", text: decision.sourceIds.join(" "), weight: 3 }
+    { field: "sourceIds", text: decision.sourceIds.join(" "), weight: 3 },
+    { field: "wikiPageIds", text: (decision.wikiPageIds ?? []).join(" "), weight: 3 }
   ]);
 }
 

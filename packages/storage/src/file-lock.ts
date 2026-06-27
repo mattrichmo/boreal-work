@@ -104,6 +104,10 @@ async function acquireFileLock(lockDir: string, options: FileLockOptions): Promi
         await writeFile(ownerPath(lockDir), `${JSON.stringify(owner, null, 2)}\n`, "utf8");
       } catch (error) {
         await rm(lockDir, { recursive: true, force: true });
+        if (isNodeError(error) && error.code === "ENOENT") {
+          await sleep(options.retryDelayMs);
+          continue;
+        }
         throw error;
       }
       return owner;
@@ -114,7 +118,7 @@ async function acquireFileLock(lockDir: string, options: FileLockOptions): Promi
 
       const currentOwner = await readLockOwner(lockDir);
       if (await isLockStale(lockDir, currentOwner, options.staleAfterMs)) {
-        const recovery = await removeStaleFileLock(lockDir, options, false);
+        const recovery = await removeStaleFileLock(lockDir, options, false, currentOwner);
         if (recovery.removed || !recovery.inspection.exists) {
           continue;
         }
@@ -137,11 +141,15 @@ async function acquireFileLock(lockDir: string, options: FileLockOptions): Promi
 async function removeStaleFileLock(
   lockDir: string,
   options: FileLockOptions,
-  throwOnActive: boolean
+  throwOnActive: boolean,
+  expectedOwner?: LockOwner
 ): Promise<{ readonly removed: boolean; readonly inspection: FileLockInspection }> {
   return withRecoveryLock(lockDir, options, async () => {
     const inspection = await inspectFileLock(lockDir, options);
     if (!inspection.exists) {
+      return { removed: false, inspection };
+    }
+    if (expectedOwner && !sameLockOwner(inspection.owner, expectedOwner)) {
       return { removed: false, inspection };
     }
     if (!inspection.stale) {
@@ -160,18 +168,34 @@ async function removeStaleFileLock(
   });
 }
 
+function sameLockOwner(left: LockOwner | undefined, right: LockOwner): boolean {
+  return (
+    left?.token === right.token &&
+    left.pid === right.pid &&
+    left.hostname === right.hostname &&
+    left.createdAt === right.createdAt
+  );
+}
+
 async function withRecoveryLock<T>(
   lockDir: string,
   options: FileLockOptions,
   operation: () => Promise<T>
 ): Promise<T> {
   const recoveryDir = `${lockDir}.recovery`;
-  const lock = await acquireRecoveryLock(recoveryDir, options);
+  const lock = await acquireRecoveryLock(recoveryDir, recoveryLockOptions(options));
   try {
     return await operation();
   } finally {
     await releaseFileLock(recoveryDir, lock.token);
   }
+}
+
+function recoveryLockOptions(options: FileLockOptions): FileLockOptions {
+  return {
+    ...options,
+    staleAfterMs: Math.max(options.staleAfterMs, options.waitTimeoutMs)
+  };
 }
 
 async function acquireRecoveryLock(lockDir: string, options: FileLockOptions): Promise<LockOwner> {
@@ -192,6 +216,10 @@ async function acquireRecoveryLock(lockDir: string, options: FileLockOptions): P
         await writeFile(ownerPath(lockDir), `${JSON.stringify(owner, null, 2)}\n`, "utf8");
       } catch (error) {
         await rm(lockDir, { recursive: true, force: true });
+        if (isNodeError(error) && error.code === "ENOENT") {
+          await sleep(options.retryDelayMs);
+          continue;
+        }
         throw error;
       }
       return owner;

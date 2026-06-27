@@ -1,11 +1,14 @@
 import { existsSync } from "node:fs";
+import { join, resolve } from "node:path";
 
 import {
   BorealError,
+  bindMcpProjectBoundary,
   detectSuspiciousUnicode,
   deterministicId,
   normalizeActorId,
   normalizeLabel,
+  nowIso,
   readJsonFile,
   runtimeSnapshotSchemaIssues,
   type AgentReservation,
@@ -16,6 +19,7 @@ import {
   type EvidenceRecord,
   type GraphEdge,
   type KnowledgeSource,
+  type ProjectRegistryMemoryLayout,
   type ProjectionId,
   type ProjectionRecord,
   type RuntimeOperation,
@@ -23,16 +27,18 @@ import {
   type WorkId,
   type WorkItem
 } from "@boreal/core";
+import { inspectDaemonStatus, type DaemonStatusResult } from "@boreal/daemon";
 import { buildContextPack, buildContextProjection } from "@boreal/search";
-import { breakStaleFileLock, inspectFileLock } from "@boreal/storage";
+import { breakStaleFileLock, inspectFileLock, inspectSQLiteCache } from "@boreal/storage";
 import { deriveReadinessStatus } from "@boreal/work-engine";
 
 import type { CliContext } from "./context.js";
 import { inspectGitWorktree } from "./git-worktree.js";
-import { exportDriftDiagnostics, ledgerStatus, readGeneratedLedgerTombstones } from "./import-export.js";
+import { inspectBorealInstallStatus, installStatusHealthy, installStatusSummary } from "./install-status.js";
+import { buildExportDocument, exportDriftDiagnostics, ledgerStatus, readGeneratedLedgerTombstones } from "./import-export.js";
 import { inspectProjectSetupDrift, type ProjectSetupDriftInspection } from "./project-setup.js";
 import { inspectSearchIndex, searchIndexLockDir, writeSearchIndex } from "./search-cli.js";
-import { inspectVault } from "./vault.js";
+import { inspectVault, listVaultRawSources, listVaultWikiPages, type RawSourceRecord, type WikiPageRecord } from "./vault.js";
 
 export type DiagnosticSeverity = "ok" | "warning" | "error" | "fixed";
 
@@ -65,7 +71,10 @@ const STATE_SECTIONS = [
   "contextPacks"
 ] as const;
 
-const OPERATION_LOG_WARNING_COUNT = 1_000;
+const OPERATION_LOG_RECOMMENDED_KEEP = 1_000;
+const OPERATION_LOG_WARNING_GRACE = 25;
+const OPERATION_LOG_WARNING_THRESHOLD = OPERATION_LOG_RECOMMENDED_KEEP + OPERATION_LOG_WARNING_GRACE;
+const MCP_CONFIG_SCHEMA_VERSION = "boreal.mcp-config.v1";
 
 export async function runDoctor(context: CliContext, fix: boolean, strict = false): Promise<DoctorResult> {
   const diagnostics: Diagnostic[] = [];
@@ -94,6 +103,9 @@ export async function runDoctor(context: CliContext, fix: boolean, strict = fals
   const projectSetupDiagnostics = await validateProjectSetup(context, fix);
   diagnostics.push(...projectSetupDiagnostics.diagnostics);
   fixed = fixed || projectSetupDiagnostics.fixed;
+  diagnostics.push(await validateInstallStatus(context));
+  diagnostics.push(await validateMcpConfig(context));
+  diagnostics.push(await validateDaemonStatus(context));
   diagnostics.push(await validateVaultStructure(context));
   diagnostics.push(await validateVaultHealth(context));
 
@@ -112,6 +124,7 @@ export async function runDoctor(context: CliContext, fix: boolean, strict = fals
   fixed = fixed || storeDiagnostics.fixed;
 
   if (schemaIssues.length === 0) {
+    const exportDocument = await buildExportDocument(context);
     const drift = await exportDriftDiagnostics(context);
     diagnostics.push({
       code: "snapshot.export_drift",
@@ -140,6 +153,23 @@ export async function runDoctor(context: CliContext, fix: boolean, strict = fals
             }
           : ledgers
     });
+    const sqliteCache = await inspectSQLiteCache({
+      rootDir: context.workspaceRoot,
+      expectedSnapshot: exportDocument.state,
+      expectedSourceContentHash: exportDocument.contentHash
+    });
+    diagnostics.push({
+      code: "cache.sqlite",
+      severity: sqliteCache.exists && !sqliteCache.ok ? "warning" : "ok",
+      message: sqliteCacheMessage(sqliteCache),
+      details:
+        sqliteCache.exists && !sqliteCache.ok
+          ? {
+              ...sqliteCache,
+              repairCommand: "bwrk sync refresh --json"
+            }
+          : sqliteCache
+    });
   } else {
     diagnostics.push({
       code: "snapshot.export_drift",
@@ -150,6 +180,11 @@ export async function runDoctor(context: CliContext, fix: boolean, strict = fals
       code: "ledger.export_drift",
       severity: "warning",
       message: "Skipped ledger drift check because runtime state failed schema validation"
+    });
+    diagnostics.push({
+      code: "cache.sqlite",
+      severity: "warning",
+      message: "Skipped SQLite cache check because runtime state failed schema validation"
     });
   }
 
@@ -285,6 +320,186 @@ async function validateProjectSetup(
   diagnostics.push(projectSetupGitmodulesDiagnostic(inspection, repairedKinds));
 
   return { fixed: inspection.fixed, diagnostics };
+}
+
+async function validateInstallStatus(context: CliContext): Promise<Diagnostic> {
+  const status = await inspectBorealInstallStatus({
+    workspaceRoot: context.workspaceRoot,
+    checkedAt: nowIso()
+  });
+  return {
+    code: "install.status",
+    severity: installStatusHealthy(status) ? "ok" : "warning",
+    message: installStatusSummary(status),
+    details: status
+  };
+}
+
+async function validateMcpConfig(context: CliContext): Promise<Diagnostic> {
+  const configPath = join(context.paths.borealDir, "mcp.json");
+  if (!existsSync(configPath)) {
+    return {
+      code: "mcp.config",
+      severity: "ok",
+      message: "No project-scoped MCP config is present",
+      details: { configPath, exists: false }
+    };
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = await readJsonFile(configPath, {
+      schemaName: MCP_CONFIG_SCHEMA_VERSION,
+      expectedObject: true,
+      maxBytes: 64 * 1024
+    });
+  } catch (error) {
+    return {
+      code: "mcp.config",
+      severity: "warning",
+      message: "MCP config could not be parsed",
+      details: {
+        configPath,
+        error: error instanceof Error ? error.message : String(error)
+      }
+    };
+  }
+
+  if (!isRecord(parsed)) {
+    return {
+      code: "mcp.config",
+      severity: "warning",
+      message: "MCP config must be a JSON object",
+      details: { configPath }
+    };
+  }
+
+  const setup = await readProjectSetupForMcpConfig(context);
+  const issues: string[] = [];
+  const workspaceRoot = configRoot(context.workspaceRoot, parsed.workspaceRoot);
+  const projectRoot = configRoot(context.workspaceRoot, parsed.projectRoot) ?? workspaceRoot ?? context.workspaceRoot;
+  const memoryRoot = configRoot(context.workspaceRoot, parsed.memoryRoot) ?? setup.memoryRoot ?? join(projectRoot, "memory");
+  const memoryLayout = mcpMemoryLayout(parsed.memoryLayout) ?? setup.memoryLayout;
+
+  if (parsed.schemaVersion !== MCP_CONFIG_SCHEMA_VERSION) {
+    issues.push(`schemaVersion must be ${MCP_CONFIG_SCHEMA_VERSION}`);
+  }
+  if (!workspaceRoot) {
+    issues.push("workspaceRoot is required");
+  } else if (workspaceRoot !== context.workspaceRoot) {
+    issues.push("workspaceRoot does not match this Boreal workspace");
+  }
+  if (projectRoot !== context.workspaceRoot) {
+    issues.push("projectRoot must match this Boreal workspace");
+  }
+
+  const args = Array.isArray(parsed.args) ? parsed.args.filter((arg): arg is string => typeof arg === "string") : [];
+  const scopedWorkspace = scopedWorkspaceFromMcpArgs(context.workspaceRoot, args);
+  if (!scopedWorkspace) {
+    issues.push("args must include --workspace <project-root>");
+  } else if (scopedWorkspace !== context.workspaceRoot) {
+    issues.push("args --workspace does not resolve to this Boreal workspace");
+  }
+  if (typeof parsed.command !== "string" || parsed.command.trim().length === 0) {
+    issues.push("command is required");
+  }
+
+  try {
+    bindMcpProjectBoundary({
+      workspaceRoot: workspaceRoot ?? context.workspaceRoot,
+      projectRoot,
+      memoryRoot,
+      memoryLayout
+    });
+  } catch (error) {
+    issues.push(error instanceof Error ? error.message : String(error));
+  }
+
+  return {
+    code: "mcp.config",
+    severity: issues.length === 0 ? "ok" : "warning",
+    message: issues.length === 0 ? "MCP config is scoped to this project" : "MCP config drift detected",
+    details: {
+      configPath,
+      exists: true,
+      workspaceRoot,
+      projectRoot,
+      memoryRoot,
+      memoryLayout,
+      scopedWorkspace,
+      issues,
+      repairCommand: "Review docs/architecture/MCP_SERVER.md and update .boreal/mcp.json"
+    }
+  };
+}
+
+async function readProjectSetupForMcpConfig(context: CliContext): Promise<{
+  readonly memoryRoot?: string;
+  readonly memoryLayout?: ProjectRegistryMemoryLayout;
+}> {
+  const path = join(context.paths.borealDir, "project.json");
+  if (!existsSync(path)) {
+    return {};
+  }
+  try {
+    const parsed = await readJsonFile(path, {
+      schemaName: "boreal.project-setup.v1",
+      expectedObject: true,
+      maxBytes: 64 * 1024
+    });
+    if (!isRecord(parsed)) {
+      return {};
+    }
+    return {
+      memoryRoot: configRoot(context.workspaceRoot, parsed.memoryRoot),
+      memoryLayout: mcpMemoryLayout(parsed.memoryLayout)
+    };
+  } catch {
+    return {};
+  }
+}
+
+function configRoot(base: string, value: unknown): string | undefined {
+  if (typeof value !== "string" || value.trim().length === 0) {
+    return undefined;
+  }
+  return resolve(base, value);
+}
+
+function scopedWorkspaceFromMcpArgs(base: string, args: readonly string[]): string | undefined {
+  const index = args.findIndex((arg) => arg === "--workspace" || arg === "--project-root");
+  const value = index >= 0 ? args[index + 1] : undefined;
+  return value ? resolve(base, value) : undefined;
+}
+
+function mcpMemoryLayout(value: unknown): ProjectRegistryMemoryLayout | undefined {
+  return value === "in-repo" || value === "child" || value === "sibling" ? value : undefined;
+}
+
+async function validateDaemonStatus(context: CliContext): Promise<Diagnostic> {
+  const status = await inspectDaemonStatus({ workspaceRoot: context.workspaceRoot });
+  const unhealthy = status.state === "missing" || status.state === "stale" || status.state === "drift";
+  return {
+    code: "daemon.status",
+    severity: unhealthy ? "warning" : "ok",
+    message: daemonStatusMessage(status),
+    details: status
+  };
+}
+
+function daemonStatusMessage(status: DaemonStatusResult): string {
+  switch (status.state) {
+    case "running":
+      return "Daemon status file points at a running process";
+    case "stopped":
+      return "Daemon is not running; this is healthy for command-driven workflows";
+    case "stale":
+      return "Daemon status file points at a stale process";
+    case "drift":
+      return "Daemon status file or project boundary drift detected";
+    case "missing":
+      return "Daemon workspace is missing or unreadable";
+  }
 }
 
 async function validateVaultStructure(context: CliContext): Promise<Diagnostic> {
@@ -804,6 +1019,7 @@ async function validateStoreRecords(
 
   try {
     const generatedTombstones = await readGeneratedLedgerTombstones(context);
+    const wikiCoverage = await inspectDoctorWikiCoverage(context);
     const summary = (() => {
       const rawWorkItems = stateSection<WorkItem>(state, "workItems");
       const rawEvidence = stateSection<EvidenceRecord>(state, "evidence");
@@ -951,6 +1167,48 @@ async function validateStoreRecords(
           .filter((sourceId) => !sourceById.has(sourceId))
           .map((sourceId) => ({ decisionId: decision.meta.id, sourceId }))
       );
+      const wikiReferenceCount = [...claims, ...decisions].reduce(
+        (count, record) => count + knowledgeRecordWikiPageIds(record).length,
+        0
+      );
+      const danglingClaimWikiPages = wikiCoverage.available
+        ? claims.flatMap((claim) =>
+            knowledgeRecordWikiPageIds(claim)
+              .filter((wikiPageId) => !wikiCoverage.pageIds.has(wikiPageId))
+              .map((wikiPageId) => ({ claimId: claim.meta.id, wikiPageId }))
+          )
+        : [];
+      const danglingDecisionWikiPages = wikiCoverage.available
+        ? decisions.flatMap((decision) =>
+            knowledgeRecordWikiPageIds(decision)
+              .filter((wikiPageId) => !wikiCoverage.pageIds.has(wikiPageId))
+              .map((wikiPageId) => ({ decisionId: decision.meta.id, wikiPageId }))
+          )
+        : [];
+      const missingWikiCoverage = [
+        ...claims
+          .filter((claim) => claim.status !== "rejected" && claim.sourceIds.length > 0 && knowledgeRecordWikiPageIds(claim).length === 0)
+          .map((claim) => ({ kind: "claim", claimId: claim.meta.id, status: claim.status, sourceIds: claim.sourceIds })),
+        ...decisions
+          .filter(
+            (decision) =>
+              decision.status !== "rejected" &&
+              decision.status !== "superseded" &&
+              decision.sourceIds.length > 0 &&
+              knowledgeRecordWikiPageIds(decision).length === 0
+          )
+          .map((decision) => ({ kind: "decision", decisionId: decision.meta.id, status: decision.status, sourceIds: decision.sourceIds }))
+      ];
+      const staleSourceBackedAssertions = claims
+        .filter((claim) => claim.status === "stale" && claim.sourceIds.length > 0)
+        .map((claim) => ({
+          claimId: claim.meta.id,
+          sourceIds: claim.sourceIds,
+          wikiPageIds: knowledgeRecordWikiPageIds(claim)
+        }));
+      const claimContradictions = claimContradictionFindings(claims);
+      const supersededDecisionReviews = supersededDecisionReviewFindings(decisions);
+      const rawSourceReconciliation = rawSourceReconciliationFindings(wikiCoverage.rawSources, wikiCoverage.wikiPages);
       const duplicateGraphEdges = duplicateGraphEdgeKeys(graphEdges);
       const danglingWorkGraphEdges = graphEdges.flatMap((edge) => {
         const issues: Array<{ edgeId: string; side: "from" | "to"; workId: string }> = [];
@@ -1094,6 +1352,15 @@ async function validateStoreRecords(
         danglingClaimSources,
         danglingClaimEvidence,
         danglingDecisionSources,
+        wikiCoverage,
+        wikiReferenceCount,
+        danglingClaimWikiPages,
+        danglingDecisionWikiPages,
+        missingWikiCoverage,
+        staleSourceBackedAssertions,
+        claimContradictions,
+        supersededDecisionReviews,
+        rawSourceReconciliation,
         duplicateGraphEdges,
         danglingWorkGraphEdges,
         blockConsistency,
@@ -1121,16 +1388,23 @@ async function validateStoreRecords(
       severity: "ok",
       message: `${summary.operationCount} operation(s) loaded`
     });
+    const operationVolumeExceeded = summary.operationCount > OPERATION_LOG_WARNING_THRESHOLD;
     diagnostics.push({
       code: "operation.volume",
-      severity: summary.operationCount > OPERATION_LOG_WARNING_COUNT ? "warning" : "ok",
+      severity: operationVolumeExceeded ? "warning" : "ok",
       message:
-        summary.operationCount > OPERATION_LOG_WARNING_COUNT
-          ? `Operation log has more than ${OPERATION_LOG_WARNING_COUNT} records; run \`bwrk operation prune --keep ${OPERATION_LOG_WARNING_COUNT} --json\``
-          : "Operation log volume is within the recommended bound",
+        operationVolumeExceeded
+          ? `Operation log has ${summary.operationCount} records; run \`bwrk operation prune --keep ${OPERATION_LOG_RECOMMENDED_KEEP} --json\``
+          : summary.operationCount > OPERATION_LOG_RECOMMENDED_KEEP
+            ? "Operation log volume is above the prune target but within maintenance grace"
+            : "Operation log volume is within the recommended bound",
       details:
-        summary.operationCount > OPERATION_LOG_WARNING_COUNT
-          ? { operationCount: summary.operationCount, recommendedKeep: OPERATION_LOG_WARNING_COUNT }
+        summary.operationCount > OPERATION_LOG_RECOMMENDED_KEEP
+          ? {
+              operationCount: summary.operationCount,
+              recommendedKeep: OPERATION_LOG_RECOMMENDED_KEEP,
+              warningThreshold: OPERATION_LOG_WARNING_THRESHOLD
+            }
           : undefined
     });
     diagnostics.push(diagnosticFromList("state.record_shape", "Malformed runtime records", summary.malformedRecords));
@@ -1144,6 +1418,44 @@ async function validateStoreRecords(
       ...summary.danglingDecisionSources
     ]));
     diagnostics.push(diagnosticFromList("knowledge.dangling_evidence", "Dangling claim evidence references", summary.danglingClaimEvidence));
+    if (summary.wikiCoverage.available) {
+      diagnostics.push(diagnosticFromList("knowledge.dangling_wiki_pages", "Dangling wiki page references", [
+        ...summary.danglingClaimWikiPages,
+        ...summary.danglingDecisionWikiPages
+      ]));
+    } else if (summary.wikiReferenceCount > 0) {
+      diagnostics.push({
+        code: "knowledge.dangling_wiki_pages",
+        severity: "warning",
+        message: "Skipped wiki page reference validation because the Boreal memory vault is unavailable",
+        details: { reason: summary.wikiCoverage.unavailableReason, wikiReferenceCount: summary.wikiReferenceCount }
+      });
+    } else {
+      diagnostics.push({
+        code: "knowledge.dangling_wiki_pages",
+        severity: "ok",
+        message: "Dangling wiki page references: none"
+      });
+    }
+    diagnostics.push(
+      warningDiagnosticFromList("knowledge.missing_wiki_coverage", "Source-backed claims and decisions missing wiki coverage", summary.missingWikiCoverage)
+    );
+    diagnostics.push(
+      warningDiagnosticFromList("knowledge.stale_source_assertions", "Stale source-backed assertions", summary.staleSourceBackedAssertions)
+    );
+    diagnostics.push(
+      warningDiagnosticFromList("knowledge.claim_contradictions", "Accepted claims with conflicting stale or rejected claim records", summary.claimContradictions)
+    );
+    diagnostics.push(
+      warningDiagnosticFromList(
+        "knowledge.superseded_decision_review",
+        "Superseded decisions missing an accepted replacement decision",
+        summary.supersededDecisionReviews
+      )
+    );
+    diagnostics.push(
+      warningDiagnosticFromList("knowledge.raw_source_reconciliation", "Raw sources waiting for memory reconciliation", summary.rawSourceReconciliation)
+    );
     diagnostics.push(diagnosticFromList("graph.duplicate_edges", "Duplicate graph edges", summary.duplicateGraphEdges));
     diagnostics.push(diagnosticFromList("graph.dangling_work_edges", "Dangling graph work edges", summary.danglingWorkGraphEdges));
     if (summary.blockConsistency.length > 0) {
@@ -1298,6 +1610,151 @@ function warningDiagnosticFromList(code: string, label: string, values: readonly
   };
 }
 
+interface DoctorWikiCoverage {
+  readonly available: boolean;
+  readonly pageIds: ReadonlySet<string>;
+  readonly wikiPages: readonly WikiPageRecord[];
+  readonly rawSources: readonly RawSourceRecord[];
+  readonly pageCount: number;
+  readonly unavailableReason?: string;
+}
+
+async function inspectDoctorWikiCoverage(context: CliContext): Promise<DoctorWikiCoverage> {
+  const status = await inspectVault(context);
+  if (!status.initialized) {
+    return {
+      available: false,
+      pageIds: new Set(),
+      wikiPages: [],
+      rawSources: [],
+      pageCount: 0,
+      unavailableReason: "vault_uninitialized"
+    };
+  }
+  const [pages, rawSources] = await Promise.all([listVaultWikiPages(context), listVaultRawSources(context)]);
+  return {
+    available: true,
+    pageIds: new Set(pages.map((page) => page.id || page.slug)),
+    wikiPages: pages,
+    rawSources,
+    pageCount: pages.length
+  };
+}
+
+function knowledgeRecordWikiPageIds(record: Pick<ClaimRecord | DecisionRecord, "wikiPageIds">): readonly string[] {
+  return Array.isArray(record.wikiPageIds) ? record.wikiPageIds.filter((wikiPageId) => typeof wikiPageId === "string") : [];
+}
+
+interface WorkflowReference {
+  readonly id: string;
+  readonly path: string;
+  readonly title: string;
+}
+
+const TRUTH_WORKFLOWS = {
+  contradictionResolution: {
+    id: "boreal.workflow.contradiction-resolution.v1",
+    path: "workflows/20-memory/contradiction-resolution.md",
+    title: "Contradiction Resolution"
+  },
+  staleTruthAudit: {
+    id: "boreal.workflow.stale-truth-audit.v1",
+    path: "workflows/20-memory/stale-truth-audit.md",
+    title: "Stale Truth Audit"
+  },
+  rawReconciliation: {
+    id: "boreal.workflow.reconcile-raw-to-memory.v1",
+    path: "workflows/20-memory/reconcile-raw-to-memory.md",
+    title: "Reconcile Raw To Memory"
+  },
+  supersedeDecision: {
+    id: "boreal.workflow.supersede-decision.v1",
+    path: "workflows/30-knowledge/supersede-decision.md",
+    title: "Supersede Decision"
+  }
+} as const satisfies Record<string, WorkflowReference>;
+
+const SAFE_TRUTH_RECHECK_COMMANDS = ["bwrk sync refresh --json", "bwrk doctor --strict --json"] as const;
+
+function claimContradictionFindings(claims: readonly ClaimRecord[]): readonly Record<string, unknown>[] {
+  const groups = new Map<string, ClaimRecord[]>();
+  for (const claim of claims) {
+    if (claim.status !== "accepted" && claim.status !== "rejected" && claim.status !== "stale") {
+      continue;
+    }
+    const key = truthKey(claim.statement);
+    groups.set(key, [...(groups.get(key) ?? []), claim]);
+  }
+
+  return [...groups.entries()].flatMap(([statementKey, records]) => {
+    const accepted = records.filter((claim) => claim.status === "accepted");
+    const conflicting = records.filter((claim) => claim.status === "rejected" || claim.status === "stale");
+    if (accepted.length === 0 || conflicting.length === 0) {
+      return [];
+    }
+    const claimIds = [...accepted, ...conflicting].map((claim) => claim.meta.id);
+    return [
+      {
+        statementKey,
+        acceptedClaimIds: accepted.map((claim) => claim.meta.id),
+        conflictingClaimIds: conflicting.map((claim) => claim.meta.id),
+        workflow: TRUTH_WORKFLOWS.contradictionResolution,
+        safeFixCommands: SAFE_TRUTH_RECHECK_COMMANDS,
+        manualReviewCommands: [
+          ...claimIds.map((claimId) => `bwrk claim show ${claimId} --json`),
+          `bwrk work create ${shellArg(`Review contradictory claim: ${accepted[0]?.statement ?? statementKey}`)} --kind task --label truth-review --json`
+        ]
+      }
+    ];
+  });
+}
+
+function supersededDecisionReviewFindings(decisions: readonly DecisionRecord[]): readonly Record<string, unknown>[] {
+  const acceptedTitleKeys = new Set(decisions.filter((decision) => decision.status === "accepted").map((decision) => truthKey(decision.title)));
+  return decisions
+    .filter((decision) => decision.status === "superseded")
+    .filter((decision) => !acceptedTitleKeys.has(truthKey(decision.title)))
+    .map((decision) => ({
+      decisionId: decision.meta.id,
+      title: decision.title,
+      workflow: TRUTH_WORKFLOWS.supersedeDecision,
+      safeFixCommands: SAFE_TRUTH_RECHECK_COMMANDS,
+      manualReviewCommands: [
+        `bwrk decision show ${decision.meta.id} --json`,
+        `bwrk decision list --status accepted --json`,
+        `bwrk work create ${shellArg(`Review superseded decision: ${decision.title}`)} --kind task --label truth-review --json`
+      ]
+    }));
+}
+
+function rawSourceReconciliationFindings(
+  rawSources: readonly RawSourceRecord[],
+  wikiPages: readonly WikiPageRecord[]
+): readonly Record<string, unknown>[] {
+  const linkedSourceRefs = new Set(wikiPages.flatMap((page) => page.sourceRefs));
+  return rawSources
+    .filter((source) => !linkedSourceRefs.has(source.id))
+    .map((source) => ({
+      sourceId: source.id,
+      title: source.title,
+      kind: source.kind,
+      workflow: TRUTH_WORKFLOWS.rawReconciliation,
+      safeFixCommands: SAFE_TRUTH_RECHECK_COMMANDS,
+      manualReviewCommands: [
+        `bwrk raw show ${source.id} --json`,
+        `bwrk wiki create ${shellArg(source.title)} --source ${source.id} --json`
+      ]
+    }));
+}
+
+function truthKey(value: string): string {
+  return normalizeLabel(value);
+}
+
+function shellArg(value: string): string {
+  return /^[A-Za-z0-9_./:@%+=,-]+$/u.test(value) ? value : `'${value.replace(/'/gu, "'\\''")}'`;
+}
+
 function ledgerDriftMessage(status: Awaited<ReturnType<typeof ledgerStatus>>): string {
   if (!status.exists) {
     return "No JSONL ledger export exists yet";
@@ -1309,6 +1766,22 @@ function ledgerDriftMessage(status: Awaited<ReturnType<typeof ledgerStatus>>): s
     return "JSONL ledger export differs from current runtime state";
   }
   return "JSONL ledger export matches current runtime state";
+}
+
+function sqliteCacheMessage(status: Awaited<ReturnType<typeof inspectSQLiteCache>>): string {
+  if (!status.exists) {
+    return "SQLite generated cache is not built yet";
+  }
+  if (!status.sqliteAvailable) {
+    return "SQLite generated cache exists but sqlite3 is unavailable";
+  }
+  if (status.error) {
+    return "SQLite generated cache is invalid";
+  }
+  if (status.stale) {
+    return "SQLite generated cache differs from current runtime state";
+  }
+  return "SQLite generated cache matches current runtime state";
 }
 
 function gitWorktreeDiagnosticMessage(status: Awaited<ReturnType<typeof inspectGitWorktree>>): string {

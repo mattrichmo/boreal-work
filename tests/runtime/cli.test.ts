@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { promisify } from "node:util";
@@ -14,6 +14,7 @@ import {
   validateCommandBehaviorMetadata
 } from "../../apps/cli/src/command-registry.ts";
 import { installJsonStdoutGuard, isBrokenPipeError, main } from "../../apps/cli/src/index.ts";
+import { inspectBorealInstallStatus } from "../../apps/cli/src/install-status.ts";
 import type { CliOutput } from "../../apps/cli/src/output.ts";
 
 interface CommandRun {
@@ -75,7 +76,11 @@ describe("bwrk cli", () => {
     for (const heading of ["## Help", ...COMMAND_DEFINITIONS.map((definition) => `## \`${commandPath(definition)}\``)]) {
       expect(commands).toContain(heading);
     }
+    for (const definition of COMMAND_DEFINITIONS) {
+      expect(commands, `${commandPath(definition)} usage drifted from COMMAND_DEFINITIONS`).toContain(definition.usage);
+    }
     expect(commands).toContain("[--priority low|normal|high|critical]");
+    expect(commands).toContain("`--view dashboard` changes only human rendering; JSON mode still returns the same schema-backed payload.");
     expect(commands).toContain("pnpm doctor:strict");
     expect(packageJson.scripts["doctor:strict"]).toBe(
       "tsx --tsconfig tsconfig.base.json apps/cli/src/index.ts doctor --workspace . --strict --json"
@@ -93,7 +98,7 @@ describe("bwrk cli", () => {
     expect(root.exitCode).toBe(0);
     expect(root.stdout).toContain("bwrk - Boreal Work CLI");
     expect(root.stdout).toContain(
-      "bwrk help [init|work|dep|evidence|source|claim|decision|context|search|reservation|agent|session|operation|workflows|install|export|import|vault|raw|wiki|duplicate|merge|compact|sync|ledger|snapshot|doctor|lock|commands|prime]"
+      "bwrk help [init|work|dep|evidence|source|claim|decision|context|search|reservation|agent|session|operation|workflows|install|registry|dashboard|daemon|sprint|export|import|vault|raw|wiki|duplicate|merge|compact|sync|ledger|snapshot|doctor|lock|commands|completion|prime]"
     );
     expect(root.stdout).toContain("bwrk version [--json]");
     expect(work.exitCode).toBe(0);
@@ -292,6 +297,7 @@ describe("bwrk cli", () => {
     expect(await fileMissing(join(rootDir, "memory/.git"))).toBe(false);
     const projectGitignore = await readFile(join(rootDir, ".gitignore"), "utf8");
     expect(projectGitignore).toContain(".boreal/project.json");
+    expect(projectGitignore).toContain(".boreal/mcp.json");
     expect(projectGitignore).toContain(".boreal/ledgers/");
     expect(projectGitignore).toContain(".agents/");
     expect(projectGitignore).toContain(".claude/");
@@ -332,6 +338,882 @@ describe("bwrk cli", () => {
     expect(invalidConfigPayload.message).toContain("Existing project setup config is invalid");
   });
 
+  it("validates project-scoped MCP config drift in doctor", async () => {
+    const rootDir = await makeTempWorkspace();
+    await runCli(rootDir, [
+      "init",
+      "--setup-memory",
+      "--memory-root",
+      "memory",
+      "--memory-layout",
+      "in-repo",
+      "--memory-git-mode",
+      "shared",
+      "--json"
+    ]);
+
+    await writeFile(
+      join(rootDir, ".boreal/mcp.json"),
+      `${JSON.stringify(
+        {
+          schemaVersion: "boreal.mcp-config.v1",
+          workspaceRoot: rootDir,
+          projectRoot: rootDir,
+          memoryRoot: join(rootDir, "memory"),
+          memoryLayout: "in-repo",
+          command: "node",
+          args: ["apps/mcp/dist/index.js", "--workspace", "."]
+        },
+        null,
+        2
+      )}\n`,
+      "utf8"
+    );
+
+    const scoped = parseData<DoctorPayload>((await runCli(rootDir, ["doctor", "--json"])).stdout);
+    expect(scoped.diagnostics).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          code: "mcp.config",
+          severity: "ok",
+          message: "MCP config is scoped to this project"
+        })
+      ])
+    );
+
+    await writeFile(
+      join(rootDir, ".boreal/mcp.json"),
+      `${JSON.stringify(
+        {
+          schemaVersion: "boreal.mcp-config.v1",
+          workspaceRoot: "/tmp/other-project",
+          projectRoot: "/tmp/other-project",
+          memoryRoot: "/tmp/other-project/memory",
+          memoryLayout: "in-repo",
+          command: "node",
+          args: ["apps/mcp/dist/index.js"]
+        },
+        null,
+        2
+      )}\n`,
+      "utf8"
+    );
+
+    const drift = await runCli(rootDir, ["doctor", "--strict", "--json"]);
+    const driftPayload = parseData<DoctorPayload>(drift.stdout);
+    const mcpDiagnostic = driftPayload.diagnostics.find((diagnostic) => diagnostic.code === "mcp.config");
+
+    expect(drift.exitCode).toBe(1);
+    expect(mcpDiagnostic).toEqual(
+      expect.objectContaining({
+        severity: "warning",
+        message: "MCP config drift detected"
+      })
+    );
+    expect(JSON.stringify(mcpDiagnostic?.details)).toContain("args must include --workspace <project-root>");
+  });
+
+  it("surfaces daemon status in CLI, doctor, and global dashboard", async () => {
+    const rootDir = await makeTempWorkspace();
+    await runCli(rootDir, [
+      "init",
+      "--setup-memory",
+      "--memory-root",
+      "memory",
+      "--memory-layout",
+      "in-repo",
+      "--memory-git-mode",
+      "shared",
+      "--json"
+    ]);
+
+    const status = parseData<{ readonly state: string; readonly watch: { readonly writesTruth: boolean } }>(
+      (await runCli(rootDir, ["daemon", "status", "--json"])).stdout
+    );
+    expect(status.state).toBe("stopped");
+    expect(status.watch.writesTruth).toBe(false);
+
+    const dashboard = parseData<{
+      readonly daemonStatus: { readonly projects: readonly Array<{ readonly projectRoot: string; readonly state: string }> };
+    }>((await runCli(rootDir, ["dashboard", "global", "--json"])).stdout);
+    expect(dashboard.daemonStatus.projects).toEqual(
+      expect.arrayContaining([expect.objectContaining({ projectRoot: rootDir, state: "stopped" })])
+    );
+
+    await mkdir(join(rootDir, ".boreal/daemon"), { recursive: true });
+    await writeFile(
+      join(rootDir, ".boreal/daemon/status.json"),
+      `${JSON.stringify(
+        {
+          schemaVersion: "boreal.daemon.status.v1",
+          workspaceRoot: rootDir,
+          projectRoot: rootDir,
+          memoryRoot: join(rootDir, "memory"),
+          memoryLayout: "in-repo",
+          pid: 999_999,
+          state: "running",
+          startedAt: "2026-06-27T00:00:00.000Z",
+          updatedAt: "2026-06-27T00:00:00.000Z"
+        },
+        null,
+        2
+      )}\n`,
+      "utf8"
+    );
+
+    const drift = await runCli(rootDir, ["doctor", "--strict", "--json"]);
+    const driftPayload = parseData<DoctorPayload>(drift.stdout);
+    expect(drift.exitCode).toBe(1);
+    expect(driftPayload.diagnostics).toEqual(
+      expect.arrayContaining([expect.objectContaining({ code: "daemon.status", severity: "warning" })])
+    );
+  });
+
+  it("manages machine-local project registry entries and doctors drift", async () => {
+    const rootDir = await makeTempWorkspace();
+    const registryRoot = join(rootDir, "registry-home");
+    await runCli(rootDir, [
+      "init",
+      "--setup-memory",
+      "--memory-root",
+      "memory",
+      "--memory-layout",
+      "in-repo",
+      "--memory-git-mode",
+      "shared",
+      "--install-root",
+      ".agents/skills",
+      "--json"
+    ]);
+    await mkdir(join(rootDir, ".agents/skills"), { recursive: true });
+
+    const empty = parseData<{ readonly entries: readonly unknown[]; readonly entryCount: number }>(
+      (await runCli(rootDir, ["registry", "list", "--registry-root", registryRoot, "--json"])).stdout
+    );
+    expect(empty.entries).toEqual([]);
+    expect(empty.entryCount).toBe(0);
+
+    const missingWorkspace = await runCli(rootDir, ["registry", "add", "--registry-root", registryRoot, "--json"]);
+    expect(missingWorkspace.exitCode).toBe(2);
+    expect(parseJson<{ readonly code: string }>(missingWorkspace.stderr).code).toBe("BOREAL_INVALID_INPUT");
+
+    const imported = parseData<{
+      readonly imported: true;
+      readonly changed: boolean;
+      readonly added: boolean;
+      readonly replaced: boolean;
+      readonly entry: { readonly id: string; readonly projectRoot: string };
+      readonly entryCount: number;
+    }>((await runCli(rootDir, ["registry", "import-setup", "--registry-root", registryRoot, "--json"])).stdout);
+    expect(imported).toEqual(
+      expect.objectContaining({
+        imported: true,
+        changed: true,
+        added: true,
+        replaced: false,
+        entryCount: 1
+      })
+    );
+    expect(imported.entry.projectRoot).toBe(rootDir);
+
+    const importedAgain = parseData<{
+      readonly imported: true;
+      readonly changed: boolean;
+      readonly added: boolean;
+      readonly replaced: boolean;
+      readonly entry: { readonly id: string };
+      readonly entryCount: number;
+    }>((await runCli(rootDir, ["registry", "import-setup", "--registry-root", registryRoot, "--json"])).stdout);
+    expect(importedAgain).toEqual(
+      expect.objectContaining({
+        imported: true,
+        changed: false,
+        added: false,
+        replaced: false,
+        entryCount: 1
+      })
+    );
+    expect(importedAgain.entry.id).toBe(imported.entry.id);
+
+    const added = parseData<{
+      readonly added: boolean;
+      readonly entry: {
+        readonly id: string;
+        readonly display: { readonly name: string; readonly labels: readonly string[] };
+        readonly projectRoot: string;
+        readonly memoryRoot: string;
+        readonly installRoot: string;
+      };
+      readonly entryCount: number;
+    }>(
+      (
+        await runCli(rootDir, [
+          "registry",
+          "add",
+          "--workspace",
+          rootDir,
+          "--registry-root",
+          registryRoot,
+          "--name",
+          "Boreal Test",
+          "--label",
+          "CLI",
+          "--json"
+        ])
+      ).stdout
+    );
+
+    expect(added.added).toBe(false);
+    expect(added.entry.display).toEqual({ name: "Boreal Test", labels: ["cli"] });
+    expect(added.entry.projectRoot).toBe(rootDir);
+    expect(added.entry.memoryRoot).toBe(join(rootDir, "memory"));
+    expect(added.entry.installRoot).toBe(join(rootDir, ".agents/skills"));
+    expect(added.entryCount).toBe(1);
+
+    const listed = parseData<{ readonly entries: Array<{ readonly id: string; readonly projectRoot: string }> }>(
+      (await runCli(rootDir, ["registry", "list", "--registry-root", registryRoot, "--json"])).stdout
+    );
+    expect(listed.entries).toEqual([expect.objectContaining({ id: added.entry.id, projectRoot: rootDir })]);
+
+    const healthy = await runCli(rootDir, ["registry", "doctor", "--registry-root", registryRoot, "--json"]);
+    const healthyPayload = parseData<{
+      readonly ok: boolean;
+      readonly findings: Array<{ readonly code: string; readonly severity: string }>;
+    }>(healthy.stdout);
+    expect(healthy.exitCode).toBe(0);
+    expect(healthyPayload.ok).toBe(true);
+    expect(healthyPayload.findings).toEqual(
+      expect.arrayContaining([expect.objectContaining({ code: "registry.memory_root", severity: "ok" })])
+    );
+
+    const configPath = join(rootDir, ".boreal/project.json");
+    const config = parseJson<Record<string, unknown>>(await readFile(configPath, "utf8"));
+    await writeFile(configPath, `${JSON.stringify({ ...config, memoryRoot: join(rootDir, "other-memory") }, null, 2)}\n`, "utf8");
+
+    const drift = await runCli(rootDir, ["registry", "doctor", "--registry-root", registryRoot, "--json"]);
+    const driftPayload = parseData<{
+      readonly ok: boolean;
+      readonly findings: Array<{ readonly code: string; readonly severity: string }>;
+    }>(drift.stdout);
+    expect(drift.exitCode).toBe(1);
+    expect(driftPayload.ok).toBe(false);
+    expect(driftPayload.findings).toEqual(
+      expect.arrayContaining([expect.objectContaining({ code: "registry.memory_root_mismatch", severity: "error" })])
+    );
+
+    const removed = parseData<{ readonly removed: true; readonly entryCount: number }>(
+      (await runCli(rootDir, ["registry", "remove", added.entry.id, "--registry-root", registryRoot, "--json"])).stdout
+    );
+    expect(removed).toEqual(expect.objectContaining({ removed: true, entryCount: 0 }));
+  });
+
+  it("emits bounded global dashboard payloads for empty, registered, and stale registries", async () => {
+    const rootDir = await makeTempWorkspace();
+    const secondRoot = await makeTempWorkspace();
+    const registryRoot = join(rootDir, "registry-home");
+    for (const workspace of [rootDir, secondRoot]) {
+      await runCli(workspace, [
+        "init",
+        "--setup-memory",
+        "--memory-root",
+        "memory",
+        "--memory-layout",
+        "in-repo",
+        "--memory-git-mode",
+        "shared",
+        "--install-root",
+        ".agents/skills",
+        "--json"
+      ]);
+      await mkdir(join(workspace, ".agents/skills"), { recursive: true });
+    }
+
+    const empty = parseData<{
+      readonly schemaVersion: string;
+      readonly limits: { readonly projects: number; readonly queueRowsPerQueue: number; readonly searchPerProject: number; readonly activityPerProject: number };
+      readonly truncated: { readonly projects: boolean };
+      readonly registry: { readonly summary: { readonly totalProjects: number }; readonly entries: Array<{ readonly projectRoot: string }> };
+      readonly globalSettings: { readonly projects: Array<{ readonly projectRoot: string; readonly validateCommand: string }> };
+    }>((await runCli(rootDir, ["dashboard", "global", "--registry-root", registryRoot, "--json"])).stdout);
+    expect(empty.schemaVersion).toBe("boreal.cli.dashboard.global.v1");
+    expect(empty.limits).toMatchObject({ projects: 100, queueRowsPerQueue: 200, searchPerProject: 10, activityPerProject: 20 });
+    expect(empty.truncated.projects).toBe(false);
+    expect(empty.registry.summary.totalProjects).toBe(1);
+    expect(empty.registry.entries[0]?.projectRoot).toBe(rootDir);
+    expect(empty.globalSettings.projects[0]?.validateCommand).toBe(`bwrk --workspace ${rootDir} doctor --json`);
+
+    const human = await runCli(rootDir, ["dashboard", "global", "--registry-root", registryRoot]);
+    expect(human.exitCode).toBe(0);
+    expect(human.stdout).toContain("project");
+    expect(human.stdout).not.toContain("schemaVersion");
+
+    await runCli(rootDir, ["registry", "import-setup", "--registry-root", registryRoot, "--json"]);
+    await runCli(secondRoot, ["registry", "import-setup", "--registry-root", registryRoot, "--json"]);
+
+    const capped = parseData<{
+      readonly truncated: { readonly projects: boolean };
+      readonly registry: { readonly entries: readonly unknown[] };
+      readonly globalQueues: { readonly queues: Array<{ readonly items: readonly unknown[] }> };
+    }>((await runCli(rootDir, ["dashboard", "global", "--registry-root", registryRoot, "--limit", "1", "--json"])).stdout);
+    expect(capped.truncated.projects).toBe(true);
+    expect(capped.registry.entries).toHaveLength(1);
+    expect(capped.globalQueues.queues.every((queue) => queue.items.length <= 200)).toBe(true);
+
+    const configPath = join(rootDir, ".boreal/project.json");
+    const config = parseJson<Record<string, unknown>>(await readFile(configPath, "utf8"));
+    await writeFile(configPath, `${JSON.stringify({ ...config, memoryRoot: join(rootDir, "other-memory") }, null, 2)}\n`, "utf8");
+
+    const stale = parseData<{
+      readonly registry: {
+        readonly entries: Array<{
+          readonly projectRoot: string;
+          readonly health: string;
+          readonly stale: boolean;
+          readonly findings: Array<{ readonly code: string; readonly severity: string; readonly source?: string }>;
+        }>;
+      };
+      readonly globalHealth: {
+        readonly summary: { readonly errorProjects: number; readonly setupFindings: number };
+        readonly findings: Array<{ readonly code: string; readonly projectRoot: string; readonly sourcePath: string }>;
+      };
+    }>((await runCli(rootDir, ["dashboard", "global", "--registry-root", registryRoot, "--json"])).stdout);
+    const staleEntry = stale.registry.entries.find((entry) => entry.projectRoot === rootDir);
+    expect(staleEntry).toMatchObject({ health: "error", stale: true });
+    expect(staleEntry?.findings).toEqual(
+      expect.arrayContaining([expect.objectContaining({ code: "registry.memory_root_mismatch", severity: "error" })])
+    );
+    expect(stale.globalHealth.summary.errorProjects).toBeGreaterThanOrEqual(1);
+    expect(stale.globalHealth.summary.setupFindings).toBeGreaterThanOrEqual(1);
+    expect(stale.globalHealth.findings).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          code: "registry.memory_root_mismatch",
+          projectRoot: rootDir,
+          sourcePath: join(rootDir, "memory")
+        })
+      ])
+    );
+  });
+
+  it("manages active sprint command contracts with workspace-scoped audit events", async () => {
+    const rootDir = await makeTempWorkspace();
+    const otherRoot = await makeTempWorkspace();
+    await runCli(rootDir, ["init", "--json"]);
+    await runCli(otherRoot, ["init", "--json"]);
+    const sprint = parseData<{ readonly meta: { readonly id: string }; readonly kind: string }>(
+      (await runCli(rootDir, ["work", "create", "Sprint Alpha", "--kind", "sprint", "--ready", "--json"])).stdout
+    );
+    const phase = parseData<{ readonly meta: { readonly id: string } }>(
+      (await runCli(rootDir, ["work", "create", "Phase Alpha", "--kind", "milestone", "--ready", "--json"])).stdout
+    );
+    const task = parseData<{ readonly meta: { readonly id: string } }>(
+      (await runCli(rootDir, ["work", "create", "Task Alpha", "--kind", "task", "--ready", "--json"])).stdout
+    );
+    await runCli(rootDir, ["dep", "add", sprint.meta.id, phase.meta.id, "--json"]);
+    await runCli(rootDir, ["dep", "add", phase.meta.id, task.meta.id, "--json"]);
+
+    const emptyCurrent = parseData<{ readonly active: boolean; readonly stale: boolean }>(
+      (await runCli(rootDir, ["sprint", "current", "--json"])).stdout
+    );
+    expect(emptyCurrent).toEqual(expect.objectContaining({ active: false, stale: false }));
+
+    const activated = parseData<{
+      readonly activeSprintId: string;
+      readonly projectionId: string;
+      readonly eventId: string;
+      readonly workspaceRoot: string;
+    }>(
+      (
+        await runCli(rootDir, [
+          "sprint",
+          "activate",
+          sprint.meta.id,
+          "--session",
+          "Sprint Session",
+          "--actor",
+          "Sprint Agent",
+          "--actor-kind",
+          "agent",
+          "--json"
+        ])
+      ).stdout
+    );
+    expect(activated).toEqual(
+      expect.objectContaining({
+        activeSprintId: sprint.meta.id,
+        workspaceRoot: rootDir
+      })
+    );
+    expect(activated.projectionId).toMatch(/^bw_projection_/);
+    expect(activated.eventId).toMatch(/^bw_event_/);
+
+    const current = parseData<{
+      readonly active: boolean;
+      readonly activeSprintId: string;
+      readonly sprint: { readonly id: string; readonly kind: string };
+      readonly scope: { readonly totalDescendants: number; readonly descendants: Array<{ readonly id: string }> };
+    }>((await runCli(rootDir, ["sprint", "current", "--json"])).stdout);
+    expect(current.active).toBe(true);
+    expect(current.activeSprintId).toBe(sprint.meta.id);
+    expect(current.sprint).toEqual(expect.objectContaining({ id: sprint.meta.id, kind: "sprint" }));
+    expect(current.scope.totalDescendants).toBe(2);
+    expect(current.scope.descendants.map((item) => item.id)).toEqual(expect.arrayContaining([phase.meta.id, task.meta.id]));
+
+    const shown = parseData<{
+      readonly active: boolean;
+      readonly scope: {
+        readonly directChildren: Array<{ readonly id: string }>;
+        readonly descendants: Array<{ readonly id: string }>;
+        readonly totalDescendants: number;
+        readonly truncated: boolean;
+      };
+    }>((await runCli(rootDir, ["sprint", "show", "current", "--limit", "1", "--json"])).stdout);
+    expect(shown.active).toBe(true);
+    expect(shown.scope.directChildren.map((item) => item.id)).toContain(phase.meta.id);
+    expect(shown.scope.descendants).toHaveLength(1);
+    expect(shown.scope.totalDescendants).toBe(2);
+    expect(shown.scope.truncated).toBe(true);
+
+    const listed = parseData<{ readonly activeSprintId: string; readonly sprints: Array<{ readonly id: string; readonly active: boolean }> }>(
+      (await runCli(rootDir, ["sprint", "list", "--json"])).stdout
+    );
+    expect(listed.activeSprintId).toBe(sprint.meta.id);
+    expect(listed.sprints).toEqual(
+      expect.arrayContaining([expect.objectContaining({ id: sprint.meta.id, active: true })])
+    );
+
+    const otherCurrent = parseData<{ readonly active: boolean }>((await runCli(otherRoot, ["sprint", "current", "--json"])).stdout);
+    expect(otherCurrent.active).toBe(false);
+
+    const state = parseJson<{
+      readonly projections: Array<{ readonly meta: { readonly id: string }; readonly kind: string; readonly subjectId: string; readonly value: Record<string, unknown> }>;
+      readonly events: Array<{ readonly meta: { readonly id: string }; readonly type: string; readonly subjectId: string; readonly operationId?: string }>;
+      readonly operations: Array<{ readonly meta: { readonly id: string }; readonly commandPath: string; readonly eventIds: readonly string[]; readonly actorId: string }>;
+    }>(await readFile(join(rootDir, ".boreal/runtime/state.json"), "utf8"));
+    const projection = state.projections.find((record) => record.meta.id === activated.projectionId);
+    const event = state.events.find((record) => record.meta.id === activated.eventId);
+    const operation = state.operations.find((record) => record.commandPath === "sprint activate");
+    expect(projection).toEqual(
+      expect.objectContaining({
+        kind: "active-sprint",
+        subjectId: "workspace",
+        value: expect.objectContaining({ sprintId: sprint.meta.id, eventId: activated.eventId, workspaceRoot: rootDir })
+      })
+    );
+    expect(event).toEqual(
+      expect.objectContaining({
+        type: "sprint.activated",
+        subjectId: sprint.meta.id,
+        operationId: operation?.meta.id
+      })
+    );
+    expect(operation).toEqual(expect.objectContaining({ actorId: "sprint agent" }));
+    expect(operation?.eventIds).toContain(activated.eventId);
+
+    const invalid = await runCli(rootDir, ["sprint", "activate", phase.meta.id, "--json"]);
+    expect(invalid.exitCode).toBe(2);
+    expect(parseJson<{ readonly code: string }>(invalid.stderr).code).toBe("BOREAL_INVALID_INPUT");
+
+    await runCli(rootDir, ["work", "create", "Duplicate Sprint", "--kind", "sprint", "--ready", "--json"]);
+    await runCli(rootDir, ["work", "create", "Duplicate Sprint", "--kind", "sprint", "--ready", "--json"]);
+    const ambiguous = await runCli(rootDir, ["sprint", "show", "Duplicate Sprint", "--json"]);
+    expect(ambiguous.exitCode).toBe(1);
+    expect(parseJson<{ readonly code: string }>(ambiguous.stderr).code).toBe("BOREAL_CONFLICT");
+  });
+
+  it("emits sprint board projections from graph scope with active blockers and reservations", async () => {
+    const rootDir = await makeTempWorkspace();
+    await runCli(rootDir, ["init", "--json"]);
+    const sprint = parseData<{ readonly meta: { readonly id: string } }>(
+      (await runCli(rootDir, ["work", "create", "Board Sprint", "--kind", "sprint", "--ready", "--json"])).stdout
+    );
+    const phase = parseData<{ readonly meta: { readonly id: string } }>(
+      (await runCli(rootDir, ["work", "create", "Board Phase", "--kind", "milestone", "--ready", "--json"])).stdout
+    );
+    const blockedTask = parseData<{ readonly meta: { readonly id: string } }>(
+      (
+        await runCli(rootDir, [
+          "work",
+          "create",
+          "Blocked Board Task",
+          "--kind",
+          "task",
+          "--priority",
+          "critical",
+          "--ready",
+          "--json"
+        ])
+      ).stdout
+    );
+    const reservedTask = parseData<{ readonly meta: { readonly id: string } }>(
+      (
+        await runCli(rootDir, [
+          "work",
+          "create",
+          "Reserved Board Task",
+          "--kind",
+          "task",
+          "--priority",
+          "high",
+          "--ready",
+          "--json"
+        ])
+      ).stdout
+    );
+    const verifiedTask = parseData<{ readonly meta: { readonly id: string } }>(
+      (await runCli(rootDir, ["work", "create", "Verified Board Task", "--kind", "task", "--ready", "--json"])).stdout
+    );
+    const activeBlocker = parseData<{ readonly meta: { readonly id: string } }>(
+      (await runCli(rootDir, ["work", "create", "Open Board Blocker", "--kind", "task", "--ready", "--json"])).stdout
+    );
+    const closedBlocker = parseData<{ readonly meta: { readonly id: string } }>(
+      (await runCli(rootDir, ["work", "create", "Closed Board Blocker", "--kind", "task", "--ready", "--json"])).stdout
+    );
+
+    await runCli(rootDir, ["dep", "add", sprint.meta.id, phase.meta.id, "--json"]);
+    await runCli(rootDir, ["dep", "add", sprint.meta.id, blockedTask.meta.id, "--json"]);
+    await runCli(rootDir, ["dep", "add", sprint.meta.id, reservedTask.meta.id, "--json"]);
+    await runCli(rootDir, ["dep", "add", sprint.meta.id, verifiedTask.meta.id, "--json"]);
+    await runCli(rootDir, ["dep", "add", blockedTask.meta.id, activeBlocker.meta.id, "--json"]);
+    await runCli(rootDir, ["dep", "add", blockedTask.meta.id, closedBlocker.meta.id, "--json"]);
+
+    const taskEvidence = parseData<{ readonly meta: { readonly id: string } }>(
+      (
+        await runCli(rootDir, [
+          "evidence",
+          "add",
+          blockedTask.meta.id,
+          "--summary",
+          "Board task evidence.",
+          "--outcome",
+          "observed",
+          "--json"
+        ])
+      ).stdout
+    );
+    expect(taskEvidence.meta.id).toMatch(/^bw_evidence_/);
+    const verifiedEvidence = parseData<{ readonly meta: { readonly id: string } }>(
+      (
+        await runCli(rootDir, [
+          "evidence",
+          "add",
+          verifiedTask.meta.id,
+          "--summary",
+          "Verified board task passed.",
+          "--outcome",
+          "passed",
+          "--json"
+        ])
+      ).stdout
+    );
+    await runCli(rootDir, ["work", "verify", verifiedTask.meta.id, "--evidence", verifiedEvidence.meta.id, "--verdict", "passed", "--json"]);
+    const blockerEvidence = parseData<{ readonly meta: { readonly id: string } }>(
+      (
+        await runCli(rootDir, [
+          "evidence",
+          "add",
+          closedBlocker.meta.id,
+          "--summary",
+          "Closed blocker passed.",
+          "--outcome",
+          "passed",
+          "--json"
+        ])
+      ).stdout
+    );
+    await runCli(rootDir, ["work", "verify", closedBlocker.meta.id, "--evidence", blockerEvidence.meta.id, "--verdict", "passed", "--json"]);
+    await runCli(rootDir, ["work", "close", closedBlocker.meta.id, "--reason", "resolved for board test", "--json"]);
+    await runCli(rootDir, ["work", "reserve", reservedTask.meta.id, "--agent", "board-agent", "--purpose", "board test", "--json"]);
+    await runCli(rootDir, ["sprint", "activate", sprint.meta.id, "--json"]);
+
+    const result = parseData<{
+      readonly schemaVersion: string;
+      readonly active: boolean;
+      readonly selectedSprintId: string;
+      readonly scope: { readonly totalDescendants: number; readonly truncated: boolean };
+      readonly board: {
+        readonly phases: Array<{ readonly id: string }>;
+        readonly lanes: Array<{ readonly id: string; readonly items: Array<{ readonly id: string; readonly activeReservationId?: string; readonly dependencyIds: readonly string[]; readonly activeBlockerIds: readonly string[]; readonly evidenceCount: number; readonly verificationCount: number }> }>;
+        readonly summary: {
+          readonly sprintId: string;
+          readonly phaseCount: number;
+          readonly taskCount: number;
+          readonly activeBlockerCount: number;
+          readonly activeReservations: number;
+          readonly blocked: number;
+          readonly inProgress: number;
+          readonly verified: number;
+        };
+      };
+    }>((await runCli(rootDir, ["sprint", "board", "--json"])).stdout);
+
+    expect(result).toEqual(
+      expect.objectContaining({
+        schemaVersion: "boreal.cli.sprint.board.v1",
+        active: true,
+        selectedSprintId: sprint.meta.id,
+        scope: expect.objectContaining({ totalDescendants: 6, truncated: false })
+      })
+    );
+    expect(result.board.summary).toEqual(
+      expect.objectContaining({
+        sprintId: sprint.meta.id,
+        phaseCount: 1,
+        taskCount: 5,
+        activeBlockerCount: 1,
+        activeReservations: 1,
+        blocked: 1,
+        inProgress: 1,
+        verified: 1
+      })
+    );
+    expect(result.board.phases.map((item) => item.id)).toEqual([phase.meta.id]);
+    const blockedRow = result.board.lanes.find((lane) => lane.id === "blocked")?.items.find((item) => item.id === blockedTask.meta.id);
+    expect(blockedRow).toEqual(
+      expect.objectContaining({
+        dependencyIds: expect.arrayContaining([activeBlocker.meta.id, closedBlocker.meta.id]),
+        activeBlockerIds: [activeBlocker.meta.id],
+        evidenceCount: 1,
+        verificationCount: 0
+      })
+    );
+    const verifiedRow = result.board.lanes.find((lane) => lane.id === "verified")?.items.find((item) => item.id === verifiedTask.meta.id);
+    expect(verifiedRow).toEqual(expect.objectContaining({ evidenceCount: 1, verificationCount: 1 }));
+    const inProgressRow = result.board.lanes.find((lane) => lane.id === "in_progress")?.items.find((item) => item.id === reservedTask.meta.id);
+    expect(inProgressRow?.activeReservationId).toMatch(/^bw_reservation_/);
+
+    const limited = parseData<{ readonly scope: { readonly totalDescendants: number; readonly truncated: boolean; readonly limit: number } }>(
+      (await runCli(rootDir, ["sprint", "board", sprint.meta.id, "--limit", "1", "--json"])).stdout
+    );
+    expect(limited.scope).toEqual(expect.objectContaining({ totalDescendants: 6, truncated: true, limit: 1 }));
+  });
+
+  it("exports sprint closeout reports with required doctor and sync evidence", async () => {
+    const rootDir = await makeTempWorkspace();
+    await runCli(rootDir, ["init", "--json"]);
+    const sprint = parseData<{ readonly meta: { readonly id: string } }>(
+      (await runCli(rootDir, ["work", "create", "Closeout Sprint", "--kind", "sprint", "--ready", "--json"])).stdout
+    );
+    const phase = parseData<{ readonly meta: { readonly id: string } }>(
+      (await runCli(rootDir, ["work", "create", "Closeout Phase", "--kind", "milestone", "--ready", "--json"])).stdout
+    );
+    const completedTask = parseData<{ readonly meta: { readonly id: string } }>(
+      (await runCli(rootDir, ["work", "create", "Completed Report Task", "--kind", "task", "--ready", "--json"])).stdout
+    );
+    const source = parseData<{ readonly meta: { readonly id: string } }>(
+      (
+        await runCli(rootDir, [
+          "source",
+          "add",
+          "--title",
+          "Report decision source",
+          "--uri",
+          "artifact://sprint-report-decision",
+          "--kind",
+          "artifact",
+          "--summary",
+          "Source linking a sprint decision to scoped work.",
+          "--json"
+        ])
+      ).stdout
+    );
+    const nextTask = parseData<{ readonly meta: { readonly id: string } }>(
+      (
+        await runCli(rootDir, [
+          "work",
+          "create",
+          "Next <Task>",
+          "--kind",
+          "task",
+          "--source",
+          "artifact://sprint-report-decision",
+          "--ready",
+          "--json"
+        ])
+      ).stdout
+    );
+    const blockedTask = parseData<{ readonly meta: { readonly id: string } }>(
+      (await runCli(rootDir, ["work", "create", "Blocked Report Task", "--kind", "task", "--ready", "--json"])).stdout
+    );
+    const blocker = parseData<{ readonly meta: { readonly id: string } }>(
+      (await runCli(rootDir, ["work", "create", "Open Report Blocker", "--kind", "task", "--ready", "--json"])).stdout
+    );
+
+    await runCli(rootDir, ["dep", "add", sprint.meta.id, phase.meta.id, "--json"]);
+    await runCli(rootDir, ["dep", "add", sprint.meta.id, completedTask.meta.id, "--json"]);
+    await runCli(rootDir, ["dep", "add", sprint.meta.id, nextTask.meta.id, "--json"]);
+    await runCli(rootDir, ["dep", "add", sprint.meta.id, blockedTask.meta.id, "--json"]);
+    await runCli(rootDir, ["dep", "add", blockedTask.meta.id, blocker.meta.id, "--json"]);
+
+    await runCli(rootDir, [
+      "decision",
+      "create",
+      "--title",
+      "Static report decision",
+      "--decision",
+      "Ship a static sprint closeout report.",
+      "--status",
+      "accepted",
+      "--source",
+      source.meta.id,
+      "--json"
+    ]);
+    const completedEvidence = parseData<{ readonly meta: { readonly id: string } }>(
+      (
+        await runCli(rootDir, [
+          "evidence",
+          "add",
+          completedTask.meta.id,
+          "--summary",
+          "Completed task evidence passed.",
+          "--outcome",
+          "passed",
+          "--json"
+        ])
+      ).stdout
+    );
+    await runCli(rootDir, [
+      "work",
+      "verify",
+      completedTask.meta.id,
+      "--evidence",
+      completedEvidence.meta.id,
+      "--verdict",
+      "passed",
+      "--json"
+    ]);
+    await runCli(rootDir, ["work", "close", completedTask.meta.id, "--reason", "ready for report", "--json"]);
+
+    const doctorEvidence = parseData<{ readonly meta: { readonly id: string } }>(
+      (
+        await runCli(rootDir, [
+          "evidence",
+          "add",
+          sprint.meta.id,
+          "--summary",
+          "doctor strict passed",
+          "--kind",
+          "command",
+          "--outcome",
+          "passed",
+          "--command",
+          "bwrk doctor --strict --json",
+          "--json"
+        ])
+      ).stdout
+    );
+    const syncEvidence = parseData<{ readonly meta: { readonly id: string } }>(
+      (
+        await runCli(rootDir, [
+          "evidence",
+          "add",
+          sprint.meta.id,
+          "--summary",
+          "sync refresh passed",
+          "--kind",
+          "command",
+          "--outcome",
+          "passed",
+          "--command",
+          "bwrk sync refresh --json",
+          "--json"
+        ])
+      ).stdout
+    );
+    await runCli(rootDir, ["sprint", "activate", sprint.meta.id, "--json"]);
+
+    const markdownResult = parseData<{
+      readonly schemaVersion: string;
+      readonly format: string;
+      readonly path: string;
+      readonly contentHash: string;
+      readonly report: {
+        readonly summary: { readonly completed: number; readonly open: number; readonly decisions: number; readonly nextSprintCandidates: number };
+        readonly closeoutEvidence: { readonly doctor: { readonly id: string }; readonly sync: { readonly id: string } };
+        readonly decisions: Array<{ readonly title: string }>;
+        readonly unresolvedBlockers: Array<{ readonly work: { readonly id: string }; readonly blockers: Array<{ readonly id: string }> }>;
+      };
+    }>(
+      (
+        await runCli(rootDir, [
+          "sprint",
+          "report",
+          "--doctor-evidence",
+          doctorEvidence.meta.id,
+          "--sync-evidence",
+          syncEvidence.meta.id,
+          "--out",
+          ".boreal/results/closeout.md",
+          "--json"
+        ])
+      ).stdout
+    );
+
+    expect(markdownResult.schemaVersion).toBe("boreal.cli.sprint.report.v1");
+    expect(markdownResult.format).toBe("markdown");
+    expect(markdownResult.path).toBe(join(rootDir, ".boreal/results/closeout.md"));
+    expect(markdownResult.contentHash).toMatch(/^sha256:/);
+    expect(markdownResult.report.summary).toEqual(
+      expect.objectContaining({ completed: 1, open: 4, decisions: 1, nextSprintCandidates: 4 })
+    );
+    expect(markdownResult.report.closeoutEvidence.doctor.id).toBe(doctorEvidence.meta.id);
+    expect(markdownResult.report.closeoutEvidence.sync.id).toBe(syncEvidence.meta.id);
+    expect(markdownResult.report.decisions.map((decision) => decision.title)).toContain("Static report decision");
+    expect(markdownResult.report.unresolvedBlockers).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          work: expect.objectContaining({ id: blockedTask.meta.id }),
+          blockers: [expect.objectContaining({ id: blocker.meta.id })]
+        })
+      ])
+    );
+
+    const markdown = await readFile(join(rootDir, ".boreal/results/closeout.md"), "utf8");
+    expect(markdown).toContain("# Sprint Closeout: Closeout Sprint");
+    expect(markdown).toContain("Static report decision");
+    expect(markdown).toContain("Blocked Report Task");
+    expect(markdown).toContain(`Doctor evidence: ${doctorEvidence.meta.id}`);
+    expect(markdown).toContain(`Sync evidence: ${syncEvidence.meta.id}`);
+
+    const htmlResult = parseData<{ readonly format: string; readonly path: string }>(
+      (
+        await runCli(rootDir, [
+          "sprint",
+          "report",
+          sprint.meta.id,
+          "--format",
+          "html",
+          "--doctor-evidence",
+          doctorEvidence.meta.id,
+          "--sync-evidence",
+          syncEvidence.meta.id,
+          "--out",
+          ".boreal/results/closeout.html",
+          "--json"
+        ])
+      ).stdout
+    );
+    expect(htmlResult.format).toBe("html");
+    expect(htmlResult.path).toBe(join(rootDir, ".boreal/results/closeout.html"));
+    const html = await readFile(join(rootDir, ".boreal/results/closeout.html"), "utf8");
+    expect(html).toContain("<!doctype html>");
+    expect(html).toContain("Next &lt;Task&gt;");
+    expect(html).not.toContain("Next <Task>");
+
+    const invalid = await runCli(rootDir, [
+      "sprint",
+      "report",
+      sprint.meta.id,
+      "--doctor-evidence",
+      doctorEvidence.meta.id,
+      "--sync-evidence",
+      completedEvidence.meta.id,
+      "--json"
+    ]);
+    expect(invalid.exitCode).toBe(2);
+    expect(parseJson<{ readonly code: string }>(invalid.stderr).code).toBe("BOREAL_INVALID_INPUT");
+  });
+
   it("does not append equivalent project .gitignore guards during repeated setup", async () => {
     const rootDir = await makeTempWorkspace();
     await writeFile(
@@ -339,6 +1221,7 @@ describe("bwrk cli", () => {
       [
         "# Boreal local workspace binding and runtime artifacts",
         ".boreal/project.json",
+        ".boreal/mcp.json",
         ".boreal/runtime/",
         ".boreal/cache/",
         ".boreal/tmp/",
@@ -823,6 +1706,44 @@ describe("bwrk cli", () => {
     const wikiMarkdown = await readFile(join(rootDir, "memory/wiki/design-principles.md"), "utf8");
     expect(wikiMarkdown).toContain("source_refs:\n  - bw_source_");
 
+    await writeFile(
+      join(rootDir, "memory/wiki/project-index.md"),
+      `---\nkind: boreal-wiki-page\nschemaVersion: boreal.vault.v1\nid: bw_page_index\nslug: project-index\ntitle: Project Index\nclaim_status: accepted\nsource_refs:\n  - ${rawPayload.record.id}\n---\n\n# Project Index\n\n[[Design Principles]]\n`,
+      "utf8"
+    );
+    const wikiList = await runCli(rootDir, ["wiki", "list", "--json"]);
+    const wikiRows = parseData<Array<{
+      readonly title: string;
+      readonly truthStatus: string;
+      readonly backlinkCount: number;
+      readonly sourceRefCount: number;
+      readonly showCommand: string;
+    }>>(wikiList.stdout);
+    expect(wikiList.exitCode).toBe(0);
+    expect(wikiRows[0]).toEqual(expect.objectContaining({
+      title: "Project Index",
+      truthStatus: "accepted",
+      sourceRefCount: 1,
+      showCommand: "bwrk wiki show bw_page_index --json"
+    }));
+    expect(wikiRows.find((row) => row.title === "Design Principles")).toEqual(
+      expect.objectContaining({ truthStatus: "draft", backlinkCount: 1 })
+    );
+
+    const wikiShow = await runCli(rootDir, ["wiki", "show", "project-index", "--json"]);
+    const wikiDetail = parseData<{
+      readonly title: string;
+      readonly truthStatus: string;
+      readonly outboundPages: readonly Array<{ readonly title: string; readonly truthStatus: string }>;
+      readonly missingOutboundLinks: readonly string[];
+    }>(wikiShow.stdout);
+    expect(wikiShow.exitCode).toBe(0);
+    expect(wikiDetail).toEqual(expect.objectContaining({ title: "Project Index", truthStatus: "accepted" }));
+    expect(wikiDetail.outboundPages).toEqual(
+      expect.arrayContaining([expect.objectContaining({ title: "Design Principles", truthStatus: "draft" })])
+    );
+    expect(wikiDetail.missingOutboundLinks).toEqual([]);
+
     const health = await runCli(rootDir, ["vault", "status", "--json"]);
     const healthPayload = parseData<{
       readonly ok: boolean;
@@ -845,7 +1766,7 @@ describe("bwrk cli", () => {
         ok: true,
         hasWarnings: false,
         rawSourceCount: 1,
-        wikiPageCount: 1,
+        wikiPageCount: 2,
         ledgerEventCount: 0,
         brokenLinks: [],
         missingSourceRefs: [],
@@ -915,6 +1836,493 @@ describe("bwrk cli", () => {
     expect(malformedLedgerPayload.ok).toBe(false);
     expect(malformedLedgerPayload.health.malformedLedgerEvents).toEqual(
       expect.arrayContaining([expect.objectContaining({ line: 1, error: expect.stringContaining("unsupported shape") })])
+    );
+  });
+
+  it("links source-backed claims and decisions to wiki pages and doctors coverage", async () => {
+    const rootDir = await makeTempWorkspace();
+    await runCli(rootDir, ["init", "--json"]);
+    await runCli(rootDir, ["vault", "init", "--json"]);
+
+    const raw = parseData<{ readonly record: { readonly id: string } }>(
+      (
+        await runCli(rootDir, [
+          "raw",
+          "add",
+          "--title",
+          "Runtime coverage source",
+          "--uri",
+          "file://runtime-coverage.md",
+          "--json"
+        ])
+      ).stdout
+    );
+    const wiki = parseData<{ readonly page: { readonly id: string; readonly slug: string; readonly path: string } }>(
+      (
+        await runCli(rootDir, [
+          "wiki",
+          "create",
+          "Runtime Coverage",
+          "--slug",
+          "runtime-coverage",
+          "--source",
+          raw.record.id,
+          "--json"
+        ])
+      ).stdout
+    );
+    const source = parseData<{ readonly meta: { readonly id: string } }>(
+      (
+        await runCli(rootDir, [
+          "source",
+          "add",
+          "--title",
+          "Runtime coverage source",
+          "--uri",
+          "memory/wiki/runtime-coverage.md",
+          "--kind",
+          "document",
+          "--summary",
+          "Runtime claim and decision coverage.",
+          "--json"
+        ])
+      ).stdout
+    );
+
+    const missingWiki = await runCli(rootDir, [
+      "claim",
+      "create",
+      "--statement",
+      "Missing wiki references fail closed.",
+      "--source",
+      source.meta.id,
+      "--wiki",
+      "missing-runtime-page",
+      "--json"
+    ]);
+    expect(missingWiki.exitCode).toBe(1);
+    expect(parseJson<{ readonly code: string }>(missingWiki.stderr).code).toBe("BOREAL_NOT_FOUND");
+
+    const claim = parseData<{
+      readonly meta: { readonly id: string };
+      readonly sourceIds: readonly string[];
+      readonly wikiPageIds: readonly string[];
+    }>(
+      (
+        await runCli(rootDir, [
+          "claim",
+          "create",
+          "--statement",
+          "Runtime claims should cite wiki coverage.",
+          "--status",
+          "accepted",
+          "--source",
+          source.meta.id,
+          "--wiki",
+          wiki.page.slug,
+          "--json"
+        ])
+      ).stdout
+    );
+    expect(claim.sourceIds).toEqual([source.meta.id]);
+    expect(claim.wikiPageIds).toEqual([wiki.page.id]);
+
+    const decision = parseData<{
+      readonly meta: { readonly id: string };
+      readonly sourceIds: readonly string[];
+      readonly wikiPageIds: readonly string[];
+    }>(
+      (
+        await runCli(rootDir, [
+          "decision",
+          "create",
+          "--title",
+          "Runtime wiki coverage",
+          "--decision",
+          "Claims and decisions cite wiki pages.",
+          "--status",
+          "accepted",
+          "--source",
+          source.meta.id,
+          "--wiki",
+          wiki.page.path,
+          "--json"
+        ])
+      ).stdout
+    );
+    expect(decision.sourceIds).toEqual([source.meta.id]);
+    expect(decision.wikiPageIds).toEqual([wiki.page.id]);
+
+    const claimRows = parseData<Array<{ readonly id: string; readonly wikiPageIds: readonly string[]; readonly wikiPageCount: number }>>(
+      (await runCli(rootDir, ["claim", "list", "--json"])).stdout
+    );
+    expect(claimRows.find((row) => row.id === claim.meta.id)).toEqual(
+      expect.objectContaining({ wikiPageIds: [wiki.page.id], wikiPageCount: 1 })
+    );
+    const decisionRows = parseData<Array<{ readonly id: string; readonly wikiPageIds: readonly string[]; readonly wikiPageCount: number }>>(
+      (await runCli(rootDir, ["decision", "list", "--json"])).stdout
+    );
+    expect(decisionRows.find((row) => row.id === decision.meta.id)).toEqual(
+      expect.objectContaining({ wikiPageIds: [wiki.page.id], wikiPageCount: 1 })
+    );
+
+    const coveredDoctor = parseData<DoctorPayload>((await runCli(rootDir, ["doctor", "--json"])).stdout);
+    expect(doctorDiagnostic(coveredDoctor, "knowledge.dangling_wiki_pages")).toEqual(expect.objectContaining({ severity: "ok" }));
+    expect(doctorDiagnostic(coveredDoctor, "knowledge.missing_wiki_coverage")).toEqual(expect.objectContaining({ severity: "ok" }));
+    expect(doctorDiagnostic(coveredDoctor, "knowledge.stale_source_assertions")).toEqual(expect.objectContaining({ severity: "ok" }));
+
+    const uncoveredClaim = parseData<{ readonly meta: { readonly id: string } }>(
+      (
+        await runCli(rootDir, [
+          "claim",
+          "create",
+          "--statement",
+          "Source-backed claims need wiki coverage.",
+          "--source",
+          source.meta.id,
+          "--json"
+        ])
+      ).stdout
+    );
+    const staleClaim = parseData<{ readonly meta: { readonly id: string } }>(
+      (
+        await runCli(rootDir, [
+          "claim",
+          "create",
+          "--statement",
+          "Stale source-backed claims are visible.",
+          "--status",
+          "stale",
+          "--source",
+          source.meta.id,
+          "--wiki",
+          wiki.page.id,
+          "--json"
+        ])
+      ).stdout
+    );
+    const warningDoctor = parseData<DoctorPayload>((await runCli(rootDir, ["doctor", "--json"])).stdout);
+    expect(doctorDiagnostic(warningDoctor, "knowledge.missing_wiki_coverage")).toEqual(
+      expect.objectContaining({
+        severity: "warning",
+        details: expect.arrayContaining([expect.objectContaining({ claimId: uncoveredClaim.meta.id })])
+      })
+    );
+    expect(doctorDiagnostic(warningDoctor, "knowledge.stale_source_assertions")).toEqual(
+      expect.objectContaining({
+        severity: "warning",
+        details: expect.arrayContaining([expect.objectContaining({ claimId: staleClaim.meta.id })])
+      })
+    );
+
+    await rm(join(rootDir, "memory/wiki/runtime-coverage.md"));
+    const danglingDoctor = parseData<DoctorPayload>((await runCli(rootDir, ["doctor", "--json"])).stdout);
+    expect(doctorDiagnostic(danglingDoctor, "knowledge.dangling_wiki_pages")).toEqual(
+      expect.objectContaining({
+        severity: "error",
+        details: expect.arrayContaining([
+          expect.objectContaining({ claimId: claim.meta.id, wikiPageId: wiki.page.id }),
+          expect.objectContaining({ decisionId: decision.meta.id, wikiPageId: wiki.page.id })
+        ])
+      })
+    );
+  });
+
+  it("reports stale truth repair workflows with safe and manual commands", async () => {
+    const rootDir = await makeTempWorkspace();
+    await runCli(rootDir, ["init", "--json"]);
+    await runCli(rootDir, ["vault", "init", "--json"]);
+
+    const linkedRaw = parseData<{ readonly record: { readonly id: string } }>(
+      (
+        await runCli(rootDir, [
+          "raw",
+          "add",
+          "--title",
+          "Linked truth source",
+          "--uri",
+          "file://linked-truth.md",
+          "--json"
+        ])
+      ).stdout
+    );
+    const queuedRaw = parseData<{ readonly record: { readonly id: string; readonly title: string } }>(
+      (
+        await runCli(rootDir, [
+          "raw",
+          "add",
+          "--title",
+          "Unreconciled Raw Source",
+          "--uri",
+          "file://unreconciled.md",
+          "--json"
+        ])
+      ).stdout
+    );
+    const wiki = parseData<{ readonly page: { readonly id: string } }>(
+      (
+        await runCli(rootDir, [
+          "wiki",
+          "create",
+          "Linked Truth",
+          "--slug",
+          "linked-truth",
+          "--source",
+          linkedRaw.record.id,
+          "--json"
+        ])
+      ).stdout
+    );
+    const acceptedSource = parseData<{ readonly meta: { readonly id: string } }>(
+      (
+        await runCli(rootDir, [
+          "source",
+          "add",
+          "--title",
+          "Accepted claim source",
+          "--uri",
+          "memory/wiki/linked-truth.md#accepted",
+          "--json"
+        ])
+      ).stdout
+    );
+    const rejectedSource = parseData<{ readonly meta: { readonly id: string } }>(
+      (
+        await runCli(rootDir, [
+          "source",
+          "add",
+          "--title",
+          "Rejected claim source",
+          "--uri",
+          "memory/wiki/linked-truth.md#rejected",
+          "--json"
+        ])
+      ).stdout
+    );
+
+    const acceptedClaim = parseData<{ readonly meta: { readonly id: string } }>(
+      (
+        await runCli(rootDir, [
+          "claim",
+          "create",
+          "--statement",
+          "Runtime truth conflicts.",
+          "--status",
+          "accepted",
+          "--source",
+          acceptedSource.meta.id,
+          "--wiki",
+          wiki.page.id,
+          "--json"
+        ])
+      ).stdout
+    );
+    const rejectedClaim = parseData<{ readonly meta: { readonly id: string } }>(
+      (
+        await runCli(rootDir, [
+          "claim",
+          "create",
+          "--statement",
+          "Runtime truth conflicts.",
+          "--status",
+          "rejected",
+          "--source",
+          rejectedSource.meta.id,
+          "--wiki",
+          wiki.page.id,
+          "--json"
+        ])
+      ).stdout
+    );
+    const supersededDecision = parseData<{ readonly meta: { readonly id: string } }>(
+      (
+        await runCli(rootDir, [
+          "decision",
+          "create",
+          "--title",
+          "Legacy Runtime Path",
+          "--decision",
+          "Use the old runtime path.",
+          "--status",
+          "superseded",
+          "--source",
+          acceptedSource.meta.id,
+          "--wiki",
+          wiki.page.id,
+          "--json"
+        ])
+      ).stdout
+    );
+
+    const doctor = parseData<DoctorPayload>((await runCli(rootDir, ["doctor", "--json"])).stdout);
+    expect(doctorDiagnostic(doctor, "knowledge.claim_contradictions")).toEqual(
+      expect.objectContaining({
+        severity: "warning",
+        details: expect.arrayContaining([
+          expect.objectContaining({
+            workflow: expect.objectContaining({
+              id: "boreal.workflow.contradiction-resolution.v1",
+              path: "workflows/20-memory/contradiction-resolution.md"
+            }),
+            acceptedClaimIds: [acceptedClaim.meta.id],
+            conflictingClaimIds: [rejectedClaim.meta.id],
+            safeFixCommands: ["bwrk sync refresh --json", "bwrk doctor --strict --json"],
+            manualReviewCommands: expect.arrayContaining([
+              `bwrk claim show ${acceptedClaim.meta.id} --json`,
+              `bwrk claim show ${rejectedClaim.meta.id} --json`,
+              "bwrk work create 'Review contradictory claim: Runtime truth conflicts.' --kind task --label truth-review --json"
+            ])
+          })
+        ])
+      })
+    );
+    expect(doctorDiagnostic(doctor, "knowledge.superseded_decision_review")).toEqual(
+      expect.objectContaining({
+        severity: "warning",
+        details: expect.arrayContaining([
+          expect.objectContaining({
+            decisionId: supersededDecision.meta.id,
+            workflow: expect.objectContaining({
+              id: "boreal.workflow.supersede-decision.v1",
+              path: "workflows/30-knowledge/supersede-decision.md"
+            }),
+            safeFixCommands: ["bwrk sync refresh --json", "bwrk doctor --strict --json"],
+            manualReviewCommands: expect.arrayContaining([
+              `bwrk decision show ${supersededDecision.meta.id} --json`,
+              "bwrk decision list --status accepted --json",
+              "bwrk work create 'Review superseded decision: Legacy Runtime Path' --kind task --label truth-review --json"
+            ])
+          })
+        ])
+      })
+    );
+    expect(doctorDiagnostic(doctor, "knowledge.raw_source_reconciliation")).toEqual(
+      expect.objectContaining({
+        severity: "warning",
+        details: expect.arrayContaining([
+          expect.objectContaining({
+            sourceId: queuedRaw.record.id,
+            workflow: expect.objectContaining({
+              id: "boreal.workflow.reconcile-raw-to-memory.v1",
+              path: "workflows/20-memory/reconcile-raw-to-memory.md"
+            }),
+            safeFixCommands: ["bwrk sync refresh --json", "bwrk doctor --strict --json"],
+            manualReviewCommands: [
+              `bwrk raw show ${queuedRaw.record.id} --json`,
+              `bwrk wiki create '${queuedRaw.record.title}' --source ${queuedRaw.record.id} --json`
+            ]
+          })
+        ])
+      })
+    );
+  });
+
+  it("lists raw vault sources and shows bounded source previews", async () => {
+    const rootDir = await makeTempWorkspace();
+    await runCli(rootDir, ["init", "--json"]);
+    await runCli(rootDir, ["vault", "init", "--json"]);
+    await writeFile(join(rootDir, "large-source.txt"), "0123456789abcdef\n".repeat(600), "utf8");
+    await writeFile(join(rootDir, "binary-source.bin"), Buffer.from([0, 1, 2, 3, 4]));
+
+    const large = parseData<{ readonly record: { readonly id: string } }>((await runCli(rootDir, [
+      "raw",
+      "add",
+      "--title",
+      "Large Source",
+      "--uri",
+      "large-source.txt",
+      "--summary",
+      "Large text asset.",
+      "--json"
+    ])).stdout);
+    const missing = parseData<{ readonly record: { readonly id: string } }>((await runCli(rootDir, [
+      "raw",
+      "add",
+      "--title",
+      "Missing Source",
+      "--uri",
+      "missing-source.txt",
+      "--json"
+    ])).stdout);
+    const binary = parseData<{ readonly record: { readonly id: string } }>((await runCli(rootDir, [
+      "raw",
+      "add",
+      "--title",
+      "Binary Source",
+      "--uri",
+      "binary-source.bin",
+      "--kind",
+      "artifact",
+      "--json"
+    ])).stdout);
+    const external = parseData<{ readonly record: { readonly id: string } }>((await runCli(rootDir, [
+      "raw",
+      "add",
+      "--title",
+      "External Source",
+      "--uri",
+      "https://example.test/source.txt",
+      "--json"
+    ])).stdout);
+
+    await runCli(rootDir, ["wiki", "create", "Large Source Notes", "--source", large.record.id, "--json"]);
+
+    const list = await runCli(rootDir, ["raw", "list", "--json"]);
+    const rows = parseData<Array<{
+      readonly id: string;
+      readonly title: string;
+      readonly sourceBacked: boolean;
+      readonly immutable: boolean;
+      readonly processingStatus: string;
+      readonly linkedPageCount: number;
+      readonly retrievalCommand: string;
+      readonly previewCommand: string;
+    }>>(list.stdout);
+    expect(list.exitCode).toBe(0);
+    expect(rows.find((row) => row.id === large.record.id)).toEqual(
+      expect.objectContaining({
+        sourceBacked: true,
+        immutable: true,
+        processingStatus: "linked",
+        linkedPageCount: 1,
+        retrievalCommand: `bwrk raw show ${large.record.id} --json`,
+        previewCommand: `bwrk raw show ${large.record.id} --preview-bytes 4096 --json`
+      })
+    );
+    expect(rows.find((row) => row.id === missing.record.id)).toEqual(expect.objectContaining({ processingStatus: "queued" }));
+
+    const largeShow = parseData<{
+      readonly preview: { readonly status: string; readonly mediaType: string; readonly body: string; readonly truncated: boolean };
+      readonly linkedPages: readonly Array<{ readonly title: string }>;
+    }>((await runCli(rootDir, ["raw", "show", large.record.id, "--preview-bytes", "32", "--json"])).stdout);
+    expect(largeShow.preview).toEqual(expect.objectContaining({ status: "truncated", mediaType: "text", truncated: true }));
+    expect(largeShow.preview.body.length).toBeLessThanOrEqual(32);
+    expect(largeShow.linkedPages).toEqual(expect.arrayContaining([expect.objectContaining({ title: "Large Source Notes" })]));
+
+    const missingShow = parseData<{ readonly preview: { readonly status: string; readonly mediaType: string; readonly message: string } }>(
+      (await runCli(rootDir, ["raw", "show", missing.record.id, "--json"])).stdout
+    );
+    expect(missingShow.preview).toEqual(
+      expect.objectContaining({ status: "missing", mediaType: "missing", message: expect.stringContaining("missing") })
+    );
+
+    const binaryShow = parseData<{ readonly preview: { readonly status: string; readonly mediaType: string } }>(
+      (await runCli(rootDir, ["raw", "show", binary.record.id, "--json"])).stdout
+    );
+    expect(binaryShow.preview).toEqual(expect.objectContaining({ status: "unsupported", mediaType: "binary" }));
+
+    const externalShow = parseData<{ readonly preview: { readonly status: string; readonly mediaType: string } }>(
+      (await runCli(rootDir, ["raw", "show", external.record.id, "--json"])).stdout
+    );
+    expect(externalShow.preview).toEqual(expect.objectContaining({ status: "external", mediaType: "external" }));
+
+    const tooLarge = await runCli(rootDir, ["raw", "show", large.record.id, "--preview-bytes", "65537", "--json"]);
+    expect(tooLarge.exitCode).toBe(2);
+    expect(parseJson<{ readonly code: string; readonly message: string }>(tooLarge.stderr)).toEqual(
+      expect.objectContaining({
+        code: "BOREAL_INVALID_INPUT",
+        message: expect.stringContaining("--preview-bytes must be at most 65536")
+      })
     );
   });
 
@@ -1424,6 +2832,13 @@ describe("bwrk cli", () => {
     );
 
     await runCli(rootDir, ["work", "list", "--session", startedPayload.sessionId, "--json"]);
+    const operationList = await runCli(rootDir, ["operation", "list", "--session-id", startedPayload.sessionId, "--limit", "20", "--json"]);
+    const operationRows = parseData<Array<{ readonly actorId: string; readonly actorKind: string }>>(operationList.stdout);
+    expect(operationList.exitCode).toBe(0);
+    expect(operationRows.length).toBeGreaterThan(0);
+    expect(operationRows.every((operation) => ["human", "agent", "system"].includes(operation.actorKind))).toBe(true);
+    expect(operationRows.every((operation) => operation.actorId.length > 0)).toBe(true);
+
     const ended = await runCli(rootDir, ["session", "end", "--id", startedPayload.sessionId, "--agent", "agent-a", "--label", "cli", "--json"]);
     const endedPayload = parseData<{
       readonly kind: string;
@@ -1475,6 +2890,7 @@ describe("bwrk cli", () => {
     }>(result.stdout);
     const reserve = registry.commands.find((command) => command.path.join(" ") === "work reserve");
     const commands = registry.commands.find((command) => command.path.join(" ") === "commands");
+    const completion = registry.commands.find((command) => command.path.join(" ") === "completion");
     const searchQuery = registry.commands.find((command) => command.path.join(" ") === "search query");
     const searchIndex = registry.commands.find((command) => command.path.join(" ") === "search index");
     const evidenceAdd = registry.commands.find((command) => command.path.join(" ") === "evidence add");
@@ -1483,6 +2899,7 @@ describe("bwrk cli", () => {
     expect(result.exitCode).toBe(0);
     expect(() => validateCommandBehaviorMetadata()).not.toThrow();
     expect(registry.commands.map((command) => command.path.join(" "))).toContain("commands");
+    expect(registry.commands.map((command) => command.path.join(" "))).toContain("completion");
     expect(registry.commands.map((command) => command.path.join(" "))).toContain("version");
     expect(registry.commands.map((command) => command.path.join(" "))).toEqual(
       expect.arrayContaining([
@@ -1509,6 +2926,7 @@ describe("bwrk cli", () => {
         "agent status",
         "session start",
         "session end",
+        "completion",
         "operation list",
         "operation show",
         "operation prune",
@@ -1518,6 +2936,17 @@ describe("bwrk cli", () => {
         "install codex",
         "install claude",
         "install skills",
+        "registry list",
+        "registry add",
+        "registry remove",
+        "registry import-setup",
+        "registry doctor",
+        "sprint list",
+        "sprint show",
+        "sprint current",
+        "sprint activate",
+        "sprint board",
+        "sprint report",
         "export json",
         "export markdown",
         "export ledgers",
@@ -1526,6 +2955,10 @@ describe("bwrk cli", () => {
         "vault init",
         "vault status",
         "raw add",
+        "raw list",
+        "raw show",
+        "wiki list",
+        "wiki show",
         "wiki create",
         "duplicate scan",
         "merge plan",
@@ -1546,6 +2979,12 @@ describe("bwrk cli", () => {
       expect.arrayContaining([
         expect.objectContaining({ name: "force", type: "boolean" }),
         expect.objectContaining({ name: "reason", type: "value" })
+      ])
+    );
+    expect(completion?.flags).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ name: "name", type: "value" }),
+        expect.objectContaining({ name: "json", type: "boolean" })
       ])
     );
     expect(registry.commands.every((command) => command.behavior.examples.length > 0)).toBe(true);
@@ -1575,6 +3014,41 @@ describe("bwrk cli", () => {
     expect(agentFinish?.behavior).toEqual(
       expect.objectContaining({ writesGeneratedArtifacts: true, requiresLock: "state+index" })
     );
+  });
+
+  it("generates shell completions from the command registry", async () => {
+    const rootDir = await makeTempWorkspace();
+    const commandPaths = COMMAND_DEFINITIONS.map(commandPath);
+
+    const zsh = await runCli(rootDir, ["completion", "zsh"]);
+    expect(zsh.exitCode).toBe(0);
+    expect(zsh.stdout).toContain("#compdef bwrk");
+    expect(zsh.stdout).toContain("Generated from COMMAND_DEFINITIONS");
+    expect(zsh.stdout).toContain("compadd --");
+
+    const bash = await runCli(rootDir, ["completion", "bash", "--name", "boreal"]);
+    expect(bash.exitCode).toBe(0);
+    expect(bash.stdout).toContain("complete -F boreal_completion boreal");
+    expect(bash.stdout).toContain("work create");
+
+    const fish = await runCli(rootDir, ["completion", "fish", "--name", "boreal", "--json"]);
+    const fishPayload = parseData<{ readonly shell: string; readonly name: string; readonly script: string }>(fish.stdout);
+    expect(fish.exitCode).toBe(0);
+    expect(fishPayload).toEqual(expect.objectContaining({ shell: "fish", name: "boreal" }));
+    expect(fishPayload.script).toContain("complete -c 'boreal'");
+    expect(fishPayload.script).toContain("-l 'workspace'");
+
+    for (const command of commandPaths) {
+      expect(zsh.stdout).toContain(command);
+      expect(bash.stdout).toContain(command);
+      expect(fishPayload.script).toContain(command);
+    }
+
+    const invalid = await runCli(rootDir, ["completion", "powershell", "--json"]);
+    const invalidPayload = parseJson<{ readonly ok: false; readonly code: string; readonly message: string }>(invalid.stderr);
+    expect(invalid.exitCode).toBe(2);
+    expect(invalidPayload.code).toBe("BOREAL_INVALID_INPUT");
+    expect(invalidPayload.message).toContain("bash, zsh, fish");
   });
 
   it("lists workflows, shows workflow markdown, plans skill installs, and doctors skill assets", async () => {
@@ -1792,6 +3266,79 @@ describe("bwrk cli", () => {
     expect(interactiveCodex.stderr).toContain("--interactive requires a TTY");
   });
 
+  it("reports local source, shim, PATH, and global bwrk install status", async () => {
+    const rootDir = await makeTempWorkspace();
+    const binDir = join(rootDir, "bin");
+    const emptyPath = join(rootDir, "empty-path");
+    await mkdir(binDir, { recursive: true });
+    await mkdir(emptyPath, { recursive: true });
+
+    const missing = await runCli(rootDir, ["install", "status", "--bin-dir", binDir, "--path", emptyPath, "--json"]);
+    const missingPayload = parseData<{
+      readonly schemaVersion: string;
+      readonly localSource: { readonly available: boolean; readonly command: string };
+      readonly localShim: { readonly exists: boolean; readonly executable: boolean; readonly path: string };
+      readonly path: { readonly binDirOnPath: boolean; readonly addToPathCommand: string };
+      readonly globalCommand: { readonly found: boolean };
+      readonly recommendedActions: readonly string[];
+    }>(missing.stdout);
+    const directMissing = await inspectBorealInstallStatus({
+      workspaceRoot: rootDir,
+      checkedAt: "2026-06-27T00:00:00.000Z",
+      binDir,
+      envPath: emptyPath
+    });
+
+    expect(missing.exitCode).toBe(0);
+    expect(missingPayload.schemaVersion).toBe("boreal.cli.install.status.v1");
+    expect(missingPayload.localSource.available).toBe(true);
+    expect(missingPayload.localSource.command).toBe("pnpm bwrk <command>");
+    expect(missingPayload.localShim).toEqual(expect.objectContaining({ exists: false, executable: false, path: join(binDir, "bwrk") }));
+    expect(missingPayload.path.binDirOnPath).toBe(false);
+    expect(missingPayload.path.addToPathCommand).toContain(binDir);
+    expect(missingPayload.globalCommand.found).toBe(false);
+    expect(missingPayload.recommendedActions.join("\n")).toContain("pnpm install:local");
+    expect(directMissing.globalCommand.found).toBe(false);
+
+    const fakeBwrk = join(binDir, "bwrk");
+    await writeFile(fakeBwrk, "#!/bin/sh\necho boreal-work 0.1.0\n", "utf8");
+    await chmod(fakeBwrk, 0o755);
+
+    const found = await runCli(rootDir, ["install", "status", "--bin-dir", binDir, "--path", binDir, "--json"]);
+    const foundPayload = parseData<{
+      readonly localShim: { readonly exists: boolean; readonly executable: boolean };
+      readonly path: { readonly binDirOnPath: boolean };
+      readonly globalCommand: { readonly found: boolean; readonly path: string; readonly probe: { readonly ok: boolean; readonly stdout: string } };
+    }>(found.stdout);
+
+    expect(found.exitCode).toBe(0);
+    expect(foundPayload.localShim).toEqual(expect.objectContaining({ exists: true, executable: true }));
+    expect(foundPayload.path.binDirOnPath).toBe(true);
+    expect(foundPayload.globalCommand).toEqual(
+      expect.objectContaining({
+        found: true,
+        path: fakeBwrk,
+        probe: expect.objectContaining({ ok: true, stdout: "boreal-work 0.1.0" })
+      })
+    );
+  });
+
+  it("surfaces install status in doctor diagnostics", async () => {
+    const rootDir = await makeTempWorkspace();
+    await runCli(rootDir, ["init", "--json"]);
+
+    const doctor = await runCli(rootDir, ["doctor", "--json"]);
+    const payload = parseData<DoctorPayload>(doctor.stdout);
+    const diagnostic = doctorDiagnostic(payload, "install.status");
+
+    expect(diagnostic).toEqual(
+      expect.objectContaining({
+        code: "install.status",
+        details: expect.objectContaining({ schemaVersion: "boreal.cli.install.status.v1" })
+      })
+    );
+  });
+
   it("generates a markdown command reference from the registry", async () => {
     const rootDir = await makeTempWorkspace();
 
@@ -1867,6 +3414,8 @@ describe("bwrk cli", () => {
       "Operation tracked work",
       "--label",
       "Sensitive Label",
+      "--source",
+      "raw:bw_source_1",
       "--ready",
       "--session",
       "Run 42",
@@ -1879,6 +3428,7 @@ describe("bwrk cli", () => {
     expect(created.exitCode).toBe(0);
 
     const state = parseJson<{
+      readonly workItems: Array<{ readonly title: string; readonly meta: { readonly sourceRefs: readonly Array<{ readonly uri: string }> } }>;
       readonly events: Array<{ readonly meta: { readonly id: string }; readonly type: string; readonly operationId?: string }>;
       readonly operations: Array<{
         readonly meta: { readonly id: string; readonly contentHash: string };
@@ -1893,9 +3443,11 @@ describe("bwrk cli", () => {
         readonly eventIds: readonly string[];
       }>;
     }>(await readFile(join(rootDir, ".boreal/runtime/state.json"), "utf8"));
+    const createdWork = state.workItems.find((item) => item.title === "Operation tracked work");
     const workCreatedEvent = state.events.find((event) => event.type === "work.created");
     const operation = state.operations.find((entry) => entry.commandPath === "work create");
 
+    expect(createdWork?.meta.sourceRefs).toEqual([{ uri: "raw:bw_source_1" }]);
     expect(state.operations.map((entry) => entry.commandPath)).toEqual(expect.arrayContaining(["init", "work create"]));
     expect(operation).toEqual(
       expect.objectContaining({
@@ -1910,7 +3462,7 @@ describe("bwrk cli", () => {
     expect(operation?.meta.id).toMatch(/^bw_operation_/);
     expect(operation?.meta.contentHash).toMatch(/^sha256:/);
     expect(operation?.argv).toEqual(
-      expect.arrayContaining(["work", "create", "--label", "<redacted>", "--ready", "--session", "<redacted>", "--actor", "<redacted>"])
+      expect.arrayContaining(["work", "create", "--label", "<redacted>", "--source", "<redacted>", "--ready", "--session", "<redacted>", "--actor", "<redacted>"])
     );
     expect(operation?.argv.join(" ")).not.toContain("Operation tracked work");
     expect(operation?.argv.join(" ")).not.toContain("Sensitive Label");
@@ -1966,6 +3518,58 @@ describe("bwrk cli", () => {
     expect(pruneResult.remainingAfterOperationLog).toBe(2);
     expect(state.operations).toHaveLength(2);
     expect(state.operations.map((operation) => operation.commandPath)).toContain("operation prune");
+  });
+
+  it("keeps strict doctor stable just above the operation prune target", async () => {
+    const rootDir = await makeTempWorkspace();
+
+    await runCli(rootDir, ["init", "--setup-memory", "--json"]);
+    await runCli(rootDir, ["sync", "refresh", "--json"]);
+
+    const initialState = await readState<{
+      readonly operations: Array<Record<string, unknown>>;
+      readonly [key: string]: unknown;
+    }>(rootDir);
+    const template = initialState.operations[0];
+    if (!template) {
+      throw new Error("expected init operation");
+    }
+    const templateMeta = template.meta as Record<string, unknown>;
+    const syntheticOperationCount = 1001;
+    const syntheticOperations = [
+      ...initialState.operations,
+      ...Array.from({ length: syntheticOperationCount - initialState.operations.length }, (_, index) => ({
+        ...template,
+        meta: {
+          ...templateMeta,
+          id: `bw_operation_${(index + 10_000).toString(16).padStart(12, "0")}`,
+          contentHash: `sha256:${(index + 10_000).toString(16).padStart(64, "0")}`
+        },
+        eventIds: []
+      }))
+    ];
+
+    await updateState(rootDir, (state) => ({
+      ...state,
+      operations: syntheticOperations
+    }));
+
+    const strictDoctor = await runCli(rootDir, ["doctor", "--strict", "--json"]);
+    const payload = parseData<DoctorPayload>(strictDoctor.stdout);
+
+    expect(strictDoctor.exitCode).toBe(0);
+    expect(payload.ok).toBe(true);
+    expect(doctorDiagnostic(payload, "operation.volume")).toEqual(
+      expect.objectContaining({
+        severity: "ok",
+        message: "Operation log volume is above the prune target but within maintenance grace",
+        details: expect.objectContaining({
+          operationCount: syntheticOperationCount,
+          recommendedKeep: 1000,
+          warningThreshold: 1025
+        })
+      })
+    );
   });
 
   it("repairs legacy operation-event links and marks unlinked events", async () => {
@@ -2112,6 +3716,7 @@ describe("bwrk cli", () => {
   it("prints stable version output and treats broken stdout pipes as clean exits", async () => {
     const rootDir = await makeTempWorkspace();
     const text = await runCli(rootDir, ["--version"]);
+    const human = await runCli(rootDir, ["version"]);
     const json = await runCli(rootDir, ["version", "--json"]);
     const shortcutJson = await runCli(rootDir, ["--version", "--json"]);
     const brokenPipeExit = await main(
@@ -2126,15 +3731,65 @@ describe("bwrk cli", () => {
       },
       rootDir
     );
+    const jsonPayload = parseData<{
+      readonly schemaVersion: string;
+      readonly name: string;
+      readonly version: string;
+      readonly cli: { readonly packageName: string; readonly packageVersion: string };
+      readonly runtime: { readonly recordSchemaVersion: string; readonly fileStoreSchemaVersion: string };
+      readonly schemas: Record<string, string>;
+      readonly publishedSchemas: { readonly totalCount: number; readonly ids: readonly string[] };
+      readonly migrationPolicy: { readonly version: string; readonly snapshotSchemaVersion: string; readonly rules: readonly string[] };
+    }>(json.stdout);
+    const shortcutPayload = parseData<{ readonly schemaVersion: string; readonly runtime: { readonly recordSchemaVersion: string } }>(
+      shortcutJson.stdout
+    );
 
     expect(text.exitCode).toBe(0);
     expect(text.stdout).toBe("boreal-work 0.1.0\n");
+    expect(human.exitCode).toBe(0);
+    expect(human.stdout).toContain("schemaVersion: boreal.cli.version.v1");
+    expect(human.stdout).toContain("runtimeRecord: boreal.runtime.v1");
     expect(json.exitCode).toBe(0);
-    expect(parseData<{ readonly name: string; readonly version: string }>(json.stdout)).toEqual(
-      expect.objectContaining({ name: "boreal-work", version: "0.1.0" })
+    expect(jsonPayload).toEqual(
+      expect.objectContaining({ schemaVersion: "boreal.cli.version.v1", name: "boreal-work", version: "0.1.0" })
     );
-    expect(parseData<{ readonly name: string; readonly version: string }>(shortcutJson.stdout)).toEqual(
-      expect.objectContaining({ name: "boreal-work", version: "0.1.0" })
+    expect(jsonPayload.cli).toEqual(expect.objectContaining({ packageName: "@boreal/cli", packageVersion: "0.1.0" }));
+    expect(jsonPayload.runtime).toEqual({
+      recordSchemaVersion: "boreal.runtime.v1",
+      fileStoreSchemaVersion: "boreal.file-store.v1"
+    });
+    expect(jsonPayload.schemas).toEqual(
+      expect.objectContaining({
+        runtimeRecord: "boreal.runtime.v1",
+        fileStore: "boreal.file-store.v1",
+        export: "boreal.export.v1",
+        ledgerManifest: "boreal.ledgers.v1",
+        ledgerDeletion: "boreal.ledger-deletion.v1",
+        searchIndex: "boreal.search-index.v1",
+        sqliteCache: "boreal.sqlite-cache.v1",
+        projectSetup: "boreal.project-setup.v1",
+        projectRegistry: "boreal.project-registry.v1",
+        vault: "boreal.vault.v1",
+        daemonStatus: "boreal.daemon.status.v1"
+      })
+    );
+    expect(jsonPayload.publishedSchemas.totalCount).toBeGreaterThanOrEqual(14);
+    expect(jsonPayload.publishedSchemas.ids).toContain("https://boreal.work/schemas/records/work-item.schema.json");
+    expect(jsonPayload.migrationPolicy).toEqual(
+      expect.objectContaining({
+        version: "boreal.runtime-migration-policy.v1",
+        snapshotSchemaVersion: "boreal.export.v1"
+      })
+    );
+    expect(jsonPayload.migrationPolicy.rules.join("\n")).toContain(
+      "Non-reversible migrations must create a boreal.export.v1 recovery snapshot"
+    );
+    expect(shortcutPayload).toEqual(
+      expect.objectContaining({
+        schemaVersion: "boreal.cli.version.v1",
+        runtime: expect.objectContaining({ recordSchemaVersion: "boreal.runtime.v1" })
+      })
     );
     expect(isBrokenPipeError(Object.assign(new Error("broken pipe"), { code: "EPIPE" }))).toBe(true);
     expect(brokenPipeExit).toBe(0);
@@ -2379,6 +4034,49 @@ describe("bwrk cli", () => {
     expect(missingPayload.code).toBe("BOREAL_NOT_FOUND");
   });
 
+  it("bounds dependency tree output for shared dependency subgraphs", async () => {
+    const rootDir = await makeTempWorkspace();
+    await runCli(rootDir, ["init", "--json"]);
+    const target = parseData<{ readonly meta: { readonly id: string } }>(
+      (await runCli(rootDir, ["work", "create", "Shared dependency target", "--ready", "--json"])).stdout
+    );
+    const first = parseData<{ readonly meta: { readonly id: string } }>(
+      (await runCli(rootDir, ["work", "create", "Shared dependency first", "--ready", "--json"])).stdout
+    );
+    const second = parseData<{ readonly meta: { readonly id: string } }>(
+      (await runCli(rootDir, ["work", "create", "Shared dependency second", "--ready", "--json"])).stdout
+    );
+    const shared = parseData<{ readonly meta: { readonly id: string } }>(
+      (await runCli(rootDir, ["work", "create", "Shared dependency leaf", "--ready", "--json"])).stdout
+    );
+
+    await runCli(rootDir, ["dep", "add", target.meta.id, first.meta.id, "--json"]);
+    await runCli(rootDir, ["dep", "add", target.meta.id, second.meta.id, "--json"]);
+    await runCli(rootDir, ["dep", "add", first.meta.id, shared.meta.id, "--json"]);
+    await runCli(rootDir, ["dep", "add", second.meta.id, shared.meta.id, "--json"]);
+
+    interface TestDependencyTreeNode {
+      readonly id: string;
+      readonly shared?: boolean;
+      readonly dependencies: readonly TestDependencyTreeNode[];
+    }
+
+    const tree = parseData<TestDependencyTreeNode>((await runCli(rootDir, ["dep", "tree", target.meta.id, "--json"])).stdout);
+    const nodes: TestDependencyTreeNode[] = [];
+    const visit = (node: TestDependencyTreeNode): void => {
+      nodes.push(node);
+      for (const dependency of node.dependencies) {
+        visit(dependency);
+      }
+    };
+    visit(tree);
+
+    const sharedLeafNodes = nodes.filter((node) => node.id === shared.meta.id);
+    expect(sharedLeafNodes).toHaveLength(2);
+    expect(sharedLeafNodes.filter((node) => node.shared === true)).toHaveLength(1);
+    expect(sharedLeafNodes.every((node) => node.dependencies.length === 0)).toBe(true);
+  });
+
   it("normalizes cli machine strings and rejects unsafe unicode input", async () => {
     const rootDir = await makeTempWorkspace();
     await runCli(rootDir, ["init", "--json"]);
@@ -2553,16 +4251,30 @@ describe("bwrk cli", () => {
     expect(listed.exitCode).toBe(0);
     expect(payload.truncated).toBe(true);
     expect(payload.command).toBe("work list");
+    expect(Object.keys(payload)).toEqual([
+      "truncated",
+      "command",
+      "maxResultSizeChars",
+      "fullResultPath",
+      "fullResultBytes",
+      "preview"
+    ]);
+    expect(payload.maxResultSizeChars).toBe(25_000);
     expect(payload.fullResultPath).toMatch(/^\.boreal\/results\/result-/);
+    expect(payload.fullResultPath).toMatch(/\.json$/u);
+    expect(payload.fullResultPath).not.toContain(rootDir);
     expect(payload.fullResultBytes).toBeGreaterThan(25_000);
     expect(payload.preview).toEqual(expect.objectContaining({ kind: "array", length: 80 }));
 
+    const fullResultFile = join(rootDir, payload.fullResultPath);
+    const fullResultStats = await stat(fullResultFile);
     const fullResult = parseJson<{ readonly ok: true; readonly data: Array<{ readonly title: string }> }>(
-      await readFile(join(rootDir, payload.fullResultPath), "utf8")
+      await readFile(fullResultFile, "utf8")
     );
     expect(fullResult.ok).toBe(true);
     expect(fullResult.data).toHaveLength(80);
     expect(fullResult.data[0]?.title).toContain("Spool output");
+    expect(fullResultStats.size).toBe(payload.fullResultBytes);
   });
 
   it("runs the knowledge context lifecycle through file-backed commands", async () => {
@@ -3535,6 +5247,81 @@ describe("bwrk cli", () => {
     ]);
   });
 
+  it("reports SQLite cache missing, stale, and corrupt states in doctor", async () => {
+    const rootDir = await makeTempWorkspace();
+    await runCli(rootDir, ["init", "--json"]);
+    await runCli(rootDir, ["vault", "init", "--json"]);
+    await runCli(rootDir, ["work", "create", "SQLite cache doctor work", "--json"]);
+
+    const missingDoctor = await runCli(rootDir, ["doctor", "--json"]);
+    const missingPayload = parseData<DoctorPayload>(missingDoctor.stdout);
+    expect(doctorDiagnostic(missingPayload, "cache.sqlite")).toEqual(
+      expect.objectContaining({
+        code: "cache.sqlite",
+        severity: "ok",
+        message: "SQLite generated cache is not built yet",
+        details: expect.objectContaining({ exists: false })
+      })
+    );
+
+    const refresh = await runCli(rootDir, ["sync", "refresh", "--json"]);
+    const refreshPayload = parseData<{
+      readonly sqliteCache: {
+        readonly path: string;
+        readonly sqliteAvailable: boolean;
+        readonly rebuilt: boolean;
+        readonly skipped: boolean;
+      };
+    }>(refresh.stdout);
+    expect(refresh.exitCode).toBe(0);
+    if (!refreshPayload.sqliteCache.sqliteAvailable) {
+      expect(refreshPayload.sqliteCache).toEqual(expect.objectContaining({ rebuilt: false, skipped: true }));
+      return;
+    }
+
+    const freshDoctor = await runCli(rootDir, ["doctor", "--json"]);
+    const freshPayload = parseData<DoctorPayload>(freshDoctor.stdout);
+    expect(doctorDiagnostic(freshPayload, "cache.sqlite")).toEqual(
+      expect.objectContaining({
+        code: "cache.sqlite",
+        severity: "ok",
+        message: "SQLite generated cache matches current runtime state",
+        details: expect.objectContaining({ exists: true, stale: false })
+      })
+    );
+
+    await runCli(rootDir, ["work", "create", "SQLite cache drift work", "--json"]);
+    const staleDoctor = await runCli(rootDir, ["doctor", "--json"]);
+    const stalePayload = parseData<DoctorPayload>(staleDoctor.stdout);
+    expect(doctorDiagnostic(stalePayload, "cache.sqlite")).toEqual(
+      expect.objectContaining({
+        code: "cache.sqlite",
+        severity: "warning",
+        message: "SQLite generated cache differs from current runtime state",
+        details: expect.objectContaining({
+          stale: true,
+          repairCommand: "bwrk sync refresh --json"
+        })
+      })
+    );
+
+    await runCli(rootDir, ["sync", "refresh", "--json"]);
+    await writeFile(refreshPayload.sqliteCache.path, "not a sqlite database", "utf8");
+    const corruptDoctor = await runCli(rootDir, ["doctor", "--json"]);
+    const corruptPayload = parseData<DoctorPayload>(corruptDoctor.stdout);
+    expect(doctorDiagnostic(corruptPayload, "cache.sqlite")).toEqual(
+      expect.objectContaining({
+        code: "cache.sqlite",
+        severity: "warning",
+        message: "SQLite generated cache is invalid",
+        details: expect.objectContaining({
+          error: expect.any(String),
+          repairCommand: "bwrk sync refresh --json"
+        })
+      })
+    );
+  });
+
   it("exports, snapshots, imports, and rejects conflicting JSON snapshots", async () => {
     const rootDir = await makeTempWorkspace();
     await runCli(rootDir, ["init", "--json"]);
@@ -3576,6 +5363,14 @@ describe("bwrk cli", () => {
       "--json"
     ]);
     await runCli(rootDir, ["context", "rebuild", "--json"]);
+    const sourceState = parseJson<{
+      readonly events: Array<{ readonly type: string; readonly subjectId: string; readonly operationId?: string; readonly operationLink?: string }>;
+      readonly operations: Array<{ readonly commandPath: string }>;
+    }>(await readFile(join(rootDir, ".boreal/runtime/state.json"), "utf8"));
+    expect(sourceState.operations.map((operation) => operation.commandPath)).toEqual(
+      expect.arrayContaining(["work create", "evidence add", "source add", "context rebuild"])
+    );
+    expect(sourceState.events.some((event) => event.operationId !== undefined || event.operationLink !== undefined)).toBe(true);
 
     const exportPath = join(rootDir, "boreal-export.json");
     const exported = await runCli(rootDir, ["export", "json", "--out", "boreal-export.json", "--json"]);
@@ -3589,12 +5384,15 @@ describe("bwrk cli", () => {
       readonly contentHash: string;
       readonly state: {
         readonly workItems: Array<{ readonly meta: { readonly id: string }; readonly title: string }>;
-        readonly events: Array<{ readonly operationId?: string }>;
+        readonly events: Array<{ readonly type: string; readonly subjectId: string; readonly operationId?: string; readonly operationLink?: string }>;
       };
     }>(await readFile(exportPath, "utf8"));
     expect(exportDocument.schemaVersion).toBe("boreal.export.v1");
+    expect("operations" in exportDocument.state).toBe(false);
     expect(exportDocument.state.workItems.map((item) => item.meta.id)).toContain(work.meta.id);
-    expect(exportDocument.state.events.every((event) => event.operationId === undefined)).toBe(true);
+    expect(
+      exportDocument.state.events.every((event) => event.operationId === undefined && event.operationLink === undefined)
+    ).toBe(true);
 
     const markdown = await runCli(rootDir, ["export", "markdown", "--out", "markdown-export", "--json"]);
     const markdownPayload = parseData<{ readonly outDir: string; readonly files: readonly string[] }>(markdown.stdout);
@@ -3633,8 +5431,12 @@ describe("bwrk cli", () => {
         expect.objectContaining({ section: "events", path: "events.jsonl" })
       ])
     );
+    expect(ledgerPayload.files.map((file) => file.section)).not.toContain("operations");
     const workLedger = await readFile(join(rootDir, ".boreal/ledgers/work-items.jsonl"), "utf8");
     expect(workLedger).toContain("\"title\":\"Exportable work\"");
+    const eventLedger = await readFile(join(rootDir, ".boreal/ledgers/events.jsonl"), "utf8");
+    expect(eventLedger).not.toContain("operationId");
+    expect(eventLedger).not.toContain("operationLink");
     expect(await readFile(join(rootDir, ".boreal/ledgers/deletions.jsonl"), "utf8")).toBe("");
 
     const freshLedgerStatus = await runCli(rootDir, ["ledger", "status", "--json"]);
@@ -3685,6 +5487,14 @@ describe("bwrk cli", () => {
       readonly postRefreshStatusOk: boolean;
       readonly exitReason: string;
       readonly contextViews: number;
+      readonly sqliteCache: {
+        readonly path: string;
+        readonly sqliteAvailable: boolean;
+        readonly rebuilt: boolean;
+        readonly skipped: boolean;
+        readonly sourceContentHash: string;
+        readonly recordCounts: { readonly workItems: number };
+      };
       readonly status: {
         readonly ok: boolean;
         readonly ledgers: { readonly ok: boolean; readonly stale: boolean };
@@ -3698,6 +5508,14 @@ describe("bwrk cli", () => {
     expect(initialRefreshPayload.postRefreshStatusOk).toBe(true);
     expect(initialRefreshPayload.exitReason).toBe("ok");
     expect(initialRefreshPayload.contextViews).toBeGreaterThan(0);
+    expect(initialRefreshPayload.sqliteCache.path).toBe(join(rootDir, ".boreal/cache/runtime-cache.sqlite"));
+    expect(initialRefreshPayload.sqliteCache.sourceContentHash).toMatch(/^sha256:/);
+    expect(initialRefreshPayload.sqliteCache.recordCounts.workItems).toBe(1);
+    if (initialRefreshPayload.sqliteCache.sqliteAvailable) {
+      expect(initialRefreshPayload.sqliteCache).toEqual(expect.objectContaining({ rebuilt: true, skipped: false }));
+    } else {
+      expect(initialRefreshPayload.sqliteCache).toEqual(expect.objectContaining({ rebuilt: false, skipped: true }));
+    }
     expect(initialRefreshPayload.status).toEqual(
       expect.objectContaining({
         ok: true,
@@ -3728,10 +5546,13 @@ describe("bwrk cli", () => {
 
     const freshDoctor = await runCli(rootDir, ["doctor", "--json"]);
     const freshDoctorPayload = parseData<{
-      readonly diagnostics: Array<{ readonly code: string; readonly severity: string }>;
+      readonly diagnostics: Array<{ readonly code: string; readonly severity: string; readonly details?: { readonly exists?: boolean } }>;
     }>(freshDoctor.stdout);
     expect(freshDoctorPayload.diagnostics).toEqual(
-      expect.arrayContaining([expect.objectContaining({ code: "ledger.export_drift", severity: "ok" })])
+      expect.arrayContaining([
+        expect.objectContaining({ code: "ledger.export_drift", severity: "ok" }),
+        expect.objectContaining({ code: "cache.sqlite", severity: "ok" })
+      ])
     );
 
     const ledgerTargetDir = await makeTempWorkspace();
@@ -3765,6 +5586,12 @@ describe("bwrk cli", () => {
     expect(importedLedgers.exitCode).toBe(0);
     expect(importedLedgerPayload.imported.workItems).toBe(1);
     expect(importedLedgerPayload.skipped.workItems).toBe(0);
+    const importedLedgerState = parseJson<{
+      readonly operations: Array<{ readonly commandPath: string }>;
+    }>(await readFile(join(ledgerTargetDir, ".boreal/runtime/state.json"), "utf8"));
+    expect(importedLedgerState.operations.map((operation) => operation.commandPath)).not.toEqual(
+      expect.arrayContaining(["work create", "evidence add", "source add", "context rebuild"])
+    );
 
     const importedLedgersAgain = await runCli(ledgerTargetDir, [
       "import",
@@ -3916,6 +5743,21 @@ describe("bwrk cli", () => {
     );
     expect(importPayload.imported.workItems).toBe(1);
     expect(importPayload.skipped.workItems).toBe(0);
+    const importedState = parseJson<{
+      readonly events: Array<{ readonly type: string; readonly subjectId: string; readonly operationId?: string; readonly operationLink?: string }>;
+      readonly operations: Array<{ readonly commandPath: string }>;
+    }>(await readFile(join(targetDir, ".boreal/runtime/state.json"), "utf8"));
+    expect(importedState.operations.map((operation) => operation.commandPath)).not.toEqual(
+      expect.arrayContaining(["work create", "evidence add", "source add", "context rebuild"])
+    );
+    const importedWorkCreatedEvent = importedState.events.find(
+      (event) => event.type === "work.created" && event.subjectId === work.meta.id
+    );
+    expect(importedWorkCreatedEvent).toEqual(
+      expect.objectContaining({ type: "work.created", subjectId: work.meta.id })
+    );
+    expect(importedWorkCreatedEvent?.operationId).toBeUndefined();
+    expect(importedWorkCreatedEvent?.operationLink).toBeUndefined();
 
     const importedAgain = await runCli(targetDir, ["import", "json", "--from", exportPath, "--allow-external-read", "--json"]);
     expect(parseData<{ readonly skipped: { readonly workItems: number } }>(importedAgain.stdout).skipped.workItems).toBe(1);
@@ -4853,6 +6695,98 @@ describe("bwrk cli", () => {
     expect(results.map((result) => result.exitCode)).toEqual([0, 0, 0]);
     expect(payloads.filter((payload) => payload.initialized)).toHaveLength(1);
     expect(state.events.filter((event) => event.type === "workspace.initialized")).toHaveLength(1);
+  });
+
+  it("serializes concurrent runtime writers before refreshing search and context projections", async () => {
+    const rootDir = await makeTempWorkspace();
+    await runCli(rootDir, ["init", "--json"]);
+    await runCli(rootDir, ["vault", "init", "--json"]);
+
+    const writes = await Promise.all(
+      Array.from({ length: 18 }, (_, index) =>
+        runCli(rootDir, [
+          "work",
+          "create",
+          `Concurrent projection work ${String(index).padStart(2, "0")}`,
+          "--label",
+          "concurrent-projection",
+          "--ready",
+          "--json"
+        ])
+      )
+    );
+    const created = writes.map((result) =>
+      parseData<{ readonly meta: { readonly id: string }; readonly title: string }>(result.stdout)
+    );
+    const blocked = created[0];
+    const blocker = created[1];
+    if (!blocked || !blocker) {
+      throw new Error("concurrent writer fixture did not create enough work items");
+    }
+
+    expect(writes.map((result) => result.exitCode)).toEqual(Array.from({ length: 18 }, () => 0));
+    expect(new Set(created.map((work) => work.meta.id)).size).toBe(18);
+
+    const listed = await runCli(rootDir, [
+      "work",
+      "list",
+      "--label",
+      "concurrent-projection",
+      "--limit",
+      "20",
+      "--json"
+    ]);
+    const listedRows = parseData<Array<{ readonly id: string; readonly title: string }>>(listed.stdout);
+    expect(listed.exitCode).toBe(0);
+    expect(listedRows).toHaveLength(18);
+    expect(new Set(listedRows.map((row) => row.id)).size).toBe(18);
+
+    const dependency = await runCli(rootDir, ["dep", "add", blocked.meta.id, blocker.meta.id, "--json"]);
+    expect(dependency.exitCode).toBe(0);
+    const shown = parseData<{
+      readonly status: string;
+      readonly dependencyIds: readonly string[];
+      readonly activeBlockerIds: readonly string[];
+    }>((await runCli(rootDir, ["work", "show", blocked.meta.id, "--json"])).stdout);
+    expect(shown).toEqual(
+      expect.objectContaining({
+        status: "blocked",
+        dependencyIds: [blocker.meta.id],
+        activeBlockerIds: [blocker.meta.id]
+      })
+    );
+
+    const refresh = await runCli(rootDir, ["sync", "refresh", "--json"]);
+    const refreshPayload = parseData<{
+      readonly contextViews: number;
+      readonly searchIndex: { readonly documentCount: number };
+      readonly ledgers: { readonly recordCounts: { readonly workItems: number; readonly contextPacks: number } };
+    }>(refresh.stdout);
+    expect(refresh.exitCode).toBe(0);
+    expect(refreshPayload.contextViews).toBeGreaterThanOrEqual(18);
+    expect(refreshPayload.searchIndex.documentCount).toBeGreaterThanOrEqual(18);
+    expect(refreshPayload.ledgers.recordCounts).toEqual(
+      expect.objectContaining({ workItems: 18, contextPacks: 18 })
+    );
+
+    const search = await runCli(rootDir, ["search", "query", "Concurrent projection work", "--json"]);
+    const searchRows = parseData<Array<{ readonly type: string; readonly title: string }>>(search.stdout);
+    expect(search.exitCode).toBe(0);
+    expect(searchRows.some((row) => row.type === "work" && row.title.includes("Concurrent projection work"))).toBe(true);
+
+    const context = parseData<{ readonly facts: readonly string[] }>(
+      (await runCli(rootDir, ["context", "show", blocked.meta.id, "--json"])).stdout
+    );
+    expect(context.facts).toContain("status: blocked");
+
+    const doctor = await runCli(rootDir, ["doctor", "--json"]);
+    const doctorPayload = parseData<DoctorPayload>(doctor.stdout);
+    expect(doctor.exitCode).toBe(0);
+    expect(doctorPayload.ok).toBe(true);
+    expect(doctorDiagnostic(doctorPayload, "graph.block_consistency")).toEqual(
+      expect.objectContaining({ severity: "ok" })
+    );
+    expect(doctorDiagnostic(doctorPayload, "search.index")).toEqual(expect.objectContaining({ severity: "ok" }));
   });
 
   it("supports bounded and filtered work lists", async () => {

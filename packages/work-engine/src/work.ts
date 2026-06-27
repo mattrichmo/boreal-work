@@ -11,6 +11,7 @@ import {
   type GraphEdge,
   type IsoTimestamp,
   type RuntimePolicy,
+  type SourceRef,
   type VerificationRecord,
   type WorkId,
   type WorkItem,
@@ -29,6 +30,7 @@ export interface CreateWorkItemInput {
   readonly acceptanceCriteria?: readonly string[];
   readonly labels?: readonly string[];
   readonly parentId?: WorkId;
+  readonly sourceRefs?: readonly SourceRef[];
   readonly nonce?: number;
   readonly actor: ActorRef;
   readonly now: IsoTimestamp;
@@ -55,6 +57,7 @@ export function createWorkItem(input: CreateWorkItemInput): WorkItem {
   const title = normalizeMachineString(input.title, "title");
   const description = input.description?.trim() ?? "";
   const labels = normalizeLabels(input.labels ?? []);
+  const sourceRefs = normalizeSourceRefs(input.sourceRefs ?? []);
   const actorId = normalizeActorId(String(input.actor.id));
   const id = deterministicId<WorkId>("work", {
     title,
@@ -71,6 +74,7 @@ export function createWorkItem(input: CreateWorkItemInput): WorkItem {
       id,
       now: input.now,
       actor: input.actor,
+      sourceRefs,
       tags: labels
     }),
     kind: input.kind ?? "task",
@@ -85,6 +89,22 @@ export function createWorkItem(input: CreateWorkItemInput): WorkItem {
     evidenceIds: [],
     verificationIds: []
   });
+}
+
+function normalizeSourceRefs(sourceRefs: readonly SourceRef[]): readonly SourceRef[] {
+  const seen = new Set<string>();
+  const normalized: SourceRef[] = [];
+  for (const sourceRef of sourceRefs) {
+    const uri = normalizeMachineString(sourceRef.uri, "source ref uri");
+    const label = sourceRef.label ? normalizeMachineString(sourceRef.label, "source ref label") : undefined;
+    const key = `${uri}\u0000${label ?? ""}\u0000${sourceRef.contentHash ?? ""}`;
+    if (seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    normalized.push({ uri, label, contentHash: sourceRef.contentHash });
+  }
+  return normalized;
 }
 
 export function markWorkReady(work: WorkItem, dependencies: readonly WorkItem[], now: IsoTimestamp, actor: ActorRef): WorkItem {

@@ -7,6 +7,7 @@ import { BorealError, assertPathInside, assertRealPathInside } from "@boreal/cor
 import { COMMAND_DEFINITIONS, commandPath } from "./command-registry.js";
 
 const repoRoot = fileURLToPath(new URL("../../..", import.meta.url));
+const SKILL_FORBIDDEN_WORKFLOW_BODY_HEADINGS = ["## Steps", "## Command Sequences", "## CLI Commands", "## Finish Criteria"] as const;
 
 export interface WorkflowAsset {
   readonly path: string;
@@ -132,6 +133,22 @@ export async function inspectWorkflowAssets(input: {
         path: skill.path,
         message: "Skill must explain how to resolve workflow refs when installed workflow files are not local"
       });
+    }
+    if (!skill.text.includes("Keep this skill as a thin adapter")) {
+      issues.push({
+        code: "skill.not_thin_adapter",
+        path: skill.path,
+        message: "Skill must stay a thin adapter and defer detailed execution steps to workflow files"
+      });
+    }
+    for (const heading of SKILL_FORBIDDEN_WORKFLOW_BODY_HEADINGS) {
+      if (skill.text.includes(heading)) {
+        issues.push({
+          code: "skill.duplicates_workflow_body",
+          path: skill.path,
+          message: `Skill must not duplicate workflow body section ${heading}`
+        });
+      }
     }
     for (const workflow of skill.workflows) {
       if (!workflowRefs.has(workflow)) {

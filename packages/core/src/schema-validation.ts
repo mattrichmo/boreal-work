@@ -1,10 +1,40 @@
+import { dirname, isAbsolute, relative, resolve } from "node:path";
+
 import { BorealError } from "./errors.js";
 import type { RuntimePolicy } from "./policies.js";
+import { PROJECT_REGISTRY_SCHEMA_ID, PROJECT_REGISTRY_SCHEMA_VERSION } from "./project-registry.js";
 
 export interface SchemaValidationIssue {
   readonly schemaId: string;
   readonly path: string;
   readonly message: string;
+}
+
+export type SchemaIssueValidator = (value: unknown, path?: string) => readonly SchemaValidationIssue[];
+
+export interface RuntimeSnapshotSchemaInput {
+  readonly workItems?: readonly unknown[];
+  readonly evidence?: readonly unknown[];
+  readonly verifications?: readonly unknown[];
+  readonly knowledgeSources?: readonly unknown[];
+  readonly claims?: readonly unknown[];
+  readonly decisions?: readonly unknown[];
+  readonly graphEdges?: readonly unknown[];
+  readonly reservations?: readonly unknown[];
+  readonly events?: readonly unknown[];
+  readonly operations?: readonly unknown[];
+  readonly projections?: readonly unknown[];
+  readonly contextPacks?: readonly unknown[];
+}
+
+export type RuntimeSnapshotSection = keyof RuntimeSnapshotSchemaInput;
+
+export interface PublishedSchemaContract {
+  readonly key: string;
+  readonly schemaId: string;
+  readonly schemaPath: string;
+  readonly validator: SchemaIssueValidator;
+  readonly runtimeSection?: RuntimeSnapshotSection;
 }
 
 export const RUNTIME_SCHEMA_IDS = {
@@ -23,58 +53,127 @@ export const RUNTIME_SCHEMA_IDS = {
   runtimePolicy: "https://boreal.work/schemas/policies/runtime-policy.schema.json"
 } as const;
 
-export function runtimeSnapshotSchemaIssues(snapshot: {
-  readonly workItems?: readonly unknown[];
-  readonly evidence?: readonly unknown[];
-  readonly verifications?: readonly unknown[];
-  readonly knowledgeSources?: readonly unknown[];
-  readonly claims?: readonly unknown[];
-  readonly decisions?: readonly unknown[];
-  readonly graphEdges?: readonly unknown[];
-  readonly reservations?: readonly unknown[];
-  readonly events?: readonly unknown[];
-  readonly operations?: readonly unknown[];
-  readonly projections?: readonly unknown[];
-  readonly contextPacks?: readonly unknown[];
-}): readonly SchemaValidationIssue[] {
+export const RUNTIME_SCHEMA_CONTRACTS = [
+  {
+    key: "workItem",
+    schemaId: RUNTIME_SCHEMA_IDS.workItem,
+    schemaPath: "schemas/records/work-item.schema.json",
+    runtimeSection: "workItems",
+    validator: workItemSchemaIssues
+  },
+  {
+    key: "evidenceRecord",
+    schemaId: RUNTIME_SCHEMA_IDS.evidenceRecord,
+    schemaPath: "schemas/records/evidence-record.schema.json",
+    runtimeSection: "evidence",
+    validator: evidenceRecordSchemaIssues
+  },
+  {
+    key: "verificationRecord",
+    schemaId: RUNTIME_SCHEMA_IDS.verificationRecord,
+    schemaPath: "schemas/records/verification-record.schema.json",
+    runtimeSection: "verifications",
+    validator: verificationRecordSchemaIssues
+  },
+  {
+    key: "knowledgeSource",
+    schemaId: RUNTIME_SCHEMA_IDS.knowledgeSource,
+    schemaPath: "schemas/records/knowledge-source.schema.json",
+    runtimeSection: "knowledgeSources",
+    validator: knowledgeSourceSchemaIssues
+  },
+  {
+    key: "claimRecord",
+    schemaId: RUNTIME_SCHEMA_IDS.claimRecord,
+    schemaPath: "schemas/records/claim-record.schema.json",
+    runtimeSection: "claims",
+    validator: claimRecordSchemaIssues
+  },
+  {
+    key: "decisionRecord",
+    schemaId: RUNTIME_SCHEMA_IDS.decisionRecord,
+    schemaPath: "schemas/records/decision-record.schema.json",
+    runtimeSection: "decisions",
+    validator: decisionRecordSchemaIssues
+  },
+  {
+    key: "graphEdge",
+    schemaId: RUNTIME_SCHEMA_IDS.graphEdge,
+    schemaPath: "schemas/records/graph-edge.schema.json",
+    runtimeSection: "graphEdges",
+    validator: graphEdgeSchemaIssues
+  },
+  {
+    key: "agentReservation",
+    schemaId: RUNTIME_SCHEMA_IDS.agentReservation,
+    schemaPath: "schemas/records/agent-reservation.schema.json",
+    runtimeSection: "reservations",
+    validator: agentReservationSchemaIssues
+  },
+  {
+    key: "runtimeEvent",
+    schemaId: RUNTIME_SCHEMA_IDS.runtimeEvent,
+    schemaPath: "schemas/events/runtime-event.schema.json",
+    runtimeSection: "events",
+    validator: runtimeEventSchemaIssues
+  },
+  {
+    key: "runtimeOperation",
+    schemaId: RUNTIME_SCHEMA_IDS.runtimeOperation,
+    schemaPath: "schemas/operations/runtime-operation.schema.json",
+    runtimeSection: "operations",
+    validator: runtimeOperationSchemaIssues
+  },
+  {
+    key: "projectionRecord",
+    schemaId: RUNTIME_SCHEMA_IDS.projectionRecord,
+    schemaPath: "schemas/projections/projection-record.schema.json",
+    runtimeSection: "projections",
+    validator: projectionRecordSchemaIssues
+  },
+  {
+    key: "contextPack",
+    schemaId: RUNTIME_SCHEMA_IDS.contextPack,
+    schemaPath: "schemas/projections/context-pack.schema.json",
+    runtimeSection: "contextPacks",
+    validator: contextPackSchemaIssues
+  },
+  {
+    key: "runtimePolicy",
+    schemaId: RUNTIME_SCHEMA_IDS.runtimePolicy,
+    schemaPath: "schemas/policies/runtime-policy.schema.json",
+    runtimeSection: undefined,
+    validator: runtimePolicySchemaIssues
+  }
+] as const satisfies readonly PublishedSchemaContract[];
+
+export const PROJECT_SCHEMA_CONTRACTS = [
+  {
+    key: "projectRegistry",
+    schemaId: PROJECT_REGISTRY_SCHEMA_ID,
+    schemaPath: "schemas/projects/project-registry.schema.json",
+    runtimeSection: undefined,
+    validator: projectRegistryDocumentSchemaIssues
+  }
+] as const satisfies readonly PublishedSchemaContract[];
+
+export const PUBLISHED_SCHEMA_CONTRACTS = [
+  ...RUNTIME_SCHEMA_CONTRACTS,
+  ...PROJECT_SCHEMA_CONTRACTS
+] as const satisfies readonly PublishedSchemaContract[];
+
+export function runtimeSnapshotSchemaIssues(snapshot: RuntimeSnapshotSchemaInput): readonly SchemaValidationIssue[] {
   return [
-    ...arrayItems(snapshot.workItems ?? [], RUNTIME_SCHEMA_IDS.workItem, "workItems", workItemSchemaIssues),
-    ...arrayItems(snapshot.evidence ?? [], RUNTIME_SCHEMA_IDS.evidenceRecord, "evidence", evidenceRecordSchemaIssues),
-    ...arrayItems(
-      snapshot.verifications ?? [],
-      RUNTIME_SCHEMA_IDS.verificationRecord,
-      "verifications",
-      verificationRecordSchemaIssues
+    ...RUNTIME_SCHEMA_CONTRACTS.flatMap((contract) =>
+      contract.runtimeSection === undefined
+        ? []
+        : arrayItems(
+            snapshot[contract.runtimeSection] ?? [],
+            contract.schemaId,
+            contract.runtimeSection,
+            contract.validator
+          )
     ),
-    ...arrayItems(
-      snapshot.knowledgeSources ?? [],
-      RUNTIME_SCHEMA_IDS.knowledgeSource,
-      "knowledgeSources",
-      knowledgeSourceSchemaIssues
-    ),
-    ...arrayItems(snapshot.claims ?? [], RUNTIME_SCHEMA_IDS.claimRecord, "claims", claimRecordSchemaIssues),
-    ...arrayItems(snapshot.decisions ?? [], RUNTIME_SCHEMA_IDS.decisionRecord, "decisions", decisionRecordSchemaIssues),
-    ...arrayItems(snapshot.graphEdges ?? [], RUNTIME_SCHEMA_IDS.graphEdge, "graphEdges", graphEdgeSchemaIssues),
-    ...arrayItems(
-      snapshot.reservations ?? [],
-      RUNTIME_SCHEMA_IDS.agentReservation,
-      "reservations",
-      agentReservationSchemaIssues
-    ),
-    ...arrayItems(snapshot.events ?? [], RUNTIME_SCHEMA_IDS.runtimeEvent, "events", runtimeEventSchemaIssues),
-    ...arrayItems(
-      snapshot.operations ?? [],
-      RUNTIME_SCHEMA_IDS.runtimeOperation,
-      "operations",
-      runtimeOperationSchemaIssues
-    ),
-    ...arrayItems(
-      snapshot.projections ?? [],
-      RUNTIME_SCHEMA_IDS.projectionRecord,
-      "projections",
-      projectionRecordSchemaIssues
-    ),
-    ...arrayItems(snapshot.contextPacks ?? [], RUNTIME_SCHEMA_IDS.contextPack, "contextPacks", contextPackSchemaIssues),
     ...(snapshot.events ?? []).flatMap((event, index) => workspaceInitializedPolicyIssues(event, `events[${index}]`))
   ];
 }
@@ -199,7 +298,8 @@ export function claimRecordSchemaIssues(value: unknown, path = "$"): readonly Sc
     ...nonEmptyStringIssue(value.statement, `${path}.statement`, schemaId),
     ...enumIssue(value.status, `${path}.status`, schemaId, ["proposed", "accepted", "rejected", "stale"]),
     ...uniqueStringArrayIssue(value.sourceIds, `${path}.sourceIds`, schemaId),
-    ...uniqueStringArrayIssue(value.evidenceIds, `${path}.evidenceIds`, schemaId)
+    ...uniqueStringArrayIssue(value.evidenceIds, `${path}.evidenceIds`, schemaId),
+    ...(value.wikiPageIds === undefined ? [] : uniqueStringArrayIssue(value.wikiPageIds, `${path}.wikiPageIds`, schemaId))
   ];
 }
 
@@ -216,7 +316,8 @@ export function decisionRecordSchemaIssues(value: unknown, path = "$"): readonly
     ...stringIssue(value.context, `${path}.context`, schemaId),
     ...nonEmptyStringIssue(value.decision, `${path}.decision`, schemaId),
     ...stringArrayIssue(value.consequences, `${path}.consequences`, schemaId),
-    ...uniqueStringArrayIssue(value.sourceIds, `${path}.sourceIds`, schemaId)
+    ...uniqueStringArrayIssue(value.sourceIds, `${path}.sourceIds`, schemaId),
+    ...(value.wikiPageIds === undefined ? [] : uniqueStringArrayIssue(value.wikiPageIds, `${path}.wikiPageIds`, schemaId))
   ];
 }
 
@@ -366,6 +467,20 @@ export function runtimePolicySchemaIssues(value: unknown, path = "$"): readonly 
   ];
 }
 
+export function projectRegistryDocumentSchemaIssues(value: unknown, path = "$"): readonly SchemaValidationIssue[] {
+  const schemaId = PROJECT_REGISTRY_SCHEMA_ID;
+  if (!isRecord(value)) {
+    return [issue(schemaId, path, "must be an object")];
+  }
+
+  return [
+    ...literalIssue(value.schemaVersion, `${path}.schemaVersion`, schemaId, PROJECT_REGISTRY_SCHEMA_VERSION),
+    ...projectRegistryStorageIssues(value.storage, `${path}.storage`, schemaId),
+    ...projectRegistryEntryArrayIssues(value.entries, `${path}.entries`, schemaId),
+    ...(value.updatedAt === undefined ? [] : stringIssue(value.updatedAt, `${path}.updatedAt`, schemaId))
+  ];
+}
+
 export function assertValidRuntimePolicy(policy: RuntimePolicy): void {
   const issues = runtimePolicySchemaIssues(policy);
   if (issues.length > 0) {
@@ -378,6 +493,121 @@ function workspaceInitializedPolicyIssues(value: unknown, path: string): readonl
     return [];
   }
   return runtimePolicySchemaIssues(value.payload.policy, `${path}.payload.policy`);
+}
+
+function projectRegistryStorageIssues(value: unknown, path: string, schemaId: string): readonly SchemaValidationIssue[] {
+  if (!isRecord(value)) {
+    return [issue(schemaId, path, "must be an object")];
+  }
+  return [
+    ...literalIssue(value.scope, `${path}.scope`, schemaId, "machine-local"),
+    ...absolutePathIssue(value.rootDir, `${path}.rootDir`, schemaId),
+    ...absolutePathIssue(value.registryDir, `${path}.registryDir`, schemaId),
+    ...absolutePathIssue(value.registryFile, `${path}.registryFile`, schemaId),
+    ...absolutePathIssue(value.lockDir, `${path}.lockDir`, schemaId),
+    ...pathInsideIssue(value.rootDir, value.registryDir, `${path}.registryDir`, schemaId, "must be inside storage rootDir"),
+    ...pathInsideIssue(value.registryDir, value.registryFile, `${path}.registryFile`, schemaId, "must be inside registryDir"),
+    ...pathInsideIssue(value.registryDir, value.lockDir, `${path}.lockDir`, schemaId, "must be inside registryDir")
+  ];
+}
+
+function projectRegistryEntryArrayIssues(value: unknown, path: string, schemaId: string): readonly SchemaValidationIssue[] {
+  if (!Array.isArray(value)) {
+    return [issue(schemaId, path, "must be an array")];
+  }
+  const seen = new Set<string>();
+  return value.flatMap((entry, index) => {
+    const entryPath = `${path}[${index}]`;
+    const entryIssues = projectRegistryEntryIssues(entry, entryPath, schemaId);
+    if (isRecord(entry) && typeof entry.id === "string") {
+      if (seen.has(entry.id)) {
+        return [...entryIssues, issue(schemaId, `${entryPath}.id`, "must be unique")];
+      }
+      seen.add(entry.id);
+    }
+    return entryIssues;
+  });
+}
+
+function projectRegistryEntryIssues(value: unknown, path: string, schemaId: string): readonly SchemaValidationIssue[] {
+  if (!isRecord(value)) {
+    return [issue(schemaId, path, "must be an object")];
+  }
+
+  return [
+    ...nonEmptyStringIssue(value.id, `${path}.id`, schemaId),
+    ...projectRegistryDisplayIssues(value.display, `${path}.display`, schemaId),
+    ...absolutePathIssue(value.projectRoot, `${path}.projectRoot`, schemaId),
+    ...absolutePathIssue(value.borealDir, `${path}.borealDir`, schemaId),
+    ...absolutePathIssue(value.runtimeDir, `${path}.runtimeDir`, schemaId),
+    ...absolutePathIssue(value.runtimeStateFile, `${path}.runtimeStateFile`, schemaId),
+    ...absolutePathIssue(value.projectConfigPath, `${path}.projectConfigPath`, schemaId),
+    ...absolutePathIssue(value.memoryRoot, `${path}.memoryRoot`, schemaId),
+    ...absolutePathIssue(value.memoryBorealDir, `${path}.memoryBorealDir`, schemaId),
+    ...absolutePathIssue(value.installRoot, `${path}.installRoot`, schemaId),
+    ...enumIssue(value.memoryLayout, `${path}.memoryLayout`, schemaId, ["in-repo", "child", "sibling"]),
+    ...enumIssue(value.memoryGitMode, `${path}.memoryGitMode`, schemaId, ["shared", "separate", "submodule"]),
+    ...projectRegistrySkillTargetsIssues(value.skillTargets, `${path}.skillTargets`, schemaId),
+    ...booleanIssue(value.folderScoped, `${path}.folderScoped`, schemaId),
+    ...enumIssue(value.source, `${path}.source`, schemaId, ["explicit", "project-setup", "imported"]),
+    ...stringIssue(value.addedAt, `${path}.addedAt`, schemaId),
+    ...stringIssue(value.updatedAt, `${path}.updatedAt`, schemaId),
+    ...(value.lastSeenAt === undefined ? [] : stringIssue(value.lastSeenAt, `${path}.lastSeenAt`, schemaId)),
+    ...(value.memoryRemote === undefined ? [] : stringIssue(value.memoryRemote, `${path}.memoryRemote`, schemaId)),
+    ...pathInsideIssue(value.projectRoot, value.borealDir, `${path}.borealDir`, schemaId, "must be inside projectRoot"),
+    ...pathInsideIssue(value.borealDir, value.runtimeDir, `${path}.runtimeDir`, schemaId, "must be inside borealDir"),
+    ...pathInsideIssue(value.runtimeDir, value.runtimeStateFile, `${path}.runtimeStateFile`, schemaId, "must be inside runtimeDir"),
+    ...pathInsideIssue(value.borealDir, value.projectConfigPath, `${path}.projectConfigPath`, schemaId, "must be inside borealDir"),
+    ...pathInsideIssue(value.memoryRoot, value.memoryBorealDir, `${path}.memoryBorealDir`, schemaId, "must be inside memoryRoot"),
+    ...memoryLayoutBoundaryIssues(value, path, schemaId),
+    ...installRootBoundaryIssues(value, path, schemaId)
+  ];
+}
+
+function projectRegistryDisplayIssues(value: unknown, path: string, schemaId: string): readonly SchemaValidationIssue[] {
+  if (!isRecord(value)) {
+    return [issue(schemaId, path, "must be an object")];
+  }
+  const issues = [
+    ...nonEmptyStringIssue(value.name, `${path}.name`, schemaId),
+    ...uniqueStringArrayIssue(value.labels, `${path}.labels`, schemaId)
+  ];
+  if (value.description !== undefined) {
+    return [...issues, ...stringIssue(value.description, `${path}.description`, schemaId)];
+  }
+  return issues;
+}
+
+function projectRegistrySkillTargetsIssues(value: unknown, path: string, schemaId: string): readonly SchemaValidationIssue[] {
+  if (!Array.isArray(value)) {
+    return [issue(schemaId, path, "must be an array")];
+  }
+  const issues = value.flatMap((entry, index) => enumIssue(entry, `${path}[${index}]`, schemaId, ["codex", "claude"]));
+  const uniqueValues = new Set(value);
+  return uniqueValues.size === value.length ? issues : [...issues, issue(schemaId, path, "must contain unique values")];
+}
+
+function memoryLayoutBoundaryIssues(value: Record<string, unknown>, path: string, schemaId: string): readonly SchemaValidationIssue[] {
+  if (typeof value.projectRoot !== "string" || typeof value.memoryRoot !== "string" || typeof value.memoryLayout !== "string") {
+    return [];
+  }
+  if (value.memoryLayout === "sibling") {
+    return dirname(resolve(value.memoryRoot)) === dirname(resolve(value.projectRoot))
+      ? []
+      : [issue(schemaId, `${path}.memoryRoot`, "sibling memoryRoot must share the projectRoot parent directory")];
+  }
+  return pathInsideIssue(value.projectRoot, value.memoryRoot, `${path}.memoryRoot`, schemaId, "must be inside projectRoot");
+}
+
+function installRootBoundaryIssues(value: Record<string, unknown>, path: string, schemaId: string): readonly SchemaValidationIssue[] {
+  if (typeof value.installRoot !== "string" || typeof value.memoryRoot !== "string") {
+    return [];
+  }
+  const relation = relative(resolve(value.memoryRoot), resolve(value.installRoot));
+  const insideMemory = relation === "" || (!relation.startsWith("..") && !isAbsolute(relation));
+  return insideMemory
+    ? [issue(schemaId, `${path}.installRoot`, "must not be inside memoryRoot")]
+    : [];
 }
 
 function recordMetaIssues(
@@ -443,7 +673,7 @@ function arrayItems(
   values: readonly unknown[],
   schemaId: string,
   section: string,
-  validate: (value: unknown, path: string) => readonly SchemaValidationIssue[]
+  validate: SchemaIssueValidator
 ): readonly SchemaValidationIssue[] {
   if (!Array.isArray(values)) {
     return [issue(schemaId, section, "must be an array")];
@@ -467,6 +697,25 @@ function nonEmptyStringIssue(value: unknown, path: string, schemaId: string): re
 
 function stringIssue(value: unknown, path: string, schemaId: string): readonly SchemaValidationIssue[] {
   return typeof value === "string" ? [] : [issue(schemaId, path, "must be a string")];
+}
+
+function absolutePathIssue(value: unknown, path: string, schemaId: string): readonly SchemaValidationIssue[] {
+  return typeof value === "string" && isAbsolute(value) ? [] : [issue(schemaId, path, "must be an absolute path")];
+}
+
+function pathInsideIssue(
+  parent: unknown,
+  child: unknown,
+  path: string,
+  schemaId: string,
+  message: string
+): readonly SchemaValidationIssue[] {
+  if (typeof parent !== "string" || typeof child !== "string" || !isAbsolute(parent) || !isAbsolute(child)) {
+    return [];
+  }
+  const relation = relative(resolve(parent), resolve(child));
+  const inside = relation === "" || (!relation.startsWith("..") && !isAbsolute(relation));
+  return inside ? [] : [issue(schemaId, path, message)];
 }
 
 function patternStringIssue(value: unknown, path: string, schemaId: string, pattern: RegExp): readonly SchemaValidationIssue[] {

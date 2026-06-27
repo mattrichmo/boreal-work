@@ -138,6 +138,7 @@ export interface ClaimRecord {
   readonly status: ClaimStatus;
   readonly sourceIds: readonly KnowledgeSourceId[];
   readonly evidenceIds: readonly EvidenceId[];
+  readonly wikiPageIds?: readonly string[];
 }
 
 export type DecisionStatus = "proposed" | "accepted" | "superseded" | "rejected";
@@ -150,6 +151,7 @@ export interface DecisionRecord {
   readonly decision: string;
   readonly consequences: readonly string[];
   readonly sourceIds: readonly KnowledgeSourceId[];
+  readonly wikiPageIds?: readonly string[];
 }
 
 export type ReservationStatus = "active" | "released" | "expired";

@@ -11,6 +11,7 @@
     "context": { "type": "string" },
     "decision": { "type": "string", "minLength": 1 },
     "consequences": { "type": "array", "items": { "type": "string" } },
-    "sourceIds": { "type": "array", "items": { "type": "string" }, "uniqueItems": true }
+    "sourceIds": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
+    "wikiPageIds": { "type": "array", "items": { "type": "string" }, "uniqueItems": true }
   }
 }

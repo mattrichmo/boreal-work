@@ -21,8 +21,10 @@ export interface FileBorealStoreOptions {
   readonly lock?: Partial<FileLockOptions>;
 }
 
+export const FILE_STORE_SCHEMA_VERSION = "boreal.file-store.v1";
+
 interface StateDocument extends Required<StoreSnapshot> {
-  readonly schemaVersion: "boreal.file-store.v1";
+  readonly schemaVersion: typeof FILE_STORE_SCHEMA_VERSION;
 }
 
 export class FileBorealStore implements BorealStore {
@@ -72,7 +74,7 @@ export class FileBorealStore implements BorealStore {
     try {
       return documentToSnapshot(
         await readJsonFile(this.stateFile, {
-          schemaName: "boreal.file-store.v1",
+          schemaName: FILE_STORE_SCHEMA_VERSION,
           expectedObject: true,
           maxBytes: 50 * 1024 * 1024
         })
@@ -99,7 +101,7 @@ export class FileBorealStore implements BorealStore {
 
 function snapshotToDocument(snapshot: StoreSnapshot): StateDocument {
   return {
-    schemaVersion: "boreal.file-store.v1",
+    schemaVersion: FILE_STORE_SCHEMA_VERSION,
     workItems: snapshot.workItems ?? [],
     evidence: snapshot.evidence ?? [],
     verifications: snapshot.verifications ?? [],
@@ -120,7 +122,7 @@ function documentToSnapshot(value: unknown): StoreSnapshot {
     throw new BorealError("BOREAL_STORAGE_ERROR", "Boreal state file must contain an object");
   }
 
-  if (value.schemaVersion !== "boreal.file-store.v1") {
+  if (value.schemaVersion !== FILE_STORE_SCHEMA_VERSION) {
     throw new BorealError("BOREAL_STORAGE_ERROR", "Unsupported Boreal state file version", {
       schemaVersion: value.schemaVersion
     });

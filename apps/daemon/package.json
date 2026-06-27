@@ -1,0 +1,24 @@
+{
+  "name": "@boreal/daemon",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "boreal-daemon": "./dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc -b",
+    "status": "pnpm build && node dist/index.js status --workspace ../..",
+    "watch:once": "pnpm build && node dist/index.js watch --once --workspace ../.."
+  },
+  "dependencies": {
+    "@boreal/core": "workspace:*",
+    "@boreal/storage": "workspace:*"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  }
+}

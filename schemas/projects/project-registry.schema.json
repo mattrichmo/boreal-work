@@ -1,0 +1,93 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://boreal.work/schemas/projects/project-registry.schema.json",
+  "title": "Boreal Project Registry",
+  "type": "object",
+  "required": ["schemaVersion", "storage", "entries"],
+  "properties": {
+    "schemaVersion": { "const": "boreal.project-registry.v1" },
+    "storage": { "$ref": "#/$defs/storage" },
+    "entries": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/entry" }
+    },
+    "updatedAt": { "type": "string", "format": "date-time" }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "storage": {
+      "type": "object",
+      "required": ["scope", "rootDir", "registryDir", "registryFile", "lockDir"],
+      "properties": {
+        "scope": { "const": "machine-local" },
+        "rootDir": { "type": "string", "minLength": 1 },
+        "registryDir": { "type": "string", "minLength": 1 },
+        "registryFile": { "type": "string", "minLength": 1 },
+        "lockDir": { "type": "string", "minLength": 1 }
+      },
+      "additionalProperties": false
+    },
+    "display": {
+      "type": "object",
+      "required": ["name", "labels"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "description": { "type": "string" },
+        "labels": {
+          "type": "array",
+          "items": { "type": "string" },
+          "uniqueItems": true
+        }
+      },
+      "additionalProperties": false
+    },
+    "entry": {
+      "type": "object",
+      "required": [
+        "id",
+        "display",
+        "projectRoot",
+        "borealDir",
+        "runtimeDir",
+        "runtimeStateFile",
+        "projectConfigPath",
+        "memoryRoot",
+        "memoryBorealDir",
+        "memoryLayout",
+        "memoryGitMode",
+        "installRoot",
+        "skillTargets",
+        "folderScoped",
+        "source",
+        "addedAt",
+        "updatedAt"
+      ],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "display": { "$ref": "#/$defs/display" },
+        "projectRoot": { "type": "string", "minLength": 1 },
+        "borealDir": { "type": "string", "minLength": 1 },
+        "runtimeDir": { "type": "string", "minLength": 1 },
+        "runtimeStateFile": { "type": "string", "minLength": 1 },
+        "projectConfigPath": { "type": "string", "minLength": 1 },
+        "memoryRoot": { "type": "string", "minLength": 1 },
+        "memoryBorealDir": { "type": "string", "minLength": 1 },
+        "memoryLayout": { "enum": ["in-repo", "child", "sibling"] },
+        "memoryGitMode": { "enum": ["shared", "separate", "submodule"] },
+        "memoryRemote": { "type": "string" },
+        "installRoot": { "type": "string", "minLength": 1 },
+        "skillTargets": {
+          "type": "array",
+          "items": { "enum": ["codex", "claude"] },
+          "uniqueItems": true
+        },
+        "folderScoped": { "type": "boolean" },
+        "source": { "enum": ["explicit", "project-setup", "imported"] },
+        "addedAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" },
+        "lastSeenAt": { "type": "string", "format": "date-time" }
+      },
+      "additionalProperties": false
+    }
+  }
+}
