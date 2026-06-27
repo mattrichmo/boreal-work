@@ -45,10 +45,21 @@ function sprintTasks(sprint: SprintData): readonly WorkItemView[] {
   return sprint.board.lanes.flatMap((lane) => lane.items);
 }
 
+const OPEN_STATUSES = new Set(["draft", "ready", "in_progress", "reserved", "blocked", "needs_verification"]);
+
+function allWorkItems(data: TuiData): readonly WorkItemView[] {
+  return data.work.queues.flatMap((queue) => queue.items);
+}
+
+function workListItems(data: TuiData, showAll: boolean): readonly WorkItemView[] {
+  const all = allWorkItems(data);
+  return showAll ? all : all.filter((item) => OPEN_STATUSES.has(item.status));
+}
+
 // The list backing the active screen: drives cursor length, selection and drill.
-function activeList(data: TuiData, frame: NavFrame): readonly { readonly id: string }[] {
+function activeList(data: TuiData, frame: NavFrame, showAllWork: boolean): readonly { readonly id: string }[] {
   if (frame.screen === "sprintList") return data.sprints.map((sprint) => ({ id: sprint.view.id }));
-  if (frame.screen === "workList") return data.work.queues.flatMap((queue) => queue.items);
+  if (frame.screen === "workList") return workListItems(data, showAllWork);
   if (frame.screen === "sprintDetail") {
     const sprint = data.sprints.find((entry) => entry.view.id === frame.sprintId);
     return sprint ? sprintTasks(sprint) : [];
@@ -93,6 +104,7 @@ export function App({
   const [data, setData] = useState<TuiData | undefined>();
   const [error, setError] = useState<string | undefined>();
   const [refreshing, setRefreshing] = useState(false);
+  const [showAllWork, setShowAllWork] = useState(false);
   const [nav, dispatch] = useReducer(reduceNav, sectionFromView(initialView), initialNavState);
 
   const refresh = useCallback(async () => {
@@ -114,7 +126,7 @@ export function App({
   }, [refresh, refreshMs]);
 
   const frame = topFrame(nav);
-  const list = data ? activeList(data, frame) : [];
+  const list = data ? activeList(data, frame, showAllWork) : [];
   const selectedId = list[frame.cursor]?.id;
 
   const handleKey = useCallback<InkInputHandler>(
@@ -125,6 +137,11 @@ export function App({
       }
       if (input === "r") {
         void refresh();
+        return;
+      }
+      if (input === "f" && frame.screen === "workList") {
+        setShowAllWork((current) => !current);
+        dispatch({ type: "move", delta: 0, length: 0 });
         return;
       }
       const section = SECTIONS.find((entry) => entry.key === input);
@@ -148,7 +165,7 @@ export function App({
         dispatch({ type: "move", delta: -1, length: list.length });
       }
     },
-    [exit, refresh, selectedId, list.length]
+    [exit, refresh, selectedId, list.length, frame.screen]
   );
 
   const rows = stdout?.rows ?? 24;
@@ -170,7 +187,7 @@ export function App({
           ) : !data.initialized ? (
             <EmptyState title="Not initialized" lines={[data.warnings[0] ?? "Run `bwrk init` here."]} />
           ) : (
-            <Screen data={data} frame={frame} height={bodyHeight} width={columns - 16} />
+            <Screen data={data} frame={frame} height={bodyHeight} width={columns - 16} showAllWork={showAllWork} />
           )}
         </Box>
       </Box>
@@ -190,10 +207,25 @@ function hintsFor(screen: NavFrame["screen"], inputEnabled: boolean): readonly {
   if (screen === "sprintDetail") {
     return [move, { keys: "⏎", label: "open task" }, { keys: "⌫/esc", label: "back" }, refresh, quit];
   }
+  if (screen === "workList") {
+    return [move, { keys: "⏎", label: "open" }, { keys: "f", label: "filter" }, sections, quit];
+  }
   return [move, { keys: "⏎", label: "open" }, sections, refresh, quit];
 }
 
-function Screen({ data, frame, height, width }: { readonly data: TuiData; readonly frame: NavFrame; readonly height: number; readonly width: number }) {
+function Screen({
+  data,
+  frame,
+  height,
+  width,
+  showAllWork
+}: {
+  readonly data: TuiData;
+  readonly frame: NavFrame;
+  readonly height: number;
+  readonly width: number;
+  readonly showAllWork: boolean;
+}) {
   switch (frame.screen) {
     case "overview":
       return <OverviewScreen data={data} height={height} />;
@@ -202,7 +234,7 @@ function Screen({ data, frame, height, width }: { readonly data: TuiData; readon
     case "sprintDetail":
       return <SprintDetailScreen data={data} frame={frame} height={height} width={width} />;
     case "workList":
-      return <WorkListScreen data={data} cursor={frame.cursor} height={height} width={width} />;
+      return <WorkListScreen data={data} cursor={frame.cursor} height={height} width={width} showAll={showAllWork} />;
     case "taskDetail":
       return <TaskDetailScreen data={data} taskId={frame.taskId} width={width} />;
     default:
@@ -228,11 +260,22 @@ function OverviewScreen({ data, height }: { readonly data: TuiData; readonly hei
       <Box marginTop={1} flexDirection="column">
         <Text color={COLOR.faint}>ACTIVE SPRINT</Text>
         {active ? (
-          <Text wrap="truncate">
-            <Text color={statusColor(active.view.status)}>● </Text>
-            <Text color={COLOR.text} bold>{active.view.title}</Text>
-            <Text color={COLOR.muted}>{`  ${active.board.summary.verified + active.board.summary.closed}/${active.scopeCount} done`}</Text>
-          </Text>
+          (() => {
+            const done = active.board.summary.verified + active.board.summary.closed;
+            const pct = active.scopeCount > 0 ? Math.round((done / active.scopeCount) * 100) : 0;
+            return (
+              <Box flexDirection="column">
+                <Text wrap="truncate">
+                  <Text color={statusColor(active.view.status)}>● </Text>
+                  <Text color={COLOR.text} bold>{active.view.title}</Text>
+                </Text>
+                <Text>
+                  <Text color={COLOR.accent}>{progressBar(done, active.scopeCount, 24)}</Text>
+                  <Text color={COLOR.muted}>{`  ${done}/${active.scopeCount} · ${pct}%`}</Text>
+                </Text>
+              </Box>
+            );
+          })()
         ) : (
           <Text color={COLOR.muted}> none active — press s to browse sprints</Text>
         )}
@@ -332,9 +375,10 @@ function workRow(task: WorkItemView): TableRow {
   };
 }
 
-function WorkListScreen({ data, cursor, height, width }: { readonly data: TuiData; readonly cursor: number; readonly height: number; readonly width: number }) {
-  const items = data.work.queues.flatMap((queue) => queue.items);
-  const nameWidth = Math.max(20, Math.floor((width - 8 - 10) * 0.6));
+function WorkListScreen({ data, cursor, height, width, showAll }: { readonly data: TuiData; readonly cursor: number; readonly height: number; readonly width: number; readonly showAll: boolean }) {
+  const items = workListItems(data, showAll);
+  const total = allWorkItems(data).length;
+  const nameWidth = Math.max(20, Math.floor((width - 8 - 10) * 0.62));
   const labelWidth = Math.max(10, width - 8 - 10 - nameWidth);
   const columns: readonly TableColumn[] = [
     { header: "status", width: 8 },
@@ -344,8 +388,19 @@ function WorkListScreen({ data, cursor, height, width }: { readonly data: TuiDat
   ];
   return (
     <Box flexDirection="column">
-      <Text color={COLOR.faint}>{`WORK (${items.length})`}</Text>
-      <Table columns={columns} rows={items.map(workRow)} cursor={cursor} height={height - 2} emptyLabel="No work items." />
+      <Text wrap="truncate">
+        <Text color={COLOR.faint}>{showAll ? "ALL WORK " : "OPEN WORK "}</Text>
+        <Text color={COLOR.text} bold>{items.length}</Text>
+        <Text color={COLOR.faint}>{` of ${total}`}</Text>
+        <Text color={COLOR.faint}>{showAll ? "  ·  f: open only" : "  ·  f: show all"}</Text>
+      </Text>
+      <Table
+        columns={columns}
+        rows={items.map(workRow)}
+        cursor={cursor}
+        height={height - 2}
+        emptyLabel={showAll ? "No work items." : "No open work — press f to show all."}
+      />
     </Box>
   );
 }
@@ -393,6 +448,12 @@ function TaskDetailScreen({ data, taskId, width }: { readonly data: TuiData; rea
 
 function clamp(value: string, max: number): string {
   return value.length <= max ? value : `${value.slice(0, max - 1)}…`;
+}
+
+function progressBar(done: number, total: number, width: number): string {
+  if (total <= 0) return "░".repeat(width);
+  const filled = Math.max(0, Math.min(width, Math.round((done / total) * width)));
+  return `${"█".repeat(filled)}${"░".repeat(width - filled)}`;
 }
 
 export function GlobalApp({ workspaceRoot, refreshMs }: { readonly workspaceRoot: string; readonly refreshMs: number }) {
