@@ -30,6 +30,7 @@ pnpm build
 
 Full command contract: [docs/cli/COMMANDS.md](docs/cli/COMMANDS.md).
 CLI prompt and dashboard direction: [docs/architecture/CLI_UX.md](docs/architecture/CLI_UX.md).
+V1 closeout/adoption guide: [docs/product/V1_CLOSEOUT_ADOPTION_GUIDE.md](docs/product/V1_CLOSEOUT_ADOPTION_GUIDE.md).
 
 Run the CLI from source:
 
@@ -100,6 +101,8 @@ init -> create work -> add dependency -> derive readiness -> reserve
 The file-backed store is also tested for persistence across runtime instances, rollback on failed transactions, concurrent writer serialization, stale-lock recovery, schema drift rejection, invalid JSON rejection, and path escape rejection.
 
 The CLI integration test covers init fail-closed behavior, exact versus discovered workspace resolution, idempotent concurrent init, bounded/filtered listing, next-ready work, atomic claim handoffs, safe agent guide/start/finish handoffs, reservation visibility/renewal/release/expiration repair, agent coordination status, create/ready/list/evidence/verify/close, source/claim/decision/context commands, fresh-index search, JSON and Markdown export, JSON import, recovery snapshots, projection and search-index repair through `doctor --fix`, and explicit stale lock repair through `lock break --stale-only`.
+
+The agent E2E fixture in [docs/architecture/AGENT_E2E_FIXTURE.md](docs/architecture/AGENT_E2E_FIXTURE.md) runs the ordered local project path from `init --setup-memory` through raw-source reconciliation, sprint launch, agent claim/finish, `sync refresh`, strict doctor, and JSON/Markdown/ledger exports. Run it with `pnpm test -- tests/runtime/agent-e2e.test.ts`.
 
 Several runtime invariants intentionally follow the Beads methodology while staying TypeScript-native:
 

@@ -42,10 +42,10 @@ The only ready `v1-remainder` work items at capture time were:
 The current app/package layout supports the v1 roadmap but leaves dashboard app surfaces mostly unimplemented:
 
 - `apps/cli`: implemented CLI source and built output are present.
-- `apps/console`: currently only `.gitkeep`; this is the intended browser client console surface.
+- `apps/console`: implemented local browser console scaffold with fixture/live modes, route smoke tests, and a registry-backed global overview surface.
 - `apps/tui`: currently only `.gitkeep`; this is the future richer terminal app boundary if the CLI primitive approach grows into a dedicated TUI.
-- `apps/mcp`: currently only `.gitkeep`; MCP should wait until project registry and no-leak boundaries are explicit.
-- `apps/daemon`: currently only `.gitkeep`; daemon/watch behavior should wait until cache/index responsibilities are constrained.
+- `apps/mcp`: now contains the first project-scoped stdio MCP server. It uses the shared no-leak boundary, exposes read-only selected-project tools first, and routes confirmed mutations through scoped CLI command contracts.
+- `apps/daemon`: now contains a project-scoped status/watch scaffold. It reports daemon state, stale PID files, lock conflicts, and bounded watch paths, while repairs remain explicit CLI commands.
 - `packages/ui-model`: currently exposes `WorkItemView`; this is the right shared boundary for console, CLI dashboard, and future TUI data models.
 
 The repo already has core runtime package boundaries for storage, engine, work, graph, evidence, knowledge, search, agent-runtime, and ui-model. Dashboard work should build on those instead of reading human CLI output or parsing Markdown where structured runtime data exists.
@@ -58,7 +58,7 @@ Source command:
 node apps/cli/dist/index.js commands --json
 ```
 
-The registry currently exposes 76 commands across workspace, meta, workflow, install, agent, work, dependency, evidence, source, claim, decision, context, search, reservation, session, operation, export, import, vault, raw, wiki, duplicate, merge, compact, sync, ledger, snapshot, doctor, and lock categories.
+The registry currently exposes 81 commands across workspace, meta, workflow, install, registry, agent, work, dependency, evidence, source, claim, decision, context, search, reservation, session, operation, export, import, vault, raw, wiki, duplicate, merge, compact, sync, ledger, snapshot, doctor, and lock categories.
 
 Important existing commands for work execution:
 
@@ -72,7 +72,7 @@ Confirmed command gaps for the dashboard roadmap:
 
 - No `dashboard` command namespace yet.
 - No first-class `sprint` command namespace yet.
-- No project/global `registry` or `bucket` command namespace yet.
+- Project/global `registry` list/add/remove/import-setup/doctor commands exist, including idempotent import from the current workspace setup.
 - No board, Kanban, or global dashboard JSON endpoint yet.
 - No command-doc drift checker yet.
 

@@ -28,6 +28,13 @@ Global flags:
 
 In JSON mode, successful commands write one JSON envelope to stdout, errors write one JSON envelope to stderr, and unexpected raw stdout writes are redirected to stderr so stdout stays parseable. If a JSON result exceeds the command's `behavior.maxResultSizeChars`, Boreal writes the full envelope under `.boreal/results/` and returns compact data with `truncated`, `preview`, `fullResultPath`, and `fullResultBytes`.
 
+Output modes:
+
+- JSON mode is the stable automation contract. `--json` always returns a schema-backed JSON envelope and wins over human view flags.
+- Plain mode is the default human output. It uses compact tables, records, or lines and avoids richer dashboard grouping unless requested.
+- Dashboard mode is opt-in human rendering for commands that accept `--view dashboard`, such as `work next`, `agent status`, `sync status`, `doctor`, `lock inspect`, and `workflows list`. `--view dashboard` changes only human rendering; JSON mode still returns the same schema-backed payload.
+- The browser console is a separate local app over CLI JSON contracts. Its global data endpoint is `bwrk dashboard global --json`; it should not be confused with `--view dashboard`, which is terminal-only human formatting.
+
 Result limits:
 
 - List commands default to `100` rows and reject `--limit` values over `1000`.
@@ -110,10 +117,12 @@ bwrk help session
 bwrk help operation
 bwrk help export
 bwrk help import
+bwrk help registry
 bwrk help snapshot
 bwrk help doctor
 bwrk help lock
 bwrk help commands
+bwrk help completion
 bwrk help prime
 bwrk work --help
 ```
@@ -169,13 +178,53 @@ JSON `data` shape:
 }
 ```
 
+## `completion`
+
+```bash
+bwrk completion <bash|zsh|fish> [--name <binary>] [--json]
+```
+
+Generates shell completion scripts from `COMMAND_DEFINITIONS`. The output includes a command manifest generated from the current registry so installed completions stay aligned with help, docs, and strict flag validation.
+
+Local source checkout examples:
+
+```bash
+pnpm bwrk completion zsh > ~/.zsh/completions/_bwrk
+pnpm bwrk completion bash > ~/.local/share/bash-completion/completions/bwrk
+pnpm bwrk completion fish > ~/.config/fish/completions/bwrk.fish
+```
+
+Installed binary examples:
+
+```bash
+bwrk completion zsh > ~/.zsh/completions/_bwrk
+bwrk completion bash > ~/.local/share/bash-completion/completions/bwrk
+bwrk completion fish > ~/.config/fish/completions/bwrk.fish
+```
+
+Use `--name <binary>` when completing an alias or renamed package binary:
+
+```bash
+bwrk completion zsh --name boreal > ~/.zsh/completions/_boreal
+```
+
+JSON mode returns:
+
+```json
+{
+  "shell": "zsh",
+  "name": "bwrk",
+  "script": "#compdef bwrk\n..."
+}
+```
+
 ## `version`
 
 ```bash
 bwrk version [--json]
 ```
 
-Prints stable Boreal CLI package and runtime version information. `bwrk --version` is a top-level shortcut for human probes; use `bwrk version --json` or `bwrk --version --json` when automation needs a JSON envelope.
+Prints stable Boreal CLI package and runtime version information. `bwrk --version` remains a one-line human probe (`boreal-work <version>`). `bwrk version --json` and `bwrk --version --json` return a `boreal.cli.version.v1` payload with the root package version, `@boreal/cli` package version, Node/package-manager runtime, runtime record schema, file-store schema, export/snapshot schema, JSONL ledger schemas, generated search and SQLite cache schemas, project setup/registry/vault schemas, daemon status schemas, published schema IDs, and the v1 migration policy. Non-reversible migrations must be snapshot-backed by a `boreal.export.v1` recovery snapshot.
 
 ## `workflows list`
 
@@ -217,10 +266,133 @@ bwrk install skills [--install-root <dir>] [--dry-run] [--interactive] [--json]
 
 Plans or installs generic namespaced Boreal skill folders into a folder-scoped skill root. Defaults to the configured install root when project setup exists, otherwise `.agents/skills` under the selected workspace. Use `--interactive` in a TTY to review the install plan before files are written.
 
+## `install status`
+
+```bash
+bwrk install status [--bin-dir <dir>] [--path <value>] [--json]
+```
+
+Inspects local and global `bwrk` availability without writing files. JSON output includes the local source runner command, generated shim path, whether the shim directory is on PATH, the resolved global command, and `--version` probe output. Use `--bin-dir` to check a non-default local shim directory and `--path` to inspect a supplied PATH value.
+
+## `registry list`
+
+```bash
+bwrk registry list [--registry-root <dir>] [--json]
+```
+
+Lists explicitly registered Boreal projects from the machine-local registry. It never scans parent directories or sibling repositories.
+
+## `registry add`
+
+```bash
+bwrk registry add --workspace <path> [--registry-root <dir>] [--name <text>] [--label <label>...] [--json]
+```
+
+Adds or updates one explicit Boreal workspace in the machine-local registry. The target workspace must be initialized and must have `.boreal/project.json`; the stored row includes project root, `.boreal` root, runtime state file, project setup config, memory root, memory `.boreal` root, memory layout, memory Git mode, install root, skill targets, folder scope, display metadata, and timestamps.
+
+## `registry remove`
+
+```bash
+bwrk registry remove <project-id> [--registry-root <dir>] [--json]
+```
+
+Removes only the registry row for a project. It does not delete project files, memory files, or skill installs.
+
+## `registry import-setup`
+
+```bash
+bwrk registry import-setup [--registry-root <dir>] [--name <text>] [--label <label>...] [--json]
+```
+
+Seeds or updates the registry from the selected workspace `.boreal/project.json`. It does not scan unrelated repositories; repeated imports of unchanged setup metadata return `changed: false` and keep one project bucket.
+
+## `registry doctor`
+
+```bash
+bwrk registry doctor [--registry-root <dir>] [--json]
+```
+
+Validates registered project roots, Boreal runtime files, project setup config paths, memory roots, memory runtime directories, install roots, and setup mismatches. It exits nonzero when registered projects are stale, moved, invalid, or inconsistent with their `.boreal/project.json`.
+
+## `dashboard global`
+
+```bash
+bwrk dashboard global [--limit <n>] [--registry-root <dir>] [--json]
+```
+
+Emits the bounded global dashboard payload for registered projects, or the current workspace when the registry is empty. The command reads runtime state and registry metadata only; it does not render the browser dashboard or mutate project state.
+
+The JSON `data` payload uses schema `boreal.cli.dashboard.global.v1` and includes registry, global queue, search, activity, health, daemon status, and settings view-model sections. Results are capped at 100 projects, 250 work rows per project, 200 rows per queue, 10 search rows per project, and 20 activity rows per project.
+
+Examples:
+
+```bash
+bwrk dashboard global --json
+bwrk dashboard global --limit 10 --json
+```
+
+## `daemon status`
+
+```bash
+bwrk daemon status [--json]
+```
+
+Reports the selected project's local daemon status without requiring the daemon to be running. The payload includes the daemon status file path, PID liveness when present, watched paths, runtime/search lock awareness, findings, and command-mediated repair recommendations. A stopped daemon is healthy; stale PID files and copied status files are warnings under strict doctor.
+
+## `sprint list`
+
+```bash
+bwrk sprint list [--limit <n>] [--json]
+```
+
+Lists workspace-local work records with `kind: "sprint"` and marks the sprint selected by the explicit active-sprint projection. Results default to 200 rows and reject larger limits than 200.
+
+## `sprint show`
+
+```bash
+bwrk sprint show <sprint-ref> [--limit <n>] [--json]
+```
+
+Shows one sprint resolved by exact ID, unambiguous ID prefix, exact title, or `current`. The returned `scope` is built from canonical `blocks` graph edges plus stored dependency IDs, not labels, and is capped at 500 descendant rows.
+
+## `sprint current`
+
+```bash
+bwrk sprint current [--json]
+```
+
+Reads the workspace-local active-sprint projection. When no sprint is selected, the JSON payload returns `active: false`; when the projection points at missing or non-sprint work, it returns `stale: true` with projection details.
+
+## `sprint activate`
+
+```bash
+bwrk sprint activate <sprint-ref> [--json]
+```
+
+Sets the workspace-local active sprint. Activation fails closed for missing, ambiguous, or non-sprint references, writes the deterministic `active-sprint` projection, and records a `sprint.activated` runtime event linked to the command operation.
+
+## `sprint board`
+
+```bash
+bwrk sprint board [<sprint-ref>] [--limit <n>] [--json]
+```
+
+Returns the active or selected sprint as a `SprintBoardView` payload using schema `boreal.cli.sprint.board.v1`. The board groups dependency-scoped work into status lanes, lists milestone phases, summarizes status totals and reservations, and keeps `dependencyIds` separate from `activeBlockerIds`. Scope is built from canonical `blocks` graph edges plus dependency ID projections, not labels, and defaults to 500 descendant rows.
+
+## `sprint report`
+
+```bash
+bwrk sprint report [<sprint-ref>] --doctor-evidence <evidence-id> --sync-evidence <evidence-id> [--format markdown|html] [--out <file>] [--limit <n>] [--json]
+```
+
+Exports a static sprint closeout report using schema `boreal.cli.sprint.report.v1`. The report is built from dependency-scoped sprint work, scoped evidence, directly linked decisions, unresolved blockers, and open next-sprint candidates. `--format` defaults to `markdown`; `--out` writes a workspace-relative artifact file, and omitted `--out` returns the rendered content.
+
+Closeout reports fail closed unless `--doctor-evidence` and `--sync-evidence` point at distinct passed evidence records inside the selected sprint scope. The evidence text, command, or URI must reference `doctor` or `sync` respectively.
+
 ## `init`
 
 ```bash
-bwrk init [--workspace <path>|--project-root <path>] [--setup-memory] [--memory-root <path>] [--memory-layout in-repo|child|sibling] [--memory-git-mode shared|separate|submodule] [--memory-remote <url>] [--separate-git] [--install-root <path>] [--skill-target codex|claude...] [--folder-scoped] [--interactive] [--json]
+bwrk init [--workspace <dir>|--project-root <dir>] [--setup-memory] [--memory-root <dir>] [--memory-layout in-repo|child|sibling] [--memory-git-mode shared|separate|submodule] [--memory-remote <url>] [--separate-git] [--install-root <dir>] [--skill-target codex|claude...] [--folder-scoped] [--interactive] [--json]
 ```
 
 Initializes a Boreal workspace by creating durable runtime state under `.boreal/runtime/state.json`.
@@ -307,17 +479,10 @@ JSON `data` shape:
 ## `work create`
 
 ```bash
-bwrk work create <title> \
-  [--description <text>] \
-  [--kind issue|task|sprint|milestone] \
-  [--priority low|normal|high|critical] \
-  [--label <label>] \
-  [--acceptance <text>] \
-  [--ready] \
-  [--json]
+bwrk work create <title> [--description <text>] [--priority low|normal|high|critical] [--kind <kind>] [--label <label>...] [--acceptance <text>...] [--source <source-ref>...] [--ready] [--json]
 ```
 
-Creates a work item. `--label` and `--acceptance` may be repeated.
+Creates a work item. `--label`, `--acceptance`, and `--source` may be repeated. Source references are stored on the work record metadata so promoted discoveries keep their original context.
 
 Behavior:
 
@@ -342,7 +507,7 @@ Recomputes readiness for one work item and marks it `ready` if its dependencies 
 ## `work list`
 
 ```bash
-bwrk work list [--ready] [--status <status>] [--label <label>] [--limit <count>] [--json]
+bwrk work list [--ready] [--status <status>] [--label <label>...] [--limit <n>] [--json]
 ```
 
 Lists work items. `--label` may be repeated and all labels must match. Default `--limit` is `100`; max is `1000`.
@@ -387,7 +552,7 @@ JSON `data` shape:
 ## `work next`
 
 ```bash
-bwrk work next [--label <label>] [--limit <count>] [--view dashboard] [--json]
+bwrk work next [--label <label>...] [--limit <n>] [--view dashboard] [--json]
 ```
 
 Lists claimable ready work from the live runtime view, ordered by priority and title. `--label` may be repeated and all labels must match. Default `--limit` is `10`; max is `1000`. `--view dashboard` renders a grouped ready-queue view for humans.
@@ -405,7 +570,7 @@ Shows the work view for one item, including evidence, verification, dependency, 
 ## `work block`
 
 ```bash
-bwrk work block <blocked-work-id> <blocking-work-id> [--json]
+bwrk work block <work-id> <blocked-by-work-id> [--json]
 ```
 
 Adds a blocking dependency. Dependency cycles are rejected by runtime policy.
@@ -433,6 +598,7 @@ bwrk dep tree <work-id> [--json]
 ```
 
 Shows the recursive blocker tree for one work item from canonical `blocks` graph edges. JSON output is a nested tree with `id`, optional `title`/`status`, and `dependencies`.
+When a dependency has already been expanded elsewhere in the same tree, later appearances are returned as a `shared: true` node with an empty `dependencies` array to keep output bounded on shared dependency subgraphs.
 
 ## `dep cycles`
 
@@ -445,7 +611,7 @@ Lists dependency cycles in canonical `blocks` graph edges.
 ## `work reserve`
 
 ```bash
-bwrk work reserve <work-id> [--agent <id>] [--purpose <text>] [--expires-at <iso>|--ttl <duration>] [--force --reason <text>] [--json]
+bwrk work reserve <work-id> --agent <agent-id> [--purpose <text>] [--expires-at <iso>|--ttl <duration>] [--force --reason <text>] [--json]
 ```
 
 Reserves a ready work item for an agent. If `--agent` is omitted, the CLI actor ID is used.
@@ -464,7 +630,7 @@ bwrk work reserve <work-id> --expires-at 2026-06-25T22:00:00.000Z
 ## `work claim`
 
 ```bash
-bwrk work claim [--label <label>] [--agent <id>] [--purpose <text>] [--expires-at <iso>|--ttl <duration>] [--query <text>] [--limit <count>] [--json]
+bwrk work claim [--label <label>...] [--agent <agent-id>] [--purpose <text>] [--expires-at <iso>|--ttl <duration>] [--query <text>] [--limit <n>] [--json]
 ```
 
 Atomically finds the next live ready work item, reserves it for the agent, rebuilds context-pack projections, rebuilds the local search index, and returns a handoff bundle.
@@ -506,7 +672,7 @@ Extends the active reservation for a work item. The new expiration must be in th
 ## `reservation list`
 
 ```bash
-bwrk reservation list [--agent <agent-id>] [--work <work-id>] [--status active|released|expired|all] [--expired] [--limit <count>] [--json]
+bwrk reservation list [--agent <agent-id>] [--work <work-id>] [--status active|released|expired|all] [--expired] [--limit <n>] [--json]
 ```
 
 Shows reservation ownership and expiration state for multi-agent coordination. By default, only active reservations are shown.
@@ -524,7 +690,7 @@ Rows include reservation ID, status, computed `expired`, agent ID, work ID, work
 ## `prime`
 
 ```bash
-bwrk prime [--agent <agent-id>] [--label <label>] [--json]
+bwrk prime [--agent <agent-id>] [--label <label>...] [--json]
 ```
 
 Prints the compact startup brief for an agent session without claiming work. The brief includes workspace sync health, agent coordination state, bounded operation history for the active `--session`, copyable protocol commands, and concrete recommended actions.
@@ -534,7 +700,7 @@ Prints the compact startup brief for an agent session without claiming work. The
 ## `agent guide`
 
 ```bash
-bwrk agent guide [--agent <agent-id>] [--label <label>] [--json]
+bwrk agent guide [--agent <agent-id>] [--label <label>...] [--json]
 ```
 
 Prints the compact agent loop without requiring an initialized workspace. The guide includes exact command templates for:
@@ -549,17 +715,7 @@ Prints the compact agent loop without requiring an initialized workspace. The gu
 ## `agent finish`
 
 ```bash
-bwrk agent finish <work-id> \
-  --summary <text> \
-  (--close --reason <text>|--release) \
-  [--agent <agent-id>] \
-  [--kind command|test|diff|review|artifact|note] \
-  [--outcome passed|failed|observed|unknown] \
-  [--command <cmd>] \
-  [--uri <uri>] \
-  [--verdict passed|failed] \
-  [--notes <text>] \
-  [--json]
+bwrk agent finish <work-id> --summary <text> (--close --reason <text>|--release) [--agent <agent-id>] [--kind command|test|diff|review|artifact|note] [--outcome passed|failed|observed|unknown] [--command <cmd>] [--uri <uri>] [--verdict passed|failed] [--notes <text>] [--json]
 ```
 
 Guarded exit workflow for work with an active agent reservation. The command requires the selected agent to own the active, non-expired reservation before it records evidence, verifies the work, and closes or releases anything. Use `current` or `active` as the work reference when the selected `--agent` has exactly one non-expired active reservation. Evidence, verification, optional close, reservation release, readiness repair, and the final `agent.finished` event run as one engine transaction. One of `--close` or `--release` is required so finish cannot leave active ownership behind.
@@ -576,7 +732,7 @@ Behavior:
 ## `agent start`
 
 ```bash
-bwrk agent start [--agent <agent-id>] [--label <label>] [--purpose <text>] [--expires-at <iso>|--ttl <duration>] [--query <text>] [--limit <count>] [--json]
+bwrk agent start [--agent <agent-id>] [--label <label>...] [--purpose <text>] [--expires-at <iso>|--ttl <duration>] [--query <text>] [--limit <n>] [--json]
 ```
 
 Safe entrypoint for an agent before it starts work:
@@ -593,7 +749,7 @@ Safe entrypoint for an agent before it starts work:
 ## `agent status`
 
 ```bash
-bwrk agent status [--agent <agent-id>] [--label <label>] [--view dashboard] [--json]
+bwrk agent status [--agent <agent-id>] [--label <label>...] [--view dashboard] [--json]
 ```
 
 Summarizes an agent's coordination state. If `--agent` is omitted, the CLI actor ID is used. `--view dashboard` renders reservation, ready-work, and recommended-action sections.
@@ -611,7 +767,7 @@ JSON `data` includes:
 ## `session start`
 
 ```bash
-bwrk session start [--id <session-id>] [--agent <agent-id>] [--label <label>] [--json]
+bwrk session start [--id <session-id>] [--agent <agent-id>] [--label <label>...] [--json]
 ```
 
 Starts the local agent protocol around a normalized session ID. If `--id` is omitted, the command uses `--session`, `BOREAL_SESSION_ID`, or generates a new `session-...` ID. The command logs itself under that same session ID and returns the same brief shape as `prime`.
@@ -621,7 +777,7 @@ Use the returned `commands.*` strings for the rest of the run so every operation
 ## `session end`
 
 ```bash
-bwrk session end [--id <session-id>] [--agent <agent-id>] [--label <label>] [--json]
+bwrk session end [--id <session-id>] [--agent <agent-id>] [--label <label>...] [--json]
 ```
 
 Summarizes the target session without deleting or closing records. The result reports operation totals, failed commands, state/artifact-changing command counts, sync health, current agent reservations, and recommended follow-up commands. When active reservations remain, the recommendations point at reservation review instead of pretending the session is clean.
@@ -629,7 +785,7 @@ Summarizes the target session without deleting or closing records. The result re
 ## `operation list`
 
 ```bash
-bwrk operation list [--session-id <id>] [--command <path>] [--status succeeded|failed|all] [--limit <count>] [--json]
+bwrk operation list [--session-id <id>] [--command <path>] [--status succeeded|failed|all] [--limit <n>] [--json]
 ```
 
 Lists local command operation records newest first. Default `--limit` is `50`; max is `1000`. Filters are exact after normalization:
@@ -638,7 +794,7 @@ Lists local command operation records newest first. Default `--limit` is `50`; m
 - `--command`: only one command path, for example `work create`.
 - `--status`: `succeeded`, `failed`, or `all`.
 
-JSON rows include operation ID, session ID, command path, status, exit code, state/artifact effect flags, actor ID, timestamps, and event count.
+JSON rows include operation ID, session ID, command path, status, exit code, state/artifact effect flags, actor ID, actor kind (`human`, `agent`, or `system`), timestamps, and event count.
 
 ## `operation show`
 
@@ -651,7 +807,7 @@ Shows one full local operation record, including redacted argv and generated eve
 ## `operation prune`
 
 ```bash
-bwrk operation prune (--keep <count>|--before <iso>) [--json]
+bwrk operation prune (--keep <n>|--before <iso>) [--json]
 ```
 
 Prunes local operation history without changing exported project records. `--keep` keeps the newest N operations including the prune command's own operation record, so `bwrk operation prune --keep 500` leaves at most 500 operation records after the command finishes. `--before` deletes operations finished before the given ISO timestamp. When both flags are provided, the age filter is applied first and the remaining newest records are capped by `--keep`.
@@ -673,13 +829,7 @@ JSON `data` includes inspected counts, linked event IDs, legacy-marked event IDs
 ## `evidence add`
 
 ```bash
-bwrk evidence add <work-id> \
-  --summary <text> \
-  [--kind command|test|diff|review|artifact|note] \
-  [--outcome passed|failed|observed|unknown] \
-  [--command <cmd>] \
-  [--uri <uri>] \
-  [--json]
+bwrk evidence add <work-id> --summary <text> [--kind command|test|diff|review|artifact|note] [--outcome passed|failed|observed|unknown] [--command <cmd>] [--uri <uri>] [--json]
 ```
 
 Records evidence against a work item and moves the work item to `needs_verification` unless it is already closed. Use `--kind artifact` for files or generated artifacts such as source maps; `document` is a source/raw kind, not an evidence kind.
@@ -693,7 +843,7 @@ bwrk evidence add bw_work_... --summary "pnpm test passed" --kind test --outcome
 ## `work verify`
 
 ```bash
-bwrk work verify <work-id> --evidence <evidence-id> [--verdict passed|failed] [--notes <text>] [--json]
+bwrk work verify <work-id> --evidence <evidence-id>... [--verdict passed|failed] [--notes <text>] [--json]
 ```
 
 Creates a verification record. `--evidence` may be repeated. Verification fails if referenced evidence is not attached to the work item. A `passed` verdict requires at least one referenced evidence record with outcome `passed`.
@@ -701,7 +851,7 @@ Creates a verification record. `--evidence` may be repeated. Verification fails 
 ## `work close`
 
 ```bash
-bwrk work close <work-id> --reason <text> [--json]
+bwrk work close <work-id> [--reason <text>] [--json]
 ```
 
 Closes a work item. Runtime policy requires a passing verification before close.
@@ -709,12 +859,7 @@ Closes a work item. Runtime policy requires a passing verification before close.
 ## `source add`
 
 ```bash
-bwrk source add \
-  --title <text> \
-  --uri <uri> \
-  [--kind raw|document|chat|code|artifact] \
-  [--summary <text>] \
-  [--json]
+bwrk source add --title <text> --uri <uri> [--kind raw|document|chat|code|artifact] [--summary <text>] [--json]
 ```
 
 Creates a knowledge source. Default `kind` is `document`.
@@ -724,7 +869,7 @@ JSON `data` is the full source record, including `meta.id`, `kind`, `title`, `ur
 ## `source list`
 
 ```bash
-bwrk source list [--kind raw|document|chat|code|artifact] [--limit <count>] [--json]
+bwrk source list [--kind raw|document|chat|code|artifact] [--limit <n>] [--json]
 ```
 
 Lists knowledge sources. Default `--limit` is `100`; max is `1000`. JSON output is an array of rows with `id`, `kind`, `title`, and `uri`.
@@ -742,27 +887,22 @@ JSON `data` is the full source record.
 ## `claim create`
 
 ```bash
-bwrk claim create \
-  --statement <text> \
-  [--status proposed|accepted|rejected|stale] \
-  [--source <source-id>] \
-  [--evidence <evidence-id>] \
-  [--json]
+bwrk claim create --statement <text> [--status proposed|accepted|rejected|stale] [--source <source-id>...] [--evidence <evidence-id>...] [--wiki <wiki-page-ref>...] [--json]
 ```
 
-Creates a claim. `--source` and `--evidence` may be repeated. Referenced sources and evidence must already exist.
+Creates a claim. `--source`, `--evidence`, and `--wiki` may be repeated. Referenced sources and evidence must already exist. `--wiki` accepts a wiki page ID, slug, title, or path and stores the canonical page reference in `wikiPageIds`.
 
-JSON `data` is the full claim record, including `meta.id`, `statement`, `status`, `sourceIds`, and `evidenceIds`.
+JSON `data` is the full claim record, including `meta.id`, `statement`, `status`, `sourceIds`, `evidenceIds`, and `wikiPageIds`.
 
 ## `claim list`
 
 ```bash
-bwrk claim list [--status proposed|accepted|rejected|stale] [--source <source-id>] [--limit <count>] [--json]
+bwrk claim list [--status proposed|accepted|rejected|stale] [--source <source-id>] [--limit <n>] [--json]
 ```
 
 Lists claims, optionally filtered by status and source. Default `--limit` is `100`; max is `1000`.
 
-JSON `data` is an array of rows with `id`, `status`, `statement`, `sources`, and `evidence`.
+JSON `data` is an array of rows with `id`, `status`, `statement`, `sources`, `sourceIds`, `sourceCount`, `evidence`, `evidenceIds`, `evidenceCount`, `wikiPages`, `wikiPageIds`, `wikiPageCount`, `reviewState`, and `updatedAt`.
 
 ## `claim show`
 
@@ -777,29 +917,22 @@ JSON `data` is the full claim record.
 ## `decision create`
 
 ```bash
-bwrk decision create \
-  --title <text> \
-  --decision <text> \
-  [--context <text>] \
-  [--status proposed|accepted|superseded|rejected] \
-  [--consequence <text>] \
-  [--source <source-id>] \
-  [--json]
+bwrk decision create --title <text> --decision <text> [--context <text>] [--status proposed|accepted|superseded|rejected] [--consequence <text>...] [--source <source-id>...] [--wiki <wiki-page-ref>...] [--json]
 ```
 
-Creates a decision record. `--consequence` and `--source` may be repeated. Referenced sources must already exist.
+Creates a decision record. `--consequence`, `--source`, and `--wiki` may be repeated. Referenced sources must already exist. `--wiki` accepts a wiki page ID, slug, title, or path and stores the canonical page reference in `wikiPageIds`.
 
-JSON `data` is the full decision record, including `meta.id`, `title`, `status`, `context`, `decision`, `consequences`, and `sourceIds`.
+JSON `data` is the full decision record, including `meta.id`, `title`, `status`, `context`, `decision`, `consequences`, `sourceIds`, and `wikiPageIds`.
 
 ## `decision list`
 
 ```bash
-bwrk decision list [--status proposed|accepted|superseded|rejected] [--source <source-id>] [--limit <count>] [--json]
+bwrk decision list [--status proposed|accepted|superseded|rejected] [--source <source-id>] [--limit <n>] [--json]
 ```
 
 Lists decisions, optionally filtered by status and source. Default `--limit` is `100`; max is `1000`.
 
-JSON `data` is an array of rows with `id`, `status`, `title`, `decision`, and `sources`.
+JSON `data` is an array of rows with `id`, `status`, `title`, `context`, `decision`, `consequences`, `consequenceCount`, `sources`, `sourceIds`, `sourceCount`, `wikiPages`, `wikiPageIds`, `wikiPageCount`, `reviewState`, `supersessionStatus`, and `updatedAt`.
 
 ## `decision show`
 
@@ -833,7 +966,7 @@ Context facts always include work status and priority, plus capped accepted clai
 ## `context search`
 
 ```bash
-bwrk context search <query> [--limit <count>] [--explain] [--json]
+bwrk context search <query> [--limit <n>] [--explain] [--json]
 ```
 
 Searches context-pack summary documents and bounded context-chunk documents only. `--limit` is capped at `100`. The search index must be fresh; run `bwrk search index` or `bwrk doctor --fix` after imports, writes, or context rebuilds that change searchable content.
@@ -853,7 +986,7 @@ JSON `data` contains `path`, `schemaVersion`, `builtAt`, `contentHash`, `documen
 ## `search query`
 
 ```bash
-bwrk search query <query> [--limit <count>] [--explain] [--json]
+bwrk search query <query> [--limit <n>] [--explain] [--json]
 ```
 
 Searches work, evidence, sources, claims, decisions, context packs, and bounded context chunks. `--limit` is capped at `100`. Results are ranked by ID prefix matches, field-weighted token matches adjusted by document frequency, deterministic vector-lite similarity, and stable type/title ordering. Tokenization preserves compact tokens while adding camelCase, path/URI, underscore, and alpha-numeric split variants.
@@ -868,7 +1001,7 @@ The command fails closed when the index is missing, malformed, or stale. Rebuild
 bwrk export json [--out <path>] [--json]
 ```
 
-Builds a `boreal.export.v1` document containing a full runtime state snapshot, record counts, and a deterministic content hash. Without `--out`, the export document is printed. With `--out`, the file is written inside the workspace and JSON `data` contains `path`, `contentHash`, and `recordCounts`.
+Builds a `boreal.export.v1` document containing the portable canonical runtime record set, record counts, and a deterministic content hash. Portable exports include work items, evidence, verifications, knowledge sources, claims, decisions, graph edges, reservations, events, projections, and context packs. They exclude local operation records and strip event operation links before hashing, so command history from one checkout does not become imported project truth in another checkout. Without `--out`, the export document is printed. With `--out`, the file is written inside the workspace and JSON `data` contains `path`, `contentHash`, and `recordCounts`.
 
 ## `export markdown`
 
@@ -886,7 +1019,7 @@ JSON `data` contains `outDir`, `files`, and `recordCounts`.
 bwrk export ledgers [--out <dir>] [--json]
 ```
 
-Writes a `boreal.ledgers.v1` JSONL bridge: one `.jsonl` file per runtime section, a `deletions.jsonl` tombstone ledger, and `manifest.json` with per-file counts, per-file content hashes, deleted-record counts, and the whole-ledger content hash. Default output directory is `.boreal/ledgers`.
+Writes a `boreal.ledgers.v1` JSONL bridge for the same portable canonical runtime sections as `export json`: one `.jsonl` file per section, a `deletions.jsonl` tombstone ledger, and `manifest.json` with per-file counts, per-file content hashes, deleted-record counts, and the whole-ledger content hash. Ledgers are reconstructable collaboration artifacts, not a second hidden source of truth, and they exclude local operation records. Default output directory is `.boreal/ledgers`.
 
 JSON `data` contains `outDir`, `manifestPath`, `contentHash`, `recordCounts`, `deletedRecordCounts`, `files`, and `deletions`.
 
@@ -896,7 +1029,7 @@ JSON `data` contains `outDir`, `manifestPath`, `contentHash`, `recordCounts`, `d
 bwrk import json --from <path> [--allow-external-read] [--json]
 ```
 
-Imports a `boreal.export.v1` document or raw `boreal.file-store.v1` state document. Import validates required sections and references before writing. Existing records with identical IDs and identical content are skipped. Existing records with identical IDs and different content are rejected as conflicts.
+Imports a `boreal.export.v1` document or raw `boreal.file-store.v1` state document. Import validates required sections and references before writing, normalizes imported event operation links away, and never imports operation records from the source file. Existing records with identical IDs and identical content are skipped. Existing records with identical IDs and different content are rejected as conflicts.
 
 By default, `--from` must resolve inside the workspace, including after symlink resolution. Use `--allow-external-read` for an intentional external file import.
 
@@ -908,7 +1041,7 @@ JSON `data` contains per-section `imported` and `skipped` counts.
 bwrk import ledgers --from <dir> [--allow-external-read] [--json]
 ```
 
-Imports a `boreal.ledgers.v1` directory. The importer reads `manifest.json`, verifies every JSONL file and `deletions.jsonl` count/content hash, reconstructs the snapshot, rejects tombstones that conflict with live records, validates record schemas and references, then merges records with the same conflict rules as `import json`.
+Imports a `boreal.ledgers.v1` directory. The importer reads `manifest.json`, verifies every JSONL file and `deletions.jsonl` count/content hash, reconstructs the portable snapshot, rejects tombstones that conflict with live records, validates record schemas and references, then merges records with the same conflict rules as `import json`.
 
 By default, `--from` must resolve inside the workspace, including after symlink resolution. Use `--allow-external-read` for an intentional external ledger import.
 
@@ -946,6 +1079,26 @@ Appends an immutable raw source record to the configured vault raw index. The me
 
 JSON `data` contains `added`, `indexPath`, and the raw source `record` with stable metadata and a content hash.
 
+## `raw list`
+
+```bash
+bwrk raw list [--limit <n>] [--json]
+```
+
+Lists immutable raw source records from the configured vault raw index. Rows include source kind, summary, URI, tags, content hash, derived processing status, linked wiki page count, and retrieval commands.
+
+Processing status is derived from source-backed wiki links: raw sources referenced by at least one wiki page are `linked`; otherwise they remain `queued`.
+
+## `raw show`
+
+```bash
+bwrk raw show <raw-id> [--preview-bytes <n>] [--json]
+```
+
+Shows one immutable raw source record with linked wiki pages, retrieval commands, and a bounded local asset preview. Local previews are restricted to the workspace or configured memory root. External URIs are not fetched, missing files are reported as missing, directories and binary assets are reported as unsupported, and large text assets are truncated to `--preview-bytes`.
+
+JSON `data.preview` contains `status`, `mediaType`, `message`, `maxBytes`, `truncated`, and optional `path`, `body`, `bytes`, and `totalBytes`.
+
 ## `wiki create`
 
 ```bash
@@ -955,6 +1108,24 @@ bwrk wiki create <title> [--slug <slug>] [--summary <text>] [--source <raw-id>..
 Creates a Markdown wiki page under the configured vault wiki directory with flat Boreal frontmatter. Existing page slugs are never overwritten. Slug existence checks and writes are serialized with a vault wiki lock under `.boreal/locks/`. Use `--source` to link the page to raw source records from the configured raw index.
 
 JSON `data` contains `created`, `path`, and the created `page` summary.
+
+## `wiki list`
+
+```bash
+bwrk wiki list [--limit <n>] [--json]
+```
+
+Lists structured wiki page records from the configured vault wiki directory. Rows include ID, slug, title, path, source refs, outbound links, accepted/draft/proposed truth status, source ref count, backlink count, outbound link count, and a show command.
+
+Default `--limit` is `100`; max is `1000`.
+
+## `wiki show`
+
+```bash
+bwrk wiki show <wiki-id|slug|title> [--json]
+```
+
+Shows one structured wiki page record with source refs, outbound links, matched outbound pages, missing outbound link targets, backlinks, and accepted/draft/proposed truth status.
 
 ## `duplicate scan`
 
@@ -1030,9 +1201,9 @@ JSON `data` contains `ok`, `workspaceRoot`, `checkedAt`, `vault`, `ledgers`, `se
 bwrk sync refresh [--json]
 ```
 
-Refreshes generated collaboration artifacts in one closeout command: context-pack projections, the local search index, and the JSONL ledger export. It then returns the same status shape as `sync status` under `data.status`. Snapshot creation remains explicit through `bwrk snapshot create --json` because snapshots are named baselines, not routine cache refreshes.
+Refreshes generated collaboration artifacts in one closeout command: context-pack projections, the local search index, the JSONL ledger export, and the optional SQLite generated cache at `.boreal/cache/runtime-cache.sqlite`. It then returns the same status shape as `sync status` under `data.status`. Snapshot creation remains explicit through `bwrk snapshot create --json` because snapshots are named baselines, not routine cache refreshes.
 
-JSON `data` contains `refreshed`, `refreshOk`, `postRefreshStatusOk`, `exitReason`, `contextViews`, `searchIndex`, `ledgers`, and `status`. `refreshOk: true` means projections, search, and ledger export were rebuilt. `postRefreshStatusOk` mirrors nested `status.ok` after the rebuild. `exitReason` is `ok` when the process exits `0`, or `post_refresh_status_unhealthy` when the refresh completed but the final health gate still failed.
+JSON `data` contains `refreshed`, `refreshOk`, `postRefreshStatusOk`, `exitReason`, `contextViews`, `searchIndex`, `ledgers`, `sqliteCache`, and `status`. `refreshOk: true` means projections, search, ledger export, and the cache rebuild path completed. If `sqlite3` is unavailable, `sqliteCache.skipped` is `true` and file-store behavior remains supported. `postRefreshStatusOk` mirrors nested `status.ok` after the rebuild. `exitReason` is `ok` when the process exits `0`, or `post_refresh_status_unhealthy` when the refresh completed but the final health gate still failed.
 
 The command exits `1` if the post-refresh sync status is still not clean, for example because the vault is missing or Git collaboration paths are dirty on a protected branch. Agents should treat `exitReason: post_refresh_status_unhealthy` as partial success: generated artifacts were refreshed, but the nested `status` object and `recommendedActions` describe the remaining repair.
 
@@ -1062,7 +1233,7 @@ JSON `data` contains `deleted`, `section`, `id`, `tombstone`, and the refreshed 
 bwrk snapshot create [--name <slug>] [--json]
 ```
 
-Creates a recovery snapshot under `.boreal/snapshots`. Snapshot files are `boreal.export.v1` documents with content hashes.
+Creates a recovery snapshot under `.boreal/snapshots`. Snapshot files are named `boreal.export.v1` baselines with content hashes. They are explicit recovery/checkpoint artifacts, so `sync refresh` does not create them automatically.
 
 JSON `data` contains `id`, `path`, `contentHash`, and `recordCounts`.
 
@@ -1100,7 +1271,9 @@ Checks:
 - Missing IDs and duplicate IDs within each state section.
 - Malformed work, evidence, verification, source, claim, decision, context-pack, graph, and reservation records.
 - Dangling work dependencies, evidence references, and verification references.
-- Dangling knowledge source and claim evidence references.
+- Dangling knowledge source, claim evidence, and claim/decision wiki page references.
+- Source-backed claims and decisions without wiki coverage, plus stale source-backed claims.
+- Accepted claim contradictions, superseded decisions that need replacement review, and raw sources waiting for memory reconciliation. These diagnostics include workflow references plus separate safe recheck commands and manual review commands.
 - Duplicate graph edges, dangling work graph edges, graph/dependency disagreement, and dependency cycles.
 - Reservation consistency, including active reservations for terminal work, work ownership pointers, and legacy `reserved` work without active reservations.
 - Expired active reservations.
@@ -1114,6 +1287,7 @@ Checks:
 - Missing or stale context-pack projections.
 - Snapshot/export drift between the current export hash and the latest recovery snapshot.
 - Missing, malformed, or stale local search index.
+- SQLite generated cache freshness when a cache file exists.
 - Runtime state and search-index lock state.
 - Git collaboration safety for `.boreal/ledgers` and `memory` paths on protected branches or detached HEAD.
 
@@ -1174,7 +1348,7 @@ JSON `data` shape:
 ## `lock break`
 
 ```bash
-bwrk lock break --stale-only [--json]
+bwrk lock break [--stale-only] [--json]
 ```
 
 Breaks only stale runtime locks. Active locks are never broken. Concurrent stale-lock breakers coordinate through an adjacent recovery lock.
