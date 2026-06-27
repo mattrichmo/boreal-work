@@ -163,26 +163,80 @@ function WorkPage({ data }: { readonly data: ConsoleDataSet }) {
 }
 
 function KnowledgePage({ data, routePath }: { readonly data: ConsoleDataSet; readonly routePath: string }) {
+  const view = knowledgeViewFromRoute(routePath);
   const filters = knowledgeFiltersFromRoute(routePath);
+  return (
+    <div className="bw-page-stack">
+      <KnowledgeViewTabs active={view} routePath={routePath} />
+      {view === "wiki" ? <KnowledgeWikiView data={data} routePath={routePath} /> : null}
+      {view === "raw" ? <KnowledgeRawView data={data} routePath={routePath} /> : null}
+      {view === "health" ? <KnowledgeHealthView data={data} filters={filters} /> : null}
+    </div>
+  );
+}
+
+function KnowledgeWikiView({ data, routePath }: { readonly data: ConsoleDataSet; readonly routePath: string }) {
+  const selected = data.wikiExplorer.selected;
+  return (
+    <div className="bw-page-grid">
+      <div className="bw-page-stack">
+        <WikiExplorerPanel view={data.wikiExplorer} routePath={routePath} />
+      </div>
+      <div className="bw-page-stack">
+        {selected ? (
+          <>
+            <WikiPageDetailPanel page={selected} />
+            <WikiSourceCoveragePanel page={selected} />
+            <WikiClaimsPanel page={selected} />
+          </>
+        ) : (
+          <Notice label="Wiki">Select a page to inspect its sources, claims, and decisions.</Notice>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function KnowledgeRawView({ data, routePath }: { readonly data: ConsoleDataSet; readonly routePath: string }) {
+  const selected = data.rawInbox.selected;
   return (
     <div className="bw-page-grid">
       <div className="bw-page-stack">
         <RawInboxPanel view={data.rawInbox} routePath={routePath} />
-        <WikiExplorerPanel view={data.wikiExplorer} routePath={routePath} />
-        <MemoryWorkflowActionsPanel view={data.memoryActions} />
       </div>
       <div className="bw-page-stack">
+        {selected ? (
+          <>
+            <RawAssetPreviewPanel source={selected} />
+            <RawIngestPlanPanel plan={data.rawInbox.ingestPlan} />
+            <RawDiffReviewPanel plan={data.rawInbox.ingestPlan} />
+            <RawContradictionReviewPanel review={data.rawInbox.contradictionReview} />
+          </>
+        ) : (
+          <Notice label="Raw inbox">Select a source to preview it and review its ingest plan.</Notice>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function KnowledgeHealthView({
+  data,
+  filters
+}: {
+  readonly data: ConsoleDataSet;
+  readonly filters: { readonly claimStatus?: string; readonly decisionStatus?: string; readonly source?: string };
+}) {
+  return (
+    <div className="bw-page-grid">
+      <div className="bw-page-stack">
         <KnowledgeHealthPanel view={data.wikiExplorer} />
-        <ObsidianCompatibilityPanel view={data.wikiExplorer} />
-        <WikiPageDetailPanel page={data.wikiExplorer.selected} />
-        <WikiSourceCoveragePanel page={data.wikiExplorer.selected} />
-        <WikiClaimsPanel page={data.wikiExplorer.selected} />
         <ClaimsTablePanel view={data.wikiExplorer} statusFilter={filters.claimStatus} sourceFilter={filters.source} />
         <KnowledgeDecisionTimelinePanel view={data.wikiExplorer} statusFilter={filters.decisionStatus} sourceFilter={filters.source} />
-        <RawAssetPreviewPanel source={data.rawInbox.selected} />
-        <RawIngestPlanPanel plan={data.rawInbox.ingestPlan} />
-        <RawDiffReviewPanel plan={data.rawInbox.ingestPlan} />
-        <RawContradictionReviewPanel review={data.rawInbox.contradictionReview} />
+      </div>
+      <div className="bw-page-stack">
+        <ObsidianCompatibilityPanel view={data.wikiExplorer} />
+        <MemoryWorkflowActionsPanel view={data.memoryActions} />
         <SourceRefList refs={[{ id: "memory-root", kind: "memory", label: data.workspace.memoryRoot ?? "memory", status: "ok" }]} />
       </div>
     </div>
@@ -306,4 +360,44 @@ function knowledgeFiltersFromRoute(routePath: string): {
     decisionStatus: params.get("decisionStatus") ?? undefined,
     source: params.get("source") ?? undefined
   };
+}
+
+type KnowledgeView = "wiki" | "raw" | "health";
+
+const KNOWLEDGE_VIEWS: readonly { readonly id: KnowledgeView; readonly label: string }[] = [
+  { id: "wiki", label: "Wiki" },
+  { id: "raw", label: "Raw inbox" },
+  { id: "health", label: "Health" }
+];
+
+function knowledgeViewFromRoute(routePath: string): KnowledgeView {
+  const query = routePath.includes("?") ? routePath.slice(routePath.indexOf("?") + 1).split("#")[0] ?? "" : "";
+  const value = new URLSearchParams(query).get("view");
+  return KNOWLEDGE_VIEWS.some((view) => view.id === value) ? (value as KnowledgeView) : "wiki";
+}
+
+function knowledgeViewHref(routePath: string, view: KnowledgeView): string {
+  const [withoutHash = "", hash] = routePath.split("#", 2);
+  const [pathname = "/knowledge", query = ""] = withoutHash.split("?", 2);
+  const params = new URLSearchParams(query);
+  params.set("view", view);
+  const nextQuery = params.toString();
+  return `${pathname || "/knowledge"}${nextQuery ? `?${nextQuery}` : ""}${hash ? `#${hash}` : ""}`;
+}
+
+function KnowledgeViewTabs({ active, routePath }: { readonly active: KnowledgeView; readonly routePath: string }) {
+  return (
+    <nav className="bw-view-tabs" aria-label="Knowledge views">
+      {KNOWLEDGE_VIEWS.map((view) => (
+        <a
+          key={view.id}
+          className={`bw-view-tabs__tab${active === view.id ? " bw-view-tabs__tab--active" : ""}`}
+          href={knowledgeViewHref(routePath, view.id)}
+          aria-current={active === view.id ? "page" : undefined}
+        >
+          {view.label}
+        </a>
+      ))}
+    </nav>
+  );
 }
