@@ -67,12 +67,14 @@ Use this workflow when the user's request requires check workspace health and ru
 - Record command/test/diff evidence before verification or closeout.
 - Keep raw source material immutable; reconcile into wiki, claims, decisions, or work instead of rewriting raw records.
 - For work changes, confirm dependency and readiness state after mutation.
+- Read `sync.git.findings` before describing Git health. Non-blocking findings such as `protected_branch`, `dirty_generated_artifact`, `dirty_memory_index`, or protected-branch `dirty_collaboration_path` are caveats with targeted actions, not proof that sync failed.
 
 ## Failure And Repair
 
 - If workspace health fails, switch to `workflows/60-health/sync-and-doctor.md`.
 - If generated artifacts are stale, run `bwrk sync refresh --json` after memory, work, context, or search-affecting changes.
 - If locks are stale, inspect before breaking them.
+- If `git.ok` is false, report the blocking finding category and recommended action. If `git.ok` is true with findings, report the caveat category without calling the workspace unhealthy.
 
 ## Finish Criteria
 

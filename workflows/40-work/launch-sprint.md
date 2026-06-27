@@ -90,12 +90,14 @@ Use a sprint record as the container, then attach ready leaf work beneath it.
 - Record command/test/diff evidence before verification or closeout.
 - Keep raw source material immutable; reconcile into wiki, claims, decisions, or work instead of rewriting raw records.
 - For work changes, confirm dependency and readiness state after mutation.
+- At launch, inspect `sync.git.findings` and separate non-blocking protected-branch/generated-artifact caveats from blocking Git findings before deciding whether the sprint can start.
 
 ## Failure And Repair
 
 - If workspace health fails, switch to `workflows/60-health/sync-and-doctor.md`.
 - If generated artifacts are stale, run `bwrk sync refresh --json` after memory, work, context, or search-affecting changes.
 - If locks are stale, inspect before breaking them.
+- Launch can continue with `git.ok=true` caveats; blocking Git findings require the recommended action or an explicit handoff note.
 
 ## Finish Criteria
 

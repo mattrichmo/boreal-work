@@ -83,12 +83,14 @@ Use exact create output IDs from JSON responses; do not invent parent, sprint, o
 - Record command/test/diff evidence before verification or closeout.
 - Keep raw source material immutable; reconcile into wiki, claims, decisions, or work instead of rewriting raw records.
 - For work changes, confirm dependency and readiness state after mutation.
+- Treat `sync.git.findings` with `blocking: false` as Git caveats when creating work structure; do not block planning only because the workspace is on protected main with generated-artifact or memory-index changes.
 
 ## Failure And Repair
 
 - If workspace health fails, switch to `workflows/60-health/sync-and-doctor.md`.
 - If generated artifacts are stale, run `bwrk sync refresh --json` after memory, work, context, or search-affecting changes.
 - If locks are stale, inspect before breaking them.
+- If `git.ok=false`, capture the blocking Git category and recommended action in the work record or handoff before continuing.
 
 ## Finish Criteria
 

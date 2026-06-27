@@ -1,15 +1,139 @@
 import { emitKeypressEvents } from "node:readline";
 import { createInterface } from "node:readline/promises";
 
+import { BorealError } from "@boreal/core";
+
 export interface CliSelectOption<T extends string> {
   readonly value: T;
   readonly label: string;
   readonly description: string;
 }
 
+export type CliStatus = "success" | "error" | "warning" | "info" | "pending" | "loading";
+
+export interface CliUiRenderOptions {
+  readonly unicode?: boolean;
+}
+
+export interface KeyValueRow {
+  readonly key: string;
+  readonly value: string | number | boolean;
+}
+
+export interface ResultSummaryInput {
+  readonly status: CliStatus;
+  readonly title: string;
+  readonly detail?: string;
+  readonly action?: string;
+}
+
+export interface StepperStep {
+  readonly label: string;
+  readonly status: "complete" | "current" | "pending" | "error";
+}
+
+export interface ChoiceListRenderInput<T extends string> {
+  readonly label: string;
+  readonly options: readonly CliSelectOption<T>[];
+  readonly activeIndex: number;
+  readonly selectedValues?: readonly T[];
+  readonly multiple?: boolean;
+  readonly windowSize?: number;
+}
+
 export interface CliPromptIO {
   readonly input: NodeJS.ReadStream;
   readonly output: NodeJS.WriteStream;
+}
+
+export function statusIcon(status: CliStatus, options: CliUiRenderOptions = {}): string {
+  if (options.unicode === true) {
+    switch (status) {
+      case "success":
+        return "✓";
+      case "error":
+        return "✕";
+      case "warning":
+        return "!";
+      case "info":
+        return "i";
+      case "pending":
+        return "…";
+      case "loading":
+        return "•";
+    }
+  }
+
+  switch (status) {
+    case "success":
+      return "OK";
+    case "error":
+      return "ERR";
+    case "warning":
+      return "WARN";
+    case "info":
+      return "INFO";
+    case "pending":
+      return "PEND";
+    case "loading":
+      return "LOAD";
+  }
+}
+
+export function shortcutHint(shortcut: string, action: string): string {
+  return `[${shortcut}] ${action}`;
+}
+
+export function section(title: string, rows: readonly string[]): string {
+  return [title, ...rows.map((row) => `  ${row}`)].join("\n");
+}
+
+export function keyValueRows(rows: readonly KeyValueRow[]): string {
+  const width = rows.reduce((max, row) => Math.max(max, row.key.length), 0);
+  return rows.map((row) => `${row.key.padEnd(width)}  ${String(row.value)}`).join("\n");
+}
+
+export function resultSummary(input: ResultSummaryInput, options: CliUiRenderOptions = {}): string {
+  return [
+    `${statusIcon(input.status, options)} ${input.title}`,
+    input.detail ? `  ${input.detail}` : undefined,
+    input.action ? `  next: ${input.action}` : undefined
+  ]
+    .filter(isString)
+    .join("\n");
+}
+
+export function stepper(steps: readonly StepperStep[], options: CliUiRenderOptions = {}): string {
+  return steps
+    .map((step, index) => {
+      const marker = step.status === "complete" ? statusIcon("success", options) : step.status === "error" ? statusIcon("error", options) : step.status === "current" ? ">" : " ";
+      return `${String(index + 1).padStart(2, " ")} ${marker} ${step.label}`;
+    })
+    .join("\n");
+}
+
+export function choiceList<T extends string>(input: ChoiceListRenderInput<T>): string {
+  const selected = new Set(input.selectedValues ?? []);
+  const activeIndex = clamp(input.activeIndex, 0, Math.max(0, input.options.length - 1));
+  const windowSize = Math.max(1, input.windowSize ?? input.options.length);
+  const windowStart = clamp(activeIndex - Math.floor(windowSize / 2), 0, Math.max(0, input.options.length - windowSize));
+  const windowedOptions = input.options.slice(windowStart, windowStart + windowSize);
+  const active = input.options[activeIndex];
+  return [
+    `${input.label}:`,
+    ...windowedOptions.map((option, offset) => {
+      const optionIndex = windowStart + offset;
+      const cursor = optionIndex === activeIndex ? ">" : " ";
+      const marker =
+        input.multiple === true ? (selected.has(option.value) ? "[x]" : "[ ]") : selected.has(option.value) ? "(*)" : "( )";
+      return `${cursor} ${marker} ${option.label}`;
+    }),
+    "",
+    active?.description ?? "",
+    input.multiple === true
+      ? `${shortcutHint("Space", "toggle")}  ${shortcutHint("Enter", "accept")}`
+      : shortcutHint("Enter", "accept")
+  ].join("\n");
 }
 
 export async function withPromptSession<T>(
@@ -74,22 +198,36 @@ export class CliPromptSession {
       selected.add(options[0]?.value as T);
     }
     let index = Math.max(0, options.findIndex((option) => selected.has(option.value)));
-    const wasRaw = stdin.isRaw;
     let renderedLines = 0;
+    let cursorHidden = false;
+    let terminalRestored = false;
+    const restoreTerminal = () => {
+      if (terminalRestored) {
+        return;
+      }
+      stdin.setRawMode(false);
+      if (cursorHidden) {
+        stdout.write("\x1B[?25h\n");
+        cursorHidden = false;
+      }
+      terminalRestored = true;
+    };
 
     emitKeypressEvents(stdin);
     stdin.setRawMode(true);
     stdin.resume();
     stdout.write("\x1B[?25l");
+    cursorHidden = true;
     renderedLines = renderSelect(stdout, label, options, index, selected, input.multiple, renderedLines);
 
     try {
-      return await new Promise<readonly T[]>((resolveSelection) => {
+      return await new Promise<readonly T[]>((resolveSelection, rejectSelection) => {
         const onKeypress = (_text: string, key: { readonly name?: string; readonly ctrl?: boolean }) => {
           if (key.ctrl && key.name === "c") {
             stdin.off("keypress", onKeypress);
-            stdout.write("\x1B[?25h\n");
-            process.exit(130);
+            restoreTerminal();
+            rejectSelection(new BorealError("BOREAL_INVALID_INPUT", "Interactive prompt cancelled", { reason: "cancelled" }));
+            return;
           }
           if (key.name === "up" || key.name === "k") {
             index = (index - 1 + options.length) % options.length;
@@ -117,14 +255,14 @@ export class CliPromptSession {
           }
           if (key.name === "return" || key.name === "enter") {
             stdin.off("keypress", onKeypress);
-            stdout.write("\x1B[?25h\n");
+            restoreTerminal();
             resolveSelection(options.filter((option) => selected.has(option.value)).map((option) => option.value));
           }
         };
         stdin.on("keypress", onKeypress);
       });
     } finally {
-      stdin.setRawMode(wasRaw);
+      restoreTerminal();
     }
   }
 }
@@ -170,4 +308,12 @@ function selectActiveOption<T extends string>(
     selected.clear();
     selected.add(active.value);
   }
+}
+
+function clamp(value: number, min: number, max: number): number {
+  return Math.min(max, Math.max(min, value));
+}
+
+function isString(value: string | undefined): value is string {
+  return typeof value === "string";
 }

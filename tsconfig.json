@@ -11,6 +11,7 @@
     { "path": "./packages/search" },
     { "path": "./packages/ui-model" },
     { "path": "./packages/engine" },
-    { "path": "./apps/cli" }
+    { "path": "./apps/cli" },
+    { "path": "./apps/console" }
   ]
 }

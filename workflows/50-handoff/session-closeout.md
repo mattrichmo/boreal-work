@@ -67,12 +67,14 @@ Use this workflow when the user's request requires summarize a session, active r
 - Record command/test/diff evidence before verification or closeout.
 - Keep raw source material immutable; reconcile into wiki, claims, decisions, or work instead of rewriting raw records.
 - For work changes, confirm dependency and readiness state after mutation.
+- When summarizing sync health, inspect `sync.git.findings`. Report non-blocking Git findings as caveats by category, and reserve "unhealthy" language for `sync.ok=false` or `git.ok=false`.
 
 ## Failure And Repair
 
 - If workspace health fails, switch to `workflows/60-health/sync-and-doctor.md`.
 - If generated artifacts are stale, run `bwrk sync refresh --json` after memory, work, context, or search-affecting changes.
 - If locks are stale, inspect before breaking them.
+- For Git findings, follow the structured `recommendedActions`; do not tell the user to branch, add, or commit unless the finding action says that is needed.
 
 ## Finish Criteria
 

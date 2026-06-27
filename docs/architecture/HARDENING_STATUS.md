@@ -37,6 +37,7 @@ This file is the current checkpoint for the broad hardening goal. It separates a
 - Repo-local `memory/` vault scaffolding, raw source index, wiki pages, duplicate scan, merge plans, and compaction plans exist.
 - Project setup now separates memory Git history by default with sibling memory repos, child ignored memory repos, child submodule metadata, generated `.gitignore` guards, and explicit `shared` opt-in for mixed project history.
 - Doctor validates project setup drift, schema shape, IDs, references, dependencies, reservations, context drift, ledger drift, search freshness, operation/event causality, and locks.
+- Git health uses the policy in `docs/architecture/GIT_HEALTH_HARDENING.md` to distinguish blocking Git failures from protected-branch, generated-artifact, and memory-index caveats.
 
 ## Hardened In This Checkpoint
 
@@ -48,6 +49,7 @@ This file is the current checkpoint for the broad hardening goal. It separates a
 - `bwrk commands --format markdown` emits a generated command reference from `COMMAND_DEFINITIONS`.
 - Claude Code sourcemap material is now treated as an ignored research artifact only; Boreal has a separate CLI UX direction document for original prompt/dashboard primitives, with richer views kept opt-in behind stable JSON and plain text command contracts.
 - `bwrk doctor` now detects project setup drift for copied configs, missing memory Git repositories, missing ignore guards, child memory tracked by project Git, and stale child submodule metadata; `doctor --fix` repairs the safe/idempotent subset.
+- `bwrk sync status`, `sync refresh`, `prime`, and `doctor` now surface categorized Git findings instead of making expected protected-main collaboration caveats look like sync failures.
 
 ## Remaining Architecture Work
 

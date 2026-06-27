@@ -85,12 +85,14 @@ Use this workflow to adjust existing records rather than recreating them.
 - Record command/test/diff evidence before verification or closeout.
 - Keep raw source material immutable; reconcile into wiki, claims, decisions, or work instead of rewriting raw records.
 - For work changes, confirm dependency and readiness state after mutation.
+- Treat `sync.git.findings` with `blocking: false` as Git caveats when updating work structure; do not call the workspace unhealthy only because generated artifacts or memory-index changes are visible on protected main.
 
 ## Failure And Repair
 
 - If workspace health fails, switch to `workflows/60-health/sync-and-doctor.md`.
 - If generated artifacts are stale, run `bwrk sync refresh --json` after memory, work, context, or search-affecting changes.
 - If locks are stale, inspect before breaking them.
+- If `git.ok=false`, capture the blocking Git category and recommended action before changing dependencies or readiness.
 
 ## Finish Criteria
 

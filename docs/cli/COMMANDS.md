@@ -180,10 +180,10 @@ Prints stable Boreal CLI package and runtime version information. `bwrk --versio
 ## `workflows list`
 
 ```bash
-bwrk workflows list [--json]
+bwrk workflows list [--view dashboard] [--json]
 ```
 
-Lists the checked-in Boreal v1 workflow playbooks. JSON rows include workflow ID, title, group, relative path, allowed-command count, and template count.
+Lists the checked-in Boreal v1 workflow playbooks. JSON rows include workflow ID, title, group, relative path, allowed-command count, and template count. `--view dashboard` renders a grouped human workflow picker without changing JSON output.
 
 ## `workflows show`
 
@@ -196,26 +196,26 @@ Shows one workflow playbook by exact workflow ID, relative path under `workflows
 ## `install codex`
 
 ```bash
-bwrk install codex [--install-root <dir>] [--dry-run] [--json]
+bwrk install codex [--install-root <dir>] [--dry-run] [--interactive] [--json]
 ```
 
-Plans or installs Boreal skill adapters for Codex. Defaults to the configured `.agents/skills` root when project setup exists, otherwise `.agents` under the selected workspace. Both `.agents` and `.agents/skills` are accepted; the actual scanned skill root is reported as `skillRoot`. Installed skills include Codex UI metadata in `agents/openai.yaml`. Use `--dry-run` before writing.
+Plans or installs Boreal skill adapters for Codex. Defaults to the configured `.agents/skills` root when project setup exists, otherwise `.agents` under the selected workspace. Both `.agents` and `.agents/skills` are accepted; the actual scanned skill root is reported as `skillRoot`. Installed skills include Codex UI metadata in `agents/openai.yaml`. Use `--dry-run` before writing. Use `--interactive` in a TTY to review the install plan before files are written.
 
 ## `install claude`
 
 ```bash
-bwrk install claude [--install-root <dir>] [--dry-run] [--json]
+bwrk install claude [--install-root <dir>] [--dry-run] [--interactive] [--json]
 ```
 
-Plans or installs Boreal skill adapters for Claude. Defaults to a configured `.claude/skills` root when project setup uses one, otherwise `.claude` under the selected workspace. Both `.claude` and `.claude/skills` are accepted; the actual scanned skill root is reported as `skillRoot`. Codex-specific `agents/openai.yaml` files are omitted. Use `--dry-run` before writing.
+Plans or installs Boreal skill adapters for Claude. Defaults to a configured `.claude/skills` root when project setup uses one, otherwise `.claude` under the selected workspace. Both `.claude` and `.claude/skills` are accepted; the actual scanned skill root is reported as `skillRoot`. Codex-specific `agents/openai.yaml` files are omitted. Use `--dry-run` before writing. Use `--interactive` in a TTY to review the install plan before files are written.
 
 ## `install skills`
 
 ```bash
-bwrk install skills [--install-root <dir>] [--dry-run] [--json]
+bwrk install skills [--install-root <dir>] [--dry-run] [--interactive] [--json]
 ```
 
-Plans or installs generic namespaced Boreal skill folders into a folder-scoped skill root. Defaults to the configured install root when project setup exists, otherwise `.agents/skills` under the selected workspace.
+Plans or installs generic namespaced Boreal skill folders into a folder-scoped skill root. Defaults to the configured install root when project setup exists, otherwise `.agents/skills` under the selected workspace. Use `--interactive` in a TTY to review the install plan before files are written.
 
 ## `init`
 
@@ -387,10 +387,10 @@ JSON `data` shape:
 ## `work next`
 
 ```bash
-bwrk work next [--label <label>] [--limit <count>] [--json]
+bwrk work next [--label <label>] [--limit <count>] [--view dashboard] [--json]
 ```
 
-Lists claimable ready work from the live runtime view, ordered by priority and title. `--label` may be repeated and all labels must match. Default `--limit` is `10`; max is `1000`.
+Lists claimable ready work from the live runtime view, ordered by priority and title. `--label` may be repeated and all labels must match. Default `--limit` is `10`; max is `1000`. `--view dashboard` renders a grouped ready-queue view for humans.
 
 This command does not use the search index; readiness and reservation-sensitive workflow state are read from current runtime state.
 
@@ -593,10 +593,10 @@ Safe entrypoint for an agent before it starts work:
 ## `agent status`
 
 ```bash
-bwrk agent status [--agent <agent-id>] [--label <label>] [--json]
+bwrk agent status [--agent <agent-id>] [--label <label>] [--view dashboard] [--json]
 ```
 
-Summarizes an agent's coordination state. If `--agent` is omitted, the CLI actor ID is used.
+Summarizes an agent's coordination state. If `--agent` is omitted, the CLI actor ID is used. `--view dashboard` renders reservation, ready-work, and recommended-action sections.
 
 JSON `data` includes:
 
@@ -1017,10 +1017,10 @@ Behavior:
 ## `sync status`
 
 ```bash
-bwrk sync status [--json]
+bwrk sync status [--view dashboard] [--json]
 ```
 
-Checks collaboration readiness without mutating state. The command combines repo-local memory vault readiness and content health, JSONL ledger freshness, generated search-index freshness, and Git worktree safety so agents can see whether the workspace is ready to share and query from one place.
+Checks collaboration readiness without mutating state. The command combines repo-local memory vault readiness and content health, JSONL ledger freshness, generated search-index freshness, and Git worktree safety so agents can see whether the workspace is ready to share and query from one place. `--view dashboard` renders grouped checks and recommended actions.
 
 JSON `data` contains `ok`, `workspaceRoot`, `checkedAt`, `vault`, `ledgers`, `searchIndex`, `git`, and `recommendedActions`. It exits `1` when the memory vault is missing/incomplete, when ledgers are missing/stale/invalid, when the local search index is missing/stale/invalid, or when `.boreal/ledgers` or `memory` paths are dirty on a protected branch or detached HEAD. Protected branches default to `main`, `master`, and `trunk`; set `BOREAL_PROTECTED_BRANCHES` to a comma-separated list to override. Recommended repairs are specific commands such as `bwrk vault init --json`, `bwrk sync refresh --json`, and `git switch -c boreal/sync-work`.
 
@@ -1085,10 +1085,10 @@ Shows one recovery snapshot by ID. JSON `data` is the full `boreal.export.v1` do
 ## `doctor`
 
 ```bash
-bwrk doctor [--fix] [--strict] [--json]
+bwrk doctor [--fix] [--strict] [--view dashboard] [--json]
 ```
 
-Validates workspace health.
+Validates workspace health. `--view dashboard` renders a grouped diagnostic dashboard while leaving JSON and default line output unchanged.
 
 Checks:
 
@@ -1156,10 +1156,10 @@ With `--skill-target` or `--install-root`, it also validates installed skill roo
 ## `lock inspect`
 
 ```bash
-bwrk lock inspect [--json]
+bwrk lock inspect [--view dashboard] [--json]
 ```
 
-Inspects the runtime state lock at `.boreal/runtime/state.lock`.
+Inspects the runtime state lock at `.boreal/runtime/state.lock`. `--view dashboard` renders lock state, owner, age, and repair action sections.
 
 JSON `data` shape:
 

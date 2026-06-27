@@ -1750,6 +1750,7 @@ describe("bwrk cli", () => {
     const codex = await runCli(rootDir, ["install", "codex", "--dry-run", "--json"]);
     const claude = await runCli(rootDir, ["install", "claude", "--dry-run", "--json"]);
     const explicitCodex = await runCli(rootDir, ["install", "codex", "--install-root", ".agents/skills", "--dry-run", "--json"]);
+    const interactiveCodex = await runCli(rootDir, ["install", "codex", "--interactive"]);
     const codexPlan = parseData<{
       readonly installRoot: string;
       readonly skillRoot: string;
@@ -1787,6 +1788,8 @@ describe("bwrk cli", () => {
     expect(explicitCodex.exitCode).toBe(0);
     expect(explicitCodexPlan.skillRoot).toBe(join(rootDir, ".agents/skills"));
     expect(explicitCodex.stdout).not.toContain(".agents/skills/skills/");
+    expect(interactiveCodex.exitCode).toBe(2);
+    expect(interactiveCodex.stderr).toContain("--interactive requires a TTY");
   });
 
   it("generates a markdown command reference from the registry", async () => {
@@ -1811,6 +1814,46 @@ describe("bwrk cli", () => {
     expect(markdown.stdout).not.toContain("Repeatable. Repeatable.");
     expect(invalid.exitCode).toBe(2);
     expect(invalidPayload.code).toBe("BOREAL_INVALID_INPUT");
+  });
+
+  it("renders opt-in dashboard views without changing json contracts", async () => {
+    const rootDir = await makeTempWorkspace();
+    await runCli(rootDir, ["init", "--json"]);
+    await runCli(rootDir, ["work", "create", "Dashboard ready work", "--label", "dashboard", "--ready", "--json"]);
+    await runCli(rootDir, ["sync", "refresh", "--json"]);
+
+    const doctor = await runCli(rootDir, ["doctor", "--view", "dashboard"]);
+    const sync = await runCli(rootDir, ["sync", "status", "--view", "dashboard"]);
+    const ready = await runCli(rootDir, ["work", "next", "--label", "dashboard", "--view", "dashboard"]);
+    const workflows = await runCli(rootDir, ["workflows", "list", "--view", "dashboard"]);
+    const lock = await runCli(rootDir, ["lock", "inspect", "--view", "dashboard"]);
+    const agent = await runCli(rootDir, [
+      "agent",
+      "status",
+      "--agent",
+      "dashboard-agent",
+      "--label",
+      "dashboard",
+      "--view",
+      "dashboard"
+    ]);
+    const readyJson = await runCli(rootDir, ["work", "next", "--label", "dashboard", "--view", "dashboard", "--json"]);
+
+    expect(doctor.exitCode).toBe(0);
+    expect(doctor.stdout).toContain("Doctor");
+    expect([0, 1]).toContain(sync.exitCode);
+    expect(sync.stdout).toContain("Sync status");
+    expect(ready.exitCode).toBe(0);
+    expect(ready.stdout).toContain("Dashboard ready work");
+    expect(workflows.exitCode).toBe(0);
+    expect(workflows.stdout).toContain("Workflow picker");
+    expect(lock.exitCode).toBe(0);
+    expect(lock.stdout).toContain("State lock");
+    expect(agent.exitCode).toBe(0);
+    expect(agent.stdout).toContain("Agent dashboard-agent");
+    expect(parseData<Array<{ readonly title: string }>>(readyJson.stdout)).toEqual([
+      expect.objectContaining({ title: "Dashboard ready work" })
+    ]);
   });
 
   it("records local command operations with session, redacted argv, and generated event ids", async () => {
@@ -3987,7 +4030,7 @@ describe("bwrk cli", () => {
     expect(malformedPayload.message).toContain("schema validation");
   });
 
-  it("reports dirty collaboration paths on protected git branches", async () => {
+  it("reports non-blocking git caveats on protected git branches", async () => {
     const rootDir = await makeTempWorkspace();
     if (!(await gitAvailable(rootDir))) {
       return;
@@ -4011,26 +4054,40 @@ describe("bwrk cli", () => {
         readonly branch?: string;
         readonly protectedBranch: boolean;
         readonly collaborationDirtyPaths: readonly Array<{ readonly path: string }>;
+        readonly blockingDirtyPaths: readonly Array<{ readonly path: string }>;
+        readonly findings: readonly Array<{
+          readonly category: string;
+          readonly blocking: boolean;
+          readonly path?: string;
+        }>;
       };
       readonly recommendedActions: readonly string[];
     }>(protectedStatus.stdout);
-    expect(protectedStatus.exitCode).toBe(1);
+    expect(protectedStatus.exitCode).toBe(0);
     expect(protectedPayload).toEqual(
       expect.objectContaining({
-        ok: false,
+        ok: true,
         ledgers: expect.objectContaining({ ok: true }),
         searchIndex: expect.objectContaining({ ok: true }),
         git: expect.objectContaining({
-          ok: false,
+          ok: true,
           insideWorktree: true,
           branch: "main",
           protectedBranch: true
         }),
-        recommendedActions: expect.arrayContaining(["git switch -c boreal/sync-work"])
+        recommendedActions: expect.arrayContaining(["bwrk doctor --fix --json", "git switch -c boreal/sync-work"])
       })
     );
     expect(protectedPayload.git.collaborationDirtyPaths.map((entry) => entry.path).join("\n")).toContain(
       ".boreal/ledgers"
+    );
+    expect(protectedPayload.git.blockingDirtyPaths).toEqual([]);
+    expect(protectedPayload.git.findings).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ category: "protected_branch", blocking: false }),
+        expect.objectContaining({ category: "dirty_generated_artifact", blocking: false }),
+        expect.objectContaining({ category: "dirty_collaboration_path", blocking: false })
+      ])
     );
 
     const protectedRefresh = await runCli(rootDir, ["sync", "refresh", "--json"]);
@@ -4048,19 +4105,19 @@ describe("bwrk cli", () => {
         readonly recommendedActions: readonly string[];
       };
     }>(protectedRefresh.stdout);
-    expect(protectedRefresh.exitCode).toBe(1);
+    expect(protectedRefresh.exitCode).toBe(0);
     expect(protectedRefreshPayload).toEqual(
       expect.objectContaining({
         refreshed: true,
         refreshOk: true,
-        postRefreshStatusOk: false,
-        exitReason: "post_refresh_status_unhealthy",
+        postRefreshStatusOk: true,
+        exitReason: "ok",
         status: expect.objectContaining({
-          ok: false,
+          ok: true,
           ledgers: expect.objectContaining({ ok: true }),
           searchIndex: expect.objectContaining({ ok: true }),
-          git: expect.objectContaining({ ok: false, protectedBranch: true }),
-          recommendedActions: expect.arrayContaining(["git switch -c boreal/sync-work"])
+          git: expect.objectContaining({ ok: true, protectedBranch: true }),
+          recommendedActions: expect.arrayContaining(["bwrk doctor --fix --json", "git switch -c boreal/sync-work"])
         })
       })
     );
@@ -4073,11 +4130,11 @@ describe("bwrk cli", () => {
     expect(doctor.exitCode).toBe(0);
     expect(doctorPayload.ok).toBe(true);
     expect(doctorPayload.diagnostics).toEqual(
-      expect.arrayContaining([expect.objectContaining({ code: "git.worktree", severity: "warning" })])
+      expect.arrayContaining([expect.objectContaining({ code: "git.worktree", severity: "ok" })])
     );
 
     const strictDoctor = await runCli(rootDir, ["doctor", "--strict", "--json"]);
-    expect(strictDoctor.exitCode).toBe(1);
+    expect(strictDoctor.exitCode).toBe(0);
 
     await runGit(rootDir, ["checkout", "-b", "feature/sync-work"]);
     const featureStatus = await runCli(rootDir, ["sync", "status", "--json"]);
@@ -4091,9 +4148,70 @@ describe("bwrk cli", () => {
       expect.objectContaining({
         ok: true,
         git: expect.objectContaining({ ok: true, branch: "feature/sync-work", protectedBranch: false }),
-        recommendedActions: []
+        recommendedActions: expect.arrayContaining(["bwrk doctor --fix --json"])
       })
     );
+    expect(featurePayload.recommendedActions).not.toContain("git switch -c boreal/sync-work");
+  });
+
+  it("classifies memory raw index changes as non-blocking git caveats", async () => {
+    const rootDir = await makeTempWorkspace();
+    if (!(await gitAvailable(rootDir))) {
+      return;
+    }
+
+    await initGitRepository(rootDir, "main");
+    await runCli(rootDir, [
+      "init",
+      "--setup-memory",
+      "--memory-root",
+      "memory",
+      "--memory-layout",
+      "in-repo",
+      "--memory-git-mode",
+      "shared",
+      "--json"
+    ]);
+    await runCli(rootDir, ["work", "create", "Tracked memory index work", "--ready", "--json"]);
+    await runCli(rootDir, ["sync", "refresh", "--json"]);
+    await runGit(rootDir, ["add", "."]);
+    await runGit(rootDir, ["commit", "-m", "Commit initialized Boreal workspace"]);
+    await writeFile(join(rootDir, "memory/raw/index.jsonl"), "\n", "utf8");
+
+    const status = await runCli(rootDir, ["sync", "status", "--json"]);
+    const payload = parseData<{
+      readonly ok: boolean;
+      readonly git: {
+        readonly ok: boolean;
+        readonly blockingDirtyPaths: readonly Array<{ readonly path: string }>;
+        readonly findings: readonly Array<{
+          readonly category: string;
+          readonly blocking: boolean;
+          readonly path?: string;
+          readonly recommendedActions: readonly string[];
+        }>;
+      };
+      readonly recommendedActions: readonly string[];
+    }>(status.stdout);
+
+    expect(status.exitCode).toBe(0);
+    expect(payload.ok).toBe(true);
+    expect(payload.git.ok).toBe(true);
+    expect(payload.git.blockingDirtyPaths).toEqual([]);
+    expect(payload.git.findings).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          category: "dirty_memory_index",
+          blocking: false,
+          path: "memory/raw/index.jsonl",
+          recommendedActions: expect.arrayContaining(["git switch -c boreal/sync-work"])
+        })
+      ])
+    );
+    expect(payload.recommendedActions).toEqual(expect.arrayContaining(["git switch -c boreal/sync-work"]));
+
+    const strictDoctor = await runCli(rootDir, ["doctor", "--strict", "--json"]);
+    expect(strictDoctor.exitCode).toBe(0);
   });
 
   it("deletes supported unreferenced records through tombstoned ledgers and blocks referenced deletions", async () => {

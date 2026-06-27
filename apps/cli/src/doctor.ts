@@ -1316,13 +1316,19 @@ function gitWorktreeDiagnosticMessage(status: Awaited<ReturnType<typeof inspectG
     return "Workspace is not inside a Git worktree";
   }
   if (!status.ok && status.detached) {
-    return "Collaboration ledger or memory paths are dirty on a detached Git HEAD";
+    return "Blocking collaboration path changes are present on a detached Git HEAD";
   }
   if (!status.ok && status.protectedBranch) {
-    return "Collaboration ledger or memory paths are dirty on a protected Git branch";
+    return "Blocking collaboration path changes are present on a protected Git branch";
+  }
+  if (!status.ok) {
+    return "Blocking Git collaboration findings are present";
+  }
+  if (status.findings.some((finding) => finding.category !== "protected_branch")) {
+    return "Git worktree has non-blocking collaboration caveats";
   }
   if (status.protectedBranch) {
-    return "Git worktree is on a protected branch with no dirty collaboration paths";
+    return "Git worktree is on a protected branch with no blocking git findings";
   }
   return "Git worktree collaboration paths are safe";
 }

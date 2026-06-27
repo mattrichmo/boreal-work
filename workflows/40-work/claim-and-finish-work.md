@@ -85,12 +85,14 @@ Prefer `agent finish` for normal reserved work closeout because it records evide
 - Record command/test/diff evidence before verification or closeout.
 - Keep raw source material immutable; reconcile into wiki, claims, decisions, or work instead of rewriting raw records.
 - For work changes, confirm dependency and readiness state after mutation.
+- Before closeout, distinguish blocking Git findings from non-blocking caveats using `sync.git.findings`; protected-branch generated artifacts or memory-index changes do not by themselves make completed work unverified.
 
 ## Failure And Repair
 
 - If workspace health fails, switch to `workflows/60-health/sync-and-doctor.md`.
 - If generated artifacts are stale, run `bwrk sync refresh --json` after memory, work, context, or search-affecting changes.
 - If locks are stale, inspect before breaking them.
+- If a Git finding has `blocking: true`, report its category and recommended action before closing. If every Git finding is non-blocking, record it as a caveat only.
 
 ## Finish Criteria
 

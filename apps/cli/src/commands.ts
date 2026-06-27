@@ -67,6 +67,7 @@ import {
 import { analyzeCompaction, applyCompaction, type CompactDomain } from "./compact.js";
 import { asEvidenceId, asWorkId, runDoctor, type Diagnostic } from "./doctor.js";
 import { assertInitialized, createCliContext, ensureWorkspaceDirs, type CliContext } from "./context.js";
+import { keyValueRows, resultSummary, section, withPromptSession, type CliSelectOption } from "./cli-ui.js";
 import { applyManualMerge, buildManualMergePlan, scanDuplicates, type DuplicateDomain } from "./duplicates.js";
 import { inspectGitWorktree, type GitWorktreeInspection } from "./git-worktree.js";
 import {
@@ -116,6 +117,18 @@ const DEFAULT_READY_WORK_LIMIT = 10;
 const MAX_LIST_LIMIT = 1_000;
 const MAX_SEARCH_LIMIT = 100;
 const MAX_HANDOFF_SEARCH_LIMIT = 50;
+const INSTALL_CONFIRM_OPTIONS: readonly CliSelectOption<"yes" | "no">[] = [
+  {
+    value: "yes",
+    label: "Write files",
+    description: "Write the planned skill files to the selected install root."
+  },
+  {
+    value: "no",
+    label: "Cancel",
+    description: "Leave the filesystem unchanged."
+  }
+];
 
 export interface CommandResult {
   readonly exitCode: number;
@@ -488,7 +501,7 @@ export async function runCommand(args: ParsedArgs, output: CliOutput, cwd: strin
         result = await operationCommand(action, rest, context, args, commandOutput, json);
         break;
       case "workflows":
-        result = await workflowsCommand(action, rest, commandOutput, json);
+        result = await workflowsCommand(action, rest, args, commandOutput, json);
         break;
       case "install":
         result = await installCommand(action, context, args, commandOutput, json);
@@ -518,7 +531,7 @@ export async function runCommand(args: ParsedArgs, output: CliOutput, cwd: strin
         result = await compactCommand(action, context, args, commandOutput, json);
         break;
       case "sync":
-        result = await syncCommand(action, context, commandOutput, json);
+        result = await syncCommand(action, context, args, commandOutput, json);
         break;
       case "ledger":
         result = await ledgerCommand(action, rest, context, args, commandOutput, json);
@@ -1010,6 +1023,7 @@ function commandsMarkdown(): string {
 async function workflowsCommand(
   action: string | undefined,
   rest: readonly string[],
+  args: ParsedArgs,
   output: CliOutput,
   json: boolean
 ): Promise<CommandResult> {
@@ -1024,7 +1038,7 @@ async function workflowsCommand(
         commands: workflow.allowedCommands.length,
         templates: workflow.templates.filter((template) => template !== "none").length
       }));
-      output.write(json ? formatRecord(rows, true) : table(rows));
+      output.write(json ? formatRecord(rows, true) : dashboardView(args) ? formatWorkflowDashboard(rows) : table(rows));
       return { exitCode: 0 };
     }
     case "show": {
@@ -1046,11 +1060,18 @@ async function installCommand(
 ): Promise<CommandResult> {
   const target = installTarget(action);
   const dryRun = hasFlag(args, "dry-run");
+  const interactive = hasFlag(args, "interactive");
+  if (interactive && json) {
+    throw new BorealError("BOREAL_INVALID_INPUT", "--interactive cannot be combined with --json");
+  }
   const plan = await buildSkillInstallPlan({
     target,
     dryRun,
     installRoot: await installRootFromArgs(context, args, target)
   });
+  if (interactive && !dryRun) {
+    await confirmSkillInstallPlan(plan);
+  }
   const result = dryRun ? plan : await installSkillsFromPlan(plan);
   output.write(json ? formatRecord(result, true) : formatSkillInstallPlan(result));
   return { exitCode: result.issues.length === 0 ? 0 : 1 };
@@ -1094,16 +1115,183 @@ function configuredInstallRootMatchesTarget(root: string, target: "codex" | "cla
   return target === "codex" ? container === ".agents" : container === ".claude";
 }
 
+async function confirmSkillInstallPlan(plan: SkillInstallPlan): Promise<void> {
+  if (!process.stdin.isTTY || !process.stdout.isTTY) {
+    throw new BorealError("BOREAL_INVALID_INPUT", "--interactive requires a TTY; use --dry-run to review install plans in automation");
+  }
+  const accepted = await withPromptSession({ input: process.stdin, output: process.stdout }, async (prompt) => {
+    prompt.writeIntro("Boreal skill install review", formatSkillInstallPlan(plan));
+    return prompt.select("Write install files", INSTALL_CONFIRM_OPTIONS, "yes");
+  });
+  if (accepted !== "yes") {
+    throw new BorealError("BOREAL_INVALID_INPUT", "Skill install cancelled", { reason: "cancelled" });
+  }
+}
+
 function formatSkillInstallPlan(plan: SkillInstallPlan): string {
+  const summaryStatus = plan.issues.length > 0 ? "warning" : plan.dryRun ? "pending" : "success";
+  const fileRows = plan.files.map((file) => {
+    const action = file.wouldWrite ? "write" : "skip";
+    return `${action} ${file.destination} (${file.workflowRefs.length} workflows)`;
+  });
   return [
-    `target: ${plan.target}`,
-    `dryRun: ${plan.dryRun}`,
-    `installRoot: ${plan.installRoot}`,
-    `skillRoot: ${plan.skillRoot}`,
-    `issues: ${plan.issues.length}`,
-    "files:",
-    ...plan.files.map((file) => `- ${file.destination} (${file.workflowRefs.length} workflows)`)
-  ].join("\n") + "\n";
+    resultSummary({
+      status: summaryStatus,
+      title: `${plan.target} skill install ${plan.dryRun ? "plan" : "result"}`,
+      detail: `${plan.files.length} files, ${plan.issues.length} issues`
+    }),
+    section(
+      "Paths",
+      keyValueRows([
+        { key: "target", value: plan.target },
+        { key: "dryRun", value: plan.dryRun },
+        { key: "installRoot", value: plan.installRoot },
+        { key: "skillRoot", value: plan.skillRoot }
+      ]).split("\n")
+    ),
+    section("Files", fileRows.length > 0 ? fileRows : ["none"]),
+    plan.issues.length > 0
+      ? section(
+          "Issues",
+          plan.issues.map((issue) => `${issue.code} ${issue.path}: ${issue.message}`)
+        )
+      : undefined
+  ]
+    .filter((line): line is string => typeof line === "string")
+    .join("\n\n") + "\n";
+}
+
+function dashboardView(args: ParsedArgs): boolean {
+  const view = flagValue(args, "view");
+  if (view === undefined) {
+    return false;
+  }
+  if (view === "dashboard") {
+    return true;
+  }
+  throw new BorealError("BOREAL_INVALID_INPUT", "--view must be dashboard");
+}
+
+function formatWorkflowDashboard(
+  rows: readonly {
+    readonly id: string;
+    readonly title: string;
+    readonly group: string;
+    readonly path: string;
+    readonly commands: number;
+    readonly templates: number;
+  }[]
+): string {
+  const groups = [...new Set(rows.map((row) => row.group))].sort();
+  return [
+    resultSummary({ status: "info", title: "Workflow picker", detail: `${rows.length} workflows available` }),
+    ...groups.map((group) =>
+      section(
+        group,
+        rows
+          .filter((row) => row.group === group)
+          .sort((left, right) => left.path.localeCompare(right.path))
+          .map((row) => `${row.path} - ${row.title} (${row.commands} commands, ${row.templates} templates)`)
+      )
+    )
+  ].join("\n\n") + "\n";
+}
+
+function formatReadyWorkDashboard(rows: readonly WorkListRow[]): string {
+  return [
+    resultSummary({ status: rows.length > 0 ? "success" : "pending", title: "Ready work", detail: `${rows.length} claimable items` }),
+    section(
+      "Queue",
+      rows.length > 0
+        ? rows.map((row) => `${row.priority.padEnd(8)} ${row.id} ${row.title}${row.labels.length > 0 ? ` [${row.labels.join(", ")}]` : ""}`)
+        : ["No ready work matches the selected filters."]
+    ),
+    section("Actions", rows.length > 0 ? ["bwrk work claim --label <label> --agent <agent-id> --json"] : ["bwrk work list --json"])
+  ].join("\n\n") + "\n";
+}
+
+function formatAgentStatusDashboard(status: AgentStatus): string {
+  return [
+    resultSummary({
+      status: status.reservations.expiredActiveCount > 0 ? "warning" : status.readyWork.claimableCount > 0 ? "success" : "pending",
+      title: `Agent ${status.agentId}`,
+      detail: status.recommendedAction.reason
+    }),
+    section(
+      "Reservations",
+      keyValueRows([
+        { key: "active", value: status.reservations.activeCount },
+        { key: "expired", value: status.reservations.expiredActiveCount },
+        { key: "capacity", value: status.reservations.capacityRemaining }
+      ]).split("\n")
+    ),
+    section(
+      "Ready work",
+      [
+        `claimable ${status.readyWork.claimableCount}`,
+        status.readyWork.next ? `next ${status.readyWork.next.id} ${status.readyWork.next.title}` : "next none"
+      ]
+    ),
+    section("Action", [status.recommendedAction.command ?? "none"])
+  ].join("\n\n") + "\n";
+}
+
+function formatSyncDashboard(status: SyncStatusResult): string {
+  return [
+    resultSummary({
+      status: status.ok ? "success" : "warning",
+      title: "Sync status",
+      detail: status.workspaceRoot
+    }),
+    section(
+      "Checks",
+      keyValueRows([
+        { key: "vault", value: status.vault.ok },
+        { key: "ledgers", value: status.ledgers.ok },
+        { key: "searchIndex", value: status.searchIndex.ok },
+        { key: "git", value: status.git.ok }
+      ]).split("\n")
+    ),
+    section("Recommended actions", status.recommendedActions.length > 0 ? status.recommendedActions : ["none"])
+  ].join("\n\n") + "\n";
+}
+
+function formatDoctorDashboard(result: Awaited<ReturnType<typeof runDoctor>>): string {
+  const errors = result.diagnostics.filter((diagnostic) => diagnostic.severity === "error");
+  const warnings = result.diagnostics.filter((diagnostic) => diagnostic.severity === "warning");
+  const fixed = result.diagnostics.filter((diagnostic) => diagnostic.severity === "fixed");
+  return [
+    resultSummary({
+      status: result.ok ? "success" : "error",
+      title: "Doctor",
+      detail: `${errors.length} errors, ${warnings.length} warnings, ${fixed.length} fixed`
+    }),
+    section(
+      "Findings",
+      result.diagnostics.length > 0 ? result.diagnostics.map(formatDiagnostic) : ["No diagnostics returned."]
+    )
+  ].join("\n\n") + "\n";
+}
+
+function formatLockDashboard(inspection: Awaited<ReturnType<typeof inspectFileLock>>): string {
+  return [
+    resultSummary({
+      status: !inspection.exists ? "success" : inspection.stale ? "warning" : "info",
+      title: "State lock",
+      detail: inspection.exists ? (inspection.stale ? "stale lock present" : "active lock present") : "no active lock"
+    }),
+    section(
+      "Details",
+      keyValueRows([
+        { key: "lockDir", value: inspection.lockDir },
+        { key: "exists", value: inspection.exists },
+        { key: "stale", value: inspection.stale },
+        { key: "ageMs", value: inspection.ageMs ?? "" },
+        { key: "owner", value: inspection.owner ? `${inspection.owner.hostname}:${inspection.owner.pid}` : "" }
+      ]).split("\n")
+    ),
+    section("Actions", inspection.exists && inspection.stale ? ["bwrk lock break --stale-only --json"] : ["none"])
+  ].join("\n\n") + "\n";
 }
 
 async function agentCommand(
@@ -1127,7 +1315,8 @@ async function agentCommand(
     case "status": {
       const agentId = agentIdFromArgs(args, context.actor.id);
       const labels = labelsFromArgs(args);
-      output.write(formatRecord(await buildAgentStatus(context, agentId, labels), json));
+      const status = await buildAgentStatus(context, agentId, labels);
+      output.write(json ? formatRecord(status, true) : dashboardView(args) ? formatAgentStatusDashboard(status) : formatRecord(status, false));
       return { exitCode: 0 };
     }
     default:
@@ -1491,7 +1680,7 @@ async function workCommand(
         .sort(compareWorkViews)
         .slice(0, limit)
         .map(workViewListRow);
-      output.write(json ? formatRecord(rows, true) : table(rows.map(textWorkListRow)));
+      output.write(json ? formatRecord(rows, true) : dashboardView(args) ? formatReadyWorkDashboard(rows) : table(rows.map(textWorkListRow)));
       return { exitCode: 0 };
     }
     case "show": {
@@ -1917,13 +2106,14 @@ async function importCommand(
 async function syncCommand(
   action: string | undefined,
   context: CliContext,
+  args: ParsedArgs,
   output: CliOutput,
   json: boolean
 ): Promise<CommandResult> {
   switch (action) {
     case "status": {
       const status = await buildSyncStatus(context);
-      output.write(formatRecord(status, json));
+      output.write(json ? formatRecord(status, true) : dashboardView(args) ? formatSyncDashboard(status) : formatRecord(status, false));
       return { exitCode: status.ok ? 0 : 1 };
     }
     case "refresh": {
@@ -2423,6 +2613,8 @@ async function doctorCommand(
   const result = await runDoctor(context, hasFlag(args, "fix"), hasFlag(args, "strict"));
   if (json) {
     output.write(formatRecord(result, true));
+  } else if (dashboardView(args)) {
+    output.write(formatDoctorDashboard(result));
   } else {
     output.write(result.diagnostics.map(formatDiagnostic).join("\n") + "\n");
   }
@@ -2483,7 +2675,7 @@ async function lockCommand(
   switch (action) {
     case "inspect": {
       const inspection = await inspectFileLock(context.paths.stateLockDir);
-      output.write(formatRecord(inspection, json));
+      output.write(json ? formatRecord(inspection, true) : dashboardView(args) ? formatLockDashboard(inspection) : formatRecord(inspection, false));
       return { exitCode: 0 };
     }
     case "break": {

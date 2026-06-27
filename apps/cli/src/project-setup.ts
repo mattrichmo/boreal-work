@@ -8,7 +8,7 @@ import { BorealError, assertPathInside, assertRealPathInside, nowIso, safeParseJ
 import { writeTextFileAtomic } from "@boreal/storage";
 
 import { flagValue, flagValues, hasFlag, type ParsedArgs } from "./args.js";
-import { withPromptSession, type CliSelectOption } from "./cli-ui.js";
+import { keyValueRows, section, withPromptSession, type CliSelectOption } from "./cli-ui.js";
 import type { CliContext } from "./context.js";
 
 export const PROJECT_SETUP_SCHEMA_VERSION = "boreal.project-setup.v1";
@@ -489,8 +489,55 @@ async function promptProjectSetupInput(context: CliContext, args: ParsedArgs): P
       defaults.skillTargets
     );
     const folderScoped = (await prompt.select("Folder scoped skills", YES_NO_OPTIONS, defaults.folderScoped ? "yes" : "no")) === "yes";
-    return { projectRoot, memoryRoot, memoryLayout, memoryGitMode, memoryRemote, installRoot, skillTargets, folderScoped };
+    const reviewed = { projectRoot, memoryRoot, memoryLayout, memoryGitMode, memoryRemote, installRoot, skillTargets, folderScoped };
+    prompt.writeIntro("Review project setup", formatProjectSetupReview(reviewed));
+    const confirmed = await prompt.select("Write setup files", YES_NO_OPTIONS, "yes");
+    if (confirmed !== "yes") {
+      throw new BorealError("BOREAL_INVALID_INPUT", "Project setup cancelled", { reason: "cancelled" });
+    }
+    return reviewed;
   });
+}
+
+function formatProjectSetupReview(input: ProjectSetupInput): string {
+  return [
+    section(
+      "Config",
+      keyValueRows([
+        { key: "projectRoot", value: input.projectRoot },
+        { key: "memoryRoot", value: input.memoryRoot },
+        { key: "memoryLayout", value: input.memoryLayout },
+        { key: "memoryGitMode", value: input.memoryGitMode },
+        { key: "memoryRemote", value: input.memoryRemote ?? "" },
+        { key: "installRoot", value: input.installRoot },
+        { key: "skillTargets", value: input.skillTargets.join(", ") },
+        { key: "folderScoped", value: input.folderScoped }
+      ]).split("\n")
+    ),
+    section("Directories", MEMORY_DIRECTORIES.map((entry) => `ensure ${relative(input.projectRoot, join(input.memoryRoot, entry))}`)),
+    section("Files", MEMORY_FILES.map((entry) => `ensure ${relative(input.projectRoot, join(input.memoryRoot, entry.path))}`)),
+    section("Git effects", projectSetupGitReviewRows(input))
+  ].join("\n\n");
+}
+
+function projectSetupGitReviewRows(input: ProjectSetupInput): readonly string[] {
+  switch (input.memoryGitMode) {
+    case "shared":
+      return ["memory history may be tracked by the project Git repository", "no separate memory Git repository is initialized"];
+    case "separate":
+      return [
+        "initialize or reuse a separate memory Git repository",
+        "write memory .gitignore guards for generated runtime artifacts",
+        "write project .gitignore guards so child memory/runtime artifacts are not tracked"
+      ];
+    case "submodule":
+      return [
+        "initialize or reuse a child memory Git repository",
+        "write memory .gitignore guards for generated runtime artifacts",
+        "write project .gitignore guards for local Boreal runtime artifacts",
+        input.memoryRemote ? "write or update .gitmodules for the memory remote" : "require --memory-remote before writing .gitmodules"
+      ];
+  }
 }
 
 async function applyProjectSetup(input: ProjectSetupInput): Promise<ProjectSetupResult> {

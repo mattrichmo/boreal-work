@@ -20,6 +20,7 @@
     "baseUrl": ".",
     "paths": {
       "@boreal/agent-runtime": ["packages/agent-runtime/src/index.ts"],
+      "@boreal/console": ["apps/console/src/index.ts"],
       "@boreal/core": ["packages/core/src/index.ts"],
       "@boreal/engine": ["packages/engine/src/index.ts"],
       "@boreal/evidence-engine": ["packages/evidence-engine/src/index.ts"],
@@ -32,4 +33,3 @@
     }
   }
 }
-

@@ -67,12 +67,14 @@ Use this workflow when the user's request requires classify the user ask and sel
 - Record command/test/diff evidence before verification or closeout.
 - Keep raw source material immutable; reconcile into wiki, claims, decisions, or work instead of rewriting raw records.
 - For work changes, confirm dependency and readiness state after mutation.
+- If route context includes Git health, use structured `sync.git.findings`; non-blocking protected-branch or generated-artifact caveats should not route the request to failure recovery.
 
 ## Failure And Repair
 
 - If workspace health fails, switch to `workflows/60-health/sync-and-doctor.md`.
 - If generated artifacts are stale, run `bwrk sync refresh --json` after memory, work, context, or search-affecting changes.
 - If locks are stale, inspect before breaking them.
+- Route to health repair only when `sync.ok=false`, `git.ok=false`, stale generated artifacts, or lock/state diagnostics require it.
 
 ## Finish Criteria
 
