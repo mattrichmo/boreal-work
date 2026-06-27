@@ -78,6 +78,7 @@ export function ConsoleApp({ routePath, data }: { readonly routePath: string; re
           </div>
           <div className="bw-console__actions">
             <form method="post" action="/api/commands/sync.refresh">
+              <input type="hidden" name="returnTo" value={routePath} />
               <Button type="submit" variant="primary" icon={<RefreshCw size={16} />}>Refresh</Button>
             </form>
             <a className="bw-button bw-button--secondary bw-button--md" href="/api/state">
@@ -88,14 +89,14 @@ export function ConsoleApp({ routePath, data }: { readonly routePath: string; re
         </header>
         <div className="bw-console__content">
           {data.workspace.stale ? <StaleBanner data={data} /> : null}
-          {route.id === "global" ? <OverviewPage data={data} /> : null}
+          {route.id === "global" ? <OverviewPage data={data} routePath={routePath} /> : null}
           {route.id === "sprint" ? <SprintPage data={data} routePath={routePath} /> : null}
           {route.id === "knowledge" ? <KnowledgePage data={data} routePath={routePath} /> : null}
           {route.id === "repo" ? <RepoPage data={data} /> : null}
           {route.id === "reports" ? <ReportsPage data={data} /> : null}
-          {route.id === "settings" ? <SettingsPage data={data} /> : null}
+          {route.id === "settings" ? <SettingsPage data={data} routePath={routePath} /> : null}
           {route.id === "work" ? <WorkPage data={data} /> : null}
-          {route.id === "health" ? <HealthPage data={data} /> : null}
+          {route.id === "health" ? <HealthPage data={data} routePath={routePath} /> : null}
         </div>
       </main>
     </div>
@@ -111,7 +112,7 @@ function NavLink({ route, active }: { readonly route: ConsoleRoute; readonly act
   );
 }
 
-function OverviewPage({ data }: { readonly data: ConsoleDataSet }) {
+function OverviewPage({ data, routePath }: { readonly data: ConsoleDataSet; readonly routePath: string }) {
   return (
     <div className="bw-page-grid">
       <div className="bw-page-stack">
@@ -119,7 +120,7 @@ function OverviewPage({ data }: { readonly data: ConsoleDataSet }) {
         <BucketOverviewGrid view={data.registry} />
         <GlobalWorkQueues view={data.globalQueues} />
         <GlobalSearchPanel view={data.globalSearch} />
-        <CommandPanel data={data} />
+        <CommandPanel data={data} routePath={routePath} />
       </div>
       <div className="bw-page-stack">
         <GlobalHealthSummaryPanel view={data.globalHealth} />
@@ -166,8 +167,8 @@ function KnowledgePage({ data, routePath }: { readonly data: ConsoleDataSet; rea
   return (
     <div className="bw-page-grid">
       <div className="bw-page-stack">
-        <RawInboxPanel view={data.rawInbox} />
-        <WikiExplorerPanel view={data.wikiExplorer} />
+        <RawInboxPanel view={data.rawInbox} routePath={routePath} />
+        <WikiExplorerPanel view={data.wikiExplorer} routePath={routePath} />
         <MemoryWorkflowActionsPanel view={data.memoryActions} />
       </div>
       <div className="bw-page-stack">
@@ -223,16 +224,16 @@ function ReportsPage({ data }: { readonly data: ConsoleDataSet }) {
   );
 }
 
-function SettingsPage({ data }: { readonly data: ConsoleDataSet }) {
+function SettingsPage({ data, routePath }: { readonly data: ConsoleDataSet; readonly routePath: string }) {
   return (
     <div className="bw-page-grid">
-      <GlobalSettingsPanel view={data.globalSettings} />
-      <CommandPanel data={data} />
+      <GlobalSettingsPanel view={data.globalSettings} routePath={routePath} />
+      <CommandPanel data={data} routePath={routePath} />
     </div>
   );
 }
 
-function HealthPage({ data }: { readonly data: ConsoleDataSet }) {
+function HealthPage({ data, routePath }: { readonly data: ConsoleDataSet; readonly routePath: string }) {
   return (
     <div className="bw-page-grid">
       <div className="bw-page-stack">
@@ -243,18 +244,19 @@ function HealthPage({ data }: { readonly data: ConsoleDataSet }) {
       </div>
       <div className="bw-page-stack">
         <SyncStatusPanel view={data.sync} />
-        <CommandPanel data={data} />
+        <CommandPanel data={data} routePath={routePath} />
       </div>
     </div>
   );
 }
 
-function CommandPanel({ data }: { readonly data: ConsoleDataSet }) {
+function CommandPanel({ data, routePath }: { readonly data: ConsoleDataSet; readonly routePath: string }) {
   return (
     <Card title="Commands" eyebrow="safe boundary" actions={<Terminal size={17} aria-hidden="true" />}>
       <div className="bw-command-list">
         {data.safeCommands.map((command) => (
           <form key={command.id} className="bw-command-row" method="post" action={`/api/commands/${command.id}`}>
+            <input type="hidden" name="returnTo" value={routePath} />
             <div>
               <strong>{command.label}</strong>
               <div><code>{command.command}</code></div>

@@ -33,6 +33,7 @@ import { createMemoryDashboardActions, memoryWorkflowShowCommand } from "./memor
 import { CONSOLE_ROUTES } from "./routes.js";
 import type {
   ConsoleDataSet,
+  ConsoleSelection,
   RawContradictionReviewView,
   RawIngestFindingSeverity,
   RawIngestMutationView,
@@ -90,6 +91,7 @@ export interface LoadLiveConsoleDataOptions {
   readonly runner?: ConsoleCliRunner;
   readonly sprintLabel?: string;
   readonly globalSearchQuery?: string;
+  readonly selection?: ConsoleSelection;
 }
 
 export function createNodeCliRunner(input: { readonly workspaceRoot: string; readonly cliPath?: string; readonly cliCommand?: string }): ConsoleCliRunner {
@@ -175,12 +177,12 @@ export async function loadLiveConsoleData(options: LoadLiveConsoleDataOptions): 
     globalSearchQuery
   });
   const registryEntries = projectOverviews.map((project) => project.entry);
-  const rawInbox = await loadRawInbox(runner, generatedAt);
+  const rawInbox = await loadRawInbox(runner, generatedAt, options.selection?.rawSource);
   const wikiExplorer = await loadWikiExplorer(runner, generatedAt, rawInbox, {
     workspaceRoot,
     memoryRoot,
     doctorResult
-  });
+  }, options.selection?.wikiPage);
   const reports = await loadReportsView({
     workspaceRoot,
     generatedAt,
@@ -447,7 +449,7 @@ async function loadProjectSearchResults(
   query: string
 ): Promise<readonly SearchResultRow[]> {
   try {
-    return cliArray<SearchResultRow>(runner, [...workspaceArg, "search", "query", query, "--limit", "10", "--json"]);
+    return await cliArray<SearchResultRow>(runner, [...workspaceArg, "search", "query", query, "--limit", "10", "--json"]);
   } catch (error) {
     if (error instanceof ConsoleCliContractError) {
       throw error;
@@ -461,7 +463,7 @@ async function loadProjectActivityRows(
   workspaceArg: readonly string[]
 ): Promise<readonly OperationListRow[]> {
   try {
-    return cliArray<OperationListRow>(runner, [...workspaceArg, "operation", "list", "--limit", "20", "--json"]);
+    return await cliArray<OperationListRow>(runner, [...workspaceArg, "operation", "list", "--limit", "20", "--json"]);
   } catch (error) {
     if (error instanceof ConsoleCliContractError) {
       throw error;
@@ -470,7 +472,7 @@ async function loadProjectActivityRows(
   }
 }
 
-async function loadRawInbox(runner: ConsoleCliRunner, generatedAt: string): Promise<RawInboxView> {
+async function loadRawInbox(runner: ConsoleCliRunner, generatedAt: string, requestedId?: string): Promise<RawInboxView> {
   const warnings: string[] = [];
   let rows: readonly RawSourceRowView[] = [];
   try {
@@ -483,11 +485,11 @@ async function loadRawInbox(runner: ConsoleCliRunner, generatedAt: string): Prom
   }
 
   let selected: RawSourceDetailView | undefined;
-  const first = rows[0];
-  if (first) {
+  const target = (requestedId ? rows.find((row) => row.id === requestedId) : undefined) ?? rows[0];
+  if (target) {
     try {
       selected = rawSourceDetailView(
-        await cliData<RawSourceDetailRow>(runner, ["raw", "show", first.id, "--preview-bytes", "4096", "--json"])
+        await cliData<RawSourceDetailRow>(runner, ["raw", "show", target.id, "--preview-bytes", "4096", "--json"])
       );
     } catch (error) {
       if (error instanceof ConsoleCliContractError) {
@@ -522,7 +524,8 @@ async function loadWikiExplorer(
     readonly workspaceRoot: string;
     readonly memoryRoot?: string;
     readonly doctorResult?: unknown;
-  }
+  },
+  requestedId?: string
 ): Promise<WikiExplorerView> {
   const warnings: string[] = [];
   let pageRows: readonly WikiPageListRow[] = [];
@@ -567,11 +570,11 @@ async function loadWikiExplorer(
   }
 
   let selected: WikiPageDetailView | undefined;
-  const first = pageRows[0];
-  if (first) {
+  const target = (requestedId ? pageRows.find((row) => row.id === requestedId || row.slug === requestedId) : undefined) ?? pageRows[0];
+  if (target) {
     try {
       selected = wikiPageDetailView(
-        await cliData<WikiPageDetailRow>(runner, ["wiki", "show", first.id || first.slug, "--json"]),
+        await cliData<WikiPageDetailRow>(runner, ["wiki", "show", target.id || target.slug, "--json"]),
         rawInbox.rows,
         sources,
         claims,

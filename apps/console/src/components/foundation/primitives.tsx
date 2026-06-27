@@ -122,37 +122,6 @@ export function LoadingSkeleton({ lines = 3, className, ...props }: LoadingSkele
   );
 }
 
-export interface ConfirmDialogProps extends Omit<HTMLAttributes<HTMLDivElement>, "title"> {
-  readonly title: ReactNode;
-  readonly message: ReactNode;
-  readonly confirmLabel: string;
-  readonly cancelLabel: string;
-  readonly onConfirm?: () => void;
-  readonly onCancel?: () => void;
-}
-
-export function ConfirmDialog({
-  title,
-  message,
-  confirmLabel,
-  cancelLabel,
-  onConfirm,
-  onCancel,
-  className,
-  ...props
-}: ConfirmDialogProps) {
-  return (
-    <div className={cx("bw-dialog", className)} role="dialog" aria-modal="true" {...props}>
-      <h2 className="bw-dialog__title">{title}</h2>
-      <div className="bw-dialog__message">{message}</div>
-      <div className="bw-dialog__actions">
-        <Button type="button" variant="ghost" onClick={onCancel}>{cancelLabel}</Button>
-        <Button type="button" variant="primary" onClick={onConfirm}>{confirmLabel}</Button>
-      </div>
-    </div>
-  );
-}
-
 export interface EntityChipProps extends HTMLAttributes<HTMLSpanElement> {
   readonly kind: string;
   readonly label: string;
@@ -164,19 +133,6 @@ export function EntityChip({ kind, label, className, ...props }: EntityChipProps
       <span className="bw-entity-chip__kind">{kind}</span>
       <span className="bw-entity-chip__label">{label}</span>
     </span>
-  );
-}
-
-export interface ActorAvatarProps extends HTMLAttributes<HTMLDivElement> {
-  readonly name: string;
-  readonly kind?: "human" | "agent";
-}
-
-export function ActorAvatar({ name, kind = "agent", className, ...props }: ActorAvatarProps) {
-  return (
-    <div className={cx("bw-avatar", `bw-avatar--${kind}`, className)} title={name} {...props}>
-      {initials(name)}
-    </div>
   );
 }
 
@@ -195,11 +151,4 @@ export function MetricCard({ label, value, detail, tone = "neutral", className, 
       {detail ? <div className="bw-metric__detail">{detail}</div> : null}
     </div>
   );
-}
-
-function initials(name: string): string {
-  const parts = name.trim().split(/\s+/).filter(Boolean);
-  const first = parts[0]?.[0] ?? "?";
-  const second = parts.length > 1 ? parts[parts.length - 1]?.[0] : undefined;
-  return `${first}${second ?? ""}`.toUpperCase();
 }
