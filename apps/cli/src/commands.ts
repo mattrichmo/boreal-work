@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { existsSync } from "node:fs";
 import { mkdir } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
 
@@ -3594,6 +3595,9 @@ async function dashboardCommand(
       if (json) {
         throw new BorealError("BOREAL_INVALID_INPUT", "bwrk dashboard serves the interactive console and does not support --json. Use bwrk dashboard global --json for dashboard data.");
       }
+      if (hasFlag(args, "tui")) {
+        return launchTuiCommand(context, args);
+      }
       return serveDashboardCommand(context, args, output);
     case "global": {
       const result = await buildGlobalDashboardResult(context, args);
@@ -3628,6 +3632,21 @@ async function serveDashboardCommand(context: CliContext, args: ParsedArgs, outp
   };
 }
 
+async function launchTuiCommand(context: CliContext, args: ParsedArgs): Promise<CommandResult> {
+  const refreshMs = parseNonNegativeInteger(flagValue(args, "refresh-ms"), "--refresh-ms");
+  const child = spawnAppProcess({
+    appDir: "tui",
+    distEntry: "index.js",
+    srcEntry: "index.tsx",
+    args: [
+      "--workspace",
+      context.workspaceRoot,
+      ...(refreshMs !== undefined ? ["--refresh-ms", String(refreshMs)] : [])
+    ]
+  });
+  return { exitCode: await waitForDashboardProcess(child) };
+}
+
 function spawnDashboardServer(input: {
   readonly workspaceRoot: string;
   readonly host: string;
@@ -3635,25 +3654,42 @@ function spawnDashboardServer(input: {
   readonly mode: "live" | "fixture";
   readonly liveCacheTtlMs: number;
 }) {
+  return spawnAppProcess({
+    appDir: "console",
+    distEntry: "server.js",
+    srcEntry: "server.ts",
+    args: [
+      "--workspace",
+      input.workspaceRoot,
+      "--host",
+      input.host,
+      "--port",
+      String(input.port),
+      "--mode",
+      input.mode,
+      "--live-cache-ttl-ms",
+      String(input.liveCacheTtlMs)
+    ]
+  });
+}
+
+// Prefer the compiled app output (works in any layout, no tsx, faster start);
+// fall back to running TypeScript source via tsx for in-repo dev checkouts.
+function spawnAppProcess(input: {
+  readonly appDir: string;
+  readonly distEntry: string;
+  readonly srcEntry: string;
+  readonly args: readonly string[];
+}) {
   const sourceRoot = resolve(dirname(import.meta.url.replace(/^file:\/\//u, "")), "..", "..", "..");
+  const distEntrypoint = join(sourceRoot, "apps", input.appDir, "dist", input.distEntry);
+  if (existsSync(distEntrypoint)) {
+    return spawn(process.execPath, [distEntrypoint, ...input.args], { cwd: sourceRoot, stdio: "inherit" });
+  }
   const tsxBin = join(sourceRoot, "node_modules", ".bin", process.platform === "win32" ? "tsx.cmd" : "tsx");
-  const serverEntrypoint = join(sourceRoot, "apps", "console", "src", "server.ts");
-  const serverTsconfig = join(sourceRoot, "apps", "console", "tsconfig.json");
-  return spawn(tsxBin, [
-    "--tsconfig",
-    serverTsconfig,
-    serverEntrypoint,
-    "--workspace",
-    input.workspaceRoot,
-    "--host",
-    input.host,
-    "--port",
-    String(input.port),
-    "--mode",
-    input.mode,
-    "--live-cache-ttl-ms",
-    String(input.liveCacheTtlMs)
-  ], {
+  const srcEntrypoint = join(sourceRoot, "apps", input.appDir, "src", input.srcEntry);
+  const tsconfig = join(sourceRoot, "apps", input.appDir, "tsconfig.json");
+  return spawn(tsxBin, ["--tsconfig", tsconfig, srcEntrypoint, ...input.args], {
     cwd: sourceRoot,
     stdio: "inherit"
   });

@@ -349,15 +349,17 @@ Validates registered project roots, Boreal runtime files, project setup config p
 ## `dashboard`
 
 ```bash
-bwrk dashboard [--host <host>] [--port <n>] [--no-open] [--mode live|fixture] [--live-cache-ttl-ms <ms>]
+bwrk dashboard [--tui] [--refresh-ms <ms>] [--host <host>] [--port <n>] [--no-open] [--mode live|fixture] [--live-cache-ttl-ms <ms>]
 ```
 
-Starts the local Boreal browser console for the selected workspace. By default it binds to `127.0.0.1:4318`, prints the URL, and opens the dashboard in your browser.
+Starts the local Boreal browser console for the selected workspace. By default it binds to `127.0.0.1:4318`, prints the URL, and opens the dashboard in your browser. Pass `--tui` to launch the live terminal dashboard instead (no browser, no HTTP server); it runs in-process against the workspace and is dismissed with `q`.
 
 This command is an interactive human surface and does not support `--json`. Use `bwrk dashboard global --json` when an agent or dashboard adapter needs the bounded dashboard data payload.
 
 Options:
 
+- `--tui`: launch the live terminal dashboard instead of the browser console. The remaining server options below are ignored in this mode.
+- `--refresh-ms`: terminal dashboard (`--tui`) auto-refresh interval in milliseconds. Defaults to `5000`.
 - `--host`: bind address. Defaults to `127.0.0.1`.
 - `--port`: port number. Defaults to `4318`.
 - `--no-open`: print the URL without launching a browser.

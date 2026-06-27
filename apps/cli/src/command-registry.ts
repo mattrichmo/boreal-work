@@ -431,11 +431,13 @@ export const COMMAND_DEFINITIONS: readonly CommandDefinition[] = [
   {
     path: ["dashboard"],
     category: "dashboard",
-    summary: "Serve the interactive dashboard and open it in a browser.",
-    usage: "bwrk dashboard [--host <host>] [--port <n>] [--no-open] [--mode live|fixture] [--live-cache-ttl-ms <ms>]",
+    summary: "Serve the interactive dashboard in a browser, or run the terminal dashboard with --tui.",
+    usage: "bwrk dashboard [--tui] [--refresh-ms <ms>] [--host <host>] [--port <n>] [--no-open] [--mode live|fixture] [--live-cache-ttl-ms <ms>]",
     description:
-      "Starts the local Boreal console for the current workspace. By default it binds to 127.0.0.1:4318 and opens the dashboard in your browser.",
+      "Starts the local Boreal console for the current workspace. By default it binds to 127.0.0.1:4318 and opens the dashboard in your browser. Pass --tui to launch the live terminal dashboard instead (no browser, no server).",
     flags: [
+      flag("tui", "boolean", "Launch the live terminal dashboard instead of the browser console."),
+      flag("refresh-ms", "value", "Terminal dashboard (--tui) auto-refresh interval in ms. Defaults to 5000."),
       flag("host", "value", "Bind host. Defaults to 127.0.0.1."),
       flag("port", "value", "Bind port. Defaults to 4318."),
       flag("no-open", "boolean", "Start the server without opening a browser."),
