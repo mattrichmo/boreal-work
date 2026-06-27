@@ -1,6 +1,10 @@
+import { execFile } from "node:child_process";
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, resolve } from "node:path";
+import { promisify } from "node:util";
+
+const execFileAsync = promisify(execFile);
 
 import { resolveWorkspacePaths, type GraphEdge, type WorkItem } from "@boreal/core";
 import { createBorealRuntime } from "@boreal/engine";
@@ -78,6 +82,64 @@ export function resolveWorkspaceRoot(explicit: string | undefined, cwd: string =
       return resolve(cwd);
     }
     current = parent;
+  }
+}
+
+export interface GlobalProjectEntry {
+  readonly id: string;
+  readonly name: string;
+  readonly projectRoot: string;
+  readonly health: string;
+  readonly stale: boolean;
+  readonly open: number;
+  readonly ready: number;
+  readonly blocked: number;
+  readonly reservations: number;
+}
+
+export interface GlobalTuiData {
+  readonly generatedAt: string;
+  readonly projects: readonly GlobalProjectEntry[];
+  readonly warnings: readonly string[];
+}
+
+function num(value: unknown): number {
+  return typeof value === "number" && Number.isFinite(value) ? value : 0;
+}
+
+// Global mode reuses the same registry aggregation the browser global console
+// uses (bwrk dashboard global --json), rather than re-reading every project store.
+export async function loadGlobalTuiData(workspaceRoot: string): Promise<GlobalTuiData> {
+  const generatedAt = new Date().toISOString();
+  const cli = process.env.BOREAL_TUI_CLI ?? "bwrk";
+  try {
+    // The registry is the source of truth for whether any project is registered.
+    // `dashboard global` falls back to the current repo when empty, so gate on
+    // the registry directly to show a real empty state instead.
+    const registry = await execFileAsync(cli, ["registry", "list", "--json"], { maxBuffer: 16 * 1024 * 1024 });
+    const registryPayload = JSON.parse(registry.stdout) as { readonly data?: { readonly entryCount?: number } };
+    if ((registryPayload.data?.entryCount ?? 0) === 0) {
+      return { generatedAt, projects: [], warnings: [] };
+    }
+    const { stdout } = await execFileAsync(cli, ["dashboard", "global", "--json", "--workspace", workspaceRoot], {
+      maxBuffer: 16 * 1024 * 1024
+    });
+    const payload = JSON.parse(stdout) as { readonly data?: { readonly registry?: { readonly entries?: readonly Record<string, unknown>[] } } };
+    const entries = payload.data?.registry?.entries ?? [];
+    const projects = entries.map((entry): GlobalProjectEntry => ({
+      id: String(entry.id ?? ""),
+      name: String(entry.name ?? entry.id ?? "project"),
+      projectRoot: String(entry.projectRoot ?? ""),
+      health: String(entry.health ?? "unknown"),
+      stale: entry.stale === true,
+      open: num(entry.openWorkCount),
+      ready: num(entry.readyWorkCount),
+      blocked: num(entry.blockedWorkCount),
+      reservations: num(entry.activeReservationCount)
+    }));
+    return { generatedAt, projects, warnings: [] };
+  } catch (error) {
+    return { generatedAt, projects: [], warnings: [error instanceof Error ? error.message : String(error)] };
   }
 }
 

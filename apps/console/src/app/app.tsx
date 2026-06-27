@@ -54,13 +54,14 @@ import { routeFromPath, type ConsoleRoute } from "./routes.js";
 import type { ConsoleDataSet } from "./types.js";
 
 export function ConsoleApp({ routePath, data }: { readonly routePath: string; readonly data: ConsoleDataSet }) {
-  const route = routeFromPath(routePath);
+  const route = routeFromPath(routePath, data.workspace.scope);
+  const global = data.workspace.scope === "global";
   return (
-    <div className="bw-console" data-console-route={route.id}>
+    <div className="bw-console" data-console-route={route.id} data-console-scope={data.workspace.scope}>
       <aside className="bw-console__sidebar">
         <div className="bw-console__brand">
-          <strong>Boreal Console</strong>
-          <span>{data.workspace.workspaceRoot}</span>
+          <strong>{global ? "Boreal Global" : "Boreal Console"}</strong>
+          <span>{global ? "all registered projects" : data.workspace.workspaceRoot}</span>
         </div>
         <nav className="bw-console__nav" aria-label="Console">
           {data.routes.map((item) => <NavLink key={item.id} route={item} active={item.id === route.id} />)}
@@ -89,7 +90,8 @@ export function ConsoleApp({ routePath, data }: { readonly routePath: string; re
         </header>
         <div className="bw-console__content">
           {data.workspace.stale ? <StaleBanner data={data} /> : null}
-          {route.id === "global" ? <OverviewPage data={data} routePath={routePath} /> : null}
+          {route.id === "overview" ? <RepoOverviewPage data={data} routePath={routePath} /> : null}
+          {route.id === "global" ? <OverviewPage data={data} /> : null}
           {route.id === "sprint" ? <SprintPage data={data} routePath={routePath} /> : null}
           {route.id === "knowledge" ? <KnowledgePage data={data} routePath={routePath} /> : null}
           {route.id === "repo" ? <RepoPage data={data} /> : null}
@@ -112,7 +114,16 @@ function NavLink({ route, active }: { readonly route: ConsoleRoute; readonly act
   );
 }
 
-function OverviewPage({ data, routePath }: { readonly data: ConsoleDataSet; readonly routePath: string }) {
+function OverviewPage({ data }: { readonly data: ConsoleDataSet }) {
+  if (data.registry.entries.length === 0) {
+    return (
+      <Notice tone="warning" label="No projects registered">
+        Global tracks every registered Boreal project. Register one with{" "}
+        <code>bwrk registry add --workspace /path/to/project</code> (or run{" "}
+        <code>bwrk registry import-setup</code> from inside a project), then refresh.
+      </Notice>
+    );
+  }
   return (
     <div className="bw-page-grid">
       <div className="bw-page-stack">
@@ -120,13 +131,30 @@ function OverviewPage({ data, routePath }: { readonly data: ConsoleDataSet; read
         <BucketOverviewGrid view={data.registry} />
         <GlobalWorkQueues view={data.globalQueues} />
         <GlobalSearchPanel view={data.globalSearch} />
-        <CommandPanel data={data} routePath={routePath} />
       </div>
       <div className="bw-page-stack">
         <GlobalHealthSummaryPanel view={data.globalHealth} />
         <GlobalDriftPanel view={data.globalHealth} />
         <ActorActivityPanel view={data.globalActivity} />
+      </div>
+    </div>
+  );
+}
+
+function RepoOverviewPage({ data, routePath }: { readonly data: ConsoleDataSet; readonly routePath: string }) {
+  const items = data.work.queues.flatMap((queue) => queue.items);
+  return (
+    <div className="bw-page-grid">
+      <div className="bw-page-stack">
+        <SprintProgressPanel view={data.work} />
+        <Card title="Work queue" eyebrow={data.work.labels.join(", ")}>
+          <SprintWorkTable items={items} />
+        </Card>
+      </div>
+      <div className="bw-page-stack">
         <SyncStatusPanel view={data.sync} />
+        <DashboardHealthPanel view={data.health} />
+        <CommandPanel data={data} routePath={routePath} />
       </div>
     </div>
   );
@@ -291,8 +319,6 @@ function HealthPage({ data, routePath }: { readonly data: ConsoleDataSet; readon
   return (
     <div className="bw-page-grid">
       <div className="bw-page-stack">
-        <GlobalHealthSummaryPanel view={data.globalHealth} />
-        <GlobalDriftPanel view={data.globalHealth} />
         <DashboardHealthPanel view={data.health} />
         <LockStatusPanel view={data.locks} />
       </div>

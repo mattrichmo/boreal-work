@@ -464,6 +464,26 @@ export const COMMAND_DEFINITIONS: readonly CommandDefinition[] = [
     supportsJson: true,
   },
   {
+    path: ["global"],
+    category: "dashboard",
+    summary: "Serve the cross-repo global console (all registered projects), or terminal with --tui.",
+    usage: "bwrk global [--tui] [--refresh-ms <ms>] [--host <host>] [--port <n>] [--no-open] [--mode live|fixture] [--live-cache-ttl-ms <ms>]",
+    description:
+      "Launches the high-level Boreal console scoped to every project in the machine-local registry (not the current repo). Register projects with `bwrk registry add` first. Pass --tui for the terminal version.",
+    flags: [
+      flag("tui", "boolean", "Launch the global terminal dashboard instead of the browser console."),
+      flag("refresh-ms", "value", "Terminal dashboard (--tui) auto-refresh interval in ms. Defaults to 5000."),
+      flag("host", "value", "Bind host. Defaults to 127.0.0.1."),
+      flag("port", "value", "Bind port. Defaults to 4318."),
+      flag("no-open", "boolean", "Start the server without opening a browser."),
+      flag("mode", "value", "Data mode: live or fixture. Defaults to live."),
+      flag("live-cache-ttl-ms", "value", "How long live data remains cached between route clicks. Defaults to 60000.")
+    ],
+    positionals: { label: "arguments", min: 0, max: 0 },
+    requiresWorkspace: false,
+    supportsJson: false,
+  },
+  {
     path: ["daemon", "status"],
     category: "daemon",
     summary: "Inspect local daemon status for the selected project.",
@@ -1965,6 +1985,18 @@ const COMMAND_BEHAVIOR: Readonly<Record<string, CommandBehaviorMetadata>> = {
     maxResultSizeChars: 500_000,
     humanOutputKind: "record",
     examples: ["bwrk dashboard global --json"],
+  }),
+  "global": commandMetadata("global", {
+    readOnly: true,
+    destructive: false,
+    writesState: false,
+    writesGeneratedArtifacts: false,
+    requiresFreshIndex: false,
+    concurrencySafe: true,
+    requiresLock: "none",
+    maxResultSizeChars: 32_000,
+    humanOutputKind: "none",
+    examples: ["bwrk global", "bwrk global --tui", "bwrk global --no-open"],
   }),
   "daemon status": commandMetadata("daemon status", {
     readOnly: true,

@@ -27,13 +27,12 @@ describe("console app runtime", () => {
       expect(html).not.toContain("[object Object]");
     }
     expect(data.routes.map((route) => route.id)).toEqual([
-      "global",
+      "overview",
       "sprint",
       "knowledge",
-      "repo",
-      "reports",
-      "settings",
       "work",
+      "reports",
+      "repo",
       "health"
     ]);
 
@@ -41,6 +40,19 @@ describe("console app runtime", () => {
     expect(tableHtml).toContain("data-console-route=\"sprint\"");
     expect(tableHtml).toContain("Dense sprint table");
     expect(tableHtml).toContain("href=\"/sprint?view=dependency&amp;label=runtime\"");
+  });
+
+  it("renders the global scope with only registry routes", () => {
+    const data = createFixtureConsoleData({
+      workspaceRoot: "/workspace/boreal-work",
+      generatedAt: "2026-06-27T00:00:00.000Z",
+      scope: "global"
+    });
+    expect(data.workspace.scope).toBe("global");
+    expect(data.routes.map((route) => route.id)).toEqual(["global", "settings"]);
+    const html = renderConsoleHtml({ route: "/", data });
+    expect(html).toContain("Boreal Global");
+    expect(html).toContain('data-console-scope="global"');
   });
 
   it("provides fixture scenarios for stale, reservation, verification, and empty states", () => {
@@ -58,7 +70,7 @@ describe("console app runtime", () => {
 
   it("loads live console data through the constrained CLI contract", async () => {
     const runner = fakeRunner();
-    const data = await loadLiveConsoleData({ workspaceRoot: "/workspace/boreal-work", runner });
+    const data = await loadLiveConsoleData({ workspaceRoot: "/workspace/boreal-work", runner, scope: "global" });
 
     expect(data.workspace.mode).toBe("live");
     expect(data.sprint.sprint.id).toBe("bw_work_5d61b84c8d43c6a9");

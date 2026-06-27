@@ -710,6 +710,9 @@ export async function runCommand(args: ParsedArgs, output: CliOutput, cwd: strin
       case "dashboard":
         result = await dashboardCommand(action, context, args, commandOutput, json);
         break;
+      case "global":
+        result = await globalCommand(action, context, args, commandOutput, json);
+        break;
       case "daemon":
         result = await daemonCommand(action, context, commandOutput, json);
         break;
@@ -3596,9 +3599,9 @@ async function dashboardCommand(
         throw new BorealError("BOREAL_INVALID_INPUT", "bwrk dashboard serves the interactive console and does not support --json. Use bwrk dashboard global --json for dashboard data.");
       }
       if (hasFlag(args, "tui")) {
-        return launchTuiCommand(context, args);
+        return launchTuiCommand(context, args, "repo");
       }
-      return serveDashboardCommand(context, args, output);
+      return serveDashboardCommand(context, args, output, "repo");
     case "global": {
       const result = await buildGlobalDashboardResult(context, args);
       output.write(json ? formatRecord(result, true) : formatGlobalDashboardSummary(result));
@@ -3609,7 +3612,31 @@ async function dashboardCommand(
   }
 }
 
-async function serveDashboardCommand(context: CliContext, args: ParsedArgs, output: CliOutput): Promise<CommandResult> {
+async function globalCommand(
+  action: string | undefined,
+  context: CliContext,
+  args: ParsedArgs,
+  output: CliOutput,
+  json: boolean
+): Promise<CommandResult> {
+  if (action !== undefined) {
+    throw new BorealError("BOREAL_INVALID_INPUT", `Unknown global command: ${action}`);
+  }
+  if (json) {
+    throw new BorealError("BOREAL_INVALID_INPUT", "bwrk global serves the cross-repo console. Use bwrk dashboard global --json for the data payload.");
+  }
+  if (hasFlag(args, "tui")) {
+    return launchTuiCommand(context, args, "global");
+  }
+  return serveDashboardCommand(context, args, output, "global");
+}
+
+async function serveDashboardCommand(
+  context: CliContext,
+  args: ParsedArgs,
+  output: CliOutput,
+  scope: "repo" | "global"
+): Promise<CommandResult> {
   const host = flagValue(args, "host") ?? "127.0.0.1";
   const port = parsePort(flagValue(args, "port")) ?? 4318;
   const mode = flagValue(args, "mode") === "fixture" ? "fixture" : "live";
@@ -3620,9 +3647,10 @@ async function serveDashboardCommand(context: CliContext, args: ParsedArgs, outp
     host,
     port,
     mode,
+    scope,
     liveCacheTtlMs
   });
-  output.write(`Boreal dashboard starting at ${url}\n`);
+  output.write(`Boreal ${scope === "global" ? "global console" : "dashboard"} starting at ${url}\n`);
   output.write("Press Ctrl+C to stop.\n");
   if (!hasFlag(args, "no-open")) {
     setTimeout(() => openBrowser(url), 750);
@@ -3632,7 +3660,7 @@ async function serveDashboardCommand(context: CliContext, args: ParsedArgs, outp
   };
 }
 
-async function launchTuiCommand(context: CliContext, args: ParsedArgs): Promise<CommandResult> {
+async function launchTuiCommand(context: CliContext, args: ParsedArgs, scope: "repo" | "global"): Promise<CommandResult> {
   const refreshMs = parseNonNegativeInteger(flagValue(args, "refresh-ms"), "--refresh-ms");
   const child = spawnAppProcess({
     appDir: "tui",
@@ -3641,6 +3669,7 @@ async function launchTuiCommand(context: CliContext, args: ParsedArgs): Promise<
     args: [
       "--workspace",
       context.workspaceRoot,
+      ...(scope === "global" ? ["--global"] : []),
       ...(refreshMs !== undefined ? ["--refresh-ms", String(refreshMs)] : [])
     ]
   });
@@ -3652,6 +3681,7 @@ function spawnDashboardServer(input: {
   readonly host: string;
   readonly port: number;
   readonly mode: "live" | "fixture";
+  readonly scope: "repo" | "global";
   readonly liveCacheTtlMs: number;
 }) {
   return spawnAppProcess({
@@ -3667,6 +3697,8 @@ function spawnDashboardServer(input: {
       String(input.port),
       "--mode",
       input.mode,
+      "--scope",
+      input.scope,
       "--live-cache-ttl-ms",
       String(input.liveCacheTtlMs)
     ]

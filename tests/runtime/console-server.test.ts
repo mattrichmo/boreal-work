@@ -73,15 +73,15 @@ describe("console server", () => {
       expect(second.status).toBe(200);
       expect(statePayload.workspace?.mode).toBe("fixture");
       expect(statePayload.workspace?.warnings?.[0]).toContain("simulated live failure");
+      // Default scope is repo, which never reaches across projects, so the
+      // cross-repo registry commands are not issued.
       const liveLoadCommands = [
         "work list --label sprint-04 --limit 100 --json",
         "work list --ready --label v1-remainder --limit 20 --json",
         "work list --limit 250 --json",
         "sync status --json",
         "doctor --json",
-        "reservation list --status active --json",
-        "registry list --json",
-        "registry doctor --json"
+        "reservation list --status active --json"
       ];
       expect(runner.calls).toEqual(liveLoadCommands);
 
