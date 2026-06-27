@@ -1,15 +1,23 @@
 // Pure navigation reducer for the terminal dashboard. Kept free of React and
 // data so the full drill-in / back interaction can be unit-tested.
 
-export type TuiSection = "overview" | "sprints" | "work";
+export type TuiSection = "overview" | "sprints" | "work" | "activity";
 
-export type TuiScreen = "overview" | "sprintList" | "sprintDetail" | "workList" | "taskDetail";
+export type TuiScreen =
+  | "overview"
+  | "sprintList"
+  | "sprintDetail"
+  | "workList"
+  | "taskDetail"
+  | "activityList"
+  | "activityDetail";
 
 export interface NavFrame {
   readonly screen: TuiScreen;
   readonly cursor: number;
   readonly sprintId?: string;
   readonly taskId?: string;
+  readonly eventId?: string;
 }
 
 export interface NavState {
@@ -27,12 +35,14 @@ export type NavAction =
 export const SECTIONS: readonly { readonly id: TuiSection; readonly label: string; readonly key: string }[] = [
   { id: "overview", label: "Overview", key: "o" },
   { id: "sprints", label: "Sprints", key: "s" },
-  { id: "work", label: "Work", key: "w" }
+  { id: "work", label: "Work", key: "w" },
+  { id: "activity", label: "Activity", key: "a" }
 ];
 
 export function rootFrame(section: TuiSection): NavFrame {
   if (section === "sprints") return { screen: "sprintList", cursor: 0 };
   if (section === "work") return { screen: "workList", cursor: 0 };
+  if (section === "activity") return { screen: "activityList", cursor: 0 };
   return { screen: "overview", cursor: 0 };
 }
 
@@ -61,7 +71,8 @@ function drillFrame(top: NavFrame, id: string): NavFrame | undefined {
   if (top.screen === "sprintList") return { screen: "sprintDetail", cursor: 0, sprintId: id };
   if (top.screen === "sprintDetail") return { screen: "taskDetail", cursor: 0, sprintId: top.sprintId, taskId: id };
   if (top.screen === "workList") return { screen: "taskDetail", cursor: 0, taskId: id };
-  return undefined; // overview and taskDetail are leaves
+  if (top.screen === "activityList") return { screen: "activityDetail", cursor: 0, eventId: id };
+  return undefined; // overview, taskDetail, activityDetail are leaves
 }
 
 export function reduceNav(state: NavState, action: NavAction): NavState {

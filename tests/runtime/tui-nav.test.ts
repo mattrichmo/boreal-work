@@ -80,6 +80,16 @@ describe("tui navigation reducer", () => {
     expect(topFrame(state).cursor).toBe(0);
   });
 
+  it("activity drills into an event detail and backs out", () => {
+    let state = initialNavState("activity");
+    expect(topFrame(state).screen).toBe("activityList");
+    state = reduceNav(state, { type: "drill", id: "bw_event_9" });
+    expect(topFrame(state).screen).toBe("activityDetail");
+    expect(topFrame(state).eventId).toBe("bw_event_9");
+    state = reduceNav(state, { type: "back" });
+    expect(topFrame(state).screen).toBe("activityList");
+  });
+
   it("work drills straight to a task and backs to the list", () => {
     let state = initialNavState("work");
     state = reduceNav(state, { type: "drill", id: "bw_task_42" });
