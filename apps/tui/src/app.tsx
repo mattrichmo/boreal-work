@@ -1,16 +1,18 @@
 import { Box, Text, useApp, useInput, useStdin, useStdout, type Key } from "ink";
-import { useCallback, useEffect, useReducer, useState } from "react";
+import { useCallback, useEffect, useMemo, useReducer, useState } from "react";
 
 import type { WorkItemView } from "@boreal/ui-model";
 import { loadGlobalTuiData, loadTuiData, type GlobalTuiData, type TuiData } from "./load.js";
 import {
   initialNavState,
+  jumpTo,
   reduceNav,
   topFrame,
   SECTIONS,
   type NavFrame,
   type TuiSection
 } from "./nav.js";
+import { searchItems, type SearchItem } from "./search.js";
 import { COLOR, fit, healthColor, statusColor, statusLabel } from "./theme.js";
 import {
   EmptyState,
@@ -55,6 +57,25 @@ function allWorkItems(data: TuiData): readonly WorkItemView[] {
 function workListItems(data: TuiData, showAll: boolean): readonly WorkItemView[] {
   const all = allWorkItems(data);
   return showAll ? all : all.filter((item) => OPEN_STATUSES.has(item.status));
+}
+
+function searchIndex(data: TuiData): readonly SearchItem[] {
+  const sprints: SearchItem[] = data.sprints.map((sprint) => ({
+    kind: "sprint",
+    id: sprint.view.id,
+    label: sprint.view.title,
+    hint: sprint.view.status
+  }));
+  const tasks: SearchItem[] = allWorkItems(data)
+    .filter((item) => item.kind !== "sprint")
+    .map((item) => ({ kind: "task", id: item.id, label: item.title, hint: item.status }));
+  const events: SearchItem[] = data.timeline.map((event) => ({
+    kind: "event",
+    id: event.id,
+    label: `${event.type} ${event.subjectType}`,
+    hint: new Date(event.at).toLocaleTimeString()
+  }));
+  return [...sprints, ...tasks, ...events];
 }
 
 // The list backing the active screen: drives cursor length, selection and drill.
@@ -103,11 +124,13 @@ function findEvent(data: TuiData, eventId: string | undefined) {
 export function App({
   workspaceRoot,
   refreshMs,
-  initialView
+  initialView,
+  initialQuery
 }: {
   readonly workspaceRoot: string;
   readonly refreshMs: number;
   readonly initialView?: string;
+  readonly initialQuery?: string;
 }) {
   const { exit } = useApp();
   const { stdout } = useStdout();
@@ -116,6 +139,9 @@ export function App({
   const [error, setError] = useState<string | undefined>();
   const [refreshing, setRefreshing] = useState(false);
   const [showAllWork, setShowAllWork] = useState(false);
+  const [paletteOpen, setPaletteOpen] = useState(initialQuery !== undefined);
+  const [query, setQuery] = useState(initialQuery ?? "");
+  const [paletteCursor, setPaletteCursor] = useState(0);
   const [nav, dispatch] = useReducer(reduceNav, sectionFromView(initialView), initialNavState);
 
   const refresh = useCallback(async () => {
@@ -140,9 +166,61 @@ export function App({
   const list = data ? activeList(data, frame, showAllWork) : [];
   const selectedId = list[frame.cursor]?.id;
 
+  const index = useMemo(() => (data ? searchIndex(data) : []), [data]);
+  const results = useMemo(() => (paletteOpen ? searchItems(index, query, 40) : []), [paletteOpen, index, query]);
+
+  const closePalette = useCallback(() => {
+    setPaletteOpen(false);
+    setQuery("");
+    setPaletteCursor(0);
+  }, []);
+
   const handleKey = useCallback<InkInputHandler>(
     (input, key) => {
-      if (input === "q" || (key.ctrl && input === "c")) {
+      if (key.ctrl && input === "c") {
+        exit();
+        return;
+      }
+      if (paletteOpen) {
+        if (key.escape) {
+          closePalette();
+          return;
+        }
+        if (key.return) {
+          const result = results[paletteCursor];
+          if (result) {
+            const target = jumpTo(result.kind, result.id);
+            dispatch({ type: "jump", section: target.section, stack: target.stack });
+          }
+          closePalette();
+          return;
+        }
+        if (key.backspace || key.delete) {
+          setQuery((current) => current.slice(0, -1));
+          setPaletteCursor(0);
+          return;
+        }
+        if (key.downArrow) {
+          setPaletteCursor((current) => Math.min(current + 1, Math.max(0, results.length - 1)));
+          return;
+        }
+        if (key.upArrow) {
+          setPaletteCursor((current) => Math.max(current - 1, 0));
+          return;
+        }
+        if (input && input.length === 1 && !key.ctrl && !key.meta) {
+          setQuery((current) => current + input);
+          setPaletteCursor(0);
+        }
+        return;
+      }
+      if (input === "/") {
+        setPaletteOpen(true);
+        setQuery("");
+        setPaletteCursor(0);
+        return;
+      }
+      if (input === "q") {
         exit();
         return;
       }
@@ -176,14 +254,19 @@ export function App({
         dispatch({ type: "move", delta: -1, length: list.length });
       }
     },
-    [exit, refresh, selectedId, list.length, frame.screen]
+    [exit, refresh, selectedId, list.length, frame.screen, paletteOpen, results, paletteCursor, closePalette]
   );
 
   const rows = stdout?.rows ?? 24;
   const columns = stdout?.columns ?? 100;
   const bodyHeight = Math.max(6, rows - 4);
-  const crumbs = data ? nav.stack.map((entry) => crumbLabel(data, entry)) : ["…"];
+  const crumbs = paletteOpen ? ["Search"] : data ? nav.stack.map((entry) => crumbLabel(data, entry)) : ["…"];
   const clock = data ? new Date(data.generatedAt).toLocaleTimeString() : "";
+  const footerHints = paletteOpen
+    ? isRawModeSupported
+      ? [{ keys: "type", label: "filter" }, { keys: "↑↓", label: "move" }, { keys: "⏎", label: "go" }, { keys: "esc", label: "close" }]
+      : [{ keys: "no TTY", label: "keyboard disabled — Ctrl+C to exit" }]
+    : hintsFor(frame.screen, isRawModeSupported);
 
   return (
     <Box flexDirection="column" width={columns} height={rows}>
@@ -197,12 +280,69 @@ export function App({
             <Text color={COLOR.muted}>Loading workspace…</Text>
           ) : !data.initialized ? (
             <EmptyState title="Not initialized" lines={[data.warnings[0] ?? "Run `bwrk init` here."]} />
+          ) : paletteOpen ? (
+            <Palette query={query} results={results} cursor={paletteCursor} height={bodyHeight} width={columns - 16} />
           ) : (
             <Screen data={data} frame={frame} height={bodyHeight} width={columns - 16} showAllWork={showAllWork} />
           )}
         </Box>
       </Box>
-      <KeyHints hints={hintsFor(frame.screen, isRawModeSupported)} />
+      <KeyHints hints={footerHints} />
+    </Box>
+  );
+}
+
+function kindColor(kind: SearchItem["kind"]): string {
+  if (kind === "sprint") return COLOR.accent;
+  if (kind === "task") return COLOR.accentSoft;
+  return COLOR.muted;
+}
+
+function Palette({
+  query,
+  results,
+  cursor,
+  height,
+  width
+}: {
+  readonly query: string;
+  readonly results: readonly (SearchItem & { readonly score: number })[];
+  readonly cursor: number;
+  readonly height: number;
+  readonly width: number;
+}) {
+  const hintWidth = 12;
+  const labelWidth = Math.max(20, width - 8 - hintWidth);
+  const columns: readonly TableColumn[] = [
+    { header: "type", width: 8 },
+    { header: "match", width: labelWidth },
+    { header: "where", width: hintWidth }
+  ];
+  const rows: readonly TableRow[] = results.map((result) => ({
+    key: `${result.kind}:${result.id}`,
+    cells: [
+      { text: result.kind, color: kindColor(result.kind) },
+      { text: result.label, color: COLOR.text },
+      { text: result.hint, color: COLOR.faint }
+    ]
+  }));
+  return (
+    <Box flexDirection="column">
+      <Text>
+        <Text color={COLOR.accent} bold>{"❯ "}</Text>
+        <Text color={COLOR.text}>{query}</Text>
+        <Text color={COLOR.accent}>▌</Text>
+        <Text color={COLOR.faint}>{`   ${results.length} result${results.length === 1 ? "" : "s"}`}</Text>
+      </Text>
+      <Box marginTop={1}>
+        <Table
+          columns={columns}
+          rows={rows}
+          cursor={cursor}
+          height={height - 3}
+          emptyLabel={query ? "No matches." : "Type to search sprints, work, and events."}
+        />
+      </Box>
     </Box>
   );
 }
@@ -210,19 +350,19 @@ export function App({
 function hintsFor(screen: NavFrame["screen"], inputEnabled: boolean): readonly { readonly keys: string; readonly label: string }[] {
   if (!inputEnabled) return [{ keys: "no TTY", label: "keyboard disabled — Ctrl+C to exit" }];
   const move = { keys: "↑↓/jk", label: "move" };
-  const sections = { keys: "o/s/w", label: "sections" };
-  const refresh = { keys: "r", label: "refresh" };
+  const sections = { keys: "o/s/w/a", label: "sections" };
+  const search = { keys: "/", label: "search" };
   const quit = { keys: "q", label: "quit" };
-  if (screen === "overview") return [sections, refresh, quit];
-  if (screen === "taskDetail" || screen === "activityDetail") return [{ keys: "⌫/esc", label: "back" }, sections, refresh, quit];
-  if (screen === "activityList") return [move, { keys: "⏎", label: "open event" }, sections, refresh, quit];
+  if (screen === "overview") return [search, sections, { keys: "r", label: "refresh" }, quit];
+  if (screen === "taskDetail" || screen === "activityDetail") return [{ keys: "⌫/esc", label: "back" }, search, sections, quit];
+  if (screen === "activityList") return [move, { keys: "⏎", label: "open event" }, search, sections, quit];
   if (screen === "sprintDetail") {
-    return [move, { keys: "⏎", label: "open task" }, { keys: "⌫/esc", label: "back" }, refresh, quit];
+    return [move, { keys: "⏎", label: "open task" }, { keys: "⌫/esc", label: "back" }, search, quit];
   }
   if (screen === "workList") {
-    return [move, { keys: "⏎", label: "open" }, { keys: "f", label: "filter" }, sections, quit];
+    return [move, { keys: "⏎", label: "open" }, { keys: "f", label: "filter" }, search, quit];
   }
-  return [move, { keys: "⏎", label: "open" }, sections, refresh, quit];
+  return [move, { keys: "⏎", label: "open" }, search, sections, quit];
 }
 
 function Screen({

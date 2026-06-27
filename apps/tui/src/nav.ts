@@ -30,7 +30,19 @@ export type NavAction =
   | { readonly type: "move"; readonly delta: number; readonly length: number }
   | { readonly type: "drill"; readonly id?: string }
   | { readonly type: "back" }
-  | { readonly type: "section"; readonly section: TuiSection };
+  | { readonly type: "section"; readonly section: TuiSection }
+  | { readonly type: "jump"; readonly section: TuiSection; readonly stack: readonly NavFrame[] };
+
+/** Build the section + frame stack to land directly on a search result's detail. */
+export function jumpTo(kind: "sprint" | "task" | "event", id: string): { readonly section: TuiSection; readonly stack: readonly NavFrame[] } {
+  if (kind === "sprint") {
+    return { section: "sprints", stack: [rootFrame("sprints"), { screen: "sprintDetail", cursor: 0, sprintId: id }] };
+  }
+  if (kind === "event") {
+    return { section: "activity", stack: [rootFrame("activity"), { screen: "activityDetail", cursor: 0, eventId: id }] };
+  }
+  return { section: "work", stack: [rootFrame("work"), { screen: "taskDetail", cursor: 0, taskId: id }] };
+}
 
 export const SECTIONS: readonly { readonly id: TuiSection; readonly label: string; readonly key: string }[] = [
   { id: "overview", label: "Overview", key: "o" },
@@ -85,6 +97,8 @@ export function reduceNav(state: NavState, action: NavAction): NavState {
       return replaceTop(state, { ...top, cursor: clampCursor(top.cursor + action.delta, action.length) });
     case "back":
       return atRoot(state) ? state : { ...state, stack: state.stack.slice(0, -1) };
+    case "jump":
+      return { section: action.section, stack: action.stack.length > 0 ? action.stack : [rootFrame(action.section)] };
     case "drill": {
       if (!action.id) return state;
       const next = drillFrame(top, action.id);
