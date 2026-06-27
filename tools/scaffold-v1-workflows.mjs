@@ -152,6 +152,8 @@ Use this workflow when the user's request requires ${purpose.charAt(0).toLowerCa
 5. Rebuild derived artifacts when the workflow changes memory, context, or search.
 6. Run \`bwrk doctor --strict --json\` unless the workflow is explicitly read-only and no generated artifacts changed.
 
+${workflowCommandSequences(slug)}
+
 ## CLI Commands
 
 ${allowedCommands.map((command) => `- \`bwrk ${command}\``).join("\n")}
@@ -247,19 +249,24 @@ Confirm the current project context. Prefer \`bwrk prime --json\` when the works
 
 ## Routing Rules
 
-- Read \`boreal.yaml\` in this skill folder to identify the canonical workflow files.
-- Read the referenced workflow file before executing steps.
+- Read \`boreal.yaml\` in this skill folder to identify the canonical workflow refs.
+- Resolve each workflow ref before executing steps: first try the repo-relative \`workflows/<ref>\` path from the Boreal checkout or current workspace, then use \`bwrk workflows show <ref>\` when the local workflow file is not present.
+- Treat the \`workflows/...\` entries below as source workflow references, not paths that must exist inside the installed skill folder.
+- Stop and report the missing workflow source if neither the local file nor \`bwrk workflows show <ref>\` is available.
 - Follow the workflow's allowed commands and finish criteria.
 - Keep this skill as a thin adapter; do not invent steps that belong in the workflow file.
 - If the request crosses repositories, stop and ask for the explicit workspace and memory root.
 
 ## Workflow References
 
+Use the value after \`workflows/\` with \`bwrk workflows show <ref>\` if the repo-relative file is not available.
+
 ${workflowRefs.map((workflow) => `- \`workflows/${workflow}\``).join("\n")}
 
 ## No-Leak Rules
 
-- Do not read sibling \`memory/\`, \`.boreal/\`, \`.agents/\`, or \`.claude/\` folders unless the user explicitly scopes the request there.
+- You may read this skill folder's \`SKILL.md\`, \`boreal.yaml\`, and target metadata such as \`agents/openai.yaml\` to follow this adapter.
+- Do not read sibling or unrelated workspace \`memory/\`, \`.boreal/\`, \`.agents/\`, or \`.claude/\` folders unless the user explicitly scopes the request there.
 - Do not use global memory as a fallback for a missing workspace.
 - Do not install or refresh skills outside the selected install root.
 
@@ -267,6 +274,118 @@ ${workflowRefs.map((workflow) => `- \`workflows/${workflow}\``).join("\n")}
 
 End with the workflow result, verification status, and the next suggested workflow.
 `;
+}
+
+function workflowCommandSequences(slug) {
+  const sequences = {
+    "create-work-structure": `## Command Sequences
+
+Use exact create output IDs from JSON responses; do not invent parent, sprint, or task IDs.
+
+1. Create a container when the request describes a program, backlog, milestone, or issue group:
+   \`bwrk work create "<container title>" --kind issue --label <label> --json\`
+2. Capture the returned container ID from \`data.meta.id\`.
+3. Create each task or issue with concrete acceptance criteria:
+   \`bwrk work create "<task title>" --kind task --priority normal --label <label> --acceptance "<criterion>" --json\`
+4. Link container and blockers explicitly:
+   \`bwrk dep add <container-id> <child-work-id> --json\`
+   \`bwrk dep add <blocked-work-id> <blocker-work-id> --json\`
+5. Mark only claimable leaf work ready:
+   \`bwrk work ready <child-work-id> --json\`
+6. Verify structure before handoff:
+   \`bwrk dep tree <container-id> --json\`
+`,
+    "update-work-structure": `## Command Sequences
+
+Use this workflow to adjust existing records rather than recreating them.
+
+1. Inspect the current record:
+   \`bwrk work show <work-id> --json\`
+2. Inspect dependency shape before changing blockers:
+   \`bwrk dep tree <work-id> --json\`
+3. Add or remove dependency edges only after identifying both existing IDs:
+   \`bwrk dep add <blocked-work-id> <blocker-work-id> --json\`
+   \`bwrk dep remove <blocked-work-id> <blocker-work-id> --json\`
+4. Re-check readiness and cycles:
+   \`bwrk dep cycles --json\`
+   \`bwrk doctor --strict --json\`
+`,
+    "discovery-to-work": `## Command Sequences
+
+Convert only verified findings into work records.
+
+1. Create a source or claim for the discovery when needed:
+   \`bwrk raw add --title "<source title>" --uri <uri> --summary "<summary>" --json\`
+   \`bwrk claim create --statement "<claim>" --json\`
+2. Create the actionable issue or task:
+   \`bwrk work create "<issue title>" --kind issue --priority normal --label <label> --acceptance "<verified outcome>" --json\`
+3. Capture \`data.meta.id\` from each \`work create\` response.
+4. Link related work with explicit blockers:
+   \`bwrk dep add <blocked-work-id> <blocker-work-id> --json\`
+5. Mark leaf work ready only when it is claimable now:
+   \`bwrk work ready <work-id> --json\`
+`,
+    "launch-sprint": `## Command Sequences
+
+Use a sprint record as the container, then attach ready leaf work beneath it.
+
+1. Start or inspect the session:
+   \`bwrk session start --agent <agent-id> --json\`
+   \`bwrk prime --agent <agent-id> --label <label> --json\`
+2. Create the sprint container:
+   \`bwrk work create "Sprint: <name>" --kind sprint --label sprint --label <label> --acceptance "<sprint gate>" --json\`
+3. Capture the sprint ID from \`data.meta.id\`.
+4. Create each sprint task with acceptance criteria:
+   \`bwrk work create "<task title>" --kind task --priority normal --label <label> --acceptance "<criterion>" --json\`
+5. Attach each task to the sprint and encode blockers:
+   \`bwrk dep add <sprint-id> <task-id> --json\`
+   \`bwrk dep add <blocked-task-id> <blocker-task-id> --json\`
+6. Mark only unblocked sprint tasks ready:
+   \`bwrk work ready <task-id> --json\`
+7. Verify launch shape:
+   \`bwrk dep tree <sprint-id> --json\`
+   \`bwrk doctor --strict --json\`
+`,
+    "claim-and-finish-work": `## Command Sequences
+
+Prefer \`agent finish\` for normal reserved work closeout because it records evidence, verifies, closes or releases, and clears the active reservation in one transaction.
+
+1. Start or resume work:
+   \`bwrk agent start --agent <agent-id> --purpose "<purpose>" --json\`
+   \`bwrk work claim --label <label> --agent <agent-id> --purpose "<purpose>" --json\`
+2. Finish the single active reservation after implementation and verification:
+   \`bwrk agent finish current --agent <agent-id> --summary "<implemented and tested>" --kind test --command "<verification command>" --verdict passed --close --reason "<close reason>" --json\`
+3. Use release instead of close when the work is verified but must remain open:
+   \`bwrk agent finish current --agent <agent-id> --summary "<partial verification>" --kind command --command "<verification command>" --verdict passed --release --json\`
+4. Use manual \`evidence add\`, \`work verify\`, and \`work close\` only when no active reservation exists or when attaching additional evidence after \`agent finish\`.
+`,
+    "closeout-work": `## Command Sequences
+
+Use manual closeout only for work that was completed outside the active-reservation path or needs extra evidence.
+
+1. Inspect the target first:
+   \`bwrk work show <work-id> --json\`
+2. Attach evidence with a supported kind:
+   \`bwrk evidence add <work-id> --summary "<summary>" --kind command --command "<command>" --outcome passed --json\`
+3. Capture the evidence ID from \`data.meta.id\`.
+4. Verify with that exact evidence ID:
+   \`bwrk work verify <work-id> --evidence <evidence-id> --verdict passed --notes "<notes>" --json\`
+5. Close only after passed verification:
+   \`bwrk work close <work-id> --reason "<reason>" --json\`
+`,
+    "link-dependencies": `## Command Sequences
+
+1. Inspect the current tree:
+   \`bwrk dep tree <work-id> --json\`
+2. Add a blocker edge where the first ID is blocked by the second:
+   \`bwrk dep add <blocked-work-id> <blocker-work-id> --json\`
+3. Remove stale blockers only after confirming both IDs:
+   \`bwrk dep remove <blocked-work-id> <blocker-work-id> --json\`
+4. Verify no cycles were introduced:
+   \`bwrk dep cycles --json\`
+`
+  };
+  return sequences[slug] ?? "";
 }
 
 function skillMetadataDoc(slug, title, workflowRefs) {

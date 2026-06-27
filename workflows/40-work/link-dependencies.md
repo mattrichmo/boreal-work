@@ -52,6 +52,18 @@ Use this workflow when the user's request requires add, remove, and audit depend
 5. Rebuild derived artifacts when the workflow changes memory, context, or search.
 6. Run `bwrk doctor --strict --json` unless the workflow is explicitly read-only and no generated artifacts changed.
 
+## Command Sequences
+
+1. Inspect the current tree:
+   `bwrk dep tree <work-id> --json`
+2. Add a blocker edge where the first ID is blocked by the second:
+   `bwrk dep add <blocked-work-id> <blocker-work-id> --json`
+3. Remove stale blockers only after confirming both IDs:
+   `bwrk dep remove <blocked-work-id> <blocker-work-id> --json`
+4. Verify no cycles were introduced:
+   `bwrk dep cycles --json`
+
+
 ## CLI Commands
 
 - `bwrk dep add`

@@ -3,7 +3,9 @@ import { BorealError, isBorealError } from "@boreal/core";
 
 import { parseArgs, wantsJsonOutput } from "./args.js";
 import { runCommand } from "./commands.js";
+import { formatRecord } from "./output.js";
 import type { CliOutput } from "./output.js";
+import { formatVersionInfo, getVersionInfo } from "./version.js";
 
 export async function main(
   argv = process.argv.slice(2),
@@ -14,10 +16,17 @@ export async function main(
   const stdoutGuard = installJsonStdoutGuard({ enabled: json });
   const guardedOutput = json ? guardedJsonOutput(output, stdoutGuard) : output;
   try {
+    if (argv.includes("--version")) {
+      guardedOutput.write(json ? formatRecord(getVersionInfo(), true) : formatVersionInfo());
+      return 0;
+    }
     const parsed = parseArgs(argv);
     const result = await runCommand(parsed, guardedOutput, cwd);
     return result.exitCode;
   } catch (error) {
+    if (isBrokenPipeError(error)) {
+      return 0;
+    }
     if (json) {
       guardedOutput.error(`${JSON.stringify(errorPayload(error), null, 2)}\n`);
     } else {
@@ -32,6 +41,8 @@ export async function main(
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {
+  installBrokenPipeHandler(process.stdout);
+  installBrokenPipeHandler(process.stderr);
   const exitCode = await main();
   process.exitCode = exitCode;
 }
@@ -39,12 +50,37 @@ if (import.meta.url === `file://${process.argv[1]}`) {
 function processOutput(): CliOutput {
   return {
     write(text) {
-      process.stdout.write(text);
+      writeProcessStream(process.stdout, text);
     },
     error(text) {
-      process.stderr.write(text);
+      writeProcessStream(process.stderr, text);
     }
   };
+}
+
+function writeProcessStream(stream: NodeJS.WriteStream, text: string): void {
+  try {
+    stream.write(text);
+  } catch (error) {
+    if (isBrokenPipeError(error)) {
+      return;
+    }
+    throw error;
+  }
+}
+
+function installBrokenPipeHandler(stream: NodeJS.WriteStream): void {
+  stream.on("error", (error: Error & { readonly code?: string }) => {
+    if (isBrokenPipeError(error)) {
+      process.exitCode = 0;
+      return;
+    }
+    throw error;
+  });
+}
+
+export function isBrokenPipeError(error: unknown): boolean {
+  return typeof error === "object" && error !== null && (error as { readonly code?: unknown }).code === "EPIPE";
 }
 
 export interface JsonStdoutGuard {

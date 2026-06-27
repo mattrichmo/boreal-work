@@ -53,6 +53,28 @@ Use this workflow when the user's request requires create a scoped sprint with t
 5. Rebuild derived artifacts when the workflow changes memory, context, or search.
 6. Run `bwrk doctor --strict --json` unless the workflow is explicitly read-only and no generated artifacts changed.
 
+## Command Sequences
+
+Use a sprint record as the container, then attach ready leaf work beneath it.
+
+1. Start or inspect the session:
+   `bwrk session start --agent <agent-id> --json`
+   `bwrk prime --agent <agent-id> --label <label> --json`
+2. Create the sprint container:
+   `bwrk work create "Sprint: <name>" --kind sprint --label sprint --label <label> --acceptance "<sprint gate>" --json`
+3. Capture the sprint ID from `data.meta.id`.
+4. Create each sprint task with acceptance criteria:
+   `bwrk work create "<task title>" --kind task --priority normal --label <label> --acceptance "<criterion>" --json`
+5. Attach each task to the sprint and encode blockers:
+   `bwrk dep add <sprint-id> <task-id> --json`
+   `bwrk dep add <blocked-task-id> <blocker-task-id> --json`
+6. Mark only unblocked sprint tasks ready:
+   `bwrk work ready <task-id> --json`
+7. Verify launch shape:
+   `bwrk dep tree <sprint-id> --json`
+   `bwrk doctor --strict --json`
+
+
 ## CLI Commands
 
 - `bwrk session start`

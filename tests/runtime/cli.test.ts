@@ -13,7 +13,7 @@ import {
   registryValueFlagNames,
   validateCommandBehaviorMetadata
 } from "../../apps/cli/src/command-registry.ts";
-import { installJsonStdoutGuard, main } from "../../apps/cli/src/index.ts";
+import { installJsonStdoutGuard, isBrokenPipeError, main } from "../../apps/cli/src/index.ts";
 import type { CliOutput } from "../../apps/cli/src/output.ts";
 
 interface CommandRun {
@@ -95,6 +95,7 @@ describe("bwrk cli", () => {
     expect(root.stdout).toContain(
       "bwrk help [init|work|dep|evidence|source|claim|decision|context|search|reservation|agent|session|operation|workflows|install|export|import|vault|raw|wiki|duplicate|merge|compact|sync|ledger|snapshot|doctor|lock|commands|prime]"
     );
+    expect(root.stdout).toContain("bwrk version [--json]");
     expect(work.exitCode).toBe(0);
     expect(work.stdout).toContain("bwrk work create");
     expect(work.stdout).toContain("--force --reason");
@@ -291,6 +292,9 @@ describe("bwrk cli", () => {
     expect(await fileMissing(join(rootDir, "memory/.git"))).toBe(false);
     const projectGitignore = await readFile(join(rootDir, ".gitignore"), "utf8");
     expect(projectGitignore).toContain(".boreal/project.json");
+    expect(projectGitignore).toContain(".boreal/ledgers/");
+    expect(projectGitignore).toContain(".agents/");
+    expect(projectGitignore).toContain(".claude/");
     expect(projectGitignore).toContain("/memory/");
     expect(await fileMissing(join(rootDir, ".gitmodules"))).toBe(true);
 
@@ -326,6 +330,63 @@ describe("bwrk cli", () => {
     expect(invalidConfig.exitCode).toBe(1);
     expect(invalidConfigPayload.code).toBe("BOREAL_CONFLICT");
     expect(invalidConfigPayload.message).toContain("Existing project setup config is invalid");
+  });
+
+  it("does not append equivalent project .gitignore guards during repeated setup", async () => {
+    const rootDir = await makeTempWorkspace();
+    await writeFile(
+      join(rootDir, ".gitignore"),
+      [
+        "# Boreal local workspace binding and runtime artifacts",
+        ".boreal/project.json",
+        ".boreal/runtime/",
+        ".boreal/cache/",
+        ".boreal/tmp/",
+        ".boreal/results/",
+        ".boreal/**/*.db",
+        ".boreal/**/*.db-*",
+        ".boreal/ledgers/",
+        ".agents/",
+        ".claude/",
+        "dump/",
+        "memory/"
+      ].join("\n") + "\n",
+      "utf8"
+    );
+
+    const initialized = await runCli(rootDir, [
+      "init",
+      "--setup-memory",
+      "--memory-root",
+      "memory",
+      "--memory-layout",
+      "child",
+      "--separate-git",
+      "--json"
+    ]);
+    const payload = parseData<{
+      readonly projectSetup: { readonly gitSetup: { readonly projectGitignoreUpdated: boolean } };
+    }>(initialized.stdout);
+    const firstGitignore = await readFile(join(rootDir, ".gitignore"), "utf8");
+
+    expect(initialized.exitCode).toBe(0);
+    expect(payload.projectSetup.gitSetup.projectGitignoreUpdated).toBe(false);
+    expect(firstGitignore).toContain("memory/");
+    expect(firstGitignore).not.toContain("/memory/");
+    expect(projectMemoryGuardCount(firstGitignore)).toBe(1);
+
+    await runCli(rootDir, [
+      "init",
+      "--setup-memory",
+      "--memory-root",
+      "memory",
+      "--memory-layout",
+      "child",
+      "--separate-git",
+      "--json"
+    ]);
+    const secondGitignore = await readFile(join(rootDir, ".gitignore"), "utf8");
+    expect(projectMemoryGuardCount(secondGitignore)).toBe(1);
   });
 
   it("defaults setup memory to a sibling separate repo with local project git guards", async () => {
@@ -1398,6 +1459,7 @@ describe("bwrk cli", () => {
     const registry = parseData<{
       readonly commands: Array<{
         readonly path: readonly string[];
+        readonly usage: string;
         readonly flags: Array<{ readonly name: string; readonly type: string }>;
         readonly behavior: {
           readonly readOnly: boolean;
@@ -1415,11 +1477,13 @@ describe("bwrk cli", () => {
     const commands = registry.commands.find((command) => command.path.join(" ") === "commands");
     const searchQuery = registry.commands.find((command) => command.path.join(" ") === "search query");
     const searchIndex = registry.commands.find((command) => command.path.join(" ") === "search index");
+    const evidenceAdd = registry.commands.find((command) => command.path.join(" ") === "evidence add");
     const agentFinish = registry.commands.find((command) => command.path.join(" ") === "agent finish");
 
     expect(result.exitCode).toBe(0);
     expect(() => validateCommandBehaviorMetadata()).not.toThrow();
     expect(registry.commands.map((command) => command.path.join(" "))).toContain("commands");
+    expect(registry.commands.map((command) => command.path.join(" "))).toContain("version");
     expect(registry.commands.map((command) => command.path.join(" "))).toEqual(
       expect.arrayContaining([
         "source add",
@@ -1498,6 +1562,16 @@ describe("bwrk cli", () => {
       expect.objectContaining({ writesGeneratedArtifacts: true, requiresLock: "index" })
     );
     expect(searchQuery?.behavior).toEqual(expect.objectContaining({ readOnly: true, requiresFreshIndex: true }));
+    expect(evidenceAdd?.usage).toContain("[--kind command|test|diff|review|artifact|note]");
+    expect(evidenceAdd?.usage).not.toContain("document");
+    expect(evidenceAdd?.flags).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          name: "kind",
+          summary: "Evidence kind: command, test, diff, review, artifact, or note. Defaults to command."
+        })
+      ])
+    );
     expect(agentFinish?.behavior).toEqual(
       expect.objectContaining({ writesGeneratedArtifacts: true, requiresLock: "state+index" })
     );
@@ -1521,6 +1595,7 @@ describe("bwrk cli", () => {
       readonly workflowCount: number;
       readonly templateCount: number;
       readonly skillCount: number;
+      readonly installedChecks: readonly unknown[];
       readonly issues: readonly unknown[];
     }>(doctor.stdout);
 
@@ -1548,6 +1623,7 @@ describe("bwrk cli", () => {
     expect(doctorPayload).toEqual(
       expect.objectContaining({ ok: true, workflowCount: expect.any(Number), templateCount: expect.any(Number), skillCount: expect.any(Number) })
     );
+    expect(doctorPayload.installedChecks).toEqual([]);
     expect(doctorPayload.issues).toEqual([]);
   });
 
@@ -1560,11 +1636,23 @@ describe("bwrk cli", () => {
     const dryRun = await runCli(rootDir, ["install", "skills", "--install-root", dryRunRoot, "--dry-run", "--json"]);
     const codex = await runCli(rootDir, ["install", "codex", "--install-root", codexRoot, "--json"]);
     const claude = await runCli(rootDir, ["install", "claude", "--install-root", claudeRoot, "--json"]);
+    const doctorCodex = await runCli(rootDir, ["doctor", "skills", "--install-root", codexRoot, "--skill-target", "codex", "--json"]);
+    const doctorClaude = await runCli(rootDir, ["doctor", "skills", "--install-root", claudeRoot, "--skill-target", "claude", "--json"]);
     const codexRouter = await readFile(join(codexRoot, "skills/boreal-router/SKILL.md"), "utf8");
     const codexRouterMetadata = await readFile(join(codexRoot, "skills/boreal-router/boreal.yaml"), "utf8");
     const codexOpenAiMetadata = await readFile(join(codexRoot, "skills/boreal-router/agents/openai.yaml"), "utf8");
     const claudeRouter = await readFile(join(claudeRoot, "skills/boreal-router/SKILL.md"), "utf8");
     const claudeRouterMetadata = await readFile(join(claudeRoot, "skills/boreal-router/boreal.yaml"), "utf8");
+    const codexDoctorPayload = parseData<{
+      readonly ok: boolean;
+      readonly installedChecks: Array<{ readonly target: string; readonly skillRoot: string; readonly expectedFileCount: number }>;
+      readonly issues: readonly unknown[];
+    }>(doctorCodex.stdout);
+    const claudeDoctorPayload = parseData<{
+      readonly ok: boolean;
+      readonly installedChecks: Array<{ readonly target: string; readonly skillRoot: string; readonly expectedFileCount: number }>;
+      readonly issues: readonly unknown[];
+    }>(doctorClaude.stdout);
 
     expect(dryRun.exitCode).toBe(0);
     expect(await fileMissing(join(dryRunRoot, "boreal-router/SKILL.md"))).toBe(true);
@@ -1581,8 +1669,20 @@ describe("bwrk cli", () => {
     );
     expect(codexRouter).toContain("name: boreal-router");
     expect(codexRouter).toContain("00-agent/route-request.md");
+    expect(codexRouter).toContain("bwrk workflows show <ref>");
+    expect(codexRouter).toContain("not paths that must exist inside the installed skill folder");
+    expect(codexRouter).toContain("You may read this skill folder's `SKILL.md`, `boreal.yaml`");
     expect(codexRouterMetadata).toContain("skill: boreal-router");
     expect(codexOpenAiMetadata).toContain("default_prompt: \"Use $boreal-router");
+    expect(doctorCodex.exitCode).toBe(0);
+    expect(codexDoctorPayload).toEqual(
+      expect.objectContaining({
+        ok: true,
+        installedChecks: [expect.objectContaining({ target: "codex", skillRoot: join(codexRoot, "skills") })],
+        issues: []
+      })
+    );
+    expect(codexDoctorPayload.installedChecks[0]?.expectedFileCount).toBeGreaterThan(0);
     expect(claude.exitCode).toBe(0);
     expect(parseData<{ readonly files: readonly unknown[]; readonly issues: readonly unknown[] }>(claude.stdout)).toEqual(
       expect.objectContaining({
@@ -1595,8 +1695,41 @@ describe("bwrk cli", () => {
     );
     expect(claudeRouter).toContain("name: boreal-router");
     expect(claudeRouter).toContain("00-agent/route-request.md");
+    expect(claudeRouter).toContain("bwrk workflows show <ref>");
+    expect(claudeRouter).toContain("not paths that must exist inside the installed skill folder");
+    expect(claudeRouter).toContain("You may read this skill folder's `SKILL.md`, `boreal.yaml`");
     expect(claudeRouterMetadata).toContain("skill: boreal-router");
+    expect(doctorClaude.exitCode).toBe(0);
+    expect(claudeDoctorPayload).toEqual(
+      expect.objectContaining({
+        ok: true,
+        installedChecks: [expect.objectContaining({ target: "claude", skillRoot: join(claudeRoot, "skills") })],
+        issues: []
+      })
+    );
+    expect(claudeDoctorPayload.installedChecks[0]?.expectedFileCount).toBeGreaterThan(0);
     expect(await fileMissing(join(claudeRoot, "skills/boreal-router/agents/openai.yaml"))).toBe(true);
+  });
+
+  it("reports stale or target-mismatched installed skills", async () => {
+    const rootDir = await makeTempWorkspace();
+    const claudeRoot = join(rootDir, "claude-home");
+    await runCli(rootDir, ["install", "claude", "--install-root", claudeRoot, "--json"]);
+    await mkdir(join(claudeRoot, "skills/boreal-router/agents"), { recursive: true });
+    await writeFile(join(claudeRoot, "skills/boreal-router/agents/openai.yaml"), "unexpected: true\n", "utf8");
+    await writeFile(join(claudeRoot, "skills/boreal-router/SKILL.md"), "stale skill\n", "utf8");
+
+    const doctor = await runCli(rootDir, ["doctor", "skills", "--install-root", claudeRoot, "--skill-target", "claude", "--json"]);
+    const payload = parseData<{
+      readonly ok: boolean;
+      readonly issues: Array<{ readonly code: string; readonly path: string }>;
+    }>(doctor.stdout);
+
+    expect(doctor.exitCode).toBe(1);
+    expect(payload.ok).toBe(false);
+    expect(payload.issues.map((issue) => issue.code)).toEqual(
+      expect.arrayContaining(["installed_skill.stale_file", "installed_skill.missing_workflow_resolver", "installed_skill.unexpected_openai_metadata"])
+    );
   });
 
   it("uses configured skill roots without nesting skills directories twice", async () => {
@@ -1665,8 +1798,13 @@ describe("bwrk cli", () => {
 
     expect(markdown.exitCode).toBe(0);
     expect(markdown.stdout).toContain("# Boreal Command Reference");
+    expect(markdown.stdout).toContain("## `version`");
     expect(markdown.stdout).toContain("## `work create`");
     expect(markdown.stdout).toContain("bwrk work create <title> [--description <text>] [--priority low|normal|high|critical]");
+    expect(markdown.stdout).toContain("bwrk evidence add <work-id> --summary <text> [--kind command|test|diff|review|artifact|note]");
+    expect(markdown.stdout).toContain(
+      "`--kind <value>`: Evidence kind: command, test, diff, review, artifact, or note. Defaults to command."
+    );
     expect(markdown.stdout).toContain("Output schema: `boreal.cli.work.create.v1`");
     expect(markdown.stdout).toContain("`--label <value>`: Label to attach to the work item. Repeatable.");
     expect(markdown.stdout).toContain("`--skill-target <value>`: Skill target to install and record: codex or claude. Repeatable.");
@@ -1928,6 +2066,37 @@ describe("bwrk cli", () => {
     expect(redirected).toBe("accidental stdout\n");
   });
 
+  it("prints stable version output and treats broken stdout pipes as clean exits", async () => {
+    const rootDir = await makeTempWorkspace();
+    const text = await runCli(rootDir, ["--version"]);
+    const json = await runCli(rootDir, ["version", "--json"]);
+    const shortcutJson = await runCli(rootDir, ["--version", "--json"]);
+    const brokenPipeExit = await main(
+      ["--version"],
+      {
+        write() {
+          throw Object.assign(new Error("broken pipe"), { code: "EPIPE" });
+        },
+        error() {
+          throw new Error("stderr should not be written");
+        }
+      },
+      rootDir
+    );
+
+    expect(text.exitCode).toBe(0);
+    expect(text.stdout).toBe("boreal-work 0.1.0\n");
+    expect(json.exitCode).toBe(0);
+    expect(parseData<{ readonly name: string; readonly version: string }>(json.stdout)).toEqual(
+      expect.objectContaining({ name: "boreal-work", version: "0.1.0" })
+    );
+    expect(parseData<{ readonly name: string; readonly version: string }>(shortcutJson.stdout)).toEqual(
+      expect.objectContaining({ name: "boreal-work", version: "0.1.0" })
+    );
+    expect(isBrokenPipeError(Object.assign(new Error("broken pipe"), { code: "EPIPE" }))).toBe(true);
+    expect(brokenPipeExit).toBe(0);
+  });
+
   it("runs the work lifecycle through file-backed commands", async () => {
     const rootDir = await makeTempWorkspace();
     const childDir = join(rootDir, "nested");
@@ -1973,6 +2142,40 @@ describe("bwrk cli", () => {
     ]);
     const evidenceRecord = parseData<{ readonly meta: { readonly id: string } }>(evidence.stdout);
     expect(evidence.exitCode).toBe(0);
+
+    const artifactEvidence = await runCli(rootDir, [
+      "evidence",
+      "add",
+      work.meta.id,
+      "--summary",
+      "source-map artifact attached",
+      "--kind",
+      "artifact",
+      "--uri",
+      "file://source-map.md",
+      "--json"
+    ]);
+    const artifactEvidenceRecord = parseData<{ readonly kind: string; readonly uri: string }>(artifactEvidence.stdout);
+    expect(artifactEvidence.exitCode).toBe(0);
+    expect(artifactEvidenceRecord.kind).toBe("artifact");
+    expect(artifactEvidenceRecord.uri).toBe("file://source-map.md");
+
+    const documentEvidence = await runCli(rootDir, [
+      "evidence",
+      "add",
+      work.meta.id,
+      "--summary",
+      "source-map document attached",
+      "--kind",
+      "document",
+      "--json"
+    ]);
+    const documentEvidenceError = parseJson<{ readonly ok: false; readonly code: string; readonly message: string }>(
+      documentEvidence.stderr
+    );
+    expect(documentEvidence.exitCode).toBe(2);
+    expect(documentEvidenceError.code).toBe("BOREAL_INVALID_INPUT");
+    expect(documentEvidenceError.message).toContain("--kind must be command, test, diff, review, artifact, or note");
 
     const verification = await runCli(rootDir, [
       "work",
@@ -3435,6 +3638,9 @@ describe("bwrk cli", () => {
     const initialRefresh = await runCli(rootDir, ["sync", "refresh", "--json"]);
     const initialRefreshPayload = parseData<{
       readonly refreshed: true;
+      readonly refreshOk: true;
+      readonly postRefreshStatusOk: boolean;
+      readonly exitReason: string;
       readonly contextViews: number;
       readonly status: {
         readonly ok: boolean;
@@ -3445,6 +3651,9 @@ describe("bwrk cli", () => {
     }>(initialRefresh.stdout);
     expect(initialRefresh.exitCode).toBe(0);
     expect(initialRefreshPayload.refreshed).toBe(true);
+    expect(initialRefreshPayload.refreshOk).toBe(true);
+    expect(initialRefreshPayload.postRefreshStatusOk).toBe(true);
+    expect(initialRefreshPayload.exitReason).toBe("ok");
     expect(initialRefreshPayload.contextViews).toBeGreaterThan(0);
     expect(initialRefreshPayload.status).toEqual(
       expect.objectContaining({
@@ -3625,6 +3834,9 @@ describe("bwrk cli", () => {
     const driftRefresh = await runCli(rootDir, ["sync", "refresh", "--json"]);
     const driftRefreshPayload = parseData<{
       readonly refreshed: true;
+      readonly refreshOk: true;
+      readonly postRefreshStatusOk: boolean;
+      readonly exitReason: string;
       readonly status: {
         readonly ok: boolean;
         readonly ledgers: { readonly ok: boolean; readonly stale: boolean };
@@ -3633,6 +3845,9 @@ describe("bwrk cli", () => {
       };
     }>(driftRefresh.stdout);
     expect(driftRefresh.exitCode).toBe(0);
+    expect(driftRefreshPayload.refreshOk).toBe(true);
+    expect(driftRefreshPayload.postRefreshStatusOk).toBe(true);
+    expect(driftRefreshPayload.exitReason).toBe("ok");
     expect(driftRefreshPayload.status).toEqual(
       expect.objectContaining({
         ok: true,
@@ -3816,6 +4031,38 @@ describe("bwrk cli", () => {
     );
     expect(protectedPayload.git.collaborationDirtyPaths.map((entry) => entry.path).join("\n")).toContain(
       ".boreal/ledgers"
+    );
+
+    const protectedRefresh = await runCli(rootDir, ["sync", "refresh", "--json"]);
+    const protectedRefreshPayload = parseData<{
+      readonly refreshed: true;
+      readonly refreshOk: true;
+      readonly postRefreshStatusOk: boolean;
+      readonly exitReason: string;
+      readonly ledgers: { readonly recordCounts: { readonly workItems: number } };
+      readonly status: {
+        readonly ok: boolean;
+        readonly ledgers: { readonly ok: boolean };
+        readonly searchIndex: { readonly ok: boolean };
+        readonly git: { readonly ok: boolean; readonly protectedBranch: boolean };
+        readonly recommendedActions: readonly string[];
+      };
+    }>(protectedRefresh.stdout);
+    expect(protectedRefresh.exitCode).toBe(1);
+    expect(protectedRefreshPayload).toEqual(
+      expect.objectContaining({
+        refreshed: true,
+        refreshOk: true,
+        postRefreshStatusOk: false,
+        exitReason: "post_refresh_status_unhealthy",
+        status: expect.objectContaining({
+          ok: false,
+          ledgers: expect.objectContaining({ ok: true }),
+          searchIndex: expect.objectContaining({ ok: true }),
+          git: expect.objectContaining({ ok: false, protectedBranch: true }),
+          recommendedActions: expect.arrayContaining(["git switch -c boreal/sync-work"])
+        })
+      })
     );
 
     const doctor = await runCli(rootDir, ["doctor", "--json"]);
@@ -4883,6 +5130,10 @@ function parseData<T>(text: string): T {
   const envelope = parseJson<{ readonly ok: true; readonly data: T }>(text);
   expect(envelope.ok).toBe(true);
   return envelope.data;
+}
+
+function projectMemoryGuardCount(text: string): number {
+  return text.split(/\r?\n/u).filter((line) => line.trim() === "memory/" || line.trim() === "/memory/").length;
 }
 
 function doctorDiagnostic(payload: DoctorPayload, code: string): DoctorPayload["diagnostics"][number] | undefined {

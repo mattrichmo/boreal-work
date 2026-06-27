@@ -53,6 +53,22 @@ Use this workflow when the user's request requires convert verified discoveries 
 5. Rebuild derived artifacts when the workflow changes memory, context, or search.
 6. Run `bwrk doctor --strict --json` unless the workflow is explicitly read-only and no generated artifacts changed.
 
+## Command Sequences
+
+Convert only verified findings into work records.
+
+1. Create a source or claim for the discovery when needed:
+   `bwrk raw add --title "<source title>" --uri <uri> --summary "<summary>" --json`
+   `bwrk claim create --statement "<claim>" --json`
+2. Create the actionable issue or task:
+   `bwrk work create "<issue title>" --kind issue --priority normal --label <label> --acceptance "<verified outcome>" --json`
+3. Capture `data.meta.id` from each `work create` response.
+4. Link related work with explicit blockers:
+   `bwrk dep add <blocked-work-id> <blocker-work-id> --json`
+5. Mark leaf work ready only when it is claimable now:
+   `bwrk work ready <work-id> --json`
+
+
 ## CLI Commands
 
 - `bwrk raw add`

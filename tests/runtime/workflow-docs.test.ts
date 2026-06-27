@@ -24,6 +24,7 @@ describe("workflow, template, and skill docs", () => {
     const workflowFiles = (await listMarkdownFiles(join(rootDir, "workflows"))).filter(
       (file) => !file.endsWith("README.md") && !file.endsWith("_workflow-template.md")
     );
+    const workflowRefs = new Set(workflowFiles.map((file) => relative(join(rootDir, "workflows"), file)));
     const commandNames = new Set(COMMAND_DEFINITIONS.map(commandPath));
     const templateIds = new Set(
       (await listMarkdownFiles(join(rootDir, "templates")))
@@ -56,6 +57,9 @@ describe("workflow, template, and skill docs", () => {
       }
       expect(text).toContain("Never read or write a sibling repository's memory");
       expect(text).toContain("bwrk doctor --strict --json");
+      for (const workflow of workflowReferencesFromMarkdown(text)) {
+        expect(workflowRefs.has(workflow), `${relative(rootDir, file)} references unknown workflow ${workflow}`).toBe(true);
+      }
     }
   });
 
@@ -98,14 +102,40 @@ describe("workflow, template, and skill docs", () => {
       expect(workflows.length).toBeGreaterThan(0);
       expect(openAiMetadata).toContain("interface:");
       expect(openAiMetadata).toContain(`default_prompt: "Use $${name}`);
+      expect(text).toContain("bwrk workflows show <ref>");
+      expect(text).toContain("not paths that must exist inside the installed skill folder");
+      expect(text).toContain("You may read this skill folder's `SKILL.md`, `boreal.yaml`");
 
+      const markdownWorkflowRefs = workflowReferencesFromMarkdown(text);
       for (const workflow of workflows) {
         expect(workflowRefs.has(workflow), `${relative(rootDir, file)} references unknown workflow ${workflow}`).toBe(true);
-        expect(text).toContain(`workflows/${workflow}`);
+        expect(markdownWorkflowRefs.has(workflow), `${relative(rootDir, file)} does not mention ${workflow}`).toBe(true);
+      }
+      for (const workflow of markdownWorkflowRefs) {
+        expect(workflowRefs.has(workflow), `${relative(rootDir, file)} references unknown workflow ${workflow}`).toBe(true);
       }
       expect(text).toContain("No-Leak Rules");
       expect(text).toContain("Do not read sibling");
     }
+  });
+
+  it("keeps work and sprint playbooks specific enough for agents to execute", async () => {
+    const launchSprint = await readFile(join(rootDir, "workflows/40-work/launch-sprint.md"), "utf8");
+    const createWork = await readFile(join(rootDir, "workflows/40-work/create-work-structure.md"), "utf8");
+    const claimFinish = await readFile(join(rootDir, "workflows/40-work/claim-and-finish-work.md"), "utf8");
+    const closeout = await readFile(join(rootDir, "workflows/40-work/closeout-work.md"), "utf8");
+
+    expect(launchSprint).toContain('bwrk work create "Sprint: <name>" --kind sprint');
+    expect(launchSprint).toContain("Capture the sprint ID from `data.meta.id`");
+    expect(launchSprint).toContain("bwrk dep add <sprint-id> <task-id> --json");
+    expect(launchSprint).toContain("bwrk work ready <task-id> --json");
+    expect(createWork).toContain("Create a container when the request describes a program, backlog, milestone, or issue group");
+    expect(createWork).toContain("Capture the returned container ID from `data.meta.id`");
+    expect(claimFinish).toContain("Prefer `agent finish` for normal reserved work closeout");
+    expect(claimFinish).toContain("bwrk agent finish current --agent <agent-id>");
+    expect(claimFinish).toContain("Use manual `evidence add`, `work verify`, and `work close` only when no active reservation exists");
+    expect(closeout).toContain("Capture the evidence ID from `data.meta.id`");
+    expect(closeout).toContain("bwrk work verify <work-id> --evidence <evidence-id> --verdict passed");
   });
 });
 
@@ -168,4 +198,15 @@ function parseYamlDocument(text: string, file: string): Record<string, string | 
     }
   }
   return result;
+}
+
+function workflowReferencesFromMarkdown(text: string): Set<string> {
+  const refs = new Set<string>();
+  for (const match of text.matchAll(/`workflows\/([^`\s]+\.md)`/gu)) {
+    const ref = match[1];
+    if (ref) {
+      refs.add(ref);
+    }
+  }
+  return refs;
 }

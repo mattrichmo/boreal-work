@@ -53,6 +53,22 @@ Use this workflow when the user's request requires revise tasks, phases, depende
 5. Rebuild derived artifacts when the workflow changes memory, context, or search.
 6. Run `bwrk doctor --strict --json` unless the workflow is explicitly read-only and no generated artifacts changed.
 
+## Command Sequences
+
+Use this workflow to adjust existing records rather than recreating them.
+
+1. Inspect the current record:
+   `bwrk work show <work-id> --json`
+2. Inspect dependency shape before changing blockers:
+   `bwrk dep tree <work-id> --json`
+3. Add or remove dependency edges only after identifying both existing IDs:
+   `bwrk dep add <blocked-work-id> <blocker-work-id> --json`
+   `bwrk dep remove <blocked-work-id> <blocker-work-id> --json`
+4. Re-check readiness and cycles:
+   `bwrk dep cycles --json`
+   `bwrk doctor --strict --json`
+
+
 ## CLI Commands
 
 - `bwrk work show`

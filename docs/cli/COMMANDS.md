@@ -24,6 +24,7 @@ Global flags:
 - `--actor-kind human|agent|system`: override the actor kind. Defaults to `human`.
 - `--session <id>`: group local command operation records under a session ID. Defaults to `BOREAL_SESSION_ID` or `local`.
 - `--help`: show root or group help.
+- `--version`: print the CLI version and exit.
 
 In JSON mode, successful commands write one JSON envelope to stdout, errors write one JSON envelope to stderr, and unexpected raw stdout writes are redirected to stderr so stdout stays parseable. If a JSON result exceeds the command's `behavior.maxResultSizeChars`, Boreal writes the full envelope under `.boreal/results/` and returns compact data with `truncated`, `preview`, `fullResultPath`, and `fullResultBytes`.
 
@@ -167,6 +168,14 @@ JSON `data` shape:
   ]
 }
 ```
+
+## `version`
+
+```bash
+bwrk version [--json]
+```
+
+Prints stable Boreal CLI package and runtime version information. `bwrk --version` is a top-level shortcut for human probes; use `bwrk version --json` or `bwrk --version --json` when automation needs a JSON envelope.
 
 ## `workflows list`
 
@@ -673,7 +682,7 @@ bwrk evidence add <work-id> \
   [--json]
 ```
 
-Records evidence against a work item and moves the work item to `needs_verification` unless it is already closed.
+Records evidence against a work item and moves the work item to `needs_verification` unless it is already closed. Use `--kind artifact` for files or generated artifacts such as source maps; `document` is a source/raw kind, not an evidence kind.
 
 Example:
 
@@ -1023,7 +1032,9 @@ bwrk sync refresh [--json]
 
 Refreshes generated collaboration artifacts in one closeout command: context-pack projections, the local search index, and the JSONL ledger export. It then returns the same status shape as `sync status` under `data.status`. Snapshot creation remains explicit through `bwrk snapshot create --json` because snapshots are named baselines, not routine cache refreshes.
 
-JSON `data` contains `refreshed`, `contextViews`, `searchIndex`, `ledgers`, and `status`. The command exits `1` if the post-refresh sync status is still not clean, for example because the vault is missing or Git collaboration paths are dirty on a protected branch.
+JSON `data` contains `refreshed`, `refreshOk`, `postRefreshStatusOk`, `exitReason`, `contextViews`, `searchIndex`, `ledgers`, and `status`. `refreshOk: true` means projections, search, and ledger export were rebuilt. `postRefreshStatusOk` mirrors nested `status.ok` after the rebuild. `exitReason` is `ok` when the process exits `0`, or `post_refresh_status_unhealthy` when the refresh completed but the final health gate still failed.
+
+The command exits `1` if the post-refresh sync status is still not clean, for example because the vault is missing or Git collaboration paths are dirty on a protected branch. Agents should treat `exitReason: post_refresh_status_unhealthy` as partial success: generated artifacts were refreshed, but the nested `status` object and `recommendedActions` describe the remaining repair.
 
 ## `ledger status`
 
@@ -1135,10 +1146,12 @@ Runs `bwrk doctor --workspace . --strict --json` from the repository root.
 ## `doctor skills`
 
 ```bash
-bwrk doctor skills [--json]
+bwrk doctor skills [--install-root <dir>] [--skill-target codex|claude|skills...] [--json]
 ```
 
 Validates the checked-in workflow, template, and skill source files without requiring an initialized workspace. It checks duplicate workflow IDs, workflow command references, workflow template references, and skill workflow references.
+
+With `--skill-target` or `--install-root`, it also validates installed skill roots against the checked-in assets. The installed-root check detects missing files such as `boreal.yaml`, stale `SKILL.md` content, missing workflow resolver guidance, and Claude installs that accidentally contain Codex `agents/openai.yaml` metadata. If `--install-root` is omitted, configured project setup roots are used where possible.
 
 ## `lock inspect`
 

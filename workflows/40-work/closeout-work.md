@@ -53,6 +53,21 @@ Use this workflow when the user's request requires close completed work with evi
 5. Rebuild derived artifacts when the workflow changes memory, context, or search.
 6. Run `bwrk doctor --strict --json` unless the workflow is explicitly read-only and no generated artifacts changed.
 
+## Command Sequences
+
+Use manual closeout only for work that was completed outside the active-reservation path or needs extra evidence.
+
+1. Inspect the target first:
+   `bwrk work show <work-id> --json`
+2. Attach evidence with a supported kind:
+   `bwrk evidence add <work-id> --summary "<summary>" --kind command --command "<command>" --outcome passed --json`
+3. Capture the evidence ID from `data.meta.id`.
+4. Verify with that exact evidence ID:
+   `bwrk work verify <work-id> --evidence <evidence-id> --verdict passed --notes "<notes>" --json`
+5. Close only after passed verification:
+   `bwrk work close <work-id> --reason "<reason>" --json`
+
+
 ## CLI Commands
 
 - `bwrk work show`
