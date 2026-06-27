@@ -81,24 +81,25 @@ This file is the current checkpoint for the broad hardening goal. It separates a
 - MCP leakage and path traversal fixtures now cover wrong-repo memory access, external paths, symlink escapes, stale copied memory roots, selected-project mismatch, mutating tool contract failures, real MCP tool calls, and operation evidence returned after confirmed mutations.
 - `.boreal/mcp.json` is a local-only project-scoped config marker, and `bwrk doctor` now reports `mcp.config` drift when copied configs point at another project or omit `--workspace`.
 - `bwrk daemon status --json`, `dashboard global --json`, and `doctor` now surface daemon state without requiring the daemon to run; stale PID files and boundary drift are warnings.
+- Golden-path command aliases, explicit closeout gates, work edit/cancel/reopen/split lifecycle commands, claim review, decision supersession, sprint metrics/close, schema validation, docs checking, and `gate`/`gate closeout` now have CLI contracts, registry metadata, command docs, and runtime tests.
+- `docs/architecture/V2_STORAGE_COLLABORATION_PLAN.md` records the accepted V2 storage/collaboration design: SQLite as the primary local writer, JSONL ledgers and snapshots as the collaboration/recovery boundary, generation-based freshness metadata, query pushdown/index contracts, and scale/migration gates.
 
 ## Remaining Architecture Work
 
-- Single-file `.boreal/runtime/state.json` is still the durable runtime adapter. JSONL ledgers and Markdown vault files exist, but they are not yet the primary rebuildable source of truth.
-- SQLite is currently a generated cache/read model, not the primary runtime writer.
+- Single-file `.boreal/runtime/state.json` is still the durable runtime adapter. JSONL ledgers and Markdown vault files exist, but they are not yet the primary collaboration/recovery boundary for a SQLite writer.
+- SQLite is currently a generated cache/read model, not the primary runtime writer. The V2 writer decision is documented in `docs/architecture/V2_STORAGE_COLLABORATION_PLAN.md`; implementation is still pending.
 - Schema validation is still hand-written. Schema/validator parity now fails in CI, but schemas are not generated from TypeScript nor are TypeScript validators generated from schema files.
 - Runtime claims and decisions can link to vault wiki pages, but runtime JSON remains the primary source of truth; wiki pages are not yet the primary rebuild source for claim/decision records.
 - Global project/bucket registry has the schema, storage-location contract, list/add/remove/import/doctor commands, setup import path, overview buckets, scoped global work queues, search results, actor activity, global health/drift panels, guarded settings forms, and the first-class `bwrk dashboard global --json` endpoint. The remaining dashboard command work is to add narrower project, dashboard-sprint, queue, health, and status endpoints over the same model boundary.
 - The hand-written CLI guide is not fully generated yet; `bwrk commands --format markdown` now provides the registry-backed reference surface.
 - Work lifecycle semantics still retain legacy `reserved` as an accepted imported state; the live runtime uses reservation leases plus `in_progress`.
-- Claim review/status transition commands and first-class decision supersession commands are still future work; stale truth workflows currently surface exact manual review commands.
 
 ## Next Priority Slices
 
-1. Add optional shared CLI dashboard primitives for status icons, shortcut hints, grouped diagnostics, stepper output, and windowed choice lists without changing JSON or stable plain text defaults.
-2. Add a doc-check command that compares `docs/cli/COMMANDS.md` against the generated command reference.
-3. Add explicit mutation commands for claim review/status transitions and decision supersession so stale truth workflows no longer rely on follow-up work items for manual repair.
-4. Define generated SQLite cache freshness thresholds for larger project registries and document when callers should query the cache instead of JSON state.
+1. Implement the V2 storage plan in `docs/architecture/V2_STORAGE_COLLABORATION_PLAN.md`, starting with generation metadata and query contracts before switching the writer.
+2. Add optional shared CLI dashboard primitives for status icons, shortcut hints, grouped diagnostics, stepper output, and windowed choice lists without changing JSON or stable plain text defaults.
+3. Add narrower project, dashboard-sprint, queue, health, and status dashboard JSON endpoints over the existing global dashboard model boundary.
+4. Generate more of the hand-written CLI guide from `COMMAND_DEFINITIONS` so the static guide and generated command reference cannot drift.
 5. Expand the JSONL merge-driver fixture to cover generated ledger directories from real `export ledgers` output.
 6. Add larger MCP client fixtures once a real client config is checked against local stdio transport behavior.
 7. Decide whether the daemon should gain an opt-in explicit `sync refresh` trigger, still mediated through the CLI command contract.

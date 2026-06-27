@@ -23,6 +23,9 @@ importers:
 
   apps/cli:
     dependencies:
+      '@boreal/console':
+        specifier: workspace:*
+        version: link:../console
       '@boreal/core':
         specifier: workspace:*
         version: link:../../packages/core
@@ -47,6 +50,9 @@ importers:
 
   apps/console:
     dependencies:
+      '@boreal/core':
+        specifier: workspace:*
+        version: link:../../packages/core
       '@boreal/ui-model':
         specifier: workspace:*
         version: link:../../packages/ui-model

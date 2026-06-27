@@ -16,6 +16,7 @@ import {
   inspectSQLiteCache,
   querySQLiteCacheRecords,
   rebuildSQLiteCache,
+  withFileLock,
   type StoreSnapshot
 } from "@boreal/storage";
 import { createWorkItem } from "@boreal/work-engine";
@@ -227,6 +228,35 @@ describe("file-backed store", () => {
       code: "BOREAL_CONFLICT"
     } satisfies Partial<BorealError>);
     await expect(inspectFileLock(lockDir, { staleAfterMs: 30_000 })).resolves.toMatchObject({ exists: true, stale: false });
+  });
+
+  it("heartbeats active long-running locks so stale recovery does not break them", async () => {
+    const rootDir = await makeTempWorkspace();
+    const lockDir = join(rootDir, ".boreal/runtime/state.lock");
+    let insideHeartbeat: string | undefined;
+
+    await withFileLock(
+      lockDir,
+      {
+        waitTimeoutMs: 250,
+        staleAfterMs: 30,
+        retryDelayMs: 5
+      },
+      async () => {
+        await sleep(90);
+        const inspection = await inspectFileLock(lockDir, { staleAfterMs: 30 });
+        insideHeartbeat = inspection.owner?.lastHeartbeatAt;
+        expect(inspection).toMatchObject({ exists: true, stale: false });
+        expect(inspection.owner?.lastHeartbeatAt).toBeDefined();
+        await expect(breakStaleFileLock(lockDir, { waitTimeoutMs: 250, staleAfterMs: 30, retryDelayMs: 5 }))
+          .rejects.toMatchObject({
+            code: "BOREAL_CONFLICT"
+          } satisfies Partial<BorealError>);
+      }
+    );
+
+    expect(insideHeartbeat).toBeDefined();
+    await expect(inspectFileLock(lockDir)).resolves.toMatchObject({ exists: false });
   });
 
   it("rejects state files outside the workspace root", async () => {

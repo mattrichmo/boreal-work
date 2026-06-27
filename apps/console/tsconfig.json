@@ -7,5 +7,5 @@
     "jsx": "react-jsx"
   },
   "include": ["src/**/*.ts", "src/**/*.tsx"],
-  "references": [{ "path": "../../packages/ui-model" }]
+  "references": [{ "path": "../../packages/core" }, { "path": "../../packages/ui-model" }]
 }

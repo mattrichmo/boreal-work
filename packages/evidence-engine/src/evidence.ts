@@ -43,11 +43,12 @@ export interface VerifySubjectInput {
 export function recordEvidence(input: RecordEvidenceInput): EvidenceRecord {
   assertNonEmpty(input.summary, "summary");
   const observedAt = input.observedAt ?? input.now;
+  const command = redactSensitiveCommand(input.command);
   const id = deterministicId<EvidenceId>("evidence", {
     subjectId: input.subjectId,
     kind: input.kind,
     summary: input.summary,
-    command: input.command ?? null,
+    command: command ?? null,
     uri: input.uri ?? null,
     observedAt
   });
@@ -63,7 +64,7 @@ export function recordEvidence(input: RecordEvidenceInput): EvidenceRecord {
     kind: input.kind,
     summary: input.summary.trim(),
     outcome: input.outcome ?? "observed",
-    command: input.command,
+    command,
     uri: input.uri,
     observedAt
   });
@@ -83,6 +84,20 @@ export function verifySubject(input: VerifySubjectInput): VerificationRecord {
   const selectedEvidence = input.evidenceIds
     .map((id) => availableById.get(id))
     .filter((record): record is EvidenceRecord => record !== undefined);
+  const mismatchedEvidence = selectedEvidence
+    .filter((record) => record.subjectId !== input.subjectId || record.subjectType !== input.subjectType)
+    .map((record) => ({
+      evidenceId: record.meta.id,
+      subjectId: record.subjectId,
+      subjectType: record.subjectType
+    }));
+  if (mismatchedEvidence.length > 0) {
+    throw new BorealError("BOREAL_POLICY_VIOLATION", "Verification evidence belongs to a different subject", {
+      subjectId: input.subjectId,
+      subjectType: input.subjectType,
+      mismatchedEvidence
+    });
+  }
   if (input.verdict === "passed" && !selectedEvidence.some((record) => record.outcome === "passed")) {
     throw new BorealError("BOREAL_POLICY_VIOLATION", "Passed verification requires at least one passed evidence", {
       evidenceIds: input.evidenceIds
@@ -115,4 +130,18 @@ function assertNonEmpty(value: string, label: string): void {
   if (value.trim().length === 0) {
     throw new BorealError("BOREAL_INVALID_INPUT", `${label} cannot be empty`);
   }
+}
+
+function redactSensitiveCommand(command: string | undefined): string | undefined {
+  const trimmed = command?.trim();
+  if (!trimmed) {
+    return undefined;
+  }
+  const sensitiveName = String.raw`(?:api[-_]?key|access[-_]?token|refresh[-_]?token|token|secret|password|passwd|pwd|authorization|auth|cookie|client[-_]?secret|private[-_]?key|credential)`;
+  return trimmed
+    .replace(new RegExp(String.raw`(--${sensitiveName})(=)([^\s]+)`, "giu"), "$1$2<redacted>")
+    .replace(new RegExp(String.raw`(--${sensitiveName}\s+)(?:"[^"]*"|'[^']*'|[^\s]+)`, "giu"), "$1<redacted>")
+    .replace(new RegExp(String.raw`(^|\s)([A-Za-z_][A-Za-z0-9_]*(?:${sensitiveName})[A-Za-z0-9_]*=)([^\s]+)`, "giu"), "$1$2<redacted>")
+    .replace(new RegExp(String.raw`([?&]${sensitiveName}=)([^\s&]+)`, "giu"), "$1<redacted>")
+    .replace(/\b(Bearer\s+)[A-Za-z0-9._~+/=-]+/giu, "$1<redacted>");
 }

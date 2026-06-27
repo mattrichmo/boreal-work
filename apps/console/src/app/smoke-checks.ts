@@ -23,6 +23,7 @@ export interface ConsoleSmokeRouteResult {
   readonly height: number;
   readonly status: number;
   readonly bytes: number;
+  readonly durationMs?: number;
   readonly checks: readonly string[];
 }
 

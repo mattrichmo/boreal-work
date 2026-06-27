@@ -86,9 +86,9 @@ async function runBrowserSmokeCli(argv: readonly string[]): Promise<void> {
     }
     process.stdout.write(`${JSON.stringify(output, null, 2)}\n`);
   } finally {
-    await client.close();
-    await chrome.close();
-    await running.close();
+    await closeWithTimeout("devtools client", () => client.close(), 1_000);
+    await closeWithTimeout("chrome", () => chrome.close(), 3_000);
+    await closeWithTimeout("console server", () => running.close(), 1_000);
   }
 }
 
@@ -264,14 +264,49 @@ async function launchChrome(executable: string): Promise<ChromeLaunch> {
   return {
     wsUrl,
     async close() {
-      chromeProcess.kill("SIGTERM");
-      await new Promise<void>((resolvePromise) => {
-        chromeProcess.once("exit", () => resolvePromise());
-        setTimeout(resolvePromise, 1000).unref();
-      });
+      if (chromeProcess.exitCode === null && chromeProcess.signalCode === null) {
+        chromeProcess.kill("SIGTERM");
+      }
+      await waitForProcessExit(chromeProcess, 1_000);
+      if (chromeProcess.exitCode === null && chromeProcess.signalCode === null) {
+        chromeProcess.kill("SIGKILL");
+        await waitForProcessExit(chromeProcess, 1_000);
+      }
       await rm(userDataDir, { recursive: true, force: true });
     }
   };
+}
+
+function waitForProcessExit(process: ChildProcessWithoutNullStreams, timeoutMs: number): Promise<void> {
+  if (process.exitCode !== null || process.signalCode !== null) {
+    return Promise.resolve();
+  }
+  return new Promise((resolvePromise) => {
+    const timer = setTimeout(resolvePromise, timeoutMs);
+    process.once("exit", () => {
+      clearTimeout(timer);
+      resolvePromise();
+    });
+  });
+}
+
+async function closeWithTimeout(label: string, close: () => Promise<void>, timeoutMs: number): Promise<void> {
+  void label;
+  let timeout: NodeJS.Timeout | undefined;
+  try {
+    await Promise.race([
+      close(),
+      new Promise<void>((resolvePromise) => {
+        timeout = setTimeout(resolvePromise, timeoutMs);
+      })
+    ]);
+  } catch {
+    // Smoke has already produced the actionable pass/fail result; cleanup should not mask it.
+  } finally {
+    if (timeout) {
+      clearTimeout(timeout);
+    }
+  }
 }
 
 function waitForDevToolsUrl(chromeProcess: ChildProcessWithoutNullStreams): Promise<string> {

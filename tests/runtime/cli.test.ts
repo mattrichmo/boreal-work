@@ -1214,6 +1214,421 @@ describe("bwrk cli", () => {
     expect(parseJson<{ readonly code: string }>(invalid.stderr).code).toBe("BOREAL_INVALID_INPUT");
   });
 
+  it("runs golden-path agent aliases and closeout gates", async () => {
+    const rootDir = await makeTempWorkspace();
+    await runCli(rootDir, [
+      "init",
+      "--setup-memory",
+      "--memory-root",
+      "memory",
+      "--memory-layout",
+      "in-repo",
+      "--memory-git-mode",
+      "shared",
+      "--json"
+    ]);
+    await runCli(rootDir, ["work", "create", "Alias paused task", "--ready", "--json"]);
+
+    const start = parseData<{
+      readonly started: boolean;
+      readonly action: string;
+      readonly reservation: { readonly meta: { readonly id: string } };
+    }>((await runCli(rootDir, ["start", "--agent", "alias-agent", "--purpose", "alias smoke", "--json"])).stdout);
+    expect(start).toEqual(expect.objectContaining({ started: true, action: "claimed_work" }));
+    expect(start.reservation.meta.id).toMatch(/^bw_reservation_/);
+
+    const paused = parseData<{
+      readonly finished: boolean;
+      readonly action: string;
+      readonly verification: { readonly verdict: string };
+      readonly release: { readonly reservation: { readonly status: string } };
+    }>(
+      (
+        await runCli(rootDir, [
+          "pause",
+          "--agent",
+          "alias-agent",
+          "--summary",
+          "Paused through alias.",
+          "--verdict",
+          "failed",
+          "--json"
+        ])
+      ).stdout
+    );
+    expect(paused).toEqual(expect.objectContaining({ finished: true, action: "verified_and_released" }));
+    expect(paused.verification.verdict).toBe("failed");
+    expect(paused.release.reservation.status).toBe("released");
+
+    await runCli(rootDir, ["work", "create", "Alias done task", "--ready", "--json"]);
+    await runCli(rootDir, ["start", "--agent", "alias-agent", "--purpose", "alias close", "--json"]);
+    const done = parseData<{
+      readonly finished: boolean;
+      readonly action: string;
+      readonly verification: { readonly verdict: string };
+      readonly closedWork: { readonly status: string; readonly closedReason: string };
+    }>(
+      (
+        await runCli(rootDir, [
+          "done",
+          "--agent",
+          "alias-agent",
+          "--summary",
+          "Done through alias.",
+          "--kind",
+          "test",
+          "--command",
+          "node --version",
+          "--reason",
+          "verified alias path",
+          "--json"
+        ])
+      ).stdout
+    );
+    expect(done).toEqual(expect.objectContaining({ finished: true, action: "verified_and_closed" }));
+    expect(done.verification.verdict).toBe("passed");
+    expect(done.closedWork).toEqual(expect.objectContaining({ status: "closed", closedReason: "verified alias path" }));
+
+    const status = parseData<{ readonly kind: string; readonly agent: { readonly agentId: string } }>(
+      (await runCli(rootDir, ["status", "--agent", "alias-agent", "--json"])).stdout
+    );
+    expect(status).toEqual(expect.objectContaining({ kind: "prime", agent: expect.objectContaining({ agentId: "alias-agent" }) }));
+
+    const schema = parseData<{ readonly ok: boolean; readonly commandMetadata: { readonly ok: boolean } }>(
+      (await runCli(rootDir, ["schema", "validate", "--json"])).stdout
+    );
+    expect(schema).toEqual(expect.objectContaining({ ok: true, commandMetadata: expect.objectContaining({ ok: true }) }));
+
+    const docs = parseData<{ readonly ok: boolean; readonly commandMetadata: { readonly ok: boolean } }>(
+      (await runCli(rootDir, ["docs", "check", "--json"])).stdout
+    );
+    expect(docs).toEqual(expect.objectContaining({ ok: true, commandMetadata: expect.objectContaining({ ok: true }) }));
+
+    const gate = parseData<{
+      readonly ok: boolean;
+      readonly sync: { readonly postRefreshStatusOk: boolean };
+      readonly doctor: { readonly ok: boolean };
+      readonly schema: { readonly ok: boolean };
+      readonly docs: { readonly ok: boolean };
+    }>((await runCli(rootDir, ["gate", "closeout", "--strict", "--json"])).stdout);
+    expect(gate).toEqual(
+      expect.objectContaining({
+        ok: true,
+        sync: expect.objectContaining({ postRefreshStatusOk: true }),
+        doctor: expect.objectContaining({ ok: true }),
+        schema: expect.objectContaining({ ok: true }),
+        docs: expect.objectContaining({ ok: true })
+      })
+    );
+  });
+
+  it("edits, cancels, reopens, splits, reviews claims, and supersedes decisions", async () => {
+    const rootDir = await makeTempWorkspace();
+    await runCli(rootDir, [
+      "init",
+      "--setup-memory",
+      "--memory-root",
+      "memory",
+      "--memory-layout",
+      "in-repo",
+      "--memory-git-mode",
+      "shared",
+      "--json"
+    ]);
+    const work = parseData<{
+      readonly meta: { readonly id: string; readonly sourceRefs: readonly Array<{ readonly uri: string }> };
+      readonly title: string;
+      readonly labels: readonly string[];
+      readonly acceptanceCriteria: readonly string[];
+    }>(
+      (
+        await runCli(rootDir, [
+          "work",
+          "create",
+          "Editable work",
+          "--source",
+          "artifact://editable-source",
+          "--label",
+          "Original",
+          "--acceptance",
+          "Original criterion",
+          "--ready",
+          "--json"
+        ])
+      ).stdout
+    );
+
+    const edited = parseData<{
+      readonly work: {
+        readonly meta: { readonly id: string; readonly sourceRefs: readonly Array<{ readonly uri: string }> };
+        readonly title: string;
+        readonly labels: readonly string[];
+        readonly acceptanceCriteria: readonly string[];
+      };
+      readonly event: { readonly type: string };
+    }>(
+      (
+        await runCli(rootDir, [
+          "work",
+          "edit",
+          work.meta.id,
+          "--title",
+          "Edited work",
+          "--label",
+          "Edited",
+          "--acceptance",
+          "Edited criterion",
+          "--json"
+        ])
+      ).stdout
+    );
+    expect(edited.work).toEqual(
+      expect.objectContaining({
+        title: "Edited work",
+        labels: ["edited"],
+        acceptanceCriteria: ["Edited criterion"],
+        meta: expect.objectContaining({ sourceRefs: work.meta.sourceRefs })
+      })
+    );
+    expect(edited.event.type).toBe("work.edited");
+
+    const split = parseData<{
+      readonly child: { readonly meta: { readonly id: string }; readonly parentId: string; readonly labels: readonly string[] };
+      readonly blockedParent: { readonly dependencyIds: readonly string[]; readonly status: string };
+    }>(
+      (
+        await runCli(rootDir, [
+          "work",
+          "split",
+          work.meta.id,
+          "--title",
+          "Split child",
+          "--label",
+          "Child",
+          "--acceptance",
+          "Child criterion",
+          "--ready",
+          "--json"
+        ])
+      ).stdout
+    );
+    expect(split.child).toEqual(expect.objectContaining({ parentId: work.meta.id, labels: ["edited", "child"] }));
+    expect(split.blockedParent.dependencyIds).toContain(split.child.meta.id);
+    expect(split.blockedParent.status).toBe("blocked");
+
+    const cancellable = parseData<{ readonly meta: { readonly id: string } }>(
+      (await runCli(rootDir, ["work", "create", "Cancelable work", "--ready", "--json"])).stdout
+    );
+    await runCli(rootDir, ["work", "reserve", cancellable.meta.id, "--agent", "cancel-agent", "--purpose", "guard", "--json"]);
+    const activeCancel = await runCli(rootDir, ["work", "cancel", cancellable.meta.id, "--reason", "not now", "--json"]);
+    expect(activeCancel.exitCode).toBe(1);
+    expect(parseJson<{ readonly code: string }>(activeCancel.stderr).code).toBe("BOREAL_POLICY_VIOLATION");
+    await runCli(rootDir, ["work", "release", cancellable.meta.id, "--json"]);
+    const cancelled = parseData<{ readonly work: { readonly status: string; readonly closedReason: string } }>(
+      (await runCli(rootDir, ["work", "cancel", cancellable.meta.id, "--reason", "not now", "--json"])).stdout
+    );
+    expect(cancelled.work).toEqual(expect.objectContaining({ status: "cancelled", closedReason: "not now" }));
+    const reopened = parseData<{ readonly work: { readonly status: string; readonly closedReason?: string } }>(
+      (await runCli(rootDir, ["work", "reopen", cancellable.meta.id, "--ready", "--reason", "resume", "--json"])).stdout
+    );
+    expect(reopened.work.status).toBe("ready");
+    expect(reopened.work.closedReason).toBeUndefined();
+
+    const source = parseData<{ readonly meta: { readonly id: string } }>(
+      (
+        await runCli(rootDir, [
+          "source",
+          "add",
+          "--title",
+          "Review source",
+          "--uri",
+          "artifact://review-source",
+          "--kind",
+          "artifact",
+          "--json"
+        ])
+      ).stdout
+    );
+    const evidence = parseData<{ readonly meta: { readonly id: string } }>(
+      (
+        await runCli(rootDir, [
+          "evidence",
+          "add",
+          work.meta.id,
+          "--summary",
+          "Review evidence observed.",
+          "--outcome",
+          "observed",
+          "--json"
+        ])
+      ).stdout
+    );
+    const claim = parseData<{ readonly meta: { readonly id: string } }>(
+      (
+        await runCli(rootDir, [
+          "claim",
+          "create",
+          "--statement",
+          "The review path is source-backed.",
+          "--status",
+          "proposed",
+          "--json"
+        ])
+      ).stdout
+    );
+    const reviewed = parseData<{
+      readonly claim: { readonly status: string; readonly sourceIds: readonly string[]; readonly evidenceIds: readonly string[] };
+      readonly event: { readonly type: string };
+    }>(
+      (
+        await runCli(rootDir, [
+          "claim",
+          "review",
+          claim.meta.id,
+          "--status",
+          "accepted",
+          "--source",
+          source.meta.id,
+          "--evidence",
+          evidence.meta.id,
+          "--notes",
+          "reviewed",
+          "--json"
+        ])
+      ).stdout
+    );
+    expect(reviewed.claim).toEqual(
+      expect.objectContaining({
+        status: "accepted",
+        sourceIds: [source.meta.id],
+        evidenceIds: [evidence.meta.id]
+      })
+    );
+    expect(reviewed.event.type).toBe("knowledge.claim_reviewed");
+
+    const decision = parseData<{ readonly meta: { readonly id: string } }>(
+      (
+        await runCli(rootDir, [
+          "decision",
+          "create",
+          "--title",
+          "Original decision",
+          "--decision",
+          "Use the original route.",
+          "--source",
+          source.meta.id,
+          "--json"
+        ])
+      ).stdout
+    );
+    const superseded = parseData<{
+      readonly superseded: { readonly meta: { readonly id: string }; readonly status: string };
+      readonly decision: { readonly meta: { readonly id: string }; readonly status: string; readonly decision: string; readonly sourceIds: readonly string[] };
+    }>(
+      (
+        await runCli(rootDir, [
+          "decision",
+          "supersede",
+          decision.meta.id,
+          "--decision",
+          "Use the replacement route.",
+          "--reason",
+          "new source review",
+          "--json"
+        ])
+      ).stdout
+    );
+    expect(superseded.superseded).toEqual(expect.objectContaining({ meta: expect.objectContaining({ id: decision.meta.id }), status: "superseded" }));
+    expect(superseded.decision).toEqual(
+      expect.objectContaining({ status: "accepted", decision: "Use the replacement route.", sourceIds: [source.meta.id] })
+    );
+    expect(superseded.decision.meta.id).not.toBe(decision.meta.id);
+  });
+
+  it("computes sprint metrics and closes verified sprints", async () => {
+    const rootDir = await makeTempWorkspace();
+    await runCli(rootDir, ["init", "--json"]);
+    const sprint = parseData<{ readonly meta: { readonly id: string } }>(
+      (await runCli(rootDir, ["work", "create", "Metrics Sprint", "--kind", "sprint", "--ready", "--json"])).stdout
+    );
+    const first = parseData<{ readonly meta: { readonly id: string } }>(
+      (await runCli(rootDir, ["work", "create", "Metrics first", "--ready", "--json"])).stdout
+    );
+    const second = parseData<{ readonly meta: { readonly id: string } }>(
+      (await runCli(rootDir, ["work", "create", "Metrics second", "--ready", "--json"])).stdout
+    );
+    await runCli(rootDir, ["dep", "add", sprint.meta.id, first.meta.id, "--json"]);
+    await runCli(rootDir, ["dep", "add", sprint.meta.id, second.meta.id, "--json"]);
+
+    for (const workId of [first.meta.id, second.meta.id]) {
+      const evidence = parseData<{ readonly meta: { readonly id: string } }>(
+        (
+          await runCli(rootDir, [
+            "evidence",
+            "add",
+            workId,
+            "--summary",
+            `Evidence for ${workId}`,
+            "--outcome",
+            "passed",
+            "--json"
+          ])
+        ).stdout
+      );
+      await runCli(rootDir, ["work", "verify", workId, "--evidence", evidence.meta.id, "--verdict", "passed", "--json"]);
+      await runCli(rootDir, ["work", "close", workId, "--reason", "completed for metrics", "--json"]);
+    }
+
+    const metrics = parseData<{
+      readonly schemaVersion: string;
+      readonly capacity: { readonly capacity: number; readonly committed: number; readonly overCapacity: boolean };
+      readonly summary: { readonly completed: number; readonly open: number; readonly risks: number };
+      readonly risks: readonly string[];
+      readonly closeout: { readonly readyForReport: boolean; readonly unresolvedWork: readonly unknown[] };
+    }>(
+      (
+        await runCli(rootDir, [
+          "sprint",
+          "metrics",
+          sprint.meta.id,
+          "--capacity",
+          "1",
+          "--risk",
+          "manual risk",
+          "--closeout-reason",
+          "scope complete",
+          "--json"
+        ])
+      ).stdout
+    );
+    expect(metrics.schemaVersion).toBe("boreal.cli.sprint.metrics.v1");
+    expect(metrics.capacity).toEqual(expect.objectContaining({ capacity: 1, committed: 2, overCapacity: true }));
+    expect(metrics.summary).toEqual(expect.objectContaining({ completed: 2, open: 0, risks: 2 }));
+    expect(metrics.risks).toEqual(expect.arrayContaining(["manual risk", "capacity_exceeded: committed 2 exceeds capacity 1"]));
+    expect(metrics.closeout).toEqual(expect.objectContaining({ readyForReport: true, unresolvedWork: [] }));
+
+    const sprintEvidence = parseData<{ readonly meta: { readonly id: string } }>(
+      (
+        await runCli(rootDir, [
+          "evidence",
+          "add",
+          sprint.meta.id,
+          "--summary",
+          "Sprint metrics closeout passed.",
+          "--outcome",
+          "passed",
+          "--json"
+        ])
+      ).stdout
+    );
+    await runCli(rootDir, ["work", "verify", sprint.meta.id, "--evidence", sprintEvidence.meta.id, "--verdict", "passed", "--json"]);
+    const closed = parseData<{ readonly closed: { readonly status: string; readonly closedReason: string }; readonly metrics: { readonly summary: { readonly open: number } } }>(
+      (await runCli(rootDir, ["sprint", "close", sprint.meta.id, "--reason", "metrics complete", "--json"])).stdout
+    );
+    expect(closed.closed).toEqual(expect.objectContaining({ status: "closed", closedReason: "metrics complete" }));
+    expect(closed.metrics.summary.open).toBe(0);
+  });
+
   it("does not append equivalent project .gitignore guards during repeated setup", async () => {
     const rootDir = await makeTempWorkspace();
     await writeFile(
@@ -3841,6 +4256,29 @@ describe("bwrk cli", () => {
     const evidenceRecord = parseData<{ readonly meta: { readonly id: string } }>(evidence.stdout);
     expect(evidence.exitCode).toBe(0);
 
+    const redactedEvidence = await runCli(rootDir, [
+      "evidence",
+      "add",
+      work.meta.id,
+      "--summary",
+      "CLI redaction evidence",
+      "--kind",
+      "command",
+      "--outcome",
+      "passed",
+      "--command",
+      "API_TOKEN=abc123 bwrk evidence add --token token123 --password=pw123",
+      "--json"
+    ]);
+    const redactedEvidenceRecord = parseData<{ readonly command?: string }>(redactedEvidence.stdout);
+    expect(redactedEvidence.exitCode).toBe(0);
+    expect(redactedEvidenceRecord.command).toContain("API_TOKEN=<redacted>");
+    expect(redactedEvidenceRecord.command).toContain("--token <redacted>");
+    expect(redactedEvidenceRecord.command).toContain("--password=<redacted>");
+    expect(redactedEvidenceRecord.command).not.toContain("abc123");
+    expect(redactedEvidenceRecord.command).not.toContain("token123");
+    expect(redactedEvidenceRecord.command).not.toContain("pw123");
+
     const artifactEvidence = await runCli(rootDir, [
       "evidence",
       "add",
@@ -3874,6 +4312,46 @@ describe("bwrk cli", () => {
     expect(documentEvidence.exitCode).toBe(2);
     expect(documentEvidenceError.code).toBe("BOREAL_INVALID_INPUT");
     expect(documentEvidenceError.message).toContain("--kind must be command, test, diff, review, artifact, or note");
+
+    const otherWork = parseData<{ readonly meta: { readonly id: string } }>(
+      (await runCli(rootDir, ["work", "create", "Other evidence owner", "--json"])).stdout
+    );
+    const otherEvidence = parseData<{ readonly meta: { readonly id: string } }>(
+      (
+        await runCli(rootDir, [
+          "evidence",
+          "add",
+          otherWork.meta.id,
+          "--summary",
+          "Other work passed",
+          "--kind",
+          "test",
+          "--outcome",
+          "passed",
+          "--json"
+        ])
+      ).stdout
+    );
+    const mismatchedVerification = await runCli(rootDir, [
+      "work",
+      "verify",
+      work.meta.id,
+      "--evidence",
+      otherEvidence.meta.id,
+      "--verdict",
+      "passed",
+      "--json"
+    ]);
+    const mismatchedVerificationPayload = parseJson<{
+      readonly ok: false;
+      readonly code: string;
+      readonly message: string;
+      readonly details?: { readonly mismatchedEvidence?: readonly { readonly evidenceId: string }[] };
+    }>(mismatchedVerification.stderr);
+    expect(mismatchedVerification.exitCode).toBe(1);
+    expect(mismatchedVerificationPayload.code).toBe("BOREAL_POLICY_VIOLATION");
+    expect(mismatchedVerificationPayload.message).toContain("different subject");
+    expect(mismatchedVerificationPayload.details?.mismatchedEvidence?.[0]?.evidenceId).toBe(otherEvidence.meta.id);
 
     const verification = await runCli(rootDir, [
       "work",
@@ -4979,6 +5457,21 @@ describe("bwrk cli", () => {
     expect(wrongAgentPayload.ok).toBe(false);
     expect(wrongAgentPayload.code).toBe("BOREAL_POLICY_VIOLATION");
     expect(wrongAgentPayload.message).toContain("does not own");
+
+    const directReservedClose = await runCli(rootDir, [
+      "work",
+      "close",
+      closeWork.meta.id,
+      "--reason",
+      "direct close should not bypass reservation",
+      "--json"
+    ]);
+    const directReservedClosePayload = parseJson<{ readonly ok: false; readonly code: string; readonly message: string }>(
+      directReservedClose.stderr
+    );
+    expect(directReservedClose.exitCode).toBe(1);
+    expect(directReservedClosePayload.code).toBe("BOREAL_POLICY_VIOLATION");
+    expect(directReservedClosePayload.message).toContain("Reserved work");
 
     const finishedClosed = await runCli(rootDir, [
       "agent",

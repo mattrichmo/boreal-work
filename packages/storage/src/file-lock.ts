@@ -30,6 +30,7 @@ export interface LockOwner {
   readonly pid: number;
   readonly hostname: string;
   readonly createdAt: string;
+  readonly lastHeartbeatAt?: string;
 }
 
 export interface FileLockInspection {
@@ -46,9 +47,11 @@ export async function withFileLock<T>(
   operation: () => Promise<T>
 ): Promise<T> {
   const lock = await acquireFileLock(lockDir, options);
+  const heartbeat = startLockHeartbeat(lockDir, lock, options);
   try {
     return await operation();
   } finally {
+    heartbeat.stop();
     await releaseFileLock(lockDir, lock.token);
   }
 }
@@ -69,7 +72,8 @@ export async function inspectFileLock(
 
   const owner = await readLockOwner(lockDir);
   const createdAt = owner ? Date.parse(owner.createdAt) : Number.NaN;
-  const ageMs = Number.isFinite(createdAt) ? Date.now() - createdAt : Date.now() - stats.mtimeMs;
+  const freshestAt = owner ? Date.parse(owner.lastHeartbeatAt ?? owner.createdAt) : createdAt;
+  const ageMs = Number.isFinite(freshestAt) ? Date.now() - freshestAt : Date.now() - stats.mtimeMs;
   return {
     exists: true,
     stale: await isLockStale(lockDir, owner, options.staleAfterMs),
@@ -92,7 +96,8 @@ async function acquireFileLock(lockDir: string, options: FileLockOptions): Promi
     token: randomUUID(),
     pid: process.pid,
     hostname: hostname(),
-    createdAt: nowIso()
+    createdAt: nowIso(),
+    lastHeartbeatAt: nowIso()
   };
 
   await mkdir(dirname(lockDir), { recursive: true });
@@ -204,7 +209,8 @@ async function acquireRecoveryLock(lockDir: string, options: FileLockOptions): P
     token: randomUUID(),
     pid: process.pid,
     hostname: hostname(),
-    createdAt: nowIso()
+    createdAt: nowIso(),
+    lastHeartbeatAt: nowIso()
   };
 
   await mkdir(dirname(lockDir), { recursive: true });
@@ -256,6 +262,31 @@ async function releaseFileLock(lockDir: string, token: string): Promise<void> {
   await rm(lockDir, { recursive: true, force: true });
 }
 
+function startLockHeartbeat(
+  lockDir: string,
+  owner: LockOwner,
+  options: FileLockOptions
+): { readonly stop: () => void } {
+  const intervalMs = Math.max(10, Math.min(10_000, Math.floor(options.staleAfterMs / 3)));
+  const interval = setInterval(() => {
+    void heartbeatLockOwner(lockDir, owner).catch(() => undefined);
+  }, intervalMs);
+  interval.unref();
+  return {
+    stop() {
+      clearInterval(interval);
+    }
+  };
+}
+
+async function heartbeatLockOwner(lockDir: string, owner: LockOwner): Promise<void> {
+  const currentOwner = await readLockOwner(lockDir).catch(() => undefined);
+  if (!currentOwner || !sameLockOwner(currentOwner, owner)) {
+    return;
+  }
+  await writeFile(ownerPath(lockDir), `${JSON.stringify({ ...currentOwner, lastHeartbeatAt: nowIso() }, null, 2)}\n`, "utf8");
+}
+
 async function readLockOwner(lockDir: string): Promise<LockOwner | undefined> {
   try {
     const parsed = await readJsonFile(ownerPath(lockDir), {
@@ -279,9 +310,9 @@ async function readLockOwner(lockDir: string): Promise<LockOwner | undefined> {
 }
 
 async function isLockStale(lockDir: string, owner: LockOwner | undefined, staleAfterMs: number): Promise<boolean> {
-  const createdAt = owner ? Date.parse(owner.createdAt) : Number.NaN;
-  if (Number.isFinite(createdAt)) {
-    return Date.now() - createdAt > staleAfterMs;
+  const freshestAt = owner ? Date.parse(owner.lastHeartbeatAt ?? owner.createdAt) : Number.NaN;
+  if (Number.isFinite(freshestAt)) {
+    return Date.now() - freshestAt > staleAfterMs;
   }
 
   const stats = await stat(lockDir).catch(() => undefined);
@@ -304,7 +335,8 @@ function isLockOwner(value: unknown): value is LockOwner {
     typeof record.token === "string" &&
     typeof record.pid === "number" &&
     typeof record.hostname === "string" &&
-    typeof record.createdAt === "string"
+    typeof record.createdAt === "string" &&
+    (record.lastHeartbeatAt === undefined || typeof record.lastHeartbeatAt === "string")
   );
 }
 

@@ -1,123 +1,167 @@
+```
+██████   ██████  ██████  ███████  █████  ██          ██     ██  ██████  ██████  ██   ██
+██   ██ ██    ██ ██   ██ ██      ██   ██ ██          ██     ██ ██    ██ ██   ██ ██  ██
+██████  ██    ██ ██████  █████   ███████ ██          ██  █  ██ ██    ██ ██████  █████
+██   ██ ██    ██ ██   ██ ██      ██   ██ ██          ██ ███ ██ ██    ██ ██   ██ ██  ██
+██████   ██████  ██   ██ ███████ ██   ██ ███████      ███ ███   ██████  ██   ██ ██   ██
+```
+
 # Boreal Work
 
-Git-native project memory and workflow control for humans and agents.
+**Git-native project memory and workflow control for humans and agents.**
 
-This repository currently contains the TypeScript runtime and the first command surface under `apps/cli`.
+Boreal turns the loose context that normally lives in chat logs, scratch notes, and people's heads into durable, queryable records that sit next to your code. Work items, the evidence that closes them, the decisions behind them, and the sources that back those decisions all become append-friendly records under a `.boreal/` runtime and a `memory/` vault — readable by a person, diffable in Git, and stable enough for an agent to coordinate against.
 
-## Artifact Policy
+> **Status:** v1 local runtime. `apps/cli` (`bwrk`) is the canonical command surface; the MCP server, daemon, and browser console are built on the same JSON-first contracts. Nothing is published to a registry yet — you run it from this checkout.
 
-This repo is a source workspace, not a checked-in runnable bundle. Do not commit `node_modules/`, `dist/`, `*.tsbuildinfo`, or `.boreal/runtime` cache artifacts. Rebuild local artifacts with:
+---
+
+## Why Boreal
+
+- **One source of truth.** Work, evidence, knowledge, and decisions are records — not Slack threads. They live in the repo, survive process restarts, and diff cleanly.
+- **Evidence-gated closure.** Work doesn't close because someone says so; it closes because a verification record points at evidence (a passing command, a test run, a note).
+- **Built for agents and humans equally.** Every command has a stable `--json` envelope. Agents claim work atomically, hand off safely, and read the same records people read.
+- **Deterministic by design.** IDs carry actor + timestamp + nonce so imports don't collide; readiness is derived and explicitly recomputable; relationship edges use deterministic natural keys.
+- **Git-native, fail-closed.** State is a file-backed store with cross-process write locking, schema-drift rejection, and a `doctor` that repairs projections and indexes.
+
+## Quick start
 
 ```bash
 pnpm install
 pnpm build
-```
 
-## Runtime Packages
-
-- `packages/core`: durable record types, deterministic IDs, canonical hashing, timestamps, errors, policies.
-- `packages/storage`: storage ports, an in-memory transactional store, and a file-backed store at `.boreal/runtime/state.json` with cross-process write locking.
-- `packages/work-engine`: work lifecycle, dependency readiness, evidence-gated closure.
-- `packages/evidence-engine`: evidence records and verification records.
-- `packages/knowledge-engine`: sources, claims, and decisions.
-- `packages/graph-engine`: deterministic relationship edges and cycle checks.
-- `packages/agent-runtime`: reservations and collision policy.
-- `packages/search`: context-pack projection helpers and deterministic hybrid local search-index ranking.
-- `packages/ui-model`: shared view models for future CLI/TUI/console surfaces.
-- `packages/engine`: outer runtime composition used by every future surface.
-
-## CLI Surface
-
-Full command contract: [docs/cli/COMMANDS.md](docs/cli/COMMANDS.md).
-CLI prompt and dashboard direction: [docs/architecture/CLI_UX.md](docs/architecture/CLI_UX.md).
-V1 closeout/adoption guide: [docs/product/V1_CLOSEOUT_ADOPTION_GUIDE.md](docs/product/V1_CLOSEOUT_ADOPTION_GUIDE.md).
-
-Run the CLI from source:
-
-```bash
+# run the CLI straight from source
 pnpm bwrk --help
-```
 
-Install the local checkout as `bwrk` while the package is still unpublished:
-
-```bash
+# or install a local `bwrk` shim while the package is unpublished
 pnpm install:local
 bwrk --help
 ```
 
-If local pnpm policy checks block script execution, run the same installer directly:
-
-```bash
-node node_modules/typescript/bin/tsc -b
-node tools/install-local-bwrk.mjs
-```
-
-The installer writes an executable shim to `~/.local/bin/bwrk` by default, or to `BOREAL_BIN_DIR` / `--bin-dir <path>` when supplied. The shim runs this checkout's built CLI, so run the command again after moving the repo. The eventual packaged binary is `bwrk` from `@boreal/cli`.
-
-Core commands:
+A first loop, end to end:
 
 ```bash
 pnpm bwrk init
 pnpm bwrk work create "Build CLI surface" --ready
-pnpm bwrk work list --status ready --label cli --limit 20
-pnpm bwrk work next --label cli
-pnpm bwrk agent guide --label cli --agent agent-a
-pnpm bwrk agent start --label cli --agent agent-a --purpose "start implementation"
-pnpm bwrk agent finish <work-id> --agent agent-a --summary "implemented and tested" --command "pnpm test" --close --reason "verified by evidence"
 pnpm bwrk work claim --label cli --agent agent-a --purpose "start implementation"
-pnpm bwrk reservation list --agent agent-a --status active
-pnpm bwrk agent status --agent agent-a
-pnpm bwrk work renew <work-id> --ttl 2h
-pnpm bwrk work release <work-id>
 pnpm bwrk evidence add <work-id> --summary "pnpm test passed" --kind test --outcome passed --command "pnpm test"
 pnpm bwrk work verify <work-id> --evidence <evidence-id>
 pnpm bwrk work close <work-id> --reason "verified by tests"
-pnpm bwrk source add --title "Design note" --uri "file://design.md" --kind document
-pnpm bwrk claim create --statement "Context packs include accepted claims" --status accepted --source <source-id>
-pnpm bwrk decision create --title "Expose context" --decision "Expose context packs through the CLI" --source <source-id>
-pnpm bwrk context rebuild
-pnpm bwrk context show <work-id>
-pnpm bwrk search index
-pnpm bwrk search query "context packs"
-pnpm bwrk context search "accepted claims"
-pnpm bwrk export json --out boreal-export.json
-pnpm bwrk export markdown --out .boreal/exports/markdown
-pnpm bwrk snapshot create --name baseline
-pnpm bwrk import json --from boreal-export.json
-pnpm bwrk doctor --fix
 ```
 
-Every command accepts `--workspace <path>` and most commands accept `--json` for automation. Without `--workspace`, commands discover the nearest parent `.boreal`; with `--workspace`, the path is treated as the exact workspace root.
+Full walkthrough → **[docs/getting-started.md](docs/getting-started.md)**.
 
-## Verified Proof Slice
+## Core concepts
 
-The current runtime test covers:
+| Concept | What it is |
+| --- | --- |
+| **Work** | The unit of tracked effort. Has status, labels, dependencies, and derived readiness. |
+| **Evidence & verification** | Proof a work item is actually done. Closure is gated on a verification record. |
+| **Sources, claims, decisions** | The knowledge layer — what's true, what backs it, and what was decided. |
+| **Context packs** | Projected, searchable bundles of the records relevant to a work item. |
+| **Reservations** | How an agent claims work without colliding with another agent. |
+| **Memory vault** | The `memory/` tree of durable, human-readable wiki/ledger/raw records. |
+| **Sprints & workflows** | Higher-level grouping and the canonical agent procedures that drive them. |
+
+Mental model in depth → **[docs/concepts.md](docs/concepts.md)**.
+
+## Surfaces
+
+Boreal is a workspace with several front ends over one runtime (`@boreal/engine`):
+
+| Surface | Package | Role |
+| --- | --- | --- |
+| **CLI** (`bwrk`) | `apps/cli` | Canonical command surface. Stable JSON, plain text, opt-in dashboard views. |
+| **MCP server** | `apps/mcp` | Project-scoped stdio MCP server for local agent clients. |
+| **Daemon** | `apps/daemon` | Observer/coordinator that watches runtime paths and reports lock/process state. |
+| **Console** | `apps/console` | Local browser dashboard over CLI JSON contracts. |
+| **TUI** *(planned)* | `apps/tui` | Terminal UI surface — scaffold only, no implementation yet. |
+
+## Documentation
+
+| Guide | Read it for |
+| --- | --- |
+| **[Documentation index](docs/README.md)** | The full map of every doc in this repo. |
+| **[Getting started](docs/getting-started.md)** | Install, initialize, and run your first work loop. |
+| **[Concepts](docs/concepts.md)** | The mental model behind work, evidence, knowledge, and memory. |
+| **[CLI commands](docs/cli/COMMANDS.md)** | The complete `bwrk` command contract (every flag, every envelope). |
+| **[Runtime architecture](docs/architecture/RUNTIME.md)** | Ports, domain operations, and the engine boundary. |
+| **[Skills & workflows](docs/architecture/SKILLS_AND_WORKFLOWS.md)** | How workflows, skills, and templates fit together. |
+| **[V1 closeout & adoption](docs/product/V1_CLOSEOUT_ADOPTION_GUIDE.md)** | Where v1 landed and how to adopt it. |
+
+## Repository layout
+
+```text
+apps/        cli, mcp, daemon, console — front ends over the runtime (tui is a planned scaffold)
+packages/    core, storage, engine, work-engine, evidence-engine,
+             knowledge-engine, graph-engine, agent-runtime, search, ui-model
+workflows/   canonical agent procedures (source of truth)
+skills/      thin adapters that route to workflows
+templates/   output shapes for workflow artifacts
+schemas/     record, event, projection, and policy schemas
+memory/      the durable memory vault (wiki, ledgers, raw, work)
+docs/        architecture, CLI, and product documentation
+```
+
+### Runtime packages
+
+- `packages/core` — durable record types, deterministic IDs, canonical hashing, timestamps, errors, policies.
+- `packages/storage` — storage ports, an in-memory transactional store, and a file-backed store at `.boreal/runtime/state.json` with cross-process write locking.
+- `packages/work-engine` — work lifecycle, dependency readiness, evidence-gated closure.
+- `packages/evidence-engine` — evidence records and verification records.
+- `packages/knowledge-engine` — sources, claims, and decisions.
+- `packages/graph-engine` — deterministic relationship edges and cycle checks.
+- `packages/agent-runtime` — reservations and collision policy.
+- `packages/search` — context-pack projection helpers and deterministic hybrid local search-index ranking.
+- `packages/ui-model` — shared view models for the CLI/TUI/console surfaces.
+- `packages/engine` — outer runtime composition every surface calls.
+
+## Development
+
+```bash
+pnpm check          # typecheck the workspace (tsc -b)
+pnpm test           # run the vitest suite
+pnpm build          # build all packages
+pnpm doctor:strict  # CI-style hardening gate (run `pnpm bwrk init` first)
+```
+
+`pnpm doctor:strict` runs `bwrk doctor --workspace . --strict --json` and fails on warnings as well as errors.
+
+### Verified proof slice
+
+The runtime test covers the full happy path end to end:
 
 ```text
 init -> create work -> add dependency -> derive readiness -> reserve
 -> record evidence -> verify -> close -> rebuild projections -> event trail
 ```
 
-The file-backed store is also tested for persistence across runtime instances, rollback on failed transactions, concurrent writer serialization, stale-lock recovery, schema drift rejection, invalid JSON rejection, and path escape rejection.
+The file-backed store is additionally tested for persistence across runtime instances, rollback on failed transactions, concurrent-writer serialization, stale-lock recovery, schema-drift rejection, invalid-JSON rejection, and path-escape rejection. The CLI integration test covers init fail-closed behavior, workspace resolution, idempotent concurrent init, bounded/filtered listing, atomic claim handoffs, reservation lifecycle, the full create→verify→close path, knowledge commands, search, export/import, recovery snapshots, projection/search-index repair through `doctor --fix`, and stale-lock repair through `lock break --stale-only`.
 
-The CLI integration test covers init fail-closed behavior, exact versus discovered workspace resolution, idempotent concurrent init, bounded/filtered listing, next-ready work, atomic claim handoffs, safe agent guide/start/finish handoffs, reservation visibility/renewal/release/expiration repair, agent coordination status, create/ready/list/evidence/verify/close, source/claim/decision/context commands, fresh-index search, JSON and Markdown export, JSON import, recovery snapshots, projection and search-index repair through `doctor --fix`, and explicit stale lock repair through `lock break --stale-only`.
+The agent E2E fixture in [docs/architecture/AGENT_E2E_FIXTURE.md](docs/architecture/AGENT_E2E_FIXTURE.md) runs the ordered local path from `init --setup-memory` through raw-source reconciliation, sprint launch, agent claim/finish, `sync refresh`, strict doctor, and JSON/Markdown/ledger exports:
 
-The agent E2E fixture in [docs/architecture/AGENT_E2E_FIXTURE.md](docs/architecture/AGENT_E2E_FIXTURE.md) runs the ordered local project path from `init --setup-memory` through raw-source reconciliation, sprint launch, agent claim/finish, `sync refresh`, strict doctor, and JSON/Markdown/ledger exports. Run it with `pnpm test -- tests/runtime/agent-e2e.test.ts`.
+```bash
+pnpm test -- tests/runtime/agent-e2e.test.ts
+```
 
-Several runtime invariants intentionally follow the Beads methodology while staying TypeScript-native:
+### Runtime invariants
+
+Several invariants intentionally follow the Beads methodology while staying TypeScript-native:
 
 - Work IDs include actor, timestamp, and nonce inputs so same-title imports do not collide.
 - Event IDs use random entropy instead of per-process sequence counters.
 - Dependency edges keep deterministic natural-key IDs.
 - Derived readiness has an explicit recompute/repair operation.
 
-Run the checks:
+## Artifact policy
+
+This repo is a source workspace, not a checked-in runnable bundle. Do **not** commit `node_modules/`, `dist/`, `*.tsbuildinfo`, or `.boreal/runtime` cache artifacts. Rebuild local artifacts with:
 
 ```bash
-pnpm check
-pnpm test
-pnpm doctor:strict
+pnpm install
 pnpm build
 ```
 
-`pnpm doctor:strict` runs `bwrk doctor --workspace . --strict --json` as a CI-style hardening gate. It fails on warnings as well as errors, so run `pnpm bwrk init` first when a fresh workspace has not been initialized.
+## Conventions
+
+Every command accepts `--workspace <path>` and most accept `--json` for automation. Without `--workspace`, commands discover the nearest parent `.boreal`; with `--workspace`, the path is treated as the exact workspace root. See the [CLI commands reference](docs/cli/COMMANDS.md) for the global flag set, output modes, and JSON envelope contract.

@@ -116,6 +116,7 @@ describe("boreal runtime proof slice", () => {
         purpose: "conflicting reservation"
       })
     ).rejects.toMatchObject({ code: "BOREAL_CONFLICT" } satisfies Partial<BorealError>);
+    await runtime.releaseWorkReservation(feature.meta.id);
 
     const featureEvidence = await runtime.recordEvidence({
       subjectId: feature.meta.id,
@@ -394,6 +395,53 @@ describe("boreal runtime proof slice", () => {
     );
   });
 
+  it("refuses direct close while work has an active reservation and cleans up expired reservations", async () => {
+    let current = new Date("2026-01-01T00:00:00.000Z");
+    const store = new InMemoryBorealStore();
+    const runtime = createBorealRuntime({
+      store,
+      actor,
+      clock: () => current
+    });
+    const work = await runtime.createWork({ title: "Direct close reservation guard" });
+    await runtime.markReady(work.meta.id);
+    await runtime.reserveWork({
+      workId: work.meta.id,
+      agentId: "agent-a",
+      expiresAt: "2026-01-01T00:10:00.000Z" as IsoTimestamp
+    });
+    const evidence = await runtime.recordEvidence({
+      subjectId: work.meta.id,
+      subjectType: "work",
+      kind: "test",
+      summary: "close guard evidence passed",
+      outcome: "passed"
+    });
+    await runtime.verifyWork({ workId: work.meta.id, verdict: "passed", evidenceIds: [evidence.meta.id] });
+
+    await expect(runtime.closeWork({ workId: work.meta.id, reason: "direct close while active" })).rejects.toMatchObject({
+      code: "BOREAL_POLICY_VIOLATION"
+    } satisfies Partial<BorealError>);
+    await expect(runtime.getWorkView(work.meta.id)).resolves.toMatchObject({
+      status: "verified",
+      activeReservationId: expect.any(String)
+    });
+
+    current = new Date("2026-01-01T00:11:00.000Z");
+    const closed = await runtime.closeWork({ workId: work.meta.id, reason: "expired reservation no longer owns close" });
+    expect(closed.status).toBe("closed");
+    await expect(runtime.getWorkView(work.meta.id)).resolves.toMatchObject({
+      status: "closed",
+      activeReservationId: undefined
+    });
+    const reservations = await store.read((reader) => reader.listReservationsForWork(work.meta.id));
+    expect(reservations).toEqual([expect.objectContaining({ status: "expired" })]);
+    const events = await runtime.listEvents();
+    expect(events.map((event) => event.type)).toEqual(
+      expect.arrayContaining(["work.reservation_expired", "work.closed"])
+    );
+  });
+
   it("finishes reserved work atomically from evidence through reservation release", async () => {
     const store = new InMemoryBorealStore();
     const runtime = createBorealRuntime({ store, actor });
@@ -491,6 +539,63 @@ describe("boreal runtime proof slice", () => {
     });
 
     expect(failedVerification.verdict).toBe("failed");
+  });
+
+  it("rejects verification evidence from another subject", async () => {
+    const runtime = createBorealRuntime({ actor });
+    const target = await runtime.createWork({ title: "Evidence subject target" });
+    const other = await runtime.createWork({ title: "Evidence subject other" });
+    const otherEvidence = await runtime.recordEvidence({
+      subjectId: other.meta.id,
+      subjectType: "work",
+      kind: "test",
+      summary: "other work evidence passed",
+      outcome: "passed"
+    });
+
+    await expect(
+      runtime.verifyWork({
+        workId: target.meta.id,
+        verdict: "passed",
+        evidenceIds: [otherEvidence.meta.id]
+      })
+    ).rejects.toMatchObject({
+      code: "BOREAL_POLICY_VIOLATION",
+      details: {
+        mismatchedEvidence: [
+          expect.objectContaining({
+            evidenceId: otherEvidence.meta.id,
+            subjectId: other.meta.id,
+            subjectType: "work"
+          })
+        ]
+      }
+    } satisfies Partial<BorealError>);
+  });
+
+  it("redacts likely secrets before persisting evidence commands", async () => {
+    const runtime = createBorealRuntime({ actor });
+    const work = await runtime.createWork({ title: "Evidence redaction target" });
+    const evidence = await runtime.recordEvidence({
+      subjectId: work.meta.id,
+      subjectType: "work",
+      kind: "command",
+      summary: "secret-bearing evidence command",
+      outcome: "passed",
+      command:
+        "API_TOKEN=abc123 bwrk evidence add --token token123 --password=pw123 curl -H 'Authorization: Bearer bearer123' 'https://example.test/check?api_key=query123'"
+    });
+
+    expect(evidence.command).toContain("API_TOKEN=<redacted>");
+    expect(evidence.command).toContain("--token <redacted>");
+    expect(evidence.command).toContain("--password=<redacted>");
+    expect(evidence.command).toContain("Bearer <redacted>");
+    expect(evidence.command).toContain("api_key=<redacted>");
+    expect(evidence.command).not.toContain("abc123");
+    expect(evidence.command).not.toContain("token123");
+    expect(evidence.command).not.toContain("pw123");
+    expect(evidence.command).not.toContain("bearer123");
+    expect(evidence.command).not.toContain("query123");
   });
 
   it("treats verified dependencies as resolved during readiness recompute", async () => {

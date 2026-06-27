@@ -1,7 +1,7 @@
-import { spawn } from "node:child_process";
 import { readdir, readFile, stat } from "node:fs/promises";
 import { basename, extname, join, relative, resolve } from "node:path";
 
+import { runBoundedProcess } from "@boreal/core";
 import {
   buildDashboardHealthView,
   buildGlobalActivityView,
@@ -1504,33 +1504,26 @@ async function runNodeCli(input: {
   readonly cliCommand: string;
   readonly args: readonly string[];
 }): Promise<string> {
-  return new Promise((resolvePromise, reject) => {
-    const executable = input.cliPath ? process.execPath : input.cliCommand;
-    const args = input.cliPath ? [input.cliPath, ...input.args] : input.args;
-    const child = spawn(executable, args, {
-      cwd: input.workspaceRoot,
-      stdio: ["ignore", "pipe", "pipe"]
-    });
-    const stdout: Buffer[] = [];
-    const stderr: Buffer[] = [];
-    child.stdout.on("data", (chunk: Buffer) => stdout.push(chunk));
-    child.stderr.on("data", (chunk: Buffer) => stderr.push(chunk));
-    child.on("error", reject);
-    child.on("close", (code) => {
-      const out = Buffer.concat(stdout).toString("utf8");
-      const err = Buffer.concat(stderr).toString("utf8");
-      if (code === 0) {
-        resolvePromise(out);
-        return;
-      }
-      const jsonPayload = firstJsonPayload(out, err);
-      if (jsonPayload) {
-        resolvePromise(jsonPayload);
-        return;
-      }
-      reject(new Error(err.trim() || out.trim() || `bwrk exited with ${code ?? "unknown"}`));
-    });
+  const executable = input.cliPath ? process.execPath : input.cliCommand;
+  const args = input.cliPath ? [input.cliPath, ...input.args] : input.args;
+  const result = await runBoundedProcess({
+    command: executable,
+    args,
+    cwd: input.workspaceRoot,
+    timeoutMs: 60_000,
+    stdoutMaxBytes: 4 * 1024 * 1024,
+    stderrMaxBytes: 1024 * 1024
   });
+  const out = result.stdout.text;
+  const err = result.stderr.text;
+  if (result.exitCode === 0) {
+    return out;
+  }
+  const jsonPayload = firstJsonPayload(out, err);
+  if (jsonPayload) {
+    return jsonPayload;
+  }
+  throw new Error(err.trim() || out.trim() || `bwrk exited with ${result.exitCode ?? "unknown"}`);
 }
 
 function firstJsonPayload(...candidates: readonly string[]): string | undefined {

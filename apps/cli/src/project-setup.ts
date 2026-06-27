@@ -211,6 +211,12 @@ const PROJECT_GITIGNORE_PATTERNS = [
   "dump/"
 ] as const;
 
+const BOREAL_WORK_BANNER = `██████   ██████  ██████  ███████  █████  ██          ██     ██  ██████  ██████  ██   ██
+██   ██ ██    ██ ██   ██ ██      ██   ██ ██          ██     ██ ██    ██ ██   ██ ██  ██
+██████  ██    ██ ██████  █████   ███████ ██          ██  █  ██ ██    ██ ██████  █████
+██   ██ ██    ██ ██   ██ ██      ██   ██ ██          ██ ███ ██ ██    ██ ██   ██ ██  ██
+██████   ██████  ██   ██ ███████ ██   ██ ███████      ███ ███   ██████  ██   ██ ██   ██`;
+
 const MEMORY_LAYOUT_OPTIONS: readonly CliSelectOption<MemoryLayout>[] = [
   {
     value: "in-repo",
@@ -460,7 +466,7 @@ async function promptProjectSetupInput(context: CliContext, args: ParsedArgs): P
   }
   const defaults = projectSetupInputFromArgs(context, args);
   return withPromptSession({ input: process.stdin, output: process.stdout }, async (prompt) => {
-    prompt.writeIntro("Boreal project setup", "Use arrow keys to choose options. Press Enter to accept.");
+    prompt.writeIntro(BOREAL_WORK_BANNER, "Boreal project setup\nUse arrow keys to choose options. Press Enter to accept.");
     const projectRoot = resolveUserPath(
       context.workspaceRoot,
       await prompt.text("Project root", defaults.projectRoot)

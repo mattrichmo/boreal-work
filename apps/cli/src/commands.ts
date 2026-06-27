@@ -1,3 +1,4 @@
+import { spawn } from "node:child_process";
 import { mkdir } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
 
@@ -16,6 +17,7 @@ import {
   normalizeSearchQuery,
   nowIso,
   randomId,
+  runtimeSnapshotSchemaIssues,
   touchRecord,
   withContentHash,
   type ActorRef,
@@ -65,6 +67,7 @@ import {
   rebuildSQLiteCache,
   writeTextFileAtomic,
   type BorealReader,
+  type BorealWriter,
   type SQLiteCacheRebuildResult
 } from "@boreal/storage";
 import {
@@ -87,6 +90,7 @@ import {
   type WorkItemView
 } from "@boreal/ui-model";
 import { deriveReadinessStatus } from "@boreal/work-engine";
+import { listenConsole } from "@boreal/console/server";
 
 import { flagValue, flagValues, hasFlag, requiredFlag, type ParsedArgs } from "./args.js";
 import {
@@ -96,6 +100,7 @@ import {
   findCommandDefinition,
   registryValueFlagNames,
   serializeCommandDefinition,
+  validateCommandBehaviorMetadata,
   validateCommandFlags,
   type CommandDefinition
 } from "./command-registry.js";
@@ -684,6 +689,18 @@ export async function runCommand(args: ParsedArgs, output: CliOutput, cwd: strin
       case "workflows":
         result = await workflowsCommand(action, rest, args, commandOutput, json);
         break;
+      case "start":
+        result = await agentCommand("start", rest, context, args, commandOutput, json);
+        break;
+      case "done":
+        result = await doneAliasCommand(context, args, commandOutput, json);
+        break;
+      case "pause":
+        result = await pauseAliasCommand(context, args, commandOutput, json);
+        break;
+      case "status":
+        result = await primeCommand(context, args, commandOutput, json);
+        break;
       case "install":
         result = await installCommand(action, context, args, commandOutput, json);
         break;
@@ -734,6 +751,15 @@ export async function runCommand(args: ParsedArgs, output: CliOutput, cwd: strin
         break;
       case "doctor":
         result = await doctorCommand(action, context, args, commandOutput, json);
+        break;
+      case "schema":
+        result = await schemaCommand(action, context, commandOutput, json);
+        break;
+      case "docs":
+        result = await docsCommand(action, commandOutput, json);
+        break;
+      case "gate":
+        result = await gateCommand(action, context, args, commandOutput, json);
         break;
       case "lock":
         result = await lockCommand(action, context, args, commandOutput, json);
@@ -1732,6 +1758,89 @@ async function agentFinishCommand(
   return { exitCode: 0 };
 }
 
+async function doneAliasCommand(
+  context: CliContext,
+  args: ParsedArgs,
+  output: CliOutput,
+  json: boolean
+): Promise<CommandResult> {
+  return finishCurrentReservationCommand({
+    context,
+    args,
+    output,
+    json,
+    close: true,
+    release: false,
+    verdict: "passed"
+  });
+}
+
+async function pauseAliasCommand(
+  context: CliContext,
+  args: ParsedArgs,
+  output: CliOutput,
+  json: boolean
+): Promise<CommandResult> {
+  return finishCurrentReservationCommand({
+    context,
+    args,
+    output,
+    json,
+    close: false,
+    release: true,
+    verdict: parseVerdict(flagValue(args, "verdict") ?? "failed")
+  });
+}
+
+async function finishCurrentReservationCommand(input: {
+  readonly context: CliContext;
+  readonly args: ParsedArgs;
+  readonly output: CliOutput;
+  readonly json: boolean;
+  readonly close: boolean;
+  readonly release: boolean;
+  readonly verdict: VerificationVerdict;
+}): Promise<CommandResult> {
+  const agentId = agentIdFromArgs(input.args, input.context.actor.id);
+  const workId = await resolveWorkId(input.context, "current", { agentId });
+  const finished = await input.context.runtime.finishReservedWork({
+    workId,
+    agentId,
+    evidence: {
+      kind: parseEvidenceKind(flagValue(input.args, "kind")),
+      summary: requiredFlag(input.args, "summary"),
+      outcome: parseFinishOutcome(flagValue(input.args, "outcome"), input.verdict),
+      command: flagValue(input.args, "command"),
+      uri: flagValue(input.args, "uri")
+    },
+    verification: {
+      verdict: input.verdict,
+      notes: flagValue(input.args, "notes")
+    },
+    close: input.close ? { reason: requiredFlag(input.args, "reason") } : undefined,
+    release: input.release
+  });
+
+  input.output.write(
+    formatRecord(
+      {
+        finished: true,
+        action: input.close ? "verified_and_closed" : "verified_and_released",
+        agentId,
+        work: await input.context.runtime.getWorkView(workId),
+        evidence: finished.evidence,
+        verification: finished.verification,
+        reservation: finished.reservation,
+        closedWork: finished.closedWork,
+        release: finished.release,
+        status: await buildAgentStatus(input.context, agentId, [])
+      } satisfies AgentFinishResult,
+      input.json
+    )
+  );
+  return { exitCode: 0 };
+}
+
 async function reservationCommand(
   action: string | undefined,
   context: CliContext,
@@ -2055,9 +2164,194 @@ async function workCommand(
       output.write(formatRecord(work, json));
       return { exitCode: 0 };
     }
+    case "edit": {
+      const result = await editWorkCommand(context, await resolveWorkId(context, requiredPositional(rest, 0, "work reference")), args);
+      output.write(formatRecord(result, json));
+      return { exitCode: 0 };
+    }
+    case "cancel": {
+      const result = await cancelWorkCommand(
+        context,
+        await resolveWorkId(context, requiredPositional(rest, 0, "work reference")),
+        requiredFlag(args, "reason")
+      );
+      output.write(formatRecord(result, json));
+      return { exitCode: 0 };
+    }
+    case "reopen": {
+      const result = await reopenWorkCommand(context, await resolveWorkId(context, requiredPositional(rest, 0, "work reference")), args);
+      output.write(formatRecord(result, json));
+      return { exitCode: 0 };
+    }
+    case "split": {
+      const parentId = await resolveWorkId(context, requiredPositional(rest, 0, "work reference"));
+      const parent = await context.store.read(async (reader) => requireCliWork(reader, parentId));
+      const child = await context.runtime.createWork({
+        title: requiredFlag(args, "title"),
+        description: flagValue(args, "description"),
+        kind: "task",
+        priority: parsePriority(flagValue(args, "priority")) ?? parent.priority,
+        acceptanceCriteria: normalizedNonEmptyStrings(flagValues(args, "acceptance")),
+        labels: uniqueStrings([...parent.labels, ...labelsFromArgs(args)]),
+        parentId: parent.meta.id,
+        sourceRefs: parent.meta.sourceRefs,
+        ready: hasFlag(args, "ready")
+      });
+      const blockedParent = await context.runtime.addBlockingDependency({
+        blockedWorkId: parent.meta.id,
+        blockingWorkId: child.meta.id
+      });
+      output.write(formatRecord({ parent, child, blockedParent }, json));
+      return { exitCode: 0 };
+    }
     default:
       throw new BorealError("BOREAL_INVALID_INPUT", `Unknown work command: ${action ?? ""}`);
   }
+}
+
+async function editWorkCommand(context: CliContext, workId: WorkId, args: ParsedArgs) {
+  const title = flagValue(args, "title");
+  const description = flagValue(args, "description");
+  const kind = parseWorkKind(flagValue(args, "kind"));
+  const priority = parsePriority(flagValue(args, "priority"));
+  const labels = flagValues(args, "label");
+  const acceptanceCriteria = flagValues(args, "acceptance");
+  if (
+    title === undefined &&
+    description === undefined &&
+    kind === undefined &&
+    priority === undefined &&
+    labels.length === 0 &&
+    acceptanceCriteria.length === 0
+  ) {
+    throw new BorealError("BOREAL_INVALID_INPUT", "work edit requires at least one mutable field flag");
+  }
+
+  const current = nowIso();
+  return context.store.write(async (writer) => {
+    const work = await requireCliWork(writer, workId);
+    const nextLabels = labels.length > 0 ? labelsFromArgs(args) : work.labels;
+    const updated = touchRecord(
+      {
+        ...work,
+        kind: kind ?? work.kind,
+        title: title ?? work.title,
+        description: description ?? work.description,
+        priority: priority ?? work.priority,
+        acceptanceCriteria: acceptanceCriteria.length > 0 ? normalizedNonEmptyStrings(acceptanceCriteria) : work.acceptanceCriteria,
+        labels: nextLabels,
+        meta: {
+          ...work.meta,
+          tags: nextLabels
+        }
+      },
+      current,
+      context.actor
+    );
+    await writer.putWorkItem(updated);
+    const event = await appendCliEvent(writer, context, "work.edited", updated.meta.id, "work", {
+      changedFields: workEditChangedFields(work, updated)
+    }, current);
+    return { work: updated, event };
+  });
+}
+
+async function cancelWorkCommand(context: CliContext, workId: WorkId, reason: string) {
+  const current = nowIso();
+  const result = await context.store.write(async (writer) => {
+    const work = await requireCliWork(writer, workId);
+    if (work.status === "closed" || work.status === "cancelled") {
+      throw new BorealError("BOREAL_INVALID_INPUT", "Only open work can be cancelled", {
+        workId,
+        status: work.status
+      });
+    }
+    const activeReservations = await activeNonExpiredReservationsForWork(writer, workId, current);
+    if (activeReservations.length > 0) {
+      throw new BorealError("BOREAL_POLICY_VIOLATION", "Cannot cancel work with an active non-expired reservation", {
+        workId,
+        reservationIds: activeReservations.map((reservation) => reservation.meta.id)
+      });
+    }
+    const expiredReservationIds = await expireStaleReservationsForWork(writer, workId, current, context.actor);
+    const updated = touchRecord(
+      {
+        ...work,
+        status: "cancelled" as const,
+        reservationId: undefined,
+        closedAt: current,
+        closedReason: reason.trim()
+      },
+      current,
+      context.actor
+    ) satisfies WorkItem;
+    await writer.putWorkItem(updated);
+    const event = await appendCliEvent(writer, context, "work.cancelled", updated.meta.id, "work", {
+      reason,
+      expiredReservationIds
+    }, current);
+    return { work: updated, event, expiredReservationIds };
+  });
+  await context.runtime.recomputeReadiness();
+  return result;
+}
+
+async function reopenWorkCommand(context: CliContext, workId: WorkId, args: ParsedArgs) {
+  const current = nowIso();
+  const ready = hasFlag(args, "ready");
+  const reason = flagValue(args, "reason");
+  const result = await context.store.write(async (writer) => {
+    const work = await requireCliWork(writer, workId);
+    if (work.status !== "closed" && work.status !== "cancelled") {
+      throw new BorealError("BOREAL_INVALID_INPUT", "Only closed or cancelled work can be reopened", {
+        workId,
+        status: work.status
+      });
+    }
+    const expiredReservationIds = await expireStaleReservationsForWork(writer, workId, current, context.actor);
+    const [workItems, graphEdges] = await Promise.all([writer.listWorkItems(), writer.listGraphEdges()]);
+    const workById = new Map(workItems.map((item) => [item.meta.id, item]));
+    const dependencyIds = dependencyIdsByWorkFromGraph(workItems, graphEdges).get(work.meta.id) ?? work.dependencyIds;
+    const dependencies = dependencyIds.map((dependencyId) => workById.get(dependencyId)).filter(isWorkItem);
+    const reopenedBase = {
+      ...work,
+      status: "draft" as const,
+      dependencyIds,
+      reservationId: undefined,
+      closedAt: undefined,
+      closedReason: undefined
+    };
+    const updated = touchRecord(
+      {
+        ...reopenedBase,
+        status: ready ? deriveReadinessStatus(reopenedBase, dependencies) : "draft"
+      },
+      current,
+      context.actor
+    );
+    await writer.putWorkItem(updated);
+    const event = await appendCliEvent(writer, context, "work.reopened", updated.meta.id, "work", {
+      reason,
+      status: updated.status,
+      expiredReservationIds
+    }, current);
+    return { work: updated, event, expiredReservationIds };
+  });
+  if (ready) {
+    await context.runtime.recomputeReadiness();
+  }
+  return result;
+}
+
+function workEditChangedFields(before: WorkItem, after: WorkItem): readonly string[] {
+  const changed: string[] = [];
+  if (before.title !== after.title) changed.push("title");
+  if (before.description !== after.description) changed.push("description");
+  if (before.kind !== after.kind) changed.push("kind");
+  if (before.priority !== after.priority) changed.push("priority");
+  if (!arraysEqual(before.labels, after.labels)) changed.push("labels");
+  if (!arraysEqual(before.acceptanceCriteria, after.acceptanceCriteria)) changed.push("acceptanceCriteria");
+  return changed;
 }
 
 async function depCommand(
@@ -2211,9 +2505,52 @@ async function claimCommand(
       output.write(formatRecord(claim, json));
       return { exitCode: 0 };
     }
+    case "review": {
+      const result = await reviewClaimCommand(context, asClaimId(requiredPositional(rest, 0, "claim id")), args);
+      output.write(formatRecord(result, json));
+      return { exitCode: 0 };
+    }
     default:
       throw new BorealError("BOREAL_INVALID_INPUT", `Unknown claim command: ${action ?? ""}`);
   }
+}
+
+async function reviewClaimCommand(context: CliContext, claimId: ClaimId, args: ParsedArgs) {
+  const status = parseClaimStatus(requiredFlag(args, "status"));
+  if (!status) {
+    throw new BorealError("BOREAL_INVALID_INPUT", "claim review requires --status");
+  }
+  const sourceIds = flagValues(args, "source").map(asSourceId);
+  const evidenceIds = flagValues(args, "evidence").map(asEvidenceId);
+  const wikiPageIds = await resolveWikiPageIds(context, flagValues(args, "wiki"));
+  const notes = flagValue(args, "notes");
+  const current = nowIso();
+
+  return context.store.write(async (writer) => {
+    const claim = await requireCliClaim(writer, claimId);
+    await requireCliKnowledgeSources(writer, sourceIds);
+    await requireCliEvidenceRecords(writer, evidenceIds);
+    const updated = touchRecord(
+      {
+        ...claim,
+        status,
+        sourceIds: uniqueValues([...claim.sourceIds, ...sourceIds]),
+        evidenceIds: uniqueValues([...claim.evidenceIds, ...evidenceIds]),
+        wikiPageIds: uniqueStrings([...(claim.wikiPageIds ?? []), ...wikiPageIds])
+      },
+      current,
+      context.actor
+    );
+    await writer.putClaim(updated);
+    const event = await appendCliEvent(writer, context, "knowledge.claim_reviewed", updated.meta.id, "claim", {
+      status,
+      addedSourceIds: sourceIds,
+      addedEvidenceIds: evidenceIds,
+      addedWikiPageIds: wikiPageIds,
+      notes
+    }, current);
+    return { claim: updated, event };
+  });
 }
 
 async function decisionCommand(
@@ -2257,9 +2594,58 @@ async function decisionCommand(
       output.write(formatRecord(decision, json));
       return { exitCode: 0 };
     }
+    case "supersede": {
+      const result = await supersedeDecisionCommand(context, asDecisionId(requiredPositional(rest, 0, "decision id")), args);
+      output.write(formatRecord(result, json));
+      return { exitCode: 0 };
+    }
     default:
       throw new BorealError("BOREAL_INVALID_INPUT", `Unknown decision command: ${action ?? ""}`);
   }
+}
+
+async function supersedeDecisionCommand(context: CliContext, decisionId: DecisionId, args: ParsedArgs) {
+  const previous = await context.runtime.getDecision(decisionId);
+  if (previous.status === "superseded") {
+    throw new BorealError("BOREAL_INVALID_INPUT", "Decision is already superseded", { decisionId });
+  }
+  const title = flagValue(args, "title") ?? previous.title;
+  const decisionText = requiredFlag(args, "decision");
+  if (title === previous.title && decisionText.trim() === previous.decision) {
+    throw new BorealError("BOREAL_INVALID_INPUT", "Replacement decision must differ from the decision it supersedes", {
+      decisionId
+    });
+  }
+  const sourceIds = uniqueValues([...previous.sourceIds, ...flagValues(args, "source").map(asSourceId)]);
+  const wikiPageIds = uniqueStrings([...(previous.wikiPageIds ?? []), ...(await resolveWikiPageIds(context, flagValues(args, "wiki")))]);
+  const replacement = await context.runtime.createDecision({
+    title,
+    context: flagValue(args, "context") ?? previous.context,
+    decision: decisionText,
+    consequences: flagValues(args, "consequence").length > 0 ? normalizedNonEmptyStrings(flagValues(args, "consequence")) : previous.consequences,
+    sourceIds,
+    wikiPageIds,
+    status: "accepted"
+  });
+  if (replacement.meta.id === previous.meta.id) {
+    throw new BorealError("BOREAL_CONFLICT", "Replacement decision resolved to the same record id", {
+      decisionId,
+      replacementDecisionId: replacement.meta.id
+    });
+  }
+
+  const current = nowIso();
+  const superseded = await context.store.write(async (writer) => {
+    const latest = await requireCliDecision(writer, decisionId);
+    const updated = touchRecord({ ...latest, status: "superseded" as const }, current, context.actor) satisfies DecisionRecord;
+    await writer.putDecision(updated);
+    await appendCliEvent(writer, context, "knowledge.decision_superseded", updated.meta.id, "decision", {
+      replacementDecisionId: replacement.meta.id,
+      reason: flagValue(args, "reason")
+    }, current);
+    return updated;
+  });
+  return { superseded, decision: replacement };
 }
 
 async function contextCommand(
@@ -2395,37 +2781,37 @@ async function syncCommand(
       return { exitCode: status.ok ? 0 : 1 };
     }
     case "refresh": {
-      const views = await rebuildProjectionsRespectingTombstones(context);
-      const searchIndex = await writeSearchIndex(context);
-      const ledgers = await exportLedgers(context, undefined);
-      const cacheDocument = await buildExportDocument(context);
-      const sqliteCache = await rebuildSQLiteCache({
-        rootDir: context.workspaceRoot,
-        snapshot: cacheDocument.state,
-        sourceContentHash: cacheDocument.contentHash
-      });
-      const status = await buildSyncStatus(context);
-      output.write(
-        formatRecord(
-          {
-            refreshed: true,
-            refreshOk: true,
-            postRefreshStatusOk: status.ok,
-            exitReason: status.ok ? "ok" : "post_refresh_status_unhealthy",
-            contextViews: views.length,
-            searchIndex,
-            ledgers,
-            sqliteCache,
-            status
-          } satisfies SyncRefreshResult,
-          json
-        )
-      );
-      return { exitCode: status.ok ? 0 : 1 };
+      const result = await buildSyncRefreshResult(context);
+      output.write(formatRecord(result, json));
+      return { exitCode: result.postRefreshStatusOk ? 0 : 1 };
     }
     default:
       throw new BorealError("BOREAL_INVALID_INPUT", `Unknown sync command: ${action ?? ""}`);
   }
+}
+
+async function buildSyncRefreshResult(context: CliContext): Promise<SyncRefreshResult> {
+  const views = await rebuildProjectionsRespectingTombstones(context);
+  const searchIndex = await writeSearchIndex(context);
+  const ledgers = await exportLedgers(context, undefined);
+  const cacheDocument = await buildExportDocument(context);
+  const sqliteCache = await rebuildSQLiteCache({
+    rootDir: context.workspaceRoot,
+    snapshot: cacheDocument.state,
+    sourceContentHash: cacheDocument.contentHash
+  });
+  const status = await buildSyncStatus(context);
+  return {
+    refreshed: true,
+    refreshOk: true,
+    postRefreshStatusOk: status.ok,
+    exitReason: status.ok ? "ok" : "post_refresh_status_unhealthy",
+    contextViews: views.length,
+    searchIndex,
+    ledgers,
+    sqliteCache,
+    status
+  };
 }
 
 async function vaultCommand(
@@ -2934,6 +3320,135 @@ async function doctorCommand(
   return { exitCode: result.ok ? 0 : 1 };
 }
 
+async function schemaCommand(
+  action: string | undefined,
+  context: CliContext,
+  output: CliOutput,
+  json: boolean
+): Promise<CommandResult> {
+  if (action !== "validate") {
+    throw new BorealError("BOREAL_INVALID_INPUT", `Unknown schema command: ${action ?? ""}`);
+  }
+  const result = await schemaValidateResult(context);
+  output.write(formatRecord(result, json));
+  return { exitCode: result.ok ? 0 : 1 };
+}
+
+async function docsCommand(
+  action: string | undefined,
+  output: CliOutput,
+  json: boolean
+): Promise<CommandResult> {
+  if (action !== "check") {
+    throw new BorealError("BOREAL_INVALID_INPUT", `Unknown docs command: ${action ?? ""}`);
+  }
+  const result = await docsCheckResult();
+  output.write(formatRecord(result, json));
+  return { exitCode: result.ok ? 0 : 1 };
+}
+
+async function gateCommand(
+  action: string | undefined,
+  context: CliContext,
+  args: ParsedArgs,
+  output: CliOutput,
+  json: boolean
+): Promise<CommandResult> {
+  if (action !== undefined && action !== "closeout") {
+    throw new BorealError("BOREAL_INVALID_INPUT", `Unknown gate command: ${action}`);
+  }
+  const result = await gateCloseoutResult(context, args);
+  output.write(formatRecord(result, json));
+  return { exitCode: result.ok ? 0 : 1 };
+}
+
+async function schemaValidateResult(context: CliContext) {
+  const generatedAt = nowIso();
+  const document = await buildExportDocument(context);
+  const recordIssues = runtimeSnapshotSchemaIssues(document.state);
+  const commandMetadata = commandMetadataValidationResult();
+  return {
+    schemaVersion: "boreal.cli.schema.validate.v1",
+    generatedAt,
+    workspaceRoot: context.workspaceRoot,
+    ok: recordIssues.length === 0 && commandMetadata.ok,
+    recordCounts: document.recordCounts,
+    recordIssueCount: recordIssues.length,
+    recordIssues,
+    commandMetadata
+  };
+}
+
+async function docsCheckResult() {
+  const generatedAt = nowIso();
+  const assets = await inspectWorkflowAssets();
+  const commandMetadata = commandMetadataValidationResult();
+  return {
+    schemaVersion: "boreal.cli.docs.check.v1",
+    generatedAt,
+    ok: assets.ok && commandMetadata.ok,
+    workflowCount: assets.workflowCount,
+    templateCount: assets.templateCount,
+    skillCount: assets.skillCount,
+    assetIssueCount: assets.issues.length,
+    assetIssues: assets.issues,
+    commandMetadata
+  };
+}
+
+async function gateCloseoutResult(context: CliContext, args: ParsedArgs) {
+  const generatedAt = nowIso();
+  const sync = await buildSyncRefreshResult(context);
+  const doctor = await runDoctor(context, false, hasFlag(args, "strict"));
+  const schema = await schemaValidateResult(context);
+  const docs = await docsCheckResult();
+  const ok = sync.postRefreshStatusOk && doctor.ok && schema.ok && docs.ok;
+  return {
+    schemaVersion: "boreal.cli.gate.closeout.v1",
+    generatedAt,
+    workspaceRoot: context.workspaceRoot,
+    strict: hasFlag(args, "strict"),
+    ok,
+    sync: {
+      refreshOk: sync.refreshOk,
+      postRefreshStatusOk: sync.postRefreshStatusOk,
+      exitReason: sync.exitReason,
+      contextViews: sync.contextViews,
+      ledgersOk: sync.status.ledgers.ok,
+      searchIndexOk: sync.status.searchIndex.ok,
+      sqliteCacheOk: !sync.sqliteCache.error,
+      statusOk: sync.status.ok,
+      recommendedActions: sync.status.recommendedActions
+    },
+    doctor: {
+      ok: doctor.ok,
+      fixed: doctor.fixed,
+      diagnosticCount: doctor.diagnostics.length,
+      errors: doctor.diagnostics.filter((diagnostic) => diagnostic.severity === "error").length,
+      warnings: doctor.diagnostics.filter((diagnostic) => diagnostic.severity === "warning").length,
+      fixedCount: doctor.diagnostics.filter((diagnostic) => diagnostic.severity === "fixed").length,
+      diagnostics: doctor.diagnostics
+    },
+    schema,
+    docs
+  };
+}
+
+function commandMetadataValidationResult() {
+  try {
+    validateCommandBehaviorMetadata();
+    return {
+      ok: true,
+      error: undefined
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      error: errorDetails(error)
+    };
+  }
+}
+
 function formatSkillDoctor(result: Awaited<ReturnType<typeof inspectWorkflowAssets>>): string {
   return [
     `[${result.ok ? "ok" : "error"}] workflow assets`,
@@ -3076,6 +3591,11 @@ async function dashboardCommand(
   json: boolean
 ): Promise<CommandResult> {
   switch (action) {
+    case undefined:
+      if (json) {
+        throw new BorealError("BOREAL_INVALID_INPUT", "bwrk dashboard serves the interactive console and does not support --json. Use bwrk dashboard global --json for dashboard data.");
+      }
+      return serveDashboardCommand(context, args, output);
     case "global": {
       const result = await buildGlobalDashboardResult(context, args);
       output.write(json ? formatRecord(result, true) : formatGlobalDashboardSummary(result));
@@ -3084,6 +3604,62 @@ async function dashboardCommand(
     default:
       throw new BorealError("BOREAL_INVALID_INPUT", `Unknown dashboard command: ${action ?? ""}`);
   }
+}
+
+async function serveDashboardCommand(context: CliContext, args: ParsedArgs, output: CliOutput): Promise<CommandResult> {
+  const host = flagValue(args, "host") ?? "127.0.0.1";
+  const port = parsePort(flagValue(args, "port")) ?? 4318;
+  const mode = flagValue(args, "mode") === "fixture" ? "fixture" : "live";
+  const liveCacheTtlMs = parseNonNegativeInteger(flagValue(args, "live-cache-ttl-ms"), "--live-cache-ttl-ms") ?? 60_000;
+  const running = await listenConsole({
+    workspaceRoot: context.workspaceRoot,
+    host,
+    port,
+    mode,
+    liveCacheTtlMs
+  });
+  output.write(`Boreal dashboard running at ${running.url}\n`);
+  output.write("Press Ctrl+C to stop.\n");
+  if (!hasFlag(args, "no-open")) {
+    openBrowser(running.url);
+  }
+  await waitForTermination();
+  await running.close();
+  return { exitCode: 0 };
+}
+
+function openBrowser(url: string): void {
+  const command = process.platform === "darwin" ? "open" : process.platform === "win32" ? "cmd" : "xdg-open";
+  const args = process.platform === "win32" ? ["/c", "start", "", url] : [url];
+  try {
+    const child = spawn(command, args, { detached: true, stdio: "ignore" });
+    child.unref();
+  } catch {
+    // Serving the dashboard is the primary contract; the URL is printed if browser launch fails.
+  }
+}
+
+function waitForTermination(): Promise<void> {
+  return new Promise((resolvePromise) => {
+    const done = () => {
+      process.off("SIGINT", done);
+      process.off("SIGTERM", done);
+      resolvePromise();
+    };
+    process.once("SIGINT", done);
+    process.once("SIGTERM", done);
+  });
+}
+
+function parsePort(value: string | undefined): number | undefined {
+  const parsed = parseNonNegativeInteger(value, "--port");
+  if (parsed === undefined) {
+    return undefined;
+  }
+  if (parsed < 1 || parsed > 65_535) {
+    throw new BorealError("BOREAL_INVALID_INPUT", "--port must be between 1 and 65535", { value });
+  }
+  return parsed;
 }
 
 async function daemonCommand(
@@ -3673,6 +4249,31 @@ async function sprintCommand(
       output.write(json ? formatRecord(result, true) : formatSprintReport(result));
       return { exitCode: 0 };
     }
+    case "metrics": {
+      const sprint = await resolveSprintWork(context, rest[0] ?? "current");
+      const result = await sprintMetricsResult(context, sprint, args, flagValue(args, "closeout-reason"));
+      output.write(formatRecord(result, json));
+      return { exitCode: 0 };
+    }
+    case "close": {
+      const sprint = await resolveSprintWork(context, rest[0] ?? "current");
+      const reason = requiredFlag(args, "reason");
+      const metrics = await sprintMetricsResult(context, sprint, args, reason);
+      const closed = await context.runtime.closeWork({ workId: sprint.meta.id, reason });
+      output.write(
+        formatRecord(
+          {
+            schemaVersion: "boreal.cli.sprint.close.v1",
+            generatedAt: nowIso(),
+            workspaceRoot: context.workspaceRoot,
+            closed,
+            metrics
+          },
+          json
+        )
+      );
+      return { exitCode: 0 };
+    }
     default:
       throw new BorealError("BOREAL_INVALID_INPUT", `Unknown sprint command: ${action ?? ""}`);
   }
@@ -3789,6 +4390,126 @@ async function sprintBoardResult(context: CliContext, sprint: WorkItem, limit: n
       reservations: scopedReservations,
       generatedAt
     })
+  };
+}
+
+async function sprintMetricsResult(context: CliContext, sprint: WorkItem, args: ParsedArgs, closeoutReason: string | undefined) {
+  const generatedAt = nowIso();
+  const limit = sprintScopeLimit(args);
+  const capacity = parseNonNegativeInteger(flagValue(args, "capacity"), "--capacity");
+  const scope = await buildSprintScope(context, sprint, limit);
+  const descendantsById = new Map(scope.descendants.map((work) => [work.id, work]));
+  const committedWork = await resolveSprintMetricWorkSet(context, flagValues(args, "commit"), scope.descendants);
+  const carryoverWork = await resolveSprintMetricWorkSet(
+    context,
+    flagValues(args, "carryover"),
+    committedWork.filter((work) => isOpenWorkStatus(work.status))
+  );
+  const completed = scope.descendants.filter((work) => !isOpenWorkStatus(work.status));
+  const open = scope.descendants.filter((work) => isOpenWorkStatus(work.status));
+  const blocked = open.filter((work) => work.status === "blocked" || work.activeBlockerIds.length > 0);
+  const risks = sprintMetricRisks({
+    explicitRisks: flagValues(args, "risk"),
+    capacity,
+    committedCount: committedWork.length,
+    carryoverCount: carryoverWork.length,
+    blockedCount: blocked.length
+  });
+  const committedOutOfScope = committedWork.filter((work) => !descendantsById.has(work.id));
+  const carryoverOutOfScope = carryoverWork.filter((work) => !descendantsById.has(work.id));
+  const readyForReport = open.length === 0 && Boolean(closeoutReason || sprint.closedReason || sprint.status === "closed");
+
+  return {
+    schemaVersion: "boreal.cli.sprint.metrics.v1",
+    generatedAt,
+    workspaceRoot: context.workspaceRoot,
+    sprint: workListRow(sprint),
+    scope: {
+      directChildCount: scope.directChildren.length,
+      totalDescendants: scope.totalDescendants,
+      truncated: scope.truncated,
+      limit
+    },
+    capacity: {
+      capacity,
+      committed: committedWork.length,
+      completed: completed.length,
+      open: open.length,
+      remaining: capacity === undefined ? undefined : Math.max(0, capacity - committedWork.length),
+      overCapacity: capacity !== undefined && committedWork.length > capacity
+    },
+    summary: {
+      total: scope.descendants.length,
+      completed: completed.length,
+      open: open.length,
+      blocked: blocked.length,
+      needsVerification: open.filter((work) => work.status === "needs_verification").length,
+      carryover: carryoverWork.length,
+      risks: risks.length,
+      committedOutOfScope: committedOutOfScope.length,
+      carryoverOutOfScope: carryoverOutOfScope.length
+    },
+    committed: committedWork.map(metricWorkRow),
+    carryover: carryoverWork.map(metricWorkRow),
+    risks,
+    closeout: {
+      reason: closeoutReason,
+      readyForReport,
+      unresolvedWork: open.map(metricWorkRow),
+      committedOutOfScope: committedOutOfScope.map(metricWorkRow),
+      carryoverOutOfScope: carryoverOutOfScope.map(metricWorkRow)
+    }
+  };
+}
+
+async function resolveSprintMetricWorkSet(
+  context: CliContext,
+  references: readonly string[],
+  fallback: readonly WorkItemView[]
+): Promise<readonly WorkItemView[]> {
+  if (references.length === 0) {
+    return fallback;
+  }
+  const rows: WorkItemView[] = [];
+  const seen = new Set<string>();
+  for (const reference of references) {
+    const workId = await resolveWorkId(context, reference);
+    if (seen.has(workId)) {
+      continue;
+    }
+    rows.push(await context.runtime.getWorkView(workId));
+    seen.add(workId);
+  }
+  return rows;
+}
+
+function sprintMetricRisks(input: {
+  readonly explicitRisks: readonly string[];
+  readonly capacity: number | undefined;
+  readonly committedCount: number;
+  readonly carryoverCount: number;
+  readonly blockedCount: number;
+}): readonly string[] {
+  const generated: string[] = [];
+  if (input.capacity !== undefined && input.committedCount > input.capacity) {
+    generated.push(`capacity_exceeded: committed ${input.committedCount} exceeds capacity ${input.capacity}`);
+  }
+  if (input.carryoverCount > 0) {
+    generated.push(`carryover: ${input.carryoverCount} item(s) remain open`);
+  }
+  if (input.blockedCount > 0) {
+    generated.push(`blocked_scope: ${input.blockedCount} item(s) remain blocked`);
+  }
+  return normalizedNonEmptyStrings([...input.explicitRisks, ...generated]);
+}
+
+function metricWorkRow(work: WorkItemView): WorkListRow {
+  return {
+    id: work.id,
+    status: work.status,
+    priority: work.priority,
+    title: work.title,
+    labels: work.labels
   };
 }
 
@@ -4638,6 +5359,114 @@ async function lockCommand(
   }
 }
 
+async function requireCliWork(reader: BorealReader, workId: WorkId): Promise<WorkItem> {
+  const work = await reader.getWorkItem(workId);
+  if (!work) {
+    throw new BorealError("BOREAL_NOT_FOUND", "Work item not found", { workId });
+  }
+  return work;
+}
+
+async function requireCliClaim(reader: BorealReader, claimId: ClaimId): Promise<ClaimRecord> {
+  const claim = await reader.getClaim(claimId);
+  if (!claim) {
+    throw new BorealError("BOREAL_NOT_FOUND", "Claim not found", { claimId });
+  }
+  return claim;
+}
+
+async function requireCliDecision(reader: BorealReader, decisionId: DecisionId): Promise<DecisionRecord> {
+  const decision = await reader.getDecision(decisionId);
+  if (!decision) {
+    throw new BorealError("BOREAL_NOT_FOUND", "Decision not found", { decisionId });
+  }
+  return decision;
+}
+
+async function requireCliKnowledgeSources(reader: BorealReader, sourceIds: readonly KnowledgeSourceId[]): Promise<void> {
+  const missingSourceIds: KnowledgeSourceId[] = [];
+  for (const sourceId of sourceIds) {
+    if (!(await reader.getKnowledgeSource(sourceId))) {
+      missingSourceIds.push(sourceId);
+    }
+  }
+  if (missingSourceIds.length > 0) {
+    throw new BorealError("BOREAL_NOT_FOUND", "Knowledge record references missing source", { missingSourceIds });
+  }
+}
+
+async function requireCliEvidenceRecords(
+  reader: BorealReader,
+  evidenceIds: readonly EvidenceRecord["meta"]["id"][]
+): Promise<void> {
+  const missingEvidenceIds: EvidenceRecord["meta"]["id"][] = [];
+  for (const evidenceId of evidenceIds) {
+    if (!(await reader.getEvidence(evidenceId))) {
+      missingEvidenceIds.push(evidenceId);
+    }
+  }
+  if (missingEvidenceIds.length > 0) {
+    throw new BorealError("BOREAL_NOT_FOUND", "Knowledge record references missing evidence", { missingEvidenceIds });
+  }
+}
+
+async function appendCliEvent(
+  writer: BorealWriter,
+  context: CliContext,
+  type: string,
+  subjectId: string,
+  subjectType: string,
+  payload: Record<string, unknown>,
+  current: IsoTimestamp = nowIso()
+): Promise<RuntimeEvent> {
+  const event = withContentHash({
+    meta: createRecordMeta({
+      id: randomId<EventId>("event"),
+      now: current,
+      actor: context.actor
+    }),
+    type,
+    subjectId,
+    subjectType,
+    operationId: context.operationId,
+    payload
+  } satisfies RuntimeEvent);
+  await writer.putEvent(event);
+  return event;
+}
+
+async function activeNonExpiredReservationsForWork(
+  reader: BorealReader,
+  workId: WorkId,
+  current: IsoTimestamp
+): Promise<readonly AgentReservation[]> {
+  return (await reader.listReservationsForWork(workId)).filter(
+    (reservation) => reservation.status === "active" && !reservationExpiredAt(reservation, current)
+  );
+}
+
+async function expireStaleReservationsForWork(
+  writer: BorealWriter,
+  workId: WorkId,
+  current: IsoTimestamp,
+  actor: ActorRef
+): Promise<readonly ReservationId[]> {
+  const expired: ReservationId[] = [];
+  for (const reservation of await writer.listReservationsForWork(workId)) {
+    if (reservation.status !== "active" || !reservationExpiredAt(reservation, current)) {
+      continue;
+    }
+    const updated = touchRecord({ ...reservation, status: "expired" as const }, current, actor) satisfies AgentReservation;
+    await writer.putReservation(updated);
+    expired.push(updated.meta.id);
+  }
+  return expired;
+}
+
+function reservationExpiredAt(reservation: AgentReservation, current: IsoTimestamp): boolean {
+  return Boolean(reservation.expiresAt && Date.parse(reservation.expiresAt) <= Date.parse(current));
+}
+
 function requiredPositional(values: readonly string[], index: number, label: string): string {
   const value = values[index];
   if (!value) {
@@ -4791,6 +5620,17 @@ function parseLimit(value: string | undefined, options: { readonly max?: number 
   const max = options.max ?? MAX_LIST_LIMIT;
   if (parsed > max) {
     throw new BorealError("BOREAL_INVALID_INPUT", `--limit must be at most ${max}`);
+  }
+  return parsed;
+}
+
+function parseNonNegativeInteger(value: string | undefined, label: string): number | undefined {
+  if (!value) {
+    return undefined;
+  }
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed < 0) {
+    throw new BorealError("BOREAL_INVALID_INPUT", `${label} must be a non-negative integer`);
   }
   return parsed;
 }
@@ -5911,6 +6751,14 @@ function labelFlags(labels: readonly string[]): string {
 
 function uniqueStrings(values: readonly string[]): readonly string[] {
   return [...new Set(values)];
+}
+
+function uniqueValues<T extends string>(values: readonly T[]): readonly T[] {
+  return [...new Set(values)];
+}
+
+function normalizedNonEmptyStrings(values: readonly string[]): readonly string[] {
+  return values.map((value) => value.trim()).filter((value) => value.length > 0);
 }
 
 function shellArg(value: string): string {

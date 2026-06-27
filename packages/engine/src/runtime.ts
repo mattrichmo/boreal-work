@@ -569,7 +569,7 @@ export function createBorealRuntime(options: BorealRuntimeOptions = {}): BorealR
     async verifyWork(input): Promise<VerificationRecord> {
       return store.write(async (writer) => {
         const work = await requireWork(writer, input.workId);
-        const availableEvidence = await writer.listEvidenceForSubject(input.workId);
+        const availableEvidence = await loadEvidenceRecords(writer, input.evidenceIds);
         const verification = verifySubject({
           subjectId: input.workId,
           subjectType: "work",
@@ -593,9 +593,28 @@ export function createBorealRuntime(options: BorealRuntimeOptions = {}): BorealR
 
     async closeWork(input): Promise<WorkItem> {
       return store.write(async (writer) => {
-        const work = await requireWork(writer, input.workId);
+        const current = now();
+        let work = await requireWork(writer, input.workId);
+        const reservation = await getActiveWorkReservation(writer, work);
+        if (reservation) {
+          if (!isReservationExpired(reservation, current)) {
+            throw new BorealError("BOREAL_POLICY_VIOLATION", "Reserved work must be finished or released by its owning agent before direct close", {
+              workId: work.meta.id,
+              reservationId: reservation.meta.id,
+              agentId: reservation.agentId
+            });
+          }
+          const expiredReservation = expireReservation(reservation, current, actor);
+          await writer.putReservation(expiredReservation);
+          work = await clearWorkReservation(writer, work, current, actor);
+          await appendEvent(writer, "work.reservation_expired", work.meta.id, "work", {
+            reservationId: expiredReservation.meta.id,
+            agentId: expiredReservation.agentId,
+            expiresAt: expiredReservation.expiresAt
+          });
+        }
         const verifications = await writer.listVerificationsForSubject(input.workId);
-        const closed = closeWorkDomain(work, verifications, policy, now(), actor, input.reason);
+        const closed = closeWorkDomain(work, verifications, policy, current, actor, input.reason);
         await writer.putWorkItem(closed);
         await recomputeAllReadiness(writer);
         await appendEvent(writer, "work.closed", closed.meta.id, "work", { reason: input.reason });
@@ -943,12 +962,7 @@ function uniqueCandidatesById(candidates: readonly WorkReferenceCandidate[]): re
 }
 
 async function requireActiveWorkReservation(reader: BorealReader, work: WorkItem): Promise<AgentReservation> {
-  const activeReservations = (await reader.listReservationsForWork(work.meta.id)).filter(
-    (reservation) => reservation.status === "active"
-  );
-  const reservation = work.reservationId
-    ? activeReservations.find((entry) => entry.meta.id === work.reservationId)
-    : activeReservations[0];
+  const reservation = await getActiveWorkReservation(reader, work);
   if (!reservation) {
     throw new BorealError("BOREAL_NOT_FOUND", "Work item does not have an active reservation", {
       workId: work.meta.id,
@@ -956,6 +970,15 @@ async function requireActiveWorkReservation(reader: BorealReader, work: WorkItem
     });
   }
   return reservation;
+}
+
+async function getActiveWorkReservation(reader: BorealReader, work: WorkItem): Promise<AgentReservation | undefined> {
+  const activeReservations = (await reader.listReservationsForWork(work.meta.id)).filter(
+    (reservation) => reservation.status === "active"
+  );
+  return work.reservationId
+    ? activeReservations.find((entry) => entry.meta.id === work.reservationId)
+    : activeReservations[0];
 }
 
 async function requireAgentWorkReservation(
@@ -983,6 +1006,10 @@ async function requireAgentWorkReservation(
     });
   }
   return reservation;
+}
+
+function isReservationExpired(reservation: AgentReservation, current: IsoTimestamp): boolean {
+  return Boolean(reservation.expiresAt && Date.parse(reservation.expiresAt) <= Date.parse(current));
 }
 
 async function clearWorkReservation(
@@ -1050,6 +1077,23 @@ async function requireEvidenceRecords(reader: BorealReader, evidenceIds: readonl
   if (missingEvidenceIds.length > 0) {
     throw new BorealError("BOREAL_NOT_FOUND", "Knowledge record references missing evidence", { missingEvidenceIds });
   }
+}
+
+async function loadEvidenceRecords(reader: BorealReader, evidenceIds: readonly EvidenceId[]): Promise<readonly EvidenceRecord[]> {
+  const records: EvidenceRecord[] = [];
+  const missingEvidence: EvidenceId[] = [];
+  for (const evidenceId of evidenceIds) {
+    const record = await reader.getEvidence(evidenceId);
+    if (record) {
+      records.push(record);
+    } else {
+      missingEvidence.push(evidenceId);
+    }
+  }
+  if (missingEvidence.length > 0) {
+    throw new BorealError("BOREAL_NOT_FOUND", "Verification references missing evidence", { missingEvidence });
+  }
+  return records;
 }
 
 async function loadDependencies(reader: BorealReader, work: WorkItem): Promise<readonly WorkItem[]> {

@@ -6,6 +6,7 @@ export * from "./ids.js";
 export * from "./json-safe.js";
 export * from "./mcp-boundary.js";
 export * from "./policies.js";
+export * from "./process-runner.js";
 export * from "./project-registry.js";
 export * from "./records.js";
 export * from "./schema-validation.js";

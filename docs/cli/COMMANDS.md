@@ -226,6 +226,38 @@ bwrk version [--json]
 
 Prints stable Boreal CLI package and runtime version information. `bwrk --version` remains a one-line human probe (`boreal-work <version>`). `bwrk version --json` and `bwrk --version --json` return a `boreal.cli.version.v1` payload with the root package version, `@boreal/cli` package version, Node/package-manager runtime, runtime record schema, file-store schema, export/snapshot schema, JSONL ledger schemas, generated search and SQLite cache schemas, project setup/registry/vault schemas, daemon status schemas, published schema IDs, and the v1 migration policy. Non-reversible migrations must be snapshot-backed by a `boreal.export.v1` recovery snapshot.
 
+## `start`
+
+```bash
+bwrk start [--agent <agent-id>] [--label <label>...] [--purpose <text>] [--expires-at <iso>|--ttl <duration>] [--json]
+```
+
+Golden-path alias for `bwrk agent start`. It resumes the selected agent's active work before claiming another ready item and returns the same JSON contract as `agent start`.
+
+## `done`
+
+```bash
+bwrk done --summary <text> --reason <text> [--agent <agent-id>] [--kind command|test|diff|review|artifact|note] [--outcome passed|failed|observed|unknown] [--command <cmd>] [--uri <uri>] [--notes <text>] [--json]
+```
+
+Golden-path alias for `bwrk agent finish current --close` with a passed verification. It records evidence, verifies, closes, releases the active reservation, and returns the same finish payload as `agent finish`.
+
+## `pause`
+
+```bash
+bwrk pause --summary <text> [--agent <agent-id>] [--kind command|test|diff|review|artifact|note] [--outcome passed|failed|observed|unknown] [--command <cmd>] [--uri <uri>] [--verdict passed|failed] [--notes <text>] [--json]
+```
+
+Golden-path alias for `bwrk agent finish current --release`. It records evidence and verification, then releases the active reservation without closing the work. The default verdict is `failed` so partial work does not look complete accidentally.
+
+## `status`
+
+```bash
+bwrk status [--agent <agent-id>] [--label <label>...] [--json]
+```
+
+Golden-path alias for `bwrk prime`. It prints the compact agent/session startup brief without claiming work.
+
 ## `workflows list`
 
 ```bash
@@ -388,6 +420,22 @@ bwrk sprint report [<sprint-ref>] --doctor-evidence <evidence-id> --sync-evidenc
 Exports a static sprint closeout report using schema `boreal.cli.sprint.report.v1`. The report is built from dependency-scoped sprint work, scoped evidence, directly linked decisions, unresolved blockers, and open next-sprint candidates. `--format` defaults to `markdown`; `--out` writes a workspace-relative artifact file, and omitted `--out` returns the rendered content.
 
 Closeout reports fail closed unless `--doctor-evidence` and `--sync-evidence` point at distinct passed evidence records inside the selected sprint scope. The evidence text, command, or URI must reference `doctor` or `sync` respectively.
+
+## `sprint metrics`
+
+```bash
+bwrk sprint metrics [<sprint-ref>] [--capacity <n>] [--commit <work-ref>...] [--carryover <work-ref>...] [--risk <text>...] [--closeout-reason <text>] [--limit <n>] [--json]
+```
+
+Computes sprint planning and closeout metrics from dependency-scoped work. The payload reports committed scope, capacity pressure, completed/open/blocked counts, carryover, explicit and derived risks, and whether the sprint is report-ready.
+
+## `sprint close`
+
+```bash
+bwrk sprint close [<sprint-ref>] --reason <text> [--capacity <n>] [--carryover <work-ref>...] [--risk <text>...] [--limit <n>] [--json]
+```
+
+Closes a verified sprint through the normal work close policy and returns the same metrics payload beside the closed sprint record. Runtime close policy still requires a passing verification on the sprint work item.
 
 ## `init`
 
@@ -856,6 +904,38 @@ bwrk work close <work-id> [--reason <text>] [--json]
 
 Closes a work item. Runtime policy requires a passing verification before close.
 
+## `work edit`
+
+```bash
+bwrk work edit <work-ref> [--title <text>] [--description <text>] [--kind issue|task|sprint|milestone] [--priority low|normal|high|critical] [--label <label>...] [--acceptance <text>...] [--json]
+```
+
+Updates mutable work fields while preserving source refs, evidence IDs, verification IDs, dependencies, reservation history, and audit events. Repeated `--label` and `--acceptance` values replace those lists.
+
+## `work cancel`
+
+```bash
+bwrk work cancel <work-ref> --reason <text> [--json]
+```
+
+Cancels open work and records the cancellation reason in closeout fields. The command fails closed when the work has an active non-expired reservation.
+
+## `work reopen`
+
+```bash
+bwrk work reopen <work-ref> [--ready] [--reason <text>] [--json]
+```
+
+Reopens closed or cancelled work by clearing closeout fields. Without `--ready`, the item returns to `draft`; with `--ready`, readiness is derived from current blockers.
+
+## `work split`
+
+```bash
+bwrk work split <work-ref> --title <text> [--description <text>] [--priority low|normal|high|critical] [--label <label>...] [--acceptance <text>...] [--ready] [--json]
+```
+
+Creates a child task that inherits the parent source refs and labels, then blocks the parent on that child task. Use this when discovery finds an actionable subtask that must complete before the original work can close.
+
 ## `source add`
 
 ```bash
@@ -914,6 +994,14 @@ Shows one claim record.
 
 JSON `data` is the full claim record.
 
+## `claim review`
+
+```bash
+bwrk claim review <claim-id> --status proposed|accepted|rejected|stale [--source <source-id>...] [--evidence <evidence-id>...] [--wiki <page-ref>...] [--notes <text>] [--json]
+```
+
+Transitions a claim through review and appends source, evidence, and wiki coverage while preserving existing links. Referenced sources and evidence must exist; `--wiki` accepts page ID, slug, title, or path.
+
 ## `decision create`
 
 ```bash
@@ -943,6 +1031,14 @@ bwrk decision show <decision-id> [--json]
 Shows one decision record.
 
 JSON `data` is the full decision record.
+
+## `decision supersede`
+
+```bash
+bwrk decision supersede <decision-id> --decision <text> [--title <text>] [--context <text>] [--consequence <text>...] [--source <source-id>...] [--wiki <page-ref>...] [--reason <text>] [--json]
+```
+
+Marks the prior decision `superseded` and creates an accepted replacement decision with inherited source and wiki coverage plus any additional links supplied on the command.
 
 ## `context rebuild`
 
@@ -1326,6 +1422,38 @@ bwrk doctor skills [--install-root <dir>] [--skill-target codex|claude|skills...
 Validates the checked-in workflow, template, and skill source files without requiring an initialized workspace. It checks duplicate workflow IDs, workflow command references, workflow template references, and skill workflow references.
 
 With `--skill-target` or `--install-root`, it also validates installed skill roots against the checked-in assets. The installed-root check detects missing files such as `boreal.yaml`, stale `SKILL.md` content, missing workflow resolver guidance, and Claude installs that accidentally contain Codex `agents/openai.yaml` metadata. If `--install-root` is omitted, configured project setup roots are used where possible.
+
+## `schema validate`
+
+```bash
+bwrk schema validate [--json]
+```
+
+Validates current runtime records against the published schema contracts and checks command behavior metadata consistency. It exits nonzero when persisted records or command metadata drift from the published contracts.
+
+## `docs check`
+
+```bash
+bwrk docs check [--json]
+```
+
+Checks workflow, template, skill, and command documentation assets. The payload includes workflow asset counts, asset issues, and command metadata validation status.
+
+## `gate`
+
+```bash
+bwrk gate [--strict] [--json]
+```
+
+Golden-path alias for `bwrk gate closeout`. Use it as a compact final gate before closing work or handing off.
+
+## `gate closeout`
+
+```bash
+bwrk gate closeout [--strict] [--json]
+```
+
+Runs the closeout sequence: `sync refresh`, `doctor`, `schema validate`, and `docs check`. JSON `data.ok` is true only when all nested checks pass; `--strict` makes doctor warnings fail the gate.
 
 ## `lock inspect`
 

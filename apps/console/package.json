@@ -11,6 +11,7 @@
     "smoke": "pnpm build && node dist/smoke.js --workspace ../.."
   },
   "dependencies": {
+    "@boreal/core": "workspace:*",
     "@boreal/ui-model": "workspace:*",
     "lucide-react": "^1.21.0",
     "react": "^19.2.7",

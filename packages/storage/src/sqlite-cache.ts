@@ -1,9 +1,8 @@
-import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { mkdir, rename, rm, stat } from "node:fs/promises";
 import { join, resolve } from "node:path";
 
-import { BorealError, assertPathInside, canonicalJson, hashContent, resolveWorkspacePaths } from "@boreal/core";
+import { BorealError, assertPathInside, canonicalJson, hashContent, resolveWorkspacePaths, runBoundedProcess } from "@boreal/core";
 
 import type { StoreSnapshot } from "./memory-store.js";
 
@@ -384,37 +383,28 @@ async function runSQLiteJson<T>(sqliteBin: string, cacheFile: string, sql: strin
 }
 
 function runSQLite(sqliteBin: string, args: readonly string[], input?: string): Promise<string> {
-  return new Promise((resolvePromise, reject) => {
-    const child = spawn(sqliteBin, args, { stdio: ["pipe", "pipe", "pipe"] });
-    let stdout = "";
-    let stderr = "";
-    child.stdout.setEncoding("utf8");
-    child.stderr.setEncoding("utf8");
-    child.stdout.on("data", (chunk: string) => {
-      stdout += chunk;
-    });
-    child.stderr.on("data", (chunk: string) => {
-      stderr += chunk;
-    });
-    child.on("error", (error) => {
-      reject(new BorealError("BOREAL_STORAGE_ERROR", "sqlite3 command failed", { error: error.message }));
-    });
-    child.on("close", (code) => {
-      if (code === 0) {
-        resolvePromise(stdout);
-        return;
-      }
-      reject(
-        new BorealError("BOREAL_STORAGE_ERROR", "sqlite3 command failed", {
-          exitCode: code,
-          stderr: stderr.trim()
-        })
-      );
-    });
-    if (input) {
-      child.stdin.write(input);
+  return runBoundedProcess({
+    command: sqliteBin,
+    args,
+    input,
+    timeoutMs: 30_000,
+    stdoutMaxBytes: 16 * 1024 * 1024,
+    stderrMaxBytes: 1024 * 1024
+  }).then((result) => {
+    if (result.exitCode === 0) {
+      return result.stdout.text;
     }
-    child.stdin.end();
+    throw new BorealError("BOREAL_STORAGE_ERROR", "sqlite3 command failed", {
+      exitCode: result.exitCode,
+      stderr: result.stderr.text.trim()
+    });
+  }, (error: unknown) => {
+    if (error instanceof BorealError) {
+      throw error;
+    }
+    throw new BorealError("BOREAL_STORAGE_ERROR", "sqlite3 command failed", {
+      error: error instanceof Error ? error.message : String(error)
+    });
   });
 }
 

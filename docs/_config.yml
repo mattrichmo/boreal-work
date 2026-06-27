@@ -1,0 +1,15 @@
+# GitHub Pages configuration for the Boreal Work documentation site.
+# Pages serves this `docs/` folder. To turn it on:
+#   GitHub → repo Settings → Pages → Source: "Deploy from a branch"
+#   → Branch: main, Folder: /docs → Save.
+#
+# GitHub Pages enables the jekyll-relative-links plugin by default, so the
+# relative `*.md` links between these docs resolve correctly on the built site.
+
+title: Boreal Work
+description: Git-native project memory and workflow control for humans and agents.
+theme: jekyll-theme-cayman
+
+# Repo-only files that should not be published as site pages.
+exclude:
+  - _config.yml

@@ -1,4 +1,3 @@
-import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
@@ -10,6 +9,7 @@ import {
   defineMcpToolContract,
   isBorealError,
   normalizeActorId,
+  runBoundedProcess,
   safeParseJson,
   type McpProjectBoundary,
   type McpProjectRegistryEntry,
@@ -558,28 +558,24 @@ async function runCommand(input: {
   readonly command: string;
   readonly args: readonly string[];
 }): Promise<string> {
-  return new Promise((resolvePromise, reject) => {
-    const child = spawn(input.command, input.args, { cwd: input.cwd, stdio: ["ignore", "pipe", "pipe"] });
-    const stdout: Buffer[] = [];
-    const stderr: Buffer[] = [];
-    child.stdout.on("data", (chunk: Buffer) => stdout.push(chunk));
-    child.stderr.on("data", (chunk: Buffer) => stderr.push(chunk));
-    child.on("error", reject);
-    child.on("close", (code) => {
-      const out = Buffer.concat(stdout).toString("utf8");
-      const err = Buffer.concat(stderr).toString("utf8");
-      const payload = firstJsonPayload(out, err);
-      if (payload) {
-        resolvePromise(payload);
-        return;
-      }
-      if (code === 0) {
-        resolvePromise(out);
-        return;
-      }
-      reject(new BorealError("BOREAL_STORAGE_ERROR", err.trim() || out.trim() || `bwrk exited with ${code ?? "unknown"}`));
-    });
+  const result = await runBoundedProcess({
+    command: input.command,
+    args: input.args,
+    cwd: input.cwd,
+    timeoutMs: 60_000,
+    stdoutMaxBytes: 4 * 1024 * 1024,
+    stderrMaxBytes: 1024 * 1024
   });
+  const out = result.stdout.text;
+  const err = result.stderr.text;
+  const payload = firstJsonPayload(out, err);
+  if (payload) {
+    return payload;
+  }
+  if (result.exitCode === 0) {
+    return out;
+  }
+  throw new BorealError("BOREAL_STORAGE_ERROR", err.trim() || out.trim() || `bwrk exited with ${result.exitCode ?? "unknown"}`);
 }
 
 function parseCliData(output: string): unknown {

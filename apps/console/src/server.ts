@@ -1,4 +1,5 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
+import { randomBytes } from "node:crypto";
 import { isAbsolute, resolve } from "node:path";
 
 import { createFixtureConsoleData } from "./app/fixtures.js";
@@ -21,39 +22,48 @@ export interface ConsoleServerOptions {
   readonly port?: number;
   readonly mode?: ConsoleDataMode;
   readonly runner?: ConsoleCliRunner;
+  readonly csrfToken?: string;
+  readonly liveCacheTtlMs?: number;
 }
+
+const DEFAULT_LIVE_CACHE_TTL_MS = 60_000;
 
 export interface RunningConsoleServer {
   readonly server: Server;
   readonly url: string;
+  readonly csrfToken: string;
+  readonly warnings: readonly string[];
   close(): Promise<void>;
 }
 
 export function createConsoleHttpServer(options: ConsoleServerOptions): Server {
   const workspaceRoot = resolve(options.workspaceRoot);
   const mode = options.mode ?? "live";
+  const host = options.host ?? "127.0.0.1";
+  const csrfToken = options.csrfToken ?? createConsoleToken();
+  const liveCache = createConsoleDataCache(options.liveCacheTtlMs ?? DEFAULT_LIVE_CACHE_TTL_MS);
   return createServer(async (request, response) => {
     try {
       const url = requestUrl(request);
       if (url.pathname === "/api/state") {
-        await sendJson(response, consoleStatePayload(await loadConsoleData({ workspaceRoot, mode, runner: options.runner })));
+        await sendJson(response, consoleStatePayload(await liveCache.load({ workspaceRoot, mode, runner: options.runner })));
         return;
       }
       if (url.pathname.startsWith("/api/commands/")) {
-        await handleCommand({ request, response, workspaceRoot, runner: options.runner });
+        await handleCommand({ request, response, workspaceRoot, runner: options.runner, csrfToken, host, afterMutation: liveCache.invalidate });
         return;
       }
       if (url.pathname.startsWith("/api/settings/projects/")) {
-        await handleProjectSettings({ request, response, workspaceRoot, runner: options.runner });
+        await handleProjectSettings({ request, response, workspaceRoot, runner: options.runner, csrfToken, host, afterMutation: liveCache.invalidate });
         return;
       }
       const route = routeFromPath(url.pathname);
-      const data = await loadConsoleData({
+      const data = await liveCache.load({
         workspaceRoot,
         mode: url.searchParams.get("mode") === "fixture" ? "fixture" : mode,
         runner: options.runner
       });
-      sendHtml(response, renderConsoleHtml({ route: `${route.path}${url.search}`, data }));
+      sendHtml(response, injectConsoleToken(renderConsoleHtml({ route: `${route.path}${url.search}`, data }), csrfToken));
     } catch (error) {
       sendError(response, error);
     }
@@ -63,7 +73,8 @@ export function createConsoleHttpServer(options: ConsoleServerOptions): Server {
 export async function listenConsole(options: ConsoleServerOptions): Promise<RunningConsoleServer> {
   const host = options.host ?? "127.0.0.1";
   const port = options.port ?? 4318;
-  const server = createConsoleHttpServer(options);
+  const csrfToken = options.csrfToken ?? createConsoleToken();
+  const server = createConsoleHttpServer({ ...options, host, csrfToken });
   await new Promise<void>((resolvePromise, reject) => {
     server.once("error", reject);
     server.listen(port, host, () => {
@@ -76,6 +87,8 @@ export async function listenConsole(options: ConsoleServerOptions): Promise<Runn
   return {
     server,
     url: `http://${host}:${actualPort}`,
+    csrfToken,
+    warnings: consoleBindWarnings(host),
     close: () => new Promise((resolvePromise, reject) => server.close((error) => error ? reject(error) : resolvePromise()))
   };
 }
@@ -85,6 +98,9 @@ async function handleProjectSettings(input: {
   readonly response: ServerResponse;
   readonly workspaceRoot: string;
   readonly runner?: ConsoleCliRunner;
+  readonly csrfToken: string;
+  readonly host: string;
+  readonly afterMutation?: () => void;
 }): Promise<void> {
   if (input.request.method !== "POST") {
     input.response.writeHead(405, { "content-type": "application/json; charset=utf-8", allow: "POST" });
@@ -92,6 +108,7 @@ async function handleProjectSettings(input: {
     return;
   }
   const params = new URLSearchParams(await readBody(input.request));
+  validateMutatingConsoleRequest(input.request, params, input.csrfToken, input.host);
   if (params.get("confirm") !== "yes") {
     await sendJson(input.response, {
       ok: false,
@@ -108,11 +125,13 @@ async function handleProjectSettings(input: {
   const validation = await validateProjectBeforeSettingsWrite(runner, projectRoot);
   if (action === "add") {
     const result = await runner.run(["registry", "add", "--workspace", projectRoot, "--json"]);
+    input.afterMutation?.();
     await sendJson(input.response, { ok: true, action, validation, result });
     return;
   }
   if (action === "import-setup") {
     const result = await runner.run(["--workspace", projectRoot, "registry", "import-setup", "--json"]);
+    input.afterMutation?.();
     await sendJson(input.response, { ok: true, action, validation, result });
     return;
   }
@@ -140,6 +159,7 @@ async function handleProjectSettings(input: {
     ];
     const setup = await runner.run(setupArgs);
     const registry = await runner.run(["--workspace", projectRoot, "registry", "import-setup", "--json"]);
+    input.afterMutation?.();
     await sendJson(input.response, { ok: true, action, validation, setup, registry });
     return;
   }
@@ -195,11 +215,45 @@ async function loadConsoleData(input: {
   }
 }
 
+function createConsoleDataCache(ttlMs: number): {
+  load(input: {
+    readonly workspaceRoot: string;
+    readonly mode: ConsoleDataMode;
+    readonly runner?: ConsoleCliRunner;
+  }): Promise<ConsoleDataSet>;
+  invalidate(): void;
+} {
+  let cached: { readonly key: string; readonly expiresAt: number; readonly value: Promise<ConsoleDataSet> } | undefined;
+  return {
+    load(input) {
+      if (input.mode === "fixture" || ttlMs <= 0) {
+        return loadConsoleData(input);
+      }
+      const key = `${input.mode}:${resolve(input.workspaceRoot)}:${input.runner ? "custom" : "default"}`;
+      const now = Date.now();
+      if (!cached || cached.key !== key || cached.expiresAt <= now) {
+        cached = {
+          key,
+          expiresAt: now + ttlMs,
+          value: loadConsoleData(input)
+        };
+      }
+      return cached.value;
+    },
+    invalidate() {
+      cached = undefined;
+    }
+  };
+}
+
 async function handleCommand(input: {
   readonly request: IncomingMessage;
   readonly response: ServerResponse;
   readonly workspaceRoot: string;
   readonly runner?: ConsoleCliRunner;
+  readonly csrfToken: string;
+  readonly host: string;
+  readonly afterMutation?: () => void;
 }): Promise<void> {
   if (input.request.method !== "POST") {
     input.response.writeHead(405, { "content-type": "application/json; charset=utf-8", allow: "POST" });
@@ -209,6 +263,7 @@ async function handleCommand(input: {
   const id = requestUrl(input.request).pathname.replace("/api/commands/", "");
   const body = await readBody(input.request);
   const params = new URLSearchParams(body);
+  validateMutatingConsoleRequest(input.request, params, input.csrfToken, input.host);
   const confirmed = params.get("confirm") === "yes";
   const command = getSafeConsoleCommand(id);
   if (command?.requiresConfirmation === true && !confirmed) {
@@ -224,6 +279,7 @@ async function handleCommand(input: {
     return;
   }
   const result = await runSafeConsoleCommand({ id, workspaceRoot: input.workspaceRoot, runner: input.runner, params });
+  input.afterMutation?.();
   const returnTo = safeReturnTo(params.get("returnTo"));
   if (returnTo) {
     input.response.writeHead(303, { location: returnTo });
@@ -256,8 +312,12 @@ async function sendJson(response: ServerResponse, value: unknown): Promise<void>
 }
 
 function sendError(response: ServerResponse, error: unknown): void {
-  response.writeHead(500, { "content-type": "application/json; charset=utf-8" });
+  response.writeHead(errorStatus(error), { "content-type": "application/json; charset=utf-8" });
   response.end(`${JSON.stringify({ ok: false, error: errorPayload(error) }, null, 2)}\n`);
+}
+
+function errorStatus(error: unknown): number {
+  return error instanceof ConsoleCommandError && error.code.startsWith("CONSOLE_SECURITY_") ? 403 : 500;
 }
 
 function errorPayload(error: unknown): Record<string, unknown> {
@@ -274,6 +334,121 @@ function errorPayload(error: unknown): Record<string, unknown> {
     message: error instanceof Error ? error.message : String(error),
     recovery: recoveryActionsForCode("CONSOLE_ERROR")
   };
+}
+
+function createConsoleToken(): string {
+  return randomBytes(32).toString("base64url");
+}
+
+function validateMutatingConsoleRequest(
+  request: IncomingMessage,
+  params: URLSearchParams,
+  csrfToken: string,
+  configuredHost: string
+): void {
+  const token = params.get("consoleToken") ?? headerValue(request, "x-boreal-console-token");
+  if (token !== csrfToken) {
+    throw new ConsoleCommandError("CONSOLE_SECURITY_TOKEN_INVALID", "Console POST token is missing or invalid");
+  }
+  validateConsoleOrigin(request, configuredHost);
+}
+
+function validateConsoleOrigin(request: IncomingMessage, configuredHost: string): void {
+  const host = headerValue(request, "host");
+  if (!host) {
+    throw new ConsoleCommandError("CONSOLE_SECURITY_HOST_REJECTED", "Console POST requests require a Host header");
+  }
+  const hostName = hostnameFromHeader(host);
+  if (!hostName || !isAllowedConsoleHost(hostName, configuredHost)) {
+    throw new ConsoleCommandError("CONSOLE_SECURITY_HOST_REJECTED", "Console POST Host is not allowed", { host });
+  }
+  const origin = headerValue(request, "origin");
+  if (!origin) {
+    return;
+  }
+  let originUrl: URL;
+  try {
+    originUrl = new URL(origin);
+  } catch {
+    throw new ConsoleCommandError("CONSOLE_SECURITY_ORIGIN_REJECTED", "Console POST Origin is invalid", { origin });
+  }
+  if (originUrl.protocol !== "http:" && originUrl.protocol !== "https:") {
+    throw new ConsoleCommandError("CONSOLE_SECURITY_ORIGIN_REJECTED", "Console POST Origin protocol is not allowed", { origin });
+  }
+  const expectedHost = normalizeHostHeader(host);
+  const originHost = normalizeHostHeader(originUrl.host);
+  if (originHost !== expectedHost) {
+    throw new ConsoleCommandError("CONSOLE_SECURITY_ORIGIN_REJECTED", "Console POST Origin must match Host", {
+      origin,
+      host
+    });
+  }
+}
+
+function headerValue(request: IncomingMessage, name: string): string | undefined {
+  const value = request.headers[name.toLowerCase()];
+  if (Array.isArray(value)) {
+    return value[0];
+  }
+  return value;
+}
+
+function hostnameFromHeader(host: string): string | undefined {
+  try {
+    return normalizeHostname(new URL(`http://${host}`).hostname);
+  } catch {
+    return undefined;
+  }
+}
+
+function normalizeHostHeader(host: string): string {
+  try {
+    const parsed = new URL(`http://${host}`);
+    const hostname = normalizeHostname(parsed.hostname);
+    return parsed.port ? `${hostname}:${parsed.port}` : hostname;
+  } catch {
+    return host.toLocaleLowerCase("en-US");
+  }
+}
+
+function normalizeHostname(hostname: string): string {
+  return hostname.replace(/^\[|\]$/gu, "").toLocaleLowerCase("en-US");
+}
+
+function isAllowedConsoleHost(hostname: string, configuredHost: string): boolean {
+  const configured = normalizeHostname(configuredHost);
+  return isLocalConsoleHost(hostname) || (isSpecificBindHost(configured) && hostname === configured);
+}
+
+function isLocalConsoleHost(hostname: string): boolean {
+  return hostname === "localhost" || hostname === "::1" || hostname.startsWith("127.");
+}
+
+function isSpecificBindHost(hostname: string): boolean {
+  return hostname !== "0.0.0.0" && hostname !== "::" && hostname !== "";
+}
+
+function consoleBindWarnings(host: string): readonly string[] {
+  const normalized = normalizeHostname(host);
+  if (isLocalConsoleHost(normalized)) {
+    return [];
+  }
+  return [
+    `Console is bound to ${host}; mutating POST requests still require the per-server token and same Host/Origin validation.`
+  ];
+}
+
+function injectConsoleToken(html: string, csrfToken: string): string {
+  const field = `<input type="hidden" name="consoleToken" value="${htmlAttribute(csrfToken)}" />`;
+  return html.replace(/(<form\b(?=[^>]*\bmethod="post")[^>]*>)/giu, `$1${field}`);
+}
+
+function htmlAttribute(value: string): string {
+  return value
+    .replaceAll("&", "&amp;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;");
 }
 
 function safeReturnTo(value: string | null): string | undefined {
@@ -332,13 +507,23 @@ function parseServerArgs(argv: readonly string[]): ConsoleServerOptions {
     workspaceRoot: valueAfter(argv, "--workspace") ?? process.cwd(),
     host: valueAfter(argv, "--host") ?? "127.0.0.1",
     port: Number(valueAfter(argv, "--port") ?? "4318"),
-    mode: valueAfter(argv, "--mode") === "fixture" ? "fixture" : "live"
+    mode: valueAfter(argv, "--mode") === "fixture" ? "fixture" : "live",
+    liveCacheTtlMs: numberAfter(argv, "--live-cache-ttl-ms")
   };
 }
 
 function valueAfter(argv: readonly string[], flag: string): string | undefined {
   const index = argv.indexOf(flag);
   return index >= 0 ? argv[index + 1] : undefined;
+}
+
+function numberAfter(argv: readonly string[], flag: string): number | undefined {
+  const value = valueAfter(argv, flag);
+  if (value === undefined) {
+    return undefined;
+  }
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : undefined;
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {
