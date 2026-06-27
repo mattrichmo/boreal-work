@@ -17,6 +17,11 @@ import type { ConsoleRoute } from "./routes.js";
 
 export type ConsoleDataMode = "fixture" | "live";
 
+export interface ConsoleSelection {
+  readonly wikiPage?: string;
+  readonly rawSource?: string;
+}
+
 export interface ConsoleWorkspaceState {
   readonly projectName: string;
   readonly workspaceRoot: string;

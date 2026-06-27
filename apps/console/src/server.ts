@@ -14,7 +14,7 @@ import {
 import { renderConsoleHtml } from "./app/render.js";
 import { consoleStatePayload } from "./app/render.js";
 import { routeFromPath } from "./app/routes.js";
-import type { ConsoleDataMode, ConsoleDataSet } from "./app/types.js";
+import type { ConsoleDataMode, ConsoleDataSet, ConsoleSelection } from "./app/types.js";
 
 export interface ConsoleServerOptions {
   readonly workspaceRoot: string;
@@ -61,7 +61,11 @@ export function createConsoleHttpServer(options: ConsoleServerOptions): Server {
       const data = await liveCache.load({
         workspaceRoot,
         mode: url.searchParams.get("mode") === "fixture" ? "fixture" : mode,
-        runner: options.runner
+        runner: options.runner,
+        selection: {
+          wikiPage: url.searchParams.get("page") ?? undefined,
+          rawSource: url.searchParams.get("source") ?? undefined
+        }
       });
       sendHtml(response, injectConsoleToken(renderConsoleHtml({ route: `${route.path}${url.search}`, data }), csrfToken));
     } catch (error) {
@@ -109,6 +113,15 @@ async function handleProjectSettings(input: {
   }
   const params = new URLSearchParams(await readBody(input.request));
   validateMutatingConsoleRequest(input.request, params, input.csrfToken, input.host);
+  const returnTo = safeReturnTo(params.get("returnTo"));
+  const finish = async (payload: unknown): Promise<void> => {
+    if (returnTo) {
+      input.response.writeHead(303, { location: returnTo });
+      input.response.end();
+      return;
+    }
+    await sendJson(input.response, payload);
+  };
   if (params.get("confirm") !== "yes") {
     await sendJson(input.response, {
       ok: false,
@@ -126,13 +139,13 @@ async function handleProjectSettings(input: {
   if (action === "add") {
     const result = await runner.run(["registry", "add", "--workspace", projectRoot, "--json"]);
     input.afterMutation?.();
-    await sendJson(input.response, { ok: true, action, validation, result });
+    await finish({ ok: true, action, validation, result });
     return;
   }
   if (action === "import-setup") {
     const result = await runner.run(["--workspace", projectRoot, "registry", "import-setup", "--json"]);
     input.afterMutation?.();
-    await sendJson(input.response, { ok: true, action, validation, result });
+    await finish({ ok: true, action, validation, result });
     return;
   }
   if (action === "apply-setup") {
@@ -160,7 +173,7 @@ async function handleProjectSettings(input: {
     const setup = await runner.run(setupArgs);
     const registry = await runner.run(["--workspace", projectRoot, "registry", "import-setup", "--json"]);
     input.afterMutation?.();
-    await sendJson(input.response, { ok: true, action, validation, setup, registry });
+    await finish({ ok: true, action, validation, setup, registry });
     return;
   }
   throw new ConsoleCommandError("CONSOLE_SETTINGS_ACTION_UNKNOWN", "Unknown project settings action", { action });
@@ -201,6 +214,7 @@ async function loadConsoleData(input: {
   readonly workspaceRoot: string;
   readonly mode: ConsoleDataMode;
   readonly runner?: ConsoleCliRunner;
+  readonly selection?: ConsoleSelection;
 }): Promise<ConsoleDataSet> {
   if (input.mode === "fixture") {
     return createFixtureConsoleData({ workspaceRoot: input.workspaceRoot });
@@ -220,6 +234,7 @@ function createConsoleDataCache(ttlMs: number): {
     readonly workspaceRoot: string;
     readonly mode: ConsoleDataMode;
     readonly runner?: ConsoleCliRunner;
+    readonly selection?: ConsoleSelection;
   }): Promise<ConsoleDataSet>;
   invalidate(): void;
 } {
@@ -229,7 +244,8 @@ function createConsoleDataCache(ttlMs: number): {
       if (input.mode === "fixture" || ttlMs <= 0) {
         return loadConsoleData(input);
       }
-      const key = `${input.mode}:${resolve(input.workspaceRoot)}:${input.runner ? "custom" : "default"}`;
+      const selectionKey = `${input.selection?.wikiPage ?? ""}|${input.selection?.rawSource ?? ""}`;
+      const key = `${input.mode}:${resolve(input.workspaceRoot)}:${input.runner ? "custom" : "default"}:${selectionKey}`;
       const now = Date.now();
       if (!cached || cached.key !== key || cached.expiresAt <= now) {
         cached = {

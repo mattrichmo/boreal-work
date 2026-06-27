@@ -181,7 +181,14 @@ export function RawSourcePreview({ title, body }: { readonly title: string; read
   );
 }
 
-export function RawInboxPanel({ view }: { readonly view: RawInboxView }) {
+function selectionHref(routePath: string, key: string, value: string): string {
+  const [path, rest = ""] = (routePath || "/").split("?");
+  const params = new URLSearchParams(rest.split("#")[0]);
+  params.set(key, value);
+  return `${path}?${params.toString()}`;
+}
+
+export function RawInboxPanel({ view, routePath = "/" }: { readonly view: RawInboxView; readonly routePath?: string }) {
   return (
     <Card title="Raw inbox" eyebrow={`${view.summary.total} source${view.summary.total === 1 ? "" : "s"}`}>
       <div className="bw-raw-summary" aria-label="Raw inbox summary">
@@ -210,7 +217,9 @@ export function RawInboxPanel({ view }: { readonly view: RawInboxView }) {
             </tr>
           </thead>
           <tbody>
-            {view.rows.map((row) => <RawInboxRow key={row.id} row={row} />)}
+            {view.rows.map((row) => (
+              <RawInboxRow key={row.id} row={row} routePath={routePath} selected={row.id === view.selected?.id} />
+            ))}
           </tbody>
         </table>
       )}
@@ -339,7 +348,7 @@ export function RawContradictionReviewPanel({ review }: { readonly review?: RawC
   );
 }
 
-export function WikiExplorerPanel({ view }: { readonly view: WikiExplorerView }) {
+export function WikiExplorerPanel({ view, routePath = "/" }: { readonly view: WikiExplorerView; readonly routePath?: string }) {
   return (
     <Card title="Wiki explorer" eyebrow={`${view.summary.total} page${view.summary.total === 1 ? "" : "s"}`}>
       <div className="bw-wiki-summary" aria-label="Wiki summary">
@@ -362,7 +371,14 @@ export function WikiExplorerPanel({ view }: { readonly view: WikiExplorerView })
             </tr>
           </thead>
           <tbody>
-            {view.rows.map((row) => <WikiExplorerRow key={`${row.id}:${row.slug}`} row={row} />)}
+            {view.rows.map((row) => (
+              <WikiExplorerRow
+                key={`${row.id}:${row.slug}`}
+                row={row}
+                routePath={routePath}
+                selected={(row.id || row.slug) === (view.selected?.id || view.selected?.slug)}
+              />
+            ))}
           </tbody>
         </table>
       )}
@@ -954,11 +970,11 @@ function StaticExportCard({ item }: { readonly item: StaticReportExportView }) {
   );
 }
 
-function RawInboxRow({ row }: { readonly row: RawSourceRowView }) {
+function RawInboxRow({ row, routePath, selected }: { readonly row: RawSourceRowView; readonly routePath: string; readonly selected: boolean }) {
   return (
-    <tr>
+    <tr className={selected ? "bw-row--selected" : undefined} aria-current={selected ? "true" : undefined}>
       <td>
-        <strong>{row.title}</strong>
+        <a className="bw-row-select" href={selectionHref(routePath, "source", row.id)}>{row.title}</a>
         <span>{row.id}</span>
         {row.summary ? <p className="bw-raw-table__summary">{row.summary}</p> : null}
       </td>
@@ -976,11 +992,11 @@ function RawInboxRow({ row }: { readonly row: RawSourceRowView }) {
   );
 }
 
-function WikiExplorerRow({ row }: { readonly row: WikiPageRowView }) {
+function WikiExplorerRow({ row, routePath, selected }: { readonly row: WikiPageRowView; readonly routePath: string; readonly selected: boolean }) {
   return (
-    <tr>
+    <tr className={selected ? "bw-row--selected" : undefined} aria-current={selected ? "true" : undefined}>
       <td>
-        <strong>{row.title}</strong>
+        <a className="bw-row-select" href={selectionHref(routePath, "page", row.id || row.slug)}>{row.title}</a>
         <span>{row.path}</span>
       </td>
       <td>

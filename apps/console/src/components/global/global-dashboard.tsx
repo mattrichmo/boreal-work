@@ -283,10 +283,11 @@ export function GlobalDriftPanel({ view }: { readonly view: GlobalHealthView }) 
   );
 }
 
-export function GlobalSettingsPanel({ view }: { readonly view: GlobalSettingsView }) {
+export function GlobalSettingsPanel({ view, routePath }: { readonly view: GlobalSettingsView; readonly routePath: string }) {
   return (
     <Card title="Project settings" eyebrow={`${view.projects.length} configured projects`}>
       <form className="bw-settings-add" method="post" action={view.addProjectAction}>
+        <input type="hidden" name="returnTo" value={routePath} />
         <TextInput label="Project root" name="projectRoot" placeholder="/absolute/path/to/project" required />
         <label className="bw-command-confirm">
           <input name="confirm" value="yes" type="checkbox" required />
@@ -311,6 +312,7 @@ export function GlobalSettingsPanel({ view }: { readonly view: GlobalSettingsVie
       <div className="bw-settings-projects">
         {view.projects.map((project) => (
           <form key={project.projectId} className="bw-settings-project" method="post" action={view.applySetupAction}>
+            <input type="hidden" name="returnTo" value={routePath} />
             <input type="hidden" name="projectId" value={project.projectId} />
             <header className="bw-settings-project__header">
               <div>
