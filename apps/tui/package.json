@@ -1,0 +1,25 @@
+{
+  "name": "@boreal/tui",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "bwrk-tui": "./dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc -b",
+    "dev": "pnpm build && node dist/index.js",
+    "start": "node dist/index.js"
+  },
+  "dependencies": {
+    "@boreal/core": "workspace:*",
+    "@boreal/engine": "workspace:*",
+    "@boreal/storage": "workspace:*",
+    "@boreal/ui-model": "workspace:*",
+    "ink": "^7.1.0",
+    "react": "^19.2.7"
+  },
+  "devDependencies": {
+    "@types/react": "^19.2.17"
+  }
+}
