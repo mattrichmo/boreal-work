@@ -33,20 +33,53 @@ function statusColor(status: string): string {
   return MUTED;
 }
 
-function selectableItems(view: ViewId, data: TuiData | undefined): readonly WorkItemView[] {
-  if (!data) return [];
-  if (view === "work") return data.work.queues.flatMap((queue) => queue.items);
-  if (view === "sprint") return data.sprint ? data.sprint.board.lanes.flatMap((lane) => lane.items) : [];
-  return [];
+function selectableLength(view: ViewId, data: TuiData | undefined): number {
+  if (!data) return 0;
+  if (view === "work") return data.work.queues.reduce((total, queue) => total + queue.items.length, 0);
+  if (view === "sprint") return data.sprints.length;
+  return 0;
 }
 
-export function App({ workspaceRoot, refreshMs }: { readonly workspaceRoot: string; readonly refreshMs: number }) {
+interface Windowed<T> {
+  readonly rows: readonly { readonly item: T; readonly index: number }[];
+  readonly above: number;
+  readonly below: number;
+}
+
+// Show only the rows that fit, windowed around the cursor, so long lists never
+// overflow the terminal (which corrupts Ink's frame diff and ghosts the border).
+function windowList<T>(items: readonly T[], cursor: number, size: number): Windowed<T> {
+  if (items.length <= size) {
+    return { rows: items.map((item, index) => ({ item, index })), above: 0, below: 0 };
+  }
+  const start = Math.max(0, Math.min(cursor - Math.floor(size / 2), items.length - size));
+  const end = start + size;
+  return {
+    rows: items.slice(start, end).map((item, offset) => ({ item, index: start + offset })),
+    above: start,
+    below: items.length - end
+  };
+}
+
+function isViewId(value: string | undefined): value is ViewId {
+  return value === "overview" || value === "sprint" || value === "work";
+}
+
+export function App({
+  workspaceRoot,
+  refreshMs,
+  initialView
+}: {
+  readonly workspaceRoot: string;
+  readonly refreshMs: number;
+  readonly initialView?: string;
+}) {
   const { exit } = useApp();
   const { stdout } = useStdout();
   const { isRawModeSupported } = useStdin();
   const [data, setData] = useState<TuiData | undefined>();
   const [error, setError] = useState<string | undefined>();
-  const [view, setView] = useState<ViewId>("overview");
+  const [view, setView] = useState<ViewId>(isViewId(initialView) ? initialView : "overview");
   const [cursor, setCursor] = useState(0);
   const [refreshing, setRefreshing] = useState(false);
 
@@ -68,11 +101,11 @@ export function App({ workspaceRoot, refreshMs }: { readonly workspaceRoot: stri
     return () => clearInterval(timer);
   }, [refresh, refreshMs]);
 
-  const selectable = useMemo(() => selectableItems(view, data), [view, data]);
+  const selLen = useMemo(() => selectableLength(view, data), [view, data]);
 
   useEffect(() => {
-    setCursor((current) => Math.min(current, Math.max(0, selectable.length - 1)));
-  }, [selectable.length]);
+    setCursor((current) => Math.min(current, Math.max(0, selLen - 1)));
+  }, [selLen]);
 
   const handleKey = useCallback<InkInputHandler>(
     (input, key) => {
@@ -91,19 +124,19 @@ export function App({ workspaceRoot, refreshMs }: { readonly workspaceRoot: stri
         return;
       }
       if (key.downArrow || input === "j") {
-        setCursor((current) => Math.min(current + 1, Math.max(0, selectable.length - 1)));
+        setCursor((current) => Math.min(current + 1, Math.max(0, selLen - 1)));
         return;
       }
       if (key.upArrow || input === "k") {
         setCursor((current) => Math.max(current - 1, 0));
       }
     },
-    [exit, refresh, selectable.length]
+    [exit, refresh, selLen]
   );
 
   const rows = stdout?.rows ?? 24;
   const columns = stdout?.columns ?? 100;
-  const selected = selectable[cursor];
+  const listHeight = Math.max(6, rows - 9);
 
   return (
     <Box flexDirection="column" width={columns} height={rows}>
@@ -121,9 +154,9 @@ export function App({ workspaceRoot, refreshMs }: { readonly workspaceRoot: stri
           ) : view === "overview" ? (
             <OverviewView data={data} />
           ) : view === "sprint" ? (
-            <SprintView data={data} selected={selected} />
+            <SprintView data={data} cursor={cursor} height={listHeight} />
           ) : (
-            <WorkView data={data} selected={selected} />
+            <WorkView data={data} cursor={cursor} height={listHeight} />
           )}
         </Box>
       </Box>
@@ -290,27 +323,23 @@ function WorkLines({ items, empty }: { readonly items: readonly WorkItemView[]; 
   );
 }
 
-function WorkView({ data, selected }: { readonly data: TuiData; readonly selected: WorkItemView | undefined }) {
+function WorkView({ data, cursor, height }: { readonly data: TuiData; readonly cursor: number; readonly height: number }) {
+  const items = data.work.queues.flatMap((queue) => queue.items);
+  const selected = items[Math.min(cursor, Math.max(0, items.length - 1))];
+  const win = windowList(items, cursor, height);
   return (
     <Box>
       <Box width="55%" flexDirection="column" marginRight={1}>
-        {data.work.queues.map((queue) => (
-          <Box key={queue.id} flexDirection="column">
-            <Text color={MUTED} bold>
-              {queue.title} ({queue.count})
-            </Text>
-            {queue.items.length === 0 ? (
-              <Text color={MUTED}> —</Text>
-            ) : (
-              queue.items.map((item) => (
-                <Text key={item.id} wrap="truncate" inverse={selected?.id === item.id}>
-                  <Text color={statusColor(item.status)}>● </Text>
-                  {item.title}
-                </Text>
-              ))
-            )}
-          </Box>
+        <Text color={MUTED}>Work · {items.length} items</Text>
+        {win.above > 0 ? <Text color={MUTED}>↑ {win.above} more</Text> : null}
+        {items.length === 0 ? <Text color={MUTED}>No work items.</Text> : null}
+        {win.rows.map(({ item, index }) => (
+          <Text key={item.id} wrap="truncate" inverse={index === cursor}>
+            <Text color={statusColor(item.status)}>● </Text>
+            {item.title}
+          </Text>
         ))}
+        {win.below > 0 ? <Text color={MUTED}>↓ {win.below} more</Text> : null}
       </Box>
       <Box width="45%">
         <WorkDetail item={selected} />
@@ -319,47 +348,78 @@ function WorkView({ data, selected }: { readonly data: TuiData; readonly selecte
   );
 }
 
-function SprintView({ data, selected }: { readonly data: TuiData; readonly selected: WorkItemView | undefined }) {
-  if (!data.sprint) {
+function SprintView({ data, cursor, height }: { readonly data: TuiData; readonly cursor: number; readonly height: number }) {
+  if (data.sprints.length === 0) {
     return (
-      <Panel title="Sprint" tone={WARN}>
-        <Text color={MUTED}>No sprint found. Create one with `bwrk work create … --kind sprint`.</Text>
+      <Panel title="Sprints" tone={WARN}>
+        <Text color={MUTED}>No sprints found. Create one with `bwrk work create … --kind sprint`.</Text>
       </Panel>
     );
   }
-  const { view, board, scopeCount } = data.sprint;
+  const selected = data.sprints[Math.min(cursor, data.sprints.length - 1)];
+  const win = windowList(data.sprints, cursor, height);
   return (
-    <Box flexDirection="column">
-      <Panel title={view.title}>
-        <Text color={MUTED}>
-          {scopeCount} in scope · {board.summary.taskCount} tasks · {board.summary.phaseCount} phases ·{" "}
-          {board.summary.activeBlockerCount} active blockers
-        </Text>
-      </Panel>
-      <Box>
-        <Box width="55%" flexDirection="column" marginRight={1}>
-          {board.lanes
-            .filter((lane) => lane.count > 0)
-            .map((lane) => (
-              <Box key={lane.id} flexDirection="column">
-                <Text color={statusColor(lane.id)} bold>
-                  {lane.title} ({lane.count})
-                </Text>
-                {lane.items.map((item) => (
-                  <Text key={item.id} wrap="truncate" inverse={selected?.id === item.id}>
-                    <Text color={statusColor(item.status)}>● </Text>
-                    {item.title}
-                  </Text>
-                ))}
-              </Box>
-            ))}
-          {board.lanes.every((lane) => lane.count === 0) ? <Text color={MUTED}>No work in this sprint yet.</Text> : null}
-        </Box>
-        <Box width="45%">
-          <WorkDetail item={selected} />
-        </Box>
+    <Box>
+      <Box width="44%" flexDirection="column" marginRight={1}>
+        <Text color={MUTED}>Sprints · {data.sprints.length}</Text>
+        {win.above > 0 ? <Text color={MUTED}>↑ {win.above} more</Text> : null}
+        {win.rows.map(({ item, index }) => {
+          const done = item.board.summary.verified + item.board.summary.closed;
+          return (
+            <Text key={item.view.id} wrap="truncate" inverse={index === cursor}>
+              <Text color={statusColor(item.view.status)}>● </Text>
+              {item.active ? <Text color={ACCENT}>★ </Text> : null}
+              {item.view.title}
+              <Text color={MUTED}> ({done}/{item.scopeCount})</Text>
+            </Text>
+          );
+        })}
+        {win.below > 0 ? <Text color={MUTED}>↓ {win.below} more</Text> : null}
       </Box>
+      <Box width="56%">{selected ? <SprintDetail sprint={selected} /> : null}</Box>
     </Box>
+  );
+}
+
+function SprintDetail({ sprint }: { readonly sprint: TuiData["sprints"][number] }) {
+  const { view, board, scopeCount, active } = sprint;
+  const lanes = board.lanes.filter((lane) => lane.count > 0);
+  const tasks = board.lanes.flatMap((lane) => lane.items);
+  return (
+    <Panel title={view.title} tone={statusColor(view.status)}>
+      <Detail label="status" value={active ? `${view.status} (active)` : view.status} valueColor={statusColor(view.status)} />
+      <Detail label="priority" value={view.priority} />
+      <Detail label="labels" value={view.labels.length > 0 ? view.labels.join(", ") : "none"} />
+      <Detail label="scope" value={`${scopeCount} items · ${board.summary.taskCount} tasks · ${board.summary.phaseCount} phases`} />
+      <Detail
+        label="blockers"
+        value={String(board.summary.activeBlockerCount)}
+        valueColor={board.summary.activeBlockerCount > 0 ? WARN : undefined}
+      />
+      <Box marginTop={1} flexDirection="column">
+        <Text color={MUTED}>lanes</Text>
+        {lanes.length === 0 ? (
+          <Text color={MUTED}> no work yet</Text>
+        ) : (
+          lanes.map((lane) => (
+            <Text key={lane.id} wrap="truncate">
+              <Text color={statusColor(lane.id)}>{lane.title}</Text>
+              <Text color={MUTED}> {lane.count}</Text>
+            </Text>
+          ))
+        )}
+      </Box>
+      <Box marginTop={1} flexDirection="column">
+        <Text color={MUTED}>tasks</Text>
+        {tasks.slice(0, 8).map((item) => (
+          <Text key={item.id} wrap="truncate">
+            <Text color={statusColor(item.status)}>● </Text>
+            {item.title}
+          </Text>
+        ))}
+        {tasks.length > 8 ? <Text color={MUTED}>+{tasks.length - 8} more</Text> : null}
+      </Box>
+    </Panel>
   );
 }
 

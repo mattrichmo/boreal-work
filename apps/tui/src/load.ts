@@ -30,6 +30,7 @@ export interface TuiSprintData {
   readonly view: WorkItemView;
   readonly board: SprintBoardView;
   readonly scopeCount: number;
+  readonly active: boolean;
 }
 
 // Mirrors the CLI's sprint scope: a work item's children are its dependencyIds
@@ -63,7 +64,8 @@ export interface TuiData {
   readonly generatedAt: string;
   readonly initialized: boolean;
   readonly work: WorkDashboardView;
-  readonly sprint?: TuiSprintData;
+  readonly sprints: readonly TuiSprintData[];
+  readonly activeSprintId?: string;
   readonly activity: readonly TuiActivityEntry[];
   readonly warnings: readonly string[];
 }
@@ -153,6 +155,7 @@ export async function loadTuiData(workspaceRoot: string): Promise<TuiData> {
       generatedAt,
       initialized: false,
       work: buildWorkDashboardView({ work: [], generatedAt }),
+      sprints: [],
       activity: [],
       warnings: ["Workspace is not initialized. Run `bwrk init` in this directory."]
     };
@@ -177,27 +180,24 @@ export async function loadTuiData(workspaceRoot: string): Promise<TuiData> {
   const work = buildWorkDashboardView({ work: views, reservations, generatedAt });
 
   const byId = new Map<string, WorkItem>(items.map((item) => [item.meta.id, item]));
-  let sprint: TuiSprintData | undefined;
   const activeProjection = projections.find(
     (projection) => projection.kind === "active-sprint" && projection.subjectId === "workspace"
   );
   const activeSprintId = typeof activeProjection?.value.sprintId === "string" ? activeProjection.value.sprintId : undefined;
-  const activeSprint = activeSprintId ? byId.get(activeSprintId) : undefined;
-  const sprintItem =
-    activeSprint ??
-    items
-      .filter((item) => item.kind === "sprint")
-      .sort((a, b) => b.meta.updatedAt.localeCompare(a.meta.updatedAt))[0];
-  if (sprintItem) {
-    const view = toWorkItemView({ work: sprintItem, dependencies: items });
-    const scopeIds = sprintScopeIds(sprintItem, byId, graphEdges);
-    const scoped = views.filter((candidate) => scopeIds.has(candidate.id));
-    sprint = {
-      view,
-      scopeCount: scoped.length,
-      board: buildSprintBoardView({ sprint: view, work: scoped, reservations, generatedAt })
-    };
-  }
+  const sprints: readonly TuiSprintData[] = items
+    .filter((item) => item.kind === "sprint")
+    .map((sprintItem): TuiSprintData => {
+      const view = toWorkItemView({ work: sprintItem, dependencies: items });
+      const scopeIds = sprintScopeIds(sprintItem, byId, graphEdges);
+      const scoped = views.filter((candidate) => scopeIds.has(candidate.id));
+      return {
+        view,
+        scopeCount: scoped.length,
+        active: sprintItem.meta.id === activeSprintId,
+        board: buildSprintBoardView({ sprint: view, work: scoped, reservations, generatedAt })
+      };
+    })
+    .sort((a, b) => Number(b.active) - Number(a.active) || a.view.title.localeCompare(b.view.title));
 
   const activity = [...events]
     .sort((a, b) => b.meta.createdAt.localeCompare(a.meta.createdAt))
@@ -210,5 +210,5 @@ export async function loadTuiData(workspaceRoot: string): Promise<TuiData> {
       at: event.meta.createdAt
     }));
 
-  return { workspaceRoot, generatedAt, initialized: true, work, sprint, activity, warnings };
+  return { workspaceRoot, generatedAt, initialized: true, work, sprints, activeSprintId, activity, warnings };
 }

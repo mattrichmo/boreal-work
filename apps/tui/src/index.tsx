@@ -15,7 +15,7 @@ if (argv.includes("--help") || argv.includes("-h")) {
     [
       "bwrk-tui - Boreal terminal dashboard",
       "",
-      "Usage: bwrk-tui [--global] [--workspace <dir>] [--refresh-ms <n>]",
+      "Usage: bwrk-tui [--global] [--view overview|sprint|work] [--workspace <dir>] [--refresh-ms <n>]",
       "",
       "Repo keys:   o overview  s sprint  w work  j/k move  r refresh  q quit",
       "Global (--global): all registered projects  j/k move  r refresh  q quit",
@@ -28,13 +28,16 @@ if (argv.includes("--help") || argv.includes("-h")) {
 const workspaceRoot = resolveWorkspaceRoot(flagValue(argv, "--workspace"));
 const refreshMs = Math.max(1000, Number(flagValue(argv, "--refresh-ms") ?? "5000") || 5000);
 const global = argv.includes("--global");
+const initialView = flagValue(argv, "--view");
 
 const enterAltScreen = "[?1049h";
 const leaveAltScreen = "[?1049l";
 process.stdout.write(enterAltScreen);
 
-const root = global ? GlobalApp : App;
-const instance = render(createElement(root, { workspaceRoot, refreshMs }), { exitOnCtrlC: false });
+const element = global
+  ? createElement(GlobalApp, { workspaceRoot, refreshMs })
+  : createElement(App, { workspaceRoot, refreshMs, initialView });
+const instance = render(element, { exitOnCtrlC: false });
 
 instance
   .waitUntilExit()
