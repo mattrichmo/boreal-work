@@ -59,6 +59,12 @@ function sprintScopeIds(sprint: WorkItem, byId: Map<string, WorkItem>, graphEdge
   return visited;
 }
 
+export interface TuiTaskDetail {
+  readonly description: string;
+  readonly acceptanceCriteria: readonly string[];
+  readonly dependencyTitles: readonly string[];
+}
+
 export interface TuiData {
   readonly workspaceRoot: string;
   readonly generatedAt: string;
@@ -67,6 +73,7 @@ export interface TuiData {
   readonly sprints: readonly TuiSprintData[];
   readonly activeSprintId?: string;
   readonly activity: readonly TuiActivityEntry[];
+  readonly details: Readonly<Record<string, TuiTaskDetail>>;
   readonly warnings: readonly string[];
 }
 
@@ -157,6 +164,7 @@ export async function loadTuiData(workspaceRoot: string): Promise<TuiData> {
       work: buildWorkDashboardView({ work: [], generatedAt }),
       sprints: [],
       activity: [],
+      details: {},
       warnings: ["Workspace is not initialized. Run `bwrk init` in this directory."]
     };
   }
@@ -210,5 +218,14 @@ export async function loadTuiData(workspaceRoot: string): Promise<TuiData> {
       at: event.meta.createdAt
     }));
 
-  return { workspaceRoot, generatedAt, initialized: true, work, sprints, activeSprintId, activity, warnings };
+  const details: Record<string, TuiTaskDetail> = {};
+  for (const item of items) {
+    details[item.meta.id] = {
+      description: item.description,
+      acceptanceCriteria: item.acceptanceCriteria,
+      dependencyTitles: item.dependencyIds.map((id) => byId.get(id)?.title ?? id)
+    };
+  }
+
+  return { workspaceRoot, generatedAt, initialized: true, work, sprints, activeSprintId, activity, details, warnings };
 }

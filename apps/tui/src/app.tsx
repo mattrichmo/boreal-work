@@ -1,68 +1,81 @@
 import { Box, Text, useApp, useInput, useStdin, useStdout, type Key } from "ink";
-import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useReducer, useState } from "react";
 
 import type { WorkItemView } from "@boreal/ui-model";
 import { loadGlobalTuiData, loadTuiData, type GlobalTuiData, type TuiData } from "./load.js";
-
-const ACCENT = "#71d48b";
-const MUTED = "#94a39b";
-const WARN = "#d7b969";
-const DANGER = "#df7c7c";
-
-type ViewId = "overview" | "sprint" | "work";
+import {
+  initialNavState,
+  reduceNav,
+  topFrame,
+  SECTIONS,
+  type NavFrame,
+  type TuiSection
+} from "./nav.js";
+import { COLOR, fit, healthColor, statusColor, statusLabel } from "./theme.js";
+import {
+  EmptyState,
+  Field,
+  KeyHints,
+  Metric,
+  Pane,
+  SectionRail,
+  Table,
+  TopBar,
+  windowList,
+  type TableColumn,
+  type TableRow
+} from "./ui.js";
 
 type InkInputHandler = (input: string, key: Key) => void;
 
-function KeyBindings({ onKey }: { readonly onKey: InkInputHandler }) {
-  useInput(onKey);
+function KeyBindings({ onKey, active }: { readonly onKey: InkInputHandler; readonly active: boolean }) {
+  useInput(onKey, { isActive: active });
   return null;
 }
 
-const VIEWS: readonly { readonly id: ViewId; readonly label: string; readonly key: string }[] = [
-  { id: "overview", label: "Overview", key: "o" },
-  { id: "sprint", label: "Sprint", key: "s" },
-  { id: "work", label: "Work", key: "w" }
-];
-
-function statusColor(status: string): string {
-  if (status === "ready") return ACCENT;
-  if (status === "in_progress" || status === "reserved") return "#8be9a5";
-  if (status === "verified" || status === "closed") return ACCENT;
-  if (status === "blocked" || status === "needs_verification") return WARN;
-  if (status === "cancelled") return DANGER;
-  return MUTED;
+function sectionFromView(view: string | undefined): TuiSection {
+  if (view === "sprint" || view === "sprints") return "sprints";
+  if (view === "work") return "work";
+  return "overview";
 }
 
-function selectableLength(view: ViewId, data: TuiData | undefined): number {
-  if (!data) return 0;
-  if (view === "work") return data.work.queues.reduce((total, queue) => total + queue.items.length, 0);
-  if (view === "sprint") return data.sprints.length;
-  return 0;
+type SprintData = TuiData["sprints"][number];
+
+function sprintTasks(sprint: SprintData): readonly WorkItemView[] {
+  return sprint.board.lanes.flatMap((lane) => lane.items);
 }
 
-interface Windowed<T> {
-  readonly rows: readonly { readonly item: T; readonly index: number }[];
-  readonly above: number;
-  readonly below: number;
-}
-
-// Show only the rows that fit, windowed around the cursor, so long lists never
-// overflow the terminal (which corrupts Ink's frame diff and ghosts the border).
-function windowList<T>(items: readonly T[], cursor: number, size: number): Windowed<T> {
-  if (items.length <= size) {
-    return { rows: items.map((item, index) => ({ item, index })), above: 0, below: 0 };
+// The list backing the active screen: drives cursor length, selection and drill.
+function activeList(data: TuiData, frame: NavFrame): readonly { readonly id: string }[] {
+  if (frame.screen === "sprintList") return data.sprints.map((sprint) => ({ id: sprint.view.id }));
+  if (frame.screen === "workList") return data.work.queues.flatMap((queue) => queue.items);
+  if (frame.screen === "sprintDetail") {
+    const sprint = data.sprints.find((entry) => entry.view.id === frame.sprintId);
+    return sprint ? sprintTasks(sprint) : [];
   }
-  const start = Math.max(0, Math.min(cursor - Math.floor(size / 2), items.length - size));
-  const end = start + size;
-  return {
-    rows: items.slice(start, end).map((item, offset) => ({ item, index: start + offset })),
-    above: start,
-    below: items.length - end
-  };
+  return [];
 }
 
-function isViewId(value: string | undefined): value is ViewId {
-  return value === "overview" || value === "sprint" || value === "work";
+function crumbLabel(data: TuiData, frame: NavFrame): string {
+  switch (frame.screen) {
+    case "overview":
+      return "Overview";
+    case "sprintList":
+      return "Sprints";
+    case "workList":
+      return "Work";
+    case "sprintDetail":
+      return data.sprints.find((entry) => entry.view.id === frame.sprintId)?.view.title ?? "Sprint";
+    case "taskDetail":
+      return findTask(data, frame.taskId)?.title ?? "Task";
+    default:
+      return "";
+  }
+}
+
+function findTask(data: TuiData, taskId: string | undefined): WorkItemView | undefined {
+  if (!taskId) return undefined;
+  return data.work.queues.flatMap((queue) => queue.items).find((item) => item.id === taskId);
 }
 
 export function App({
@@ -79,9 +92,8 @@ export function App({
   const { isRawModeSupported } = useStdin();
   const [data, setData] = useState<TuiData | undefined>();
   const [error, setError] = useState<string | undefined>();
-  const [view, setView] = useState<ViewId>(isViewId(initialView) ? initialView : "overview");
-  const [cursor, setCursor] = useState(0);
   const [refreshing, setRefreshing] = useState(false);
+  const [nav, dispatch] = useReducer(reduceNav, sectionFromView(initialView), initialNavState);
 
   const refresh = useCallback(async () => {
     setRefreshing(true);
@@ -101,368 +113,286 @@ export function App({
     return () => clearInterval(timer);
   }, [refresh, refreshMs]);
 
-  const selLen = useMemo(() => selectableLength(view, data), [view, data]);
-
-  useEffect(() => {
-    setCursor((current) => Math.min(current, Math.max(0, selLen - 1)));
-  }, [selLen]);
+  const frame = topFrame(nav);
+  const list = data ? activeList(data, frame) : [];
+  const selectedId = list[frame.cursor]?.id;
 
   const handleKey = useCallback<InkInputHandler>(
     (input, key) => {
-      if (input === "q" || key.escape || (key.ctrl && input === "c")) {
+      if (input === "q" || (key.ctrl && input === "c")) {
         exit();
-        return;
-      }
-      const matchedView = VIEWS.find((entry) => entry.key === input);
-      if (matchedView) {
-        setView(matchedView.id);
-        setCursor(0);
         return;
       }
       if (input === "r") {
         void refresh();
         return;
       }
+      const section = SECTIONS.find((entry) => entry.key === input);
+      if (section) {
+        dispatch({ type: "section", section: section.id });
+        return;
+      }
+      if (key.escape || key.backspace || key.delete || key.leftArrow || input === "h") {
+        dispatch({ type: "back" });
+        return;
+      }
+      if (key.return || key.rightArrow || input === "l") {
+        dispatch({ type: "drill", id: selectedId });
+        return;
+      }
       if (key.downArrow || input === "j") {
-        setCursor((current) => Math.min(current + 1, Math.max(0, selLen - 1)));
+        dispatch({ type: "move", delta: 1, length: list.length });
         return;
       }
       if (key.upArrow || input === "k") {
-        setCursor((current) => Math.max(current - 1, 0));
+        dispatch({ type: "move", delta: -1, length: list.length });
       }
     },
-    [exit, refresh, selLen]
+    [exit, refresh, selectedId, list.length]
   );
 
   const rows = stdout?.rows ?? 24;
   const columns = stdout?.columns ?? 100;
-  const listHeight = Math.max(6, rows - 9);
+  const bodyHeight = Math.max(6, rows - 4);
+  const crumbs = data ? nav.stack.map((entry) => crumbLabel(data, entry)) : ["…"];
+  const clock = data ? new Date(data.generatedAt).toLocaleTimeString() : "";
 
   return (
     <Box flexDirection="column" width={columns} height={rows}>
-      {isRawModeSupported ? <KeyBindings onKey={handleKey} /> : null}
-      <Header data={data} view={view} refreshing={refreshing} error={error} />
-      <Box flexGrow={1} marginTop={1}>
-        <NavRail view={view} />
-        <Box flexDirection="column" flexGrow={1} paddingX={1}>
+      {isRawModeSupported ? <KeyBindings onKey={handleKey} active /> : null}
+      <TopBar crumbs={crumbs} right={`${refreshing ? "↻ " : ""}${clock}`} />
+      <Box flexGrow={1} paddingX={1} paddingY={1}>
+        <SectionRail sections={SECTIONS} active={nav.section} />
+        <Box flexDirection="column" flexGrow={1}>
+          {error ? <Text color={COLOR.danger}>! {error}</Text> : null}
           {!data ? (
-            <Text color={MUTED}>Loading workspace…</Text>
+            <Text color={COLOR.muted}>Loading workspace…</Text>
           ) : !data.initialized ? (
-            <Panel title="Not initialized" tone={WARN}>
-              <Text>{data.warnings[0] ?? "Run `bwrk init` in this directory."}</Text>
-            </Panel>
-          ) : view === "overview" ? (
-            <OverviewView data={data} />
-          ) : view === "sprint" ? (
-            <SprintView data={data} cursor={cursor} height={listHeight} />
+            <EmptyState title="Not initialized" lines={[data.warnings[0] ?? "Run `bwrk init` here."]} />
           ) : (
-            <WorkView data={data} cursor={cursor} height={listHeight} />
+            <Screen data={data} frame={frame} height={bodyHeight} width={columns - 16} />
           )}
         </Box>
       </Box>
-      <Footer inputEnabled={isRawModeSupported} />
+      <KeyHints hints={hintsFor(frame.screen, isRawModeSupported)} />
     </Box>
   );
 }
 
-function Header({
-  data,
-  view,
-  refreshing,
-  error
-}: {
-  readonly data: TuiData | undefined;
-  readonly view: ViewId;
-  readonly refreshing: boolean;
-  readonly error: string | undefined;
-}) {
-  const label = VIEWS.find((entry) => entry.id === view)?.label ?? "Global";
-  return (
-    <Box flexDirection="column">
-      <Box justifyContent="space-between">
-        <Text>
-          <Text color={ACCENT} bold>
-            ❄ Boreal
-          </Text>
-          <Text color={MUTED}> · {label}</Text>
-        </Text>
-        <Text color={MUTED}>
-          {refreshing ? "refreshing… " : ""}
-          {data ? new Date(data.generatedAt).toLocaleTimeString() : ""}
-        </Text>
-      </Box>
-      <Text color={MUTED} wrap="truncate">
-        {data?.workspaceRoot ?? ""}
-      </Text>
-      {error ? <Text color={DANGER}>! {error}</Text> : null}
-      {data && data.warnings.length > 0 && data.initialized ? (
-        <Text color={WARN} wrap="truncate">
-          ⚠ {data.warnings.join(" ")}
-        </Text>
-      ) : null}
-    </Box>
-  );
-}
-
-function NavRail({ view }: { readonly view: ViewId }) {
-  return (
-    <Box flexDirection="column" width={14} marginRight={1}>
-      {VIEWS.map((entry) => {
-        const active = entry.id === view;
-        return (
-          <Text key={entry.id} color={active ? ACCENT : MUTED} bold={active}>
-            {active ? "▍" : " "} {entry.label}
-            <Text color={MUTED}> ({entry.key})</Text>
-          </Text>
-        );
-      })}
-    </Box>
-  );
-}
-
-function Footer({ inputEnabled }: { readonly inputEnabled: boolean }) {
-  return (
-    <Box marginTop={1}>
-      {inputEnabled ? (
-        <Text color={MUTED}>o/s/w views · j/k move · r refresh · q quit</Text>
-      ) : (
-        <Text color={WARN}>input unavailable (no raw-mode TTY) — keyboard disabled; Ctrl+C to exit</Text>
-      )}
-    </Box>
-  );
-}
-
-function Panel({
-  title,
-  tone = ACCENT,
-  children
-}: {
-  readonly title: string;
-  readonly tone?: string;
-  readonly children: ReactNode;
-}) {
-  return (
-    <Box flexDirection="column" borderStyle="round" borderColor={tone} paddingX={1} marginBottom={1}>
-      <Text color={tone} bold>
-        {title}
-      </Text>
-      {children}
-    </Box>
-  );
-}
-
-function Metric({ label, value, tone = ACCENT }: { readonly label: string; readonly value: number; readonly tone?: string }) {
-  return (
-    <Box flexDirection="column" marginRight={3}>
-      <Text color={tone} bold>
-        {value}
-      </Text>
-      <Text color={MUTED}>{label}</Text>
-    </Box>
-  );
-}
-
-function OverviewView({ data }: { readonly data: TuiData }) {
-  const summary = data.work.summary;
-  const readyQueue = data.work.queues.find((queue) => queue.id === "ready");
-  const inProgressQueue = data.work.queues.find((queue) => queue.id === "in_progress");
-  return (
-    <Box flexDirection="column">
-      <Panel title="Overview">
-        <Box>
-          <Metric label="total" value={summary.total} tone={MUTED} />
-          <Metric label="ready" value={summary.ready} />
-          <Metric label="in progress" value={summary.inProgress} tone="#8be9a5" />
-          <Metric label="blocked" value={summary.blocked} tone={WARN} />
-          <Metric label="needs verify" value={summary.needsVerification} tone={WARN} />
-          <Metric label="verified" value={summary.verified} />
-          <Metric label="reserved" value={summary.activeReservations} tone={MUTED} />
-        </Box>
-      </Panel>
-      <Box>
-        <Box width="50%" flexDirection="column" marginRight={1}>
-          <Panel title={`Ready to claim (${readyQueue?.count ?? 0})`}>
-            <WorkLines items={readyQueue?.items ?? []} empty="Nothing ready." />
-          </Panel>
-          <Panel title={`In progress (${inProgressQueue?.count ?? 0})`} tone="#8be9a5">
-            <WorkLines items={inProgressQueue?.items ?? []} empty="No active work." />
-          </Panel>
-        </Box>
-        <Box width="50%" flexDirection="column">
-          <Panel title="Recent activity" tone={MUTED}>
-            {data.activity.length === 0 ? (
-              <Text color={MUTED}>No recent events.</Text>
-            ) : (
-              data.activity.slice(0, 8).map((entry) => (
-                <Text key={entry.id} wrap="truncate">
-                  <Text color={MUTED}>{new Date(entry.at).toLocaleTimeString()} </Text>
-                  <Text color={ACCENT}>{entry.type}</Text>
-                  <Text color={MUTED}> {entry.subjectType}</Text>
-                </Text>
-              ))
-            )}
-          </Panel>
-        </Box>
-      </Box>
-    </Box>
-  );
-}
-
-function WorkLines({ items, empty }: { readonly items: readonly WorkItemView[]; readonly empty: string }) {
-  if (items.length === 0) return <Text color={MUTED}>{empty}</Text>;
-  return (
-    <>
-      {items.slice(0, 6).map((item) => (
-        <Text key={item.id} wrap="truncate">
-          <Text color={statusColor(item.status)}>● </Text>
-          {item.title}
-        </Text>
-      ))}
-      {items.length > 6 ? <Text color={MUTED}>+{items.length - 6} more</Text> : null}
-    </>
-  );
-}
-
-function WorkView({ data, cursor, height }: { readonly data: TuiData; readonly cursor: number; readonly height: number }) {
-  const items = data.work.queues.flatMap((queue) => queue.items);
-  const selected = items[Math.min(cursor, Math.max(0, items.length - 1))];
-  const win = windowList(items, cursor, height);
-  return (
-    <Box>
-      <Box width="55%" flexDirection="column" marginRight={1}>
-        <Text color={MUTED}>Work · {items.length} items</Text>
-        {win.above > 0 ? <Text color={MUTED}>↑ {win.above} more</Text> : null}
-        {items.length === 0 ? <Text color={MUTED}>No work items.</Text> : null}
-        {win.rows.map(({ item, index }) => (
-          <Text key={item.id} wrap="truncate" inverse={index === cursor}>
-            <Text color={statusColor(item.status)}>● </Text>
-            {item.title}
-          </Text>
-        ))}
-        {win.below > 0 ? <Text color={MUTED}>↓ {win.below} more</Text> : null}
-      </Box>
-      <Box width="45%">
-        <WorkDetail item={selected} />
-      </Box>
-    </Box>
-  );
-}
-
-function SprintView({ data, cursor, height }: { readonly data: TuiData; readonly cursor: number; readonly height: number }) {
-  if (data.sprints.length === 0) {
-    return (
-      <Panel title="Sprints" tone={WARN}>
-        <Text color={MUTED}>No sprints found. Create one with `bwrk work create … --kind sprint`.</Text>
-      </Panel>
-    );
+function hintsFor(screen: NavFrame["screen"], inputEnabled: boolean): readonly { readonly keys: string; readonly label: string }[] {
+  if (!inputEnabled) return [{ keys: "no TTY", label: "keyboard disabled — Ctrl+C to exit" }];
+  const move = { keys: "↑↓/jk", label: "move" };
+  const sections = { keys: "o/s/w", label: "sections" };
+  const refresh = { keys: "r", label: "refresh" };
+  const quit = { keys: "q", label: "quit" };
+  if (screen === "overview") return [sections, refresh, quit];
+  if (screen === "taskDetail") return [{ keys: "⌫/esc", label: "back" }, sections, refresh, quit];
+  if (screen === "sprintDetail") {
+    return [move, { keys: "⏎", label: "open task" }, { keys: "⌫/esc", label: "back" }, refresh, quit];
   }
-  const selected = data.sprints[Math.min(cursor, data.sprints.length - 1)];
-  const win = windowList(data.sprints, cursor, height);
-  return (
-    <Box>
-      <Box width="44%" flexDirection="column" marginRight={1}>
-        <Text color={MUTED}>Sprints · {data.sprints.length}</Text>
-        {win.above > 0 ? <Text color={MUTED}>↑ {win.above} more</Text> : null}
-        {win.rows.map(({ item, index }) => {
-          const done = item.board.summary.verified + item.board.summary.closed;
-          return (
-            <Text key={item.view.id} wrap="truncate" inverse={index === cursor}>
-              <Text color={statusColor(item.view.status)}>● </Text>
-              {item.active ? <Text color={ACCENT}>★ </Text> : null}
-              {item.view.title}
-              <Text color={MUTED}> ({done}/{item.scopeCount})</Text>
-            </Text>
-          );
-        })}
-        {win.below > 0 ? <Text color={MUTED}>↓ {win.below} more</Text> : null}
-      </Box>
-      <Box width="56%">{selected ? <SprintDetail sprint={selected} /> : null}</Box>
-    </Box>
-  );
+  return [move, { keys: "⏎", label: "open" }, sections, refresh, quit];
 }
 
-function SprintDetail({ sprint }: { readonly sprint: TuiData["sprints"][number] }) {
-  const { view, board, scopeCount, active } = sprint;
-  const lanes = board.lanes.filter((lane) => lane.count > 0);
-  const tasks = board.lanes.flatMap((lane) => lane.items);
+function Screen({ data, frame, height, width }: { readonly data: TuiData; readonly frame: NavFrame; readonly height: number; readonly width: number }) {
+  switch (frame.screen) {
+    case "overview":
+      return <OverviewScreen data={data} height={height} />;
+    case "sprintList":
+      return <SprintListScreen data={data} cursor={frame.cursor} height={height} width={width} />;
+    case "sprintDetail":
+      return <SprintDetailScreen data={data} frame={frame} height={height} width={width} />;
+    case "workList":
+      return <WorkListScreen data={data} cursor={frame.cursor} height={height} width={width} />;
+    case "taskDetail":
+      return <TaskDetailScreen data={data} taskId={frame.taskId} width={width} />;
+    default:
+      return null;
+  }
+}
+
+function OverviewScreen({ data, height }: { readonly data: TuiData; readonly height: number }) {
+  const summary = data.work.summary;
+  const active = data.sprints.find((sprint) => sprint.active);
   return (
-    <Panel title={view.title} tone={statusColor(view.status)}>
-      <Detail label="status" value={active ? `${view.status} (active)` : view.status} valueColor={statusColor(view.status)} />
-      <Detail label="priority" value={view.priority} />
-      <Detail label="labels" value={view.labels.length > 0 ? view.labels.join(", ") : "none"} />
-      <Detail label="scope" value={`${scopeCount} items · ${board.summary.taskCount} tasks · ${board.summary.phaseCount} phases`} />
-      <Detail
-        label="blockers"
-        value={String(board.summary.activeBlockerCount)}
-        valueColor={board.summary.activeBlockerCount > 0 ? WARN : undefined}
-      />
+    <Box flexDirection="column">
+      {data.warnings.length > 0 ? <Text color={COLOR.warn} wrap="truncate">⚠ {data.warnings.join(" ")}</Text> : null}
+      <Box marginTop={data.warnings.length > 0 ? 1 : 0}>
+        <Metric label="total" value={summary.total} tone={COLOR.muted} />
+        <Metric label="ready" value={summary.ready} />
+        <Metric label="active" value={summary.inProgress} tone={COLOR.accentSoft} />
+        <Metric label="blocked" value={summary.blocked} tone={COLOR.warn} />
+        <Metric label="verify" value={summary.needsVerification} tone={COLOR.warn} />
+        <Metric label="reserved" value={summary.activeReservations} tone={COLOR.muted} />
+        <Metric label="sprints" value={data.sprints.length} tone={COLOR.muted} />
+      </Box>
       <Box marginTop={1} flexDirection="column">
-        <Text color={MUTED}>lanes</Text>
-        {lanes.length === 0 ? (
-          <Text color={MUTED}> no work yet</Text>
+        <Text color={COLOR.faint}>ACTIVE SPRINT</Text>
+        {active ? (
+          <Text wrap="truncate">
+            <Text color={statusColor(active.view.status)}>● </Text>
+            <Text color={COLOR.text} bold>{active.view.title}</Text>
+            <Text color={COLOR.muted}>{`  ${active.board.summary.verified + active.board.summary.closed}/${active.scopeCount} done`}</Text>
+          </Text>
         ) : (
-          lanes.map((lane) => (
-            <Text key={lane.id} wrap="truncate">
-              <Text color={statusColor(lane.id)}>{lane.title}</Text>
-              <Text color={MUTED}> {lane.count}</Text>
+          <Text color={COLOR.muted}> none active — press s to browse sprints</Text>
+        )}
+      </Box>
+      <Box marginTop={1} flexDirection="column">
+        <Text color={COLOR.faint}>RECENT ACTIVITY</Text>
+        {data.activity.length === 0 ? (
+          <Text color={COLOR.muted}> no recent events</Text>
+        ) : (
+          windowList(data.activity, 0, Math.max(3, height - 8)).rows.map(({ item }) => (
+            <Text key={item.id} wrap="truncate">
+              <Text color={COLOR.faint}>{new Date(item.at).toLocaleTimeString()} </Text>
+              <Text color={COLOR.accent}>{item.type}</Text>
+              <Text color={COLOR.muted}>{` ${item.subjectType}`}</Text>
             </Text>
           ))
         )}
       </Box>
-      <Box marginTop={1} flexDirection="column">
-        <Text color={MUTED}>tasks</Text>
-        {tasks.slice(0, 8).map((item) => (
-          <Text key={item.id} wrap="truncate">
-            <Text color={statusColor(item.status)}>● </Text>
-            {item.title}
-          </Text>
-        ))}
-        {tasks.length > 8 ? <Text color={MUTED}>+{tasks.length - 8} more</Text> : null}
+    </Box>
+  );
+}
+
+function sprintRow(sprint: SprintData): TableRow {
+  const done = sprint.board.summary.verified + sprint.board.summary.closed;
+  return {
+    key: sprint.view.id,
+    cells: [
+      { text: statusLabel(sprint.view.status), color: statusColor(sprint.view.status) },
+      { text: `${sprint.active ? "★ " : ""}${sprint.view.title}`, color: COLOR.text },
+      { text: `${done}/${sprint.scopeCount}`, color: COLOR.muted },
+      { text: String(sprint.board.summary.taskCount), color: COLOR.muted },
+      { text: String(sprint.board.summary.activeBlockerCount), color: sprint.board.summary.activeBlockerCount > 0 ? COLOR.warn : COLOR.faint }
+    ]
+  };
+}
+
+function SprintListScreen({ data, cursor, height, width }: { readonly data: TuiData; readonly cursor: number; readonly height: number; readonly width: number }) {
+  const nameWidth = Math.max(20, width - 8 - 9 - 7 - 9);
+  const columns: readonly TableColumn[] = [
+    { header: "status", width: 8 },
+    { header: "sprint", width: nameWidth },
+    { header: "done", width: 9, align: "right" },
+    { header: "tasks", width: 7, align: "right" },
+    { header: "block", width: 9, align: "right" }
+  ];
+  return <Table columns={columns} rows={data.sprints.map(sprintRow)} cursor={cursor} height={height - 1} emptyLabel="No sprints. Create one with bwrk work create … --kind sprint" />;
+}
+
+function taskRow(task: WorkItemView): TableRow {
+  return {
+    key: task.id,
+    cells: [
+      { text: statusLabel(task.status), color: statusColor(task.status) },
+      { text: task.title, color: COLOR.text },
+      { text: task.priority, color: COLOR.muted },
+      { text: task.activeReservation ? task.activeReservation.agentId : "—", color: COLOR.faint }
+    ]
+  };
+}
+
+function SprintDetailScreen({ data, frame, height, width }: { readonly data: TuiData; readonly frame: NavFrame; readonly height: number; readonly width: number }) {
+  const sprint = data.sprints.find((entry) => entry.view.id === frame.sprintId);
+  if (!sprint) return <EmptyState title="Sprint" lines={["This sprint is no longer available.", "Press ⌫ to go back."]} />;
+  const { view, board, scopeCount, active } = sprint;
+  const lanes = board.lanes.filter((lane) => lane.count > 0).map((lane) => `${statusLabel(lane.id)} ${lane.count}`);
+  const nameWidth = Math.max(20, width - 8 - 10 - 12);
+  const columns: readonly TableColumn[] = [
+    { header: "status", width: 8 },
+    { header: "task", width: nameWidth },
+    { header: "priority", width: 10 },
+    { header: "reserved", width: 12 }
+  ];
+  const tasks = sprintTasks(sprint);
+  return (
+    <Box flexDirection="column">
+      <Box flexDirection="column" marginBottom={1}>
+        <Field label="status" value={active ? `${view.status} (active)` : view.status} color={statusColor(view.status)} />
+        <Field label="priority" value={view.priority} />
+        <Field label="scope" value={`${scopeCount} items · ${board.summary.taskCount} tasks · ${board.summary.phaseCount} phases · ${board.summary.activeBlockerCount} blockers`} />
+        <Field label="lanes" value={lanes.length > 0 ? lanes.join("  ") : "no work yet"} color={COLOR.muted} />
       </Box>
-    </Panel>
+      <Text color={COLOR.faint}>{`TASKS (${tasks.length})`}</Text>
+      <Table columns={columns} rows={tasks.map(taskRow)} cursor={frame.cursor} height={height - 7} emptyLabel="No work in this sprint yet." />
+    </Box>
   );
 }
 
-function WorkDetail({ item }: { readonly item: WorkItemView | undefined }) {
-  if (!item) {
-    return (
-      <Panel title="Detail" tone={MUTED}>
-        <Text color={MUTED}>Select an item with j/k.</Text>
-      </Panel>
-    );
-  }
+function workRow(task: WorkItemView): TableRow {
+  return {
+    key: task.id,
+    cells: [
+      { text: statusLabel(task.status), color: statusColor(task.status) },
+      { text: task.title, color: COLOR.text },
+      { text: task.priority, color: COLOR.muted },
+      { text: task.labels.length > 0 ? task.labels.join(", ") : "—", color: COLOR.faint }
+    ]
+  };
+}
+
+function WorkListScreen({ data, cursor, height, width }: { readonly data: TuiData; readonly cursor: number; readonly height: number; readonly width: number }) {
+  const items = data.work.queues.flatMap((queue) => queue.items);
+  const nameWidth = Math.max(20, Math.floor((width - 8 - 10) * 0.6));
+  const labelWidth = Math.max(10, width - 8 - 10 - nameWidth);
+  const columns: readonly TableColumn[] = [
+    { header: "status", width: 8 },
+    { header: "title", width: nameWidth },
+    { header: "priority", width: 10 },
+    { header: "labels", width: labelWidth }
+  ];
   return (
-    <Panel title={item.title} tone={statusColor(item.status)}>
-      <Detail label="id" value={item.id} />
-      <Detail label="kind" value={item.kind} />
-      <Detail label="status" value={item.status} valueColor={statusColor(item.status)} />
-      <Detail label="priority" value={item.priority} />
-      <Detail label="labels" value={item.labels.length > 0 ? item.labels.join(", ") : "none"} />
-      <Detail label="blockers" value={item.activeBlockerIds.length > 0 ? item.activeBlockerIds.join(", ") : "none"} />
-      <Detail
+    <Box flexDirection="column">
+      <Text color={COLOR.faint}>{`WORK (${items.length})`}</Text>
+      <Table columns={columns} rows={items.map(workRow)} cursor={cursor} height={height - 2} emptyLabel="No work items." />
+    </Box>
+  );
+}
+
+function TaskDetailScreen({ data, taskId, width }: { readonly data: TuiData; readonly taskId: string | undefined; readonly width: number }) {
+  const task = findTask(data, taskId);
+  if (!task) return <EmptyState title="Task" lines={["This item is no longer available.", "Press ⌫ to go back."]} />;
+  const detail = taskId ? data.details[taskId] : undefined;
+  return (
+    <Pane title={task.title} tone={statusColor(task.status)}>
+      <Field label="id" value={task.id} color={COLOR.muted} />
+      <Field label="kind" value={task.kind} />
+      <Field label="status" value={task.status} color={statusColor(task.status)} />
+      <Field label="priority" value={task.priority} />
+      <Field label="labels" value={task.labels.length > 0 ? task.labels.join(", ") : "none"} />
+      <Field label="blockers" value={task.activeBlockerIds.length > 0 ? task.activeBlockerIds.join(", ") : "none"} color={task.activeBlockerIds.length > 0 ? COLOR.warn : undefined} />
+      <Field
         label="reserved"
-        value={item.activeReservation ? `${item.activeReservation.agentId}${item.activeReservation.expired ? " (expired)" : ""}` : "no"}
+        value={task.activeReservation ? `${task.activeReservation.agentId}${task.activeReservation.expired ? " (expired)" : ""}` : "no"}
       />
-      <Detail label="evidence" value={`${item.evidenceCount} · verifications ${item.verificationCount}`} />
-      {item.contextSummary ? <Text color={MUTED} wrap="truncate">{item.contextSummary}</Text> : null}
-    </Panel>
+      <Field label="evidence" value={`${task.evidenceCount} · verifications ${task.verificationCount}`} />
+      {detail && detail.dependencyTitles.length > 0 ? (
+        <Field label="depends on" value={detail.dependencyTitles.join(", ")} color={COLOR.muted} />
+      ) : null}
+      {detail && detail.description ? (
+        <Box marginTop={1} flexDirection="column">
+          <Text color={COLOR.faint}>DESCRIPTION</Text>
+          <Text color={COLOR.text} wrap="wrap">{clamp(detail.description, 600)}</Text>
+        </Box>
+      ) : null}
+      {detail && detail.acceptanceCriteria.length > 0 ? (
+        <Box marginTop={1} flexDirection="column">
+          <Text color={COLOR.faint}>ACCEPTANCE</Text>
+          {detail.acceptanceCriteria.slice(0, 8).map((criterion, index) => (
+            <Text key={index} color={COLOR.text} wrap="truncate">
+              <Text color={COLOR.accent}>• </Text>
+              {fit(criterion, Math.max(20, width - 4))}
+            </Text>
+          ))}
+        </Box>
+      ) : null}
+    </Pane>
   );
 }
 
-function Detail({ label, value, valueColor }: { readonly label: string; readonly value: string; readonly valueColor?: string }) {
-  return (
-    <Text wrap="truncate">
-      <Text color={MUTED}>{label.padEnd(9)}</Text>
-      <Text color={valueColor}>{value}</Text>
-    </Text>
-  );
-}
-
-function healthColor(health: string): string {
-  if (health === "ok") return ACCENT;
-  if (health === "warning") return WARN;
-  if (health === "error" || health === "critical") return DANGER;
-  return MUTED;
+function clamp(value: string, max: number): string {
+  return value.length <= max ? value : `${value.slice(0, max - 1)}…`;
 }
 
 export function GlobalApp({ workspaceRoot, refreshMs }: { readonly workspaceRoot: string; readonly refreshMs: number }) {
@@ -521,63 +451,57 @@ export function GlobalApp({ workspaceRoot, refreshMs }: { readonly workspaceRoot
 
   const rows = stdout?.rows ?? 24;
   const columns = stdout?.columns ?? 100;
+  const clock = data ? new Date(data.generatedAt).toLocaleTimeString() : "";
   const selected = projects[cursor];
+  const nameWidth = Math.max(20, columns - 4 - 10 - 8 - 8 - 9 - 6);
+  const tableColumns: readonly TableColumn[] = [
+    { header: "health", width: 10 },
+    { header: "project", width: nameWidth },
+    { header: "open", width: 8, align: "right" },
+    { header: "ready", width: 8, align: "right" },
+    { header: "blocked", width: 9, align: "right" },
+    { header: "resv", width: 6, align: "right" }
+  ];
+  const tableRows: readonly TableRow[] = projects.map((project) => ({
+    key: project.id || project.name,
+    cells: [
+      { text: project.stale ? "stale" : project.health, color: healthColor(project.health) },
+      { text: project.name, color: COLOR.text },
+      { text: String(project.open), color: COLOR.muted },
+      { text: String(project.ready), color: COLOR.accent },
+      { text: String(project.blocked), color: project.blocked > 0 ? COLOR.warn : COLOR.faint },
+      { text: String(project.reservations), color: COLOR.faint }
+    ]
+  }));
 
   return (
     <Box flexDirection="column" width={columns} height={rows}>
-      {isRawModeSupported ? <KeyBindings onKey={handleKey} /> : null}
-      <Box justifyContent="space-between">
-        <Text>
-          <Text color={ACCENT} bold>❄ Boreal Global</Text>
-          <Text color={MUTED}> · {projects.length} registered project{projects.length === 1 ? "" : "s"}</Text>
-        </Text>
-        <Text color={MUTED}>
-          {refreshing ? "refreshing… " : ""}
-          {data ? new Date(data.generatedAt).toLocaleTimeString() : ""}
-        </Text>
-      </Box>
-      {error ? <Text color={DANGER}>! {error}</Text> : null}
-      {data && data.warnings.length > 0 ? <Text color={WARN} wrap="truncate">⚠ {data.warnings.join(" ")}</Text> : null}
-      <Box marginTop={1} flexGrow={1}>
+      {isRawModeSupported ? <KeyBindings onKey={handleKey} active /> : null}
+      <TopBar crumbs={["Global", `${projects.length} project${projects.length === 1 ? "" : "s"}`]} right={`${refreshing ? "↻ " : ""}${clock}`} />
+      <Box flexGrow={1} paddingX={1} paddingY={1} flexDirection="column">
+        {error ? <Text color={COLOR.danger}>! {error}</Text> : null}
+        {data && data.warnings.length > 0 ? <Text color={COLOR.warn} wrap="truncate">⚠ {data.warnings.join(" ")}</Text> : null}
         {!data ? (
-          <Text color={MUTED}>Loading registry…</Text>
+          <Text color={COLOR.muted}>Loading registry…</Text>
         ) : projects.length === 0 ? (
-          <Panel title="No projects registered" tone={WARN}>
-            <Text>Global tracks every registered project. Register one with</Text>
-            <Text color={ACCENT}>{"bwrk registry add --workspace <path>"}</Text>
-            <Text color={MUTED}>then refresh with r.</Text>
-          </Panel>
+          <EmptyState
+            title="No projects registered"
+            lines={["Global tracks every registered project.", "Register one with: bwrk registry add --workspace <path>", "then refresh with r."]}
+          />
         ) : (
-          <Box flexDirection="column">
-            <Box>
-              <Box width={30}><Text color={MUTED} bold>project</Text></Box>
-              <Box width={10}><Text color={MUTED} bold>health</Text></Box>
-              <Box width={7}><Text color={MUTED} bold>open</Text></Box>
-              <Box width={7}><Text color={MUTED} bold>ready</Text></Box>
-              <Box width={9}><Text color={MUTED} bold>blocked</Text></Box>
-              <Box width={6}><Text color={MUTED} bold>resv</Text></Box>
-            </Box>
-            {projects.map((project, index) => (
-              <Box key={project.id || index}>
-                <Box width={30}><Text inverse={index === cursor} wrap="truncate">{project.name}</Text></Box>
-                <Box width={10}><Text color={healthColor(project.health)}>{project.stale ? "stale" : project.health}</Text></Box>
-                <Box width={7}><Text>{project.open}</Text></Box>
-                <Box width={7}><Text color={ACCENT}>{project.ready}</Text></Box>
-                <Box width={9}><Text color={project.blocked > 0 ? WARN : MUTED}>{project.blocked}</Text></Box>
-                <Box width={6}><Text color={MUTED}>{project.reservations}</Text></Box>
-              </Box>
-            ))}
-          </Box>
+          <>
+            <Table columns={tableColumns} rows={tableRows} cursor={cursor} height={rows - 7} />
+            {selected ? <Text color={COLOR.faint} wrap="truncate">{`  ${selected.projectRoot}`}</Text> : null}
+          </>
         )}
       </Box>
-      {selected ? <Text color={MUTED} wrap="truncate">{selected.projectRoot}</Text> : null}
-      <Box marginTop={1}>
-        {isRawModeSupported ? (
-          <Text color={MUTED}>j/k move · r refresh · q quit</Text>
-        ) : (
-          <Text color={WARN}>input unavailable (no raw-mode TTY) — keyboard disabled; Ctrl+C to exit</Text>
-        )}
-      </Box>
+      <KeyHints
+        hints={
+          isRawModeSupported
+            ? [{ keys: "↑↓/jk", label: "move" }, { keys: "r", label: "refresh" }, { keys: "q", label: "quit" }]
+            : [{ keys: "no TTY", label: "keyboard disabled — Ctrl+C to exit" }]
+        }
+      />
     </Box>
   );
 }
