@@ -36,6 +36,7 @@ function KeyBindings({ onKey, active }: { readonly onKey: InkInputHandler; reado
 function sectionFromView(view: string | undefined): TuiSection {
   if (view === "sprint" || view === "sprints") return "sprints";
   if (view === "work") return "work";
+  if (view === "activity") return "activity";
   return "overview";
 }
 
@@ -60,6 +61,7 @@ function workListItems(data: TuiData, showAll: boolean): readonly WorkItemView[]
 function activeList(data: TuiData, frame: NavFrame, showAllWork: boolean): readonly { readonly id: string }[] {
   if (frame.screen === "sprintList") return data.sprints.map((sprint) => ({ id: sprint.view.id }));
   if (frame.screen === "workList") return workListItems(data, showAllWork);
+  if (frame.screen === "activityList") return data.timeline;
   if (frame.screen === "sprintDetail") {
     const sprint = data.sprints.find((entry) => entry.view.id === frame.sprintId);
     return sprint ? sprintTasks(sprint) : [];
@@ -75,10 +77,14 @@ function crumbLabel(data: TuiData, frame: NavFrame): string {
       return "Sprints";
     case "workList":
       return "Work";
+    case "activityList":
+      return "Activity";
     case "sprintDetail":
       return data.sprints.find((entry) => entry.view.id === frame.sprintId)?.view.title ?? "Sprint";
     case "taskDetail":
       return findTask(data, frame.taskId)?.title ?? "Task";
+    case "activityDetail":
+      return findEvent(data, frame.eventId)?.type ?? "Event";
     default:
       return "";
   }
@@ -87,6 +93,11 @@ function crumbLabel(data: TuiData, frame: NavFrame): string {
 function findTask(data: TuiData, taskId: string | undefined): WorkItemView | undefined {
   if (!taskId) return undefined;
   return data.work.queues.flatMap((queue) => queue.items).find((item) => item.id === taskId);
+}
+
+function findEvent(data: TuiData, eventId: string | undefined) {
+  if (!eventId) return undefined;
+  return data.timeline.find((entry) => entry.id === eventId);
 }
 
 export function App({
@@ -203,7 +214,8 @@ function hintsFor(screen: NavFrame["screen"], inputEnabled: boolean): readonly {
   const refresh = { keys: "r", label: "refresh" };
   const quit = { keys: "q", label: "quit" };
   if (screen === "overview") return [sections, refresh, quit];
-  if (screen === "taskDetail") return [{ keys: "⌫/esc", label: "back" }, sections, refresh, quit];
+  if (screen === "taskDetail" || screen === "activityDetail") return [{ keys: "⌫/esc", label: "back" }, sections, refresh, quit];
+  if (screen === "activityList") return [move, { keys: "⏎", label: "open event" }, sections, refresh, quit];
   if (screen === "sprintDetail") {
     return [move, { keys: "⏎", label: "open task" }, { keys: "⌫/esc", label: "back" }, refresh, quit];
   }
@@ -237,6 +249,10 @@ function Screen({
       return <WorkListScreen data={data} cursor={frame.cursor} height={height} width={width} showAll={showAllWork} />;
     case "taskDetail":
       return <TaskDetailScreen data={data} taskId={frame.taskId} width={width} />;
+    case "activityList":
+      return <ActivityListScreen data={data} cursor={frame.cursor} height={height} width={width} />;
+    case "activityDetail":
+      return <ActivityDetailScreen data={data} eventId={frame.eventId} width={width} />;
     default:
       return null;
   }
@@ -282,10 +298,10 @@ function OverviewScreen({ data, height }: { readonly data: TuiData; readonly hei
       </Box>
       <Box marginTop={1} flexDirection="column">
         <Text color={COLOR.faint}>RECENT ACTIVITY</Text>
-        {data.activity.length === 0 ? (
+        {data.timeline.length === 0 ? (
           <Text color={COLOR.muted}> no recent events</Text>
         ) : (
-          windowList(data.activity, 0, Math.max(3, height - 8)).rows.map(({ item }) => (
+          windowList(data.timeline, 0, Math.max(3, height - 8)).rows.map(({ item }) => (
             <Text key={item.id} wrap="truncate">
               <Text color={COLOR.faint}>{new Date(item.at).toLocaleTimeString()} </Text>
               <Text color={COLOR.accent}>{item.type}</Text>
@@ -340,7 +356,7 @@ function SprintDetailScreen({ data, frame, height, width }: { readonly data: Tui
   const sprint = data.sprints.find((entry) => entry.view.id === frame.sprintId);
   if (!sprint) return <EmptyState title="Sprint" lines={["This sprint is no longer available.", "Press ⌫ to go back."]} />;
   const { view, board, scopeCount, active } = sprint;
-  const lanes = board.lanes.filter((lane) => lane.count > 0).map((lane) => `${statusLabel(lane.id)} ${lane.count}`);
+  const activeLanes = board.lanes.filter((lane) => lane.count > 0);
   const nameWidth = Math.max(20, width - 8 - 10 - 12);
   const columns: readonly TableColumn[] = [
     { header: "status", width: 8 },
@@ -355,7 +371,18 @@ function SprintDetailScreen({ data, frame, height, width }: { readonly data: Tui
         <Field label="status" value={active ? `${view.status} (active)` : view.status} color={statusColor(view.status)} />
         <Field label="priority" value={view.priority} />
         <Field label="scope" value={`${scopeCount} items · ${board.summary.taskCount} tasks · ${board.summary.phaseCount} phases · ${board.summary.activeBlockerCount} blockers`} />
-        <Field label="lanes" value={lanes.length > 0 ? lanes.join("  ") : "no work yet"} color={COLOR.muted} />
+        <Box>
+          <Text color={COLOR.faint}>{fit("lanes", 11)}</Text>
+          {activeLanes.length === 0 ? (
+            <Text color={COLOR.muted}>no work yet</Text>
+          ) : (
+            activeLanes.map((lane, index) => (
+              <Text key={lane.id} color={statusColor(lane.id)}>
+                {`${index > 0 ? "  " : ""}${statusLabel(lane.id)} ${lane.count}`}
+              </Text>
+            ))
+          )}
+        </Box>
       </Box>
       <Text color={COLOR.faint}>{`TASKS (${tasks.length})`}</Text>
       <Table columns={columns} rows={tasks.map(taskRow)} cursor={frame.cursor} height={height - 7} emptyLabel="No work in this sprint yet." />
@@ -405,26 +432,84 @@ function WorkListScreen({ data, cursor, height, width, showAll }: { readonly dat
   );
 }
 
+function shortId(id: string): string {
+  return id.length > 16 ? `…${id.slice(-12)}` : id;
+}
+
+function ActivityListScreen({ data, cursor, height, width }: { readonly data: TuiData; readonly cursor: number; readonly height: number; readonly width: number }) {
+  const typeWidth = Math.max(16, Math.floor((width - 12) * 0.42));
+  const subjectWidth = Math.max(16, width - 12 - typeWidth);
+  const columns: readonly TableColumn[] = [
+    { header: "time", width: 12 },
+    { header: "event", width: typeWidth },
+    { header: "subject", width: subjectWidth }
+  ];
+  const rows: readonly TableRow[] = data.timeline.map((event) => ({
+    key: event.id,
+    cells: [
+      { text: new Date(event.at).toLocaleTimeString(), color: COLOR.faint },
+      { text: event.type, color: COLOR.accent },
+      { text: `${event.subjectType} ${shortId(event.subjectId)}`, color: COLOR.muted }
+    ]
+  }));
+  return (
+    <Box flexDirection="column">
+      <Text color={COLOR.faint}>{`TIMELINE (${data.timeline.length})`}</Text>
+      <Table columns={columns} rows={rows} cursor={cursor} height={height - 2} emptyLabel="No recent events." />
+    </Box>
+  );
+}
+
+function ActivityDetailScreen({ data, eventId, width }: { readonly data: TuiData; readonly eventId: string | undefined; readonly width: number }) {
+  const event = findEvent(data, eventId);
+  if (!event) return <EmptyState title="Event" lines={["This event is no longer available.", "Press ⌫ to go back."]} />;
+  return (
+    <Pane title={event.type} tone={COLOR.accent}>
+      <Field label="time" value={new Date(event.at).toLocaleString()} />
+      <Field label="subject" value={`${event.subjectType} · ${event.subjectId}`} color={COLOR.muted} />
+      <Box marginTop={1} flexDirection="column">
+        <Text color={COLOR.faint}>PAYLOAD</Text>
+        {event.payload.length === 0 ? (
+          <Text color={COLOR.muted}> none</Text>
+        ) : (
+          event.payload.map((entry, index) => (
+            <Text key={index} wrap="truncate">
+              <Text color={COLOR.faint}>{fit(entry.key, 18)}</Text>
+              <Text color={COLOR.text}>{fit(entry.value, Math.max(20, width - 20))}</Text>
+            </Text>
+          ))
+        )}
+      </Box>
+    </Pane>
+  );
+}
+
 function TaskDetailScreen({ data, taskId, width }: { readonly data: TuiData; readonly taskId: string | undefined; readonly width: number }) {
   const task = findTask(data, taskId);
   if (!task) return <EmptyState title="Task" lines={["This item is no longer available.", "Press ⌫ to go back."]} />;
   const detail = taskId ? data.details[taskId] : undefined;
   return (
     <Pane title={task.title} tone={statusColor(task.status)}>
-      <Field label="id" value={task.id} color={COLOR.muted} />
-      <Field label="kind" value={task.kind} />
-      <Field label="status" value={task.status} color={statusColor(task.status)} />
-      <Field label="priority" value={task.priority} />
-      <Field label="labels" value={task.labels.length > 0 ? task.labels.join(", ") : "none"} />
-      <Field label="blockers" value={task.activeBlockerIds.length > 0 ? task.activeBlockerIds.join(", ") : "none"} color={task.activeBlockerIds.length > 0 ? COLOR.warn : undefined} />
-      <Field
-        label="reserved"
-        value={task.activeReservation ? `${task.activeReservation.agentId}${task.activeReservation.expired ? " (expired)" : ""}` : "no"}
-      />
-      <Field label="evidence" value={`${task.evidenceCount} · verifications ${task.verificationCount}`} />
-      {detail && detail.dependencyTitles.length > 0 ? (
-        <Field label="depends on" value={detail.dependencyTitles.join(", ")} color={COLOR.muted} />
-      ) : null}
+      <Text>
+        <Text color={statusColor(task.status)} bold>{statusLabel(task.status)}</Text>
+        <Text color={COLOR.faint}>{"  ·  "}</Text>
+        <Text color={COLOR.muted}>{task.kind}</Text>
+        <Text color={COLOR.faint}>{"  ·  "}</Text>
+        <Text color={COLOR.muted}>{`${task.priority} priority`}</Text>
+      </Text>
+      <Box marginTop={1} flexDirection="column">
+        <Field label="id" value={task.id} color={COLOR.muted} />
+        <Field label="labels" value={task.labels.length > 0 ? task.labels.join(", ") : "none"} />
+        <Field label="blockers" value={task.activeBlockerIds.length > 0 ? task.activeBlockerIds.join(", ") : "none"} color={task.activeBlockerIds.length > 0 ? COLOR.warn : undefined} />
+        <Field
+          label="reserved"
+          value={task.activeReservation ? `${task.activeReservation.agentId}${task.activeReservation.expired ? " (expired)" : ""}` : "no"}
+        />
+        <Field label="evidence" value={`${task.evidenceCount} · verifications ${task.verificationCount}`} />
+        {detail && detail.dependencyTitles.length > 0 ? (
+          <Field label="depends on" value={detail.dependencyTitles.join(", ")} color={COLOR.muted} />
+        ) : null}
+      </Box>
       {detail && detail.description ? (
         <Box marginTop={1} flexDirection="column">
           <Text color={COLOR.faint}>DESCRIPTION</Text>

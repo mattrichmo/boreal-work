@@ -142,7 +142,7 @@ export function Pane({ title, tone = COLOR.accent, children }: { readonly title?
   return (
     <Box flexDirection="column" borderStyle="round" borderColor={tone} paddingX={1}>
       {title ? (
-        <Text color={tone} bold>
+        <Text color={tone} bold wrap="truncate">
           {title}
         </Text>
       ) : null}

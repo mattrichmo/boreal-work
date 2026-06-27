@@ -24,6 +24,7 @@ export interface TuiActivityEntry {
   readonly subjectType: string;
   readonly subjectId: string;
   readonly at: string;
+  readonly payload: readonly { readonly key: string; readonly value: string }[];
 }
 
 export interface TuiSprintData {
@@ -72,7 +73,7 @@ export interface TuiData {
   readonly work: WorkDashboardView;
   readonly sprints: readonly TuiSprintData[];
   readonly activeSprintId?: string;
-  readonly activity: readonly TuiActivityEntry[];
+  readonly timeline: readonly TuiActivityEntry[];
   readonly details: Readonly<Record<string, TuiTaskDetail>>;
   readonly warnings: readonly string[];
 }
@@ -114,6 +115,17 @@ export interface GlobalTuiData {
 
 function num(value: unknown): number {
   return typeof value === "number" && Number.isFinite(value) ? value : 0;
+}
+
+function stringifyPayloadValue(value: unknown): string {
+  if (value === null || value === undefined) return "—";
+  if (typeof value === "string") return value;
+  if (typeof value === "number" || typeof value === "boolean") return String(value);
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return String(value);
+  }
 }
 
 // Global mode reuses the same registry aggregation the browser global console
@@ -163,7 +175,7 @@ export async function loadTuiData(workspaceRoot: string): Promise<TuiData> {
       initialized: false,
       work: buildWorkDashboardView({ work: [], generatedAt }),
       sprints: [],
-      activity: [],
+      timeline: [],
       details: {},
       warnings: ["Workspace is not initialized. Run `bwrk init` in this directory."]
     };
@@ -207,15 +219,18 @@ export async function loadTuiData(workspaceRoot: string): Promise<TuiData> {
     })
     .sort((a, b) => Number(b.active) - Number(a.active) || a.view.title.localeCompare(b.view.title));
 
-  const activity = [...events]
+  const timeline = [...events]
     .sort((a, b) => b.meta.createdAt.localeCompare(a.meta.createdAt))
-    .slice(0, 10)
+    .slice(0, 200)
     .map((event) => ({
       id: event.meta.id,
       type: event.type,
       subjectType: event.subjectType,
       subjectId: event.subjectId,
-      at: event.meta.createdAt
+      at: event.meta.createdAt,
+      payload: Object.entries(event.payload ?? {})
+        .slice(0, 14)
+        .map(([key, value]) => ({ key, value: stringifyPayloadValue(value) }))
     }));
 
   const details: Record<string, TuiTaskDetail> = {};
@@ -227,5 +242,5 @@ export async function loadTuiData(workspaceRoot: string): Promise<TuiData> {
     };
   }
 
-  return { workspaceRoot, generatedAt, initialized: true, work, sprints, activeSprintId, activity, details, warnings };
+  return { workspaceRoot, generatedAt, initialized: true, work, sprints, activeSprintId, timeline, details, warnings };
 }
