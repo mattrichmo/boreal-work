@@ -17,6 +17,8 @@ import type { ConsoleRoute } from "./routes.js";
 
 export type ConsoleDataMode = "fixture" | "live";
 
+export type ConsoleScope = "repo" | "global";
+
 export interface ConsoleSelection {
   readonly wikiPage?: string;
   readonly rawSource?: string;
@@ -27,6 +29,7 @@ export interface ConsoleWorkspaceState {
   readonly workspaceRoot: string;
   readonly memoryRoot?: string;
   readonly mode: ConsoleDataMode;
+  readonly scope: ConsoleScope;
   readonly generatedAt: string;
   readonly stale: boolean;
   readonly warnings: readonly string[];

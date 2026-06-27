@@ -30,9 +30,10 @@ import {
   validateConsoleCliContract
 } from "./cli-contracts.js";
 import { createMemoryDashboardActions, memoryWorkflowShowCommand } from "./memory-actions.js";
-import { CONSOLE_ROUTES } from "./routes.js";
+import { routesForScope } from "./routes.js";
 import type {
   ConsoleDataSet,
+  ConsoleScope,
   ConsoleSelection,
   RawContradictionReviewView,
   RawIngestFindingSeverity,
@@ -92,6 +93,7 @@ export interface LoadLiveConsoleDataOptions {
   readonly sprintLabel?: string;
   readonly globalSearchQuery?: string;
   readonly selection?: ConsoleSelection;
+  readonly scope?: ConsoleScope;
 }
 
 export function createNodeCliRunner(input: { readonly workspaceRoot: string; readonly cliPath?: string; readonly cliCommand?: string }): ConsoleCliRunner {
@@ -109,6 +111,7 @@ export async function loadLiveConsoleData(options: LoadLiveConsoleDataOptions): 
   const workspaceRoot = resolve(options.workspaceRoot);
   const generatedAt = new Date().toISOString();
   const runner = options.runner ?? createNodeCliRunner({ workspaceRoot });
+  const scope: ConsoleScope = options.scope ?? "repo";
   const sprintLabel = options.sprintLabel ?? "sprint-04";
   const globalSearchQuery = options.globalSearchQuery ?? "v1-remainder global dashboard registry";
   const [
@@ -118,8 +121,6 @@ export async function loadLiveConsoleData(options: LoadLiveConsoleDataOptions): 
     syncStatus,
     doctorResult,
     activeReservations,
-    registryList,
-    registryDoctor,
     projectSetup
   ] = await Promise.all([
     cliArray<WorkListRow>(runner, ["work", "list", "--label", sprintLabel, "--limit", "100", "--json"]),
@@ -128,10 +129,17 @@ export async function loadLiveConsoleData(options: LoadLiveConsoleDataOptions): 
     cliData<unknown>(runner, ["sync", "status", "--json"]),
     cliData<unknown>(runner, ["doctor", "--json"]),
     cliArray<ReservationListRow>(runner, ["reservation", "list", "--status", "active", "--json"]),
-    cliData<unknown>(runner, ["registry", "list", "--json"]),
-    cliData<unknown>(runner, ["registry", "doctor", "--json"]),
     readProjectSetup(workspaceRoot)
   ]);
+  // The cross-repo registry is only loaded in global scope; repo scope never
+  // reaches across projects (and skips these calls entirely).
+  const [registryList, registryDoctor] =
+    scope === "global"
+      ? await Promise.all([
+          cliData<unknown>(runner, ["registry", "list", "--json"]),
+          cliData<unknown>(runner, ["registry", "doctor", "--json"])
+        ])
+      : [undefined, undefined];
   const sprintWork = await Promise.all(sprintRows.map((row) => loadWorkView(runner, row)));
   const readyWork = readyRows.map((row) => workViewFromRow(row));
   const listedWork = allRows.map((row) => workViewFromRow(row));
@@ -161,21 +169,25 @@ export async function loadLiveConsoleData(options: LoadLiveConsoleDataOptions): 
     ...projectFindings.filter((finding) => finding.severity !== "info").map((finding) => finding.message)
   ];
   const workspaceStale = !sync.ok || health.summary.errors > 0 || health.summary.warnings > 0;
-  const projectOverviews = await buildConsoleProjectOverviews({
-    runner,
-    workspaceRoot,
-    generatedAt,
-    registryList,
-    registryDoctor,
-    projectSetup,
-    currentWork: allWork,
-    currentSync: sync,
-    currentFindings: projectFindings,
-    currentReservations: activeReservations,
-    currentSearchResults,
-    currentActivityRows,
-    globalSearchQuery
-  });
+  const projectOverviews =
+    scope === "global"
+      ? await buildConsoleProjectOverviews({
+          runner,
+          workspaceRoot,
+          generatedAt,
+          registryList,
+          registryDoctor,
+          projectSetup,
+          currentWork: allWork,
+          currentSync: sync,
+          currentFindings: projectFindings,
+          currentReservations: activeReservations,
+          currentSearchResults,
+          currentActivityRows,
+          globalSearchQuery,
+          includeCurrentFallback: false
+        })
+      : [];
   const registryEntries = projectOverviews.map((project) => project.entry);
   const rawInbox = await loadRawInbox(runner, generatedAt, options.selection?.rawSource);
   const wikiExplorer = await loadWikiExplorer(runner, generatedAt, rawInbox, {
@@ -197,11 +209,12 @@ export async function loadLiveConsoleData(options: LoadLiveConsoleDataOptions): 
       workspaceRoot: projectSetup.projectRoot ?? workspaceRoot,
       memoryRoot,
       mode: "live",
+      scope,
       generatedAt,
       stale: workspaceStale,
       warnings: staleWarnings
     },
-    routes: CONSOLE_ROUTES,
+    routes: routesForScope(scope),
     registry: buildProjectRegistryView({
       generatedAt,
       entries: registryEntries
@@ -2075,9 +2088,13 @@ async function buildConsoleProjectOverviews(input: {
   readonly currentSearchResults: readonly SearchResultRow[];
   readonly currentActivityRows: readonly OperationListRow[];
   readonly globalSearchQuery: string;
+  readonly includeCurrentFallback?: boolean;
 }): Promise<readonly ConsoleProjectOverview[]> {
   const registryRows = registryProjectRowsFromCli(input.registryList);
   const registryFindings = registryFindingsByProject(input.registryDoctor);
+  if (registryRows.length === 0 && input.includeCurrentFallback === false) {
+    return [];
+  }
   if (registryRows.length === 0) {
     return [
       currentProjectOverview({

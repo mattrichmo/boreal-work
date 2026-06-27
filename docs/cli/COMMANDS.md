@@ -383,6 +383,18 @@ bwrk dashboard global --json
 bwrk dashboard global --limit 10 --json
 ```
 
+## `global`
+
+```bash
+bwrk global [--tui] [--refresh-ms <ms>] [--host <host>] [--port <n>] [--no-open] [--mode live|fixture] [--live-cache-ttl-ms <ms>]
+```
+
+Launches the high-level console scoped to every project in the machine-local registry, rather than the current repository. This is the cross-repo tracker: `bwrk dashboard` shows only the current workspace, while `bwrk global` aggregates all registered projects. Register projects first with `bwrk registry add --workspace <path>` (or `bwrk registry import-setup` from inside a project); with an empty registry the console shows a prompt to register one.
+
+Pass `--tui` to run the terminal version. Like `bwrk dashboard` this is an interactive human surface and does not support `--json`; use `bwrk dashboard global --json` for the bounded data payload.
+
+Options match `bwrk dashboard` (`--tui`, `--refresh-ms`, `--host`, `--port`, `--no-open`, `--mode`, `--live-cache-ttl-ms`).
+
 ## `daemon status`
 
 ```bash

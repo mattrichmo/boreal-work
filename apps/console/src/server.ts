@@ -14,13 +14,14 @@ import {
 import { renderConsoleHtml } from "./app/render.js";
 import { consoleStatePayload } from "./app/render.js";
 import { routeFromPath } from "./app/routes.js";
-import type { ConsoleDataMode, ConsoleDataSet, ConsoleSelection } from "./app/types.js";
+import type { ConsoleDataMode, ConsoleDataSet, ConsoleScope, ConsoleSelection } from "./app/types.js";
 
 export interface ConsoleServerOptions {
   readonly workspaceRoot: string;
   readonly host?: string;
   readonly port?: number;
   readonly mode?: ConsoleDataMode;
+  readonly scope?: ConsoleScope;
   readonly runner?: ConsoleCliRunner;
   readonly csrfToken?: string;
   readonly liveCacheTtlMs?: number;
@@ -39,6 +40,7 @@ export interface RunningConsoleServer {
 export function createConsoleHttpServer(options: ConsoleServerOptions): Server {
   const workspaceRoot = resolve(options.workspaceRoot);
   const mode = options.mode ?? "live";
+  const scope = options.scope ?? "repo";
   const host = options.host ?? "127.0.0.1";
   const csrfToken = options.csrfToken ?? createConsoleToken();
   const liveCache = createConsoleDataCache(options.liveCacheTtlMs ?? DEFAULT_LIVE_CACHE_TTL_MS);
@@ -46,7 +48,7 @@ export function createConsoleHttpServer(options: ConsoleServerOptions): Server {
     try {
       const url = requestUrl(request);
       if (url.pathname === "/api/state") {
-        await sendJson(response, consoleStatePayload(await liveCache.load({ workspaceRoot, mode, runner: options.runner })));
+        await sendJson(response, consoleStatePayload(await liveCache.load({ workspaceRoot, mode, scope, runner: options.runner })));
         return;
       }
       if (url.pathname.startsWith("/api/commands/")) {
@@ -57,10 +59,11 @@ export function createConsoleHttpServer(options: ConsoleServerOptions): Server {
         await handleProjectSettings({ request, response, workspaceRoot, runner: options.runner, csrfToken, host, afterMutation: liveCache.invalidate });
         return;
       }
-      const route = routeFromPath(url.pathname);
+      const route = routeFromPath(url.pathname, scope);
       const data = await liveCache.load({
         workspaceRoot,
         mode: url.searchParams.get("mode") === "fixture" ? "fixture" : mode,
+        scope,
         runner: options.runner,
         selection: {
           wikiPage: url.searchParams.get("page") ?? undefined,
@@ -213,17 +216,19 @@ function healthOk(value: unknown): boolean {
 async function loadConsoleData(input: {
   readonly workspaceRoot: string;
   readonly mode: ConsoleDataMode;
+  readonly scope?: ConsoleScope;
   readonly runner?: ConsoleCliRunner;
   readonly selection?: ConsoleSelection;
 }): Promise<ConsoleDataSet> {
   if (input.mode === "fixture") {
-    return createFixtureConsoleData({ workspaceRoot: input.workspaceRoot });
+    return createFixtureConsoleData({ workspaceRoot: input.workspaceRoot, scope: input.scope });
   }
   try {
     return await loadLiveConsoleData(input);
   } catch (error) {
     return createFixtureConsoleData({
       workspaceRoot: input.workspaceRoot,
+      scope: input.scope,
       warnings: [error instanceof Error ? error.message : String(error)]
     });
   }
@@ -233,6 +238,7 @@ function createConsoleDataCache(ttlMs: number): {
   load(input: {
     readonly workspaceRoot: string;
     readonly mode: ConsoleDataMode;
+    readonly scope?: ConsoleScope;
     readonly runner?: ConsoleCliRunner;
     readonly selection?: ConsoleSelection;
   }): Promise<ConsoleDataSet>;
@@ -245,7 +251,7 @@ function createConsoleDataCache(ttlMs: number): {
         return loadConsoleData(input);
       }
       const selectionKey = `${input.selection?.wikiPage ?? ""}|${input.selection?.rawSource ?? ""}`;
-      const key = `${input.mode}:${resolve(input.workspaceRoot)}:${input.runner ? "custom" : "default"}:${selectionKey}`;
+      const key = `${input.mode}:${input.scope ?? "repo"}:${resolve(input.workspaceRoot)}:${input.runner ? "custom" : "default"}:${selectionKey}`;
       const now = Date.now();
       if (!cached || cached.key !== key || cached.expiresAt <= now) {
         cached = {
@@ -524,6 +530,7 @@ function parseServerArgs(argv: readonly string[]): ConsoleServerOptions {
     host: valueAfter(argv, "--host") ?? "127.0.0.1",
     port: Number(valueAfter(argv, "--port") ?? "4318"),
     mode: valueAfter(argv, "--mode") === "fixture" ? "fixture" : "live",
+    scope: valueAfter(argv, "--scope") === "global" ? "global" : "repo",
     liveCacheTtlMs: numberAfter(argv, "--live-cache-ttl-ms")
   };
 }

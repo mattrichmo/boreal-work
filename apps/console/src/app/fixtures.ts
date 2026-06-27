@@ -18,9 +18,10 @@ import {
 
 import { SAFE_CONSOLE_COMMANDS } from "./commands.js";
 import { createMemoryDashboardActions, memoryWorkflowShowCommand } from "./memory-actions.js";
-import { CONSOLE_ROUTES } from "./routes.js";
+import { routesForScope } from "./routes.js";
 import type {
   ConsoleDataSet,
+  ConsoleScope,
   RawContradictionReviewView,
   RawIngestPlanView,
   RawInboxView,
@@ -38,8 +39,10 @@ export function createFixtureConsoleData(input: {
   readonly generatedAt?: string;
   readonly scenario?: ConsoleFixtureScenario;
   readonly warnings?: readonly string[];
+  readonly scope?: ConsoleScope;
 }): ConsoleDataSet {
   const generatedAt = input.generatedAt ?? new Date().toISOString();
+  const scope: ConsoleScope = input.scope ?? "repo";
   const scenario = input.scenario ?? "default";
   const sprint = workItem({
     id: "bw_work_5d61b84c8d43c6a9",
@@ -87,11 +90,12 @@ export function createFixtureConsoleData(input: {
       workspaceRoot: input.workspaceRoot,
       memoryRoot: `${input.workspaceRoot}/memory`,
       mode: "fixture",
+      scope,
       generatedAt,
       stale,
       warnings: input.warnings ?? (stale ? ["Fixture sync state is stale."] : [])
     },
-    routes: CONSOLE_ROUTES,
+    routes: routesForScope(scope),
     registry: buildProjectRegistryView({
       generatedAt,
       entries: [registryEntry]

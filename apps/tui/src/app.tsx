@@ -2,14 +2,14 @@ import { Box, Text, useApp, useInput, useStdin, useStdout, type Key } from "ink"
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 
 import type { WorkItemView } from "@boreal/ui-model";
-import { loadTuiData, type TuiData } from "./load.js";
+import { loadGlobalTuiData, loadTuiData, type GlobalTuiData, type TuiData } from "./load.js";
 
 const ACCENT = "#71d48b";
 const MUTED = "#94a39b";
 const WARN = "#d7b969";
 const DANGER = "#df7c7c";
 
-type ViewId = "global" | "sprint" | "work";
+type ViewId = "overview" | "sprint" | "work";
 
 type InkInputHandler = (input: string, key: Key) => void;
 
@@ -19,7 +19,7 @@ function KeyBindings({ onKey }: { readonly onKey: InkInputHandler }) {
 }
 
 const VIEWS: readonly { readonly id: ViewId; readonly label: string; readonly key: string }[] = [
-  { id: "global", label: "Global", key: "g" },
+  { id: "overview", label: "Overview", key: "o" },
   { id: "sprint", label: "Sprint", key: "s" },
   { id: "work", label: "Work", key: "w" }
 ];
@@ -46,7 +46,7 @@ export function App({ workspaceRoot, refreshMs }: { readonly workspaceRoot: stri
   const { isRawModeSupported } = useStdin();
   const [data, setData] = useState<TuiData | undefined>();
   const [error, setError] = useState<string | undefined>();
-  const [view, setView] = useState<ViewId>("global");
+  const [view, setView] = useState<ViewId>("overview");
   const [cursor, setCursor] = useState(0);
   const [refreshing, setRefreshing] = useState(false);
 
@@ -118,8 +118,8 @@ export function App({ workspaceRoot, refreshMs }: { readonly workspaceRoot: stri
             <Panel title="Not initialized" tone={WARN}>
               <Text>{data.warnings[0] ?? "Run `bwrk init` in this directory."}</Text>
             </Panel>
-          ) : view === "global" ? (
-            <GlobalView data={data} />
+          ) : view === "overview" ? (
+            <OverviewView data={data} />
           ) : view === "sprint" ? (
             <SprintView data={data} selected={selected} />
           ) : (
@@ -127,7 +127,7 @@ export function App({ workspaceRoot, refreshMs }: { readonly workspaceRoot: stri
           )}
         </Box>
       </Box>
-      <Footer />
+      <Footer inputEnabled={isRawModeSupported} />
     </Box>
   );
 }
@@ -187,10 +187,14 @@ function NavRail({ view }: { readonly view: ViewId }) {
   );
 }
 
-function Footer() {
+function Footer({ inputEnabled }: { readonly inputEnabled: boolean }) {
   return (
     <Box marginTop={1}>
-      <Text color={MUTED}>g/s/w views · j/k move · r refresh · q quit</Text>
+      {inputEnabled ? (
+        <Text color={MUTED}>o/s/w views · j/k move · r refresh · q quit</Text>
+      ) : (
+        <Text color={WARN}>input unavailable (no raw-mode TTY) — keyboard disabled; Ctrl+C to exit</Text>
+      )}
     </Box>
   );
 }
@@ -225,7 +229,7 @@ function Metric({ label, value, tone = ACCENT }: { readonly label: string; reado
   );
 }
 
-function GlobalView({ data }: { readonly data: TuiData }) {
+function OverviewView({ data }: { readonly data: TuiData }) {
   const summary = data.work.summary;
   const readyQueue = data.work.queues.find((queue) => queue.id === "ready");
   const inProgressQueue = data.work.queues.find((queue) => queue.id === "in_progress");
@@ -391,5 +395,129 @@ function Detail({ label, value, valueColor }: { readonly label: string; readonly
       <Text color={MUTED}>{label.padEnd(9)}</Text>
       <Text color={valueColor}>{value}</Text>
     </Text>
+  );
+}
+
+function healthColor(health: string): string {
+  if (health === "ok") return ACCENT;
+  if (health === "warning") return WARN;
+  if (health === "error" || health === "critical") return DANGER;
+  return MUTED;
+}
+
+export function GlobalApp({ workspaceRoot, refreshMs }: { readonly workspaceRoot: string; readonly refreshMs: number }) {
+  const { exit } = useApp();
+  const { stdout } = useStdout();
+  const { isRawModeSupported } = useStdin();
+  const [data, setData] = useState<GlobalTuiData | undefined>();
+  const [error, setError] = useState<string | undefined>();
+  const [cursor, setCursor] = useState(0);
+  const [refreshing, setRefreshing] = useState(false);
+
+  const refresh = useCallback(async () => {
+    setRefreshing(true);
+    try {
+      setData(await loadGlobalTuiData(workspaceRoot));
+      setError(undefined);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : String(caught));
+    } finally {
+      setRefreshing(false);
+    }
+  }, [workspaceRoot]);
+
+  useEffect(() => {
+    void refresh();
+    const timer = setInterval(() => void refresh(), refreshMs);
+    return () => clearInterval(timer);
+  }, [refresh, refreshMs]);
+
+  const projects = data?.projects ?? [];
+
+  useEffect(() => {
+    setCursor((current) => Math.min(current, Math.max(0, projects.length - 1)));
+  }, [projects.length]);
+
+  const handleKey = useCallback<InkInputHandler>(
+    (input, key) => {
+      if (input === "q" || key.escape || (key.ctrl && input === "c")) {
+        exit();
+        return;
+      }
+      if (input === "r") {
+        void refresh();
+        return;
+      }
+      if (key.downArrow || input === "j") {
+        setCursor((current) => Math.min(current + 1, Math.max(0, projects.length - 1)));
+        return;
+      }
+      if (key.upArrow || input === "k") {
+        setCursor((current) => Math.max(current - 1, 0));
+      }
+    },
+    [exit, refresh, projects.length]
+  );
+
+  const rows = stdout?.rows ?? 24;
+  const columns = stdout?.columns ?? 100;
+  const selected = projects[cursor];
+
+  return (
+    <Box flexDirection="column" width={columns} height={rows}>
+      {isRawModeSupported ? <KeyBindings onKey={handleKey} /> : null}
+      <Box justifyContent="space-between">
+        <Text>
+          <Text color={ACCENT} bold>❄ Boreal Global</Text>
+          <Text color={MUTED}> · {projects.length} registered project{projects.length === 1 ? "" : "s"}</Text>
+        </Text>
+        <Text color={MUTED}>
+          {refreshing ? "refreshing… " : ""}
+          {data ? new Date(data.generatedAt).toLocaleTimeString() : ""}
+        </Text>
+      </Box>
+      {error ? <Text color={DANGER}>! {error}</Text> : null}
+      {data && data.warnings.length > 0 ? <Text color={WARN} wrap="truncate">⚠ {data.warnings.join(" ")}</Text> : null}
+      <Box marginTop={1} flexGrow={1}>
+        {!data ? (
+          <Text color={MUTED}>Loading registry…</Text>
+        ) : projects.length === 0 ? (
+          <Panel title="No projects registered" tone={WARN}>
+            <Text>Global tracks every registered project. Register one with</Text>
+            <Text color={ACCENT}>{"bwrk registry add --workspace <path>"}</Text>
+            <Text color={MUTED}>then refresh with r.</Text>
+          </Panel>
+        ) : (
+          <Box flexDirection="column">
+            <Box>
+              <Box width={30}><Text color={MUTED} bold>project</Text></Box>
+              <Box width={10}><Text color={MUTED} bold>health</Text></Box>
+              <Box width={7}><Text color={MUTED} bold>open</Text></Box>
+              <Box width={7}><Text color={MUTED} bold>ready</Text></Box>
+              <Box width={9}><Text color={MUTED} bold>blocked</Text></Box>
+              <Box width={6}><Text color={MUTED} bold>resv</Text></Box>
+            </Box>
+            {projects.map((project, index) => (
+              <Box key={project.id || index}>
+                <Box width={30}><Text inverse={index === cursor} wrap="truncate">{project.name}</Text></Box>
+                <Box width={10}><Text color={healthColor(project.health)}>{project.stale ? "stale" : project.health}</Text></Box>
+                <Box width={7}><Text>{project.open}</Text></Box>
+                <Box width={7}><Text color={ACCENT}>{project.ready}</Text></Box>
+                <Box width={9}><Text color={project.blocked > 0 ? WARN : MUTED}>{project.blocked}</Text></Box>
+                <Box width={6}><Text color={MUTED}>{project.reservations}</Text></Box>
+              </Box>
+            ))}
+          </Box>
+        )}
+      </Box>
+      {selected ? <Text color={MUTED} wrap="truncate">{selected.projectRoot}</Text> : null}
+      <Box marginTop={1}>
+        {isRawModeSupported ? (
+          <Text color={MUTED}>j/k move · r refresh · q quit</Text>
+        ) : (
+          <Text color={WARN}>input unavailable (no raw-mode TTY) — keyboard disabled; Ctrl+C to exit</Text>
+        )}
+      </Box>
+    </Box>
   );
 }
