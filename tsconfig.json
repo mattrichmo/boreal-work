@@ -14,6 +14,7 @@
     { "path": "./apps/daemon" },
     { "path": "./apps/cli" },
     { "path": "./apps/console" },
-    { "path": "./apps/mcp" }
+    { "path": "./apps/mcp" },
+    { "path": "./apps/tui" }
   ]
 }
