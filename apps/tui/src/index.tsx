@@ -15,10 +15,9 @@ if (argv.includes("--help") || argv.includes("-h")) {
     [
       "bwrk-tui - Boreal terminal dashboard",
       "",
-      "Usage: bwrk-tui [--global] [--view overview|sprint|work] [--workspace <dir>] [--refresh-ms <n>]",
+      "Usage: bwrk-tui [--global] [--view overview|sprint|work|activity] [--search <q>] [--workspace <dir>] [--refresh-ms <n>]",
       "",
-      "Repo keys:   o overview  s sprint  w work  j/k move  r refresh  q quit",
-      "Global (--global): all registered projects  j/k move  r refresh  q quit",
+      "Keys: o/s/w/a sections · ↑↓/jk move · ⏎ open · ⌫/esc back · / search · r refresh · q quit",
       ""
     ].join("\n")
   );
@@ -31,18 +30,12 @@ const global = argv.includes("--global");
 const initialView = flagValue(argv, "--view");
 const initialQuery = argv.includes("--search") ? flagValue(argv, "--search") ?? "" : undefined;
 
-const enterAltScreen = "[?1049h";
-const leaveAltScreen = "[?1049l";
-process.stdout.write(enterAltScreen);
-
+// Alternate-screen enter/exit + SGR mouse + signal-safe restore live in
+// useAltScreen() (apps/tui/src/runtime.ts), so a signalled exit can't leave
+// the terminal stuck in the alt buffer.
 const element = global
   ? createElement(GlobalApp, { workspaceRoot, refreshMs })
   : createElement(App, { workspaceRoot, refreshMs, initialView, initialQuery });
 const instance = render(element, { exitOnCtrlC: false });
 
-instance
-  .waitUntilExit()
-  .catch(() => undefined)
-  .finally(() => {
-    process.stdout.write(leaveAltScreen);
-  });
+instance.waitUntilExit().catch(() => undefined);
