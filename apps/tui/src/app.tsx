@@ -1,5 +1,5 @@
 import { Box, Text, useApp, useInput, useStdin, useStdout, type Key } from "ink";
-import { useCallback, useEffect, useMemo, useReducer, useState } from "react";
+import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
 
 import type { WorkItemView } from "@boreal/ui-model";
 import { loadGlobalTuiData, loadTuiData, type GlobalTuiData, type TuiData } from "./load.js";
@@ -12,6 +12,8 @@ import {
   type NavFrame,
   type TuiSection
 } from "./nav.js";
+import { bindingsForScreen, footerHints as buildFooterHints, resolveAction } from "./bindings.js";
+import { useAltScreen, wheelFromInput } from "./runtime.js";
 import { searchItems, type SearchItem } from "./search.js";
 import { COLOR, fit, healthColor, statusColor, statusLabel } from "./theme.js";
 import {
@@ -135,6 +137,7 @@ export function App({
   const { exit } = useApp();
   const { stdout } = useStdout();
   const { isRawModeSupported } = useStdin();
+  useAltScreen();
   const [data, setData] = useState<TuiData | undefined>();
   const [error, setError] = useState<string | undefined>();
   const [refreshing, setRefreshing] = useState(false);
@@ -142,7 +145,14 @@ export function App({
   const [paletteOpen, setPaletteOpen] = useState(initialQuery !== undefined);
   const [query, setQuery] = useState(initialQuery ?? "");
   const [paletteCursor, setPaletteCursor] = useState(0);
+  const [quitArmed, setQuitArmed] = useState(false);
   const [nav, dispatch] = useReducer(reduceNav, sectionFromView(initialView), initialNavState);
+
+  // Skip auto-refresh while searching or right after a keypress, so a refresh
+  // tick never competes with input (cause of multi-hundred-ms frame gaps).
+  const lastActivityRef = useRef(0);
+  const paletteOpenRef = useRef(paletteOpen);
+  paletteOpenRef.current = paletteOpen;
 
   const refresh = useCallback(async () => {
     setRefreshing(true);
@@ -158,13 +168,18 @@ export function App({
 
   useEffect(() => {
     void refresh();
-    const timer = setInterval(() => void refresh(), refreshMs);
+    const timer = setInterval(() => {
+      if (paletteOpenRef.current) return;
+      if (Date.now() - lastActivityRef.current < 1200) return;
+      void refresh();
+    }, refreshMs);
     return () => clearInterval(timer);
   }, [refresh, refreshMs]);
 
   const frame = topFrame(nav);
   const list = data ? activeList(data, frame, showAllWork) : [];
   const selectedId = list[frame.cursor]?.id;
+  const specs = useMemo(() => bindingsForScreen(frame.screen), [frame.screen]);
 
   const index = useMemo(() => (data ? searchIndex(data) : []), [data]);
   const results = useMemo(() => (paletteOpen ? searchItems(index, query, 40) : []), [paletteOpen, index, query]);
@@ -175,10 +190,24 @@ export function App({
     setPaletteCursor(0);
   }, []);
 
+  // Double-press q / ctrl+c to quit (a single accidental press just arms it).
+  const quitArmedAtRef = useRef(0);
+  const requestQuit = useCallback(() => {
+    const now = Date.now();
+    if (now - quitArmedAtRef.current < 1500) {
+      exit();
+      return;
+    }
+    quitArmedAtRef.current = now;
+    setQuitArmed(true);
+    setTimeout(() => setQuitArmed(false), 1500);
+  }, [exit]);
+
   const handleKey = useCallback<InkInputHandler>(
     (input, key) => {
+      lastActivityRef.current = Date.now();
       if (key.ctrl && input === "c") {
-        exit();
+        requestQuit();
         return;
       }
       if (paletteOpen) {
@@ -214,47 +243,54 @@ export function App({
         }
         return;
       }
-      if (input === "/") {
-        setPaletteOpen(true);
-        setQuery("");
-        setPaletteCursor(0);
+      const wheel = wheelFromInput(input);
+      if (wheel) {
+        dispatch({ type: "move", delta: wheel === "down" ? 1 : -1, length: list.length });
         return;
       }
-      if (input === "q") {
-        exit();
-        return;
-      }
-      if (input === "r") {
-        void refresh();
-        return;
-      }
-      if (input === "f" && frame.screen === "workList") {
-        setShowAllWork((current) => !current);
-        dispatch({ type: "move", delta: 0, length: 0 });
-        return;
-      }
-      const section = SECTIONS.find((entry) => entry.key === input);
-      if (section) {
-        dispatch({ type: "section", section: section.id });
-        return;
-      }
-      if (key.escape || key.backspace || key.delete || key.leftArrow || input === "h") {
-        dispatch({ type: "back" });
-        return;
-      }
-      if (key.return || key.rightArrow || input === "l") {
-        dispatch({ type: "drill", id: selectedId });
-        return;
-      }
-      if (key.downArrow || input === "j") {
-        dispatch({ type: "move", delta: 1, length: list.length });
-        return;
-      }
-      if (key.upArrow || input === "k") {
-        dispatch({ type: "move", delta: -1, length: list.length });
+      const action = resolveAction(specs, input, key);
+      switch (action) {
+        case "move":
+          dispatch({ type: "move", delta: key.downArrow || input === "j" ? 1 : -1, length: list.length });
+          return;
+        case "drill":
+          dispatch({ type: "drill", id: selectedId });
+          return;
+        case "back":
+          dispatch({ type: "back" });
+          return;
+        case "search":
+          setPaletteOpen(true);
+          setQuery("");
+          setPaletteCursor(0);
+          return;
+        case "refresh":
+          void refresh();
+          return;
+        case "filter":
+          setShowAllWork((current) => !current);
+          dispatch({ type: "move", delta: 0, length: 0 });
+          return;
+        case "quit":
+          requestQuit();
+          return;
+        case "section:overview":
+          dispatch({ type: "section", section: "overview" });
+          return;
+        case "section:sprints":
+          dispatch({ type: "section", section: "sprints" });
+          return;
+        case "section:work":
+          dispatch({ type: "section", section: "work" });
+          return;
+        case "section:activity":
+          dispatch({ type: "section", section: "activity" });
+          return;
+        default:
+          return;
       }
     },
-    [exit, refresh, selectedId, list.length, frame.screen, paletteOpen, results, paletteCursor, closePalette]
+    [requestQuit, refresh, selectedId, list.length, specs, paletteOpen, results, paletteCursor, closePalette]
   );
 
   const rows = stdout?.rows ?? 24;
@@ -262,11 +298,13 @@ export function App({
   const bodyHeight = Math.max(6, rows - 4);
   const crumbs = paletteOpen ? ["Search"] : data ? nav.stack.map((entry) => crumbLabel(data, entry)) : ["…"];
   const clock = data ? new Date(data.generatedAt).toLocaleTimeString() : "";
-  const footerHints = paletteOpen
-    ? isRawModeSupported
-      ? [{ keys: "type", label: "filter" }, { keys: "↑↓", label: "move" }, { keys: "⏎", label: "go" }, { keys: "esc", label: "close" }]
-      : [{ keys: "no TTY", label: "keyboard disabled — Ctrl+C to exit" }]
-    : hintsFor(frame.screen, isRawModeSupported);
+  const footerHints = !isRawModeSupported
+    ? [{ keys: "no TTY", label: "keyboard disabled — Ctrl+C to exit" }]
+    : quitArmed
+      ? [{ keys: "q/^c", label: "press again to quit" }]
+      : paletteOpen
+        ? [{ keys: "type", label: "filter" }, { keys: "↑↓", label: "move" }, { keys: "⏎", label: "go" }, { keys: "esc", label: "close" }]
+        : buildFooterHints(specs);
 
   return (
     <Box flexDirection="column" width={columns} height={rows}>
@@ -345,24 +383,6 @@ function Palette({
       </Box>
     </Box>
   );
-}
-
-function hintsFor(screen: NavFrame["screen"], inputEnabled: boolean): readonly { readonly keys: string; readonly label: string }[] {
-  if (!inputEnabled) return [{ keys: "no TTY", label: "keyboard disabled — Ctrl+C to exit" }];
-  const move = { keys: "↑↓/jk", label: "move" };
-  const sections = { keys: "o/s/w/a", label: "sections" };
-  const search = { keys: "/", label: "search" };
-  const quit = { keys: "q", label: "quit" };
-  if (screen === "overview") return [search, sections, { keys: "r", label: "refresh" }, quit];
-  if (screen === "taskDetail" || screen === "activityDetail") return [{ keys: "⌫/esc", label: "back" }, search, sections, quit];
-  if (screen === "activityList") return [move, { keys: "⏎", label: "open event" }, search, sections, quit];
-  if (screen === "sprintDetail") {
-    return [move, { keys: "⏎", label: "open task" }, { keys: "⌫/esc", label: "back" }, search, quit];
-  }
-  if (screen === "workList") {
-    return [move, { keys: "⏎", label: "open" }, { keys: "f", label: "filter" }, search, quit];
-  }
-  return [move, { keys: "⏎", label: "open" }, search, sections, quit];
 }
 
 function Screen({
@@ -685,10 +705,23 @@ export function GlobalApp({ workspaceRoot, refreshMs }: { readonly workspaceRoot
   const { exit } = useApp();
   const { stdout } = useStdout();
   const { isRawModeSupported } = useStdin();
+  useAltScreen();
   const [data, setData] = useState<GlobalTuiData | undefined>();
   const [error, setError] = useState<string | undefined>();
   const [cursor, setCursor] = useState(0);
   const [refreshing, setRefreshing] = useState(false);
+  const [quitArmed, setQuitArmed] = useState(false);
+  const quitArmedAtRef = useRef(0);
+  const requestQuit = useCallback(() => {
+    const now = Date.now();
+    if (now - quitArmedAtRef.current < 1500) {
+      exit();
+      return;
+    }
+    quitArmedAtRef.current = now;
+    setQuitArmed(true);
+    setTimeout(() => setQuitArmed(false), 1500);
+  }, [exit]);
 
   const refresh = useCallback(async () => {
     setRefreshing(true);
@@ -716,12 +749,21 @@ export function GlobalApp({ workspaceRoot, refreshMs }: { readonly workspaceRoot
 
   const handleKey = useCallback<InkInputHandler>(
     (input, key) => {
-      if (input === "q" || key.escape || (key.ctrl && input === "c")) {
-        exit();
+      if (input === "q" || (key.ctrl && input === "c")) {
+        requestQuit();
         return;
       }
       if (input === "r") {
         void refresh();
+        return;
+      }
+      const wheel = wheelFromInput(input);
+      if (wheel) {
+        setCursor((current) =>
+          wheel === "down"
+            ? Math.min(current + 1, Math.max(0, projects.length - 1))
+            : Math.max(current - 1, 0)
+        );
         return;
       }
       if (key.downArrow || input === "j") {
@@ -732,7 +774,7 @@ export function GlobalApp({ workspaceRoot, refreshMs }: { readonly workspaceRoot
         setCursor((current) => Math.max(current - 1, 0));
       }
     },
-    [exit, refresh, projects.length]
+    [requestQuit, refresh, projects.length]
   );
 
   const rows = stdout?.rows ?? 24;
@@ -783,9 +825,11 @@ export function GlobalApp({ workspaceRoot, refreshMs }: { readonly workspaceRoot
       </Box>
       <KeyHints
         hints={
-          isRawModeSupported
-            ? [{ keys: "↑↓/jk", label: "move" }, { keys: "r", label: "refresh" }, { keys: "q", label: "quit" }]
-            : [{ keys: "no TTY", label: "keyboard disabled — Ctrl+C to exit" }]
+          !isRawModeSupported
+            ? [{ keys: "no TTY", label: "keyboard disabled — Ctrl+C to exit" }]
+            : quitArmed
+              ? [{ keys: "q/^c", label: "press again to quit" }]
+              : [{ keys: "↑↓/jk", label: "move" }, { keys: "r", label: "refresh" }, { keys: "q", label: "quit" }]
         }
       />
     </Box>
