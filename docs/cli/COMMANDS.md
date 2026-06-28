@@ -349,22 +349,30 @@ Validates registered project roots, Boreal runtime files, project setup config p
 ## `dashboard`
 
 ```bash
-bwrk dashboard [--tui] [--refresh-ms <ms>] [--host <host>] [--port <n>] [--no-open] [--mode live|fixture] [--live-cache-ttl-ms <ms>]
+bwrk dashboard [--web] [--global] [--json] [--mouse] [--refresh-ms <ms>] [--host <host>] [--port <n>] [--no-open] [--mode live|fixture] [--live-cache-ttl-ms <ms>]
 ```
 
-Starts the local Boreal browser console for the selected workspace. By default it binds to `127.0.0.1:4318`, prints the URL, and opens the dashboard in your browser. Pass `--tui` to launch the live terminal dashboard instead (no browser, no HTTP server); it runs in-process against the workspace and is dismissed with `q`.
+Opens the Boreal dashboard for the current workspace. **By default it runs the live terminal dashboard** (no HTTP server, no browser); it works in-process against the workspace and is dismissed with `q`. Surface and scope are independent flags:
 
-This command is an interactive human surface and does not support `--json`. Use `bwrk dashboard global --json` when an agent or dashboard adapter needs the bounded dashboard data payload.
+- `--web` opens the browser console instead (binds `127.0.0.1:4318`, prints the URL, opens a browser).
+- `--global` scopes to every registered project instead of the current repo.
+- `--json` emits the bounded cross-repo data payload (no UI) for agents and adapters; same schema as `bwrk dashboard global`.
+
+So `bwrk dashboard` is the terminal repo view, `bwrk dashboard --web` the browser, `bwrk dashboard --global` the terminal cross-repo view, and `bwrk dashboard --global --web` the browser cross-repo view.
 
 Options:
 
-- `--tui`: launch the live terminal dashboard instead of the browser console. The remaining server options below are ignored in this mode.
-- `--refresh-ms`: terminal dashboard (`--tui`) auto-refresh interval in milliseconds. Defaults to `5000`.
-- `--host`: bind address. Defaults to `127.0.0.1`.
-- `--port`: port number. Defaults to `4318`.
-- `--no-open`: print the URL without launching a browser.
+- `--web`: open the browser console instead of the terminal dashboard.
+- `--global`: scope to every registered project instead of the current repo.
+- `--json`: print the bounded data payload instead of launching a UI.
+- `--mouse`: terminal dashboard mouse wheel (off by default; enabling it disables the terminal's native text selection).
+- `--tui`: deprecated and ignored; the terminal dashboard is now the default.
+- `--refresh-ms`: terminal dashboard auto-refresh interval in milliseconds. Defaults to `5000`.
+- `--host`: browser console (`--web`) bind address. Defaults to `127.0.0.1`.
+- `--port`: browser console (`--web`) port number. Defaults to `4318`.
+- `--no-open`: browser console (`--web`): print the URL without launching a browser.
 - `--mode`: `live` for workspace data or `fixture` for demo data. Defaults to `live`.
-- `--live-cache-ttl-ms`: live dashboard cache TTL between route clicks. Defaults to `60000`.
+- `--live-cache-ttl-ms`: browser console (`--web`) live data cache TTL between route clicks. Defaults to `60000`.
 
 ## `dashboard global`
 
@@ -386,14 +394,14 @@ bwrk dashboard global --limit 10 --json
 ## `global`
 
 ```bash
-bwrk global [--tui] [--refresh-ms <ms>] [--host <host>] [--port <n>] [--no-open] [--mode live|fixture] [--live-cache-ttl-ms <ms>]
+bwrk global [--web] [--json] [--mouse] [--refresh-ms <ms>] [--host <host>] [--port <n>] [--no-open] [--mode live|fixture] [--live-cache-ttl-ms <ms>]
 ```
 
-Launches the high-level console scoped to every project in the machine-local registry, rather than the current repository. This is the cross-repo tracker: `bwrk dashboard` shows only the current workspace, while `bwrk global` aggregates all registered projects. Register projects first with `bwrk registry add --workspace <path>` (or `bwrk registry import-setup` from inside a project); with an empty registry the console shows a prompt to register one.
+Ergonomic alias for `bwrk dashboard --global`: the high-level dashboard scoped to every project in the machine-local registry, rather than the current repository. `bwrk dashboard` shows only the current workspace, while `bwrk global` aggregates all registered projects. Register projects first with `bwrk registry add --workspace <path>` (or `bwrk registry import-setup` from inside a project); with an empty registry the dashboard prompts you to register one.
 
-Pass `--tui` to run the terminal version. Like `bwrk dashboard` this is an interactive human surface and does not support `--json`; use `bwrk dashboard global --json` for the bounded data payload.
+Runs the terminal dashboard by default; pass `--web` for the browser console or `--json` for the bounded data payload.
 
-Options match `bwrk dashboard` (`--tui`, `--refresh-ms`, `--host`, `--port`, `--no-open`, `--mode`, `--live-cache-ttl-ms`).
+Options match `bwrk dashboard` (`--web`, `--mouse`, `--refresh-ms`, `--host`, `--port`, `--no-open`, `--mode`, `--live-cache-ttl-ms`).
 
 ## `daemon status`
 
