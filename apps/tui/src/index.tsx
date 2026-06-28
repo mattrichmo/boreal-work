@@ -15,7 +15,7 @@ if (argv.includes("--help") || argv.includes("-h")) {
     [
       "bwrk-tui - Boreal terminal dashboard",
       "",
-      "Usage: bwrk-tui [--global] [--view overview|sprint|work|activity] [--search <q>] [--workspace <dir>] [--refresh-ms <n>]",
+      "Usage: bwrk-tui [--global] [--view overview|sprint|work|activity] [--search <q>] [--mouse] [--workspace <dir>] [--refresh-ms <n>]",
       "",
       "Keys: o/s/w/a sections · ↑↓/jk move · ⏎ open · ⌫/esc back · / search · r refresh · q quit",
       ""
@@ -29,13 +29,14 @@ const refreshMs = Math.max(1000, Number(flagValue(argv, "--refresh-ms") ?? "5000
 const global = argv.includes("--global");
 const initialView = flagValue(argv, "--view");
 const initialQuery = argv.includes("--search") ? flagValue(argv, "--search") ?? "" : undefined;
+const mouse = argv.includes("--mouse");
 
 // Alternate-screen enter/exit + SGR mouse + signal-safe restore live in
 // useAltScreen() (apps/tui/src/runtime.ts), so a signalled exit can't leave
 // the terminal stuck in the alt buffer.
 const element = global
-  ? createElement(GlobalApp, { workspaceRoot, refreshMs })
-  : createElement(App, { workspaceRoot, refreshMs, initialView, initialQuery });
+  ? createElement(GlobalApp, { workspaceRoot, refreshMs, mouse })
+  : createElement(App, { workspaceRoot, refreshMs, initialView, initialQuery, mouse });
 const instance = render(element, { exitOnCtrlC: false });
 
 instance.waitUntilExit().catch(() => undefined);

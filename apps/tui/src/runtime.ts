@@ -13,7 +13,10 @@ const MOUSE_OFF = `${ESC}[?1006l${ESC}[?1000l`;
 // before render() and undone in a .finally() leaks the alt screen when the
 // process is signalled. useInsertionEffect runs during the mutation phase, so
 // the enter sequence reaches the terminal before Ink paints the first frame.
-export function useAltScreen(enableMouse = true): void {
+// Mouse tracking is opt-in: enabling it captures the mouse and disables the
+// terminal's own text selection / copy, so it's off unless the user asks
+// (--mouse) and confirms wheel events actually arrive on their terminal.
+export function useAltScreen(enableMouse = false): void {
   const { stdout } = useStdout();
   useInsertionEffect(() => {
     const out = stdout ?? process.stdout;
