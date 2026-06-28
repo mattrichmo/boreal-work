@@ -431,22 +431,25 @@ export const COMMAND_DEFINITIONS: readonly CommandDefinition[] = [
   {
     path: ["dashboard"],
     category: "dashboard",
-    summary: "Serve the interactive dashboard in a browser, or run the terminal dashboard with --tui.",
-    usage: "bwrk dashboard [--tui] [--refresh-ms <ms>] [--host <host>] [--port <n>] [--no-open] [--mode live|fixture] [--live-cache-ttl-ms <ms>]",
+    summary: "Open the terminal dashboard (default); --web for the browser console, --global for all projects.",
+    usage: "bwrk dashboard [--web] [--global] [--json] [--mouse] [--refresh-ms <ms>] [--host <host>] [--port <n>] [--no-open] [--mode live|fixture] [--live-cache-ttl-ms <ms>]",
     description:
-      "Starts the local Boreal console for the current workspace. By default it binds to 127.0.0.1:4318 and opens the dashboard in your browser. Pass --tui to launch the live terminal dashboard instead (no browser, no server).",
+      "Opens the Boreal dashboard for the current workspace. By default it runs the live terminal dashboard (no server, no browser). Pass --web for the browser console (binds 127.0.0.1:4318 and opens a browser), --global to scope to every registered project, and --json for the bounded data payload. Surface (--web) and scope (--global) are independent.",
     flags: [
-      flag("tui", "boolean", "Launch the live terminal dashboard instead of the browser console."),
-      flag("refresh-ms", "value", "Terminal dashboard (--tui) auto-refresh interval in ms. Defaults to 5000."),
-      flag("host", "value", "Bind host. Defaults to 127.0.0.1."),
-      flag("port", "value", "Bind port. Defaults to 4318."),
-      flag("no-open", "boolean", "Start the server without opening a browser."),
+      flag("web", "boolean", "Open the browser console instead of the terminal dashboard."),
+      flag("global", "boolean", "Scope to every registered project instead of the current repo."),
+      flag("mouse", "boolean", "Terminal dashboard: enable mouse wheel (disables native text selection)."),
+      flag("tui", "boolean", "Deprecated and ignored: the terminal dashboard is now the default."),
+      flag("refresh-ms", "value", "Terminal dashboard auto-refresh interval in ms. Defaults to 5000."),
+      flag("host", "value", "Browser console (--web) bind host. Defaults to 127.0.0.1."),
+      flag("port", "value", "Browser console (--web) bind port. Defaults to 4318."),
+      flag("no-open", "boolean", "Browser console (--web): start the server without opening a browser."),
       flag("mode", "value", "Data mode: live or fixture. Defaults to live."),
-      flag("live-cache-ttl-ms", "value", "How long live dashboard data remains cached between route clicks. Defaults to 60000.")
+      flag("live-cache-ttl-ms", "value", "Browser console (--web) live data cache TTL between route clicks. Defaults to 60000.")
     ],
     positionals: { label: "arguments", min: 0, max: 0 },
     requiresWorkspace: true,
-    supportsJson: false,
+    supportsJson: true,
   },
   {
     path: ["dashboard", "global"],
@@ -466,22 +469,23 @@ export const COMMAND_DEFINITIONS: readonly CommandDefinition[] = [
   {
     path: ["global"],
     category: "dashboard",
-    summary: "Serve the cross-repo global console (all registered projects), or terminal with --tui.",
-    usage: "bwrk global [--tui] [--refresh-ms <ms>] [--host <host>] [--port <n>] [--no-open] [--mode live|fixture] [--live-cache-ttl-ms <ms>]",
+    summary: "Cross-repo dashboard for all registered projects (terminal default; alias for dashboard --global).",
+    usage: "bwrk global [--web] [--json] [--mouse] [--refresh-ms <ms>] [--host <host>] [--port <n>] [--no-open] [--mode live|fixture] [--live-cache-ttl-ms <ms>]",
     description:
-      "Launches the high-level Boreal console scoped to every project in the machine-local registry (not the current repo). Register projects with `bwrk registry add` first. Pass --tui for the terminal version.",
+      "Ergonomic alias for `bwrk dashboard --global`: the high-level dashboard scoped to every project in the machine-local registry (not the current repo). Runs the terminal dashboard by default; pass --web for the browser console or --json for the data payload. Register projects with `bwrk registry add` first.",
     flags: [
-      flag("tui", "boolean", "Launch the global terminal dashboard instead of the browser console."),
-      flag("refresh-ms", "value", "Terminal dashboard (--tui) auto-refresh interval in ms. Defaults to 5000."),
-      flag("host", "value", "Bind host. Defaults to 127.0.0.1."),
-      flag("port", "value", "Bind port. Defaults to 4318."),
-      flag("no-open", "boolean", "Start the server without opening a browser."),
+      flag("web", "boolean", "Open the browser console instead of the terminal dashboard."),
+      flag("mouse", "boolean", "Terminal dashboard: enable mouse wheel (disables native text selection)."),
+      flag("refresh-ms", "value", "Terminal dashboard auto-refresh interval in ms. Defaults to 5000."),
+      flag("host", "value", "Browser console (--web) bind host. Defaults to 127.0.0.1."),
+      flag("port", "value", "Browser console (--web) bind port. Defaults to 4318."),
+      flag("no-open", "boolean", "Browser console (--web): start the server without opening a browser."),
       flag("mode", "value", "Data mode: live or fixture. Defaults to live."),
-      flag("live-cache-ttl-ms", "value", "How long live data remains cached between route clicks. Defaults to 60000.")
+      flag("live-cache-ttl-ms", "value", "Browser console (--web) live data cache TTL between route clicks. Defaults to 60000.")
     ],
     positionals: { label: "arguments", min: 0, max: 0 },
     requiresWorkspace: false,
-    supportsJson: false,
+    supportsJson: true,
   },
   {
     path: ["daemon", "status"],
@@ -1970,9 +1974,9 @@ const COMMAND_BEHAVIOR: Readonly<Record<string, CommandBehaviorMetadata>> = {
     requiresFreshIndex: false,
     concurrencySafe: true,
     requiresLock: "none",
-    maxResultSizeChars: 32_000,
+    maxResultSizeChars: 500_000,
     humanOutputKind: "none",
-    examples: ["bwrk dashboard", "bwrk dashboard --no-open", "bwrk dashboard --port 4320"],
+    examples: ["bwrk dashboard", "bwrk dashboard --web", "bwrk dashboard --global", "bwrk dashboard --json"],
   }),
   "dashboard global": commandMetadata("dashboard global", {
     readOnly: true,
@@ -1994,9 +1998,9 @@ const COMMAND_BEHAVIOR: Readonly<Record<string, CommandBehaviorMetadata>> = {
     requiresFreshIndex: false,
     concurrencySafe: true,
     requiresLock: "none",
-    maxResultSizeChars: 32_000,
+    maxResultSizeChars: 500_000,
     humanOutputKind: "none",
-    examples: ["bwrk global", "bwrk global --tui", "bwrk global --no-open"],
+    examples: ["bwrk global", "bwrk global --web", "bwrk global --json"],
   }),
   "daemon status": commandMetadata("daemon status", {
     readOnly: true,

@@ -3593,25 +3593,38 @@ async function dashboardCommand(
   output: CliOutput,
   json: boolean
 ): Promise<CommandResult> {
+  const scope: "repo" | "global" = hasFlag(args, "global") ? "global" : "repo";
   switch (action) {
     case undefined:
+      // --json emits the cross-repo data payload (same as `dashboard global`).
       if (json) {
-        throw new BorealError("BOREAL_INVALID_INPUT", "bwrk dashboard serves the interactive console and does not support --json. Use bwrk dashboard global --json for dashboard data.");
+        return emitGlobalDashboardData(context, args, output, true);
       }
-      if (hasFlag(args, "tui")) {
-        return launchTuiCommand(context, args, "repo");
+      // Terminal dashboard is the default; --web opts into the browser console.
+      if (hasFlag(args, "web")) {
+        return serveDashboardCommand(context, args, output, scope);
       }
-      return serveDashboardCommand(context, args, output, "repo");
-    case "global": {
-      const result = await buildGlobalDashboardResult(context, args);
-      output.write(json ? formatRecord(result, true) : formatGlobalDashboardSummary(result));
-      return { exitCode: 0 };
-    }
+      return launchTuiCommand(context, args, scope);
+    case "global":
+      // Retained data command; equivalent to `dashboard --global --json`.
+      return emitGlobalDashboardData(context, args, output, json);
     default:
       throw new BorealError("BOREAL_INVALID_INPUT", `Unknown dashboard command: ${action ?? ""}`);
   }
 }
 
+async function emitGlobalDashboardData(
+  context: CliContext,
+  args: ParsedArgs,
+  output: CliOutput,
+  json: boolean
+): Promise<CommandResult> {
+  const result = await buildGlobalDashboardResult(context, args);
+  output.write(json ? formatRecord(result, true) : formatGlobalDashboardSummary(result));
+  return { exitCode: 0 };
+}
+
+// `bwrk global` is an ergonomic alias for `bwrk dashboard --global`.
 async function globalCommand(
   action: string | undefined,
   context: CliContext,
@@ -3623,12 +3636,12 @@ async function globalCommand(
     throw new BorealError("BOREAL_INVALID_INPUT", `Unknown global command: ${action}`);
   }
   if (json) {
-    throw new BorealError("BOREAL_INVALID_INPUT", "bwrk global serves the cross-repo console. Use bwrk dashboard global --json for the data payload.");
+    return emitGlobalDashboardData(context, args, output, true);
   }
-  if (hasFlag(args, "tui")) {
-    return launchTuiCommand(context, args, "global");
+  if (hasFlag(args, "web")) {
+    return serveDashboardCommand(context, args, output, "global");
   }
-  return serveDashboardCommand(context, args, output, "global");
+  return launchTuiCommand(context, args, "global");
 }
 
 async function serveDashboardCommand(
@@ -3670,6 +3683,7 @@ async function launchTuiCommand(context: CliContext, args: ParsedArgs, scope: "r
       "--workspace",
       context.workspaceRoot,
       ...(scope === "global" ? ["--global"] : []),
+      ...(hasFlag(args, "mouse") ? ["--mouse"] : []),
       ...(refreshMs !== undefined ? ["--refresh-ms", String(refreshMs)] : [])
     ]
   });
