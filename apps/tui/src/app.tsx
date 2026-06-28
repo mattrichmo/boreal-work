@@ -127,17 +127,19 @@ export function App({
   workspaceRoot,
   refreshMs,
   initialView,
-  initialQuery
+  initialQuery,
+  mouse
 }: {
   readonly workspaceRoot: string;
   readonly refreshMs: number;
   readonly initialView?: string;
   readonly initialQuery?: string;
+  readonly mouse?: boolean;
 }) {
   const { exit } = useApp();
   const { stdout } = useStdout();
   const { isRawModeSupported } = useStdin();
-  useAltScreen();
+  useAltScreen(mouse ?? false);
   const [data, setData] = useState<TuiData | undefined>();
   const [error, setError] = useState<string | undefined>();
   const [refreshing, setRefreshing] = useState(false);
@@ -701,11 +703,11 @@ function progressBar(done: number, total: number, width: number): string {
   return `${"█".repeat(filled)}${"░".repeat(width - filled)}`;
 }
 
-export function GlobalApp({ workspaceRoot, refreshMs }: { readonly workspaceRoot: string; readonly refreshMs: number }) {
+export function GlobalApp({ workspaceRoot, refreshMs, mouse }: { readonly workspaceRoot: string; readonly refreshMs: number; readonly mouse?: boolean }) {
   const { exit } = useApp();
   const { stdout } = useStdout();
   const { isRawModeSupported } = useStdin();
-  useAltScreen();
+  useAltScreen(mouse ?? false);
   const [data, setData] = useState<GlobalTuiData | undefined>();
   const [error, setError] = useState<string | undefined>();
   const [cursor, setCursor] = useState(0);
