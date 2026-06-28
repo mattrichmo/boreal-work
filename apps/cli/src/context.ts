@@ -6,6 +6,7 @@ import { dirname, resolve } from "node:path";
 import {
   BorealError,
   normalizeActorId,
+  resolveProjectRegistryPaths,
   resolveWorkspacePaths,
   type ActorKind,
   type ActorRef,
@@ -14,7 +15,18 @@ import {
 import { createBorealRuntime } from "@boreal/engine";
 import { FileBorealStore } from "@boreal/storage";
 
-import { flagValue, type ParsedArgs } from "./args.js";
+import { flagValue, hasFlag, type ParsedArgs } from "./args.js";
+
+/** The global workspace lives at the machine-local registry root (app-state).
+ * Passing env so BOREAL_PROJECT_REGISTRY_ROOT is honored (overrides + tests). */
+export function resolveGlobalWorkspaceRoot(): string {
+  return resolveProjectRegistryPaths({ env: process.env }).rootDir;
+}
+
+/** True when the command should operate on the global workspace. */
+export function isGlobalContext(args: ParsedArgs): boolean {
+  return hasFlag(args, "global") || args.command[0] === "global";
+}
 
 export interface CliContext {
   readonly cwd: string;
@@ -37,16 +49,25 @@ export async function createCliContext(
   cwd: string,
   options: CreateCliContextOptions = {}
 ): Promise<CliContext> {
+  const useGlobal = isGlobalContext(args);
   const explicitWorkspace = flagValue(args, "workspace") ?? flagValue(args, "project-root");
-  const workspaceRoot = explicitWorkspace
-    ? resolveExplicitWorkspaceRoot(explicitWorkspace)
-    : resolveDiscoveredWorkspaceRoot(cwd);
+  const workspaceRoot = useGlobal
+    ? resolveGlobalWorkspaceRoot()
+    : explicitWorkspace
+      ? resolveExplicitWorkspaceRoot(explicitWorkspace)
+      : resolveDiscoveredWorkspaceRoot(cwd);
   const paths = resolveWorkspacePaths(workspaceRoot);
   const actor = actorFromArgs(args);
   const sessionId = options.sessionId ? normalizeActorId(options.sessionId) : sessionIdFromArgs(args);
   const store = new FileBorealStore({ rootDir: workspaceRoot });
   const runtime = createBorealRuntime({ store, actor, operationId: options.operationId });
-  return { cwd, workspaceRoot, paths, store, runtime, actor, sessionId, operationId: options.operationId };
+  const context: CliContext = { cwd, workspaceRoot, paths, store, runtime, actor, sessionId, operationId: options.operationId };
+  // The global workspace is auto-initialized on first use so it always exists.
+  if (useGlobal) {
+    await ensureWorkspaceDirs(context);
+    await runtime.ensureWorkspaceInitialized();
+  }
+  return context;
 }
 
 export async function ensureWorkspaceDirs(context: CliContext): Promise<void> {

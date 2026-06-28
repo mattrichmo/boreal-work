@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { BorealError, isBorealError } from "@boreal/core";
 
-import { parseArgs, wantsJsonOutput } from "./args.js";
+import { expandGlobalNamespace, parseArgs, wantsJsonOutput } from "./args.js";
 import { runCommand } from "./commands.js";
 import { formatRecord } from "./output.js";
 import type { CliOutput } from "./output.js";
@@ -20,7 +20,7 @@ export async function main(
       guardedOutput.write(json ? formatRecord(getVersionInfo(), true) : formatVersionProbe());
       return 0;
     }
-    const parsed = parseArgs(argv);
+    const parsed = parseArgs(expandGlobalNamespace(argv));
     const result = await runCommand(parsed, guardedOutput, cwd);
     return result.exitCode;
   } catch (error) {

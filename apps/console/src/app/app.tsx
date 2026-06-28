@@ -115,27 +115,37 @@ function NavLink({ route, active }: { readonly route: ConsoleRoute; readonly act
 }
 
 function OverviewPage({ data }: { readonly data: ConsoleDataSet }) {
-  if (data.registry.entries.length === 0) {
-    return (
-      <Notice tone="warning" label="No projects registered">
-        Global tracks every registered Boreal project. Register one with{" "}
-        <code>bwrk registry add --workspace /path/to/project</code> (or run{" "}
-        <code>bwrk registry import-setup</code> from inside a project), then refresh.
-      </Notice>
-    );
-  }
+  const items = data.work.queues.flatMap((queue) => queue.items);
+  const hasProjects = data.registry.entries.length > 0;
   return (
     <div className="bw-page-grid">
       <div className="bw-page-stack">
-        <GlobalOverviewMetrics view={data.registry} />
-        <BucketOverviewGrid view={data.registry} />
-        <GlobalWorkQueues view={data.globalQueues} />
-        <GlobalSearchPanel view={data.globalSearch} />
+        <Card title="Global work" eyebrow="your cross-project to-dos and plans">
+          <SprintWorkTable items={items} />
+        </Card>
+        {hasProjects ? (
+          <>
+            <GlobalOverviewMetrics view={data.registry} />
+            <BucketOverviewGrid view={data.registry} />
+            <GlobalWorkQueues view={data.globalQueues} />
+            <GlobalSearchPanel view={data.globalSearch} />
+          </>
+        ) : (
+          <Notice tone="warning" label="No linked projects">
+            Link a project to track it here with{" "}
+            <code>bwrk link /path/to/project</code> (or <code>bwrk link</code> from inside one), then refresh.
+          </Notice>
+        )}
       </div>
       <div className="bw-page-stack">
-        <GlobalHealthSummaryPanel view={data.globalHealth} />
-        <GlobalDriftPanel view={data.globalHealth} />
-        <ActorActivityPanel view={data.globalActivity} />
+        <SprintProgressPanel view={data.work} />
+        {hasProjects ? (
+          <>
+            <GlobalHealthSummaryPanel view={data.globalHealth} />
+            <GlobalDriftPanel view={data.globalHealth} />
+            <ActorActivityPanel view={data.globalActivity} />
+          </>
+        ) : null}
       </div>
     </div>
   );

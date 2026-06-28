@@ -64,7 +64,11 @@ export interface ResolveProjectRegistryPathsOptions {
 }
 
 export function resolveProjectRegistryPaths(options: ResolveProjectRegistryPathsOptions = {}): ProjectRegistryStorage {
-  const rootDir = resolve(options.rootDir ?? options.env?.[PROJECT_REGISTRY_ROOT_ENV] ?? defaultRegistryRoot(options));
+  // Honor BOREAL_PROJECT_REGISTRY_ROOT by default (the documented override).
+  // Previously the env var was only read when a caller passed `options.env`,
+  // so the override silently did nothing for most commands.
+  const env = options.env ?? process.env;
+  const rootDir = resolve(options.rootDir ?? env[PROJECT_REGISTRY_ROOT_ENV] ?? defaultRegistryRoot({ ...options, env }));
   const registryDir = join(rootDir, "registry");
   return {
     scope: "machine-local",

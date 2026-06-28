@@ -2,7 +2,7 @@ import { Box, Text, useApp, useInput, useStdin, useStdout, type Key } from "ink"
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
 
 import type { WorkItemView } from "@boreal/ui-model";
-import { loadGlobalTuiData, loadTuiData, type GlobalTuiData, type TuiData } from "./load.js";
+import { loadGlobalTuiData, loadTuiData, type GlobalProjectEntry, type TuiData } from "./load.js";
 import {
   initialNavState,
   jumpTo,
@@ -128,19 +128,22 @@ export function App({
   refreshMs,
   initialView,
   initialQuery,
-  mouse
+  mouse,
+  global
 }: {
   readonly workspaceRoot: string;
   readonly refreshMs: number;
   readonly initialView?: string;
   readonly initialQuery?: string;
   readonly mouse?: boolean;
+  readonly global?: boolean;
 }) {
   const { exit } = useApp();
   const { stdout } = useStdout();
   const { isRawModeSupported } = useStdin();
   useAltScreen(mouse ?? false);
   const [data, setData] = useState<TuiData | undefined>();
+  const [projects, setProjects] = useState<readonly GlobalProjectEntry[]>([]);
   const [error, setError] = useState<string | undefined>();
   const [refreshing, setRefreshing] = useState(false);
   const [showAllWork, setShowAllWork] = useState(false);
@@ -177,6 +180,23 @@ export function App({
     }, refreshMs);
     return () => clearInterval(timer);
   }, [refresh, refreshMs]);
+
+  // In global mode, also load the linked-projects rollup for the Overview.
+  useEffect(() => {
+    if (!global) return;
+    let active = true;
+    const load = () => {
+      void loadGlobalTuiData(workspaceRoot).then((result) => {
+        if (active) setProjects(result.projects);
+      });
+    };
+    load();
+    const timer = setInterval(load, Math.max(refreshMs, 10_000));
+    return () => {
+      active = false;
+      clearInterval(timer);
+    };
+  }, [global, workspaceRoot, refreshMs]);
 
   const frame = topFrame(nav);
   const list = data ? activeList(data, frame, showAllWork) : [];
@@ -298,7 +318,8 @@ export function App({
   const rows = stdout?.rows ?? 24;
   const columns = stdout?.columns ?? 100;
   const bodyHeight = Math.max(6, rows - 4);
-  const crumbs = paletteOpen ? ["Search"] : data ? nav.stack.map((entry) => crumbLabel(data, entry)) : ["…"];
+  const baseCrumbs = paletteOpen ? ["Search"] : data ? nav.stack.map((entry) => crumbLabel(data, entry)) : ["…"];
+  const crumbs = global ? ["global", ...baseCrumbs] : baseCrumbs;
   const clock = data ? new Date(data.generatedAt).toLocaleTimeString() : "";
   const footerHints = !isRawModeSupported
     ? [{ keys: "no TTY", label: "keyboard disabled — Ctrl+C to exit" }]
@@ -323,7 +344,7 @@ export function App({
           ) : paletteOpen ? (
             <Palette query={query} results={results} cursor={paletteCursor} height={bodyHeight} width={columns - 16} />
           ) : (
-            <Screen data={data} frame={frame} height={bodyHeight} width={columns - 16} showAllWork={showAllWork} />
+            <Screen data={data} frame={frame} height={bodyHeight} width={columns - 16} showAllWork={showAllWork} projects={projects} />
           )}
         </Box>
       </Box>
@@ -392,17 +413,19 @@ function Screen({
   frame,
   height,
   width,
-  showAllWork
+  showAllWork,
+  projects
 }: {
   readonly data: TuiData;
   readonly frame: NavFrame;
   readonly height: number;
   readonly width: number;
   readonly showAllWork: boolean;
+  readonly projects: readonly GlobalProjectEntry[];
 }) {
   switch (frame.screen) {
     case "overview":
-      return <OverviewScreen data={data} height={height} />;
+      return <OverviewScreen data={data} height={height} width={width} projects={projects} />;
     case "sprintList":
       return <SprintListScreen data={data} cursor={frame.cursor} height={height} width={width} />;
     case "sprintDetail":
@@ -420,7 +443,17 @@ function Screen({
   }
 }
 
-function OverviewScreen({ data, height }: { readonly data: TuiData; readonly height: number }) {
+function OverviewScreen({
+  data,
+  height,
+  width,
+  projects
+}: {
+  readonly data: TuiData;
+  readonly height: number;
+  readonly width: number;
+  readonly projects: readonly GlobalProjectEntry[];
+}) {
   const summary = data.work.summary;
   const active = data.sprints.find((sprint) => sprint.active);
   return (
@@ -458,22 +491,51 @@ function OverviewScreen({ data, height }: { readonly data: TuiData; readonly hei
           <Text color={COLOR.muted}> none active — press s to browse sprints</Text>
         )}
       </Box>
-      <Box marginTop={1} flexDirection="column">
-        <Text color={COLOR.faint}>RECENT ACTIVITY</Text>
-        {data.timeline.length === 0 ? (
-          <Text color={COLOR.muted}> no recent events</Text>
-        ) : (
-          windowList(data.timeline, 0, Math.max(3, height - 8)).rows.map(({ item }) => (
-            <Text key={item.id} wrap="truncate">
-              <Text color={COLOR.faint}>{new Date(item.at).toLocaleTimeString()} </Text>
-              <Text color={COLOR.accent}>{item.type}</Text>
-              <Text color={COLOR.muted}>{` ${item.subjectType}`}</Text>
-            </Text>
-          ))
-        )}
-      </Box>
+      {projects.length > 0 ? (
+        <Box marginTop={1} flexDirection="column">
+          <Text color={COLOR.faint}>{`LINKED PROJECTS (${projects.length})`}</Text>
+          <LinkedProjectsTable projects={projects} width={width} height={Math.max(3, height - 12)} />
+        </Box>
+      ) : (
+        <Box marginTop={1} flexDirection="column">
+          <Text color={COLOR.faint}>RECENT ACTIVITY</Text>
+          {data.timeline.length === 0 ? (
+            <Text color={COLOR.muted}> no recent events</Text>
+          ) : (
+            windowList(data.timeline, 0, Math.max(3, height - 8)).rows.map(({ item }) => (
+              <Text key={item.id} wrap="truncate">
+                <Text color={COLOR.faint}>{new Date(item.at).toLocaleTimeString()} </Text>
+                <Text color={COLOR.accent}>{item.type}</Text>
+                <Text color={COLOR.muted}>{` ${item.subjectType}`}</Text>
+              </Text>
+            ))
+          )}
+        </Box>
+      )}
     </Box>
   );
+}
+
+function LinkedProjectsTable({ projects, width, height }: { readonly projects: readonly GlobalProjectEntry[]; readonly width: number; readonly height: number }) {
+  const nameWidth = Math.max(16, width - 10 - 7 - 7 - 9);
+  const columns: readonly TableColumn[] = [
+    { header: "health", width: 10 },
+    { header: "project", width: nameWidth },
+    { header: "open", width: 7, align: "right" },
+    { header: "ready", width: 7, align: "right" },
+    { header: "blocked", width: 9, align: "right" }
+  ];
+  const rows: readonly TableRow[] = projects.map((project) => ({
+    key: project.id || project.name,
+    cells: [
+      { text: project.stale ? "stale" : project.health, color: healthColor(project.health) },
+      { text: project.name, color: COLOR.text },
+      { text: String(project.open), color: COLOR.muted },
+      { text: String(project.ready), color: COLOR.accent },
+      { text: String(project.blocked), color: project.blocked > 0 ? COLOR.warn : COLOR.faint }
+    ]
+  }));
+  return <Table columns={columns} rows={rows} cursor={-1} height={height} emptyLabel="No linked projects — bwrk link <path>" />;
 }
 
 function sprintRow(sprint: SprintData): TableRow {
@@ -701,139 +763,4 @@ function progressBar(done: number, total: number, width: number): string {
   if (total <= 0) return "░".repeat(width);
   const filled = Math.max(0, Math.min(width, Math.round((done / total) * width)));
   return `${"█".repeat(filled)}${"░".repeat(width - filled)}`;
-}
-
-export function GlobalApp({ workspaceRoot, refreshMs, mouse }: { readonly workspaceRoot: string; readonly refreshMs: number; readonly mouse?: boolean }) {
-  const { exit } = useApp();
-  const { stdout } = useStdout();
-  const { isRawModeSupported } = useStdin();
-  useAltScreen(mouse ?? false);
-  const [data, setData] = useState<GlobalTuiData | undefined>();
-  const [error, setError] = useState<string | undefined>();
-  const [cursor, setCursor] = useState(0);
-  const [refreshing, setRefreshing] = useState(false);
-  const [quitArmed, setQuitArmed] = useState(false);
-  const quitArmedAtRef = useRef(0);
-  const requestQuit = useCallback(() => {
-    const now = Date.now();
-    if (now - quitArmedAtRef.current < 1500) {
-      exit();
-      return;
-    }
-    quitArmedAtRef.current = now;
-    setQuitArmed(true);
-    setTimeout(() => setQuitArmed(false), 1500);
-  }, [exit]);
-
-  const refresh = useCallback(async () => {
-    setRefreshing(true);
-    try {
-      setData(await loadGlobalTuiData(workspaceRoot));
-      setError(undefined);
-    } catch (caught) {
-      setError(caught instanceof Error ? caught.message : String(caught));
-    } finally {
-      setRefreshing(false);
-    }
-  }, [workspaceRoot]);
-
-  useEffect(() => {
-    void refresh();
-    const timer = setInterval(() => void refresh(), refreshMs);
-    return () => clearInterval(timer);
-  }, [refresh, refreshMs]);
-
-  const projects = data?.projects ?? [];
-
-  useEffect(() => {
-    setCursor((current) => Math.min(current, Math.max(0, projects.length - 1)));
-  }, [projects.length]);
-
-  const handleKey = useCallback<InkInputHandler>(
-    (input, key) => {
-      if (input === "q" || (key.ctrl && input === "c")) {
-        requestQuit();
-        return;
-      }
-      if (input === "r") {
-        void refresh();
-        return;
-      }
-      const wheel = wheelFromInput(input);
-      if (wheel) {
-        setCursor((current) =>
-          wheel === "down"
-            ? Math.min(current + 1, Math.max(0, projects.length - 1))
-            : Math.max(current - 1, 0)
-        );
-        return;
-      }
-      if (key.downArrow || input === "j") {
-        setCursor((current) => Math.min(current + 1, Math.max(0, projects.length - 1)));
-        return;
-      }
-      if (key.upArrow || input === "k") {
-        setCursor((current) => Math.max(current - 1, 0));
-      }
-    },
-    [requestQuit, refresh, projects.length]
-  );
-
-  const rows = stdout?.rows ?? 24;
-  const columns = stdout?.columns ?? 100;
-  const clock = data ? new Date(data.generatedAt).toLocaleTimeString() : "";
-  const selected = projects[cursor];
-  const nameWidth = Math.max(20, columns - 4 - 10 - 8 - 8 - 9 - 6);
-  const tableColumns: readonly TableColumn[] = [
-    { header: "health", width: 10 },
-    { header: "project", width: nameWidth },
-    { header: "open", width: 8, align: "right" },
-    { header: "ready", width: 8, align: "right" },
-    { header: "blocked", width: 9, align: "right" },
-    { header: "resv", width: 6, align: "right" }
-  ];
-  const tableRows: readonly TableRow[] = projects.map((project) => ({
-    key: project.id || project.name,
-    cells: [
-      { text: project.stale ? "stale" : project.health, color: healthColor(project.health) },
-      { text: project.name, color: COLOR.text },
-      { text: String(project.open), color: COLOR.muted },
-      { text: String(project.ready), color: COLOR.accent },
-      { text: String(project.blocked), color: project.blocked > 0 ? COLOR.warn : COLOR.faint },
-      { text: String(project.reservations), color: COLOR.faint }
-    ]
-  }));
-
-  return (
-    <Box flexDirection="column" width={columns} height={rows}>
-      {isRawModeSupported ? <KeyBindings onKey={handleKey} active /> : null}
-      <TopBar crumbs={["Global", `${projects.length} project${projects.length === 1 ? "" : "s"}`]} right={`${refreshing ? "↻ " : ""}${clock}`} />
-      <Box flexGrow={1} paddingX={1} paddingY={1} flexDirection="column">
-        {error ? <Text color={COLOR.danger}>! {error}</Text> : null}
-        {data && data.warnings.length > 0 ? <Text color={COLOR.warn} wrap="truncate">⚠ {data.warnings.join(" ")}</Text> : null}
-        {!data ? (
-          <Text color={COLOR.muted}>Loading registry…</Text>
-        ) : projects.length === 0 ? (
-          <EmptyState
-            title="No projects registered"
-            lines={["Global tracks every registered project.", "Register one with: bwrk registry add --workspace <path>", "then refresh with r."]}
-          />
-        ) : (
-          <>
-            <Table columns={tableColumns} rows={tableRows} cursor={cursor} height={rows - 7} />
-            {selected ? <Text color={COLOR.faint} wrap="truncate">{`  ${selected.projectRoot}`}</Text> : null}
-          </>
-        )}
-      </Box>
-      <KeyHints
-        hints={
-          !isRawModeSupported
-            ? [{ keys: "no TTY", label: "keyboard disabled — Ctrl+C to exit" }]
-            : quitArmed
-              ? [{ keys: "q/^c", label: "press again to quit" }]
-              : [{ keys: "↑↓/jk", label: "move" }, { keys: "r", label: "refresh" }, { keys: "q", label: "quit" }]
-        }
-      />
-    </Box>
-  );
 }
