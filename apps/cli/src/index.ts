@@ -2,6 +2,7 @@
 import { BorealError, isBorealError } from "@boreal/core";
 
 import { expandGlobalNamespace, parseArgs, wantsJsonOutput } from "./args.js";
+import { aboutText } from "./branding.js";
 import { runCommand } from "./commands.js";
 import { formatRecord } from "./output.js";
 import type { CliOutput } from "./output.js";
@@ -18,6 +19,10 @@ export async function main(
   try {
     if (argv.includes("--version")) {
       guardedOutput.write(json ? formatRecord(getVersionInfo(), true) : formatVersionProbe());
+      return 0;
+    }
+    if (argv.includes("--about")) {
+      guardedOutput.write(json ? formatRecord(getVersionInfo(), true) : `${aboutText()}\n`);
       return 0;
     }
     const parsed = parseArgs(expandGlobalNamespace(argv));

@@ -8,6 +8,7 @@ import { BorealError, assertPathInside, assertRealPathInside, nowIso, safeParseJ
 import { writeTextFileAtomic } from "@boreal/storage";
 
 import { flagValue, flagValues, hasFlag, type ParsedArgs } from "./args.js";
+import { BOREAL_WORK_BANNER } from "./branding.js";
 import { keyValueRows, section, withPromptSession, type CliSelectOption } from "./cli-ui.js";
 import type { CliContext } from "./context.js";
 
@@ -210,12 +211,6 @@ const PROJECT_GITIGNORE_PATTERNS = [
   ".claude/",
   "dump/"
 ] as const;
-
-const BOREAL_WORK_BANNER = `██████   ██████  ██████  ███████  █████  ██          ██     ██  ██████  ██████  ██   ██
-██   ██ ██    ██ ██   ██ ██      ██   ██ ██          ██     ██ ██    ██ ██   ██ ██  ██
-██████  ██    ██ ██████  █████   ███████ ██          ██  █  ██ ██    ██ ██████  █████
-██   ██ ██    ██ ██   ██ ██      ██   ██ ██          ██ ███ ██ ██    ██ ██   ██ ██  ██
-██████   ██████  ██   ██ ███████ ██   ██ ███████      ███ ███   ██████  ██   ██ ██   ██`;
 
 const MEMORY_LAYOUT_OPTIONS: readonly CliSelectOption<MemoryLayout>[] = [
   {
