@@ -96,11 +96,17 @@ describe("bwrk cli", () => {
     const doctor = await runCli(rootDir, ["doctor", "--help"]);
 
     expect(root.exitCode).toBe(0);
-    expect(root.stdout).toContain("bwrk - Boreal Work CLI");
-    expect(root.stdout).toContain(
-      "bwrk help [init|work|dep|evidence|source|claim|decision|context|search|reservation|agent|session|operation|workflows|install|registry|dashboard|daemon|sprint|export|import|vault|raw|wiki|duplicate|merge|compact|sync|ledger|snapshot|doctor|lock|commands|completion|prime]"
-    );
-    expect(root.stdout).toContain("bwrk version [--json]");
+    expect(root.stdout).toContain("Boreal Work");
+    // Grouped overview: section headers + the per-command help pointer.
+    expect(root.stdout).toContain("WORK");
+    expect(root.stdout).toContain("KNOWLEDGE");
+    expect(root.stdout).toContain("bwrk help <command>");
+    expect(root.stdout).toContain("bwrk --about");
+
+    const about = await runCli(rootDir, ["--about"]);
+    expect(about.exitCode).toBe(0);
+    expect(about.stdout).toContain("Boreal Work");
+    expect(about.stdout).toContain("Matt Richmond");
     expect(work.exitCode).toBe(0);
     expect(work.stdout).toContain("bwrk work create");
     expect(work.stdout).toContain("--force --reason");

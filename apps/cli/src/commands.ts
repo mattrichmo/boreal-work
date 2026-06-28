@@ -178,6 +178,7 @@ import {
   type SkillInstallPlan
 } from "./workflow-assets.js";
 import { formatVersionInfo, getVersionInfo } from "./version.js";
+import { box, TAGLINE } from "./branding.js";
 
 const DEFAULT_HANDOFF_SEARCH_LIMIT = 8;
 const HANDOFF_SEARCH_MIN_CANDIDATES = 24;
@@ -1182,18 +1183,36 @@ function commandsCommand(args: ParsedArgs, output: CliOutput, json: boolean): Co
   } else if (format === "markdown") {
     output.write(commandsMarkdown());
   } else {
-    output.write(
-      table(
-        COMMAND_DEFINITIONS.map((definition) => ({
-          command: commandPath(definition),
-          category: definition.category,
-          workspace: definition.requiresWorkspace ? "yes" : "no",
-          summary: definition.summary
-        }))
-      )
-    );
+    output.write(formatCommandsGrouped());
   }
   return { exitCode: 0 };
+}
+
+function formatCommandsGrouped(): string {
+  const version = getVersionInfo().version;
+  const lines: string[] = [box([`Boreal Work · command reference   v${version}`]), ""];
+  const covered = new Set(HELP_SECTIONS.flatMap((section) => section.categories));
+  const renderSection = (title: string, defs: readonly (typeof COMMAND_DEFINITIONS)[number][]): void => {
+    if (defs.length === 0) return;
+    const width = defs.reduce((max, definition) => Math.max(max, commandPath(definition).length), 0);
+    lines.push(`▌ ${title.toUpperCase()}`);
+    for (const definition of defs) {
+      lines.push(`    ${commandPath(definition).padEnd(width)}   ${definition.summary}`);
+    }
+    lines.push("");
+  };
+  for (const section of HELP_SECTIONS) {
+    renderSection(
+      section.title,
+      COMMAND_DEFINITIONS.filter((definition) => section.categories.includes(definition.category))
+    );
+  }
+  renderSection(
+    "More",
+    COMMAND_DEFINITIONS.filter((definition) => !covered.has(definition.category))
+  );
+  lines.push(" bwrk help <command> for full usage · bwrk commands --format markdown for docs");
+  return lines.join("\n");
 }
 
 function commandsFormat(args: ParsedArgs): "table" | "markdown" {
@@ -6988,13 +7007,56 @@ ${definitions.some((definition) => definition.description)
     : ""}`;
 }
 
+const HELP_SECTIONS: readonly { readonly title: string; readonly categories: readonly string[] }[] = [
+  { title: "Start", categories: ["workspace", "install", "docs"] },
+  { title: "Work", categories: ["work", "dependency", "evidence", "gate"] },
+  { title: "Plan", categories: ["sprint", "workflow"] },
+  { title: "Knowledge", categories: ["source", "claim", "decision", "context", "search", "raw", "wiki", "vault"] },
+  { title: "Agents", categories: ["agent", "session", "reservation", "operation"] },
+  { title: "Dashboards", categories: ["dashboard", "registry"] },
+  { title: "Maintain", categories: ["doctor", "sync", "lock", "ledger", "snapshot", "duplicate", "merge", "compact", "daemon"] },
+  { title: "Data", categories: ["export", "import"] },
+  { title: "Meta", categories: ["meta", "schema"] }
+];
+
+function helpSectionNames(categories: readonly string[]): readonly string[] {
+  const wanted = new Set(categories);
+  const seen = new Set<string>();
+  const names: string[] = [];
+  for (const definition of COMMAND_DEFINITIONS) {
+    if (!wanted.has(definition.category)) continue;
+    const top = definition.path[0];
+    if (top && !seen.has(top)) {
+      seen.add(top);
+      names.push(top);
+    }
+  }
+  return names;
+}
+
 function rootHelpText(): string {
-  return `bwrk - Boreal Work CLI
-
-Usage:
-${COMMAND_DEFINITIONS.map((definition) => `  ${definition.usage}`).join("\n")}
-
-Help:
-  bwrk help [init|work|dep|evidence|source|claim|decision|context|search|reservation|agent|session|operation|workflows|install|registry|dashboard|daemon|sprint|export|import|vault|raw|wiki|duplicate|merge|compact|sync|ledger|snapshot|doctor|lock|commands|completion|prime]
-`;
+  const version = getVersionInfo().version;
+  const covered = new Set(HELP_SECTIONS.flatMap((section) => section.categories));
+  const labelWidth = 12;
+  const lines: string[] = [box([`Boreal Work   v${version}`, TAGLINE]), ""];
+  for (const section of HELP_SECTIONS) {
+    const names = helpSectionNames(section.categories);
+    if (names.length > 0) {
+      lines.push(` ${section.title.toUpperCase().padEnd(labelWidth)}${names.join(" · ")}`);
+    }
+  }
+  const moreNames = helpSectionNames(
+    [...new Set(COMMAND_DEFINITIONS.map((definition) => definition.category))].filter((category) => !covered.has(category))
+  );
+  if (moreNames.length > 0) {
+    lines.push(` ${"MORE".padEnd(labelWidth)}${moreNames.join(" · ")}`);
+  }
+  lines.push(
+    "",
+    ` ${"".padEnd(labelWidth)}bwrk help <command>   usage for one command`,
+    ` ${"".padEnd(labelWidth)}bwrk commands         full reference (--format markdown)`,
+    ` ${"".padEnd(labelWidth)}bwrk --about          about Boreal Work`,
+    ""
+  );
+  return lines.join("\n");
 }
