@@ -1,6 +1,6 @@
 ---
 name: boreal-health-doctor
-description: Boreal Health Doctor skill for Boreal project-scoped workflows. Use when the user asks to run or reason about Boreal memory/workflow commands for: sync and doctor, ledger export import, recover from failure.
+description: "Boreal Health Doctor skill for Boreal project-scoped workflows. Use when the user asks to run or reason about Boreal memory/workflow commands for: sync and doctor, ledger export import, recover from failure."
 ---
 
 # Boreal Health Doctor

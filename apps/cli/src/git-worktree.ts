@@ -63,15 +63,24 @@ export interface GitWorktreeInspection {
   readonly error?: string;
 }
 
-export async function inspectGitWorktree(context: CliContext): Promise<GitWorktreeInspection> {
+export interface GitWorktreeInspectOptions {
+  readonly rootDir?: string;
+  readonly checkedPaths?: readonly string[];
+  readonly generatedArtifactPaths?: readonly string[];
+}
+
+export async function inspectGitWorktree(context: CliContext, options: GitWorktreeInspectOptions = {}): Promise<GitWorktreeInspection> {
   const protectedBranches = protectedBranchNames();
+  const rootDir = options.rootDir ?? context.workspaceRoot;
+  const checkedPaths = options.checkedPaths ?? COLLABORATION_PATHS;
+  const generatedArtifactPaths = options.generatedArtifactPaths ?? GENERATED_ARTIFACT_PATHS;
   const base = {
     workspaceRoot: context.workspaceRoot,
     protectedBranches,
-    checkedPaths: COLLABORATION_PATHS
+    checkedPaths
   };
 
-  const root = await runGit(context.workspaceRoot, ["rev-parse", "--show-toplevel"]);
+  const root = await runGit(rootDir, ["rev-parse", "--show-toplevel"]);
   if (!root.ok) {
     return {
       ...base,
@@ -88,18 +97,19 @@ export async function inspectGitWorktree(context: CliContext): Promise<GitWorktr
     };
   }
 
-  const branchResult = await runGit(context.workspaceRoot, ["rev-parse", "--abbrev-ref", "HEAD"]);
-  const branch = branchResult.ok ? branchResult.stdout.trim() : undefined;
-  const detached = branch === "HEAD" || !branch;
+  const branchResult = await currentGitBranch(rootDir);
+  const branch = branchResult.branch;
+  const detached = branchResult.detached;
   const protectedBranch = Boolean(branch && protectedBranches.includes(branch));
-  const status = await runGit(context.workspaceRoot, ["status", "--porcelain=v1", "--", ...COLLABORATION_PATHS]);
+  const status = await runGit(rootDir, ["status", "--porcelain=v1", "--", ...checkedPaths]);
   const collaborationDirtyPaths = status.ok ? parsePorcelainStatus(status.stdout) : [];
   const findings = gitWorktreeFindings({
     protectedBranch,
     detached,
     collaborationDirtyPaths,
+    generatedArtifactPaths,
     statusError: status.ok ? undefined : status.error,
-    branchError: branchResult.ok ? undefined : branchResult.error
+    branchError: branchResult.error
   });
   const blockingDirtyPaths = collaborationDirtyPaths.filter((entry) =>
     findings.some((finding) => finding.blocking && finding.path === entry.path)
@@ -119,8 +129,31 @@ export async function inspectGitWorktree(context: CliContext): Promise<GitWorktr
     blockingDirtyPaths,
     findings,
     recommendedActions,
-    error: branchResult.ok && status.ok ? undefined : branchResult.error ?? status.error
+    error: branchResult.error ?? status.error
   };
+}
+
+async function currentGitBranch(rootDir: string): Promise<{
+  readonly branch?: string;
+  readonly detached: boolean;
+  readonly error?: string;
+}> {
+  const symbolic = await runGit(rootDir, ["symbolic-ref", "--quiet", "--short", "HEAD"]);
+  if (symbolic.ok) {
+    const branch = symbolic.stdout.trim();
+    return { branch: branch.length > 0 ? branch : undefined, detached: branch.length === 0 };
+  }
+
+  const revParse = await runGit(rootDir, ["rev-parse", "--abbrev-ref", "HEAD"]);
+  if (!revParse.ok) {
+    return { detached: false, error: revParse.error ?? symbolic.error };
+  }
+
+  const branch = revParse.stdout.trim();
+  if (branch === "HEAD" || branch.length === 0) {
+    return { detached: true };
+  }
+  return { branch, detached: false };
 }
 
 function protectedBranchNames(): readonly string[] {
@@ -149,6 +182,7 @@ function gitWorktreeFindings(input: {
   readonly protectedBranch: boolean;
   readonly detached: boolean;
   readonly collaborationDirtyPaths: readonly GitDirtyPath[];
+  readonly generatedArtifactPaths: readonly string[];
   readonly statusError?: string;
   readonly branchError?: string;
 }): readonly GitWorktreeFinding[] {
@@ -188,7 +222,7 @@ function gitWorktreeFindings(input: {
   }
 
   for (const entry of input.collaborationDirtyPaths) {
-    if (isGeneratedArtifactPath(entry.path)) {
+    if (isGeneratedArtifactPath(entry.path, input.generatedArtifactPaths)) {
       findings.push({
         category: "dirty_generated_artifact",
         severity: "info",
@@ -235,9 +269,9 @@ function generatedArtifactActions(entry: GitDirtyPath): readonly string[] {
   return [`git rm -r --cached -- ${shellPath(entry.path)}`, "bwrk doctor --fix --json"];
 }
 
-function isGeneratedArtifactPath(path: string): boolean {
+function isGeneratedArtifactPath(path: string, generatedArtifactPaths: readonly string[] = GENERATED_ARTIFACT_PATHS): boolean {
   const normalized = normalizeGitPath(path);
-  return GENERATED_ARTIFACT_PATHS.some((prefix) => normalized === prefix || normalized.startsWith(`${prefix}/`));
+  return generatedArtifactPaths.some((prefix) => normalized === prefix || normalized.startsWith(`${prefix}/`));
 }
 
 function isMemoryIndexPath(path: string): boolean {

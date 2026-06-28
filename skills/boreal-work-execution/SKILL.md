@@ -1,6 +1,6 @@
 ---
 name: boreal-work-execution
-description: Boreal Work Execution skill for Boreal project-scoped workflows. Use when the user asks to run or reason about Boreal memory/workflow commands for: claim and finish work, closeout work, link dependencies.
+description: "Boreal Work Execution skill for Boreal project-scoped workflows. Use when the user asks to run or reason about Boreal memory/workflow commands for: claim and finish work, closeout work, link dependencies."
 ---
 
 # Boreal Work Execution

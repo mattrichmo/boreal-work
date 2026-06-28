@@ -1,6 +1,6 @@
 ---
 name: boreal-raw-inbox
-description: Boreal Raw Inbox skill for Boreal project-scoped workflows. Use when the user asks to run or reason about Boreal memory/workflow commands for: add raw source, triage raw inbox, retrieve raw source.
+description: "Boreal Raw Inbox skill for Boreal project-scoped workflows. Use when the user asks to run or reason about Boreal memory/workflow commands for: add raw source, triage raw inbox, retrieve raw source."
 ---
 
 # Boreal Raw Inbox

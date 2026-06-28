@@ -1543,7 +1543,61 @@ async function runNodeCli(input: {
 }
 
 function firstJsonPayload(...candidates: readonly string[]): string | undefined {
-  return candidates.map((candidate) => candidate.trim()).find((candidate) => candidate.startsWith("{"));
+  for (const candidate of candidates) {
+    const payload = firstCompleteJsonObject(candidate);
+    if (payload) {
+      return payload;
+    }
+  }
+  return undefined;
+}
+
+function firstCompleteJsonObject(text: string): string | undefined {
+  let start = -1;
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let index = 0; index < text.length; index += 1) {
+    const char = text[index];
+    if (start < 0) {
+      if (char === "{") {
+        start = index;
+        depth = 1;
+      }
+      continue;
+    }
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (char === "\\") {
+      escaped = inString;
+      continue;
+    }
+    if (char === "\"") {
+      inString = !inString;
+      continue;
+    }
+    if (inString) {
+      continue;
+    }
+    if (char === "{") {
+      depth += 1;
+    } else if (char === "}") {
+      depth -= 1;
+      if (depth === 0) {
+        const payload = text.slice(start, index + 1);
+        try {
+          JSON.parse(payload);
+          return payload;
+        } catch {
+          start = -1;
+          depth = 0;
+        }
+      }
+    }
+  }
+  return undefined;
 }
 
 async function resolveCliData(output: string, workspaceRoot: string): Promise<unknown> {
@@ -1557,7 +1611,14 @@ async function resolveCliData(output: string, workspaceRoot: string): Promise<un
   }
   const data = parsed.data;
   if (isRecord(data) && data.truncated === true && typeof data.fullResultPath === "string") {
-    const full = parseJsonObject(await readFile(resolve(workspaceRoot, data.fullResultPath), "utf8"), "boreal full result");
+    const fullResultPath = resolve(workspaceRoot, data.fullResultPath);
+    const resultsRoot = resolve(workspaceRoot, ".boreal", "results");
+    if (!fullResultPath.startsWith(`${resultsRoot}/`)) {
+      throw new ConsoleCommandError("CONSOLE_RESULT_PATH_OUT_OF_BOUNDS", "Spooled CLI result path is outside .boreal/results", {
+        fullResultPath: data.fullResultPath
+      });
+    }
+    const full = parseJsonObject(await readFile(fullResultPath, "utf8"), "boreal full result");
     if (full.ok !== true) {
       throw new Error("Boreal full result was not ok");
     }

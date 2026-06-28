@@ -1,6 +1,6 @@
 ---
 name: boreal-project-context
-description: Boreal Project Context skill for Boreal project-scoped workflows. Use when the user asks to run or reason about Boreal memory/workflow commands for: retrieve project context, retrieve work state, retrieve decision history.
+description: "Boreal Project Context skill for Boreal project-scoped workflows. Use when the user asks to run or reason about Boreal memory/workflow commands for: retrieve project context, retrieve work state, retrieve decision history."
 ---
 
 # Boreal Project Context

@@ -13,6 +13,12 @@ export type ProjectRegistryMemoryLayout = "in-repo" | "child" | "sibling";
 export type ProjectRegistryMemoryGitMode = "shared" | "separate" | "submodule";
 export type ProjectRegistrySkillTarget = "codex" | "claude";
 
+export interface ProjectRegistrySkillInstallRoot {
+  readonly target: ProjectRegistrySkillTarget;
+  readonly installRoot: string;
+  readonly skillRoot: string;
+}
+
 export interface ProjectRegistryStorage {
   readonly scope: ProjectRegistryStorageScope;
   readonly rootDir: string;
@@ -41,6 +47,7 @@ export interface ProjectRegistryEntry {
   readonly memoryGitMode: ProjectRegistryMemoryGitMode;
   readonly memoryRemote?: string;
   readonly installRoot: string;
+  readonly skillInstallRoots?: readonly ProjectRegistrySkillInstallRoot[];
   readonly skillTargets: readonly ProjectRegistrySkillTarget[];
   readonly folderScoped: boolean;
   readonly source: ProjectRegistryEntrySource;

@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 
 import { BorealError, type ActorRef, type EvidenceId, type IsoTimestamp, type KnowledgeSourceId } from "@boreal/core";
 import { createBorealRuntime } from "@boreal/engine";
+import { recordEvidence, verifySubject } from "@boreal/evidence-engine";
+import { createClaim, createDecision, createKnowledgeSource } from "@boreal/knowledge-engine";
 import { InMemoryBorealStore } from "@boreal/storage";
 
 const actor: ActorRef = {
@@ -179,6 +181,138 @@ describe("boreal runtime proof slice", () => {
     expect(first.meta.id).not.toBe(second.meta.id);
   });
 
+  it("canonicalizes deterministic evidence and knowledge inputs before hashing", () => {
+    const now = "2026-01-01T00:00:00.000Z" as IsoTimestamp;
+    const evidence = recordEvidence({
+      subjectId: "bw_work_subject",
+      subjectType: "work",
+      kind: "test",
+      summary: "  Command   passed  ",
+      outcome: "passed",
+      uri: " file://reports/test.json ",
+      actor,
+      now
+    });
+    const sameEvidence = recordEvidence({
+      subjectId: "bw_work_subject",
+      subjectType: "work",
+      kind: "test",
+      summary: "Command passed",
+      outcome: "passed",
+      uri: "file://reports/test.json",
+      actor,
+      now
+    });
+    const otherEvidence = recordEvidence({
+      subjectId: "bw_work_subject",
+      subjectType: "work",
+      kind: "artifact",
+      summary: "Other evidence",
+      outcome: "observed",
+      actor,
+      now
+    });
+
+    expect(evidence.meta.id).toBe(sameEvidence.meta.id);
+    expect(evidence.summary).toBe("Command passed");
+    expect(evidence.uri).toBe("file://reports/test.json");
+    expect(evidence.meta.contentHash).toBe(sameEvidence.meta.contentHash);
+
+    const verification = verifySubject({
+      subjectId: "bw_work_subject",
+      subjectType: "work",
+      verdict: "passed",
+      evidenceIds: [otherEvidence.meta.id, evidence.meta.id, evidence.meta.id],
+      availableEvidence: [evidence, otherEvidence],
+      notes: "  Verified   by test  ",
+      policy: { requireEvidenceForVerification: true },
+      actor,
+      now
+    });
+    const sameVerification = verifySubject({
+      subjectId: "bw_work_subject",
+      subjectType: "work",
+      verdict: "passed",
+      evidenceIds: [evidence.meta.id, otherEvidence.meta.id],
+      availableEvidence: [otherEvidence, evidence],
+      notes: "Verified by test",
+      policy: { requireEvidenceForVerification: true },
+      actor,
+      now
+    });
+    expect(verification.meta.id).toBe(sameVerification.meta.id);
+    expect(verification.evidenceIds).toEqual([evidence.meta.id, otherEvidence.meta.id].sort());
+    expect(verification.meta.contentHash).toBe(sameVerification.meta.contentHash);
+
+    const source = createKnowledgeSource({
+      kind: "document",
+      title: "  Runtime   note  ",
+      uri: " file://runtime.md ",
+      summary: "",
+      actor,
+      now
+    });
+    const sameSource = createKnowledgeSource({
+      kind: "document",
+      title: "Runtime note",
+      uri: "file://runtime.md",
+      summary: "",
+      actor,
+      now
+    });
+    expect(source.meta.id).toBe(sameSource.meta.id);
+    expect(source.meta.contentHash).toBe(sameSource.meta.contentHash);
+
+    const claim = createClaim({
+      statement: "  Runtime   facts are stable.  ",
+      status: "accepted",
+      sourceIds: [source.meta.id, source.meta.id],
+      evidenceIds: [otherEvidence.meta.id, evidence.meta.id, evidence.meta.id],
+      wikiPageIds: [" Wiki/Runtime ", "Wiki/Runtime"],
+      actor,
+      now
+    });
+    const sameClaim = createClaim({
+      statement: "Runtime facts are stable.",
+      status: "accepted",
+      sourceIds: [source.meta.id],
+      evidenceIds: [evidence.meta.id, otherEvidence.meta.id],
+      wikiPageIds: ["Wiki/Runtime"],
+      actor,
+      now
+    });
+    expect(claim.meta.id).toBe(sameClaim.meta.id);
+    expect(claim.evidenceIds).toEqual([evidence.meta.id, otherEvidence.meta.id].sort());
+    expect(claim.wikiPageIds).toEqual(["Wiki/Runtime"]);
+    expect(claim.meta.contentHash).toBe(sameClaim.meta.contentHash);
+
+    const decision = createDecision({
+      title: "  Runtime decision ",
+      context: "  Keep   inputs canonical. ",
+      decision: "  Sort and trim deterministic fields. ",
+      status: "accepted",
+      consequences: [" B ", "A", "A"],
+      sourceIds: [source.meta.id, source.meta.id],
+      wikiPageIds: [" Wiki/Runtime ", "Wiki/Runtime"],
+      actor,
+      now
+    });
+    const sameDecision = createDecision({
+      title: "Runtime decision",
+      context: "Keep inputs canonical.",
+      decision: "Sort and trim deterministic fields.",
+      status: "accepted",
+      consequences: ["A", "B"],
+      sourceIds: [source.meta.id],
+      wikiPageIds: ["Wiki/Runtime"],
+      actor,
+      now
+    });
+    expect(decision.meta.id).toBe(sameDecision.meta.id);
+    expect(decision.consequences).toEqual(["A", "B"]);
+    expect(decision.meta.contentHash).toBe(sameDecision.meta.contentHash);
+  });
+
   it("repairs stale derived readiness with an explicit recompute", async () => {
     const store = new InMemoryBorealStore();
     const runtime = createBorealRuntime({
@@ -208,6 +342,43 @@ describe("boreal runtime proof slice", () => {
       expect.arrayContaining([expect.objectContaining({ id: blocked.meta.id })])
     );
     await expect(runtime.recomputeReadiness()).resolves.toEqual({ changed: 1 });
+    await expect(runtime.getWorkView(blocked.meta.id)).resolves.toMatchObject({ status: "blocked" });
+  });
+
+  it("keeps work blocked when adding a resolved blocker beside an open blocker", async () => {
+    const runtime = createBorealRuntime({ actor });
+    const openBlocker = await runtime.createWork({ title: "Open blocker", ready: true });
+    const resolvedBlocker = await runtime.createWork({ title: "Resolved blocker", ready: true });
+    const blocked = await runtime.createWork({ title: "Blocked by full graph", ready: true });
+
+    await runtime.addBlockingDependency({
+      blockedWorkId: blocked.meta.id,
+      blockingWorkId: openBlocker.meta.id
+    });
+    const evidence = await runtime.recordEvidence({
+      subjectId: resolvedBlocker.meta.id,
+      subjectType: "work",
+      kind: "test",
+      summary: "resolved blocker passed",
+      outcome: "passed"
+    });
+    await runtime.verifyWork({
+      workId: resolvedBlocker.meta.id,
+      verdict: "passed",
+      evidenceIds: [evidence.meta.id]
+    });
+    await runtime.closeWork({
+      workId: resolvedBlocker.meta.id,
+      reason: "resolved before adding dependency"
+    });
+
+    const updated = await runtime.addBlockingDependency({
+      blockedWorkId: blocked.meta.id,
+      blockingWorkId: resolvedBlocker.meta.id
+    });
+
+    expect(updated.status).toBe("blocked");
+    expect(updated.dependencyIds).toEqual(expect.arrayContaining([openBlocker.meta.id, resolvedBlocker.meta.id]));
     await expect(runtime.getWorkView(blocked.meta.id)).resolves.toMatchObject({ status: "blocked" });
   });
 

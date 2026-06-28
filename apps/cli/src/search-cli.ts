@@ -16,6 +16,8 @@ import { normalizeFileLockOptions, withFileLock, writeTextFileAtomic } from "@bo
 
 import type { CliContext } from "./context.js";
 
+const SEARCH_INDEX_MAX_READ_BYTES = 100 * 1024 * 1024;
+
 export interface SearchIndexWriteResult {
   readonly path: string;
   readonly schemaVersion: SearchIndexDocument["schemaVersion"];
@@ -140,7 +142,7 @@ async function readSearchIndex(path: string): Promise<SearchIndexDocument> {
   const parsed = await readJsonFile(path, {
     schemaName: "boreal.search-index.v1",
     expectedObject: true,
-    maxBytes: 50 * 1024 * 1024
+    maxBytes: SEARCH_INDEX_MAX_READ_BYTES
   });
   if (!isSearchIndexDocument(parsed)) {
     throw new BorealError("BOREAL_INVALID_INPUT", "Search index has an unsupported shape", { path });

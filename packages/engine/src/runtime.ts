@@ -296,10 +296,12 @@ export function createBorealRuntime(options: BorealRuntimeOptions = {}): BorealR
       return store.write(async (writer) => {
         const blockedWork = await workWithGraphDependencies(writer, await requireWork(writer, input.blockedWorkId));
         const blockingWork = await requireWork(writer, input.blockingWorkId);
+        const dependencies = await loadDependencies(writer, blockedWork);
         const existingEdges = await writer.listGraphEdges();
         const result = addBlockingDependencyDomain({
           blockedWork,
           blockingWork,
+          dependencies,
           existingEdges,
           policy,
           actor,

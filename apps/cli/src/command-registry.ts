@@ -437,7 +437,7 @@ export const COMMAND_DEFINITIONS: readonly CommandDefinition[] = [
     path: ["dashboard"],
     category: "dashboard",
     summary: "Open the terminal dashboard (default); --web for the browser console, --global for all projects.",
-    usage: "bwrk dashboard [--web] [--global] [--json] [--mouse] [--refresh-ms <ms>] [--host <host>] [--port <n>] [--no-open] [--mode live|fixture] [--live-cache-ttl-ms <ms>]",
+    usage: "bwrk dashboard [--web] [--global] [--json] [--mouse] [--refresh-ms <ms>] [--host <host>] [--port <n>] [--no-open] [--mode live|fixture] [--live-cache-ttl-ms <ms>] [--allow-fixture-fallback]",
     description:
       "Opens the Boreal dashboard for the current workspace. By default it runs the live terminal dashboard (no server, no browser). Pass --web for the browser console (binds 127.0.0.1:4318 and opens a browser), --global to scope to every registered project, and --json for the bounded data payload. Surface (--web) and scope (--global) are independent.",
     flags: [
@@ -449,7 +449,8 @@ export const COMMAND_DEFINITIONS: readonly CommandDefinition[] = [
       flag("port", "value", "Browser console (--web) bind port. Defaults to 4318."),
       flag("no-open", "boolean", "Browser console (--web): start the server without opening a browser."),
       flag("mode", "value", "Data mode: live or fixture. Defaults to live."),
-      flag("live-cache-ttl-ms", "value", "Browser console (--web) live data cache TTL between route clicks. Defaults to 60000.")
+      flag("live-cache-ttl-ms", "value", "Browser console (--web) live data cache TTL between route clicks. Defaults to 60000."),
+      flag("allow-fixture-fallback", "boolean", "Browser console (--web): render fixture data with warnings when live data fails.")
     ],
     positionals: { label: "arguments", min: 0, max: 0 },
     requiresWorkspace: true,
@@ -474,7 +475,7 @@ export const COMMAND_DEFINITIONS: readonly CommandDefinition[] = [
     path: ["global"],
     category: "dashboard",
     summary: "Your global workspace: cross-repo dashboard, global work (global work ...), and link/unlink.",
-    usage: "bwrk global [link <path>|unlink <project-id>] [--web] [--json] [--mouse] [--refresh-ms <ms>] [--host <host>] [--port <n>] [--no-open] [--mode live|fixture] [--name <text>] [--label <label>...] [--registry-root <dir>]",
+    usage: "bwrk global [link <path>|unlink <project-id>] [--web] [--json] [--mouse] [--refresh-ms <ms>] [--host <host>] [--port <n>] [--no-open] [--mode live|fixture] [--live-cache-ttl-ms <ms>] [--allow-fixture-fallback] [--name <text>] [--label <label>...] [--registry-root <dir>]",
     description:
       "The machine-level global workspace. With no subcommand it opens the cross-repo dashboard (terminal by default; --web for the browser, --json for the data payload). `bwrk global work ...` (and any `bwrk global <command>`) runs that command against the global workspace. `bwrk global link <path>` links a project to be tracked; `bwrk global unlink <project-id>` removes it.",
     flags: [
@@ -486,6 +487,7 @@ export const COMMAND_DEFINITIONS: readonly CommandDefinition[] = [
       flag("no-open", "boolean", "Browser console (--web): start the server without opening a browser."),
       flag("mode", "value", "Data mode: live or fixture. Defaults to live."),
       flag("live-cache-ttl-ms", "value", "Browser console (--web) live data cache TTL between route clicks. Defaults to 60000."),
+      flag("allow-fixture-fallback", "boolean", "Browser console (--web): render fixture data with warnings when live data fails."),
       flag("name", "value", "link: display name for the linked project."),
       flag("label", "value", "link: label for the linked project (repeatable).", true),
       flag("registry-root", "value", "link/unlink: machine-local registry root override.")
@@ -1724,9 +1726,12 @@ export const COMMAND_DEFINITIONS: readonly CommandDefinition[] = [
     path: ["gate"],
     category: "gate",
     summary: "Run the default closeout gate.",
-    usage: "bwrk gate [--strict] [--json]",
+    usage: "bwrk gate [--strict] [--auto-prune-operations] [--json]",
     description: "Golden-path alias for `bwrk gate closeout`.",
-    flags: [flag("strict", "boolean", "Treat doctor warnings as gate failures.")],
+    flags: [
+      flag("strict", "boolean", "Treat doctor warnings as gate failures."),
+      flag("auto-prune-operations", "boolean", "Prune local operation history when operation volume is the only strict gate blocker.")
+    ],
     positionals: { label: "arguments", min: 0, max: 0 },
     requiresWorkspace: true,
     supportsJson: true,
@@ -1735,9 +1740,12 @@ export const COMMAND_DEFINITIONS: readonly CommandDefinition[] = [
     path: ["gate", "closeout"],
     category: "gate",
     summary: "Run sync, doctor, schema, and docs closeout checks.",
-    usage: "bwrk gate closeout [--strict] [--json]",
+    usage: "bwrk gate closeout [--strict] [--auto-prune-operations] [--json]",
     description: "Coordinates sync refresh, doctor, schema validation, and docs checks with unambiguous JSON success semantics.",
-    flags: [flag("strict", "boolean", "Treat doctor warnings as gate failures.")],
+    flags: [
+      flag("strict", "boolean", "Treat doctor warnings as gate failures."),
+      flag("auto-prune-operations", "boolean", "Prune local operation history when operation volume is the only strict gate blocker.")
+    ],
     positionals: { label: "arguments", min: 0, max: 0 },
     requiresWorkspace: true,
     supportsJson: true,
@@ -3111,27 +3119,27 @@ const COMMAND_BEHAVIOR: Readonly<Record<string, CommandBehaviorMetadata>> = {
   }),
   gate: commandMetadata("gate", {
     readOnly: false,
-    destructive: false,
+    destructive: true,
     writesState: true,
     writesGeneratedArtifacts: true,
     requiresFreshIndex: false,
     concurrencySafe: true,
     requiresLock: "state+generated",
-    maxResultSizeChars: 500_000,
+    maxResultSizeChars: 600_000,
     humanOutputKind: "record",
-    examples: ["bwrk gate --strict --json"],
+    examples: ["bwrk gate --strict --auto-prune-operations --json"],
   }),
   "gate closeout": commandMetadata("gate closeout", {
     readOnly: false,
-    destructive: false,
+    destructive: true,
     writesState: true,
     writesGeneratedArtifacts: true,
     requiresFreshIndex: false,
     concurrencySafe: true,
     requiresLock: "state+generated",
-    maxResultSizeChars: 500_000,
+    maxResultSizeChars: 600_000,
     humanOutputKind: "record",
-    examples: ["bwrk gate closeout --strict --json"],
+    examples: ["bwrk gate closeout --strict --auto-prune-operations --json"],
   }),
   "lock inspect": commandMetadata("lock inspect", {
     readOnly: true,

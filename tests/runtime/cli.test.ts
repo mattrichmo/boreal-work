@@ -16,6 +16,7 @@ import {
 import { installJsonStdoutGuard, isBrokenPipeError, main } from "../../apps/cli/src/index.ts";
 import { inspectBorealInstallStatus } from "../../apps/cli/src/install-status.ts";
 import type { CliOutput } from "../../apps/cli/src/output.ts";
+import { inspectWorkflowAssets } from "../../apps/cli/src/workflow-assets.ts";
 
 interface CommandRun {
   readonly exitCode: number;
@@ -259,6 +260,18 @@ describe("bwrk cli", () => {
         memoryLayout: "child",
         memoryGitMode: "separate",
         installRoot: join(rootDir, ".agents/skills"),
+        skillInstallRoots: [
+          {
+            target: "codex",
+            installRoot: join(rootDir, ".agents/skills"),
+            skillRoot: join(rootDir, ".agents/skills")
+          },
+          {
+            target: "claude",
+            installRoot: join(rootDir, ".claude"),
+            skillRoot: join(rootDir, ".claude/skills")
+          }
+        ],
         skillTargets: ["codex", "claude"],
         folderScoped: true
       })
@@ -469,7 +482,8 @@ describe("bwrk cli", () => {
 
     const drift = await runCli(rootDir, ["doctor", "--strict", "--json"]);
     const driftPayload = parseData<DoctorPayload>(drift.stdout);
-    expect(drift.exitCode).toBe(1);
+    expect(drift.exitCode).toBe(0);
+    expect(driftPayload.ok).toBe(true);
     expect(driftPayload.diagnostics).toEqual(
       expect.arrayContaining([expect.objectContaining({ code: "daemon.status", severity: "warning" })])
     );
@@ -1900,13 +1914,25 @@ describe("bwrk cli", () => {
     expect(doctorDiagnostic(failingPayload, "project_setup.gitmodules")).toEqual(
       expect.objectContaining({ severity: "error" })
     );
+    expect(doctorDiagnostic(failingPayload, "project_setup.child_tracking")).toEqual(
+      expect.objectContaining({
+        severity: "error",
+        message: expect.stringContaining("Git gitlink")
+      })
+    );
 
     const fixed = await runCli(rootDir, ["doctor", "--fix", "--json"]);
     const fixedPayload = parseData<DoctorPayload>(fixed.stdout);
 
-    expect(fixed.exitCode).toBe(0);
+    expect(fixed.exitCode).toBe(1);
     expect(doctorDiagnostic(fixedPayload, "project_setup.gitmodules")).toEqual(
       expect.objectContaining({ severity: "fixed" })
+    );
+    expect(doctorDiagnostic(fixedPayload, "project_setup.child_tracking")).toEqual(
+      expect.objectContaining({
+        severity: "error",
+        message: expect.stringContaining("Git gitlink")
+      })
     );
     expect(await readFile(join(rootDir, ".gitmodules"), "utf8")).toContain(
       "url = git@example.com:example/project-memory.git"
@@ -3522,6 +3548,60 @@ describe("bwrk cli", () => {
     expect(doctorPayload.issues).toEqual([]);
   });
 
+  it("validates skill frontmatter with standards-compatible quoted YAML scalars", async () => {
+    const rootDir = await makeTempWorkspace();
+    const assetRoot = join(rootDir, "assets");
+    await mkdir(join(assetRoot, "workflows/00-agent"), { recursive: true });
+    await mkdir(join(assetRoot, "templates"), { recursive: true });
+    await mkdir(join(assetRoot, "skills/boreal-test"), { recursive: true });
+    await writeFile(
+      join(assetRoot, "workflows/00-agent/route-request.md"),
+      [
+        "---",
+        "id: boreal.workflow.test-route.v1",
+        "title: Test Route",
+        "group: agent",
+        "allowed_commands:",
+        "  - work list",
+        "templates:",
+        "  - none",
+        "---",
+        "",
+        "# Test Route"
+      ].join("\n"),
+      "utf8"
+    );
+    await writeFile(
+      join(assetRoot, "skills/boreal-test/boreal.yaml"),
+      ["skill: boreal-test", "display_name: Boreal Test", "workflows:", "  - 00-agent/route-request.md"].join("\n"),
+      "utf8"
+    );
+    const skillBody = [
+      "Use `bwrk workflows show <ref>` to resolve workflow refs.",
+      "Keep this skill as a thin adapter.",
+      "Workflow: `workflows/00-agent/route-request.md`"
+    ].join("\n");
+
+    await writeFile(
+      join(assetRoot, "skills/boreal-test/SKILL.md"),
+      ["---", "name: boreal-test", "description: Adapter for: invalid YAML", "---", "", skillBody].join("\n"),
+      "utf8"
+    );
+    await expect(inspectWorkflowAssets({ assetRoot })).rejects.toMatchObject({
+      code: "BOREAL_INVALID_INPUT",
+      message: "YAML scalar containing ': ' must be quoted"
+    });
+
+    await writeFile(
+      join(assetRoot, "skills/boreal-test/SKILL.md"),
+      ["---", "name: boreal-test", 'description: "Adapter for: valid YAML"', "---", "", skillBody].join("\n"),
+      "utf8"
+    );
+    await expect(inspectWorkflowAssets({ assetRoot })).resolves.toEqual(
+      expect.objectContaining({ ok: true, workflowCount: 1, templateCount: 0, skillCount: 1, issues: [] })
+    );
+  });
+
   it("installs Codex and Claude skill files and keeps dry-run read-only", async () => {
     const rootDir = await makeTempWorkspace();
     const dryRunRoot = join(rootDir, "dry-run-skills");
@@ -3991,6 +4071,91 @@ describe("bwrk cli", () => {
         })
       })
     );
+  });
+
+  it("auto-prunes local operation volume when it is the only strict closeout blocker", async () => {
+    const rootDir = await makeTempWorkspace();
+
+    await runCli(rootDir, ["init", "--setup-memory", "--json"]);
+    await runCli(rootDir, ["sync", "refresh", "--json"]);
+
+    const initialState = await readState<{
+      readonly operations: Array<Record<string, unknown>>;
+      readonly [key: string]: unknown;
+    }>(rootDir);
+    const template = initialState.operations[0];
+    if (!template) {
+      throw new Error("expected init operation");
+    }
+    const templateMeta = template.meta as Record<string, unknown>;
+    const syntheticOperationCount = 1_030;
+    await updateState(rootDir, (state) => ({
+      ...state,
+      operations: [
+        ...initialState.operations,
+        ...Array.from({ length: syntheticOperationCount - initialState.operations.length }, (_, index) => ({
+          ...template,
+          meta: {
+            ...templateMeta,
+            id: `bw_operation_${(index + 20_000).toString(16).padStart(12, "0")}`,
+            contentHash: `sha256:${(index + 20_000).toString(16).padStart(64, "0")}`
+          },
+          eventIds: []
+        }))
+      ]
+    }));
+
+    const strictGate = await runCli(rootDir, ["gate", "closeout", "--strict", "--json"]);
+    const strictPayload = parseData<{
+      readonly ok: boolean;
+      readonly autoPruneOperations: boolean;
+      readonly operationPrune?: unknown;
+      readonly doctor: { readonly ok: boolean; readonly diagnostics: DoctorPayload["diagnostics"] };
+    }>(strictGate.stdout);
+    const strictOperationVolume = strictPayload.doctor.diagnostics.find((diagnostic) => diagnostic.code === "operation.volume");
+
+    expect(strictGate.exitCode).toBe(1);
+    expect(strictPayload.ok).toBe(false);
+    expect(strictPayload.autoPruneOperations).toBe(false);
+    expect(strictPayload.operationPrune).toBeUndefined();
+    expect(strictOperationVolume).toEqual(
+      expect.objectContaining({
+        severity: "warning",
+        details: expect.objectContaining({ recommendedKeep: 1000, warningThreshold: 1025 })
+      })
+    );
+
+    const autoGate = await runCli(rootDir, ["gate", "closeout", "--strict", "--auto-prune-operations", "--json"]);
+    const autoPayload = parseData<{
+      readonly ok: boolean;
+      readonly autoPruneOperations: boolean;
+      readonly operationPrune?: {
+        readonly triggeredBy: string;
+        readonly deleted: number;
+        readonly keep: number;
+        readonly remainingAfterOperationLog: number;
+      };
+      readonly doctor: { readonly ok: boolean; readonly diagnostics: DoctorPayload["diagnostics"] };
+    }>(autoGate.stdout);
+    const autoOperationVolume = autoPayload.doctor.diagnostics.find((diagnostic) => diagnostic.code === "operation.volume");
+    const finalState = await readState<{
+      readonly operations: Array<{ readonly commandPath: string }>;
+    }>(rootDir);
+
+    expect(autoGate.exitCode).toBe(0);
+    expect(autoPayload.ok).toBe(true);
+    expect(autoPayload.autoPruneOperations).toBe(true);
+    expect(autoPayload.operationPrune).toEqual(
+      expect.objectContaining({
+        triggeredBy: "operation.volume",
+        keep: 1000,
+        remainingAfterOperationLog: 1000
+      })
+    );
+    expect(autoPayload.operationPrune?.deleted).toBeGreaterThan(0);
+    expect(autoOperationVolume).toEqual(expect.objectContaining({ severity: "ok" }));
+    expect(finalState.operations).toHaveLength(1000);
+    expect(finalState.operations.map((operation) => operation.commandPath)).toContain("gate closeout");
   });
 
   it("repairs legacy operation-event links and marks unlinked events", async () => {

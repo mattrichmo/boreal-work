@@ -349,7 +349,7 @@ Validates registered project roots, Boreal runtime files, project setup config p
 ## `dashboard`
 
 ```bash
-bwrk dashboard [--web] [--global] [--json] [--mouse] [--refresh-ms <ms>] [--host <host>] [--port <n>] [--no-open] [--mode live|fixture] [--live-cache-ttl-ms <ms>]
+bwrk dashboard [--web] [--global] [--json] [--mouse] [--refresh-ms <ms>] [--host <host>] [--port <n>] [--no-open] [--mode live|fixture] [--live-cache-ttl-ms <ms>] [--allow-fixture-fallback]
 ```
 
 Opens the Boreal dashboard for the current workspace. **By default it runs the live terminal dashboard** (no HTTP server, no browser); it works in-process against the workspace and is dismissed with `q`. Surface and scope are independent flags:
@@ -373,6 +373,7 @@ Options:
 - `--no-open`: browser console (`--web`): print the URL without launching a browser.
 - `--mode`: `live` for workspace data or `fixture` for demo data. Defaults to `live`.
 - `--live-cache-ttl-ms`: browser console (`--web`) live data cache TTL between route clicks. Defaults to `60000`.
+- `--allow-fixture-fallback`: browser console (`--web`) renders deterministic fixture data with warnings if live data fails. Without this flag, live data failures return an error.
 
 ## `dashboard global`
 
@@ -394,7 +395,7 @@ bwrk dashboard global --limit 10 --json
 ## `global`
 
 ```bash
-bwrk global [link <path>|unlink <project-id>] [--web] [--json] [--mouse] [--refresh-ms <ms>] [--host <host>] [--port <n>] [--no-open] [--mode live|fixture] [--name <text>] [--label <label>...] [--registry-root <dir>]
+bwrk global [link <path>|unlink <project-id>] [--web] [--json] [--mouse] [--refresh-ms <ms>] [--host <host>] [--port <n>] [--no-open] [--mode live|fixture] [--live-cache-ttl-ms <ms>] [--allow-fixture-fallback] [--name <text>] [--label <label>...] [--registry-root <dir>]
 ```
 
 The machine-level **global workspace**: a real Boreal workspace (its own to-dos, plans, tasks, sprints) that lives at the registry root, plus a monitor over the projects you've linked. It is not tied to any repo.
@@ -405,7 +406,7 @@ The machine-level **global workspace**: a real Boreal workspace (its own to-dos,
 
 The global workspace is created automatically on first use. Nothing is tracked globally until you link it; `bwrk init` never auto-links a project.
 
-Options match `bwrk dashboard` (`--web`, `--mouse`, `--refresh-ms`, `--host`, `--port`, `--no-open`, `--mode`), plus `--name`/`--label`/`--registry-root` for `link`.
+Options match `bwrk dashboard` (`--web`, `--mouse`, `--refresh-ms`, `--host`, `--port`, `--no-open`, `--mode`, `--live-cache-ttl-ms`, `--allow-fixture-fallback`), plus `--name`/`--label`/`--registry-root` for `link`.
 
 ## `link`
 
@@ -516,11 +517,11 @@ Behavior:
 - `--memory-layout child` requires the memory root to be a direct child of the project root.
 - `--memory-layout child` defaults to `--memory-git-mode separate`, initializes the child memory Git repo, and adds the child path to the project `.gitignore`.
 - `--memory-layout sibling` requires the memory root to share the project root parent and always uses `--memory-git-mode separate`.
-- `--memory-git-mode submodule` requires `--memory-layout child` and `--memory-remote`; setup writes `.gitmodules` metadata but leaves normal Git staging and the gitlink commit to the user.
+- `--memory-git-mode submodule` requires `--memory-layout child` and `--memory-remote`; setup writes `.gitmodules` metadata, but doctor still requires a real project-index gitlink (`160000` mode). Run `git submodule add <remote> <path>` or otherwise create the gitlink before treating submodule mode as healthy.
 - `--memory-git-mode shared` keeps memory in the project repository and is only the default for `--memory-layout in-repo`.
 - `--separate-git` is retained as a compatibility alias for `--memory-git-mode separate`.
 - `--interactive` prompts for the same setup fields and requires a TTY. Path fields use editable text prompts; choice fields use arrow-key selectors with descriptions. Use Space to toggle multiple skill targets and Enter to accept.
-- `--skill-target codex` installs to `.agents/skills`; `--skill-target claude` installs to `.claude/skills` unless the configured install root is already Claude-shaped.
+- `--skill-target codex` installs to `.agents/skills`; `--skill-target claude` installs to `.claude/skills` unless the configured install root is already Claude-shaped. Setup stores resolved `skillInstallRoots[]` so future installs, registry entries, and doctor output agree per target.
 - Returns the existing initialization event when the workspace is already initialized.
 - Human output is a short setup summary with Git guard status. Use `--json` when automation needs the full `projectSetup` object.
 
@@ -549,6 +550,13 @@ JSON `data` shape:
       "memoryLayout": "sibling",
       "memoryGitMode": "separate",
       "installRoot": "/absolute/path/.agents/skills",
+      "skillInstallRoots": [
+        {
+          "target": "codex",
+          "installRoot": "/absolute/path/.agents/skills",
+          "skillRoot": "/absolute/path/.agents/skills"
+        }
+      ],
       "skillTargets": ["codex"],
       "folderScoped": true,
       "createdAt": "2026-06-26T00:00:00.000Z",
@@ -1421,7 +1429,7 @@ Checks:
 
 - `.boreal` and runtime state presence.
 - Runtime state JSON parse and schema version.
-- Project setup drift: config root mismatch, configured memory root presence, expected memory Git repository boundary, project/memory `.gitignore` guards, child memory accidentally tracked by the project Git index, and child submodule `.gitmodules` metadata.
+- Project setup and environment manifest drift: config root mismatch, configured memory root presence, expected memory Git repository boundary, target-specific skill install roots, resolved workflow asset roots, project/memory `.gitignore` guards, child memory accidentally tracked by the project Git index, child submodule `.gitmodules` metadata, and the required submodule gitlink.
 - Integrated schema validation for all persisted runtime state sections and runtime policy payloads.
 - Required state sections.
 - Missing IDs and duplicate IDs within each state section.
@@ -1445,7 +1453,7 @@ Checks:
 - Missing, malformed, or stale local search index.
 - SQLite generated cache freshness when a cache file exists.
 - Runtime state and search-index lock state.
-- Git collaboration safety for `.boreal/ledgers` and `memory` paths on protected branches or detached HEAD.
+- Git collaboration safety across the project repository and any separate child/sibling memory repository. Generated artifact and raw-index caveats are advisory; blocking dirty paths on detached HEAD or uninspectable Git status remain warnings that fail strict mode.
 
 `--fix` performs only idempotent repairs:
 
@@ -1459,9 +1467,9 @@ Checks:
 - Initialize a missing memory Git repository when setup mode is `separate` or `submodule` and the memory root exists.
 - Repair missing or stale child submodule `.gitmodules` path/URL metadata.
 
-`--fix` does not remove child memory from the project Git index and does not delete stale non-submodule `.gitmodules` entries. Those are reported with exact Git details so a human can decide whether to run commands such as `git rm -r --cached -- memory`.
+`--fix` does not create a submodule gitlink, remove child memory from the project Git index, or delete stale non-submodule `.gitmodules` entries. Those are reported with exact Git details so a human can decide whether to run commands such as `git submodule add <remote> memory` or `git rm -r --cached -- memory`.
 
-`--strict` treats warnings as a failing doctor result for CI and hardening gates. Diagnostic severities are not rewritten; JSON `data.ok` and the command exit code fail when any `warning` remains.
+`--strict` treats operationally blocking warnings as a failing doctor result for CI and hardening gates. Advisory warnings such as stopped/stale daemon status, install status caveats, generated artifact drift, SQLite cache drift, and search-index rebuild guidance are surfaced without failing strict mode unless they are paired with an error or a blocking Git finding. Diagnostic severities are not rewritten; JSON `data.ok` and the command exit code reflect the strict gate result.
 
 Without `--strict`, doctor exits `1` when any diagnostic has severity `error`.
 
@@ -1497,12 +1505,12 @@ Validates current runtime records against the published schema contracts and che
 bwrk docs check [--json]
 ```
 
-Checks workflow, template, skill, and command documentation assets. The payload includes workflow asset counts, asset issues, and command metadata validation status.
+Checks workflow, template, skill, and command documentation assets from the resolved workflow asset root. The payload includes workflow asset counts, asset issues, and command metadata validation status. Skill frontmatter uses standards-compatible YAML scalars; values containing `: ` must be quoted.
 
 ## `gate`
 
 ```bash
-bwrk gate [--strict] [--json]
+bwrk gate [--strict] [--auto-prune-operations] [--json]
 ```
 
 Golden-path alias for `bwrk gate closeout`. Use it as a compact final gate before closing work or handing off.
@@ -1510,10 +1518,12 @@ Golden-path alias for `bwrk gate closeout`. Use it as a compact final gate befor
 ## `gate closeout`
 
 ```bash
-bwrk gate closeout [--strict] [--json]
+bwrk gate closeout [--strict] [--auto-prune-operations] [--json]
 ```
 
 Runs the closeout sequence: `sync refresh`, `doctor`, `schema validate`, and `docs check`. JSON `data.ok` is true only when all nested checks pass; `--strict` makes doctor warnings fail the gate.
+
+`--auto-prune-operations` is an explicit maintenance opt-in. When `--strict` is also set and the only strict gate blocker is the `operation.volume` doctor warning, the gate prunes local operation history to the recommended keep target, refreshes generated state again, and reruns the closeout checks. The JSON payload includes `autoPruneOperations: true` and an `operationPrune` result when pruning ran.
 
 ## `lock inspect`
 

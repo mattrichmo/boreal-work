@@ -1,6 +1,6 @@
 ---
 name: boreal-sprint-launch
-description: Boreal Sprint Launch skill for Boreal project-scoped workflows. Use when the user asks to run or reason about Boreal memory/workflow commands for: launch sprint.
+description: "Boreal Sprint Launch skill for Boreal project-scoped workflows. Use when the user asks to run or reason about Boreal memory/workflow commands for: launch sprint."
 ---
 
 # Boreal Sprint Launch

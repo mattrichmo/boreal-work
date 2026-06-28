@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { join, relative, resolve } from "node:path";
 
 import {
   BorealError,
@@ -33,6 +33,7 @@ import { breakStaleFileLock, inspectFileLock, inspectSQLiteCache } from "@boreal
 import { deriveReadinessStatus } from "@boreal/work-engine";
 
 import type { CliContext } from "./context.js";
+import { resolveEnvironmentManifest } from "./environment-manifest.js";
 import { inspectGitWorktree } from "./git-worktree.js";
 import { inspectBorealInstallStatus, installStatusHealthy, installStatusSummary } from "./install-status.js";
 import { buildExportDocument, exportDriftDiagnostics, ledgerStatus, readGeneratedLedgerTombstones } from "./import-export.js";
@@ -71,7 +72,7 @@ const STATE_SECTIONS = [
   "contextPacks"
 ] as const;
 
-const OPERATION_LOG_RECOMMENDED_KEEP = 1_000;
+export const OPERATION_LOG_RECOMMENDED_KEEP = 1_000;
 const OPERATION_LOG_WARNING_GRACE = 25;
 const OPERATION_LOG_WARNING_THRESHOLD = OPERATION_LOG_RECOMMENDED_KEEP + OPERATION_LOG_WARNING_GRACE;
 const MCP_CONFIG_SCHEMA_VERSION = "boreal.mcp-config.v1";
@@ -103,6 +104,7 @@ export async function runDoctor(context: CliContext, fix: boolean, strict = fals
   const projectSetupDiagnostics = await validateProjectSetup(context, fix);
   diagnostics.push(...projectSetupDiagnostics.diagnostics);
   fixed = fixed || projectSetupDiagnostics.fixed;
+  diagnostics.push(await validateEnvironmentManifest(context));
   diagnostics.push(await validateInstallStatus(context));
   diagnostics.push(await validateMcpConfig(context));
   diagnostics.push(await validateDaemonStatus(context));
@@ -260,13 +262,91 @@ async function validateRuntimeLocks(
 }
 
 async function validateGitWorktree(context: CliContext): Promise<Diagnostic> {
-  const inspection = await inspectGitWorktree(context);
+  const manifest = await resolveEnvironmentManifest(context).catch(() => undefined);
+  if (!manifest) {
+    const inspection = await inspectGitWorktree(context);
+    return {
+      code: "git.worktree",
+      severity: inspection.ok ? "ok" : "warning",
+      message: gitWorktreeDiagnosticMessage(inspection),
+      details: inspection
+    };
+  }
+  const project = await inspectGitWorktree(context, {
+    rootDir: manifest.projectRoot,
+    checkedPaths: projectGitCheckedPaths(manifest),
+    generatedArtifactPaths: projectGeneratedArtifactPaths(manifest)
+  });
+  const memory =
+    manifest.memoryGitMode === "shared"
+      ? undefined
+      : await inspectGitWorktree(context, {
+          rootDir: manifest.memoryRoot,
+          checkedPaths: memoryGitCheckedPaths(),
+          generatedArtifactPaths: memoryGeneratedArtifactPaths()
+        });
+  const ok = project.ok && (memory?.ok ?? true);
   return {
     code: "git.worktree",
-    severity: inspection.ok ? "ok" : "warning",
-    message: gitWorktreeDiagnosticMessage(inspection),
-    details: inspection
+    severity: ok ? "ok" : "warning",
+    message: gitTopologyDiagnosticMessage(project, memory, manifest.memoryGitMode),
+    details: {
+      topology: {
+        projectRoot: manifest.projectRoot,
+        memoryRoot: manifest.memoryRoot,
+        memoryLayout: manifest.memoryLayout,
+        memoryGitMode: manifest.memoryGitMode
+      },
+      project,
+      memory
+    }
   };
+}
+
+function projectGitCheckedPaths(manifest: Awaited<ReturnType<typeof resolveEnvironmentManifest>>): readonly string[] {
+  const paths = [".boreal/ledgers", ".boreal/runtime", ".agents", ".claude", "dump"];
+  if (manifest.memoryGitMode === "shared") {
+    paths.push("memory/raw/index.jsonl", "memory");
+  }
+  if (manifest.memoryGitMode === "submodule" && manifest.memoryLayout === "child") {
+    paths.push(relative(manifest.projectRoot, manifest.memoryRoot).replaceAll("\\", "/"));
+  }
+  return paths;
+}
+
+function projectGeneratedArtifactPaths(manifest: Awaited<ReturnType<typeof resolveEnvironmentManifest>>): readonly string[] {
+  const paths = [".boreal/ledgers", ".boreal/runtime", ".boreal/cache", ".boreal/tmp", ".boreal/results", ".agents", ".claude", "dump"];
+  if (manifest.memoryGitMode === "shared") {
+    paths.push("memory/.boreal/db", "memory/.boreal/cache", "memory/.boreal/locks", "memory/.boreal/tmp", "memory/.boreal/results");
+  }
+  return paths;
+}
+
+function memoryGitCheckedPaths(): readonly string[] {
+  return ["raw/index.jsonl", "graph/relationships.jsonl", "ledgers/events.jsonl", "ledgers/deletions.jsonl", ".boreal"];
+}
+
+function memoryGeneratedArtifactPaths(): readonly string[] {
+  return [".boreal/db", ".boreal/cache", ".boreal/locks", ".boreal/tmp", ".boreal/results"];
+}
+
+async function validateEnvironmentManifest(context: CliContext): Promise<Diagnostic> {
+  try {
+    const manifest = await resolveEnvironmentManifest(context);
+    return {
+      code: "environment.manifest",
+      severity: "ok",
+      message: "Resolved environment manifest for project, memory, skills, Git mode, and workflow assets",
+      details: manifest
+    };
+  } catch (error) {
+    return {
+      code: "environment.manifest",
+      severity: "error",
+      message: "Could not resolve environment manifest",
+      details: error instanceof BorealError ? { code: error.code, message: error.message, details: error.details } : String(error)
+    };
+  }
 }
 
 async function validateProjectSetup(
@@ -374,12 +454,12 @@ async function validateMcpConfig(context: CliContext): Promise<Diagnostic> {
     };
   }
 
-  const setup = await readProjectSetupForMcpConfig(context);
+  const manifest = await resolveEnvironmentManifest(context).catch(() => undefined);
   const issues: string[] = [];
   const workspaceRoot = configRoot(context.workspaceRoot, parsed.workspaceRoot);
-  const projectRoot = configRoot(context.workspaceRoot, parsed.projectRoot) ?? workspaceRoot ?? context.workspaceRoot;
-  const memoryRoot = configRoot(context.workspaceRoot, parsed.memoryRoot) ?? setup.memoryRoot ?? join(projectRoot, "memory");
-  const memoryLayout = mcpMemoryLayout(parsed.memoryLayout) ?? setup.memoryLayout;
+  const projectRoot = configRoot(context.workspaceRoot, parsed.projectRoot) ?? manifest?.projectRoot ?? workspaceRoot ?? context.workspaceRoot;
+  const memoryRoot = configRoot(context.workspaceRoot, parsed.memoryRoot) ?? manifest?.memoryRoot ?? join(projectRoot, "memory");
+  const memoryLayout = mcpMemoryLayout(parsed.memoryLayout) ?? manifest?.memoryLayout ?? "in-repo";
 
   if (parsed.schemaVersion !== MCP_CONFIG_SCHEMA_VERSION) {
     issues.push(`schemaVersion must be ${MCP_CONFIG_SCHEMA_VERSION}`);
@@ -431,32 +511,6 @@ async function validateMcpConfig(context: CliContext): Promise<Diagnostic> {
       repairCommand: "Review docs/architecture/MCP_SERVER.md and update .boreal/mcp.json"
     }
   };
-}
-
-async function readProjectSetupForMcpConfig(context: CliContext): Promise<{
-  readonly memoryRoot?: string;
-  readonly memoryLayout?: ProjectRegistryMemoryLayout;
-}> {
-  const path = join(context.paths.borealDir, "project.json");
-  if (!existsSync(path)) {
-    return {};
-  }
-  try {
-    const parsed = await readJsonFile(path, {
-      schemaName: "boreal.project-setup.v1",
-      expectedObject: true,
-      maxBytes: 64 * 1024
-    });
-    if (!isRecord(parsed)) {
-      return {};
-    }
-    return {
-      memoryRoot: configRoot(context.workspaceRoot, parsed.memoryRoot),
-      memoryLayout: mcpMemoryLayout(parsed.memoryLayout)
-    };
-  } catch {
-    return {};
-  }
 }
 
 function configRoot(base: string, value: unknown): string | undefined {
@@ -715,12 +769,26 @@ function projectSetupChildTrackingDiagnostic(inspection: ProjectSetupDriftInspec
     };
   }
 
+  if (config.memoryGitMode === "submodule" && tracking.gitlinkPaths.length === 0) {
+    return {
+      code: "project_setup.child_tracking",
+      severity: "error",
+      message: "Child submodule mode requires a real Git gitlink; `.gitmodules` metadata alone is not enough",
+      details: {
+        expectedPath: tracking.expectedPath,
+        trackedPaths: tracking.trackedPaths,
+        gitlinkPaths: tracking.gitlinkPaths,
+        repairCommand: `git submodule add ${config.memoryRemote ?? "<memory-remote>"} ${tracking.expectedPath ?? "memory"}`
+      }
+    };
+  }
+
   return {
     code: "project_setup.child_tracking",
     severity: "ok",
     message:
       config.memoryGitMode === "submodule"
-        ? "Child memory has no project-tracked files outside an optional submodule gitlink"
+        ? "Child memory is tracked by a real Git submodule gitlink and has no project-tracked files"
         : "Child memory is not tracked by the project Git index",
     details: tracking
   };
@@ -1806,6 +1874,23 @@ function gitWorktreeDiagnosticMessage(status: Awaited<ReturnType<typeof inspectG
   return "Git worktree collaboration paths are safe";
 }
 
+function gitTopologyDiagnosticMessage(
+  project: Awaited<ReturnType<typeof inspectGitWorktree>>,
+  memory: Awaited<ReturnType<typeof inspectGitWorktree>> | undefined,
+  memoryGitMode: string
+): string {
+  if (!memory) {
+    return `${gitWorktreeDiagnosticMessage(project)}; memory uses shared ${memoryGitMode} topology`;
+  }
+  if (project.ok && memory.ok) {
+    return "Git topology checks passed for project and memory repositories";
+  }
+  if (!project.ok && !memory.ok) {
+    return "Blocking Git findings are present in both project and memory repositories";
+  }
+  return project.ok ? "Blocking Git findings are present in the memory repository" : "Blocking Git findings are present in the project repository";
+}
+
 function vaultStructureDiagnosticMessage(status: Awaited<ReturnType<typeof inspectVault>>): string {
   if (status.invalidPaths.length > 0) {
     return "Boreal memory vault has paths with the wrong type";
@@ -2273,8 +2358,38 @@ function verificationPolicyIssues(
 }
 
 function finalize(diagnostics: readonly Diagnostic[], fixed: boolean, strict: boolean): DoctorResult {
-  const ok = diagnostics.every((diagnostic) => diagnostic.severity !== "error" && (!strict || diagnostic.severity !== "warning"));
+  const ok = diagnostics.every((diagnostic) => diagnostic.severity !== "error" && (!strict || !strictBlockingWarning(diagnostic)));
   return { ok, strict, fixed, diagnostics };
+}
+
+const STRICT_ADVISORY_WARNING_CODES = new Set([
+  "daemon.status",
+  "install.status",
+  "snapshot.export_drift",
+  "ledger.export_drift",
+  "cache.sqlite",
+  "search.index"
+]);
+
+export function strictBlockingWarning(diagnostic: Diagnostic): boolean {
+  if (diagnostic.severity !== "warning") {
+    return false;
+  }
+  if (diagnostic.code === "git.worktree") {
+    return gitDetailsHaveBlockingFindings(diagnostic.details);
+  }
+  return !STRICT_ADVISORY_WARNING_CODES.has(diagnostic.code);
+}
+
+function gitDetailsHaveBlockingFindings(details: unknown): boolean {
+  if (!isRecord(details)) {
+    return true;
+  }
+  const inspections = [details.project, details.memory, details].filter(isRecord);
+  return inspections.some((inspection) => {
+    const findings = inspection.findings;
+    return Array.isArray(findings) && findings.some((finding) => isRecord(finding) && finding.blocking === true);
+  });
 }
 
 function readRecordId(value: unknown, section: string): string | undefined {

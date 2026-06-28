@@ -1,6 +1,6 @@
 ---
 name: boreal-handoff-builder
-description: Boreal Handoff Builder skill for Boreal project-scoped workflows. Use when the user asks to run or reason about Boreal memory/workflow commands for: build handoff, session closeout, project closeout.
+description: "Boreal Handoff Builder skill for Boreal project-scoped workflows. Use when the user asks to run or reason about Boreal memory/workflow commands for: build handoff, session closeout, project closeout."
 ---
 
 # Boreal Handoff Builder

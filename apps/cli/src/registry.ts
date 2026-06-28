@@ -18,7 +18,7 @@ import {
 } from "@boreal/core";
 import { DEFAULT_FILE_LOCK_OPTIONS, withFileLock, writeTextFileAtomic } from "@boreal/storage";
 
-import { readProjectSetupConfig, type ProjectSetupConfig } from "./project-setup.js";
+import { readProjectSetupConfig, skillInstallRootConfig, type ProjectSetupConfig } from "./project-setup.js";
 
 export interface RegistryListResult {
   readonly storage: ProjectRegistryStorage;
@@ -330,6 +330,7 @@ function registryEntryFromConfig(
     memoryGitMode: config.memoryGitMode,
     memoryRemote: config.memoryRemote,
     installRoot: resolve(config.installRoot),
+    skillInstallRoots: config.skillInstallRoots ?? config.skillTargets.map((target) => skillInstallRootConfig(projectRoot, resolve(config.installRoot), target)),
     skillTargets: config.skillTargets,
     folderScoped: config.folderScoped,
     source: "project-setup",
@@ -421,6 +422,21 @@ function configMismatchFindings(entry: ProjectRegistryEntry, config: ProjectSetu
       path: entry.installRoot,
       details: { expected: entry.installRoot, actual: config.installRoot }
     });
+  }
+  const expectedSkillRoots = config.skillInstallRoots ?? config.skillTargets.map((target) => skillInstallRootConfig(entry.projectRoot, config.installRoot, target));
+  const actualSkillRoots = entry.skillInstallRoots ?? [];
+  for (const expected of expectedSkillRoots) {
+    const actual = actualSkillRoots.find((root) => root.target === expected.target);
+    if (!actual || resolve(actual.installRoot) !== resolve(expected.installRoot) || resolve(actual.skillRoot) !== resolve(expected.skillRoot)) {
+      findings.push({
+        code: "registry.skill_install_root_mismatch",
+        severity: "warning",
+        message: "Registered target-specific skill install root does not match project setup config",
+        projectId: entry.id,
+        path: actual?.installRoot ?? entry.installRoot,
+        details: { target: expected.target, expected, actual }
+      });
+    }
   }
   return findings;
 }

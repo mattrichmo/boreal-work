@@ -1,5 +1,4 @@
 import {
-  BorealError,
   createRecordMeta,
   deterministicId,
   normalizeMachineString,
@@ -50,6 +49,7 @@ export interface CreateDecisionInput {
 export function createKnowledgeSource(input: CreateKnowledgeSourceInput): KnowledgeSource {
   const title = normalizeMachineString(input.title, "title");
   const uri = normalizeMachineString(input.uri, "uri");
+  const summary = input.summary === undefined ? "" : normalizeMachineString(input.summary, "summary", { allowEmpty: true });
   const id = deterministicId<KnowledgeSourceId>("source", {
     kind: input.kind,
     title,
@@ -65,15 +65,18 @@ export function createKnowledgeSource(input: CreateKnowledgeSourceInput): Knowle
     kind: input.kind,
     title,
     uri,
-    summary: input.summary?.trim() ?? ""
+    summary
   });
 }
 
 export function createClaim(input: CreateClaimInput): ClaimRecord {
-  assertNonEmpty(input.statement, "statement");
+  const statement = normalizeMachineString(input.statement, "statement");
+  const sourceIds = unique([...(input.sourceIds ?? [])].sort());
+  const evidenceIds = unique([...(input.evidenceIds ?? [])].sort());
+  const wikiPageIds = unique((input.wikiPageIds ?? []).map((id) => normalizeMachineString(id, "wiki page id")).sort());
   const id = deterministicId<ClaimRecord["meta"]["id"]>("claim", {
-    statement: input.statement,
-    sourceIds: [...(input.sourceIds ?? [])].sort()
+    statement,
+    sourceIds
   });
 
   return withContentHash({
@@ -82,20 +85,24 @@ export function createClaim(input: CreateClaimInput): ClaimRecord {
       now: input.now,
       actor: input.actor
     }),
-    statement: input.statement.trim(),
+    statement,
     status: input.status ?? "proposed",
-    sourceIds: input.sourceIds ?? [],
-    evidenceIds: input.evidenceIds ?? [],
-    wikiPageIds: input.wikiPageIds ?? []
+    sourceIds,
+    evidenceIds,
+    wikiPageIds
   });
 }
 
 export function createDecision(input: CreateDecisionInput): DecisionRecord {
   const title = normalizeMachineString(input.title, "title");
-  assertNonEmpty(input.decision, "decision");
+  const context = normalizeMachineString(input.context, "context", { allowEmpty: true });
+  const decision = normalizeMachineString(input.decision, "decision");
+  const consequences = unique((input.consequences ?? []).map((entry) => normalizeMachineString(entry, "consequence")).sort());
+  const sourceIds = unique([...(input.sourceIds ?? [])].sort());
+  const wikiPageIds = unique((input.wikiPageIds ?? []).map((id) => normalizeMachineString(id, "wiki page id")).sort());
   const id = deterministicId<DecisionRecord["meta"]["id"]>("decision", {
     title,
-    decision: input.decision
+    decision
   });
 
   return withContentHash({
@@ -106,16 +113,14 @@ export function createDecision(input: CreateDecisionInput): DecisionRecord {
     }),
     title,
     status: input.status ?? "accepted",
-    context: input.context.trim(),
-    decision: input.decision.trim(),
-    consequences: input.consequences ?? [],
-    sourceIds: input.sourceIds ?? [],
-    wikiPageIds: input.wikiPageIds ?? []
+    context,
+    decision,
+    consequences,
+    sourceIds,
+    wikiPageIds
   });
 }
 
-function assertNonEmpty(value: string, label: string): void {
-  if (value.trim().length === 0) {
-    throw new BorealError("BOREAL_INVALID_INPUT", `${label} cannot be empty`);
-  }
+function unique<T>(values: readonly T[]): readonly T[] {
+  return [...new Set(values)];
 }

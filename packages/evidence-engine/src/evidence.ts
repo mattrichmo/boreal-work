@@ -2,6 +2,7 @@ import {
   BorealError,
   createRecordMeta,
   deterministicId,
+  normalizeMachineString,
   type ActorRef,
   type EvidenceId,
   type EvidenceKind,
@@ -41,15 +42,16 @@ export interface VerifySubjectInput {
 }
 
 export function recordEvidence(input: RecordEvidenceInput): EvidenceRecord {
-  assertNonEmpty(input.summary, "summary");
+  const summary = normalizeMachineString(input.summary, "summary");
   const observedAt = input.observedAt ?? input.now;
   const command = redactSensitiveCommand(input.command);
+  const uri = input.uri === undefined ? undefined : normalizeMachineString(input.uri, "uri");
   const id = deterministicId<EvidenceId>("evidence", {
     subjectId: input.subjectId,
     kind: input.kind,
-    summary: input.summary,
+    summary,
     command: command ?? null,
-    uri: input.uri ?? null,
+    uri: uri ?? null,
     observedAt
   });
 
@@ -62,26 +64,28 @@ export function recordEvidence(input: RecordEvidenceInput): EvidenceRecord {
     subjectId: input.subjectId,
     subjectType: input.subjectType,
     kind: input.kind,
-    summary: input.summary.trim(),
+    summary,
     outcome: input.outcome ?? "observed",
     command,
-    uri: input.uri,
+    uri,
     observedAt
   });
 }
 
 export function verifySubject(input: VerifySubjectInput): VerificationRecord {
-  if (input.policy.requireEvidenceForVerification && input.evidenceIds.length === 0) {
+  const evidenceIds = unique([...input.evidenceIds].sort());
+  const notes = input.notes === undefined ? undefined : normalizeMachineString(input.notes, "verification notes");
+  if (input.policy.requireEvidenceForVerification && evidenceIds.length === 0) {
     throw new BorealError("BOREAL_POLICY_VIOLATION", "Verification requires evidence");
   }
 
   const availableById = new Map(input.availableEvidence.map((record) => [record.meta.id, record]));
-  const missingEvidence = input.evidenceIds.filter((id) => !availableById.has(id));
+  const missingEvidence = evidenceIds.filter((id) => !availableById.has(id));
   if (missingEvidence.length > 0) {
     throw new BorealError("BOREAL_NOT_FOUND", "Verification references missing evidence", { missingEvidence });
   }
 
-  const selectedEvidence = input.evidenceIds
+  const selectedEvidence = evidenceIds
     .map((id) => availableById.get(id))
     .filter((record): record is EvidenceRecord => record !== undefined);
   const mismatchedEvidence = selectedEvidence
@@ -100,15 +104,15 @@ export function verifySubject(input: VerifySubjectInput): VerificationRecord {
   }
   if (input.verdict === "passed" && !selectedEvidence.some((record) => record.outcome === "passed")) {
     throw new BorealError("BOREAL_POLICY_VIOLATION", "Passed verification requires at least one passed evidence", {
-      evidenceIds: input.evidenceIds
+      evidenceIds
     });
   }
 
   const id = deterministicId<VerificationId>("verification", {
     subjectId: input.subjectId,
     verdict: input.verdict,
-    evidenceIds: [...input.evidenceIds].sort(),
-    notes: input.notes ?? null
+    evidenceIds,
+    notes: notes ?? null
   });
 
   return withContentHash({
@@ -120,16 +124,10 @@ export function verifySubject(input: VerifySubjectInput): VerificationRecord {
     subjectId: input.subjectId,
     subjectType: input.subjectType,
     verdict: input.verdict,
-    evidenceIds: input.evidenceIds,
+    evidenceIds,
     verifiedAt: input.now,
-    notes: input.notes
+    notes
   });
-}
-
-function assertNonEmpty(value: string, label: string): void {
-  if (value.trim().length === 0) {
-    throw new BorealError("BOREAL_INVALID_INPUT", `${label} cannot be empty`);
-  }
 }
 
 function redactSensitiveCommand(command: string | undefined): string | undefined {
@@ -144,4 +142,8 @@ function redactSensitiveCommand(command: string | undefined): string | undefined
     .replace(new RegExp(String.raw`(^|\s)([A-Za-z_][A-Za-z0-9_]*(?:${sensitiveName})[A-Za-z0-9_]*=)([^\s]+)`, "giu"), "$1$2<redacted>")
     .replace(new RegExp(String.raw`([?&]${sensitiveName}=)([^\s&]+)`, "giu"), "$1<redacted>")
     .replace(/\b(Bearer\s+)[A-Za-z0-9._~+/=-]+/giu, "$1<redacted>");
+}
+
+function unique<T>(values: readonly T[]): readonly T[] {
+  return [...new Set(values)];
 }

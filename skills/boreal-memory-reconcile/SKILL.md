@@ -1,6 +1,6 @@
 ---
 name: boreal-memory-reconcile
-description: Boreal Memory Reconcile skill for Boreal project-scoped workflows. Use when the user asks to run or reason about Boreal memory/workflow commands for: reconcile raw to memory, update memory, reconcile chat thread.
+description: "Boreal Memory Reconcile skill for Boreal project-scoped workflows. Use when the user asks to run or reason about Boreal memory/workflow commands for: reconcile raw to memory, update memory, reconcile chat thread."
 ---
 
 # Boreal Memory Reconcile

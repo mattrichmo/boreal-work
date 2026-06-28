@@ -54,14 +54,15 @@ describe("console server", () => {
     }
   });
 
-  it("caches live route data, exposes live failures as warnings, and invalidates after mutations", async () => {
+  it("caches live route data, exposes explicit fixture fallback warnings, and invalidates after mutations", async () => {
     const runner = failingLiveRunner();
     const running = await listenConsole({
       workspaceRoot: "/workspace/boreal-work",
       mode: "live",
       port: 0,
       runner,
-      liveCacheTtlMs: 30_000
+      liveCacheTtlMs: 30_000,
+      allowFixtureFallback: true
     });
     try {
       const first = await fetch(`${running.url}/`);
@@ -98,6 +99,26 @@ describe("console server", () => {
         "sync refresh --json",
         ...liveLoadCommands
       ]);
+    } finally {
+      await running.close();
+    }
+  });
+
+  it("fails closed on live data failures unless fixture fallback is explicit", async () => {
+    const running = await listenConsole({
+      workspaceRoot: "/workspace/boreal-work",
+      mode: "live",
+      port: 0,
+      runner: failingLiveRunner(),
+      liveCacheTtlMs: 30_000
+    });
+    try {
+      const state = await fetch(`${running.url}/api/state`);
+      const payload = await state.json() as { readonly error?: { readonly code?: string; readonly message?: string } };
+
+      expect(state.status).toBe(500);
+      expect(payload.error?.code).toBe("CONSOLE_LIVE_DATA_UNAVAILABLE");
+      expect(payload.error?.message).toContain("use fixture mode explicitly");
     } finally {
       await running.close();
     }

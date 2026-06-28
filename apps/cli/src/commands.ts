@@ -106,7 +106,15 @@ import {
 } from "./command-registry.js";
 import { analyzeCompaction, applyCompaction, type CompactDomain } from "./compact.js";
 import { COMPLETION_SHELLS, generateShellCompletion, isCompletionShell } from "./completion.js";
-import { asEvidenceId, asWorkId, runDoctor, type Diagnostic } from "./doctor.js";
+import {
+  OPERATION_LOG_RECOMMENDED_KEEP,
+  asEvidenceId,
+  asWorkId,
+  runDoctor,
+  strictBlockingWarning,
+  type Diagnostic,
+  type DoctorResult
+} from "./doctor.js";
 import { assertInitialized, createCliContext, ensureWorkspaceDirs, isGlobalContext, type CliContext } from "./context.js";
 import { keyValueRows, resultSummary, section, withPromptSession, type CliSelectOption } from "./cli-ui.js";
 import { applyManualMerge, buildManualMergePlan, scanDuplicates, type DuplicateDomain } from "./duplicates.js";
@@ -142,7 +150,13 @@ import {
   type LedgerStatusResult
 } from "./import-export.js";
 import { createResultSpoolingOutput, formatRecord, table, type CliOutput } from "./output.js";
-import { maybeConfigureProjectSetup, readProjectSetupConfig, type ProjectSetupResult } from "./project-setup.js";
+import {
+  configuredInstallRootForTarget,
+  configuredInstallRootMatchesTarget,
+  maybeConfigureProjectSetup,
+  readProjectSetupConfig,
+  type ProjectSetupResult
+} from "./project-setup.js";
 import {
   addProjectRegistryEntry,
   doctorProjectRegistry,
@@ -391,6 +405,18 @@ interface OperationPruneResult {
   readonly keep?: number;
   readonly before?: IsoTimestamp;
   readonly deletedIds: readonly string[];
+}
+
+interface GateCloseoutChecks {
+  readonly sync: SyncRefreshResult;
+  readonly doctor: DoctorResult;
+  readonly schema: Awaited<ReturnType<typeof schemaValidateResult>>;
+  readonly docs: Awaited<ReturnType<typeof docsCheckResult>>;
+  readonly ok: boolean;
+}
+
+interface GateOperationPruneResult extends OperationPruneResult {
+  readonly triggeredBy: "operation.volume";
 }
 
 interface OperationRepairResult {
@@ -688,7 +714,7 @@ export async function runCommand(args: ParsedArgs, output: CliOutput, cwd: strin
         result = await operationCommand(action, rest, context, args, commandOutput, json);
         break;
       case "workflows":
-        result = await workflowsCommand(action, rest, args, commandOutput, json);
+        result = await workflowsCommand(action, rest, context, args, commandOutput, json);
         break;
       case "start":
         result = await agentCommand("start", rest, context, args, commandOutput, json);
@@ -766,7 +792,7 @@ export async function runCommand(args: ParsedArgs, output: CliOutput, cwd: strin
         result = await schemaCommand(action, context, commandOutput, json);
         break;
       case "docs":
-        result = await docsCommand(action, commandOutput, json);
+        result = await docsCommand(action, context, commandOutput, json);
         break;
       case "gate":
         result = await gateCommand(action, context, args, commandOutput, json);
@@ -904,13 +930,20 @@ async function pruneOperations(context: CliContext, args: ParsedArgs): Promise<O
     throw new BorealError("BOREAL_INVALID_INPUT", "operation prune requires --keep or --before");
   }
 
+  return pruneOperationsWithPolicy(context, { keep, before });
+}
+
+async function pruneOperationsWithPolicy(
+  context: CliContext,
+  policy: { readonly keep?: number; readonly before?: IsoTimestamp }
+): Promise<OperationPruneResult> {
   return context.store.write(async (writer) => {
     const operations = [...(await writer.listOperations())].sort(compareOperationsNewestFirst);
-    const beforeMs = before ? Date.parse(before) : undefined;
+    const beforeMs = policy.before ? Date.parse(policy.before) : undefined;
     const eligibleByAge = operations.filter(
       (operation) => beforeMs === undefined || Date.parse(operation.finishedAt) >= beforeMs
     );
-    const keepBeforeOperationLog = keep === undefined ? eligibleByAge.length : Math.max(0, keep - 1);
+    const keepBeforeOperationLog = policy.keep === undefined ? eligibleByAge.length : Math.max(0, policy.keep - 1);
     const keptIds = new Set(eligibleByAge.slice(0, keepBeforeOperationLog).map((operation) => operation.meta.id));
     const deleted = operations.filter((operation) => !keptIds.has(operation.meta.id));
     for (const operation of deleted) {
@@ -921,8 +954,8 @@ async function pruneOperations(context: CliContext, args: ParsedArgs): Promise<O
       deleted: deleted.length,
       keptBeforeOperationLog,
       remainingAfterOperationLog: keptBeforeOperationLog + 1,
-      keep,
-      before,
+      keep: policy.keep,
+      before: policy.before,
       deletedIds: deleted.map((operation) => operation.meta.id)
     };
   });
@@ -1289,13 +1322,14 @@ function commandsMarkdown(): string {
 async function workflowsCommand(
   action: string | undefined,
   rest: readonly string[],
+  context: CliContext,
   args: ParsedArgs,
   output: CliOutput,
   json: boolean
 ): Promise<CommandResult> {
   switch (action) {
     case "list": {
-      const workflows = await listWorkflowAssets();
+      const workflows = await listWorkflowAssets({ workspaceRoot: context.workspaceRoot });
       const rows = workflows.map((workflow) => ({
         id: workflow.id,
         title: workflow.title,
@@ -1308,7 +1342,7 @@ async function workflowsCommand(
       return { exitCode: 0 };
     }
     case "show": {
-      const workflow = await getWorkflowAsset(requiredPositional(rest, 0, "workflow reference"));
+      const workflow = await getWorkflowAsset(requiredPositional(rest, 0, "workflow reference"), { workspaceRoot: context.workspaceRoot });
       output.write(json ? formatRecord(workflow, true) : workflow.text);
       return { exitCode: 0 };
     }
@@ -1344,7 +1378,8 @@ async function installCommand(
   const plan = await buildSkillInstallPlan({
     target,
     dryRun,
-    installRoot: await installRootFromArgs(context, args, target)
+    installRoot: await installRootFromArgs(context, args, target),
+    workspaceRoot: context.workspaceRoot
   });
   if (interactive && !dryRun) {
     await confirmSkillInstallPlan(plan);
@@ -1417,8 +1452,14 @@ async function installRootFromArgs(context: CliContext, args: ParsedArgs, target
     return resolve(context.workspaceRoot, explicit);
   }
   const config = await readProjectSetupConfig(context.workspaceRoot);
-  if (config?.installRoot && configuredInstallRootMatchesTarget(config.installRoot, target)) {
+  if (config?.installRoot && (target === "skills" || configuredInstallRootMatchesTarget(config.installRoot, target))) {
     return config.installRoot;
+  }
+  if (config && target !== "skills") {
+    const targetRoot = config.skillInstallRoots?.find((entry) => entry.target === target)?.installRoot;
+    if (targetRoot) {
+      return targetRoot;
+    }
   }
   return defaultInstallRoot(context.workspaceRoot, target);
 }
@@ -1432,14 +1473,6 @@ function defaultInstallRoot(workspaceRoot: string, target: "codex" | "claude" | 
     case "skills":
       return join(workspaceRoot, ".agents", "skills");
   }
-}
-
-function configuredInstallRootMatchesTarget(root: string, target: "codex" | "claude" | "skills"): boolean {
-  if (target === "skills") {
-    return true;
-  }
-  const container = basename(root) === "skills" ? basename(dirname(root)) : basename(root);
-  return target === "codex" ? container === ".agents" : container === ".claude";
 }
 
 async function confirmSkillInstallPlan(plan: SkillInstallPlan): Promise<void> {
@@ -1472,6 +1505,7 @@ function formatSkillInstallPlan(plan: SkillInstallPlan): string {
       keyValueRows([
         { key: "target", value: plan.target },
         { key: "dryRun", value: plan.dryRun },
+        { key: "assetRoot", value: plan.assetRoot },
         { key: "installRoot", value: plan.installRoot },
         { key: "skillRoot", value: plan.skillRoot }
       ]).split("\n")
@@ -1981,10 +2015,10 @@ async function initCommand(
 async function installProjectSetupSkills(context: CliContext, projectSetup: ProjectSetupResult): Promise<readonly SkillInstallSummary[]> {
   const results: SkillInstallSummary[] = [];
   for (const target of projectSetup.config.skillTargets) {
-    const installRoot = configuredInstallRootMatchesTarget(projectSetup.config.installRoot, target)
-      ? projectSetup.config.installRoot
-      : defaultInstallRoot(context.workspaceRoot, target);
-    const plan = await buildSkillInstallPlan({ target, dryRun: false, installRoot });
+    const installRoot =
+      projectSetup.config.skillInstallRoots?.find((entry) => entry.target === target)?.installRoot ??
+      configuredInstallRootForTarget(context.workspaceRoot, projectSetup.config.installRoot, target);
+    const plan = await buildSkillInstallPlan({ target, dryRun: false, installRoot, workspaceRoot: context.workspaceRoot });
     const installed = await installSkillsFromPlan(plan);
     results.push({
       target: installed.target,
@@ -3329,6 +3363,7 @@ async function doctorCommand(
 ): Promise<CommandResult> {
   if (action === "skills") {
     const result = await inspectWorkflowAssets({
+      workspaceRoot: context.workspaceRoot,
       installChecks: await installedSkillChecks(context, args)
     });
     output.write(json ? formatRecord(result, true) : formatSkillDoctor(result));
@@ -3364,13 +3399,14 @@ async function schemaCommand(
 
 async function docsCommand(
   action: string | undefined,
+  context: CliContext,
   output: CliOutput,
   json: boolean
 ): Promise<CommandResult> {
   if (action !== "check") {
     throw new BorealError("BOREAL_INVALID_INPUT", `Unknown docs command: ${action ?? ""}`);
   }
-  const result = await docsCheckResult();
+  const result = await docsCheckResult(context);
   output.write(formatRecord(result, json));
   return { exitCode: result.ok ? 0 : 1 };
 }
@@ -3407,9 +3443,9 @@ async function schemaValidateResult(context: CliContext) {
   };
 }
 
-async function docsCheckResult() {
+async function docsCheckResult(context: CliContext) {
   const generatedAt = nowIso();
-  const assets = await inspectWorkflowAssets();
+  const assets = await inspectWorkflowAssets({ workspaceRoot: context.workspaceRoot });
   const commandMetadata = commandMetadataValidationResult();
   return {
     schemaVersion: "boreal.cli.docs.check.v1",
@@ -3426,39 +3462,74 @@ async function docsCheckResult() {
 
 async function gateCloseoutResult(context: CliContext, args: ParsedArgs) {
   const generatedAt = nowIso();
-  const sync = await buildSyncRefreshResult(context);
-  const doctor = await runDoctor(context, false, hasFlag(args, "strict"));
-  const schema = await schemaValidateResult(context);
-  const docs = await docsCheckResult();
-  const ok = sync.postRefreshStatusOk && doctor.ok && schema.ok && docs.ok;
+  const strict = hasFlag(args, "strict");
+  const autoPruneOperations = hasFlag(args, "auto-prune-operations");
+  let checks = await runGateCloseoutChecks(context, strict);
+  let operationPrune: GateOperationPruneResult | undefined;
+  if (autoPruneOperations && shouldAutoPruneOperationVolume(checks, strict)) {
+    operationPrune = {
+      triggeredBy: "operation.volume",
+      ...(await pruneOperationsWithPolicy(context, { keep: OPERATION_LOG_RECOMMENDED_KEEP }))
+    };
+    checks = await runGateCloseoutChecks(context, strict);
+  }
   return {
     schemaVersion: "boreal.cli.gate.closeout.v1",
     generatedAt,
     workspaceRoot: context.workspaceRoot,
-    strict: hasFlag(args, "strict"),
-    ok,
-    sync: {
-      refreshOk: sync.refreshOk,
-      postRefreshStatusOk: sync.postRefreshStatusOk,
-      exitReason: sync.exitReason,
-      contextViews: sync.contextViews,
-      ledgersOk: sync.status.ledgers.ok,
-      searchIndexOk: sync.status.searchIndex.ok,
-      sqliteCacheOk: !sync.sqliteCache.error,
-      statusOk: sync.status.ok,
-      recommendedActions: sync.status.recommendedActions
-    },
-    doctor: {
-      ok: doctor.ok,
-      fixed: doctor.fixed,
-      diagnosticCount: doctor.diagnostics.length,
-      errors: doctor.diagnostics.filter((diagnostic) => diagnostic.severity === "error").length,
-      warnings: doctor.diagnostics.filter((diagnostic) => diagnostic.severity === "warning").length,
-      fixedCount: doctor.diagnostics.filter((diagnostic) => diagnostic.severity === "fixed").length,
-      diagnostics: doctor.diagnostics
-    },
-    schema,
-    docs
+    strict,
+    autoPruneOperations,
+    operationPrune,
+    ok: checks.ok,
+    sync: gateSyncView(checks.sync),
+    doctor: gateDoctorView(checks.doctor),
+    schema: checks.schema,
+    docs: checks.docs
+  };
+}
+
+async function runGateCloseoutChecks(context: CliContext, strict: boolean): Promise<GateCloseoutChecks> {
+  const sync = await buildSyncRefreshResult(context);
+  const doctor = await runDoctor(context, false, strict);
+  const schema = await schemaValidateResult(context);
+  const docs = await docsCheckResult(context);
+  const ok = sync.postRefreshStatusOk && doctor.ok && schema.ok && docs.ok;
+  return { sync, doctor, schema, docs, ok };
+}
+
+function shouldAutoPruneOperationVolume(checks: GateCloseoutChecks, strict: boolean): boolean {
+  if (!strict || checks.ok || !checks.sync.postRefreshStatusOk || !checks.schema.ok || !checks.docs.ok) {
+    return false;
+  }
+  const blockingDiagnostics = checks.doctor.diagnostics.filter(
+    (diagnostic) => diagnostic.severity === "error" || strictBlockingWarning(diagnostic)
+  );
+  return blockingDiagnostics.length === 1 && blockingDiagnostics[0]?.code === "operation.volume";
+}
+
+function gateSyncView(sync: SyncRefreshResult) {
+  return {
+    refreshOk: sync.refreshOk,
+    postRefreshStatusOk: sync.postRefreshStatusOk,
+    exitReason: sync.exitReason,
+    contextViews: sync.contextViews,
+    ledgersOk: sync.status.ledgers.ok,
+    searchIndexOk: sync.status.searchIndex.ok,
+    sqliteCacheOk: !sync.sqliteCache.error,
+    statusOk: sync.status.ok,
+    recommendedActions: sync.status.recommendedActions
+  };
+}
+
+function gateDoctorView(doctor: DoctorResult) {
+  return {
+    ok: doctor.ok,
+    fixed: doctor.fixed,
+    diagnosticCount: doctor.diagnostics.length,
+    errors: doctor.diagnostics.filter((diagnostic) => diagnostic.severity === "error").length,
+    warnings: doctor.diagnostics.filter((diagnostic) => diagnostic.severity === "warning").length,
+    fixedCount: doctor.diagnostics.filter((diagnostic) => diagnostic.severity === "fixed").length,
+    diagnostics: doctor.diagnostics
   };
 }
 
@@ -3725,6 +3796,7 @@ async function serveDashboardCommand(
   const port = parsePort(flagValue(args, "port")) ?? 4318;
   const mode = flagValue(args, "mode") === "fixture" ? "fixture" : "live";
   const liveCacheTtlMs = parseNonNegativeInteger(flagValue(args, "live-cache-ttl-ms"), "--live-cache-ttl-ms") ?? 60_000;
+  const allowFixtureFallback = hasFlag(args, "allow-fixture-fallback");
   const url = `http://${host}:${port}`;
   const child = spawnDashboardServer({
     workspaceRoot: context.workspaceRoot,
@@ -3732,7 +3804,8 @@ async function serveDashboardCommand(
     port,
     mode,
     scope,
-    liveCacheTtlMs
+    liveCacheTtlMs,
+    allowFixtureFallback
   });
   output.write(`Boreal ${scope === "global" ? "global console" : "dashboard"} starting at ${url}\n`);
   output.write("Press Ctrl+C to stop.\n");
@@ -3768,7 +3841,9 @@ function spawnDashboardServer(input: {
   readonly mode: "live" | "fixture";
   readonly scope: "repo" | "global";
   readonly liveCacheTtlMs: number;
+  readonly allowFixtureFallback: boolean;
 }) {
+  const fallbackArgs = input.allowFixtureFallback ? ["--allow-fixture-fallback"] : [];
   return spawnAppProcess({
     appDir: "console",
     distEntry: "server.js",
@@ -3785,7 +3860,8 @@ function spawnDashboardServer(input: {
       "--scope",
       input.scope,
       "--live-cache-ttl-ms",
-      String(input.liveCacheTtlMs)
+      String(input.liveCacheTtlMs),
+      ...fallbackArgs
     ]
   });
 }

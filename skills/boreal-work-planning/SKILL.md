@@ -1,6 +1,6 @@
 ---
 name: boreal-work-planning
-description: Boreal Work Planning skill for Boreal project-scoped workflows. Use when the user asks to run or reason about Boreal memory/workflow commands for: create work structure, update work structure, discovery to work.
+description: "Boreal Work Planning skill for Boreal project-scoped workflows. Use when the user asks to run or reason about Boreal memory/workflow commands for: create work structure, update work structure, discovery to work."
 ---
 
 # Boreal Work Planning

@@ -545,6 +545,9 @@ function projectRegistryEntryIssues(value: unknown, path: string, schemaId: stri
     ...absolutePathIssue(value.memoryRoot, `${path}.memoryRoot`, schemaId),
     ...absolutePathIssue(value.memoryBorealDir, `${path}.memoryBorealDir`, schemaId),
     ...absolutePathIssue(value.installRoot, `${path}.installRoot`, schemaId),
+    ...(value.skillInstallRoots === undefined
+      ? []
+      : projectRegistrySkillInstallRootsIssues(value.skillInstallRoots, `${path}.skillInstallRoots`, schemaId)),
     ...enumIssue(value.memoryLayout, `${path}.memoryLayout`, schemaId, ["in-repo", "child", "sibling"]),
     ...enumIssue(value.memoryGitMode, `${path}.memoryGitMode`, schemaId, ["shared", "separate", "submodule"]),
     ...projectRegistrySkillTargetsIssues(value.skillTargets, `${path}.skillTargets`, schemaId),
@@ -560,8 +563,36 @@ function projectRegistryEntryIssues(value: unknown, path: string, schemaId: stri
     ...pathInsideIssue(value.borealDir, value.projectConfigPath, `${path}.projectConfigPath`, schemaId, "must be inside borealDir"),
     ...pathInsideIssue(value.memoryRoot, value.memoryBorealDir, `${path}.memoryBorealDir`, schemaId, "must be inside memoryRoot"),
     ...memoryLayoutBoundaryIssues(value, path, schemaId),
-    ...installRootBoundaryIssues(value, path, schemaId)
+    ...installRootBoundaryIssues(value, path, schemaId),
+    ...(value.skillInstallRoots === undefined ? [] : skillInstallRootBoundaryIssues(value, path, schemaId))
   ];
+}
+
+function projectRegistrySkillInstallRootsIssues(value: unknown, path: string, schemaId: string): readonly SchemaValidationIssue[] {
+  if (!Array.isArray(value)) {
+    return [issue(schemaId, path, "must be an array")];
+  }
+  const seen = new Set<string>();
+  return value.flatMap((entry, index) => {
+    const entryPath = `${path}[${index}]`;
+    if (!isRecord(entry)) {
+      return [issue(schemaId, entryPath, "must be an object")];
+    }
+    const duplicateIssues =
+      typeof entry.target === "string" && seen.has(entry.target)
+        ? [issue(schemaId, `${entryPath}.target`, "must be unique")]
+        : [];
+    if (typeof entry.target === "string") {
+      seen.add(entry.target);
+    }
+    return [
+      ...enumIssue(entry.target, `${entryPath}.target`, schemaId, ["codex", "claude"]),
+      ...duplicateIssues,
+      ...absolutePathIssue(entry.installRoot, `${entryPath}.installRoot`, schemaId),
+      ...absolutePathIssue(entry.skillRoot, `${entryPath}.skillRoot`, schemaId),
+      ...pathInsideIssue(entry.installRoot, entry.skillRoot, `${entryPath}.skillRoot`, schemaId, "must be inside installRoot")
+    ];
+  });
 }
 
 function projectRegistryDisplayIssues(value: unknown, path: string, schemaId: string): readonly SchemaValidationIssue[] {
@@ -608,6 +639,26 @@ function installRootBoundaryIssues(value: Record<string, unknown>, path: string,
   return insideMemory
     ? [issue(schemaId, `${path}.installRoot`, "must not be inside memoryRoot")]
     : [];
+}
+
+function skillInstallRootBoundaryIssues(value: Record<string, unknown>, path: string, schemaId: string): readonly SchemaValidationIssue[] {
+  if (typeof value.memoryRoot !== "string" || !Array.isArray(value.skillInstallRoots)) {
+    return [];
+  }
+  const memoryRoot = value.memoryRoot;
+  return value.skillInstallRoots.flatMap((entry, index) => {
+    if (!isRecord(entry) || typeof entry.installRoot !== "string" || typeof entry.skillRoot !== "string") {
+      return [];
+    }
+    const installRelation = relative(resolve(memoryRoot), resolve(entry.installRoot));
+    const skillRelation = relative(resolve(memoryRoot), resolve(entry.skillRoot));
+    const installInsideMemory = installRelation === "" || (!installRelation.startsWith("..") && !isAbsolute(installRelation));
+    const skillInsideMemory = skillRelation === "" || (!skillRelation.startsWith("..") && !isAbsolute(skillRelation));
+    return [
+      ...(installInsideMemory ? [issue(schemaId, `${path}.skillInstallRoots[${index}].installRoot`, "must not be inside memoryRoot")] : []),
+      ...(skillInsideMemory ? [issue(schemaId, `${path}.skillInstallRoots[${index}].skillRoot`, "must not be inside memoryRoot")] : [])
+    ];
+  });
 }
 
 function recordMetaIssues(

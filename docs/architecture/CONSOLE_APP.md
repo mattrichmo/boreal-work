@@ -22,6 +22,7 @@ For one-off commands without package scripts, call the built files directly:
 
 ```bash
 node apps/console/dist/server.js --workspace . --mode live
+node apps/console/dist/server.js --workspace . --mode live --allow-fixture-fallback
 node apps/console/dist/render-file.js --workspace . --mode fixture --route /settings --out .boreal/results/console-settings-fixture.html
 node apps/console/dist/browser-smoke.js --workspace . --mode fixture --out .boreal/results/console-browser-smoke.json
 ```
@@ -46,7 +47,7 @@ Live mode reads the selected workspace through constrained JSON commands:
 
 The CLI also exposes the combined global payload through `dashboard global --json`, with the same registry, queue, search, activity, health, and settings sections used by the console model. The console can keep using narrower live reads when a route only needs part of the payload.
 
-For registered projects beyond the selected workspace, live mode prefixes project-scoped reads with `--workspace <project-root>` instead of changing process context silently. Use live mode when checking real project state, stale generated artifacts, reservations, doctor findings, registry drift, or project setup metadata.
+For registered projects beyond the selected workspace, live mode prefixes project-scoped reads with `--workspace <project-root>` instead of changing process context silently. Use live mode when checking real project state, stale generated artifacts, reservations, doctor findings, registry drift, or project setup metadata. Live mode fails closed when CLI data cannot be loaded. Use fixture mode explicitly for demos and screenshots; pass `--allow-fixture-fallback` only when you want the live console to render deterministic fixture data with warnings after a live read failure.
 
 The global route renders project buckets, ready/blocked/needs-verification queues, search results, actor activity, and global health/drift from registry-scoped rows. Queue, search, activity, and health items keep `projectId`, `projectName`, and `projectRoot`, so repeated record IDs in different repositories stay distinct. Search rows expose the CLI source kind, activity rows expose `actorKind` so human, agent, and system operations are visibly separate, and drift rows preserve the original source path from doctor/registry diagnostics when one is available. Ready queue rows show a copyable `bwrk --workspace <project-root> work reserve <work-id> --purpose 'Claim from Boreal Console' --json` command rather than executing a broad claim from the selected workspace.
 

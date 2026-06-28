@@ -1,6 +1,6 @@
 ---
 name: boreal-router
-description: Boreal Router skill for Boreal project-scoped workflows. Use when the user asks to run or reason about Boreal memory/workflow commands for: route request.
+description: "Boreal Router skill for Boreal project-scoped workflows. Use when the user asks to run or reason about Boreal memory/workflow commands for: route request."
 ---
 
 # Boreal Router

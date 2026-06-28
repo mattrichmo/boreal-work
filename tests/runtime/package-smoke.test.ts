@@ -130,12 +130,16 @@ describe("package smoke", () => {
     await expectRegularPath(join(project, ".claude/skills/boreal-router/SKILL.md"));
     await expectRegularPath(join(genericSkillRoot, "boreal-router/SKILL.md"));
 
+    const consoleCommands: string[] = [];
     const running = await listenConsole({
       workspaceRoot: project,
       mode: "live",
       port: 0,
       runner: {
-        run: async (args) => parseData<unknown>((await runBwrk(bwrk, args, project, env)).stdout)
+        run: async (args) => {
+          consoleCommands.push(args.join(" "));
+          return parseData<unknown>((await runBwrk(bwrk, args, project, env)).stdout);
+        }
       }
     });
     try {
@@ -145,9 +149,9 @@ describe("package smoke", () => {
       const state = await stateResponse.json() as {
         readonly workspace?: { readonly mode?: string; readonly warnings?: readonly string[] };
       };
-      expect(htmlResponse.status).toBe(200);
+      expect(htmlResponse.status, `${html}\ncommands:\n${consoleCommands.join("\n")}`).toBe(200);
       expect(html).toContain("Boreal Console");
-      expect(stateResponse.status).toBe(200);
+      expect(stateResponse.status, `${JSON.stringify(state)}\ncommands:\n${consoleCommands.join("\n")}`).toBe(200);
       expect(state.workspace?.mode).toBe("live");
     } finally {
       await running.close();

@@ -236,7 +236,14 @@ describe("core hashing and ids", () => {
           ...document.entries[0],
           borealDir: "/tmp/other/.boreal",
           memoryRoot: "/other/boreal-work-memory",
-          installRoot: "/other/boreal-work-memory/.agents/skills"
+          installRoot: "/other/boreal-work-memory/.agents/skills",
+          skillInstallRoots: [
+            {
+              target: "codex",
+              installRoot: "/other/boreal-work-memory/.agents/skills",
+              skillRoot: "/other/boreal-work-memory/.agents/skills"
+            }
+          ]
         }
       ]
     });
@@ -253,6 +260,14 @@ describe("core hashing and ids", () => {
         }),
         expect.objectContaining({
           path: "$.entries[0].installRoot",
+          schemaId: PROJECT_REGISTRY_SCHEMA_ID
+        }),
+        expect.objectContaining({
+          path: "$.entries[0].skillInstallRoots[0].installRoot",
+          schemaId: PROJECT_REGISTRY_SCHEMA_ID
+        }),
+        expect.objectContaining({
+          path: "$.entries[0].skillInstallRoots[0].skillRoot",
           schemaId: PROJECT_REGISTRY_SCHEMA_ID
         })
       ])
@@ -585,6 +600,13 @@ function projectRegistryDocument(): ProjectRegistryDocument {
         memoryLayout: "in-repo",
         memoryGitMode: "separate",
         installRoot: "/repo/boreal-work/.agents/skills",
+        skillInstallRoots: [
+          {
+            target: "codex",
+            installRoot: "/repo/boreal-work/.agents/skills",
+            skillRoot: "/repo/boreal-work/.agents/skills"
+          }
+        ],
         skillTargets: ["codex"],
         folderScoped: false,
         source: "project-setup",

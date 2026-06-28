@@ -1,6 +1,6 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { randomBytes } from "node:crypto";
-import { isAbsolute, resolve } from "node:path";
+import { dirname, isAbsolute, resolve } from "node:path";
 
 import { createFixtureConsoleData } from "./app/fixtures.js";
 import { getSafeConsoleCommand } from "./app/commands.js";
@@ -25,9 +25,11 @@ export interface ConsoleServerOptions {
   readonly runner?: ConsoleCliRunner;
   readonly csrfToken?: string;
   readonly liveCacheTtlMs?: number;
+  readonly allowFixtureFallback?: boolean;
 }
 
 const DEFAULT_LIVE_CACHE_TTL_MS = 60_000;
+const MAX_CONSOLE_BODY_BYTES = 64 * 1024;
 
 export interface RunningConsoleServer {
   readonly server: Server;
@@ -44,11 +46,12 @@ export function createConsoleHttpServer(options: ConsoleServerOptions): Server {
   const host = options.host ?? "127.0.0.1";
   const csrfToken = options.csrfToken ?? createConsoleToken();
   const liveCache = createConsoleDataCache(options.liveCacheTtlMs ?? DEFAULT_LIVE_CACHE_TTL_MS);
+  const allowFixtureFallback = options.allowFixtureFallback ?? false;
   return createServer(async (request, response) => {
     try {
       const url = requestUrl(request);
       if (url.pathname === "/api/state") {
-        await sendJson(response, consoleStatePayload(await liveCache.load({ workspaceRoot, mode, scope, runner: options.runner })));
+        await sendJson(response, consoleStatePayload(await liveCache.load({ workspaceRoot, mode, scope, runner: options.runner, allowFixtureFallback })));
         return;
       }
       if (url.pathname.startsWith("/api/commands/")) {
@@ -65,6 +68,7 @@ export function createConsoleHttpServer(options: ConsoleServerOptions): Server {
         mode: url.searchParams.get("mode") === "fixture" ? "fixture" : mode,
         scope,
         runner: options.runner,
+        allowFixtureFallback,
         selection: {
           wikiPage: url.searchParams.get("page") ?? undefined,
           rawSource: url.searchParams.get("source") ?? undefined
@@ -155,6 +159,7 @@ async function handleProjectSettings(input: {
     const memoryRoot = absoluteParam(params, "memoryRoot");
     const memoryLayout = enumParam(params, "memoryLayout", ["in-repo", "child", "sibling"] as const);
     const memoryGitMode = enumParam(params, "memoryGitMode", ["shared", "separate", "submodule"] as const);
+    validateMemoryRootBounds(projectRoot, memoryRoot, memoryLayout);
     const memoryRemote = params.get("memoryRemote")?.trim() ?? "";
     if (memoryGitMode === "submodule" && memoryRemote.length === 0) {
       throw new ConsoleCommandError("CONSOLE_SETTINGS_REMOTE_REQUIRED", "Submodule memory mode requires a memory remote");
@@ -201,6 +206,32 @@ function absoluteParam(params: URLSearchParams, key: string): string {
   return value;
 }
 
+function validateMemoryRootBounds(projectRoot: string, memoryRoot: string, memoryLayout: "in-repo" | "child" | "sibling"): void {
+  const project = resolve(projectRoot);
+  const memory = resolve(memoryRoot);
+  if (memoryLayout === "sibling") {
+    if (dirname(memory) !== dirname(project)) {
+      throw new ConsoleCommandError("CONSOLE_SETTINGS_INVALID_PATH", "Sibling memory roots must share the project root parent", {
+        projectRoot: project,
+        memoryRoot: memory
+      });
+    }
+    return;
+  }
+  if (memory === project || !memory.startsWith(`${project}/`)) {
+    throw new ConsoleCommandError("CONSOLE_SETTINGS_INVALID_PATH", "Memory root must be inside the project root for in-repo and child layouts", {
+      projectRoot: project,
+      memoryRoot: memory
+    });
+  }
+  if (memoryLayout === "child" && dirname(memory) !== project) {
+    throw new ConsoleCommandError("CONSOLE_SETTINGS_INVALID_PATH", "Child memory root must be a direct child of the project root", {
+      projectRoot: project,
+      memoryRoot: memory
+    });
+  }
+}
+
 function enumParam<const T extends readonly string[]>(params: URLSearchParams, key: string, values: T): T[number] {
   const value = params.get(key)?.trim() ?? "";
   if (!values.includes(value)) {
@@ -219,6 +250,7 @@ async function loadConsoleData(input: {
   readonly scope?: ConsoleScope;
   readonly runner?: ConsoleCliRunner;
   readonly selection?: ConsoleSelection;
+  readonly allowFixtureFallback?: boolean;
 }): Promise<ConsoleDataSet> {
   if (input.mode === "fixture") {
     return createFixtureConsoleData({ workspaceRoot: input.workspaceRoot, scope: input.scope });
@@ -226,6 +258,11 @@ async function loadConsoleData(input: {
   try {
     return await loadLiveConsoleData(input);
   } catch (error) {
+    if (!input.allowFixtureFallback) {
+      throw new ConsoleCommandError("CONSOLE_LIVE_DATA_UNAVAILABLE", "Live console data failed; use fixture mode explicitly to inspect static sample data", {
+        error: error instanceof Error ? error.message : String(error)
+      });
+    }
     return createFixtureConsoleData({
       workspaceRoot: input.workspaceRoot,
       scope: input.scope,
@@ -241,6 +278,7 @@ function createConsoleDataCache(ttlMs: number): {
     readonly scope?: ConsoleScope;
     readonly runner?: ConsoleCliRunner;
     readonly selection?: ConsoleSelection;
+    readonly allowFixtureFallback?: boolean;
   }): Promise<ConsoleDataSet>;
   invalidate(): void;
 } {
@@ -313,8 +351,16 @@ async function handleCommand(input: {
 
 async function readBody(request: IncomingMessage): Promise<string> {
   const chunks: Buffer[] = [];
+  let totalBytes = 0;
   for await (const chunk of request) {
-    chunks.push(typeof chunk === "string" ? Buffer.from(chunk) : chunk);
+    const buffer = typeof chunk === "string" ? Buffer.from(chunk) : chunk;
+    totalBytes += buffer.byteLength;
+    if (totalBytes > MAX_CONSOLE_BODY_BYTES) {
+      throw new ConsoleCommandError("CONSOLE_BODY_TOO_LARGE", "Console POST body exceeds the configured limit", {
+        maxBytes: MAX_CONSOLE_BODY_BYTES
+      });
+    }
+    chunks.push(buffer);
   }
   return Buffer.concat(chunks).toString("utf8");
 }
@@ -339,6 +385,9 @@ function sendError(response: ServerResponse, error: unknown): void {
 }
 
 function errorStatus(error: unknown): number {
+  if (error instanceof ConsoleCommandError && error.code === "CONSOLE_BODY_TOO_LARGE") {
+    return 413;
+  }
   return error instanceof ConsoleCommandError && error.code.startsWith("CONSOLE_SECURITY_") ? 403 : 500;
 }
 
@@ -531,7 +580,8 @@ function parseServerArgs(argv: readonly string[]): ConsoleServerOptions {
     port: Number(valueAfter(argv, "--port") ?? "4318"),
     mode: valueAfter(argv, "--mode") === "fixture" ? "fixture" : "live",
     scope: valueAfter(argv, "--scope") === "global" ? "global" : "repo",
-    liveCacheTtlMs: numberAfter(argv, "--live-cache-ttl-ms")
+    liveCacheTtlMs: numberAfter(argv, "--live-cache-ttl-ms"),
+    allowFixtureFallback: argv.includes("--allow-fixture-fallback")
   };
 }
 

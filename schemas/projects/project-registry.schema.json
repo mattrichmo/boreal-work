@@ -76,6 +76,10 @@
         "memoryGitMode": { "enum": ["shared", "separate", "submodule"] },
         "memoryRemote": { "type": "string" },
         "installRoot": { "type": "string", "minLength": 1 },
+        "skillInstallRoots": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/skillInstallRoot" }
+        },
         "skillTargets": {
           "type": "array",
           "items": { "enum": ["codex", "claude"] },
@@ -86,6 +90,16 @@
         "addedAt": { "type": "string", "format": "date-time" },
         "updatedAt": { "type": "string", "format": "date-time" },
         "lastSeenAt": { "type": "string", "format": "date-time" }
+      },
+      "additionalProperties": false
+    },
+    "skillInstallRoot": {
+      "type": "object",
+      "required": ["target", "installRoot", "skillRoot"],
+      "properties": {
+        "target": { "enum": ["codex", "claude"] },
+        "installRoot": { "type": "string", "minLength": 1 },
+        "skillRoot": { "type": "string", "minLength": 1 }
       },
       "additionalProperties": false
     }

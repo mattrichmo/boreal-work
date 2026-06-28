@@ -39,6 +39,7 @@ export interface CreateWorkItemInput {
 export interface AddBlockingDependencyInput {
   readonly blockedWork: WorkItem;
   readonly blockingWork: WorkItem;
+  readonly dependencies: readonly WorkItem[];
   readonly existingEdges: readonly GraphEdge[];
   readonly policy: Pick<RuntimePolicy, "preventDependencyCycles">;
   readonly actor: ActorRef;
@@ -147,7 +148,7 @@ export function addBlockingDependency(input: AddBlockingDependencyInput): {
       {
         ...input.blockedWork,
         dependencyIds,
-        status: deriveReadinessStatus({ ...input.blockedWork, dependencyIds }, [input.blockingWork])
+        status: deriveReadinessStatus({ ...input.blockedWork, dependencyIds }, uniqueWorkItems([...input.dependencies, input.blockingWork]))
       },
       input.now,
       input.actor
@@ -251,4 +252,12 @@ export function setWorkStatus(work: WorkItem, status: WorkStatus, now: IsoTimest
 
 function unique<T>(values: readonly T[]): readonly T[] {
   return [...new Set(values)];
+}
+
+function uniqueWorkItems(values: readonly WorkItem[]): readonly WorkItem[] {
+  const byId = new Map<WorkId, WorkItem>();
+  for (const value of values) {
+    byId.set(value.meta.id, value);
+  }
+  return [...byId.values()];
 }

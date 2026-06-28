@@ -20,6 +20,12 @@ export type MemoryLayout = "in-repo" | "child" | "sibling";
 export type MemoryGitMode = "shared" | "separate" | "submodule";
 export type SkillTarget = "codex" | "claude";
 
+export interface SkillInstallRootConfig {
+  readonly target: SkillTarget;
+  readonly installRoot: string;
+  readonly skillRoot: string;
+}
+
 export interface ProjectSetupConfig {
   readonly schemaVersion: typeof PROJECT_SETUP_SCHEMA_VERSION;
   readonly projectRoot: string;
@@ -28,6 +34,7 @@ export interface ProjectSetupConfig {
   readonly memoryGitMode: MemoryGitMode;
   readonly memoryRemote?: string;
   readonly installRoot: string;
+  readonly skillInstallRoots?: readonly SkillInstallRootConfig[];
   readonly skillTargets: readonly SkillTarget[];
   readonly folderScoped: boolean;
   readonly createdAt: string;
@@ -52,6 +59,7 @@ interface ProjectSetupInput {
   readonly memoryGitMode: MemoryGitMode;
   readonly memoryRemote?: string;
   readonly installRoot: string;
+  readonly skillInstallRoots: readonly SkillInstallRootConfig[];
   readonly skillTargets: readonly SkillTarget[];
   readonly folderScoped: boolean;
 }
@@ -291,7 +299,7 @@ export async function readProjectSetupConfig(projectRoot: string): Promise<Proje
   const config = await readExistingConfig(join(projectRoot, ".boreal", "project.json"));
   if (config) {
     assertProjectSetupRootMatches(projectRoot, config);
-    await validateProjectSetupInput(config);
+    await validateProjectSetupInput(projectSetupInputFromConfig(config));
   }
   return config;
 }
@@ -333,7 +341,7 @@ export async function inspectProjectSetupDrift(
   let validationError: string | undefined;
   try {
     assertProjectSetupRootMatches(context.workspaceRoot, config);
-    await validateProjectSetupInput(config);
+    await validateProjectSetupInput(projectSetupInputFromConfig(config));
   } catch (error) {
     validationError = error instanceof Error ? error.message : String(error);
   }
@@ -353,13 +361,16 @@ export async function inspectProjectSetupDrift(
   const memoryRoot = await inspectPath(config.memoryRoot);
   const memoryRepoExpected = config.memoryGitMode !== "shared";
   let memoryRepoExists = memoryRepoExpected ? existsSync(join(config.memoryRoot, ".git")) : false;
-  let projectGitignoreMissingPatterns = await missingIgnorePatterns(join(config.projectRoot, ".gitignore"), projectIgnorePatterns(config));
+  let projectGitignoreMissingPatterns = await missingIgnorePatterns(
+    join(config.projectRoot, ".gitignore"),
+    projectIgnorePatterns(projectSetupInputFromConfig(config))
+  );
   let memoryGitignoreMissingPatterns = memoryRoot.isDirectory
     ? await missingIgnorePatterns(join(config.memoryRoot, ".gitignore"), MEMORY_GITIGNORE_PATTERNS)
     : [];
 
   if (fix && projectGitignoreMissingPatterns.length > 0) {
-    await ensureIgnoreFile(join(config.projectRoot, ".gitignore"), projectIgnorePatterns(config));
+    await ensureIgnoreFile(join(config.projectRoot, ".gitignore"), projectIgnorePatterns(projectSetupInputFromConfig(config)));
     repairs.push({
       kind: "project_gitignore",
       path: join(config.projectRoot, ".gitignore"),
@@ -443,6 +454,7 @@ function projectSetupInputFromArgs(context: CliContext, args: ParsedArgs): Proje
   const memoryRoot = resolveUserPath(projectRoot, flagValue(args, "memory-root") ?? defaultMemoryRoot(projectRoot, memoryLayout));
   const installRoot = resolveUserPath(projectRoot, flagValue(args, "install-root") ?? ".agents/skills");
   const skillTargets = parseSkillTargets(flagValues(args, "skill-target"));
+  const skillInstallRoots = skillTargets.map((target) => skillInstallRootConfig(projectRoot, installRoot, target));
   return {
     projectRoot,
     memoryRoot,
@@ -450,6 +462,7 @@ function projectSetupInputFromArgs(context: CliContext, args: ParsedArgs): Proje
     memoryGitMode: parseMemoryGitMode(args, memoryLayout),
     memoryRemote: flagValue(args, "memory-remote"),
     installRoot,
+    skillInstallRoots,
     skillTargets,
     folderScoped: hasFlag(args, "folder-scoped")
   };
@@ -490,8 +503,9 @@ async function promptProjectSetupInput(context: CliContext, args: ParsedArgs): P
       SKILL_TARGET_OPTIONS,
       defaults.skillTargets
     );
+    const skillInstallRoots = skillTargets.map((target) => skillInstallRootConfig(projectRoot, installRoot, target));
     const folderScoped = (await prompt.select("Folder scoped skills", YES_NO_OPTIONS, defaults.folderScoped ? "yes" : "no")) === "yes";
-    const reviewed = { projectRoot, memoryRoot, memoryLayout, memoryGitMode, memoryRemote, installRoot, skillTargets, folderScoped };
+    const reviewed = { projectRoot, memoryRoot, memoryLayout, memoryGitMode, memoryRemote, installRoot, skillInstallRoots, skillTargets, folderScoped };
     prompt.writeIntro("Review project setup", formatProjectSetupReview(reviewed));
     const confirmed = await prompt.select("Write setup files", YES_NO_OPTIONS, "yes");
     if (confirmed !== "yes") {
@@ -512,6 +526,7 @@ function formatProjectSetupReview(input: ProjectSetupInput): string {
         { key: "memoryGitMode", value: input.memoryGitMode },
         { key: "memoryRemote", value: input.memoryRemote ?? "" },
         { key: "installRoot", value: input.installRoot },
+        { key: "skillInstallRoots", value: input.skillInstallRoots.map((entry) => `${entry.target}=${entry.skillRoot}`).join(", ") },
         { key: "skillTargets", value: input.skillTargets.join(", ") },
         { key: "folderScoped", value: input.folderScoped }
       ]).split("\n")
@@ -555,6 +570,7 @@ async function applyProjectSetup(input: ProjectSetupInput): Promise<ProjectSetup
     memoryGitMode: input.memoryGitMode,
     memoryRemote: input.memoryRemote,
     installRoot: input.installRoot,
+    skillInstallRoots: input.skillInstallRoots,
     skillTargets: input.skillTargets,
     folderScoped: input.folderScoped,
     createdAt: existingConfig?.createdAt ?? now,
@@ -648,7 +664,30 @@ async function readExistingConfig(configPath: string): Promise<ProjectSetupConfi
       configPath
     });
   }
-  return parsed;
+  return normalizedProjectSetupConfig(parsed);
+}
+
+function normalizedProjectSetupConfig(config: ProjectSetupConfig): ProjectSetupConfig {
+  return {
+    ...config,
+    skillInstallRoots:
+      config.skillInstallRoots ?? config.skillTargets.map((target) => skillInstallRootConfig(config.projectRoot, config.installRoot, target))
+  };
+}
+
+function projectSetupInputFromConfig(config: ProjectSetupConfig): ProjectSetupInput {
+  return {
+    projectRoot: config.projectRoot,
+    memoryRoot: config.memoryRoot,
+    memoryLayout: config.memoryLayout,
+    memoryGitMode: config.memoryGitMode,
+    memoryRemote: config.memoryRemote,
+    installRoot: config.installRoot,
+    skillInstallRoots:
+      config.skillInstallRoots ?? config.skillTargets.map((target) => skillInstallRootConfig(config.projectRoot, config.installRoot, target)),
+    skillTargets: config.skillTargets,
+    folderScoped: config.folderScoped
+  };
 }
 
 function assertProjectSetupRootMatches(projectRoot: string, config: ProjectSetupConfig): void {
@@ -679,6 +718,19 @@ function isProjectSetupConfig(value: unknown): value is ProjectSetupConfig {
     (record.memoryGitMode === "shared" || record.memoryGitMode === "separate" || record.memoryGitMode === "submodule") &&
     (record.memoryRemote === undefined || typeof record.memoryRemote === "string") &&
     typeof record.installRoot === "string" &&
+    (record.skillInstallRoots === undefined ||
+      (Array.isArray(record.skillInstallRoots) &&
+        record.skillInstallRoots.every((entry) => {
+          if (typeof entry !== "object" || entry === null) {
+            return false;
+          }
+          const root = entry as Record<string, unknown>;
+          return (
+            (root.target === "codex" || root.target === "claude") &&
+            typeof root.installRoot === "string" &&
+            typeof root.skillRoot === "string"
+          );
+        }))) &&
     Array.isArray(record.skillTargets) &&
     record.skillTargets.every((target) => target === "codex" || target === "claude") &&
     typeof record.folderScoped === "boolean" &&
@@ -759,6 +811,31 @@ function parseSkillTargets(values: readonly string[]): readonly SkillTarget[] {
 function resolveUserPath(baseDir: string, value: string): string {
   const expanded = value.replace(/^~(?=$|\/)/, process.env.HOME ?? "");
   return isAbsolute(expanded) ? resolve(expanded) : resolve(baseDir, expanded);
+}
+
+export function skillInstallRootConfig(projectRoot: string, configuredRoot: string, target: SkillTarget): SkillInstallRootConfig {
+  const installRoot = configuredInstallRootForTarget(projectRoot, configuredRoot, target);
+  return {
+    target,
+    installRoot,
+    skillRoot: skillRootForInstallRoot(installRoot)
+  };
+}
+
+export function configuredInstallRootForTarget(projectRoot: string, configuredRoot: string, target: SkillTarget): string {
+  if (configuredInstallRootMatchesTarget(configuredRoot, target)) {
+    return resolve(configuredRoot);
+  }
+  return target === "codex" ? resolve(projectRoot, ".agents") : resolve(projectRoot, ".claude");
+}
+
+export function configuredInstallRootMatchesTarget(root: string, target: SkillTarget): boolean {
+  const container = basename(root) === "skills" ? basename(dirname(root)) : basename(root);
+  return target === "codex" ? container === ".agents" : container === ".claude";
+}
+
+export function skillRootForInstallRoot(root: string): string {
+  return basename(root) === "skills" ? resolve(root) : resolve(root, "skills");
 }
 
 function defaultMemoryRoot(projectRoot: string, memoryLayout: MemoryLayout): string {
