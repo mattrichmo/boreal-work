@@ -107,7 +107,7 @@ import {
 import { analyzeCompaction, applyCompaction, type CompactDomain } from "./compact.js";
 import { COMPLETION_SHELLS, generateShellCompletion, isCompletionShell } from "./completion.js";
 import { asEvidenceId, asWorkId, runDoctor, type Diagnostic } from "./doctor.js";
-import { assertInitialized, createCliContext, ensureWorkspaceDirs, type CliContext } from "./context.js";
+import { assertInitialized, createCliContext, ensureWorkspaceDirs, isGlobalContext, type CliContext } from "./context.js";
 import { keyValueRows, resultSummary, section, withPromptSession, type CliSelectOption } from "./cli-ui.js";
 import { applyManualMerge, buildManualMergePlan, scanDuplicates, type DuplicateDomain } from "./duplicates.js";
 import { inspectGitWorktree, type GitWorktreeInspection } from "./git-worktree.js";
@@ -711,7 +711,13 @@ export async function runCommand(args: ParsedArgs, output: CliOutput, cwd: strin
         result = await dashboardCommand(action, context, args, commandOutput, json);
         break;
       case "global":
-        result = await globalCommand(action, context, args, commandOutput, json);
+        result = await globalCommand(action, rest, context, args, commandOutput, json);
+        break;
+      case "link":
+        result = await linkCommand(action, context, args, commandOutput, json);
+        break;
+      case "unlink":
+        result = await unlinkCommand(action, args, commandOutput, json);
         break;
       case "daemon":
         result = await daemonCommand(action, context, commandOutput, json);
@@ -3624,14 +3630,22 @@ async function emitGlobalDashboardData(
   return { exitCode: 0 };
 }
 
-// `bwrk global` is an ergonomic alias for `bwrk dashboard --global`.
+// `bwrk global` is an ergonomic alias for `bwrk dashboard --global`, and also
+// hosts the `link` / `unlink` project-registry verbs.
 async function globalCommand(
   action: string | undefined,
+  rest: readonly string[],
   context: CliContext,
   args: ParsedArgs,
   output: CliOutput,
   json: boolean
 ): Promise<CommandResult> {
+  if (action === "link") {
+    return linkCommand(rest[0], context, args, output, json);
+  }
+  if (action === "unlink") {
+    return unlinkCommand(rest[0], args, output, json);
+  }
   if (action !== undefined) {
     throw new BorealError("BOREAL_INVALID_INPUT", `Unknown global command: ${action}`);
   }
@@ -3642,6 +3656,44 @@ async function globalCommand(
     return serveDashboardCommand(context, args, output, "global");
   }
   return launchTuiCommand(context, args, "global");
+}
+
+// Link a project into the global workspace (registry add, reframed). With no
+// path, links the current repo; inside the global context a path is required.
+async function linkCommand(
+  pathArg: string | undefined,
+  context: CliContext,
+  args: ParsedArgs,
+  output: CliOutput,
+  json: boolean
+): Promise<CommandResult> {
+  const target = pathArg ? resolve(pathArg) : isGlobalContext(args) ? undefined : context.workspaceRoot;
+  if (!target) {
+    throw new BorealError("BOREAL_INVALID_INPUT", "Provide a project path to link: bwrk global link <path>");
+  }
+  const result = await addProjectRegistryEntry({
+    registryRoot: flagValue(args, "registry-root"),
+    workspaceRoot: target,
+    name: flagValue(args, "name"),
+    labels: flagValues(args, "label")
+  });
+  output.write(json ? formatRecord(result, true) : formatRegistryAdd(result));
+  return { exitCode: 0 };
+}
+
+async function unlinkCommand(
+  idArg: string | undefined,
+  args: ParsedArgs,
+  output: CliOutput,
+  json: boolean
+): Promise<CommandResult> {
+  const id = idArg ?? "";
+  if (!id) {
+    throw new BorealError("BOREAL_INVALID_INPUT", "Provide the project id to unlink: bwrk unlink <project-id>");
+  }
+  const result = await removeProjectRegistryEntry(id, { registryRoot: flagValue(args, "registry-root") });
+  output.write(json ? formatRecord(result, true) : formatRegistryRemove(result));
+  return { exitCode: 0 };
 }
 
 async function serveDashboardCommand(

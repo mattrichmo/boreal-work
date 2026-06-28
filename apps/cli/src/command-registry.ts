@@ -97,6 +97,11 @@ export const GLOBAL_FLAGS: readonly FlagDefinition[] = [
     summary: "Workspace directory. Defaults to the current directory.",
   },
   {
+    name: "global",
+    type: "boolean",
+    summary: "Operate on the global workspace (machine-level) instead of the current repo.",
+  },
+  {
     name: "json",
     type: "boolean",
     summary: "Emit a JSON envelope instead of human-readable text.",
@@ -437,7 +442,6 @@ export const COMMAND_DEFINITIONS: readonly CommandDefinition[] = [
       "Opens the Boreal dashboard for the current workspace. By default it runs the live terminal dashboard (no server, no browser). Pass --web for the browser console (binds 127.0.0.1:4318 and opens a browser), --global to scope to every registered project, and --json for the bounded data payload. Surface (--web) and scope (--global) are independent.",
     flags: [
       flag("web", "boolean", "Open the browser console instead of the terminal dashboard."),
-      flag("global", "boolean", "Scope to every registered project instead of the current repo."),
       flag("mouse", "boolean", "Terminal dashboard: enable mouse wheel (disables native text selection)."),
       flag("tui", "boolean", "Deprecated and ignored: the terminal dashboard is now the default."),
       flag("refresh-ms", "value", "Terminal dashboard auto-refresh interval in ms. Defaults to 5000."),
@@ -469,10 +473,10 @@ export const COMMAND_DEFINITIONS: readonly CommandDefinition[] = [
   {
     path: ["global"],
     category: "dashboard",
-    summary: "Cross-repo dashboard for all registered projects (terminal default; alias for dashboard --global).",
-    usage: "bwrk global [--web] [--json] [--mouse] [--refresh-ms <ms>] [--host <host>] [--port <n>] [--no-open] [--mode live|fixture] [--live-cache-ttl-ms <ms>]",
+    summary: "Your global workspace: cross-repo dashboard, global work (global work ...), and link/unlink.",
+    usage: "bwrk global [link <path>|unlink <project-id>] [--web] [--json] [--mouse] [--refresh-ms <ms>] [--host <host>] [--port <n>] [--no-open] [--mode live|fixture] [--name <text>] [--label <label>...] [--registry-root <dir>]",
     description:
-      "Ergonomic alias for `bwrk dashboard --global`: the high-level dashboard scoped to every project in the machine-local registry (not the current repo). Runs the terminal dashboard by default; pass --web for the browser console or --json for the data payload. Register projects with `bwrk registry add` first.",
+      "The machine-level global workspace. With no subcommand it opens the cross-repo dashboard (terminal by default; --web for the browser, --json for the data payload). `bwrk global work ...` (and any `bwrk global <command>`) runs that command against the global workspace. `bwrk global link <path>` links a project to be tracked; `bwrk global unlink <project-id>` removes it.",
     flags: [
       flag("web", "boolean", "Open the browser console instead of the terminal dashboard."),
       flag("mouse", "boolean", "Terminal dashboard: enable mouse wheel (disables native text selection)."),
@@ -481,9 +485,39 @@ export const COMMAND_DEFINITIONS: readonly CommandDefinition[] = [
       flag("port", "value", "Browser console (--web) bind port. Defaults to 4318."),
       flag("no-open", "boolean", "Browser console (--web): start the server without opening a browser."),
       flag("mode", "value", "Data mode: live or fixture. Defaults to live."),
-      flag("live-cache-ttl-ms", "value", "Browser console (--web) live data cache TTL between route clicks. Defaults to 60000.")
+      flag("live-cache-ttl-ms", "value", "Browser console (--web) live data cache TTL between route clicks. Defaults to 60000."),
+      flag("name", "value", "link: display name for the linked project."),
+      flag("label", "value", "link: label for the linked project (repeatable).", true),
+      flag("registry-root", "value", "link/unlink: machine-local registry root override.")
     ],
-    positionals: { label: "arguments", min: 0, max: 0 },
+    positionals: { label: "arguments", min: 0, max: 2 },
+    requiresWorkspace: false,
+    supportsJson: true,
+  },
+  {
+    path: ["link"],
+    category: "dashboard",
+    summary: "Link a project to your global workspace so it shows up in `bwrk global`.",
+    usage: "bwrk link [<path>] [--name <text>] [--label <label>...] [--registry-root <dir>] [--json]",
+    description:
+      "Adds a project to the machine-local registry so the global dashboard tracks it. With no path, links the current repo. Equivalent to `bwrk registry add`; nothing is tracked globally until you link it.",
+    flags: [
+      flag("name", "value", "Display name for the linked project."),
+      flag("label", "value", "Label for the linked project (repeatable).", true),
+      flag("registry-root", "value", "Machine-local registry root override.")
+    ],
+    positionals: { label: "path", min: 0, max: 1 },
+    requiresWorkspace: false,
+    supportsJson: true,
+  },
+  {
+    path: ["unlink"],
+    category: "dashboard",
+    summary: "Stop tracking a project in your global workspace.",
+    usage: "bwrk unlink <project-id> [--registry-root <dir>] [--json]",
+    description: "Removes a project from the machine-local registry. Equivalent to `bwrk registry remove`.",
+    flags: [flag("registry-root", "value", "Machine-local registry root override.")],
+    positionals: { label: "project-id", min: 1, max: 1 },
     requiresWorkspace: false,
     supportsJson: true,
   },
@@ -2000,7 +2034,31 @@ const COMMAND_BEHAVIOR: Readonly<Record<string, CommandBehaviorMetadata>> = {
     requiresLock: "none",
     maxResultSizeChars: 500_000,
     humanOutputKind: "none",
-    examples: ["bwrk global", "bwrk global --web", "bwrk global --json"],
+    examples: ["bwrk global", "bwrk global --web", "bwrk global --json", "bwrk global work list"],
+  }),
+  "link": commandMetadata("link", {
+    readOnly: false,
+    destructive: false,
+    writesState: true,
+    writesGeneratedArtifacts: false,
+    requiresFreshIndex: false,
+    concurrencySafe: true,
+    requiresLock: "registry",
+    maxResultSizeChars: 50_000,
+    humanOutputKind: "record",
+    examples: ["bwrk link", "bwrk link /repo/app --json"],
+  }),
+  "unlink": commandMetadata("unlink", {
+    readOnly: false,
+    destructive: false,
+    writesState: true,
+    writesGeneratedArtifacts: false,
+    requiresFreshIndex: false,
+    concurrencySafe: true,
+    requiresLock: "registry",
+    maxResultSizeChars: 50_000,
+    humanOutputKind: "record",
+    examples: ["bwrk unlink project_0123456789abcdef --json"],
   }),
   "daemon status": commandMetadata("daemon status", {
     readOnly: true,
@@ -3145,6 +3203,10 @@ export function registryValueFlagNames(): ReadonlySet<string> {
       .filter((definition) => definition.type === "value")
       .map((definition) => definition.name)
   );
+}
+
+export function isTopLevelGroup(name: string): boolean {
+  return COMMAND_DEFINITIONS.some((definition) => definition.path[0] === name);
 }
 
 export const serializeCommandDefinition = (definition: CommandDefinition) => ({
