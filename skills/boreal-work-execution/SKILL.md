@@ -1,6 +1,6 @@
 ---
 name: boreal-work-execution
-description: "Boreal Work Execution skill for Boreal project-scoped workflows. Use when the user asks to run or reason about Boreal memory/workflow commands for: claim and finish work, closeout work, link dependencies."
+description: "Boreal Work Execution skill for Boreal project-scoped workflows. Use when the user asks to run or reason about Boreal memory/workflow commands for: claim and finish work, closeout work, checkpoint git state, link dependencies."
 ---
 
 # Boreal Work Execution
@@ -25,6 +25,7 @@ Use the value after `workflows/` with `bwrk workflows show <ref>` if the repo-re
 
 - `workflows/40-work/claim-and-finish-work.md`
 - `workflows/40-work/closeout-work.md`
+- `workflows/40-work/checkpoint-git-state.md`
 - `workflows/40-work/link-dependencies.md`
 
 ## No-Leak Rules
@@ -36,4 +37,4 @@ Use the value after `workflows/` with `bwrk workflows show <ref>` if the repo-re
 
 ## Completion
 
-End with the workflow result, verification status, and the next suggested workflow.
+End with the workflow result, verification status, Git checkpoint commit or reason code, granular closeout summary, and the next suggested workflow.

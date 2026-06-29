@@ -10,9 +10,13 @@ allowed_commands:
   - session end
   - operation list
   - reservation list
+  - work list
+  - sprint list
+  - sprint show
   - sync status
   - doctor
   - sync refresh
+  - gate closeout
 templates:
   - session-closeout
 ---
@@ -50,6 +54,7 @@ Use this workflow when the user's request requires summarize a session, active r
 4. Attach evidence or source references for any durable claim, decision, or closed work.
 5. Rebuild derived artifacts when the workflow changes memory, context, or search.
 6. Run `bwrk doctor --strict --json` unless the workflow is explicitly read-only and no generated artifacts changed.
+7. When work was finished or closed, summarize completed work by task, sprint, phase, or milestone and include Git checkpoint commit(s) or reason code(s) from `workflows/40-work/checkpoint-git-state.md`.
 
 
 
@@ -58,9 +63,13 @@ Use this workflow when the user's request requires summarize a session, active r
 - `bwrk session end`
 - `bwrk operation list`
 - `bwrk reservation list`
+- `bwrk work list`
+- `bwrk sprint list`
+- `bwrk sprint show`
 - `bwrk sync status`
 - `bwrk doctor`
 - `bwrk sync refresh`
+- `bwrk gate closeout`
 
 ## Evidence And Checkpoints
 
@@ -68,6 +77,8 @@ Use this workflow when the user's request requires summarize a session, active r
 - Keep raw source material immutable; reconcile into wiki, claims, decisions, or work instead of rewriting raw records.
 - For work changes, confirm dependency and readiness state after mutation.
 - When summarizing sync health, inspect `sync.git.findings`. Report non-blocking Git findings as caveats by category, and reserve "unhealthy" language for `sync.ok=false` or `git.ok=false`.
+- When summarizing completed work, include child task status, evidence, verification, commit SHA(s), and reason code(s); do not collapse a sprint or milestone into a single narrative sentence.
+- Report every remaining dirty path as committed, ignored/generated, out of scope, or blocked.
 
 ## Failure And Repair
 
@@ -80,9 +91,11 @@ Use this workflow when the user's request requires summarize a session, active r
 
 - The requested outcome is represented in Boreal records or the workflow has returned a clear read-only answer.
 - Any new or updated durable memory has source/evidence support.
+- Finished work is summarized with per-task/per-sprint outcomes and Git checkpoint commits or reason codes.
 - `bwrk doctor --strict --json` passes or the remaining diagnostic is explicitly reported.
 
 ## Next Suggested Workflow
 
 - Use `workflows/50-handoff/session-closeout.md` after long agent sessions.
+- Use `workflows/40-work/checkpoint-git-state.md` when finished work changed repository state but has no checkpoint evidence yet.
 - Use `workflows/60-health/sync-and-doctor.md` when state, ledger, or generated-artifact health is uncertain.

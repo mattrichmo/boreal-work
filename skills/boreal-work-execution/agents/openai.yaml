@@ -1,4 +1,4 @@
 interface:
   display_name: "Boreal Work Execution"
-  short_description: "Claim, verify, and close Boreal work"
+  short_description: "Claim, checkpoint, verify, and close Boreal work"
   default_prompt: "Use $boreal-work-execution to run the matching Boreal workflow in this project."

@@ -8,12 +8,19 @@ writes_state: true
 requires_workspace: true
 allowed_commands:
   - work show
+  - dep tree
   - evidence add
   - work verify
   - work close
+  - sprint show
+  - sprint metrics
+  - sprint report
+  - sprint close
   - session end
+  - sync status
   - doctor
   - sync refresh
+  - gate closeout
 templates:
   - verification-note
   - session-closeout
@@ -59,30 +66,65 @@ Use manual closeout only for work that was completed outside the active-reservat
 
 1. Inspect the target first:
    `bwrk work show <work-id> --json`
-2. Attach evidence with a supported kind:
+2. Before closeout, run `workflows/40-work/checkpoint-git-state.md` when the work changed repository state. Capture commit SHA(s) or a reason code.
+3. Attach evidence with a supported kind:
    `bwrk evidence add <work-id> --summary "<summary>" --kind command --command "<command>" --outcome passed --json`
-3. Capture the evidence ID from `data.meta.id`.
-4. Verify with that exact evidence ID:
+4. Capture the evidence ID from `data.meta.id`.
+5. Verify with that exact evidence ID:
    `bwrk work verify <work-id> --evidence <evidence-id> --verdict passed --notes "<notes>" --json`
-5. Close only after passed verification:
+6. Close only after passed verification:
    `bwrk work close <work-id> --reason "<reason>" --json`
+
+For sprint or parent-gate closeout:
+
+1. Inspect the parent and child state:
+   `bwrk sprint show <sprint-id> --json`
+   `bwrk sprint metrics <sprint-id> --closeout-reason "<reason>" --json`
+2. Confirm every child task is closed, cancelled, or explicitly deferred into later work with a reason.
+3. Run the Git checkpoint workflow for the sprint, phase, milestone, or project before closing the parent.
+4. Record final sync and doctor evidence on the sprint or parent work item:
+   `bwrk evidence add <sprint-id> --summary "sync closeout passed" --kind command --command "bwrk sync refresh --json" --outcome passed --json`
+   `bwrk evidence add <sprint-id> --summary "doctor closeout passed" --kind command --command "bwrk doctor --strict --json" --outcome passed --json`
+5. Generate the sprint report when closing a sprint:
+   `bwrk sprint report <sprint-id> --doctor-evidence <doctor-evidence-id> --sync-evidence <sync-evidence-id> --json`
+6. Close the sprint only after passed verification and checkpoint evidence:
+   `bwrk sprint close <sprint-id> --reason "<reason>" --json`
 
 
 ## CLI Commands
 
 - `bwrk work show`
+- `bwrk dep tree`
 - `bwrk evidence add`
 - `bwrk work verify`
 - `bwrk work close`
+- `bwrk sprint show`
+- `bwrk sprint metrics`
+- `bwrk sprint report`
+- `bwrk sprint close`
 - `bwrk session end`
+- `bwrk sync status`
 - `bwrk doctor`
 - `bwrk sync refresh`
+- `bwrk gate closeout`
 
 ## Evidence And Checkpoints
 
 - Record command/test/diff evidence before verification or closeout.
 - Keep raw source material immutable; reconcile into wiki, claims, decisions, or work instead of rewriting raw records.
 - For work changes, confirm dependency and readiness state after mutation.
+- For repository changes, attach Git checkpoint evidence or a no-commit reason code before closing task, sprint, phase, or milestone work.
+- For sprint and milestone closeout, include per-child status, evidence, verification, commit, and deferral state in the user-facing summary.
+
+## Required User Closeout Summary
+
+End the workflow with a granular closeout summary:
+
+- Parent scope: work ID, sprint ID, phase ID, milestone ID, or project scope.
+- Child breakdown: each child task or sprint with status, outcome, evidence ID(s), verification ID(s), and close/defer reason.
+- Git checkpoints: commit SHA(s) per Git root, or reason code(s) for children that legitimately did not commit.
+- Validation: commands run, gate status, and any non-blocking Git caveats.
+- Remaining state: carryover, unresolved blockers, out-of-scope dirty paths, and next workflow.
 
 ## Failure And Repair
 
@@ -94,9 +136,12 @@ Use manual closeout only for work that was completed outside the active-reservat
 
 - The requested outcome is represented in Boreal records or the workflow has returned a clear read-only answer.
 - Any new or updated durable memory has source/evidence support.
+- Any repository state change has checkpoint evidence or an explicit reason code before close.
+- Sprint, phase, milestone, and project closeouts include a child-by-child user summary.
 - `bwrk doctor --strict --json` passes or the remaining diagnostic is explicitly reported.
 
 ## Next Suggested Workflow
 
 - Use `workflows/50-handoff/session-closeout.md` after long agent sessions.
+- Use `workflows/40-work/checkpoint-git-state.md` before closing work that changed repository state.
 - Use `workflows/60-health/sync-and-doctor.md` when state, ledger, or generated-artifact health is uncertain.

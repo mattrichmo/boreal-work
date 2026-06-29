@@ -21,3 +21,7 @@ Each skill declares the workflow files it can route to. Skill text must referenc
 ## Installer Behavior
 
 The installer should render skills for Codex and Claude into a selected install root. Dry-run mode reports target files and source workflow references without writing.
+
+## Closeout Checkpoints
+
+Workflows that close task, sprint, phase, milestone, or project work must require a Git checkpoint commit or an explicit no-commit reason code when repository state changed. Closeout summaries must report the affected child work, evidence, verification, commit SHA(s), reason code(s), and any remaining dirty paths instead of collapsing broad work into one final narrative.

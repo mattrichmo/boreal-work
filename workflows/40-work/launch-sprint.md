@@ -55,7 +55,7 @@ Use this workflow when the user's request requires create a scoped sprint with t
 
 ## Command Sequences
 
-Use a sprint record as the container, then attach ready leaf work beneath it.
+Use a sprint record as the container, attach ready leaf work beneath it, and define Git checkpoint boundaries before implementation starts.
 
 1. Start or inspect the session:
    `bwrk session start --agent <agent-id> --json`
@@ -65,12 +65,13 @@ Use a sprint record as the container, then attach ready leaf work beneath it.
 3. Capture the sprint ID from `data.meta.id`.
 4. Create each sprint task with acceptance criteria:
    `bwrk work create "<task title>" --kind task --priority normal --label <label> --acceptance "<criterion>" --json`
-5. Attach each task to the sprint and encode blockers:
+5. For each task, phase, or milestone that can change repository state, include acceptance language requiring a scoped Git checkpoint or explicit no-commit reason code before closeout.
+6. Attach each task to the sprint and encode blockers:
    `bwrk dep add <sprint-id> <task-id> --json`
    `bwrk dep add <blocked-task-id> <blocker-task-id> --json`
-6. Mark only unblocked sprint tasks ready:
+7. Mark only unblocked sprint tasks ready:
    `bwrk work ready <task-id> --json`
-7. Verify launch shape:
+8. Verify launch shape:
    `bwrk dep tree <sprint-id> --json`
    `bwrk doctor --strict --json`
 
@@ -91,6 +92,8 @@ Use a sprint record as the container, then attach ready leaf work beneath it.
 - Keep raw source material immutable; reconcile into wiki, claims, decisions, or work instead of rewriting raw records.
 - For work changes, confirm dependency and readiness state after mutation.
 - At launch, inspect `sync.git.findings` and separate non-blocking protected-branch/generated-artifact caveats from blocking Git findings before deciding whether the sprint can start.
+- Plan commit checkpoints as part of the sprint structure. Major refactors should be split into task, phase, or subsystem checkpoints rather than one final sprint-sized commit.
+- Sprint acceptance should require a final closeout summary with per-task outcomes, evidence, verification, commit SHA(s), and reason code(s).
 
 ## Failure And Repair
 
@@ -103,9 +106,11 @@ Use a sprint record as the container, then attach ready leaf work beneath it.
 
 - The requested outcome is represented in Boreal records or the workflow has returned a clear read-only answer.
 - Any new or updated durable memory has source/evidence support.
+- The sprint plan identifies checkpoint boundaries for task, phase, sprint, or milestone closeout.
 - `bwrk doctor --strict --json` passes or the remaining diagnostic is explicitly reported.
 
 ## Next Suggested Workflow
 
 - Use `workflows/50-handoff/session-closeout.md` after long agent sessions.
+- Use `workflows/40-work/checkpoint-git-state.md` when a sprint task, phase, or milestone reaches a commit boundary.
 - Use `workflows/60-health/sync-and-doctor.md` when state, ledger, or generated-artifact health is uncertain.

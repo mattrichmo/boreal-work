@@ -16,6 +16,8 @@ Use this template as an output contract for workflows that need a human-readable
 - Source or evidence references
 - Current state
 - Decision or action taken
+- Sprint and task breakdown
+- Git checkpoints or reason codes
 - Risks and unknowns
 - Next action
 
@@ -38,6 +40,19 @@ Write the smallest truthful summary that preserves uncertainty.
 ### Details
 
 Record material facts, decisions, task structure, or handoff instructions.
+
+### Sprint And Task Breakdown
+
+- Sprint or milestone:
+- Closed task(s):
+- Deferred task(s):
+- Evidence and verification:
+
+### Git Checkpoints
+
+- Commit SHA(s):
+- No-commit reason code(s):
+- Remaining dirty paths:
 
 ### Risks And Open Questions
 

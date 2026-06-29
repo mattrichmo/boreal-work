@@ -11,8 +11,12 @@ allowed_commands:
   - doctor
   - export ledgers
   - work list
+  - sprint list
+  - sprint show
+  - sprint report
   - decision list
   - sync refresh
+  - gate closeout
 templates:
   - project-closeout
 ---
@@ -50,6 +54,7 @@ Use this workflow when the user's request requires summarize project status, mem
 4. Attach evidence or source references for any durable claim, decision, or closed work.
 5. Rebuild derived artifacts when the workflow changes memory, context, or search.
 6. Run `bwrk doctor --strict --json` unless the workflow is explicitly read-only and no generated artifacts changed.
+7. Summarize each closed sprint, phase, milestone, and task with evidence, verification, Git checkpoint commit(s), and reason code(s).
 
 
 
@@ -59,14 +64,20 @@ Use this workflow when the user's request requires summarize project status, mem
 - `bwrk doctor`
 - `bwrk export ledgers`
 - `bwrk work list`
+- `bwrk sprint list`
+- `bwrk sprint show`
+- `bwrk sprint report`
 - `bwrk decision list`
 - `bwrk sync refresh`
+- `bwrk gate closeout`
 
 ## Evidence And Checkpoints
 
 - Record command/test/diff evidence before verification or closeout.
 - Keep raw source material immutable; reconcile into wiki, claims, decisions, or work instead of rewriting raw records.
 - For work changes, confirm dependency and readiness state after mutation.
+- Project closeout must include a sprint/task breakdown and Git checkpoint summary. If a sprint or task has no commit, include the reason code from `workflows/40-work/checkpoint-git-state.md`.
+- Report uncommitted paths by Git root and classify each as in scope, out of scope, ignored/generated, or blocked.
 
 ## Failure And Repair
 
@@ -78,9 +89,12 @@ Use this workflow when the user's request requires summarize project status, mem
 
 - The requested outcome is represented in Boreal records or the workflow has returned a clear read-only answer.
 - Any new or updated durable memory has source/evidence support.
+- Every closed sprint, phase, milestone, or task is represented in the human-readable closeout summary.
+- Repository changes are represented by commit SHA(s) or explicit no-commit reason code(s).
 - `bwrk doctor --strict --json` passes or the remaining diagnostic is explicitly reported.
 
 ## Next Suggested Workflow
 
 - Use `workflows/50-handoff/session-closeout.md` after long agent sessions.
+- Use `workflows/40-work/checkpoint-git-state.md` when project closeout finds closed work without checkpoint evidence.
 - Use `workflows/60-health/sync-and-doctor.md` when state, ledger, or generated-artifact health is uncertain.

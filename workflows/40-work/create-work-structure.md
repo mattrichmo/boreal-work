@@ -60,12 +60,13 @@ Use exact create output IDs from JSON responses; do not invent parent, sprint, o
 2. Capture the returned container ID from `data.meta.id`.
 3. Create each task or issue with concrete acceptance criteria:
    `bwrk work create "<task title>" --kind task --priority normal --label <label> --acceptance "<criterion>" --json`
-4. Link container and blockers explicitly:
+4. Add acceptance criteria that define Git checkpoint boundaries for every task, phase, sprint, or milestone expected to change repository state.
+5. Link container and blockers explicitly:
    `bwrk dep add <container-id> <child-work-id> --json`
    `bwrk dep add <blocked-work-id> <blocker-work-id> --json`
-5. Mark only claimable leaf work ready:
+6. Mark only claimable leaf work ready:
    `bwrk work ready <child-work-id> --json`
-6. Verify structure before handoff:
+7. Verify structure before handoff:
    `bwrk dep tree <container-id> --json`
 
 
@@ -84,6 +85,8 @@ Use exact create output IDs from JSON responses; do not invent parent, sprint, o
 - Keep raw source material immutable; reconcile into wiki, claims, decisions, or work instead of rewriting raw records.
 - For work changes, confirm dependency and readiness state after mutation.
 - Treat `sync.git.findings` with `blocking: false` as Git caveats when creating work structure; do not block planning only because the workspace is on protected main with generated-artifact or memory-index changes.
+- Plan checkpoint boundaries before implementation begins. For major refactors, create child tasks or phases small enough to commit independently.
+- Parent acceptance criteria should require commit checkpoint(s) or no-commit reason code(s) before parent closeout.
 
 ## Failure And Repair
 
@@ -96,9 +99,11 @@ Use exact create output IDs from JSON responses; do not invent parent, sprint, o
 
 - The requested outcome is represented in Boreal records or the workflow has returned a clear read-only answer.
 - Any new or updated durable memory has source/evidence support.
+- New sprint, phase, milestone, or major-task structures identify where Git checkpoints are expected.
 - `bwrk doctor --strict --json` passes or the remaining diagnostic is explicitly reported.
 
 ## Next Suggested Workflow
 
 - Use `workflows/50-handoff/session-closeout.md` after long agent sessions.
+- Use `workflows/40-work/checkpoint-git-state.md` when a created task, sprint, phase, or milestone reaches a checkpoint boundary.
 - Use `workflows/60-health/sync-and-doctor.md` when state, ledger, or generated-artifact health is uncertain.
