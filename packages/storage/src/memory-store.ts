@@ -1,6 +1,8 @@
 import { deepClone } from "@boreal/core";
 import type {
   AgentReservation,
+  AgentSummaryId,
+  AgentSummaryRecord,
   ClaimId,
   ClaimRecord,
   ContextPack,
@@ -28,6 +30,7 @@ import type { BorealReader, BorealStore, BorealWriter, WorkItemFilter } from "./
 
 interface StoreState {
   readonly workItems: Map<WorkId, WorkItem>;
+  readonly agentSummaries: Map<AgentSummaryId, AgentSummaryRecord>;
   readonly evidence: Map<EvidenceId, EvidenceRecord>;
   readonly verifications: Map<VerificationId, VerificationRecord>;
   readonly knowledgeSources: Map<KnowledgeSourceId, KnowledgeSource>;
@@ -68,6 +71,7 @@ export class InMemoryBorealStore implements BorealStore {
 
 export interface StoreSnapshot {
   readonly workItems?: readonly WorkItem[];
+  readonly agentSummaries?: readonly AgentSummaryRecord[];
   readonly evidence?: readonly EvidenceRecord[];
   readonly verifications?: readonly VerificationRecord[];
   readonly knowledgeSources?: readonly KnowledgeSource[];
@@ -93,6 +97,18 @@ class MemoryTransaction implements BorealWriter {
   async listWorkItems(filter?: WorkItemFilter): Promise<readonly WorkItem[]> {
     const items = [...this.state.workItems.values()].filter((item) => matchesWorkFilter(item, filter));
     return deepClone(items);
+  }
+
+  async getAgentSummary(id: AgentSummaryId): Promise<AgentSummaryRecord | undefined> {
+    return cloneMaybe(this.state.agentSummaries.get(id));
+  }
+
+  async listAgentSummaries(): Promise<readonly AgentSummaryRecord[]> {
+    return deepClone([...this.state.agentSummaries.values()]);
+  }
+
+  async listAgentSummariesForSubject(subjectId: string): Promise<readonly AgentSummaryRecord[]> {
+    return deepClone([...this.state.agentSummaries.values()].filter((record) => record.subjectId === subjectId));
   }
 
   async getEvidence(id: EvidenceId): Promise<EvidenceRecord | undefined> {
@@ -213,6 +229,14 @@ class MemoryTransaction implements BorealWriter {
     return this.state.workItems.delete(id);
   }
 
+  async putAgentSummary(record: AgentSummaryRecord): Promise<void> {
+    this.state.agentSummaries.set(record.meta.id, deepClone(record));
+  }
+
+  async deleteAgentSummary(id: AgentSummaryId): Promise<boolean> {
+    return this.state.agentSummaries.delete(id);
+  }
+
   async putEvidence(record: EvidenceRecord): Promise<void> {
     this.state.evidence.set(record.meta.id, deepClone(record));
   }
@@ -301,6 +325,7 @@ class MemoryTransaction implements BorealWriter {
 function createState(seed?: PartialStoreSeed): StoreState {
   return {
     workItems: new Map((seed?.workItems ?? []).map((item) => [item.meta.id, deepClone(item)])),
+    agentSummaries: new Map((seed?.agentSummaries ?? []).map((record) => [record.meta.id, deepClone(record)])),
     evidence: new Map((seed?.evidence ?? []).map((record) => [record.meta.id, deepClone(record)])),
     verifications: new Map((seed?.verifications ?? []).map((record) => [record.meta.id, deepClone(record)])),
     knowledgeSources: new Map((seed?.knowledgeSources ?? []).map((record) => [record.meta.id, deepClone(record)])),
@@ -322,6 +347,7 @@ function cloneState(state: StoreState): StoreState {
 function stateToSnapshot(state: StoreState): StoreSnapshot {
   return {
     workItems: [...state.workItems.values()],
+    agentSummaries: [...state.agentSummaries.values()],
     evidence: [...state.evidence.values()],
     verifications: [...state.verifications.values()],
     knowledgeSources: [...state.knowledgeSources.values()],

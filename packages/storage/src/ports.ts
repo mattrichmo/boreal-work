@@ -1,5 +1,7 @@
 import type {
   AgentReservation,
+  AgentSummaryId,
+  AgentSummaryRecord,
   ClaimId,
   ClaimRecord,
   ContextPack,
@@ -31,6 +33,9 @@ export interface WorkItemFilter {
 export interface BorealReader {
   getWorkItem(id: WorkId): Promise<WorkItem | undefined>;
   listWorkItems(filter?: WorkItemFilter): Promise<readonly WorkItem[]>;
+  getAgentSummary(id: AgentSummaryId): Promise<AgentSummaryRecord | undefined>;
+  listAgentSummaries(): Promise<readonly AgentSummaryRecord[]>;
+  listAgentSummariesForSubject(subjectId: string): Promise<readonly AgentSummaryRecord[]>;
   getEvidence(id: EvidenceId): Promise<EvidenceRecord | undefined>;
   listEvidence(): Promise<readonly EvidenceRecord[]>;
   listEvidenceForSubject(subjectId: string): Promise<readonly EvidenceRecord[]>;
@@ -62,6 +67,8 @@ export interface BorealReader {
 export interface BorealWriter extends BorealReader {
   putWorkItem(item: WorkItem): Promise<void>;
   deleteWorkItem(id: WorkId): Promise<boolean>;
+  putAgentSummary(record: AgentSummaryRecord): Promise<void>;
+  deleteAgentSummary(id: AgentSummaryId): Promise<boolean>;
   putEvidence(record: EvidenceRecord): Promise<void>;
   deleteEvidence(id: EvidenceId): Promise<boolean>;
   putVerification(record: VerificationRecord): Promise<void>;

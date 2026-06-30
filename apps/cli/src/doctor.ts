@@ -12,6 +12,7 @@ import {
   readJsonFile,
   runtimeSnapshotSchemaIssues,
   type AgentReservation,
+  type AgentSummaryRecord,
   type ClaimRecord,
   type ContextPack,
   type DecisionRecord,
@@ -59,6 +60,7 @@ export interface DoctorResult {
 
 const STATE_SECTIONS = [
   "workItems",
+  "agentSummaries",
   "evidence",
   "verifications",
   "knowledgeSources",
@@ -1051,6 +1053,7 @@ function validateSchemaConformance(
 ): ReturnType<typeof runtimeSnapshotSchemaIssues> {
   const issues = runtimeSnapshotSchemaIssues({
     workItems: stateSection(state, "workItems"),
+    agentSummaries: stateSection(state, "agentSummaries"),
     evidence: stateSection(state, "evidence"),
     verifications: stateSection(state, "verifications"),
     knowledgeSources: stateSection(state, "knowledgeSources"),
@@ -1090,6 +1093,7 @@ async function validateStoreRecords(
     const wikiCoverage = await inspectDoctorWikiCoverage(context);
     const summary = (() => {
       const rawWorkItems = stateSection<WorkItem>(state, "workItems");
+      const rawAgentSummaries = stateSection<AgentSummaryRecord>(state, "agentSummaries");
       const rawEvidence = stateSection<EvidenceRecord>(state, "evidence");
       const rawVerifications = stateSection<VerificationRecord>(state, "verifications");
       const rawKnowledgeSources = stateSection<KnowledgeSource>(state, "knowledgeSources");
@@ -1103,6 +1107,7 @@ async function validateStoreRecords(
       const rawProjections = stateSection<ProjectionRecord>(state, "projections");
       const malformedRecords = [
         ...malformedIndexes(rawWorkItems, isDoctorWorkItem, "workItems"),
+        ...malformedIndexes(rawAgentSummaries, isDoctorAgentSummary, "agentSummaries"),
         ...malformedIndexes(rawEvidence, isDoctorEvidence, "evidence"),
         ...malformedIndexes(rawVerifications, isDoctorVerification, "verifications"),
         ...malformedIndexes(rawKnowledgeSources, isDoctorKnowledgeSource, "knowledgeSources"),
@@ -1115,6 +1120,7 @@ async function validateStoreRecords(
         ...malformedIndexes(rawProjections, isDoctorProjection, "projections")
       ];
       const workItems = rawWorkItems.filter(isDoctorWorkItem);
+      const agentSummaries = rawAgentSummaries.filter(isDoctorAgentSummary);
       const evidence = rawEvidence.filter(isDoctorEvidence);
       const verifications = rawVerifications.filter(isDoctorVerification);
       const knowledgeSources = rawKnowledgeSources.filter(isDoctorKnowledgeSource);
@@ -1128,6 +1134,7 @@ async function validateStoreRecords(
       const sourceById = new Map(knowledgeSources.map((record) => [record.meta.id, record]));
       const verificationsById = new Map(verifications.map((record) => [record.meta.id, record]));
       const workById = new Map(workItems.map((work) => [work.meta.id, work]));
+      const summariesById = new Map(agentSummaries.map((record) => [record.meta.id, record]));
       const eventById = new Map<string, Record<string, unknown>>();
       for (const event of rawEvents) {
         const eventId = readRecordId(event, "events");
@@ -1151,6 +1158,27 @@ async function validateStoreRecords(
           .filter((verificationId) => !verificationsById.has(verificationId))
           .map((verificationId) => ({ workId: work.meta.id, verificationId }))
       );
+      const danglingSummaryEvidence = agentSummaries.flatMap((summary) =>
+        summary.evidenceIds
+          .filter((evidenceId) => !evidenceById.has(evidenceId))
+          .map((evidenceId) => ({ summaryId: summary.meta.id, evidenceId }))
+      );
+      const danglingSummaryVerifications = agentSummaries.flatMap((summary) =>
+        summary.verificationIds
+          .filter((verificationId) => !verificationsById.has(verificationId))
+          .map((verificationId) => ({ summaryId: summary.meta.id, verificationId }))
+      );
+      const danglingSummaryChildren = agentSummaries.flatMap((summary) =>
+        summary.childSummaryIds
+          .filter((summaryId) => !summariesById.has(summaryId))
+          .map((childSummaryId) => ({ summaryId: summary.meta.id, childSummaryId }))
+      );
+      const danglingSummaryParents = agentSummaries
+        .filter((summary) => summary.parentSummaryId !== undefined && !summariesById.has(summary.parentSummaryId))
+        .map((summary) => ({ summaryId: summary.meta.id, parentSummaryId: summary.parentSummaryId }));
+      const danglingSummarySubjects = agentSummaries
+        .filter((summary) => ["work", "sprint", "milestone"].includes(summary.subjectType) && !workById.has(summary.subjectId as WorkId))
+        .map((summary) => ({ summaryId: summary.meta.id, subjectId: summary.subjectId, subjectType: summary.subjectType }));
       const blockEdges = graphEdges.filter(
         (edge) => edge.kind === "blocks" && edge.fromType === "work" && edge.toType === "work"
       );
@@ -1382,6 +1410,7 @@ async function validateStoreRecords(
       ];
       const stringSafety = stringSafetyIssues({
         workItems,
+        agentSummaries,
         evidence,
         verifications,
         knowledgeSources,
@@ -1395,6 +1424,7 @@ async function validateStoreRecords(
       const labelCollisions = labelNormalizationCollisions(workItems);
       const actorCollisions = actorNormalizationCollisions({
         workItems,
+        agentSummaries,
         evidence,
         verifications,
         knowledgeSources,
@@ -1437,6 +1467,11 @@ async function validateStoreRecords(
         expiredActiveReservations,
         verificationPolicy,
         closedWithoutReason,
+        danglingSummaryEvidence,
+        danglingSummaryVerifications,
+        danglingSummaryChildren,
+        danglingSummaryParents,
+        danglingSummarySubjects,
         danglingOperationEvents,
         legacyOperationEvents,
         operationEventCausality,
@@ -1480,6 +1515,25 @@ async function validateStoreRecords(
     diagnostics.push(diagnosticFromList("work.dangling_evidence", "Dangling work evidence references", summary.danglingEvidence));
     diagnostics.push(
       diagnosticFromList("work.dangling_verifications", "Dangling work verification references", summary.danglingVerifications)
+    );
+    diagnostics.push(
+      diagnosticFromList("summary.dangling_evidence", "Dangling agent summary evidence references", summary.danglingSummaryEvidence)
+    );
+    diagnostics.push(
+      diagnosticFromList(
+        "summary.dangling_verifications",
+        "Dangling agent summary verification references",
+        summary.danglingSummaryVerifications
+      )
+    );
+    diagnostics.push(
+      diagnosticFromList("summary.dangling_children", "Dangling agent summary child references", summary.danglingSummaryChildren)
+    );
+    diagnostics.push(
+      diagnosticFromList("summary.dangling_parent", "Dangling agent summary parent references", summary.danglingSummaryParents)
+    );
+    diagnostics.push(
+      diagnosticFromList("summary.dangling_subject", "Dangling agent summary subject references", summary.danglingSummarySubjects)
     );
     diagnostics.push(diagnosticFromList("knowledge.dangling_sources", "Dangling knowledge source references", [
       ...summary.danglingClaimSources,
@@ -1910,6 +1964,7 @@ interface MachineStringField {
 
 interface StringSafetyInput {
   readonly workItems: readonly WorkItem[];
+  readonly agentSummaries: readonly AgentSummaryRecord[];
   readonly evidence: readonly EvidenceRecord[];
   readonly verifications: readonly VerificationRecord[];
   readonly knowledgeSources: readonly KnowledgeSource[];
@@ -1927,6 +1982,13 @@ function stringSafetyIssues(input: StringSafetyInput): Array<Record<string, unkn
       ...metaStringFields("workItems", work.meta.id, work),
       stringField("workItems", work.meta.id, "title", work.title),
       ...work.labels.map((label, index) => stringField("workItems", work.meta.id, `labels[${index}]`, label))
+    ]),
+    ...input.agentSummaries.flatMap((summary) => [
+      ...metaStringFields("agentSummaries", summary.meta.id, summary),
+      stringField("agentSummaries", summary.meta.id, "title", summary.title),
+      stringField("agentSummaries", summary.meta.id, "subjectId", summary.subjectId),
+      ...(summary.artifactUri ? [stringField("agentSummaries", summary.meta.id, "artifactUri", summary.artifactUri)] : []),
+      ...(summary.duplicateOf ? [stringField("agentSummaries", summary.meta.id, "duplicateOf", summary.duplicateOf)] : [])
     ]),
     ...input.evidence.flatMap((evidence) => [
       ...metaStringFields("evidence", evidence.meta.id, evidence),
@@ -1994,6 +2056,7 @@ function labelNormalizationCollisions(workItems: readonly WorkItem[]): Array<Rec
 function actorNormalizationCollisions(input: Omit<StringSafetyInput, "contextPacks">): Array<Record<string, unknown>> {
   const records = [
     ...input.workItems.map((record) => ({ section: "workItems", id: record.meta.id, record })),
+    ...input.agentSummaries.map((record) => ({ section: "agentSummaries", id: record.meta.id, record })),
     ...input.evidence.map((record) => ({ section: "evidence", id: record.meta.id, record })),
     ...input.verifications.map((record) => ({ section: "verifications", id: record.meta.id, record })),
     ...input.knowledgeSources.map((record) => ({ section: "knowledgeSources", id: record.meta.id, record })),
@@ -2422,6 +2485,27 @@ function isDoctorWorkItem(value: unknown): value is WorkItem {
     Array.isArray(value.dependencyIds) &&
     Array.isArray(value.evidenceIds) &&
     Array.isArray(value.verificationIds)
+  );
+}
+
+function isDoctorAgentSummary(value: unknown): value is AgentSummaryRecord {
+  return (
+    isRecord(value) &&
+    readRecordId(value, "agentSummaries") !== undefined &&
+    typeof value.subjectId === "string" &&
+    typeof value.subjectType === "string" &&
+    typeof value.summaryKind === "string" &&
+    typeof value.status === "string" &&
+    typeof value.outcome === "string" &&
+    typeof value.title === "string" &&
+    typeof value.body === "string" &&
+    Array.isArray(value.completedWork) &&
+    Array.isArray(value.evidenceIds) &&
+    Array.isArray(value.verificationIds) &&
+    Array.isArray(value.commitShas) &&
+    Array.isArray(value.dirtyPathNotes) &&
+    Array.isArray(value.childSummaryIds) &&
+    typeof value.generatedAt === "string"
   );
 }
 

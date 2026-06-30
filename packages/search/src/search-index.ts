@@ -2,6 +2,7 @@ import {
   hashContent,
   normalizeGeneratedSearchText,
   nowIso,
+  type AgentSummaryRecord,
   type ClaimRecord,
   type ContentHash,
   type ContextPack,
@@ -26,10 +27,19 @@ const VECTOR_TRIGRAM_WEIGHT = 0.3;
 const VECTOR_SCORE_WEIGHT = 4;
 const MIN_VECTOR_SIMILARITY = 0.06;
 
-export type SearchDocumentType = "work" | "evidence" | "source" | "claim" | "decision" | "context_pack" | "context_chunk";
+export type SearchDocumentType =
+  | "work"
+  | "agent_summary"
+  | "evidence"
+  | "source"
+  | "claim"
+  | "decision"
+  | "context_pack"
+  | "context_chunk";
 
 export interface SearchCorpusSnapshot {
   readonly workItems: readonly WorkItem[];
+  readonly agentSummaries: readonly AgentSummaryRecord[];
   readonly evidence: readonly EvidenceRecord[];
   readonly knowledgeSources: readonly KnowledgeSource[];
   readonly claims: readonly ClaimRecord[];
@@ -155,12 +165,13 @@ const STOP_WORDS = new Set([
 
 const TYPE_ORDER: Record<SearchDocumentType, number> = {
   work: 0,
-  context_pack: 1,
-  context_chunk: 2,
-  decision: 3,
-  claim: 4,
-  evidence: 5,
-  source: 6
+  agent_summary: 1,
+  context_pack: 2,
+  context_chunk: 3,
+  decision: 4,
+  claim: 5,
+  evidence: 6,
+  source: 7
 };
 
 export function buildSearchIndex(snapshot: SearchCorpusSnapshot, builtAt: IsoTimestamp = nowIso()): SearchIndexDocument {
@@ -244,6 +255,7 @@ export function isSearchIndexDocument(value: unknown): value is SearchIndexDocum
 function buildSearchEntries(snapshot: SearchCorpusSnapshot): readonly SearchIndexEntry[] {
   return [
     ...snapshot.workItems.map(workEntry),
+    ...(snapshot.agentSummaries ?? []).map(agentSummaryEntry),
     ...snapshot.evidence.map(evidenceEntry),
     ...snapshot.knowledgeSources.map(sourceEntry),
     ...snapshot.claims.map(claimEntry),
@@ -261,6 +273,31 @@ function workEntry(work: WorkItem): SearchIndexEntry {
     { field: "state", text: `${work.kind} ${work.status} ${work.priority}`, weight: 4 },
     { field: "description", text: work.description, weight: 3 }
   ]);
+}
+
+function agentSummaryEntry(summary: AgentSummaryRecord): SearchIndexEntry {
+  const completedWorkText = summary.completedWork
+    .map((work) => [work.workId ?? "", work.title, work.outcome, work.notes].join(" "))
+    .join(" ");
+  return entry(
+    "agent_summary",
+    summary.meta.id,
+    summary.title,
+    summary.body,
+    [
+      { field: "id", text: summary.meta.id, weight: 10 },
+      { field: "subjectId", text: summary.subjectId, weight: 8 },
+      { field: "title", text: summary.title, weight: 8 },
+      { field: "body", text: summary.body, weight: 7 },
+      { field: "completedWork", text: completedWorkText, weight: 6 },
+      { field: "evidenceIds", text: summary.evidenceIds.join(" "), weight: 5 },
+      { field: "verificationIds", text: summary.verificationIds.join(" "), weight: 5 },
+      { field: "commitShas", text: summary.commitShas.join(" "), weight: 5 },
+      { field: "state", text: `${summary.subjectType} ${summary.summaryKind} ${summary.status} ${summary.outcome}`, weight: 4 },
+      { field: "force", text: `${summary.forceReasonCode ?? ""} ${summary.forceComment ?? ""}`.trim(), weight: 3 }
+    ],
+    summary.subjectId
+  );
 }
 
 function evidenceEntry(record: EvidenceRecord): SearchIndexEntry {
@@ -815,6 +852,7 @@ function isVectorWeight(value: unknown): value is readonly [number, number] {
 function isSearchDocumentType(value: unknown): value is SearchDocumentType {
   return (
     value === "work" ||
+    value === "agent_summary" ||
     value === "evidence" ||
     value === "source" ||
     value === "claim" ||

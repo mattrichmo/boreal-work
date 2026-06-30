@@ -164,6 +164,7 @@ export interface SnapshotListEntry {
 
 export type SnapshotSection =
   | "workItems"
+  | "agentSummaries"
   | "evidence"
   | "verifications"
   | "knowledgeSources"
@@ -179,6 +180,7 @@ type ExportSnapshot = Required<Pick<StoreSnapshot, SnapshotSection>>;
 
 const SNAPSHOT_SECTIONS: readonly SnapshotSection[] = [
   "workItems",
+  "agentSummaries",
   "evidence",
   "verifications",
   "knowledgeSources",
@@ -198,6 +200,7 @@ const LEDGER_MANIFEST_FILE = "manifest.json";
 const LEDGER_DELETIONS_FILE = "deletions.jsonl";
 const LEDGER_FILES: Record<SnapshotSection, string> = {
   workItems: "work-items.jsonl",
+  agentSummaries: "agent-summaries.jsonl",
   evidence: "evidence.jsonl",
   verifications: "verifications.jsonl",
   knowledgeSources: "knowledge-sources.jsonl",
@@ -929,6 +932,7 @@ export async function exportDriftDiagnostics(context: CliContext): Promise<{
 async function readSnapshot(reader: BorealReader): Promise<ExportSnapshot> {
   return {
     workItems: await reader.listWorkItems(),
+    agentSummaries: await reader.listAgentSummaries(),
     evidence: await reader.listEvidence(),
     verifications: await reader.listVerifications(),
     knowledgeSources: await reader.listKnowledgeSources(),
@@ -986,7 +990,15 @@ async function readLedgerSection(
   const path = resolve(dir, file.path);
   assertPathInside(dir, path);
   await assertRealPathInside(dir, path);
-  const info = await stat(path);
+  let info: Awaited<ReturnType<typeof stat>>;
+  try {
+    info = await stat(path);
+  } catch (error) {
+    if (isNodeError(error) && error.code === "ENOENT" && file.count === 0) {
+      return [];
+    }
+    throw error;
+  }
   if (!info.isFile()) {
     throw new BorealError("BOREAL_INVALID_INPUT", "Ledger path must be a regular file", { section, path });
   }
@@ -1104,8 +1116,9 @@ async function importSnapshot(store: BorealStore, incoming: ExportSnapshot): Pro
 }
 
 async function assertWorkItemCanBeDeleted(reader: BorealReader, workId: WorkId): Promise<void> {
-  const [workItems, evidence, verifications, graphEdges, reservations, projections, contextPacks] = await Promise.all([
+  const [workItems, agentSummaries, evidence, verifications, graphEdges, reservations, projections, contextPacks] = await Promise.all([
     reader.listWorkItems(),
+    reader.listAgentSummaries(),
     reader.listEvidence(),
     reader.listVerifications(),
     reader.listGraphEdges(),
@@ -1123,6 +1136,9 @@ async function assertWorkItemCanBeDeleted(reader: BorealReader, workId: WorkId):
   const verificationIds = verifications
     .filter((record) => subjectReferences(record, workId, GRAPH_TYPE_ALIASES.work))
     .map((record) => record.meta.id);
+  const summaryIds = agentSummaries
+    .filter((record) => subjectReferences(record, workId, GRAPH_TYPE_ALIASES.work))
+    .map((record) => record.meta.id);
   const graphEdgeIds = graphEdges
     .filter((edge) => graphEdgeReferences(edge, workId, GRAPH_TYPE_ALIASES.work))
     .map((edge) => edge.meta.id);
@@ -1137,6 +1153,7 @@ async function assertWorkItemCanBeDeleted(reader: BorealReader, workId: WorkId):
     dependencyWorkIds.length > 0 ||
     evidenceIds.length > 0 ||
     verificationIds.length > 0 ||
+    summaryIds.length > 0 ||
     graphEdgeIds.length > 0 ||
     reservationIds.length > 0 ||
     projectionIds.length > 0 ||
@@ -1149,6 +1166,7 @@ async function assertWorkItemCanBeDeleted(reader: BorealReader, workId: WorkId):
         dependencyWork: dependencyWorkIds,
         evidence: evidenceIds,
         verifications: verificationIds,
+        agentSummaries: summaryIds,
         graphEdges: graphEdgeIds,
         reservations: reservationIds,
         projections: projectionIds,
@@ -1159,13 +1177,17 @@ async function assertWorkItemCanBeDeleted(reader: BorealReader, workId: WorkId):
 }
 
 async function assertEvidenceCanBeDeleted(reader: BorealReader, evidenceId: EvidenceId): Promise<void> {
-  const [workItems, verifications, claims, graphEdges] = await Promise.all([
+  const [workItems, agentSummaries, verifications, claims, graphEdges] = await Promise.all([
     reader.listWorkItems(),
+    reader.listAgentSummaries(),
     reader.listVerifications(),
     reader.listClaims(),
     reader.listGraphEdges()
   ]);
   const workIds = workItems.filter((work) => work.evidenceIds.includes(evidenceId)).map((work) => work.meta.id);
+  const summaryIds = agentSummaries
+    .filter((summary) => summary.evidenceIds.includes(evidenceId))
+    .map((summary) => summary.meta.id);
   const verificationIds = verifications
     .filter((verification) => verification.evidenceIds.includes(evidenceId))
     .map((verification) => verification.meta.id);
@@ -1174,11 +1196,12 @@ async function assertEvidenceCanBeDeleted(reader: BorealReader, evidenceId: Evid
     .filter((edge) => graphEdgeReferences(edge, evidenceId, GRAPH_TYPE_ALIASES.evidence))
     .map((edge) => edge.meta.id);
 
-  if (workIds.length > 0 || verificationIds.length > 0 || claimIds.length > 0 || graphEdgeIds.length > 0) {
+  if (workIds.length > 0 || summaryIds.length > 0 || verificationIds.length > 0 || claimIds.length > 0 || graphEdgeIds.length > 0) {
     throw new BorealError("BOREAL_CONFLICT", "Cannot delete evidence while records reference it", {
       evidenceId,
       references: {
         workItems: workIds,
+        agentSummaries: summaryIds,
         verifications: verificationIds,
         claims: claimIds,
         graphEdges: graphEdgeIds
@@ -1188,19 +1211,27 @@ async function assertEvidenceCanBeDeleted(reader: BorealReader, evidenceId: Evid
 }
 
 async function assertVerificationCanBeDeleted(reader: BorealReader, verificationId: VerificationId): Promise<void> {
-  const [workItems, graphEdges] = await Promise.all([reader.listWorkItems(), reader.listGraphEdges()]);
+  const [workItems, agentSummaries, graphEdges] = await Promise.all([
+    reader.listWorkItems(),
+    reader.listAgentSummaries(),
+    reader.listGraphEdges()
+  ]);
   const workIds = workItems
     .filter((work) => work.verificationIds.includes(verificationId))
     .map((work) => work.meta.id);
+  const summaryIds = agentSummaries
+    .filter((summary) => summary.verificationIds.includes(verificationId))
+    .map((summary) => summary.meta.id);
   const graphEdgeIds = graphEdges
     .filter((edge) => graphEdgeReferences(edge, verificationId, GRAPH_TYPE_ALIASES.verification))
     .map((edge) => edge.meta.id);
 
-  if (workIds.length > 0 || graphEdgeIds.length > 0) {
+  if (workIds.length > 0 || summaryIds.length > 0 || graphEdgeIds.length > 0) {
     throw new BorealError("BOREAL_CONFLICT", "Cannot delete verification while records reference it", {
       verificationId,
       references: {
         workItems: workIds,
+        agentSummaries: summaryIds,
         graphEdges: graphEdgeIds
       }
     });
@@ -1278,7 +1309,7 @@ async function assertKnowledgeSourceCanBeDeleted(reader: BorealReader, sourceId:
 type DeletableGraphRecordKind = "work" | "evidence" | "verification" | "source" | "claim" | "decision";
 
 const GRAPH_TYPE_ALIASES: Record<DeletableGraphRecordKind, readonly string[]> = {
-  work: ["work", "workItem", "workItems"],
+  work: ["work", "workItem", "workItems", "sprint", "milestone"],
   evidence: ["evidence"],
   verification: ["verification", "verifications"],
   source: ["source", "knowledgeSource", "knowledge_source", "knowledgeSources"],
@@ -1375,6 +1406,14 @@ function parseLedgerManifest(value: unknown): LedgerManifest {
 }
 
 function parseLedgerManifestFile(section: SnapshotSection, value: unknown): LedgerManifestFile {
+  if (value === undefined) {
+    return {
+      section,
+      path: LEDGER_FILES[section],
+      count: 0,
+      contentHash: hashContent([])
+    };
+  }
   if (!isRecord(value)) {
     throw new BorealError("BOREAL_INVALID_INPUT", "Ledger manifest file entry must be an object", { section });
   }
@@ -1527,6 +1566,7 @@ function validateSnapshot(snapshot: ExportSnapshot): void {
   }
 
   const workIds = ids.get("workItems") ?? new Set<string>();
+  const summaryIds = ids.get("agentSummaries") ?? new Set<string>();
   const evidenceIds = ids.get("evidence") ?? new Set<string>();
   const verificationIds = ids.get("verifications") ?? new Set<string>();
   const sourceIds = ids.get("knowledgeSources") ?? new Set<string>();
@@ -1543,6 +1583,33 @@ function validateSnapshot(snapshot: ExportSnapshot): void {
       throw new BorealError("BOREAL_INVALID_INPUT", "Work references missing reservation", {
         workId: work.meta.id,
         reservationId: work.reservationId
+      });
+    }
+  }
+  for (const summary of snapshot.agentSummaries) {
+    assertArrayField(summary, "completedWork", "agentSummaries", summary.meta.id);
+    assertArrayField(summary, "evidenceIds", "agentSummaries", summary.meta.id);
+    assertArrayField(summary, "verificationIds", "agentSummaries", summary.meta.id);
+    assertArrayField(summary, "commitShas", "agentSummaries", summary.meta.id);
+    assertArrayField(summary, "dirtyPathNotes", "agentSummaries", summary.meta.id);
+    assertArrayField(summary, "childSummaryIds", "agentSummaries", summary.meta.id);
+    assertReferences("agent summary evidence", summary.meta.id, summary.evidenceIds, evidenceIds);
+    assertReferences("agent summary verification", summary.meta.id, summary.verificationIds, verificationIds);
+    assertReferences("agent summary child", summary.meta.id, summary.childSummaryIds, summaryIds);
+    if (summary.parentSummaryId && !summaryIds.has(summary.parentSummaryId)) {
+      throw new BorealError("BOREAL_INVALID_INPUT", "Agent summary references missing parent summary", {
+        summaryId: summary.meta.id,
+        parentSummaryId: summary.parentSummaryId
+      });
+    }
+    if (
+      (summary.subjectType === "work" || summary.subjectType === "sprint" || summary.subjectType === "milestone") &&
+      !workIds.has(summary.subjectId)
+    ) {
+      throw new BorealError("BOREAL_INVALID_INPUT", "Agent summary references missing work", {
+        summaryId: summary.meta.id,
+        subjectType: summary.subjectType,
+        workId: summary.subjectId
       });
     }
   }
@@ -1679,6 +1746,9 @@ async function writeImportedRecords(
   for (const record of incoming.workItems.filter((entry) => importableIds.workItems.has(entry.meta.id))) {
     await writer.putWorkItem(record);
   }
+  for (const record of incoming.agentSummaries.filter((entry) => importableIds.agentSummaries.has(entry.meta.id))) {
+    await writer.putAgentSummary(record);
+  }
   for (const record of incoming.evidence.filter((entry) => importableIds.evidence.has(entry.meta.id))) {
     await writer.putEvidence(record);
   }
@@ -1738,6 +1808,32 @@ function markdownFiles(document: ExportDocument): Array<{ path: string; content:
           tags: record.meta.tags
         }) +
         `# ${record.title}\n\nStatus: ${record.status}\nPriority: ${record.priority}\nKind: ${record.kind}\n\n${record.description}\n`
+    })),
+    ...document.state.agentSummaries.map((record) => ({
+      path: `agent-summaries/${record.meta.id}.md`,
+      content:
+        frontmatter({
+          kind: "agent-summary",
+          id: record.meta.id,
+          subject_type: record.subjectType,
+          subject_id: record.subjectId,
+          summary_kind: record.summaryKind,
+          status: record.status,
+          outcome: record.outcome,
+          evidence: record.evidenceIds,
+          verifications: record.verificationIds,
+          commits: record.commitShas,
+          parent_summary: record.parentSummaryId,
+          child_summaries: record.childSummaryIds,
+          artifact_uri: record.artifactUri,
+          duplicate_of: record.duplicateOf,
+          force_reason: record.forceReasonCode,
+          generated_at: record.generatedAt,
+          created_at: record.meta.createdAt,
+          updated_at: record.meta.updatedAt,
+          tags: record.meta.tags
+        }) +
+        `# ${record.title}\n\nStatus: ${record.status}\nOutcome: ${record.outcome}\nSubject: ${record.subjectType}:${record.subjectId}\n\n${record.body}\n`
     })),
     ...document.state.evidence.map((record) => ({
       path: `evidence/${record.meta.id}.md`,
@@ -1906,6 +2002,9 @@ function parseSectionCounts(value: unknown, label: string): Record<SnapshotSecti
   return Object.fromEntries(
     SNAPSHOT_SECTIONS.map((section) => {
       const count = value[section];
+      if (count === undefined) {
+        return [section, 0];
+      }
       if (typeof count !== "number" || !Number.isInteger(count) || count < 0) {
         throw new BorealError("BOREAL_INVALID_INPUT", `Ledger manifest ${label} has an invalid count`, {
           section,

@@ -103,6 +103,7 @@ function snapshotToDocument(snapshot: StoreSnapshot): StateDocument {
   return {
     schemaVersion: FILE_STORE_SCHEMA_VERSION,
     workItems: snapshot.workItems ?? [],
+    agentSummaries: snapshot.agentSummaries ?? [],
     evidence: snapshot.evidence ?? [],
     verifications: snapshot.verifications ?? [],
     knowledgeSources: snapshot.knowledgeSources ?? [],
@@ -130,6 +131,7 @@ function documentToSnapshot(value: unknown): StoreSnapshot {
 
   const snapshot: StoreSnapshot = {
     workItems: readArray(value, "workItems"),
+    agentSummaries: readOptionalArray(value, "agentSummaries"),
     evidence: readArray(value, "evidence"),
     verifications: readArray(value, "verifications"),
     knowledgeSources: readArray(value, "knowledgeSources"),

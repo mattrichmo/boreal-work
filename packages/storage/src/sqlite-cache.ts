@@ -10,6 +10,7 @@ export const SQLITE_CACHE_SCHEMA_VERSION = "boreal.sqlite-cache.v1";
 
 export type SQLiteCacheSection =
   | "workItems"
+  | "agentSummaries"
   | "evidence"
   | "verifications"
   | "knowledgeSources"
@@ -82,6 +83,7 @@ export interface SQLiteCacheRecordRow {
 
 const CACHE_SECTIONS: readonly SQLiteCacheSection[] = [
   "workItems",
+  "agentSummaries",
   "evidence",
   "verifications",
   "knowledgeSources",
@@ -257,6 +259,7 @@ function resolveCachePath(options: SQLiteCacheOptions): string {
 function canonicalCacheSnapshot(snapshot: StoreSnapshot): Record<SQLiteCacheSection, readonly unknown[]> {
   return {
     workItems: snapshot.workItems ?? [],
+    agentSummaries: snapshot.agentSummaries ?? [],
     evidence: snapshot.evidence ?? [],
     verifications: snapshot.verifications ?? [],
     knowledgeSources: snapshot.knowledgeSources ?? [],

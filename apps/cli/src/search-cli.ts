@@ -152,8 +152,9 @@ async function readSearchIndex(path: string): Promise<SearchIndexDocument> {
 
 async function readSearchSnapshot(context: CliContext): Promise<SearchCorpusSnapshot> {
   return context.store.read(async (reader) => {
-    const [workItems, evidence, knowledgeSources, claims, decisions, contextPacks] = await Promise.all([
+    const [workItems, agentSummaries, evidence, knowledgeSources, claims, decisions, contextPacks] = await Promise.all([
       reader.listWorkItems(),
+      reader.listAgentSummaries(),
       reader.listEvidence(),
       reader.listKnowledgeSources(),
       reader.listClaims(),
@@ -162,6 +163,7 @@ async function readSearchSnapshot(context: CliContext): Promise<SearchCorpusSnap
     ]);
     return {
       workItems,
+      agentSummaries,
       evidence,
       knowledgeSources,
       claims,
