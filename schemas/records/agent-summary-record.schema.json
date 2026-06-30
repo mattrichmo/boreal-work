@@ -1,0 +1,92 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://boreal.work/schemas/records/agent-summary-record.schema.json",
+  "title": "Boreal Agent Summary Record",
+  "type": "object",
+  "required": [
+    "meta",
+    "subjectId",
+    "subjectType",
+    "summaryKind",
+    "status",
+    "outcome",
+    "title",
+    "body",
+    "completedWork",
+    "evidenceIds",
+    "verificationIds",
+    "commitShas",
+    "dirtyPathNotes",
+    "childSummaryIds",
+    "generatedAt"
+  ],
+  "properties": {
+    "meta": { "$ref": "#/$defs/meta" },
+    "subjectId": { "type": "string", "minLength": 1 },
+    "subjectType": { "enum": ["work", "sprint", "milestone", "phase", "project", "session"] },
+    "summaryKind": { "enum": ["task", "sprint", "milestone", "phase", "project", "session", "legacy_backfill"] },
+    "status": { "enum": ["draft", "final", "forced"] },
+    "outcome": { "enum": ["completed", "partial", "deferred", "duplicate", "cancelled", "blocked", "no_change"] },
+    "title": { "type": "string", "minLength": 1 },
+    "body": { "type": "string", "minLength": 1 },
+    "completedWork": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/completedWork" }
+    },
+    "evidenceIds": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
+    "verificationIds": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
+    "commitShas": {
+      "type": "array",
+      "items": { "type": "string", "pattern": "^[a-f0-9]{7,64}$" },
+      "uniqueItems": true
+    },
+    "dirtyPathNotes": { "type": "array", "items": { "type": "string" } },
+    "childSummaryIds": {
+      "type": "array",
+      "items": { "type": "string", "pattern": "^bw_summary_[a-f0-9]{12,64}$" },
+      "uniqueItems": true
+    },
+    "parentSummaryId": { "type": "string", "pattern": "^bw_summary_[a-f0-9]{12,64}$" },
+    "artifactUri": { "type": "string" },
+    "duplicateOf": { "type": "string" },
+    "forceReasonCode": {
+      "enum": [
+        "duplicate",
+        "cancelled_no_work",
+        "external_close",
+        "legacy_backfill",
+        "summary_unavailable",
+        "operator_override"
+      ]
+    },
+    "forceComment": { "type": "string" },
+    "generatedAt": { "type": "string", "format": "date-time" }
+  },
+  "$defs": {
+    "meta": {
+      "type": "object",
+      "required": ["id", "schemaVersion", "createdAt", "updatedAt", "createdBy", "updatedBy", "sourceRefs", "tags"],
+      "properties": {
+        "id": { "type": "string", "pattern": "^bw_summary_[a-f0-9]{12,64}$" },
+        "schemaVersion": { "const": "boreal.runtime.v1" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" },
+        "createdBy": { "type": "object" },
+        "updatedBy": { "type": "object" },
+        "contentHash": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" },
+        "sourceRefs": { "type": "array" },
+        "tags": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "completedWork": {
+      "type": "object",
+      "required": ["title", "outcome", "notes"],
+      "properties": {
+        "workId": { "type": "string", "pattern": "^bw_work_[a-f0-9]{12,64}$" },
+        "title": { "type": "string", "minLength": 1 },
+        "outcome": { "enum": ["completed", "partial", "deferred", "duplicate", "cancelled", "blocked", "no_change"] },
+        "notes": { "type": "string" }
+      }
+    }
+  }
+}

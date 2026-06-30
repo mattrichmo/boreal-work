@@ -1,5 +1,6 @@
 import type {
   AgentId,
+  AgentSummaryId,
   ClaimId,
   ContentHash,
   DecisionId,
@@ -72,6 +73,48 @@ export interface WorkItem {
   readonly reservationId?: ReservationId;
   readonly closedAt?: IsoTimestamp;
   readonly closedReason?: string;
+}
+
+export type AgentSummarySubjectType = "work" | "sprint" | "milestone" | "phase" | "project" | "session";
+export type AgentSummaryKind = "task" | "sprint" | "milestone" | "phase" | "project" | "session" | "legacy_backfill";
+export type AgentSummaryStatus = "draft" | "final" | "forced";
+export type AgentSummaryOutcome = "completed" | "partial" | "deferred" | "duplicate" | "cancelled" | "blocked" | "no_change";
+export type AgentSummaryForceReasonCode =
+  | "duplicate"
+  | "cancelled_no_work"
+  | "external_close"
+  | "legacy_backfill"
+  | "summary_unavailable"
+  | "operator_override";
+
+export interface AgentSummaryCompletedWork {
+  readonly workId?: WorkId;
+  readonly title: string;
+  readonly outcome: AgentSummaryOutcome;
+  readonly notes: string;
+}
+
+export interface AgentSummaryRecord {
+  readonly meta: RecordMeta<AgentSummaryId>;
+  readonly subjectId: string;
+  readonly subjectType: AgentSummarySubjectType;
+  readonly summaryKind: AgentSummaryKind;
+  readonly status: AgentSummaryStatus;
+  readonly outcome: AgentSummaryOutcome;
+  readonly title: string;
+  readonly body: string;
+  readonly completedWork: readonly AgentSummaryCompletedWork[];
+  readonly evidenceIds: readonly EvidenceId[];
+  readonly verificationIds: readonly VerificationId[];
+  readonly commitShas: readonly string[];
+  readonly dirtyPathNotes: readonly string[];
+  readonly childSummaryIds: readonly AgentSummaryId[];
+  readonly parentSummaryId?: AgentSummaryId;
+  readonly artifactUri?: string;
+  readonly duplicateOf?: string;
+  readonly forceReasonCode?: AgentSummaryForceReasonCode;
+  readonly forceComment?: string;
+  readonly generatedAt: IsoTimestamp;
 }
 
 export type EdgeKind =

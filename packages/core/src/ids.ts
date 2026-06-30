@@ -6,6 +6,7 @@ export type Brand<T, TBrand extends string> = T & { readonly __brand: TBrand };
 
 export type BorealId = Brand<string, "BorealId">;
 export type AgentId = Brand<string, "AgentId">;
+export type AgentSummaryId = Brand<string, "AgentSummaryId">;
 export type ClaimId = Brand<string, "ClaimId">;
 export type ContentHash = Brand<string, "ContentHash">;
 export type DecisionId = Brand<string, "DecisionId">;
@@ -21,6 +22,7 @@ export type WorkId = Brand<string, "WorkId">;
 
 export type EntityPrefix =
   | "agent"
+  | "summary"
   | "claim"
   | "decision"
   | "edge"

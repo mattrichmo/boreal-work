@@ -14,6 +14,7 @@ export type SchemaIssueValidator = (value: unknown, path?: string) => readonly S
 
 export interface RuntimeSnapshotSchemaInput {
   readonly workItems?: readonly unknown[];
+  readonly agentSummaries?: readonly unknown[];
   readonly evidence?: readonly unknown[];
   readonly verifications?: readonly unknown[];
   readonly knowledgeSources?: readonly unknown[];
@@ -39,6 +40,7 @@ export interface PublishedSchemaContract {
 
 export const RUNTIME_SCHEMA_IDS = {
   workItem: "https://boreal.work/schemas/records/work-item.schema.json",
+  agentSummaryRecord: "https://boreal.work/schemas/records/agent-summary-record.schema.json",
   graphEdge: "https://boreal.work/schemas/records/graph-edge.schema.json",
   evidenceRecord: "https://boreal.work/schemas/records/evidence-record.schema.json",
   verificationRecord: "https://boreal.work/schemas/records/verification-record.schema.json",
@@ -60,6 +62,13 @@ export const RUNTIME_SCHEMA_CONTRACTS = [
     schemaPath: "schemas/records/work-item.schema.json",
     runtimeSection: "workItems",
     validator: workItemSchemaIssues
+  },
+  {
+    key: "agentSummaryRecord",
+    schemaId: RUNTIME_SCHEMA_IDS.agentSummaryRecord,
+    schemaPath: "schemas/records/agent-summary-record.schema.json",
+    runtimeSection: "agentSummaries",
+    validator: agentSummaryRecordSchemaIssues
   },
   {
     key: "evidenceRecord",
@@ -219,6 +228,83 @@ export function workItemSchemaIssues(value: unknown, path = "$"): readonly Schem
   }
   if (value.closedReason !== undefined) {
     issues.push(...stringIssue(value.closedReason, `${path}.closedReason`, schemaId));
+  }
+
+  return issues;
+}
+
+export function agentSummaryRecordSchemaIssues(value: unknown, path = "$"): readonly SchemaValidationIssue[] {
+  const schemaId = RUNTIME_SCHEMA_IDS.agentSummaryRecord;
+  if (!isRecord(value)) {
+    return [issue(schemaId, path, "must be an object")];
+  }
+
+  const issues: SchemaValidationIssue[] = [
+    ...recordMetaIssues(value.meta, `${path}.meta`, schemaId, /^bw_summary_[a-f0-9]{12,64}$/),
+    ...nonEmptyStringIssue(value.subjectId, `${path}.subjectId`, schemaId),
+    ...enumIssue(value.subjectType, `${path}.subjectType`, schemaId, ["work", "sprint", "milestone", "phase", "project", "session"]),
+    ...enumIssue(value.summaryKind, `${path}.summaryKind`, schemaId, [
+      "task",
+      "sprint",
+      "milestone",
+      "phase",
+      "project",
+      "session",
+      "legacy_backfill"
+    ]),
+    ...enumIssue(value.status, `${path}.status`, schemaId, ["draft", "final", "forced"]),
+    ...enumIssue(value.outcome, `${path}.outcome`, schemaId, [
+      "completed",
+      "partial",
+      "deferred",
+      "duplicate",
+      "cancelled",
+      "blocked",
+      "no_change"
+    ]),
+    ...nonEmptyStringIssue(value.title, `${path}.title`, schemaId),
+    ...nonEmptyStringIssue(value.body, `${path}.body`, schemaId),
+    ...agentSummaryCompletedWorkArrayIssues(value.completedWork, `${path}.completedWork`, schemaId),
+    ...uniqueStringArrayIssue(value.evidenceIds, `${path}.evidenceIds`, schemaId),
+    ...uniqueStringArrayIssue(value.verificationIds, `${path}.verificationIds`, schemaId),
+    ...uniquePatternStringArrayIssue(value.commitShas, `${path}.commitShas`, schemaId, /^[a-f0-9]{7,64}$/),
+    ...stringArrayIssue(value.dirtyPathNotes, `${path}.dirtyPathNotes`, schemaId),
+    ...uniquePatternStringArrayIssue(value.childSummaryIds, `${path}.childSummaryIds`, schemaId, /^bw_summary_[a-f0-9]{12,64}$/),
+    ...stringIssue(value.generatedAt, `${path}.generatedAt`, schemaId)
+  ];
+
+  if (value.parentSummaryId !== undefined) {
+    issues.push(...patternStringIssue(value.parentSummaryId, `${path}.parentSummaryId`, schemaId, /^bw_summary_[a-f0-9]{12,64}$/));
+  }
+  if (value.artifactUri !== undefined) {
+    issues.push(...stringIssue(value.artifactUri, `${path}.artifactUri`, schemaId));
+  }
+  if (value.duplicateOf !== undefined) {
+    issues.push(...stringIssue(value.duplicateOf, `${path}.duplicateOf`, schemaId));
+  }
+  if (value.forceReasonCode !== undefined) {
+    issues.push(
+      ...enumIssue(value.forceReasonCode, `${path}.forceReasonCode`, schemaId, [
+        "duplicate",
+        "cancelled_no_work",
+        "external_close",
+        "legacy_backfill",
+        "summary_unavailable",
+        "operator_override"
+      ])
+    );
+  }
+  if (value.forceComment !== undefined) {
+    issues.push(...stringIssue(value.forceComment, `${path}.forceComment`, schemaId));
+  }
+
+  if (value.status === "forced") {
+    if (value.forceReasonCode === undefined) {
+      issues.push(issue(schemaId, `${path}.forceReasonCode`, "is required when status is forced"));
+    }
+    if (typeof value.forceComment !== "string" || value.forceComment.trim().length === 0) {
+      issues.push(issue(schemaId, `${path}.forceComment`, "must be a non-empty string when status is forced"));
+    }
   }
 
   return issues;
@@ -461,6 +547,9 @@ export function runtimePolicySchemaIssues(value: unknown, path = "$"): readonly 
   return [
     ...booleanIssue(value.requireEvidenceForVerification, `${path}.requireEvidenceForVerification`, schemaId),
     ...booleanIssue(value.requirePassingVerificationForClose, `${path}.requirePassingVerificationForClose`, schemaId),
+    ...(value.requireAgentSummaryForClose === undefined
+      ? []
+      : booleanIssue(value.requireAgentSummaryForClose, `${path}.requireAgentSummaryForClose`, schemaId)),
     ...booleanIssue(value.preventDependencyCycles, `${path}.preventDependencyCycles`, schemaId),
     ...booleanIssue(value.allowReservationStealing, `${path}.allowReservationStealing`, schemaId),
     ...integerAtLeastIssue(value.maxActiveReservationsPerAgent, `${path}.maxActiveReservationsPerAgent`, schemaId, 1)
@@ -720,6 +809,36 @@ function sourceRefIssues(value: unknown, path: string, schemaId: string): readon
   return issues;
 }
 
+function agentSummaryCompletedWorkArrayIssues(value: unknown, path: string, schemaId: string): readonly SchemaValidationIssue[] {
+  if (!Array.isArray(value)) {
+    return [issue(schemaId, path, "must be an array")];
+  }
+  return value.flatMap((entry, index) => agentSummaryCompletedWorkIssues(entry, `${path}[${index}]`, schemaId));
+}
+
+function agentSummaryCompletedWorkIssues(value: unknown, path: string, schemaId: string): readonly SchemaValidationIssue[] {
+  if (!isRecord(value)) {
+    return [issue(schemaId, path, "must be an object")];
+  }
+  const issues: SchemaValidationIssue[] = [
+    ...nonEmptyStringIssue(value.title, `${path}.title`, schemaId),
+    ...enumIssue(value.outcome, `${path}.outcome`, schemaId, [
+      "completed",
+      "partial",
+      "deferred",
+      "duplicate",
+      "cancelled",
+      "blocked",
+      "no_change"
+    ]),
+    ...stringIssue(value.notes, `${path}.notes`, schemaId)
+  ];
+  if (value.workId !== undefined) {
+    issues.push(...patternStringIssue(value.workId, `${path}.workId`, schemaId, /^bw_work_[a-f0-9]{12,64}$/));
+  }
+  return issues;
+}
+
 function arrayItems(
   values: readonly unknown[],
   schemaId: string,
@@ -771,6 +890,17 @@ function pathInsideIssue(
 
 function patternStringIssue(value: unknown, path: string, schemaId: string, pattern: RegExp): readonly SchemaValidationIssue[] {
   return typeof value === "string" && pattern.test(value) ? [] : [issue(schemaId, path, `must match ${pattern.source}`)];
+}
+
+function uniquePatternStringArrayIssue(value: unknown, path: string, schemaId: string, pattern: RegExp): readonly SchemaValidationIssue[] {
+  const arrayIssues = uniqueStringArrayIssue(value, path, schemaId);
+  if (!Array.isArray(value)) {
+    return arrayIssues;
+  }
+  return [
+    ...arrayIssues,
+    ...value.flatMap((entry, index) => patternStringIssue(entry, `${path}[${index}]`, schemaId, pattern))
+  ];
 }
 
 function recordIssue(value: unknown, path: string, schemaId: string): readonly SchemaValidationIssue[] {
