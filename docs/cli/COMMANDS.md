@@ -478,7 +478,7 @@ Returns the active or selected sprint as a `SprintBoardView` payload using schem
 bwrk sprint report [<sprint-ref>] --doctor-evidence <evidence-id> --sync-evidence <evidence-id> [--format markdown|html] [--out <file>] [--limit <n>] [--json]
 ```
 
-Exports a static sprint closeout report using schema `boreal.cli.sprint.report.v1`. The report is built from dependency-scoped sprint work, scoped evidence, directly linked decisions, unresolved blockers, and open next-sprint candidates. `--format` defaults to `markdown`; `--out` writes a workspace-relative artifact file, and omitted `--out` returns the rendered content.
+Exports a static sprint closeout report using schema `boreal.cli.sprint.report.v1`. The report is built from dependency-scoped sprint work, scoped agent summaries, summary checkpoint coverage, scoped evidence, directly linked decisions, unresolved blockers, and open next-sprint candidates. `--format` defaults to `markdown`; `--out` writes a workspace-relative artifact file, and omitted `--out` returns the rendered content.
 
 Closeout reports fail closed unless `--doctor-evidence` and `--sync-evidence` point at distinct passed evidence records inside the selected sprint scope. The evidence text, command, or URI must reference `doctor` or `sync` respectively.
 
@@ -1033,10 +1033,10 @@ Updates mutable work fields while preserving source refs, evidence IDs, verifica
 ## `work cancel`
 
 ```bash
-bwrk work cancel <work-ref> --reason <text> [--json]
+bwrk work cancel <work-ref> --reason <text> [--agent-summary <id>...] [--force-summary --force-reason <code> --force-comment <text>] [--commit <sha>...] [--dirty-path <note>...] [--json]
 ```
 
-Cancels open work and records the cancellation reason in closeout fields. The command fails closed when the work has an active non-expired reservation.
+Cancels open work only after ensuring a final or forced agent summary exists for the work subject. If no summary is supplied or already exists, the command composes a cancellation summary with outcome `cancelled`, renders its Markdown artifact, and returns a `boreal.cli.work.cancel.v1` envelope with `work`, `agentSummaries`, and optional `createdAgentSummary` / `createdAgentSummaryArtifact`. The command fails closed when the work has an active non-expired reservation.
 
 ## `work reopen`
 
@@ -1493,6 +1493,7 @@ Checks:
 - Expired active reservations.
 - Verification policy drift, including passed verifications without passed evidence.
 - Closed work items without close reasons.
+- Agent summary closeout coverage for terminal work, checkpoint commit/dirty-path coverage, Markdown artifact URI coverage, and forced summaries without a reason code or human comment.
 - Unsafe Unicode in machine-facing strings.
 - Label and actor normalization collisions in imported or hand-edited state.
 - Local operation log shape, volume, legacy operation-event links, dangling event references, and retained operation/event causality.
@@ -1519,7 +1520,7 @@ Checks:
 
 `--fix` does not create a submodule gitlink, remove child memory from the project Git index, or delete stale non-submodule `.gitmodules` entries. Those are reported with exact Git details so a human can decide whether to run commands such as `git submodule add <remote> memory` or `git rm -r --cached -- memory`.
 
-`--strict` treats operationally blocking warnings as a failing doctor result for CI and hardening gates. Advisory warnings such as stopped/stale daemon status, install status caveats, generated artifact drift, SQLite cache drift, and search-index rebuild guidance are surfaced without failing strict mode unless they are paired with an error or a blocking Git finding. Diagnostic severities are not rewritten; JSON `data.ok` and the command exit code reflect the strict gate result.
+`--strict` treats operationally blocking warnings as a failing doctor result for CI and hardening gates. Advisory warnings such as stopped/stale daemon status, install status caveats, generated artifact drift, SQLite cache drift, search-index rebuild guidance, and legacy agent-summary coverage gaps are surfaced without failing strict mode unless they are paired with an error or a blocking Git finding. Diagnostic severities are not rewritten; JSON `data.ok` and the command exit code reflect the strict gate result.
 
 Without `--strict`, doctor exits `1` when any diagnostic has severity `error`.
 

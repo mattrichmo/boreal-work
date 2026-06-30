@@ -1179,6 +1179,52 @@ async function validateStoreRecords(
       const danglingSummarySubjects = agentSummaries
         .filter((summary) => ["work", "sprint", "milestone"].includes(summary.subjectType) && !workById.has(summary.subjectId as WorkId))
         .map((summary) => ({ summaryId: summary.meta.id, subjectId: summary.subjectId, subjectType: summary.subjectType }));
+      const terminalWorkItems = workItems.filter(isTerminalCloseoutWork);
+      const terminalWorkSubjectKeys = new Set(
+        terminalWorkItems.map((work) => closeoutSummarySubjectKey(doctorSummarySubjectTypeForWork(work), work.meta.id))
+      );
+      const closeoutSummaries = agentSummaries.filter(isFinalOrForcedAgentSummary);
+      const closeoutSummaryKeys = new Set(
+        closeoutSummaries.map((summary) => closeoutSummarySubjectKey(summary.subjectType, summary.subjectId))
+      );
+      const missingCloseoutSummaries = terminalWorkItems
+        .filter((work) => !closeoutSummaryKeys.has(closeoutSummarySubjectKey(doctorSummarySubjectTypeForWork(work), work.meta.id)))
+        .map((work) => ({
+          workId: work.meta.id,
+          title: work.title,
+          status: work.status,
+          kind: work.kind,
+          expectedSubjectType: doctorSummarySubjectTypeForWork(work)
+        }));
+      const summaryCheckpointGaps = closeoutSummaries
+        .filter((summary) => terminalWorkSubjectKeys.has(closeoutSummarySubjectKey(summary.subjectType, summary.subjectId)))
+        .filter((summary) => summary.commitShas.length === 0 && summary.dirtyPathNotes.length === 0)
+        .map((summary) => ({
+          summaryId: summary.meta.id,
+          subjectId: summary.subjectId,
+          subjectType: summary.subjectType,
+          status: summary.status,
+          issue: "missing_commit_or_dirty_path_reason"
+        }));
+      const summaryArtifactGaps = closeoutSummaries
+        .filter((summary) => terminalWorkSubjectKeys.has(closeoutSummarySubjectKey(summary.subjectType, summary.subjectId)))
+        .filter((summary) => !summary.artifactUri)
+        .map((summary) => ({
+          summaryId: summary.meta.id,
+          subjectId: summary.subjectId,
+          subjectType: summary.subjectType,
+          status: summary.status,
+          issue: "missing_artifact_uri"
+        }));
+      const forcedSummaryReasonGaps = agentSummaries
+        .filter((summary) => summary.status === "forced" && (!summary.forceReasonCode || !summary.forceComment?.trim()))
+        .map((summary) => ({
+          summaryId: summary.meta.id,
+          subjectId: summary.subjectId,
+          subjectType: summary.subjectType,
+          forceReasonCode: summary.forceReasonCode,
+          hasForceComment: Boolean(summary.forceComment?.trim())
+        }));
       const blockEdges = graphEdges.filter(
         (edge) => edge.kind === "blocks" && edge.fromType === "work" && edge.toType === "work"
       );
@@ -1467,6 +1513,10 @@ async function validateStoreRecords(
         expiredActiveReservations,
         verificationPolicy,
         closedWithoutReason,
+        missingCloseoutSummaries,
+        summaryCheckpointGaps,
+        summaryArtifactGaps,
+        forcedSummaryReasonGaps,
         danglingSummaryEvidence,
         danglingSummaryVerifications,
         danglingSummaryChildren,
@@ -1631,6 +1681,16 @@ async function validateStoreRecords(
     }
     diagnostics.push(diagnosticFromList("verification.policy", "Verification policy issues", summary.verificationPolicy));
     diagnostics.push(diagnosticFromList("work.closed_reason", "Closed work items missing a close reason", summary.closedWithoutReason));
+    diagnostics.push(diagnosticFromList("summary.force_reason", "Forced agent summaries missing reason code or comment", summary.forcedSummaryReasonGaps));
+    diagnostics.push(
+      warningDiagnosticFromList("summary.closeout_coverage", "Terminal work missing final or forced agent summaries", summary.missingCloseoutSummaries)
+    );
+    diagnostics.push(
+      warningDiagnosticFromList("summary.checkpoint_coverage", "Closeout summaries missing commit SHA or dirty-path reason", summary.summaryCheckpointGaps)
+    );
+    diagnostics.push(
+      warningDiagnosticFromList("summary.artifact_coverage", "Closeout summaries missing Markdown artifact URI", summary.summaryArtifactGaps)
+    );
     diagnostics.push(diagnosticFromList("operation.dangling_events", "Operation event references missing runtime events", summary.danglingOperationEvents));
     diagnostics.push(warningDiagnosticFromList("operation.legacy_events", "Legacy operation/event links", summary.legacyOperationEvents));
     diagnostics.push(diagnosticFromList("operation.event_causality", "Operation and event causality links disagree", summary.operationEventCausality));
@@ -1730,6 +1790,22 @@ function warningDiagnosticFromList(code: string, label: string, values: readonly
     message: values.length > 0 ? label : `${label}: none`,
     details: values.length > 0 ? values : undefined
   };
+}
+
+function isTerminalCloseoutWork(work: WorkItem): boolean {
+  return work.status === "closed" || work.status === "cancelled";
+}
+
+function isFinalOrForcedAgentSummary(summary: AgentSummaryRecord): boolean {
+  return summary.status === "final" || summary.status === "forced";
+}
+
+function doctorSummarySubjectTypeForWork(work: WorkItem): AgentSummaryRecord["subjectType"] {
+  return work.kind === "sprint" ? "sprint" : work.kind === "milestone" ? "milestone" : "work";
+}
+
+function closeoutSummarySubjectKey(subjectType: AgentSummaryRecord["subjectType"], subjectId: string): string {
+  return `${subjectType}:${subjectId}`;
 }
 
 interface DoctorWikiCoverage {
@@ -2431,7 +2507,10 @@ const STRICT_ADVISORY_WARNING_CODES = new Set([
   "snapshot.export_drift",
   "ledger.export_drift",
   "cache.sqlite",
-  "search.index"
+  "search.index",
+  "summary.closeout_coverage",
+  "summary.checkpoint_coverage",
+  "summary.artifact_coverage"
 ]);
 
 export function strictBlockingWarning(diagnostic: Diagnostic): boolean {

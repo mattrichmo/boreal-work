@@ -329,6 +329,23 @@ interface SprintReportDecisionRow {
   readonly sourceIds: readonly string[];
 }
 
+interface SprintReportAgentSummaryRow {
+  readonly id: string;
+  readonly subjectId: string;
+  readonly subjectType: AgentSummarySubjectType;
+  readonly summaryKind: AgentSummaryKind;
+  readonly status: AgentSummaryStatus;
+  readonly outcome: AgentSummaryOutcome;
+  readonly title: string;
+  readonly artifactUri?: string;
+  readonly commitShas: readonly string[];
+  readonly dirtyPathNotes: readonly string[];
+  readonly childSummaryIds: readonly string[];
+  readonly forceReasonCode?: AgentSummaryForceReasonCode;
+  readonly forceComment?: string;
+  readonly generatedAt: string;
+}
+
 interface SprintReportBlockerRow {
   readonly work: SprintReportWorkRow;
   readonly blockers: readonly SprintReportWorkRow[];
@@ -356,12 +373,15 @@ interface SprintReportDocument {
     readonly needsVerification: number;
     readonly evidence: number;
     readonly decisions: number;
+    readonly agentSummaries: number;
+    readonly summaryCheckpointGaps: number;
     readonly nextSprintCandidates: number;
   };
   readonly completedWork: readonly SprintReportWorkRow[];
   readonly openWork: readonly SprintReportWorkRow[];
   readonly unresolvedBlockers: readonly SprintReportBlockerRow[];
   readonly nextSprintCandidates: readonly SprintReportWorkRow[];
+  readonly agentSummaries: readonly SprintReportAgentSummaryRow[];
   readonly evidence: readonly SprintReportEvidenceRow[];
   readonly decisions: readonly SprintReportDecisionRow[];
   readonly closeoutEvidence: {
@@ -2276,12 +2296,44 @@ async function workCommand(
       return { exitCode: 0 };
     }
     case "cancel": {
+      const workId = await resolveWorkId(context, requiredPositional(rest, 0, "work reference"));
+      const reason = requiredFlag(args, "reason");
+      const work = await context.store.read((reader) => requireCliWork(reader, workId));
+      if (work.status === "closed" || work.status === "cancelled") {
+        throw new BorealError("BOREAL_INVALID_INPUT", "Only open work can be cancelled", {
+          workId,
+          status: work.status
+        });
+      }
+      const activeReservations = await context.store.read((reader) => activeNonExpiredReservationsForWork(reader, workId, nowIso()));
+      if (activeReservations.length > 0) {
+        throw new BorealError("BOREAL_POLICY_VIOLATION", "Cannot cancel work with an active non-expired reservation", {
+          workId,
+          reservationIds: activeReservations.map((reservation) => reservation.meta.id)
+        });
+      }
+      const closeoutSummary = await ensureAgentSummaryForClose(context, args, work, reason, {
+        outcome: "cancelled"
+      });
       const result = await cancelWorkCommand(
         context,
-        await resolveWorkId(context, requiredPositional(rest, 0, "work reference")),
-        requiredFlag(args, "reason")
+        workId,
+        reason
       );
-      output.write(formatRecord(result, json));
+      output.write(
+        formatRecord(
+          {
+            schemaVersion: "boreal.cli.work.cancel.v1",
+            generatedAt: nowIso(),
+            workspaceRoot: context.workspaceRoot,
+            ...result,
+            agentSummaries: closeoutSummary.summaries,
+            createdAgentSummary: closeoutSummary.created?.summary,
+            createdAgentSummaryArtifact: closeoutSummary.created?.artifact
+          },
+          json
+        )
+      );
       return { exitCode: 0 };
     }
     case "reopen": {
@@ -3088,7 +3140,10 @@ async function ensureAgentSummaryForClose(
   context: CliContext,
   args: ParsedArgs,
   work: WorkItem,
-  closeReason: string
+  closeReason: string,
+  options: {
+    readonly outcome?: AgentSummaryOutcome;
+  } = {}
 ): Promise<CloseoutAgentSummaryResult> {
   const explicitSummaryIds = flagValues(args, "agent-summary").map(asAgentSummaryId);
   if (explicitSummaryIds.length > 0) {
@@ -3109,7 +3164,8 @@ async function ensureAgentSummaryForClose(
   }
 
   const created = await createCloseoutAgentSummary(context, args, work, closeReason, {
-    force: hasFlag(args, "force-summary")
+    force: hasFlag(args, "force-summary"),
+    outcome: options.outcome
   });
   return { summaries: [created.summary], created };
 }
@@ -3178,6 +3234,7 @@ async function createCloseoutAgentSummary(
   closeReason: string,
   options: {
     readonly force?: boolean;
+    readonly outcome?: AgentSummaryOutcome;
     readonly body?: string;
     readonly evidenceIds?: readonly EvidenceRecord["meta"]["id"][];
     readonly verificationIds?: readonly VerificationRecord["meta"]["id"][];
@@ -3195,6 +3252,7 @@ async function createCloseoutAgentSummary(
   const commitShas = uniqueStrings(flagValues(args, "commit").map(normalizeCommitSha));
   const dirtyPathNotes = normalizedNonEmptyStrings(flagValues(args, "dirty-path"));
   const childSummaryIds = await childAgentSummaryIdsForWork(context, work);
+  const outcome = options.outcome ?? (options.force ? parseSummaryOutcome(flagValue(args, "outcome")) : "completed");
   const body = options.body?.trim() || await composedCloseoutSummaryBody(context, subject, closeReason, {
     forceReasonCode,
     forceComment,
@@ -3220,14 +3278,14 @@ async function createCloseoutAgentSummary(
     subjectType: subject.subjectType,
     summaryKind: subject.summaryKind,
     status: options.force ? "forced" : "final",
-    outcome: options.force ? parseSummaryOutcome(flagValue(args, "outcome")) : "completed",
+    outcome,
     title: `${options.force ? "Forced closeout summary" : "Closeout summary"}: ${subject.title}`,
     body,
     completedWork: [
       {
         workId: work.meta.id,
         title: work.title,
-        outcome: options.force ? parseSummaryOutcome(flagValue(args, "outcome")) : "completed",
+        outcome,
         notes: closeReason
       }
     ],
@@ -5668,6 +5726,7 @@ async function buildSprintReportDocument(
     context.runtime.getWorkView(sprint.meta.id),
     context.store.read(async (reader) => ({
       workItems: await reader.listWorkItems(),
+      agentSummaries: await reader.listAgentSummaries(),
       evidence: await reader.listEvidence(),
       decisions: await reader.listDecisions(),
       graphEdges: await reader.listGraphEdges(),
@@ -5700,6 +5759,15 @@ async function buildSprintReportDocument(
     )
     .map(decisionRow)
     .sort((left, right) => left.title.localeCompare(right.title) || left.id.localeCompare(right.id));
+  const agentSummaries = snapshot.agentSummaries
+    .filter((summary) => scopedWorkIds.has(summary.subjectId))
+    .map(agentSummaryReportRow)
+    .sort(compareAgentSummaryRows);
+  const summaryCheckpointGaps = agentSummaries.filter(
+    (summary) => (summary.status === "final" || summary.status === "forced") &&
+      summary.commitShas.length === 0 &&
+      summary.dirtyPathNotes.length === 0
+  );
   const completedWork = descendantWork.filter((work) => isCompletedReportStatus(work.status));
   const openWork = descendantWork.filter((work) => isOpenReportStatus(work.status));
   const unresolvedBlockers = openWork
@@ -5740,12 +5808,15 @@ async function buildSprintReportDocument(
       needsVerification: openWork.filter((work) => work.status === "needs_verification").length,
       evidence: scopedEvidence.length,
       decisions: decisions.length,
+      agentSummaries: agentSummaries.length,
+      summaryCheckpointGaps: summaryCheckpointGaps.length,
       nextSprintCandidates: nextSprintCandidates.length
     },
     completedWork,
     openWork,
     unresolvedBlockers,
     nextSprintCandidates,
+    agentSummaries,
     evidence: scopedEvidence,
     decisions,
     closeoutEvidence
@@ -5864,6 +5935,25 @@ function decisionRow(record: DecisionRecord): SprintReportDecisionRow {
   };
 }
 
+function agentSummaryReportRow(record: AgentSummaryRecord): SprintReportAgentSummaryRow {
+  return {
+    id: record.meta.id,
+    subjectId: record.subjectId,
+    subjectType: record.subjectType,
+    summaryKind: record.summaryKind,
+    status: record.status,
+    outcome: record.outcome,
+    title: record.title,
+    artifactUri: record.artifactUri,
+    commitShas: record.commitShas,
+    dirtyPathNotes: record.dirtyPathNotes,
+    childSummaryIds: record.childSummaryIds,
+    forceReasonCode: record.forceReasonCode,
+    forceComment: record.forceComment,
+    generatedAt: record.generatedAt
+  };
+}
+
 function isReportWorkRow(value: SprintReportWorkRow | undefined): value is SprintReportWorkRow {
   return value !== undefined;
 }
@@ -5874,6 +5964,10 @@ function isString(value: string | undefined): value is string {
 
 function compareEvidenceRows(left: SprintReportEvidenceRow, right: SprintReportEvidenceRow): number {
   return right.observedAt.localeCompare(left.observedAt) || left.summary.localeCompare(right.summary) || left.id.localeCompare(right.id);
+}
+
+function compareAgentSummaryRows(left: SprintReportAgentSummaryRow, right: SprintReportAgentSummaryRow): number {
+  return right.generatedAt.localeCompare(left.generatedAt) || left.title.localeCompare(right.title) || left.id.localeCompare(right.id);
 }
 
 function compareReportWorkRows(left: SprintReportWorkRow, right: SprintReportWorkRow): number {
@@ -5915,6 +6009,8 @@ function renderSprintReportMarkdown(document: SprintReportDocument): string {
     `- Needs verification: ${document.summary.needsVerification}`,
     `- Evidence records: ${document.summary.evidence}`,
     `- Decisions: ${document.summary.decisions}`,
+    `- Agent summaries: ${document.summary.agentSummaries}`,
+    `- Summary checkpoint gaps: ${document.summary.summaryCheckpointGaps}`,
     `- Next sprint candidates: ${document.summary.nextSprintCandidates}`,
     "",
     "## Completed Work",
@@ -5932,6 +6028,10 @@ function renderSprintReportMarkdown(document: SprintReportDocument): string {
     "## Decisions",
     "",
     markdownDecisionList(document.decisions),
+    "",
+    "## Agent Summaries",
+    "",
+    markdownAgentSummaryList(document.agentSummaries),
     "",
     "## Evidence",
     "",
@@ -5975,6 +6075,22 @@ function markdownDecisionList(rows: readonly SprintReportDecisionRow[]): string 
   }
   return rows
     .map((row) => `- ${row.title} (${row.id}) - ${row.status}: ${row.decision}`)
+    .join("\n");
+}
+
+function markdownAgentSummaryList(rows: readonly SprintReportAgentSummaryRow[]): string {
+  if (rows.length === 0) {
+    return "None.";
+  }
+  return rows
+    .map((row) => {
+      const commits = row.commitShas.length > 0 ? row.commitShas.join(", ") : "none";
+      const dirtyPaths = row.dirtyPathNotes.length > 0 ? row.dirtyPathNotes.join("; ") : "none";
+      const children = row.childSummaryIds.length > 0 ? row.childSummaryIds.join(", ") : "none";
+      const artifact = row.artifactUri ?? "none";
+      const forced = row.forceReasonCode ? ` force ${row.forceReasonCode}` : "";
+      return `- ${row.title} (${row.id}) - ${row.subjectType} ${row.subjectId}, ${row.status}/${row.outcome}, commits ${commits}, dirty paths ${dirtyPaths}, child summaries ${children}, artifact ${artifact}${forced}`;
+    })
     .join("\n");
 }
 
@@ -6026,11 +6142,14 @@ function renderSprintReportHtml(document: SprintReportDocument): string {
     htmlPill("Blocked", String(document.summary.blocked)),
     htmlPill("Needs verification", String(document.summary.needsVerification)),
     htmlPill("Decisions", String(document.summary.decisions)),
+    htmlPill("Agent summaries", String(document.summary.agentSummaries)),
+    htmlPill("Summary checkpoint gaps", String(document.summary.summaryCheckpointGaps)),
     "</div></section>",
     htmlWorkSection("Completed Work", document.completedWork),
     htmlWorkSection("Open Work", document.openWork),
     htmlBlockerSection(document.unresolvedBlockers),
     htmlDecisionSection(document.decisions),
+    htmlAgentSummarySection(document.agentSummaries),
     htmlEvidenceSection(document.evidence),
     htmlWorkSection("Next Sprint Candidates", document.nextSprintCandidates),
     "</main>",
@@ -6088,6 +6207,30 @@ function htmlDecisionSection(rows: readonly SprintReportDecisionRow[]): string {
       : htmlTable(
           ["Title", "Status", "Decision"],
           rows.map((row) => [`${row.title} (${row.id})`, row.status, row.decision])
+        ),
+    "</section>"
+  ].join("\n");
+}
+
+function htmlAgentSummarySection(rows: readonly SprintReportAgentSummaryRow[]): string {
+  return [
+    '<section class="section"><h2>Agent Summaries</h2>',
+    rows.length === 0
+      ? '<p class="empty">None.</p>'
+      : htmlTable(
+          ["Title", "Subject", "Status", "Checkpoint", "Children", "Artifact"],
+          rows.map((row) => [
+            `${row.title} (${row.id})`,
+            `${row.subjectType} ${row.subjectId}`,
+            `${row.status}/${row.outcome}${row.forceReasonCode ? ` force ${row.forceReasonCode}` : ""}`,
+            row.commitShas.length > 0
+              ? row.commitShas.join(", ")
+              : row.dirtyPathNotes.length > 0
+                ? row.dirtyPathNotes.join("; ")
+                : "none",
+            row.childSummaryIds.length > 0 ? row.childSummaryIds.join(", ") : "none",
+            row.artifactUri ?? "none"
+          ])
         ),
     "</section>"
   ].join("\n");

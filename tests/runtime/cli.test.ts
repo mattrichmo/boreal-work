@@ -1102,7 +1102,7 @@ describe("bwrk cli", () => {
       "passed",
       "--json"
     ]);
-    await runCli(rootDir, ["work", "close", completedTask.meta.id, "--reason", "ready for report", "--json"]);
+    await runCli(rootDir, ["work", "close", completedTask.meta.id, "--reason", "ready for report", "--commit", "abc1234", "--json"]);
 
     const doctorEvidence = parseData<{ readonly meta: { readonly id: string } }>(
       (
@@ -1148,8 +1148,16 @@ describe("bwrk cli", () => {
       readonly path: string;
       readonly contentHash: string;
       readonly report: {
-        readonly summary: { readonly completed: number; readonly open: number; readonly decisions: number; readonly nextSprintCandidates: number };
+        readonly summary: {
+          readonly completed: number;
+          readonly open: number;
+          readonly decisions: number;
+          readonly agentSummaries: number;
+          readonly summaryCheckpointGaps: number;
+          readonly nextSprintCandidates: number;
+        };
         readonly closeoutEvidence: { readonly doctor: { readonly id: string }; readonly sync: { readonly id: string } };
+        readonly agentSummaries: Array<{ readonly subjectId: string; readonly commitShas: readonly string[]; readonly artifactUri: string }>;
         readonly decisions: Array<{ readonly title: string }>;
         readonly unresolvedBlockers: Array<{ readonly work: { readonly id: string }; readonly blockers: Array<{ readonly id: string }> }>;
       };
@@ -1174,8 +1182,11 @@ describe("bwrk cli", () => {
     expect(markdownResult.path).toBe(join(rootDir, ".boreal/results/closeout.md"));
     expect(markdownResult.contentHash).toMatch(/^sha256:/);
     expect(markdownResult.report.summary).toEqual(
-      expect.objectContaining({ completed: 1, open: 4, decisions: 1, nextSprintCandidates: 4 })
+      expect.objectContaining({ completed: 1, open: 4, decisions: 1, agentSummaries: 1, summaryCheckpointGaps: 0, nextSprintCandidates: 4 })
     );
+    expect(markdownResult.report.agentSummaries).toEqual([
+      expect.objectContaining({ subjectId: completedTask.meta.id, commitShas: ["abc1234"] })
+    ]);
     expect(markdownResult.report.closeoutEvidence.doctor.id).toBe(doctorEvidence.meta.id);
     expect(markdownResult.report.closeoutEvidence.sync.id).toBe(syncEvidence.meta.id);
     expect(markdownResult.report.decisions.map((decision) => decision.title)).toContain("Static report decision");
@@ -1192,6 +1203,8 @@ describe("bwrk cli", () => {
     expect(markdown).toContain("# Sprint Closeout: Closeout Sprint");
     expect(markdown).toContain("Static report decision");
     expect(markdown).toContain("Blocked Report Task");
+    expect(markdown).toContain("## Agent Summaries");
+    expect(markdown).toContain("commits abc1234");
     expect(markdown).toContain(`Doctor evidence: ${doctorEvidence.meta.id}`);
     expect(markdown).toContain(`Sync evidence: ${syncEvidence.meta.id}`);
 
@@ -1217,6 +1230,7 @@ describe("bwrk cli", () => {
     expect(htmlResult.path).toBe(join(rootDir, ".boreal/results/closeout.html"));
     const html = await readFile(join(rootDir, ".boreal/results/closeout.html"), "utf8");
     expect(html).toContain("<!doctype html>");
+    expect(html).toContain("Agent Summaries");
     expect(html).toContain("Next &lt;Task&gt;");
     expect(html).not.toContain("Next <Task>");
 
@@ -7735,6 +7749,96 @@ describe("bwrk cli", () => {
     ]);
     expect(forcedWithoutComment.exitCode).toBe(2);
     expect(parseJson<{ readonly code: string }>(forcedWithoutComment.stderr).code).toBe("BOREAL_INVALID_INPUT");
+  });
+
+  it("requires agent summary coverage for cancelled work and doctors terminal coverage", async () => {
+    const rootDir = await makeTempWorkspace();
+    await runCli(rootDir, ["init", "--json"]);
+
+    const work = parseData<{ readonly meta: { readonly id: string } }>(
+      (await runCli(rootDir, ["work", "create", "Duplicate cancellation", "--ready", "--json"])).stdout
+    );
+    const cancelled = parseData<{
+      readonly schemaVersion: string;
+      readonly work: { readonly status: string; readonly closedReason: string };
+      readonly agentSummaries: readonly Array<{
+        readonly meta: { readonly id: string };
+        readonly subjectId: string;
+        readonly status: string;
+        readonly outcome: string;
+        readonly dirtyPathNotes: readonly string[];
+        readonly forceReasonCode: string;
+        readonly forceComment: string;
+        readonly artifactUri: string;
+      }>;
+      readonly createdAgentSummaryArtifact: { readonly path: string; readonly uri: string };
+    }>(
+      (
+        await runCli(rootDir, [
+          "work",
+          "cancel",
+          work.meta.id,
+          "--reason",
+          "duplicate task",
+          "--force-summary",
+          "--force-reason",
+          "duplicate",
+          "--force-comment",
+          "Covered by the canonical duplicate target.",
+          "--dirty-path",
+          "no code changes: duplicate closeout",
+          "--json"
+        ])
+      ).stdout
+    );
+
+    expect(cancelled.schemaVersion).toBe("boreal.cli.work.cancel.v1");
+    expect(cancelled.work).toEqual(expect.objectContaining({ status: "cancelled", closedReason: "duplicate task" }));
+    expect(cancelled.agentSummaries).toEqual([
+      expect.objectContaining({
+        subjectId: work.meta.id,
+        status: "forced",
+        outcome: "cancelled",
+        dirtyPathNotes: ["no code changes: duplicate closeout"],
+        forceReasonCode: "duplicate",
+        forceComment: "Covered by the canonical duplicate target."
+      })
+    ]);
+    expect(cancelled.createdAgentSummaryArtifact.uri).toBe(cancelled.agentSummaries[0]?.artifactUri);
+    expect(await readFile(cancelled.createdAgentSummaryArtifact.path, "utf8")).toContain("duplicate task");
+
+    const cleanDoctor = parseData<DoctorPayload>((await runCli(rootDir, ["doctor", "--strict", "--json"])).stdout);
+    expect(doctorDiagnostic(cleanDoctor, "summary.force_reason")).toEqual(expect.objectContaining({ severity: "ok" }));
+    expect(doctorDiagnostic(cleanDoctor, "summary.closeout_coverage")).toEqual(expect.objectContaining({ severity: "ok" }));
+    expect(doctorDiagnostic(cleanDoctor, "summary.checkpoint_coverage")).toEqual(expect.objectContaining({ severity: "ok" }));
+    expect(doctorDiagnostic(cleanDoctor, "summary.artifact_coverage")).toEqual(expect.objectContaining({ severity: "ok" }));
+
+    const legacy = parseData<{ readonly meta: { readonly id: string } }>(
+      (await runCli(rootDir, ["work", "create", "Legacy closed without summary", "--ready", "--json"])).stdout
+    );
+    await updateState(rootDir, (current) => ({
+      ...current,
+      workItems: ((current.workItems as Array<Record<string, unknown>> | undefined) ?? []).map((item) =>
+        item?.meta && typeof item.meta === "object" && "id" in item.meta && item.meta.id === legacy.meta.id
+          ? {
+              ...item,
+              status: "closed",
+              closedAt: "2026-06-01T00:00:00.000Z",
+              closedReason: "legacy imported closeout"
+            }
+          : item
+      )
+    }));
+
+    const legacyDoctorRun = await runCli(rootDir, ["doctor", "--json"]);
+    const legacyDoctor = parseData<DoctorPayload>(legacyDoctorRun.stdout);
+    expect(legacyDoctorRun.exitCode).toBe(0);
+    expect(doctorDiagnostic(legacyDoctor, "summary.closeout_coverage")).toEqual(
+      expect.objectContaining({
+        severity: "warning",
+        details: expect.arrayContaining([expect.objectContaining({ workId: legacy.meta.id })])
+      })
+    );
   });
 
   it("repairs missing generated projection records through doctor", async () => {
