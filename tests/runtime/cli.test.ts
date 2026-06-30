@@ -7612,6 +7612,120 @@ describe("bwrk cli", () => {
     expect(ambiguousPayload.code).toBe("BOREAL_CONFLICT");
   });
 
+  it("creates, renders, lists, and composes agent summaries", async () => {
+    const rootDir = await makeTempWorkspace();
+    await runCli(rootDir, ["init", "--json"]);
+
+    const work = parseData<{ readonly meta: { readonly id: string }; readonly title: string }>(
+      (await runCli(rootDir, ["work", "create", "Summary target", "--ready", "--json"])).stdout
+    );
+    const evidence = parseData<{ readonly meta: { readonly id: string } }>(
+      (
+        await runCli(rootDir, [
+          "evidence",
+          "add",
+          work.meta.id,
+          "--summary",
+          "summary test evidence passed",
+          "--kind",
+          "test",
+          "--outcome",
+          "passed",
+          "--json"
+        ])
+      ).stdout
+    );
+    const verification = parseData<{ readonly meta: { readonly id: string } }>(
+      (
+        await runCli(rootDir, [
+          "work",
+          "verify",
+          work.meta.id,
+          "--evidence",
+          evidence.meta.id,
+          "--verdict",
+          "passed",
+          "--notes",
+          "verified summary test",
+          "--json"
+        ])
+      ).stdout
+    );
+
+    const created = parseData<{
+      readonly summary: {
+        readonly meta: { readonly id: string };
+        readonly subjectId: string;
+        readonly subjectType: string;
+        readonly status: string;
+        readonly outcome: string;
+        readonly evidenceIds: readonly string[];
+        readonly verificationIds: readonly string[];
+        readonly commitShas: readonly string[];
+        readonly artifactUri: string;
+      };
+      readonly artifact: { readonly path: string; readonly uri: string };
+    }>(
+      (
+        await runCli(rootDir, [
+          "summary",
+          "create",
+          work.meta.id,
+          "--body",
+          "Implemented the summary target and verified it.",
+          "--evidence",
+          evidence.meta.id,
+          "--verification",
+          verification.meta.id,
+          "--commit",
+          "abc1234",
+          "--dirty-path",
+          "none",
+          "--json"
+        ])
+      ).stdout
+    );
+
+    expect(created.summary.subjectId).toBe(work.meta.id);
+    expect(created.summary.subjectType).toBe("work");
+    expect(created.summary.status).toBe("final");
+    expect(created.summary.outcome).toBe("completed");
+    expect(created.summary.evidenceIds).toEqual([evidence.meta.id]);
+    expect(created.summary.verificationIds).toEqual([verification.meta.id]);
+    expect(created.summary.commitShas).toEqual(["abc1234"]);
+    expect(created.artifact.uri).toBe(created.summary.artifactUri);
+    expect(await readFile(created.artifact.path, "utf8")).toContain("Implemented the summary target and verified it.");
+
+    const shown = parseData<{ readonly meta: { readonly id: string }; readonly subjectId: string }>(
+      (await runCli(rootDir, ["summary", "show", created.summary.meta.id, "--json"])).stdout
+    );
+    expect(shown).toEqual(expect.objectContaining({ subjectId: work.meta.id }));
+
+    const listed = parseData<Array<{ readonly id: string; readonly subjectId: string }>>(
+      (await runCli(rootDir, ["summary", "list", "--subject", work.meta.id, "--json"])).stdout
+    );
+    expect(listed).toEqual([expect.objectContaining({ id: created.summary.meta.id, subjectId: work.meta.id })]);
+
+    const composed = parseData<{ readonly summary: { readonly subjectId: string; readonly body: string } }>(
+      (await runCli(rootDir, ["summary", "compose", work.meta.id, "--no-render", "--json"])).stdout
+    );
+    expect(composed.summary.subjectId).toBe(work.meta.id);
+    expect(composed.summary.body).toContain("summary test evidence passed");
+
+    const forcedWithoutComment = await runCli(rootDir, [
+      "summary",
+      "create",
+      work.meta.id,
+      "--body",
+      "forced summary without comment",
+      "--force-reason",
+      "operator_override",
+      "--json"
+    ]);
+    expect(forcedWithoutComment.exitCode).toBe(2);
+    expect(parseJson<{ readonly code: string }>(forcedWithoutComment.stderr).code).toBe("BOREAL_INVALID_INPUT");
+  });
+
   it("repairs missing generated projection records through doctor", async () => {
     const rootDir = await makeTempWorkspace();
     await runCli(rootDir, ["init", "--json"]);

@@ -24,6 +24,13 @@ import {
   type ActorRef,
   type ActorKind,
   type AgentReservation,
+  type AgentSummaryForceReasonCode,
+  type AgentSummaryId,
+  type AgentSummaryKind,
+  type AgentSummaryOutcome,
+  type AgentSummaryRecord,
+  type AgentSummaryStatus,
+  type AgentSummarySubjectType,
   type ClaimId,
   type ClaimRecord,
   type ClaimStatus,
@@ -682,6 +689,9 @@ export async function runCommand(args: ParsedArgs, output: CliOutput, cwd: strin
         break;
       case "evidence":
         result = await evidenceCommand(action, rest, context, args, commandOutput, json);
+        break;
+      case "summary":
+        result = await summaryCommand(action, rest, context, args, commandOutput, json);
         break;
       case "source":
         result = await sourceCommand(action, rest, context, args, commandOutput, json);
@@ -2486,6 +2496,550 @@ async function evidenceCommand(
   });
   output.write(formatRecord(evidence, json));
   return { exitCode: 0 };
+}
+
+async function summaryCommand(
+  action: string | undefined,
+  rest: readonly string[],
+  context: CliContext,
+  args: ParsedArgs,
+  output: CliOutput,
+  json: boolean
+): Promise<CommandResult> {
+  switch (action) {
+    case "create": {
+      const subject = await resolveSummarySubject(context, requiredPositional(rest, 0, "summary subject reference"), args);
+      const result = await createAgentSummaryCommand(context, args, subject, {
+        body: requiredFlag(args, "body"),
+        title: flagValue(args, "title")
+      });
+      output.write(formatRecord(result, json));
+      return { exitCode: 0 };
+    }
+    case "compose": {
+      const subject = await resolveSummarySubject(context, requiredPositional(rest, 0, "summary subject reference"), args);
+      const body = await composeAgentSummaryBody(context, subject);
+      const result = await createAgentSummaryCommand(context, args, subject, {
+        body,
+        title: flagValue(args, "title") ?? `Closeout summary: ${subject.title}`
+      });
+      output.write(formatRecord(result, json));
+      return { exitCode: 0 };
+    }
+    case "show": {
+      const ref = requiredPositional(rest, 0, "summary or subject reference");
+      const summary = ref.startsWith("bw_summary_")
+        ? await context.store.read(async (reader) => requireAgentSummary(reader, asAgentSummaryId(ref)))
+        : await latestSummaryForSubject(context, await resolveSummarySubject(context, ref, args));
+      output.write(formatRecord(summary, json));
+      return { exitCode: 0 };
+    }
+    case "list": {
+      const limit = parseLimit(flagValue(args, "limit")) ?? DEFAULT_LIST_LIMIT;
+      const subjectRef = flagValue(args, "subject");
+      const summaries = await context.store.read(async (reader) =>
+        subjectRef
+          ? reader.listAgentSummariesForSubject((await resolveSummarySubject(context, subjectRef, args)).subjectId)
+          : reader.listAgentSummaries()
+      );
+      const rows = [...summaries]
+        .sort((left, right) => right.generatedAt.localeCompare(left.generatedAt) || left.meta.id.localeCompare(right.meta.id))
+        .slice(0, limit)
+        .map(agentSummaryRow);
+      output.write(json ? formatRecord(rows, true) : table(rows));
+      return { exitCode: 0 };
+    }
+    case "render": {
+      const summaryId = asAgentSummaryId(requiredPositional(rest, 0, "summary id"));
+      const result = await renderExistingAgentSummary(context, summaryId, flagValue(args, "out"));
+      output.write(formatRecord(result, json));
+      return { exitCode: 0 };
+    }
+    case "backfill": {
+      const result = await backfillAgentSummaries(context, args);
+      output.write(formatRecord(result, json));
+      return { exitCode: 0 };
+    }
+    default:
+      throw new BorealError("BOREAL_INVALID_INPUT", `Unknown summary command: ${action ?? ""}`);
+  }
+}
+
+interface SummarySubject {
+  readonly subjectId: string;
+  readonly subjectType: AgentSummarySubjectType;
+  readonly summaryKind: AgentSummaryKind;
+  readonly title: string;
+  readonly work?: WorkItem;
+}
+
+async function createAgentSummaryCommand(
+  context: CliContext,
+  args: ParsedArgs,
+  subject: SummarySubject,
+  input: {
+    readonly title?: string;
+    readonly body: string;
+  }
+): Promise<{ readonly summary: AgentSummaryRecord; readonly artifact?: AgentSummaryArtifactResult; readonly event: RuntimeEvent }> {
+  const current = nowIso();
+  const outcome = parseSummaryOutcome(flagValue(args, "outcome"));
+  const status = parseSummaryStatus(flagValue(args, "status"), flagValue(args, "force-reason"));
+  const forceReasonCode = parseSummaryForceReason(flagValue(args, "force-reason"));
+  const forceComment = flagValue(args, "force-comment");
+  if (status === "forced" && (!forceReasonCode || !forceComment?.trim())) {
+    throw new BorealError("BOREAL_INVALID_INPUT", "Forced summaries require --force-reason and --force-comment");
+  }
+  const title = normalizeMachineString(input.title ?? `Agent summary: ${subject.title}`, "summary title");
+  const body = input.body.trim();
+  if (!body) {
+    throw new BorealError("BOREAL_INVALID_INPUT", "Summary body is required");
+  }
+  const evidenceIds = uniqueValues(flagValues(args, "evidence").map(asEvidenceId));
+  const verificationIds = uniqueValues(flagValues(args, "verification").map(asVerificationId));
+  const commitShas = uniqueStrings(flagValues(args, "commit").map(normalizeCommitSha));
+  const dirtyPathNotes = normalizedNonEmptyStrings(flagValues(args, "dirty-path"));
+  const childSummaryIds = uniqueValues(flagValues(args, "child-summary").map(asAgentSummaryId));
+  const parentSummaryId = flagValue(args, "parent-summary") ? asAgentSummaryId(requiredFlag(args, "parent-summary")) : undefined;
+  const duplicateOf = flagValue(args, "duplicate-of");
+  const completedWork = summaryCompletedWorkFromArgs(args, subject, outcome, body);
+  const summaryId = deterministicId<AgentSummaryId>("summary", {
+    subjectId: subject.subjectId,
+    subjectType: subject.subjectType,
+    title,
+    body,
+    generatedAt: current
+  });
+  const artifactUri = hasFlag(args, "no-render")
+    ? flagValue(args, "artifact-uri")
+    : flagValue(args, "artifact-uri") ?? defaultAgentSummaryArtifactUri({ ...subject, summaryId });
+
+  const result = await context.store.write(async (writer) => {
+    await requireSummaryReferences(writer, {
+      evidenceIds,
+      verificationIds,
+      childSummaryIds,
+      parentSummaryId
+    });
+    const summary = withContentHash({
+      meta: createRecordMeta({
+        id: summaryId,
+        now: current,
+        actor: context.actor,
+        tags: ["agent-summary", subject.summaryKind]
+      }),
+      subjectId: subject.subjectId,
+      subjectType: subject.subjectType,
+      summaryKind: subject.summaryKind,
+      status,
+      outcome,
+      title,
+      body,
+      completedWork,
+      evidenceIds,
+      verificationIds,
+      commitShas,
+      dirtyPathNotes,
+      childSummaryIds,
+      parentSummaryId,
+      artifactUri,
+      duplicateOf,
+      forceReasonCode,
+      forceComment,
+      generatedAt: current
+    } satisfies AgentSummaryRecord);
+    await writer.putAgentSummary(summary);
+    const event = await appendCliEvent(writer, context, "agent_summary.created", summary.meta.id, "agent_summary", {
+      subjectId: summary.subjectId,
+      subjectType: summary.subjectType,
+      status: summary.status,
+      outcome: summary.outcome
+    }, current);
+    return { summary, event };
+  });
+  const artifact = hasFlag(args, "no-render") ? undefined : await writeAgentSummaryArtifact(context, result.summary);
+  return { ...result, artifact };
+}
+
+async function resolveSummarySubject(context: CliContext, ref: string, args: ParsedArgs): Promise<SummarySubject> {
+  const explicitSubjectType = parseSummarySubjectType(flagValue(args, "subject-type"));
+  if (explicitSubjectType === "phase" || explicitSubjectType === "project" || explicitSubjectType === "session") {
+    return {
+      subjectId: ref,
+      subjectType: explicitSubjectType,
+      summaryKind: explicitSubjectType,
+      title: ref
+    };
+  }
+
+  const workId = await resolveWorkId(context, ref);
+  const work = await context.store.read(async (reader) => requireCliWork(reader, workId));
+  const subjectType =
+    explicitSubjectType ??
+    (work.kind === "sprint" ? "sprint" : work.kind === "milestone" ? "milestone" : "work");
+  if (subjectType === "sprint" && work.kind !== "sprint") {
+    throw new BorealError("BOREAL_INVALID_INPUT", "Summary subject type sprint requires a sprint work item", { workId });
+  }
+  if (subjectType === "milestone" && work.kind !== "milestone") {
+    throw new BorealError("BOREAL_INVALID_INPUT", "Summary subject type milestone requires a milestone work item", { workId });
+  }
+  return {
+    subjectId: work.meta.id,
+    subjectType,
+    summaryKind: parseSummaryKind(flagValue(args, "kind")) ?? summaryKindForWork(work, subjectType),
+    title: work.title,
+    work
+  };
+}
+
+async function composeAgentSummaryBody(context: CliContext, subject: SummarySubject): Promise<string> {
+  if (!subject.work) {
+    return [
+      `Subject: ${subject.subjectType}:${subject.subjectId}`,
+      "",
+      "## Outcome",
+      "",
+      "No repository work item is attached to this summary subject."
+    ].join("\n");
+  }
+  const snapshot = await context.store.read(async (reader) => ({
+    workItems: await reader.listWorkItems(),
+    graphEdges: await reader.listGraphEdges(),
+    evidence: await reader.listEvidenceForSubject(subject.work!.meta.id),
+    verifications: await reader.listVerificationsForSubject(subject.work!.meta.id),
+    summaries: await reader.listAgentSummariesForSubject(subject.work!.meta.id)
+  }));
+  const tree = dependencyTreeForWork(subject.work.meta.id, snapshot.workItems, snapshot.graphEdges);
+  const descendants = flattenDependencyTree(tree).filter((node) => node.id !== subject.work?.meta.id);
+  return [
+    `Subject: ${subject.subjectType}:${subject.subjectId}`,
+    `Status: ${subject.work.status}`,
+    `Priority: ${subject.work.priority}`,
+    "",
+    "## Outcome",
+    "",
+    subject.work.closedReason ?? (subject.work.description || "No close reason or description is recorded."),
+    "",
+    "## Evidence",
+    "",
+    snapshot.evidence.length > 0
+      ? snapshot.evidence.map((record) => `- ${record.meta.id}: ${record.outcome} ${record.summary}`).join("\n")
+      : "None.",
+    "",
+    "## Verification",
+    "",
+    snapshot.verifications.length > 0
+      ? snapshot.verifications.map((record) => `- ${record.meta.id}: ${record.verdict}${record.notes ? ` ${record.notes}` : ""}`).join("\n")
+      : "None.",
+    "",
+    "## Child Work",
+    "",
+    descendants.length > 0
+      ? descendants.map((node) => `- ${node.id}: ${node.status ?? "missing"} ${node.title ?? ""}`.trim()).join("\n")
+      : "None.",
+    "",
+    "## Prior Summaries",
+    "",
+    snapshot.summaries.length > 0
+      ? snapshot.summaries.map((record) => `- ${record.meta.id}: ${record.status} ${record.outcome} ${record.title}`).join("\n")
+      : "None."
+  ].join("\n");
+}
+
+function flattenDependencyTree(tree: DependencyTreeNode): readonly DependencyTreeNode[] {
+  return [tree, ...tree.dependencies.flatMap((child) => flattenDependencyTree(child))];
+}
+
+async function latestSummaryForSubject(context: CliContext, subject: SummarySubject): Promise<AgentSummaryRecord> {
+  const summaries = await context.store.read((reader) => reader.listAgentSummariesForSubject(subject.subjectId));
+  const summary = [...summaries].sort((left, right) => right.generatedAt.localeCompare(left.generatedAt)).at(0);
+  if (!summary) {
+    throw new BorealError("BOREAL_NOT_FOUND", "No agent summary found for subject", {
+      subjectId: subject.subjectId,
+      subjectType: subject.subjectType
+    });
+  }
+  return summary;
+}
+
+interface AgentSummaryArtifactResult {
+  readonly path: string;
+  readonly uri: string;
+  readonly contentHash: string;
+  readonly sizeBytes: number;
+}
+
+async function renderExistingAgentSummary(
+  context: CliContext,
+  summaryId: AgentSummaryId,
+  out: string | undefined
+): Promise<{ readonly summary: AgentSummaryRecord; readonly artifact: AgentSummaryArtifactResult; readonly event?: RuntimeEvent }> {
+  const current = nowIso();
+  const summary = await context.store.read(async (reader) => requireAgentSummary(reader, summaryId));
+  const artifact = await writeAgentSummaryArtifact(context, out ? { ...summary, artifactUri: out } : summary);
+  const event = await context.store.write(async (writer) => {
+    const currentSummary = await requireAgentSummary(writer, summaryId);
+    const updated = touchRecord({ ...currentSummary, artifactUri: artifact.uri }, current, context.actor);
+    await writer.putAgentSummary(updated);
+    return appendCliEvent(writer, context, "agent_summary.rendered", updated.meta.id, "agent_summary", {
+      artifactUri: artifact.uri,
+      path: artifact.path
+    }, current);
+  });
+  return {
+    summary: await context.store.read(async (reader) => requireAgentSummary(reader, summaryId)),
+    artifact,
+    event
+  };
+}
+
+async function backfillAgentSummaries(context: CliContext, args: ParsedArgs) {
+  const limit = parseLimit(flagValue(args, "limit")) ?? DEFAULT_LIST_LIMIT;
+  const current = nowIso();
+  const closedOnly = hasFlag(args, "closed-only") || !hasFlag(args, "all");
+  const candidates = await context.store.read(async (reader) => {
+    const summaries = await reader.listAgentSummaries();
+    const summarizedSubjectIds = new Set(summaries.map((summary) => summary.subjectId));
+    return (await reader.listWorkItems())
+      .filter((work) => !summarizedSubjectIds.has(work.meta.id))
+      .filter((work) => !closedOnly || work.status === "closed" || work.status === "cancelled")
+      .slice(0, limit);
+  });
+  const created: AgentSummaryRecord[] = [];
+  for (const work of candidates) {
+    const subject: SummarySubject = {
+      subjectId: work.meta.id,
+      subjectType: work.kind === "sprint" ? "sprint" : work.kind === "milestone" ? "milestone" : "work",
+      summaryKind: work.kind === "sprint" ? "sprint" : work.kind === "milestone" ? "milestone" : "legacy_backfill",
+      title: work.title,
+      work
+    };
+    const summary = await context.store.write(async (writer) => {
+      const id = deterministicId<AgentSummaryId>("summary", {
+        subjectId: work.meta.id,
+        subjectType: subject.subjectType,
+        title: work.title,
+        generatedAt: current,
+        backfill: created.length
+      });
+      const record = withContentHash({
+        meta: createRecordMeta({
+          id,
+          now: current,
+          actor: context.actor,
+          tags: ["agent-summary", "legacy-backfill"]
+        }),
+        subjectId: work.meta.id,
+        subjectType: subject.subjectType,
+        summaryKind: subject.summaryKind,
+        status: "final",
+        outcome: work.status === "cancelled" ? "cancelled" : "completed",
+        title: `Legacy summary: ${work.title}`,
+        body: work.closedReason ?? (work.description || "Legacy backfill summary generated from existing work metadata."),
+        completedWork: [
+          {
+            workId: work.meta.id,
+            title: work.title,
+            outcome: work.status === "cancelled" ? "cancelled" : "completed",
+            notes: work.closedReason ?? work.description
+          }
+        ],
+        evidenceIds: work.evidenceIds,
+        verificationIds: work.verificationIds,
+        commitShas: [],
+        dirtyPathNotes: [],
+        childSummaryIds: [],
+        artifactUri: defaultAgentSummaryArtifactUri({ ...subject, summaryId: id }),
+        generatedAt: current
+      } satisfies AgentSummaryRecord);
+      await writer.putAgentSummary(record);
+      await appendCliEvent(writer, context, "agent_summary.backfilled", record.meta.id, "agent_summary", {
+        subjectId: record.subjectId,
+        subjectType: record.subjectType
+      }, current);
+      return record;
+    });
+    await writeAgentSummaryArtifact(context, summary);
+    created.push(summary);
+  }
+  return {
+    schemaVersion: "boreal.cli.summary.backfill.v1",
+    generatedAt: current,
+    scanned: candidates.length,
+    created: created.map(agentSummaryRow)
+  };
+}
+
+function agentSummaryRow(summary: AgentSummaryRecord) {
+  return {
+    id: summary.meta.id,
+    subjectId: summary.subjectId,
+    subjectType: summary.subjectType,
+    kind: summary.summaryKind,
+    status: summary.status,
+    outcome: summary.outcome,
+    title: summary.title,
+    artifactUri: summary.artifactUri,
+    generatedAt: summary.generatedAt
+  };
+}
+
+async function requireAgentSummary(reader: BorealReader, summaryId: AgentSummaryId): Promise<AgentSummaryRecord> {
+  const summary = await reader.getAgentSummary(summaryId);
+  if (!summary) {
+    throw new BorealError("BOREAL_NOT_FOUND", "Agent summary not found", { summaryId });
+  }
+  return summary;
+}
+
+async function requireSummaryReferences(
+  reader: BorealReader,
+  input: {
+    readonly evidenceIds: readonly EvidenceRecord["meta"]["id"][];
+    readonly verificationIds: readonly VerificationRecord["meta"]["id"][];
+    readonly childSummaryIds: readonly AgentSummaryId[];
+    readonly parentSummaryId?: AgentSummaryId;
+  }
+): Promise<void> {
+  await requireCliEvidenceRecords(reader, input.evidenceIds);
+  const missingVerificationIds: VerificationId[] = [];
+  for (const verificationId of input.verificationIds) {
+    if (!(await reader.getVerification(verificationId))) {
+      missingVerificationIds.push(verificationId);
+    }
+  }
+  if (missingVerificationIds.length > 0) {
+    throw new BorealError("BOREAL_NOT_FOUND", "Agent summary references missing verification", { missingVerificationIds });
+  }
+  const summaryIds = [...input.childSummaryIds, ...(input.parentSummaryId ? [input.parentSummaryId] : [])];
+  const missingSummaryIds: AgentSummaryId[] = [];
+  for (const summaryId of summaryIds) {
+    if (!(await reader.getAgentSummary(summaryId))) {
+      missingSummaryIds.push(summaryId);
+    }
+  }
+  if (missingSummaryIds.length > 0) {
+    throw new BorealError("BOREAL_NOT_FOUND", "Agent summary references missing summary", { missingSummaryIds });
+  }
+}
+
+function summaryCompletedWorkFromArgs(
+  args: ParsedArgs,
+  subject: SummarySubject,
+  outcome: AgentSummaryOutcome,
+  body: string
+): readonly AgentSummaryRecord["completedWork"][number][] {
+  const explicit = flagValues(args, "completed").map((value) => parseCompletedWork(value, outcome));
+  if (explicit.length > 0) {
+    return explicit;
+  }
+  return [
+    {
+      workId: subject.work?.meta.id,
+      title: subject.title,
+      outcome,
+      notes: body.split("\n").find((line) => line.trim().length > 0)?.trim() ?? ""
+    }
+  ];
+}
+
+function parseCompletedWork(value: string, fallbackOutcome: AgentSummaryOutcome): AgentSummaryRecord["completedWork"][number] {
+  const [workIdOrTitle, maybeTitle, maybeOutcome, ...notes] = value.split("|").map((part) => part.trim());
+  if (!workIdOrTitle) {
+    throw new BorealError("BOREAL_INVALID_INPUT", "--completed entries must not be empty");
+  }
+  const hasWorkId = workIdOrTitle.startsWith("bw_work_");
+  return {
+    workId: hasWorkId ? asWorkId(workIdOrTitle) : undefined,
+    title: hasWorkId ? maybeTitle || workIdOrTitle : workIdOrTitle,
+    outcome: maybeOutcome ? parseSummaryOutcome(maybeOutcome) : fallbackOutcome,
+    notes: notes.join("|") || (hasWorkId ? "" : maybeTitle ?? "")
+  };
+}
+
+async function writeAgentSummaryArtifact(context: CliContext, summary: AgentSummaryRecord): Promise<AgentSummaryArtifactResult> {
+  const memoryRoot = await agentSummaryMemoryRoot(context);
+  const uri = summary.artifactUri ?? defaultAgentSummaryArtifactUri({
+    subjectId: summary.subjectId,
+    subjectType: summary.subjectType,
+    summaryKind: summary.summaryKind,
+    title: summary.title,
+    summaryId: summary.meta.id
+  });
+  const relativePath = uri.startsWith("memory://") ? uri.slice("memory://".length) : uri;
+  const path = resolve(memoryRoot, relativePath);
+  assertPathInside(memoryRoot, path);
+  await mkdir(dirname(path), { recursive: true });
+  const content = renderAgentSummaryMarkdown(summary);
+  await writeTextFileAtomic(path, content);
+  return {
+    path,
+    uri: uri.startsWith("memory://") ? uri : `memory://${relativePath}`,
+    contentHash: hashContent(content),
+    sizeBytes: Buffer.byteLength(content, "utf8")
+  };
+}
+
+async function agentSummaryMemoryRoot(context: CliContext): Promise<string> {
+  const config = await readProjectSetupConfig(context.workspaceRoot).catch(() => undefined);
+  return config?.memoryRoot ?? join(context.workspaceRoot, "memory");
+}
+
+function defaultAgentSummaryArtifactUri(input: {
+  readonly subjectId: string;
+  readonly subjectType: AgentSummarySubjectType;
+  readonly summaryKind: AgentSummaryKind;
+  readonly title: string;
+  readonly summaryId: AgentSummaryId;
+}): string {
+  const subjectFolder = `${input.subjectType}s`;
+  return `memory://agent-summaries/${subjectFolder}/${input.subjectId}/${input.summaryId}.md`;
+}
+
+function renderAgentSummaryMarkdown(summary: AgentSummaryRecord): string {
+  return [
+    "---",
+    `id: ${summary.meta.id}`,
+    `subject_id: ${summary.subjectId}`,
+    `subject_type: ${summary.subjectType}`,
+    `summary_kind: ${summary.summaryKind}`,
+    `status: ${summary.status}`,
+    `outcome: ${summary.outcome}`,
+    `generated_at: ${summary.generatedAt}`,
+    summary.parentSummaryId ? `parent_summary: ${summary.parentSummaryId}` : undefined,
+    summary.artifactUri ? `artifact_uri: ${summary.artifactUri}` : undefined,
+    summary.duplicateOf ? `duplicate_of: ${summary.duplicateOf}` : undefined,
+    summary.forceReasonCode ? `force_reason: ${summary.forceReasonCode}` : undefined,
+    summary.forceComment ? `force_comment: ${JSON.stringify(summary.forceComment)}` : undefined,
+    "---",
+    "",
+    `# ${summary.title}`,
+    "",
+    `- Subject: ${summary.subjectType}:${summary.subjectId}`,
+    `- Status: ${summary.status}`,
+    `- Outcome: ${summary.outcome}`,
+    `- Evidence: ${summary.evidenceIds.length > 0 ? summary.evidenceIds.join(", ") : "none"}`,
+    `- Verification: ${summary.verificationIds.length > 0 ? summary.verificationIds.join(", ") : "none"}`,
+    `- Commits: ${summary.commitShas.length > 0 ? summary.commitShas.join(", ") : "none"}`,
+    "",
+    "## Summary",
+    "",
+    summary.body,
+    "",
+    "## Completed Work",
+    "",
+    summary.completedWork.length > 0
+      ? summary.completedWork.map((work) => `- ${work.title}${work.workId ? ` (${work.workId})` : ""}: ${work.outcome}${work.notes ? ` - ${work.notes}` : ""}`).join("\n")
+      : "None.",
+    "",
+    "## Dirty Path Notes",
+    "",
+    summary.dirtyPathNotes.length > 0 ? summary.dirtyPathNotes.map((note) => `- ${note}`).join("\n") : "None.",
+    "",
+    "## Child Summaries",
+    "",
+    summary.childSummaryIds.length > 0 ? summary.childSummaryIds.map((id) => `- ${id}`).join("\n") : "None."
+  ].filter((line): line is string => line !== undefined).join("\n") + "\n";
 }
 
 async function sourceCommand(
@@ -5773,6 +6327,13 @@ function asVerificationId(value: string): VerificationId {
   return value as VerificationId;
 }
 
+function asAgentSummaryId(value: string): AgentSummaryId {
+  if (!value.startsWith("bw_summary_")) {
+    throw new BorealError("BOREAL_INVALID_INPUT", `Expected an agent summary id, got ${value}`);
+  }
+  return value as AgentSummaryId;
+}
+
 function asGraphEdgeId(value: string): GraphEdgeId {
   if (!value.startsWith("bw_edge_")) {
     throw new BorealError("BOREAL_INVALID_INPUT", `Expected a graph edge id, got ${value}`);
@@ -5846,6 +6407,97 @@ function parseWorkStatus(value: string | undefined): WorkStatus | undefined {
     "BOREAL_INVALID_INPUT",
     "--status must be draft, ready, reserved, in_progress, blocked, needs_verification, verified, closed, or cancelled"
   );
+}
+
+function parseSummarySubjectType(value: string | undefined): AgentSummarySubjectType | undefined {
+  if (!value) {
+    return undefined;
+  }
+  if (value === "work" || value === "sprint" || value === "milestone" || value === "phase" || value === "project" || value === "session") {
+    return value;
+  }
+  throw new BorealError("BOREAL_INVALID_INPUT", "--subject-type must be work, sprint, milestone, phase, project, or session");
+}
+
+function parseSummaryKind(value: string | undefined): AgentSummaryKind | undefined {
+  if (!value) {
+    return undefined;
+  }
+  if (
+    value === "task" ||
+    value === "sprint" ||
+    value === "milestone" ||
+    value === "phase" ||
+    value === "project" ||
+    value === "session" ||
+    value === "legacy_backfill"
+  ) {
+    return value;
+  }
+  throw new BorealError("BOREAL_INVALID_INPUT", "--kind must be task, sprint, milestone, phase, project, session, or legacy_backfill");
+}
+
+function parseSummaryStatus(value: string | undefined, forceReason: string | undefined): AgentSummaryStatus {
+  if (!value) {
+    return forceReason ? "forced" : "final";
+  }
+  if (value === "draft" || value === "final" || value === "forced") {
+    return value;
+  }
+  throw new BorealError("BOREAL_INVALID_INPUT", "--status must be draft, final, or forced");
+}
+
+function parseSummaryOutcome(value: string | undefined): AgentSummaryOutcome {
+  if (!value) {
+    return "completed";
+  }
+  if (
+    value === "completed" ||
+    value === "partial" ||
+    value === "deferred" ||
+    value === "duplicate" ||
+    value === "cancelled" ||
+    value === "blocked" ||
+    value === "no_change"
+  ) {
+    return value;
+  }
+  throw new BorealError("BOREAL_INVALID_INPUT", "--outcome must be completed, partial, deferred, duplicate, cancelled, blocked, or no_change");
+}
+
+function parseSummaryForceReason(value: string | undefined): AgentSummaryForceReasonCode | undefined {
+  if (!value) {
+    return undefined;
+  }
+  if (
+    value === "duplicate" ||
+    value === "cancelled_no_work" ||
+    value === "external_close" ||
+    value === "legacy_backfill" ||
+    value === "summary_unavailable" ||
+    value === "operator_override"
+  ) {
+    return value;
+  }
+  throw new BorealError(
+    "BOREAL_INVALID_INPUT",
+    "--force-reason must be duplicate, cancelled_no_work, external_close, legacy_backfill, summary_unavailable, or operator_override"
+  );
+}
+
+function summaryKindForWork(work: WorkItem, subjectType: AgentSummarySubjectType): AgentSummaryKind {
+  if (subjectType === "sprint" || subjectType === "milestone" || subjectType === "phase" || subjectType === "project" || subjectType === "session") {
+    return subjectType;
+  }
+  return work.kind === "sprint" || work.kind === "milestone" ? work.kind : "task";
+}
+
+function normalizeCommitSha(value: string): string {
+  const normalized = value.trim().toLowerCase();
+  if (!/^[0-9a-f]{7,64}$/.test(normalized)) {
+    throw new BorealError("BOREAL_INVALID_INPUT", `Expected a Git commit SHA, got ${value}`);
+  }
+  return normalized;
 }
 
 function dependencyTypeFromArgs(args: ParsedArgs): "blocks" {

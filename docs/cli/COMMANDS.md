@@ -956,6 +956,56 @@ Example:
 bwrk evidence add bw_work_... --summary "pnpm test passed" --kind test --outcome passed --command "pnpm test"
 ```
 
+## `summary create`
+
+```bash
+bwrk summary create <work-ref|subject-id> --body <text> [--subject-type work|sprint|milestone|phase|project|session] [--kind task|sprint|milestone|phase|project|session|legacy_backfill] [--title <text>] [--status draft|final|forced] [--outcome completed|partial|deferred|duplicate|cancelled|blocked|no_change] [--evidence <id>...] [--verification <id>...] [--commit <sha>...] [--dirty-path <note>...] [--completed <work|title>|<title>|<outcome>|<notes>...] [--child-summary <id>...] [--parent-summary <id>] [--duplicate-of <id>] [--force-reason <code>] [--force-comment <text>] [--artifact-uri <uri>] [--no-render] [--json]
+```
+
+Creates a typed agent closeout summary. By default it writes a Markdown artifact under `memory://agent-summaries/` and links evidence, verification, commit SHAs, child summaries, and dirty-path notes into the record.
+
+Forced summaries require both `--force-reason` and `--force-comment`. Use forced summaries for documented bypasses such as duplicate closeout, legacy backfill, external closeout, or operator override.
+
+## `summary compose`
+
+```bash
+bwrk summary compose <work-ref|subject-id> [--subject-type work|sprint|milestone|phase|project|session] [--kind task|sprint|milestone|phase|project|session|legacy_backfill] [--title <text>] [--status draft|final|forced] [--outcome completed|partial|deferred|duplicate|cancelled|blocked|no_change] [--evidence <id>...] [--verification <id>...] [--commit <sha>...] [--dirty-path <note>...] [--child-summary <id>...] [--parent-summary <id>] [--duplicate-of <id>] [--force-reason <code>] [--force-comment <text>] [--artifact-uri <uri>] [--no-render] [--json]
+```
+
+Builds the summary body from the current work item, evidence, verification, child dependency tree, and prior summaries, then persists the same record shape as `summary create`.
+
+## `summary show`
+
+```bash
+bwrk summary show <summary-id|work-ref|subject-id> [--subject-type work|sprint|milestone|phase|project|session] [--json]
+```
+
+Shows an agent summary by summary ID, or the latest summary for a resolved subject.
+
+## `summary list`
+
+```bash
+bwrk summary list [--subject <work-ref|subject-id>] [--subject-type work|sprint|milestone|phase|project|session] [--limit <n>] [--json]
+```
+
+Lists agent summaries, newest first. Use `--subject` to inspect the summary chain for one task, sprint, phase, milestone, project, or session.
+
+## `summary render`
+
+```bash
+bwrk summary render <summary-id> [--out <memory-uri-or-relative-path>] [--json]
+```
+
+Renders an existing agent summary to Markdown and updates the summary artifact URI.
+
+## `summary backfill`
+
+```bash
+bwrk summary backfill [--closed-only|--all] [--limit <n>] [--json]
+```
+
+Creates `legacy_backfill` summaries for existing work items that do not already have summaries. The default is `--closed-only`.
+
 ## `work verify`
 
 ```bash
