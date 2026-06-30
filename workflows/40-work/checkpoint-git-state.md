@@ -107,6 +107,7 @@ Use one of these reason codes when a closeout does not have an in-scope commit:
 - `unrelated_dirty_state`: dirty files exist but are outside this work's scope.
 - `git_unavailable`: Git cannot write or inspect the repository.
 - `out_of_scope_repository`: the dirty repository is not part of the requested workspace.
+- `legacy_backfill`: reserved for automated summaries generated for pre-policy terminal work.
 
 ## Commit Policy
 

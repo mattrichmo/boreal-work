@@ -18,6 +18,8 @@ import {
   type ActorRef,
   type AgentId,
   type AgentReservation,
+  type AgentSummaryId,
+  type AgentSummaryRecord,
   type ClaimId,
   type ClaimRecord,
   type ContextPack,
@@ -33,6 +35,7 @@ import {
   type ProjectionId,
   type RuntimeEvent,
   type RuntimePolicy,
+  type VerificationId,
   type VerificationRecord,
   type WorkId,
   type WorkItem,
@@ -122,9 +125,25 @@ export interface FinishReservedWorkInput {
   };
   readonly close?: {
     readonly reason: string;
+    readonly agentSummary?: FinishReservedWorkSummaryFactory;
+    readonly agentSummaryIds?: readonly AgentSummaryId[];
   };
   readonly release?: boolean;
 }
+
+export interface FinishReservedWorkSummaryInput {
+  readonly work: WorkItem;
+  readonly evidence: EvidenceRecord;
+  readonly verification: VerificationRecord;
+  readonly closedWork: WorkItem;
+  readonly reason: string;
+  readonly now: IsoTimestamp;
+  readonly actor: ActorRef;
+}
+
+export type FinishReservedWorkSummaryFactory = (
+  input: FinishReservedWorkSummaryInput
+) => AgentSummaryRecord | Promise<AgentSummaryRecord>;
 
 export interface FinishReservedWorkResult {
   readonly work: WorkItem;
@@ -132,6 +151,7 @@ export interface FinishReservedWorkResult {
   readonly verification: VerificationRecord;
   readonly reservation: AgentReservation;
   readonly closedWork?: WorkItem;
+  readonly agentSummary?: AgentSummaryRecord;
   readonly release: ReservationLifecycleResult;
 }
 
@@ -182,6 +202,8 @@ export interface BorealRuntime {
   closeWork(input: {
     readonly workId: WorkId;
     readonly reason: string;
+    readonly agentSummary?: AgentSummaryRecord;
+    readonly agentSummaryIds?: readonly AgentSummaryId[];
   }): Promise<WorkItem>;
   finishReservedWork(input: FinishReservedWorkInput): Promise<FinishReservedWorkResult>;
   createKnowledgeSource(input: Omit<Parameters<typeof createKnowledgeSource>[0], "actor" | "now">): Promise<KnowledgeSource>;
@@ -616,7 +638,28 @@ export function createBorealRuntime(options: BorealRuntimeOptions = {}): BorealR
           });
         }
         const verifications = await writer.listVerificationsForSubject(input.workId);
+        const closeoutSummaries = await resolveCloseoutSummaries(writer, input.agentSummaryIds, input.agentSummary);
+        assertAgentSummaryClosePolicy(policy, work, closeoutSummaries);
+        if (input.agentSummary) {
+          await assertAgentSummaryReferences(writer, input.agentSummary);
+        }
         const closed = closeWorkDomain(work, verifications, policy, current, actor, input.reason);
+        if (input.agentSummary) {
+          await writer.putAgentSummary(input.agentSummary);
+          await appendEvent(
+            writer,
+            input.agentSummary.status === "forced" ? "agent_summary.forced_closeout" : "agent_summary.closeout_created",
+            input.agentSummary.meta.id,
+            "agent_summary",
+            {
+              subjectId: input.agentSummary.subjectId,
+              subjectType: input.agentSummary.subjectType,
+              workId: work.meta.id,
+              closeReason: input.reason,
+              forceReasonCode: input.agentSummary.forceReasonCode
+            }
+          );
+        }
         await writer.putWorkItem(closed);
         await recomputeAllReadiness(writer);
         await appendEvent(writer, "work.closed", closed.meta.id, "work", { reason: input.reason });
@@ -662,9 +705,29 @@ export function createBorealRuntime(options: BorealRuntimeOptions = {}): BorealR
 
         let finalWork = workWithVerification;
         let closedWork: WorkItem | undefined;
+        let agentSummary: AgentSummaryRecord | undefined;
         if (input.close) {
           const availableVerifications = [...(await writer.listVerificationsForSubject(input.workId)), verification];
           closedWork = closeWorkDomain(workWithVerification, availableVerifications, policy, current, actor, input.close.reason);
+          if (input.close.agentSummary) {
+            agentSummary = await input.close.agentSummary({
+              work: workWithVerification,
+              evidence,
+              verification,
+              closedWork,
+              reason: input.close.reason,
+              now: current,
+              actor
+            });
+          }
+          const closeoutSummaries = await resolveCloseoutSummaries(writer, input.close.agentSummaryIds, agentSummary);
+          assertAgentSummaryClosePolicy(policy, workWithVerification, closeoutSummaries);
+          if (agentSummary) {
+            await assertAgentSummaryReferences(writer, agentSummary, {
+              evidence: [evidence],
+              verifications: [verification]
+            });
+          }
           finalWork = closedWork;
         }
 
@@ -675,6 +738,9 @@ export function createBorealRuntime(options: BorealRuntimeOptions = {}): BorealR
         await writer.putEvidence(evidence);
         await writer.putVerification(verification);
         await writer.putReservation(releasedReservation);
+        if (agentSummary) {
+          await writer.putAgentSummary(agentSummary);
+        }
         await writer.putWorkItem(finalWork);
         if (input.close) {
           await recomputeAllReadiness(writer);
@@ -690,6 +756,21 @@ export function createBorealRuntime(options: BorealRuntimeOptions = {}): BorealR
           verificationId: verification.meta.id
         });
         if (input.close) {
+          if (agentSummary) {
+            await appendEvent(
+              writer,
+              agentSummary.status === "forced" ? "agent_summary.forced_closeout" : "agent_summary.closeout_created",
+              agentSummary.meta.id,
+              "agent_summary",
+              {
+                subjectId: agentSummary.subjectId,
+                subjectType: agentSummary.subjectType,
+                workId: finalWork.meta.id,
+                closeReason: input.close.reason,
+                forceReasonCode: agentSummary.forceReasonCode
+              }
+            );
+          }
           await appendEvent(writer, "work.closed", finalWork.meta.id, "work", { reason: input.close.reason });
         }
         await appendEvent(writer, "work.reservation_released", finalWork.meta.id, "work", {
@@ -710,6 +791,7 @@ export function createBorealRuntime(options: BorealRuntimeOptions = {}): BorealR
           verification,
           reservation: releasedReservation,
           closedWork,
+          agentSummary,
           release: { work: finalWork, reservation: releasedReservation }
         };
       });
@@ -1028,6 +1110,106 @@ async function clearWorkReservation(
   const graphBase = await workWithGraphDependencies(reader, base);
   const dependencies = await loadDependencies(reader, graphBase);
   return touchRecord({ ...graphBase, status: deriveReadinessStatus(graphBase, dependencies) }, now, actor);
+}
+
+async function resolveCloseoutSummaries(
+  reader: BorealReader,
+  summaryIds: readonly AgentSummaryId[] | undefined,
+  pendingSummary: AgentSummaryRecord | undefined
+): Promise<readonly AgentSummaryRecord[]> {
+  const summaries: AgentSummaryRecord[] = pendingSummary ? [pendingSummary] : [];
+  const missingSummaryIds: AgentSummaryId[] = [];
+  for (const summaryId of summaryIds ?? []) {
+    if (pendingSummary?.meta.id === summaryId) {
+      continue;
+    }
+    const summary = await reader.getAgentSummary(summaryId);
+    if (summary) {
+      summaries.push(summary);
+    } else {
+      missingSummaryIds.push(summaryId);
+    }
+  }
+  if (missingSummaryIds.length > 0) {
+    throw new BorealError("BOREAL_NOT_FOUND", "Closeout references missing agent summary", { missingSummaryIds });
+  }
+  return summaries;
+}
+
+function assertAgentSummaryClosePolicy(
+  runtimePolicy: RuntimePolicy,
+  work: WorkItem,
+  summaries: readonly AgentSummaryRecord[]
+): void {
+  if (!runtimePolicy.requireAgentSummaryForClose) {
+    return;
+  }
+  const expectedSubjectType = agentSummarySubjectTypeForWork(work);
+  const matching = summaries.filter(
+    (summary) =>
+      summary.subjectId === work.meta.id &&
+      summary.subjectType === expectedSubjectType &&
+      (summary.status === "final" || summary.status === "forced")
+  );
+  if (matching.length === 0) {
+    throw new BorealError("BOREAL_POLICY_VIOLATION", "Closeout requires a final or forced agent summary matching the work subject", {
+      workId: work.meta.id,
+      expectedSubjectType,
+      summaryIds: summaries.map((summary) => summary.meta.id)
+    });
+  }
+}
+
+async function assertAgentSummaryReferences(
+  reader: BorealReader,
+  summary: AgentSummaryRecord,
+  extras: {
+    readonly evidence?: readonly EvidenceRecord[];
+    readonly verifications?: readonly VerificationRecord[];
+  } = {}
+): Promise<void> {
+  const extraEvidenceIds = new Set((extras.evidence ?? []).map((evidence) => evidence.meta.id));
+  const missingEvidenceIds: EvidenceId[] = [];
+  for (const evidenceId of summary.evidenceIds) {
+    if (extraEvidenceIds.has(evidenceId)) {
+      continue;
+    }
+    if (!(await reader.getEvidence(evidenceId))) {
+      missingEvidenceIds.push(evidenceId);
+    }
+  }
+  if (missingEvidenceIds.length > 0) {
+    throw new BorealError("BOREAL_NOT_FOUND", "Agent summary references missing evidence", { missingEvidenceIds });
+  }
+
+  const extraVerificationIds = new Set((extras.verifications ?? []).map((verification) => verification.meta.id));
+  const missingVerificationIds: VerificationId[] = [];
+  for (const verificationId of summary.verificationIds) {
+    if (extraVerificationIds.has(verificationId)) {
+      continue;
+    }
+    if (!(await reader.getVerification(verificationId))) {
+      missingVerificationIds.push(verificationId);
+    }
+  }
+  if (missingVerificationIds.length > 0) {
+    throw new BorealError("BOREAL_NOT_FOUND", "Agent summary references missing verification", { missingVerificationIds });
+  }
+
+  const summaryIds = [...summary.childSummaryIds, ...(summary.parentSummaryId ? [summary.parentSummaryId] : [])];
+  const missingSummaryIds: AgentSummaryId[] = [];
+  for (const summaryId of summaryIds) {
+    if (!(await reader.getAgentSummary(summaryId))) {
+      missingSummaryIds.push(summaryId);
+    }
+  }
+  if (missingSummaryIds.length > 0) {
+    throw new BorealError("BOREAL_NOT_FOUND", "Agent summary references missing summary", { missingSummaryIds });
+  }
+}
+
+function agentSummarySubjectTypeForWork(work: WorkItem): AgentSummaryRecord["subjectType"] {
+  return work.kind === "sprint" ? "sprint" : work.kind === "milestone" ? "milestone" : "work";
 }
 
 async function requireKnowledgeSource(reader: BorealReader, sourceId: KnowledgeSourceId): Promise<KnowledgeSource> {

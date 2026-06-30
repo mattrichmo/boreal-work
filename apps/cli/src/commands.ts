@@ -98,6 +98,7 @@ import {
   type WorkItemView
 } from "@boreal/ui-model";
 import { deriveReadinessStatus } from "@boreal/work-engine";
+import type { FinishReservedWorkSummaryFactory } from "@boreal/engine";
 
 import { flagValue, flagValues, hasFlag, requiredFlag, type ParsedArgs } from "./args.js";
 import {
@@ -177,6 +178,7 @@ import {
   type RegistryRemoveResult
 } from "./registry.js";
 import { inspectSearchIndex, runSearch, writeSearchIndex, type SearchIndexInspection } from "./search-cli.js";
+import { requireCommitOrDirtyPathReason } from "./summary-policy.js";
 import {
   addRawSource,
   createWikiPage,
@@ -1814,6 +1816,10 @@ async function agentFinishCommand(
     throw new BorealError("BOREAL_INVALID_INPUT", "--close requires a passed verification verdict");
   }
 
+  const closeReason = close ? requiredFlag(args, "reason") : undefined;
+  const closeoutSummaryFactory = closeReason
+    ? await agentFinishSummaryFactory(context, args, workId, closeReason)
+    : undefined;
   const finished = await context.runtime.finishReservedWork({
     workId,
     agentId,
@@ -1828,15 +1834,11 @@ async function agentFinishCommand(
       verdict,
       notes: flagValue(args, "notes")
     },
-    close: close ? { reason: requiredFlag(args, "reason") } : undefined,
+    close: closeReason ? { reason: closeReason, agentSummary: closeoutSummaryFactory } : undefined,
     release
   });
-  const closeoutSummary = close && finished.closedWork
-    ? await createAgentFinishSummary(context, args, finished.closedWork, {
-      reason: requiredFlag(args, "reason"),
-      evidence: finished.evidence,
-      verification: finished.verification
-    })
+  const closeoutSummaryArtifact = finished.agentSummary
+    ? await writeAgentSummaryArtifact(context, finished.agentSummary)
     : undefined;
 
   output.write(
@@ -1850,8 +1852,8 @@ async function agentFinishCommand(
         verification: finished.verification,
         reservation: finished.reservation,
         closedWork: finished.closedWork,
-        agentSummary: closeoutSummary?.summary,
-        agentSummaryArtifact: closeoutSummary?.artifact,
+        agentSummary: finished.agentSummary,
+        agentSummaryArtifact: closeoutSummaryArtifact,
         release: finished.release,
         status: await buildAgentStatus(context, agentId, [])
       } satisfies AgentFinishResult,
@@ -1906,6 +1908,10 @@ async function finishCurrentReservationCommand(input: {
 }): Promise<CommandResult> {
   const agentId = agentIdFromArgs(input.args, input.context.actor.id);
   const workId = await resolveWorkId(input.context, "current", { agentId });
+  const closeReason = input.close ? requiredFlag(input.args, "reason") : undefined;
+  const closeoutSummaryFactory = closeReason
+    ? await agentFinishSummaryFactory(input.context, input.args, workId, closeReason)
+    : undefined;
   const finished = await input.context.runtime.finishReservedWork({
     workId,
     agentId,
@@ -1920,15 +1926,11 @@ async function finishCurrentReservationCommand(input: {
       verdict: input.verdict,
       notes: flagValue(input.args, "notes")
     },
-    close: input.close ? { reason: requiredFlag(input.args, "reason") } : undefined,
+    close: closeReason ? { reason: closeReason, agentSummary: closeoutSummaryFactory } : undefined,
     release: input.release
   });
-  const closeoutSummary = input.close && finished.closedWork
-    ? await createAgentFinishSummary(input.context, input.args, finished.closedWork, {
-      reason: requiredFlag(input.args, "reason"),
-      evidence: finished.evidence,
-      verification: finished.verification
-    })
+  const closeoutSummaryArtifact = finished.agentSummary
+    ? await writeAgentSummaryArtifact(input.context, finished.agentSummary)
     : undefined;
 
   input.output.write(
@@ -1942,8 +1944,8 @@ async function finishCurrentReservationCommand(input: {
         verification: finished.verification,
         reservation: finished.reservation,
         closedWork: finished.closedWork,
-        agentSummary: closeoutSummary?.summary,
-        agentSummaryArtifact: closeoutSummary?.artifact,
+        agentSummary: finished.agentSummary,
+        agentSummaryArtifact: closeoutSummaryArtifact,
         release: finished.release,
         status: await buildAgentStatus(input.context, agentId, [])
       } satisfies AgentFinishResult,
@@ -2273,7 +2275,15 @@ async function workCommand(
       const reason = requiredFlag(args, "reason");
       const work = await context.store.read((reader) => requireCliWork(reader, workId));
       const closeoutSummary = await ensureAgentSummaryForClose(context, args, work, reason);
-      const closed = await context.runtime.closeWork({ workId, reason });
+      const closed = await context.runtime.closeWork({
+        workId,
+        reason,
+        agentSummary: closeoutSummary.created?.summary,
+        agentSummaryIds: closeoutSummary.summaries.map((summary) => summary.meta.id)
+      });
+      const createdArtifact = closeoutSummary.created
+        ? await writeAgentSummaryArtifact(context, closeoutSummary.created.summary)
+        : undefined;
       output.write(
         formatRecord(
           {
@@ -2283,7 +2293,7 @@ async function workCommand(
             work: closed,
             agentSummaries: closeoutSummary.summaries,
             createdAgentSummary: closeoutSummary.created?.summary,
-            createdAgentSummaryArtifact: closeoutSummary.created?.artifact
+            createdAgentSummaryArtifact: createdArtifact
           },
           json
         )
@@ -2318,8 +2328,12 @@ async function workCommand(
       const result = await cancelWorkCommand(
         context,
         workId,
-        reason
+        reason,
+        closeoutSummary.created?.summary
       );
+      const createdArtifact = closeoutSummary.created
+        ? await writeAgentSummaryArtifact(context, closeoutSummary.created.summary)
+        : undefined;
       output.write(
         formatRecord(
           {
@@ -2329,7 +2343,7 @@ async function workCommand(
             ...result,
             agentSummaries: closeoutSummary.summaries,
             createdAgentSummary: closeoutSummary.created?.summary,
-            createdAgentSummaryArtifact: closeoutSummary.created?.artifact
+            createdAgentSummaryArtifact: createdArtifact
           },
           json
         )
@@ -2414,7 +2428,12 @@ async function editWorkCommand(context: CliContext, workId: WorkId, args: Parsed
   });
 }
 
-async function cancelWorkCommand(context: CliContext, workId: WorkId, reason: string) {
+async function cancelWorkCommand(
+  context: CliContext,
+  workId: WorkId,
+  reason: string,
+  agentSummary?: AgentSummaryRecord
+) {
   const current = nowIso();
   const result = await context.store.write(async (writer) => {
     const work = await requireCliWork(writer, workId);
@@ -2443,6 +2462,29 @@ async function cancelWorkCommand(context: CliContext, workId: WorkId, reason: st
       current,
       context.actor
     ) satisfies WorkItem;
+    if (agentSummary) {
+      await requireSummaryReferences(writer, {
+        evidenceIds: agentSummary.evidenceIds,
+        verificationIds: agentSummary.verificationIds,
+        childSummaryIds: agentSummary.childSummaryIds
+      });
+      await writer.putAgentSummary(agentSummary);
+      await appendCliEvent(
+        writer,
+        context,
+        agentSummary.status === "forced" ? "agent_summary.forced_closeout" : "agent_summary.closeout_created",
+        agentSummary.meta.id,
+        "agent_summary",
+        {
+          subjectId: agentSummary.subjectId,
+          subjectType: agentSummary.subjectType,
+          workId: work.meta.id,
+          closeReason: reason,
+          forceReasonCode: agentSummary.forceReasonCode
+        },
+        current
+      );
+    }
     await writer.putWorkItem(updated);
     const event = await appendCliEvent(writer, context, "work.cancelled", updated.meta.id, "work", {
       reason,
@@ -2930,11 +2972,11 @@ async function backfillAgentSummaries(context: CliContext, args: ParsedArgs) {
             notes: work.closedReason ?? work.description
           }
         ],
-        evidenceIds: work.evidenceIds,
-        verificationIds: work.verificationIds,
-        commitShas: [],
-        dirtyPathNotes: [],
-        childSummaryIds: [],
+	        evidenceIds: work.evidenceIds,
+	        verificationIds: work.verificationIds,
+	        commitShas: [],
+	        dirtyPathNotes: ["legacy_backfill: checkpoint unavailable for pre-policy terminal work"],
+	        childSummaryIds: [],
         artifactUri: defaultAgentSummaryArtifactUri({ ...subject, summaryId: id }),
         generatedAt: current
       } satisfies AgentSummaryRecord);
@@ -3132,7 +3174,6 @@ interface CloseoutAgentSummaryResult {
   readonly summaries: readonly AgentSummaryRecord[];
   readonly created?: {
     readonly summary: AgentSummaryRecord;
-    readonly artifact: AgentSummaryArtifactResult;
   };
 }
 
@@ -3147,6 +3188,12 @@ async function ensureAgentSummaryForClose(
 ): Promise<CloseoutAgentSummaryResult> {
   const explicitSummaryIds = flagValues(args, "agent-summary").map(asAgentSummaryId);
   if (explicitSummaryIds.length > 0) {
+    if (closeoutSummaryMetadataRequested(args, options)) {
+      throw new BorealError(
+        "BOREAL_INVALID_INPUT",
+        "--agent-summary cannot be combined with closeout summary metadata flags; update the summary first or omit --agent-summary"
+      );
+    }
     const summaries = await context.store.read(async (reader) => {
       const records: AgentSummaryRecord[] = [];
       for (const summaryId of explicitSummaryIds) {
@@ -3158,38 +3205,54 @@ async function ensureAgentSummaryForClose(
     return { summaries };
   }
 
-  const existing = await latestFinalSummariesForSubject(context, work.meta.id);
-  if (existing.length > 0) {
+  const shouldCreateFreshSummary = closeoutSummaryMetadataRequested(args, options);
+  const existing = shouldCreateFreshSummary ? [] : await latestFinalSummariesForSubject(context, work.meta.id);
+  if (!shouldCreateFreshSummary && existing.length > 0) {
     return { summaries: existing };
   }
 
-  const created = await createCloseoutAgentSummary(context, args, work, closeReason, {
+  const summary = await buildCloseoutAgentSummaryRecord(context, args, work, closeReason, {
     force: hasFlag(args, "force-summary"),
     outcome: options.outcome
   });
-  return { summaries: [created.summary], created };
+  return { summaries: [summary], created: { summary } };
 }
 
-async function createAgentFinishSummary(
+function closeoutSummaryMetadataRequested(
+  args: ParsedArgs,
+  options: { readonly outcome?: AgentSummaryOutcome } = {}
+): boolean {
+  return (
+    options.outcome !== undefined ||
+    hasFlag(args, "force-summary") ||
+    flagValue(args, "force-reason") !== undefined ||
+    flagValue(args, "force-comment") !== undefined ||
+    flagValue(args, "outcome") !== undefined ||
+    flagValues(args, "commit").length > 0 ||
+    flagValues(args, "dirty-path").length > 0
+  );
+}
+
+async function agentFinishSummaryFactory(
   context: CliContext,
   args: ParsedArgs,
-  work: WorkItem,
-  input: {
-    readonly reason: string;
-    readonly evidence: EvidenceRecord;
-    readonly verification: VerificationRecord;
-  }
-): Promise<{ readonly summary: AgentSummaryRecord; readonly artifact: AgentSummaryArtifactResult }> {
-  return createCloseoutAgentSummary(context, args, work, input.reason, {
-    body: [
-      "## Agent Finish Summary",
-      "",
-      requiredFlag(args, "summary"),
-      "",
-      `Close reason: ${input.reason}`
-    ].join("\n"),
+  workId: WorkId,
+  reason: string
+): Promise<FinishReservedWorkSummaryFactory> {
+  const work = await context.store.read((reader) => requireCliWork(reader, workId));
+  const childSummaryIds = await childAgentSummaryIdsForWork(context, work);
+  const body = [
+    "## Agent Finish Summary",
+    "",
+    requiredFlag(args, "summary"),
+    "",
+    `Close reason: ${reason}`
+  ].join("\n");
+  return (input) => buildCloseoutAgentSummaryRecord(context, args, input.closedWork, reason, {
+    body,
     evidenceIds: [input.evidence.meta.id],
-    verificationIds: [input.verification.meta.id]
+    verificationIds: [input.verification.meta.id],
+    childSummaryIds
   });
 }
 
@@ -3227,7 +3290,7 @@ function assertCloseoutSummariesMatchWork(work: WorkItem, summaries: readonly Ag
   }
 }
 
-async function createCloseoutAgentSummary(
+async function buildCloseoutAgentSummaryRecord(
   context: CliContext,
   args: ParsedArgs,
   work: WorkItem,
@@ -3238,8 +3301,9 @@ async function createCloseoutAgentSummary(
     readonly body?: string;
     readonly evidenceIds?: readonly EvidenceRecord["meta"]["id"][];
     readonly verificationIds?: readonly VerificationRecord["meta"]["id"][];
+    readonly childSummaryIds?: readonly AgentSummaryId[];
   } = {}
-): Promise<{ readonly summary: AgentSummaryRecord; readonly artifact: AgentSummaryArtifactResult }> {
+): Promise<AgentSummaryRecord> {
   const subject = summarySubjectForWork(work);
   const current = nowIso();
   const forceReasonCode = options.force ? parseSummaryForceReason(requiredFlag(args, "force-reason")) : undefined;
@@ -3251,7 +3315,8 @@ async function createCloseoutAgentSummary(
   const verificationIds = uniqueValues(options.verificationIds ?? work.verificationIds);
   const commitShas = uniqueStrings(flagValues(args, "commit").map(normalizeCommitSha));
   const dirtyPathNotes = normalizedNonEmptyStrings(flagValues(args, "dirty-path"));
-  const childSummaryIds = await childAgentSummaryIdsForWork(context, work);
+  requireCommitOrDirtyPathReason(commitShas, dirtyPathNotes);
+  const childSummaryIds = options.childSummaryIds ?? await childAgentSummaryIdsForWork(context, work);
   const outcome = options.outcome ?? (options.force ? parseSummaryOutcome(flagValue(args, "outcome")) : "completed");
   const body = options.body?.trim() || await composedCloseoutSummaryBody(context, subject, closeReason, {
     forceReasonCode,
@@ -3299,23 +3364,7 @@ async function createCloseoutAgentSummary(
     forceComment,
     generatedAt: current
   } satisfies AgentSummaryRecord);
-  await context.store.write(async (writer) => {
-    await requireSummaryReferences(writer, {
-      evidenceIds,
-      verificationIds,
-      childSummaryIds
-    });
-    await writer.putAgentSummary(summary);
-    await appendCliEvent(writer, context, options.force ? "agent_summary.forced_closeout" : "agent_summary.closeout_created", summary.meta.id, "agent_summary", {
-      subjectId: summary.subjectId,
-      subjectType: summary.subjectType,
-      workId: work.meta.id,
-      closeReason,
-      forceReasonCode
-    }, current);
-  });
-  const artifact = await writeAgentSummaryArtifact(context, summary);
-  return { summary, artifact };
+  return summary;
 }
 
 function summarySubjectForWork(work: WorkItem): SummarySubject {
@@ -5418,21 +5467,29 @@ async function sprintCommand(
     case "close": {
       const sprint = await resolveSprintWork(context, rest[0] ?? "current");
       const reason = requiredFlag(args, "reason");
-      const metrics = await sprintMetricsResult(context, sprint, args, reason);
-      const closeoutSummary = await ensureAgentSummaryForClose(context, args, sprint, reason);
-      const closed = await context.runtime.closeWork({ workId: sprint.meta.id, reason });
-      output.write(
-        formatRecord(
+	      const metrics = await sprintMetricsResult(context, sprint, args, reason);
+	      const closeoutSummary = await ensureAgentSummaryForClose(context, args, sprint, reason);
+	      const closed = await context.runtime.closeWork({
+	        workId: sprint.meta.id,
+	        reason,
+	        agentSummary: closeoutSummary.created?.summary,
+	        agentSummaryIds: closeoutSummary.summaries.map((summary) => summary.meta.id)
+	      });
+	      const createdArtifact = closeoutSummary.created
+	        ? await writeAgentSummaryArtifact(context, closeoutSummary.created.summary)
+	        : undefined;
+	      output.write(
+	        formatRecord(
           {
             schemaVersion: "boreal.cli.sprint.close.v1",
             generatedAt: nowIso(),
             workspaceRoot: context.workspaceRoot,
             closed,
-            metrics,
-            agentSummaries: closeoutSummary.summaries,
-            createdAgentSummary: closeoutSummary.created?.summary,
-            createdAgentSummaryArtifact: closeoutSummary.created?.artifact
-          },
+	            metrics,
+	            agentSummaries: closeoutSummary.summaries,
+	            createdAgentSummary: closeoutSummary.created?.summary,
+	            createdAgentSummaryArtifact: createdArtifact
+	          },
           json
         )
       );

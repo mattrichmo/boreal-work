@@ -942,7 +942,16 @@ describe("bwrk cli", () => {
       ).stdout
     );
     await runCli(rootDir, ["work", "verify", closedBlocker.meta.id, "--evidence", blockerEvidence.meta.id, "--verdict", "passed", "--json"]);
-    await runCli(rootDir, ["work", "close", closedBlocker.meta.id, "--reason", "resolved for board test", "--json"]);
+    await runCli(rootDir, [
+      "work",
+      "close",
+      closedBlocker.meta.id,
+      "--reason",
+      "resolved for board test",
+      "--dirty-path",
+      "no_repo_changes: board fixture",
+      "--json"
+    ]);
     await runCli(rootDir, ["work", "reserve", reservedTask.meta.id, "--agent", "board-agent", "--purpose", "board test", "--json"]);
     await runCli(rootDir, ["sprint", "activate", sprint.meta.id, "--json"]);
 
@@ -1311,12 +1320,14 @@ describe("bwrk cli", () => {
           "Done through alias.",
           "--kind",
           "test",
-          "--command",
-          "node --version",
-          "--reason",
-          "verified alias path",
-          "--json"
-        ])
+	          "--command",
+	          "node --version",
+	          "--reason",
+	          "verified alias path",
+	          "--dirty-path",
+	          "no_repo_changes: alias done fixture",
+	          "--json"
+	        ])
       ).stdout
     );
     expect(done).toEqual(expect.objectContaining({ finished: true, action: "verified_and_closed" }));
@@ -1459,7 +1470,18 @@ describe("bwrk cli", () => {
     expect(parseJson<{ readonly code: string }>(activeCancel.stderr).code).toBe("BOREAL_POLICY_VIOLATION");
     await runCli(rootDir, ["work", "release", cancellable.meta.id, "--json"]);
     const cancelled = parseData<{ readonly work: { readonly status: string; readonly closedReason: string } }>(
-      (await runCli(rootDir, ["work", "cancel", cancellable.meta.id, "--reason", "not now", "--json"])).stdout
+      (
+        await runCli(rootDir, [
+          "work",
+          "cancel",
+          cancellable.meta.id,
+          "--reason",
+          "not now",
+          "--dirty-path",
+          "no_repo_changes: cancel fixture",
+          "--json"
+        ])
+      ).stdout
     );
     expect(cancelled.work).toEqual(expect.objectContaining({ status: "cancelled", closedReason: "not now" }));
     const reopened = parseData<{ readonly work: { readonly status: string; readonly closedReason?: string } }>(
@@ -1610,7 +1632,16 @@ describe("bwrk cli", () => {
         ).stdout
       );
       await runCli(rootDir, ["work", "verify", workId, "--evidence", evidence.meta.id, "--verdict", "passed", "--json"]);
-      await runCli(rootDir, ["work", "close", workId, "--reason", "completed for metrics", "--json"]);
+      await runCli(rootDir, [
+        "work",
+        "close",
+        workId,
+        "--reason",
+        "completed for metrics",
+        "--dirty-path",
+        "no_repo_changes: metrics fixture",
+        "--json"
+      ]);
     }
 
     const metrics = parseData<{
@@ -1657,7 +1688,18 @@ describe("bwrk cli", () => {
     );
     await runCli(rootDir, ["work", "verify", sprint.meta.id, "--evidence", sprintEvidence.meta.id, "--verdict", "passed", "--json"]);
     const closed = parseData<{ readonly closed: { readonly status: string; readonly closedReason: string }; readonly metrics: { readonly summary: { readonly open: number } } }>(
-      (await runCli(rootDir, ["sprint", "close", sprint.meta.id, "--reason", "metrics complete", "--json"])).stdout
+      (
+        await runCli(rootDir, [
+          "sprint",
+          "close",
+          sprint.meta.id,
+          "--reason",
+          "metrics complete",
+          "--dirty-path",
+          "no_repo_changes: metrics sprint fixture",
+          "--json"
+        ])
+      ).stdout
     );
     expect(closed.closed).toEqual(expect.objectContaining({ status: "closed", closedReason: "metrics complete" }));
     expect(closed.metrics.summary.open).toBe(0);
@@ -4633,7 +4675,16 @@ describe("bwrk cli", () => {
       ).stdout
     );
     await runCli(rootDir, ["work", "verify", blocker.meta.id, "--evidence", blockerEvidence.meta.id, "--verdict", "passed", "--json"]);
-    await runCli(rootDir, ["work", "close", blocker.meta.id, "--reason", "dependency satisfied", "--json"]);
+    await runCli(rootDir, [
+      "work",
+      "close",
+      blocker.meta.id,
+      "--reason",
+      "dependency satisfied",
+      "--dirty-path",
+      "no_repo_changes: dependency fixture",
+      "--json"
+    ]);
 
     const readyDependent = parseData<{
       readonly status: string;
@@ -5658,10 +5709,12 @@ describe("bwrk cli", () => {
       "work",
       "close",
       closeWork.meta.id,
-      "--reason",
-      "direct close should not bypass reservation",
-      "--json"
-    ]);
+	      "--reason",
+	      "direct close should not bypass reservation",
+	      "--dirty-path",
+	      "no_repo_changes: reserved close guard fixture",
+	      "--json"
+	    ]);
     const directReservedClosePayload = parseJson<{ readonly ok: false; readonly code: string; readonly message: string }>(
       directReservedClose.stderr
     );
@@ -5679,11 +5732,13 @@ describe("bwrk cli", () => {
       "Implemented and tested finish close.",
       "--command",
       "pnpm test",
-      "--close",
-      "--reason",
-      "verified by finish evidence",
-      "--json"
-    ]);
+	      "--close",
+	      "--reason",
+	      "verified by finish evidence",
+	      "--dirty-path",
+	      "no_repo_changes: agent finish fixture",
+	      "--json"
+	    ]);
     const closedPayload = parseData<{
       readonly finished: boolean;
       readonly action: string;
@@ -7637,7 +7692,7 @@ describe("bwrk cli", () => {
     expect(ambiguousPayload.code).toBe("BOREAL_CONFLICT");
   });
 
-  it("creates, renders, lists, and composes agent summaries", async () => {
+	  it("creates, renders, lists, and composes agent summaries", async () => {
     const rootDir = await makeTempWorkspace();
     await runCli(rootDir, ["init", "--json"]);
 
@@ -7747,11 +7802,182 @@ describe("bwrk cli", () => {
       "operator_override",
       "--json"
     ]);
-    expect(forcedWithoutComment.exitCode).toBe(2);
-    expect(parseJson<{ readonly code: string }>(forcedWithoutComment.stderr).code).toBe("BOREAL_INVALID_INPUT");
-  });
+	    expect(forcedWithoutComment.exitCode).toBe(2);
+	    expect(parseJson<{ readonly code: string }>(forcedWithoutComment.stderr).code).toBe("BOREAL_INVALID_INPUT");
+	  });
 
-  it("requires agent summary coverage for cancelled work and doctors terminal coverage", async () => {
+	  it("keeps closeout summaries atomic with work close failures", async () => {
+	    const rootDir = await makeTempWorkspace();
+	    await runCli(rootDir, ["init", "--json"]);
+
+	    const work = parseData<{ readonly meta: { readonly id: string } }>(
+	      (await runCli(rootDir, ["work", "create", "Unverified closeout target", "--ready", "--json"])).stdout
+	    );
+	    const failedClose = await runCli(rootDir, [
+	      "work",
+	      "close",
+	      work.meta.id,
+	      "--reason",
+	      "should not close",
+	      "--commit",
+	      "abc1234",
+	      "--json"
+	    ]);
+
+	    expect(failedClose.exitCode).toBe(1);
+	    expect(parseJson<{ readonly code: string }>(failedClose.stderr).code).toBe("BOREAL_POLICY_VIOLATION");
+	    const state = await readState<{
+	      readonly workItems: Array<{ readonly meta: { readonly id: string }; readonly status: string }>;
+	      readonly agentSummaries: readonly unknown[];
+	    }>(rootDir);
+	    expect(state.workItems.find((item) => item.meta.id === work.meta.id)?.status).toBe("ready");
+	    expect(state.agentSummaries).toHaveLength(0);
+	  });
+
+	  it("keeps agent finish close atomic when summary checkpoint metadata is invalid", async () => {
+	    const rootDir = await makeTempWorkspace();
+	    await runCli(rootDir, ["init", "--json"]);
+
+	    const work = parseData<{ readonly meta: { readonly id: string } }>(
+	      (await runCli(rootDir, ["work", "create", "Invalid finish checkpoint", "--label", "finish-atomic", "--ready", "--json"])).stdout
+	    );
+	    await runCli(rootDir, ["agent", "start", "--agent", "finish-atomic-agent", "--label", "finish-atomic", "--json"]);
+
+	    const failedFinish = await runCli(rootDir, [
+	      "agent",
+	      "finish",
+	      "current",
+	      "--agent",
+	      "finish-atomic-agent",
+	      "--summary",
+	      "Implemented the invalid checkpoint fixture.",
+	      "--command",
+	      "pnpm test",
+	      "--close",
+	      "--reason",
+	      "verified by invalid checkpoint fixture",
+	      "--commit",
+	      "notasha",
+	      "--json"
+	    ]);
+
+	    expect(failedFinish.exitCode).toBe(2);
+	    expect(parseJson<{ readonly code: string }>(failedFinish.stderr).code).toBe("BOREAL_INVALID_INPUT");
+	    const state = await readState<{
+	      readonly workItems: Array<{ readonly meta: { readonly id: string }; readonly status: string; readonly reservationId?: string }>;
+	      readonly evidence: readonly unknown[];
+	      readonly verifications: readonly unknown[];
+	      readonly agentSummaries: readonly unknown[];
+	      readonly reservations: Array<{ readonly workId: string; readonly status: string; readonly agentId: string }>;
+	    }>(rootDir);
+	    const storedWork = state.workItems.find((item) => item.meta.id === work.meta.id);
+	    expect(storedWork).toEqual(expect.objectContaining({ status: "in_progress" }));
+	    expect(state.evidence).toHaveLength(0);
+	    expect(state.verifications).toHaveLength(0);
+	    expect(state.agentSummaries).toHaveLength(0);
+	    expect(state.reservations).toEqual([
+	      expect.objectContaining({ workId: work.meta.id, status: "active", agentId: "finish-atomic-agent" })
+	    ]);
+	  });
+
+	  it("creates a fresh closeout summary when new checkpoint metadata is supplied", async () => {
+	    const rootDir = await makeTempWorkspace();
+	    await runCli(rootDir, ["init", "--json"]);
+
+	    const work = parseData<{ readonly meta: { readonly id: string } }>(
+	      (await runCli(rootDir, ["work", "create", "Fresh checkpoint summary", "--ready", "--json"])).stdout
+	    );
+	    const evidence = parseData<{ readonly meta: { readonly id: string } }>(
+	      (
+	        await runCli(rootDir, [
+	          "evidence",
+	          "add",
+	          work.meta.id,
+	          "--summary",
+	          "Fresh summary close evidence passed.",
+	          "--outcome",
+	          "passed",
+	          "--json"
+	        ])
+	      ).stdout
+	    );
+	    await runCli(rootDir, ["work", "verify", work.meta.id, "--evidence", evidence.meta.id, "--verdict", "passed", "--json"]);
+	    const previous = parseData<{ readonly summary: { readonly meta: { readonly id: string }; readonly commitShas: readonly string[] } }>(
+	      (
+	        await runCli(rootDir, [
+	          "summary",
+	          "create",
+	          work.meta.id,
+	          "--body",
+	          "Existing final summary without a checkpoint.",
+	          "--no-render",
+	          "--json"
+	        ])
+	      ).stdout
+	    );
+
+	    const closed = parseData<{
+	      readonly agentSummaries: readonly Array<{ readonly meta: { readonly id: string }; readonly commitShas: readonly string[] }>;
+	      readonly createdAgentSummary?: { readonly meta: { readonly id: string }; readonly commitShas: readonly string[] };
+	    }>(
+	      (
+	        await runCli(rootDir, [
+	          "work",
+	          "close",
+	          work.meta.id,
+	          "--reason",
+	          "verified with fresh checkpoint",
+	          "--commit",
+	          "abc1234",
+	          "--json"
+	        ])
+	      ).stdout
+	    );
+
+	    expect(previous.summary.commitShas).toEqual([]);
+	    expect(closed.agentSummaries).toEqual([
+	      expect.objectContaining({ commitShas: ["abc1234"] })
+	    ]);
+	    expect(closed.createdAgentSummary).toEqual(expect.objectContaining({ commitShas: ["abc1234"] }));
+	    expect(closed.createdAgentSummary?.meta.id).not.toBe(previous.summary.meta.id);
+	    const state = await readState<{ readonly agentSummaries: readonly Array<{ readonly subjectId: string }> }>(rootDir);
+	    expect(state.agentSummaries.filter((summary) => summary.subjectId === work.meta.id)).toHaveLength(2);
+	  });
+
+	  it("rejects closeout dirty-path notes without a checkpoint reason code", async () => {
+	    const rootDir = await makeTempWorkspace();
+	    await runCli(rootDir, ["init", "--json"]);
+
+	    const work = parseData<{ readonly meta: { readonly id: string } }>(
+	      (await runCli(rootDir, ["work", "create", "Dirty reason code target", "--ready", "--json"])).stdout
+	    );
+	    const invalid = await runCli(rootDir, [
+	      "work",
+	      "cancel",
+	      work.meta.id,
+	      "--reason",
+	      "no valid checkpoint reason",
+	      "--dirty-path",
+	      "none",
+	      "--json"
+	    ]);
+
+	    expect(invalid.exitCode).toBe(2);
+	    expect(parseJson<{ readonly code: string; readonly message: string }>(invalid.stderr)).toEqual(
+	      expect.objectContaining({
+	        code: "BOREAL_INVALID_INPUT",
+	        message: expect.stringContaining("reason-code prefixes")
+	      })
+	    );
+	    const state = await readState<{
+	      readonly workItems: Array<{ readonly meta: { readonly id: string }; readonly status: string }>;
+	      readonly agentSummaries: readonly unknown[];
+	    }>(rootDir);
+	    expect(state.workItems.find((item) => item.meta.id === work.meta.id)?.status).toBe("ready");
+	    expect(state.agentSummaries).toHaveLength(0);
+	  });
+
+	  it("requires agent summary coverage for cancelled work and doctors terminal coverage", async () => {
     const rootDir = await makeTempWorkspace();
     await runCli(rootDir, ["init", "--json"]);
 
@@ -7783,12 +8009,12 @@ describe("bwrk cli", () => {
           "--force-summary",
           "--force-reason",
           "duplicate",
-          "--force-comment",
-          "Covered by the canonical duplicate target.",
-          "--dirty-path",
-          "no code changes: duplicate closeout",
-          "--json"
-        ])
+	          "--force-comment",
+	          "Covered by the canonical duplicate target.",
+	          "--dirty-path",
+	          "no_repo_changes: duplicate closeout",
+	          "--json"
+	        ])
       ).stdout
     );
 
@@ -7797,10 +8023,10 @@ describe("bwrk cli", () => {
     expect(cancelled.agentSummaries).toEqual([
       expect.objectContaining({
         subjectId: work.meta.id,
-        status: "forced",
-        outcome: "cancelled",
-        dirtyPathNotes: ["no code changes: duplicate closeout"],
-        forceReasonCode: "duplicate",
+	        status: "forced",
+	        outcome: "cancelled",
+	        dirtyPathNotes: ["no_repo_changes: duplicate closeout"],
+	        forceReasonCode: "duplicate",
         forceComment: "Covered by the canonical duplicate target."
       })
     ]);
@@ -7833,7 +8059,7 @@ describe("bwrk cli", () => {
     const legacyDoctorRun = await runCli(rootDir, ["doctor", "--json"]);
     const legacyDoctor = parseData<DoctorPayload>(legacyDoctorRun.stdout);
     expect(legacyDoctorRun.exitCode).toBe(0);
-    expect(doctorDiagnostic(legacyDoctor, "summary.closeout_coverage")).toEqual(
+    expect(doctorDiagnostic(legacyDoctor, "summary.legacy_closeout_coverage")).toEqual(
       expect.objectContaining({
         severity: "warning",
         details: expect.arrayContaining([expect.objectContaining({ workId: legacy.meta.id })])

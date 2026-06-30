@@ -290,11 +290,13 @@ describe("agent E2E fixture", () => {
       "agent-e2e fixture",
       "--verdict",
       "passed",
-      "--close",
-      "--reason",
-      "Verified by ordered fixture.",
-      "--json"
-    ]);
+	      "--close",
+	      "--reason",
+	      "Verified by ordered fixture.",
+	      "--dirty-path",
+	      "no_repo_changes: agent e2e fixture",
+	      "--json"
+	    ]);
     expect(finished.action).toBe("verified_and_closed");
     expect(finished.work).toEqual(expect.objectContaining({ id: task.meta.id, status: "closed" }));
     expect(finished.work.contextSummary).toContain("is closed");

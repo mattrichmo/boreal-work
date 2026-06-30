@@ -40,6 +40,7 @@ import { inspectBorealInstallStatus, installStatusHealthy, installStatusSummary 
 import { buildExportDocument, exportDriftDiagnostics, ledgerStatus, readGeneratedLedgerTombstones } from "./import-export.js";
 import { inspectProjectSetupDrift, type ProjectSetupDriftInspection } from "./project-setup.js";
 import { inspectSearchIndex, searchIndexLockDir, writeSearchIndex } from "./search-cli.js";
+import { dirtyPathNotesHaveReasonCode } from "./summary-policy.js";
 import { inspectVault, listVaultRawSources, listVaultWikiPages, type RawSourceRecord, type WikiPageRecord } from "./vault.js";
 
 export type DiagnosticSeverity = "ok" | "warning" | "error" | "fixed";
@@ -77,6 +78,7 @@ const STATE_SECTIONS = [
 export const OPERATION_LOG_RECOMMENDED_KEEP = 1_000;
 const OPERATION_LOG_WARNING_GRACE = 25;
 const OPERATION_LOG_WARNING_THRESHOLD = OPERATION_LOG_RECOMMENDED_KEEP + OPERATION_LOG_WARNING_GRACE;
+const AGENT_SUMMARY_POLICY_ENFORCED_AT = "2026-06-30T00:00:00.000Z";
 const MCP_CONFIG_SCHEMA_VERSION = "boreal.mcp-config.v1";
 
 export async function runDoctor(context: CliContext, fix: boolean, strict = false): Promise<DoctorResult> {
@@ -1187,26 +1189,40 @@ async function validateStoreRecords(
       const closeoutSummaryKeys = new Set(
         closeoutSummaries.map((summary) => closeoutSummarySubjectKey(summary.subjectType, summary.subjectId))
       );
-      const missingCloseoutSummaries = terminalWorkItems
+      const missingCloseoutSummaryCandidates = terminalWorkItems
         .filter((work) => !closeoutSummaryKeys.has(closeoutSummarySubjectKey(doctorSummarySubjectTypeForWork(work), work.meta.id)))
         .map((work) => ({
           workId: work.meta.id,
           title: work.title,
           status: work.status,
           kind: work.kind,
-          expectedSubjectType: doctorSummarySubjectTypeForWork(work)
+          expectedSubjectType: doctorSummarySubjectTypeForWork(work),
+          closedAt: work.closedAt
         }));
-      const summaryCheckpointGaps = closeoutSummaries
+      const missingCloseoutSummaries = missingCloseoutSummaryCandidates.filter((entry) =>
+        isAgentSummaryPolicyEnforcedAt(entry.closedAt)
+      );
+      const legacyMissingCloseoutSummaries = missingCloseoutSummaryCandidates.filter((entry) =>
+        !isAgentSummaryPolicyEnforcedAt(entry.closedAt)
+      );
+      const summaryCheckpointGapCandidates = closeoutSummaries
         .filter((summary) => terminalWorkSubjectKeys.has(closeoutSummarySubjectKey(summary.subjectType, summary.subjectId)))
-        .filter((summary) => summary.commitShas.length === 0 && summary.dirtyPathNotes.length === 0)
+        .filter((summary) => summary.commitShas.length === 0 && !dirtyPathNotesHaveReasonCode(summary.dirtyPathNotes))
         .map((summary) => ({
           summaryId: summary.meta.id,
           subjectId: summary.subjectId,
           subjectType: summary.subjectType,
           status: summary.status,
+          generatedAt: summary.generatedAt,
           issue: "missing_commit_or_dirty_path_reason"
         }));
-      const summaryArtifactGaps = closeoutSummaries
+      const summaryCheckpointGaps = summaryCheckpointGapCandidates.filter((entry) =>
+        isAgentSummaryPolicyEnforcedAt(entry.generatedAt)
+      );
+      const legacySummaryCheckpointGaps = summaryCheckpointGapCandidates.filter((entry) =>
+        !isAgentSummaryPolicyEnforcedAt(entry.generatedAt)
+      );
+      const summaryArtifactGapCandidates = closeoutSummaries
         .filter((summary) => terminalWorkSubjectKeys.has(closeoutSummarySubjectKey(summary.subjectType, summary.subjectId)))
         .filter((summary) => !summary.artifactUri)
         .map((summary) => ({
@@ -1214,8 +1230,15 @@ async function validateStoreRecords(
           subjectId: summary.subjectId,
           subjectType: summary.subjectType,
           status: summary.status,
+          generatedAt: summary.generatedAt,
           issue: "missing_artifact_uri"
         }));
+      const summaryArtifactGaps = summaryArtifactGapCandidates.filter((entry) =>
+        isAgentSummaryPolicyEnforcedAt(entry.generatedAt)
+      );
+      const legacySummaryArtifactGaps = summaryArtifactGapCandidates.filter((entry) =>
+        !isAgentSummaryPolicyEnforcedAt(entry.generatedAt)
+      );
       const forcedSummaryReasonGaps = agentSummaries
         .filter((summary) => summary.status === "forced" && (!summary.forceReasonCode || !summary.forceComment?.trim()))
         .map((summary) => ({
@@ -1514,8 +1537,11 @@ async function validateStoreRecords(
         verificationPolicy,
         closedWithoutReason,
         missingCloseoutSummaries,
+        legacyMissingCloseoutSummaries,
         summaryCheckpointGaps,
+        legacySummaryCheckpointGaps,
         summaryArtifactGaps,
+        legacySummaryArtifactGaps,
         forcedSummaryReasonGaps,
         danglingSummaryEvidence,
         danglingSummaryVerifications,
@@ -1683,13 +1709,34 @@ async function validateStoreRecords(
     diagnostics.push(diagnosticFromList("work.closed_reason", "Closed work items missing a close reason", summary.closedWithoutReason));
     diagnostics.push(diagnosticFromList("summary.force_reason", "Forced agent summaries missing reason code or comment", summary.forcedSummaryReasonGaps));
     diagnostics.push(
-      warningDiagnosticFromList("summary.closeout_coverage", "Terminal work missing final or forced agent summaries", summary.missingCloseoutSummaries)
+      diagnosticFromList("summary.closeout_coverage", "Terminal work missing final or forced agent summaries", summary.missingCloseoutSummaries)
     );
     diagnostics.push(
-      warningDiagnosticFromList("summary.checkpoint_coverage", "Closeout summaries missing commit SHA or dirty-path reason", summary.summaryCheckpointGaps)
+      warningDiagnosticFromList(
+        "summary.legacy_closeout_coverage",
+        "Legacy terminal work missing final or forced agent summaries",
+        summary.legacyMissingCloseoutSummaries
+      )
     );
     diagnostics.push(
-      warningDiagnosticFromList("summary.artifact_coverage", "Closeout summaries missing Markdown artifact URI", summary.summaryArtifactGaps)
+      diagnosticFromList("summary.checkpoint_coverage", "Closeout summaries missing commit SHA or dirty-path reason code", summary.summaryCheckpointGaps)
+    );
+    diagnostics.push(
+      warningDiagnosticFromList(
+        "summary.legacy_checkpoint_coverage",
+        "Legacy closeout summaries missing commit SHA or dirty-path reason code",
+        summary.legacySummaryCheckpointGaps
+      )
+    );
+    diagnostics.push(
+      diagnosticFromList("summary.artifact_coverage", "Closeout summaries missing Markdown artifact URI", summary.summaryArtifactGaps)
+    );
+    diagnostics.push(
+      warningDiagnosticFromList(
+        "summary.legacy_artifact_coverage",
+        "Legacy closeout summaries missing Markdown artifact URI",
+        summary.legacySummaryArtifactGaps
+      )
     );
     diagnostics.push(diagnosticFromList("operation.dangling_events", "Operation event references missing runtime events", summary.danglingOperationEvents));
     diagnostics.push(warningDiagnosticFromList("operation.legacy_events", "Legacy operation/event links", summary.legacyOperationEvents));
@@ -2501,6 +2548,14 @@ function finalize(diagnostics: readonly Diagnostic[], fixed: boolean, strict: bo
   return { ok, strict, fixed, diagnostics };
 }
 
+function isAgentSummaryPolicyEnforcedAt(timestamp: string | undefined): boolean {
+  if (!timestamp) {
+    return true;
+  }
+  const parsed = Date.parse(timestamp);
+  return Number.isNaN(parsed) || parsed >= Date.parse(AGENT_SUMMARY_POLICY_ENFORCED_AT);
+}
+
 const STRICT_ADVISORY_WARNING_CODES = new Set([
   "daemon.status",
   "install.status",
@@ -2508,9 +2563,9 @@ const STRICT_ADVISORY_WARNING_CODES = new Set([
   "ledger.export_drift",
   "cache.sqlite",
   "search.index",
-  "summary.closeout_coverage",
-  "summary.checkpoint_coverage",
-  "summary.artifact_coverage"
+  "summary.legacy_closeout_coverage",
+  "summary.legacy_checkpoint_coverage",
+  "summary.legacy_artifact_coverage"
 ]);
 
 export function strictBlockingWarning(diagnostic: Diagnostic): boolean {

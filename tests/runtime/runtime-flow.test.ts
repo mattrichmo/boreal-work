@@ -1,6 +1,19 @@
 import { describe, expect, it } from "vitest";
 
-import { BorealError, type ActorRef, type EvidenceId, type IsoTimestamp, type KnowledgeSourceId } from "@boreal/core";
+import {
+  BorealError,
+  createRecordMeta,
+  deterministicId,
+  withContentHash,
+  type ActorRef,
+  type AgentSummaryId,
+  type AgentSummaryRecord,
+  type EvidenceId,
+  type IsoTimestamp,
+  type KnowledgeSourceId,
+  type VerificationId,
+  type WorkItem
+} from "@boreal/core";
 import { createBorealRuntime } from "@boreal/engine";
 import { recordEvidence, verifySubject } from "@boreal/evidence-engine";
 import { createClaim, createDecision, createKnowledgeSource } from "@boreal/knowledge-engine";
@@ -11,6 +24,53 @@ const actor: ActorRef = {
   kind: "agent",
   displayName: "Codex Runtime Test"
 };
+
+function closeoutSummaryFor(
+  work: WorkItem,
+  input: {
+    readonly evidenceIds?: readonly EvidenceId[];
+    readonly verificationIds?: readonly VerificationId[];
+    readonly nonce?: string;
+  } = {}
+): AgentSummaryRecord {
+  const generatedAt = "2026-01-01T00:00:00.000Z" as IsoTimestamp;
+  const subjectType = work.kind === "sprint" ? "sprint" : work.kind === "milestone" ? "milestone" : "work";
+  const summaryId = deterministicId<AgentSummaryId>("summary", {
+    subjectId: work.meta.id,
+    title: work.title,
+    nonce: input.nonce ?? "runtime-test-closeout"
+  });
+  return withContentHash({
+    meta: createRecordMeta({
+      id: summaryId,
+      now: generatedAt,
+      actor,
+      tags: ["agent-summary", "closeout"]
+    }),
+    subjectId: work.meta.id,
+    subjectType,
+    summaryKind: subjectType === "sprint" || subjectType === "milestone" ? subjectType : "task",
+    status: "final",
+    outcome: "completed",
+    title: `Closeout summary: ${work.title}`,
+    body: "Runtime test closeout summary.",
+    completedWork: [
+      {
+        workId: work.meta.id,
+        title: work.title,
+        outcome: "completed",
+        notes: "Runtime test closeout."
+      }
+    ],
+    evidenceIds: input.evidenceIds ?? [],
+    verificationIds: input.verificationIds ?? [],
+    commitShas: ["abc1234"],
+    dirtyPathNotes: [],
+    childSummaryIds: [],
+    artifactUri: `agent-summaries/${summaryId}.md`,
+    generatedAt
+  } satisfies AgentSummaryRecord);
+}
 
 describe("boreal runtime proof slice", () => {
   it("rejects runtime policies that do not match the schema", () => {
@@ -51,7 +111,7 @@ describe("boreal runtime proof slice", () => {
     } satisfies Partial<BorealError>);
   });
 
-  it("runs create, dependency readiness, reserve, evidence, verify, close, and projections", async () => {
+	  it("runs create, dependency readiness, reserve, evidence, verify, close, and projections", async () => {
     let tick = 0;
     const runtime = createBorealRuntime({
       actor,
@@ -90,7 +150,7 @@ describe("boreal runtime proof slice", () => {
       summary: "storage transaction test passed",
       outcome: "passed"
     });
-    await runtime.verifyWork({
+    const foundationVerification = await runtime.verifyWork({
       workId: foundation.meta.id,
       verdict: "passed",
       evidenceIds: [foundationEvidence.meta.id],
@@ -98,7 +158,12 @@ describe("boreal runtime proof slice", () => {
     });
     await runtime.closeWork({
       workId: foundation.meta.id,
-      reason: "verified by test evidence"
+      reason: "verified by test evidence",
+      agentSummary: closeoutSummaryFor(foundation, {
+        evidenceIds: [foundationEvidence.meta.id],
+        verificationIds: [foundationVerification.meta.id],
+        nonce: "foundation"
+      })
     });
 
     const ready = await runtime.listReadyWork();
@@ -137,7 +202,12 @@ describe("boreal runtime proof slice", () => {
 
     const closed = await runtime.closeWork({
       workId: feature.meta.id,
-      reason: "proof slice verified"
+      reason: "proof slice verified",
+      agentSummary: closeoutSummaryFor(feature, {
+        evidenceIds: [featureEvidence.meta.id],
+        verificationIds: [verification.meta.id],
+        nonce: "feature"
+      })
     });
     expect(closed.status).toBe("closed");
 
@@ -160,10 +230,47 @@ describe("boreal runtime proof slice", () => {
         "work.closed",
         "projection.rebuilt"
       ])
-    );
-  });
+	    );
+	  });
 
-  it("uses nonce-backed work ids for same-title creates in one timestamp", async () => {
+	  it("enforces agent summary policy at the runtime close boundary", async () => {
+	    const store = new InMemoryBorealStore();
+	    const runtime = createBorealRuntime({ store, actor });
+	    const work = await runtime.createWork({ title: "Runtime summary policy target", ready: true });
+	    const evidence = await runtime.recordEvidence({
+	      subjectId: work.meta.id,
+	      subjectType: "work",
+	      kind: "test",
+	      summary: "summary policy evidence passed",
+	      outcome: "passed"
+	    });
+	    const verification = await runtime.verifyWork({
+	      workId: work.meta.id,
+	      verdict: "passed",
+	      evidenceIds: [evidence.meta.id]
+	    });
+
+	    await expect(runtime.closeWork({ workId: work.meta.id, reason: "missing summary" })).rejects.toMatchObject({
+	      code: "BOREAL_POLICY_VIOLATION"
+	    } satisfies Partial<BorealError>);
+	    const closed = await runtime.closeWork({
+	      workId: work.meta.id,
+	      reason: "summary provided",
+	      agentSummary: closeoutSummaryFor(work, {
+	        evidenceIds: [evidence.meta.id],
+	        verificationIds: [verification.meta.id],
+	        nonce: "runtime-policy"
+	      })
+	    });
+
+	    expect(closed.status).toBe("closed");
+	    const summaries = await store.read((reader) => reader.listAgentSummariesForSubject(work.meta.id));
+	    expect(summaries).toEqual([
+	      expect.objectContaining({ subjectId: work.meta.id, status: "final" })
+	    ]);
+	  });
+
+	  it("uses nonce-backed work ids for same-title creates in one timestamp", async () => {
     const runtime = createBorealRuntime({
       actor,
       clock: () => new Date("2026-01-01T00:00:00.000Z")
@@ -362,14 +469,19 @@ describe("boreal runtime proof slice", () => {
       summary: "resolved blocker passed",
       outcome: "passed"
     });
-    await runtime.verifyWork({
+    const resolvedVerification = await runtime.verifyWork({
       workId: resolvedBlocker.meta.id,
       verdict: "passed",
       evidenceIds: [evidence.meta.id]
     });
     await runtime.closeWork({
       workId: resolvedBlocker.meta.id,
-      reason: "resolved before adding dependency"
+      reason: "resolved before adding dependency",
+      agentSummary: closeoutSummaryFor(resolvedBlocker, {
+        evidenceIds: [evidence.meta.id],
+        verificationIds: [resolvedVerification.meta.id],
+        nonce: "resolved-blocker"
+      })
     });
 
     const updated = await runtime.addBlockingDependency({
@@ -588,7 +700,7 @@ describe("boreal runtime proof slice", () => {
       summary: "close guard evidence passed",
       outcome: "passed"
     });
-    await runtime.verifyWork({ workId: work.meta.id, verdict: "passed", evidenceIds: [evidence.meta.id] });
+    const verification = await runtime.verifyWork({ workId: work.meta.id, verdict: "passed", evidenceIds: [evidence.meta.id] });
 
     await expect(runtime.closeWork({ workId: work.meta.id, reason: "direct close while active" })).rejects.toMatchObject({
       code: "BOREAL_POLICY_VIOLATION"
@@ -599,7 +711,15 @@ describe("boreal runtime proof slice", () => {
     });
 
     current = new Date("2026-01-01T00:11:00.000Z");
-    const closed = await runtime.closeWork({ workId: work.meta.id, reason: "expired reservation no longer owns close" });
+    const closed = await runtime.closeWork({
+      workId: work.meta.id,
+      reason: "expired reservation no longer owns close",
+      agentSummary: closeoutSummaryFor(work, {
+        evidenceIds: [evidence.meta.id],
+        verificationIds: [verification.meta.id],
+        nonce: "expired-reservation"
+      })
+    });
     expect(closed.status).toBe("closed");
     await expect(runtime.getWorkView(work.meta.id)).resolves.toMatchObject({
       status: "closed",
@@ -660,7 +780,13 @@ describe("boreal runtime proof slice", () => {
         notes: "single runtime write"
       },
       close: {
-        reason: "verified atomically"
+        reason: "verified atomically",
+        agentSummary: ({ closedWork, evidence, verification }) =>
+          closeoutSummaryFor(closedWork, {
+            evidenceIds: [evidence.meta.id],
+            verificationIds: [verification.meta.id],
+            nonce: "finish-reserved"
+          })
       }
     });
 
@@ -671,6 +797,7 @@ describe("boreal runtime proof slice", () => {
     expect(finished.reservation.status).toBe("released");
     expect(finished.release.work.status).toBe("closed");
     expect(finished.closedWork?.closedReason).toBe("verified atomically");
+    expect(finished.agentSummary?.subjectId).toBe(work.meta.id);
 
     const events = await runtime.listEvents();
     expect(events.map((event) => event.type)).toEqual(

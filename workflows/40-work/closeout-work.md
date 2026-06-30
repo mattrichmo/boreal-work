@@ -77,6 +77,7 @@ Use manual closeout only for work that was completed outside the active-reservat
    `bwrk work verify <work-id> --evidence <evidence-id> --verdict passed --notes "<notes>" --json`
 6. Compose or reference the required agent summary before close. Include Git checkpoint SHA(s) or dirty-path notes from `workflows/40-work/checkpoint-git-state.md`:
    `bwrk summary compose <work-id> --commit <sha> --json`
+   `bwrk summary compose <work-id> --dirty-path "no_repo_changes: <why no commit was valid>" --json`
 7. Close only after passed verification and summary availability:
    `bwrk work close <work-id> --reason "<reason>" --agent-summary <summary-id> --json`
 
@@ -94,6 +95,7 @@ For sprint or parent-gate closeout:
    `bwrk sprint report <sprint-id> --doctor-evidence <doctor-evidence-id> --sync-evidence <sync-evidence-id> --json`
 6. Compose the sprint rollup summary from child summaries, final evidence, and checkpoint SHA(s):
    `bwrk summary compose <sprint-id> --commit <sha> --json`
+   `bwrk summary compose <sprint-id> --dirty-path "no_repo_changes: <why no commit was valid>" --json`
 7. Close the sprint only after passed verification, checkpoint evidence, and summary availability:
    `bwrk sprint close <sprint-id> --reason "<reason>" --agent-summary <summary-id> --json`
 
