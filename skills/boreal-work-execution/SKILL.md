@@ -37,4 +37,4 @@ Use the value after `workflows/` with `bwrk workflows show <ref>` if the repo-re
 
 ## Completion
 
-End with the workflow result, verification status, Git checkpoint commit or reason code, granular closeout summary, and the next suggested workflow.
+End with the workflow result, verification status, agent summary record ID/artifact URI, Git checkpoint commit or reason code, granular closeout summary, and the next suggested workflow.

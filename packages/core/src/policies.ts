@@ -10,7 +10,7 @@ export interface RuntimePolicy {
 export const DEFAULT_RUNTIME_POLICY: RuntimePolicy = {
   requireEvidenceForVerification: true,
   requirePassingVerificationForClose: true,
-  requireAgentSummaryForClose: false,
+  requireAgentSummaryForClose: true,
   preventDependencyCycles: true,
   allowReservationStealing: false,
   maxActiveReservationsPerAgent: 3

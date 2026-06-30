@@ -16,6 +16,8 @@ allowed_commands:
   - sprint show
   - sprint metrics
   - sprint report
+  - summary compose
+  - summary create
   - evidence add
   - docs check
   - schema validate
@@ -44,6 +46,7 @@ Use this workflow after a coherent task, phase, sprint, milestone, or major refa
 
 ## Safety Constraints
 
+- Never read or write a sibling repository's memory unless the user explicitly names that repository and workspace.
 - Never stage or commit a sibling repository unless the user explicitly names that repository.
 - Inspect every in-scope Git root before staging; project and memory roots can be separate repositories.
 - Stage explicit pathspecs by default. Use `git add -A` only after every dirty path in that Git root has been inspected and declared in scope.
@@ -61,8 +64,9 @@ Use this workflow after a coherent task, phase, sprint, milestone, or major refa
 6. Verify the staged set with `git diff --cached --name-status` and `git diff --cached --stat`.
 7. Commit each in-scope Git root with a scoped message that names the task, sprint, phase, milestone, or work ID.
 8. If no commit is valid, record one reason code from the list below and explain what evidence proves the closeout can continue.
-9. After the checkpoint, run `bwrk sync refresh --json` and `bwrk gate closeout --json` or the narrower health commands required by the parent workflow.
+9. After the checkpoint, run `bwrk sync refresh --json` and `bwrk doctor --strict --json`, or `bwrk gate closeout --json` when the parent workflow requires the full gate.
 10. Attach checkpoint evidence to the work or sprint with `bwrk evidence add`, including commit SHA(s), reason code, validation commands, and any out-of-scope dirty paths.
+11. Create or update the closeout agent summary with the checkpoint SHA(s), or include the no-commit reason code in `--dirty-path` / summary notes before parent closeout.
 
 ## Command Sequences
 
@@ -86,6 +90,8 @@ Use raw Git commands for repository mutations because Boreal validates workflow 
    `git log --oneline --decorate -3`
 7. Attach evidence:
    `bwrk evidence add <work-id> --summary "Git checkpoint: <sha-or-reason>" --kind command --command "<validation and git commands>" --outcome passed --json`
+8. Link the checkpoint into the agent summary:
+   `bwrk summary compose <work-id> --commit <sha> --dirty-path "<out-of-scope path classification>" --json`
 
 For separate memory mode, run the memory commit first when memory changes are in scope, then run the project commit. Never stage child `memory/` contents into the project repository unless the project uses shared memory mode.
 
@@ -129,6 +135,7 @@ Use one of these reason codes when a closeout does not have an in-scope commit:
 
 - Record commit SHA(s) or reason code(s) as evidence before parent work is closed.
 - Include the staged path list and validation commands in the evidence summary or command field.
+- Include commit SHA(s) or no-commit reason code(s) in the work or sprint agent summary before closeout.
 - If any dirty path remains after the checkpoint, classify it as in scope, out of scope, ignored/generated, or blocked.
 - For protected branches, use `sync.git.findings` to distinguish blocking Git failures from non-blocking collaboration caveats.
 
@@ -142,6 +149,7 @@ Use one of these reason codes when a closeout does not have an in-scope commit:
 ## Finish Criteria
 
 - The target task, sprint, phase, milestone, or project has a commit checkpoint or explicit reason code.
+- The target closeout summary records the commit SHA(s), or records the reason code/comment explaining why no commit was valid.
 - Every in-scope Git root has been inspected before and after staging or committing.
 - The staged set was verified before commit.
 - The final health gate passed or the remaining diagnostic is explicitly reported.

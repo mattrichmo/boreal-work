@@ -237,10 +237,10 @@ Golden-path alias for `bwrk agent start`. It resumes the selected agent's active
 ## `done`
 
 ```bash
-bwrk done --summary <text> --reason <text> [--agent <agent-id>] [--kind command|test|diff|review|artifact|note] [--outcome passed|failed|observed|unknown] [--command <cmd>] [--uri <uri>] [--notes <text>] [--json]
+bwrk done --summary <text> --reason <text> [--agent <agent-id>] [--kind command|test|diff|review|artifact|note] [--outcome passed|failed|observed|unknown] [--command <cmd>] [--uri <uri>] [--notes <text>] [--commit <sha>...] [--dirty-path <note>...] [--json]
 ```
 
-Golden-path alias for `bwrk agent finish current --close` with a passed verification. It records evidence, verifies, closes, releases the active reservation, and returns the same finish payload as `agent finish`.
+Golden-path alias for `bwrk agent finish current --close` with a passed verification. It records evidence, verifies, closes, releases the active reservation, creates an agent closeout summary, and returns the same finish payload as `agent finish`.
 
 ## `pause`
 
@@ -493,10 +493,10 @@ Computes sprint planning and closeout metrics from dependency-scoped work. The p
 ## `sprint close`
 
 ```bash
-bwrk sprint close [<sprint-ref>] --reason <text> [--capacity <n>] [--carryover <work-ref>...] [--risk <text>...] [--limit <n>] [--json]
+bwrk sprint close [<sprint-ref>] --reason <text> [--capacity <n>] [--carryover <work-ref>...] [--risk <text>...] [--limit <n>] [--agent-summary <id>...] [--force-summary --force-reason <code> --force-comment <text>] [--commit <sha>...] [--dirty-path <note>...] [--json]
 ```
 
-Closes a verified sprint through the normal work close policy and returns the same metrics payload beside the closed sprint record. Runtime close policy still requires a passing verification on the sprint work item.
+Closes a verified sprint through the normal work close policy after ensuring a final or forced agent summary exists for the sprint. If no summary is supplied or already linked to the sprint, the command composes one from sprint state, child summaries, evidence, verification, commits, and dirty-path notes. Use `--force-summary` only with `--force-reason` and `--force-comment` for audited bypasses.
 
 ## `init`
 
@@ -831,10 +831,10 @@ Prints the compact agent loop without requiring an initialized workspace. The gu
 ## `agent finish`
 
 ```bash
-bwrk agent finish <work-id> --summary <text> (--close --reason <text>|--release) [--agent <agent-id>] [--kind command|test|diff|review|artifact|note] [--outcome passed|failed|observed|unknown] [--command <cmd>] [--uri <uri>] [--verdict passed|failed] [--notes <text>] [--json]
+bwrk agent finish <work-id> --summary <text> (--close --reason <text>|--release) [--agent <agent-id>] [--kind command|test|diff|review|artifact|note] [--outcome passed|failed|observed|unknown] [--command <cmd>] [--uri <uri>] [--verdict passed|failed] [--notes <text>] [--commit <sha>...] [--dirty-path <note>...] [--json]
 ```
 
-Guarded exit workflow for work with an active agent reservation. The command requires the selected agent to own the active, non-expired reservation before it records evidence, verifies the work, and closes or releases anything. Use `current` or `active` as the work reference when the selected `--agent` has exactly one non-expired active reservation. Evidence, verification, optional close, reservation release, readiness repair, and the final `agent.finished` event run as one engine transaction. One of `--close` or `--release` is required so finish cannot leave active ownership behind.
+Guarded exit workflow for work with an active agent reservation. The command requires the selected agent to own the active, non-expired reservation before it records evidence, verifies the work, and closes or releases anything. Use `current` or `active` as the work reference when the selected `--agent` has exactly one non-expired active reservation. Evidence, verification, optional close, reservation release, readiness repair, and the final `agent.finished` event run as one engine transaction. One of `--close` or `--release` is required so finish cannot leave active ownership behind. When closing, the evidence summary becomes the generated agent closeout summary body and optional `--commit` / `--dirty-path` values are linked into that summary.
 
 Behavior:
 
@@ -1017,10 +1017,10 @@ Creates a verification record. `--evidence` may be repeated. Verification fails 
 ## `work close`
 
 ```bash
-bwrk work close <work-id> [--reason <text>] [--json]
+bwrk work close <work-id> --reason <text> [--agent-summary <id>...] [--force-summary --force-reason <code> --force-comment <text>] [--commit <sha>...] [--dirty-path <note>...] [--json]
 ```
 
-Closes a work item. Runtime policy requires a passing verification before close.
+Closes a work item. Runtime policy requires a passing verification before close, and the CLI ensures a final or forced agent summary exists for the work subject before calling the close path. If no summary is supplied or already exists, the command composes a final closeout summary automatically. JSON output is a `boreal.cli.work.close.v1` envelope with `work`, `agentSummaries`, and optional `createdAgentSummary` / `createdAgentSummaryArtifact`.
 
 ## `work edit`
 

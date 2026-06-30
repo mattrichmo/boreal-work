@@ -9,6 +9,9 @@ requires_workspace: true
 allowed_commands:
   - work show
   - dep tree
+  - summary compose
+  - summary create
+  - summary show
   - evidence add
   - work verify
   - work close
@@ -72,8 +75,10 @@ Use manual closeout only for work that was completed outside the active-reservat
 4. Capture the evidence ID from `data.meta.id`.
 5. Verify with that exact evidence ID:
    `bwrk work verify <work-id> --evidence <evidence-id> --verdict passed --notes "<notes>" --json`
-6. Close only after passed verification:
-   `bwrk work close <work-id> --reason "<reason>" --json`
+6. Compose or reference the required agent summary before close. Include Git checkpoint SHA(s) or dirty-path notes from `workflows/40-work/checkpoint-git-state.md`:
+   `bwrk summary compose <work-id> --commit <sha> --json`
+7. Close only after passed verification and summary availability:
+   `bwrk work close <work-id> --reason "<reason>" --agent-summary <summary-id> --json`
 
 For sprint or parent-gate closeout:
 
@@ -87,14 +92,19 @@ For sprint or parent-gate closeout:
    `bwrk evidence add <sprint-id> --summary "doctor closeout passed" --kind command --command "bwrk doctor --strict --json" --outcome passed --json`
 5. Generate the sprint report when closing a sprint:
    `bwrk sprint report <sprint-id> --doctor-evidence <doctor-evidence-id> --sync-evidence <sync-evidence-id> --json`
-6. Close the sprint only after passed verification and checkpoint evidence:
-   `bwrk sprint close <sprint-id> --reason "<reason>" --json`
+6. Compose the sprint rollup summary from child summaries, final evidence, and checkpoint SHA(s):
+   `bwrk summary compose <sprint-id> --commit <sha> --json`
+7. Close the sprint only after passed verification, checkpoint evidence, and summary availability:
+   `bwrk sprint close <sprint-id> --reason "<reason>" --agent-summary <summary-id> --json`
 
 
 ## CLI Commands
 
 - `bwrk work show`
 - `bwrk dep tree`
+- `bwrk summary compose`
+- `bwrk summary create`
+- `bwrk summary show`
 - `bwrk evidence add`
 - `bwrk work verify`
 - `bwrk work close`
@@ -114,6 +124,7 @@ For sprint or parent-gate closeout:
 - Keep raw source material immutable; reconcile into wiki, claims, decisions, or work instead of rewriting raw records.
 - For work changes, confirm dependency and readiness state after mutation.
 - For repository changes, attach Git checkpoint evidence or a no-commit reason code before closing task, sprint, phase, or milestone work.
+- Every work, sprint, phase, milestone, or project close must have a final or forced agent summary record. Forced summaries require both a reason code and a human comment.
 - For sprint and milestone closeout, include per-child status, evidence, verification, commit, and deferral state in the user-facing summary.
 
 ## Required User Closeout Summary
@@ -122,6 +133,7 @@ End the workflow with a granular closeout summary:
 
 - Parent scope: work ID, sprint ID, phase ID, milestone ID, or project scope.
 - Child breakdown: each child task or sprint with status, outcome, evidence ID(s), verification ID(s), and close/defer reason.
+- Agent summaries: parent summary ID/artifact, child summary IDs, and forced summary reason/comment when applicable.
 - Git checkpoints: commit SHA(s) per Git root, or reason code(s) for children that legitimately did not commit.
 - Validation: commands run, gate status, and any non-blocking Git caveats.
 - Remaining state: carryover, unresolved blockers, out-of-scope dirty paths, and next workflow.
@@ -137,6 +149,7 @@ End the workflow with a granular closeout summary:
 - The requested outcome is represented in Boreal records or the workflow has returned a clear read-only answer.
 - Any new or updated durable memory has source/evidence support.
 - Any repository state change has checkpoint evidence or an explicit reason code before close.
+- Every closed item has a final or forced agent summary record, and forced records include a reason code and comment.
 - Sprint, phase, milestone, and project closeouts include a child-by-child user summary.
 - `bwrk doctor --strict --json` passes or the remaining diagnostic is explicitly reported.
 

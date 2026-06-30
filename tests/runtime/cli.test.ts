@@ -4536,8 +4536,19 @@ describe("bwrk cli", () => {
     ]);
     expect(parseData<{ readonly verdict: string }>(verification.stdout).verdict).toBe("passed");
 
-    const closed = await runCli(rootDir, ["work", "close", work.meta.id, "--reason", "verified", "--json"]);
-    expect(parseData<{ readonly status: string }>(closed.stdout).status).toBe("closed");
+    const closed = await runCli(rootDir, ["work", "close", work.meta.id, "--reason", "verified", "--commit", "abc1234", "--json"]);
+    const closeout = parseData<{
+      readonly work: { readonly status: string };
+      readonly agentSummaries: readonly Array<{ readonly subjectId: string; readonly commitShas: readonly string[] }>;
+      readonly createdAgentSummary?: { readonly subjectId: string; readonly commitShas: readonly string[] };
+      readonly createdAgentSummaryArtifact?: { readonly path: string };
+    }>(closed.stdout);
+    expect(closeout.work.status).toBe("closed");
+    expect(closeout.agentSummaries).toEqual([
+      expect.objectContaining({ subjectId: work.meta.id, commitShas: ["abc1234"] })
+    ]);
+    expect(closeout.createdAgentSummary).toEqual(expect.objectContaining({ subjectId: work.meta.id, commitShas: ["abc1234"] }));
+    expect(closeout.createdAgentSummaryArtifact?.path).toContain("agent-summaries");
 
     const repaired = await runCli(rootDir, ["doctor", "--fix", "--json"]);
     const repairedPayload = parseData<{ readonly ok: boolean; readonly fixed: boolean }>(repaired.stdout);

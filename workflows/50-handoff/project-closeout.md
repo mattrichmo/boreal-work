@@ -14,6 +14,8 @@ allowed_commands:
   - sprint list
   - sprint show
   - sprint report
+  - summary list
+  - summary show
   - decision list
   - sync refresh
   - gate closeout
@@ -54,7 +56,8 @@ Use this workflow when the user's request requires summarize project status, mem
 4. Attach evidence or source references for any durable claim, decision, or closed work.
 5. Rebuild derived artifacts when the workflow changes memory, context, or search.
 6. Run `bwrk doctor --strict --json` unless the workflow is explicitly read-only and no generated artifacts changed.
-7. Summarize each closed sprint, phase, milestone, and task with evidence, verification, Git checkpoint commit(s), and reason code(s).
+7. Summarize each closed sprint, phase, milestone, and task with evidence, verification, agent summary ID/artifact URI, Git checkpoint commit(s), and reason code(s).
+8. Include forced summary reason/comment whenever a closeout was bypassed for duplicate, cancelled, external, legacy, or operator-override reasons.
 
 
 
@@ -67,6 +70,8 @@ Use this workflow when the user's request requires summarize project status, mem
 - `bwrk sprint list`
 - `bwrk sprint show`
 - `bwrk sprint report`
+- `bwrk summary list`
+- `bwrk summary show`
 - `bwrk decision list`
 - `bwrk sync refresh`
 - `bwrk gate closeout`
@@ -77,6 +82,7 @@ Use this workflow when the user's request requires summarize project status, mem
 - Keep raw source material immutable; reconcile into wiki, claims, decisions, or work instead of rewriting raw records.
 - For work changes, confirm dependency and readiness state after mutation.
 - Project closeout must include a sprint/task breakdown and Git checkpoint summary. If a sprint or task has no commit, include the reason code from `workflows/40-work/checkpoint-git-state.md`.
+- Project closeout must include the agent summary hierarchy for each closed sprint/task: parent summary, child summaries, artifact URI(s), and forced reason/comment when present.
 - Report uncommitted paths by Git root and classify each as in scope, out of scope, ignored/generated, or blocked.
 
 ## Failure And Repair
@@ -89,7 +95,7 @@ Use this workflow when the user's request requires summarize project status, mem
 
 - The requested outcome is represented in Boreal records or the workflow has returned a clear read-only answer.
 - Any new or updated durable memory has source/evidence support.
-- Every closed sprint, phase, milestone, or task is represented in the human-readable closeout summary.
+- Every closed sprint, phase, milestone, or task is represented in the human-readable closeout summary with its agent summary record/artifact.
 - Repository changes are represented by commit SHA(s) or explicit no-commit reason code(s).
 - `bwrk doctor --strict --json` passes or the remaining diagnostic is explicitly reported.
 
