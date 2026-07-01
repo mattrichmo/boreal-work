@@ -180,6 +180,18 @@ Compiler stages:
 
 The compiler must fail closed for invalid registry entries and fail soft for missing optional data by emitting a diagnostic directive rather than fabricating instructions.
 
+## Runtime And Daemon Surface
+
+`@boreal/agent-runtime` exposes `compileAgentRuntimeDirectiveObligations()` for non-CLI callers. The helper accepts a typed `AgentDirectiveSnapshot` and a context of `work`, `session`, `closeout`, `health`, or `handoff`, then returns:
+
+- `agentDirectives`: the same bundle shape used by CLI JSON envelopes.
+- `summary`: counts for selected, emitted, required, blocking, closeout-blocking, conflict, deprecation, and missing-required directives.
+- `dataByRegistryId`, `issues`, and `missingRequired` for callers that need to inspect why a directive was selected or withheld.
+
+The helper composes registry-backed data builders from `packages/core`; it does not shell out to `bwrk`, read workflow Markdown, or accept dynamic instruction text.
+
+Daemon callers use `compileDaemonDirectiveObligations()` after the daemon has bound the selected project boundary. Daemon status and watch payloads also expose `agentDirectives` and `directiveObligations`, with daemon health findings mapped into typed diagnostic data for the static `doctor.recovery-required` and `workflow_next.canonical-next-step` directives.
+
 ## Precedence And Conflict Handling
 
 Directive precedence is deterministic:
@@ -204,7 +216,7 @@ Initial command groups:
 - Planning and graph: `work create`, `work edit`, `work split`, `work ready`, `dep add`, `dep remove`, `dep tree`.
 - Workflow/skills: `workflows list`, `workflows show`, `install codex`, `install claude`, `doctor skills`.
 - Health: `prime`, `sync status`, `sync refresh`, `doctor`, `lock inspect`, `operation prune`.
-- Agent surfaces: MCP tool results, daemon status/watch payloads, console live data, and TUI view models.
+- Agent surfaces: MCP tool results, daemon status/watch payloads, agent-runtime directive obligations, console live data, and TUI view models.
 
 Envelope rules:
 

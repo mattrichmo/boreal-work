@@ -3,10 +3,24 @@ import { mkdir, readFile, rm } from "node:fs/promises";
 import { join, resolve } from "node:path";
 
 import {
+  compileAgentRuntimeDirectiveObligations,
+  type AgentRuntimeDirectiveContext,
+  type AgentRuntimeDirectiveObligations,
+  type AgentRuntimeDirectiveObligationsInput
+} from "@boreal/agent-runtime";
+import {
+  AGENT_DIRECTIVE_SNAPSHOT_CONTEXT_KEYS,
   BorealError,
   bindMcpProjectBoundary,
+  createAgentDirectiveSnapshot,
+  hashContent,
   nowIso,
   safeParseJson,
+  type AgentDirectiveBundle,
+  type AgentDirectiveDiagnosticSnapshot,
+  type AgentDirectiveSnapshot,
+  type ContentHash,
+  type IsoTimestamp,
   type McpProjectBoundary,
   type ProjectRegistryMemoryLayout
 } from "@boreal/core";
@@ -61,6 +75,8 @@ export interface DaemonStatusResult {
   };
   readonly findings: readonly DaemonFinding[];
   readonly recommendedActions: readonly string[];
+  readonly agentDirectives: readonly AgentDirectiveBundle[];
+  readonly directiveObligations: AgentRuntimeDirectiveObligations;
 }
 
 export interface DaemonWatchResult {
@@ -78,6 +94,17 @@ export interface DaemonRuntimeOptions {
   readonly workspaceRoot: string;
   readonly pidExists?: (pid: number) => boolean;
   readonly now?: () => string;
+}
+
+export interface DaemonDirectiveObligationsResult extends AgentRuntimeDirectiveObligations {
+  readonly workspaceRoot: string;
+  readonly projectRoot: string;
+  readonly memoryRoot: string;
+  readonly memoryLayout: ProjectRegistryMemoryLayout;
+}
+
+export interface DaemonDirectiveObligationsInput extends AgentRuntimeDirectiveObligationsInput {
+  readonly workspaceRoot: string;
 }
 
 interface DaemonProjectBinding {
@@ -116,7 +143,7 @@ export async function inspectDaemonStatus(options: DaemonRuntimeOptions): Promis
   }
 
   if (!binding.boundary) {
-    return daemonStatusResult({
+    return withDaemonDirectiveObligations(daemonStatusResult({
       generatedAt,
       workspaceRoot,
       statusPath,
@@ -125,12 +152,12 @@ export async function inspectDaemonStatus(options: DaemonRuntimeOptions): Promis
       watchPaths,
       findings,
       recommendedActions: [...recommendedActions]
-    });
+    }));
   }
 
   const statusFile = await readDaemonStatusFile(statusPath);
   if (!statusFile) {
-    return daemonStatusResult({
+    return withDaemonDirectiveObligations(daemonStatusResult({
       generatedAt,
       workspaceRoot,
       projectRoot: binding.boundary.projectRoot,
@@ -142,7 +169,7 @@ export async function inspectDaemonStatus(options: DaemonRuntimeOptions): Promis
       watchPaths,
       findings,
       recommendedActions: [...recommendedActions]
-    });
+    }));
   }
 
   findings.push(...statusFileFindings(statusFile, binding.boundary));
@@ -171,7 +198,7 @@ export async function inspectDaemonStatus(options: DaemonRuntimeOptions): Promis
         ? "running"
         : "stale";
 
-  return daemonStatusResult({
+  return withDaemonDirectiveObligations(daemonStatusResult({
     generatedAt,
     workspaceRoot,
     projectRoot: binding.boundary.projectRoot,
@@ -185,7 +212,7 @@ export async function inspectDaemonStatus(options: DaemonRuntimeOptions): Promis
     watchPaths,
     findings,
     recommendedActions: [...recommendedActions]
-  });
+  }));
 }
 
 export async function runDaemonWatchOnce(options: DaemonRuntimeOptions): Promise<DaemonWatchResult> {
@@ -207,6 +234,26 @@ export async function runDaemonWatchOnce(options: DaemonRuntimeOptions): Promise
     status,
     observedPaths: action === "observed" ? status.watch.paths : [],
     recommendedActions: status.recommendedActions
+  };
+}
+
+export async function compileDaemonDirectiveObligations(
+  input: DaemonDirectiveObligationsInput
+): Promise<DaemonDirectiveObligationsResult> {
+  const workspaceRoot = resolve(input.workspaceRoot);
+  const binding = await bindDaemonProject(workspaceRoot);
+  if (!binding.boundary) {
+    throw new BorealError("BOREAL_INVALID_INPUT", "Cannot compile daemon directive obligations for an unhealthy project boundary", {
+      workspaceRoot,
+      findings: binding.findings
+    });
+  }
+  return {
+    workspaceRoot,
+    projectRoot: binding.boundary.projectRoot,
+    memoryRoot: binding.boundary.memoryRoot,
+    memoryLayout: binding.boundary.memoryLayout,
+    ...compileAgentRuntimeDirectiveObligations(input)
   };
 }
 
@@ -428,7 +475,7 @@ function daemonStatusResult(input: {
   readonly watchPaths: readonly string[];
   readonly findings: readonly DaemonFinding[];
   readonly recommendedActions: readonly string[];
-}): DaemonStatusResult {
+}): Omit<DaemonStatusResult, "agentDirectives" | "directiveObligations"> {
   return {
     schemaVersion: DAEMON_STATUS_SCHEMA_VERSION,
     generatedAt: input.generatedAt,
@@ -449,6 +496,178 @@ function daemonStatusResult(input: {
     findings: input.findings,
     recommendedActions: [...new Set(input.recommendedActions)]
   };
+}
+
+function withDaemonDirectiveObligations(
+  status: Omit<DaemonStatusResult, "agentDirectives" | "directiveObligations">,
+  context: AgentRuntimeDirectiveContext = "health"
+): DaemonStatusResult {
+  const diagnostics = daemonDirectiveDiagnostics(status);
+  const workflowRef = diagnostics.length > 0
+    ? "workflows/60-health/sync-and-doctor.md"
+    : "workflows/40-work/claim-and-finish-work.md";
+  const nextCommandPath = diagnostics.length > 0
+    ? status.recommendedActions[0] ?? "bwrk doctor --strict --json"
+    : "bwrk work list --ready --json";
+  const directiveObligations = compileAgentRuntimeDirectiveObligations({
+    context,
+    snapshot: daemonDirectiveSnapshot(status, diagnostics, workflowRef, nextCommandPath),
+    recovery: {
+      diagnostics,
+      recommendedCommands: diagnostics.length > 0 ? daemonDirectiveRecommendedCommands(status) : [],
+      nextWorkflowRef: workflowRef,
+      nextCommandPath
+    }
+  });
+  return {
+    ...status,
+    agentDirectives: directiveObligations.agentDirectives,
+    directiveObligations
+  };
+}
+
+function daemonDirectiveSnapshot(
+  status: Omit<DaemonStatusResult, "agentDirectives" | "directiveObligations">,
+  diagnostics: readonly AgentDirectiveDiagnosticSnapshot[],
+  workflowRef: string,
+  nextCommandPath: string
+): AgentDirectiveSnapshot {
+  const generatedAt = status.generatedAt as IsoTimestamp;
+  const primaryRoot = status.projectRoot ?? status.workspaceRoot;
+  const healthOk = diagnostics.length === 0 && status.state !== "missing" && status.state !== "drift" && status.state !== "stale";
+
+  return createAgentDirectiveSnapshot({
+    capturedAt: generatedAt,
+    work: {
+      subject: {
+        type: "workspace",
+        id: status.workspaceRoot,
+        title: "Workspace"
+      },
+      labels: [],
+      dependencyIds: [],
+      activeBlockerIds: [],
+      blockedByIds: [],
+      childWorkIds: [],
+      descendantWorkIds: [],
+      openDescendantIds: []
+    },
+    summary: {
+      summaryIds: [],
+      finalSummaryIds: [],
+      childSummaryIds: [],
+      artifactUris: [],
+      commitShas: [],
+      dirtyPathNotes: []
+    },
+    gate: {
+      requiredGates: [],
+      openGateIds: [],
+      satisfiedGateIds: [],
+      forcedGateIds: []
+    },
+    evidence: {
+      evidenceIds: [],
+      verificationIds: [],
+      evidence: [],
+      verifications: []
+    },
+    git: {
+      roots: [
+        {
+          root: primaryRoot,
+          detached: false,
+          protectedBranch: false,
+          clean: true,
+          scopedChangedPaths: [],
+          collaborationDirtyPaths: [],
+          blockingDirtyPaths: [],
+          untrackedPaths: []
+        }
+      ],
+      checkpointCommitShas: [],
+      dirtyPathNotes: []
+    },
+    workflow: {
+      workflowRefs: [workflowRef],
+      skillRefs: diagnostics.length > 0 ? ["boreal-health-doctor"] : ["boreal-work-execution"],
+      requiredInputNames: [...AGENT_DIRECTIVE_SNAPSHOT_CONTEXT_KEYS],
+      nextWorkflowRef: workflowRef,
+      recommendedCommandPath: nextCommandPath,
+      assetManifestHash: hashContent({
+        commandPath: "daemon status",
+        workflowRef,
+        state: status.state,
+        findingCodes: status.findings.map((finding) => finding.code)
+      }) as ContentHash
+    },
+    doctor: {
+      ok: healthOk,
+      strict: true,
+      diagnostics
+    },
+    sync: {
+      ok: healthOk,
+      refreshed: false,
+      ledgersFresh: healthOk,
+      searchIndexFresh: healthOk,
+      sqliteCacheFresh: healthOk
+    },
+    command: {
+      path: "daemon status",
+      argv: ["daemon", "status", "--json"],
+      envelopeSchema: DAEMON_STATUS_SCHEMA_VERSION,
+      json: true,
+      mutatesState: false,
+      resultOk: healthOk
+    },
+    actor: {
+      actor: {
+        id: "boreal-daemon",
+        kind: "system",
+        displayName: "Boreal daemon"
+      },
+      activeReservationIds: []
+    }
+  });
+}
+
+function daemonDirectiveDiagnostics(
+  status: Omit<DaemonStatusResult, "agentDirectives" | "directiveObligations">
+): readonly AgentDirectiveDiagnosticSnapshot[] {
+  return status.findings.map((finding) => ({
+    code: finding.code,
+    severity: finding.severity,
+    message: finding.message,
+    blocking: finding.severity === "error" || status.state === "missing" || status.state === "drift",
+    recommendedCommands: daemonFindingRecommendedCommands(finding)
+  }));
+}
+
+function daemonDirectiveRecommendedCommands(
+  status: Omit<DaemonStatusResult, "agentDirectives" | "directiveObligations">
+): readonly string[] {
+  const commands = [
+    ...status.recommendedActions,
+    ...status.findings.flatMap((finding) => daemonFindingRecommendedCommands(finding))
+  ];
+  return [...new Set(commands.length > 0 ? commands : ["bwrk doctor --strict --json"])];
+}
+
+function daemonFindingRecommendedCommands(finding: DaemonFinding): readonly string[] {
+  if (finding.repairCommand) {
+    return [finding.repairCommand];
+  }
+  if (finding.code.startsWith("daemon.lock.")) {
+    return ["bwrk lock inspect --json"];
+  }
+  if (finding.code === "daemon.project_missing" || finding.code === "daemon.boundary") {
+    return ["bwrk prime --json"];
+  }
+  if (finding.code === "daemon.pid_stale" || finding.code === "daemon.status_drift") {
+    return ["bwrk daemon status --json"];
+  }
+  return [];
 }
 
 function daemonWatchPaths(workspaceRoot: string): readonly string[] {

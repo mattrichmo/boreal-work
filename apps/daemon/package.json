@@ -12,6 +12,7 @@
     "watch:once": "pnpm build && node dist/index.js watch --once --workspace ../.."
   },
   "dependencies": {
+    "@boreal/agent-runtime": "workspace:*",
     "@boreal/core": "workspace:*",
     "@boreal/storage": "workspace:*"
   },

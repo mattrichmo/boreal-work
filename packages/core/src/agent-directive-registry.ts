@@ -244,7 +244,7 @@ export const AGENT_DIRECTIVE_REGISTRY: AgentDirectiveRegistry = {
       title: "Recover workspace health",
       instruction: "Run the safe health workflow for the listed diagnostics before continuing dependent work.",
       appliesTo: {
-        commandPaths: ["doctor", "lock inspect", "prime", "sync refresh", "sync status"],
+        commandPaths: ["daemon status", "daemon watch", "doctor", "lock inspect", "prime", "sync refresh", "sync status"],
         subjectTypes: ["workspace", "project", "session"]
       },
       blocksCloseout: true,
@@ -442,6 +442,8 @@ export const AGENT_DIRECTIVE_REGISTRY: AgentDirectiveRegistry = {
         commandPaths: [
           "agent start",
           "agent finish",
+          "daemon status",
+          "daemon watch",
           "prime",
           "doctor",
           "gate closeout",
