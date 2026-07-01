@@ -6168,6 +6168,196 @@ describe("bwrk cli", () => {
     expect(heartbeatLedger).toContain(created.heartbeat.meta.id);
   });
 
+  it("lists recently closed work with checkpoint, container, kind, and phase filters", async () => {
+    const rootDir = await makeTempWorkspace();
+    await runCli(rootDir, ["init", "--json"]);
+
+    const sprint = parseData<{ readonly meta: { readonly id: string } }>(
+      (await runCli(rootDir, ["work", "create", "Recent closed sprint", "--kind", "sprint", "--ready", "--json"])).stdout
+    );
+    const older = parseData<{ readonly meta: { readonly id: string } }>(
+      (await runCli(rootDir, ["work", "create", "Older closed child", "--ready", "--json"])).stdout
+    );
+    const equal = parseData<{ readonly meta: { readonly id: string } }>(
+      (await runCli(rootDir, ["work", "create", "Equal watermark child", "--ready", "--json"])).stdout
+    );
+    const newer = parseData<{ readonly meta: { readonly id: string } }>(
+      (await runCli(rootDir, ["work", "create", "Newer closed child", "--ready", "--json"])).stdout
+    );
+    const phase = parseData<{ readonly meta: { readonly id: string } }>(
+      (
+        await runCli(rootDir, [
+          "work",
+          "create",
+          "Phase close milestone",
+          "--kind",
+          "milestone",
+          "--label",
+          "phase",
+          "--ready",
+          "--json"
+        ])
+      ).stdout
+    );
+    const outside = parseData<{ readonly meta: { readonly id: string } }>(
+      (await runCli(rootDir, ["work", "create", "Outside closed issue", "--kind", "issue", "--ready", "--json"])).stdout
+    );
+    for (const child of [older, equal, newer, phase]) {
+      await runCli(rootDir, ["dep", "add", sprint.meta.id, child.meta.id, "--json"]);
+    }
+
+    const closedAtByWork = new Map([
+      [older.meta.id, "2026-01-01T00:00:00.000Z"],
+      [equal.meta.id, "2026-01-02T00:00:00.000Z"],
+      [newer.meta.id, "2026-01-03T00:00:00.000Z"],
+      [phase.meta.id, "2026-01-04T00:00:00.000Z"],
+      [outside.meta.id, "2026-01-05T00:00:00.000Z"]
+    ]);
+    await updateState(rootDir, (state) => ({
+      ...state,
+      workItems: state.workItems.map((work) =>
+        closedAtByWork.has(work.meta.id)
+          ? {
+              ...work,
+              status: "closed",
+              closedAt: closedAtByWork.get(work.meta.id),
+              closedReason: `${work.title} closed`,
+              evidenceIds: [`bw_evidence_${work.meta.id.slice("bw_work_".length)}`],
+              verificationIds: [`bw_verification_${work.meta.id.slice("bw_work_".length)}`]
+            }
+          : work
+      ),
+      events: [
+        ...((state.events as readonly unknown[] | undefined) ?? []),
+        ...[older, equal, newer, phase, outside].map((work, index) => ({
+          meta: {
+            ...testMeta(`bw_event_${String(index + 1).padStart(12, "0")}`),
+            createdAt: closedAtByWork.get(work.meta.id),
+            updatedAt: closedAtByWork.get(work.meta.id)
+          },
+          type: "work.closed",
+          subjectId: work.meta.id,
+          subjectType: "work",
+          payload: { reason: `${work.meta.id} closed` }
+        }))
+      ]
+    }));
+
+    const checkpointRun = await runCli(rootDir, [
+      "heartbeat",
+      "create",
+      "recent-review",
+      "--reviewer",
+      "reviewer-a",
+      "--container",
+      sprint.meta.id,
+      "--closed-at",
+      "2026-01-02T00:00:00.000Z",
+      "--json"
+    ]);
+    expect(checkpointRun).toEqual(expect.objectContaining({ exitCode: 0, stderr: "" }));
+    const checkpoint = parseData<{
+      readonly heartbeat: { readonly meta: { readonly id: string }; readonly lastClosedAt?: string; readonly lastWorkId?: string };
+    }>(checkpointRun.stdout);
+    expect(checkpoint.heartbeat.lastClosedAt).toBe("2026-01-02T00:00:00.000Z");
+    expect(checkpoint.heartbeat.lastWorkId).toBeUndefined();
+
+    const afterCheckpoint = parseData<{
+      readonly schemaVersion: string;
+      readonly filters: { readonly after: { readonly source: string; readonly includeEqualClosedAt: boolean }; readonly containerId: string };
+      readonly items: readonly Array<{
+        readonly id: string;
+        readonly title: string;
+        readonly kind: string;
+        readonly status: string;
+        readonly closedAt: string;
+        readonly closedReason: string;
+        readonly labels: readonly string[];
+        readonly evidenceCount: number;
+        readonly verificationCount: number;
+        readonly closedEventId?: string;
+      }>;
+    }>(
+      (
+        await runCli(rootDir, [
+          "work",
+          "recent-closed",
+          "--container",
+          sprint.meta.id,
+          "--after",
+          checkpoint.heartbeat.meta.id,
+          "--order",
+          "asc",
+          "--json"
+        ])
+      ).stdout
+    );
+
+    expect(afterCheckpoint.schemaVersion).toBe("boreal.cli.work.recent_closed.v1");
+    expect(afterCheckpoint.filters).toEqual(
+      expect.objectContaining({
+        containerId: sprint.meta.id,
+        after: expect.objectContaining({ source: "checkpoint", includeEqualClosedAt: true })
+      })
+    );
+    expect(afterCheckpoint.items.map((item) => item.id)).toEqual([equal.meta.id, newer.meta.id, phase.meta.id]);
+    expect(afterCheckpoint.items[0]).toEqual(
+      expect.objectContaining({
+        title: "Equal watermark child",
+        kind: "task",
+        status: "closed",
+        closedAt: "2026-01-02T00:00:00.000Z",
+        closedReason: "Equal watermark child closed",
+        evidenceCount: 1,
+        verificationCount: 1,
+        closedEventId: expect.stringMatching(/^bw_event_/)
+      })
+    );
+
+    const afterIso = parseData<{ readonly items: readonly Array<{ readonly id: string }> }>(
+      (
+        await runCli(rootDir, [
+          "work",
+          "recent-closed",
+          "--container",
+          sprint.meta.id,
+          "--after",
+          "2026-01-02T00:00:00.000Z",
+          "--order",
+          "asc",
+          "--json"
+        ])
+      ).stdout
+    );
+    expect(afterIso.items.map((item) => item.id)).toEqual([newer.meta.id, phase.meta.id]);
+
+    const limitedTasks = parseData<{ readonly items: readonly Array<{ readonly id: string; readonly kind: string }> }>(
+      (
+        await runCli(rootDir, [
+          "work",
+          "recent-closed",
+          "--container",
+          sprint.meta.id,
+          "--kind",
+          "task",
+          "--since",
+          "2026-01-03T00:00:00.000Z",
+          "--limit",
+          "1",
+          "--json"
+        ])
+      ).stdout
+    );
+    expect(limitedTasks.items).toEqual([expect.objectContaining({ id: newer.meta.id, kind: "task" })]);
+
+    const phaseOnly = parseData<{ readonly items: readonly Array<{ readonly id: string; readonly kind: string; readonly labels: readonly string[] }> }>(
+      (await runCli(rootDir, ["work", "recent-closed", "--container", sprint.meta.id, "--phase", "--json"])).stdout
+    );
+    expect(phaseOnly.items).toEqual([
+      expect.objectContaining({ id: phase.meta.id, kind: "milestone", labels: expect.arrayContaining(["phase"]) })
+    ]);
+  });
+
   it("reports SQLite cache missing, stale, and corrupt states in doctor", async () => {
     const rootDir = await makeTempWorkspace();
     await runCli(rootDir, ["init", "--json"]);

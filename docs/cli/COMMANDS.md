@@ -666,6 +666,16 @@ JSON `data` shape:
 ]
 ```
 
+## `work recent-closed`
+
+```bash
+bwrk work recent-closed [--since <duration|iso>] [--after <iso|checkpoint-id>] [--container <work-ref>] [--kind issue|task|sprint|milestone] [--phase] [--limit <n>] [--order asc|desc] [--json]
+```
+
+Lists closed work from durable work records plus matching `work.closed` events, sorted by `closedAt`. The rows include id, title, kind, status, closedAt, closedReason, labels, evidence count, verification count, and the latest closed event id when present.
+
+Use `--since` for an inclusive ISO timestamp or relative duration such as `2h`; use `--after` for an exclusive ISO timestamp or an inclusive reviewer heartbeat checkpoint id. `--container` scopes results to the container and its dependency-graph descendants. `--phase` returns phase milestones, represented as milestone work carrying the `phase` label.
+
 ## `work next`
 
 ```bash

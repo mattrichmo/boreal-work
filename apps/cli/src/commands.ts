@@ -268,6 +268,19 @@ interface WorkListRow {
   readonly labels: readonly string[];
 }
 
+interface RecentClosedWorkRow {
+  readonly id: WorkId;
+  readonly title: string;
+  readonly kind: WorkKind;
+  readonly status: "closed";
+  readonly closedAt: IsoTimestamp;
+  readonly closedReason?: string;
+  readonly labels: readonly string[];
+  readonly evidenceCount: number;
+  readonly verificationCount: number;
+  readonly closedEventId?: EventId;
+}
+
 interface DependencyTreeNode {
   readonly id: string;
   readonly title?: string;
@@ -2314,6 +2327,181 @@ function compareClosedWorkWatermark(left: WorkItem, right: WorkItem): number {
   );
 }
 
+type RecentClosedOrder = "asc" | "desc";
+
+interface RecentClosedCursor {
+  readonly value: string;
+  readonly source: "iso" | "checkpoint";
+  readonly closedAt?: IsoTimestamp;
+  readonly eventId?: EventId;
+  readonly workId?: WorkId;
+  readonly includeEqualClosedAt: boolean;
+}
+
+async function recentClosedWorkCommand(context: CliContext, args: ParsedArgs) {
+  const limit = parseLimit(flagValue(args, "limit")) ?? DEFAULT_LIST_LIMIT;
+  const order = parseRecentClosedOrder(flagValue(args, "order"));
+  const since = parseRecentClosedSince(flagValue(args, "since"));
+  const after = await recentClosedCursorFromArgs(context, flagValue(args, "after"));
+  const kind = parseRecentClosedKind(flagValue(args, "kind"));
+  const phase = hasFlag(args, "phase");
+  if (phase && kind && kind !== "milestone") {
+    throw new BorealError("BOREAL_INVALID_INPUT", "--phase can only be combined with --kind milestone");
+  }
+  const containerId = flagValue(args, "container")
+    ? await resolveWorkId(context, requiredFlag(args, "container"))
+    : undefined;
+  const snapshot = await context.store.read(async (reader) => ({
+    workItems: await reader.listWorkItems(),
+    graphEdges: await reader.listGraphEdges(),
+    events: await reader.listEvents()
+  }));
+  const scopedIds = containerId ? heartbeatScopeIds(containerId, snapshot.workItems, snapshot.graphEdges) : undefined;
+  const rows = snapshot.workItems
+    .filter((work): work is WorkItem & { readonly status: "closed"; readonly closedAt: IsoTimestamp } =>
+      work.status === "closed" && work.closedAt !== undefined
+    )
+    .filter((work) => !kind || work.kind === kind)
+    .filter((work) => !phase || (work.kind === "milestone" && work.labels.includes("phase")))
+    .filter((work) => !scopedIds || scopedIds.has(work.meta.id))
+    .filter((work) => !since || work.closedAt >= since)
+    .filter((work) => recentClosedWorkIsAfterCursor(work, after))
+    .map((work) => recentClosedWorkRow(work, snapshot.events))
+    .sort((left, right) => compareRecentClosedRows(left, right, order))
+    .slice(0, limit);
+  return {
+    schemaVersion: "boreal.cli.work.recent_closed.v1",
+    generatedAt: nowIso(),
+    workspaceRoot: context.workspaceRoot,
+    filters: {
+      since,
+      after,
+      containerId,
+      kind,
+      phase,
+      order,
+      limit
+    },
+    items: rows
+  };
+}
+
+function recentClosedWorkRow(work: WorkItem & { readonly status: "closed"; readonly closedAt: IsoTimestamp }, events: readonly RuntimeEvent[]): RecentClosedWorkRow {
+  return {
+    id: work.meta.id,
+    title: work.title,
+    kind: work.kind,
+    status: work.status,
+    closedAt: work.closedAt,
+    closedReason: work.closedReason,
+    labels: [...work.labels],
+    evidenceCount: work.evidenceIds.length,
+    verificationCount: work.verificationIds.length,
+    closedEventId: workClosedEventId(events, work.meta.id)
+  };
+}
+
+function recentClosedWorkIsAfterCursor(work: WorkItem & { readonly closedAt: IsoTimestamp }, cursor: RecentClosedCursor | undefined): boolean {
+  if (!cursor?.closedAt) {
+    return true;
+  }
+  if (work.closedAt > cursor.closedAt) {
+    return true;
+  }
+  if (work.closedAt < cursor.closedAt) {
+    return false;
+  }
+  if (!cursor.includeEqualClosedAt) {
+    return false;
+  }
+  if (!cursor.workId) {
+    return true;
+  }
+  return work.meta.id.localeCompare(cursor.workId) > 0;
+}
+
+function compareRecentClosedRows(left: RecentClosedWorkRow, right: RecentClosedWorkRow, order: RecentClosedOrder): number {
+  const ascending = left.closedAt.localeCompare(right.closedAt) || left.id.localeCompare(right.id);
+  return order === "asc" ? ascending : -ascending;
+}
+
+function textRecentClosedWorkRow(row: RecentClosedWorkRow) {
+  return {
+    id: row.id,
+    kind: row.kind,
+    closedAt: row.closedAt,
+    evidence: row.evidenceCount,
+    verification: row.verificationCount,
+    title: row.title
+  };
+}
+
+function parseRecentClosedOrder(value: string | undefined): RecentClosedOrder {
+  if (!value || value === "desc") {
+    return "desc";
+  }
+  if (value === "asc") {
+    return "asc";
+  }
+  throw new BorealError("BOREAL_INVALID_INPUT", "--order must be asc or desc");
+}
+
+function parseRecentClosedKind(value: string | undefined): WorkKind | undefined {
+  if (!value) {
+    return undefined;
+  }
+  if (value === "issue" || value === "task" || value === "sprint" || value === "milestone") {
+    return value;
+  }
+  throw new BorealError("BOREAL_INVALID_INPUT", "--kind must be issue, task, sprint, or milestone");
+}
+
+function parseRecentClosedSince(value: string | undefined): IsoTimestamp | undefined {
+  if (!value) {
+    return undefined;
+  }
+  if (isIsoTimestamp(value)) {
+    return value as IsoTimestamp;
+  }
+  const match = /^([1-9][0-9]*)(s|m|h|d)$/.exec(value.trim());
+  if (!match) {
+    throw new BorealError("BOREAL_INVALID_INPUT", "--since must be an ISO timestamp or positive duration like 30m, 2h, or 1d");
+  }
+  const amount = Number(match[1]);
+  const unit = match[2];
+  const multiplier = unit === "s" ? 1_000 : unit === "m" ? 60_000 : unit === "h" ? 3_600_000 : 86_400_000;
+  return new Date(Date.now() - amount * multiplier).toISOString() as IsoTimestamp;
+}
+
+async function recentClosedCursorFromArgs(context: CliContext, value: string | undefined): Promise<RecentClosedCursor | undefined> {
+  if (!value) {
+    return undefined;
+  }
+  if (isIsoTimestamp(value)) {
+    return {
+      value,
+      source: "iso",
+      closedAt: value as IsoTimestamp,
+      includeEqualClosedAt: false
+    };
+  }
+  if (!value.startsWith("bw_heartbeat_")) {
+    throw new BorealError("BOREAL_INVALID_INPUT", "--after must be an ISO timestamp or reviewer heartbeat checkpoint id");
+  }
+  const heartbeat = await context.store.read((reader) => reader.getReviewerHeartbeat(asReviewerHeartbeatId(value)));
+  if (!heartbeat) {
+    throw new BorealError("BOREAL_NOT_FOUND", "Reviewer heartbeat checkpoint not found", { checkpointId: value });
+  }
+  return {
+    value,
+    source: "checkpoint",
+    closedAt: heartbeat.lastClosedAt,
+    eventId: heartbeat.lastEventId,
+    workId: heartbeat.lastWorkId,
+    includeEqualClosedAt: true
+  };
+}
+
 function parseHeartbeatIsoTimestamp(value: string, label: string): IsoTimestamp {
   if (!isIsoTimestamp(value)) {
     throw new BorealError("BOREAL_INVALID_INPUT", `${label} must be an ISO timestamp`, { value });
@@ -2498,6 +2686,11 @@ async function workCommand(
       );
       const rows = items.slice(0, limit).map(workListRow);
       output.write(json ? formatRecord(rows, true) : table(rows.map(textWorkListRow)));
+      return { exitCode: 0 };
+    }
+    case "recent-closed": {
+      const result = await recentClosedWorkCommand(context, args);
+      output.write(json ? formatRecord(result, true) : table(result.items.map(textRecentClosedWorkRow)));
       return { exitCode: 0 };
     }
     case "next": {
