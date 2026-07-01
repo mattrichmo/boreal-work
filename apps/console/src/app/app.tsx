@@ -8,6 +8,7 @@ import {
   Card,
   ClaimsTablePanel,
   DashboardHealthPanel,
+  DirectiveSummaryPanel,
   GlobalDriftPanel,
   GlobalHealthSummaryPanel,
   GlobalOverviewMetrics,
@@ -176,6 +177,7 @@ function SprintPage({ data, routePath }: { readonly data: ConsoleDataSet; readon
     <div className="bw-page-stack">
       <SprintHeader view={data.sprint} />
       <SprintScopeSummary view={data.sprint} />
+      <DirectiveSummaryPanel work={data.sprint.sprint} title="Sprint agent directives" />
       <ViewModeTabs active={viewMode} routePath={routePath} />
       <SprintReviewQueues view={data.sprint} routePath={routePath} />
       <SprintDashboardActions view={data.sprint} routePath={routePath} />
@@ -190,9 +192,13 @@ function SprintPage({ data, routePath }: { readonly data: ConsoleDataSet; readon
 
 function WorkPage({ data }: { readonly data: ConsoleDataSet }) {
   const items = data.work.queues.flatMap((queue) => queue.items);
+  const directiveWork = items.find((item) => item.directiveSummary && item.directiveSummary.total > 0);
   return (
     <div className="bw-page-grid">
-      <SprintProgressPanel view={data.work} />
+      <div className="bw-page-stack">
+        <SprintProgressPanel view={data.work} />
+        {directiveWork ? <DirectiveSummaryPanel work={directiveWork} title="Work agent directives" /> : null}
+      </div>
       <Card title="Work queue" eyebrow={data.work.labels.join(", ")}>
         <SprintWorkTable items={items} />
       </Card>

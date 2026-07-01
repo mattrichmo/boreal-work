@@ -9,7 +9,8 @@ import type {
   GlobalWorkQueueId,
   GlobalWorkQueuesView,
   ProjectRegistryView,
-  WorkDashboardView
+  WorkDashboardView,
+  WorkItemView
 } from "@boreal/ui-model";
 import type { ReactNode } from "react";
 
@@ -128,6 +129,7 @@ export function GlobalWorkQueues({ view }: { readonly view: GlobalWorkQueuesView
                         {item.work.evidenceCount > 0 || item.work.verificationCount > 0 ? (
                           <span>{item.work.evidenceCount} evidence / {item.work.verificationCount} verification</span>
                         ) : null}
+                        <GlobalDirectiveBadges work={item.work} />
                       </div>
                     </div>
                     {item.claimCommand ? (
@@ -146,6 +148,21 @@ export function GlobalWorkQueues({ view }: { readonly view: GlobalWorkQueuesView
         ))}
       </div>
     </Card>
+  );
+}
+
+function GlobalDirectiveBadges({ work }: { readonly work: WorkItemView }) {
+  const summary = work.directiveSummary;
+  if (!summary || summary.total === 0) {
+    return null;
+  }
+  return (
+    <span className="bw-global-queue__directives">
+      {summary.blocked > 0 ? <Badge tone="danger">{summary.blocked} blocked directives</Badge> : null}
+      {summary.required > 0 ? <Badge tone="warning">{summary.required} required directives</Badge> : null}
+      {summary.recommended > 0 ? <Badge tone="accent">{summary.recommended} recommended directives</Badge> : null}
+      {summary.informational > 0 ? <Badge>{summary.informational} informational directives</Badge> : null}
+    </span>
   );
 }
 

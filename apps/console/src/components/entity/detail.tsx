@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import type { DashboardFinding, WorkItemView } from "@boreal/ui-model";
+import type { DashboardFinding, WorkDirectiveItemView, WorkDirectiveLane, WorkItemView } from "@boreal/ui-model";
 
 import { Badge, Card, EntityChip, LoadingSkeleton, Notice, type Tone } from "../foundation/index.js";
 import type {
@@ -143,6 +143,115 @@ export function LineagePanel({ work }: { readonly work: WorkItemView }) {
   );
 }
 
+const DIRECTIVE_LANES: readonly { readonly id: WorkDirectiveLane; readonly label: string; readonly tone: Tone }[] = [
+  { id: "blocked", label: "blocked", tone: "danger" },
+  { id: "required", label: "required", tone: "warning" },
+  { id: "recommended", label: "recommended", tone: "accent" },
+  { id: "informational", label: "informational", tone: "neutral" }
+];
+
+export function DirectiveSummaryPanel({
+  work,
+  title = "Agent directives"
+}: {
+  readonly work: WorkItemView;
+  readonly title?: string;
+}) {
+  const summary = work.directiveSummary;
+  if (!summary || summary.total === 0) {
+    return (
+      <Card title={title} eyebrow={work.id}>
+        <Notice label="Agent directives">No directive bundle data is available for this work item.</Notice>
+      </Card>
+    );
+  }
+
+  return (
+    <Card title={title} eyebrow={`${summary.total} directive${summary.total === 1 ? "" : "s"}`}>
+      <div className="bw-directive-summary" aria-label={`${work.title} directive obligations`}>
+        <div className="bw-directive-summary__counts">
+          <Badge tone={summary.blocked > 0 ? "danger" : "neutral"}>{summary.blocked} blocked</Badge>
+          <Badge tone={summary.required > 0 ? "warning" : "neutral"}>{summary.required} required</Badge>
+          <Badge tone={summary.recommended > 0 ? "accent" : "neutral"}>{summary.recommended} recommended</Badge>
+          <Badge tone="neutral">{summary.informational} informational</Badge>
+        </div>
+        {summary.sourceCommands.length > 0 ? (
+          <div className="bw-directive-source-commands" aria-label="Directive source commands">
+            {summary.sourceCommands.map((command) => <code key={command}>{command}</code>)}
+          </div>
+        ) : null}
+        <div className="bw-directive-groups">
+          {DIRECTIVE_LANES.map((lane) => {
+            const items = summary.items.filter((item) => item.lane === lane.id);
+            return items.length > 0 ? <DirectiveGroup key={lane.id} lane={lane} items={items} /> : null;
+          })}
+        </div>
+      </div>
+    </Card>
+  );
+}
+
+function DirectiveGroup({
+  lane,
+  items
+}: {
+  readonly lane: { readonly id: WorkDirectiveLane; readonly label: string; readonly tone: Tone };
+  readonly items: readonly WorkDirectiveItemView[];
+}) {
+  return (
+    <section className={`bw-directive-group bw-directive-group--${lane.id}`} aria-label={`${lane.label} directives`}>
+      <header className="bw-directive-group__header">
+        <strong>{lane.label} directives</strong>
+        <Badge tone={lane.tone}>{items.length}</Badge>
+      </header>
+      <div className="bw-directive-list">
+        {items.map((item) => <DirectiveRow key={item.id} item={item} />)}
+      </div>
+    </section>
+  );
+}
+
+function DirectiveRow({ item }: { readonly item: WorkDirectiveItemView }) {
+  return (
+    <article className={`bw-directive-row bw-directive-row--${item.lane}`}>
+      <div className="bw-directive-row__header">
+        <div>
+          <strong>{item.title}</strong>
+          <span>{item.id}</span>
+        </div>
+        <Badge tone={directiveLaneTone(item.lane)}>{item.lane}</Badge>
+      </div>
+      <div className="bw-directive-row__meta">
+        <Badge>{item.registryId}</Badge>
+        <Badge>{item.severity}</Badge>
+        <Badge>{item.lifecycle}</Badge>
+        {item.family ? <Badge>{item.family}</Badge> : null}
+        {item.kind ? <Badge>{item.kind}</Badge> : null}
+      </div>
+      <p>{item.reason}</p>
+      {item.relatedIds.length > 0 ? (
+        <div className="bw-directive-row__ids" aria-label="Related records">
+          {item.relatedIds.map((id) => <EntityChip key={id} kind="related" label={id} />)}
+        </div>
+      ) : null}
+      {item.sourceCommand ? <code>{item.sourceCommand}</code> : null}
+    </article>
+  );
+}
+
+function directiveLaneTone(lane: WorkDirectiveLane): Tone {
+  switch (lane) {
+    case "blocked":
+      return "danger";
+    case "required":
+      return "warning";
+    case "recommended":
+      return "accent";
+    case "informational":
+      return "neutral";
+  }
+}
+
 export function HealthFindingList({ findings }: { readonly findings: readonly DashboardFinding[] }) {
   if (findings.length === 0) return <Notice tone="success" label="Health">No findings.</Notice>;
   return (
@@ -167,6 +276,7 @@ export function WorkItemDetailPage({ work }: { readonly work: WorkItemView }) {
     <article className="bw-work-detail">
       <EntityDetailHeader title={work.title} kind={work.kind} status={work.status} labels={work.labels} />
       <VerificationPanel work={work} />
+      <DirectiveSummaryPanel work={work} />
       <DependencyPanel work={work} />
       <LineagePanel work={work} />
     </article>

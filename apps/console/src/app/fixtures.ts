@@ -13,6 +13,7 @@ import {
   type DashboardFinding,
   type LockDashboardView,
   type SyncDashboardView,
+  type WorkDirectiveSummaryView,
   type WorkItemView
 } from "@boreal/ui-model";
 
@@ -48,7 +49,8 @@ export function createFixtureConsoleData(input: {
     id: "bw_work_5d61b84c8d43c6a9",
     kind: "sprint",
     status: "blocked",
-    title: "Sprint 04 - Client console app foundation"
+    title: "Sprint 04 - Client console app foundation",
+    directiveSummary: directiveSummary("bw_work_5d61b84c8d43c6a9")
   });
   const sprintWork = sprint04FixtureWork(scenario);
   const healthFindings = fixtureHealthFindings(scenario, input.workspaceRoot);
@@ -213,6 +215,7 @@ function sprint04FixtureWork(scenario: ConsoleFixtureScenario): readonly WorkIte
       id: "bw_work_534295e2daf65102",
       status: reserved ? "in_progress" : "ready",
       title: "S04T01 - Scaffold apps/console package and workspace scripts",
+      directiveSummary: directiveSummary("bw_work_534295e2daf65102"),
       activeReservationId: reserved ? "bw_reservation_fixture" : undefined,
       activeReservation: reserved ? {
         id: "bw_reservation_fixture",
@@ -276,10 +279,10 @@ function sprint04FixtureWork(scenario: ConsoleFixtureScenario): readonly WorkIte
 }
 
 export function workItem(input: Partial<WorkItemView> & Pick<WorkItemView, "id" | "title">): WorkItemView {
-  return {
-    kind: "task",
-    status: "ready",
-    priority: "high",
+  const item = {
+    kind: "task" as const,
+    status: "ready" as const,
+    priority: "high" as const,
     labels: ["sprint-04", "console", "client", "app-foundation"],
     dependencyIds: [],
     activeBlockerIds: [],
@@ -287,6 +290,76 @@ export function workItem(input: Partial<WorkItemView> & Pick<WorkItemView, "id" 
     evidenceCount: 0,
     verificationCount: 0,
     ...input
+  };
+  return {
+    ...item,
+    requiredCloseoutGates: item.requiredCloseoutGates ?? []
+  };
+}
+
+function directiveSummary(subjectId: string): WorkDirectiveSummaryView {
+  const items: WorkDirectiveSummaryView["items"] = [
+    {
+      id: `directive.workflow_next.canonical-next-step.${subjectId}`,
+      registryId: "workflow_next.canonical-next-step",
+      family: "workflow_next",
+      kind: "next_step",
+      title: "Follow next canonical workflow",
+      severity: "action",
+      lifecycle: "active",
+      lane: "recommended",
+      reason: "Follow the named canonical workflow and pass only typed inputs to the next command.",
+      sourceCommand: `bwrk work show ${subjectId} --json`,
+      relatedIds: [subjectId]
+    },
+    {
+      id: `directive.closeout.required-summary.${subjectId}`,
+      registryId: "closeout.required-summary",
+      family: "closeout",
+      kind: "final_response",
+      title: "Prepare final user summary",
+      severity: "required",
+      lifecycle: "active",
+      lane: "required",
+      reason: "Closed successful work must provide a user-facing summary in the agent response.",
+      sourceCommand: `bwrk agent finish ${subjectId} --json`,
+      relatedIds: [subjectId, "bw_gate_fixture"]
+    },
+    {
+      id: `directive.git.blocked-dirty-state.${subjectId}`,
+      registryId: "git.blocked-dirty-state",
+      family: "git",
+      kind: "blocked",
+      title: "Resolve blocking dirty state",
+      severity: "blocking",
+      lifecycle: "blocked",
+      lane: "blocked",
+      reason: "The directive is blocked until related work has a clean checkpoint or dirty-path reason.",
+      sourceCommand: "bwrk doctor --json",
+      relatedIds: [subjectId, "bw_reservation_fixture"]
+    },
+    {
+      id: `directive.context.info.${subjectId}`,
+      registryId: "context.info",
+      family: "context",
+      kind: "reference",
+      title: "Context pack available",
+      severity: "info",
+      lifecycle: "active",
+      lane: "informational",
+      reason: "A context pack is available for operator review.",
+      sourceCommand: `bwrk summary show ${subjectId} --json`,
+      relatedIds: [subjectId, "bw_summary_fixture"]
+    }
+  ];
+  return {
+    total: items.length,
+    informational: items.filter((item) => item.lane === "informational").length,
+    recommended: items.filter((item) => item.lane === "recommended").length,
+    required: items.filter((item) => item.lane === "required").length,
+    blocked: items.filter((item) => item.lane === "blocked").length,
+    sourceCommands: Array.from(new Set(items.flatMap((item) => item.sourceCommand ? [item.sourceCommand] : []))),
+    items
   };
 }
 

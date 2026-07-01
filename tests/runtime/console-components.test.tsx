@@ -8,6 +8,7 @@ import {
   BucketOverviewGrid,
   ClaimsTablePanel,
   DashboardHealthPanel,
+  DirectiveSummaryPanel,
   EntityDetailHeader,
   GlobalDriftPanel,
   GlobalHealthSummaryPanel,
@@ -54,6 +55,7 @@ import type {
   GlobalWorkQueuesView,
   ProjectRegistryView,
   SprintBoardView,
+  WorkDirectiveSummaryView,
   WorkItemView
 } from "@boreal/ui-model";
 import type { RawInboxView, ReportsView, WikiExplorerView } from "@boreal/console";
@@ -69,10 +71,16 @@ describe("console component exports", () => {
 
   it("renders entity primitives from typed data", () => {
     const refs: readonly ReferenceItem[] = [{ id: "src-1", kind: "raw", label: "thread.txt", status: "ok" }];
+    const directiveWork = workItem({
+      id: "bw_work_1",
+      title: "Evidence gate",
+      directiveSummary: directiveSummaryFixture("bw_work_1")
+    });
     const html = renderToStaticMarkup(
       <>
         <EntityDetailHeader title="Evidence gate" kind="work" status="ready" labels={["sprint-03"]} />
-        <WorkItemDetailPage work={workItem({ id: "bw_work_1", title: "Evidence gate" })} />
+        <WorkItemDetailPage work={directiveWork} />
+        <DirectiveSummaryPanel work={directiveWork} />
         <span>{refs[0]?.label}</span>
       </>
     );
@@ -80,6 +88,11 @@ describe("console component exports", () => {
     expect(html).toContain("bw-entity-header");
     expect(html).toContain("Evidence gate");
     expect(html).toContain("thread.txt");
+    expect(html).toContain("Agent directives");
+    expect(html).toContain("workflow_next.canonical-next-step");
+    expect(html).toContain("directive.workflow_next.fixture");
+    expect(html).toContain("bwrk sync refresh --json");
+    expect(html).toContain("bw_work_1");
   });
 
   it("renders sprint, global, and operations dashboard primitives", () => {
@@ -151,6 +164,10 @@ describe("console component exports", () => {
     expect(html).toContain("bw-kanban-card--closed");
     expect(html).toContain("reserved");
     expect(html).toContain("cybertron");
+    expect(html).toContain("recommended directives");
+    expect(html).toContain("required directives");
+    expect(html).toContain("blocked directives");
+    expect(html).toContain("informational directives");
     expect(html).toContain("Sprint review");
     expect(html).toContain("Verification queue");
     expect(html).toContain("Promote discovery");
@@ -246,7 +263,73 @@ function workItem(input: Partial<WorkItemView> & Pick<WorkItemView, "id" | "titl
     blockedBy: [],
     evidenceCount: 0,
     verificationCount: 0,
+    requiredCloseoutGates: [],
     ...input
+  };
+}
+
+function directiveSummaryFixture(subjectId: string): WorkDirectiveSummaryView {
+  return {
+    total: 4,
+    informational: 1,
+    recommended: 1,
+    required: 1,
+    blocked: 1,
+    sourceCommands: ["bwrk sync refresh --json", `bwrk work show ${subjectId} --json`],
+    items: [
+      {
+        id: "directive.workflow_next.fixture",
+        registryId: "workflow_next.canonical-next-step",
+        family: "workflow_next",
+        kind: "next_step",
+        title: "Follow next canonical workflow",
+        severity: "action",
+        lifecycle: "active",
+        lane: "recommended",
+        reason: "Follow the named canonical workflow before continuing.",
+        sourceCommand: "bwrk sync refresh --json",
+        relatedIds: [subjectId]
+      },
+      {
+        id: "directive.closeout.fixture",
+        registryId: "closeout.required-summary",
+        family: "closeout",
+        kind: "final_response",
+        title: "Summarize successful closeout",
+        severity: "required",
+        lifecycle: "active",
+        lane: "required",
+        reason: "Final closeout requires a concise user-facing summary.",
+        sourceCommand: `bwrk work show ${subjectId} --json`,
+        relatedIds: [subjectId, "bw_gate_fixture"]
+      },
+      {
+        id: "directive.git.fixture",
+        registryId: "git.blocked-dirty-state",
+        family: "git",
+        kind: "blocked",
+        title: "Resolve dirty checkpoint",
+        severity: "blocking",
+        lifecycle: "blocked",
+        lane: "blocked",
+        reason: "Checkpoint is blocked until dirty state is resolved or explicitly explained.",
+        sourceCommand: "bwrk doctor --json",
+        relatedIds: [subjectId, "bw_reservation_fixture"]
+      },
+      {
+        id: "directive.context.fixture",
+        registryId: "context.info",
+        family: "context",
+        kind: "reference",
+        title: "Context pack available",
+        severity: "info",
+        lifecycle: "active",
+        lane: "informational",
+        reason: "Context pack can be inspected before responding.",
+        sourceCommand: `bwrk summary show ${subjectId} --json`,
+        relatedIds: [subjectId, "bw_summary_fixture"]
+      }
+    ]
   };
 }
 
@@ -266,7 +349,8 @@ function sprintBoardView(): SprintBoardView {
     labels: ["component-import"],
     dependencyIds: ["bw_work_active"],
     activeBlockerIds: ["bw_work_active"],
-    evidenceCount: 2
+    evidenceCount: 2,
+    directiveSummary: directiveSummaryFixture("bw_work_task")
   });
   const active = workItem({
     id: "bw_work_active",
@@ -367,7 +451,12 @@ function registryView(): ProjectRegistryView {
 }
 
 function globalQueuesView(): GlobalWorkQueuesView {
-  const work = workItem({ id: "bw_work_ready", title: "Claimable work", status: "ready" });
+  const work = workItem({
+    id: "bw_work_ready",
+    title: "Claimable work",
+    status: "ready",
+    directiveSummary: directiveSummaryFixture("bw_work_ready")
+  });
   return {
     queues: [
       {

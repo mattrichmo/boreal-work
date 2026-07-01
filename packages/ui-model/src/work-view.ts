@@ -16,6 +16,7 @@ export interface WorkItemView {
   readonly activeReservationId?: string;
   readonly activeReservation?: WorkReservationView;
   readonly contextSummary?: string;
+  readonly directiveSummary?: WorkDirectiveSummaryView;
 }
 
 export interface WorkReservationView {
@@ -24,6 +25,33 @@ export interface WorkReservationView {
   readonly reservedAt?: string;
   readonly expiresAt?: string;
   readonly expired?: boolean;
+}
+
+export type WorkDirectiveSeverity = "info" | "action" | "required" | "blocking";
+export type WorkDirectiveLane = "informational" | "recommended" | "required" | "blocked";
+
+export interface WorkDirectiveItemView {
+  readonly id: string;
+  readonly registryId: string;
+  readonly family?: string;
+  readonly kind?: string;
+  readonly title: string;
+  readonly severity: WorkDirectiveSeverity;
+  readonly lifecycle: string;
+  readonly lane: WorkDirectiveLane;
+  readonly reason: string;
+  readonly sourceCommand?: string;
+  readonly relatedIds: readonly string[];
+}
+
+export interface WorkDirectiveSummaryView {
+  readonly total: number;
+  readonly informational: number;
+  readonly recommended: number;
+  readonly required: number;
+  readonly blocked: number;
+  readonly sourceCommands: readonly string[];
+  readonly items: readonly WorkDirectiveItemView[];
 }
 
 export function toWorkItemView(input: {

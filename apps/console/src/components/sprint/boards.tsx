@@ -186,6 +186,7 @@ export function SprintKanbanCard({ item }: { readonly item: WorkItemView }) {
         {blockerCount > 0 ? <Badge tone="warning">{blockerCount} blockers</Badge> : <Badge tone="success">unblocked</Badge>}
         {item.activeReservationId ? <Badge tone="accent" title={item.activeReservationId}>reserved</Badge> : null}
       </div>
+      <DirectiveBadgeStrip item={item} />
       <dl className="bw-kanban-card__facts" aria-label="Work facts">
         <div>
           <dt>Kind</dt>
@@ -442,6 +443,7 @@ export function SprintBoardTable({ view }: { readonly view: SprintBoardView }) {
             <th>Status</th>
             <th>Priority</th>
             <th>Blocking</th>
+            <th>Directives</th>
             <th>Evidence</th>
             <th>Labels</th>
           </tr>
@@ -459,6 +461,7 @@ export function SprintBoardTable({ view }: { readonly view: SprintBoardView }) {
                 <span>{item.activeBlockerIds.length} active</span>
                 <span>{item.dependencyIds.length} deps</span>
               </td>
+              <td><DirectiveBadgeStrip item={item} emptyLabel="none" /></td>
               <td>
                 <span>{item.evidenceCount} evidence</span>
                 <span>{item.verificationCount} verified</span>
@@ -561,6 +564,7 @@ export function SprintWorkTable({ items }: { readonly items: readonly WorkItemVi
           <th>Work</th>
           <th>Status</th>
           <th>Priority</th>
+          <th>Directives</th>
           <th>Evidence</th>
         </tr>
       </thead>
@@ -570,6 +574,7 @@ export function SprintWorkTable({ items }: { readonly items: readonly WorkItemVi
             <td>{item.title}</td>
             <td>{item.status}</td>
             <td>{item.priority}</td>
+            <td><DirectiveBadgeStrip item={item} emptyLabel="none" /></td>
             <td>{item.evidenceCount}</td>
           </tr>
         ))}
@@ -608,6 +613,22 @@ function sprintStatusTone(status: WorkItemView["status"]): Tone {
     case "ready":
       return "neutral";
   }
+}
+
+function DirectiveBadgeStrip({ item, emptyLabel }: { readonly item: WorkItemView; readonly emptyLabel?: string }) {
+  const summary = item.directiveSummary;
+  if (!summary || summary.total === 0) {
+    return emptyLabel ? <span className="bw-directive-badges bw-directive-badges--empty">{emptyLabel}</span> : null;
+  }
+  return (
+    <div className="bw-directive-badges" aria-label={`${summary.total} directives for ${item.title}`}>
+      {summary.blocked > 0 ? <Badge tone="danger">{summary.blocked} blocked directives</Badge> : null}
+      {summary.required > 0 ? <Badge tone="warning">{summary.required} required directives</Badge> : null}
+      {summary.recommended > 0 ? <Badge tone="accent">{summary.recommended} recommended directives</Badge> : null}
+      {summary.informational > 0 ? <Badge tone="neutral">{summary.informational} informational directives</Badge> : null}
+      {summary.sourceCommands.length > 0 ? <Badge>{summary.sourceCommands.length} source commands</Badge> : null}
+    </div>
+  );
 }
 
 function DependencyRow({ item, byId }: { readonly item: WorkItemView; readonly byId: ReadonlyMap<string, WorkItemView> }) {

@@ -141,17 +141,22 @@ button, input { max-width: 100%; }
 `;
 
 function workItem(input: Partial<WorkItemView> & Pick<WorkItemView, "id" | "title">): WorkItemView {
-  return {
-    kind: "task",
-    status: "ready",
-    priority: "critical",
+  const item = {
+    kind: "task" as const,
+    status: "ready" as const,
+    priority: "critical" as const,
     labels: ["sprint-03", "component-import"],
     dependencyIds: [],
     activeBlockerIds: [],
     blockedBy: [],
     evidenceCount: 0,
     verificationCount: 0,
+    requiredCloseoutGates: [],
     ...input
+  };
+  return {
+    ...item,
+    requiredCloseoutGates: item.requiredCloseoutGates ?? []
   };
 }
 

@@ -513,6 +513,7 @@ function workView(input: Partial<WorkItemView> & Pick<WorkItemView, "id" | "titl
     blockedBy: [],
     evidenceCount: 0,
     verificationCount: 0,
+    requiredCloseoutGates: [],
     ...input
   };
 }

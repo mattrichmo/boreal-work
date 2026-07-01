@@ -21,6 +21,10 @@ import {
   type ProjectMemoryLayout,
   type ProjectSyncFreshness,
   type SyncDashboardView,
+  type WorkDirectiveItemView,
+  type WorkDirectiveLane,
+  type WorkDirectiveSeverity,
+  type WorkDirectiveSummaryView,
   type WorkItemView
 } from "@boreal/ui-model";
 
@@ -1622,9 +1626,17 @@ async function resolveCliData(output: string, workspaceRoot: string): Promise<un
     if (full.ok !== true) {
       throw new Error("Boreal full result was not ok");
     }
-    return full.data;
+    return withCliAgentDirectives(full.data, full);
   }
-  return data;
+  return withCliAgentDirectives(data, parsed);
+}
+
+function withCliAgentDirectives(data: unknown, envelope: Record<string, unknown>): unknown {
+  const bundles = envelope.agentDirectives;
+  if (!Array.isArray(bundles) || !isRecord(data)) {
+    return data;
+  }
+  return { ...data, agentDirectives: bundles };
 }
 
 async function cliArray<T>(runner: ConsoleCliRunner, args: readonly string[]): Promise<readonly T[]> {
@@ -1805,8 +1817,10 @@ function workViewFromRecord(data: unknown): WorkItemView {
     blockedBy: stringArrayField(data, "blockedBy"),
     evidenceCount: numberField(data, "evidenceCount"),
     verificationCount: numberField(data, "verificationCount"),
+    requiredCloseoutGates: requiredCloseoutGatesView(data.requiredCloseoutGates),
     activeReservationId: typeof data.activeReservationId === "string" ? data.activeReservationId : undefined,
-    contextSummary: typeof data.contextSummary === "string" ? data.contextSummary : undefined
+    contextSummary: typeof data.contextSummary === "string" ? data.contextSummary : undefined,
+    directiveSummary: directiveSummaryFromBundles(data.agentDirectives)
   };
 }
 
@@ -1823,8 +1837,188 @@ function workViewFromRow(row: WorkListRow): WorkItemView {
     activeBlockerIds: row.status === "blocked" ? ["unknown"] : [],
     blockedBy: row.status === "blocked" ? ["unknown"] : [],
     evidenceCount: 0,
-    verificationCount: 0
+    verificationCount: 0,
+    requiredCloseoutGates: []
   };
+}
+
+function requiredCloseoutGatesView(value: unknown): WorkItemView["requiredCloseoutGates"] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value.filter(isRecord) as unknown as NonNullable<WorkItemView["requiredCloseoutGates"]>;
+}
+
+function directiveSummaryFromBundles(value: unknown): WorkDirectiveSummaryView | undefined {
+  if (!Array.isArray(value)) {
+    return undefined;
+  }
+  const items: WorkDirectiveItemView[] = [];
+  const sourceCommands = new Set<string>();
+  for (const bundle of value) {
+    if (!isRecord(bundle)) {
+      continue;
+    }
+    const meta = isRecord(bundle.meta) ? bundle.meta : {};
+    const bundleCommand = sourceCommandFromPath(stringField(meta, "commandPath", ""));
+    const conflicts = directiveConflictReasons(bundle.conflicts);
+    const directives = Array.isArray(bundle.directives) ? bundle.directives : [];
+    for (const directive of directives) {
+      const item = directiveItemFromRecord(directive, bundleCommand, conflicts);
+      if (!item) {
+        continue;
+      }
+      items.push(item);
+      if (item.sourceCommand) {
+        sourceCommands.add(item.sourceCommand);
+      }
+    }
+  }
+  if (items.length === 0) {
+    return undefined;
+  }
+  return {
+    total: items.length,
+    informational: items.filter((item) => item.lane === "informational").length,
+    recommended: items.filter((item) => item.lane === "recommended").length,
+    required: items.filter((item) => item.lane === "required").length,
+    blocked: items.filter((item) => item.lane === "blocked").length,
+    sourceCommands: [...sourceCommands],
+    items
+  };
+}
+
+function directiveItemFromRecord(
+  value: unknown,
+  bundleCommand: string | undefined,
+  conflicts: ReadonlyMap<string, string>
+): WorkDirectiveItemView | undefined {
+  if (!isRecord(value)) {
+    return undefined;
+  }
+  const id = stringField(value, "id", "");
+  const registryId = stringField(value, "registryId", "");
+  if (!id || !registryId) {
+    return undefined;
+  }
+  const data = isRecord(value.data) ? value.data : {};
+  const severity = directiveSeverity(value.severity);
+  const lifecycle = stringField(value, "lifecycle", "active");
+  const lane = directiveLane(severity, lifecycle);
+  const commandPath = firstStringField(data, ["commandPath", "sourceCommand"]);
+  const sourceCommand = sourceCommandFromPath(commandPath) ?? bundleCommand;
+  const reason = directiveReason(value, data, conflicts.get(id));
+  return {
+    id,
+    registryId,
+    family: nonEmptyString(value.family),
+    kind: nonEmptyString(value.kind),
+    title: stringField(value, "title", registryId),
+    severity,
+    lifecycle,
+    lane,
+    reason,
+    sourceCommand,
+    relatedIds: relatedIdsFromDirective(value).slice(0, 12)
+  };
+}
+
+function directiveConflictReasons(value: unknown): ReadonlyMap<string, string> {
+  const reasons = new Map<string, string>();
+  if (!Array.isArray(value)) {
+    return reasons;
+  }
+  for (const conflict of value) {
+    if (!isRecord(conflict)) {
+      continue;
+    }
+    const directiveId = firstStringField(conflict, ["directiveId", "id"]);
+    const reason = firstStringField(conflict, ["reason", "message", "detail"]);
+    if (directiveId && reason) {
+      reasons.set(directiveId, reason);
+    }
+  }
+  return reasons;
+}
+
+function directiveReason(
+  directive: Record<string, unknown>,
+  data: Record<string, unknown>,
+  conflictReason: string | undefined
+): string {
+  if (conflictReason) {
+    return conflictReason;
+  }
+  const acknowledgement = isRecord(directive.acknowledgement) ? directive.acknowledgement : {};
+  return (
+    firstStringField(acknowledgement, ["message", "reason", "detail"]) ??
+    firstStringField(data, ["reason", "message", "detail", "summary"]) ??
+    stringField(directive, "instruction", "Directive is active for this work item.")
+  );
+}
+
+function directiveSeverity(value: unknown): WorkDirectiveSeverity {
+  return value === "action" || value === "required" || value === "blocking" || value === "info" ? value : "info";
+}
+
+function directiveLane(severity: WorkDirectiveSeverity, lifecycle: string): WorkDirectiveLane {
+  if (severity === "blocking" || lifecycle === "blocked") {
+    return "blocked";
+  }
+  if (severity === "required") {
+    return "required";
+  }
+  if (severity === "action") {
+    return "recommended";
+  }
+  return "informational";
+}
+
+function sourceCommandFromPath(commandPath: string | undefined): string | undefined {
+  if (!commandPath) {
+    return undefined;
+  }
+  return commandPath.startsWith("bwrk ") ? commandPath : `bwrk ${commandPath} --json`;
+}
+
+function relatedIdsFromDirective(value: Record<string, unknown>): readonly string[] {
+  const ids = new Set<string>();
+  const subject = isRecord(value.subject) ? value.subject : {};
+  const subjectId = nonEmptyString(subject.id);
+  if (subjectId && isBorealRecordId(subjectId)) {
+    ids.add(subjectId);
+  }
+  collectRelatedIds(value.data, ids);
+  return [...ids];
+}
+
+function collectRelatedIds(value: unknown, ids: Set<string>): void {
+  if (typeof value === "string") {
+    if (isBorealRecordId(value)) {
+      ids.add(value);
+    }
+    return;
+  }
+  if (Array.isArray(value)) {
+    for (const entry of value) {
+      collectRelatedIds(entry, ids);
+    }
+    return;
+  }
+  if (!isRecord(value)) {
+    return;
+  }
+  for (const entry of Object.values(value)) {
+    collectRelatedIds(entry, ids);
+  }
+}
+
+function isBorealRecordId(value: string): boolean {
+  return /^bw_(work|gate|evidence|verification|summary|reservation)_[A-Za-z0-9]+$/.test(value);
+}
+
+function nonEmptyString(value: unknown): string | undefined {
+  return typeof value === "string" && value.length > 0 ? value : undefined;
 }
 
 function rawSourceRowView(row: RawSourceListRow): RawSourceRowView {

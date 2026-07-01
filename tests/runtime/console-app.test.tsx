@@ -74,6 +74,15 @@ describe("console app runtime", () => {
 
     expect(data.workspace.mode).toBe("live");
     expect(data.sprint.sprint.id).toBe("bw_work_5d61b84c8d43c6a9");
+    expect(data.sprint.sprint.directiveSummary).toMatchObject({
+      total: 1,
+      recommended: 1
+    });
+    expect(data.sprint.sprint.directiveSummary?.items[0]).toMatchObject({
+      registryId: "workflow_next.canonical-next-step",
+      sourceCommand: "bwrk work show bw_work_5d61b84c8d43c6a9 --json",
+      relatedIds: ["bw_work_5d61b84c8d43c6a9"]
+    });
     expect(data.sprint.summary.taskCount).toBeGreaterThan(0);
     expect(data.work.summary.ready).toBeGreaterThan(0);
     expect(data.globalQueues.summary.ready).toBeGreaterThan(1);
@@ -337,7 +346,8 @@ function fakeRunner(): ConsoleCliRunner & { readonly calls: string[] } {
           activeBlockerIds: [],
           blockedBy: [],
           evidenceCount: 0,
-          verificationCount: 0
+          verificationCount: 0,
+          agentDirectives: agentDirectivesFor(id)
         };
       }
       if (command === "sync status --json") {
@@ -511,6 +521,41 @@ function fakeRunner(): ConsoleCliRunner & { readonly calls: string[] } {
 
 function row(id: string, title: string, status: string, labels: readonly string[]) {
   return { id, title, status, priority: "high", labels };
+}
+
+function agentDirectivesFor(subjectId: string) {
+  return [
+    {
+      meta: {
+        id: `bundle.work.show.${subjectId}`,
+        commandPath: "work show"
+      },
+      directives: [
+        {
+          id: `directive.workflow_next.${subjectId}`,
+          registryId: "workflow_next.canonical-next-step",
+          family: "workflow_next",
+          severity: "action",
+          kind: "next_step",
+          lifecycle: "active",
+          title: "Follow next canonical workflow",
+          instruction: "Follow the named canonical workflow.",
+          data: {
+            commandPath: `bwrk work show ${subjectId} --json`,
+            subjectId
+          },
+          subject: {
+            type: "work",
+            id: subjectId,
+            title: `Work ${subjectId}`
+          }
+        }
+      ],
+      conflicts: [],
+      deprecations: [],
+      missingRequired: []
+    }
+  ];
 }
 
 function rawRow(id: string, title: string, kind: string, uri: string, processingStatus: "queued" | "linked") {
