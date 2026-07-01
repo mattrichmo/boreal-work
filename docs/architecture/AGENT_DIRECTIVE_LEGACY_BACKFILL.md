@@ -44,6 +44,20 @@ Leave a record legacy-only when any of these are true:
 
 Legacy-only records are not errors by themselves. They are explicit migration facts that prevent fabricated acknowledgements while keeping older closeout data readable.
 
+## Import, Export, And Release Expectations
+
+Before a migration or release slice changes acknowledgement policy, create or keep a `boreal.export.v1` recovery snapshot. Durable directive acknowledgements are portable state: JSON export includes them under `state.directiveAcknowledgements`, JSONL ledgers store them in `directive-acknowledgements.jsonl`, and Markdown export renders one file per acknowledgement under `directive-acknowledgements/`.
+
+Emitted `agentDirectives` bundles are different. They can be carried as top-level export metadata when a result spool intentionally preserves command output, but they are not imported as runtime state and do not prove that an agent acknowledged anything. A backfill record still needs a durable acknowledgement with concrete evidence, verification, summary, artifact, or handoff links.
+
+Release notes for directive migration must state:
+
+- whether durable acknowledgements are required for new closeouts;
+- whether current-policy gaps are advisory or blocking in strict doctor;
+- how legacy-compatible summaries appear in doctor and report surfaces;
+- which export/import surfaces preserve acknowledgement records;
+- which historical records intentionally remain legacy-only.
+
 ## Backfill Workflow
 
 1. Run `bwrk sync refresh --json` and `bwrk doctor --strict --json`.

@@ -83,6 +83,7 @@ This file is the current checkpoint for the broad hardening goal. It separates a
 - `bwrk daemon status --json`, `dashboard global --json`, and `doctor` now surface daemon state without requiring the daemon to run; stale PID files and boundary drift are warnings.
 - Golden-path command aliases, explicit closeout gates, work edit/cancel/reopen/split lifecycle commands, claim review, decision supersession, sprint metrics/close, schema validation, docs checking, and `gate`/`gate closeout` now have CLI contracts, registry metadata, command docs, and runtime tests.
 - `docs/architecture/V2_STORAGE_COLLABORATION_PLAN.md` records the accepted V2 storage/collaboration design: SQLite as the primary local writer, JSONL ledgers and snapshots as the collaboration/recovery boundary, generation-based freshness metadata, query pushdown/index contracts, and scale/migration gates.
+- Agent directive migration docs now define the release boundary between emitted `agentDirectives` transport metadata, durable `directiveAcknowledgements` runtime records, and legacy-compatible closeout summaries. JSON export, JSONL ledgers, Markdown export, import validation, and doctor/report classifications all preserve acknowledgement proof without fabricating it for historical records.
 
 ## Remaining Architecture Work
 

@@ -179,6 +179,12 @@ Use these references instead of copying command text into downstream docs:
 - Generated registry reference: `bwrk commands --format markdown`.
 - Machine-readable registry: `bwrk commands --json`.
 
+## Directive Migration Release Note
+
+Agent directive migration keeps emitted command guidance separate from durable proof. JSON command envelopes may return `agentDirectives` as typed transport metadata, but portable project state records acknowledgement proof only through `directiveAcknowledgements`. JSON exports, JSONL ledgers, Markdown exports, and imports preserve those durable records and validate their links to evidence, verifications, summaries, artifact URIs, handoffs, and work subjects.
+
+Historical closeout summaries that predate directive acknowledgement policy are not automatically modernized. Doctor/report surfaces classify them as legacy-compatible when they have accepted legacy reasons, while current-policy summaries without durable acknowledgement proof appear under the directive coverage diagnostic.
+
 ## Known Limitations
 
 - `.boreal/runtime/state.json` is still the primary durable runtime adapter.

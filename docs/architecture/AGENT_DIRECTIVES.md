@@ -341,6 +341,20 @@ Directive acknowledgement persistence is represented by `DirectiveAcknowledgemen
 
 Legacy closeout data remains readable during migration. Doctor treats durable acknowledgement records linked to a closeout summary, its evidence, verification, artifact URI, or handoff summary as modern directive coverage. Closeout summaries generated before the directive acknowledgement policy date, or explicitly marked through `legacy_backfill`, are classified as legacy-compatible instead of missing modern coverage. Current-policy closeout summaries without durable acknowledgement coverage are reported separately so backfill work can distinguish true gaps from accepted legacy records. The safe backfill rules are defined in [Agent Directive Legacy Backfill](AGENT_DIRECTIVE_LEGACY_BACKFILL.md).
 
+## Migration, Import, And Export
+
+Directive migration keeps three record classes separate:
+
+- emitted `agentDirectives` bundles are command-output transport metadata;
+- persisted `DirectiveAcknowledgementRecord` rows are durable runtime state;
+- legacy closeout summaries remain readable migration facts when no truthful acknowledgement can be created.
+
+Portable `boreal.export.v1` documents include durable acknowledgement records in `state.directiveAcknowledgements` and `recordCounts.directiveAcknowledgements`. JSONL ledgers write the same section as `directive-acknowledgements.jsonl`. Markdown export renders durable acknowledgements under `directive-acknowledgements/<acknowledgement-id>.md` with directive ID, registry version, command path, subject, outcome, proof links, and reason metadata.
+
+An export document may carry an `agentDirectives` top-level field when a command/result spool intentionally includes the emitted bundle alongside portable state. That carrier is schema-validated, but it is not part of `state`, not counted in `recordCounts`, and not durable proof by itself. Import and export validation reject dangling durable acknowledgement links to missing evidence, verification, agent summaries, handoff summaries, artifact URIs, work subjects, or directive IDs when a directive carrier is supplied.
+
+Release and migration notes must preserve this boundary. A migration can modernize historical records only by creating durable acknowledgements with real directive identity and proof links. If the original bundle or proof context is missing, the record remains legacy-compatible and should surface through doctor/report classifications instead of receiving fabricated acknowledgement data.
+
 ## Consumer Rules
 
 CLI:

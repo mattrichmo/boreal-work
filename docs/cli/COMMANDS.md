@@ -1351,7 +1351,11 @@ The command fails closed when the index is missing, malformed, or stale. Rebuild
 bwrk export json [--out <path>] [--json]
 ```
 
-Builds a `boreal.export.v1` document containing the portable canonical runtime record set, record counts, and a deterministic content hash. Portable exports include work items, evidence, verifications, knowledge sources, claims, decisions, graph edges, reservations, events, projections, and context packs. They exclude local operation records and strip event operation links before hashing, so command history from one checkout does not become imported project truth in another checkout. Without `--out`, the export document is printed. With `--out`, the file is written inside the workspace and JSON `data` contains `path`, `contentHash`, and `recordCounts`.
+Builds a `boreal.export.v1` document containing the portable canonical runtime record set, record counts, and a deterministic content hash. Portable exports include work items, evidence, verifications, directive acknowledgements, knowledge sources, claims, decisions, graph edges, reservations, events, projections, and context packs. They exclude local operation records and strip event operation links before hashing, so command history from one checkout does not become imported project truth in another checkout.
+
+Directive migration behavior is explicit: durable `directiveAcknowledgements` are exported as runtime state, while emitted `agentDirectives` bundles are only top-level transport metadata when a result spool intentionally includes them. A carried `agentDirectives` bundle is schema-validated but is not written into `state`, not counted in `recordCounts`, and not sufficient proof of acknowledgement without a durable acknowledgement record.
+
+Without `--out`, the export document is printed. With `--out`, the file is written inside the workspace and JSON `data` contains `path`, `contentHash`, and `recordCounts`.
 
 ## `export markdown`
 
@@ -1359,7 +1363,7 @@ Builds a `boreal.export.v1` document containing the portable canonical runtime r
 bwrk export markdown [--out <dir>] [--json]
 ```
 
-Writes Git-friendly Markdown files for work, evidence, sources, claims, decisions, and context packs. Each file includes flat frontmatter with stable IDs, status/kind fields, references, tags, and timestamps where available. Default output directory is `.boreal/exports/markdown`.
+Writes Git-friendly Markdown files for work, agent summaries, evidence, directive acknowledgements, reviewer heartbeats, sources, claims, decisions, and context packs. Each file includes flat frontmatter with stable IDs, status/kind fields, references, tags, and timestamps where available. Durable acknowledgement records render under `directive-acknowledgements/<acknowledgement-id>.md` with directive, registry, command, subject, outcome, proof-link, and reason metadata. Default output directory is `.boreal/exports/markdown`.
 
 JSON `data` contains `outDir`, `files`, and `recordCounts`.
 
@@ -1369,7 +1373,7 @@ JSON `data` contains `outDir`, `files`, and `recordCounts`.
 bwrk export ledgers [--out <dir>] [--json]
 ```
 
-Writes a `boreal.ledgers.v1` JSONL bridge for the same portable canonical runtime sections as `export json`: one `.jsonl` file per section, a `deletions.jsonl` tombstone ledger, and `manifest.json` with per-file counts, per-file content hashes, deleted-record counts, and the whole-ledger content hash. Ledgers are reconstructable collaboration artifacts, not a second hidden source of truth, and they exclude local operation records. Default output directory is `.boreal/ledgers`.
+Writes a `boreal.ledgers.v1` JSONL bridge for the same portable canonical runtime sections as `export json`: one `.jsonl` file per section, a `deletions.jsonl` tombstone ledger, and `manifest.json` with per-file counts, per-file content hashes, deleted-record counts, and the whole-ledger content hash. The directive acknowledgement section is written as `directive-acknowledgements.jsonl`. Ledgers are reconstructable collaboration artifacts, not a second hidden source of truth, and they exclude local operation records. Default output directory is `.boreal/ledgers`.
 
 JSON `data` contains `outDir`, `manifestPath`, `contentHash`, `recordCounts`, `deletedRecordCounts`, `files`, and `deletions`.
 
@@ -1380,6 +1384,8 @@ bwrk import json --from <path> [--allow-external-read] [--json]
 ```
 
 Imports a `boreal.export.v1` document or raw `boreal.file-store.v1` state document. Import validates required sections and references before writing, normalizes imported event operation links away, and never imports operation records from the source file. Existing records with identical IDs and identical content are skipped. Existing records with identical IDs and different content are rejected as conflicts.
+
+Directive acknowledgement records import only as durable runtime records with valid links. Import rejects acknowledgement records that point at missing evidence, verification, summaries, artifact URIs, handoffs, or work subjects. If the export carries a top-level `agentDirectives` bundle, import validates directive references against that carrier; the bundle itself remains transport metadata and is not added to runtime state. Historical closeout summaries without acknowledgement records import as legacy-compatible records and are classified by doctor/report surfaces instead of being silently modernized.
 
 By default, `--from` must resolve inside the workspace, including after symlink resolution. Use `--allow-external-read` for an intentional external file import.
 
@@ -1392,6 +1398,8 @@ bwrk import ledgers --from <dir> [--allow-external-read] [--json]
 ```
 
 Imports a `boreal.ledgers.v1` directory. The importer reads `manifest.json`, verifies every JSONL file and `deletions.jsonl` count/content hash, reconstructs the portable snapshot, rejects tombstones that conflict with live records, validates record schemas and references, then merges records with the same conflict rules as `import json`.
+
+Directive acknowledgement ledger rows follow the same link validation as `import json`. A ledger import can preserve durable acknowledgements and legacy-only closeout facts, but it must not fabricate acknowledgements from legacy summaries.
 
 By default, `--from` must resolve inside the workspace, including after symlink resolution. Use `--allow-external-read` for an intentional external ledger import.
 
@@ -1641,6 +1649,8 @@ Checks:
 - SQLite generated cache freshness when a cache file exists.
 - Runtime state and search-index lock state.
 - Git collaboration safety across the project repository and any separate child/sibling memory repository. Generated artifact and raw-index caveats are advisory; blocking dirty paths on detached HEAD or uninspectable Git status remain warnings that fail strict mode.
+
+Directive migration diagnostics are split deliberately. `summary.directive_coverage` reports current-policy closeout summaries without durable acknowledgement proof. `summary.legacy_directive_compatibility` reports closeout summaries that predate directive acknowledgement policy or are explicitly marked through `legacy_backfill`. Legacy checkpoint, artifact, and closeout summary diagnostics remain separate so operators can tell missing proof from accepted historical state.
 
 `--fix` performs only idempotent repairs:
 
