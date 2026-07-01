@@ -36,10 +36,13 @@ describe("CLI agent directive envelopes", () => {
 
     const shown = await runCli(rootDir, ["work", "show", created.data.meta.id, "--json"]);
     const envelope = parseEnvelope<{ readonly id: string; readonly title: string }>(shown.stdout);
+    const legacyData = parseLegacyData<{ readonly id: string; readonly title: string }>(shown.stdout);
     const bundle = envelope.agentDirectives?.[0];
 
     expect(shown.exitCode).toBe(0);
+    expect(Object.keys(envelope)).toEqual(["ok", "data", "agentDirectives"]);
     expect(envelope.data).toEqual(expect.objectContaining({ id: created.data.meta.id, title: "Directive envelope target" }));
+    expect(legacyData).toEqual(envelope.data);
     expect(envelope.data).not.toHaveProperty("agentDirectives");
     expect(bundle).toBeDefined();
     expect(bundle?.meta).toEqual(
@@ -54,6 +57,24 @@ describe("CLI agent directive envelopes", () => {
     expect(bundle?.conflicts).toEqual(expect.any(Array));
     expect(bundle?.missingRequired).toEqual(expect.any(Array));
     expect(() => assertAgentDirectiveBundle(bundle)).not.toThrow();
+  });
+
+  it("keeps non-directive JSON command envelopes compatible with existing data consumers", async () => {
+    const rootDir = await makeTempWorkspace();
+    const initialized = parseEnvelope<{ readonly initialized: boolean; readonly workspaceRoot: string }>(
+      (await runCli(rootDir, ["init", "--json"])).stdout
+    );
+    const created = await runCli(rootDir, ["work", "create", "Non directive command target", "--ready", "--json"]);
+    const createdEnvelope = parseEnvelope<{ readonly meta: { readonly id: string }; readonly title: string }>(created.stdout);
+    const legacyData = parseLegacyData<{ readonly meta: { readonly id: string }; readonly title: string }>(created.stdout);
+
+    expect(Object.keys(initialized)).toEqual(["ok", "data"]);
+    expect(initialized.agentDirectives).toBeUndefined();
+    expect(initialized.data.initialized).toBe(true);
+    expect(Object.keys(createdEnvelope)).toEqual(["ok", "data"]);
+    expect(createdEnvelope.agentDirectives).toBeUndefined();
+    expect(createdEnvelope.data.title).toBe("Non directive command target");
+    expect(legacyData).toEqual(createdEnvelope.data);
   });
 
   it("exposes blocked-work recovery directives from work show", async () => {
@@ -205,7 +226,11 @@ describe("CLI agent directive envelopes", () => {
     const fullResult = parseEnvelope<readonly { readonly title: string }[]>(
       await readFile(join(rootDir, payload.fullResultPath), "utf8")
     );
+    const legacyFullResultData = parseLegacyData<readonly { readonly title: string }[]>(
+      await readFile(join(rootDir, payload.fullResultPath), "utf8")
+    );
     expect(fullResult.data).toHaveLength(40);
+    expect(legacyFullResultData).toEqual(fullResult.data);
     expect(fullResult.agentDirectives).toEqual([bundle]);
   });
 });
@@ -233,6 +258,10 @@ async function runCli(cwd: string, argv: readonly string[]): Promise<CommandRun>
 
 function parseEnvelope<T>(text: string): CliEnvelope<T> {
   return JSON.parse(text) as CliEnvelope<T>;
+}
+
+function parseLegacyData<T>(text: string): T {
+  return (JSON.parse(text) as { readonly data: T }).data;
 }
 
 function registryIds(agentDirectives: readonly AgentDirectiveBundle[] | undefined): readonly string[] {
