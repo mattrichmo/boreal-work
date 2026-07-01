@@ -6604,6 +6604,26 @@ describe("bwrk cli", () => {
         })
       })
     );
+    expect(doctorDiagnostic(doctor, "closeout.required_gate_coverage")).toEqual(
+      expect.objectContaining({
+        severity: "warning",
+        details: expect.arrayContaining([
+          expect.objectContaining({
+            workId: pending.meta.id,
+            gateKind: "review",
+            gateScope: "self",
+            targetId: pending.meta.id,
+            reason: "required gate has no satisfying evidence"
+          })
+        ])
+      })
+    );
+
+    const strictDoctor = parseData<DoctorPayload>((await runCli(rootDir, ["doctor", "--strict", "--json"])).stdout);
+    expect(strictDoctor.ok).toBe(false);
+    expect(doctorDiagnostic(strictDoctor, "closeout.required_gate_coverage")).toEqual(
+      expect.objectContaining({ severity: "warning" })
+    );
 
     const gate = parseData<{
       readonly reviewGates: {
@@ -6616,6 +6636,17 @@ describe("bwrk cli", () => {
         review: expect.objectContaining({ pending: 1, passed: 1, forced: 0 }),
         audit: expect.objectContaining({ pending: 0, passed: 0, forced: 1 })
       })
+    );
+    const strictGate = parseData<{
+      readonly ok: boolean;
+      readonly doctor: { readonly ok: boolean; readonly diagnostics: readonly Array<{ readonly code: string; readonly severity: string }> };
+    }>((await runCli(rootDir, ["gate", "closeout", "--strict", "--json"])).stdout);
+    expect(strictGate.ok).toBe(false);
+    expect(strictGate.doctor.ok).toBe(false);
+    expect(strictGate.doctor.diagnostics).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ code: "closeout.required_gate_coverage", severity: "warning" })
+      ])
     );
 
     const doctorEvidence = parseData<{ readonly meta: { readonly id: string } }>(
@@ -6663,6 +6694,15 @@ describe("bwrk cli", () => {
             readonly audit: { readonly pending: number; readonly passed: number; readonly forced: number };
           };
         };
+        readonly reviewGateDetails: readonly Array<{
+          readonly workId: string;
+          readonly kind: string;
+          readonly status: string;
+          readonly evidenceIds: readonly string[];
+          readonly forceReason?: string;
+          readonly forceComment?: string;
+          readonly forceEvidenceIds: readonly string[];
+        }>;
       };
     }>(
       (
@@ -6686,9 +6726,35 @@ describe("bwrk cli", () => {
         audit: expect.objectContaining({ pending: 0, passed: 0, forced: 1 })
       })
     );
+    expect(report.report.reviewGateDetails).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          workId: pending.meta.id,
+          kind: "review",
+          status: "open",
+          evidenceIds: []
+        }),
+        expect.objectContaining({
+          workId: passed.meta.id,
+          kind: "review",
+          status: "satisfied",
+          evidenceIds: [reviewEvidence.meta.id]
+        }),
+        expect.objectContaining({
+          workId: forced.meta.id,
+          kind: "audit",
+          status: "forced",
+          forceReason: "audit_unavailable",
+          forceComment: "External audit window unavailable before reviewer sweep.",
+          forceEvidenceIds: [forceEvidence.meta.id]
+        })
+      ])
+    );
     const reportMarkdown = await readFile(report.path, "utf8");
     expect(reportMarkdown).toContain("Review gates: pending 1, passed 1, forced bypass 0");
     expect(reportMarkdown).toContain("Audit gates: pending 0, passed 0, forced bypass 1");
+    expect(reportMarkdown).toContain(reviewEvidence.meta.id);
+    expect(reportMarkdown).toContain(`force_evidence=${forceEvidence.meta.id}`);
 
     const composed = parseData<{
       readonly summary: { readonly body: string };
@@ -6708,6 +6774,23 @@ describe("bwrk cli", () => {
     );
     expect(composed.closeoutGateStatus?.summary.reviewGates.review.pending).toBe(1);
     expect(composed.summary.body).toContain("Review gates: pending 1, passed 0, forced bypass 0");
+
+    const sprintSummary = parseData<{ readonly summary: { readonly body: string } }>(
+      (
+        await runCli(rootDir, [
+          "summary",
+          "compose",
+          sprint.meta.id,
+          "--dirty-path",
+          "no_repo_changes: sprint review gate summary fixture",
+          "--no-render",
+          "--json"
+        ])
+      ).stdout
+    );
+    expect(sprintSummary.summary.body).toContain("## Review/Audit Gate Details");
+    expect(sprintSummary.summary.body).toContain(reviewEvidence.meta.id);
+    expect(sprintSummary.summary.body).toContain(`force_evidence=${forceEvidence.meta.id}`);
   });
 
   it("reports SQLite cache missing, stale, and corrupt states in doctor", async () => {

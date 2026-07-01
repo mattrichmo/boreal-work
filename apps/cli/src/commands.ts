@@ -310,6 +310,25 @@ interface ReviewGateSummary {
   readonly audit: ReviewGateKindSummary;
 }
 
+interface ReviewGateDetailRow {
+  readonly workId: WorkId;
+  readonly workTitle: string;
+  readonly gateId: string;
+  readonly kind: CloseoutGateKind;
+  readonly scope: CloseoutGateScope;
+  readonly status: CloseoutGateStatusRow["status"];
+  readonly targetIds: readonly WorkId[];
+  readonly pendingTargetIds: readonly WorkId[];
+  readonly evidenceIds: readonly string[];
+  readonly verificationIds: readonly string[];
+  readonly agentSummaryIds: readonly string[];
+  readonly commitShas: readonly string[];
+  readonly dirtyPathNotes: readonly string[];
+  readonly forceReason?: string;
+  readonly forceComment?: string;
+  readonly forceEvidenceIds: readonly string[];
+}
+
 interface DependencyTreeNode {
   readonly id: string;
   readonly title?: string;
@@ -440,6 +459,7 @@ interface SprintReportDocument {
   readonly agentSummaries: readonly SprintReportAgentSummaryRow[];
   readonly evidence: readonly SprintReportEvidenceRow[];
   readonly decisions: readonly SprintReportDecisionRow[];
+  readonly reviewGateDetails: readonly ReviewGateDetailRow[];
   readonly closeoutEvidence: {
     readonly doctor: SprintReportEvidenceRow;
     readonly sync: SprintReportEvidenceRow;
@@ -3681,10 +3701,13 @@ async function composeAgentSummaryBody(context: CliContext, subject: SummarySubj
   const snapshot = await context.store.read(async (reader) => ({
     workItems: await reader.listWorkItems(),
     graphEdges: await reader.listGraphEdges(),
-    evidence: await reader.listEvidenceForSubject(subject.work!.meta.id),
-    verifications: await reader.listVerificationsForSubject(subject.work!.meta.id),
-    summaries: await reader.listAgentSummariesForSubject(subject.work!.meta.id)
+    evidence: await reader.listEvidence(),
+    verifications: await reader.listVerifications(),
+    summaries: await reader.listAgentSummaries()
   }));
+  const subjectEvidence = snapshot.evidence.filter((record) => record.subjectId === subject.work?.meta.id);
+  const subjectVerifications = snapshot.verifications.filter((record) => record.subjectId === subject.work?.meta.id);
+  const subjectSummaries = snapshot.summaries.filter((record) => record.subjectId === subject.work?.meta.id);
   const tree = dependencyTreeForWork(subject.work.meta.id, snapshot.workItems, snapshot.graphEdges);
   const descendants = flattenDependencyTree(tree).filter((node) => node.id !== subject.work?.meta.id);
   const closeoutGateStatus = closeoutGateStatusFromSnapshot(
@@ -3694,6 +3717,16 @@ async function composeAgentSummaryBody(context: CliContext, subject: SummarySubj
     snapshot.evidence,
     snapshot.verifications,
     snapshot.summaries
+  );
+  const reviewGateDetails = reviewGateDetailRowsFromStatuses(
+    closeoutGateStatusesForWorkScope(
+      subject.work,
+      snapshot.workItems,
+      snapshot.graphEdges,
+      snapshot.evidence,
+      snapshot.verifications,
+      snapshot.summaries
+    )
   );
   return [
     `Subject: ${subject.subjectType}:${subject.subjectId}`,
@@ -3706,19 +3739,23 @@ async function composeAgentSummaryBody(context: CliContext, subject: SummarySubj
     "",
     "## Evidence",
     "",
-    snapshot.evidence.length > 0
-      ? snapshot.evidence.map((record) => `- ${record.meta.id}: ${record.outcome} ${record.summary}`).join("\n")
+    subjectEvidence.length > 0
+      ? subjectEvidence.map((record) => `- ${record.meta.id}: ${record.outcome} ${record.summary}`).join("\n")
       : "None.",
     "",
     "## Verification",
     "",
-    snapshot.verifications.length > 0
-      ? snapshot.verifications.map((record) => `- ${record.meta.id}: ${record.verdict}${record.notes ? ` ${record.notes}` : ""}`).join("\n")
+    subjectVerifications.length > 0
+      ? subjectVerifications.map((record) => `- ${record.meta.id}: ${record.verdict}${record.notes ? ` ${record.notes}` : ""}`).join("\n")
       : "None.",
     "",
     "## Closeout Gates",
     "",
     formatCloseoutGateStatusMarkdown(closeoutGateStatus),
+    "",
+    "## Review/Audit Gate Details",
+    "",
+    formatReviewGateDetailsMarkdown(reviewGateDetails),
     "",
     "## Child Work",
     "",
@@ -3728,8 +3765,8 @@ async function composeAgentSummaryBody(context: CliContext, subject: SummarySubj
     "",
     "## Prior Summaries",
     "",
-    snapshot.summaries.length > 0
-      ? snapshot.summaries.map((record) => `- ${record.meta.id}: ${record.status} ${record.outcome} ${record.title}`).join("\n")
+    subjectSummaries.length > 0
+      ? subjectSummaries.map((record) => `- ${record.meta.id}: ${record.status} ${record.outcome} ${record.title}`).join("\n")
       : "None."
   ].join("\n");
 }
@@ -4101,6 +4138,74 @@ function formatCloseoutGateStatusMarkdown(status: CloseoutGateStatusView): strin
     const recorded = gate.recordedStatus !== gate.status ? ` recorded=${gate.recordedStatus}` : "";
     return `- ${gate.kind}:${gate.scope} ${gate.status}${recorded}${evidence}${verification}${summaries}${commits}${dirty}${forced}`;
   })].join("\n");
+}
+
+function closeoutGateStatusesForWorkScope(
+  work: WorkItem,
+  workItems: readonly WorkItem[],
+  graphEdges: readonly GraphEdge[],
+  evidence: readonly EvidenceRecord[],
+  verifications: readonly VerificationRecord[],
+  summaries: readonly AgentSummaryRecord[]
+): readonly CloseoutGateStatusView[] {
+  const scopedIds = new Set([
+    work.meta.id,
+    ...flattenDependencyTree(dependencyTreeForWork(work.meta.id, workItems, graphEdges))
+      .filter((node) => node.id !== work.meta.id)
+      .map((node) => node.id as WorkId)
+  ]);
+  return workItems
+    .filter((candidate) => scopedIds.has(candidate.meta.id))
+    .map((candidate) => closeoutGateStatusFromSnapshot(candidate, workItems, graphEdges, evidence, verifications, summaries));
+}
+
+function reviewGateDetailRowsFromStatuses(statuses: readonly CloseoutGateStatusView[]): readonly ReviewGateDetailRow[] {
+  return statuses.flatMap((status) =>
+    status.requiredGates
+      .filter(isReviewCandidateGate)
+      .map((gate) => reviewGateDetailRow(status, gate))
+  );
+}
+
+function reviewGateDetailRow(status: CloseoutGateStatusView, gate: CloseoutGateStatusRow): ReviewGateDetailRow {
+  const satisfied = gate.satisfiedBy;
+  return {
+    workId: status.subjectId,
+    workTitle: status.title,
+    gateId: gate.id,
+    kind: gate.kind,
+    scope: gate.scope,
+    status: gate.status,
+    targetIds: gate.targets.map((target) => target.targetId),
+    pendingTargetIds: gate.targets.filter((target) => target.status === "open").map((target) => target.targetId),
+    evidenceIds: satisfied?.evidenceIds ?? [],
+    verificationIds: satisfied?.verificationIds ?? [],
+    agentSummaryIds: satisfied?.agentSummaryIds ?? [],
+    commitShas: satisfied?.commitShas ?? [],
+    dirtyPathNotes: satisfied?.dirtyPathNotes ?? [],
+    forceReason: gate.force?.reason,
+    forceComment: gate.force?.comment,
+    forceEvidenceIds: gate.force?.evidenceIds ?? []
+  };
+}
+
+function formatReviewGateDetailsMarkdown(rows: readonly ReviewGateDetailRow[]): string {
+  if (rows.length === 0) {
+    return "None.";
+  }
+  return rows.map((row) => {
+    const pending = row.pendingTargetIds.length > 0 ? ` pending_targets=${row.pendingTargetIds.join(",")}` : "";
+    const targets = row.targetIds.length > 0 ? ` targets=${row.targetIds.join(",")}` : "";
+    const evidence = row.evidenceIds.length > 0 ? ` evidence=${row.evidenceIds.join(",")}` : "";
+    const verification = row.verificationIds.length > 0 ? ` verification=${row.verificationIds.join(",")}` : "";
+    const summaries = row.agentSummaryIds.length > 0 ? ` summaries=${row.agentSummaryIds.join(",")}` : "";
+    const commits = row.commitShas.length > 0 ? ` commits=${row.commitShas.join(",")}` : "";
+    const dirty = row.dirtyPathNotes.length > 0 ? ` dirty_paths=${row.dirtyPathNotes.join("; ")}` : "";
+    const forced = row.forceReason
+      ? ` forced=${row.forceReason}${row.forceComment ? ` ${row.forceComment}` : ""}${row.forceEvidenceIds.length > 0 ? ` force_evidence=${row.forceEvidenceIds.join(",")}` : ""}`
+      : "";
+    return `- ${row.workTitle} (${row.workId}) ${row.kind}:${row.scope} ${row.status} gate=${row.gateId}${targets}${pending}${evidence}${verification}${summaries}${commits}${dirty}${forced}`;
+  }).join("\n");
 }
 
 function flattenDependencyTree(tree: DependencyTreeNode): readonly DependencyTreeNode[] {
@@ -7089,18 +7194,18 @@ async function buildSprintReportDocument(
   const nextSprintCandidates = openWork
     .filter((work) => work.status !== "cancelled")
     .sort(compareReportWorkRows);
-  const reviewGates = reviewGateSummaryFromStatuses(
-    snapshot.workItems
-      .filter((work) => scopedWorkIds.has(work.meta.id))
-      .map((work) => closeoutGateStatusFromSnapshot(
-        work,
-        snapshot.workItems,
-        snapshot.graphEdges,
-        snapshot.evidence,
-        snapshot.verifications,
-        snapshot.agentSummaries
-      ))
-  );
+  const scopedGateStatuses = snapshot.workItems
+    .filter((work) => scopedWorkIds.has(work.meta.id))
+    .map((work) => closeoutGateStatusFromSnapshot(
+      work,
+      snapshot.workItems,
+      snapshot.graphEdges,
+      snapshot.evidence,
+      snapshot.verifications,
+      snapshot.agentSummaries
+    ));
+  const reviewGates = reviewGateSummaryFromStatuses(scopedGateStatuses);
+  const reviewGateDetails = reviewGateDetailRowsFromStatuses(scopedGateStatuses);
 
   return {
     schemaVersion: SPRINT_REPORT_SCHEMA_VERSION,
@@ -7136,6 +7241,7 @@ async function buildSprintReportDocument(
     agentSummaries,
     evidence: scopedEvidence,
     decisions,
+    reviewGateDetails,
     closeoutEvidence
   };
 }
@@ -7352,6 +7458,10 @@ function renderSprintReportMarkdown(document: SprintReportDocument): string {
     "",
     markdownAgentSummaryList(document.agentSummaries),
     "",
+    "## Review/Audit Gates",
+    "",
+    formatReviewGateDetailsMarkdown(document.reviewGateDetails),
+    "",
     "## Evidence",
     "",
     markdownEvidenceList(document.evidence),
@@ -7471,6 +7581,7 @@ function renderSprintReportHtml(document: SprintReportDocument): string {
     htmlBlockerSection(document.unresolvedBlockers),
     htmlDecisionSection(document.decisions),
     htmlAgentSummarySection(document.agentSummaries),
+    htmlReviewGateSection(document.reviewGateDetails),
     htmlEvidenceSection(document.evidence),
     htmlWorkSection("Next Sprint Candidates", document.nextSprintCandidates),
     "</main>",
@@ -7551,6 +7662,33 @@ function htmlAgentSummarySection(rows: readonly SprintReportAgentSummaryRow[]): 
                 : "none",
             row.childSummaryIds.length > 0 ? row.childSummaryIds.join(", ") : "none",
             row.artifactUri ?? "none"
+          ])
+        ),
+    "</section>"
+  ].join("\n");
+}
+
+function htmlReviewGateSection(rows: readonly ReviewGateDetailRow[]): string {
+  return [
+    '<section class="section"><h2>Review/Audit Gates</h2>',
+    rows.length === 0
+      ? '<p class="empty">None.</p>'
+      : htmlTable(
+          ["Work", "Gate", "Status", "Evidence", "Forced Bypass"],
+          rows.map((row) => [
+            `${row.workTitle} (${row.workId})`,
+            `${row.kind}:${row.scope} ${row.gateId}`,
+            `${row.status}${row.pendingTargetIds.length > 0 ? ` pending ${row.pendingTargetIds.join(", ")}` : ""}`,
+            [
+              row.evidenceIds.length > 0 ? `evidence ${row.evidenceIds.join(", ")}` : "",
+              row.verificationIds.length > 0 ? `verification ${row.verificationIds.join(", ")}` : "",
+              row.agentSummaryIds.length > 0 ? `summaries ${row.agentSummaryIds.join(", ")}` : "",
+              row.commitShas.length > 0 ? `commits ${row.commitShas.join(", ")}` : "",
+              row.dirtyPathNotes.length > 0 ? `dirty ${row.dirtyPathNotes.join("; ")}` : ""
+            ].filter((value) => value.length > 0).join("; ") || "none",
+            row.forceReason
+              ? `${row.forceReason}: ${row.forceComment ?? ""}${row.forceEvidenceIds.length > 0 ? ` (${row.forceEvidenceIds.join(", ")})` : ""}`
+              : "none"
           ])
         ),
     "</section>"

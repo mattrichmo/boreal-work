@@ -1253,6 +1253,13 @@ async function validateStoreRecords(
       );
       const expectedDependencyIds = dependencyIdsByWorkFromGraph(workItems, blockEdges);
       const reviewGateCounts = doctorReviewGateCounts(workItems, evidence, expectedDependencyIds);
+      const requiredGateCoverageGaps = doctorRequiredCloseoutGateCoverageGaps(
+        workItems,
+        evidence,
+        verifications,
+        agentSummaries,
+        expectedDependencyIds
+      );
       const staleReadiness = workItems.flatMap((work) => {
         const dependencyIds = expectedDependencyIds.get(work.meta.id) ?? [];
         const dependencies = dependencyIds.map((dependencyId) => workById.get(dependencyId)).filter(isWorkItem);
@@ -1545,6 +1552,7 @@ async function validateStoreRecords(
         legacySummaryArtifactGaps,
         forcedSummaryReasonGaps,
         reviewGateCounts,
+        requiredGateCoverageGaps,
         danglingSummaryEvidence,
         danglingSummaryVerifications,
         danglingSummaryChildren,
@@ -1741,6 +1749,13 @@ async function validateStoreRecords(
         `audit gates pending ${summary.reviewGateCounts.audit.pending}, passed ${summary.reviewGateCounts.audit.passed}, forced bypass ${summary.reviewGateCounts.audit.forced}`,
       details: summary.reviewGateCounts
     });
+    diagnostics.push(
+      warningDiagnosticFromList(
+        "closeout.required_gate_coverage",
+        "Current-policy terminal work has unsatisfied required closeout gates",
+        summary.requiredGateCoverageGaps
+      )
+    );
     diagnostics.push(
       warningDiagnosticFromList(
         "summary.legacy_artifact_coverage",
@@ -2416,6 +2431,20 @@ interface DoctorReviewGateCounts extends DoctorReviewGateKindCounts {
   audit: DoctorReviewGateKindCounts;
 }
 
+type DoctorRequiredCloseoutGate = NonNullable<WorkItem["requiredCloseoutGates"]>[number];
+
+interface DoctorRequiredCloseoutGateCoverageGap {
+  readonly workId: WorkId;
+  readonly title: string;
+  readonly gateId: string;
+  readonly gateKind: DoctorRequiredCloseoutGate["kind"];
+  readonly gateScope: DoctorRequiredCloseoutGate["scope"];
+  readonly gateStatus: DoctorRequiredCloseoutGate["status"];
+  readonly targetId: WorkId;
+  readonly targetStatus?: WorkItem["status"];
+  readonly reason: string;
+}
+
 function doctorReviewGateCounts(
   workItems: readonly WorkItem[],
   evidence: readonly EvidenceRecord[],
@@ -2440,6 +2469,128 @@ function doctorReviewGateCounts(
     review,
     audit
   };
+}
+
+function doctorRequiredCloseoutGateCoverageGaps(
+  workItems: readonly WorkItem[],
+  evidence: readonly EvidenceRecord[],
+  verifications: readonly VerificationRecord[],
+  agentSummaries: readonly AgentSummaryRecord[],
+  dependencyIdsByWork: ReadonlyMap<WorkId, readonly WorkId[]>
+): readonly DoctorRequiredCloseoutGateCoverageGap[] {
+  const workById = new Map(workItems.map((work) => [work.meta.id, work]));
+  return workItems
+    .filter((work) => isTerminalCloseoutWork(work) && isAgentSummaryPolicyEnforcedAt(work.closedAt))
+    .flatMap((work) =>
+      (work.requiredCloseoutGates ?? []).flatMap((gate) => {
+        if (gate.status === "forced") {
+          return doctorForcedGateIsValid(gate)
+            ? []
+            : [doctorRequiredCloseoutGateCoverageGap(work, gate, work.meta.id, work.status, "forced gate is missing required bypass metadata")];
+        }
+        return doctorReviewGateTargetIds(work, gate.scope, dependencyIdsByWork).flatMap((targetId) => {
+          const target = workById.get(targetId);
+          if (!target) {
+            return [doctorRequiredCloseoutGateCoverageGap(work, gate, targetId, undefined, "required gate target is missing")];
+          }
+          return doctorRequiredGateSatisfied(gate, target, evidence, verifications, agentSummaries)
+            ? []
+            : [doctorRequiredCloseoutGateCoverageGap(work, gate, target.meta.id, target.status, "required gate has no satisfying evidence")];
+        });
+      })
+    );
+}
+
+function doctorRequiredCloseoutGateCoverageGap(
+  work: WorkItem,
+  gate: DoctorRequiredCloseoutGate,
+  targetId: WorkId,
+  targetStatus: WorkItem["status"] | undefined,
+  reason: string
+): DoctorRequiredCloseoutGateCoverageGap {
+  return {
+    workId: work.meta.id,
+    title: work.title,
+    gateId: gate.id,
+    gateKind: gate.kind,
+    gateScope: gate.scope,
+    gateStatus: gate.status,
+    targetId,
+    targetStatus,
+    reason
+  };
+}
+
+function doctorForcedGateIsValid(gate: DoctorRequiredCloseoutGate): boolean {
+  return Boolean(gate.force?.reason && gate.force.comment.trim() && gate.force.actor.id && gate.force.forcedAt);
+}
+
+function doctorRequiredGateSatisfied(
+  gate: DoctorRequiredCloseoutGate,
+  target: WorkItem,
+  evidence: readonly EvidenceRecord[],
+  verifications: readonly VerificationRecord[],
+  agentSummaries: readonly AgentSummaryRecord[]
+): boolean {
+  switch (gate.kind) {
+    case "verification":
+      return doctorVerificationGateSatisfied(gate, target, evidence, verifications);
+    case "checkpoint":
+      return doctorCheckpointGateSatisfied(gate, target, agentSummaries);
+    case "review":
+    case "audit":
+      return doctorEvidenceGateSatisfied(gate, target, evidence);
+  }
+}
+
+function doctorVerificationGateSatisfied(
+  gate: DoctorRequiredCloseoutGate,
+  target: WorkItem,
+  evidence: readonly EvidenceRecord[],
+  verifications: readonly VerificationRecord[]
+): boolean {
+  const evidenceById = new Map(evidence.map((record) => [record.meta.id, record]));
+  const evidenceIds = new Set<string>();
+  for (const verification of verifications) {
+    if (verification.subjectId !== target.meta.id || verification.verdict !== "passed") {
+      continue;
+    }
+    for (const evidenceId of verification.evidenceIds) {
+      const record = evidenceById.get(evidenceId);
+      if (record?.subjectId === target.meta.id && (record.outcome === "passed" || record.outcome === "observed")) {
+        evidenceIds.add(evidenceId);
+      }
+    }
+  }
+  return evidenceIds.size >= gate.minEvidenceCount;
+}
+
+function doctorCheckpointGateSatisfied(
+  gate: DoctorRequiredCloseoutGate,
+  target: WorkItem,
+  agentSummaries: readonly AgentSummaryRecord[]
+): boolean {
+  return agentSummaries.filter(
+    (summary) =>
+      summary.subjectId === target.meta.id &&
+      (summary.status === "final" || summary.status === "forced") &&
+      (summary.commitShas.length > 0 || dirtyPathNotesHaveReasonCode(summary.dirtyPathNotes))
+  ).length >= gate.minEvidenceCount;
+}
+
+function doctorEvidenceGateSatisfied(
+  gate: DoctorRequiredCloseoutGate,
+  target: WorkItem,
+  evidence: readonly EvidenceRecord[]
+): boolean {
+  const allowedKinds = new Set(gate.requiredEvidenceKinds);
+  return evidence.filter(
+    (record) =>
+      record.subjectType === "work" &&
+      record.subjectId === target.meta.id &&
+      record.outcome === gate.requiredOutcome &&
+      allowedKinds.has(record.kind)
+  ).length >= gate.minEvidenceCount;
 }
 
 function doctorEmptyReviewGateKindCounts(): DoctorReviewGateKindCounts {
