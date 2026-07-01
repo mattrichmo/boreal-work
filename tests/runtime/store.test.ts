@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { nowIso, type ActorRef } from "@boreal/core";
+import { createRecordMeta, deterministicId, nowIso, withContentHash, type ActorRef, type ReviewerHeartbeatId } from "@boreal/core";
 import { InMemoryBorealStore } from "@boreal/storage";
 import { createWorkItem } from "@boreal/work-engine";
 
@@ -74,5 +74,36 @@ describe("in-memory store", () => {
       })
     ]);
     expect(loaded?.requiredCloseoutGates).not.toBe(work.requiredCloseoutGates);
+  });
+
+  it("preserves reviewer heartbeat checkpoints through writes and reads", async () => {
+    const store = new InMemoryBorealStore();
+    const now = nowIso(new Date("2026-01-01T00:00:00.000Z"));
+    const heartbeat = withContentHash({
+      meta: createRecordMeta({
+        id: deterministicId<ReviewerHeartbeatId>("heartbeat", {
+          name: "review-pass",
+          reviewerId: "reviewer-a",
+          containerId: null
+        }),
+        actor,
+        now,
+        tags: ["reviewer-heartbeat"]
+      }),
+      name: "review-pass",
+      reviewerId: "reviewer-a",
+      lastClosedAt: now,
+      advancedAt: now
+    });
+
+    await store.write((writer) => writer.putReviewerHeartbeat(heartbeat));
+    const loaded = await store.read(async (reader) => ({
+      single: await reader.getReviewerHeartbeat(heartbeat.meta.id),
+      all: await reader.listReviewerHeartbeats()
+    }));
+
+    expect(loaded.single).toEqual(heartbeat);
+    expect(loaded.single).not.toBe(heartbeat);
+    expect(loaded.all).toEqual([heartbeat]);
   });
 });

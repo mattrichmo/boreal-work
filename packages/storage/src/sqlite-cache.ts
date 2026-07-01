@@ -18,6 +18,7 @@ export type SQLiteCacheSection =
   | "decisions"
   | "graphEdges"
   | "reservations"
+  | "reviewerHeartbeats"
   | "events"
   | "projections"
   | "contextPacks";
@@ -91,6 +92,7 @@ const CACHE_SECTIONS: readonly SQLiteCacheSection[] = [
   "decisions",
   "graphEdges",
   "reservations",
+  "reviewerHeartbeats",
   "events",
   "projections",
   "contextPacks"
@@ -267,6 +269,7 @@ function canonicalCacheSnapshot(snapshot: StoreSnapshot): Record<SQLiteCacheSect
     decisions: snapshot.decisions ?? [],
     graphEdges: snapshot.graphEdges ?? [],
     reservations: snapshot.reservations ?? [],
+    reviewerHeartbeats: snapshot.reviewerHeartbeats ?? [],
     events: snapshot.events ?? [],
     projections: snapshot.projections ?? [],
     contextPacks: snapshot.contextPacks ?? []

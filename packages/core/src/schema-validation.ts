@@ -22,6 +22,7 @@ export interface RuntimeSnapshotSchemaInput {
   readonly decisions?: readonly unknown[];
   readonly graphEdges?: readonly unknown[];
   readonly reservations?: readonly unknown[];
+  readonly reviewerHeartbeats?: readonly unknown[];
   readonly events?: readonly unknown[];
   readonly operations?: readonly unknown[];
   readonly projections?: readonly unknown[];
@@ -48,6 +49,7 @@ export const RUNTIME_SCHEMA_IDS = {
   claimRecord: "https://boreal.work/schemas/records/claim-record.schema.json",
   decisionRecord: "https://boreal.work/schemas/records/decision-record.schema.json",
   agentReservation: "https://boreal.work/schemas/records/agent-reservation.schema.json",
+  reviewerHeartbeat: "https://boreal.work/schemas/records/reviewer-heartbeat.schema.json",
   runtimeEvent: "https://boreal.work/schemas/events/runtime-event.schema.json",
   runtimeOperation: "https://boreal.work/schemas/operations/runtime-operation.schema.json",
   projectionRecord: "https://boreal.work/schemas/projections/projection-record.schema.json",
@@ -118,6 +120,13 @@ export const RUNTIME_SCHEMA_CONTRACTS = [
     schemaPath: "schemas/records/agent-reservation.schema.json",
     runtimeSection: "reservations",
     validator: agentReservationSchemaIssues
+  },
+  {
+    key: "reviewerHeartbeat",
+    schemaId: RUNTIME_SCHEMA_IDS.reviewerHeartbeat,
+    schemaPath: "schemas/records/reviewer-heartbeat.schema.json",
+    runtimeSection: "reviewerHeartbeats",
+    validator: reviewerHeartbeatSchemaIssues
   },
   {
     key: "runtimeEvent",
@@ -308,6 +317,33 @@ export function agentSummaryRecordSchemaIssues(value: unknown, path = "$"): read
     }
   }
 
+  return issues;
+}
+
+export function reviewerHeartbeatSchemaIssues(value: unknown, path = "$"): readonly SchemaValidationIssue[] {
+  const schemaId = RUNTIME_SCHEMA_IDS.reviewerHeartbeat;
+  if (!isRecord(value)) {
+    return [issue(schemaId, path, "must be an object")];
+  }
+
+  const issues: SchemaValidationIssue[] = [
+    ...recordMetaIssues(value.meta, `${path}.meta`, schemaId, /^bw_heartbeat_[a-f0-9]{12,64}$/),
+    ...nonEmptyStringIssue(value.name, `${path}.name`, schemaId),
+    ...nonEmptyStringIssue(value.reviewerId, `${path}.reviewerId`, schemaId),
+    ...stringIssue(value.advancedAt, `${path}.advancedAt`, schemaId)
+  ];
+  if (value.containerId !== undefined) {
+    issues.push(...patternStringIssue(value.containerId, `${path}.containerId`, schemaId, /^bw_work_[a-f0-9]{12,64}$/));
+  }
+  if (value.lastClosedAt !== undefined) {
+    issues.push(...stringIssue(value.lastClosedAt, `${path}.lastClosedAt`, schemaId));
+  }
+  if (value.lastEventId !== undefined) {
+    issues.push(...patternStringIssue(value.lastEventId, `${path}.lastEventId`, schemaId, /^bw_event_[a-f0-9]{12,64}$/));
+  }
+  if (value.lastWorkId !== undefined) {
+    issues.push(...patternStringIssue(value.lastWorkId, `${path}.lastWorkId`, schemaId, /^bw_work_[a-f0-9]{12,64}$/));
+  }
   return issues;
 }
 

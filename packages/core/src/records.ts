@@ -12,6 +12,7 @@ import type {
   OperationId,
   ProjectionId,
   ReservationId,
+  ReviewerHeartbeatId,
   VerificationId,
   WorkId
 } from "./ids.js";
@@ -119,6 +120,17 @@ export interface WorkItem {
   readonly reservationId?: ReservationId;
   readonly closedAt?: IsoTimestamp;
   readonly closedReason?: string;
+}
+
+export interface ReviewerHeartbeatRecord {
+  readonly meta: RecordMeta<ReviewerHeartbeatId>;
+  readonly name: string;
+  readonly reviewerId: string;
+  readonly containerId?: WorkId;
+  readonly lastClosedAt?: IsoTimestamp;
+  readonly lastEventId?: EventId;
+  readonly lastWorkId?: WorkId;
+  readonly advancedAt: IsoTimestamp;
 }
 
 export type AgentSummarySubjectType = "work" | "sprint" | "milestone" | "phase" | "project" | "session";

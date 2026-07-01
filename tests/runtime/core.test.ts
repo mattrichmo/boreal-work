@@ -266,6 +266,38 @@ describe("core hashing and ids", () => {
     );
   });
 
+  it("validates reviewer heartbeat records", () => {
+    const validHeartbeat = {
+      meta: runtimeMeta("bw_heartbeat_deadbeefdead"),
+      name: "review-pass",
+      reviewerId: "reviewer-a",
+      containerId: "bw_work_deadbeefdead",
+      lastClosedAt: "2026-01-01T00:00:00.000Z",
+      lastEventId: "bw_event_deadbeefdead",
+      lastWorkId: "bw_work_feedbeefcafe",
+      advancedAt: "2026-01-01T00:00:00.000Z"
+    };
+
+    expect(runtimeSnapshotSchemaIssues({ reviewerHeartbeats: [validHeartbeat] })).toEqual([]);
+    expect(
+      runtimeSnapshotSchemaIssues({
+        reviewerHeartbeats: [
+          {
+            ...validHeartbeat,
+            lastEventId: "not-an-event"
+          }
+        ]
+      })
+    ).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          path: "reviewerHeartbeats[0].lastEventId",
+          schemaId: RUNTIME_SCHEMA_IDS.reviewerHeartbeat
+        })
+      ])
+    );
+  });
+
   it("resolves the machine-local project registry path without workspace scanning", () => {
     const storage = resolveProjectRegistryPaths({
       env: {},

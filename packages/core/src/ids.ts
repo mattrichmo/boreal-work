@@ -18,6 +18,7 @@ export type KnowledgeSourceId = Brand<string, "KnowledgeSourceId">;
 export type OperationId = Brand<string, "OperationId">;
 export type ProjectionId = Brand<string, "ProjectionId">;
 export type ReservationId = Brand<string, "ReservationId">;
+export type ReviewerHeartbeatId = Brand<string, "ReviewerHeartbeatId">;
 export type VerificationId = Brand<string, "VerificationId">;
 export type WorkId = Brand<string, "WorkId">;
 
@@ -30,6 +31,7 @@ export type EntityPrefix =
   | "event"
   | "evidence"
   | "gate"
+  | "heartbeat"
   | "operation"
   | "page"
   | "projection"

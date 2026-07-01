@@ -18,6 +18,8 @@ import type {
   ProjectionId,
   ProjectionRecord,
   ReservationId,
+  ReviewerHeartbeatId,
+  ReviewerHeartbeatRecord,
   RuntimeEvent,
   RuntimeOperation,
   VerificationId,
@@ -38,6 +40,7 @@ interface StoreState {
   readonly decisions: Map<DecisionId, DecisionRecord>;
   readonly graphEdges: Map<GraphEdgeId, GraphEdge>;
   readonly reservations: Map<ReservationId, AgentReservation>;
+  readonly reviewerHeartbeats: Map<ReviewerHeartbeatId, ReviewerHeartbeatRecord>;
   readonly events: Map<string, RuntimeEvent>;
   readonly operations: Map<OperationId, RuntimeOperation>;
   readonly projections: Map<ProjectionId, ProjectionRecord>;
@@ -79,6 +82,7 @@ export interface StoreSnapshot {
   readonly decisions?: readonly DecisionRecord[];
   readonly graphEdges?: readonly GraphEdge[];
   readonly reservations?: readonly AgentReservation[];
+  readonly reviewerHeartbeats?: readonly ReviewerHeartbeatRecord[];
   readonly events?: readonly RuntimeEvent[];
   readonly operations?: readonly RuntimeOperation[];
   readonly projections?: readonly ProjectionRecord[];
@@ -193,6 +197,14 @@ class MemoryTransaction implements BorealWriter {
     );
   }
 
+  async getReviewerHeartbeat(id: ReviewerHeartbeatId): Promise<ReviewerHeartbeatRecord | undefined> {
+    return cloneMaybe(this.state.reviewerHeartbeats.get(id));
+  }
+
+  async listReviewerHeartbeats(): Promise<readonly ReviewerHeartbeatRecord[]> {
+    return deepClone([...this.state.reviewerHeartbeats.values()]);
+  }
+
   async listEvents(): Promise<readonly RuntimeEvent[]> {
     return deepClone([...this.state.events.values()]);
   }
@@ -293,6 +305,14 @@ class MemoryTransaction implements BorealWriter {
     return this.state.reservations.delete(id);
   }
 
+  async putReviewerHeartbeat(record: ReviewerHeartbeatRecord): Promise<void> {
+    this.state.reviewerHeartbeats.set(record.meta.id, deepClone(record));
+  }
+
+  async deleteReviewerHeartbeat(id: ReviewerHeartbeatId): Promise<boolean> {
+    return this.state.reviewerHeartbeats.delete(id);
+  }
+
   async putEvent(record: RuntimeEvent): Promise<void> {
     this.state.events.set(record.meta.id, deepClone(record));
   }
@@ -333,6 +353,7 @@ function createState(seed?: PartialStoreSeed): StoreState {
     decisions: new Map((seed?.decisions ?? []).map((record) => [record.meta.id, deepClone(record)])),
     graphEdges: new Map((seed?.graphEdges ?? []).map((record) => [record.meta.id, deepClone(record)])),
     reservations: new Map((seed?.reservations ?? []).map((record) => [record.meta.id, deepClone(record)])),
+    reviewerHeartbeats: new Map((seed?.reviewerHeartbeats ?? []).map((record) => [record.meta.id, deepClone(record)])),
     events: new Map((seed?.events ?? []).map((record) => [record.meta.id, deepClone(record)])),
     operations: new Map((seed?.operations ?? []).map((record) => [record.meta.id, deepClone(record)])),
     projections: new Map((seed?.projections ?? []).map((record) => [record.meta.id, deepClone(record)])),
@@ -355,6 +376,7 @@ function stateToSnapshot(state: StoreState): StoreSnapshot {
     decisions: [...state.decisions.values()],
     graphEdges: [...state.graphEdges.values()],
     reservations: [...state.reservations.values()],
+    reviewerHeartbeats: [...state.reviewerHeartbeats.values()],
     events: [...state.events.values()],
     operations: [...state.operations.values()],
     projections: [...state.projections.values()],

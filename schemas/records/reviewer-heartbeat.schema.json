@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://boreal.work/schemas/records/reviewer-heartbeat.schema.json",
+  "title": "Boreal Reviewer Heartbeat",
+  "type": "object",
+  "required": ["meta", "name", "reviewerId", "advancedAt"],
+  "properties": {
+    "meta": { "type": "object" },
+    "name": { "type": "string", "minLength": 1 },
+    "reviewerId": { "type": "string", "minLength": 1 },
+    "containerId": { "type": "string", "pattern": "^bw_work_[a-f0-9]{12,64}$" },
+    "lastClosedAt": { "type": "string", "format": "date-time" },
+    "lastEventId": { "type": "string", "pattern": "^bw_event_[a-f0-9]{12,64}$" },
+    "lastWorkId": { "type": "string", "pattern": "^bw_work_[a-f0-9]{12,64}$" },
+    "advancedAt": { "type": "string", "format": "date-time" }
+  }
+}

@@ -804,6 +804,32 @@ Filters:
 
 Rows include reservation ID, status, computed `expired`, agent ID, work ID, work status, work title, `reservedAt`, optional `expiresAt`, and optional purpose.
 
+## `heartbeat create`
+
+```bash
+bwrk heartbeat create <name> [--reviewer <id>|--agent <id>] [--container <work-ref>] [--work <work-ref>|--closed-at <iso>] [--event <event-id>] [--json]
+```
+
+Creates a named reviewer heartbeat checkpoint. A heartbeat stores the reviewer's last reviewed closed-work watermark, optionally scoped to a sprint, milestone, or other work container.
+
+Use `--work` to seed the checkpoint from a closed work item. Use `--closed-at` and optional `--event` when importing a known cursor from another review pass. JSON output includes `sinceHeartbeat.includeEqualClosedAt: true`; candidate queries should treat the stored `closedAt` as inclusive so equal-timestamp closures are not skipped.
+
+## `heartbeat show`
+
+```bash
+bwrk heartbeat show <name|heartbeat-id> [--reviewer <id>|--agent <id>] [--container <work-ref>] [--json]
+```
+
+Shows a reviewer heartbeat checkpoint. Name lookup uses the reviewer ID and optional container scope; exact heartbeat IDs can be shown without those lookup flags.
+
+## `heartbeat advance`
+
+```bash
+bwrk heartbeat advance <name|heartbeat-id> [--reviewer <id>|--agent <id>] [--container <work-ref>] [--work <work-ref>|--closed-at <iso>] [--event <event-id>] [--json]
+```
+
+Advances a heartbeat to a new cursor. Supplying `--work` requires a closed work item inside the heartbeat's container scope. Without an explicit cursor, the command advances to the latest closed work in scope.
+
 ## `prime`
 
 ```bash

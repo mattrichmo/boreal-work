@@ -172,6 +172,7 @@ export type SnapshotSection =
   | "decisions"
   | "graphEdges"
   | "reservations"
+  | "reviewerHeartbeats"
   | "events"
   | "projections"
   | "contextPacks";
@@ -188,6 +189,7 @@ const SNAPSHOT_SECTIONS: readonly SnapshotSection[] = [
   "decisions",
   "graphEdges",
   "reservations",
+  "reviewerHeartbeats",
   "events",
   "projections",
   "contextPacks"
@@ -208,6 +210,7 @@ const LEDGER_FILES: Record<SnapshotSection, string> = {
   decisions: "decisions.jsonl",
   graphEdges: "graph-edges.jsonl",
   reservations: "reservations.jsonl",
+  reviewerHeartbeats: "reviewer-heartbeats.jsonl",
   events: "events.jsonl",
   projections: "projections.jsonl",
   contextPacks: "context-packs.jsonl"
@@ -940,6 +943,7 @@ async function readSnapshot(reader: BorealReader): Promise<ExportSnapshot> {
     decisions: await reader.listDecisions(),
     graphEdges: await reader.listGraphEdges(),
     reservations: await reader.listReservations(),
+    reviewerHeartbeats: await reader.listReviewerHeartbeats(),
     events: (await reader.listEvents()).map(portableEvent),
     projections: await reader.listProjections(),
     contextPacks: await reader.listContextPacks()
@@ -1116,13 +1120,24 @@ async function importSnapshot(store: BorealStore, incoming: ExportSnapshot): Pro
 }
 
 async function assertWorkItemCanBeDeleted(reader: BorealReader, workId: WorkId): Promise<void> {
-  const [workItems, agentSummaries, evidence, verifications, graphEdges, reservations, projections, contextPacks] = await Promise.all([
+  const [
+    workItems,
+    agentSummaries,
+    evidence,
+    verifications,
+    graphEdges,
+    reservations,
+    reviewerHeartbeats,
+    projections,
+    contextPacks
+  ] = await Promise.all([
     reader.listWorkItems(),
     reader.listAgentSummaries(),
     reader.listEvidence(),
     reader.listVerifications(),
     reader.listGraphEdges(),
     reader.listReservations(),
+    reader.listReviewerHeartbeats(),
     reader.listProjections(),
     reader.listContextPacks()
   ]);
@@ -1143,6 +1158,9 @@ async function assertWorkItemCanBeDeleted(reader: BorealReader, workId: WorkId):
     .filter((edge) => graphEdgeReferences(edge, workId, GRAPH_TYPE_ALIASES.work))
     .map((edge) => edge.meta.id);
   const reservationIds = reservations.filter((reservation) => reservation.workId === workId).map((reservation) => reservation.meta.id);
+  const reviewerHeartbeatIds = reviewerHeartbeats
+    .filter((record) => record.containerId === workId || record.lastWorkId === workId)
+    .map((record) => record.meta.id);
   const projectionIds = projections
     .filter((projection) => projection.subjectId === workId)
     .map((projection) => projection.meta.id);
@@ -1156,6 +1174,7 @@ async function assertWorkItemCanBeDeleted(reader: BorealReader, workId: WorkId):
     summaryIds.length > 0 ||
     graphEdgeIds.length > 0 ||
     reservationIds.length > 0 ||
+    reviewerHeartbeatIds.length > 0 ||
     projectionIds.length > 0 ||
     contextPackIds.length > 0
   ) {
@@ -1169,6 +1188,7 @@ async function assertWorkItemCanBeDeleted(reader: BorealReader, workId: WorkId):
         agentSummaries: summaryIds,
         graphEdges: graphEdgeIds,
         reservations: reservationIds,
+        reviewerHeartbeats: reviewerHeartbeatIds,
         projections: projectionIds,
         contextPacks: contextPackIds
       }
@@ -1673,6 +1693,20 @@ function validateSnapshot(snapshot: ExportSnapshot): void {
       });
     }
   }
+  for (const heartbeat of snapshot.reviewerHeartbeats) {
+    if (heartbeat.containerId && !workIds.has(heartbeat.containerId)) {
+      throw new BorealError("BOREAL_INVALID_INPUT", "Reviewer heartbeat references missing container work", {
+        heartbeatId: heartbeat.meta.id,
+        workId: heartbeat.containerId
+      });
+    }
+    if (heartbeat.lastWorkId && !workIds.has(heartbeat.lastWorkId)) {
+      throw new BorealError("BOREAL_INVALID_INPUT", "Reviewer heartbeat references missing last reviewed work", {
+        heartbeatId: heartbeat.meta.id,
+        workId: heartbeat.lastWorkId
+      });
+    }
+  }
   for (const pack of snapshot.contextPacks) {
     assertArrayField(pack, "facts", "contextPacks", pack.id);
     assertArrayField(pack, "evidence", "contextPacks", pack.id);
@@ -1779,6 +1813,9 @@ async function writeImportedRecords(
   for (const record of incoming.reservations.filter((entry) => importableIds.reservations.has(entry.meta.id))) {
     await writer.putReservation(record);
   }
+  for (const record of incoming.reviewerHeartbeats.filter((entry) => importableIds.reviewerHeartbeats.has(entry.meta.id))) {
+    await writer.putReviewerHeartbeat(record);
+  }
   for (const record of incoming.events.filter((entry) => importableIds.events.has(entry.meta.id))) {
     await writer.putEvent(record);
   }
@@ -1862,6 +1899,25 @@ function markdownFiles(document: ExportDocument): Array<{ path: string; content:
           tags: record.meta.tags
         }) +
         `# ${record.summary}\n\nOutcome: ${record.outcome}\nKind: ${record.kind}\nSubject: ${record.subjectType}:${record.subjectId}\n\n${record.command ? `Command: \`${record.command}\`\n` : ""}${record.uri ? `URI: ${record.uri}\n` : ""}`
+    })),
+    ...document.state.reviewerHeartbeats.map((record) => ({
+      path: `reviewer-heartbeats/${record.meta.id}.md`,
+      content:
+        frontmatter({
+          kind: "reviewer-heartbeat",
+          id: record.meta.id,
+          name: record.name,
+          reviewer_id: record.reviewerId,
+          container_id: record.containerId,
+          last_closed_at: record.lastClosedAt,
+          last_event_id: record.lastEventId,
+          last_work_id: record.lastWorkId,
+          advanced_at: record.advancedAt,
+          created_at: record.meta.createdAt,
+          updated_at: record.meta.updatedAt,
+          tags: record.meta.tags
+        }) +
+        `# ${record.name}\n\nReviewer: ${record.reviewerId}\nContainer: ${record.containerId ?? "all"}\nLast closed at: ${record.lastClosedAt ?? "none"}\nLast event: ${record.lastEventId ?? "none"}\nLast work: ${record.lastWorkId ?? "none"}\n`
     })),
     ...document.state.knowledgeSources.map((record) => ({
       path: `sources/${record.meta.id}.md`,

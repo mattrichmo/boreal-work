@@ -17,6 +17,8 @@ import type {
   ProjectionId,
   ProjectionRecord,
   ReservationId,
+  ReviewerHeartbeatId,
+  ReviewerHeartbeatRecord,
   RuntimeEvent,
   RuntimeOperation,
   VerificationId,
@@ -55,6 +57,8 @@ export interface BorealReader {
   listReservations(): Promise<readonly AgentReservation[]>;
   listReservationsForWork(workId: WorkId): Promise<readonly AgentReservation[]>;
   listActiveReservationsForAgent(agentId: string): Promise<readonly AgentReservation[]>;
+  getReviewerHeartbeat(id: ReviewerHeartbeatId): Promise<ReviewerHeartbeatRecord | undefined>;
+  listReviewerHeartbeats(): Promise<readonly ReviewerHeartbeatRecord[]>;
   listEvents(): Promise<readonly RuntimeEvent[]>;
   getOperation(id: OperationId): Promise<RuntimeOperation | undefined>;
   listOperations(): Promise<readonly RuntimeOperation[]>;
@@ -83,6 +87,8 @@ export interface BorealWriter extends BorealReader {
   deleteGraphEdge(id: GraphEdgeId): Promise<boolean>;
   putReservation(record: AgentReservation): Promise<void>;
   deleteReservation(id: ReservationId): Promise<boolean>;
+  putReviewerHeartbeat(record: ReviewerHeartbeatRecord): Promise<void>;
+  deleteReviewerHeartbeat(id: ReviewerHeartbeatId): Promise<boolean>;
   putEvent(record: RuntimeEvent): Promise<void>;
   putOperation(record: RuntimeOperation): Promise<void>;
   deleteOperation(id: OperationId): Promise<boolean>;

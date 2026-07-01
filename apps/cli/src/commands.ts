@@ -56,6 +56,8 @@ import {
   type ProjectionRecord,
   type ReservationId,
   type ReservationStatus,
+  type ReviewerHeartbeatId,
+  type ReviewerHeartbeatRecord,
   type RuntimeOperation,
   type RuntimeOperationStatus,
   type RuntimeEvent,
@@ -741,6 +743,9 @@ export async function runCommand(args: ParsedArgs, output: CliOutput, cwd: strin
         break;
       case "reservation":
         result = await reservationCommand(action, context, args, commandOutput, json);
+        break;
+      case "heartbeat":
+        result = await heartbeatCommand(action, rest, context, args, commandOutput, json);
         break;
       case "prime":
         result = await primeCommand(context, args, commandOutput, json);
@@ -1995,6 +2000,323 @@ async function reservationCommand(
   });
   output.write(json ? formatRecord(rows, true) : table(rows.map(textReservationListRow)));
   return { exitCode: 0 };
+}
+
+async function heartbeatCommand(
+  action: string | undefined,
+  rest: readonly string[],
+  context: CliContext,
+  args: ParsedArgs,
+  output: CliOutput,
+  json: boolean
+): Promise<CommandResult> {
+  switch (action) {
+    case "create": {
+      const name = heartbeatName(requiredPositional(rest, 0, "heartbeat name"));
+      const reviewerId = reviewerIdFromArgs(args, context);
+      const containerId = await optionalHeartbeatContainerId(context, args);
+      const current = nowIso();
+      const heartbeatId = heartbeatIdFor(name, reviewerId, containerId);
+      const cursor = await heartbeatCursorFromArgs(context, args, containerId);
+      const result = await context.store.write(async (writer) => {
+        if (await writer.getReviewerHeartbeat(heartbeatId)) {
+          throw new BorealError("BOREAL_CONFLICT", "Reviewer heartbeat already exists", {
+            heartbeatId,
+            name,
+            reviewerId,
+            containerId
+          });
+        }
+        const heartbeat = withContentHash({
+          meta: createRecordMeta({
+            id: heartbeatId,
+            now: current,
+            actor: context.actor,
+            tags: ["reviewer-heartbeat"]
+          }),
+          name,
+          reviewerId,
+          containerId,
+          lastClosedAt: cursor.lastClosedAt,
+          lastEventId: cursor.lastEventId,
+          lastWorkId: cursor.lastWorkId,
+          advancedAt: current
+        } satisfies ReviewerHeartbeatRecord);
+        await writer.putReviewerHeartbeat(heartbeat);
+        const event = await appendCliEvent(writer, context, "reviewer_heartbeat.created", heartbeat.meta.id, "reviewer_heartbeat", {
+          name,
+          reviewerId,
+          containerId,
+          lastClosedAt: heartbeat.lastClosedAt,
+          lastEventId: heartbeat.lastEventId,
+          lastWorkId: heartbeat.lastWorkId
+        }, current);
+        return heartbeatPayload(context, heartbeat, event);
+      });
+      output.write(formatRecord(result, json));
+      return { exitCode: 0 };
+    }
+    case "show": {
+      const heartbeat = await resolveReviewerHeartbeat(context, requiredPositional(rest, 0, "heartbeat name or id"), args);
+      output.write(formatRecord(heartbeatPayload(context, heartbeat), json));
+      return { exitCode: 0 };
+    }
+    case "advance": {
+      const target = requiredPositional(rest, 0, "heartbeat name or id");
+      const current = nowIso();
+      const existing = await resolveReviewerHeartbeat(context, target, args);
+      const cursor = await heartbeatCursorFromArgs(context, args, existing.containerId, true);
+      const result = await context.store.write(async (writer) => {
+        const stored = await writer.getReviewerHeartbeat(existing.meta.id);
+        if (!stored) {
+          throw new BorealError("BOREAL_NOT_FOUND", "Reviewer heartbeat not found", { heartbeatId: existing.meta.id });
+        }
+        const heartbeat = withContentHash(
+          touchRecord(
+            {
+              ...stored,
+              lastClosedAt: cursor.lastClosedAt,
+              lastEventId: cursor.lastEventId,
+              lastWorkId: cursor.lastWorkId,
+              advancedAt: current
+            },
+            current,
+            context.actor
+          )
+        );
+        await writer.putReviewerHeartbeat(heartbeat);
+        const event = await appendCliEvent(writer, context, "reviewer_heartbeat.advanced", heartbeat.meta.id, "reviewer_heartbeat", {
+          name: heartbeat.name,
+          reviewerId: heartbeat.reviewerId,
+          containerId: heartbeat.containerId,
+          lastClosedAt: heartbeat.lastClosedAt,
+          lastEventId: heartbeat.lastEventId,
+          lastWorkId: heartbeat.lastWorkId
+        }, current);
+        return heartbeatPayload(context, heartbeat, event);
+      });
+      output.write(formatRecord(result, json));
+      return { exitCode: 0 };
+    }
+    default:
+      throw new BorealError("BOREAL_INVALID_INPUT", `Unknown heartbeat command: ${action ?? ""}`);
+  }
+}
+
+interface HeartbeatCursor {
+  readonly lastClosedAt?: IsoTimestamp;
+  readonly lastEventId?: EventId;
+  readonly lastWorkId?: WorkId;
+}
+
+function heartbeatPayload(context: CliContext, heartbeat: ReviewerHeartbeatRecord, event?: RuntimeEvent) {
+  return {
+    schemaVersion: "boreal.cli.heartbeat.v1",
+    generatedAt: nowIso(),
+    workspaceRoot: context.workspaceRoot,
+    heartbeat,
+    sinceHeartbeat: {
+      closedAt: heartbeat.lastClosedAt,
+      eventId: heartbeat.lastEventId,
+      workId: heartbeat.lastWorkId,
+      includeEqualClosedAt: true
+    },
+    event
+  };
+}
+
+function heartbeatName(value: string): string {
+  return normalizeMachineString(value, "heartbeat name");
+}
+
+function reviewerIdFromArgs(args: ParsedArgs, context: CliContext): string {
+  return normalizeActorId(flagValue(args, "reviewer") ?? flagValue(args, "agent") ?? String(context.actor.id));
+}
+
+function heartbeatIdFor(name: string, reviewerId: string, containerId: WorkId | undefined): ReviewerHeartbeatId {
+  return deterministicId<ReviewerHeartbeatId>("heartbeat", {
+    name,
+    reviewerId,
+    containerId: containerId ?? null
+  });
+}
+
+async function optionalHeartbeatContainerId(context: CliContext, args: ParsedArgs): Promise<WorkId | undefined> {
+  const containerRef = flagValue(args, "container");
+  return containerRef ? resolveWorkId(context, containerRef) : undefined;
+}
+
+async function resolveReviewerHeartbeat(
+  context: CliContext,
+  value: string,
+  args: ParsedArgs
+): Promise<ReviewerHeartbeatRecord> {
+  if (value.startsWith("bw_heartbeat_")) {
+    const heartbeat = await context.store.read((reader) => reader.getReviewerHeartbeat(asReviewerHeartbeatId(value)));
+    if (!heartbeat) {
+      throw new BorealError("BOREAL_NOT_FOUND", "Reviewer heartbeat not found", { heartbeatId: value });
+    }
+    return heartbeat;
+  }
+  const name = heartbeatName(value);
+  const reviewerId = reviewerIdFromArgs(args, context);
+  const containerId = await optionalHeartbeatContainerId(context, args);
+  const heartbeatId = heartbeatIdFor(name, reviewerId, containerId);
+  const heartbeat = await context.store.read((reader) => reader.getReviewerHeartbeat(heartbeatId));
+  if (!heartbeat) {
+    throw new BorealError("BOREAL_NOT_FOUND", "Reviewer heartbeat not found", {
+      heartbeatId,
+      name,
+      reviewerId,
+      containerId
+    });
+  }
+  return heartbeat;
+}
+
+async function heartbeatCursorFromArgs(
+  context: CliContext,
+  args: ParsedArgs,
+  containerId: WorkId | undefined,
+  defaultToLatest = false
+): Promise<HeartbeatCursor> {
+  const workRef = flagValue(args, "work");
+  const closedAtValue = flagValue(args, "closed-at");
+  const eventValue = flagValue(args, "event");
+  if (workRef && closedAtValue) {
+    throw new BorealError("BOREAL_INVALID_INPUT", "heartbeat cursor cannot combine --work with --closed-at");
+  }
+
+  if (workRef) {
+    const workId = await resolveWorkId(context, workRef);
+    return context.store.read(async (reader) => {
+      const [work, graphEdges, events] = await Promise.all([
+        reader.getWorkItem(workId),
+        reader.listGraphEdges(),
+        reader.listEvents()
+      ]);
+      if (!work) {
+        throw new BorealError("BOREAL_NOT_FOUND", "Heartbeat work cursor not found", { workId });
+      }
+      if (!work.closedAt) {
+        throw new BorealError("BOREAL_INVALID_INPUT", "Heartbeat work cursor must reference closed work", {
+          workId,
+          status: work.status
+        });
+      }
+      await assertWorkInHeartbeatScope(reader, work.meta.id, containerId, graphEdges);
+      const explicitEventId = eventValue ? asEventId(eventValue) : undefined;
+      if (explicitEventId && !events.some((event) => event.meta.id === explicitEventId)) {
+        throw new BorealError("BOREAL_NOT_FOUND", "Heartbeat event cursor not found", { eventId: explicitEventId });
+      }
+      const eventId = explicitEventId ?? workClosedEventId(events, work.meta.id);
+      return {
+        lastClosedAt: work.closedAt,
+        lastEventId: eventId,
+        lastWorkId: work.meta.id
+      };
+    });
+  }
+
+  const explicitClosedAt = closedAtValue ? parseHeartbeatIsoTimestamp(closedAtValue, "--closed-at") : undefined;
+  const explicitEventId = eventValue ? asEventId(eventValue) : undefined;
+  if (explicitEventId) {
+    await context.store.read(async (reader) => {
+      if (!(await reader.listEvents()).some((event) => event.meta.id === explicitEventId)) {
+        throw new BorealError("BOREAL_NOT_FOUND", "Heartbeat event cursor not found", { eventId: explicitEventId });
+      }
+    });
+  }
+  if (explicitClosedAt || explicitEventId) {
+    return {
+      lastClosedAt: explicitClosedAt,
+      lastEventId: explicitEventId
+    };
+  }
+  return defaultToLatest ? latestClosedHeartbeatCursor(context, containerId) : {};
+}
+
+async function latestClosedHeartbeatCursor(context: CliContext, containerId: WorkId | undefined): Promise<HeartbeatCursor> {
+  return context.store.read(async (reader) => {
+    const [workItems, graphEdges, events] = await Promise.all([
+      reader.listWorkItems(),
+      reader.listGraphEdges(),
+      reader.listEvents()
+    ]);
+    const scopedIds = containerId ? heartbeatScopeIds(containerId, workItems, graphEdges) : undefined;
+    const latest = workItems
+      .filter((work) => work.closedAt && (!scopedIds || scopedIds.has(work.meta.id)))
+      .sort(compareClosedWorkWatermark)
+      .at(0);
+    if (!latest?.closedAt) {
+      return {};
+    }
+    return {
+      lastClosedAt: latest.closedAt,
+      lastEventId: workClosedEventId(events, latest.meta.id),
+      lastWorkId: latest.meta.id
+    };
+  });
+}
+
+async function assertWorkInHeartbeatScope(
+  reader: BorealReader,
+  workId: WorkId,
+  containerId: WorkId | undefined,
+  graphEdges: readonly GraphEdge[]
+): Promise<void> {
+  if (!containerId) {
+    return;
+  }
+  const workItems = await reader.listWorkItems();
+  const scopedIds = heartbeatScopeIds(containerId, workItems, graphEdges);
+  if (!scopedIds.has(workId)) {
+    throw new BorealError("BOREAL_INVALID_INPUT", "Heartbeat work cursor is outside the container scope", {
+      workId,
+      containerId
+    });
+  }
+}
+
+function heartbeatScopeIds(containerId: WorkId, workItems: readonly WorkItem[], graphEdges: readonly GraphEdge[]): ReadonlySet<WorkId> {
+  const workById = new Map(workItems.map((work) => [work.meta.id, work]));
+  const ids = new Set<WorkId>([containerId]);
+  const visit = (workId: WorkId): void => {
+    const work = workById.get(workId);
+    if (!work) {
+      return;
+    }
+    for (const dependencyId of dependencyIdsForWork(work, graphEdges)) {
+      if (ids.has(dependencyId)) {
+        continue;
+      }
+      ids.add(dependencyId);
+      visit(dependencyId);
+    }
+  };
+  visit(containerId);
+  return ids;
+}
+
+function workClosedEventId(events: readonly RuntimeEvent[], workId: WorkId): EventId | undefined {
+  return events
+    .filter((event) => event.type === "work.closed" && event.subjectId === workId)
+    .sort((left, right) => right.meta.createdAt.localeCompare(left.meta.createdAt) || right.meta.id.localeCompare(left.meta.id))
+    .at(0)?.meta.id;
+}
+
+function compareClosedWorkWatermark(left: WorkItem, right: WorkItem): number {
+  return (
+    (right.closedAt ?? "").localeCompare(left.closedAt ?? "") ||
+    right.meta.id.localeCompare(left.meta.id)
+  );
+}
+
+function parseHeartbeatIsoTimestamp(value: string, label: string): IsoTimestamp {
+  if (!isIsoTimestamp(value)) {
+    throw new BorealError("BOREAL_INVALID_INPUT", `${label} must be an ISO timestamp`, { value });
+  }
+  return value as IsoTimestamp;
 }
 
 async function buildAgentStatus(
@@ -6860,6 +7182,20 @@ function asReservationId(value: string): ReservationId {
     throw new BorealError("BOREAL_INVALID_INPUT", `Expected a reservation id, got ${value}`);
   }
   return value as ReservationId;
+}
+
+function asReviewerHeartbeatId(value: string): ReviewerHeartbeatId {
+  if (!value.startsWith("bw_heartbeat_")) {
+    throw new BorealError("BOREAL_INVALID_INPUT", `Expected a reviewer heartbeat id, got ${value}`);
+  }
+  return value as ReviewerHeartbeatId;
+}
+
+function asEventId(value: string): EventId {
+  if (!value.startsWith("bw_event_")) {
+    throw new BorealError("BOREAL_INVALID_INPUT", `Expected an event id, got ${value}`);
+  }
+  return value as EventId;
 }
 
 function asProjectionId(value: string): ProjectionId {

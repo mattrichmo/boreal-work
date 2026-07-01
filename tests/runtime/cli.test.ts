@@ -5991,6 +5991,183 @@ describe("bwrk cli", () => {
     ]);
   });
 
+  it("persists reviewer heartbeat checkpoints through CLI and sync refresh", async () => {
+    const rootDir = await makeTempWorkspace();
+    await runCli(rootDir, ["init", "--json"]);
+    await runCli(rootDir, ["vault", "init", "--json"]);
+
+    const sprint = parseData<{ readonly meta: { readonly id: string } }>(
+      (await runCli(rootDir, ["work", "create", "Heartbeat Sprint", "--kind", "sprint", "--ready", "--json"])).stdout
+    );
+    const first = parseData<{ readonly meta: { readonly id: string } }>(
+      (await runCli(rootDir, ["work", "create", "Heartbeat first close", "--ready", "--json"])).stdout
+    );
+    const second = parseData<{ readonly meta: { readonly id: string } }>(
+      (await runCli(rootDir, ["work", "create", "Heartbeat second close", "--ready", "--json"])).stdout
+    );
+    await runCli(rootDir, ["dep", "add", sprint.meta.id, first.meta.id, "--json"]);
+    await runCli(rootDir, ["dep", "add", sprint.meta.id, second.meta.id, "--json"]);
+
+    const closeWork = async (workId: string, summary: string) => {
+      const evidence = parseData<{ readonly meta: { readonly id: string } }>(
+        (
+          await runCli(rootDir, [
+            "evidence",
+            "add",
+            workId,
+            "--summary",
+            summary,
+            "--outcome",
+            "passed",
+            "--json"
+          ])
+        ).stdout
+      );
+      await runCli(rootDir, ["work", "verify", workId, "--evidence", evidence.meta.id, "--verdict", "passed", "--json"]);
+      return parseData<{ readonly work: { readonly status: string; readonly closedAt: string } }>(
+        (
+          await runCli(rootDir, [
+            "work",
+            "close",
+            workId,
+            "--reason",
+            "heartbeat fixture closed",
+            "--dirty-path",
+            "no_repo_changes: heartbeat fixture",
+            "--json"
+          ])
+        ).stdout
+      );
+    };
+
+    const firstClosed = await closeWork(first.meta.id, "First heartbeat fixture evidence passed.");
+    expect(firstClosed.work.status).toBe("closed");
+
+    const created = parseData<{
+      readonly schemaVersion: string;
+      readonly heartbeat: {
+        readonly meta: { readonly id: string };
+        readonly name: string;
+        readonly reviewerId: string;
+        readonly containerId?: string;
+        readonly lastClosedAt?: string;
+        readonly lastEventId?: string;
+        readonly lastWorkId?: string;
+      };
+      readonly sinceHeartbeat: {
+        readonly closedAt?: string;
+        readonly eventId?: string;
+        readonly workId?: string;
+        readonly includeEqualClosedAt: boolean;
+      };
+      readonly event?: { readonly type: string; readonly subjectType: string; readonly subjectId: string };
+    }>(
+      (
+        await runCli(rootDir, [
+          "heartbeat",
+          "create",
+          "review-pass",
+          "--reviewer",
+          "reviewer-a",
+          "--container",
+          sprint.meta.id,
+          "--work",
+          first.meta.id,
+          "--json"
+        ])
+      ).stdout
+    );
+    expect(created.schemaVersion).toBe("boreal.cli.heartbeat.v1");
+    expect(created.heartbeat).toEqual(
+      expect.objectContaining({
+        name: "review-pass",
+        reviewerId: "reviewer-a",
+        containerId: sprint.meta.id,
+        lastClosedAt: firstClosed.work.closedAt,
+        lastWorkId: first.meta.id
+      })
+    );
+    expect(created.heartbeat.lastEventId).toMatch(/^bw_event_/);
+    expect(created.sinceHeartbeat).toEqual(
+      expect.objectContaining({
+        closedAt: firstClosed.work.closedAt,
+        eventId: created.heartbeat.lastEventId,
+        workId: first.meta.id,
+        includeEqualClosedAt: true
+      })
+    );
+    expect(created.event).toEqual(
+      expect.objectContaining({
+        type: "reviewer_heartbeat.created",
+        subjectType: "reviewer_heartbeat",
+        subjectId: created.heartbeat.meta.id
+      })
+    );
+
+    const shownByName = parseData<{ readonly heartbeat: { readonly meta: { readonly id: string } } }>(
+      (
+        await runCli(rootDir, [
+          "heartbeat",
+          "show",
+          "review-pass",
+          "--reviewer",
+          "reviewer-a",
+          "--container",
+          sprint.meta.id,
+          "--json"
+        ])
+      ).stdout
+    );
+    expect(shownByName.heartbeat.meta.id).toBe(created.heartbeat.meta.id);
+
+    const shownById = parseData<{ readonly heartbeat: { readonly meta: { readonly id: string } } }>(
+      (await runCli(rootDir, ["heartbeat", "show", created.heartbeat.meta.id, "--json"])).stdout
+    );
+    expect(shownById.heartbeat.meta.id).toBe(created.heartbeat.meta.id);
+
+    const secondClosed = await closeWork(second.meta.id, "Second heartbeat fixture evidence passed.");
+    const advanced = parseData<{
+      readonly heartbeat: { readonly lastClosedAt?: string; readonly lastWorkId?: string };
+      readonly sinceHeartbeat: { readonly includeEqualClosedAt: boolean; readonly workId?: string };
+      readonly event?: { readonly type: string };
+    }>(
+      (
+        await runCli(rootDir, [
+          "heartbeat",
+          "advance",
+          "review-pass",
+          "--reviewer",
+          "reviewer-a",
+          "--container",
+          sprint.meta.id,
+          "--work",
+          second.meta.id,
+          "--json"
+        ])
+      ).stdout
+    );
+    expect(advanced.heartbeat.lastClosedAt).toBe(secondClosed.work.closedAt);
+    expect(advanced.heartbeat.lastWorkId).toBe(second.meta.id);
+    expect(advanced.sinceHeartbeat).toEqual(expect.objectContaining({ includeEqualClosedAt: true, workId: second.meta.id }));
+    expect(advanced.event?.type).toBe("reviewer_heartbeat.advanced");
+
+    const refresh = await runCli(rootDir, ["sync", "refresh", "--json"]);
+    const refreshPayload = parseData<{
+      readonly ledgers: { readonly recordCounts: { readonly reviewerHeartbeats: number } };
+    }>(refresh.stdout);
+    expect(refresh.exitCode).toBe(0);
+    expect(refreshPayload.ledgers.recordCounts.reviewerHeartbeats).toBe(1);
+
+    const state = await readState<{
+      readonly reviewerHeartbeats: Array<{ readonly meta: { readonly id: string }; readonly lastWorkId?: string }>;
+    }>(rootDir);
+    expect(state.reviewerHeartbeats).toEqual([
+      expect.objectContaining({ meta: expect.objectContaining({ id: created.heartbeat.meta.id }), lastWorkId: second.meta.id })
+    ]);
+    const heartbeatLedger = await readFile(join(rootDir, ".boreal/ledgers/reviewer-heartbeats.jsonl"), "utf8");
+    expect(heartbeatLedger).toContain(created.heartbeat.meta.id);
+  });
+
   it("reports SQLite cache missing, stale, and corrupt states in doctor", async () => {
     const rootDir = await makeTempWorkspace();
     await runCli(rootDir, ["init", "--json"]);
