@@ -319,12 +319,51 @@ describe("CLI agent directive envelopes", () => {
     const refresh = parseEnvelope<{ readonly postRefreshStatusOk: boolean }>(
       (await runCli(rootDir, ["sync", "refresh", "--json"])).stdout
     );
-    const doctor = parseEnvelope<{ readonly ok: boolean }>(
+    const doctor = parseEnvelope<{
+      readonly ok: boolean;
+      readonly diagnostics: readonly Array<{
+        readonly code: string;
+        readonly severity: string;
+        readonly details?: {
+          readonly checkedBundles?: number;
+          readonly issueCounts?: Record<string, number>;
+        };
+      }>;
+    }>(
       (await runCli(rootDir, ["doctor", "--strict", "--json"])).stdout
+    );
+    const directiveRegistryDiagnostic = doctor.data.diagnostics.find(
+      (diagnostic) => diagnostic.code === "agent_directives.registry"
+    );
+    const directiveBundleDiagnostic = doctor.data.diagnostics.find(
+      (diagnostic) => diagnostic.code === "agent_directives.emitted_bundles"
     );
 
     expect(refresh.data.postRefreshStatusOk).toBe(true);
     expect(doctor.data.ok).toBe(true);
+    expect(directiveRegistryDiagnostic).toEqual(
+      expect.objectContaining({
+        severity: "ok"
+      })
+    );
+    expect(directiveBundleDiagnostic).toEqual(
+      expect.objectContaining({
+        severity: "ok"
+      })
+    );
+    expect(directiveBundleDiagnostic?.details?.checkedBundles).toBeGreaterThan(0);
+    expect(directiveBundleDiagnostic?.details?.issueCounts).toEqual(
+      expect.objectContaining({
+        unknown_id: 0,
+        deprecated_emission: 0,
+        duplicate_id: 0,
+        invalid_data: 0,
+        unsafe_dynamic_instruction: 0,
+        stale_registry_version: 0,
+        missing_required_directive: 0,
+        conflict: 0
+      })
+    );
     expect(registryIds(refresh.agentDirectives)).not.toContain("memory.reconcile-source");
     expect(refresh.agentDirectives?.[0]?.missingRequired).toEqual([]);
     expect(registryIds(doctor.agentDirectives)).not.toContain("doctor.recovery-required");

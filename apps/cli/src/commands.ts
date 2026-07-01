@@ -6728,11 +6728,15 @@ function doctorDirectiveSnapshot(
 
 function doctorDiagnosticSnapshot(diagnostic: Diagnostic): AgentDirectiveDiagnosticSnapshot {
   const recommendedCommands = diagnosticRecommendedCommands(diagnostic.details);
+  const severity =
+    diagnostic.severity === "fixed" || (diagnostic.severity === "warning" && !strictBlockingWarning(diagnostic))
+      ? "info"
+      : diagnostic.severity;
   return {
     code: diagnostic.code,
-    severity: diagnostic.severity === "fixed" ? "info" : diagnostic.severity,
+    severity,
     message: diagnostic.message,
-    blocking: diagnostic.severity === "error",
+    blocking: diagnostic.severity === "error" || strictBlockingWarning(diagnostic),
     recommendedCommands
   };
 }
@@ -6858,7 +6862,7 @@ function cliHealthRecoveryNeeded(
 }
 
 function doctorDiagnosticNeedsAttention(diagnostic: Diagnostic): boolean {
-  return diagnostic.severity === "warning" || diagnostic.severity === "error";
+  return diagnostic.severity === "error" || strictBlockingWarning(diagnostic);
 }
 
 function cliDirectiveCommandPath(args: ParsedArgs): string {
