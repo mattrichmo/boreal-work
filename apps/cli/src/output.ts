@@ -89,12 +89,91 @@ function previewJsonEnvelope(text: string): unknown {
   try {
     const parsed = safeParseJson(text, { schemaName: "boreal.cli.output.v1", expectedObject: true });
     if (isRecord(parsed) && parsed.ok === true && "data" in parsed) {
+      const agentDirectives = previewAgentDirectiveBundles(parsed.agentDirectives);
+      if (agentDirectives) {
+        return {
+          data: previewJsonValue(parsed.data, 0),
+          agentDirectives
+        };
+      }
       return previewJsonValue(parsed.data, 0);
     }
   } catch {
     return text.slice(0, 1_000);
   }
   return text.slice(0, 1_000);
+}
+
+function previewAgentDirectiveBundles(value: unknown): unknown | undefined {
+  if (!Array.isArray(value) || value.length === 0) {
+    return undefined;
+  }
+  return {
+    bundleCount: value.length,
+    bundles: value.map((bundle) => previewAgentDirectiveBundle(bundle))
+  };
+}
+
+function previewAgentDirectiveBundle(value: unknown): unknown {
+  if (!isRecord(value)) {
+    return previewJsonValue(value, 0);
+  }
+  const directives = Array.isArray(value.directives) ? value.directives.map((directive) => previewAgentDirective(directive)) : [];
+  const conflicts = Array.isArray(value.conflicts) ? value.conflicts : [];
+  const deprecations = Array.isArray(value.deprecations) ? value.deprecations : [];
+  const missingRequired = Array.isArray(value.missingRequired) ? value.missingRequired : [];
+  return {
+    meta: previewAgentDirectiveMeta(value.meta),
+    directiveCount: directives.length,
+    directives,
+    conflictCount: conflicts.length,
+    conflicts,
+    deprecationCount: deprecations.length,
+    deprecations,
+    missingRequiredCount: missingRequired.length,
+    missingRequired
+  };
+}
+
+function previewAgentDirectiveMeta(value: unknown): unknown {
+  if (!isRecord(value)) {
+    return previewJsonValue(value, 0);
+  }
+  return pickDefined({
+    id: value.id,
+    schemaVersion: value.schemaVersion,
+    registryVersion: value.registryVersion,
+    generatedAt: value.generatedAt,
+    commandPath: value.commandPath,
+    envelopeSchema: value.envelopeSchema,
+    sourceSnapshotHash: value.sourceSnapshotHash
+  });
+}
+
+function previewAgentDirective(value: unknown): unknown {
+  if (!isRecord(value)) {
+    return previewJsonValue(value, 0);
+  }
+  return pickDefined({
+    id: value.id,
+    registryId: value.registryId,
+    version: value.version,
+    family: value.family,
+    severity: value.severity,
+    audience: value.audience,
+    kind: value.kind,
+    lifecycle: value.lifecycle,
+    title: value.title,
+    instruction: value.instruction,
+    subject: value.subject,
+    blocksCloseout: value.blocksCloseout,
+    acknowledgement: value.acknowledgement,
+    data: previewJsonValue(value.data, 0)
+  });
+}
+
+function pickDefined(value: Record<string, unknown>): Record<string, unknown> {
+  return Object.fromEntries(Object.entries(value).filter(([, entry]) => entry !== undefined));
 }
 
 function previewJsonValue(value: unknown, depth: number): unknown {
