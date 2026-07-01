@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -18,6 +18,28 @@ interface CliEnvelope<T> {
   readonly ok: true;
   readonly data: T;
   readonly agentDirectives?: readonly AgentDirectiveBundle[];
+}
+
+interface CliErrorEnvelope {
+  readonly ok: false;
+  readonly code: string;
+  readonly message: string;
+  readonly details?: unknown;
+}
+
+interface RuntimeWorkItemForDirectiveTest {
+  readonly meta: { readonly id: string; readonly [key: string]: unknown };
+  readonly requiredCloseoutGates?: readonly Array<{
+    readonly id: string;
+    readonly satisfiedBy?: Record<string, unknown>;
+    readonly [key: string]: unknown;
+  }>;
+  readonly [key: string]: unknown;
+}
+
+interface RuntimeStateForDirectiveTest {
+  readonly workItems: readonly RuntimeWorkItemForDirectiveTest[];
+  readonly [key: string]: unknown;
 }
 
 const tempDirs: string[] = [];
@@ -230,6 +252,67 @@ describe("CLI agent directive envelopes", () => {
     expect(() => assertAgentDirectiveBundle(custom.data.bundle)).not.toThrow();
   });
 
+  it("surfaces missing required directive data from CLI debug compilation", async () => {
+    const rootDir = await makeTempWorkspace();
+
+    const compiled = parseEnvelope<{
+      readonly schemaVersion: string;
+      readonly commandPath: string;
+      readonly selectedRegistryIds: readonly string[];
+      readonly issueCount: number;
+      readonly missingRequired: readonly Array<{
+        readonly registryId: string;
+        readonly requirement: string;
+        readonly message: string;
+      }>;
+      readonly bundle?: AgentDirectiveBundle;
+    }>(
+      (
+        await runCli(rootDir, [
+          "directives",
+          "compile",
+          "--command",
+          "agent finish",
+          "--subject-type",
+          "work",
+          "--subject-id",
+          "bw_work_missingreq000001",
+          "--subject-title",
+          "Missing directive closeout data",
+          "--status",
+          "closed",
+          "--json"
+        ])
+      ).stdout
+    );
+
+    expect(compiled.data.schemaVersion).toBe("boreal.cli.directives.compile.v1");
+    expect(compiled.data.commandPath).toBe("agent finish");
+    expect(compiled.data.selectedRegistryIds).toEqual(
+      expect.arrayContaining(["closeout.summary-required", "git.checkpoint-required"])
+    );
+    expect(compiled.data.missingRequired).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          registryId: "closeout.summary-required",
+          requirement: "summaryId",
+          message: "missing required directive data"
+        }),
+        expect.objectContaining({
+          registryId: "handoff.session-summary",
+          requirement: "summaryUri",
+          message: "missing required directive data"
+        })
+      ])
+    );
+    expect(compiled.data.issueCount).toBeGreaterThan(0);
+    expect(compiled.data.bundle?.missingRequired).toEqual(compiled.data.missingRequired);
+    expect(compiled.data.bundle?.directives.map((directive) => directive.registryId)).toEqual(
+      expect.arrayContaining(["git.checkpoint-required", "workflow_next.canonical-next-step"])
+    );
+    expect(() => assertAgentDirectiveBundle(compiled.data.bundle)).not.toThrow();
+  });
+
   it("adds validated agentDirectives to directive-aware JSON output without changing data", async () => {
     const rootDir = await makeTempWorkspace();
     await runCli(rootDir, ["init", "--json"]);
@@ -371,6 +454,71 @@ describe("CLI agent directive envelopes", () => {
     expect(doctor.agentDirectives?.[0]?.conflicts).toEqual([]);
   });
 
+  it("fails doctor and closeout gates on invalid directive-linked closeout metadata", async () => {
+    const rootDir = await makeTempWorkspace();
+    await runCli(rootDir, [
+      "init",
+      "--setup-memory",
+      "--memory-root",
+      "memory",
+      "--memory-layout",
+      "in-repo",
+      "--memory-git-mode",
+      "shared",
+      "--json"
+    ]);
+    const created = parseEnvelope<{ readonly meta: { readonly id: string } }>(
+      (
+        await runCli(rootDir, [
+          "work",
+          "create",
+          "Invalid directive-linked gate",
+          "--required-gate",
+          "review",
+          "--ready",
+          "--json"
+        ])
+      ).stdout
+    );
+    await updateRuntimeState(rootDir, (state) => ({
+      ...state,
+      workItems: state.workItems.map((work) =>
+        work.meta.id === created.data.meta.id
+          ? {
+              ...work,
+              requiredCloseoutGates: (work.requiredCloseoutGates ?? []).map((gate, index) =>
+                index === 0
+                  ? {
+                      ...gate,
+                      satisfiedBy: {
+                        ...(gate.satisfiedBy ?? {}),
+                        directiveIds: ["bad directive id"]
+                      }
+                    }
+                  : gate
+              )
+            }
+          : work
+      )
+    }));
+
+    const doctorResult = await runCli(rootDir, ["doctor", "--strict", "--json"]);
+    const doctorError = parseErrorEnvelope(doctorResult.stderr);
+
+    expect(doctorResult.exitCode).not.toBe(0);
+    expect(doctorResult.stdout).toBe("");
+    expect(doctorError.ok).toBe(false);
+    expect(JSON.stringify(doctorError)).toContain(".directiveIds[0]");
+
+    const gateResult = await runCli(rootDir, ["gate", "closeout", "--strict", "--json"]);
+    const gateError = parseErrorEnvelope(gateResult.stderr);
+
+    expect(gateResult.exitCode).not.toBe(0);
+    expect(gateResult.stdout).toBe("");
+    expect(gateError.ok).toBe(false);
+    expect(JSON.stringify(gateError)).toContain(".directiveIds[0]");
+  });
+
   it("keeps directive bundles in spooled results and previews directive obligations", async () => {
     const rootDir = await makeTempWorkspace();
     const bundle = agentDirectiveBundleFixture();
@@ -502,12 +650,25 @@ function parseEnvelope<T>(text: string): CliEnvelope<T> {
   return JSON.parse(text) as CliEnvelope<T>;
 }
 
+function parseErrorEnvelope(text: string): CliErrorEnvelope {
+  return JSON.parse(text) as CliErrorEnvelope;
+}
+
 function parseLegacyData<T>(text: string): T {
   return (JSON.parse(text) as { readonly data: T }).data;
 }
 
 function registryIds(agentDirectives: readonly AgentDirectiveBundle[] | undefined): readonly string[] {
   return agentDirectives?.flatMap((bundle) => bundle.directives.map((directive) => directive.registryId)) ?? [];
+}
+
+async function updateRuntimeState(
+  rootDir: string,
+  update: (state: RuntimeStateForDirectiveTest) => RuntimeStateForDirectiveTest
+): Promise<void> {
+  const statePath = join(rootDir, ".boreal/runtime/state.json");
+  const state = JSON.parse(await readFile(statePath, "utf8")) as RuntimeStateForDirectiveTest;
+  await writeFile(statePath, `${JSON.stringify(update(state), null, 2)}\n`, "utf8");
 }
 
 function agentDirectiveBundleFixture(): AgentDirectiveBundle {
