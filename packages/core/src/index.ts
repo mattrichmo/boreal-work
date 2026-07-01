@@ -1,4 +1,5 @@
 export * from "./clone.js";
+export * from "./agent-directives.js";
 export * from "./errors.js";
 export * from "./factory.js";
 export * from "./hash.js";
