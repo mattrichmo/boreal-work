@@ -16,6 +16,7 @@ import {
   createRecordMeta,
   createAgentDirectiveSnapshot,
   deterministicId,
+  directiveAcknowledgementRecordSchemaIssues,
   gitDirectiveDataByRegistryId,
   hashContent,
   handoffDirectiveDataByRegistryId,
@@ -41,13 +42,16 @@ import {
   type AgentDirectiveBundleAssemblyIssue,
   type AgentDirectiveDiagnosticSnapshot,
   type AgentDirectiveGateStateSnapshot,
+  type AgentDirectiveId,
   type AgentDirectiveLifecycle,
   type AgentDirectiveMissingRequiredEntry,
   type AgentDirectiveRegistry,
+  type AgentDirectiveRegistryVersion,
   type AgentDirectiveRegistryEntry,
   type AgentDirectiveSubjectType,
   type AgentDirectiveSnapshot,
   type AgentDirectiveTemplateId,
+  type AgentDirectiveVersion,
   type AgentReservation,
   type AgentSummaryForceReasonCode,
   type AgentSummaryId,
@@ -68,6 +72,9 @@ import {
   type DecisionId,
   type DecisionRecord,
   type DecisionStatus,
+  type DirectiveAcknowledgementId,
+  type DirectiveAcknowledgementOutcome,
+  type DirectiveAcknowledgementRecord,
   type EventId,
   type EvidenceId,
   type EvidenceRecord,
@@ -771,7 +778,7 @@ export async function runCommand(args: ParsedArgs, output: CliOutput, cwd: strin
   if (definition.path[0] === "commands") {
     return commandsCommand(args, output, json);
   }
-  if (definition.path[0] === "directives") {
+  if (isStaticDirectivesCommand(definition.path)) {
     return directivesCommand(args.command[1], args.command.slice(2), args, output, json);
   }
   if (definition.path[0] === "completion") {
@@ -812,6 +819,9 @@ export async function runCommand(args: ParsedArgs, output: CliOutput, cwd: strin
         break;
       case "work":
         result = await workCommand(action, rest, context, args, commandOutput, json);
+        break;
+      case "directives":
+        result = await directiveAcknowledgementCommand(action, rest, context, args, commandOutput, json);
         break;
       case "dep":
         result = await depCommand(action, rest, context, args, commandOutput, json);
@@ -1280,6 +1290,13 @@ function shouldRecordOperation(definition: CommandDefinition): boolean {
   return definition.requiresWorkspace || definition.path[0] === "init";
 }
 
+function isStaticDirectivesCommand(path: readonly string[]): boolean {
+  return (
+    path[0] === "directives" &&
+    (path[1] === "list" || path[1] === "show" || path[1] === "compile" || path[1] === "render" || path[1] === "explain")
+  );
+}
+
 async function recordCliOperation(
   context: CliContext,
   operationId: OperationId,
@@ -1517,6 +1534,28 @@ interface DirectiveExplainResult {
   readonly directive?: AgentDirectiveBundle["directives"][number];
 }
 
+interface DirectiveAcknowledgementCreateResult {
+  readonly schemaVersion: "boreal.cli.directives.ack.create.v1";
+  readonly created: true;
+  readonly acknowledgement: DirectiveAcknowledgementRecord;
+  readonly event: RuntimeEvent;
+}
+
+interface DirectiveAcknowledgementListResult {
+  readonly schemaVersion: "boreal.cli.directives.ack.list.v1";
+  readonly filters: {
+    readonly subjectId?: string;
+    readonly directiveId?: AgentDirectiveId;
+    readonly outcome?: DirectiveAcknowledgementOutcome;
+  };
+  readonly acknowledgements: readonly DirectiveAcknowledgementRecord[];
+}
+
+interface DirectiveAcknowledgementShowResult {
+  readonly schemaVersion: "boreal.cli.directives.ack.show.v1";
+  readonly acknowledgement: DirectiveAcknowledgementRecord;
+}
+
 function directivesCommand(
   action: string | undefined,
   rest: readonly string[],
@@ -1553,6 +1592,183 @@ function directivesCommand(
     default:
       throw new BorealError("BOREAL_INVALID_INPUT", `Unknown directives command: ${action ?? ""}`);
   }
+}
+
+async function directiveAcknowledgementCommand(
+  action: string | undefined,
+  rest: readonly string[],
+  context: CliContext,
+  args: ParsedArgs,
+  output: CliOutput,
+  json: boolean
+): Promise<CommandResult> {
+  if (action !== "ack") {
+    throw new BorealError("BOREAL_INVALID_INPUT", `Unknown directives command: ${action ?? ""}`);
+  }
+  const subcommand = rest[0];
+  const subrest = rest.slice(1);
+  switch (subcommand) {
+    case "create": {
+      const result = await createDirectiveAcknowledgement(context, requiredPositional(subrest, 0, "directive id"), args);
+      output.write(json ? formatRecord(result, true) : formatDirectiveAcknowledgementCreate(result));
+      return { exitCode: 0 };
+    }
+    case "list": {
+      const result = await listDirectiveAcknowledgements(context, args);
+      output.write(json ? formatRecord(result, true) : formatDirectiveAcknowledgementList(result));
+      return { exitCode: 0 };
+    }
+    case "show": {
+      const result = await showDirectiveAcknowledgement(context, requiredPositional(subrest, 0, "acknowledgement id"));
+      output.write(json ? formatRecord(result, true) : formatDirectiveAcknowledgementShow(result));
+      return { exitCode: 0 };
+    }
+    default:
+      throw new BorealError("BOREAL_INVALID_INPUT", `Unknown directives ack command: ${subcommand ?? ""}`);
+  }
+}
+
+async function createDirectiveAcknowledgement(
+  context: CliContext,
+  directiveRef: string,
+  args: ParsedArgs
+): Promise<DirectiveAcknowledgementCreateResult> {
+  const current = nowIso();
+  const directiveId = asAgentDirectiveId(directiveRef);
+  const explicitRegistryId = flagValue(args, "registry-id");
+  const directiveRegistryId = explicitRegistryId
+    ? asAgentDirectiveTemplateId(explicitRegistryId)
+    : inferDirectiveRegistryId(directiveId);
+  const registryEntry = directiveRegistryId
+    ? AGENT_DIRECTIVE_REGISTRY.entries.find((entry) => entry.id === directiveRegistryId)
+    : undefined;
+  if (explicitRegistryId && !registryEntry) {
+    throw new BorealError("BOREAL_NOT_FOUND", "Directive registry entry not found", { registryId: directiveRegistryId });
+  }
+  const directiveVersion = asAgentDirectiveVersion(flagValue(args, "version") ?? registryEntry?.version ?? "v1");
+  const outcome = parseDirectiveAcknowledgementOutcome(requiredFlag(args, "outcome"));
+  const evidenceIds = uniqueValues(flagValues(args, "evidence").map(asEvidenceId));
+  const agentSummaryIds = uniqueValues(flagValues(args, "summary").map(asAgentSummaryId));
+  const handoffIds = uniqueStrings(flagValues(args, "handoff").map((value) => normalizeMachineString(value, "handoff id")));
+  const reasonCode = optionalDirectiveReasonCode(flagValue(args, "reason-code"));
+  const reason = optionalTrimmedText(flagValue(args, "reason"));
+  assertDirectiveAcknowledgementPolicy({ outcome, evidenceIds, agentSummaryIds, handoffIds, reasonCode, reason });
+
+  const subjectType = parseAgentDirectiveSubjectType(requiredFlag(args, "subject-type"));
+  const explicitSubjectId = optionalTrimmedText(flagValue(args, "subject-id"));
+  const commandPathValue = optionalCommandPath(requiredFlag(args, "command"));
+  if (!commandPathValue) {
+    throw new BorealError("BOREAL_INVALID_INPUT", "--command must name the directive source command");
+  }
+  const generatedAt = parseOptionalIsoTimestamp(flagValue(args, "generated-at"), "--generated-at") ?? current;
+  const registryVersion = (flagValue(args, "registry-version") ?? AGENT_DIRECTIVE_REGISTRY.version) as AgentDirectiveRegistryVersion;
+  const sourceSnapshotHash = optionalContentHash(flagValue(args, "source-hash"));
+  const envelopeSchema = optionalMachineString(flagValue(args, "envelope-schema"), "envelope schema");
+  const bundleId = optionalMachineString(flagValue(args, "bundle-id"), "bundle id");
+
+  return context.store.write(async (writer) => {
+    const subjectWork = isWorkLikeDirectiveSubject(subjectType)
+      ? await requireDirectiveAcknowledgementWorkSubject(writer, explicitSubjectId, subjectType)
+      : undefined;
+    await requireDirectiveAcknowledgementEvidence(writer, evidenceIds);
+    await requireDirectiveAcknowledgementSummaries(writer, agentSummaryIds);
+    const subjectId = subjectWork?.meta.id ?? explicitSubjectId;
+    const subjectTitle = optionalTrimmedText(flagValue(args, "subject-title")) ?? subjectWork?.title;
+    const acknowledgement = withContentHash({
+      meta: createRecordMeta({
+        id: randomId<DirectiveAcknowledgementId>("acknowledgement"),
+        now: current,
+        actor: context.actor,
+        tags: ["directive-acknowledgement", outcome]
+      }),
+      directiveId,
+      directiveVersion,
+      ...(directiveRegistryId ? { directiveRegistryId } : {}),
+      bundleSource: {
+        ...(bundleId ? { bundleId } : {}),
+        registryVersion,
+        commandPath: commandPathValue,
+        ...(envelopeSchema ? { envelopeSchema } : {}),
+        ...(sourceSnapshotHash ? { sourceSnapshotHash } : {}),
+        generatedAt
+      },
+      actor: context.actor,
+      subjectType,
+      ...(subjectId ? { subjectId } : {}),
+      ...(subjectTitle ? { subjectTitle } : {}),
+      commandPath: commandPathValue,
+      outcome,
+      evidenceIds,
+      agentSummaryIds,
+      handoffIds,
+      ...(reasonCode ? { reasonCode } : {}),
+      ...(reason ? { reason } : {}),
+      acknowledgedAt: current
+    } satisfies DirectiveAcknowledgementRecord);
+    const schemaIssues = directiveAcknowledgementRecordSchemaIssues(acknowledgement);
+    if (schemaIssues.length > 0) {
+      throw new BorealError("BOREAL_INVALID_INPUT", "Directive acknowledgement failed schema validation", { issues: schemaIssues });
+    }
+    await writer.putDirectiveAcknowledgement(acknowledgement);
+    const event = await appendCliEvent(writer, context, "directive_acknowledgement.created", acknowledgement.meta.id, "directive_acknowledgement", {
+      directiveId,
+      directiveRegistryId,
+      outcome,
+      subjectType,
+      subjectId,
+      evidenceIds,
+      agentSummaryIds,
+      handoffIds
+    }, current);
+    return {
+      schemaVersion: "boreal.cli.directives.ack.create.v1",
+      created: true,
+      acknowledgement,
+      event
+    };
+  });
+}
+
+async function listDirectiveAcknowledgements(
+  context: CliContext,
+  args: ParsedArgs
+): Promise<DirectiveAcknowledgementListResult> {
+  const subjectId = optionalTrimmedText(flagValue(args, "subject-id"));
+  const directiveId = flagValue(args, "directive-id") ? asAgentDirectiveId(requiredFlag(args, "directive-id")) : undefined;
+  const outcome = flagValue(args, "outcome") ? parseDirectiveAcknowledgementOutcome(requiredFlag(args, "outcome")) : undefined;
+  const acknowledgements = await context.store.read(async (reader) => {
+    const records = subjectId
+      ? await reader.listDirectiveAcknowledgementsForSubject(subjectId)
+      : await reader.listDirectiveAcknowledgements();
+    return records
+      .filter((record) => (directiveId ? record.directiveId === directiveId : true))
+      .filter((record) => (outcome ? record.outcome === outcome : true))
+      .sort((left, right) => right.acknowledgedAt.localeCompare(left.acknowledgedAt));
+  });
+  return {
+    schemaVersion: "boreal.cli.directives.ack.list.v1",
+    filters: {
+      ...(subjectId ? { subjectId } : {}),
+      ...(directiveId ? { directiveId } : {}),
+      ...(outcome ? { outcome } : {})
+    },
+    acknowledgements
+  };
+}
+
+async function showDirectiveAcknowledgement(
+  context: CliContext,
+  acknowledgementRef: string
+): Promise<DirectiveAcknowledgementShowResult> {
+  const acknowledgementId = asDirectiveAcknowledgementId(acknowledgementRef);
+  const acknowledgement = await context.store.read((reader) => reader.getDirectiveAcknowledgement(acknowledgementId));
+  if (!acknowledgement) {
+    throw new BorealError("BOREAL_NOT_FOUND", "Directive acknowledgement not found", { acknowledgementId });
+  }
+  return {
+    schemaVersion: "boreal.cli.directives.ack.show.v1",
+    acknowledgement
+  };
 }
 
 function listDirectiveRegistry(args: ParsedArgs): DirectiveRegistryListResult {
@@ -2024,6 +2240,31 @@ function parseAgentDirectiveSubjectType(value: string): AgentDirectiveSubjectTyp
   });
 }
 
+function parseDirectiveAcknowledgementOutcome(value: string): DirectiveAcknowledgementOutcome {
+  const normalized = value === "not-applicable" ? "not_applicable" : value;
+  if (
+    normalized === "satisfied" ||
+    normalized === "deferred" ||
+    normalized === "noncompliant" ||
+    normalized === "not_applicable"
+  ) {
+    return normalized;
+  }
+  throw new BorealError("BOREAL_INVALID_INPUT", "--outcome must be satisfied, deferred, noncompliant, or not-applicable", {
+    outcome: value
+  });
+}
+
+function parseOptionalIsoTimestamp(value: string | undefined, label: string): IsoTimestamp | undefined {
+  if (!value) {
+    return undefined;
+  }
+  if (!isIsoTimestamp(value)) {
+    throw new BorealError("BOREAL_INVALID_INPUT", `${label} must be an ISO timestamp`);
+  }
+  return value;
+}
+
 function parseDirectiveRenderFormat(value: string | undefined): DirectiveRenderFormat {
   if (value === undefined || value === "markdown") {
     return "markdown";
@@ -2188,6 +2429,51 @@ function formatDirectiveExplain(result: DirectiveExplainResult): string {
     lines.push("", section("Missing Required", result.missingRequired.map((missing) => `${missing.registryId}: ${missing.requirement}`)));
   }
   return `${lines.join("\n")}\n`;
+}
+
+function formatDirectiveAcknowledgementCreate(result: DirectiveAcknowledgementCreateResult): string {
+  return `${section("Directive Acknowledgement", [
+    `created ${result.acknowledgement.meta.id}`,
+    `directive ${result.acknowledgement.directiveId}@${result.acknowledgement.directiveVersion}`,
+    `outcome ${result.acknowledgement.outcome}`,
+    `subject ${directiveAcknowledgementSubjectLabel(result.acknowledgement)}`
+  ])}\n`;
+}
+
+function formatDirectiveAcknowledgementList(result: DirectiveAcknowledgementListResult): string {
+  if (result.acknowledgements.length === 0) {
+    return "No directive acknowledgements found.\n";
+  }
+  return `${table(
+    result.acknowledgements.map((record) => ({
+      id: record.meta.id,
+      directive: record.directiveRegistryId ?? record.directiveId,
+      outcome: record.outcome,
+      subject: directiveAcknowledgementSubjectLabel(record),
+      acknowledged: record.acknowledgedAt
+    }))
+  )}\n`;
+}
+
+function formatDirectiveAcknowledgementShow(result: DirectiveAcknowledgementShowResult): string {
+  const record = result.acknowledgement;
+  return `${keyValueRows([
+    { key: "id", value: record.meta.id },
+    { key: "directive", value: `${record.directiveId}@${record.directiveVersion}` },
+    { key: "registryId", value: record.directiveRegistryId ?? "none" },
+    { key: "outcome", value: record.outcome },
+    { key: "command", value: record.commandPath },
+    { key: "subject", value: directiveAcknowledgementSubjectLabel(record) },
+    { key: "evidence", value: record.evidenceIds.join(", ") || "none" },
+    { key: "summaries", value: record.agentSummaryIds.join(", ") || "none" },
+    { key: "handoffs", value: record.handoffIds.join(", ") || "none" },
+    { key: "reason", value: record.reason ?? record.reasonCode ?? "none" },
+    { key: "acknowledgedAt", value: record.acknowledgedAt }
+  ])}\n`;
+}
+
+function directiveAcknowledgementSubjectLabel(record: DirectiveAcknowledgementRecord): string {
+  return `${record.subjectType}:${record.subjectId ?? "none"}${record.subjectTitle ? ` ${record.subjectTitle}` : ""}`;
 }
 
 function directiveFamilyFilter(args: ParsedArgs): AgentDirectiveFamily | undefined {
@@ -9757,6 +10043,37 @@ function asAgentSummaryId(value: string): AgentSummaryId {
   return value as AgentSummaryId;
 }
 
+function asDirectiveAcknowledgementId(value: string): DirectiveAcknowledgementId {
+  if (!value.startsWith("bw_acknowledgement_")) {
+    throw new BorealError("BOREAL_INVALID_INPUT", `Expected a directive acknowledgement id, got ${value}`);
+  }
+  return value as DirectiveAcknowledgementId;
+}
+
+function asAgentDirectiveId(value: string): AgentDirectiveId {
+  return asAgentDirectiveLinkId(value, "directive id") as AgentDirectiveId;
+}
+
+function asAgentDirectiveTemplateId(value: string): AgentDirectiveTemplateId {
+  return asAgentDirectiveLinkId(value, "directive registry id") as AgentDirectiveTemplateId;
+}
+
+function asAgentDirectiveVersion(value: string): AgentDirectiveVersion {
+  const trimmed = value.trim();
+  if (!trimmed) {
+    throw new BorealError("BOREAL_INVALID_INPUT", "Directive version must not be empty");
+  }
+  return trimmed as AgentDirectiveVersion;
+}
+
+function asAgentDirectiveLinkId(value: string, label: string): string {
+  const normalized = normalizeMachineString(value, label, { lowerCase: true });
+  if (!/^[a-z0-9][a-z0-9._:-]{0,127}$/u.test(normalized)) {
+    throw new BorealError("BOREAL_INVALID_INPUT", `Invalid ${label}`, { value });
+  }
+  return normalized;
+}
+
 function asGraphEdgeId(value: string): GraphEdgeId {
   if (!value.startsWith("bw_edge_")) {
     throw new BorealError("BOREAL_INVALID_INPUT", `Expected a graph edge id, got ${value}`);
@@ -10202,6 +10519,119 @@ function parseVerdict(value: string | undefined): VerificationVerdict {
     return verdict;
   }
   throw new BorealError("BOREAL_INVALID_INPUT", "--verdict must be passed or failed");
+}
+
+function inferDirectiveRegistryId(directiveId: AgentDirectiveId): AgentDirectiveTemplateId | undefined {
+  const raw = String(directiveId);
+  const candidate = raw.startsWith("directive.")
+    ? raw.slice("directive.".length).replace(/\.[a-f0-9]{12,64}$/u, "")
+    : raw;
+  return AGENT_DIRECTIVE_REGISTRY.entries.some((entry) => entry.id === candidate)
+    ? (candidate as AgentDirectiveTemplateId)
+    : undefined;
+}
+
+function optionalDirectiveReasonCode(value: string | undefined): string | undefined {
+  return value ? asAgentDirectiveLinkId(value, "directive acknowledgement reason code") : undefined;
+}
+
+function optionalTrimmedText(value: string | undefined): string | undefined {
+  const trimmed = value?.trim();
+  return trimmed ? trimmed : undefined;
+}
+
+function optionalMachineString(value: string | undefined, label: string): string | undefined {
+  return value ? normalizeMachineString(value, label, { lowerCase: true }) : undefined;
+}
+
+function optionalContentHash(value: string | undefined): ContentHash | undefined {
+  if (!value) {
+    return undefined;
+  }
+  if (!/^sha256:[a-f0-9]{64}$/u.test(value)) {
+    throw new BorealError("BOREAL_INVALID_INPUT", "--source-hash must be a sha256 content hash");
+  }
+  return value as ContentHash;
+}
+
+function isWorkLikeDirectiveSubject(type: AgentDirectiveSubjectType): boolean {
+  return type === "work" || type === "sprint" || type === "phase" || type === "milestone";
+}
+
+function assertDirectiveAcknowledgementPolicy(input: {
+  readonly outcome: DirectiveAcknowledgementOutcome;
+  readonly evidenceIds: readonly EvidenceId[];
+  readonly agentSummaryIds: readonly AgentSummaryId[];
+  readonly handoffIds: readonly string[];
+  readonly reasonCode?: string;
+  readonly reason?: string;
+}): void {
+  const hasEvidenceLink =
+    input.evidenceIds.length > 0 || input.agentSummaryIds.length > 0 || input.handoffIds.length > 0;
+  const hasReason = Boolean(input.reasonCode || input.reason);
+  if (input.outcome === "satisfied" && !hasEvidenceLink && !hasReason) {
+    throw new BorealError(
+      "BOREAL_INVALID_INPUT",
+      "Satisfied directive acknowledgements require --evidence, --summary, --handoff, --reason, or --reason-code"
+    );
+  }
+  if (input.outcome !== "satisfied" && !hasReason) {
+    throw new BorealError("BOREAL_INVALID_INPUT", "Deferred, noncompliant, and not-applicable acknowledgements require --reason or --reason-code");
+  }
+}
+
+async function requireDirectiveAcknowledgementWorkSubject(
+  reader: BorealReader,
+  subjectId: string | undefined,
+  subjectType: AgentDirectiveSubjectType
+): Promise<WorkItem> {
+  if (!subjectId) {
+    throw new BorealError("BOREAL_INVALID_INPUT", `--subject-id is required when --subject-type is ${subjectType}`);
+  }
+  const work = await requireCliWork(reader, asWorkId(subjectId));
+  if (subjectType === "sprint" && work.kind !== "sprint") {
+    throw new BorealError("BOREAL_INVALID_INPUT", "--subject-type sprint requires a sprint work item", {
+      subjectId,
+      workKind: work.kind
+    });
+  }
+  if ((subjectType === "phase" || subjectType === "milestone") && work.kind !== "milestone") {
+    throw new BorealError("BOREAL_INVALID_INPUT", `--subject-type ${subjectType} requires a milestone work item`, {
+      subjectId,
+      workKind: work.kind
+    });
+  }
+  return work;
+}
+
+async function requireDirectiveAcknowledgementEvidence(
+  reader: BorealReader,
+  evidenceIds: readonly EvidenceId[]
+): Promise<void> {
+  const missingEvidenceIds: EvidenceId[] = [];
+  for (const evidenceId of evidenceIds) {
+    if (!(await reader.getEvidence(evidenceId))) {
+      missingEvidenceIds.push(evidenceId);
+    }
+  }
+  if (missingEvidenceIds.length > 0) {
+    throw new BorealError("BOREAL_NOT_FOUND", "Directive acknowledgement references missing evidence", { missingEvidenceIds });
+  }
+}
+
+async function requireDirectiveAcknowledgementSummaries(
+  reader: BorealReader,
+  summaryIds: readonly AgentSummaryId[]
+): Promise<void> {
+  const missingSummaryIds: AgentSummaryId[] = [];
+  for (const summaryId of summaryIds) {
+    if (!(await reader.getAgentSummary(summaryId))) {
+      missingSummaryIds.push(summaryId);
+    }
+  }
+  if (missingSummaryIds.length > 0) {
+    throw new BorealError("BOREAL_NOT_FOUND", "Directive acknowledgement references missing agent summary", { missingSummaryIds });
+  }
 }
 
 function optionalSourceId(value: string | undefined): KnowledgeSourceId | undefined {

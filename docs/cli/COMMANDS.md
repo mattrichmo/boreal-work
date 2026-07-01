@@ -228,6 +228,36 @@ Explains why a directive was emitted, selected but blocked by missing data, or n
 
 JSON `data` uses schema `boreal.cli.directives.explain.v1` and includes selector checks, selection provenance, relevant issues, missing data, conflicts, and the emitted directive when present.
 
+## `directives ack create`
+
+```bash
+bwrk directives ack create <directive-id> --outcome satisfied|deferred|noncompliant|not-applicable --subject-type <type> --command <command-path> [--registry-id <id>] [--version <version>] [--bundle-id <id>] [--registry-version <version>] [--envelope-schema <schema>] [--source-hash <sha256>] [--generated-at <iso>] [--subject-id <id>] [--subject-title <title>] [--evidence <id>...] [--summary <id>...] [--handoff <id>...] [--reason-code <code>] [--reason <text>] [--json]
+```
+
+Records a durable directive acknowledgement. `satisfied` acknowledgements require at least one evidence, summary, handoff, or reason link; `deferred`, `noncompliant`, and `not-applicable` acknowledgements require `--reason` or `--reason-code`.
+
+JSON `data` uses schema `boreal.cli.directives.ack.create.v1` and returns the created acknowledgement record plus the runtime event that recorded it.
+
+## `directives ack list`
+
+```bash
+bwrk directives ack list [--subject-id <id>] [--directive-id <id>] [--outcome <outcome>] [--json]
+```
+
+Lists durable directive acknowledgement records, optionally filtered by subject, directive id, or outcome.
+
+JSON `data` uses schema `boreal.cli.directives.ack.list.v1`.
+
+## `directives ack show`
+
+```bash
+bwrk directives ack show <acknowledgement-id> [--json]
+```
+
+Shows one durable directive acknowledgement record.
+
+JSON `data` uses schema `boreal.cli.directives.ack.show.v1`.
+
 ## `completion`
 
 ```bash

@@ -143,6 +143,197 @@ describe("CLI agent directive envelopes", () => {
     );
   });
 
+  it("records and exposes durable directive acknowledgements", async () => {
+    const rootDir = await makeTempWorkspace();
+    await runCli(rootDir, ["init", "--json"]);
+    const work = parseEnvelope<{
+      readonly meta: { readonly id: string };
+      readonly title: string;
+    }>(
+      (await runCli(rootDir, ["work", "create", "Directive acknowledgement CLI target", "--ready", "--json"])).stdout
+    );
+    const evidence = parseEnvelope<{
+      readonly meta: { readonly id: string };
+    }>(
+      (
+        await runCli(rootDir, [
+          "evidence",
+          "add",
+          work.data.meta.id,
+          "--summary",
+          "Directive acknowledgement proof.",
+          "--kind",
+          "note",
+          "--outcome",
+          "passed",
+          "--json"
+        ])
+      ).stdout
+    );
+
+    const created = parseEnvelope<{
+      readonly schemaVersion: string;
+      readonly created: boolean;
+      readonly acknowledgement: {
+        readonly meta: { readonly id: string };
+        readonly directiveId: string;
+        readonly directiveRegistryId: string;
+        readonly outcome: string;
+        readonly subjectType: string;
+        readonly subjectId: string;
+        readonly evidenceIds: readonly string[];
+        readonly reason: string;
+        readonly bundleSource: {
+          readonly bundleId: string;
+          readonly registryVersion: string;
+          readonly commandPath: string;
+          readonly envelopeSchema: string;
+          readonly sourceSnapshotHash: string;
+          readonly generatedAt: string;
+        };
+      };
+      readonly event: { readonly type: string; readonly subjectId: string };
+    }>(
+      (
+        await runCli(rootDir, [
+          "directives",
+          "ack",
+          "create",
+          "directive.closeout.summary-required.deadbeefdead",
+          "--registry-id",
+          "closeout.summary-required",
+          "--outcome",
+          "satisfied",
+          "--subject-type",
+          "work",
+          "--subject-id",
+          work.data.meta.id,
+          "--command",
+          "agent finish",
+          "--bundle-id",
+          "bundle.agent.finish.deadbeefdead",
+          "--registry-version",
+          "directives.v1",
+          "--envelope-schema",
+          "boreal.cli.agent.finish.v1",
+          "--source-hash",
+          "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "--generated-at",
+          "2026-01-01T00:00:00.000Z",
+          "--evidence",
+          evidence.data.meta.id,
+          "--reason",
+          "Responded to the user with a closeout summary.",
+          "--json"
+        ])
+      ).stdout
+    );
+
+    expect(created.agentDirectives).toBeUndefined();
+    expect(created.data).toEqual(
+      expect.objectContaining({
+        schemaVersion: "boreal.cli.directives.ack.create.v1",
+        created: true
+      })
+    );
+    expect(created.data.acknowledgement).toEqual(
+      expect.objectContaining({
+        directiveId: "directive.closeout.summary-required.deadbeefdead",
+        directiveRegistryId: "closeout.summary-required",
+        outcome: "satisfied",
+        subjectType: "work",
+        subjectId: work.data.meta.id,
+        evidenceIds: [evidence.data.meta.id],
+        reason: "Responded to the user with a closeout summary.",
+        bundleSource: expect.objectContaining({
+          bundleId: "bundle.agent.finish.deadbeefdead",
+          registryVersion: "directives.v1",
+          commandPath: "agent finish",
+          envelopeSchema: "boreal.cli.agent.finish.v1",
+          sourceSnapshotHash: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          generatedAt: "2026-01-01T00:00:00.000Z"
+        })
+      })
+    );
+    expect(created.data.event).toEqual(
+      expect.objectContaining({
+        type: "directive_acknowledgement.created",
+        subjectId: created.data.acknowledgement.meta.id
+      })
+    );
+
+    const listed = parseEnvelope<{
+      readonly schemaVersion: string;
+      readonly filters: { readonly subjectId: string; readonly outcome: string };
+      readonly acknowledgements: readonly Array<{ readonly meta: { readonly id: string }; readonly outcome: string }>;
+    }>(
+      (
+        await runCli(rootDir, [
+          "directives",
+          "ack",
+          "list",
+          "--subject-id",
+          work.data.meta.id,
+          "--outcome",
+          "satisfied",
+          "--json"
+        ])
+      ).stdout
+    );
+    expect(listed.data.schemaVersion).toBe("boreal.cli.directives.ack.list.v1");
+    expect(listed.data.filters).toEqual({ subjectId: work.data.meta.id, outcome: "satisfied" });
+    expect(listed.data.acknowledgements).toEqual([
+      expect.objectContaining({
+        meta: expect.objectContaining({ id: created.data.acknowledgement.meta.id }),
+        outcome: "satisfied"
+      })
+    ]);
+
+    const shown = parseEnvelope<{
+      readonly schemaVersion: string;
+      readonly acknowledgement: { readonly meta: { readonly id: string }; readonly subjectId: string };
+    }>(
+      (
+        await runCli(rootDir, ["directives", "ack", "show", created.data.acknowledgement.meta.id, "--json"])
+      ).stdout
+    );
+    expect(shown.data).toEqual(
+      expect.objectContaining({
+        schemaVersion: "boreal.cli.directives.ack.show.v1",
+        acknowledgement: expect.objectContaining({
+          meta: expect.objectContaining({ id: created.data.acknowledgement.meta.id }),
+          subjectId: work.data.meta.id
+        })
+      })
+    );
+
+    const missingReason = await runCli(rootDir, [
+      "directives",
+      "ack",
+      "create",
+      "directive.blocked.resolve-blockers.deadbeefdead",
+      "--registry-id",
+      "blocked.resolve-blockers",
+      "--outcome",
+      "deferred",
+      "--subject-type",
+      "work",
+      "--subject-id",
+      work.data.meta.id,
+      "--command",
+      "work show",
+      "--json"
+    ]);
+    expect(missingReason.exitCode).toBe(2);
+    expect(parseErrorEnvelope(missingReason.stderr)).toEqual(
+      expect.objectContaining({
+        ok: false,
+        code: "BOREAL_INVALID_INPUT",
+        message: "Deferred, noncompliant, and not-applicable acknowledgements require --reason or --reason-code"
+      })
+    );
+  });
+
   it("compiles, renders, and explains directive debug bundles", async () => {
     const rootDir = await makeTempWorkspace();
 
