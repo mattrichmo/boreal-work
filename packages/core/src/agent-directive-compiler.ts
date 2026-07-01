@@ -97,6 +97,39 @@ export interface AgentDirectiveCloseoutCompilationResult extends AgentDirectiveB
   readonly dataByRegistryId: AgentDirectiveAssemblyDataByRegistryId;
 }
 
+export interface AgentDirectiveRollupChildStatus {
+  readonly workId: string;
+  readonly title?: string;
+  readonly status: string;
+  readonly summaryIds?: readonly string[];
+  readonly evidenceIds?: readonly string[];
+  readonly verificationIds?: readonly string[];
+  readonly commitShas?: readonly string[];
+  readonly deferred?: boolean;
+  readonly deferralReason?: string;
+}
+
+export interface AgentDirectiveSummaryDataOptions extends AgentDirectiveCloseoutDataOptions {
+  readonly childWorkIds?: readonly string[];
+  readonly childSummaryIds?: readonly string[];
+  readonly childStatuses?: readonly AgentDirectiveRollupChildStatus[];
+  readonly carryoverWorkIds?: readonly string[];
+  readonly deferredWorkIds?: readonly string[];
+  readonly findingsDisposition?: string;
+}
+
+export interface AgentDirectiveSummaryCompilationInput extends AgentDirectiveSummaryDataOptions {
+  readonly snapshot: AgentDirectiveSnapshot;
+  readonly dataByRegistryId?: AgentDirectiveAssemblyDataByRegistryId;
+  readonly registry?: AgentDirectiveRegistry;
+  readonly generatedAt?: IsoTimestamp;
+  readonly bundleId?: AgentDirectiveBundleId;
+}
+
+export interface AgentDirectiveSummaryCompilationResult extends AgentDirectiveBundleAssemblyResult {
+  readonly dataByRegistryId: AgentDirectiveAssemblyDataByRegistryId;
+}
+
 export function selectAgentDirectiveRegistryEntries(
   snapshot: AgentDirectiveSnapshot,
   registry: AgentDirectiveRegistry = AGENT_DIRECTIVE_REGISTRY
@@ -271,6 +304,102 @@ export function compileCloseoutAgentDirectiveBundle(
 ): AgentDirectiveCloseoutCompilationResult {
   const dataByRegistryId = {
     ...closeoutDirectiveDataByRegistryId(input.snapshot, input),
+    ...input.dataByRegistryId
+  };
+  const result = assembleAgentDirectiveBundle({
+    snapshot: input.snapshot,
+    dataByRegistryId,
+    registry: input.registry,
+    generatedAt: input.generatedAt,
+    bundleId: input.bundleId
+  });
+  return {
+    ...result,
+    dataByRegistryId
+  };
+}
+
+export function summaryDirectiveDataByRegistryId(
+  snapshot: AgentDirectiveSnapshot,
+  options: AgentDirectiveSummaryDataOptions = {}
+): AgentDirectiveAssemblyDataByRegistryId {
+  const subjectId = snapshot.work.subject?.id;
+  const childWorkIds = options.childWorkIds ?? snapshot.work.childWorkIds;
+  const childSummaryIds = options.childSummaryIds ?? snapshot.summary.childSummaryIds;
+  const childStatuses = childStatusDataValues(options.childStatuses ?? []);
+  const carryoverWorkIds = options.carryoverWorkIds ?? snapshot.work.openDescendantIds;
+  const deferredWorkIds =
+    options.deferredWorkIds ?? (options.childStatuses ?? []).filter((child) => child.deferred === true).map((child) => child.workId);
+  const evidenceIds = snapshot.evidence.evidenceIds;
+  const verificationIds = snapshot.evidence.verificationIds;
+  const commitShas = uniqueStrings([...snapshot.git.checkpointCommitShas, ...snapshot.summary.commitShas]);
+  const dirtyPathNotes = uniqueStrings([...snapshot.git.dirtyPathNotes, ...snapshot.summary.dirtyPathNotes]);
+  const summaryUri = snapshot.summary.latestSummaryUri ?? last(snapshot.summary.artifactUris);
+  const gateState = gateStateDataValues(snapshot);
+  const allGateIds = uniqueStrings([
+    ...snapshot.gate.requiredGates.map((gate) => gate.id),
+    ...snapshot.gate.openGateIds,
+    ...snapshot.gate.satisfiedGateIds,
+    ...snapshot.gate.forcedGateIds
+  ]);
+
+  return {
+    ...closeoutDirectiveDataByRegistryId(snapshot, options),
+    "review.gate-required": gateRequirementData(snapshot, "review"),
+    "audit.gate-required": {
+      ...gateRequirementData(snapshot, "audit"),
+      ...dataRecord([["findingsDisposition", options.findingsDisposition]])
+    },
+    "container.descendant-closeout": dataRecord([
+      ["containerId", subjectId],
+      ["openDescendantIds", snapshot.work.openDescendantIds],
+      ["requiredGateIds", snapshot.gate.openGateIds],
+      ["childSummaryIds", childSummaryIds],
+      ["childStatuses", childStatuses],
+      ["evidenceIds", evidenceIds],
+      ["verificationIds", verificationIds],
+      ["commitShas", commitShas],
+      ["dirtyPathNotes", dirtyPathNotes],
+      ["deferredWorkIds", deferredWorkIds],
+      ["gateState", gateState],
+      ["closeReason", options.closeReason ?? snapshot.work.subject?.closedReason]
+    ]),
+    "phase.close-rollup": dataRecord([
+      ["phaseId", subjectId],
+      ["childWorkIds", childWorkIds],
+      ["childSummaryIds", childSummaryIds],
+      ["childStatuses", childStatuses],
+      ["evidenceIds", evidenceIds],
+      ["verificationIds", verificationIds],
+      ["commitShas", commitShas],
+      ["dirtyPathNotes", dirtyPathNotes],
+      ["deferredWorkIds", deferredWorkIds],
+      ["gateIds", allGateIds],
+      ["gateState", gateState]
+    ]),
+    "sprint.close-rollup": dataRecord([
+      ["sprintId", subjectId],
+      ["childWorkIds", childWorkIds],
+      ["carryoverWorkIds", carryoverWorkIds],
+      ["childSummaryIds", childSummaryIds],
+      ["childStatuses", childStatuses],
+      ["evidenceIds", evidenceIds],
+      ["verificationIds", verificationIds],
+      ["commitShas", commitShas],
+      ["dirtyPathNotes", dirtyPathNotes],
+      ["deferredWorkIds", deferredWorkIds],
+      ["summaryUri", summaryUri],
+      ["gateIds", allGateIds],
+      ["gateState", gateState]
+    ])
+  };
+}
+
+export function compileSummaryAgentDirectiveBundle(
+  input: AgentDirectiveSummaryCompilationInput
+): AgentDirectiveSummaryCompilationResult {
+  const dataByRegistryId = {
+    ...summaryDirectiveDataByRegistryId(input.snapshot, input),
     ...input.dataByRegistryId
   };
   const result = assembleAgentDirectiveBundle({
@@ -605,6 +734,58 @@ function uniqueConflicts(conflicts: AgentDirectiveBundle["conflicts"]): AgentDir
     output.push(conflict);
   }
   return output;
+}
+
+function gateRequirementData(snapshot: AgentDirectiveSnapshot, kind: string): AgentDirectiveData {
+  const gates = snapshot.gate.requiredGates.filter((gate) => gate.kind === kind);
+  return dataRecord([
+    ["subjectId", snapshot.work.subject?.id],
+    ["gateIds", gates.map((gate) => gate.id)],
+    ["requiredEvidenceKinds", uniqueStrings(gates.flatMap((gate) => gate.requiredEvidenceKinds))],
+    ["minEvidenceCount", maxNumber(gates.map((gate) => gate.minEvidenceCount))],
+    ["forceReasonCode", gates.find((gate) => gate.forceReasonCode !== undefined)?.forceReasonCode]
+  ]);
+}
+
+function gateStateDataValues(snapshot: AgentDirectiveSnapshot): readonly AgentDirectiveDataValue[] {
+  return snapshot.gate.requiredGates.map((gate) =>
+    dataRecord([
+      ["id", gate.id],
+      ["subjectType", gate.subjectType],
+      ["subjectId", gate.subjectId],
+      ["kind", gate.kind],
+      ["scope", gate.scope],
+      ["status", gate.status],
+      ["requiredEvidenceKinds", gate.requiredEvidenceKinds],
+      ["minEvidenceCount", gate.minEvidenceCount],
+      ["evidenceIds", gate.evidenceIds],
+      ["verificationIds", gate.verificationIds],
+      ["agentSummaryIds", gate.agentSummaryIds],
+      ["commitShas", gate.commitShas],
+      ["dirtyPathNotes", gate.dirtyPathNotes],
+      ["forceReasonCode", gate.forceReasonCode]
+    ])
+  );
+}
+
+function childStatusDataValues(children: readonly AgentDirectiveRollupChildStatus[]): readonly AgentDirectiveDataValue[] {
+  return children.map((child) =>
+    dataRecord([
+      ["workId", child.workId],
+      ["title", child.title],
+      ["status", child.status],
+      ["summaryIds", child.summaryIds],
+      ["evidenceIds", child.evidenceIds],
+      ["verificationIds", child.verificationIds],
+      ["commitShas", child.commitShas],
+      ["deferred", child.deferred],
+      ["deferralReason", child.deferralReason]
+    ])
+  );
+}
+
+function maxNumber(values: readonly number[]): number {
+  return values.length === 0 ? 0 : Math.max(...values);
 }
 
 function dataRecord(entries: readonly (readonly [string, AgentDirectiveDataValue | undefined])[]): AgentDirectiveData {

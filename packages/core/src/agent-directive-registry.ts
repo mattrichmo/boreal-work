@@ -110,7 +110,7 @@ export const AGENT_DIRECTIVE_REGISTRY: AgentDirectiveRegistry = {
       title: "Satisfy review gate",
       instruction: "Obtain passed review evidence for the listed review gate before closing the scoped work.",
       appliesTo: {
-        commandPaths: ["agent finish", "gate closeout", "summary compose", "work close"],
+        commandPaths: ["agent finish", "gate closeout", "summary compose", "summary show", "work close"],
         subjectTypes: ["work", "sprint", "phase", "milestone"],
         gates: ["review"]
       },
@@ -137,7 +137,7 @@ export const AGENT_DIRECTIVE_REGISTRY: AgentDirectiveRegistry = {
       title: "Satisfy audit gate",
       instruction: "Obtain passed audit evidence or record an approved forced gate reason before closing the scoped work.",
       appliesTo: {
-        commandPaths: ["agent finish", "gate closeout", "summary compose", "work close"],
+        commandPaths: ["agent finish", "gate closeout", "summary compose", "summary show", "work close"],
         subjectTypes: ["work", "sprint", "phase", "milestone", "project"],
         gates: ["audit"]
       },
@@ -165,7 +165,7 @@ export const AGENT_DIRECTIVE_REGISTRY: AgentDirectiveRegistry = {
       instruction:
         "Inspect the Git roots, commit only scoped changes, and record a commit SHA or accepted dirty-path reason before closeout.",
       appliesTo: {
-        commandPaths: ["agent finish", "summary compose", "sync status", "work close", "work cancel"],
+        commandPaths: ["agent finish", "summary compose", "summary show", "sync status", "work close", "work cancel"],
         subjectTypes: ["work", "sprint", "phase", "milestone", "project"]
       },
       blocksCloseout: true,
@@ -192,7 +192,7 @@ export const AGENT_DIRECTIVE_REGISTRY: AgentDirectiveRegistry = {
       instruction:
         "Respond to the user with a concise summary of the verified terminal outcome, summary artifact, checkpoint, remaining risks, and next workflow.",
       appliesTo: {
-        commandPaths: ["agent finish", "summary compose", "work close", "work cancel"],
+        commandPaths: ["agent finish", "summary compose", "summary show", "work close", "work cancel"],
         subjectTypes: ["work", "sprint", "phase", "milestone", "project"],
         workStatuses: ["in_progress", "closed", "cancelled"]
       },
@@ -275,7 +275,7 @@ export const AGENT_DIRECTIVE_REGISTRY: AgentDirectiveRegistry = {
       instruction:
         "Build a handoff that names the current work, evidence, verification, summary artifact, checkpoint state, and next canonical workflow.",
       appliesTo: {
-        commandPaths: ["agent finish", "session end", "summary compose"],
+        commandPaths: ["agent finish", "session end", "summary compose", "summary show"],
         subjectTypes: ["session", "work", "sprint", "project"]
       },
       dataRequirements: [
@@ -295,7 +295,7 @@ export const AGENT_DIRECTIVE_REGISTRY: AgentDirectiveRegistry = {
       title: "Close descendant blockers",
       instruction: "Close or document every descendant blocker before closing the parent container.",
       appliesTo: {
-        commandPaths: ["agent finish", "dep tree", "summary compose", "work close"],
+        commandPaths: ["agent finish", "dep tree", "summary compose", "summary show", "work close"],
         subjectTypes: ["work", "milestone", "project"]
       },
       blocksCloseout: true,
@@ -309,6 +309,13 @@ export const AGENT_DIRECTIVE_REGISTRY: AgentDirectiveRegistry = {
         requirement("openDescendantIds", "array", true, "Open descendant ids preventing parent closeout."),
         requirement("requiredGateIds", "array", false, "Descendant or parent gate ids still open."),
         requirement("childSummaryIds", "array", false, "Child summary ids included in the parent rollup."),
+        requirement("childStatuses", "array", false, "Child or descendant status records included in the rollup."),
+        requirement("evidenceIds", "array", false, "Evidence ids referenced by the parent rollup."),
+        requirement("verificationIds", "array", false, "Verification ids referenced by the parent rollup."),
+        requirement("commitShas", "array", false, "Checkpoint commit SHAs referenced by the parent rollup."),
+        requirement("dirtyPathNotes", "array", false, "Dirty path notes referenced by the parent rollup."),
+        requirement("deferredWorkIds", "array", false, "Deferred or carried-forward descendant work ids."),
+        requirement("gateState", "array", false, "Required gate state records included in the rollup."),
         requirement("closeReason", "string", false, "Close or force reason used for parent closeout.")
       ]
     }),
@@ -321,15 +328,21 @@ export const AGENT_DIRECTIVE_REGISTRY: AgentDirectiveRegistry = {
       title: "Roll up phase closeout",
       instruction: "Roll up child task outcomes, evidence, verification, and checkpoint references before closing the phase.",
       appliesTo: {
-        commandPaths: ["agent finish", "summary compose", "work close"],
+        commandPaths: ["agent finish", "summary compose", "summary show", "work close"],
         subjectTypes: ["phase", "milestone"]
       },
       dataRequirements: [
         requirement("phaseId", "id", true, "Phase or phase-like milestone id."),
         requirement("childWorkIds", "array", true, "Child work ids included in the phase rollup."),
         requirement("childSummaryIds", "array", true, "Child summary ids included in the phase rollup."),
+        requirement("childStatuses", "array", false, "Child status records included in the phase rollup."),
         requirement("evidenceIds", "array", false, "Evidence ids referenced by the phase rollup."),
-        requirement("commitShas", "array", false, "Checkpoint commit SHAs referenced by the phase rollup.")
+        requirement("verificationIds", "array", false, "Verification ids referenced by the phase rollup."),
+        requirement("commitShas", "array", false, "Checkpoint commit SHAs referenced by the phase rollup."),
+        requirement("dirtyPathNotes", "array", false, "Dirty path notes referenced by the phase rollup."),
+        requirement("deferredWorkIds", "array", false, "Deferred child work ids carried forward from the phase."),
+        requirement("gateIds", "array", false, "Required gate ids included in the phase rollup."),
+        requirement("gateState", "array", false, "Required gate state records included in the phase rollup.")
       ]
     }),
     entry({
@@ -342,15 +355,23 @@ export const AGENT_DIRECTIVE_REGISTRY: AgentDirectiveRegistry = {
       instruction:
         "Prepare the sprint report with closed child status, carryover, verification, gate evidence, and checkpoint references before closing the sprint.",
       appliesTo: {
-        commandPaths: ["agent finish", "sprint close", "sprint report", "summary compose"],
+        commandPaths: ["agent finish", "sprint close", "sprint metrics", "sprint report", "summary compose"],
         subjectTypes: ["sprint"]
       },
       dataRequirements: [
         requirement("sprintId", "id", true, "Sprint id being reported or closed."),
         requirement("childWorkIds", "array", true, "Child work ids included in the sprint."),
         requirement("carryoverWorkIds", "array", false, "Open child work ids carried forward."),
+        requirement("childSummaryIds", "array", false, "Child summary ids included in the sprint rollup."),
+        requirement("childStatuses", "array", false, "Child status records included in the sprint rollup."),
+        requirement("evidenceIds", "array", false, "Evidence ids referenced by the sprint rollup."),
+        requirement("verificationIds", "array", false, "Verification ids referenced by the sprint rollup."),
+        requirement("commitShas", "array", false, "Checkpoint commit SHAs referenced by the sprint rollup."),
+        requirement("dirtyPathNotes", "array", false, "Dirty path notes referenced by the sprint rollup."),
+        requirement("deferredWorkIds", "array", false, "Deferred child work ids carried forward from the sprint."),
         requirement("summaryUri", "uri", true, "Sprint report or summary artifact URI."),
-        requirement("gateIds", "array", false, "Review, audit, or checkpoint gate ids for the sprint.")
+        requirement("gateIds", "array", false, "Review, audit, or checkpoint gate ids for the sprint."),
+        requirement("gateState", "array", false, "Required gate state records included in the sprint rollup.")
       ]
     }),
     entry({
@@ -388,7 +409,11 @@ export const AGENT_DIRECTIVE_REGISTRY: AgentDirectiveRegistry = {
           "agent start",
           "agent finish",
           "prime",
+          "gate closeout",
+          "sprint metrics",
+          "sprint report",
           "summary compose",
+          "summary show",
           "work cancel",
           "work close",
           "work show",

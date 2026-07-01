@@ -7,15 +7,19 @@ import {
   assembleAgentDirectiveBundle,
   assertAgentDirectiveBundle,
   compileCloseoutAgentDirectiveBundle,
+  compileSummaryAgentDirectiveBundle,
   createAgentDirectiveSnapshot,
   selectAgentDirectiveRegistryEntries,
+  type AgentDirectiveGateStateSnapshot,
   type AgentSummaryId,
+  type AgentDirectiveSubjectType,
   type AgentDirectiveSnapshot,
   type AgentId,
   type ContentHash,
   type EvidenceId,
   type IsoTimestamp,
   type VerificationId,
+  type WorkKind,
   type WorkStatus,
   type WorkId
 } from "@boreal/core";
@@ -352,6 +356,210 @@ describe("agent directive bundle assembly", () => {
     });
   });
 
+  it("compiles summary show rollups with child status, gate, evidence, verification, and checkpoint data", () => {
+    const reviewGate = gateStateFixture({
+      id: "bw_gate_review0001",
+      kind: "review",
+      status: "open",
+      evidenceIds: ["bw_evidence_review0001" as EvidenceId]
+    });
+    const auditGate = gateStateFixture({
+      id: "bw_gate_audit0001",
+      kind: "audit",
+      status: "forced",
+      forceReasonCode: "audit_unavailable",
+      evidenceIds: ["bw_evidence_audit0001" as EvidenceId]
+    });
+    const snapshot = agentDirectiveCompilerSnapshotFixture({
+      commandPath: "summary show",
+      subjectType: "milestone",
+      workKind: "milestone",
+      workStatus: "in_progress",
+      summaryId: "bw_summary_parent0001" as AgentSummaryId,
+      summaryUri: "memory://agent-summaries/works/bw_work_7ec3f08689c6cfb0/bw_summary_parent0001.md",
+      childWorkIds: ["bw_work_child0001" as WorkId, "bw_work_child0002" as WorkId],
+      openDescendantIds: ["bw_work_child0002" as WorkId],
+      childSummaryIds: ["bw_summary_child0001" as AgentSummaryId],
+      evidenceIds: ["bw_evidence_parent0001" as EvidenceId],
+      verificationIds: ["bw_verification_parent0001" as VerificationId],
+      commitShas: ["2222222222222222222222222222222222222222"],
+      requiredGates: [reviewGate, auditGate]
+    });
+    const result = compileSummaryAgentDirectiveBundle({
+      snapshot,
+      summaryStatus: "final",
+      summaryOutcome: "completed",
+      childStatuses: [
+        {
+          workId: "bw_work_child0001",
+          title: "Closed child",
+          status: "closed",
+          summaryIds: ["bw_summary_child0001"],
+          evidenceIds: ["bw_evidence_parent0001"],
+          verificationIds: ["bw_verification_parent0001"],
+          commitShas: ["2222222222222222222222222222222222222222"]
+        },
+        {
+          workId: "bw_work_child0002",
+          title: "Deferred child",
+          status: "blocked",
+          deferred: true,
+          deferralReason: "Carry forward to next sprint."
+        }
+      ],
+      findingsDisposition: "Audit gate was forced with recorded operator reason.",
+      nextWorkflowRef: "workflows/40-work/closeout-work.md",
+      nextCommandPath: "bwrk gate closeout --strict --json"
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.selectedRegistryIds).toEqual([
+      "review.gate-required",
+      "audit.gate-required",
+      "git.checkpoint-required",
+      "closeout.summary-required",
+      "container.descendant-closeout",
+      "phase.close-rollup",
+      "workflow_next.canonical-next-step"
+    ]);
+    expect(result.bundle?.directives.find((directive) => directive.registryId === "review.gate-required")?.data).toMatchObject({
+      subjectId: "bw_work_7ec3f08689c6cfb0",
+      gateIds: ["bw_gate_review0001"],
+      requiredEvidenceKinds: ["review"],
+      minEvidenceCount: 1
+    });
+    expect(result.bundle?.directives.find((directive) => directive.registryId === "audit.gate-required")?.data).toMatchObject({
+      gateIds: ["bw_gate_audit0001"],
+      forceReasonCode: "audit_unavailable",
+      findingsDisposition: "Audit gate was forced with recorded operator reason."
+    });
+    const parent = result.bundle?.directives.find((directive) => directive.registryId === "container.descendant-closeout");
+    const phase = result.bundle?.directives.find((directive) => directive.registryId === "phase.close-rollup");
+    expect(parent?.data).toMatchObject({
+      childSummaryIds: ["bw_summary_child0001"],
+      deferredWorkIds: ["bw_work_child0002"],
+      evidenceIds: ["bw_evidence_parent0001"],
+      verificationIds: ["bw_verification_parent0001"],
+      commitShas: ["2222222222222222222222222222222222222222"]
+    });
+    expect(parent?.data.childStatuses).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ workId: "bw_work_child0001", status: "closed" }),
+        expect.objectContaining({ workId: "bw_work_child0002", deferred: true })
+      ])
+    );
+    expect(phase?.data.gateState).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ id: "bw_gate_review0001", kind: "review", status: "open" }),
+        expect.objectContaining({ id: "bw_gate_audit0001", kind: "audit", status: "forced" })
+      ])
+    );
+  });
+
+  it("compiles sprint metrics and report rollups with carryover and gate state data", () => {
+    const snapshot = agentDirectiveCompilerSnapshotFixture({
+      commandPath: "sprint metrics",
+      subjectType: "sprint",
+      workKind: "sprint",
+      workStatus: "in_progress",
+      summaryUri: "memory://agent-summaries/sprints/bw_work_7ec3f08689c6cfb0/bw_summary_sprint0001.md",
+      childWorkIds: ["bw_work_sprintchild1" as WorkId, "bw_work_sprintchild2" as WorkId],
+      openDescendantIds: ["bw_work_sprintchild2" as WorkId],
+      childSummaryIds: ["bw_summary_sprintchild1" as AgentSummaryId],
+      evidenceIds: ["bw_evidence_sprint0001" as EvidenceId],
+      verificationIds: ["bw_verification_sprint0001" as VerificationId],
+      commitShas: ["3333333333333333333333333333333333333333"],
+      requiredGates: [
+        gateStateFixture({
+          id: "bw_gate_sprintreview1",
+          kind: "review",
+          status: "open"
+        })
+      ]
+    });
+    const result = compileSummaryAgentDirectiveBundle({
+      snapshot,
+      childStatuses: [
+        { workId: "bw_work_sprintchild1", status: "closed", summaryIds: ["bw_summary_sprintchild1"] },
+        { workId: "bw_work_sprintchild2", status: "ready", deferred: true }
+      ],
+      nextWorkflowRef: "workflows/50-sprint/sprint-report.md",
+      nextCommandPath: "bwrk sprint report --json"
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.selectedRegistryIds).toEqual(["sprint.close-rollup", "workflow_next.canonical-next-step"]);
+    const sprint = result.bundle?.directives.find((directive) => directive.registryId === "sprint.close-rollup");
+    expect(sprint?.data).toMatchObject({
+      sprintId: "bw_work_7ec3f08689c6cfb0",
+      childWorkIds: ["bw_work_sprintchild1", "bw_work_sprintchild2"],
+      carryoverWorkIds: ["bw_work_sprintchild2"],
+      childSummaryIds: ["bw_summary_sprintchild1"],
+      evidenceIds: ["bw_evidence_sprint0001"],
+      verificationIds: ["bw_verification_sprint0001"],
+      commitShas: ["3333333333333333333333333333333333333333"],
+      deferredWorkIds: ["bw_work_sprintchild2"],
+      gateIds: ["bw_gate_sprintreview1"]
+    });
+    expect(sprint?.data.childStatuses).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ workId: "bw_work_sprintchild1", status: "closed" }),
+        expect.objectContaining({ workId: "bw_work_sprintchild2", deferred: true })
+      ])
+    );
+    expect(result.bundle?.directives.find((directive) => directive.registryId === "workflow_next.canonical-next-step")?.data).toMatchObject({
+      workflowRef: "workflows/50-sprint/sprint-report.md",
+      commandPath: "bwrk sprint report --json"
+    });
+  });
+
+  it("compiles gate closeout directives with review and audit gate data", () => {
+    const snapshot = agentDirectiveCompilerSnapshotFixture({
+      commandPath: "gate closeout",
+      subjectType: "sprint",
+      workKind: "sprint",
+      workStatus: "in_progress",
+      requiredGates: [
+        gateStateFixture({
+          id: "bw_gate_reviewclose1",
+          kind: "review",
+          status: "open",
+          evidenceIds: ["bw_evidence_reviewclose1" as EvidenceId]
+        }),
+        gateStateFixture({
+          id: "bw_gate_auditclose1",
+          kind: "audit",
+          status: "forced",
+          forceReasonCode: "external_review_record"
+        })
+      ]
+    });
+    const result = compileSummaryAgentDirectiveBundle({
+      snapshot,
+      findingsDisposition: "Audit evidence is represented by an external review record.",
+      nextWorkflowRef: "workflows/40-work/claim-and-finish-work.md",
+      nextCommandPath: "bwrk work list --ready --json"
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.selectedRegistryIds).toEqual([
+      "review.gate-required",
+      "audit.gate-required",
+      "workflow_next.canonical-next-step"
+    ]);
+    expect(result.bundle?.directives.find((directive) => directive.registryId === "review.gate-required")?.data).toMatchObject({
+      gateIds: ["bw_gate_reviewclose1"],
+      requiredEvidenceKinds: ["review"],
+      minEvidenceCount: 1
+    });
+    expect(result.bundle?.directives.find((directive) => directive.registryId === "audit.gate-required")?.data).toMatchObject({
+      gateIds: ["bw_gate_auditclose1"],
+      requiredEvidenceKinds: ["audit"],
+      forceReasonCode: "external_review_record",
+      findingsDisposition: "Audit evidence is represented by an external review record."
+    });
+  });
+
   it("short-circuits invalid snapshots before bundle validation", () => {
     const snapshot = {
       ...agentDirectiveCompilerSnapshotFixture(),
@@ -391,18 +599,50 @@ function memoryDirectiveData() {
   };
 }
 
+function gateStateFixture(
+  overrides: Omit<Partial<AgentDirectiveGateStateSnapshot>, "id" | "kind" | "status"> & {
+    readonly id: string;
+    readonly kind: AgentDirectiveGateStateSnapshot["kind"];
+    readonly status: AgentDirectiveGateStateSnapshot["status"];
+  }
+): AgentDirectiveGateStateSnapshot {
+  const { id, kind, status, ...rest } = overrides;
+  return {
+    id: id as AgentDirectiveGateStateSnapshot["id"],
+    kind,
+    status,
+    subjectType: "work",
+    subjectId: "bw_work_7ec3f08689c6cfb0",
+    scope: "descendants",
+    requiredEvidenceKinds: [kind === "audit" ? "audit" : "review"],
+    minEvidenceCount: 1,
+    evidenceIds: [],
+    verificationIds: [],
+    agentSummaryIds: [],
+    commitShas: [],
+    dirtyPathNotes: [],
+    ...rest
+  };
+}
+
 function agentDirectiveCompilerSnapshotFixture(
   options: {
     readonly activeReservationIds?: readonly string[];
     readonly activeBlockerIds?: readonly WorkId[];
     readonly closedReason?: string;
+    readonly childSummaryIds?: readonly AgentSummaryId[];
+    readonly childWorkIds?: readonly WorkId[];
     readonly commandPath?: string;
     readonly commitShas?: readonly string[];
     readonly dirtyPathNotes?: readonly string[];
     readonly evidenceIds?: readonly EvidenceId[];
+    readonly openDescendantIds?: readonly WorkId[];
+    readonly requiredGates?: readonly AgentDirectiveGateStateSnapshot[];
+    readonly subjectType?: AgentDirectiveSubjectType;
     readonly summaryId?: AgentSummaryId;
     readonly summaryUri?: string;
     readonly verificationIds?: readonly VerificationId[];
+    readonly workKind?: WorkKind;
     readonly workStatus?: WorkStatus;
     readonly workTitle?: string;
   } = {}
@@ -416,14 +656,15 @@ function agentDirectiveCompilerSnapshotFixture(
   const verificationIds = options.verificationIds ?? [];
   const commitShas = options.commitShas ?? [];
   const dirtyPathNotes = options.dirtyPathNotes ?? [];
+  const requiredGates = options.requiredGates ?? [];
   return createAgentDirectiveSnapshot({
     capturedAt,
     work: {
       subject: {
-        type: "work",
+        type: options.subjectType ?? "work",
         id: workId,
         title: options.workTitle ?? "S02T02 - Implement directive bundle assembly pipeline",
-        kind: "task",
+        kind: options.workKind ?? "task",
         status: options.workStatus ?? "in_progress",
         priority: "critical",
         ...(options.closedReason === undefined ? {} : { closedReason: options.closedReason })
@@ -432,14 +673,14 @@ function agentDirectiveCompilerSnapshotFixture(
       dependencyIds: ["bw_work_0f55e2240849c396" as WorkId],
       activeBlockerIds: options.activeBlockerIds ?? [],
       blockedByIds: options.activeBlockerIds ?? [],
-      childWorkIds: [],
+      childWorkIds: options.childWorkIds ?? [],
       descendantWorkIds: [],
-      openDescendantIds: []
+      openDescendantIds: options.openDescendantIds ?? []
     },
     summary: {
       summaryIds,
       finalSummaryIds: summaryIds,
-      childSummaryIds: [],
+      childSummaryIds: options.childSummaryIds ?? [],
       artifactUris,
       commitShas,
       dirtyPathNotes,
@@ -447,10 +688,10 @@ function agentDirectiveCompilerSnapshotFixture(
       ...(options.summaryUri === undefined ? {} : { latestSummaryUri: options.summaryUri })
     },
     gate: {
-      requiredGates: [],
-      openGateIds: [],
-      satisfiedGateIds: [],
-      forcedGateIds: []
+      requiredGates,
+      openGateIds: requiredGates.filter((gate) => gate.status === "open").map((gate) => gate.id),
+      satisfiedGateIds: requiredGates.filter((gate) => gate.status === "satisfied").map((gate) => gate.id),
+      forcedGateIds: requiredGates.filter((gate) => gate.status === "forced").map((gate) => gate.id)
     },
     evidence: {
       evidenceIds,
