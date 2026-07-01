@@ -41,6 +41,41 @@ export interface WorkDirectiveItemView {
   readonly lane: WorkDirectiveLane;
   readonly reason: string;
   readonly sourceCommand?: string;
+  readonly nextCommand?: string;
+  readonly workflowRef?: string;
+  readonly recoveryWorkflow?: string;
+  readonly blocksCloseout?: boolean;
+  readonly requiredInputs: readonly string[];
+  readonly relatedIds: readonly string[];
+}
+
+export interface WorkDirectiveConflictView {
+  readonly id: string;
+  readonly directiveIds: readonly string[];
+  readonly reason: string;
+  readonly resolution: string;
+  readonly resolvedDirectiveId?: string;
+  readonly severity: WorkDirectiveSeverity;
+  readonly lane: WorkDirectiveLane;
+}
+
+export interface WorkDirectiveMissingRequiredView {
+  readonly id: string;
+  readonly registryId: string;
+  readonly family?: string;
+  readonly requirement: string;
+  readonly message: string;
+  readonly subjectId?: string;
+  readonly subjectType?: string;
+}
+
+export interface WorkDirectiveNextStepView {
+  readonly id: string;
+  readonly title: string;
+  readonly lane: WorkDirectiveLane;
+  readonly command?: string;
+  readonly workflowRef?: string;
+  readonly reason: string;
   readonly relatedIds: readonly string[];
 }
 
@@ -50,7 +85,14 @@ export interface WorkDirectiveSummaryView {
   readonly recommended: number;
   readonly required: number;
   readonly blocked: number;
+  readonly conflictCount: number;
+  readonly missingRequiredCount: number;
+  readonly blockerIds: readonly string[];
   readonly sourceCommands: readonly string[];
+  readonly safeCommands: readonly string[];
+  readonly nextSteps: readonly WorkDirectiveNextStepView[];
+  readonly conflicts: readonly WorkDirectiveConflictView[];
+  readonly missingRequired: readonly WorkDirectiveMissingRequiredView[];
   readonly items: readonly WorkDirectiveItemView[];
 }
 

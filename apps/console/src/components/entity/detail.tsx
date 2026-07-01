@@ -1,5 +1,14 @@
 import type { ReactNode } from "react";
-import type { DashboardFinding, WorkDirectiveItemView, WorkDirectiveLane, WorkItemView } from "@boreal/ui-model";
+import type {
+  DashboardFinding,
+  WorkDirectiveConflictView,
+  WorkDirectiveItemView,
+  WorkDirectiveLane,
+  WorkDirectiveMissingRequiredView,
+  WorkDirectiveNextStepView,
+  WorkDirectiveSummaryView,
+  WorkItemView
+} from "@boreal/ui-model";
 
 import { Badge, Card, EntityChip, LoadingSkeleton, Notice, type Tone } from "../foundation/index.js";
 import type {
@@ -174,10 +183,15 @@ export function DirectiveSummaryPanel({
           <Badge tone={summary.required > 0 ? "warning" : "neutral"}>{summary.required} required</Badge>
           <Badge tone={summary.recommended > 0 ? "accent" : "neutral"}>{summary.recommended} recommended</Badge>
           <Badge tone="neutral">{summary.informational} informational</Badge>
+          {summary.conflictCount > 0 ? <Badge tone="danger">{summary.conflictCount} conflicts</Badge> : null}
+          {summary.missingRequiredCount > 0 ? <Badge tone="danger">{summary.missingRequiredCount} missing required</Badge> : null}
+          {summary.blockerIds.length > 0 ? <Badge tone="danger">{summary.blockerIds.length} blocker refs</Badge> : null}
+          {summary.nextSteps.length > 0 ? <Badge tone="accent">{summary.nextSteps.length} next steps</Badge> : null}
         </div>
-        {summary.sourceCommands.length > 0 ? (
+        <DirectiveObligationsPanel summary={summary} />
+        {summary.safeCommands.length > 0 ? (
           <div className="bw-directive-source-commands" aria-label="Directive source commands">
-            {summary.sourceCommands.map((command) => <code key={command}>{command}</code>)}
+            {summary.safeCommands.map((command) => <code key={command}>{command}</code>)}
           </div>
         ) : null}
         <div className="bw-directive-groups">
@@ -188,6 +202,124 @@ export function DirectiveSummaryPanel({
         </div>
       </div>
     </Card>
+  );
+}
+
+function DirectiveObligationsPanel({ summary }: { readonly summary: WorkDirectiveSummaryView }) {
+  if (
+    summary.blockerIds.length === 0 &&
+    summary.conflicts.length === 0 &&
+    summary.missingRequired.length === 0 &&
+    summary.nextSteps.length === 0
+  ) {
+    return null;
+  }
+  return (
+    <div className="bw-directive-obligations">
+      {summary.blockerIds.length > 0 ? (
+        <section className="bw-directive-obligation bw-directive-obligation--danger" aria-label="Required blockers">
+          <header>
+            <strong>Required blockers</strong>
+            <Badge tone="danger">{summary.blockerIds.length}</Badge>
+          </header>
+          <div className="bw-directive-row__ids">
+            {summary.blockerIds.map((id) => <EntityChip key={id} kind="blocker" label={id} />)}
+          </div>
+        </section>
+      ) : null}
+      {summary.conflicts.length > 0 ? (
+        <section className="bw-directive-obligation bw-directive-obligation--danger" aria-label="Directive conflicts">
+          <header>
+            <strong>Directive conflicts</strong>
+            <Badge tone="danger">{summary.conflicts.length}</Badge>
+          </header>
+          <div className="bw-directive-list">
+            {summary.conflicts.map((conflict) => <DirectiveConflictRow key={conflict.id} conflict={conflict} />)}
+          </div>
+        </section>
+      ) : null}
+      {summary.missingRequired.length > 0 ? (
+        <section className="bw-directive-obligation bw-directive-obligation--danger" aria-label="Missing required directive data">
+          <header>
+            <strong>Missing required directive data</strong>
+            <Badge tone="danger">{summary.missingRequired.length}</Badge>
+          </header>
+          <div className="bw-directive-list">
+            {summary.missingRequired.map((missing) => <DirectiveMissingRequiredRow key={missing.id} missing={missing} />)}
+          </div>
+        </section>
+      ) : null}
+      {summary.nextSteps.length > 0 ? (
+        <section className="bw-directive-obligation" aria-label="Safe next workflow commands">
+          <header>
+            <strong>Safe next workflow commands</strong>
+            <Badge tone="accent">{summary.nextSteps.length}</Badge>
+          </header>
+          <div className="bw-directive-list">
+            {summary.nextSteps.map((step) => <DirectiveNextStepRow key={step.id} step={step} />)}
+          </div>
+        </section>
+      ) : null}
+    </div>
+  );
+}
+
+function DirectiveConflictRow({ conflict }: { readonly conflict: WorkDirectiveConflictView }) {
+  return (
+    <article className={`bw-directive-mini-row bw-directive-mini-row--${conflict.lane}`}>
+      <div className="bw-directive-row__header">
+        <div>
+          <strong>{conflict.resolution}</strong>
+          <span>{conflict.reason}</span>
+        </div>
+        <Badge tone={directiveLaneTone(conflict.lane)}>{conflict.severity}</Badge>
+      </div>
+      <div className="bw-directive-row__meta">
+        {conflict.resolvedDirectiveId ? <Badge tone="success">resolved {conflict.resolvedDirectiveId}</Badge> : null}
+        {conflict.directiveIds.map((id) => <Badge key={id}>{id}</Badge>)}
+      </div>
+    </article>
+  );
+}
+
+function DirectiveMissingRequiredRow({ missing }: { readonly missing: WorkDirectiveMissingRequiredView }) {
+  return (
+    <article className="bw-directive-mini-row bw-directive-mini-row--required">
+      <div className="bw-directive-row__header">
+        <div>
+          <strong>{missing.registryId}</strong>
+          <span>{missing.message}</span>
+        </div>
+        <Badge tone="danger">missing</Badge>
+      </div>
+      <div className="bw-directive-row__meta">
+        <Badge tone="warning">{missing.requirement}</Badge>
+        {missing.family ? <Badge>{missing.family}</Badge> : null}
+        {missing.subjectType ? <Badge>{missing.subjectType}</Badge> : null}
+        {missing.subjectId ? <Badge>{missing.subjectId}</Badge> : null}
+      </div>
+    </article>
+  );
+}
+
+function DirectiveNextStepRow({ step }: { readonly step: WorkDirectiveNextStepView }) {
+  return (
+    <article className={`bw-directive-mini-row bw-directive-mini-row--${step.lane}`}>
+      <div className="bw-directive-row__header">
+        <div>
+          <strong>{step.title}</strong>
+          <span>{step.reason}</span>
+        </div>
+        <Badge tone={directiveLaneTone(step.lane)}>{step.lane}</Badge>
+      </div>
+      {step.workflowRef ? <code>{step.workflowRef}</code> : null}
+      {step.command ? <code>{step.command}</code> : null}
+      {step.relatedIds.length > 0 ? (
+        <div className="bw-directive-row__ids">
+          {step.relatedIds.map((id) => <EntityChip key={id} kind="related" label={id} />)}
+        </div>
+      ) : null}
+    </article>
   );
 }
 
@@ -225,10 +357,19 @@ function DirectiveRow({ item }: { readonly item: WorkDirectiveItemView }) {
         <Badge>{item.registryId}</Badge>
         <Badge>{item.severity}</Badge>
         <Badge>{item.lifecycle}</Badge>
+        {item.blocksCloseout ? <Badge tone="danger">blocks closeout</Badge> : null}
         {item.family ? <Badge>{item.family}</Badge> : null}
         {item.kind ? <Badge>{item.kind}</Badge> : null}
       </div>
       <p>{item.reason}</p>
+      {item.workflowRef ? <code>{item.workflowRef}</code> : null}
+      {item.recoveryWorkflow ? <code>{item.recoveryWorkflow}</code> : null}
+      {item.nextCommand && item.nextCommand !== item.sourceCommand ? <code>{item.nextCommand}</code> : null}
+      {item.requiredInputs.length > 0 ? (
+        <div className="bw-directive-row__meta" aria-label="Required directive inputs">
+          {item.requiredInputs.map((input) => <Badge key={input}>{input}</Badge>)}
+        </div>
+      ) : null}
       {item.relatedIds.length > 0 ? (
         <div className="bw-directive-row__ids" aria-label="Related records">
           {item.relatedIds.map((id) => <EntityChip key={id} kind="related" label={id} />)}

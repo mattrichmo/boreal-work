@@ -310,6 +310,9 @@ function directiveSummary(subjectId: string): WorkDirectiveSummaryView {
       lane: "recommended",
       reason: "Follow the named canonical workflow and pass only typed inputs to the next command.",
       sourceCommand: `bwrk work show ${subjectId} --json`,
+      nextCommand: `bwrk work show ${subjectId} --json`,
+      workflowRef: "workflows/40-work/claim-and-finish-work.md",
+      requiredInputs: ["work", "summary", "doctor"],
       relatedIds: [subjectId]
     },
     {
@@ -323,6 +326,8 @@ function directiveSummary(subjectId: string): WorkDirectiveSummaryView {
       lane: "required",
       reason: "Closed successful work must provide a user-facing summary in the agent response.",
       sourceCommand: `bwrk agent finish ${subjectId} --json`,
+      blocksCloseout: true,
+      requiredInputs: ["summary", "evidence", "verification"],
       relatedIds: [subjectId, "bw_gate_fixture"]
     },
     {
@@ -336,7 +341,11 @@ function directiveSummary(subjectId: string): WorkDirectiveSummaryView {
       lane: "blocked",
       reason: "The directive is blocked until related work has a clean checkpoint or dirty-path reason.",
       sourceCommand: "bwrk doctor --json",
-      relatedIds: [subjectId, "bw_reservation_fixture"]
+      nextCommand: "bwrk doctor --json",
+      recoveryWorkflow: "workflows/60-health/sync-and-doctor.md",
+      blocksCloseout: true,
+      requiredInputs: ["git", "doctor"],
+      relatedIds: [subjectId, "bw_reservation_fixture", "bw_work_blocker_fixture"]
     },
     {
       id: `directive.context.info.${subjectId}`,
@@ -349,7 +358,45 @@ function directiveSummary(subjectId: string): WorkDirectiveSummaryView {
       lane: "informational",
       reason: "A context pack is available for operator review.",
       sourceCommand: `bwrk summary show ${subjectId} --json`,
+      requiredInputs: [],
       relatedIds: [subjectId, "bw_summary_fixture"]
+    }
+  ];
+  const nextSteps = items.flatMap((item) => {
+    const workflowRef = item.workflowRef ?? item.recoveryWorkflow;
+    if (!item.nextCommand && !workflowRef) {
+      return [];
+    }
+    return [{
+      id: `next-step-${item.id}`,
+      title: item.title,
+      lane: item.lane,
+      command: item.nextCommand,
+      workflowRef,
+      reason: item.reason,
+      relatedIds: item.relatedIds
+    }];
+  });
+  const conflicts: WorkDirectiveSummaryView["conflicts"] = [
+    {
+      id: `directive-conflict-${subjectId}`,
+      directiveIds: [`directive.git.blocked-dirty-state.${subjectId}`, `directive.workflow_next.canonical-next-step.${subjectId}`],
+      reason: "Blocking directive must be resolved before the next step can be acted on.",
+      resolution: "blocking_wins",
+      resolvedDirectiveId: `directive.git.blocked-dirty-state.${subjectId}`,
+      severity: "blocking",
+      lane: "blocked"
+    }
+  ];
+  const missingRequired: WorkDirectiveSummaryView["missingRequired"] = [
+    {
+      id: `directive-missing-${subjectId}`,
+      registryId: "closeout.summary-required",
+      family: "closeout",
+      requirement: "summary.latestSummaryId",
+      message: "Summary data is required.",
+      subjectId,
+      subjectType: "work"
     }
   ];
   return {
@@ -358,7 +405,17 @@ function directiveSummary(subjectId: string): WorkDirectiveSummaryView {
     recommended: items.filter((item) => item.lane === "recommended").length,
     required: items.filter((item) => item.lane === "required").length,
     blocked: items.filter((item) => item.lane === "blocked").length,
+    conflictCount: conflicts.length,
+    missingRequiredCount: missingRequired.length,
+    blockerIds: ["bw_work_blocker_fixture"],
     sourceCommands: Array.from(new Set(items.flatMap((item) => item.sourceCommand ? [item.sourceCommand] : []))),
+    safeCommands: Array.from(new Set([
+      ...items.flatMap((item) => item.sourceCommand ? [item.sourceCommand] : []),
+      ...nextSteps.flatMap((step) => step.command ? [step.command] : [])
+    ])),
+    nextSteps,
+    conflicts,
+    missingRequired,
     items
   };
 }

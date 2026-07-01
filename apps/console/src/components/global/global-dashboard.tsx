@@ -162,6 +162,9 @@ function GlobalDirectiveBadges({ work }: { readonly work: WorkItemView }) {
       {summary.required > 0 ? <Badge tone="warning">{summary.required} required directives</Badge> : null}
       {summary.recommended > 0 ? <Badge tone="accent">{summary.recommended} recommended directives</Badge> : null}
       {summary.informational > 0 ? <Badge>{summary.informational} informational directives</Badge> : null}
+      {summary.conflictCount > 0 ? <Badge tone="danger">{summary.conflictCount} directive conflicts</Badge> : null}
+      {summary.missingRequiredCount > 0 ? <Badge tone="danger">{summary.missingRequiredCount} missing required</Badge> : null}
+      {summary.nextSteps.length > 0 ? <Badge tone="accent">{summary.nextSteps.length} next steps</Badge> : null}
     </span>
   );
 }

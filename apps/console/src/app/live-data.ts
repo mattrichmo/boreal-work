@@ -21,8 +21,11 @@ import {
   type ProjectMemoryLayout,
   type ProjectSyncFreshness,
   type SyncDashboardView,
+  type WorkDirectiveConflictView,
   type WorkDirectiveItemView,
   type WorkDirectiveLane,
+  type WorkDirectiveMissingRequiredView,
+  type WorkDirectiveNextStepView,
   type WorkDirectiveSeverity,
   type WorkDirectiveSummaryView,
   type WorkItemView
@@ -1854,6 +1857,9 @@ function directiveSummaryFromBundles(value: unknown): WorkDirectiveSummaryView |
     return undefined;
   }
   const items: WorkDirectiveItemView[] = [];
+  const conflicts: WorkDirectiveConflictView[] = [];
+  const missingRequired: WorkDirectiveMissingRequiredView[] = [];
+  const blockerIds = new Set<string>();
   const sourceCommands = new Set<string>();
   for (const bundle of value) {
     if (!isRecord(bundle)) {
@@ -1861,10 +1867,12 @@ function directiveSummaryFromBundles(value: unknown): WorkDirectiveSummaryView |
     }
     const meta = isRecord(bundle.meta) ? bundle.meta : {};
     const bundleCommand = sourceCommandFromPath(stringField(meta, "commandPath", ""));
-    const conflicts = directiveConflictReasons(bundle.conflicts);
+    const conflictReasons = directiveConflictReasons(bundle.conflicts);
+    conflicts.push(...directiveConflictsFromBundle(bundle.conflicts));
+    missingRequired.push(...directiveMissingRequiredFromBundle(bundle.missingRequired));
     const directives = Array.isArray(bundle.directives) ? bundle.directives : [];
     for (const directive of directives) {
-      const item = directiveItemFromRecord(directive, bundleCommand, conflicts);
+      const item = directiveItemFromRecord(directive, bundleCommand, conflictReasons);
       if (!item) {
         continue;
       }
@@ -1872,10 +1880,23 @@ function directiveSummaryFromBundles(value: unknown): WorkDirectiveSummaryView |
       if (item.sourceCommand) {
         sourceCommands.add(item.sourceCommand);
       }
+      if (item.nextCommand) {
+        sourceCommands.add(item.nextCommand);
+      }
+      for (const blockerId of blockerIdsFromDirective(directive)) {
+        blockerIds.add(blockerId);
+      }
     }
   }
-  if (items.length === 0) {
+  if (items.length === 0 && conflicts.length === 0 && missingRequired.length === 0) {
     return undefined;
+  }
+  const nextSteps = nextStepsFromDirectiveItems(items);
+  const safeCommands = new Set(sourceCommands);
+  for (const step of nextSteps) {
+    if (step.command) {
+      safeCommands.add(step.command);
+    }
   }
   return {
     total: items.length,
@@ -1883,7 +1904,14 @@ function directiveSummaryFromBundles(value: unknown): WorkDirectiveSummaryView |
     recommended: items.filter((item) => item.lane === "recommended").length,
     required: items.filter((item) => item.lane === "required").length,
     blocked: items.filter((item) => item.lane === "blocked").length,
+    conflictCount: conflicts.length,
+    missingRequiredCount: missingRequired.length,
+    blockerIds: [...blockerIds],
     sourceCommands: [...sourceCommands],
+    safeCommands: [...safeCommands],
+    nextSteps,
+    conflicts,
+    missingRequired,
     items
   };
 }
@@ -1906,6 +1934,7 @@ function directiveItemFromRecord(
   const lifecycle = stringField(value, "lifecycle", "active");
   const lane = directiveLane(severity, lifecycle);
   const commandPath = firstStringField(data, ["commandPath", "sourceCommand"]);
+  const nextCommand = sourceCommandFromPath(firstStringField(data, ["nextCommandPath", "commandPath", "sourceCommand"]));
   const sourceCommand = sourceCommandFromPath(commandPath) ?? bundleCommand;
   const reason = directiveReason(value, data, conflicts.get(id));
   return {
@@ -1919,8 +1948,85 @@ function directiveItemFromRecord(
     lane,
     reason,
     sourceCommand,
+    nextCommand,
+    workflowRef: firstStringField(data, ["workflowRef"]),
+    recoveryWorkflow: firstStringField(data, ["recoveryWorkflow"]),
+    blocksCloseout: value.blocksCloseout === true,
+    requiredInputs: stringArray(data.requiredInputs),
     relatedIds: relatedIdsFromDirective(value).slice(0, 12)
   };
+}
+
+function directiveConflictsFromBundle(value: unknown): readonly WorkDirectiveConflictView[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value.flatMap((entry, index): readonly WorkDirectiveConflictView[] => {
+    if (!isRecord(entry)) {
+      return [];
+    }
+    const directiveIds = stringArray(entry.directiveIds);
+    const reason = stringField(entry, "reason", "");
+    const resolution = stringField(entry, "resolution", "unknown");
+    if (directiveIds.length === 0 && !reason) {
+      return [];
+    }
+    const severity = directiveSeverity(entry.severity);
+    return [{
+      id: `directive-conflict-${index}-${directiveIds.join("-") || resolution}`,
+      directiveIds,
+      reason: reason || "Directive conflict requires review.",
+      resolution,
+      resolvedDirectiveId: nonEmptyString(entry.resolvedDirectiveId),
+      severity,
+      lane: directiveLane(severity, severity === "blocking" ? "blocked" : "active")
+    }];
+  });
+}
+
+function directiveMissingRequiredFromBundle(value: unknown): readonly WorkDirectiveMissingRequiredView[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value.flatMap((entry, index): readonly WorkDirectiveMissingRequiredView[] => {
+    if (!isRecord(entry)) {
+      return [];
+    }
+    const registryId = stringField(entry, "registryId", "");
+    const requirement = stringField(entry, "requirement", "");
+    const message = stringField(entry, "message", "");
+    if (!registryId && !requirement && !message) {
+      return [];
+    }
+    const subject = isRecord(entry.subject) ? entry.subject : {};
+    return [{
+      id: `directive-missing-${index}-${registryId || requirement || "required"}`,
+      registryId: registryId || "unknown",
+      family: nonEmptyString(entry.family),
+      requirement: requirement || "unknown",
+      message: message || "Required directive data is missing.",
+      subjectId: nonEmptyString(subject.id),
+      subjectType: nonEmptyString(subject.type)
+    }];
+  });
+}
+
+function nextStepsFromDirectiveItems(items: readonly WorkDirectiveItemView[]): readonly WorkDirectiveNextStepView[] {
+  return items.flatMap((item): readonly WorkDirectiveNextStepView[] => {
+    const workflowRef = item.workflowRef ?? item.recoveryWorkflow;
+    if (!item.nextCommand && !workflowRef) {
+      return [];
+    }
+    return [{
+      id: `next-step-${item.id}`,
+      title: item.title,
+      lane: item.lane,
+      command: item.nextCommand,
+      workflowRef,
+      reason: item.reason,
+      relatedIds: item.relatedIds
+    }];
+  });
 }
 
 function directiveConflictReasons(value: unknown): ReadonlyMap<string, string> {
@@ -1978,7 +2084,25 @@ function sourceCommandFromPath(commandPath: string | undefined): string | undefi
   if (!commandPath) {
     return undefined;
   }
-  return commandPath.startsWith("bwrk ") ? commandPath : `bwrk ${commandPath} --json`;
+  if (commandPath.startsWith("bwrk ")) {
+    return commandPath;
+  }
+  return commandPath.includes("--json") ? `bwrk ${commandPath}` : `bwrk ${commandPath} --json`;
+}
+
+function blockerIdsFromDirective(value: unknown): readonly string[] {
+  if (!isRecord(value) || !isRecord(value.data)) {
+    return [];
+  }
+  const ids = new Set<string>();
+  for (const key of ["blockerIds", "blockedByIds", "openBlockerIds", "activeBlockerIds"]) {
+    for (const id of stringArray(value.data[key])) {
+      if (id.startsWith("bw_work_")) {
+        ids.add(id);
+      }
+    }
+  }
+  return [...ids];
 }
 
 function relatedIdsFromDirective(value: Record<string, unknown>): readonly string[] {

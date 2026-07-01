@@ -93,6 +93,11 @@ describe("console component exports", () => {
     expect(html).toContain("directive.workflow_next.fixture");
     expect(html).toContain("bwrk sync refresh --json");
     expect(html).toContain("bw_work_1");
+    expect(html).toContain("Directive conflicts");
+    expect(html).toContain("Missing required directive data");
+    expect(html).toContain("Safe next workflow commands");
+    expect(html).toContain("closeout.summary-required");
+    expect(html).toContain("workflows/40-work/claim-and-finish-work.md");
   });
 
   it("renders sprint, global, and operations dashboard primitives", () => {
@@ -168,6 +173,9 @@ describe("console component exports", () => {
     expect(html).toContain("required directives");
     expect(html).toContain("blocked directives");
     expect(html).toContain("informational directives");
+    expect(html).toContain("directive conflicts");
+    expect(html).toContain("missing required");
+    expect(html).toContain("next steps");
     expect(html).toContain("Sprint review");
     expect(html).toContain("Verification queue");
     expect(html).toContain("Promote discovery");
@@ -269,7 +277,7 @@ function workItem(input: Partial<WorkItemView> & Pick<WorkItemView, "id" | "titl
 }
 
 function directiveSummaryFixture(subjectId: string): WorkDirectiveSummaryView {
-  return {
+  const base = {
     total: 4,
     informational: 1,
     recommended: 1,
@@ -288,6 +296,9 @@ function directiveSummaryFixture(subjectId: string): WorkDirectiveSummaryView {
         lane: "recommended",
         reason: "Follow the named canonical workflow before continuing.",
         sourceCommand: "bwrk sync refresh --json",
+        nextCommand: "bwrk sync refresh --json",
+        workflowRef: "workflows/40-work/claim-and-finish-work.md",
+        requiredInputs: ["work", "doctor"],
         relatedIds: [subjectId]
       },
       {
@@ -301,6 +312,8 @@ function directiveSummaryFixture(subjectId: string): WorkDirectiveSummaryView {
         lane: "required",
         reason: "Final closeout requires a concise user-facing summary.",
         sourceCommand: `bwrk work show ${subjectId} --json`,
+        blocksCloseout: true,
+        requiredInputs: ["summary"],
         relatedIds: [subjectId, "bw_gate_fixture"]
       },
       {
@@ -314,7 +327,11 @@ function directiveSummaryFixture(subjectId: string): WorkDirectiveSummaryView {
         lane: "blocked",
         reason: "Checkpoint is blocked until dirty state is resolved or explicitly explained.",
         sourceCommand: "bwrk doctor --json",
-        relatedIds: [subjectId, "bw_reservation_fixture"]
+        nextCommand: "bwrk doctor --json",
+        recoveryWorkflow: "workflows/60-health/sync-and-doctor.md",
+        blocksCloseout: true,
+        requiredInputs: ["git", "doctor"],
+        relatedIds: [subjectId, "bw_reservation_fixture", "bw_work_blocker_fixture"]
       },
       {
         id: "directive.context.fixture",
@@ -327,9 +344,62 @@ function directiveSummaryFixture(subjectId: string): WorkDirectiveSummaryView {
         lane: "informational",
         reason: "Context pack can be inspected before responding.",
         sourceCommand: `bwrk summary show ${subjectId} --json`,
+        requiredInputs: [],
         relatedIds: [subjectId, "bw_summary_fixture"]
       }
     ]
+  };
+  const nextSteps: WorkDirectiveSummaryView["nextSteps"] = [
+    {
+      id: "next-step-directive.workflow_next.fixture",
+      title: "Follow next canonical workflow",
+      lane: "recommended",
+      command: "bwrk sync refresh --json",
+      workflowRef: "workflows/40-work/claim-and-finish-work.md",
+      reason: "Follow the named canonical workflow before continuing.",
+      relatedIds: [subjectId]
+    },
+    {
+      id: "next-step-directive.git.fixture",
+      title: "Resolve dirty checkpoint",
+      lane: "blocked",
+      command: "bwrk doctor --json",
+      workflowRef: "workflows/60-health/sync-and-doctor.md",
+      reason: "Checkpoint is blocked until dirty state is resolved or explicitly explained.",
+      relatedIds: [subjectId, "bw_reservation_fixture", "bw_work_blocker_fixture"]
+    }
+  ];
+  const conflicts: WorkDirectiveSummaryView["conflicts"] = [
+    {
+      id: "directive-conflict-fixture",
+      directiveIds: ["directive.git.fixture", "directive.workflow_next.fixture"],
+      reason: "Blocking directive wins.",
+      resolution: "blocking_wins",
+      resolvedDirectiveId: "directive.git.fixture",
+      severity: "blocking",
+      lane: "blocked"
+    }
+  ];
+  const missingRequired: WorkDirectiveSummaryView["missingRequired"] = [
+    {
+      id: "directive-missing-fixture",
+      registryId: "closeout.summary-required",
+      family: "closeout",
+      requirement: "summary.latestSummaryId",
+      message: "Summary data is required.",
+      subjectId,
+      subjectType: "work"
+    }
+  ];
+  return {
+    ...base,
+    conflictCount: conflicts.length,
+    missingRequiredCount: missingRequired.length,
+    blockerIds: ["bw_work_blocker_fixture"],
+    safeCommands: ["bwrk sync refresh --json", `bwrk work show ${subjectId} --json`, "bwrk doctor --json", `bwrk summary show ${subjectId} --json`],
+    nextSteps,
+    conflicts,
+    missingRequired
   };
 }
 
