@@ -165,7 +165,7 @@ export const AGENT_DIRECTIVE_REGISTRY: AgentDirectiveRegistry = {
       instruction:
         "Inspect the Git roots, commit only scoped changes, and record a commit SHA or accepted dirty-path reason before closeout.",
       appliesTo: {
-        commandPaths: ["agent finish", "summary compose", "sync status", "work close"],
+        commandPaths: ["agent finish", "summary compose", "sync status", "work close", "work cancel"],
         subjectTypes: ["work", "sprint", "phase", "milestone", "project"]
       },
       blocksCloseout: true,
@@ -190,11 +190,11 @@ export const AGENT_DIRECTIVE_REGISTRY: AgentDirectiveRegistry = {
       kind: "summary",
       title: "Respond with closeout summary",
       instruction:
-        "Respond to the user with a concise summary of the verified outcome, evidence, summary artifact, checkpoint, remaining risks, and next workflow.",
+        "Respond to the user with a concise summary of the verified terminal outcome, summary artifact, checkpoint, remaining risks, and next workflow.",
       appliesTo: {
-        commandPaths: ["agent finish", "summary compose", "work close"],
+        commandPaths: ["agent finish", "summary compose", "work close", "work cancel"],
         subjectTypes: ["work", "sprint", "phase", "milestone", "project"],
-        workStatuses: ["in_progress", "closed"]
+        workStatuses: ["in_progress", "closed", "cancelled"]
       },
       blocksCloseout: true,
       acknowledgement: {
@@ -208,7 +208,14 @@ export const AGENT_DIRECTIVE_REGISTRY: AgentDirectiveRegistry = {
         requirement("summaryUri", "uri", true, "Markdown artifact URI for the agent summary."),
         requirement("evidenceIds", "array", true, "Evidence ids used in closeout."),
         requirement("verificationIds", "array", true, "Verification ids used in closeout."),
-        requirement("commitShas", "array", false, "Checkpoint commit SHAs included in closeout.")
+        requirement("commitShas", "array", false, "Checkpoint commit SHAs included in closeout."),
+        requirement("dirtyPathNotes", "array", false, "Dirty paths intentionally left out of the checkpoint."),
+        requirement("summaryStatus", "string", false, "Final or forced summary status."),
+        requirement("summaryOutcome", "string", false, "Terminal summary outcome."),
+        requirement("closeReason", "string", false, "Close or cancellation reason."),
+        requirement("duplicateOf", "string", false, "Duplicate target when the terminal outcome is duplicate."),
+        requirement("forceReasonCode", "string", false, "Forced-summary reason code."),
+        requirement("forceComment", "string", false, "Forced-summary operator comment.")
       ]
     }),
     entry({
@@ -377,7 +384,16 @@ export const AGENT_DIRECTIVE_REGISTRY: AgentDirectiveRegistry = {
       title: "Follow next canonical workflow",
       instruction: "Follow the named canonical workflow and pass only the listed typed inputs to the next command.",
       appliesTo: {
-        commandPaths: ["agent start", "prime", "work show", "workflows show"],
+        commandPaths: [
+          "agent start",
+          "agent finish",
+          "prime",
+          "summary compose",
+          "work cancel",
+          "work close",
+          "work show",
+          "workflows show"
+        ],
         subjectTypes: ["work", "sprint", "phase", "milestone", "session"]
       },
       dataRequirements: [

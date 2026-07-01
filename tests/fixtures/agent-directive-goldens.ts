@@ -54,7 +54,11 @@ export const AGENT_DIRECTIVE_GOLDEN_CASES: readonly AgentDirectiveGoldenCase[] =
       summaryUri: "memory://agent-summaries/works/bw_work_deadbeef0001/bw_summary_deadbeef0001.md",
       evidenceIds: ["bw_evidence_deadbeef0001"],
       verificationIds: ["bw_verification_deadbeef0001"],
-      commitShas: ["0123456789abcdef0123456789abcdef01234567"]
+      commitShas: ["0123456789abcdef0123456789abcdef01234567"],
+      dirtyPathNotes: ["README.md left dirty because it predates the closeout"],
+      summaryStatus: "final",
+      summaryOutcome: "completed",
+      closeReason: "Completed acceptance criteria"
     },
     expected: {
       title: "Respond with closeout summary",
@@ -62,7 +66,16 @@ export const AGENT_DIRECTIVE_GOLDEN_CASES: readonly AgentDirectiveGoldenCase[] =
       kind: "summary",
       blocksCloseout: true,
       requiredKeys: ["subjectId", "summaryId", "summaryUri", "evidenceIds", "verificationIds"],
-      optionalKeys: ["commitShas"]
+      optionalKeys: [
+        "commitShas",
+        "dirtyPathNotes",
+        "summaryStatus",
+        "summaryOutcome",
+        "closeReason",
+        "duplicateOf",
+        "forceReasonCode",
+        "forceComment"
+      ]
     }
   },
   {

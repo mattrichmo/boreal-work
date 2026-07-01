@@ -25,6 +25,12 @@ import {
   type AgentDirectiveSnapshot
 } from "./agent-directive-snapshot.js";
 import type { ContentHash } from "./ids.js";
+import type {
+  AgentSummaryForceReasonCode,
+  AgentSummaryOutcome,
+  AgentSummaryStatus,
+  VerificationVerdict
+} from "./records.js";
 import { isIsoTimestamp, type IsoTimestamp } from "./time.js";
 
 export type AgentDirectiveAssemblyIssuePhase =
@@ -62,6 +68,33 @@ export interface AgentDirectiveBundleAssemblyResult {
   readonly issues: readonly AgentDirectiveBundleAssemblyIssue[];
   readonly missingRequired: readonly AgentDirectiveMissingRequiredEntry[];
   readonly bundle?: AgentDirectiveBundle;
+}
+
+export interface AgentDirectiveCloseoutDataOptions {
+  readonly summaryStatus?: AgentSummaryStatus;
+  readonly summaryOutcome?: AgentSummaryOutcome;
+  readonly closeReason?: string;
+  readonly duplicateOf?: string;
+  readonly forceReasonCode?: AgentSummaryForceReasonCode;
+  readonly forceComment?: string;
+  readonly checkpointReasonCode?: string;
+  readonly validationCommand?: string;
+  readonly expectedVerificationVerdict?: VerificationVerdict;
+  readonly nextWorkflowRef?: string;
+  readonly nextCommandPath?: string;
+  readonly nextRequiredInputs?: readonly string[];
+}
+
+export interface AgentDirectiveCloseoutCompilationInput extends AgentDirectiveCloseoutDataOptions {
+  readonly snapshot: AgentDirectiveSnapshot;
+  readonly dataByRegistryId?: AgentDirectiveAssemblyDataByRegistryId;
+  readonly registry?: AgentDirectiveRegistry;
+  readonly generatedAt?: IsoTimestamp;
+  readonly bundleId?: AgentDirectiveBundleId;
+}
+
+export interface AgentDirectiveCloseoutCompilationResult extends AgentDirectiveBundleAssemblyResult {
+  readonly dataByRegistryId: AgentDirectiveAssemblyDataByRegistryId;
 }
 
 export function selectAgentDirectiveRegistryEntries(
@@ -159,6 +192,98 @@ export function assembleAgentDirectiveBundle(
         missingRequired,
         bundle
       };
+}
+
+export function closeoutDirectiveDataByRegistryId(
+  snapshot: AgentDirectiveSnapshot,
+  options: AgentDirectiveCloseoutDataOptions = {}
+): AgentDirectiveAssemblyDataByRegistryId {
+  const subjectId = snapshot.work.subject?.id;
+  const latestSummaryId =
+    snapshot.summary.latestSummaryId ?? last(snapshot.summary.finalSummaryIds) ?? last(snapshot.summary.summaryIds);
+  const latestSummaryUri = snapshot.summary.latestSummaryUri ?? last(snapshot.summary.artifactUris);
+  const evidenceIds = snapshot.evidence.evidenceIds;
+  const verificationIds = snapshot.evidence.verificationIds;
+  const commitShas = uniqueStrings([...snapshot.git.checkpointCommitShas, ...snapshot.summary.commitShas]);
+  const dirtyPathNotes = uniqueStrings([...snapshot.git.dirtyPathNotes, ...snapshot.summary.dirtyPathNotes]);
+  const primaryGitRoot = snapshot.git.roots[0];
+  const nextWorkflowRef = options.nextWorkflowRef ?? snapshot.workflow.nextWorkflowRef;
+  const nextCommandPath = options.nextCommandPath ?? snapshot.workflow.recommendedCommandPath;
+  const checkpointReasonCode =
+    options.checkpointReasonCode ?? inferCheckpointReasonCode(options.summaryOutcome, commitShas, dirtyPathNotes);
+
+  return {
+    "closeout.summary-required": dataRecord([
+      ["subjectId", subjectId],
+      ["summaryId", latestSummaryId],
+      ["summaryUri", latestSummaryUri],
+      ["evidenceIds", evidenceIds],
+      ["verificationIds", verificationIds],
+      ["commitShas", commitShas],
+      ["dirtyPathNotes", dirtyPathNotes],
+      ["summaryStatus", options.summaryStatus],
+      ["summaryOutcome", options.summaryOutcome],
+      ["closeReason", options.closeReason ?? snapshot.work.subject?.closedReason],
+      ["duplicateOf", options.duplicateOf],
+      ["forceReasonCode", options.forceReasonCode],
+      ["forceComment", options.forceComment]
+    ]),
+    "git.checkpoint-required": dataRecord([
+      ["gitRoot", primaryGitRoot?.root],
+      ["commitShas", commitShas],
+      ["dirtyPathNotes", dirtyPathNotes],
+      ["reasonCode", checkpointReasonCode],
+      ["branchName", primaryGitRoot?.branchName]
+    ]),
+    "verification.evidence-required": dataRecord([
+      ["subjectId", subjectId],
+      ["command", options.validationCommand ?? latestEvidenceCommand(snapshot)],
+      ["expectedVerdict", options.expectedVerificationVerdict ?? "passed"],
+      ["evidenceIds", evidenceIds],
+      ["verificationIds", verificationIds]
+    ]),
+    "handoff.session-summary": dataRecord([
+      ["workId", subjectId],
+      ["summaryUri", latestSummaryUri],
+      ["nextWorkflow", nextWorkflowRef],
+      ["reservationIds", snapshot.actor.activeReservationIds],
+      ["commitShas", commitShas]
+    ]),
+    "container.descendant-closeout": dataRecord([
+      ["containerId", subjectId],
+      ["openDescendantIds", snapshot.work.openDescendantIds],
+      ["requiredGateIds", snapshot.gate.openGateIds],
+      ["childSummaryIds", snapshot.summary.childSummaryIds],
+      ["closeReason", options.closeReason ?? snapshot.work.subject?.closedReason]
+    ]),
+    "workflow_next.canonical-next-step": dataRecord([
+      ["workflowRef", nextWorkflowRef],
+      ["commandPath", nextCommandPath],
+      ["requiredInputs", options.nextRequiredInputs ?? snapshot.workflow.requiredInputNames],
+      ["currentStatus", snapshot.work.subject?.status],
+      ["subjectId", subjectId]
+    ])
+  };
+}
+
+export function compileCloseoutAgentDirectiveBundle(
+  input: AgentDirectiveCloseoutCompilationInput
+): AgentDirectiveCloseoutCompilationResult {
+  const dataByRegistryId = {
+    ...closeoutDirectiveDataByRegistryId(input.snapshot, input),
+    ...input.dataByRegistryId
+  };
+  const result = assembleAgentDirectiveBundle({
+    snapshot: input.snapshot,
+    dataByRegistryId,
+    registry: input.registry,
+    generatedAt: input.generatedAt,
+    bundleId: input.bundleId
+  });
+  return {
+    ...result,
+    dataByRegistryId
+  };
 }
 
 function registryEntrySelectedBy(
@@ -480,6 +605,57 @@ function uniqueConflicts(conflicts: AgentDirectiveBundle["conflicts"]): AgentDir
     output.push(conflict);
   }
   return output;
+}
+
+function dataRecord(entries: readonly (readonly [string, AgentDirectiveDataValue | undefined])[]): AgentDirectiveData {
+  const record: Record<string, AgentDirectiveDataValue> = {};
+  for (const [key, value] of entries) {
+    if (value !== undefined) {
+      record[key] = value;
+    }
+  }
+  return record;
+}
+
+function inferCheckpointReasonCode(
+  outcome: AgentSummaryOutcome | undefined,
+  commitShas: readonly string[],
+  dirtyPathNotes: readonly string[]
+): string | undefined {
+  if (commitShas.length > 0) {
+    return "scoped_commit_recorded";
+  }
+  if (outcome === "no_change") {
+    return "no_repo_changes";
+  }
+  if (outcome === "duplicate") {
+    return "duplicate";
+  }
+  if (outcome === "cancelled") {
+    return "cancelled_no_work";
+  }
+  if (dirtyPathNotes.length > 0) {
+    return "dirty_paths_documented";
+  }
+  return undefined;
+}
+
+function latestEvidenceCommand(snapshot: AgentDirectiveSnapshot): string | undefined {
+  for (let index = snapshot.evidence.evidence.length - 1; index >= 0; index -= 1) {
+    const command = snapshot.evidence.evidence[index]?.command;
+    if (command !== undefined && command.trim().length > 0) {
+      return command;
+    }
+  }
+  return undefined;
+}
+
+function uniqueStrings(values: readonly string[]): readonly string[] {
+  return [...new Set(values)];
+}
+
+function last<T>(values: readonly T[]): T | undefined {
+  return values.length > 0 ? values[values.length - 1] : undefined;
 }
 
 function bundleIdForSnapshot(snapshot: AgentDirectiveSnapshot, snapshotHash: ContentHash): AgentDirectiveBundleId {
