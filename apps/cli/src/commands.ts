@@ -4,6 +4,8 @@ import { mkdir } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
 
 import {
+  AGENT_DIRECTIVE_FAMILIES,
+  AGENT_DIRECTIVE_REGISTRY,
   AGENT_DIRECTIVE_SNAPSHOT_CONTEXT_KEYS,
   BorealError,
   assembleAgentDirectiveBundle,
@@ -31,11 +33,16 @@ import {
   withContentHash,
   type ActorRef,
   type ActorKind,
+  type AgentDirectiveFamily,
   type AgentDirectiveBundle,
   type AgentDirectiveDiagnosticSnapshot,
   type AgentDirectiveGateStateSnapshot,
+  type AgentDirectiveLifecycle,
+  type AgentDirectiveRegistry,
+  type AgentDirectiveRegistryEntry,
   type AgentDirectiveSubjectType,
   type AgentDirectiveSnapshot,
+  type AgentDirectiveTemplateId,
   type AgentReservation,
   type AgentSummaryForceReasonCode,
   type AgentSummaryId,
@@ -758,6 +765,9 @@ export async function runCommand(args: ParsedArgs, output: CliOutput, cwd: strin
   if (definition.path[0] === "commands") {
     return commandsCommand(args, output, json);
   }
+  if (definition.path[0] === "directives") {
+    return directivesCommand(args.command[1], args.command.slice(2), args, output, json);
+  }
   if (definition.path[0] === "completion") {
     return completionCommand(args, output, json);
   }
@@ -1357,6 +1367,345 @@ function commandsCommand(args: ParsedArgs, output: CliOutput, json: boolean): Co
     output.write(formatCommandsGrouped());
   }
   return { exitCode: 0 };
+}
+
+const DIRECTIVE_REGISTRY_STATUS_VALUES = [
+  "active",
+  "deprecated",
+  "removed",
+  "proposed",
+  "satisfied",
+  "acknowledged",
+  "superseded",
+  "blocked"
+] as const;
+
+type DirectiveRegistryStatus = (typeof DIRECTIVE_REGISTRY_STATUS_VALUES)[number];
+
+interface DirectiveRegistryReplacementMetadata {
+  readonly status: DirectiveRegistryStatus;
+  readonly removed: boolean;
+  readonly supersedes: readonly AgentDirectiveTemplateId[];
+  readonly deprecatedBy: readonly AgentDirectiveTemplateId[];
+}
+
+interface DirectiveRegistryListEntry {
+  readonly id: AgentDirectiveTemplateId;
+  readonly version: string;
+  readonly family: AgentDirectiveFamily;
+  readonly severity: string;
+  readonly audience: string;
+  readonly kind: string;
+  readonly lifecycle: AgentDirectiveLifecycle;
+  readonly status: DirectiveRegistryStatus;
+  readonly title: string;
+  readonly blocksCloseout: boolean;
+  readonly supersedes: readonly AgentDirectiveTemplateId[];
+  readonly deprecatedBy: readonly AgentDirectiveTemplateId[];
+}
+
+interface DirectiveRegistryFamilySummary {
+  readonly family: AgentDirectiveFamily;
+  readonly total: number;
+  readonly active: number;
+  readonly deprecated: number;
+  readonly removed: number;
+}
+
+interface DirectiveRegistryListResult {
+  readonly schemaVersion: "boreal.cli.directives.list.v1";
+  readonly registryVersion: string;
+  readonly sourcePath: string;
+  readonly filters: {
+    readonly family?: AgentDirectiveFamily;
+    readonly status?: DirectiveRegistryStatus;
+  };
+  readonly families: readonly DirectiveRegistryFamilySummary[];
+  readonly directives: readonly DirectiveRegistryListEntry[];
+}
+
+interface DirectiveRegistryShowEntry extends DirectiveRegistryListEntry {
+  readonly instruction: string;
+  readonly defaultLifecycle: AgentDirectiveLifecycle;
+  readonly sourcePath: string;
+  readonly appliesTo: AgentDirectiveRegistryEntry["appliesTo"];
+  readonly acknowledgement?: AgentDirectiveRegistryEntry["acknowledgement"];
+  readonly dataRequirements: AgentDirectiveRegistryEntry["dataRequirements"];
+  readonly replacementMetadata: DirectiveRegistryReplacementMetadata;
+}
+
+interface DirectiveRegistryShowResult {
+  readonly schemaVersion: "boreal.cli.directives.show.v1";
+  readonly registryVersion: string;
+  readonly sourcePath: string;
+  readonly directive: DirectiveRegistryShowEntry;
+}
+
+function directivesCommand(
+  action: string | undefined,
+  rest: readonly string[],
+  args: ParsedArgs,
+  output: CliOutput,
+  json: boolean
+): CommandResult {
+  switch (action) {
+    case "list": {
+      const result = listDirectiveRegistry(args);
+      output.write(json ? formatRecord(result, true) : formatDirectiveRegistryList(result));
+      return { exitCode: 0 };
+    }
+    case "show": {
+      const result = showDirectiveRegistryEntry(requiredPositional(rest, 0, "directive id"));
+      output.write(json ? formatRecord(result, true) : formatDirectiveRegistryShow(result));
+      return { exitCode: 0 };
+    }
+    default:
+      throw new BorealError("BOREAL_INVALID_INPUT", `Unknown directives command: ${action ?? ""}`);
+  }
+}
+
+function listDirectiveRegistry(args: ParsedArgs): DirectiveRegistryListResult {
+  const family = directiveFamilyFilter(args);
+  const status = directiveStatusFilter(args);
+  const replacements = directiveReplacementIndex(AGENT_DIRECTIVE_REGISTRY);
+  const directives = AGENT_DIRECTIVE_REGISTRY.entries
+    .map((entry) => directiveListEntry(entry, replacements))
+    .filter((entry) => (family ? entry.family === family : true))
+    .filter((entry) => (status ? entry.status === status : true))
+    .sort(compareDirectiveListEntries);
+  return {
+    schemaVersion: "boreal.cli.directives.list.v1",
+    registryVersion: AGENT_DIRECTIVE_REGISTRY.version,
+    sourcePath: "packages/core/src/agent-directive-registry.ts",
+    filters: {
+      ...(family ? { family } : {}),
+      ...(status ? { status } : {})
+    },
+    families: directiveFamilySummaries(AGENT_DIRECTIVE_REGISTRY, replacements),
+    directives
+  };
+}
+
+function showDirectiveRegistryEntry(id: string): DirectiveRegistryShowResult {
+  const entry = AGENT_DIRECTIVE_REGISTRY.entries.find((candidate) => candidate.id === id);
+  if (!entry) {
+    throw new BorealError("BOREAL_NOT_FOUND", `Directive registry entry not found: ${id}`);
+  }
+  const replacements = directiveReplacementIndex(AGENT_DIRECTIVE_REGISTRY);
+  return {
+    schemaVersion: "boreal.cli.directives.show.v1",
+    registryVersion: AGENT_DIRECTIVE_REGISTRY.version,
+    sourcePath: "packages/core/src/agent-directive-registry.ts",
+    directive: directiveShowEntry(entry, replacements)
+  };
+}
+
+function directiveFamilyFilter(args: ParsedArgs): AgentDirectiveFamily | undefined {
+  const family = flagValue(args, "family");
+  if (!family) {
+    return undefined;
+  }
+  if ((AGENT_DIRECTIVE_FAMILIES as readonly string[]).includes(family)) {
+    return family as AgentDirectiveFamily;
+  }
+  throw new BorealError("BOREAL_INVALID_INPUT", `Unknown directive family: ${family}`, {
+    family,
+    validFamilies: AGENT_DIRECTIVE_FAMILIES
+  });
+}
+
+function directiveStatusFilter(args: ParsedArgs): DirectiveRegistryStatus | undefined {
+  const status = flagValue(args, "status");
+  if (!status) {
+    return undefined;
+  }
+  if ((DIRECTIVE_REGISTRY_STATUS_VALUES as readonly string[]).includes(status)) {
+    return status as DirectiveRegistryStatus;
+  }
+  throw new BorealError("BOREAL_INVALID_INPUT", `Unknown directive status: ${status}`, {
+    status,
+    validStatuses: DIRECTIVE_REGISTRY_STATUS_VALUES
+  });
+}
+
+function directiveReplacementIndex(
+  registry: AgentDirectiveRegistry
+): ReadonlyMap<AgentDirectiveTemplateId, readonly AgentDirectiveTemplateId[]> {
+  const replacements = new Map<AgentDirectiveTemplateId, AgentDirectiveTemplateId[]>();
+  for (const entry of registry.entries) {
+    for (const supersededId of entry.supersedes ?? []) {
+      const current = replacements.get(supersededId) ?? [];
+      current.push(entry.id);
+      replacements.set(supersededId, current);
+    }
+  }
+  return new Map(
+    [...replacements.entries()].map(([id, replacementIds]) => [
+      id,
+      replacementIds.sort((left, right) => left.localeCompare(right))
+    ])
+  );
+}
+
+function directiveListEntry(
+  entry: AgentDirectiveRegistryEntry,
+  replacements: ReadonlyMap<AgentDirectiveTemplateId, readonly AgentDirectiveTemplateId[]>
+): DirectiveRegistryListEntry {
+  const deprecatedBy = replacements.get(entry.id) ?? [];
+  return {
+    id: entry.id,
+    version: entry.version,
+    family: entry.family,
+    severity: entry.severity,
+    audience: entry.audience,
+    kind: entry.kind,
+    lifecycle: entry.lifecycle,
+    status: directiveRegistryStatus(entry, deprecatedBy),
+    title: entry.title,
+    blocksCloseout: Boolean(entry.blocksCloseout),
+    supersedes: entry.supersedes ?? [],
+    deprecatedBy
+  };
+}
+
+function directiveShowEntry(
+  entry: AgentDirectiveRegistryEntry,
+  replacements: ReadonlyMap<AgentDirectiveTemplateId, readonly AgentDirectiveTemplateId[]>
+): DirectiveRegistryShowEntry {
+  const base = directiveListEntry(entry, replacements);
+  return {
+    ...base,
+    instruction: entry.instruction,
+    defaultLifecycle: entry.defaultLifecycle,
+    sourcePath: entry.sourcePath,
+    appliesTo: entry.appliesTo,
+    acknowledgement: entry.acknowledgement,
+    dataRequirements: entry.dataRequirements,
+    replacementMetadata: {
+      status: base.status,
+      removed: base.status === "removed",
+      supersedes: base.supersedes,
+      deprecatedBy: base.deprecatedBy
+    }
+  };
+}
+
+function directiveRegistryStatus(
+  entry: AgentDirectiveRegistryEntry,
+  deprecatedBy: readonly AgentDirectiveTemplateId[]
+): DirectiveRegistryStatus {
+  if (deprecatedBy.length > 0 || entry.lifecycle === "superseded") {
+    return "deprecated";
+  }
+  return entry.lifecycle;
+}
+
+function directiveFamilySummaries(
+  registry: AgentDirectiveRegistry,
+  replacements: ReadonlyMap<AgentDirectiveTemplateId, readonly AgentDirectiveTemplateId[]>
+): readonly DirectiveRegistryFamilySummary[] {
+  return AGENT_DIRECTIVE_FAMILIES.map((family) => {
+    const entries = registry.entries
+      .filter((entry) => entry.family === family)
+      .map((entry) => directiveListEntry(entry, replacements));
+    return {
+      family,
+      total: entries.length,
+      active: entries.filter((entry) => entry.status === "active").length,
+      deprecated: entries.filter((entry) => entry.status === "deprecated").length,
+      removed: entries.filter((entry) => entry.status === "removed").length
+    };
+  });
+}
+
+function compareDirectiveListEntries(left: DirectiveRegistryListEntry, right: DirectiveRegistryListEntry): number {
+  return left.family.localeCompare(right.family) || left.id.localeCompare(right.id);
+}
+
+function formatDirectiveRegistryList(result: DirectiveRegistryListResult): string {
+  const lines = [
+    `Agent Directive Registry ${result.registryVersion}`,
+    `Source: ${result.sourcePath}`,
+    `Filters: ${directiveFilterSummary(result.filters)}`,
+    ""
+  ];
+  if (result.directives.length === 0) {
+    lines.push("No directive registry entries match the filters.");
+  } else {
+    lines.push(
+      table(
+        result.directives.map((directive) => ({
+          id: directive.id,
+          family: directive.family,
+          status: directive.status,
+          severity: directive.severity,
+          kind: directive.kind,
+          title: directive.title
+        }))
+      ).trimEnd()
+    );
+  }
+  return `${lines.join("\n")}\n`;
+}
+
+function formatDirectiveRegistryShow(result: DirectiveRegistryShowResult): string {
+  const directive = result.directive;
+  const lines = [
+    keyValueRows([
+      { key: "id", value: directive.id },
+      { key: "title", value: directive.title },
+      { key: "family", value: directive.family },
+      { key: "status", value: directive.status },
+      { key: "lifecycle", value: directive.lifecycle },
+      { key: "severity", value: directive.severity },
+      { key: "audience", value: directive.audience },
+      { key: "kind", value: directive.kind },
+      { key: "blocksCloseout", value: String(directive.blocksCloseout) },
+      { key: "source", value: directive.sourcePath },
+      { key: "supersedes", value: formatDirectiveIdList(directive.replacementMetadata.supersedes) },
+      { key: "deprecatedBy", value: formatDirectiveIdList(directive.replacementMetadata.deprecatedBy) }
+    ]),
+    "",
+    section("Instruction", [directive.instruction]),
+    "",
+    section("Applies To", [
+      `commands: ${directive.appliesTo.commandPaths.join(", ")}`,
+      `subjects: ${directive.appliesTo.subjectTypes?.join(", ") ?? "any"}`,
+      `statuses: ${directive.appliesTo.workStatuses?.join(", ") ?? "any"}`,
+      `gates: ${directive.appliesTo.gates?.join(", ") ?? "any"}`
+    ]),
+    "",
+    section(
+      "Data Requirements",
+      directive.dataRequirements.map(
+        (requirement) =>
+          `${requirement.key} (${requirement.valueType}${requirement.required ? ", required" : ", optional"}): ${requirement.description}`
+      )
+    )
+  ];
+  if (directive.acknowledgement) {
+    lines.push(
+      "",
+      section("Acknowledgement", [
+        `requiredBefore: ${directive.acknowledgement.requiredBefore}`,
+        `evidenceKind: ${directive.acknowledgement.evidenceKind ?? "none"}`,
+        directive.acknowledgement.message
+      ])
+    );
+  }
+  return `${lines.join("\n")}\n`;
+}
+
+function directiveFilterSummary(filters: DirectiveRegistryListResult["filters"]): string {
+  const parts = [
+    filters.family ? `family=${filters.family}` : undefined,
+    filters.status ? `status=${filters.status}` : undefined
+  ].filter(isString);
+  return parts.length > 0 ? parts.join(", ") : "none";
+}
+
+function formatDirectiveIdList(ids: readonly AgentDirectiveTemplateId[]): string {
+  return ids.length > 0 ? ids.join(", ") : "none";
 }
 
 function formatCommandsGrouped(): string {
@@ -10173,7 +10522,7 @@ const HELP_SECTIONS: readonly { readonly title: string; readonly categories: rea
   { title: "Work", categories: ["work", "dependency", "evidence", "gate"] },
   { title: "Plan", categories: ["sprint", "workflow"] },
   { title: "Knowledge", categories: ["source", "claim", "decision", "context", "search", "raw", "wiki", "vault"] },
-  { title: "Agents", categories: ["agent", "session", "reservation", "operation"] },
+  { title: "Agents", categories: ["agent", "session", "reservation", "operation", "directive"] },
   { title: "Dashboards", categories: ["dashboard", "registry"] },
   { title: "Maintain", categories: ["doctor", "sync", "lock", "ledger", "snapshot", "duplicate", "merge", "compact", "daemon"] },
   { title: "Data", categories: ["export", "import"] },

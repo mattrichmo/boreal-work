@@ -46,6 +46,7 @@ export interface CommandDefinition {
     | "snapshot"
     | "doctor"
     | "lock"
+    | "directive"
     | "schema"
     | "docs"
     | "gate"
@@ -187,6 +188,33 @@ export const COMMAND_DEFINITIONS: readonly CommandDefinition[] = [
     description: "Prints the command registry used by validation, help, documentation generation, and machine consumers.",
     flags: [flag("format", "value", "Human output format: table or markdown.")],
     positionals: { label: "arguments", min: 0, max: 0 },
+    requiresWorkspace: false,
+    supportsJson: true,
+  },
+  {
+    path: ["directives", "list"],
+    category: "directive",
+    summary: "List trusted agent directive registry entries.",
+    usage: "bwrk directives list [--family <family>] [--status active|deprecated|removed] [--json]",
+    description:
+      "Lists the static trusted agent directive registry with optional family and lifecycle-status filters.",
+    flags: [
+      flag("family", "value", "Directive family filter, for example blocked, closeout, doctor, or workflow_next."),
+      flag("status", "value", "Directive registry status filter: active, deprecated, or removed."),
+    ],
+    positionals: { label: "arguments", min: 0, max: 0 },
+    requiresWorkspace: false,
+    supportsJson: true,
+  },
+  {
+    path: ["directives", "show"],
+    category: "directive",
+    summary: "Show a trusted agent directive registry entry.",
+    usage: "bwrk directives show <directive-id> [--json]",
+    description:
+      "Shows a static directive registry entry including data requirements, applies-to selectors, and replacement metadata.",
+    flags: [],
+    positionals: { label: "directive id", min: 1, max: 1 },
     requiresWorkspace: false,
     supportsJson: true,
   },
@@ -2041,6 +2069,30 @@ const COMMAND_BEHAVIOR: Readonly<Record<string, CommandBehaviorMetadata>> = {
     maxResultSizeChars: 250_000,
     humanOutputKind: "table",
     examples: ["bwrk commands --json", "bwrk commands --format markdown"],
+  }),
+  "directives list": commandMetadata("directives list", {
+    readOnly: true,
+    destructive: false,
+    writesState: false,
+    writesGeneratedArtifacts: false,
+    requiresFreshIndex: false,
+    concurrencySafe: true,
+    requiresLock: "none",
+    maxResultSizeChars: 125_000,
+    humanOutputKind: "table",
+    examples: ["bwrk directives list --json", "bwrk directives list --family closeout --status active"],
+  }),
+  "directives show": commandMetadata("directives show", {
+    readOnly: true,
+    destructive: false,
+    writesState: false,
+    writesGeneratedArtifacts: false,
+    requiresFreshIndex: false,
+    concurrencySafe: true,
+    requiresLock: "none",
+    maxResultSizeChars: 75_000,
+    humanOutputKind: "record",
+    examples: ["bwrk directives show closeout.summary-required --json"],
   }),
   completion: commandMetadata("completion", {
     readOnly: true,

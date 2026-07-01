@@ -27,6 +27,100 @@ afterEach(async () => {
 });
 
 describe("CLI agent directive envelopes", () => {
+  it("lists and shows trusted directive registry entries", async () => {
+    const rootDir = await makeTempWorkspace();
+
+    const listed = parseEnvelope<{
+      readonly schemaVersion: string;
+      readonly registryVersion: string;
+      readonly sourcePath: string;
+      readonly filters: Record<string, never>;
+      readonly families: readonly Array<{ readonly family: string; readonly total: number; readonly active: number }>;
+      readonly directives: readonly Array<{
+        readonly id: string;
+        readonly family: string;
+        readonly status: string;
+        readonly lifecycle: string;
+        readonly title: string;
+        readonly deprecatedBy: readonly string[];
+      }>;
+    }>((await runCli(rootDir, ["directives", "list", "--json"])).stdout);
+    const activeCloseout = parseEnvelope<{
+      readonly filters: { readonly family: string; readonly status: string };
+      readonly directives: readonly Array<{ readonly id: string; readonly family: string; readonly status: string }>;
+    }>((await runCli(rootDir, ["directives", "list", "--family", "closeout", "--status", "active", "--json"])).stdout);
+    const removed = parseEnvelope<{
+      readonly filters: { readonly status: string };
+      readonly directives: readonly unknown[];
+    }>((await runCli(rootDir, ["directives", "list", "--status", "removed", "--json"])).stdout);
+    const shown = parseEnvelope<{
+      readonly schemaVersion: string;
+      readonly directive: {
+        readonly id: string;
+        readonly family: string;
+        readonly status: string;
+        readonly instruction: string;
+        readonly dataRequirements: readonly Array<{ readonly key: string; readonly required: boolean }>;
+        readonly replacementMetadata: {
+          readonly status: string;
+          readonly removed: boolean;
+          readonly supersedes: readonly string[];
+          readonly deprecatedBy: readonly string[];
+        };
+      };
+    }>((await runCli(rootDir, ["directives", "show", "closeout.summary-required", "--json"])).stdout);
+
+    expect(Object.keys(listed)).toEqual(["ok", "data"]);
+    expect(listed.agentDirectives).toBeUndefined();
+    expect(listed.data).toEqual(
+      expect.objectContaining({
+        schemaVersion: "boreal.cli.directives.list.v1",
+        registryVersion: "directives.v1",
+        sourcePath: "packages/core/src/agent-directive-registry.ts"
+      })
+    );
+    expect(listed.data.directives).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: "closeout.summary-required",
+          family: "closeout",
+          status: "active",
+          lifecycle: "active"
+        })
+      ])
+    );
+    expect(listed.data.families).toEqual(
+      expect.arrayContaining([expect.objectContaining({ family: "closeout", total: expect.any(Number), active: expect.any(Number) })])
+    );
+    expect(activeCloseout.data.filters).toEqual({ family: "closeout", status: "active" });
+    expect(activeCloseout.data.directives.length).toBeGreaterThan(0);
+    expect(activeCloseout.data.directives.every((directive) => directive.family === "closeout" && directive.status === "active")).toBe(true);
+    expect(removed.data.filters).toEqual({ status: "removed" });
+    expect(removed.data.directives).toEqual([]);
+    expect(shown.data.schemaVersion).toBe("boreal.cli.directives.show.v1");
+    expect(shown.data.directive).toEqual(
+      expect.objectContaining({
+        id: "closeout.summary-required",
+        family: "closeout",
+        status: "active",
+        replacementMetadata: {
+          status: "active",
+          removed: false,
+          supersedes: [],
+          deprecatedBy: []
+        }
+      })
+    );
+    expect(shown.data.directive.instruction).toContain("Respond to the user");
+    expect(shown.data.directive.dataRequirements).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ key: "summaryId", required: true }),
+        expect.objectContaining({ key: "summaryUri", required: true }),
+        expect.objectContaining({ key: "evidenceIds", required: true })
+      ])
+    );
+  });
+
   it("adds validated agentDirectives to directive-aware JSON output without changing data", async () => {
     const rootDir = await makeTempWorkspace();
     await runCli(rootDir, ["init", "--json"]);

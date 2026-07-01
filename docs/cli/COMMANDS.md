@@ -178,6 +178,26 @@ JSON `data` shape:
 }
 ```
 
+## `directives list`
+
+```bash
+bwrk directives list [--family <family>] [--status active|deprecated|removed] [--json]
+```
+
+Lists trusted static agent directive registry entries. Use `--family` to restrict the registry family and `--status` to inspect active, deprecated, or removed entries. Removed entries are filterable for compatibility, but the current static registry does not retain removed directive records.
+
+JSON `data` uses schema `boreal.cli.directives.list.v1` and contains the registry version, source path, applied filters, family counts, and compact directive rows with lifecycle, derived status, and replacement IDs.
+
+## `directives show`
+
+```bash
+bwrk directives show <directive-id> [--json]
+```
+
+Shows one trusted static directive registry entry. The payload includes the instruction text, applies-to selectors, acknowledgement rule, data requirements, and replacement metadata derived from registry `supersedes` links.
+
+JSON `data` uses schema `boreal.cli.directives.show.v1`.
+
 ## `completion`
 
 ```bash
