@@ -4431,6 +4431,10 @@ function forceRequiredCloseoutGates(input: {
         comment: input.comment,
         actor: input.actor,
         evidenceIds: input.evidenceIds.length > 0 ? input.evidenceIds : undefined,
+        ...(gate.force?.directiveIds && gate.force.directiveIds.length > 0 ? { directiveIds: gate.force.directiveIds } : {}),
+        ...(gate.force?.acknowledgementIds && gate.force.acknowledgementIds.length > 0
+          ? { acknowledgementIds: gate.force.acknowledgementIds }
+          : {}),
         forcedAt: input.now
       }
     };
@@ -5107,12 +5111,16 @@ function mergeCloseoutGateSatisfactions(
   if (values.length === 0) {
     return undefined;
   }
+  const directiveIds = uniqueValues(values.flatMap((value) => value.directiveIds ?? []));
+  const acknowledgementIds = uniqueStrings(values.flatMap((value) => value.acknowledgementIds ?? []));
   return {
     evidenceIds: uniqueValues(values.flatMap((value) => value.evidenceIds ?? [])),
     verificationIds: uniqueValues(values.flatMap((value) => value.verificationIds ?? [])),
     agentSummaryIds: uniqueValues(values.flatMap((value) => value.agentSummaryIds ?? [])),
     commitShas: uniqueStrings(values.flatMap((value) => value.commitShas ?? [])),
-    dirtyPathNotes: uniqueStrings(values.flatMap((value) => value.dirtyPathNotes ?? []))
+    dirtyPathNotes: uniqueStrings(values.flatMap((value) => value.dirtyPathNotes ?? [])),
+    ...(directiveIds.length > 0 ? { directiveIds } : {}),
+    ...(acknowledgementIds.length > 0 ? { acknowledgementIds } : {})
   };
 }
 
@@ -6679,6 +6687,8 @@ function directiveGateStatesFromCloseoutStatus(status: CloseoutGateStatusView): 
     agentSummaryIds: gate.satisfiedBy?.agentSummaryIds ?? [],
     commitShas: gate.satisfiedBy?.commitShas ?? [],
     dirtyPathNotes: gate.satisfiedBy?.dirtyPathNotes ?? [],
+    directiveIds: uniqueValues([...(gate.satisfiedBy?.directiveIds ?? []), ...(gate.force?.directiveIds ?? [])]),
+    acknowledgementIds: uniqueStrings([...(gate.satisfiedBy?.acknowledgementIds ?? []), ...(gate.force?.acknowledgementIds ?? [])]),
     ...(gate.force ? { forceReasonCode: gate.force.reason } : {})
   }));
 }

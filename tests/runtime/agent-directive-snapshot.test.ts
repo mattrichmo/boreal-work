@@ -171,7 +171,9 @@ function agentDirectiveSnapshotFixture(): AgentDirectiveSnapshot {
           verificationIds: [verificationId],
           agentSummaryIds: [summaryId],
           commitShas: ["abcdef1"],
-          dirtyPathNotes: []
+          dirtyPathNotes: [],
+          directiveIds: [],
+          acknowledgementIds: []
         }
       ],
       openGateIds: [],

@@ -224,6 +224,7 @@ const LEDGER_FILES: Record<SnapshotSection, string> = {
 export async function buildExportDocument(context: CliContext, options: ExportDocumentOptions = {}): Promise<ExportDocument> {
   const state = await context.store.read((reader) => readSnapshot(reader));
   const agentDirectives = parseAgentDirectiveBundles(options.agentDirectives, "$.agentDirectives");
+  validateSnapshotDirectiveLinks(state, agentDirectives);
   const contentHash = hashContent(state);
   return {
     schemaVersion: EXPORT_SCHEMA_VERSION,
@@ -1530,7 +1531,7 @@ function parseExportDocument(value: unknown): ExportDocument {
     });
   }
   const agentDirectives = parseAgentDirectiveBundles(value.agentDirectives, "$.agentDirectives");
-  validateSnapshot(state);
+  validateSnapshot(state, { agentDirectives });
   return {
     schemaVersion: EXPORT_SCHEMA_VERSION,
     exportedAt: typeof value.exportedAt === "string" ? value.exportedAt : "",
@@ -1588,7 +1589,11 @@ function portableEvent<T>(value: T): T {
   return isRecord(event.meta) ? (withContentHash(event as unknown as RuntimeEvent) as T) : (event as T);
 }
 
-function validateSnapshot(snapshot: ExportSnapshot): void {
+interface SnapshotValidationOptions {
+  readonly agentDirectives?: readonly AgentDirectiveBundle[];
+}
+
+function validateSnapshot(snapshot: ExportSnapshot, options: SnapshotValidationOptions = {}): void {
   const schemaIssues = runtimeSnapshotSchemaIssues(snapshot);
   if (schemaIssues.length > 0) {
     throw new BorealError("BOREAL_INVALID_INPUT", "Snapshot failed schema validation", {
@@ -1745,6 +1750,30 @@ function validateSnapshot(snapshot: ExportSnapshot): void {
       });
     }
   }
+  validateSnapshotDirectiveLinks(snapshot, options.agentDirectives);
+}
+
+function validateSnapshotDirectiveLinks(
+  snapshot: ExportSnapshot,
+  agentDirectives: readonly AgentDirectiveBundle[] | undefined
+): void {
+  const directiveIds = directiveIdsFromBundles(agentDirectives);
+  if (directiveIds === undefined) {
+    return;
+  }
+  for (const work of snapshot.workItems) {
+    for (const gate of work.requiredCloseoutGates ?? []) {
+      assertDirectiveReferences("required gate directive", gate.id, gate.satisfiedBy?.directiveIds, directiveIds);
+      assertDirectiveReferences("required gate force directive", gate.id, gate.force?.directiveIds, directiveIds);
+    }
+  }
+}
+
+function directiveIdsFromBundles(agentDirectives: readonly AgentDirectiveBundle[] | undefined): ReadonlySet<string> | undefined {
+  if (agentDirectives === undefined) {
+    return undefined;
+  }
+  return new Set(agentDirectives.flatMap((bundle) => bundle.directives.map((directive) => directive.id)));
 }
 
 function assertArrayField(record: unknown, field: string, section: SnapshotSection, id: string): void {
@@ -1761,6 +1790,24 @@ function assertReferences(label: string, recordId: string, values: readonly stri
       missing
     });
   }
+}
+
+function assertDirectiveReferences(
+  label: string,
+  recordId: string,
+  values: readonly string[] | undefined,
+  validIds: ReadonlySet<string>
+): void {
+  if (values === undefined) {
+    return;
+  }
+  if (!Array.isArray(values)) {
+    throw new BorealError("BOREAL_INVALID_INPUT", "Snapshot directive references must be an array", {
+      recordId,
+      label
+    });
+  }
+  assertReferences(label, recordId, values, validIds);
 }
 
 function mergeSnapshot(

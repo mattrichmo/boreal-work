@@ -992,6 +992,8 @@ function gateStateFixture(
     agentSummaryIds: [],
     commitShas: [],
     dirtyPathNotes: [],
+    directiveIds: [],
+    acknowledgementIds: [],
     ...rest
   };
 }

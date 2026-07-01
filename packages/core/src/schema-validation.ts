@@ -58,6 +58,8 @@ export const RUNTIME_SCHEMA_IDS = {
   runtimePolicy: "https://boreal.work/schemas/policies/runtime-policy.schema.json"
 } as const;
 
+const AGENT_DIRECTIVE_LINK_ID_PATTERN = /^[a-z0-9][a-z0-9._:-]{0,127}$/u;
+
 export const AGENT_DIRECTIVE_SCHEMA_IDS = {
   agentDirectiveBundle: "https://boreal.work/schemas/directives/agent-directive-bundle.schema.json"
 } as const;
@@ -954,6 +956,11 @@ function requiredCloseoutGateSatisfactionIssues(value: unknown, path: string, sc
       issues.push(...uniqueStringArrayIssue(value[field], `${path}.${field}`, schemaId));
     }
   }
+  for (const field of ["directiveIds", "acknowledgementIds"] as const) {
+    if (value[field] !== undefined) {
+      issues.push(...uniquePatternStringArrayIssue(value[field], `${path}.${field}`, schemaId, AGENT_DIRECTIVE_LINK_ID_PATTERN));
+    }
+  }
   return issues;
 }
 
@@ -976,6 +983,11 @@ function requiredCloseoutGateForceIssues(value: unknown, path: string, schemaId:
   ];
   if (value.evidenceIds !== undefined) {
     issues.push(...uniqueStringArrayIssue(value.evidenceIds, `${path}.evidenceIds`, schemaId));
+  }
+  for (const field of ["directiveIds", "acknowledgementIds"] as const) {
+    if (value[field] !== undefined) {
+      issues.push(...uniquePatternStringArrayIssue(value[field], `${path}.${field}`, schemaId, AGENT_DIRECTIVE_LINK_ID_PATTERN));
+    }
   }
   return issues;
 }

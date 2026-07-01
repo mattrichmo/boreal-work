@@ -16,6 +16,7 @@ import type {
   VerificationId,
   WorkId
 } from "./ids.js";
+import type { AgentDirectiveId } from "./agent-directives.js";
 import type { IsoTimestamp } from "./time.js";
 
 export const BOREAL_SCHEMA_VERSION = "boreal.runtime.v1";
@@ -77,6 +78,8 @@ export interface RequiredCloseoutGateSatisfaction {
   readonly agentSummaryIds?: readonly AgentSummaryId[];
   readonly commitShas?: readonly string[];
   readonly dirtyPathNotes?: readonly string[];
+  readonly directiveIds?: readonly AgentDirectiveId[];
+  readonly acknowledgementIds?: readonly string[];
 }
 
 export interface RequiredCloseoutGateForce {
@@ -84,6 +87,8 @@ export interface RequiredCloseoutGateForce {
   readonly comment: string;
   readonly actor: ActorRef;
   readonly evidenceIds?: readonly EvidenceId[];
+  readonly directiveIds?: readonly AgentDirectiveId[];
+  readonly acknowledgementIds?: readonly string[];
   readonly forcedAt: IsoTimestamp;
 }
 

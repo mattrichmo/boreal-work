@@ -6,6 +6,7 @@ import {
   deterministicId,
   withContentHash,
   type ActorRef,
+  type AgentDirectiveId,
   type AgentSummaryId,
   type AgentSummaryRecord,
   type EvidenceId,
@@ -919,6 +920,73 @@ describe("boreal runtime proof slice", () => {
         satisfiedBy: expect.objectContaining({
           evidenceIds: [reviewEvidence.meta.id]
         })
+      })
+    );
+  });
+
+  it("preserves directive links when satisfying closeout gates", async () => {
+    const store = new InMemoryBorealStore();
+    const runtime = createBorealRuntime({ store, actor });
+    const directiveIds = ["closeout.summary-required" as AgentDirectiveId];
+    const acknowledgementIds = ["ack.closeout.summary-required"];
+    const work = await runtime.createWork({
+      title: "Directive-linked review gate target",
+      ready: true,
+      requiredCloseoutGates: [{ kind: "review" }]
+    });
+    const gate = work.requiredCloseoutGates?.[0];
+    if (!gate) {
+      throw new Error("expected required gate fixture");
+    }
+    await store.write((writer) =>
+      writer.putWorkItem({
+        ...work,
+        requiredCloseoutGates: [
+          {
+            ...gate,
+            satisfiedBy: {
+              directiveIds,
+              acknowledgementIds
+            }
+          }
+        ]
+      })
+    );
+    const testEvidence = await runtime.recordEvidence({
+      subjectId: work.meta.id,
+      subjectType: "work",
+      kind: "test",
+      summary: "verification evidence passed",
+      outcome: "passed"
+    });
+    const verification = await runtime.verifyWork({
+      workId: work.meta.id,
+      verdict: "passed",
+      evidenceIds: [testEvidence.meta.id]
+    });
+    const reviewEvidence = await runtime.recordEvidence({
+      subjectId: work.meta.id,
+      subjectType: "work",
+      kind: "review",
+      summary: "directive-linked review passed",
+      outcome: "passed"
+    });
+
+    const closed = await runtime.closeWork({
+      workId: work.meta.id,
+      reason: "review evidence present",
+      agentSummary: closeoutSummaryFor(work, {
+        evidenceIds: [testEvidence.meta.id, reviewEvidence.meta.id],
+        verificationIds: [verification.meta.id],
+        nonce: "directive-linked-review-gate"
+      })
+    });
+
+    expect(closed.requiredCloseoutGates?.[0]?.satisfiedBy).toEqual(
+      expect.objectContaining({
+        evidenceIds: [reviewEvidence.meta.id],
+        directiveIds,
+        acknowledgementIds
       })
     );
   });

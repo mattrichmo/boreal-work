@@ -487,7 +487,9 @@ describe("core hashing and ids", () => {
             verificationIds: ["bw_verification_deadbeefdead"],
             agentSummaryIds: ["bw_summary_deadbeefdead"],
             commitShas: ["abc1234"],
-            dirtyPathNotes: ["no_repo_changes: schema fixture"]
+            dirtyPathNotes: ["no_repo_changes: schema fixture"],
+            directiveIds: ["closeout.summary-required"],
+            acknowledgementIds: ["ack.closeout.summary-required"]
           }
         }
       ]
@@ -514,6 +516,31 @@ describe("core hashing and ids", () => {
       expect.arrayContaining([
         expect.objectContaining({
           path: "workItems[0].requiredCloseoutGates[0].force",
+          schemaId: RUNTIME_SCHEMA_IDS.workItem
+        })
+      ])
+    );
+    expect(
+      runtimeSnapshotSchemaIssues({
+        workItems: [
+          {
+            ...validWork,
+            requiredCloseoutGates: [
+              {
+                ...validWork.requiredCloseoutGates[0],
+                satisfiedBy: {
+                  ...validWork.requiredCloseoutGates[0].satisfiedBy,
+                  directiveIds: ["not safe"]
+                }
+              }
+            ]
+          }
+        ]
+      })
+    ).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          path: "workItems[0].requiredCloseoutGates[0].satisfiedBy.directiveIds[0]",
           schemaId: RUNTIME_SCHEMA_IDS.workItem
         })
       ])

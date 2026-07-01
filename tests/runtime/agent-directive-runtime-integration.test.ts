@@ -522,6 +522,8 @@ function gateFixture(
     agentSummaryIds: [],
     commitShas: [],
     dirtyPathNotes: [],
+    directiveIds: [],
+    acknowledgementIds: [],
     ...(forceReasonCode === undefined ? {} : { forceReasonCode })
   };
 }

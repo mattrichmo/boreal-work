@@ -171,13 +171,7 @@ interface CloseoutGateEvaluationInput {
   readonly closeoutSummaries?: readonly AgentSummaryRecord[];
 }
 
-interface CloseoutGateSatisfaction {
-  readonly evidenceIds: readonly EvidenceId[];
-  readonly verificationIds: readonly VerificationId[];
-  readonly agentSummaryIds: readonly AgentSummaryId[];
-  readonly commitShas: readonly string[];
-  readonly dirtyPathNotes: readonly string[];
-}
+type CloseoutGateSatisfaction = NonNullable<RequiredCloseoutGate["satisfiedBy"]>;
 
 interface CloseoutGateGap {
   readonly gateId: string;
@@ -1380,7 +1374,7 @@ function evaluateRequiredCloseoutGate(input: {
     gate: {
       ...input.gate,
       status: "satisfied",
-      satisfiedBy: mergeGateSatisfactions(satisfactions)
+      satisfiedBy: mergeGateSatisfactions(input.gate.satisfiedBy ? [input.gate.satisfiedBy, ...satisfactions] : satisfactions)
     },
     gaps: []
   };
@@ -1539,12 +1533,16 @@ function gateGap(gate: RequiredCloseoutGate, owner: WorkItem, target: WorkItem |
 }
 
 function mergeGateSatisfactions(values: readonly CloseoutGateSatisfaction[]): RequiredCloseoutGate["satisfiedBy"] {
+  const directiveIds = uniqueValues(values.flatMap((value) => value.directiveIds ?? []));
+  const acknowledgementIds = uniqueStrings(values.flatMap((value) => value.acknowledgementIds ?? []));
   return {
-    evidenceIds: uniqueValues(values.flatMap((value) => value.evidenceIds)),
-    verificationIds: uniqueValues(values.flatMap((value) => value.verificationIds)),
-    agentSummaryIds: uniqueValues(values.flatMap((value) => value.agentSummaryIds)),
-    commitShas: uniqueStrings(values.flatMap((value) => value.commitShas)),
-    dirtyPathNotes: uniqueStrings(values.flatMap((value) => value.dirtyPathNotes))
+    evidenceIds: uniqueValues(values.flatMap((value) => value.evidenceIds ?? [])),
+    verificationIds: uniqueValues(values.flatMap((value) => value.verificationIds ?? [])),
+    agentSummaryIds: uniqueValues(values.flatMap((value) => value.agentSummaryIds ?? [])),
+    commitShas: uniqueStrings(values.flatMap((value) => value.commitShas ?? [])),
+    dirtyPathNotes: uniqueStrings(values.flatMap((value) => value.dirtyPathNotes ?? [])),
+    ...(directiveIds.length > 0 ? { directiveIds } : {}),
+    ...(acknowledgementIds.length > 0 ? { acknowledgementIds } : {})
   };
 }
 

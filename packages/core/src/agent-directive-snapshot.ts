@@ -1,6 +1,7 @@
 import {
   AGENT_DIRECTIVE_SUBJECT_TYPES,
   agentDirectiveDataIssues,
+  type AgentDirectiveId,
   type AgentDirectiveSubjectType
 } from "./agent-directives.js";
 import { BorealError } from "./errors.js";
@@ -114,6 +115,8 @@ export interface AgentDirectiveGateStateSnapshot {
   readonly agentSummaryIds: readonly AgentSummaryId[];
   readonly commitShas: readonly string[];
   readonly dirtyPathNotes: readonly string[];
+  readonly directiveIds: readonly AgentDirectiveId[];
+  readonly acknowledgementIds: readonly string[];
   readonly forceReasonCode?: CloseoutGateForceReasonCode;
 }
 
@@ -437,6 +440,8 @@ function gateStateIssues(value: unknown, path: string): readonly AgentDirectiveS
     ...stringArrayIssues(value.agentSummaryIds, `${path}.agentSummaryIds`),
     ...stringArrayIssues(value.commitShas, `${path}.commitShas`),
     ...stringArrayIssues(value.dirtyPathNotes, `${path}.dirtyPathNotes`),
+    ...stringArrayIssues(value.directiveIds, `${path}.directiveIds`),
+    ...stringArrayIssues(value.acknowledgementIds, `${path}.acknowledgementIds`),
     ...optionalNonEmptyStringIssues(value.forceReasonCode, `${path}.forceReasonCode`)
   ];
 }
