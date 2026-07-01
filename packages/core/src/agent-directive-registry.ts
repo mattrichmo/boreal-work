@@ -347,6 +347,28 @@ export const AGENT_DIRECTIVE_REGISTRY: AgentDirectiveRegistry = {
       ]
     }),
     entry({
+      id: "sprint.launch-plan" as AgentDirectiveTemplateId,
+      family: "sprint",
+      severity: "action",
+      audience: "agent",
+      kind: "obligation",
+      title: "Prepare sprint launch",
+      instruction:
+        "Create the sprint container, attach scoped child work, mark only unblocked leaf tasks ready, and record checkpoint boundaries before implementation starts.",
+      appliesTo: {
+        commandPaths: ["dep add", "doctor", "prime", "session start", "sync refresh", "work create", "work ready"],
+        subjectTypes: ["project", "session", "sprint"]
+      },
+      dataRequirements: [
+        requirement("sprintTitle", "string", true, "Sprint title being launched."),
+        requirement("childWorkIds", "array", true, "Child work ids scoped to the sprint."),
+        requirement("readyWorkIds", "array", true, "Leaf work ids marked ready at launch."),
+        requirement("checkpointPlan", "array", true, "Planned Git or evidence checkpoint boundaries."),
+        requirement("workflowRef", "string", true, "Canonical sprint launch workflow reference."),
+        requirement("sprintId", "id", false, "Sprint id after the launch container is created.")
+      ]
+    }),
+    entry({
       id: "workflow_next.canonical-next-step" as AgentDirectiveTemplateId,
       family: "workflow_next",
       severity: "action",
