@@ -18,6 +18,7 @@ import {
   type ContentHash,
   type DirectiveAcknowledgementRecord,
   type EvidenceRecord,
+  type VerificationRecord,
   type WorkItem
 } from "@boreal/core";
 import { InMemoryBorealStore } from "@boreal/storage";
@@ -94,15 +95,19 @@ describe("import/export agent directive carriers", () => {
       now: nowIso(new Date("2026-01-01T00:00:00.000Z"))
     });
     const evidence = evidenceFixture(work.meta.id);
-    const summary = summaryFixture(work.meta.id, [evidence.meta.id]);
+    const verification = verificationFixture(work.meta.id, [evidence.meta.id]);
+    const summary = summaryFixture(work.meta.id, [evidence.meta.id], [verification.meta.id]);
     const acknowledgement = acknowledgementFixture({
       workId: work.meta.id,
       evidenceId: evidence.meta.id,
-      summaryId: summary.meta.id
+      summaryId: summary.meta.id,
+      verificationId: verification.meta.id,
+      artifactUri: summary.artifactUri ?? ""
     });
     await store.write(async (writer) => {
       await writer.putWorkItem(work);
       await writer.putEvidence(evidence);
+      await writer.putVerification(verification);
       await writer.putAgentSummary(summary);
       await writer.putDirectiveAcknowledgement(acknowledgement);
     });
@@ -121,6 +126,8 @@ describe("import/export agent directive carriers", () => {
         outcome: "satisfied",
         evidenceIds: [evidence.meta.id],
         agentSummaryIds: [summary.meta.id],
+        verificationIds: [verification.meta.id],
+        artifactUris: [summary.artifactUri],
         handoffIds: ["handoff.session.deadbeefdead"]
       })
     ]);
@@ -149,15 +156,17 @@ describe("import/export agent directive carriers", () => {
         acknowledgementFixture({
           workId: work.meta.id,
           evidenceId: "bw_evidence_deadbeef0001",
-          summaryId: "bw_summary_deadbeef0001"
+          summaryId: "bw_summary_deadbeef0001",
+          verificationId: "bw_verification_deadbeef0001",
+          artifactUri: "memory://agent-summaries/works/bw_work_deadbeefdead/bw_summary_deadbeef0001.md"
         })
       );
     });
 
     await expect(buildExportDocument(testContext(store))).rejects.toMatchObject({
       code: "BOREAL_INVALID_INPUT",
-      message: "Snapshot has dangling directive acknowledgement evidence reference",
-      details: expect.objectContaining({ missing: ["bw_evidence_deadbeef0001"] })
+      message: "Snapshot has dangling directive acknowledgement verification reference",
+      details: expect.objectContaining({ missing: ["bw_verification_deadbeef0001"] })
     });
   });
 
@@ -256,7 +265,19 @@ function evidenceFixture(workId: string): EvidenceRecord {
   };
 }
 
-function summaryFixture(workId: string, evidenceIds: readonly string[]): AgentSummaryRecord {
+function verificationFixture(workId: string, evidenceIds: readonly string[]): VerificationRecord {
+  return {
+    meta: runtimeMeta("bw_verification_deadbeefdead") as VerificationRecord["meta"],
+    subjectId: workId,
+    subjectType: "work",
+    verdict: "passed",
+    evidenceIds: evidenceIds as VerificationRecord["evidenceIds"],
+    verifiedAt: "2026-01-01T00:00:00.000Z",
+    notes: "Directive acknowledgement verification."
+  };
+}
+
+function summaryFixture(workId: string, evidenceIds: readonly string[], verificationIds: readonly string[]): AgentSummaryRecord {
   return {
     meta: runtimeMeta("bw_summary_deadbeefdead") as AgentSummaryRecord["meta"],
     subjectId: workId,
@@ -275,10 +296,11 @@ function summaryFixture(workId: string, evidenceIds: readonly string[]): AgentSu
       }
     ],
     evidenceIds: evidenceIds as AgentSummaryRecord["evidenceIds"],
-    verificationIds: [],
+    verificationIds: verificationIds as AgentSummaryRecord["verificationIds"],
     commitShas: ["abc1234"],
     dirtyPathNotes: [],
     childSummaryIds: [],
+    artifactUri: "memory://agent-summaries/works/bw_work_deadbeefdead/bw_summary_deadbeefdead.md",
     generatedAt: "2026-01-01T00:00:00.000Z"
   };
 }
@@ -287,6 +309,8 @@ function acknowledgementFixture(input: {
   readonly workId: string;
   readonly evidenceId: string;
   readonly summaryId: string;
+  readonly verificationId: string;
+  readonly artifactUri: string;
 }): DirectiveAcknowledgementRecord {
   return {
     meta: runtimeMeta("bw_acknowledgement_deadbeefdead") as DirectiveAcknowledgementRecord["meta"],
@@ -309,6 +333,8 @@ function acknowledgementFixture(input: {
     outcome: "satisfied",
     evidenceIds: [input.evidenceId] as DirectiveAcknowledgementRecord["evidenceIds"],
     agentSummaryIds: [input.summaryId] as DirectiveAcknowledgementRecord["agentSummaryIds"],
+    verificationIds: [input.verificationId] as DirectiveAcknowledgementRecord["verificationIds"],
+    artifactUris: [input.artifactUri],
     handoffIds: ["handoff.session.deadbeefdead"],
     acknowledgedAt: "2026-01-01T00:00:00.000Z"
   };

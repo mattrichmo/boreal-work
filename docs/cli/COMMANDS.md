@@ -231,10 +231,10 @@ JSON `data` uses schema `boreal.cli.directives.explain.v1` and includes selector
 ## `directives ack create`
 
 ```bash
-bwrk directives ack create <directive-id> --outcome satisfied|deferred|noncompliant|not-applicable --subject-type <type> --command <command-path> [--registry-id <id>] [--version <version>] [--bundle-id <id>] [--registry-version <version>] [--envelope-schema <schema>] [--source-hash <sha256>] [--generated-at <iso>] [--subject-id <id>] [--subject-title <title>] [--evidence <id>...] [--summary <id>...] [--handoff <id>...] [--reason-code <code>] [--reason <text>] [--json]
+bwrk directives ack create <directive-id> --outcome satisfied|deferred|noncompliant|not-applicable --subject-type <type> --command <command-path> [--registry-id <id>] [--version <version>] [--bundle-id <id>] [--registry-version <version>] [--envelope-schema <schema>] [--source-hash <sha256>] [--generated-at <iso>] [--subject-id <id>] [--subject-title <title>] [--evidence <id>...] [--summary <id>...] [--verification <id>...] [--artifact-uri <uri>...] [--handoff <id>...] [--reason-code <code>] [--reason <text>] [--json]
 ```
 
-Records a durable directive acknowledgement. `satisfied` acknowledgements require at least one evidence, summary, handoff, or reason link; `deferred`, `noncompliant`, and `not-applicable` acknowledgements require `--reason` or `--reason-code`.
+Records a durable directive acknowledgement. `satisfied` acknowledgements require at least one evidence, summary, verification, artifact URI, handoff, or reason link; `deferred`, `noncompliant`, and `not-applicable` acknowledgements require `--reason` or `--reason-code`.
 
 JSON `data` uses schema `boreal.cli.directives.ack.create.v1` and returns the created acknowledgement record plus the runtime event that recorded it.
 

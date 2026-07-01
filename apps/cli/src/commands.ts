@@ -1649,10 +1649,21 @@ async function createDirectiveAcknowledgement(
   const outcome = parseDirectiveAcknowledgementOutcome(requiredFlag(args, "outcome"));
   const evidenceIds = uniqueValues(flagValues(args, "evidence").map(asEvidenceId));
   const agentSummaryIds = uniqueValues(flagValues(args, "summary").map(asAgentSummaryId));
+  const verificationIds = uniqueValues(flagValues(args, "verification").map(asVerificationId));
+  const artifactUris = uniqueStrings(flagValues(args, "artifact-uri").map(normalizeDirectiveArtifactUri));
   const handoffIds = uniqueStrings(flagValues(args, "handoff").map((value) => normalizeMachineString(value, "handoff id")));
   const reasonCode = optionalDirectiveReasonCode(flagValue(args, "reason-code"));
   const reason = optionalTrimmedText(flagValue(args, "reason"));
-  assertDirectiveAcknowledgementPolicy({ outcome, evidenceIds, agentSummaryIds, handoffIds, reasonCode, reason });
+  assertDirectiveAcknowledgementPolicy({
+    outcome,
+    evidenceIds,
+    agentSummaryIds,
+    verificationIds,
+    artifactUris,
+    handoffIds,
+    reasonCode,
+    reason
+  });
 
   const subjectType = parseAgentDirectiveSubjectType(requiredFlag(args, "subject-type"));
   const explicitSubjectId = optionalTrimmedText(flagValue(args, "subject-id"));
@@ -1672,6 +1683,7 @@ async function createDirectiveAcknowledgement(
       : undefined;
     await requireDirectiveAcknowledgementEvidence(writer, evidenceIds);
     await requireDirectiveAcknowledgementSummaries(writer, agentSummaryIds);
+    await requireDirectiveAcknowledgementVerifications(writer, verificationIds);
     const subjectId = subjectWork?.meta.id ?? explicitSubjectId;
     const subjectTitle = optionalTrimmedText(flagValue(args, "subject-title")) ?? subjectWork?.title;
     const acknowledgement = withContentHash({
@@ -1700,6 +1712,8 @@ async function createDirectiveAcknowledgement(
       outcome,
       evidenceIds,
       agentSummaryIds,
+      verificationIds,
+      artifactUris,
       handoffIds,
       ...(reasonCode ? { reasonCode } : {}),
       ...(reason ? { reason } : {}),
@@ -1718,6 +1732,8 @@ async function createDirectiveAcknowledgement(
       subjectId,
       evidenceIds,
       agentSummaryIds,
+      verificationIds,
+      artifactUris,
       handoffIds
     }, current);
     return {
@@ -2466,6 +2482,8 @@ function formatDirectiveAcknowledgementShow(result: DirectiveAcknowledgementShow
     { key: "subject", value: directiveAcknowledgementSubjectLabel(record) },
     { key: "evidence", value: record.evidenceIds.join(", ") || "none" },
     { key: "summaries", value: record.agentSummaryIds.join(", ") || "none" },
+    { key: "verifications", value: record.verificationIds?.join(", ") || "none" },
+    { key: "artifacts", value: record.artifactUris?.join(", ") || "none" },
     { key: "handoffs", value: record.handoffIds.join(", ") || "none" },
     { key: "reason", value: record.reason ?? record.reasonCode ?? "none" },
     { key: "acknowledgedAt", value: record.acknowledgedAt }
@@ -6721,7 +6739,7 @@ async function compactCommand(
 async function buildSyncStatus(context: CliContext): Promise<SyncStatusResult> {
   const [vault, ledgers, searchIndex, git] = await Promise.all([
     inspectVault(context),
-    ledgerStatus(context, undefined),
+    safeLedgerStatus(context),
     inspectSearchIndex(context),
     inspectGitWorktree(context)
   ]);
@@ -6740,6 +6758,22 @@ async function buildSyncStatus(context: CliContext): Promise<SyncStatusResult> {
     git,
     recommendedActions
   };
+}
+
+async function safeLedgerStatus(context: CliContext): Promise<LedgerStatusResult> {
+  try {
+    return await ledgerStatus(context, undefined);
+  } catch (error) {
+    return {
+      ok: false,
+      path: join(context.workspaceRoot, ".boreal/ledgers/manifest.json"),
+      exists: false,
+      stale: true,
+      expectedContentHash: "unavailable",
+      reconstructable: false,
+      error: error instanceof Error ? error.message : String(error)
+    };
+  }
 }
 
 interface CliAgentDirectiveSubject {
@@ -10540,6 +10574,14 @@ function optionalTrimmedText(value: string | undefined): string | undefined {
   return trimmed ? trimmed : undefined;
 }
 
+function normalizeDirectiveArtifactUri(value: string): string {
+  const trimmed = value.trim();
+  if (!trimmed) {
+    throw new BorealError("BOREAL_INVALID_INPUT", "Directive acknowledgement artifact URI must be non-empty");
+  }
+  return trimmed;
+}
+
 function optionalMachineString(value: string | undefined, label: string): string | undefined {
   return value ? normalizeMachineString(value, label, { lowerCase: true }) : undefined;
 }
@@ -10562,17 +10604,23 @@ function assertDirectiveAcknowledgementPolicy(input: {
   readonly outcome: DirectiveAcknowledgementOutcome;
   readonly evidenceIds: readonly EvidenceId[];
   readonly agentSummaryIds: readonly AgentSummaryId[];
+  readonly verificationIds: readonly VerificationId[];
+  readonly artifactUris: readonly string[];
   readonly handoffIds: readonly string[];
   readonly reasonCode?: string;
   readonly reason?: string;
 }): void {
   const hasEvidenceLink =
-    input.evidenceIds.length > 0 || input.agentSummaryIds.length > 0 || input.handoffIds.length > 0;
+    input.evidenceIds.length > 0 ||
+    input.agentSummaryIds.length > 0 ||
+    input.verificationIds.length > 0 ||
+    input.artifactUris.length > 0 ||
+    input.handoffIds.length > 0;
   const hasReason = Boolean(input.reasonCode || input.reason);
   if (input.outcome === "satisfied" && !hasEvidenceLink && !hasReason) {
     throw new BorealError(
       "BOREAL_INVALID_INPUT",
-      "Satisfied directive acknowledgements require --evidence, --summary, --handoff, --reason, or --reason-code"
+      "Satisfied directive acknowledgements require --evidence, --summary, --verification, --artifact-uri, --handoff, --reason, or --reason-code"
     );
   }
   if (input.outcome !== "satisfied" && !hasReason) {
@@ -10631,6 +10679,21 @@ async function requireDirectiveAcknowledgementSummaries(
   }
   if (missingSummaryIds.length > 0) {
     throw new BorealError("BOREAL_NOT_FOUND", "Directive acknowledgement references missing agent summary", { missingSummaryIds });
+  }
+}
+
+async function requireDirectiveAcknowledgementVerifications(
+  reader: BorealReader,
+  verificationIds: readonly VerificationId[]
+): Promise<void> {
+  const missingVerificationIds: VerificationId[] = [];
+  for (const verificationId of verificationIds) {
+    if (!(await reader.getVerification(verificationId))) {
+      missingVerificationIds.push(verificationId);
+    }
+  }
+  if (missingVerificationIds.length > 0) {
+    throw new BorealError("BOREAL_NOT_FOUND", "Directive acknowledgement references missing verification", { missingVerificationIds });
   }
 }
 

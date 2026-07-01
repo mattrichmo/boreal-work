@@ -631,6 +631,8 @@ function directiveAcknowledgementFixture(subjectId: string): DirectiveAcknowledg
     outcome: "satisfied",
     evidenceIds: [],
     agentSummaryIds: [],
+    verificationIds: [],
+    artifactUris: [],
     handoffIds: ["handoff.session.deadbeefdead"],
     acknowledgedAt: timestamp
   };

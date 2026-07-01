@@ -170,6 +170,48 @@ describe("CLI agent directive envelopes", () => {
         ])
       ).stdout
     );
+    const verification = parseEnvelope<{
+      readonly meta: { readonly id: string };
+    }>(
+      (
+        await runCli(rootDir, [
+          "work",
+          "verify",
+          work.data.meta.id,
+          "--evidence",
+          evidence.data.meta.id,
+          "--notes",
+          "Directive acknowledgement verification.",
+          "--json"
+        ])
+      ).stdout
+    );
+    const artifactUri = `memory://agent-summaries/works/${work.data.meta.id}/bw_summary_ackproof.md`;
+    const summary = parseEnvelope<{
+      readonly summary: { readonly meta: { readonly id: string }; readonly artifactUri: string };
+    }>(
+      (
+        await runCli(rootDir, [
+          "summary",
+          "create",
+          work.data.meta.id,
+          "--body",
+          "Directive acknowledgement summary artifact.",
+          "--status",
+          "final",
+          "--outcome",
+          "completed",
+          "--evidence",
+          evidence.data.meta.id,
+          "--verification",
+          verification.data.meta.id,
+          "--artifact-uri",
+          artifactUri,
+          "--no-render",
+          "--json"
+        ])
+      ).stdout
+    );
 
     const created = parseEnvelope<{
       readonly schemaVersion: string;
@@ -182,6 +224,9 @@ describe("CLI agent directive envelopes", () => {
         readonly subjectType: string;
         readonly subjectId: string;
         readonly evidenceIds: readonly string[];
+        readonly agentSummaryIds: readonly string[];
+        readonly verificationIds: readonly string[];
+        readonly artifactUris: readonly string[];
         readonly reason: string;
         readonly bundleSource: {
           readonly bundleId: string;
@@ -222,6 +267,12 @@ describe("CLI agent directive envelopes", () => {
           "2026-01-01T00:00:00.000Z",
           "--evidence",
           evidence.data.meta.id,
+          "--summary",
+          summary.data.summary.meta.id,
+          "--verification",
+          verification.data.meta.id,
+          "--artifact-uri",
+          artifactUri,
           "--reason",
           "Responded to the user with a closeout summary.",
           "--json"
@@ -244,6 +295,9 @@ describe("CLI agent directive envelopes", () => {
         subjectType: "work",
         subjectId: work.data.meta.id,
         evidenceIds: [evidence.data.meta.id],
+        agentSummaryIds: [summary.data.summary.meta.id],
+        verificationIds: [verification.data.meta.id],
+        artifactUris: [artifactUri],
         reason: "Responded to the user with a closeout summary.",
         bundleSource: expect.objectContaining({
           bundleId: "bundle.agent.finish.deadbeefdead",
@@ -330,6 +384,145 @@ describe("CLI agent directive envelopes", () => {
         ok: false,
         code: "BOREAL_INVALID_INPUT",
         message: "Deferred, noncompliant, and not-applicable acknowledgements require --reason or --reason-code"
+      })
+    );
+
+    const missingVerification = await runCli(rootDir, [
+      "directives",
+      "ack",
+      "create",
+      "directive.closeout.summary-required.badverification",
+      "--registry-id",
+      "closeout.summary-required",
+      "--outcome",
+      "satisfied",
+      "--subject-type",
+      "work",
+      "--subject-id",
+      work.data.meta.id,
+      "--command",
+      "agent finish",
+      "--verification",
+      "bw_verification_deadbeef0001",
+      "--json"
+    ]);
+    expect(missingVerification.exitCode).toBe(1);
+    expect(parseErrorEnvelope(missingVerification.stderr)).toEqual(
+      expect.objectContaining({
+        ok: false,
+        code: "BOREAL_NOT_FOUND",
+        message: "Directive acknowledgement references missing verification"
+      })
+    );
+  });
+
+  it("doctors dangling directive acknowledgement proof links", async () => {
+    const rootDir = await makeTempWorkspace();
+    await runCli(rootDir, ["init", "--json"]);
+    const work = parseEnvelope<{
+      readonly meta: { readonly id: string };
+    }>(
+      (await runCli(rootDir, ["work", "create", "Dangling acknowledgement proof target", "--ready", "--json"])).stdout
+    );
+    const evidence = parseEnvelope<{
+      readonly meta: { readonly id: string };
+    }>(
+      (
+        await runCli(rootDir, [
+          "evidence",
+          "add",
+          work.data.meta.id,
+          "--summary",
+          "Dangling acknowledgement proof seed.",
+          "--kind",
+          "note",
+          "--outcome",
+          "passed",
+          "--json"
+        ])
+      ).stdout
+    );
+    const created = parseEnvelope<{
+      readonly acknowledgement: { readonly meta: { readonly id: string } };
+    }>(
+      (
+        await runCli(rootDir, [
+          "directives",
+          "ack",
+          "create",
+          "directive.closeout.summary-required.deadbeef0002",
+          "--registry-id",
+          "closeout.summary-required",
+          "--outcome",
+          "satisfied",
+          "--subject-type",
+          "work",
+          "--subject-id",
+          work.data.meta.id,
+          "--command",
+          "agent finish",
+          "--evidence",
+          evidence.data.meta.id,
+          "--json"
+        ])
+      ).stdout
+    );
+
+    await updateRuntimeState(rootDir, (state) => ({
+      ...state,
+      directiveAcknowledgements: ((state.directiveAcknowledgements as readonly Record<string, unknown>[] | undefined) ?? []).map((record) =>
+        (record.meta as { readonly id?: string } | undefined)?.id === created.data.acknowledgement.meta.id
+          ? {
+              ...record,
+              verificationIds: ["bw_verification_deadbeef0001"],
+              artifactUris: ["memory://agent-summaries/works/bw_work_deadbeef0001/bw_summary_deadbeef0001.md"],
+              handoffIds: ["bw_operation_deadbeef0001"]
+            }
+          : record
+      )
+    }));
+
+    const doctor = await runCli(rootDir, ["doctor", "--json"]);
+    expect(doctor.stderr).toBe("");
+    expect(doctor.stdout).not.toBe("");
+    const payload = parseEnvelope<{
+      readonly ok: boolean;
+      readonly diagnostics: readonly Array<{ readonly code: string; readonly severity: string; readonly details?: unknown }>;
+    }>(doctor.stdout);
+    const diagnostic = (code: string) => payload.data.diagnostics.find((entry) => entry.code === code);
+    expect(doctor.exitCode).toBe(1);
+    expect(payload.data.ok).toBe(false);
+    expect(diagnostic("directive_acknowledgement.dangling_verification")).toEqual(
+      expect.objectContaining({
+        severity: "error",
+        details: expect.arrayContaining([
+          expect.objectContaining({
+            acknowledgementId: created.data.acknowledgement.meta.id,
+            verificationId: "bw_verification_deadbeef0001"
+          })
+        ])
+      })
+    );
+    expect(diagnostic("directive_acknowledgement.dangling_artifact")).toEqual(
+      expect.objectContaining({
+        severity: "error",
+        details: expect.arrayContaining([
+          expect.objectContaining({
+            acknowledgementId: created.data.acknowledgement.meta.id,
+            artifactUri: "memory://agent-summaries/works/bw_work_deadbeef0001/bw_summary_deadbeef0001.md"
+          })
+        ])
+      })
+    );
+    expect(diagnostic("directive_acknowledgement.dangling_handoff")).toEqual(
+      expect.objectContaining({
+        severity: "error",
+        details: expect.arrayContaining([
+          expect.objectContaining({
+            acknowledgementId: created.data.acknowledgement.meta.id,
+            handoffId: "bw_operation_deadbeef0001"
+          })
+        ])
       })
     );
   });

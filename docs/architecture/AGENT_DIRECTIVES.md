@@ -335,7 +335,7 @@ An acknowledgement record, if persisted, should include:
 - Subject and command.
 - Actor and timestamp.
 - Acknowledgement outcome.
-- Evidence IDs or reason code when required.
+- Evidence, verification, agent summary, artifact URI, handoff, or reason links when required.
 
 Directive acknowledgement persistence is represented by `DirectiveAcknowledgementRecord` runtime records. These records are exported with snapshots and ledgers, validated by doctor, and remain separate from emitted directive bundles so ordinary command output does not become durable state by default.
 

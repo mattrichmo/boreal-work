@@ -258,6 +258,8 @@ export interface DirectiveAcknowledgementRecord {
   readonly outcome: DirectiveAcknowledgementOutcome;
   readonly evidenceIds: readonly EvidenceId[];
   readonly agentSummaryIds: readonly AgentSummaryId[];
+  readonly verificationIds?: readonly VerificationId[];
+  readonly artifactUris?: readonly string[];
   readonly handoffIds: readonly string[];
   readonly reasonCode?: string;
   readonly reason?: string;

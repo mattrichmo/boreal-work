@@ -601,6 +601,8 @@ describe("core hashing and ids", () => {
       outcome: "satisfied",
       evidenceIds: ["bw_evidence_deadbeefdead"],
       agentSummaryIds: ["bw_summary_deadbeefdead"],
+      verificationIds: ["bw_verification_deadbeefdead"],
+      artifactUris: ["memory://agent-summaries/works/bw_work_deadbeefdead/bw_summary_deadbeefdead.md"],
       handoffIds: ["handoff.session.deadbeefdead"],
       acknowledgedAt: "2026-01-01T00:00:00.000Z"
     };
@@ -637,6 +639,23 @@ describe("core hashing and ids", () => {
       expect.arrayContaining([
         expect.objectContaining({
           path: "directiveAcknowledgements[0].evidenceIds[0]",
+          schemaId: RUNTIME_SCHEMA_IDS.directiveAcknowledgementRecord
+        })
+      ])
+    );
+    expect(
+      runtimeSnapshotSchemaIssues({
+        directiveAcknowledgements: [
+          {
+            ...validAcknowledgement,
+            verificationIds: ["not-verification"]
+          }
+        ]
+      })
+    ).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          path: "directiveAcknowledgements[0].verificationIds[0]",
           schemaId: RUNTIME_SCHEMA_IDS.directiveAcknowledgementRecord
         })
       ])

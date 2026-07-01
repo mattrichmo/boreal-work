@@ -453,6 +453,10 @@ export function directiveAcknowledgementRecordSchemaIssues(value: unknown, path 
     ]),
     ...uniquePatternStringArrayIssue(value.evidenceIds, `${path}.evidenceIds`, schemaId, /^bw_evidence_[a-f0-9]{12,64}$/),
     ...uniquePatternStringArrayIssue(value.agentSummaryIds, `${path}.agentSummaryIds`, schemaId, /^bw_summary_[a-f0-9]{12,64}$/),
+    ...(value.verificationIds === undefined
+      ? []
+      : uniquePatternStringArrayIssue(value.verificationIds, `${path}.verificationIds`, schemaId, /^bw_verification_[a-f0-9]{12,64}$/)),
+    ...(value.artifactUris === undefined ? [] : uniqueStringArrayIssue(value.artifactUris, `${path}.artifactUris`, schemaId)),
     ...uniqueStringArrayIssue(value.handoffIds, `${path}.handoffIds`, schemaId),
     ...stringIssue(value.acknowledgedAt, `${path}.acknowledgedAt`, schemaId)
   ];

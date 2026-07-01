@@ -1650,6 +1650,7 @@ function validateSnapshot(snapshot: ExportSnapshot, options: SnapshotValidationO
   const verificationIds = ids.get("verifications") ?? new Set<string>();
   const sourceIds = ids.get("knowledgeSources") ?? new Set<string>();
   const reservationIds = ids.get("reservations") ?? new Set<string>();
+  const summaryArtifactUris = new Set(snapshot.agentSummaries.flatMap((summary) => (summary.artifactUri ? [summary.artifactUri] : [])));
 
   for (const work of snapshot.workItems) {
     assertArrayField(work, "dependencyIds", "workItems", work.meta.id);
@@ -1722,7 +1723,16 @@ function validateSnapshot(snapshot: ExportSnapshot, options: SnapshotValidationO
   for (const acknowledgement of snapshot.directiveAcknowledgements) {
     assertArrayField(acknowledgement, "evidenceIds", "directiveAcknowledgements", acknowledgement.meta.id);
     assertArrayField(acknowledgement, "agentSummaryIds", "directiveAcknowledgements", acknowledgement.meta.id);
+    if (acknowledgement.verificationIds !== undefined) {
+      assertArrayField(acknowledgement, "verificationIds", "directiveAcknowledgements", acknowledgement.meta.id);
+      assertReferences("directive acknowledgement verification", acknowledgement.meta.id, acknowledgement.verificationIds, verificationIds);
+    }
+    if (acknowledgement.artifactUris !== undefined) {
+      assertArrayField(acknowledgement, "artifactUris", "directiveAcknowledgements", acknowledgement.meta.id);
+      assertLocalArtifactReferences(acknowledgement.meta.id, acknowledgement.artifactUris, summaryArtifactUris);
+    }
     assertArrayField(acknowledgement, "handoffIds", "directiveAcknowledgements", acknowledgement.meta.id);
+    assertHandoffReferences(acknowledgement.meta.id, acknowledgement.handoffIds, summaryIds);
     assertReferences("directive acknowledgement evidence", acknowledgement.meta.id, acknowledgement.evidenceIds, evidenceIds);
     assertReferences(
       "directive acknowledgement agent summary",
@@ -1847,6 +1857,34 @@ function assertReferences(label: string, recordId: string, values: readonly stri
       missing
     });
   }
+}
+
+function assertLocalArtifactReferences(recordId: string, values: readonly string[], validSummaryArtifactUris: ReadonlySet<string>): void {
+  const missing = values.filter((value) => isAgentSummaryArtifactUri(value) && !validSummaryArtifactUris.has(value));
+  if (missing.length > 0) {
+    throw new BorealError("BOREAL_INVALID_INPUT", "Snapshot has dangling directive acknowledgement artifact reference", {
+      recordId,
+      missing
+    });
+  }
+}
+
+function assertHandoffReferences(recordId: string, values: readonly string[], validSummaryIds: ReadonlySet<string>): void {
+  const missing = values.filter((value) => (isAgentSummaryReference(value) ? !validSummaryIds.has(value) : false));
+  if (missing.length > 0) {
+    throw new BorealError("BOREAL_INVALID_INPUT", "Snapshot has dangling directive acknowledgement handoff reference", {
+      recordId,
+      missing
+    });
+  }
+}
+
+function isAgentSummaryArtifactUri(value: string): boolean {
+  return value.startsWith("memory://agent-summaries/");
+}
+
+function isAgentSummaryReference(value: string): boolean {
+  return /^bw_summary_[a-f0-9]{12,64}$/u.test(value);
 }
 
 function assertDirectiveReferences(
@@ -2054,6 +2092,8 @@ function markdownFiles(document: ExportDocument): Array<{ path: string; content:
           outcome: record.outcome,
           evidence: record.evidenceIds,
           agent_summaries: record.agentSummaryIds,
+          verifications: record.verificationIds,
+          artifact_uris: record.artifactUris,
           handoffs: record.handoffIds,
           reason_code: record.reasonCode,
           acknowledged_at: record.acknowledgedAt,

@@ -297,9 +297,9 @@ export const COMMAND_DEFINITIONS: readonly CommandDefinition[] = [
     category: "directive",
     summary: "Record a durable directive acknowledgement.",
     usage:
-      "bwrk directives ack create <directive-id> --outcome satisfied|deferred|noncompliant|not-applicable --subject-type <type> --command <command-path> [--registry-id <id>] [--version <version>] [--bundle-id <id>] [--registry-version <version>] [--envelope-schema <schema>] [--source-hash <sha256>] [--generated-at <iso>] [--subject-id <id>] [--subject-title <title>] [--evidence <id>...] [--summary <id>...] [--handoff <id>...] [--reason-code <code>] [--reason <text>] [--json]",
+      "bwrk directives ack create <directive-id> --outcome satisfied|deferred|noncompliant|not-applicable --subject-type <type> --command <command-path> [--registry-id <id>] [--version <version>] [--bundle-id <id>] [--registry-version <version>] [--envelope-schema <schema>] [--source-hash <sha256>] [--generated-at <iso>] [--subject-id <id>] [--subject-title <title>] [--evidence <id>...] [--summary <id>...] [--verification <id>...] [--artifact-uri <uri>...] [--handoff <id>...] [--reason-code <code>] [--reason <text>] [--json]",
     description:
-      "Writes a durable directive acknowledgement record that links an emitted directive to an actor, subject, outcome, source bundle metadata, and evidence, summary, handoff, or reason data.",
+      "Writes a durable directive acknowledgement record that links an emitted directive to an actor, subject, outcome, source bundle metadata, and evidence, summary, verification, artifact, handoff, or reason data.",
     flags: [
       flag("outcome", "value", "Acknowledgement outcome: satisfied, deferred, noncompliant, or not-applicable."),
       flag("subject-type", "value", "Directive subject type: work, sprint, phase, milestone, project, session, workspace, or command."),
@@ -315,6 +315,8 @@ export const COMMAND_DEFINITIONS: readonly CommandDefinition[] = [
       flag("subject-title", "value", "Directive subject title. Defaults to the work title for work-like subjects."),
       flag("evidence", "value", "Evidence id linked to the acknowledgement; may be repeated.", true),
       flag("summary", "value", "Agent summary id linked to the acknowledgement; may be repeated.", true),
+      flag("verification", "value", "Verification id linked to the acknowledgement; may be repeated.", true),
+      flag("artifact-uri", "value", "Artifact URI linked to the acknowledgement; may be repeated.", true),
       flag("handoff", "value", "Handoff id linked to the acknowledgement; may be repeated.", true),
       flag("reason-code", "value", "Machine-readable reason code for deferred, noncompliant, or not-applicable outcomes."),
       flag("reason", "value", "Human-readable reason comment.")

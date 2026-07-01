@@ -141,69 +141,93 @@ export async function runDoctor(context: CliContext, fix: boolean, strict = fals
   const storeDiagnostics = await validateStoreRecords(context, fix, state);
   diagnostics.push(...storeDiagnostics.diagnostics);
   fixed = fixed || storeDiagnostics.fixed;
+  const hasStoreErrors = storeDiagnostics.diagnostics.some((diagnostic) => diagnostic.severity === "error");
 
-  if (schemaIssues.length === 0) {
-    const exportDocument = await buildExportDocument(context);
-    const drift = await exportDriftDiagnostics(context);
-    diagnostics.push({
-      code: "snapshot.export_drift",
-      severity: drift.drift ? "warning" : "ok",
-      message: drift.drift
-        ? "Latest snapshot content hash differs from current export state"
-        : "Latest snapshot matches current export state or no snapshots exist",
-      details: drift.drift
-        ? {
-            ...drift,
-            repairCommand: "bwrk snapshot create --json",
-            repairNote: "Create a new explicit snapshot baseline when the current state should replace the previous baseline."
-          }
-        : drift
-    });
-    const ledgers = await ledgerStatus(context, undefined);
-    diagnostics.push({
-      code: "ledger.export_drift",
-      severity: ledgers.exists && !ledgers.ok ? "warning" : "ok",
-      message: ledgerDriftMessage(ledgers),
-      details:
-        ledgers.exists && !ledgers.ok
+  if (schemaIssues.length === 0 && !hasStoreErrors) {
+    try {
+      const exportDocument = await buildExportDocument(context);
+      const drift = await exportDriftDiagnostics(context);
+      diagnostics.push({
+        code: "snapshot.export_drift",
+        severity: drift.drift ? "warning" : "ok",
+        message: drift.drift
+          ? "Latest snapshot content hash differs from current export state"
+          : "Latest snapshot matches current export state or no snapshots exist",
+        details: drift.drift
           ? {
-              ...ledgers,
-              repairCommand: "bwrk sync refresh --json"
+              ...drift,
+              repairCommand: "bwrk snapshot create --json",
+              repairNote: "Create a new explicit snapshot baseline when the current state should replace the previous baseline."
             }
-          : ledgers
-    });
-    const sqliteCache = await inspectSQLiteCache({
-      rootDir: context.workspaceRoot,
-      expectedSnapshot: exportDocument.state,
-      expectedSourceContentHash: exportDocument.contentHash
-    });
-    diagnostics.push({
-      code: "cache.sqlite",
-      severity: sqliteCache.exists && !sqliteCache.ok ? "warning" : "ok",
-      message: sqliteCacheMessage(sqliteCache),
-      details:
-        sqliteCache.exists && !sqliteCache.ok
-          ? {
-              ...sqliteCache,
-              repairCommand: "bwrk sync refresh --json"
-            }
-          : sqliteCache
-    });
+          : drift
+      });
+      const ledgers = await ledgerStatus(context, undefined);
+      diagnostics.push({
+        code: "ledger.export_drift",
+        severity: ledgers.exists && !ledgers.ok ? "warning" : "ok",
+        message: ledgerDriftMessage(ledgers),
+        details:
+          ledgers.exists && !ledgers.ok
+            ? {
+                ...ledgers,
+                repairCommand: "bwrk sync refresh --json"
+              }
+            : ledgers
+      });
+      const sqliteCache = await inspectSQLiteCache({
+        rootDir: context.workspaceRoot,
+        expectedSnapshot: exportDocument.state,
+        expectedSourceContentHash: exportDocument.contentHash
+      });
+      diagnostics.push({
+        code: "cache.sqlite",
+        severity: sqliteCache.exists && !sqliteCache.ok ? "warning" : "ok",
+        message: sqliteCacheMessage(sqliteCache),
+        details:
+          sqliteCache.exists && !sqliteCache.ok
+            ? {
+                ...sqliteCache,
+                repairCommand: "bwrk sync refresh --json"
+              }
+            : sqliteCache
+      });
+    } catch (error) {
+      diagnostics.push({
+        code: "snapshot.export_drift",
+        severity: "error",
+        message: "Snapshot drift check failed because current runtime state is not exportable",
+        details: diagnosticErrorDetails(error)
+      });
+      diagnostics.push({
+        code: "ledger.export_drift",
+        severity: "warning",
+        message: "Skipped ledger drift check because current runtime state is not exportable"
+      });
+      diagnostics.push({
+        code: "cache.sqlite",
+        severity: "warning",
+        message: "Skipped SQLite cache check because current runtime state is not exportable"
+      });
+    }
   } else {
+    const skipReason =
+      schemaIssues.length > 0
+        ? "because runtime state failed schema validation"
+        : "because runtime state failed store consistency validation";
     diagnostics.push({
       code: "snapshot.export_drift",
       severity: "warning",
-      message: "Skipped snapshot drift check because runtime state failed schema validation"
+      message: `Skipped snapshot drift check ${skipReason}`
     });
     diagnostics.push({
       code: "ledger.export_drift",
       severity: "warning",
-      message: "Skipped ledger drift check because runtime state failed schema validation"
+      message: `Skipped ledger drift check ${skipReason}`
     });
     diagnostics.push({
       code: "cache.sqlite",
       severity: "warning",
-      message: "Skipped SQLite cache check because runtime state failed schema validation"
+      message: `Skipped SQLite cache check ${skipReason}`
     });
   }
 
@@ -1154,6 +1178,8 @@ async function validateStoreRecords(
       const verificationsById = new Map(verifications.map((record) => [record.meta.id, record]));
       const workById = new Map(workItems.map((work) => [work.meta.id, work]));
       const summariesById = new Map(agentSummaries.map((record) => [record.meta.id, record]));
+      const summaryArtifactUris = new Set(agentSummaries.flatMap((summary) => (summary.artifactUri ? [summary.artifactUri] : [])));
+      const operationById = new Map<string, RuntimeOperation>(operations.map((operation) => [operation.meta.id, operation]));
       const eventById = new Map<string, Record<string, unknown>>();
       for (const event of rawEvents) {
         const eventId = readRecordId(event, "events");
@@ -1207,6 +1233,27 @@ async function validateStoreRecords(
         acknowledgement.agentSummaryIds
           .filter((summaryId) => !summariesById.has(summaryId))
           .map((summaryId) => ({ acknowledgementId: acknowledgement.meta.id, summaryId }))
+      );
+      const danglingDirectiveAcknowledgementVerifications = directiveAcknowledgements.flatMap((acknowledgement) =>
+        (acknowledgement.verificationIds ?? [])
+          .filter((verificationId) => !verificationsById.has(verificationId))
+          .map((verificationId) => ({ acknowledgementId: acknowledgement.meta.id, verificationId }))
+      );
+      const danglingDirectiveAcknowledgementArtifacts = directiveAcknowledgements.flatMap((acknowledgement) =>
+        (acknowledgement.artifactUris ?? [])
+          .filter((artifactUri) => isAgentSummaryArtifactUri(artifactUri) && !summaryArtifactUris.has(artifactUri))
+          .map((artifactUri) => ({ acknowledgementId: acknowledgement.meta.id, artifactUri }))
+      );
+      const danglingDirectiveAcknowledgementHandoffs = directiveAcknowledgements.flatMap((acknowledgement) =>
+        acknowledgement.handoffIds
+          .filter((handoffId) =>
+            isOperationReference(handoffId)
+              ? !operationById.has(handoffId)
+              : isAgentSummaryReference(handoffId)
+                ? !summariesById.has(handoffId as AgentSummaryRecord["meta"]["id"])
+                : false
+          )
+          .map((handoffId) => ({ acknowledgementId: acknowledgement.meta.id, handoffId }))
       );
       const danglingDirectiveAcknowledgementSubjects = directiveAcknowledgements
         .filter(
@@ -1493,7 +1540,6 @@ async function validateStoreRecords(
         }
         return [];
       });
-      const operationById = new Map<string, RuntimeOperation>(operations.map((operation) => [operation.meta.id, operation]));
       const operationEventCausality = [
         ...operations.flatMap((operation) =>
           operation.eventIds.flatMap((eventId) => {
@@ -1601,6 +1647,9 @@ async function validateStoreRecords(
         danglingSummarySubjects,
         danglingDirectiveAcknowledgementEvidence,
         danglingDirectiveAcknowledgementSummaries,
+        danglingDirectiveAcknowledgementVerifications,
+        danglingDirectiveAcknowledgementArtifacts,
+        danglingDirectiveAcknowledgementHandoffs,
         danglingDirectiveAcknowledgementSubjects,
         danglingOperationEvents,
         legacyOperationEvents,
@@ -1677,6 +1726,27 @@ async function validateStoreRecords(
         "directive_acknowledgement.dangling_summary",
         "Dangling directive acknowledgement summary references",
         summary.danglingDirectiveAcknowledgementSummaries
+      )
+    );
+    diagnostics.push(
+      diagnosticFromList(
+        "directive_acknowledgement.dangling_verification",
+        "Dangling directive acknowledgement verification references",
+        summary.danglingDirectiveAcknowledgementVerifications
+      )
+    );
+    diagnostics.push(
+      diagnosticFromList(
+        "directive_acknowledgement.dangling_artifact",
+        "Dangling directive acknowledgement artifact references",
+        summary.danglingDirectiveAcknowledgementArtifacts
+      )
+    );
+    diagnostics.push(
+      diagnosticFromList(
+        "directive_acknowledgement.dangling_handoff",
+        "Dangling directive acknowledgement handoff references",
+        summary.danglingDirectiveAcknowledgementHandoffs
       )
     );
     diagnostics.push(
@@ -1918,6 +1988,31 @@ function diagnosticFromList(code: string, label: string, values: readonly unknow
     message: values.length > 0 ? label : `${label}: none`,
     details: values.length > 0 ? values : undefined
   };
+}
+
+function diagnosticErrorDetails(error: unknown): Record<string, unknown> {
+  if (error instanceof BorealError) {
+    return {
+      code: error.code,
+      message: error.message,
+      details: error.details
+    };
+  }
+  return {
+    message: error instanceof Error ? error.message : String(error)
+  };
+}
+
+function isAgentSummaryArtifactUri(value: string): boolean {
+  return value.startsWith("memory://agent-summaries/");
+}
+
+function isOperationReference(value: string): boolean {
+  return /^bw_operation_[a-f0-9]{12,64}$/u.test(value);
+}
+
+function isAgentSummaryReference(value: string): boolean {
+  return /^bw_summary_[a-f0-9]{12,64}$/u.test(value);
 }
 
 function warningDiagnosticFromList(code: string, label: string, values: readonly unknown[]): Diagnostic {
@@ -2429,6 +2524,21 @@ function stringSafetyIssues(input: StringSafetyInput): Array<Record<string, unkn
         acknowledgement.bundleSource.commandPath
       ),
       stringField("directiveAcknowledgements", acknowledgement.meta.id, "commandPath", acknowledgement.commandPath),
+      ...acknowledgement.evidenceIds.map((evidenceId, index) =>
+        stringField("directiveAcknowledgements", acknowledgement.meta.id, `evidenceIds[${index}]`, evidenceId)
+      ),
+      ...acknowledgement.agentSummaryIds.map((summaryId, index) =>
+        stringField("directiveAcknowledgements", acknowledgement.meta.id, `agentSummaryIds[${index}]`, summaryId)
+      ),
+      ...(acknowledgement.verificationIds ?? []).map((verificationId, index) =>
+        stringField("directiveAcknowledgements", acknowledgement.meta.id, `verificationIds[${index}]`, verificationId)
+      ),
+      ...(acknowledgement.artifactUris ?? []).map((artifactUri, index) =>
+        stringField("directiveAcknowledgements", acknowledgement.meta.id, `artifactUris[${index}]`, artifactUri)
+      ),
+      ...acknowledgement.handoffIds.map((handoffId, index) =>
+        stringField("directiveAcknowledgements", acknowledgement.meta.id, `handoffIds[${index}]`, handoffId)
+      ),
       ...(acknowledgement.subjectId
         ? [stringField("directiveAcknowledgements", acknowledgement.meta.id, "subjectId", acknowledgement.subjectId)]
         : []),
@@ -3240,6 +3350,8 @@ function isDoctorDirectiveAcknowledgement(value: unknown): value is DirectiveAck
     typeof value.outcome === "string" &&
     Array.isArray(value.evidenceIds) &&
     Array.isArray(value.agentSummaryIds) &&
+    (value.verificationIds === undefined || Array.isArray(value.verificationIds)) &&
+    (value.artifactUris === undefined || Array.isArray(value.artifactUris)) &&
     Array.isArray(value.handoffIds) &&
     typeof value.acknowledgedAt === "string"
   );

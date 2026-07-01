@@ -52,6 +52,16 @@
       "items": { "type": "string", "pattern": "^bw_summary_[a-f0-9]{12,64}$" },
       "uniqueItems": true
     },
+    "verificationIds": {
+      "type": "array",
+      "items": { "type": "string", "pattern": "^bw_verification_[a-f0-9]{12,64}$" },
+      "uniqueItems": true
+    },
+    "artifactUris": {
+      "type": "array",
+      "items": { "type": "string" },
+      "uniqueItems": true
+    },
     "handoffIds": {
       "type": "array",
       "items": { "type": "string" },
