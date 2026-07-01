@@ -7,6 +7,8 @@ import type {
   ContextPack,
   DecisionId,
   DecisionRecord,
+  DirectiveAcknowledgementId,
+  DirectiveAcknowledgementRecord,
   EvidenceId,
   EvidenceRecord,
   GraphEdge,
@@ -44,6 +46,9 @@ export interface BorealReader {
   getVerification(id: VerificationId): Promise<VerificationRecord | undefined>;
   listVerifications(): Promise<readonly VerificationRecord[]>;
   listVerificationsForSubject(subjectId: string): Promise<readonly VerificationRecord[]>;
+  getDirectiveAcknowledgement(id: DirectiveAcknowledgementId): Promise<DirectiveAcknowledgementRecord | undefined>;
+  listDirectiveAcknowledgements(): Promise<readonly DirectiveAcknowledgementRecord[]>;
+  listDirectiveAcknowledgementsForSubject(subjectId: string): Promise<readonly DirectiveAcknowledgementRecord[]>;
   getKnowledgeSource(id: KnowledgeSourceId): Promise<KnowledgeSource | undefined>;
   listKnowledgeSources(): Promise<readonly KnowledgeSource[]>;
   getClaim(id: ClaimId): Promise<ClaimRecord | undefined>;
@@ -77,6 +82,8 @@ export interface BorealWriter extends BorealReader {
   deleteEvidence(id: EvidenceId): Promise<boolean>;
   putVerification(record: VerificationRecord): Promise<void>;
   deleteVerification(id: VerificationId): Promise<boolean>;
+  putDirectiveAcknowledgement(record: DirectiveAcknowledgementRecord): Promise<void>;
+  deleteDirectiveAcknowledgement(id: DirectiveAcknowledgementId): Promise<boolean>;
   putKnowledgeSource(record: KnowledgeSource): Promise<void>;
   deleteKnowledgeSource(id: KnowledgeSourceId): Promise<boolean>;
   putClaim(record: ClaimRecord): Promise<void>;

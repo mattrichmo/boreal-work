@@ -1,0 +1,64 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://boreal.work/schemas/records/directive-acknowledgement-record.schema.json",
+  "title": "Boreal Directive Acknowledgement Record",
+  "type": "object",
+  "required": [
+    "meta",
+    "directiveId",
+    "directiveVersion",
+    "bundleSource",
+    "actor",
+    "subjectType",
+    "commandPath",
+    "outcome",
+    "evidenceIds",
+    "agentSummaryIds",
+    "handoffIds",
+    "acknowledgedAt"
+  ],
+  "properties": {
+    "meta": { "type": "object" },
+    "directiveId": { "type": "string", "minLength": 1 },
+    "directiveVersion": { "type": "string", "minLength": 1 },
+    "directiveRegistryId": { "type": "string", "minLength": 1 },
+    "bundleSource": {
+      "type": "object",
+      "required": ["registryVersion", "commandPath", "generatedAt"],
+      "properties": {
+        "bundleId": { "type": "string", "minLength": 1 },
+        "registryVersion": { "type": "string", "minLength": 1 },
+        "commandPath": { "type": "string", "minLength": 1 },
+        "envelopeSchema": { "type": "string" },
+        "sourceSnapshotHash": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" },
+        "generatedAt": { "type": "string", "format": "date-time" }
+      }
+    },
+    "actor": { "type": "object" },
+    "subjectType": {
+      "enum": ["work", "sprint", "phase", "milestone", "project", "session", "workspace", "command"]
+    },
+    "subjectId": { "type": "string" },
+    "subjectTitle": { "type": "string" },
+    "commandPath": { "type": "string", "minLength": 1 },
+    "outcome": { "enum": ["satisfied", "deferred", "noncompliant", "not_applicable"] },
+    "evidenceIds": {
+      "type": "array",
+      "items": { "type": "string", "pattern": "^bw_evidence_[a-f0-9]{12,64}$" },
+      "uniqueItems": true
+    },
+    "agentSummaryIds": {
+      "type": "array",
+      "items": { "type": "string", "pattern": "^bw_summary_[a-f0-9]{12,64}$" },
+      "uniqueItems": true
+    },
+    "handoffIds": {
+      "type": "array",
+      "items": { "type": "string" },
+      "uniqueItems": true
+    },
+    "reasonCode": { "type": "string", "minLength": 1 },
+    "reason": { "type": "string" },
+    "acknowledgedAt": { "type": "string", "format": "date-time" }
+  }
+}

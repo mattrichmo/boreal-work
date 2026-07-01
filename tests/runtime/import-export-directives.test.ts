@@ -14,7 +14,10 @@ import {
   type AgentDirectiveRegistryVersion,
   type AgentDirectiveTemplateId,
   type AgentDirectiveVersion,
+  type AgentSummaryRecord,
   type ContentHash,
+  type DirectiveAcknowledgementRecord,
+  type EvidenceRecord,
   type WorkItem
 } from "@boreal/core";
 import { InMemoryBorealStore } from "@boreal/storage";
@@ -81,6 +84,81 @@ describe("import/export agent directive carriers", () => {
     expect(document.agentDirectives?.[0]?.directives[0]?.acknowledgement).toEqual(
       expect.objectContaining({ requiredBefore: "close" })
     );
+  });
+
+  it("exports and imports durable directive acknowledgement records", async () => {
+    const store = new InMemoryBorealStore();
+    const work = createWorkItem({
+      title: "Directive acknowledgement target",
+      actor: { id: "agent-a", kind: "agent" },
+      now: nowIso(new Date("2026-01-01T00:00:00.000Z"))
+    });
+    const evidence = evidenceFixture(work.meta.id);
+    const summary = summaryFixture(work.meta.id, [evidence.meta.id]);
+    const acknowledgement = acknowledgementFixture({
+      workId: work.meta.id,
+      evidenceId: evidence.meta.id,
+      summaryId: summary.meta.id
+    });
+    await store.write(async (writer) => {
+      await writer.putWorkItem(work);
+      await writer.putEvidence(evidence);
+      await writer.putAgentSummary(summary);
+      await writer.putDirectiveAcknowledgement(acknowledgement);
+    });
+
+    const document = await buildExportDocument(testContext(store), {
+      agentDirectives: [agentDirectiveBundleFixture()]
+    });
+
+    expect(document.recordCounts.directiveAcknowledgements).toBe(1);
+    expect(document.state.directiveAcknowledgements).toEqual([
+      expect.objectContaining({
+        directiveId: "closeout.summary-required",
+        directiveVersion: "v1",
+        directiveRegistryId: "closeout.summary-required",
+        subjectId: work.meta.id,
+        outcome: "satisfied",
+        evidenceIds: [evidence.meta.id],
+        agentSummaryIds: [summary.meta.id],
+        handoffIds: ["handoff.session.deadbeefdead"]
+      })
+    ]);
+
+    const dir = await mkdtemp(join(tmpdir(), "boreal-import-export-acknowledgements-"));
+    tempDirs.push(dir);
+    await writeFile(join(dir, "acknowledgements-export.json"), `${JSON.stringify(document, null, 2)}\n`);
+
+    await expect(importJson(testContext(new InMemoryBorealStore(), dir), "acknowledgements-export.json")).resolves.toEqual(
+      expect.objectContaining({
+        imported: expect.objectContaining({ directiveAcknowledgements: 1 })
+      })
+    );
+  });
+
+  it("rejects dangling durable directive acknowledgement links", async () => {
+    const store = new InMemoryBorealStore();
+    const work = createWorkItem({
+      title: "Dangling directive acknowledgement target",
+      actor: { id: "agent-a", kind: "agent" },
+      now: nowIso(new Date("2026-01-01T00:00:00.000Z"))
+    });
+    await store.write(async (writer) => {
+      await writer.putWorkItem(work);
+      await writer.putDirectiveAcknowledgement(
+        acknowledgementFixture({
+          workId: work.meta.id,
+          evidenceId: "bw_evidence_deadbeef0001",
+          summaryId: "bw_summary_deadbeef0001"
+        })
+      );
+    });
+
+    await expect(buildExportDocument(testContext(store))).rejects.toMatchObject({
+      code: "BOREAL_INVALID_INPUT",
+      message: "Snapshot has dangling directive acknowledgement evidence reference",
+      details: expect.objectContaining({ missing: ["bw_evidence_deadbeef0001"] })
+    });
   });
 
   it("rejects dangling closeout gate directive links on export and import", async () => {
@@ -163,6 +241,89 @@ function closeoutGateLinkedWork(input: {
         }
       }
     ]
+  };
+}
+
+function evidenceFixture(workId: string): EvidenceRecord {
+  return {
+    meta: runtimeMeta("bw_evidence_deadbeefdead") as EvidenceRecord["meta"],
+    subjectId: workId,
+    subjectType: "work",
+    kind: "note",
+    summary: "Directive acknowledgement proof.",
+    outcome: "passed",
+    observedAt: "2026-01-01T00:00:00.000Z"
+  };
+}
+
+function summaryFixture(workId: string, evidenceIds: readonly string[]): AgentSummaryRecord {
+  return {
+    meta: runtimeMeta("bw_summary_deadbeefdead") as AgentSummaryRecord["meta"],
+    subjectId: workId,
+    subjectType: "work",
+    summaryKind: "task",
+    status: "final",
+    outcome: "completed",
+    title: "Directive acknowledgement summary",
+    body: "The directive acknowledgement fixture completed.",
+    completedWork: [
+      {
+        workId: workId as WorkItem["meta"]["id"],
+        title: "Directive acknowledgement target",
+        outcome: "completed",
+        notes: "Fixture summary."
+      }
+    ],
+    evidenceIds: evidenceIds as AgentSummaryRecord["evidenceIds"],
+    verificationIds: [],
+    commitShas: ["abc1234"],
+    dirtyPathNotes: [],
+    childSummaryIds: [],
+    generatedAt: "2026-01-01T00:00:00.000Z"
+  };
+}
+
+function acknowledgementFixture(input: {
+  readonly workId: string;
+  readonly evidenceId: string;
+  readonly summaryId: string;
+}): DirectiveAcknowledgementRecord {
+  return {
+    meta: runtimeMeta("bw_acknowledgement_deadbeefdead") as DirectiveAcknowledgementRecord["meta"],
+    directiveId: "closeout.summary-required" as AgentDirectiveId,
+    directiveVersion: "v1" as AgentDirectiveVersion,
+    directiveRegistryId: "closeout.summary-required" as AgentDirectiveTemplateId,
+    bundleSource: {
+      bundleId: "bundle.closeout-summary",
+      registryVersion: "directives.v1" as AgentDirectiveRegistryVersion,
+      commandPath: "agent finish",
+      envelopeSchema: "boreal.cli.agent.finish.v1",
+      sourceSnapshotHash: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" as ContentHash,
+      generatedAt: "2026-01-01T00:00:00.000Z"
+    },
+    actor: { id: "agent-a", kind: "agent", displayName: "agent-a" },
+    subjectType: "work",
+    subjectId: input.workId,
+    subjectTitle: "Directive acknowledgement target",
+    commandPath: "agent finish",
+    outcome: "satisfied",
+    evidenceIds: [input.evidenceId] as DirectiveAcknowledgementRecord["evidenceIds"],
+    agentSummaryIds: [input.summaryId] as DirectiveAcknowledgementRecord["agentSummaryIds"],
+    handoffIds: ["handoff.session.deadbeefdead"],
+    acknowledgedAt: "2026-01-01T00:00:00.000Z"
+  };
+}
+
+function runtimeMeta(id: string): Record<string, unknown> {
+  return {
+    id,
+    schemaVersion: "boreal.runtime.v1",
+    createdAt: "2026-01-01T00:00:00.000Z",
+    updatedAt: "2026-01-01T00:00:00.000Z",
+    createdBy: { id: "agent-a", kind: "agent", displayName: "agent-a" },
+    updatedBy: { id: "agent-a", kind: "agent", displayName: "agent-a" },
+    sourceRefs: [],
+    tags: []
   };
 }
 

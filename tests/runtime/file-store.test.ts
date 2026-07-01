@@ -5,7 +5,7 @@ import { join } from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
 
-import { BorealError, nowIso, type ActorRef } from "@boreal/core";
+import { BorealError, nowIso, type ActorRef, type DirectiveAcknowledgementRecord } from "@boreal/core";
 import { createBorealRuntime } from "@boreal/engine";
 import { recordEvidence } from "@boreal/evidence-engine";
 import { createKnowledgeSource } from "@boreal/knowledge-engine";
@@ -64,6 +64,27 @@ describe("file-backed store", () => {
     };
     expect(state.schemaVersion).toBe("boreal.file-store.v1");
     expect(state.workItems).toHaveLength(1);
+  });
+
+  it("persists directive acknowledgement records across store instances", async () => {
+    const rootDir = await makeTempWorkspace();
+    const store = new FileBorealStore({ rootDir, lock });
+    const acknowledgement = directiveAcknowledgementFixture("bw_work_deadbeefdead");
+
+    await store.write((writer) => writer.putDirectiveAcknowledgement(acknowledgement));
+
+    const secondStore = new FileBorealStore({ rootDir, lock });
+    await expect(secondStore.read((reader) => reader.getDirectiveAcknowledgement(acknowledgement.meta.id))).resolves.toMatchObject({
+      meta: { id: acknowledgement.meta.id },
+      directiveId: "closeout.summary-required",
+      outcome: "satisfied"
+    });
+    await expect(secondStore.read((reader) => reader.listDirectiveAcknowledgementsForSubject("bw_work_deadbeefdead"))).resolves.toHaveLength(1);
+
+    const state = JSON.parse(await readFile(join(rootDir, ".boreal/runtime/state.json"), "utf8")) as {
+      readonly directiveAcknowledgements: readonly unknown[];
+    };
+    expect(state.directiveAcknowledgements).toHaveLength(1);
   });
 
   it("does not persist failed transactions", async () => {
@@ -271,7 +292,8 @@ describe("file-backed store", () => {
       actor,
       now: nowIso(new Date("2026-01-01T00:00:00.000Z"))
     });
-    const snapshot = { workItems: [work] };
+    const acknowledgement = directiveAcknowledgementFixture(work.meta.id);
+    const snapshot = { workItems: [work], directiveAcknowledgements: [acknowledgement] };
 
     const first = await rebuildSQLiteCache({ rootDir, snapshot });
     if (first.skipped) {
@@ -287,6 +309,7 @@ describe("file-backed store", () => {
       expectedSourceContentHash: "sha256:stale"
     });
     const rows = await querySQLiteCacheRecords({ rootDir, section: "workItems" });
+    const acknowledgementRows = await querySQLiteCacheRecords({ rootDir, section: "directiveAcknowledgements" });
     const store = new FileBorealStore({ rootDir, lock });
 
     expect(first).toEqual(
@@ -303,7 +326,7 @@ describe("file-backed store", () => {
         exists: true,
         stale: false,
         sourceContentHash: first.sourceContentHash,
-        recordCounts: expect.objectContaining({ workItems: 1 })
+        recordCounts: expect.objectContaining({ workItems: 1, directiveAcknowledgements: 1 })
       })
     );
     expect(staleInspection).toEqual(expect.objectContaining({ ok: false, exists: true, stale: true }));
@@ -314,6 +337,12 @@ describe("file-backed store", () => {
         title: "SQLite cached work",
         status: "draft",
         kind: "task"
+      })
+    ]);
+    expect(acknowledgementRows).toEqual([
+      expect.objectContaining({
+        section: "directiveAcknowledgements",
+        id: acknowledgement.meta.id
       })
     ]);
     await expect(store.read((reader) => reader.listWorkItems())).resolves.toHaveLength(0);
@@ -569,10 +598,49 @@ function largeCacheSnapshot(): StoreSnapshot {
   };
 }
 
+function directiveAcknowledgementFixture(subjectId: string): DirectiveAcknowledgementRecord {
+  const timestamp = "2026-01-01T00:00:00.000Z";
+  return {
+    meta: {
+      id: "bw_acknowledgement_deadbeefdead" as DirectiveAcknowledgementRecord["meta"]["id"],
+      schemaVersion: "boreal.runtime.v1",
+      createdAt: timestamp,
+      updatedAt: timestamp,
+      createdBy: actor,
+      updatedBy: actor,
+      sourceRefs: [],
+      tags: []
+    },
+    directiveId: "closeout.summary-required" as DirectiveAcknowledgementRecord["directiveId"],
+    directiveVersion: "v1" as DirectiveAcknowledgementRecord["directiveVersion"],
+    directiveRegistryId: "closeout.summary-required" as DirectiveAcknowledgementRecord["directiveRegistryId"],
+    bundleSource: {
+      bundleId: "bundle.closeout-summary",
+      registryVersion: "directives.v1" as DirectiveAcknowledgementRecord["bundleSource"]["registryVersion"],
+      commandPath: "agent finish",
+      envelopeSchema: "boreal.cli.agent.finish.v1",
+      sourceSnapshotHash:
+        "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" as DirectiveAcknowledgementRecord["bundleSource"]["sourceSnapshotHash"],
+      generatedAt: timestamp
+    },
+    actor,
+    subjectType: "work",
+    subjectId,
+    subjectTitle: "Directive acknowledgement target",
+    commandPath: "agent finish",
+    outcome: "satisfied",
+    evidenceIds: [],
+    agentSummaryIds: [],
+    handoffIds: ["handoff.session.deadbeefdead"],
+    acknowledgedAt: timestamp
+  };
+}
+
 function emptyStateDocument(overrides: Record<string, readonly unknown[]> = {}): Record<string, unknown> {
   return {
     schemaVersion: "boreal.file-store.v1",
     workItems: [],
+    directiveAcknowledgements: [],
     evidence: [],
     verifications: [],
     knowledgeSources: [],

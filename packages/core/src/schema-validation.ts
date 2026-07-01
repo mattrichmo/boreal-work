@@ -18,6 +18,7 @@ export interface RuntimeSnapshotSchemaInput {
   readonly agentSummaries?: readonly unknown[];
   readonly evidence?: readonly unknown[];
   readonly verifications?: readonly unknown[];
+  readonly directiveAcknowledgements?: readonly unknown[];
   readonly knowledgeSources?: readonly unknown[];
   readonly claims?: readonly unknown[];
   readonly decisions?: readonly unknown[];
@@ -46,6 +47,7 @@ export const RUNTIME_SCHEMA_IDS = {
   graphEdge: "https://boreal.work/schemas/records/graph-edge.schema.json",
   evidenceRecord: "https://boreal.work/schemas/records/evidence-record.schema.json",
   verificationRecord: "https://boreal.work/schemas/records/verification-record.schema.json",
+  directiveAcknowledgementRecord: "https://boreal.work/schemas/records/directive-acknowledgement-record.schema.json",
   knowledgeSource: "https://boreal.work/schemas/records/knowledge-source.schema.json",
   claimRecord: "https://boreal.work/schemas/records/claim-record.schema.json",
   decisionRecord: "https://boreal.work/schemas/records/decision-record.schema.json",
@@ -92,6 +94,13 @@ export const RUNTIME_SCHEMA_CONTRACTS = [
     schemaPath: "schemas/records/verification-record.schema.json",
     runtimeSection: "verifications",
     validator: verificationRecordSchemaIssues
+  },
+  {
+    key: "directiveAcknowledgementRecord",
+    schemaId: RUNTIME_SCHEMA_IDS.directiveAcknowledgementRecord,
+    schemaPath: "schemas/records/directive-acknowledgement-record.schema.json",
+    runtimeSection: "directiveAcknowledgements",
+    validator: directiveAcknowledgementRecordSchemaIssues
   },
   {
     key: "knowledgeSource",
@@ -408,6 +417,67 @@ export function verificationRecordSchemaIssues(value: unknown, path = "$"): read
 
   if (value.notes !== undefined) {
     issues.push(...stringIssue(value.notes, `${path}.notes`, schemaId));
+  }
+
+  return issues;
+}
+
+export function directiveAcknowledgementRecordSchemaIssues(value: unknown, path = "$"): readonly SchemaValidationIssue[] {
+  const schemaId = RUNTIME_SCHEMA_IDS.directiveAcknowledgementRecord;
+  if (!isRecord(value)) {
+    return [issue(schemaId, path, "must be an object")];
+  }
+
+  const issues: SchemaValidationIssue[] = [
+    ...recordMetaIssues(value.meta, `${path}.meta`, schemaId, /^bw_acknowledgement_[a-f0-9]{12,64}$/),
+    ...patternStringIssue(value.directiveId, `${path}.directiveId`, schemaId, AGENT_DIRECTIVE_LINK_ID_PATTERN),
+    ...nonEmptyStringIssue(value.directiveVersion, `${path}.directiveVersion`, schemaId),
+    ...directiveAcknowledgementBundleSourceIssues(value.bundleSource, `${path}.bundleSource`, schemaId),
+    ...actorRefIssues(value.actor, `${path}.actor`, schemaId),
+    ...enumIssue(value.subjectType, `${path}.subjectType`, schemaId, [
+      "work",
+      "sprint",
+      "phase",
+      "milestone",
+      "project",
+      "session",
+      "workspace",
+      "command"
+    ]),
+    ...nonEmptyStringIssue(value.commandPath, `${path}.commandPath`, schemaId),
+    ...enumIssue(value.outcome, `${path}.outcome`, schemaId, [
+      "satisfied",
+      "deferred",
+      "noncompliant",
+      "not_applicable"
+    ]),
+    ...uniquePatternStringArrayIssue(value.evidenceIds, `${path}.evidenceIds`, schemaId, /^bw_evidence_[a-f0-9]{12,64}$/),
+    ...uniquePatternStringArrayIssue(value.agentSummaryIds, `${path}.agentSummaryIds`, schemaId, /^bw_summary_[a-f0-9]{12,64}$/),
+    ...uniqueStringArrayIssue(value.handoffIds, `${path}.handoffIds`, schemaId),
+    ...stringIssue(value.acknowledgedAt, `${path}.acknowledgedAt`, schemaId)
+  ];
+
+  if (value.directiveRegistryId !== undefined) {
+    issues.push(...patternStringIssue(value.directiveRegistryId, `${path}.directiveRegistryId`, schemaId, AGENT_DIRECTIVE_LINK_ID_PATTERN));
+  }
+  if (value.subjectId !== undefined) {
+    issues.push(...stringIssue(value.subjectId, `${path}.subjectId`, schemaId));
+  }
+  if (value.subjectTitle !== undefined) {
+    issues.push(...stringIssue(value.subjectTitle, `${path}.subjectTitle`, schemaId));
+  }
+  if (value.reasonCode !== undefined) {
+    issues.push(...patternStringIssue(value.reasonCode, `${path}.reasonCode`, schemaId, AGENT_DIRECTIVE_LINK_ID_PATTERN));
+  }
+  if (value.reason !== undefined) {
+    issues.push(...stringIssue(value.reason, `${path}.reason`, schemaId));
+  }
+  if (
+    (value.outcome === "deferred" || value.outcome === "noncompliant") &&
+    value.reasonCode === undefined &&
+    (typeof value.reason !== "string" || value.reason.trim().length === 0)
+  ) {
+    issues.push(issue(schemaId, `${path}.reason`, "is required when outcome is deferred or noncompliant unless reasonCode is present"));
   }
 
   return issues;
@@ -866,6 +936,31 @@ function sourceRefIssues(value: unknown, path: string, schemaId: string): readon
   }
   if (value.contentHash !== undefined) {
     issues.push(...patternStringIssue(value.contentHash, `${path}.contentHash`, schemaId, /^sha256:[a-f0-9]{64}$/));
+  }
+  return issues;
+}
+
+function directiveAcknowledgementBundleSourceIssues(
+  value: unknown,
+  path: string,
+  schemaId: string
+): readonly SchemaValidationIssue[] {
+  if (!isRecord(value)) {
+    return [issue(schemaId, path, "must be an object")];
+  }
+  const issues: SchemaValidationIssue[] = [
+    ...nonEmptyStringIssue(value.registryVersion, `${path}.registryVersion`, schemaId),
+    ...nonEmptyStringIssue(value.commandPath, `${path}.commandPath`, schemaId),
+    ...stringIssue(value.generatedAt, `${path}.generatedAt`, schemaId)
+  ];
+  if (value.bundleId !== undefined) {
+    issues.push(...nonEmptyStringIssue(value.bundleId, `${path}.bundleId`, schemaId));
+  }
+  if (value.envelopeSchema !== undefined) {
+    issues.push(...stringIssue(value.envelopeSchema, `${path}.envelopeSchema`, schemaId));
+  }
+  if (value.sourceSnapshotHash !== undefined) {
+    issues.push(...patternStringIssue(value.sourceSnapshotHash, `${path}.sourceSnapshotHash`, schemaId, /^sha256:[a-f0-9]{64}$/));
   }
   return issues;
 }

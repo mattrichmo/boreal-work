@@ -337,7 +337,7 @@ An acknowledgement record, if persisted, should include:
 - Acknowledgement outcome.
 - Evidence IDs or reason code when required.
 
-Acknowledgement persistence belongs in a later implementation step. The first directive bundle can expose acknowledgement requirements without storing acknowledgements.
+Directive acknowledgement persistence is represented by `DirectiveAcknowledgementRecord` runtime records. These records are exported with snapshots and ledgers, validated by doctor, and remain separate from emitted directive bundles so ordinary command output does not become durable state by default.
 
 ## Consumer Rules
 

@@ -26,6 +26,7 @@ import {
   type ContentHash,
   type ContextPack,
   type DecisionRecord,
+  type DirectiveAcknowledgementRecord,
   type EvidenceId,
   type EvidenceRecord,
   type GraphEdge,
@@ -74,6 +75,7 @@ const STATE_SECTIONS = [
   "agentSummaries",
   "evidence",
   "verifications",
+  "directiveAcknowledgements",
   "knowledgeSources",
   "claims",
   "decisions",
@@ -1069,6 +1071,7 @@ function validateSchemaConformance(
     agentSummaries: stateSection(state, "agentSummaries"),
     evidence: stateSection(state, "evidence"),
     verifications: stateSection(state, "verifications"),
+    directiveAcknowledgements: stateSection(state, "directiveAcknowledgements"),
     knowledgeSources: stateSection(state, "knowledgeSources"),
     claims: stateSection(state, "claims"),
     decisions: stateSection(state, "decisions"),
@@ -1109,6 +1112,7 @@ async function validateStoreRecords(
       const rawAgentSummaries = stateSection<AgentSummaryRecord>(state, "agentSummaries");
       const rawEvidence = stateSection<EvidenceRecord>(state, "evidence");
       const rawVerifications = stateSection<VerificationRecord>(state, "verifications");
+      const rawDirectiveAcknowledgements = stateSection<DirectiveAcknowledgementRecord>(state, "directiveAcknowledgements");
       const rawKnowledgeSources = stateSection<KnowledgeSource>(state, "knowledgeSources");
       const rawClaims = stateSection<ClaimRecord>(state, "claims");
       const rawDecisions = stateSection<DecisionRecord>(state, "decisions");
@@ -1123,6 +1127,7 @@ async function validateStoreRecords(
         ...malformedIndexes(rawAgentSummaries, isDoctorAgentSummary, "agentSummaries"),
         ...malformedIndexes(rawEvidence, isDoctorEvidence, "evidence"),
         ...malformedIndexes(rawVerifications, isDoctorVerification, "verifications"),
+        ...malformedIndexes(rawDirectiveAcknowledgements, isDoctorDirectiveAcknowledgement, "directiveAcknowledgements"),
         ...malformedIndexes(rawKnowledgeSources, isDoctorKnowledgeSource, "knowledgeSources"),
         ...malformedIndexes(rawClaims, isDoctorClaim, "claims"),
         ...malformedIndexes(rawDecisions, isDoctorDecision, "decisions"),
@@ -1136,6 +1141,7 @@ async function validateStoreRecords(
       const agentSummaries = rawAgentSummaries.filter(isDoctorAgentSummary);
       const evidence = rawEvidence.filter(isDoctorEvidence);
       const verifications = rawVerifications.filter(isDoctorVerification);
+      const directiveAcknowledgements = rawDirectiveAcknowledgements.filter(isDoctorDirectiveAcknowledgement);
       const knowledgeSources = rawKnowledgeSources.filter(isDoctorKnowledgeSource);
       const claims = rawClaims.filter(isDoctorClaim);
       const decisions = rawDecisions.filter(isDoctorDecision);
@@ -1192,6 +1198,28 @@ async function validateStoreRecords(
       const danglingSummarySubjects = agentSummaries
         .filter((summary) => ["work", "sprint", "milestone"].includes(summary.subjectType) && !workById.has(summary.subjectId as WorkId))
         .map((summary) => ({ summaryId: summary.meta.id, subjectId: summary.subjectId, subjectType: summary.subjectType }));
+      const danglingDirectiveAcknowledgementEvidence = directiveAcknowledgements.flatMap((acknowledgement) =>
+        acknowledgement.evidenceIds
+          .filter((evidenceId) => !evidenceById.has(evidenceId))
+          .map((evidenceId) => ({ acknowledgementId: acknowledgement.meta.id, evidenceId }))
+      );
+      const danglingDirectiveAcknowledgementSummaries = directiveAcknowledgements.flatMap((acknowledgement) =>
+        acknowledgement.agentSummaryIds
+          .filter((summaryId) => !summariesById.has(summaryId))
+          .map((summaryId) => ({ acknowledgementId: acknowledgement.meta.id, summaryId }))
+      );
+      const danglingDirectiveAcknowledgementSubjects = directiveAcknowledgements
+        .filter(
+          (acknowledgement) =>
+            acknowledgement.subjectId !== undefined &&
+            ["work", "sprint", "phase", "milestone"].includes(acknowledgement.subjectType) &&
+            !workById.has(acknowledgement.subjectId as WorkId)
+        )
+        .map((acknowledgement) => ({
+          acknowledgementId: acknowledgement.meta.id,
+          subjectId: acknowledgement.subjectId,
+          subjectType: acknowledgement.subjectType
+        }));
       const terminalWorkItems = workItems.filter(isTerminalCloseoutWork);
       const terminalWorkSubjectKeys = new Set(
         terminalWorkItems.map((work) => closeoutSummarySubjectKey(doctorSummarySubjectTypeForWork(work), work.meta.id))
@@ -1501,6 +1529,7 @@ async function validateStoreRecords(
         agentSummaries,
         evidence,
         verifications,
+        directiveAcknowledgements,
         knowledgeSources,
         claims,
         decisions,
@@ -1515,6 +1544,7 @@ async function validateStoreRecords(
         agentSummaries,
         evidence,
         verifications,
+        directiveAcknowledgements,
         knowledgeSources,
         claims,
         decisions,
@@ -1569,6 +1599,9 @@ async function validateStoreRecords(
         danglingSummaryChildren,
         danglingSummaryParents,
         danglingSummarySubjects,
+        danglingDirectiveAcknowledgementEvidence,
+        danglingDirectiveAcknowledgementSummaries,
+        danglingDirectiveAcknowledgementSubjects,
         danglingOperationEvents,
         legacyOperationEvents,
         operationEventCausality,
@@ -1631,6 +1664,27 @@ async function validateStoreRecords(
     );
     diagnostics.push(
       diagnosticFromList("summary.dangling_subject", "Dangling agent summary subject references", summary.danglingSummarySubjects)
+    );
+    diagnostics.push(
+      diagnosticFromList(
+        "directive_acknowledgement.dangling_evidence",
+        "Dangling directive acknowledgement evidence references",
+        summary.danglingDirectiveAcknowledgementEvidence
+      )
+    );
+    diagnostics.push(
+      diagnosticFromList(
+        "directive_acknowledgement.dangling_summary",
+        "Dangling directive acknowledgement summary references",
+        summary.danglingDirectiveAcknowledgementSummaries
+      )
+    );
+    diagnostics.push(
+      diagnosticFromList(
+        "directive_acknowledgement.dangling_subject",
+        "Dangling directive acknowledgement subject references",
+        summary.danglingDirectiveAcknowledgementSubjects
+      )
     );
     diagnostics.push(diagnosticFromList("knowledge.dangling_sources", "Dangling knowledge source references", [
       ...summary.danglingClaimSources,
@@ -2323,6 +2377,7 @@ interface StringSafetyInput {
   readonly agentSummaries: readonly AgentSummaryRecord[];
   readonly evidence: readonly EvidenceRecord[];
   readonly verifications: readonly VerificationRecord[];
+  readonly directiveAcknowledgements: readonly DirectiveAcknowledgementRecord[];
   readonly knowledgeSources: readonly KnowledgeSource[];
   readonly claims: readonly ClaimRecord[];
   readonly decisions: readonly DecisionRecord[];
@@ -2351,6 +2406,39 @@ function stringSafetyIssues(input: StringSafetyInput): Array<Record<string, unkn
       ...(evidence.uri ? [stringField("evidence", evidence.meta.id, "uri", evidence.uri)] : [])
     ]),
     ...input.verifications.flatMap((verification) => metaStringFields("verifications", verification.meta.id, verification)),
+    ...input.directiveAcknowledgements.flatMap((acknowledgement) => [
+      ...metaStringFields("directiveAcknowledgements", acknowledgement.meta.id, acknowledgement),
+      stringField("directiveAcknowledgements", acknowledgement.meta.id, "directiveId", acknowledgement.directiveId),
+      ...(acknowledgement.directiveRegistryId
+        ? [
+            stringField(
+              "directiveAcknowledgements",
+              acknowledgement.meta.id,
+              "directiveRegistryId",
+              acknowledgement.directiveRegistryId
+            )
+          ]
+        : []),
+      ...(acknowledgement.bundleSource.bundleId
+        ? [stringField("directiveAcknowledgements", acknowledgement.meta.id, "bundleSource.bundleId", acknowledgement.bundleSource.bundleId)]
+        : []),
+      stringField(
+        "directiveAcknowledgements",
+        acknowledgement.meta.id,
+        "bundleSource.commandPath",
+        acknowledgement.bundleSource.commandPath
+      ),
+      stringField("directiveAcknowledgements", acknowledgement.meta.id, "commandPath", acknowledgement.commandPath),
+      ...(acknowledgement.subjectId
+        ? [stringField("directiveAcknowledgements", acknowledgement.meta.id, "subjectId", acknowledgement.subjectId)]
+        : []),
+      ...(acknowledgement.subjectTitle
+        ? [stringField("directiveAcknowledgements", acknowledgement.meta.id, "subjectTitle", acknowledgement.subjectTitle)]
+        : []),
+      ...(acknowledgement.reasonCode
+        ? [stringField("directiveAcknowledgements", acknowledgement.meta.id, "reasonCode", acknowledgement.reasonCode)]
+        : [])
+    ]),
     ...input.knowledgeSources.flatMap((source) => [
       ...metaStringFields("knowledgeSources", source.meta.id, source),
       stringField("knowledgeSources", source.meta.id, "title", source.title),
@@ -3137,6 +3225,23 @@ function isDoctorVerification(value: unknown): value is VerificationRecord {
     typeof value.subjectId === "string" &&
     Array.isArray(value.evidenceIds) &&
     isVerificationVerdict(value.verdict)
+  );
+}
+
+function isDoctorDirectiveAcknowledgement(value: unknown): value is DirectiveAcknowledgementRecord {
+  return (
+    isRecord(value) &&
+    readRecordId(value, "directiveAcknowledgements") !== undefined &&
+    typeof value.directiveId === "string" &&
+    typeof value.directiveVersion === "string" &&
+    isRecord(value.bundleSource) &&
+    typeof value.commandPath === "string" &&
+    typeof value.subjectType === "string" &&
+    typeof value.outcome === "string" &&
+    Array.isArray(value.evidenceIds) &&
+    Array.isArray(value.agentSummaryIds) &&
+    Array.isArray(value.handoffIds) &&
+    typeof value.acknowledgedAt === "string"
   );
 }
 

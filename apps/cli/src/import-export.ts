@@ -172,6 +172,7 @@ export type SnapshotSection =
   | "agentSummaries"
   | "evidence"
   | "verifications"
+  | "directiveAcknowledgements"
   | "knowledgeSources"
   | "claims"
   | "decisions"
@@ -189,6 +190,7 @@ const SNAPSHOT_SECTIONS: readonly SnapshotSection[] = [
   "agentSummaries",
   "evidence",
   "verifications",
+  "directiveAcknowledgements",
   "knowledgeSources",
   "claims",
   "decisions",
@@ -210,6 +212,7 @@ const LEDGER_FILES: Record<SnapshotSection, string> = {
   agentSummaries: "agent-summaries.jsonl",
   evidence: "evidence.jsonl",
   verifications: "verifications.jsonl",
+  directiveAcknowledgements: "directive-acknowledgements.jsonl",
   knowledgeSources: "knowledge-sources.jsonl",
   claims: "claims.jsonl",
   decisions: "decisions.jsonl",
@@ -224,7 +227,7 @@ const LEDGER_FILES: Record<SnapshotSection, string> = {
 export async function buildExportDocument(context: CliContext, options: ExportDocumentOptions = {}): Promise<ExportDocument> {
   const state = await context.store.read((reader) => readSnapshot(reader));
   const agentDirectives = parseAgentDirectiveBundles(options.agentDirectives, "$.agentDirectives");
-  validateSnapshotDirectiveLinks(state, agentDirectives);
+  validateSnapshot(state, { agentDirectives });
   const contentHash = hashContent(state);
   return {
     schemaVersion: EXPORT_SCHEMA_VERSION,
@@ -946,6 +949,7 @@ async function readSnapshot(reader: BorealReader): Promise<ExportSnapshot> {
     agentSummaries: await reader.listAgentSummaries(),
     evidence: await reader.listEvidence(),
     verifications: await reader.listVerifications(),
+    directiveAcknowledgements: await reader.listDirectiveAcknowledgements(),
     knowledgeSources: await reader.listKnowledgeSources(),
     claims: await reader.listClaims(),
     decisions: await reader.listDecisions(),
@@ -1133,6 +1137,7 @@ async function assertWorkItemCanBeDeleted(reader: BorealReader, workId: WorkId):
     agentSummaries,
     evidence,
     verifications,
+    directiveAcknowledgements,
     graphEdges,
     reservations,
     reviewerHeartbeats,
@@ -1143,6 +1148,7 @@ async function assertWorkItemCanBeDeleted(reader: BorealReader, workId: WorkId):
     reader.listAgentSummaries(),
     reader.listEvidence(),
     reader.listVerifications(),
+    reader.listDirectiveAcknowledgements(),
     reader.listGraphEdges(),
     reader.listReservations(),
     reader.listReviewerHeartbeats(),
@@ -1162,6 +1168,12 @@ async function assertWorkItemCanBeDeleted(reader: BorealReader, workId: WorkId):
   const summaryIds = agentSummaries
     .filter((record) => subjectReferences(record, workId, GRAPH_TYPE_ALIASES.work))
     .map((record) => record.meta.id);
+  const directiveAcknowledgementIds = directiveAcknowledgements
+    .filter(
+      (record) =>
+        record.subjectId === workId && ["work", "sprint", "phase", "milestone"].includes(record.subjectType)
+    )
+    .map((record) => record.meta.id);
   const graphEdgeIds = graphEdges
     .filter((edge) => graphEdgeReferences(edge, workId, GRAPH_TYPE_ALIASES.work))
     .map((edge) => edge.meta.id);
@@ -1180,6 +1192,7 @@ async function assertWorkItemCanBeDeleted(reader: BorealReader, workId: WorkId):
     evidenceIds.length > 0 ||
     verificationIds.length > 0 ||
     summaryIds.length > 0 ||
+    directiveAcknowledgementIds.length > 0 ||
     graphEdgeIds.length > 0 ||
     reservationIds.length > 0 ||
     reviewerHeartbeatIds.length > 0 ||
@@ -1194,6 +1207,7 @@ async function assertWorkItemCanBeDeleted(reader: BorealReader, workId: WorkId):
         evidence: evidenceIds,
         verifications: verificationIds,
         agentSummaries: summaryIds,
+        directiveAcknowledgements: directiveAcknowledgementIds,
         graphEdges: graphEdgeIds,
         reservations: reservationIds,
         reviewerHeartbeats: reviewerHeartbeatIds,
@@ -1205,11 +1219,12 @@ async function assertWorkItemCanBeDeleted(reader: BorealReader, workId: WorkId):
 }
 
 async function assertEvidenceCanBeDeleted(reader: BorealReader, evidenceId: EvidenceId): Promise<void> {
-  const [workItems, agentSummaries, verifications, claims, graphEdges] = await Promise.all([
+  const [workItems, agentSummaries, verifications, claims, directiveAcknowledgements, graphEdges] = await Promise.all([
     reader.listWorkItems(),
     reader.listAgentSummaries(),
     reader.listVerifications(),
     reader.listClaims(),
+    reader.listDirectiveAcknowledgements(),
     reader.listGraphEdges()
   ]);
   const workIds = workItems.filter((work) => work.evidenceIds.includes(evidenceId)).map((work) => work.meta.id);
@@ -1220,11 +1235,21 @@ async function assertEvidenceCanBeDeleted(reader: BorealReader, evidenceId: Evid
     .filter((verification) => verification.evidenceIds.includes(evidenceId))
     .map((verification) => verification.meta.id);
   const claimIds = claims.filter((claim) => claim.evidenceIds.includes(evidenceId)).map((claim) => claim.meta.id);
+  const directiveAcknowledgementIds = directiveAcknowledgements
+    .filter((record) => record.evidenceIds.includes(evidenceId))
+    .map((record) => record.meta.id);
   const graphEdgeIds = graphEdges
     .filter((edge) => graphEdgeReferences(edge, evidenceId, GRAPH_TYPE_ALIASES.evidence))
     .map((edge) => edge.meta.id);
 
-  if (workIds.length > 0 || summaryIds.length > 0 || verificationIds.length > 0 || claimIds.length > 0 || graphEdgeIds.length > 0) {
+  if (
+    workIds.length > 0 ||
+    summaryIds.length > 0 ||
+    verificationIds.length > 0 ||
+    claimIds.length > 0 ||
+    directiveAcknowledgementIds.length > 0 ||
+    graphEdgeIds.length > 0
+  ) {
     throw new BorealError("BOREAL_CONFLICT", "Cannot delete evidence while records reference it", {
       evidenceId,
       references: {
@@ -1232,6 +1257,7 @@ async function assertEvidenceCanBeDeleted(reader: BorealReader, evidenceId: Evid
         agentSummaries: summaryIds,
         verifications: verificationIds,
         claims: claimIds,
+        directiveAcknowledgements: directiveAcknowledgementIds,
         graphEdges: graphEdgeIds
       }
     });
@@ -1693,6 +1719,29 @@ function validateSnapshot(snapshot: ExportSnapshot, options: SnapshotValidationO
     }
     assertReferences("verification evidence", verification.meta.id, verification.evidenceIds, evidenceIds);
   }
+  for (const acknowledgement of snapshot.directiveAcknowledgements) {
+    assertArrayField(acknowledgement, "evidenceIds", "directiveAcknowledgements", acknowledgement.meta.id);
+    assertArrayField(acknowledgement, "agentSummaryIds", "directiveAcknowledgements", acknowledgement.meta.id);
+    assertArrayField(acknowledgement, "handoffIds", "directiveAcknowledgements", acknowledgement.meta.id);
+    assertReferences("directive acknowledgement evidence", acknowledgement.meta.id, acknowledgement.evidenceIds, evidenceIds);
+    assertReferences(
+      "directive acknowledgement agent summary",
+      acknowledgement.meta.id,
+      acknowledgement.agentSummaryIds,
+      summaryIds
+    );
+    if (
+      acknowledgement.subjectId &&
+      ["work", "sprint", "phase", "milestone"].includes(acknowledgement.subjectType) &&
+      !workIds.has(acknowledgement.subjectId)
+    ) {
+      throw new BorealError("BOREAL_INVALID_INPUT", "Directive acknowledgement references missing work", {
+        acknowledgementId: acknowledgement.meta.id,
+        subjectType: acknowledgement.subjectType,
+        workId: acknowledgement.subjectId
+      });
+    }
+  }
   for (const claim of snapshot.claims) {
     assertArrayField(claim, "sourceIds", "claims", claim.meta.id);
     assertArrayField(claim, "evidenceIds", "claims", claim.meta.id);
@@ -1766,6 +1815,14 @@ function validateSnapshotDirectiveLinks(
       assertDirectiveReferences("required gate directive", gate.id, gate.satisfiedBy?.directiveIds, directiveIds);
       assertDirectiveReferences("required gate force directive", gate.id, gate.force?.directiveIds, directiveIds);
     }
+  }
+  for (const acknowledgement of snapshot.directiveAcknowledgements) {
+    assertDirectiveReferences(
+      "directive acknowledgement directive",
+      acknowledgement.meta.id,
+      [acknowledgement.directiveId],
+      directiveIds
+    );
   }
 }
 
@@ -1873,6 +1930,11 @@ async function writeImportedRecords(
   for (const record of incoming.verifications.filter((entry) => importableIds.verifications.has(entry.meta.id))) {
     await writer.putVerification(record);
   }
+  for (const record of incoming.directiveAcknowledgements.filter((entry) =>
+    importableIds.directiveAcknowledgements.has(entry.meta.id)
+  )) {
+    await writer.putDirectiveAcknowledgement(record);
+  }
   for (const record of incoming.knowledgeSources.filter((entry) => importableIds.knowledgeSources.has(entry.meta.id))) {
     await writer.putKnowledgeSource(record);
   }
@@ -1974,6 +2036,32 @@ function markdownFiles(document: ExportDocument): Array<{ path: string; content:
           tags: record.meta.tags
         }) +
         `# ${record.summary}\n\nOutcome: ${record.outcome}\nKind: ${record.kind}\nSubject: ${record.subjectType}:${record.subjectId}\n\n${record.command ? `Command: \`${record.command}\`\n` : ""}${record.uri ? `URI: ${record.uri}\n` : ""}`
+    })),
+    ...document.state.directiveAcknowledgements.map((record) => ({
+      path: `directive-acknowledgements/${record.meta.id}.md`,
+      content:
+        frontmatter({
+          kind: "directive-acknowledgement",
+          id: record.meta.id,
+          directive_id: record.directiveId,
+          directive_version: record.directiveVersion,
+          directive_registry_id: record.directiveRegistryId,
+          bundle_id: record.bundleSource.bundleId,
+          bundle_registry_version: record.bundleSource.registryVersion,
+          command_path: record.commandPath,
+          subject_type: record.subjectType,
+          subject_id: record.subjectId,
+          outcome: record.outcome,
+          evidence: record.evidenceIds,
+          agent_summaries: record.agentSummaryIds,
+          handoffs: record.handoffIds,
+          reason_code: record.reasonCode,
+          acknowledged_at: record.acknowledgedAt,
+          created_at: record.meta.createdAt,
+          updated_at: record.meta.updatedAt,
+          tags: record.meta.tags
+        }) +
+        `# Directive acknowledgement ${record.meta.id}\n\nOutcome: ${record.outcome}\nDirective: ${record.directiveId}@${record.directiveVersion}\nCommand: ${record.commandPath}\nSubject: ${record.subjectType}:${record.subjectId ?? "none"}\n\n${record.reason ?? ""}\n`
     })),
     ...document.state.reviewerHeartbeats.map((record) => ({
       path: `reviewer-heartbeats/${record.meta.id}.md`,

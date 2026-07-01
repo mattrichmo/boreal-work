@@ -5,6 +5,7 @@ import type {
   CloseoutGateId,
   ContentHash,
   DecisionId,
+  DirectiveAcknowledgementId,
   EventId,
   EvidenceId,
   GraphEdgeId,
@@ -16,7 +17,13 @@ import type {
   VerificationId,
   WorkId
 } from "./ids.js";
-import type { AgentDirectiveId } from "./agent-directives.js";
+import type {
+  AgentDirectiveId,
+  AgentDirectiveRegistryVersion,
+  AgentDirectiveSubjectType,
+  AgentDirectiveTemplateId,
+  AgentDirectiveVersion
+} from "./agent-directives.js";
 import type { IsoTimestamp } from "./time.js";
 
 export const BOREAL_SCHEMA_VERSION = "boreal.runtime.v1";
@@ -224,6 +231,37 @@ export interface VerificationRecord {
   readonly evidenceIds: readonly EvidenceId[];
   readonly verifiedAt: IsoTimestamp;
   readonly notes?: string;
+}
+
+export type DirectiveAcknowledgementOutcome = "satisfied" | "deferred" | "noncompliant" | "not_applicable";
+
+export interface DirectiveAcknowledgementBundleSource {
+  readonly bundleId?: string;
+  readonly registryVersion: AgentDirectiveRegistryVersion;
+  readonly commandPath: string;
+  readonly envelopeSchema?: string;
+  readonly sourceSnapshotHash?: ContentHash;
+  readonly generatedAt: IsoTimestamp;
+}
+
+export interface DirectiveAcknowledgementRecord {
+  readonly meta: RecordMeta<DirectiveAcknowledgementId>;
+  readonly directiveId: AgentDirectiveId;
+  readonly directiveVersion: AgentDirectiveVersion;
+  readonly directiveRegistryId?: AgentDirectiveTemplateId;
+  readonly bundleSource: DirectiveAcknowledgementBundleSource;
+  readonly actor: ActorRef;
+  readonly subjectType: AgentDirectiveSubjectType;
+  readonly subjectId?: string;
+  readonly subjectTitle?: string;
+  readonly commandPath: string;
+  readonly outcome: DirectiveAcknowledgementOutcome;
+  readonly evidenceIds: readonly EvidenceId[];
+  readonly agentSummaryIds: readonly AgentSummaryId[];
+  readonly handoffIds: readonly string[];
+  readonly reasonCode?: string;
+  readonly reason?: string;
+  readonly acknowledgedAt: IsoTimestamp;
 }
 
 export type KnowledgeSourceKind = "raw" | "document" | "chat" | "code" | "artifact";

@@ -13,6 +13,7 @@ export type SQLiteCacheSection =
   | "agentSummaries"
   | "evidence"
   | "verifications"
+  | "directiveAcknowledgements"
   | "knowledgeSources"
   | "claims"
   | "decisions"
@@ -87,6 +88,7 @@ const CACHE_SECTIONS: readonly SQLiteCacheSection[] = [
   "agentSummaries",
   "evidence",
   "verifications",
+  "directiveAcknowledgements",
   "knowledgeSources",
   "claims",
   "decisions",
@@ -264,6 +266,7 @@ function canonicalCacheSnapshot(snapshot: StoreSnapshot): Record<SQLiteCacheSect
     agentSummaries: snapshot.agentSummaries ?? [],
     evidence: snapshot.evidence ?? [],
     verifications: snapshot.verifications ?? [],
+    directiveAcknowledgements: snapshot.directiveAcknowledgements ?? [],
     knowledgeSources: snapshot.knowledgeSources ?? [],
     claims: snapshot.claims ?? [],
     decisions: snapshot.decisions ?? [],

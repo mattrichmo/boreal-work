@@ -11,6 +11,7 @@ export type ClaimId = Brand<string, "ClaimId">;
 export type CloseoutGateId = Brand<string, "CloseoutGateId">;
 export type ContentHash = Brand<string, "ContentHash">;
 export type DecisionId = Brand<string, "DecisionId">;
+export type DirectiveAcknowledgementId = Brand<string, "DirectiveAcknowledgementId">;
 export type EventId = Brand<string, "EventId">;
 export type EvidenceId = Brand<string, "EvidenceId">;
 export type GraphEdgeId = Brand<string, "GraphEdgeId">;
@@ -23,6 +24,7 @@ export type VerificationId = Brand<string, "VerificationId">;
 export type WorkId = Brand<string, "WorkId">;
 
 export type EntityPrefix =
+  | "acknowledgement"
   | "agent"
   | "summary"
   | "claim"

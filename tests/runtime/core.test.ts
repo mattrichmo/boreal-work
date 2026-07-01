@@ -579,6 +579,70 @@ describe("core hashing and ids", () => {
     );
   });
 
+  it("validates directive acknowledgement records", () => {
+    const validAcknowledgement = {
+      meta: runtimeMeta("bw_acknowledgement_deadbeefdead"),
+      directiveId: "closeout.summary-required",
+      directiveVersion: "v1",
+      directiveRegistryId: "closeout.summary-required",
+      bundleSource: {
+        bundleId: "bundle.agent.finish.deadbeefdead",
+        registryVersion: "directives.v1",
+        commandPath: "agent finish",
+        envelopeSchema: "boreal.cli.agent.finish.v1",
+        sourceSnapshotHash: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        generatedAt: "2026-01-01T00:00:00.000Z"
+      },
+      actor: { id: "agent-a", kind: "agent", displayName: "agent-a" },
+      subjectType: "work",
+      subjectId: "bw_work_deadbeefdead",
+      subjectTitle: "Closeout target",
+      commandPath: "agent finish",
+      outcome: "satisfied",
+      evidenceIds: ["bw_evidence_deadbeefdead"],
+      agentSummaryIds: ["bw_summary_deadbeefdead"],
+      handoffIds: ["handoff.session.deadbeefdead"],
+      acknowledgedAt: "2026-01-01T00:00:00.000Z"
+    };
+
+    expect(runtimeSnapshotSchemaIssues({ directiveAcknowledgements: [validAcknowledgement] })).toEqual([]);
+    expect(
+      runtimeSnapshotSchemaIssues({
+        directiveAcknowledgements: [
+          {
+            ...validAcknowledgement,
+            outcome: "deferred",
+            reason: ""
+          }
+        ]
+      })
+    ).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          path: "directiveAcknowledgements[0].reason",
+          schemaId: RUNTIME_SCHEMA_IDS.directiveAcknowledgementRecord
+        })
+      ])
+    );
+    expect(
+      runtimeSnapshotSchemaIssues({
+        directiveAcknowledgements: [
+          {
+            ...validAcknowledgement,
+            evidenceIds: ["not-evidence"]
+          }
+        ]
+      })
+    ).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          path: "directiveAcknowledgements[0].evidenceIds[0]",
+          schemaId: RUNTIME_SCHEMA_IDS.directiveAcknowledgementRecord
+        })
+      ])
+    );
+  });
+
   it("resolves the machine-local project registry path without workspace scanning", () => {
     const storage = resolveProjectRegistryPaths({
       env: {},

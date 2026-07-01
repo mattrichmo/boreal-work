@@ -8,6 +8,8 @@ import type {
   ContextPack,
   DecisionId,
   DecisionRecord,
+  DirectiveAcknowledgementId,
+  DirectiveAcknowledgementRecord,
   EvidenceId,
   EvidenceRecord,
   GraphEdge,
@@ -35,6 +37,7 @@ interface StoreState {
   readonly agentSummaries: Map<AgentSummaryId, AgentSummaryRecord>;
   readonly evidence: Map<EvidenceId, EvidenceRecord>;
   readonly verifications: Map<VerificationId, VerificationRecord>;
+  readonly directiveAcknowledgements: Map<DirectiveAcknowledgementId, DirectiveAcknowledgementRecord>;
   readonly knowledgeSources: Map<KnowledgeSourceId, KnowledgeSource>;
   readonly claims: Map<ClaimId, ClaimRecord>;
   readonly decisions: Map<DecisionId, DecisionRecord>;
@@ -77,6 +80,7 @@ export interface StoreSnapshot {
   readonly agentSummaries?: readonly AgentSummaryRecord[];
   readonly evidence?: readonly EvidenceRecord[];
   readonly verifications?: readonly VerificationRecord[];
+  readonly directiveAcknowledgements?: readonly DirectiveAcknowledgementRecord[];
   readonly knowledgeSources?: readonly KnowledgeSource[];
   readonly claims?: readonly ClaimRecord[];
   readonly decisions?: readonly DecisionRecord[];
@@ -137,6 +141,18 @@ class MemoryTransaction implements BorealWriter {
 
   async listVerificationsForSubject(subjectId: string): Promise<readonly VerificationRecord[]> {
     return deepClone([...this.state.verifications.values()].filter((record) => record.subjectId === subjectId));
+  }
+
+  async getDirectiveAcknowledgement(id: DirectiveAcknowledgementId): Promise<DirectiveAcknowledgementRecord | undefined> {
+    return cloneMaybe(this.state.directiveAcknowledgements.get(id));
+  }
+
+  async listDirectiveAcknowledgements(): Promise<readonly DirectiveAcknowledgementRecord[]> {
+    return deepClone([...this.state.directiveAcknowledgements.values()]);
+  }
+
+  async listDirectiveAcknowledgementsForSubject(subjectId: string): Promise<readonly DirectiveAcknowledgementRecord[]> {
+    return deepClone([...this.state.directiveAcknowledgements.values()].filter((record) => record.subjectId === subjectId));
   }
 
   async getKnowledgeSource(id: KnowledgeSourceId): Promise<KnowledgeSource | undefined> {
@@ -265,6 +281,14 @@ class MemoryTransaction implements BorealWriter {
     return this.state.verifications.delete(id);
   }
 
+  async putDirectiveAcknowledgement(record: DirectiveAcknowledgementRecord): Promise<void> {
+    this.state.directiveAcknowledgements.set(record.meta.id, deepClone(record));
+  }
+
+  async deleteDirectiveAcknowledgement(id: DirectiveAcknowledgementId): Promise<boolean> {
+    return this.state.directiveAcknowledgements.delete(id);
+  }
+
   async putKnowledgeSource(record: KnowledgeSource): Promise<void> {
     this.state.knowledgeSources.set(record.meta.id, deepClone(record));
   }
@@ -348,6 +372,9 @@ function createState(seed?: PartialStoreSeed): StoreState {
     agentSummaries: new Map((seed?.agentSummaries ?? []).map((record) => [record.meta.id, deepClone(record)])),
     evidence: new Map((seed?.evidence ?? []).map((record) => [record.meta.id, deepClone(record)])),
     verifications: new Map((seed?.verifications ?? []).map((record) => [record.meta.id, deepClone(record)])),
+    directiveAcknowledgements: new Map(
+      (seed?.directiveAcknowledgements ?? []).map((record) => [record.meta.id, deepClone(record)])
+    ),
     knowledgeSources: new Map((seed?.knowledgeSources ?? []).map((record) => [record.meta.id, deepClone(record)])),
     claims: new Map((seed?.claims ?? []).map((record) => [record.meta.id, deepClone(record)])),
     decisions: new Map((seed?.decisions ?? []).map((record) => [record.meta.id, deepClone(record)])),
@@ -371,6 +398,7 @@ function stateToSnapshot(state: StoreState): StoreSnapshot {
     agentSummaries: [...state.agentSummaries.values()],
     evidence: [...state.evidence.values()],
     verifications: [...state.verifications.values()],
+    directiveAcknowledgements: [...state.directiveAcknowledgements.values()],
     knowledgeSources: [...state.knowledgeSources.values()],
     claims: [...state.claims.values()],
     decisions: [...state.decisions.values()],
