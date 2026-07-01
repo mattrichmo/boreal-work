@@ -78,7 +78,7 @@ describe("agent directive bundle assembly", () => {
     });
 
     expect(result.ok).toBe(false);
-    expect(result.bundle).toBeUndefined();
+    expect(result.bundle).toBeDefined();
     expect(result.selectedRegistryIds).toEqual(["memory.reconcile-source"]);
     expect(result.issues).toEqual(
       expect.arrayContaining([
@@ -96,12 +96,79 @@ describe("agent directive bundle assembly", () => {
         })
       ])
     );
+    expect(result.bundle?.missingRequired).toEqual(result.missingRequired);
     expect(result.missingRequired).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
           registryId: "memory.reconcile-source",
           family: "memory",
           requirement: "sourceIds"
+        })
+      ])
+    );
+  });
+
+  it("surfaces blocking conflicts and marks blocked directives", () => {
+    const snapshot = agentDirectiveCompilerSnapshotFixture({
+      commandPath: "agent start",
+      workStatus: "blocked",
+      activeBlockerIds: ["bw_work_blocker0001" as WorkId]
+    });
+    const result = assembleAgentDirectiveBundle({
+      snapshot,
+      dataByRegistryId: {
+        "blocked.resolve-blockers": {
+          subjectId: "bw_work_7ec3f08689c6cfb0",
+          blockerIds: ["bw_work_blocker0001"],
+          blockerTitles: ["Resolve prerequisite"],
+          recoveryWorkflow: "workflows/40-work/claim-and-finish-work.md"
+        },
+        "workflow_next.canonical-next-step": {
+          workflowRef: "workflows/40-work/claim-and-finish-work.md",
+          commandPath: "bwrk work claim",
+          requiredInputs: ["work", "command", "actor"],
+          currentStatus: "blocked",
+          subjectId: "bw_work_7ec3f08689c6cfb0"
+        }
+      }
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.selectedRegistryIds).toEqual(["blocked.resolve-blockers", "workflow_next.canonical-next-step"]);
+    expect(result.bundle?.conflicts).toEqual([
+      expect.objectContaining({
+        resolution: "blocking_wins",
+        severity: "blocking"
+      })
+    ]);
+
+    const blocker = result.bundle?.directives.find((directive) => directive.registryId === "blocked.resolve-blockers");
+    const nextStep = result.bundle?.directives.find(
+      (directive) => directive.registryId === "workflow_next.canonical-next-step"
+    );
+    expect(blocker?.lifecycle).toBe("active");
+    expect(nextStep?.lifecycle).toBe("blocked");
+    expect(result.bundle?.conflicts[0].resolvedDirectiveId).toBe(blocker?.id);
+  });
+
+  it("reports stale registry references from explicit data inputs", () => {
+    const snapshot = agentDirectiveCompilerSnapshotFixture();
+    const result = assembleAgentDirectiveBundle({
+      snapshot,
+      dataByRegistryId: {
+        "memory.reconcile-source": memoryDirectiveData(),
+        "removed.reconcile-source": {}
+      }
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.bundle).toBeDefined();
+    expect(result.issues).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          phase: "data",
+          path: "$.dataByRegistryId.removed.reconcile-source",
+          message: "must reference a known registry entry"
         })
       ])
     );
@@ -146,9 +213,17 @@ function memoryDirectiveData() {
   };
 }
 
-function agentDirectiveCompilerSnapshotFixture(options: { readonly workTitle?: string } = {}): AgentDirectiveSnapshot {
+function agentDirectiveCompilerSnapshotFixture(
+  options: {
+    readonly activeBlockerIds?: readonly WorkId[];
+    readonly commandPath?: string;
+    readonly workStatus?: "blocked" | "in_progress";
+    readonly workTitle?: string;
+  } = {}
+): AgentDirectiveSnapshot {
   const capturedAt = "2026-07-01T14:30:00.000Z" as IsoTimestamp;
   const workId = "bw_work_7ec3f08689c6cfb0" as WorkId;
+  const commandPath = options.commandPath ?? "raw add";
   return createAgentDirectiveSnapshot({
     capturedAt,
     work: {
@@ -157,13 +232,13 @@ function agentDirectiveCompilerSnapshotFixture(options: { readonly workTitle?: s
         id: workId,
         title: options.workTitle ?? "S02T02 - Implement directive bundle assembly pipeline",
         kind: "task",
-        status: "in_progress",
+        status: options.workStatus ?? "in_progress",
         priority: "critical"
       },
       labels: ["agent-directives", "sprint-02", "compiler"],
       dependencyIds: ["bw_work_0f55e2240849c396" as WorkId],
-      activeBlockerIds: [],
-      blockedByIds: [],
+      activeBlockerIds: options.activeBlockerIds ?? [],
+      blockedByIds: options.activeBlockerIds ?? [],
       childWorkIds: [],
       descendantWorkIds: [],
       openDescendantIds: []
@@ -226,8 +301,8 @@ function agentDirectiveCompilerSnapshotFixture(options: { readonly workTitle?: s
       sqliteCacheFresh: true
     },
     command: {
-      path: "raw add",
-      argv: ["raw", "add", "--json"],
+      path: commandPath,
+      argv: [...commandPath.split(" "), "--json"],
       envelopeSchema: "boreal.cli.result.v1",
       json: true,
       mutatesState: true,

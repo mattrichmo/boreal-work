@@ -6,6 +6,7 @@ import {
   type AgentDirective,
   type AgentDirectiveBundle,
   type AgentDirectiveBundleId,
+  type AgentDirectiveConflict,
   type AgentDirectiveData,
   type AgentDirectiveDataRequirement,
   type AgentDirectiveDataValue,
@@ -102,7 +103,7 @@ export function assembleAgentDirectiveBundle(
 
   const selections = selectAgentDirectiveRegistryEntries(input.snapshot, registry);
   const snapshotHash = agentDirectiveSnapshotHash(input.snapshot);
-  const dataIssues: AgentDirectiveBundleAssemblyIssue[] = [];
+  const dataIssues: AgentDirectiveBundleAssemblyIssue[] = [...staleDataReferenceIssues(input.dataByRegistryId, registry)];
   const missingRequired: AgentDirectiveMissingRequiredEntry[] = [];
   const directives: AgentDirective[] = [];
 
@@ -114,7 +115,7 @@ export function assembleAgentDirectiveBundle(
 
     if (currentDataIssues.length > 0) {
       dataIssues.push(...currentDataIssues);
-      missingRequired.push(...missingRequiredEntries(registryEntry, data, input.snapshot));
+      missingRequired.push(...missingRequiredEntries(registryEntry, currentDataIssues, input.snapshot));
       continue;
     }
 
@@ -122,14 +123,8 @@ export function assembleAgentDirectiveBundle(
   }
 
   const selectedRegistryIds = selections.map((selection) => selection.registryEntry.id);
-  if (dataIssues.length > 0) {
-    return {
-      ok: false,
-      selectedRegistryIds,
-      issues: dataIssues,
-      missingRequired
-    };
-  }
+  const conflicts = resolveAgentDirectiveConflicts(directives, registry);
+  const resolvedDirectives = applyConflictLifecycles(directives, conflicts);
 
   const bundle: AgentDirectiveBundle = {
     meta: {
@@ -141,10 +136,10 @@ export function assembleAgentDirectiveBundle(
       envelopeSchema: input.snapshot.command.envelopeSchema,
       sourceSnapshotHash: snapshotHash
     },
-    directives,
-    conflicts: [],
+    directives: resolvedDirectives,
+    conflicts,
     deprecations: [],
-    missingRequired: []
+    missingRequired
   };
   const bundleValidationIssues = agentDirectiveBundleIssues(bundle, {
     knownRegistryEntries: registry.entries
@@ -155,13 +150,13 @@ export function assembleAgentDirectiveBundle(
         ok: false,
         selectedRegistryIds,
         issues: bundleValidationIssues,
-        missingRequired: []
+        missingRequired
       }
     : {
-        ok: true,
+        ok: dataIssues.length === 0,
         selectedRegistryIds,
-        issues: [],
-        missingRequired: [],
+        issues: dataIssues,
+        missingRequired,
         bundle
       };
 }
@@ -259,23 +254,124 @@ function dataRequirementIssues(
     : [assemblyIssue("data", path, `must be ${requirement.valueType} directive data`, registryEntry.id)];
 }
 
+function staleDataReferenceIssues(
+  dataByRegistryId: AgentDirectiveAssemblyDataByRegistryId,
+  registry: AgentDirectiveRegistry
+): readonly AgentDirectiveBundleAssemblyIssue[] {
+  const knownRegistryIds = new Set<string>(registry.entries.map((entry) => entry.id));
+  return Object.keys(dataByRegistryId).flatMap((registryId) =>
+    knownRegistryIds.has(registryId)
+      ? []
+      : [
+          assemblyIssue(
+            "data",
+            `$.dataByRegistryId.${registryId}`,
+            "must reference a known registry entry"
+          )
+        ]
+  );
+}
+
 function missingRequiredEntries(
   registryEntry: AgentDirectiveRegistryEntry,
-  data: AgentDirectiveData,
+  dataIssues: readonly AgentDirectiveBundleAssemblyIssue[],
   snapshot: AgentDirectiveSnapshot
 ): readonly AgentDirectiveMissingRequiredEntry[] {
-  return registryEntry.dataRequirements.flatMap((requirement) =>
-    requirement.required && !Object.prototype.hasOwnProperty.call(data, requirement.key)
-      ? [
+  return registryEntry.dataRequirements.flatMap((requirement) => {
+    if (!requirement.required) {
+      return [];
+    }
+    const path = `$.dataByRegistryId.${registryEntry.id}.${requirement.key}`;
+    const matchingIssue = dataIssues.find((dataIssue) => dataIssue.path === path);
+    return matchingIssue === undefined
+      ? []
+      : [
           {
             registryId: registryEntry.id,
             family: registryEntry.family,
             subject: subjectForSnapshot(snapshot),
             requirement: requirement.key,
-            message: `Missing required directive data: ${requirement.key}`
+            message: matchingIssue.message
           }
-        ]
-      : []
+        ];
+  });
+}
+
+function resolveAgentDirectiveConflicts(
+  directives: readonly AgentDirective[],
+  registry: AgentDirectiveRegistry
+) {
+  const registryEntriesById = new Map<string, AgentDirectiveRegistryEntry>(
+    registry.entries.map((entry) => [entry.id, entry])
+  );
+  const directiveByRegistryId = new Map<string, AgentDirective>(
+    directives.map((directive) => [directive.registryId, directive])
+  );
+  const conflicts: AgentDirectiveConflict[] = [];
+
+  for (const directive of directives) {
+    const registryEntry = registryEntriesById.get(directive.registryId);
+    for (const supersededRegistryId of registryEntry?.supersedes ?? []) {
+      const supersededDirective = directiveByRegistryId.get(supersededRegistryId);
+      if (supersededDirective === undefined) {
+        continue;
+      }
+      conflicts.push({
+        directiveIds: [supersededDirective.id, directive.id],
+        reason: "Selected directive supersedes another selected registry entry.",
+        resolution: "registry_order",
+        resolvedDirectiveId: directive.id,
+        severity: maxSeverity([supersededDirective.severity, directive.severity])
+      });
+    }
+  }
+
+  for (const candidate of directives) {
+    if (!isBlockingDirective(candidate)) {
+      continue;
+    }
+    for (const blocked of directives) {
+      if (candidate.id === blocked.id || !blocksLowerPriorityDirective(candidate, blocked)) {
+        continue;
+      }
+      conflicts.push({
+        directiveIds: [candidate.id, blocked.id],
+        reason: "Blocking directive must be resolved before the lower-priority directive can be acted on.",
+        resolution: "blocking_wins",
+        resolvedDirectiveId: candidate.id,
+        severity: candidate.severity
+      });
+    }
+  }
+
+  return uniqueConflicts(conflicts);
+}
+
+function applyConflictLifecycles(
+  directives: readonly AgentDirective[],
+  conflicts: AgentDirectiveBundle["conflicts"]
+): readonly AgentDirective[] {
+  const blockedDirectiveIds = new Set<string>();
+  const supersededDirectiveIds = new Set<string>();
+  for (const conflict of conflicts) {
+    for (const directiveId of conflict.directiveIds) {
+      if (directiveId === conflict.resolvedDirectiveId) {
+        continue;
+      }
+      if (conflict.resolution === "registry_order") {
+        supersededDirectiveIds.add(directiveId);
+      } else {
+        blockedDirectiveIds.add(directiveId);
+      }
+    }
+  }
+
+  return directives.map((directive) =>
+    supersededDirectiveIds.has(directive.id)
+      ? { ...directive, lifecycle: "superseded" }
+      : blockedDirectiveIds.has(directive.id)
+        ? { ...directive, lifecycle: "blocked" }
+        : directive
   );
 }
 
@@ -337,6 +433,53 @@ function subjectTypesForSnapshot(snapshot: AgentDirectiveSnapshot): readonly Age
     subjectTypes.add("workspace");
   }
   return [...subjectTypes];
+}
+
+function isBlockingDirective(directive: AgentDirective): boolean {
+  return directive.severity === "blocking" || directive.lifecycle === "blocked" || directive.blocksCloseout === true;
+}
+
+function blocksLowerPriorityDirective(blockingDirective: AgentDirective, candidate: AgentDirective): boolean {
+  return (
+    severityRank(blockingDirective.severity) > severityRank(candidate.severity) &&
+    (candidate.kind === "next_step" || candidate.severity === "action" || candidate.severity === "info")
+  );
+}
+
+function maxSeverity(severities: readonly AgentDirective["severity"][]): AgentDirective["severity"] {
+  return severities.reduce((current, next) => (severityRank(next) > severityRank(current) ? next : current), "info");
+}
+
+function severityRank(severity: AgentDirective["severity"]): number {
+  switch (severity) {
+    case "blocking":
+      return 3;
+    case "required":
+      return 2;
+    case "action":
+      return 1;
+    case "info":
+      return 0;
+  }
+}
+
+function uniqueConflicts(conflicts: AgentDirectiveBundle["conflicts"]): AgentDirectiveBundle["conflicts"] {
+  const seen = new Set<string>();
+  const output: AgentDirectiveConflict[] = [];
+  for (const conflict of conflicts) {
+    const key = [
+      [...conflict.directiveIds].sort().join(","),
+      conflict.resolution,
+      conflict.resolvedDirectiveId ?? "",
+      conflict.reason
+    ].join("|");
+    if (seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    output.push(conflict);
+  }
+  return output;
 }
 
 function bundleIdForSnapshot(snapshot: AgentDirectiveSnapshot, snapshotHash: ContentHash): AgentDirectiveBundleId {
