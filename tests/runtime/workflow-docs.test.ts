@@ -11,12 +11,21 @@ const requiredWorkflowSections = [
   "## When To Use",
   "## Inputs Required",
   "## Safety Constraints",
+  "## Agent Directives",
   "## Steps",
   "## CLI Commands",
   "## Evidence And Checkpoints",
   "## Failure And Repair",
   "## Finish Criteria",
   "## Next Suggested Workflow"
+] as const;
+const directiveGuidanceMarkers = [
+  "agentDirectives",
+  'severity: "required"',
+  'severity: "blocking"',
+  "conflicts",
+  "missingRequired",
+  "typed data"
 ] as const;
 
 describe("workflow, template, and skill docs", () => {
@@ -37,6 +46,7 @@ describe("workflow, template, and skill docs", () => {
     for (const file of workflowFiles) {
       const text = await readFile(file, "utf8");
       const meta = parseFrontmatter(text, file);
+      const label = relative(rootDir, file);
 
       expect(meta.id).toMatch(/^boreal\.workflow\.[a-z0-9-]+\.v1$/u);
       expect(ids.has(meta.id)).toBe(false);
@@ -50,15 +60,19 @@ describe("workflow, template, and skill docs", () => {
         expect(commandNames.has(command), `${relative(rootDir, file)} references unknown command ${command}`).toBe(true);
       }
       for (const template of meta.templates.filter((entry) => entry !== "none")) {
-        expect(templateIds.has(template), `${relative(rootDir, file)} references unknown template ${template}`).toBe(true);
+        expect(templateIds.has(template), `${label} references unknown template ${template}`).toBe(true);
       }
       for (const section of requiredWorkflowSections) {
-        expect(text, `${relative(rootDir, file)} missing ${section}`).toContain(section);
+        expect(text, `${label} missing ${section}`).toContain(section);
+      }
+      expectHeadingCount(text, "## Agent Directives", label, 1);
+      for (const marker of directiveGuidanceMarkers) {
+        expect(text, `${label} missing directive guidance marker ${marker}`).toContain(marker);
       }
       expect(text).toContain("Never read or write a sibling repository's memory");
       expect(text).toContain("bwrk doctor --strict --json");
       for (const workflow of workflowReferencesFromMarkdown(text)) {
-        expect(workflowRefs.has(workflow), `${relative(rootDir, file)} references unknown workflow ${workflow}`).toBe(true);
+        expect(workflowRefs.has(workflow), `${label} references unknown workflow ${workflow}`).toBe(true);
       }
     }
   });
@@ -86,6 +100,7 @@ describe("workflow, template, and skill docs", () => {
       const text = await readFile(file, "utf8");
       const meta = parseFrontmatter(text, file);
       const name = meta.name as string;
+      const label = relative(rootDir, file);
       const metadataPath = join(dirname(file), "boreal.yaml");
       const openAiMetadataPath = join(dirname(file), "agents", "openai.yaml");
       const borealMeta = parseYamlDocument(await readFile(metadataPath, "utf8"), metadataPath);
@@ -105,25 +120,24 @@ describe("workflow, template, and skill docs", () => {
       expect(text).toContain("bwrk workflows show <ref>");
       expect(text).toContain("not paths that must exist inside the installed skill folder");
       expect(text).toContain("You may read this skill folder's `SKILL.md`, `boreal.yaml`");
-      expect(text).toContain("agentDirectives");
-      expect(text).toContain('severity: "required"');
-      expect(text).toContain('severity: "blocking"');
-      expect(text).toContain("missingRequired");
-      expect(text).toContain("typed data");
+      expectHeadingCount(text, "## Agent Directive Handling", label, 1);
+      for (const marker of directiveGuidanceMarkers) {
+        expect(text, `${label} missing directive guidance marker ${marker}`).toContain(marker);
+      }
 
       const markdownWorkflowRefs = workflowReferencesFromMarkdown(text);
       for (const workflow of workflows) {
-        expect(workflowRefs.has(workflow), `${relative(rootDir, file)} references unknown workflow ${workflow}`).toBe(true);
-        expect(markdownWorkflowRefs.has(workflow), `${relative(rootDir, file)} does not mention ${workflow}`).toBe(true);
+        expect(workflowRefs.has(workflow), `${label} references unknown workflow ${workflow}`).toBe(true);
+        expect(markdownWorkflowRefs.has(workflow), `${label} does not mention ${workflow}`).toBe(true);
       }
       for (const workflow of markdownWorkflowRefs) {
-        expect(workflowRefs.has(workflow), `${relative(rootDir, file)} references unknown workflow ${workflow}`).toBe(true);
+        expect(workflowRefs.has(workflow), `${label} references unknown workflow ${workflow}`).toBe(true);
       }
       expect(text).toContain("No-Leak Rules");
       expect(text).toContain("Do not read sibling");
       expect(text).toContain("Keep this skill as a thin adapter");
       for (const workflowBodyHeading of ["## Steps", "## Command Sequences", "## CLI Commands", "## Finish Criteria"]) {
-        expect(text, `${relative(rootDir, file)} duplicates ${workflowBodyHeading}`).not.toContain(workflowBodyHeading);
+        expect(text, `${label} duplicates ${workflowBodyHeading}`).not.toContain(workflowBodyHeading);
       }
     }
   });
@@ -268,4 +282,9 @@ function workflowReferencesFromMarkdown(text: string): Set<string> {
     }
   }
   return refs;
+}
+
+function expectHeadingCount(text: string, heading: string, file: string, expected: number): void {
+  const count = text.split("\n").filter((line) => line.trim() === heading).length;
+  expect(count, `${file} expected ${expected} ${heading} section(s)`).toBe(expected);
 }

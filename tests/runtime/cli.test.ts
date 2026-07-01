@@ -3712,6 +3712,7 @@ describe("bwrk cli", () => {
     expect(codexRouter).toContain('severity: "blocking"');
     expect(codexRouter).toContain("missingRequired");
     expect(codexRouter).toContain("typed data");
+    expect(codexRouter.split("\n").filter((line) => line.trim() === "## Agent Directive Handling")).toHaveLength(1);
     expect(codexRouterMetadata).toContain("skill: boreal-router");
     expect(codexOpenAiMetadata).toContain("default_prompt: \"Use $boreal-router");
     expect(doctorCodex.exitCode).toBe(0);
@@ -3743,6 +3744,7 @@ describe("bwrk cli", () => {
     expect(claudeRouter).toContain('severity: "blocking"');
     expect(claudeRouter).toContain("missingRequired");
     expect(claudeRouter).toContain("typed data");
+    expect(claudeRouter.split("\n").filter((line) => line.trim() === "## Agent Directive Handling")).toHaveLength(1);
     expect(claudeRouterMetadata).toContain("skill: boreal-router");
     expect(doctorClaude.exitCode).toBe(0);
     expect(claudeDoctorPayload).toEqual(
