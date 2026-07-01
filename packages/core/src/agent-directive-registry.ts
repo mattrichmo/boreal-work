@@ -179,7 +179,21 @@ export const AGENT_DIRECTIVE_REGISTRY: AgentDirectiveRegistry = {
         requirement("commitShas", "array", false, "Scoped checkpoint commit SHAs."),
         requirement("dirtyPathNotes", "array", false, "Dirty paths left out of scope with reasons."),
         requirement("reasonCode", "string", false, "Accepted reason code when no commit is valid."),
-        requirement("branchName", "string", false, "Branch name inspected for the checkpoint.")
+        requirement("branchName", "string", false, "Branch name inspected for the checkpoint."),
+        requirement("roots", "array", false, "Git root state records inspected for the checkpoint."),
+        requirement("protectedBranch", "boolean", false, "Whether the primary Git root is on a protected branch."),
+        requirement("detached", "boolean", false, "Whether the primary Git root is detached."),
+        requirement("clean", "boolean", false, "Whether the primary Git root is clean."),
+        requirement("repositoryChanged", "boolean", false, "Whether scoped repository changes were observed."),
+        requirement("noRepoChanges", "boolean", false, "Whether no scoped repository changes were observed."),
+        requirement("scopedChangedPaths", "array", false, "Scoped changed paths in the primary Git root."),
+        requirement("collaborationDirtyPaths", "array", false, "Out-of-scope collaboration dirty paths."),
+        requirement("blockingDirtyPaths", "array", false, "Dirty paths that block safe checkpointing."),
+        requirement("untrackedPaths", "array", false, "Untracked paths observed in the primary Git root."),
+        requirement("outOfScopeRepoNotes", "array", false, "Operator notes for dirty paths outside the current work."),
+        requirement("noCommitReason", "string", false, "Accepted reason when no commit SHA is produced."),
+        requirement("protectedBranchCaveat", "string", false, "Caveat emitted when checkpointing on a protected branch."),
+        requirement("lastCommitSha", "string", false, "Last observed commit SHA for the primary Git root.")
       ]
     }),
     entry({

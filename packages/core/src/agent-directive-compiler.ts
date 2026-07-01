@@ -78,11 +78,33 @@ export interface AgentDirectiveCloseoutDataOptions {
   readonly forceReasonCode?: AgentSummaryForceReasonCode;
   readonly forceComment?: string;
   readonly checkpointReasonCode?: string;
+  readonly noCommitReason?: string;
+  readonly outOfScopeRepoNotes?: readonly string[];
+  readonly repositoryChanged?: boolean;
   readonly validationCommand?: string;
   readonly expectedVerificationVerdict?: VerificationVerdict;
   readonly nextWorkflowRef?: string;
   readonly nextCommandPath?: string;
   readonly nextRequiredInputs?: readonly string[];
+}
+
+export interface AgentDirectiveGitDataOptions {
+  readonly checkpointReasonCode?: string;
+  readonly noCommitReason?: string;
+  readonly outOfScopeRepoNotes?: readonly string[];
+  readonly repositoryChanged?: boolean;
+}
+
+export interface AgentDirectiveGitCompilationInput extends AgentDirectiveGitDataOptions {
+  readonly snapshot: AgentDirectiveSnapshot;
+  readonly dataByRegistryId?: AgentDirectiveAssemblyDataByRegistryId;
+  readonly registry?: AgentDirectiveRegistry;
+  readonly generatedAt?: IsoTimestamp;
+  readonly bundleId?: AgentDirectiveBundleId;
+}
+
+export interface AgentDirectiveGitCompilationResult extends AgentDirectiveBundleAssemblyResult {
+  readonly dataByRegistryId: AgentDirectiveAssemblyDataByRegistryId;
 }
 
 export interface AgentDirectiveCloseoutCompilationInput extends AgentDirectiveCloseoutDataOptions {
@@ -239,11 +261,8 @@ export function closeoutDirectiveDataByRegistryId(
   const verificationIds = snapshot.evidence.verificationIds;
   const commitShas = uniqueStrings([...snapshot.git.checkpointCommitShas, ...snapshot.summary.commitShas]);
   const dirtyPathNotes = uniqueStrings([...snapshot.git.dirtyPathNotes, ...snapshot.summary.dirtyPathNotes]);
-  const primaryGitRoot = snapshot.git.roots[0];
   const nextWorkflowRef = options.nextWorkflowRef ?? snapshot.workflow.nextWorkflowRef;
   const nextCommandPath = options.nextCommandPath ?? snapshot.workflow.recommendedCommandPath;
-  const checkpointReasonCode =
-    options.checkpointReasonCode ?? inferCheckpointReasonCode(options.summaryOutcome, commitShas, dirtyPathNotes);
 
   return {
     "closeout.summary-required": dataRecord([
@@ -261,13 +280,7 @@ export function closeoutDirectiveDataByRegistryId(
       ["forceReasonCode", options.forceReasonCode],
       ["forceComment", options.forceComment]
     ]),
-    "git.checkpoint-required": dataRecord([
-      ["gitRoot", primaryGitRoot?.root],
-      ["commitShas", commitShas],
-      ["dirtyPathNotes", dirtyPathNotes],
-      ["reasonCode", checkpointReasonCode],
-      ["branchName", primaryGitRoot?.branchName]
-    ]),
+    "git.checkpoint-required": gitCheckpointDirectiveData(snapshot, options.summaryOutcome, options),
     "verification.evidence-required": dataRecord([
       ["subjectId", subjectId],
       ["command", options.validationCommand ?? latestEvidenceCommand(snapshot)],
@@ -296,6 +309,35 @@ export function closeoutDirectiveDataByRegistryId(
       ["currentStatus", snapshot.work.subject?.status],
       ["subjectId", subjectId]
     ])
+  };
+}
+
+export function gitDirectiveDataByRegistryId(
+  snapshot: AgentDirectiveSnapshot,
+  options: AgentDirectiveGitDataOptions = {}
+): AgentDirectiveAssemblyDataByRegistryId {
+  return {
+    "git.checkpoint-required": gitCheckpointDirectiveData(snapshot, undefined, options)
+  };
+}
+
+export function compileGitAgentDirectiveBundle(
+  input: AgentDirectiveGitCompilationInput
+): AgentDirectiveGitCompilationResult {
+  const dataByRegistryId = {
+    ...gitDirectiveDataByRegistryId(input.snapshot, input),
+    ...input.dataByRegistryId
+  };
+  const result = assembleAgentDirectiveBundle({
+    snapshot: input.snapshot,
+    dataByRegistryId,
+    registry: input.registry,
+    generatedAt: input.generatedAt,
+    bundleId: input.bundleId
+  });
+  return {
+    ...result,
+    dataByRegistryId
   };
 }
 
@@ -788,6 +830,80 @@ function maxNumber(values: readonly number[]): number {
   return values.length === 0 ? 0 : Math.max(...values);
 }
 
+function gitCheckpointDirectiveData(
+  snapshot: AgentDirectiveSnapshot,
+  outcome: AgentSummaryOutcome | undefined,
+  options: AgentDirectiveGitDataOptions
+): AgentDirectiveData {
+  const primaryGitRoot = snapshot.git.roots[0];
+  const commitShas = uniqueStrings([...snapshot.git.checkpointCommitShas, ...snapshot.summary.commitShas]);
+  const dirtyPathNotes = uniqueStrings([...snapshot.git.dirtyPathNotes, ...snapshot.summary.dirtyPathNotes]);
+  const scopedChangedPaths = primaryGitRoot?.scopedChangedPaths ?? [];
+  const collaborationDirtyPaths = primaryGitRoot?.collaborationDirtyPaths ?? [];
+  const blockingDirtyPaths = primaryGitRoot?.blockingDirtyPaths ?? [];
+  const untrackedPaths = primaryGitRoot?.untrackedPaths ?? [];
+  const repositoryChanged =
+    options.repositoryChanged ??
+    snapshot.git.roots.some(
+      (root) =>
+        root.scopedChangedPaths.length > 0 ||
+        root.blockingDirtyPaths.length > 0 ||
+        root.untrackedPaths.length > 0
+    );
+  const noRepoChanges = commitShas.length === 0 && repositoryChanged === false;
+  const noCommitReason =
+    options.noCommitReason ?? inferCheckpointReasonCode(outcome, commitShas, dirtyPathNotes, repositoryChanged);
+  const reasonCode = options.checkpointReasonCode ?? noCommitReason;
+
+  return dataRecord([
+    ["gitRoot", primaryGitRoot?.root],
+    ["commitShas", commitShas],
+    ["dirtyPathNotes", dirtyPathNotes],
+    ["reasonCode", reasonCode],
+    ["branchName", primaryGitRoot?.branchName],
+    ["roots", gitRootDataValues(snapshot)],
+    ["protectedBranch", primaryGitRoot?.protectedBranch],
+    ["detached", primaryGitRoot?.detached],
+    ["clean", primaryGitRoot?.clean],
+    ["repositoryChanged", repositoryChanged],
+    ["noRepoChanges", noRepoChanges],
+    ["scopedChangedPaths", pathDataValues(scopedChangedPaths)],
+    ["collaborationDirtyPaths", pathDataValues(collaborationDirtyPaths)],
+    ["blockingDirtyPaths", pathDataValues(blockingDirtyPaths)],
+    ["untrackedPaths", untrackedPaths],
+    ["outOfScopeRepoNotes", options.outOfScopeRepoNotes ?? dirtyPathNotes],
+    ["noCommitReason", noCommitReason],
+    ["protectedBranchCaveat", primaryGitRoot?.protectedBranch === true ? "protected_branch_checkpoint" : undefined],
+    ["lastCommitSha", primaryGitRoot?.lastCommitSha]
+  ]);
+}
+
+function gitRootDataValues(snapshot: AgentDirectiveSnapshot): readonly AgentDirectiveDataValue[] {
+  return snapshot.git.roots.map((root) =>
+    dataRecord([
+      ["root", root.root],
+      ["branchName", root.branchName],
+      ["detached", root.detached],
+      ["protectedBranch", root.protectedBranch],
+      ["clean", root.clean],
+      ["scopedChangedPaths", pathDataValues(root.scopedChangedPaths)],
+      ["collaborationDirtyPaths", pathDataValues(root.collaborationDirtyPaths)],
+      ["blockingDirtyPaths", pathDataValues(root.blockingDirtyPaths)],
+      ["untrackedPaths", root.untrackedPaths],
+      ["lastCommitSha", root.lastCommitSha]
+    ])
+  );
+}
+
+function pathDataValues(paths: readonly { readonly status: string; readonly path: string }[]): readonly AgentDirectiveDataValue[] {
+  return paths.map((path) =>
+    dataRecord([
+      ["status", path.status],
+      ["path", path.path]
+    ])
+  );
+}
+
 function dataRecord(entries: readonly (readonly [string, AgentDirectiveDataValue | undefined])[]): AgentDirectiveData {
   const record: Record<string, AgentDirectiveDataValue> = {};
   for (const [key, value] of entries) {
@@ -801,7 +917,8 @@ function dataRecord(entries: readonly (readonly [string, AgentDirectiveDataValue
 function inferCheckpointReasonCode(
   outcome: AgentSummaryOutcome | undefined,
   commitShas: readonly string[],
-  dirtyPathNotes: readonly string[]
+  dirtyPathNotes: readonly string[],
+  repositoryChanged: boolean
 ): string | undefined {
   if (commitShas.length > 0) {
     return "scoped_commit_recorded";
@@ -817,6 +934,9 @@ function inferCheckpointReasonCode(
   }
   if (dirtyPathNotes.length > 0) {
     return "dirty_paths_documented";
+  }
+  if (!repositoryChanged) {
+    return "no_repo_changes";
   }
   return undefined;
 }

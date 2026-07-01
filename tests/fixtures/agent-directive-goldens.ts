@@ -183,7 +183,34 @@ export const AGENT_DIRECTIVE_GOLDEN_CASES: readonly AgentDirectiveGoldenCase[] =
       commitShas: ["1111111111111111111111111111111111111111"],
       dirtyPathNotes: ["README.md left dirty because it predates this work"],
       reasonCode: "scoped_commit_recorded",
-      branchName: "main"
+      branchName: "main",
+      roots: [
+        {
+          root: "/Users/cybertron/Code/boreal-work",
+          branchName: "main",
+          detached: false,
+          protectedBranch: true,
+          clean: false,
+          scopedChangedPaths: [{ status: "M", path: "packages/core/src/agent-directive-compiler.ts" }],
+          collaborationDirtyPaths: [{ status: "M", path: "README.md" }],
+          blockingDirtyPaths: [],
+          untrackedPaths: [],
+          lastCommitSha: "1111111111111111111111111111111111111111"
+        }
+      ],
+      protectedBranch: true,
+      detached: false,
+      clean: false,
+      repositoryChanged: true,
+      noRepoChanges: false,
+      scopedChangedPaths: [{ status: "M", path: "packages/core/src/agent-directive-compiler.ts" }],
+      collaborationDirtyPaths: [{ status: "M", path: "README.md" }],
+      blockingDirtyPaths: [],
+      untrackedPaths: [],
+      outOfScopeRepoNotes: ["README.md left dirty because it predates this work"],
+      noCommitReason: "scoped_commit_recorded",
+      protectedBranchCaveat: "protected_branch_checkpoint",
+      lastCommitSha: "1111111111111111111111111111111111111111"
     },
     expected: {
       title: "Record Git checkpoint",
@@ -191,7 +218,26 @@ export const AGENT_DIRECTIVE_GOLDEN_CASES: readonly AgentDirectiveGoldenCase[] =
       kind: "obligation",
       blocksCloseout: true,
       requiredKeys: ["gitRoot"],
-      optionalKeys: ["commitShas", "dirtyPathNotes", "reasonCode", "branchName"]
+      optionalKeys: [
+        "commitShas",
+        "dirtyPathNotes",
+        "reasonCode",
+        "branchName",
+        "roots",
+        "protectedBranch",
+        "detached",
+        "clean",
+        "repositoryChanged",
+        "noRepoChanges",
+        "scopedChangedPaths",
+        "collaborationDirtyPaths",
+        "blockingDirtyPaths",
+        "untrackedPaths",
+        "outOfScopeRepoNotes",
+        "noCommitReason",
+        "protectedBranchCaveat",
+        "lastCommitSha"
+      ]
     }
   },
   {

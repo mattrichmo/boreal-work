@@ -7,6 +7,7 @@ import {
   assembleAgentDirectiveBundle,
   assertAgentDirectiveBundle,
   compileCloseoutAgentDirectiveBundle,
+  compileGitAgentDirectiveBundle,
   compileSummaryAgentDirectiveBundle,
   createAgentDirectiveSnapshot,
   selectAgentDirectiveRegistryEntries,
@@ -560,6 +561,102 @@ describe("agent directive bundle assembly", () => {
     });
   });
 
+  it("compiles git checkpoint directives with protected-branch and out-of-scope dirty-path data", () => {
+    const snapshot = agentDirectiveCompilerSnapshotFixture({
+      commandPath: "sync status",
+      commitShas: ["4444444444444444444444444444444444444444"],
+      dirtyPathNotes: ["README.md is unrelated pre-existing work"],
+      gitRoots: [
+        {
+          root: "/Users/cybertron/Code/boreal-work",
+          branchName: "main",
+          detached: false,
+          protectedBranch: true,
+          clean: false,
+          scopedChangedPaths: [{ status: "M", path: "packages/core/src/agent-directive-compiler.ts" }],
+          collaborationDirtyPaths: [{ status: "M", path: "README.md" }],
+          blockingDirtyPaths: [],
+          untrackedPaths: ["docs/architecture/PRIOR_ART_ORIGINALITY.md"],
+          lastCommitSha: "4444444444444444444444444444444444444444"
+        }
+      ]
+    });
+    const result = compileGitAgentDirectiveBundle({
+      snapshot,
+      outOfScopeRepoNotes: ["README.md is unrelated pre-existing work"]
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.selectedRegistryIds).toEqual(["git.checkpoint-required"]);
+    const git = result.bundle?.directives.find((directive) => directive.registryId === "git.checkpoint-required");
+    expect(git?.data).toMatchObject({
+      gitRoot: "/Users/cybertron/Code/boreal-work",
+      branchName: "main",
+      protectedBranch: true,
+      protectedBranchCaveat: "protected_branch_checkpoint",
+      repositoryChanged: true,
+      noRepoChanges: false,
+      reasonCode: "scoped_commit_recorded",
+      noCommitReason: "scoped_commit_recorded",
+      commitShas: ["4444444444444444444444444444444444444444"],
+      dirtyPathNotes: ["README.md is unrelated pre-existing work"],
+      outOfScopeRepoNotes: ["README.md is unrelated pre-existing work"],
+      untrackedPaths: ["docs/architecture/PRIOR_ART_ORIGINALITY.md"],
+      lastCommitSha: "4444444444444444444444444444444444444444"
+    });
+    expect(git?.data.scopedChangedPaths).toEqual([
+      { status: "M", path: "packages/core/src/agent-directive-compiler.ts" }
+    ]);
+    expect(git?.data.collaborationDirtyPaths).toEqual([{ status: "M", path: "README.md" }]);
+    expect(git?.data.roots).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          root: "/Users/cybertron/Code/boreal-work",
+          protectedBranch: true,
+          clean: false
+        })
+      ])
+    );
+  });
+
+  it("compiles no-repo-change git directives with an explicit no-commit reason", () => {
+    const snapshot = agentDirectiveCompilerSnapshotFixture({
+      commandPath: "sync status",
+      gitRoots: [
+        {
+          root: "/Users/cybertron/Code/boreal-work",
+          branchName: "codex/no-change",
+          detached: false,
+          protectedBranch: false,
+          clean: true,
+          scopedChangedPaths: [],
+          collaborationDirtyPaths: [],
+          blockingDirtyPaths: [],
+          untrackedPaths: []
+        }
+      ]
+    });
+    const result = compileGitAgentDirectiveBundle({ snapshot });
+
+    expect(result.ok).toBe(true);
+    const git = result.bundle?.directives.find((directive) => directive.registryId === "git.checkpoint-required");
+    expect(git?.data).toMatchObject({
+      branchName: "codex/no-change",
+      protectedBranch: false,
+      clean: true,
+      repositoryChanged: false,
+      noRepoChanges: true,
+      reasonCode: "no_repo_changes",
+      noCommitReason: "no_repo_changes",
+      commitShas: [],
+      dirtyPathNotes: [],
+      scopedChangedPaths: [],
+      collaborationDirtyPaths: [],
+      blockingDirtyPaths: [],
+      untrackedPaths: []
+    });
+  });
+
   it("short-circuits invalid snapshots before bundle validation", () => {
     const snapshot = {
       ...agentDirectiveCompilerSnapshotFixture(),
@@ -636,6 +733,7 @@ function agentDirectiveCompilerSnapshotFixture(
     readonly commitShas?: readonly string[];
     readonly dirtyPathNotes?: readonly string[];
     readonly evidenceIds?: readonly EvidenceId[];
+    readonly gitRoots?: AgentDirectiveSnapshot["git"]["roots"];
     readonly openDescendantIds?: readonly WorkId[];
     readonly requiredGates?: readonly AgentDirectiveGateStateSnapshot[];
     readonly subjectType?: AgentDirectiveSubjectType;
@@ -716,7 +814,7 @@ function agentDirectiveCompilerSnapshotFixture(
       }))
     },
     git: {
-      roots: [
+      roots: options.gitRoots ?? [
         {
           root: "/Users/cybertron/Code/boreal-work",
           branchName: "main",
