@@ -218,6 +218,7 @@ export interface AgentDirectiveBundleCarrier {
 
 export interface AgentDirectiveBundleValidationOptions {
   readonly knownRegistryIds?: readonly AgentDirectiveTemplateId[];
+  readonly knownRegistryEntries?: readonly AgentDirectiveRegistryEntry[];
   readonly trustedRegistryPathPrefixes?: readonly string[];
   readonly maxDataDepth?: number;
 }
@@ -255,8 +256,18 @@ export function agentDirectiveBundleIssues(
     issues.push(issue("$.directives", "directive ids must be unique"));
   }
 
+  const knownRegistryEntriesById =
+    options.knownRegistryEntries === undefined
+      ? undefined
+      : new Map<string, AgentDirectiveRegistryEntry>(
+          options.knownRegistryEntries.map((registryEntry) => [registryEntry.id, registryEntry])
+        );
   const knownRegistryIdSet =
-    options.knownRegistryIds === undefined ? undefined : new Set<string>(options.knownRegistryIds);
+    options.knownRegistryIds === undefined
+      ? knownRegistryEntriesById === undefined
+        ? undefined
+        : new Set<string>(knownRegistryEntriesById.keys())
+      : new Set<string>(options.knownRegistryIds);
   if (knownRegistryIdSet && Array.isArray(value.directives)) {
     value.directives.forEach((directive, index) => {
       if (isRecord(directive) && typeof directive.registryId === "string" && !knownRegistryIdSet.has(directive.registryId)) {
@@ -268,6 +279,15 @@ export function agentDirectiveBundleIssues(
   issues.push(...directiveReferenceIssues(value.directives, "$.directives", directiveIdSet));
   issues.push(...conflictReferenceIssues(value.conflicts, "$.conflicts", directiveIdSet));
   issues.push(...deprecationReferenceIssues(value.deprecations, "$.deprecations", directiveIdSet));
+  issues.push(
+    ...directiveRegistryLifecycleIssues(
+      value.directives,
+      "$.directives",
+      value.deprecations,
+      "$.deprecations",
+      knownRegistryEntriesById
+    )
+  );
 
   return issues;
 }
@@ -331,6 +351,7 @@ export function agentDirectiveRegistryIssues(
       }
     }
     issues.push(...registryFamilyOrderIssues(value.entries, "$.entries"));
+    issues.push(...registryLifecycleIssues(value.entries, "$.entries", entryIdSet));
     value.entries.forEach((entry, index) => {
       if (!isRecord(entry) || !Array.isArray(entry.supersedes)) {
         return;
@@ -449,6 +470,56 @@ function registryFamilyOrderIssues(
     }
     lastFamilyIndex = familyIndex;
   });
+  return issues;
+}
+
+function registryLifecycleIssues(
+  entries: readonly unknown[],
+  path: string,
+  entryIdSet: ReadonlySet<string>
+): readonly AgentDirectiveBundleValidationIssue[] {
+  const registryEntriesById = new Map(
+    entries.flatMap((entry) =>
+      isRecord(entry) && typeof entry.id === "string" ? [[entry.id, entry] as const] : []
+    )
+  );
+  const issues: AgentDirectiveBundleValidationIssue[] = [];
+
+  entries.forEach((entry, index) => {
+    if (!isRecord(entry)) {
+      return;
+    }
+    if (entry.lifecycle === "satisfied" || entry.lifecycle === "acknowledged") {
+      issues.push(issue(`${path}[${index}].lifecycle`, "must not use runtime terminal lifecycle for registry entries"));
+    }
+    if (typeof entry.lifecycle === "string" && entry.lifecycle !== "active" && entry.defaultLifecycle === "active") {
+      issues.push(issue(`${path}[${index}].defaultLifecycle`, "must not be active for a non-active registry entry"));
+    }
+    if (entry.lifecycle === "active" && entry.defaultLifecycle !== "active") {
+      issues.push(issue(`${path}[${index}].defaultLifecycle`, "must be active for an active registry entry"));
+    }
+    if (!Array.isArray(entry.supersedes)) {
+      return;
+    }
+    entry.supersedes.forEach((supersededId, supersedesIndex) => {
+      if (typeof supersededId !== "string") {
+        return;
+      }
+      if (supersededId === entry.id) {
+        issues.push(issue(`${path}[${index}].supersedes[${supersedesIndex}]`, "must not reference itself"));
+      }
+      if (!entryIdSet.has(supersededId)) {
+        return;
+      }
+      const supersededEntry = registryEntriesById.get(supersededId);
+      if (isRecord(supersededEntry) && supersededEntry.lifecycle !== "superseded") {
+        issues.push(
+          issue(`${path}[${index}].supersedes[${supersedesIndex}]`, "must reference a superseded registry entry")
+        );
+      }
+    });
+  });
+
   return issues;
 }
 
@@ -711,6 +782,55 @@ function deprecationReferenceIssues(
     if (typeof deprecation.deprecatedBy === "string" && !directiveIds.has(deprecation.deprecatedBy)) {
       issues.push(issue(`${path}[${index}].deprecatedBy`, "must reference a directive id from this bundle"));
     }
+    return issues;
+  });
+}
+
+function directiveRegistryLifecycleIssues(
+  directives: unknown,
+  directivesPath: string,
+  deprecations: unknown,
+  deprecationsPath: string,
+  knownRegistryEntriesById: ReadonlyMap<string, AgentDirectiveRegistryEntry> | undefined
+): readonly AgentDirectiveBundleValidationIssue[] {
+  if (knownRegistryEntriesById === undefined || !Array.isArray(directives)) {
+    return [];
+  }
+
+  const deprecatedDirectiveIds = new Set(
+    Array.isArray(deprecations)
+      ? deprecations.flatMap((deprecation) =>
+          isRecord(deprecation) && typeof deprecation.directiveId === "string" ? [deprecation.directiveId] : []
+        )
+      : []
+  );
+
+  return directives.flatMap((directive, index) => {
+    if (!isRecord(directive) || typeof directive.registryId !== "string") {
+      return [];
+    }
+    const registryEntry = knownRegistryEntriesById.get(directive.registryId);
+    if (registryEntry === undefined || registryEntry.lifecycle === "active") {
+      return [];
+    }
+
+    const issues: AgentDirectiveBundleValidationIssue[] = [];
+    if (registryEntry.lifecycle === "superseded") {
+      if (directive.lifecycle !== "superseded") {
+        issues.push(
+          issue(
+            `${directivesPath}[${index}].lifecycle`,
+            "must be superseded when emitting a superseded registry entry"
+          )
+        );
+      }
+      if (typeof directive.id === "string" && !deprecatedDirectiveIds.has(directive.id)) {
+        issues.push(issue(deprecationsPath, "must include deprecation metadata for superseded directive emission"));
+      }
+      return issues;
+    }
+
+    issues.push(issue(`${directivesPath}[${index}].registryId`, "must reference an active registry entry"));
     return issues;
   });
 }
