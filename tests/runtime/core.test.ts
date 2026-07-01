@@ -5,7 +5,11 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
 import {
+  AGENT_DIRECTIVE_BUNDLE_SCHEMA_VERSION,
   BorealError,
+  agentDirectiveBundleIssues,
+  agentDirectiveDataIssues,
+  assertAgentDirectiveBundle,
   assertMcpResourcePathAllowed,
   assertMcpResourceRealPathAllowed,
   bindMcpProjectBoundary,
@@ -31,6 +35,13 @@ import {
   RUNTIME_SCHEMA_IDS,
   runtimeSnapshotSchemaIssues,
   safeParseJson,
+  type AgentDirectiveBundle,
+  type AgentDirectiveBundleId,
+  type AgentDirectiveId,
+  type AgentDirectiveRegistryVersion,
+  type AgentDirectiveTemplateId,
+  type AgentDirectiveVersion,
+  type ContentHash,
   type EventId,
   type EvidenceId,
   type ProjectRegistryDocument,
@@ -121,6 +132,152 @@ describe("core hashing and ids", () => {
     expect(() => normalizeMachineString("bad\u202etitle", "title")).toThrow(
       expect.objectContaining({ code: "BOREAL_UNSAFE_UNICODE" })
     );
+  });
+
+  it("validates safe agent directive bundles", () => {
+    const bundle = agentDirectiveBundleFixture();
+
+    expect(agentDirectiveBundleIssues(bundle)).toEqual([]);
+    expect(() => assertAgentDirectiveBundle(bundle)).not.toThrow();
+    expect(agentDirectiveDataIssues(bundle.directives[0].data)).toEqual([]);
+  });
+
+  it("rejects unsafe agent directive bundle shapes", () => {
+    const bundle = agentDirectiveBundleFixture();
+    const knownRegistryIds = ["closeout.summary-required" as AgentDirectiveTemplateId];
+    const missingInstruction = { ...bundle.directives[0] } as Record<string, unknown>;
+    delete missingInstruction.instruction;
+
+    expect(
+      agentDirectiveBundleIssues({
+        ...bundle,
+        conflicts: [
+          {
+            directiveIds: ["closeout.summary-required", "git.checkpoint-required"],
+            reason: "Prefer closeout summary after checkpoint",
+            resolution: "registry_order",
+            severity: "required"
+          }
+        ]
+      })
+    ).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          path: "$.conflicts[0].directiveIds[1]",
+          message: "must reference a directive id from this bundle"
+        })
+      ])
+    );
+
+    expect(
+      agentDirectiveBundleIssues(
+        {
+          ...bundle,
+          directives: [
+            {
+              ...bundle.directives[0],
+              registryId: "git.checkpoint-required"
+            }
+          ]
+        },
+        { knownRegistryIds }
+      )
+    ).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          path: "$.directives[0].registryId",
+          message: "must reference a known registry id"
+        })
+      ])
+    );
+
+    expect(
+      agentDirectiveBundleIssues({
+        ...bundle,
+        directives: [
+          {
+            ...bundle.directives[0],
+            severity: "urgent",
+            audience: "bot",
+            kind: "imperative"
+          }
+        ]
+      })
+    ).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ path: "$.directives[0].severity" }),
+        expect.objectContaining({ path: "$.directives[0].audience" }),
+        expect.objectContaining({ path: "$.directives[0].kind" })
+      ])
+    );
+
+    expect(
+      agentDirectiveBundleIssues({
+        ...bundle,
+        directives: [
+          {
+            ...bundle.directives[0],
+            source: {
+              ...bundle.directives[0].source,
+              registryPath: "../memory/raw/index.jsonl"
+            }
+          }
+        ]
+      })
+    ).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          path: "$.directives[0].source.registryPath",
+          message: "must be a relative checked-in registry path"
+        })
+      ])
+    );
+
+    expect(
+      agentDirectiveBundleIssues({
+        ...bundle,
+        directives: [
+          {
+            ...bundle.directives[0],
+            data: {
+              summary: "bad\u202esummary",
+              count: Number.NaN
+            }
+          }
+        ]
+      })
+    ).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ path: "$.directives[0].data.summary" }),
+        expect.objectContaining({ path: "$.directives[0].data.count", message: "must be a finite number" })
+      ])
+    );
+
+    expect(
+      agentDirectiveBundleIssues({
+        ...bundle,
+        directives: [missingInstruction]
+      })
+    ).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          path: "$.directives[0].instruction",
+          message: "must be a non-empty string"
+        })
+      ])
+    );
+
+    expect(() =>
+      assertAgentDirectiveBundle({
+        ...bundle,
+        directives: [
+          {
+            ...bundle.directives[0],
+            data: ["not", "an", "object"]
+          }
+        ]
+      })
+    ).toThrow(expect.objectContaining({ code: "BOREAL_INVALID_INPUT" }));
   });
 
   it("reports schema validation issues for malformed runtime snapshots", () => {
@@ -668,6 +825,63 @@ function runtimeMeta(id: string): Record<string, unknown> {
     updatedBy: { id: "agent-a", kind: "agent", displayName: "agent-a" },
     sourceRefs: [],
     tags: []
+  };
+}
+
+function agentDirectiveBundleFixture(): AgentDirectiveBundle {
+  return {
+    meta: {
+      id: "bundle.closeout-summary" as AgentDirectiveBundleId,
+      schemaVersion: AGENT_DIRECTIVE_BUNDLE_SCHEMA_VERSION,
+      registryVersion: "directives.v1" as AgentDirectiveRegistryVersion,
+      generatedAt: "2026-01-01T00:00:00.000Z",
+      commandPath: "agent finish",
+      envelopeSchema: "boreal.cli.agent.finish.v1"
+    },
+    directives: [
+      {
+        id: "closeout.summary-required" as AgentDirectiveId,
+        registryId: "closeout.summary-required" as AgentDirectiveTemplateId,
+        version: "v1" as AgentDirectiveVersion,
+        family: "closeout",
+        severity: "required",
+        audience: "agent",
+        kind: "summary",
+        lifecycle: "active",
+        title: "Respond with closeout summary",
+        instruction: "Respond to the user with the verified closeout summary in your own words.",
+        data: {
+          workId: "bw_work_deadbeefdead",
+          evidenceIds: ["bw_evidence_deadbeefdead"],
+          summaryUri: "memory://agent-summaries/works/bw_work_deadbeefdead/bw_summary_deadbeefdead.md"
+        },
+        source: {
+          registryVersion: "directives.v1" as AgentDirectiveRegistryVersion,
+          registryPath: "packages/core/src/agent-directive-registry.ts",
+          selectedBy: ["closeout.final-summary"],
+          snapshotHash: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" as ContentHash
+        },
+        subject: {
+          type: "work",
+          id: "bw_work_deadbeefdead",
+          title: "Close work"
+        },
+        appliesTo: {
+          commandPaths: ["agent finish", "work close"],
+          subjectTypes: ["work"],
+          workStatuses: ["in_progress"]
+        },
+        blocksCloseout: true,
+        acknowledgement: {
+          requiredBefore: "close",
+          evidenceKind: "note",
+          message: "A final user-facing closeout summary is required before close."
+        }
+      }
+    ],
+    conflicts: [],
+    deprecations: [],
+    missingRequired: []
   };
 }
 
