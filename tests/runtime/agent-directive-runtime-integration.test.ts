@@ -120,7 +120,67 @@ describe("agent directive runtime compiler integration", () => {
       expect(obligations.summary.emittedRegistryIds, runtimeCase.context).toEqual(runtimeCase.expectedRegistryIds);
       expect(obligations.agentDirectives, runtimeCase.context).toHaveLength(1);
       expect(obligations.issues, runtimeCase.context).toEqual([]);
+      if (runtimeCase.context === "work") {
+        expect(obligations.summary.blockingCount).toBe(1);
+        expect(obligations.summary.conflictCount).toBe(1);
+        expect(obligations.agentDirectives[0]?.directives).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({ registryId: "workflow_next.canonical-next-step", lifecycle: "blocked" })
+          ])
+        );
+      }
     }
+  });
+
+  it("fails closed for missing subject identifiers and stale registry data", () => {
+    const validSnapshot = snapshotFixture({ commandPath: "work show" });
+    const missingSubject = compileAgentRuntimeDirectiveObligations({
+      context: "work",
+      snapshot: {
+        ...validSnapshot,
+        work: {
+          ...validSnapshot.work,
+          subject: validSnapshot.work.subject
+            ? {
+                ...validSnapshot.work.subject,
+                id: ""
+              }
+            : undefined
+        }
+      }
+    });
+    const staleData = compileAgentRuntimeDirectiveObligations({
+      context: "health",
+      snapshot: snapshotFixture({
+        commandPath: "sync refresh",
+        subjectType: "workspace"
+      }),
+      dataByRegistryId: {
+        "removed.directive-template": {}
+      }
+    });
+
+    expect(missingSubject.ok).toBe(false);
+    expect(missingSubject.agentDirectives).toEqual([]);
+    expect(missingSubject.issues).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          phase: "snapshot",
+          path: "$.work.subject.id",
+          message: "must be a non-empty string"
+        })
+      ])
+    );
+    expect(staleData.ok).toBe(false);
+    expect(staleData.issues).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          phase: "data",
+          path: "$.dataByRegistryId.removed.directive-template",
+          message: "must reference a known registry entry"
+        })
+      ])
+    );
   });
 
   it("emits deterministic valid bundles across runtime compiler families without trusting runtime text", () => {

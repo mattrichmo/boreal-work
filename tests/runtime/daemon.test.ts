@@ -161,6 +161,33 @@ describe("boreal daemon runtime", () => {
       })
     ]);
   });
+
+  it("reports stale directive data for daemon callers without hiding emitted blockers", async () => {
+    const root = await makeProjectWorkspace();
+    const result = await compileDaemonDirectiveObligations({
+      workspaceRoot: root,
+      context: "work",
+      snapshot: daemonWorkSnapshot(root),
+      dataByRegistryId: {
+        "removed.directive-template": {}
+      }
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.summary.emittedRegistryIds).toEqual([
+      "blocked.resolve-blockers",
+      "workflow_next.canonical-next-step"
+    ]);
+    expect(result.issues).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          phase: "data",
+          path: "$.dataByRegistryId.removed.directive-template",
+          message: "must reference a known registry entry"
+        })
+      ])
+    );
+  });
 });
 
 async function makeProjectWorkspace(): Promise<string> {

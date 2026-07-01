@@ -101,6 +101,37 @@ describe("boreal MCP server", () => {
                   subjectTypes: ["work"]
                 },
                 supersedes: []
+              },
+              {
+                id: "directive.workflow_next.fixture",
+                registryId: "workflow_next.canonical-next-step",
+                version: "v1",
+                family: "workflow_next",
+                severity: "action",
+                audience: "agent",
+                kind: "next_step",
+                lifecycle: "blocked",
+                title: "Follow next canonical workflow",
+                instruction: "Follow the canonical next workflow after blockers are resolved.",
+                data: {
+                  workflowRef: "workflows/40-work/link-dependencies.md",
+                  commandPath: "bwrk dep tree bw_work_blocked --json"
+                },
+                source: {
+                  registryVersion: "directives.v1",
+                  registryPath: "packages/core/src/agent-directive-registry.ts",
+                  selectedBy: ["applies.command_path"]
+                },
+                subject: {
+                  type: "work",
+                  id: "bw_work_blocked",
+                  title: "Blocked work"
+                },
+                appliesTo: {
+                  commandPaths: ["work show"],
+                  subjectTypes: ["work"]
+                },
+                supersedes: []
               }
             ],
             conflicts: [
@@ -139,8 +170,11 @@ describe("boreal MCP server", () => {
           readonly conflictCount: number;
           readonly missingRequiredCount: number;
           readonly missingRequiredRegistryIds: readonly string[];
+          readonly registryIds: readonly string[];
         };
-        readonly agentDirectives: readonly unknown[];
+        readonly agentDirectives: readonly {
+          readonly directives: readonly { readonly registryId: string; readonly lifecycle: string }[];
+        }[];
       };
     };
 
@@ -149,13 +183,34 @@ describe("boreal MCP server", () => {
     expect(payload.result.agentDirectives.length).toBe(1);
     expect(payload.result.summary).toEqual(
       expect.objectContaining({
-        directiveCount: 1,
+        directiveCount: 2,
         blockingCount: 1,
         conflictCount: 1,
         missingRequiredCount: 1,
+        registryIds: ["blocked.resolve-blockers", "workflow_next.canonical-next-step"],
         missingRequiredRegistryIds: ["closeout.summary-required"]
       })
     );
+    expect(payload.result.agentDirectives[0]?.directives).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ registryId: "workflow_next.canonical-next-step", lifecycle: "blocked" })
+      ])
+    );
+  });
+
+  it("fails current directive requests with a missing subject before CLI execution", async () => {
+    const runner = fakeRunner({});
+    const result = await callBorealMcpTool(
+      "boreal_directives_current",
+      { workspaceRoot: WORKSPACE, memoryRoot: MEMORY },
+      { runner }
+    );
+    const payload = result.structuredContent as { readonly code: string; readonly details?: { readonly name?: string } };
+
+    expect(result.isError).toBe(true);
+    expect(payload.code).toBe("BOREAL_INVALID_INPUT");
+    expect(payload.details?.name).toBe("workId");
+    expect(runner.calls).toEqual([]);
   });
 
   it("wraps directive compile and explain CLI commands for MCP clients", async () => {
@@ -217,6 +272,43 @@ describe("boreal MCP server", () => {
     expect(explained.isError).toBeUndefined();
     expect(explainPayload.result.emitted).toBe(true);
     expect(explainPayload.result.reason).toBe("emitted with conflict resolution metadata");
+  });
+
+  it("passes stale registry directive compile diagnostics through MCP unchanged", async () => {
+    const runner = fakeRunner({
+      "--workspace /workspace/boreal-work directives compile --fixture blocked-work --json": {
+        schemaVersion: "boreal.cli.directives.compile.v1",
+        commandPath: "work show",
+        selectedRegistryIds: ["blocked.resolve-blockers"],
+        issues: [
+          {
+            kind: "stale_registry_version",
+            path: "$.meta.registryVersion",
+            message: "must be current registry version directives.v1"
+          }
+        ],
+        missingRequired: [],
+        bundle: {
+          directives: [],
+          conflicts: []
+        }
+      }
+    });
+
+    const result = await callBorealMcpTool(
+      "boreal_directives_compile",
+      { workspaceRoot: WORKSPACE, memoryRoot: MEMORY, fixture: "blocked-work" },
+      { runner }
+    );
+    const payload = result.structuredContent as {
+      readonly result: { readonly issues: readonly [{ readonly kind: string; readonly path: string }] };
+    };
+
+    expect(result.isError).toBeUndefined();
+    expect(payload.result.issues).toEqual([
+      expect.objectContaining({ kind: "stale_registry_version", path: "$.meta.registryVersion" })
+    ]);
+    expect(runner.calls).toEqual(["--workspace /workspace/boreal-work directives compile --fixture blocked-work --json"]);
   });
 
   it("fails closed before CLI execution when project selection crosses registry roots", async () => {
