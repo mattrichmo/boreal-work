@@ -4,6 +4,7 @@ import { mkdir } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
 
 import {
+  AGENT_DIRECTIVE_SUBJECT_TYPES,
   AGENT_DIRECTIVE_FAMILIES,
   AGENT_DIRECTIVE_REGISTRY,
   AGENT_DIRECTIVE_SNAPSHOT_CONTEXT_KEYS,
@@ -28,16 +29,20 @@ import {
   randomId,
   recoveryDirectiveDataByRegistryId,
   runtimeSnapshotSchemaIssues,
+  selectAgentDirectiveRegistryEntries,
   summaryDirectiveDataByRegistryId,
   touchRecord,
   withContentHash,
   type ActorRef,
   type ActorKind,
+  type AgentDirectiveAssemblyDataByRegistryId,
   type AgentDirectiveFamily,
   type AgentDirectiveBundle,
+  type AgentDirectiveBundleAssemblyIssue,
   type AgentDirectiveDiagnosticSnapshot,
   type AgentDirectiveGateStateSnapshot,
   type AgentDirectiveLifecycle,
+  type AgentDirectiveMissingRequiredEntry,
   type AgentDirectiveRegistry,
   type AgentDirectiveRegistryEntry,
   type AgentDirectiveSubjectType,
@@ -64,6 +69,7 @@ import {
   type DecisionRecord,
   type DecisionStatus,
   type EventId,
+  type EvidenceId,
   type EvidenceRecord,
   type EvidenceKind,
   type EvidenceOutcome,
@@ -1441,6 +1447,76 @@ interface DirectiveRegistryShowResult {
   readonly directive: DirectiveRegistryShowEntry;
 }
 
+const DIRECTIVE_DEBUG_FIXTURE_IDS = ["blocked-work", "closeout-success", "doctor-recovery", "session-handoff"] as const;
+
+type DirectiveDebugFixtureId = (typeof DIRECTIVE_DEBUG_FIXTURE_IDS)[number];
+type DirectiveRenderFormat = "markdown" | "json";
+
+interface DirectiveCompileSelection {
+  readonly registryId: AgentDirectiveTemplateId;
+  readonly selectedBy: readonly string[];
+}
+
+interface DirectiveDebugInput {
+  readonly fixture?: DirectiveDebugFixtureId;
+  readonly snapshot: AgentDirectiveSnapshot;
+  readonly dataByRegistryId: AgentDirectiveAssemblyDataByRegistryId;
+  readonly selections: readonly DirectiveCompileSelection[];
+}
+
+interface DirectiveCompileResult {
+  readonly schemaVersion: "boreal.cli.directives.compile.v1";
+  readonly registryVersion: string;
+  readonly sourcePath: string;
+  readonly fixture?: DirectiveDebugFixtureId;
+  readonly commandPath: string;
+  readonly subject?: AgentDirectiveSnapshot["work"]["subject"];
+  readonly selectedRegistryIds: readonly AgentDirectiveTemplateId[];
+  readonly selections: readonly DirectiveCompileSelection[];
+  readonly issueCount: number;
+  readonly issues: readonly AgentDirectiveBundleAssemblyIssue[];
+  readonly missingRequired: readonly AgentDirectiveMissingRequiredEntry[];
+  readonly dataByRegistryId: AgentDirectiveAssemblyDataByRegistryId;
+  readonly bundle?: AgentDirectiveBundle;
+}
+
+interface DirectiveRenderResult {
+  readonly schemaVersion: "boreal.cli.directives.render.v1";
+  readonly registryVersion: string;
+  readonly sourcePath: string;
+  readonly fixture: DirectiveDebugFixtureId;
+  readonly format: DirectiveRenderFormat;
+  readonly content: string;
+  readonly compile: DirectiveCompileResult;
+}
+
+interface DirectiveExplainResult {
+  readonly schemaVersion: "boreal.cli.directives.explain.v1";
+  readonly registryVersion: string;
+  readonly sourcePath: string;
+  readonly fixture?: DirectiveDebugFixtureId;
+  readonly directiveId: AgentDirectiveTemplateId;
+  readonly commandPath: string;
+  readonly subjectTypes: readonly AgentDirectiveSubjectType[];
+  readonly selected: boolean;
+  readonly emitted: boolean;
+  readonly reason: string;
+  readonly selectedBy: readonly string[];
+  readonly selectorChecks: {
+    readonly lifecycleActive: boolean;
+    readonly commandMatches: boolean;
+    readonly subjectTypeMatches: boolean;
+    readonly workStatusMatches: boolean;
+    readonly labelMatches: boolean;
+    readonly gateMatches: boolean;
+  };
+  readonly dataPresent: boolean;
+  readonly issues: readonly AgentDirectiveBundleAssemblyIssue[];
+  readonly missingRequired: readonly AgentDirectiveMissingRequiredEntry[];
+  readonly conflicts: AgentDirectiveBundle["conflicts"];
+  readonly directive?: AgentDirectiveBundle["directives"][number];
+}
+
 function directivesCommand(
   action: string | undefined,
   rest: readonly string[],
@@ -1457,6 +1533,21 @@ function directivesCommand(
     case "show": {
       const result = showDirectiveRegistryEntry(requiredPositional(rest, 0, "directive id"));
       output.write(json ? formatRecord(result, true) : formatDirectiveRegistryShow(result));
+      return { exitCode: 0 };
+    }
+    case "compile": {
+      const result = compileDirectiveDebugBundle(args);
+      output.write(json ? formatRecord(result, true) : formatDirectiveCompile(result));
+      return { exitCode: 0 };
+    }
+    case "render": {
+      const result = renderDirectiveDebugBundle(args);
+      output.write(json ? formatRecord(result, true) : result.content);
+      return { exitCode: 0 };
+    }
+    case "explain": {
+      const result = explainDirectiveEmission(requiredPositional(rest, 0, "directive id"), args);
+      output.write(json ? formatRecord(result, true) : formatDirectiveExplain(result));
       return { exitCode: 0 };
     }
     default:
@@ -1498,6 +1589,605 @@ function showDirectiveRegistryEntry(id: string): DirectiveRegistryShowResult {
     sourcePath: "packages/core/src/agent-directive-registry.ts",
     directive: directiveShowEntry(entry, replacements)
   };
+}
+
+function compileDirectiveDebugBundle(args: ParsedArgs): DirectiveCompileResult {
+  const input = directiveDebugInput(args, { defaultFixture: "blocked-work" });
+  const result = assembleAgentDirectiveBundle({
+    snapshot: input.snapshot,
+    dataByRegistryId: input.dataByRegistryId
+  });
+  return {
+    schemaVersion: "boreal.cli.directives.compile.v1",
+    registryVersion: AGENT_DIRECTIVE_REGISTRY.version,
+    sourcePath: "packages/core/src/agent-directive-registry.ts",
+    ...(input.fixture ? { fixture: input.fixture } : {}),
+    commandPath: input.snapshot.command.path,
+    ...(input.snapshot.work.subject ? { subject: input.snapshot.work.subject } : {}),
+    selectedRegistryIds: result.selectedRegistryIds,
+    selections: input.selections,
+    issueCount: result.issues.length,
+    issues: result.issues,
+    missingRequired: result.missingRequired,
+    dataByRegistryId: input.dataByRegistryId,
+    ...(result.bundle ? { bundle: result.bundle } : {})
+  };
+}
+
+function renderDirectiveDebugBundle(args: ParsedArgs): DirectiveRenderResult {
+  const fixture = directiveDebugFixtureId(args) ?? "blocked-work";
+  const format = parseDirectiveRenderFormat(flagValue(args, "format"));
+  const compile = compileDirectiveDebugBundle(argsWithDirectiveFixture(args, fixture));
+  const content = format === "json" ? `${JSON.stringify(compile.bundle ?? {}, null, 2)}\n` : renderDirectiveBundleMarkdown(compile);
+  return {
+    schemaVersion: "boreal.cli.directives.render.v1",
+    registryVersion: AGENT_DIRECTIVE_REGISTRY.version,
+    sourcePath: "packages/core/src/agent-directive-registry.ts",
+    fixture,
+    format,
+    content,
+    compile
+  };
+}
+
+function explainDirectiveEmission(id: string, args: ParsedArgs): DirectiveExplainResult {
+  const entry = AGENT_DIRECTIVE_REGISTRY.entries.find((candidate) => candidate.id === id);
+  if (!entry) {
+    throw new BorealError("BOREAL_NOT_FOUND", `Directive registry entry not found: ${id}`);
+  }
+  const input = directiveDebugInput(args, { defaultFixture: "blocked-work" });
+  const result = assembleAgentDirectiveBundle({
+    snapshot: input.snapshot,
+    dataByRegistryId: input.dataByRegistryId
+  });
+  const directive = result.bundle?.directives.find((candidate) => candidate.registryId === entry.id);
+  const selected = result.selectedRegistryIds.includes(entry.id);
+  const issues = result.issues.filter((issue) => issue.registryId === entry.id);
+  const missingRequired = result.missingRequired.filter((missing) => missing.registryId === entry.id);
+  const selectedBy = directive?.source.selectedBy ?? input.selections.find((selection) => selection.registryId === entry.id)?.selectedBy ?? [];
+  const conflicts = result.bundle?.conflicts.filter((conflict) =>
+    directive ? conflict.directiveIds.includes(directive.id) : conflict.directiveIds.some((directiveId) => directiveId.includes(entry.id))
+  ) ?? [];
+  return {
+    schemaVersion: "boreal.cli.directives.explain.v1",
+    registryVersion: AGENT_DIRECTIVE_REGISTRY.version,
+    sourcePath: "packages/core/src/agent-directive-registry.ts",
+    ...(input.fixture ? { fixture: input.fixture } : {}),
+    directiveId: entry.id,
+    commandPath: input.snapshot.command.path,
+    subjectTypes: directiveDebugSubjectTypes(input.snapshot),
+    selected,
+    emitted: directive !== undefined,
+    reason: directiveExplainReason({ selected, emitted: directive !== undefined, issues, missingRequired, conflicts }),
+    selectedBy,
+    selectorChecks: directiveSelectorChecks(entry, input.snapshot),
+    dataPresent: input.dataByRegistryId[entry.id] !== undefined,
+    issues,
+    missingRequired,
+    conflicts,
+    ...(directive ? { directive } : {})
+  };
+}
+
+function directiveDebugInput(
+  args: ParsedArgs,
+  options: { readonly defaultFixture?: DirectiveDebugFixtureId } = {}
+): DirectiveDebugInput {
+  const fixture = directiveDebugFixtureId(args) ?? (flagValue(args, "command") ? undefined : options.defaultFixture);
+  const baseSnapshot = fixture ? directiveDebugFixtureSnapshot(fixture) : directiveDebugBaseSnapshot();
+  const snapshot = applyDirectiveDebugOverrides(baseSnapshot, args);
+  const dataByRegistryId = directiveDebugDataByRegistryId(snapshot);
+  const selections = selectAgentDirectiveRegistryEntries(snapshot, AGENT_DIRECTIVE_REGISTRY, {
+    dataByRegistryId
+  }).map((selection) => ({
+    registryId: selection.registryEntry.id,
+    selectedBy: selection.selectedBy
+  }));
+  return {
+    ...(fixture ? { fixture } : {}),
+    snapshot,
+    dataByRegistryId,
+    selections
+  };
+}
+
+function directiveDebugDataByRegistryId(snapshot: AgentDirectiveSnapshot): AgentDirectiveAssemblyDataByRegistryId {
+  return {
+    ...closeoutDirectiveDataByRegistryId(snapshot),
+    ...summaryDirectiveDataByRegistryId(snapshot),
+    ...gitDirectiveDataByRegistryId(snapshot),
+    ...handoffDirectiveDataByRegistryId(snapshot),
+    ...recoveryDirectiveDataByRegistryId(snapshot)
+  };
+}
+
+function directiveDebugFixtureId(args: ParsedArgs): DirectiveDebugFixtureId | undefined {
+  const fixture = flagValue(args, "fixture");
+  if (!fixture) {
+    return undefined;
+  }
+  if ((DIRECTIVE_DEBUG_FIXTURE_IDS as readonly string[]).includes(fixture)) {
+    return fixture as DirectiveDebugFixtureId;
+  }
+  throw new BorealError("BOREAL_INVALID_INPUT", `Unknown directive fixture: ${fixture}`, {
+    fixture,
+    validFixtures: DIRECTIVE_DEBUG_FIXTURE_IDS
+  });
+}
+
+function argsWithDirectiveFixture(args: ParsedArgs, fixture: DirectiveDebugFixtureId): ParsedArgs {
+  if (flagValue(args, "fixture")) {
+    return args;
+  }
+  const flags = new Map(args.flags);
+  flags.set("fixture", [fixture]);
+  return { command: args.command, flags };
+}
+
+function directiveDebugFixtureSnapshot(fixture: DirectiveDebugFixtureId): AgentDirectiveSnapshot {
+  switch (fixture) {
+    case "blocked-work":
+      return directiveDebugBaseSnapshot({
+        commandPath: "work show",
+        subjectType: "work",
+        subjectId: "bw_work_blocked00000001",
+        subjectTitle: "Blocked fixture work",
+        workStatus: "blocked",
+        dependencyIds: ["bw_work_blocker0000001" as WorkId],
+        activeBlockerIds: ["bw_work_blocker0000001" as WorkId],
+        labels: ["agent-directives", "fixture"]
+      });
+    case "closeout-success":
+      return directiveDebugBaseSnapshot({
+        commandPath: "agent finish",
+        subjectType: "work",
+        subjectId: "bw_work_closed00000001",
+        subjectTitle: "Closed fixture work",
+        workStatus: "closed",
+        labels: ["agent-directives", "fixture"],
+        evidenceIds: ["bw_evidence_fixture0001" as EvidenceId],
+        verificationIds: ["bw_verification_fixture01" as VerificationId],
+        summaryIds: ["bw_summary_fixture000001" as AgentSummaryId],
+        artifactUris: ["memory://agent-summaries/works/bw_work_closed00000001/bw_summary_fixture000001.md"],
+        commitShas: ["abc1234"]
+      });
+    case "doctor-recovery":
+      return directiveDebugBaseSnapshot({
+        commandPath: "doctor",
+        subjectType: "workspace",
+        subjectId: "workspace",
+        subjectTitle: "Workspace",
+        doctorOk: false,
+        syncOk: false,
+        diagnostics: [
+          {
+            code: "search.index",
+            severity: "warning",
+            message: "Search index is not fresh",
+            blocking: false,
+            recommendedCommands: ["bwrk sync refresh --json"]
+          }
+        ],
+        workflowRef: "workflows/60-health/sync-and-doctor.md",
+        recommendedCommandPath: "bwrk sync refresh --json"
+      });
+    case "session-handoff":
+      return directiveDebugBaseSnapshot({
+        commandPath: "session end",
+        subjectType: "session",
+        subjectId: "local",
+        subjectTitle: "Session local",
+        labels: ["agent-directives", "fixture"],
+        evidenceIds: ["bw_evidence_fixture0002" as EvidenceId],
+        verificationIds: ["bw_verification_fixture02" as VerificationId],
+        summaryIds: ["bw_summary_fixture000002" as AgentSummaryId],
+        artifactUris: ["memory://handoffs/session/local/bw_summary_fixture000002.md"],
+        commitShas: ["def5678"],
+        activeReservationIds: ["bw_reservation_fixture01" as ReservationId],
+        workflowRef: "workflows/50-handoff/session-closeout.md",
+        recommendedCommandPath: "bwrk work list --ready --json"
+      });
+  }
+}
+
+function directiveDebugBaseSnapshot(
+  input: {
+    readonly commandPath?: string;
+    readonly subjectType?: AgentDirectiveSubjectType;
+    readonly subjectId?: string;
+    readonly subjectTitle?: string;
+    readonly workStatus?: WorkStatus;
+    readonly dependencyIds?: readonly WorkId[];
+    readonly activeBlockerIds?: readonly WorkId[];
+    readonly openDescendantIds?: readonly WorkId[];
+    readonly labels?: readonly string[];
+    readonly evidenceIds?: readonly EvidenceId[];
+    readonly verificationIds?: readonly VerificationId[];
+    readonly summaryIds?: readonly AgentSummaryId[];
+    readonly artifactUris?: readonly string[];
+    readonly commitShas?: readonly string[];
+    readonly dirtyPathNotes?: readonly string[];
+    readonly activeReservationIds?: readonly ReservationId[];
+    readonly doctorOk?: boolean;
+    readonly syncOk?: boolean;
+    readonly diagnostics?: readonly AgentDirectiveDiagnosticSnapshot[];
+    readonly workflowRef?: string;
+    readonly recommendedCommandPath?: string;
+  } = {}
+): AgentDirectiveSnapshot {
+  const commandPath = input.commandPath ?? "work show";
+  const workflowRef = input.workflowRef ?? directiveDebugWorkflowRef(commandPath);
+  const recommendedCommandPath = input.recommendedCommandPath ?? directiveDebugRecommendedCommand(commandPath, input.subjectId);
+  const summaryIds = input.summaryIds ?? [];
+  const latestSummaryId = summaryIds.at(-1);
+  const latestSummaryUri = input.artifactUris?.at(-1);
+  return createAgentDirectiveSnapshot({
+    capturedAt: "2026-01-01T00:00:00.000Z" as IsoTimestamp,
+    work: {
+      ...(input.subjectType && input.subjectId && input.subjectTitle
+        ? {
+            subject: {
+              type: input.subjectType,
+              id: input.subjectId,
+              title: input.subjectTitle,
+              ...(input.workStatus ? { status: input.workStatus } : {})
+            }
+          }
+        : {}),
+      labels: input.labels ?? [],
+      dependencyIds: input.dependencyIds ?? [],
+      activeBlockerIds: input.activeBlockerIds ?? [],
+      blockedByIds: input.activeBlockerIds ?? [],
+      childWorkIds: input.dependencyIds ?? [],
+      descendantWorkIds: input.dependencyIds ?? [],
+      openDescendantIds: input.openDescendantIds ?? []
+    },
+    summary: {
+      summaryIds,
+      finalSummaryIds: summaryIds,
+      childSummaryIds: [],
+      artifactUris: input.artifactUris ?? [],
+      commitShas: input.commitShas ?? [],
+      dirtyPathNotes: input.dirtyPathNotes ?? [],
+      ...(latestSummaryId ? { latestSummaryId } : {}),
+      ...(latestSummaryUri ? { latestSummaryUri } : {})
+    },
+    gate: {
+      requiredGates: [],
+      openGateIds: [],
+      satisfiedGateIds: [],
+      forcedGateIds: []
+    },
+    evidence: {
+      evidenceIds: input.evidenceIds ?? [],
+      verificationIds: input.verificationIds ?? [],
+      evidence: [],
+      verifications: []
+    },
+    git: {
+      roots: [
+        {
+          root: "/workspace",
+          branchName: "main",
+          detached: false,
+          protectedBranch: true,
+          clean: (input.dirtyPathNotes ?? []).length === 0,
+          scopedChangedPaths: [],
+          collaborationDirtyPaths: [],
+          blockingDirtyPaths: [],
+          untrackedPaths: []
+        }
+      ],
+      checkpointCommitShas: input.commitShas ?? [],
+      dirtyPathNotes: input.dirtyPathNotes ?? []
+    },
+    workflow: {
+      workflowRefs: [workflowRef],
+      skillRefs: ["boreal-work-execution"],
+      requiredInputNames: AGENT_DIRECTIVE_SNAPSHOT_CONTEXT_KEYS,
+      nextWorkflowRef: workflowRef,
+      recommendedCommandPath,
+      assetManifestHash: hashContent({ commandPath, workflowRef }) as ContentHash
+    },
+    doctor: {
+      ok: input.doctorOk ?? true,
+      strict: true,
+      diagnostics: input.diagnostics ?? []
+    },
+    sync: {
+      ok: input.syncOk ?? true,
+      refreshed: true,
+      ledgersFresh: input.syncOk ?? true,
+      searchIndexFresh: input.syncOk ?? true,
+      sqliteCacheFresh: true,
+      operationCount: 0,
+      warningThreshold: 1025
+    },
+    command: {
+      path: commandPath,
+      argv: ["bwrk", ...commandPath.split(/\s+/u)],
+      envelopeSchema: `boreal.cli.${commandPath.replace(/\s+/gu, ".")}.v1`,
+      json: true,
+      mutatesState: false,
+      resultOk: true
+    },
+    actor: {
+      actor: {
+        id: "fixture-agent",
+        kind: "agent"
+      },
+      activeAgentId: "fixture-agent",
+      activeReservationIds: input.activeReservationIds ?? []
+    }
+  });
+}
+
+function applyDirectiveDebugOverrides(snapshot: AgentDirectiveSnapshot, args: ParsedArgs): AgentDirectiveSnapshot {
+  const commandPath = flagValue(args, "command") ?? snapshot.command.path;
+  const labels = flagValues(args, "label").length > 0 ? normalizeLabels(flagValues(args, "label")) : snapshot.work.labels;
+  const dependencyIds = flagValues(args, "dependency").length > 0
+    ? flagValues(args, "dependency").map(asWorkId)
+    : snapshot.work.dependencyIds;
+  const activeBlockerIds = flagValues(args, "active-blocker").length > 0
+    ? flagValues(args, "active-blocker").map(asWorkId)
+    : snapshot.work.activeBlockerIds;
+  const openDescendantIds = flagValues(args, "open-descendant").length > 0
+    ? flagValues(args, "open-descendant").map(asWorkId)
+    : snapshot.work.openDescendantIds;
+  const evidenceIds = flagValues(args, "evidence").length > 0
+    ? flagValues(args, "evidence").map(asEvidenceId)
+    : snapshot.evidence.evidenceIds;
+  const verificationIds = flagValues(args, "verification").length > 0
+    ? flagValues(args, "verification").map(asVerificationId)
+    : snapshot.evidence.verificationIds;
+  const summaryIds = flagValue(args, "summary-id")
+    ? [asAgentSummaryId(requiredFlag(args, "summary-id"))]
+    : snapshot.summary.summaryIds;
+  const artifactUris = flagValue(args, "summary-uri") ? [requiredFlag(args, "summary-uri")] : snapshot.summary.artifactUris;
+  const commitShas = flagValues(args, "commit").length > 0 ? flagValues(args, "commit") : snapshot.summary.commitShas;
+  const dirtyPathNotes = flagValues(args, "dirty-path").length > 0 ? flagValues(args, "dirty-path") : snapshot.summary.dirtyPathNotes;
+  const subject = directiveDebugSubjectOverride(snapshot, args);
+  return createAgentDirectiveSnapshot({
+    ...snapshot,
+    work: {
+      ...snapshot.work,
+      ...(subject ? { subject } : {}),
+      labels,
+      dependencyIds,
+      activeBlockerIds,
+      blockedByIds: activeBlockerIds,
+      childWorkIds: dependencyIds,
+      descendantWorkIds: dependencyIds,
+      openDescendantIds
+    },
+    summary: {
+      ...snapshot.summary,
+      summaryIds,
+      finalSummaryIds: summaryIds,
+      artifactUris,
+      commitShas,
+      dirtyPathNotes,
+      ...(summaryIds.at(-1) ? { latestSummaryId: summaryIds.at(-1) } : {}),
+      ...(artifactUris.at(-1) ? { latestSummaryUri: artifactUris.at(-1) } : {})
+    },
+    evidence: {
+      ...snapshot.evidence,
+      evidenceIds,
+      verificationIds
+    },
+    git: {
+      ...snapshot.git,
+      checkpointCommitShas: commitShas,
+      dirtyPathNotes
+    },
+    workflow: {
+      ...snapshot.workflow,
+      workflowRefs: [directiveDebugWorkflowRef(commandPath)],
+      nextWorkflowRef: directiveDebugWorkflowRef(commandPath),
+      recommendedCommandPath: directiveDebugRecommendedCommand(commandPath, subject?.id),
+      assetManifestHash: hashContent({ commandPath, workflowRef: directiveDebugWorkflowRef(commandPath) }) as ContentHash
+    },
+    command: {
+      ...snapshot.command,
+      path: commandPath,
+      argv: ["bwrk", ...commandPath.split(/\s+/u)],
+      envelopeSchema: `boreal.cli.${commandPath.replace(/\s+/gu, ".")}.v1`
+    }
+  });
+}
+
+function directiveDebugSubjectOverride(
+  snapshot: AgentDirectiveSnapshot,
+  args: ParsedArgs
+): AgentDirectiveSnapshot["work"]["subject"] | undefined {
+  const hasSubjectOverride = ["subject-type", "subject-id", "subject-title", "status"].some((name) => flagValue(args, name) !== undefined);
+  if (!hasSubjectOverride) {
+    return snapshot.work.subject;
+  }
+  const type = parseAgentDirectiveSubjectType(flagValue(args, "subject-type") ?? snapshot.work.subject?.type ?? "work");
+  const status = parseWorkStatus(flagValue(args, "status")) ?? snapshot.work.subject?.status;
+  return {
+    type,
+    id: flagValue(args, "subject-id") ?? snapshot.work.subject?.id ?? directiveDebugDefaultSubjectId(type),
+    title: flagValue(args, "subject-title") ?? snapshot.work.subject?.title ?? directiveDebugDefaultSubjectTitle(type),
+    ...(status ? { status } : {})
+  };
+}
+
+function parseAgentDirectiveSubjectType(value: string): AgentDirectiveSubjectType {
+  if ((AGENT_DIRECTIVE_SUBJECT_TYPES as readonly string[]).includes(value)) {
+    return value as AgentDirectiveSubjectType;
+  }
+  throw new BorealError("BOREAL_INVALID_INPUT", `Unknown directive subject type: ${value}`, {
+    subjectType: value,
+    validSubjectTypes: AGENT_DIRECTIVE_SUBJECT_TYPES
+  });
+}
+
+function parseDirectiveRenderFormat(value: string | undefined): DirectiveRenderFormat {
+  if (value === undefined || value === "markdown") {
+    return "markdown";
+  }
+  if (value === "json") {
+    return "json";
+  }
+  throw new BorealError("BOREAL_INVALID_INPUT", `Unknown directive render format: ${value}`, {
+    format: value,
+    validFormats: ["markdown", "json"]
+  });
+}
+
+function directiveDebugDefaultSubjectId(type: AgentDirectiveSubjectType): string {
+  return type === "workspace" ? "workspace" : `${type}.fixture`;
+}
+
+function directiveDebugDefaultSubjectTitle(type: AgentDirectiveSubjectType): string {
+  return type === "workspace" ? "Workspace" : `${type} fixture`;
+}
+
+function directiveDebugWorkflowRef(commandPath: string): string {
+  if (["doctor", "lock inspect", "prime", "sync refresh", "sync status"].includes(commandPath)) {
+    return "workflows/60-health/sync-and-doctor.md";
+  }
+  if (commandPath === "session end") {
+    return "workflows/50-handoff/session-closeout.md";
+  }
+  return "workflows/40-work/claim-and-finish-work.md";
+}
+
+function directiveDebugRecommendedCommand(commandPath: string, subjectId: string | undefined): string {
+  if (["doctor", "lock inspect", "prime", "sync refresh", "sync status"].includes(commandPath)) {
+    return "bwrk sync refresh --json";
+  }
+  if (subjectId) {
+    return `bwrk work show ${subjectId} --json`;
+  }
+  return "bwrk work list --ready --json";
+}
+
+function directiveDebugSubjectTypes(snapshot: AgentDirectiveSnapshot): readonly AgentDirectiveSubjectType[] {
+  const subjectTypes = new Set<AgentDirectiveSubjectType>(["command"]);
+  if (snapshot.work.subject) {
+    subjectTypes.add(snapshot.work.subject.type);
+  } else {
+    subjectTypes.add("workspace");
+  }
+  return [...subjectTypes];
+}
+
+function directiveSelectorChecks(
+  entry: AgentDirectiveRegistryEntry,
+  snapshot: AgentDirectiveSnapshot
+): DirectiveExplainResult["selectorChecks"] {
+  const subjectTypes = directiveDebugSubjectTypes(snapshot);
+  const workStatus = snapshot.work.subject?.status;
+  return {
+    lifecycleActive: entry.lifecycle === "active",
+    commandMatches: entry.appliesTo.commandPaths.includes(snapshot.command.path),
+    subjectTypeMatches: entry.appliesTo.subjectTypes === undefined || entry.appliesTo.subjectTypes.some((type) => subjectTypes.includes(type)),
+    workStatusMatches: entry.appliesTo.workStatuses === undefined || (workStatus !== undefined && entry.appliesTo.workStatuses.includes(workStatus)),
+    labelMatches: entry.appliesTo.labels === undefined || entry.appliesTo.labels.some((label) => snapshot.work.labels.includes(label)),
+    gateMatches: entry.appliesTo.gates === undefined || entry.appliesTo.gates.some((gate) => snapshot.gate.requiredGates.some((state) => state.kind === gate))
+  };
+}
+
+function directiveExplainReason(input: {
+  readonly selected: boolean;
+  readonly emitted: boolean;
+  readonly issues: readonly AgentDirectiveBundleAssemblyIssue[];
+  readonly missingRequired: readonly AgentDirectiveMissingRequiredEntry[];
+  readonly conflicts: AgentDirectiveBundle["conflicts"];
+}): string {
+  if (input.emitted && input.conflicts.length > 0) {
+    return "emitted with conflict resolution metadata";
+  }
+  if (input.emitted) {
+    return "emitted";
+  }
+  if (input.selected && (input.issues.length > 0 || input.missingRequired.length > 0)) {
+    return "selected but missing or invalid directive data";
+  }
+  if (input.selected) {
+    return "selected but not emitted";
+  }
+  return "not selected by registry selectors";
+}
+
+function renderDirectiveBundleMarkdown(result: DirectiveCompileResult): string {
+  const bundle = result.bundle;
+  const lines = [
+    "# Agent Directive Bundle",
+    "",
+    keyValueRows([
+      { key: "registry", value: result.registryVersion },
+      { key: "fixture", value: result.fixture ?? "custom" },
+      { key: "command", value: result.commandPath },
+      { key: "subject", value: result.subject ? `${result.subject.type}:${result.subject.id}` : "none" },
+      { key: "selected", value: result.selectedRegistryIds.join(", ") || "none" },
+      { key: "issues", value: String(result.issueCount) }
+    ]),
+    ""
+  ];
+  if (!bundle || bundle.directives.length === 0) {
+    lines.push("No directives were emitted.", "");
+  } else {
+    lines.push(
+      section(
+        "Directives",
+        bundle.directives.map(
+          (directive) =>
+            `${directive.registryId} [${directive.severity}/${directive.lifecycle}] - ${directive.title} (${directive.source.selectedBy.join(", ")})`
+        )
+      ),
+      ""
+    );
+  }
+  if (result.missingRequired.length > 0) {
+    lines.push(
+      section(
+        "Missing Required",
+        result.missingRequired.map((missing) => `${missing.registryId}: ${missing.requirement}`)
+      ),
+      ""
+    );
+  }
+  if (result.issues.length > 0) {
+    lines.push(
+      section(
+        "Issues",
+        result.issues.map((issue) => `${issue.phase} ${issue.path}: ${issue.message}`)
+      ),
+      ""
+    );
+  }
+  return `${lines.join("\n")}\n`;
+}
+
+function formatDirectiveCompile(result: DirectiveCompileResult): string {
+  return renderDirectiveBundleMarkdown(result);
+}
+
+function formatDirectiveExplain(result: DirectiveExplainResult): string {
+  const lines = [
+    keyValueRows([
+      { key: "directive", value: result.directiveId },
+      { key: "command", value: result.commandPath },
+      { key: "fixture", value: result.fixture ?? "custom" },
+      { key: "selected", value: String(result.selected) },
+      { key: "emitted", value: String(result.emitted) },
+      { key: "reason", value: result.reason },
+      { key: "selectedBy", value: result.selectedBy.join(", ") || "none" }
+    ]),
+    "",
+    section("Selector Checks", Object.entries(result.selectorChecks).map(([key, value]) => `${key}: ${String(value)}`))
+  ];
+  if (result.issues.length > 0) {
+    lines.push("", section("Issues", result.issues.map((issue) => `${issue.phase} ${issue.path}: ${issue.message}`)));
+  }
+  if (result.missingRequired.length > 0) {
+    lines.push("", section("Missing Required", result.missingRequired.map((missing) => `${missing.registryId}: ${missing.requirement}`)));
+  }
+  return `${lines.join("\n")}\n`;
 }
 
 function directiveFamilyFilter(args: ParsedArgs): AgentDirectiveFamily | undefined {
@@ -6168,9 +6858,7 @@ function cliHealthRecoveryNeeded(
 }
 
 function doctorDiagnosticNeedsAttention(diagnostic: Diagnostic): boolean {
-  return diagnostic.severity !== "ok" && diagnostic.severity !== "fixed"
-    ? true
-    : diagnosticRecommendedCommands(diagnostic.details).length > 0;
+  return diagnostic.severity === "warning" || diagnostic.severity === "error";
 }
 
 function cliDirectiveCommandPath(args: ParsedArgs): string {

@@ -121,6 +121,115 @@ describe("CLI agent directive envelopes", () => {
     );
   });
 
+  it("compiles, renders, and explains directive debug bundles", async () => {
+    const rootDir = await makeTempWorkspace();
+
+    const compiled = parseEnvelope<{
+      readonly schemaVersion: string;
+      readonly fixture: string;
+      readonly commandPath: string;
+      readonly selectedRegistryIds: readonly string[];
+      readonly selections: readonly Array<{ readonly registryId: string; readonly selectedBy: readonly string[] }>;
+      readonly bundle: AgentDirectiveBundle;
+    }>((await runCli(rootDir, ["directives", "compile", "--fixture", "blocked-work", "--json"])).stdout);
+    const rendered = parseEnvelope<{
+      readonly schemaVersion: string;
+      readonly fixture: string;
+      readonly format: string;
+      readonly content: string;
+      readonly compile: { readonly bundle: AgentDirectiveBundle };
+    }>((await runCli(rootDir, ["directives", "render", "--fixture", "doctor-recovery", "--json"])).stdout);
+    const explained = parseEnvelope<{
+      readonly schemaVersion: string;
+      readonly directiveId: string;
+      readonly selected: boolean;
+      readonly emitted: boolean;
+      readonly selectedBy: readonly string[];
+      readonly selectorChecks: { readonly commandMatches: boolean; readonly subjectTypeMatches: boolean; readonly workStatusMatches: boolean };
+    }>((await runCli(rootDir, ["directives", "explain", "blocked.resolve-blockers", "--fixture", "blocked-work", "--json"])).stdout);
+    const custom = parseEnvelope<{
+      readonly schemaVersion: string;
+      readonly commandPath: string;
+      readonly selectedRegistryIds: readonly string[];
+      readonly bundle: AgentDirectiveBundle;
+    }>(
+      (
+        await runCli(rootDir, [
+          "directives",
+          "compile",
+          "--command",
+          "work show",
+          "--subject-type",
+          "work",
+          "--subject-id",
+          "bw_work_custom0000001",
+          "--subject-title",
+          "Custom blocked work",
+          "--status",
+          "blocked",
+          "--active-blocker",
+          "bw_work_blocker000001",
+          "--json"
+        ])
+      ).stdout
+    );
+
+    expect(Object.keys(compiled)).toEqual(["ok", "data"]);
+    expect(compiled.agentDirectives).toBeUndefined();
+    expect(compiled.data).toEqual(
+      expect.objectContaining({
+        schemaVersion: "boreal.cli.directives.compile.v1",
+        fixture: "blocked-work",
+        commandPath: "work show"
+      })
+    );
+    expect(compiled.data.selectedRegistryIds).toEqual(
+      expect.arrayContaining(["blocked.resolve-blockers", "workflow_next.canonical-next-step"])
+    );
+    expect(compiled.data.selections).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          registryId: "blocked.resolve-blockers",
+          selectedBy: expect.arrayContaining(["applies.command_path", "applies.subject_type", "applies.work_status"])
+        })
+      ])
+    );
+    expect(compiled.data.bundle.directives.map((directive) => directive.registryId)).toEqual(
+      expect.arrayContaining(["blocked.resolve-blockers", "workflow_next.canonical-next-step"])
+    );
+    expect(() => assertAgentDirectiveBundle(compiled.data.bundle)).not.toThrow();
+
+    expect(rendered.data.schemaVersion).toBe("boreal.cli.directives.render.v1");
+    expect(rendered.data.fixture).toBe("doctor-recovery");
+    expect(rendered.data.format).toBe("markdown");
+    expect(rendered.data.content).toContain("doctor.recovery-required");
+    expect(() => assertAgentDirectiveBundle(rendered.data.compile.bundle)).not.toThrow();
+
+    expect(explained.data).toEqual(
+      expect.objectContaining({
+        schemaVersion: "boreal.cli.directives.explain.v1",
+        directiveId: "blocked.resolve-blockers",
+        selected: true,
+        emitted: true
+      })
+    );
+    expect(explained.data.selectedBy).toEqual(
+      expect.arrayContaining(["applies.command_path", "applies.subject_type", "applies.work_status"])
+    );
+    expect(explained.data.selectorChecks).toEqual(
+      expect.objectContaining({
+        commandMatches: true,
+        subjectTypeMatches: true,
+        workStatusMatches: true
+      })
+    );
+
+    expect(custom.data.schemaVersion).toBe("boreal.cli.directives.compile.v1");
+    expect(custom.data.commandPath).toBe("work show");
+    expect(custom.data.selectedRegistryIds).toContain("blocked.resolve-blockers");
+    expect(() => assertAgentDirectiveBundle(custom.data.bundle)).not.toThrow();
+  });
+
   it("adds validated agentDirectives to directive-aware JSON output without changing data", async () => {
     const rootDir = await makeTempWorkspace();
     await runCli(rootDir, ["init", "--json"]);

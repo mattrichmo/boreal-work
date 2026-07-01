@@ -198,6 +198,36 @@ Shows one trusted static directive registry entry. The payload includes the inst
 
 JSON `data` uses schema `boreal.cli.directives.show.v1`.
 
+## `directives compile`
+
+```bash
+bwrk directives compile [--fixture <name>] [--command <command-path>] [--subject-type <type>] [--subject-id <id>] [--subject-title <title>] [--status <status>] [--json]
+```
+
+Compiles a trusted agent directive bundle from a deterministic debug fixture or explicit command and subject snapshot. Use repeated `--label`, `--dependency`, `--active-blocker`, `--open-descendant`, `--evidence`, `--verification`, `--commit`, and `--dirty-path` flags to shape the synthetic snapshot.
+
+JSON `data` uses schema `boreal.cli.directives.compile.v1` and includes the snapshot command path, selected registry IDs, selection provenance, data payloads, missing requirements, assembly issues, and compiled bundle.
+
+## `directives render`
+
+```bash
+bwrk directives render [--fixture <name>] [--format markdown|json] [--json]
+```
+
+Renders a compiled directive debug fixture for terminal inspection without reading or mutating workspace state. Fixtures include `blocked-work`, `closeout-success`, `doctor-recovery`, and `session-handoff`.
+
+JSON `data` uses schema `boreal.cli.directives.render.v1` and includes the rendered content plus the underlying compile result.
+
+## `directives explain`
+
+```bash
+bwrk directives explain <directive-id> [--fixture <name>] [--json]
+```
+
+Explains why a directive was emitted, selected but blocked by missing data, or not selected for a debug fixture or explicit command and subject snapshot. The same compile-shaping flags accepted by `directives compile` are accepted here.
+
+JSON `data` uses schema `boreal.cli.directives.explain.v1` and includes selector checks, selection provenance, relevant issues, missing data, conflicts, and the emitted directive when present.
+
 ## `completion`
 
 ```bash

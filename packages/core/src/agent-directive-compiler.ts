@@ -1077,9 +1077,9 @@ function handoffDirectiveData(
 function attentionDiagnostics(snapshot: AgentDirectiveSnapshot): readonly AgentDirectiveRecoveryDiagnosticSnapshot[] {
   return snapshot.doctor.diagnostics.filter(
     (diagnostic) =>
-      diagnostic.severity !== "ok" ||
-      diagnostic.blocking ||
-      diagnostic.recommendedCommands.length > 0
+      diagnostic.severity === "warning" ||
+      diagnostic.severity === "error" ||
+      diagnostic.blocking
   );
 }
 
