@@ -6,8 +6,11 @@ import { describe, expect, it } from "vitest";
 
 import {
   AGENT_DIRECTIVE_BUNDLE_SCHEMA_VERSION,
+  AGENT_DIRECTIVE_SCHEMA_CONTRACTS,
+  AGENT_DIRECTIVE_SCHEMA_IDS,
   BorealError,
   agentDirectiveBundleIssues,
+  agentDirectiveBundleSchemaIssues,
   agentDirectiveDataIssues,
   assertAgentDirectiveBundle,
   assertMcpResourcePathAllowed,
@@ -138,6 +141,7 @@ describe("core hashing and ids", () => {
     const bundle = agentDirectiveBundleFixture();
 
     expect(agentDirectiveBundleIssues(bundle)).toEqual([]);
+    expect(agentDirectiveBundleSchemaIssues(bundle)).toEqual([]);
     expect(() => assertAgentDirectiveBundle(bundle)).not.toThrow();
     expect(agentDirectiveDataIssues(bundle.directives[0].data)).toEqual([]);
   });
@@ -208,6 +212,25 @@ describe("core hashing and ids", () => {
         expect.objectContaining({ path: "$.directives[0].severity" }),
         expect.objectContaining({ path: "$.directives[0].audience" }),
         expect.objectContaining({ path: "$.directives[0].kind" })
+      ])
+    );
+
+    expect(
+      agentDirectiveBundleSchemaIssues({
+        ...bundle,
+        directives: [
+          {
+            ...bundle.directives[0],
+            severity: "urgent"
+          }
+        ]
+      })
+    ).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          schemaId: AGENT_DIRECTIVE_SCHEMA_IDS.agentDirectiveBundle,
+          path: "$.directives[0].severity"
+        })
       ])
     );
 
@@ -770,7 +793,11 @@ describe("core hashing and ids", () => {
     expect(new Set(RUNTIME_SCHEMA_CONTRACTS.map((contract) => contract.schemaId))).toEqual(
       new Set(Object.values(RUNTIME_SCHEMA_IDS))
     );
+    expect(new Set(AGENT_DIRECTIVE_SCHEMA_CONTRACTS.map((contract) => contract.schemaId))).toEqual(
+      new Set(Object.values(AGENT_DIRECTIVE_SCHEMA_IDS))
+    );
     expect(schemaIds).toContain(PROJECT_REGISTRY_SCHEMA_ID);
+    expect(schemaIds).toContain(AGENT_DIRECTIVE_SCHEMA_IDS.agentDirectiveBundle);
 
     for (const contract of contracts) {
       const schema = safeParseJson(await readFile(new URL(`../../${contract.schemaPath}`, import.meta.url), "utf8"), {

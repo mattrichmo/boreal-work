@@ -181,6 +181,10 @@ export interface AgentDirectiveBundle {
   readonly missingRequired: readonly AgentDirectiveMissingRequiredEntry[];
 }
 
+export interface AgentDirectiveBundleCarrier {
+  readonly agentDirectives?: readonly AgentDirectiveBundle[];
+}
+
 export interface AgentDirectiveBundleValidationOptions {
   readonly knownRegistryIds?: readonly AgentDirectiveTemplateId[];
   readonly trustedRegistryPathPrefixes?: readonly string[];

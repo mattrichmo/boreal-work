@@ -1,0 +1,234 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://boreal.work/schemas/directives/agent-directive-bundle.schema.json",
+  "title": "Boreal Agent Directive Bundle",
+  "type": "object",
+  "required": ["meta", "directives", "conflicts", "deprecations", "missingRequired"],
+  "properties": {
+    "meta": { "$ref": "#/$defs/bundleMeta" },
+    "directives": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/directive" }
+    },
+    "conflicts": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/conflict" }
+    },
+    "deprecations": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/deprecation" }
+    },
+    "missingRequired": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/missingRequired" }
+    }
+  },
+  "$defs": {
+    "stableMachineId": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9._:-]{0,127}$"
+    },
+    "contentHash": {
+      "type": "string",
+      "pattern": "^sha256:[a-f0-9]{64}$"
+    },
+    "family": {
+      "enum": [
+        "closeout",
+        "git",
+        "sprint",
+        "phase",
+        "container",
+        "handoff",
+        "doctor",
+        "blocked",
+        "workflow_next",
+        "verification",
+        "review",
+        "audit",
+        "memory"
+      ]
+    },
+    "severity": {
+      "enum": ["info", "action", "required", "blocking"]
+    },
+    "audience": {
+      "enum": ["agent", "operator", "reviewer"]
+    },
+    "kind": {
+      "enum": ["obligation", "next_step", "warning", "recovery", "summary", "acknowledgement"]
+    },
+    "lifecycle": {
+      "enum": ["proposed", "active", "satisfied", "acknowledged", "superseded", "blocked"]
+    },
+    "subjectType": {
+      "enum": ["work", "sprint", "phase", "milestone", "project", "session", "workspace", "command"]
+    },
+    "bundleMeta": {
+      "type": "object",
+      "required": ["schemaVersion", "registryVersion", "generatedAt", "commandPath"],
+      "properties": {
+        "id": { "$ref": "#/$defs/stableMachineId" },
+        "schemaVersion": { "const": "boreal.agent-directives.v1" },
+        "registryVersion": { "$ref": "#/$defs/stableMachineId" },
+        "generatedAt": { "type": "string", "format": "date-time" },
+        "commandPath": { "type": "string", "minLength": 1 },
+        "envelopeSchema": { "type": "string", "minLength": 1 },
+        "sourceSnapshotHash": { "$ref": "#/$defs/contentHash" }
+      }
+    },
+    "source": {
+      "type": "object",
+      "required": ["registryVersion", "registryPath", "selectedBy"],
+      "properties": {
+        "registryVersion": { "$ref": "#/$defs/stableMachineId" },
+        "registryPath": { "type": "string", "minLength": 1 },
+        "selectedBy": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "snapshotHash": { "$ref": "#/$defs/contentHash" }
+      }
+    },
+    "subject": {
+      "type": "object",
+      "required": ["type"],
+      "properties": {
+        "type": { "$ref": "#/$defs/subjectType" },
+        "id": { "type": "string" },
+        "title": { "type": "string" }
+      }
+    },
+    "appliesTo": {
+      "type": "object",
+      "required": ["commandPaths"],
+      "properties": {
+        "commandPaths": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "subjectTypes": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/subjectType" }
+        },
+        "workStatuses": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "labels": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "gates": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+    "acknowledgement": {
+      "type": "object",
+      "required": ["requiredBefore", "message"],
+      "properties": {
+        "requiredBefore": { "enum": ["close", "release", "force_gate", "handoff", "none"] },
+        "evidenceKind": { "enum": ["command", "review", "artifact", "note"] },
+        "message": { "type": "string", "minLength": 1 }
+      }
+    },
+    "directiveData": {
+      "type": "object",
+      "propertyNames": {
+        "pattern": "^[A-Za-z_][A-Za-z0-9_.:-]{0,127}$"
+      },
+      "additionalProperties": { "$ref": "#/$defs/directiveDataValue" }
+    },
+    "directiveDataValue": {
+      "anyOf": [
+        { "type": "string" },
+        { "type": "number" },
+        { "type": "boolean" },
+        { "type": "null" },
+        {
+          "type": "array",
+          "items": { "$ref": "#/$defs/directiveDataValue" }
+        },
+        { "$ref": "#/$defs/directiveData" }
+      ]
+    },
+    "directive": {
+      "type": "object",
+      "required": [
+        "id",
+        "registryId",
+        "version",
+        "family",
+        "severity",
+        "audience",
+        "kind",
+        "lifecycle",
+        "title",
+        "instruction",
+        "data",
+        "source",
+        "appliesTo"
+      ],
+      "properties": {
+        "id": { "$ref": "#/$defs/stableMachineId" },
+        "registryId": { "$ref": "#/$defs/stableMachineId" },
+        "version": { "$ref": "#/$defs/stableMachineId" },
+        "family": { "$ref": "#/$defs/family" },
+        "severity": { "$ref": "#/$defs/severity" },
+        "audience": { "$ref": "#/$defs/audience" },
+        "kind": { "$ref": "#/$defs/kind" },
+        "lifecycle": { "$ref": "#/$defs/lifecycle" },
+        "title": { "type": "string", "minLength": 1 },
+        "instruction": { "type": "string", "minLength": 1 },
+        "data": { "$ref": "#/$defs/directiveData" },
+        "source": { "$ref": "#/$defs/source" },
+        "subject": { "$ref": "#/$defs/subject" },
+        "appliesTo": { "$ref": "#/$defs/appliesTo" },
+        "supersedes": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/stableMachineId" }
+        },
+        "blocksCloseout": { "type": "boolean" },
+        "acknowledgement": { "$ref": "#/$defs/acknowledgement" }
+      }
+    },
+    "conflict": {
+      "type": "object",
+      "required": ["directiveIds", "reason", "resolution", "severity"],
+      "properties": {
+        "directiveIds": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/stableMachineId" }
+        },
+        "reason": { "type": "string", "minLength": 1 },
+        "resolution": {
+          "enum": ["highest_severity_wins", "blocking_wins", "registry_order", "manual_review"]
+        },
+        "resolvedDirectiveId": { "$ref": "#/$defs/stableMachineId" },
+        "severity": { "$ref": "#/$defs/severity" }
+      }
+    },
+    "deprecation": {
+      "type": "object",
+      "required": ["directiveId", "reason"],
+      "properties": {
+        "directiveId": { "$ref": "#/$defs/stableMachineId" },
+        "deprecatedBy": { "$ref": "#/$defs/stableMachineId" },
+        "reason": { "type": "string", "minLength": 1 }
+      }
+    },
+    "missingRequired": {
+      "type": "object",
+      "required": ["family", "requirement", "message"],
+      "properties": {
+        "registryId": { "$ref": "#/$defs/stableMachineId" },
+        "family": { "$ref": "#/$defs/family" },
+        "subject": { "$ref": "#/$defs/subject" },
+        "requirement": { "type": "string", "minLength": 1 },
+        "message": { "type": "string", "minLength": 1 }
+      }
+    }
+  }
+}

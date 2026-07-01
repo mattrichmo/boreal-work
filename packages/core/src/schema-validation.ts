@@ -1,6 +1,7 @@
 import { dirname, isAbsolute, relative, resolve } from "node:path";
 
 import { BorealError } from "./errors.js";
+import { agentDirectiveBundleIssues } from "./agent-directives.js";
 import type { RuntimePolicy } from "./policies.js";
 import { PROJECT_REGISTRY_SCHEMA_ID, PROJECT_REGISTRY_SCHEMA_VERSION } from "./project-registry.js";
 
@@ -55,6 +56,10 @@ export const RUNTIME_SCHEMA_IDS = {
   projectionRecord: "https://boreal.work/schemas/projections/projection-record.schema.json",
   contextPack: "https://boreal.work/schemas/projections/context-pack.schema.json",
   runtimePolicy: "https://boreal.work/schemas/policies/runtime-policy.schema.json"
+} as const;
+
+export const AGENT_DIRECTIVE_SCHEMA_IDS = {
+  agentDirectiveBundle: "https://boreal.work/schemas/directives/agent-directive-bundle.schema.json"
 } as const;
 
 export const RUNTIME_SCHEMA_CONTRACTS = [
@@ -175,8 +180,19 @@ export const PROJECT_SCHEMA_CONTRACTS = [
   }
 ] as const satisfies readonly PublishedSchemaContract[];
 
+export const AGENT_DIRECTIVE_SCHEMA_CONTRACTS = [
+  {
+    key: "agentDirectiveBundle",
+    schemaId: AGENT_DIRECTIVE_SCHEMA_IDS.agentDirectiveBundle,
+    schemaPath: "schemas/directives/agent-directive-bundle.schema.json",
+    runtimeSection: undefined,
+    validator: agentDirectiveBundleSchemaIssues
+  }
+] as const satisfies readonly PublishedSchemaContract[];
+
 export const PUBLISHED_SCHEMA_CONTRACTS = [
   ...RUNTIME_SCHEMA_CONTRACTS,
+  ...AGENT_DIRECTIVE_SCHEMA_CONTRACTS,
   ...PROJECT_SCHEMA_CONTRACTS
 ] as const satisfies readonly PublishedSchemaContract[];
 
@@ -605,6 +621,12 @@ export function projectRegistryDocumentSchemaIssues(value: unknown, path = "$"):
     ...projectRegistryEntryArrayIssues(value.entries, `${path}.entries`, schemaId),
     ...(value.updatedAt === undefined ? [] : stringIssue(value.updatedAt, `${path}.updatedAt`, schemaId))
   ];
+}
+
+export function agentDirectiveBundleSchemaIssues(value: unknown, path = "$"): readonly SchemaValidationIssue[] {
+  return agentDirectiveBundleIssues(value).map((directiveIssue) =>
+    issue(AGENT_DIRECTIVE_SCHEMA_IDS.agentDirectiveBundle, schemaPath(path, directiveIssue.path), directiveIssue.message)
+  );
 }
 
 export function assertValidRuntimePolicy(policy: RuntimePolicy): void {
@@ -1061,6 +1083,16 @@ function uniqueStringArrayIssue(value: unknown, path: string, schemaId: string):
 
 function issue(schemaId: string, path: string, message: string): SchemaValidationIssue {
   return { schemaId, path, message };
+}
+
+function schemaPath(basePath: string, relativePath: string): string {
+  if (relativePath === "$") {
+    return basePath;
+  }
+  if (basePath === "$") {
+    return relativePath;
+  }
+  return `${basePath}${relativePath.slice(1)}`;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

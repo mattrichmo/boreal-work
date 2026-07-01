@@ -6,6 +6,7 @@ import {
   assertPathInside,
   assertRealPathInside,
   canonicalJson,
+  agentDirectiveBundleSchemaIssues,
   hashContent,
   nowIso,
   parseJsonlStrict,
@@ -13,6 +14,8 @@ import {
   runtimeSnapshotSchemaIssues,
   touchRecord,
   withContentHash,
+  type AgentDirectiveBundle,
+  type AgentDirectiveBundleCarrier,
   type AgentReservation,
   type ClaimId,
   type ClaimRecord,
@@ -46,7 +49,7 @@ import { deriveReadinessStatus } from "@boreal/work-engine";
 
 import type { CliContext } from "./context.js";
 
-export interface ExportDocument {
+export interface ExportDocument extends AgentDirectiveBundleCarrier {
   readonly schemaVersion: typeof EXPORT_SCHEMA_VERSION;
   readonly exportedAt: string;
   readonly workspaceRoot: string;
@@ -54,6 +57,8 @@ export interface ExportDocument {
   readonly recordCounts: Record<SnapshotSection, number>;
   readonly state: ExportSnapshot;
 }
+
+export interface ExportDocumentOptions extends AgentDirectiveBundleCarrier {}
 
 export interface ExportWriteResult {
   readonly path: string;
@@ -216,8 +221,9 @@ const LEDGER_FILES: Record<SnapshotSection, string> = {
   contextPacks: "context-packs.jsonl"
 };
 
-export async function buildExportDocument(context: CliContext): Promise<ExportDocument> {
+export async function buildExportDocument(context: CliContext, options: ExportDocumentOptions = {}): Promise<ExportDocument> {
   const state = await context.store.read((reader) => readSnapshot(reader));
+  const agentDirectives = parseAgentDirectiveBundles(options.agentDirectives, "$.agentDirectives");
   const contentHash = hashContent(state);
   return {
     schemaVersion: EXPORT_SCHEMA_VERSION,
@@ -225,7 +231,8 @@ export async function buildExportDocument(context: CliContext): Promise<ExportDo
     workspaceRoot: context.workspaceRoot,
     contentHash,
     recordCounts: recordCounts(state),
-    state
+    state,
+    ...(agentDirectives === undefined ? {} : { agentDirectives })
   };
 }
 
@@ -1522,6 +1529,7 @@ function parseExportDocument(value: unknown): ExportDocument {
       expectedHash
     });
   }
+  const agentDirectives = parseAgentDirectiveBundles(value.agentDirectives, "$.agentDirectives");
   validateSnapshot(state);
   return {
     schemaVersion: EXPORT_SCHEMA_VERSION,
@@ -1529,8 +1537,28 @@ function parseExportDocument(value: unknown): ExportDocument {
     workspaceRoot: typeof value.workspaceRoot === "string" ? value.workspaceRoot : "",
     contentHash,
     recordCounts: recordCounts(state),
-    state
+    state,
+    ...(agentDirectives === undefined ? {} : { agentDirectives })
   };
+}
+
+function parseAgentDirectiveBundles(value: unknown, path: string): readonly AgentDirectiveBundle[] | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  if (!Array.isArray(value)) {
+    throw new BorealError("BOREAL_INVALID_INPUT", "agentDirectives must be an array", {
+      issues: [{ path, message: "must be an array" }]
+    });
+  }
+  const issues = value.flatMap((bundle, index) => agentDirectiveBundleSchemaIssues(bundle, `${path}[${index}]`));
+  if (issues.length > 0) {
+    throw new BorealError("BOREAL_INVALID_INPUT", "agentDirectives failed schema validation", {
+      issues: issues.slice(0, 50),
+      issueCount: issues.length
+    });
+  }
+  return value as readonly AgentDirectiveBundle[];
 }
 
 function normalizeSnapshot(value: unknown): ExportSnapshot {
