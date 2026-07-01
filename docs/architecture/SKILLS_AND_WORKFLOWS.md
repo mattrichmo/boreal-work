@@ -29,3 +29,5 @@ Workflows that close task, sprint, phase, milestone, or project work must requir
 ## Required Closeout Gates
 
 Required closeout gates are subject-scoped work policy, separate from the workspace-wide `gate closeout` health command. Gate kinds, scope, evidence requirements, force semantics, and summary output are specified in [Required closeout gate contract](CLOSEOUT_GATE_CONTRACT.md). Schema, enforcement, reports, and workflow changes should use that contract as the implementation boundary.
+
+Workflow docs that create, edit, verify, summarize, or close work must expose the gate lifecycle directly: plan gates with `work create` or `work edit --required-gate`, satisfy them with subject-matched passed evidence and verification, inspect `closeoutGateStatus` from CLI JSON output, and force only the specific planned gate with `work edit --force-gate ... --force-gate-reason ... --force-gate-comment ...`. Forced summaries are separate and must not imply forced review, audit, verification, or checkpoint gates.

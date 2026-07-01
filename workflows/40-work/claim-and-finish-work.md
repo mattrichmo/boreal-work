@@ -8,7 +8,9 @@ writes_state: true
 requires_workspace: true
 allowed_commands:
   - agent start
+  - work create
   - work claim
+  - work edit
   - agent finish
   - summary compose
   - summary create
@@ -74,11 +76,26 @@ Prefer `agent finish` for normal reserved work closeout because it records evide
    `bwrk agent finish current --agent <agent-id> --summary "<partial verification>" --kind command --command "<verification command>" --verdict passed --release --json`
 5. Use manual `evidence add`, `work verify`, and `work close` only when no active reservation exists or when attaching additional evidence after `agent finish`; run `summary compose` before or during that closeout so the `boreal.cli.work.close.v1` envelope includes `agentSummaries`. Use `--force-summary --force-reason <code> --force-comment "<why>"` only for audited bypasses such as duplicates or external closes.
 
+For work that requires explicit review or audit:
+
+1. Plan the gate when creating or editing the work:
+   `bwrk work create "<title>" --required-gate review --required-gate audit --ready --json`
+   `bwrk work edit <work-id> --required-gate review --required-gate audit:descendants --json`
+2. Satisfy review or audit gates before closeout with subject-matched passed evidence:
+   `bwrk evidence add <work-id> --summary "<reviewed scope and findings disposition>" --kind review --outcome passed --json`
+   `bwrk evidence add <work-id> --summary "<audit findings absent, fixed, or deferred>" --kind command --command "<audit command>" --outcome passed --json`
+3. Inspect `closeoutGateStatus` from `evidence add`, `work verify`, `summary compose`, or `summary show`. Do not close until required gates are `satisfied` or `forced`.
+4. Force a gate only as an audited bypass on the planned gate itself:
+   `bwrk work edit <work-id> --force-gate <gate-id|kind[:scope]> --force-gate-reason <code> --force-gate-comment "<why>" [--force-gate-evidence <evidence-id>] --json`
+   `--force-summary` does not force review, audit, verification, or checkpoint gates.
+
 
 ## CLI Commands
 
 - `bwrk agent start`
+- `bwrk work create`
 - `bwrk work claim`
+- `bwrk work edit`
 - `bwrk agent finish`
 - `bwrk summary compose`
 - `bwrk summary create`

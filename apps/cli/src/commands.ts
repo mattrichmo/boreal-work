@@ -34,6 +34,7 @@ import {
   type ClaimId,
   type ClaimRecord,
   type ClaimStatus,
+  type CloseoutGateForceReasonCode,
   type CloseoutGateKind,
   type CloseoutGateScope,
   type ContextPack,
@@ -56,6 +57,7 @@ import {
   type ProjectionRecord,
   type ReservationId,
   type ReservationStatus,
+  type RequiredCloseoutGate,
   type ReviewerHeartbeatId,
   type ReviewerHeartbeatRecord,
   type RuntimeOperation,
@@ -187,7 +189,7 @@ import {
   type RegistryRemoveResult
 } from "./registry.js";
 import { inspectSearchIndex, runSearch, writeSearchIndex, type SearchIndexInspection } from "./search-cli.js";
-import { requireCommitOrDirtyPathReason } from "./summary-policy.js";
+import { dirtyPathNotesHaveReasonCode, requireCommitOrDirtyPathReason } from "./summary-policy.js";
 import {
   addRawSource,
   createWikiPage,
@@ -2591,13 +2593,14 @@ async function workCommand(
     }
     case "verify": {
       const evidenceIds = flagValues(args, "evidence").map(asEvidenceId);
+      const workId = await resolveWorkId(context, requiredPositional(rest, 0, "work reference"));
       const verification = await context.runtime.verifyWork({
-        workId: await resolveWorkId(context, requiredPositional(rest, 0, "work reference")),
+        workId,
         verdict: parseVerdict(flagValue(args, "verdict")),
         evidenceIds,
         notes: flagValue(args, "notes")
       });
-      output.write(formatRecord(verification, json));
+      output.write(formatRecord({ ...verification, closeoutGateStatus: await closeoutGateStatusForWork(context, workId) }, json));
       return { exitCode: 0 };
     }
     case "close": {
@@ -2720,6 +2723,10 @@ async function editWorkCommand(context: CliContext, workId: WorkId, args: Parsed
   const acceptanceCriteria = flagValues(args, "acceptance");
   const requiredCloseoutGateInputs = requiredCloseoutGateInputsFromArgs(args);
   const clearRequiredCloseoutGates = hasFlag(args, "clear-required-gates");
+  const forceGateRefs = flagValues(args, "force-gate");
+  const forceGateReason = flagValue(args, "force-gate-reason");
+  const forceGateComment = flagValue(args, "force-gate-comment");
+  const forceGateEvidenceIds = flagValues(args, "force-gate-evidence").map(asEvidenceId);
   if (
     title === undefined &&
     description === undefined &&
@@ -2728,12 +2735,22 @@ async function editWorkCommand(context: CliContext, workId: WorkId, args: Parsed
     labels.length === 0 &&
     acceptanceCriteria.length === 0 &&
     requiredCloseoutGateInputs.length === 0 &&
-    !clearRequiredCloseoutGates
+    !clearRequiredCloseoutGates &&
+    forceGateRefs.length === 0
   ) {
     throw new BorealError("BOREAL_INVALID_INPUT", "work edit requires at least one mutable field flag");
   }
   if (requiredCloseoutGateInputs.length > 0 && clearRequiredCloseoutGates) {
     throw new BorealError("BOREAL_INVALID_INPUT", "work edit cannot combine --required-gate with --clear-required-gates");
+  }
+  if (forceGateRefs.length > 0 && clearRequiredCloseoutGates) {
+    throw new BorealError("BOREAL_INVALID_INPUT", "work edit cannot combine --force-gate with --clear-required-gates");
+  }
+  if (forceGateRefs.length > 0 && (!forceGateReason || !forceGateComment?.trim())) {
+    throw new BorealError("BOREAL_INVALID_INPUT", "--force-gate requires --force-gate-reason and --force-gate-comment");
+  }
+  if (forceGateRefs.length === 0 && (forceGateReason || forceGateComment || forceGateEvidenceIds.length > 0)) {
+    throw new BorealError("BOREAL_INVALID_INPUT", "--force-gate-reason, --force-gate-comment, and --force-gate-evidence require --force-gate");
   }
 
   const current = nowIso();
@@ -2741,7 +2758,7 @@ async function editWorkCommand(context: CliContext, workId: WorkId, args: Parsed
     const work = await requireCliWork(writer, workId);
     const nextLabels = labels.length > 0 ? labelsFromArgs(args) : work.labels;
     const nextKind = kind ?? work.kind;
-    const requiredCloseoutGates =
+    let requiredCloseoutGates =
       requiredCloseoutGateInputs.length > 0
         ? createRequiredCloseoutGates({
             subjectId: work.meta.id,
@@ -2753,6 +2770,18 @@ async function editWorkCommand(context: CliContext, workId: WorkId, args: Parsed
         : clearRequiredCloseoutGates
           ? undefined
           : work.requiredCloseoutGates;
+    if (forceGateRefs.length > 0) {
+      await requireCliEvidenceRecords(writer, forceGateEvidenceIds);
+      requiredCloseoutGates = forceRequiredCloseoutGates({
+        gates: requiredCloseoutGates ?? [],
+        refs: forceGateRefs,
+        reason: parseCloseoutGateForceReason(forceGateReason),
+        comment: forceGateComment?.trim() ?? "",
+        evidenceIds: forceGateEvidenceIds,
+        actor: context.actor,
+        now: current
+      });
+    }
     const updated = touchRecord(
       {
         ...work,
@@ -2908,6 +2937,78 @@ function workEditChangedFields(before: WorkItem, after: WorkItem): readonly stri
   return changed;
 }
 
+function forceRequiredCloseoutGates(input: {
+  readonly gates: readonly RequiredCloseoutGate[];
+  readonly refs: readonly string[];
+  readonly reason: CloseoutGateForceReasonCode;
+  readonly comment: string;
+  readonly evidenceIds: readonly EvidenceRecord["meta"]["id"][];
+  readonly actor: ActorRef;
+  readonly now: IsoTimestamp;
+}): readonly RequiredCloseoutGate[] {
+  if (input.gates.length === 0) {
+    throw new BorealError("BOREAL_INVALID_INPUT", "Cannot force a required gate because the work item has no required gates");
+  }
+  const refs = input.refs.map(parseCloseoutGateRef);
+  const matched = refs.map(() => false);
+  const forced = input.gates.map((gate) => {
+    const shouldForce = refs.some((ref, index) => {
+      const matches = closeoutGateRefMatches(gate, ref);
+      if (matches) {
+        matched[index] = true;
+      }
+      return matches;
+    });
+    if (!shouldForce) {
+      return gate;
+    }
+    return {
+      ...gate,
+      status: "forced" as const,
+      force: {
+        reason: input.reason,
+        comment: input.comment,
+        actor: input.actor,
+        evidenceIds: input.evidenceIds.length > 0 ? input.evidenceIds : undefined,
+        forcedAt: input.now
+      }
+    };
+  });
+  const missing = input.refs.filter((_, index) => !matched[index]);
+  if (missing.length > 0) {
+    throw new BorealError("BOREAL_NOT_FOUND", "Required closeout gate not found for force request", {
+      missing,
+      availableGates: input.gates.map((gate) => `${gate.id}:${gate.kind}:${gate.scope}`)
+    });
+  }
+  return forced;
+}
+
+type CloseoutGateRef =
+  | { readonly id: string; readonly kind?: undefined; readonly scope?: undefined }
+  | { readonly id?: undefined; readonly kind: CloseoutGateKind; readonly scope?: CloseoutGateScope };
+
+function parseCloseoutGateRef(value: string): CloseoutGateRef {
+  if (value.startsWith("bw_gate_")) {
+    return { id: value };
+  }
+  const [kindValue, scopeValue, extra] = value.split(":");
+  if (!kindValue || extra !== undefined) {
+    throw new BorealError("BOREAL_INVALID_INPUT", "--force-gate must use gate id, kind, or kind:scope");
+  }
+  return {
+    kind: parseCloseoutGateKind(kindValue),
+    scope: parseCloseoutGateScope(scopeValue)
+  };
+}
+
+function closeoutGateRefMatches(gate: RequiredCloseoutGate, ref: CloseoutGateRef): boolean {
+  if (ref.id) {
+    return gate.id === ref.id;
+  }
+  return gate.kind === ref.kind && (!ref.scope || gate.scope === ref.scope);
+}
+
 async function depCommand(
   action: string | undefined,
   rest: readonly string[],
@@ -2976,7 +3077,7 @@ async function evidenceCommand(
     command: flagValue(args, "command"),
     uri: flagValue(args, "uri")
   });
-  output.write(formatRecord(evidence, json));
+  output.write(formatRecord({ ...evidence, closeoutGateStatus: await closeoutGateStatusForWork(context, evidence.subjectId as WorkId) }, json));
   return { exitCode: 0 };
 }
 
@@ -2995,7 +3096,7 @@ async function summaryCommand(
         body: requiredFlag(args, "body"),
         title: flagValue(args, "title")
       });
-      output.write(formatRecord(result, json));
+      output.write(formatRecord({ ...result, closeoutGateStatus: await closeoutGateStatusForSummary(context, result.summary) }, json));
       return { exitCode: 0 };
     }
     case "compose": {
@@ -3005,7 +3106,7 @@ async function summaryCommand(
         body,
         title: flagValue(args, "title") ?? `Closeout summary: ${subject.title}`
       });
-      output.write(formatRecord(result, json));
+      output.write(formatRecord({ ...result, closeoutGateStatus: await closeoutGateStatusForSummary(context, result.summary) }, json));
       return { exitCode: 0 };
     }
     case "show": {
@@ -3013,7 +3114,7 @@ async function summaryCommand(
       const summary = ref.startsWith("bw_summary_")
         ? await context.store.read(async (reader) => requireAgentSummary(reader, asAgentSummaryId(ref)))
         : await latestSummaryForSubject(context, await resolveSummarySubject(context, ref, args));
-      output.write(formatRecord(summary, json));
+      output.write(formatRecord({ ...summary, closeoutGateStatus: await closeoutGateStatusForSummary(context, summary) }, json));
       return { exitCode: 0 };
     }
     case "list": {
@@ -3193,6 +3294,14 @@ async function composeAgentSummaryBody(context: CliContext, subject: SummarySubj
   }));
   const tree = dependencyTreeForWork(subject.work.meta.id, snapshot.workItems, snapshot.graphEdges);
   const descendants = flattenDependencyTree(tree).filter((node) => node.id !== subject.work?.meta.id);
+  const closeoutGateStatus = closeoutGateStatusFromSnapshot(
+    subject.work,
+    snapshot.workItems,
+    snapshot.graphEdges,
+    snapshot.evidence,
+    snapshot.verifications,
+    snapshot.summaries
+  );
   return [
     `Subject: ${subject.subjectType}:${subject.subjectId}`,
     `Status: ${subject.work.status}`,
@@ -3214,6 +3323,10 @@ async function composeAgentSummaryBody(context: CliContext, subject: SummarySubj
       ? snapshot.verifications.map((record) => `- ${record.meta.id}: ${record.verdict}${record.notes ? ` ${record.notes}` : ""}`).join("\n")
       : "None.",
     "",
+    "## Closeout Gates",
+    "",
+    formatCloseoutGateStatusMarkdown(closeoutGateStatus),
+    "",
     "## Child Work",
     "",
     descendants.length > 0
@@ -3226,6 +3339,312 @@ async function composeAgentSummaryBody(context: CliContext, subject: SummarySubj
       ? snapshot.summaries.map((record) => `- ${record.meta.id}: ${record.status} ${record.outcome} ${record.title}`).join("\n")
       : "None."
   ].join("\n");
+}
+
+interface CloseoutGateStatusView {
+  readonly subjectId: WorkId;
+  readonly subjectType: string;
+  readonly title: string;
+  readonly summary: {
+    readonly total: number;
+    readonly open: number;
+    readonly satisfied: number;
+    readonly forced: number;
+  };
+  readonly requiredGates: readonly CloseoutGateStatusRow[];
+  readonly gateGaps: readonly CloseoutGateGapRow[];
+}
+
+interface CloseoutGateStatusRow {
+  readonly id: string;
+  readonly kind: CloseoutGateKind;
+  readonly scope: CloseoutGateScope;
+  readonly status: "open" | "satisfied" | "forced";
+  readonly recordedStatus: "open" | "satisfied" | "forced";
+  readonly requiredEvidenceKinds: readonly EvidenceKind[];
+  readonly requiredOutcome: "passed";
+  readonly minEvidenceCount: number;
+  readonly satisfiedBy?: RequiredCloseoutGate["satisfiedBy"];
+  readonly force?: RequiredCloseoutGate["force"];
+  readonly targets: readonly CloseoutGateTargetStatusRow[];
+}
+
+interface CloseoutGateTargetStatusRow {
+  readonly targetId: WorkId;
+  readonly title: string;
+  readonly workStatus: WorkStatus;
+  readonly status: "open" | "satisfied";
+  readonly satisfiedBy?: RequiredCloseoutGate["satisfiedBy"];
+}
+
+interface CloseoutGateGapRow {
+  readonly gateId: string;
+  readonly gateKind: CloseoutGateKind;
+  readonly gateScope: CloseoutGateScope;
+  readonly subjectId: WorkId;
+  readonly targetId: WorkId;
+  readonly reason: string;
+}
+
+async function closeoutGateStatusForSummary(
+  context: CliContext,
+  summary: AgentSummaryRecord
+): Promise<CloseoutGateStatusView | undefined> {
+  if (
+    (summary.subjectType !== "work" && summary.subjectType !== "sprint" && summary.subjectType !== "milestone") ||
+    !summary.subjectId.startsWith("bw_work_")
+  ) {
+    return undefined;
+  }
+  return closeoutGateStatusForWork(context, summary.subjectId as WorkId);
+}
+
+async function closeoutGateStatusForWork(context: CliContext, workId: WorkId): Promise<CloseoutGateStatusView> {
+  return context.store.read(async (reader) => {
+    const [work, workItems, graphEdges, evidence, verifications, summaries] = await Promise.all([
+      requireCliWork(reader, workId),
+      reader.listWorkItems(),
+      reader.listGraphEdges(),
+      reader.listEvidence(),
+      reader.listVerifications(),
+      reader.listAgentSummaries()
+    ]);
+    return closeoutGateStatusFromSnapshot(work, workItems, graphEdges, evidence, verifications, summaries);
+  });
+}
+
+function closeoutGateStatusFromSnapshot(
+  work: WorkItem,
+  workItems: readonly WorkItem[],
+  graphEdges: readonly GraphEdge[],
+  evidence: readonly EvidenceRecord[],
+  verifications: readonly VerificationRecord[],
+  summaries: readonly AgentSummaryRecord[]
+): CloseoutGateStatusView {
+  const requiredGates = (work.requiredCloseoutGates ?? []).map((gate) =>
+    closeoutGateStatusRow(gate, work, workItems, graphEdges, evidence, verifications, summaries)
+  );
+  const gateGaps = requiredGates.flatMap((gate) =>
+    gate.status === "open"
+      ? gate.targets
+          .filter((target) => target.status === "open")
+          .map((target) => ({
+            gateId: gate.id,
+            gateKind: gate.kind,
+            gateScope: gate.scope,
+            subjectId: work.meta.id,
+            targetId: target.targetId,
+            reason: "required gate has no satisfying evidence"
+          }))
+      : []
+  );
+  return {
+    subjectId: work.meta.id,
+    subjectType: closeoutGateSubjectTypeForWorkKind(work.kind),
+    title: work.title,
+    summary: {
+      total: requiredGates.length,
+      open: requiredGates.filter((gate) => gate.status === "open").length,
+      satisfied: requiredGates.filter((gate) => gate.status === "satisfied").length,
+      forced: requiredGates.filter((gate) => gate.status === "forced").length
+    },
+    requiredGates,
+    gateGaps
+  };
+}
+
+function closeoutGateStatusRow(
+  gate: RequiredCloseoutGate,
+  owner: WorkItem,
+  workItems: readonly WorkItem[],
+  graphEdges: readonly GraphEdge[],
+  evidence: readonly EvidenceRecord[],
+  verifications: readonly VerificationRecord[],
+  summaries: readonly AgentSummaryRecord[]
+): CloseoutGateStatusRow {
+  const targets = closeoutGateTargets(gate, owner, workItems, graphEdges).map((target) => {
+    const satisfiedBy = closeoutGateTargetSatisfaction(gate, target, evidence, verifications, summaries);
+    return {
+      targetId: target.meta.id,
+      title: target.title,
+      workStatus: target.status,
+      status: satisfiedBy ? "satisfied" as const : "open" as const,
+      satisfiedBy
+    };
+  });
+  const status =
+    gate.status === "forced"
+      ? "forced"
+      : gate.status === "satisfied" || targets.every((target) => target.status === "satisfied")
+        ? "satisfied"
+        : "open";
+  return {
+    id: gate.id,
+    kind: gate.kind,
+    scope: gate.scope,
+    status,
+    recordedStatus: gate.status,
+    requiredEvidenceKinds: gate.requiredEvidenceKinds,
+    requiredOutcome: gate.requiredOutcome,
+    minEvidenceCount: gate.minEvidenceCount,
+    satisfiedBy: gate.satisfiedBy ?? mergeCloseoutGateSatisfactions(targets.flatMap((target) => target.satisfiedBy ? [target.satisfiedBy] : [])),
+    force: gate.force,
+    targets
+  };
+}
+
+function closeoutGateTargets(
+  gate: RequiredCloseoutGate,
+  owner: WorkItem,
+  workItems: readonly WorkItem[],
+  graphEdges: readonly GraphEdge[]
+): readonly WorkItem[] {
+  switch (gate.scope) {
+    case "self":
+      return [owner];
+    case "direct_children": {
+      const workById = new Map(workItems.map((work) => [work.meta.id, work]));
+      return dependencyIdsForWork(owner, graphEdges).map((id) => workById.get(id)).filter(isWorkItem);
+    }
+    case "descendants": {
+      const descendantIds = new Set(flattenDependencyTree(dependencyTreeForWork(owner.meta.id, workItems, graphEdges))
+        .filter((node) => node.id !== owner.meta.id)
+        .map((node) => node.id));
+      return workItems.filter((item) => descendantIds.has(item.meta.id));
+    }
+  }
+}
+
+function closeoutGateTargetSatisfaction(
+  gate: RequiredCloseoutGate,
+  target: WorkItem,
+  evidence: readonly EvidenceRecord[],
+  verifications: readonly VerificationRecord[],
+  summaries: readonly AgentSummaryRecord[]
+): RequiredCloseoutGate["satisfiedBy"] | undefined {
+  switch (gate.kind) {
+    case "verification":
+      return verificationGateStatusSatisfaction(gate, target, evidence, verifications);
+    case "checkpoint":
+      return checkpointGateStatusSatisfaction(gate, target, summaries);
+    case "review":
+    case "audit":
+      return evidenceGateStatusSatisfaction(gate, target, evidence);
+  }
+}
+
+function verificationGateStatusSatisfaction(
+  gate: RequiredCloseoutGate,
+  target: WorkItem,
+  evidence: readonly EvidenceRecord[],
+  verifications: readonly VerificationRecord[]
+): RequiredCloseoutGate["satisfiedBy"] | undefined {
+  const evidenceById = new Map(evidence.map((record) => [record.meta.id, record]));
+  const matches = verifications.filter((verification) => {
+    if (verification.subjectId !== target.meta.id || verification.verdict !== "passed") {
+      return false;
+    }
+    return verification.evidenceIds.some((evidenceId) => {
+      const record = evidenceById.get(evidenceId);
+      return record?.subjectId === target.meta.id && (record.outcome === "passed" || record.outcome === "observed");
+    });
+  });
+  const evidenceIds = uniqueValues(matches.flatMap((verification) =>
+    verification.evidenceIds.filter((evidenceId) => {
+      const record = evidenceById.get(evidenceId);
+      return record?.subjectId === target.meta.id && (record.outcome === "passed" || record.outcome === "observed");
+    })
+  ));
+  if (evidenceIds.length < gate.minEvidenceCount) {
+    return undefined;
+  }
+  return {
+    evidenceIds,
+    verificationIds: uniqueValues(matches.map((verification) => verification.meta.id)),
+    agentSummaryIds: [],
+    commitShas: [],
+    dirtyPathNotes: []
+  };
+}
+
+function checkpointGateStatusSatisfaction(
+  gate: RequiredCloseoutGate,
+  target: WorkItem,
+  summaries: readonly AgentSummaryRecord[]
+): RequiredCloseoutGate["satisfiedBy"] | undefined {
+  const matches = summaries.filter(
+    (summary) =>
+      summary.subjectId === target.meta.id &&
+      (summary.status === "final" || summary.status === "forced") &&
+      (summary.commitShas.length > 0 || closeoutDirtyPathNotesHaveReasonCode(summary.dirtyPathNotes))
+  );
+  if (matches.length < gate.minEvidenceCount) {
+    return undefined;
+  }
+  return {
+    evidenceIds: uniqueValues(matches.flatMap((summary) => summary.evidenceIds)),
+    verificationIds: uniqueValues(matches.flatMap((summary) => summary.verificationIds)),
+    agentSummaryIds: uniqueValues(matches.map((summary) => summary.meta.id)),
+    commitShas: uniqueStrings(matches.flatMap((summary) => summary.commitShas)),
+    dirtyPathNotes: uniqueStrings(matches.flatMap((summary) => summary.dirtyPathNotes))
+  };
+}
+
+function evidenceGateStatusSatisfaction(
+  gate: RequiredCloseoutGate,
+  target: WorkItem,
+  evidence: readonly EvidenceRecord[]
+): RequiredCloseoutGate["satisfiedBy"] | undefined {
+  const allowedKinds = new Set(gate.requiredEvidenceKinds);
+  const matches = evidence.filter(
+    (record) => record.subjectId === target.meta.id && record.outcome === gate.requiredOutcome && allowedKinds.has(record.kind)
+  );
+  if (matches.length < gate.minEvidenceCount) {
+    return undefined;
+  }
+  return {
+    evidenceIds: uniqueValues(matches.map((record) => record.meta.id)),
+    verificationIds: [],
+    agentSummaryIds: [],
+    commitShas: [],
+    dirtyPathNotes: []
+  };
+}
+
+function mergeCloseoutGateSatisfactions(
+  values: readonly NonNullable<RequiredCloseoutGate["satisfiedBy"]>[]
+): RequiredCloseoutGate["satisfiedBy"] | undefined {
+  if (values.length === 0) {
+    return undefined;
+  }
+  return {
+    evidenceIds: uniqueValues(values.flatMap((value) => value.evidenceIds ?? [])),
+    verificationIds: uniqueValues(values.flatMap((value) => value.verificationIds ?? [])),
+    agentSummaryIds: uniqueValues(values.flatMap((value) => value.agentSummaryIds ?? [])),
+    commitShas: uniqueStrings(values.flatMap((value) => value.commitShas ?? [])),
+    dirtyPathNotes: uniqueStrings(values.flatMap((value) => value.dirtyPathNotes ?? []))
+  };
+}
+
+function closeoutDirtyPathNotesHaveReasonCode(notes: readonly string[]): boolean {
+  return dirtyPathNotesHaveReasonCode(notes);
+}
+
+function formatCloseoutGateStatusMarkdown(status: CloseoutGateStatusView): string {
+  if (status.requiredGates.length === 0) {
+    return "None.";
+  }
+  return status.requiredGates.map((gate) => {
+    const satisfied = gate.satisfiedBy;
+    const evidence = satisfied?.evidenceIds?.length ? ` evidence=${satisfied.evidenceIds.join(",")}` : "";
+    const verification = satisfied?.verificationIds?.length ? ` verification=${satisfied.verificationIds.join(",")}` : "";
+    const summaries = satisfied?.agentSummaryIds?.length ? ` summaries=${satisfied.agentSummaryIds.join(",")}` : "";
+    const commits = satisfied?.commitShas?.length ? ` commits=${satisfied.commitShas.join(",")}` : "";
+    const dirty = satisfied?.dirtyPathNotes?.length ? ` dirty_paths=${satisfied.dirtyPathNotes.join("; ")}` : "";
+    const forced = gate.force ? ` forced=${gate.force.reason} ${gate.force.comment}` : "";
+    const recorded = gate.recordedStatus !== gate.status ? ` recorded=${gate.recordedStatus}` : "";
+    return `- ${gate.kind}:${gate.scope} ${gate.status}${recorded}${evidence}${verification}${summaries}${commits}${dirty}${forced}`;
+  }).join("\n");
 }
 
 function flattenDependencyTree(tree: DependencyTreeNode): readonly DependencyTreeNode[] {
@@ -7264,6 +7683,23 @@ function parseCloseoutGateKind(value: string): CloseoutGateKind {
     return value;
   }
   throw new BorealError("BOREAL_INVALID_INPUT", "required gate kind must be verification, checkpoint, review, or audit");
+}
+
+function parseCloseoutGateForceReason(value: string | undefined): CloseoutGateForceReasonCode {
+  if (
+    value === "review_unavailable" ||
+    value === "audit_unavailable" ||
+    value === "external_review_record" ||
+    value === "legacy_backfill" ||
+    value === "user_accepted_risk" ||
+    value === "emergency_closeout"
+  ) {
+    return value;
+  }
+  throw new BorealError(
+    "BOREAL_INVALID_INPUT",
+    "--force-gate-reason must be review_unavailable, audit_unavailable, external_review_record, legacy_backfill, user_accepted_risk, or emergency_closeout"
+  );
 }
 
 function parseCloseoutGateScope(value: string | undefined): CloseoutGateScope | undefined {

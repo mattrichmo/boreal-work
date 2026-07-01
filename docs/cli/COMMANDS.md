@@ -604,7 +604,7 @@ Behavior:
 
 - Default `kind` is `task`.
 - Default `priority` is `normal`.
-- `--required-gate` stores first-class closeout gate metadata on the work record. Use `kind` for a self-scoped gate or `kind:scope` for `self`, `direct_children`, or `descendants`.
+- `--required-gate` stores first-class closeout gate metadata on the work record. Use `kind` for a self-scoped gate or `kind:scope` for `self`, `direct_children`, or `descendants`; for example `--required-gate review --required-gate audit:descendants`.
 - `--ready` marks the new item ready in the same runtime write transaction.
 
 Example:
@@ -975,7 +975,7 @@ JSON `data` includes inspected counts, linked event IDs, legacy-marked event IDs
 bwrk evidence add <work-id> --summary <text> [--kind command|test|diff|review|artifact|note] [--outcome passed|failed|observed|unknown] [--command <cmd>] [--uri <uri>] [--json]
 ```
 
-Records evidence against a work item and moves the work item to `needs_verification` unless it is already closed. Use `--kind artifact` for files or generated artifacts such as source maps; `document` is a source/raw kind, not an evidence kind.
+Records evidence against a work item and moves the work item to `needs_verification` unless it is already closed. Use `--kind artifact` for files or generated artifacts such as source maps; `document` is a source/raw kind, not an evidence kind. JSON output includes `closeoutGateStatus` for the subject work item. A passed `--kind review` record satisfies `review` gates and can satisfy `audit` gates; passed `command` and `artifact` evidence can also satisfy `audit` gates.
 
 Example:
 
@@ -989,7 +989,7 @@ bwrk evidence add bw_work_... --summary "pnpm test passed" --kind test --outcome
 bwrk summary create <work-ref|subject-id> --body <text> [--subject-type work|sprint|milestone|phase|project|session] [--kind task|sprint|milestone|phase|project|session|legacy_backfill] [--title <text>] [--status draft|final|forced] [--outcome completed|partial|deferred|duplicate|cancelled|blocked|no_change] [--evidence <id>...] [--verification <id>...] [--commit <sha>...] [--dirty-path <note>...] [--completed <work|title>|<title>|<outcome>|<notes>...] [--child-summary <id>...] [--parent-summary <id>] [--duplicate-of <id>] [--force-reason <code>] [--force-comment <text>] [--artifact-uri <uri>] [--no-render] [--json]
 ```
 
-Creates a typed agent closeout summary. By default it writes a Markdown artifact under `memory://agent-summaries/` and links evidence, verification, commit SHAs, child summaries, and dirty-path notes into the record.
+Creates a typed agent closeout summary. By default it writes a Markdown artifact under `memory://agent-summaries/` and links evidence, verification, commit SHAs, child summaries, and dirty-path notes into the record. JSON output includes `closeoutGateStatus` when the summary subject resolves to work, sprint, or milestone work.
 
 Forced summaries require both `--force-reason` and `--force-comment`. Use forced summaries for documented bypasses such as duplicate closeout, legacy backfill, external closeout, or operator override.
 
@@ -999,7 +999,7 @@ Forced summaries require both `--force-reason` and `--force-comment`. Use forced
 bwrk summary compose <work-ref|subject-id> [--subject-type work|sprint|milestone|phase|project|session] [--kind task|sprint|milestone|phase|project|session|legacy_backfill] [--title <text>] [--status draft|final|forced] [--outcome completed|partial|deferred|duplicate|cancelled|blocked|no_change] [--evidence <id>...] [--verification <id>...] [--commit <sha>...] [--dirty-path <note>...] [--child-summary <id>...] [--parent-summary <id>] [--duplicate-of <id>] [--force-reason <code>] [--force-comment <text>] [--artifact-uri <uri>] [--no-render] [--json]
 ```
 
-Builds the summary body from the current work item, evidence, verification, child dependency tree, and prior summaries, then persists the same record shape as `summary create`.
+Builds the summary body from the current work item, evidence, verification, child dependency tree, closeout gate status, and prior summaries, then persists the same record shape as `summary create`. Generated Markdown includes a `Closeout Gates` section.
 
 ## `summary show`
 
@@ -1007,7 +1007,7 @@ Builds the summary body from the current work item, evidence, verification, chil
 bwrk summary show <summary-id|work-ref|subject-id> [--subject-type work|sprint|milestone|phase|project|session] [--json]
 ```
 
-Shows an agent summary by summary ID, or the latest summary for a resolved subject.
+Shows an agent summary by summary ID, or the latest summary for a resolved subject. JSON output includes `closeoutGateStatus` when the summary subject resolves to work, sprint, or milestone work.
 
 ## `summary list`
 
@@ -1039,7 +1039,7 @@ Creates `legacy_backfill` summaries for existing work items that do not already 
 bwrk work verify <work-id> --evidence <evidence-id>... [--verdict passed|failed] [--notes <text>] [--json]
 ```
 
-Creates a verification record. `--evidence` may be repeated. Verification fails if referenced evidence is not attached to the work item. A `passed` verdict requires at least one referenced evidence record with outcome `passed`.
+Creates a verification record. `--evidence` may be repeated. Verification fails if referenced evidence is not attached to the work item. A `passed` verdict requires at least one referenced evidence record with outcome `passed`. JSON output includes `closeoutGateStatus` so callers can see whether required review, audit, verification, or checkpoint gates are still open.
 
 ## `work close`
 
@@ -1052,10 +1052,12 @@ Closes a work item. Runtime policy requires a passing verification before close,
 ## `work edit`
 
 ```bash
-bwrk work edit <work-ref> [--title <text>] [--description <text>] [--kind issue|task|sprint|milestone] [--priority low|normal|high|critical] [--label <label>...] [--acceptance <text>...] [--required-gate verification|checkpoint|review|audit[:self|direct_children|descendants]...|--clear-required-gates] [--json]
+bwrk work edit <work-ref> [--title <text>] [--description <text>] [--kind issue|task|sprint|milestone] [--priority low|normal|high|critical] [--label <label>...] [--acceptance <text>...] [--required-gate verification|checkpoint|review|audit[:self|direct_children|descendants]...|--clear-required-gates] [--force-gate <gate-id|kind[:scope]>... --force-gate-reason <code> --force-gate-comment <text>] [--force-gate-evidence <evidence-id>...] [--json]
 ```
 
 Updates mutable work fields while preserving source refs, evidence IDs, verification IDs, dependencies, reservation history, and audit events. Repeated `--label` and `--acceptance` values replace those lists. Repeated `--required-gate` replaces required closeout gate metadata; `--clear-required-gates` removes it.
+
+Use `--force-gate` for an audited bypass of an existing required gate, not as normal satisfaction. It accepts a gate id, kind, or `kind:scope`, requires `--force-gate-reason` and `--force-gate-comment`, and may attach support records with repeated `--force-gate-evidence`. Allowed force reason codes are `review_unavailable`, `audit_unavailable`, `external_review_record`, `legacy_backfill`, `user_accepted_risk`, and `emergency_closeout`. `--force-summary` does not force required review or audit gates.
 
 ## `work cancel`
 

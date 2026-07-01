@@ -8,6 +8,7 @@ writes_state: true
 requires_workspace: true
 allowed_commands:
   - work show
+  - work edit
   - dep tree
   - summary compose
   - summary create
@@ -81,6 +82,16 @@ Use manual closeout only for work that was completed outside the active-reservat
 7. Close only after passed verification and summary availability:
    `bwrk work close <work-id> --reason "<reason>" --agent-summary <summary-id> --json`
 
+For required review or audit gates:
+
+1. Inspect `closeoutGateStatus` from `summary compose <work-id> --json`, `summary show`, `work verify`, or recent `evidence add` output before closeout.
+2. If the gate is open, attach subject-matched passed evidence before closeout:
+   `bwrk evidence add <work-id> --summary "<reviewed scope and findings disposition>" --kind review --outcome passed --json`
+   `bwrk evidence add <work-id> --summary "<audit findings absent, fixed, or deferred>" --kind command --command "<audit command>" --outcome passed --json`
+3. Force a planned required gate only when normal evidence is unavailable and the bypass is explicitly accepted:
+   `bwrk work edit <work-id> --force-gate <gate-id|kind[:scope]> --force-gate-reason <code> --force-gate-comment "<why>" [--force-gate-evidence <evidence-id>] --json`
+4. Do not treat `--force-summary` as a gate force. It satisfies only the closeout-summary requirement.
+
 For sprint or parent-gate closeout:
 
 1. Inspect the parent and child state:
@@ -103,6 +114,7 @@ For sprint or parent-gate closeout:
 ## CLI Commands
 
 - `bwrk work show`
+- `bwrk work edit`
 - `bwrk dep tree`
 - `bwrk summary compose`
 - `bwrk summary create`

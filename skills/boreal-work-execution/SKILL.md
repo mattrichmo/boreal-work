@@ -16,6 +16,7 @@ Confirm the current project context. Prefer `bwrk prime --json` when the workspa
 - Treat the `workflows/...` entries below as source workflow references, not paths that must exist inside the installed skill folder.
 - Stop and report the missing workflow source if neither the local file nor `bwrk workflows show <ref>` is available.
 - Follow the workflow's allowed commands and finish criteria.
+- For required review or audit closeout gates, rely on the referenced work workflow files for the exact plan, satisfy, inspect, and force sequence; do not treat forced summaries as forced gates.
 - Keep this skill as a thin adapter; do not invent steps that belong in the workflow file.
 - If the request crosses repositories, stop and ask for the explicit workspace and memory root.
 

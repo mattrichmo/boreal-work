@@ -8011,7 +8011,7 @@ describe("bwrk cli", () => {
 	    expect(state.agentSummaries).toHaveLength(0);
 	  });
 
-  it("enforces required review gates from work close", async () => {
+  it("plans and exposes required review and audit gates from CLI workflows", async () => {
     const rootDir = await makeTempWorkspace();
     await runCli(rootDir, ["init", "--json"]);
 
@@ -8035,7 +8035,36 @@ describe("bwrk cli", () => {
       expect.objectContaining({ kind: "review", status: "open" })
     ]);
 
-    const testEvidence = parseData<{ readonly meta: { readonly id: string } }>(
+    const edited = parseData<{
+      readonly work: {
+        readonly requiredCloseoutGates: readonly Array<{ readonly kind: string; readonly scope: string; readonly status: string }>;
+      };
+    }>(
+      (
+        await runCli(rootDir, [
+          "work",
+          "edit",
+          work.meta.id,
+          "--required-gate",
+          "review",
+          "--required-gate",
+          "audit",
+          "--json"
+        ])
+      ).stdout
+    );
+    expect(edited.work.requiredCloseoutGates).toEqual([
+      expect.objectContaining({ kind: "review", scope: "self", status: "open" }),
+      expect.objectContaining({ kind: "audit", scope: "self", status: "open" })
+    ]);
+
+    const testEvidence = parseData<{
+      readonly meta: { readonly id: string };
+      readonly closeoutGateStatus: {
+        readonly summary: { readonly total: number; readonly open: number; readonly satisfied: number };
+        readonly gateGaps: readonly Array<{ readonly gateKind: string; readonly targetId: string }>;
+      };
+    }>(
       (
         await runCli(rootDir, [
           "evidence",
@@ -8051,14 +8080,28 @@ describe("bwrk cli", () => {
         ])
       ).stdout
     );
-    await runCli(rootDir, ["work", "verify", work.meta.id, "--evidence", testEvidence.meta.id, "--verdict", "passed", "--json"]);
+    expect(testEvidence.closeoutGateStatus.summary).toEqual(expect.objectContaining({ total: 2, open: 2, satisfied: 0 }));
+    expect(testEvidence.closeoutGateStatus.gateGaps).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ gateKind: "review", targetId: work.meta.id }),
+        expect.objectContaining({ gateKind: "audit", targetId: work.meta.id })
+      ])
+    );
+    const testVerification = parseData<{
+      readonly verdict: string;
+      readonly closeoutGateStatus: { readonly summary: { readonly open: number; readonly satisfied: number } };
+    }>(
+      (await runCli(rootDir, ["work", "verify", work.meta.id, "--evidence", testEvidence.meta.id, "--verdict", "passed", "--json"])).stdout
+    );
+    expect(testVerification.verdict).toBe("passed");
+    expect(testVerification.closeoutGateStatus.summary).toEqual(expect.objectContaining({ open: 2, satisfied: 0 }));
 
     const failedClose = await runCli(rootDir, [
       "work",
       "close",
       work.meta.id,
       "--reason",
-      "missing review evidence",
+      "missing review and audit evidence",
       "--commit",
       "abc1234",
       "--json"
@@ -8072,6 +8115,10 @@ describe("bwrk cli", () => {
             expect.objectContaining({
               gateKind: "review",
               targetId: work.meta.id
+            }),
+            expect.objectContaining({
+              gateKind: "audit",
+              targetId: work.meta.id
             })
           ])
         })
@@ -8079,7 +8126,18 @@ describe("bwrk cli", () => {
     );
     expect((await readState<{ readonly agentSummaries: readonly unknown[] }>(rootDir)).agentSummaries).toHaveLength(0);
 
-    const reviewEvidence = parseData<{ readonly meta: { readonly id: string } }>(
+    const reviewEvidence = parseData<{
+      readonly meta: { readonly id: string };
+      readonly closeoutGateStatus: {
+        readonly summary: { readonly open: number; readonly satisfied: number };
+        readonly requiredGates: readonly Array<{
+          readonly kind: string;
+          readonly status: string;
+          readonly recordedStatus: string;
+          readonly satisfiedBy?: { readonly evidenceIds?: readonly string[] };
+        }>;
+      };
+    }>(
       (
         await runCli(rootDir, [
           "evidence",
@@ -8095,10 +8153,38 @@ describe("bwrk cli", () => {
         ])
       ).stdout
     );
+    expect(reviewEvidence.closeoutGateStatus.summary).toEqual(expect.objectContaining({ open: 0, satisfied: 2 }));
+    expect(reviewEvidence.closeoutGateStatus.requiredGates).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          kind: "review",
+          status: "satisfied",
+          recordedStatus: "open",
+          satisfiedBy: expect.objectContaining({ evidenceIds: [reviewEvidence.meta.id] })
+        }),
+        expect.objectContaining({
+          kind: "audit",
+          status: "satisfied",
+          recordedStatus: "open",
+          satisfiedBy: expect.objectContaining({ evidenceIds: [reviewEvidence.meta.id] })
+        })
+      ])
+    );
+
+    const composed = parseData<{
+      readonly summary: { readonly body: string };
+      readonly closeoutGateStatus: { readonly summary: { readonly open: number; readonly satisfied: number } };
+    }>((await runCli(rootDir, ["summary", "compose", work.meta.id, "--no-render", "--json"])).stdout);
+    expect(composed.closeoutGateStatus.summary).toEqual(expect.objectContaining({ open: 0, satisfied: 2 }));
+    expect(composed.summary.body).toContain("## Closeout Gates");
+    expect(composed.summary.body).toContain("review:self satisfied");
+    expect(composed.summary.body).toContain("audit:self satisfied");
+
     const closed = parseData<{
       readonly work: {
         readonly status: string;
         readonly requiredCloseoutGates: readonly Array<{
+          readonly kind: string;
           readonly status: string;
           readonly satisfiedBy?: { readonly evidenceIds?: readonly string[] };
         }>;
@@ -8121,14 +8207,220 @@ describe("bwrk cli", () => {
 
     expect(closed.work.status).toBe("closed");
     expect(closed.createdAgentSummary?.commitShas).toEqual(["def5678"]);
-    expect(closed.work.requiredCloseoutGates[0]).toEqual(
-      expect.objectContaining({
-        status: "satisfied",
-        satisfiedBy: expect.objectContaining({
-          evidenceIds: [reviewEvidence.meta.id]
+    expect(closed.work.requiredCloseoutGates).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          kind: "review",
+          status: "satisfied",
+          satisfiedBy: expect.objectContaining({
+            evidenceIds: [reviewEvidence.meta.id]
+          })
+        }),
+        expect.objectContaining({
+          kind: "audit",
+          status: "satisfied",
+          satisfiedBy: expect.objectContaining({
+            evidenceIds: [reviewEvidence.meta.id]
+          })
         })
+      ])
+    );
+  });
+
+  it("forces planned required gates through work edit with audited metadata", async () => {
+    const rootDir = await makeTempWorkspace();
+    await runCli(rootDir, ["init", "--json"]);
+
+    const work = parseData<{
+      readonly meta: { readonly id: string };
+      readonly requiredCloseoutGates: readonly Array<{ readonly kind: string; readonly status: string }>;
+    }>(
+      (
+        await runCli(rootDir, [
+          "work",
+          "create",
+          "Forced audit gate target",
+          "--required-gate",
+          "audit",
+          "--ready",
+          "--json"
+        ])
+      ).stdout
+    );
+    expect(work.requiredCloseoutGates).toEqual([
+      expect.objectContaining({ kind: "audit", status: "open" })
+    ]);
+
+    const invalidForce = await runCli(rootDir, [
+      "work",
+      "edit",
+      work.meta.id,
+      "--force-gate",
+      "audit",
+      "--force-gate-reason",
+      "audit_unavailable",
+      "--json"
+    ]);
+    expect(invalidForce.exitCode).toBe(2);
+    expect(parseJson<{ readonly code: string; readonly message: string }>(invalidForce.stderr)).toEqual(
+      expect.objectContaining({
+        code: "BOREAL_INVALID_INPUT",
+        message: expect.stringContaining("--force-gate requires --force-gate-reason and --force-gate-comment")
       })
     );
+
+    const supportEvidence = parseData<{ readonly meta: { readonly id: string } }>(
+      (
+        await runCli(rootDir, [
+          "evidence",
+          "add",
+          work.meta.id,
+          "--summary",
+          "External audit window was unavailable.",
+          "--kind",
+          "note",
+          "--outcome",
+          "observed",
+          "--json"
+        ])
+      ).stdout
+    );
+
+    const forced = parseData<{
+      readonly work: {
+        readonly requiredCloseoutGates: readonly Array<{
+          readonly kind: string;
+          readonly status: string;
+          readonly force?: {
+            readonly reason: string;
+            readonly comment: string;
+            readonly evidenceIds?: readonly string[];
+          };
+        }>;
+      };
+    }>(
+      (
+        await runCli(rootDir, [
+          "work",
+          "edit",
+          work.meta.id,
+          "--force-gate",
+          "audit",
+          "--force-gate-reason",
+          "audit_unavailable",
+          "--force-gate-comment",
+          "External audit window was unavailable before closeout.",
+          "--force-gate-evidence",
+          supportEvidence.meta.id,
+          "--json"
+        ])
+      ).stdout
+    );
+    expect(forced.work.requiredCloseoutGates).toEqual([
+      expect.objectContaining({
+        kind: "audit",
+        status: "forced",
+        force: expect.objectContaining({
+          reason: "audit_unavailable",
+          comment: "External audit window was unavailable before closeout.",
+          evidenceIds: [supportEvidence.meta.id]
+        })
+      })
+    ]);
+
+    const verificationEvidence = parseData<{
+      readonly meta: { readonly id: string };
+      readonly closeoutGateStatus: {
+        readonly summary: { readonly open: number; readonly forced: number };
+        readonly requiredGates: readonly Array<{ readonly kind: string; readonly status: string }>;
+      };
+    }>(
+      (
+        await runCli(rootDir, [
+          "evidence",
+          "add",
+          work.meta.id,
+          "--summary",
+          "Verification evidence passed after forced audit.",
+          "--kind",
+          "test",
+          "--outcome",
+          "passed",
+          "--json"
+        ])
+      ).stdout
+    );
+    expect(verificationEvidence.closeoutGateStatus.summary).toEqual(expect.objectContaining({ open: 0, forced: 1 }));
+    expect(verificationEvidence.closeoutGateStatus.requiredGates).toEqual([
+      expect.objectContaining({ kind: "audit", status: "forced" })
+    ]);
+
+    await runCli(rootDir, [
+      "work",
+      "verify",
+      work.meta.id,
+      "--evidence",
+      verificationEvidence.meta.id,
+      "--verdict",
+      "passed",
+      "--json"
+    ]);
+    const composed = parseData<{
+      readonly summary: { readonly meta: { readonly id: string }; readonly body: string; readonly dirtyPathNotes: readonly string[] };
+      readonly closeoutGateStatus: { readonly summary: { readonly open: number; readonly forced: number } };
+    }>(
+      (
+        await runCli(rootDir, [
+          "summary",
+          "compose",
+          work.meta.id,
+          "--dirty-path",
+          "no_repo_changes: forced audit gate fixture",
+          "--no-render",
+          "--json"
+        ])
+      ).stdout
+    );
+    expect(composed.summary.dirtyPathNotes).toEqual(["no_repo_changes: forced audit gate fixture"]);
+    expect(composed.closeoutGateStatus.summary).toEqual(expect.objectContaining({ open: 0, forced: 1 }));
+    expect(composed.summary.body).toContain("audit:self forced");
+    expect(composed.summary.body).toContain("forced=audit_unavailable External audit window was unavailable before closeout.");
+
+    const closed = parseData<{
+      readonly work: {
+        readonly status: string;
+        readonly requiredCloseoutGates: readonly Array<{
+          readonly kind: string;
+          readonly status: string;
+          readonly force?: { readonly reason: string };
+        }>;
+      };
+      readonly agentSummaries: readonly Array<{ readonly meta: { readonly id: string } }>;
+    }>(
+      (
+        await runCli(rootDir, [
+          "work",
+          "close",
+          work.meta.id,
+          "--reason",
+          "forced audit gate accepted",
+          "--agent-summary",
+          composed.summary.meta.id,
+          "--json"
+        ])
+      ).stdout
+    );
+    expect(closed.work.status).toBe("closed");
+    expect(closed.agentSummaries).toEqual([
+      expect.objectContaining({ meta: expect.objectContaining({ id: composed.summary.meta.id }) })
+    ]);
+    expect(closed.work.requiredCloseoutGates).toEqual([
+      expect.objectContaining({
+        kind: "audit",
+        status: "forced",
+        force: expect.objectContaining({ reason: "audit_unavailable" })
+      })
+    ]);
   });
 
 	  it("keeps agent finish close atomic when summary checkpoint metadata is invalid", async () => {
