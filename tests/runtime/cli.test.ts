@@ -6358,6 +6358,358 @@ describe("bwrk cli", () => {
     ]);
   });
 
+  it("lists review candidates and rolls review gate counts through closeout surfaces", async () => {
+    const rootDir = await makeTempWorkspace();
+    await runCli(rootDir, ["init", "--json"]);
+
+    const sprint = parseData<{ readonly meta: { readonly id: string } }>(
+      (await runCli(rootDir, ["work", "create", "Review candidate sprint", "--kind", "sprint", "--ready", "--json"])).stdout
+    );
+
+    const closePlainWork = async (title: string) => {
+      const work = parseData<{ readonly meta: { readonly id: string } }>(
+        (await runCli(rootDir, ["work", "create", title, "--ready", "--json"])).stdout
+      );
+      await runCli(rootDir, ["dep", "add", sprint.meta.id, work.meta.id, "--json"]);
+      const evidence = parseData<{ readonly meta: { readonly id: string } }>(
+        (
+          await runCli(rootDir, [
+            "evidence",
+            "add",
+            work.meta.id,
+            "--summary",
+            `${title} implementation passed.`,
+            "--kind",
+            "test",
+            "--outcome",
+            "passed",
+            "--json"
+          ])
+        ).stdout
+      );
+      await runCli(rootDir, ["work", "verify", work.meta.id, "--evidence", evidence.meta.id, "--verdict", "passed", "--json"]);
+      const summary = parseData<{ readonly summary: { readonly meta: { readonly id: string } } }>(
+        (
+          await runCli(rootDir, [
+            "summary",
+            "compose",
+            work.meta.id,
+            "--dirty-path",
+            `no_repo_changes: ${title} fixture`,
+            "--json"
+          ])
+        ).stdout
+      );
+      await runCli(rootDir, [
+        "work",
+        "close",
+        work.meta.id,
+        "--reason",
+        `${title} closed`,
+        "--agent-summary",
+        summary.summary.meta.id,
+        "--json"
+      ]);
+      return work;
+    };
+
+    const pending = await closePlainWork("Pending review candidate");
+    const passed = await closePlainWork("Passed review candidate");
+    const forced = await closePlainWork("Forced audit candidate");
+    const optional = await closePlainWork("Optional recent closure");
+    const outside = await closePlainWork("Outside candidate");
+    await runCli(rootDir, ["dep", "remove", sprint.meta.id, outside.meta.id, "--json"]);
+
+    await runCli(rootDir, ["work", "edit", pending.meta.id, "--required-gate", "review", "--json"]);
+    await runCli(rootDir, ["work", "edit", passed.meta.id, "--required-gate", "review", "--json"]);
+    const reviewEvidence = parseData<{ readonly meta: { readonly id: string } }>(
+      (
+        await runCli(rootDir, [
+          "evidence",
+          "add",
+          passed.meta.id,
+          "--summary",
+          "Reviewer checked passed candidate and found no blockers.",
+          "--kind",
+          "review",
+          "--outcome",
+          "passed",
+          "--json"
+        ])
+      ).stdout
+    );
+    expect(reviewEvidence.meta.id).toMatch(/^bw_evidence_/);
+
+    await runCli(rootDir, ["work", "edit", forced.meta.id, "--required-gate", "audit", "--json"]);
+    const forceEvidence = parseData<{ readonly meta: { readonly id: string } }>(
+      (
+        await runCli(rootDir, [
+          "evidence",
+          "add",
+          forced.meta.id,
+          "--summary",
+          "External audit window was unavailable for this closed work.",
+          "--kind",
+          "note",
+          "--outcome",
+          "observed",
+          "--json"
+        ])
+      ).stdout
+    );
+    await runCli(rootDir, [
+      "work",
+      "edit",
+      forced.meta.id,
+      "--force-gate",
+      "audit",
+      "--force-gate-reason",
+      "audit_unavailable",
+      "--force-gate-comment",
+      "External audit window unavailable before reviewer sweep.",
+      "--force-gate-evidence",
+      forceEvidence.meta.id,
+      "--json"
+    ]);
+
+    const checkpoint = parseData<{ readonly heartbeat: { readonly meta: { readonly id: string } } }>(
+      (
+        await runCli(rootDir, [
+          "heartbeat",
+          "create",
+          "candidate-review",
+          "--reviewer",
+          "reviewer-a",
+          "--container",
+          sprint.meta.id,
+          "--closed-at",
+          "2000-01-01T00:00:00.000Z",
+          "--json"
+        ])
+      ).stdout
+    );
+
+    const pendingCandidates = parseData<{
+      readonly schemaVersion: string;
+      readonly summary: {
+        readonly total: number;
+        readonly returned: number;
+        readonly pending: number;
+        readonly passed: number;
+        readonly forced: number;
+        readonly optional: number;
+        readonly reviewGates: {
+          readonly review: { readonly pending: number; readonly passed: number; readonly forced: number };
+          readonly audit: { readonly pending: number; readonly passed: number; readonly forced: number };
+        };
+      };
+      readonly optionalRecentClosedCommand: string;
+      readonly items: readonly Array<{
+        readonly id: string;
+        readonly reviewStatus: string;
+        readonly pendingGateIds: readonly string[];
+        readonly passedGateIds: readonly string[];
+        readonly forcedGateIds: readonly string[];
+        readonly reviewEvidenceCommand: string;
+        readonly heartbeatAdvanceCommand?: string;
+      }>;
+    }>(
+      (
+        await runCli(rootDir, [
+          "work",
+          "review-candidates",
+          "--container",
+          sprint.meta.id,
+          "--after",
+          checkpoint.heartbeat.meta.id,
+          "--json"
+        ])
+      ).stdout
+    );
+
+    expect(pendingCandidates.schemaVersion).toBe("boreal.cli.work.review_candidates.v1");
+    expect(pendingCandidates.items).toEqual([
+      expect.objectContaining({
+        id: pending.meta.id,
+        reviewStatus: "pending",
+        pendingGateIds: [expect.stringMatching(/^bw_gate_/)],
+        reviewEvidenceCommand: expect.stringContaining("bwrk evidence add"),
+        heartbeatAdvanceCommand: `bwrk heartbeat advance ${checkpoint.heartbeat.meta.id} --work ${pending.meta.id} --json`
+      })
+    ]);
+    expect(pendingCandidates.summary).toEqual(
+      expect.objectContaining({
+        total: 3,
+        returned: 1,
+        pending: 1,
+        passed: 1,
+        forced: 1,
+        optional: 0,
+        reviewGates: expect.objectContaining({
+          review: expect.objectContaining({ pending: 1, passed: 1, forced: 0 }),
+          audit: expect.objectContaining({ pending: 0, passed: 0, forced: 1 })
+        })
+      })
+    );
+    expect(pendingCandidates.optionalRecentClosedCommand).toContain("bwrk work recent-closed");
+
+    const allCandidates = parseData<{ readonly items: readonly Array<{ readonly id: string; readonly reviewStatus: string }> }>(
+      (
+        await runCli(rootDir, [
+          "work",
+          "review-candidates",
+          "--container",
+          sprint.meta.id,
+          "--after",
+          checkpoint.heartbeat.meta.id,
+          "--review-status",
+          "all",
+          "--json"
+        ])
+      ).stdout
+    );
+    expect(allCandidates.items).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ id: pending.meta.id, reviewStatus: "pending" }),
+        expect.objectContaining({ id: passed.meta.id, reviewStatus: "passed" }),
+        expect.objectContaining({ id: forced.meta.id, reviewStatus: "forced" })
+      ])
+    );
+    expect(allCandidates.items.map((item) => item.id)).not.toContain(optional.meta.id);
+    expect(allCandidates.items.map((item) => item.id)).not.toContain(outside.meta.id);
+
+    const optionalCandidates = parseData<{ readonly items: readonly Array<{ readonly id: string; readonly reviewStatus: string }> }>(
+      (
+        await runCli(rootDir, [
+          "work",
+          "review-candidates",
+          "--container",
+          sprint.meta.id,
+          "--include-optional",
+          "--review-status",
+          "optional",
+          "--json"
+        ])
+      ).stdout
+    );
+    expect(optionalCandidates.items).toEqual([expect.objectContaining({ id: optional.meta.id, reviewStatus: "optional" })]);
+
+    const doctor = parseData<DoctorPayload>((await runCli(rootDir, ["doctor", "--json"])).stdout);
+    expect(doctorDiagnostic(doctor, "closeout.review_gate_counts")).toEqual(
+      expect.objectContaining({
+        severity: "ok",
+        details: expect.objectContaining({
+          review: expect.objectContaining({ pending: 1, passed: 1, forced: 0 }),
+          audit: expect.objectContaining({ pending: 0, passed: 0, forced: 1 })
+        })
+      })
+    );
+
+    const gate = parseData<{
+      readonly reviewGates: {
+        readonly review: { readonly pending: number; readonly passed: number; readonly forced: number };
+        readonly audit: { readonly pending: number; readonly passed: number; readonly forced: number };
+      };
+    }>((await runCli(rootDir, ["gate", "closeout", "--json"])).stdout);
+    expect(gate.reviewGates).toEqual(
+      expect.objectContaining({
+        review: expect.objectContaining({ pending: 1, passed: 1, forced: 0 }),
+        audit: expect.objectContaining({ pending: 0, passed: 0, forced: 1 })
+      })
+    );
+
+    const doctorEvidence = parseData<{ readonly meta: { readonly id: string } }>(
+      (
+        await runCli(rootDir, [
+          "evidence",
+          "add",
+          sprint.meta.id,
+          "--summary",
+          "doctor review gate counts passed",
+          "--kind",
+          "command",
+          "--outcome",
+          "passed",
+          "--command",
+          "bwrk doctor --json",
+          "--json"
+        ])
+      ).stdout
+    );
+    const syncEvidence = parseData<{ readonly meta: { readonly id: string } }>(
+      (
+        await runCli(rootDir, [
+          "evidence",
+          "add",
+          sprint.meta.id,
+          "--summary",
+          "sync refresh passed",
+          "--kind",
+          "command",
+          "--outcome",
+          "passed",
+          "--command",
+          "bwrk sync refresh --json",
+          "--json"
+        ])
+      ).stdout
+    );
+    const report = parseData<{
+      readonly path: string;
+      readonly report: {
+        readonly summary: {
+          readonly reviewGates: {
+            readonly review: { readonly pending: number; readonly passed: number; readonly forced: number };
+            readonly audit: { readonly pending: number; readonly passed: number; readonly forced: number };
+          };
+        };
+      };
+    }>(
+      (
+        await runCli(rootDir, [
+          "sprint",
+          "report",
+          sprint.meta.id,
+          "--doctor-evidence",
+          doctorEvidence.meta.id,
+          "--sync-evidence",
+          syncEvidence.meta.id,
+          "--out",
+          ".boreal/results/review-gates.md",
+          "--json"
+        ])
+      ).stdout
+    );
+    expect(report.report.summary.reviewGates).toEqual(
+      expect.objectContaining({
+        review: expect.objectContaining({ pending: 1, passed: 1, forced: 0 }),
+        audit: expect.objectContaining({ pending: 0, passed: 0, forced: 1 })
+      })
+    );
+    const reportMarkdown = await readFile(report.path, "utf8");
+    expect(reportMarkdown).toContain("Review gates: pending 1, passed 1, forced bypass 0");
+    expect(reportMarkdown).toContain("Audit gates: pending 0, passed 0, forced bypass 1");
+
+    const composed = parseData<{
+      readonly summary: { readonly body: string };
+      readonly closeoutGateStatus: { readonly summary: { readonly reviewGates: { readonly review: { readonly pending: number } } } };
+    }>(
+      (
+        await runCli(rootDir, [
+          "summary",
+          "compose",
+          pending.meta.id,
+          "--dirty-path",
+          "no_repo_changes: pending review gate summary fixture",
+          "--no-render",
+          "--json"
+        ])
+      ).stdout
+    );
+    expect(composed.closeoutGateStatus?.summary.reviewGates.review.pending).toBe(1);
+    expect(composed.summary.body).toContain("Review gates: pending 1, passed 0, forced bypass 0");
+  });
+
   it("reports SQLite cache missing, stale, and corrupt states in doctor", async () => {
     const rootDir = await makeTempWorkspace();
     await runCli(rootDir, ["init", "--json"]);

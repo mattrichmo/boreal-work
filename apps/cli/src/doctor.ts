@@ -1252,6 +1252,7 @@ async function validateStoreRecords(
         (edge) => edge.kind === "blocks" && edge.fromType === "work" && edge.toType === "work"
       );
       const expectedDependencyIds = dependencyIdsByWorkFromGraph(workItems, blockEdges);
+      const reviewGateCounts = doctorReviewGateCounts(workItems, evidence, expectedDependencyIds);
       const staleReadiness = workItems.flatMap((work) => {
         const dependencyIds = expectedDependencyIds.get(work.meta.id) ?? [];
         const dependencies = dependencyIds.map((dependencyId) => workById.get(dependencyId)).filter(isWorkItem);
@@ -1543,6 +1544,7 @@ async function validateStoreRecords(
         summaryArtifactGaps,
         legacySummaryArtifactGaps,
         forcedSummaryReasonGaps,
+        reviewGateCounts,
         danglingSummaryEvidence,
         danglingSummaryVerifications,
         danglingSummaryChildren,
@@ -1731,6 +1733,14 @@ async function validateStoreRecords(
     diagnostics.push(
       diagnosticFromList("summary.artifact_coverage", "Closeout summaries missing Markdown artifact URI", summary.summaryArtifactGaps)
     );
+    diagnostics.push({
+      code: "closeout.review_gate_counts",
+      severity: "ok",
+      message:
+        `Review gates pending ${summary.reviewGateCounts.review.pending}, passed ${summary.reviewGateCounts.review.passed}, forced bypass ${summary.reviewGateCounts.review.forced}; ` +
+        `audit gates pending ${summary.reviewGateCounts.audit.pending}, passed ${summary.reviewGateCounts.audit.passed}, forced bypass ${summary.reviewGateCounts.audit.forced}`,
+      details: summary.reviewGateCounts
+    });
     diagnostics.push(
       warningDiagnosticFromList(
         "summary.legacy_artifact_coverage",
@@ -2391,6 +2401,115 @@ function dependencyIdsByWorkFromGraph(
       workId,
       [...new Set(dependencyIds)].sort((left, right) => left.localeCompare(right))
     ])
+  );
+}
+
+interface DoctorReviewGateKindCounts {
+  total: number;
+  pending: number;
+  passed: number;
+  forced: number;
+}
+
+interface DoctorReviewGateCounts extends DoctorReviewGateKindCounts {
+  review: DoctorReviewGateKindCounts;
+  audit: DoctorReviewGateKindCounts;
+}
+
+function doctorReviewGateCounts(
+  workItems: readonly WorkItem[],
+  evidence: readonly EvidenceRecord[],
+  dependencyIdsByWork: ReadonlyMap<WorkId, readonly WorkId[]>
+): DoctorReviewGateCounts {
+  const review = doctorEmptyReviewGateKindCounts();
+  const audit = doctorEmptyReviewGateKindCounts();
+  for (const work of workItems) {
+    for (const gate of work.requiredCloseoutGates ?? []) {
+      if (gate.kind !== "review" && gate.kind !== "audit") {
+        continue;
+      }
+      const bucket = gate.kind === "review" ? review : audit;
+      doctorIncrementReviewGateCounts(bucket, doctorReviewGateStatus(work, gate, evidence, dependencyIdsByWork));
+    }
+  }
+  return {
+    total: review.total + audit.total,
+    pending: review.pending + audit.pending,
+    passed: review.passed + audit.passed,
+    forced: review.forced + audit.forced,
+    review,
+    audit
+  };
+}
+
+function doctorEmptyReviewGateKindCounts(): DoctorReviewGateKindCounts {
+  return {
+    total: 0,
+    pending: 0,
+    passed: 0,
+    forced: 0
+  };
+}
+
+function doctorIncrementReviewGateCounts(counts: DoctorReviewGateKindCounts, status: "pending" | "passed" | "forced"): void {
+  counts.total += 1;
+  counts[status] += 1;
+}
+
+function doctorReviewGateStatus(
+  owner: WorkItem,
+  gate: NonNullable<WorkItem["requiredCloseoutGates"]>[number],
+  evidence: readonly EvidenceRecord[],
+  dependencyIdsByWork: ReadonlyMap<WorkId, readonly WorkId[]>
+): "pending" | "passed" | "forced" {
+  if (gate.status === "forced") {
+    return "forced";
+  }
+  if (gate.status === "satisfied") {
+    return "passed";
+  }
+  const targets = doctorReviewGateTargetIds(owner, gate.scope, dependencyIdsByWork);
+  return targets.every((targetId) => doctorTargetHasReviewGateEvidence(gate, targetId, evidence)) ? "passed" : "pending";
+}
+
+function doctorReviewGateTargetIds(
+  owner: WorkItem,
+  scope: NonNullable<WorkItem["requiredCloseoutGates"]>[number]["scope"],
+  dependencyIdsByWork: ReadonlyMap<WorkId, readonly WorkId[]>
+): readonly WorkId[] {
+  if (scope === "self") {
+    return [owner.meta.id];
+  }
+  const direct = dependencyIdsByWork.get(owner.meta.id) ?? [];
+  if (scope === "direct_children") {
+    return direct;
+  }
+  const visited = new Set<WorkId>();
+  const visit = (workId: WorkId): void => {
+    for (const dependencyId of dependencyIdsByWork.get(workId) ?? []) {
+      if (visited.has(dependencyId)) {
+        continue;
+      }
+      visited.add(dependencyId);
+      visit(dependencyId);
+    }
+  };
+  visit(owner.meta.id);
+  return [...visited];
+}
+
+function doctorTargetHasReviewGateEvidence(
+  gate: NonNullable<WorkItem["requiredCloseoutGates"]>[number],
+  targetId: WorkId,
+  evidence: readonly EvidenceRecord[]
+): boolean {
+  const allowedKinds = new Set(gate.requiredEvidenceKinds);
+  return evidence.some(
+    (record) =>
+      record.subjectType === "work" &&
+      record.subjectId === targetId &&
+      record.outcome === gate.requiredOutcome &&
+      allowedKinds.has(record.kind)
   );
 }
 

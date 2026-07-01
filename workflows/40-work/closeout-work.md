@@ -8,6 +8,8 @@ writes_state: true
 requires_workspace: true
 allowed_commands:
   - work show
+  - work recent-closed
+  - work review-candidates
   - work edit
   - dep tree
   - summary compose
@@ -20,6 +22,8 @@ allowed_commands:
   - sprint metrics
   - sprint report
   - sprint close
+  - heartbeat show
+  - heartbeat advance
   - session end
   - sync status
   - doctor
@@ -92,6 +96,18 @@ For required review or audit gates:
    `bwrk work edit <work-id> --force-gate <gate-id|kind[:scope]> --force-gate-reason <code> --force-gate-comment "<why>" [--force-gate-evidence <evidence-id>] --json`
 4. Do not treat `--force-summary` as a gate force. It satisfies only the closeout-summary requirement.
 
+For reviewer-agent candidate loops after work has closed:
+
+1. Resolve the last reviewed checkpoint:
+   `bwrk heartbeat show <checkpoint> --reviewer <reviewer-id> --container <work-ref> --json`
+2. Query pending required review or audit gates since that checkpoint:
+   `bwrk work review-candidates --container <work-ref> --after <checkpoint-id> --review-status pending --json`
+3. Record the reviewer outcome on the closed work item with passed review evidence, or force the planned gate with audited metadata when review is unavailable:
+   `bwrk evidence add <work-id> --summary "<reviewed scope and findings disposition>" --kind review --outcome passed --json`
+4. Advance the checkpoint only after recording the review outcome:
+   `bwrk heartbeat advance <checkpoint-id> --work <work-id> --json`
+5. Use optional broad review with `bwrk work recent-closed --container <work-ref> --after <checkpoint-id> --json` when the scope has no required review/audit gates but still needs sampling.
+
 For sprint or parent-gate closeout:
 
 1. Inspect the parent and child state:
@@ -114,6 +130,8 @@ For sprint or parent-gate closeout:
 ## CLI Commands
 
 - `bwrk work show`
+- `bwrk work recent-closed`
+- `bwrk work review-candidates`
 - `bwrk work edit`
 - `bwrk dep tree`
 - `bwrk summary compose`
@@ -126,6 +144,8 @@ For sprint or parent-gate closeout:
 - `bwrk sprint metrics`
 - `bwrk sprint report`
 - `bwrk sprint close`
+- `bwrk heartbeat show`
+- `bwrk heartbeat advance`
 - `bwrk session end`
 - `bwrk sync status`
 - `bwrk doctor`

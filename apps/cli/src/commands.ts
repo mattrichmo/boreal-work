@@ -281,6 +281,35 @@ interface RecentClosedWorkRow {
   readonly closedEventId?: EventId;
 }
 
+type ReviewCandidateStatus = "pending" | "passed" | "forced" | "optional";
+
+interface ReviewCandidateRow extends RecentClosedWorkRow {
+  readonly reviewStatus: ReviewCandidateStatus;
+  readonly reviewGateCounts: ReviewGateSummary;
+  readonly pendingGateIds: readonly string[];
+  readonly passedGateIds: readonly string[];
+  readonly forcedGateIds: readonly string[];
+  readonly reviewEvidenceCommand: string;
+  readonly heartbeatAdvanceCommand?: string;
+  readonly closeoutGateStatus: CloseoutGateStatusView;
+}
+
+interface ReviewGateKindSummary {
+  readonly total: number;
+  readonly pending: number;
+  readonly passed: number;
+  readonly forced: number;
+}
+
+interface ReviewGateSummary {
+  readonly total: number;
+  readonly pending: number;
+  readonly passed: number;
+  readonly forced: number;
+  readonly review: ReviewGateKindSummary;
+  readonly audit: ReviewGateKindSummary;
+}
+
 interface DependencyTreeNode {
   readonly id: string;
   readonly title?: string;
@@ -402,6 +431,7 @@ interface SprintReportDocument {
     readonly agentSummaries: number;
     readonly summaryCheckpointGaps: number;
     readonly nextSprintCandidates: number;
+    readonly reviewGates: ReviewGateSummary;
   };
   readonly completedWork: readonly SprintReportWorkRow[];
   readonly openWork: readonly SprintReportWorkRow[];
@@ -2386,6 +2416,74 @@ async function recentClosedWorkCommand(context: CliContext, args: ParsedArgs) {
   };
 }
 
+async function reviewCandidatesCommand(context: CliContext, args: ParsedArgs) {
+  const limit = parseLimit(flagValue(args, "limit")) ?? DEFAULT_LIST_LIMIT;
+  const order = parseRecentClosedOrder(flagValue(args, "order"));
+  const since = parseRecentClosedSince(flagValue(args, "since"));
+  const after = await recentClosedCursorFromArgs(context, flagValue(args, "after"));
+  const kind = parseRecentClosedKind(flagValue(args, "kind"));
+  const phase = hasFlag(args, "phase");
+  const includeOptional = hasFlag(args, "include-optional");
+  const reviewStatus = parseReviewCandidateStatus(flagValue(args, "review-status"));
+  if (phase && kind && kind !== "milestone") {
+    throw new BorealError("BOREAL_INVALID_INPUT", "--phase can only be combined with --kind milestone");
+  }
+  const containerId = flagValue(args, "container")
+    ? await resolveWorkId(context, requiredFlag(args, "container"))
+    : undefined;
+  const snapshot = await context.store.read(async (reader) => ({
+    workItems: await reader.listWorkItems(),
+    graphEdges: await reader.listGraphEdges(),
+    events: await reader.listEvents(),
+    evidence: await reader.listEvidence(),
+    verifications: await reader.listVerifications(),
+    summaries: await reader.listAgentSummaries()
+  }));
+  const scopedIds = containerId ? heartbeatScopeIds(containerId, snapshot.workItems, snapshot.graphEdges) : undefined;
+  const allCandidates = snapshot.workItems
+    .filter((work): work is WorkItem & { readonly status: "closed"; readonly closedAt: IsoTimestamp } =>
+      work.status === "closed" && work.closedAt !== undefined
+    )
+    .filter((work) => !kind || work.kind === kind)
+    .filter((work) => !phase || (work.kind === "milestone" && work.labels.includes("phase")))
+    .filter((work) => !scopedIds || scopedIds.has(work.meta.id))
+    .filter((work) => !since || work.closedAt >= since)
+    .filter((work) => recentClosedWorkIsAfterCursor(work, after))
+    .map((work) => reviewCandidateRow(work, snapshot, after))
+    .filter((row): row is ReviewCandidateRow => row !== undefined && (includeOptional || row.reviewStatus !== "optional"))
+    .sort((left, right) => compareRecentClosedRows(left, right, order));
+  const rows = allCandidates
+    .filter((row) => reviewStatus === "all" || row.reviewStatus === reviewStatus)
+    .slice(0, limit);
+  return {
+    schemaVersion: "boreal.cli.work.review_candidates.v1",
+    generatedAt: nowIso(),
+    workspaceRoot: context.workspaceRoot,
+    filters: {
+      since,
+      after,
+      containerId,
+      kind,
+      phase,
+      includeOptional,
+      reviewStatus,
+      order,
+      limit
+    },
+    summary: {
+      total: allCandidates.length,
+      returned: rows.length,
+      pending: allCandidates.filter((row) => row.reviewStatus === "pending").length,
+      passed: allCandidates.filter((row) => row.reviewStatus === "passed").length,
+      forced: allCandidates.filter((row) => row.reviewStatus === "forced").length,
+      optional: allCandidates.filter((row) => row.reviewStatus === "optional").length,
+      reviewGates: reviewGateSummaryFromStatuses(allCandidates.map((row) => row.closeoutGateStatus))
+    },
+    optionalRecentClosedCommand: recentClosedCommandForFilters({ since, after, containerId, kind, phase, order, limit }),
+    items: rows
+  };
+}
+
 function recentClosedWorkRow(work: WorkItem & { readonly status: "closed"; readonly closedAt: IsoTimestamp }, events: readonly RuntimeEvent[]): RecentClosedWorkRow {
   return {
     id: work.meta.id,
@@ -2399,6 +2497,63 @@ function recentClosedWorkRow(work: WorkItem & { readonly status: "closed"; reado
     verificationCount: work.verificationIds.length,
     closedEventId: workClosedEventId(events, work.meta.id)
   };
+}
+
+function reviewCandidateRow(
+  work: WorkItem & { readonly status: "closed"; readonly closedAt: IsoTimestamp },
+  snapshot: {
+    readonly workItems: readonly WorkItem[];
+    readonly graphEdges: readonly GraphEdge[];
+    readonly events: readonly RuntimeEvent[];
+    readonly evidence: readonly EvidenceRecord[];
+    readonly verifications: readonly VerificationRecord[];
+    readonly summaries: readonly AgentSummaryRecord[];
+  },
+  after: RecentClosedCursor | undefined
+): ReviewCandidateRow | undefined {
+  const closeoutGateStatus = closeoutGateStatusFromSnapshot(
+    work,
+    snapshot.workItems,
+    snapshot.graphEdges,
+    snapshot.evidence,
+    snapshot.verifications,
+    snapshot.summaries
+  );
+  const gateCounts = reviewGateSummaryFromStatus(closeoutGateStatus);
+  const reviewStatus = reviewCandidateStatus(closeoutGateStatus);
+  if (!reviewStatus) {
+    return undefined;
+  }
+  const reviewGates = closeoutGateStatus.requiredGates.filter(isReviewCandidateGate);
+  return {
+    ...recentClosedWorkRow(work, snapshot.events),
+    reviewStatus,
+    reviewGateCounts: gateCounts,
+    pendingGateIds: reviewGates.filter((gate) => gate.status === "open").map((gate) => gate.id),
+    passedGateIds: reviewGates.filter((gate) => gate.status === "satisfied").map((gate) => gate.id),
+    forcedGateIds: reviewGates.filter((gate) => gate.status === "forced").map((gate) => gate.id),
+    reviewEvidenceCommand: `bwrk evidence add ${shellArg(work.meta.id)} --kind review --outcome passed --summary ${shellArg(`review passed for ${work.title}`)} --json`,
+    heartbeatAdvanceCommand: after?.source === "checkpoint" ? `bwrk heartbeat advance ${shellArg(after.value)} --work ${shellArg(work.meta.id)} --json` : undefined,
+    closeoutGateStatus
+  };
+}
+
+function reviewCandidateStatus(status: CloseoutGateStatusView): ReviewCandidateStatus | undefined {
+  const reviewGates = status.requiredGates.filter(isReviewCandidateGate);
+  if (reviewGates.length === 0) {
+    return "optional";
+  }
+  if (reviewGates.some((gate) => gate.status === "open")) {
+    return "pending";
+  }
+  if (reviewGates.some((gate) => gate.status === "forced")) {
+    return "forced";
+  }
+  return "passed";
+}
+
+function isReviewCandidateGate(gate: Pick<CloseoutGateStatusRow, "kind">): boolean {
+  return gate.kind === "review" || gate.kind === "audit";
 }
 
 function recentClosedWorkIsAfterCursor(work: WorkItem & { readonly closedAt: IsoTimestamp }, cursor: RecentClosedCursor | undefined): boolean {
@@ -2436,6 +2591,17 @@ function textRecentClosedWorkRow(row: RecentClosedWorkRow) {
   };
 }
 
+function textReviewCandidateRow(row: ReviewCandidateRow) {
+  return {
+    id: row.id,
+    status: row.reviewStatus,
+    review: `${row.reviewGateCounts.review.pending}/${row.reviewGateCounts.review.passed}/${row.reviewGateCounts.review.forced}`,
+    audit: `${row.reviewGateCounts.audit.pending}/${row.reviewGateCounts.audit.passed}/${row.reviewGateCounts.audit.forced}`,
+    closedAt: row.closedAt,
+    title: row.title
+  };
+}
+
 function parseRecentClosedOrder(value: string | undefined): RecentClosedOrder {
   if (!value || value === "desc") {
     return "desc";
@@ -2454,6 +2620,16 @@ function parseRecentClosedKind(value: string | undefined): WorkKind | undefined 
     return value;
   }
   throw new BorealError("BOREAL_INVALID_INPUT", "--kind must be issue, task, sprint, or milestone");
+}
+
+function parseReviewCandidateStatus(value: string | undefined): ReviewCandidateStatus | "all" {
+  if (!value) {
+    return "pending";
+  }
+  if (value === "pending" || value === "passed" || value === "forced" || value === "optional" || value === "all") {
+    return value;
+  }
+  throw new BorealError("BOREAL_INVALID_INPUT", "--review-status must be pending, passed, forced, optional, or all");
 }
 
 function parseRecentClosedSince(value: string | undefined): IsoTimestamp | undefined {
@@ -2500,6 +2676,25 @@ async function recentClosedCursorFromArgs(context: CliContext, value: string | u
     workId: heartbeat.lastWorkId,
     includeEqualClosedAt: true
   };
+}
+
+function recentClosedCommandForFilters(input: {
+  readonly since: IsoTimestamp | undefined;
+  readonly after: RecentClosedCursor | undefined;
+  readonly containerId: WorkId | undefined;
+  readonly kind: WorkKind | undefined;
+  readonly phase: boolean;
+  readonly order: RecentClosedOrder;
+  readonly limit: number;
+}): string {
+  const args = ["bwrk", "work", "recent-closed"];
+  if (input.containerId) args.push("--container", input.containerId);
+  if (input.after) args.push("--after", input.after.value);
+  if (input.since) args.push("--since", input.since);
+  if (input.kind) args.push("--kind", input.kind);
+  if (input.phase) args.push("--phase");
+  args.push("--order", input.order, "--limit", String(input.limit), "--json");
+  return args.map(shellArg).join(" ");
 }
 
 function parseHeartbeatIsoTimestamp(value: string, label: string): IsoTimestamp {
@@ -2691,6 +2886,11 @@ async function workCommand(
     case "recent-closed": {
       const result = await recentClosedWorkCommand(context, args);
       output.write(json ? formatRecord(result, true) : table(result.items.map(textRecentClosedWorkRow)));
+      return { exitCode: 0 };
+    }
+    case "review-candidates": {
+      const result = await reviewCandidatesCommand(context, args);
+      output.write(json ? formatRecord(result, true) : table(result.items.map(textReviewCandidateRow)));
       return { exitCode: 0 };
     }
     case "next": {
@@ -3543,6 +3743,7 @@ interface CloseoutGateStatusView {
     readonly open: number;
     readonly satisfied: number;
     readonly forced: number;
+    readonly reviewGates: ReviewGateSummary;
   };
   readonly requiredGates: readonly CloseoutGateStatusRow[];
   readonly gateGaps: readonly CloseoutGateGapRow[];
@@ -3639,7 +3840,8 @@ function closeoutGateStatusFromSnapshot(
       total: requiredGates.length,
       open: requiredGates.filter((gate) => gate.status === "open").length,
       satisfied: requiredGates.filter((gate) => gate.status === "satisfied").length,
-      forced: requiredGates.filter((gate) => gate.status === "forced").length
+      forced: requiredGates.filter((gate) => gate.status === "forced").length,
+      reviewGates: reviewGateSummaryFromRows(requiredGates)
     },
     requiredGates,
     gateGaps
@@ -3819,6 +4021,62 @@ function mergeCloseoutGateSatisfactions(
   };
 }
 
+function emptyReviewGateKindSummary(): ReviewGateKindSummary {
+  return {
+    total: 0,
+    pending: 0,
+    passed: 0,
+    forced: 0
+  };
+}
+
+function emptyReviewGateSummary(): ReviewGateSummary {
+  return {
+    total: 0,
+    pending: 0,
+    passed: 0,
+    forced: 0,
+    review: emptyReviewGateKindSummary(),
+    audit: emptyReviewGateKindSummary()
+  };
+}
+
+function reviewGateSummaryFromStatus(status: CloseoutGateStatusView): ReviewGateSummary {
+  return reviewGateSummaryFromRows(status.requiredGates);
+}
+
+function reviewGateSummaryFromStatuses(statuses: readonly CloseoutGateStatusView[]): ReviewGateSummary {
+  return reviewGateSummaryFromRows(statuses.flatMap((status) => status.requiredGates));
+}
+
+function reviewGateSummaryFromRows(rows: readonly CloseoutGateStatusRow[]): ReviewGateSummary {
+  const review = { ...emptyReviewGateKindSummary() };
+  const audit = { ...emptyReviewGateKindSummary() };
+  for (const gate of rows.filter(isReviewCandidateGate)) {
+    const bucket = gate.kind === "review" ? review : audit;
+    incrementReviewGateSummary(bucket, gate.status);
+  }
+  return {
+    total: review.total + audit.total,
+    pending: review.pending + audit.pending,
+    passed: review.passed + audit.passed,
+    forced: review.forced + audit.forced,
+    review,
+    audit
+  };
+}
+
+function incrementReviewGateSummary(summary: { total: number; pending: number; passed: number; forced: number }, status: CloseoutGateStatusRow["status"]): void {
+  summary.total += 1;
+  if (status === "open") {
+    summary.pending += 1;
+  } else if (status === "satisfied") {
+    summary.passed += 1;
+  } else {
+    summary.forced += 1;
+  }
+}
+
 function closeoutDirtyPathNotesHaveReasonCode(notes: readonly string[]): boolean {
   return dirtyPathNotesHaveReasonCode(notes);
 }
@@ -3827,7 +4085,12 @@ function formatCloseoutGateStatusMarkdown(status: CloseoutGateStatusView): strin
   if (status.requiredGates.length === 0) {
     return "None.";
   }
-  return status.requiredGates.map((gate) => {
+  const counts = status.summary.reviewGates;
+  const lines = [
+    `Review gates: pending ${counts.review.pending}, passed ${counts.review.passed}, forced bypass ${counts.review.forced}`,
+    `Audit gates: pending ${counts.audit.pending}, passed ${counts.audit.passed}, forced bypass ${counts.audit.forced}`
+  ];
+  return [...lines, ...status.requiredGates.map((gate) => {
     const satisfied = gate.satisfiedBy;
     const evidence = satisfied?.evidenceIds?.length ? ` evidence=${satisfied.evidenceIds.join(",")}` : "";
     const verification = satisfied?.verificationIds?.length ? ` verification=${satisfied.verificationIds.join(",")}` : "";
@@ -3837,7 +4100,7 @@ function formatCloseoutGateStatusMarkdown(status: CloseoutGateStatusView): strin
     const forced = gate.force ? ` forced=${gate.force.reason} ${gate.force.comment}` : "";
     const recorded = gate.recordedStatus !== gate.status ? ` recorded=${gate.recordedStatus}` : "";
     return `- ${gate.kind}:${gate.scope} ${gate.status}${recorded}${evidence}${verification}${summaries}${commits}${dirty}${forced}`;
-  }).join("\n");
+  })].join("\n");
 }
 
 function flattenDependencyTree(tree: DependencyTreeNode): readonly DependencyTreeNode[] {
@@ -5378,6 +5641,7 @@ async function gateCloseoutResult(context: CliContext, args: ParsedArgs) {
     };
     checks = await runGateCloseoutChecks(context, strict);
   }
+  const reviewGates = await reviewGateSummaryForWorkspace(context);
   return {
     schemaVersion: "boreal.cli.gate.closeout.v1",
     generatedAt,
@@ -5386,6 +5650,7 @@ async function gateCloseoutResult(context: CliContext, args: ParsedArgs) {
     autoPruneOperations,
     operationPrune,
     ok: checks.ok,
+    reviewGates,
     sync: gateSyncView(checks.sync),
     doctor: gateDoctorView(checks.doctor),
     schema: checks.schema,
@@ -5436,6 +5701,21 @@ function gateDoctorView(doctor: DoctorResult) {
     fixedCount: doctor.diagnostics.filter((diagnostic) => diagnostic.severity === "fixed").length,
     diagnostics: doctor.diagnostics
   };
+}
+
+async function reviewGateSummaryForWorkspace(context: CliContext): Promise<ReviewGateSummary> {
+  return context.store.read(async (reader) => {
+    const [workItems, graphEdges, evidence, verifications, summaries] = await Promise.all([
+      reader.listWorkItems(),
+      reader.listGraphEdges(),
+      reader.listEvidence(),
+      reader.listVerifications(),
+      reader.listAgentSummaries()
+    ]);
+    return reviewGateSummaryFromStatuses(
+      workItems.map((work) => closeoutGateStatusFromSnapshot(work, workItems, graphEdges, evidence, verifications, summaries))
+    );
+  });
 }
 
 function commandMetadataValidationResult() {
@@ -6751,6 +7031,7 @@ async function buildSprintReportDocument(
       workItems: await reader.listWorkItems(),
       agentSummaries: await reader.listAgentSummaries(),
       evidence: await reader.listEvidence(),
+      verifications: await reader.listVerifications(),
       decisions: await reader.listDecisions(),
       graphEdges: await reader.listGraphEdges(),
       sources: await reader.listKnowledgeSources()
@@ -6808,6 +7089,18 @@ async function buildSprintReportDocument(
   const nextSprintCandidates = openWork
     .filter((work) => work.status !== "cancelled")
     .sort(compareReportWorkRows);
+  const reviewGates = reviewGateSummaryFromStatuses(
+    snapshot.workItems
+      .filter((work) => scopedWorkIds.has(work.meta.id))
+      .map((work) => closeoutGateStatusFromSnapshot(
+        work,
+        snapshot.workItems,
+        snapshot.graphEdges,
+        snapshot.evidence,
+        snapshot.verifications,
+        snapshot.agentSummaries
+      ))
+  );
 
   return {
     schemaVersion: SPRINT_REPORT_SCHEMA_VERSION,
@@ -6833,7 +7126,8 @@ async function buildSprintReportDocument(
       decisions: decisions.length,
       agentSummaries: agentSummaries.length,
       summaryCheckpointGaps: summaryCheckpointGaps.length,
-      nextSprintCandidates: nextSprintCandidates.length
+      nextSprintCandidates: nextSprintCandidates.length,
+      reviewGates
     },
     completedWork,
     openWork,
@@ -7035,6 +7329,8 @@ function renderSprintReportMarkdown(document: SprintReportDocument): string {
     `- Agent summaries: ${document.summary.agentSummaries}`,
     `- Summary checkpoint gaps: ${document.summary.summaryCheckpointGaps}`,
     `- Next sprint candidates: ${document.summary.nextSprintCandidates}`,
+    `- Review gates: pending ${document.summary.reviewGates.review.pending}, passed ${document.summary.reviewGates.review.passed}, forced bypass ${document.summary.reviewGates.review.forced}`,
+    `- Audit gates: pending ${document.summary.reviewGates.audit.pending}, passed ${document.summary.reviewGates.audit.passed}, forced bypass ${document.summary.reviewGates.audit.forced}`,
     "",
     "## Completed Work",
     "",
@@ -7167,6 +7463,8 @@ function renderSprintReportHtml(document: SprintReportDocument): string {
     htmlPill("Decisions", String(document.summary.decisions)),
     htmlPill("Agent summaries", String(document.summary.agentSummaries)),
     htmlPill("Summary checkpoint gaps", String(document.summary.summaryCheckpointGaps)),
+    htmlPill("Review gates", `pending ${document.summary.reviewGates.review.pending}, passed ${document.summary.reviewGates.review.passed}, forced ${document.summary.reviewGates.review.forced}`),
+    htmlPill("Audit gates", `pending ${document.summary.reviewGates.audit.pending}, passed ${document.summary.reviewGates.audit.passed}, forced ${document.summary.reviewGates.audit.forced}`),
     "</div></section>",
     htmlWorkSection("Completed Work", document.completedWork),
     htmlWorkSection("Open Work", document.openWork),

@@ -676,6 +676,23 @@ Lists closed work from durable work records plus matching `work.closed` events, 
 
 Use `--since` for an inclusive ISO timestamp or relative duration such as `2h`; use `--after` for an exclusive ISO timestamp or an inclusive reviewer heartbeat checkpoint id. `--container` scopes results to the container and its dependency-graph descendants. `--phase` returns phase milestones, represented as milestone work carrying the `phase` label.
 
+## `work review-candidates`
+
+```bash
+bwrk work review-candidates [--since <duration|iso>] [--after <iso|checkpoint-id>] [--container <work-ref>] [--kind issue|task|sprint|milestone] [--phase] [--review-status pending|passed|forced|optional|all] [--include-optional] [--limit <n>] [--order asc|desc] [--json]
+```
+
+Lists closed work with required review or audit gates, using the same durable closed-work and `work.closed` sources as `work recent-closed`. The default `--review-status pending` returns required gates still waiting on review evidence. Use `--review-status all` to include passed and forced bypass rows, and `--include-optional` to include ordinary recent closures with no required review/audit gate.
+
+Each JSON row includes review/audit gate counts, pending/passed/forced gate IDs, the current `closeoutGateStatus`, a `reviewEvidenceCommand`, and, when `--after` is a heartbeat checkpoint, a `heartbeatAdvanceCommand`. A reviewer-agent loop is:
+
+```bash
+bwrk heartbeat show <checkpoint> --reviewer <reviewer-id> --container <work-ref> --json
+bwrk work review-candidates --container <work-ref> --after <checkpoint-id> --review-status pending --json
+bwrk evidence add <work-id> --kind review --outcome passed --summary <review-summary> --json
+bwrk heartbeat advance <checkpoint-id> --work <work-id> --json
+```
+
 ## `work next`
 
 ```bash
