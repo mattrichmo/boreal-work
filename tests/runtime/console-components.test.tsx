@@ -96,8 +96,31 @@ describe("console component exports", () => {
     expect(html).toContain("Directive conflicts");
     expect(html).toContain("Missing required directive data");
     expect(html).toContain("Safe next workflow commands");
+    expect(html).toContain("Directive acknowledgements");
+    expect(html).toContain("acknowledgement before close");
+    expect(html).toContain("The user-facing closeout summary must be prepared from verified data.");
     expect(html).toContain("closeout.summary-required");
     expect(html).toContain("workflows/40-work/claim-and-finish-work.md");
+  });
+
+  it("covers directive populated, empty, warning, blocked, conflict, and acknowledgement states", () => {
+    const populated = workItem({
+      id: "bw_work_directive_states",
+      title: "Directive states",
+      directiveSummary: directiveSummaryFixture("bw_work_directive_states")
+    });
+    const empty = workItem({ id: "bw_work_empty_directives", title: "No directives" });
+    const populatedHtml = renderToStaticMarkup(<DirectiveSummaryPanel work={populated} />);
+    const emptyHtml = renderToStaticMarkup(<DirectiveSummaryPanel work={empty} />);
+
+    expect(populatedHtml).toContain("Agent directives");
+    expect(populatedHtml).toContain("required directives");
+    expect(populatedHtml).toContain("blocked directives");
+    expect(populatedHtml).toContain("Directive conflicts");
+    expect(populatedHtml).toContain("Missing required directive data");
+    expect(populatedHtml).toContain("Directive acknowledgements");
+    expect(populatedHtml).toContain("before force_gate");
+    expect(emptyHtml).toContain("No directive bundle data is available");
   });
 
   it("renders sprint, global, and operations dashboard primitives", () => {
@@ -311,10 +334,15 @@ function directiveSummaryFixture(subjectId: string): WorkDirectiveSummaryView {
         lifecycle: "active",
         lane: "required",
         reason: "Final closeout requires a concise user-facing summary.",
-        sourceCommand: `bwrk work show ${subjectId} --json`,
-        blocksCloseout: true,
-        requiredInputs: ["summary"],
-        relatedIds: [subjectId, "bw_gate_fixture"]
+      sourceCommand: `bwrk work show ${subjectId} --json`,
+      blocksCloseout: true,
+      acknowledgement: {
+        requiredBefore: "close",
+        evidenceKind: "note",
+        message: "The user-facing closeout summary must be prepared from verified data."
+      },
+      requiredInputs: ["summary"],
+      relatedIds: [subjectId, "bw_gate_fixture"]
       },
       {
         id: "directive.git.fixture",
@@ -328,10 +356,15 @@ function directiveSummaryFixture(subjectId: string): WorkDirectiveSummaryView {
         reason: "Checkpoint is blocked until dirty state is resolved or explicitly explained.",
         sourceCommand: "bwrk doctor --json",
         nextCommand: "bwrk doctor --json",
-        recoveryWorkflow: "workflows/60-health/sync-and-doctor.md",
-        blocksCloseout: true,
-        requiredInputs: ["git", "doctor"],
-        relatedIds: [subjectId, "bw_reservation_fixture", "bw_work_blocker_fixture"]
+      recoveryWorkflow: "workflows/60-health/sync-and-doctor.md",
+      blocksCloseout: true,
+      acknowledgement: {
+        requiredBefore: "force_gate",
+        evidenceKind: "command",
+        message: "A dirty checkpoint must be resolved or explicitly explained before force-gating closeout."
+      },
+      requiredInputs: ["git", "doctor"],
+      relatedIds: [subjectId, "bw_reservation_fixture", "bw_work_blocker_fixture"]
       },
       {
         id: "directive.context.fixture",
@@ -395,6 +428,7 @@ function directiveSummaryFixture(subjectId: string): WorkDirectiveSummaryView {
     ...base,
     conflictCount: conflicts.length,
     missingRequiredCount: missingRequired.length,
+    acknowledgementCount: base.items.filter((item) => item.acknowledgement).length,
     blockerIds: ["bw_work_blocker_fixture"],
     safeCommands: ["bwrk sync refresh --json", `bwrk work show ${subjectId} --json`, "bwrk doctor --json", `bwrk summary show ${subjectId} --json`],
     nextSteps,

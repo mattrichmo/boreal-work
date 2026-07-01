@@ -76,11 +76,17 @@ describe("console app runtime", () => {
     expect(data.sprint.sprint.id).toBe("bw_work_5d61b84c8d43c6a9");
     expect(data.sprint.sprint.directiveSummary).toMatchObject({
       total: 1,
-      recommended: 1
+      recommended: 1,
+      acknowledgementCount: 1
     });
     expect(data.sprint.sprint.directiveSummary?.items[0]).toMatchObject({
       registryId: "workflow_next.canonical-next-step",
       sourceCommand: "bwrk work show bw_work_5d61b84c8d43c6a9 --json",
+      acknowledgement: {
+        requiredBefore: "continue",
+        evidenceKind: "note",
+        message: "Acknowledge the next workflow before acting."
+      },
       relatedIds: ["bw_work_5d61b84c8d43c6a9"]
     });
     expect(data.sprint.summary.taskCount).toBeGreaterThan(0);
@@ -540,6 +546,11 @@ function agentDirectivesFor(subjectId: string) {
           lifecycle: "active",
           title: "Follow next canonical workflow",
           instruction: "Follow the named canonical workflow.",
+          acknowledgement: {
+            requiredBefore: "continue",
+            evidenceKind: "note",
+            message: "Acknowledge the next workflow before acting."
+          },
           data: {
             commandPath: `bwrk work show ${subjectId} --json`,
             subjectId

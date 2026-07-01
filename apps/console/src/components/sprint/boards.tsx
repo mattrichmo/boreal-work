@@ -628,6 +628,7 @@ function DirectiveBadgeStrip({ item, emptyLabel }: { readonly item: WorkItemView
       {summary.informational > 0 ? <Badge tone="neutral">{summary.informational} informational directives</Badge> : null}
       {summary.conflictCount > 0 ? <Badge tone="danger">{summary.conflictCount} directive conflicts</Badge> : null}
       {summary.missingRequiredCount > 0 ? <Badge tone="danger">{summary.missingRequiredCount} missing required</Badge> : null}
+      {summary.acknowledgementCount > 0 ? <Badge tone="warning">{summary.acknowledgementCount} acknowledgements</Badge> : null}
       {summary.blockerIds.length > 0 ? <Badge tone="danger">{summary.blockerIds.length} blocker refs</Badge> : null}
       {summary.nextSteps.length > 0 ? <Badge tone="accent">{summary.nextSteps.length} next steps</Badge> : null}
       {summary.safeCommands.length > 0 ? <Badge>{summary.safeCommands.length} safe commands</Badge> : null}

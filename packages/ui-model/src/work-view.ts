@@ -45,8 +45,15 @@ export interface WorkDirectiveItemView {
   readonly workflowRef?: string;
   readonly recoveryWorkflow?: string;
   readonly blocksCloseout?: boolean;
+  readonly acknowledgement?: WorkDirectiveAcknowledgementView;
   readonly requiredInputs: readonly string[];
   readonly relatedIds: readonly string[];
+}
+
+export interface WorkDirectiveAcknowledgementView {
+  readonly requiredBefore: string;
+  readonly evidenceKind?: string;
+  readonly message: string;
 }
 
 export interface WorkDirectiveConflictView {
@@ -87,6 +94,7 @@ export interface WorkDirectiveSummaryView {
   readonly blocked: number;
   readonly conflictCount: number;
   readonly missingRequiredCount: number;
+  readonly acknowledgementCount: number;
   readonly blockerIds: readonly string[];
   readonly sourceCommands: readonly string[];
   readonly safeCommands: readonly string[];

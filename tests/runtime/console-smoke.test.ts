@@ -27,6 +27,9 @@ describe("console route smoke checks", () => {
         expect(result.viewport).toBe(viewport.name);
         expect(result.bytes).toBeGreaterThan(3000);
         expect(result.checks).toContain("text-overlap-guards");
+        if (route === "/work") {
+          expect(result.checks).toContain("directive-state-coverage");
+        }
         if (viewport.name === "mobile") {
           expect(result.checks).toContain("mobile-breakpoint");
         }

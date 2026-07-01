@@ -16,6 +16,12 @@ describe("console gallery fixture", () => {
       for (const family of consoleGalleryFamilies) {
         expect(html).toContain(`data-gallery-family="${family}"`);
       }
+      expect(html).toContain("Populated directive states");
+      expect(html).toContain("Empty directive state");
+      expect(html).toContain("Directive conflicts");
+      expect(html).toContain("Directive acknowledgements");
+      expect(html).toContain("Missing required directive data");
+      expect(html).toContain("blocked directives");
       expect(html).not.toContain("undefined");
       expect(html).not.toContain("[object Object]");
     }

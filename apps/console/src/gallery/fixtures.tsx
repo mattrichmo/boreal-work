@@ -9,6 +9,7 @@ import type {
   ProjectRegistryView,
   SprintBoardView,
   SyncDashboardView,
+  WorkDirectiveSummaryView,
   WorkItemView
 } from "@boreal/ui-model";
 
@@ -17,6 +18,7 @@ import {
   Button,
   Card,
   DashboardHealthPanel,
+  DirectiveSummaryPanel,
   DiffViewer,
   ActorActivityPanel,
   GlobalDriftPanel,
@@ -43,6 +45,7 @@ export const consoleGalleryFamilies = [
   "foundation",
   "global-dashboard",
   "sprint-board",
+  "agent-directives",
   "raw-wiki",
   "operations"
 ] as const;
@@ -59,6 +62,12 @@ export const consoleGalleryCopyAudit = {
 
 export function ConsoleGallery({ viewport = "desktop" }: { readonly viewport?: ConsoleGalleryViewport }) {
   const work = workItem({ id: "bw_work_gallery001", title: "Convert component primitives", evidenceCount: 1 });
+  const directiveWork = workItem({
+    id: "bw_work_gallery_directives",
+    title: "Review directive obligations",
+    directiveSummary: directiveSummary("bw_work_gallery_directives")
+  });
+  const emptyDirectiveWork = workItem({ id: "bw_work_gallery_empty_directives", title: "No directive bundle" });
   const board = sprintBoardView(work);
   const registry = registryView();
   const health = healthView();
@@ -96,6 +105,14 @@ export function ConsoleGallery({ viewport = "desktop" }: { readonly viewport?: C
         <h2>Sprint Board</h2>
         <SprintHeader view={board} />
         <SprintKanbanBoard view={board} />
+      </section>
+
+      <section data-gallery-family="agent-directives">
+        <h2>Agent Directives</h2>
+        <div className="bw-gallery__grid">
+          <DirectiveSummaryPanel work={directiveWork} title="Populated directive states" />
+          <DirectiveSummaryPanel work={emptyDirectiveWork} title="Empty directive state" />
+        </div>
       </section>
 
       <section data-gallery-family="raw-wiki">
@@ -157,6 +174,140 @@ function workItem(input: Partial<WorkItemView> & Pick<WorkItemView, "id" | "titl
   return {
     ...item,
     requiredCloseoutGates: item.requiredCloseoutGates ?? []
+  };
+}
+
+function directiveSummary(subjectId: string): WorkDirectiveSummaryView {
+  const items: WorkDirectiveSummaryView["items"] = [
+    {
+      id: "directive.workflow_next.gallery",
+      registryId: "workflow_next.canonical-next-step",
+      family: "workflow_next",
+      kind: "next_step",
+      title: "Follow next canonical workflow",
+      severity: "action",
+      lifecycle: "active",
+      lane: "recommended",
+      reason: "Follow the named canonical workflow before continuing.",
+      sourceCommand: `bwrk work show ${subjectId} --json`,
+      nextCommand: "bwrk sync refresh --json",
+      workflowRef: "workflows/40-work/claim-and-finish-work.md",
+      requiredInputs: ["work", "doctor"],
+      relatedIds: [subjectId]
+    },
+    {
+      id: "directive.closeout.gallery",
+      registryId: "closeout.summary-required",
+      family: "closeout",
+      kind: "summary",
+      title: "Prepare closeout summary",
+      severity: "required",
+      lifecycle: "active",
+      lane: "required",
+      reason: "Closeout requires a verified user-facing summary.",
+      sourceCommand: `bwrk agent finish ${subjectId} --json`,
+      blocksCloseout: true,
+      acknowledgement: {
+        requiredBefore: "close",
+        evidenceKind: "note",
+        message: "The user-facing closeout summary must be prepared from verified data."
+      },
+      requiredInputs: ["summary", "evidence"],
+      relatedIds: [subjectId]
+    },
+    {
+      id: "directive.blocked.gallery",
+      registryId: "blocked.resolve-blockers",
+      family: "blocked",
+      kind: "recovery",
+      title: "Resolve active blockers",
+      severity: "blocking",
+      lifecycle: "blocked",
+      lane: "blocked",
+      reason: "Blocking directive wins until active blockers are resolved.",
+      sourceCommand: "bwrk dep tree bw_work_gallery_directives --json",
+      nextCommand: "bwrk dep tree bw_work_gallery_directives --json",
+      recoveryWorkflow: "workflows/40-work/link-dependencies.md",
+      blocksCloseout: true,
+      acknowledgement: {
+        requiredBefore: "force_gate",
+        evidenceKind: "artifact",
+        message: "Active blockers require explicit resolution or a forced gate reason."
+      },
+      requiredInputs: ["work", "gate"],
+      relatedIds: [subjectId, "bw_work_gallery_blocker"]
+    },
+    {
+      id: "directive.context.gallery",
+      registryId: "context.info",
+      family: "context",
+      kind: "reference",
+      title: "Context pack available",
+      severity: "info",
+      lifecycle: "active",
+      lane: "informational",
+      reason: "Context is available for operator review.",
+      sourceCommand: `bwrk summary show ${subjectId} --json`,
+      requiredInputs: [],
+      relatedIds: [subjectId, "bw_summary_gallery"]
+    }
+  ];
+  const nextSteps = items.flatMap((item) => {
+    const workflowRef = item.workflowRef ?? item.recoveryWorkflow;
+    if (!item.nextCommand && !workflowRef) {
+      return [];
+    }
+    return [{
+      id: `next-step-${item.id}`,
+      title: item.title,
+      lane: item.lane,
+      command: item.nextCommand,
+      workflowRef,
+      reason: item.reason,
+      relatedIds: item.relatedIds
+    }];
+  });
+  const conflicts: WorkDirectiveSummaryView["conflicts"] = [
+    {
+      id: "directive-conflict-gallery",
+      directiveIds: ["directive.blocked.gallery", "directive.workflow_next.gallery"],
+      reason: "Blocking directive must be resolved before the lower-priority directive can be acted on.",
+      resolution: "blocking_wins",
+      resolvedDirectiveId: "directive.blocked.gallery",
+      severity: "blocking",
+      lane: "blocked"
+    }
+  ];
+  const missingRequired: WorkDirectiveSummaryView["missingRequired"] = [
+    {
+      id: "directive-missing-gallery",
+      registryId: "closeout.summary-required",
+      family: "closeout",
+      requirement: "summary.latestSummaryId",
+      message: "Summary data is required.",
+      subjectId,
+      subjectType: "work"
+    }
+  ];
+  return {
+    total: items.length,
+    informational: items.filter((item) => item.lane === "informational").length,
+    recommended: items.filter((item) => item.lane === "recommended").length,
+    required: items.filter((item) => item.lane === "required").length,
+    blocked: items.filter((item) => item.lane === "blocked").length,
+    conflictCount: conflicts.length,
+    missingRequiredCount: missingRequired.length,
+    acknowledgementCount: items.filter((item) => item.acknowledgement).length,
+    blockerIds: ["bw_work_gallery_blocker"],
+    sourceCommands: Array.from(new Set(items.flatMap((item) => item.sourceCommand ? [item.sourceCommand] : []))),
+    safeCommands: Array.from(new Set([
+      ...items.flatMap((item) => item.sourceCommand ? [item.sourceCommand] : []),
+      ...nextSteps.flatMap((step) => step.command ? [step.command] : [])
+    ])),
+    nextSteps,
+    conflicts,
+    missingRequired,
+    items
   };
 }
 

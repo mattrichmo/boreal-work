@@ -1,6 +1,7 @@
 import type { ReactNode } from "react";
 import type {
   DashboardFinding,
+  WorkDirectiveAcknowledgementView,
   WorkDirectiveConflictView,
   WorkDirectiveItemView,
   WorkDirectiveLane,
@@ -185,6 +186,7 @@ export function DirectiveSummaryPanel({
           <Badge tone="neutral">{summary.informational} informational</Badge>
           {summary.conflictCount > 0 ? <Badge tone="danger">{summary.conflictCount} conflicts</Badge> : null}
           {summary.missingRequiredCount > 0 ? <Badge tone="danger">{summary.missingRequiredCount} missing required</Badge> : null}
+          {summary.acknowledgementCount > 0 ? <Badge tone="warning">{summary.acknowledgementCount} acknowledgements</Badge> : null}
           {summary.blockerIds.length > 0 ? <Badge tone="danger">{summary.blockerIds.length} blocker refs</Badge> : null}
           {summary.nextSteps.length > 0 ? <Badge tone="accent">{summary.nextSteps.length} next steps</Badge> : null}
         </div>
@@ -206,10 +208,12 @@ export function DirectiveSummaryPanel({
 }
 
 function DirectiveObligationsPanel({ summary }: { readonly summary: WorkDirectiveSummaryView }) {
+  const acknowledgementItems = summary.items.filter((item) => item.acknowledgement);
   if (
     summary.blockerIds.length === 0 &&
     summary.conflicts.length === 0 &&
     summary.missingRequired.length === 0 &&
+    acknowledgementItems.length === 0 &&
     summary.nextSteps.length === 0
   ) {
     return null;
@@ -249,6 +253,19 @@ function DirectiveObligationsPanel({ summary }: { readonly summary: WorkDirectiv
           </div>
         </section>
       ) : null}
+      {acknowledgementItems.length > 0 ? (
+        <section className="bw-directive-obligation" aria-label="Directive acknowledgements">
+          <header>
+            <strong>Directive acknowledgements</strong>
+            <Badge tone="warning">{acknowledgementItems.length}</Badge>
+          </header>
+          <div className="bw-directive-list">
+            {acknowledgementItems.map((item) => (
+              <DirectiveAcknowledgementRow key={item.id} itemId={item.id} acknowledgement={item.acknowledgement!} />
+            ))}
+          </div>
+        </section>
+      ) : null}
       {summary.nextSteps.length > 0 ? (
         <section className="bw-directive-obligation" aria-label="Safe next workflow commands">
           <header>
@@ -261,6 +278,30 @@ function DirectiveObligationsPanel({ summary }: { readonly summary: WorkDirectiv
         </section>
       ) : null}
     </div>
+  );
+}
+
+function DirectiveAcknowledgementRow({
+  itemId,
+  acknowledgement
+}: {
+  readonly itemId: string;
+  readonly acknowledgement: WorkDirectiveAcknowledgementView;
+}) {
+  return (
+    <article className="bw-directive-mini-row bw-directive-mini-row--required">
+      <div className="bw-directive-row__header">
+        <div>
+          <strong>{itemId}</strong>
+          <span>{acknowledgement.message}</span>
+        </div>
+        <Badge tone="warning">acknowledgement</Badge>
+      </div>
+      <div className="bw-directive-row__meta">
+        <Badge tone="warning">before {acknowledgement.requiredBefore}</Badge>
+        {acknowledgement.evidenceKind ? <Badge>{acknowledgement.evidenceKind}</Badge> : null}
+      </div>
+    </article>
   );
 }
 
@@ -358,10 +399,12 @@ function DirectiveRow({ item }: { readonly item: WorkDirectiveItemView }) {
         <Badge>{item.severity}</Badge>
         <Badge>{item.lifecycle}</Badge>
         {item.blocksCloseout ? <Badge tone="danger">blocks closeout</Badge> : null}
+        {item.acknowledgement ? <Badge tone="warning">acknowledgement before {item.acknowledgement.requiredBefore}</Badge> : null}
         {item.family ? <Badge>{item.family}</Badge> : null}
         {item.kind ? <Badge>{item.kind}</Badge> : null}
       </div>
       <p>{item.reason}</p>
+      {item.acknowledgement ? <p>{item.acknowledgement.message}</p> : null}
       {item.workflowRef ? <code>{item.workflowRef}</code> : null}
       {item.recoveryWorkflow ? <code>{item.recoveryWorkflow}</code> : null}
       {item.nextCommand && item.nextCommand !== item.sourceCommand ? <code>{item.nextCommand}</code> : null}

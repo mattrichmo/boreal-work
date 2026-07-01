@@ -21,6 +21,7 @@ import {
   type ProjectMemoryLayout,
   type ProjectSyncFreshness,
   type SyncDashboardView,
+  type WorkDirectiveAcknowledgementView,
   type WorkDirectiveConflictView,
   type WorkDirectiveItemView,
   type WorkDirectiveLane,
@@ -1906,6 +1907,7 @@ function directiveSummaryFromBundles(value: unknown): WorkDirectiveSummaryView |
     blocked: items.filter((item) => item.lane === "blocked").length,
     conflictCount: conflicts.length,
     missingRequiredCount: missingRequired.length,
+    acknowledgementCount: items.filter((item) => item.acknowledgement).length,
     blockerIds: [...blockerIds],
     sourceCommands: [...sourceCommands],
     safeCommands: [...safeCommands],
@@ -1952,8 +1954,25 @@ function directiveItemFromRecord(
     workflowRef: firstStringField(data, ["workflowRef"]),
     recoveryWorkflow: firstStringField(data, ["recoveryWorkflow"]),
     blocksCloseout: value.blocksCloseout === true,
+    acknowledgement: directiveAcknowledgementFromRecord(value.acknowledgement),
     requiredInputs: stringArray(data.requiredInputs),
     relatedIds: relatedIdsFromDirective(value).slice(0, 12)
+  };
+}
+
+function directiveAcknowledgementFromRecord(value: unknown): WorkDirectiveAcknowledgementView | undefined {
+  if (!isRecord(value)) {
+    return undefined;
+  }
+  const requiredBefore = firstStringField(value, ["requiredBefore", "required_before"]);
+  const message = firstStringField(value, ["message", "reason", "detail"]);
+  if (!requiredBefore && !message) {
+    return undefined;
+  }
+  return {
+    requiredBefore: requiredBefore ?? "close",
+    evidenceKind: firstStringField(value, ["evidenceKind", "evidence_kind"]),
+    message: message ?? "Directive acknowledgement is required."
   };
 }
 

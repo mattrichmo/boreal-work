@@ -327,6 +327,11 @@ function directiveSummary(subjectId: string): WorkDirectiveSummaryView {
       reason: "Closed successful work must provide a user-facing summary in the agent response.",
       sourceCommand: `bwrk agent finish ${subjectId} --json`,
       blocksCloseout: true,
+      acknowledgement: {
+        requiredBefore: "close",
+        evidenceKind: "note",
+        message: "The user-facing closeout summary must be prepared from verified data."
+      },
       requiredInputs: ["summary", "evidence", "verification"],
       relatedIds: [subjectId, "bw_gate_fixture"]
     },
@@ -344,6 +349,11 @@ function directiveSummary(subjectId: string): WorkDirectiveSummaryView {
       nextCommand: "bwrk doctor --json",
       recoveryWorkflow: "workflows/60-health/sync-and-doctor.md",
       blocksCloseout: true,
+      acknowledgement: {
+        requiredBefore: "force_gate",
+        evidenceKind: "command",
+        message: "A dirty checkpoint must be resolved or explicitly explained before force-gating closeout."
+      },
       requiredInputs: ["git", "doctor"],
       relatedIds: [subjectId, "bw_reservation_fixture", "bw_work_blocker_fixture"]
     },
@@ -407,6 +417,7 @@ function directiveSummary(subjectId: string): WorkDirectiveSummaryView {
     blocked: items.filter((item) => item.lane === "blocked").length,
     conflictCount: conflicts.length,
     missingRequiredCount: missingRequired.length,
+    acknowledgementCount: items.filter((item) => item.acknowledgement).length,
     blockerIds: ["bw_work_blocker_fixture"],
     sourceCommands: Array.from(new Set(items.flatMap((item) => item.sourceCommand ? [item.sourceCommand] : []))),
     safeCommands: Array.from(new Set([

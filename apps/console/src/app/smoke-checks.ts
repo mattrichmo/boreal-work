@@ -83,6 +83,16 @@ export function validateConsoleSmokeHtml(input: ConsoleSmokeHtmlInput): ConsoleS
     checks.push("mobile-breakpoint");
   }
 
+  if (route.id === "work") {
+    requireContains(input.html, "Work agent directives", "work directive panel");
+    requireContains(input.html, "required directives", "directive warning state");
+    requireContains(input.html, "blocked directives", "directive blocked state");
+    requireContains(input.html, "Directive conflicts", "directive conflict state");
+    requireContains(input.html, "Missing required directive data", "directive missing-required state");
+    requireContains(input.html, "Directive acknowledgements", "directive acknowledgement state");
+    checks.push("directive-state-coverage");
+  }
+
   return {
     route: input.routePath,
     routeId: route.id,
