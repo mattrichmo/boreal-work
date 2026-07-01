@@ -339,6 +339,8 @@ An acknowledgement record, if persisted, should include:
 
 Directive acknowledgement persistence is represented by `DirectiveAcknowledgementRecord` runtime records. These records are exported with snapshots and ledgers, validated by doctor, and remain separate from emitted directive bundles so ordinary command output does not become durable state by default.
 
+Legacy closeout data remains readable during migration. Doctor treats durable acknowledgement records linked to a closeout summary, its evidence, verification, artifact URI, or handoff summary as modern directive coverage. Closeout summaries generated before the directive acknowledgement policy date, or explicitly marked through `legacy_backfill`, are classified as legacy-compatible instead of missing modern coverage. Current-policy closeout summaries without durable acknowledgement coverage are reported separately so backfill work can distinguish true gaps from accepted legacy records.
+
 ## Consumer Rules
 
 CLI:

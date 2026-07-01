@@ -9302,6 +9302,146 @@ describe("bwrk cli", () => {
     );
   });
 
+  it("distinguishes legacy-compatible closeout summaries from missing directive coverage", async () => {
+    const rootDir = await makeTempWorkspace();
+    await runCli(rootDir, ["init", "--json"]);
+
+    const modern = parseData<{ readonly meta: { readonly id: string } }>(
+      (await runCli(rootDir, ["work", "create", "Modern directive coverage closeout", "--label", "directive-coverage", "--ready", "--json"]))
+        .stdout
+    );
+    await runCli(rootDir, ["agent", "start", "--agent", "directive-coverage-agent", "--label", "directive-coverage", "--json"]);
+    const modernFinish = parseData<{
+      readonly evidence: { readonly meta: { readonly id: string } };
+      readonly verification: { readonly meta: { readonly id: string } };
+      readonly agentSummary: { readonly meta: { readonly id: string }; readonly artifactUri?: string };
+    }>(
+      (
+        await runCli(rootDir, [
+          "agent",
+          "finish",
+          "current",
+          "--agent",
+          "directive-coverage-agent",
+          "--summary",
+          "Closed without durable directive acknowledgement coverage.",
+          "--command",
+          "pnpm test",
+          "--close",
+          "--reason",
+          "directive coverage fixture",
+          "--dirty-path",
+          "no_repo_changes: directive coverage fixture",
+          "--json"
+        ])
+      ).stdout
+    );
+
+    const missingCoverageDoctor = parseData<DoctorPayload>((await runCli(rootDir, ["doctor", "--strict", "--json"])).stdout);
+    expect(doctorDiagnostic(missingCoverageDoctor, "summary.directive_coverage")).toEqual(
+      expect.objectContaining({
+        severity: "warning",
+        details: expect.arrayContaining([expect.objectContaining({ summaryId: modernFinish.agentSummary.meta.id })])
+      })
+    );
+
+    await runCli(rootDir, [
+      "directives",
+      "ack",
+      "create",
+      "directive.closeout.summary-required.deadbeefdead",
+      "--registry-id",
+      "closeout.summary-required",
+      "--outcome",
+      "satisfied",
+      "--subject-type",
+      "work",
+      "--subject-id",
+      modern.meta.id,
+      "--command",
+      "agent finish",
+      "--bundle-id",
+      "bundle.agent.finish.deadbeefdead",
+      "--registry-version",
+      "directives.v1",
+      "--envelope-schema",
+      "boreal.cli.agent.finish.v1",
+      "--source-hash",
+      "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "--generated-at",
+      "2026-07-01T00:00:00.000Z",
+      "--evidence",
+      modernFinish.evidence.meta.id,
+      "--summary",
+      modernFinish.agentSummary.meta.id,
+      "--verification",
+      modernFinish.verification.meta.id,
+      ...(modernFinish.agentSummary.artifactUri ? ["--artifact-uri", modernFinish.agentSummary.artifactUri] : []),
+      "--reason",
+      "Closeout summary directive was satisfied with durable proof links.",
+      "--json"
+    ]);
+
+    const coveredDoctor = parseData<DoctorPayload>((await runCli(rootDir, ["doctor", "--strict", "--json"])).stdout);
+    expect(doctorDiagnostic(coveredDoctor, "summary.directive_coverage")).toEqual(expect.objectContaining({ severity: "ok" }));
+
+    const legacy = parseData<{ readonly meta: { readonly id: string } }>(
+      (await runCli(rootDir, ["work", "create", "Legacy-compatible directive closeout", "--label", "legacy-directive", "--ready", "--json"]))
+        .stdout
+    );
+    await runCli(rootDir, ["agent", "start", "--agent", "legacy-directive-agent", "--label", "legacy-directive", "--json"]);
+    const legacyFinish = parseData<{ readonly agentSummary: { readonly meta: { readonly id: string } } }>(
+      (
+        await runCli(rootDir, [
+          "agent",
+          "finish",
+          "current",
+          "--agent",
+          "legacy-directive-agent",
+          "--summary",
+          "Closed before durable directive acknowledgement policy.",
+          "--command",
+          "pnpm test",
+          "--close",
+          "--reason",
+          "legacy directive coverage fixture",
+          "--dirty-path",
+          "no_repo_changes: legacy directive coverage fixture",
+          "--json"
+        ])
+      ).stdout
+    );
+    await updateState(rootDir, (current) => ({
+      ...current,
+      agentSummaries: ((current.agentSummaries as Array<Record<string, unknown>> | undefined) ?? []).map((summary) =>
+        summary?.meta &&
+        typeof summary.meta === "object" &&
+        "id" in summary.meta &&
+        summary.meta.id === legacyFinish.agentSummary.meta.id
+          ? {
+              ...summary,
+              generatedAt: "2026-06-30T23:59:59.000Z"
+            }
+          : summary
+      )
+    }));
+
+    const legacyCompatibleDoctor = parseData<DoctorPayload>((await runCli(rootDir, ["doctor", "--strict", "--json"])).stdout);
+    expect(doctorDiagnostic(legacyCompatibleDoctor, "summary.directive_coverage")).toEqual(expect.objectContaining({ severity: "ok" }));
+    expect(doctorDiagnostic(legacyCompatibleDoctor, "summary.legacy_directive_compatibility")).toEqual(
+      expect.objectContaining({
+        severity: "ok",
+        details: expect.arrayContaining([
+          expect.objectContaining({
+            summaryId: legacyFinish.agentSummary.meta.id,
+            reasonCodes: expect.arrayContaining(["pre_directive_acknowledgement_policy"])
+          })
+        ])
+      })
+    );
+    expect(legacy.meta.id).toMatch(/^bw_work_/);
+  });
+
   it("repairs missing generated projection records through doctor", async () => {
     const rootDir = await makeTempWorkspace();
     await runCli(rootDir, ["init", "--json"]);

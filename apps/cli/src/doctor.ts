@@ -91,6 +91,7 @@ export const OPERATION_LOG_RECOMMENDED_KEEP = 1_000;
 const OPERATION_LOG_WARNING_GRACE = 25;
 const OPERATION_LOG_WARNING_THRESHOLD = OPERATION_LOG_RECOMMENDED_KEEP + OPERATION_LOG_WARNING_GRACE;
 const AGENT_SUMMARY_POLICY_ENFORCED_AT = "2026-06-30T00:00:00.000Z";
+const AGENT_DIRECTIVE_ACKNOWLEDGEMENT_POLICY_ENFORCED_AT = "2026-07-01T00:00:00.000Z";
 const MCP_CONFIG_SCHEMA_VERSION = "boreal.mcp-config.v1";
 
 export async function runDoctor(context: CliContext, fix: boolean, strict = false): Promise<DoctorResult> {
@@ -1275,6 +1276,9 @@ async function validateStoreRecords(
       const closeoutSummaryKeys = new Set(
         closeoutSummaries.map((summary) => closeoutSummarySubjectKey(summary.subjectType, summary.subjectId))
       );
+      const closeoutSummariesForTerminalWork = closeoutSummaries.filter((summary) =>
+        terminalWorkSubjectKeys.has(closeoutSummarySubjectKey(summary.subjectType, summary.subjectId))
+      );
       const missingCloseoutSummaryCandidates = terminalWorkItems
         .filter((work) => !closeoutSummaryKeys.has(closeoutSummarySubjectKey(doctorSummarySubjectTypeForWork(work), work.meta.id)))
         .map((work) => ({
@@ -1291,8 +1295,22 @@ async function validateStoreRecords(
       const legacyMissingCloseoutSummaries = missingCloseoutSummaryCandidates.filter((entry) =>
         !isAgentSummaryPolicyEnforcedAt(entry.closedAt)
       );
-      const summaryCheckpointGapCandidates = closeoutSummaries
-        .filter((summary) => terminalWorkSubjectKeys.has(closeoutSummarySubjectKey(summary.subjectType, summary.subjectId)))
+      const legacyDirectiveCompatibleSummaries = closeoutSummariesForTerminalWork.flatMap((summary) =>
+        doctorLegacyDirectiveCompatibility(summary)
+      );
+      const directiveCoverageGaps = closeoutSummariesForTerminalWork
+        .filter((summary) => isAgentDirectiveAcknowledgementPolicyEnforcedAt(summary.generatedAt))
+        .filter((summary) => doctorLegacyDirectiveCompatibility(summary).length === 0)
+        .filter((summary) => !doctorSummaryHasDirectiveAcknowledgementCoverage(summary, directiveAcknowledgements))
+        .map((summary) => ({
+          summaryId: summary.meta.id,
+          subjectId: summary.subjectId,
+          subjectType: summary.subjectType,
+          generatedAt: summary.generatedAt,
+          artifactUri: summary.artifactUri,
+          issue: "missing_directive_acknowledgement_coverage"
+        }));
+      const summaryCheckpointGapCandidates = closeoutSummariesForTerminalWork
         .filter((summary) => summary.commitShas.length === 0 && !dirtyPathNotesHaveReasonCode(summary.dirtyPathNotes))
         .map((summary) => ({
           summaryId: summary.meta.id,
@@ -1308,8 +1326,7 @@ async function validateStoreRecords(
       const legacySummaryCheckpointGaps = summaryCheckpointGapCandidates.filter((entry) =>
         !isAgentSummaryPolicyEnforcedAt(entry.generatedAt)
       );
-      const summaryArtifactGapCandidates = closeoutSummaries
-        .filter((summary) => terminalWorkSubjectKeys.has(closeoutSummarySubjectKey(summary.subjectType, summary.subjectId)))
+      const summaryArtifactGapCandidates = closeoutSummariesForTerminalWork
         .filter((summary) => !summary.artifactUri)
         .map((summary) => ({
           summaryId: summary.meta.id,
@@ -1633,6 +1650,8 @@ async function validateStoreRecords(
         closedWithoutReason,
         missingCloseoutSummaries,
         legacyMissingCloseoutSummaries,
+        directiveCoverageGaps,
+        legacyDirectiveCompatibleSummaries,
         summaryCheckpointGaps,
         legacySummaryCheckpointGaps,
         summaryArtifactGaps,
@@ -1864,6 +1883,14 @@ async function validateStoreRecords(
       )
     );
     diagnostics.push(
+      warningDiagnosticFromList(
+        "summary.directive_coverage",
+        "Current-policy closeout summaries missing directive acknowledgement coverage",
+        summary.directiveCoverageGaps
+      )
+    );
+    diagnostics.push(legacyDirectiveCompatibilityDiagnostic(summary.legacyDirectiveCompatibleSummaries));
+    diagnostics.push(
       diagnosticFromList("summary.checkpoint_coverage", "Closeout summaries missing commit SHA or dirty-path reason code", summary.summaryCheckpointGaps)
     );
     diagnostics.push(
@@ -2020,6 +2047,18 @@ function warningDiagnosticFromList(code: string, label: string, values: readonly
     code,
     severity: values.length > 0 ? "warning" : "ok",
     message: values.length > 0 ? label : `${label}: none`,
+    details: values.length > 0 ? values : undefined
+  };
+}
+
+function legacyDirectiveCompatibilityDiagnostic(values: readonly unknown[]): Diagnostic {
+  return {
+    code: "summary.legacy_directive_compatibility",
+    severity: "ok",
+    message:
+      values.length > 0
+        ? `${values.length} legacy-compatible closeout summary record(s)`
+        : "Legacy-compatible closeout summary records: none",
     details: values.length > 0 ? values : undefined
   };
 }
@@ -2235,6 +2274,65 @@ function doctorSummarySubjectTypeForWork(work: WorkItem): AgentSummaryRecord["su
 
 function closeoutSummarySubjectKey(subjectType: AgentSummaryRecord["subjectType"], subjectId: string): string {
   return `${subjectType}:${subjectId}`;
+}
+
+interface DoctorLegacyDirectiveCompatibleSummary {
+  readonly summaryId: string;
+  readonly subjectId: string;
+  readonly subjectType: AgentSummaryRecord["subjectType"];
+  readonly generatedAt: string;
+  readonly reasonCodes: readonly string[];
+  readonly artifactUri?: string;
+}
+
+function doctorLegacyDirectiveCompatibility(summary: AgentSummaryRecord): readonly DoctorLegacyDirectiveCompatibleSummary[] {
+  const reasonCodes = [
+    ...(!isAgentDirectiveAcknowledgementPolicyEnforcedAt(summary.generatedAt) ? ["pre_directive_acknowledgement_policy"] : []),
+    ...(summary.summaryKind === "legacy_backfill" ? ["legacy_backfill_summary"] : []),
+    ...(summary.forceReasonCode === "legacy_backfill" ? ["legacy_backfill_force"] : []),
+    ...(summary.dirtyPathNotes.some((note) => note.trim().startsWith("legacy_backfill:")) ? ["legacy_backfill_dirty_path"] : [])
+  ];
+  if (reasonCodes.length === 0) {
+    return [];
+  }
+  return [
+    {
+      summaryId: summary.meta.id,
+      subjectId: summary.subjectId,
+      subjectType: summary.subjectType,
+      generatedAt: summary.generatedAt,
+      reasonCodes: [...new Set(reasonCodes)].sort(),
+      artifactUri: summary.artifactUri
+    }
+  ];
+}
+
+function doctorSummaryHasDirectiveAcknowledgementCoverage(
+  summary: AgentSummaryRecord,
+  acknowledgements: readonly DirectiveAcknowledgementRecord[]
+): boolean {
+  return acknowledgements.some((acknowledgement) => doctorAcknowledgementCoversSummary(summary, acknowledgement));
+}
+
+function doctorAcknowledgementCoversSummary(summary: AgentSummaryRecord, acknowledgement: DirectiveAcknowledgementRecord): boolean {
+  if (acknowledgement.agentSummaryIds.includes(summary.meta.id)) {
+    return true;
+  }
+  if (summary.artifactUri && (acknowledgement.artifactUris ?? []).includes(summary.artifactUri)) {
+    return true;
+  }
+  if (acknowledgement.handoffIds.includes(summary.meta.id)) {
+    return true;
+  }
+  return (
+    stringArraysIntersect(acknowledgement.evidenceIds, summary.evidenceIds) ||
+    stringArraysIntersect(acknowledgement.verificationIds ?? [], summary.verificationIds)
+  );
+}
+
+function stringArraysIntersect(left: readonly string[], right: readonly string[]): boolean {
+  const rightValues = new Set(right);
+  return left.some((value) => rightValues.has(value));
 }
 
 interface DoctorWikiCoverage {
@@ -3232,6 +3330,14 @@ function isAgentSummaryPolicyEnforcedAt(timestamp: string | undefined): boolean 
   return Number.isNaN(parsed) || parsed >= Date.parse(AGENT_SUMMARY_POLICY_ENFORCED_AT);
 }
 
+function isAgentDirectiveAcknowledgementPolicyEnforcedAt(timestamp: string | undefined): boolean {
+  if (!timestamp) {
+    return true;
+  }
+  const parsed = Date.parse(timestamp);
+  return Number.isNaN(parsed) || parsed >= Date.parse(AGENT_DIRECTIVE_ACKNOWLEDGEMENT_POLICY_ENFORCED_AT);
+}
+
 const STRICT_ADVISORY_WARNING_CODES = new Set([
   "daemon.status",
   "install.status",
@@ -3239,6 +3345,7 @@ const STRICT_ADVISORY_WARNING_CODES = new Set([
   "ledger.export_drift",
   "cache.sqlite",
   "search.index",
+  "summary.directive_coverage",
   "summary.legacy_closeout_coverage",
   "summary.legacy_checkpoint_coverage",
   "summary.legacy_artifact_coverage"

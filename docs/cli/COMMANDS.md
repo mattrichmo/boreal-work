@@ -1629,7 +1629,7 @@ Checks:
 - Expired active reservations.
 - Verification policy drift, including passed verifications without passed evidence.
 - Closed work items without close reasons.
-- Agent summary closeout coverage for terminal work, checkpoint commit/dirty-path coverage, Markdown artifact URI coverage, and forced summaries without a reason code or human comment.
+- Agent summary closeout coverage for terminal work, directive acknowledgement coverage for current-policy closeout summaries, legacy-compatible directive closeout classification, checkpoint commit/dirty-path coverage, Markdown artifact URI coverage, and forced summaries without a reason code or human comment.
 - Unsafe Unicode in machine-facing strings.
 - Label and actor normalization collisions in imported or hand-edited state.
 - Local operation log shape, volume, legacy operation-event links, dangling event references, and retained operation/event causality.
@@ -1656,7 +1656,7 @@ Checks:
 
 `--fix` does not create a submodule gitlink, remove child memory from the project Git index, or delete stale non-submodule `.gitmodules` entries. Those are reported with exact Git details so a human can decide whether to run commands such as `git submodule add <remote> memory` or `git rm -r --cached -- memory`.
 
-`--strict` treats operationally blocking warnings as a failing doctor result for CI and hardening gates. Advisory warnings such as stopped/stale daemon status, install status caveats, generated artifact drift, SQLite cache drift, search-index rebuild guidance, and legacy agent-summary coverage gaps are surfaced without failing strict mode unless they are paired with an error or a blocking Git finding. Diagnostic severities are not rewritten; JSON `data.ok` and the command exit code reflect the strict gate result.
+`--strict` treats operationally blocking warnings as a failing doctor result for CI and hardening gates. Advisory warnings such as stopped/stale daemon status, install status caveats, generated artifact drift, SQLite cache drift, search-index rebuild guidance, current directive-acknowledgement coverage gaps, and legacy agent-summary coverage gaps are surfaced without failing strict mode unless they are paired with an error or a blocking Git finding. Diagnostic severities are not rewritten; JSON `data.ok` and the command exit code reflect the strict gate result.
 
 Without `--strict`, doctor exits `1` when any diagnostic has severity `error`.
 
