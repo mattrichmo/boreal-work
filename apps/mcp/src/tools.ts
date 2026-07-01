@@ -4,6 +4,7 @@ import { readFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 
 import {
+  type AgentDirectiveBundle,
   BorealError,
   bindMcpProjectBoundary,
   defineMcpToolContract,
@@ -28,6 +29,9 @@ const MAX_PAYLOAD_CHARS = 64_000;
 export type BorealMcpToolName =
   | "boreal_command_catalog"
   | "boreal_workspace_status"
+  | "boreal_directives_current"
+  | "boreal_directives_compile"
+  | "boreal_directives_explain"
   | "boreal_work_next"
   | "boreal_work_show"
   | "boreal_work_context"
@@ -42,6 +46,7 @@ export type BorealMcpToolName =
 
 export interface BorealCliRunner {
   run(args: readonly string[], options: { readonly workspaceRoot: string }): Promise<unknown>;
+  runEnvelope?(args: readonly string[], options: { readonly workspaceRoot: string }): Promise<BorealCliEnvelope>;
 }
 
 export interface BorealMcpServerOptions {
@@ -119,6 +124,12 @@ interface OperationListRow {
   readonly eventCount: number;
 }
 
+interface BorealCliEnvelope {
+  readonly ok: true;
+  readonly data: unknown;
+  readonly agentDirectives?: readonly AgentDirectiveBundle[];
+}
+
 const COMMON_PROPERTIES = {
   workspaceRoot: { type: "string", description: "Explicit Boreal project root. Required unless the MCP server was launched with --workspace." },
   projectRoot: { type: "string", description: "Selected project root. Defaults to workspaceRoot." },
@@ -129,6 +140,26 @@ const COMMON_PROPERTIES = {
 
 const CONFIRM_PROPERTY = {
   confirmed: { type: "boolean", description: "Must be true before a mutating tool executes." }
+} as const;
+
+const DIRECTIVE_DEBUG_PROPERTIES = {
+  fixture: { type: "string", description: "Directive debug fixture such as blocked-work, closeout-success, doctor-recovery, or session-handoff." },
+  commandPath: { type: "string", description: "Boreal command path used to compile directive selectors, for example work show or agent finish." },
+  subjectType: { type: "string", description: "Directive subject type such as work, sprint, milestone, session, or workspace." },
+  subjectId: { type: "string" },
+  subjectTitle: { type: "string" },
+  status: { type: "string" },
+  label: { type: "string" },
+  labels: { type: "array", items: { type: "string" } },
+  dependencies: { type: "array", items: { type: "string" } },
+  activeBlockers: { type: "array", items: { type: "string" } },
+  openDescendants: { type: "array", items: { type: "string" } },
+  evidenceIds: { type: "array", items: { type: "string" } },
+  verificationIds: { type: "array", items: { type: "string" } },
+  summaryId: { type: "string" },
+  summaryUri: { type: "string" },
+  commits: { type: "array", items: { type: "string" } },
+  dirtyPaths: { type: "array", items: { type: "string" } }
 } as const;
 
 const TOOL_SPECS: readonly ToolSpec[] = [
@@ -160,6 +191,62 @@ const TOOL_SPECS: readonly ToolSpec[] = [
         sync,
         doctor
       };
+    }
+  },
+  {
+    name: "boreal_directives_current",
+    title: "Boreal current directives",
+    description: "Return the current CLI agentDirectives bundle for a selected work, sprint, phase, or milestone subject.",
+    kind: "read",
+    inputSchema: schema({ ...COMMON_PROPERTIES, workId: { type: "string" } }, ["workId"]),
+    async run(input, context) {
+      const workId = requiredString(input, "workId");
+      const envelope = await scopedReadEnvelope(context, ["work", "show", workId, "--json"]);
+      const agentDirectives = envelope.agentDirectives ?? [];
+      return {
+        schemaVersion: "boreal.mcp.directives.current.v1",
+        workspaceRoot: context.boundary.workspaceRoot,
+        projectRoot: context.boundary.projectRoot,
+        memoryRoot: context.boundary.memoryRoot,
+        commandPath: "work show",
+        subject: directiveSubjectFromWorkData(envelope.data, workId),
+        summary: summarizeDirectiveBundles(agentDirectives),
+        agentDirectives,
+        result: envelope.data
+      };
+    }
+  },
+  {
+    name: "boreal_directives_compile",
+    title: "Compile Boreal directives",
+    description: "Compile a directive bundle through the CLI directive compiler for a fixture or explicit typed subject snapshot.",
+    kind: "read",
+    inputSchema: schema({
+      ...COMMON_PROPERTIES,
+      ...DIRECTIVE_DEBUG_PROPERTIES
+    }),
+    async run(input, context) {
+      return scopedRead(context, ["directives", "compile", ...directiveDebugArgs(input), "--json"]);
+    }
+  },
+  {
+    name: "boreal_directives_explain",
+    title: "Explain Boreal directive",
+    description: "Explain why one directive registry entry was emitted, selected, missing data, conflicted, or not selected.",
+    kind: "read",
+    inputSchema: schema({
+      ...COMMON_PROPERTIES,
+      directiveId: { type: "string" },
+      ...DIRECTIVE_DEBUG_PROPERTIES
+    }, ["directiveId"]),
+    async run(input, context) {
+      return scopedRead(context, [
+        "directives",
+        "explain",
+        requiredString(input, "directiveId"),
+        ...directiveDebugArgs(input),
+        "--json"
+      ]);
     }
   },
   {
@@ -421,6 +508,15 @@ export function createNodeBorealCliRunner(input: { readonly workspaceRoot: strin
         args: [...invocation.args, ...args]
       });
       return parseCliData(output);
+    },
+    async runEnvelope(args) {
+      const invocation = cliInvocation(workspaceRoot, input.cliPath);
+      const output = await runCommand({
+        cwd: workspaceRoot,
+        command: invocation.command,
+        args: [...invocation.args, ...args]
+      });
+      return parseCliEnvelope(output);
     }
   };
 }
@@ -492,6 +588,22 @@ async function scopedRead(context: ToolContext, args: readonly string[]): Promis
   return context.runner.run(["--workspace", context.boundary.workspaceRoot, ...args], {
     workspaceRoot: context.boundary.workspaceRoot
   });
+}
+
+async function scopedReadEnvelope(context: ToolContext, args: readonly string[]): Promise<BorealCliEnvelope> {
+  const scopedArgs = ["--workspace", context.boundary.workspaceRoot, ...args];
+  if (context.runner.runEnvelope) {
+    return context.runner.runEnvelope(scopedArgs, {
+      workspaceRoot: context.boundary.workspaceRoot
+    });
+  }
+  const result = await context.runner.run(scopedArgs, {
+    workspaceRoot: context.boundary.workspaceRoot
+  });
+  if (isRecord(result) && result.ok === true && "data" in result) {
+    return cliEnvelopeFromRecord(result);
+  }
+  return { ok: true, data: result };
 }
 
 async function boundaryFromInput(
@@ -578,17 +690,29 @@ async function runCommand(input: {
   throw new BorealError("BOREAL_STORAGE_ERROR", err.trim() || out.trim() || `bwrk exited with ${result.exitCode ?? "unknown"}`);
 }
 
-function parseCliData(output: string): unknown {
+function parseCliEnvelope(output: string): BorealCliEnvelope {
   const parsed = safeParseJson(output, { schemaName: "boreal.cli.envelope.v1", expectedObject: true });
   if (!isRecord(parsed)) {
     throw new BorealError("BOREAL_STORAGE_ERROR", "Boreal CLI response was not an object");
   }
   if (parsed.ok === true) {
-    return parsed.data;
+    return cliEnvelopeFromRecord(parsed);
   }
   throw new BorealError(cliErrorCode(parsed.code), typeof parsed.message === "string" ? parsed.message : "Boreal CLI command failed", {
     details: parsed.details
   });
+}
+
+function parseCliData(output: string): unknown {
+  return parseCliEnvelope(output).data;
+}
+
+function cliEnvelopeFromRecord(value: Readonly<Record<string, unknown>>): BorealCliEnvelope {
+  return {
+    ok: true,
+    data: value.data,
+    ...(Array.isArray(value.agentDirectives) ? { agentDirectives: value.agentDirectives as readonly AgentDirectiveBundle[] } : {})
+  };
 }
 
 function firstJsonPayload(...candidates: readonly string[]): string | undefined {
@@ -735,6 +859,69 @@ function finishActionArgs(input: ToolInput): readonly string[] {
     return ["--release"];
   }
   throw new BorealError("BOREAL_INVALID_INPUT", "Agent finish requires close=true or release=true");
+}
+
+function directiveDebugArgs(input: ToolInput): readonly string[] {
+  return [
+    ...optionalNamedFlag("fixture", optionalString(input, "fixture")),
+    ...optionalNamedFlag("command", optionalString(input, "commandPath")),
+    ...optionalNamedFlag("subject-type", optionalString(input, "subjectType")),
+    ...optionalNamedFlag("subject-id", optionalString(input, "subjectId")),
+    ...optionalNamedFlag("subject-title", optionalString(input, "subjectTitle")),
+    ...optionalNamedFlag("status", optionalString(input, "status")),
+    ...optionalRepeatedFlag("label", stringArrayInput(input, "labels", optionalString(input, "label"))),
+    ...optionalRepeatedFlag("dependency", stringArrayInput(input, "dependencies")),
+    ...optionalRepeatedFlag("active-blocker", stringArrayInput(input, "activeBlockers")),
+    ...optionalRepeatedFlag("open-descendant", stringArrayInput(input, "openDescendants")),
+    ...optionalRepeatedFlag("evidence", stringArrayInput(input, "evidenceIds")),
+    ...optionalRepeatedFlag("verification", stringArrayInput(input, "verificationIds")),
+    ...optionalNamedFlag("summary-id", optionalString(input, "summaryId")),
+    ...optionalNamedFlag("summary-uri", optionalString(input, "summaryUri")),
+    ...optionalRepeatedFlag("commit", stringArrayInput(input, "commits")),
+    ...optionalRepeatedFlag("dirty-path", stringArrayInput(input, "dirtyPaths"))
+  ];
+}
+
+function optionalNamedFlag(name: string, value: string | undefined): readonly string[] {
+  return value ? [`--${name}`, value] : [];
+}
+
+function directiveSubjectFromWorkData(data: unknown, fallbackId: string): unknown {
+  if (!isRecord(data)) {
+    return { id: fallbackId };
+  }
+  return {
+    id: typeof data.id === "string" ? data.id : fallbackId,
+    ...(typeof data.kind === "string" ? { type: data.kind } : {}),
+    ...(typeof data.title === "string" ? { title: data.title } : {}),
+    ...(typeof data.status === "string" ? { status: data.status } : {})
+  };
+}
+
+function summarizeDirectiveBundles(bundles: readonly AgentDirectiveBundle[]): unknown {
+  const directives = bundles.flatMap((bundle) => bundle.directives);
+  const conflicts = bundles.flatMap((bundle) => bundle.conflicts);
+  const deprecations = bundles.flatMap((bundle) => bundle.deprecations);
+  const missingRequired = bundles.flatMap((bundle) => bundle.missingRequired);
+  return {
+    bundleCount: bundles.length,
+    directiveCount: directives.length,
+    requiredCount: directives.filter((directive) => directive.severity === "required").length,
+    blockingCount: directives.filter((directive) => directive.severity === "blocking").length,
+    conflictCount: conflicts.length,
+    deprecationCount: deprecations.length,
+    missingRequiredCount: missingRequired.length,
+    registryIds: uniqueStrings(directives.map((directive) => directive.registryId)),
+    missingRequiredRegistryIds: uniqueStrings(missingRequired.map((entry) => entry.registryId).filter(isDefined))
+  };
+}
+
+function uniqueStrings(values: readonly string[]): readonly string[] {
+  return [...new Set(values)].sort((left, right) => left.localeCompare(right));
+}
+
+function isDefined<T>(value: T | undefined): value is T {
+  return value !== undefined;
 }
 
 function memoryLayoutInput(input: ToolInput, fallback?: ProjectRegistryMemoryLayout): ProjectRegistryMemoryLayout | undefined {

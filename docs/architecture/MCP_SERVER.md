@@ -39,6 +39,9 @@ Read tools:
 
 - `boreal_command_catalog`
 - `boreal_workspace_status`
+- `boreal_directives_current`
+- `boreal_directives_compile`
+- `boreal_directives_explain`
 - `boreal_work_next`
 - `boreal_work_show`
 - `boreal_work_context`
@@ -55,6 +58,8 @@ Mutating tools:
 - `boreal_sync_refresh`
 
 Every tool binds the request through the shared MCP boundary guard. Read tools return bounded structured JSON. Mutating tools require `confirmed: true`, execute an exact scoped `bwrk --workspace <project-root> ... --json` command, stamp a unique MCP session ID, and return the resulting operation ID from `bwrk operation list --session-id <id>`.
+
+Directive tools are read-only bridges over the same CLI directive contracts. `boreal_directives_current` preserves the command envelope's `agentDirectives` bundle for a selected work, sprint, phase, or milestone ID and summarizes directive, conflict, deprecation, and missing-required counts. `boreal_directives_compile` and `boreal_directives_explain` wrap `bwrk directives compile` and `bwrk directives explain` for fixture or typed-subject debugging without reimplementing directive selection inside MCP.
 
 ## Doctor Drift Check
 

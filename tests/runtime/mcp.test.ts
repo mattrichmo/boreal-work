@@ -17,6 +17,9 @@ describe("boreal MCP server", () => {
 
     expect(names).toContain("boreal_command_catalog");
     expect(names).toContain("boreal_workspace_status");
+    expect(names).toContain("boreal_directives_current");
+    expect(names).toContain("boreal_directives_compile");
+    expect(names).toContain("boreal_directives_explain");
     expect(names).toContain("boreal_work_next");
     expect(names).toContain("boreal_work_claim");
     expect(names).toContain("boreal_sync_refresh");
@@ -50,6 +53,170 @@ describe("boreal MCP server", () => {
     expect(payload.contract.readOnly).toBe(true);
     expect(payload.result[0].id).toBe("bw_work_ready");
     expect(runner.calls).toEqual(["--workspace /workspace/boreal-work work next --label v1-remainder --limit 100 --json"]);
+  });
+
+  it("returns current work directive envelopes with conflict and missing-required summaries", async () => {
+    const runner = fakeRunner({
+      "--workspace /workspace/boreal-work work show bw_work_blocked --json": {
+        ok: true,
+        data: {
+          id: "bw_work_blocked",
+          kind: "task",
+          title: "Blocked work",
+          status: "blocked"
+        },
+        agentDirectives: [
+          {
+            meta: {
+              schemaVersion: "boreal.agent-directives.v1",
+              registryVersion: "directives.v1",
+              generatedAt: "2026-01-01T00:00:00.000Z",
+              commandPath: "work show"
+            },
+            directives: [
+              {
+                id: "directive.blocked.resolve-blockers.fixture",
+                registryId: "blocked.resolve-blockers",
+                version: "v1",
+                family: "blocked",
+                severity: "blocking",
+                audience: "agent",
+                kind: "recovery",
+                lifecycle: "active",
+                title: "Resolve active blockers",
+                instruction: "Stop until blockers are resolved.",
+                data: { blockerIds: ["bw_work_blocker"] },
+                source: {
+                  registryVersion: "directives.v1",
+                  registryPath: "packages/core/src/agent-directive-registry.ts",
+                  selectedBy: ["applies.work_status"]
+                },
+                subject: {
+                  type: "work",
+                  id: "bw_work_blocked",
+                  title: "Blocked work"
+                },
+                appliesTo: {
+                  commandPaths: ["work show"],
+                  subjectTypes: ["work"]
+                },
+                supersedes: []
+              }
+            ],
+            conflicts: [
+              {
+                directiveIds: ["directive.blocked.resolve-blockers.fixture", "directive.workflow_next.fixture"],
+                reason: "Blocking directive wins.",
+                resolution: "blocking_wins",
+                resolvedDirectiveId: "directive.blocked.resolve-blockers.fixture",
+                severity: "blocking"
+              }
+            ],
+            deprecations: [],
+            missingRequired: [
+              {
+                registryId: "closeout.summary-required",
+                requirement: "summary.latestSummaryId",
+                message: "Summary data is required."
+              }
+            ]
+          }
+        ]
+      }
+    });
+
+    const result = await callBorealMcpTool(
+      "boreal_directives_current",
+      { workspaceRoot: WORKSPACE, memoryRoot: MEMORY, workId: "bw_work_blocked" },
+      { runner }
+    );
+    const payload = result.structuredContent as {
+      readonly result: {
+        readonly result: { readonly id: string };
+        readonly summary: {
+          readonly directiveCount: number;
+          readonly blockingCount: number;
+          readonly conflictCount: number;
+          readonly missingRequiredCount: number;
+          readonly missingRequiredRegistryIds: readonly string[];
+        };
+        readonly agentDirectives: readonly unknown[];
+      };
+    };
+
+    expect(result.isError).toBeUndefined();
+    expect(payload.result.result.id).toBe("bw_work_blocked");
+    expect(payload.result.agentDirectives.length).toBe(1);
+    expect(payload.result.summary).toEqual(
+      expect.objectContaining({
+        directiveCount: 1,
+        blockingCount: 1,
+        conflictCount: 1,
+        missingRequiredCount: 1,
+        missingRequiredRegistryIds: ["closeout.summary-required"]
+      })
+    );
+  });
+
+  it("wraps directive compile and explain CLI commands for MCP clients", async () => {
+    const runner = fakeRunner({
+      "--workspace /workspace/boreal-work directives compile --command work show --subject-type work --subject-id bw_work_blocked --status blocked --active-blocker bw_work_blocker --json": {
+        schemaVersion: "boreal.cli.directives.compile.v1",
+        commandPath: "work show",
+        selectedRegistryIds: ["blocked.resolve-blockers"],
+        missingRequired: [],
+        bundle: {
+          directives: [{ registryId: "blocked.resolve-blockers" }],
+          conflicts: [{ severity: "blocking" }]
+        }
+      },
+      "--workspace /workspace/boreal-work directives explain blocked.resolve-blockers --fixture blocked-work --json": {
+        schemaVersion: "boreal.cli.directives.explain.v1",
+        directiveId: "blocked.resolve-blockers",
+        selected: true,
+        emitted: true,
+        reason: "emitted with conflict resolution metadata",
+        conflicts: [{ severity: "blocking" }],
+        missingRequired: []
+      }
+    });
+
+    const compiled = await callBorealMcpTool(
+      "boreal_directives_compile",
+      {
+        workspaceRoot: WORKSPACE,
+        memoryRoot: MEMORY,
+        commandPath: "work show",
+        subjectType: "work",
+        subjectId: "bw_work_blocked",
+        status: "blocked",
+        activeBlockers: ["bw_work_blocker"]
+      },
+      { runner }
+    );
+    const compilePayload = compiled.structuredContent as {
+      readonly result: { readonly bundle: { readonly conflicts: readonly unknown[] } };
+    };
+
+    const explained = await callBorealMcpTool(
+      "boreal_directives_explain",
+      {
+        workspaceRoot: WORKSPACE,
+        memoryRoot: MEMORY,
+        directiveId: "blocked.resolve-blockers",
+        fixture: "blocked-work"
+      },
+      { runner }
+    );
+    const explainPayload = explained.structuredContent as {
+      readonly result: { readonly emitted: boolean; readonly reason: string };
+    };
+
+    expect(compiled.isError).toBeUndefined();
+    expect(compilePayload.result.bundle.conflicts.length).toBe(1);
+    expect(explained.isError).toBeUndefined();
+    expect(explainPayload.result.emitted).toBe(true);
+    expect(explainPayload.result.reason).toBe("emitted with conflict resolution metadata");
   });
 
   it("fails closed before CLI execution when project selection crosses registry roots", async () => {
@@ -201,6 +368,14 @@ function fakeRunner(responses: Readonly<Record<string, unknown>>): BorealCliRunn
         throw new Error(`Unexpected MCP CLI call: ${key}`);
       }
       return responses[key];
+    },
+    async runEnvelope(args) {
+      const key = args.join(" ");
+      calls.push(key);
+      if (!(key in responses)) {
+        throw new Error(`Unexpected MCP CLI envelope call: ${key}`);
+      }
+      return responses[key] as Awaited<ReturnType<NonNullable<BorealCliRunner["runEnvelope"]>>>;
     }
   };
 }
