@@ -152,6 +152,26 @@ export interface AgentDirectiveSummaryCompilationResult extends AgentDirectiveBu
   readonly dataByRegistryId: AgentDirectiveAssemblyDataByRegistryId;
 }
 
+export interface AgentDirectiveHandoffDataOptions {
+  readonly summaryId?: string;
+  readonly summaryUri?: string;
+  readonly nextWorkflowRef?: string;
+  readonly nextCommandPath?: string;
+  readonly nextRequiredInputs?: readonly string[];
+}
+
+export interface AgentDirectiveHandoffCompilationInput extends AgentDirectiveHandoffDataOptions {
+  readonly snapshot: AgentDirectiveSnapshot;
+  readonly dataByRegistryId?: AgentDirectiveAssemblyDataByRegistryId;
+  readonly registry?: AgentDirectiveRegistry;
+  readonly generatedAt?: IsoTimestamp;
+  readonly bundleId?: AgentDirectiveBundleId;
+}
+
+export interface AgentDirectiveHandoffCompilationResult extends AgentDirectiveBundleAssemblyResult {
+  readonly dataByRegistryId: AgentDirectiveAssemblyDataByRegistryId;
+}
+
 export type AgentDirectiveRecoveryDiagnosticSnapshot = AgentDirectiveSnapshot["doctor"]["diagnostics"][number];
 
 export interface AgentDirectiveRecoveryDataOptions {
@@ -315,13 +335,13 @@ export function closeoutDirectiveDataByRegistryId(
       ["evidenceIds", evidenceIds],
       ["verificationIds", verificationIds]
     ]),
-    "handoff.session-summary": dataRecord([
-      ["workId", subjectId],
-      ["summaryUri", latestSummaryUri],
-      ["nextWorkflow", nextWorkflowRef],
-      ["reservationIds", snapshot.actor.activeReservationIds],
-      ["commitShas", commitShas]
-    ]),
+    "handoff.session-summary": handoffDirectiveData(snapshot, {
+      summaryId: latestSummaryId,
+      summaryUri: latestSummaryUri,
+      nextWorkflowRef,
+      nextCommandPath,
+      nextRequiredInputs: options.nextRequiredInputs
+    }),
     "container.descendant-closeout": dataRecord([
       ["containerId", subjectId],
       ["openDescendantIds", snapshot.work.openDescendantIds],
@@ -470,6 +490,50 @@ export function compileSummaryAgentDirectiveBundle(
 ): AgentDirectiveSummaryCompilationResult {
   const dataByRegistryId = {
     ...summaryDirectiveDataByRegistryId(input.snapshot, input),
+    ...input.dataByRegistryId
+  };
+  const result = assembleAgentDirectiveBundle({
+    snapshot: input.snapshot,
+    dataByRegistryId,
+    registry: input.registry,
+    generatedAt: input.generatedAt,
+    bundleId: input.bundleId
+  });
+  return {
+    ...result,
+    dataByRegistryId
+  };
+}
+
+export function handoffDirectiveDataByRegistryId(
+  snapshot: AgentDirectiveSnapshot,
+  options: AgentDirectiveHandoffDataOptions = {}
+): AgentDirectiveAssemblyDataByRegistryId {
+  const nextWorkflowRef = options.nextWorkflowRef ?? snapshot.workflow.nextWorkflowRef;
+  const nextCommandPath = options.nextCommandPath ?? snapshot.workflow.recommendedCommandPath;
+  const nextRequiredInputs = options.nextRequiredInputs ?? snapshot.workflow.requiredInputNames;
+
+  return {
+    "handoff.session-summary": handoffDirectiveData(snapshot, {
+      ...options,
+      nextWorkflowRef,
+      nextCommandPath,
+      nextRequiredInputs
+    }),
+    "workflow_next.canonical-next-step": workflowNextDirectiveData(
+      snapshot,
+      nextWorkflowRef,
+      nextCommandPath,
+      nextRequiredInputs
+    )
+  };
+}
+
+export function compileHandoffAgentDirectiveBundle(
+  input: AgentDirectiveHandoffCompilationInput
+): AgentDirectiveHandoffCompilationResult {
+  const dataByRegistryId = {
+    ...handoffDirectiveDataByRegistryId(input.snapshot, input),
     ...input.dataByRegistryId
   };
   const result = assembleAgentDirectiveBundle({
@@ -929,12 +993,48 @@ function workflowNextDirectiveData(
   commandPath: string | undefined = snapshot.workflow.recommendedCommandPath,
   requiredInputs: readonly string[] = snapshot.workflow.requiredInputNames
 ): AgentDirectiveData {
+  const primaryGitRoot = snapshot.git.roots[0];
   return dataRecord([
     ["workflowRef", workflowRef],
     ["commandPath", commandPath],
     ["requiredInputs", requiredInputs],
     ["currentStatus", snapshot.work.subject?.status],
-    ["subjectId", snapshot.work.subject?.id]
+    ["subjectId", snapshot.work.subject?.id],
+    ["branchName", primaryGitRoot?.branchName],
+    ["gitRoot", primaryGitRoot?.root],
+    ["evidenceIds", snapshot.evidence.evidenceIds],
+    ["verificationIds", snapshot.evidence.verificationIds],
+    ["openBlockerIds", openBlockerIds(snapshot)],
+    ["openDescendantIds", snapshot.work.openDescendantIds],
+    ["requiredGateIds", snapshot.gate.openGateIds],
+    ["activeReservationIds", snapshot.actor.activeReservationIds],
+    ["summaryUri", latestSnapshotSummaryUri(snapshot)],
+    ["summaryId", latestSnapshotSummaryId(snapshot)]
+  ]);
+}
+
+function handoffDirectiveData(
+  snapshot: AgentDirectiveSnapshot,
+  options: AgentDirectiveHandoffDataOptions = {}
+): AgentDirectiveData {
+  const primaryGitRoot = snapshot.git.roots[0];
+  return dataRecord([
+    ["workId", snapshot.work.subject?.id],
+    ["summaryId", options.summaryId ?? latestSnapshotSummaryId(snapshot)],
+    ["summaryUri", options.summaryUri ?? latestSnapshotSummaryUri(snapshot)],
+    ["nextWorkflow", options.nextWorkflowRef ?? snapshot.workflow.nextWorkflowRef],
+    ["reservationIds", snapshot.actor.activeReservationIds],
+    ["commitShas", snapshotCommitShas(snapshot)],
+    ["subjectStatus", snapshot.work.subject?.status],
+    ["branchName", primaryGitRoot?.branchName],
+    ["gitRoot", primaryGitRoot?.root],
+    ["evidenceIds", snapshot.evidence.evidenceIds],
+    ["verificationIds", snapshot.evidence.verificationIds],
+    ["openBlockerIds", openBlockerIds(snapshot)],
+    ["openDescendantIds", snapshot.work.openDescendantIds],
+    ["requiredGateIds", snapshot.gate.openGateIds],
+    ["nextCommandPath", options.nextCommandPath ?? snapshot.workflow.recommendedCommandPath],
+    ["requiredInputs", options.nextRequiredInputs ?? snapshot.workflow.requiredInputNames]
   ]);
 }
 
@@ -1135,6 +1235,22 @@ function latestEvidenceCommand(snapshot: AgentDirectiveSnapshot): string | undef
     }
   }
   return undefined;
+}
+
+function latestSnapshotSummaryId(snapshot: AgentDirectiveSnapshot): string | undefined {
+  return snapshot.summary.latestSummaryId ?? last(snapshot.summary.finalSummaryIds) ?? last(snapshot.summary.summaryIds);
+}
+
+function latestSnapshotSummaryUri(snapshot: AgentDirectiveSnapshot): string | undefined {
+  return snapshot.summary.latestSummaryUri ?? last(snapshot.summary.artifactUris);
+}
+
+function snapshotCommitShas(snapshot: AgentDirectiveSnapshot): readonly string[] {
+  return uniqueStrings([...snapshot.git.checkpointCommitShas, ...snapshot.summary.commitShas]);
+}
+
+function openBlockerIds(snapshot: AgentDirectiveSnapshot): readonly string[] {
+  return uniqueStrings([...snapshot.work.activeBlockerIds, ...snapshot.work.blockedByIds]);
 }
 
 function uniqueStrings(values: readonly string[]): readonly string[] {

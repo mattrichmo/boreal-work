@@ -303,10 +303,21 @@ export const AGENT_DIRECTIVE_REGISTRY: AgentDirectiveRegistry = {
       },
       dataRequirements: [
         requirement("workId", "id", false, "Current or most recent work id."),
+        requirement("summaryId", "id", false, "Agent summary id included in the handoff."),
         requirement("summaryUri", "uri", true, "Agent summary or handoff artifact URI."),
         requirement("nextWorkflow", "string", true, "Canonical workflow recommended for the next agent."),
         requirement("reservationIds", "array", false, "Active or released reservation ids."),
-        requirement("commitShas", "array", false, "Checkpoint commit SHAs available to the next agent.")
+        requirement("commitShas", "array", false, "Checkpoint commit SHAs available to the next agent."),
+        requirement("subjectStatus", "string", false, "Current subject status at handoff time."),
+        requirement("branchName", "string", false, "Primary Git branch name at handoff time."),
+        requirement("gitRoot", "string", false, "Primary Git root inspected for handoff."),
+        requirement("evidenceIds", "array", false, "Evidence ids available to the next agent."),
+        requirement("verificationIds", "array", false, "Verification ids available to the next agent."),
+        requirement("openBlockerIds", "array", false, "Unresolved blocker ids that the next agent must inspect."),
+        requirement("openDescendantIds", "array", false, "Open descendant ids carried into the handoff."),
+        requirement("requiredGateIds", "array", false, "Open gate ids carried into the handoff."),
+        requirement("nextCommandPath", "string", false, "Recommended command path for the next agent."),
+        requirement("requiredInputs", "array", false, "Typed input names required by the next workflow.")
       ]
     }),
     entry({
@@ -435,6 +446,7 @@ export const AGENT_DIRECTIVE_REGISTRY: AgentDirectiveRegistry = {
           "doctor",
           "gate closeout",
           "lock inspect",
+          "session end",
           "sprint metrics",
           "sprint report",
           "sync refresh",
@@ -453,7 +465,17 @@ export const AGENT_DIRECTIVE_REGISTRY: AgentDirectiveRegistry = {
         requirement("commandPath", "string", true, "Recommended command path for the next step."),
         requirement("requiredInputs", "array", true, "Typed input names required by the workflow."),
         requirement("currentStatus", "string", false, "Current status of the subject."),
-        requirement("subjectId", "id", false, "Subject id for the next workflow.")
+        requirement("subjectId", "id", false, "Subject id for the next workflow."),
+        requirement("branchName", "string", false, "Primary Git branch name for workflow navigation."),
+        requirement("gitRoot", "string", false, "Primary Git root for workflow navigation."),
+        requirement("evidenceIds", "array", false, "Evidence ids relevant to the next workflow."),
+        requirement("verificationIds", "array", false, "Verification ids relevant to the next workflow."),
+        requirement("openBlockerIds", "array", false, "Unresolved blocker ids relevant to the next workflow."),
+        requirement("openDescendantIds", "array", false, "Open descendant ids relevant to the next workflow."),
+        requirement("requiredGateIds", "array", false, "Open gate ids relevant to the next workflow."),
+        requirement("activeReservationIds", "array", false, "Active reservation ids relevant to the next workflow."),
+        requirement("summaryUri", "uri", false, "Latest summary or handoff artifact URI."),
+        requirement("summaryId", "id", false, "Latest summary id relevant to the next workflow.")
       ]
     })
   ]

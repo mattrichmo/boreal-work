@@ -8,6 +8,7 @@ import {
   assertAgentDirectiveBundle,
   compileCloseoutAgentDirectiveBundle,
   compileGitAgentDirectiveBundle,
+  compileHandoffAgentDirectiveBundle,
   compileRecoveryAgentDirectiveBundle,
   compileSummaryAgentDirectiveBundle,
   createAgentDirectiveSnapshot,
@@ -788,6 +789,104 @@ describe("agent directive bundle assembly", () => {
       subjectId: "bw_work_7ec3f08689c6cfb0"
     });
     expect(next?.lifecycle).toBe("blocked");
+  });
+
+  it("compiles session handoff directives with branch, status, verification, blockers, and next workflow data", () => {
+    const gate = gateStateFixture({
+      id: "bw_gate_handoff0001",
+      kind: "review",
+      status: "open"
+    });
+    const snapshot = agentDirectiveCompilerSnapshotFixture({
+      commandPath: "session end",
+      subjectType: "session",
+      workStatus: "closed",
+      summaryId: "bw_summary_handoff0001" as AgentSummaryId,
+      summaryUri: "memory://agent-summaries/works/bw_work_7ec3f08689c6cfb0/bw_summary_handoff0001.md",
+      evidenceIds: ["bw_evidence_handoff0001" as EvidenceId],
+      verificationIds: ["bw_verification_handoff0001" as VerificationId],
+      commitShas: ["5555555555555555555555555555555555555555"],
+      activeReservationIds: ["bw_reservation_handoff0001"],
+      activeBlockerIds: ["bw_work_handoffblock1" as WorkId],
+      openDescendantIds: ["bw_work_handoffopen1" as WorkId],
+      requiredGates: [gate],
+      nextWorkflowRef: "workflows/40-work/claim-and-finish-work.md",
+      recommendedCommandPath: "bwrk work list --ready --json"
+    });
+    const result = compileHandoffAgentDirectiveBundle({ snapshot });
+
+    expect(result.ok).toBe(true);
+    expect(result.selectedRegistryIds).toEqual([
+      "handoff.session-summary",
+      "workflow_next.canonical-next-step"
+    ]);
+    const handoff = result.bundle?.directives.find((directive) => directive.registryId === "handoff.session-summary");
+    const next = result.bundle?.directives.find(
+      (directive) => directive.registryId === "workflow_next.canonical-next-step"
+    );
+    expect(handoff?.data).toMatchObject({
+      workId: "bw_work_7ec3f08689c6cfb0",
+      summaryId: "bw_summary_handoff0001",
+      summaryUri: "memory://agent-summaries/works/bw_work_7ec3f08689c6cfb0/bw_summary_handoff0001.md",
+      nextWorkflow: "workflows/40-work/claim-and-finish-work.md",
+      reservationIds: ["bw_reservation_handoff0001"],
+      commitShas: ["5555555555555555555555555555555555555555"],
+      subjectStatus: "closed",
+      branchName: "main",
+      gitRoot: "/Users/cybertron/Code/boreal-work",
+      evidenceIds: ["bw_evidence_handoff0001"],
+      verificationIds: ["bw_verification_handoff0001"],
+      openBlockerIds: ["bw_work_handoffblock1"],
+      openDescendantIds: ["bw_work_handoffopen1"],
+      requiredGateIds: ["bw_gate_handoff0001"],
+      nextCommandPath: "bwrk work list --ready --json"
+    });
+    expect(handoff?.data.requiredInputs).toEqual(expect.arrayContaining(["work", "summary", "git"]));
+    expect(next?.data).toMatchObject({
+      workflowRef: "workflows/40-work/claim-and-finish-work.md",
+      commandPath: "bwrk work list --ready --json",
+      currentStatus: "closed",
+      branchName: "main",
+      verificationIds: ["bw_verification_handoff0001"],
+      openBlockerIds: ["bw_work_handoffblock1"],
+      requiredGateIds: ["bw_gate_handoff0001"],
+      summaryId: "bw_summary_handoff0001"
+    });
+  });
+
+  it("compiles workflow navigation directives with current project context and unresolved work ids", () => {
+    const snapshot = agentDirectiveCompilerSnapshotFixture({
+      commandPath: "workflows show",
+      subjectType: "project",
+      workStatus: "ready",
+      evidenceIds: ["bw_evidence_workflow0001" as EvidenceId],
+      verificationIds: ["bw_verification_workflow0001" as VerificationId],
+      activeReservationIds: ["bw_reservation_workflow0001"],
+      activeBlockerIds: ["bw_work_workflowblock1" as WorkId],
+      openDescendantIds: ["bw_work_workflowopen1" as WorkId],
+      nextWorkflowRef: "workflows/50-sprint/sprint-report.md",
+      recommendedCommandPath: "bwrk sprint report --json"
+    });
+    const result = compileHandoffAgentDirectiveBundle({ snapshot });
+
+    expect(result.ok).toBe(true);
+    expect(result.selectedRegistryIds).toEqual(["workflow_next.canonical-next-step"]);
+    const next = result.bundle?.directives.find(
+      (directive) => directive.registryId === "workflow_next.canonical-next-step"
+    );
+    expect(next?.data).toMatchObject({
+      workflowRef: "workflows/50-sprint/sprint-report.md",
+      commandPath: "bwrk sprint report --json",
+      currentStatus: "ready",
+      subjectId: "bw_work_7ec3f08689c6cfb0",
+      branchName: "main",
+      gitRoot: "/Users/cybertron/Code/boreal-work",
+      evidenceIds: ["bw_evidence_workflow0001"],
+      verificationIds: ["bw_verification_workflow0001"],
+      openBlockerIds: ["bw_work_workflowblock1"],
+      openDescendantIds: ["bw_work_workflowopen1"],
+      activeReservationIds: ["bw_reservation_workflow0001"]
+    });
   });
 
   it("short-circuits invalid snapshots before bundle validation", () => {

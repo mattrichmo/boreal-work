@@ -186,10 +186,21 @@ export const AGENT_DIRECTIVE_GOLDEN_CASES: readonly AgentDirectiveGoldenCase[] =
     commandPath: "session end",
     data: {
       workId: "bw_work_deadbeef0007",
+      summaryId: "bw_summary_deadbeef0007",
       summaryUri: "memory://agent-summaries/works/bw_work_deadbeef0007/bw_summary_deadbeef0007.md",
       nextWorkflow: "workflows/40-work/claim-and-finish-work.md",
       reservationIds: ["bw_reservation_deadbeef0001"],
-      commitShas: ["abcdef0123456789abcdef0123456789abcdef01"]
+      commitShas: ["abcdef0123456789abcdef0123456789abcdef01"],
+      subjectStatus: "closed",
+      branchName: "main",
+      gitRoot: "/Users/cybertron/Code/boreal-work",
+      evidenceIds: ["bw_evidence_deadbeef0007"],
+      verificationIds: ["bw_verification_deadbeef0007"],
+      openBlockerIds: ["bw_work_deadbeef0012"],
+      openDescendantIds: ["bw_work_deadbeef0013"],
+      requiredGateIds: ["bw_gate_deadbeef0007"],
+      nextCommandPath: "bwrk work list --ready --json",
+      requiredInputs: ["work", "summary", "git"]
     },
     expected: {
       title: "Prepare session handoff",
@@ -197,7 +208,22 @@ export const AGENT_DIRECTIVE_GOLDEN_CASES: readonly AgentDirectiveGoldenCase[] =
       kind: "summary",
       blocksCloseout: false,
       requiredKeys: ["summaryUri", "nextWorkflow"],
-      optionalKeys: ["workId", "reservationIds", "commitShas"]
+      optionalKeys: [
+        "workId",
+        "summaryId",
+        "reservationIds",
+        "commitShas",
+        "subjectStatus",
+        "branchName",
+        "gitRoot",
+        "evidenceIds",
+        "verificationIds",
+        "openBlockerIds",
+        "openDescendantIds",
+        "requiredGateIds",
+        "nextCommandPath",
+        "requiredInputs"
+      ]
     }
   },
   {
@@ -281,7 +307,17 @@ export const AGENT_DIRECTIVE_GOLDEN_CASES: readonly AgentDirectiveGoldenCase[] =
       commandPath: "bwrk work show bw_work_deadbeef0008 --json",
       requiredInputs: ["workId", "agentId"],
       currentStatus: "ready",
-      subjectId: "bw_work_deadbeef0008"
+      subjectId: "bw_work_deadbeef0008",
+      branchName: "main",
+      gitRoot: "/Users/cybertron/Code/boreal-work",
+      evidenceIds: ["bw_evidence_deadbeef0008"],
+      verificationIds: ["bw_verification_deadbeef0008"],
+      openBlockerIds: ["bw_work_deadbeef0014"],
+      openDescendantIds: ["bw_work_deadbeef0015"],
+      requiredGateIds: ["bw_gate_deadbeef0008"],
+      activeReservationIds: ["bw_reservation_deadbeef0008"],
+      summaryUri: "memory://agent-summaries/works/bw_work_deadbeef0008/bw_summary_deadbeef0008.md",
+      summaryId: "bw_summary_deadbeef0008"
     },
     expected: {
       title: "Follow next canonical workflow",
@@ -289,7 +325,20 @@ export const AGENT_DIRECTIVE_GOLDEN_CASES: readonly AgentDirectiveGoldenCase[] =
       kind: "next_step",
       blocksCloseout: false,
       requiredKeys: ["workflowRef", "commandPath", "requiredInputs"],
-      optionalKeys: ["currentStatus", "subjectId"]
+      optionalKeys: [
+        "currentStatus",
+        "subjectId",
+        "branchName",
+        "gitRoot",
+        "evidenceIds",
+        "verificationIds",
+        "openBlockerIds",
+        "openDescendantIds",
+        "requiredGateIds",
+        "activeReservationIds",
+        "summaryUri",
+        "summaryId"
+      ]
     }
   },
   {
