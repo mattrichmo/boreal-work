@@ -41,5 +41,38 @@ describe("in-memory store", () => {
     expect(loaded).toEqual(work);
     expect(loaded).not.toBe(work);
   });
-});
 
+  it("preserves required closeout gate metadata through writes and reads", async () => {
+    const store = new InMemoryBorealStore();
+    const work = createWorkItem({
+      title: "Gate metadata storage",
+      requiredCloseoutGates: [{ kind: "review" }, { kind: "audit", scope: "descendants" }],
+      actor,
+      now: nowIso(new Date("2026-01-01T00:00:00.000Z"))
+    });
+
+    await store.write((writer) => writer.putWorkItem(work));
+    const loaded = await store.read((reader) => reader.getWorkItem(work.meta.id));
+
+    expect(loaded?.requiredCloseoutGates).toEqual([
+      expect.objectContaining({
+        id: expect.stringMatching(/^bw_gate_[a-f0-9]{16}$/),
+        subjectId: work.meta.id,
+        subjectType: "work",
+        kind: "review",
+        scope: "self",
+        status: "open",
+        requiredEvidenceKinds: ["review"],
+        requiredOutcome: "passed",
+        minEvidenceCount: 1
+      }),
+      expect.objectContaining({
+        subjectId: work.meta.id,
+        kind: "audit",
+        scope: "descendants",
+        requiredEvidenceKinds: ["review", "command", "artifact"]
+      })
+    ]);
+    expect(loaded?.requiredCloseoutGates).not.toBe(work.requiredCloseoutGates);
+  });
+});

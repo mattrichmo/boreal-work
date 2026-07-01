@@ -17,6 +17,10 @@
     "dependencyIds": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
     "evidenceIds": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
     "verificationIds": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
+    "requiredCloseoutGates": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/requiredCloseoutGate" }
+    },
     "reservationId": { "type": "string" },
     "closedAt": { "type": "string", "format": "date-time" },
     "closedReason": { "type": "string" }
@@ -36,7 +40,77 @@
         "sourceRefs": { "type": "array" },
         "tags": { "type": "array", "items": { "type": "string" } }
       }
+    },
+    "actor": {
+      "type": "object",
+      "required": ["id", "kind"],
+      "properties": {
+        "id": { "type": "string" },
+        "kind": { "enum": ["human", "agent", "system"] },
+        "displayName": { "type": "string" }
+      }
+    },
+    "requiredCloseoutGate": {
+      "type": "object",
+      "required": [
+        "id",
+        "subjectType",
+        "subjectId",
+        "kind",
+        "scope",
+        "status",
+        "requiredEvidenceKinds",
+        "requiredOutcome",
+        "minEvidenceCount",
+        "createdAt",
+        "createdBy"
+      ],
+      "properties": {
+        "id": { "type": "string", "pattern": "^bw_gate_[a-f0-9]{12,64}$" },
+        "subjectType": { "enum": ["work", "sprint", "phase", "milestone", "project"] },
+        "subjectId": { "type": "string", "minLength": 1 },
+        "kind": { "enum": ["verification", "checkpoint", "review", "audit"] },
+        "scope": { "enum": ["self", "direct_children", "descendants"] },
+        "status": { "enum": ["open", "satisfied", "forced"] },
+        "requiredEvidenceKinds": {
+          "type": "array",
+          "items": { "enum": ["command", "test", "diff", "review", "artifact", "note"] }
+        },
+        "requiredOutcome": { "const": "passed" },
+        "minEvidenceCount": { "type": "integer", "minimum": 0 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "createdBy": { "$ref": "#/$defs/actor" },
+        "satisfiedBy": {
+          "type": "object",
+          "properties": {
+            "evidenceIds": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
+            "verificationIds": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
+            "agentSummaryIds": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
+            "commitShas": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
+            "dirtyPathNotes": { "type": "array", "items": { "type": "string" } }
+          }
+        },
+        "force": {
+          "type": "object",
+          "required": ["reason", "comment", "actor", "forcedAt"],
+          "properties": {
+            "reason": {
+              "enum": [
+                "review_unavailable",
+                "audit_unavailable",
+                "external_review_record",
+                "legacy_backfill",
+                "user_accepted_risk",
+                "emergency_closeout"
+              ]
+            },
+            "comment": { "type": "string", "minLength": 1 },
+            "actor": { "$ref": "#/$defs/actor" },
+            "evidenceIds": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
+            "forcedAt": { "type": "string", "format": "date-time" }
+          }
+        }
+      }
     }
   }
 }
-

@@ -595,15 +595,16 @@ JSON `data` shape:
 ## `work create`
 
 ```bash
-bwrk work create <title> [--description <text>] [--priority low|normal|high|critical] [--kind <kind>] [--label <label>...] [--acceptance <text>...] [--source <source-ref>...] [--ready] [--json]
+bwrk work create <title> [--description <text>] [--priority low|normal|high|critical] [--kind <kind>] [--label <label>...] [--acceptance <text>...] [--required-gate verification|checkpoint|review|audit[:self|direct_children|descendants]...] [--source <source-ref>...] [--ready] [--json]
 ```
 
-Creates a work item. `--label`, `--acceptance`, and `--source` may be repeated. Source references are stored on the work record metadata so promoted discoveries keep their original context.
+Creates a work item. `--label`, `--acceptance`, `--required-gate`, and `--source` may be repeated. Source references are stored on the work record metadata so promoted discoveries keep their original context.
 
 Behavior:
 
 - Default `kind` is `task`.
 - Default `priority` is `normal`.
+- `--required-gate` stores first-class closeout gate metadata on the work record. Use `kind` for a self-scoped gate or `kind:scope` for `self`, `direct_children`, or `descendants`.
 - `--ready` marks the new item ready in the same runtime write transaction.
 
 Example:
@@ -1025,10 +1026,10 @@ Closes a work item. Runtime policy requires a passing verification before close,
 ## `work edit`
 
 ```bash
-bwrk work edit <work-ref> [--title <text>] [--description <text>] [--kind issue|task|sprint|milestone] [--priority low|normal|high|critical] [--label <label>...] [--acceptance <text>...] [--json]
+bwrk work edit <work-ref> [--title <text>] [--description <text>] [--kind issue|task|sprint|milestone] [--priority low|normal|high|critical] [--label <label>...] [--acceptance <text>...] [--required-gate verification|checkpoint|review|audit[:self|direct_children|descendants]...|--clear-required-gates] [--json]
 ```
 
-Updates mutable work fields while preserving source refs, evidence IDs, verification IDs, dependencies, reservation history, and audit events. Repeated `--label` and `--acceptance` values replace those lists.
+Updates mutable work fields while preserving source refs, evidence IDs, verification IDs, dependencies, reservation history, and audit events. Repeated `--label` and `--acceptance` values replace those lists. Repeated `--required-gate` replaces required closeout gate metadata; `--clear-required-gates` removes it.
 
 ## `work cancel`
 

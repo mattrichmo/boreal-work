@@ -214,7 +214,8 @@ export function workItemSchemaIssues(value: unknown, path = "$"): readonly Schem
     ...uniqueStringArrayIssue(value.labels, `${path}.labels`, schemaId),
     ...uniqueStringArrayIssue(value.dependencyIds, `${path}.dependencyIds`, schemaId),
     ...uniqueStringArrayIssue(value.evidenceIds, `${path}.evidenceIds`, schemaId),
-    ...uniqueStringArrayIssue(value.verificationIds, `${path}.verificationIds`, schemaId)
+    ...uniqueStringArrayIssue(value.verificationIds, `${path}.verificationIds`, schemaId),
+    ...optionalRequiredCloseoutGateArrayIssues(value.requiredCloseoutGates, `${path}.requiredCloseoutGates`, schemaId)
   ];
 
   if (value.parentId !== undefined) {
@@ -839,6 +840,88 @@ function agentSummaryCompletedWorkIssues(value: unknown, path: string, schemaId:
   return issues;
 }
 
+function optionalRequiredCloseoutGateArrayIssues(value: unknown, path: string, schemaId: string): readonly SchemaValidationIssue[] {
+  if (value === undefined) {
+    return [];
+  }
+  if (!Array.isArray(value)) {
+    return [issue(schemaId, path, "must be an array")];
+  }
+  return value.flatMap((entry, index) => requiredCloseoutGateIssues(entry, `${path}[${index}]`, schemaId));
+}
+
+function requiredCloseoutGateIssues(value: unknown, path: string, schemaId: string): readonly SchemaValidationIssue[] {
+  if (!isRecord(value)) {
+    return [issue(schemaId, path, "must be an object")];
+  }
+  const issues: SchemaValidationIssue[] = [
+    ...patternStringIssue(value.id, `${path}.id`, schemaId, /^bw_gate_[a-f0-9]{12,64}$/),
+    ...enumIssue(value.subjectType, `${path}.subjectType`, schemaId, ["work", "sprint", "phase", "milestone", "project"]),
+    ...nonEmptyStringIssue(value.subjectId, `${path}.subjectId`, schemaId),
+    ...enumIssue(value.kind, `${path}.kind`, schemaId, ["verification", "checkpoint", "review", "audit"]),
+    ...enumIssue(value.scope, `${path}.scope`, schemaId, ["self", "direct_children", "descendants"]),
+    ...enumIssue(value.status, `${path}.status`, schemaId, ["open", "satisfied", "forced"]),
+    ...enumArrayIssue(value.requiredEvidenceKinds, `${path}.requiredEvidenceKinds`, schemaId, [
+      "command",
+      "test",
+      "diff",
+      "review",
+      "artifact",
+      "note"
+    ]),
+    ...literalIssue(value.requiredOutcome, `${path}.requiredOutcome`, schemaId, "passed"),
+    ...integerAtLeastIssue(value.minEvidenceCount, `${path}.minEvidenceCount`, schemaId, 0),
+    ...stringIssue(value.createdAt, `${path}.createdAt`, schemaId),
+    ...actorRefIssues(value.createdBy, `${path}.createdBy`, schemaId)
+  ];
+  if (value.satisfiedBy !== undefined) {
+    issues.push(...requiredCloseoutGateSatisfactionIssues(value.satisfiedBy, `${path}.satisfiedBy`, schemaId));
+  }
+  if (value.force !== undefined) {
+    issues.push(...requiredCloseoutGateForceIssues(value.force, `${path}.force`, schemaId));
+  }
+  if (value.status === "forced" && value.force === undefined) {
+    issues.push(issue(schemaId, `${path}.force`, "is required when status is forced"));
+  }
+  return issues;
+}
+
+function requiredCloseoutGateSatisfactionIssues(value: unknown, path: string, schemaId: string): readonly SchemaValidationIssue[] {
+  if (!isRecord(value)) {
+    return [issue(schemaId, path, "must be an object")];
+  }
+  const issues: SchemaValidationIssue[] = [];
+  for (const field of ["evidenceIds", "verificationIds", "agentSummaryIds", "commitShas", "dirtyPathNotes"] as const) {
+    if (value[field] !== undefined) {
+      issues.push(...uniqueStringArrayIssue(value[field], `${path}.${field}`, schemaId));
+    }
+  }
+  return issues;
+}
+
+function requiredCloseoutGateForceIssues(value: unknown, path: string, schemaId: string): readonly SchemaValidationIssue[] {
+  if (!isRecord(value)) {
+    return [issue(schemaId, path, "must be an object")];
+  }
+  const issues: SchemaValidationIssue[] = [
+    ...enumIssue(value.reason, `${path}.reason`, schemaId, [
+      "review_unavailable",
+      "audit_unavailable",
+      "external_review_record",
+      "legacy_backfill",
+      "user_accepted_risk",
+      "emergency_closeout"
+    ]),
+    ...nonEmptyStringIssue(value.comment, `${path}.comment`, schemaId),
+    ...actorRefIssues(value.actor, `${path}.actor`, schemaId),
+    ...stringIssue(value.forcedAt, `${path}.forcedAt`, schemaId)
+  ];
+  if (value.evidenceIds !== undefined) {
+    issues.push(...uniqueStringArrayIssue(value.evidenceIds, `${path}.evidenceIds`, schemaId));
+  }
+  return issues;
+}
+
 function arrayItems(
   values: readonly unknown[],
   schemaId: string,
@@ -901,6 +984,13 @@ function uniquePatternStringArrayIssue(value: unknown, path: string, schemaId: s
     ...arrayIssues,
     ...value.flatMap((entry, index) => patternStringIssue(entry, `${path}[${index}]`, schemaId, pattern))
   ];
+}
+
+function enumArrayIssue(value: unknown, path: string, schemaId: string, allowed: readonly string[]): readonly SchemaValidationIssue[] {
+  if (!Array.isArray(value)) {
+    return [issue(schemaId, path, "must be an array")];
+  }
+  return value.flatMap((entry, index) => enumIssue(entry, `${path}[${index}]`, schemaId, allowed));
 }
 
 function recordIssue(value: unknown, path: string, schemaId: string): readonly SchemaValidationIssue[] {

@@ -34,6 +34,8 @@ import {
   type ClaimId,
   type ClaimRecord,
   type ClaimStatus,
+  type CloseoutGateKind,
+  type CloseoutGateScope,
   type ContextPack,
   type DecisionId,
   type DecisionRecord,
@@ -97,7 +99,12 @@ import {
   type SyncDashboardView,
   type WorkItemView
 } from "@boreal/ui-model";
-import { deriveReadinessStatus } from "@boreal/work-engine";
+import {
+  closeoutGateSubjectTypeForWorkKind,
+  createRequiredCloseoutGates,
+  deriveReadinessStatus,
+  type RequiredCloseoutGateInput
+} from "@boreal/work-engine";
 import type { FinishReservedWorkSummaryFactory } from "@boreal/engine";
 
 import { flagValue, flagValues, hasFlag, requiredFlag, type ParsedArgs } from "./args.js";
@@ -2143,6 +2150,7 @@ async function workCommand(
         priority: parsePriority(flagValue(args, "priority")),
         acceptanceCriteria: flagValues(args, "acceptance"),
         labels: labelsFromArgs(args),
+        requiredCloseoutGates: requiredCloseoutGateInputsFromArgs(args),
         sourceRefs: sourceRefsFromArgs(args),
         ready: hasFlag(args, "ready")
       });
@@ -2388,29 +2396,50 @@ async function editWorkCommand(context: CliContext, workId: WorkId, args: Parsed
   const priority = parsePriority(flagValue(args, "priority"));
   const labels = flagValues(args, "label");
   const acceptanceCriteria = flagValues(args, "acceptance");
+  const requiredCloseoutGateInputs = requiredCloseoutGateInputsFromArgs(args);
+  const clearRequiredCloseoutGates = hasFlag(args, "clear-required-gates");
   if (
     title === undefined &&
     description === undefined &&
     kind === undefined &&
     priority === undefined &&
     labels.length === 0 &&
-    acceptanceCriteria.length === 0
+    acceptanceCriteria.length === 0 &&
+    requiredCloseoutGateInputs.length === 0 &&
+    !clearRequiredCloseoutGates
   ) {
     throw new BorealError("BOREAL_INVALID_INPUT", "work edit requires at least one mutable field flag");
+  }
+  if (requiredCloseoutGateInputs.length > 0 && clearRequiredCloseoutGates) {
+    throw new BorealError("BOREAL_INVALID_INPUT", "work edit cannot combine --required-gate with --clear-required-gates");
   }
 
   const current = nowIso();
   return context.store.write(async (writer) => {
     const work = await requireCliWork(writer, workId);
     const nextLabels = labels.length > 0 ? labelsFromArgs(args) : work.labels;
+    const nextKind = kind ?? work.kind;
+    const requiredCloseoutGates =
+      requiredCloseoutGateInputs.length > 0
+        ? createRequiredCloseoutGates({
+            subjectId: work.meta.id,
+            subjectType: closeoutGateSubjectTypeForWorkKind(nextKind),
+            inputs: requiredCloseoutGateInputs,
+            actor: context.actor,
+            now: current
+          })
+        : clearRequiredCloseoutGates
+          ? undefined
+          : work.requiredCloseoutGates;
     const updated = touchRecord(
       {
         ...work,
-        kind: kind ?? work.kind,
+        kind: nextKind,
         title: title ?? work.title,
         description: description ?? work.description,
         priority: priority ?? work.priority,
         acceptanceCriteria: acceptanceCriteria.length > 0 ? normalizedNonEmptyStrings(acceptanceCriteria) : work.acceptanceCriteria,
+        requiredCloseoutGates,
         labels: nextLabels,
         meta: {
           ...work.meta,
@@ -2551,6 +2580,9 @@ function workEditChangedFields(before: WorkItem, after: WorkItem): readonly stri
   if (before.priority !== after.priority) changed.push("priority");
   if (!arraysEqual(before.labels, after.labels)) changed.push("labels");
   if (!arraysEqual(before.acceptanceCriteria, after.acceptanceCriteria)) changed.push("acceptanceCriteria");
+  if (JSON.stringify(before.requiredCloseoutGates ?? []) !== JSON.stringify(after.requiredCloseoutGates ?? [])) {
+    changed.push("requiredCloseoutGates");
+  }
   return changed;
 }
 
@@ -6891,6 +6923,23 @@ function parseWorkStatus(value: string | undefined): WorkStatus | undefined {
   );
 }
 
+function parseCloseoutGateKind(value: string): CloseoutGateKind {
+  if (value === "verification" || value === "checkpoint" || value === "review" || value === "audit") {
+    return value;
+  }
+  throw new BorealError("BOREAL_INVALID_INPUT", "required gate kind must be verification, checkpoint, review, or audit");
+}
+
+function parseCloseoutGateScope(value: string | undefined): CloseoutGateScope | undefined {
+  if (!value) {
+    return undefined;
+  }
+  if (value === "self" || value === "direct_children" || value === "descendants") {
+    return value;
+  }
+  throw new BorealError("BOREAL_INVALID_INPUT", "required gate scope must be self, direct_children, or descendants");
+}
+
 function parseSummarySubjectType(value: string | undefined): AgentSummarySubjectType | undefined {
   if (!value) {
     return undefined;
@@ -7259,6 +7308,19 @@ function labelsFromArgs(args: ParsedArgs): readonly string[] {
 
 function sourceRefsFromArgs(args: ParsedArgs): readonly SourceRef[] {
   return flagValues(args, "source").map((source) => ({ uri: normalizeMachineString(source, "source ref uri") }));
+}
+
+function requiredCloseoutGateInputsFromArgs(args: ParsedArgs): readonly RequiredCloseoutGateInput[] {
+  return flagValues(args, "required-gate").map((value) => {
+    const [kindValue, scopeValue, extra] = value.split(":");
+    if (!kindValue || extra !== undefined) {
+      throw new BorealError("BOREAL_INVALID_INPUT", "--required-gate must use kind or kind:scope");
+    }
+    return {
+      kind: parseCloseoutGateKind(kindValue),
+      scope: parseCloseoutGateScope(scopeValue)
+    };
+  });
 }
 
 async function resolveWorkId(

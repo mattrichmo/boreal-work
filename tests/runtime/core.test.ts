@@ -32,7 +32,9 @@ import {
   runtimeSnapshotSchemaIssues,
   safeParseJson,
   type EventId,
+  type EvidenceId,
   type ProjectRegistryDocument,
+  type VerificationId,
   type WorkId
 } from "@boreal/core";
 
@@ -195,6 +197,70 @@ describe("core hashing and ids", () => {
         expect.objectContaining({
           path: "reservations[0].status",
           schemaId: "https://boreal.work/schemas/records/agent-reservation.schema.json"
+        })
+      ])
+    );
+  });
+
+  it("accepts legacy work without required closeout gates and validates gate metadata", () => {
+    const validWork = {
+      meta: runtimeMeta("bw_work_deadbeefdead"),
+      kind: "task",
+      title: "Gate validation target",
+      description: "",
+      status: "ready",
+      priority: "normal",
+      acceptanceCriteria: [],
+      labels: [],
+      dependencyIds: [],
+      evidenceIds: ["bw_evidence_deadbeefdead" as EvidenceId],
+      verificationIds: ["bw_verification_deadbeefdead" as VerificationId],
+      requiredCloseoutGates: [
+        {
+          id: "bw_gate_deadbeefdead",
+          subjectType: "work",
+          subjectId: "bw_work_deadbeefdead",
+          kind: "review",
+          scope: "self",
+          status: "satisfied",
+          requiredEvidenceKinds: ["review"],
+          requiredOutcome: "passed",
+          minEvidenceCount: 1,
+          createdAt: "2026-01-01T00:00:00.000Z",
+          createdBy: { id: "agent-a", kind: "agent" },
+          satisfiedBy: {
+            evidenceIds: ["bw_evidence_deadbeefdead"],
+            verificationIds: ["bw_verification_deadbeefdead"],
+            agentSummaryIds: ["bw_summary_deadbeefdead"],
+            commitShas: ["abc1234"],
+            dirtyPathNotes: ["no_repo_changes: schema fixture"]
+          }
+        }
+      ]
+    };
+
+    expect(runtimeSnapshotSchemaIssues({ workItems: [{ ...validWork, requiredCloseoutGates: undefined }] })).toEqual([]);
+    expect(runtimeSnapshotSchemaIssues({ workItems: [validWork] })).toEqual([]);
+    expect(
+      runtimeSnapshotSchemaIssues({
+        workItems: [
+          {
+            ...validWork,
+            requiredCloseoutGates: [
+              {
+                ...validWork.requiredCloseoutGates[0],
+                status: "forced",
+                force: undefined
+              }
+            ]
+          }
+        ]
+      })
+    ).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          path: "workItems[0].requiredCloseoutGates[0].force",
+          schemaId: RUNTIME_SCHEMA_IDS.workItem
         })
       ])
     );

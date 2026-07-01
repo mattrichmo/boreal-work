@@ -12,6 +12,7 @@ export interface WorkItemView {
   readonly blockedBy: readonly string[];
   readonly evidenceCount: number;
   readonly verificationCount: number;
+  readonly requiredCloseoutGates: WorkItem["requiredCloseoutGates"];
   readonly activeReservationId?: string;
   readonly activeReservation?: WorkReservationView;
   readonly contextSummary?: string;
@@ -52,6 +53,7 @@ export function toWorkItemView(input: {
     blockedBy: activeBlockerIds,
     evidenceCount: input.evidence?.length ?? input.work.evidenceIds.length,
     verificationCount: input.verifications?.length ?? input.work.verificationIds.length,
+    requiredCloseoutGates: input.work.requiredCloseoutGates ?? [],
     activeReservationId: input.work.reservationId,
     contextSummary: input.contextPack?.summary
   };

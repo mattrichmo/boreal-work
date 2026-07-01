@@ -111,6 +111,45 @@ describe("boreal runtime proof slice", () => {
     } satisfies Partial<BorealError>);
   });
 
+  it("persists required closeout gates on work records and views", async () => {
+    const runtime = createBorealRuntime({ actor });
+    const work = await runtime.createWork({
+      title: "Runtime gate metadata target",
+      requiredCloseoutGates: [{ kind: "verification" }, { kind: "review", scope: "descendants" }]
+    });
+    const legacy = await runtime.createWork({ title: "Legacy no-gate target" });
+
+    expect(work.requiredCloseoutGates).toEqual([
+      expect.objectContaining({
+        id: expect.stringMatching(/^bw_gate_[a-f0-9]{16}$/),
+        subjectId: work.meta.id,
+        subjectType: "work",
+        kind: "verification",
+        scope: "self",
+        status: "open",
+        requiredEvidenceKinds: ["command", "test", "diff", "review", "artifact"],
+        requiredOutcome: "passed",
+        minEvidenceCount: 1
+      }),
+      expect.objectContaining({
+        subjectId: work.meta.id,
+        kind: "review",
+        scope: "descendants",
+        requiredEvidenceKinds: ["review"]
+      })
+    ]);
+    expect(legacy.requiredCloseoutGates).toBeUndefined();
+
+    const view = await runtime.getWorkView(work.meta.id);
+    const legacyView = await runtime.getWorkView(legacy.meta.id);
+    expect(view.requiredCloseoutGates).toEqual(work.requiredCloseoutGates);
+    expect(legacyView.requiredCloseoutGates).toEqual([]);
+
+    const projections = await runtime.rebuildProjections();
+    const projected = projections.find((entry) => entry.id === work.meta.id);
+    expect(projected?.requiredCloseoutGates).toEqual(work.requiredCloseoutGates);
+  });
+
 	  it("runs create, dependency readiness, reserve, evidence, verify, close, and projections", async () => {
     let tick = 0;
     const runtime = createBorealRuntime({

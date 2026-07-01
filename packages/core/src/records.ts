@@ -2,6 +2,7 @@ import type {
   AgentId,
   AgentSummaryId,
   ClaimId,
+  CloseoutGateId,
   ContentHash,
   DecisionId,
   EventId,
@@ -57,6 +58,50 @@ export type WorkStatus =
   | "closed"
   | "cancelled";
 
+export type CloseoutGateKind = "verification" | "checkpoint" | "review" | "audit";
+export type CloseoutGateScope = "self" | "direct_children" | "descendants";
+export type CloseoutGateStatus = "open" | "satisfied" | "forced";
+export type CloseoutGateSubjectType = "work" | "sprint" | "phase" | "milestone" | "project";
+export type CloseoutGateForceReasonCode =
+  | "review_unavailable"
+  | "audit_unavailable"
+  | "external_review_record"
+  | "legacy_backfill"
+  | "user_accepted_risk"
+  | "emergency_closeout";
+
+export interface RequiredCloseoutGateSatisfaction {
+  readonly evidenceIds?: readonly EvidenceId[];
+  readonly verificationIds?: readonly VerificationId[];
+  readonly agentSummaryIds?: readonly AgentSummaryId[];
+  readonly commitShas?: readonly string[];
+  readonly dirtyPathNotes?: readonly string[];
+}
+
+export interface RequiredCloseoutGateForce {
+  readonly reason: CloseoutGateForceReasonCode;
+  readonly comment: string;
+  readonly actor: ActorRef;
+  readonly evidenceIds?: readonly EvidenceId[];
+  readonly forcedAt: IsoTimestamp;
+}
+
+export interface RequiredCloseoutGate {
+  readonly id: CloseoutGateId;
+  readonly subjectType: CloseoutGateSubjectType;
+  readonly subjectId: string;
+  readonly kind: CloseoutGateKind;
+  readonly scope: CloseoutGateScope;
+  readonly status: CloseoutGateStatus;
+  readonly requiredEvidenceKinds: readonly EvidenceKind[];
+  readonly requiredOutcome: "passed";
+  readonly minEvidenceCount: number;
+  readonly createdAt: IsoTimestamp;
+  readonly createdBy: ActorRef;
+  readonly satisfiedBy?: RequiredCloseoutGateSatisfaction;
+  readonly force?: RequiredCloseoutGateForce;
+}
+
 export interface WorkItem {
   readonly meta: RecordMeta<WorkId>;
   readonly kind: WorkKind;
@@ -70,6 +115,7 @@ export interface WorkItem {
   readonly dependencyIds: readonly WorkId[];
   readonly evidenceIds: readonly EvidenceId[];
   readonly verificationIds: readonly VerificationId[];
+  readonly requiredCloseoutGates?: readonly RequiredCloseoutGate[];
   readonly reservationId?: ReservationId;
   readonly closedAt?: IsoTimestamp;
   readonly closedReason?: string;

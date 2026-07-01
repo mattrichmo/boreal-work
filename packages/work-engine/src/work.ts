@@ -7,9 +7,15 @@ import {
   normalizeMachineString,
   touchRecord,
   type ActorRef,
+  type CloseoutGateId,
+  type CloseoutGateKind,
+  type CloseoutGateScope,
+  type CloseoutGateSubjectType,
+  type EvidenceKind,
   type EvidenceId,
   type GraphEdge,
   type IsoTimestamp,
+  type RequiredCloseoutGate,
   type RuntimePolicy,
   type SourceRef,
   type VerificationRecord,
@@ -29,11 +35,19 @@ export interface CreateWorkItemInput {
   readonly priority?: WorkPriority;
   readonly acceptanceCriteria?: readonly string[];
   readonly labels?: readonly string[];
+  readonly requiredCloseoutGates?: readonly RequiredCloseoutGateInput[];
   readonly parentId?: WorkId;
   readonly sourceRefs?: readonly SourceRef[];
   readonly nonce?: number;
   readonly actor: ActorRef;
   readonly now: IsoTimestamp;
+}
+
+export interface RequiredCloseoutGateInput {
+  readonly kind: CloseoutGateKind;
+  readonly scope?: CloseoutGateScope;
+  readonly requiredEvidenceKinds?: readonly EvidenceKind[];
+  readonly minEvidenceCount?: number;
 }
 
 export interface AddBlockingDependencyInput {
@@ -57,12 +71,13 @@ export interface RemoveBlockingDependencyInput {
 export function createWorkItem(input: CreateWorkItemInput): WorkItem {
   const title = normalizeMachineString(input.title, "title");
   const description = input.description?.trim() ?? "";
+  const kind = input.kind ?? "task";
   const labels = normalizeLabels(input.labels ?? []);
   const sourceRefs = normalizeSourceRefs(input.sourceRefs ?? []);
   const actorId = normalizeActorId(String(input.actor.id));
   const id = deterministicId<WorkId>("work", {
     title,
-    kind: input.kind ?? "task",
+    kind,
     description,
     actorId,
     createdAt: input.now,
@@ -78,18 +93,81 @@ export function createWorkItem(input: CreateWorkItemInput): WorkItem {
       sourceRefs,
       tags: labels
     }),
-    kind: input.kind ?? "task",
+    kind,
     title,
     description,
     status: "draft",
     priority: input.priority ?? "normal",
     acceptanceCriteria: input.acceptanceCriteria ?? [],
     labels,
+    requiredCloseoutGates: createRequiredCloseoutGates({
+      subjectId: id,
+      subjectType: closeoutGateSubjectTypeForWorkKind(kind),
+      inputs: input.requiredCloseoutGates ?? [],
+      actor: input.actor,
+      now: input.now
+    }),
     parentId: input.parentId,
     dependencyIds: [],
     evidenceIds: [],
     verificationIds: []
   });
+}
+
+export function createRequiredCloseoutGates(input: {
+  readonly subjectId: string;
+  readonly subjectType: CloseoutGateSubjectType;
+  readonly inputs: readonly RequiredCloseoutGateInput[];
+  readonly actor: ActorRef;
+  readonly now: IsoTimestamp;
+}): readonly RequiredCloseoutGate[] | undefined {
+  const gates = input.inputs.map((gate, index) => {
+    const scope = gate.scope ?? "self";
+    const requiredEvidenceKinds = gate.requiredEvidenceKinds ?? defaultRequiredEvidenceKinds(gate.kind);
+    const minEvidenceCount = gate.minEvidenceCount ?? 1;
+    return {
+      id: deterministicId<CloseoutGateId>("gate", {
+        subjectId: input.subjectId,
+        subjectType: input.subjectType,
+        kind: gate.kind,
+        scope,
+        requiredEvidenceKinds,
+        minEvidenceCount,
+        index
+      }),
+      subjectType: input.subjectType,
+      subjectId: input.subjectId,
+      kind: gate.kind,
+      scope,
+      status: "open" as const,
+      requiredEvidenceKinds,
+      requiredOutcome: "passed" as const,
+      minEvidenceCount,
+      createdAt: input.now,
+      createdBy: input.actor
+    };
+  });
+  return gates.length > 0 ? gates : undefined;
+}
+
+export function closeoutGateSubjectTypeForWorkKind(kind: WorkKind): CloseoutGateSubjectType {
+  if (kind === "sprint" || kind === "milestone") {
+    return kind;
+  }
+  return "work";
+}
+
+function defaultRequiredEvidenceKinds(kind: CloseoutGateKind): readonly EvidenceKind[] {
+  switch (kind) {
+    case "review":
+      return ["review"];
+    case "audit":
+      return ["review", "command", "artifact"];
+    case "verification":
+      return ["command", "test", "diff", "review", "artifact"];
+    case "checkpoint":
+      return [];
+  }
 }
 
 function normalizeSourceRefs(sourceRefs: readonly SourceRef[]): readonly SourceRef[] {

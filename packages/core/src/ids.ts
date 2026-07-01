@@ -8,6 +8,7 @@ export type BorealId = Brand<string, "BorealId">;
 export type AgentId = Brand<string, "AgentId">;
 export type AgentSummaryId = Brand<string, "AgentSummaryId">;
 export type ClaimId = Brand<string, "ClaimId">;
+export type CloseoutGateId = Brand<string, "CloseoutGateId">;
 export type ContentHash = Brand<string, "ContentHash">;
 export type DecisionId = Brand<string, "DecisionId">;
 export type EventId = Brand<string, "EventId">;
@@ -28,6 +29,7 @@ export type EntityPrefix =
   | "edge"
   | "event"
   | "evidence"
+  | "gate"
   | "operation"
   | "page"
   | "projection"

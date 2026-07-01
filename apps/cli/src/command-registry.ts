@@ -675,13 +675,14 @@ export const COMMAND_DEFINITIONS: readonly CommandDefinition[] = [
     category: "work",
     summary: "Create a work item.",
     usage:
-      "bwrk work create <title> [--description <text>] [--priority low|normal|high|critical] [--kind <kind>] [--label <label>...] [--acceptance <text>...] [--source <source-ref>...] [--ready] [--json]",
+      "bwrk work create <title> [--description <text>] [--priority low|normal|high|critical] [--kind <kind>] [--label <label>...] [--acceptance <text>...] [--required-gate verification|checkpoint|review|audit[:self|direct_children|descendants]...] [--source <source-ref>...] [--ready] [--json]",
     flags: [
       flag("description", "value", "Work description."),
       flag("priority", "value", "Work priority: low, normal, high, or critical."),
       flag("kind", "value", "Work kind."),
       flag("label", "value", "Label to attach to the work item.", true),
       flag("acceptance", "value", "Acceptance criterion.", true),
+      flag("required-gate", "value", "Required closeout gate as kind or kind:scope. Repeat for multiple gates.", true),
       flag("source", "value", "Source reference to preserve on the work item.", true),
       flag("ready", "boolean", "Create the item as ready when policy allows it."),
     ],
@@ -894,7 +895,7 @@ export const COMMAND_DEFINITIONS: readonly CommandDefinition[] = [
     path: ["work", "edit"],
     category: "work",
     summary: "Edit work item fields.",
-    usage: "bwrk work edit <work-ref> [--title <text>] [--description <text>] [--kind issue|task|sprint|milestone] [--priority low|normal|high|critical] [--label <label>...] [--acceptance <text>...] [--json]",
+    usage: "bwrk work edit <work-ref> [--title <text>] [--description <text>] [--kind issue|task|sprint|milestone] [--priority low|normal|high|critical] [--label <label>...] [--acceptance <text>...] [--required-gate verification|checkpoint|review|audit[:self|direct_children|descendants]...|--clear-required-gates] [--json]",
     description: "Updates mutable work fields while preserving source refs, evidence, verification, dependencies, and audit events.",
     flags: [
       flag("title", "value", "Replacement title."),
@@ -903,6 +904,8 @@ export const COMMAND_DEFINITIONS: readonly CommandDefinition[] = [
       flag("priority", "value", "Replacement priority."),
       flag("label", "value", "Replacement labels. Repeat to set multiple labels.", true),
       flag("acceptance", "value", "Replacement acceptance criteria. Repeat to set multiple criteria.", true),
+      flag("required-gate", "value", "Replacement required closeout gate as kind or kind:scope. Repeat to set multiple gates.", true),
+      flag("clear-required-gates", "boolean", "Remove required closeout gate metadata from the work item."),
     ],
     positionals: { label: "work reference", min: 1, max: 1 },
     requiresWorkspace: true,

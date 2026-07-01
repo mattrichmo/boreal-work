@@ -1576,6 +1576,15 @@ function validateSnapshot(snapshot: ExportSnapshot): void {
     assertArrayField(work, "dependencyIds", "workItems", work.meta.id);
     assertArrayField(work, "evidenceIds", "workItems", work.meta.id);
     assertArrayField(work, "verificationIds", "workItems", work.meta.id);
+    if (work.requiredCloseoutGates !== undefined) {
+      assertArrayField(work, "requiredCloseoutGates", "workItems", work.meta.id);
+      for (const gate of work.requiredCloseoutGates) {
+        assertReferences("required gate evidence", gate.id, gate.satisfiedBy?.evidenceIds ?? [], evidenceIds);
+        assertReferences("required gate force evidence", gate.id, gate.force?.evidenceIds ?? [], evidenceIds);
+        assertReferences("required gate verification", gate.id, gate.satisfiedBy?.verificationIds ?? [], verificationIds);
+        assertReferences("required gate agent summary", gate.id, gate.satisfiedBy?.agentSummaryIds ?? [], summaryIds);
+      }
+    }
     assertReferences("work dependency", work.meta.id, work.dependencyIds, workIds);
     assertReferences("work evidence", work.meta.id, work.evidenceIds, evidenceIds);
     assertReferences("work verification", work.meta.id, work.verificationIds, verificationIds);
