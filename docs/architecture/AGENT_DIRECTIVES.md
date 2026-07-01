@@ -76,9 +76,12 @@ interface AgentDirective {
   family: AgentDirectiveFamily;
   severity: "info" | "action" | "required" | "blocking";
   audience: "agent" | "operator" | "reviewer";
+  kind: "obligation" | "next_step" | "warning" | "recovery" | "summary" | "acknowledgement";
+  lifecycle: "proposed" | "active" | "satisfied" | "acknowledged" | "superseded" | "blocked";
   title: string;
   instruction: string;
   data: Record<string, unknown>;
+  source: AgentDirectiveSource;
   appliesTo: AgentDirectiveAppliesTo;
   supersedes?: string[];
   blocksCloseout?: boolean;
@@ -86,15 +89,25 @@ interface AgentDirective {
 
 type AgentDirectiveFamily =
   | "closeout"
-  | "sprint_launch"
-  | "blocked_state"
-  | "doctor_recovery"
+  | "git"
+  | "sprint"
+  | "phase"
+  | "container"
   | "handoff"
-  | "git_checkpoint"
+  | "doctor"
+  | "blocked"
   | "workflow_next"
   | "verification"
   | "review"
-  | "audit";
+  | "audit"
+  | "memory";
+
+interface AgentDirectiveSource {
+  registryVersion: string;
+  registryPath: string;
+  selectedBy: string[];
+  snapshotHash?: string;
+}
 
 interface AgentDirectiveAppliesTo {
   commandPaths: string[];
@@ -203,41 +216,102 @@ Envelope rules:
 
 ## Directive Families
 
-### Closeout
+The canonical family names are stable registry keys. UI labels may be friendlier, but command JSON and tests should use these names.
 
-Closeout directives describe what must be true before a task, sprint, phase, milestone, or project closes: passed verification, final or forced summary, gate state, commit or dirty-path reason, child status, and user-facing summary requirements.
+| Family | Primary obligation | Typical subjects | Default severity |
+| --- | --- | --- | --- |
+| `closeout` | Explain what must exist before close or cancel: verification, summary, gates, child status, and response summary. | work, sprint, phase, milestone, project | required |
+| `git` | Require root inspection, scoped path handling, commit SHA, or accepted dirty-path reason code. | work, sprint, phase, milestone, project | required |
+| `sprint` | Guide launch, report, metrics, capacity, carryover, child readiness, and sprint close. | sprint | action |
+| `phase` | Guide phase sequencing, phase-level child status, and phase closeout rollup. | phase, milestone | action |
+| `container` | Guide aggregate issue, milestone, or project container state, descendant gates, and parent closeout. | work, milestone, project | action |
+| `handoff` | Tell the next agent which context, evidence, summaries, reservations, and next workflow to consume. | session, work, sprint, project | action |
+| `doctor` | Map health diagnostics to safe repair commands and manual review commands. | workspace, project, session | required |
+| `blocked` | Explain active blockers, gate gaps, stale reservations, dependency blockers, or review blockers. | work, sprint, phase, milestone | blocking |
+| `verification` | State validation commands, evidence kinds, verdict expectations, and scope limits. | work, sprint, phase, milestone | required |
+| `review` | Require reviewer evidence, candidate selection, heartbeat movement, or force semantics. | work, sprint, phase, milestone | required |
+| `audit` | Require broader policy/security/workflow findings disposition. | work, sprint, phase, milestone, project | required |
+| `memory` | Require raw-source reconciliation, wiki/claim/decision coverage, or source-backed memory updates. | workspace, project, work | action |
+| `workflow_next` | Name the next canonical workflow, command shape, and required inputs. | work, sprint, phase, milestone, session | action |
 
-### Sprint Launch
+## Severity, Audience, Kind, And Lifecycle
 
-Sprint launch directives describe the next claimable work, capacity constraints, required gates, checkpoint cadence, and any blocked child work that must not be started yet.
+Severity controls urgency:
 
-### Blocked State
+| Severity | Meaning | Closeout effect |
+| --- | --- | --- |
+| `info` | Useful context; no immediate action required. | Never blocks closeout. |
+| `action` | Recommended next step. | Does not block unless another directive requires it. |
+| `required` | Required to satisfy the current workflow contract. | Blocks closeout when `blocksCloseout=true`. |
+| `blocking` | Acting without resolution would be unsafe or contradictory. | Blocks closeout and mutation until resolved or forced. |
 
-Blocked-state directives explain active blockers, whether they are work dependencies, gate gaps, expired reservations, stale generated artifacts, or external review requirements.
+Audience controls rendering:
 
-### Doctor Recovery
+| Audience | Consumer |
+| --- | --- |
+| `agent` | Autonomous agent instruction and CLI/MCP JSON consumers. |
+| `operator` | Human operator dashboards, console, TUI, and handoff text. |
+| `reviewer` | Review/audit loops and gate evidence workflows. |
 
-Doctor recovery directives map diagnostics to safe commands and manual-review commands. They must distinguish generated artifact repairs from canonical state changes.
+Kind controls shape:
 
-### Handoff
+| Kind | Use |
+| --- | --- |
+| `obligation` | A required condition such as verification, checkpoint, or review. |
+| `next_step` | A recommended command or workflow transition. |
+| `warning` | A non-blocking caveat such as protected branch or unrelated dirty state. |
+| `recovery` | A repair path for doctor/sync/lock/index failures. |
+| `summary` | A user-response or handoff summary obligation. |
+| `acknowledgement` | A required acknowledgement before release, close, force, or handoff. |
 
-Handoff directives identify the summary, context, evidence, verification, open reservations, dirty-state classifications, and next workflow a new agent should consume.
+Lifecycle states:
 
-### Git Checkpoint
+| Lifecycle | Meaning |
+| --- | --- |
+| `proposed` | Selected by the compiler but not yet active for this command result. |
+| `active` | Applies now. |
+| `satisfied` | Requirement has matching evidence, verification, summary, commit, or reason code. |
+| `acknowledged` | Actor acknowledged the directive requirement. |
+| `superseded` | Another directive replaces this one. |
+| `blocked` | Cannot proceed without resolution or force metadata. |
 
-Git checkpoint directives state which roots must be inspected, which paths are in scope, which paths are unrelated, and whether a commit SHA or reason code is required before closeout.
+## Family Precedence Matrix
 
-### Workflow Next
+When multiple directive families apply, the compiler uses severity first and this family order second. Rows earlier in the list win ties unless explicit `supersedes` metadata says otherwise.
 
-Workflow-next directives name the next canonical workflow, command shape, and required inputs after a command completes.
+| Rank | Family | Tie-break reason |
+| --- | --- | --- |
+| 1 | `blocked` | Prevents unsafe mutation or misleading closeout. |
+| 2 | `verification` | Proves acceptance before close or report. |
+| 3 | `review` | Satisfies explicit review gates. |
+| 4 | `audit` | Satisfies broad gate or policy obligations. |
+| 5 | `git` | Proves checkpoint or accepted no-commit reason. |
+| 6 | `closeout` | Coordinates final summary, child state, and close/cancel conditions. |
+| 7 | `doctor` | Repairs workspace health before dependent actions. |
+| 8 | `memory` | Preserves source-backed project truth. |
+| 9 | `handoff` | Preserves continuity after state is safe. |
+| 10 | `container` | Applies parent/container rollups after child safety requirements. |
+| 11 | `phase` | Applies phase sequencing after blockers and gates. |
+| 12 | `sprint` | Applies sprint launch/report behavior after blockers and gates. |
+| 13 | `workflow_next` | Provides the next command once higher obligations are handled. |
 
-### Verification
+Conflict examples:
 
-Verification directives describe required commands, evidence kinds, verdict expectations, and test scope. They must avoid treating a narrow check as proof of broad completion.
+- A `blocked` directive for unresolved dependencies supersedes a `workflow_next` directive that would otherwise recommend claiming work.
+- A `git` directive requiring a checkpoint supersedes a `closeout` directive that says verification is complete.
+- A `doctor` directive for stale generated artifacts supersedes a `handoff` directive that would send the next agent to stale context.
+- A `memory` directive for unreconciled raw source does not supersede `verification` unless the active workflow requires source-backed memory evidence.
 
-### Review And Audit
+## Source Metadata
 
-Review/audit directives describe required reviewer or audit evidence, force semantics, and findings disposition for required gates.
+Every directive includes `source` metadata so consumers can audit why it exists:
+
+- `registryVersion`: version of the static registry.
+- `registryPath`: checked-in file that owns the trusted instruction text.
+- `selectedBy`: predicate IDs or compiler stages that selected the directive.
+- `snapshotHash`: optional hash of the normalized input snapshot.
+
+Consumers should render source metadata for debugging and tests, but agents should follow the directive body and data contract rather than reading registry files directly during normal work.
 
 ## Acknowledgement
 
