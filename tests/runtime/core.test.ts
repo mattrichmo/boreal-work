@@ -6,13 +6,24 @@ import { describe, expect, it } from "vitest";
 
 import {
   AGENT_DIRECTIVE_BUNDLE_SCHEMA_VERSION,
+  AGENT_DIRECTIVE_DATA_REQUIREMENT_TYPES,
+  AGENT_DIRECTIVE_FAMILIES,
+  AGENT_DIRECTIVE_REGISTRY,
+  AGENT_DIRECTIVE_REGISTRY_BY_FAMILY,
+  AGENT_DIRECTIVE_REGISTRY_ENTRIES,
+  AGENT_DIRECTIVE_REGISTRY_IDS,
+  AGENT_DIRECTIVE_REGISTRY_SOURCE_PATH,
+  AGENT_DIRECTIVE_REGISTRY_VERSION,
   AGENT_DIRECTIVE_SCHEMA_CONTRACTS,
   AGENT_DIRECTIVE_SCHEMA_IDS,
   BorealError,
   agentDirectiveBundleIssues,
   agentDirectiveBundleSchemaIssues,
   agentDirectiveDataIssues,
+  agentDirectiveRegistryEntriesByFamily,
+  agentDirectiveRegistryIssues,
   assertAgentDirectiveBundle,
+  assertAgentDirectiveRegistry,
   assertMcpResourcePathAllowed,
   assertMcpResourceRealPathAllowed,
   bindMcpProjectBoundary,
@@ -41,6 +52,7 @@ import {
   type AgentDirectiveBundle,
   type AgentDirectiveBundleId,
   type AgentDirectiveId,
+  type AgentDirectiveRegistry,
   type AgentDirectiveRegistryVersion,
   type AgentDirectiveTemplateId,
   type AgentDirectiveVersion,
@@ -301,6 +313,68 @@ describe("core hashing and ids", () => {
         ]
       })
     ).toThrow(expect.objectContaining({ code: "BOREAL_INVALID_INPUT" }));
+  });
+
+  it("validates the static master agent directive registry", () => {
+    expect(AGENT_DIRECTIVE_REGISTRY.version).toBe(AGENT_DIRECTIVE_REGISTRY_VERSION);
+    expect(agentDirectiveRegistryIssues(AGENT_DIRECTIVE_REGISTRY)).toEqual([]);
+    expect(() => assertAgentDirectiveRegistry(AGENT_DIRECTIVE_REGISTRY)).not.toThrow();
+
+    expect(AGENT_DIRECTIVE_REGISTRY_ENTRIES).toBe(AGENT_DIRECTIVE_REGISTRY.entries);
+    expect(new Set(AGENT_DIRECTIVE_REGISTRY_IDS).size).toBe(AGENT_DIRECTIVE_REGISTRY_IDS.length);
+    expect(AGENT_DIRECTIVE_REGISTRY_IDS).toEqual(AGENT_DIRECTIVE_REGISTRY_ENTRIES.map((entry) => entry.id));
+
+    let previousFamilyRank = -1;
+    for (const entry of AGENT_DIRECTIVE_REGISTRY_ENTRIES) {
+      const familyRank = AGENT_DIRECTIVE_FAMILIES.indexOf(entry.family);
+      expect(familyRank).toBeGreaterThanOrEqual(previousFamilyRank);
+      previousFamilyRank = familyRank;
+
+      expect(entry.sourcePath).toBe(AGENT_DIRECTIVE_REGISTRY_SOURCE_PATH);
+      expect(entry.lifecycle).toBe("active");
+      expect(entry.instruction).not.toMatch(/\$\{|\{\{|\$[A-Za-z_]/u);
+      expect(entry.dataRequirements.length).toBeGreaterThan(0);
+
+      const requirementKeys = entry.dataRequirements.map((requirement) => requirement.key);
+      expect(new Set(requirementKeys).size).toBe(requirementKeys.length);
+      for (const requirement of entry.dataRequirements) {
+        expect(AGENT_DIRECTIVE_DATA_REQUIREMENT_TYPES).toContain(requirement.valueType);
+        expect(requirement.description.length).toBeGreaterThan(0);
+      }
+    }
+
+    const grouped = agentDirectiveRegistryEntriesByFamily();
+    expect(grouped).toEqual(AGENT_DIRECTIVE_REGISTRY_BY_FAMILY);
+    for (const family of AGENT_DIRECTIVE_FAMILIES) {
+      expect(grouped[family]).toEqual(AGENT_DIRECTIVE_REGISTRY_ENTRIES.filter((entry) => entry.family === family));
+      expect(grouped[family].length).toBeGreaterThan(0);
+    }
+  });
+
+  it("rejects unsafe static registry entries", () => {
+    const invalidRegistry: AgentDirectiveRegistry = {
+      ...AGENT_DIRECTIVE_REGISTRY,
+      entries: [
+        {
+          ...AGENT_DIRECTIVE_REGISTRY.entries[0],
+          instruction: "Use ${workTitle} as instruction.",
+          sourcePath: "../memory/raw/index.jsonl",
+          supersedes: ["missing.registry-entry" as AgentDirectiveTemplateId]
+        },
+        ...AGENT_DIRECTIVE_REGISTRY.entries.slice(1)
+      ]
+    };
+
+    expect(agentDirectiveRegistryIssues(invalidRegistry)).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ path: "$.entries[0].instruction", message: "must not contain interpolation markers" }),
+        expect.objectContaining({ path: "$.entries[0].sourcePath", message: "must be a relative checked-in registry path" }),
+        expect.objectContaining({ path: "$.entries[0].supersedes[0]", message: "must reference a registry entry id" })
+      ])
+    );
+    expect(() => assertAgentDirectiveRegistry(invalidRegistry)).toThrow(
+      expect.objectContaining({ code: "BOREAL_INVALID_INPUT" })
+    );
   });
 
   it("reports schema validation issues for malformed runtime snapshots", () => {

@@ -7,19 +7,19 @@ export const AGENT_DIRECTIVE_BUNDLE_SCHEMA_VERSION = "boreal.agent-directives.v1
 export const AGENT_DIRECTIVE_TRUSTED_REGISTRY_PATH_PREFIXES = ["packages/core/src/agent-directive"] as const;
 
 export const AGENT_DIRECTIVE_FAMILIES = [
-  "closeout",
-  "git",
-  "sprint",
-  "phase",
-  "container",
-  "handoff",
-  "doctor",
   "blocked",
-  "workflow_next",
   "verification",
   "review",
   "audit",
-  "memory"
+  "git",
+  "closeout",
+  "doctor",
+  "memory",
+  "handoff",
+  "container",
+  "phase",
+  "sprint",
+  "workflow_next",
 ] as const;
 
 export const AGENT_DIRECTIVE_SEVERITIES = ["info", "action", "required", "blocking"] as const;
@@ -56,6 +56,17 @@ export const AGENT_DIRECTIVE_CONFLICT_RESOLUTIONS = [
   "registry_order",
   "manual_review"
 ] as const;
+export const AGENT_DIRECTIVE_DATA_REQUIREMENT_TYPES = [
+  "string",
+  "number",
+  "boolean",
+  "array",
+  "object",
+  "id",
+  "timestamp",
+  "content_hash",
+  "uri"
+] as const;
 
 export type AgentDirectiveId = Brand<string, "AgentDirectiveId">;
 export type AgentDirectiveBundleId = Brand<string, "AgentDirectiveBundleId">;
@@ -69,6 +80,7 @@ export type AgentDirectiveAudience = (typeof AGENT_DIRECTIVE_AUDIENCES)[number];
 export type AgentDirectiveKind = (typeof AGENT_DIRECTIVE_KINDS)[number];
 export type AgentDirectiveLifecycle = (typeof AGENT_DIRECTIVE_LIFECYCLES)[number];
 export type AgentDirectiveSubjectType = (typeof AGENT_DIRECTIVE_SUBJECT_TYPES)[number];
+export type AgentDirectiveDataRequirementType = (typeof AGENT_DIRECTIVE_DATA_REQUIREMENT_TYPES)[number];
 
 export type AgentDirectiveDataPrimitive = string | number | boolean | null;
 export type AgentDirectiveDataValue =
@@ -161,6 +173,25 @@ export interface AgentDirectiveTemplate {
   readonly appliesTo: AgentDirectiveAppliesTo;
   readonly blocksCloseout?: boolean;
   readonly acknowledgement?: AgentDirectiveAcknowledgementRequirement;
+}
+
+export interface AgentDirectiveDataRequirement {
+  readonly key: string;
+  readonly valueType: AgentDirectiveDataRequirementType;
+  readonly required: boolean;
+  readonly description: string;
+}
+
+export interface AgentDirectiveRegistryEntry extends AgentDirectiveTemplate {
+  readonly lifecycle: AgentDirectiveLifecycle;
+  readonly sourcePath: string;
+  readonly dataRequirements: readonly AgentDirectiveDataRequirement[];
+  readonly supersedes?: readonly AgentDirectiveTemplateId[];
+}
+
+export interface AgentDirectiveRegistry {
+  readonly version: AgentDirectiveRegistryVersion;
+  readonly entries: readonly AgentDirectiveRegistryEntry[];
 }
 
 export interface AgentDirectiveBundleMetadata {
@@ -277,6 +308,53 @@ export function isAgentDirectiveDataValue(value: unknown): value is AgentDirecti
   return dataValueIssues(value, "$", 24, 0, new WeakSet<object>(), false).length === 0;
 }
 
+export function agentDirectiveRegistryIssues(
+  value: unknown,
+  options: AgentDirectiveBundleValidationOptions = {}
+): readonly AgentDirectiveBundleValidationIssue[] {
+  if (!isRecord(value)) {
+    return [issue("$", "must be an object")];
+  }
+  const issues: AgentDirectiveBundleValidationIssue[] = [
+    ...stableMachineIdIssues(value.version, "$.version"),
+    ...registryEntryArrayIssues(value.entries, "$.entries", options)
+  ];
+  if (Array.isArray(value.entries)) {
+    const entryIds = value.entries.flatMap((entry) => (isRecord(entry) && typeof entry.id === "string" ? [entry.id] : []));
+    const entryIdSet = new Set(entryIds);
+    if (entryIds.length !== entryIdSet.size) {
+      issues.push(issue("$.entries", "registry entry ids must be unique"));
+    }
+    for (const family of AGENT_DIRECTIVE_FAMILIES) {
+      if (!value.entries.some((entry) => isRecord(entry) && entry.family === family)) {
+        issues.push(issue("$.entries", `must include at least one ${family} directive entry`));
+      }
+    }
+    issues.push(...registryFamilyOrderIssues(value.entries, "$.entries"));
+    value.entries.forEach((entry, index) => {
+      if (!isRecord(entry) || !Array.isArray(entry.supersedes)) {
+        return;
+      }
+      entry.supersedes.forEach((supersededId, supersedesIndex) => {
+        if (typeof supersededId === "string" && !entryIdSet.has(supersededId)) {
+          issues.push(issue(`$.entries[${index}].supersedes[${supersedesIndex}]`, "must reference a registry entry id"));
+        }
+      });
+    });
+  }
+  return issues;
+}
+
+export function assertAgentDirectiveRegistry(
+  value: unknown,
+  options: AgentDirectiveBundleValidationOptions = {}
+): asserts value is AgentDirectiveRegistry {
+  const issues = agentDirectiveRegistryIssues(value, options);
+  if (issues.length > 0) {
+    throw new BorealError("BOREAL_INVALID_INPUT", "Invalid agent directive registry", { issues });
+  }
+}
+
 function bundleMetaIssues(value: unknown, path: string): readonly AgentDirectiveBundleValidationIssue[] {
   if (!isRecord(value)) {
     return [issue(path, "must be an object")];
@@ -291,6 +369,99 @@ function bundleMetaIssues(value: unknown, path: string): readonly AgentDirective
     ...optionalContentHashIssues(value.sourceSnapshotHash, `${path}.sourceSnapshotHash`)
   ];
   return issues;
+}
+
+function registryEntryArrayIssues(
+  value: unknown,
+  path: string,
+  options: AgentDirectiveBundleValidationOptions
+): readonly AgentDirectiveBundleValidationIssue[] {
+  if (!Array.isArray(value)) {
+    return [issue(path, "must be an array")];
+  }
+  return value.flatMap((entry, index) => registryEntryIssues(entry, `${path}[${index}]`, options));
+}
+
+function registryEntryIssues(
+  value: unknown,
+  path: string,
+  options: AgentDirectiveBundleValidationOptions
+): readonly AgentDirectiveBundleValidationIssue[] {
+  if (!isRecord(value)) {
+    return [issue(path, "must be an object")];
+  }
+  const issues: AgentDirectiveBundleValidationIssue[] = [
+    ...stableMachineIdIssues(value.id, `${path}.id`),
+    ...stableMachineIdIssues(value.version, `${path}.version`),
+    ...enumIssues(value.family, `${path}.family`, AGENT_DIRECTIVE_FAMILIES),
+    ...enumIssues(value.severity, `${path}.severity`, AGENT_DIRECTIVE_SEVERITIES),
+    ...enumIssues(value.audience, `${path}.audience`, AGENT_DIRECTIVE_AUDIENCES),
+    ...enumIssues(value.kind, `${path}.kind`, AGENT_DIRECTIVE_KINDS),
+    ...enumIssues(value.defaultLifecycle, `${path}.defaultLifecycle`, AGENT_DIRECTIVE_LIFECYCLES),
+    ...enumIssues(value.lifecycle, `${path}.lifecycle`, AGENT_DIRECTIVE_LIFECYCLES),
+    ...nonEmptySafeStringIssues(value.title, `${path}.title`),
+    ...nonEmptyStaticInstructionIssues(value.instruction, `${path}.instruction`),
+    ...appliesToIssues(value.appliesTo, `${path}.appliesTo`),
+    ...trustedRegistryPathIssues(value.sourcePath, `${path}.sourcePath`, options),
+    ...dataRequirementArrayIssues(value.dataRequirements, `${path}.dataRequirements`)
+  ];
+  if (value.blocksCloseout !== undefined && typeof value.blocksCloseout !== "boolean") {
+    issues.push(issue(`${path}.blocksCloseout`, "must be a boolean"));
+  }
+  if (value.acknowledgement !== undefined) {
+    issues.push(...acknowledgementIssues(value.acknowledgement, `${path}.acknowledgement`));
+  }
+  if (value.supersedes !== undefined) {
+    issues.push(...stableMachineIdArrayIssues(value.supersedes, `${path}.supersedes`));
+  }
+  return issues;
+}
+
+function dataRequirementArrayIssues(value: unknown, path: string): readonly AgentDirectiveBundleValidationIssue[] {
+  if (!Array.isArray(value)) {
+    return [issue(path, "must be an array")];
+  }
+  if (value.length === 0) {
+    return [issue(path, "must include at least one data requirement")];
+  }
+  const issues = value.flatMap((entry, index) => dataRequirementIssues(entry, `${path}[${index}]`));
+  const keys = value.flatMap((entry) => (isRecord(entry) && typeof entry.key === "string" ? [entry.key] : []));
+  return new Set(keys).size === keys.length ? issues : [...issues, issue(path, "must contain unique data keys")];
+}
+
+function registryFamilyOrderIssues(
+  entries: readonly unknown[],
+  path: string
+): readonly AgentDirectiveBundleValidationIssue[] {
+  const issues: AgentDirectiveBundleValidationIssue[] = [];
+  let lastFamilyIndex = -1;
+  entries.forEach((entry, index) => {
+    if (!isRecord(entry) || typeof entry.family !== "string") {
+      return;
+    }
+    const familyIndex = (AGENT_DIRECTIVE_FAMILIES as readonly string[]).indexOf(entry.family);
+    if (familyIndex < 0) {
+      return;
+    }
+    if (familyIndex < lastFamilyIndex) {
+      issues.push(issue(`${path}[${index}].family`, "must be grouped by family precedence order"));
+      return;
+    }
+    lastFamilyIndex = familyIndex;
+  });
+  return issues;
+}
+
+function dataRequirementIssues(value: unknown, path: string): readonly AgentDirectiveBundleValidationIssue[] {
+  if (!isRecord(value)) {
+    return [issue(path, "must be an object")];
+  }
+  return [
+    ...dataKeyIssues(value.key, `${path}.key`),
+    ...enumIssues(value.valueType, `${path}.valueType`, AGENT_DIRECTIVE_DATA_REQUIREMENT_TYPES),
+    ...(typeof value.required === "boolean" ? [] : [issue(`${path}.required`, "must be a boolean")]),
+    ...nonEmptySafeStringIssues(value.description, `${path}.description`)
+  ];
 }
 
 function directiveArrayIssues(
@@ -680,6 +851,14 @@ function optionalContentHashIssues(value: unknown, path: string): readonly Agent
   return CONTENT_HASH_PATTERN.test(value) ? issues : [...issues, issue(path, `must match ${CONTENT_HASH_PATTERN.source}`)];
 }
 
+function dataKeyIssues(value: unknown, path: string): readonly AgentDirectiveBundleValidationIssue[] {
+  const issues = nonEmptySafeStringIssues(value, path);
+  if (typeof value !== "string") {
+    return issues;
+  }
+  return DATA_KEY_PATTERN.test(value) ? issues : [...issues, issue(path, "must use a safe data key")];
+}
+
 function literalIssues(
   value: unknown,
   path: string,
@@ -703,6 +882,16 @@ function nonEmptySafeStringIssues(value: unknown, path: string): readonly AgentD
     return [issue(path, "must be a non-empty string")];
   }
   return safeStringContentIssues(value, path);
+}
+
+function nonEmptyStaticInstructionIssues(value: unknown, path: string): readonly AgentDirectiveBundleValidationIssue[] {
+  const issues = nonEmptySafeStringIssues(value, path);
+  if (typeof value !== "string") {
+    return issues;
+  }
+  return /\$\{|\{\{|\$[A-Za-z_]/u.test(value)
+    ? [...issues, issue(path, "must not contain interpolation markers")]
+    : issues;
 }
 
 function safeStringContentIssues(value: string, path: string): readonly AgentDirectiveBundleValidationIssue[] {
