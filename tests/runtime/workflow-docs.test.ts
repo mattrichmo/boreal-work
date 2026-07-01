@@ -105,6 +105,11 @@ describe("workflow, template, and skill docs", () => {
       expect(text).toContain("bwrk workflows show <ref>");
       expect(text).toContain("not paths that must exist inside the installed skill folder");
       expect(text).toContain("You may read this skill folder's `SKILL.md`, `boreal.yaml`");
+      expect(text).toContain("agentDirectives");
+      expect(text).toContain('severity: "required"');
+      expect(text).toContain('severity: "blocking"');
+      expect(text).toContain("missingRequired");
+      expect(text).toContain("typed data");
 
       const markdownWorkflowRefs = workflowReferencesFromMarkdown(text);
       for (const workflow of workflows) {

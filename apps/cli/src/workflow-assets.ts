@@ -9,6 +9,14 @@ import { COMMAND_DEFINITIONS, commandPath } from "./command-registry.js";
 
 const sourceRoot = fileURLToPath(new URL("../../..", import.meta.url));
 const SKILL_FORBIDDEN_WORKFLOW_BODY_HEADINGS = ["## Steps", "## Command Sequences", "## CLI Commands", "## Finish Criteria"] as const;
+const SKILL_DIRECTIVE_HANDLING_MARKERS = [
+  "agentDirectives",
+  'severity: "required"',
+  'severity: "blocking"',
+  "conflicts",
+  "missingRequired",
+  "typed data"
+] as const;
 const ASSET_ROOT_ENV = "BOREAL_ASSET_ROOT";
 
 export interface WorkflowAsset {
@@ -200,6 +208,13 @@ export async function inspectWorkflowAssets(input: {
         message: "Skill must stay a thin adapter and defer detailed execution steps to workflow files"
       });
     }
+    if (!hasAgentDirectiveHandling(skill.text)) {
+      issues.push({
+        code: "skill.missing_agent_directive_handling",
+        path: skill.path,
+        message: "Skill must require agentDirectives inspection, required/blocking directive handling, conflict reporting, and typed-data safety"
+      });
+    }
     for (const heading of SKILL_FORBIDDEN_WORKFLOW_BODY_HEADINGS) {
       if (skill.text.includes(heading)) {
         issues.push({
@@ -286,6 +301,13 @@ export async function validateInstalledSkillRoot(
         code: "installed_skill.missing_workflow_resolver",
         path: relative(roots.assetRoot, file.destination),
         message: "Installed SKILL.md does not explain the workflow resolver fallback"
+      });
+    }
+    if (file.destination.endsWith("/SKILL.md") && !hasAgentDirectiveHandling(installedText)) {
+      issues.push({
+        code: "installed_skill.missing_agent_directive_handling",
+        path: relative(roots.assetRoot, file.destination),
+        message: "Installed SKILL.md does not require directive-bundle inspection and conflict reporting"
       });
     }
   }
@@ -408,6 +430,10 @@ function workflowReferencesFromMarkdown(text: string): Set<string> {
     }
   }
   return refs;
+}
+
+function hasAgentDirectiveHandling(text: string): boolean {
+  return SKILL_DIRECTIVE_HANDLING_MARKERS.every((marker) => text.includes(marker));
 }
 
 function skillRootForInstall(root: string, target: "codex" | "claude" | "skills"): string {
