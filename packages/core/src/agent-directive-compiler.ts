@@ -152,6 +152,33 @@ export interface AgentDirectiveSummaryCompilationResult extends AgentDirectiveBu
   readonly dataByRegistryId: AgentDirectiveAssemblyDataByRegistryId;
 }
 
+export type AgentDirectiveRecoveryDiagnosticSnapshot = AgentDirectiveSnapshot["doctor"]["diagnostics"][number];
+
+export interface AgentDirectiveRecoveryDataOptions {
+  readonly blockerIds?: readonly string[];
+  readonly blockedByIds?: readonly string[];
+  readonly blockerTitles?: readonly string[];
+  readonly gateIds?: readonly string[];
+  readonly diagnostics?: readonly AgentDirectiveRecoveryDiagnosticSnapshot[];
+  readonly recommendedCommands?: readonly string[];
+  readonly lockPaths?: readonly string[];
+  readonly nextWorkflowRef?: string;
+  readonly nextCommandPath?: string;
+  readonly nextRequiredInputs?: readonly string[];
+}
+
+export interface AgentDirectiveRecoveryCompilationInput extends AgentDirectiveRecoveryDataOptions {
+  readonly snapshot: AgentDirectiveSnapshot;
+  readonly dataByRegistryId?: AgentDirectiveAssemblyDataByRegistryId;
+  readonly registry?: AgentDirectiveRegistry;
+  readonly generatedAt?: IsoTimestamp;
+  readonly bundleId?: AgentDirectiveBundleId;
+}
+
+export interface AgentDirectiveRecoveryCompilationResult extends AgentDirectiveBundleAssemblyResult {
+  readonly dataByRegistryId: AgentDirectiveAssemblyDataByRegistryId;
+}
+
 export function selectAgentDirectiveRegistryEntries(
   snapshot: AgentDirectiveSnapshot,
   registry: AgentDirectiveRegistry = AGENT_DIRECTIVE_REGISTRY
@@ -317,7 +344,8 @@ export function gitDirectiveDataByRegistryId(
   options: AgentDirectiveGitDataOptions = {}
 ): AgentDirectiveAssemblyDataByRegistryId {
   return {
-    "git.checkpoint-required": gitCheckpointDirectiveData(snapshot, undefined, options)
+    "git.checkpoint-required": gitCheckpointDirectiveData(snapshot, undefined, options),
+    "workflow_next.canonical-next-step": workflowNextDirectiveData(snapshot)
   };
 }
 
@@ -442,6 +470,75 @@ export function compileSummaryAgentDirectiveBundle(
 ): AgentDirectiveSummaryCompilationResult {
   const dataByRegistryId = {
     ...summaryDirectiveDataByRegistryId(input.snapshot, input),
+    ...input.dataByRegistryId
+  };
+  const result = assembleAgentDirectiveBundle({
+    snapshot: input.snapshot,
+    dataByRegistryId,
+    registry: input.registry,
+    generatedAt: input.generatedAt,
+    bundleId: input.bundleId
+  });
+  return {
+    ...result,
+    dataByRegistryId
+  };
+}
+
+export function recoveryDirectiveDataByRegistryId(
+  snapshot: AgentDirectiveSnapshot,
+  options: AgentDirectiveRecoveryDataOptions = {}
+): AgentDirectiveAssemblyDataByRegistryId {
+  const subjectId = snapshot.work.subject?.id;
+  const blockerIds = uniqueStrings([
+    ...(options.blockerIds ?? []),
+    ...snapshot.work.activeBlockerIds,
+    ...snapshot.work.blockedByIds
+  ]);
+  const blockedByIds = uniqueStrings([...(options.blockedByIds ?? []), ...snapshot.work.blockedByIds]);
+  const gateIds = uniqueStrings(options.gateIds ?? snapshot.gate.openGateIds);
+  const diagnostics = options.diagnostics ?? attentionDiagnostics(snapshot);
+  const nextWorkflowRef = options.nextWorkflowRef ?? snapshot.workflow.nextWorkflowRef;
+  const nextCommandPath = options.nextCommandPath ?? snapshot.workflow.recommendedCommandPath;
+
+  return {
+    "blocked.resolve-blockers": dataRecord([
+      ["subjectId", subjectId],
+      ["blockerIds", blockerIds],
+      ["blockerTitles", options.blockerTitles],
+      ["gateIds", gateIds],
+      ["recoveryWorkflow", nextWorkflowRef],
+      ["blockedByIds", blockedByIds],
+      ["recommendedCommands", blockedRecoveryCommands(subjectId, blockerIds, gateIds, options)],
+      ["nextCommandPath", nextCommandPath]
+    ]),
+    "doctor.recovery-required": dataRecord([
+      ["diagnostics", diagnosticDataValues(diagnostics)],
+      ["recommendedCommands", doctorRecoveryCommands(snapshot, diagnostics, options)],
+      ["syncOk", snapshot.sync.ok],
+      ["doctorOk", snapshot.doctor.ok],
+      ["lockPaths", options.lockPaths],
+      ["diagnosticCodes", diagnostics.map((diagnostic) => diagnostic.code)],
+      ["blockingDiagnosticCodes", diagnostics.filter((diagnostic) => diagnostic.blocking).map((diagnostic) => diagnostic.code)],
+      ["safeWorkflow", nextWorkflowRef],
+      ["nextCommandPath", nextCommandPath],
+      ["operationCount", snapshot.sync.operationCount],
+      ["warningThreshold", snapshot.sync.warningThreshold]
+    ]),
+    "workflow_next.canonical-next-step": workflowNextDirectiveData(
+      snapshot,
+      nextWorkflowRef,
+      nextCommandPath,
+      options.nextRequiredInputs
+    )
+  };
+}
+
+export function compileRecoveryAgentDirectiveBundle(
+  input: AgentDirectiveRecoveryCompilationInput
+): AgentDirectiveRecoveryCompilationResult {
+  const dataByRegistryId = {
+    ...recoveryDirectiveDataByRegistryId(input.snapshot, input),
     ...input.dataByRegistryId
   };
   const result = assembleAgentDirectiveBundle({
@@ -826,6 +923,95 @@ function childStatusDataValues(children: readonly AgentDirectiveRollupChildStatu
   );
 }
 
+function workflowNextDirectiveData(
+  snapshot: AgentDirectiveSnapshot,
+  workflowRef: string | undefined = snapshot.workflow.nextWorkflowRef,
+  commandPath: string | undefined = snapshot.workflow.recommendedCommandPath,
+  requiredInputs: readonly string[] = snapshot.workflow.requiredInputNames
+): AgentDirectiveData {
+  return dataRecord([
+    ["workflowRef", workflowRef],
+    ["commandPath", commandPath],
+    ["requiredInputs", requiredInputs],
+    ["currentStatus", snapshot.work.subject?.status],
+    ["subjectId", snapshot.work.subject?.id]
+  ]);
+}
+
+function attentionDiagnostics(snapshot: AgentDirectiveSnapshot): readonly AgentDirectiveRecoveryDiagnosticSnapshot[] {
+  return snapshot.doctor.diagnostics.filter(
+    (diagnostic) =>
+      diagnostic.severity !== "ok" ||
+      diagnostic.blocking ||
+      diagnostic.recommendedCommands.length > 0
+  );
+}
+
+function diagnosticDataValues(
+  diagnostics: readonly AgentDirectiveRecoveryDiagnosticSnapshot[]
+): readonly AgentDirectiveDataValue[] {
+  return diagnostics.map((diagnostic) =>
+    dataRecord([
+      ["code", diagnostic.code],
+      ["severity", diagnostic.severity],
+      ["message", diagnostic.message],
+      ["blocking", diagnostic.blocking],
+      ["recommendedCommands", diagnostic.recommendedCommands]
+    ])
+  );
+}
+
+function blockedRecoveryCommands(
+  subjectId: string | undefined,
+  blockerIds: readonly string[],
+  gateIds: readonly string[],
+  options: AgentDirectiveRecoveryDataOptions
+): readonly string[] {
+  const commands = [...(options.recommendedCommands ?? [])];
+  if (subjectId !== undefined) {
+    commands.push(`bwrk dep tree ${subjectId} --json`);
+  }
+  commands.push(...blockerIds.map((blockerId) => `bwrk work show ${blockerId} --json`));
+  if (gateIds.length > 0) {
+    commands.push("bwrk gate closeout --strict --json");
+  }
+  return uniqueNonEmptyStrings(commands);
+}
+
+function doctorRecoveryCommands(
+  snapshot: AgentDirectiveSnapshot,
+  diagnostics: readonly AgentDirectiveRecoveryDiagnosticSnapshot[],
+  options: AgentDirectiveRecoveryDataOptions
+): readonly string[] {
+  const commands = [
+    ...(options.recommendedCommands ?? []),
+    ...diagnostics.flatMap((diagnostic) => diagnostic.recommendedCommands)
+  ];
+  const syncNeedsRefresh =
+    !snapshot.sync.ok ||
+    !snapshot.sync.refreshed ||
+    !snapshot.sync.ledgersFresh ||
+    !snapshot.sync.searchIndexFresh ||
+    !snapshot.sync.sqliteCacheFresh;
+  if (syncNeedsRefresh) {
+    commands.push("bwrk sync refresh --json");
+  }
+  if (!snapshot.doctor.ok || diagnostics.length > 0 || syncNeedsRefresh) {
+    commands.push("bwrk doctor --strict --json");
+  }
+  if (
+    snapshot.sync.operationCount !== undefined &&
+    snapshot.sync.warningThreshold !== undefined &&
+    snapshot.sync.operationCount >= snapshot.sync.warningThreshold
+  ) {
+    commands.push("bwrk gate closeout --strict --auto-prune-operations --json");
+  }
+  if (diagnostics.some((diagnostic) => diagnostic.code.includes("lock"))) {
+    commands.push("bwrk lock inspect --json");
+  }
+  return uniqueNonEmptyStrings(commands);
+}
+
 function maxNumber(values: readonly number[]): number {
   return values.length === 0 ? 0 : Math.max(...values);
 }
@@ -953,6 +1139,10 @@ function latestEvidenceCommand(snapshot: AgentDirectiveSnapshot): string | undef
 
 function uniqueStrings(values: readonly string[]): readonly string[] {
   return [...new Set(values)];
+}
+
+function uniqueNonEmptyStrings(values: readonly string[]): readonly string[] {
+  return uniqueStrings(values.map((value) => value.trim()).filter((value) => value.length > 0));
 }
 
 function last<T>(values: readonly T[]): T | undefined {

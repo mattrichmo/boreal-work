@@ -55,7 +55,7 @@ export const AGENT_DIRECTIVE_REGISTRY: AgentDirectiveRegistry = {
       instruction:
         "Stop the current mutation until the listed blockers are resolved, closed, or explicitly forced through an approved gate.",
       appliesTo: {
-        commandPaths: ["agent start", "agent finish", "dep tree", "work close", "work show"],
+        commandPaths: ["agent start", "agent finish", "dep tree", "work claim", "work close", "work next", "work show"],
         subjectTypes: ["work", "sprint", "phase", "milestone"],
         workStatuses: ["blocked"]
       },
@@ -70,7 +70,10 @@ export const AGENT_DIRECTIVE_REGISTRY: AgentDirectiveRegistry = {
         requirement("blockerIds", "array", true, "Active blocker ids that prevent the current action."),
         requirement("blockerTitles", "array", false, "Display titles for active blockers."),
         requirement("gateIds", "array", false, "Required gate ids involved in the blocked state."),
-        requirement("recoveryWorkflow", "string", false, "Canonical workflow reference for blocker recovery.")
+        requirement("recoveryWorkflow", "string", false, "Canonical workflow reference for blocker recovery."),
+        requirement("blockedByIds", "array", false, "Dependency ids that currently block the subject."),
+        requirement("recommendedCommands", "array", false, "Safe inspection or recovery commands for blockers."),
+        requirement("nextCommandPath", "string", false, "Recommended command path after blocker recovery.")
       ]
     }),
     entry({
@@ -255,7 +258,13 @@ export const AGENT_DIRECTIVE_REGISTRY: AgentDirectiveRegistry = {
         requirement("recommendedCommands", "array", true, "Safe recovery commands recommended by Boreal."),
         requirement("syncOk", "boolean", false, "Whether sync status was healthy."),
         requirement("doctorOk", "boolean", false, "Whether strict doctor was healthy."),
-        requirement("lockPaths", "array", false, "Runtime or search lock paths involved in recovery.")
+        requirement("lockPaths", "array", false, "Runtime or search lock paths involved in recovery."),
+        requirement("diagnosticCodes", "array", false, "Diagnostic codes included in the recovery directive."),
+        requirement("blockingDiagnosticCodes", "array", false, "Diagnostic codes that block continued work."),
+        requirement("safeWorkflow", "string", false, "Canonical workflow reference for safe recovery."),
+        requirement("nextCommandPath", "string", false, "Recommended command path after recovery."),
+        requirement("operationCount", "number", false, "Observed operation log count when available."),
+        requirement("warningThreshold", "number", false, "Operation log warning threshold when available.")
       ]
     }),
     entry({
@@ -423,9 +432,13 @@ export const AGENT_DIRECTIVE_REGISTRY: AgentDirectiveRegistry = {
           "agent start",
           "agent finish",
           "prime",
+          "doctor",
           "gate closeout",
+          "lock inspect",
           "sprint metrics",
           "sprint report",
+          "sync refresh",
+          "sync status",
           "summary compose",
           "summary show",
           "work cancel",
@@ -433,7 +446,7 @@ export const AGENT_DIRECTIVE_REGISTRY: AgentDirectiveRegistry = {
           "work show",
           "workflows show"
         ],
-        subjectTypes: ["work", "sprint", "phase", "milestone", "session"]
+        subjectTypes: ["work", "sprint", "phase", "milestone", "project", "session", "workspace"]
       },
       dataRequirements: [
         requirement("workflowRef", "string", true, "Canonical workflow reference to use next."),

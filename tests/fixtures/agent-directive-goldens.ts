@@ -114,7 +114,13 @@ export const AGENT_DIRECTIVE_GOLDEN_CASES: readonly AgentDirectiveGoldenCase[] =
       blockerIds: ["bw_work_deadbeef0006"],
       blockerTitles: ["Finish registry validator"],
       gateIds: ["bw_gate_deadbeef0001"],
-      recoveryWorkflow: "workflows/40-work/claim-and-finish-work.md"
+      recoveryWorkflow: "workflows/40-work/claim-and-finish-work.md",
+      blockedByIds: ["bw_work_deadbeef0006"],
+      recommendedCommands: [
+        "bwrk dep tree bw_work_deadbeef0005 --json",
+        "bwrk work show bw_work_deadbeef0006 --json"
+      ],
+      nextCommandPath: "bwrk work show bw_work_deadbeef0005 --json"
     },
     expected: {
       title: "Resolve active blockers",
@@ -122,7 +128,14 @@ export const AGENT_DIRECTIVE_GOLDEN_CASES: readonly AgentDirectiveGoldenCase[] =
       kind: "recovery",
       blocksCloseout: true,
       requiredKeys: ["subjectId", "blockerIds"],
-      optionalKeys: ["blockerTitles", "gateIds", "recoveryWorkflow"]
+      optionalKeys: [
+        "blockerTitles",
+        "gateIds",
+        "recoveryWorkflow",
+        "blockedByIds",
+        "recommendedCommands",
+        "nextCommandPath"
+      ]
     }
   },
   {
@@ -137,7 +150,13 @@ export const AGENT_DIRECTIVE_GOLDEN_CASES: readonly AgentDirectiveGoldenCase[] =
       recommendedCommands: ["bwrk sync refresh --json", "bwrk doctor --strict --json"],
       syncOk: false,
       doctorOk: false,
-      lockPaths: [".boreal/runtime/state.lock", ".boreal/runtime/search-index.lock"]
+      lockPaths: [".boreal/runtime/state.lock", ".boreal/runtime/search-index.lock"],
+      diagnosticCodes: ["ledger.export_drift", "search.index"],
+      blockingDiagnosticCodes: ["ledger.export_drift"],
+      safeWorkflow: "workflows/30-health/sync-and-doctor.md",
+      nextCommandPath: "bwrk sync refresh --json",
+      operationCount: 1029,
+      warningThreshold: 1025
     },
     expected: {
       title: "Recover workspace health",
@@ -145,7 +164,17 @@ export const AGENT_DIRECTIVE_GOLDEN_CASES: readonly AgentDirectiveGoldenCase[] =
       kind: "recovery",
       blocksCloseout: true,
       requiredKeys: ["diagnostics", "recommendedCommands"],
-      optionalKeys: ["syncOk", "doctorOk", "lockPaths"]
+      optionalKeys: [
+        "syncOk",
+        "doctorOk",
+        "lockPaths",
+        "diagnosticCodes",
+        "blockingDiagnosticCodes",
+        "safeWorkflow",
+        "nextCommandPath",
+        "operationCount",
+        "warningThreshold"
+      ]
     }
   },
   {

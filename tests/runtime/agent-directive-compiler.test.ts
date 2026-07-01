@@ -8,6 +8,7 @@ import {
   assertAgentDirectiveBundle,
   compileCloseoutAgentDirectiveBundle,
   compileGitAgentDirectiveBundle,
+  compileRecoveryAgentDirectiveBundle,
   compileSummaryAgentDirectiveBundle,
   createAgentDirectiveSnapshot,
   selectAgentDirectiveRegistryEntries,
@@ -587,7 +588,7 @@ describe("agent directive bundle assembly", () => {
     });
 
     expect(result.ok).toBe(true);
-    expect(result.selectedRegistryIds).toEqual(["git.checkpoint-required"]);
+    expect(result.selectedRegistryIds).toEqual(["git.checkpoint-required", "workflow_next.canonical-next-step"]);
     const git = result.bundle?.directives.find((directive) => directive.registryId === "git.checkpoint-required");
     expect(git?.data).toMatchObject({
       gitRoot: "/Users/cybertron/Code/boreal-work",
@@ -639,6 +640,7 @@ describe("agent directive bundle assembly", () => {
     const result = compileGitAgentDirectiveBundle({ snapshot });
 
     expect(result.ok).toBe(true);
+    expect(result.selectedRegistryIds).toEqual(["git.checkpoint-required", "workflow_next.canonical-next-step"]);
     const git = result.bundle?.directives.find((directive) => directive.registryId === "git.checkpoint-required");
     expect(git?.data).toMatchObject({
       branchName: "codex/no-change",
@@ -655,6 +657,137 @@ describe("agent directive bundle assembly", () => {
       blockingDirtyPaths: [],
       untrackedPaths: []
     });
+  });
+
+  it("compiles blocked work recovery directives with blocker ids, safe commands, and next workflow data", () => {
+    const reviewGate = gateStateFixture({
+      id: "bw_gate_blocked0001",
+      kind: "review",
+      status: "open"
+    });
+    const snapshot = agentDirectiveCompilerSnapshotFixture({
+      commandPath: "work show",
+      workStatus: "blocked",
+      activeBlockerIds: ["bw_work_blocker0001" as WorkId, "bw_work_blocker0002" as WorkId],
+      requiredGates: [reviewGate]
+    });
+    const result = compileRecoveryAgentDirectiveBundle({
+      snapshot,
+      blockerTitles: ["Finish prerequisite one", "Finish prerequisite two"],
+      nextWorkflowRef: "workflows/40-work/claim-and-finish-work.md",
+      nextCommandPath: "bwrk work show bw_work_7ec3f08689c6cfb0 --json"
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.issues).toEqual([]);
+    expect(result.selectedRegistryIds).toEqual([
+      "blocked.resolve-blockers",
+      "workflow_next.canonical-next-step"
+    ]);
+    const blocked = result.bundle?.directives.find((directive) => directive.registryId === "blocked.resolve-blockers");
+    const next = result.bundle?.directives.find(
+      (directive) => directive.registryId === "workflow_next.canonical-next-step"
+    );
+    expect(blocked?.data).toMatchObject({
+      subjectId: "bw_work_7ec3f08689c6cfb0",
+      blockerIds: ["bw_work_blocker0001", "bw_work_blocker0002"],
+      blockedByIds: ["bw_work_blocker0001", "bw_work_blocker0002"],
+      blockerTitles: ["Finish prerequisite one", "Finish prerequisite two"],
+      gateIds: ["bw_gate_blocked0001"],
+      recoveryWorkflow: "workflows/40-work/claim-and-finish-work.md",
+      nextCommandPath: "bwrk work show bw_work_7ec3f08689c6cfb0 --json"
+    });
+    expect(blocked?.data.recommendedCommands).toEqual([
+      "bwrk dep tree bw_work_7ec3f08689c6cfb0 --json",
+      "bwrk work show bw_work_blocker0001 --json",
+      "bwrk work show bw_work_blocker0002 --json",
+      "bwrk gate closeout --strict --json"
+    ]);
+    expect(next?.data).toMatchObject({
+      workflowRef: "workflows/40-work/claim-and-finish-work.md",
+      commandPath: "bwrk work show bw_work_7ec3f08689c6cfb0 --json",
+      currentStatus: "blocked",
+      subjectId: "bw_work_7ec3f08689c6cfb0"
+    });
+    expect(next?.lifecycle).toBe("blocked");
+  });
+
+  it("compiles doctor recovery directives with diagnostics, safe commands, and operation prune guidance", () => {
+    const snapshot = agentDirectiveCompilerSnapshotFixture({
+      commandPath: "doctor",
+      subjectType: "workspace",
+      doctorOk: false,
+      syncOk: false,
+      ledgersFresh: false,
+      searchIndexFresh: false,
+      sqliteCacheFresh: false,
+      operationCount: 1029,
+      warningThreshold: 1025,
+      doctorDiagnostics: [
+        {
+          code: "operation.volume",
+          severity: "warning",
+          message: "Operation log has 1029 records",
+          blocking: false,
+          recommendedCommands: ["bwrk operation prune --keep 1000 --json"]
+        },
+        {
+          code: "lock.search_index.present",
+          severity: "error",
+          message: "Search index lock is present",
+          blocking: true,
+          recommendedCommands: ["bwrk lock inspect --json"]
+        }
+      ],
+      nextWorkflowRef: "workflows/30-health/sync-and-doctor.md",
+      recommendedCommandPath: "bwrk sync refresh --json"
+    });
+    const result = compileRecoveryAgentDirectiveBundle({
+      snapshot,
+      lockPaths: [".boreal/runtime/search-index.lock"],
+      nextWorkflowRef: "workflows/30-health/sync-and-doctor.md",
+      nextCommandPath: "bwrk sync refresh --json"
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.selectedRegistryIds).toEqual([
+      "doctor.recovery-required",
+      "workflow_next.canonical-next-step"
+    ]);
+    const doctor = result.bundle?.directives.find((directive) => directive.registryId === "doctor.recovery-required");
+    const next = result.bundle?.directives.find(
+      (directive) => directive.registryId === "workflow_next.canonical-next-step"
+    );
+    expect(doctor?.data).toMatchObject({
+      syncOk: false,
+      doctorOk: false,
+      diagnosticCodes: ["operation.volume", "lock.search_index.present"],
+      blockingDiagnosticCodes: ["lock.search_index.present"],
+      safeWorkflow: "workflows/30-health/sync-and-doctor.md",
+      nextCommandPath: "bwrk sync refresh --json",
+      operationCount: 1029,
+      warningThreshold: 1025,
+      lockPaths: [".boreal/runtime/search-index.lock"]
+    });
+    expect(doctor?.data.diagnostics).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ code: "operation.volume", severity: "warning" }),
+        expect.objectContaining({ code: "lock.search_index.present", blocking: true })
+      ])
+    );
+    expect(doctor?.data.recommendedCommands).toEqual([
+      "bwrk operation prune --keep 1000 --json",
+      "bwrk lock inspect --json",
+      "bwrk sync refresh --json",
+      "bwrk doctor --strict --json",
+      "bwrk gate closeout --strict --auto-prune-operations --json"
+    ]);
+    expect(next?.data).toMatchObject({
+      workflowRef: "workflows/30-health/sync-and-doctor.md",
+      commandPath: "bwrk sync refresh --json",
+      subjectId: "bw_work_7ec3f08689c6cfb0"
+    });
+    expect(next?.lifecycle).toBe("blocked");
   });
 
   it("short-circuits invalid snapshots before bundle validation", () => {
@@ -732,13 +865,25 @@ function agentDirectiveCompilerSnapshotFixture(
     readonly commandPath?: string;
     readonly commitShas?: readonly string[];
     readonly dirtyPathNotes?: readonly string[];
+    readonly doctorDiagnostics?: AgentDirectiveSnapshot["doctor"]["diagnostics"];
+    readonly doctorOk?: boolean;
+    readonly doctorStrict?: boolean;
     readonly evidenceIds?: readonly EvidenceId[];
     readonly gitRoots?: AgentDirectiveSnapshot["git"]["roots"];
+    readonly ledgersFresh?: boolean;
+    readonly nextWorkflowRef?: string;
     readonly openDescendantIds?: readonly WorkId[];
+    readonly operationCount?: number;
+    readonly recommendedCommandPath?: string;
     readonly requiredGates?: readonly AgentDirectiveGateStateSnapshot[];
+    readonly searchIndexFresh?: boolean;
+    readonly sqliteCacheFresh?: boolean;
     readonly subjectType?: AgentDirectiveSubjectType;
     readonly summaryId?: AgentSummaryId;
     readonly summaryUri?: string;
+    readonly syncOk?: boolean;
+    readonly syncRefreshed?: boolean;
+    readonly warningThreshold?: number;
     readonly verificationIds?: readonly VerificationId[];
     readonly workKind?: WorkKind;
     readonly workStatus?: WorkStatus;
@@ -834,21 +979,23 @@ function agentDirectiveCompilerSnapshotFixture(
       workflowRefs: ["workflows/40-work/claim-and-finish-work.md"],
       skillRefs: ["boreal-work-execution"],
       requiredInputNames: [...AGENT_DIRECTIVE_SNAPSHOT_CONTEXT_KEYS],
-      nextWorkflowRef: "workflows/40-work/claim-and-finish-work.md",
-      recommendedCommandPath: "bwrk agent finish",
+      nextWorkflowRef: options.nextWorkflowRef ?? "workflows/40-work/claim-and-finish-work.md",
+      recommendedCommandPath: options.recommendedCommandPath ?? "bwrk agent finish",
       assetManifestHash: "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef" as ContentHash
     },
     doctor: {
-      ok: true,
-      strict: true,
-      diagnostics: []
+      ok: options.doctorOk ?? true,
+      strict: options.doctorStrict ?? true,
+      diagnostics: options.doctorDiagnostics ?? []
     },
     sync: {
-      ok: true,
-      refreshed: true,
-      ledgersFresh: true,
-      searchIndexFresh: true,
-      sqliteCacheFresh: true
+      ok: options.syncOk ?? true,
+      refreshed: options.syncRefreshed ?? true,
+      ledgersFresh: options.ledgersFresh ?? true,
+      searchIndexFresh: options.searchIndexFresh ?? true,
+      sqliteCacheFresh: options.sqliteCacheFresh ?? true,
+      ...(options.operationCount === undefined ? {} : { operationCount: options.operationCount }),
+      ...(options.warningThreshold === undefined ? {} : { warningThreshold: options.warningThreshold })
     },
     command: {
       path: commandPath,
