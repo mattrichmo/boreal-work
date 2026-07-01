@@ -850,6 +850,250 @@ describe("boreal runtime proof slice", () => {
     );
   });
 
+  it("requires review gate evidence before direct runtime close", async () => {
+    const runtime = createBorealRuntime({ actor });
+    const work = await runtime.createWork({
+      title: "Runtime review gate target",
+      ready: true,
+      requiredCloseoutGates: [{ kind: "review" }]
+    });
+    const testEvidence = await runtime.recordEvidence({
+      subjectId: work.meta.id,
+      subjectType: "work",
+      kind: "test",
+      summary: "ordinary verification evidence passed",
+      outcome: "passed"
+    });
+    const verification = await runtime.verifyWork({
+      workId: work.meta.id,
+      verdict: "passed",
+      evidenceIds: [testEvidence.meta.id]
+    });
+
+    await expect(
+      runtime.closeWork({
+        workId: work.meta.id,
+        reason: "missing review evidence",
+        agentSummary: closeoutSummaryFor(work, {
+          evidenceIds: [testEvidence.meta.id],
+          verificationIds: [verification.meta.id],
+          nonce: "review-gate-missing"
+        })
+      })
+    ).rejects.toMatchObject({
+      code: "BOREAL_POLICY_VIOLATION",
+      details: expect.objectContaining({
+        gateGaps: expect.arrayContaining([
+          expect.objectContaining({
+            gateKind: "review",
+            gateScope: "self",
+            subjectId: work.meta.id,
+            targetId: work.meta.id,
+            reason: "required gate has no satisfying evidence"
+          })
+        ])
+      })
+    } satisfies Partial<BorealError>);
+
+    const reviewEvidence = await runtime.recordEvidence({
+      subjectId: work.meta.id,
+      subjectType: "work",
+      kind: "review",
+      summary: "required review passed",
+      outcome: "passed"
+    });
+    const closed = await runtime.closeWork({
+      workId: work.meta.id,
+      reason: "review evidence present",
+      agentSummary: closeoutSummaryFor(work, {
+        evidenceIds: [testEvidence.meta.id, reviewEvidence.meta.id],
+        verificationIds: [verification.meta.id],
+        nonce: "review-gate-satisfied"
+      })
+    });
+
+    expect(closed.status).toBe("closed");
+    expect(closed.requiredCloseoutGates?.[0]).toEqual(
+      expect.objectContaining({
+        status: "satisfied",
+        satisfiedBy: expect.objectContaining({
+          evidenceIds: [reviewEvidence.meta.id]
+        })
+      })
+    );
+  });
+
+  it("enforces required gates against pending agent finish evidence", async () => {
+    const store = new InMemoryBorealStore();
+    const runtime = createBorealRuntime({ store, actor });
+    const work = await runtime.createWork({
+      title: "Finish review gate target",
+      ready: true,
+      requiredCloseoutGates: [{ kind: "review" }]
+    });
+    await runtime.reserveWork({ workId: work.meta.id, agentId: "review-agent" });
+
+    await expect(
+      runtime.finishReservedWork({
+        workId: work.meta.id,
+        agentId: "review-agent",
+        evidence: {
+          kind: "test",
+          summary: "test evidence alone is not review evidence",
+          outcome: "passed"
+        },
+        verification: {
+          verdict: "passed"
+        },
+        close: {
+          reason: "missing review gate",
+          agentSummary: ({ closedWork, evidence, verification }) =>
+            closeoutSummaryFor(closedWork, {
+              evidenceIds: [evidence.meta.id],
+              verificationIds: [verification.meta.id],
+              nonce: "finish-gate-missing"
+            })
+        }
+      })
+    ).rejects.toMatchObject({
+      code: "BOREAL_POLICY_VIOLATION",
+      details: expect.objectContaining({
+        gateGaps: expect.arrayContaining([
+          expect.objectContaining({
+            gateKind: "review",
+            subjectId: work.meta.id,
+            targetId: work.meta.id
+          })
+        ])
+      })
+    } satisfies Partial<BorealError>);
+
+    const afterFailedFinish = await store.read(async (reader) => ({
+      work: await reader.getWorkItem(work.meta.id),
+      evidence: await reader.listEvidenceForSubject(work.meta.id),
+      verifications: await reader.listVerificationsForSubject(work.meta.id),
+      summaries: await reader.listAgentSummariesForSubject(work.meta.id)
+    }));
+    expect(afterFailedFinish.work?.status).toBe("in_progress");
+    expect(afterFailedFinish.evidence).toHaveLength(0);
+    expect(afterFailedFinish.verifications).toHaveLength(0);
+    expect(afterFailedFinish.summaries).toHaveLength(0);
+
+    const finished = await runtime.finishReservedWork({
+      workId: work.meta.id,
+      agentId: "review-agent",
+      evidence: {
+        kind: "review",
+        summary: "finish review evidence passed",
+        outcome: "passed"
+      },
+      verification: {
+        verdict: "passed"
+      },
+      close: {
+        reason: "review gate satisfied",
+        agentSummary: ({ closedWork, evidence, verification }) =>
+          closeoutSummaryFor(closedWork, {
+            evidenceIds: [evidence.meta.id],
+            verificationIds: [verification.meta.id],
+            nonce: "finish-gate-satisfied"
+          })
+      }
+    });
+
+    expect(finished.work.status).toBe("closed");
+    expect(finished.work.requiredCloseoutGates?.[0]).toEqual(
+      expect.objectContaining({
+        status: "satisfied",
+        satisfiedBy: expect.objectContaining({
+          evidenceIds: [finished.evidence.meta.id],
+          verificationIds: []
+        })
+      })
+    );
+  });
+
+  it("refuses sprint closeout while descendant work remains unresolved", async () => {
+    const runtime = createBorealRuntime({ actor });
+    const sprint = await runtime.createWork({ title: "Container gate sprint", kind: "sprint", ready: true });
+    const child = await runtime.createWork({ title: "Container gate child", ready: true });
+    await runtime.addBlockingDependency({
+      blockedWorkId: sprint.meta.id,
+      blockingWorkId: child.meta.id
+    });
+
+    const sprintEvidence = await runtime.recordEvidence({
+      subjectId: sprint.meta.id,
+      subjectType: "work",
+      kind: "test",
+      summary: "sprint evidence passed",
+      outcome: "passed"
+    });
+    const sprintVerification = await runtime.verifyWork({
+      workId: sprint.meta.id,
+      verdict: "passed",
+      evidenceIds: [sprintEvidence.meta.id]
+    });
+
+    await expect(
+      runtime.closeWork({
+        workId: sprint.meta.id,
+        reason: "child still open",
+        agentSummary: closeoutSummaryFor(sprint, {
+          evidenceIds: [sprintEvidence.meta.id],
+          verificationIds: [sprintVerification.meta.id],
+          nonce: "sprint-open-child"
+        })
+      })
+    ).rejects.toMatchObject({
+      code: "BOREAL_POLICY_VIOLATION",
+      details: expect.objectContaining({
+        gateGaps: expect.arrayContaining([
+          expect.objectContaining({
+            gateKind: "descendant_work",
+            gateScope: "descendants",
+            subjectId: sprint.meta.id,
+            targetId: child.meta.id,
+            reason: "descendant work is ready"
+          })
+        ])
+      })
+    } satisfies Partial<BorealError>);
+
+    const childEvidence = await runtime.recordEvidence({
+      subjectId: child.meta.id,
+      subjectType: "work",
+      kind: "test",
+      summary: "child evidence passed",
+      outcome: "passed"
+    });
+    const childVerification = await runtime.verifyWork({
+      workId: child.meta.id,
+      verdict: "passed",
+      evidenceIds: [childEvidence.meta.id]
+    });
+    await runtime.closeWork({
+      workId: child.meta.id,
+      reason: "child resolved",
+      agentSummary: closeoutSummaryFor(child, {
+        evidenceIds: [childEvidence.meta.id],
+        verificationIds: [childVerification.meta.id],
+        nonce: "child-resolved"
+      })
+    });
+
+    const closedSprint = await runtime.closeWork({
+      workId: sprint.meta.id,
+      reason: "descendants resolved",
+      agentSummary: closeoutSummaryFor(sprint, {
+        evidenceIds: [sprintEvidence.meta.id],
+        verificationIds: [sprintVerification.meta.id],
+        nonce: "sprint-resolved-child"
+      })
+    });
+    expect(closedSprint.status).toBe("closed");
+  });
+
   it("requires passed evidence for passed verification but allows failed verdict evidence", async () => {
     const runtime = createBorealRuntime({ actor });
     const work = await runtime.createWork({ title: "Verify evidence policy" });

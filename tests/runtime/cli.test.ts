@@ -7834,6 +7834,126 @@ describe("bwrk cli", () => {
 	    expect(state.agentSummaries).toHaveLength(0);
 	  });
 
+  it("enforces required review gates from work close", async () => {
+    const rootDir = await makeTempWorkspace();
+    await runCli(rootDir, ["init", "--json"]);
+
+    const work = parseData<{
+      readonly meta: { readonly id: string };
+      readonly requiredCloseoutGates: readonly Array<{ readonly kind: string; readonly status: string }>;
+    }>(
+      (
+        await runCli(rootDir, [
+          "work",
+          "create",
+          "CLI review gate target",
+          "--required-gate",
+          "review",
+          "--ready",
+          "--json"
+        ])
+      ).stdout
+    );
+    expect(work.requiredCloseoutGates).toEqual([
+      expect.objectContaining({ kind: "review", status: "open" })
+    ]);
+
+    const testEvidence = parseData<{ readonly meta: { readonly id: string } }>(
+      (
+        await runCli(rootDir, [
+          "evidence",
+          "add",
+          work.meta.id,
+          "--summary",
+          "ordinary test evidence passed",
+          "--kind",
+          "test",
+          "--outcome",
+          "passed",
+          "--json"
+        ])
+      ).stdout
+    );
+    await runCli(rootDir, ["work", "verify", work.meta.id, "--evidence", testEvidence.meta.id, "--verdict", "passed", "--json"]);
+
+    const failedClose = await runCli(rootDir, [
+      "work",
+      "close",
+      work.meta.id,
+      "--reason",
+      "missing review evidence",
+      "--commit",
+      "abc1234",
+      "--json"
+    ]);
+    expect(failedClose.exitCode).toBe(1);
+    expect(parseJson<{ readonly code: string; readonly details: { readonly gateGaps: readonly unknown[] } }>(failedClose.stderr)).toEqual(
+      expect.objectContaining({
+        code: "BOREAL_POLICY_VIOLATION",
+        details: expect.objectContaining({
+          gateGaps: expect.arrayContaining([
+            expect.objectContaining({
+              gateKind: "review",
+              targetId: work.meta.id
+            })
+          ])
+        })
+      })
+    );
+    expect((await readState<{ readonly agentSummaries: readonly unknown[] }>(rootDir)).agentSummaries).toHaveLength(0);
+
+    const reviewEvidence = parseData<{ readonly meta: { readonly id: string } }>(
+      (
+        await runCli(rootDir, [
+          "evidence",
+          "add",
+          work.meta.id,
+          "--summary",
+          "review evidence passed",
+          "--kind",
+          "review",
+          "--outcome",
+          "passed",
+          "--json"
+        ])
+      ).stdout
+    );
+    const closed = parseData<{
+      readonly work: {
+        readonly status: string;
+        readonly requiredCloseoutGates: readonly Array<{
+          readonly status: string;
+          readonly satisfiedBy?: { readonly evidenceIds?: readonly string[] };
+        }>;
+      };
+      readonly createdAgentSummary?: { readonly commitShas: readonly string[] };
+    }>(
+      (
+        await runCli(rootDir, [
+          "work",
+          "close",
+          work.meta.id,
+          "--reason",
+          "review gate satisfied",
+          "--commit",
+          "def5678",
+          "--json"
+        ])
+      ).stdout
+    );
+
+    expect(closed.work.status).toBe("closed");
+    expect(closed.createdAgentSummary?.commitShas).toEqual(["def5678"]);
+    expect(closed.work.requiredCloseoutGates[0]).toEqual(
+      expect.objectContaining({
+        status: "satisfied",
+        satisfiedBy: expect.objectContaining({
+          evidenceIds: [reviewEvidence.meta.id]
+        })
+      })
+    );
+  });
+
 	  it("keeps agent finish close atomic when summary checkpoint metadata is invalid", async () => {
 	    const rootDir = await makeTempWorkspace();
 	    await runCli(rootDir, ["init", "--json"]);

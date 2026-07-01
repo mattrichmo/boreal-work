@@ -28,6 +28,7 @@ import {
   type EventId,
   type EvidenceId,
   type EvidenceRecord,
+  type RequiredCloseoutGate,
   type IsoTimestamp,
   type KnowledgeSource,
   type KnowledgeSourceId,
@@ -159,6 +160,45 @@ export interface RebuildProjectionsOptions {
   readonly skipContextPackIds?: ReadonlySet<ProjectionId>;
   readonly skipProjectionIds?: ReadonlySet<ProjectionId>;
 }
+
+interface CloseoutGateEvaluationInput {
+  readonly reader: BorealReader;
+  readonly work: WorkItem;
+  readonly now: IsoTimestamp;
+  readonly actor: ActorRef;
+  readonly pendingEvidence?: readonly EvidenceRecord[];
+  readonly pendingVerifications?: readonly VerificationRecord[];
+  readonly closeoutSummaries?: readonly AgentSummaryRecord[];
+}
+
+interface CloseoutGateSatisfaction {
+  readonly evidenceIds: readonly EvidenceId[];
+  readonly verificationIds: readonly VerificationId[];
+  readonly agentSummaryIds: readonly AgentSummaryId[];
+  readonly commitShas: readonly string[];
+  readonly dirtyPathNotes: readonly string[];
+}
+
+interface CloseoutGateGap {
+  readonly gateId: string;
+  readonly gateKind: string;
+  readonly gateScope: string;
+  readonly subjectId: string;
+  readonly targetId?: string;
+  readonly reason: string;
+}
+
+const CHECKPOINT_DIRTY_PATH_REASON_CODES = new Set([
+  "no_repo_changes",
+  "read_only_or_audit_only",
+  "user_requested_review_first",
+  "external_system_only",
+  "validation_blocked",
+  "unrelated_dirty_state",
+  "git_unavailable",
+  "out_of_scope_repository",
+  "legacy_backfill"
+]);
 
 export interface BorealRuntime {
   readonly policy: RuntimePolicy;
@@ -643,7 +683,14 @@ export function createBorealRuntime(options: BorealRuntimeOptions = {}): BorealR
         if (input.agentSummary) {
           await assertAgentSummaryReferences(writer, input.agentSummary);
         }
-        const closed = closeWorkDomain(work, verifications, policy, current, actor, input.reason);
+        const gatedWork = await applyRequiredCloseoutGatePolicy({
+          reader: writer,
+          work,
+          now: current,
+          actor,
+          closeoutSummaries
+        });
+        const closed = closeWorkDomain(gatedWork, verifications, policy, current, actor, input.reason);
         if (input.agentSummary) {
           await writer.putAgentSummary(input.agentSummary);
           await appendEvent(
@@ -708,13 +755,13 @@ export function createBorealRuntime(options: BorealRuntimeOptions = {}): BorealR
         let agentSummary: AgentSummaryRecord | undefined;
         if (input.close) {
           const availableVerifications = [...(await writer.listVerificationsForSubject(input.workId)), verification];
-          closedWork = closeWorkDomain(workWithVerification, availableVerifications, policy, current, actor, input.close.reason);
+          const provisionalClosedWork = closeWorkDomain(workWithVerification, availableVerifications, policy, current, actor, input.close.reason);
           if (input.close.agentSummary) {
             agentSummary = await input.close.agentSummary({
               work: workWithVerification,
               evidence,
               verification,
-              closedWork,
+              closedWork: provisionalClosedWork,
               reason: input.close.reason,
               now: current,
               actor
@@ -728,6 +775,16 @@ export function createBorealRuntime(options: BorealRuntimeOptions = {}): BorealR
               verifications: [verification]
             });
           }
+          const gatedWork = await applyRequiredCloseoutGatePolicy({
+            reader: writer,
+            work: workWithVerification,
+            now: current,
+            actor,
+            pendingEvidence: [evidence],
+            pendingVerifications: [verification],
+            closeoutSummaries
+          });
+          closedWork = closeWorkDomain(gatedWork, availableVerifications, policy, current, actor, input.close.reason);
           finalWork = closedWork;
         }
 
@@ -1210,6 +1267,316 @@ async function assertAgentSummaryReferences(
 
 function agentSummarySubjectTypeForWork(work: WorkItem): AgentSummaryRecord["subjectType"] {
   return work.kind === "sprint" ? "sprint" : work.kind === "milestone" ? "milestone" : "work";
+}
+
+async function applyRequiredCloseoutGatePolicy(input: CloseoutGateEvaluationInput): Promise<WorkItem> {
+  const workItems = await input.reader.listWorkItems();
+  const evidence = [...(await input.reader.listEvidence()), ...(input.pendingEvidence ?? [])];
+  const verifications = [...(await input.reader.listVerifications()), ...(input.pendingVerifications ?? [])];
+  const summaries = uniqueAgentSummaries([...(await input.reader.listAgentSummaries()), ...(input.closeoutSummaries ?? [])]);
+  const descendants = dependencyDescendants(input.work, workItems);
+  const gaps: CloseoutGateGap[] = [];
+
+  if (isContainerWork(input.work)) {
+    for (const descendant of descendants) {
+      if (!isResolvedForContainerClose(descendant)) {
+        gaps.push({
+          gateId: "descendant-work",
+          gateKind: "descendant_work",
+          gateScope: "descendants",
+          subjectId: input.work.meta.id,
+          targetId: descendant.meta.id,
+          reason: `descendant work is ${descendant.status}`
+        });
+      }
+    }
+  }
+
+  const evaluatedGates = (input.work.requiredCloseoutGates ?? []).map((gate) => {
+    const evaluation = evaluateRequiredCloseoutGate({
+      gate,
+      owner: input.work,
+      workItems,
+      evidence,
+      verifications,
+      summaries
+    });
+    gaps.push(...evaluation.gaps);
+    return evaluation.gate;
+  });
+
+  if (isContainerWork(input.work)) {
+    for (const descendant of descendants) {
+      for (const gate of descendant.requiredCloseoutGates ?? []) {
+        const evaluation = evaluateRequiredCloseoutGate({
+          gate,
+          owner: descendant,
+          workItems,
+          evidence,
+          verifications,
+          summaries
+        });
+        gaps.push(...evaluation.gaps);
+      }
+    }
+  }
+
+  if (gaps.length > 0) {
+    throw new BorealError("BOREAL_POLICY_VIOLATION", "Closeout requires satisfied required gates and resolved descendant work", {
+      workId: input.work.meta.id,
+      gateGaps: gaps
+    });
+  }
+
+  if (JSON.stringify(input.work.requiredCloseoutGates ?? []) === JSON.stringify(evaluatedGates)) {
+    return input.work;
+  }
+
+  return touchRecord(
+    {
+      ...input.work,
+      requiredCloseoutGates: evaluatedGates.length > 0 ? evaluatedGates : undefined
+    },
+    input.now,
+    input.actor
+  );
+}
+
+function evaluateRequiredCloseoutGate(input: {
+  readonly gate: RequiredCloseoutGate;
+  readonly owner: WorkItem;
+  readonly workItems: readonly WorkItem[];
+  readonly evidence: readonly EvidenceRecord[];
+  readonly verifications: readonly VerificationRecord[];
+  readonly summaries: readonly AgentSummaryRecord[];
+}): { readonly gate: RequiredCloseoutGate; readonly gaps: readonly CloseoutGateGap[] } {
+  if (input.gate.status === "forced") {
+    return forcedRequiredGateIsValid(input.gate)
+      ? { gate: input.gate, gaps: [] }
+      : {
+          gate: input.gate,
+          gaps: [gateGap(input.gate, input.owner, undefined, "forced gate is missing a reason, comment, actor, or forced timestamp")]
+        };
+  }
+
+  const targets = requiredGateTargets(input.gate, input.owner, input.workItems);
+  const gaps: CloseoutGateGap[] = [];
+  const satisfactions: CloseoutGateSatisfaction[] = [];
+
+  for (const target of targets) {
+    const satisfaction = targetCloseoutGateSatisfaction(input.gate, target, input.evidence, input.verifications, input.summaries);
+    if (!satisfaction) {
+      gaps.push(gateGap(input.gate, input.owner, target, "required gate has no satisfying evidence"));
+    } else {
+      satisfactions.push(satisfaction);
+    }
+  }
+
+  if (gaps.length > 0) {
+    return { gate: input.gate, gaps };
+  }
+
+  return {
+    gate: {
+      ...input.gate,
+      status: "satisfied",
+      satisfiedBy: mergeGateSatisfactions(satisfactions)
+    },
+    gaps: []
+  };
+}
+
+function targetCloseoutGateSatisfaction(
+  gate: RequiredCloseoutGate,
+  target: WorkItem,
+  evidence: readonly EvidenceRecord[],
+  verifications: readonly VerificationRecord[],
+  summaries: readonly AgentSummaryRecord[]
+): CloseoutGateSatisfaction | undefined {
+  switch (gate.kind) {
+    case "verification":
+      return verificationGateSatisfaction(gate, target, evidence, verifications);
+    case "checkpoint":
+      return checkpointGateSatisfaction(gate, target, summaries);
+    case "review":
+    case "audit":
+      return evidenceGateSatisfaction(gate, target, evidence);
+  }
+}
+
+function verificationGateSatisfaction(
+  gate: RequiredCloseoutGate,
+  target: WorkItem,
+  evidence: readonly EvidenceRecord[],
+  verifications: readonly VerificationRecord[]
+): CloseoutGateSatisfaction | undefined {
+  const evidenceById = new Map(evidence.map((record) => [record.meta.id, record]));
+  const matches = verifications.filter((verification) => {
+    if (verification.subjectId !== target.meta.id || verification.verdict !== "passed") {
+      return false;
+    }
+    return verification.evidenceIds.some((evidenceId) => {
+      const record = evidenceById.get(evidenceId);
+      return (
+        record?.subjectId === target.meta.id &&
+        (record.outcome === "passed" || record.outcome === "observed")
+      );
+    });
+  });
+  const evidenceIds = uniqueValues(matches.flatMap((verification) =>
+    verification.evidenceIds.filter((evidenceId) => {
+      const record = evidenceById.get(evidenceId);
+      return record?.subjectId === target.meta.id && (record.outcome === "passed" || record.outcome === "observed");
+    })
+  ));
+  if (evidenceIds.length < gate.minEvidenceCount) {
+    return undefined;
+  }
+  return {
+    evidenceIds,
+    verificationIds: uniqueValues(matches.map((verification) => verification.meta.id)),
+    agentSummaryIds: [],
+    commitShas: [],
+    dirtyPathNotes: []
+  };
+}
+
+function checkpointGateSatisfaction(
+  gate: RequiredCloseoutGate,
+  target: WorkItem,
+  summaries: readonly AgentSummaryRecord[]
+): CloseoutGateSatisfaction | undefined {
+  const matches = summaries.filter(
+    (summary) =>
+      summary.subjectId === target.meta.id &&
+      (summary.status === "final" || summary.status === "forced") &&
+      (summary.commitShas.length > 0 || dirtyPathNotesHaveReasonCode(summary.dirtyPathNotes))
+  );
+  if (matches.length < gate.minEvidenceCount) {
+    return undefined;
+  }
+  return {
+    evidenceIds: uniqueValues(matches.flatMap((summary) => summary.evidenceIds)),
+    verificationIds: uniqueValues(matches.flatMap((summary) => summary.verificationIds)),
+    agentSummaryIds: uniqueValues(matches.map((summary) => summary.meta.id)),
+    commitShas: uniqueStrings(matches.flatMap((summary) => summary.commitShas)),
+    dirtyPathNotes: uniqueStrings(matches.flatMap((summary) => summary.dirtyPathNotes))
+  };
+}
+
+function evidenceGateSatisfaction(
+  gate: RequiredCloseoutGate,
+  target: WorkItem,
+  evidence: readonly EvidenceRecord[]
+): CloseoutGateSatisfaction | undefined {
+  const allowedKinds = new Set(gate.requiredEvidenceKinds);
+  const matches = evidence.filter(
+    (record) =>
+      record.subjectId === target.meta.id &&
+      record.outcome === gate.requiredOutcome &&
+      allowedKinds.has(record.kind)
+  );
+  if (matches.length < gate.minEvidenceCount) {
+    return undefined;
+  }
+  return {
+    evidenceIds: uniqueValues(matches.map((record) => record.meta.id)),
+    verificationIds: [],
+    agentSummaryIds: [],
+    commitShas: [],
+    dirtyPathNotes: []
+  };
+}
+
+function requiredGateTargets(gate: RequiredCloseoutGate, owner: WorkItem, workItems: readonly WorkItem[]): readonly WorkItem[] {
+  switch (gate.scope) {
+    case "self":
+      return [owner];
+    case "direct_children":
+      return owner.dependencyIds
+        .map((id) => workItems.find((item) => item.meta.id === id))
+        .filter(isWorkItem);
+    case "descendants":
+      return dependencyDescendants(owner, workItems);
+  }
+}
+
+function dependencyDescendants(work: WorkItem, workItems: readonly WorkItem[]): readonly WorkItem[] {
+  const byId = new Map(workItems.map((item) => [item.meta.id, item]));
+  const descendants: WorkItem[] = [];
+  const visited = new Set<string>();
+  const visit = (item: WorkItem): void => {
+    for (const dependencyId of item.dependencyIds) {
+      if (visited.has(dependencyId)) {
+        continue;
+      }
+      visited.add(dependencyId);
+      const child = byId.get(dependencyId);
+      if (!child) {
+        continue;
+      }
+      descendants.push(child);
+      visit(child);
+    }
+  };
+  visit(work);
+  return descendants;
+}
+
+function forcedRequiredGateIsValid(gate: RequiredCloseoutGate): boolean {
+  return Boolean(gate.force?.reason && gate.force.comment.trim() && gate.force.actor && gate.force.forcedAt);
+}
+
+function gateGap(gate: RequiredCloseoutGate, owner: WorkItem, target: WorkItem | undefined, reason: string): CloseoutGateGap {
+  return {
+    gateId: gate.id,
+    gateKind: gate.kind,
+    gateScope: gate.scope,
+    subjectId: owner.meta.id,
+    targetId: target?.meta.id,
+    reason
+  };
+}
+
+function mergeGateSatisfactions(values: readonly CloseoutGateSatisfaction[]): RequiredCloseoutGate["satisfiedBy"] {
+  return {
+    evidenceIds: uniqueValues(values.flatMap((value) => value.evidenceIds)),
+    verificationIds: uniqueValues(values.flatMap((value) => value.verificationIds)),
+    agentSummaryIds: uniqueValues(values.flatMap((value) => value.agentSummaryIds)),
+    commitShas: uniqueStrings(values.flatMap((value) => value.commitShas)),
+    dirtyPathNotes: uniqueStrings(values.flatMap((value) => value.dirtyPathNotes))
+  };
+}
+
+function uniqueValues<T extends string>(values: readonly T[]): readonly T[] {
+  return [...new Set(values)];
+}
+
+function uniqueStrings(values: readonly string[]): readonly string[] {
+  return [...new Set(values)];
+}
+
+function uniqueAgentSummaries(values: readonly AgentSummaryRecord[]): readonly AgentSummaryRecord[] {
+  const byId = new Map<AgentSummaryId, AgentSummaryRecord>();
+  for (const value of values) {
+    byId.set(value.meta.id, value);
+  }
+  return [...byId.values()];
+}
+
+function dirtyPathNotesHaveReasonCode(notes: readonly string[]): boolean {
+  return notes.some((note) => {
+    const [code] = note.trim().split(":", 1);
+    return code !== undefined && CHECKPOINT_DIRTY_PATH_REASON_CODES.has(code);
+  });
+}
+
+function isContainerWork(work: WorkItem): boolean {
+  return work.kind === "sprint" || work.kind === "milestone";
+}
+
+function isResolvedForContainerClose(work: WorkItem): boolean {
+  return work.status === "closed" || work.status === "cancelled" || work.status === "verified";
 }
 
 async function requireKnowledgeSource(reader: BorealReader, sourceId: KnowledgeSourceId): Promise<KnowledgeSource> {
