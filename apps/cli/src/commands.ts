@@ -4,12 +4,18 @@ import { mkdir } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
 
 import {
+  AGENT_DIRECTIVE_SNAPSHOT_CONTEXT_KEYS,
   BorealError,
+  assembleAgentDirectiveBundle,
   assertPathInside,
   assertRealPathInside,
+  closeoutDirectiveDataByRegistryId,
   createRecordMeta,
+  createAgentDirectiveSnapshot,
   deterministicId,
+  gitDirectiveDataByRegistryId,
   hashContent,
+  handoffDirectiveDataByRegistryId,
   isBorealError,
   isIsoTimestamp,
   normalizeActorId,
@@ -18,11 +24,18 @@ import {
   normalizeSearchQuery,
   nowIso,
   randomId,
+  recoveryDirectiveDataByRegistryId,
   runtimeSnapshotSchemaIssues,
+  summaryDirectiveDataByRegistryId,
   touchRecord,
   withContentHash,
   type ActorRef,
   type ActorKind,
+  type AgentDirectiveBundle,
+  type AgentDirectiveDiagnosticSnapshot,
+  type AgentDirectiveGateStateSnapshot,
+  type AgentDirectiveSubjectType,
+  type AgentDirectiveSnapshot,
   type AgentReservation,
   type AgentSummaryForceReasonCode,
   type AgentSummaryId,
@@ -35,8 +48,10 @@ import {
   type ClaimRecord,
   type ClaimStatus,
   type CloseoutGateForceReasonCode,
+  type CloseoutGateId,
   type CloseoutGateKind,
   type CloseoutGateScope,
+  type ContentHash,
   type ContextPack,
   type DecisionId,
   type DecisionRecord,
@@ -938,7 +953,11 @@ async function primeCommand(
 ): Promise<CommandResult> {
   const agentId = agentIdFromArgs(args, context.actor.id);
   const labels = labelsFromArgs(args);
-  output.write(formatRecord(await buildAgentProtocolBrief("prime", context, agentId, labels), json));
+  const result = await buildAgentProtocolBrief("prime", context, agentId, labels);
+  output.write(await formatRecordWithAgentDirectives(context, args, result, json, {
+    syncStatus: await buildSyncStatus(context),
+    subject: { type: "workspace", id: context.workspaceRoot, title: "Workspace" }
+  }));
   return { exitCode: 0 };
 }
 
@@ -953,10 +972,18 @@ async function sessionCommand(
   const labels = labelsFromArgs(args);
   switch (action) {
     case "start":
-      output.write(formatRecord(await buildAgentProtocolBrief("session_start", context, agentId, labels), json));
+      output.write(
+        await formatRecordWithAgentDirectives(context, args, await buildAgentProtocolBrief("session_start", context, agentId, labels), json, {
+          subject: { type: "session", id: context.sessionId, title: context.sessionId }
+        })
+      );
       return { exitCode: 0 };
     case "end":
-      output.write(formatRecord(await buildAgentProtocolBrief("session_end", context, agentId, labels), json));
+      output.write(
+        await formatRecordWithAgentDirectives(context, args, await buildAgentProtocolBrief("session_end", context, agentId, labels), json, {
+          subject: { type: "session", id: context.sessionId, title: context.sessionId }
+        })
+      );
       return { exitCode: 0 };
     default:
       throw new BorealError("BOREAL_INVALID_INPUT", `Unknown session command: ${action ?? ""}`);
@@ -1816,21 +1843,19 @@ async function agentStartCommand(
   if (activeReservation) {
     const reservation = await requireReservation(context, activeReservation.id);
     const handoff = await buildHandoffResult(context, asWorkId(activeReservation.workId), args, handoffResultLimit);
-    output.write(
-      formatRecord(
-        {
-          started: true,
-          action: "continue_reserved_work",
-          agentId,
-          labels,
-          status: await buildAgentStatus(context, agentId, labels),
-          reservation,
-          releasedReservations: [],
-          ...handoff
-        } satisfies AgentStartResult,
-        json
-      )
-    );
+    const result = {
+      started: true,
+      action: "continue_reserved_work",
+      agentId,
+      labels,
+      status: await buildAgentStatus(context, agentId, labels),
+      reservation,
+      releasedReservations: [],
+      ...handoff
+    } satisfies AgentStartResult;
+    output.write(await formatRecordWithAgentDirectives(context, args, result, json, {
+      subjectWorkId: asWorkId(activeReservation.workId)
+    }));
     return { exitCode: 0 };
   }
 
@@ -1852,21 +1877,19 @@ async function agentStartCommand(
   }
 
   const handoff = await buildHandoffResult(context, claim.work.meta.id, args, handoffResultLimit, claim.work);
-  output.write(
-    formatRecord(
-      {
-        started: true,
-        action: "claimed_work",
-        agentId,
-        labels,
-        status: await buildAgentStatus(context, agentId, labels),
-        reservation: claim.reservation,
-        releasedReservations: claim.releasedReservations,
-        ...handoff
-      } satisfies AgentStartResult,
-      json
-    )
-  );
+  const result = {
+    started: true,
+    action: "claimed_work",
+    agentId,
+    labels,
+    status: await buildAgentStatus(context, agentId, labels),
+    reservation: claim.reservation,
+    releasedReservations: claim.releasedReservations,
+    ...handoff
+  } satisfies AgentStartResult;
+  output.write(await formatRecordWithAgentDirectives(context, args, result, json, {
+    subjectWork: claim.work
+  }));
   return { exitCode: 0 };
 }
 
@@ -1918,25 +1941,23 @@ async function agentFinishCommand(
     ? await writeAgentSummaryArtifact(context, finished.agentSummary)
     : undefined;
 
-  output.write(
-    formatRecord(
-      {
-        finished: true,
-        action: close ? "verified_and_closed" : "verified_and_released",
-        agentId,
-        work: await context.runtime.getWorkView(workId),
-        evidence: finished.evidence,
-        verification: finished.verification,
-        reservation: finished.reservation,
-        closedWork: finished.closedWork,
-        agentSummary: finished.agentSummary,
-        agentSummaryArtifact: closeoutSummaryArtifact,
-        release: finished.release,
-        status: await buildAgentStatus(context, agentId, [])
-      } satisfies AgentFinishResult,
-      json
-    )
-  );
+  const result = {
+    finished: true,
+    action: close ? "verified_and_closed" : "verified_and_released",
+    agentId,
+    work: await context.runtime.getWorkView(workId),
+    evidence: finished.evidence,
+    verification: finished.verification,
+    reservation: finished.reservation,
+    closedWork: finished.closedWork,
+    agentSummary: finished.agentSummary,
+    agentSummaryArtifact: closeoutSummaryArtifact,
+    release: finished.release,
+    status: await buildAgentStatus(context, agentId, [])
+  } satisfies AgentFinishResult;
+  output.write(await formatRecordWithAgentDirectives(context, args, result, json, {
+    subjectWork: finished.closedWork ?? finished.work
+  }));
   return { exitCode: 0 };
 }
 
@@ -2010,25 +2031,23 @@ async function finishCurrentReservationCommand(input: {
     ? await writeAgentSummaryArtifact(input.context, finished.agentSummary)
     : undefined;
 
-  input.output.write(
-    formatRecord(
-      {
-        finished: true,
-        action: input.close ? "verified_and_closed" : "verified_and_released",
-        agentId,
-        work: await input.context.runtime.getWorkView(workId),
-        evidence: finished.evidence,
-        verification: finished.verification,
-        reservation: finished.reservation,
-        closedWork: finished.closedWork,
-        agentSummary: finished.agentSummary,
-        agentSummaryArtifact: closeoutSummaryArtifact,
-        release: finished.release,
-        status: await buildAgentStatus(input.context, agentId, [])
-      } satisfies AgentFinishResult,
-      input.json
-    )
-  );
+  const result = {
+    finished: true,
+    action: input.close ? "verified_and_closed" : "verified_and_released",
+    agentId,
+    work: await input.context.runtime.getWorkView(workId),
+    evidence: finished.evidence,
+    verification: finished.verification,
+    reservation: finished.reservation,
+    closedWork: finished.closedWork,
+    agentSummary: finished.agentSummary,
+    agentSummaryArtifact: closeoutSummaryArtifact,
+    release: finished.release,
+    status: await buildAgentStatus(input.context, agentId, [])
+  } satisfies AgentFinishResult;
+  input.output.write(await formatRecordWithAgentDirectives(input.context, input.args, result, input.json, {
+    subjectWork: finished.closedWork ?? finished.work
+  }));
   return { exitCode: 0 };
 }
 
@@ -2926,8 +2945,9 @@ async function workCommand(
       return { exitCode: 0 };
     }
     case "show": {
-      const view = await context.runtime.getWorkView(await resolveWorkId(context, requiredPositional(rest, 0, "work reference")));
-      output.write(formatRecord(view, json));
+      const workId = await resolveWorkId(context, requiredPositional(rest, 0, "work reference"));
+      const view = await context.runtime.getWorkView(workId);
+      output.write(await formatRecordWithAgentDirectives(context, args, view, json, { subjectWorkId: workId }));
       return { exitCode: 0 };
     }
     case "block": {
@@ -2975,18 +2995,14 @@ async function workCommand(
       }
 
       const handoff = await buildHandoffResult(context, claim.work.meta.id, args, handoffResultLimit, claim.work);
-      output.write(
-        formatRecord(
-          {
-            claimed: true,
-            work: handoff.work,
-            reservation: claim.reservation,
-            releasedReservations: claim.releasedReservations,
-            ...handoff
-          },
-          json
-        )
-      );
+      const result = {
+        claimed: true,
+        work: handoff.work,
+        reservation: claim.reservation,
+        releasedReservations: claim.releasedReservations,
+        ...handoff
+      };
+      output.write(await formatRecordWithAgentDirectives(context, args, result, json, { subjectWork: claim.work }));
       return { exitCode: 0 };
     }
     case "release": {
@@ -3013,7 +3029,8 @@ async function workCommand(
         evidenceIds,
         notes: flagValue(args, "notes")
       });
-      output.write(formatRecord({ ...verification, closeoutGateStatus: await closeoutGateStatusForWork(context, workId) }, json));
+      const result = { ...verification, closeoutGateStatus: await closeoutGateStatusForWork(context, workId) };
+      output.write(await formatRecordWithAgentDirectives(context, args, result, json, { subjectWorkId: workId }));
       return { exitCode: 0 };
     }
     case "close": {
@@ -3030,20 +3047,16 @@ async function workCommand(
       const createdArtifact = closeoutSummary.created
         ? await writeAgentSummaryArtifact(context, closeoutSummary.created.summary)
         : undefined;
-      output.write(
-        formatRecord(
-          {
-            schemaVersion: "boreal.cli.work.close.v1",
-            generatedAt: nowIso(),
-            workspaceRoot: context.workspaceRoot,
-            work: closed,
-            agentSummaries: closeoutSummary.summaries,
-            createdAgentSummary: closeoutSummary.created?.summary,
-            createdAgentSummaryArtifact: createdArtifact
-          },
-          json
-        )
-      );
+      const result = {
+        schemaVersion: "boreal.cli.work.close.v1",
+        generatedAt: nowIso(),
+        workspaceRoot: context.workspaceRoot,
+        work: closed,
+        agentSummaries: closeoutSummary.summaries,
+        createdAgentSummary: closeoutSummary.created?.summary,
+        createdAgentSummaryArtifact: createdArtifact
+      };
+      output.write(await formatRecordWithAgentDirectives(context, args, result, json, { subjectWork: closed }));
       return { exitCode: 0 };
     }
     case "edit": {
@@ -3080,20 +3093,16 @@ async function workCommand(
       const createdArtifact = closeoutSummary.created
         ? await writeAgentSummaryArtifact(context, closeoutSummary.created.summary)
         : undefined;
-      output.write(
-        formatRecord(
-          {
-            schemaVersion: "boreal.cli.work.cancel.v1",
-            generatedAt: nowIso(),
-            workspaceRoot: context.workspaceRoot,
-            ...result,
-            agentSummaries: closeoutSummary.summaries,
-            createdAgentSummary: closeoutSummary.created?.summary,
-            createdAgentSummaryArtifact: createdArtifact
-          },
-          json
-        )
-      );
+      const outputResult = {
+        schemaVersion: "boreal.cli.work.cancel.v1",
+        generatedAt: nowIso(),
+        workspaceRoot: context.workspaceRoot,
+        ...result,
+        agentSummaries: closeoutSummary.summaries,
+        createdAgentSummary: closeoutSummary.created?.summary,
+        createdAgentSummaryArtifact: createdArtifact
+      };
+      output.write(await formatRecordWithAgentDirectives(context, args, outputResult, json, { subjectWorkId: workId }));
       return { exitCode: 0 };
     }
     case "reopen": {
@@ -3452,7 +3461,7 @@ async function depCommand(
       const tree = await context.store.read(async (reader) =>
         dependencyTreeForWork(workId, await reader.listWorkItems(), await reader.listGraphEdges())
       );
-      output.write(json ? formatRecord(tree, true) : table(dependencyTreeRows(tree)));
+      output.write(json ? await formatRecordWithAgentDirectives(context, args, tree, true, { subjectWorkId: workId }) : table(dependencyTreeRows(tree)));
       return { exitCode: 0 };
     }
     case "cycles": {
@@ -3490,7 +3499,8 @@ async function evidenceCommand(
     command: flagValue(args, "command"),
     uri: flagValue(args, "uri")
   });
-  output.write(formatRecord({ ...evidence, closeoutGateStatus: await closeoutGateStatusForWork(context, evidence.subjectId as WorkId) }, json));
+  const result = { ...evidence, closeoutGateStatus: await closeoutGateStatusForWork(context, evidence.subjectId as WorkId) };
+  output.write(await formatRecordWithAgentDirectives(context, args, result, json, { subjectWorkId: evidence.subjectId as WorkId }));
   return { exitCode: 0 };
 }
 
@@ -3509,7 +3519,10 @@ async function summaryCommand(
         body: requiredFlag(args, "body"),
         title: flagValue(args, "title")
       });
-      output.write(formatRecord({ ...result, closeoutGateStatus: await closeoutGateStatusForSummary(context, result.summary) }, json));
+      const outputResult = { ...result, closeoutGateStatus: await closeoutGateStatusForSummary(context, result.summary) };
+      output.write(await formatRecordWithAgentDirectives(context, args, outputResult, json, {
+        subjectWorkId: result.summary.subjectId.startsWith("bw_work_") ? result.summary.subjectId as WorkId : undefined
+      }));
       return { exitCode: 0 };
     }
     case "compose": {
@@ -3519,7 +3532,10 @@ async function summaryCommand(
         body,
         title: flagValue(args, "title") ?? `Closeout summary: ${subject.title}`
       });
-      output.write(formatRecord({ ...result, closeoutGateStatus: await closeoutGateStatusForSummary(context, result.summary) }, json));
+      const outputResult = { ...result, closeoutGateStatus: await closeoutGateStatusForSummary(context, result.summary) };
+      output.write(await formatRecordWithAgentDirectives(context, args, outputResult, json, {
+        subjectWorkId: result.summary.subjectId.startsWith("bw_work_") ? result.summary.subjectId as WorkId : undefined
+      }));
       return { exitCode: 0 };
     }
     case "show": {
@@ -3527,7 +3543,10 @@ async function summaryCommand(
       const summary = ref.startsWith("bw_summary_")
         ? await context.store.read(async (reader) => requireAgentSummary(reader, asAgentSummaryId(ref)))
         : await latestSummaryForSubject(context, await resolveSummarySubject(context, ref, args));
-      output.write(formatRecord({ ...summary, closeoutGateStatus: await closeoutGateStatusForSummary(context, summary) }, json));
+      const result = { ...summary, closeoutGateStatus: await closeoutGateStatusForSummary(context, summary) };
+      output.write(await formatRecordWithAgentDirectives(context, args, result, json, {
+        subjectWorkId: summary.subjectId.startsWith("bw_work_") ? summary.subjectId as WorkId : undefined
+      }));
       return { exitCode: 0 };
     }
     case "list": {
@@ -4087,6 +4106,9 @@ function reviewGateSummaryFromStatuses(statuses: readonly CloseoutGateStatusView
 }
 
 function reviewGateSummaryFromRows(rows: readonly CloseoutGateStatusRow[]): ReviewGateSummary {
+  if (rows.length === 0) {
+    return emptyReviewGateSummary();
+  }
   const review = { ...emptyReviewGateKindSummary() };
   const audit = { ...emptyReviewGateKindSummary() };
   for (const gate of rows.filter(isReviewCandidateGate)) {
@@ -5112,12 +5134,19 @@ async function syncCommand(
   switch (action) {
     case "status": {
       const status = await buildSyncStatus(context);
-      output.write(json ? formatRecord(status, true) : dashboardView(args) ? formatSyncDashboard(status) : formatRecord(status, false));
+      output.write(json ? await formatRecordWithAgentDirectives(context, args, status, true, {
+        syncStatus: status,
+        subject: { type: "workspace", id: context.workspaceRoot, title: "Workspace" }
+      }) : dashboardView(args) ? formatSyncDashboard(status) : formatRecord(status, false));
       return { exitCode: status.ok ? 0 : 1 };
     }
     case "refresh": {
       const result = await buildSyncRefreshResult(context);
-      output.write(formatRecord(result, json));
+      output.write(await formatRecordWithAgentDirectives(context, args, result, json, {
+        syncStatus: result.status,
+        syncRefreshed: true,
+        subject: { type: "workspace", id: context.workspaceRoot, title: "Workspace" }
+      }));
       return { exitCode: result.postRefreshStatusOk ? 0 : 1 };
     }
     default:
@@ -5378,6 +5407,464 @@ async function buildSyncStatus(context: CliContext): Promise<SyncStatusResult> {
     git,
     recommendedActions
   };
+}
+
+interface CliAgentDirectiveSubject {
+  readonly type: AgentDirectiveSubjectType;
+  readonly id: string;
+  readonly title: string;
+  readonly status?: WorkStatus;
+}
+
+interface CliAgentDirectiveOptions {
+  readonly subjectWorkId?: WorkId;
+  readonly subjectWork?: WorkItem;
+  readonly subject?: CliAgentDirectiveSubject;
+  readonly syncStatus?: SyncStatusResult;
+  readonly syncRefreshed?: boolean;
+  readonly doctorResult?: DoctorResult;
+  readonly resultOk?: boolean;
+  readonly nextWorkflowRef?: string;
+  readonly recommendedCommandPath?: string;
+}
+
+async function formatRecordWithAgentDirectives(
+  context: CliContext,
+  args: ParsedArgs,
+  value: unknown,
+  json: boolean,
+  options: CliAgentDirectiveOptions = {}
+): Promise<string> {
+  if (!json) {
+    return formatRecord(value, false);
+  }
+  const agentDirectives = await compileCliAgentDirectiveBundles(context, args, options);
+  return formatRecord(value, true, { agentDirectives });
+}
+
+async function compileCliAgentDirectiveBundles(
+  context: CliContext,
+  args: ParsedArgs,
+  options: CliAgentDirectiveOptions
+): Promise<readonly AgentDirectiveBundle[]> {
+  const snapshot = await buildCliAgentDirectiveSnapshot(context, args, options);
+  const dataByRegistryId = {
+    ...closeoutDirectiveDataByRegistryId(snapshot),
+    ...summaryDirectiveDataByRegistryId(snapshot),
+    ...gitDirectiveDataByRegistryId(snapshot),
+    ...handoffDirectiveDataByRegistryId(snapshot),
+    ...recoveryDirectiveDataByRegistryId(snapshot)
+  };
+  const result = assembleAgentDirectiveBundle({
+    snapshot,
+    dataByRegistryId
+  });
+  if (!result.bundle && (result.selectedRegistryIds.length > 0 || result.issues.length > 0)) {
+    throw new BorealError("BOREAL_INVALID_INPUT", "agentDirectives failed schema validation", {
+      selectedRegistryIds: result.selectedRegistryIds,
+      issues: result.issues,
+      missingRequired: result.missingRequired
+    });
+  }
+  return result.bundle && result.selectedRegistryIds.length > 0 ? [result.bundle] : [];
+}
+
+async function buildCliAgentDirectiveSnapshot(
+  context: CliContext,
+  args: ParsedArgs,
+  options: CliAgentDirectiveOptions
+): Promise<AgentDirectiveSnapshot> {
+  const command = cliDirectiveCommandPath(args);
+  const syncStatus = options.syncStatus ?? await buildSyncStatus(context);
+  const doctor = options.doctorResult;
+  const actorId = optionalAgentIdFromArgs(args) ?? String(context.actor.id);
+  const generatedAt = nowIso();
+  return context.store.read(async (reader) => {
+    const [workItems, graphEdges, evidence, verifications, summaries, reservations] = await Promise.all([
+      reader.listWorkItems(),
+      reader.listGraphEdges(),
+      reader.listEvidence(),
+      reader.listVerifications(),
+      reader.listAgentSummaries(),
+      reader.listReservations()
+    ]);
+    const workById = new Map(workItems.map((work) => [work.meta.id, work]));
+    const subjectWork = options.subjectWork ?? (options.subjectWorkId ? workById.get(options.subjectWorkId) : undefined);
+    const subjectWorkId = subjectWork?.meta.id;
+    const dependencyIds = subjectWork ? dependencyIdsForWork(subjectWork, graphEdges) : [];
+    const dependencyWork = dependencyIds.map((id) => workById.get(id)).filter(isWorkItem);
+    const activeBlockerIds = dependencyWork.filter((work) => isOpenWorkStatus(work.status)).map((work) => work.meta.id);
+    const tree = subjectWork ? dependencyTreeForWork(subjectWork.meta.id, workItems, graphEdges) : undefined;
+    const descendantNodes = tree ? flattenDependencyTree(tree).filter((node) => node.id !== subjectWorkId) : [];
+    const descendantWorkIds = descendantNodes.map((node) => node.id as WorkId);
+    const openDescendantIds = descendantNodes
+      .filter((node) => node.status !== undefined && isOpenWorkStatus(node.status))
+      .map((node) => node.id as WorkId);
+    const subjectEvidence = subjectWorkId ? evidence.filter((record) => record.subjectId === subjectWorkId) : [];
+    const subjectVerifications = subjectWorkId ? verifications.filter((record) => record.subjectId === subjectWorkId) : [];
+    const subjectSummaries = subjectWorkId ? summaries.filter((summary) => summary.subjectId === subjectWorkId) : [];
+    const latestSummary = [...subjectSummaries].sort(compareAgentSummariesNewestFirst)[0];
+    const gateStatus = subjectWork
+      ? closeoutGateStatusFromSnapshot(subjectWork, workItems, graphEdges, evidence, verifications, summaries)
+      : undefined;
+    const activeReservations = reservations.filter((reservation) => reservation.status === "active");
+    const subjectReservation = subjectWorkId
+      ? activeReservations.find((reservation) => reservation.workId === subjectWorkId)
+      : undefined;
+    const subject = subjectWork
+      ? {
+          type: closeoutGateSubjectTypeForWorkKind(subjectWork.kind) as AgentDirectiveSubjectType,
+          id: subjectWork.meta.id,
+          title: subjectWork.title,
+          kind: subjectWork.kind,
+          status: subjectWork.status,
+          priority: subjectWork.priority,
+          ...(subjectReservation?.meta.id ?? subjectWork.reservationId
+            ? { reservationId: subjectReservation?.meta.id ?? subjectWork.reservationId }
+            : {}),
+          ...(subjectWork.closedReason ? { closedReason: subjectWork.closedReason } : {})
+        }
+      : options.subject
+        ? {
+            type: options.subject.type,
+            id: options.subject.id,
+            title: options.subject.title,
+            ...(options.subject.status ? { status: options.subject.status } : {})
+          }
+        : undefined;
+
+    return createAgentDirectiveSnapshot({
+      capturedAt: generatedAt,
+      work: {
+        subject,
+        labels: subjectWork?.labels ?? [],
+        dependencyIds,
+        activeBlockerIds,
+        blockedByIds: activeBlockerIds,
+        childWorkIds: dependencyIds,
+        descendantWorkIds,
+        openDescendantIds
+      },
+      summary: {
+        summaryIds: subjectSummaries.map((summary) => summary.meta.id),
+        finalSummaryIds: subjectSummaries.filter((summary) => summary.status === "final").map((summary) => summary.meta.id),
+        childSummaryIds: uniqueStrings(subjectSummaries.flatMap((summary) => summary.childSummaryIds)) as readonly AgentSummaryId[],
+        artifactUris: subjectSummaries.flatMap((summary) => summary.artifactUri ? [summary.artifactUri] : []),
+        commitShas: uniqueStrings(subjectSummaries.flatMap((summary) => summary.commitShas)),
+        dirtyPathNotes: uniqueStrings(subjectSummaries.flatMap((summary) => summary.dirtyPathNotes)),
+        ...(latestSummary ? { latestSummaryId: latestSummary.meta.id } : {}),
+        ...(latestSummary?.artifactUri ? { latestSummaryUri: latestSummary.artifactUri } : {})
+      },
+      gate: {
+        requiredGates: gateStatus ? directiveGateStatesFromCloseoutStatus(gateStatus) : [],
+        openGateIds: gateStatus
+          ? gateStatus.requiredGates.filter((gate) => gate.status === "open").map((gate) => gate.id as CloseoutGateId)
+          : [],
+        satisfiedGateIds: gateStatus
+          ? gateStatus.requiredGates.filter((gate) => gate.status === "satisfied").map((gate) => gate.id as CloseoutGateId)
+          : [],
+        forcedGateIds: gateStatus
+          ? gateStatus.requiredGates.filter((gate) => gate.status === "forced").map((gate) => gate.id as CloseoutGateId)
+          : []
+      },
+      evidence: {
+        evidenceIds: subjectEvidence.map((record) => record.meta.id),
+        verificationIds: subjectVerifications.map((record) => record.meta.id),
+        evidence: subjectEvidence.map((record) => ({
+          id: record.meta.id,
+          subjectId: record.subjectId,
+          subjectType: record.subjectType,
+          kind: record.kind,
+          outcome: record.outcome,
+          summary: record.summary,
+          ...(record.command ? { command: record.command } : {}),
+          ...(record.uri ? { uri: record.uri } : {}),
+          observedAt: record.observedAt
+        })),
+        verifications: subjectVerifications.map((record) => ({
+          id: record.meta.id,
+          subjectId: record.subjectId,
+          subjectType: record.subjectType,
+          verdict: record.verdict,
+          evidenceIds: record.evidenceIds,
+          verifiedAt: record.verifiedAt
+        }))
+      },
+      git: gitDirectiveSnapshot(syncStatus, subjectSummaries),
+      workflow: {
+        workflowRefs: [options.nextWorkflowRef ?? directiveWorkflowRef(command, subjectWork, syncStatus, doctor)],
+        skillRefs: directiveSkillRefs(command, doctor, syncStatus),
+        requiredInputNames: [...AGENT_DIRECTIVE_SNAPSHOT_CONTEXT_KEYS],
+        nextWorkflowRef: options.nextWorkflowRef ?? directiveWorkflowRef(command, subjectWork, syncStatus, doctor),
+        recommendedCommandPath: options.recommendedCommandPath ?? directiveRecommendedCommand(command, subjectWork, syncStatus, doctor),
+        assetManifestHash: hashContent({ command, workflowRefs: directiveSkillRefs(command, doctor, syncStatus) }) as ContentHash
+      },
+      doctor: doctorDirectiveSnapshot(doctor, syncStatus),
+      sync: {
+        ok: syncStatus.ok,
+        refreshed: options.syncRefreshed ?? false,
+        ledgersFresh: syncStatus.ledgers.ok,
+        searchIndexFresh: syncStatus.searchIndex.ok,
+        sqliteCacheFresh: true
+      },
+      command: {
+        path: command,
+        argv: cliDirectiveArgv(args),
+        envelopeSchema: `boreal.cli.${command.replace(/\s+/gu, ".")}.v1`,
+        json: hasFlag(args, "json"),
+        mutatesState: cliCommandMutatesState(args),
+        resultOk: options.resultOk ?? true
+      },
+      actor: {
+        actor: context.actor,
+        activeAgentId: actorId,
+        activeReservationIds: activeReservations.map((reservation) => reservation.meta.id),
+        ...(subjectReservation?.purpose ? { purpose: subjectReservation.purpose } : {})
+      }
+    });
+  });
+}
+
+function directiveGateStatesFromCloseoutStatus(status: CloseoutGateStatusView): readonly AgentDirectiveGateStateSnapshot[] {
+  return status.requiredGates.map((gate) => ({
+    id: gate.id as CloseoutGateId,
+    subjectType: status.subjectType,
+    subjectId: status.subjectId,
+    kind: gate.kind,
+    scope: gate.scope,
+    status: gate.status,
+    requiredEvidenceKinds: gate.requiredEvidenceKinds,
+    minEvidenceCount: gate.minEvidenceCount,
+    evidenceIds: gate.satisfiedBy?.evidenceIds ?? [],
+    verificationIds: gate.satisfiedBy?.verificationIds ?? [],
+    agentSummaryIds: gate.satisfiedBy?.agentSummaryIds ?? [],
+    commitShas: gate.satisfiedBy?.commitShas ?? [],
+    dirtyPathNotes: gate.satisfiedBy?.dirtyPathNotes ?? [],
+    ...(gate.force ? { forceReasonCode: gate.force.reason } : {})
+  }));
+}
+
+function gitDirectiveSnapshot(
+  syncStatus: SyncStatusResult,
+  summaries: readonly AgentSummaryRecord[]
+): AgentDirectiveSnapshot["git"] {
+  const git = syncStatus.git;
+  const changedPaths = uniqueGitPaths([...git.collaborationDirtyPaths, ...git.blockingDirtyPaths]);
+  return {
+    roots: [
+      {
+        root: git.gitRoot ?? git.workspaceRoot,
+        ...(git.branch ? { branchName: git.branch } : {}),
+        detached: git.detached,
+        protectedBranch: git.protectedBranch,
+        clean: changedPaths.length === 0,
+        scopedChangedPaths: changedPaths,
+        collaborationDirtyPaths: git.collaborationDirtyPaths,
+        blockingDirtyPaths: git.blockingDirtyPaths,
+        untrackedPaths: changedPaths.filter((entry) => entry.status === "??").map((entry) => entry.path)
+      }
+    ],
+    checkpointCommitShas: uniqueStrings(summaries.flatMap((summary) => summary.commitShas)),
+    dirtyPathNotes: uniqueStrings(summaries.flatMap((summary) => summary.dirtyPathNotes))
+  };
+}
+
+function doctorDirectiveSnapshot(
+  doctor: DoctorResult | undefined,
+  syncStatus: SyncStatusResult
+): AgentDirectiveSnapshot["doctor"] {
+  if (doctor) {
+    return {
+      ok: doctor.ok,
+      strict: doctor.strict,
+      diagnostics: doctor.diagnostics.map(doctorDiagnosticSnapshot)
+    };
+  }
+  return {
+    ok: syncStatus.ok,
+    strict: false,
+    diagnostics: syncStatusDiagnostics(syncStatus)
+  };
+}
+
+function doctorDiagnosticSnapshot(diagnostic: Diagnostic): AgentDirectiveDiagnosticSnapshot {
+  const recommendedCommands = diagnosticRecommendedCommands(diagnostic.details);
+  return {
+    code: diagnostic.code,
+    severity: diagnostic.severity === "fixed" ? "info" : diagnostic.severity,
+    message: diagnostic.message,
+    blocking: diagnostic.severity === "error",
+    recommendedCommands
+  };
+}
+
+function syncStatusDiagnostics(syncStatus: SyncStatusResult): readonly AgentDirectiveDiagnosticSnapshot[] {
+  const diagnostics: AgentDirectiveDiagnosticSnapshot[] = [];
+  if (!syncStatus.vault.ok) {
+    diagnostics.push(syncDiagnostic("vault.health", "warning", "Vault health is not ok", false, syncStatus.recommendedActions));
+  }
+  if (!syncStatus.ledgers.ok) {
+    diagnostics.push(syncDiagnostic("ledger.status", "warning", "Ledger status is not ok", false, syncStatus.recommendedActions));
+  }
+  if (!syncStatus.searchIndex.ok) {
+    diagnostics.push(syncDiagnostic("search.index", "warning", "Search index is not fresh", false, syncStatus.recommendedActions));
+  }
+  for (const finding of syncStatus.git.findings) {
+    if (finding.severity === "info" && !finding.blocking && finding.recommendedActions.length === 0) {
+      continue;
+    }
+    diagnostics.push(syncDiagnostic(`git.${finding.category}`, finding.severity === "error" ? "error" : "warning", finding.message, finding.blocking, finding.recommendedActions));
+  }
+  return diagnostics;
+}
+
+function syncDiagnostic(
+  code: string,
+  severity: AgentDirectiveDiagnosticSnapshot["severity"],
+  message: string,
+  blocking: boolean,
+  recommendedCommands: readonly string[]
+): AgentDirectiveDiagnosticSnapshot {
+  return {
+    code,
+    severity,
+    message,
+    blocking,
+    recommendedCommands
+  };
+}
+
+function diagnosticRecommendedCommands(details: unknown): readonly string[] {
+  if (!isRecord(details)) {
+    return [];
+  }
+  const commands = [
+    ...(typeof details.repairCommand === "string" ? [details.repairCommand] : []),
+    ...(Array.isArray(details.recommendedActions) ? details.recommendedActions.filter((entry): entry is string => typeof entry === "string") : [])
+  ];
+  return uniqueStrings(commands);
+}
+
+function directiveWorkflowRef(
+  command: string,
+  work: WorkItem | undefined,
+  syncStatus: SyncStatusResult,
+  doctor: DoctorResult | undefined
+): string {
+  if (cliHealthRecoveryNeeded(command, doctor, syncStatus)) {
+    return "workflows/60-health/sync-and-doctor.md";
+  }
+  if (command.startsWith("sprint ")) {
+    return "workflows/40-work/closeout-work.md";
+  }
+  if (command.startsWith("summary ") || command === "gate closeout") {
+    return "workflows/40-work/closeout-work.md";
+  }
+  if (work?.status === "blocked") {
+    return "workflows/40-work/link-dependencies.md";
+  }
+  return "workflows/40-work/claim-and-finish-work.md";
+}
+
+function directiveRecommendedCommand(
+  command: string,
+  work: WorkItem | undefined,
+  syncStatus: SyncStatusResult,
+  doctor: DoctorResult | undefined
+): string {
+  if (cliHealthRecoveryNeeded(command, doctor, syncStatus)) {
+    return "bwrk sync refresh --json";
+  }
+  if (work?.status === "blocked") {
+    return `bwrk dep tree ${work.meta.id} --json`;
+  }
+  if (work && isOpenWorkStatus(work.status)) {
+    return `bwrk work show ${work.meta.id} --json`;
+  }
+  if (work) {
+    return `bwrk summary show ${work.meta.id} --json`;
+  }
+  return "bwrk work list --ready --json";
+}
+
+function directiveSkillRefs(
+  command: string,
+  doctor: DoctorResult | undefined,
+  syncStatus: SyncStatusResult
+): readonly string[] {
+  if (cliHealthRecoveryNeeded(command, doctor, syncStatus)) {
+    return ["boreal-health-doctor"];
+  }
+  if (command.startsWith("sprint ") || command.startsWith("summary ") || command === "gate closeout") {
+    return ["boreal-work-execution", "boreal-handoff-builder"];
+  }
+  return ["boreal-work-execution"];
+}
+
+function cliHealthRecoveryNeeded(
+  command: string,
+  doctor: DoctorResult | undefined,
+  syncStatus: SyncStatusResult
+): boolean {
+  if (!syncStatus.ok) {
+    return true;
+  }
+  if (doctor) {
+    return !doctor.ok || doctor.diagnostics.some(doctorDiagnosticNeedsAttention);
+  }
+  if (command === "doctor" || command.startsWith("sync ") || command.startsWith("lock ")) {
+    return syncStatusDiagnostics(syncStatus).length > 0;
+  }
+  return false;
+}
+
+function doctorDiagnosticNeedsAttention(diagnostic: Diagnostic): boolean {
+  return diagnostic.severity !== "ok" && diagnostic.severity !== "fixed"
+    ? true
+    : diagnosticRecommendedCommands(diagnostic.details).length > 0;
+}
+
+function cliDirectiveCommandPath(args: ParsedArgs): string {
+  const definition = findCommandDefinition(args.command);
+  return definition ? commandPath(definition) : args.command.join(" ");
+}
+
+function cliDirectiveArgv(args: ParsedArgs): readonly string[] {
+  const flags: string[] = [];
+  for (const [name, values] of args.flags.entries()) {
+    for (const value of values) {
+      flags.push(`--${name}`);
+      if (value !== "true") {
+        flags.push(value);
+      }
+    }
+  }
+  return [...args.command, ...flags];
+}
+
+function cliCommandMutatesState(args: ParsedArgs): boolean {
+  const definition = findCommandDefinition(args.command);
+  if (!definition) {
+    return false;
+  }
+  const behavior = commandBehavior(definition);
+  return behavior.writesState || behavior.writesGeneratedArtifacts;
+}
+
+function uniqueGitPaths(paths: readonly { readonly status: string; readonly path: string }[]): readonly { readonly status: string; readonly path: string }[] {
+  const byPath = new Map<string, { readonly status: string; readonly path: string }>();
+  for (const path of paths) {
+    byPath.set(path.path, byPath.get(path.path) ?? path);
+  }
+  return [...byPath.values()].sort((left, right) => left.path.localeCompare(right.path));
+}
+
+function compareAgentSummariesNewestFirst(left: AgentSummaryRecord, right: AgentSummaryRecord): number {
+  return right.generatedAt.localeCompare(left.generatedAt) || right.meta.id.localeCompare(left.meta.id);
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 async function buildAgentProtocolBrief(
@@ -5647,7 +6134,10 @@ async function doctorCommand(
   }
   const result = await runDoctor(context, hasFlag(args, "fix"), hasFlag(args, "strict"));
   if (json) {
-    output.write(formatRecord(result, true));
+    output.write(await formatRecordWithAgentDirectives(context, args, result, true, {
+      doctorResult: result,
+      subject: { type: "workspace", id: context.workspaceRoot, title: "Workspace" }
+    }));
   } else if (dashboardView(args)) {
     output.write(formatDoctorDashboard(result));
   } else {
@@ -5695,7 +6185,9 @@ async function gateCommand(
     throw new BorealError("BOREAL_INVALID_INPUT", `Unknown gate command: ${action}`);
   }
   const result = await gateCloseoutResult(context, args);
-  output.write(formatRecord(result, json));
+  output.write(await formatRecordWithAgentDirectives(context, args, result, json, {
+    subject: { type: "workspace", id: context.workspaceRoot, title: "Workspace" }
+  }));
   return { exitCode: result.ok ? 0 : 1 };
 }
 
@@ -6806,13 +7298,13 @@ async function sprintCommand(
     case "report": {
       const sprint = await resolveSprintWork(context, rest[0] ?? "current");
       const result = await sprintReportResult(context, sprint, args);
-      output.write(json ? formatRecord(result, true) : formatSprintReport(result));
+      output.write(json ? await formatRecordWithAgentDirectives(context, args, result, true, { subjectWork: sprint }) : formatSprintReport(result));
       return { exitCode: 0 };
     }
     case "metrics": {
       const sprint = await resolveSprintWork(context, rest[0] ?? "current");
       const result = await sprintMetricsResult(context, sprint, args, flagValue(args, "closeout-reason"));
-      output.write(formatRecord(result, json));
+      output.write(await formatRecordWithAgentDirectives(context, args, result, json, { subjectWork: sprint }));
       return { exitCode: 0 };
     }
     case "close": {
@@ -6829,21 +7321,17 @@ async function sprintCommand(
 	      const createdArtifact = closeoutSummary.created
 	        ? await writeAgentSummaryArtifact(context, closeoutSummary.created.summary)
 	        : undefined;
-	      output.write(
-	        formatRecord(
-          {
-            schemaVersion: "boreal.cli.sprint.close.v1",
-            generatedAt: nowIso(),
-            workspaceRoot: context.workspaceRoot,
-            closed,
-	            metrics,
-	            agentSummaries: closeoutSummary.summaries,
-	            createdAgentSummary: closeoutSummary.created?.summary,
-	            createdAgentSummaryArtifact: createdArtifact
-	          },
-          json
-        )
-      );
+	      const result = {
+	        schemaVersion: "boreal.cli.sprint.close.v1",
+	        generatedAt: nowIso(),
+	        workspaceRoot: context.workspaceRoot,
+	        closed,
+	        metrics,
+	        agentSummaries: closeoutSummary.summaries,
+	        createdAgentSummary: closeoutSummary.created?.summary,
+	        createdAgentSummaryArtifact: createdArtifact
+	      };
+	      output.write(await formatRecordWithAgentDirectives(context, args, result, json, { subjectWork: closed }));
       return { exitCode: 0 };
     }
     default:

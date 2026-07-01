@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { join, relative } from "node:path";
 
-import { safeParseJson } from "@boreal/core";
+import { safeParseJson, type AgentDirectiveBundle } from "@boreal/core";
 import { writeTextFileAtomic } from "@boreal/storage";
 
 export interface CliOutput {
@@ -12,6 +12,7 @@ export interface CliOutput {
 export interface CliSuccessEnvelope {
   readonly ok: true;
   readonly data: unknown;
+  readonly agentDirectives?: readonly AgentDirectiveBundle[];
 }
 
 export interface ResultSpoolingOutput extends CliOutput {
@@ -24,9 +25,20 @@ export interface ResultSpoolingOptions {
   readonly maxResultSizeChars: number;
 }
 
-export function formatRecord(value: unknown, json: boolean): string {
+export function formatRecord(
+  value: unknown,
+  json: boolean,
+  options: { readonly agentDirectives?: readonly AgentDirectiveBundle[] } = {}
+): string {
   if (json) {
-    return `${JSON.stringify({ ok: true, data: value } satisfies CliSuccessEnvelope, null, 2)}\n`;
+    const envelope: CliSuccessEnvelope = {
+      ok: true,
+      data: value,
+      ...(options.agentDirectives && options.agentDirectives.length > 0
+        ? { agentDirectives: options.agentDirectives }
+        : {})
+    };
+    return `${JSON.stringify(envelope, null, 2)}\n`;
   }
   if (typeof value === "string") {
     return `${value}\n`;

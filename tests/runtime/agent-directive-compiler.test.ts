@@ -791,6 +791,48 @@ describe("agent directive bundle assembly", () => {
     expect(next?.lifecycle).toBe("blocked");
   });
 
+  it("does not emit recovery obligations when doctor and sync are clean", () => {
+    const snapshot = agentDirectiveCompilerSnapshotFixture({
+      commandPath: "doctor",
+      subjectType: "workspace",
+      doctorOk: true,
+      syncOk: true,
+      ledgersFresh: true,
+      searchIndexFresh: true,
+      sqliteCacheFresh: true,
+      doctorDiagnostics: [],
+      recommendedCommandPath: "bwrk work list --ready --json"
+    });
+    const result = compileRecoveryAgentDirectiveBundle({ snapshot });
+
+    expect(result.ok).toBe(true);
+    expect(result.selectedRegistryIds).toEqual(["workflow_next.canonical-next-step"]);
+    expect(result.bundle?.directives.map((directive) => directive.registryId)).toEqual([
+      "workflow_next.canonical-next-step"
+    ]);
+    expect(result.bundle?.conflicts).toEqual([]);
+    expect(result.bundle?.missingRequired).toEqual([]);
+  });
+
+  it("does not select memory reconciliation on sync refresh without source context", () => {
+    const snapshot = agentDirectiveCompilerSnapshotFixture({
+      commandPath: "sync refresh",
+      subjectType: "workspace",
+      doctorOk: true,
+      syncOk: true,
+      ledgersFresh: true,
+      searchIndexFresh: true,
+      sqliteCacheFresh: true,
+      doctorDiagnostics: [],
+      recommendedCommandPath: "bwrk work list --ready --json"
+    });
+    const result = compileRecoveryAgentDirectiveBundle({ snapshot });
+
+    expect(result.ok).toBe(true);
+    expect(result.selectedRegistryIds).toEqual(["workflow_next.canonical-next-step"]);
+    expect(result.bundle?.missingRequired).toEqual([]);
+  });
+
   it("compiles session handoff directives with branch, status, verification, blockers, and next workflow data", () => {
     const gate = gateStateFixture({
       id: "bw_gate_handoff0001",

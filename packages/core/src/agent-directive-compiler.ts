@@ -201,7 +201,8 @@ export interface AgentDirectiveRecoveryCompilationResult extends AgentDirectiveB
 
 export function selectAgentDirectiveRegistryEntries(
   snapshot: AgentDirectiveSnapshot,
-  registry: AgentDirectiveRegistry = AGENT_DIRECTIVE_REGISTRY
+  registry: AgentDirectiveRegistry = AGENT_DIRECTIVE_REGISTRY,
+  options: { readonly dataByRegistryId?: AgentDirectiveAssemblyDataByRegistryId } = {}
 ): readonly AgentDirectiveRegistrySelection[] {
   const snapshotIssues = agentDirectiveSnapshotIssues(snapshot);
   if (snapshotIssues.length > 0) {
@@ -212,7 +213,7 @@ export function selectAgentDirectiveRegistryEntries(
     return [];
   }
   return registry.entries.flatMap((registryEntry) => {
-    const selectedBy = registryEntrySelectedBy(registryEntry, snapshot);
+    const selectedBy = registryEntrySelectedBy(registryEntry, snapshot, options.dataByRegistryId ?? {});
     return selectedBy.length > 0 ? [{ registryEntry, selectedBy }] : [];
   });
 }
@@ -236,7 +237,9 @@ export function assembleAgentDirectiveBundle(
     };
   }
 
-  const selections = selectAgentDirectiveRegistryEntries(input.snapshot, registry);
+  const selections = selectAgentDirectiveRegistryEntries(input.snapshot, registry, {
+    dataByRegistryId: input.dataByRegistryId
+  });
   const snapshotHash = agentDirectiveSnapshotHash(input.snapshot);
   const dataIssues: AgentDirectiveBundleAssemblyIssue[] = [...staleDataReferenceIssues(input.dataByRegistryId, registry)];
   const missingRequired: AgentDirectiveMissingRequiredEntry[] = [];
@@ -620,7 +623,8 @@ export function compileRecoveryAgentDirectiveBundle(
 
 function registryEntrySelectedBy(
   registryEntry: AgentDirectiveRegistryEntry,
-  snapshot: AgentDirectiveSnapshot
+  snapshot: AgentDirectiveSnapshot,
+  dataByRegistryId: AgentDirectiveAssemblyDataByRegistryId
 ): readonly string[] {
   if (registryEntry.lifecycle !== "active") {
     return [];
@@ -674,7 +678,39 @@ function registryEntrySelectedBy(
     selectedBy.push("applies.gate");
   }
 
+  if (!registryEntryRuntimePreconditionsMatch(registryEntry, snapshot, dataByRegistryId)) {
+    return [];
+  }
+
   return selectedBy;
+}
+
+function registryEntryRuntimePreconditionsMatch(
+  registryEntry: AgentDirectiveRegistryEntry,
+  snapshot: AgentDirectiveSnapshot,
+  dataByRegistryId: AgentDirectiveAssemblyDataByRegistryId
+): boolean {
+  switch (registryEntry.id) {
+    case "doctor.recovery-required":
+      return needsDoctorRecoveryDirective(snapshot);
+    case "memory.reconcile-source":
+      return snapshot.command.path !== "sync refresh" || dataByRegistryId["memory.reconcile-source"] !== undefined;
+    default:
+      return true;
+  }
+}
+
+function needsDoctorRecoveryDirective(snapshot: AgentDirectiveSnapshot): boolean {
+  const syncNeedsRefresh =
+    !snapshot.sync.ok ||
+    !snapshot.sync.ledgersFresh ||
+    !snapshot.sync.searchIndexFresh ||
+    !snapshot.sync.sqliteCacheFresh;
+  const operationNeedsPrune =
+    snapshot.sync.operationCount !== undefined &&
+    snapshot.sync.warningThreshold !== undefined &&
+    snapshot.sync.operationCount >= snapshot.sync.warningThreshold;
+  return !snapshot.doctor.ok || syncNeedsRefresh || operationNeedsPrune || attentionDiagnostics(snapshot).length > 0;
 }
 
 function directiveDataIssues(
@@ -1089,7 +1125,6 @@ function doctorRecoveryCommands(
   ];
   const syncNeedsRefresh =
     !snapshot.sync.ok ||
-    !snapshot.sync.refreshed ||
     !snapshot.sync.ledgersFresh ||
     !snapshot.sync.searchIndexFresh ||
     !snapshot.sync.sqliteCacheFresh;
