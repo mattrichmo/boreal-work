@@ -117,6 +117,8 @@ export interface AgentDirectiveGateStateSnapshot {
   readonly dirtyPathNotes: readonly string[];
   readonly directiveIds: readonly AgentDirectiveId[];
   readonly acknowledgementIds: readonly string[];
+  readonly declaredCommand?: string;
+  readonly expectedObservable?: string;
   readonly forceReasonCode?: CloseoutGateForceReasonCode;
 }
 
@@ -442,6 +444,8 @@ function gateStateIssues(value: unknown, path: string): readonly AgentDirectiveS
     ...stringArrayIssues(value.dirtyPathNotes, `${path}.dirtyPathNotes`),
     ...stringArrayIssues(value.directiveIds, `${path}.directiveIds`),
     ...stringArrayIssues(value.acknowledgementIds, `${path}.acknowledgementIds`),
+    ...optionalNonEmptyStringIssues(value.declaredCommand, `${path}.declaredCommand`),
+    ...optionalNonEmptyStringIssues(value.expectedObservable, `${path}.expectedObservable`),
     ...optionalNonEmptyStringIssues(value.forceReasonCode, `${path}.forceReasonCode`)
   ];
 }

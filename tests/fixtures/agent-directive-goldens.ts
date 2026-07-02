@@ -377,10 +377,15 @@ export const AGENT_DIRECTIVE_GOLDEN_CASES: readonly AgentDirectiveGoldenCase[] =
       severity: "required",
       kind: "obligation",
       blocksCloseout: true,
-      triggerCodes: ["close.no-passing-verification", "gate.verification.unsatisfied"],
+      triggerCodes: [
+        "close.no-passing-verification",
+        "gate.verification.unsatisfied",
+        "gate.declared-command.missing",
+        "gate.expected-observable.missing"
+      ],
       nextCommandTemplate: "<validation-command>",
       requiredKeys: ["subjectId", "command", "expectedVerdict"],
-      optionalKeys: ["evidenceIds", "verificationIds"]
+      optionalKeys: ["gateIds", "declaredCommands", "expectedObservable", "expectedObservables", "evidenceIds", "verificationIds"]
     }
   },
   {

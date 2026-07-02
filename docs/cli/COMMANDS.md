@@ -683,7 +683,7 @@ JSON `data` shape:
 ## `work create`
 
 ```bash
-bwrk work create <title> [--description <text>] [--priority low|normal|high|critical] [--kind <kind>] [--label <label>...] [--acceptance <text>...] [--required-gate verification|checkpoint|review|audit[:self|direct_children|descendants]...] [--source <source-ref>...] [--ready] [--json]
+bwrk work create <title> [--description <text>] [--priority low|normal|high|critical] [--kind <kind>] [--label <label>...] [--acceptance <text>...] [--required-gate verification|checkpoint|review|audit[:self|direct_children|descendants]...] [--gate-command <command>...] [--gate-expect <text>...] [--source <source-ref>...] [--ready] [--json]
 ```
 
 Creates a work item. `--label`, `--acceptance`, `--required-gate`, and `--source` may be repeated. Source references are stored on the work record metadata so promoted discoveries keep their original context.
@@ -693,6 +693,7 @@ Behavior:
 - Default `kind` is `task`.
 - Default `priority` is `normal`.
 - `--required-gate` stores first-class closeout gate metadata on the work record. Use `kind` for a self-scoped gate or `kind:scope` for `self`, `direct_children`, or `descendants`; for example `--required-gate review --required-gate audit:descendants`.
+- `--gate-command` and `--gate-expect` attach declared command and observable metadata to the same-index `--required-gate`.
 - `--ready` marks the new item ready in the same runtime write transaction.
 
 Example:
@@ -1167,10 +1168,12 @@ Closes a work item. Runtime policy requires a passing verification before close,
 ## `work edit`
 
 ```bash
-bwrk work edit <work-ref> [--title <text>] [--description <text>] [--kind issue|task|sprint|milestone] [--priority low|normal|high|critical] [--label <label>...] [--acceptance <text>...] [--required-gate verification|checkpoint|review|audit[:self|direct_children|descendants]...|--clear-required-gates] [--force-gate <gate-id|kind[:scope]>... --force-gate-reason <code> --force-gate-comment <text>] [--force-gate-evidence <evidence-id>...] [--json]
+bwrk work edit <work-ref> [--title <text>] [--description <text>] [--kind issue|task|sprint|milestone] [--priority low|normal|high|critical] [--label <label>...] [--acceptance <text>...] [--required-gate verification|checkpoint|review|audit[:self|direct_children|descendants]... [--gate-command <command>...] [--gate-expect <text>...]|--clear-required-gates] [--force-gate <gate-id|kind[:scope]>... --force-gate-reason <code> --force-gate-comment <text>] [--force-gate-evidence <evidence-id>...] [--json]
 ```
 
 Updates mutable work fields while preserving source refs, evidence IDs, verification IDs, dependencies, reservation history, and audit events. Repeated `--label` and `--acceptance` values replace those lists. Repeated `--required-gate` replaces required closeout gate metadata; `--clear-required-gates` removes it.
+
+Use `--gate-command` and `--gate-expect` with repeated `--required-gate` values to replace declared command and observable metadata for the same-index required gate.
 
 Use `--force-gate` for an audited bypass of an existing required gate, not as normal satisfaction. It accepts a gate id, kind, or `kind:scope`, requires `--force-gate-reason` and `--force-gate-comment`, and may attach support records with repeated `--force-gate-evidence`. Allowed force reason codes are `review_unavailable`, `audit_unavailable`, `external_review_record`, `legacy_backfill`, `user_accepted_risk`, and `emergency_closeout`. `--force-summary` does not force required review or audit gates.
 

@@ -3381,6 +3381,40 @@ describe("bwrk cli", () => {
     expect(textGuide.stdout).toContain("bwrk doctor --fix --json");
   });
 
+  it("echoes the active declared gate command in agent guide finish and evidence hints", async () => {
+    const rootDir = await makeTempWorkspace();
+    await runCli(rootDir, ["init", "--json"]);
+
+    const declaredCommand = "pnpm test --filter agent-guide-declared";
+    const work = parseData<{ readonly meta: { readonly id: string } }>(
+      (
+        await runCli(rootDir, [
+          "work",
+          "create",
+          "Guide declared gate target",
+          "--label",
+          "guide-declared",
+          "--required-gate",
+          "verification",
+          "--gate-command",
+          declaredCommand,
+          "--gate-expect",
+          "agent guide declared gate passed",
+          "--ready",
+          "--json"
+        ])
+      ).stdout
+    );
+    await runCli(rootDir, ["work", "reserve", work.meta.id, "--agent", "guide-agent", "--json"]);
+
+    const guide = parseData<{
+      readonly commands: { readonly finish: string; readonly evidence: string };
+    }>((await runCli(rootDir, ["agent", "guide", "--agent", "guide-agent", "--label", "guide-declared", "--json"])).stdout);
+
+    expect(guide.commands.finish).toContain(`--command '${declaredCommand}'`);
+    expect(guide.commands.evidence).toContain(`--command '${declaredCommand}'`);
+  });
+
   it("primes and summarizes agent protocol sessions", async () => {
     const rootDir = await makeTempWorkspace();
     await runCli(rootDir, ["init", "--json"]);
@@ -9083,6 +9117,140 @@ describe("bwrk cli", () => {
         })
       })
     ]);
+  });
+
+  it("round-trips declared gate command and observable fields through create, edit, and show", async () => {
+    const rootDir = await makeTempWorkspace();
+    await runCli(rootDir, ["init", "--json"]);
+
+    const declaredCommand = "pnpm test --filter declared-gate";
+    const expectedObservable = "declared gate passed";
+    const work = parseData<{
+      readonly meta: { readonly id: string };
+      readonly requiredCloseoutGates: readonly Array<{
+        readonly kind: string;
+        readonly declaredCommand?: string;
+        readonly expectedObservable?: string;
+      }>;
+    }>(
+      (
+        await runCli(rootDir, [
+          "work",
+          "create",
+          "Declared gate create target",
+          "--required-gate",
+          "verification",
+          "--gate-command",
+          declaredCommand,
+          "--gate-expect",
+          expectedObservable,
+          "--ready",
+          "--json"
+        ])
+      ).stdout
+    );
+    expect(work.requiredCloseoutGates).toEqual([
+      expect.objectContaining({
+        kind: "verification",
+        declaredCommand,
+        expectedObservable
+      })
+    ]);
+
+    const shown = parseData<{
+      readonly requiredCloseoutGates: readonly Array<{
+        readonly declaredCommand?: string;
+        readonly expectedObservable?: string;
+      }>;
+      readonly gaps?: readonly Array<{
+        readonly code: string;
+        readonly data?: { readonly declaredCommand?: string; readonly expectedObservable?: string };
+      }>;
+    }>((await runCli(rootDir, ["work", "show", work.meta.id, "--json"])).stdout);
+    expect(shown.requiredCloseoutGates).toEqual([
+      expect.objectContaining({
+        declaredCommand,
+        expectedObservable
+      })
+    ]);
+    expect(shown.gaps).toEqual([
+      expect.objectContaining({
+        code: "gate.declared-command.missing",
+        data: expect.objectContaining({
+          declaredCommand,
+          expectedObservable
+        })
+      })
+    ]);
+
+    const reviewCommand = "pnpm exec vitest run tests/runtime/declared-review.test.ts";
+    const edited = parseData<{
+      readonly work: {
+        readonly requiredCloseoutGates: readonly Array<{
+          readonly kind: string;
+          readonly declaredCommand?: string;
+          readonly expectedObservable?: string;
+        }>;
+      };
+    }>(
+      (
+        await runCli(rootDir, [
+          "work",
+          "edit",
+          work.meta.id,
+          "--required-gate",
+          "review",
+          "--gate-command",
+          reviewCommand,
+          "--gate-expect",
+          "review observable passed",
+          "--json"
+        ])
+      ).stdout
+    );
+    expect(edited.work.requiredCloseoutGates).toEqual([
+      expect.objectContaining({
+        kind: "review",
+        declaredCommand: reviewCommand,
+        expectedObservable: "review observable passed"
+      })
+    ]);
+
+    const missingGate = await runCli(rootDir, [
+      "work",
+      "create",
+      "Invalid declared gate target",
+      "--gate-command",
+      "pnpm test",
+      "--json"
+    ]);
+    expect(missingGate.exitCode).toBe(2);
+    expect(parseJson<{ readonly code: string; readonly message: string }>(missingGate.stderr)).toEqual(
+      expect.objectContaining({
+        code: "BOREAL_INVALID_INPUT",
+        message: "--gate-command and --gate-expect require --required-gate"
+      })
+    );
+
+    const tooManyCommands = await runCli(rootDir, [
+      "work",
+      "edit",
+      work.meta.id,
+      "--required-gate",
+      "review",
+      "--gate-command",
+      "pnpm test",
+      "--gate-command",
+      "pnpm lint",
+      "--json"
+    ]);
+    expect(tooManyCommands.exitCode).toBe(2);
+    expect(parseJson<{ readonly code: string; readonly message: string }>(tooManyCommands.stderr)).toEqual(
+      expect.objectContaining({
+        code: "BOREAL_INVALID_INPUT",
+        message: "--gate-command and --gate-expect must not be repeated more times than --required-gate"
+      })
+    );
   });
 
   it("forces planned required gates through work edit with audited metadata", async () => {

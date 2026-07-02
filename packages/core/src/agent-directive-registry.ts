@@ -82,7 +82,12 @@ export const AGENT_DIRECTIVE_REGISTRY: AgentDirectiveRegistry = {
       title: "Attach passed verification evidence",
       instruction:
         "Run the required validation command and attach passed verification evidence before reporting the work as complete.",
-      triggerCodes: ["close.no-passing-verification", "gate.verification.unsatisfied"],
+      triggerCodes: [
+        "close.no-passing-verification",
+        "gate.verification.unsatisfied",
+        "gate.declared-command.missing",
+        "gate.expected-observable.missing"
+      ],
       nextCommandTemplate: "<validation-command>",
       blocksCloseout: true,
       acknowledgement: {
@@ -94,6 +99,10 @@ export const AGENT_DIRECTIVE_REGISTRY: AgentDirectiveRegistry = {
         requirement("subjectId", "id", true, "Work, sprint, phase, or milestone id under verification."),
         requirement("command", "string", true, "Validation command that must be run or referenced."),
         requirement("expectedVerdict", "string", true, "Expected verification verdict."),
+        requirement("gateIds", "array", false, "Open declared verification gate ids."),
+        requirement("declaredCommands", "array", false, "Declared commands attached to open verification gates."),
+        requirement("expectedObservable", "string", false, "Observable text expected in matching evidence."),
+        requirement("expectedObservables", "array", false, "Observable texts expected by open verification gates."),
         requirement("evidenceIds", "array", false, "Evidence ids attached to the subject."),
         requirement("verificationIds", "array", false, "Verification ids attached to the subject.")
       ]

@@ -863,7 +863,7 @@ export const COMMAND_DEFINITIONS: readonly CommandDefinition[] = [
     category: "work",
     summary: "Create a work item.",
     usage:
-      "bwrk work create <title> [--description <text>] [--priority low|normal|high|critical] [--kind <kind>] [--label <label>...] [--acceptance <text>...] [--required-gate verification|checkpoint|review|audit[:self|direct_children|descendants]...] [--source <source-ref>...] [--ready] [--json]",
+      "bwrk work create <title> [--description <text>] [--priority low|normal|high|critical] [--kind <kind>] [--label <label>...] [--acceptance <text>...] [--required-gate verification|checkpoint|review|audit[:self|direct_children|descendants]...] [--gate-command <command>...] [--gate-expect <text>...] [--source <source-ref>...] [--ready] [--json]",
     flags: [
       flag("description", "value", "Work description."),
       flag("priority", "value", "Work priority: low, normal, high, or critical."),
@@ -871,6 +871,8 @@ export const COMMAND_DEFINITIONS: readonly CommandDefinition[] = [
       flag("label", "value", "Label to attach to the work item.", true),
       flag("acceptance", "value", "Acceptance criterion.", true),
       flag("required-gate", "value", "Required closeout gate as kind or kind:scope. Repeat for multiple gates.", true),
+      flag("gate-command", "value", "Declared command for the same-index required gate.", true),
+      flag("gate-expect", "value", "Expected observable text for the same-index required gate.", true),
       flag("source", "value", "Source reference to preserve on the work item.", true),
       flag("ready", "boolean", "Create the item as ready when policy allows it."),
     ],
@@ -1124,7 +1126,7 @@ export const COMMAND_DEFINITIONS: readonly CommandDefinition[] = [
     path: ["work", "edit"],
     category: "work",
     summary: "Edit work item fields.",
-    usage: "bwrk work edit <work-ref> [--title <text>] [--description <text>] [--kind issue|task|sprint|milestone] [--priority low|normal|high|critical] [--label <label>...] [--acceptance <text>...] [--required-gate verification|checkpoint|review|audit[:self|direct_children|descendants]...|--clear-required-gates] [--force-gate <gate-id|kind[:scope]>... --force-gate-reason <code> --force-gate-comment <text>] [--force-gate-evidence <evidence-id>...] [--json]",
+    usage: "bwrk work edit <work-ref> [--title <text>] [--description <text>] [--kind issue|task|sprint|milestone] [--priority low|normal|high|critical] [--label <label>...] [--acceptance <text>...] [--required-gate verification|checkpoint|review|audit[:self|direct_children|descendants]... [--gate-command <command>...] [--gate-expect <text>...]|--clear-required-gates] [--force-gate <gate-id|kind[:scope]>... --force-gate-reason <code> --force-gate-comment <text>] [--force-gate-evidence <evidence-id>...] [--json]",
     description: "Updates mutable work fields while preserving source refs, evidence, verification, dependencies, and audit events.",
     flags: [
       flag("title", "value", "Replacement title."),
@@ -1134,6 +1136,8 @@ export const COMMAND_DEFINITIONS: readonly CommandDefinition[] = [
       flag("label", "value", "Replacement labels. Repeat to set multiple labels.", true),
       flag("acceptance", "value", "Replacement acceptance criteria. Repeat to set multiple criteria.", true),
       flag("required-gate", "value", "Replacement required closeout gate as kind or kind:scope. Repeat to set multiple gates.", true),
+      flag("gate-command", "value", "Declared command for the same-index replacement required gate.", true),
+      flag("gate-expect", "value", "Expected observable text for the same-index replacement required gate.", true),
       flag("clear-required-gates", "boolean", "Remove required closeout gate metadata from the work item."),
       flag("force-gate", "value", "Required gate id, kind, or kind:scope to force. Repeat to force multiple gates.", true),
       flag("force-gate-reason", "value", "Machine-readable reason code for forced gate bypass."),

@@ -21,6 +21,7 @@ import { AGENT_DIRECTIVE_REGISTRY } from "./agent-directive-registry.js";
 import {
   agentDirectiveSnapshotHash,
   agentDirectiveSnapshotIssues,
+  type AgentDirectiveGateStateSnapshot,
   type AgentDirectiveSnapshot
 } from "./agent-directive-snapshot.js";
 import type { EnforcementGapCode } from "./enforcement-gaps.js";
@@ -346,8 +347,12 @@ export function closeoutDirectiveDataByRegistryId(
     "git.checkpoint-required": gitCheckpointDirectiveData(snapshot, options.summaryOutcome, options),
     "verification.evidence-required": dataRecord([
       ["subjectId", subjectId],
-      ["command", options.validationCommand ?? latestEvidenceCommand(snapshot)],
+      ["command", options.validationCommand ?? firstOpenDeclaredGateCommand(snapshot) ?? latestEvidenceCommand(snapshot)],
       ["expectedVerdict", options.expectedVerificationVerdict ?? "passed"],
+      ["gateIds", openDeclaredGatesByKind(snapshot, "verification").map((gate) => gate.id)],
+      ["declaredCommands", uniqueStrings(openDeclaredGatesByKind(snapshot, "verification").flatMap((gate) => gate.declaredCommand ? [gate.declaredCommand] : []))],
+      ["expectedObservable", firstOpenDeclaredGateObservable(snapshot)],
+      ["expectedObservables", uniqueStrings(openDeclaredGatesByKind(snapshot, "verification").flatMap((gate) => gate.expectedObservable ? [gate.expectedObservable] : []))],
       ["evidenceIds", evidenceIds],
       ["verificationIds", verificationIds]
     ]),
@@ -582,6 +587,7 @@ export function recoveryDirectiveDataByRegistryId(
   const nextCommandPath = options.nextCommandPath ?? snapshot.workflow.recommendedCommandPath;
 
   return {
+    ...declaredGateDirectiveDataByRegistryId(snapshot),
     "blocked.resolve-blockers": dataRecord([
       ["subjectId", subjectId],
       ["blockerIds", blockerIds],
@@ -753,6 +759,12 @@ function triggerCodesForSnapshot(snapshot: AgentDirectiveSnapshot): Set<Enforcem
     if (gate.status !== "open") {
       continue;
     }
+    if (gate.declaredCommand !== undefined) {
+      codes.add("gate.declared-command.missing");
+    }
+    if (gate.expectedObservable !== undefined) {
+      codes.add("gate.expected-observable.missing");
+    }
     switch (gate.kind) {
       case "verification":
         codes.add("gate.verification.unsatisfied");
@@ -777,6 +789,28 @@ function triggerCodesForSnapshot(snapshot: AgentDirectiveSnapshot): Set<Enforcem
   }
 
   return codes;
+}
+
+function declaredGateDirectiveDataByRegistryId(snapshot: AgentDirectiveSnapshot): AgentDirectiveAssemblyDataByRegistryId {
+  const verificationGates = openDeclaredGatesByKind(snapshot, "verification");
+  const reviewGates = openDeclaredGatesByKind(snapshot, "review");
+  const auditGates = openDeclaredGatesByKind(snapshot, "audit");
+  return {
+    ...(verificationGates.length > 0
+      ? { "verification.evidence-required": gateRequirementData(snapshot, "verification", verificationGates) }
+      : {}),
+    ...(reviewGates.length > 0 ? { "review.gate-required": gateRequirementData(snapshot, "review", reviewGates) } : {}),
+    ...(auditGates.length > 0 ? { "audit.gate-required": gateRequirementData(snapshot, "audit", auditGates) } : {})
+  };
+}
+
+function openDeclaredGatesByKind(
+  snapshot: AgentDirectiveSnapshot,
+  kind: string
+): readonly AgentDirectiveGateStateSnapshot[] {
+  return snapshot.gate.requiredGates.filter(
+    (gate) => gate.kind === kind && gate.status === "open" && gate.declaredCommand !== undefined
+  );
 }
 
 function registryEntryRuntimePreconditionsMatch(
@@ -1059,13 +1093,21 @@ function uniqueConflicts(conflicts: AgentDirectiveBundle["conflicts"]): AgentDir
   return output;
 }
 
-function gateRequirementData(snapshot: AgentDirectiveSnapshot, kind: string): AgentDirectiveData {
-  const gates = snapshot.gate.requiredGates.filter((gate) => gate.kind === kind);
+function gateRequirementData(
+  snapshot: AgentDirectiveSnapshot,
+  kind: string,
+  gates: readonly AgentDirectiveGateStateSnapshot[] = snapshot.gate.requiredGates.filter((gate) => gate.kind === kind)
+): AgentDirectiveData {
   return dataRecord([
     ["subjectId", snapshot.work.subject?.id],
     ["gateIds", gates.map((gate) => gate.id)],
     ["requiredEvidenceKinds", uniqueStrings(gates.flatMap((gate) => gate.requiredEvidenceKinds))],
     ["minEvidenceCount", maxNumber(gates.map((gate) => gate.minEvidenceCount))],
+    ["command", firstString(gates.map((gate) => gate.declaredCommand))],
+    ["expectedVerdict", "passed"],
+    ["declaredCommands", uniqueStrings(gates.flatMap((gate) => gate.declaredCommand ? [gate.declaredCommand] : []))],
+    ["expectedObservable", firstString(gates.map((gate) => gate.expectedObservable))],
+    ["expectedObservables", uniqueStrings(gates.flatMap((gate) => gate.expectedObservable ? [gate.expectedObservable] : []))],
     ["forceReasonCode", gates.find((gate) => gate.forceReasonCode !== undefined)?.forceReasonCode]
   ]);
 }
@@ -1086,6 +1128,8 @@ function gateStateDataValues(snapshot: AgentDirectiveSnapshot): readonly AgentDi
       ["agentSummaryIds", gate.agentSummaryIds],
       ["commitShas", gate.commitShas],
       ["dirtyPathNotes", gate.dirtyPathNotes],
+      ["declaredCommand", gate.declaredCommand],
+      ["expectedObservable", gate.expectedObservable],
       ["forceReasonCode", gate.forceReasonCode]
     ])
   );
@@ -1233,6 +1277,18 @@ function doctorRecoveryCommands(
 
 function maxNumber(values: readonly number[]): number {
   return values.length === 0 ? 0 : Math.max(...values);
+}
+
+function firstString(values: readonly (string | undefined)[]): string | undefined {
+  return values.find((value) => value !== undefined && value.trim().length > 0);
+}
+
+function firstOpenDeclaredGateCommand(snapshot: AgentDirectiveSnapshot): string | undefined {
+  return firstString(openDeclaredGatesByKind(snapshot, "verification").map((gate) => gate.declaredCommand));
+}
+
+function firstOpenDeclaredGateObservable(snapshot: AgentDirectiveSnapshot): string | undefined {
+  return firstString(openDeclaredGatesByKind(snapshot, "verification").map((gate) => gate.expectedObservable));
 }
 
 function gitCheckpointDirectiveData(

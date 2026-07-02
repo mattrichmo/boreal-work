@@ -728,6 +728,64 @@ describe("CLI agent directive envelopes", () => {
     expect(() => assertAgentDirectiveBundle(bundle)).not.toThrow();
   });
 
+  it("surfaces declared gate directives from work show, work claim, and agent start", async () => {
+    const rootDir = await makeTempWorkspace();
+    await runCli(rootDir, ["init", "--json"]);
+
+    const declaredCommand = "pnpm test --filter declared-directive";
+    const expectedObservable = "declared directive passed";
+    const createDeclaredWork = async (label: string) =>
+      parseEnvelope<{ readonly meta: { readonly id: string } }>(
+        (
+          await runCli(rootDir, [
+            "work",
+            "create",
+            `Declared directive ${label}`,
+            "--label",
+            label,
+            "--required-gate",
+            "verification",
+            "--gate-command",
+            declaredCommand,
+            "--gate-expect",
+            expectedObservable,
+            "--ready",
+            "--json"
+          ])
+        ).stdout
+      );
+
+    const showWork = await createDeclaredWork("declared-show");
+    const shown = parseEnvelope<{ readonly id: string }>(
+      (await runCli(rootDir, ["work", "show", showWork.data.meta.id, "--json"])).stdout
+    );
+    expectDeclaredGateDirective(shown.agentDirectives, declaredCommand, expectedObservable);
+
+    await createDeclaredWork("declared-claim");
+    const claimed = parseEnvelope<{ readonly claimed: boolean }>(
+      (await runCli(rootDir, ["work", "claim", "--agent", "declared-claim-agent", "--label", "declared-claim", "--json"])).stdout
+    );
+    expect(claimed.data.claimed).toBe(true);
+    expectDeclaredGateDirective(claimed.agentDirectives, declaredCommand, expectedObservable);
+
+    await createDeclaredWork("declared-start");
+    const started = parseEnvelope<{ readonly started: boolean; readonly action: string }>(
+      (
+        await runCli(rootDir, [
+          "agent",
+          "start",
+          "--agent",
+          "declared-start-agent",
+          "--label",
+          "declared-start",
+          "--json"
+        ])
+      ).stdout
+    );
+    expect(started.data).toEqual(expect.objectContaining({ started: true, action: "claimed_work" }));
+    expectDeclaredGateDirective(started.agentDirectives, declaredCommand, expectedObservable);
+  });
+
   it("keeps non-directive JSON command envelopes compatible with existing data consumers", async () => {
     const rootDir = await makeTempWorkspace();
     const initialized = parseEnvelope<{ readonly initialized: boolean; readonly workspaceRoot: string }>(
@@ -1043,6 +1101,29 @@ function parseLegacyData<T>(text: string): T {
 
 function registryIds(agentDirectives: readonly AgentDirectiveBundle[] | undefined): readonly string[] {
   return agentDirectives?.flatMap((bundle) => bundle.directives.map((directive) => directive.registryId)) ?? [];
+}
+
+function expectDeclaredGateDirective(
+  agentDirectives: readonly AgentDirectiveBundle[] | undefined,
+  declaredCommand: string,
+  expectedObservable: string
+): void {
+  const directive = agentDirectives
+    ?.flatMap((bundle) => bundle.directives)
+    .find((candidate) => candidate.registryId === "verification.evidence-required");
+  expect(directive).toBeDefined();
+  expect(directive?.triggerCodes).toEqual(
+    expect.arrayContaining(["gate.declared-command.missing", "gate.expected-observable.missing"])
+  );
+  expect(directive?.data).toEqual(
+    expect.objectContaining({
+      command: declaredCommand,
+      expectedObservable,
+      expectedObservables: [expectedObservable],
+      declaredCommands: [declaredCommand],
+      gateIds: [expect.stringMatching(/^bw_gate_[a-f0-9]{16}$/)]
+    })
+  );
 }
 
 async function updateRuntimeState(

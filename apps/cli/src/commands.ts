@@ -3293,7 +3293,7 @@ async function agentCommand(
 ): Promise<CommandResult> {
   switch (action) {
     case "guide": {
-      const guide = buildAgentGuide(agentIdFromArgs(args, context.actor.id), labelsFromArgs(args));
+      const guide = await buildAgentGuide(context, agentIdFromArgs(args, context.actor.id), labelsFromArgs(args));
       output.write(json ? formatRecord(guide, true) : formatAgentGuide(guide));
       return { exitCode: 0 };
     }
@@ -7332,6 +7332,8 @@ function directiveGateStatesFromCloseoutStatus(status: CloseoutGateStatusView): 
     dirtyPathNotes: gate.satisfiedBy?.dirtyPathNotes ?? [],
     directiveIds: uniqueValues([...(gate.satisfiedBy?.directiveIds ?? []), ...(gate.force?.directiveIds ?? [])]),
     acknowledgementIds: uniqueStrings([...(gate.satisfiedBy?.acknowledgementIds ?? []), ...(gate.force?.acknowledgementIds ?? [])]),
+    ...(gate.declaredCommand ? { declaredCommand: gate.declaredCommand } : {}),
+    ...(gate.expectedObservable ? { expectedObservable: gate.expectedObservable } : {}),
     ...(gate.force ? { forceReasonCode: gate.force.reason } : {})
   }));
 }
@@ -11108,16 +11110,43 @@ function sourceRefsFromArgs(args: ParsedArgs): readonly SourceRef[] {
 }
 
 function requiredCloseoutGateInputsFromArgs(args: ParsedArgs): readonly RequiredCloseoutGateInput[] {
-  return flagValues(args, "required-gate").map((value) => {
+  const gateValues = flagValues(args, "required-gate");
+  const gateCommands = flagValues(args, "gate-command");
+  const gateExpectedObservables = flagValues(args, "gate-expect");
+  if (gateValues.length === 0 && (gateCommands.length > 0 || gateExpectedObservables.length > 0)) {
+    throw new BorealError("BOREAL_INVALID_INPUT", "--gate-command and --gate-expect require --required-gate");
+  }
+  if (gateCommands.length > gateValues.length || gateExpectedObservables.length > gateValues.length) {
+    throw new BorealError(
+      "BOREAL_INVALID_INPUT",
+      "--gate-command and --gate-expect must not be repeated more times than --required-gate"
+    );
+  }
+  return gateValues.map((value, index) => {
     const [kindValue, scopeValue, extra] = value.split(":");
     if (!kindValue || extra !== undefined) {
       throw new BorealError("BOREAL_INVALID_INPUT", "--required-gate must use kind or kind:scope");
     }
+    const declaredCommand = optionalRequiredGateText(gateCommands[index], "--gate-command");
+    const expectedObservable = optionalRequiredGateText(gateExpectedObservables[index], "--gate-expect");
     return {
       kind: parseCloseoutGateKind(kindValue),
-      scope: parseCloseoutGateScope(scopeValue)
+      scope: parseCloseoutGateScope(scopeValue),
+      ...(declaredCommand ? { declaredCommand } : {}),
+      ...(expectedObservable ? { expectedObservable } : {})
     };
   });
+}
+
+function optionalRequiredGateText(value: string | undefined, flagName: string): string | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  const trimmed = value.trim();
+  if (!trimmed) {
+    throw new BorealError("BOREAL_INVALID_INPUT", `${flagName} must be non-empty`);
+  }
+  return trimmed;
 }
 
 async function resolveWorkId(
@@ -11244,9 +11273,11 @@ function agentStartBlocked(
   };
 }
 
-function buildAgentGuide(agentId: string, labels: readonly string[]): AgentGuide {
+async function buildAgentGuide(context: CliContext, agentId: string, labels: readonly string[]): Promise<AgentGuide> {
   const normalizedAgentId = normalizeActorId(agentId);
   const normalizedLabels = normalizeLabels(labels);
+  const declaredGateHint = await agentGuideDeclaredGateHint(context, normalizedAgentId, normalizedLabels);
+  const validationCommand = declaredGateHint?.declaredCommand ?? "pnpm test";
   const agentFlag = `--agent ${shellArg(normalizedAgentId)}`;
   const scopedFlags = `${agentFlag}${labelFlags(normalizedLabels)}`;
   const commands = {
@@ -11254,10 +11285,10 @@ function buildAgentGuide(agentId: string, labels: readonly string[]): AgentGuide
     start: `bwrk agent start ${scopedFlags} --purpose ${shellArg("start implementation")} --json`,
     finish:
       `bwrk agent finish <work-id> ${agentFlag} --summary ${shellArg("implemented and tested")} ` +
-      `--command ${shellArg("pnpm test")} --close --reason ${shellArg("verified by evidence")} --json`,
+      `--command ${shellArg(validationCommand)} --close --reason ${shellArg("verified by evidence")} --json`,
     renew: "bwrk work renew <work-id> --ttl 2h --json",
     evidence:
-      "bwrk evidence add <work-id> --summary 'implemented and tested' --kind command --outcome passed --command 'pnpm test' --json",
+      `bwrk evidence add <work-id> --summary ${shellArg("implemented and tested")} --kind command --outcome passed --command ${shellArg(validationCommand)} --json`,
     verify: "bwrk work verify <work-id> --evidence <evidence-id> --verdict passed --json",
     close: "bwrk work close <work-id> --reason 'verified by evidence' --json",
     release: "bwrk work release <work-id> --json",
@@ -11313,6 +11344,45 @@ function buildAgentGuide(agentId: string, labels: readonly string[]): AgentGuide
       }
     ]
   };
+}
+
+async function agentGuideDeclaredGateHint(
+  context: CliContext,
+  agentId: string,
+  labels: readonly string[]
+): Promise<{ readonly declaredCommand: string; readonly expectedObservable?: string } | undefined> {
+  try {
+    const now = Date.now();
+    return await context.store.read(async (reader) => {
+      const [reservations, workItems] = await Promise.all([reader.listReservations(), reader.listWorkItems()]);
+      const workById = new Map(workItems.map((work) => [work.meta.id, work]));
+      const activeRows = reservations
+        .map((reservation) => reservationListRow(reservation, workById.get(reservation.workId), now))
+        .filter((row) => row.agentId === agentId && row.status === "active" && !row.expired)
+        .sort(compareReservationRows);
+      for (const row of activeRows) {
+        const work = workById.get(asWorkId(row.workId));
+        if (!work || !labels.every((label) => work.labels.includes(label))) {
+          continue;
+        }
+        const declaredGate = (work.requiredCloseoutGates ?? []).find(
+          (gate) => gate.status === "open" && gate.declaredCommand !== undefined
+        );
+        if (declaredGate?.declaredCommand) {
+          return {
+            declaredCommand: declaredGate.declaredCommand,
+            ...(declaredGate.expectedObservable ? { expectedObservable: declaredGate.expectedObservable } : {})
+          };
+        }
+      }
+      return undefined;
+    });
+  } catch (error) {
+    if (isBorealError(error)) {
+      return undefined;
+    }
+    throw error;
+  }
 }
 
 function formatAgentGuide(guide: AgentGuide): string {
