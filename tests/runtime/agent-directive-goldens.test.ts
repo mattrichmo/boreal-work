@@ -43,8 +43,8 @@ describe("agent directive golden fixtures", () => {
       expect(registryEntry.severity).toBe(goldenCase.expected.severity);
       expect(registryEntry.kind).toBe(goldenCase.expected.kind);
       expect(Boolean(registryEntry.blocksCloseout)).toBe(goldenCase.expected.blocksCloseout);
-      expect(registryEntry.appliesTo.commandPaths).toContain(goldenCase.commandPath);
-      expect(registryEntry.appliesTo.subjectTypes).toContain(goldenCase.subjectType);
+      expect(registryEntry.triggerCodes).toEqual(goldenCase.expected.triggerCodes);
+      expect(registryEntry.nextCommandTemplate).toBe(goldenCase.expected.nextCommandTemplate);
 
       const requiredKeys = registryEntry.dataRequirements
         .filter((requirement) => requirement.required)

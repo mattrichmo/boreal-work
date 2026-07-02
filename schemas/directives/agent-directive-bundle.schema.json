@@ -99,31 +99,38 @@
         "title": { "type": "string" }
       }
     },
-    "appliesTo": {
-      "type": "object",
-      "required": ["commandPaths"],
-      "properties": {
-        "commandPaths": {
-          "type": "array",
-          "items": { "type": "string", "minLength": 1 }
-        },
-        "subjectTypes": {
-          "type": "array",
-          "items": { "$ref": "#/$defs/subjectType" }
-        },
-        "workStatuses": {
-          "type": "array",
-          "items": { "type": "string", "minLength": 1 }
-        },
-        "labels": {
-          "type": "array",
-          "items": { "type": "string", "minLength": 1 }
-        },
-        "gates": {
-          "type": "array",
-          "items": { "type": "string", "minLength": 1 }
-        }
-      }
+    "triggerCode": {
+      "enum": [
+        "gate.verification.unsatisfied",
+        "gate.checkpoint.unsatisfied",
+        "gate.review.unsatisfied",
+        "gate.audit.unsatisfied",
+        "gate.force.invalid",
+        "gate.declared-command.missing",
+        "gate.declared-command.mismatch",
+        "gate.expected-observable.missing",
+        "gate.expected-observable.mismatch",
+        "work.blocked.open-dependency",
+        "work.container.open-descendant",
+        "reservation.not-ready",
+        "reservation.capacity-exceeded",
+        "reservation.active-conflict",
+        "close.no-passing-verification",
+        "summary.missing",
+        "summary.checkpoint-missing",
+        "directive.acknowledgement-missing",
+        "directive.workflow-next.available",
+        "closeout.user-summary.required",
+        "git.checkpoint.required",
+        "doctor.recovery.required",
+        "memory.reconcile-source.required",
+        "handoff.session-summary.required",
+        "container.descendant-closeout.required",
+        "phase.close-rollup.required",
+        "sprint.close-rollup.required",
+        "sprint.launch-plan.required",
+        "search.index-stale"
+      ]
     },
     "acknowledgement": {
       "type": "object",
@@ -167,9 +174,10 @@
         "lifecycle",
         "title",
         "instruction",
+        "triggerCodes",
+        "nextCommandTemplate",
         "data",
-        "source",
-        "appliesTo"
+        "source"
       ],
       "properties": {
         "id": { "$ref": "#/$defs/stableMachineId" },
@@ -182,10 +190,16 @@
         "lifecycle": { "$ref": "#/$defs/lifecycle" },
         "title": { "type": "string", "minLength": 1 },
         "instruction": { "type": "string", "minLength": 1 },
+        "triggerCodes": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/triggerCode" },
+          "uniqueItems": true,
+          "minItems": 1
+        },
+        "nextCommandTemplate": { "type": "string", "minLength": 1 },
         "data": { "$ref": "#/$defs/directiveData" },
         "source": { "$ref": "#/$defs/source" },
         "subject": { "$ref": "#/$defs/subject" },
-        "appliesTo": { "$ref": "#/$defs/appliesTo" },
         "supersedes": {
           "type": "array",
           "items": { "$ref": "#/$defs/stableMachineId" }

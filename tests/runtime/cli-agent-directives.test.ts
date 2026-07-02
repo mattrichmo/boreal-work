@@ -596,7 +596,7 @@ describe("CLI agent directive envelopes", () => {
       expect.arrayContaining([
         expect.objectContaining({
           registryId: "blocked.resolve-blockers",
-          selectedBy: expect.arrayContaining(["applies.command_path", "applies.subject_type", "applies.work_status"])
+          selectedBy: expect.arrayContaining(["gap.work.blocked.open-dependency"])
         })
       ])
     );
@@ -620,13 +620,12 @@ describe("CLI agent directive envelopes", () => {
       })
     );
     expect(explained.data.selectedBy).toEqual(
-      expect.arrayContaining(["applies.command_path", "applies.subject_type", "applies.work_status"])
+      expect.arrayContaining(["gap.work.blocked.open-dependency"])
     );
     expect(explained.data.selectorChecks).toEqual(
       expect.objectContaining({
-        commandMatches: true,
-        subjectTypeMatches: true,
-        workStatusMatches: true
+        lifecycleActive: true,
+        matchedTriggerCodes: ["work.blocked.open-dependency"]
       })
     );
 
@@ -683,7 +682,7 @@ describe("CLI agent directive envelopes", () => {
           message: "missing required directive data"
         }),
         expect.objectContaining({
-          registryId: "handoff.session-summary",
+          registryId: "closeout.summary-required",
           requirement: "summaryUri",
           message: "missing required directive data"
         })
@@ -1077,6 +1076,8 @@ function agentDirectiveBundleFixture(): AgentDirectiveBundle {
         lifecycle: "active",
         title: "Respond with closeout summary",
         instruction: "Respond to the user with the verified closeout summary in your own words.",
+        triggerCodes: ["closeout.user-summary.required"],
+        nextCommandTemplate: "bwrk summary show <subjectId> --json",
         data: {
           workId: "bw_work_deadbeefdead",
           summaryUri: "memory://agent-summaries/works/bw_work_deadbeefdead/bw_summary_deadbeefdead.md"
@@ -1091,11 +1092,6 @@ function agentDirectiveBundleFixture(): AgentDirectiveBundle {
           type: "work",
           id: "bw_work_deadbeefdead",
           title: "Close work"
-        },
-        appliesTo: {
-          commandPaths: ["agent finish", "work close"],
-          subjectTypes: ["work"],
-          workStatuses: ["in_progress"]
         },
         blocksCloseout: true,
         acknowledgement: {

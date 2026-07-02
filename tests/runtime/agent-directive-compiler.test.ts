@@ -46,9 +46,14 @@ describe("agent directive bundle assembly", () => {
       }
     });
 
-    expect(selectAgentDirectiveRegistryEntries(snapshot).map((selection) => selection.registryEntry.id)).toEqual([
-      "memory.reconcile-source"
-    ]);
+    expect(selectAgentDirectiveRegistryEntries(snapshot).map((selection) => selection.registryEntry.id)).toEqual([]);
+    expect(
+      selectAgentDirectiveRegistryEntries(snapshot, AGENT_DIRECTIVE_REGISTRY, {
+        dataByRegistryId: {
+          "memory.reconcile-source": data
+        }
+      }).map((selection) => selection.registryEntry.id)
+    ).toEqual(["memory.reconcile-source"]);
     expect(first.ok).toBe(true);
     expect(first.issues).toEqual([]);
     expect(first.selectedRegistryIds).toEqual(["memory.reconcile-source"]);
@@ -67,7 +72,7 @@ describe("agent directive bundle assembly", () => {
     expect(directive.source).toEqual({
       registryVersion: AGENT_DIRECTIVE_REGISTRY.version,
       registryPath: registryEntry.sourcePath,
-      selectedBy: ["applies.command_path", "applies.subject_type"],
+      selectedBy: ["gap.memory.reconcile-source.required"],
       snapshotHash: agentDirectiveSnapshotHash(snapshot)
     });
     expect(() =>
@@ -212,7 +217,6 @@ describe("agent directive bundle assembly", () => {
       "git.checkpoint-required",
       "closeout.summary-required",
       "handoff.session-summary",
-      "container.descendant-closeout",
       "workflow_next.canonical-next-step"
     ]);
     const closeout = result.bundle?.directives.find((directive) => directive.registryId === "closeout.summary-required");
@@ -418,7 +422,6 @@ describe("agent directive bundle assembly", () => {
     expect(result.ok).toBe(true);
     expect(result.selectedRegistryIds).toEqual([
       "review.gate-required",
-      "audit.gate-required",
       "git.checkpoint-required",
       "closeout.summary-required",
       "container.descendant-closeout",
@@ -431,11 +434,7 @@ describe("agent directive bundle assembly", () => {
       requiredEvidenceKinds: ["review"],
       minEvidenceCount: 1
     });
-    expect(result.bundle?.directives.find((directive) => directive.registryId === "audit.gate-required")?.data).toMatchObject({
-      gateIds: ["bw_gate_audit0001"],
-      forceReasonCode: "audit_unavailable",
-      findingsDisposition: "Audit gate was forced with recorded operator reason."
-    });
+    expect(result.bundle?.directives.some((directive) => directive.registryId === "audit.gate-required")).toBe(false);
     const parent = result.bundle?.directives.find((directive) => directive.registryId === "container.descendant-closeout");
     const phase = result.bundle?.directives.find((directive) => directive.registryId === "phase.close-rollup");
     expect(parent?.data).toMatchObject({
@@ -491,7 +490,13 @@ describe("agent directive bundle assembly", () => {
     });
 
     expect(result.ok).toBe(true);
-    expect(result.selectedRegistryIds).toEqual(["sprint.close-rollup", "workflow_next.canonical-next-step"]);
+    expect(result.selectedRegistryIds).toEqual([
+      "review.gate-required",
+      "git.checkpoint-required",
+      "container.descendant-closeout",
+      "sprint.close-rollup",
+      "workflow_next.canonical-next-step"
+    ]);
     const sprint = result.bundle?.directives.find((directive) => directive.registryId === "sprint.close-rollup");
     expect(sprint?.data).toMatchObject({
       sprintId: "bw_work_7ec3f08689c6cfb0",
@@ -547,7 +552,6 @@ describe("agent directive bundle assembly", () => {
     expect(result.ok).toBe(true);
     expect(result.selectedRegistryIds).toEqual([
       "review.gate-required",
-      "audit.gate-required",
       "workflow_next.canonical-next-step"
     ]);
     expect(result.bundle?.directives.find((directive) => directive.registryId === "review.gate-required")?.data).toMatchObject({
@@ -555,12 +559,7 @@ describe("agent directive bundle assembly", () => {
       requiredEvidenceKinds: ["review"],
       minEvidenceCount: 1
     });
-    expect(result.bundle?.directives.find((directive) => directive.registryId === "audit.gate-required")?.data).toMatchObject({
-      gateIds: ["bw_gate_auditclose1"],
-      requiredEvidenceKinds: ["audit"],
-      forceReasonCode: "external_review_record",
-      findingsDisposition: "Audit evidence is represented by an external review record."
-    });
+    expect(result.bundle?.directives.some((directive) => directive.registryId === "audit.gate-required")).toBe(false);
   });
 
   it("compiles git checkpoint directives with protected-branch and out-of-scope dirty-path data", () => {

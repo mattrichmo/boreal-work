@@ -1479,7 +1479,8 @@ interface DirectiveRegistryShowEntry extends DirectiveRegistryListEntry {
   readonly instruction: string;
   readonly defaultLifecycle: AgentDirectiveLifecycle;
   readonly sourcePath: string;
-  readonly appliesTo: AgentDirectiveRegistryEntry["appliesTo"];
+  readonly triggerCodes: AgentDirectiveRegistryEntry["triggerCodes"];
+  readonly nextCommandTemplate: AgentDirectiveRegistryEntry["nextCommandTemplate"];
   readonly acknowledgement?: AgentDirectiveRegistryEntry["acknowledgement"];
   readonly dataRequirements: AgentDirectiveRegistryEntry["dataRequirements"];
   readonly replacementMetadata: DirectiveRegistryReplacementMetadata;
@@ -1549,11 +1550,9 @@ interface DirectiveExplainResult {
   readonly selectedBy: readonly string[];
   readonly selectorChecks: {
     readonly lifecycleActive: boolean;
-    readonly commandMatches: boolean;
-    readonly subjectTypeMatches: boolean;
-    readonly workStatusMatches: boolean;
-    readonly labelMatches: boolean;
-    readonly gateMatches: boolean;
+    readonly dataPresent: boolean;
+    readonly matchedTriggerCodes: readonly string[];
+    readonly configuredTriggerCodes: readonly string[];
   };
   readonly dataPresent: boolean;
   readonly issues: readonly AgentDirectiveBundleAssemblyIssue[];
@@ -1920,7 +1919,7 @@ function explainDirectiveEmission(id: string, args: ParsedArgs): DirectiveExplai
     emitted: directive !== undefined,
     reason: directiveExplainReason({ selected, emitted: directive !== undefined, issues, missingRequired, conflicts }),
     selectedBy,
-    selectorChecks: directiveSelectorChecks(entry, input.snapshot),
+    selectorChecks: directiveSelectorChecks(entry, input.dataByRegistryId, selectedBy),
     dataPresent: input.dataByRegistryId[entry.id] !== undefined,
     issues,
     missingRequired,
@@ -2362,17 +2361,16 @@ function directiveDebugSubjectTypes(snapshot: AgentDirectiveSnapshot): readonly 
 
 function directiveSelectorChecks(
   entry: AgentDirectiveRegistryEntry,
-  snapshot: AgentDirectiveSnapshot
+  dataByRegistryId: AgentDirectiveAssemblyDataByRegistryId,
+  selectedBy: readonly string[]
 ): DirectiveExplainResult["selectorChecks"] {
-  const subjectTypes = directiveDebugSubjectTypes(snapshot);
-  const workStatus = snapshot.work.subject?.status;
   return {
     lifecycleActive: entry.lifecycle === "active",
-    commandMatches: entry.appliesTo.commandPaths.includes(snapshot.command.path),
-    subjectTypeMatches: entry.appliesTo.subjectTypes === undefined || entry.appliesTo.subjectTypes.some((type) => subjectTypes.includes(type)),
-    workStatusMatches: entry.appliesTo.workStatuses === undefined || (workStatus !== undefined && entry.appliesTo.workStatuses.includes(workStatus)),
-    labelMatches: entry.appliesTo.labels === undefined || entry.appliesTo.labels.some((label) => snapshot.work.labels.includes(label)),
-    gateMatches: entry.appliesTo.gates === undefined || entry.appliesTo.gates.some((gate) => snapshot.gate.requiredGates.some((state) => state.kind === gate))
+    dataPresent: dataByRegistryId[entry.id] !== undefined,
+    matchedTriggerCodes: selectedBy.flatMap((selector) =>
+      selector.startsWith("gap.") ? [selector.replace(/^gap\./u, "")] : []
+    ),
+    configuredTriggerCodes: entry.triggerCodes
   };
 }
 
@@ -2395,7 +2393,7 @@ function directiveExplainReason(input: {
   if (input.selected) {
     return "selected but not emitted";
   }
-  return "not selected by registry selectors";
+  return "not selected by registry trigger codes";
 }
 
 function renderDirectiveBundleMarkdown(result: DirectiveCompileResult): string {
@@ -2600,7 +2598,8 @@ function directiveShowEntry(
     instruction: entry.instruction,
     defaultLifecycle: entry.defaultLifecycle,
     sourcePath: entry.sourcePath,
-    appliesTo: entry.appliesTo,
+    triggerCodes: entry.triggerCodes,
+    nextCommandTemplate: entry.nextCommandTemplate,
     acknowledgement: entry.acknowledgement,
     dataRequirements: entry.dataRequirements,
     replacementMetadata: {
@@ -2684,18 +2683,14 @@ function formatDirectiveRegistryShow(result: DirectiveRegistryShowResult): strin
       { key: "kind", value: directive.kind },
       { key: "blocksCloseout", value: String(directive.blocksCloseout) },
       { key: "source", value: directive.sourcePath },
+      { key: "nextCommand", value: directive.nextCommandTemplate },
       { key: "supersedes", value: formatDirectiveIdList(directive.replacementMetadata.supersedes) },
       { key: "deprecatedBy", value: formatDirectiveIdList(directive.replacementMetadata.deprecatedBy) }
     ]),
     "",
     section("Instruction", [directive.instruction]),
     "",
-    section("Applies To", [
-      `commands: ${directive.appliesTo.commandPaths.join(", ")}`,
-      `subjects: ${directive.appliesTo.subjectTypes?.join(", ") ?? "any"}`,
-      `statuses: ${directive.appliesTo.workStatuses?.join(", ") ?? "any"}`,
-      `gates: ${directive.appliesTo.gates?.join(", ") ?? "any"}`
-    ]),
+    section("Trigger Codes", directive.triggerCodes),
     "",
     section(
       "Data Requirements",
@@ -7123,13 +7118,7 @@ async function compileCliAgentDirectiveBundles(
   options: CliAgentDirectiveOptions
 ): Promise<readonly AgentDirectiveBundle[]> {
   const snapshot = await buildCliAgentDirectiveSnapshot(context, args, options);
-  const dataByRegistryId = {
-    ...closeoutDirectiveDataByRegistryId(snapshot),
-    ...summaryDirectiveDataByRegistryId(snapshot),
-    ...gitDirectiveDataByRegistryId(snapshot),
-    ...handoffDirectiveDataByRegistryId(snapshot),
-    ...recoveryDirectiveDataByRegistryId(snapshot)
-  };
+  const dataByRegistryId = cliDirectiveDataByRegistryId(snapshot);
   const result = assembleAgentDirectiveBundle({
     snapshot,
     dataByRegistryId
@@ -7142,6 +7131,32 @@ async function compileCliAgentDirectiveBundles(
     });
   }
   return result.bundle && result.selectedRegistryIds.length > 0 ? [result.bundle] : [];
+}
+
+function cliDirectiveDataByRegistryId(snapshot: AgentDirectiveSnapshot): AgentDirectiveAssemblyDataByRegistryId {
+  const command = snapshot.command.path;
+  const base = recoveryDirectiveDataByRegistryId(snapshot);
+  if (["agent finish", "work cancel", "work close"].includes(command)) {
+    return {
+      ...base,
+      ...closeoutDirectiveDataByRegistryId(snapshot),
+      ...gitDirectiveDataByRegistryId(snapshot),
+      ...handoffDirectiveDataByRegistryId(snapshot)
+    };
+  }
+  if (["gate closeout", "sprint metrics", "sprint report", "summary compose", "summary show"].includes(command)) {
+    return {
+      ...base,
+      ...summaryDirectiveDataByRegistryId(snapshot)
+    };
+  }
+  if (["sync status"].includes(command)) {
+    return {
+      ...base,
+      ...gitDirectiveDataByRegistryId(snapshot)
+    };
+  }
+  return base;
 }
 
 async function buildCliAgentDirectiveSnapshot(

@@ -148,13 +148,6 @@ function agentRuntimeDirectiveDataByRegistryId(
     ...input.closeout,
     ...input.summary
   };
-  const allWorkData: AgentDirectiveAssemblyDataByRegistryId = {
-    ...recoveryDirectiveDataByRegistryId(input.snapshot, input.recovery),
-    ...gitDirectiveDataByRegistryId(input.snapshot, input.git),
-    ...closeoutDirectiveDataByRegistryId(input.snapshot, input.closeout),
-    ...summaryDirectiveDataByRegistryId(input.snapshot, summaryOptions),
-    ...handoffDirectiveDataByRegistryId(input.snapshot, input.handoff)
-  };
 
   switch (input.context) {
     case "health":
@@ -179,7 +172,7 @@ function agentRuntimeDirectiveDataByRegistryId(
       };
     case "work":
       return {
-        ...allWorkData,
+        ...recoveryDirectiveDataByRegistryId(input.snapshot, input.recovery),
         ...input.dataByRegistryId
       };
   }

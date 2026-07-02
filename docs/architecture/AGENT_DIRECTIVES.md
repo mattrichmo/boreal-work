@@ -80,9 +80,10 @@ interface AgentDirective {
   lifecycle: "proposed" | "active" | "satisfied" | "acknowledged" | "superseded" | "blocked";
   title: string;
   instruction: string;
+  triggerCodes: string[];
+  nextCommandTemplate: string;
   data: Record<string, unknown>;
   source: AgentDirectiveSource;
-  appliesTo: AgentDirectiveAppliesTo;
   supersedes?: string[];
   blocksCloseout?: boolean;
 }
@@ -109,11 +110,11 @@ interface AgentDirectiveSource {
   snapshotHash?: string;
 }
 
-interface AgentDirectiveAppliesTo {
-  commandPaths: string[];
-  subjectTypes: AgentDirectiveSubject["type"][];
-  states?: string[];
-  gates?: string[];
+interface AgentDirectiveRegistryEntry {
+  id: string;
+  triggerCodes: string[];
+  nextCommandTemplate: string;
+  dataRequirements: AgentDirectiveDataRequirement[];
 }
 
 interface AgentDirectiveConflict {

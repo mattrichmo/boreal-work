@@ -20,6 +20,16 @@ export const ENFORCEMENT_GAP_CODES = [
   "summary.missing",
   "summary.checkpoint-missing",
   "directive.acknowledgement-missing",
+  "directive.workflow-next.available",
+  "closeout.user-summary.required",
+  "git.checkpoint.required",
+  "doctor.recovery.required",
+  "memory.reconcile-source.required",
+  "handoff.session-summary.required",
+  "container.descendant-closeout.required",
+  "phase.close-rollup.required",
+  "sprint.close-rollup.required",
+  "sprint.launch-plan.required",
   "search.index-stale"
 ] as const;
 

@@ -1,5 +1,6 @@
 import type { Brand, ContentHash } from "./ids.js";
 import { BorealError } from "./errors.js";
+import { ENFORCEMENT_GAP_CODES, type EnforcementGapCode } from "./enforcement-gaps.js";
 import { detectSuspiciousUnicode } from "./string-safety.js";
 import type { IsoTimestamp } from "./time.js";
 
@@ -73,6 +74,7 @@ export type AgentDirectiveBundleId = Brand<string, "AgentDirectiveBundleId">;
 export type AgentDirectiveTemplateId = Brand<string, "AgentDirectiveTemplateId">;
 export type AgentDirectiveVersion = Brand<string, "AgentDirectiveVersion">;
 export type AgentDirectiveRegistryVersion = Brand<string, "AgentDirectiveRegistryVersion">;
+export type AgentDirectiveTriggerCode = EnforcementGapCode;
 
 export type AgentDirectiveFamily = (typeof AGENT_DIRECTIVE_FAMILIES)[number];
 export type AgentDirectiveSeverity = (typeof AGENT_DIRECTIVE_SEVERITIES)[number];
@@ -102,14 +104,6 @@ export interface AgentDirectiveSubject {
   readonly title?: string;
 }
 
-export interface AgentDirectiveAppliesTo {
-  readonly commandPaths: readonly string[];
-  readonly subjectTypes?: readonly AgentDirectiveSubjectType[];
-  readonly workStatuses?: readonly string[];
-  readonly labels?: readonly string[];
-  readonly gates?: readonly string[];
-}
-
 export interface AgentDirectiveAcknowledgementRequirement {
   readonly requiredBefore: "close" | "release" | "force_gate" | "handoff" | "none";
   readonly evidenceKind?: "command" | "review" | "artifact" | "note";
@@ -127,10 +121,11 @@ export interface AgentDirective {
   readonly lifecycle: AgentDirectiveLifecycle;
   readonly title: string;
   readonly instruction: string;
+  readonly triggerCodes: readonly AgentDirectiveTriggerCode[];
+  readonly nextCommandTemplate: string;
   readonly data: AgentDirectiveData;
   readonly source: AgentDirectiveSource;
   readonly subject?: AgentDirectiveSubject;
-  readonly appliesTo: AgentDirectiveAppliesTo;
   readonly supersedes?: readonly AgentDirectiveId[];
   readonly blocksCloseout?: boolean;
   readonly acknowledgement?: AgentDirectiveAcknowledgementRequirement;
@@ -170,7 +165,8 @@ export interface AgentDirectiveTemplate {
   readonly title: string;
   readonly instruction: string;
   readonly defaultLifecycle: AgentDirectiveLifecycle;
-  readonly appliesTo: AgentDirectiveAppliesTo;
+  readonly triggerCodes: readonly AgentDirectiveTriggerCode[];
+  readonly nextCommandTemplate: string;
   readonly blocksCloseout?: boolean;
   readonly acknowledgement?: AgentDirectiveAcknowledgementRequirement;
 }
@@ -422,7 +418,8 @@ function registryEntryIssues(
     ...enumIssues(value.lifecycle, `${path}.lifecycle`, AGENT_DIRECTIVE_LIFECYCLES),
     ...nonEmptySafeStringIssues(value.title, `${path}.title`),
     ...nonEmptyStaticInstructionIssues(value.instruction, `${path}.instruction`),
-    ...appliesToIssues(value.appliesTo, `${path}.appliesTo`),
+    ...triggerCodeArrayIssues(value.triggerCodes, `${path}.triggerCodes`),
+    ...nonEmptySafeStringIssues(value.nextCommandTemplate, `${path}.nextCommandTemplate`),
     ...trustedRegistryPathIssues(value.sourcePath, `${path}.sourcePath`, options),
     ...dataRequirementArrayIssues(value.dataRequirements, `${path}.dataRequirements`)
   ];
@@ -565,9 +562,10 @@ function directiveIssues(
     ...enumIssues(value.lifecycle, `${path}.lifecycle`, AGENT_DIRECTIVE_LIFECYCLES),
     ...nonEmptySafeStringIssues(value.title, `${path}.title`),
     ...nonEmptySafeStringIssues(value.instruction, `${path}.instruction`),
+    ...triggerCodeArrayIssues(value.triggerCodes, `${path}.triggerCodes`),
+    ...nonEmptySafeStringIssues(value.nextCommandTemplate, `${path}.nextCommandTemplate`),
     ...agentDirectiveDataIssues(value.data, `${path}.data`, options),
-    ...sourceIssues(value.source, `${path}.source`, options),
-    ...appliesToIssues(value.appliesTo, `${path}.appliesTo`)
+    ...sourceIssues(value.source, `${path}.source`, options)
   ];
   if (value.subject !== undefined) {
     issues.push(...subjectIssues(value.subject, `${path}.subject`));
@@ -609,28 +607,6 @@ function subjectIssues(value: unknown, path: string): readonly AgentDirectiveBun
     ...optionalNonEmptySafeStringIssues(value.id, `${path}.id`),
     ...optionalNonEmptySafeStringIssues(value.title, `${path}.title`)
   ];
-}
-
-function appliesToIssues(value: unknown, path: string): readonly AgentDirectiveBundleValidationIssue[] {
-  if (!isRecord(value)) {
-    return [issue(path, "must be an object")];
-  }
-  const issues: AgentDirectiveBundleValidationIssue[] = [
-    ...nonEmptySafeStringArrayIssues(value.commandPaths, `${path}.commandPaths`)
-  ];
-  if (value.subjectTypes !== undefined) {
-    issues.push(...enumArrayIssues(value.subjectTypes, `${path}.subjectTypes`, AGENT_DIRECTIVE_SUBJECT_TYPES));
-  }
-  if (value.workStatuses !== undefined) {
-    issues.push(...nonEmptySafeStringArrayIssues(value.workStatuses, `${path}.workStatuses`));
-  }
-  if (value.labels !== undefined) {
-    issues.push(...nonEmptySafeStringArrayIssues(value.labels, `${path}.labels`));
-  }
-  if (value.gates !== undefined) {
-    issues.push(...nonEmptySafeStringArrayIssues(value.gates, `${path}.gates`));
-  }
-  return issues;
 }
 
 function acknowledgementIssues(value: unknown, path: string): readonly AgentDirectiveBundleValidationIssue[] {
@@ -924,14 +900,6 @@ function stableMachineIdArrayIssues(value: unknown, path: string): readonly Agen
   return new Set(value).size === value.length ? issues : [...issues, issue(path, "must contain unique values")];
 }
 
-function nonEmptySafeStringArrayIssues(value: unknown, path: string): readonly AgentDirectiveBundleValidationIssue[] {
-  if (!Array.isArray(value)) {
-    return [issue(path, "must be an array")];
-  }
-  const issues = value.flatMap((entry, index) => nonEmptySafeStringIssues(entry, `${path}[${index}]`));
-  return new Set(value).size === value.length ? issues : [...issues, issue(path, "must contain unique values")];
-}
-
 function enumArrayIssues<T extends string>(
   value: unknown,
   path: string,
@@ -942,6 +910,10 @@ function enumArrayIssues<T extends string>(
   }
   const issues = value.flatMap((entry, index) => enumIssues(entry, `${path}[${index}]`, allowed));
   return new Set(value).size === value.length ? issues : [...issues, issue(path, "must contain unique values")];
+}
+
+function triggerCodeArrayIssues(value: unknown, path: string): readonly AgentDirectiveBundleValidationIssue[] {
+  return enumArrayIssues(value, path, ENFORCEMENT_GAP_CODES);
 }
 
 function stableMachineIdIssues(value: unknown, path: string): readonly AgentDirectiveBundleValidationIssue[] {

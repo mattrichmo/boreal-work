@@ -54,11 +54,8 @@ export const AGENT_DIRECTIVE_REGISTRY: AgentDirectiveRegistry = {
       title: "Resolve active blockers",
       instruction:
         "Stop the current mutation until the listed blockers are resolved, closed, or explicitly forced through an approved gate.",
-      appliesTo: {
-        commandPaths: ["agent start", "agent finish", "dep tree", "work claim", "work close", "work next", "work show"],
-        subjectTypes: ["work", "sprint", "phase", "milestone"],
-        workStatuses: ["blocked"]
-      },
+      triggerCodes: ["work.blocked.open-dependency"],
+      nextCommandTemplate: "bwrk dep tree <subjectId> --json",
       blocksCloseout: true,
       acknowledgement: {
         requiredBefore: "force_gate",
@@ -85,11 +82,8 @@ export const AGENT_DIRECTIVE_REGISTRY: AgentDirectiveRegistry = {
       title: "Attach passed verification evidence",
       instruction:
         "Run the required validation command and attach passed verification evidence before reporting the work as complete.",
-      appliesTo: {
-        commandPaths: ["agent finish", "work close", "work verify"],
-        subjectTypes: ["work", "sprint", "phase", "milestone"],
-        workStatuses: ["in_progress", "ready", "blocked"]
-      },
+      triggerCodes: ["close.no-passing-verification", "gate.verification.unsatisfied"],
+      nextCommandTemplate: "<validation-command>",
       blocksCloseout: true,
       acknowledgement: {
         requiredBefore: "close",
@@ -112,11 +106,8 @@ export const AGENT_DIRECTIVE_REGISTRY: AgentDirectiveRegistry = {
       kind: "obligation",
       title: "Satisfy review gate",
       instruction: "Obtain passed review evidence for the listed review gate before closing the scoped work.",
-      appliesTo: {
-        commandPaths: ["agent finish", "gate closeout", "summary compose", "summary show", "work close"],
-        subjectTypes: ["work", "sprint", "phase", "milestone"],
-        gates: ["review"]
-      },
+      triggerCodes: ["gate.review.unsatisfied"],
+      nextCommandTemplate: "bwrk evidence add <subjectId> --kind review --outcome passed --json",
       blocksCloseout: true,
       acknowledgement: {
         requiredBefore: "close",
@@ -139,11 +130,8 @@ export const AGENT_DIRECTIVE_REGISTRY: AgentDirectiveRegistry = {
       kind: "obligation",
       title: "Satisfy audit gate",
       instruction: "Obtain passed audit evidence or record an approved forced gate reason before closing the scoped work.",
-      appliesTo: {
-        commandPaths: ["agent finish", "gate closeout", "summary compose", "summary show", "work close"],
-        subjectTypes: ["work", "sprint", "phase", "milestone", "project"],
-        gates: ["audit"]
-      },
+      triggerCodes: ["gate.audit.unsatisfied"],
+      nextCommandTemplate: "bwrk evidence add <subjectId> --kind command --outcome passed --json",
       blocksCloseout: true,
       acknowledgement: {
         requiredBefore: "close",
@@ -167,10 +155,8 @@ export const AGENT_DIRECTIVE_REGISTRY: AgentDirectiveRegistry = {
       title: "Record Git checkpoint",
       instruction:
         "Inspect the Git roots, commit only scoped changes, and record a commit SHA or accepted dirty-path reason before closeout.",
-      appliesTo: {
-        commandPaths: ["agent finish", "summary compose", "summary show", "sync status", "work close", "work cancel"],
-        subjectTypes: ["work", "sprint", "phase", "milestone", "project"]
-      },
+      triggerCodes: ["git.checkpoint.required", "gate.checkpoint.unsatisfied", "summary.checkpoint-missing"],
+      nextCommandTemplate: "git status --short --branch",
       blocksCloseout: true,
       acknowledgement: {
         requiredBefore: "close",
@@ -208,11 +194,8 @@ export const AGENT_DIRECTIVE_REGISTRY: AgentDirectiveRegistry = {
       title: "Respond with closeout summary",
       instruction:
         "Respond to the user with a concise summary of the verified terminal outcome, summary artifact, checkpoint, remaining risks, and next workflow.",
-      appliesTo: {
-        commandPaths: ["agent finish", "summary compose", "summary show", "work close", "work cancel"],
-        subjectTypes: ["work", "sprint", "phase", "milestone", "project"],
-        workStatuses: ["in_progress", "closed", "cancelled"]
-      },
+      triggerCodes: ["closeout.user-summary.required", "summary.missing"],
+      nextCommandTemplate: "bwrk summary show <subjectId> --json",
       blocksCloseout: true,
       acknowledgement: {
         requiredBefore: "close",
@@ -243,10 +226,8 @@ export const AGENT_DIRECTIVE_REGISTRY: AgentDirectiveRegistry = {
       kind: "recovery",
       title: "Recover workspace health",
       instruction: "Run the safe health workflow for the listed diagnostics before continuing dependent work.",
-      appliesTo: {
-        commandPaths: ["daemon status", "daemon watch", "doctor", "lock inspect", "prime", "sync refresh", "sync status"],
-        subjectTypes: ["workspace", "project", "session"]
-      },
+      triggerCodes: ["doctor.recovery.required", "search.index-stale"],
+      nextCommandTemplate: "bwrk doctor --strict --json",
       blocksCloseout: true,
       acknowledgement: {
         requiredBefore: "handoff",
@@ -276,10 +257,8 @@ export const AGENT_DIRECTIVE_REGISTRY: AgentDirectiveRegistry = {
       title: "Reconcile source-backed memory",
       instruction:
         "Reconcile source-backed memory changes into wiki, claim, decision, or work records before treating them as durable project truth.",
-      appliesTo: {
-        commandPaths: ["context rebuild", "raw add", "raw triage", "sync refresh"],
-        subjectTypes: ["workspace", "project", "work"]
-      },
+      triggerCodes: ["memory.reconcile-source.required"],
+      nextCommandTemplate: "bwrk raw triage --json",
       dataRequirements: [
         requirement("sourceIds", "array", true, "Raw or knowledge source ids that need reconciliation."),
         requirement("memoryRoot", "string", true, "Memory root inspected for reconciliation."),
@@ -297,10 +276,8 @@ export const AGENT_DIRECTIVE_REGISTRY: AgentDirectiveRegistry = {
       title: "Prepare session handoff",
       instruction:
         "Build a handoff that names the current work, evidence, verification, summary artifact, checkpoint state, and next canonical workflow.",
-      appliesTo: {
-        commandPaths: ["agent finish", "session end", "summary compose", "summary show"],
-        subjectTypes: ["session", "work", "sprint", "project"]
-      },
+      triggerCodes: ["handoff.session-summary.required"],
+      nextCommandTemplate: "bwrk session end --json",
       dataRequirements: [
         requirement("workId", "id", false, "Current or most recent work id."),
         requirement("summaryId", "id", false, "Agent summary id included in the handoff."),
@@ -328,10 +305,8 @@ export const AGENT_DIRECTIVE_REGISTRY: AgentDirectiveRegistry = {
       kind: "obligation",
       title: "Close descendant blockers",
       instruction: "Close or document every descendant blocker before closing the parent container.",
-      appliesTo: {
-        commandPaths: ["agent finish", "dep tree", "summary compose", "summary show", "work close"],
-        subjectTypes: ["work", "milestone", "project"]
-      },
+      triggerCodes: ["work.container.open-descendant", "container.descendant-closeout.required"],
+      nextCommandTemplate: "bwrk dep tree <containerId> --json",
       blocksCloseout: true,
       acknowledgement: {
         requiredBefore: "close",
@@ -361,10 +336,8 @@ export const AGENT_DIRECTIVE_REGISTRY: AgentDirectiveRegistry = {
       kind: "summary",
       title: "Roll up phase closeout",
       instruction: "Roll up child task outcomes, evidence, verification, and checkpoint references before closing the phase.",
-      appliesTo: {
-        commandPaths: ["agent finish", "summary compose", "summary show", "work close"],
-        subjectTypes: ["phase", "milestone"]
-      },
+      triggerCodes: ["phase.close-rollup.required"],
+      nextCommandTemplate: "bwrk summary compose <phaseId> --json",
       dataRequirements: [
         requirement("phaseId", "id", true, "Phase or phase-like milestone id."),
         requirement("childWorkIds", "array", true, "Child work ids included in the phase rollup."),
@@ -388,10 +361,8 @@ export const AGENT_DIRECTIVE_REGISTRY: AgentDirectiveRegistry = {
       title: "Prepare sprint closeout",
       instruction:
         "Prepare the sprint report with closed child status, carryover, verification, gate evidence, and checkpoint references before closing the sprint.",
-      appliesTo: {
-        commandPaths: ["agent finish", "sprint close", "sprint metrics", "sprint report", "summary compose"],
-        subjectTypes: ["sprint"]
-      },
+      triggerCodes: ["sprint.close-rollup.required"],
+      nextCommandTemplate: "bwrk sprint report <sprintId> --json",
       dataRequirements: [
         requirement("sprintId", "id", true, "Sprint id being reported or closed."),
         requirement("childWorkIds", "array", true, "Child work ids included in the sprint."),
@@ -417,10 +388,8 @@ export const AGENT_DIRECTIVE_REGISTRY: AgentDirectiveRegistry = {
       title: "Prepare sprint launch",
       instruction:
         "Create the sprint container, attach scoped child work, mark only unblocked leaf tasks ready, and record checkpoint boundaries before implementation starts.",
-      appliesTo: {
-        commandPaths: ["dep add", "doctor", "prime", "session start", "sync refresh", "work create", "work ready"],
-        subjectTypes: ["project", "session", "sprint"]
-      },
+      triggerCodes: ["sprint.launch-plan.required"],
+      nextCommandTemplate: "bwrk work create <sprint-title> --json",
       dataRequirements: [
         requirement("sprintTitle", "string", true, "Sprint title being launched."),
         requirement("childWorkIds", "array", true, "Child work ids scoped to the sprint."),
@@ -438,30 +407,8 @@ export const AGENT_DIRECTIVE_REGISTRY: AgentDirectiveRegistry = {
       kind: "next_step",
       title: "Follow next canonical workflow",
       instruction: "Follow the named canonical workflow and pass only the listed typed inputs to the next command.",
-      appliesTo: {
-        commandPaths: [
-          "agent start",
-          "agent finish",
-          "daemon status",
-          "daemon watch",
-          "prime",
-          "doctor",
-          "gate closeout",
-          "lock inspect",
-          "session end",
-          "sprint metrics",
-          "sprint report",
-          "sync refresh",
-          "sync status",
-          "summary compose",
-          "summary show",
-          "work cancel",
-          "work close",
-          "work show",
-          "workflows show"
-        ],
-        subjectTypes: ["work", "sprint", "phase", "milestone", "project", "session", "workspace"]
-      },
+      triggerCodes: ["directive.workflow-next.available"],
+      nextCommandTemplate: "<workflow-recommended-command>",
       dataRequirements: [
         requirement("workflowRef", "string", true, "Canonical workflow reference to use next."),
         requirement("commandPath", "string", true, "Recommended command path for the next step."),

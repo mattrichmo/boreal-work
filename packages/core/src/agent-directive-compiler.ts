@@ -15,7 +15,6 @@ import {
   type AgentDirectiveRegistry,
   type AgentDirectiveRegistryEntry,
   type AgentDirectiveSubject,
-  type AgentDirectiveSubjectType,
   type AgentDirectiveTemplateId
 } from "./agent-directives.js";
 import { AGENT_DIRECTIVE_REGISTRY } from "./agent-directive-registry.js";
@@ -24,6 +23,7 @@ import {
   agentDirectiveSnapshotIssues,
   type AgentDirectiveSnapshot
 } from "./agent-directive-snapshot.js";
+import type { EnforcementGapCode } from "./enforcement-gaps.js";
 import type { ContentHash } from "./ids.js";
 import type {
   AgentSummaryForceReasonCode,
@@ -198,6 +198,19 @@ export interface AgentDirectiveRecoveryCompilationInput extends AgentDirectiveRe
 export interface AgentDirectiveRecoveryCompilationResult extends AgentDirectiveBundleAssemblyResult {
   readonly dataByRegistryId: AgentDirectiveAssemblyDataByRegistryId;
 }
+
+const DATA_TRIGGER_CODES = new Set<EnforcementGapCode>([
+  "directive.workflow-next.available",
+  "closeout.user-summary.required",
+  "git.checkpoint.required",
+  "memory.reconcile-source.required",
+  "handoff.session-summary.required",
+  "phase.close-rollup.required",
+  "sprint.close-rollup.required",
+  "sprint.launch-plan.required",
+  "close.no-passing-verification",
+  "gate.verification.unsatisfied"
+]);
 
 export function selectAgentDirectiveRegistryEntries(
   snapshot: AgentDirectiveSnapshot,
@@ -629,60 +642,141 @@ function registryEntrySelectedBy(
   if (registryEntry.lifecycle !== "active") {
     return [];
   }
-  if (!registryEntry.appliesTo.commandPaths.includes(snapshot.command.path)) {
+  const selectedCodes = selectedTriggerCodes(registryEntry, snapshot, dataByRegistryId);
+  if (selectedCodes.length === 0) {
     return [];
-  }
-
-  const selectedBy = ["applies.command_path"];
-  const snapshotSubjectTypes = subjectTypesForSnapshot(snapshot);
-  if (
-    registryEntry.appliesTo.subjectTypes !== undefined &&
-    !registryEntry.appliesTo.subjectTypes.some((subjectType) => snapshotSubjectTypes.includes(subjectType))
-  ) {
-    return [];
-  }
-  if (registryEntry.appliesTo.subjectTypes !== undefined) {
-    selectedBy.push("applies.subject_type");
-  }
-
-  const workStatus = snapshot.work.subject?.status;
-  if (
-    registryEntry.appliesTo.workStatuses !== undefined &&
-    (workStatus === undefined || !registryEntry.appliesTo.workStatuses.includes(workStatus))
-  ) {
-    return [];
-  }
-  if (registryEntry.appliesTo.workStatuses !== undefined) {
-    selectedBy.push("applies.work_status");
-  }
-
-  if (
-    registryEntry.appliesTo.labels !== undefined &&
-    !registryEntry.appliesTo.labels.some((label) => snapshot.work.labels.includes(label))
-  ) {
-    return [];
-  }
-  if (registryEntry.appliesTo.labels !== undefined) {
-    selectedBy.push("applies.label");
-  }
-
-  if (
-    registryEntry.appliesTo.gates !== undefined &&
-    !registryEntry.appliesTo.gates.some((gateKind) =>
-      snapshot.gate.requiredGates.some((gate) => gate.kind === gateKind)
-    )
-  ) {
-    return [];
-  }
-  if (registryEntry.appliesTo.gates !== undefined) {
-    selectedBy.push("applies.gate");
   }
 
   if (!registryEntryRuntimePreconditionsMatch(registryEntry, snapshot, dataByRegistryId)) {
     return [];
   }
 
-  return selectedBy;
+  return selectedCodes.map((code) => `gap.${code}`);
+}
+
+function selectedTriggerCodes(
+  registryEntry: AgentDirectiveRegistryEntry,
+  snapshot: AgentDirectiveSnapshot,
+  dataByRegistryId: AgentDirectiveAssemblyDataByRegistryId
+): readonly EnforcementGapCode[] {
+  const data = dataByRegistryId[registryEntry.id];
+  if (data === undefined) {
+    return [];
+  }
+  const activeCodes = triggerCodesForSnapshot(snapshot);
+  if (dataActivatesRegistryEntry(registryEntry, snapshot, data)) {
+    for (const code of registryEntry.triggerCodes) {
+      if (DATA_TRIGGER_CODES.has(code)) {
+        activeCodes.add(code);
+      }
+    }
+  }
+  return registryEntry.triggerCodes.filter((code) => activeCodes.has(code));
+}
+
+function dataActivatesRegistryEntry(
+  registryEntry: AgentDirectiveRegistryEntry,
+  snapshot: AgentDirectiveSnapshot,
+  data: AgentDirectiveData
+): boolean {
+  switch (registryEntry.id) {
+    case "closeout.summary-required":
+      return (
+        isTerminalWorkStatus(snapshot.work.subject?.status) ||
+        (hasAnyKey(data, ["summaryId"]) && hasAnyKey(data, ["summaryUri"])) ||
+        hasAnyKey(data, ["summaryStatus", "summaryOutcome", "closeReason", "duplicateOf", "forceReasonCode", "forceComment"])
+      );
+    case "git.checkpoint-required":
+      return (
+        hasNonEmptyArrayKey(data, ["commitShas", "dirtyPathNotes", "scopedChangedPaths", "blockingDirtyPaths"]) ||
+        data.repositoryChanged === true ||
+        (hasAnyKey(data, ["reasonCode", "noCommitReason"]) && checkpointCommandCanEmitReason(snapshot.command.path))
+      );
+    case "memory.reconcile-source":
+      return Object.keys(data).length > 0;
+    case "handoff.session-summary":
+      return (
+        snapshot.work.subject?.type === "session" ||
+        (snapshot.actor.activeReservationIds.length > 0 && hasAnyKey(data, ["summaryUri"]))
+      );
+    case "phase.close-rollup":
+      return (
+        (snapshot.work.subject?.type === "phase" || snapshot.work.subject?.type === "milestone") &&
+        (hasAnyKey(data, ["summaryUri"]) || hasNonEmptyArrayKey(data, ["childWorkIds", "childSummaryIds", "childStatuses", "deferredWorkIds"]))
+      );
+    case "sprint.close-rollup":
+      return (
+        snapshot.work.subject?.type === "sprint" &&
+        (hasAnyKey(data, ["summaryUri"]) || hasNonEmptyArrayKey(data, ["childWorkIds", "carryoverWorkIds", "childStatuses", "deferredWorkIds"]))
+      );
+    case "sprint.launch-plan":
+      return Object.keys(data).length > 0;
+    case "verification.evidence-required":
+      return snapshot.command.path === "work verify" && hasAnyKey(data, ["command"]);
+    case "workflow_next.canonical-next-step":
+      return hasAnyKey(data, ["workflowRef", "commandPath", "requiredInputs"]);
+    default:
+      return false;
+  }
+}
+
+function hasAnyKey(data: AgentDirectiveData, keys: readonly string[]): boolean {
+  return keys.some((key) => Object.prototype.hasOwnProperty.call(data, key));
+}
+
+function hasNonEmptyArrayKey(data: AgentDirectiveData, keys: readonly string[]): boolean {
+  return keys.some((key) => {
+    const value = data[key];
+    return Array.isArray(value) && value.length > 0;
+  });
+}
+
+function isTerminalWorkStatus(status: string | undefined): boolean {
+  return status === "closed" || status === "cancelled";
+}
+
+function checkpointCommandCanEmitReason(commandPath: string): boolean {
+  return ["agent finish", "summary compose", "summary show", "sync status", "work cancel", "work close"].includes(commandPath);
+}
+
+function triggerCodesForSnapshot(snapshot: AgentDirectiveSnapshot): Set<EnforcementGapCode> {
+  const codes = new Set<EnforcementGapCode>();
+
+  if (snapshot.work.activeBlockerIds.length > 0 || snapshot.work.blockedByIds.length > 0) {
+    codes.add("work.blocked.open-dependency");
+  }
+  if (snapshot.work.openDescendantIds.length > 0) {
+    codes.add("work.container.open-descendant");
+  }
+
+  for (const gate of snapshot.gate.requiredGates) {
+    if (gate.status !== "open") {
+      continue;
+    }
+    switch (gate.kind) {
+      case "verification":
+        codes.add("gate.verification.unsatisfied");
+        break;
+      case "checkpoint":
+        codes.add("gate.checkpoint.unsatisfied");
+        break;
+      case "review":
+        codes.add("gate.review.unsatisfied");
+        break;
+      case "audit":
+        codes.add("gate.audit.unsatisfied");
+        break;
+    }
+  }
+
+  if (needsDoctorRecoveryDirective(snapshot)) {
+    codes.add("doctor.recovery.required");
+    if (!snapshot.sync.searchIndexFresh) {
+      codes.add("search.index-stale");
+    }
+  }
+
+  return codes;
 }
 
 function registryEntryRuntimePreconditionsMatch(
@@ -887,6 +981,8 @@ function directiveFromRegistryEntry(
     lifecycle: registryEntry.defaultLifecycle,
     title: registryEntry.title,
     instruction: registryEntry.instruction,
+    triggerCodes: registryEntry.triggerCodes,
+    nextCommandTemplate: registryEntry.nextCommandTemplate,
     data,
     source: {
       registryVersion: registry.version,
@@ -895,7 +991,6 @@ function directiveFromRegistryEntry(
       snapshotHash
     },
     subject: subjectForSnapshot(snapshot),
-    appliesTo: registryEntry.appliesTo,
     supersedes: [],
     blocksCloseout: registryEntry.blocksCloseout,
     acknowledgement: registryEntry.acknowledgement
@@ -915,17 +1010,6 @@ function subjectForSnapshot(snapshot: AgentDirectiveSnapshot): AgentDirectiveSub
     id: normalizeMachineFragment(snapshot.command.path),
     title: snapshot.command.path
   };
-}
-
-function subjectTypesForSnapshot(snapshot: AgentDirectiveSnapshot): readonly AgentDirectiveSubjectType[] {
-  const subjectTypes = new Set<AgentDirectiveSubjectType>(["command"]);
-  if (snapshot.work.subject !== undefined) {
-    subjectTypes.add(snapshot.work.subject.type);
-  }
-  if (snapshot.work.subject === undefined) {
-    subjectTypes.add("workspace");
-  }
-  return [...subjectTypes];
 }
 
 function isBlockingDirective(directive: AgentDirective): boolean {

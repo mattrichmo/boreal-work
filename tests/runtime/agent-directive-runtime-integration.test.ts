@@ -69,8 +69,6 @@ describe("agent directive runtime compiler integration", () => {
         expectedRegistryIds: [
           "git.checkpoint-required",
           "closeout.summary-required",
-          "handoff.session-summary",
-          "container.descendant-closeout",
           "workflow_next.canonical-next-step"
         ]
       },
@@ -207,8 +205,6 @@ describe("agent directive runtime compiler integration", () => {
         expectedRegistryIds: [
           "git.checkpoint-required",
           "closeout.summary-required",
-          "handoff.session-summary",
-          "container.descendant-closeout",
           "workflow_next.canonical-next-step"
         ]
       },
@@ -352,7 +348,11 @@ describe("agent directive runtime compiler integration", () => {
               { workId: "bw_work_sprintopen1", status: "ready", deferred: true }
             ]
           }),
-        expectedRegistryIds: ["sprint.close-rollup", "workflow_next.canonical-next-step"]
+        expectedRegistryIds: [
+          "container.descendant-closeout",
+          "sprint.close-rollup",
+          "workflow_next.canonical-next-step"
+        ]
       },
       {
         name: "gate",
@@ -373,7 +373,6 @@ describe("agent directive runtime compiler integration", () => {
           }),
         expectedRegistryIds: [
           "review.gate-required",
-          "audit.gate-required",
           "workflow_next.canonical-next-step"
         ]
       }

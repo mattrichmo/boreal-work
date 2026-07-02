@@ -375,6 +375,8 @@ function agentDirectiveBundleFixture(): AgentDirectiveBundle {
         lifecycle: "active",
         title: "Respond with closeout summary",
         instruction: "Respond to the user with the verified closeout summary in your own words.",
+        triggerCodes: ["closeout.user-summary.required"],
+        nextCommandTemplate: "bwrk summary show <subjectId> --json",
         data: {
           workId: "bw_work_deadbeefdead",
           summaryUri: "memory://agent-summaries/works/bw_work_deadbeefdead/bw_summary_deadbeefdead.md"
@@ -389,11 +391,6 @@ function agentDirectiveBundleFixture(): AgentDirectiveBundle {
           type: "work",
           id: "bw_work_deadbeefdead",
           title: "Close work"
-        },
-        appliesTo: {
-          commandPaths: ["agent finish", "work close"],
-          subjectTypes: ["work"],
-          workStatuses: ["in_progress"]
         },
         blocksCloseout: true,
         acknowledgement: {

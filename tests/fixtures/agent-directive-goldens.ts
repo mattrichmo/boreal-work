@@ -4,7 +4,8 @@ import type {
   AgentDirectiveKind,
   AgentDirectiveSeverity,
   AgentDirectiveSubjectType,
-  AgentDirectiveTemplateId
+  AgentDirectiveTemplateId,
+  EnforcementGapCode
 } from "@boreal/core";
 
 export const REQUIRED_AGENT_DIRECTIVE_GOLDEN_SCENARIOS = [
@@ -35,6 +36,8 @@ export interface AgentDirectiveGoldenCase {
     readonly severity: AgentDirectiveSeverity;
     readonly kind: AgentDirectiveKind;
     readonly blocksCloseout: boolean;
+    readonly triggerCodes: readonly EnforcementGapCode[];
+    readonly nextCommandTemplate: string;
     readonly requiredKeys: readonly string[];
     readonly optionalKeys: readonly string[];
   };
@@ -65,6 +68,8 @@ export const AGENT_DIRECTIVE_GOLDEN_CASES: readonly AgentDirectiveGoldenCase[] =
       severity: "required",
       kind: "summary",
       blocksCloseout: true,
+      triggerCodes: ["closeout.user-summary.required", "summary.missing"],
+      nextCommandTemplate: "bwrk summary show <subjectId> --json",
       requiredKeys: ["subjectId", "summaryId", "summaryUri", "evidenceIds", "verificationIds"],
       optionalKeys: [
         "commitShas",
@@ -98,6 +103,8 @@ export const AGENT_DIRECTIVE_GOLDEN_CASES: readonly AgentDirectiveGoldenCase[] =
       severity: "action",
       kind: "obligation",
       blocksCloseout: false,
+      triggerCodes: ["sprint.launch-plan.required"],
+      nextCommandTemplate: "bwrk work create <sprint-title> --json",
       requiredKeys: ["sprintTitle", "childWorkIds", "readyWorkIds", "checkpointPlan", "workflowRef"],
       optionalKeys: ["sprintId"]
     }
@@ -127,6 +134,8 @@ export const AGENT_DIRECTIVE_GOLDEN_CASES: readonly AgentDirectiveGoldenCase[] =
       severity: "blocking",
       kind: "recovery",
       blocksCloseout: true,
+      triggerCodes: ["work.blocked.open-dependency"],
+      nextCommandTemplate: "bwrk dep tree <subjectId> --json",
       requiredKeys: ["subjectId", "blockerIds"],
       optionalKeys: [
         "blockerTitles",
@@ -163,6 +172,8 @@ export const AGENT_DIRECTIVE_GOLDEN_CASES: readonly AgentDirectiveGoldenCase[] =
       severity: "required",
       kind: "recovery",
       blocksCloseout: true,
+      triggerCodes: ["doctor.recovery.required", "search.index-stale"],
+      nextCommandTemplate: "bwrk doctor --strict --json",
       requiredKeys: ["diagnostics", "recommendedCommands"],
       optionalKeys: [
         "syncOk",
@@ -207,6 +218,8 @@ export const AGENT_DIRECTIVE_GOLDEN_CASES: readonly AgentDirectiveGoldenCase[] =
       severity: "action",
       kind: "summary",
       blocksCloseout: false,
+      triggerCodes: ["handoff.session-summary.required"],
+      nextCommandTemplate: "bwrk session end --json",
       requiredKeys: ["summaryUri", "nextWorkflow"],
       optionalKeys: [
         "workId",
@@ -272,6 +285,8 @@ export const AGENT_DIRECTIVE_GOLDEN_CASES: readonly AgentDirectiveGoldenCase[] =
       severity: "required",
       kind: "obligation",
       blocksCloseout: true,
+      triggerCodes: ["git.checkpoint.required", "gate.checkpoint.unsatisfied", "summary.checkpoint-missing"],
+      nextCommandTemplate: "git status --short --branch",
       requiredKeys: ["gitRoot"],
       optionalKeys: [
         "commitShas",
@@ -324,6 +339,8 @@ export const AGENT_DIRECTIVE_GOLDEN_CASES: readonly AgentDirectiveGoldenCase[] =
       severity: "action",
       kind: "next_step",
       blocksCloseout: false,
+      triggerCodes: ["directive.workflow-next.available"],
+      nextCommandTemplate: "<workflow-recommended-command>",
       requiredKeys: ["workflowRef", "commandPath", "requiredInputs"],
       optionalKeys: [
         "currentStatus",
@@ -360,6 +377,8 @@ export const AGENT_DIRECTIVE_GOLDEN_CASES: readonly AgentDirectiveGoldenCase[] =
       severity: "required",
       kind: "obligation",
       blocksCloseout: true,
+      triggerCodes: ["close.no-passing-verification", "gate.verification.unsatisfied"],
+      nextCommandTemplate: "<validation-command>",
       requiredKeys: ["subjectId", "command", "expectedVerdict"],
       optionalKeys: ["evidenceIds", "verificationIds"]
     }
@@ -383,6 +402,8 @@ export const AGENT_DIRECTIVE_GOLDEN_CASES: readonly AgentDirectiveGoldenCase[] =
       severity: "required",
       kind: "obligation",
       blocksCloseout: true,
+      triggerCodes: ["gate.review.unsatisfied"],
+      nextCommandTemplate: "bwrk evidence add <subjectId> --kind review --outcome passed --json",
       requiredKeys: ["subjectId", "gateIds", "requiredEvidenceKinds", "minEvidenceCount"],
       optionalKeys: ["forceReasonCode"]
     }
@@ -406,6 +427,8 @@ export const AGENT_DIRECTIVE_GOLDEN_CASES: readonly AgentDirectiveGoldenCase[] =
       severity: "action",
       kind: "obligation",
       blocksCloseout: false,
+      triggerCodes: ["memory.reconcile-source.required"],
+      nextCommandTemplate: "bwrk raw triage --json",
       requiredKeys: ["sourceIds", "memoryRoot", "requiredRecordTypes"],
       optionalKeys: ["wikiPageIds", "claimIds"]
     }

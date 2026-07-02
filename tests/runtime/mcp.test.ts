@@ -85,20 +85,18 @@ describe("boreal MCP server", () => {
                 lifecycle: "active",
                 title: "Resolve active blockers",
                 instruction: "Stop until blockers are resolved.",
+                triggerCodes: ["work.blocked.open-dependency"],
+                nextCommandTemplate: "bwrk dep tree <subjectId> --json",
                 data: { blockerIds: ["bw_work_blocker"] },
                 source: {
                   registryVersion: "directives.v1",
                   registryPath: "packages/core/src/agent-directive-registry.ts",
-                  selectedBy: ["applies.work_status"]
+                  selectedBy: ["gap.work.blocked.open-dependency"]
                 },
                 subject: {
                   type: "work",
                   id: "bw_work_blocked",
                   title: "Blocked work"
-                },
-                appliesTo: {
-                  commandPaths: ["work show"],
-                  subjectTypes: ["work"]
                 },
                 supersedes: []
               },
@@ -113,23 +111,22 @@ describe("boreal MCP server", () => {
                 lifecycle: "blocked",
                 title: "Follow next canonical workflow",
                 instruction: "Follow the canonical next workflow after blockers are resolved.",
+                triggerCodes: ["directive.workflow-next.available"],
+                nextCommandTemplate: "<workflow-recommended-command>",
                 data: {
                   workflowRef: "workflows/40-work/link-dependencies.md",
-                  commandPath: "bwrk dep tree bw_work_blocked --json"
+                  commandPath: "bwrk dep tree bw_work_blocked --json",
+                  requiredInputs: ["work", "command", "actor"]
                 },
                 source: {
                   registryVersion: "directives.v1",
                   registryPath: "packages/core/src/agent-directive-registry.ts",
-                  selectedBy: ["applies.command_path"]
+                  selectedBy: ["gap.directive.workflow-next.available"]
                 },
                 subject: {
                   type: "work",
                   id: "bw_work_blocked",
                   title: "Blocked work"
-                },
-                appliesTo: {
-                  commandPaths: ["work show"],
-                  subjectTypes: ["work"]
                 },
                 supersedes: []
               }
