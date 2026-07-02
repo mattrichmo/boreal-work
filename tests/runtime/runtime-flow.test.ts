@@ -19,6 +19,7 @@ import { createBorealRuntime } from "@boreal/engine";
 import { recordEvidence, verifySubject } from "@boreal/evidence-engine";
 import { createClaim, createDecision, createKnowledgeSource } from "@boreal/knowledge-engine";
 import { InMemoryBorealStore } from "@boreal/storage";
+import { closeWork as closeWorkDomain } from "@boreal/work-engine";
 
 const actor: ActorRef = {
   id: "codex-runtime-test",
@@ -982,6 +983,179 @@ describe("boreal runtime proof slice", () => {
         })
       })
     );
+  });
+
+  it("emits typed enforcement gaps from policy failures", async () => {
+    const runtime = createBorealRuntime({
+      actor,
+      policy: { maxActiveReservationsPerAgent: 1 }
+    });
+    const draft = await runtime.createWork({ title: "Gap draft reservation target" });
+
+    await expect(runtime.reserveWork({ workId: draft.meta.id, agentId: "agent-a" })).rejects.toMatchObject({
+      code: "BOREAL_POLICY_VIOLATION",
+      gaps: [expect.objectContaining({ code: "reservation.not-ready", subjectId: draft.meta.id })]
+    } satisfies Partial<BorealError>);
+
+    const first = await runtime.createWork({ title: "Gap first reservation target", ready: true });
+    const second = await runtime.createWork({ title: "Gap second reservation target", ready: true });
+    await runtime.reserveWork({ workId: first.meta.id, agentId: "agent-a" });
+    await expect(runtime.reserveWork({ workId: second.meta.id, agentId: "agent-a" })).rejects.toMatchObject({
+      code: "BOREAL_POLICY_VIOLATION",
+      gaps: [expect.objectContaining({ code: "reservation.capacity-exceeded", subjectId: second.meta.id })]
+    } satisfies Partial<BorealError>);
+
+    await expect(runtime.closeWork({ workId: second.meta.id, reason: "missing summary" })).rejects.toMatchObject({
+      code: "BOREAL_POLICY_VIOLATION",
+      gaps: [expect.objectContaining({ code: "summary.missing", subjectId: second.meta.id })]
+    } satisfies Partial<BorealError>);
+
+    expect(() =>
+      closeWorkDomain(
+        second,
+        [],
+        { requirePassingVerificationForClose: true },
+        "2026-01-01T00:00:00.000Z" as IsoTimestamp,
+        actor,
+        "missing verification"
+      )
+    ).toThrow(
+      expect.objectContaining({
+        code: "BOREAL_POLICY_VIOLATION",
+        gaps: [expect.objectContaining({ code: "close.no-passing-verification", subjectId: second.meta.id })]
+      } satisfies Partial<BorealError>)
+    );
+  });
+
+  it("enforces declared closeout gate command and observable constraints", async () => {
+    const runtime = createBorealRuntime({ actor });
+    const declaredCommand = "pnpm test --token=<redacted>";
+    const expectedObservable = "expected pass";
+
+    const commandMismatch = await runtime.createWork({
+      title: "Declared command mismatch target",
+      ready: true,
+      requiredCloseoutGates: [{ kind: "verification", declaredCommand, expectedObservable }]
+    });
+    const wrongCommandEvidence = await runtime.recordEvidence({
+      subjectId: commandMismatch.meta.id,
+      subjectType: "work",
+      kind: "test",
+      summary: "expected pass",
+      outcome: "passed",
+      command: "pnpm test --other"
+    });
+    const wrongCommandVerification = await runtime.verifyWork({
+      workId: commandMismatch.meta.id,
+      verdict: "passed",
+      evidenceIds: [wrongCommandEvidence.meta.id]
+    });
+    await expect(
+      runtime.closeWork({
+        workId: commandMismatch.meta.id,
+        reason: "wrong command",
+        agentSummary: closeoutSummaryFor(commandMismatch, {
+          evidenceIds: [wrongCommandEvidence.meta.id],
+          verificationIds: [wrongCommandVerification.meta.id],
+          nonce: "declared-command-mismatch"
+        })
+      })
+    ).rejects.toMatchObject({
+      code: "BOREAL_POLICY_VIOLATION",
+      gaps: [expect.objectContaining({ code: "gate.declared-command.mismatch", subjectId: commandMismatch.meta.id })]
+    } satisfies Partial<BorealError>);
+
+    const observableMismatch = await runtime.createWork({
+      title: "Declared observable mismatch target",
+      ready: true,
+      requiredCloseoutGates: [{ kind: "verification", declaredCommand, expectedObservable }]
+    });
+    const missingObservableEvidence = await runtime.recordEvidence({
+      subjectId: observableMismatch.meta.id,
+      subjectType: "work",
+      kind: "test",
+      summary: "different output",
+      outcome: "passed",
+      command: "pnpm test --token=secret"
+    });
+    expect(missingObservableEvidence.command).toBe(declaredCommand);
+    const missingObservableVerification = await runtime.verifyWork({
+      workId: observableMismatch.meta.id,
+      verdict: "passed",
+      evidenceIds: [missingObservableEvidence.meta.id]
+    });
+    await expect(
+      runtime.closeWork({
+        workId: observableMismatch.meta.id,
+        reason: "missing observable",
+        agentSummary: closeoutSummaryFor(observableMismatch, {
+          evidenceIds: [missingObservableEvidence.meta.id],
+          verificationIds: [missingObservableVerification.meta.id],
+          nonce: "declared-observable-mismatch"
+        })
+      })
+    ).rejects.toMatchObject({
+      code: "BOREAL_POLICY_VIOLATION",
+      gaps: [expect.objectContaining({ code: "gate.expected-observable.mismatch", subjectId: observableMismatch.meta.id })]
+    } satisfies Partial<BorealError>);
+
+    const satisfied = await runtime.createWork({
+      title: "Declared gate satisfied target",
+      ready: true,
+      requiredCloseoutGates: [{ kind: "verification", declaredCommand, expectedObservable }]
+    });
+    const matchingEvidence = await runtime.recordEvidence({
+      subjectId: satisfied.meta.id,
+      subjectType: "work",
+      kind: "test",
+      summary: "expected pass",
+      outcome: "passed",
+      command: "pnpm test --token=secret"
+    });
+    const matchingVerification = await runtime.verifyWork({
+      workId: satisfied.meta.id,
+      verdict: "passed",
+      evidenceIds: [matchingEvidence.meta.id]
+    });
+    const closed = await runtime.closeWork({
+      workId: satisfied.meta.id,
+      reason: "declared gate satisfied",
+      agentSummary: closeoutSummaryFor(satisfied, {
+        evidenceIds: [matchingEvidence.meta.id],
+        verificationIds: [matchingVerification.meta.id],
+        nonce: "declared-gate-satisfied"
+      })
+    });
+    expect(closed.requiredCloseoutGates?.[0]).toEqual(expect.objectContaining({ status: "satisfied" }));
+
+    const finishTarget = await runtime.createWork({
+      title: "Declared gate finish path target",
+      ready: true,
+      requiredCloseoutGates: [{ kind: "verification", declaredCommand, expectedObservable }]
+    });
+    await runtime.reserveWork({ workId: finishTarget.meta.id, agentId: actor.id });
+    const finished = await runtime.finishReservedWork({
+      workId: finishTarget.meta.id,
+      agentId: actor.id,
+      evidence: {
+        kind: "test",
+        summary: "expected pass",
+        outcome: "passed",
+        command: "pnpm test --token=secret"
+      },
+      verification: { verdict: "passed" },
+      close: {
+        reason: "declared finish gate satisfied",
+        agentSummary: ({ evidence, verification }) =>
+          closeoutSummaryFor(finishTarget, {
+            evidenceIds: [evidence.meta.id],
+            verificationIds: [verification.meta.id],
+            nonce: "declared-gate-finish"
+          })
+      }
+    });
+    expect(finished.closedWork?.status).toBe("closed");
+    expect(finished.closedWork?.requiredCloseoutGates?.[0]).toEqual(expect.objectContaining({ status: "satisfied" }));
   });
 
   it("preserves directive links when satisfying closeout gates", async () => {

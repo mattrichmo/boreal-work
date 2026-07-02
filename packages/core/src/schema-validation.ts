@@ -1121,6 +1121,9 @@ function enforcementGapDataIssues(value: unknown, path: string, schemaId: string
   if (value.observed !== undefined) {
     issues.push(...stringArrayIssue(value.observed, `${path}.observed`, schemaId));
   }
+  if (value.evidenceIds !== undefined) {
+    issues.push(...uniquePatternStringArrayIssue(value.evidenceIds, `${path}.evidenceIds`, schemaId, /^bw_evidence_[a-f0-9]{12,64}$/));
+  }
   if (value.reason !== undefined) {
     issues.push(...nonEmptyStringIssue(value.reason, `${path}.reason`, schemaId));
   }

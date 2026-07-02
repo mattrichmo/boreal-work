@@ -8,7 +8,9 @@ export const ENFORCEMENT_GAP_CODES = [
   "gate.audit.unsatisfied",
   "gate.force.invalid",
   "gate.declared-command.missing",
+  "gate.declared-command.mismatch",
   "gate.expected-observable.missing",
+  "gate.expected-observable.mismatch",
   "work.blocked.open-dependency",
   "work.container.open-descendant",
   "reservation.not-ready",
@@ -41,6 +43,7 @@ export interface EnforcementGapData {
   readonly declaredCommand?: string;
   readonly expectedObservable?: string;
   readonly observed?: readonly string[];
+  readonly evidenceIds?: readonly string[];
   readonly reason?: string;
 }
 

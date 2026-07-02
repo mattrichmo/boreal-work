@@ -80,6 +80,7 @@ import {
   type EvidenceRecord,
   type EvidenceKind,
   type EvidenceOutcome,
+  type EnforcementGap,
   type GraphEdge,
   type GraphEdgeId,
   type IsoTimestamp,
@@ -4441,7 +4442,8 @@ async function workCommand(
     case "show": {
       const workId = await resolveWorkId(context, requiredPositional(rest, 0, "work reference"));
       const view = await context.runtime.getWorkView(workId);
-      output.write(await formatRecordWithAgentDirectives(context, args, view, json, { subjectWorkId: workId }));
+      const viewWithGaps = json ? { ...view, gaps: (await closeoutGateStatusForWork(context, workId)).gaps } : view;
+      output.write(await formatRecordWithAgentDirectives(context, args, viewWithGaps, json, { subjectWorkId: workId }));
       return { exitCode: 0 };
     }
     case "block": {
@@ -5303,6 +5305,7 @@ interface CloseoutGateStatusView {
   };
   readonly requiredGates: readonly CloseoutGateStatusRow[];
   readonly gateGaps: readonly CloseoutGateGapRow[];
+  readonly gaps: readonly EnforcementGap[];
 }
 
 interface CloseoutGateStatusRow {
@@ -5314,6 +5317,8 @@ interface CloseoutGateStatusRow {
   readonly requiredEvidenceKinds: readonly EvidenceKind[];
   readonly requiredOutcome: "passed";
   readonly minEvidenceCount: number;
+  readonly declaredCommand?: string;
+  readonly expectedObservable?: string;
   readonly satisfiedBy?: RequiredCloseoutGate["satisfiedBy"];
   readonly force?: RequiredCloseoutGate["force"];
   readonly targets: readonly CloseoutGateTargetStatusRow[];
@@ -5328,12 +5333,15 @@ interface CloseoutGateTargetStatusRow {
 }
 
 interface CloseoutGateGapRow {
+  readonly code: EnforcementGap["code"];
   readonly gateId: string;
   readonly gateKind: CloseoutGateKind;
   readonly gateScope: CloseoutGateScope;
+  readonly subjectType: EnforcementGap["subjectType"];
   readonly subjectId: WorkId;
   readonly targetId: WorkId;
   readonly reason: string;
+  readonly data?: EnforcementGap["data"];
 }
 
 async function closeoutGateStatusForSummary(
@@ -5378,14 +5386,7 @@ function closeoutGateStatusFromSnapshot(
     gate.status === "open"
       ? gate.targets
           .filter((target) => target.status === "open")
-          .map((target) => ({
-            gateId: gate.id,
-            gateKind: gate.kind,
-            gateScope: gate.scope,
-            subjectId: work.meta.id,
-            targetId: target.targetId,
-            reason: "required gate has no satisfying evidence"
-          }))
+          .map((target) => closeoutGateGapRow(gate, work, target))
       : []
   );
   return {
@@ -5400,7 +5401,8 @@ function closeoutGateStatusFromSnapshot(
       reviewGates: reviewGateSummaryFromRows(requiredGates)
     },
     requiredGates,
-    gateGaps
+    gateGaps,
+    gaps: gateGaps.map(enforcementGapFromCloseoutGateGapRow)
   };
 }
 
@@ -5438,6 +5440,8 @@ function closeoutGateStatusRow(
     requiredEvidenceKinds: gate.requiredEvidenceKinds,
     requiredOutcome: gate.requiredOutcome,
     minEvidenceCount: gate.minEvidenceCount,
+    declaredCommand: gate.declaredCommand,
+    expectedObservable: gate.expectedObservable,
     satisfiedBy: gate.satisfiedBy ?? mergeCloseoutGateSatisfactions(targets.flatMap((target) => target.satisfiedBy ? [target.satisfiedBy] : [])),
     force: gate.force,
     targets
@@ -5497,13 +5501,21 @@ function verificationGateStatusSatisfaction(
     }
     return verification.evidenceIds.some((evidenceId) => {
       const record = evidenceById.get(evidenceId);
-      return record?.subjectId === target.meta.id && (record.outcome === "passed" || record.outcome === "observed");
+      return (
+        record?.subjectId === target.meta.id &&
+        (record.outcome === "passed" || record.outcome === "observed") &&
+        evidenceSatisfiesCloseoutGate(gate, record)
+      );
     });
   });
   const evidenceIds = uniqueValues(matches.flatMap((verification) =>
     verification.evidenceIds.filter((evidenceId) => {
       const record = evidenceById.get(evidenceId);
-      return record?.subjectId === target.meta.id && (record.outcome === "passed" || record.outcome === "observed");
+      return (
+        record?.subjectId === target.meta.id &&
+        (record.outcome === "passed" || record.outcome === "observed") &&
+        evidenceSatisfiesCloseoutGate(gate, record)
+      );
     })
   ));
   if (evidenceIds.length < gate.minEvidenceCount) {
@@ -5548,7 +5560,11 @@ function evidenceGateStatusSatisfaction(
 ): RequiredCloseoutGate["satisfiedBy"] | undefined {
   const allowedKinds = new Set(gate.requiredEvidenceKinds);
   const matches = evidence.filter(
-    (record) => record.subjectId === target.meta.id && record.outcome === gate.requiredOutcome && allowedKinds.has(record.kind)
+    (record) =>
+      record.subjectId === target.meta.id &&
+      record.outcome === gate.requiredOutcome &&
+      allowedKinds.has(record.kind) &&
+      evidenceSatisfiesCloseoutGate(gate, record)
   );
   if (matches.length < gate.minEvidenceCount) {
     return undefined;
@@ -5559,6 +5575,86 @@ function evidenceGateStatusSatisfaction(
     agentSummaryIds: [],
     commitShas: [],
     dirtyPathNotes: []
+  };
+}
+
+function evidenceSatisfiesCloseoutGate(gate: RequiredCloseoutGate, record: EvidenceRecord): boolean {
+  if (gate.declaredCommand && record.command !== gate.declaredCommand) {
+    return false;
+  }
+  if (gate.expectedObservable && !record.summary.includes(gate.expectedObservable)) {
+    return false;
+  }
+  return true;
+}
+
+function closeoutGateGapRow(
+  gate: CloseoutGateStatusRow,
+  owner: WorkItem,
+  target: CloseoutGateTargetStatusRow
+): CloseoutGateGapRow {
+  const reason = declaredGateGapReason(gate) ?? "required gate has no satisfying evidence";
+  const code = declaredGateGapCode(gate) ?? defaultCloseoutGateGapCode(gate.kind);
+  return {
+    code,
+    gateId: gate.id,
+    gateKind: gate.kind,
+    gateScope: gate.scope,
+    subjectType: closeoutGateSubjectTypeForWorkKind(owner.kind),
+    subjectId: owner.meta.id,
+    targetId: target.targetId,
+    reason,
+    data: {
+      gateIds: [gate.id as CloseoutGateId],
+      requiredEvidenceKinds: gate.requiredEvidenceKinds,
+      minEvidenceCount: gate.minEvidenceCount,
+      ...(gate.declaredCommand ? { declaredCommand: gate.declaredCommand } : {}),
+      ...(gate.expectedObservable ? { expectedObservable: gate.expectedObservable } : {}),
+      reason
+    }
+  };
+}
+
+function declaredGateGapCode(gate: CloseoutGateStatusRow): EnforcementGap["code"] | undefined {
+  if (gate.declaredCommand) {
+    return "gate.declared-command.missing";
+  }
+  if (gate.expectedObservable) {
+    return "gate.expected-observable.missing";
+  }
+  return undefined;
+}
+
+function declaredGateGapReason(gate: CloseoutGateStatusRow): string | undefined {
+  if (gate.declaredCommand) {
+    return "required gate has no evidence matching declaredCommand";
+  }
+  if (gate.expectedObservable) {
+    return "required gate has no evidence summary containing expectedObservable";
+  }
+  return undefined;
+}
+
+function defaultCloseoutGateGapCode(kind: CloseoutGateKind): EnforcementGap["code"] {
+  switch (kind) {
+    case "verification":
+      return "gate.verification.unsatisfied";
+    case "checkpoint":
+      return "gate.checkpoint.unsatisfied";
+    case "review":
+      return "gate.review.unsatisfied";
+    case "audit":
+      return "gate.audit.unsatisfied";
+  }
+}
+
+function enforcementGapFromCloseoutGateGapRow(gap: CloseoutGateGapRow): EnforcementGap {
+  return {
+    code: gap.code,
+    subjectType: gap.subjectType,
+    subjectId: gap.subjectId,
+    targetId: gap.targetId,
+    data: gap.data ?? { reason: gap.reason }
   };
 }
 
@@ -11105,7 +11201,8 @@ function errorDetails(error: unknown): unknown {
     return {
       code: error.code,
       message: error.message,
-      details: error.details
+      details: error.details,
+      gaps: error.gaps
     };
   }
   if (error instanceof Error) {

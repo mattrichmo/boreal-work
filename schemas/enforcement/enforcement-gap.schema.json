@@ -13,7 +13,9 @@
         "gate.audit.unsatisfied",
         "gate.force.invalid",
         "gate.declared-command.missing",
+        "gate.declared-command.mismatch",
         "gate.expected-observable.missing",
+        "gate.expected-observable.mismatch",
         "work.blocked.open-dependency",
         "work.container.open-descendant",
         "reservation.not-ready",
@@ -52,6 +54,11 @@
         "declaredCommand": { "type": "string", "minLength": 1 },
         "expectedObservable": { "type": "string", "minLength": 1 },
         "observed": { "type": "array", "items": { "type": "string" } },
+        "evidenceIds": {
+          "type": "array",
+          "items": { "type": "string", "pattern": "^bw_evidence_[a-f0-9]{12,64}$" },
+          "uniqueItems": true
+        },
         "reason": { "type": "string", "minLength": 1 }
       }
     }

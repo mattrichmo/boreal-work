@@ -13,6 +13,7 @@ import {
   type CloseoutGateSubjectType,
   type EvidenceKind,
   type EvidenceId,
+  type EnforcementGap,
   type GraphEdge,
   type IsoTimestamp,
   type RequiredCloseoutGate,
@@ -311,7 +312,20 @@ export function closeWork(
 ): WorkItem {
   const hasPassingVerification = verifications.some((verification) => verification.verdict === "passed");
   if (policy.requirePassingVerificationForClose && !hasPassingVerification) {
-    throw new BorealError("BOREAL_POLICY_VIOLATION", "Work cannot close without a passing verification");
+    const gaps = [
+      {
+        code: "close.no-passing-verification",
+        subjectType: workSubjectType(work),
+        subjectId: work.meta.id,
+        data: { reason: "no passing verification is attached to this work item" }
+      }
+    ] satisfies readonly EnforcementGap[];
+    throw new BorealError(
+      "BOREAL_POLICY_VIOLATION",
+      "Work cannot close without a passing verification",
+      { gaps },
+      gaps
+    );
   }
 
   return touchRecord(
@@ -331,16 +345,28 @@ export function deriveReadinessStatus(work: WorkItem, dependencies: readonly Wor
     return work.status;
   }
 
-  const openDependency = dependencies.some(
-    (dependency) =>
-      dependency.status !== "closed" && dependency.status !== "cancelled" && dependency.status !== "verified"
-  );
-
-  if (openDependency) {
+  if (workReadinessGaps(work, dependencies).length > 0) {
     return "blocked";
   }
 
   return work.status === "draft" || work.status === "blocked" ? "ready" : work.status;
+}
+
+export function workReadinessGaps(work: WorkItem, dependencies: readonly WorkItem[]): readonly EnforcementGap[] {
+  const blockerIds = dependencies
+    .filter((dependency) => dependency.status !== "closed" && dependency.status !== "cancelled" && dependency.status !== "verified")
+    .map((dependency) => dependency.meta.id);
+  if (blockerIds.length === 0) {
+    return [];
+  }
+  return [
+    {
+      code: "work.blocked.open-dependency",
+      subjectType: workSubjectType(work),
+      subjectId: work.meta.id,
+      data: { blockerIds }
+    }
+  ];
 }
 
 export function setWorkStatus(work: WorkItem, status: WorkStatus, now: IsoTimestamp, actor: ActorRef): WorkItem {
@@ -357,4 +383,8 @@ function uniqueWorkItems(values: readonly WorkItem[]): readonly WorkItem[] {
     byId.set(value.meta.id, value);
   }
   return [...byId.values()];
+}
+
+function workSubjectType(work: WorkItem): EnforcementGap["subjectType"] {
+  return closeoutGateSubjectTypeForWorkKind(work.kind);
 }

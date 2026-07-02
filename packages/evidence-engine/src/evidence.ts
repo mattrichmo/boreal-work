@@ -8,6 +8,7 @@ import {
   type EvidenceKind,
   type EvidenceOutcome,
   type EvidenceRecord,
+  type EnforcementGap,
   type IsoTimestamp,
   type RuntimePolicy,
   type VerificationRecord,
@@ -76,7 +77,8 @@ export function verifySubject(input: VerifySubjectInput): VerificationRecord {
   const evidenceIds = unique([...input.evidenceIds].sort());
   const notes = input.notes === undefined ? undefined : normalizeMachineString(input.notes, "verification notes");
   if (input.policy.requireEvidenceForVerification && evidenceIds.length === 0) {
-    throw new BorealError("BOREAL_POLICY_VIOLATION", "Verification requires evidence");
+    const gaps = [verificationGap(input.subjectId, input.subjectType, "verification has no evidence ids")];
+    throw new BorealError("BOREAL_POLICY_VIOLATION", "Verification requires evidence", { gaps }, gaps);
   }
 
   const availableById = new Map(input.availableEvidence.map((record) => [record.meta.id, record]));
@@ -96,16 +98,40 @@ export function verifySubject(input: VerifySubjectInput): VerificationRecord {
       subjectType: record.subjectType
     }));
   if (mismatchedEvidence.length > 0) {
-    throw new BorealError("BOREAL_POLICY_VIOLATION", "Verification evidence belongs to a different subject", {
-      subjectId: input.subjectId,
-      subjectType: input.subjectType,
-      mismatchedEvidence
-    });
+    const gaps = [
+      verificationGap(input.subjectId, input.subjectType, "verification evidence belongs to a different subject", {
+        evidenceIds: mismatchedEvidence.map((record) => record.evidenceId),
+        observed: mismatchedEvidence.map((record) => `${record.subjectType}:${record.subjectId}`)
+      })
+    ];
+    throw new BorealError(
+      "BOREAL_POLICY_VIOLATION",
+      "Verification evidence belongs to a different subject",
+      {
+        subjectId: input.subjectId,
+        subjectType: input.subjectType,
+        mismatchedEvidence,
+        gaps
+      },
+      gaps
+    );
   }
   if (input.verdict === "passed" && !selectedEvidence.some((record) => record.outcome === "passed")) {
-    throw new BorealError("BOREAL_POLICY_VIOLATION", "Passed verification requires at least one passed evidence", {
-      evidenceIds
-    });
+    const gaps = [
+      verificationGap(input.subjectId, input.subjectType, "passed verification has no passed evidence", {
+        evidenceIds,
+        observed: selectedEvidence.map((record) => record.outcome)
+      })
+    ];
+    throw new BorealError(
+      "BOREAL_POLICY_VIOLATION",
+      "Passed verification requires at least one passed evidence",
+      {
+        evidenceIds,
+        gaps
+      },
+      gaps
+    );
   }
 
   const id = deterministicId<VerificationId>("verification", {
@@ -142,6 +168,39 @@ function redactSensitiveCommand(command: string | undefined): string | undefined
     .replace(new RegExp(String.raw`(^|\s)([A-Za-z_][A-Za-z0-9_]*(?:${sensitiveName})[A-Za-z0-9_]*=)([^\s]+)`, "giu"), "$1$2<redacted>")
     .replace(new RegExp(String.raw`([?&]${sensitiveName}=)([^\s&]+)`, "giu"), "$1<redacted>")
     .replace(/\b(Bearer\s+)[A-Za-z0-9._~+/=-]+/giu, "$1<redacted>");
+}
+
+function verificationGap(
+  subjectId: string,
+  subjectType: string,
+  reason: string,
+  data: Omit<NonNullable<EnforcementGap["data"]>, "reason"> = {}
+): EnforcementGap {
+  return {
+    code: "gate.verification.unsatisfied",
+    subjectType: enforcementSubjectType(subjectType),
+    subjectId,
+    data: {
+      ...data,
+      reason
+    }
+  };
+}
+
+function enforcementSubjectType(value: string): EnforcementGap["subjectType"] {
+  switch (value) {
+    case "work":
+    case "sprint":
+    case "phase":
+    case "milestone":
+    case "project":
+    case "session":
+    case "workspace":
+    case "command":
+      return value;
+    default:
+      return "command";
+  }
 }
 
 function unique<T>(values: readonly T[]): readonly T[] {

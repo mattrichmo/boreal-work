@@ -9050,6 +9050,41 @@ describe("bwrk cli", () => {
     );
   });
 
+  it("includes advisory enforcement gaps in work show JSON", async () => {
+    const rootDir = await makeTempWorkspace();
+    await runCli(rootDir, ["init", "--json"]);
+
+    const work = parseData<{ readonly meta: { readonly id: string } }>(
+      (
+        await runCli(rootDir, [
+          "work",
+          "create",
+          "Advisory gap target",
+          "--required-gate",
+          "review",
+          "--ready",
+          "--json"
+        ])
+      ).stdout
+    );
+
+    const shown = parseData<{
+      readonly id: string;
+      readonly gaps?: readonly Array<{ readonly code: string; readonly subjectId: string; readonly data?: { readonly gateIds?: readonly string[] } }>;
+    }>((await runCli(rootDir, ["work", "show", work.meta.id, "--json"])).stdout);
+
+    expect(shown.id).toBe(work.meta.id);
+    expect(shown.gaps).toEqual([
+      expect.objectContaining({
+        code: "gate.review.unsatisfied",
+        subjectId: work.meta.id,
+        data: expect.objectContaining({
+          gateIds: [expect.stringMatching(/^bw_gate_[a-f0-9]{16}$/)]
+        })
+      })
+    ]);
+  });
+
   it("forces planned required gates through work edit with audited metadata", async () => {
     const rootDir = await makeTempWorkspace();
     await runCli(rootDir, ["init", "--json"]);

@@ -187,7 +187,8 @@ function errorPayload(error: unknown): Record<string, unknown> {
       ok: false,
       code: error.code,
       message: error.message,
-      details: error.details
+      details: error.details,
+      gaps: error.gaps
     };
   }
   if (error instanceof Error) {

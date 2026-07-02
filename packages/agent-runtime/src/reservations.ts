@@ -7,6 +7,7 @@ import {
   type ActorRef,
   type AgentId,
   type AgentReservation,
+  type EnforcementGap,
   type IsoTimestamp,
   type ReservationId,
   type RuntimePolicy,
@@ -44,7 +45,8 @@ export interface RenewReservationInput {
 export function reserveWork(input: ReserveWorkInput): ReserveWorkResult {
   const agentId = normalizeActorId(String(input.agentId));
   if (input.work.status === "closed" || input.work.status === "cancelled") {
-    throw new BorealError("BOREAL_POLICY_VIOLATION", "Closed or cancelled work cannot be reserved");
+    const gaps = [reservationNotReadyGap(input.work, "closed or cancelled work cannot be reserved")];
+    throw new BorealError("BOREAL_POLICY_VIOLATION", "Closed or cancelled work cannot be reserved", { gaps }, gaps);
   }
   if (input.expiresAt && Date.parse(input.expiresAt) <= Date.parse(input.now)) {
     throw new BorealError("BOREAL_INVALID_INPUT", "Reservation expiration must be in the future", {
@@ -57,26 +59,51 @@ export function reserveWork(input: ReserveWorkInput): ReserveWorkResult {
   const activeForWork = input.existingReservationsForWork.filter((reservation) => reservation.status === "active");
   if (activeForWork.length > 0 && !input.policy.allowReservationStealing) {
     throw new BorealError("BOREAL_CONFLICT", "Work already has an active reservation", {
-      reservationIds: activeForWork.map((reservation) => reservation.meta.id)
+      reservationIds: activeForWork.map((reservation) => reservation.meta.id),
+      gaps: [
+        {
+          code: "reservation.active-conflict",
+          subjectType: workSubjectType(input.work),
+          subjectId: input.work.meta.id,
+          data: {
+            observed: activeForWork.map((reservation) => reservation.meta.id),
+            reason: "work already has an active reservation"
+          }
+        }
+      ] satisfies readonly EnforcementGap[]
     });
   }
 
   if (input.work.status !== "ready") {
     const forceReason = input.forceReason?.trim();
     if (!input.force || !forceReason) {
+      const gaps = [reservationNotReadyGap(input.work, "only ready work can be reserved without force and reason")];
       throw new BorealError(
         "BOREAL_POLICY_VIOLATION",
         "Only ready work can be reserved without --force and --reason",
         {
           workId: input.work.meta.id,
-          status: input.work.status
-        }
+          status: input.work.status,
+          gaps
+        },
+        gaps
       );
     }
   }
 
   if (input.activeReservationsForAgent.length >= input.policy.maxActiveReservationsPerAgent) {
-    throw new BorealError("BOREAL_POLICY_VIOLATION", "Agent has reached active reservation limit");
+    const gaps = [
+      {
+        code: "reservation.capacity-exceeded",
+        subjectType: "work",
+        subjectId: input.work.meta.id,
+        data: {
+          observed: input.activeReservationsForAgent.map((reservation) => reservation.meta.id),
+          reason: "agent has reached active reservation limit"
+        }
+      }
+    ] satisfies readonly EnforcementGap[];
+    throw new BorealError("BOREAL_POLICY_VIOLATION", "Agent has reached active reservation limit", { gaps }, gaps);
   }
 
   const releasedReservations = activeForWork.map((reservation) => releaseReservation(reservation, input.now, input.actor));
@@ -149,4 +176,20 @@ function createReservation(input: ReserveWorkInput): AgentReservation {
     expiresAt: input.expiresAt,
     purpose: input.purpose
   });
+}
+
+function reservationNotReadyGap(work: WorkItem, reason: string): EnforcementGap {
+  return {
+    code: "reservation.not-ready",
+    subjectType: workSubjectType(work),
+    subjectId: work.meta.id,
+    data: {
+      observed: [work.status],
+      reason
+    }
+  };
+}
+
+function workSubjectType(work: WorkItem): EnforcementGap["subjectType"] {
+  return work.kind === "sprint" || work.kind === "milestone" ? work.kind : "work";
 }

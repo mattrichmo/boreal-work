@@ -28,6 +28,7 @@ import {
   type EventId,
   type EvidenceId,
   type EvidenceRecord,
+  type EnforcementGap,
   type RequiredCloseoutGate,
   type IsoTimestamp,
   type KnowledgeSource,
@@ -52,6 +53,7 @@ import {
   addBlockingDependency as addBlockingDependencyDomain,
   attachEvidenceToWork,
   attachVerificationToWork,
+  closeoutGateSubjectTypeForWorkKind,
   closeWork as closeWorkDomain,
   createWorkItem,
   deriveReadinessStatus,
@@ -174,12 +176,15 @@ interface CloseoutGateEvaluationInput {
 type CloseoutGateSatisfaction = NonNullable<RequiredCloseoutGate["satisfiedBy"]>;
 
 interface CloseoutGateGap {
+  readonly code: EnforcementGap["code"];
   readonly gateId: string;
   readonly gateKind: string;
   readonly gateScope: string;
+  readonly subjectType: EnforcementGap["subjectType"];
   readonly subjectId: string;
   readonly targetId?: string;
   readonly reason: string;
+  readonly data?: EnforcementGap["data"];
 }
 
 const CHECKPOINT_DIRTY_PATH_REASON_CODES = new Set([
@@ -663,11 +668,28 @@ export function createBorealRuntime(options: BorealRuntimeOptions = {}): BorealR
         const reservation = await getActiveWorkReservation(writer, work);
         if (reservation) {
           if (!isReservationExpired(reservation, current)) {
-            throw new BorealError("BOREAL_POLICY_VIOLATION", "Reserved work must be finished or released by its owning agent before direct close", {
-              workId: work.meta.id,
-              reservationId: reservation.meta.id,
-              agentId: reservation.agentId
-            });
+            const gaps = [
+              {
+                code: "reservation.active-conflict",
+                subjectType: closeoutGateSubjectTypeForWorkKind(work.kind),
+                subjectId: work.meta.id,
+                data: {
+                  observed: [reservation.meta.id],
+                  reason: "reserved work must be finished or released by its owning agent before direct close"
+                }
+              }
+            ] satisfies readonly EnforcementGap[];
+            throw new BorealError(
+              "BOREAL_POLICY_VIOLATION",
+              "Reserved work must be finished or released by its owning agent before direct close",
+              {
+                workId: work.meta.id,
+                reservationId: reservation.meta.id,
+                agentId: reservation.agentId,
+                gaps
+              },
+              gaps
+            );
           }
           const expiredReservation = expireReservation(reservation, current, actor);
           await writer.putReservation(expiredReservation);
@@ -1145,20 +1167,54 @@ async function requireAgentWorkReservation(
   const normalizedAgentId = normalizeActorId(String(agentId));
   const reservation = await requireActiveWorkReservation(reader, work);
   if (String(reservation.agentId) !== normalizedAgentId) {
-    throw new BorealError("BOREAL_POLICY_VIOLATION", "Agent does not own the active reservation", {
-      workId: work.meta.id,
-      agentId: normalizedAgentId,
-      reservationAgentId: reservation.agentId,
-      reservationId: reservation.meta.id
-    });
+    const gaps = [
+      {
+        code: "reservation.active-conflict",
+        subjectType: closeoutGateSubjectTypeForWorkKind(work.kind),
+        subjectId: work.meta.id,
+        data: {
+          observed: [String(reservation.agentId)],
+          reason: "agent does not own the active reservation"
+        }
+      }
+    ] satisfies readonly EnforcementGap[];
+    throw new BorealError(
+      "BOREAL_POLICY_VIOLATION",
+      "Agent does not own the active reservation",
+      {
+        workId: work.meta.id,
+        agentId: normalizedAgentId,
+        reservationAgentId: reservation.agentId,
+        reservationId: reservation.meta.id,
+        gaps
+      },
+      gaps
+    );
   }
   if (reservation.expiresAt && Date.parse(reservation.expiresAt) <= Date.parse(current)) {
-    throw new BorealError("BOREAL_POLICY_VIOLATION", "Agent reservation is expired; run `bwrk doctor --fix`", {
-      workId: work.meta.id,
-      agentId: normalizedAgentId,
-      reservationId: reservation.meta.id,
-      expiresAt: reservation.expiresAt
-    });
+    const gaps = [
+      {
+        code: "reservation.not-ready",
+        subjectType: closeoutGateSubjectTypeForWorkKind(work.kind),
+        subjectId: work.meta.id,
+        data: {
+          observed: [reservation.expiresAt],
+          reason: "agent reservation is expired"
+        }
+      }
+    ] satisfies readonly EnforcementGap[];
+    throw new BorealError(
+      "BOREAL_POLICY_VIOLATION",
+      "Agent reservation is expired; run `bwrk doctor --fix`",
+      {
+        workId: work.meta.id,
+        agentId: normalizedAgentId,
+        reservationId: reservation.meta.id,
+        expiresAt: reservation.expiresAt,
+        gaps
+      },
+      gaps
+    );
   }
   return reservation;
 }
@@ -1223,11 +1279,28 @@ function assertAgentSummaryClosePolicy(
       (summary.status === "final" || summary.status === "forced")
   );
   if (matching.length === 0) {
-    throw new BorealError("BOREAL_POLICY_VIOLATION", "Closeout requires a final or forced agent summary matching the work subject", {
-      workId: work.meta.id,
-      expectedSubjectType,
-      summaryIds: summaries.map((summary) => summary.meta.id)
-    });
+    const gaps = [
+      {
+        code: "summary.missing",
+        subjectType: closeoutGateSubjectTypeForWorkKind(work.kind),
+        subjectId: work.meta.id,
+        data: {
+          observed: summaries.map((summary) => `${summary.subjectType}:${summary.status}:${summary.meta.id}`),
+          reason: "no final or forced agent summary matches the work subject"
+        }
+      }
+    ] satisfies readonly EnforcementGap[];
+    throw new BorealError(
+      "BOREAL_POLICY_VIOLATION",
+      "Closeout requires a final or forced agent summary matching the work subject",
+      {
+        workId: work.meta.id,
+        expectedSubjectType,
+        summaryIds: summaries.map((summary) => summary.meta.id),
+        gaps
+      },
+      gaps
+    );
   }
 }
 
@@ -1295,12 +1368,18 @@ async function applyRequiredCloseoutGatePolicy(input: CloseoutGateEvaluationInpu
     for (const descendant of descendants) {
       if (!isResolvedForContainerClose(descendant)) {
         gaps.push({
+          code: "work.container.open-descendant",
           gateId: "descendant-work",
           gateKind: "descendant_work",
           gateScope: "descendants",
+          subjectType: closeoutGateSubjectTypeForWorkKind(input.work.kind),
           subjectId: input.work.meta.id,
           targetId: descendant.meta.id,
-          reason: `descendant work is ${descendant.status}`
+          reason: `descendant work is ${descendant.status}`,
+          data: {
+            blockerIds: [descendant.meta.id],
+            reason: `descendant work is ${descendant.status}`
+          }
         });
       }
     }
@@ -1336,10 +1415,12 @@ async function applyRequiredCloseoutGatePolicy(input: CloseoutGateEvaluationInpu
   }
 
   if (gaps.length > 0) {
+    const enforcementGaps = gaps.map(enforcementGapFromCloseoutGateGap);
     throw new BorealError("BOREAL_POLICY_VIOLATION", "Closeout requires satisfied required gates and resolved descendant work", {
       workId: input.work.meta.id,
-      gateGaps: gaps
-    });
+      gateGaps: gaps.map(legacyCloseoutGateGap),
+      gaps: enforcementGaps
+    }, enforcementGaps);
   }
 
   if (JSON.stringify(input.work.requiredCloseoutGates ?? []) === JSON.stringify(evaluatedGates)) {
@@ -1369,7 +1450,11 @@ function evaluateRequiredCloseoutGate(input: {
       ? { gate: input.gate, gaps: [] }
       : {
           gate: input.gate,
-          gaps: [gateGap(input.gate, input.owner, undefined, "forced gate is missing a reason, comment, actor, or forced timestamp")]
+          gaps: [
+            gateGap(input.gate, input.owner, undefined, "forced gate is missing a reason, comment, actor, or forced timestamp", {
+              code: "gate.force.invalid"
+            })
+          ]
         };
   }
 
@@ -1380,7 +1465,7 @@ function evaluateRequiredCloseoutGate(input: {
   for (const target of targets) {
     const satisfaction = targetCloseoutGateSatisfaction(input.gate, target, input.evidence, input.verifications, input.summaries);
     if (!satisfaction) {
-      gaps.push(gateGap(input.gate, input.owner, target, "required gate has no satisfying evidence"));
+      gaps.push(unsatisfiedGateGap(input.gate, input.owner, target, input.evidence, input.verifications));
     } else {
       satisfactions.push(satisfaction);
     }
@@ -1433,14 +1518,19 @@ function verificationGateSatisfaction(
       const record = evidenceById.get(evidenceId);
       return (
         record?.subjectId === target.meta.id &&
-        (record.outcome === "passed" || record.outcome === "observed")
+        (record.outcome === "passed" || record.outcome === "observed") &&
+        evidenceSatisfiesDeclaredGate(gate, record)
       );
     });
   });
   const evidenceIds = uniqueValues(matches.flatMap((verification) =>
     verification.evidenceIds.filter((evidenceId) => {
       const record = evidenceById.get(evidenceId);
-      return record?.subjectId === target.meta.id && (record.outcome === "passed" || record.outcome === "observed");
+      return (
+        record?.subjectId === target.meta.id &&
+        (record.outcome === "passed" || record.outcome === "observed") &&
+        evidenceSatisfiesDeclaredGate(gate, record)
+      );
     })
   ));
   if (evidenceIds.length < gate.minEvidenceCount) {
@@ -1488,7 +1578,8 @@ function evidenceGateSatisfaction(
     (record) =>
       record.subjectId === target.meta.id &&
       record.outcome === gate.requiredOutcome &&
-      allowedKinds.has(record.kind)
+      allowedKinds.has(record.kind) &&
+      evidenceSatisfiesDeclaredGate(gate, record)
   );
   if (matches.length < gate.minEvidenceCount) {
     return undefined;
@@ -1541,15 +1632,143 @@ function forcedRequiredGateIsValid(gate: RequiredCloseoutGate): boolean {
   return Boolean(gate.force?.reason && gate.force.comment.trim() && gate.force.actor && gate.force.forcedAt);
 }
 
-function gateGap(gate: RequiredCloseoutGate, owner: WorkItem, target: WorkItem | undefined, reason: string): CloseoutGateGap {
+function evidenceSatisfiesDeclaredGate(gate: RequiredCloseoutGate, record: EvidenceRecord): boolean {
+  if (gate.declaredCommand && record.command !== gate.declaredCommand) {
+    return false;
+  }
+  if (gate.expectedObservable && !record.summary.includes(gate.expectedObservable)) {
+    return false;
+  }
+  return true;
+}
+
+function unsatisfiedGateGap(
+  gate: RequiredCloseoutGate,
+  owner: WorkItem,
+  target: WorkItem,
+  evidence: readonly EvidenceRecord[],
+  verifications: readonly VerificationRecord[]
+): CloseoutGateGap {
+  const targetEvidence = candidateEvidenceForGate(gate, target, evidence, verifications);
+  if (gate.declaredCommand) {
+    const observed = uniqueStrings(targetEvidence.map((record) => record.command ?? "<missing>"));
+    if (!targetEvidence.some((record) => record.command === gate.declaredCommand)) {
+      return gateGap(gate, owner, target, "required gate has no evidence matching declaredCommand", {
+        code: observed.includes("<missing>") ? "gate.declared-command.missing" : "gate.declared-command.mismatch",
+        data: {
+          declaredCommand: gate.declaredCommand,
+          observed,
+          evidenceIds: targetEvidence.map((record) => record.meta.id)
+        }
+      });
+    }
+  }
+  if (gate.expectedObservable) {
+    const expectedObservable = gate.expectedObservable;
+    const evidenceWithDeclaredCommand = gate.declaredCommand
+      ? targetEvidence.filter((record) => record.command === gate.declaredCommand)
+      : targetEvidence;
+    if (!evidenceWithDeclaredCommand.some((record) => record.summary.includes(expectedObservable))) {
+      return gateGap(gate, owner, target, "required gate has no evidence summary containing expectedObservable", {
+        code: evidenceWithDeclaredCommand.length > 0 ? "gate.expected-observable.mismatch" : "gate.expected-observable.missing",
+        data: {
+          expectedObservable,
+          observed: evidenceWithDeclaredCommand.map((record) => record.summary),
+          evidenceIds: evidenceWithDeclaredCommand.map((record) => record.meta.id)
+        }
+      });
+    }
+  }
+  return gateGap(gate, owner, target, "required gate has no satisfying evidence");
+}
+
+function candidateEvidenceForGate(
+  gate: RequiredCloseoutGate,
+  target: WorkItem,
+  evidence: readonly EvidenceRecord[],
+  verifications: readonly VerificationRecord[]
+): readonly EvidenceRecord[] {
+  const allowedKinds = new Set(gate.requiredEvidenceKinds);
+  if (gate.kind === "verification") {
+    const passedEvidenceIds = new Set(
+      verifications
+        .filter((verification) => verification.subjectId === target.meta.id && verification.verdict === "passed")
+        .flatMap((verification) => verification.evidenceIds)
+    );
+    return evidence.filter(
+      (record) =>
+        passedEvidenceIds.has(record.meta.id) &&
+        record.subjectId === target.meta.id &&
+        (record.outcome === "passed" || record.outcome === "observed")
+    );
+  }
+  return evidence.filter(
+    (record) =>
+      record.subjectId === target.meta.id &&
+      record.outcome === gate.requiredOutcome &&
+      allowedKinds.has(record.kind)
+  );
+}
+
+function gateGap(
+  gate: RequiredCloseoutGate,
+  owner: WorkItem,
+  target: WorkItem | undefined,
+  reason: string,
+  options: {
+    readonly code?: EnforcementGap["code"];
+    readonly data?: EnforcementGap["data"];
+  } = {}
+): CloseoutGateGap {
   return {
+    code: options.code ?? defaultGateGapCode(gate.kind),
     gateId: gate.id,
     gateKind: gate.kind,
     gateScope: gate.scope,
+    subjectType: closeoutGateSubjectTypeForWorkKind(owner.kind),
     subjectId: owner.meta.id,
     targetId: target?.meta.id,
-    reason
+    reason,
+    data: {
+      gateIds: [gate.id],
+      requiredEvidenceKinds: gate.requiredEvidenceKinds,
+      minEvidenceCount: gate.minEvidenceCount,
+      ...(gate.declaredCommand ? { declaredCommand: gate.declaredCommand } : {}),
+      ...(gate.expectedObservable ? { expectedObservable: gate.expectedObservable } : {}),
+      ...options.data,
+      reason
+    }
   };
+}
+
+function defaultGateGapCode(kind: RequiredCloseoutGate["kind"]): EnforcementGap["code"] {
+  switch (kind) {
+    case "verification":
+      return "gate.verification.unsatisfied";
+    case "checkpoint":
+      return "gate.checkpoint.unsatisfied";
+    case "review":
+      return "gate.review.unsatisfied";
+    case "audit":
+      return "gate.audit.unsatisfied";
+  }
+}
+
+function enforcementGapFromCloseoutGateGap(gap: CloseoutGateGap): EnforcementGap {
+  return {
+    code: gap.code,
+    subjectType: gap.subjectType,
+    subjectId: gap.subjectId,
+    targetId: gap.targetId,
+    data: gap.data ?? { reason: gap.reason }
+  };
+}
+
+function legacyCloseoutGateGap(gap: CloseoutGateGap): Omit<CloseoutGateGap, "code" | "data"> & {
+  readonly code: EnforcementGap["code"];
+  readonly data?: EnforcementGap["data"];
+} {
+  return gap;
 }
 
 function mergeGateSatisfactions(values: readonly CloseoutGateSatisfaction[]): RequiredCloseoutGate["satisfiedBy"] {
