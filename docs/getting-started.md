@@ -12,12 +12,52 @@ This guide takes you from a fresh checkout to a closed, evidence-backed work ite
 
 ## Install
 
+Choose the install scope that matches how you want to run `bwrk`.
+
+### npm global package
+
+After the owner publishes the prepared npm package:
+
+```bash
+npm install -g @boreal/cli
+bwrk --version
+```
+
+This installs the bundled CLI dist artifact as a machine-level `bwrk` binary. The npm package is prepared from the repo version and is published with npm provenance by the owner.
+
+### Homebrew
+
+After the owner publishes the prepared tap:
+
+```bash
+brew tap mattrichmo/boreal
+brew install boreal-work
+bwrk --version
+```
+
+The Homebrew formula wraps the npm tarball and depends on Homebrew `node`. A future node-free single executable can be added later; it is not required for the v1 install path.
+
+### install.sh
+
+For release artifacts and source checkouts, the installer can install or upgrade the machine binary:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/mattrichmo/boreal-work/main/install.sh | bash -s -- --machine --yes
+```
+
+From a built source checkout, the same installer can install the local dist:
+
+```bash
+pnpm build
+./install.sh --machine --yes
+```
+
+### Source checkout
+
 ```bash
 pnpm install
 pnpm build
 ```
-
-You can run the CLI two ways.
 
 **From source**, with the workspace script:
 
@@ -25,14 +65,14 @@ You can run the CLI two ways.
 pnpm bwrk --help
 ```
 
-**As a local `bwrk` shim**, while the package is unpublished:
+**As a local `bwrk` shim** for this checkout:
 
 ```bash
 pnpm install:local
 bwrk --help
 ```
 
-`install:local` builds the workspace and writes an executable shim to `~/.local/bin/bwrk` (override with `BOREAL_BIN_DIR` or `--bin-dir <path>`). The shim runs *this checkout's* built CLI, so rebuild and re-run the installer if you move the repo. If local pnpm policy blocks script execution, run the installer steps directly:
+`install:local` builds the workspace and writes an executable shim to `~/.local/bin/bwrk` (override with `BOREAL_BIN_DIR` or `--bin-dir <path>`). The shim runs *this checkout's* source CLI, so rebuild and re-run the installer if you move the repo. If local pnpm policy blocks script execution, run the installer steps directly:
 
 ```bash
 node node_modules/typescript/bin/tsc -b
@@ -45,7 +85,7 @@ Boreal supports three install scopes on one machine: a source checkout (`pnpm bw
 
 Patch-level skew between the machine launcher and repo-pinned binary is allowed. Major or minor skew is reported by `bwrk doctor` as `install.version_skew` with channel-correct upgrade commands. A binary may only operate on the file-store schema it supports (`boreal.file-store.v1` today); newer state files are rejected by doctor and by the storage adapter instead of being read silently.
 
-The rest of this guide uses `pnpm bwrk`; substitute `bwrk` if you installed the shim.
+The rest of this guide uses `pnpm bwrk`; substitute `bwrk` if you installed the npm package, Homebrew formula, machine installer, or local shim.
 
 ## Install Boreal into a project
 

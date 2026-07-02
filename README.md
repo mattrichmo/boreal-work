@@ -12,7 +12,7 @@
 
 Boreal turns tasks, sources, claims, decisions, verification, and workflow state into durable records with JSON-first command contracts and repairable Git-native artifacts. The `.boreal/` runtime tracks operational truth; the `memory/` vault preserves human-readable knowledge, ledgers, and handoff material that people can diff and agents can coordinate against.
 
-> **Status:** v1 local runtime. `apps/cli` (`bwrk`) is the canonical command surface; the MCP server, daemon, and browser console are built on the same JSON-first contracts. Nothing is published to a registry yet — you run it from this checkout.
+> **Status:** v1 local runtime. `apps/cli` (`bwrk`) is the canonical command surface; the MCP server, daemon, and browser console are built on the same JSON-first contracts. npm and Homebrew packaging are prepared; the first public publish and tap push are owner actions.
 
 ---
 
@@ -24,7 +24,28 @@ Boreal turns tasks, sources, claims, decisions, verification, and workflow state
 - **Deterministic by design.** IDs carry actor + timestamp + nonce so imports don't collide; readiness is derived and explicitly recomputable; relationship edges use deterministic natural keys.
 - **Git-native, fail-closed.** State is a file-backed store with cross-process write locking, schema-drift rejection, and a `doctor` that repairs projections and indexes.
 
-## Quick start
+## Install
+
+Install the machine-level `bwrk` with npm or Homebrew after the owner publishes the prepared release artifacts:
+
+```bash
+npm install -g @boreal/cli
+bwrk --version
+```
+
+```bash
+brew tap mattrichmo/boreal
+brew install boreal-work
+bwrk --version
+```
+
+The installer channel is available for release artifacts and source checkouts:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/mattrichmo/boreal-work/main/install.sh | bash -s -- --machine --yes
+```
+
+For source development:
 
 ```bash
 pnpm install
@@ -33,7 +54,7 @@ pnpm build
 # run the CLI straight from source
 pnpm bwrk --help
 
-# or install a local `bwrk` shim while the package is unpublished
+# or install a local `bwrk` shim for this checkout
 pnpm install:local
 bwrk --help
 ```
@@ -83,6 +104,7 @@ Boreal is a workspace with several front ends over one runtime (`@boreal/engine`
 | --- | --- |
 | **[Documentation index](docs/README.md)** | The full map of every doc in this repo. |
 | **[Getting started](docs/getting-started.md)** | Install, initialize, and run your first work loop. |
+| **[Publishing](docs/release/publishing.md)** | Release package gates, npm publish dry run, and Homebrew tap handoff. |
 | **[Concepts](docs/concepts.md)** | The mental model behind work, evidence, knowledge, and memory. |
 | **[CLI commands](docs/cli/COMMANDS.md)** | The complete `bwrk` command contract (every flag, every envelope). |
 | **[Runtime architecture](docs/architecture/RUNTIME.md)** | Ports, domain operations, and the engine boundary. |

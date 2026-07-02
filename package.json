@@ -24,6 +24,11 @@
     "doctor:strict": "tsx --tsconfig tsconfig.base.json apps/cli/src/index.ts doctor --workspace . --strict --json",
     "install:local": "node node_modules/typescript/bin/tsc -b && node tools/install-local-bwrk.mjs",
     "mcp:dev": "pnpm --dir apps/mcp dev",
+    "release:brew:verify": "node tools/verify-homebrew-formula.mjs",
+    "release:npm:dry-run": "node tools/npm-publish-dry-run.mjs",
+    "release:npm:pack": "node tools/smoke-npm-package.mjs --pack-only",
+    "release:npm:prepare": "node tools/prepare-npm-package.mjs",
+    "release:npm:smoke": "node tools/smoke-npm-package.mjs",
     "test": "vitest run",
     "test:watch": "vitest"
   },

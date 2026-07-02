@@ -15,6 +15,7 @@ coverage/
 .boreal/ledgers/
 .boreal/cache/
 .boreal/tmp/
+.boreal/release/
 .boreal/tmp-install-bin/
 .boreal/results/
 .boreal/**/*.db

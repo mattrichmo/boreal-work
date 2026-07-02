@@ -10,6 +10,7 @@ The complete map of Boreal documentation. Start with the guides, drop into the r
 | --- | --- |
 | [Getting started](getting-started.md) | Install, initialize a workspace, and run your first work loop. |
 | [Concepts](concepts.md) | The mental model: work, evidence, knowledge, context, memory, agents. |
+| [Publishing](release/publishing.md) | npm package staging, dry-run publish gate, and Homebrew tap handoff. |
 
 ## CLI reference
 
