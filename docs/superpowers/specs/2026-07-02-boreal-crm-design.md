@@ -6,6 +6,8 @@
 
 **Scope note:** bcrm does not execute outreach (no sending, dialing, calendar writes). It is the system of record and direction: logging, histories, summaries, commitments, closeouts, relationship state, and the `next` loop that tells humans and agents what the relationship graph requires.
 
+**Positioning:** an **enterprise-grade agentic CRM substrate** — the accountability and audit layer for organizations whose relationship work is increasingly conducted by agents. It is deliberately **harness-agnostic**: the entire contract is CLI commands with stable JSON envelopes, MCP tools, skills, workflows, and typed agent directives. Any harness that can run a shell or speak MCP participates — no SDK, no vendor runtime. The enterprise sale is not "a better pipeline tool"; it is *"every agent action against a customer relationship is auditable, attributable, and policy-gated by construction."*
+
 ---
 
 ## 1. Purpose
@@ -35,7 +37,7 @@ The core transfer:
 1. **Repo shape:** sibling product inside this monorepo. New `packages/crm-engine` + `apps/crm-cli` (bin `bcrm`), reusing `@boreal/core`, `@boreal/storage`, `@boreal/graph-engine`, `@boreal/agent-runtime`, `@boreal/search`.
 2. **v1 scope:** engine + CLI + directive registry + MCP + minimal daemon tick + CSV import + TUI queue/brief/timeline views. Console projections and email/calendar auto-ingestion are v2.
 3. **Pipelines:** one configurable pipeline per workspace in v1; multiple named pipelines v2.
-4. **Audience:** solo operator / small team plus agents. No multi-tenant, no server.
+4. **Audience:** enterprise teams running agent-heavy relationship work; dogfood path is solo/small-team first. No hosted multi-tenant service — deployment is a shared git repo per team (the JSONL merge drivers and file-locked store already support multi-actor), which is also what keeps it deployable inside enterprise boundaries without a new server to security-review.
 
 ## 3. Architecture
 
@@ -267,7 +269,52 @@ The surface is designed so each actor type has a native mode:
 
 Skills follow `skills/boreal-*` conventions: `bcrm-daily-loop`, `bcrm-log-interaction`, `bcrm-reconcile-captures`, `bcrm-account-digest`.
 
-## 10. TUI (`apps/crm-tui`)
+**Harness-agnosticism as a contract:** nothing above assumes a specific agent runtime. The integration surface is exactly: (a) CLI commands with stable JSON envelopes, (b) MCP tools over stdio, (c) skills/workflows as markdown procedures, (d) typed directive bundles. A Claude Code agent, an OpenAI-based SDR, a LangGraph pipeline, or a homegrown harness all participate identically. This is a compatibility promise the test suite enforces (envelope schema stability), not a slogan.
+
+## 10. Enterprise accountability layer
+
+The enterprise value proposition: when agents conduct relationship work, the org must be able to answer *who did what, to which customer, on whose authority, and what was promised* — after the fact, under scrutiny. bcrm answers this by construction rather than by bolt-on logging.
+
+### 10.1 Actor identity and principal chains
+Every write carries a full actor chain, not just an actor string:
+
+- **ActorRecord:** `id`, `type` (`human` | `agent`), `harness?` (free-form: claude-code, langgraph, custom), `actingFor?` (the human/team principal an agent operates on behalf of).
+- A subagent's writes chain through its dispatching agent to the human principal. "Agent X, dispatched by agent Y, operating for rep Z" is recorded on the interaction, not reconstructed later.
+- Unknown actors fail closed: writes from an unregistered actor ID are rejected (registration is one command; the point is that the ledger never contains unattributable actions).
+
+### 10.2 Authority policy (what agents may do without a human)
+Declared in checked-in config, enforced as gaps + acknowledgements — reusing the acknowledgement machinery as *authorization*, which is different in kind from the rejected verification ceremony (it gates outward-facing promises, not truth of records):
+
+```jsonc
+{
+  "agentAuthority": {
+    "log.interaction": "allowed",
+    "commitment.owed_by_us": "requires_ack",   // an agent promising something to a customer needs countersign
+    "deal.advance": "allowed",
+    "deal.advance.force": "denied",             // agents never bypass gates
+    "deal.close": "requires_ack",
+    "contact.merge": "requires_ack",
+    "dismiss": "denied"                          // agents may snooze with reason, never permanently dismiss
+  }
+}
+```
+
+`requires_ack` records the action immediately (nothing is hidden) but emits `crm.authority.unacknowledged`, which blocks dependent transitions and sits in the operator's `next` queue until countersigned. `denied` fails closed at the command layer.
+
+### 10.3 Audit trail mechanics
+- **Immutable records + git = tamper-evident log.** Every mutation is a store transaction that lands in git history; corrections supersede rather than edit; merges leave alias records. Optional signed commits give cryptographic attribution where required. There is no "edit history" feature to build — the audit trail is the storage model.
+- **Governance reports as first-class projections:** promise ledger per customer (every open/fulfilled/broken commitment with actor chains), commitment fulfillment rate by actor, forced-gate rate by actor, agent-vs-human touch ratio, authority-ack latency. These are the artifacts a sales leader or compliance reviewer actually asks for.
+- `bcrm audit <subject> [--since]` — the full attributable event trail for a contact/account/deal, exportable.
+
+### 10.4 The injection boundary is the enterprise security story
+CRM content is *other people's words* — customer emails, call transcripts, notes. The directive safety boundary (instruction text only from checked-in registry entries; runtime content is typed data, never instruction prose) means a customer email containing adversarial text can never become an instruction to any agent reading a brief or directive bundle. Consumers render `instruction` and `data` separately. This existing boreal invariant is a headline feature here, and tests must cover it with hostile fixture content.
+
+### 10.5 Compliance posture
+- **Do-not-contact** is already a hard flag (§4.1).
+- **Retention and erasure vs. immutability is a real tension** (GDPR right-to-erasure vs. append-only records). Design direction: a **redaction record** tombstones a subject and removes content fields while preserving the record skeleton and actor chain (the fact that an interaction happened is retained; its content is not). Whether that requires history rewrite policy or content-envelope encryption with key destruction is an open question — flagged for legal/deployment review, not silently decided here.
+- **Export:** `bcrm audit --json` and CSV export cover legal-hold and migration needs.
+
+## 11. TUI (`apps/crm-tui`)
 
 Read-mostly + quick-capture; deep edits stay in the CLI. Built over the same JSON contracts (no second truth). Four views:
 
@@ -278,22 +325,25 @@ Read-mostly + quick-capture; deep edits stay in the CLI. Built over the same JSO
 
 Quick-log is a single form: kind/direction/outcome pickers, summary line, **next-step field that cannot be skipped** (commitment / touch date / none+reason) — the invariant is enforced in the capture UI, not discovered later as a gap. Target: log a call in under 10 seconds.
 
-## 11. Deliberate non-goals
+## 12. Deliberate non-goals
 
 1. **No verification/summary ceremony.** A logged interaction *is* the evidence. Provenance (human/agent, sourceRef) is recorded data, not a verdict layer.
 2. **No relevance-scored brief assembly.** Explicit links only.
 3. **No outreach execution.** No sending, dialing, calendar writes. bcrm records and directs.
 4. **No silent free-text parsing in write paths.** Raw capture → reconcile with confirmation, always.
-5. **No multi-tenant/server/sync.** Git is the sync layer.
+5. **No hosted service.** Git is the sync and deployment layer — a shared repo per team. This is a feature for enterprise: no new server to security-review, and the audit trail rides infrastructure the org already trusts.
+6. **No agent harness of our own.** bcrm directs and records; harnesses execute. Building an SDR agent product on top is someone else's (or a later) project.
 
-## 12. Risks
+## 13. Risks
 
 - **Substrate generalization** (gap-code unions, directive families, subject types in `core` are work-flavored): widen to product-namespaced registries rather than forking the compiler. Fallback: thin CRM-local directive layer over the shared bundle schema.
 - **Alias/merge integrity:** re-pointing via alias resolution must be doctor-checkable (no orphaned references after merge). This is new machinery; test it hardest.
 - **Shared `state.json` with work records:** record-type namespacing must keep `bwrk doctor` and `bcrm doctor` from fighting; fallback is a sibling store file.
 - **Next-step invariant friction:** if it's annoying, people stop logging (worse than dangling threads). Mitigation: `--next-touch <date>` is one flag; TUI makes it one keystroke; `none` is always available with a reason. Watch this in dogfooding — the invariant is right but the ergonomics decide whether it survives.
+- **Erasure vs. immutability (§10.5):** redaction design must be settled before any deployment holding real customer PII; the git-history dimension (content lives in old commits) is the hard part.
+- **Authority policy bypass:** `denied`/`requires_ack` is enforced at the command layer; a hostile actor with filesystem access can write the store directly. Git attribution + signed commits are the detection layer; full prevention would require a server, which is out of scope. State this honestly in docs.
 
-## 13. Testing
+## 14. Testing
 
 Mirror `tests/runtime` patterns:
 
@@ -303,14 +353,16 @@ Mirror `tests/runtime` patterns:
 - **Identity:** duplicate-email fail-closed; merge → alias resolution → zero orphaned refs (property test).
 - **Idempotency:** replayed `log` with same content key → single record, `deduped: true`.
 - **Ownership concurrency:** two actors, one wins.
-- **Envelope stability:** schema checks on every command output.
+- **Envelope stability:** schema checks on every command output (this is the harness-compatibility promise).
+- **Actor chains:** unregistered actor fails closed; subagent writes carry full dispatch chain; authority policy (`denied` blocks, `requires_ack` records + gaps, ack unblocks).
+- **Injection fixtures:** hostile content in interaction bodies/intel/captures never appears in directive `instruction` fields or brief instruction surfaces.
 
-## 14. Build order (input to the implementation plan)
+## 15. Build order (input to the implementation plan)
 
 1. Substrate widening in `core` (namespaced gap codes / directive registries) — keep `bwrk` goldens green.
-2. `crm-engine`: records + identity/merge + store integration + pinned-clock derivation.
-3. Interactions + next-step invariant + commitments + gates (the enforcement spine).
+2. `crm-engine`: records + actor chains + identity/merge + store integration + pinned-clock derivation.
+3. Interactions + next-step invariant + commitments + gates + authority policy (the enforcement spine).
 4. Gap emission + directive registry + snooze/dismiss + `next` + `brief`.
-5. CLI surface + capture/reconcile + timeline + import + doctor + goldens.
-6. TUI (queue, brief, timeline, board).
-7. MCP exposure + daemon tick + subagent skills + digests.
+5. CLI surface + capture/reconcile + timeline + audit + import + doctor + goldens.
+6. MCP exposure + daemon tick + subagent skills + digests (the agentic loop end-to-end — this is the demo).
+7. TUI (queue, brief, timeline, board) + governance reports.
