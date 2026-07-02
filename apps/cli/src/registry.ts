@@ -19,6 +19,7 @@ import {
 import { DEFAULT_FILE_LOCK_OPTIONS, withFileLock, writeTextFileAtomic } from "@boreal/storage";
 
 import { readProjectSetupConfig, skillInstallRootConfig, type ProjectSetupConfig } from "./project-setup.js";
+import { resolveRepoBwrkPin } from "./repo-binary-pin.js";
 
 export interface RegistryListResult {
   readonly storage: ProjectRegistryStorage;
@@ -312,6 +313,7 @@ function registryEntryFromConfig(
 ): ProjectRegistryEntry {
   const projectRoot = resolve(config.projectRoot);
   const memoryRoot = resolve(config.memoryRoot);
+  const bwrkPin = resolveRepoBwrkPin(projectRoot, { requireExisting: true });
   const now = nowIso();
   return {
     id: registryEntryId(projectRoot),
@@ -330,6 +332,7 @@ function registryEntryFromConfig(
     memoryGitMode: config.memoryGitMode,
     memoryRemote: config.memoryRemote,
     installRoot: resolve(config.installRoot),
+    bwrkPin,
     skillInstallRoots: config.skillInstallRoots ?? config.skillTargets.map((target) => skillInstallRootConfig(projectRoot, resolve(config.installRoot), target)),
     skillTargets: config.skillTargets,
     folderScoped: config.folderScoped,
@@ -421,6 +424,17 @@ function configMismatchFindings(entry: ProjectRegistryEntry, config: ProjectSetu
       projectId: entry.id,
       path: entry.installRoot,
       details: { expected: entry.installRoot, actual: config.installRoot }
+    });
+  }
+  const expectedBwrkPin = resolveRepoBwrkPin(entry.projectRoot, { requireExisting: true });
+  if (JSON.stringify(expectedBwrkPin) !== JSON.stringify(entry.bwrkPin)) {
+    findings.push({
+      code: "registry.bwrk_pin_mismatch",
+      severity: "warning",
+      message: "Registered repo-pinned bwrk metadata does not match the linked project",
+      projectId: entry.id,
+      path: entry.bwrkPin?.binPath ?? expectedBwrkPin?.binPath,
+      details: { expected: expectedBwrkPin, actual: entry.bwrkPin }
     });
   }
   const expectedSkillRoots = config.skillInstallRoots ?? config.skillTargets.map((target) => skillInstallRootConfig(entry.projectRoot, config.installRoot, target));

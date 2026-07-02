@@ -806,6 +806,7 @@ function projectRegistryEntryIssues(value: unknown, path: string, schemaId: stri
     ...absolutePathIssue(value.memoryRoot, `${path}.memoryRoot`, schemaId),
     ...absolutePathIssue(value.memoryBorealDir, `${path}.memoryBorealDir`, schemaId),
     ...absolutePathIssue(value.installRoot, `${path}.installRoot`, schemaId),
+    ...(value.bwrkPin === undefined ? [] : projectRegistryBwrkPinIssues(value.bwrkPin, `${path}.bwrkPin`, schemaId)),
     ...(value.skillInstallRoots === undefined
       ? []
       : projectRegistrySkillInstallRootsIssues(value.skillInstallRoots, `${path}.skillInstallRoots`, schemaId)),
@@ -823,10 +824,30 @@ function projectRegistryEntryIssues(value: unknown, path: string, schemaId: stri
     ...pathInsideIssue(value.runtimeDir, value.runtimeStateFile, `${path}.runtimeStateFile`, schemaId, "must be inside runtimeDir"),
     ...pathInsideIssue(value.borealDir, value.projectConfigPath, `${path}.projectConfigPath`, schemaId, "must be inside borealDir"),
     ...pathInsideIssue(value.memoryRoot, value.memoryBorealDir, `${path}.memoryBorealDir`, schemaId, "must be inside memoryRoot"),
+    ...(value.bwrkPin === undefined ? [] : projectRegistryBwrkPinBoundaryIssues(value, path, schemaId)),
     ...memoryLayoutBoundaryIssues(value, path, schemaId),
     ...installRootBoundaryIssues(value, path, schemaId),
     ...(value.skillInstallRoots === undefined ? [] : skillInstallRootBoundaryIssues(value, path, schemaId))
   ];
+}
+
+function projectRegistryBwrkPinIssues(value: unknown, path: string, schemaId: string): readonly SchemaValidationIssue[] {
+  if (!isRecord(value)) {
+    return [issue(schemaId, path, "must be an object")];
+  }
+  return [
+    ...enumIssue(value.source, `${path}.source`, schemaId, ["node_modules", "project-config"]),
+    ...absolutePathIssue(value.binPath, `${path}.binPath`, schemaId),
+    ...nonEmptyStringIssue(value.relativeBinPath, `${path}.relativeBinPath`, schemaId),
+    ...(value.packageName === undefined ? [] : nonEmptyStringIssue(value.packageName, `${path}.packageName`, schemaId))
+  ];
+}
+
+function projectRegistryBwrkPinBoundaryIssues(value: Record<string, unknown>, path: string, schemaId: string): readonly SchemaValidationIssue[] {
+  if (!isRecord(value.bwrkPin) || typeof value.projectRoot !== "string") {
+    return [];
+  }
+  return pathInsideIssue(value.projectRoot, value.bwrkPin.binPath, `${path}.bwrkPin.binPath`, schemaId, "must be inside projectRoot");
 }
 
 function projectRegistrySkillInstallRootsIssues(value: unknown, path: string, schemaId: string): readonly SchemaValidationIssue[] {

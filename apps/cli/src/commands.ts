@@ -9381,6 +9381,7 @@ function dashboardEntryFromMetrics(input: {
     memoryLayout: input.entry.memoryLayout,
     memoryGitMode: input.entry.memoryGitMode,
     installRoot: input.entry.installRoot,
+    bwrkPin: input.entry.bwrkPin,
     health: projectHealthState(input.sync.ok, input.findings),
     stale,
     syncFreshness,

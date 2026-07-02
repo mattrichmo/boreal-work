@@ -11,6 +11,7 @@ import { flagValue, flagValues, hasFlag, type ParsedArgs } from "./args.js";
 import { BOREAL_WORK_BANNER } from "./branding.js";
 import { keyValueRows, section, withPromptSession, type CliSelectOption } from "./cli-ui.js";
 import type { CliContext } from "./context.js";
+import type { ProjectConfigBwrkPin } from "./repo-binary-pin.js";
 
 export const PROJECT_SETUP_SCHEMA_VERSION = "boreal.project-setup.v1";
 const VAULT_SCHEMA_VERSION = "boreal.vault.v1";
@@ -34,6 +35,7 @@ export interface ProjectSetupConfig {
   readonly memoryGitMode: MemoryGitMode;
   readonly memoryRemote?: string;
   readonly installRoot: string;
+  readonly bwrkPin?: ProjectConfigBwrkPin;
   readonly skillInstallRoots?: readonly SkillInstallRootConfig[];
   readonly skillTargets: readonly SkillTarget[];
   readonly folderScoped: boolean;
@@ -707,6 +709,7 @@ export async function applyProjectSetup(input: ProjectSetupInput): Promise<Proje
     memoryGitMode: input.memoryGitMode,
     memoryRemote: input.memoryRemote,
     installRoot: input.installRoot,
+    bwrkPin: existingConfig?.bwrkPin,
     skillInstallRoots: input.skillInstallRoots,
     skillTargets: input.skillTargets,
     folderScoped: input.folderScoped,
@@ -855,6 +858,12 @@ function isProjectSetupConfig(value: unknown): value is ProjectSetupConfig {
     (record.memoryGitMode === "shared" || record.memoryGitMode === "separate" || record.memoryGitMode === "submodule") &&
     (record.memoryRemote === undefined || typeof record.memoryRemote === "string") &&
     typeof record.installRoot === "string" &&
+    (record.bwrkPin === undefined ||
+      (typeof record.bwrkPin === "object" &&
+        record.bwrkPin !== null &&
+        typeof (record.bwrkPin as Record<string, unknown>).binPath === "string" &&
+        ((record.bwrkPin as Record<string, unknown>).packageName === undefined ||
+          typeof (record.bwrkPin as Record<string, unknown>).packageName === "string"))) &&
     (record.skillInstallRoots === undefined ||
       (Array.isArray(record.skillInstallRoots) &&
         record.skillInstallRoots.every((entry) => {

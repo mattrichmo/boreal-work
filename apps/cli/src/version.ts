@@ -17,6 +17,13 @@ import { EXPORT_SCHEMA_VERSION, LEDGER_DELETION_SCHEMA_VERSION, LEDGER_SCHEMA_VE
 import { detectInstallChannel, type InstallChannel } from "./install-channel.js";
 import { PROJECT_SETUP_SCHEMA_VERSION } from "./project-setup.js";
 import { VAULT_SCHEMA_VERSION } from "./vault.js";
+import {
+  BWRK_DELEGATED_BIN_ENV,
+  BWRK_LAUNCHER_CHANNEL_ENV,
+  BWRK_LAUNCHER_EXECUTABLE_ENV,
+  BWRK_LAUNCHER_NAME_ENV,
+  BWRK_LAUNCHER_VERSION_ENV
+} from "./delegation-env.js";
 
 const repoRoot = fileURLToPath(new URL("../../..", import.meta.url));
 
@@ -70,6 +77,19 @@ export interface VersionInfo {
     readonly snapshotSchemaVersion: typeof EXPORT_SCHEMA_VERSION;
     readonly rules: readonly string[];
   };
+  readonly delegation?: VersionDelegationInfo;
+}
+
+export interface VersionIdentity {
+  readonly name: string;
+  readonly version: string;
+  readonly installChannel: string;
+  readonly executable?: string;
+}
+
+export interface VersionDelegationInfo {
+  readonly launcher: VersionIdentity;
+  readonly delegated: VersionIdentity;
 }
 
 interface PackageJson {
@@ -131,7 +151,8 @@ export function getVersionInfo(): VersionInfo {
         "Reversible migrations must be idempotent and document the inverse or rollback command.",
         "Non-reversible migrations must create a boreal.export.v1 recovery snapshot before mutation."
       ]
-    }
+    },
+    delegation: delegatedVersionInfo()
   };
   return cachedVersionInfo;
 }
@@ -146,6 +167,9 @@ export function formatVersionInfo(info = getVersionInfo()): string {
     `installChannel: ${info.installChannel}`,
     `runtimeRecord: ${info.runtime.recordSchemaVersion}`,
     `fileStore: ${info.runtime.fileStoreSchemaVersion}`,
+    info.delegation
+      ? `launcher: ${formatVersionIdentity(info.delegation.launcher)}\ndelegated: ${formatVersionIdentity(info.delegation.delegated)}`
+      : undefined,
     `export: ${info.schemas.export}`,
     `ledgerManifest: ${info.schemas.ledgerManifest}`,
     `searchIndex: ${info.schemas.searchIndex}`,
@@ -163,6 +187,12 @@ export function formatVersionInfo(info = getVersionInfo()): string {
 }
 
 export function formatVersionProbe(info = getVersionInfo()): string {
+  if (info.delegation) {
+    return [
+      `launcher: ${formatVersionIdentity(info.delegation.launcher)}`,
+      `delegated: ${formatVersionIdentity(info.delegation.delegated)}`
+    ].join("\n").concat("\n");
+  }
   return `${info.name} ${info.version} (${info.installChannel})\n`;
 }
 
@@ -176,6 +206,38 @@ function readPackageJson(relativePath: string): PackageJson {
     }
     throw error;
   }
+}
+
+function delegatedVersionInfo(info?: Pick<VersionInfo, "name" | "version" | "installChannel">): VersionDelegationInfo | undefined {
+  const launcherName = process.env[BWRK_LAUNCHER_NAME_ENV];
+  const launcherVersion = process.env[BWRK_LAUNCHER_VERSION_ENV];
+  const launcherChannel = process.env[BWRK_LAUNCHER_CHANNEL_ENV];
+  if (!launcherName || !launcherVersion || !launcherChannel) {
+    return undefined;
+  }
+  const delegated = info ?? {
+    name: readPackageJson("package.json").name ?? "boreal-work",
+    version: readPackageJson("package.json").version ?? "0.0.0",
+    installChannel: detectInstallChannel()
+  };
+  return {
+    launcher: {
+      name: launcherName,
+      version: launcherVersion,
+      installChannel: launcherChannel,
+      executable: process.env[BWRK_LAUNCHER_EXECUTABLE_ENV] || undefined
+    },
+    delegated: {
+      name: delegated.name,
+      version: delegated.version,
+      installChannel: delegated.installChannel,
+      executable: process.env[BWRK_DELEGATED_BIN_ENV] || process.argv[1]
+    }
+  };
+}
+
+function formatVersionIdentity(identity: VersionIdentity): string {
+  return `${identity.name} ${identity.version} (${identity.installChannel})`;
 }
 
 function buildPackageJson(relativePath: string): PackageJson | undefined {

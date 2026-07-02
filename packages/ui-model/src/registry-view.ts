@@ -15,6 +15,12 @@ export interface ProjectRegistryEntry {
   readonly memoryLayout: ProjectMemoryLayout;
   readonly memoryGitMode: ProjectMemoryGitMode;
   readonly installRoot?: string;
+  readonly bwrkPin?: {
+    readonly source: "node_modules" | "project-config";
+    readonly binPath: string;
+    readonly relativeBinPath: string;
+    readonly packageName?: string;
+  };
   readonly health: ProjectHealthState;
   readonly stale: boolean;
   readonly syncFreshness: ProjectSyncFreshness;

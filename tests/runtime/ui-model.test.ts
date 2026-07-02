@@ -355,6 +355,12 @@ describe("ui model dashboard contracts", () => {
           memoryRoot: "/repo/b/memory",
           memoryLayout: "child",
           memoryGitMode: "separate",
+          bwrkPin: {
+            source: "node_modules",
+            binPath: "/repo/b/node_modules/.bin/bwrk",
+            relativeBinPath: "node_modules/.bin/bwrk",
+            packageName: "@boreal/cli"
+          },
           health: "warning",
           stale: true,
           syncFreshness: "stale",
@@ -385,6 +391,9 @@ describe("ui model dashboard contracts", () => {
 
     expect(workSummary).toEqual({ openWorkCount: 2, readyWorkCount: 1, blockedWorkCount: 1 });
     expect(registry.entries.map((entry) => entry.id)).toEqual(["project-a", "project-b"]);
+    expect(registry.entries.find((entry) => entry.id === "project-b")?.bwrkPin).toEqual(
+      expect.objectContaining({ relativeBinPath: "node_modules/.bin/bwrk", packageName: "@boreal/cli" })
+    );
     expect(registry.summary).toMatchObject({
       totalProjects: 2,
       healthyProjects: 1,

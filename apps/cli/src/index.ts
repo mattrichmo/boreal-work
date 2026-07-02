@@ -8,6 +8,7 @@ import { BorealError, isBorealError } from "@boreal/core";
 import { expandGlobalNamespace, parseArgs, wantsJsonOutput } from "./args.js";
 import { aboutText } from "./branding.js";
 import { runCommand } from "./commands.js";
+import { delegateToRepoPinnedBwrk, stripNoDelegateArgv } from "./delegation.js";
 import { formatRecord } from "./output.js";
 import type { CliOutput } from "./output.js";
 import { formatVersionProbe, getVersionInfo } from "./version.js";
@@ -17,19 +18,20 @@ export async function main(
   output: CliOutput = processOutput(),
   cwd = process.cwd()
 ): Promise<number> {
-  const json = wantsJsonOutput(argv);
+  const commandArgv = stripNoDelegateArgv(argv);
+  const json = wantsJsonOutput(commandArgv);
   const stdoutGuard = installJsonStdoutGuard({ enabled: json });
   const guardedOutput = json ? guardedJsonOutput(output, stdoutGuard) : output;
   try {
-    if (argv.includes("--version")) {
+    if (commandArgv.includes("--version")) {
       guardedOutput.write(json ? formatRecord(getVersionInfo(), true) : formatVersionProbe());
       return 0;
     }
-    if (argv.includes("--about")) {
+    if (commandArgv.includes("--about")) {
       guardedOutput.write(json ? formatRecord(getVersionInfo(), true) : `${aboutText()}\n`);
       return 0;
     }
-    const parsed = parseArgs(expandGlobalNamespace(argv));
+    const parsed = parseArgs(expandGlobalNamespace(commandArgv));
     const result = await runCommand(parsed, guardedOutput, cwd);
     return result.exitCode;
   } catch (error) {
@@ -52,8 +54,8 @@ export async function main(
 if (isDirectEntrypoint(import.meta.url)) {
   installBrokenPipeHandler(process.stdout);
   installBrokenPipeHandler(process.stderr);
-  const exitCode = await main();
-  process.exitCode = exitCode;
+  const delegation = delegateToRepoPinnedBwrk();
+  process.exitCode = delegation.delegated ? delegation.exitCode : await main();
 }
 
 function isDirectEntrypoint(metaUrl: string, argv1 = process.argv[1]): boolean {

@@ -765,6 +765,12 @@ describe("core hashing and ids", () => {
           borealDir: "/tmp/other/.boreal",
           memoryRoot: "/other/boreal-work-memory",
           installRoot: "/other/boreal-work-memory/.agents/skills",
+          bwrkPin: {
+            source: "node_modules",
+            binPath: "/tmp/other/node_modules/.bin/bwrk",
+            relativeBinPath: "node_modules/.bin/bwrk",
+            packageName: "@boreal/cli"
+          },
           skillInstallRoots: [
             {
               target: "codex",
@@ -788,6 +794,10 @@ describe("core hashing and ids", () => {
         }),
         expect.objectContaining({
           path: "$.entries[0].installRoot",
+          schemaId: PROJECT_REGISTRY_SCHEMA_ID
+        }),
+        expect.objectContaining({
+          path: "$.entries[0].bwrkPin.binPath",
           schemaId: PROJECT_REGISTRY_SCHEMA_ID
         }),
         expect.objectContaining({
@@ -1185,6 +1195,12 @@ function projectRegistryDocument(): ProjectRegistryDocument {
         memoryLayout: "in-repo",
         memoryGitMode: "separate",
         installRoot: "/repo/boreal-work/.agents/skills",
+        bwrkPin: {
+          source: "node_modules",
+          binPath: "/repo/boreal-work/node_modules/.bin/bwrk",
+          relativeBinPath: "node_modules/.bin/bwrk",
+          packageName: "@boreal/cli"
+        },
         skillInstallRoots: [
           {
             target: "codex",

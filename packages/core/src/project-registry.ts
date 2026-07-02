@@ -19,6 +19,13 @@ export interface ProjectRegistrySkillInstallRoot {
   readonly skillRoot: string;
 }
 
+export interface ProjectRegistryBwrkPin {
+  readonly source: "node_modules" | "project-config";
+  readonly binPath: string;
+  readonly relativeBinPath: string;
+  readonly packageName?: string;
+}
+
 export interface ProjectRegistryStorage {
   readonly scope: ProjectRegistryStorageScope;
   readonly rootDir: string;
@@ -47,6 +54,7 @@ export interface ProjectRegistryEntry {
   readonly memoryGitMode: ProjectRegistryMemoryGitMode;
   readonly memoryRemote?: string;
   readonly installRoot: string;
+  readonly bwrkPin?: ProjectRegistryBwrkPin;
   readonly skillInstallRoots?: readonly ProjectRegistrySkillInstallRoot[];
   readonly skillTargets: readonly ProjectRegistrySkillTarget[];
   readonly folderScoped: boolean;
