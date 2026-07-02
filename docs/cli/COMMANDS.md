@@ -336,7 +336,7 @@ Golden-path alias for `bwrk agent finish current --release`. It records evidence
 bwrk status [--agent <agent-id>] [--label <label>...] [--json]
 ```
 
-Golden-path alias for `bwrk prime`. It prints the compact agent/session startup brief without claiming work.
+Compatibility alias for `bwrk prime`. It prints the compact agent/session startup brief without claiming work. New agent-facing instructions should prefer `bwrk agent guide` for the command loop and `bwrk agent status` for coordination state.
 
 ## `workflows list`
 
@@ -353,6 +353,14 @@ bwrk workflows show <workflow-id|path|slug> [--json]
 ```
 
 Shows one workflow playbook by exact workflow ID, relative path under `workflows/`, or filename slug. Human output is the Markdown workflow text; JSON output includes metadata and text.
+
+## `install`
+
+```bash
+bwrk install [--yes] [--dry-run] [--interactive] [--workspace <dir>|--project-root <dir>] [--memory-root <dir>] [--memory-layout in-repo|child|sibling] [--memory-git-mode shared|separate|submodule] [--memory-remote <url>] [--install-root <dir>] [--skill-target codex|claude...] [--folder-scoped] [--json]
+```
+
+Runs the first-run project installer. In a TTY, bare `bwrk install` opens the setup flow. `bwrk install --yes` applies the recommended safe default: `./memory` as a child Git repository ignored by the app repo, Codex skills in `.agents/skills`, and folder-scoped skill metadata. `bwrk install --dry-run` previews the same plan without writing files. `bwrk install --json` is non-mutating unless `--yes` is also supplied. Short alias: `-y` means `--yes`.
 
 ## `install codex`
 
@@ -592,8 +600,8 @@ Behavior:
 - Safe under concurrent init attempts.
 - Plain `bwrk init` does not create memory files; use `bwrk vault init` for the repo-local default vault or `--setup-memory` for explicit project setup.
 - With setup flags, writes `.boreal/project.json`, scaffolds the selected memory root, writes memory `.gitignore` guards, applies the selected memory Git mode, and installs the selected skill targets.
-- Default setup uses sibling memory at `../<project>-memory` with `--memory-git-mode separate`, so memory history does not mix with application history.
-- Supplying `--memory-root` without `--memory-layout` keeps the legacy explicit-root default of `--memory-layout in-repo`.
+- Default setup uses child memory at `<project>/memory` with `--memory-git-mode separate`, so memory stays visible in the project folder while keeping its own Git history.
+- Supplying `--memory-root` without `--memory-layout` uses the default child layout. Pass `--memory-layout sibling` or `--memory-layout in-repo` explicitly for those shapes.
 - `--memory-layout child` requires the memory root to be a direct child of the project root.
 - `--memory-layout child` defaults to `--memory-git-mode separate`, initializes the child memory Git repo, and adds the child path to the project `.gitignore`.
 - `--memory-layout sibling` requires the memory root to share the project root parent and always uses `--memory-git-mode separate`.
@@ -943,9 +951,9 @@ Advances a heartbeat to a new cursor. Supplying `--work` requires a closed work 
 bwrk prime [--agent <agent-id>] [--label <label>...] [--json]
 ```
 
-Prints the compact startup brief for an agent session without claiming work. The brief includes workspace sync health, agent coordination state, bounded operation history for the active `--session`, copyable protocol commands, and concrete recommended actions.
+Compatibility startup brief for an agent session without claiming work. The brief includes workspace sync health, agent coordination state, bounded operation history for the active `--session`, copyable protocol commands, and concrete recommended actions.
 
-`prime` is read-only for project state. Like other initialized workspace commands, it is still logged in local operation history for auditability.
+`prime` is read-only for project state. Like other initialized workspace commands, it is still logged in local operation history for auditability. New agent-facing instructions should prefer `bwrk agent guide` for the command loop and `bwrk agent status` for coordination state; `prime` remains available for existing workflows and scripts.
 
 ## `agent guide`
 

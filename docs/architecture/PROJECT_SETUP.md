@@ -28,6 +28,6 @@ Boreal setup has four root families:
 - Local source checkouts run through `pnpm bwrk <command>` without requiring a global install. `bwrk install status --json` reports whether that source runner is available, whether the local shim exists and is executable, whether the shim directory is on PATH, and whether the resolved global `bwrk` passes `--version`.
 - `bwrk doctor` resolves a single environment manifest covering project, memory, skills, Git mode, runtime, and workflow asset roots. Diagnostics should read from that manifest instead of reconstructing root paths independently.
 
-## Init Direction
+## Install Direction
 
-`bwrk init --interactive` should ask for project root, memory layout, separate Git preference, install root, target agents, and folder-scope. Non-interactive flags should provide the same data for automation.
+`bwrk install` is the human setup surface. It should ask for project root, memory layout, Git preference, install root, target agents, and folder-scope, with child `memory/` plus a separate Git repository as the safe default. `bwrk install --yes` applies those defaults without prompting, and `bwrk init` remains the low-level idempotent runtime primitive.

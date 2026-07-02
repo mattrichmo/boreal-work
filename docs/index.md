@@ -10,9 +10,9 @@ title: Boreal Work
 ██████   ██████  ██   ██ ███████ ██   ██ ███████      ███ ███   ██████  ██   ██ ██   ██
 ```
 
-**Git-native project memory and workflow control for humans and agents.**
+**Local runtime for evidence-backed work, project memory, and agent handoff.**
 
-Boreal turns the loose context that normally lives in chat logs, scratch notes, and people's heads into durable, queryable records that sit next to your code. Work items, the evidence that closes them, the decisions behind them, and the sources that back those decisions all become append-friendly records — readable by a person, diffable in Git, and stable enough for an agent to coordinate against.
+Boreal turns tasks, sources, claims, decisions, verification, and workflow state into durable records with JSON-first command contracts and repairable Git-native artifacts. The runtime tracks operational truth; the memory vault preserves human-readable knowledge, ledgers, and handoff material that people can diff and agents can coordinate against.
 
 > **Status:** v1 local runtime. `bwrk` (the CLI) is the canonical command surface; the MCP server, daemon, and browser console are built on the same JSON-first contracts.
 
@@ -25,7 +25,7 @@ Boreal turns the loose context that normally lives in chat logs, scratch notes, 
 
 ## Why Boreal
 
-- **One source of truth.** Work, evidence, knowledge, and decisions are records — not Slack threads. They live in the repo and diff cleanly.
+- **Evidence-backed operational truth.** Work, evidence, verification, sources, claims, and decisions are records — not Slack threads.
 - **Evidence-gated closure.** Work closes because a verification record points at evidence, not because someone said so.
 - **Built for agents and humans equally.** Every command has a stable `--json` envelope.
 - **Deterministic and fail-closed.** Collision-proof IDs, derived-and-repairable readiness, schema-drift rejection, and a `doctor` that repairs projections and indexes.
@@ -35,6 +35,7 @@ Boreal turns the loose context that normally lives in chat logs, scratch notes, 
 - [Runtime architecture](architecture/RUNTIME.md)
 - [Skills & workflows](architecture/SKILLS_AND_WORKFLOWS.md)
 - [Project setup](architecture/PROJECT_SETUP.md)
+- [Prior art & originality](architecture/PRIOR_ART_ORIGINALITY.md)
 - [V1 closeout & adoption guide](product/V1_CLOSEOUT_ADOPTION_GUIDE.md)
 
 ---

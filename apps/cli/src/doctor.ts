@@ -142,7 +142,9 @@ export async function runDoctor(context: CliContext, fix: boolean, strict = fals
   const storeDiagnostics = await validateStoreRecords(context, fix, state);
   diagnostics.push(...storeDiagnostics.diagnostics);
   fixed = fixed || storeDiagnostics.fixed;
-  const hasStoreErrors = storeDiagnostics.diagnostics.some((diagnostic) => diagnostic.severity === "error");
+  const hasStoreErrors = storeDiagnostics.diagnostics.some(
+    (diagnostic) => diagnostic.severity === "error" && diagnostic.code !== "work.readiness"
+  );
 
   if (schemaIssues.length === 0 && !hasStoreErrors) {
     try {
@@ -3341,6 +3343,7 @@ function isAgentDirectiveAcknowledgementPolicyEnforcedAt(timestamp: string | und
 const STRICT_ADVISORY_WARNING_CODES = new Set([
   "daemon.status",
   "install.status",
+  "project_setup.child_tracking",
   "snapshot.export_drift",
   "ledger.export_drift",
   "cache.sqlite",

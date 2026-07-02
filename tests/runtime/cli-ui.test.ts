@@ -111,7 +111,7 @@ describe("cli ui", () => {
     await expect(selectedPromise).resolves.toBe("sibling");
     expect(input.rawModes[0]).toBe(true);
     expect(input.rawModes.at(-1)).toBe(false);
-    expect(output.text).toContain("Memory layout:");
+    expect(output.text).toContain("Memory layout");
     expect(output.text).toContain("Use sibling memory.");
     expect(output.text).toContain("\x1B[?25h");
   });
@@ -138,7 +138,7 @@ describe("cli ui", () => {
     await expect(selectedPromise).resolves.toEqual(["codex", "claude"]);
     expect(input.rawModes[0]).toBe(true);
     expect(input.rawModes.at(-1)).toBe(false);
-    expect(output.text).toContain("Space toggles. Enter accepts.");
+    expect(output.text).toContain("Space toggle   Enter accept   Up/Down move");
   });
 
   it("cancels prompts with ctrl-c and restores terminal state", async () => {

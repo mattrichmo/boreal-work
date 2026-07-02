@@ -26,6 +26,7 @@ The complete map of Boreal documentation. Start with the guides, drop into the r
 | [CLI ↔ TUI runtime boundary](architecture/CLI_TUI_RUNTIME_BOUNDARY.md) | How terminal surfaces share the runtime. |
 | [Skills & workflows](architecture/SKILLS_AND_WORKFLOWS.md) | Workflows (canonical), skills (adapters), and templates (output shapes). |
 | [Project setup](architecture/PROJECT_SETUP.md) | Project, memory, and install roots, and supported layouts. |
+| [Prior art & originality](architecture/PRIOR_ART_ORIGINALITY.md) | Positioning against adjacent local-first and agent-workflow tools. |
 | [MCP server](architecture/MCP_SERVER.md) | The project-scoped stdio MCP server in `apps/mcp`. |
 | [MCP ↔ daemon boundary](architecture/MCP_DAEMON_BOUNDARY.md) | The shared boundary guard between MCP and the daemon. |
 | [Daemon](architecture/DAEMON.md) | The observer/coordinator daemon in `apps/daemon`. |

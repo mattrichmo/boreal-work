@@ -41,25 +41,29 @@ node tools/install-local-bwrk.mjs
 
 The rest of this guide uses `pnpm bwrk`; substitute `bwrk` if you installed the shim.
 
-## Initialize a workspace
+## Install Boreal into a project
 
 ```bash
-pnpm bwrk init
+pnpm bwrk install
 ```
 
-`init` is idempotent and safe under concurrent attempts. It creates durable runtime state at `.boreal/runtime/state.json`. Plain `init` does **not** create memory files.
+The installer walks through project setup in a TTY. The recommended default creates `memory/` inside the project as a separate Git repository, keeps the app repository clean with `.gitignore` guards, and installs Codex skills into `.agents/skills`.
 
-To also scaffold the memory vault and install agent skills, use setup flags:
+For unattended setup with the recommended defaults:
 
 ```bash
-# repo-local default vault
-pnpm bwrk vault init
-
-# or explicit project setup (sibling memory repo + codex skills)
-pnpm bwrk init --setup-memory --install-root .agents/skills --skill-target codex --folder-scoped
+pnpm bwrk install --yes
 ```
 
-The default setup uses **sibling memory** at `../<project>-memory` with a separate Git history, so memory and application history don't mix. See [Project setup](architecture/PROJECT_SETUP.md) for child/submodule layouts.
+To preview without writing files:
+
+```bash
+pnpm bwrk install --dry-run
+```
+
+`init` remains the low-level primitive. Plain `init` is idempotent and creates durable runtime state at `.boreal/runtime/state.json`; it does **not** create memory files. Use `init --setup-memory` only when you need explicit noninteractive setup flags.
+
+See [Project setup](architecture/PROJECT_SETUP.md) for sibling, shared-history, and submodule layouts.
 
 > **Workspace resolution:** without `--workspace`, every command walks upward from the current directory until it finds `.boreal`. With `--workspace <path>`, that exact path is the workspace root (no discovery).
 

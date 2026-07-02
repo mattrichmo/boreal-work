@@ -166,8 +166,8 @@ export const COMMAND_DEFINITIONS: readonly CommandDefinition[] = [
     flags: [
       flag("project-root", "value", "Project root alias for --workspace during setup."),
       flag("setup-memory", "boolean", "Write project setup config and scaffold the selected memory root."),
-      flag("memory-root", "value", "Memory root path. Relative paths resolve from the project root. Defaults to a sibling <project>-memory repo."),
-      flag("memory-layout", "value", "Memory layout: in-repo, child, or sibling. Defaults to sibling unless --memory-root is supplied."),
+      flag("memory-root", "value", "Memory root path. Relative paths resolve from the project root. Defaults to memory."),
+      flag("memory-layout", "value", "Memory layout: child, sibling, or in-repo. Defaults to child."),
       flag("memory-git-mode", "value", "Memory Git mode: shared, separate, or submodule. Defaults to separate for child/sibling memory."),
       flag("memory-remote", "value", "Remote URL to write for child submodule memory."),
       flag("separate-git", "boolean", "Deprecated alias for --memory-git-mode separate."),
@@ -442,7 +442,8 @@ export const COMMAND_DEFINITIONS: readonly CommandDefinition[] = [
     category: "agent",
     summary: "Alias for the compact agent/session startup brief.",
     usage: "bwrk status [--agent <agent-id>] [--label <label>...] [--json]",
-    description: "Golden-path alias for `bwrk prime` with the same JSON output contract.",
+    description:
+      "Compatibility alias for `bwrk prime` with the same JSON output contract. New agent instructions should prefer `bwrk agent guide` for the command loop and `bwrk agent status` for coordination state.",
     flags: [
       flag("agent", "value", "Agent identifier. Defaults to the CLI actor."),
       flag("label", "value", "Only consider ready work with this label when computing claimable work.", true),
@@ -470,6 +471,31 @@ export const COMMAND_DEFINITIONS: readonly CommandDefinition[] = [
     description: "Shows one checked-in workflow by ID, relative path, or slug.",
     flags: [],
     positionals: { label: "workflow reference", min: 1, max: 1 },
+    requiresWorkspace: false,
+    supportsJson: true,
+  },
+  {
+    path: ["install"],
+    category: "install",
+    summary: "Install Boreal into this project.",
+    usage:
+      "bwrk install [--yes] [--dry-run] [--interactive] [--workspace <dir>|--project-root <dir>] [--memory-root <dir>] [--memory-layout in-repo|child|sibling] [--memory-git-mode shared|separate|submodule] [--memory-remote <url>] [--install-root <dir>] [--skill-target codex|claude...] [--folder-scoped] [--json]",
+    description:
+      "Runs the first-run project installer. By default it opens a TTY setup flow. `--yes` applies the recommended child memory repo setup at ./memory with Codex skills in .agents/skills. `--dry-run` previews without writing.",
+    flags: [
+      flag("yes", "boolean", "Apply recommended defaults without prompting. Short alias: -y."),
+      flag("dry-run", "boolean", "Preview the install plan without writing files."),
+      flag("interactive", "boolean", "Open the TTY installer even when other defaults are supplied."),
+      flag("project-root", "value", "Project root alias for --workspace during setup."),
+      flag("memory-root", "value", "Memory root path. Relative paths resolve from the project root. Defaults to memory."),
+      flag("memory-layout", "value", "Memory layout: child, sibling, or in-repo. Defaults to child."),
+      flag("memory-git-mode", "value", "Memory Git mode: separate, shared, or submodule. Defaults to separate for child memory."),
+      flag("memory-remote", "value", "Remote URL to write for child submodule memory."),
+      flag("install-root", "value", "Skill install root. Relative paths resolve from the project root. Defaults to .agents/skills."),
+      flag("skill-target", "value", "Skill target to install and record: codex or claude.", true),
+      flag("folder-scoped", "boolean", "Record skills as folder-scoped for sessions opened inside the install folder.")
+    ],
+    positionals: { label: "arguments", min: 0, max: 0 },
     requiresWorkspace: false,
     supportsJson: true,
   },
@@ -820,10 +846,10 @@ export const COMMAND_DEFINITIONS: readonly CommandDefinition[] = [
   {
     path: ["prime"],
     category: "agent",
-    summary: "Show the compact agent/session startup brief.",
+    summary: "Compatibility startup brief for agent/session protocol state.",
     usage: "bwrk prime [--agent <agent-id>] [--label <label>...] [--json]",
     description:
-      "Summarizes workspace sync health, agent coordination state, current session operations, and the next concrete protocol commands.",
+      "Summarizes workspace sync health, agent coordination state, current session operations, and the next concrete protocol commands. New user-facing docs should prefer `bwrk agent guide` for the loop and `bwrk agent status` for coordination state.",
     flags: [
       flag("agent", "value", "Agent identifier. Defaults to the CLI actor."),
       flag("label", "value", "Only consider ready work with this label when computing claimable work.", true),
@@ -2407,6 +2433,18 @@ const COMMAND_BEHAVIOR: Readonly<Record<string, CommandBehaviorMetadata>> = {
     maxResultSizeChars: 250_000,
     humanOutputKind: "markdown",
     examples: ["bwrk workflows show boreal.workflow.launch-sprint.v1"],
+  }),
+  install: commandMetadata("install", {
+    readOnly: false,
+    destructive: false,
+    writesState: true,
+    writesGeneratedArtifacts: true,
+    requiresFreshIndex: false,
+    concurrencySafe: true,
+    requiresLock: "state+generated",
+    maxResultSizeChars: 250_000,
+    humanOutputKind: "record",
+    examples: ["bwrk install", "bwrk install --yes --json", "bwrk install --dry-run --json"],
   }),
   "install codex": commandMetadata("install codex", {
     readOnly: false,

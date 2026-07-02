@@ -52,7 +52,7 @@ export interface ProjectSetupResult {
   readonly gitSetup: ProjectGitSetupResult;
 }
 
-interface ProjectSetupInput {
+export interface ProjectSetupInput {
   readonly projectRoot: string;
   readonly memoryRoot: string;
   readonly memoryLayout: MemoryLayout;
@@ -224,17 +224,35 @@ const MEMORY_LAYOUT_OPTIONS: readonly CliSelectOption<MemoryLayout>[] = [
   {
     value: "in-repo",
     label: "In repo",
-    description: "Use <project>/memory. Best default when memory belongs to this repository."
+    description: "Use <project>/memory in the project repository. Only use when memory history should mix with app history."
   },
   {
     value: "child",
     label: "Child memory repo",
-    description: "Use a direct child memory folder that can become its own Git repository."
+    description: "Use <project>/memory as a separate Git repository ignored by the app repo. This is the safe default."
   },
   {
     value: "sibling",
     label: "Sibling memory repo",
     description: "Use ../<project>-memory. Choose this when memory must live beside the project."
+  }
+];
+
+const INSTALL_MEMORY_LAYOUT_OPTIONS: readonly CliSelectOption<MemoryLayout>[] = [
+  {
+    value: "child",
+    label: "Child repo: ./memory",
+    description: "Clean default. Memory stays inside the project folder, uses its own Git repo, and is ignored by the app repo."
+  },
+  {
+    value: "sibling",
+    label: "Sibling repo: ../<project>-memory",
+    description: "Keep memory beside the project. Useful when the project tree cannot contain local memory."
+  },
+  {
+    value: "in-repo",
+    label: "Shared folder: ./memory",
+    description: "Track memory with the app repo. Use only when memory history should mix with app history."
   }
 ];
 
@@ -256,6 +274,35 @@ const MEMORY_GIT_OPTIONS: readonly CliSelectOption<MemoryGitMode>[] = [
   }
 ];
 
+const INSTALL_CHILD_MEMORY_GIT_OPTIONS: readonly CliSelectOption<MemoryGitMode>[] = [
+  {
+    value: "separate",
+    label: "Separate child repo",
+    description: "Default. Initialize ./memory as its own Git repository and ignore it from the app repo."
+  },
+  {
+    value: "submodule",
+    label: "Child submodule",
+    description: "Advanced. Requires a remote URL and a real project gitlink before doctor treats it as healthy."
+  }
+];
+
+const INSTALL_SHARED_MEMORY_GIT_OPTIONS: readonly CliSelectOption<MemoryGitMode>[] = [
+  {
+    value: "shared",
+    label: "Shared app history",
+    description: "Track memory files in the app repository."
+  }
+];
+
+const INSTALL_SEPARATE_MEMORY_GIT_OPTIONS: readonly CliSelectOption<MemoryGitMode>[] = [
+  {
+    value: "separate",
+    label: "Separate memory repo",
+    description: "Initialize or reuse a separate Git repository for memory."
+  }
+];
+
 const SKILL_TARGET_OPTIONS: readonly CliSelectOption<SkillTarget>[] = [
   {
     value: "codex",
@@ -268,6 +315,22 @@ const SKILL_TARGET_OPTIONS: readonly CliSelectOption<SkillTarget>[] = [
     description: "Install Boreal skills for Claude sessions."
   }
 ];
+
+function installMemoryGitOptions(memoryLayout: MemoryLayout): readonly CliSelectOption<MemoryGitMode>[] {
+  switch (memoryLayout) {
+    case "child":
+      return INSTALL_CHILD_MEMORY_GIT_OPTIONS;
+    case "in-repo":
+      return INSTALL_SHARED_MEMORY_GIT_OPTIONS;
+    case "sibling":
+      return INSTALL_SEPARATE_MEMORY_GIT_OPTIONS;
+  }
+}
+
+function installMemoryGitDefault(current: MemoryGitMode, memoryLayout: MemoryLayout): MemoryGitMode {
+  const options = installMemoryGitOptions(memoryLayout);
+  return options.some((option) => option.value === current) ? current : options[0]?.value ?? "separate";
+}
 
 const YES_NO_OPTIONS: readonly CliSelectOption<"yes" | "no">[] = [
   {
@@ -293,6 +356,48 @@ export async function maybeConfigureProjectSetup(
     ? await promptProjectSetupInput(context, args)
     : projectSetupInputFromArgs(context, args);
   return applyProjectSetup(input);
+}
+
+export async function promptProjectInstallInput(context: CliContext, args: ParsedArgs): Promise<ProjectSetupInput> {
+  if (!process.stdin.isTTY || !process.stdout.isTTY) {
+    throw new BorealError("BOREAL_INVALID_INPUT", "bwrk install requires a TTY; use --yes for defaults or --dry-run to preview");
+  }
+  const defaults = projectSetupInputFromArgs(context, args);
+  return withPromptSession({ input: process.stdin, output: process.stdout }, async (prompt) => {
+    prompt.writeIntro(
+      "Boreal Install",
+      [
+        "Clean project setup for local-first work and memory.",
+        "Recommended: ./memory as a child Git repo, Codex skills in .agents/skills, no app-history pollution."
+      ].join("\n")
+    );
+    const projectRoot = resolveUserPath(context.workspaceRoot, await prompt.text("Project root", defaults.projectRoot));
+    const memoryLayout = await prompt.select("Memory location", INSTALL_MEMORY_LAYOUT_OPTIONS, defaults.memoryLayout);
+    const memoryRootDefault = flagValue(args, "memory-root")
+      ? defaults.memoryRoot
+      : defaultMemoryRoot(projectRoot, memoryLayout);
+    const memoryRoot = resolveUserPath(projectRoot, await prompt.text("Memory root", memoryRootDefault));
+    const memoryGitMode = await prompt.select(
+      "Memory Git mode",
+      installMemoryGitOptions(memoryLayout),
+      installMemoryGitDefault(defaults.memoryGitMode, memoryLayout)
+    );
+    const memoryRemote =
+      memoryGitMode === "submodule"
+        ? await prompt.text("Memory remote URL", defaults.memoryRemote ?? "")
+        : defaults.memoryRemote;
+    const installRoot = resolveUserPath(projectRoot, await prompt.text("Skill install root", defaults.installRoot));
+    const skillTargets = await prompt.multiselect("Agent skills", SKILL_TARGET_OPTIONS, defaults.skillTargets);
+    const skillInstallRoots = skillTargets.map((target) => skillInstallRootConfig(projectRoot, installRoot, target));
+    const folderScoped = (await prompt.select("Folder scoped skills", YES_NO_OPTIONS, defaults.folderScoped ? "yes" : "no")) === "yes";
+    const reviewed = { projectRoot, memoryRoot, memoryLayout, memoryGitMode, memoryRemote, installRoot, skillInstallRoots, skillTargets, folderScoped };
+    prompt.writeIntro("Install review", formatProjectInstallReview(reviewed));
+    const confirmed = await prompt.select("Write install files", YES_NO_OPTIONS, "yes");
+    if (confirmed !== "yes") {
+      throw new BorealError("BOREAL_INVALID_INPUT", "Boreal install cancelled", { reason: "cancelled" });
+    }
+    return reviewed;
+  });
 }
 
 export async function readProjectSetupConfig(projectRoot: string): Promise<ProjectSetupConfig | undefined> {
@@ -448,9 +553,9 @@ function shouldConfigureProjectSetup(args: ParsedArgs): boolean {
   );
 }
 
-function projectSetupInputFromArgs(context: CliContext, args: ParsedArgs): ProjectSetupInput {
+export function projectSetupInputFromArgs(context: CliContext, args: ParsedArgs): ProjectSetupInput {
   const projectRoot = context.workspaceRoot;
-  const memoryLayout = parseMemoryLayout(flagValue(args, "memory-layout") ?? (flagValue(args, "memory-root") ? "in-repo" : "sibling"));
+  const memoryLayout = parseMemoryLayout(flagValue(args, "memory-layout") ?? "child");
   const memoryRoot = resolveUserPath(projectRoot, flagValue(args, "memory-root") ?? defaultMemoryRoot(projectRoot, memoryLayout));
   const installRoot = resolveUserPath(projectRoot, flagValue(args, "install-root") ?? ".agents/skills");
   const skillTargets = parseSkillTargets(flagValues(args, "skill-target"));
@@ -515,7 +620,7 @@ async function promptProjectSetupInput(context: CliContext, args: ParsedArgs): P
   });
 }
 
-function formatProjectSetupReview(input: ProjectSetupInput): string {
+export function formatProjectSetupReview(input: ProjectSetupInput): string {
   return [
     section(
       "Config",
@@ -533,6 +638,38 @@ function formatProjectSetupReview(input: ProjectSetupInput): string {
     ),
     section("Directories", MEMORY_DIRECTORIES.map((entry) => `ensure ${relative(input.projectRoot, join(input.memoryRoot, entry))}`)),
     section("Files", MEMORY_FILES.map((entry) => `ensure ${relative(input.projectRoot, join(input.memoryRoot, entry.path))}`)),
+    section("Git effects", projectSetupGitReviewRows(input))
+  ].join("\n\n");
+}
+
+export function formatProjectInstallReview(input: ProjectSetupInput): string {
+  return [
+    section(
+      "Recommended shape",
+      [
+        "project stays the app repository",
+        "memory gets its own Git repository",
+        "project Git ignores local memory and generated agent surfaces"
+      ]
+    ),
+    section(
+      "Paths",
+      keyValueRows([
+        { key: "project", value: input.projectRoot },
+        { key: "memory", value: input.memoryRoot },
+        { key: "skills", value: input.skillInstallRoots.map((entry) => `${entry.target}:${entry.skillRoot}`).join(", ") },
+        { key: "config", value: join(input.projectRoot, ".boreal", "project.json") }
+      ]).split("\n")
+    ),
+    section(
+      "Choices",
+      keyValueRows([
+        { key: "memoryLayout", value: input.memoryLayout },
+        { key: "memoryGit", value: input.memoryGitMode },
+        { key: "skillTargets", value: input.skillTargets.join(", ") },
+        { key: "folderScoped", value: input.folderScoped }
+      ]).split("\n")
+    ),
     section("Git effects", projectSetupGitReviewRows(input))
   ].join("\n\n");
 }
@@ -557,7 +694,7 @@ function projectSetupGitReviewRows(input: ProjectSetupInput): readonly string[] 
   }
 }
 
-async function applyProjectSetup(input: ProjectSetupInput): Promise<ProjectSetupResult> {
+export async function applyProjectSetup(input: ProjectSetupInput): Promise<ProjectSetupResult> {
   await validateProjectSetupInput(input);
   const now = nowIso();
   const configPath = join(input.projectRoot, ".boreal", "project.json");
@@ -607,7 +744,7 @@ async function applyProjectSetup(input: ProjectSetupInput): Promise<ProjectSetup
   return { configured: true, configPath, config, createdDirectories, existingDirectories, createdFiles, existingFiles, gitSetup };
 }
 
-async function validateProjectSetupInput(input: ProjectSetupInput): Promise<void> {
+export async function validateProjectSetupInput(input: ProjectSetupInput): Promise<void> {
   if (input.memoryLayout === "in-repo") {
     assertPathInside(input.projectRoot, input.memoryRoot);
     await assertRealPathInside(input.projectRoot, input.memoryRoot);

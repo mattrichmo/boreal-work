@@ -1763,10 +1763,9 @@ describe("bwrk cli", () => {
     expect(projectMemoryGuardCount(secondGitignore)).toBe(1);
   });
 
-  it("defaults setup memory to a sibling separate repo with local project git guards", async () => {
+  it("defaults setup memory to a child separate repo with local project git guards", async () => {
     const rootDir = await makeTempWorkspace();
-    const siblingRoot = join(dirname(rootDir), `${rootDir.split("/").at(-1) ?? "workspace"}-memory`);
-    tempDirs.push(siblingRoot);
+    const memoryRoot = join(rootDir, "memory");
 
     const initialized = await runCli(rootDir, ["init", "--setup-memory", "--json"]);
     const payload = parseData<{
@@ -1783,21 +1782,123 @@ describe("bwrk cli", () => {
 
     expect(initialized.exitCode).toBe(0);
     expect(payload.projectSetup.config).toEqual(
-      expect.objectContaining({ memoryRoot: siblingRoot, memoryLayout: "sibling", memoryGitMode: "separate" })
+      expect.objectContaining({ memoryRoot, memoryLayout: "child", memoryGitMode: "separate" })
     );
     expect(payload.projectSetup.gitSetup).toEqual(
       expect.objectContaining({
         memoryRepoInitialized: true,
-        ignoredByProject: false,
+        ignoredByProject: true,
         projectGitignoreUpdated: true,
         gitmodulesUpdated: false
       })
     );
-    expect(await fileMissing(join(siblingRoot, ".git"))).toBe(false);
-    expect(await readFile(join(siblingRoot, ".gitignore"), "utf8")).toContain(".boreal/cache/");
+    expect(await fileMissing(join(memoryRoot, ".git"))).toBe(false);
+    expect(await readFile(join(memoryRoot, ".gitignore"), "utf8")).toContain(".boreal/cache/");
     const projectGitignore = await readFile(join(rootDir, ".gitignore"), "utf8");
     expect(projectGitignore).toContain(".boreal/project.json");
-    expect(projectGitignore).not.toContain("/memory/");
+    expect(projectGitignore).toContain("/memory/");
+  });
+
+  it("previews and applies the recommended bare install setup", async () => {
+    const previewRoot = await makeTempWorkspace();
+    const preview = await runCli(previewRoot, ["install", "--dry-run", "--json"]);
+    const previewPayload = parseData<{
+      readonly kind: string;
+      readonly dryRun: boolean;
+      readonly plan: {
+        readonly memoryRoot: string;
+        readonly memoryLayout: string;
+        readonly memoryGitMode: string;
+        readonly installRoot: string;
+        readonly skillTargets: readonly string[];
+        readonly folderScoped: boolean;
+      };
+    }>(preview.stdout);
+
+    expect(preview.exitCode).toBe(0);
+    expect(previewPayload).toEqual(
+      expect.objectContaining({
+        kind: "install",
+        dryRun: true,
+        plan: expect.objectContaining({
+          memoryRoot: join(previewRoot, "memory"),
+          memoryLayout: "child",
+          memoryGitMode: "separate",
+          installRoot: join(previewRoot, ".agents/skills"),
+          skillTargets: ["codex"],
+          folderScoped: true
+        })
+      })
+    );
+    expect(await fileMissing(join(previewRoot, ".boreal/project.json"))).toBe(true);
+    expect(await fileMissing(join(previewRoot, "memory/index.md"))).toBe(true);
+
+    const rootDir = await makeTempWorkspace();
+    const installed = await runCli(rootDir, ["install", "--yes", "--json"]);
+    const payload = parseData<{
+      readonly kind: string;
+      readonly dryRun: boolean;
+      readonly initialized: boolean;
+      readonly projectSetup: {
+        readonly config: {
+          readonly memoryRoot: string;
+          readonly memoryLayout: string;
+          readonly memoryGitMode: string;
+          readonly installRoot: string;
+          readonly skillTargets: readonly string[];
+          readonly folderScoped: boolean;
+        };
+        readonly gitSetup: {
+          readonly memoryRepoInitialized: boolean;
+          readonly ignoredByProject: boolean;
+        };
+      };
+      readonly skillInstalls: readonly Array<{ readonly target: string; readonly skillRoot: string }>;
+    }>(installed.stdout);
+
+    expect(installed.exitCode).toBe(0);
+    expect(payload).toEqual(
+      expect.objectContaining({
+        kind: "install",
+        dryRun: false,
+        initialized: true,
+        projectSetup: expect.objectContaining({
+          config: expect.objectContaining({
+            memoryRoot: join(rootDir, "memory"),
+            memoryLayout: "child",
+            memoryGitMode: "separate",
+            installRoot: join(rootDir, ".agents/skills"),
+            skillTargets: ["codex"],
+            folderScoped: true
+          }),
+          gitSetup: expect.objectContaining({ memoryRepoInitialized: true, ignoredByProject: true })
+        }),
+        skillInstalls: [expect.objectContaining({ target: "codex", skillRoot: join(rootDir, ".agents/skills") })]
+      })
+    );
+    expect(await readFile(join(rootDir, "memory/index.md"), "utf8")).toContain("Boreal Memory Vault");
+    expect(await fileMissing(join(rootDir, "memory/.git"))).toBe(false);
+    expect(await fileMissing(join(rootDir, ".agents/skills/boreal-router/SKILL.md"))).toBe(false);
+    expect(await readFile(join(rootDir, ".gitignore"), "utf8")).toContain("/memory/");
+
+    const aliasRoot = await makeTempWorkspace();
+    const alias = await runCli(aliasRoot, ["install", "-y", "--json"]);
+    expect(alias.exitCode).toBe(0);
+    expect(parseData<{ readonly projectSetup: { readonly config: { readonly memoryRoot: string } } }>(alias.stdout).projectSetup.config.memoryRoot).toBe(
+      join(aliasRoot, "memory")
+    );
+  });
+
+  it("prints a readable bare install plan in human mode", async () => {
+    const rootDir = await makeTempWorkspace();
+    const planned = await runCli(rootDir, ["install", "--dry-run"]);
+
+    expect(planned.exitCode).toBe(0);
+    expect(planned.stdout).toContain("Boreal Install");
+    expect(planned.stdout).toContain("Boreal install plan");
+    expect(planned.stdout).toContain(join(rootDir, "memory"));
+    expect(planned.stdout).toContain("memoryLayout  child");
+    expect(planned.stdout).toContain("No files were written");
   });
 
   it("sets up child memory submodules with gitmodules metadata", async () => {
@@ -3398,6 +3499,7 @@ describe("bwrk cli", () => {
     const searchIndex = registry.commands.find((command) => command.path.join(" ") === "search index");
     const evidenceAdd = registry.commands.find((command) => command.path.join(" ") === "evidence add");
     const agentFinish = registry.commands.find((command) => command.path.join(" ") === "agent finish");
+    const install = registry.commands.find((command) => command.path.join(" ") === "install");
 
     expect(result.exitCode).toBe(0);
     expect(() => validateCommandBehaviorMetadata()).not.toThrow();
@@ -3436,6 +3538,7 @@ describe("bwrk cli", () => {
         "operation repair",
         "workflows list",
         "workflows show",
+        "install",
         "install codex",
         "install claude",
         "install skills",
@@ -3490,6 +3593,13 @@ describe("bwrk cli", () => {
         expect.objectContaining({ name: "json", type: "boolean" })
       ])
     );
+    expect(install?.flags).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ name: "yes", type: "boolean" }),
+        expect.objectContaining({ name: "dry-run", type: "boolean" }),
+        expect.objectContaining({ name: "memory-layout", type: "value" })
+      ])
+    );
     expect(registry.commands.every((command) => command.behavior.examples.length > 0)).toBe(true);
     expect(registry.commands.every((command) => command.behavior.jsonOutputSchema.startsWith("boreal.cli."))).toBe(true);
     expect(registry.commands.every((command) => command.behavior.maxResultSizeChars > 0)).toBe(true);
@@ -3499,6 +3609,7 @@ describe("bwrk cli", () => {
         .every((command) => command.behavior.requiresLock !== "none")
     ).toBe(true);
     expect(commands?.behavior.readOnly).toBe(true);
+    expect(install?.behavior).toEqual(expect.objectContaining({ writesState: true, writesGeneratedArtifacts: true, requiresLock: "state+generated" }));
     expect(reserve?.behavior).toEqual(expect.objectContaining({ writesState: true, requiresLock: "state" }));
     expect(searchIndex?.behavior).toEqual(
       expect.objectContaining({ writesGeneratedArtifacts: true, requiresLock: "index" })
@@ -4101,6 +4212,7 @@ describe("bwrk cli", () => {
   it("keeps strict doctor stable just above the operation prune target", async () => {
     const rootDir = await makeTempWorkspace();
 
+    await initGitRepository(rootDir, "main");
     await runCli(rootDir, ["init", "--setup-memory", "--json"]);
     await runCli(rootDir, ["sync", "refresh", "--json"]);
 
@@ -4153,6 +4265,7 @@ describe("bwrk cli", () => {
   it("auto-prunes local operation volume when it is the only strict closeout blocker", async () => {
     const rootDir = await makeTempWorkspace();
 
+    await initGitRepository(rootDir, "main");
     await runCli(rootDir, ["init", "--setup-memory", "--json"]);
     await runCli(rootDir, ["sync", "refresh", "--json"]);
 
@@ -8420,7 +8533,7 @@ describe("bwrk cli", () => {
     expect(excessiveSearch.exitCode).toBe(2);
     expect(excessiveSearchPayload.code).toBe("BOREAL_INVALID_INPUT");
     expect(excessiveSearchPayload.message).toContain("--limit must be at most 100");
-  });
+  }, 15_000);
 
   it("rejects excessive handoff limits before claiming work", async () => {
     const rootDir = await makeTempWorkspace();

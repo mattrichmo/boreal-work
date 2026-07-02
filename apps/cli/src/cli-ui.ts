@@ -156,7 +156,7 @@ export class CliPromptSession {
   ) {}
 
   writeIntro(title: string, detail: string): void {
-    this.io.output.write(`${title}\n\n${detail}\n\n`);
+    this.io.output.write(`${promptBox([title, "", ...detail.split("\n")])}\n\n`);
   }
 
   async text(label: string, defaultValue: string): Promise<string> {
@@ -277,21 +277,26 @@ function renderSelect<T extends string>(
   previousLineCount: number
 ): number {
   const active = options[index];
+  const columns = typeof output.columns === "number" ? output.columns : 92;
+  const cardWidth = clamp(columns - 4, 44, 88);
+  const hint = multiple ? "Space toggle   Enter accept   Up/Down move" : "Enter accept   Up/Down move";
   const lines = [
-    `${label}:`,
+    label,
+    "",
     ...options.map((option, optionIndex) => {
-      const cursor = optionIndex === index ? ">" : " ";
-      const marker = multiple ? (selected.has(option.value) ? "[x]" : "[ ]") : selected.has(option.value) ? "(*)" : "( )";
-      return `${cursor} ${marker} ${option.label}`;
+      const cursor = optionIndex === index ? "›" : " ";
+      const marker = multiple ? (selected.has(option.value) ? "■" : "□") : selected.has(option.value) ? "●" : "○";
+      return truncateLine(`${cursor} ${marker} ${option.label}`, cardWidth);
     }),
     "",
-    active ? active.description : "",
-    multiple ? "Space toggles. Enter accepts." : "Enter accepts.",
-    ""
+    ...wrapText(active ? active.description : "", cardWidth),
+    "",
+    hint
   ];
   const prefix = previousLineCount > 0 ? `\x1B[${previousLineCount}F\x1B[J` : "";
-  output.write(`${prefix}${lines.join("\n")}`);
-  return lines.length;
+  const rendered = promptBox(lines, cardWidth);
+  output.write(`${prefix}${rendered}\n`);
+  return rendered.split("\n").length;
 }
 
 function selectActiveOption<T extends string>(
@@ -312,6 +317,54 @@ function selectActiveOption<T extends string>(
 
 function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
+}
+
+function promptBox(lines: readonly string[], width?: number): string {
+  const contentWidth = width ?? lines.reduce((max, line) => Math.max(max, line.length), 0);
+  const top = `╭${"─".repeat(contentWidth + 2)}╮`;
+  const bottom = `╰${"─".repeat(contentWidth + 2)}╯`;
+  const body = lines.map((line) => `│ ${truncateLine(line, contentWidth).padEnd(contentWidth)} │`);
+  return [top, ...body, bottom].join("\n");
+}
+
+function truncateLine(line: string, width: number): string {
+  if (line.length <= width) {
+    return line;
+  }
+  if (width <= 1) {
+    return line.slice(0, width);
+  }
+  return `${line.slice(0, width - 1)}…`;
+}
+
+function wrapText(text: string, width: number): readonly string[] {
+  const words = text.split(/\s+/).filter(Boolean);
+  if (words.length === 0) {
+    return [""];
+  }
+  const lines: string[] = [];
+  let current = "";
+  for (const word of words) {
+    if (word.length > width) {
+      if (current) {
+        lines.push(current);
+        current = "";
+      }
+      lines.push(truncateLine(word, width));
+      continue;
+    }
+    const next = current ? `${current} ${word}` : word;
+    if (next.length > width) {
+      lines.push(current);
+      current = word;
+    } else {
+      current = next;
+    }
+  }
+  if (current) {
+    lines.push(current);
+  }
+  return lines;
 }
 
 function isString(value: string | undefined): value is string {

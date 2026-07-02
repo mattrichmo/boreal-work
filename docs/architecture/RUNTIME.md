@@ -77,9 +77,9 @@ Duplicate handling starts with read-only detection. `duplicate scan` groups like
 
 Operational work state should not depend on JSONL or Markdown as a hardcoded implementation detail. Human-readable vault formats can be adapters; engine rules must stay behind storage and schema contracts.
 
-## Beads-Derived Runtime Rules
+## Runtime Invariants
 
-The Beads runtime is Go/Dolt-centered, but several of its operational rules apply directly:
+Boreal adopts common invariants from Git-native issue trackers, local-first collaboration tools, and agent workflow systems while implementing them independently in TypeScript:
 
 - Stable natural-key IDs belong on relationship records. Boreal graph edges use deterministic IDs from edge identity.
 - User-created work records must tolerate same-title imports and retries. Boreal work IDs include actor, timestamp, and nonce seed inputs, with runtime-level nonce retry on collision.

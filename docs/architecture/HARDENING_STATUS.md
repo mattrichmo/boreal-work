@@ -41,7 +41,7 @@ This file is the current checkpoint for the broad hardening goal. It separates a
 - `apps/mcp` now exposes the first project-scoped stdio MCP server with read-only project tools and confirmed mutating tools routed through exact scoped CLI commands plus operation evidence.
 - `apps/daemon` now exposes the first project-scoped daemon status/watch scaffold with stale PID detection, lock awareness, bounded watched paths, CLI/global-dashboard visibility, and doctor drift diagnostics.
 - Repo-local `memory/` vault scaffolding, raw source index, wiki pages, duplicate scan, merge plans, and compaction plans exist.
-- Project setup now separates memory Git history by default with sibling memory repos, child ignored memory repos, child submodule metadata, generated `.gitignore` guards, and explicit `shared` opt-in for mixed project history.
+- Project setup now separates memory Git history by default with child ignored memory repos, while still supporting sibling memory repos, child submodule metadata, generated `.gitignore` guards, and explicit `shared` opt-in for mixed project history.
 - Doctor validates project setup drift, schema shape, IDs, references, dependencies, reservations, context drift, ledger drift, search freshness, operation/event causality, and locks.
 - Git health uses the policy in `docs/architecture/GIT_HEALTH_HARDENING.md` to distinguish blocking Git failures from protected-branch, generated-artifact, and memory-index caveats.
 - The machine-local project registry contract has a published schema, explicit storage-location helper, display metadata, project/memory/install path bindings, and no implicit directory scanning.

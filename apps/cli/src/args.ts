@@ -42,6 +42,11 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
       break;
     }
 
+    if (arg === "-y") {
+      addFlag(flags, "yes", "true");
+      continue;
+    }
+
     if (!arg.startsWith("--")) {
       command.push(arg);
       continue;

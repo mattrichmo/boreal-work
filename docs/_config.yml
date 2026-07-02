@@ -7,7 +7,7 @@
 # relative `*.md` links between these docs resolve correctly on the built site.
 
 title: Boreal Work
-description: Git-native project memory and workflow control for humans and agents.
+description: Local runtime for evidence-backed work, project memory, and agent handoff.
 theme: jekyll-theme-cayman
 
 # Repo-only files that should not be published as site pages.

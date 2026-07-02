@@ -8,9 +8,9 @@
 
 # Boreal Work
 
-**Git-native project memory and workflow control for humans and agents.**
+**Local runtime for evidence-backed work, project memory, and agent handoff.**
 
-Boreal turns the loose context that normally lives in chat logs, scratch notes, and people's heads into durable, queryable records that sit next to your code. Work items, the evidence that closes them, the decisions behind them, and the sources that back those decisions all become append-friendly records under a `.boreal/` runtime and a `memory/` vault — readable by a person, diffable in Git, and stable enough for an agent to coordinate against.
+Boreal turns tasks, sources, claims, decisions, verification, and workflow state into durable records with JSON-first command contracts and repairable Git-native artifacts. The `.boreal/` runtime tracks operational truth; the `memory/` vault preserves human-readable knowledge, ledgers, and handoff material that people can diff and agents can coordinate against.
 
 > **Status:** v1 local runtime. `apps/cli` (`bwrk`) is the canonical command surface; the MCP server, daemon, and browser console are built on the same JSON-first contracts. Nothing is published to a registry yet — you run it from this checkout.
 
@@ -18,9 +18,9 @@ Boreal turns the loose context that normally lives in chat logs, scratch notes, 
 
 ## Why Boreal
 
-- **One source of truth.** Work, evidence, knowledge, and decisions are records — not Slack threads. They live in the repo, survive process restarts, and diff cleanly.
+- **Evidence-backed operational truth.** Work, evidence, verification, sources, claims, and decisions are records — not Slack threads. They survive process restarts and diff cleanly.
 - **Evidence-gated closure.** Work doesn't close because someone says so; it closes because a verification record points at evidence (a passing command, a test run, a note).
-- **Built for agents and humans equally.** Every command has a stable `--json` envelope. Agents claim work atomically, hand off safely, and read the same records people read.
+- **Built for agent handoff.** Every command has a stable `--json` envelope. Agents claim work atomically, hand off safely, and read the same records people read.
 - **Deterministic by design.** IDs carry actor + timestamp + nonce so imports don't collide; readiness is derived and explicitly recomputable; relationship edges use deterministic natural keys.
 - **Git-native, fail-closed.** State is a file-backed store with cross-process write locking, schema-drift rejection, and a `doctor` that repairs projections and indexes.
 
@@ -87,6 +87,7 @@ Boreal is a workspace with several front ends over one runtime (`@boreal/engine`
 | **[CLI commands](docs/cli/COMMANDS.md)** | The complete `bwrk` command contract (every flag, every envelope). |
 | **[Runtime architecture](docs/architecture/RUNTIME.md)** | Ports, domain operations, and the engine boundary. |
 | **[Skills & workflows](docs/architecture/SKILLS_AND_WORKFLOWS.md)** | How workflows, skills, and templates fit together. |
+| **[Prior art & originality](docs/architecture/PRIOR_ART_ORIGINALITY.md)** | How Boreal positions itself against adjacent local-first and agent-workflow tools. |
 | **[V1 closeout & adoption](docs/product/V1_CLOSEOUT_ADOPTION_GUIDE.md)** | Where v1 landed and how to adopt it. |
 
 ## Repository layout
@@ -146,12 +147,15 @@ pnpm test -- tests/runtime/agent-e2e.test.ts
 
 ### Runtime invariants
 
-Several invariants intentionally follow the Beads methodology while staying TypeScript-native:
+Boreal adopts common invariants from Git-native issue trackers and agent workflow tools while implementing them independently in TypeScript:
 
+- Stable natural-key IDs belong on relationship records.
 - Work IDs include actor, timestamp, and nonce inputs so same-title imports do not collide.
 - Event IDs use random entropy instead of per-process sequence counters.
 - Dependency edges keep deterministic natural-key IDs.
 - Derived readiness has an explicit recompute/repair operation.
+- Search and ready-work paths stay bounded and filterable.
+- State-file writes use temp file, fsync, and rename so readers never observe a partial JSON document.
 
 ## Artifact policy
 

@@ -437,7 +437,7 @@ async function runJsonStep<T>(
   expectStepReady(completed, stepId);
   const result = await runCli(cwd, argv);
   expect(result.stderr, `${stepId} stderr`).toBe("");
-  expect(result.exitCode, `${stepId} exit`).toBe(0);
+  expect(result.exitCode, `${stepId} exit stdout:\n${result.stdout}\nstderr:\n${result.stderr}`).toBe(0);
   const envelope = parseJson<{ readonly ok: true; readonly data: T }>(result.stdout);
   expect(envelope.ok, `${stepId} JSON envelope`).toBe(true);
   completed.push(stepId);

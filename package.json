@@ -2,7 +2,7 @@
   "name": "boreal-work",
   "version": "0.1.0",
   "private": true,
-  "description": "Git-native project memory and workflow control for humans and agents.",
+  "description": "Local runtime for evidence-backed work, project memory, and agent handoff.",
   "type": "module",
   "packageManager": "pnpm@9.15.1",
   "engines": {

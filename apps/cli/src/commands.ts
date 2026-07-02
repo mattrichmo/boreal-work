@@ -205,10 +205,16 @@ import {
 } from "./import-export.js";
 import { createResultSpoolingOutput, formatRecord, table, type CliOutput } from "./output.js";
 import {
+  applyProjectSetup,
   configuredInstallRootForTarget,
   configuredInstallRootMatchesTarget,
+  formatProjectInstallReview,
   maybeConfigureProjectSetup,
+  projectSetupInputFromArgs,
+  promptProjectInstallInput,
   readProjectSetupConfig,
+  validateProjectSetupInput,
+  type ProjectSetupInput,
   type ProjectSetupResult
 } from "./project-setup.js";
 import {
@@ -231,6 +237,7 @@ import {
   getRawSourceDetail,
   initVault,
   inspectVault,
+  VAULT_SCHEMA_VERSION,
   listVaultWikiPages,
   listRawSourceRows,
   type RawSourceRow,
@@ -629,6 +636,26 @@ interface SkillInstallSummary {
   readonly installRoot: string;
   readonly skillRoot: string;
   readonly fileCount: number;
+}
+
+interface InstallSetupResult {
+  readonly kind: "install";
+  readonly dryRun: boolean;
+  readonly yes: boolean;
+  readonly initialized?: boolean;
+  readonly workspaceRoot: string;
+  readonly eventId?: string;
+  readonly plan: {
+    readonly projectRoot: string;
+    readonly memoryRoot: string;
+    readonly memoryLayout: string;
+    readonly memoryGitMode: string;
+    readonly installRoot: string;
+    readonly skillTargets: readonly string[];
+    readonly folderScoped: boolean;
+  };
+  readonly projectSetup?: ProjectSetupResult;
+  readonly skillInstalls?: readonly SkillInstallSummary[];
 }
 
 type AgentStartReason = "expired_active_reservations" | "reservation_capacity_reached" | "no_ready_work";
@@ -2839,6 +2866,10 @@ async function installCommand(
   output: CliOutput,
   json: boolean
 ): Promise<CommandResult> {
+  if (action === undefined) {
+    return installSetupCommand(context, args, output, json);
+  }
+
   if (action === "status") {
     const status = await inspectBorealInstallStatus({
       workspaceRoot: context.workspaceRoot,
@@ -2868,6 +2899,126 @@ async function installCommand(
   const result = dryRun ? plan : await installSkillsFromPlan(plan);
   output.write(json ? formatRecord(result, true) : formatSkillInstallPlan(result));
   return { exitCode: result.issues.length === 0 ? 0 : 1 };
+}
+
+async function installSetupCommand(
+  context: CliContext,
+  args: ParsedArgs,
+  output: CliOutput,
+  json: boolean
+): Promise<CommandResult> {
+  const yes = hasFlag(args, "yes");
+  const explicitDryRun = hasFlag(args, "dry-run");
+  const dryRun = explicitDryRun || (json && !yes);
+  const explicitInteractive = hasFlag(args, "interactive");
+  const interactive = explicitInteractive || (!yes && !dryRun);
+  if (yes && explicitDryRun) {
+    throw new BorealError("BOREAL_INVALID_INPUT", "bwrk install cannot combine --yes and --dry-run");
+  }
+  if (yes && explicitInteractive) {
+    throw new BorealError("BOREAL_INVALID_INPUT", "bwrk install cannot combine --yes and --interactive");
+  }
+  if (interactive && json) {
+    throw new BorealError("BOREAL_INVALID_INPUT", "--interactive cannot be combined with --json");
+  }
+
+  const setupArgs = installSetupArgs(args);
+  const input = interactive
+    ? await promptProjectInstallInput(context, setupArgs)
+    : projectSetupInputFromArgs(context, setupArgs);
+  await validateProjectSetupInput(input);
+  const plan = installSetupPlan(input);
+  if (dryRun) {
+    const result: InstallSetupResult = {
+      kind: "install",
+      dryRun: true,
+      yes,
+      workspaceRoot: context.workspaceRoot,
+      plan
+    };
+    output.write(json ? formatRecord(result, true) : formatInstallSetupResult(result, input));
+    return { exitCode: 0 };
+  }
+
+  await ensureWorkspaceDirs(context);
+  const initialized = await context.runtime.ensureWorkspaceInitialized();
+  const projectSetup = await applyProjectSetup(input);
+  const skillInstalls = await installProjectSetupSkills(context, projectSetup);
+  const result: InstallSetupResult = {
+    kind: "install",
+    dryRun: false,
+    yes,
+    initialized: initialized.initialized,
+    workspaceRoot: context.workspaceRoot,
+    eventId: initialized.event.meta.id,
+    plan,
+    projectSetup,
+    skillInstalls
+  };
+  output.write(json ? formatRecord(result, true) : formatInstallSetupResult(result, input));
+  return { exitCode: 0 };
+}
+
+function installSetupArgs(args: ParsedArgs): ParsedArgs {
+  const flags = new Map<string, string[]>();
+  for (const [name, values] of args.flags.entries()) {
+    flags.set(name, [...values]);
+  }
+  if (!flags.has("folder-scoped")) {
+    flags.set("folder-scoped", ["true"]);
+  }
+  return { command: args.command, flags };
+}
+
+function installSetupPlan(input: ProjectSetupInput): InstallSetupResult["plan"] {
+  return {
+    projectRoot: input.projectRoot,
+    memoryRoot: input.memoryRoot,
+    memoryLayout: input.memoryLayout,
+    memoryGitMode: input.memoryGitMode,
+    installRoot: input.installRoot,
+    skillTargets: input.skillTargets,
+    folderScoped: input.folderScoped
+  };
+}
+
+function formatInstallSetupResult(result: InstallSetupResult, input: ProjectSetupInput): string {
+  const title = result.dryRun ? "Boreal install plan" : "Boreal install complete";
+  const detail = result.dryRun
+    ? "No files were written. Run bwrk install --yes to apply this plan."
+    : "Workspace runtime, child memory, Git guards, and agent skills are ready.";
+  const lines = [
+    box(["Boreal Install", "Clean local setup for project memory and agent skills"]),
+    "",
+    resultSummary({ status: result.dryRun ? "pending" : "success", title, detail }),
+    "",
+    formatProjectInstallReview(input)
+  ];
+  if (result.projectSetup) {
+    lines.push(
+      "",
+      section(
+        "Written",
+        [
+          `config ${result.projectSetup.configPath}`,
+          `memory directories ${result.projectSetup.createdDirectories.length} created, ${result.projectSetup.existingDirectories.length} existing`,
+          `memory files ${result.projectSetup.createdFiles.length} created, ${result.projectSetup.existingFiles.length} existing`,
+          `project gitignore ${result.projectSetup.gitSetup.projectGitignoreUpdated ? "updated" : "unchanged"}`,
+          `memory repo ${result.projectSetup.gitSetup.memoryRepoInitialized ? "initialized" : "already present"}`
+        ]
+      )
+    );
+  }
+  if (result.skillInstalls && result.skillInstalls.length > 0) {
+    lines.push(
+      "",
+      section(
+        "Skills",
+        result.skillInstalls.map((install) => `${install.target} ${install.skillRoot} (${install.fileCount} files)`)
+      )
+    );
+  }
+  return `${lines.join("\n")}\n`;
 }
 
 function installTarget(action: string | undefined): "codex" | "claude" | "skills" {
@@ -6738,7 +6889,7 @@ async function compactCommand(
 
 async function buildSyncStatus(context: CliContext): Promise<SyncStatusResult> {
   const [vault, ledgers, searchIndex, git] = await Promise.all([
-    inspectVault(context),
+    inspectVaultForSyncStatus(context),
     safeLedgerStatus(context),
     inspectSearchIndex(context),
     inspectGitWorktree(context)
@@ -6757,6 +6908,46 @@ async function buildSyncStatus(context: CliContext): Promise<SyncStatusResult> {
     },
     git,
     recommendedActions
+  };
+}
+
+async function inspectVaultForSyncStatus(context: CliContext): Promise<VaultStatusResult> {
+  try {
+    return await inspectVault(context);
+  } catch (caught) {
+    if (!isBorealError(caught)) {
+      throw caught;
+    }
+    return unavailableVaultStatus(context);
+  }
+}
+
+function unavailableVaultStatus(context: CliContext): VaultStatusResult {
+  return {
+    ok: false,
+    initialized: false,
+    rootDir: join(context.workspaceRoot, "memory"),
+    schemaVersion: VAULT_SCHEMA_VERSION,
+    health: {
+      ok: false,
+      hasWarnings: true,
+      rawSourceCount: 0,
+      wikiPageCount: 0,
+      ledgerEventCount: 0,
+      brokenLinks: [],
+      orphanPages: [],
+      missingSourceRefs: [],
+      staleClaims: [],
+      malformedRawRecords: [],
+      malformedLedgerEvents: [],
+      missingArchiveRefs: [],
+      missingMergeRefs: []
+    },
+    requiredDirectories: [],
+    requiredFiles: [],
+    missingDirectories: [],
+    missingFiles: [],
+    invalidPaths: []
   };
 }
 
@@ -7505,16 +7696,24 @@ async function doctorCommand(
   }
   const result = await runDoctor(context, hasFlag(args, "fix"), hasFlag(args, "strict"));
   if (json) {
-    output.write(await formatRecordWithAgentDirectives(context, args, result, true, {
-      doctorResult: result,
-      subject: { type: "workspace", id: context.workspaceRoot, title: "Workspace" }
-    }));
+    output.write(
+      doctorResultCanAttachDirectives(result)
+        ? await formatRecordWithAgentDirectives(context, args, result, true, {
+            doctorResult: result,
+            subject: { type: "workspace", id: context.workspaceRoot, title: "Workspace" }
+          })
+        : formatRecord(result, true)
+    );
   } else if (dashboardView(args)) {
     output.write(formatDoctorDashboard(result));
   } else {
     output.write(result.diagnostics.map(formatDiagnostic).join("\n") + "\n");
   }
   return { exitCode: result.ok ? 0 : 1 };
+}
+
+function doctorResultCanAttachDirectives(result: DoctorResult): boolean {
+  return !result.diagnostics.some((diagnostic) => diagnostic.code === "state.record_shape" && diagnostic.severity === "error");
 }
 
 async function schemaCommand(

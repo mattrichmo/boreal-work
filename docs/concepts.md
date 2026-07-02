@@ -6,7 +6,7 @@ The mental model behind Boreal. Read this once and the [CLI commands](cli/COMMAN
 
 ## The core idea
 
-Most project context is ephemeral: it lives in chat, in tickets that rot, in someone's memory. Boreal makes that context **durable records** stored next to the code and managed through Git. A record is created once, transitions through explicit states, and leaves an event trail. Humans read the records; agents coordinate against them; Git versions them.
+Most project context is ephemeral: it lives in chat, in tickets that rot, in someone's memory. Boreal makes that context **durable records** with explicit evidence, verification, sources, claims, decisions, and workflow state. A record is created once, transitions through explicit states, and leaves an event trail. Humans read the records; agents coordinate against them; Git versions the repairable artifacts.
 
 Two roots hold everything:
 
@@ -66,7 +66,7 @@ The `memory/` tree is the durable, human-readable side of Boreal:
 - **raw** — captured raw sources awaiting triage/reconciliation.
 - **work**, **graph**, **dashboards** — projected views.
 
-Memory can live in-repo, in a child repo, or in a sibling repo with separate Git history (the default), so knowledge history doesn't tangle with application history. See [Project setup](architecture/PROJECT_SETUP.md).
+Memory can live in a child repo, a sibling repo, or in-repo with shared history. The installer default is child `memory/` with separate Git history, so knowledge history stays visible in the project folder without mixing into application history. See [Project setup](architecture/PROJECT_SETUP.md).
 
 ## Sprints and workflows
 
