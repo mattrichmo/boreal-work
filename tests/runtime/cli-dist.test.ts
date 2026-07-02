@@ -153,7 +153,113 @@ describe("bundled bwrk dist", () => {
     const noPin = await runBundle(machineBin, noPinWorkspace, ["--version"]);
     expect(noPin.exitCode).toBe(0);
     expect(noPin.stdout).toBe("boreal-work 0.1.0 (brew)\n");
+
+    const missingPinWorkspace = await makeTempDir("boreal-cli-missing-pin-");
+    await mkdir(join(missingPinWorkspace, ".boreal"), { recursive: true });
+    await writeFile(
+      join(missingPinWorkspace, ".boreal", "project.json"),
+      `${JSON.stringify({ bwrkPin: { binPath: "node_modules/.bin/bwrk", packageName: "@boreal/cli" } }, null, 2)}\n`,
+      "utf8"
+    );
+
+    const missingPin = await runBundle(machineBin, missingPinWorkspace, ["doctor", "--json"]);
+    const missingPinPayload = parseError<{
+      readonly code: string;
+      readonly message: string;
+      readonly details: { readonly reason: string; readonly installCommand: string; readonly relativeBinPath: string };
+    }>(missingPin.stderr);
+    expect(missingPin.exitCode).toBe(1);
+    expect(missingPinPayload.code).toBe("BOREAL_POLICY_VIOLATION");
+    expect(missingPinPayload.message).toContain("pnpm install");
+    expect(missingPinPayload.details).toEqual(
+      expect.objectContaining({
+        reason: "repo_pinned_bwrk_missing",
+        installCommand: "pnpm install",
+        relativeBinPath: "node_modules/.bin/bwrk"
+      })
+    );
+    expect(missingPin.stdout).toBe("");
   }, 40_000);
+
+  it("reports version-skew warnings and unsupported state-schema errors with channel-correct commands", async () => {
+    await buildCliDist("npm");
+    const workspaceRoot = await makeTempDir("boreal-cli-compat-");
+    const repoBin = await installBundledPackage(workspaceRoot);
+
+    const init = await runBundle(repoBin, workspaceRoot, ["init", "--json"], { BOREAL_BWRK_DELEGATED: "1" });
+    expect(init.exitCode).toBe(0);
+
+    const skewDoctor = await runBundle(repoBin, workspaceRoot, ["doctor", "--json"], {
+      BOREAL_BWRK_DELEGATED: "1",
+      BOREAL_BWRK_LAUNCHER_NAME: "boreal-work",
+      BOREAL_BWRK_LAUNCHER_VERSION: "0.2.0",
+      BOREAL_BWRK_LAUNCHER_CHANNEL: "brew",
+      BOREAL_BWRK_LAUNCHER_EXECUTABLE: "/opt/homebrew/bin/bwrk",
+      BOREAL_BWRK_DELEGATED_BIN: repoBin
+    });
+    const skewPayload = parseData<{
+      readonly diagnostics: readonly Array<{
+        readonly code: string;
+        readonly severity: string;
+        readonly details?: {
+          readonly launcher?: { readonly version: string; readonly installChannel: string };
+          readonly repoPinned?: { readonly version: string; readonly installChannel: string };
+          readonly upgrade?: { readonly channel: string; readonly command: string };
+          readonly repoPinnedUpgrade?: { readonly channel: string; readonly command: string };
+          readonly recommendedActions?: readonly string[];
+        };
+      }>;
+    }>(skewDoctor.stdout);
+    const skewDiagnostic = skewPayload.diagnostics.find((diagnostic) => diagnostic.code === "install.version_skew");
+    expect(skewDoctor.exitCode).toBe(0);
+    expect(skewDiagnostic).toEqual(
+      expect.objectContaining({
+        severity: "warning",
+        details: expect.objectContaining({
+          launcher: expect.objectContaining({ version: "0.2.0", installChannel: "brew" }),
+          repoPinned: expect.objectContaining({ version: "0.1.0", installChannel: "npm" }),
+          upgrade: expect.objectContaining({ channel: "brew", command: "brew upgrade boreal-work" }),
+          repoPinnedUpgrade: expect.objectContaining({ channel: "npm", command: "npm install -g @boreal/cli@latest" }),
+          recommendedActions: expect.arrayContaining([
+            "Upgrade machine bwrk via brew: brew upgrade boreal-work.",
+            "Upgrade repo-pinned bwrk via npm: npm install -g @boreal/cli@latest."
+          ])
+        })
+      })
+    );
+
+    await writeFile(join(workspaceRoot, ".boreal", "runtime", "state.json"), '{"schemaVersion":"boreal.file-store.v999"}\n', "utf8");
+    const schemaDoctor = await runBundle(repoBin, workspaceRoot, ["doctor", "--json"], { BOREAL_BWRK_DELEGATED: "1" });
+    const schemaPayload = parseData<{
+      readonly ok: boolean;
+      readonly diagnostics: readonly Array<{
+        readonly code: string;
+        readonly severity: string;
+        readonly details?: {
+          readonly schemaVersion?: string;
+          readonly supportedSchemaVersion?: string;
+          readonly upgrade?: { readonly channel: string; readonly command: string };
+          readonly repairCommand?: string;
+          readonly recommendedActions?: readonly string[];
+        };
+      }>;
+    }>(schemaDoctor.stdout);
+    const schemaDiagnostic = schemaPayload.diagnostics.find((diagnostic) => diagnostic.code === "state.schema");
+    expect(schemaDoctor.exitCode).toBe(1);
+    expect(schemaPayload.ok).toBe(false);
+    expect(schemaDiagnostic).toEqual(
+      expect.objectContaining({
+        severity: "error",
+        details: expect.objectContaining({
+          schemaVersion: "boreal.file-store.v999",
+          supportedSchemaVersion: "boreal.file-store.v1",
+          upgrade: expect.objectContaining({ channel: "npm", command: "npm install -g @boreal/cli@latest" }),
+          repairCommand: "npm install -g @boreal/cli@latest",
+          recommendedActions: expect.arrayContaining(["Upgrade this bwrk binary via npm: npm install -g @boreal/cli@latest."])
+        })
+      })
+    );
+  }, 30_000);
 
   it("records repo-pinned bwrk metadata in imported project registry entries", async () => {
     const workspaceRoot = await makeTempDir("boreal-cli-registry-pin-");
@@ -260,6 +366,12 @@ function parseData<T>(text: string): T {
   const envelope = JSON.parse(text) as { readonly ok: true; readonly data: T };
   expect(envelope.ok).toBe(true);
   return envelope.data;
+}
+
+function parseError<T>(text: string): T {
+  const envelope = JSON.parse(text) as T & { readonly ok: false };
+  expect(envelope.ok).toBe(false);
+  return envelope;
 }
 
 function commandEnv(overrides: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {

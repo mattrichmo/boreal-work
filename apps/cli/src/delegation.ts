@@ -10,7 +10,12 @@ import {
   BWRK_LAUNCHER_NAME_ENV,
   BWRK_LAUNCHER_VERSION_ENV
 } from "./delegation-env.js";
-import { findBorealWorkspaceRoot, findRepoBwrkRoot, pathsReferToSameFile, resolveRepoBwrkPin } from "./repo-binary-pin.js";
+import {
+  findBorealWorkspaceRoot,
+  findRepoBwrkRoot,
+  pathsReferToSameFile,
+  resolveRepoBwrkPinForDelegation
+} from "./repo-binary-pin.js";
 import { getVersionInfo } from "./version.js";
 
 export const NO_DELEGATE_FLAG = "--no-delegate";
@@ -51,10 +56,15 @@ export function delegateToRepoPinnedBwrk(options: DelegateToRepoBwrkOptions = {}
     return { delegated: false, reason: "no-workspace" };
   }
 
-  const pin = resolveRepoBwrkPin(workspaceRoot, { requireExisting: true });
-  if (!pin) {
+  const pinResolution = resolveRepoBwrkPinForDelegation(workspaceRoot);
+  if (pinResolution.status === "none") {
     return { delegated: false, reason: "no-pin", workspaceRoot };
   }
+  if (pinResolution.status === "missing") {
+    writeMissingRepoPinError(workspaceRoot, pinResolution, argv);
+    return { delegated: true, exitCode: 1, reason: "pin-missing", workspaceRoot, pinPath: pinResolution.pin.binPath };
+  }
+  const pin = pinResolution.pin;
   if (pathsReferToSameFile(currentExecutable, pin.binPath)) {
     return { delegated: false, reason: "self", workspaceRoot, pinPath: pin.binPath };
   }
@@ -126,6 +136,43 @@ function explicitWorkspaceArg(argv: readonly string[]): string | undefined {
 
 function isGlobalInvocation(argv: readonly string[]): boolean {
   return argv.includes("--global") || argv.some((arg) => arg.startsWith("--global=") && arg !== "--global=false") || argv[0] === "global";
+}
+
+function writeMissingRepoPinError(
+  workspaceRoot: string,
+  resolution: Extract<ReturnType<typeof resolveRepoBwrkPinForDelegation>, { readonly status: "missing" }>,
+  argv: readonly string[]
+): void {
+  const message = `${resolution.reason} at ${resolution.pin.relativeBinPath}; run \`${resolution.installCommand}\` in ${workspaceRoot} before using a machine bwrk binary here.`;
+  const details = {
+    reason: "repo_pinned_bwrk_missing",
+    workspaceRoot,
+    pinPath: resolution.pin.binPath,
+    relativeBinPath: resolution.pin.relativeBinPath,
+    source: resolution.pin.source,
+    packageName: resolution.pin.packageName,
+    installCommand: resolution.installCommand
+  };
+  if (argvWantsJson(argv)) {
+    process.stderr.write(
+      `${JSON.stringify(
+        {
+          ok: false,
+          code: "BOREAL_POLICY_VIOLATION",
+          message,
+          details
+        },
+        null,
+        2
+      )}\n`
+    );
+    return;
+  }
+  process.stderr.write(`BOREAL_POLICY_VIOLATION: ${message}\n`);
+}
+
+function argvWantsJson(argv: readonly string[]): boolean {
+  return argv.some((arg) => arg === "--json" || arg === "--json=true");
 }
 
 function resolveUserPath(path: string, base = process.cwd()): string {

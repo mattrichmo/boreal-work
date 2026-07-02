@@ -8455,7 +8455,7 @@ async function doctorCommand(
 }
 
 function doctorResultCanAttachDirectives(result: DoctorResult): boolean {
-  return !result.diagnostics.some((diagnostic) => diagnostic.code === "state.record_shape" && diagnostic.severity === "error");
+  return !result.diagnostics.some((diagnostic) => diagnostic.code.startsWith("state.") && diagnostic.severity === "error");
 }
 
 async function schemaCommand(

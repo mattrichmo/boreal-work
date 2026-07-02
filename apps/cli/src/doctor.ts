@@ -34,18 +34,20 @@ import {
 } from "@boreal/core";
 import { inspectDaemonStatus, type DaemonStatusResult } from "@boreal/daemon";
 import { buildContextPack, buildContextProjection } from "@boreal/search";
-import { breakStaleFileLock, inspectFileLock, inspectSQLiteCache } from "@boreal/storage";
+import { FILE_STORE_SCHEMA_VERSION, breakStaleFileLock, inspectFileLock, inspectSQLiteCache } from "@boreal/storage";
 import { deriveReadinessStatus } from "@boreal/work-engine";
 
 import type { CliContext } from "./context.js";
 import { resolveEnvironmentManifest } from "./environment-manifest.js";
 import { inspectGitWorktree } from "./git-worktree.js";
+import { installUpgradeStatus, normalizeInstallChannel } from "./install-channel.js";
 import { inspectBorealInstallStatus, installStatusHealthy, installStatusSummary } from "./install-status.js";
 import { buildExportDocument, exportDriftDiagnostics, ledgerStatus, readGeneratedLedgerTombstones } from "./import-export.js";
 import { inspectProjectSetupDrift, type ProjectSetupDriftInspection } from "./project-setup.js";
 import { inspectSearchIndex, searchIndexLockDir, writeSearchIndex } from "./search-cli.js";
 import { dirtyPathNotesHaveReasonCode } from "./summary-policy.js";
 import { inspectVault, listVaultRawSources, listVaultWikiPages, type RawSourceRecord, type WikiPageRecord } from "./vault.js";
+import { getVersionInfo, type VersionIdentity } from "./version.js";
 
 export type DiagnosticSeverity = "ok" | "warning" | "error" | "fixed";
 
@@ -116,6 +118,7 @@ export async function runDoctor(context: CliContext, fix: boolean, strict = fals
   fixed = fixed || projectSetupDiagnostics.fixed;
   diagnostics.push(await validateEnvironmentManifest(context));
   diagnostics.push(await validateInstallStatus(context));
+  diagnostics.push(...validateVersionSkew());
   diagnostics.push(await validateMcpConfig(context));
   diagnostics.push(await validateDaemonStatus(context));
   diagnostics.push(await validateVaultStructure(context));
@@ -452,6 +455,38 @@ async function validateInstallStatus(context: CliContext): Promise<Diagnostic> {
   };
 }
 
+function validateVersionSkew(): readonly Diagnostic[] {
+  const version = getVersionInfo();
+  const delegation = version.delegation;
+  if (!delegation || !versionsDifferBeyondPatch(delegation.launcher.version, delegation.delegated.version)) {
+    return [];
+  }
+
+  const launcherUpgrade = upgradeStatusForIdentity(delegation.launcher);
+  const delegatedUpgrade = upgradeStatusForIdentity(delegation.delegated);
+  const recommendedActions = [
+    launcherUpgrade ? `Upgrade machine bwrk via ${launcherUpgrade.channel}: ${launcherUpgrade.command}.` : undefined,
+    delegatedUpgrade ? `Upgrade repo-pinned bwrk via ${delegatedUpgrade.channel}: ${delegatedUpgrade.command}.` : undefined
+  ].filter((value): value is string => value !== undefined);
+
+  return [
+    {
+      code: "install.version_skew",
+      severity: "warning",
+      message: `Machine bwrk ${delegation.launcher.version} and repo-pinned bwrk ${delegation.delegated.version} differ by more than a patch`,
+      details: {
+        policy: "Machine and repo-pinned bwrk may differ by patch version only; major or minor skew must be resolved.",
+        launcher: delegation.launcher,
+        repoPinned: delegation.delegated,
+        upgrade: launcherUpgrade,
+        repoPinnedUpgrade: delegatedUpgrade,
+        repairCommand: launcherUpgrade?.command ?? delegatedUpgrade?.command,
+        recommendedActions
+      }
+    }
+  ];
+}
+
 async function validateMcpConfig(context: CliContext): Promise<Diagnostic> {
   const configPath = join(context.paths.borealDir, "mcp.json");
   if (!existsSync(configPath)) {
@@ -548,6 +583,32 @@ async function validateMcpConfig(context: CliContext): Promise<Diagnostic> {
       repairCommand: "Review docs/architecture/MCP_SERVER.md and update .boreal/mcp.json"
     }
   };
+}
+
+function versionsDifferBeyondPatch(left: string, right: string): boolean {
+  const parsedLeft = parseSemver(left);
+  const parsedRight = parseSemver(right);
+  if (!parsedLeft || !parsedRight) {
+    return left !== right;
+  }
+  return parsedLeft.major !== parsedRight.major || parsedLeft.minor !== parsedRight.minor;
+}
+
+function parseSemver(version: string): { readonly major: number; readonly minor: number; readonly patch: number } | undefined {
+  const match = /^(\d+)\.(\d+)\.(\d+)(?:[-+].*)?$/u.exec(version);
+  if (!match) {
+    return undefined;
+  }
+  return {
+    major: Number(match[1]),
+    minor: Number(match[2]),
+    patch: Number(match[3])
+  };
+}
+
+function upgradeStatusForIdentity(identity: VersionIdentity) {
+  const channel = normalizeInstallChannel(identity.installChannel);
+  return channel ? installUpgradeStatus(channel) : undefined;
 }
 
 function configRoot(base: string, value: unknown): string | undefined {
@@ -987,12 +1048,19 @@ async function readStateDocument(
       });
       return undefined;
     }
-    if (parsed.schemaVersion !== "boreal.file-store.v1") {
+    if (parsed.schemaVersion !== FILE_STORE_SCHEMA_VERSION) {
+      const upgrade = installUpgradeStatus(getVersionInfo().installChannel);
       diagnostics.push({
         code: "state.schema",
         severity: "error",
         message: "Unsupported runtime state schema version",
-        details: { schemaVersion: parsed.schemaVersion }
+        details: {
+          schemaVersion: parsed.schemaVersion,
+          supportedSchemaVersion: FILE_STORE_SCHEMA_VERSION,
+          upgrade,
+          repairCommand: upgrade.command,
+          recommendedActions: [`Upgrade this bwrk binary via ${upgrade.channel}: ${upgrade.command}.`]
+        }
       });
       return undefined;
     }

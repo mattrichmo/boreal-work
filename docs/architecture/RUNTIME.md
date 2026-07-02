@@ -50,10 +50,13 @@ The SQLite generated cache lives at `.boreal/cache/runtime-cache.sqlite`. It is 
 
 `bwrk version --json` is the canonical machine-readable compatibility contract for local automation. Its `boreal.cli.version.v1` payload reports the CLI package version, Node/package-manager runtime, `boreal.runtime.v1` record schema, `boreal.file-store.v1` state adapter schema, `boreal.export.v1` recovery snapshot schema, JSONL ledger schemas, generated search/SQLite cache schemas, project setup/registry/vault schemas, daemon status schemas, and the published schema IDs enforced by `PUBLISHED_SCHEMA_CONTRACTS`.
 
+Install-scope compatibility is bounded by delegation and schema checks. A machine-level `bwrk` may launch in any repo, but when the repo declares a pinned `node_modules/.bin/bwrk` package the machine binary must delegate to it before reading or writing project state. Missing pinned dependencies are a hard floor error with `pnpm install` guidance, not permission to run the machine binary against that repo. Patch-level launcher/repo skew is tolerated; major or minor skew is doctor-visible as `install.version_skew` with upgrade commands derived from the detected install channels (`source`, `npm`, or `brew`).
+
 Runtime v1 migrations must obey these rules:
 
 - Existing `boreal.runtime.v1` records must continue to validate unless a new runtime schema version is introduced.
 - Optional additive v1 fields are allowed only when import/export remains forward-compatible.
+- A binary may operate only on the file-store schema it advertises in `bwrk version --json`. If `.boreal/runtime/state.json` carries a newer or unknown `schemaVersion`, `doctor` reports `state.schema` with channel-correct upgrade guidance and `FileBorealStore` still rejects the file in `documentToSnapshot` as the hard backstop.
 - Reversible migrations must be idempotent and document the inverse or rollback command.
 - Migrations that cannot be cleanly reversed must create a `boreal.export.v1` recovery snapshot before mutation and preserve the snapshot path in command evidence or release notes.
 - Generated artifacts are migrated by rebuild, not in-place mutation. Search indexes, SQLite caches, context projections, and JSONL ledgers must be disposable outputs of canonical runtime records plus validated vault inputs.

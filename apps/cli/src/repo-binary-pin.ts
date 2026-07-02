@@ -19,6 +19,21 @@ export interface RepoBwrkPin {
   readonly packageName?: string;
 }
 
+export type RepoBwrkPinResolution =
+  | {
+      readonly status: "found";
+      readonly pin: RepoBwrkPin;
+    }
+  | {
+      readonly status: "missing";
+      readonly pin: RepoBwrkPin;
+      readonly installCommand: "pnpm install";
+      readonly reason: string;
+    }
+  | {
+      readonly status: "none";
+    };
+
 export interface ResolveRepoBwrkPinOptions {
   readonly requireExisting?: boolean;
 }
@@ -41,6 +56,30 @@ export function resolveRepoBwrkPin(
     return pinMetadata(root, defaultBin, "node_modules", inferPinnedPackageName(root));
   }
   return undefined;
+}
+
+export function resolveRepoBwrkPinForDelegation(workspaceRoot: string): RepoBwrkPinResolution {
+  const root = resolveUserPath(workspaceRoot);
+  const configPin = readProjectConfigBwrkPin(root);
+  if (configPin) {
+    const resolved = resolvePinPath(root, configPin.binPath);
+    const pin = pinMetadata(root, resolved, "project-config", configPin.packageName ?? inferPinnedPackageName(root));
+    if (existsSync(resolved)) {
+      return { status: "found", pin };
+    }
+    return {
+      status: "missing",
+      pin,
+      installCommand: "pnpm install",
+      reason: "Configured repo-pinned bwrk binary is missing"
+    };
+  }
+
+  const defaultBin = join(root, DEFAULT_REPO_BWRK_RELATIVE_BIN);
+  if (existsSync(defaultBin)) {
+    return { status: "found", pin: pinMetadata(root, defaultBin, "node_modules", inferPinnedPackageName(root)) };
+  }
+  return { status: "none" };
 }
 
 export function pathsReferToSameFile(left: string | undefined, right: string | undefined): boolean {
