@@ -3,7 +3,7 @@ import { realpathSync } from "node:fs";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { BorealError, isBorealError } from "@boreal/core";
+import { BorealError, classifyBorealError, isBorealError } from "@boreal/core";
 
 import { expandGlobalNamespace, parseArgs, wantsJsonOutput } from "./args.js";
 import { aboutText } from "./branding.js";
@@ -200,10 +200,14 @@ function formatError(error: unknown): string {
 
 function errorPayload(error: unknown): Record<string, unknown> {
   if (error instanceof BorealError) {
+    const classification = classifyBorealError(error.code, error.details);
     return {
       ok: false,
+      ledgerSeq: null,
       code: error.code,
       message: error.message,
+      retryable: classification.retryable,
+      recovery: classification.recovery,
       details: error.details,
       gaps: error.gaps
     };
@@ -211,13 +215,19 @@ function errorPayload(error: unknown): Record<string, unknown> {
   if (error instanceof Error) {
     return {
       ok: false,
+      ledgerSeq: null,
       code: "BOREAL_UNEXPECTED",
-      message: error.message
+      message: error.message,
+      retryable: false,
+      recovery: classifyBorealError("BOREAL_INVARIANT").recovery
     };
   }
   return {
     ok: false,
+    ledgerSeq: null,
     code: "BOREAL_UNEXPECTED",
-    message: String(error)
+    message: String(error),
+    retryable: false,
+    recovery: classifyBorealError("BOREAL_INVARIANT").recovery
   };
 }

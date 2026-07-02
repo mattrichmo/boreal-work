@@ -26,6 +26,10 @@ The installer should render skills for Codex and Claude into a selected install 
 
 Workflows that close task, sprint, phase, milestone, or project work must require a Git checkpoint commit or an explicit no-commit reason code when repository state changed. Closeout summaries must report the affected child work, evidence, verification, commit SHA(s), reason code(s), and any remaining dirty paths instead of collapsing broad work into one final narrative.
 
+## Parallel Lane Isolation
+
+When a sprint, phase, or branch will be executed by multiple agents, workflows must apply [Lane Worktree Isolation](LANE_WORKTREE_ISOLATION.md). Shared integration branches are merge targets only; state-changing work must happen in a lane worktree and branch. Workflow outputs and handoffs should name the merge target, lane branch, worktree path, base SHA, validation command, and merge-back status.
+
 ## Required Closeout Gates
 
 Required closeout gates are subject-scoped work policy, separate from the workspace-wide `gate closeout` health command. Gate kinds, scope, evidence requirements, force semantics, and summary output are specified in [Required closeout gate contract](CLOSEOUT_GATE_CONTRACT.md). Schema, enforcement, reports, and workflow changes should use that contract as the implementation boundary.

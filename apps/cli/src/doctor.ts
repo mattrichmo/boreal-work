@@ -1,4 +1,5 @@
 import { existsSync } from "node:fs";
+import { readdir, stat } from "node:fs/promises";
 import { join, relative, resolve } from "node:path";
 
 import {
@@ -12,6 +13,7 @@ import {
   normalizeLabel,
   nowIso,
   readJsonFile,
+  runBoundedProcess,
   runtimeSnapshotSchemaIssues,
   type AgentDirectiveHealthIssue,
   type AgentReservation,
@@ -85,9 +87,12 @@ const STATE_SECTIONS = [
 export const OPERATION_LOG_RECOMMENDED_KEEP = 1_000;
 const OPERATION_LOG_WARNING_GRACE = 25;
 const OPERATION_LOG_WARNING_THRESHOLD = OPERATION_LOG_RECOMMENDED_KEEP + OPERATION_LOG_WARNING_GRACE;
+const DEFAULT_RESULTS_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
+const RESULTS_PRUNE_GRACE_MS = 5 * 60 * 1000;
 const AGENT_SUMMARY_POLICY_ENFORCED_AT = "2026-06-30T00:00:00.000Z";
 const AGENT_DIRECTIVE_ACKNOWLEDGEMENT_POLICY_ENFORCED_AT = "2026-07-01T00:00:00.000Z";
 const MCP_CONFIG_SCHEMA_VERSION = "boreal.mcp-config.v1";
+const DEFAULT_GIT_TRACKER_DRIFT_COMMIT_WINDOW = 50;
 
 export async function runDoctor(context: CliContext, fix: boolean, strict = false): Promise<DoctorResult> {
   const diagnostics: Diagnostic[] = [];
@@ -1195,7 +1200,7 @@ async function validateStoreRecords(
   try {
     const generatedTombstones = await readGeneratedLedgerTombstones(context);
     const wikiCoverage = await inspectDoctorWikiCoverage(context);
-    const summary = (() => {
+    const summary = await (async () => {
       const rawWorkItems = stateSection<WorkItem>(state, "workItems");
       const rawAgentSummaries = stateSection<AgentSummaryRecord>(state, "agentSummaries");
       const rawEvidence = stateSection<EvidenceRecord>(state, "evidence");
@@ -1678,6 +1683,7 @@ async function validateStoreRecords(
         reservations,
         operations
       });
+      const gitTrackerDrift = await gitTrackerDriftFindings(context, workItems);
 
       return {
         workCount: workItems.length,
@@ -1736,6 +1742,7 @@ async function validateStoreRecords(
         danglingOperationEvents,
         legacyOperationEvents,
         operationEventCausality,
+        gitTrackerDrift,
         stringSafety,
         labelCollisions,
         actorCollisions
@@ -1771,6 +1778,7 @@ async function validateStoreRecords(
             }
           : undefined
     });
+    diagnostics.push(await validateResultsDirectory(context));
     diagnostics.push(diagnosticFromList("state.record_shape", "Malformed runtime records", summary.malformedRecords));
     diagnostics.push(diagnosticFromList("work.dangling_dependencies", "Dangling work dependencies", summary.danglingDependencies));
     diagnostics.push(diagnosticFromList("work.dangling_evidence", "Dangling work evidence references", summary.danglingEvidence));
@@ -1983,6 +1991,13 @@ async function validateStoreRecords(
     );
     diagnostics.push(
       warningDiagnosticFromList(
+        "git.tracker_drift",
+        "Recent commits reference work items that are still open in the tracker",
+        summary.gitTrackerDrift
+      )
+    );
+    diagnostics.push(
+      warningDiagnosticFromList(
         "summary.legacy_artifact_coverage",
         "Legacy closeout summaries missing Markdown artifact URI",
         summary.legacySummaryArtifactGaps
@@ -2112,6 +2127,116 @@ function warningDiagnosticFromList(code: string, label: string, values: readonly
     message: values.length > 0 ? label : `${label}: none`,
     details: values.length > 0 ? values : undefined
   };
+}
+
+async function gitTrackerDriftFindings(
+  context: CliContext,
+  workItems: readonly WorkItem[]
+): Promise<readonly {
+  readonly workId: WorkId;
+  readonly status: WorkItem["status"];
+  readonly title: string;
+  readonly commitSha: string;
+  readonly committedAt?: string;
+  readonly subject: string;
+}[]> {
+  const root = await runDoctorGit(context.cwd, ["rev-parse", "--show-toplevel"]);
+  if (root.exitCode !== 0) {
+    return [];
+  }
+  const gitRoot = root.stdout.trim();
+  if (!gitRoot) {
+    return [];
+  }
+  const limit = gitTrackerDriftCommitWindow();
+  const log = await runDoctorGit(gitRoot, [
+    "log",
+    `-${limit}`,
+    "--format=%H%x1f%cI%x1f%s%x1f%b%x1e"
+  ]);
+  if (log.exitCode !== 0 || !log.stdout.includes("bw_work_")) {
+    return [];
+  }
+  const workById = new Map(workItems.map((work) => [work.meta.id, work]));
+  return parseGitTrackerDriftCommits(log.stdout).flatMap((commit) =>
+    commit.workIds.flatMap((workId) => {
+      const work = workById.get(workId);
+      if (!work || work.status === "closed" || work.status === "cancelled") {
+        return [];
+      }
+      return [
+        {
+          workId,
+          status: work.status,
+          title: work.title,
+          commitSha: commit.sha,
+          ...(commit.committedAt ? { committedAt: commit.committedAt } : {}),
+          subject: commit.subject
+        }
+      ];
+    })
+  );
+}
+
+function gitTrackerDriftCommitWindow(): number {
+  const value = Number.parseInt(process.env.BOREAL_GIT_TRACKER_DRIFT_COMMITS ?? "", 10);
+  return Number.isFinite(value) && value > 0 ? Math.min(value, 500) : DEFAULT_GIT_TRACKER_DRIFT_COMMIT_WINDOW;
+}
+
+async function runDoctorGit(
+  cwd: string,
+  args: readonly string[]
+): Promise<{ readonly exitCode: number | null; readonly stdout: string; readonly stderr: string }> {
+  try {
+    const result = await runBoundedProcess({
+      command: "git",
+      args,
+      cwd,
+      timeoutMs: 5_000,
+      stdoutMaxBytes: 512 * 1024,
+      stderrMaxBytes: 64 * 1024
+    });
+    return { exitCode: result.exitCode, stdout: result.stdout.text, stderr: result.stderr.text };
+  } catch (error) {
+    return {
+      exitCode: 1,
+      stdout: "",
+      stderr: error instanceof Error ? error.message : String(error)
+    };
+  }
+}
+
+function parseGitTrackerDriftCommits(text: string): readonly {
+  readonly sha: string;
+  readonly committedAt?: string;
+  readonly subject: string;
+  readonly workIds: readonly WorkId[];
+}[] {
+  return text
+    .split("\x1e")
+    .map((record) => record.trim())
+    .filter(Boolean)
+    .flatMap((record) => {
+      const [sha, committedAt, subject, body = ""] = record.split("\x1f");
+      if (!sha || !subject) {
+        return [];
+      }
+      const workIds = uniqueWorkIds(`${subject}\n${body}`);
+      return workIds.length > 0
+        ? [
+            {
+              sha,
+              ...(committedAt ? { committedAt } : {}),
+              subject,
+              workIds
+            }
+          ]
+        : [];
+    });
+}
+
+function uniqueWorkIds(text: string): readonly WorkId[] {
+  return [...new Set([...text.matchAll(/\bbw_work_[a-f0-9]{12,64}\b/gu)].map((match) => match[0] as WorkId))].sort();
 }
 
 function legacyDirectiveCompatibilityDiagnostic(values: readonly unknown[]): Diagnostic {
@@ -3217,6 +3342,48 @@ function finalize(diagnostics: readonly Diagnostic[], fixed: boolean, strict: bo
   return { ok, strict, fixed, diagnostics };
 }
 
+async function validateResultsDirectory(context: CliContext): Promise<Diagnostic> {
+  const directory = join(context.workspaceRoot, ".boreal", "results");
+  if (!existsSync(directory)) {
+    return {
+      code: "operation.results",
+      severity: "ok",
+      message: "Results directory has 0 files, 0 stale",
+      details: { directory: ".boreal/results", fileCount: 0, sizeBytes: 0, staleFileCount: 0 }
+    };
+  }
+  const cutoffMs = Date.now() - DEFAULT_RESULTS_RETENTION_MS;
+  const nowMs = Date.now();
+  let fileCount = 0;
+  let sizeBytes = 0;
+  let staleFileCount = 0;
+  for (const entry of await readdir(directory)) {
+    const absolute = join(directory, entry);
+    const info = await stat(absolute);
+    if (!info.isFile()) {
+      continue;
+    }
+    fileCount += 1;
+    sizeBytes += info.size;
+    if (info.mtimeMs < cutoffMs && nowMs - info.mtimeMs >= RESULTS_PRUNE_GRACE_MS) {
+      staleFileCount += 1;
+    }
+  }
+  return {
+    code: "operation.results",
+    severity: "ok",
+    message: `Results directory has ${fileCount} file(s), ${staleFileCount} stale`,
+    details: {
+      directory: ".boreal/results",
+      fileCount,
+      sizeBytes,
+      staleFileCount,
+      retentionDays: Math.round(DEFAULT_RESULTS_RETENTION_MS / (24 * 60 * 60 * 1000)),
+      graceMs: RESULTS_PRUNE_GRACE_MS
+    }
+  };
+}
+
 function isAgentSummaryPolicyEnforcedAt(timestamp: string | undefined): boolean {
   if (!timestamp) {
     return true;
@@ -3240,6 +3407,7 @@ const STRICT_ADVISORY_WARNING_CODES = new Set([
   "snapshot.export_drift",
   "ledger.export_drift",
   "cache.sqlite",
+  "git.tracker_drift",
   "search.index",
   "summary.directive_coverage",
   "summary.legacy_closeout_coverage",

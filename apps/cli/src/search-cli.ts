@@ -1,7 +1,14 @@
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 
-import { BorealError, normalizeSearchQuery, nowIso, readJsonFile, type ContentHash } from "@boreal/core";
+import {
+  BorealError,
+  normalizeSearchQuery,
+  nowIso,
+  readJsonFile,
+  type ContentHash,
+  type EnforcementGap
+} from "@boreal/core";
 import {
   buildSearchIndex,
   isSearchIndexDocument,
@@ -49,11 +56,7 @@ export interface SearchCommandOptions {
 
 export async function writeSearchIndex(context: CliContext): Promise<SearchIndexWriteResult> {
   return withFileLock(searchIndexLockDir(context), normalizeFileLockOptions(), async () => {
-    const snapshot = await readSearchSnapshot(context);
-    const index = buildSearchIndex(snapshot, nowIso());
-    const path = searchIndexPath(context);
-    await writeTextFileAtomic(path, `${JSON.stringify(index)}\n`);
-    return indexWriteResult(path, index);
+    return writeSearchIndexUnlocked(context);
   });
 }
 
@@ -122,7 +125,7 @@ async function loadFreshSearchIndex(
   const inspection = await inspectSearchIndex(context);
   if (!inspection.exists) {
     if (options.rebuildStaleIndex) {
-      await writeSearchIndex(context);
+      await rebuildSearchIndexIfStillNeeded(context);
       return readSearchIndex(inspection.path);
     }
     throw new BorealError("BOREAL_POLICY_VIOLATION", "Search index is missing; run `bwrk search index`", {
@@ -132,7 +135,7 @@ async function loadFreshSearchIndex(
   }
   if (inspection.error) {
     if (options.rebuildStaleIndex) {
-      await writeSearchIndex(context);
+      await rebuildSearchIndexIfStillNeeded(context);
       return readSearchIndex(inspection.path);
     }
     throw new BorealError("BOREAL_POLICY_VIOLATION", "Search index is invalid; run `bwrk search index`", {
@@ -142,7 +145,7 @@ async function loadFreshSearchIndex(
   }
   if (inspection.stale) {
     if (options.rebuildStaleIndex) {
-      await writeSearchIndex(context);
+      await rebuildSearchIndexIfStillNeeded(context);
       return readSearchIndex(inspection.path);
     }
     throw new BorealError("BOREAL_POLICY_VIOLATION", "Search index is stale; run `bwrk search index`", {
@@ -152,6 +155,49 @@ async function loadFreshSearchIndex(
     });
   }
   return readSearchIndex(inspection.path);
+}
+
+async function rebuildSearchIndexIfStillNeeded(context: CliContext): Promise<SearchIndexWriteResult | undefined> {
+  return withFileLock(searchIndexLockDir(context), normalizeFileLockOptions(), async () => {
+    const inspection = await inspectSearchIndex(context);
+    if (inspection.exists && !inspection.stale && !inspection.error) {
+      return undefined;
+    }
+    try {
+      return await writeSearchIndexUnlocked(context);
+    } catch (error) {
+      const gaps = [
+        {
+          code: "doctor.recovery.required",
+          subjectType: "workspace",
+          subjectId: context.workspaceRoot,
+          data: {
+            reason: "automatic search index rebuild failed"
+          }
+        }
+      ] satisfies readonly EnforcementGap[];
+      throw new BorealError(
+        "BOREAL_POLICY_VIOLATION",
+        "Automatic search index rebuild failed; run `bwrk doctor --strict --json`",
+        {
+          doNotRetry: true,
+          repairCommand: "bwrk doctor --strict --json",
+          indexPath: searchIndexPath(context),
+          originalError: error instanceof Error ? error.message : String(error),
+          gaps
+        },
+        gaps
+      );
+    }
+  });
+}
+
+async function writeSearchIndexUnlocked(context: CliContext): Promise<SearchIndexWriteResult> {
+  const snapshot = await readSearchSnapshot(context);
+  const index = buildSearchIndex(snapshot, nowIso());
+  const path = searchIndexPath(context);
+  await writeTextFileAtomic(path, `${JSON.stringify(index)}\n`);
+  return indexWriteResult(path, index);
 }
 
 async function readSearchIndex(path: string): Promise<SearchIndexDocument> {

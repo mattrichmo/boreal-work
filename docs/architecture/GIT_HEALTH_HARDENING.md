@@ -62,3 +62,14 @@ The runtime CLI tests cover:
 - Feature branch behavior after switching off a protected branch.
 
 Future matrix expansion should add child separate memory, sibling memory, and submodule memory fixture repositories around this same classification contract.
+
+## Shared Integration Branches
+
+Protected-branch caveats are not enough for parallel agent work. A branch can be clean and still be unsafe as a mutation workspace when it is acting as the shared merge target for multiple agents.
+
+Use [Lane Worktree Isolation](LANE_WORKTREE_ISOLATION.md) for this mode:
+
+- The shared integration branch remains the serial merge target.
+- Each agent gets a lane branch and separate worktree.
+- `sync.git.findings` can remain non-blocking while `agentDirectives` emits `git.lane-worktree-required` for state-changing work.
+- Integration validation runs after each lane merge, not against another agent's uncommitted checkout state.

@@ -43,6 +43,7 @@ Use this workflow when the user's request requires start, guide, and close a sco
 - Prefer source-backed claims, decisions, and wiki edits.
 - Use `--json` for commands that feed later automation.
 - Stop and ask when candidate records conflict or the workflow would overwrite user-authored truth.
+- For state-changing work on a shared integration branch, create or switch into the assigned lane worktree before claiming, mutating files, mutating Boreal records, or running closeout.
 
 ## Agent Directives
 
@@ -55,11 +56,12 @@ Use this workflow when the user's request requires start, guide, and close a sco
 
 1. Confirm the workspace with `bwrk prime --json` or `bwrk sync status --json`.
 2. Inspect the latest `agentDirectives` bundle, follow required or blocking directives first, and use `workflow_next` or recovery directives to choose the next canonical workflow.
-3. Gather current context using only the allowed commands listed in frontmatter.
-4. Execute the smallest state-changing command set required by the user request.
-5. Attach evidence or source references for any durable claim, decision, or closed work.
-6. Rebuild derived artifacts when the workflow changes memory, context, or search.
-7. Run `bwrk doctor --strict --json` unless the workflow is explicitly read-only and no generated artifacts changed.
+3. If the bundle includes `git.lane-worktree-required`, run or report the supplied worktree setup command and continue the session from that lane worktree.
+4. Gather current context using only the allowed commands listed in frontmatter.
+5. Execute the smallest state-changing command set required by the user request.
+6. Attach evidence or source references for any durable claim, decision, or closed work.
+7. Rebuild derived artifacts when the workflow changes memory, context, or search.
+8. Run `bwrk doctor --strict --json` unless the workflow is explicitly read-only and no generated artifacts changed.
 
 
 
@@ -79,17 +81,20 @@ Use this workflow when the user's request requires start, guide, and close a sco
 - Record command/test/diff evidence before verification or closeout.
 - Keep raw source material immutable; reconcile into wiki, claims, decisions, or work instead of rewriting raw records.
 - For work changes, confirm dependency and readiness state after mutation.
+- For parallel branch work, record the merge target branch, lane branch, worktree path, base SHA, and validation command in session handoff or closeout evidence.
 
 ## Failure And Repair
 
 - If workspace health fails, switch to `workflows/60-health/sync-and-doctor.md`.
 - If generated artifacts are stale, run `bwrk sync refresh --json` after memory, work, context, or search-affecting changes.
 - If locks are stale, inspect before breaking them.
+- If a lane worktree is required but cannot be created or entered, do not mutate the shared integration checkout; hand off the branch/worktree failure with exact command output.
 
 ## Finish Criteria
 
 - The requested outcome is represented in Boreal records or the workflow has returned a clear read-only answer.
 - Any new or updated durable memory has source/evidence support.
+- State-changing parallel work ran in its assigned lane worktree, or the session ended before mutation with the missing-worktree reason reported.
 - `bwrk doctor --strict --json` passes or the remaining diagnostic is explicitly reported.
 
 ## Next Suggested Workflow

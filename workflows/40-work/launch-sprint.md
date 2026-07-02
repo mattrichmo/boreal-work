@@ -43,6 +43,7 @@ Use this workflow when the user's request requires create a scoped sprint with t
 - Prefer source-backed claims, decisions, and wiki edits.
 - Use `--json` for commands that feed later automation.
 - Stop and ask when candidate records conflict or the workflow would overwrite user-authored truth.
+- When launching parallel agent lanes on a shared integration branch, assign a merge target branch, lane branch, and worktree path for each lane before any task is claimed.
 
 ## Agent Directives
 
@@ -75,12 +76,13 @@ Use a sprint record as the container, attach ready leaf work beneath it, and def
 4. Create each sprint task with acceptance criteria:
    `bwrk work create "<task title>" --kind task --priority normal --label <label> --acceptance "<criterion>" --json`
 5. For each task, phase, or milestone that can change repository state, include acceptance language requiring a scoped Git checkpoint or explicit no-commit reason code before closeout.
-6. Attach each task to the sprint and encode blockers:
+6. For parallel lanes, record a lane isolation plan: merge target branch, lane branch, worktree path, base ref or base SHA, assigned agent, and post-merge validation command.
+7. Attach each task to the sprint and encode blockers:
    `bwrk dep add <sprint-id> <task-id> --json`
    `bwrk dep add <blocked-task-id> <blocker-task-id> --json`
-7. Mark only unblocked sprint tasks ready:
+8. Mark only unblocked sprint tasks ready:
    `bwrk work ready <task-id> --json`
-8. Verify launch shape:
+9. Verify launch shape:
    `bwrk dep tree <sprint-id> --json`
    `bwrk doctor --strict --json`
 
@@ -101,6 +103,7 @@ Use a sprint record as the container, attach ready leaf work beneath it, and def
 - Keep raw source material immutable; reconcile into wiki, claims, decisions, or work instead of rewriting raw records.
 - For work changes, confirm dependency and readiness state after mutation.
 - At launch, inspect `sync.git.findings` and separate non-blocking protected-branch/generated-artifact caveats from blocking Git findings before deciding whether the sprint can start.
+- For multi-agent execution, treat the integration branch as a merge target only. Bootstrap, implementation, review, and hardening lanes must work from separate Git worktrees.
 - Plan commit checkpoints as part of the sprint structure. Major refactors should be split into task, phase, or subsystem checkpoints rather than one final sprint-sized commit.
 - Sprint acceptance should require a final closeout summary with per-task outcomes, evidence, verification, commit SHA(s), and reason code(s).
 
@@ -116,6 +119,7 @@ Use a sprint record as the container, attach ready leaf work beneath it, and def
 - The requested outcome is represented in Boreal records or the workflow has returned a clear read-only answer.
 - Any new or updated durable memory has source/evidence support.
 - The sprint plan identifies checkpoint boundaries for task, phase, sprint, or milestone closeout.
+- Parallel sprint plans identify merge target, lane branch, worktree path, assigned agent, and serial merge gate for each lane.
 - `bwrk doctor --strict --json` passes or the remaining diagnostic is explicitly reported.
 
 ## Next Suggested Workflow

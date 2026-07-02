@@ -16,9 +16,11 @@ interface CommandRun {
 const execFileAsync = promisify(execFile);
 const repoRoot = fileURLToPath(new URL("../..", import.meta.url));
 const tempDirs: string[] = [];
+const suiteTempDirs: string[] = [];
+let npmDistDir = join(repoRoot, "apps", "cli", "dist");
 
 beforeAll(async () => {
-  await buildCliDist("npm");
+  npmDistDir = await buildCliDist("npm", "suite");
 });
 
 afterEach(async () => {
@@ -27,13 +29,14 @@ afterEach(async () => {
 
 afterAll(async () => {
   await Promise.all(tempDirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
+  await Promise.all(suiteTempDirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
 });
 
 describe("bundled bwrk dist", () => {
   it("runs from a copied dist directory without a source checkout or node_modules", async () => {
     const bundleRoot = await makeTempDir("boreal-cli-bundle-");
     const workspaceRoot = await makeTempDir("boreal-cli-workspace-");
-    await cp(join(repoRoot, "apps", "cli", "dist"), join(bundleRoot, "dist"), { recursive: true });
+    await cp(npmDistDir, join(bundleRoot, "dist"), { recursive: true });
 
     const bundledBin = join(bundleRoot, "dist", "index.js");
     expect(await isMissing(join(bundleRoot, "node_modules"))).toBe(true);
@@ -93,7 +96,16 @@ describe("bundled bwrk dist", () => {
     const installedBin = await installBundledPackage(workspaceRoot);
     await writeFile(
       join(workspaceRoot, "package.json"),
-      `${JSON.stringify({ name: "boreal-package-bin-fixture", private: true, devDependencies: { "@boreal/cli": "0.1.0" } }, null, 2)}\n`,
+      `${JSON.stringify(
+        {
+          name: "boreal-package-bin-fixture",
+          private: true,
+          packageManager: "pnpm@9.15.1",
+          devDependencies: { "@boreal/cli": "0.1.0" }
+        },
+        null,
+        2
+      )}\n`,
       "utf8"
     );
 
@@ -112,12 +124,12 @@ describe("bundled bwrk dist", () => {
     const machineRoot = await makeTempDir("boreal-cli-machine-");
     const workspaceRoot = await makeTempDir("boreal-cli-pinned-");
 
-    await buildCliDist("brew");
-    await cp(join(repoRoot, "apps", "cli", "dist"), join(machineRoot, "dist"), { recursive: true });
+    const brewDist = await buildCliDist("brew");
+    await cp(brewDist, join(machineRoot, "dist"), { recursive: true });
     const machineBin = join(machineRoot, "dist", "index.js");
 
-    await buildCliDist("npm");
-    const repoBin = await installBundledPackage(workspaceRoot);
+    const npmDist = await buildCliDist("npm");
+    const repoBin = await installBundledPackage(workspaceRoot, npmDist);
     await mkdir(join(workspaceRoot, ".boreal"), { recursive: true });
     await writeFile(
       join(workspaceRoot, ".boreal", "project.json"),
@@ -182,9 +194,9 @@ describe("bundled bwrk dist", () => {
   }, 40_000);
 
   it("reports version-skew warnings and unsupported state-schema errors with channel-correct commands", async () => {
-    await buildCliDist("npm");
+    const npmDist = await buildCliDist("npm");
     const workspaceRoot = await makeTempDir("boreal-cli-compat-");
-    const repoBin = await installBundledPackage(workspaceRoot);
+    const repoBin = await installBundledPackage(workspaceRoot, npmDist);
 
     const init = await runBundle(repoBin, workspaceRoot, ["init", "--json"], { BOREAL_BWRK_DELEGATED: "1" });
     expect(init.exitCode).toBe(0);
@@ -264,7 +276,7 @@ describe("bundled bwrk dist", () => {
   it("records repo-pinned bwrk metadata in imported project registry entries", async () => {
     const workspaceRoot = await makeTempDir("boreal-cli-registry-pin-");
     const registryRoot = await makeTempDir("boreal-cli-registry-root-");
-    const bundledBin = join(repoRoot, "apps", "cli", "dist", "index.js");
+    const bundledBin = join(npmDistDir, "index.js");
     await installBundledPackage(workspaceRoot);
 
     const init = await runBundle(bundledBin, workspaceRoot, ["init", "--setup-memory", "--json"]);
@@ -298,21 +310,25 @@ async function makeTempDir(prefix: string): Promise<string> {
   return dir;
 }
 
-async function buildCliDist(channel: "npm" | "brew"): Promise<void> {
+async function buildCliDist(channel: "npm" | "brew", lifetime: "test" | "suite" = "test"): Promise<string> {
+  const snapshotRoot = await mkdtemp(join(tmpdir(), `boreal-cli-dist-${channel}-`));
+  (lifetime === "suite" ? suiteTempDirs : tempDirs).push(snapshotRoot);
+  const snapshotDist = join(snapshotRoot, "dist");
   await execFileAsync(process.execPath, [join(repoRoot, "tools", "build-cli-dist.mjs")], {
     cwd: repoRoot,
-    env: commandEnv({ BOREAL_INSTALL_CHANNEL: channel }),
+    env: commandEnv({ BOREAL_INSTALL_CHANNEL: channel, BOREAL_BUILD_DIST_SNAPSHOT_DIR: snapshotDist }),
     maxBuffer: 1024 * 1024
   });
+  return snapshotDist;
 }
 
-async function installBundledPackage(workspaceRoot: string): Promise<string> {
+async function installBundledPackage(workspaceRoot: string, distDir = npmDistDir): Promise<string> {
   const packageRoot = join(workspaceRoot, "node_modules", "@boreal", "cli");
   const binDir = join(workspaceRoot, "node_modules", ".bin");
   const binPath = join(binDir, "bwrk");
   await mkdir(binDir, { recursive: true });
   await mkdir(packageRoot, { recursive: true });
-  await cp(join(repoRoot, "apps", "cli", "dist"), join(packageRoot, "dist"), { recursive: true });
+  await cp(distDir, join(packageRoot, "dist"), { recursive: true });
   await writeFile(
     join(packageRoot, "package.json"),
     `${JSON.stringify({ name: "@boreal/cli", version: "0.1.0", type: "module", bin: { bwrk: "./dist/index.js" } }, null, 2)}\n`,

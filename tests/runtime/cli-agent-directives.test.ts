@@ -109,7 +109,7 @@ describe("CLI agent directive envelopes", () => {
       };
     }>((await runCli(rootDir, ["directives", "show", "closeout.summary-required", "--json"])).stdout);
 
-    expect(Object.keys(listed)).toEqual(["ok", "data"]);
+    expect(Object.keys(listed)).toEqual(["ok", "ledgerSeq", "data"]);
     expect(listed.agentDirectives).toBeUndefined();
     expect(listed.data).toEqual(
       expect.objectContaining({
@@ -597,7 +597,7 @@ describe("CLI agent directive envelopes", () => {
       ).stdout
     );
 
-    expect(Object.keys(compiled)).toEqual(["ok", "data"]);
+    expect(Object.keys(compiled)).toEqual(["ok", "ledgerSeq", "data"]);
     expect(compiled.agentDirectives).toBeUndefined();
     expect(compiled.data).toEqual(
       expect.objectContaining({
@@ -724,7 +724,7 @@ describe("CLI agent directive envelopes", () => {
     const bundle = envelope.agentDirectives?.[0];
 
     expect(shown.exitCode).toBe(0);
-    expect(Object.keys(envelope)).toEqual(["ok", "data", "agentDirectives"]);
+    expect(Object.keys(envelope)).toEqual(["ok", "ledgerSeq", "data", "agentDirectives"]);
     expect(envelope.data).toEqual(expect.objectContaining({ id: created.data.meta.id, title: "Directive envelope target" }));
     expect(legacyData).toEqual(envelope.data);
     expect(envelope.data).not.toHaveProperty("agentDirectives");
@@ -829,14 +829,16 @@ describe("CLI agent directive envelopes", () => {
       expect.objectContaining({
         schemaVersion: "boreal.cli.next.v1",
         state: "ready_work",
-        command: "bwrk work claim --agent next-agent --label next-ready --json"
+        command: `bwrk work claim ${ready.data.checked.readyWorkId} --agent next-agent --label next-ready --json`
       })
     );
     expect(readyDirective.registryId).toBe("workflow_next.canonical-next-step");
     expect(ready.data.directive?.registryId).toBe(readyDirective.registryId);
 
     const readyText = await runCli(readyRoot, ["next", "--agent", "next-agent", "--label", "next-ready"]);
-    expect(readyText.stdout.trim().split("\n").at(-1)).toBe("bwrk work claim --agent next-agent --label next-ready --json");
+    expect(readyText.stdout.trim().split("\n").at(-1)).toBe(
+      `bwrk work claim ${ready.data.checked.readyWorkId} --agent next-agent --label next-ready --json`
+    );
 
     const activeRoot = await makeTempWorkspace();
     await runCli(activeRoot, ["init", "--json"]);
@@ -1011,10 +1013,10 @@ describe("CLI agent directive envelopes", () => {
     const createdEnvelope = parseEnvelope<{ readonly meta: { readonly id: string }; readonly title: string }>(created.stdout);
     const legacyData = parseLegacyData<{ readonly meta: { readonly id: string }; readonly title: string }>(created.stdout);
 
-    expect(Object.keys(initialized)).toEqual(["ok", "data"]);
+    expect(Object.keys(initialized)).toEqual(["ok", "ledgerSeq", "data"]);
     expect(initialized.agentDirectives).toBeUndefined();
     expect(initialized.data.initialized).toBe(true);
-    expect(Object.keys(createdEnvelope)).toEqual(["ok", "data"]);
+    expect(Object.keys(createdEnvelope)).toEqual(["ok", "ledgerSeq", "data"]);
     expect(createdEnvelope.agentDirectives).toBeUndefined();
     expect(createdEnvelope.data.title).toBe("Non directive command target");
     expect(legacyData).toEqual(createdEnvelope.data);
@@ -1149,12 +1151,15 @@ describe("CLI agent directive envelopes", () => {
     }));
 
     const doctorResult = await runCli(rootDir, ["doctor", "--strict", "--json"]);
-    const doctorError = parseErrorEnvelope(doctorResult.stderr);
+    const doctorEnvelope = parseEnvelope<{
+      readonly ok: boolean;
+      readonly diagnostics: readonly unknown[];
+    }>(doctorResult.stdout);
 
     expect(doctorResult.exitCode).not.toBe(0);
-    expect(doctorResult.stdout).toBe("");
-    expect(doctorError.ok).toBe(false);
-    expect(JSON.stringify(doctorError)).toContain(".directiveIds[0]");
+    expect(doctorResult.stderr).toBe("");
+    expect(doctorEnvelope.data.ok).toBe(false);
+    expect(JSON.stringify(doctorEnvelope)).toContain(".directiveIds[0]");
 
     const gateResult = await runCli(rootDir, ["gate", "closeout", "--strict", "--json"]);
     const gateError = parseErrorEnvelope(gateResult.stderr);

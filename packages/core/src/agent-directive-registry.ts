@@ -128,6 +128,24 @@ export const AGENT_DIRECTIVE_REGISTRY: AgentDirectiveRegistry = {
       }
     }),
     entry({
+      id: "git.lane-worktree-required" as AgentDirectiveTemplateId,
+      family: "git",
+      severity: "required",
+      audience: "agent",
+      kind: "obligation",
+      title: "Use isolated lane worktree",
+      instruction:
+        "Move state-changing agent work off the shared integration branch and into the named lane worktree before mutating files or records.",
+      triggerCodes: ["git.lane-worktree.required"],
+      nextCommandTemplate: "git worktree add <worktreePath> -b <laneBranch> <baseRef>",
+      blocksCloseout: true,
+      acknowledgement: {
+        requiredBefore: "close",
+        evidenceKind: "command",
+        message: "Parallel or shared-branch work requires an isolated lane worktree before mutation."
+      }
+    }),
+    entry({
       id: "closeout.summary-required" as AgentDirectiveTemplateId,
       family: "closeout",
       severity: "required",

@@ -155,6 +155,9 @@ function agentRuntimeDirectiveGaps(
     ...(context === "closeout" && gitCheckpointRequired(snapshot, dataByRegistryId["git.checkpoint-required"])
       ? [runtimeGap(snapshot, "git.checkpoint.required")]
       : []),
+    ...(dataByRegistryId["git.lane-worktree-required"] !== undefined
+      ? [runtimeGap(snapshot, "git.lane-worktree.required")]
+      : []),
     ...(context === "closeout" && rollupRequired(snapshot, ["phase", "milestone"])
       ? [runtimeGap(snapshot, "phase.close-rollup.required")]
       : []),

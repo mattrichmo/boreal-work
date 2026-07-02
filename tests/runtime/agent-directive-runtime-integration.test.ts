@@ -126,6 +126,50 @@ describe("agent directive runtime compiler integration", () => {
     }
   });
 
+  it("emits a required lane worktree directive when shared-branch isolation data is supplied", () => {
+    const obligations = compileAgentRuntimeDirectiveObligations({
+      context: "work",
+      snapshot: snapshotFixture({
+        commandPath: "agent start",
+        workStatus: "ready"
+      }),
+      dataByRegistryId: {
+        "git.lane-worktree-required": {
+          gitRoot: "/workspace/project",
+          mergeTargetBranch: "integration/current-initiative",
+          laneBranch: "boreal/lane/current-initiative/agent-alpha-bw-work-runtime01",
+          worktreePath: "/workspace/worktrees/project/agent-alpha",
+          baseRef: "origin/integration/current-initiative",
+          currentBranch: "integration/current-initiative",
+          agentId: "agent-alpha",
+          workId: "bw_work_deadbeef0013",
+          reason: "parallel_agents_on_shared_integration_branch",
+          recommendedCommands: [
+            "git fetch origin",
+            "git worktree add /workspace/worktrees/project/agent-alpha -b boreal/lane/current-initiative/agent-alpha-bw-work-runtime01 origin/integration/current-initiative"
+          ]
+        }
+      }
+    });
+
+    expect(obligations.ok).toBe(true);
+    expect(obligations.summary.requiredRegistryIds).toContain("git.lane-worktree-required");
+    expect(obligations.summary.closeoutBlockingRegistryIds).toContain("git.lane-worktree-required");
+    expect(obligations.agentDirectives[0]?.directives).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          registryId: "git.lane-worktree-required",
+          severity: "required",
+          data: expect.objectContaining({
+            mergeTargetBranch: "integration/current-initiative",
+            laneBranch: "boreal/lane/current-initiative/agent-alpha-bw-work-runtime01",
+            worktreePath: "/workspace/worktrees/project/agent-alpha"
+          })
+        })
+      ])
+    );
+  });
+
   it("fails closed for missing subject identifiers and stale registry data", () => {
     const validSnapshot = snapshotFixture({ commandPath: "work show" });
     const missingSubject = compileAgentRuntimeDirectiveObligations({

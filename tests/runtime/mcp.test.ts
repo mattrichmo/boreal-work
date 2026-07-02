@@ -21,6 +21,7 @@ describe("boreal MCP server", () => {
     expect(names).toContain("boreal_directives_compile");
     expect(names).toContain("boreal_directives_explain");
     expect(names).toContain("boreal_work_next");
+    expect(names).toContain("boreal_work_parallel");
     expect(names).toContain("boreal_work_claim");
     expect(names).toContain("boreal_sync_refresh");
     expect(tools.every((tool) => tool.inputSchema.additionalProperties === false)).toBe(true);
@@ -28,20 +29,31 @@ describe("boreal MCP server", () => {
 
   it("runs read-only tools through selected workspace CLI contracts", async () => {
     const runner = fakeRunner({
-      "--workspace /workspace/boreal-work work next --label v1-remainder --limit 100 --json": [
+      "--workspace /workspace/boreal-work work next --label v1-remainder --container bw_work_container --limit 100 --json": [
         {
           id: "bw_work_ready",
           status: "ready",
           priority: "high",
           title: "Ready work",
-          labels: ["v1-remainder"]
+          labels: ["v1-remainder"],
+          containerId: "bw_work_container"
         }
-      ]
+      ],
+      "--workspace /workspace/boreal-work work parallel --label v1-remainder --container bw_work_container --agent-prefix worker --purpose hardening --limit 3 --json": {
+        schemaVersion: "boreal.cli.work.parallel.v1",
+        items: [
+          {
+            id: "bw_work_ready",
+            agentId: "worker-1",
+            agentStartCommand: "bwrk agent start bw_work_ready --agent worker-1 --label v1-remainder --container bw_work_container --purpose hardening --json"
+          }
+        ]
+      }
     });
 
     const result = await callBorealMcpTool(
       "boreal_work_next",
-      { workspaceRoot: WORKSPACE, memoryRoot: MEMORY, label: "v1-remainder", limit: 999 },
+      { workspaceRoot: WORKSPACE, memoryRoot: MEMORY, label: "v1-remainder", containerId: "bw_work_container", limit: 999 },
       { runner }
     );
     const payload = result.structuredContent as {
@@ -52,7 +64,35 @@ describe("boreal MCP server", () => {
     expect(result.isError).toBeUndefined();
     expect(payload.contract.readOnly).toBe(true);
     expect(payload.result[0].id).toBe("bw_work_ready");
-    expect(runner.calls).toEqual(["--workspace /workspace/boreal-work work next --label v1-remainder --limit 100 --json"]);
+    expect(runner.calls).toEqual([
+      "--workspace /workspace/boreal-work work next --label v1-remainder --container bw_work_container --limit 100 --json"
+    ]);
+
+    const parallelResult = await callBorealMcpTool(
+      "boreal_work_parallel",
+      {
+        workspaceRoot: WORKSPACE,
+        memoryRoot: MEMORY,
+        label: "v1-remainder",
+        containerId: "bw_work_container",
+        agentPrefix: "worker",
+        purpose: "hardening",
+        limit: 3
+      },
+      { runner }
+    );
+    const parallelPayload = parallelResult.structuredContent as {
+      readonly contract: { readonly readOnly: boolean };
+      readonly result: { readonly schemaVersion: string; readonly items: readonly [{ readonly id: string; readonly agentId: string }] };
+    };
+
+    expect(parallelResult.isError).toBeUndefined();
+    expect(parallelPayload.contract.readOnly).toBe(true);
+    expect(parallelPayload.result.schemaVersion).toBe("boreal.cli.work.parallel.v1");
+    expect(parallelPayload.result.items[0]).toEqual(expect.objectContaining({ id: "bw_work_ready", agentId: "worker-1" }));
+    expect(runner.calls.at(-1)).toBe(
+      "--workspace /workspace/boreal-work work parallel --label v1-remainder --container bw_work_container --agent-prefix worker --purpose hardening --limit 3 --json"
+    );
   });
 
   it("returns current work directive envelopes with conflict and missing-required summaries", async () => {
@@ -335,7 +375,7 @@ describe("boreal MCP server", () => {
 
   it("requires confirmation for mutating tools and returns operation evidence when confirmed", async () => {
     const runner = fakeRunner({
-      "--workspace /workspace/boreal-work --session mcp-test work claim --agent codex --label v1-remainder --purpose hardening --ttl 2h --json": {
+      "--workspace /workspace/boreal-work --session mcp-test work claim bw_work_ready --agent codex --label v1-remainder --purpose hardening --ttl 2h --json": {
         claimed: true,
         work: { id: "bw_work_ready" }
       },
@@ -367,6 +407,7 @@ describe("boreal MCP server", () => {
         workspaceRoot: WORKSPACE,
         memoryRoot: MEMORY,
         confirmed: true,
+        workId: "bw_work_ready",
         agentId: "codex",
         label: "v1-remainder",
         purpose: "hardening",
@@ -395,6 +436,7 @@ describe("boreal MCP server", () => {
       "mcp-test",
       "work",
       "claim",
+      "bw_work_ready",
       "--agent",
       "codex",
       "--label",

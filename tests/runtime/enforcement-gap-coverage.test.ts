@@ -4,8 +4,8 @@ import {
   BorealError,
   AGENT_DIRECTIVE_SNAPSHOT_CONTEXT_KEYS,
   ENFORCEMENT_GAP_CODES,
-  assembleAgentDirectiveBundle,
   compileCloseoutAgentDirectiveBundle,
+  compileGitAgentDirectiveBundle,
   compileHandoffAgentDirectiveBundle,
   compileRecoveryAgentDirectiveBundle,
   compileSummaryAgentDirectiveBundle,
@@ -173,6 +173,11 @@ function gapCoverageScenarios(): readonly GapCoverageScenario[] {
       code: "git.checkpoint.required",
       name: "directive compiler emits git checkpoint advisory trigger",
       collectGaps: closeoutDirectiveTriggerGaps
+    },
+    {
+      code: "git.lane-worktree.required",
+      name: "directive compiler emits shared-branch lane worktree trigger",
+      collectGaps: laneWorktreeDirectiveTriggerGaps
     },
     {
       code: "doctor.recovery.required",
@@ -460,6 +465,33 @@ async function closeoutDirectiveTriggerGaps(): Promise<readonly EnforcementGap[]
     contractGap("git.checkpoint.required"),
     contractGap("directive.workflow-next.available")
   ];
+}
+
+async function laneWorktreeDirectiveTriggerGaps(): Promise<readonly EnforcementGap[]> {
+  const result = compileGitAgentDirectiveBundle({
+    snapshot: snapshotFixture({
+      commandPath: "agent start",
+      workStatus: "ready"
+    }),
+    dataByRegistryId: {
+      "git.lane-worktree-required": {
+        gitRoot: "/workspace/project",
+        mergeTargetBranch: "integration/current-initiative",
+        laneBranch: "boreal/lane/current-initiative/agent-alpha-bw-work-gapcoverage",
+        worktreePath: "/workspace/worktrees/project/agent-alpha",
+        baseRef: "origin/integration/current-initiative",
+        currentBranch: "integration/current-initiative",
+        agentId: "agent-alpha",
+        workId: "bw_work_gapcoverage0001",
+        reason: "parallel_agents_on_shared_integration_branch",
+        recommendedCommands: [
+          "git fetch origin",
+          "git worktree add /workspace/worktrees/project/agent-alpha -b boreal/lane/current-initiative/agent-alpha-bw-work-gapcoverage origin/integration/current-initiative"
+        ]
+      }
+    }
+  });
+  return directiveTriggerGaps(result);
 }
 
 async function recoveryDirectiveTriggerGaps(): Promise<readonly EnforcementGap[]> {

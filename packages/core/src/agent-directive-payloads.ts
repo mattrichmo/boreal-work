@@ -87,6 +87,20 @@ export interface GitCheckpointRequiredPayload {
   readonly lastCommitSha?: string;
 }
 
+export interface GitLaneWorktreeRequiredPayload {
+  readonly gitRoot: string;
+  readonly mergeTargetBranch: string;
+  readonly laneBranch: string;
+  readonly worktreePath: string;
+  readonly baseRef?: string;
+  readonly baseSha?: string;
+  readonly currentBranch?: string;
+  readonly agentId?: string;
+  readonly workId?: string;
+  readonly reason?: string;
+  readonly recommendedCommands?: PayloadArray;
+}
+
 export interface CloseoutSummaryRequiredPayload {
   readonly subjectId: string;
   readonly summaryId: string;
@@ -222,6 +236,7 @@ export interface AgentDirectivePayloadByRegistryId {
   readonly "review.gate-required": ReviewGateRequiredPayload;
   readonly "audit.gate-required": AuditGateRequiredPayload;
   readonly "git.checkpoint-required": GitCheckpointRequiredPayload;
+  readonly "git.lane-worktree-required": GitLaneWorktreeRequiredPayload;
   readonly "closeout.summary-required": CloseoutSummaryRequiredPayload;
   readonly "doctor.recovery-required": DoctorRecoveryRequiredPayload;
   readonly "memory.reconcile-source": MemoryReconcileSourcePayload;
@@ -297,6 +312,19 @@ export const AGENT_DIRECTIVE_PAYLOAD_FIELDS = {
     noCommitReason: field("noCommitReason", "string", false, "Accepted reason when no commit SHA is produced."),
     protectedBranchCaveat: field("protectedBranchCaveat", "string", false, "Caveat emitted when checkpointing on a protected branch."),
     lastCommitSha: field("lastCommitSha", "string", false, "Last observed commit SHA for the primary Git root.")
+  },
+  "git.lane-worktree-required": {
+    gitRoot: field("gitRoot", "string", true, "Git root whose shared branch must not be mutated directly."),
+    mergeTargetBranch: field("mergeTargetBranch", "string", true, "Shared integration branch that receives reviewed lane merges."),
+    laneBranch: field("laneBranch", "string", true, "Per-agent or per-lane branch used for isolated implementation commits."),
+    worktreePath: field("worktreePath", "string", true, "Filesystem path for the isolated lane worktree."),
+    baseRef: field("baseRef", "string", false, "Ref used as the worktree base, normally the merge target branch."),
+    baseSha: field("baseSha", "string", false, "Observed base commit SHA for the lane branch."),
+    currentBranch: field("currentBranch", "string", false, "Current branch detected in the shared checkout."),
+    agentId: field("agentId", "string", false, "Agent expected to work in the lane worktree."),
+    workId: field("workId", "id", false, "Work item assigned to the lane."),
+    reason: field("reason", "string", false, "Reason the current checkout requires lane isolation."),
+    recommendedCommands: field("recommendedCommands", "array", false, "Safe commands for creating or entering the lane worktree.")
   },
   "closeout.summary-required": {
     subjectId: field("subjectId", "id", true, "Closed or closing subject id."),

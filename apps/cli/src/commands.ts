@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
-import { mkdir } from "node:fs/promises";
+import { mkdir, readdir, rm, stat } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
 
 import {
@@ -30,6 +30,8 @@ import {
   normalizeSearchQuery,
   nowIso,
   randomId,
+  readJsonFile,
+  runBoundedProcess,
   recoveryDirectiveDataByRegistryId,
   runtimeSnapshotSchemaIssues,
   selectAgentDirectiveRegistryEntriesFromGaps,
@@ -266,6 +268,10 @@ const HANDOFF_SEARCH_MIN_CANDIDATES = 24;
 const HANDOFF_CONTEXT_CHUNK_LIMIT_RATIO = 3;
 const DEFAULT_LIST_LIMIT = 100;
 const DEFAULT_OPERATION_LIST_LIMIT = 50;
+const DEFAULT_RESULTS_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
+const RESULTS_PRUNE_GRACE_MS = 5 * 60 * 1000;
+const CIRCUIT_BREAKER_SCHEMA_VERSION = "boreal.cli.circuit-breakers.v1";
+const CIRCUIT_BREAKER_FAILURE_THRESHOLD = 2;
 const DEFAULT_READY_WORK_LIMIT = 10;
 const DEFAULT_DASHBOARD_PROJECT_LIMIT = 100;
 const DEFAULT_DASHBOARD_WORK_LIMIT = 250;
@@ -309,10 +315,34 @@ export interface CommandResult {
 
 interface WorkListRow {
   readonly id: string;
+  readonly kind: WorkKind;
   readonly status: WorkStatus;
   readonly priority: string;
   readonly title: string;
   readonly labels: readonly string[];
+  readonly containerId?: WorkId;
+  readonly agentId?: string;
+  readonly showCommand?: string;
+  readonly agentStartCommand?: string;
+  readonly workClaimCommand?: string;
+}
+
+interface WorkParallelResult {
+  readonly schemaVersion: "boreal.cli.work.parallel.v1";
+  readonly generatedAt: IsoTimestamp;
+  readonly workspaceRoot: string;
+  readonly filters: {
+    readonly labels: readonly string[];
+    readonly containerId?: WorkId;
+    readonly limit: number;
+    readonly purpose?: string;
+    readonly agentMode: "default" | "single" | "round_robin" | "prefix";
+  };
+  readonly items: readonly WorkListRow[];
+  readonly commands: {
+    readonly rerunCommand: string;
+    readonly reservationListCommand: string;
+  };
 }
 
 interface RecentClosedWorkRow {
@@ -548,6 +578,24 @@ interface SyncRefreshResult {
   readonly status: SyncStatusResult;
 }
 
+interface CircuitBreakerEntry {
+  readonly commandPath: "sync refresh" | "vault init";
+  readonly errorSignature: ContentHash;
+  readonly consecutiveFailures: number;
+  readonly firstFailureAt: IsoTimestamp;
+  readonly lastFailureAt: IsoTimestamp;
+  readonly lastError: {
+    readonly code: string;
+    readonly message: string;
+  };
+}
+
+interface CircuitBreakerState {
+  readonly schemaVersion: typeof CIRCUIT_BREAKER_SCHEMA_VERSION;
+  readonly updatedAt: IsoTimestamp;
+  readonly entries: Record<string, CircuitBreakerEntry>;
+}
+
 interface OperationPruneResult {
   readonly deleted: number;
   readonly keptBeforeOperationLog: number;
@@ -555,6 +603,15 @@ interface OperationPruneResult {
   readonly keep?: number;
   readonly before?: IsoTimestamp;
   readonly deletedIds: readonly string[];
+  readonly results: {
+    readonly directory: string;
+    readonly cutoff: IsoTimestamp;
+    readonly graceMs: number;
+    readonly deleted: number;
+    readonly deletedBytes: number;
+    readonly deletedPaths: readonly string[];
+    readonly skippedYoung: number;
+  };
 }
 
 interface GateCloseoutChecks {
@@ -692,6 +749,11 @@ type AgentStartReason = "expired_active_reservations" | "reservation_capacity_re
 interface HandoffBundle {
   readonly work: WorkItemView;
   readonly contextPack: ContextPack;
+  readonly contextFreshness: {
+    readonly contextPackLedgerSeq: number;
+    readonly currentLedgerSeq: number;
+    readonly current: boolean;
+  };
   readonly search: {
     readonly query: string;
     readonly results: readonly SearchResult[];
@@ -735,6 +797,7 @@ interface AgentStartReadyBase {
   readonly status: AgentStatus;
   readonly reservation: AgentReservation;
   readonly releasedReservations: readonly AgentReservation[];
+  readonly postMutationWork?: WorkItemView;
 }
 
 type AgentStartReady = AgentStartReadyBase & HandoffResult;
@@ -747,6 +810,10 @@ interface AgentFinishResult {
   readonly agentId: string;
   readonly work: WorkItemView;
   readonly evidence: EvidenceRecord;
+  readonly evidenceRefs?: readonly EvidenceId[];
+  readonly inlineEvidence?: string;
+  readonly gitEvidence?: EvidenceRecord;
+  readonly gitEvidenceNote?: string;
   readonly verification: VerificationRecord;
   readonly reservation: AgentReservation;
   readonly closedWork?: WorkItem;
@@ -802,8 +869,23 @@ interface AgentProtocolBrief {
   readonly sync: SyncStatusBrief;
   readonly agent: AgentStatus;
   readonly operations: SessionOperationSummary;
+  readonly contextPacks: ContextPackFreshnessSummary;
   readonly commands: AgentProtocolCommands;
   readonly recommendedActions: readonly string[];
+}
+
+interface ContextPackFreshnessSummary {
+  readonly currentLedgerSeq: number;
+  readonly active: readonly ContextPackFreshnessRow[];
+}
+
+interface ContextPackFreshnessRow {
+  readonly workId: WorkId;
+  readonly contextPackId?: ProjectionId;
+  readonly contextPackLedgerSeq?: number;
+  readonly currentLedgerSeq: number;
+  readonly current: boolean;
+  readonly generatedAt?: IsoTimestamp;
 }
 
 interface ReservationLifecycleResult {
@@ -861,7 +943,8 @@ export async function runCommand(args: ParsedArgs, output: CliOutput, cwd: strin
     ? createResultSpoolingOutput(output, {
         workspaceRoot: context.workspaceRoot,
         command: commandPath(definition),
-        maxResultSizeChars: commandBehavior(definition).maxResultSizeChars
+        maxResultSizeChars: commandBehavior(definition).maxResultSizeChars,
+        jsonEnvelopeMetadata: () => ledgerEnvelopeMetadata(context)
       })
     : undefined;
   const commandOutput = spoolingOutput ?? output;
@@ -1018,7 +1101,17 @@ export async function runCommand(args: ParsedArgs, output: CliOutput, cwd: strin
     thrown = error;
   }
   if (operationId && startedAt) {
-    await recordCliOperation(context, operationId, definition, args, startedAt, eventIdsBefore, result, thrown);
+    try {
+      await recordCliOperation(context, operationId, definition, args, startedAt, eventIdsBefore, result, thrown);
+    } catch (operationError) {
+      if (thrown) {
+        throw thrown;
+      }
+      if (!json) {
+        const message = operationError instanceof Error ? operationError.message : String(operationError);
+        output.error(`warning: failed to record operation: ${message}\n`);
+      }
+    }
   }
   if (thrown) {
     throw thrown;
@@ -1120,6 +1213,10 @@ async function operationCommand(
       output.write(formatRecord(operation, json));
       return { exitCode: 0 };
     }
+    case "stats": {
+      output.write(formatRecord(await operationStats(context, args), json));
+      return { exitCode: 0 };
+    }
     case "prune": {
       output.write(formatRecord(await pruneOperations(context, args), json));
       return { exitCode: 0 };
@@ -1159,6 +1256,107 @@ async function resolveOperation(context: CliContext, value: string): Promise<Run
   return candidates[0] as RuntimeOperation;
 }
 
+async function operationStats(context: CliContext, args: ParsedArgs) {
+  const sessionId = optionalSessionId(flagValue(args, "session-id"));
+  const operations = await context.store.read(async (reader) =>
+    (await reader.listOperations()).filter((operation) => !sessionId || operation.sessionId === sessionId)
+  );
+  const total = operations.length;
+  const succeeded = operations.filter((operation) => operation.status === "succeeded").length;
+  const failed = operations.filter((operation) => operation.status === "failed").length;
+  const mutations = operations.filter((operation) => operation.stateChanged || operation.generatedArtifactsChanged).length;
+  const readOnly = total - mutations;
+  const byCommand = [...groupOperations(operations, (operation) => operation.commandPath).entries()]
+    .map(([commandPathValue, items]) => ({
+      commandPath: commandPathValue,
+      total: items.length,
+      succeeded: items.filter((operation) => operation.status === "succeeded").length,
+      failed: items.filter((operation) => operation.status === "failed").length,
+      stateChanged: items.filter((operation) => operation.stateChanged).length,
+      generatedArtifactsChanged: items.filter((operation) => operation.generatedArtifactsChanged).length
+    }))
+    .sort((left, right) => right.total - left.total || left.commandPath.localeCompare(right.commandPath));
+  const failureClusters = [...groupOperations(operations.filter((operation) => operation.status === "failed"), failureClusterKey).entries()]
+    .map(([key, items]) => {
+      const sample = items[0];
+      return {
+        key,
+        commandPath: sample?.commandPath ?? "",
+        errorCode: sample?.errorCode ?? "BOREAL_COMMAND_EXIT_NONZERO",
+        errorMessage: sample?.errorMessage,
+        count: items.length,
+        firstStartedAt: [...items].sort(compareOperationsOldestFirst)[0]?.startedAt,
+        lastFinishedAt: [...items].sort(compareOperationsNewestFirst)[0]?.finishedAt
+      };
+    })
+    .sort((left, right) => right.count - left.count || left.key.localeCompare(right.key));
+  return {
+    schemaVersion: "boreal.cli.operation.stats.v1",
+    generatedAt: nowIso(),
+    sessionId,
+    totals: {
+      total,
+      succeeded,
+      failed,
+      readOnly,
+      mutations,
+      readMutationRatio: mutations === 0 ? null : readOnly / mutations
+    },
+    perCommand: byCommand,
+    failureClusters,
+    longestConsecutiveIdenticalFailureRun: longestConsecutiveFailureRun(operations)
+  };
+}
+
+function groupOperations(
+  operations: readonly RuntimeOperation[],
+  keyFor: (operation: RuntimeOperation) => string
+): ReadonlyMap<string, readonly RuntimeOperation[]> {
+  const groups = new Map<string, RuntimeOperation[]>();
+  for (const operation of operations) {
+    const key = keyFor(operation);
+    groups.set(key, [...(groups.get(key) ?? []), operation]);
+  }
+  return groups;
+}
+
+function failureClusterKey(operation: RuntimeOperation): string {
+  return [operation.commandPath, operation.errorCode ?? "BOREAL_COMMAND_EXIT_NONZERO", operation.errorMessage ?? ""].join("|");
+}
+
+function longestConsecutiveFailureRun(operations: readonly RuntimeOperation[]) {
+  let best: RuntimeOperation[] = [];
+  let current: RuntimeOperation[] = [];
+  let currentKey = "";
+  for (const operation of [...operations].sort(compareOperationsOldestFirst)) {
+    const key = operation.status === "failed" ? failureClusterKey(operation) : "";
+    if (!key) {
+      current = [];
+      currentKey = "";
+      continue;
+    }
+    if (key === currentKey) {
+      current = [...current, operation];
+    } else {
+      current = [operation];
+      currentKey = key;
+    }
+    if (current.length > best.length) {
+      best = current;
+    }
+  }
+  const sample = best[0];
+  return {
+    count: best.length,
+    commandPath: sample?.commandPath,
+    errorCode: sample?.errorCode,
+    errorMessage: sample?.errorMessage,
+    operationIds: best.map((operation) => operation.meta.id),
+    startedAt: sample?.startedAt,
+    finishedAt: best.at(-1)?.finishedAt
+  };
+}
+
 async function pruneOperations(context: CliContext, args: ParsedArgs): Promise<OperationPruneResult> {
   const keep = parseOperationKeep(flagValue(args, "keep"));
   const before = parseOperationBefore(flagValue(args, "before"));
@@ -1173,7 +1371,7 @@ async function pruneOperationsWithPolicy(
   context: CliContext,
   policy: { readonly keep?: number; readonly before?: IsoTimestamp }
 ): Promise<OperationPruneResult> {
-  return context.store.write(async (writer) => {
+  const operationResult = await context.store.write(async (writer) => {
     const operations = [...(await writer.listOperations())].sort(compareOperationsNewestFirst);
     const beforeMs = policy.before ? Date.parse(policy.before) : undefined;
     const eligibleByAge = operations.filter(
@@ -1195,6 +1393,49 @@ async function pruneOperationsWithPolicy(
       deletedIds: deleted.map((operation) => operation.meta.id)
     };
   });
+  return {
+    ...operationResult,
+    results: await pruneResultFiles(context, policy.before)
+  };
+}
+
+async function pruneResultFiles(context: CliContext, before: IsoTimestamp | undefined): Promise<OperationPruneResult["results"]> {
+  const directory = join(context.workspaceRoot, ".boreal", "results");
+  const cutoffMs = before ? Date.parse(before) : Date.now() - DEFAULT_RESULTS_RETENTION_MS;
+  const cutoff = new Date(cutoffMs).toISOString() as IsoTimestamp;
+  if (!existsSync(directory)) {
+    return { directory: ".boreal/results", cutoff, graceMs: RESULTS_PRUNE_GRACE_MS, deleted: 0, deletedBytes: 0, deletedPaths: [], skippedYoung: 0 };
+  }
+  const nowMs = Date.now();
+  const deletedPaths: string[] = [];
+  let deletedBytes = 0;
+  let skippedYoung = 0;
+  for (const entry of await readdir(directory)) {
+    const absolute = join(directory, entry);
+    const info = await stat(absolute);
+    if (!info.isFile()) {
+      continue;
+    }
+    if (nowMs - info.mtimeMs < RESULTS_PRUNE_GRACE_MS) {
+      skippedYoung += 1;
+      continue;
+    }
+    if (info.mtimeMs >= cutoffMs) {
+      continue;
+    }
+    await rm(absolute);
+    deletedPaths.push(join(".boreal", "results", entry));
+    deletedBytes += info.size;
+  }
+  return {
+    directory: ".boreal/results",
+    cutoff,
+    graceMs: RESULTS_PRUNE_GRACE_MS,
+    deleted: deletedPaths.length,
+    deletedBytes,
+    deletedPaths,
+    skippedYoung
+  };
 }
 
 async function repairOperationLinks(context: CliContext, dryRun: boolean): Promise<OperationRepairResult> {
@@ -1350,6 +1591,14 @@ function compareOperationsNewestFirst(left: RuntimeOperation, right: RuntimeOper
   );
 }
 
+function compareOperationsOldestFirst(left: RuntimeOperation, right: RuntimeOperation): number {
+  return (
+    Date.parse(left.startedAt) - Date.parse(right.startedAt) ||
+    Date.parse(left.finishedAt) - Date.parse(right.finishedAt) ||
+    left.meta.id.localeCompare(right.meta.id)
+  );
+}
+
 function optionalSessionId(value: string | undefined): string | undefined {
   return value ? normalizeActorId(value) : undefined;
 }
@@ -1414,6 +1663,22 @@ async function recordCliOperation(
 
 async function listEventIds(context: CliContext): Promise<ReadonlySet<EventId>> {
   return new Set((await context.store.read((reader) => reader.listEvents())).map((event) => event.meta.id));
+}
+
+async function ledgerEnvelopeMetadata(context: CliContext): Promise<{ readonly ledgerSeq: number | null }> {
+  try {
+    return {
+      ledgerSeq: await currentLedgerSeq(context)
+    };
+  } catch {
+    return {
+      ledgerSeq: null
+    };
+  }
+}
+
+async function currentLedgerSeq(context: CliContext): Promise<number> {
+  return (await context.store.read((reader) => reader.listEvents())).length;
 }
 
 function commandErrorExitCode(error: unknown): number {
@@ -3497,7 +3762,8 @@ function formatWorkflowDashboard(
   ].join("\n\n") + "\n";
 }
 
-function formatReadyWorkDashboard(rows: readonly WorkListRow[]): string {
+function formatReadyWorkDashboard(rows: readonly WorkListRow[], containerId?: WorkId): string {
+  const containerArg = containerId ? ` --container ${containerId}` : "";
   return [
     resultSummary({ status: rows.length > 0 ? "success" : "pending", title: "Ready work", detail: `${rows.length} claimable items` }),
     section(
@@ -3506,7 +3772,33 @@ function formatReadyWorkDashboard(rows: readonly WorkListRow[]): string {
         ? rows.map((row) => `${row.priority.padEnd(8)} ${row.id} ${row.title}${row.labels.length > 0 ? ` [${row.labels.join(", ")}]` : ""}`)
         : ["No ready work matches the selected filters."]
     ),
-    section("Actions", rows.length > 0 ? ["bwrk work claim --label <label> --agent <agent-id> --json"] : ["bwrk work list --json"])
+    section("Actions", rows.length > 0 ? [`bwrk work claim${containerArg} --label <label> --agent <agent-id> --json`] : [`bwrk work list${containerArg} --json`])
+  ].join("\n\n") + "\n";
+}
+
+function formatWorkParallelResult(result: WorkParallelResult): string {
+  return [
+    resultSummary({
+      status: result.items.length > 0 ? "success" : "pending",
+      title: "Parallel work queue",
+      detail: `${result.items.length} ready items`
+    }),
+    table(
+      result.items.map((item) => ({
+        id: item.id,
+        kind: item.kind,
+        priority: item.priority,
+        agent: item.agentId ?? "",
+        title: item.title
+      }))
+    ),
+    section(
+      "Start commands",
+      result.items.length > 0
+        ? result.items.map((item) => item.agentStartCommand ?? "")
+        : ["No ready work matches the selected filters."]
+    ),
+    section("Refresh", [result.commands.rerunCommand, result.commands.reservationListCommand])
   ].join("\n\n") + "\n";
 }
 
@@ -3611,7 +3903,7 @@ async function agentCommand(
     case "finish":
       return agentFinishCommand(rest, context, args, output, json);
     case "start":
-      return agentStartCommand(context, args, output, json);
+      return agentStartCommand(rest, context, args, output, json);
     case "status": {
       const agentId = agentIdFromArgs(args, context.actor.id);
       const labels = labelsFromArgs(args);
@@ -3625,14 +3917,20 @@ async function agentCommand(
 }
 
 async function agentStartCommand(
+  rest: readonly string[],
   context: CliContext,
   args: ParsedArgs,
   output: CliOutput,
   json: boolean
 ): Promise<CommandResult> {
+  if (rest.length > 1) {
+    throw new BorealError("BOREAL_INVALID_INPUT", "agent start accepts at most one work reference");
+  }
   const agentId = agentIdFromArgs(args, context.actor.id);
   const labels = labelsFromArgs(args);
+  const containerId = await optionalContainerIdFromArgs(context, args);
   const handoffResultLimit = parseHandoffResultLimit(args);
+  const workId = rest[0] ? await resolveWorkId(context, rest[0], { agentId }) : undefined;
   const status = await buildAgentStatus(context, agentId, labels);
 
   if (status.reservations.expiredActiveCount > 0) {
@@ -3640,7 +3938,13 @@ async function agentStartCommand(
     return { exitCode: 1 };
   }
 
-  const activeReservation = status.reservations.active[0];
+  if (workId) {
+    await assertExactClaimMatchesFilters(context, workId, labels, containerId);
+  }
+
+  const activeReservation = workId
+    ? status.reservations.active.find((reservation) => reservation.workId === workId)
+    : status.reservations.active[0];
   if (activeReservation) {
     const reservation = await requireReservation(context, activeReservation.id);
     const handoff = await buildHandoffResult(context, asWorkId(activeReservation.workId), args, handoffResultLimit);
@@ -3665,12 +3969,22 @@ async function agentStartCommand(
     return { exitCode: 1 };
   }
 
-  const claim = await context.runtime.claimNextWork({
-    agentId,
-    labels,
-    purpose: flagValue(args, "purpose"),
-    expiresAt: parseReservationExpiresAt(args)
-  });
+  const claim = workId
+    ? await claimExactWork(context, {
+        workId,
+        agentId,
+        labels,
+        containerId,
+        purpose: flagValue(args, "purpose"),
+        expiresAt: parseReservationExpiresAt(args)
+      })
+    : await context.runtime.claimNextWork({
+        agentId,
+        labels,
+        containerId,
+        purpose: flagValue(args, "purpose"),
+        expiresAt: parseReservationExpiresAt(args)
+      });
   if (!claim) {
     const currentStatus = await buildAgentStatus(context, agentId, labels);
     output.write(formatRecord(agentStartBlocked(agentId, labels, currentStatus, "no_ready_work"), json));
@@ -3686,6 +4000,7 @@ async function agentStartCommand(
     status: await buildAgentStatus(context, agentId, labels),
     reservation: claim.reservation,
     releasedReservations: claim.releasedReservations,
+    postMutationWork: handoff.work,
     ...handoff
   } satisfies AgentStartResult;
   output.write(await formatRecordWithAgentDirectives(context, args, result, json, {
@@ -3717,20 +4032,22 @@ async function agentFinishCommand(
     throw new BorealError("BOREAL_INVALID_INPUT", "--close requires a passed verification verdict");
   }
 
+  const noop = await idempotentAgentFinishResult(context, workId, agentId, args);
+  if (noop) {
+    output.write(await formatRecordWithAgentDirectives(context, args, noop, json, { subjectWorkId: workId }));
+    return { exitCode: 0 };
+  }
+  await assertWorkNotAlreadyClosedForAgentFinish(context, workId);
+
   const closeReason = close ? requiredFlag(args, "reason") : undefined;
   const closeoutSummaryFactory = closeReason
     ? await agentFinishSummaryFactory(context, args, workId, closeReason)
     : undefined;
-  const finished = await context.runtime.finishReservedWork({
+  const finishEvidence = await finishEvidenceInput(context, args, workId, verdict);
+  const finished = await finishReservedWorkWithCompositeState(context, workId, {
     workId,
     agentId,
-    evidence: {
-      kind: parseEvidenceKind(flagValue(args, "kind")),
-      summary: requiredFlag(args, "summary"),
-      outcome: parseFinishOutcome(flagValue(args, "outcome"), verdict),
-      command: flagValue(args, "command"),
-      uri: flagValue(args, "uri")
-    },
+    evidence: finishEvidence.evidence,
     verification: {
       verdict,
       notes: flagValue(args, "notes")
@@ -3741,6 +4058,7 @@ async function agentFinishCommand(
   const closeoutSummaryArtifact = finished.agentSummary
     ? await writeAgentSummaryArtifact(context, finished.agentSummary)
     : undefined;
+  const gitEvidence = await captureGitFinishEvidence(context, workId);
 
   const result = {
     finished: true,
@@ -3748,6 +4066,10 @@ async function agentFinishCommand(
     agentId,
     work: await context.runtime.getWorkView(workId),
     evidence: finished.evidence,
+    evidenceRefs: finishEvidence.evidenceRefs,
+    inlineEvidence: finishEvidence.inlineEvidence,
+    gitEvidence: gitEvidence.evidence,
+    gitEvidenceNote: gitEvidence.note,
     verification: finished.verification,
     reservation: finished.reservation,
     closedWork: finished.closedWork,
@@ -3756,10 +4078,301 @@ async function agentFinishCommand(
     release: finished.release,
     status: await buildAgentStatus(context, agentId, [])
   } satisfies AgentFinishResult;
-  output.write(await formatRecordWithAgentDirectives(context, args, result, json, {
+  const resultWithPostState = { ...result, postMutationWork: result.work };
+  output.write(await formatRecordWithAgentDirectives(context, args, resultWithPostState, json, {
     subjectWork: finished.closedWork ?? finished.work
   }));
   return { exitCode: 0 };
+}
+
+interface FinishEvidencePayload {
+  readonly evidence: {
+    readonly kind: EvidenceKind;
+    readonly summary: string;
+    readonly outcome: EvidenceOutcome;
+    readonly command?: string;
+    readonly uri?: string;
+  };
+  readonly evidenceRefs: readonly EvidenceId[];
+  readonly inlineEvidence?: string;
+}
+
+async function finishEvidenceInput(
+  context: CliContext,
+  args: ParsedArgs,
+  workId: WorkId,
+  verdict: VerificationVerdict
+): Promise<FinishEvidencePayload> {
+  const evidenceValues = flagValues(args, "evidence");
+  const explicitSummary = flagValue(args, "summary");
+  const referencedEvidenceIds = evidenceValues.filter((value) => value.startsWith("bw_evidence_")).map(asEvidenceId);
+  const inlineEvidence = evidenceValues.find((value) => !value.startsWith("bw_evidence_"));
+  const referencedEvidence = referencedEvidenceIds[0]
+    ? await context.store.read((reader) => reader.getEvidence(referencedEvidenceIds[0] as EvidenceId))
+    : undefined;
+  if (referencedEvidenceIds[0] && !referencedEvidence) {
+    throw new BorealError("BOREAL_NOT_FOUND", "Referenced finish evidence was not found", {
+      workId,
+      evidenceId: referencedEvidenceIds[0]
+    });
+  }
+  if (referencedEvidence && referencedEvidence.subjectId !== workId) {
+    throw new BorealError("BOREAL_INVALID_INPUT", "Referenced finish evidence belongs to a different subject", {
+      workId,
+      evidenceId: referencedEvidence.meta.id,
+      evidenceSubjectId: referencedEvidence.subjectId
+    });
+  }
+  const summary = explicitSummary ?? inlineEvidence ?? referencedEvidence?.summary;
+  if (!summary?.trim()) {
+    throw new BorealError("BOREAL_INVALID_INPUT", "Agent finish requires --summary or --evidence <inline-or-evidence-id>");
+  }
+  return {
+    evidence: {
+      kind: parseEvidenceKind(flagValue(args, "kind") ?? referencedEvidence?.kind),
+      summary,
+      outcome: parseFinishOutcome(flagValue(args, "outcome") ?? referencedEvidence?.outcome, verdict),
+      command: flagValue(args, "command") ?? referencedEvidence?.command,
+      uri: flagValue(args, "uri") ?? referencedEvidence?.uri
+    },
+    evidenceRefs: referencedEvidenceIds,
+    ...(inlineEvidence ? { inlineEvidence } : {})
+  };
+}
+
+async function finishReservedWorkWithCompositeState(
+  context: CliContext,
+  workId: WorkId,
+  input: Parameters<CliContext["runtime"]["finishReservedWork"]>[0]
+): ReturnType<CliContext["runtime"]["finishReservedWork"]> {
+  try {
+    return await context.runtime.finishReservedWork(input);
+  } catch (error) {
+    const resultingWork = await context.runtime.getWorkView(workId).catch(() => undefined);
+    if (error instanceof BorealError) {
+      throw new BorealError(
+        error.code,
+        error.message,
+        {
+          originalDetails: error.details,
+          composite: {
+            command: "agent finish",
+            completed: false,
+            partialMutation: false,
+            resultingWork
+          }
+        },
+        error.gaps
+      );
+    }
+    throw error;
+  }
+}
+
+async function idempotentAgentFinishResult(
+  context: CliContext,
+  workId: WorkId,
+  agentId: string,
+  args: ParsedArgs
+): Promise<Record<string, unknown> | undefined> {
+  const snapshot = await context.store.read(async (reader) => {
+    const work = await reader.getWorkItem(workId);
+    if (!work || work.status !== "closed") {
+      return undefined;
+    }
+    const closed = await closedWorkMetadata(reader, work);
+    const normalizedAgentId = normalizeActorId(agentId);
+    if (closed.closedBy !== normalizedAgentId && String(work.meta.updatedBy.id) !== normalizedAgentId) {
+      return undefined;
+    }
+    const summaries = await reader.listAgentSummariesForSubject(work.meta.id);
+    const latestSummary = [...summaries].sort((left, right) => right.generatedAt.localeCompare(left.generatedAt)).at(0);
+    return {
+      work,
+      closed,
+      latestSummary,
+      evidenceIds: latestSummary?.evidenceIds ?? work.evidenceIds,
+      verificationIds: latestSummary?.verificationIds ?? work.verificationIds
+    };
+  });
+  if (!snapshot) {
+    return undefined;
+  }
+  const [evidence, verifications] = await context.store.read(async (reader) =>
+    Promise.all([
+      Promise.all(snapshot.evidenceIds.map((id) => reader.getEvidence(id))),
+      Promise.all(snapshot.verificationIds.map((id) => reader.getVerification(id)))
+    ])
+  );
+  const workView = await context.runtime.getWorkView(workId);
+  return {
+    finished: true,
+    noop: true,
+    action: "already_closed",
+    agentId: normalizeActorId(agentId),
+    work: workView,
+    postMutationWork: workView,
+    evidence: evidence.filter(isEvidenceRecord),
+    verification: verifications.filter(isVerificationRecord),
+    agentSummary: snapshot.latestSummary,
+    existingSummary: snapshot.latestSummary,
+    closedBy: snapshot.closed.closedBy,
+    closedAt: snapshot.closed.closedAt,
+    closingEventId: snapshot.closed.closingEventId,
+    status: await buildAgentStatus(context, agentId, labelsFromArgs(args))
+  };
+}
+
+async function assertWorkNotAlreadyClosedForAgentFinish(context: CliContext, workId: WorkId): Promise<void> {
+  const closed = await context.store.read(async (reader) => {
+    const work = await reader.getWorkItem(workId);
+    return work?.status === "closed" ? closedWorkMetadata(reader, work) : undefined;
+  });
+  if (!closed) {
+    return;
+  }
+  throw new BorealError("BOREAL_NOT_FOUND", "Work item is already closed", {
+    workId,
+    closedBy: closed.closedBy,
+    closedAt: closed.closedAt,
+    closingEventId: closed.closingEventId
+  });
+}
+
+async function captureGitFinishEvidence(
+  context: CliContext,
+  workId: WorkId
+): Promise<{ readonly evidence?: EvidenceRecord; readonly note?: string }> {
+  const probe = await gitFinishProbe(context.cwd);
+  if (!probe.insideWorktree) {
+    return { note: probe.note ?? "No git worktree detected; finish continued without git evidence." };
+  }
+  if (probe.error) {
+    return { note: `Git probe failed; finish continued without blocking: ${probe.error}` };
+  }
+  const dirtyStatus = probe.dirtyPaths.length > 0 ? "dirty" : "clean";
+  const evidence = await context.runtime.recordEvidence({
+    subjectId: workId,
+    subjectType: "work",
+    kind: "diff",
+    outcome: "observed",
+    summary: `Git finish evidence: HEAD ${probe.headSha ?? "unknown"} on ${probe.branch ?? "detached"} (${dirtyStatus}); root ${probe.root ?? context.cwd}`,
+    command: "git rev-parse HEAD && git branch --show-current && git status --short",
+    uri: probe.root
+  });
+  return { evidence };
+}
+
+async function gitFinishProbe(cwd: string): Promise<{
+  readonly insideWorktree: boolean;
+  readonly root?: string;
+  readonly headSha?: string;
+  readonly branch?: string;
+  readonly dirtyPaths: readonly string[];
+  readonly error?: string;
+  readonly note?: string;
+}> {
+  const root = await runGitForFinish(cwd, ["rev-parse", "--show-toplevel"]);
+  if (root.exitCode !== 0) {
+    return {
+      insideWorktree: false,
+      dirtyPaths: [],
+      note: root.stderr || root.stdout || "git rev-parse reported this directory is outside a worktree"
+    };
+  }
+  const rootDir = root.stdout.trim();
+  const [head, branch, status] = await Promise.all([
+    runGitForFinish(rootDir, ["rev-parse", "HEAD"]),
+    runGitForFinish(rootDir, ["branch", "--show-current"]),
+    runGitForFinish(rootDir, ["status", "--short"])
+  ]);
+  const error = [head, branch, status].find((result) => result.exitCode !== 0);
+  return {
+    insideWorktree: true,
+    root: rootDir,
+    headSha: head.stdout.trim() || undefined,
+    branch: branch.stdout.trim() || undefined,
+    dirtyPaths: status.stdout.split(/\r?\n/u).map((line) => line.trim()).filter(Boolean),
+    error: error ? (error.stderr || error.stdout || `git exited ${error.exitCode}`) : undefined
+  };
+}
+
+async function runGitForFinish(
+  cwd: string,
+  args: readonly string[]
+): Promise<{ readonly exitCode: number | null; readonly stdout: string; readonly stderr: string }> {
+  try {
+    const result = await runBoundedProcess({
+      command: "git",
+      args,
+      cwd,
+      timeoutMs: 5_000,
+      stdoutMaxBytes: 64 * 1024,
+      stderrMaxBytes: 64 * 1024
+    });
+    return { exitCode: result.exitCode, stdout: result.stdout.text, stderr: result.stderr.text };
+  } catch (error) {
+    return {
+      exitCode: 1,
+      stdout: "",
+      stderr: error instanceof Error ? error.message : String(error)
+    };
+  }
+}
+
+async function idempotentWorkReleaseResult(context: CliContext, workId: WorkId): Promise<Record<string, unknown> | undefined> {
+  const snapshot = await context.store.read(async (reader) => {
+    const work = await reader.getWorkItem(workId);
+    if (!work || work.reservationId) {
+      return undefined;
+    }
+    const latestReleased = [...(await reader.listReservationsForWork(workId))]
+      .filter((reservation) => reservation.status === "released")
+      .sort((left, right) => right.meta.updatedAt.localeCompare(left.meta.updatedAt))
+      .at(0);
+    if (!latestReleased || String(latestReleased.agentId) !== String(context.actor.id)) {
+      return undefined;
+    }
+    return { work, reservation: latestReleased };
+  });
+  if (!snapshot) {
+    return undefined;
+  }
+  const postMutationWork = await context.runtime.getWorkView(workId);
+  return {
+    noop: true,
+    work: snapshot.work,
+    reservation: snapshot.reservation,
+    postMutationWork
+  };
+}
+
+async function closedWorkMetadata(
+  reader: BorealReader,
+  work: WorkItem
+): Promise<{ readonly closedBy: string; readonly closedAt: IsoTimestamp; readonly closingEventId?: EventId }> {
+  const events = (await reader.listEvents()).filter(
+    (event) =>
+      event.subjectId === work.meta.id &&
+      (event.type === "work.closed" || event.type === "agent.finished")
+  );
+  const closing = [...events].sort((left, right) => right.meta.createdAt.localeCompare(left.meta.createdAt)).at(0);
+  const payloadAgentId = closing && isRecord(closing.payload) && typeof closing.payload.agentId === "string"
+    ? closing.payload.agentId
+    : undefined;
+  return {
+    closedBy: normalizeActorId(payloadAgentId ?? String(closing?.meta.createdBy.id ?? work.meta.updatedBy.id)),
+    closedAt: closing?.meta.createdAt ?? work.closedAt ?? work.meta.updatedAt,
+    closingEventId: closing?.meta.id
+  };
+}
+
+function isEvidenceRecord(value: EvidenceRecord | undefined): value is EvidenceRecord {
+  return value !== undefined;
+}
+
+function isVerificationRecord(value: VerificationRecord | undefined): value is VerificationRecord {
+  return value !== undefined;
 }
 
 async function doneAliasCommand(
@@ -3811,16 +4424,11 @@ async function finishCurrentReservationCommand(input: {
   const closeoutSummaryFactory = closeReason
     ? await agentFinishSummaryFactory(input.context, input.args, workId, closeReason)
     : undefined;
-  const finished = await input.context.runtime.finishReservedWork({
+  const finishEvidence = await finishEvidenceInput(input.context, input.args, workId, input.verdict);
+  const finished = await finishReservedWorkWithCompositeState(input.context, workId, {
     workId,
     agentId,
-    evidence: {
-      kind: parseEvidenceKind(flagValue(input.args, "kind")),
-      summary: requiredFlag(input.args, "summary"),
-      outcome: parseFinishOutcome(flagValue(input.args, "outcome"), input.verdict),
-      command: flagValue(input.args, "command"),
-      uri: flagValue(input.args, "uri")
-    },
+    evidence: finishEvidence.evidence,
     verification: {
       verdict: input.verdict,
       notes: flagValue(input.args, "notes")
@@ -3831,6 +4439,7 @@ async function finishCurrentReservationCommand(input: {
   const closeoutSummaryArtifact = finished.agentSummary
     ? await writeAgentSummaryArtifact(input.context, finished.agentSummary)
     : undefined;
+  const gitEvidence = await captureGitFinishEvidence(input.context, workId);
 
   const result = {
     finished: true,
@@ -3838,6 +4447,10 @@ async function finishCurrentReservationCommand(input: {
     agentId,
     work: await input.context.runtime.getWorkView(workId),
     evidence: finished.evidence,
+    evidenceRefs: finishEvidence.evidenceRefs,
+    inlineEvidence: finishEvidence.inlineEvidence,
+    gitEvidence: gitEvidence.evidence,
+    gitEvidenceNote: gitEvidence.note,
     verification: finished.verification,
     reservation: finished.reservation,
     closedWork: finished.closedWork,
@@ -3846,7 +4459,8 @@ async function finishCurrentReservationCommand(input: {
     release: finished.release,
     status: await buildAgentStatus(input.context, agentId, [])
   } satisfies AgentFinishResult;
-  input.output.write(await formatRecordWithAgentDirectives(input.context, input.args, result, input.json, {
+  const resultWithPostState = { ...result, postMutationWork: result.work };
+  input.output.write(await formatRecordWithAgentDirectives(input.context, input.args, resultWithPostState, input.json, {
     subjectWork: finished.closedWork ?? finished.work
   }));
   return { exitCode: 0 };
@@ -4181,6 +4795,18 @@ function heartbeatScopeIds(containerId: WorkId, workItems: readonly WorkItem[], 
   };
   visit(containerId);
   return ids;
+}
+
+async function optionalContainerIdFromArgs(context: CliContext, args: ParsedArgs): Promise<WorkId | undefined> {
+  const container = flagValue(args, "container");
+  return container ? resolveWorkId(context, container) : undefined;
+}
+
+async function containerScopeIds(context: CliContext, containerId: WorkId): Promise<ReadonlySet<WorkId>> {
+  return context.store.read(async (reader) => {
+    const [workItems, graphEdges] = await Promise.all([reader.listWorkItems(), reader.listGraphEdges()]);
+    return heartbeatScopeIds(containerId, workItems, graphEdges);
+  });
 }
 
 function workClosedEventId(events: readonly RuntimeEvent[], workId: WorkId): EventId | undefined {
@@ -4537,6 +5163,242 @@ function recentClosedCommandForFilters(input: {
   return args.map(shellArg).join(" ");
 }
 
+function readyWorkCommandRow(
+  view: WorkItemView,
+  input: {
+    readonly containerId?: WorkId;
+    readonly labels: readonly string[];
+    readonly agentId: string;
+    readonly purpose?: string;
+    readonly sessionId?: string;
+  }
+): WorkListRow {
+  const workId = asWorkId(view.id);
+  const row = workViewListRow(view, input.containerId);
+  return {
+    ...row,
+    agentId: input.agentId,
+    showCommand: bwrkCommand(["work", "show", workId, ...sessionArgs(input.sessionId), "--json"]),
+    agentStartCommand: bwrkCommand([
+      "agent",
+      "start",
+      workId,
+      ...sessionArgs(input.sessionId),
+      "--agent",
+      input.agentId,
+      ...repeatedFlagArgs("label", input.labels),
+      ...namedFlagArgs("container", input.containerId),
+      ...namedFlagArgs("purpose", input.purpose),
+      "--json"
+    ]),
+    workClaimCommand: bwrkCommand([
+      "work",
+      "claim",
+      workId,
+      ...sessionArgs(input.sessionId),
+      "--agent",
+      input.agentId,
+      ...repeatedFlagArgs("label", input.labels),
+      ...namedFlagArgs("container", input.containerId),
+      ...namedFlagArgs("purpose", input.purpose),
+      "--json"
+    ])
+  };
+}
+
+function buildWorkParallelResult(input: {
+  readonly context: CliContext;
+  readonly args: ParsedArgs;
+  readonly labels: readonly string[];
+  readonly containerId?: WorkId;
+  readonly limit: number;
+  readonly views: readonly WorkItemView[];
+}): WorkParallelResult {
+  const purpose = flagValue(input.args, "purpose");
+  const explicitSessionId = flagValue(input.args, "session");
+  const agentSelection = workParallelAgentSelection(input.context, input.args);
+  const items = input.views.map((view, index) =>
+    readyWorkCommandRow(view, {
+      containerId: input.containerId,
+      labels: input.labels,
+      agentId: agentSelection.agentIdForIndex(index),
+      purpose,
+      sessionId: explicitSessionId
+    })
+  );
+  return {
+    schemaVersion: "boreal.cli.work.parallel.v1",
+    generatedAt: nowIso(),
+    workspaceRoot: input.context.workspaceRoot,
+    filters: {
+      labels: input.labels,
+      ...(input.containerId ? { containerId: input.containerId } : {}),
+      limit: input.limit,
+      ...(purpose ? { purpose } : {}),
+      agentMode: agentSelection.mode
+    },
+    items,
+    commands: {
+      rerunCommand: workParallelCommandForFilters({
+        labels: input.labels,
+        containerId: input.containerId,
+        limit: input.limit,
+        purpose,
+        sessionId: explicitSessionId,
+        agentValues: agentSelection.agentValues,
+        agentPrefix: agentSelection.agentPrefix
+      }),
+      reservationListCommand: bwrkCommand([
+        "reservation",
+        "list",
+        ...sessionArgs(explicitSessionId),
+        "--status",
+        "active",
+        "--json"
+      ])
+    }
+  };
+}
+
+function workParallelAgentSelection(
+  context: CliContext,
+  args: ParsedArgs
+): {
+  readonly mode: WorkParallelResult["filters"]["agentMode"];
+  readonly agentValues: readonly string[];
+  readonly agentPrefix?: string;
+  agentIdForIndex(index: number): string;
+} {
+  const agentValues = flagValues(args, "agent").map((value) => normalizeActorId(value));
+  const agentPrefix = flagValue(args, "agent-prefix");
+  if (agentValues.length > 0 && agentPrefix) {
+    throw new BorealError("BOREAL_INVALID_INPUT", "Use either --agent or --agent-prefix, not both");
+  }
+  if (agentPrefix) {
+    return {
+      mode: "prefix",
+      agentValues: [],
+      agentPrefix,
+      agentIdForIndex(index) {
+        return normalizeActorId(`${agentPrefix}-${index + 1}`);
+      }
+    };
+  }
+  if (agentValues.length > 1) {
+    return {
+      mode: "round_robin",
+      agentValues,
+      agentIdForIndex(index) {
+        return agentValues[index % agentValues.length] ?? normalizeActorId(String(context.actor.id));
+      }
+    };
+  }
+  if (agentValues.length === 1) {
+    const agentId = agentValues[0] ?? normalizeActorId(String(context.actor.id));
+    return {
+      mode: "single",
+      agentValues,
+      agentIdForIndex() {
+        return agentId;
+      }
+    };
+  }
+  const defaultAgentId = normalizeActorId(String(context.actor.id));
+  return {
+    mode: "default",
+    agentValues: [defaultAgentId],
+    agentIdForIndex() {
+      return defaultAgentId;
+    }
+  };
+}
+
+function workParallelCommandForFilters(input: {
+  readonly labels: readonly string[];
+  readonly containerId?: WorkId;
+  readonly limit: number;
+  readonly purpose?: string;
+  readonly sessionId?: string;
+  readonly agentValues: readonly string[];
+  readonly agentPrefix?: string;
+}): string {
+  return bwrkCommand([
+    "work",
+    "parallel",
+    ...sessionArgs(input.sessionId),
+    ...repeatedFlagArgs("label", input.labels),
+    ...namedFlagArgs("container", input.containerId),
+    "--limit",
+    String(input.limit),
+    ...repeatedFlagArgs("agent", input.agentValues),
+    ...namedFlagArgs("agent-prefix", input.agentPrefix),
+    ...namedFlagArgs("purpose", input.purpose),
+    "--json"
+  ]);
+}
+
+function bwrkCommand(args: readonly string[]): string {
+  return ["bwrk", ...args].map(shellArg).join(" ");
+}
+
+function sessionArgs(sessionId: string | undefined): readonly string[] {
+  return sessionId ? ["--session", sessionId] : [];
+}
+
+function namedFlagArgs(name: string, value: string | undefined): readonly string[] {
+  return value ? [`--${name}`, value] : [];
+}
+
+function repeatedFlagArgs(name: string, values: readonly string[]): readonly string[] {
+  return values.flatMap((value) => [`--${name}`, value]);
+}
+
+async function claimExactWork(
+  context: CliContext,
+  input: {
+    readonly workId: WorkId;
+    readonly agentId: string;
+    readonly labels: readonly string[];
+    readonly containerId?: WorkId;
+    readonly purpose?: string;
+    readonly expiresAt?: IsoTimestamp;
+  }
+): Promise<Awaited<ReturnType<CliContext["runtime"]["claimWork"]>>> {
+  await assertExactClaimMatchesFilters(context, input.workId, input.labels, input.containerId);
+  return context.runtime.claimWork({
+    workId: input.workId,
+    agentId: input.agentId,
+    purpose: input.purpose,
+    expiresAt: input.expiresAt
+  });
+}
+
+async function assertExactClaimMatchesFilters(
+  context: CliContext,
+  workId: WorkId,
+  labels: readonly string[],
+  containerId: WorkId | undefined
+): Promise<void> {
+  const view = await context.runtime.getWorkView(workId);
+  const missingLabels = labels.filter((label) => !view.labels.includes(label));
+  if (missingLabels.length > 0) {
+    throw new BorealError("BOREAL_INVALID_INPUT", "Exact work claim does not match --label filters", {
+      workId,
+      missingLabels
+    });
+  }
+  if (!containerId) {
+    return;
+  }
+  const scopedIds = await containerScopeIds(context, containerId);
+  if (!scopedIds.has(workId)) {
+    throw new BorealError("BOREAL_INVALID_INPUT", "Exact work claim is outside the container scope", {
+      workId,
+      containerId
+    });
+  }
+}
+
 function parseHeartbeatIsoTimestamp(value: string, label: string): IsoTimestamp {
   if (!isIsoTimestamp(value)) {
     throw new BorealError("BOREAL_INVALID_INPUT", `${label} must be an ISO timestamp`, { value });
@@ -4713,13 +5575,16 @@ async function workCommand(
       const status = listStatus(args);
       const labels = labelsFromArgs(args);
       const limit = parseLimit(flagValue(args, "limit")) ?? DEFAULT_LIST_LIMIT;
-      const items = await context.store.read((reader) =>
-        reader.listWorkItems({
-          status,
-          labels: labels.length > 0 ? labels : undefined
-        })
-      );
-      const rows = items.slice(0, limit).map(workListRow);
+      const containerId = await optionalContainerIdFromArgs(context, args);
+      const items = await context.store.read(async (reader) => {
+        const [workItems, graphEdges] = await Promise.all([reader.listWorkItems(), reader.listGraphEdges()]);
+        const scopedIds = containerId ? heartbeatScopeIds(containerId, workItems, graphEdges) : undefined;
+        return workItems
+          .filter((work) => !status || work.status === status)
+          .filter((work) => labels.every((label) => work.labels.includes(label)))
+          .filter((work) => !scopedIds || scopedIds.has(work.meta.id));
+      });
+      const rows = items.slice(0, limit).map((work) => workListRow(work, containerId));
       output.write(json ? formatRecord(rows, true) : table(rows.map(textWorkListRow)));
       return { exitCode: 0 };
     }
@@ -4736,17 +5601,45 @@ async function workCommand(
     case "next": {
       const labels = labelsFromArgs(args);
       const limit = parseLimit(flagValue(args, "limit")) ?? DEFAULT_READY_WORK_LIMIT;
+      const containerId = await optionalContainerIdFromArgs(context, args);
+      const scopedIds = containerId ? await containerScopeIds(context, containerId) : undefined;
+      const agentId = agentIdFromArgs(args, context.actor.id);
+      const purpose = flagValue(args, "purpose");
+      const explicitSessionId = flagValue(args, "session");
       const views = await context.runtime.listReadyWork();
       const rows = views
         .filter((view) => labels.every((label) => view.labels.includes(label)))
+        .filter((view) => !scopedIds || scopedIds.has(view.id as WorkId))
         .sort(compareWorkViews)
         .slice(0, limit)
-        .map(workViewListRow);
-      output.write(json ? formatRecord(rows, true) : dashboardView(args) ? formatReadyWorkDashboard(rows) : table(rows.map(textWorkListRow)));
+        .map((view) => readyWorkCommandRow(view, { containerId, labels, agentId, purpose, sessionId: explicitSessionId }));
+      output.write(json ? formatRecord(rows, true) : dashboardView(args) ? formatReadyWorkDashboard(rows, containerId) : table(rows.map(textWorkListRow)));
+      return { exitCode: 0 };
+    }
+    case "parallel": {
+      const labels = labelsFromArgs(args);
+      const limit = parseLimit(flagValue(args, "limit")) ?? DEFAULT_READY_WORK_LIMIT;
+      const containerId = await optionalContainerIdFromArgs(context, args);
+      const scopedIds = containerId ? await containerScopeIds(context, containerId) : undefined;
+      const views = (await context.runtime.listReadyWork())
+        .filter((view) => labels.every((label) => view.labels.includes(label)))
+        .filter((view) => !scopedIds || scopedIds.has(view.id as WorkId))
+        .sort(compareWorkViews)
+        .slice(0, limit);
+      const result = buildWorkParallelResult({ context, args, labels, containerId, limit, views });
+      output.write(json ? formatRecord(result, true) : formatWorkParallelResult(result));
       return { exitCode: 0 };
     }
     case "show": {
       const workId = await resolveWorkId(context, requiredPositional(rest, 0, "work reference"));
+      const since = parseNonNegativeInteger(flagValue(args, "since"), "--since");
+      if (since !== undefined) {
+        const freshness = await workFreshnessSince(context, workId, since);
+        if (freshness.unchanged) {
+          output.write(formatRecord({ id: workId, unchanged: true, seq: freshness.ledgerSeq, ledgerSeq: freshness.ledgerSeq }, json));
+          return { exitCode: 0 };
+        }
+      }
       const view = await context.runtime.getWorkView(workId);
       const viewWithGaps = json ? { ...view, gaps: (await closeoutGateStatusForWork(context, workId)).gaps } : view;
       output.write(await formatRecordWithAgentDirectives(context, args, viewWithGaps, json, { subjectWorkId: workId }));
@@ -4768,19 +5661,39 @@ async function workCommand(
         force: hasFlag(args, "force"),
         forceReason: flagValue(args, "reason")
       });
-      output.write(formatRecord(work, json));
+      const reservation = work.reservationId ? await requireReservation(context, work.reservationId) : undefined;
+      const postMutationWork = await context.runtime.getWorkView(work.meta.id);
+      output.write(formatRecord(json && reservation ? { ...work, reservation, releasedReservations: [], postMutationWork } : work, json));
       return { exitCode: 0 };
     }
     case "claim": {
+      if (rest.length > 1) {
+        throw new BorealError("BOREAL_INVALID_INPUT", "work claim accepts at most one work reference");
+      }
+      if (hasFlag(args, "start")) {
+        return agentStartCommand(rest, context, args, output, json);
+      }
       const agentId = agentIdFromArgs(args, context.actor.id);
       const labels = labelsFromArgs(args);
+      const containerId = await optionalContainerIdFromArgs(context, args);
+      const workId = rest[0] ? await resolveWorkId(context, rest[0], { agentId }) : undefined;
       const handoffResultLimit = parseHandoffResultLimit(args);
-      const claim = await context.runtime.claimNextWork({
-        agentId,
-        labels,
-        purpose: flagValue(args, "purpose"),
-        expiresAt: parseReservationExpiresAt(args)
-      });
+      const claim = workId
+        ? await claimExactWork(context, {
+            workId,
+            agentId,
+            labels,
+            containerId,
+            purpose: flagValue(args, "purpose"),
+            expiresAt: parseReservationExpiresAt(args)
+          })
+        : await context.runtime.claimNextWork({
+            agentId,
+            labels,
+            containerId,
+            purpose: flagValue(args, "purpose"),
+            expiresAt: parseReservationExpiresAt(args)
+          });
       if (!claim) {
         output.write(
           formatRecord(
@@ -4788,7 +5701,8 @@ async function workCommand(
               claimed: false,
               reason: "no_ready_work",
               agentId,
-              labels
+              labels,
+              containerId
             },
             json
           )
@@ -4802,16 +5716,24 @@ async function workCommand(
         work: handoff.work,
         reservation: claim.reservation,
         releasedReservations: claim.releasedReservations,
+        postMutationWork: handoff.work,
         ...handoff
       };
       output.write(await formatRecordWithAgentDirectives(context, args, result, json, { subjectWork: claim.work }));
       return { exitCode: 0 };
     }
     case "release": {
+      const workId = await resolveWorkId(context, requiredPositional(rest, 0, "work reference"));
+      const noop = await idempotentWorkReleaseResult(context, workId);
+      if (noop) {
+        output.write(formatRecord(noop, json));
+        return { exitCode: 0 };
+      }
       const result = await context.runtime.releaseWorkReservation(
-        await resolveWorkId(context, requiredPositional(rest, 0, "work reference"))
+        workId
       );
-      output.write(formatRecord(result, json));
+      const postMutationWork = await context.runtime.getWorkView(result.work.meta.id);
+      output.write(formatRecord({ ...result, postMutationWork }, json));
       return { exitCode: 0 };
     }
     case "renew": {
@@ -4819,7 +5741,8 @@ async function workCommand(
         workId: await resolveWorkId(context, requiredPositional(rest, 0, "work reference")),
         expiresAt: requiredReservationExpiresAt(args)
       });
-      output.write(formatRecord(result, json));
+      const postMutationWork = await context.runtime.getWorkView(result.work.meta.id);
+      output.write(formatRecord({ ...result, postMutationWork }, json));
       return { exitCode: 0 };
     }
     case "verify": {
@@ -4839,6 +5762,15 @@ async function workCommand(
       const workId = await resolveWorkId(context, requiredPositional(rest, 0, "work reference"));
       const reason = requiredFlag(args, "reason");
       const work = await context.store.read((reader) => requireCliWork(reader, workId));
+      const activeReservations = await context.store.read((reader) => activeNonExpiredReservationsForWork(reader, workId, nowIso()));
+      if (activeReservations.length > 0) {
+        throw new BorealError("BOREAL_POLICY_VIOLATION", "Reserved work cannot be closed directly; use `bwrk agent finish`", {
+          workId,
+          reservationIds: activeReservations.map((reservation) => reservation.meta.id),
+          remedialCommand: `bwrk agent finish ${workId} --agent ${activeReservations[0]?.agentId ?? context.actor.id} --summary '<evidence summary>' --close --reason ${shellArg(reason)} --json`
+        });
+      }
+      assertLeafEvidenceGateForClose(work, args);
       const closeoutSummary = await ensureAgentSummaryForClose(context, args, work, reason);
       const closed = await context.runtime.closeWork({
         workId,
@@ -4854,6 +5786,7 @@ async function workCommand(
         generatedAt: nowIso(),
         workspaceRoot: context.workspaceRoot,
         work: closed,
+        postMutationWork: await context.runtime.getWorkView(closed.meta.id),
         agentSummaries: closeoutSummary.summaries,
         createdAgentSummary: closeoutSummary.created?.summary,
         createdAgentSummaryArtifact: createdArtifact
@@ -4909,7 +5842,7 @@ async function workCommand(
     }
     case "reopen": {
       const result = await reopenWorkCommand(context, await resolveWorkId(context, requiredPositional(rest, 0, "work reference")), args);
-      output.write(formatRecord(result, json));
+      output.write(formatRecord({ ...result, postMutationWork: await context.runtime.getWorkView(result.work.meta.id) }, json));
       return { exitCode: 0 };
     }
     case "split": {
@@ -5032,6 +5965,66 @@ async function editWorkCommand(context: CliContext, workId: WorkId, args: Parsed
   });
   await context.runtime.refreshWorkContext(workId);
   return result;
+}
+
+function assertLeafEvidenceGateForClose(work: WorkItem, args: ParsedArgs): void {
+  if ((work.kind !== "task" && work.kind !== "issue") || work.evidenceIds.length > 0 || hasFlag(args, "force-summary")) {
+    return;
+  }
+  const remediationCommand =
+    `bwrk evidence add ${work.meta.id} --summary '<evidence summary>' --kind command --outcome passed ` +
+    "--command '<validation command>' --json";
+  const gaps = [
+    {
+      code: "gate.verification.unsatisfied",
+      subjectType: "work",
+      subjectId: work.meta.id,
+      data: {
+        requiredEvidenceKinds: ["command", "test", "diff", "review", "artifact", "note"],
+        minEvidenceCount: 1,
+        reason: "leaf work cannot close with zero evidence records"
+      }
+    }
+  ] satisfies readonly EnforcementGap[];
+  throw new BorealError(
+    "BOREAL_POLICY_VIOLATION",
+    "Leaf work cannot close with zero evidence records",
+    {
+      workId: work.meta.id,
+      gateCode: "gate.verification.unsatisfied",
+      remedialCommand: remediationCommand,
+      forcePath: "Use --force-summary with --force-reason and --force-comment only for an audited bypass.",
+      gaps
+    },
+    gaps
+  );
+}
+
+async function workFreshnessSince(
+  context: CliContext,
+  workId: WorkId,
+  since: number
+): Promise<{ readonly unchanged: boolean; readonly ledgerSeq: number; readonly latestTouchSeq: number }> {
+  const events = await context.store.read((reader) => reader.listEvents());
+  const latestTouchSeq = events.reduce((latest, event, index) => {
+    return eventTouchesWork(event, workId) ? Math.max(latest, index + 1) : latest;
+  }, 0);
+  return {
+    unchanged: latestTouchSeq <= since,
+    ledgerSeq: events.length,
+    latestTouchSeq
+  };
+}
+
+function eventTouchesWork(event: RuntimeEvent, workId: WorkId): boolean {
+  if (event.subjectId === workId) {
+    return true;
+  }
+  const payload = event.payload;
+  if (!isRecord(payload)) {
+    return false;
+  }
+  return payload.subjectId === workId || payload.workId === workId || payload.blockingWorkId === workId;
 }
 
 async function cancelWorkCommand(
@@ -7018,6 +8011,164 @@ async function searchCommand(
   }
 }
 
+async function assertCircuitBreakerAllows(
+  context: CliContext,
+  command: CircuitBreakerEntry["commandPath"]
+): Promise<void> {
+  const state = await readCircuitBreakerState(context);
+  const entry = state.entries[command];
+  if (!entry || entry.consecutiveFailures < CIRCUIT_BREAKER_FAILURE_THRESHOLD) {
+    return;
+  }
+  const gaps = [
+    {
+      code: "doctor.recovery.required",
+      subjectType: "command",
+      subjectId: command,
+      data: {
+        reason: `circuit breaker open after ${entry.consecutiveFailures} identical failures`
+      }
+    }
+  ] satisfies readonly EnforcementGap[];
+  throw new BorealError(
+    "BOREAL_POLICY_VIOLATION",
+    `${command} is circuit-broken after repeated identical failures; run \`bwrk doctor --strict --json\``,
+    {
+      doNotRetry: true,
+      commandPath: command,
+      consecutiveFailures: entry.consecutiveFailures,
+      firstFailureAt: entry.firstFailureAt,
+      lastFailureAt: entry.lastFailureAt,
+      lastError: entry.lastError,
+      repairCommand: "bwrk doctor --strict --json",
+      resetCommands: ["bwrk doctor --fix --json", `bwrk ${command} --json`],
+      gaps
+    },
+    gaps
+  );
+}
+
+async function recordCircuitBreakerSuccess(
+  context: CliContext,
+  command: CircuitBreakerEntry["commandPath"]
+): Promise<void> {
+  const state = await readCircuitBreakerState(context);
+  if (!state.entries[command]) {
+    return;
+  }
+  const entries = { ...state.entries };
+  delete entries[command];
+  await writeCircuitBreakerState(context, entries);
+}
+
+async function recordCircuitBreakerFailure(
+  context: CliContext,
+  command: CircuitBreakerEntry["commandPath"],
+  error: unknown
+): Promise<void> {
+  const state = await readCircuitBreakerState(context);
+  const current = nowIso();
+  const signature = circuitBreakerSignature(error);
+  const existing = state.entries[command];
+  const consecutiveFailures = existing?.errorSignature === signature ? existing.consecutiveFailures + 1 : 1;
+  await writeCircuitBreakerState(context, {
+    ...state.entries,
+    [command]: {
+      commandPath: command,
+      errorSignature: signature,
+      consecutiveFailures,
+      firstFailureAt: existing?.errorSignature === signature ? existing.firstFailureAt : current,
+      lastFailureAt: current,
+      lastError: circuitBreakerError(error)
+    }
+  });
+}
+
+async function clearCircuitBreakers(context: CliContext): Promise<void> {
+  await writeCircuitBreakerState(context, {});
+}
+
+function circuitBreakerPath(context: CliContext): string {
+  return join(context.paths.runtimeDir, "circuit-breakers.json");
+}
+
+async function readCircuitBreakerState(context: CliContext): Promise<CircuitBreakerState> {
+  const path = circuitBreakerPath(context);
+  if (!existsSync(path)) {
+    return emptyCircuitBreakerState();
+  }
+  try {
+    const parsed = await readJsonFile(path, {
+      schemaName: CIRCUIT_BREAKER_SCHEMA_VERSION,
+      expectedObject: true,
+      maxBytes: 256 * 1024
+    });
+    if (!isCircuitBreakerState(parsed)) {
+      return emptyCircuitBreakerState();
+    }
+    return parsed;
+  } catch {
+    return emptyCircuitBreakerState();
+  }
+}
+
+async function writeCircuitBreakerState(
+  context: CliContext,
+  entries: Record<string, CircuitBreakerEntry>
+): Promise<void> {
+  await mkdir(context.paths.runtimeDir, { recursive: true });
+  await writeTextFileAtomic(circuitBreakerPath(context), `${JSON.stringify({
+    schemaVersion: CIRCUIT_BREAKER_SCHEMA_VERSION,
+    updatedAt: nowIso(),
+    entries
+  } satisfies CircuitBreakerState)}\n`);
+}
+
+function emptyCircuitBreakerState(): CircuitBreakerState {
+  return {
+    schemaVersion: CIRCUIT_BREAKER_SCHEMA_VERSION,
+    updatedAt: nowIso(),
+    entries: {}
+  };
+}
+
+function isCircuitBreakerState(value: unknown): value is CircuitBreakerState {
+  if (!isRecord(value) || value.schemaVersion !== CIRCUIT_BREAKER_SCHEMA_VERSION || !isRecord(value.entries)) {
+    return false;
+  }
+  return Object.values(value.entries).every(isCircuitBreakerEntry);
+}
+
+function isCircuitBreakerEntry(value: unknown): value is CircuitBreakerEntry {
+  return (
+    isRecord(value) &&
+    (value.commandPath === "sync refresh" || value.commandPath === "vault init") &&
+    typeof value.errorSignature === "string" &&
+    typeof value.consecutiveFailures === "number" &&
+    typeof value.firstFailureAt === "string" &&
+    typeof value.lastFailureAt === "string" &&
+    isRecord(value.lastError) &&
+    typeof value.lastError.code === "string" &&
+    typeof value.lastError.message === "string"
+  );
+}
+
+function circuitBreakerSignature(error: unknown): ContentHash {
+  const fields = circuitBreakerError(error);
+  const details = error instanceof BorealError ? error.details : undefined;
+  return hashContent({ ...fields, details }) as ContentHash;
+}
+
+function circuitBreakerError(error: unknown): CircuitBreakerEntry["lastError"] {
+  if (error instanceof BorealError) {
+    return { code: error.code, message: error.message };
+  }
+  if (error instanceof Error) {
+    return { code: "BOREAL_UNEXPECTED_ERROR", message: error.message };
+  }
+  return { code: "BOREAL_UNEXPECTED_ERROR", message: String(error) };
+}
+
 function formatContextPack(pack: ContextPack): string {
   const lines = [
     pack.title,
@@ -7112,7 +8263,15 @@ async function syncCommand(
       return { exitCode: status.ok ? 0 : 1 };
     }
     case "refresh": {
-      const result = await buildSyncRefreshResult(context);
+      await assertCircuitBreakerAllows(context, "sync refresh");
+      let result: SyncRefreshResult;
+      try {
+        result = await buildSyncRefreshResult(context);
+        await recordCircuitBreakerSuccess(context, "sync refresh");
+      } catch (error) {
+        await recordCircuitBreakerFailure(context, "sync refresh", error);
+        throw error;
+      }
       output.write(await formatRecordWithAgentDirectives(context, args, result, json, {
         syncStatus: result.status,
         syncRefreshed: true,
@@ -7157,7 +8316,15 @@ async function vaultCommand(
 ): Promise<CommandResult> {
   switch (action) {
     case "init": {
-      output.write(formatRecord(await initVault(context), json));
+      await assertCircuitBreakerAllows(context, "vault init");
+      try {
+        const result = await initVault(context);
+        await recordCircuitBreakerSuccess(context, "vault init");
+        output.write(formatRecord(result, json));
+      } catch (error) {
+        await recordCircuitBreakerFailure(context, "vault init", error);
+        throw error;
+      }
       return { exitCode: 0 };
     }
     case "status": {
@@ -8177,10 +9344,11 @@ async function buildAgentProtocolBrief(
   agentId: string,
   labels: readonly string[]
 ): Promise<AgentProtocolBrief> {
-  const [sync, agent, operations] = await Promise.all([
+  const [sync, agent, operations, contextPacks] = await Promise.all([
     buildSyncStatus(context),
     buildAgentStatus(context, agentId, labels),
-    buildSessionOperationSummary(context, context.sessionId, 10)
+    buildSessionOperationSummary(context, context.sessionId, 10),
+    buildContextPackFreshnessSummary(context, agentId)
   ]);
   const commands = buildAgentProtocolCommands(context.sessionId, agent.agentId, agent.labels);
   return {
@@ -8193,8 +9361,38 @@ async function buildAgentProtocolBrief(
     sync: syncStatusBrief(sync),
     agent,
     operations,
+    contextPacks,
     commands,
     recommendedActions: protocolRecommendedActions(kind, sync, agent, operations, commands)
+  };
+}
+
+async function buildContextPackFreshnessSummary(
+  context: CliContext,
+  agentId: string
+): Promise<ContextPackFreshnessSummary> {
+  const currentSeq = await currentLedgerSeq(context);
+  const active = await context.store.read(async (reader) => {
+    const reservations = (await reader.listActiveReservationsForAgent(agentId))
+      .filter((reservation) => !reservation.expiresAt || Date.parse(reservation.expiresAt) > Date.now())
+      .sort((left, right) => left.workId.localeCompare(right.workId));
+    return Promise.all(
+      reservations.map(async (reservation): Promise<ContextPackFreshnessRow> => {
+        const pack = await reader.getContextPackForSubject(reservation.workId);
+        const packSeq = pack?.ledgerSeq;
+        return {
+          workId: reservation.workId,
+          ...(pack ? { contextPackId: pack.id, generatedAt: pack.generatedAt } : {}),
+          ...(packSeq !== undefined ? { contextPackLedgerSeq: packSeq } : {}),
+          currentLedgerSeq: currentSeq,
+          current: packSeq !== undefined && packSeq === currentSeq
+        };
+      })
+    );
+  });
+  return {
+    currentLedgerSeq: currentSeq,
+    active
   };
 }
 
@@ -8294,6 +9492,9 @@ function protocolAgentAction(
   }
   switch (agent.recommendedAction.kind) {
     case "claim_work":
+      return agent.readyWork.next
+        ? commandWithPositionalWork(commands.agentStart, agent.readyWork.next.id)
+        : commands.agentStart;
     case "continue_reserved_work":
       return commands.agentStart;
     case "release_or_finish_work":
@@ -8305,6 +9506,10 @@ function protocolAgentAction(
     default:
       return agent.recommendedAction.command;
   }
+}
+
+function commandWithPositionalWork(command: string, workId: string): string {
+  return command.replace("bwrk agent start", `bwrk agent start ${shellArg(workId)}`);
 }
 
 function syncRecommendedActions(
@@ -8437,6 +9642,9 @@ async function doctorCommand(
     throw new BorealError("BOREAL_INVALID_INPUT", `Unknown doctor command: ${action}`);
   }
   const result = await runDoctor(context, hasFlag(args, "fix"), hasFlag(args, "strict"));
+  if (hasFlag(args, "fix") && result.ok) {
+    await clearCircuitBreakers(context);
+  }
   if (json) {
     output.write(
       doctorResultCanAttachDirectives(result)
@@ -9914,6 +11122,7 @@ function sprintMetricRisks(input: {
 function metricWorkRow(work: WorkItemView): WorkListRow {
   return {
     id: work.id,
+    kind: work.kind,
     status: work.status,
     priority: work.priority,
     title: work.title,
@@ -11798,9 +13007,16 @@ async function buildHandoffBundle(
   const candidates = await runSearch(context, query, {
     limit: Math.max(resultLimit * HANDOFF_CONTEXT_CHUNK_LIMIT_RATIO, HANDOFF_SEARCH_MIN_CANDIDATES)
   });
+  const ledgerSeq = await currentLedgerSeq(context);
+  const contextPackLedgerSeq = contextPack.ledgerSeq ?? ledgerSeq;
   return {
     work,
     contextPack,
+    contextFreshness: {
+      contextPackLedgerSeq,
+      currentLedgerSeq: ledgerSeq,
+      current: contextPackLedgerSeq === ledgerSeq
+    },
     search: {
       query,
       results: diversifyHandoffSearchResults(candidates, resultLimit)
@@ -11919,7 +13135,7 @@ async function buildAgentGuide(context: CliContext, agentId: string, labels: rea
       {
         step: "Start or resume work",
         command: commands.start,
-        when: "Use as the normal entrypoint; it resumes active work before claiming another ready item."
+        when: "Use as the normal entrypoint; it resumes active work before claiming another ready item. When a work ID is already known, pass it before the flags."
       },
       {
         step: "Renew if work continues",
@@ -12023,16 +13239,19 @@ function isWorkItem(value: WorkItem | undefined): value is WorkItem {
 function workListRow(work: {
   readonly meta: { readonly id: string };
   readonly title: string;
+  readonly kind: WorkKind;
   readonly status: WorkStatus;
   readonly priority: string;
   readonly labels: readonly string[];
-}): WorkListRow {
+}, containerId?: WorkId): WorkListRow {
   return {
     id: work.meta.id,
+    kind: work.kind,
     status: work.status,
     priority: work.priority,
     title: work.title,
-    labels: [...work.labels]
+    labels: [...work.labels],
+    ...(containerId ? { containerId } : {})
   };
 }
 
@@ -12213,13 +13432,15 @@ function cycleKey(cycle: readonly string[]): string {
   return rotations.sort()[0] ?? cycle.join("|");
 }
 
-function workViewListRow(view: WorkItemView): WorkListRow {
+function workViewListRow(view: WorkItemView, containerId?: WorkId): WorkListRow {
   return {
     id: view.id,
+    kind: view.kind,
     status: view.status,
     priority: view.priority,
     title: view.title,
-    labels: [...view.labels]
+    labels: [...view.labels],
+    ...(containerId ? { containerId } : {})
   };
 }
 
@@ -12253,13 +13474,15 @@ function textOperationListRow(row: OperationListRow): Record<string, string> {
 }
 
 function textWorkListRow(row: WorkListRow): Record<string, string> {
-  return {
+  const base = {
     id: row.id,
+    kind: row.kind,
     status: row.status,
     priority: row.priority,
     title: row.title,
     labels: row.labels.join(",")
   };
+  return row.containerId ? { ...base, container: row.containerId } : base;
 }
 
 function textRawSourceRow(row: RawSourceRow): Record<string, string> {
@@ -12677,9 +13900,10 @@ function recommendedAgentAction(input: {
     };
   }
   if (input.claimableWork.length > 0) {
+    const nextWorkId = input.claimableWork[0]?.meta.id;
     return {
       kind: "claim_work",
-      command: `bwrk work claim --agent ${shellArg(input.agentId)}${labelFlags(input.labels)}`,
+      command: `bwrk work claim ${nextWorkId ? `${shellArg(nextWorkId)} ` : ""}--agent ${shellArg(input.agentId)}${labelFlags(input.labels)}`,
       reason: "The agent has available reservation capacity and claimable ready work."
     };
   }

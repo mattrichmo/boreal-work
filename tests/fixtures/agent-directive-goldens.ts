@@ -15,6 +15,7 @@ export const REQUIRED_AGENT_DIRECTIVE_GOLDEN_SCENARIOS = [
   "doctor_recovery",
   "handoff",
   "git_checkpoint",
+  "lane_worktree",
   "workflow_next",
   "verification",
   "review",
@@ -307,6 +308,48 @@ export const AGENT_DIRECTIVE_GOLDEN_CASES: readonly AgentDirectiveGoldenCase[] =
         "noCommitReason",
         "protectedBranchCaveat",
         "lastCommitSha"
+      ]
+    }
+  },
+  {
+    scenario: "lane_worktree",
+    name: "parallel lane worktree isolation",
+    registryId: "git.lane-worktree-required" as AgentDirectiveTemplateId,
+    family: "git",
+    subjectType: "work",
+    commandPath: "agent start",
+    data: {
+      gitRoot: "/workspace/project",
+      mergeTargetBranch: "integration/current-initiative",
+      laneBranch: "boreal/lane/current-initiative/agent-alpha-bw-work-deadbeef0012",
+      worktreePath: "/workspace/worktrees/project/agent-alpha",
+      baseRef: "origin/integration/current-initiative",
+      baseSha: "2222222222222222222222222222222222222222",
+      currentBranch: "integration/current-initiative",
+      agentId: "agent-alpha",
+      workId: "bw_work_deadbeef0012",
+      reason: "parallel_agents_on_shared_integration_branch",
+      recommendedCommands: [
+        "git fetch origin",
+        "git worktree add /workspace/worktrees/project/agent-alpha -b boreal/lane/current-initiative/agent-alpha-bw-work-deadbeef0012 origin/integration/current-initiative"
+      ]
+    },
+    expected: {
+      title: "Use isolated lane worktree",
+      severity: "required",
+      kind: "obligation",
+      blocksCloseout: true,
+      triggerCodes: ["git.lane-worktree.required"],
+      nextCommandTemplate: "git worktree add <worktreePath> -b <laneBranch> <baseRef>",
+      requiredKeys: ["gitRoot", "mergeTargetBranch", "laneBranch", "worktreePath"],
+      optionalKeys: [
+        "baseRef",
+        "baseSha",
+        "currentBranch",
+        "agentId",
+        "workId",
+        "reason",
+        "recommendedCommands"
       ]
     }
   },

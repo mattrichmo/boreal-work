@@ -57,7 +57,7 @@ describe("package smoke", () => {
     await initGit(siblingProject);
 
     const version = await run(bwrk, ["--version"], project, env);
-    expect(version.stdout).toBe("boreal-work 0.1.0\n");
+    expect(version.stdout).toBe("boreal-work 0.1.0 (source)\n");
 
     const status = parseData<{
       readonly localShim: { readonly executable: boolean; readonly targetCli?: string };
@@ -65,8 +65,8 @@ describe("package smoke", () => {
       readonly recommendedActions: readonly string[];
     }>((await runBwrk(bwrk, ["install", "status", "--bin-dir", binDir, "--path", env.PATH, "--json"], project, env)).stdout);
     expect(status.localShim).toEqual(expect.objectContaining({ executable: true, targetCli: join(repoRoot, "apps/cli/src/index.ts") }));
-    expect(status.globalCommand).toEqual(expect.objectContaining({ found: true, probe: expect.objectContaining({ ok: true, stdout: "boreal-work 0.1.0" }) }));
-    expect(status.recommendedActions).toEqual([]);
+    expect(status.globalCommand).toEqual(expect.objectContaining({ found: true, probe: expect.objectContaining({ ok: true, stdout: "boreal-work 0.1.0 (source)" }) }));
+    expect(status.recommendedActions).toEqual(["Upgrade bwrk via source: git pull && pnpm install && pnpm install:local."]);
 
     const init = await runBwrk(bwrk, [
       "init",

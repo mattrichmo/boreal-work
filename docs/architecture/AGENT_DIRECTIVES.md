@@ -119,6 +119,7 @@ Gap codes are stable machine strings emitted by enforcement logic. Examples:
 - `work.blocked.open-dependency`
 - `git.checkpoint.required`
 - `summary.missing`
+- `git.lane-worktree.required`
 - `doctor.recovery.required`
 - `search.index-stale`
 - `directive.workflow-next.available`
@@ -202,7 +203,7 @@ Directive families are collapsed to the registry keys used in command JSON:
 | `verification` | Require passed evidence and verification. | required |
 | `review` | Require review evidence or force metadata. | required |
 | `audit` | Require broad findings disposition. | required |
-| `git` | Require checkpoint SHA or accepted dirty-path reason. | required |
+| `git` | Require checkpoint SHA, accepted dirty-path reason, or isolated lane worktree before shared-branch mutation. | required |
 | `closeout` | Require summaries, response summary, or terminal rollups. | required |
 | `doctor` | Repair generated state, locks, search, ledgers, or health. | required |
 | `memory` | Preserve source-backed memory truth. | required/advisory |
@@ -253,6 +254,10 @@ Skills and workflows:
 - Inspect every returned bundle.
 - Follow blocking and required directives before state-changing work.
 - Use `bwrk next` or `workflow_next` payloads for the next command instead of duplicating live policy.
+
+## Lane Worktree Isolation
+
+For multi-agent execution, direct state-changing work on a shared integration branch is unsafe. The `git.lane-worktree-required` directive is the agent-facing obligation for that case. It tells the agent to move the assigned work into a named lane worktree and branch before mutating files or Boreal records. The operational contract is in [Lane Worktree Isolation](LANE_WORKTREE_ISOLATION.md).
 
 ## Superseded Design Note
 

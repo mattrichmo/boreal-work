@@ -3418,7 +3418,9 @@ describe("bwrk cli", () => {
   it("primes and summarizes agent protocol sessions", async () => {
     const rootDir = await makeTempWorkspace();
     await runCli(rootDir, ["init", "--json"]);
-    await runCli(rootDir, ["work", "create", "Session protocol work", "--label", "cli", "--ready", "--json"]);
+    const work = parseData<{ readonly meta: { readonly id: string } }>(
+      (await runCli(rootDir, ["work", "create", "Session protocol work", "--label", "cli", "--ready", "--json"])).stdout
+    );
 
     const primed = await runCli(rootDir, ["prime", "--agent", "agent-a", "--label", "cli", "--json"]);
     const primePayload = parseData<{
@@ -3440,6 +3442,9 @@ describe("bwrk cli", () => {
     );
     expect(primePayload.sync.ok).toBe(false);
     expect(primePayload.sync.recommendedActions).toEqual(expect.arrayContaining(["bwrk vault init --json"]));
+    expect(primePayload.recommendedActions).toContain(
+      `bwrk agent start ${work.meta.id} --session local --agent agent-a --label cli --purpose 'start implementation' --json`
+    );
     expect(primePayload.recommendedActions).toContain("bwrk session end --session local --agent agent-a --label cli --json");
 
     const started = await runCli(rootDir, ["session", "start", "--agent", "agent-a", "--label", "cli", "--json"]);
@@ -4236,6 +4241,27 @@ describe("bwrk cli", () => {
     expect(shown.exitCode).toBe(0);
     expect(shownOperation.meta.id).toBe(workOperation?.id);
     expect(shownOperation.commandPath).toBe("work create");
+
+    const stats = await runCli(rootDir, ["operation", "stats", "--session-id", "Run 42", "--json"]);
+    const statsPayload = parseData<{
+      readonly totals: {
+        readonly total: number;
+        readonly readOnly: number;
+        readonly mutations: number;
+        readonly readMutationRatio: number | null;
+      };
+      readonly perCommand: Array<{ readonly commandPath: string; readonly total: number }>;
+      readonly failureClusters: readonly unknown[];
+      readonly longestConsecutiveIdenticalFailureRun: { readonly count: number };
+    }>(stats.stdout);
+    expect(stats.exitCode).toBe(0);
+    expect(statsPayload.totals.total).toBeGreaterThanOrEqual(1);
+    expect(statsPayload.perCommand).toEqual(
+      expect.arrayContaining([expect.objectContaining({ commandPath: "work create", total: 1 })])
+    );
+    expect(statsPayload.totals.mutations).toBeGreaterThanOrEqual(1);
+    expect(statsPayload.failureClusters).toEqual([]);
+    expect(statsPayload.longestConsecutiveIdenticalFailureRun.count).toBe(0);
 
     const pruned = await runCli(rootDir, ["operation", "prune", "--keep", "2", "--json"]);
     const pruneResult = parseData<{
@@ -5600,6 +5626,7 @@ describe("bwrk cli", () => {
       readonly work: { readonly id: string; readonly status: string; readonly activeReservationId?: string };
       readonly reservation: { readonly meta: { readonly id: string }; readonly status: string; readonly purpose?: string };
       readonly contextPack: { readonly subjectId: string; readonly facts: readonly string[] };
+      readonly contextFreshness: { readonly contextPackLedgerSeq: number; readonly currentLedgerSeq: number; readonly current: boolean };
       readonly search: { readonly query: string; readonly results: Array<{ readonly type: string; readonly title: string }> };
     }>(claimed.stdout);
 
@@ -5616,6 +5643,8 @@ describe("bwrk cli", () => {
     expect(payload.contextPack.facts).toContain(
       "decision: Return claimed work, reservation, context, and focused search results."
     );
+    expect(payload.contextFreshness.current).toBe(true);
+    expect(payload.contextFreshness.contextPackLedgerSeq).toBe(payload.contextFreshness.currentLedgerSeq);
     expect(payload.search.query).toContain("Claim handoff runtime");
     expect(payload.search.results.map((result) => result.type)).toEqual(
       expect.arrayContaining(["work", "context_pack", "decision"])
@@ -5626,6 +5655,50 @@ describe("bwrk cli", () => {
       expect.arrayContaining([expect.objectContaining({ type: "decision", title: "Return claim handoff bundle" })])
     );
 
+    const prime = parseData<{
+      readonly contextPacks: {
+        readonly currentLedgerSeq: number;
+        readonly active: Array<{ readonly workId: string; readonly contextPackLedgerSeq?: number; readonly current: boolean }>;
+      };
+    }>((await runCli(rootDir, ["prime", "--agent", "agent-a", "--json"])).stdout);
+    expect(prime.contextPacks.active).toEqual([
+      expect.objectContaining({
+        workId: work.meta.id,
+        contextPackLedgerSeq: prime.contextPacks.currentLedgerSeq,
+        current: true
+      })
+    ]);
+
+    const startClaimWork = parseData<{ readonly meta: { readonly id: string } }>(
+      (await runCli(rootDir, ["work", "create", "Claim start shortcut", "--label", "start-shortcut", "--ready", "--json"])).stdout
+    );
+    const startedClaim = await runCli(rootDir, [
+      "work",
+      "claim",
+      startClaimWork.meta.id,
+      "--start",
+      "--agent",
+      "agent-start-claim",
+      "--json"
+    ]);
+    const startedClaimPayload = parseData<{
+      readonly started: boolean;
+      readonly action: string;
+      readonly handoffComplete: boolean;
+      readonly work: { readonly id: string; readonly status: string };
+      readonly contextFreshness: { readonly current: boolean };
+    }>(startedClaim.stdout);
+    expect(startedClaim.exitCode).toBe(0);
+    expect(startedClaimPayload).toEqual(
+      expect.objectContaining({
+        started: true,
+        action: "claimed_work",
+        handoffComplete: true,
+        work: expect.objectContaining({ id: startClaimWork.meta.id, status: "in_progress" }),
+        contextFreshness: expect.objectContaining({ current: true })
+      })
+    );
+
     const missing = await runCli(rootDir, ["work", "claim", "--label", "missing", "--json"]);
     expect(parseData<{ readonly claimed: boolean; readonly reason: string }>(missing.stdout)).toEqual({
       claimed: false,
@@ -5633,6 +5706,71 @@ describe("bwrk cli", () => {
       agentId: expect.any(String),
       labels: ["missing"]
     });
+  });
+
+  it("claims a specified work item and returns the handoff bundle", async () => {
+    const rootDir = await makeTempWorkspace();
+    await runCli(rootDir, ["init", "--json"]);
+
+    const exact = parseData<{ readonly meta: { readonly id: string } }>(
+      (await runCli(rootDir, ["work", "create", "Exact claim target", "--label", "cli", "--ready", "--json"])).stdout
+    );
+    const queueWinner = parseData<{ readonly meta: { readonly id: string } }>(
+      (
+        await runCli(rootDir, [
+          "work",
+          "create",
+          "Queue winner should remain ready",
+          "--label",
+          "cli",
+          "--priority",
+          "critical",
+          "--ready",
+          "--json"
+        ])
+      ).stdout
+    );
+
+    const claimed = await runCli(rootDir, [
+      "work",
+      "claim",
+      exact.meta.id,
+      "--label",
+      "cli",
+      "--agent",
+      "agent-exact",
+      "--purpose",
+      "start exact task",
+      "--json"
+    ]);
+    const payload = parseData<{
+      readonly claimed: boolean;
+      readonly handoffComplete: boolean;
+      readonly work: { readonly id: string; readonly status: string; readonly activeReservationId?: string };
+      readonly reservation: { readonly status: string; readonly workId: string; readonly purpose?: string };
+    }>(claimed.stdout);
+
+    expect(claimed.exitCode).toBe(0);
+    expect(payload.claimed).toBe(true);
+    expect(payload.handoffComplete).toBe(true);
+    expect(payload.work.id).toBe(exact.meta.id);
+    expect(payload.work.status).toBe("in_progress");
+    expect(payload.reservation.status).toBe("active");
+    expect(payload.reservation.workId).toBe(exact.meta.id);
+    expect(payload.reservation.purpose).toBe("start exact task");
+    expect(payload.work.activeReservationId).toMatch(/^bw_reservation_/);
+
+    const remainingReady = parseData<Array<{ readonly id: string }>>(
+      (await runCli(rootDir, ["work", "next", "--label", "cli", "--json"])).stdout
+    );
+    expect(remainingReady.map((row) => row.id)).toContain(queueWinner.meta.id);
+    expect(remainingReady.map((row) => row.id)).not.toContain(exact.meta.id);
+
+    const mismatch = await runCli(rootDir, ["work", "claim", queueWinner.meta.id, "--label", "missing", "--json"]);
+    const mismatchPayload = parseJson<{ readonly ok: false; readonly code: string; readonly message: string }>(mismatch.stderr);
+    expect(mismatch.exitCode).toBe(2);
+    expect(mismatchPayload.code).toBe("BOREAL_INVALID_INPUT");
+    expect(mismatchPayload.message).toContain("label");
   });
 
   it("keeps claimed work reservations when work claim handoff generation fails", async () => {
@@ -5800,6 +5938,122 @@ describe("bwrk cli", () => {
     expect(missingPayload.reason).toBe("no_ready_work");
     expect(missingPayload.status.readyWork.claimableCount).toBe(0);
     expect(missingPayload.recommendedAction.kind).toBe("wait_for_ready_work");
+  });
+
+  it("starts a specified work item and supports scoped agent queues", async () => {
+    const rootDir = await makeTempWorkspace();
+    await runCli(rootDir, ["init", "--json"]);
+
+    const container = parseData<{ readonly meta: { readonly id: string } }>(
+      (await runCli(rootDir, ["work", "create", "Agent scoped sprint", "--kind", "sprint", "--ready", "--json"])).stdout
+    );
+    const exact = parseData<{ readonly meta: { readonly id: string } }>(
+      (await runCli(rootDir, ["work", "create", "Agent exact start target", "--label", "scoped-agent", "--ready", "--json"])).stdout
+    );
+    const scopedQueue = parseData<{ readonly meta: { readonly id: string } }>(
+      (await runCli(rootDir, ["work", "create", "Agent scoped queue target", "--label", "scoped-agent", "--ready", "--json"])).stdout
+    );
+    const outside = parseData<{ readonly meta: { readonly id: string } }>(
+      (
+        await runCli(rootDir, [
+          "work",
+          "create",
+          "Agent outside target",
+          "--label",
+          "scoped-agent",
+          "--priority",
+          "critical",
+          "--ready",
+          "--json"
+        ])
+      ).stdout
+    );
+    await runCli(rootDir, ["dep", "add", container.meta.id, exact.meta.id, "--json"]);
+    await runCli(rootDir, ["dep", "add", container.meta.id, scopedQueue.meta.id, "--json"]);
+
+    const outsideScoped = await runCli(rootDir, [
+      "agent",
+      "start",
+      outside.meta.id,
+      "--container",
+      container.meta.id,
+      "--agent",
+      "agent-exact-start",
+      "--json"
+    ]);
+    const outsideScopedPayload = parseJson<{ readonly ok: false; readonly code: string; readonly message: string }>(
+      outsideScoped.stderr
+    );
+    expect(outsideScoped.exitCode).toBe(2);
+    expect(outsideScopedPayload.code).toBe("BOREAL_INVALID_INPUT");
+    expect(outsideScopedPayload.message).toContain("outside the container scope");
+
+    const exactStart = await runCli(rootDir, [
+      "agent",
+      "start",
+      exact.meta.id,
+      "--container",
+      container.meta.id,
+      "--label",
+      "scoped-agent",
+      "--agent",
+      "agent-exact-start",
+      "--purpose",
+      "start exact item",
+      "--json"
+    ]);
+    const exactPayload = parseData<{
+      readonly started: boolean;
+      readonly action?: string;
+      readonly handoffComplete: boolean;
+      readonly work?: { readonly id: string; readonly status: string; readonly activeReservationId?: string };
+      readonly reservation?: { readonly meta: { readonly id: string }; readonly status: string; readonly workId: string; readonly purpose?: string };
+    }>(exactStart.stdout);
+    expect(exactStart.exitCode).toBe(0);
+    expect(exactPayload.started).toBe(true);
+    expect(exactPayload.action).toBe("claimed_work");
+    expect(exactPayload.handoffComplete).toBe(true);
+    expect(exactPayload.work?.id).toBe(exact.meta.id);
+    expect(exactPayload.work?.status).toBe("in_progress");
+    expect(exactPayload.work?.activeReservationId).toBe(exactPayload.reservation?.meta.id);
+    expect(exactPayload.reservation).toEqual(
+      expect.objectContaining({ status: "active", workId: exact.meta.id, purpose: "start exact item" })
+    );
+
+    const aliasResume = await runCli(rootDir, ["start", exact.meta.id, "--agent", "agent-exact-start", "--json"]);
+    const aliasPayload = parseData<{
+      readonly started: boolean;
+      readonly action?: string;
+      readonly work?: { readonly id: string };
+      readonly reservation?: { readonly meta: { readonly id: string } };
+    }>(aliasResume.stdout);
+    expect(aliasResume.exitCode).toBe(0);
+    expect(aliasPayload.started).toBe(true);
+    expect(aliasPayload.action).toBe("continue_reserved_work");
+    expect(aliasPayload.work?.id).toBe(exact.meta.id);
+    expect(aliasPayload.reservation?.meta.id).toBe(exactPayload.reservation?.meta.id);
+
+    const scopedStart = await runCli(rootDir, [
+      "agent",
+      "start",
+      "--container",
+      container.meta.id,
+      "--label",
+      "scoped-agent",
+      "--agent",
+      "agent-scoped-queue",
+      "--json"
+    ]);
+    const scopedPayload = parseData<{
+      readonly started: boolean;
+      readonly action?: string;
+      readonly work?: { readonly id: string };
+    }>(scopedStart.stdout);
+    expect(scopedStart.exitCode).toBe(0);
+    expect(scopedPayload.started).toBe(true);
+    expect(scopedPayload.action).toBe("claimed_work");
+    expect(scopedPayload.work?.id).toBe(scopedQueue.meta.id);
+    expect(scopedPayload.work?.id).not.toBe(outside.meta.id);
   });
 
   it("keeps claimed reservations when agent start handoff generation fails", async () => {
@@ -5970,7 +6224,7 @@ describe("bwrk cli", () => {
       releaseWork.meta.id,
       "--agent",
       "agent-c",
-      "--summary",
+      "--evidence",
       "Blocked by a failing check.",
       "--verdict",
       "failed",
@@ -5981,6 +6235,7 @@ describe("bwrk cli", () => {
       readonly action: string;
       readonly work: { readonly status: string; readonly activeReservationId?: string };
       readonly evidence: { readonly outcome: string };
+      readonly inlineEvidence?: string;
       readonly verification: { readonly verdict: string };
       readonly release?: { readonly reservation: { readonly status: string } };
       readonly status: { readonly reservations: { readonly activeCount: number } };
@@ -5991,6 +6246,7 @@ describe("bwrk cli", () => {
     expect(releasedPayload.work.status).toBe("needs_verification");
     expect(releasedPayload.work.activeReservationId).toBeUndefined();
     expect(releasedPayload.evidence.outcome).toBe("failed");
+    expect(releasedPayload.inlineEvidence).toBe("Blocked by a failing check.");
     expect(releasedPayload.verification.verdict).toBe("failed");
     expect(releasedPayload.release?.reservation.status).toBe("released");
     expect(releasedPayload.status.reservations.activeCount).toBe(0);
@@ -6034,13 +6290,26 @@ describe("bwrk cli", () => {
     expect(readyStatusPayload.readyWork.next?.id).toBe(work.meta.id);
     expect(readyStatusPayload.recommendedAction.kind).toBe("claim_work");
     expect(readyStatusPayload.recommendedAction.command).toBe(
-      "bwrk work claim --agent 'agent $one'\\''s' --label 'coord $label'\\''s'"
+      `bwrk work claim ${work.meta.id} --agent 'agent $one'\\''s' --label 'coord $label'\\''s'`
     );
 
     const reserved = await runCli(rootDir, ["work", "reserve", work.meta.id, "--agent", "agent-a", "--ttl", "1h", "--json"]);
-    const reservedWork = parseData<{ readonly status: string; readonly reservationId: string }>(reserved.stdout);
+    const reservedWork = parseData<{
+      readonly status: string;
+      readonly reservationId: string;
+      readonly reservation: { readonly meta: { readonly id: string }; readonly status: string; readonly workId: string };
+      readonly releasedReservations: readonly unknown[];
+    }>(reserved.stdout);
     expect(reservedWork.status).toBe("in_progress");
     expect(reservedWork.reservationId).toMatch(/^bw_reservation_/);
+    expect(reservedWork.reservation).toEqual(
+      expect.objectContaining({
+        meta: expect.objectContaining({ id: reservedWork.reservationId }),
+        status: "active",
+        workId: work.meta.id
+      })
+    );
+    expect(reservedWork.releasedReservations).toEqual([]);
 
     const activeList = await runCli(rootDir, ["reservation", "list", "--agent", "agent-a", "--work", work.meta.id, "--json"]);
     const activeRows = parseData<
@@ -6172,6 +6441,33 @@ describe("bwrk cli", () => {
     expect(parseData<Array<{ readonly id: string; readonly status: string; readonly expired: boolean }>>(expiredList.stdout)).toEqual([
       expect.objectContaining({ id: staleReservationId, status: "expired", expired: true })
     ]);
+
+    const finishAfterReap = await runCli(rootDir, [
+      "agent",
+      "finish",
+      work.meta.id,
+      "--agent",
+      "agent-b",
+      "--summary",
+      "finish after reap should explain state",
+      "--release",
+      "--json"
+    ]);
+    const finishAfterReapPayload = parseJson<{
+      readonly ok: false;
+      readonly code: string;
+      readonly message: string;
+      readonly details?: { readonly originalDetails?: { readonly reservationStatus?: string; readonly originalOwner?: string } };
+    }>(finishAfterReap.stderr);
+    expect(finishAfterReap.exitCode).toBe(1);
+    expect(finishAfterReapPayload.code).toBe("BOREAL_POLICY_VIOLATION");
+    expect(finishAfterReapPayload.message).toContain("reservation was reaped");
+    expect(finishAfterReapPayload.details?.originalDetails).toEqual(
+      expect.objectContaining({
+        reservationStatus: "expired",
+        originalOwner: "agent-b"
+      })
+    );
   });
 
   it("persists reviewer heartbeat checkpoints through CLI and sync refresh", async () => {
@@ -8579,6 +8875,71 @@ describe("bwrk cli", () => {
     }
   });
 
+  it("circuit-breaks repeated generated-state command failures until doctor repair clears the breaker", async () => {
+    const rootDir = await makeTempWorkspace();
+    await runCli(rootDir, ["init", "--json"]);
+    await writeFile(join(rootDir, "memory"), "not a directory");
+
+    const firstFailure = await runCli(rootDir, ["vault", "init", "--json"]);
+    const secondFailure = await runCli(rootDir, ["vault", "init", "--json"]);
+    const shortCircuited = await runCli(rootDir, ["vault", "init", "--json"]);
+    const shortCircuitPayload = parseJson<{
+      readonly ok: false;
+      readonly code: string;
+      readonly message: string;
+      readonly details?: { readonly doNotRetry?: boolean; readonly consecutiveFailures?: number };
+      readonly gaps?: Array<{ readonly code: string }>;
+    }>(shortCircuited.stderr);
+
+    expect(firstFailure.exitCode).toBe(1);
+    expect(secondFailure.exitCode).toBe(1);
+    expect(shortCircuited.exitCode).toBe(1);
+    expect(shortCircuitPayload.code).toBe("BOREAL_POLICY_VIOLATION");
+    expect(shortCircuitPayload.message).toContain("circuit-broken");
+    expect(shortCircuitPayload.details).toEqual(expect.objectContaining({ doNotRetry: true, consecutiveFailures: 2 }));
+    expect(shortCircuitPayload.gaps).toEqual(expect.arrayContaining([expect.objectContaining({ code: "doctor.recovery.required" })]));
+
+    await rm(join(rootDir, "memory"), { force: true });
+    const doctor = await runCli(rootDir, ["doctor", "--fix", "--json"]);
+    expect(doctor.exitCode).toBe(0);
+
+    const repaired = await runCli(rootDir, ["vault", "init", "--json"]);
+    expect(repaired.exitCode).toBe(0);
+  });
+
+  it("reports recent git commits that reference open tracker work", async () => {
+    const rootDir = await makeTempWorkspace();
+    await execFileAsync("git", ["init"], { cwd: rootDir });
+    await execFileAsync("git", ["config", "user.email", "boreal@example.invalid"], { cwd: rootDir });
+    await execFileAsync("git", ["config", "user.name", "Boreal Test"], { cwd: rootDir });
+    await runCli(rootDir, ["init", "--json"]);
+    const work = parseData<{ readonly meta: { readonly id: string } }>(
+      (await runCli(rootDir, ["work", "create", "Git drift open work", "--ready", "--json"])).stdout
+    );
+    await writeFile(join(rootDir, "drift.txt"), `references ${work.meta.id}\n`);
+    await execFileAsync("git", ["add", "."], { cwd: rootDir });
+    await execFileAsync("git", ["commit", "-m", `Progress on ${work.meta.id}`], { cwd: rootDir });
+    const commitSha = (await execFileAsync("git", ["rev-parse", "HEAD"], { cwd: rootDir })).stdout.trim();
+
+    const doctor = await runCli(rootDir, ["doctor", "--json"]);
+    const payload = parseData<DoctorPayload>(doctor.stdout);
+    const drift = doctorDiagnostic(payload, "git.tracker_drift");
+
+    expect(doctor.exitCode).toBe(0);
+    expect(drift).toEqual(
+      expect.objectContaining({
+        severity: "warning",
+        details: expect.arrayContaining([
+          expect.objectContaining({
+            workId: work.meta.id,
+            commitSha,
+            status: "ready"
+          })
+        ])
+      })
+    );
+  });
+
   it("supports bounded and filtered work lists", async () => {
     const rootDir = await makeTempWorkspace();
     await runCli(rootDir, ["init", "--json"]);
@@ -8603,6 +8964,146 @@ describe("bwrk cli", () => {
     expect(rows).toHaveLength(1);
     expect(rows[0]?.status).toBe("ready");
     expect(rows[0]?.labels).toContain("cli");
+  });
+
+  it("supports container-scoped ready queues and claims", async () => {
+    const rootDir = await makeTempWorkspace();
+    await runCli(rootDir, ["init", "--json"]);
+
+    const container = parseData<{ readonly meta: { readonly id: string } }>(
+      (await runCli(rootDir, ["work", "create", "Scoped sprint", "--kind", "sprint", "--ready", "--json"])).stdout
+    );
+    const directChild = parseData<{ readonly meta: { readonly id: string } }>(
+      (await runCli(rootDir, ["work", "create", "Scoped direct child", "--label", "scoped", "--ready", "--json"])).stdout
+    );
+    const nestedReady = parseData<{ readonly meta: { readonly id: string } }>(
+      (await runCli(rootDir, ["work", "create", "Scoped nested ready", "--label", "scoped", "--ready", "--json"])).stdout
+    );
+    const outsideReady = parseData<{ readonly meta: { readonly id: string } }>(
+      (await runCli(rootDir, ["work", "create", "Outside ready work", "--label", "scoped", "--priority", "critical", "--ready", "--json"])).stdout
+    );
+    await runCli(rootDir, ["dep", "add", container.meta.id, directChild.meta.id, "--json"]);
+    await runCli(rootDir, ["dep", "add", directChild.meta.id, nestedReady.meta.id, "--json"]);
+
+    const scopedList = parseData<Array<{ readonly id: string; readonly containerId?: string }>>(
+      (
+        await runCli(rootDir, [
+          "work",
+          "list",
+          "--ready",
+          "--container",
+          container.meta.id,
+          "--label",
+          "scoped",
+          "--json"
+        ])
+      ).stdout
+    );
+    expect(scopedList).toEqual([
+      expect.objectContaining({ id: nestedReady.meta.id, containerId: container.meta.id })
+    ]);
+    expect(scopedList.map((row) => row.id)).not.toContain(outsideReady.meta.id);
+
+    const scopedNext = parseData<
+      Array<{
+        readonly id: string;
+        readonly kind: string;
+        readonly containerId?: string;
+        readonly agentId?: string;
+        readonly showCommand?: string;
+        readonly agentStartCommand?: string;
+        readonly workClaimCommand?: string;
+      }>
+    >(
+      (
+        await runCli(rootDir, [
+          "work",
+          "next",
+          "--container",
+          container.meta.id,
+          "--label",
+          "scoped",
+          "--agent",
+          "queue-agent",
+          "--purpose",
+          "fan out",
+          "--json"
+        ])
+      ).stdout
+    );
+    expect(scopedNext).toEqual([
+      expect.objectContaining({
+        id: nestedReady.meta.id,
+        kind: "task",
+        containerId: container.meta.id,
+        agentId: "queue-agent"
+      })
+    ]);
+    expect(scopedNext[0]?.showCommand).toBe(`bwrk work show ${nestedReady.meta.id} --json`);
+    expect(scopedNext[0]?.agentStartCommand).toBe(
+      `bwrk agent start ${nestedReady.meta.id} --agent queue-agent --label scoped --container ${container.meta.id} --purpose 'fan out' --json`
+    );
+    expect(scopedNext[0]?.workClaimCommand).toBe(
+      `bwrk work claim ${nestedReady.meta.id} --agent queue-agent --label scoped --container ${container.meta.id} --purpose 'fan out' --json`
+    );
+
+    const parallel = parseData<{
+      readonly schemaVersion: string;
+      readonly filters: { readonly containerId?: string; readonly labels: readonly string[]; readonly agentMode: string };
+      readonly items: Array<{ readonly id: string; readonly agentId?: string; readonly agentStartCommand?: string }>;
+      readonly commands: { readonly rerunCommand: string; readonly reservationListCommand: string };
+    }>(
+      (
+        await runCli(rootDir, [
+          "work",
+          "parallel",
+          "--container",
+          container.meta.id,
+          "--label",
+          "scoped",
+          "--agent-prefix",
+          "worker",
+          "--purpose",
+          "fan out",
+          "--limit",
+          "2",
+          "--json"
+        ])
+      ).stdout
+    );
+    expect(parallel.schemaVersion).toBe("boreal.cli.work.parallel.v1");
+    expect(parallel.filters).toEqual(
+      expect.objectContaining({ containerId: container.meta.id, labels: ["scoped"], agentMode: "prefix" })
+    );
+    expect(parallel.items).toEqual([
+      expect.objectContaining({
+        id: nestedReady.meta.id,
+        agentId: "worker-1",
+        agentStartCommand: `bwrk agent start ${nestedReady.meta.id} --agent worker-1 --label scoped --container ${container.meta.id} --purpose 'fan out' --json`
+      })
+    ]);
+    expect(parallel.commands.rerunCommand).toBe(
+      `bwrk work parallel --label scoped --container ${container.meta.id} --limit 2 --agent-prefix worker --purpose 'fan out' --json`
+    );
+    expect(parallel.commands.reservationListCommand).toBe("bwrk reservation list --status active --json");
+
+    const claimed = parseData<{ readonly claimed: boolean; readonly work: { readonly id: string } }>(
+      (
+        await runCli(rootDir, [
+          "work",
+          "claim",
+          "--container",
+          container.meta.id,
+          "--label",
+          "scoped",
+          "--agent",
+          "scoped-agent",
+          "--json"
+        ])
+      ).stdout
+    );
+    expect(claimed.claimed).toBe(true);
+    expect(claimed.work.id).toBe(nestedReady.meta.id);
   });
 
   it("caps high-volume list and search result limits", async () => {

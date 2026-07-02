@@ -53,6 +53,7 @@ Use this workflow after a coherent task, phase, sprint, milestone, or major refa
 - Do not use destructive Git commands such as reset, checkout, clean, rebase, or force-push unless the user explicitly requests them.
 - Do not hide unrelated dirty state inside a sprint closeout. Report it as out of scope and leave it unstaged.
 - Push only when the user requested push or the governing workflow explicitly requires publication.
+- In parallel lane mode, checkpoint the lane branch from the lane worktree. Do not commit implementation or contract state directly on the shared integration branch.
 
 ## Agent Directives
 
@@ -68,14 +69,15 @@ Use this workflow after a coherent task, phase, sprint, milestone, or major refa
 2. Inspect the latest `agentDirectives` bundle, follow required or blocking directives first, and run `bwrk next --json` when you need a single executable command for the next canonical workflow or recovery step.
 3. Inspect the target work or sprint with `bwrk work show <work-id> --json` or `bwrk sprint show <sprint-id> --json`.
 4. Inspect each in-scope Git root with `git status --short --branch`, then review changed paths with `git diff --name-status` and `git diff --stat`.
-5. Run the relevant validation command(s) for the completed slice and `git diff --check` before staging.
-6. Stage only the intended paths with `git add -- <path>...`; for separate memory repos, checkpoint the memory repo separately from the project repo.
-7. Verify the staged set with `git diff --cached --name-status` and `git diff --cached --stat`.
-8. Commit each in-scope Git root with a scoped message that names the task, sprint, phase, milestone, or work ID.
-9. If no commit is valid, record one reason code from the list below and explain what evidence proves the closeout can continue.
-10. After the checkpoint, run `bwrk sync refresh --json` and `bwrk doctor --strict --json`, or `bwrk gate closeout --json` when the parent workflow requires the full gate.
-11. Attach checkpoint evidence to the work or sprint with `bwrk evidence add`, including commit SHA(s), reason code, validation commands, and any out-of-scope dirty paths.
-12. Create or update the closeout agent summary with the checkpoint SHA(s), or include the no-commit reason code in `--dirty-path` / summary notes before parent closeout.
+5. If the target branch is a shared integration branch and state-changing work belongs to a lane, stop checkpointing until the lane worktree is created or entered.
+6. Run the relevant validation command(s) for the completed slice and `git diff --check` before staging.
+7. Stage only the intended paths with `git add -- <path>...`; for separate memory repos, checkpoint the memory repo separately from the project repo.
+8. Verify the staged set with `git diff --cached --name-status` and `git diff --cached --stat`.
+9. Commit each in-scope Git root with a scoped message that names the task, sprint, phase, milestone, or work ID.
+10. If no commit is valid, record one reason code from the list below and explain what evidence proves the closeout can continue.
+11. After the checkpoint, run `bwrk sync refresh --json` and `bwrk doctor --strict --json`, or `bwrk gate closeout --json` when the parent workflow requires the full gate.
+12. Attach checkpoint evidence to the work or sprint with `bwrk evidence add`, including commit SHA(s), reason code, validation commands, and any out-of-scope dirty paths.
+13. Create or update the closeout agent summary with the checkpoint SHA(s), or include the no-commit reason code in `--dirty-path` / summary notes before parent closeout.
 
 ## Command Sequences
 
@@ -85,6 +87,7 @@ Use raw Git commands for repository mutations because Boreal validates workflow 
    `git status --short --branch`
    `git diff --name-status`
    `git diff --stat`
+   `git worktree list`
 2. Validate before staging:
    `git diff --check`
 3. Stage narrowly:
@@ -154,6 +157,7 @@ Use one of these reason codes when a closeout does not have an in-scope commit:
 - If Git inspection fails, report `git_unavailable` and switch to `workflows/60-health/sync-and-doctor.md` only when Boreal state health is also uncertain.
 - If validation fails, do not commit; report `validation_blocked` and keep the work open or released.
 - If unrelated dirty state exists, do not stage it; report `unrelated_dirty_state` with exact paths.
+- If the required lane worktree is missing, stop before staging and follow the `git.lane-worktree-required` directive or hand off the setup failure.
 - If generated artifacts are stale after commit, run `bwrk sync refresh --json` and recheck.
 
 ## Finish Criteria
@@ -161,6 +165,7 @@ Use one of these reason codes when a closeout does not have an in-scope commit:
 - The target task, sprint, phase, milestone, or project has a commit checkpoint or explicit reason code.
 - The target closeout summary records the commit SHA(s), or records the reason code/comment explaining why no commit was valid.
 - Every in-scope Git root has been inspected before and after staging or committing.
+- Parallel lane commits were made from the lane worktree and lane branch, not directly on the integration branch.
 - The staged set was verified before commit.
 - The final health gate passed or the remaining diagnostic is explicitly reported.
 - Checkpoint evidence is attached to the relevant work or sprint when Boreal records are being closed.

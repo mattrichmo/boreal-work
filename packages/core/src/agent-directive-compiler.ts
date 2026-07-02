@@ -717,6 +717,7 @@ function gitDirectiveGaps(
     ...(gitCheckpointRequired(snapshot, dataByRegistryId["git.checkpoint-required"])
       ? [directiveGap(snapshot, "git.checkpoint.required", dataByRegistryId["git.checkpoint-required"])]
       : []),
+    ...laneWorktreeGaps(snapshot, dataByRegistryId),
     ...workflowNextGaps(snapshot, dataByRegistryId)
   ]);
 }
@@ -733,6 +734,7 @@ function closeoutDirectiveGaps(
     ...(gitCheckpointRequired(snapshot, dataByRegistryId["git.checkpoint-required"])
       ? [directiveGap(snapshot, "git.checkpoint.required", dataByRegistryId["git.checkpoint-required"])]
       : []),
+    ...laneWorktreeGaps(snapshot, dataByRegistryId),
     ...(verificationEvidenceRequired(dataByRegistryId["verification.evidence-required"])
       ? [directiveGap(snapshot, "gate.verification.unsatisfied", dataByRegistryId["verification.evidence-required"])]
       : []),
@@ -786,8 +788,19 @@ function recoveryDirectiveGaps(
     ...(needsDoctorRecoveryDirective(snapshot)
       ? [directiveGap(snapshot, snapshot.sync.searchIndexFresh ? "doctor.recovery.required" : "search.index-stale", dataByRegistryId["doctor.recovery-required"])]
       : []),
+    ...laneWorktreeGaps(snapshot, dataByRegistryId),
     ...workflowNextGaps(snapshot, dataByRegistryId)
   ]);
+}
+
+function laneWorktreeGaps(
+  snapshot: AgentDirectiveSnapshot,
+  dataByRegistryId: AgentDirectiveAssemblyDataByRegistryId
+): readonly EnforcementGap[] {
+  const data = dataByRegistryId["git.lane-worktree-required"];
+  return data !== undefined && dataHasAnyKey(data, ["gitRoot", "mergeTargetBranch", "laneBranch", "worktreePath"])
+    ? [directiveGap(snapshot, "git.lane-worktree.required", data)]
+    : [];
 }
 
 function workflowNextGaps(

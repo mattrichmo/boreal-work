@@ -148,7 +148,7 @@ JSON `data` shape:
       "path": ["work", "reserve"],
       "category": "work",
       "summary": "Reserve ready work for an agent.",
-      "usage": "bwrk work reserve <work-id> --agent <agent-id> [--purpose <text>] [--force --reason <text>] [--json]",
+      "usage": "bwrk work reserve <work-id> --agent <agent-id> [--purpose <text>] [--expires-at <iso>|--ttl <duration>] [--force --reason <text>] [--json]",
       "requiresWorkspace": true,
       "supportsJson": true,
       "behavior": {
@@ -309,10 +309,10 @@ Prints stable Boreal CLI package and runtime version information. `bwrk --versio
 ## `start`
 
 ```bash
-bwrk start [--agent <agent-id>] [--label <label>...] [--purpose <text>] [--expires-at <iso>|--ttl <duration>] [--json]
+bwrk start [work-ref] [--agent <agent-id>] [--label <label>...] [--container <work-ref>] [--purpose <text>] [--expires-at <iso>|--ttl <duration>] [--query <text>] [--limit <n>] [--json]
 ```
 
-Golden-path alias for `bwrk agent start`. It resumes the selected agent's active work before claiming another ready item and returns the same JSON contract as `agent start`.
+Golden-path alias for `bwrk agent start`. With no work reference it resumes the selected agent's active work before claiming another ready item; with `work-ref` it starts or claims that exact work item. It returns the same JSON contract as `agent start`.
 
 ## `done`
 
@@ -721,10 +721,10 @@ Recomputes readiness for one work item and marks it `ready` if its dependencies 
 ## `work list`
 
 ```bash
-bwrk work list [--ready] [--status <status>] [--label <label>...] [--limit <n>] [--json]
+bwrk work list [--ready] [--status <status>] [--label <label>...] [--container <work-ref>] [--limit <n>] [--json]
 ```
 
-Lists work items. `--label` may be repeated and all labels must match. Default `--limit` is `100`; max is `1000`.
+Lists work items. `--label` may be repeated and all labels must match. `--container` scopes results to the container and its dependency-graph descendants. Default `--limit` is `100`; max is `1000`.
 
 Statuses:
 
@@ -746,7 +746,7 @@ Examples:
 
 ```bash
 bwrk work list --ready
-bwrk work list --status ready --label cli --limit 20 --json
+bwrk work list --status ready --container <work-id> --label cli --limit 20 --json
 ```
 
 JSON `data` shape:
@@ -755,13 +755,17 @@ JSON `data` shape:
 [
   {
     "id": "bw_work_...",
+    "kind": "task",
     "status": "ready",
     "priority": "normal",
     "title": "Harden CLI output",
-    "labels": ["cli"]
+    "labels": ["cli"],
+    "containerId": "bw_work_..."
   }
 ]
 ```
+
+`containerId` is present only when `--container` is used.
 
 ## `work recent-closed`
 
@@ -793,20 +797,31 @@ bwrk heartbeat advance <checkpoint-id> --work <work-id> --json
 ## `work next`
 
 ```bash
-bwrk work next [--label <label>...] [--limit <n>] [--view dashboard] [--json]
+bwrk work next [--label <label>...] [--container <work-ref>] [--agent <agent-id>] [--purpose <text>] [--limit <n>] [--view dashboard] [--json]
 ```
 
-Lists claimable ready work from the live runtime view, ordered by priority and title. `--label` may be repeated and all labels must match. Default `--limit` is `10`; max is `1000`. `--view dashboard` renders a grouped ready-queue view for humans.
+Lists claimable ready work from the live runtime view, ordered by priority and title. `--label` may be repeated and all labels must match. `--container` scopes results to the container and its dependency-graph descendants and adds `containerId` to returned rows. JSON rows include `showCommand`, `agentStartCommand`, and `workClaimCommand` exact commands. `--agent` and `--purpose` customize those generated commands. Default `--limit` is `10`; max is `1000`. `--view dashboard` renders a grouped ready-queue view for humans.
 
 This command does not use the search index; readiness and reservation-sensitive workflow state are read from current runtime state.
+
+## `work parallel`
+
+```bash
+bwrk work parallel [--label <label>...] [--container <work-ref>] [--agent <agent-id>...] [--agent-prefix <prefix>] [--purpose <text>] [--limit <n>] [--json]
+```
+
+Builds a read-only coordinator queue for parallel agent fan-out. It uses the same live readiness, priority ordering, label filtering, and container scoping as `work next`, but returns a `boreal.cli.work.parallel.v1` record with `items`, `filters`, and refresh commands.
+
+Each item includes the ready work row plus an assigned `agentId`, exact `agentStartCommand`, exact `workClaimCommand`, and `showCommand`. Use repeated `--agent` values to round-robin rows across named workers, or `--agent-prefix worker` to generate `worker-1`, `worker-2`, and so on. The command only reads queue state; the generated `agent start <work-id>` or `work claim <work-id>` command performs the actual reservation.
 
 ## `work show`
 
 ```bash
-bwrk work show <work-id> [--json]
+bwrk work show <work-id> [--since <ledger-seq>] [--json]
 ```
 
 Shows the work view for one item, including evidence, verification, dependency, active-blocker, and context-pack summary fields when present. In JSON output, `dependencyIds` is the full dependency list, `activeBlockerIds` is the unresolved blocker list, and the legacy `blockedBy` field mirrors `activeBlockerIds`.
+When `--since` is supplied, JSON output returns a minimal unchanged payload if no newer ledger event touches that item.
 
 ## `work block`
 
@@ -857,7 +872,7 @@ bwrk work reserve <work-id> --agent <agent-id> [--purpose <text>] [--expires-at 
 
 Reserves a ready work item for an agent. If `--agent` is omitted, the CLI actor ID is used.
 
-Normal reservation requires `ready` work. A successful reservation writes an active reservation record, stores its ID on the work item, and moves the work to `in_progress`. `--force` allows a documented reservation of non-ready work only when `--reason` is also supplied. Closed and cancelled work still cannot be reserved.
+Normal reservation requires `ready` work. A successful reservation writes an active reservation record, stores its ID on the work item, and moves the work to `in_progress`. JSON output keeps the updated work fields at top level and also includes the active `reservation` record and `releasedReservations`. `--force` allows a documented reservation of non-ready work only when `--reason` is also supplied. Closed and cancelled work still cannot be reserved.
 
 Reservations can expire:
 
@@ -871,16 +886,20 @@ bwrk work reserve <work-id> --expires-at 2026-06-25T22:00:00.000Z
 ## `work claim`
 
 ```bash
-bwrk work claim [--label <label>...] [--agent <agent-id>] [--purpose <text>] [--expires-at <iso>|--ttl <duration>] [--query <text>] [--limit <n>] [--json]
+bwrk work claim [work-ref] [--start] [--label <label>...] [--container <work-ref>] [--agent <agent-id>] [--purpose <text>] [--expires-at <iso>|--ttl <duration>] [--query <text>] [--limit <n>] [--json]
 ```
 
-Atomically finds the next live ready work item, reserves it for the agent, rebuilds context-pack projections, rebuilds the local search index, and returns a handoff bundle.
+Atomically finds the next live ready work item, or claims the specified ready work item, reserves it for the agent, rebuilds context-pack projections, rebuilds the local search index, and returns a handoff bundle.
 
 Selection behavior:
 
+- `work-ref` claims one exact work item; use this when a task ID is already known.
 - `--label` may be repeated and all labels must match.
+- `--container` restricts selection to the container and its dependency-graph descendants.
+- When `work-ref` is provided, `--label` and `--container` validate that the exact work item matches those filters before reserving.
 - Claimed work is ordered by priority, title, then ID.
 - The runtime rechecks blocker-derived readiness inside the same write transaction before reserving.
+- `--start` returns the same start-shaped handoff payload as `bwrk agent start`, including resume behavior for an existing active reservation.
 - If no work matches, the command exits `0` with `claimed: false`.
 
 Handoff output includes:
@@ -888,6 +907,7 @@ Handoff output includes:
 - The claimed work view.
 - The reservation record.
 - The refreshed context pack for the claimed work.
+- `contextFreshness.contextPackLedgerSeq` and `contextFreshness.currentLedgerSeq`, using the same ledger sequence basis as JSON response envelopes.
 - Focused search results using `--query` or a default query built from the work title, labels, context facts, and evidence.
 
 If context/search handoff generation fails after the reservation is created, the command still exits `0` with `claimed: true`, `handoffComplete: false`, the reservation/work view, a warning, and `repairCommand: "bwrk doctor --fix --json"`.
@@ -960,7 +980,7 @@ Advances a heartbeat to a new cursor. Supplying `--work` requires a closed work 
 bwrk prime [--agent <agent-id>] [--label <label>...] [--json]
 ```
 
-Compatibility startup brief for an agent session without claiming work. The brief includes workspace sync health, agent coordination state, bounded operation history for the active `--session`, copyable protocol commands, and concrete recommended actions.
+Compatibility startup brief for an agent session without claiming work. The brief includes workspace sync health, agent coordination state, active context-pack freshness versus current ledger sequence, bounded operation history for the active `--session`, copyable protocol commands, and concrete recommended actions.
 
 `prime` is read-only for project state. Like other initialized workspace commands, it is still logged in local operation history for auditability. New agent-facing instructions should prefer `bwrk agent guide` for the command loop and `bwrk agent status` for coordination state; `prime` remains available for existing workflows and scripts.
 
@@ -982,7 +1002,7 @@ Prints the compact agent loop without requiring an initialized workspace. The gu
 ## `agent finish`
 
 ```bash
-bwrk agent finish <work-id> --summary <text> (--close --reason <text>|--release) [--agent <agent-id>] [--kind command|test|diff|review|artifact|note] [--outcome passed|failed|observed|unknown] [--command <cmd>] [--uri <uri>] [--verdict passed|failed] [--notes <text>] [--commit <sha>...] [--dirty-path <note>...] [--json]
+bwrk agent finish <work-id> (--summary <text>|--evidence <inline-or-evidence-id>) (--close --reason <text>|--release) [--agent <agent-id>] [--kind command|test|diff|review|artifact|note] [--outcome passed|failed|observed|unknown] [--command <cmd>] [--uri <uri>] [--verdict passed|failed] [--notes <text>] [--commit <sha>...] [--dirty-path <note>...] [--json]
 ```
 
 Guarded exit workflow for work with an active agent reservation. The command requires the selected agent to own the active, non-expired reservation before it records evidence, verifies the work, and closes or releases anything. Use `current` or `active` as the work reference when the selected `--agent` has exactly one non-expired active reservation. Evidence, verification, optional close, reservation release, readiness repair, and the final `agent.finished` event run as one engine transaction. One of `--close` or `--release` is required so finish cannot leave active ownership behind. When closing, the evidence summary becomes the generated agent closeout summary body and optional `--commit` / `--dirty-path` values are linked into that summary; if no `--commit` is provided, one `--dirty-path` must start with a checkpoint reason code such as `no_repo_changes: ...`.
@@ -990,6 +1010,7 @@ Guarded exit workflow for work with an active agent reservation. The command req
 Behavior:
 
 - Records one evidence item against the work. If `--outcome` is omitted, it defaults to `passed` for a passed verdict and `failed` for a failed verdict.
+- `--evidence` can supply an inline evidence summary or an existing evidence ID as the finish evidence source when `--summary` is omitted.
 - Verifies the work using the new evidence ID.
 - Refreshes the work context/projection for the returned view so `work.status`, counts, and `contextSummary` describe the same post-finish state.
 - With `--close`, requires a passed verdict and `--reason`, closes the work, then releases the active reservation so closed work does not keep stale ownership.
@@ -999,14 +1020,16 @@ Behavior:
 ## `agent start`
 
 ```bash
-bwrk agent start [--agent <agent-id>] [--label <label>...] [--purpose <text>] [--expires-at <iso>|--ttl <duration>] [--query <text>] [--limit <n>] [--json]
+bwrk agent start [work-ref] [--agent <agent-id>] [--label <label>...] [--container <work-ref>] [--purpose <text>] [--expires-at <iso>|--ttl <duration>] [--query <text>] [--limit <n>] [--json]
 ```
 
 Safe entrypoint for an agent before it starts work:
 
 - Blocks with exit code `1` when the agent has expired active reservations; the response points at `bwrk doctor --fix`.
 - Resumes the agent's existing active reservation before claiming more work.
-- Atomically claims the next ready matching work only when the agent has no active work and has reservation capacity.
+- With no `work-ref`, atomically claims the next ready matching work only when the agent has no active work and has reservation capacity.
+- With `work-ref`, resumes that exact work if already reserved by the agent, otherwise atomically claims that exact ready work when reservation capacity remains.
+- `--container` restricts queue claims to the container and descendants; with `work-ref`, it validates the exact work item is inside that scope before reserving.
 - Returns the selected work view, reservation, context pack, and handoff search results.
 - If context/search handoff generation fails after a reservation is claimed or resumed, returns the reservation with `handoffComplete: false`, a warning, and `repairCommand: "bwrk doctor --fix --json"` instead of losing the successful claim behind an error.
 - Returns `started: false` with `reason: "no_ready_work"` when no matching ready work exists.
@@ -1071,15 +1094,23 @@ bwrk operation show <operation-id-or-prefix> [--json]
 
 Shows one full local operation record, including redacted argv and generated event IDs. Prefixes must include at least 12 hex characters and be unambiguous.
 
+## `operation stats`
+
+```bash
+bwrk operation stats [--session-id <id>] [--json]
+```
+
+Aggregates local operation records into totals, read/mutation ratio, per-command counts, failure clusters grouped by command and error code, and the longest consecutive identical failure run. The command is read-only and uses the operation log directly.
+
 ## `operation prune`
 
 ```bash
 bwrk operation prune (--keep <n>|--before <iso>) [--json]
 ```
 
-Prunes local operation history without changing exported project records. `--keep` keeps the newest N operations including the prune command's own operation record, so `bwrk operation prune --keep 500` leaves at most 500 operation records after the command finishes. `--before` deletes operations finished before the given ISO timestamp. When both flags are provided, the age filter is applied first and the remaining newest records are capped by `--keep`.
+Prunes local operation history without changing exported project records. `--keep` keeps the newest N operations including the prune command's own operation record, so `bwrk operation prune --keep 500` leaves at most 500 operation records after the command finishes. `--before` deletes operations finished before the given ISO timestamp. When both flags are provided, the age filter is applied first and the remaining newest records are capped by `--keep`. The same command also prunes old spilled JSON result files under `.boreal/results`, skipping files inside the fresh-file grace window.
 
-JSON `data` includes `deleted`, `keptBeforeOperationLog`, `remainingAfterOperationLog`, optional `keep`/`before`, and `deletedIds`.
+JSON `data` includes `deleted`, `keptBeforeOperationLog`, `remainingAfterOperationLog`, optional `keep`/`before`, `deletedIds`, and a `results` object describing removed result files.
 
 ## `operation repair`
 

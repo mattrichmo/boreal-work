@@ -24,15 +24,21 @@ interface InstallFixture {
 const execFileAsync = promisify(execFile);
 const repoRoot = fileURLToPath(new URL("../..", import.meta.url));
 const installScript = join(repoRoot, "install.sh");
-const bundledBin = join(repoRoot, "apps", "cli", "dist", "index.js");
+let bundledBin = join(repoRoot, "apps", "cli", "dist", "index.js");
+let installDistDir = join(repoRoot, "apps", "cli", "dist");
 const tempDirs: string[] = [];
+const suiteTempDirs: string[] = [];
 
 beforeAll(async () => {
+  const suiteRoot = await mkdtemp(join(tmpdir(), "boreal-install-suite-"));
+  suiteTempDirs.push(suiteRoot);
+  installDistDir = join(suiteRoot, "dist");
   await execFileAsync(process.execPath, [join(repoRoot, "tools", "build-cli-dist.mjs")], {
     cwd: repoRoot,
-    env: commandEnv({ BOREAL_INSTALL_CHANNEL: "npm" }),
+    env: commandEnv({ BOREAL_INSTALL_CHANNEL: "npm", BOREAL_BUILD_DIST_SNAPSHOT_DIR: installDistDir }),
     maxBuffer: 1024 * 1024
   });
+  bundledBin = join(installDistDir, "index.js");
 });
 
 afterEach(async () => {
@@ -41,6 +47,7 @@ afterEach(async () => {
 
 afterAll(async () => {
   await Promise.all(tempDirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
+  await Promise.all(suiteTempDirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
 });
 
 describe("install.sh", () => {
@@ -179,7 +186,11 @@ async function makeFixture(prefix: string): Promise<InstallFixture> {
 }
 
 async function writePackageJson(cwd: string): Promise<void> {
-  await writeFile(join(cwd, "package.json"), `${JSON.stringify({ name: "boreal-install-fixture", private: true }, null, 2)}\n`, "utf8");
+  await writeFile(
+    join(cwd, "package.json"),
+    `${JSON.stringify({ name: "boreal-install-fixture", private: true, packageManager: "pnpm@9.15.1" }, null, 2)}\n`,
+    "utf8"
+  );
 }
 
 async function initWorkspace(fixture: InstallFixture): Promise<void> {
@@ -260,6 +271,7 @@ function fixtureEnv(fixture: InstallFixture): NodeJS.ProcessEnv {
     HOME: fixture.root,
     BOREAL_INSTALL_BIN_DIR: fixture.binDir,
     BOREAL_INSTALL_LIB_DIR: fixture.libDir,
+    BOREAL_INSTALL_DIST_DIR: installDistDir,
     BOREAL_PROJECT_REGISTRY_ROOT: fixture.registryRoot,
     PNPM_HOME: join(fixture.root, "pnpm-home"),
     XDG_DATA_HOME: join(fixture.root, "xdg-data"),

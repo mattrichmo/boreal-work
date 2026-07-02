@@ -8,6 +8,8 @@ writes_state: true
 requires_workspace: true
 allowed_commands:
   - agent start
+  - work next
+  - work parallel
   - work create
   - work claim
   - work edit
@@ -75,8 +77,15 @@ Use this workflow when the user's request requires claim work, gather evidence, 
 Prefer `agent finish` for normal reserved work closeout because it records evidence, verifies, closes or releases, and clears the active reservation in one transaction.
 
 1. Start or resume work:
+   `bwrk work parallel --container <container-id> --limit <n> --agent-prefix <prefix> --json`
+   `bwrk work next --container <container-id> --limit <n> --json`
    `bwrk agent start --agent <agent-id> --purpose "<purpose>" --json`
+   `bwrk agent start <work-id> --agent <agent-id> --purpose "<purpose>" --json`
+   `bwrk agent start --container <container-id> --agent <agent-id> --purpose "<purpose>" --json`
    `bwrk work claim --label <label> --agent <agent-id> --purpose "<purpose>" --json`
+   `bwrk work claim <work-id> --agent <agent-id> --purpose "<purpose>" --json`
+   `bwrk work claim --container <container-id> --label <label> --agent <agent-id> --purpose "<purpose>" --json`
+   Prefer an exact `<work-id>` when the user, sprint board, task list, or handoff already names the item. Use `--container` when the intended queue is a sprint, phase, epic, or other dependency container rather than the global ready queue.
 2. Before closing, run `workflows/40-work/checkpoint-git-state.md` when the work changed code, docs, workflows, templates, tracker state, memory, generated collaboration artifacts, or any other repository state. Capture commit SHA(s) or a reason code.
 3. Finish the single active reservation after implementation, verification, and any required Git checkpoint. Include commit SHA(s) and dirty-path notes so `agent finish --close` can generate the required agent summary record:
    `bwrk agent finish current --agent <agent-id> --summary "<implemented and tested>" --kind test --command "<verification command>" --verdict passed --close --reason "<close reason>" --commit <sha> --json`
@@ -121,6 +130,7 @@ For work that requires explicit review or audit:
 - Record command/test/diff evidence before verification or closeout.
 - Keep raw source material immutable; reconcile into wiki, claims, decisions, or work instead of rewriting raw records.
 - For work changes, confirm dependency and readiness state after mutation.
+- Treat unrelated strict-doctor or Git findings as ambient caveats only after verifying they are outside the claimed work scope. Do not let pre-existing generated artifacts, nested memory repo state, or unrelated dirty paths hide the result of the claimed item.
 - Before closeout, distinguish blocking Git findings from non-blocking caveats using `sync.git.findings`; protected-branch generated artifacts or memory-index changes do not by themselves make completed work unverified.
 - Before `--close`, require a Git checkpoint commit or explicit reason code from `workflows/40-work/checkpoint-git-state.md` when repository state changed.
 - Closing work must create or reference an agent summary record. If a normal summary cannot be produced, force the summary only with a reason code and human comment.

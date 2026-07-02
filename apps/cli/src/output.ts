@@ -11,6 +11,7 @@ export interface CliOutput {
 
 export interface CliSuccessEnvelope {
   readonly ok: true;
+  readonly ledgerSeq: number | null;
   readonly data: unknown;
   readonly agentDirectives?: readonly AgentDirectiveBundle[];
 }
@@ -23,16 +24,18 @@ export interface ResultSpoolingOptions {
   readonly workspaceRoot: string;
   readonly command: string;
   readonly maxResultSizeChars: number;
+  readonly jsonEnvelopeMetadata?: () => Promise<Record<string, unknown>> | Record<string, unknown>;
 }
 
 export function formatRecord(
   value: unknown,
   json: boolean,
-  options: { readonly agentDirectives?: readonly AgentDirectiveBundle[] } = {}
+  options: { readonly agentDirectives?: readonly AgentDirectiveBundle[]; readonly ledgerSeq?: number | null } = {}
 ): string {
   if (json) {
     const envelope: CliSuccessEnvelope = {
       ok: true,
+      ledgerSeq: options.ledgerSeq ?? null,
       data: value,
       ...(options.agentDirectives && options.agentDirectives.length > 0
         ? { agentDirectives: options.agentDirectives }
@@ -56,28 +59,47 @@ export function createResultSpoolingOutput(output: CliOutput, options: ResultSpo
       output.error(text);
     },
     async flush() {
+      const metadata = await options.jsonEnvelopeMetadata?.();
       if (stdout.length <= options.maxResultSizeChars) {
-        output.write(stdout);
+        output.write(decorateJsonEnvelope(stdout, metadata));
         return;
       }
 
       const fullResultPath = resultPath(options.workspaceRoot);
       await writeTextFileAtomic(fullResultPath, stdout);
       output.write(
-        formatRecord(
-          {
-            truncated: true,
-            command: options.command,
-            maxResultSizeChars: options.maxResultSizeChars,
-            fullResultPath: relative(options.workspaceRoot, fullResultPath),
-            fullResultBytes: Buffer.byteLength(stdout, "utf8"),
-            preview: previewJsonEnvelope(stdout)
-          },
-          true
+        decorateJsonEnvelope(
+          formatRecord(
+            {
+              truncated: true,
+              command: options.command,
+              maxResultSizeChars: options.maxResultSizeChars,
+              fullResultPath: relative(options.workspaceRoot, fullResultPath),
+              fullResultBytes: Buffer.byteLength(stdout, "utf8"),
+              preview: previewJsonEnvelope(stdout)
+            },
+            true
+          ),
+          metadata
         )
       );
     }
   };
+}
+
+function decorateJsonEnvelope(text: string, metadata: Record<string, unknown> | undefined): string {
+  if (!metadata || Object.keys(metadata).length === 0) {
+    return text;
+  }
+  try {
+    const parsed = safeParseJson(text, { schemaName: "boreal.cli.output.v1", expectedObject: true });
+    if (isRecord(parsed) && parsed.ok === true && "data" in parsed) {
+      return `${JSON.stringify({ ...parsed, ...metadata }, null, 2)}\n`;
+    }
+  } catch {
+    return text;
+  }
+  return text;
 }
 
 function resultPath(workspaceRoot: string): string {

@@ -7,6 +7,7 @@ import {
   type AgentDirectiveBundle,
   BorealError,
   bindMcpProjectBoundary,
+  classifyBorealError,
   defineMcpToolContract,
   isBorealError,
   normalizeActorId,
@@ -33,6 +34,7 @@ export type BorealMcpToolName =
   | "boreal_directives_compile"
   | "boreal_directives_explain"
   | "boreal_work_next"
+  | "boreal_work_parallel"
   | "boreal_work_show"
   | "boreal_work_context"
   | "boreal_search"
@@ -126,6 +128,7 @@ interface OperationListRow {
 
 interface BorealCliEnvelope {
   readonly ok: true;
+  readonly ledgerSeq?: number | null;
   readonly data: unknown;
   readonly agentDirectives?: readonly AgentDirectiveBundle[];
 }
@@ -257,6 +260,10 @@ const TOOL_SPECS: readonly ToolSpec[] = [
     inputSchema: schema({
       ...COMMON_PROPERTIES,
       label: { type: "string" },
+      labels: { type: "array", items: { type: "string" } },
+      containerId: { type: "string", description: "Optional work container whose dependency-graph descendants scope ready work." },
+      agentId: { type: "string", description: "Agent ID to include in generated claim/start commands." },
+      purpose: { type: "string", description: "Reservation purpose to include in generated claim/start commands." },
       limit: { type: "number", minimum: 1, maximum: MAX_LIST_LIMIT }
     }),
     async run(input, context) {
@@ -264,6 +271,40 @@ const TOOL_SPECS: readonly ToolSpec[] = [
         "work",
         "next",
         ...optionalRepeatedFlag("label", stringArrayInput(input, "labels", optionalString(input, "label"))),
+        ...optionalNamedFlag("container", optionalString(input, "containerId")),
+        ...optionalNamedFlag("agent", optionalString(input, "agentId")),
+        ...optionalFlag(input, "purpose"),
+        "--limit",
+        String(limitInput(input, DEFAULT_LIST_LIMIT)),
+        "--json"
+      ]);
+    }
+  },
+  {
+    name: "boreal_work_parallel",
+    title: "Boreal parallel work queue",
+    description: "Build a read-only ready-work queue with exact agent start and work claim commands per row.",
+    kind: "read",
+    inputSchema: schema({
+      ...COMMON_PROPERTIES,
+      label: { type: "string" },
+      labels: { type: "array", items: { type: "string" } },
+      containerId: { type: "string", description: "Optional work container whose dependency-graph descendants scope ready work." },
+      agentId: { type: "string", description: "Single agent ID to include in generated commands." },
+      agentIds: { type: "array", items: { type: "string" }, description: "Agent IDs to round-robin across generated commands." },
+      agentPrefix: { type: "string", description: "Generate per-row agent IDs as <prefix>-1, <prefix>-2, and so on." },
+      purpose: { type: "string", description: "Reservation purpose to include in generated claim/start commands." },
+      limit: { type: "number", minimum: 1, maximum: MAX_LIST_LIMIT }
+    }),
+    async run(input, context) {
+      return scopedRead(context, [
+        "work",
+        "parallel",
+        ...optionalRepeatedFlag("label", stringArrayInput(input, "labels", optionalString(input, "label"))),
+        ...optionalNamedFlag("container", optionalString(input, "containerId")),
+        ...optionalRepeatedFlag("agent", stringArrayInput(input, "agentIds", optionalString(input, "agentId"))),
+        ...optionalNamedFlag("agent-prefix", optionalString(input, "agentPrefix")),
+        ...optionalFlag(input, "purpose"),
         "--limit",
         String(limitInput(input, DEFAULT_LIST_LIMIT)),
         "--json"
@@ -324,27 +365,33 @@ const TOOL_SPECS: readonly ToolSpec[] = [
   {
     name: "boreal_work_claim",
     title: "Claim Boreal work",
-    description: "Claim next ready work through bwrk work claim with lock and audit semantics.",
+    description: "Claim a specific work item or the next matching ready work through bwrk work claim with lock and audit semantics.",
     kind: "mutating",
     effects: ["state"],
     inputSchema: schema({
       ...COMMON_PROPERTIES,
       ...CONFIRM_PROPERTY,
+      workId: { type: "string", description: "Optional exact work item to claim instead of the next matching ready item." },
       agentId: { type: "string" },
       label: { type: "string" },
       labels: { type: "array", items: { type: "string" } },
+      containerId: { type: "string", description: "Optional work container whose dependency-graph descendants scope ready work." },
       purpose: { type: "string" },
       ttl: { type: "string" },
-      expiresAt: { type: "string" }
+      expiresAt: { type: "string" },
+      start: { type: "boolean", description: "Return the agent-start handoff payload after claiming or resuming." }
     }, ["confirmed", "agentId"]),
     command(input) {
       const labels = stringArrayInput(input, "labels", optionalString(input, "label"));
       return [
         "work",
         "claim",
+        ...optionalWorkIdArg(input),
+        ...(input.start === true ? ["--start"] : []),
         "--agent",
         requiredString(input, "agentId"),
         ...optionalRepeatedFlag("label", labels),
+        ...optionalNamedFlag("container", optionalString(input, "containerId")),
         ...optionalFlag(input, "purpose"),
         ...reservationExpiryArgs(input),
         "--json"
@@ -354,7 +401,7 @@ const TOOL_SPECS: readonly ToolSpec[] = [
   {
     name: "boreal_work_reserve",
     title: "Reserve Boreal work",
-    description: "Reserve a specific work item through bwrk work reserve.",
+    description: "Reserve a specific work item through bwrk work reserve and return the updated work plus active reservation.",
     kind: "mutating",
     effects: ["state"],
     inputSchema: schema({
@@ -419,6 +466,8 @@ const TOOL_SPECS: readonly ToolSpec[] = [
       workId: { type: "string" },
       agentId: { type: "string" },
       summary: { type: "string" },
+      evidence: { type: "string" },
+      evidenceIds: { type: "array", items: { type: "string" } },
       close: { type: "boolean" },
       release: { type: "boolean" },
       reason: { type: "string" },
@@ -428,14 +477,16 @@ const TOOL_SPECS: readonly ToolSpec[] = [
       uri: { type: "string" },
       verdict: { type: "string" },
       notes: { type: "string" }
-    }, ["confirmed", "workId", "summary"]),
+    }, ["confirmed", "workId"]),
     command(input) {
+      const evidence = stringArrayInput(input, "evidenceIds", optionalString(input, "evidence"));
+      const summary = optionalString(input, "summary");
       return [
         "agent",
         "finish",
         requiredString(input, "workId"),
-        "--summary",
-        requiredString(input, "summary"),
+        ...(summary ? ["--summary", summary] : []),
+        ...optionalRepeatedFlag("evidence", evidence),
         ...optionalFlag(input, "agent", optionalString(input, "agentId")),
         ...optionalFlag(input, "kind"),
         ...optionalFlag(input, "outcome"),
@@ -710,6 +761,7 @@ function parseCliData(output: string): unknown {
 function cliEnvelopeFromRecord(value: Readonly<Record<string, unknown>>): BorealCliEnvelope {
   return {
     ok: true,
+    ...(typeof value.ledgerSeq === "number" || value.ledgerSeq === null ? { ledgerSeq: value.ledgerSeq } : {}),
     data: value.data,
     ...(Array.isArray(value.agentDirectives) ? { agentDirectives: value.agentDirectives as readonly AgentDirectiveBundle[] } : {})
   };
@@ -729,8 +781,21 @@ function toolResult(payload: unknown): BorealMcpToolResult {
 
 function toolError(error: unknown): BorealMcpToolResult {
   const payload = isBorealError(error)
-    ? { ok: false, code: error.code, message: error.message, details: error.details }
-    : { ok: false, code: "BOREAL_INVARIANT", message: error instanceof Error ? error.message : String(error) };
+    ? {
+        ok: false,
+        code: error.code,
+        message: error.message,
+        retryable: classifyBorealError(error.code, error.details).retryable,
+        recovery: classifyBorealError(error.code, error.details).recovery,
+        details: error.details
+      }
+    : {
+        ok: false,
+        code: "BOREAL_INVARIANT",
+        message: error instanceof Error ? error.message : String(error),
+        retryable: false,
+        recovery: classifyBorealError("BOREAL_INVARIANT").recovery
+      };
   return {
     isError: true,
     content: [{ type: "text", text: `${JSON.stringify(payload, null, 2)}\n` }],
@@ -822,6 +887,11 @@ function limitInput(input: ToolInput, fallback: number): number {
 
 function optionalFlag(input: ToolInput, name: string, value = optionalString(input, name)): readonly string[] {
   return value ? [`--${name}`, value] : [];
+}
+
+function optionalWorkIdArg(input: ToolInput): readonly string[] {
+  const workId = optionalString(input, "workId");
+  return workId ? [workId] : [];
 }
 
 function optionalRepeatedFlag(name: string, values: readonly string[]): readonly string[] {

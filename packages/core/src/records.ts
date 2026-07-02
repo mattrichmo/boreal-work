@@ -354,6 +354,7 @@ export interface ContextPack {
   readonly id: ProjectionId;
   readonly subjectId: string;
   readonly generatedAt: IsoTimestamp;
+  readonly ledgerSeq?: number;
   readonly title: string;
   readonly summary: string;
   readonly facts: readonly string[];

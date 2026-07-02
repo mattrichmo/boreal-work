@@ -83,6 +83,14 @@ export interface WorkspaceInitializationResult {
 export interface ClaimNextWorkInput {
   readonly agentId: AgentId | string;
   readonly labels?: readonly string[];
+  readonly containerId?: WorkId;
+  readonly purpose?: string;
+  readonly expiresAt?: IsoTimestamp;
+}
+
+export interface ClaimWorkInput {
+  readonly workId: WorkId;
+  readonly agentId: AgentId | string;
   readonly purpose?: string;
   readonly expiresAt?: IsoTimestamp;
 }
@@ -215,6 +223,7 @@ export interface BorealRuntime {
   }): Promise<WorkItem>;
   markReady(workId: WorkId): Promise<WorkItem>;
   listReadyWork(): Promise<readonly WorkItemView[]>;
+  claimWork(input: ClaimWorkInput): Promise<ClaimNextWorkResult>;
   claimNextWork(input: ClaimNextWorkInput): Promise<ClaimNextWorkResult | undefined>;
   reserveWork(input: {
     readonly workId: WorkId;
@@ -456,14 +465,51 @@ export function createBorealRuntime(options: BorealRuntimeOptions = {}): BorealR
       });
     },
 
+    async claimWork(input): Promise<ClaimNextWorkResult> {
+      return store.write(async (writer) => {
+        const agentId = normalizeActorId(String(input.agentId));
+        const work = await workWithGraphDependencies(writer, await requireWork(writer, input.workId));
+        const dependencies = await loadDependencies(writer, work);
+        const derivedStatus = deriveReadinessStatus(work, dependencies);
+        const reservationResult = reserveWorkDomain({
+          work: { ...work, status: derivedStatus },
+          agentId,
+          existingReservationsForWork: await writer.listReservationsForWork(input.workId),
+          activeReservationsForAgent: await writer.listActiveReservationsForAgent(agentId),
+          policy,
+          actor,
+          now: now(),
+          purpose: input.purpose,
+          expiresAt: input.expiresAt
+        });
+        for (const released of reservationResult.releasedReservations) {
+          await writer.putReservation(released);
+        }
+        await writer.putReservation(reservationResult.reservation);
+        await writer.putWorkItem(reservationResult.work);
+        await appendEvent(writer, "work.claimed", work.meta.id, "work", {
+          agentId,
+          reservationId: reservationResult.reservation.meta.id,
+          purpose: input.purpose,
+          expiresAt: input.expiresAt,
+          exact: true
+        });
+        return reservationResult;
+      });
+    },
+
     async claimNextWork(input): Promise<ClaimNextWorkResult | undefined> {
       return store.write(async (writer) => {
         const labels = normalizeLabels(input.labels ?? []);
         const agentId = normalizeActorId(String(input.agentId));
         const candidates: WorkItem[] = [];
         const items = await writer.listWorkItems();
+        const scopedIds = input.containerId ? await workDependencyScopeIds(writer, input.containerId, items) : undefined;
         for (const item of items) {
           if (item.status !== "ready" || item.reservationId) {
+            continue;
+          }
+          if (scopedIds && !scopedIds.has(item.meta.id)) {
             continue;
           }
           if (!labels.every((label) => item.labels.includes(label))) {
@@ -938,6 +984,7 @@ export function createBorealRuntime(options: BorealRuntimeOptions = {}): BorealR
 
     async rebuildProjections(options = {}): Promise<readonly WorkItemView[]> {
       return store.write(async (writer) => {
+        const ledgerSeq = (await writer.listEvents()).length + 1;
         const workItems = await writer.listWorkItems();
         const sources = await writer.listKnowledgeSources();
         const claims = await writer.listClaims();
@@ -950,7 +997,10 @@ export function createBorealRuntime(options: BorealRuntimeOptions = {}): BorealR
             .map((dependencyId) => workItems.find((item) => item.meta.id === dependencyId))
             .filter(isWorkItem);
           const evidence = await writer.listEvidenceForSubject(work.meta.id);
-          const contextPack = buildContextPack({ work: graphWork, evidence, sources, claims, decisions, actor, now: now() });
+          const contextPack = withContextPackLedgerSeq(
+            buildContextPack({ work: graphWork, evidence, sources, claims, decisions, actor, now: now() }),
+            ledgerSeq
+          );
           const projection = buildContextProjection({ work: graphWork, evidence, sources, claims, decisions, actor, now: now() });
           const writeContextPack = !options.skipContextPackIds?.has(contextPack.id);
           const writeProjection = !options.skipProjectionIds?.has(projection.meta.id);
@@ -1165,7 +1215,50 @@ async function requireAgentWorkReservation(
   current: IsoTimestamp
 ): Promise<AgentReservation> {
   const normalizedAgentId = normalizeActorId(String(agentId));
-  const reservation = await requireActiveWorkReservation(reader, work);
+  const reservation = await getActiveWorkReservation(reader, work);
+  if (!reservation) {
+    const terminalReservation = (await reader.listReservationsForWork(work.meta.id))
+      .filter((entry) => String(entry.agentId) === normalizedAgentId)
+      .filter((entry) => entry.status === "expired" || entry.status === "released")
+      .sort((left, right) => right.meta.updatedAt.localeCompare(left.meta.updatedAt))
+      .at(0);
+    if (terminalReservation?.status === "expired") {
+      const gaps = [
+        {
+          code: "reservation.not-ready",
+          subjectType: closeoutGateSubjectTypeForWorkKind(work.kind),
+          subjectId: work.meta.id,
+          data: {
+            observed: [terminalReservation.expiresAt ?? terminalReservation.meta.updatedAt],
+            reason: "agent reservation was reaped after expiry"
+          }
+        }
+      ] satisfies readonly EnforcementGap[];
+      throw new BorealError(
+        "BOREAL_POLICY_VIOLATION",
+        "Agent reservation was reaped after expiry; claim the work again before finishing",
+        {
+          workId: work.meta.id,
+          agentId: normalizedAgentId,
+          reservationId: terminalReservation.meta.id,
+          reservationStatus: terminalReservation.status,
+          originalOwner: terminalReservation.agentId,
+          expiresAt: terminalReservation.expiresAt,
+          reapedAt: terminalReservation.meta.updatedAt,
+          repairCommand: `bwrk agent start ${work.meta.id} --agent ${normalizedAgentId} --json`,
+          gaps
+        },
+        gaps
+      );
+    }
+    throw new BorealError("BOREAL_NOT_FOUND", "Work item does not have an active reservation", {
+      workId: work.meta.id,
+      agentId: normalizedAgentId,
+      reservationId: work.reservationId,
+      latestReservationId: terminalReservation?.meta.id,
+      latestReservationStatus: terminalReservation?.status
+    });
+  }
   if (String(reservation.agentId) !== normalizedAgentId) {
     const gaps = [
       {
@@ -1897,6 +1990,37 @@ async function graphDependencyIds(reader: BorealReader, workId: WorkId): Promise
   ).sort((left, right) => left.localeCompare(right));
 }
 
+async function workDependencyScopeIds(
+  reader: BorealReader,
+  containerId: WorkId,
+  workItems: readonly WorkItem[]
+): Promise<ReadonlySet<WorkId>> {
+  const edges = await reader.listGraphEdges();
+  const workById = new Map(workItems.map((work) => [work.meta.id, work]));
+  const ids = new Set<WorkId>([containerId]);
+  const visit = (workId: WorkId): void => {
+    const work = workById.get(workId);
+    if (!work) {
+      return;
+    }
+    const dependencyIds = unique([
+      ...work.dependencyIds,
+      ...edges
+        .filter((edge) => edge.kind === "blocks" && edge.fromType === "work" && edge.toType === "work" && edge.toId === workId)
+        .map((edge) => edge.fromId as WorkId)
+    ]);
+    for (const dependencyId of dependencyIds) {
+      if (ids.has(dependencyId)) {
+        continue;
+      }
+      ids.add(dependencyId);
+      visit(dependencyId);
+    }
+  };
+  visit(containerId);
+  return ids;
+}
+
 async function workWithGraphDependencies(reader: BorealReader, work: WorkItem): Promise<WorkItem> {
   return { ...work, dependencyIds: await graphDependencyIds(reader, work.meta.id) };
 }
@@ -1973,15 +2097,26 @@ async function refreshWorkContext(
   actor: ActorRef,
   current: IsoTimestamp
 ): Promise<ContextPack> {
+  const ledgerSeq = (await writer.listEvents()).length + 1;
   const graphWork = await workWithGraphDependencies(writer, work);
   const evidence = await writer.listEvidenceForSubject(work.meta.id);
   const sources = await writer.listKnowledgeSources();
   const claims = await writer.listClaims();
   const decisions = await writer.listDecisions();
-  const pack = buildContextPack({ work: graphWork, evidence, sources, claims, decisions, actor, now: current });
+  const pack = withContextPackLedgerSeq(
+    buildContextPack({ work: graphWork, evidence, sources, claims, decisions, actor, now: current }),
+    ledgerSeq
+  );
   await writer.putContextPack(pack);
   await writer.putProjection(buildContextProjection({ work: graphWork, evidence, sources, claims, decisions, actor, now: current }));
   return pack;
+}
+
+function withContextPackLedgerSeq(pack: ContextPack, ledgerSeq: number): ContextPack {
+  return {
+    ...pack,
+    ledgerSeq
+  };
 }
 
 function compareClaimCandidates(left: WorkItem, right: WorkItem): number {
