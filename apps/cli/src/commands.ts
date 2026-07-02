@@ -8335,7 +8335,40 @@ function daemonStatusUnavailable(workspaceRoot: string, generatedAt: string, err
         message: error instanceof Error ? error.message : String(error)
       }
     ],
-    recommendedActions: []
+    recommendedActions: [],
+    agentDirectives: [],
+    directiveObligations: unavailableDaemonDirectiveObligations(generatedAt)
+  };
+}
+
+function unavailableDaemonDirectiveObligations(generatedAt: string): DaemonStatusResult["directiveObligations"] {
+  const obligationGeneratedAt = isIsoTimestamp(generatedAt) ? generatedAt : nowIso();
+  return {
+    schemaVersion: "boreal.agent-runtime.directive-obligations.v1",
+    generatedAt: obligationGeneratedAt,
+    context: "health",
+    ok: true,
+    agentDirectives: [],
+    summary: {
+      context: "health",
+      bundleCount: 0,
+      directiveCount: 0,
+      selectedRegistryIds: [],
+      emittedRegistryIds: [],
+      requiredRegistryIds: [],
+      blockingRegistryIds: [],
+      closeoutBlockingRegistryIds: [],
+      requiredCount: 0,
+      blockingCount: 0,
+      closeoutBlockingCount: 0,
+      conflictCount: 0,
+      deprecationCount: 0,
+      missingRequiredCount: 0
+    },
+    selectedRegistryIds: [],
+    dataByRegistryId: {},
+    issues: [],
+    missingRequired: []
   };
 }
 
