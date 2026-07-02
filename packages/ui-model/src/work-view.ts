@@ -32,8 +32,8 @@ export interface WorkReservationView {
   readonly expired?: boolean;
 }
 
-export type WorkDirectiveSeverity = "info" | "action" | "required" | "blocking";
-export type WorkDirectiveLane = "informational" | "recommended" | "required" | "blocked";
+export type WorkDirectiveSeverity = "advisory" | "required" | "blocking";
+export type WorkDirectiveLane = WorkDirectiveSeverity;
 
 export interface WorkDirectiveItemView {
   readonly id: string;
@@ -42,7 +42,6 @@ export interface WorkDirectiveItemView {
   readonly kind?: string;
   readonly title: string;
   readonly severity: WorkDirectiveSeverity;
-  readonly lifecycle: string;
   readonly lane: WorkDirectiveLane;
   readonly reason: string;
   readonly sourceCommand?: string;
@@ -93,10 +92,9 @@ export interface WorkDirectiveNextStepView {
 
 export interface WorkDirectiveSummaryView {
   readonly total: number;
-  readonly informational: number;
-  readonly recommended: number;
+  readonly advisory: number;
   readonly required: number;
-  readonly blocked: number;
+  readonly blocking: number;
   readonly conflictCount: number;
   readonly missingRequiredCount: number;
   readonly acknowledgementCount: number;

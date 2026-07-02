@@ -50,16 +50,13 @@
       ]
     },
     "severity": {
-      "enum": ["info", "action", "required", "blocking"]
+      "enum": ["advisory", "required", "blocking"]
     },
     "audience": {
       "enum": ["agent", "operator", "reviewer"]
     },
     "kind": {
       "enum": ["obligation", "next_step", "warning", "recovery", "summary", "acknowledgement"]
-    },
-    "lifecycle": {
-      "enum": ["proposed", "active", "satisfied", "acknowledged", "superseded", "blocked"]
     },
     "subjectType": {
       "enum": ["work", "sprint", "phase", "milestone", "project", "session", "workspace", "command"]
@@ -171,7 +168,6 @@
         "severity",
         "audience",
         "kind",
-        "lifecycle",
         "title",
         "instruction",
         "triggerCodes",
@@ -187,7 +183,6 @@
         "severity": { "$ref": "#/$defs/severity" },
         "audience": { "$ref": "#/$defs/audience" },
         "kind": { "$ref": "#/$defs/kind" },
-        "lifecycle": { "$ref": "#/$defs/lifecycle" },
         "title": { "type": "string", "minLength": 1 },
         "instruction": { "type": "string", "minLength": 1 },
         "triggerCodes": {

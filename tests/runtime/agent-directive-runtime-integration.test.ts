@@ -5,7 +5,7 @@ import {
   AGENT_DIRECTIVE_SNAPSHOT_CONTEXT_KEYS,
   AGENT_DIRECTIVE_REGISTRY,
   assertAgentDirectiveBundle,
-  assembleAgentDirectiveBundle,
+  assembleAgentDirectiveBundleFromGaps,
   compileCloseoutAgentDirectiveBundle,
   compileGitAgentDirectiveBundle,
   compileHandoffAgentDirectiveBundle,
@@ -66,11 +66,7 @@ describe("agent directive runtime compiler integration", () => {
           verificationIds: ["bw_verification_closectx1" as VerificationId],
           commitShas: ["3333333333333333333333333333333333333333"]
         }),
-        expectedRegistryIds: [
-          "git.checkpoint-required",
-          "closeout.summary-required",
-          "workflow_next.canonical-next-step"
-        ]
+        expectedRegistryIds: ["workflow_next.canonical-next-step"]
       },
       {
         context: "health",
@@ -123,7 +119,7 @@ describe("agent directive runtime compiler integration", () => {
         expect(obligations.summary.conflictCount).toBe(1);
         expect(obligations.agentDirectives[0]?.directives).toEqual(
           expect.arrayContaining([
-            expect.objectContaining({ registryId: "workflow_next.canonical-next-step", lifecycle: "blocked" })
+            expect.objectContaining({ registryId: "workflow_next.canonical-next-step", severity: "advisory" })
           ])
         );
       }
@@ -201,12 +197,8 @@ describe("agent directive runtime compiler integration", () => {
             summaryStatus: "final",
             summaryOutcome: "completed",
             closeReason: "Runtime closeout completed."
-          }),
-        expectedRegistryIds: [
-          "git.checkpoint-required",
-          "closeout.summary-required",
-          "workflow_next.canonical-next-step"
-        ]
+        }),
+        expectedRegistryIds: ["workflow_next.canonical-next-step"]
       },
       {
         name: "blocked",
@@ -285,7 +277,7 @@ describe("agent directive runtime compiler integration", () => {
               nextCommandPath: "bwrk work list --ready --json"
             })
           }),
-        expectedRegistryIds: ["git.checkpoint-required", "workflow_next.canonical-next-step"]
+        expectedRegistryIds: ["workflow_next.canonical-next-step"]
       },
       {
         name: "summary and phase",
@@ -322,8 +314,6 @@ describe("agent directive runtime compiler integration", () => {
           }),
         expectedRegistryIds: [
           "review.gate-required",
-          "git.checkpoint-required",
-          "closeout.summary-required",
           "container.descendant-closeout",
           "phase.close-rollup",
           "workflow_next.canonical-next-step"
@@ -413,8 +403,8 @@ describe("agent directive runtime compiler integration", () => {
     );
 
     expect(result.ok).toBe(true);
-    expect(blocked?.lifecycle).toBe("active");
-    expect(next?.lifecycle).toBe("blocked");
+    expect(blocked).not.toHaveProperty("lifecycle");
+    expect(next).not.toHaveProperty("lifecycle");
     expect(result.bundle?.conflicts).toEqual([
       expect.objectContaining({
         directiveIds: [blocked?.id, next?.id],
@@ -425,7 +415,7 @@ describe("agent directive runtime compiler integration", () => {
     ]);
   });
 
-  it("reports missing required runtime data instead of fabricating handoff artifacts", () => {
+  it("does not fabricate handoff artifacts when no session summary exists", () => {
     const result = compileHandoffAgentDirectiveBundle({
       snapshot: snapshotFixture({
         commandPath: "session end",
@@ -435,27 +425,11 @@ describe("agent directive runtime compiler integration", () => {
       })
     });
 
-    expect(result.ok).toBe(false);
+    expect(result.ok).toBe(true);
     expect(result.bundle).toBeDefined();
-    expect(result.selectedRegistryIds).toEqual(["handoff.session-summary", "workflow_next.canonical-next-step"]);
-    expect(result.issues).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({
-          phase: "data",
-          registryId: "handoff.session-summary",
-          path: "$.dataByRegistryId.handoff.session-summary.summaryUri",
-          message: "missing required directive data"
-        })
-      ])
-    );
-    expect(result.missingRequired).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({
-          registryId: "handoff.session-summary",
-          requirement: "summaryUri"
-        })
-      ])
-    );
+    expect(result.selectedRegistryIds).toEqual(["workflow_next.canonical-next-step"]);
+    expect(result.issues).toEqual([]);
+    expect(result.missingRequired).toEqual([]);
     expect(result.bundle?.directives.map((directive) => directive.registryId)).toEqual([
       "workflow_next.canonical-next-step"
     ]);
@@ -463,8 +437,14 @@ describe("agent directive runtime compiler integration", () => {
 
   it("keeps explicit data issues separate from trusted instruction text", () => {
     const snapshot = snapshotFixture({ commandPath: "work verify" });
-    const result = assembleAgentDirectiveBundle({
-      snapshot,
+    const result = assembleAgentDirectiveBundleFromGaps({
+      gaps: [
+        {
+          code: "gate.verification.unsatisfied",
+          subjectType: "work",
+          subjectId: "bw_work_runtime01" as WorkId
+        }
+      ],
       dataByRegistryId: {
         "verification.evidence-required": {
           subjectId: "bw_work_runtime01",
@@ -472,7 +452,11 @@ describe("agent directive runtime compiler integration", () => {
           expectedVerdict: "passed",
           evidenceIds: "bw_evidence_wrongshape"
         }
-      }
+      },
+      commandPath: snapshot.command.path,
+      capturedAt: snapshot.capturedAt,
+      envelopeSchema: snapshot.command.envelopeSchema,
+      subject: snapshot.work.subject
     });
 
     expect(result.ok).toBe(false);

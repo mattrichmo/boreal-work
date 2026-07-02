@@ -3,12 +3,9 @@ import { join, relative, resolve } from "node:path";
 
 import {
   AGENT_DIRECTIVE_REGISTRY,
-  AGENT_DIRECTIVE_SNAPSHOT_CONTEXT_KEYS,
   BorealError,
   agentDirectiveHealthReport,
-  assembleAgentDirectiveBundle,
   bindMcpProjectBoundary,
-  createAgentDirectiveSnapshot,
   detectSuspiciousUnicode,
   deterministicId,
   normalizeActorId,
@@ -16,14 +13,10 @@ import {
   nowIso,
   readJsonFile,
   runtimeSnapshotSchemaIssues,
-  type AgentDirectiveBundle,
-  type AgentDirectiveBundleAssemblyIssue,
   type AgentDirectiveHealthIssue,
   type AgentReservation,
   type AgentSummaryRecord,
-  type AgentId,
   type ClaimRecord,
-  type ContentHash,
   type ContextPack,
   type DecisionRecord,
   type DirectiveAcknowledgementRecord,
@@ -137,7 +130,7 @@ export async function runDoctor(context: CliContext, fix: boolean, strict = fals
   validateMissingIds(state, diagnostics);
   validateDuplicateIds(state, diagnostics);
   const schemaIssues = validateSchemaConformance(state, diagnostics);
-  diagnostics.push(...validateAgentDirectiveHealth(context));
+  diagnostics.push(...validateAgentDirectiveHealth());
 
   const storeDiagnostics = await validateStoreRecords(context, fix, state);
   diagnostics.push(...storeDiagnostics.diagnostics);
@@ -2065,194 +2058,26 @@ function legacyDirectiveCompatibilityDiagnostic(values: readonly unknown[]): Dia
   };
 }
 
-function validateAgentDirectiveHealth(context: CliContext): readonly Diagnostic[] {
-  const probes = buildAgentDirectiveHealthProbeBundles(context);
+function validateAgentDirectiveHealth(): readonly Diagnostic[] {
   const report = agentDirectiveHealthReport({
-    registry: AGENT_DIRECTIVE_REGISTRY,
-    bundles: probes.bundles
+    registry: AGENT_DIRECTIVE_REGISTRY
   });
-  const registryIssues = report.issues.filter((issue) => issue.source === "registry");
-  const emittedIssues = report.issues.filter((issue) => issue.source === "bundle");
-  const assemblyIssues = probes.assemblyIssues.map(agentDirectiveAssemblyHealthIssue);
 
   return [
     {
       code: "agent_directives.registry",
-      severity: diagnosticSeverityForAgentDirectiveIssues(registryIssues),
+      severity: diagnosticSeverityForAgentDirectiveIssues(report.issues),
       message:
-        registryIssues.length > 0
+        report.issues.length > 0
           ? "Agent directive registry health issues found"
           : "Agent directive registry health checks passed",
       details: {
         registryVersion: report.registryVersion,
         issueCounts: report.issueCounts,
-        issues: registryIssues
-      }
-    },
-    {
-      code: "agent_directives.emitted_bundles",
-      severity: diagnosticSeverityForAgentDirectiveIssues([...emittedIssues, ...assemblyIssues]),
-      message:
-        emittedIssues.length > 0 || assemblyIssues.length > 0
-          ? "Agent directive emitted bundle health issues found"
-          : "Agent directive emitted bundle health checks passed",
-      details: {
-        registryVersion: report.registryVersion,
-        checkedBundles: report.checkedBundles,
-        probeBundles: probes.probeBundles,
-        issueCounts: report.issueCounts,
-        issues: emittedIssues,
-        assemblyIssues
+        issues: report.issues
       }
     }
   ];
-}
-
-function buildAgentDirectiveHealthProbeBundles(context: CliContext): {
-  readonly bundles: readonly AgentDirectiveBundle[];
-  readonly assemblyIssues: readonly AgentDirectiveBundleAssemblyIssue[];
-  readonly probeBundles: ReadonlyArray<{
-    readonly commandPath: string;
-    readonly selectedRegistryIds: readonly string[];
-    readonly emittedRegistryIds: readonly string[];
-    readonly issueCount: number;
-    readonly missingRequiredCount: number;
-  }>;
-} {
-  const dataByRegistryId = {
-    "workflow_next.canonical-next-step": {
-      workflowRef: "workflows/40-work/claim-and-finish-work.md",
-      commandPath: "bwrk work list --ready --json",
-      requiredInputs: [...AGENT_DIRECTIVE_SNAPSHOT_CONTEXT_KEYS],
-      subjectId: context.workspaceRoot,
-      gitRoot: context.workspaceRoot
-    },
-    "memory.reconcile-source": {
-      sourceIds: ["raw.directive-health-probe"],
-      memoryRoot: join(context.workspaceRoot, "memory"),
-      requiredRecordTypes: ["wiki", "claim"]
-    }
-  };
-  const results = [
-    assembleAgentDirectiveBundle({
-      snapshot: agentDirectiveHealthProbeSnapshot(context, "sync refresh", "boreal.cli.sync.refresh.v1"),
-      dataByRegistryId
-    })
-  ];
-
-  return {
-    bundles: results.flatMap((result) => (result.bundle === undefined ? [] : [result.bundle])),
-    assemblyIssues: results.flatMap((result) => result.issues),
-    probeBundles: results.map((result) => ({
-      commandPath: result.bundle?.meta.commandPath ?? "sync refresh",
-      selectedRegistryIds: result.selectedRegistryIds,
-      emittedRegistryIds: result.bundle?.directives.map((directive) => directive.registryId) ?? [],
-      issueCount: result.issues.length,
-      missingRequiredCount: result.missingRequired.length
-    }))
-  };
-}
-
-function agentDirectiveHealthProbeSnapshot(context: CliContext, commandPath: string, envelopeSchema: string) {
-  const capturedAt = nowIso();
-  return createAgentDirectiveSnapshot({
-    capturedAt,
-    work: {
-      labels: [],
-      dependencyIds: [],
-      activeBlockerIds: [],
-      blockedByIds: [],
-      childWorkIds: [],
-      descendantWorkIds: [],
-      openDescendantIds: []
-    },
-    summary: {
-      summaryIds: [],
-      finalSummaryIds: [],
-      childSummaryIds: [],
-      artifactUris: [],
-      commitShas: [],
-      dirtyPathNotes: []
-    },
-    gate: {
-      requiredGates: [],
-      openGateIds: [],
-      satisfiedGateIds: [],
-      forcedGateIds: []
-    },
-    evidence: {
-      evidenceIds: [],
-      verificationIds: [],
-      evidence: [],
-      verifications: []
-    },
-    git: {
-      roots: [
-        {
-          root: context.workspaceRoot,
-          branchName: "main",
-          detached: false,
-          protectedBranch: true,
-          clean: true,
-          scopedChangedPaths: [],
-          collaborationDirtyPaths: [],
-          blockingDirtyPaths: [],
-          untrackedPaths: []
-        }
-      ],
-      checkpointCommitShas: [],
-      dirtyPathNotes: []
-    },
-    workflow: {
-      workflowRefs: ["workflows/40-work/claim-and-finish-work.md"],
-      skillRefs: ["boreal-work-execution"],
-      requiredInputNames: [...AGENT_DIRECTIVE_SNAPSHOT_CONTEXT_KEYS],
-      nextWorkflowRef: "workflows/40-work/claim-and-finish-work.md",
-      recommendedCommandPath: "bwrk work list --ready --json",
-      assetManifestHash: "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef" as ContentHash
-    },
-    doctor: {
-      ok: true,
-      strict: true,
-      diagnostics: []
-    },
-    sync: {
-      ok: true,
-      refreshed: true,
-      ledgersFresh: true,
-      searchIndexFresh: true,
-      sqliteCacheFresh: true
-    },
-    command: {
-      path: commandPath,
-      argv: [...commandPath.split(" "), "--json"],
-      envelopeSchema,
-      json: true,
-      mutatesState: true,
-      resultOk: true
-    },
-    actor: {
-      actor: {
-        id: "doctor" as AgentId,
-        kind: "agent",
-        displayName: "doctor"
-      },
-      activeAgentId: "doctor" as AgentId,
-      activeReservationIds: [],
-      purpose: "Validate agent directive registry and emitted bundle health"
-    }
-  });
-}
-
-function agentDirectiveAssemblyHealthIssue(issue: AgentDirectiveBundleAssemblyIssue): AgentDirectiveHealthIssue {
-  return {
-    kind: issue.phase === "data" ? "invalid_data" : "bundle_invalid",
-    severity: "error",
-    source: issue.phase === "registry" ? "registry" : "bundle",
-    path: issue.path,
-    message: issue.message,
-    registryId: issue.registryId
-  };
 }
 
 function diagnosticSeverityForAgentDirectiveIssues(issues: readonly AgentDirectiveHealthIssue[]): DiagnosticSeverity {

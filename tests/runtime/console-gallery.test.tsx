@@ -21,7 +21,7 @@ describe("console gallery fixture", () => {
       expect(html).toContain("Directive conflicts");
       expect(html).toContain("Directive acknowledgements");
       expect(html).toContain("Missing required directive data");
-      expect(html).toContain("blocked directives");
+      expect(html).toContain("blocking directives");
       expect(html).not.toContain("undefined");
       expect(html).not.toContain("[object Object]");
     }

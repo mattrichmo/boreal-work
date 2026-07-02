@@ -1901,10 +1901,9 @@ function directiveSummaryFromBundles(value: unknown): WorkDirectiveSummaryView |
   }
   return {
     total: items.length,
-    informational: items.filter((item) => item.lane === "informational").length,
-    recommended: items.filter((item) => item.lane === "recommended").length,
+    advisory: items.filter((item) => item.lane === "advisory").length,
     required: items.filter((item) => item.lane === "required").length,
-    blocked: items.filter((item) => item.lane === "blocked").length,
+    blocking: items.filter((item) => item.lane === "blocking").length,
     conflictCount: conflicts.length,
     missingRequiredCount: missingRequired.length,
     acknowledgementCount: items.filter((item) => item.acknowledgement).length,
@@ -1933,8 +1932,7 @@ function directiveItemFromRecord(
   }
   const data = isRecord(value.data) ? value.data : {};
   const severity = directiveSeverity(value.severity);
-  const lifecycle = stringField(value, "lifecycle", "active");
-  const lane = directiveLane(severity, lifecycle);
+  const lane = directiveLane(severity);
   const commandPath = firstStringField(data, ["commandPath", "sourceCommand"]);
   const nextCommand = sourceCommandFromPath(firstStringField(data, ["nextCommandPath", "commandPath", "sourceCommand"]));
   const sourceCommand = sourceCommandFromPath(commandPath) ?? bundleCommand;
@@ -1946,7 +1944,6 @@ function directiveItemFromRecord(
     kind: nonEmptyString(value.kind),
     title: stringField(value, "title", registryId),
     severity,
-    lifecycle,
     lane,
     reason,
     sourceCommand,
@@ -1998,7 +1995,7 @@ function directiveConflictsFromBundle(value: unknown): readonly WorkDirectiveCon
       resolution,
       resolvedDirectiveId: nonEmptyString(entry.resolvedDirectiveId),
       severity,
-      lane: directiveLane(severity, severity === "blocking" ? "blocked" : "active")
+      lane: directiveLane(severity)
     }];
   });
 }
@@ -2083,20 +2080,11 @@ function directiveReason(
 }
 
 function directiveSeverity(value: unknown): WorkDirectiveSeverity {
-  return value === "action" || value === "required" || value === "blocking" || value === "info" ? value : "info";
+  return value === "required" || value === "blocking" || value === "advisory" ? value : "advisory";
 }
 
-function directiveLane(severity: WorkDirectiveSeverity, lifecycle: string): WorkDirectiveLane {
-  if (severity === "blocking" || lifecycle === "blocked") {
-    return "blocked";
-  }
-  if (severity === "required") {
-    return "required";
-  }
-  if (severity === "action") {
-    return "recommended";
-  }
-  return "informational";
+function directiveLane(severity: WorkDirectiveSeverity): WorkDirectiveLane {
+  return severity;
 }
 
 function sourceCommandFromPath(commandPath: string | undefined): string | undefined {

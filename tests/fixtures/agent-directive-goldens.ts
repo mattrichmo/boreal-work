@@ -100,7 +100,7 @@ export const AGENT_DIRECTIVE_GOLDEN_CASES: readonly AgentDirectiveGoldenCase[] =
     },
     expected: {
       title: "Prepare sprint launch",
-      severity: "action",
+      severity: "advisory",
       kind: "obligation",
       blocksCloseout: false,
       triggerCodes: ["sprint.launch-plan.required"],
@@ -215,7 +215,7 @@ export const AGENT_DIRECTIVE_GOLDEN_CASES: readonly AgentDirectiveGoldenCase[] =
     },
     expected: {
       title: "Prepare session handoff",
-      severity: "action",
+      severity: "advisory",
       kind: "summary",
       blocksCloseout: false,
       triggerCodes: ["handoff.session-summary.required"],
@@ -336,7 +336,7 @@ export const AGENT_DIRECTIVE_GOLDEN_CASES: readonly AgentDirectiveGoldenCase[] =
     },
     expected: {
       title: "Follow next canonical workflow",
-      severity: "action",
+      severity: "advisory",
       kind: "next_step",
       blocksCloseout: false,
       triggerCodes: ["directive.workflow-next.available"],
@@ -429,7 +429,7 @@ export const AGENT_DIRECTIVE_GOLDEN_CASES: readonly AgentDirectiveGoldenCase[] =
     },
     expected: {
       title: "Reconcile source-backed memory",
-      severity: "action",
+      severity: "advisory",
       kind: "obligation",
       blocksCloseout: false,
       triggerCodes: ["memory.reconcile-source.required"],

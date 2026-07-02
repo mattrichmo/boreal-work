@@ -9592,6 +9592,48 @@ describe("bwrk cli", () => {
 	    expect(state.agentSummaries).toHaveLength(0);
 	  });
 
+	  it("rejects no_repo_changes dirty-path reason when the scoped git worktree is dirty", async () => {
+	    const rootDir = await makeTempWorkspace();
+	    await initGitRepository(rootDir, "main");
+	    await runCli(rootDir, ["init", "--json"]);
+
+	    const work = parseData<{ readonly meta: { readonly id: string } }>(
+	      (await runCli(rootDir, ["work", "create", "Dirty no-change target", "--ready", "--json"])).stdout
+	    );
+	    await writeFile(join(rootDir, "README.md"), "tracked file changed\n", "utf8");
+
+	    const invalid = await runCli(rootDir, [
+	      "work",
+	      "cancel",
+	      work.meta.id,
+	      "--reason",
+	      "claims no repo changes",
+	      "--force-summary",
+	      "--force-reason",
+	      "duplicate",
+	      "--force-comment",
+	      "Testing invalid no_repo_changes reason.",
+	      "--dirty-path",
+	      "no_repo_changes: claimed clean worktree",
+	      "--json"
+	    ]);
+
+	    expect(invalid.exitCode).toBe(1);
+	    expect(parseJson<{ readonly code: string; readonly message: string; readonly gaps?: readonly Array<{ readonly code: string }> }>(invalid.stderr)).toEqual(
+	      expect.objectContaining({
+	        code: "BOREAL_POLICY_VIOLATION",
+	        message: expect.stringContaining("no_repo_changes is invalid"),
+	        gaps: expect.arrayContaining([expect.objectContaining({ code: "git.checkpoint.required" })])
+	      })
+	    );
+	    const state = await readState<{
+	      readonly workItems: Array<{ readonly meta: { readonly id: string }; readonly status: string }>;
+	      readonly agentSummaries: readonly unknown[];
+	    }>(rootDir);
+	    expect(state.workItems.find((item) => item.meta.id === work.meta.id)?.status).toBe("ready");
+	    expect(state.agentSummaries).toHaveLength(0);
+	  });
+
 	  it("requires agent summary coverage for cancelled work and doctors terminal coverage", async () => {
     const rootDir = await makeTempWorkspace();
     await runCli(rootDir, ["init", "--json"]);

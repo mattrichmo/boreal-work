@@ -52,7 +52,7 @@ export async function writeSearchIndex(context: CliContext): Promise<SearchIndex
     const snapshot = await readSearchSnapshot(context);
     const index = buildSearchIndex(snapshot, nowIso());
     const path = searchIndexPath(context);
-    await writeTextFileAtomic(path, `${JSON.stringify(index, null, 2)}\n`);
+    await writeTextFileAtomic(path, `${JSON.stringify(index)}\n`);
     return indexWriteResult(path, index);
   });
 }

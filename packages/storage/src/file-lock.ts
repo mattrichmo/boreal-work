@@ -1,9 +1,10 @@
 import { randomUUID } from "node:crypto";
-import { mkdir, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, rm, stat } from "node:fs/promises";
 import { hostname } from "node:os";
 import { dirname, join } from "node:path";
 
 import { BorealError, nowIso, readJsonFile } from "@boreal/core";
+import { writeTextFileAtomic } from "./atomic-write.js";
 
 export interface FileLockOptions {
   readonly waitTimeoutMs: number;
@@ -51,7 +52,7 @@ export async function withFileLock<T>(
   try {
     return await operation();
   } finally {
-    heartbeat.stop();
+    await heartbeat.stop();
     await releaseFileLock(lockDir, lock.token);
   }
 }
@@ -106,7 +107,7 @@ async function acquireFileLock(lockDir: string, options: FileLockOptions): Promi
     try {
       await mkdir(lockDir);
       try {
-        await writeFile(ownerPath(lockDir), `${JSON.stringify(owner, null, 2)}\n`, "utf8");
+        await writeLockOwner(lockDir, owner);
       } catch (error) {
         await rm(lockDir, { recursive: true, force: true });
         if (isNodeError(error) && error.code === "ENOENT") {
@@ -150,12 +151,23 @@ async function removeStaleFileLock(
   expectedOwner?: LockOwner
 ): Promise<{ readonly removed: boolean; readonly inspection: FileLockInspection }> {
   return withRecoveryLock(lockDir, options, async () => {
-    const inspection = await inspectFileLock(lockDir, options);
+    let inspection = await inspectFileLock(lockDir, options);
     if (!inspection.exists) {
       return { removed: false, inspection };
     }
     if (expectedOwner && !sameLockOwner(inspection.owner, expectedOwner)) {
       return { removed: false, inspection };
+    }
+    if (inspection.stale && inspection.owner) {
+      await sleep(Math.max(options.retryDelayMs, Math.min(50, options.staleAfterMs)));
+      const refreshed = await inspectFileLock(lockDir, options);
+      if (!refreshed.exists) {
+        return { removed: false, inspection: refreshed };
+      }
+      if (expectedOwner && !sameLockOwner(refreshed.owner, expectedOwner)) {
+        return { removed: false, inspection: refreshed };
+      }
+      inspection = refreshed;
     }
     if (!inspection.stale) {
       if (throwOnActive) {
@@ -219,7 +231,7 @@ async function acquireRecoveryLock(lockDir: string, options: FileLockOptions): P
     try {
       await mkdir(lockDir);
       try {
-        await writeFile(ownerPath(lockDir), `${JSON.stringify(owner, null, 2)}\n`, "utf8");
+        await writeLockOwner(lockDir, owner);
       } catch (error) {
         await rm(lockDir, { recursive: true, force: true });
         if (isNodeError(error) && error.code === "ENOENT") {
@@ -266,15 +278,27 @@ function startLockHeartbeat(
   lockDir: string,
   owner: LockOwner,
   options: FileLockOptions
-): { readonly stop: () => void } {
+): { readonly stop: () => Promise<void> } {
   const intervalMs = Math.max(10, Math.min(10_000, Math.floor(options.staleAfterMs / 3)));
+  const pending = new Set<Promise<void>>();
+  let stopped = false;
   const interval = setInterval(() => {
-    void heartbeatLockOwner(lockDir, owner).catch(() => undefined);
+    if (stopped) {
+      return;
+    }
+    const heartbeat = heartbeatLockOwner(lockDir, owner)
+      .catch(() => undefined)
+      .finally(() => {
+        pending.delete(heartbeat);
+      });
+    pending.add(heartbeat);
   }, intervalMs);
   interval.unref();
   return {
-    stop() {
+    async stop() {
+      stopped = true;
       clearInterval(interval);
+      await Promise.all([...pending]);
     }
   };
 }
@@ -284,7 +308,11 @@ async function heartbeatLockOwner(lockDir: string, owner: LockOwner): Promise<vo
   if (!currentOwner || !sameLockOwner(currentOwner, owner)) {
     return;
   }
-  await writeFile(ownerPath(lockDir), `${JSON.stringify({ ...currentOwner, lastHeartbeatAt: nowIso() }, null, 2)}\n`, "utf8");
+  await writeLockOwner(lockDir, { ...currentOwner, lastHeartbeatAt: nowIso() });
+}
+
+async function writeLockOwner(lockDir: string, owner: LockOwner): Promise<void> {
+  await writeTextFileAtomic(ownerPath(lockDir), `${JSON.stringify(owner, null, 2)}\n`);
 }
 
 async function readLockOwner(lockDir: string): Promise<LockOwner | undefined> {

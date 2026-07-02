@@ -23,7 +23,7 @@ export const AGENT_DIRECTIVE_FAMILIES = [
   "workflow_next",
 ] as const;
 
-export const AGENT_DIRECTIVE_SEVERITIES = ["info", "action", "required", "blocking"] as const;
+export const AGENT_DIRECTIVE_SEVERITIES = ["advisory", "required", "blocking"] as const;
 export const AGENT_DIRECTIVE_AUDIENCES = ["agent", "operator", "reviewer"] as const;
 export const AGENT_DIRECTIVE_KINDS = [
   "obligation",
@@ -57,18 +57,6 @@ export const AGENT_DIRECTIVE_CONFLICT_RESOLUTIONS = [
   "registry_order",
   "manual_review"
 ] as const;
-export const AGENT_DIRECTIVE_DATA_REQUIREMENT_TYPES = [
-  "string",
-  "number",
-  "boolean",
-  "array",
-  "object",
-  "id",
-  "timestamp",
-  "content_hash",
-  "uri"
-] as const;
-
 export type AgentDirectiveId = Brand<string, "AgentDirectiveId">;
 export type AgentDirectiveBundleId = Brand<string, "AgentDirectiveBundleId">;
 export type AgentDirectiveTemplateId = Brand<string, "AgentDirectiveTemplateId">;
@@ -82,7 +70,6 @@ export type AgentDirectiveAudience = (typeof AGENT_DIRECTIVE_AUDIENCES)[number];
 export type AgentDirectiveKind = (typeof AGENT_DIRECTIVE_KINDS)[number];
 export type AgentDirectiveLifecycle = (typeof AGENT_DIRECTIVE_LIFECYCLES)[number];
 export type AgentDirectiveSubjectType = (typeof AGENT_DIRECTIVE_SUBJECT_TYPES)[number];
-export type AgentDirectiveDataRequirementType = (typeof AGENT_DIRECTIVE_DATA_REQUIREMENT_TYPES)[number];
 
 export type AgentDirectiveDataPrimitive = string | number | boolean | null;
 export type AgentDirectiveDataValue =
@@ -118,7 +105,6 @@ export interface AgentDirective {
   readonly severity: AgentDirectiveSeverity;
   readonly audience: AgentDirectiveAudience;
   readonly kind: AgentDirectiveKind;
-  readonly lifecycle: AgentDirectiveLifecycle;
   readonly title: string;
   readonly instruction: string;
   readonly triggerCodes: readonly AgentDirectiveTriggerCode[];
@@ -171,17 +157,9 @@ export interface AgentDirectiveTemplate {
   readonly acknowledgement?: AgentDirectiveAcknowledgementRequirement;
 }
 
-export interface AgentDirectiveDataRequirement {
-  readonly key: string;
-  readonly valueType: AgentDirectiveDataRequirementType;
-  readonly required: boolean;
-  readonly description: string;
-}
-
 export interface AgentDirectiveRegistryEntry extends AgentDirectiveTemplate {
   readonly lifecycle: AgentDirectiveLifecycle;
   readonly sourcePath: string;
-  readonly dataRequirements: readonly AgentDirectiveDataRequirement[];
   readonly supersedes?: readonly AgentDirectiveTemplateId[];
 }
 
@@ -276,7 +254,7 @@ export function agentDirectiveBundleIssues(
   issues.push(...conflictReferenceIssues(value.conflicts, "$.conflicts", directiveIdSet));
   issues.push(...deprecationReferenceIssues(value.deprecations, "$.deprecations", directiveIdSet));
   issues.push(
-    ...directiveRegistryLifecycleIssues(
+    ...directiveRegistryEmissionIssues(
       value.directives,
       "$.directives",
       value.deprecations,
@@ -415,13 +393,11 @@ function registryEntryIssues(
     ...enumIssues(value.audience, `${path}.audience`, AGENT_DIRECTIVE_AUDIENCES),
     ...enumIssues(value.kind, `${path}.kind`, AGENT_DIRECTIVE_KINDS),
     ...enumIssues(value.defaultLifecycle, `${path}.defaultLifecycle`, AGENT_DIRECTIVE_LIFECYCLES),
-    ...enumIssues(value.lifecycle, `${path}.lifecycle`, AGENT_DIRECTIVE_LIFECYCLES),
     ...nonEmptySafeStringIssues(value.title, `${path}.title`),
     ...nonEmptyStaticInstructionIssues(value.instruction, `${path}.instruction`),
     ...triggerCodeArrayIssues(value.triggerCodes, `${path}.triggerCodes`),
     ...nonEmptySafeStringIssues(value.nextCommandTemplate, `${path}.nextCommandTemplate`),
-    ...trustedRegistryPathIssues(value.sourcePath, `${path}.sourcePath`, options),
-    ...dataRequirementArrayIssues(value.dataRequirements, `${path}.dataRequirements`)
+    ...trustedRegistryPathIssues(value.sourcePath, `${path}.sourcePath`, options)
   ];
   if (value.blocksCloseout !== undefined && typeof value.blocksCloseout !== "boolean") {
     issues.push(issue(`${path}.blocksCloseout`, "must be a boolean"));
@@ -433,18 +409,6 @@ function registryEntryIssues(
     issues.push(...stableMachineIdArrayIssues(value.supersedes, `${path}.supersedes`));
   }
   return issues;
-}
-
-function dataRequirementArrayIssues(value: unknown, path: string): readonly AgentDirectiveBundleValidationIssue[] {
-  if (!Array.isArray(value)) {
-    return [issue(path, "must be an array")];
-  }
-  if (value.length === 0) {
-    return [issue(path, "must include at least one data requirement")];
-  }
-  const issues = value.flatMap((entry, index) => dataRequirementIssues(entry, `${path}[${index}]`));
-  const keys = value.flatMap((entry) => (isRecord(entry) && typeof entry.key === "string" ? [entry.key] : []));
-  return new Set(keys).size === keys.length ? issues : [...issues, issue(path, "must contain unique data keys")];
 }
 
 function registryFamilyOrderIssues(
@@ -520,18 +484,6 @@ function registryLifecycleIssues(
   return issues;
 }
 
-function dataRequirementIssues(value: unknown, path: string): readonly AgentDirectiveBundleValidationIssue[] {
-  if (!isRecord(value)) {
-    return [issue(path, "must be an object")];
-  }
-  return [
-    ...dataKeyIssues(value.key, `${path}.key`),
-    ...enumIssues(value.valueType, `${path}.valueType`, AGENT_DIRECTIVE_DATA_REQUIREMENT_TYPES),
-    ...(typeof value.required === "boolean" ? [] : [issue(`${path}.required`, "must be a boolean")]),
-    ...nonEmptySafeStringIssues(value.description, `${path}.description`)
-  ];
-}
-
 function directiveArrayIssues(
   value: unknown,
   path: string,
@@ -559,7 +511,6 @@ function directiveIssues(
     ...enumIssues(value.severity, `${path}.severity`, AGENT_DIRECTIVE_SEVERITIES),
     ...enumIssues(value.audience, `${path}.audience`, AGENT_DIRECTIVE_AUDIENCES),
     ...enumIssues(value.kind, `${path}.kind`, AGENT_DIRECTIVE_KINDS),
-    ...enumIssues(value.lifecycle, `${path}.lifecycle`, AGENT_DIRECTIVE_LIFECYCLES),
     ...nonEmptySafeStringIssues(value.title, `${path}.title`),
     ...nonEmptySafeStringIssues(value.instruction, `${path}.instruction`),
     ...triggerCodeArrayIssues(value.triggerCodes, `${path}.triggerCodes`),
@@ -762,7 +713,7 @@ function deprecationReferenceIssues(
   });
 }
 
-function directiveRegistryLifecycleIssues(
+function directiveRegistryEmissionIssues(
   directives: unknown,
   directivesPath: string,
   deprecations: unknown,
@@ -790,24 +741,14 @@ function directiveRegistryLifecycleIssues(
       return [];
     }
 
-    const issues: AgentDirectiveBundleValidationIssue[] = [];
     if (registryEntry.lifecycle === "superseded") {
-      if (directive.lifecycle !== "superseded") {
-        issues.push(
-          issue(
-            `${directivesPath}[${index}].lifecycle`,
-            "must be superseded when emitting a superseded registry entry"
-          )
-        );
-      }
       if (typeof directive.id === "string" && !deprecatedDirectiveIds.has(directive.id)) {
-        issues.push(issue(deprecationsPath, "must include deprecation metadata for superseded directive emission"));
+        return [issue(deprecationsPath, "must include deprecation metadata for superseded directive emission")];
       }
-      return issues;
+      return [];
     }
 
-    issues.push(issue(`${directivesPath}[${index}].registryId`, "must reference an active registry entry"));
-    return issues;
+    return [issue(`${directivesPath}[${index}].registryId`, "must reference an active registry entry")];
   });
 }
 
@@ -941,14 +882,6 @@ function optionalContentHashIssues(value: unknown, path: string): readonly Agent
     return issues;
   }
   return CONTENT_HASH_PATTERN.test(value) ? issues : [...issues, issue(path, `must match ${CONTENT_HASH_PATTERN.source}`)];
-}
-
-function dataKeyIssues(value: unknown, path: string): readonly AgentDirectiveBundleValidationIssue[] {
-  const issues = nonEmptySafeStringIssues(value, path);
-  if (typeof value !== "string") {
-    return issues;
-  }
-  return DATA_KEY_PATTERN.test(value) ? issues : [...issues, issue(path, "must use a safe data key")];
 }
 
 function literalIssues(

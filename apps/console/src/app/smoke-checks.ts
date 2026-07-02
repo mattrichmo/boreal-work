@@ -86,7 +86,7 @@ export function validateConsoleSmokeHtml(input: ConsoleSmokeHtmlInput): ConsoleS
   if (route.id === "work") {
     requireContains(input.html, "Work agent directives", "work directive panel");
     requireContains(input.html, "required directives", "directive warning state");
-    requireContains(input.html, "blocked directives", "directive blocked state");
+    requireContains(input.html, "blocking directives", "directive blocking state");
     requireContains(input.html, "Directive conflicts", "directive conflict state");
     requireContains(input.html, "Missing required directive data", "directive missing-required state");
     requireContains(input.html, "Directive acknowledgements", "directive acknowledgement state");

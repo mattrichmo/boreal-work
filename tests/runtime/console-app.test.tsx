@@ -76,7 +76,7 @@ describe("console app runtime", () => {
     expect(data.sprint.sprint.id).toBe("bw_work_5d61b84c8d43c6a9");
     expect(data.sprint.sprint.directiveSummary).toMatchObject({
       total: 1,
-      recommended: 1,
+      advisory: 1,
       acknowledgementCount: 1
     });
     expect(data.sprint.sprint.directiveSummary?.items[0]).toMatchObject({
@@ -541,9 +541,8 @@ function agentDirectivesFor(subjectId: string) {
           id: `directive.workflow_next.${subjectId}`,
           registryId: "workflow_next.canonical-next-step",
           family: "workflow_next",
-          severity: "action",
+          severity: "advisory",
           kind: "next_step",
-          lifecycle: "active",
           title: "Follow next canonical workflow",
           instruction: "Follow the named canonical workflow.",
           acknowledgement: {

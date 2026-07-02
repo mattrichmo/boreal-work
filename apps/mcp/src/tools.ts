@@ -906,6 +906,7 @@ function summarizeDirectiveBundles(bundles: readonly AgentDirectiveBundle[]): un
   return {
     bundleCount: bundles.length,
     directiveCount: directives.length,
+    advisoryCount: directives.filter((directive) => directive.severity === "advisory").length,
     requiredCount: directives.filter((directive) => directive.severity === "required").length,
     blockingCount: directives.filter((directive) => directive.severity === "blocking").length,
     conflictCount: conflicts.length,

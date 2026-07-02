@@ -185,9 +185,8 @@ function directiveSummary(subjectId: string): WorkDirectiveSummaryView {
       family: "workflow_next",
       kind: "next_step",
       title: "Follow next canonical workflow",
-      severity: "action",
-      lifecycle: "active",
-      lane: "recommended",
+      severity: "advisory",
+      lane: "advisory",
       reason: "Follow the named canonical workflow before continuing.",
       sourceCommand: `bwrk work show ${subjectId} --json`,
       nextCommand: "bwrk sync refresh --json",
@@ -202,7 +201,6 @@ function directiveSummary(subjectId: string): WorkDirectiveSummaryView {
       kind: "summary",
       title: "Prepare closeout summary",
       severity: "required",
-      lifecycle: "active",
       lane: "required",
       reason: "Closeout requires a verified user-facing summary.",
       sourceCommand: `bwrk agent finish ${subjectId} --json`,
@@ -222,8 +220,7 @@ function directiveSummary(subjectId: string): WorkDirectiveSummaryView {
       kind: "recovery",
       title: "Resolve active blockers",
       severity: "blocking",
-      lifecycle: "blocked",
-      lane: "blocked",
+      lane: "blocking",
       reason: "Blocking directive wins until active blockers are resolved.",
       sourceCommand: "bwrk dep tree bw_work_gallery_directives --json",
       nextCommand: "bwrk dep tree bw_work_gallery_directives --json",
@@ -243,9 +240,8 @@ function directiveSummary(subjectId: string): WorkDirectiveSummaryView {
       family: "context",
       kind: "reference",
       title: "Context pack available",
-      severity: "info",
-      lifecycle: "active",
-      lane: "informational",
+      severity: "advisory",
+      lane: "advisory",
       reason: "Context is available for operator review.",
       sourceCommand: `bwrk summary show ${subjectId} --json`,
       requiredInputs: [],
@@ -275,7 +271,7 @@ function directiveSummary(subjectId: string): WorkDirectiveSummaryView {
       resolution: "blocking_wins",
       resolvedDirectiveId: "directive.blocked.gallery",
       severity: "blocking",
-      lane: "blocked"
+      lane: "blocking"
     }
   ];
   const missingRequired: WorkDirectiveSummaryView["missingRequired"] = [
@@ -291,10 +287,9 @@ function directiveSummary(subjectId: string): WorkDirectiveSummaryView {
   ];
   return {
     total: items.length,
-    informational: items.filter((item) => item.lane === "informational").length,
-    recommended: items.filter((item) => item.lane === "recommended").length,
+    advisory: items.filter((item) => item.lane === "advisory").length,
     required: items.filter((item) => item.lane === "required").length,
-    blocked: items.filter((item) => item.lane === "blocked").length,
+    blocking: items.filter((item) => item.lane === "blocking").length,
     conflictCount: conflicts.length,
     missingRequiredCount: missingRequired.length,
     acknowledgementCount: items.filter((item) => item.acknowledgement).length,

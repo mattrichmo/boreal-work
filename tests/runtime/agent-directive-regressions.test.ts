@@ -129,9 +129,7 @@ describe("agent directive safety regressions", () => {
       lifecycle: "superseded",
       defaultLifecycle: "superseded"
     });
-    const bundle = bundleFixture({
-      lifecycle: "superseded"
-    });
+    const bundle = bundleFixture();
 
     expect(agentDirectiveBundleIssues(bundle, { knownRegistryEntries: supersededRegistryEntries })).toEqual(
       expect.arrayContaining([
@@ -143,30 +141,12 @@ describe("agent directive safety regressions", () => {
     );
   });
 
-  it("rejects deprecated registry entry use emitted as an active directive", () => {
-    const supersededRegistryEntries = registryEntriesWithId("closeout.summary-required" as AgentDirectiveTemplateId, {
-      lifecycle: "superseded",
-      defaultLifecycle: "superseded"
-    });
-
-    expect(agentDirectiveBundleIssues(bundleFixture(), { knownRegistryEntries: supersededRegistryEntries })).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({
-          path: "$.directives[0].lifecycle",
-          message: "must be superseded when emitting a superseded registry entry"
-        })
-      ])
-    );
-  });
-
   it("allows deprecated registry entry use when migration metadata is explicit", () => {
     const supersededRegistryEntries = registryEntriesWithId("closeout.summary-required" as AgentDirectiveTemplateId, {
       lifecycle: "superseded",
       defaultLifecycle: "superseded"
     });
-    const supersededDirective = bundleDirectiveFixture({
-      lifecycle: "superseded"
-    });
+    const supersededDirective = bundleDirectiveFixture();
     const replacementDirective = bundleDirectiveFixture({
       id: "directive.closeout-replacement" as AgentDirectiveId,
       registryId: "verification.evidence-required" as AgentDirectiveTemplateId,
@@ -243,7 +223,6 @@ function bundleDirectiveFixture(overrides: Partial<AgentDirective> = {}): AgentD
     severity: "required",
     audience: "agent",
     kind: "summary",
-    lifecycle: "active",
     title: "Respond with closeout summary",
     instruction: "Respond to the user with the verified closeout summary in your own words.",
     triggerCodes: ["closeout.user-summary.required"],

@@ -212,7 +212,7 @@ export const COMMAND_DEFINITIONS: readonly CommandDefinition[] = [
     summary: "Show a trusted agent directive registry entry.",
     usage: "bwrk directives show <directive-id> [--json]",
     description:
-      "Shows a static directive registry entry including data requirements, applies-to selectors, and replacement metadata.",
+      "Shows a static directive registry entry including trigger codes, payload fields, acknowledgement rules, and replacement metadata.",
     flags: [],
     positionals: { label: "directive id", min: 1, max: 1 },
     requiresWorkspace: false,
@@ -850,6 +850,21 @@ export const COMMAND_DEFINITIONS: readonly CommandDefinition[] = [
     usage: "bwrk prime [--agent <agent-id>] [--label <label>...] [--json]",
     description:
       "Summarizes workspace sync health, agent coordination state, current session operations, and the next concrete protocol commands. New user-facing docs should prefer `bwrk agent guide` for the loop and `bwrk agent status` for coordination state.",
+    flags: [
+      flag("agent", "value", "Agent identifier. Defaults to the CLI actor."),
+      flag("label", "value", "Only consider ready work with this label when computing claimable work.", true),
+    ],
+    positionals: { label: "arguments", min: 0, max: 0 },
+    requiresWorkspace: true,
+    supportsJson: true,
+  },
+  {
+    path: ["next"],
+    category: "agent",
+    summary: "Return the next single executable directive for an agent.",
+    usage: "bwrk next [--agent <agent-id>] [--label <label>...] [--json]",
+    description:
+      "Resolves active reservations, claimable ready work, and workspace health into one registry-projected directive with its executable command.",
     flags: [
       flag("agent", "value", "Agent identifier. Defaults to the CLI actor."),
       flag("label", "value", "Only consider ready work with this label when computing claimable work.", true),
@@ -3380,6 +3395,18 @@ const COMMAND_BEHAVIOR: Readonly<Record<string, CommandBehaviorMetadata>> = {
     maxResultSizeChars: 100_000,
     humanOutputKind: "record",
     examples: ["bwrk agent status --agent agent-a --label hardening --json"],
+  }),
+  next: commandMetadata("next", {
+    readOnly: true,
+    destructive: false,
+    writesState: false,
+    writesGeneratedArtifacts: false,
+    requiresFreshIndex: false,
+    concurrencySafe: true,
+    requiresLock: "none",
+    maxResultSizeChars: 75_000,
+    humanOutputKind: "record",
+    examples: ["bwrk next --agent agent-a --label hardening --json"],
   }),
   "session start": commandMetadata("session start", {
     readOnly: true,

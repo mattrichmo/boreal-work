@@ -372,7 +372,6 @@ function agentDirectiveBundleFixture(): AgentDirectiveBundle {
         severity: "required",
         audience: "agent",
         kind: "summary",
-        lifecycle: "active",
         title: "Respond with closeout summary",
         instruction: "Respond to the user with the verified closeout summary in your own words.",
         triggerCodes: ["closeout.user-summary.required"],

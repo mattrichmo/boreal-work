@@ -2,9 +2,10 @@ import { describe, expect, it } from "vitest";
 
 import {
   AGENT_DIRECTIVE_REGISTRY,
+  agentDirectivePayloadFields,
   agentDirectiveRegistryIssues,
   assertAgentDirectiveRegistry,
-  type AgentDirectiveDataRequirementType,
+  type AgentDirectivePayloadFieldValueType,
   type AgentDirectiveDataValue
 } from "@boreal/core";
 
@@ -46,12 +47,13 @@ describe("agent directive golden fixtures", () => {
       expect(registryEntry.triggerCodes).toEqual(goldenCase.expected.triggerCodes);
       expect(registryEntry.nextCommandTemplate).toBe(goldenCase.expected.nextCommandTemplate);
 
-      const requiredKeys = registryEntry.dataRequirements
-        .filter((requirement) => requirement.required)
-        .map((requirement) => requirement.key);
-      const optionalKeys = registryEntry.dataRequirements
-        .filter((requirement) => !requirement.required)
-        .map((requirement) => requirement.key);
+      const payloadFields = agentDirectivePayloadFields(registryEntry.id);
+      const requiredKeys = payloadFields
+        .filter((payloadField) => payloadField.required)
+        .map((payloadField) => payloadField.key);
+      const optionalKeys = payloadFields
+        .filter((payloadField) => !payloadField.required)
+        .map((payloadField) => payloadField.key);
 
       expect(goldenCase.expected.requiredKeys).toEqual(requiredKeys);
       expect(goldenCase.expected.optionalKeys).toEqual(optionalKeys);
@@ -66,24 +68,23 @@ describe("agent directive golden fixtures", () => {
         continue;
       }
 
-      const requirementsByKey = new Map(
-        registryEntry.dataRequirements.map((requirement) => [requirement.key, requirement])
-      );
+      const payloadFields = agentDirectivePayloadFields(registryEntry.id);
+      const payloadFieldsByKey = new Map(payloadFields.map((payloadField) => [payloadField.key, payloadField]));
       const fixtureKeys = Object.keys(goldenCase.data);
 
-      for (const requirement of registryEntry.dataRequirements) {
-        if (requirement.required) {
-          expect(goldenCase.data, goldenCase.name).toHaveProperty(requirement.key);
+      for (const payloadField of payloadFields) {
+        if (payloadField.required) {
+          expect(goldenCase.data, goldenCase.name).toHaveProperty(payloadField.key);
         }
       }
 
       for (const key of fixtureKeys) {
-        const requirement = requirementsByKey.get(key);
-        expect(requirement, `${goldenCase.name}:${key}`).toBeDefined();
-        if (!requirement) {
+        const payloadField = payloadFieldsByKey.get(key);
+        expect(payloadField, `${goldenCase.name}:${key}`).toBeDefined();
+        if (!payloadField) {
           continue;
         }
-        expect(matchesRequirementType(goldenCase.data[key], requirement.valueType), `${goldenCase.name}:${key}`).toBe(
+        expect(matchesRequirementType(goldenCase.data[key], payloadField.valueType), `${goldenCase.name}:${key}`).toBe(
           true
         );
       }
@@ -108,7 +109,7 @@ describe("agent directive golden fixtures", () => {
 
 function matchesRequirementType(
   value: AgentDirectiveDataValue | undefined,
-  requirementType: AgentDirectiveDataRequirementType
+  requirementType: AgentDirectivePayloadFieldValueType
 ): boolean {
   if (value === undefined || value === null) {
     return false;

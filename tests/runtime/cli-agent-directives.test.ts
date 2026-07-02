@@ -27,6 +27,23 @@ interface CliErrorEnvelope {
   readonly details?: unknown;
 }
 
+type NextCommandDirectiveForTest = AgentDirectiveBundle["directives"][number];
+
+interface NextCommandResultForTest {
+  readonly schemaVersion: "boreal.cli.next.v1";
+  readonly state: "active_reservation" | "ready_work" | "workspace_health" | "idle";
+  readonly command?: string;
+  readonly directive: NextCommandDirectiveForTest | null;
+  readonly selectionKey?: string;
+  readonly checked: {
+    readonly activeReservationIds: readonly string[];
+    readonly expiredActiveReservationIds: readonly string[];
+    readonly readyWorkCount: number;
+    readonly readyWorkId?: string;
+    readonly syncOk: boolean;
+  };
+}
+
 interface RuntimeWorkItemForDirectiveTest {
   readonly meta: { readonly id: string; readonly [key: string]: unknown };
   readonly requiredCloseoutGates?: readonly Array<{
@@ -82,7 +99,7 @@ describe("CLI agent directive envelopes", () => {
         readonly family: string;
         readonly status: string;
         readonly instruction: string;
-        readonly dataRequirements: readonly Array<{ readonly key: string; readonly required: boolean }>;
+        readonly payloadFields: readonly Array<{ readonly key: string; readonly required: boolean }>;
         readonly replacementMetadata: {
           readonly status: string;
           readonly removed: boolean;
@@ -134,7 +151,7 @@ describe("CLI agent directive envelopes", () => {
       })
     );
     expect(shown.data.directive.instruction).toContain("Respond to the user");
-    expect(shown.data.directive.dataRequirements).toEqual(
+    expect(shown.data.directive.payloadFields).toEqual(
       expect.arrayContaining([
         expect.objectContaining({ key: "summaryId", required: true }),
         expect.objectContaining({ key: "summaryUri", required: true }),
@@ -671,9 +688,7 @@ describe("CLI agent directive envelopes", () => {
 
     expect(compiled.data.schemaVersion).toBe("boreal.cli.directives.compile.v1");
     expect(compiled.data.commandPath).toBe("agent finish");
-    expect(compiled.data.selectedRegistryIds).toEqual(
-      expect.arrayContaining(["closeout.summary-required", "git.checkpoint-required"])
-    );
+    expect(compiled.data.selectedRegistryIds).toEqual(expect.arrayContaining(["closeout.summary-required"]));
     expect(compiled.data.missingRequired).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
@@ -691,7 +706,7 @@ describe("CLI agent directive envelopes", () => {
     expect(compiled.data.issueCount).toBeGreaterThan(0);
     expect(compiled.data.bundle?.missingRequired).toEqual(compiled.data.missingRequired);
     expect(compiled.data.bundle?.directives.map((directive) => directive.registryId)).toEqual(
-      expect.arrayContaining(["git.checkpoint-required", "workflow_next.canonical-next-step"])
+      expect.arrayContaining(["workflow_next.canonical-next-step"])
     );
     expect(() => assertAgentDirectiveBundle(compiled.data.bundle)).not.toThrow();
   });
@@ -786,6 +801,207 @@ describe("CLI agent directive envelopes", () => {
     expectDeclaredGateDirective(started.agentDirectives, declaredCommand, expectedObservable);
   });
 
+  it("returns one next directive across ready, active, blocked, and idle states", async () => {
+    const readyRoot = await makeTempWorkspace();
+    await runCli(readyRoot, ["init", "--json"]);
+    await runCli(readyRoot, [
+      "work",
+      "create",
+      "Ready next target",
+      "--label",
+      "next-ready",
+      "--required-gate",
+      "verification",
+      "--gate-command",
+      "echo ready next passed",
+      "--gate-expect",
+      "ready next passed",
+      "--ready",
+      "--json"
+    ]);
+    await runCli(readyRoot, ["vault", "init", "--json"]);
+    await runCli(readyRoot, ["sync", "refresh", "--json"]);
+    const ready = parseEnvelope<NextCommandResultForTest>(
+      (await runCli(readyRoot, ["next", "--agent", "next-agent", "--label", "next-ready", "--json"])).stdout
+    );
+    const readyDirective = expectSingleNextDirective(ready);
+    expect(ready.data).toEqual(
+      expect.objectContaining({
+        schemaVersion: "boreal.cli.next.v1",
+        state: "ready_work",
+        command: "bwrk work claim --agent next-agent --label next-ready --json"
+      })
+    );
+    expect(readyDirective.registryId).toBe("workflow_next.canonical-next-step");
+    expect(ready.data.directive?.registryId).toBe(readyDirective.registryId);
+
+    const readyText = await runCli(readyRoot, ["next", "--agent", "next-agent", "--label", "next-ready"]);
+    expect(readyText.stdout.trim().split("\n").at(-1)).toBe("bwrk work claim --agent next-agent --label next-ready --json");
+
+    const activeRoot = await makeTempWorkspace();
+    await runCli(activeRoot, ["init", "--json"]);
+    const declaredCommand = "pnpm test --filter next-active";
+    const activeWork = parseEnvelope<{ readonly meta: { readonly id: string } }>(
+      (
+        await runCli(activeRoot, [
+          "work",
+          "create",
+          "Active next target",
+          "--required-gate",
+          "verification",
+          "--gate-command",
+          declaredCommand,
+          "--gate-expect",
+          "next active passed",
+          "--ready",
+          "--json"
+        ])
+      ).stdout
+    );
+    await runCli(activeRoot, ["work", "reserve", activeWork.data.meta.id, "--agent", "next-active", "--json"]);
+    await runCli(activeRoot, ["vault", "init", "--json"]);
+    await runCli(activeRoot, ["sync", "refresh", "--json"]);
+    const active = parseEnvelope<NextCommandResultForTest>(
+      (await runCli(activeRoot, ["next", "--agent", "next-active", "--json"])).stdout
+    );
+    const activeDirective = expectSingleNextDirective(active);
+    expect(active.data.state).toBe("active_reservation");
+    expect(activeDirective.registryId).toBe("verification.evidence-required");
+    expect(active.data.command).toBe(declaredCommand);
+
+    const blockedRoot = await makeTempWorkspace();
+    await runCli(blockedRoot, ["init", "--json"]);
+    const blocker = parseEnvelope<{ readonly meta: { readonly id: string } }>(
+      (await runCli(blockedRoot, ["work", "create", "Blocked next blocker", "--ready", "--json"])).stdout
+    );
+    const blocked = parseEnvelope<{ readonly meta: { readonly id: string } }>(
+      (await runCli(blockedRoot, ["work", "create", "Blocked next target", "--ready", "--json"])).stdout
+    );
+    await runCli(blockedRoot, ["dep", "add", blocked.data.meta.id, blocker.data.meta.id, "--json"]);
+    await runCli(blockedRoot, [
+      "work",
+      "reserve",
+      blocked.data.meta.id,
+      "--agent",
+      "next-blocked",
+      "--force",
+      "--reason",
+      "next blocked fixture",
+      "--json"
+    ]);
+    await runCli(blockedRoot, ["vault", "init", "--json"]);
+    await runCli(blockedRoot, ["sync", "refresh", "--json"]);
+    const blockedNext = parseEnvelope<NextCommandResultForTest>(
+      (await runCli(blockedRoot, ["next", "--agent", "next-blocked", "--json"])).stdout
+    );
+    const blockedDirective = expectSingleNextDirective(blockedNext);
+    expect(blockedNext.data.state).toBe("active_reservation");
+    expect(blockedDirective.registryId).toBe("blocked.resolve-blockers");
+    expect(blockedNext.data.command).toBe(`bwrk dep tree ${blocked.data.meta.id} --json`);
+
+    const idleRoot = await makeTempWorkspace();
+    await runCli(idleRoot, ["init", "--json"]);
+    await runCli(idleRoot, ["vault", "init", "--json"]);
+    await runCli(idleRoot, ["sync", "refresh", "--json"]);
+    const idle = parseEnvelope<NextCommandResultForTest>(
+      (await runCli(idleRoot, ["next", "--agent", "idle-agent", "--json"])).stdout
+    );
+    expect(idle.agentDirectives).toBeUndefined();
+    expect(idle.data).toEqual(
+      expect.objectContaining({
+        schemaVersion: "boreal.cli.next.v1",
+        state: "idle",
+        directive: null
+      })
+    );
+    expect(idle.data.checked.readyWorkCount).toBe(0);
+  });
+
+  it("selects the same next directive on repeat invocation for identical state", async () => {
+    const rootDir = await makeTempWorkspace();
+    await runCli(rootDir, ["init", "--json"]);
+    await runCli(rootDir, ["work", "create", "Repeat next target", "--label", "next-repeat", "--ready", "--json"]);
+    await runCli(rootDir, ["vault", "init", "--json"]);
+    await runCli(rootDir, ["sync", "refresh", "--json"]);
+
+    const first = parseEnvelope<NextCommandResultForTest>(
+      (await runCli(rootDir, ["next", "--agent", "repeat-agent", "--label", "next-repeat", "--json"])).stdout
+    );
+    const second = parseEnvelope<NextCommandResultForTest>(
+      (await runCli(rootDir, ["next", "--agent", "repeat-agent", "--label", "next-repeat", "--json"])).stdout
+    );
+
+    expect(stableNextSelection(first)).toEqual(stableNextSelection(second));
+    expect(expectSingleNextDirective(first).registryId).toBe(expectSingleNextDirective(second).registryId);
+  });
+
+  it("terminates seeded next-loop simulations from canonical and randomized states", async () => {
+    const readyRoot = await makeTempWorkspace();
+    await initializeNextLoopWorkspace(readyRoot);
+    await runCli(readyRoot, ["work", "create", "Loop ready target", "--label", "loop-ready", "--ready", "--json"]);
+    await runCli(readyRoot, ["sync", "refresh", "--json"]);
+    await expect(runNextLoopSimulation(readyRoot, "loop-ready-agent", ["--label", "loop-ready"])).resolves.toEqual(
+      expect.objectContaining({ terminal: "closed" })
+    );
+
+    const declaredRoot = await makeTempWorkspace();
+    await initializeNextLoopWorkspace(declaredRoot);
+    await runCli(declaredRoot, [
+      "work",
+      "create",
+      "Loop declared gate target",
+      "--label",
+      "loop-declared",
+      "--required-gate",
+      "verification",
+      "--gate-command",
+      "echo loop declared passed",
+      "--gate-expect",
+      "loop declared passed",
+      "--ready",
+      "--json"
+    ]);
+    await runCli(declaredRoot, ["sync", "refresh", "--json"]);
+    await expect(runNextLoopSimulation(declaredRoot, "loop-declared-agent", ["--label", "loop-declared"])).resolves.toEqual(
+      expect.objectContaining({ terminal: "closed" })
+    );
+
+    const blockedRoot = await makeTempWorkspace();
+    await initializeNextLoopWorkspace(blockedRoot);
+    const blocker = await createLoopWork(blockedRoot, "Loop blocker");
+    const blocked = await createLoopWork(blockedRoot, "Loop blocked target");
+    await runCli(blockedRoot, ["dep", "add", blocked, blocker, "--json"]);
+    await runCli(blockedRoot, ["work", "reserve", blocked, "--agent", "loop-blocked-agent", "--force", "--reason", "blocked fixture", "--json"]);
+    await runCli(blockedRoot, ["sync", "refresh", "--json"]);
+    await expect(runNextLoopSimulation(blockedRoot, "loop-blocked-agent")).resolves.toEqual(
+      expect.objectContaining({ terminal: "escalation" })
+    );
+
+    const idleRoot = await makeTempWorkspace();
+    await initializeNextLoopWorkspace(idleRoot);
+    await expect(runNextLoopSimulation(idleRoot, "loop-idle-agent")).resolves.toEqual(
+      expect.objectContaining({ terminal: "idle" })
+    );
+
+    const random = seededRandom(20260702);
+    for (let index = 0; index < 4; index += 1) {
+      const rootDir = await makeTempWorkspace();
+      const agentId = `loop-random-${index}`;
+      await initializeNextLoopWorkspace(rootDir);
+      const chainLength = 2 + Math.floor(random() * 4);
+      const ids: string[] = [];
+      for (let step = 0; step < chainLength; step += 1) {
+        ids.push(await createLoopWork(rootDir, `Loop random ${index}.${step}`));
+      }
+      for (let step = 0; step < ids.length - 1; step += 1) {
+        await runCli(rootDir, ["dep", "add", ids[step] as string, ids[step + 1] as string, "--json"]);
+      }
+      await runCli(rootDir, ["work", "reserve", ids[0] as string, "--agent", agentId, "--force", "--reason", "random dependency fixture", "--json"]);
+      await runCli(rootDir, ["sync", "refresh", "--json"]);
+      await expect(runNextLoopSimulation(rootDir, agentId)).resolves.toEqual(expect.objectContaining({ terminal: "escalation" }));
+    }
+  }, 15_000);
+
   it("keeps non-directive JSON command envelopes compatible with existing data consumers", async () => {
     const rootDir = await makeTempWorkspace();
     const initialized = parseEnvelope<{ readonly initialized: boolean; readonly workspaceRoot: string }>(
@@ -849,7 +1065,6 @@ describe("CLI agent directive envelopes", () => {
         readonly code: string;
         readonly severity: string;
         readonly details?: {
-          readonly checkedBundles?: number;
           readonly issueCounts?: Record<string, number>;
         };
       }>;
@@ -870,24 +1085,14 @@ describe("CLI agent directive envelopes", () => {
         severity: "ok"
       })
     );
-    expect(directiveBundleDiagnostic).toEqual(
+    expect(directiveRegistryDiagnostic?.details?.issueCounts).toEqual(
       expect.objectContaining({
-        severity: "ok"
-      })
-    );
-    expect(directiveBundleDiagnostic?.details?.checkedBundles).toBeGreaterThan(0);
-    expect(directiveBundleDiagnostic?.details?.issueCounts).toEqual(
-      expect.objectContaining({
-        unknown_id: 0,
-        deprecated_emission: 0,
         duplicate_id: 0,
-        invalid_data: 0,
         unsafe_dynamic_instruction: 0,
-        stale_registry_version: 0,
-        missing_required_directive: 0,
-        conflict: 0
+        registry_invalid: 0
       })
     );
+    expect(directiveBundleDiagnostic).toBeUndefined();
     expect(registryIds(refresh.agentDirectives)).not.toContain("memory.reconcile-source");
     expect(refresh.agentDirectives?.[0]?.missingRequired).toEqual([]);
     expect(registryIds(doctor.agentDirectives)).not.toContain("doctor.recovery-required");
@@ -1103,6 +1308,159 @@ function registryIds(agentDirectives: readonly AgentDirectiveBundle[] | undefine
   return agentDirectives?.flatMap((bundle) => bundle.directives.map((directive) => directive.registryId)) ?? [];
 }
 
+function expectSingleNextDirective(envelope: CliEnvelope<NextCommandResultForTest>): NextCommandDirectiveForTest {
+  const directives = envelope.agentDirectives?.flatMap((bundle) => bundle.directives) ?? [];
+  expect(directives).toHaveLength(1);
+  expect(envelope.agentDirectives).toHaveLength(1);
+  expect(envelope.agentDirectives?.[0]?.directives).toHaveLength(1);
+  expect(envelope.data.directive?.registryId).toBe(directives[0]?.registryId);
+  return directives[0] as NextCommandDirectiveForTest;
+}
+
+function stableNextSelection(envelope: CliEnvelope<NextCommandResultForTest>): {
+  readonly state: NextCommandResultForTest["state"];
+  readonly command: string | undefined;
+  readonly directiveRegistryId: string | undefined;
+  readonly triggerCodes: readonly string[];
+  readonly subjectId: string | undefined;
+  readonly selectionKey: string | undefined;
+} {
+  return {
+    state: envelope.data.state,
+    command: envelope.data.command,
+    directiveRegistryId: envelope.data.directive?.registryId,
+    triggerCodes: envelope.data.directive?.triggerCodes ?? [],
+    subjectId: envelope.data.directive?.subject?.id,
+    selectionKey: envelope.data.selectionKey
+  };
+}
+
+async function initializeNextLoopWorkspace(rootDir: string): Promise<void> {
+  await runCli(rootDir, ["init", "--json"]);
+  await runCli(rootDir, ["vault", "init", "--json"]);
+  await runCli(rootDir, ["sync", "refresh", "--json"]);
+}
+
+async function createLoopWork(rootDir: string, title: string): Promise<string> {
+  return parseEnvelope<{ readonly meta: { readonly id: string } }>(
+    (await runCli(rootDir, ["work", "create", title, "--ready", "--json"])).stdout
+  ).data.meta.id;
+}
+
+async function runNextLoopSimulation(
+  rootDir: string,
+  agentId: string,
+  extraArgs: readonly string[] = [],
+  maxSteps = 8
+): Promise<{ readonly terminal: "closed" | "escalation" | "idle"; readonly steps: number; readonly commands: readonly string[] }> {
+  const seen = new Set<string>();
+  const commands: string[] = [];
+  for (let step = 0; step < maxSteps; step += 1) {
+    const envelope = parseEnvelope<NextCommandResultForTest>(
+      (await runCli(rootDir, ["next", "--agent", agentId, ...extraArgs, "--json"])).stdout
+    );
+    const command = envelope.data.command;
+    const registryId = envelope.data.directive?.registryId;
+    const stateKey = `${envelope.data.state}|${registryId ?? "none"}|${envelope.data.directive?.subject?.id ?? "none"}|${command ?? "none"}`;
+    expect(seen.has(stateKey), `next loop repeated state ${stateKey}`).toBe(false);
+    seen.add(stateKey);
+
+    if (envelope.data.state === "idle") {
+      return { terminal: "idle", steps: step + 1, commands };
+    }
+    if (!command || envelope.data.directive?.severity === "blocking" || registryId === "blocked.resolve-blockers") {
+      return { terminal: "escalation", steps: step + 1, commands };
+    }
+
+    commands.push(command);
+    if (command.startsWith("bwrk work claim ")) {
+      await runCli(rootDir, bwrkCommandArgv(command));
+      continue;
+    }
+    if (command.startsWith("bwrk sync refresh")) {
+      await runCli(rootDir, ["sync", "refresh", "--json"]);
+      continue;
+    }
+    if (command.startsWith("bwrk doctor ")) {
+      await runCli(rootDir, command.includes("--fix") ? ["doctor", "--fix", "--json"] : ["doctor", "--json"]);
+      continue;
+    }
+    if (command.startsWith("bwrk dep tree ")) {
+      return { terminal: "escalation", steps: step + 1, commands };
+    }
+
+    const subjectId = envelope.data.directive?.subject?.id;
+    if (!subjectId) {
+      return { terminal: "escalation", steps: step + 1, commands };
+    }
+    await simulateNextLoopWorkCompletion(rootDir, agentId, subjectId, command);
+    return { terminal: "closed", steps: step + 1, commands };
+  }
+  throw new Error(`next loop did not terminate within ${maxSteps} steps: ${commands.join(" -> ")}`);
+}
+
+async function simulateNextLoopWorkCompletion(
+  rootDir: string,
+  agentId: string,
+  workId: string,
+  command: string
+): Promise<void> {
+  const evidence = parseEnvelope<{ readonly meta: { readonly id: string } }>(
+    (
+      await runCli(rootDir, [
+        "evidence",
+        "add",
+        workId,
+        "--kind",
+        "command",
+        "--outcome",
+        "passed",
+        "--command",
+        command,
+        "--summary",
+        `next loop simulated executor completed ${workId}`,
+        "--json"
+      ])
+    ).stdout
+  );
+  await runCli(rootDir, ["work", "verify", workId, "--evidence", evidence.data.meta.id, "--verdict", "passed", "--json"]);
+  await runCli(rootDir, [
+    "agent",
+    "finish",
+    workId,
+    "--agent",
+    agentId,
+    "--summary",
+    `next loop property simulation closed ${workId}`,
+    "--close",
+    "--reason",
+    "completed",
+    "--kind",
+    "note",
+    "--outcome",
+    "passed",
+    "--verdict",
+    "passed",
+    "--dirty-path",
+    "no_repo_changes:next_loop_property_fixture_uses_temp_workspace",
+    "--json"
+  ]);
+}
+
+function bwrkCommandArgv(command: string): readonly string[] {
+  const tokens = command.trim().split(/\s+/u);
+  expect(tokens[0]).toBe("bwrk");
+  return tokens.slice(1);
+}
+
+function seededRandom(seed: number): () => number {
+  let state = seed >>> 0;
+  return () => {
+    state = (1664525 * state + 1013904223) >>> 0;
+    return state / 0x100000000;
+  };
+}
+
 function expectDeclaredGateDirective(
   agentDirectives: readonly AgentDirectiveBundle[] | undefined,
   declaredCommand: string,
@@ -1154,7 +1512,6 @@ function agentDirectiveBundleFixture(): AgentDirectiveBundle {
         severity: "required",
         audience: "agent",
         kind: "summary",
-        lifecycle: "active",
         title: "Respond with closeout summary",
         instruction: "Respond to the user with the verified closeout summary in your own words.",
         triggerCodes: ["closeout.user-summary.required"],

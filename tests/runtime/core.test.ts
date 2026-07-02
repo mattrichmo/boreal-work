@@ -6,8 +6,8 @@ import { describe, expect, it } from "vitest";
 
 import {
   AGENT_DIRECTIVE_BUNDLE_SCHEMA_VERSION,
-  AGENT_DIRECTIVE_DATA_REQUIREMENT_TYPES,
   AGENT_DIRECTIVE_FAMILIES,
+  AGENT_DIRECTIVE_PAYLOAD_FIELD_VALUE_TYPES,
   AGENT_DIRECTIVE_REGISTRY,
   AGENT_DIRECTIVE_REGISTRY_BY_FAMILY,
   AGENT_DIRECTIVE_REGISTRY_ENTRIES,
@@ -20,6 +20,8 @@ import {
   agentDirectiveBundleIssues,
   agentDirectiveBundleSchemaIssues,
   agentDirectiveDataIssues,
+  agentDirectivePayloadFields,
+  agentDirectivePayloadRegistryIssues,
   agentDirectiveRegistryEntriesByFamily,
   agentDirectiveRegistryIssues,
   assertAgentDirectiveBundle,
@@ -321,6 +323,7 @@ describe("core hashing and ids", () => {
   it("validates the static master agent directive registry", () => {
     expect(AGENT_DIRECTIVE_REGISTRY.version).toBe(AGENT_DIRECTIVE_REGISTRY_VERSION);
     expect(agentDirectiveRegistryIssues(AGENT_DIRECTIVE_REGISTRY)).toEqual([]);
+    expect(agentDirectivePayloadRegistryIssues(AGENT_DIRECTIVE_REGISTRY)).toEqual([]);
     expect(() => assertAgentDirectiveRegistry(AGENT_DIRECTIVE_REGISTRY)).not.toThrow();
 
     expect(AGENT_DIRECTIVE_REGISTRY_ENTRIES).toBe(AGENT_DIRECTIVE_REGISTRY.entries);
@@ -336,13 +339,14 @@ describe("core hashing and ids", () => {
       expect(entry.sourcePath).toBe(AGENT_DIRECTIVE_REGISTRY_SOURCE_PATH);
       expect(entry.lifecycle).toBe("active");
       expect(entry.instruction).not.toMatch(/\$\{|\{\{|\$[A-Za-z_]/u);
-      expect(entry.dataRequirements.length).toBeGreaterThan(0);
+      const payloadFields = agentDirectivePayloadFields(entry.id);
+      expect(payloadFields.length).toBeGreaterThan(0);
 
-      const requirementKeys = entry.dataRequirements.map((requirement) => requirement.key);
-      expect(new Set(requirementKeys).size).toBe(requirementKeys.length);
-      for (const requirement of entry.dataRequirements) {
-        expect(AGENT_DIRECTIVE_DATA_REQUIREMENT_TYPES).toContain(requirement.valueType);
-        expect(requirement.description.length).toBeGreaterThan(0);
+      const payloadFieldKeys = payloadFields.map((payloadField) => payloadField.key);
+      expect(new Set(payloadFieldKeys).size).toBe(payloadFieldKeys.length);
+      for (const payloadField of payloadFields) {
+        expect(AGENT_DIRECTIVE_PAYLOAD_FIELD_VALUE_TYPES).toContain(payloadField.valueType);
+        expect(payloadField.description.length).toBeGreaterThan(0);
       }
     }
 
@@ -1120,7 +1124,6 @@ function agentDirectiveBundleFixture(): AgentDirectiveBundle {
         severity: "required",
         audience: "agent",
         kind: "summary",
-        lifecycle: "active",
         title: "Respond with closeout summary",
         instruction: "Respond to the user with the verified closeout summary in your own words.",
         triggerCodes: ["closeout.user-summary.required"],

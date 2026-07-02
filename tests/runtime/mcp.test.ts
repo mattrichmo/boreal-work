@@ -82,7 +82,6 @@ describe("boreal MCP server", () => {
                 severity: "blocking",
                 audience: "agent",
                 kind: "recovery",
-                lifecycle: "active",
                 title: "Resolve active blockers",
                 instruction: "Stop until blockers are resolved.",
                 triggerCodes: ["work.blocked.open-dependency"],
@@ -105,10 +104,9 @@ describe("boreal MCP server", () => {
                 registryId: "workflow_next.canonical-next-step",
                 version: "v1",
                 family: "workflow_next",
-                severity: "action",
+                severity: "advisory",
                 audience: "agent",
                 kind: "next_step",
-                lifecycle: "blocked",
                 title: "Follow next canonical workflow",
                 instruction: "Follow the canonical next workflow after blockers are resolved.",
                 triggerCodes: ["directive.workflow-next.available"],
@@ -181,6 +179,7 @@ describe("boreal MCP server", () => {
     expect(payload.result.summary).toEqual(
       expect.objectContaining({
         directiveCount: 2,
+        advisoryCount: 1,
         blockingCount: 1,
         conflictCount: 1,
         missingRequiredCount: 1,
@@ -190,7 +189,7 @@ describe("boreal MCP server", () => {
     );
     expect(payload.result.agentDirectives[0]?.directives).toEqual(
       expect.arrayContaining([
-        expect.objectContaining({ registryId: "workflow_next.canonical-next-step", lifecycle: "blocked" })
+        expect.objectContaining({ registryId: "workflow_next.canonical-next-step", severity: "advisory" })
       ])
     );
   });

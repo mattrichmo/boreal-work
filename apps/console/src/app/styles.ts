@@ -329,15 +329,15 @@ tr.bw-row--selected .bw-row-select { text-decoration-color: var(--bw-accent); }
 .bw-directive-obligation header { min-width: 0; display: flex; flex-wrap: wrap; justify-content: space-between; align-items: start; gap: 8px; }
 .bw-directive-obligation header strong { color: var(--bw-text); overflow-wrap: anywhere; }
 .bw-directive-group { min-width: 0; border: 1px solid var(--bw-border); border-radius: 8px; background: rgba(255,255,255,0.015); padding: 10px; display: grid; gap: 9px; }
-.bw-directive-group--blocked { border-color: rgba(223, 124, 124, 0.6); }
+.bw-directive-group--blocking { border-color: rgba(223, 124, 124, 0.6); }
 .bw-directive-group--required { border-color: rgba(215, 185, 105, 0.55); }
-.bw-directive-group--recommended { border-color: rgba(113, 212, 139, 0.45); }
+.bw-directive-group--advisory { border-color: rgba(113, 212, 139, 0.45); }
 .bw-directive-group__header, .bw-directive-row__header { min-width: 0; display: flex; flex-wrap: wrap; align-items: start; justify-content: space-between; gap: 8px; }
 .bw-directive-group__header strong, .bw-directive-row strong, .bw-directive-mini-row strong { color: var(--bw-text); overflow-wrap: anywhere; }
 .bw-directive-row, .bw-directive-mini-row { min-width: 0; border: 1px solid var(--bw-border); border-radius: 8px; background: var(--bw-panel); padding: 10px; display: grid; gap: 8px; }
-.bw-directive-row--blocked, .bw-directive-mini-row--blocked { border-color: rgba(223, 124, 124, 0.5); }
+.bw-directive-row--blocking, .bw-directive-mini-row--blocking { border-color: rgba(223, 124, 124, 0.5); }
 .bw-directive-row--required, .bw-directive-mini-row--required { border-color: rgba(215, 185, 105, 0.48); }
-.bw-directive-row--recommended, .bw-directive-mini-row--recommended { border-color: rgba(113, 212, 139, 0.38); }
+.bw-directive-row--advisory, .bw-directive-mini-row--advisory { border-color: rgba(113, 212, 139, 0.38); }
 .bw-directive-row__header div { min-width: 0; display: grid; gap: 3px; }
 .bw-directive-row span, .bw-directive-row p, .bw-directive-mini-row span, .bw-directive-mini-row p { color: var(--bw-muted); font-size: 12px; line-height: 1.35; overflow-wrap: anywhere; margin: 0; }
 .bw-entity-header__labels, .bw-verification, .bw-ref-list__item, .bw-lock-list li, .bw-command-list, .bw-command-row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; min-width: 0; }

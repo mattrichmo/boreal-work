@@ -622,10 +622,9 @@ function DirectiveBadgeStrip({ item, emptyLabel }: { readonly item: WorkItemView
   }
   return (
     <div className="bw-directive-badges" aria-label={`${summary.total} directives for ${item.title}`}>
-      {summary.blocked > 0 ? <Badge tone="danger">{summary.blocked} blocked directives</Badge> : null}
+      {summary.blocking > 0 ? <Badge tone="danger">{summary.blocking} blocking directives</Badge> : null}
       {summary.required > 0 ? <Badge tone="warning">{summary.required} required directives</Badge> : null}
-      {summary.recommended > 0 ? <Badge tone="accent">{summary.recommended} recommended directives</Badge> : null}
-      {summary.informational > 0 ? <Badge tone="neutral">{summary.informational} informational directives</Badge> : null}
+      {summary.advisory > 0 ? <Badge tone="accent">{summary.advisory} advisory directives</Badge> : null}
       {summary.conflictCount > 0 ? <Badge tone="danger">{summary.conflictCount} directive conflicts</Badge> : null}
       {summary.missingRequiredCount > 0 ? <Badge tone="danger">{summary.missingRequiredCount} missing required</Badge> : null}
       {summary.acknowledgementCount > 0 ? <Badge tone="warning">{summary.acknowledgementCount} acknowledgements</Badge> : null}

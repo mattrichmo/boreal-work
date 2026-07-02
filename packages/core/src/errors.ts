@@ -22,7 +22,7 @@ export class BorealError extends Error {
     this.name = "BorealError";
     this.code = code;
     this.details = details;
-    this.gaps = gaps ?? gapsFromDetails(details);
+    this.gaps = gaps;
     Object.setPrototypeOf(this, new.target.prototype);
   }
 }
@@ -40,12 +40,4 @@ export function invariant(
 
 export function isBorealError(error: unknown): error is BorealError {
   return error instanceof BorealError;
-}
-
-function gapsFromDetails(details: unknown): readonly EnforcementGap[] | undefined {
-  if (!details || typeof details !== "object" || Array.isArray(details)) {
-    return undefined;
-  }
-  const gaps = (details as { readonly gaps?: unknown }).gaps;
-  return Array.isArray(gaps) ? (gaps as readonly EnforcementGap[]) : undefined;
 }

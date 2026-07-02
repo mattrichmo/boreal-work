@@ -1,6 +1,7 @@
 export * from "./clone.js";
 export * from "./agent-directive-compiler.js";
 export * from "./agent-directive-health.js";
+export * from "./agent-directive-payloads.js";
 export * from "./agent-directive-registry.js";
 export * from "./agent-directive-snapshot.js";
 export * from "./agent-directives.js";

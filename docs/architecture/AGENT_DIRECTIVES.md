@@ -1,368 +1,236 @@
 # Agent Directives
 
-Agent directives are trusted, runtime-selected instruction bundles returned by Boreal commands for the agent that is currently acting on work. They are not free-form work content, not generated policy text, and not a replacement for workflows or skills. They are a typed bridge between live Boreal state and the static operating instructions an agent should follow next.
+Agent directives are trusted command-output bundles that tell an agent what live Boreal state requires next. They are generated from enforcement gaps, looked up in a checked-in registry, and returned as typed JSON data. They are not free-form work content and they are not a second workflow engine.
 
 This contract is the implementation boundary for the Agent Directive System. The surface audit is in [Agent Directive Surface Audit](AGENT_DIRECTIVE_SURFACE_AUDIT.md).
 
-## Goals
+## Current Architecture
 
-- Return explicit, machine-readable obligations from commands that start, inspect, finish, close, recover, or hand off work.
-- Compose those obligations from a versioned static registry controlled by the Boreal codebase.
-- Pass live work, gate, verification, Git, and workflow state only as typed data fields.
-- Preserve the current workflow model: workflows remain canonical, and installed skills stay thin adapters.
-- Make closeout, sprint launch, blocked recovery, doctor recovery, handoff, Git checkpoint, workflow-next-step, and verification duties visible in JSON output and UI surfaces.
-- Provide deterministic conflict handling when multiple directive families apply to the same command result.
+The shipped model is gap projection:
 
-## Non-Goals
+1. Runtime, closeout, doctor, Git, gate, and workflow checks emit stable gap codes.
+2. Gap codes are the contract between policy enforcement and agent guidance.
+3. The directive registry maps those gap codes to trusted instruction text, family, severity, acknowledgement requirements, and payload expectations.
+4. The compiler fills typed payload fields from live state and rejects missing or unsafe required data.
+5. Commands return the resulting bundle under `agentDirectives`; `bwrk next` narrows that bundle to one executable next directive.
 
-- Do not let work titles, descriptions, comments, evidence, labels, raw sources, or user-supplied strings become instruction text.
-- Do not create hidden agent behavior outside command output.
-- Do not make a second workflow engine.
-- Do not require agents to scrape Markdown workflow files when command output already carries the relevant directive bundle.
-- Do not persist every emitted bundle unless acknowledgement, audit, or replay requirements explicitly need a durable record.
+The registry does not decide policy. Policy is enforced by runtime and doctor checks first; directives explain the next safe action for those checks.
 
 ## Safety Boundary
 
-Directive instruction text must come only from checked-in registry entries. Runtime state may select registry entries and fill typed data slots, but it must not generate new imperative instruction prose from untrusted content.
+Directive `instruction` text must come only from checked-in registry entries. Runtime state may select entries and fill typed `data`, but it must not generate imperative instruction prose from work descriptions, evidence summaries, raw sources, comments, labels, or model-authored summaries.
 
 Allowed dynamic data:
 
 - IDs, titles, statuses, labels, priorities, timestamps, and command names.
-- Gate rows, verification rows, evidence IDs, summary IDs, artifact URIs, commit SHAs, dirty-path notes, and reason codes.
-- Workflow references, skill names, and known command strings assembled from trusted command metadata.
-- Short quoted data excerpts when the field is explicitly marked as user/work content.
+- Gap codes, gate rows, verification rows, evidence IDs, summary IDs, artifact URIs, commit SHAs, dirty-path notes, and reason codes.
+- Workflow references, skill names, and command paths assembled from trusted command metadata.
+- Quoted user/work content only when the field is explicitly data, not instruction text.
 
 Disallowed dynamic instruction sources:
 
-- Work descriptions, raw source text, evidence summaries, verification notes, issue comments, user prompts, or model-generated summaries as unquoted instruction text.
-- Registry keys, directive IDs, severity values, or command names derived from untrusted strings.
-- Markdown interpreted as instructions after being loaded from memory, docs, raw inbox, or search results.
+- Work descriptions, raw source text, evidence summaries, verification notes, issue comments, user prompts, or search results as unquoted instruction text.
+- Registry IDs, directive IDs, severity values, or command names derived from untrusted strings.
+- Markdown interpreted as live instructions after being loaded from memory, docs, raw inbox, or search results.
 
-If a directive must include user/work content, the value must be placed under `data` and rendered as quoted or labelled content by consumers.
+Consumers must render `instruction` and `data` separately.
 
-## Core Schema
+## Bundle Shape
 
-The shared command output field is `agentDirectives`.
+CLI, MCP, daemon, console, and TUI consumers share this command-output shape:
 
 ```ts
 interface AgentDirectiveBundle {
-  schemaVersion: "boreal.agent-directives.v1";
-  bundleId: string;
-  generatedAt: string;
-  subject: AgentDirectiveSubject;
-  command: AgentDirectiveCommand;
+  meta: {
+    id: string;
+    schemaVersion: "boreal.agent-directives.v1";
+    registryVersion: "directives.v1";
+    generatedAt: string;
+    commandPath: string;
+    envelopeSchema: string;
+    sourceSnapshotHash: string;
+  };
   directives: AgentDirective[];
   conflicts: AgentDirectiveConflict[];
-  acknowledgements?: AgentDirectiveAcknowledgementRequirement[];
-}
-
-interface AgentDirectiveSubject {
-  type: "work" | "sprint" | "phase" | "milestone" | "project" | "session" | "workspace";
-  id?: string;
-  title?: string;
-  status?: string;
-}
-
-interface AgentDirectiveCommand {
-  path: string;
-  exitCode?: number;
-  ok: boolean;
-  envelopeSchema?: string;
+  deprecations: AgentDirectiveDeprecation[];
+  missingRequired: AgentDirectiveMissingRequiredEntry[];
 }
 
 interface AgentDirective {
   id: string;
   registryId: string;
-  family: AgentDirectiveFamily;
-  severity: "info" | "action" | "required" | "blocking";
+  version: "v1";
+  family:
+    | "blocked"
+    | "verification"
+    | "review"
+    | "audit"
+    | "git"
+    | "closeout"
+    | "doctor"
+    | "memory"
+    | "handoff"
+    | "container"
+    | "phase"
+    | "sprint"
+    | "workflow_next";
+  severity: "advisory" | "required" | "blocking";
   audience: "agent" | "operator" | "reviewer";
   kind: "obligation" | "next_step" | "warning" | "recovery" | "summary" | "acknowledgement";
-  lifecycle: "proposed" | "active" | "satisfied" | "acknowledged" | "superseded" | "blocked";
   title: string;
   instruction: string;
   triggerCodes: string[];
   nextCommandTemplate: string;
   data: Record<string, unknown>;
-  source: AgentDirectiveSource;
-  supersedes?: string[];
+  source: {
+    registryVersion: "directives.v1";
+    registryPath: string;
+    selectedBy: string[];
+    snapshotHash: string;
+  };
+  subject: {
+    type: "work" | "sprint" | "phase" | "milestone" | "project" | "session" | "workspace";
+    id?: string;
+    title?: string;
+    kind?: string;
+    status?: string;
+    priority?: string;
+    reservationId?: string;
+    closedReason?: string;
+  };
+  supersedes: string[];
   blocksCloseout?: boolean;
-}
-
-type AgentDirectiveFamily =
-  | "closeout"
-  | "git"
-  | "sprint"
-  | "phase"
-  | "container"
-  | "handoff"
-  | "doctor"
-  | "blocked"
-  | "workflow_next"
-  | "verification"
-  | "review"
-  | "audit"
-  | "memory";
-
-interface AgentDirectiveSource {
-  registryVersion: string;
-  registryPath: string;
-  selectedBy: string[];
-  snapshotHash?: string;
-}
-
-interface AgentDirectiveRegistryEntry {
-  id: string;
-  triggerCodes: string[];
-  nextCommandTemplate: string;
-  dataRequirements: AgentDirectiveDataRequirement[];
-}
-
-interface AgentDirectiveConflict {
-  directiveIds: string[];
-  resolution: "highest_severity_wins" | "blocking_wins" | "registry_order" | "manual_review";
-  selectedDirectiveId?: string;
-  reason: string;
-}
-
-interface AgentDirectiveAcknowledgementRequirement {
-  directiveId: string;
-  requiredBefore: "close" | "release" | "force_gate" | "handoff" | "none";
-  evidenceKind?: "command" | "review" | "artifact" | "note";
+  acknowledgement?: {
+    requiredBefore: "close" | "release" | "force_gate" | "handoff" | "none";
+    evidenceKind?: "command" | "review" | "artifact" | "note";
+    message: string;
+  };
 }
 ```
 
-The schema should live in `packages/core` so CLI, MCP, daemon, console, TUI, and tests share one contract.
+`agentDirectives` is transport metadata. It is not durable project truth unless the actor creates a `DirectiveAcknowledgementRecord`.
 
-## Static Registry
+## Gap Contract
 
-The registry is a checked-in library of directive entries. Each entry owns stable text, applicability rules, and default severity.
+Gap codes are stable machine strings emitted by enforcement logic. Examples:
 
-Registry entries must include:
+- `gate.verification.unsatisfied`
+- `gate.review.unsatisfied`
+- `work.blocked.open-dependency`
+- `git.checkpoint.required`
+- `summary.missing`
+- `doctor.recovery.required`
+- `search.index-stale`
+- `directive.workflow-next.available`
+
+Each registry entry declares `triggerCodes`. Selection is a direct projection from emitted gaps to entries with matching trigger codes. Tests should cover gap emission and registry projection together; a missing directive is a gap emission or registry coverage bug, not a prompt-engineering problem.
+
+## Registry
+
+The static registry owns trusted directive text and payload shape:
 
 - Stable `registryId`.
-- `family`.
-- Default `severity`.
-- Trusted `instruction` text.
-- Applicability predicates over typed state, not arbitrary strings.
-- Data slot definitions that name required runtime fields.
-- Conflict metadata, including supersedes relationships when one directive replaces another.
+- Family, severity, audience, and kind.
+- Trusted `title` and `instruction`.
+- `triggerCodes` that bind the entry to enforcement gaps.
+- `nextCommandTemplate` for command synthesis.
+- `payloadFields` from `agentDirectivePayloadFields()`.
+- Optional acknowledgement requirement and supersession metadata.
 
-Registry entries must not include:
-
-- String interpolation that turns untrusted data into instruction prose.
-- Hidden side effects.
-- Runtime-specific IDs baked into static text.
-- References to workflows, commands, or skills that are not validated by docs/schema checks.
+Registry entries must not include hidden side effects, runtime-specific IDs, or string interpolation that turns untrusted data into instructions.
 
 ## Compiler
 
-The compiler takes a typed state snapshot and returns a safe bundle.
-
-Input snapshot:
+The compiler takes a typed `AgentDirectiveSnapshot`:
 
 - Command path and envelope schema.
-- Subject type, ID, status, labels, and dependency state.
-- Reservation and active agent state.
-- Required gate status.
-- Evidence and verification coverage.
-- Agent summary coverage.
+- Subject type, ID, status, priority, labels, dependency state, and reservation state.
+- Required gate status, declared commands, expected observables, evidence, verification, and summary coverage.
 - Git checkpoint data and dirty-state classification.
-- Workflow/skill references resolved from the asset manifest.
-- Doctor/sync diagnostics when relevant.
+- Doctor/sync diagnostics.
+- Workflow and skill references resolved from the asset manifest.
 
 Compiler stages:
 
-1. Normalize input into a stable `AgentDirectiveSnapshot`.
-2. Select registry entries whose predicates match the snapshot.
-3. Validate required data slots for each selected entry.
-4. Resolve conflicts by severity, block status, supersedes metadata, then registry order.
-5. Emit the bundle with deterministic ordering.
-6. Validate the bundle schema before it reaches command output.
+1. Derive gaps from the typed snapshot.
+2. Select registry entries by trigger-code intersection.
+3. Build typed payload data.
+4. Validate required payload fields.
+5. Resolve conflicts by severity, closeout blocking, subject specificity, supersession, and stable registry order.
+6. Emit a schema-valid bundle.
 
-The compiler must fail closed for invalid registry entries and fail soft for missing optional data by emitting a diagnostic directive rather than fabricating instructions.
+The compiler fails closed for invalid registry entries. Missing optional data should appear as `missingRequired` or a diagnostic directive; it must not fabricate instructions.
 
-## Runtime And Daemon Surface
+## `bwrk next`
 
-`@boreal/agent-runtime` exposes `compileAgentRuntimeDirectiveObligations()` for non-CLI callers. The helper accepts a typed `AgentDirectiveSnapshot` and a context of `work`, `session`, `closeout`, `health`, or `handoff`, then returns:
+`bwrk next` is the single-directive command loop surface. It checks agent state and workspace health, compiles directives, selects one executable directive, and returns:
 
-- `agentDirectives`: the same bundle shape used by CLI JSON envelopes.
-- `summary`: counts for selected, emitted, required, blocking, closeout-blocking, conflict, deprecation, and missing-required directives.
-- `dataByRegistryId`, `issues`, and `missingRequired` for callers that need to inspect why a directive was selected or withheld.
+- `state`: `active_reservation`, `ready_work`, `workspace_health`, or `idle`.
+- `directive`: the selected directive, or `null` when idle.
+- `command`: the executable command to run next when available.
+- `selectionKey`: deterministic selection evidence.
+- top-level `agentDirectives`: the same selected directive as a one-item bundle.
 
-The helper composes registry-backed data builders from `packages/core`; it does not shell out to `bwrk`, read workflow Markdown, or accept dynamic instruction text.
+Selection rules:
 
-Daemon callers use `compileDaemonDirectiveObligations()` after the daemon has bound the selected project boundary. Daemon status and watch payloads also expose `agentDirectives` and `directiveObligations`, with daemon health findings mapped into typed diagnostic data for the static `doctor.recovery-required` and `workflow_next.canonical-next-step` directives.
+1. Active non-expired reservations take precedence over ready work.
+2. Expired reservations and workspace health recovery block normal work.
+3. Ready work claims before closeout validation, even when the ready item already has declared gates.
+4. Blocking beats required, required beats advisory.
+5. Ties are stable by sorted trigger codes, subject ID, registry ID, and directive ID.
 
-## Precedence And Conflict Handling
+Command extraction order is `data.command`, `data.commandPath`, the first `data.recommendedCommands`, then `data.nextCommandPath`. `bwrk` commands are normalized with `--json`.
 
-Directive precedence is deterministic:
+## Declared Gates
 
-1. `blocking` beats every lower severity.
-2. Required closeout, review, audit, verification, and checkpoint obligations beat convenience next-step directives.
-3. Specific subject directives beat workspace-wide directives.
-4. Command-specific directives beat generic family directives.
-5. Explicit `supersedes` metadata beats registry order.
-6. Registry order is the final tie-breaker and must be stable in tests.
+Declared gates are first-class closeout requirements on work records:
 
-Conflicts must be returned in `agentDirectives.conflicts` even when automatically resolved. Manual-review conflicts must use `severity=blocking` when acting without resolution could close, release, mutate, or commit the wrong thing.
+- `requiredCloseoutGates[].kind` names the gate family.
+- `declaredCommand` is the validation command an agent should run.
+- `expectedObservable` is the text that passed evidence must contain.
+- `gate.verification.unsatisfied`, `gate.review.unsatisfied`, and `gate.audit.unsatisfied` project into directive families.
 
-## Command Envelope Obligations
+For ready work, declared gates are visible but do not supersede claim guidance. Once the work is actively reserved, declared gate directives can select their validation command.
 
-Commands that change or inspect workflow state should include `agentDirectives` in JSON output when there is any non-empty directive bundle.
+## Families And Precedence
 
-Initial command groups:
+Directive families are collapsed to the registry keys used in command JSON:
 
-- Work lifecycle: `work reserve`, `work claim`, `work release`, `work verify`, `work close`, `work cancel`, `work reopen`, `agent start`, `agent finish`.
-- Closeout/reporting: `summary compose`, `summary create`, `sprint report`, `sprint close`, `gate closeout`.
-- Planning and graph: `work create`, `work edit`, `work split`, `work ready`, `dep add`, `dep remove`, `dep tree`.
-- Workflow/skills: `workflows list`, `workflows show`, `install codex`, `install claude`, `doctor skills`.
-- Health: `prime`, `sync status`, `sync refresh`, `doctor`, `lock inspect`, `operation prune`.
-- Agent surfaces: MCP tool results, daemon status/watch payloads, agent-runtime directive obligations, console live data, and TUI view models.
-
-Envelope rules:
-
-- `agentDirectives` must be inside the JSON data envelope, not mixed into human output.
-- Spooling through `.boreal/results` must preserve the full bundle.
-- Human dashboard output may summarize directives, but JSON remains canonical.
-- Error envelopes may include recovery directives when the command reached a trusted diagnostic state.
-- Commands returning nested health gates must not claim success only because the top-level `ok` is true; directives should point agents at nested `data.ok` or diagnostic failures.
-
-## Directive Families
-
-The canonical family names are stable registry keys. UI labels may be friendlier, but command JSON and tests should use these names.
-
-| Family | Primary obligation | Typical subjects | Default severity |
-| --- | --- | --- | --- |
-| `closeout` | Explain what must exist before close or cancel: verification, summary, gates, child status, and response summary. | work, sprint, phase, milestone, project | required |
-| `git` | Require root inspection, scoped path handling, commit SHA, or accepted dirty-path reason code. | work, sprint, phase, milestone, project | required |
-| `sprint` | Guide launch, report, metrics, capacity, carryover, child readiness, and sprint close. | sprint | action |
-| `phase` | Guide phase sequencing, phase-level child status, and phase closeout rollup. | phase, milestone | action |
-| `container` | Guide aggregate issue, milestone, or project container state, descendant gates, and parent closeout. | work, milestone, project | action |
-| `handoff` | Tell the next agent which context, evidence, summaries, reservations, and next workflow to consume. | session, work, sprint, project | action |
-| `doctor` | Map health diagnostics to safe repair commands and manual review commands. | workspace, project, session | required |
-| `blocked` | Explain active blockers, gate gaps, stale reservations, dependency blockers, or review blockers. | work, sprint, phase, milestone | blocking |
-| `verification` | State validation commands, evidence kinds, verdict expectations, and scope limits. | work, sprint, phase, milestone | required |
-| `review` | Require reviewer evidence, candidate selection, heartbeat movement, or force semantics. | work, sprint, phase, milestone | required |
-| `audit` | Require broader policy/security/workflow findings disposition. | work, sprint, phase, milestone, project | required |
-| `memory` | Require raw-source reconciliation, wiki/claim/decision coverage, or source-backed memory updates. | workspace, project, work | action |
-| `workflow_next` | Name the next canonical workflow, command shape, and required inputs. | work, sprint, phase, milestone, session | action |
-
-## Severity, Audience, Kind, And Lifecycle
-
-Severity controls urgency:
-
-| Severity | Meaning | Closeout effect |
+| Family | Purpose | Default effect |
 | --- | --- | --- |
-| `info` | Useful context; no immediate action required. | Never blocks closeout. |
-| `action` | Recommended next step. | Does not block unless another directive requires it. |
-| `required` | Required to satisfy the current workflow contract. | Blocks closeout when `blocksCloseout=true`. |
-| `blocking` | Acting without resolution would be unsafe or contradictory. | Blocks closeout and mutation until resolved or forced. |
+| `blocked` | Stop unsafe mutation until dependencies or blockers are resolved. | blocking |
+| `verification` | Require passed evidence and verification. | required |
+| `review` | Require review evidence or force metadata. | required |
+| `audit` | Require broad findings disposition. | required |
+| `git` | Require checkpoint SHA or accepted dirty-path reason. | required |
+| `closeout` | Require summaries, response summary, or terminal rollups. | required |
+| `doctor` | Repair generated state, locks, search, ledgers, or health. | required |
+| `memory` | Preserve source-backed memory truth. | required/advisory |
+| `handoff` | Preserve continuity after state is safe. | advisory |
+| `container`, `phase`, `sprint` | Guide parent rollups and planning. | advisory/required |
+| `workflow_next` | Name the next canonical workflow command. | advisory |
 
-Audience controls rendering:
+Conflicts are returned even when automatically resolved. A lower-priority `workflow_next` directive may still be present in the source bundle, but `bwrk next` returns only the selected directive.
 
-| Audience | Consumer |
-| --- | --- |
-| `agent` | Autonomous agent instruction and CLI/MCP JSON consumers. |
-| `operator` | Human operator dashboards, console, TUI, and handoff text. |
-| `reviewer` | Review/audit loops and gate evidence workflows. |
+## Acknowledgements
 
-Kind controls shape:
+Directive acknowledgement persistence is represented by durable `DirectiveAcknowledgementRecord` rows. Acknowledgements are separate from emitted bundles so command output does not become project truth by default.
 
-| Kind | Use |
-| --- | --- |
-| `obligation` | A required condition such as verification, checkpoint, or review. |
-| `next_step` | A recommended command or workflow transition. |
-| `warning` | A non-blocking caveat such as protected branch or unrelated dirty state. |
-| `recovery` | A repair path for doctor/sync/lock/index failures. |
-| `summary` | A user-response or handoff summary obligation. |
-| `acknowledgement` | A required acknowledgement before release, close, force, or handoff. |
+Acknowledgements link directive identity to evidence, verification, agent summaries, artifact URIs, handoffs, or reason codes. Doctor validates dangling links and classifies older summaries through the legacy backfill rules in [Agent Directive Legacy Backfill](AGENT_DIRECTIVE_LEGACY_BACKFILL.md).
 
-Lifecycle states:
+## Import And Export
 
-| Lifecycle | Meaning |
-| --- | --- |
-| `proposed` | Selected by the compiler but not yet active for this command result. |
-| `active` | Applies now. |
-| `satisfied` | Requirement has matching evidence, verification, summary, commit, or reason code. |
-| `acknowledged` | Actor acknowledged the directive requirement. |
-| `superseded` | Another directive replaces this one. |
-| `blocked` | Cannot proceed without resolution or force metadata. |
+Portable exports include durable acknowledgement records in `state.directiveAcknowledgements` and ledger section `directive-acknowledgements.jsonl`.
 
-## Family Precedence Matrix
-
-When multiple directive families apply, the compiler uses severity first and this family order second. Rows earlier in the list win ties unless explicit `supersedes` metadata says otherwise.
-
-| Rank | Family | Tie-break reason |
-| --- | --- | --- |
-| 1 | `blocked` | Prevents unsafe mutation or misleading closeout. |
-| 2 | `verification` | Proves acceptance before close or report. |
-| 3 | `review` | Satisfies explicit review gates. |
-| 4 | `audit` | Satisfies broad gate or policy obligations. |
-| 5 | `git` | Proves checkpoint or accepted no-commit reason. |
-| 6 | `closeout` | Coordinates final summary, child state, and close/cancel conditions. |
-| 7 | `doctor` | Repairs workspace health before dependent actions. |
-| 8 | `memory` | Preserves source-backed project truth. |
-| 9 | `handoff` | Preserves continuity after state is safe. |
-| 10 | `container` | Applies parent/container rollups after child safety requirements. |
-| 11 | `phase` | Applies phase sequencing after blockers and gates. |
-| 12 | `sprint` | Applies sprint launch/report behavior after blockers and gates. |
-| 13 | `workflow_next` | Provides the next command once higher obligations are handled. |
-
-Conflict examples:
-
-- A `blocked` directive for unresolved dependencies supersedes a `workflow_next` directive that would otherwise recommend claiming work.
-- A `git` directive requiring a checkpoint supersedes a `closeout` directive that says verification is complete.
-- A `doctor` directive for stale generated artifacts supersedes a `handoff` directive that would send the next agent to stale context.
-- A `memory` directive for unreconciled raw source does not supersede `verification` unless the active workflow requires source-backed memory evidence.
-
-## Source Metadata
-
-Every directive includes `source` metadata so consumers can audit why it exists:
-
-- `registryVersion`: version of the static registry.
-- `registryPath`: checked-in file that owns the trusted instruction text.
-- `selectedBy`: predicate IDs or compiler stages that selected the directive.
-- `snapshotHash`: optional hash of the normalized input snapshot.
-
-Consumers should render source metadata for debugging and tests, but agents should follow the directive body and data contract rather than reading registry files directly during normal work.
-
-## Acknowledgement
-
-Acknowledgement is optional for ordinary informational directives and required for directives that block closeout, force gates, or release work with known gaps.
-
-An acknowledgement record, if persisted, should include:
-
-- Directive ID and bundle ID.
-- Subject and command.
-- Actor and timestamp.
-- Acknowledgement outcome.
-- Evidence, verification, agent summary, artifact URI, handoff, or reason links when required.
-
-Directive acknowledgement persistence is represented by `DirectiveAcknowledgementRecord` runtime records. These records are exported with snapshots and ledgers, validated by doctor, and remain separate from emitted directive bundles so ordinary command output does not become durable state by default.
-
-Legacy closeout data remains readable during migration. Doctor treats durable acknowledgement records linked to a closeout summary, its evidence, verification, artifact URI, or handoff summary as modern directive coverage. Closeout summaries generated before the directive acknowledgement policy date, or explicitly marked through `legacy_backfill`, are classified as legacy-compatible instead of missing modern coverage. Current-policy closeout summaries without durable acknowledgement coverage are reported separately so backfill work can distinguish true gaps from accepted legacy records. The safe backfill rules are defined in [Agent Directive Legacy Backfill](AGENT_DIRECTIVE_LEGACY_BACKFILL.md).
-
-## Migration, Import, And Export
-
-Directive migration keeps three record classes separate:
-
-- emitted `agentDirectives` bundles are command-output transport metadata;
-- persisted `DirectiveAcknowledgementRecord` rows are durable runtime state;
-- legacy closeout summaries remain readable migration facts when no truthful acknowledgement can be created.
-
-Portable `boreal.export.v1` documents include durable acknowledgement records in `state.directiveAcknowledgements` and `recordCounts.directiveAcknowledgements`. JSONL ledgers write the same section as `directive-acknowledgements.jsonl`. Markdown export renders durable acknowledgements under `directive-acknowledgements/<acknowledgement-id>.md` with directive ID, registry version, command path, subject, outcome, proof links, and reason metadata.
-
-An export document may carry an `agentDirectives` top-level field when a command/result spool intentionally includes the emitted bundle alongside portable state. That carrier is schema-validated, but it is not part of `state`, not counted in `recordCounts`, and not durable proof by itself. Import and export validation reject dangling durable acknowledgement links to missing evidence, verification, agent summaries, handoff summaries, artifact URIs, work subjects, or directive IDs when a directive carrier is supplied.
-
-Release and migration notes must preserve this boundary. A migration can modernize historical records only by creating durable acknowledgements with real directive identity and proof links. If the original bundle or proof context is missing, the record remains legacy-compatible and should surface through doctor/report classifications instead of receiving fabricated acknowledgement data.
+An export may carry a top-level `agentDirectives` carrier when a command result intentionally spools the emitted bundle. That carrier is schema-validated but is not part of `state`, not counted in `recordCounts`, and not durable proof by itself.
 
 ## Consumer Rules
 
 CLI:
 
-- Emit bundle in JSON.
-- Render compact human hints only when not in JSON mode.
-- Keep registry validation in docs/schema/test gates.
+- Emit `agentDirectives` in JSON envelopes.
+- Keep human rendering compact and secondary.
+- Preserve full bundles through `.boreal/results` spooling.
 
 MCP:
 
@@ -372,28 +240,34 @@ MCP:
 Daemon:
 
 - Surface obligations and recovery suggestions.
-- Do not run repairs or mutations implicitly.
+- Do not run repairs implicitly.
 
 Console and TUI:
 
-- Render directive family, severity, subject, blocking status, and next command.
-- Keep data fields visibly separate from trusted instruction text.
+- Render family, severity, subject, blocking status, and next command.
+- Keep typed payload data visibly separate from trusted instruction text.
 
 Skills and workflows:
 
-- Continue routing through canonical workflow files.
-- Prefer command-returned directives for live obligations.
-- Avoid duplicating dynamic closeout or Git policy in generated skill prose.
+- Stay thin.
+- Inspect every returned bundle.
+- Follow blocking and required directives before state-changing work.
+- Use `bwrk next` or `workflow_next` payloads for the next command instead of duplicating live policy.
+
+## Superseded Design Note
+
+Earlier sketches described registry entries as owning `appliesTo` matching and lifecycle states such as `active`, `satisfied`, and `superseded`. That design is superseded. The shipped system derives enforcement gaps first, then projects those gap codes through the registry. Historical notes may mention `appliesTo` only when explaining that retired matcher model.
 
 ## Verification Requirements
 
-Implementation is not complete until tests prove:
+Implementation is complete when tests prove:
 
 - Untrusted work content cannot become trusted instruction text.
-- Registry entries validate before use.
-- Bundle schema is stable and versioned.
+- Gap emission covers each enforced policy.
+- Registry projection is deterministic and schema-valid.
+- Payload fields are validated.
 - Conflict handling is deterministic.
-- CLI JSON spooling preserves full directive bundles.
-- Closeout, sprint launch, doctor, handoff, Git checkpoint, workflow-next, and verification directives appear on the expected command outputs.
+- CLI JSON spooling preserves bundles.
+- `bwrk next` returns one selected directive across ready, active, blocked, health, and idle states.
+- Closeout, sprint launch, doctor, handoff, Git checkpoint, workflow-next, review, audit, and verification directives appear on expected command outputs.
 - MCP, daemon, console, and TUI consumers preserve directive fields without silently mutating state.
-- Import/export and doctor behavior are defined for any persisted acknowledgement records.

@@ -305,9 +305,8 @@ function directiveSummary(subjectId: string): WorkDirectiveSummaryView {
       family: "workflow_next",
       kind: "next_step",
       title: "Follow next canonical workflow",
-      severity: "action",
-      lifecycle: "active",
-      lane: "recommended",
+      severity: "advisory",
+      lane: "advisory",
       reason: "Follow the named canonical workflow and pass only typed inputs to the next command.",
       sourceCommand: `bwrk work show ${subjectId} --json`,
       nextCommand: `bwrk work show ${subjectId} --json`,
@@ -322,7 +321,6 @@ function directiveSummary(subjectId: string): WorkDirectiveSummaryView {
       kind: "final_response",
       title: "Prepare final user summary",
       severity: "required",
-      lifecycle: "active",
       lane: "required",
       reason: "Closed successful work must provide a user-facing summary in the agent response.",
       sourceCommand: `bwrk agent finish ${subjectId} --json`,
@@ -342,8 +340,7 @@ function directiveSummary(subjectId: string): WorkDirectiveSummaryView {
       kind: "blocked",
       title: "Resolve blocking dirty state",
       severity: "blocking",
-      lifecycle: "blocked",
-      lane: "blocked",
+      lane: "blocking",
       reason: "The directive is blocked until related work has a clean checkpoint or dirty-path reason.",
       sourceCommand: "bwrk doctor --json",
       nextCommand: "bwrk doctor --json",
@@ -363,9 +360,8 @@ function directiveSummary(subjectId: string): WorkDirectiveSummaryView {
       family: "context",
       kind: "reference",
       title: "Context pack available",
-      severity: "info",
-      lifecycle: "active",
-      lane: "informational",
+      severity: "advisory",
+      lane: "advisory",
       reason: "A context pack is available for operator review.",
       sourceCommand: `bwrk summary show ${subjectId} --json`,
       requiredInputs: [],
@@ -395,7 +391,7 @@ function directiveSummary(subjectId: string): WorkDirectiveSummaryView {
       resolution: "blocking_wins",
       resolvedDirectiveId: `directive.git.blocked-dirty-state.${subjectId}`,
       severity: "blocking",
-      lane: "blocked"
+      lane: "blocking"
     }
   ];
   const missingRequired: WorkDirectiveSummaryView["missingRequired"] = [
@@ -411,10 +407,9 @@ function directiveSummary(subjectId: string): WorkDirectiveSummaryView {
   ];
   return {
     total: items.length,
-    informational: items.filter((item) => item.lane === "informational").length,
-    recommended: items.filter((item) => item.lane === "recommended").length,
+    advisory: items.filter((item) => item.lane === "advisory").length,
     required: items.filter((item) => item.lane === "required").length,
-    blocked: items.filter((item) => item.lane === "blocked").length,
+    blocking: items.filter((item) => item.lane === "blocking").length,
     conflictCount: conflicts.length,
     missingRequiredCount: missingRequired.length,
     acknowledgementCount: items.filter((item) => item.acknowledgement).length,

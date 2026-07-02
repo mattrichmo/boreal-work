@@ -194,7 +194,7 @@ JSON `data` uses schema `boreal.cli.directives.list.v1` and contains the registr
 bwrk directives show <directive-id> [--json]
 ```
 
-Shows one trusted static directive registry entry. The payload includes the instruction text, applies-to selectors, acknowledgement rule, data requirements, and replacement metadata derived from registry `supersedes` links.
+Shows one trusted static directive registry entry. The payload includes the instruction text, trigger codes, payload fields, acknowledgement rules, and replacement metadata derived from registry `supersedes` links.
 
 JSON `data` uses schema `boreal.cli.directives.show.v1`.
 
@@ -337,6 +337,14 @@ bwrk status [--agent <agent-id>] [--label <label>...] [--json]
 ```
 
 Compatibility alias for `bwrk prime`. It prints the compact agent/session startup brief without claiming work. New agent-facing instructions should prefer `bwrk agent guide` for the command loop and `bwrk agent status` for coordination state.
+
+## `next`
+
+```bash
+bwrk next [--agent <agent-id>] [--label <label>...] [--json]
+```
+
+Returns the next single executable directive for an agent. The command checks active reservations first, then claimable ready work, then workspace health. JSON output uses schema `boreal.cli.next.v1` and returns `state`, `checked`, one selected `directive` with `command`, and a top-level `agentDirectives` bundle containing exactly that directive. When nothing applies, it returns `state: "idle"` with `directive: null`. Plain output prints the executable command on the last line when a directive has a command.
 
 ## `workflows list`
 

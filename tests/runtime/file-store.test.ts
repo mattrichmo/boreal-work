@@ -148,9 +148,9 @@ describe("file-backed store", () => {
         const store = new FileBorealStore({
           rootDir,
           lock: {
-            waitTimeoutMs: 2_000,
-            staleAfterMs: 1,
-            retryDelayMs: 5
+            waitTimeoutMs: 10_000,
+            staleAfterMs: 500,
+            retryDelayMs: 10
           }
         });
         const work = createWorkItem({
@@ -259,17 +259,17 @@ describe("file-backed store", () => {
     await withFileLock(
       lockDir,
       {
-        waitTimeoutMs: 250,
-        staleAfterMs: 30,
-        retryDelayMs: 5
+        waitTimeoutMs: 1_000,
+        staleAfterMs: 500,
+        retryDelayMs: 10
       },
       async () => {
-        await sleep(90);
-        const inspection = await inspectFileLock(lockDir, { staleAfterMs: 30 });
+        await sleep(1_200);
+        const inspection = await inspectFileLock(lockDir, { staleAfterMs: 500 });
         insideHeartbeat = inspection.owner?.lastHeartbeatAt;
         expect(inspection).toMatchObject({ exists: true, stale: false });
         expect(inspection.owner?.lastHeartbeatAt).toBeDefined();
-        await expect(breakStaleFileLock(lockDir, { waitTimeoutMs: 250, staleAfterMs: 30, retryDelayMs: 5 }))
+        await expect(breakStaleFileLock(lockDir, { waitTimeoutMs: 1_000, staleAfterMs: 500, retryDelayMs: 10 }))
           .rejects.toMatchObject({
             code: "BOREAL_CONFLICT"
           } satisfies Partial<BorealError>);

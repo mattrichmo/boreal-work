@@ -8,7 +8,6 @@ import {
   type AgentDirectiveBundleId,
   type AgentDirectiveConflict,
   type AgentDirectiveData,
-  type AgentDirectiveDataRequirement,
   type AgentDirectiveDataValue,
   type AgentDirectiveId,
   type AgentDirectiveMissingRequiredEntry,
@@ -17,6 +16,10 @@ import {
   type AgentDirectiveSubject,
   type AgentDirectiveTemplateId
 } from "./agent-directives.js";
+import {
+  agentDirectivePayloadFields,
+  type AgentDirectivePayloadField
+} from "./agent-directive-payloads.js";
 import { AGENT_DIRECTIVE_REGISTRY } from "./agent-directive-registry.js";
 import {
   agentDirectiveSnapshotHash,
@@ -26,12 +29,11 @@ import {
 } from "./agent-directive-snapshot.js";
 import type { EnforcementGap, EnforcementGapCode } from "./enforcement-gaps.js";
 import { hashContent } from "./hash.js";
-import type { ContentHash, WorkId } from "./ids.js";
+import type { ContentHash } from "./ids.js";
 import type {
   AgentSummaryForceReasonCode,
   AgentSummaryOutcome,
   AgentSummaryStatus,
-  EvidenceKind,
   VerificationVerdict
 } from "./records.js";
 import { isIsoTimestamp, type IsoTimestamp } from "./time.js";
@@ -222,19 +224,6 @@ export interface AgentDirectiveRecoveryCompilationResult extends AgentDirectiveB
   readonly dataByRegistryId: AgentDirectiveAssemblyDataByRegistryId;
 }
 
-const DATA_TRIGGER_CODES = new Set<EnforcementGapCode>([
-  "directive.workflow-next.available",
-  "closeout.user-summary.required",
-  "git.checkpoint.required",
-  "memory.reconcile-source.required",
-  "handoff.session-summary.required",
-  "phase.close-rollup.required",
-  "sprint.close-rollup.required",
-  "sprint.launch-plan.required",
-  "close.no-passing-verification",
-  "gate.verification.unsatisfied"
-]);
-
 export function selectAgentDirectiveRegistryEntries(
   snapshot: AgentDirectiveSnapshot,
   registry: AgentDirectiveRegistry = AGENT_DIRECTIVE_REGISTRY,
@@ -244,11 +233,10 @@ export function selectAgentDirectiveRegistryEntries(
   if (snapshotIssues.length > 0) {
     return [];
   }
-  return selectAgentDirectiveRegistryEntriesFromGaps(
-    agentDirectiveGapsForSnapshot(snapshot, registry, options.dataByRegistryId ?? {}),
-    registry,
-    { dataByRegistryId: options.dataByRegistryId ?? {} }
-  );
+  void snapshot;
+  void registry;
+  void options;
+  return [];
 }
 
 export function selectAgentDirectiveRegistryEntriesFromGaps(
@@ -288,7 +276,7 @@ export function assembleAgentDirectiveBundle(
   }
 
   return assembleAgentDirectiveBundleFromGaps({
-    gaps: agentDirectiveGapsForSnapshot(input.snapshot, registry, input.dataByRegistryId),
+    gaps: [],
     dataByRegistryId: input.dataByRegistryId,
     commandPath: input.snapshot.command.path,
     capturedAt: input.snapshot.capturedAt,
@@ -353,7 +341,6 @@ export function assembleAgentDirectiveBundleFromGaps(
 
   const selectedRegistryIds = selections.map((selection) => selection.registryEntry.id);
   const conflicts = resolveAgentDirectiveConflicts(directives, registry);
-  const resolvedDirectives = applyConflictLifecycles(directives, conflicts);
 
   const bundle: AgentDirectiveBundle = {
     meta: {
@@ -365,7 +352,7 @@ export function assembleAgentDirectiveBundleFromGaps(
       envelopeSchema: input.envelopeSchema,
       sourceSnapshotHash: sourceHash
     },
-    directives: resolvedDirectives,
+    directives,
     conflicts,
     deprecations: [],
     missingRequired
@@ -474,13 +461,7 @@ export function compileGitAgentDirectiveBundle(
     ...gitDirectiveDataByRegistryId(input.snapshot, input),
     ...input.dataByRegistryId
   };
-  const result = assembleAgentDirectiveBundle({
-    snapshot: input.snapshot,
-    dataByRegistryId,
-    registry: input.registry,
-    generatedAt: input.generatedAt,
-    bundleId: input.bundleId
-  });
+  const result = assembleAgentDirectiveBundleForSnapshot(input, dataByRegistryId, gitDirectiveGaps(input.snapshot, dataByRegistryId));
   return {
     ...result,
     dataByRegistryId
@@ -494,13 +475,7 @@ export function compileCloseoutAgentDirectiveBundle(
     ...closeoutDirectiveDataByRegistryId(input.snapshot, input),
     ...input.dataByRegistryId
   };
-  const result = assembleAgentDirectiveBundle({
-    snapshot: input.snapshot,
-    dataByRegistryId,
-    registry: input.registry,
-    generatedAt: input.generatedAt,
-    bundleId: input.bundleId
-  });
+  const result = assembleAgentDirectiveBundleForSnapshot(input, dataByRegistryId, closeoutDirectiveGaps(input.snapshot, dataByRegistryId));
   return {
     ...result,
     dataByRegistryId
@@ -590,13 +565,7 @@ export function compileSummaryAgentDirectiveBundle(
     ...summaryDirectiveDataByRegistryId(input.snapshot, input),
     ...input.dataByRegistryId
   };
-  const result = assembleAgentDirectiveBundle({
-    snapshot: input.snapshot,
-    dataByRegistryId,
-    registry: input.registry,
-    generatedAt: input.generatedAt,
-    bundleId: input.bundleId
-  });
+  const result = assembleAgentDirectiveBundleForSnapshot(input, dataByRegistryId, summaryDirectiveGaps(input.snapshot, dataByRegistryId));
   return {
     ...result,
     dataByRegistryId
@@ -634,13 +603,7 @@ export function compileHandoffAgentDirectiveBundle(
     ...handoffDirectiveDataByRegistryId(input.snapshot, input),
     ...input.dataByRegistryId
   };
-  const result = assembleAgentDirectiveBundle({
-    snapshot: input.snapshot,
-    dataByRegistryId,
-    registry: input.registry,
-    generatedAt: input.generatedAt,
-    bundleId: input.bundleId
-  });
+  const result = assembleAgentDirectiveBundleForSnapshot(input, dataByRegistryId, handoffDirectiveGaps(input.snapshot, dataByRegistryId));
   return {
     ...result,
     dataByRegistryId
@@ -704,13 +667,7 @@ export function compileRecoveryAgentDirectiveBundle(
     ...recoveryDirectiveDataByRegistryId(input.snapshot, input),
     ...input.dataByRegistryId
   };
-  const result = assembleAgentDirectiveBundle({
-    snapshot: input.snapshot,
-    dataByRegistryId,
-    registry: input.registry,
-    generatedAt: input.generatedAt,
-    bundleId: input.bundleId
-  });
+  const result = assembleAgentDirectiveBundleForSnapshot(input, dataByRegistryId, recoveryDirectiveGaps(input.snapshot, dataByRegistryId));
   return {
     ...result,
     dataByRegistryId
@@ -732,173 +689,259 @@ function registryEntrySelectedByGapCodes(
   return selectedCodes.map((code) => `gap.${code}`);
 }
 
-export function agentDirectiveGapsForSnapshot(
-  snapshot: AgentDirectiveSnapshot,
-  registry: AgentDirectiveRegistry = AGENT_DIRECTIVE_REGISTRY,
-  dataByRegistryId: AgentDirectiveAssemblyDataByRegistryId
-): readonly EnforcementGap[] {
-  const codes = triggerCodesForSnapshot(snapshot);
-  for (const registryEntry of registry.entries) {
-    const data = dataByRegistryId[registryEntry.id];
-    if (data === undefined || !dataActivatesRegistryEntry(registryEntry, snapshot, data)) {
-      continue;
-    }
-    for (const code of registryEntry.triggerCodes) {
-      if (DATA_TRIGGER_CODES.has(code)) {
-        codes.add(code);
-      }
-    }
-  }
-  return [...codes].sort().map((code) => enforcementGapForSnapshotCode(snapshot, code));
-}
-
-function dataActivatesRegistryEntry(
-  registryEntry: AgentDirectiveRegistryEntry,
-  snapshot: AgentDirectiveSnapshot,
-  data: AgentDirectiveData
-): boolean {
-  switch (registryEntry.id) {
-    case "closeout.summary-required":
-      return (
-        isTerminalWorkStatus(snapshot.work.subject?.status) ||
-        (hasAnyKey(data, ["summaryId"]) && hasAnyKey(data, ["summaryUri"])) ||
-        hasAnyKey(data, ["summaryStatus", "summaryOutcome", "closeReason", "duplicateOf", "forceReasonCode", "forceComment"])
-      );
-    case "git.checkpoint-required":
-      return (
-        hasNonEmptyArrayKey(data, ["commitShas", "dirtyPathNotes", "scopedChangedPaths", "blockingDirtyPaths"]) ||
-        data.repositoryChanged === true ||
-        (hasAnyKey(data, ["reasonCode", "noCommitReason"]) && checkpointCommandCanEmitReason(snapshot.command.path))
-      );
-    case "memory.reconcile-source":
-      return Object.keys(data).length > 0;
-    case "handoff.session-summary":
-      return (
-        snapshot.work.subject?.type === "session" ||
-        (snapshot.actor.activeReservationIds.length > 0 && hasAnyKey(data, ["summaryUri"]))
-      );
-    case "phase.close-rollup":
-      return (
-        (snapshot.work.subject?.type === "phase" || snapshot.work.subject?.type === "milestone") &&
-        (hasAnyKey(data, ["summaryUri"]) || hasNonEmptyArrayKey(data, ["childWorkIds", "childSummaryIds", "childStatuses", "deferredWorkIds"]))
-      );
-    case "sprint.close-rollup":
-      return (
-        snapshot.work.subject?.type === "sprint" &&
-        (hasAnyKey(data, ["summaryUri"]) || hasNonEmptyArrayKey(data, ["childWorkIds", "carryoverWorkIds", "childStatuses", "deferredWorkIds"]))
-      );
-    case "sprint.launch-plan":
-      return Object.keys(data).length > 0;
-    case "verification.evidence-required":
-      return snapshot.command.path === "work verify" && hasAnyKey(data, ["command"]);
-    case "workflow_next.canonical-next-step":
-      return hasAnyKey(data, ["workflowRef", "commandPath", "requiredInputs"]);
-    default:
-      return false;
-  }
-}
-
-function hasAnyKey(data: AgentDirectiveData, keys: readonly string[]): boolean {
-  return keys.some((key) => Object.prototype.hasOwnProperty.call(data, key));
-}
-
-function hasNonEmptyArrayKey(data: AgentDirectiveData, keys: readonly string[]): boolean {
-  return keys.some((key) => {
-    const value = data[key];
-    return Array.isArray(value) && value.length > 0;
+function assembleAgentDirectiveBundleForSnapshot(
+  input: Pick<AgentDirectiveBundleAssemblyInput, "snapshot" | "registry" | "generatedAt" | "bundleId">,
+  dataByRegistryId: AgentDirectiveAssemblyDataByRegistryId,
+  gaps: readonly EnforcementGap[]
+): AgentDirectiveBundleAssemblyResult {
+  return assembleAgentDirectiveBundleFromGaps({
+    gaps,
+    dataByRegistryId,
+    commandPath: input.snapshot.command.path,
+    capturedAt: input.snapshot.capturedAt,
+    envelopeSchema: input.snapshot.command.envelopeSchema,
+    subject: subjectForSnapshot(input.snapshot),
+    registry: input.registry,
+    generatedAt: input.generatedAt,
+    bundleId: input.bundleId,
+    sourceHash: agentDirectiveSnapshotHash(input.snapshot)
   });
 }
 
-function isTerminalWorkStatus(status: string | undefined): boolean {
-  return status === "closed" || status === "cancelled";
+function gitDirectiveGaps(
+  snapshot: AgentDirectiveSnapshot,
+  dataByRegistryId: AgentDirectiveAssemblyDataByRegistryId
+): readonly EnforcementGap[] {
+  return uniqueGaps([
+    ...gateGapsForSnapshot(snapshot),
+    ...(gitCheckpointRequired(snapshot, dataByRegistryId["git.checkpoint-required"])
+      ? [directiveGap(snapshot, "git.checkpoint.required", dataByRegistryId["git.checkpoint-required"])]
+      : []),
+    ...workflowNextGaps(snapshot, dataByRegistryId)
+  ]);
 }
 
-function checkpointCommandCanEmitReason(commandPath: string): boolean {
-  return ["agent finish", "summary compose", "summary show", "sync status", "work cancel", "work close"].includes(commandPath);
+function closeoutDirectiveGaps(
+  snapshot: AgentDirectiveSnapshot,
+  dataByRegistryId: AgentDirectiveAssemblyDataByRegistryId
+): readonly EnforcementGap[] {
+  return uniqueGaps([
+    ...gateGapsForSnapshot(snapshot),
+    ...(closeoutSummaryRequired(snapshot, dataByRegistryId["closeout.summary-required"])
+      ? [directiveGap(snapshot, "closeout.user-summary.required", dataByRegistryId["closeout.summary-required"])]
+      : []),
+    ...(gitCheckpointRequired(snapshot, dataByRegistryId["git.checkpoint-required"])
+      ? [directiveGap(snapshot, "git.checkpoint.required", dataByRegistryId["git.checkpoint-required"])]
+      : []),
+    ...(verificationEvidenceRequired(dataByRegistryId["verification.evidence-required"])
+      ? [directiveGap(snapshot, "gate.verification.unsatisfied", dataByRegistryId["verification.evidence-required"])]
+      : []),
+    ...(snapshot.work.openDescendantIds.length > 0
+      ? [directiveGap(snapshot, "work.container.open-descendant", dataByRegistryId["container.descendant-closeout"])]
+      : []),
+    ...handoffDirectiveGaps(snapshot, dataByRegistryId),
+    ...workflowNextGaps(snapshot, dataByRegistryId)
+  ]);
 }
 
-function triggerCodesForSnapshot(snapshot: AgentDirectiveSnapshot): Set<EnforcementGapCode> {
-  const codes = new Set<EnforcementGapCode>();
+function summaryDirectiveGaps(
+  snapshot: AgentDirectiveSnapshot,
+  dataByRegistryId: AgentDirectiveAssemblyDataByRegistryId
+): readonly EnforcementGap[] {
+  return uniqueGaps([
+    ...closeoutDirectiveGaps(snapshot, dataByRegistryId),
+    ...(rollupRequired(snapshot, ["phase", "milestone"])
+      ? [directiveGap(snapshot, "phase.close-rollup.required", dataByRegistryId["phase.close-rollup"])]
+      : []),
+    ...(rollupRequired(snapshot, ["sprint"])
+      ? [directiveGap(snapshot, "sprint.close-rollup.required", dataByRegistryId["sprint.close-rollup"])]
+      : [])
+  ]);
+}
 
-  if (snapshot.work.activeBlockerIds.length > 0 || snapshot.work.blockedByIds.length > 0) {
-    codes.add("work.blocked.open-dependency");
-  }
-  if (snapshot.work.openDescendantIds.length > 0) {
-    codes.add("work.container.open-descendant");
-  }
+function handoffDirectiveGaps(
+  snapshot: AgentDirectiveSnapshot,
+  dataByRegistryId: AgentDirectiveAssemblyDataByRegistryId
+): readonly EnforcementGap[] {
+  const data = dataByRegistryId["handoff.session-summary"];
+  return uniqueGaps([
+    ...(data !== undefined &&
+    (snapshot.work.subject?.type === "session" || snapshot.actor.activeReservationIds.length > 0) &&
+    dataHasAnyString(data, ["summaryUri", "summaryId"])
+      ? [directiveGap(snapshot, "handoff.session-summary.required", data)]
+      : []),
+    ...workflowNextGaps(snapshot, dataByRegistryId)
+  ]);
+}
 
-  for (const gate of snapshot.gate.requiredGates) {
+function recoveryDirectiveGaps(
+  snapshot: AgentDirectiveSnapshot,
+  dataByRegistryId: AgentDirectiveAssemblyDataByRegistryId
+): readonly EnforcementGap[] {
+  return uniqueGaps([
+    ...gateGapsForSnapshot(snapshot),
+    ...(snapshot.work.activeBlockerIds.length > 0 || snapshot.work.blockedByIds.length > 0
+      ? [directiveGap(snapshot, "work.blocked.open-dependency", dataByRegistryId["blocked.resolve-blockers"])]
+      : []),
+    ...(needsDoctorRecoveryDirective(snapshot)
+      ? [directiveGap(snapshot, snapshot.sync.searchIndexFresh ? "doctor.recovery.required" : "search.index-stale", dataByRegistryId["doctor.recovery-required"])]
+      : []),
+    ...workflowNextGaps(snapshot, dataByRegistryId)
+  ]);
+}
+
+function workflowNextGaps(
+  snapshot: AgentDirectiveSnapshot,
+  dataByRegistryId: AgentDirectiveAssemblyDataByRegistryId
+): readonly EnforcementGap[] {
+  const data = dataByRegistryId["workflow_next.canonical-next-step"];
+  return data !== undefined && dataHasAnyKey(data, ["workflowRef", "commandPath", "requiredInputs"])
+    ? [directiveGap(snapshot, "directive.workflow-next.available", data)]
+    : [];
+}
+
+function gateGapsForSnapshot(snapshot: AgentDirectiveSnapshot): readonly EnforcementGap[] {
+  return uniqueGaps(snapshot.gate.requiredGates.flatMap((gate) => {
     if (gate.status !== "open") {
-      continue;
+      return [];
     }
+    const codes: EnforcementGapCode[] = [];
     if (gate.declaredCommand !== undefined) {
-      codes.add("gate.declared-command.missing");
+      codes.push("gate.declared-command.missing");
     }
     if (gate.expectedObservable !== undefined) {
-      codes.add("gate.expected-observable.missing");
+      codes.push("gate.expected-observable.missing");
     }
     switch (gate.kind) {
       case "verification":
-        codes.add("gate.verification.unsatisfied");
+        codes.push("gate.verification.unsatisfied");
         break;
       case "checkpoint":
-        codes.add("gate.checkpoint.unsatisfied");
+        codes.push("gate.checkpoint.unsatisfied");
         break;
       case "review":
-        codes.add("gate.review.unsatisfied");
+        codes.push("gate.review.unsatisfied");
         break;
       case "audit":
-        codes.add("gate.audit.unsatisfied");
+        codes.push("gate.audit.unsatisfied");
         break;
     }
-  }
-
-  if (needsDoctorRecoveryDirective(snapshot)) {
-    codes.add("doctor.recovery.required");
-    if (!snapshot.sync.searchIndexFresh) {
-      codes.add("search.index-stale");
-    }
-  }
-
-  return codes;
+    return codes.map((code) => directiveGap(snapshot, code, gateGapData(snapshot)));
+  }));
 }
 
-function enforcementGapForSnapshotCode(snapshot: AgentDirectiveSnapshot, code: EnforcementGapCode): EnforcementGap {
+function directiveGap(snapshot: AgentDirectiveSnapshot, code: EnforcementGapCode, data?: AgentDirectiveData): EnforcementGap {
   const subject = snapshot.work.subject;
   return {
     code,
     subjectType: (subject?.type ?? "command") as EnforcementGap["subjectType"],
     subjectId: subject?.id ?? snapshot.command.path,
-    data: enforcementGapDataForSnapshotCode(snapshot, code)
+    data
   };
 }
 
-function enforcementGapDataForSnapshotCode(
+function gateGapData(snapshot: AgentDirectiveSnapshot): AgentDirectiveData {
+  const openGates = snapshot.gate.requiredGates.filter((gate) => gate.status === "open");
+  return dataRecord([
+    ["gateIds", openGates.map((gate) => gate.id)],
+    ["requiredEvidenceKinds", uniqueStrings(openGates.flatMap((gate) => gate.requiredEvidenceKinds))],
+    ["minEvidenceCount", maxNumber(openGates.map((gate) => gate.minEvidenceCount))],
+    ["declaredCommand", firstString(openGates.map((gate) => gate.declaredCommand))],
+    ["expectedObservable", firstString(openGates.map((gate) => gate.expectedObservable))]
+  ]);
+}
+
+function uniqueGaps(gaps: readonly EnforcementGap[]): readonly EnforcementGap[] {
+  const byCode = new Map<EnforcementGapCode, EnforcementGap>();
+  for (const gap of gaps) {
+    byCode.set(gap.code, gap);
+  }
+  return [...byCode.values()].sort((left, right) => left.code.localeCompare(right.code));
+}
+
+function gitCheckpointRequired(snapshot: AgentDirectiveSnapshot, data: AgentDirectiveData | undefined): boolean {
+  if (data === undefined) {
+    return false;
+  }
+  const commitShas = dataStringArray(data, "commitShas");
+  if (commitShas.length > 0) {
+    return false;
+  }
+  const reasonCode = dataString(data, "reasonCode") ?? dataString(data, "noCommitReason");
+  const repositoryChanged = dataBoolean(data, "repositoryChanged") === true;
+  const scopedChangedPaths = dataArray(data, "scopedChangedPaths");
+  const blockingDirtyPaths = dataArray(data, "blockingDirtyPaths");
+  if (repositoryChanged || scopedChangedPaths.length > 0 || blockingDirtyPaths.length > 0) {
+    return true;
+  }
+  return closeoutCommandRequiresCheckpoint(snapshot.command.path) && reasonCode === undefined;
+}
+
+function closeoutSummaryRequired(snapshot: AgentDirectiveSnapshot, data: AgentDirectiveData | undefined): boolean {
+  if (data === undefined) {
+    return false;
+  }
+  const hasSummary = dataString(data, "summaryId") !== undefined || dataString(data, "summaryUri") !== undefined;
+  if (hasSummary) {
+    return false;
+  }
+  return snapshot.work.subject?.status === "closed" || snapshot.work.subject?.status === "cancelled" || ["agent finish", "work cancel", "work close", "sprint close"].includes(snapshot.command.path);
+}
+
+function verificationEvidenceRequired(data: AgentDirectiveData | undefined): boolean {
+  if (data !== undefined && dataStringArray(data, "verificationIds").length > 0) {
+    return false;
+  }
+  return (
+    data !== undefined &&
+    (dataHasAnyString(data, ["command", "expectedObservable"]) ||
+      dataHasAnyNonEmptyArray(data, ["declaredCommands", "expectedObservables"]))
+  );
+}
+
+function rollupRequired(
   snapshot: AgentDirectiveSnapshot,
-  code: EnforcementGapCode
-): EnforcementGap["data"] | undefined {
-  if (code === "work.blocked.open-dependency") {
-    return {
-      blockerIds: uniqueStrings([...snapshot.work.activeBlockerIds, ...snapshot.work.blockedByIds]) as readonly WorkId[]
-    };
-  }
-  if (code === "work.container.open-descendant") {
-    return { blockerIds: snapshot.work.openDescendantIds as readonly WorkId[] };
-  }
-  if (code.startsWith("gate.")) {
-    const openGates = snapshot.gate.requiredGates.filter((gate) => gate.status === "open");
-    return {
-      gateIds: openGates.map((gate) => gate.id),
-      requiredEvidenceKinds: uniqueStrings(openGates.flatMap((gate) => gate.requiredEvidenceKinds)) as readonly EvidenceKind[],
-      minEvidenceCount: maxNumber(openGates.map((gate) => gate.minEvidenceCount)),
-      declaredCommand: firstString(openGates.map((gate) => gate.declaredCommand)),
-      expectedObservable: firstString(openGates.map((gate) => gate.expectedObservable))
-    };
-  }
-  if (code === "doctor.recovery.required" || code === "search.index-stale") {
-    return { reason: attentionDiagnostics(snapshot).map((diagnostic) => diagnostic.code).join(",") };
-  }
-  return undefined;
+  subjectTypes: readonly string[]
+): boolean {
+  return (
+    ["summary compose", "summary show", "sprint metrics", "sprint report"].includes(snapshot.command.path) &&
+    subjectTypes.includes(snapshot.work.subject?.type ?? "")
+  );
+}
+
+function dataHasAnyKey(data: AgentDirectiveData, keys: readonly string[]): boolean {
+  return keys.some((key) => Object.prototype.hasOwnProperty.call(data, key));
+}
+
+function dataHasAnyString(data: AgentDirectiveData, keys: readonly string[]): boolean {
+  return keys.some((key) => dataString(data, key) !== undefined);
+}
+
+function dataHasAnyNonEmptyArray(data: AgentDirectiveData, keys: readonly string[]): boolean {
+  return keys.some((key) => dataArray(data, key).length > 0);
+}
+
+function dataString(data: AgentDirectiveData, key: string): string | undefined {
+  const value = data[key];
+  return typeof value === "string" && value.trim().length > 0 ? value : undefined;
+}
+
+function dataBoolean(data: AgentDirectiveData, key: string): boolean | undefined {
+  const value = data[key];
+  return typeof value === "boolean" ? value : undefined;
+}
+
+function dataStringArray(data: AgentDirectiveData, key: string): readonly string[] {
+  return dataArray(data, key).filter((value): value is string => typeof value === "string");
+}
+
+function dataArray(data: AgentDirectiveData, key: string): readonly AgentDirectiveDataValue[] {
+  const value = data[key];
+  return Array.isArray(value) ? value : [];
+}
+
+function closeoutCommandRequiresCheckpoint(commandPath: string): boolean {
+  return ["agent finish", "summary compose", "summary show", "work cancel", "work close", "sprint close"].includes(commandPath);
 }
 
 function declaredGateDirectiveDataByRegistryId(snapshot: AgentDirectiveSnapshot): AgentDirectiveAssemblyDataByRegistryId {
@@ -946,28 +989,28 @@ function directiveDataIssues(
   );
   return [
     ...issues,
-    ...registryEntry.dataRequirements.flatMap((requirement) =>
-      dataRequirementIssues(registryEntry, data, requirement, `${path}.${requirement.key}`)
+    ...agentDirectivePayloadFields(registryEntry.id).flatMap((payloadField) =>
+      payloadFieldIssues(registryEntry, data, payloadField, `${path}.${payloadField.key}`)
     )
   ];
 }
 
-function dataRequirementIssues(
+function payloadFieldIssues(
   registryEntry: AgentDirectiveRegistryEntry,
   data: AgentDirectiveData,
-  requirement: AgentDirectiveDataRequirement,
+  payloadField: AgentDirectivePayloadField,
   path: string
 ): readonly AgentDirectiveBundleAssemblyIssue[] {
-  const hasValue = Object.prototype.hasOwnProperty.call(data, requirement.key);
+  const hasValue = Object.prototype.hasOwnProperty.call(data, payloadField.key);
   if (!hasValue) {
-    return requirement.required
+    return payloadField.required
       ? [assemblyIssue("data", path, "missing required directive data", registryEntry.id)]
       : [];
   }
-  const value = data[requirement.key];
-  return dataValueMatchesRequirement(value, requirement.valueType)
+  const value = data[payloadField.key];
+  return dataValueMatchesRequirement(value, payloadField.valueType)
     ? []
-    : [assemblyIssue("data", path, `must be ${requirement.valueType} directive data`, registryEntry.id)];
+    : [assemblyIssue("data", path, `must be ${payloadField.valueType} directive data`, registryEntry.id)];
 }
 
 function staleDataReferenceIssues(
@@ -993,11 +1036,11 @@ function missingRequiredEntries(
   dataIssues: readonly AgentDirectiveBundleAssemblyIssue[],
   context: AgentDirectiveProjectionContext
 ): readonly AgentDirectiveMissingRequiredEntry[] {
-  return registryEntry.dataRequirements.flatMap((requirement) => {
-    if (!requirement.required) {
+  return agentDirectivePayloadFields(registryEntry.id).flatMap((payloadField) => {
+    if (!payloadField.required) {
       return [];
     }
-    const path = `$.dataByRegistryId.${registryEntry.id}.${requirement.key}`;
+    const path = `$.dataByRegistryId.${registryEntry.id}.${payloadField.key}`;
     const matchingIssue = dataIssues.find((dataIssue) => dataIssue.path === path);
     return matchingIssue === undefined
       ? []
@@ -1006,7 +1049,7 @@ function missingRequiredEntries(
             registryId: registryEntry.id,
             family: registryEntry.family,
             subject: subjectForProjectionContext(context),
-            requirement: requirement.key,
+            requirement: payloadField.key,
             message: matchingIssue.message
           }
         ];
@@ -1063,34 +1106,6 @@ function resolveAgentDirectiveConflicts(
   return uniqueConflicts(conflicts);
 }
 
-function applyConflictLifecycles(
-  directives: readonly AgentDirective[],
-  conflicts: AgentDirectiveBundle["conflicts"]
-): readonly AgentDirective[] {
-  const blockedDirectiveIds = new Set<string>();
-  const supersededDirectiveIds = new Set<string>();
-  for (const conflict of conflicts) {
-    for (const directiveId of conflict.directiveIds) {
-      if (directiveId === conflict.resolvedDirectiveId) {
-        continue;
-      }
-      if (conflict.resolution === "registry_order") {
-        supersededDirectiveIds.add(directiveId);
-      } else {
-        blockedDirectiveIds.add(directiveId);
-      }
-    }
-  }
-
-  return directives.map((directive) =>
-    supersededDirectiveIds.has(directive.id)
-      ? { ...directive, lifecycle: "superseded" }
-      : blockedDirectiveIds.has(directive.id)
-        ? { ...directive, lifecycle: "blocked" }
-        : directive
-  );
-}
-
 function directiveFromRegistryEntry(
   registryEntry: AgentDirectiveRegistryEntry,
   registry: AgentDirectiveRegistry,
@@ -1107,7 +1122,6 @@ function directiveFromRegistryEntry(
     severity: registryEntry.severity,
     audience: registryEntry.audience,
     kind: registryEntry.kind,
-    lifecycle: registryEntry.defaultLifecycle,
     title: registryEntry.title,
     instruction: registryEntry.instruction,
     triggerCodes: registryEntry.triggerCodes,
@@ -1150,29 +1164,27 @@ function subjectForSnapshot(snapshot: AgentDirectiveSnapshot): AgentDirectiveSub
 }
 
 function isBlockingDirective(directive: AgentDirective): boolean {
-  return directive.severity === "blocking" || directive.lifecycle === "blocked" || directive.blocksCloseout === true;
+  return directive.severity === "blocking" || directive.blocksCloseout === true;
 }
 
 function blocksLowerPriorityDirective(blockingDirective: AgentDirective, candidate: AgentDirective): boolean {
   return (
     severityRank(blockingDirective.severity) > severityRank(candidate.severity) &&
-    (candidate.kind === "next_step" || candidate.severity === "action" || candidate.severity === "info")
+    (candidate.kind === "next_step" || candidate.severity === "advisory")
   );
 }
 
 function maxSeverity(severities: readonly AgentDirective["severity"][]): AgentDirective["severity"] {
-  return severities.reduce((current, next) => (severityRank(next) > severityRank(current) ? next : current), "info");
+  return severities.reduce((current, next) => (severityRank(next) > severityRank(current) ? next : current), "advisory");
 }
 
 function severityRank(severity: AgentDirective["severity"]): number {
   switch (severity) {
     case "blocking":
-      return 3;
-    case "required":
       return 2;
-    case "action":
+    case "required":
       return 1;
-    case "info":
+    case "advisory":
       return 0;
   }
 }

@@ -162,7 +162,6 @@ function previewAgentDirective(value: unknown): unknown {
     severity: value.severity,
     audience: value.audience,
     kind: value.kind,
-    lifecycle: value.lifecycle,
     title: value.title,
     instruction: value.instruction,
     subject: value.subject,

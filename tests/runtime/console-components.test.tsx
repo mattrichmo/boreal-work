@@ -115,7 +115,7 @@ describe("console component exports", () => {
 
     expect(populatedHtml).toContain("Agent directives");
     expect(populatedHtml).toContain("required directives");
-    expect(populatedHtml).toContain("blocked directives");
+    expect(populatedHtml).toContain("blocking directives");
     expect(populatedHtml).toContain("Directive conflicts");
     expect(populatedHtml).toContain("Missing required directive data");
     expect(populatedHtml).toContain("Directive acknowledgements");
@@ -192,10 +192,9 @@ describe("console component exports", () => {
     expect(html).toContain("bw-kanban-card--closed");
     expect(html).toContain("reserved");
     expect(html).toContain("cybertron");
-    expect(html).toContain("recommended directives");
+    expect(html).toContain("advisory directives");
     expect(html).toContain("required directives");
-    expect(html).toContain("blocked directives");
-    expect(html).toContain("informational directives");
+    expect(html).toContain("blocking directives");
     expect(html).toContain("directive conflicts");
     expect(html).toContain("missing required");
     expect(html).toContain("next steps");
@@ -302,10 +301,9 @@ function workItem(input: Partial<WorkItemView> & Pick<WorkItemView, "id" | "titl
 function directiveSummaryFixture(subjectId: string): WorkDirectiveSummaryView {
   const base = {
     total: 4,
-    informational: 1,
-    recommended: 1,
+    advisory: 2,
     required: 1,
-    blocked: 1,
+    blocking: 1,
     sourceCommands: ["bwrk sync refresh --json", `bwrk work show ${subjectId} --json`],
     items: [
       {
@@ -314,9 +312,8 @@ function directiveSummaryFixture(subjectId: string): WorkDirectiveSummaryView {
         family: "workflow_next",
         kind: "next_step",
         title: "Follow next canonical workflow",
-        severity: "action",
-        lifecycle: "active",
-        lane: "recommended",
+        severity: "advisory",
+        lane: "advisory",
         reason: "Follow the named canonical workflow before continuing.",
         sourceCommand: "bwrk sync refresh --json",
         nextCommand: "bwrk sync refresh --json",
@@ -331,7 +328,6 @@ function directiveSummaryFixture(subjectId: string): WorkDirectiveSummaryView {
         kind: "final_response",
         title: "Summarize successful closeout",
         severity: "required",
-        lifecycle: "active",
         lane: "required",
         reason: "Final closeout requires a concise user-facing summary.",
       sourceCommand: `bwrk work show ${subjectId} --json`,
@@ -351,8 +347,7 @@ function directiveSummaryFixture(subjectId: string): WorkDirectiveSummaryView {
         kind: "blocked",
         title: "Resolve dirty checkpoint",
         severity: "blocking",
-        lifecycle: "blocked",
-        lane: "blocked",
+        lane: "blocking",
         reason: "Checkpoint is blocked until dirty state is resolved or explicitly explained.",
         sourceCommand: "bwrk doctor --json",
         nextCommand: "bwrk doctor --json",
@@ -372,9 +367,8 @@ function directiveSummaryFixture(subjectId: string): WorkDirectiveSummaryView {
         family: "context",
         kind: "reference",
         title: "Context pack available",
-        severity: "info",
-        lifecycle: "active",
-        lane: "informational",
+        severity: "advisory",
+        lane: "advisory",
         reason: "Context pack can be inspected before responding.",
         sourceCommand: `bwrk summary show ${subjectId} --json`,
         requiredInputs: [],
@@ -386,7 +380,7 @@ function directiveSummaryFixture(subjectId: string): WorkDirectiveSummaryView {
     {
       id: "next-step-directive.workflow_next.fixture",
       title: "Follow next canonical workflow",
-      lane: "recommended",
+      lane: "advisory",
       command: "bwrk sync refresh --json",
       workflowRef: "workflows/40-work/claim-and-finish-work.md",
       reason: "Follow the named canonical workflow before continuing.",
@@ -395,7 +389,7 @@ function directiveSummaryFixture(subjectId: string): WorkDirectiveSummaryView {
     {
       id: "next-step-directive.git.fixture",
       title: "Resolve dirty checkpoint",
-      lane: "blocked",
+      lane: "blocking",
       command: "bwrk doctor --json",
       workflowRef: "workflows/60-health/sync-and-doctor.md",
       reason: "Checkpoint is blocked until dirty state is resolved or explicitly explained.",
@@ -410,7 +404,7 @@ function directiveSummaryFixture(subjectId: string): WorkDirectiveSummaryView {
       resolution: "blocking_wins",
       resolvedDirectiveId: "directive.git.fixture",
       severity: "blocking",
-      lane: "blocked"
+      lane: "blocking"
     }
   ];
   const missingRequired: WorkDirectiveSummaryView["missingRequired"] = [

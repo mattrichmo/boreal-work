@@ -154,10 +154,9 @@ export function LineagePanel({ work }: { readonly work: WorkItemView }) {
 }
 
 const DIRECTIVE_LANES: readonly { readonly id: WorkDirectiveLane; readonly label: string; readonly tone: Tone }[] = [
-  { id: "blocked", label: "blocked", tone: "danger" },
+  { id: "blocking", label: "blocking", tone: "danger" },
   { id: "required", label: "required", tone: "warning" },
-  { id: "recommended", label: "recommended", tone: "accent" },
-  { id: "informational", label: "informational", tone: "neutral" }
+  { id: "advisory", label: "advisory", tone: "accent" }
 ];
 
 export function DirectiveSummaryPanel({
@@ -180,10 +179,9 @@ export function DirectiveSummaryPanel({
     <Card title={title} eyebrow={`${summary.total} directive${summary.total === 1 ? "" : "s"}`}>
       <div className="bw-directive-summary" aria-label={`${work.title} directive obligations`}>
         <div className="bw-directive-summary__counts">
-          <Badge tone={summary.blocked > 0 ? "danger" : "neutral"}>{summary.blocked} blocked</Badge>
+          <Badge tone={summary.blocking > 0 ? "danger" : "neutral"}>{summary.blocking} blocking</Badge>
           <Badge tone={summary.required > 0 ? "warning" : "neutral"}>{summary.required} required</Badge>
-          <Badge tone={summary.recommended > 0 ? "accent" : "neutral"}>{summary.recommended} recommended</Badge>
-          <Badge tone="neutral">{summary.informational} informational</Badge>
+          <Badge tone={summary.advisory > 0 ? "accent" : "neutral"}>{summary.advisory} advisory</Badge>
           {summary.conflictCount > 0 ? <Badge tone="danger">{summary.conflictCount} conflicts</Badge> : null}
           {summary.missingRequiredCount > 0 ? <Badge tone="danger">{summary.missingRequiredCount} missing required</Badge> : null}
           {summary.acknowledgementCount > 0 ? <Badge tone="warning">{summary.acknowledgementCount} acknowledgements</Badge> : null}
@@ -397,7 +395,6 @@ function DirectiveRow({ item }: { readonly item: WorkDirectiveItemView }) {
       <div className="bw-directive-row__meta">
         <Badge>{item.registryId}</Badge>
         <Badge>{item.severity}</Badge>
-        <Badge>{item.lifecycle}</Badge>
         {item.blocksCloseout ? <Badge tone="danger">blocks closeout</Badge> : null}
         {item.acknowledgement ? <Badge tone="warning">acknowledgement before {item.acknowledgement.requiredBefore}</Badge> : null}
         {item.family ? <Badge>{item.family}</Badge> : null}
@@ -425,14 +422,12 @@ function DirectiveRow({ item }: { readonly item: WorkDirectiveItemView }) {
 
 function directiveLaneTone(lane: WorkDirectiveLane): Tone {
   switch (lane) {
-    case "blocked":
+    case "blocking":
       return "danger";
     case "required":
       return "warning";
-    case "recommended":
+    case "advisory":
       return "accent";
-    case "informational":
-      return "neutral";
   }
 }
 
