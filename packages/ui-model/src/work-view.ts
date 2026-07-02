@@ -1,12 +1,16 @@
-import type { ContextPack, EvidenceRecord, VerificationRecord, WorkItem } from "@boreal/core";
+import type { ContextPack, EvidenceRecord, SourceRef, VerificationRecord, WorkItem } from "@boreal/core";
 
 export interface WorkItemView {
   readonly id: string;
   readonly title: string;
+  readonly description?: string;
   readonly kind: WorkItem["kind"];
   readonly status: WorkItem["status"];
   readonly priority: WorkItem["priority"];
+  readonly acceptanceCriteria?: readonly string[];
   readonly labels: readonly string[];
+  readonly sourceRefs?: readonly SourceRef[];
+  readonly parentId?: WorkItem["parentId"];
   readonly dependencyIds: readonly string[];
   readonly activeBlockerIds: readonly string[];
   readonly blockedBy: readonly string[];
@@ -15,6 +19,7 @@ export interface WorkItemView {
   readonly requiredCloseoutGates: WorkItem["requiredCloseoutGates"];
   readonly activeReservationId?: string;
   readonly activeReservation?: WorkReservationView;
+  readonly closedReason?: string;
   readonly contextSummary?: string;
   readonly directiveSummary?: WorkDirectiveSummaryView;
 }
@@ -122,10 +127,14 @@ export function toWorkItemView(input: {
   return {
     id: input.work.meta.id,
     title: input.work.title,
+    description: input.work.description,
     kind: input.work.kind,
     status: input.work.status,
     priority: input.work.priority,
+    acceptanceCriteria: input.work.acceptanceCriteria,
     labels: input.work.labels,
+    sourceRefs: input.work.meta.sourceRefs,
+    parentId: input.work.parentId,
     dependencyIds,
     activeBlockerIds,
     blockedBy: activeBlockerIds,
@@ -133,6 +142,7 @@ export function toWorkItemView(input: {
     verificationCount: input.verifications?.length ?? input.work.verificationIds.length,
     requiredCloseoutGates: input.work.requiredCloseoutGates ?? [],
     activeReservationId: input.work.reservationId,
+    closedReason: input.work.closedReason,
     contextSummary: input.contextPack?.summary
   };
 }

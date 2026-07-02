@@ -44,6 +44,7 @@ export interface SearchCommandOptions {
   readonly type?: SearchDocumentType;
   readonly types?: readonly SearchDocumentType[];
   readonly explain?: boolean;
+  readonly rebuildStaleIndex?: boolean;
 }
 
 export async function writeSearchIndex(context: CliContext): Promise<SearchIndexWriteResult> {
@@ -102,7 +103,7 @@ export async function runSearch(
     throw new BorealError("BOREAL_INVALID_INPUT", "Search query is required");
   }
 
-  const index = await loadFreshSearchIndex(context);
+  const index = await loadFreshSearchIndex(context, { rebuildStaleIndex: options.rebuildStaleIndex ?? true });
   return querySearchIndex(index, normalizedQuery, options);
 }
 
@@ -114,21 +115,36 @@ export function searchIndexLockDir(context: CliContext): string {
   return join(context.paths.runtimeDir, "search-index.lock");
 }
 
-async function loadFreshSearchIndex(context: CliContext): Promise<SearchIndexDocument> {
+async function loadFreshSearchIndex(
+  context: CliContext,
+  options: { readonly rebuildStaleIndex: boolean }
+): Promise<SearchIndexDocument> {
   const inspection = await inspectSearchIndex(context);
   if (!inspection.exists) {
+    if (options.rebuildStaleIndex) {
+      await writeSearchIndex(context);
+      return readSearchIndex(inspection.path);
+    }
     throw new BorealError("BOREAL_POLICY_VIOLATION", "Search index is missing; run `bwrk search index`", {
       path: inspection.path,
       expectedContentHash: inspection.expectedContentHash
     });
   }
   if (inspection.error) {
+    if (options.rebuildStaleIndex) {
+      await writeSearchIndex(context);
+      return readSearchIndex(inspection.path);
+    }
     throw new BorealError("BOREAL_POLICY_VIOLATION", "Search index is invalid; run `bwrk search index`", {
       path: inspection.path,
       error: inspection.error
     });
   }
   if (inspection.stale) {
+    if (options.rebuildStaleIndex) {
+      await writeSearchIndex(context);
+      return readSearchIndex(inspection.path);
+    }
     throw new BorealError("BOREAL_POLICY_VIOLATION", "Search index is stale; run `bwrk search index`", {
       path: inspection.path,
       contentHash: inspection.contentHash,

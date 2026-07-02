@@ -48,6 +48,8 @@ export interface RequiredCloseoutGateInput {
   readonly scope?: CloseoutGateScope;
   readonly requiredEvidenceKinds?: readonly EvidenceKind[];
   readonly minEvidenceCount?: number;
+  readonly declaredCommand?: string;
+  readonly expectedObservable?: string;
 }
 
 export interface AddBlockingDependencyInput {
@@ -125,6 +127,8 @@ export function createRequiredCloseoutGates(input: {
     const scope = gate.scope ?? "self";
     const requiredEvidenceKinds = gate.requiredEvidenceKinds ?? defaultRequiredEvidenceKinds(gate.kind);
     const minEvidenceCount = gate.minEvidenceCount ?? 1;
+    const declaredCommand = optionalNonEmptyString(gate.declaredCommand, "declared command");
+    const expectedObservable = optionalNonEmptyString(gate.expectedObservable, "expected observable");
     return {
       id: deterministicId<CloseoutGateId>("gate", {
         subjectId: input.subjectId,
@@ -133,6 +137,8 @@ export function createRequiredCloseoutGates(input: {
         scope,
         requiredEvidenceKinds,
         minEvidenceCount,
+        declaredCommand,
+        expectedObservable,
         index
       }),
       subjectType: input.subjectType,
@@ -143,11 +149,24 @@ export function createRequiredCloseoutGates(input: {
       requiredEvidenceKinds,
       requiredOutcome: "passed" as const,
       minEvidenceCount,
+      ...(declaredCommand ? { declaredCommand } : {}),
+      ...(expectedObservable ? { expectedObservable } : {}),
       createdAt: input.now,
       createdBy: input.actor
     };
   });
   return gates.length > 0 ? gates : undefined;
+}
+
+function optionalNonEmptyString(value: string | undefined, fieldName: string): string | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  const normalized = value.trim();
+  if (!normalized) {
+    throw new BorealError("BOREAL_INVALID_INPUT", `${fieldName} must be non-empty when provided`);
+  }
+  return normalized;
 }
 
 export function closeoutGateSubjectTypeForWorkKind(kind: WorkKind): CloseoutGateSubjectType {

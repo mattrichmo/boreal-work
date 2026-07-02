@@ -116,7 +116,17 @@ describe("boreal runtime proof slice", () => {
     const runtime = createBorealRuntime({ actor });
     const work = await runtime.createWork({
       title: "Runtime gate metadata target",
-      requiredCloseoutGates: [{ kind: "verification" }, { kind: "review", scope: "descendants" }]
+      description: "Runtime view should carry the full task specification.",
+      acceptanceCriteria: ["gate metadata is visible"],
+      sourceRefs: [{ uri: "file://gate-source.md", label: "Gate Source" }],
+      requiredCloseoutGates: [
+        {
+          kind: "verification",
+          declaredCommand: "pnpm test -- runtime-flow",
+          expectedObservable: "passed"
+        },
+        { kind: "review", scope: "descendants" }
+      ]
     });
     const legacy = await runtime.createWork({ title: "Legacy no-gate target" });
 
@@ -130,7 +140,9 @@ describe("boreal runtime proof slice", () => {
         status: "open",
         requiredEvidenceKinds: ["command", "test", "diff", "review", "artifact"],
         requiredOutcome: "passed",
-        minEvidenceCount: 1
+        minEvidenceCount: 1,
+        declaredCommand: "pnpm test -- runtime-flow",
+        expectedObservable: "passed"
       }),
       expect.objectContaining({
         subjectId: work.meta.id,
@@ -144,11 +156,59 @@ describe("boreal runtime proof slice", () => {
     const view = await runtime.getWorkView(work.meta.id);
     const legacyView = await runtime.getWorkView(legacy.meta.id);
     expect(view.requiredCloseoutGates).toEqual(work.requiredCloseoutGates);
+    expect(view).toMatchObject({
+      description: "Runtime view should carry the full task specification.",
+      acceptanceCriteria: ["gate metadata is visible"],
+      sourceRefs: [{ uri: "file://gate-source.md", label: "Gate Source" }]
+    });
     expect(legacyView.requiredCloseoutGates).toEqual([]);
 
     const projections = await runtime.rebuildProjections();
     const projected = projections.find((entry) => entry.id === work.meta.id);
     expect(projected?.requiredCloseoutGates).toEqual(work.requiredCloseoutGates);
+  });
+
+  it("refreshes a subject context pack after evidence, verification, and close mutations", async () => {
+    let tick = 0;
+    const runtime = createBorealRuntime({
+      actor,
+      clock: () => new Date(Date.UTC(2026, 0, 1, 0, 0, tick++))
+    });
+    const work = await runtime.createWork({
+      title: "Fresh context mutation target",
+      description: "Initial context body.",
+      acceptanceCriteria: ["context observes mutations"]
+    });
+    await runtime.rebuildProjections();
+    const before = await runtime.getContextPack(work.meta.id);
+
+    const evidence = await runtime.recordEvidence({
+      subjectId: work.meta.id,
+      subjectType: "work",
+      kind: "test",
+      summary: "fresh mutation evidence passed",
+      outcome: "passed"
+    });
+    const afterEvidence = await runtime.getContextPack(work.meta.id);
+    expect(afterEvidence.generatedAt).not.toBe(before.generatedAt);
+    expect(afterEvidence.evidence).toContain("passed: fresh mutation evidence passed");
+    expect(afterEvidence.facts).toContain("status: needs_verification");
+
+    const verification = await runtime.verifyWork({ workId: work.meta.id, verdict: "passed", evidenceIds: [evidence.meta.id] });
+    const afterVerification = await runtime.getContextPack(work.meta.id);
+    expect(afterVerification.facts).toContain("status: verified");
+
+    await runtime.closeWork({
+      workId: work.meta.id,
+      reason: "context refresh verified",
+      agentSummary: closeoutSummaryFor(work, {
+        evidenceIds: [evidence.meta.id],
+        verificationIds: [verification.meta.id],
+        nonce: "context-refresh"
+      })
+    });
+    const afterClose = await runtime.getContextPack(work.meta.id);
+    expect(afterClose.facts).toContain("status: closed");
   });
 
 	  it("runs create, dependency readiness, reserve, evidence, verify, close, and projections", async () => {

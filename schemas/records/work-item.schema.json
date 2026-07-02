@@ -78,6 +78,8 @@
         },
         "requiredOutcome": { "const": "passed" },
         "minEvidenceCount": { "type": "integer", "minimum": 0 },
+        "declaredCommand": { "type": "string", "minLength": 1 },
+        "expectedObservable": { "type": "string", "minLength": 1 },
         "createdAt": { "type": "string", "format": "date-time" },
         "createdBy": { "$ref": "#/$defs/actor" },
         "satisfiedBy": {

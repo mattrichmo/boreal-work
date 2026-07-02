@@ -1324,12 +1324,14 @@ Context facts always include work status and priority, plus capped accepted clai
 ## `context search`
 
 ```bash
-bwrk context search <query> [--limit <n>] [--explain] [--json]
+bwrk context search <query> [--limit <n>] [--explain] [--no-rebuild] [--json]
 ```
 
-Searches context-pack summary documents and bounded context-chunk documents only. `--limit` is capped at `100`. The search index must be fresh; run `bwrk search index` or `bwrk doctor --fix` after imports, writes, or context rebuilds that change searchable content.
+Searches context-pack summary documents and bounded context-chunk documents only. `--limit` is capped at `100`. The search index is rebuilt automatically when missing, malformed, or stale unless `--no-rebuild` is set.
 
 JSON `data` is an array of search results with `id`, `type`, `recordId`, `subjectId`, `title`, `summary`, `score`, and `matches`. With `--explain`, each result also includes `explain.algorithm`, `queryTokens`, `scoreBreakdown`, and `fieldMatches`.
+
+Search commands rebuild a missing, invalid, or stale local search index by default. Use `--no-rebuild` to preserve fail-closed behavior.
 
 ## `search index`
 
@@ -1344,14 +1346,15 @@ JSON `data` contains `path`, `schemaVersion`, `builtAt`, `contentHash`, `documen
 ## `search query`
 
 ```bash
-bwrk search query <query> [--limit <n>] [--explain] [--json]
+bwrk search query <query> [--limit <n>] [--explain] [--no-rebuild] [--json]
 ```
 
 Searches work, evidence, sources, claims, decisions, context packs, and bounded context chunks. `--limit` is capped at `100`. Results are ranked by ID prefix matches, field-weighted token matches adjusted by document frequency, deterministic vector-lite similarity, and stable type/title ordering. Tokenization preserves compact tokens while adding camelCase, path/URI, underscore, and alpha-numeric split variants.
 
 Use `--explain` to include the normalized query tokens, score contributions, document frequencies, IDF factors, vector similarity, and field-level matches that caused each result to rank.
+Search commands rebuild a missing, invalid, or stale local search index by default. Use `--no-rebuild` to preserve fail-closed behavior.
 
-The command fails closed when the index is missing, malformed, or stale. Rebuild with `bwrk search index` or `bwrk doctor --fix`.
+With `--no-rebuild`, the command fails closed when the index is missing, malformed, or stale. Rebuild with `bwrk search index` or `bwrk doctor --fix`.
 
 ## `export json`
 

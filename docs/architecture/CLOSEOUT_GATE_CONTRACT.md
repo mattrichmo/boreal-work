@@ -48,6 +48,8 @@ interface RequiredCloseoutGate {
   requiredEvidenceKinds: string[];
   requiredOutcome: "passed";
   minEvidenceCount: number;
+  declaredCommand?: string;
+  expectedObservable?: string;
   createdAt: string;
   createdBy: ActorRef;
   satisfiedBy?: {
@@ -68,6 +70,8 @@ interface RequiredCloseoutGate {
 ```
 
 The schema may store this inline on work records or in a separate state section, but command output should expose the same logical fields so later reports and agents can depend on one contract.
+
+`declaredCommand` is an optional exact command string that the filer expects closeout evidence to record. `expectedObservable` is an optional deterministic substring that must appear in satisfying evidence text or a linked artifact once evaluation is wired. It is intentionally a substring, not a regular expression, so gate declarations cannot smuggle executable or ambiguous matching logic into closeout. Both fields are additive: existing gates omit them and evaluate exactly as before. When present, they participate in the deterministic gate ID so two gate declarations with different done conditions do not collapse into one record.
 
 ## Evidence Requirements
 

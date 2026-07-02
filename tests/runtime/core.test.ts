@@ -31,7 +31,10 @@ import {
   defineMcpToolContract,
   deterministicId,
   detectSuspiciousUnicode,
+  ENFORCEMENT_GAP_CODES,
+  enforcementGapSchemaIssues,
   hashContent,
+  isEnforcementGapCode,
   normalizeActorId,
   normalizeLabel,
   normalizeMachineString,
@@ -480,6 +483,8 @@ describe("core hashing and ids", () => {
           requiredEvidenceKinds: ["review"],
           requiredOutcome: "passed",
           minEvidenceCount: 1,
+          declaredCommand: "pnpm test -- runtime",
+          expectedObservable: "passed",
           createdAt: "2026-01-01T00:00:00.000Z",
           createdBy: { id: "agent-a", kind: "agent" },
           satisfiedBy: {
@@ -497,6 +502,28 @@ describe("core hashing and ids", () => {
 
     expect(runtimeSnapshotSchemaIssues({ workItems: [{ ...validWork, requiredCloseoutGates: undefined }] })).toEqual([]);
     expect(runtimeSnapshotSchemaIssues({ workItems: [validWork] })).toEqual([]);
+    expect(
+      runtimeSnapshotSchemaIssues({
+        workItems: [
+          {
+            ...validWork,
+            requiredCloseoutGates: [
+              {
+                ...validWork.requiredCloseoutGates[0],
+                expectedObservable: ""
+              }
+            ]
+          }
+        ]
+      })
+    ).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          path: "workItems[0].requiredCloseoutGates[0].expectedObservable",
+          schemaId: RUNTIME_SCHEMA_IDS.workItem
+        })
+      ])
+    );
     expect(
       runtimeSnapshotSchemaIssues({
         workItems: [
@@ -543,6 +570,41 @@ describe("core hashing and ids", () => {
           path: "workItems[0].requiredCloseoutGates[0].satisfiedBy.directiveIds[0]",
           schemaId: RUNTIME_SCHEMA_IDS.workItem
         })
+      ])
+    );
+  });
+
+  it("validates the published enforcement gap schema", () => {
+    expect(ENFORCEMENT_GAP_CODES).toContain("gate.verification.unsatisfied");
+    expect(isEnforcementGapCode("work.blocked.open-dependency")).toBe(true);
+    expect(
+      enforcementGapSchemaIssues({
+        code: "gate.verification.unsatisfied",
+        subjectType: "work",
+        subjectId: "bw_work_deadbeefdead",
+        targetId: "bw_work_cafebabecafe",
+        data: {
+          gateIds: ["bw_gate_deadbeefdead"],
+          requiredEvidenceKinds: ["test"],
+          minEvidenceCount: 1,
+          declaredCommand: "pnpm test",
+          expectedObservable: "passed"
+        }
+      })
+    ).toEqual([]);
+    expect(
+      enforcementGapSchemaIssues({
+        code: "gate.verification.maybe",
+        subjectType: "work",
+        subjectId: "bw_work_deadbeefdead",
+        data: {
+          blockerIds: ["not-a-work-id"]
+        }
+      })
+    ).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ path: "$.code", schemaId: RUNTIME_SCHEMA_IDS.enforcementGap }),
+        expect.objectContaining({ path: "$.data.blockerIds[0]", schemaId: RUNTIME_SCHEMA_IDS.enforcementGap })
       ])
     );
   });

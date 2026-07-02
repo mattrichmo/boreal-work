@@ -109,6 +109,8 @@ export interface RequiredCloseoutGate {
   readonly requiredEvidenceKinds: readonly EvidenceKind[];
   readonly requiredOutcome: "passed";
   readonly minEvidenceCount: number;
+  readonly declaredCommand?: string;
+  readonly expectedObservable?: string;
   readonly createdAt: IsoTimestamp;
   readonly createdBy: ActorRef;
   readonly satisfiedBy?: RequiredCloseoutGateSatisfaction;

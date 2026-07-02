@@ -33,6 +33,10 @@ This is the invariant that makes Boreal more than a to-do list: **work cannot cl
 
 This keeps the audit trail honest: every closed item can be traced back to the concrete proof that closed it.
 
+Evidence is not a specification channel. The work specification belongs in the work record: `description` for the body, `acceptanceCriteria` for done conditions, and `meta.sourceRefs` for provenance supplied with `--source`. Evidence is proof after work has happened; attaching evidence to open work intentionally moves it toward verification instead of rewriting the task brief.
+
+For paired work orders, use a dependency as the hard block: `bwrk work block <contract-work> <implementation-work>`. The first item remains blocked and unclaimable until the blocker is closed, unless an actor uses an explicit force path with a recorded reason. This keeps contract or wrapper work from being claimed before its implementation prerequisite is done.
+
 ## Knowledge: sources, claims, decisions
 
 The knowledge layer answers "what is true here, and why."
@@ -46,6 +50,8 @@ Accepted claims and decisions flow into context packs, so the reasoning travels 
 ## Context packs
 
 A **context pack** is a projected, searchable bundle of the records relevant to a work item — its claims, decisions, and related state. Packs are *rebuilt* from the underlying records (`context rebuild`), never hand-edited, so they stay consistent with the source of truth. `context show` reads a pack; `context search` and `search query` rank across them with a deterministic hybrid local index.
+
+Mutating commands that change a work item's user-facing truth refresh that subject's context pack immediately. Search commands rebuild a missing, invalid, or stale local index by default, with `--no-rebuild` reserved for fail-closed checks.
 
 ## Reservations and agents
 

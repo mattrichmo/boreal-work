@@ -1,0 +1,59 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://boreal.work/schemas/enforcement/enforcement-gap.schema.json",
+  "title": "Boreal Enforcement Gap",
+  "type": "object",
+  "required": ["code", "subjectType", "subjectId"],
+  "properties": {
+    "code": {
+      "enum": [
+        "gate.verification.unsatisfied",
+        "gate.checkpoint.unsatisfied",
+        "gate.review.unsatisfied",
+        "gate.audit.unsatisfied",
+        "gate.force.invalid",
+        "gate.declared-command.missing",
+        "gate.expected-observable.missing",
+        "work.blocked.open-dependency",
+        "work.container.open-descendant",
+        "reservation.not-ready",
+        "reservation.capacity-exceeded",
+        "reservation.active-conflict",
+        "close.no-passing-verification",
+        "summary.missing",
+        "summary.checkpoint-missing",
+        "directive.acknowledgement-missing",
+        "search.index-stale"
+      ]
+    },
+    "subjectType": {
+      "enum": ["work", "sprint", "phase", "milestone", "project", "session", "workspace", "command"]
+    },
+    "subjectId": { "type": "string", "minLength": 1 },
+    "targetId": { "type": "string", "minLength": 1 },
+    "data": {
+      "type": "object",
+      "properties": {
+        "blockerIds": {
+          "type": "array",
+          "items": { "type": "string", "pattern": "^bw_work_[a-f0-9]{12,64}$" },
+          "uniqueItems": true
+        },
+        "gateIds": {
+          "type": "array",
+          "items": { "type": "string", "pattern": "^bw_gate_[a-f0-9]{12,64}$" },
+          "uniqueItems": true
+        },
+        "requiredEvidenceKinds": {
+          "type": "array",
+          "items": { "enum": ["command", "test", "diff", "review", "artifact", "note"] }
+        },
+        "minEvidenceCount": { "type": "integer", "minimum": 0 },
+        "declaredCommand": { "type": "string", "minLength": 1 },
+        "expectedObservable": { "type": "string", "minLength": 1 },
+        "observed": { "type": "array", "items": { "type": "string" } },
+        "reason": { "type": "string", "minLength": 1 }
+      }
+    }
+  }
+}

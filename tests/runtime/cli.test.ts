@@ -3614,7 +3614,9 @@ describe("bwrk cli", () => {
     expect(searchIndex?.behavior).toEqual(
       expect.objectContaining({ writesGeneratedArtifacts: true, requiresLock: "index" })
     );
-    expect(searchQuery?.behavior).toEqual(expect.objectContaining({ readOnly: true, requiresFreshIndex: true }));
+    expect(searchQuery?.behavior).toEqual(
+      expect.objectContaining({ readOnly: true, writesGeneratedArtifacts: true, requiresFreshIndex: false, requiresLock: "index" })
+    );
     expect(evidenceAdd?.usage).toContain("[--kind command|test|diff|review|artifact|note]");
     expect(evidenceAdd?.usage).not.toContain("document");
     expect(evidenceAdd?.flags).toEqual(
@@ -5319,9 +5321,10 @@ describe("bwrk cli", () => {
     await runCli(rootDir, ["context", "rebuild", "--json"]);
 
     const missing = await runCli(rootDir, ["search", "query", "content hash", "--json"]);
-    const missingPayload = parseJson<{ readonly ok: false; readonly code: string }>(missing.stderr);
-    expect(missing.exitCode).toBe(1);
-    expect(missingPayload.code).toBe("BOREAL_POLICY_VIOLATION");
+    expect(missing.exitCode).toBe(0);
+    expect(parseData<Array<{ readonly title: string }>>(missing.stdout).map((result) => result.title)).toContain(
+      "Use content hash search"
+    );
 
     const indexed = await runCli(rootDir, ["search", "index", "--json"]);
     expect(parseData<{ readonly documentCount: number; readonly tokenCount: number }>(indexed.stdout).documentCount).toBeGreaterThan(8);
@@ -5444,7 +5447,7 @@ describe("bwrk cli", () => {
       "file://stale-search.md",
       "--json"
     ]);
-    const stale = await runCli(rootDir, ["search", "query", "content hash", "--json"]);
+    const stale = await runCli(rootDir, ["search", "query", "content hash", "--no-rebuild", "--json"]);
     const stalePayload = parseJson<{ readonly ok: false; readonly code: string; readonly message: string }>(stale.stderr);
     expect(stale.exitCode).toBe(1);
     expect(stalePayload.code).toBe("BOREAL_POLICY_VIOLATION");
@@ -8035,6 +8038,12 @@ describe("bwrk cli", () => {
       ...state,
       workItems: state.workItems.map((work) =>
         work.meta.id === deletableWork.meta.id ? { ...work, evidenceIds: [], verificationIds: [] } : work
+      ),
+      projections: ((state.projections as Array<{ readonly subjectId: string }> | undefined) ?? []).filter(
+        (projection) => projection.subjectId !== deletableWork.meta.id
+      ),
+      contextPacks: ((state.contextPacks as Array<{ readonly subjectId: string }> | undefined) ?? []).filter(
+        (pack) => pack.subjectId !== deletableWork.meta.id
       )
     }));
 
@@ -8467,6 +8476,61 @@ describe("bwrk cli", () => {
       expect.objectContaining({ severity: "ok" })
     );
     expect(doctorDiagnostic(doctorPayload, "search.index")).toEqual(expect.objectContaining({ severity: "ok" }));
+  });
+
+  it("refreshes context packs after work edit and renders generatedAt in text and JSON", async () => {
+    const rootDir = await makeTempWorkspace();
+    await runCli(rootDir, ["init", "--json"]);
+
+    const work = parseData<{ readonly meta: { readonly id: string } }>(
+      (await runCli(rootDir, [
+        "work",
+        "create",
+        "Editable context target",
+        "--description",
+        "Original context description.",
+        "--ready",
+        "--json"
+      ])).stdout
+    );
+    await runCli(rootDir, ["context", "rebuild", "--json"]);
+    await runCli(rootDir, ["work", "edit", work.meta.id, "--description", "Fresh context description.", "--json"]);
+
+    const jsonPack = parseData<{ readonly generatedAt: string; readonly summary: string }>(
+      (await runCli(rootDir, ["context", "show", work.meta.id, "--json"])).stdout
+    );
+    expect(jsonPack.generatedAt).toMatch(/^20/u);
+    expect(jsonPack.summary).toContain("Fresh context description.");
+
+    const textPack = await runCli(rootDir, ["context", "show", work.meta.id]);
+    expect(textPack.stdout).toContain("Generated at:");
+    expect(textPack.stdout).toContain("Fresh context description.");
+  });
+
+  it("auto-rebuilds stale search indexes unless --no-rebuild is requested", async () => {
+    const rootDir = await makeTempWorkspace();
+    await runCli(rootDir, ["init", "--json"]);
+    await runCli(rootDir, ["work", "create", "Auto rebuild search target", "--ready", "--json"]);
+
+    const missingIndexSearch = await runCli(rootDir, ["search", "query", "Auto rebuild search target", "--json"]);
+    expect(missingIndexSearch.exitCode).toBe(0);
+    expect(parseData<Array<{ readonly title: string }>>(missingIndexSearch.stdout).some((row) => row.title === "Auto rebuild search target"))
+      .toBe(true);
+
+    await runCli(rootDir, ["work", "create", "Concurrent auto rebuild target", "--ready", "--json"]);
+    const noRebuild = await runCli(rootDir, ["search", "query", "Concurrent auto rebuild target", "--no-rebuild", "--json"]);
+    const noRebuildPayload = parseJson<{ readonly ok: false; readonly message: string }>(noRebuild.stderr);
+    expect(noRebuild.exitCode).toBe(1);
+    expect(noRebuildPayload.message).toContain("Search index is stale");
+
+    const searches = await Promise.all(
+      Array.from({ length: 4 }, () => runCli(rootDir, ["search", "query", "Concurrent auto rebuild target", "--json"]))
+    );
+    expect(searches.map((result) => result.exitCode)).toEqual([0, 0, 0, 0]);
+    for (const result of searches) {
+      expect(parseData<Array<{ readonly title: string }>>(result.stdout).some((row) => row.title === "Concurrent auto rebuild target"))
+        .toBe(true);
+    }
   });
 
   it("supports bounded and filtered work lists", async () => {

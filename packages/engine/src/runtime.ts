@@ -251,6 +251,7 @@ export interface BorealRuntime {
   getDecision(decisionId: DecisionId): Promise<DecisionRecord>;
   rebuildProjections(options?: RebuildProjectionsOptions): Promise<readonly WorkItemView[]>;
   getContextPack(workId: WorkId): Promise<ContextPack>;
+  refreshWorkContext(workId: WorkId): Promise<ContextPack>;
   recomputeReadiness(): Promise<{ readonly changed: number }>;
   getWorkView(workId: WorkId): Promise<WorkItemView>;
   listEvents(): Promise<readonly RuntimeEvent[]>;
@@ -609,11 +610,14 @@ export function createBorealRuntime(options: BorealRuntimeOptions = {}): BorealR
 
     async recordEvidence(input): Promise<EvidenceRecord> {
       return store.write(async (writer) => {
-        const evidence = recordEvidenceDomain({ ...input, actor, now: now() });
+        const current = now();
+        const evidence = recordEvidenceDomain({ ...input, actor, now: current });
         await writer.putEvidence(evidence);
         if (input.subjectType === "work") {
           const work = await requireWork(writer, input.subjectId as WorkId);
-          await writer.putWorkItem(attachEvidenceToWork(work, evidence.meta.id, now(), actor));
+          const updated = attachEvidenceToWork(work, evidence.meta.id, current, actor);
+          await writer.putWorkItem(updated);
+          await refreshWorkContext(writer, updated, actor, current);
         }
         await appendEvent(writer, "evidence.recorded", evidence.meta.id, "evidence", {
           subjectId: evidence.subjectId,
@@ -626,6 +630,7 @@ export function createBorealRuntime(options: BorealRuntimeOptions = {}): BorealR
 
     async verifyWork(input): Promise<VerificationRecord> {
       return store.write(async (writer) => {
+        const current = now();
         const work = await requireWork(writer, input.workId);
         const availableEvidence = await loadEvidenceRecords(writer, input.evidenceIds);
         const verification = verifySubject({
@@ -637,10 +642,12 @@ export function createBorealRuntime(options: BorealRuntimeOptions = {}): BorealR
           notes: input.notes,
           policy,
           actor,
-          now: now()
+          now: current
         });
         await writer.putVerification(verification);
-        await writer.putWorkItem(attachVerificationToWork(work, verification, now(), actor));
+        const updated = attachVerificationToWork(work, verification, current, actor);
+        await writer.putWorkItem(updated);
+        await refreshWorkContext(writer, updated, actor, current);
         await appendEvent(writer, "work.verified", input.workId, "work", {
           verdict: verification.verdict,
           verificationId: verification.meta.id
@@ -703,6 +710,7 @@ export function createBorealRuntime(options: BorealRuntimeOptions = {}): BorealR
         }
         await writer.putWorkItem(closed);
         await recomputeAllReadiness(writer);
+        await refreshWorkContext(writer, closed, actor, current);
         await appendEvent(writer, "work.closed", closed.meta.id, "work", { reason: input.reason });
         return closed;
       });
@@ -945,6 +953,18 @@ export function createBorealRuntime(options: BorealRuntimeOptions = {}): BorealR
         if (!pack) {
           throw new BorealError("BOREAL_NOT_FOUND", "Context pack not found; run `bwrk context rebuild`", { workId });
         }
+        return pack;
+      });
+    },
+
+    async refreshWorkContext(workId): Promise<ContextPack> {
+      return store.write(async (writer) => {
+        const current = now();
+        const work = await requireWork(writer, workId);
+        const pack = await refreshWorkContext(writer, work, actor, current);
+        await appendEvent(writer, "context.refreshed", work.meta.id, "work", {
+          contextPackId: pack.id
+        });
         return pack;
       });
     },
@@ -1733,14 +1753,16 @@ async function refreshWorkContext(
   work: WorkItem,
   actor: ActorRef,
   current: IsoTimestamp
-): Promise<void> {
+): Promise<ContextPack> {
   const graphWork = await workWithGraphDependencies(writer, work);
   const evidence = await writer.listEvidenceForSubject(work.meta.id);
   const sources = await writer.listKnowledgeSources();
   const claims = await writer.listClaims();
   const decisions = await writer.listDecisions();
-  await writer.putContextPack(buildContextPack({ work: graphWork, evidence, sources, claims, decisions, actor, now: current }));
+  const pack = buildContextPack({ work: graphWork, evidence, sources, claims, decisions, actor, now: current });
+  await writer.putContextPack(pack);
   await writer.putProjection(buildContextProjection({ work: graphWork, evidence, sources, claims, decisions, actor, now: current }));
+  return pack;
 }
 
 function compareClaimCandidates(left: WorkItem, right: WorkItem): number {

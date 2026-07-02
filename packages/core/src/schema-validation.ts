@@ -1,7 +1,8 @@
 import { dirname, isAbsolute, relative, resolve } from "node:path";
 
-import { BorealError } from "./errors.js";
 import { agentDirectiveBundleIssues } from "./agent-directives.js";
+import { ENFORCEMENT_GAP_CODES } from "./enforcement-gaps.js";
+import { BorealError } from "./errors.js";
 import type { RuntimePolicy } from "./policies.js";
 import { PROJECT_REGISTRY_SCHEMA_ID, PROJECT_REGISTRY_SCHEMA_VERSION } from "./project-registry.js";
 
@@ -57,6 +58,7 @@ export const RUNTIME_SCHEMA_IDS = {
   runtimeOperation: "https://boreal.work/schemas/operations/runtime-operation.schema.json",
   projectionRecord: "https://boreal.work/schemas/projections/projection-record.schema.json",
   contextPack: "https://boreal.work/schemas/projections/context-pack.schema.json",
+  enforcementGap: "https://boreal.work/schemas/enforcement/enforcement-gap.schema.json",
   runtimePolicy: "https://boreal.work/schemas/policies/runtime-policy.schema.json"
 } as const;
 
@@ -171,6 +173,13 @@ export const RUNTIME_SCHEMA_CONTRACTS = [
     schemaPath: "schemas/projections/context-pack.schema.json",
     runtimeSection: "contextPacks",
     validator: contextPackSchemaIssues
+  },
+  {
+    key: "enforcementGap",
+    schemaId: RUNTIME_SCHEMA_IDS.enforcementGap,
+    schemaPath: "schemas/enforcement/enforcement-gap.schema.json",
+    runtimeSection: undefined,
+    validator: enforcementGapSchemaIssues
   },
   {
     key: "runtimePolicy",
@@ -668,6 +677,34 @@ export function contextPackSchemaIssues(value: unknown, path = "$"): readonly Sc
   ];
 }
 
+export function enforcementGapSchemaIssues(value: unknown, path = "$"): readonly SchemaValidationIssue[] {
+  const schemaId = RUNTIME_SCHEMA_IDS.enforcementGap;
+  if (!isRecord(value)) {
+    return [issue(schemaId, path, "must be an object")];
+  }
+  const issues: SchemaValidationIssue[] = [
+    ...enumIssue(value.code, `${path}.code`, schemaId, ENFORCEMENT_GAP_CODES),
+    ...enumIssue(value.subjectType, `${path}.subjectType`, schemaId, [
+      "work",
+      "sprint",
+      "phase",
+      "milestone",
+      "project",
+      "session",
+      "workspace",
+      "command"
+    ]),
+    ...nonEmptyStringIssue(value.subjectId, `${path}.subjectId`, schemaId)
+  ];
+  if (value.targetId !== undefined) {
+    issues.push(...nonEmptyStringIssue(value.targetId, `${path}.targetId`, schemaId));
+  }
+  if (value.data !== undefined) {
+    issues.push(...enforcementGapDataIssues(value.data, `${path}.data`, schemaId));
+  }
+  return issues;
+}
+
 export function runtimePolicySchemaIssues(value: unknown, path = "$"): readonly SchemaValidationIssue[] {
   const schemaId = RUNTIME_SCHEMA_IDS.runtimePolicy;
   if (!isRecord(value)) {
@@ -1033,6 +1070,12 @@ function requiredCloseoutGateIssues(value: unknown, path: string, schemaId: stri
     ...stringIssue(value.createdAt, `${path}.createdAt`, schemaId),
     ...actorRefIssues(value.createdBy, `${path}.createdBy`, schemaId)
   ];
+  if (value.declaredCommand !== undefined) {
+    issues.push(...nonEmptyStringIssue(value.declaredCommand, `${path}.declaredCommand`, schemaId));
+  }
+  if (value.expectedObservable !== undefined) {
+    issues.push(...nonEmptyStringIssue(value.expectedObservable, `${path}.expectedObservable`, schemaId));
+  }
   if (value.satisfiedBy !== undefined) {
     issues.push(...requiredCloseoutGateSatisfactionIssues(value.satisfiedBy, `${path}.satisfiedBy`, schemaId));
   }
@@ -1041,6 +1084,45 @@ function requiredCloseoutGateIssues(value: unknown, path: string, schemaId: stri
   }
   if (value.status === "forced" && value.force === undefined) {
     issues.push(issue(schemaId, `${path}.force`, "is required when status is forced"));
+  }
+  return issues;
+}
+
+function enforcementGapDataIssues(value: unknown, path: string, schemaId: string): readonly SchemaValidationIssue[] {
+  if (!isRecord(value)) {
+    return [issue(schemaId, path, "must be an object")];
+  }
+  const issues: SchemaValidationIssue[] = [];
+  if (value.blockerIds !== undefined) {
+    issues.push(...uniquePatternStringArrayIssue(value.blockerIds, `${path}.blockerIds`, schemaId, /^bw_work_[a-f0-9]{12,64}$/));
+  }
+  if (value.gateIds !== undefined) {
+    issues.push(...uniquePatternStringArrayIssue(value.gateIds, `${path}.gateIds`, schemaId, /^bw_gate_[a-f0-9]{12,64}$/));
+  }
+  if (value.requiredEvidenceKinds !== undefined) {
+    issues.push(...enumArrayIssue(value.requiredEvidenceKinds, `${path}.requiredEvidenceKinds`, schemaId, [
+      "command",
+      "test",
+      "diff",
+      "review",
+      "artifact",
+      "note"
+    ]));
+  }
+  if (value.minEvidenceCount !== undefined) {
+    issues.push(...integerAtLeastIssue(value.minEvidenceCount, `${path}.minEvidenceCount`, schemaId, 0));
+  }
+  if (value.declaredCommand !== undefined) {
+    issues.push(...nonEmptyStringIssue(value.declaredCommand, `${path}.declaredCommand`, schemaId));
+  }
+  if (value.expectedObservable !== undefined) {
+    issues.push(...nonEmptyStringIssue(value.expectedObservable, `${path}.expectedObservable`, schemaId));
+  }
+  if (value.observed !== undefined) {
+    issues.push(...stringArrayIssue(value.observed, `${path}.observed`, schemaId));
+  }
+  if (value.reason !== undefined) {
+    issues.push(...nonEmptyStringIssue(value.reason, `${path}.reason`, schemaId));
   }
   return issues;
 }

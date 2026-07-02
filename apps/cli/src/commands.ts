@@ -4670,7 +4670,7 @@ async function editWorkCommand(context: CliContext, workId: WorkId, args: Parsed
   }
 
   const current = nowIso();
-  return context.store.write(async (writer) => {
+  const result = await context.store.write(async (writer) => {
     const work = await requireCliWork(writer, workId);
     const nextLabels = labels.length > 0 ? labelsFromArgs(args) : work.labels;
     const nextKind = kind ?? work.kind;
@@ -4722,6 +4722,8 @@ async function editWorkCommand(context: CliContext, workId: WorkId, args: Parsed
     }, current);
     return { work: updated, event };
   });
+  await context.runtime.refreshWorkContext(workId);
+  return result;
 }
 
 async function cancelWorkCommand(
@@ -6523,14 +6525,15 @@ async function contextCommand(
     }
     case "show": {
       const pack = await context.runtime.getContextPack(await resolveWorkId(context, requiredPositional(rest, 0, "work reference")));
-      output.write(formatRecord(pack, json));
+      output.write(json ? formatRecord(pack, true) : formatContextPack(pack));
       return { exitCode: 0 };
     }
     case "search": {
       const results = await runSearch(context, rest.join(" "), {
         limit: parseLimit(flagValue(args, "limit"), { max: MAX_SEARCH_LIMIT }),
         types: ["context_pack", "context_chunk"],
-        explain: hasFlag(args, "explain")
+        explain: hasFlag(args, "explain"),
+        rebuildStaleIndex: !hasFlag(args, "no-rebuild")
       });
       output.write(json ? formatRecord(results, true) : table(results.map(searchResultRow)));
       return { exitCode: 0 };
@@ -6556,7 +6559,8 @@ async function searchCommand(
     case "query": {
       const results = await runSearch(context, rest.join(" "), {
         limit: parseLimit(flagValue(args, "limit"), { max: MAX_SEARCH_LIMIT }),
-        explain: hasFlag(args, "explain")
+        explain: hasFlag(args, "explain"),
+        rebuildStaleIndex: !hasFlag(args, "no-rebuild")
       });
       output.write(json ? formatRecord(results, true) : table(results.map(searchResultRow)));
       return { exitCode: 0 };
@@ -6564,6 +6568,23 @@ async function searchCommand(
     default:
       throw new BorealError("BOREAL_INVALID_INPUT", `Unknown search command: ${action ?? ""}`);
   }
+}
+
+function formatContextPack(pack: ContextPack): string {
+  const lines = [
+    pack.title,
+    `Subject: ${pack.subjectId}`,
+    `Generated at: ${pack.generatedAt}`,
+    "",
+    pack.summary
+  ];
+  if (pack.facts.length > 0) {
+    lines.push("", "Facts:", ...pack.facts.map((fact) => `- ${fact}`));
+  }
+  if (pack.evidence.length > 0) {
+    lines.push("", "Evidence:", ...pack.evidence.map((entry) => `- ${entry}`));
+  }
+  return `${lines.join("\n")}\n`;
 }
 
 async function exportCommand(

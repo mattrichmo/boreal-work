@@ -2,7 +2,7 @@
 
 These JSON schemas describe the durable record envelopes used by the TypeScript runtime. The TypeScript source in `packages/core/src/records.ts` remains the domain type source, and `packages/core/src/schema-validation.ts` enforces the currently published schema subset at runtime, import, and doctor boundaries.
 
-The current runtime types cover work, agent summaries, graph edges, evidence, verification, knowledge sources, claims, decisions, reservations, events, and projections. Agent directive bundle schemas describe trusted runtime instruction bundles carried by command envelopes and imports, but are intentionally separate from durable runtime snapshots. The project registry schema is a machine-local coordination contract for known Boreal workspaces and is intentionally separate from runtime snapshots.
+The current runtime types cover work, agent summaries, graph edges, evidence, verification, knowledge sources, claims, decisions, reservations, events, and projections. Enforcement gap schemas describe typed runtime misses that directives can project from later, but are not durable runtime snapshot sections yet. Agent directive bundle schemas describe trusted runtime instruction bundles carried by command envelopes and imports, but are intentionally separate from durable runtime snapshots. The project registry schema is a machine-local coordination contract for known Boreal workspaces and is intentionally separate from runtime snapshots.
 
 Currently enforced schemas:
 
@@ -10,6 +10,7 @@ Currently enforced schemas:
 - `schemas/records/agent-summary-record.schema.json`
 - `schemas/records/graph-edge.schema.json`
 - `schemas/records/evidence-record.schema.json`
+- `schemas/enforcement/enforcement-gap.schema.json`
 - `schemas/records/verification-record.schema.json`
 - `schemas/records/knowledge-source.schema.json`
 - `schemas/records/claim-record.schema.json`

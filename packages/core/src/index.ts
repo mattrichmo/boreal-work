@@ -4,6 +4,7 @@ export * from "./agent-directive-health.js";
 export * from "./agent-directive-registry.js";
 export * from "./agent-directive-snapshot.js";
 export * from "./agent-directives.js";
+export * from "./enforcement-gaps.js";
 export * from "./errors.js";
 export * from "./factory.js";
 export * from "./hash.js";
