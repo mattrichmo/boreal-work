@@ -100,7 +100,7 @@ Opportunity. `title`, `accountId`, `stage`, `value?`, `currency?`, `expectedClos
 - `direction`: `outbound` | `inbound` | `mutual` — load-bearing for derivation (§5.1)
 - `outcome`: `connected` | `no_answer` | `positive` | `negative` | `neutral` | `info`
 - `occurredAt` (backfill-friendly, distinct from `createdAt`)
-- `contactIds[]`, `accountId?`, `dealId?`, `summary`, `body?`
+- `contactIds[]`, `accountId?`, `dealId?`, `summary` (short, git-tracked), `bodyRef?` (content hash → sidecar store, never in git — see §10.5)
 - `fulfillsCommitmentIds[]` — the only way a commitment is satisfied
 - `nextStep`: **required** — one of:
   - `commitment:<id>` (a commitment was created from this interaction),
@@ -311,7 +311,11 @@ CRM content is *other people's words* — customer emails, call transcripts, not
 
 ### 10.5 Compliance posture
 - **Do-not-contact** is already a hard flag (§4.1).
-- **Retention and erasure vs. immutability is a real tension** (GDPR right-to-erasure vs. append-only records). Design direction: a **redaction record** tombstones a subject and removes content fields while preserving the record skeleton and actor chain (the fact that an interaction happened is retained; its content is not). Whether that requires history rewrite policy or content-envelope encryption with key destruction is an open question — flagged for legal/deployment review, not silently decided here.
+- **Erasure vs. immutability — settled direction: minimization by design + content sidecar + redaction runbook.**
+  - **Heavy PII never enters git.** Interaction `body`, email text, and transcripts live in a local content-addressed store outside version control (`.boreal/content/`, gitignored); the git-tracked record holds structure (kind, direction, outcome, timestamps, actor chain) plus the content hash. This is a day-one default, not an option — it is brutal to retrofit.
+  - **Erasure** = delete the sidecar blobs (instant, no history surgery) + write a **redaction record** tombstoning the subject. The tamper-evident skeleton survives: *that* an interaction happened, when, by whom, hash-attested — while the erasable words were never in a commit.
+  - **Summaries** (short, git-tracked, diffable) remain the residual PII surface, retained under documented legitimate-interest/retention policy; the break-glass path for a full-erasure demand is a coordinated `git filter-repo` runbook with a redaction attestation — tractable because the deployment unit is a per-team repo with few clones.
+  - Crypto-shredding (per-subject content keys, destroy on erasure) is the documented escalation if a deployment requires erasable content *inside* the audit chain; it is not the default because encrypted content kills readability and diffing.
 - **Export:** `bcrm audit --json` and CSV export cover legal-hold and migration needs.
 
 ## 11. TUI (`apps/crm-tui`)
@@ -340,7 +344,7 @@ Quick-log is a single form: kind/direction/outcome pickers, summary line, **next
 - **Alias/merge integrity:** re-pointing via alias resolution must be doctor-checkable (no orphaned references after merge). This is new machinery; test it hardest.
 - **Shared `state.json` with work records:** record-type namespacing must keep `bwrk doctor` and `bcrm doctor` from fighting; fallback is a sibling store file.
 - **Next-step invariant friction:** if it's annoying, people stop logging (worse than dangling threads). Mitigation: `--next-touch <date>` is one flag; TUI makes it one keystroke; `none` is always available with a reason. Watch this in dogfooding — the invariant is right but the ergonomics decide whether it survives.
-- **Erasure vs. immutability (§10.5):** redaction design must be settled before any deployment holding real customer PII; the git-history dimension (content lives in old commits) is the hard part.
+- **Erasure vs. immutability (§10.5):** direction is settled (sidecar + redaction runbook), but summaries in git remain a residual PII surface; retention policy language needs DPO-grade review before a deployment holds EU customer data. The sidecar also means content doesn't sync via git — content replication between team members needs its own answer (likely: content travels with briefs/digests on demand, or an rsync-able blob dir).
 - **Authority policy bypass:** `denied`/`requires_ack` is enforced at the command layer; a hostile actor with filesystem access can write the store directly. Git attribution + signed commits are the detection layer; full prevention would require a server, which is out of scope. State this honestly in docs.
 
 ## 14. Testing
