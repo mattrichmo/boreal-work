@@ -9,7 +9,9 @@ import {
   AGENT_DIRECTIVE_REGISTRY,
   AGENT_DIRECTIVE_SNAPSHOT_CONTEXT_KEYS,
   BorealError,
-  assembleAgentDirectiveBundle,
+  agentDirectiveGapsForSnapshot,
+  agentDirectiveSnapshotHash,
+  assembleAgentDirectiveBundleFromGaps,
   assertPathInside,
   assertRealPathInside,
   closeoutDirectiveDataByRegistryId,
@@ -30,7 +32,7 @@ import {
   randomId,
   recoveryDirectiveDataByRegistryId,
   runtimeSnapshotSchemaIssues,
-  selectAgentDirectiveRegistryEntries,
+  selectAgentDirectiveRegistryEntriesFromGaps,
   summaryDirectiveDataByRegistryId,
   touchRecord,
   withContentHash,
@@ -1506,6 +1508,7 @@ interface DirectiveCompileSelection {
 interface DirectiveDebugInput {
   readonly fixture?: DirectiveDebugFixtureId;
   readonly snapshot: AgentDirectiveSnapshot;
+  readonly gaps: readonly EnforcementGap[];
   readonly dataByRegistryId: AgentDirectiveAssemblyDataByRegistryId;
   readonly selections: readonly DirectiveCompileSelection[];
 }
@@ -1517,6 +1520,7 @@ interface DirectiveCompileResult {
   readonly fixture?: DirectiveDebugFixtureId;
   readonly commandPath: string;
   readonly subject?: AgentDirectiveSnapshot["work"]["subject"];
+  readonly gaps: readonly EnforcementGap[];
   readonly selectedRegistryIds: readonly AgentDirectiveTemplateId[];
   readonly selections: readonly DirectiveCompileSelection[];
   readonly issueCount: number;
@@ -1852,9 +1856,14 @@ function showDirectiveRegistryEntry(id: string): DirectiveRegistryShowResult {
 
 function compileDirectiveDebugBundle(args: ParsedArgs): DirectiveCompileResult {
   const input = directiveDebugInput(args, { defaultFixture: "blocked-work" });
-  const result = assembleAgentDirectiveBundle({
-    snapshot: input.snapshot,
-    dataByRegistryId: input.dataByRegistryId
+  const result = assembleAgentDirectiveBundleFromGaps({
+    gaps: input.gaps,
+    dataByRegistryId: input.dataByRegistryId,
+    commandPath: input.snapshot.command.path,
+    capturedAt: input.snapshot.capturedAt,
+    envelopeSchema: input.snapshot.command.envelopeSchema,
+    subject: input.snapshot.work.subject,
+    sourceHash: agentDirectiveSnapshotHash(input.snapshot)
   });
   return {
     schemaVersion: "boreal.cli.directives.compile.v1",
@@ -1863,6 +1872,7 @@ function compileDirectiveDebugBundle(args: ParsedArgs): DirectiveCompileResult {
     ...(input.fixture ? { fixture: input.fixture } : {}),
     commandPath: input.snapshot.command.path,
     ...(input.snapshot.work.subject ? { subject: input.snapshot.work.subject } : {}),
+    gaps: input.gaps,
     selectedRegistryIds: result.selectedRegistryIds,
     selections: input.selections,
     issueCount: result.issues.length,
@@ -1895,9 +1905,14 @@ function explainDirectiveEmission(id: string, args: ParsedArgs): DirectiveExplai
     throw new BorealError("BOREAL_NOT_FOUND", `Directive registry entry not found: ${id}`);
   }
   const input = directiveDebugInput(args, { defaultFixture: "blocked-work" });
-  const result = assembleAgentDirectiveBundle({
-    snapshot: input.snapshot,
-    dataByRegistryId: input.dataByRegistryId
+  const result = assembleAgentDirectiveBundleFromGaps({
+    gaps: input.gaps,
+    dataByRegistryId: input.dataByRegistryId,
+    commandPath: input.snapshot.command.path,
+    capturedAt: input.snapshot.capturedAt,
+    envelopeSchema: input.snapshot.command.envelopeSchema,
+    subject: input.snapshot.work.subject,
+    sourceHash: agentDirectiveSnapshotHash(input.snapshot)
   });
   const directive = result.bundle?.directives.find((candidate) => candidate.registryId === entry.id);
   const selected = result.selectedRegistryIds.includes(entry.id);
@@ -1936,7 +1951,8 @@ function directiveDebugInput(
   const baseSnapshot = fixture ? directiveDebugFixtureSnapshot(fixture) : directiveDebugBaseSnapshot();
   const snapshot = applyDirectiveDebugOverrides(baseSnapshot, args);
   const dataByRegistryId = directiveDebugDataByRegistryId(snapshot);
-  const selections = selectAgentDirectiveRegistryEntries(snapshot, AGENT_DIRECTIVE_REGISTRY, {
+  const gaps = agentDirectiveGapsForSnapshot(snapshot, AGENT_DIRECTIVE_REGISTRY, dataByRegistryId);
+  const selections = selectAgentDirectiveRegistryEntriesFromGaps(gaps, AGENT_DIRECTIVE_REGISTRY, {
     dataByRegistryId
   }).map((selection) => ({
     registryId: selection.registryEntry.id,
@@ -1945,6 +1961,7 @@ function directiveDebugInput(
   return {
     ...(fixture ? { fixture } : {}),
     snapshot,
+    gaps,
     dataByRegistryId,
     selections
   };
@@ -2406,6 +2423,7 @@ function renderDirectiveBundleMarkdown(result: DirectiveCompileResult): string {
       { key: "fixture", value: result.fixture ?? "custom" },
       { key: "command", value: result.commandPath },
       { key: "subject", value: result.subject ? `${result.subject.type}:${result.subject.id}` : "none" },
+      { key: "gaps", value: String(result.gaps.length) },
       { key: "selected", value: result.selectedRegistryIds.join(", ") || "none" },
       { key: "issues", value: String(result.issueCount) }
     ]),
@@ -7119,9 +7137,15 @@ async function compileCliAgentDirectiveBundles(
 ): Promise<readonly AgentDirectiveBundle[]> {
   const snapshot = await buildCliAgentDirectiveSnapshot(context, args, options);
   const dataByRegistryId = cliDirectiveDataByRegistryId(snapshot);
-  const result = assembleAgentDirectiveBundle({
-    snapshot,
-    dataByRegistryId
+  const gaps = agentDirectiveGapsForSnapshot(snapshot, AGENT_DIRECTIVE_REGISTRY, dataByRegistryId);
+  const result = assembleAgentDirectiveBundleFromGaps({
+    gaps,
+    dataByRegistryId,
+    commandPath: snapshot.command.path,
+    capturedAt: snapshot.capturedAt,
+    envelopeSchema: snapshot.command.envelopeSchema,
+    subject: snapshot.work.subject,
+    sourceHash: agentDirectiveSnapshotHash(snapshot)
   });
   if (!result.bundle && (result.selectedRegistryIds.length > 0 || result.issues.length > 0)) {
     throw new BorealError("BOREAL_INVALID_INPUT", "agentDirectives failed schema validation", {

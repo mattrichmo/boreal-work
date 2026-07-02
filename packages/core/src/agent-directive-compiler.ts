@@ -24,12 +24,14 @@ import {
   type AgentDirectiveGateStateSnapshot,
   type AgentDirectiveSnapshot
 } from "./agent-directive-snapshot.js";
-import type { EnforcementGapCode } from "./enforcement-gaps.js";
-import type { ContentHash } from "./ids.js";
+import type { EnforcementGap, EnforcementGapCode } from "./enforcement-gaps.js";
+import { hashContent } from "./hash.js";
+import type { ContentHash, WorkId } from "./ids.js";
 import type {
   AgentSummaryForceReasonCode,
   AgentSummaryOutcome,
   AgentSummaryStatus,
+  EvidenceKind,
   VerificationVerdict
 } from "./records.js";
 import { isIsoTimestamp, type IsoTimestamp } from "./time.js";
@@ -56,6 +58,26 @@ export interface AgentDirectiveBundleAssemblyInput {
   readonly registry?: AgentDirectiveRegistry;
   readonly generatedAt?: IsoTimestamp;
   readonly bundleId?: AgentDirectiveBundleId;
+}
+
+export interface AgentDirectiveGapProjectionInput {
+  readonly gaps: readonly EnforcementGap[];
+  readonly dataByRegistryId: AgentDirectiveAssemblyDataByRegistryId;
+  readonly commandPath: string;
+  readonly capturedAt: IsoTimestamp;
+  readonly envelopeSchema?: string;
+  readonly subject?: AgentDirectiveSubject;
+  readonly registry?: AgentDirectiveRegistry;
+  readonly generatedAt?: IsoTimestamp;
+  readonly bundleId?: AgentDirectiveBundleId;
+  readonly sourceHash?: ContentHash;
+}
+
+interface AgentDirectiveProjectionContext {
+  readonly subject?: AgentDirectiveSubject;
+  readonly commandPath: string;
+  readonly envelopeSchema?: string;
+  readonly capturedAt: IsoTimestamp;
 }
 
 export interface AgentDirectiveRegistrySelection {
@@ -222,12 +244,26 @@ export function selectAgentDirectiveRegistryEntries(
   if (snapshotIssues.length > 0) {
     return [];
   }
+  return selectAgentDirectiveRegistryEntriesFromGaps(
+    agentDirectiveGapsForSnapshot(snapshot, registry, options.dataByRegistryId ?? {}),
+    registry,
+    { dataByRegistryId: options.dataByRegistryId ?? {} }
+  );
+}
+
+export function selectAgentDirectiveRegistryEntriesFromGaps(
+  gaps: readonly EnforcementGap[],
+  registry: AgentDirectiveRegistry = AGENT_DIRECTIVE_REGISTRY,
+  options: { readonly dataByRegistryId?: AgentDirectiveAssemblyDataByRegistryId } = {}
+): readonly AgentDirectiveRegistrySelection[] {
   const registryIssues = agentDirectiveRegistryIssues(registry);
   if (registryIssues.length > 0) {
     return [];
   }
+  const activeCodes = new Set(gaps.map((gap) => gap.code));
+  const dataByRegistryId = options.dataByRegistryId ?? {};
   return registry.entries.flatMap((registryEntry) => {
-    const selectedBy = registryEntrySelectedBy(registryEntry, snapshot, options.dataByRegistryId ?? {});
+    const selectedBy = registryEntrySelectedByGapCodes(registryEntry, activeCodes, dataByRegistryId);
     return selectedBy.length > 0 ? [{ registryEntry, selectedBy }] : [];
   });
 }
@@ -251,10 +287,51 @@ export function assembleAgentDirectiveBundle(
     };
   }
 
-  const selections = selectAgentDirectiveRegistryEntries(input.snapshot, registry, {
+  return assembleAgentDirectiveBundleFromGaps({
+    gaps: agentDirectiveGapsForSnapshot(input.snapshot, registry, input.dataByRegistryId),
+    dataByRegistryId: input.dataByRegistryId,
+    commandPath: input.snapshot.command.path,
+    capturedAt: input.snapshot.capturedAt,
+    envelopeSchema: input.snapshot.command.envelopeSchema,
+    subject: subjectForSnapshot(input.snapshot),
+    registry,
+    generatedAt: input.generatedAt,
+    bundleId: input.bundleId,
+    sourceHash: agentDirectiveSnapshotHash(input.snapshot)
+  });
+}
+
+export function assembleAgentDirectiveBundleFromGaps(
+  input: AgentDirectiveGapProjectionInput
+): AgentDirectiveBundleAssemblyResult {
+  const registry = input.registry ?? AGENT_DIRECTIVE_REGISTRY;
+  const registryIssues = agentDirectiveRegistryIssues(registry).map((registryIssue) =>
+    assemblyIssue("registry", registryIssue.path, registryIssue.message)
+  );
+  if (registryIssues.length > 0) {
+    return {
+      ok: false,
+      selectedRegistryIds: [],
+      issues: registryIssues,
+      missingRequired: []
+    };
+  }
+
+  const selections = selectAgentDirectiveRegistryEntriesFromGaps(input.gaps, registry, {
     dataByRegistryId: input.dataByRegistryId
   });
-  const snapshotHash = agentDirectiveSnapshotHash(input.snapshot);
+  const sourceHash = input.sourceHash ?? hashContent({
+    gaps: input.gaps,
+    commandPath: input.commandPath,
+    envelopeSchema: input.envelopeSchema,
+    subject: input.subject
+  });
+  const context: AgentDirectiveProjectionContext = {
+    subject: input.subject,
+    commandPath: input.commandPath,
+    envelopeSchema: input.envelopeSchema,
+    capturedAt: input.capturedAt
+  };
   const dataIssues: AgentDirectiveBundleAssemblyIssue[] = [...staleDataReferenceIssues(input.dataByRegistryId, registry)];
   const missingRequired: AgentDirectiveMissingRequiredEntry[] = [];
   const directives: AgentDirective[] = [];
@@ -267,11 +344,11 @@ export function assembleAgentDirectiveBundle(
 
     if (currentDataIssues.length > 0) {
       dataIssues.push(...currentDataIssues);
-      missingRequired.push(...missingRequiredEntries(registryEntry, currentDataIssues, input.snapshot));
+      missingRequired.push(...missingRequiredEntries(registryEntry, currentDataIssues, context));
       continue;
     }
 
-    directives.push(directiveFromRegistryEntry(registryEntry, registry, input.snapshot, data, selectedBy, snapshotHash));
+    directives.push(directiveFromRegistryEntry(registryEntry, registry, context, data, selectedBy, sourceHash));
   }
 
   const selectedRegistryIds = selections.map((selection) => selection.registryEntry.id);
@@ -280,13 +357,13 @@ export function assembleAgentDirectiveBundle(
 
   const bundle: AgentDirectiveBundle = {
     meta: {
-      id: input.bundleId ?? bundleIdForSnapshot(input.snapshot, snapshotHash),
+      id: input.bundleId ?? bundleIdForCommand(input.commandPath, sourceHash),
       schemaVersion: AGENT_DIRECTIVE_BUNDLE_SCHEMA_VERSION,
       registryVersion: registry.version,
-      generatedAt: input.generatedAt ?? input.snapshot.capturedAt,
-      commandPath: input.snapshot.command.path,
-      envelopeSchema: input.snapshot.command.envelopeSchema,
-      sourceSnapshotHash: snapshotHash
+      generatedAt: input.generatedAt ?? input.capturedAt,
+      commandPath: input.commandPath,
+      envelopeSchema: input.envelopeSchema,
+      sourceSnapshotHash: sourceHash
     },
     directives: resolvedDirectives,
     conflicts,
@@ -640,44 +717,39 @@ export function compileRecoveryAgentDirectiveBundle(
   };
 }
 
-function registryEntrySelectedBy(
+function registryEntrySelectedByGapCodes(
   registryEntry: AgentDirectiveRegistryEntry,
-  snapshot: AgentDirectiveSnapshot,
+  activeCodes: ReadonlySet<EnforcementGapCode>,
   dataByRegistryId: AgentDirectiveAssemblyDataByRegistryId
 ): readonly string[] {
   if (registryEntry.lifecycle !== "active") {
     return [];
   }
-  const selectedCodes = selectedTriggerCodes(registryEntry, snapshot, dataByRegistryId);
-  if (selectedCodes.length === 0) {
+  if (dataByRegistryId[registryEntry.id] === undefined) {
     return [];
   }
-
-  if (!registryEntryRuntimePreconditionsMatch(registryEntry, snapshot, dataByRegistryId)) {
-    return [];
-  }
-
+  const selectedCodes = registryEntry.triggerCodes.filter((code) => activeCodes.has(code));
   return selectedCodes.map((code) => `gap.${code}`);
 }
 
-function selectedTriggerCodes(
-  registryEntry: AgentDirectiveRegistryEntry,
+export function agentDirectiveGapsForSnapshot(
   snapshot: AgentDirectiveSnapshot,
+  registry: AgentDirectiveRegistry = AGENT_DIRECTIVE_REGISTRY,
   dataByRegistryId: AgentDirectiveAssemblyDataByRegistryId
-): readonly EnforcementGapCode[] {
-  const data = dataByRegistryId[registryEntry.id];
-  if (data === undefined) {
-    return [];
-  }
-  const activeCodes = triggerCodesForSnapshot(snapshot);
-  if (dataActivatesRegistryEntry(registryEntry, snapshot, data)) {
+): readonly EnforcementGap[] {
+  const codes = triggerCodesForSnapshot(snapshot);
+  for (const registryEntry of registry.entries) {
+    const data = dataByRegistryId[registryEntry.id];
+    if (data === undefined || !dataActivatesRegistryEntry(registryEntry, snapshot, data)) {
+      continue;
+    }
     for (const code of registryEntry.triggerCodes) {
       if (DATA_TRIGGER_CODES.has(code)) {
-        activeCodes.add(code);
+        codes.add(code);
       }
     }
   }
-  return registryEntry.triggerCodes.filter((code) => activeCodes.has(code));
+  return [...codes].sort().map((code) => enforcementGapForSnapshotCode(snapshot, code));
 }
 
 function dataActivatesRegistryEntry(
@@ -791,6 +863,44 @@ function triggerCodesForSnapshot(snapshot: AgentDirectiveSnapshot): Set<Enforcem
   return codes;
 }
 
+function enforcementGapForSnapshotCode(snapshot: AgentDirectiveSnapshot, code: EnforcementGapCode): EnforcementGap {
+  const subject = snapshot.work.subject;
+  return {
+    code,
+    subjectType: (subject?.type ?? "command") as EnforcementGap["subjectType"],
+    subjectId: subject?.id ?? snapshot.command.path,
+    data: enforcementGapDataForSnapshotCode(snapshot, code)
+  };
+}
+
+function enforcementGapDataForSnapshotCode(
+  snapshot: AgentDirectiveSnapshot,
+  code: EnforcementGapCode
+): EnforcementGap["data"] | undefined {
+  if (code === "work.blocked.open-dependency") {
+    return {
+      blockerIds: uniqueStrings([...snapshot.work.activeBlockerIds, ...snapshot.work.blockedByIds]) as readonly WorkId[]
+    };
+  }
+  if (code === "work.container.open-descendant") {
+    return { blockerIds: snapshot.work.openDescendantIds as readonly WorkId[] };
+  }
+  if (code.startsWith("gate.")) {
+    const openGates = snapshot.gate.requiredGates.filter((gate) => gate.status === "open");
+    return {
+      gateIds: openGates.map((gate) => gate.id),
+      requiredEvidenceKinds: uniqueStrings(openGates.flatMap((gate) => gate.requiredEvidenceKinds)) as readonly EvidenceKind[],
+      minEvidenceCount: maxNumber(openGates.map((gate) => gate.minEvidenceCount)),
+      declaredCommand: firstString(openGates.map((gate) => gate.declaredCommand)),
+      expectedObservable: firstString(openGates.map((gate) => gate.expectedObservable))
+    };
+  }
+  if (code === "doctor.recovery.required" || code === "search.index-stale") {
+    return { reason: attentionDiagnostics(snapshot).map((diagnostic) => diagnostic.code).join(",") };
+  }
+  return undefined;
+}
+
 function declaredGateDirectiveDataByRegistryId(snapshot: AgentDirectiveSnapshot): AgentDirectiveAssemblyDataByRegistryId {
   const verificationGates = openDeclaredGatesByKind(snapshot, "verification");
   const reviewGates = openDeclaredGatesByKind(snapshot, "review");
@@ -811,21 +921,6 @@ function openDeclaredGatesByKind(
   return snapshot.gate.requiredGates.filter(
     (gate) => gate.kind === kind && gate.status === "open" && gate.declaredCommand !== undefined
   );
-}
-
-function registryEntryRuntimePreconditionsMatch(
-  registryEntry: AgentDirectiveRegistryEntry,
-  snapshot: AgentDirectiveSnapshot,
-  dataByRegistryId: AgentDirectiveAssemblyDataByRegistryId
-): boolean {
-  switch (registryEntry.id) {
-    case "doctor.recovery-required":
-      return needsDoctorRecoveryDirective(snapshot);
-    case "memory.reconcile-source":
-      return snapshot.command.path !== "sync refresh" || dataByRegistryId["memory.reconcile-source"] !== undefined;
-    default:
-      return true;
-  }
 }
 
 function needsDoctorRecoveryDirective(snapshot: AgentDirectiveSnapshot): boolean {
@@ -896,7 +991,7 @@ function staleDataReferenceIssues(
 function missingRequiredEntries(
   registryEntry: AgentDirectiveRegistryEntry,
   dataIssues: readonly AgentDirectiveBundleAssemblyIssue[],
-  snapshot: AgentDirectiveSnapshot
+  context: AgentDirectiveProjectionContext
 ): readonly AgentDirectiveMissingRequiredEntry[] {
   return registryEntry.dataRequirements.flatMap((requirement) => {
     if (!requirement.required) {
@@ -910,7 +1005,7 @@ function missingRequiredEntries(
           {
             registryId: registryEntry.id,
             family: registryEntry.family,
-            subject: subjectForSnapshot(snapshot),
+            subject: subjectForProjectionContext(context),
             requirement: requirement.key,
             message: matchingIssue.message
           }
@@ -999,13 +1094,13 @@ function applyConflictLifecycles(
 function directiveFromRegistryEntry(
   registryEntry: AgentDirectiveRegistryEntry,
   registry: AgentDirectiveRegistry,
-  snapshot: AgentDirectiveSnapshot,
+  context: AgentDirectiveProjectionContext,
   data: AgentDirectiveData,
   selectedBy: readonly string[],
-  snapshotHash: ContentHash
+  sourceHash: ContentHash
 ): AgentDirective {
   return {
-    id: directiveIdForRegistryEntry(registryEntry, snapshotHash),
+    id: directiveIdForRegistryEntry(registryEntry, sourceHash),
     registryId: registryEntry.id,
     version: registryEntry.version,
     family: registryEntry.family,
@@ -1022,12 +1117,20 @@ function directiveFromRegistryEntry(
       registryVersion: registry.version,
       registryPath: registryEntry.sourcePath,
       selectedBy,
-      snapshotHash
+      snapshotHash: sourceHash
     },
-    subject: subjectForSnapshot(snapshot),
+    subject: subjectForProjectionContext(context),
     supersedes: [],
     blocksCloseout: registryEntry.blocksCloseout,
     acknowledgement: registryEntry.acknowledgement
+  };
+}
+
+function subjectForProjectionContext(context: AgentDirectiveProjectionContext): AgentDirectiveSubject {
+  return context.subject ?? {
+    type: "command",
+    id: normalizeMachineFragment(context.commandPath),
+    title: context.commandPath
   };
 }
 
@@ -1440,8 +1543,8 @@ function last<T>(values: readonly T[]): T | undefined {
   return values.length > 0 ? values[values.length - 1] : undefined;
 }
 
-function bundleIdForSnapshot(snapshot: AgentDirectiveSnapshot, snapshotHash: ContentHash): AgentDirectiveBundleId {
-  return `bundle.${normalizeMachineFragment(snapshot.command.path)}.${hashSuffix(snapshotHash)}` as AgentDirectiveBundleId;
+function bundleIdForCommand(commandPath: string, sourceHash: ContentHash): AgentDirectiveBundleId {
+  return `bundle.${normalizeMachineFragment(commandPath)}.${hashSuffix(sourceHash)}` as AgentDirectiveBundleId;
 }
 
 function directiveIdForRegistryEntry(

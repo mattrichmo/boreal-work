@@ -3,8 +3,10 @@ import { describe, expect, it } from "vitest";
 import {
   AGENT_DIRECTIVE_REGISTRY,
   AGENT_DIRECTIVE_SNAPSHOT_CONTEXT_KEYS,
+  agentDirectiveGapsForSnapshot,
   agentDirectiveSnapshotHash,
   assembleAgentDirectiveBundle,
+  assembleAgentDirectiveBundleFromGaps,
   assertAgentDirectiveBundle,
   compileCloseoutAgentDirectiveBundle,
   compileGitAgentDirectiveBundle,
@@ -13,12 +15,14 @@ import {
   compileSummaryAgentDirectiveBundle,
   createAgentDirectiveSnapshot,
   selectAgentDirectiveRegistryEntries,
+  selectAgentDirectiveRegistryEntriesFromGaps,
   type AgentDirectiveGateStateSnapshot,
   type AgentSummaryId,
   type AgentDirectiveSubjectType,
   type AgentDirectiveSnapshot,
   type AgentId,
   type ContentHash,
+  type EnforcementGap,
   type EvidenceId,
   type IsoTimestamp,
   type VerificationId,
@@ -928,6 +932,107 @@ describe("agent directive bundle assembly", () => {
       openDescendantIds: ["bw_work_workflowopen1"],
       activeReservationIds: ["bw_reservation_workflow0001"]
     });
+  });
+
+  it("selects registry entries directly from enforcement gaps", () => {
+    const gaps: readonly EnforcementGap[] = [
+      {
+        code: "memory.reconcile-source.required",
+        subjectType: "work",
+        subjectId: "bw_work_7ec3f08689c6cfb0"
+      }
+    ];
+
+    expect(selectAgentDirectiveRegistryEntriesFromGaps(gaps).map((selection) => selection.registryEntry.id)).toEqual([]);
+    expect(
+      selectAgentDirectiveRegistryEntriesFromGaps(gaps, AGENT_DIRECTIVE_REGISTRY, {
+        dataByRegistryId: {
+          "memory.reconcile-source": memoryDirectiveData()
+        }
+      }).map((selection) => selection.registryEntry.id)
+    ).toEqual(["memory.reconcile-source"]);
+  });
+
+  it("assembles bundles as a projection from enforcement gaps and registry data", () => {
+    const gap: EnforcementGap = {
+      code: "memory.reconcile-source.required",
+      subjectType: "work",
+      subjectId: "bw_work_7ec3f08689c6cfb0",
+      data: { reason: "raw source has not been reconciled" }
+    };
+    const result = assembleAgentDirectiveBundleFromGaps({
+      gaps: [gap],
+      dataByRegistryId: {
+        "memory.reconcile-source": memoryDirectiveData()
+      },
+      commandPath: "raw add",
+      envelopeSchema: "boreal.cli.raw.add.v1",
+      capturedAt: "2026-07-01T14:30:00.000Z" as IsoTimestamp,
+      subject: {
+        type: "work",
+        id: "bw_work_7ec3f08689c6cfb0",
+        title: "Gap projection target"
+      }
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.selectedRegistryIds).toEqual(["memory.reconcile-source"]);
+    expect(result.bundle?.meta.commandPath).toBe("raw add");
+    expect(result.bundle?.directives[0]).toEqual(
+      expect.objectContaining({
+        registryId: "memory.reconcile-source",
+        subject: {
+          type: "work",
+          id: "bw_work_7ec3f08689c6cfb0",
+          title: "Gap projection target"
+        }
+      })
+    );
+    expect(result.bundle?.directives[0]?.source.selectedBy).toEqual(["gap.memory.reconcile-source.required"]);
+    expect(() => assertAgentDirectiveBundle(result.bundle)).not.toThrow();
+  });
+
+  it("extracts projection gaps from legacy directive snapshots", () => {
+    const reviewGate = gateStateFixture({
+      id: "bw_gate_gapextract1",
+      kind: "review",
+      status: "open"
+    });
+    const snapshot = agentDirectiveCompilerSnapshotFixture({
+      commandPath: "work show",
+      workStatus: "blocked",
+      activeBlockerIds: ["bw_work_blocker0001" as WorkId],
+      requiredGates: [reviewGate],
+      recommendedCommandPath: "bwrk dep tree bw_work_7ec3f08689c6cfb0 --json"
+    });
+    const gaps = agentDirectiveGapsForSnapshot(snapshot, AGENT_DIRECTIVE_REGISTRY, {
+      "blocked.resolve-blockers": {
+        subjectId: "bw_work_7ec3f08689c6cfb0",
+        blockerIds: ["bw_work_blocker0001"]
+      },
+      "review.gate-required": {
+        subjectId: "bw_work_7ec3f08689c6cfb0",
+        gateIds: ["bw_gate_gapextract1"],
+        requiredEvidenceKinds: ["review"],
+        minEvidenceCount: 1
+      },
+      "workflow_next.canonical-next-step": {
+        workflowRef: "workflows/40-work/link-dependencies.md",
+        commandPath: "bwrk dep tree bw_work_7ec3f08689c6cfb0 --json",
+        requiredInputs: ["work", "workflow"]
+      }
+    });
+
+    expect(gaps.map((gap) => gap.code)).toEqual(
+      expect.arrayContaining([
+        "work.blocked.open-dependency",
+        "gate.review.unsatisfied",
+        "directive.workflow-next.available"
+      ])
+    );
+    expect(gaps.find((gap) => gap.code === "work.blocked.open-dependency")?.data).toEqual(
+      expect.objectContaining({ blockerIds: ["bw_work_blocker0001"] })
+    );
   });
 
   it("short-circuits invalid snapshots before bundle validation", () => {
