@@ -4001,6 +4001,8 @@ describe("bwrk cli", () => {
     const missing = await runCli(rootDir, ["install", "status", "--bin-dir", binDir, "--path", emptyPath, "--json"]);
     const missingPayload = parseData<{
       readonly schemaVersion: string;
+      readonly package: { readonly installChannel: string };
+      readonly upgrade: { readonly channel: string; readonly command: string };
       readonly localSource: { readonly available: boolean; readonly command: string };
       readonly localShim: { readonly exists: boolean; readonly executable: boolean; readonly path: string };
       readonly path: { readonly binDirOnPath: boolean; readonly addToPathCommand: string };
@@ -4016,6 +4018,10 @@ describe("bwrk cli", () => {
 
     expect(missing.exitCode).toBe(0);
     expect(missingPayload.schemaVersion).toBe("boreal.cli.install.status.v1");
+    expect(missingPayload.package.installChannel).toBe("source");
+    expect(missingPayload.upgrade).toEqual(
+      expect.objectContaining({ channel: "source", command: "git pull && pnpm install && pnpm install:local" })
+    );
     expect(missingPayload.localSource.available).toBe(true);
     expect(missingPayload.localSource.command).toBe("pnpm bwrk <command>");
     expect(missingPayload.localShim).toEqual(expect.objectContaining({ exists: false, executable: false, path: join(binDir, "bwrk") }));
@@ -4059,7 +4065,11 @@ describe("bwrk cli", () => {
     expect(diagnostic).toEqual(
       expect.objectContaining({
         code: "install.status",
-        details: expect.objectContaining({ schemaVersion: "boreal.cli.install.status.v1" })
+        details: expect.objectContaining({
+          schemaVersion: "boreal.cli.install.status.v1",
+          package: expect.objectContaining({ installChannel: "source" }),
+          upgrade: expect.objectContaining({ channel: "source" })
+        })
       })
     );
   });
@@ -4547,6 +4557,7 @@ describe("bwrk cli", () => {
       readonly schemaVersion: string;
       readonly name: string;
       readonly version: string;
+      readonly installChannel: string;
       readonly cli: { readonly packageName: string; readonly packageVersion: string };
       readonly runtime: { readonly recordSchemaVersion: string; readonly fileStoreSchemaVersion: string };
       readonly schemas: Record<string, string>;
@@ -4558,13 +4569,14 @@ describe("bwrk cli", () => {
     );
 
     expect(text.exitCode).toBe(0);
-    expect(text.stdout).toBe("boreal-work 0.1.0\n");
+    expect(text.stdout).toBe("boreal-work 0.1.0 (source)\n");
     expect(human.exitCode).toBe(0);
     expect(human.stdout).toContain("schemaVersion: boreal.cli.version.v1");
+    expect(human.stdout).toContain("installChannel: source");
     expect(human.stdout).toContain("runtimeRecord: boreal.runtime.v1");
     expect(json.exitCode).toBe(0);
     expect(jsonPayload).toEqual(
-      expect.objectContaining({ schemaVersion: "boreal.cli.version.v1", name: "boreal-work", version: "0.1.0" })
+      expect.objectContaining({ schemaVersion: "boreal.cli.version.v1", name: "boreal-work", version: "0.1.0", installChannel: "source" })
     );
     expect(jsonPayload.cli).toEqual(expect.objectContaining({ packageName: "@boreal/cli", packageVersion: "0.1.0" }));
     expect(jsonPayload.runtime).toEqual({

@@ -14,10 +14,17 @@ import { SEARCH_INDEX_SCHEMA_VERSION } from "@boreal/search";
 import { FILE_STORE_SCHEMA_VERSION, SQLITE_CACHE_SCHEMA_VERSION } from "@boreal/storage";
 
 import { EXPORT_SCHEMA_VERSION, LEDGER_DELETION_SCHEMA_VERSION, LEDGER_SCHEMA_VERSION } from "./import-export.js";
+import { detectInstallChannel, type InstallChannel } from "./install-channel.js";
 import { PROJECT_SETUP_SCHEMA_VERSION } from "./project-setup.js";
 import { VAULT_SCHEMA_VERSION } from "./vault.js";
 
 const repoRoot = fileURLToPath(new URL("../../..", import.meta.url));
+
+declare const BOREAL_BUILD_PACKAGE_NAME: string | undefined;
+declare const BOREAL_BUILD_PACKAGE_VERSION: string | undefined;
+declare const BOREAL_BUILD_PACKAGE_MANAGER: string | undefined;
+declare const BOREAL_BUILD_CLI_PACKAGE_NAME: string | undefined;
+declare const BOREAL_BUILD_CLI_PACKAGE_VERSION: string | undefined;
 
 export const VERSION_INFO_SCHEMA_VERSION = "boreal.cli.version.v1";
 export const RUNTIME_MIGRATION_POLICY_VERSION = "boreal.runtime-migration-policy.v1";
@@ -27,6 +34,7 @@ export interface VersionInfo {
   readonly name: string;
   readonly version: string;
   readonly packageManager?: string;
+  readonly installChannel: InstallChannel;
   readonly node: string;
   readonly cli: {
     readonly packageName: string;
@@ -83,6 +91,7 @@ export function getVersionInfo(): VersionInfo {
     name: parsed.name ?? "boreal-work",
     version: parsed.version ?? "0.0.0",
     packageManager: parsed.packageManager,
+    installChannel: detectInstallChannel(),
     node: process.version,
     cli: {
       packageName: cliPackage.name ?? "@boreal/cli",
@@ -134,6 +143,7 @@ export function formatVersionInfo(info = getVersionInfo()): string {
     `cliPackage: ${info.cli.packageName} ${info.cli.packageVersion}`,
     `node: ${info.node}`,
     info.packageManager ? `packageManager: ${info.packageManager}` : undefined,
+    `installChannel: ${info.installChannel}`,
     `runtimeRecord: ${info.runtime.recordSchemaVersion}`,
     `fileStore: ${info.runtime.fileStoreSchemaVersion}`,
     `export: ${info.schemas.export}`,
@@ -153,9 +163,59 @@ export function formatVersionInfo(info = getVersionInfo()): string {
 }
 
 export function formatVersionProbe(info = getVersionInfo()): string {
-  return `${info.name} ${info.version}\n`;
+  return `${info.name} ${info.version} (${info.installChannel})\n`;
 }
 
 function readPackageJson(relativePath: string): PackageJson {
-  return JSON.parse(readFileSync(join(repoRoot, relativePath), "utf8")) as PackageJson;
+  try {
+    return JSON.parse(readFileSync(join(repoRoot, relativePath), "utf8")) as PackageJson;
+  } catch (error) {
+    const fallback = buildPackageJson(relativePath);
+    if (fallback) {
+      return fallback;
+    }
+    throw error;
+  }
+}
+
+function buildPackageJson(relativePath: string): PackageJson | undefined {
+  if (relativePath === "package.json") {
+    return {
+      name: buildConstantString("BOREAL_BUILD_PACKAGE_NAME"),
+      version: buildConstantString("BOREAL_BUILD_PACKAGE_VERSION"),
+      packageManager: buildConstantString("BOREAL_BUILD_PACKAGE_MANAGER")
+    };
+  }
+  if (relativePath === "apps/cli/package.json") {
+    return {
+      name: buildConstantString("BOREAL_BUILD_CLI_PACKAGE_NAME"),
+      version: buildConstantString("BOREAL_BUILD_CLI_PACKAGE_VERSION")
+    };
+  }
+  return undefined;
+}
+
+function buildConstantString(name: string): string | undefined {
+  switch (name) {
+    case "BOREAL_BUILD_PACKAGE_NAME":
+      return typeof BOREAL_BUILD_PACKAGE_NAME === "string" && BOREAL_BUILD_PACKAGE_NAME.length > 0 ? BOREAL_BUILD_PACKAGE_NAME : undefined;
+    case "BOREAL_BUILD_PACKAGE_VERSION":
+      return typeof BOREAL_BUILD_PACKAGE_VERSION === "string" && BOREAL_BUILD_PACKAGE_VERSION.length > 0
+        ? BOREAL_BUILD_PACKAGE_VERSION
+        : undefined;
+    case "BOREAL_BUILD_PACKAGE_MANAGER":
+      return typeof BOREAL_BUILD_PACKAGE_MANAGER === "string" && BOREAL_BUILD_PACKAGE_MANAGER.length > 0
+        ? BOREAL_BUILD_PACKAGE_MANAGER
+        : undefined;
+    case "BOREAL_BUILD_CLI_PACKAGE_NAME":
+      return typeof BOREAL_BUILD_CLI_PACKAGE_NAME === "string" && BOREAL_BUILD_CLI_PACKAGE_NAME.length > 0
+        ? BOREAL_BUILD_CLI_PACKAGE_NAME
+        : undefined;
+    case "BOREAL_BUILD_CLI_PACKAGE_VERSION":
+      return typeof BOREAL_BUILD_CLI_PACKAGE_VERSION === "string" && BOREAL_BUILD_CLI_PACKAGE_VERSION.length > 0
+        ? BOREAL_BUILD_CLI_PACKAGE_VERSION
+        : undefined;
+    default:
+      return undefined;
+  }
 }

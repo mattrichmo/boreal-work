@@ -1,4 +1,8 @@
 #!/usr/bin/env node
+import { realpathSync } from "node:fs";
+import { resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+
 import { BorealError, isBorealError } from "@boreal/core";
 
 import { expandGlobalNamespace, parseArgs, wantsJsonOutput } from "./args.js";
@@ -45,11 +49,22 @@ export async function main(
   }
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+if (isDirectEntrypoint(import.meta.url)) {
   installBrokenPipeHandler(process.stdout);
   installBrokenPipeHandler(process.stderr);
   const exitCode = await main();
   process.exitCode = exitCode;
+}
+
+function isDirectEntrypoint(metaUrl: string, argv1 = process.argv[1]): boolean {
+  if (!argv1) {
+    return false;
+  }
+  try {
+    return realpathSync(fileURLToPath(metaUrl)) === realpathSync(argv1);
+  } catch {
+    return resolve(fileURLToPath(metaUrl)) === resolve(argv1);
+  }
 }
 
 function processOutput(): CliOutput {

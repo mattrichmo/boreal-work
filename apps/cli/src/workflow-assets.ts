@@ -8,6 +8,7 @@ import { BorealError, assertPathInside, assertRealPathInside } from "@boreal/cor
 import { COMMAND_DEFINITIONS, commandPath } from "./command-registry.js";
 
 const sourceRoot = fileURLToPath(new URL("../../..", import.meta.url));
+const bundledAssetRoot = fileURLToPath(new URL("./assets", import.meta.url));
 const SKILL_FORBIDDEN_WORKFLOW_BODY_HEADINGS = ["## Steps", "## Command Sequences", "## CLI Commands", "## Finish Criteria"] as const;
 const SKILL_DIRECTIVE_HANDLING_MARKERS = [
   "agentDirectives",
@@ -61,7 +62,8 @@ export interface WorkflowAssetRoots {
   readonly workflowsRoot: string;
   readonly templatesRoot: string;
   readonly skillsRoot: string;
-  readonly source: "explicit" | "environment" | "workspace" | "source";
+  readonly schemasRoot: string;
+  readonly source: "explicit" | "environment" | "workspace" | "bundle" | "source";
 }
 
 export interface InstalledSkillRootValidationInput {
@@ -99,6 +101,7 @@ export function resolveWorkflowAssetRoots(options: WorkflowAssetRootOptions = {}
     options.assetRoot ? { root: options.assetRoot, source: "explicit" as const } : undefined,
     envRoot ? { root: envRoot, source: "environment" as const } : undefined,
     options.workspaceRoot ? { root: options.workspaceRoot, source: "workspace" as const } : undefined,
+    { root: bundledAssetRoot, source: "bundle" as const },
     { root: sourceRoot, source: "source" as const }
   ].filter((entry): entry is { readonly root: string; readonly source: WorkflowAssetRoots["source"] } => Boolean(entry));
   const seen = new Set<string>();
@@ -122,6 +125,7 @@ function workflowAssetRoots(assetRoot: string, source: WorkflowAssetRoots["sourc
     workflowsRoot: join(assetRoot, "workflows"),
     templatesRoot: join(assetRoot, "templates"),
     skillsRoot: join(assetRoot, "skills"),
+    schemasRoot: join(assetRoot, "schemas"),
     source
   };
 }

@@ -8,6 +8,7 @@ import { promisify } from "node:util";
 
 import { readJsonFile, type IsoTimestamp } from "@boreal/core";
 
+import { installUpgradeStatus, type InstallChannel, type InstallUpgradeStatus } from "./install-channel.js";
 import { getVersionInfo } from "./version.js";
 
 const execFileAsync = promisify(execFile);
@@ -30,6 +31,7 @@ export interface InstallStatus {
   readonly workspaceRoot: string;
   readonly checkedAt: IsoTimestamp;
   readonly package: InstallPackageStatus;
+  readonly upgrade: InstallUpgradeStatus;
   readonly localSource: LocalSourceStatus;
   readonly localShim: LocalShimStatus;
   readonly path: PathStatus;
@@ -41,6 +43,7 @@ export interface InstallPackageStatus {
   readonly name: string;
   readonly version: string;
   readonly packageManager?: string;
+  readonly installChannel: InstallChannel;
   readonly node: string;
 }
 
@@ -110,6 +113,7 @@ export async function inspectBorealInstallStatus(options: InstallStatusOptions):
     binDirOnPath: entries.some((entry) => resolve(entry) === binDir),
     addToPathCommand: pathAddCommand(binDir)
   };
+  const upgrade = installUpgradeStatus(versionInfo.installChannel);
 
   return {
     schemaVersion: INSTALL_STATUS_SCHEMA_VERSION,
@@ -119,13 +123,15 @@ export async function inspectBorealInstallStatus(options: InstallStatusOptions):
       name: versionInfo.name,
       version: versionInfo.version,
       packageManager: versionInfo.packageManager,
+      installChannel: versionInfo.installChannel,
       node: versionInfo.node
     },
+    upgrade,
     localSource,
     localShim,
     path: pathStatus,
     globalCommand,
-    recommendedActions: installStatusRecommendedActions({ localSource, localShim, pathStatus, globalCommand })
+    recommendedActions: installStatusRecommendedActions({ localSource, localShim, pathStatus, globalCommand, upgrade })
   };
 }
 
@@ -299,8 +305,9 @@ function installStatusRecommendedActions(input: {
   readonly localShim: LocalShimStatus;
   readonly pathStatus: PathStatus;
   readonly globalCommand: GlobalCommandStatus;
+  readonly upgrade: InstallUpgradeStatus;
 }): readonly string[] {
-  const actions: string[] = [];
+  const actions: string[] = [`Upgrade ${input.globalCommand.command} via ${input.upgrade.channel}: ${input.upgrade.command}.`];
   if (!input.localSource.available) {
     actions.push(`Run from a Boreal source checkout or use an installed ${input.globalCommand.command} binary.`);
   }
@@ -334,14 +341,15 @@ export function installStatusHealthy(status: InstallStatus): boolean {
 }
 
 export function installStatusSummary(status: InstallStatus): string {
+  const suffix = ` (${status.package.installChannel} channel; upgrade: ${status.upgrade.command})`;
   if (status.globalCommand.found && status.globalCommand.probe?.ok) {
-    return `Global ${status.globalCommand.command} resolves to ${status.globalCommand.path}`;
+    return `Global ${status.globalCommand.command} resolves to ${status.globalCommand.path}${suffix}`;
   }
   if (status.globalCommand.found) {
-    return `Global ${status.globalCommand.command} resolves but failed version verification`;
+    return `Global ${status.globalCommand.command} resolves but failed version verification${suffix}`;
   }
   if (status.localSource.available) {
-    return `Local source runner is available; global ${status.globalCommand.command} is not on PATH`;
+    return `Local source runner is available; global ${status.globalCommand.command} is not on PATH${suffix}`;
   }
-  return `No local source runner or global ${status.globalCommand.command} command is available`;
+  return `No local source runner or global ${status.globalCommand.command} command is available${suffix}`;
 }

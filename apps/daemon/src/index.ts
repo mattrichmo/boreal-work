@@ -8,7 +8,11 @@ import {
 
 export * from "./runtime.js";
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+declare const BOREAL_BUNDLED_CLI: boolean | undefined;
+
+const runningInsideBundledCli = typeof BOREAL_BUNDLED_CLI === "boolean" && BOREAL_BUNDLED_CLI;
+
+if (!runningInsideBundledCli && import.meta.url === `file://${process.argv[1]}`) {
   const argv = process.argv.slice(2);
   const command = argv[0] && !argv[0].startsWith("-") ? argv[0] : "status";
   const workspaceRoot = flagValue(argv, "workspace") ?? flagValue(argv, "project-root") ?? process.cwd();

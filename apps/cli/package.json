@@ -6,6 +6,12 @@
   "bin": {
     "bwrk": "./dist/index.js"
   },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build:dist": "node ../../tools/build-cli-dist.mjs"
+  },
   "dependencies": {
     "@boreal/core": "workspace:*",
     "@boreal/daemon": "workspace:*",

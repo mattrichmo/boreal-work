@@ -10,8 +10,9 @@
   },
   "scripts": {
     "bwrk": "tsx --tsconfig tsconfig.base.json apps/cli/src/index.ts",
-    "build": "tsc -b",
+    "build": "tsc -b && pnpm --dir apps/cli build:dist",
     "check": "tsc -b --pretty false",
+    "cli:dist": "pnpm --dir apps/cli build:dist",
     "clean": "pnpm -r exec rm -rf dist tsconfig.tsbuildinfo && rm -rf coverage",
     "console:browser-smoke": "pnpm --dir apps/console browser-smoke",
     "console:build": "pnpm --dir apps/console build",
@@ -28,6 +29,7 @@
   },
   "devDependencies": {
     "@types/node": "^22.10.0",
+    "esbuild": "^0.28.1",
     "tsx": "^4.19.2",
     "typescript": "^5.7.2",
     "vitest": "^2.1.8"

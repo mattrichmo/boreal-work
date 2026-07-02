@@ -3347,7 +3347,9 @@ function formatInstallStatus(status: InstallStatus): string {
         { key: "name", value: status.package.name },
         { key: "version", value: status.package.version },
         { key: "node", value: status.package.node },
-        { key: "packageManager", value: status.package.packageManager ?? "unknown" }
+        { key: "packageManager", value: status.package.packageManager ?? "unknown" },
+        { key: "installChannel", value: status.package.installChannel },
+        { key: "upgrade", value: status.upgrade.command }
       ]).split("\n")
     ),
     section(
