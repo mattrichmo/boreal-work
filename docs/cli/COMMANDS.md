@@ -82,6 +82,25 @@ JSON success envelope:
 
 Top-level `ok: true` means the command invocation produced a valid response envelope. Commands that act as health or diagnostic gates can still return nested `data.ok: false`; agents should treat nested `data.ok === false` and any nonzero process exit as a failed gate even when stdout is valid JSON.
 
+State-mutating commands include a stable primary-result block at `data.result` using schema `boreal.cli.result.v1`. Agents should read this path instead of guessing between command-specific IDs such as `data.meta.id`, `data.id`, `data.summary.meta.id`, or `data.verification.meta.id`.
+
+```json
+{
+  "ok": true,
+  "data": {
+    "result": {
+      "schemaVersion": "boreal.cli.result.v1",
+      "id": "bw_evidence_...",
+      "kind": "evidence",
+      "status": "passed",
+      "subjectId": "bw_work_..."
+    }
+  }
+}
+```
+
+`bwrk commands --json` exposes the same global contract at `data.jsonOutput.mutationResult`.
+
 JSON error envelope:
 
 ```json

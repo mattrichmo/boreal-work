@@ -313,6 +313,28 @@ export interface CommandResult {
   readonly exitCode: number;
 }
 
+const CLI_RESULT_SCHEMA_VERSION = "boreal.cli.result.v1";
+
+interface CliMutationResult {
+  readonly schemaVersion: typeof CLI_RESULT_SCHEMA_VERSION;
+  readonly id: string;
+  readonly kind: string;
+  readonly status: string;
+  readonly subjectId: string;
+}
+
+const CLI_JSON_OUTPUT_CONTRACT = {
+  successEnvelope: {
+    okPath: "ok",
+    dataPath: "data"
+  },
+  mutationResult: {
+    path: "data.result",
+    schemaVersion: CLI_RESULT_SCHEMA_VERSION,
+    fields: ["id", "kind", "status", "subjectId"] as const
+  }
+};
+
 interface WorkListRow {
   readonly id: string;
   readonly kind: WorkKind;
@@ -325,6 +347,60 @@ interface WorkListRow {
   readonly showCommand?: string;
   readonly agentStartCommand?: string;
   readonly workClaimCommand?: string;
+}
+
+function withCliResult<T extends object>(
+  value: T,
+  result: Omit<CliMutationResult, "schemaVersion">
+): T & { readonly result: CliMutationResult } {
+  return {
+    ...value,
+    result: {
+      schemaVersion: CLI_RESULT_SCHEMA_VERSION,
+      ...result
+    }
+  };
+}
+
+function workCliResult(work: WorkItem | WorkItemView): CliMutationResult {
+  const id = "meta" in work ? work.meta.id : work.id;
+  return {
+    schemaVersion: CLI_RESULT_SCHEMA_VERSION,
+    id,
+    kind: work.kind,
+    status: work.status,
+    subjectId: id
+  };
+}
+
+function evidenceCliResult(evidence: EvidenceRecord): CliMutationResult {
+  return {
+    schemaVersion: CLI_RESULT_SCHEMA_VERSION,
+    id: evidence.meta.id,
+    kind: "evidence",
+    status: evidence.outcome,
+    subjectId: evidence.subjectId
+  };
+}
+
+function verificationCliResult(verification: VerificationRecord): CliMutationResult {
+  return {
+    schemaVersion: CLI_RESULT_SCHEMA_VERSION,
+    id: verification.meta.id,
+    kind: "verification",
+    status: verification.verdict,
+    subjectId: verification.subjectId
+  };
+}
+
+function summaryCliResult(summary: AgentSummaryRecord): CliMutationResult {
+  return {
+    schemaVersion: CLI_RESULT_SCHEMA_VERSION,
+    id: summary.meta.id,
+    kind: "summary",
+    status: summary.status,
+    subjectId: summary.subjectId
+  };
 }
 
 interface WorkParallelResult {
@@ -947,7 +1023,9 @@ export async function runCommand(args: ParsedArgs, output: CliOutput, cwd: strin
         jsonEnvelopeMetadata: () => ledgerEnvelopeMetadata(context)
       })
     : undefined;
-  const commandOutput = spoolingOutput ?? output;
+  const commandOutput = json
+    ? outputWithInferredCliResult(spoolingOutput ?? output, definition, context.workspaceRoot)
+    : output;
 
   let result: CommandResult | undefined;
   let thrown: unknown;
@@ -1717,6 +1795,7 @@ function redactedArgv(definition: CommandDefinition, args: ParsedArgs): readonly
 function commandsCommand(args: ParsedArgs, output: CliOutput, json: boolean): CommandResult {
   const format = commandsFormat(args);
   const registry = {
+    jsonOutput: CLI_JSON_OUTPUT_CONTRACT,
     commands: COMMAND_DEFINITIONS.map(serializeCommandDefinition)
   };
   if (json) {
@@ -1727,6 +1806,131 @@ function commandsCommand(args: ParsedArgs, output: CliOutput, json: boolean): Co
     output.write(formatCommandsGrouped());
   }
   return { exitCode: 0 };
+}
+
+function outputWithInferredCliResult(output: CliOutput, definition: CommandDefinition, workspaceRoot: string): CliOutput {
+  if (!commandBehavior(definition).writesState) {
+    return output;
+  }
+  const command = commandPath(definition);
+  return {
+    write(text) {
+      output.write(addInferredCliResult(text, command, workspaceRoot));
+    },
+    error(text) {
+      output.error(text);
+    }
+  };
+}
+
+function addInferredCliResult(text: string, command: string, workspaceRoot: string): string {
+  if (text.includes('"result"')) {
+    return text;
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return text;
+  }
+  if (!isRecord(parsed) || parsed.ok !== true || !isRecord(parsed.data) || isRecord(parsed.data.result)) {
+    return text;
+  }
+  const result = inferCliResult(parsed.data, command, workspaceRoot);
+  if (!result) {
+    return text;
+  }
+  return `${JSON.stringify({ ...parsed, data: { ...parsed.data, result } }, null, 2)}\n`;
+}
+
+function inferCliResult(data: Record<string, unknown>, command: string, workspaceRoot: string): CliMutationResult | undefined {
+  if (data.claimed === false || data.started === false || data.finished === false) {
+    return undefined;
+  }
+  const candidates = [
+    data,
+    data.postMutationWork,
+    data.work,
+    data.closed,
+    data.closedWork,
+    data.summary,
+    data.evidence,
+    data.verification,
+    data.reservation,
+    data.claim,
+    data.decision,
+    data.source,
+    data.blockedParent,
+    data.child,
+    data.parent
+  ];
+  for (const candidate of candidates) {
+    const result = cliResultFromCandidate(candidate);
+    if (result) {
+      return result;
+    }
+  }
+  return {
+    schemaVersion: CLI_RESULT_SCHEMA_VERSION,
+    id: cliResultFallbackId(data, workspaceRoot),
+    kind: command.replace(/\s+/gu, "."),
+    status: cliResultStatus(data) ?? "succeeded",
+    subjectId: typeof data.subjectId === "string" ? data.subjectId : workspaceRoot
+  };
+}
+
+function cliResultFromCandidate(value: unknown): CliMutationResult | undefined {
+  if (!isRecord(value)) {
+    return undefined;
+  }
+  const meta = isRecord(value.meta) ? value.meta : undefined;
+  const id = typeof meta?.id === "string" ? meta.id : typeof value.id === "string" ? value.id : undefined;
+  if (!id) {
+    return undefined;
+  }
+  return {
+    schemaVersion: CLI_RESULT_SCHEMA_VERSION,
+    id,
+    kind: typeof value.kind === "string" ? value.kind : cliResultKindFromId(id),
+    status: cliResultStatus(value) ?? "succeeded",
+    subjectId: typeof value.subjectId === "string" ? value.subjectId : id
+  };
+}
+
+function cliResultStatus(value: Record<string, unknown>): string | undefined {
+  for (const key of ["status", "outcome", "verdict"] as const) {
+    if (typeof value[key] === "string") {
+      return value[key];
+    }
+  }
+  if (typeof value.ok === "boolean") {
+    return value.ok ? "passed" : "failed";
+  }
+  return undefined;
+}
+
+function cliResultKindFromId(id: string): string {
+  if (id.startsWith("bw_work_")) return "work";
+  if (id.startsWith("bw_evidence_")) return "evidence";
+  if (id.startsWith("bw_verification_")) return "verification";
+  if (id.startsWith("bw_summary_")) return "summary";
+  if (id.startsWith("bw_reservation_")) return "reservation";
+  if (id.startsWith("bw_source_")) return "source";
+  if (id.startsWith("bw_claim_")) return "claim";
+  if (id.startsWith("bw_decision_")) return "decision";
+  if (id.startsWith("bw_edge_")) return "graph_edge";
+  if (id.startsWith("bw_operation_")) return "operation";
+  if (id.startsWith("bw_projection_")) return "projection";
+  return "record";
+}
+
+function cliResultFallbackId(data: Record<string, unknown>, workspaceRoot: string): string {
+  for (const key of ["id", "eventId", "path", "workspaceRoot"] as const) {
+    if (typeof data[key] === "string") {
+      return data[key];
+    }
+  }
+  return workspaceRoot;
 }
 
 const DIRECTIVE_REGISTRY_STATUS_VALUES = [
@@ -4079,7 +4283,7 @@ async function agentFinishCommand(
     status: await buildAgentStatus(context, agentId, [])
   } satisfies AgentFinishResult;
   const resultWithPostState = { ...result, postMutationWork: result.work };
-  output.write(await formatRecordWithAgentDirectives(context, args, resultWithPostState, json, {
+  output.write(await formatRecordWithAgentDirectives(context, args, withCliResult(resultWithPostState, workCliResult(result.work)), json, {
     subjectWork: finished.closedWork ?? finished.work
   }));
   return { exitCode: 0 };
@@ -5754,7 +5958,10 @@ async function workCommand(
         evidenceIds,
         notes: flagValue(args, "notes")
       });
-      const result = { ...verification, closeoutGateStatus: await closeoutGateStatusForWork(context, workId) };
+      const result = withCliResult(
+        { ...verification, closeoutGateStatus: await closeoutGateStatusForWork(context, workId) },
+        verificationCliResult(verification)
+      );
       output.write(await formatRecordWithAgentDirectives(context, args, result, json, { subjectWorkId: workId }));
       return { exitCode: 0 };
     }
@@ -5791,7 +5998,7 @@ async function workCommand(
         createdAgentSummary: closeoutSummary.created?.summary,
         createdAgentSummaryArtifact: createdArtifact
       };
-      output.write(await formatRecordWithAgentDirectives(context, args, result, json, { subjectWork: closed }));
+      output.write(await formatRecordWithAgentDirectives(context, args, withCliResult(result, workCliResult(closed)), json, { subjectWork: closed }));
       return { exitCode: 0 };
     }
     case "edit": {
@@ -6300,7 +6507,10 @@ async function evidenceCommand(
     command: flagValue(args, "command"),
     uri: flagValue(args, "uri")
   });
-  const result = { ...evidence, closeoutGateStatus: await closeoutGateStatusForWork(context, evidence.subjectId as WorkId) };
+  const result = withCliResult(
+    { ...evidence, closeoutGateStatus: await closeoutGateStatusForWork(context, evidence.subjectId as WorkId) },
+    evidenceCliResult(evidence)
+  );
   output.write(await formatRecordWithAgentDirectives(context, args, result, json, { subjectWorkId: evidence.subjectId as WorkId }));
   return { exitCode: 0 };
 }
@@ -6320,7 +6530,10 @@ async function summaryCommand(
         body: requiredFlag(args, "body"),
         title: flagValue(args, "title")
       });
-      const outputResult = { ...result, closeoutGateStatus: await closeoutGateStatusForSummary(context, result.summary) };
+      const outputResult = withCliResult(
+        { ...result, closeoutGateStatus: await closeoutGateStatusForSummary(context, result.summary) },
+        summaryCliResult(result.summary)
+      );
       output.write(await formatRecordWithAgentDirectives(context, args, outputResult, json, {
         subjectWorkId: result.summary.subjectId.startsWith("bw_work_") ? result.summary.subjectId as WorkId : undefined
       }));
@@ -6333,7 +6546,10 @@ async function summaryCommand(
         body,
         title: flagValue(args, "title") ?? `Closeout summary: ${subject.title}`
       });
-      const outputResult = { ...result, closeoutGateStatus: await closeoutGateStatusForSummary(context, result.summary) };
+      const outputResult = withCliResult(
+        { ...result, closeoutGateStatus: await closeoutGateStatusForSummary(context, result.summary) },
+        summaryCliResult(result.summary)
+      );
       output.write(await formatRecordWithAgentDirectives(context, args, outputResult, json, {
         subjectWorkId: result.summary.subjectId.startsWith("bw_work_") ? result.summary.subjectId as WorkId : undefined
       }));
@@ -10887,7 +11103,7 @@ async function sprintCommand(
 	        createdAgentSummary: closeoutSummary.created?.summary,
 	        createdAgentSummaryArtifact: createdArtifact
 	      };
-	      output.write(await formatRecordWithAgentDirectives(context, args, result, json, { subjectWork: closed }));
+	      output.write(await formatRecordWithAgentDirectives(context, args, withCliResult(result, workCliResult(closed)), json, { subjectWork: closed }));
       return { exitCode: 0 };
     }
     default:

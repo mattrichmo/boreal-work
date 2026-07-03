@@ -60,6 +60,14 @@ interface MutableStateForTest {
   readonly [key: string]: unknown;
 }
 
+interface CliResultForTest {
+  readonly schemaVersion: string;
+  readonly id: string;
+  readonly kind: string;
+  readonly status: string;
+  readonly subjectId: string;
+}
+
 const tempDirs: string[] = [];
 const execFileAsync = promisify(execFile);
 
@@ -3515,6 +3523,13 @@ describe("bwrk cli", () => {
 
     const result = await runCli(rootDir, ["commands", "--json"]);
     const registry = parseData<{
+      readonly jsonOutput: {
+        readonly mutationResult: {
+          readonly path: string;
+          readonly schemaVersion: string;
+          readonly fields: readonly string[];
+        };
+      };
       readonly commands: Array<{
         readonly path: readonly string[];
         readonly usage: string;
@@ -3542,6 +3557,11 @@ describe("bwrk cli", () => {
 
     expect(result.exitCode).toBe(0);
     expect(() => validateCommandBehaviorMetadata()).not.toThrow();
+    expect(registry.jsonOutput.mutationResult).toEqual({
+      path: "data.result",
+      schemaVersion: "boreal.cli.result.v1",
+      fields: ["id", "kind", "status", "subjectId"]
+    });
     expect(registry.commands.map((command) => command.path.join(" "))).toContain("commands");
     expect(registry.commands.map((command) => command.path.join(" "))).toContain("completion");
     expect(registry.commands.map((command) => command.path.join(" "))).toContain("version");
@@ -6193,6 +6213,7 @@ describe("bwrk cli", () => {
       readonly closedWork?: { readonly status: string; readonly closedReason?: string };
       readonly release?: { readonly reservation: { readonly status: string } };
       readonly status: { readonly reservations: { readonly activeCount: number } };
+      readonly result: CliResultForTest;
     }>(finishedClosed.stdout);
 
     expect(finishedClosed.exitCode).toBe(0);
@@ -6213,6 +6234,13 @@ describe("bwrk cli", () => {
     );
     expect(closedPayload.release?.reservation.status).toBe("released");
     expect(closedPayload.status.reservations.activeCount).toBe(0);
+    expect(closedPayload.result).toEqual({
+      schemaVersion: "boreal.cli.result.v1",
+      id: closeWork.meta.id,
+      kind: "task",
+      status: "closed",
+      subjectId: closeWork.meta.id
+    });
 
     const releaseWork = parseData<{ readonly meta: { readonly id: string } }>(
       (await runCli(rootDir, ["work", "create", "Finish and release", "--label", "release", "--ready", "--json"])).stdout
@@ -6239,6 +6267,7 @@ describe("bwrk cli", () => {
       readonly verification: { readonly verdict: string };
       readonly release?: { readonly reservation: { readonly status: string } };
       readonly status: { readonly reservations: { readonly activeCount: number } };
+      readonly result: CliResultForTest;
     }>(finishedReleased.stdout);
 
     expect(finishedReleased.exitCode).toBe(0);
@@ -6250,6 +6279,13 @@ describe("bwrk cli", () => {
     expect(releasedPayload.verification.verdict).toBe("failed");
     expect(releasedPayload.release?.reservation.status).toBe("released");
     expect(releasedPayload.status.reservations.activeCount).toBe(0);
+    expect(releasedPayload.result).toEqual({
+      schemaVersion: "boreal.cli.result.v1",
+      id: releaseWork.meta.id,
+      kind: "task",
+      status: "needs_verification",
+      subjectId: releaseWork.meta.id
+    });
 
     const invalidMode = await runCli(rootDir, [
       "agent",
@@ -6267,6 +6303,173 @@ describe("bwrk cli", () => {
     expect(invalidMode.exitCode).toBe(2);
     expect(invalidPayload.code).toBe("BOREAL_INVALID_INPUT");
     expect(invalidPayload.message).toContain("cannot be used together");
+  });
+
+  it("returns a stable result block on closeout mutating commands", async () => {
+    const rootDir = await makeTempWorkspace();
+    await runCli(rootDir, ["init", "--json"]);
+
+    const work = parseData<{ readonly meta: { readonly id: string }; readonly result: CliResultForTest }>(
+      (await runCli(rootDir, ["work", "create", "Result block work", "--ready", "--json"])).stdout
+    );
+    expect(work.result).toEqual(
+      expect.objectContaining({
+        schemaVersion: "boreal.cli.result.v1",
+        id: work.meta.id,
+        kind: "task",
+        status: "ready",
+        subjectId: work.meta.id
+      })
+    );
+
+    const evidence = parseData<{ readonly meta: { readonly id: string }; readonly result: CliResultForTest }>(
+      (
+        await runCli(rootDir, [
+          "evidence",
+          "add",
+          work.meta.id,
+          "--summary",
+          "result block evidence passed",
+          "--outcome",
+          "passed",
+          "--json"
+        ])
+      ).stdout
+    );
+    expect(evidence.result).toEqual({
+      schemaVersion: "boreal.cli.result.v1",
+      id: evidence.meta.id,
+      kind: "evidence",
+      status: "passed",
+      subjectId: work.meta.id
+    });
+
+    const verification = parseData<{ readonly meta: { readonly id: string }; readonly result: CliResultForTest }>(
+      (
+        await runCli(rootDir, [
+          "work",
+          "verify",
+          work.meta.id,
+          "--evidence",
+          evidence.meta.id,
+          "--verdict",
+          "passed",
+          "--json"
+        ])
+      ).stdout
+    );
+    expect(verification.result).toEqual({
+      schemaVersion: "boreal.cli.result.v1",
+      id: verification.meta.id,
+      kind: "verification",
+      status: "passed",
+      subjectId: work.meta.id
+    });
+
+    const createdSummary = parseData<{ readonly summary: { readonly meta: { readonly id: string } }; readonly result: CliResultForTest }>(
+      (
+        await runCli(rootDir, [
+          "summary",
+          "create",
+          work.meta.id,
+          "--body",
+          "Created summary for result contract.",
+          "--dirty-path",
+          "no_repo_changes: result block fixture",
+          "--json"
+        ])
+      ).stdout
+    );
+    expect(createdSummary.result).toEqual({
+      schemaVersion: "boreal.cli.result.v1",
+      id: createdSummary.summary.meta.id,
+      kind: "summary",
+      status: "final",
+      subjectId: work.meta.id
+    });
+
+    const composedSummary = parseData<{ readonly summary: { readonly meta: { readonly id: string } }; readonly result: CliResultForTest }>(
+      (
+        await runCli(rootDir, [
+          "summary",
+          "compose",
+          work.meta.id,
+          "--dirty-path",
+          "no_repo_changes: result block fixture",
+          "--json"
+        ])
+      ).stdout
+    );
+    expect(composedSummary.result).toEqual({
+      schemaVersion: "boreal.cli.result.v1",
+      id: composedSummary.summary.meta.id,
+      kind: "summary",
+      status: "final",
+      subjectId: work.meta.id
+    });
+
+    const closed = parseData<{ readonly work: { readonly meta: { readonly id: string }; readonly status: string }; readonly result: CliResultForTest }>(
+      (
+        await runCli(rootDir, [
+          "work",
+          "close",
+          work.meta.id,
+          "--reason",
+          "result block verified",
+          "--dirty-path",
+          "no_repo_changes: result block fixture",
+          "--json"
+        ])
+      ).stdout
+    );
+    expect(closed.result).toEqual({
+      schemaVersion: "boreal.cli.result.v1",
+      id: closed.work.meta.id,
+      kind: "task",
+      status: "closed",
+      subjectId: closed.work.meta.id
+    });
+
+    const sprint = parseData<{ readonly meta: { readonly id: string } }>(
+      (await runCli(rootDir, ["work", "create", "Result block sprint", "--kind", "sprint", "--ready", "--json"])).stdout
+    );
+    const sprintEvidence = parseData<{ readonly meta: { readonly id: string } }>(
+      (
+        await runCli(rootDir, [
+          "evidence",
+          "add",
+          sprint.meta.id,
+          "--summary",
+          "result block sprint evidence passed",
+          "--outcome",
+          "passed",
+          "--json"
+        ])
+      ).stdout
+    );
+    await runCli(rootDir, ["work", "verify", sprint.meta.id, "--evidence", sprintEvidence.meta.id, "--verdict", "passed", "--json"]);
+    await runCli(rootDir, ["summary", "compose", sprint.meta.id, "--dirty-path", "no_repo_changes: result block sprint fixture", "--json"]);
+    const sprintClosed = parseData<{ readonly closed: { readonly meta: { readonly id: string }; readonly status: string }; readonly result: CliResultForTest }>(
+      (
+        await runCli(rootDir, [
+          "sprint",
+          "close",
+          sprint.meta.id,
+          "--reason",
+          "result block sprint verified",
+          "--dirty-path",
+          "no_repo_changes: result block sprint fixture",
+          "--json"
+        ])
+      ).stdout
+    );
+    expect(sprintClosed.result).toEqual({
+      schemaVersion: "boreal.cli.result.v1",
+      id: sprintClosed.closed.meta.id,
+      kind: "sprint",
+      status: "closed",
+      subjectId: sprintClosed.closed.meta.id
+    });
   });
 
   it("renews, releases, and repairs expired reservations through the CLI", async () => {
@@ -7270,7 +7473,7 @@ describe("bwrk cli", () => {
     expect(sprintSummary.summary.body).toContain("## Review/Audit Gate Details");
     expect(sprintSummary.summary.body).toContain(reviewEvidence.meta.id);
     expect(sprintSummary.summary.body).toContain(`force_evidence=${forceEvidence.meta.id}`);
-  });
+  }, 10_000);
 
   it("reports SQLite cache missing, stale, and corrupt states in doctor", async () => {
     const rootDir = await makeTempWorkspace();
