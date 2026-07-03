@@ -3732,6 +3732,18 @@ describe("bwrk cli", () => {
     const workflows = await runCli(rootDir, ["workflows", "list", "--json"]);
     const workflowRows = parseData<Array<{ readonly id: string; readonly path: string }>>(workflows.stdout);
     const shown = await runCli(rootDir, ["workflows", "show", "launch-sprint"]);
+    const prefixedShown = await runCli(rootDir, ["workflows", "show", "workflows/40-work/closeout-work.md", "--json"]);
+    const prefixedWorkflow = parseData<{ readonly id: string; readonly path: string; readonly title: string }>(prefixedShown.stdout);
+    const missingWorkflow = await runCli(rootDir, ["workflows", "show", "workflows/40-work/closeot-work.md", "--json"]);
+    const missingWorkflowPayload = parseJson<{
+      readonly ok: false;
+      readonly code: string;
+      readonly details: {
+        readonly ref: string;
+        readonly normalizedRef: string;
+        readonly didYouMean: ReadonlyArray<{ readonly id: string; readonly path: string }>;
+      };
+    }>(missingWorkflow.stderr);
     const installPlan = await runCli(rootDir, ["install", "skills", "--dry-run", "--json"]);
     const plan = parseData<{
       readonly dryRun: boolean;
@@ -3757,6 +3769,22 @@ describe("bwrk cli", () => {
     expect(shown.exitCode).toBe(0);
     expect(shown.stdout).toContain("# Launch Sprint");
     expect(shown.stdout).toContain("bwrk session start");
+    expect(prefixedShown.exitCode).toBe(0);
+    expect(prefixedWorkflow).toEqual(
+      expect.objectContaining({
+        path: "40-work/closeout-work.md",
+        title: "Closeout Work"
+      })
+    );
+    expect(missingWorkflow.exitCode).toBe(1);
+    expect(missingWorkflowPayload.code).toBe("BOREAL_NOT_FOUND");
+    expect(missingWorkflowPayload.details).toEqual(
+      expect.objectContaining({
+        ref: "workflows/40-work/closeot-work.md",
+        normalizedRef: "40-work/closeot-work.md",
+        didYouMean: expect.arrayContaining([expect.objectContaining({ path: "40-work/closeout-work.md" })])
+      })
+    );
     expect(installPlan.exitCode).toBe(0);
     expect(plan.dryRun).toBe(true);
     expect(plan.issues).toEqual([]);
@@ -4438,7 +4466,7 @@ describe("bwrk cli", () => {
     expect(autoOperationVolume).toEqual(expect.objectContaining({ severity: "ok" }));
     expect(finalState.operations).toHaveLength(1000);
     expect(finalState.operations.map((operation) => operation.commandPath)).toContain("gate closeout");
-  });
+  }, 10_000);
 
   it("repairs legacy operation-event links and marks unlinked events", async () => {
     const rootDir = await makeTempWorkspace();

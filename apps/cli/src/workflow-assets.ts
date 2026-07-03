@@ -144,14 +144,77 @@ export async function listWorkflowAssets(options: WorkflowAssetRootOptions = {})
 
 export async function getWorkflowAsset(ref: string, options: WorkflowAssetRootOptions = {}): Promise<WorkflowAsset> {
   const workflows = await listWorkflowAssets(options);
-  const matches = workflows.filter((workflow) => workflow.id === ref || workflow.path === ref || workflow.path.endsWith(`/${ref}.md`));
+  const normalizedRef = normalizeWorkflowRef(ref);
+  const matches = workflows.filter((workflow) => workflowReferenceMatches(workflow, ref, normalizedRef));
   if (matches.length === 1 && matches[0]) {
     return matches[0];
   }
   if (matches.length > 1) {
     throw new BorealError("BOREAL_CONFLICT", "Workflow reference is ambiguous", { ref, candidates: matches.map((item) => item.path) });
   }
-  throw new BorealError("BOREAL_NOT_FOUND", "Workflow not found", { ref });
+  throw new BorealError("BOREAL_NOT_FOUND", "Workflow not found", {
+    ref,
+    normalizedRef,
+    didYouMean: nearestWorkflowReferences(normalizedRef, workflows)
+  });
+}
+
+function normalizeWorkflowRef(ref: string): string {
+  return ref.startsWith("workflows/") ? ref.slice("workflows/".length) : ref;
+}
+
+function workflowReferenceMatches(workflow: WorkflowAsset, ref: string, normalizedRef: string): boolean {
+  return (
+    workflow.id === ref ||
+    workflow.id === normalizedRef ||
+    workflow.path === normalizedRef ||
+    workflow.path === ref ||
+    workflow.path.endsWith(`/${normalizedRef}.md`)
+  );
+}
+
+function nearestWorkflowReferences(
+  ref: string,
+  workflows: readonly WorkflowAsset[]
+): ReadonlyArray<{ readonly id: string; readonly path: string }> {
+  return workflows
+    .map((workflow) => ({
+      workflow,
+      distance: workflowReferenceDistance(ref, workflow)
+    }))
+    .sort((left, right) => left.distance - right.distance || left.workflow.path.localeCompare(right.workflow.path))
+    .slice(0, 5)
+    .map(({ workflow }) => ({ id: workflow.id, path: workflow.path }));
+}
+
+function workflowReferenceDistance(ref: string, workflow: WorkflowAsset): number {
+  const slug = workflow.path.replace(/^.*\/([^/]+)\.md$/u, "$1");
+  return Math.min(
+    levenshteinDistance(ref, workflow.path),
+    levenshteinDistance(ref, `workflows/${workflow.path}`),
+    levenshteinDistance(ref, workflow.id),
+    levenshteinDistance(ref, slug)
+  );
+}
+
+function levenshteinDistance(left: string, right: string): number {
+  const previous = Array.from({ length: right.length + 1 }, (_, index) => index);
+  const current = Array.from({ length: right.length + 1 }, () => 0);
+  for (let leftIndex = 1; leftIndex <= left.length; leftIndex += 1) {
+    current[0] = leftIndex;
+    for (let rightIndex = 1; rightIndex <= right.length; rightIndex += 1) {
+      const substitutionCost = left[leftIndex - 1] === right[rightIndex - 1] ? 0 : 1;
+      current[rightIndex] = Math.min(
+        (previous[rightIndex] ?? 0) + 1,
+        (current[rightIndex - 1] ?? 0) + 1,
+        (previous[rightIndex - 1] ?? 0) + substitutionCost
+      );
+    }
+    for (let index = 0; index < current.length; index += 1) {
+      previous[index] = current[index] ?? 0;
+    }
+  }
+  return previous[right.length] ?? 0;
 }
 
 export async function inspectWorkflowAssets(input: {
