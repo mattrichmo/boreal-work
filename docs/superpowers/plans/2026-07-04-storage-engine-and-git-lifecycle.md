@@ -831,6 +831,7 @@ Progress:
 - [x] agent
 - [x] work dependencies
 - [x] health
+- [x] sprint
 
 ### Task 19: Directive machinery audit (decision task, not deletion task)
 

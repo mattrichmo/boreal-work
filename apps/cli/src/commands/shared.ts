@@ -9,7 +9,10 @@ import {
   readJsonFile,
   type ContentHash,
   type EnforcementGap,
-  type IsoTimestamp
+  type GraphEdge,
+  type IsoTimestamp,
+  type WorkId,
+  type WorkItem
 } from "@boreal/core";
 import { writeTextFileAtomic } from "@boreal/storage";
 
@@ -20,6 +23,21 @@ const CIRCUIT_BREAKER_FAILURE_THRESHOLD = 2;
 
 export interface CommandResult {
   readonly exitCode: number;
+}
+
+export function dependencyIdsForWork(work: WorkItem, graphEdges: readonly GraphEdge[]): readonly WorkId[] {
+  const ids = new Set<string>(work.dependencyIds);
+  for (const edge of graphEdges) {
+    if (
+      edge.kind === "blocks" &&
+      edge.fromType === "work" &&
+      edge.toType === "work" &&
+      edge.toId === work.meta.id
+    ) {
+      ids.add(edge.fromId);
+    }
+  }
+  return [...ids] as WorkId[];
 }
 
 interface CircuitBreakerEntry {
