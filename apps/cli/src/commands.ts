@@ -146,6 +146,7 @@ import {
 } from "./commands/sync.js";
 import { vaultCommand } from "./commands/vault.js";
 import { workCommand as workGroupCommand, type WorkCommandDependencies } from "./commands/work.js";
+import { workflowsCommand, type WorkflowsCommandDependencies } from "./commands/workflows.js";
 import { dependencyIdsForWork, type CommandResult } from "./commands/shared.js";
 import {
   COMMAND_DEFINITIONS,
@@ -199,10 +200,8 @@ import { dirtyPathNotesHaveReasonCode, requireCommitOrDirtyPathReason } from "./
 import { VAULT_SCHEMA_VERSION } from "./vault.js";
 import {
   buildSkillInstallPlan,
-  getWorkflowAsset,
   inspectWorkflowAssets,
   installSkillsFromPlan,
-  listWorkflowAssets,
   validateInstalledSkillRoot,
   type SkillInstallPlan
 } from "./workflow-assets.js";
@@ -871,7 +870,7 @@ export async function runCommand(args: ParsedArgs, output: CliOutput, cwd: strin
         result = await operationCommand(action, rest, context, args, commandOutput, json, operationCommandDependencies());
         break;
       case "workflows":
-        result = await workflowsCommand(action, rest, context, args, commandOutput, json);
+        result = await workflowsCommand(action, rest, context, args, commandOutput, json, workflowsCommandDependencies());
         break;
       case "start":
         result = await agentCommand("start", rest, context, args, commandOutput, json, agentCommandDependencies());
@@ -1204,6 +1203,13 @@ function daemonCommandDependencies(): DaemonCommandDependencies {
 
 function registryCommandDependencies(): RegistryCommandDependencies {
   return {
+    requiredPositional
+  };
+}
+
+function workflowsCommandDependencies(): WorkflowsCommandDependencies {
+  return {
+    dashboardView,
     requiredPositional
   };
 }
@@ -3483,38 +3489,6 @@ function formatDirectiveIdList(ids: readonly AgentDirectiveTemplateId[]): string
   return ids.length > 0 ? ids.join(", ") : "none";
 }
 
-async function workflowsCommand(
-  action: string | undefined,
-  rest: readonly string[],
-  context: CliContext,
-  args: ParsedArgs,
-  output: CliOutput,
-  json: boolean
-): Promise<CommandResult> {
-  switch (action) {
-    case "list": {
-      const workflows = await listWorkflowAssets({ workspaceRoot: context.workspaceRoot });
-      const rows = workflows.map((workflow) => ({
-        id: workflow.id,
-        title: workflow.title,
-        group: workflow.group,
-        path: workflow.path,
-        commands: workflow.allowedCommands.length,
-        templates: workflow.templates.filter((template) => template !== "none").length
-      }));
-      output.write(json ? formatRecord(rows, true) : dashboardView(args) ? formatWorkflowDashboard(rows) : table(rows));
-      return { exitCode: 0 };
-    }
-    case "show": {
-      const workflow = await getWorkflowAsset(requiredPositional(rest, 0, "workflow reference"), { workspaceRoot: context.workspaceRoot });
-      output.write(json ? formatRecord(workflow, true) : workflow.text);
-      return { exitCode: 0 };
-    }
-    default:
-      throw new BorealError("BOREAL_INVALID_INPUT", `Unknown workflows command: ${action ?? ""}`);
-  }
-}
-
 async function installCommand(
   action: string | undefined,
   context: CliContext,
@@ -3821,31 +3795,6 @@ function dashboardView(args: ParsedArgs): boolean {
     return true;
   }
   throw new BorealError("BOREAL_INVALID_INPUT", "--view must be dashboard");
-}
-
-function formatWorkflowDashboard(
-  rows: readonly {
-    readonly id: string;
-    readonly title: string;
-    readonly group: string;
-    readonly path: string;
-    readonly commands: number;
-    readonly templates: number;
-  }[]
-): string {
-  const groups = [...new Set(rows.map((row) => row.group))].sort();
-  return [
-    resultSummary({ status: "info", title: "Workflow picker", detail: `${rows.length} workflows available` }),
-    ...groups.map((group) =>
-      section(
-        group,
-        rows
-          .filter((row) => row.group === group)
-          .sort((left, right) => left.path.localeCompare(right.path))
-          .map((row) => `${row.path} - ${row.title} (${row.commands} commands, ${row.templates} templates)`)
-      )
-    )
-  ].join("\n\n") + "\n";
 }
 
 function formatReadyWorkDashboard(rows: readonly WorkListRow[], containerId?: WorkId): string {
