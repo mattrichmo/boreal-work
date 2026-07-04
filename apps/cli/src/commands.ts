@@ -158,7 +158,6 @@ import { storageCommand } from "./commands/storage.js";
 import {
   buildSyncRefreshResult,
   buildSyncStatus,
-  rebuildProjectionsRespectingTombstones,
   refreshGeneratedArtifactsInline,
   syncCommand,
   type SyncRefreshResult,
@@ -1031,10 +1030,14 @@ export async function runCommand(args: ParsedArgs, output: CliOutput, cwd: strin
       case "source":
       case "claim":
       case "decision":
+      case "context":
+      case "search":
         result = await knowledgeCommand(group, action, rest, context, args, commandOutput, json, {
           defaultListLimit: DEFAULT_LIST_LIMIT,
+          maxSearchLimit: MAX_SEARCH_LIMIT,
           parseLimit,
           requiredPositional,
+          resolveWorkId,
           asSourceId,
           asClaimId,
           asDecisionId,
@@ -1048,12 +1051,6 @@ export async function runCommand(args: ParsedArgs, output: CliOutput, cwd: strin
           uniqueValues,
           uniqueStrings
         });
-        break;
-      case "context":
-        result = await contextCommand(action, rest, context, args, commandOutput, json);
-        break;
-      case "search":
-        result = await searchCommand(action, rest, context, args, commandOutput, json);
         break;
       case "reservation":
         result = await reservationCommand(action, context, args, commandOutput, json);
@@ -8046,84 +8043,6 @@ async function childAgentSummaryIdsForWork(context: CliContext, work: WorkItem):
   return [...latestBySubject.values()].map((summary) => summary.meta.id).sort();
 }
 
-async function contextCommand(
-  action: string | undefined,
-  rest: readonly string[],
-  context: CliContext,
-  args: ParsedArgs,
-  output: CliOutput,
-  json: boolean
-): Promise<CommandResult> {
-  switch (action) {
-    case "rebuild": {
-      const views = await rebuildProjectionsRespectingTombstones(context);
-      output.write(formatRecord({ rebuilt: views.length, views }, json));
-      return { exitCode: 0 };
-    }
-    case "show": {
-      const pack = await context.runtime.getContextPack(await resolveWorkId(context, requiredPositional(rest, 0, "work reference")));
-      output.write(json ? formatRecord(pack, true) : formatContextPack(pack));
-      return { exitCode: 0 };
-    }
-    case "search": {
-      const results = await runSearch(context, rest.join(" "), {
-        limit: parseLimit(flagValue(args, "limit"), { max: MAX_SEARCH_LIMIT }),
-        types: ["context_pack", "context_chunk"],
-        explain: hasFlag(args, "explain"),
-        rebuildStaleIndex: !hasFlag(args, "no-rebuild")
-      });
-      output.write(json ? formatRecord(results, true) : table(results.map(searchResultRow)));
-      return { exitCode: 0 };
-    }
-    default:
-      throw new BorealError("BOREAL_INVALID_INPUT", `Unknown context command: ${action ?? ""}`);
-  }
-}
-
-async function searchCommand(
-  action: string | undefined,
-  rest: readonly string[],
-  context: CliContext,
-  args: ParsedArgs,
-  output: CliOutput,
-  json: boolean
-): Promise<CommandResult> {
-  switch (action) {
-    case "index": {
-      output.write(formatRecord(await writeSearchIndex(context), json));
-      return { exitCode: 0 };
-    }
-    case "query": {
-      const results = await runSearch(context, rest.join(" "), {
-        limit: parseLimit(flagValue(args, "limit"), { max: MAX_SEARCH_LIMIT }),
-        explain: hasFlag(args, "explain"),
-        rebuildStaleIndex: !hasFlag(args, "no-rebuild")
-      });
-      output.write(json ? formatRecord(results, true) : table(results.map(searchResultRow)));
-      return { exitCode: 0 };
-    }
-    default:
-      throw new BorealError("BOREAL_INVALID_INPUT", `Unknown search command: ${action ?? ""}`);
-  }
-}
-
-function formatContextPack(pack: ContextPack): string {
-  const lines = [
-    pack.title,
-    `Subject: ${pack.subjectId}`,
-    `Generated at: ${pack.generatedAt}`,
-    "",
-    pack.summary
-  ];
-  if (pack.facts.length > 0) {
-    lines.push("", "Facts:", ...pack.facts.map((fact) => `- ${fact}`));
-  }
-  if (pack.evidence.length > 0) {
-    lines.push("", "Evidence:", ...pack.evidence.map((entry) => `- ${entry}`));
-  }
-  return `${lines.join("\n")}\n`;
-}
-
 function shouldRefreshGeneratedArtifactsAfterMutation(definition: CommandDefinition): boolean {
   const behavior = commandBehavior(definition);
   return (
@@ -13587,17 +13506,6 @@ function textWorkListRow(row: WorkListRow): Record<string, string> {
     labels: row.labels.join(",")
   };
   return row.containerId ? { ...base, container: row.containerId } : base;
-}
-
-function searchResultRow(result: SearchResult): Record<string, string | number> {
-  return {
-    score: result.score,
-    type: result.type,
-    id: result.recordId,
-    subject: result.subjectId ?? "",
-    title: result.title,
-    matches: result.matches.join(",")
-  };
 }
 
 function handoffSearchQuery(work: WorkItemView, contextPack: ContextPack): string {

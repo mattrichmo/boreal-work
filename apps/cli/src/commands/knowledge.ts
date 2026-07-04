@@ -5,6 +5,7 @@ import {
   type ClaimId,
   type ClaimRecord,
   type ClaimStatus,
+  type ContextPack,
   type DecisionId,
   type DecisionRecord,
   type DecisionStatus,
@@ -14,21 +15,27 @@ import {
   type KnowledgeSource,
   type KnowledgeSourceId,
   type KnowledgeSourceKind,
-  type RuntimeEvent
+  type RuntimeEvent,
+  type WorkId
 } from "@boreal/core";
+import type { SearchResult } from "@boreal/search";
 import type { BorealReader, BorealWriter } from "@boreal/storage";
 
-import { flagValue, flagValues, requiredFlag, type ParsedArgs } from "../args.js";
+import { flagValue, flagValues, hasFlag, requiredFlag, type ParsedArgs } from "../args.js";
 import type { CliContext } from "../context.js";
 import { formatRecord, table, type CliOutput } from "../output.js";
+import { runSearch, writeSearchIndex } from "../search-cli.js";
+import { rebuildProjectionsRespectingTombstones } from "./sync.js";
 import type { CommandResult } from "./shared.js";
 
-type KnowledgeCommandGroup = "source" | "claim" | "decision";
+type KnowledgeCommandGroup = "source" | "claim" | "decision" | "context" | "search";
 
 export interface KnowledgeCommandDependencies {
   readonly defaultListLimit: number;
-  readonly parseLimit: (value: string | undefined) => number | undefined;
+  readonly maxSearchLimit: number;
+  readonly parseLimit: (value: string | undefined, options?: { readonly max?: number }) => number | undefined;
   readonly requiredPositional: (values: readonly string[], index: number, label: string) => string;
+  readonly resolveWorkId: (context: CliContext, value: string) => Promise<WorkId>;
   readonly asSourceId: (value: string) => KnowledgeSourceId;
   readonly asClaimId: (value: string) => ClaimId;
   readonly asDecisionId: (value: string) => DecisionId;
@@ -68,6 +75,10 @@ export async function knowledgeCommand(
       return claimCommand(action, rest, context, args, output, json, dependencies);
     case "decision":
       return decisionCommand(action, rest, context, args, output, json, dependencies);
+    case "context":
+      return contextCommand(action, rest, context, args, output, json, dependencies);
+    case "search":
+      return searchCommand(action, rest, context, args, output, json, dependencies);
   }
 }
 
@@ -273,6 +284,88 @@ async function decisionCommand(
   }
 }
 
+async function contextCommand(
+  action: string | undefined,
+  rest: readonly string[],
+  context: CliContext,
+  args: ParsedArgs,
+  output: CliOutput,
+  json: boolean,
+  dependencies: KnowledgeCommandDependencies
+): Promise<CommandResult> {
+  switch (action) {
+    case "rebuild": {
+      const views = await rebuildProjectionsRespectingTombstones(context);
+      output.write(formatRecord({ rebuilt: views.length, views }, json));
+      return { exitCode: 0 };
+    }
+    case "show": {
+      const pack = await context.runtime.getContextPack(
+        await dependencies.resolveWorkId(context, dependencies.requiredPositional(rest, 0, "work reference"))
+      );
+      output.write(json ? formatRecord(pack, true) : formatContextPack(pack));
+      return { exitCode: 0 };
+    }
+    case "search": {
+      const results = await runSearch(context, rest.join(" "), {
+        limit: dependencies.parseLimit(flagValue(args, "limit"), { max: dependencies.maxSearchLimit }),
+        types: ["context_pack", "context_chunk"],
+        explain: hasFlag(args, "explain"),
+        rebuildStaleIndex: !hasFlag(args, "no-rebuild")
+      });
+      output.write(json ? formatRecord(results, true) : table(results.map(searchResultRow)));
+      return { exitCode: 0 };
+    }
+    default:
+      throw new BorealError("BOREAL_INVALID_INPUT", `Unknown context command: ${action ?? ""}`);
+  }
+}
+
+async function searchCommand(
+  action: string | undefined,
+  rest: readonly string[],
+  context: CliContext,
+  args: ParsedArgs,
+  output: CliOutput,
+  json: boolean,
+  dependencies: KnowledgeCommandDependencies
+): Promise<CommandResult> {
+  switch (action) {
+    case "index": {
+      output.write(formatRecord(await writeSearchIndex(context), json));
+      return { exitCode: 0 };
+    }
+    case "query": {
+      const results = await runSearch(context, rest.join(" "), {
+        limit: dependencies.parseLimit(flagValue(args, "limit"), { max: dependencies.maxSearchLimit }),
+        explain: hasFlag(args, "explain"),
+        rebuildStaleIndex: !hasFlag(args, "no-rebuild")
+      });
+      output.write(json ? formatRecord(results, true) : table(results.map(searchResultRow)));
+      return { exitCode: 0 };
+    }
+    default:
+      throw new BorealError("BOREAL_INVALID_INPUT", `Unknown search command: ${action ?? ""}`);
+  }
+}
+
+function formatContextPack(pack: ContextPack): string {
+  const lines = [
+    pack.title,
+    `Subject: ${pack.subjectId}`,
+    `Generated at: ${pack.generatedAt}`,
+    "",
+    pack.summary
+  ];
+  if (pack.facts.length > 0) {
+    lines.push("", "Facts:", ...pack.facts.map((fact) => `- ${fact}`));
+  }
+  if (pack.evidence.length > 0) {
+    lines.push("", "Evidence:", ...pack.evidence.map((entry) => `- ${entry}`));
+  }
+  return `${lines.join("\n")}\n`;
+}
+
 async function supersedeDecisionCommand(
   context: CliContext,
   decisionId: DecisionId,
@@ -437,6 +530,17 @@ function textDecisionListRow(row: Record<string, string | number | readonly stri
     sources: String(row.sources ?? ""),
     wiki: String(row.wikiPages ?? ""),
     review: String(row.reviewState ?? "")
+  };
+}
+
+function searchResultRow(result: SearchResult): Record<string, string | number> {
+  return {
+    score: result.score,
+    type: result.type,
+    id: result.recordId,
+    subject: result.subjectId ?? "",
+    title: result.title,
+    matches: result.matches.join(",")
   };
 }
 
