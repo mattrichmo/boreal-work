@@ -838,6 +838,7 @@ Progress:
 - [x] daemon
 - [x] registry
 - [x] dashboard/global
+- [x] meta/help
 
 ### Task 19: Directive machinery audit (decision task, not deletion task)
 
