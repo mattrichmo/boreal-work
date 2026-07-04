@@ -150,6 +150,7 @@ import {
 import type { FinishReservedWorkSummaryFactory } from "@boreal/engine";
 
 import { flagValue, flagValues, hasFlag, requiredFlag, type ParsedArgs } from "./args.js";
+import { agentCommand, agentStartCommand, type AgentCommandDependencies } from "./commands/agent.js";
 import { evidenceCommand } from "./commands/evidence.js";
 import { knowledgeCommand } from "./commands/knowledge.js";
 import { memoryCommand, resolveWikiPageIds } from "./commands/memory.js";
@@ -859,21 +860,6 @@ interface AgentStartBlocked {
   readonly recommendedAction: AgentStatus["recommendedAction"];
 }
 
-interface AgentStartReadyBase {
-  readonly started: true;
-  readonly action: "claimed_work" | "continue_reserved_work";
-  readonly agentId: string;
-  readonly labels: readonly string[];
-  readonly status: AgentStatus;
-  readonly reservation: AgentReservation;
-  readonly releasedReservations: readonly AgentReservation[];
-  readonly postMutationWork?: WorkItemView;
-}
-
-type AgentStartReady = AgentStartReadyBase & HandoffResult;
-
-type AgentStartResult = AgentStartBlocked | AgentStartReady;
-
 interface AgentFinishResult {
   readonly finished: true;
   readonly action: "verified_and_released" | "verified_and_closed";
@@ -1105,7 +1091,7 @@ export async function runCommand(args: ParsedArgs, output: CliOutput, cwd: strin
         result = await nextCommand(context, args, commandOutput, json);
         break;
       case "agent":
-        result = await agentCommand(action, rest, context, args, commandOutput, json);
+        result = await agentCommand(action, rest, context, args, commandOutput, json, agentCommandDependencies());
         break;
       case "session":
         result = await sessionCommand(action, context, args, commandOutput, json);
@@ -1117,7 +1103,7 @@ export async function runCommand(args: ParsedArgs, output: CliOutput, cwd: strin
         result = await workflowsCommand(action, rest, context, args, commandOutput, json);
         break;
       case "start":
-        result = await agentCommand("start", rest, context, args, commandOutput, json);
+        result = await agentCommand("start", rest, context, args, commandOutput, json, agentCommandDependencies());
         break;
       case "done":
         result = await doneAliasCommand(context, args, commandOutput, json);
@@ -1243,6 +1229,43 @@ export async function runCommand(args: ParsedArgs, output: CliOutput, cwd: strin
     throw new BorealError("BOREAL_INVARIANT", "Command did not return a result");
   }
   return result;
+}
+
+function agentCommandDependencies(): AgentCommandDependencies {
+  return {
+    agentIdFromArgs,
+    labelsFromArgs,
+    buildAgentGuide,
+    formatAgentGuide: (guide) => formatAgentGuide(guide as AgentGuide),
+    buildAgentStatus,
+    dashboardView,
+    formatAgentStatusDashboard: (status) => formatAgentStatusDashboard(status as AgentStatus),
+    optionalContainerIdFromArgs,
+    parseHandoffResultLimit,
+    resolveWorkId,
+    requiredPositional,
+    agentStartBlocked: (agentId, labels, status, reason) =>
+      agentStartBlocked(agentId, labels, status as AgentStatus, reason as AgentStartReason),
+    assertExactClaimMatchesFilters,
+    requireReservation,
+    buildHandoffResult,
+    formatRecordWithAgentDirectives,
+    asWorkId,
+    claimExactWork,
+    parseReservationExpiresAt,
+    attachGitBranchForClaim,
+    parseVerdict,
+    idempotentAgentFinishResult,
+    assertWorkNotAlreadyClosedForAgentFinish,
+    agentFinishGitPreflight,
+    agentFinishSummaryFactory,
+    finishEvidenceInput,
+    finishReservedWorkWithCompositeState,
+    writeAgentSummaryArtifact,
+    captureGitFinishEvidence,
+    agentSummaryRow,
+    resultForWork: (value, work) => withCliResult(value, workCliResult(work))
+  };
 }
 
 async function primeCommand(
@@ -4214,207 +4237,6 @@ function formatRuntimeLockDashboardRows(lock: RuntimeLockState): readonly string
   ]).split("\n");
 }
 
-async function agentCommand(
-  action: string | undefined,
-  rest: readonly string[],
-  context: CliContext,
-  args: ParsedArgs,
-  output: CliOutput,
-  json: boolean
-): Promise<CommandResult> {
-  switch (action) {
-    case "guide": {
-      const guide = await buildAgentGuide(context, agentIdFromArgs(args, context.actor.id), labelsFromArgs(args));
-      output.write(json ? formatRecord(guide, true) : formatAgentGuide(guide));
-      return { exitCode: 0 };
-    }
-    case "finish":
-      return agentFinishCommand(rest, context, args, output, json);
-    case "start":
-      return agentStartCommand(rest, context, args, output, json);
-    case "status": {
-      const agentId = agentIdFromArgs(args, context.actor.id);
-      const labels = labelsFromArgs(args);
-      const status = await buildAgentStatus(context, agentId, labels);
-      output.write(json ? formatRecord(status, true) : dashboardView(args) ? formatAgentStatusDashboard(status) : formatRecord(status, false));
-      return { exitCode: 0 };
-    }
-    default:
-      throw new BorealError("BOREAL_INVALID_INPUT", `Unknown agent command: ${action ?? ""}`);
-  }
-}
-
-async function agentStartCommand(
-  rest: readonly string[],
-  context: CliContext,
-  args: ParsedArgs,
-  output: CliOutput,
-  json: boolean
-): Promise<CommandResult> {
-  if (rest.length > 1) {
-    throw new BorealError("BOREAL_INVALID_INPUT", "agent start accepts at most one work reference");
-  }
-  const agentId = agentIdFromArgs(args, context.actor.id);
-  const labels = labelsFromArgs(args);
-  const containerId = await optionalContainerIdFromArgs(context, args);
-  const handoffResultLimit = parseHandoffResultLimit(args);
-  const workId = rest[0] ? await resolveWorkId(context, rest[0], { agentId }) : undefined;
-  const status = await buildAgentStatus(context, agentId, labels);
-
-  if (status.reservations.expiredActiveCount > 0) {
-    output.write(formatRecord(agentStartBlocked(agentId, labels, status, "expired_active_reservations"), json));
-    return { exitCode: 1 };
-  }
-
-  if (workId) {
-    await assertExactClaimMatchesFilters(context, workId, labels, containerId);
-  }
-
-  const activeReservation = workId
-    ? status.reservations.active.find((reservation) => reservation.workId === workId)
-    : status.reservations.active[0];
-  if (activeReservation) {
-    const reservation = await requireReservation(context, activeReservation.id);
-    const handoff = await buildHandoffResult(context, asWorkId(activeReservation.workId), args, handoffResultLimit);
-    const result = {
-      started: true,
-      action: "continue_reserved_work",
-      agentId,
-      labels,
-      status: await buildAgentStatus(context, agentId, labels),
-      reservation,
-      releasedReservations: [],
-      ...handoff
-    } satisfies AgentStartResult;
-    output.write(await formatRecordWithAgentDirectives(context, args, result, json, {
-      subjectWorkId: asWorkId(activeReservation.workId)
-    }));
-    return { exitCode: 0 };
-  }
-
-  if (status.reservations.capacityRemaining <= 0) {
-    output.write(formatRecord(agentStartBlocked(agentId, labels, status, "reservation_capacity_reached"), json));
-    return { exitCode: 1 };
-  }
-
-  const claim = workId
-    ? await claimExactWork(context, {
-        workId,
-        agentId,
-        labels,
-        containerId,
-        purpose: flagValue(args, "purpose"),
-        expiresAt: parseReservationExpiresAt(args)
-      })
-    : await context.runtime.claimNextWork({
-        agentId,
-        labels,
-        containerId,
-        purpose: flagValue(args, "purpose"),
-        expiresAt: parseReservationExpiresAt(args)
-      });
-  if (!claim) {
-    const currentStatus = await buildAgentStatus(context, agentId, labels);
-    output.write(formatRecord(agentStartBlocked(agentId, labels, currentStatus, "no_ready_work"), json));
-    return { exitCode: 0 };
-  }
-
-  const branchResult = await attachGitBranchForClaim(context, args, claim);
-  const handoff = await buildHandoffResult(context, claim.work.meta.id, args, handoffResultLimit, claim.work);
-  const result = {
-    started: true,
-    action: "claimed_work",
-    agentId,
-    labels,
-    status: await buildAgentStatus(context, agentId, labels),
-    reservation: branchResult.reservation,
-    releasedReservations: claim.releasedReservations,
-    ...(branchResult.gitBranch ? { gitBranch: branchResult.gitBranch } : {}),
-    postMutationWork: handoff.work,
-    ...handoff
-  } satisfies AgentStartResult;
-  output.write(await formatRecordWithAgentDirectives(context, args, result, json, {
-    subjectWork: claim.work
-  }));
-  return { exitCode: 0 };
-}
-
-async function agentFinishCommand(
-  rest: readonly string[],
-  context: CliContext,
-  args: ParsedArgs,
-  output: CliOutput,
-  json: boolean
-): Promise<CommandResult> {
-  const agentId = agentIdFromArgs(args, context.actor.id);
-  const workId = await resolveWorkId(context, requiredPositional(rest, 0, "work reference"), { agentId });
-  const verdict = parseVerdict(flagValue(args, "verdict"));
-  const close = hasFlag(args, "close");
-  const release = hasFlag(args, "release");
-
-  if (close && release) {
-    throw new BorealError("BOREAL_INVALID_INPUT", "--close and --release cannot be used together");
-  }
-  if (!close && !release) {
-    throw new BorealError("BOREAL_INVALID_INPUT", "Agent finish requires --close or --release");
-  }
-  if (close && verdict !== "passed") {
-    throw new BorealError("BOREAL_INVALID_INPUT", "--close requires a passed verification verdict");
-  }
-
-  const noop = await idempotentAgentFinishResult(context, workId, agentId, args);
-  if (noop) {
-    output.write(await formatRecordWithAgentDirectives(context, args, noop, json, { subjectWorkId: workId }));
-    return { exitCode: 0 };
-  }
-  await assertWorkNotAlreadyClosedForAgentFinish(context, workId);
-  const finishGit = await agentFinishGitPreflight(context, workId, agentId);
-
-  const closeReason = close ? requiredFlag(args, "reason") : undefined;
-  const closeoutSummaryFactory = closeReason
-    ? await agentFinishSummaryFactory(context, args, workId, closeReason)
-    : undefined;
-  const finishEvidence = await finishEvidenceInput(context, args, workId, verdict);
-  const finished = await finishReservedWorkWithCompositeState(context, workId, {
-    workId,
-    agentId,
-    evidence: finishEvidence.evidence,
-    verification: {
-      verdict,
-      notes: flagValue(args, "notes")
-    },
-    close: closeReason ? { reason: closeReason, agentSummary: closeoutSummaryFactory, ...(finishGit ? { git: finishGit } : {}) } : undefined,
-    release
-  });
-  const closeoutSummaryArtifact = finished.agentSummary
-    ? await writeAgentSummaryArtifact(context, finished.agentSummary)
-    : undefined;
-  const gitEvidence = await captureGitFinishEvidence(context, workId);
-
-  const result = {
-    finished: true,
-    action: close ? "verified_and_closed" : "verified_and_released",
-    agentId,
-    work: await context.runtime.getWorkView(workId),
-    evidence: finished.evidence,
-    evidenceRefs: finishEvidence.evidenceRefs,
-    inlineEvidence: finishEvidence.inlineEvidence,
-    gitEvidence: gitEvidence.evidence,
-    gitEvidenceNote: gitEvidence.note,
-    verification: finished.verification,
-    reservation: finished.reservation,
-    closedWork: finished.closedWork,
-    agentSummary: finished.agentSummary ? agentSummaryRow(finished.agentSummary) : undefined,
-    agentSummaryArtifact: closeoutSummaryArtifact,
-    release: finished.release,
-    status: await buildAgentStatus(context, agentId, [])
-  } satisfies AgentFinishResult;
-  output.write(await formatRecordWithAgentDirectives(context, args, withCliResult(result, workCliResult(result.work)), json, {
-    subjectWork: finished.closedWork ?? finished.work
-  }));
-  return { exitCode: 0 };
-}
-
 interface FinishEvidencePayload {
   readonly evidence: {
     readonly kind: EvidenceKind;
@@ -6193,7 +6015,7 @@ async function workCommand(
         throw new BorealError("BOREAL_INVALID_INPUT", "work claim accepts at most one work reference");
       }
       if (hasFlag(args, "start")) {
-        return agentStartCommand(rest, context, args, output, json);
+        return agentStartCommand(rest, context, args, output, json, agentCommandDependencies());
       }
       const agentId = agentIdFromArgs(args, context.actor.id);
       const labels = labelsFromArgs(args);
