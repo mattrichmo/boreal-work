@@ -149,6 +149,7 @@ import { evidenceCommand } from "./commands/evidence.js";
 import { healthCommand, type HealthCommandDependencies } from "./commands/health.js";
 import { knowledgeCommand } from "./commands/knowledge.js";
 import { memoryCommand, resolveWikiPageIds } from "./commands/memory.js";
+import { operationCommand, type OperationCommandDependencies } from "./commands/operation.js";
 import { protocolCommand, type ProtocolCommandDependencies } from "./commands/protocol.js";
 import { sprintCommand, type SprintCommandDependencies } from "./commands/sprint.js";
 import { storageCommand } from "./commands/storage.js";
@@ -916,7 +917,7 @@ export async function runCommand(args: ParsedArgs, output: CliOutput, cwd: strin
         result = await protocolCommand("session", action, context, args, commandOutput, json, protocolCommandDependencies());
         break;
       case "operation":
-        result = await operationCommand(action, rest, context, args, commandOutput, json);
+        result = await operationCommand(action, rest, context, args, commandOutput, json, operationCommandDependencies());
         break;
       case "workflows":
         result = await workflowsCommand(action, rest, context, args, commandOutput, json);
@@ -1226,53 +1227,22 @@ function protocolCommandDependencies(): ProtocolCommandDependencies {
   };
 }
 
-async function operationCommand(
-  action: string | undefined,
-  rest: readonly string[],
-  context: CliContext,
-  args: ParsedArgs,
-  output: CliOutput,
-  json: boolean
-): Promise<CommandResult> {
-  switch (action) {
-    case "list": {
-      const sessionId = optionalSessionId(flagValue(args, "session-id"));
-      const command = optionalCommandPath(flagValue(args, "command"));
-      const status = parseOperationStatus(flagValue(args, "status"));
-      const limit = parseLimit(flagValue(args, "limit")) ?? DEFAULT_OPERATION_LIST_LIMIT;
-      const rows = await context.store.read(async (reader) => {
-        const operations = await reader.listOperations();
-        return [...operations]
-          .filter((operation) => !sessionId || operation.sessionId === sessionId)
-          .filter((operation) => !command || operation.commandPath === command)
-          .filter((operation) => !status || operation.status === status)
-          .sort(compareOperationsNewestFirst)
-          .slice(0, limit)
-          .map(operationListRow);
-      });
-      output.write(json ? formatRecord(rows, true) : table(rows.map(textOperationListRow)));
-      return { exitCode: 0 };
-    }
-    case "show": {
-      const operation = await resolveOperation(context, requiredPositional(rest, 0, "operation id"));
-      output.write(formatRecord(operation, json));
-      return { exitCode: 0 };
-    }
-    case "stats": {
-      output.write(formatRecord(await operationStats(context, args), json));
-      return { exitCode: 0 };
-    }
-    case "prune": {
-      output.write(formatRecord(await pruneOperations(context, args), json));
-      return { exitCode: 0 };
-    }
-    case "repair": {
-      output.write(formatRecord(await repairOperationLinks(context, hasFlag(args, "dry-run")), json));
-      return { exitCode: 0 };
-    }
-    default:
-      throw new BorealError("BOREAL_INVALID_INPUT", `Unknown operation command: ${action ?? ""}`);
-  }
+function operationCommandDependencies(): OperationCommandDependencies {
+  return {
+    defaultListLimit: DEFAULT_OPERATION_LIST_LIMIT,
+    optionalSessionId,
+    optionalCommandPath,
+    parseOperationStatus,
+    parseLimit,
+    compareOperationsNewestFirst,
+    operationListRow,
+    textOperationListRow: (row) => textOperationListRow(row as OperationListRow),
+    requiredPositional,
+    resolveOperation,
+    operationStats,
+    pruneOperations,
+    repairOperationLinks
+  };
 }
 
 async function resolveOperation(context: CliContext, value: string): Promise<RuntimeOperation> {
