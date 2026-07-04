@@ -29,6 +29,7 @@ import {
   type EvidenceId,
   type EvidenceRecord,
   type EnforcementGap,
+  type GraphEdge,
   type RequiredCloseoutGate,
   type IsoTimestamp,
   type KnowledgeSource,
@@ -778,7 +779,7 @@ export function createBorealRuntime(options: BorealRuntimeOptions = {}): BorealR
           );
         }
         await writer.putWorkItem(closed);
-        await recomputeAllReadiness(writer);
+        await recomputeReadinessFrom(writer, [closed.meta.id]);
         await refreshWorkContext(writer, closed, actor, current);
         await appendEvent(writer, "work.closed", closed.meta.id, "work", { reason: input.reason });
         return closed;
@@ -885,7 +886,7 @@ export function createBorealRuntime(options: BorealRuntimeOptions = {}): BorealR
         }
         await writer.putWorkItem(finalWork);
         if (input.close) {
-          await recomputeAllReadiness(writer);
+          await recomputeReadinessFrom(writer, [finalWork.meta.id]);
         }
         await refreshWorkContext(writer, finalWork, actor, current);
         await appendEvent(writer, "evidence.recorded", evidence.meta.id, "evidence", {
@@ -2151,11 +2152,14 @@ async function recomputeAllReadiness(writer: BorealWriter): Promise<number> {
 
   for (let pass = 0; pass < 100; pass += 1) {
     const items = await writer.listWorkItems();
+    const workById = new Map(items.map((item) => [item.meta.id, item]));
+    const { blockedBy } = buildWorkDependencyIndexes(await writer.listGraphEdges());
     let changedThisPass = 0;
 
     for (const item of items) {
-      const dependencies = await loadDependencies(writer, item);
-      const status = deriveReadinessStatus(item, dependencies);
+      const dependencyIds = blockedBy.get(item.meta.id) ?? [];
+      const dependencies = dependencyIds.map((dependencyId) => workById.get(dependencyId)).filter(isWorkItem);
+      const status = deriveReadinessStatus({ ...item, dependencyIds }, dependencies);
       if (status !== item.status) {
         await writer.putWorkItem({ ...item, status });
         changedThisPass += 1;
@@ -2169,6 +2173,62 @@ async function recomputeAllReadiness(writer: BorealWriter): Promise<number> {
   }
 
   throw new BorealError("BOREAL_INVARIANT", "Readiness recompute did not converge");
+}
+
+async function recomputeReadinessFrom(writer: BorealWriter, changedWorkIds: readonly WorkId[]): Promise<number> {
+  const { blockedBy, blocks } = buildWorkDependencyIndexes(await writer.listGraphEdges());
+  const queue = unique(changedWorkIds);
+  const seen = new Set<WorkId>();
+  let changed = 0;
+
+  while (queue.length > 0) {
+    const id = queue.shift();
+    if (!id || seen.has(id)) {
+      continue;
+    }
+    seen.add(id);
+
+    for (const dependentId of blocks.get(id) ?? []) {
+      const dependent = await writer.getWorkItem(dependentId);
+      if (!dependent) {
+        continue;
+      }
+      const dependencyIds = blockedBy.get(dependentId) ?? [];
+      const dependencies = (await Promise.all(dependencyIds.map((dependencyId) => writer.getWorkItem(dependencyId)))).filter(isWorkItem);
+      const status = deriveReadinessStatus({ ...dependent, dependencyIds }, dependencies);
+      if (status !== dependent.status) {
+        await writer.putWorkItem({ ...dependent, status });
+        changed += 1;
+        queue.push(dependentId);
+      }
+    }
+  }
+
+  return changed;
+}
+
+function buildWorkDependencyIndexes(edges: readonly GraphEdge[]): {
+  readonly blockedBy: Map<WorkId, WorkId[]>;
+  readonly blocks: Map<WorkId, WorkId[]>;
+} {
+  const blockedBy = new Map<WorkId, WorkId[]>();
+  const blocks = new Map<WorkId, WorkId[]>();
+  for (const edge of edges) {
+    if (edge.kind !== "blocks" || edge.fromType !== "work" || edge.toType !== "work") {
+      continue;
+    }
+    const blockingWorkId = edge.fromId as WorkId;
+    const blockedWorkId = edge.toId as WorkId;
+    blockedBy.set(blockedWorkId, [...(blockedBy.get(blockedWorkId) ?? []), blockingWorkId]);
+    blocks.set(blockingWorkId, [...(blocks.get(blockingWorkId) ?? []), blockedWorkId]);
+  }
+  for (const [workId, dependencyIds] of blockedBy) {
+    blockedBy.set(workId, unique(dependencyIds).sort((left, right) => left.localeCompare(right)));
+  }
+  for (const [workId, dependentIds] of blocks) {
+    blocks.set(workId, unique(dependentIds).sort((left, right) => left.localeCompare(right)));
+  }
+  return { blockedBy, blocks };
 }
 
 async function makeWorkView(

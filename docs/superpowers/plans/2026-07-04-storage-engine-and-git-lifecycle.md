@@ -481,7 +481,7 @@ async function recomputeReadinessFrom(writer: BorealWriter, changedWorkIds: read
 
 Walks the **reverse** dependency graph (blocker → blocked) from the changed items via `listGraphEdges()` (called **once**, indexed into a `Map<WorkId, WorkId[]>`), recomputing `deriveReadinessStatus` breadth-first until no status changes. `recomputeAllReadiness` stays for `recomputeReadiness()` (the explicit repair command) but also builds the edge index once per pass instead of calling `loadDependencies` (→ `listGraphEdges`) per item.
 
-- [ ] **Step 1: Failing test**
+- [x] **Step 1: Failing test**
 
 ```ts
 it("closing a blocker readies only its transitive dependents", async () => {
@@ -501,7 +501,7 @@ it("closing a blocker readies only its transitive dependents", async () => {
 
 (This behavior must be identical before and after — write it first against `main` behavior to lock the contract, then swap the implementation.)
 
-- [ ] **Step 2: Implement**
+- [x] **Step 2: Implement**
 
 ```ts
 async function recomputeReadinessFrom(writer: BorealWriter, changedWorkIds: readonly WorkId[]): Promise<number> {
@@ -542,7 +542,7 @@ async function recomputeReadinessFrom(writer: BorealWriter, changedWorkIds: read
 
 Replace `await recomputeAllReadiness(writer)` at `runtime.ts:781` (closeWork) and `:888` (finishReservedWork) with `await recomputeReadinessFrom(writer, [closed.meta.id])` / `[finalWork.meta.id]`.
 
-- [ ] **Step 3: Full suite (the agent-e2e and cli tests cover close cascades) + benchmark with `node tools/bench-mutation.mjs 500`. Commit** `perf: incremental readiness recompute from changed nodes`.
+- [x] **Step 3: Full suite (the agent-e2e and cli tests cover close cascades) + benchmark with `node tools/bench-mutation.mjs 500`. Commit** `perf: incremental readiness recompute from changed nodes`.
 
 ### Task 9: Scope context refresh to affected items
 
