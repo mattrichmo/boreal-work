@@ -833,6 +833,7 @@ Progress:
 - [x] work dependencies
 - [x] health
 - [x] sprint
+- [x] protocol
 
 ### Task 19: Directive machinery audit (decision task, not deletion task)
 

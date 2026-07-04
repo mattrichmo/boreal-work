@@ -149,6 +149,7 @@ import { evidenceCommand } from "./commands/evidence.js";
 import { healthCommand, type HealthCommandDependencies } from "./commands/health.js";
 import { knowledgeCommand } from "./commands/knowledge.js";
 import { memoryCommand, resolveWikiPageIds } from "./commands/memory.js";
+import { protocolCommand, type ProtocolCommandDependencies } from "./commands/protocol.js";
 import { sprintCommand, type SprintCommandDependencies } from "./commands/sprint.js";
 import { storageCommand } from "./commands/storage.js";
 import {
@@ -903,16 +904,16 @@ export async function runCommand(args: ParsedArgs, output: CliOutput, cwd: strin
         result = await heartbeatCommand(action, rest, context, args, commandOutput, json);
         break;
       case "prime":
-        result = await primeCommand(context, args, commandOutput, json);
+        result = await protocolCommand("prime", action, context, args, commandOutput, json, protocolCommandDependencies());
         break;
       case "next":
-        result = await nextCommand(context, args, commandOutput, json);
+        result = await protocolCommand("next", action, context, args, commandOutput, json, protocolCommandDependencies());
         break;
       case "agent":
         result = await agentCommand(action, rest, context, args, commandOutput, json, agentCommandDependencies());
         break;
       case "session":
-        result = await sessionCommand(action, context, args, commandOutput, json);
+        result = await protocolCommand("session", action, context, args, commandOutput, json, protocolCommandDependencies());
         break;
       case "operation":
         result = await operationCommand(action, rest, context, args, commandOutput, json);
@@ -930,7 +931,7 @@ export async function runCommand(args: ParsedArgs, output: CliOutput, cwd: strin
         result = await pauseAliasCommand(context, args, commandOutput, json);
         break;
       case "status":
-        result = await primeCommand(context, args, commandOutput, json);
+        result = await protocolCommand("status", action, context, args, commandOutput, json, protocolCommandDependencies());
         break;
       case "install":
         result = await installCommand(action, context, args, commandOutput, json);
@@ -1212,61 +1213,17 @@ function sprintCommandDependencies(): SprintCommandDependencies {
   };
 }
 
-async function primeCommand(
-  context: CliContext,
-  args: ParsedArgs,
-  output: CliOutput,
-  json: boolean
-): Promise<CommandResult> {
-  const agentId = agentIdFromArgs(args, context.actor.id);
-  const labels = labelsFromArgs(args);
-  const result = await buildAgentProtocolBrief("prime", context, agentId, labels);
-  output.write(await formatRecordWithAgentDirectives(context, args, result, json, {
-    subject: { type: "workspace", id: context.workspaceRoot, title: "Workspace" }
-  }));
-  return { exitCode: 0 };
-}
-
-async function nextCommand(
-  context: CliContext,
-  args: ParsedArgs,
-  output: CliOutput,
-  json: boolean
-): Promise<CommandResult> {
-  const agentId = agentIdFromArgs(args, context.actor.id);
-  const labels = labelsFromArgs(args);
-  const result = await buildNextCommandResult(context, args, agentId, labels);
-  output.write(json ? formatRecord(result, true, { agentDirectives: result.bundleMeta && result.directive ? [nextResultBundle(result)] : [] }) : formatNextCommandResult(result));
-  return { exitCode: 0 };
-}
-
-async function sessionCommand(
-  action: string | undefined,
-  context: CliContext,
-  args: ParsedArgs,
-  output: CliOutput,
-  json: boolean
-): Promise<CommandResult> {
-  const agentId = agentIdFromArgs(args, context.actor.id);
-  const labels = labelsFromArgs(args);
-  switch (action) {
-    case "start":
-      output.write(
-        await formatRecordWithAgentDirectives(context, args, await buildAgentProtocolBrief("session_start", context, agentId, labels), json, {
-          subject: { type: "session", id: context.sessionId, title: context.sessionId }
-        })
-      );
-      return { exitCode: 0 };
-    case "end":
-      output.write(
-        await formatRecordWithAgentDirectives(context, args, await buildAgentProtocolBrief("session_end", context, agentId, labels), json, {
-          subject: { type: "session", id: context.sessionId, title: context.sessionId }
-        })
-      );
-      return { exitCode: 0 };
-    default:
-      throw new BorealError("BOREAL_INVALID_INPUT", `Unknown session command: ${action ?? ""}`);
-  }
+function protocolCommandDependencies(): ProtocolCommandDependencies {
+  return {
+    agentIdFromArgs,
+    labelsFromArgs,
+    buildAgentProtocolBrief,
+    buildNextCommandResult: (context, args, agentId, labels) =>
+      buildNextCommandResult(context, args, agentId, labels) as Promise<Awaited<ReturnType<typeof buildNextCommandResult>> & Record<string, unknown>>,
+    nextResultBundle: (result) => nextResultBundle(result as unknown as NextCommandResult),
+    formatNextCommandResult: (result) => formatNextCommandResult(result as NextCommandResult),
+    formatRecordWithAgentDirectives
+  };
 }
 
 async function operationCommand(
