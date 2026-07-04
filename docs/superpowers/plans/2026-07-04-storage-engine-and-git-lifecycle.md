@@ -840,6 +840,7 @@ Progress:
 - [x] dashboard/global
 - [x] meta/help
 - [x] workflows
+- [x] install/init
 
 ### Task 19: Directive machinery audit (decision task, not deletion task)
 
