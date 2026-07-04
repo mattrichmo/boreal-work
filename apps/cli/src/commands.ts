@@ -164,7 +164,7 @@ import {
   type SyncStatusResult
 } from "./commands/sync.js";
 import { vaultCommand } from "./commands/vault.js";
-import { workCommand as workGroupCommand } from "./commands/work.js";
+import { workCommand as workGroupCommand, type WorkCommandDependencies } from "./commands/work.js";
 import {
   clearCircuitBreakers,
   type CommandResult
@@ -1014,16 +1014,7 @@ export async function runCommand(args: ParsedArgs, output: CliOutput, cwd: strin
         result = await directiveAcknowledgementCommand(action, rest, context, args, commandOutput, json);
         break;
       case "dep":
-        result = await workGroupCommand("dep", action, rest, context, args, commandOutput, json, {
-          dependencyTypeFromArgs,
-          resolveWorkId,
-          requiredPositional,
-          dependencyTreeForWork: (workId, workItems, graphEdges) =>
-            dependencyTreeForWork(workId, workItems as readonly WorkItem[], graphEdges as readonly GraphEdge[]),
-          formatRecordWithAgentDirectives,
-          dependencyTreeRows: (tree) => dependencyTreeRows(tree as DependencyTreeNode),
-          dependencyCyclesFromGraph: (graphEdges) => dependencyCyclesFromGraph(graphEdges as readonly GraphEdge[])
-        });
+        result = await workGroupCommand("dep", action, rest, context, args, commandOutput, json, workCommandDependencies());
         break;
       case "evidence":
         result = await evidenceCommand(action, rest, context, args, commandOutput, json, {
@@ -1063,7 +1054,7 @@ export async function runCommand(args: ParsedArgs, output: CliOutput, cwd: strin
         });
         break;
       case "reservation":
-        result = await reservationCommand(action, context, args, commandOutput, json);
+        result = await workGroupCommand("reservation", action, rest, context, args, commandOutput, json, workCommandDependencies());
         break;
       case "heartbeat":
         result = await heartbeatCommand(action, rest, context, args, commandOutput, json);
@@ -1246,6 +1237,28 @@ function agentCommandDependencies(): AgentCommandDependencies {
     captureGitFinishEvidence,
     agentSummaryRow,
     resultForWork: (value, work) => withCliResult(value, workCliResult(work))
+  };
+}
+
+function workCommandDependencies(): WorkCommandDependencies {
+  return {
+    defaultListLimit: DEFAULT_LIST_LIMIT,
+    dependencyTypeFromArgs,
+    optionalAgentIdFromArgs,
+    resolveWorkId,
+    requiredPositional,
+    parseReservationStatus,
+    parseLimit,
+    reservationListRow: (reservation, work, now) =>
+      reservationListRow(reservation as AgentReservation, work as WorkItem | undefined, now) as unknown as Record<string, unknown>,
+    compareReservationRows: (left, right) =>
+      compareReservationRows(left as unknown as ReservationListRow, right as unknown as ReservationListRow),
+    textReservationListRow: (row) => textReservationListRow(row as unknown as ReservationListRow),
+    dependencyTreeForWork: (workId, workItems, graphEdges) =>
+      dependencyTreeForWork(workId, workItems as readonly WorkItem[], graphEdges as readonly GraphEdge[]),
+    formatRecordWithAgentDirectives,
+    dependencyTreeRows: (tree) => dependencyTreeRows(tree as DependencyTreeNode),
+    dependencyCyclesFromGraph: (graphEdges) => dependencyCyclesFromGraph(graphEdges as readonly GraphEdge[])
   };
 }
 
@@ -4597,41 +4610,6 @@ async function finishCurrentReservationCommand(input: {
   input.output.write(await formatRecordWithAgentDirectives(input.context, input.args, result, input.json, {
     subjectWork: finished.closedWork ?? finished.work
   }));
-  return { exitCode: 0 };
-}
-
-async function reservationCommand(
-  action: string | undefined,
-  context: CliContext,
-  args: ParsedArgs,
-  output: CliOutput,
-  json: boolean
-): Promise<CommandResult> {
-  if (action !== "list") {
-    throw new BorealError("BOREAL_INVALID_INPUT", `Unknown reservation command: ${action ?? ""}`);
-  }
-
-  const agentId = optionalAgentIdFromArgs(args);
-  const workRef = flagValue(args, "work");
-  const workId = workRef ? await resolveWorkId(context, workRef, agentId ? { agentId } : undefined) : undefined;
-  const status = parseReservationStatus(flagValue(args, "status"));
-  const onlyExpired = hasFlag(args, "expired");
-  const limit = parseLimit(flagValue(args, "limit")) ?? DEFAULT_LIST_LIMIT;
-  const now = Date.now();
-  const rows = await context.store.read(async (reader) => {
-    const reservations = await reader.listReservations();
-    const workItems = await reader.listWorkItems();
-    const workById = new Map(workItems.map((work) => [work.meta.id, work]));
-    return reservations
-      .map((reservation) => reservationListRow(reservation, workById.get(reservation.workId), now))
-      .filter((row) => !agentId || row.agentId === agentId)
-      .filter((row) => !workId || row.workId === workId)
-      .filter((row) => !status || row.status === status)
-      .filter((row) => !onlyExpired || row.expired)
-      .sort(compareReservationRows)
-      .slice(0, limit);
-  });
-  output.write(json ? formatRecord(rows, true) : table(rows.map(textReservationListRow)));
   return { exitCode: 0 };
 }
 
