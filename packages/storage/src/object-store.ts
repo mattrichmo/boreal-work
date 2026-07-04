@@ -23,7 +23,8 @@ import {
   workItemSchemaIssues,
   type RuntimeEvent,
   type RuntimeOperation,
-  type SchemaValidationIssue
+  type SchemaValidationIssue,
+  type WorkItem
 } from "@boreal/core";
 
 import { writeTextFileAtomic } from "./atomic-write.js";
@@ -35,11 +36,13 @@ import {
   type StoreSectionName,
   type StoreSnapshot
 } from "./memory-store.js";
-import type { BorealReader, BorealStore, BorealWriter } from "./ports.js";
+import { ObjectReadIndex, objectIndexPath, type NodeSqliteModule } from "./object-index.js";
+import type { BorealReader, BorealStore, BorealWriter, WorkItemFilter } from "./ports.js";
 
 export interface ObjectDirBorealStoreOptions {
   readonly rootDir: string;
   readonly lock?: Partial<FileLockOptions>;
+  readonly sqlite?: NodeSqliteModule;
 }
 
 type PersistedObjectSection = Exclude<StoreSectionName, "events" | "operations" | "projections" | "contextPacks">;
@@ -74,29 +77,35 @@ export class ObjectDirBorealStore implements BorealStore {
   readonly rootDir: string;
   readonly objectsDir: string;
   readonly eventLogFile: string;
+  readonly objectIndexFile: string;
   readonly lockDir: string;
   readonly lockOptions: FileLockOptions;
 
   #writeQueue: Promise<void> = Promise.resolve();
   #eventLog: FileEventLog;
+  #index: ObjectReadIndex;
 
   constructor(options: ObjectDirBorealStoreOptions) {
     const paths = resolveWorkspacePaths(options.rootDir);
     this.rootDir = paths.rootDir;
     this.objectsDir = paths.objectsDir;
     this.eventLogFile = paths.eventLogFile;
+    this.objectIndexFile = objectIndexPath(paths.rootDir);
     this.lockDir = paths.stateLockDir;
     this.lockOptions = normalizeFileLockOptions(options.lock);
     this.#eventLog = new FileEventLog({ path: this.eventLogFile });
+    this.#index = new ObjectReadIndex({
+      path: this.objectIndexFile,
+      ...(Object.hasOwn(options, "sqlite") ? { sqlite: options.sqlite } : {})
+    });
     assertPathInside(this.rootDir, this.objectsDir);
     assertPathInside(this.rootDir, this.eventLogFile);
+    assertPathInside(this.rootDir, this.objectIndexFile);
     assertPathInside(this.rootDir, this.lockDir);
   }
 
   async read<T>(operation: (reader: BorealReader) => Promise<T> | T): Promise<T> {
-    const snapshot = await this.loadSnapshot();
-    const memory = new InMemoryBorealStore(snapshot);
-    return memory.read((reader) => operation(withHeadSeqReader(reader, async () => (await this.#eventLog.head()).seq)));
+    return operation(this.createReader());
   }
 
   async write<T>(operation: (writer: BorealWriter) => Promise<T> | T): Promise<T> {
@@ -125,8 +134,63 @@ export class ObjectDirBorealStore implements BorealStore {
       for (const pending of logRecordsFromChanges(snapshot, changes)) {
         await this.#eventLog.append(pending.kind, pending.record);
       }
+      await this.#index.applyChanges(changes, await this.#eventLog.head());
       return result;
     });
+  }
+
+  private createReader(): BorealReader {
+    let fullReader: Promise<BorealReader> | undefined;
+    const loadFullReader = async (): Promise<BorealReader> => {
+      fullReader ??= this.loadSnapshot().then(async (snapshot) => {
+        const memory = new InMemoryBorealStore(snapshot);
+        return memory.read((reader) => withHeadSeqReader(reader, async () => (await this.#eventLog.head()).seq));
+      });
+      return fullReader;
+    };
+    const callFullReader = async (property: PropertyKey, args: readonly unknown[]): Promise<unknown> => {
+      const reader = await loadFullReader();
+      const value = (reader as unknown as Record<PropertyKey, unknown>)[property];
+      if (typeof value !== "function") {
+        return value;
+      }
+      return (value as (...input: readonly unknown[]) => unknown).apply(reader, [...args]);
+    };
+    const indexedMethods = {
+      headSeq: async () => (await this.#eventLog.head()).seq,
+      listWorkItems: async (filter?: WorkItemFilter) => {
+        const indexed = await this.listIndexedWorkItems(filter);
+        if (indexed !== undefined) {
+          return indexed;
+        }
+        const reader = await loadFullReader();
+        return reader.listWorkItems(filter);
+      }
+    };
+    return new Proxy(indexedMethods, {
+      get(target, property, receiver) {
+        if (property in target) {
+          return Reflect.get(target, property, receiver);
+        }
+        return (...args: readonly unknown[]) => callFullReader(property, args);
+      }
+    }) as BorealReader;
+  }
+
+  private async listIndexedWorkItems(filter?: WorkItemFilter): Promise<readonly WorkItem[] | undefined> {
+    const head = await this.#eventLog.head();
+    const indexed = await this.#index.listWorkItems(filter, head);
+    if (indexed !== undefined) {
+      return indexed;
+    }
+    const status = await this.#index.status(head);
+    if (!status.available) {
+      return undefined;
+    }
+    const snapshot = await this.loadSnapshot();
+    const refreshedHead = await this.#eventLog.head();
+    await this.#index.rebuild(snapshot, refreshedHead);
+    return this.#index.listWorkItems(filter, refreshedHead);
   }
 
   private async loadSnapshot(): Promise<StoreSnapshot> {

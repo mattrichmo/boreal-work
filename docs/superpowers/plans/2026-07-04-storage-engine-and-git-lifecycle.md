@@ -661,9 +661,9 @@ it("migrates a file-store workspace to objects and back", async () => {
 **Interfaces:**
 - Produces: `.boreal/cache/index.sqlite` (gitignored), maintained incrementally from the write change-set via `node:sqlite` **when importable**, else a no-op index (`available: false`) and reads fall back to full directory load — which after Phases 1–3 is fast enough below ~5k records. Schema: one table `records(section TEXT, id TEXT PRIMARY KEY, status TEXT, kind TEXT, updated_at TEXT, content_hash TEXT, json TEXT)` + `head(seq INTEGER, hash TEXT)` for staleness (compare against event-log head; on mismatch, rebuild the index from the directories). Delete the old shell-out `sqlite-cache.ts` and its `refreshGeneratedArtifactsInline` usage once this lands.
 
-- [ ] **Step 1: Failing tests** — index rebuilds when stale; `listWorkItems({ status })` served from index matches directory scan; store works identically when `node:sqlite` is unavailable (mock the import via constructor injection: `new ObjectDirBorealStore({ rootDir, sqlite: undefined })`).
+- [x] **Step 1: Failing tests** — index rebuilds when stale; `listWorkItems({ status })` served from index matches directory scan; store works identically when `node:sqlite` is unavailable (mock the import via constructor injection: `new ObjectDirBorealStore({ rootDir, sqlite: undefined })`).
 
-- [ ] **Step 2: Implement with dependency injection**
+- [x] **Step 2: Implement with dependency injection**
 
 ```ts
 // object-index.ts
@@ -672,7 +672,9 @@ export async function loadNodeSqlite(): Promise<typeof import("node:sqlite") | u
 }
 ```
 
-- [ ] **Step 3: Run tests. Commit** `feat: incremental sqlite read index for object store, retire shell-out cache`.
+- [x] **Step 3: Run tests. Commit** `feat: incremental sqlite read index for object store, retire shell-out cache`.
+
+> Implementation note: the object-store read index is additive. The legacy shell-out SQLite cache remains for file-store generated-artifact compatibility and existing public exports.
 
 ---
 
