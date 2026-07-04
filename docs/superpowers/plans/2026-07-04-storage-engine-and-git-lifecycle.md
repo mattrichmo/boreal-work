@@ -823,6 +823,7 @@ Order groups smallest-first (vault, storage, sync, …) to debug the pattern che
 
 Progress:
 - [x] storage
+- [x] vault
 
 ### Task 19: Directive machinery audit (decision task, not deletion task)
 
