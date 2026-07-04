@@ -827,6 +827,7 @@ Progress:
 - [x] sync
 - [x] evidence
 - [x] knowledge
+- [x] memory
 
 ### Task 19: Directive machinery audit (decision task, not deletion task)
 

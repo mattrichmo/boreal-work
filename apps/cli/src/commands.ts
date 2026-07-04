@@ -152,6 +152,7 @@ import type { FinishReservedWorkSummaryFactory } from "@boreal/engine";
 import { flagValue, flagValues, hasFlag, requiredFlag, type ParsedArgs } from "./args.js";
 import { evidenceCommand } from "./commands/evidence.js";
 import { knowledgeCommand } from "./commands/knowledge.js";
+import { memoryCommand, resolveWikiPageIds } from "./commands/memory.js";
 import { storageCommand } from "./commands/storage.js";
 import {
   buildSyncRefreshResult,
@@ -253,17 +254,7 @@ import {
 } from "./registry.js";
 import { runSearch, writeSearchIndex } from "./search-cli.js";
 import { dirtyPathNotesHaveReasonCode, requireCommitOrDirtyPathReason } from "./summary-policy.js";
-import {
-  addRawSource,
-  createWikiPage,
-  getRawSourceDetail,
-  inspectVault,
-  VAULT_SCHEMA_VERSION,
-  listVaultWikiPages,
-  listRawSourceRows,
-  type RawSourceRow,
-  type WikiPageRecord
-} from "./vault.js";
+import { VAULT_SCHEMA_VERSION } from "./vault.js";
 import {
   buildSkillInstallPlan,
   getWorkflowAsset,
@@ -291,9 +282,7 @@ const DEFAULT_DASHBOARD_SEARCH_LIMIT = 10;
 const DEFAULT_DASHBOARD_ACTIVITY_LIMIT = 20;
 const DEFAULT_SPRINT_LIST_LIMIT = 200;
 const DEFAULT_SPRINT_SCOPE_LIMIT = 500;
-const DEFAULT_RAW_PREVIEW_BYTES = 4_096;
 const MAX_LIST_LIMIT = 1_000;
-const MAX_RAW_PREVIEW_BYTES = 65_536;
 const MAX_DASHBOARD_PROJECT_LIMIT = 100;
 const MAX_SPRINT_LIST_LIMIT = 200;
 const MAX_SPRINT_SCOPE_LIMIT = 500;
@@ -1173,10 +1162,12 @@ export async function runCommand(args: ParsedArgs, output: CliOutput, cwd: strin
         result = await vaultCommand(action, context, commandOutput, json);
         break;
       case "raw":
-        result = await rawCommand(action, rest, context, args, commandOutput, json);
-        break;
       case "wiki":
-        result = await wikiCommand(action, rest, context, args, commandOutput, json);
+        result = await memoryCommand(group, action, rest, context, args, commandOutput, json, {
+          defaultListLimit: DEFAULT_LIST_LIMIT,
+          parseLimit,
+          requiredPositional
+        });
         break;
       case "duplicate":
         result = await duplicateCommand(action, context, args, commandOutput, json);
@@ -8412,91 +8403,6 @@ function shouldRefreshGeneratedArtifactsAfterMutation(definition: CommandDefinit
 // staleness is detected by sync status/doctor and rebuilt by `sync refresh`.
 const INLINE_GENERATED_ARTIFACT_REFRESH_COMMANDS = new Set<string>([]);
 
-async function rawCommand(
-  action: string | undefined,
-  rest: readonly string[],
-  context: CliContext,
-  args: ParsedArgs,
-  output: CliOutput,
-  json: boolean
-): Promise<CommandResult> {
-  switch (action) {
-    case "list": {
-      const limit = parseLimit(flagValue(args, "limit")) ?? DEFAULT_LIST_LIMIT;
-      const rows = await listRawSourceRows(context, { limit });
-      output.write(json ? formatRecord(rows, true) : table(rows.map(textRawSourceRow)));
-      return { exitCode: 0 };
-    }
-    case "show": {
-      const detail = await getRawSourceDetail(context, requiredPositional(rest, 0, "raw source id"), {
-        previewBytes: parsePreviewBytes(flagValue(args, "preview-bytes"))
-      });
-      output.write(formatRecord(detail, json));
-      return { exitCode: 0 };
-    }
-    case "add": {
-      output.write(
-        formatRecord(
-          await addRawSource(context, {
-            title: requiredFlag(args, "title"),
-            kind: flagValue(args, "kind"),
-            uri: flagValue(args, "uri"),
-            summary: flagValue(args, "summary"),
-            tags: flagValues(args, "tag")
-          }),
-          json
-        )
-      );
-      return { exitCode: 0 };
-    }
-    default:
-      throw new BorealError("BOREAL_INVALID_INPUT", `Unknown raw command: ${action ?? ""}`);
-  }
-}
-
-async function wikiCommand(
-  action: string | undefined,
-  rest: readonly string[],
-  context: CliContext,
-  args: ParsedArgs,
-  output: CliOutput,
-  json: boolean
-): Promise<CommandResult> {
-  switch (action) {
-    case "list": {
-      const limit = parseLimit(flagValue(args, "limit")) ?? DEFAULT_LIST_LIMIT;
-      const pages = await listVaultWikiPages(context);
-      const rows = wikiPageRows(pages).slice(0, limit);
-      output.write(json ? formatRecord(rows, true) : table(rows.map(textWikiPageRow)));
-      return { exitCode: 0 };
-    }
-    case "show": {
-      const pages = await listVaultWikiPages(context);
-      const page = resolveWikiPage(pages, requiredPositional(rest, 0, "wiki page reference"));
-      const detail = wikiPageDetail(page, pages);
-      output.write(formatRecord(detail, json));
-      return { exitCode: 0 };
-    }
-    case "create": {
-      output.write(
-        formatRecord(
-          await createWikiPage(context, {
-            title: rest.join(" ").trim(),
-            slug: flagValue(args, "slug"),
-            summary: flagValue(args, "summary"),
-            sourceRefs: flagValues(args, "source"),
-            tags: flagValues(args, "tag")
-          }),
-          json
-        )
-      );
-      return { exitCode: 0 };
-    }
-    default:
-      throw new BorealError("BOREAL_INVALID_INPUT", `Unknown wiki command: ${action ?? ""}`);
-  }
-}
-
 async function duplicateCommand(
   action: string | undefined,
   context: CliContext,
@@ -13160,20 +13066,6 @@ function parseNonNegativeInteger(value: string | undefined, label: string): numb
   return parsed;
 }
 
-function parsePreviewBytes(value: string | undefined): number {
-  if (!value) {
-    return DEFAULT_RAW_PREVIEW_BYTES;
-  }
-  const parsed = Number(value);
-  if (!Number.isInteger(parsed) || parsed <= 0) {
-    throw new BorealError("BOREAL_INVALID_INPUT", "--preview-bytes must be a positive integer");
-  }
-  if (parsed > MAX_RAW_PREVIEW_BYTES) {
-    throw new BorealError("BOREAL_INVALID_INPUT", `--preview-bytes must be at most ${MAX_RAW_PREVIEW_BYTES}`);
-  }
-  return parsed;
-}
-
 function parseHandoffResultLimit(args: ParsedArgs): number {
   return parseLimit(flagValue(args, "limit"), { max: MAX_HANDOFF_SEARCH_LIMIT }) ?? DEFAULT_HANDOFF_SEARCH_LIMIT;
 }
@@ -14194,209 +14086,6 @@ function textWorkListRow(row: WorkListRow): Record<string, string> {
     labels: row.labels.join(",")
   };
   return row.containerId ? { ...base, container: row.containerId } : base;
-}
-
-function textRawSourceRow(row: RawSourceRow): Record<string, string> {
-  return {
-    id: row.id,
-    status: row.processingStatus,
-    kind: row.kind,
-    title: row.title,
-    uri: row.uri ?? "",
-    linked: String(row.linkedPageCount),
-    addedAt: row.addedAt
-  };
-}
-
-interface WikiPageRow {
-  readonly id: string;
-  readonly slug: string;
-  readonly title: string;
-  readonly path: string;
-  readonly sourceRefs: readonly string[];
-  readonly links: readonly string[];
-  readonly claimStatus?: string;
-  readonly truthStatus: string;
-  readonly sourceRefCount: number;
-  readonly outboundLinkCount: number;
-  readonly backlinkCount: number;
-  readonly showCommand: string;
-}
-
-interface WikiPageDetail extends WikiPageRow {
-  readonly backlinks: readonly WikiLinkedPage[];
-  readonly outboundPages: readonly WikiLinkedPage[];
-  readonly missingOutboundLinks: readonly string[];
-}
-
-interface WikiLinkedPage {
-  readonly id: string;
-  readonly slug: string;
-  readonly title: string;
-  readonly path: string;
-  readonly truthStatus: string;
-}
-
-function wikiPageRows(pages: readonly WikiPageRecord[]): readonly WikiPageRow[] {
-  return pages.map((page) => wikiPageRow(page, pages)).sort(compareWikiPageRows);
-}
-
-function wikiPageDetail(page: WikiPageRecord, pages: readonly WikiPageRecord[]): WikiPageDetail {
-  const row = wikiPageRow(page, pages);
-  const outbound = page.links.map((link) => ({ link, page: findWikiPageByLink(pages, link) }));
-  return {
-    ...row,
-    backlinks: wikiBacklinks(page, pages).map(wikiLinkedPage),
-    outboundPages: outbound.map((entry) => entry.page).filter(isWikiPageRecord).map(wikiLinkedPage),
-    missingOutboundLinks: outbound.filter((entry) => !entry.page).map((entry) => entry.link)
-  };
-}
-
-function wikiPageRow(page: WikiPageRecord, pages: readonly WikiPageRecord[]): WikiPageRow {
-  return {
-    id: wikiPageRuntimeId(page),
-    slug: page.slug,
-    title: page.title,
-    path: page.path,
-    sourceRefs: page.sourceRefs,
-    links: page.links,
-    claimStatus: page.claimStatus,
-    truthStatus: wikiTruthStatus(page),
-    sourceRefCount: page.sourceRefs.length,
-    outboundLinkCount: page.links.length,
-    backlinkCount: wikiBacklinks(page, pages).length,
-    showCommand: `bwrk wiki show ${wikiPageRuntimeId(page)} --json`
-  };
-}
-
-function wikiBacklinks(page: WikiPageRecord, pages: readonly WikiPageRecord[]): readonly WikiPageRecord[] {
-  return pages.filter((candidate) =>
-    candidate.path !== page.path && candidate.links.some((link) => wikiLinkTargetsPage(link, page))
-  );
-}
-
-async function resolveWikiPageIds(context: CliContext, references: readonly string[]): Promise<readonly string[]> {
-  if (references.length === 0) {
-    return [];
-  }
-  const vaultStatus = await inspectVault(context);
-  if (!vaultStatus.initialized) {
-    throw new BorealError("BOREAL_NOT_FOUND", "Wiki page references require an initialized Boreal memory vault", {
-      references,
-      missingDirectories: vaultStatus.missingDirectories,
-      missingFiles: vaultStatus.missingFiles,
-      domain: "summary"
-    });
-  }
-  const pages = await listVaultWikiPages(context);
-  const ids: string[] = [];
-  const seen = new Set<string>();
-  for (const reference of references) {
-    const pageId = wikiPageRuntimeId(resolveWikiPage(pages, reference));
-    if (!seen.has(pageId)) {
-      ids.push(pageId);
-      seen.add(pageId);
-    }
-  }
-  return ids;
-}
-
-function resolveWikiPage(pages: readonly WikiPageRecord[], reference: string): WikiPageRecord {
-  const normalized = normalizeWikiReference(reference);
-  const page = pages.find((candidate) =>
-    candidate.id === reference ||
-    candidate.slug === reference ||
-    normalizeWikiReference(candidate.title) === normalized ||
-    normalizeWikiReference(candidate.path) === normalized
-  );
-  if (!page) {
-    throw new BorealError("BOREAL_NOT_FOUND", "Wiki page not found", { reference, domain: "summary" });
-  }
-  return page;
-}
-
-function findWikiPageByLink(pages: readonly WikiPageRecord[], link: string): WikiPageRecord | undefined {
-  const normalized = normalizeWikiReference(link);
-  return pages.find((page) =>
-    normalizeWikiReference(page.slug) === normalized ||
-    normalizeWikiReference(page.title) === normalized ||
-    normalizeWikiReference(page.path) === normalized ||
-    page.id === link
-  );
-}
-
-function wikiLinkTargetsPage(link: string, page: WikiPageRecord): boolean {
-  const normalized = normalizeWikiReference(link);
-  return (
-    normalized === normalizeWikiReference(page.slug) ||
-    normalized === normalizeWikiReference(page.title) ||
-    normalized === normalizeWikiReference(page.path) ||
-    link === page.id
-  );
-}
-
-function wikiTruthStatus(page: WikiPageRecord): string {
-  if (page.claimStatus === "accepted") return "accepted";
-  if (page.claimStatus === "proposed") return "proposed";
-  if (page.claimStatus === "stale") return "stale";
-  if (page.claimStatus === "rejected") return "rejected";
-  return "draft";
-}
-
-function wikiLinkedPage(page: WikiPageRecord): WikiLinkedPage {
-  return {
-    id: wikiPageRuntimeId(page),
-    slug: page.slug,
-    title: page.title,
-    path: page.path,
-    truthStatus: wikiTruthStatus(page)
-  };
-}
-
-function compareWikiPageRows(left: WikiPageRow, right: WikiPageRow): number {
-  return (
-    wikiTruthRank(left.truthStatus) - wikiTruthRank(right.truthStatus) ||
-    right.backlinkCount - left.backlinkCount ||
-    right.sourceRefCount - left.sourceRefCount ||
-    left.title.localeCompare(right.title) ||
-    left.slug.localeCompare(right.slug)
-  );
-}
-
-function wikiTruthRank(status: string): number {
-  if (status === "accepted") return 0;
-  if (status === "proposed") return 1;
-  if (status === "draft") return 2;
-  if (status === "stale") return 3;
-  return 4;
-}
-
-function normalizeWikiReference(value: string): string {
-  const fileName = basename(value.trim().replace(/\\/gu, "/"), ".md");
-  return fileName
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/gu, "-")
-    .replace(/^-+|-+$/gu, "");
-}
-
-function wikiPageRuntimeId(page: WikiPageRecord): string {
-  return page.id || page.slug;
-}
-
-function isWikiPageRecord(value: WikiPageRecord | undefined): value is WikiPageRecord {
-  return Boolean(value);
-}
-
-function textWikiPageRow(row: WikiPageRow): Record<string, string> {
-  return {
-    id: row.id,
-    status: row.truthStatus,
-    title: row.title,
-    path: row.path,
-    sources: String(row.sourceRefCount),
-    backlinks: String(row.backlinkCount),
-    outbound: String(row.outboundLinkCount)
-  };
 }
 
 function searchResultRow(result: SearchResult): Record<string, string | number> {
