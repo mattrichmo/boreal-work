@@ -550,9 +550,9 @@ Replace `await recomputeAllReadiness(writer)` at `runtime.ts:781` (closeWork) an
 - Modify: `packages/engine/src/runtime.ts` (`closeWork`, `finishReservedWork` — after readiness recompute, refresh context only for the closed item; drop the pre-existing behavior of leaving all other packs stale-but-persisted, which Task 6 already made moot)
 - Test: none new (Task 6's rebuild-on-miss covers correctness); verify by benchmark.
 
-- [ ] **Step 1: Confirm `refreshWorkContext` is now only called with the mutated work item in `closeWork`/`finishReservedWork`/`recordEvidence`/`verifyWork` (it already is — this step is verification, not change). Ensure `rebuildProjections` (the full rebuild) is reachable only from `sync refresh` / `context rebuild` commands.**
+- [x] **Step 1: Confirm `refreshWorkContext` is now only called with the mutated work item in `closeWork`/`finishReservedWork`/`recordEvidence`/`verifyWork` (it already is — this step is verification, not change). Ensure `rebuildProjections` (the full rebuild) is reachable only from `sync refresh` / `context rebuild` commands.**
 
-- [ ] **Step 2: Run `pnpm test`, benchmark, commit** `perf: context packs rebuilt on demand only`.
+- [x] **Step 2: Run `pnpm test`, benchmark, commit** `perf: context packs rebuilt on demand only`.
 
 ---
 

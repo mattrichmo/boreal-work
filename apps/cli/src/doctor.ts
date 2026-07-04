@@ -2113,26 +2113,12 @@ async function validateStoreRecords(
       ...summary.contextProjectionDrift
     ];
     if (contextPackIssues.length > 0 || contextProjectionIssues.length > 0 || (fix && workStateChanged && state.schemaVersion === LEGACY_FILE_STORE_SCHEMA_VERSION)) {
-      if (fix) {
-        await context.runtime.rebuildProjections({
-          skipContextPackIds: generatedTombstones.contextPackIds,
-          skipProjectionIds: generatedTombstones.projectionIds
-        });
-        diagnostics.push({
-          code: "projection.context_pack",
-          severity: "fixed",
-          message: "Rebuilt context pack projections",
-          details: { contextPackIssues, contextProjectionIssues, workStateChanged }
-        });
-        fixed = true;
-      } else {
-        diagnostics.push({
-          code: "projection.context_pack",
-          severity: "warning",
-          message: "Some context pack projections are missing or stale",
-          details: { contextPackIssues, contextProjectionIssues }
-        });
-      }
+      diagnostics.push({
+        code: "projection.context_pack",
+        severity: "warning",
+        message: "Some context pack projections are missing or stale; run `bwrk sync refresh --json`",
+        details: { contextPackIssues, contextProjectionIssues, workStateChanged, repairCommand: "bwrk sync refresh --json" }
+      });
     } else {
       diagnostics.push({
         code: "projection.context_pack",

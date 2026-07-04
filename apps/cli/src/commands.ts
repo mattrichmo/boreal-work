@@ -13869,7 +13869,6 @@ async function buildHandoffBundle(
   args: ParsedArgs,
   resultLimit: number
 ): Promise<HandoffBundle> {
-  await rebuildProjectionsRespectingTombstones(context);
   const [work, contextPack] = await Promise.all([context.runtime.getWorkView(workId), context.runtime.getContextPack(workId)]);
   await writeSearchIndex(context);
   const queryFlag = flagValue(args, "query");

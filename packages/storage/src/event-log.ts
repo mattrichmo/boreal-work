@@ -41,7 +41,10 @@ export class FileEventLog {
   }
 
   async readAll(): Promise<readonly EventLogEntry[]> {
-    return parseEntries(await this.readText());
+    const entries = parseEntries(await this.readText());
+    const last = entries.at(-1);
+    this.#head = last ? { seq: last.seq, hash: last.hash } : { seq: 0, hash: GENESIS_HASH };
+    return entries;
   }
 
   async head(): Promise<{ readonly seq: number; readonly hash: string }> {
