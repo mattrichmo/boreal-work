@@ -19,6 +19,16 @@ const SKILL_DIRECTIVE_HANDLING_MARKERS = [
   "typed data"
 ] as const;
 const ASSET_ROOT_ENV = "BOREAL_ASSET_ROOT";
+const DOCUMENTED_JSON_ENVELOPE_PATHS = new Set([
+  "data.ok",
+  "data.result",
+  "data.summary",
+  "data.meta.id",
+  "data.command",
+  "data.commandPath",
+  "data.recommendedCommands",
+  "data.nextCommandPath"
+]);
 
 export interface WorkflowAsset {
   readonly path: string;
@@ -257,10 +267,11 @@ export async function inspectWorkflowAssets(input: {
         issues.push({ code: "workflow.unknown_workflow_reference", path: workflow.path, message: `Unknown workflow reference ${workflowRef}` });
       }
     }
+    validateDocumentedJsonPaths("workflow", workflow.path, workflow.text, issues);
   }
 
   for (const skill of skills) {
-    const markdownWorkflowRefs = workflowReferencesFromMarkdown(skill.text);
+    const markdownWorkflowRefs = workflowReferencesFromSkillMarkdown(skill.text);
     if (!skill.text.includes("bwrk workflows show <ref>")) {
       issues.push({
         code: "skill.missing_workflow_resolver",
@@ -292,18 +303,37 @@ export async function inspectWorkflowAssets(input: {
       }
     }
     for (const workflow of skill.workflows) {
-      if (!workflowRefs.has(workflow)) {
+      const workflowAsset = workflowByReference(workflows, workflow);
+      if (!workflowAsset) {
         issues.push({ code: "skill.unknown_workflow", path: skill.path, message: `Unknown workflow ${workflow}` });
+        continue;
       }
-      if (!markdownWorkflowRefs.has(workflow)) {
+      if (workflow !== workflowAsset.id) {
+        issues.push({
+          code: "skill.noncanonical_workflow_reference",
+          path: skill.path,
+          message: `Skill metadata must reference workflow ID ${workflowAsset.id}, not ${workflow}`
+        });
+      }
+      if (!setHasWorkflowReference(markdownWorkflowRefs, workflows, workflowAsset.id)) {
         issues.push({ code: "skill.missing_workflow_reference", path: skill.path, message: `SKILL.md does not reference workflow ${workflow}` });
       }
     }
     for (const workflowRef of markdownWorkflowRefs) {
-      if (!workflowRefs.has(workflowRef)) {
+      const workflowAsset = workflowByReference(workflows, workflowRef);
+      if (!workflowAsset) {
         issues.push({ code: "skill.unknown_workflow_reference", path: skill.path, message: `Unknown workflow reference ${workflowRef}` });
+        continue;
+      }
+      if (workflowRef !== workflowAsset.id) {
+        issues.push({
+          code: "skill.noncanonical_workflow_reference",
+          path: skill.path,
+          message: `SKILL.md must reference workflow ID ${workflowAsset.id}, not ${workflowRef}`
+        });
       }
     }
+    validateDocumentedJsonPaths("skill", skill.path, skill.text, issues);
   }
 
   const installedChecks = await Promise.all(
@@ -339,6 +369,7 @@ export async function validateInstalledSkillRoot(
   const installRoot = resolve(input.installRoot);
   const skillRoot = skillRootForInstall(installRoot, input.target);
   const skillAssets = skills ?? await listSkillAssets(roots);
+  const workflows = await listWorkflowAssets({ assetRoot: roots.assetRoot });
   const expectedFiles = skillAssets.flatMap((skill) => expectedSkillInstallFiles(skillRoot, input.target, skill, false));
   let checkedFileCount = 0;
 
@@ -363,19 +394,11 @@ export async function validateInstalledSkillRoot(
         message: `Installed skill file differs from ${file.source}`
       });
     }
-    if (file.destination.endsWith("/SKILL.md") && !installedText.includes("bwrk workflows show <ref>")) {
-      issues.push({
-        code: "installed_skill.missing_workflow_resolver",
-        path: relative(roots.assetRoot, file.destination),
-        message: "Installed SKILL.md does not explain the workflow resolver fallback"
-      });
+    if (file.destination.endsWith("/SKILL.md")) {
+      validateInstalledSkillMarkdown(file.destination, installedText, workflows, issues, roots);
     }
-    if (file.destination.endsWith("/SKILL.md") && !hasAgentDirectiveHandling(installedText)) {
-      issues.push({
-        code: "installed_skill.missing_agent_directive_handling",
-        path: relative(roots.assetRoot, file.destination),
-        message: "Installed SKILL.md does not require directive-bundle inspection and conflict reporting"
-      });
+    if (file.destination.endsWith("/boreal.yaml")) {
+      validateInstalledSkillMetadata(file.destination, installedText, workflows, issues, roots);
     }
   }
 
@@ -497,6 +520,138 @@ function workflowReferencesFromMarkdown(text: string): Set<string> {
     }
   }
   return refs;
+}
+
+function workflowReferencesFromSkillMarkdown(text: string): Set<string> {
+  const refs = new Set<string>();
+  const workflowRefPattern = /`((?:boreal\.workflow\.[a-z0-9-]+\.v1)|(?:workflows\/[^`\s]+\.md)|(?:\d\d-[^`\s]+\/[^`\s]+\.md))`/gu;
+  for (const match of text.matchAll(workflowRefPattern)) {
+    const ref = match[1];
+    if (ref) {
+      refs.add(ref);
+    }
+  }
+  return refs;
+}
+
+function documentedJsonPathsFromMarkdown(text: string): Set<string> {
+  const refs = new Set<string>();
+  for (const match of text.matchAll(/`?(data\.[A-Za-z0-9_.[\]-]+)`?/gu)) {
+    const ref = match[1];
+    if (ref) {
+      refs.add(ref.replace(/\[\]/gu, ""));
+    }
+  }
+  return refs;
+}
+
+function validateDocumentedJsonPaths(
+  kind: "workflow" | "skill" | "installed_skill",
+  path: string,
+  text: string,
+  issues: AssetValidationIssue[]
+): void {
+  for (const jsonPath of documentedJsonPathsFromMarkdown(text)) {
+    if (!DOCUMENTED_JSON_ENVELOPE_PATHS.has(jsonPath)) {
+      issues.push({
+        code: `${kind}.unknown_json_path`,
+        path,
+        message: `Unknown documented JSON extraction path ${jsonPath}`
+      });
+    }
+  }
+}
+
+function workflowByReference(workflows: readonly WorkflowAsset[], ref: string): WorkflowAsset | undefined {
+  const normalizedRef = normalizeWorkflowRef(ref);
+  const matches = workflows.filter((workflow) => workflowReferenceMatches(workflow, ref, normalizedRef));
+  return matches.length === 1 ? matches[0] : undefined;
+}
+
+function setHasWorkflowReference(refs: ReadonlySet<string>, workflows: readonly WorkflowAsset[], expectedRef: string): boolean {
+  const expectedWorkflow = workflowByReference(workflows, expectedRef);
+  if (!expectedWorkflow) {
+    return false;
+  }
+  for (const ref of refs) {
+    const workflow = workflowByReference(workflows, ref);
+    if (workflow?.id === expectedWorkflow.id) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function validateInstalledSkillMarkdown(
+  destination: string,
+  installedText: string,
+  workflows: readonly WorkflowAsset[],
+  issues: AssetValidationIssue[],
+  roots: WorkflowAssetRoots
+): void {
+  const path = relative(roots.assetRoot, destination);
+  if (!installedText.includes("bwrk workflows show <ref>")) {
+    issues.push({
+      code: "installed_skill.missing_workflow_resolver",
+      path,
+      message: "Installed SKILL.md does not explain the workflow resolver fallback"
+    });
+  }
+  if (!hasAgentDirectiveHandling(installedText)) {
+    issues.push({
+      code: "installed_skill.missing_agent_directive_handling",
+      path,
+      message: "Installed SKILL.md does not require directive-bundle inspection and conflict reporting"
+    });
+  }
+  for (const workflowRef of workflowReferencesFromSkillMarkdown(installedText)) {
+    const workflow = workflowByReference(workflows, workflowRef);
+    if (!workflow) {
+      issues.push({
+        code: "installed_skill.unknown_workflow_reference",
+        path,
+        message: `Installed SKILL.md references unknown workflow ${workflowRef}`
+      });
+      continue;
+    }
+    if (workflowRef !== workflow.id) {
+      issues.push({
+        code: "installed_skill.noncanonical_workflow_reference",
+        path,
+        message: `Installed SKILL.md must reference workflow ID ${workflow.id}, not ${workflowRef}`
+      });
+    }
+  }
+  validateDocumentedJsonPaths("installed_skill", path, installedText, issues);
+}
+
+function validateInstalledSkillMetadata(
+  destination: string,
+  installedText: string,
+  workflows: readonly WorkflowAsset[],
+  issues: AssetValidationIssue[],
+  roots: WorkflowAssetRoots
+): void {
+  const path = relative(roots.assetRoot, destination);
+  const meta = parseYamlDocument(installedText, path);
+  for (const workflowRef of listValue(meta, "workflows")) {
+    const workflow = workflowByReference(workflows, workflowRef);
+    if (!workflow) {
+      issues.push({
+        code: "installed_skill.unknown_workflow_reference",
+        path,
+        message: `Installed boreal.yaml references unknown workflow ${workflowRef}`
+      });
+      continue;
+    }
+    if (workflowRef !== workflow.id) {
+      issues.push({
+        code: "installed_skill.noncanonical_workflow_reference",
+        path,
+        message: `Installed boreal.yaml must reference workflow ID ${workflow.id}, not ${workflowRef}`
+      });
+    }
+  }
 }
 
 function hasAgentDirectiveHandling(text: string): boolean {

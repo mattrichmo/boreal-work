@@ -9,6 +9,7 @@ export const DIRTY_PATH_REASON_CODES = [
   "unrelated_dirty_state",
   "git_unavailable",
   "out_of_scope_repository",
+  "sprint_checkpoint_rollup",
   "legacy_backfill"
 ] as const;
 

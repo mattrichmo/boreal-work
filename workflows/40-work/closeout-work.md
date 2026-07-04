@@ -79,25 +79,36 @@ Use this workflow when the user's request requires close completed work with evi
 
 ## Command Sequences
 
-Use manual closeout only for work that was completed outside the active-reservation path or needs extra evidence.
+Use the golden path first. `bwrk gate closeout --strict --json` is the single health gate for closeout readiness, `bwrk agent finish` is the preferred task closeout command, and `bwrk sprint close --auto-report` is the preferred sprint closeout command. Use manual evidence/verify/compose/close only as an evidence-after-the-fact fallback.
 
 1. Inspect the target first:
    `bwrk work show <work-id> --json`
 2. Before closeout, run `workflows/40-work/checkpoint-git-state.md` when the work changed repository state. Capture commit SHA(s) or a reason code.
-3. Attach evidence with a supported kind:
+3. Run the closeout health gate once after validation and checkpoint work:
+   `bwrk gate closeout --strict --json`
+4. For active or named task work, prefer agent finish:
+   `bwrk agent start <work-id> --agent <agent-id> --purpose "<purpose>" --json`
+   `bwrk agent finish current --agent <agent-id> --summary "<implemented and tested>" --kind test --command "<verification command>" --verdict passed --close --reason "<close reason>" --dirty-path "no_repo_changes: <why no commit was valid>" --json`
+   `bwrk agent finish <work-id> --agent <agent-id> --summary "<implemented and tested>" --kind test --command "<verification command>" --verdict passed --close --reason "<close reason>" --dirty-path "no_repo_changes: <why no commit was valid>" --json`
+5. For sprint closeout, prefer the composite report path:
+   `bwrk sprint close <sprint-id> --reason "<reason>" --auto-report --report-out .boreal/results/sprint-closeout.md --dirty-path "sprint_checkpoint_rollup: child checkpoints verified" --json`
+
+Manual fallback for evidence-after-the-fact:
+
+1. Attach evidence with a supported kind:
    `bwrk evidence add <work-id> --summary "<summary>" --kind command --command "<command>" --outcome passed --json`
-4. Capture the evidence ID from `data.meta.id`.
-5. Verify with that exact evidence ID:
+2. Capture the evidence ID from `data.meta.id`.
+3. Verify with that exact evidence ID:
    `bwrk work verify <work-id> --evidence <evidence-id> --verdict passed --notes "<notes>" --json`
-6. Compose or reference the required agent summary before close. Include Git checkpoint SHA(s) or dirty-path notes from `workflows/40-work/checkpoint-git-state.md`:
+4. Compose or reference the required agent summary before close. Include Git checkpoint SHA(s) or dirty-path notes from `workflows/40-work/checkpoint-git-state.md`:
    `bwrk summary compose <work-id> --commit <sha> --json`
    `bwrk summary compose <work-id> --dirty-path "no_repo_changes: <why no commit was valid>" --json`
-7. Close only after passed verification and summary availability:
+5. Close only after passed verification and summary availability:
    `bwrk work close <work-id> --reason "<reason>" --agent-summary <summary-id> --json`
 
 For required review or audit gates:
 
-1. Inspect `closeoutGateStatus` from `summary compose <work-id> --json`, `summary show`, `work verify`, or recent `evidence add` output before closeout.
+1. Inspect `closeoutGateStatus` from `summary compose <work-id> --json`, `summary show`, or `work verify` before closeout.
 2. If the gate is open, attach subject-matched passed evidence before closeout:
    `bwrk evidence add <work-id> --summary "<reviewed scope and findings disposition>" --kind review --outcome passed --json`
    `bwrk evidence add <work-id> --summary "<audit findings absent, fixed, or deferred>" --kind command --command "<audit command>" --outcome passed --json`
@@ -124,16 +135,9 @@ For sprint or parent-gate closeout:
    `bwrk sprint metrics <sprint-id> --closeout-reason "<reason>" --json`
 2. Confirm every child task is closed, cancelled, or explicitly deferred into later work with a reason.
 3. Run the Git checkpoint workflow for the sprint, phase, milestone, or project before closing the parent.
-4. Record final sync and doctor evidence on the sprint or parent work item:
-   `bwrk evidence add <sprint-id> --summary "sync closeout passed" --kind command --command "bwrk sync refresh --json" --outcome passed --json`
-   `bwrk evidence add <sprint-id> --summary "doctor closeout passed" --kind command --command "bwrk doctor --strict --json" --outcome passed --json`
-5. Generate the sprint report when closing a sprint:
-   `bwrk sprint report <sprint-id> --doctor-evidence <doctor-evidence-id> --sync-evidence <sync-evidence-id> --json`
-6. Compose the sprint rollup summary from child summaries, final evidence, and checkpoint SHA(s):
-   `bwrk summary compose <sprint-id> --commit <sha> --json`
-   `bwrk summary compose <sprint-id> --dirty-path "no_repo_changes: <why no commit was valid>" --json`
-7. Close the sprint only after passed verification, checkpoint evidence, and summary availability:
-   `bwrk sprint close <sprint-id> --reason "<reason>" --agent-summary <summary-id> --json`
+4. Close with the composite report path when the parent is a sprint:
+   `bwrk sprint close <sprint-id> --reason "<reason>" --auto-report --report-out .boreal/results/sprint-closeout.md --dirty-path "sprint_checkpoint_rollup: child checkpoints verified" --json`
+5. Use manual sync evidence, doctor evidence, `sprint report`, `summary compose`, and `sprint close --agent-summary` only when adding evidence after the fact or recovering from an earlier partial closeout attempt.
 
 
 ## CLI Commands

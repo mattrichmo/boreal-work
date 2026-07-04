@@ -74,7 +74,7 @@ Use this workflow when the user's request requires claim work, gather evidence, 
 
 ## Command Sequences
 
-Prefer `agent finish` for normal reserved work closeout because it records evidence, verifies, closes or releases, and clears the active reservation in one transaction.
+Prefer `agent finish` for normal work closeout because it records evidence, verifies, closes or releases, and clears ownership in one transaction. When the user names a work item to finish, first route through `bwrk agent start <work-id> --agent <agent-id> --purpose "<purpose>" --json` so the reservation path applies; use direct `bwrk agent finish <work-id> ... --close` only when the work is explicitly unreserved and ready for one-shot closeout.
 
 1. Start or resume work:
    `bwrk work parallel --container <container-id> --limit <n> --agent-prefix <prefix> --json`
@@ -90,9 +90,11 @@ Prefer `agent finish` for normal reserved work closeout because it records evide
 3. Finish the single active reservation after implementation, verification, and any required Git checkpoint. Include commit SHA(s) and dirty-path notes so `agent finish --close` can generate the required agent summary record:
    `bwrk agent finish current --agent <agent-id> --summary "<implemented and tested>" --kind test --command "<verification command>" --verdict passed --close --reason "<close reason>" --commit <sha> --json`
    `bwrk agent finish current --agent <agent-id> --summary "<implemented and tested>" --kind test --command "<verification command>" --verdict passed --close --reason "<close reason>" --dirty-path "no_repo_changes: <why no commit was valid>" --json`
-4. Use release instead of close when the work is verified but must remain open:
+4. For explicit unreserved work that should close in one transaction, use the same finish flags with the work ID:
+   `bwrk agent finish <work-id> --agent <agent-id> --summary "<implemented and tested>" --kind test --command "<verification command>" --verdict passed --close --reason "<close reason>" --dirty-path "no_repo_changes: <why no commit was valid>" --json`
+5. Use release instead of close when the work is verified but must remain open:
    `bwrk agent finish current --agent <agent-id> --summary "<partial verification>" --kind command --command "<verification command>" --verdict passed --release --json`
-5. Use manual `evidence add`, `work verify`, and `work close` only when no active reservation exists or when attaching additional evidence after `agent finish`; run `summary compose` before or during that closeout so the `boreal.cli.work.close.v1` envelope includes `agentSummaries`. Use `--force-summary --force-reason <code> --force-comment "<why>"` only for audited bypasses such as duplicates or external closes.
+6. Use manual `evidence add`, `work verify`, and `work close` only when attaching additional evidence after `agent finish`, closing historical work after the fact, or using an audited forced-summary bypass; run `summary compose` before or during that closeout so the `boreal.cli.work.close.v1` envelope includes `agentSummaries`. Use `--force-summary --force-reason <code> --force-comment "<why>"` only for audited bypasses such as duplicates or external closes.
 
 For work that requires explicit review or audit:
 
@@ -102,7 +104,7 @@ For work that requires explicit review or audit:
 2. Satisfy review or audit gates before closeout with subject-matched passed evidence:
    `bwrk evidence add <work-id> --summary "<reviewed scope and findings disposition>" --kind review --outcome passed --json`
    `bwrk evidence add <work-id> --summary "<audit findings absent, fixed, or deferred>" --kind command --command "<audit command>" --outcome passed --json`
-3. Inspect `closeoutGateStatus` from `evidence add`, `work verify`, `summary compose`, or `summary show`. Do not close until required gates are `satisfied` or `forced`.
+3. Inspect `closeoutGateStatus` from `work verify`, `summary compose`, or `summary show`. Do not close until required gates are `satisfied` or `forced`.
 4. Force a gate only as an audited bypass on the planned gate itself:
    `bwrk work edit <work-id> --force-gate <gate-id|kind[:scope]> --force-gate-reason <code> --force-gate-comment "<why>" [--force-gate-evidence <evidence-id>] --json`
    `--force-summary` does not force review, audit, verification, or checkpoint gates.

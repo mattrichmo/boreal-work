@@ -40,6 +40,16 @@ describe("agent directive compiler snapshots", () => {
     expect(agentDirectiveSnapshotHash(snapshot)).toMatch(/^sha256:[a-f0-9]{64}$/u);
   });
 
+  it("keeps source hashes stable across capture timestamps", () => {
+    const snapshot = agentDirectiveSnapshotFixture();
+    const recaptured = createAgentDirectiveSnapshot({
+      ...snapshot,
+      capturedAt: "2026-07-01T00:00:01.000Z" as IsoTimestamp
+    });
+
+    expect(agentDirectiveSnapshotHash(recaptured)).toBe(agentDirectiveSnapshotHash(snapshot));
+  });
+
   it("creates snapshots without inventing runtime context", () => {
     const snapshot = agentDirectiveSnapshotFixture();
     const { schemaVersion: _schemaVersion, ...input } = snapshot;
@@ -255,7 +265,7 @@ function agentDirectiveSnapshotFixture(): AgentDirectiveSnapshot {
       searchIndexFresh: true,
       sqliteCacheFresh: true,
       operationCount: 1020,
-      warningThreshold: 1025,
+      warningThreshold: 1250,
       contentHash: "sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789" as ContentHash,
       searchIndexHash: "sha256:fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210" as ContentHash
     },

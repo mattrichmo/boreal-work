@@ -764,13 +764,13 @@ describe("agent directive bundle assembly", () => {
       ledgersFresh: false,
       searchIndexFresh: false,
       sqliteCacheFresh: false,
-      operationCount: 1029,
-      warningThreshold: 1025,
+      operationCount: 1260,
+      warningThreshold: 1250,
       doctorDiagnostics: [
         {
           code: "operation.volume",
           severity: "warning",
-          message: "Operation log has 1029 records",
+          message: "Operation log has 1260 records",
           blocking: false,
           recommendedCommands: ["bwrk operation prune --keep 1000 --json"]
         },
@@ -808,8 +808,8 @@ describe("agent directive bundle assembly", () => {
       blockingDiagnosticCodes: ["lock.search_index.present"],
       safeWorkflow: "workflows/30-health/sync-and-doctor.md",
       nextCommandPath: "bwrk sync refresh --json",
-      operationCount: 1029,
-      warningThreshold: 1025,
+      operationCount: 1260,
+      warningThreshold: 1250,
       lockPaths: [".boreal/runtime/search-index.lock"]
     });
     expect(doctor?.data.diagnostics).toEqual(
@@ -823,7 +823,7 @@ describe("agent directive bundle assembly", () => {
       "bwrk lock inspect --json",
       "bwrk sync refresh --json",
       "bwrk doctor --strict --json",
-      "bwrk gate closeout --strict --auto-prune-operations --json"
+      "bwrk gate closeout --strict --json"
     ]);
     expect(next?.data).toMatchObject({
       workflowRef: "workflows/30-health/sync-and-doctor.md",
@@ -831,6 +831,55 @@ describe("agent directive bundle assembly", () => {
       subjectId: "bw_work_7ec3f08689c6cfb0"
     });
     expect(next).not.toHaveProperty("lifecycle");
+  });
+
+  it("does not emit generated-artifact or operation-volume recovery directives for mid-stream work commands", () => {
+    const snapshot = agentDirectiveCompilerSnapshotFixture({
+      commandPath: "agent start",
+      doctorOk: false,
+      syncOk: false,
+      ledgersFresh: false,
+      searchIndexFresh: false,
+      sqliteCacheFresh: false,
+      operationCount: 1260,
+      warningThreshold: 1250,
+      doctorDiagnostics: [
+        {
+          code: "ledger.status",
+          severity: "warning",
+          message: "Ledger status is not ok",
+          blocking: false,
+          recommendedCommands: ["bwrk sync refresh --json"]
+        },
+        {
+          code: "search.index",
+          severity: "warning",
+          message: "Search index is not fresh",
+          blocking: false,
+          recommendedCommands: ["bwrk sync refresh --json"]
+        },
+        {
+          code: "operation.volume",
+          severity: "warning",
+          message: "Operation log has 1260 records",
+          blocking: false,
+          recommendedCommands: ["bwrk operation prune --keep 1000 --json"]
+        }
+      ],
+      nextWorkflowRef: "workflows/40-work/claim-and-finish-work.md",
+      recommendedCommandPath: "bwrk work show bw_work_7ec3f08689c6cfb0 --json"
+    });
+    const result = compileRecoveryAgentDirectiveBundle({
+      snapshot,
+      nextWorkflowRef: "workflows/40-work/claim-and-finish-work.md",
+      nextCommandPath: "bwrk work show bw_work_7ec3f08689c6cfb0 --json"
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.selectedRegistryIds).toEqual(["workflow_next.canonical-next-step"]);
+    expect(result.bundle?.directives).toEqual([
+      expect.objectContaining({ registryId: "workflow_next.canonical-next-step" })
+    ]);
   });
 
   it("does not emit recovery obligations when doctor and sync are clean", () => {

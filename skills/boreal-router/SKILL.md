@@ -11,10 +11,10 @@ Confirm the current project context. Prefer `bwrk prime --json` when the workspa
 
 ## Routing Rules
 
-- Read `boreal.yaml` in this skill folder to identify the canonical workflow refs.
-- Resolve each workflow ref before executing steps: first try the repo-relative `workflows/<ref>` path from the Boreal checkout or current workspace, then use `bwrk workflows show <ref>` when the local workflow file is not present.
-- Treat the `workflows/...` entries below as source workflow references, not paths that must exist inside the installed skill folder.
-- Stop and report the missing workflow source if neither the local file nor `bwrk workflows show <ref>` is available.
+- Read `boreal.yaml` in this skill folder to identify the canonical workflow IDs.
+- Resolve each workflow ID with `bwrk workflows show <ref>` before executing steps; the values are canonical refs, not filesystem paths to search for in sibling checkouts.
+- Use only the selected workspace or the installed `bwrk` workflow bundle for workflow source; never scan unrelated home-directory or sibling repository copies.
+- Stop and report the missing workflow source if `bwrk workflows show <ref>` cannot resolve the ID.
 - Follow the workflow's allowed commands and finish criteria.
 - Keep this skill as a thin adapter; do not invent steps that belong in the workflow file.
 - If the request crosses repositories, stop and ask for the explicit workspace and memory root.
@@ -30,9 +30,9 @@ Confirm the current project context. Prefer `bwrk prime --json` when the workspa
 
 ## Workflow References
 
-Use the value after `workflows/` with `bwrk workflows show <ref>` if the repo-relative file is not available.
+Use each workflow ID below verbatim with `bwrk workflows show <ref>`; do not rewrite it to a `workflows/...` path unless you are already inside the Boreal source checkout.
 
-- `workflows/00-agent/route-request.md`
+- `boreal.workflow.route-request.v1`
 
 ## No-Leak Rules
 

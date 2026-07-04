@@ -87,6 +87,7 @@ export interface CommandBehaviorMetadata {
   readonly requiresLock: CommandLockRequirement;
   readonly supportsExplain: boolean;
   readonly maxResultSizeChars: number;
+  readonly maxResultLines: number;
   readonly jsonOutputSchema: string;
   readonly humanOutputKind: HumanOutputKind;
   readonly examples: readonly string[];
@@ -107,6 +108,11 @@ export const GLOBAL_FLAGS: readonly FlagDefinition[] = [
     name: "json",
     type: "boolean",
     summary: "Emit a JSON envelope instead of human-readable text.",
+  },
+  {
+    name: "brief",
+    type: "boolean",
+    summary: "Emit a compact JSON envelope profile for automation. Implies --json.",
   },
   {
     name: "actor",
@@ -144,15 +150,20 @@ const flag = (
 
 const commandMetadata = (
   command: string,
-  input: Omit<CommandBehaviorMetadata, "supportsExplain" | "jsonOutputSchema" | "examples"> &
-    Partial<Pick<CommandBehaviorMetadata, "supportsExplain" | "jsonOutputSchema">> & {
+  input: Omit<CommandBehaviorMetadata, "supportsExplain" | "jsonOutputSchema" | "examples" | "maxResultLines"> &
+    Partial<Pick<CommandBehaviorMetadata, "supportsExplain" | "jsonOutputSchema" | "maxResultLines">> & {
       readonly examples: readonly string[];
     },
 ): CommandBehaviorMetadata => ({
   supportsExplain: false,
   jsonOutputSchema: `boreal.cli.${command.replace(/\s+/gu, ".")}.v1`,
   ...input,
+  maxResultLines: input.maxResultLines ?? defaultMaxResultLines(input.maxResultSizeChars),
 });
+
+function defaultMaxResultLines(maxResultSizeChars: number): number {
+  return Math.max(20, Math.ceil(maxResultSizeChars / 40));
+}
 
 export const COMMAND_DEFINITIONS: readonly CommandDefinition[] = [
   {
@@ -591,10 +602,14 @@ export const COMMAND_DEFINITIONS: readonly CommandDefinition[] = [
   {
     path: ["registry", "remove"],
     category: "registry",
-    summary: "Remove a project from the machine-local registry.",
-    usage: "bwrk registry remove <project-id> [--registry-root <dir>] [--json]",
-    description: "Removes the registry entry only. It never deletes project or memory files.",
-    flags: [flag("registry-root", "value", "Machine-local registry root override. Defaults to the platform Boreal app-state directory.")],
+    summary: "Archive or purge a project from the machine-local registry.",
+    usage: "bwrk registry remove <project-id> [--registry-root <dir>] [--purge] [--json]",
+    description:
+      "Archives the registry entry by default so references can still resolve. With --purge, removes the registry entry only. It never deletes project or memory files.",
+    flags: [
+      flag("registry-root", "value", "Machine-local registry root override. Defaults to the platform Boreal app-state directory."),
+      flag("purge", "boolean", "Remove the registry row instead of archiving it.")
+    ],
     positionals: { label: "project id", min: 1, max: 1 },
     requiresWorkspace: false,
     supportsJson: true,
@@ -668,7 +683,7 @@ export const COMMAND_DEFINITIONS: readonly CommandDefinition[] = [
     path: ["global"],
     category: "dashboard",
     summary: "Your global workspace: cross-repo dashboard, global work (global work ...), and link/unlink.",
-    usage: "bwrk global [link <path>|unlink <project-id>] [--web] [--json] [--mouse] [--refresh-ms <ms>] [--host <host>] [--port <n>] [--no-open] [--mode live|fixture] [--live-cache-ttl-ms <ms>] [--allow-fixture-fallback] [--name <text>] [--label <label>...] [--registry-root <dir>]",
+    usage: "bwrk global [link <path>|unlink <project-id>] [--web] [--json] [--mouse] [--refresh-ms <ms>] [--host <host>] [--port <n>] [--no-open] [--mode live|fixture] [--live-cache-ttl-ms <ms>] [--allow-fixture-fallback] [--name <text>] [--label <label>...] [--registry-root <dir>] [--purge]",
     description:
       "The machine-level global workspace. With no subcommand it opens the cross-repo dashboard (terminal by default; --web for the browser, --json for the data payload). `bwrk global work ...` (and any `bwrk global <command>`) runs that command against the global workspace. `bwrk global link <path>` links a project to be tracked; `bwrk global unlink <project-id>` removes it.",
     flags: [
@@ -683,7 +698,8 @@ export const COMMAND_DEFINITIONS: readonly CommandDefinition[] = [
       flag("allow-fixture-fallback", "boolean", "Browser console (--web): render fixture data with warnings when live data fails."),
       flag("name", "value", "link: display name for the linked project."),
       flag("label", "value", "link: label for the linked project (repeatable).", true),
-      flag("registry-root", "value", "link/unlink: machine-local registry root override.")
+      flag("registry-root", "value", "link/unlink: machine-local registry root override."),
+      flag("purge", "boolean", "unlink: remove the archived registry row instead of retaining it for references.")
     ],
     positionals: { label: "arguments", min: 0, max: 2 },
     requiresWorkspace: false,
@@ -709,9 +725,12 @@ export const COMMAND_DEFINITIONS: readonly CommandDefinition[] = [
     path: ["unlink"],
     category: "dashboard",
     summary: "Stop tracking a project in your global workspace.",
-    usage: "bwrk unlink <project-id> [--registry-root <dir>] [--json]",
-    description: "Removes a project from the machine-local registry. Equivalent to `bwrk registry remove`.",
-    flags: [flag("registry-root", "value", "Machine-local registry root override.")],
+    usage: "bwrk unlink <project-id> [--registry-root <dir>] [--purge] [--json]",
+    description: "Archives a project in the machine-local registry. Equivalent to `bwrk registry remove`.",
+    flags: [
+      flag("registry-root", "value", "Machine-local registry root override."),
+      flag("purge", "boolean", "Remove the registry row instead of archiving it.")
+    ],
     positionals: { label: "project-id", min: 1, max: 1 },
     requiresWorkspace: false,
     supportsJson: true,
@@ -826,10 +845,14 @@ export const COMMAND_DEFINITIONS: readonly CommandDefinition[] = [
     path: ["sprint", "close"],
     category: "sprint",
     summary: "Close a verified sprint with closeout metrics.",
-    usage: "bwrk sprint close [<sprint-ref>] --reason <text> [--capacity <n>] [--carryover <work-ref>...] [--risk <text>...] [--limit <n>] [--agent-summary <id>...] [--force-summary --force-reason <code> --force-comment <text>] [--commit <sha>...] [--dirty-path <note>...] [--json]",
-    description: "Closes a sprint through the normal work close policy, ensuring a final or forced agent summary exists before close.",
+    usage: "bwrk sprint close [<sprint-ref>] --reason <text> [--auto-report] [--report-format markdown|html] [--report-out <file>] [--strict] [--capacity <n>] [--carryover <work-ref>...] [--risk <text>...] [--limit <n>] [--agent-summary <id>...] [--force-summary --force-reason <code> --force-comment <text>] [--commit <sha>...] [--dirty-path <note>...] [--json]",
+    description: "Closes a sprint through the normal work close policy, optionally generating sync/doctor evidence, sprint verification, a closeout report, and a final or forced agent summary inline.",
     flags: [
       flag("reason", "value", "Close reason."),
+      flag("auto-report", "boolean", "Run sync refresh, doctor, sprint verification, and sprint report generation before closing."),
+      flag("report-format", "value", "Auto-report format: markdown or html. Defaults to markdown."),
+      flag("report-out", "value", "Workspace-relative auto-report artifact path. Defaults under .boreal/results."),
+      flag("strict", "boolean", "Treat doctor warnings as auto-report gate failures."),
       flag("capacity", "value", "Nominal work-item capacity for this sprint."),
       flag("carryover", "value", "Carryover work reference. Repeat to set explicit carryover.", true),
       flag("risk", "value", "Known sprint risk.", true),
@@ -913,10 +936,10 @@ export const COMMAND_DEFINITIONS: readonly CommandDefinition[] = [
     summary: "List work items.",
     usage: "bwrk work list [--ready] [--status <status>] [--label <label>...] [--container <work-ref>] [--limit <n>] [--json]",
     flags: [
-      flag("ready", "boolean", "Only include ready work."),
+      flag("ready", "boolean", "Only include dependency-valid claimable ready work."),
       flag("status", "value", "Only include work with this status."),
       flag("label", "value", "Only include work with this label.", true),
-      flag("container", "value", "Only include a container and its dependency-graph descendants."),
+      flag("container", "value", "Only include a container such as an epic, milestone, or sprint and its dependency-graph descendants."),
       flag("limit", "value", "Maximum number of work items to print. Defaults to 100, max 1000."),
     ],
     positionals: { label: "arguments", min: 0, max: 0 },
@@ -969,10 +992,11 @@ export const COMMAND_DEFINITIONS: readonly CommandDefinition[] = [
     category: "work",
     summary: "Show the next ready work.",
     usage: "bwrk work next [--label <label>...] [--container <work-ref>] [--agent <agent-id>] [--purpose <text>] [--limit <n>] [--view dashboard] [--json]",
-    description: "Lists claimable ready work from the live runtime view, ordered by priority and title, with exact claim/start commands in JSON rows.",
+    description:
+      "Lists dependency-valid claimable ready work from the live runtime view, ordered by priority and title, with lineage and exact claim/start commands in JSON rows.",
     flags: [
       flag("label", "value", "Only include work with this label.", true),
-      flag("container", "value", "Only include ready work inside a container's dependency-graph descendants."),
+      flag("container", "value", "Only include ready work inside a container such as an epic, milestone, or sprint."),
       flag("agent", "value", "Agent identifier to include in generated claim/start commands. Defaults to the CLI actor."),
       flag("purpose", "value", "Reservation purpose to include in generated claim/start commands."),
       flag("limit", "value", "Maximum number of ready work items to print. Defaults to 10, max 1000."),
@@ -992,7 +1016,7 @@ export const COMMAND_DEFINITIONS: readonly CommandDefinition[] = [
       "Returns a read-only ready-work queue with exact agent start and work claim commands per row for coordinator fan-out.",
     flags: [
       flag("label", "value", "Only include work with this label.", true),
-      flag("container", "value", "Only include ready work inside a container's dependency-graph descendants."),
+      flag("container", "value", "Only include ready work inside a container such as an epic, milestone, or sprint."),
       flag("agent", "value", "Agent identifier to assign to generated commands. Repeat to round-robin rows across agents.", true),
       flag("agent-prefix", "value", "Generate per-row agent IDs as <prefix>-1, <prefix>-2, and so on."),
       flag("purpose", "value", "Reservation purpose to include in generated claim/start commands."),
@@ -1666,11 +1690,11 @@ export const COMMAND_DEFINITIONS: readonly CommandDefinition[] = [
   {
     path: ["agent", "finish"],
     category: "agent",
-    summary: "Finish work with an active reservation using evidence and verification.",
+    summary: "Finish work with evidence and verification.",
     usage:
       "bwrk agent finish <work-id> (--summary <text>|--evidence <inline-or-evidence-id>) (--close --reason <text>|--release) [--agent <agent-id>] [--kind command|test|diff|review|artifact|note] [--outcome passed|failed|observed|unknown] [--command <cmd>] [--uri <uri>] [--verdict passed|failed] [--notes <text>] [--commit <sha>...] [--dirty-path <note>...] [--json]",
     description:
-      "Requires the requested agent to own the active reservation, records evidence, verifies the work, and closes or releases the reservation.",
+      "Records evidence and verification, then closes or releases owned reserved work. Explicit unreserved work refs are auto-reserved and released in the same transaction.",
     flags: [
       flag("summary", "value", "Evidence summary."),
       flag("evidence", "value", "Inline evidence summary or existing evidence id to use as the finish evidence source.", true),
@@ -2099,10 +2123,10 @@ export const COMMAND_DEFINITIONS: readonly CommandDefinition[] = [
     path: ["sync", "refresh"],
     category: "sync",
     summary: "Refresh generated collaboration artifacts.",
-    usage: "bwrk sync refresh [--json]",
+    usage: "bwrk sync refresh [--strict] [--json]",
     description:
       "Runs the safe generated-artifact refresh sequence: context projections, local search index, JSONL ledgers, then sync status.",
-    flags: [],
+    flags: [flag("strict", "boolean", "Exit non-zero when post-refresh sync status is still unhealthy.")],
     positionals: { label: "arguments", min: 0, max: 0 },
     requiresWorkspace: true,
     supportsJson: true,
@@ -2182,7 +2206,7 @@ export const COMMAND_DEFINITIONS: readonly CommandDefinition[] = [
     summary: "Inspect workflow, template, and skill integrity.",
     usage: "bwrk doctor skills [--install-root <dir>] [--skill-target codex|claude|skills...] [--json]",
     description:
-      "Validates workflow command references, template references, skill workflow references, duplicate workflow IDs, and optionally installed skill roots.",
+      "Validates workflow command references, template references, canonical skill workflow IDs, duplicate workflow IDs, and optionally installed skill roots.",
     flags: [
       flag("install-root", "value", "Installed skill root to validate. Defaults to configured roots when --skill-target is set."),
       flag("skill-target", "value", "Installed skill target to validate: codex, claude, or skills.", true),
@@ -2217,11 +2241,12 @@ export const COMMAND_DEFINITIONS: readonly CommandDefinition[] = [
     path: ["gate"],
     category: "gate",
     summary: "Run the default closeout gate.",
-    usage: "bwrk gate [--strict] [--auto-prune-operations] [--json]",
+    usage: "bwrk gate [--strict] [--no-auto-prune-operations] [--json]",
     description: "Golden-path alias for `bwrk gate closeout`.",
     flags: [
       flag("strict", "boolean", "Treat doctor warnings as gate failures."),
-      flag("auto-prune-operations", "boolean", "Prune local operation history when operation volume is the only strict gate blocker.")
+      flag("auto-prune-operations", "boolean", "Deprecated no-op; operation volume is pruned by default when it is the only strict gate blocker."),
+      flag("no-auto-prune-operations", "boolean", "Disable default operation-history pruning at the closeout gate.")
     ],
     positionals: { label: "arguments", min: 0, max: 0 },
     requiresWorkspace: true,
@@ -2231,11 +2256,12 @@ export const COMMAND_DEFINITIONS: readonly CommandDefinition[] = [
     path: ["gate", "closeout"],
     category: "gate",
     summary: "Run sync, doctor, schema, and docs closeout checks.",
-    usage: "bwrk gate closeout [--strict] [--auto-prune-operations] [--json]",
+    usage: "bwrk gate closeout [--strict] [--no-auto-prune-operations] [--json]",
     description: "Coordinates sync refresh, doctor, schema validation, and docs checks with unambiguous JSON success semantics.",
     flags: [
       flag("strict", "boolean", "Treat doctor warnings as gate failures."),
-      flag("auto-prune-operations", "boolean", "Prune local operation history when operation volume is the only strict gate blocker.")
+      flag("auto-prune-operations", "boolean", "Deprecated no-op; operation volume is pruned by default when it is the only strict gate blocker."),
+      flag("no-auto-prune-operations", "boolean", "Disable default operation-history pruning at the closeout gate.")
     ],
     positionals: { label: "arguments", min: 0, max: 0 },
     requiresWorkspace: true,
@@ -2244,7 +2270,7 @@ export const COMMAND_DEFINITIONS: readonly CommandDefinition[] = [
   {
     path: ["lock", "inspect"],
     category: "lock",
-    summary: "Inspect the workspace lock.",
+    summary: "Inspect workspace runtime locks.",
     usage: "bwrk lock inspect [--view dashboard] [--json]",
     flags: [flag("view", "value", "Optional human view. Use dashboard for grouped lock output.")],
     positionals: { label: "arguments", min: 0, max: 0 },
@@ -2288,7 +2314,7 @@ const COMMAND_BEHAVIOR: Readonly<Record<string, CommandBehaviorMetadata>> = {
     requiresFreshIndex: false,
     concurrencySafe: true,
     requiresLock: "none",
-    maxResultSizeChars: 250_000,
+    maxResultSizeChars: 600_000,
     humanOutputKind: "table",
     examples: ["bwrk commands --json", "bwrk commands --format markdown"],
   }),
@@ -2779,13 +2805,16 @@ const COMMAND_BEHAVIOR: Readonly<Record<string, CommandBehaviorMetadata>> = {
     readOnly: false,
     destructive: false,
     writesState: true,
-    writesGeneratedArtifacts: false,
+    writesGeneratedArtifacts: true,
     requiresFreshIndex: false,
     concurrencySafe: true,
     requiresLock: "state",
-    maxResultSizeChars: 250_000,
+    maxResultSizeChars: 300_000,
     humanOutputKind: "record",
-    examples: ["bwrk sprint close bw_work_0123456789ab --reason 'verified closeout' --dirty-path 'no_repo_changes: closeout only' --json"],
+    examples: [
+      "bwrk sprint close bw_work_0123456789ab --reason 'verified closeout' --dirty-path 'no_repo_changes: closeout only' --json",
+      "bwrk sprint close bw_work_0123456789ab --reason 'verified closeout' --auto-report --report-out .boreal/results/sprint-closeout.md --dirty-path 'sprint_checkpoint_rollup: child checkpoints verified' --json"
+    ],
   }),
   prime: commandMetadata("prime", {
     readOnly: true,
@@ -3007,10 +3036,10 @@ const COMMAND_BEHAVIOR: Readonly<Record<string, CommandBehaviorMetadata>> = {
     readOnly: false,
     destructive: false,
     writesState: true,
-    writesGeneratedArtifacts: false,
+    writesGeneratedArtifacts: true,
     requiresFreshIndex: false,
     concurrencySafe: true,
-    requiresLock: "state",
+    requiresLock: "state+generated",
     maxResultSizeChars: 50_000,
     humanOutputKind: "record",
     examples: ["bwrk work verify bw_work_example --evidence bw_evidence_example --json"],
@@ -3019,10 +3048,10 @@ const COMMAND_BEHAVIOR: Readonly<Record<string, CommandBehaviorMetadata>> = {
     readOnly: false,
     destructive: false,
     writesState: true,
-    writesGeneratedArtifacts: false,
+    writesGeneratedArtifacts: true,
     requiresFreshIndex: false,
     concurrencySafe: true,
-    requiresLock: "state",
+    requiresLock: "state+generated",
     maxResultSizeChars: 50_000,
     humanOutputKind: "record",
     examples: ["bwrk work close bw_work_example --reason verified --dirty-path 'no_repo_changes: closeout only' --json"],
@@ -3079,10 +3108,10 @@ const COMMAND_BEHAVIOR: Readonly<Record<string, CommandBehaviorMetadata>> = {
     readOnly: false,
     destructive: false,
     writesState: true,
-    writesGeneratedArtifacts: false,
+    writesGeneratedArtifacts: true,
     requiresFreshIndex: false,
     concurrencySafe: true,
-    requiresLock: "state",
+    requiresLock: "state+generated",
     maxResultSizeChars: 50_000,
     humanOutputKind: "record",
     examples: ["bwrk evidence add bw_work_example --summary 'tests passed' --kind test --outcome passed --json"],
@@ -3786,7 +3815,7 @@ const COMMAND_BEHAVIOR: Readonly<Record<string, CommandBehaviorMetadata>> = {
     requiresLock: "state+generated",
     maxResultSizeChars: 300_000,
     humanOutputKind: "record",
-    examples: ["bwrk sync refresh --json"],
+    examples: ["bwrk sync refresh --json", "bwrk sync refresh --strict --json"],
   }),
   "ledger status": commandMetadata("ledger status", {
     readOnly: true,
@@ -3906,7 +3935,7 @@ const COMMAND_BEHAVIOR: Readonly<Record<string, CommandBehaviorMetadata>> = {
     requiresLock: "state+generated",
     maxResultSizeChars: 600_000,
     humanOutputKind: "record",
-    examples: ["bwrk gate --strict --auto-prune-operations --json"],
+    examples: ["bwrk gate --strict --json", "bwrk gate --strict --no-auto-prune-operations --json"],
   }),
   "gate closeout": commandMetadata("gate closeout", {
     readOnly: false,
@@ -3918,7 +3947,7 @@ const COMMAND_BEHAVIOR: Readonly<Record<string, CommandBehaviorMetadata>> = {
     requiresLock: "state+generated",
     maxResultSizeChars: 600_000,
     humanOutputKind: "record",
-    examples: ["bwrk gate closeout --strict --auto-prune-operations --json"],
+    examples: ["bwrk gate closeout --strict --json", "bwrk gate closeout --strict --no-auto-prune-operations --json"],
   }),
   "lock inspect": commandMetadata("lock inspect", {
     readOnly: true,
@@ -3928,7 +3957,7 @@ const COMMAND_BEHAVIOR: Readonly<Record<string, CommandBehaviorMetadata>> = {
     requiresFreshIndex: false,
     concurrencySafe: true,
     requiresLock: "none",
-    maxResultSizeChars: 50_000,
+    maxResultSizeChars: 100_000,
     humanOutputKind: "record",
     examples: ["bwrk lock inspect --json"],
   }),
@@ -4023,12 +4052,14 @@ export const validateCommandFlags = (args: ParsedArgs, definition: CommandDefini
   for (const [name, values] of args.flags.entries()) {
     const definitionForFlag = allowedFlags.get(name);
     if (!definitionForFlag) {
+      const didYouMean = nearestRegisteredFlag(name, allowedFlags);
       throw new BorealError(
         "BOREAL_INVALID_INPUT",
-        `Unknown flag --${name} for bwrk ${commandPath(definition)}`,
+        `Unknown flag --${name} for bwrk ${commandPath(definition)}${didYouMean ? `. Did you mean --${didYouMean}?` : ""}`,
         {
           command: definition.path,
           flag: name,
+          ...(didYouMean ? { didYouMean: `--${didYouMean}` } : {}),
         },
       );
     }
@@ -4083,3 +4114,47 @@ export const validateCommandFlags = (args: ParsedArgs, definition: CommandDefini
     );
   }
 };
+
+function nearestRegisteredFlag(name: string, allowedFlags: ReadonlyMap<string, FlagDefinition>): string | undefined {
+  const aliases = flagAliasCandidates(name).filter((candidate) => allowedFlags.has(candidate));
+  if (aliases[0]) {
+    return aliases[0];
+  }
+  const candidates = [...allowedFlags.keys()];
+  const ranked = candidates
+    .map((candidate) => ({ candidate, distance: levenshteinDistance(name, candidate) }))
+    .sort((left, right) => left.distance - right.distance || left.candidate.localeCompare(right.candidate));
+  const nearest = ranked[0];
+  return nearest && nearest.distance <= Math.max(3, Math.ceil(Math.max(name.length, nearest.candidate.length) / 2))
+    ? nearest.candidate
+    : undefined;
+}
+
+function flagAliasCandidates(name: string): readonly string[] {
+  switch (name) {
+    case "parent":
+      return ["container"];
+    case "pr":
+    case "prio":
+      return ["priority"];
+    default:
+      return [];
+  }
+}
+
+function levenshteinDistance(left: string, right: string): number {
+  let previous: number[] = Array.from({ length: right.length + 1 }, (_, index) => index);
+  for (let leftIndex = 1; leftIndex <= left.length; leftIndex += 1) {
+    const current: number[] = [leftIndex];
+    for (let rightIndex = 1; rightIndex <= right.length; rightIndex += 1) {
+      const substitutionCost = left[leftIndex - 1] === right[rightIndex - 1] ? 0 : 1;
+      current[rightIndex] = Math.min(
+        (current[rightIndex - 1] ?? leftIndex) + 1,
+        (previous[rightIndex] ?? rightIndex) + 1,
+        (previous[rightIndex - 1] ?? rightIndex - 1) + substitutionCost
+      );
+    }
+    previous = current;
+  }
+  return previous[right.length] ?? 0;
+}

@@ -1792,6 +1792,7 @@ interface RegistryProjectRow {
   readonly memoryRemote?: string;
   readonly installRoot?: string;
   readonly source?: string;
+  readonly lifecycle?: string;
   readonly lastSeenAt?: string;
 }
 
@@ -2476,7 +2477,7 @@ async function buildConsoleProjectOverviews(input: {
   readonly globalSearchQuery: string;
   readonly includeCurrentFallback?: boolean;
 }): Promise<readonly ConsoleProjectOverview[]> {
-  const registryRows = registryProjectRowsFromCli(input.registryList);
+  const registryRows = registryProjectRowsFromCli(input.registryList).filter((row) => row.lifecycle !== "archived" && row.lifecycle !== "paused");
   const registryFindings = registryFindingsByProject(input.registryDoctor);
   if (registryRows.length === 0 && input.includeCurrentFallback === false) {
     return [];
@@ -2683,6 +2684,7 @@ function registryProjectRowsFromCli(data: unknown): readonly RegistryProjectRow[
         memoryRemote: typeof entry.memoryRemote === "string" ? entry.memoryRemote : undefined,
         installRoot: typeof entry.installRoot === "string" ? entry.installRoot : undefined,
         source: typeof entry.source === "string" ? entry.source : undefined,
+        lifecycle: typeof entry.lifecycle === "string" ? entry.lifecycle : undefined,
         lastSeenAt: typeof entry.lastSeenAt === "string" ? entry.lastSeenAt : undefined
       }
     ];

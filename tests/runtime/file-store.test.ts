@@ -1,5 +1,5 @@
 import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { hostname as osHostname, tmpdir } from "node:os";
 import { performance } from "node:perf_hooks";
 import { join } from "node:path";
 
@@ -249,6 +249,27 @@ describe("file-backed store", () => {
       code: "BOREAL_CONFLICT"
     } satisfies Partial<BorealError>);
     await expect(inspectFileLock(lockDir, { staleAfterMs: 30_000 })).resolves.toMatchObject({ exists: true, stale: false });
+  });
+
+  it("marks same-host dead-owner locks stale without waiting for heartbeat expiry", async () => {
+    const rootDir = await makeTempWorkspace();
+    const lockDir = join(rootDir, ".boreal/runtime/state.lock");
+    const now = new Date().toISOString();
+    await writeLockOwner(rootDir, now, {
+      hostname: osHostname(),
+      pid: 999_999_999,
+      lastHeartbeatAt: now
+    });
+
+    await expect(inspectFileLock(lockDir, { staleAfterMs: 60_000 })).resolves.toMatchObject({
+      exists: true,
+      stale: true,
+      ownerPidAlive: false,
+      staleReason: "owner_pid_exited"
+    });
+    await expect(breakStaleFileLock(lockDir, { waitTimeoutMs: 250, staleAfterMs: 60_000, retryDelayMs: 5 })).resolves.toMatchObject({
+      removed: true
+    });
   });
 
   it("heartbeats active long-running locks so stale recovery does not break them", async () => {
@@ -532,7 +553,11 @@ async function makeTempWorkspace(): Promise<string> {
   return dir;
 }
 
-async function writeLockOwner(rootDir: string, createdAt: string): Promise<void> {
+async function writeLockOwner(
+  rootDir: string,
+  createdAt: string,
+  owner: Partial<{ readonly hostname: string; readonly pid: number; readonly lastHeartbeatAt: string }> = {}
+): Promise<void> {
   const lockDir = join(rootDir, ".boreal/runtime/state.lock");
   await mkdir(lockDir, { recursive: true });
   await writeFile(
@@ -540,9 +565,10 @@ async function writeLockOwner(rootDir: string, createdAt: string): Promise<void>
     JSON.stringify(
       {
         token: "external-lock",
-        pid: 999_999,
-        hostname: "test-host",
-        createdAt
+        pid: owner.pid ?? 999_999,
+        hostname: owner.hostname ?? "test-host",
+        createdAt,
+        ...(owner.lastHeartbeatAt ? { lastHeartbeatAt: owner.lastHeartbeatAt } : {})
       },
       null,
       2

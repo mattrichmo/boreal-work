@@ -24,6 +24,8 @@ import { normalizeFileLockOptions, withFileLock, writeTextFileAtomic } from "@bo
 import type { CliContext } from "./context.js";
 
 const SEARCH_INDEX_MAX_READ_BYTES = 100 * 1024 * 1024;
+const SEARCH_INDEX_LOCK_RETRY_ATTEMPTS = 3;
+const SEARCH_INDEX_LOCK_RETRY_DELAY_MS = 100;
 
 export interface SearchIndexWriteResult {
   readonly path: string;
@@ -55,9 +57,11 @@ export interface SearchCommandOptions {
 }
 
 export async function writeSearchIndex(context: CliContext): Promise<SearchIndexWriteResult> {
-  return withFileLock(searchIndexLockDir(context), normalizeFileLockOptions(), async () => {
-    return writeSearchIndexUnlocked(context);
-  });
+  return withSearchIndexLockRetry(context, () =>
+    withFileLock(searchIndexLockDir(context), normalizeFileLockOptions(), async () => {
+      return writeSearchIndexUnlocked(context);
+    })
+  );
 }
 
 export async function inspectSearchIndex(context: CliContext): Promise<SearchIndexInspection> {
@@ -158,38 +162,69 @@ async function loadFreshSearchIndex(
 }
 
 async function rebuildSearchIndexIfStillNeeded(context: CliContext): Promise<SearchIndexWriteResult | undefined> {
-  return withFileLock(searchIndexLockDir(context), normalizeFileLockOptions(), async () => {
-    const inspection = await inspectSearchIndex(context);
-    if (inspection.exists && !inspection.stale && !inspection.error) {
-      return undefined;
-    }
-    try {
-      return await writeSearchIndexUnlocked(context);
-    } catch (error) {
-      const gaps = [
-        {
-          code: "doctor.recovery.required",
-          subjectType: "workspace",
-          subjectId: context.workspaceRoot,
-          data: {
-            reason: "automatic search index rebuild failed"
+  return withSearchIndexLockRetry(context, () =>
+    withFileLock(searchIndexLockDir(context), normalizeFileLockOptions(), async () => {
+      const inspection = await inspectSearchIndex(context);
+      if (inspection.exists && !inspection.stale && !inspection.error) {
+        return undefined;
+      }
+      try {
+        return await writeSearchIndexUnlocked(context);
+      } catch (error) {
+        const gaps = [
+          {
+            code: "doctor.recovery.required",
+            subjectType: "workspace",
+            subjectId: context.workspaceRoot,
+            data: {
+              reason: "automatic search index rebuild failed"
+            }
           }
-        }
-      ] satisfies readonly EnforcementGap[];
-      throw new BorealError(
-        "BOREAL_POLICY_VIOLATION",
-        "Automatic search index rebuild failed; run `bwrk doctor --strict --json`",
-        {
-          doNotRetry: true,
-          repairCommand: "bwrk doctor --strict --json",
-          indexPath: searchIndexPath(context),
-          originalError: error instanceof Error ? error.message : String(error),
+        ] satisfies readonly EnforcementGap[];
+        throw new BorealError(
+          "BOREAL_POLICY_VIOLATION",
+          "Automatic search index rebuild failed; run `bwrk doctor --strict --json`",
+          {
+            doNotRetry: true,
+            repairCommand: "bwrk doctor --strict --json",
+            indexPath: searchIndexPath(context),
+            originalError: error instanceof Error ? error.message : String(error),
+            gaps
+          },
           gaps
-        },
-        gaps
-      );
+        );
+      }
+    })
+  );
+}
+
+async function withSearchIndexLockRetry<T>(context: CliContext, operation: () => Promise<T>): Promise<T> {
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= SEARCH_INDEX_LOCK_RETRY_ATTEMPTS; attempt += 1) {
+    try {
+      return await operation();
+    } catch (error) {
+      if (!isSearchIndexLockConflict(error, context) || attempt === SEARCH_INDEX_LOCK_RETRY_ATTEMPTS) {
+        throw error;
+      }
+      lastError = error;
+      await sleep(SEARCH_INDEX_LOCK_RETRY_DELAY_MS);
     }
-  });
+  }
+  throw lastError;
+}
+
+function isSearchIndexLockConflict(error: unknown, context: CliContext): boolean {
+  if (!(error instanceof BorealError) || error.code !== "BOREAL_CONFLICT") {
+    return false;
+  }
+  const details = error.details;
+  return (
+    typeof details === "object" &&
+    details !== null &&
+    "lockDir" in details &&
+    (details as { readonly lockDir?: unknown }).lockDir === searchIndexLockDir(context)
+  );
 }
 
 async function writeSearchIndexUnlocked(context: CliContext): Promise<SearchIndexWriteResult> {
@@ -244,4 +279,8 @@ function indexWriteResult(path: string, index: SearchIndexDocument): SearchIndex
     documentCount: index.documentCount,
     tokenCount: index.tokenCount
   };
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }

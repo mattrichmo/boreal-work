@@ -3,4 +3,4 @@ system: boreal
 skill: boreal-router
 display_name: Boreal Router
 workflows:
-  - 00-agent/route-request.md
+  - boreal.workflow.route-request.v1

@@ -3,6 +3,6 @@ system: boreal
 skill: boreal-memory-reconcile
 display_name: Boreal Memory Reconcile
 workflows:
-  - 20-memory/reconcile-raw-to-memory.md
-  - 20-memory/update-memory.md
-  - 20-memory/reconcile-chat-thread.md
+  - boreal.workflow.reconcile-raw-to-memory.v1
+  - boreal.workflow.update-memory.v1
+  - boreal.workflow.reconcile-chat-thread.v1

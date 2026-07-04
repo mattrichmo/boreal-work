@@ -126,6 +126,42 @@ describe("agent directive runtime compiler integration", () => {
     }
   });
 
+  it("does not emit generated-artifact or operation-volume recovery obligations for work-context starts", () => {
+    const obligations = compileAgentRuntimeDirectiveObligations({
+      context: "work",
+      snapshot: snapshotFixture({
+        commandPath: "agent start",
+        doctorOk: false,
+        syncOk: false,
+        ledgersFresh: false,
+        operationCount: 1260,
+        warningThreshold: 1250,
+        doctorDiagnostics: [
+          {
+            code: "ledger.status",
+            severity: "warning",
+            message: "Ledger status is not ok",
+            blocking: false,
+            recommendedCommands: ["bwrk sync refresh --json"]
+          },
+          {
+            code: "operation.volume",
+            severity: "warning",
+            message: "Operation log has 1260 records",
+            blocking: false,
+            recommendedCommands: ["bwrk operation prune --keep 1000 --json"]
+          }
+        ]
+      })
+    });
+
+    expect(obligations.ok).toBe(true);
+    expect(obligations.summary.emittedRegistryIds).toEqual(["workflow_next.canonical-next-step"]);
+    expect(obligations.agentDirectives[0]?.directives).toEqual([
+      expect.objectContaining({ registryId: "workflow_next.canonical-next-step" })
+    ]);
+  });
+
   it("emits a required lane worktree directive when shared-branch isolation data is supplied", () => {
     const obligations = compileAgentRuntimeDirectiveObligations({
       context: "work",
@@ -271,13 +307,13 @@ describe("agent directive runtime compiler integration", () => {
               doctorOk: false,
               syncOk: false,
               ledgersFresh: false,
-              operationCount: 1029,
-              warningThreshold: 1025,
+              operationCount: 1260,
+              warningThreshold: 1250,
               doctorDiagnostics: [
                 {
                   code: "operation.volume",
                   severity: "warning",
-                  message: "Operation log has 1029 records",
+                  message: "Operation log has 1260 records",
                   blocking: false,
                   recommendedCommands: ["bwrk operation prune --keep 1000 --json"]
                 }
@@ -660,7 +696,7 @@ function snapshotFixture(
       searchIndexFresh: true,
       sqliteCacheFresh: true,
       operationCount: options.operationCount ?? 1000,
-      warningThreshold: options.warningThreshold ?? 1025
+      warningThreshold: options.warningThreshold ?? 1250
     },
     command: {
       path: options.commandPath ?? "agent finish",

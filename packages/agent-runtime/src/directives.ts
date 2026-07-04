@@ -222,6 +222,8 @@ function uniqueGaps(gaps: readonly EnforcementGap[]): readonly EnforcementGap[] 
 }
 
 function needsDoctorRecovery(snapshot: AgentDirectiveSnapshot): boolean {
+  const diagnostics = recoveryDiagnostics(snapshot);
+  const commandSelfRefreshes = commandSelfRefreshesGeneratedArtifacts(snapshot.command.path);
   const syncNeedsRefresh =
     !snapshot.sync.ok ||
     !snapshot.sync.ledgersFresh ||
@@ -231,9 +233,72 @@ function needsDoctorRecovery(snapshot: AgentDirectiveSnapshot): boolean {
     snapshot.sync.operationCount !== undefined &&
     snapshot.sync.warningThreshold !== undefined &&
     snapshot.sync.operationCount >= snapshot.sync.warningThreshold;
-  return !snapshot.doctor.ok || syncNeedsRefresh || operationNeedsPrune || snapshot.doctor.diagnostics.some((diagnostic) =>
+  const generatedArtifactsNeedRefresh = syncNeedsRefresh && !commandSelfRefreshes;
+  const doctorNeedsRecovery =
+    !snapshot.doctor.ok && (generatedArtifactsNeedRefresh || operationNeedsPrune || diagnostics.length > 0);
+  if (commandEmitsHealthRecovery(snapshot.command.path)) {
+    return doctorNeedsRecovery || generatedArtifactsNeedRefresh || operationNeedsPrune || diagnostics.length > 0;
+  }
+  return diagnostics.length > 0;
+}
+
+function recoveryDiagnostics(snapshot: AgentDirectiveSnapshot): readonly AgentDirectiveSnapshot["doctor"]["diagnostics"][number][] {
+  const diagnostics = snapshot.doctor.diagnostics.filter((diagnostic) =>
     diagnostic.severity === "warning" || diagnostic.severity === "error" || diagnostic.blocking
   );
+  if (commandEmitsHealthRecovery(snapshot.command.path)) {
+    if (commandSelfRefreshesGeneratedArtifacts(snapshot.command.path)) {
+      return diagnostics.filter((diagnostic) => !isGeneratedArtifactStalenessDiagnostic(diagnostic.code));
+    }
+    return diagnostics;
+  }
+  return diagnostics.filter((diagnostic) => !isCloseoutHealthDiagnostic(diagnostic.code));
+}
+
+function commandEmitsHealthRecovery(commandPath: string): boolean {
+  return isCloseoutRelevantCommand(commandPath) || isHealthCommand(commandPath);
+}
+
+function isCloseoutRelevantCommand(commandPath: string): boolean {
+  return [
+    "agent finish",
+    "gate closeout",
+    "session end",
+    "sprint close",
+    "summary compose",
+    "summary show",
+    "work cancel",
+    "work close"
+  ].includes(commandPath);
+}
+
+function isHealthCommand(commandPath: string): boolean {
+  return (
+    commandPath === "doctor" ||
+    commandPath === "prime" ||
+    commandPath === "sync refresh" ||
+    commandPath === "sync status" ||
+    commandPath.startsWith("lock ")
+  );
+}
+
+function commandSelfRefreshesGeneratedArtifacts(commandPath: string): boolean {
+  return [
+    "agent finish",
+    "agent start",
+    "evidence add",
+    "summary compose",
+    "work close",
+    "work verify"
+  ].includes(commandPath);
+}
+
+function isGeneratedArtifactStalenessDiagnostic(code: string): boolean {
+  return code === "ledger.status" || code === "search.index" || code === "cache.sqlite";
+}
+
+function isCloseoutHealthDiagnostic(code: string): boolean {
+  return code === "operation.volume" || isGeneratedArtifactStalenessDiagnostic(code);
 }
 
 function closeoutSummaryRequired(snapshot: AgentDirectiveSnapshot, data: AgentDirectiveAssemblyDataByRegistryId[string]): boolean {

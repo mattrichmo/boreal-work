@@ -797,6 +797,8 @@ function projectRegistryEntryIssues(value: unknown, path: string, schemaId: stri
 
   return [
     ...nonEmptyStringIssue(value.id, `${path}.id`, schemaId),
+    ...projectRegistryIdentityIssues(value.identity, `${path}.identity`, schemaId),
+    ...enumIssue(value.lifecycle, `${path}.lifecycle`, schemaId, ["linked", "paused", "archived", "missing"]),
     ...projectRegistryDisplayIssues(value.display, `${path}.display`, schemaId),
     ...absolutePathIssue(value.projectRoot, `${path}.projectRoot`, schemaId),
     ...absolutePathIssue(value.borealDir, `${path}.borealDir`, schemaId),
@@ -828,6 +830,16 @@ function projectRegistryEntryIssues(value: unknown, path: string, schemaId: stri
     ...memoryLayoutBoundaryIssues(value, path, schemaId),
     ...installRootBoundaryIssues(value, path, schemaId),
     ...(value.skillInstallRoots === undefined ? [] : skillInstallRootBoundaryIssues(value, path, schemaId))
+  ];
+}
+
+function projectRegistryIdentityIssues(value: unknown, path: string, schemaId: string): readonly SchemaValidationIssue[] {
+  if (!isRecord(value)) {
+    return [issue(schemaId, path, "must be an object")];
+  }
+  return [
+    ...enumIssue(value.strategy, `${path}.strategy`, schemaId, ["project-config", "git-remote", "path"]),
+    ...nonEmptyStringIssue(value.fingerprint, `${path}.fingerprint`, schemaId)
   ];
 }
 

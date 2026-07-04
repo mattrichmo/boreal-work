@@ -13,8 +13,17 @@ export interface CliSuccessEnvelope {
   readonly ok: true;
   readonly ledgerSeq: number | null;
   readonly data: unknown;
-  readonly agentDirectives?: readonly AgentDirectiveBundle[];
+  readonly agentDirectives?: AgentDirectiveOutput;
 }
+
+export type JsonOutputProfile = "full" | "brief";
+
+export interface AgentDirectiveUnchangedMarker {
+  readonly unchanged: true;
+  readonly sourceHash: string;
+}
+
+export type AgentDirectiveOutput = readonly AgentDirectiveBundle[] | AgentDirectiveUnchangedMarker;
 
 export interface ResultSpoolingOutput extends CliOutput {
   flush(): Promise<void>;
@@ -24,20 +33,22 @@ export interface ResultSpoolingOptions {
   readonly workspaceRoot: string;
   readonly command: string;
   readonly maxResultSizeChars: number;
+  readonly jsonOutputProfile?: JsonOutputProfile;
+  readonly readOnly?: boolean;
   readonly jsonEnvelopeMetadata?: () => Promise<Record<string, unknown>> | Record<string, unknown>;
 }
 
 export function formatRecord(
   value: unknown,
   json: boolean,
-  options: { readonly agentDirectives?: readonly AgentDirectiveBundle[]; readonly ledgerSeq?: number | null } = {}
+  options: { readonly agentDirectives?: AgentDirectiveOutput; readonly ledgerSeq?: number | null } = {}
 ): string {
   if (json) {
     const envelope: CliSuccessEnvelope = {
       ok: true,
       ledgerSeq: options.ledgerSeq ?? null,
       data: value,
-      ...(options.agentDirectives && options.agentDirectives.length > 0
+      ...(hasAgentDirectiveOutput(options.agentDirectives)
         ? { agentDirectives: options.agentDirectives }
         : {})
     };
@@ -47,6 +58,10 @@ export function formatRecord(
     return `${value}\n`;
   }
   return `${JSON.stringify(value, null, 2)}\n`;
+}
+
+function hasAgentDirectiveOutput(value: AgentDirectiveOutput | undefined): value is AgentDirectiveOutput {
+  return Array.isArray(value) ? value.length > 0 : value !== undefined;
 }
 
 export function createResultSpoolingOutput(output: CliOutput, options: ResultSpoolingOptions): ResultSpoolingOutput {
@@ -60,23 +75,25 @@ export function createResultSpoolingOutput(output: CliOutput, options: ResultSpo
     },
     async flush() {
       const metadata = await options.jsonEnvelopeMetadata?.();
-      if (stdout.length <= options.maxResultSizeChars) {
-        output.write(decorateJsonEnvelope(stdout, metadata));
+      const text = options.jsonOutputProfile === "brief" ? briefJsonEnvelope(stdout, options.readOnly ?? false) : stdout;
+      if (text.length <= options.maxResultSizeChars) {
+        output.write(decorateJsonEnvelope(text, metadata));
         return;
       }
 
       const fullResultPath = resultPath(options.workspaceRoot);
-      await writeTextFileAtomic(fullResultPath, stdout);
+      await writeTextFileAtomic(fullResultPath, text);
       output.write(
         decorateJsonEnvelope(
           formatRecord(
             {
+              ...stableTruncatedVerdictFields(options.command, text),
               truncated: true,
               command: options.command,
               maxResultSizeChars: options.maxResultSizeChars,
               fullResultPath: relative(options.workspaceRoot, fullResultPath),
-              fullResultBytes: Buffer.byteLength(stdout, "utf8"),
-              preview: previewJsonEnvelope(stdout)
+              fullResultBytes: Buffer.byteLength(text, "utf8"),
+              preview: previewJsonEnvelope(text)
             },
             true
           ),
@@ -85,6 +102,113 @@ export function createResultSpoolingOutput(output: CliOutput, options: ResultSpo
       );
     }
   };
+}
+
+function briefJsonEnvelope(text: string, readOnly: boolean): string {
+  try {
+    const parsed = safeParseJson(text, { schemaName: "boreal.cli.output.brief.v1", expectedObject: true });
+    if (!isRecord(parsed) || parsed.ok !== true || !("data" in parsed)) {
+      return text;
+    }
+    const data = readOnly
+      ? { summary: briefJsonSummary(parsed.data) }
+      : { result: briefJsonResult(parsed.data) };
+    return `${JSON.stringify(pickDefined({
+      ok: true,
+      ledgerSeq: parsed.ledgerSeq ?? null,
+      data,
+      agentDirectives: parsed.agentDirectives
+    }), null, 2)}\n`;
+  } catch {
+    return text;
+  }
+}
+
+function briefJsonResult(value: unknown): unknown {
+  if (isRecord(value) && isRecord(value.result)) {
+    return value.result;
+  }
+  return briefJsonSummary(value);
+}
+
+function briefJsonSummary(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    return {
+      count: value.length,
+      items: value.slice(0, 20).map(briefJsonEntity)
+    };
+  }
+  if (!isRecord(value)) {
+    return value;
+  }
+  if (Array.isArray(value.items)) {
+    return pickDefined({
+      schemaVersion: value.schemaVersion,
+      count: value.items.length,
+      items: value.items.slice(0, 20).map(briefJsonEntity)
+    });
+  }
+  if (Array.isArray(value.work)) {
+    return pickDefined({
+      schemaVersion: value.schemaVersion,
+      count: value.work.length,
+      work: value.work.slice(0, 20).map(briefJsonEntity)
+    });
+  }
+  return pickDefined({
+    schemaVersion: value.schemaVersion,
+    id: value.id,
+    kind: value.kind,
+    status: value.status,
+    title: value.title,
+    priority: value.priority,
+    ok: value.ok,
+    active: value.active,
+    action: value.action,
+    workspaceRoot: value.workspaceRoot,
+    subjectId: value.subjectId,
+    subjectType: value.subjectType,
+    evidenceCount: value.evidenceCount,
+    verificationCount: value.verificationCount,
+    activeBlockerIds: value.activeBlockerIds,
+    blockedBy: value.blockedBy,
+    requiredCloseoutGates: value.requiredCloseoutGates,
+    result: isRecord(value.result) ? value.result : undefined,
+    sync: isRecord(value.sync)
+      ? pickDefined({
+          ok: value.sync.ok,
+          vaultOk: value.sync.vaultOk,
+          ledgersOk: value.sync.ledgersOk,
+          searchIndexOk: value.sync.searchIndexOk,
+          gitOk: value.sync.gitOk
+        })
+      : undefined,
+    agent: isRecord(value.agent)
+      ? pickDefined({
+          agentId: value.agent.agentId,
+          activeReservations: isRecord(value.agent.reservations) ? value.agent.reservations.activeCount : undefined,
+          capacityRemaining: isRecord(value.agent.reservations) ? value.agent.reservations.capacityRemaining : undefined,
+          readyWork: isRecord(value.agent.readyWork) ? value.agent.readyWork.claimableCount : undefined
+        })
+      : undefined
+  });
+}
+
+function briefJsonEntity(value: unknown): unknown {
+  if (!isRecord(value)) {
+    return value;
+  }
+  const meta = isRecord(value.meta) ? value.meta : undefined;
+  return pickDefined({
+    id: typeof value.id === "string" ? value.id : meta?.id,
+    kind: value.kind,
+    status: value.status,
+    priority: value.priority,
+    title: value.title,
+    subjectId: value.subjectId,
+    outcome: value.outcome,
+    verdict: value.verdict
+  });
 }
 
 function decorateJsonEnvelope(text: string, metadata: Record<string, unknown> | undefined): string {
@@ -111,7 +235,7 @@ function previewJsonEnvelope(text: string): unknown {
   try {
     const parsed = safeParseJson(text, { schemaName: "boreal.cli.output.v1", expectedObject: true });
     if (isRecord(parsed) && parsed.ok === true && "data" in parsed) {
-      const agentDirectives = previewAgentDirectiveBundles(parsed.agentDirectives);
+      const agentDirectives = previewAgentDirectiveOutput(parsed.agentDirectives);
       if (agentDirectives) {
         return {
           data: previewJsonValue(parsed.data, 0),
@@ -124,6 +248,35 @@ function previewJsonEnvelope(text: string): unknown {
     return text.slice(0, 1_000);
   }
   return text.slice(0, 1_000);
+}
+
+function previewAgentDirectiveOutput(value: unknown): unknown | undefined {
+  if (isRecord(value) && value.unchanged === true && typeof value.sourceHash === "string") {
+    return {
+      unchanged: true,
+      sourceHash: value.sourceHash
+    };
+  }
+  return previewAgentDirectiveBundles(value);
+}
+
+function stableTruncatedVerdictFields(command: string, text: string): Record<string, unknown> {
+  if (command !== "doctor" && command !== "gate closeout") {
+    return {};
+  }
+  try {
+    const parsed = safeParseJson(text, { schemaName: "boreal.cli.output.v1", expectedObject: true });
+    if (isRecord(parsed) && parsed.ok === true && isRecord(parsed.data)) {
+      return pickDefined({
+        ok: parsed.data.ok,
+        fixed: parsed.data.fixed,
+        blockingDiagnosticCodes: parsed.data.blockingDiagnosticCodes
+      });
+    }
+  } catch {
+    return {};
+  }
+  return {};
 }
 
 function previewAgentDirectiveBundles(value: unknown): unknown | undefined {

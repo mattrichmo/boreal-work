@@ -77,13 +77,13 @@ Sprint activation constraints:
 
 ## Registry Namespace
 
-The implemented namespace is `bwrk registry <action>`. The backing document contract is `boreal.project-registry.v1` with schema ID `https://boreal.work/schemas/projects/project-registry.schema.json`.
+The implemented namespace is `bwrk registry <action>`. The backing document contract is `boreal.project-registry.v2` with schema ID `https://boreal.work/schemas/projects/project-registry.schema.json`.
 
 | Command | Purpose | JSON schema | Result cap | Lock | Human output |
 | --- | --- | --- | --- | --- | --- |
 | `registry list` | List known Boreal projects. | `boreal.cli.registry.list.v1` | 200 projects | none | table |
 | `registry add --workspace <path>` | Add an explicit Boreal workspace to the local registry. | `boreal.cli.registry.add.v1` | compact only | registry | record |
-| `registry remove <project-id>` | Remove a workspace from the local registry without deleting project files. | `boreal.cli.registry.remove.v1` | compact only | registry | record |
+| `registry remove <project-id>` | Archive a workspace in the local registry without deleting project files; `--purge` removes the row. | `boreal.cli.registry.remove.v1` | compact only | registry | record |
 | `registry import-setup` | Import the selected workspace `.boreal/project.json` into the local registry idempotently. | `boreal.cli.registry.import-setup.v1` | compact only | state+registry | record |
 | `registry doctor` | Validate registered roots, memory roots, runtime files, install roots, and project setup drift. | `boreal.cli.registry.doctor.v1` | 200 findings | none | grouped findings |
 

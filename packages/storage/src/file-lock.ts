@@ -40,6 +40,8 @@ export interface FileLockInspection {
   readonly lockDir: string;
   readonly owner?: LockOwner;
   readonly ageMs?: number;
+  readonly ownerPidAlive?: boolean;
+  readonly staleReason?: "owner_pid_exited" | "owner_heartbeat_expired" | "lock_mtime_expired";
 }
 
 export async function withFileLock<T>(
@@ -72,15 +74,17 @@ export async function inspectFileLock(
   }
 
   const owner = await readLockOwner(lockDir);
-  const createdAt = owner ? Date.parse(owner.createdAt) : Number.NaN;
-  const freshestAt = owner ? Date.parse(owner.lastHeartbeatAt ?? owner.createdAt) : createdAt;
+  const stale = await assessLockStaleness(lockDir, owner, options.staleAfterMs);
+  const freshestAt = owner ? Date.parse(owner.lastHeartbeatAt ?? owner.createdAt) : Number.NaN;
   const ageMs = Number.isFinite(freshestAt) ? Date.now() - freshestAt : Date.now() - stats.mtimeMs;
   return {
     exists: true,
-    stale: await isLockStale(lockDir, owner, options.staleAfterMs),
+    stale: stale.stale,
     lockDir,
     owner,
-    ageMs
+    ageMs,
+    ownerPidAlive: stale.ownerPidAlive,
+    staleReason: stale.staleReason
   };
 }
 
@@ -158,7 +162,7 @@ async function removeStaleFileLock(
     if (expectedOwner && !sameLockOwner(inspection.owner, expectedOwner)) {
       return { removed: false, inspection };
     }
-    if (inspection.stale && inspection.owner) {
+    if (inspection.stale && inspection.owner && inspection.staleReason !== "owner_pid_exited") {
       await sleep(Math.max(options.retryDelayMs, Math.min(50, options.staleAfterMs)));
       const refreshed = await inspectFileLock(lockDir, options);
       if (!refreshed.exists) {
@@ -338,16 +342,39 @@ async function readLockOwner(lockDir: string): Promise<LockOwner | undefined> {
 }
 
 async function isLockStale(lockDir: string, owner: LockOwner | undefined, staleAfterMs: number): Promise<boolean> {
-  const freshestAt = owner ? Date.parse(owner.lastHeartbeatAt ?? owner.createdAt) : Number.NaN;
-  if (Number.isFinite(freshestAt)) {
-    return Date.now() - freshestAt > staleAfterMs;
+  return (await assessLockStaleness(lockDir, owner, staleAfterMs)).stale;
+}
+
+async function assessLockStaleness(
+  lockDir: string,
+  owner: LockOwner | undefined,
+  staleAfterMs: number
+): Promise<{
+  readonly stale: boolean;
+  readonly ownerPidAlive?: boolean;
+  readonly staleReason?: FileLockInspection["staleReason"];
+}> {
+  if (owner) {
+    const ownerPidAlive = owner.hostname === hostname() ? pidExists(owner.pid) : undefined;
+    if (ownerPidAlive === false) {
+      return { stale: true, ownerPidAlive, staleReason: "owner_pid_exited" };
+    }
+
+    const freshestAt = Date.parse(owner.lastHeartbeatAt ?? owner.createdAt);
+    if (Number.isFinite(freshestAt) && Date.now() - freshestAt > staleAfterMs) {
+      return { stale: true, ownerPidAlive, staleReason: "owner_heartbeat_expired" };
+    }
+    return { stale: false, ownerPidAlive };
   }
 
   const stats = await stat(lockDir).catch(() => undefined);
   if (!stats) {
-    return false;
+    return { stale: false };
   }
-  return Date.now() - stats.mtimeMs > staleAfterMs;
+  if (Date.now() - stats.mtimeMs > staleAfterMs) {
+    return { stale: true, staleReason: "lock_mtime_expired" };
+  }
+  return { stale: false };
 }
 
 function ownerPath(lockDir: string): string {
@@ -370,6 +397,24 @@ function isLockOwner(value: unknown): value is LockOwner {
 
 function isNodeError(error: unknown): error is NodeJS.ErrnoException {
   return typeof error === "object" && error !== null && "code" in error;
+}
+
+function pidExists(pid: number): boolean {
+  if (!Number.isInteger(pid) || pid <= 0) {
+    return false;
+  }
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    if (isNodeError(error) && error.code === "ESRCH") {
+      return false;
+    }
+    if (isNodeError(error) && error.code === "EPERM") {
+      return true;
+    }
+    return false;
+  }
 }
 
 function sleep(ms: number): Promise<void> {

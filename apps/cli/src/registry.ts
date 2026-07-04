@@ -1,25 +1,33 @@
+import { execFile } from "node:child_process";
 import { existsSync } from "node:fs";
 import { stat } from "node:fs/promises";
-import { basename, join, resolve } from "node:path";
+import { basename, isAbsolute, join, relative, resolve } from "node:path";
+import { promisify } from "node:util";
 
 import {
   BorealError,
-  hashContent,
+  deriveProjectRegistryIdentity,
+  LEGACY_PROJECT_REGISTRY_SCHEMA_VERSIONS,
   normalizeLabels,
   normalizeMachineString,
   nowIso,
   PROJECT_REGISTRY_SCHEMA_VERSION,
+  projectRegistryEntryIdFromIdentity,
+  projectRegistryIdentitiesEquivalent,
   projectRegistryDocumentSchemaIssues,
   readJsonFile,
   resolveProjectRegistryPaths,
   type ProjectRegistryDocument,
   type ProjectRegistryEntry,
+  type ProjectRegistryIdentity,
   type ProjectRegistryStorage
 } from "@boreal/core";
 import { DEFAULT_FILE_LOCK_OPTIONS, withFileLock, writeTextFileAtomic } from "@boreal/storage";
 
-import { readProjectSetupConfig, skillInstallRootConfig, type ProjectSetupConfig } from "./project-setup.js";
+import { readProjectSetupConfigFile, skillInstallRootConfig, type ProjectSetupConfig } from "./project-setup.js";
 import { resolveRepoBwrkPin } from "./repo-binary-pin.js";
+
+const execFileAsync = promisify(execFile);
 
 export interface RegistryListResult {
   readonly storage: ProjectRegistryStorage;
@@ -35,6 +43,8 @@ export interface RegistryAddResult extends RegistryListResult {
 
 export interface RegistryRemoveResult extends RegistryListResult {
   readonly removed: true;
+  readonly archived: boolean;
+  readonly purged: boolean;
   readonly entry: ProjectRegistryEntry;
 }
 
@@ -74,6 +84,10 @@ export interface RegistryAddOptions extends RegistryCommandOptions {
   readonly labels?: readonly string[];
 }
 
+export interface RegistryRemoveOptions extends RegistryCommandOptions {
+  readonly purge?: boolean;
+}
+
 export async function listProjectRegistry(options: RegistryCommandOptions = {}): Promise<RegistryListResult> {
   const storage = registryStorage(options);
   const document = await readRegistryDocument(storage);
@@ -84,17 +98,24 @@ export async function addProjectRegistryEntry(options: RegistryAddOptions): Prom
   const storage = registryStorage(options);
   const workspaceRoot = resolve(options.workspaceRoot);
   const config = await readTargetProjectSetup(workspaceRoot);
-  const entry = registryEntryFromConfig(config, {
+  const generatedEntry = await registryEntryFromConfig(config, workspaceRoot, {
     name: options.name,
     labels: options.labels ?? []
   });
 
   return mutateRegistry<RegistryAddResult>(storage, (document) => {
+    const existing = findReusableRegistryEntry(document.entries, generatedEntry);
+    const entry = linkedRegistryEntry(generatedEntry, existing, {
+      preserveDisplay: false,
+      nameProvided: Boolean(options.name),
+      labelsProvided: Boolean(options.labels && options.labels.length > 0)
+    });
     const entries = document.entries.filter((candidate) => candidate.id !== entry.id);
-    const replaced = entries.length !== document.entries.length;
+    const replaced = existing !== undefined || entries.length !== document.entries.length;
+    const collisionSafeEntry = existing ? entry : withCollisionSafeId(entry, entries);
     const nextDocument = withRegistryUpdate(storage, {
       ...document,
-      entries: [...entries, entry].sort(compareRegistryEntries)
+      entries: [...entries, collisionSafeEntry].sort(compareRegistryEntries)
     });
     return {
       document: nextDocument,
@@ -102,7 +123,7 @@ export async function addProjectRegistryEntry(options: RegistryAddOptions): Prom
         ...registryListResult(nextDocument),
         added: !replaced,
         replaced,
-        entry
+        entry: collisionSafeEntry
       }
     };
   });
@@ -112,21 +133,18 @@ export async function importProjectSetupRegistryEntry(options: RegistryAddOption
   const storage = registryStorage(options);
   const workspaceRoot = resolve(options.workspaceRoot);
   const config = await readTargetProjectSetup(workspaceRoot);
-  const generatedEntry = registryEntryFromConfig(config, {
+  const generatedEntry = await registryEntryFromConfig(config, workspaceRoot, {
     name: options.name,
     labels: options.labels ?? []
   });
 
   return mutateRegistry<RegistryImportSetupResult>(storage, (document) => {
-    const existing = document.entries.find((candidate) => candidate.id === generatedEntry.id);
-    const entry = {
-      ...generatedEntry,
-      display: {
-        name: options.name ? generatedEntry.display.name : existing?.display.name ?? generatedEntry.display.name,
-        labels: options.labels && options.labels.length > 0 ? generatedEntry.display.labels : existing?.display.labels ?? generatedEntry.display.labels
-      },
-      addedAt: existing?.addedAt ?? generatedEntry.addedAt
-    };
+    const existing = findReusableRegistryEntry(document.entries, generatedEntry);
+    const entry = linkedRegistryEntry(generatedEntry, existing, {
+      preserveDisplay: true,
+      nameProvided: Boolean(options.name),
+      labelsProvided: Boolean(options.labels && options.labels.length > 0)
+    });
 
     if (existing && registryEntriesEquivalent(existing, entry)) {
       return {
@@ -143,10 +161,11 @@ export async function importProjectSetupRegistryEntry(options: RegistryAddOption
     }
 
     const entries = document.entries.filter((candidate) => candidate.id !== entry.id);
-    const replaced = entries.length !== document.entries.length;
+    const replaced = existing !== undefined || entries.length !== document.entries.length;
+    const collisionSafeEntry = existing ? entry : withCollisionSafeId(entry, entries);
     const nextDocument = withRegistryUpdate(storage, {
       ...document,
-      entries: [...entries, entry].sort(compareRegistryEntries)
+      entries: [...entries, collisionSafeEntry].sort(compareRegistryEntries)
     });
     return {
       document: nextDocument,
@@ -156,7 +175,7 @@ export async function importProjectSetupRegistryEntry(options: RegistryAddOption
         changed: true,
         added: !replaced,
         replaced,
-        entry
+        entry: collisionSafeEntry
       }
     };
   });
@@ -164,7 +183,7 @@ export async function importProjectSetupRegistryEntry(options: RegistryAddOption
 
 export async function removeProjectRegistryEntry(
   projectId: string,
-  options: RegistryCommandOptions = {}
+  options: RegistryRemoveOptions = {}
 ): Promise<RegistryRemoveResult> {
   const storage = registryStorage(options);
   return mutateRegistry(storage, (document) => {
@@ -172,16 +191,26 @@ export async function removeProjectRegistryEntry(
     if (!entry) {
       throw new BorealError("BOREAL_NOT_FOUND", "Registry entry not found", { projectId });
     }
+    const archivedEntry = {
+      ...entry,
+      lifecycle: "archived" as const,
+      updatedAt: nowIso()
+    };
+    const nextEntries = options.purge
+      ? document.entries.filter((candidate) => candidate.id !== projectId)
+      : document.entries.map((candidate) => candidate.id === projectId ? archivedEntry : candidate);
     const nextDocument = withRegistryUpdate(storage, {
       ...document,
-      entries: document.entries.filter((candidate) => candidate.id !== projectId)
+      entries: nextEntries.sort(compareRegistryEntries)
     });
     return {
       document: nextDocument,
       result: {
         ...registryListResult(nextDocument),
         removed: true,
-        entry
+        archived: !options.purge,
+        purged: Boolean(options.purge),
+        entry: options.purge ? entry : archivedEntry
       }
     };
   });
@@ -259,8 +288,9 @@ async function readRegistryDocument(storage: ProjectRegistryStorage): Promise<Pr
     expectedObject: true,
     maxBytes: 2 * 1024 * 1024
   });
-  assertValidRegistryDocument(parsed, storage.registryFile);
-  return parsed as ProjectRegistryDocument;
+  const migrated = migrateRegistryDocument(parsed, storage);
+  assertValidRegistryDocument(migrated, storage.registryFile);
+  return migrated;
 }
 
 function emptyRegistryDocument(storage: ProjectRegistryStorage): ProjectRegistryDocument {
@@ -289,6 +319,47 @@ function assertValidRegistryDocument(value: unknown, registryFile: string): void
   }
 }
 
+function migrateRegistryDocument(value: unknown, storage: ProjectRegistryStorage): ProjectRegistryDocument {
+  if (!isRecord(value)) {
+    return value as ProjectRegistryDocument;
+  }
+
+  if (value.schemaVersion === PROJECT_REGISTRY_SCHEMA_VERSION) {
+    return value as unknown as ProjectRegistryDocument;
+  }
+
+  if (!LEGACY_PROJECT_REGISTRY_SCHEMA_VERSIONS.includes(value.schemaVersion as (typeof LEGACY_PROJECT_REGISTRY_SCHEMA_VERSIONS)[number])) {
+    return value as unknown as ProjectRegistryDocument;
+  }
+
+  const entries = Array.isArray(value.entries)
+    ? value.entries.map((entry) => migrateRegistryEntry(entry))
+    : value.entries;
+  return {
+    ...value,
+    schemaVersion: PROJECT_REGISTRY_SCHEMA_VERSION,
+    storage: isRecord(value.storage) ? value.storage : storage,
+    entries
+  } as ProjectRegistryDocument;
+}
+
+function migrateRegistryEntry(value: unknown): unknown {
+  if (!isRecord(value)) {
+    return value;
+  }
+  const projectRoot = typeof value.projectRoot === "string" ? value.projectRoot : "";
+  const identity = isProjectRegistryIdentity(value.identity)
+    ? value.identity
+    : deriveProjectRegistryIdentity({ projectRoot });
+  const lifecycle = isProjectRegistryLifecycle(value.lifecycle) ? value.lifecycle : "linked";
+  return {
+    ...value,
+    id: typeof value.id === "string" && value.id.length > 0 ? value.id : projectRegistryEntryIdFromIdentity(identity),
+    identity,
+    lifecycle
+  };
+}
+
 async function readTargetProjectSetup(workspaceRoot: string): Promise<ProjectSetupConfig> {
   const stateFile = join(workspaceRoot, ".boreal", "runtime", "state.json");
   if (!existsSync(stateFile)) {
@@ -297,7 +368,7 @@ async function readTargetProjectSetup(workspaceRoot: string): Promise<ProjectSet
       stateFile
     });
   }
-  const config = await readProjectSetupConfig(workspaceRoot);
+  const config = await readProjectSetupConfigFile(workspaceRoot);
   if (!config) {
     throw new BorealError("BOREAL_INVALID_INPUT", "Registry add requires .boreal/project.json project setup metadata", {
       workspaceRoot,
@@ -307,16 +378,26 @@ async function readTargetProjectSetup(workspaceRoot: string): Promise<ProjectSet
   return config;
 }
 
-function registryEntryFromConfig(
+async function registryEntryFromConfig(
   config: ProjectSetupConfig,
+  workspaceRoot: string,
   options: { readonly name?: string; readonly labels: readonly string[] }
-): ProjectRegistryEntry {
-  const projectRoot = resolve(config.projectRoot);
-  const memoryRoot = resolve(config.memoryRoot);
+): Promise<ProjectRegistryEntry> {
+  const projectRoot = resolve(workspaceRoot);
+  const configuredProjectRoot = resolve(config.projectRoot);
+  const memoryRoot = rebaseConfiguredPath(configuredProjectRoot, projectRoot, config.memoryRoot);
+  const installRoot = rebaseConfiguredPath(configuredProjectRoot, projectRoot, config.installRoot);
   const bwrkPin = resolveRepoBwrkPin(projectRoot, { requireExisting: true });
+  const identity = deriveProjectRegistryIdentity({
+    projectRoot,
+    projectConfig: config as unknown as Readonly<Record<string, unknown>>,
+    gitRemote: await readProjectGitRemote(projectRoot)
+  });
   const now = nowIso();
   return {
-    id: registryEntryId(projectRoot),
+    id: projectRegistryEntryIdFromIdentity(identity),
+    identity,
+    lifecycle: "linked",
     display: {
       name: normalizeMachineString(options.name ?? basename(projectRoot), "registry project name"),
       labels: normalizeLabels(options.labels)
@@ -331,9 +412,9 @@ function registryEntryFromConfig(
     memoryLayout: config.memoryLayout,
     memoryGitMode: config.memoryGitMode,
     memoryRemote: config.memoryRemote,
-    installRoot: resolve(config.installRoot),
+    installRoot,
     bwrkPin,
-    skillInstallRoots: config.skillInstallRoots ?? config.skillTargets.map((target) => skillInstallRootConfig(projectRoot, resolve(config.installRoot), target)),
+    skillInstallRoots: registrySkillInstallRoots(config, configuredProjectRoot, projectRoot, installRoot),
     skillTargets: config.skillTargets,
     folderScoped: config.folderScoped,
     source: "project-setup",
@@ -343,11 +424,104 @@ function registryEntryFromConfig(
   };
 }
 
-function registryEntryId(projectRoot: string): string {
-  return `project_${hashContent({ projectRoot: resolve(projectRoot) }).replace("sha256:", "").slice(0, 16)}`;
+function registrySkillInstallRoots(
+  config: ProjectSetupConfig,
+  configuredProjectRoot: string,
+  projectRoot: string,
+  installRoot: string
+): ProjectRegistryEntry["skillInstallRoots"] {
+  if (!config.skillInstallRoots) {
+    return config.skillTargets.map((target) => skillInstallRootConfig(projectRoot, installRoot, target));
+  }
+  return config.skillInstallRoots.map((root) => ({
+    target: root.target,
+    installRoot: rebaseConfiguredPath(configuredProjectRoot, projectRoot, root.installRoot),
+    skillRoot: rebaseConfiguredPath(configuredProjectRoot, projectRoot, root.skillRoot)
+  }));
+}
+
+function rebaseConfiguredPath(configuredProjectRoot: string, projectRoot: string, path: string): string {
+  const absolute = resolve(path);
+  const relativePath = relative(configuredProjectRoot, absolute);
+  if (relativePath === "") {
+    return projectRoot;
+  }
+  if (!relativePath.startsWith("..") && !isAbsolute(relativePath)) {
+    return resolve(projectRoot, relativePath);
+  }
+  return absolute;
+}
+
+async function readProjectGitRemote(projectRoot: string): Promise<string | undefined> {
+  try {
+    const { stdout } = await execFileAsync("git", ["-C", projectRoot, "config", "--get", "remote.origin.url"], { timeout: 5_000 });
+    const remote = stdout.trim();
+    return remote.length > 0 ? remote : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function linkedRegistryEntry(
+  generatedEntry: ProjectRegistryEntry,
+  existing: ProjectRegistryEntry | undefined,
+  options: {
+    readonly preserveDisplay: boolean;
+    readonly nameProvided: boolean;
+    readonly labelsProvided: boolean;
+  }
+): ProjectRegistryEntry {
+  const now = nowIso();
+  return {
+    ...generatedEntry,
+    id: existing?.id ?? generatedEntry.id,
+    display: {
+      name: options.preserveDisplay && !options.nameProvided ? existing?.display.name ?? generatedEntry.display.name : generatedEntry.display.name,
+      labels: options.preserveDisplay && !options.labelsProvided ? existing?.display.labels ?? generatedEntry.display.labels : generatedEntry.display.labels
+    },
+    lifecycle: "linked",
+    addedAt: existing?.addedAt ?? generatedEntry.addedAt,
+    updatedAt: now,
+    lastSeenAt: now
+  };
+}
+
+function findReusableRegistryEntry(
+  entries: readonly ProjectRegistryEntry[],
+  generatedEntry: ProjectRegistryEntry
+): ProjectRegistryEntry | undefined {
+  return entries.find((entry) => projectRegistryIdentitiesEquivalent(entry.identity, generatedEntry.identity))
+    ?? entries.find((entry) => resolve(entry.projectRoot) === resolve(generatedEntry.projectRoot));
+}
+
+function withCollisionSafeId(entry: ProjectRegistryEntry, existingEntries: readonly ProjectRegistryEntry[]): ProjectRegistryEntry {
+  let next = entry;
+  let salt = 1;
+  while (
+    existingEntries.some((candidate) =>
+      candidate.id === next.id && !projectRegistryIdentitiesEquivalent(candidate.identity, next.identity)
+    )
+  ) {
+    next = {
+      ...entry,
+      id: projectRegistryEntryIdFromIdentity(entry.identity, `collision-${salt}`)
+    };
+    salt += 1;
+  }
+  return next;
 }
 
 async function inspectRegistryEntry(entry: ProjectRegistryEntry): Promise<readonly RegistryDoctorFinding[]> {
+  if (entry.lifecycle === "archived") {
+    return [{
+      code: "registry.lifecycle_archived",
+      severity: "ok",
+      message: "Registry entry is archived and retained for reference resolution",
+      projectId: entry.id,
+      path: entry.projectRoot
+    }];
+  }
+
   const findings: RegistryDoctorFinding[] = [
     await pathFinding(entry, "registry.project_root", entry.projectRoot, "directory", "Project root exists"),
     await pathFinding(entry, "registry.boreal_dir", entry.borealDir, "directory", "Boreal metadata directory exists"),
@@ -361,7 +535,7 @@ async function inspectRegistryEntry(entry: ProjectRegistryEntry): Promise<readon
   findings.push(installRoot.severity === "error" ? { ...installRoot, severity: "warning" } : installRoot);
 
   try {
-    const config = await readProjectSetupConfig(entry.projectRoot);
+    const config = await readProjectSetupConfigFile(entry.projectRoot);
     if (!config) {
       findings.push({
         code: "registry.project_setup_missing",
@@ -388,14 +562,17 @@ async function inspectRegistryEntry(entry: ProjectRegistryEntry): Promise<readon
 
 function configMismatchFindings(entry: ProjectRegistryEntry, config: ProjectSetupConfig): readonly RegistryDoctorFinding[] {
   const findings: RegistryDoctorFinding[] = [];
-  if (resolve(config.memoryRoot) !== resolve(entry.memoryRoot)) {
+  const configuredProjectRoot = resolve(config.projectRoot);
+  const expectedMemoryRoot = rebaseConfiguredPath(configuredProjectRoot, entry.projectRoot, config.memoryRoot);
+  const expectedInstallRoot = rebaseConfiguredPath(configuredProjectRoot, entry.projectRoot, config.installRoot);
+  if (resolve(expectedMemoryRoot) !== resolve(entry.memoryRoot)) {
     findings.push({
       code: "registry.memory_root_mismatch",
       severity: "error",
       message: "Registered memory root does not match project setup config",
       projectId: entry.id,
       path: entry.memoryRoot,
-      details: { expected: entry.memoryRoot, actual: config.memoryRoot }
+      details: { expected: entry.memoryRoot, actual: expectedMemoryRoot }
     });
   }
   if (config.memoryLayout !== entry.memoryLayout) {
@@ -416,14 +593,14 @@ function configMismatchFindings(entry: ProjectRegistryEntry, config: ProjectSetu
       details: { expected: entry.memoryGitMode, actual: config.memoryGitMode }
     });
   }
-  if (resolve(config.installRoot) !== resolve(entry.installRoot)) {
+  if (resolve(expectedInstallRoot) !== resolve(entry.installRoot)) {
     findings.push({
       code: "registry.install_root_mismatch",
       severity: "warning",
       message: "Registered install root does not match project setup config",
       projectId: entry.id,
       path: entry.installRoot,
-      details: { expected: entry.installRoot, actual: config.installRoot }
+      details: { expected: entry.installRoot, actual: expectedInstallRoot }
     });
   }
   const expectedBwrkPin = resolveRepoBwrkPin(entry.projectRoot, { requireExisting: true });
@@ -437,7 +614,7 @@ function configMismatchFindings(entry: ProjectRegistryEntry, config: ProjectSetu
       details: { expected: expectedBwrkPin, actual: entry.bwrkPin }
     });
   }
-  const expectedSkillRoots = config.skillInstallRoots ?? config.skillTargets.map((target) => skillInstallRootConfig(entry.projectRoot, config.installRoot, target));
+  const expectedSkillRoots = registrySkillInstallRoots(config, configuredProjectRoot, entry.projectRoot, expectedInstallRoot) ?? [];
   const actualSkillRoots = entry.skillInstallRoots ?? [];
   for (const expected of expectedSkillRoots) {
     const actual = actualSkillRoots.find((root) => root.target === expected.target);
@@ -517,6 +694,23 @@ function registryEntriesEquivalent(left: ProjectRegistryEntry, right: ProjectReg
 function registryEntryStableFields(entry: ProjectRegistryEntry): Omit<ProjectRegistryEntry, "addedAt" | "updatedAt" | "lastSeenAt"> {
   const { addedAt: _addedAt, updatedAt: _updatedAt, lastSeenAt: _lastSeenAt, ...stable } = entry;
   return stable;
+}
+
+function isProjectRegistryIdentity(value: unknown): value is ProjectRegistryIdentity {
+  return (
+    isRecord(value) &&
+    (value.strategy === "project-config" || value.strategy === "git-remote" || value.strategy === "path") &&
+    typeof value.fingerprint === "string" &&
+    value.fingerprint.length > 0
+  );
+}
+
+function isProjectRegistryLifecycle(value: unknown): value is ProjectRegistryEntry["lifecycle"] {
+  return value === "linked" || value === "paused" || value === "archived" || value === "missing";
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function isNodeError(error: unknown): error is NodeJS.ErrnoException {

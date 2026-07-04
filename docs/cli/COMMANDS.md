@@ -20,17 +20,20 @@ Global flags:
 
 - `--workspace <path>`: use this exact path as the Boreal workspace root.
 - `--json`: emit a stable JSON envelope for automation.
+- `--brief`: emit a compact JSON envelope profile for automation. This implies `--json`.
 - `--actor <id>`: override the actor ID stored on new records.
 - `--actor-kind human|agent|system`: override the actor kind. Defaults to `human`.
 - `--session <id>`: group local command operation records under a session ID. Defaults to `BOREAL_SESSION_ID` or `local`.
 - `--help`: show root or group help.
 - `--version`: print the CLI version and exit.
 
-In JSON mode, successful commands write one JSON envelope to stdout, errors write one JSON envelope to stderr, and unexpected raw stdout writes are redirected to stderr so stdout stays parseable. If a JSON result exceeds the command's `behavior.maxResultSizeChars`, Boreal writes the full envelope under `.boreal/results/` and returns compact data with `truncated`, `preview`, `fullResultPath`, and `fullResultBytes`.
+In JSON mode, successful commands write one JSON envelope to stdout, errors write one JSON envelope to stderr, and unexpected raw stdout writes are redirected to stderr so stdout stays parseable. Command metadata declares `behavior.maxResultSizeChars` and `behavior.maxResultLines` budgets for JSON stdout. If a JSON result exceeds the byte budget, Boreal writes the full envelope under `.boreal/results/` and returns compact data with `truncated`, `preview`, `fullResultPath`, and `fullResultBytes`; runtime tests enforce representative byte and line budgets in CI.
 
 Output modes:
 
 - JSON mode is the stable automation contract. `--json` always returns a schema-backed JSON envelope and wins over human view flags.
+- Brief JSON mode is the compact automation profile. `--brief` implies JSON output; mutating commands return the compact `data.result` mutation verdict, while read commands return `data.summary` with stable identifiers, statuses, counts, and short row summaries. Agent directives are included only when the command emits them.
+- Agent directive bundles are deduped per `--session`: the first source hash emits the full bundle, and repeated unchanged state in the same session emits `agentDirectives: { "unchanged": true, "sourceHash": "sha256:..." }`.
 - Plain mode is the default human output. It uses compact tables, records, or lines and avoids richer dashboard grouping unless requested.
 - Dashboard mode is opt-in human rendering for commands that accept `--view dashboard`, such as `work next`, `agent status`, `sync status`, `doctor`, `lock inspect`, and `workflows list`. `--view dashboard` changes only human rendering; JSON mode still returns the same schema-backed payload.
 - The browser console is a separate local app over CLI JSON contracts. Its global data endpoint is `bwrk dashboard global --json`; it should not be confused with `--view dashboard`, which is terminal-only human formatting.
@@ -180,6 +183,7 @@ JSON `data` shape:
         "requiresLock": "state",
         "supportsExplain": false,
         "maxResultSizeChars": 50000,
+        "maxResultLines": 1250,
         "jsonOutputSchema": "boreal.cli.work.reserve.v1",
         "humanOutputKind": "record",
         "examples": ["bwrk work reserve bw_work_example --agent agent-a --ttl 2h --json"]
@@ -395,7 +399,7 @@ Runs the first-run project installer. In a TTY, bare `bwrk install` opens the se
 bwrk install codex [--install-root <dir>] [--dry-run] [--interactive] [--json]
 ```
 
-Plans or installs Boreal skill adapters for Codex. Defaults to the configured `.agents/skills` root when project setup exists, otherwise `.agents` under the selected workspace. Both `.agents` and `.agents/skills` are accepted; the actual scanned skill root is reported as `skillRoot`. Installed skills include Codex UI metadata in `agents/openai.yaml`. Use `--dry-run` before writing. Use `--interactive` in a TTY to review the install plan before files are written.
+Plans or installs Boreal skill adapters for Codex. Defaults to the configured `.agents/skills` root when project setup exists, otherwise `.agents` under the selected workspace. Both `.agents` and `.agents/skills` are accepted; the actual scanned skill root is reported as `skillRoot`. Installed skills include Codex UI metadata in `agents/openai.yaml` and reference workflows by canonical IDs that resolve through `bwrk workflows show <ref>`. Use `--dry-run` before writing. Use `--interactive` in a TTY to review the install plan before files are written.
 
 ## `install claude`
 
@@ -403,7 +407,7 @@ Plans or installs Boreal skill adapters for Codex. Defaults to the configured `.
 bwrk install claude [--install-root <dir>] [--dry-run] [--interactive] [--json]
 ```
 
-Plans or installs Boreal skill adapters for Claude. Defaults to a configured `.claude/skills` root when project setup uses one, otherwise `.claude` under the selected workspace. Both `.claude` and `.claude/skills` are accepted; the actual scanned skill root is reported as `skillRoot`. Codex-specific `agents/openai.yaml` files are omitted. Use `--dry-run` before writing. Use `--interactive` in a TTY to review the install plan before files are written.
+Plans or installs Boreal skill adapters for Claude. Defaults to a configured `.claude/skills` root when project setup uses one, otherwise `.claude` under the selected workspace. Both `.claude` and `.claude/skills` are accepted; the actual scanned skill root is reported as `skillRoot`. Codex-specific `agents/openai.yaml` files are omitted, and workflow references remain canonical IDs resolvable by `bwrk workflows show <ref>`. Use `--dry-run` before writing. Use `--interactive` in a TTY to review the install plan before files are written.
 
 ## `install skills`
 
@@ -411,7 +415,7 @@ Plans or installs Boreal skill adapters for Claude. Defaults to a configured `.c
 bwrk install skills [--install-root <dir>] [--dry-run] [--interactive] [--json]
 ```
 
-Plans or installs generic namespaced Boreal skill folders into a folder-scoped skill root. Defaults to the configured install root when project setup exists, otherwise `.agents/skills` under the selected workspace. Use `--interactive` in a TTY to review the install plan before files are written.
+Plans or installs generic namespaced Boreal skill folders into a folder-scoped skill root. Defaults to the configured install root when project setup exists, otherwise `.agents/skills` under the selected workspace. Workflow references are installed as canonical IDs that `bwrk workflows show <ref>` accepts verbatim. Use `--interactive` in a TTY to review the install plan before files are written.
 
 ## `install status`
 
@@ -435,15 +439,15 @@ Lists explicitly registered Boreal projects from the machine-local registry. It 
 bwrk registry add --workspace <path> [--registry-root <dir>] [--name <text>] [--label <label>...] [--json]
 ```
 
-Adds or updates one explicit Boreal workspace in the machine-local registry. The target workspace must be initialized and must have `.boreal/project.json`; the stored row includes project root, `.boreal` root, runtime state file, project setup config, memory root, memory `.boreal` root, memory layout, memory Git mode, install root, skill targets, folder scope, display metadata, and timestamps.
+Adds or updates one explicit Boreal workspace in the machine-local registry. The target workspace must be initialized and must have `.boreal/project.json`; the stored row includes stable project identity, lifecycle, project root, `.boreal` root, runtime state file, project setup config, memory root, memory `.boreal` root, memory layout, memory Git mode, install root, skill targets, folder scope, display metadata, and timestamps.
 
 ## `registry remove`
 
 ```bash
-bwrk registry remove <project-id> [--registry-root <dir>] [--json]
+bwrk registry remove <project-id> [--registry-root <dir>] [--purge] [--json]
 ```
 
-Removes only the registry row for a project. It does not delete project files, memory files, or skill installs.
+Archives the registry row for a project by default so references can still resolve if it is relinked later. With `--purge`, removes only the registry row. It does not delete project files, memory files, or skill installs.
 
 ## `registry import-setup`
 
@@ -510,7 +514,7 @@ bwrk dashboard global --limit 10 --json
 ## `global`
 
 ```bash
-bwrk global [link <path>|unlink <project-id>] [--web] [--json] [--mouse] [--refresh-ms <ms>] [--host <host>] [--port <n>] [--no-open] [--mode live|fixture] [--live-cache-ttl-ms <ms>] [--allow-fixture-fallback] [--name <text>] [--label <label>...] [--registry-root <dir>]
+bwrk global [link <path>|unlink <project-id>] [--web] [--json] [--mouse] [--refresh-ms <ms>] [--host <host>] [--port <n>] [--no-open] [--mode live|fixture] [--live-cache-ttl-ms <ms>] [--allow-fixture-fallback] [--name <text>] [--label <label>...] [--registry-root <dir>] [--purge]
 ```
 
 The machine-level **global workspace**: a real Boreal workspace (its own to-dos, plans, tasks, sprints) that lives at the registry root, plus a monitor over the projects you've linked. It is not tied to any repo.
@@ -534,10 +538,10 @@ Links a project to your global workspace so the global dashboard tracks it (mach
 ## `unlink`
 
 ```bash
-bwrk unlink <project-id> [--registry-root <dir>] [--json]
+bwrk unlink <project-id> [--registry-root <dir>] [--purge] [--json]
 ```
 
-Stops tracking a project in your global workspace (removes it from the machine-local registry). Equivalent to `bwrk registry remove`. Also available as `bwrk global unlink <project-id>`.
+Stops tracking a project in your global workspace by archiving it in the machine-local registry. Equivalent to `bwrk registry remove`. Also available as `bwrk global unlink <project-id>`.
 
 ## `daemon status`
 
@@ -608,10 +612,12 @@ Computes sprint planning and closeout metrics from dependency-scoped work. The p
 ## `sprint close`
 
 ```bash
-bwrk sprint close [<sprint-ref>] --reason <text> [--capacity <n>] [--carryover <work-ref>...] [--risk <text>...] [--limit <n>] [--agent-summary <id>...] [--force-summary --force-reason <code> --force-comment <text>] [--commit <sha>...] [--dirty-path <note>...] [--json]
+bwrk sprint close [<sprint-ref>] --reason <text> [--auto-report] [--report-format markdown|html] [--report-out <file>] [--strict] [--capacity <n>] [--carryover <work-ref>...] [--risk <text>...] [--limit <n>] [--agent-summary <id>...] [--force-summary --force-reason <code> --force-comment <text>] [--commit <sha>...] [--dirty-path <note>...] [--json]
 ```
 
-Closes a verified sprint through the normal work close policy after ensuring a final or forced agent summary exists for the sprint. If no summary is supplied or already linked to the sprint, the command composes one from sprint state, child summaries, evidence, verification, commits, and dirty-path notes. When no `--commit` is provided, at least one `--dirty-path` value must start with a checkpoint reason code such as `no_repo_changes: ...`. Use `--force-summary` only with `--force-reason` and `--force-comment` for audited bypasses.
+Closes a verified sprint through the normal work close policy after ensuring a final or forced agent summary exists for the sprint. If no summary is supplied or already linked to the sprint, the command composes one from sprint state, child summaries, evidence, verification, commits, and dirty-path notes. When no sprint-level `--commit` is provided, at least one `--dirty-path` value must start with a checkpoint reason code such as `no_repo_changes: ...`; use `sprint_checkpoint_rollup: ...` when the sprint checkpoint is intentionally represented by child summary commits or dirty-path notes. Use `--force-summary` only with `--force-reason` and `--force-comment` for audited bypasses.
+
+With `--auto-report`, sprint close runs sync refresh and doctor, records sprint-scoped passed evidence for both gates, verifies the sprint with that evidence, writes a sprint closeout report, composes the rollup summary, and closes the sprint in one command. The default report path is `.boreal/results/sprint-closeout-<sprint-id>.md`; use `--report-out` and `--report-format` to override it. `--strict` makes doctor warnings fail the auto-report gate.
 
 ## `init`
 
@@ -743,7 +749,7 @@ Recomputes readiness for one work item and marks it `ready` if its dependencies 
 bwrk work list [--ready] [--status <status>] [--label <label>...] [--container <work-ref>] [--limit <n>] [--json]
 ```
 
-Lists work items. `--label` may be repeated and all labels must match. `--container` scopes results to the container and its dependency-graph descendants. Default `--limit` is `100`; max is `1000`.
+Lists work items. `--label` may be repeated and all labels must match. `--container` scopes results to the container and its dependency-graph descendants; use it for epic/milestone/sprint-style scopes, while labels remain tags. `--ready` returns dependency-valid claimable work from the current graph; `--status ready` is a raw status filter. Default `--limit` is `100`; max is `1000`.
 
 Statuses:
 
@@ -779,12 +785,22 @@ JSON `data` shape:
     "priority": "normal",
     "title": "Harden CLI output",
     "labels": ["cli"],
-    "containerId": "bw_work_..."
+    "containerId": "bw_work_...",
+    "parentIds": ["bw_work_..."],
+    "lineage": [
+      {
+        "id": "bw_work_...",
+        "kind": "sprint",
+        "role": "sprint",
+        "title": "Sprint 01",
+        "labels": ["sprint-01"]
+      }
+    ]
   }
 ]
 ```
 
-`containerId` is present only when `--container` is used.
+`containerId` is present only when `--container` is used. `parentIds` and `lineage` are present when Boreal can derive parent containers from explicit `parentId` or dependency-graph ancestry.
 
 ## `work recent-closed`
 
@@ -819,7 +835,7 @@ bwrk heartbeat advance <checkpoint-id> --work <work-id> --json
 bwrk work next [--label <label>...] [--container <work-ref>] [--agent <agent-id>] [--purpose <text>] [--limit <n>] [--view dashboard] [--json]
 ```
 
-Lists claimable ready work from the live runtime view, ordered by priority and title. `--label` may be repeated and all labels must match. `--container` scopes results to the container and its dependency-graph descendants and adds `containerId` to returned rows. JSON rows include `showCommand`, `agentStartCommand`, and `workClaimCommand` exact commands. `--agent` and `--purpose` customize those generated commands. Default `--limit` is `10`; max is `1000`. `--view dashboard` renders a grouped ready-queue view for humans.
+Lists dependency-valid claimable ready work from the live runtime view, ordered by priority and title. `--label` may be repeated and all labels must match. `--container` scopes results to the container and its dependency-graph descendants; use it for epic/milestone/sprint-style scopes rather than relying on labels alone. Scoped rows include `containerId`, and rows with known parents include root-to-nearest `parentIds` plus structured `lineage`. JSON rows include `showCommand`, `agentStartCommand`, and `workClaimCommand` exact commands. `--agent` and `--purpose` customize those generated commands. Default `--limit` is `10`; max is `1000`. `--view dashboard` renders a grouped ready-queue view for humans.
 
 This command does not use the search index; readiness and reservation-sensitive workflow state are read from current runtime state.
 
@@ -829,7 +845,7 @@ This command does not use the search index; readiness and reservation-sensitive 
 bwrk work parallel [--label <label>...] [--container <work-ref>] [--agent <agent-id>...] [--agent-prefix <prefix>] [--purpose <text>] [--limit <n>] [--json]
 ```
 
-Builds a read-only coordinator queue for parallel agent fan-out. It uses the same live readiness, priority ordering, label filtering, and container scoping as `work next`, but returns a `boreal.cli.work.parallel.v1` record with `items`, `filters`, and refresh commands.
+Builds a read-only coordinator queue for parallel agent fan-out. It uses the same dependency-valid readiness, priority ordering, label filtering, lineage, and container scoping as `work next`, but returns a `boreal.cli.work.parallel.v1` record with `items`, `filters`, and refresh commands.
 
 Each item includes the ready work row plus an assigned `agentId`, exact `agentStartCommand`, exact `workClaimCommand`, and `showCommand`. Use repeated `--agent` values to round-robin rows across named workers, or `--agent-prefix worker` to generate `worker-1`, `worker-2`, and so on. The command only reads queue state; the generated `agent start <work-id>` or `work claim <work-id>` command performs the actual reservation.
 
@@ -1024,7 +1040,7 @@ Prints the compact agent loop without requiring an initialized workspace. The gu
 bwrk agent finish <work-id> (--summary <text>|--evidence <inline-or-evidence-id>) (--close --reason <text>|--release) [--agent <agent-id>] [--kind command|test|diff|review|artifact|note] [--outcome passed|failed|observed|unknown] [--command <cmd>] [--uri <uri>] [--verdict passed|failed] [--notes <text>] [--commit <sha>...] [--dirty-path <note>...] [--json]
 ```
 
-Guarded exit workflow for work with an active agent reservation. The command requires the selected agent to own the active, non-expired reservation before it records evidence, verifies the work, and closes or releases anything. Use `current` or `active` as the work reference when the selected `--agent` has exactly one non-expired active reservation. Evidence, verification, optional close, reservation release, readiness repair, and the final `agent.finished` event run as one engine transaction. One of `--close` or `--release` is required so finish cannot leave active ownership behind. When closing, the evidence summary becomes the generated agent closeout summary body and optional `--commit` / `--dirty-path` values are linked into that summary; if no `--commit` is provided, one `--dirty-path` must start with a checkpoint reason code such as `no_repo_changes: ...`.
+Guarded exit workflow for work with an active agent reservation, plus explicit unreserved work refs. When the work has an active reservation, the command requires the selected agent to own the active, non-expired reservation before it records evidence, verifies the work, and closes or releases anything. Use `current` or `active` as the work reference when the selected `--agent` has exactly one non-expired active reservation. When an explicit work ID or title has no active reservation, Boreal creates a short-lived reservation for the selected agent and releases it inside the same transaction. Evidence, verification, optional close, reservation release, readiness repair, and the final `agent.finished` event run as one engine transaction. One of `--close` or `--release` is required so finish cannot leave active ownership behind. When closing, the evidence summary becomes the generated agent closeout summary body and optional `--commit` / `--dirty-path` values are linked into that summary; if no `--commit` is provided, one `--dirty-path` must start with a checkpoint reason code such as `no_repo_changes: ...`.
 
 Behavior:
 
@@ -1149,7 +1165,7 @@ JSON `data` includes inspected counts, linked event IDs, legacy-marked event IDs
 bwrk evidence add <work-id> --summary <text> [--kind command|test|diff|review|artifact|note] [--outcome passed|failed|observed|unknown] [--command <cmd>] [--uri <uri>] [--json]
 ```
 
-Records evidence against a work item and moves the work item to `needs_verification` unless it is already closed. Use `--kind artifact` for files or generated artifacts such as source maps; `document` is a source/raw kind, not an evidence kind. JSON output includes `closeoutGateStatus` for the subject work item. A passed `--kind review` record satisfies `review` gates and can satisfy `audit` gates; passed `command` and `artifact` evidence can also satisfy `audit` gates.
+Records evidence against a work item and moves the work item to `needs_verification` unless it is already closed. Use `--kind artifact` for files or generated artifacts such as source maps; `document` is a source/raw kind, not an evidence kind. JSON output includes the created evidence record and `data.result`; inspect `closeoutGateStatus` through `work verify`, `summary compose`, or `summary show`. A passed `--kind review` record satisfies `review` gates and can satisfy `audit` gates; passed `command` and `artifact` evidence can also satisfy `audit` gates.
 
 Example:
 
@@ -1221,7 +1237,7 @@ Creates a verification record. `--evidence` may be repeated. Verification fails 
 bwrk work close <work-id> --reason <text> [--agent-summary <id>...] [--force-summary --force-reason <code> --force-comment <text>] [--commit <sha>...] [--dirty-path <note>...] [--json]
 ```
 
-Closes a work item. Runtime policy requires a passing verification before close, and the CLI ensures a final or forced agent summary exists for the work subject before calling the close path. If no summary is supplied or already exists, the command composes a final closeout summary automatically. When no `--commit` is provided, at least one `--dirty-path` value must start with a checkpoint reason code such as `no_repo_changes: ...`. JSON output is a `boreal.cli.work.close.v1` envelope with `work`, `agentSummaries`, and optional `createdAgentSummary` / `createdAgentSummaryArtifact`.
+Closes a work item. Runtime policy requires a passing verification before close, and the CLI ensures a final or forced agent summary exists for the work subject before calling the close path. If no summary is supplied or already exists, the command composes a final closeout summary automatically. When no `--commit` is provided, at least one `--dirty-path` value must start with a checkpoint reason code such as `no_repo_changes: ...`. JSON output is a `boreal.cli.work.close.v1` envelope with `work`, compact `agentSummaries` rows, and optional compact `createdAgentSummary` / `createdAgentSummaryArtifact`; use `summary show` for full summary body and checkpoint metadata.
 
 ## `work edit`
 
@@ -1241,7 +1257,7 @@ Use `--force-gate` for an audited bypass of an existing required gate, not as no
 bwrk work cancel <work-ref> --reason <text> [--agent-summary <id>...] [--force-summary --force-reason <code> --force-comment <text>] [--commit <sha>...] [--dirty-path <note>...] [--json]
 ```
 
-Cancels open work only after ensuring a final or forced agent summary exists for the work subject. If no summary is supplied or already exists, the command composes a cancellation summary with outcome `cancelled`, renders its Markdown artifact, and returns a `boreal.cli.work.cancel.v1` envelope with `work`, `agentSummaries`, and optional `createdAgentSummary` / `createdAgentSummaryArtifact`. When no `--commit` is provided, at least one `--dirty-path` value must start with a checkpoint reason code such as `no_repo_changes: ...`. The command fails closed when the work has an active non-expired reservation.
+Cancels open work only after ensuring a final or forced agent summary exists for the work subject. If no summary is supplied or already exists, the command composes a cancellation summary with outcome `cancelled`, renders its Markdown artifact, and returns a `boreal.cli.work.cancel.v1` envelope with `work`, compact `agentSummaries` rows, and optional compact `createdAgentSummary` / `createdAgentSummaryArtifact`. When no `--commit` is provided, at least one `--dirty-path` value must start with a checkpoint reason code such as `no_repo_changes: ...`. The command fails closed when the work has an active non-expired reservation.
 
 ## `work reopen`
 
@@ -1628,14 +1644,14 @@ JSON `data` contains `ok`, `workspaceRoot`, `checkedAt`, `vault`, `ledgers`, `se
 ## `sync refresh`
 
 ```bash
-bwrk sync refresh [--json]
+bwrk sync refresh [--strict] [--json]
 ```
 
 Refreshes generated collaboration artifacts in one closeout command: context-pack projections, the local search index, the JSONL ledger export, and the optional SQLite generated cache at `.boreal/cache/runtime-cache.sqlite`. It then returns the same status shape as `sync status` under `data.status`. Snapshot creation remains explicit through `bwrk snapshot create --json` because snapshots are named baselines, not routine cache refreshes.
 
-JSON `data` contains `refreshed`, `refreshOk`, `postRefreshStatusOk`, `exitReason`, `contextViews`, `searchIndex`, `ledgers`, `sqliteCache`, and `status`. `refreshOk: true` means projections, search, ledger export, and the cache rebuild path completed. If `sqlite3` is unavailable, `sqliteCache.skipped` is `true` and file-store behavior remains supported. `postRefreshStatusOk` mirrors nested `status.ok` after the rebuild. `exitReason` is `ok` when the process exits `0`, or `post_refresh_status_unhealthy` when the refresh completed but the final health gate still failed.
+JSON `data` contains `refreshed`, `refreshOk`, `postRefreshStatusOk`, `exitReason`, `contextViews`, `searchIndex`, `ledgers`, `sqliteCache`, and `status`. `refreshOk: true` means projections, search, ledger export, and the cache rebuild path completed. If `sqlite3` is unavailable, `sqliteCache.skipped` is `true` and file-store behavior remains supported. `postRefreshStatusOk` mirrors nested `status.ok` after the rebuild. `exitReason` is `ok` when post-refresh status is healthy, or `post_refresh_status_unhealthy` when the refresh completed but the final health gate still failed.
 
-The command exits `1` if the post-refresh sync status is still not clean, for example because the vault is missing or Git collaboration paths are dirty on a protected branch. Agents should treat `exitReason: post_refresh_status_unhealthy` as partial success: generated artifacts were refreshed, but the nested `status` object and `recommendedActions` describe the remaining repair.
+By default the command exits `0` when the refresh itself succeeds, even if `postRefreshStatusOk` is false. Pass `--strict` to restore status-based exit semantics and exit `1` when the post-refresh sync status is still not clean, for example because the vault is missing or Git collaboration paths are dirty on a protected branch. Agents should treat `exitReason: post_refresh_status_unhealthy` as partial success: generated artifacts were refreshed, but the nested `status` object and `recommendedActions` describe the remaining repair.
 
 ## `ledger status`
 
@@ -1756,9 +1772,9 @@ Runs `bwrk doctor --workspace . --strict --json` from the repository root.
 bwrk doctor skills [--install-root <dir>] [--skill-target codex|claude|skills...] [--json]
 ```
 
-Validates the checked-in workflow, template, and skill source files without requiring an initialized workspace. It checks duplicate workflow IDs, workflow command references, workflow template references, and skill workflow references.
+Validates the checked-in workflow, template, and skill source files without requiring an initialized workspace. It checks duplicate workflow IDs, workflow command references, workflow template references, and skill workflow references. Skill `boreal.yaml` files and `SKILL.md` workflow lists must use canonical workflow IDs that `bwrk workflows show <ref>` accepts verbatim.
 
-With `--skill-target` or `--install-root`, it also validates installed skill roots against the checked-in assets. The installed-root check detects missing files such as `boreal.yaml`, stale `SKILL.md` content, missing workflow resolver guidance, and Claude installs that accidentally contain Codex `agents/openai.yaml` metadata. If `--install-root` is omitted, configured project setup roots are used where possible.
+With `--skill-target` or `--install-root`, it also validates installed skill roots against the checked-in assets. The installed-root check detects missing files such as `boreal.yaml`, stale `SKILL.md` content, missing workflow resolver guidance, noncanonical or unknown workflow refs, and Claude installs that accidentally contain Codex `agents/openai.yaml` metadata. If `--install-root` is omitted, configured project setup roots are used where possible.
 
 ## `schema validate`
 
@@ -1774,12 +1790,12 @@ Validates current runtime records against the published schema contracts and che
 bwrk docs check [--json]
 ```
 
-Checks workflow, template, skill, and command documentation assets from the resolved workflow asset root. The payload includes workflow asset counts, asset issues, and command metadata validation status. Skill frontmatter uses standards-compatible YAML scalars; values containing `: ` must be quoted.
+Checks workflow, template, skill, and command documentation assets from the resolved workflow asset root. The payload includes workflow asset counts, asset issues, and command metadata validation status. Skill frontmatter uses standards-compatible YAML scalars; values containing `: ` must be quoted. Workflow and skill Markdown references to machine-readable `data.*` extraction paths are validated against the known JSON envelope paths so stale automation instructions fail the docs gate.
 
 ## `gate`
 
 ```bash
-bwrk gate [--strict] [--auto-prune-operations] [--json]
+bwrk gate [--strict] [--no-auto-prune-operations] [--json]
 ```
 
 Golden-path alias for `bwrk gate closeout`. Use it as a compact final gate before closing work or handing off.
@@ -1787,12 +1803,12 @@ Golden-path alias for `bwrk gate closeout`. Use it as a compact final gate befor
 ## `gate closeout`
 
 ```bash
-bwrk gate closeout [--strict] [--auto-prune-operations] [--json]
+bwrk gate closeout [--strict] [--no-auto-prune-operations] [--json]
 ```
 
 Runs the closeout sequence: `sync refresh`, `doctor`, `schema validate`, and `docs check`. JSON `data.ok` is true only when all nested checks pass; `--strict` makes doctor warnings fail the gate.
 
-`--auto-prune-operations` is an explicit maintenance opt-in. When `--strict` is also set and the only strict gate blocker is the `operation.volume` doctor warning, the gate prunes local operation history to the recommended keep target, refreshes generated state again, and reruns the closeout checks. The JSON payload includes `autoPruneOperations: true` and an `operationPrune` result when pruning ran.
+When `--strict` is set and the only strict gate blocker is the `operation.volume` doctor warning, the gate prunes local operation history to the recommended keep target by default, refreshes generated state again, and reruns the closeout checks. The JSON payload includes `autoPruneOperations: true` and an `operationPrune` result when pruning ran. Pass `--no-auto-prune-operations` to disable this maintenance step and preserve the hard operation-volume block.
 
 ## `lock inspect`
 
@@ -1800,17 +1816,53 @@ Runs the closeout sequence: `sync refresh`, `doctor`, `schema validate`, and `do
 bwrk lock inspect [--view dashboard] [--json]
 ```
 
-Inspects the runtime state lock at `.boreal/runtime/state.lock`. `--view dashboard` renders lock state, owner, age, and repair action sections.
+Inspects runtime locks, including `.boreal/runtime/state.lock` and `.boreal/runtime/search-index.lock`. `--view dashboard` renders lock state, owner, age, stale reason, and repair action sections.
 
 JSON `data` shape:
 
 ```json
 {
+  "schemaVersion": "boreal.cli.lock-inspect.v1",
+  "ok": true,
+  "locks": [
+    {
+      "name": "state",
+      "diagnosticCode": "lock.absent",
+      "status": "absent",
+      "inspection": {
+        "exists": false,
+        "stale": false,
+        "lockDir": "/absolute/path/.boreal/runtime/state.lock"
+      }
+    },
+    {
+      "name": "searchIndex",
+      "diagnosticCode": "lock.search_index.absent",
+      "status": "absent",
+      "inspection": {
+        "exists": false,
+        "stale": false,
+        "lockDir": "/absolute/path/.boreal/runtime/search-index.lock"
+      }
+    }
+  ],
+  "state": {
+    "exists": false,
+    "stale": false,
+    "lockDir": "/absolute/path/.boreal/runtime/state.lock"
+  },
+  "searchIndex": {
+    "exists": false,
+    "stale": false,
+    "lockDir": "/absolute/path/.boreal/runtime/search-index.lock"
+  },
   "exists": false,
   "stale": false,
   "lockDir": "/absolute/path/.boreal/runtime/state.lock"
 }
 ```
+
+The top-level `exists`, `stale`, and `lockDir` fields mirror `state` for compatibility with earlier callers.
 
 ## `lock break`
 

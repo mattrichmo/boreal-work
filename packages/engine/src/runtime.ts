@@ -204,6 +204,7 @@ const CHECKPOINT_DIRTY_PATH_REASON_CODES = new Set([
   "unrelated_dirty_state",
   "git_unavailable",
   "out_of_scope_repository",
+  "sprint_checkpoint_rollup",
   "legacy_backfill"
 ]);
 
@@ -794,9 +795,14 @@ export function createBorealRuntime(options: BorealRuntimeOptions = {}): BorealR
 
       return store.write(async (writer) => {
         const current = now();
-        const work = await requireWork(writer, input.workId);
+        const initialWork = await requireWork(writer, input.workId);
         const agentId = normalizeActorId(String(input.agentId));
-        const reservation = await requireAgentWorkReservation(writer, work, agentId, current);
+        const { work, reservation, autoReserved } = await agentFinishReservation(writer, initialWork, {
+          agentId,
+          actor,
+          policy,
+          current
+        });
 
         const evidence = recordEvidenceDomain({
           ...input.evidence,
@@ -858,6 +864,15 @@ export function createBorealRuntime(options: BorealRuntimeOptions = {}): BorealR
           finalWork = closedWork;
         }
 
+        if (autoReserved) {
+          await writer.putReservation(reservation);
+          await appendEvent(writer, "work.claimed", work.meta.id, "work", {
+            agentId,
+            reservationId: reservation.meta.id,
+            exact: true,
+            autoFinish: true
+          });
+        }
         const releasedReservation = releaseReservation(reservation, current, actor);
         finalWork = await clearWorkReservation(writer, finalWork, current, actor);
         closedWork = closedWork ? finalWork : undefined;
@@ -1197,6 +1212,76 @@ async function requireActiveWorkReservation(reader: BorealReader, work: WorkItem
     });
   }
   return reservation;
+}
+
+async function agentFinishReservation(
+  reader: BorealReader,
+  work: WorkItem,
+  options: {
+    readonly agentId: string;
+    readonly actor: ActorRef;
+    readonly policy: RuntimePolicy;
+    readonly current: IsoTimestamp;
+  }
+): Promise<{ readonly work: WorkItem; readonly reservation: AgentReservation; readonly autoReserved: boolean }> {
+  const { agentId, actor, policy, current } = options;
+  const activeReservation = await getActiveWorkReservation(reader, work);
+  const existingReservationsForWork = await reader.listReservationsForWork(work.meta.id);
+  const expiredAgentReservation = existingReservationsForWork
+    .filter((reservation) => String(reservation.agentId) === agentId)
+    .filter((reservation) => reservation.status === "expired")
+    .sort((left, right) => right.meta.updatedAt.localeCompare(left.meta.updatedAt))
+    .at(0);
+  if (work.reservationId || activeReservation || expiredAgentReservation) {
+    return {
+      work,
+      reservation: await requireAgentWorkReservation(reader, work, agentId, current),
+      autoReserved: false
+    };
+  }
+
+  const graphWork = await workWithGraphDependencies(reader, work);
+  const dependencies = await loadDependencies(reader, graphWork);
+  const derivedStatus = deriveReadinessStatus(graphWork, dependencies);
+  if (derivedStatus === "blocked") {
+    const gaps = [
+      {
+        code: "work.blocked.open-dependency",
+        subjectType: closeoutGateSubjectTypeForWorkKind(graphWork.kind),
+        subjectId: graphWork.meta.id,
+        data: {
+          blockerIds: dependencies
+            .filter((dependency) => dependency.status !== "closed" && dependency.status !== "cancelled" && dependency.status !== "verified")
+            .map((dependency) => dependency.meta.id),
+          reason: "unreserved agent finish cannot bypass open blockers"
+        }
+      }
+    ] satisfies readonly EnforcementGap[];
+    throw new BorealError(
+      "BOREAL_POLICY_VIOLATION",
+      "Unreserved agent finish cannot bypass open blockers",
+      { workId: graphWork.meta.id, agentId, gaps },
+      gaps
+    );
+  }
+
+  const reservationResult = reserveWorkDomain({
+    work: { ...graphWork, status: derivedStatus },
+    agentId,
+    existingReservationsForWork,
+    activeReservationsForAgent: await reader.listActiveReservationsForAgent(agentId),
+    policy,
+    actor,
+    now: current,
+    purpose: "agent finish one-shot",
+    force: derivedStatus !== "ready",
+    forceReason: "agent_finish_unreserved"
+  });
+  return {
+    work: reservationResult.work,
+    reservation: reservationResult.reservation,
+    autoReserved: true
+  };
 }
 
 async function getActiveWorkReservation(reader: BorealReader, work: WorkItem): Promise<AgentReservation | undefined> {

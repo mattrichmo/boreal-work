@@ -3,7 +3,7 @@ system: boreal
 skill: boreal-work-execution
 display_name: Boreal Work Execution
 workflows:
-  - 40-work/claim-and-finish-work.md
-  - 40-work/closeout-work.md
-  - 40-work/checkpoint-git-state.md
-  - 40-work/link-dependencies.md
+  - boreal.workflow.claim-and-finish-work.v1
+  - boreal.workflow.closeout-work.v1
+  - boreal.workflow.checkpoint-git-state.v1
+  - boreal.workflow.link-dependencies.v1

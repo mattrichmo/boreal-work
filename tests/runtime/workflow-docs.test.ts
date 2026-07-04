@@ -78,11 +78,14 @@ describe("workflow, template, and skill docs", () => {
   });
 
   it("keeps templates and skills connected to existing workflows", async () => {
-    const workflowRefs = new Set(
-      (await listMarkdownFiles(join(rootDir, "workflows")))
-        .filter((file) => !file.endsWith("README.md") && !file.endsWith("_workflow-template.md"))
-        .map((file) => relative(join(rootDir, "workflows"), file))
+    const workflowFiles = (await listMarkdownFiles(join(rootDir, "workflows"))).filter(
+      (file) => !file.endsWith("README.md") && !file.endsWith("_workflow-template.md")
     );
+    const workflowRefs = new Set(workflowFiles.map((file) => relative(join(rootDir, "workflows"), file)));
+    const workflowIds = new Set<string>();
+    for (const workflowFile of workflowFiles) {
+      workflowIds.add(parseFrontmatter(await readFile(workflowFile, "utf8"), workflowFile).id as string);
+    }
     const templateFiles = (await listMarkdownFiles(join(rootDir, "templates"))).filter((file) => !file.endsWith("README.md"));
     const skillFiles = await listSkillFiles(join(rootDir, "skills"));
 
@@ -118,7 +121,9 @@ describe("workflow, template, and skill docs", () => {
       expect(openAiMetadata).toContain("interface:");
       expect(openAiMetadata).toContain(`default_prompt: "Use $${name}`);
       expect(text).toContain("bwrk workflows show <ref>");
-      expect(text).toContain("not paths that must exist inside the installed skill folder");
+      expect(text).toContain("canonical workflow IDs");
+      expect(text).toContain("not filesystem paths to search for in sibling checkouts");
+      expect(text).not.toContain("not paths that must exist inside the installed skill folder");
       expect(text).toContain("You may read this skill folder's `SKILL.md`, `boreal.yaml`");
       expectHeadingCount(text, "## Agent Directive Handling", label, 1);
       for (const marker of directiveGuidanceMarkers) {
@@ -127,12 +132,14 @@ describe("workflow, template, and skill docs", () => {
 
       const markdownWorkflowRefs = workflowReferencesFromMarkdown(text);
       for (const workflow of workflows) {
-        expect(workflowRefs.has(workflow), `${label} references unknown workflow ${workflow}`).toBe(true);
+        expect(workflowIds.has(workflow), `${label} references unknown workflow ${workflow}`).toBe(true);
+        expect(workflow).toMatch(/^boreal\.workflow\.[a-z0-9-]+\.v1$/u);
         expect(markdownWorkflowRefs.has(workflow), `${label} does not mention ${workflow}`).toBe(true);
       }
       for (const workflow of markdownWorkflowRefs) {
-        expect(workflowRefs.has(workflow), `${label} references unknown workflow ${workflow}`).toBe(true);
+        expect(workflowIds.has(workflow), `${label} references unknown workflow ${workflow}`).toBe(true);
       }
+      expect(text).not.toMatch(/`workflows\/[^`\s]+\.md`/u);
       expect(text).toContain("No-Leak Rules");
       expect(text).toContain("Do not read sibling");
       expect(text).toContain("Keep this skill as a thin adapter");
@@ -154,10 +161,14 @@ describe("workflow, template, and skill docs", () => {
     expect(launchSprint).toContain("bwrk work ready <task-id> --json");
     expect(createWork).toContain("Create a container when the request describes a program, backlog, milestone, or issue group");
     expect(createWork).toContain("Capture the returned container ID from `data.meta.id`");
-    expect(claimFinish).toContain("Prefer `agent finish` for normal reserved work closeout");
+    expect(claimFinish).toContain("Prefer `agent finish` for normal work closeout");
+    expect(claimFinish).toContain("bwrk agent start <work-id> --agent <agent-id>");
     expect(claimFinish).toContain("bwrk agent finish current --agent <agent-id>");
-    expect(claimFinish).toContain("Use manual `evidence add`, `work verify`, and `work close` only when no active reservation exists");
+    expect(claimFinish).toContain("bwrk agent finish <work-id> --agent <agent-id>");
+    expect(claimFinish).toContain("Use manual `evidence add`, `work verify`, and `work close` only when attaching additional evidence after `agent finish`");
     expect(closeout).toContain("Capture the evidence ID from `data.meta.id`");
+    expect(closeout).toContain("bwrk gate closeout --strict --json");
+    expect(closeout).toContain("bwrk sprint close <sprint-id> --reason \"<reason>\" --auto-report");
     expect(closeout).toContain("bwrk work verify <work-id> --evidence <evidence-id> --verdict passed");
   });
 
@@ -275,6 +286,12 @@ function parseYamlDocument(text: string, file: string): Record<string, string | 
 
 function workflowReferencesFromMarkdown(text: string): Set<string> {
   const refs = new Set<string>();
+  for (const match of text.matchAll(/`(boreal\.workflow\.[a-z0-9-]+\.v1)`/gu)) {
+    const ref = match[1];
+    if (ref) {
+      refs.add(ref);
+    }
+  }
   for (const match of text.matchAll(/`workflows\/([^`\s]+\.md)`/gu)) {
     const ref = match[1];
     if (ref) {

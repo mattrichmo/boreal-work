@@ -12,7 +12,7 @@ The shipped model is gap projection:
 2. Gap codes are the contract between policy enforcement and agent guidance.
 3. The directive registry maps those gap codes to trusted instruction text, family, severity, acknowledgement requirements, and payload expectations.
 4. The compiler fills typed payload fields from live state and rejects missing or unsafe required data.
-5. Commands return the resulting bundle under `agentDirectives`; `bwrk next` narrows that bundle to one executable next directive.
+5. Commands return the resulting bundle under `agentDirectives`; `bwrk next` narrows that bundle to one executable next directive. Within a CLI `--session`, repeated unchanged directive source hashes may return `agentDirectives: { "unchanged": true, "sourceHash": "sha256:..." }` instead of re-emitting the full bundle.
 
 The registry does not decide policy. Policy is enforced by runtime and doctor checks first; directives explain the next safe action for those checks.
 
@@ -230,6 +230,7 @@ An export may carry a top-level `agentDirectives` carrier when a command result 
 CLI:
 
 - Emit `agentDirectives` in JSON envelopes.
+- Treat `{ "unchanged": true, "sourceHash": "sha256:..." }` as "reuse the last full bundle seen for this session hash."
 - Keep human rendering compact and secondary.
 - Preserve full bundles through `.boreal/results` spooling.
 

@@ -3,4 +3,4 @@ system: boreal
 skill: boreal-agent-session
 display_name: Boreal Agent Session
 workflows:
-  - 00-agent/agent-session.md
+  - boreal.workflow.agent-session.v1

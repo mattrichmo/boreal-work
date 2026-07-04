@@ -36,7 +36,7 @@ import {
 } from "@boreal/core";
 import { inspectDaemonStatus, type DaemonStatusResult } from "@boreal/daemon";
 import { buildContextPack, buildContextProjection } from "@boreal/search";
-import { FILE_STORE_SCHEMA_VERSION, breakStaleFileLock, inspectFileLock, inspectSQLiteCache } from "@boreal/storage";
+import { FILE_STORE_SCHEMA_VERSION, breakStaleFileLock, inspectSQLiteCache } from "@boreal/storage";
 import { deriveReadinessStatus } from "@boreal/work-engine";
 
 import type { CliContext } from "./context.js";
@@ -45,8 +45,9 @@ import { inspectGitWorktree } from "./git-worktree.js";
 import { installUpgradeStatus, normalizeInstallChannel } from "./install-channel.js";
 import { inspectBorealInstallStatus, installStatusHealthy, installStatusSummary } from "./install-status.js";
 import { buildExportDocument, exportDriftDiagnostics, ledgerStatus, readGeneratedLedgerTombstones } from "./import-export.js";
+import { inspectRuntimeLocks } from "./locks.js";
 import { inspectProjectSetupDrift, type ProjectSetupDriftInspection } from "./project-setup.js";
-import { inspectSearchIndex, searchIndexLockDir, writeSearchIndex } from "./search-cli.js";
+import { inspectSearchIndex, writeSearchIndex } from "./search-cli.js";
 import { dirtyPathNotesHaveReasonCode } from "./summary-policy.js";
 import { inspectVault, listVaultRawSources, listVaultWikiPages, type RawSourceRecord, type WikiPageRecord } from "./vault.js";
 import { getVersionInfo, type VersionIdentity } from "./version.js";
@@ -64,6 +65,7 @@ export interface DoctorResult {
   readonly ok: boolean;
   readonly strict: boolean;
   readonly fixed: boolean;
+  readonly blockingDiagnosticCodes: readonly string[];
   readonly diagnostics: readonly Diagnostic[];
 }
 
@@ -85,7 +87,7 @@ const STATE_SECTIONS = [
 ] as const;
 
 export const OPERATION_LOG_RECOMMENDED_KEEP = 1_000;
-const OPERATION_LOG_WARNING_GRACE = 25;
+const OPERATION_LOG_WARNING_GRACE = 250;
 const OPERATION_LOG_WARNING_THRESHOLD = OPERATION_LOG_RECOMMENDED_KEEP + OPERATION_LOG_WARNING_GRACE;
 const DEFAULT_RESULTS_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
 const RESULTS_PRUNE_GRACE_MS = 5 * 60 * 1000;
@@ -252,25 +254,13 @@ async function validateRuntimeLocks(
   const diagnostics: Diagnostic[] = [];
   let fixed = false;
 
-  for (const target of [
-    {
-      codePrefix: "lock",
-      path: context.paths.stateLockDir,
-      label: "runtime state",
-      breakHint: " or `bwrk lock break --stale-only`"
-    },
-    {
-      codePrefix: "lock.search_index",
-      path: searchIndexLockDir(context),
-      label: "search index",
-      breakHint: ""
-    }
-  ]) {
-    const lockInspection = await inspectFileLock(target.path);
+  const lockState = await inspectRuntimeLocks(context);
+  for (const target of lockState.locks) {
+    const lockInspection = target.inspection;
     if (lockInspection.exists) {
       if (lockInspection.stale) {
         if (fix) {
-          await breakStaleFileLock(target.path);
+          await breakStaleFileLock(target.inspection.lockDir);
           diagnostics.push({
             code: `${target.codePrefix}.stale`,
             severity: "fixed",
@@ -3339,7 +3329,13 @@ function verificationPolicyIssues(
 
 function finalize(diagnostics: readonly Diagnostic[], fixed: boolean, strict: boolean): DoctorResult {
   const ok = diagnostics.every((diagnostic) => diagnostic.severity !== "error" && (!strict || !strictBlockingWarning(diagnostic)));
-  return { ok, strict, fixed, diagnostics };
+  return { ok, strict, fixed, blockingDiagnosticCodes: blockingDiagnosticCodes(diagnostics, strict), diagnostics };
+}
+
+function blockingDiagnosticCodes(diagnostics: readonly Diagnostic[], strict: boolean): readonly string[] {
+  return diagnostics
+    .filter((diagnostic) => diagnostic.severity === "error" || (strict && strictBlockingWarning(diagnostic)))
+    .map((diagnostic) => diagnostic.code);
 }
 
 async function validateResultsDirectory(context: CliContext): Promise<Diagnostic> {

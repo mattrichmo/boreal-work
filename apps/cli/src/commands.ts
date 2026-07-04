@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
-import { mkdir, readdir, rm, stat } from "node:fs/promises";
+import { mkdir, readFile, readdir, rm, stat } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
 
 import {
@@ -18,6 +18,7 @@ import {
   createRecordMeta,
   createAgentDirectiveSnapshot,
   deterministicId,
+  deriveProjectRegistryIdentity,
   directiveAcknowledgementRecordSchemaIssues,
   gitDirectiveDataByRegistryId,
   hashContent,
@@ -29,6 +30,7 @@ import {
   normalizeMachineString,
   normalizeSearchQuery,
   nowIso,
+  projectRegistryEntryIdFromIdentity,
   randomId,
   readJsonFile,
   runBoundedProcess,
@@ -119,7 +121,6 @@ import { inspectDaemonStatus, type DaemonStatusResult } from "@boreal/daemon";
 import type { SearchResult } from "@boreal/search";
 import {
   breakStaleFileLock,
-  inspectFileLock,
   rebuildSQLiteCache,
   writeTextFileAtomic,
   type BorealReader,
@@ -210,7 +211,8 @@ import {
   showSnapshot,
   type LedgerStatusResult
 } from "./import-export.js";
-import { createResultSpoolingOutput, formatRecord, table, type CliOutput } from "./output.js";
+import { inspectRuntimeLocks, type RuntimeLockInspectionResult, type RuntimeLockState } from "./locks.js";
+import { createResultSpoolingOutput, formatRecord, table, type AgentDirectiveOutput, type CliOutput } from "./output.js";
 import {
   applyProjectSetup,
   configuredInstallRootForTarget,
@@ -335,6 +337,14 @@ const CLI_JSON_OUTPUT_CONTRACT = {
   }
 };
 
+interface WorkLineageEntry {
+  readonly id: WorkId;
+  readonly kind: WorkKind;
+  readonly role: "issue" | "milestone" | "phase" | "sprint" | "parent";
+  readonly title: string;
+  readonly labels: readonly string[];
+}
+
 interface WorkListRow {
   readonly id: string;
   readonly kind: WorkKind;
@@ -343,6 +353,8 @@ interface WorkListRow {
   readonly title: string;
   readonly labels: readonly string[];
   readonly containerId?: WorkId;
+  readonly parentIds?: readonly WorkId[];
+  readonly lineage?: readonly WorkLineageEntry[];
   readonly agentId?: string;
   readonly showCommand?: string;
   readonly agentStartCommand?: string;
@@ -631,6 +643,33 @@ interface SprintReportResult {
   readonly content?: string;
 }
 
+interface SprintCloseAutoReportResult {
+  readonly sync: {
+    readonly ok: boolean;
+    readonly postRefreshStatusOk: boolean;
+    readonly evidence: SprintReportEvidenceRow;
+  };
+  readonly doctor: {
+    readonly ok: boolean;
+    readonly strict: boolean;
+    readonly blockingDiagnosticCodes: readonly string[];
+    readonly evidence: SprintReportEvidenceRow;
+  };
+  readonly verification: {
+    readonly id: VerificationId;
+    readonly verdict: VerificationVerdict;
+  };
+  readonly report: {
+    readonly schemaVersion: typeof SPRINT_REPORT_SCHEMA_VERSION;
+    readonly format: SprintReportFormat;
+    readonly path?: string;
+    readonly contentHash: string;
+    readonly sizeBytes: number;
+    readonly summary: SprintReportDocument["summary"];
+    readonly closeoutEvidence: SprintReportDocument["closeoutEvidence"];
+  };
+}
+
 interface SyncStatusResult {
   readonly ok: boolean;
   readonly workspaceRoot: string;
@@ -893,10 +932,23 @@ interface AgentFinishResult {
   readonly verification: VerificationRecord;
   readonly reservation: AgentReservation;
   readonly closedWork?: WorkItem;
-  readonly agentSummary?: AgentSummaryRecord;
+  readonly agentSummary?: AgentSummaryOutputRow;
   readonly agentSummaryArtifact?: AgentSummaryArtifactResult;
   readonly release?: ReservationLifecycleResult;
   readonly status: AgentStatus;
+}
+
+interface AgentSummaryOutputRow {
+  readonly [key: string]: string | number | undefined;
+  readonly id: AgentSummaryId;
+  readonly subjectId: string;
+  readonly subjectType: AgentSummarySubjectType;
+  readonly kind: AgentSummaryKind;
+  readonly status: AgentSummaryStatus;
+  readonly outcome: AgentSummaryOutcome;
+  readonly title: string;
+  readonly artifactUri?: string;
+  readonly generatedAt: IsoTimestamp;
 }
 
 type AgentProtocolKind = "prime" | "session_start" | "session_end";
@@ -988,7 +1040,8 @@ export async function runCommand(args: ParsedArgs, output: CliOutput, cwd: strin
     throw new BorealError("BOREAL_INVALID_INPUT", `Unknown command: ${args.command.join(" ")}`);
   }
   validateCommandFlags(args, definition);
-  const json = hasFlag(args, "json");
+  const json = hasFlag(args, "json") || hasFlag(args, "brief");
+  const briefJson = hasFlag(args, "brief");
   if (definition.path[0] === "commands") {
     return commandsCommand(args, output, json);
   }
@@ -1020,6 +1073,8 @@ export async function runCommand(args: ParsedArgs, output: CliOutput, cwd: strin
         workspaceRoot: context.workspaceRoot,
         command: commandPath(definition),
         maxResultSizeChars: commandBehavior(definition).maxResultSizeChars,
+        jsonOutputProfile: briefJson ? "brief" : "full",
+        readOnly: commandBehavior(definition).readOnly,
         jsonEnvelopeMetadata: () => ledgerEnvelopeMetadata(context)
       })
     : undefined;
@@ -1178,6 +1233,13 @@ export async function runCommand(args: ParsedArgs, output: CliOutput, cwd: strin
   } catch (error) {
     thrown = error;
   }
+  if (!thrown && result && shouldRefreshGeneratedArtifactsAfterMutation(definition)) {
+    try {
+      await refreshGeneratedArtifactsInline(context);
+    } catch (error) {
+      thrown = error;
+    }
+  }
   if (operationId && startedAt) {
     try {
       await recordCliOperation(context, operationId, definition, args, startedAt, eventIdsBefore, result, thrown);
@@ -1211,7 +1273,6 @@ async function primeCommand(
   const labels = labelsFromArgs(args);
   const result = await buildAgentProtocolBrief("prime", context, agentId, labels);
   output.write(await formatRecordWithAgentDirectives(context, args, result, json, {
-    syncStatus: await buildSyncStatus(context),
     subject: { type: "workspace", id: context.workspaceRoot, title: "Workspace" }
   }));
   return { exitCode: 0 };
@@ -2600,12 +2661,14 @@ function cliEnforcementGapDataForSnapshotCode(
     };
   }
   if (code === "doctor.recovery.required" || code === "search.index-stale") {
-    return { reason: cliAttentionDiagnostics(snapshot).map((diagnostic) => diagnostic.code).join(",") };
+    return { reason: cliRecoveryDiagnostics(snapshot).map((diagnostic) => diagnostic.code).join(",") };
   }
   return undefined;
 }
 
 function cliNeedsDoctorRecoveryDirective(snapshot: AgentDirectiveSnapshot): boolean {
+  const recoveryDiagnostics = cliRecoveryDiagnostics(snapshot);
+  const commandSelfRefreshesGeneratedArtifacts = cliCommandSelfRefreshesGeneratedArtifacts(snapshot);
   const syncNeedsRefresh =
     !snapshot.sync.ok ||
     !snapshot.sync.ledgersFresh ||
@@ -2615,7 +2678,19 @@ function cliNeedsDoctorRecoveryDirective(snapshot: AgentDirectiveSnapshot): bool
     snapshot.sync.operationCount !== undefined &&
     snapshot.sync.warningThreshold !== undefined &&
     snapshot.sync.operationCount >= snapshot.sync.warningThreshold;
-  return !snapshot.doctor.ok || syncNeedsRefresh || operationNeedsPrune || cliAttentionDiagnostics(snapshot).length > 0;
+  const generatedArtifactsNeedRefresh = syncNeedsRefresh && !commandSelfRefreshesGeneratedArtifacts;
+  const doctorNeedsRecovery =
+    !snapshot.doctor.ok &&
+    (generatedArtifactsNeedRefresh || operationNeedsPrune || recoveryDiagnostics.length > 0);
+  if (cliCommandEmitsHealthRecovery(snapshot.command.path)) {
+    return (
+      doctorNeedsRecovery ||
+      generatedArtifactsNeedRefresh ||
+      operationNeedsPrune ||
+      recoveryDiagnostics.length > 0
+    );
+  }
+  return recoveryDiagnostics.length > 0;
 }
 
 function cliAttentionDiagnostics(snapshot: AgentDirectiveSnapshot): readonly AgentDirectiveDiagnosticSnapshot[] {
@@ -2625,6 +2700,67 @@ function cliAttentionDiagnostics(snapshot: AgentDirectiveSnapshot): readonly Age
       diagnostic.severity === "error" ||
       diagnostic.blocking
   );
+}
+
+function cliRecoveryDiagnostics(snapshot: AgentDirectiveSnapshot): readonly AgentDirectiveDiagnosticSnapshot[] {
+  const diagnostics = cliAttentionDiagnostics(snapshot);
+  if (cliCommandEmitsHealthRecovery(snapshot.command.path)) {
+    if (cliCommandSelfRefreshesGeneratedArtifacts(snapshot)) {
+      return diagnostics.filter((diagnostic) => !isGeneratedArtifactStalenessDiagnostic(diagnostic.code));
+    }
+    return diagnostics;
+  }
+  return diagnostics.filter((diagnostic) => !isCloseoutHealthDiagnostic(diagnostic.code));
+}
+
+function cliCommandSelfRefreshesGeneratedArtifacts(snapshot: AgentDirectiveSnapshot): boolean {
+  if (!snapshot.command.mutatesState) {
+    return false;
+  }
+  if (!INLINE_GENERATED_ARTIFACT_REFRESH_COMMANDS.has(snapshot.command.path)) {
+    return false;
+  }
+  const definition = findCommandDefinition(snapshot.command.path.split(/\s+/u));
+  if (!definition) {
+    return false;
+  }
+  const behavior = commandBehavior(definition);
+  return behavior.writesState && behavior.writesGeneratedArtifacts;
+}
+
+function isGeneratedArtifactStalenessDiagnostic(code: string): boolean {
+  return code === "ledger.status" || code === "search.index" || code === "cache.sqlite";
+}
+
+function cliCommandEmitsHealthRecovery(commandPath: string): boolean {
+  return cliCloseoutRelevantHealthCommand(commandPath) || cliHealthCommand(commandPath);
+}
+
+function cliCloseoutRelevantHealthCommand(commandPath: string): boolean {
+  return [
+    "agent finish",
+    "gate closeout",
+    "session end",
+    "sprint close",
+    "summary compose",
+    "summary show",
+    "work cancel",
+    "work close"
+  ].includes(commandPath);
+}
+
+function cliHealthCommand(commandPath: string): boolean {
+  return (
+    commandPath === "doctor" ||
+    commandPath === "prime" ||
+    commandPath === "sync refresh" ||
+    commandPath === "sync status" ||
+    commandPath.startsWith("lock ")
+  );
+}
+
+function isCloseoutHealthDiagnostic(code: string): boolean {
+  return code === "operation.volume" || isGeneratedArtifactStalenessDiagnostic(code);
 }
 
 function maxNumber(values: readonly number[]): number {
@@ -2938,7 +3074,7 @@ function directiveDebugBaseSnapshot(
       searchIndexFresh: input.syncOk ?? true,
       sqliteCacheFresh: true,
       operationCount: 0,
-      warningThreshold: 1025
+      warningThreshold: 1250
     },
     command: {
       path: commandPath,
@@ -3973,7 +4109,10 @@ function formatReadyWorkDashboard(rows: readonly WorkListRow[], containerId?: Wo
     section(
       "Queue",
       rows.length > 0
-        ? rows.map((row) => `${row.priority.padEnd(8)} ${row.id} ${row.title}${row.labels.length > 0 ? ` [${row.labels.join(", ")}]` : ""}`)
+        ? rows.map((row) => {
+            const parents = compactLineage(row.lineage);
+            return `${row.priority.padEnd(8)} ${row.id}${parents ? ` parents:${parents}` : ""} ${row.title}${row.labels.length > 0 ? ` [${row.labels.join(", ")}]` : ""}`;
+          })
         : ["No ready work matches the selected filters."]
     ),
     section("Actions", rows.length > 0 ? [`bwrk work claim${containerArg} --label <label> --agent <agent-id> --json`] : [`bwrk work list${containerArg} --json`])
@@ -4069,25 +4208,27 @@ function formatDoctorDashboard(result: Awaited<ReturnType<typeof runDoctor>>): s
   ].join("\n\n") + "\n";
 }
 
-function formatLockDashboard(inspection: Awaited<ReturnType<typeof inspectFileLock>>): string {
+function formatLockDashboard(result: RuntimeLockInspectionResult): string {
   return [
     resultSummary({
-      status: !inspection.exists ? "success" : inspection.stale ? "warning" : "info",
-      title: "State lock",
-      detail: inspection.exists ? (inspection.stale ? "stale lock present" : "active lock present") : "no active lock"
+      status: result.ok ? "success" : "warning",
+      title: "Runtime locks",
+      detail: result.ok ? "no stale locks" : "stale lock present"
     }),
-    section(
-      "Details",
-      keyValueRows([
-        { key: "lockDir", value: inspection.lockDir },
-        { key: "exists", value: inspection.exists },
-        { key: "stale", value: inspection.stale },
-        { key: "ageMs", value: inspection.ageMs ?? "" },
-        { key: "owner", value: inspection.owner ? `${inspection.owner.hostname}:${inspection.owner.pid}` : "" }
-      ]).split("\n")
-    ),
-    section("Actions", inspection.exists && inspection.stale ? ["bwrk lock break --stale-only --json"] : ["none"])
+    ...result.locks.map((lock) => section(lock.label, formatRuntimeLockDashboardRows(lock))),
+    section("Actions", result.locks.some((lock) => lock.status === "stale") ? ["bwrk doctor --fix --json"] : ["none"])
   ].join("\n\n") + "\n";
+}
+
+function formatRuntimeLockDashboardRows(lock: RuntimeLockState): readonly string[] {
+  return keyValueRows([
+    { key: "path", value: lock.inspection.lockDir },
+    { key: "status", value: lock.status },
+    { key: "stale", value: lock.inspection.stale },
+    { key: "ageMs", value: lock.inspection.ageMs ?? "" },
+    { key: "staleReason", value: lock.inspection.staleReason ?? "" },
+    { key: "owner", value: lock.inspection.owner ? `${lock.inspection.owner.hostname}:${lock.inspection.owner.pid}` : "" }
+  ]).split("\n");
 }
 
 async function agentCommand(
@@ -4195,7 +4336,9 @@ async function agentStartCommand(
     return { exitCode: 0 };
   }
 
-  const handoff = await buildHandoffResult(context, claim.work.meta.id, args, handoffResultLimit, claim.work);
+  const handoff = await buildHandoffResult(context, claim.work.meta.id, args, handoffResultLimit, claim.work, {
+    refreshGeneratedArtifacts: true
+  });
   const result = {
     started: true,
     action: "claimed_work",
@@ -4277,13 +4420,12 @@ async function agentFinishCommand(
     verification: finished.verification,
     reservation: finished.reservation,
     closedWork: finished.closedWork,
-    agentSummary: finished.agentSummary,
+    agentSummary: finished.agentSummary ? agentSummaryRow(finished.agentSummary) : undefined,
     agentSummaryArtifact: closeoutSummaryArtifact,
     release: finished.release,
     status: await buildAgentStatus(context, agentId, [])
   } satisfies AgentFinishResult;
-  const resultWithPostState = { ...result, postMutationWork: result.work };
-  output.write(await formatRecordWithAgentDirectives(context, args, withCliResult(resultWithPostState, workCliResult(result.work)), json, {
+  output.write(await formatRecordWithAgentDirectives(context, args, withCliResult(result, workCliResult(result.work)), json, {
     subjectWork: finished.closedWork ?? finished.work
   }));
   return { exitCode: 0 };
@@ -4415,11 +4557,10 @@ async function idempotentAgentFinishResult(
     action: "already_closed",
     agentId: normalizeActorId(agentId),
     work: workView,
-    postMutationWork: workView,
     evidence: evidence.filter(isEvidenceRecord),
     verification: verifications.filter(isVerificationRecord),
-    agentSummary: snapshot.latestSummary,
-    existingSummary: snapshot.latestSummary,
+    agentSummary: snapshot.latestSummary ? agentSummaryRow(snapshot.latestSummary) : undefined,
+    existingSummary: snapshot.latestSummary ? agentSummaryRow(snapshot.latestSummary) : undefined,
     closedBy: snapshot.closed.closedBy,
     closedAt: snapshot.closed.closedAt,
     closingEventId: snapshot.closed.closingEventId,
@@ -4658,13 +4799,12 @@ async function finishCurrentReservationCommand(input: {
     verification: finished.verification,
     reservation: finished.reservation,
     closedWork: finished.closedWork,
-    agentSummary: finished.agentSummary,
+    agentSummary: finished.agentSummary ? agentSummaryRow(finished.agentSummary) : undefined,
     agentSummaryArtifact: closeoutSummaryArtifact,
     release: finished.release,
     status: await buildAgentStatus(input.context, agentId, [])
   } satisfies AgentFinishResult;
-  const resultWithPostState = { ...result, postMutationWork: result.work };
-  input.output.write(await formatRecordWithAgentDirectives(input.context, input.args, resultWithPostState, input.json, {
+  input.output.write(await formatRecordWithAgentDirectives(input.context, input.args, result, input.json, {
     subjectWork: finished.closedWork ?? finished.work
   }));
   return { exitCode: 0 };
@@ -5371,6 +5511,7 @@ function readyWorkCommandRow(
   view: WorkItemView,
   input: {
     readonly containerId?: WorkId;
+    readonly lineage?: readonly WorkLineageEntry[];
     readonly labels: readonly string[];
     readonly agentId: string;
     readonly purpose?: string;
@@ -5378,7 +5519,7 @@ function readyWorkCommandRow(
   }
 ): WorkListRow {
   const workId = asWorkId(view.id);
-  const row = workViewListRow(view, input.containerId);
+  const row = workViewListRow(view, input.containerId, input.lineage);
   return {
     ...row,
     agentId: input.agentId,
@@ -5417,6 +5558,7 @@ function buildWorkParallelResult(input: {
   readonly containerId?: WorkId;
   readonly limit: number;
   readonly views: readonly WorkItemView[];
+  readonly lineageById: ReadonlyMap<WorkId, readonly WorkLineageEntry[]>;
 }): WorkParallelResult {
   const purpose = flagValue(input.args, "purpose");
   const explicitSessionId = flagValue(input.args, "session");
@@ -5424,6 +5566,7 @@ function buildWorkParallelResult(input: {
   const items = input.views.map((view, index) =>
     readyWorkCommandRow(view, {
       containerId: input.containerId,
+      lineage: input.lineageById.get(asWorkId(view.id)) ?? [],
       labels: input.labels,
       agentId: agentSelection.agentIdForIndex(index),
       purpose,
@@ -5543,6 +5686,13 @@ function workParallelCommandForFilters(input: {
 
 function bwrkCommand(args: readonly string[]): string {
   return ["bwrk", ...args].map(shellArg).join(" ");
+}
+
+async function workLineageByIdFromStore(context: CliContext): Promise<ReadonlyMap<WorkId, readonly WorkLineageEntry[]>> {
+  return context.store.read(async (reader) => {
+    const [workItems, graphEdges] = await Promise.all([reader.listWorkItems(), reader.listGraphEdges()]);
+    return workLineageById(workItems, graphEdges);
+  });
 }
 
 function sessionArgs(sessionId: string | undefined): readonly string[] {
@@ -5776,19 +5926,28 @@ async function workCommand(
       return { exitCode: 0 };
     }
     case "list": {
-      const status = listStatus(args);
+      const readyOnly = hasFlag(args, "ready");
+      const status = readyOnly ? undefined : listStatus(args);
+      if (readyOnly) {
+        listStatus(args);
+      }
       const labels = labelsFromArgs(args);
       const limit = parseLimit(flagValue(args, "limit")) ?? DEFAULT_LIST_LIMIT;
       const containerId = await optionalContainerIdFromArgs(context, args);
-      const items = await context.store.read(async (reader) => {
+      const rows = await context.store.read(async (reader) => {
         const [workItems, graphEdges] = await Promise.all([reader.listWorkItems(), reader.listGraphEdges()]);
         const scopedIds = containerId ? heartbeatScopeIds(containerId, workItems, graphEdges) : undefined;
+        const lineageById = workLineageById(workItems, graphEdges);
+        const claimableIds = readyOnly
+          ? new Set(claimableWorkItems(workItems, labels, graphEdges).map((work) => work.meta.id))
+          : undefined;
         return workItems
-          .filter((work) => !status || work.status === status)
-          .filter((work) => labels.every((label) => work.labels.includes(label)))
-          .filter((work) => !scopedIds || scopedIds.has(work.meta.id));
+          .filter((work) => (claimableIds ? claimableIds.has(work.meta.id) : !status || work.status === status))
+          .filter((work) => claimableIds || labels.every((label) => work.labels.includes(label)))
+          .filter((work) => !scopedIds || scopedIds.has(work.meta.id))
+          .slice(0, limit)
+          .map((work) => workListRow(work, containerId, lineageById.get(work.meta.id) ?? []));
       });
-      const rows = items.slice(0, limit).map((work) => workListRow(work, containerId));
       output.write(json ? formatRecord(rows, true) : table(rows.map(textWorkListRow)));
       return { exitCode: 0 };
     }
@@ -5811,12 +5970,22 @@ async function workCommand(
       const purpose = flagValue(args, "purpose");
       const explicitSessionId = flagValue(args, "session");
       const views = await context.runtime.listReadyWork();
+      const lineageById = await workLineageByIdFromStore(context);
       const rows = views
         .filter((view) => labels.every((label) => view.labels.includes(label)))
         .filter((view) => !scopedIds || scopedIds.has(view.id as WorkId))
         .sort(compareWorkViews)
         .slice(0, limit)
-        .map((view) => readyWorkCommandRow(view, { containerId, labels, agentId, purpose, sessionId: explicitSessionId }));
+        .map((view) =>
+          readyWorkCommandRow(view, {
+            containerId,
+            lineage: lineageById.get(asWorkId(view.id)) ?? [],
+            labels,
+            agentId,
+            purpose,
+            sessionId: explicitSessionId
+          })
+        );
       output.write(json ? formatRecord(rows, true) : dashboardView(args) ? formatReadyWorkDashboard(rows, containerId) : table(rows.map(textWorkListRow)));
       return { exitCode: 0 };
     }
@@ -5830,7 +5999,7 @@ async function workCommand(
         .filter((view) => !scopedIds || scopedIds.has(view.id as WorkId))
         .sort(compareWorkViews)
         .slice(0, limit);
-      const result = buildWorkParallelResult({ context, args, labels, containerId, limit, views });
+      const result = buildWorkParallelResult({ context, args, labels, containerId, limit, views, lineageById: await workLineageByIdFromStore(context) });
       output.write(json ? formatRecord(result, true) : formatWorkParallelResult(result));
       return { exitCode: 0 };
     }
@@ -5993,9 +6162,8 @@ async function workCommand(
         generatedAt: nowIso(),
         workspaceRoot: context.workspaceRoot,
         work: closed,
-        postMutationWork: await context.runtime.getWorkView(closed.meta.id),
-        agentSummaries: closeoutSummary.summaries,
-        createdAgentSummary: closeoutSummary.created?.summary,
+        agentSummaries: closeoutSummary.summaries.map(agentSummaryRow),
+        createdAgentSummary: closeoutSummary.created ? agentSummaryRow(closeoutSummary.created.summary) : undefined,
         createdAgentSummaryArtifact: createdArtifact
       };
       output.write(await formatRecordWithAgentDirectives(context, args, withCliResult(result, workCliResult(closed)), json, { subjectWork: closed }));
@@ -6040,8 +6208,8 @@ async function workCommand(
         generatedAt: nowIso(),
         workspaceRoot: context.workspaceRoot,
         ...result,
-        agentSummaries: closeoutSummary.summaries,
-        createdAgentSummary: closeoutSummary.created?.summary,
+        agentSummaries: closeoutSummary.summaries.map(agentSummaryRow),
+        createdAgentSummary: closeoutSummary.created ? agentSummaryRow(closeoutSummary.created.summary) : undefined,
         createdAgentSummaryArtifact: createdArtifact
       };
       output.write(await formatRecordWithAgentDirectives(context, args, outputResult, json, { subjectWorkId: workId }));
@@ -6507,11 +6675,8 @@ async function evidenceCommand(
     command: flagValue(args, "command"),
     uri: flagValue(args, "uri")
   });
-  const result = withCliResult(
-    { ...evidence, closeoutGateStatus: await closeoutGateStatusForWork(context, evidence.subjectId as WorkId) },
-    evidenceCliResult(evidence)
-  );
-  output.write(await formatRecordWithAgentDirectives(context, args, result, json, { subjectWorkId: evidence.subjectId as WorkId }));
+  const result = withCliResult(evidence, evidenceCliResult(evidence));
+  output.write(formatRecord(result, json));
   return { exitCode: 0 };
 }
 
@@ -7470,7 +7635,7 @@ async function backfillAgentSummaries(context: CliContext, args: ParsedArgs) {
   };
 }
 
-function agentSummaryRow(summary: AgentSummaryRecord) {
+function agentSummaryRow(summary: AgentSummaryRecord): AgentSummaryOutputRow {
   return {
     id: summary.meta.id,
     subjectId: summary.subjectId,
@@ -8493,7 +8658,7 @@ async function syncCommand(
         syncRefreshed: true,
         subject: { type: "workspace", id: context.workspaceRoot, title: "Workspace" }
       }));
-      return { exitCode: result.postRefreshStatusOk ? 0 : 1 };
+      return { exitCode: hasFlag(args, "strict") && !result.postRefreshStatusOk ? 1 : 0 };
     }
     default:
       throw new BorealError("BOREAL_INVALID_INPUT", `Unknown sync command: ${action ?? ""}`);
@@ -8501,15 +8666,7 @@ async function syncCommand(
 }
 
 async function buildSyncRefreshResult(context: CliContext): Promise<SyncRefreshResult> {
-  const views = await rebuildProjectionsRespectingTombstones(context);
-  const searchIndex = await writeSearchIndex(context);
-  const ledgers = await exportLedgers(context, undefined);
-  const cacheDocument = await buildExportDocument(context);
-  const sqliteCache = await rebuildSQLiteCache({
-    rootDir: context.workspaceRoot,
-    snapshot: cacheDocument.state,
-    sourceContentHash: cacheDocument.contentHash
-  });
+  const { views, searchIndex, ledgers, sqliteCache } = await refreshGeneratedArtifactsInline(context);
   const status = await buildSyncStatus(context);
   return {
     refreshed: true,
@@ -8522,6 +8679,37 @@ async function buildSyncRefreshResult(context: CliContext): Promise<SyncRefreshR
     sqliteCache,
     status
   };
+}
+
+function shouldRefreshGeneratedArtifactsAfterMutation(definition: CommandDefinition): boolean {
+  const behavior = commandBehavior(definition);
+  return (
+  INLINE_GENERATED_ARTIFACT_REFRESH_COMMANDS.has(definition.path.join(" ")) &&
+    behavior.writesState &&
+    behavior.writesGeneratedArtifacts
+  );
+}
+
+const INLINE_GENERATED_ARTIFACT_REFRESH_COMMANDS = new Set([
+  "agent finish",
+  "evidence add",
+  "sprint close",
+  "summary compose",
+  "work close",
+  "work verify"
+]);
+
+async function refreshGeneratedArtifactsInline(context: CliContext) {
+  const views = await rebuildProjectionsRespectingTombstones(context);
+  const searchIndex = await writeSearchIndex(context);
+  const ledgers = await exportLedgers(context, undefined);
+  const cacheDocument = await buildExportDocument(context);
+  const sqliteCache = await rebuildSQLiteCache({
+    rootDir: context.workspaceRoot,
+    snapshot: cacheDocument.state,
+    sourceContentHash: cacheDocument.contentHash
+  });
+  return { views, searchIndex, ledgers, sqliteCache };
 }
 
 async function vaultCommand(
@@ -8838,6 +9026,21 @@ interface CliAgentDirectiveOptions {
   readonly recommendedCommandPath?: string;
 }
 
+interface CliAgentDirectiveWorkScope {
+  readonly subjectWork?: WorkItem;
+  readonly workItems: readonly WorkItem[];
+  readonly graphEdges: readonly GraphEdge[];
+}
+
+const AGENT_DIRECTIVE_SESSION_CACHE_SCHEMA_VERSION = "boreal.agent-directive-session-cache.v1";
+const AGENT_DIRECTIVE_SESSION_CACHE_LIMIT = 200;
+
+interface AgentDirectiveSessionCache {
+  readonly schemaVersion: typeof AGENT_DIRECTIVE_SESSION_CACHE_SCHEMA_VERSION;
+  readonly sessionId: string;
+  readonly sourceHashes: readonly ContentHash[];
+}
+
 async function formatRecordWithAgentDirectives(
   context: CliContext,
   args: ParsedArgs,
@@ -8849,7 +9052,85 @@ async function formatRecordWithAgentDirectives(
     return formatRecord(value, false);
   }
   const agentDirectives = await compileCliAgentDirectiveBundles(context, args, options);
-  return formatRecord(value, true, { agentDirectives });
+  const outputDirectives = await agentDirectiveOutputForSession(context, agentDirectives);
+  return formatRecord(value, true, { agentDirectives: outputDirectives });
+}
+
+async function agentDirectiveOutputForSession(
+  context: CliContext,
+  bundles: readonly AgentDirectiveBundle[]
+): Promise<AgentDirectiveOutput> {
+  if (bundles.length === 0) {
+    return [];
+  }
+  const sourceHashes = uniqueStrings(
+    bundles
+      .map((bundle) => bundle.meta.sourceSnapshotHash)
+      .filter((hash): hash is ContentHash => typeof hash === "string" && hash.startsWith("sha256:"))
+  ) as unknown as readonly ContentHash[];
+  if (sourceHashes.length === 0) {
+    return bundles;
+  }
+
+  const cache = await readAgentDirectiveSessionCache(context);
+  const previousHashes = new Set(cache.sourceHashes);
+  const unchanged = sourceHashes.every((hash) => previousHashes.has(hash));
+  const nextHashes = uniqueStrings([...cache.sourceHashes, ...sourceHashes]).slice(
+    -AGENT_DIRECTIVE_SESSION_CACHE_LIMIT
+  ) as unknown as readonly ContentHash[];
+  if (!arraysEqual(cache.sourceHashes, nextHashes)) {
+    await writeAgentDirectiveSessionCache(context, {
+      schemaVersion: AGENT_DIRECTIVE_SESSION_CACHE_SCHEMA_VERSION,
+      sessionId: context.sessionId,
+      sourceHashes: nextHashes
+    });
+  }
+
+  if (!unchanged) {
+    return bundles;
+  }
+  return {
+    unchanged: true,
+    sourceHash: sourceHashes.length === 1 ? sourceHashes[0] as string : hashContent(sourceHashes)
+  };
+}
+
+async function readAgentDirectiveSessionCache(context: CliContext): Promise<AgentDirectiveSessionCache> {
+  const empty = {
+    schemaVersion: AGENT_DIRECTIVE_SESSION_CACHE_SCHEMA_VERSION,
+    sessionId: context.sessionId,
+    sourceHashes: []
+  } satisfies AgentDirectiveSessionCache;
+  try {
+    const parsed = JSON.parse(await readFile(agentDirectiveSessionCachePath(context), "utf8")) as unknown;
+    if (isAgentDirectiveSessionCache(parsed) && parsed.sessionId === context.sessionId) {
+      return parsed;
+    }
+  } catch {
+    return empty;
+  }
+  return empty;
+}
+
+async function writeAgentDirectiveSessionCache(context: CliContext, cache: AgentDirectiveSessionCache): Promise<void> {
+  const path = agentDirectiveSessionCachePath(context);
+  await mkdir(dirname(path), { recursive: true });
+  await writeTextFileAtomic(path, `${JSON.stringify(cache, null, 2)}\n`);
+}
+
+function agentDirectiveSessionCachePath(context: CliContext): string {
+  const safeSessionId = context.sessionId.replace(/[^a-z0-9._-]+/giu, "-").slice(0, 120) || "local";
+  return join(context.workspaceRoot, ".boreal", "cache", "agent-directives", `${safeSessionId}.json`);
+}
+
+function isAgentDirectiveSessionCache(value: unknown): value is AgentDirectiveSessionCache {
+  return (
+    isRecord(value) &&
+    value.schemaVersion === AGENT_DIRECTIVE_SESSION_CACHE_SCHEMA_VERSION &&
+    typeof value.sessionId === "string" &&
+    Array.isArray(value.sourceHashes) &&
+    value.sourceHashes.every((hash) => typeof hash === "string" && hash.startsWith("sha256:"))
+  );
 }
 
 async function compileCliAgentDirectiveBundles(
@@ -8911,22 +9192,29 @@ async function buildCliAgentDirectiveSnapshot(
   options: CliAgentDirectiveOptions
 ): Promise<AgentDirectiveSnapshot> {
   const command = cliDirectiveCommandPath(args);
-  const syncStatus = options.syncStatus ?? await buildSyncStatus(context);
+  const syncStatus = options.syncStatus ?? (cliCommandIsReadOnly(args) ? unprobedSyncStatus(context) : await buildSyncStatus(context));
   const doctor = options.doctorResult;
   const actorId = optionalAgentIdFromArgs(args) ?? String(context.actor.id);
   const generatedAt = nowIso();
   return context.store.read(async (reader) => {
-    const [workItems, graphEdges, evidence, verifications, summaries, reservations] = await Promise.all([
-      reader.listWorkItems(),
-      reader.listGraphEdges(),
-      reader.listEvidence(),
-      reader.listVerifications(),
-      reader.listAgentSummaries(),
-      reader.listReservations()
-    ]);
-    const workById = new Map(workItems.map((work) => [work.meta.id, work]));
-    const subjectWork = options.subjectWork ?? (options.subjectWorkId ? workById.get(options.subjectWorkId) : undefined);
+    const workScope = await readCliAgentDirectiveWorkScope(reader, options);
+    const { subjectWork, workItems, graphEdges } = workScope;
     const subjectWorkId = subjectWork?.meta.id;
+    const subjectSubtreeWorkIds = subjectWork ? workItems.map((work) => work.meta.id) : [];
+    const [evidence, verifications, summaries, reservations] = subjectWork
+      ? await Promise.all([
+          readEvidenceForSubjects(reader, subjectSubtreeWorkIds),
+          readVerificationsForSubjects(reader, subjectSubtreeWorkIds),
+          readAgentSummariesForSubjects(reader, subjectSubtreeWorkIds),
+          readReservationsForWorks(reader, subjectSubtreeWorkIds)
+        ])
+      : await Promise.all([
+          Promise.resolve([] as readonly EvidenceRecord[]),
+          Promise.resolve([] as readonly VerificationRecord[]),
+          Promise.resolve([] as readonly AgentSummaryRecord[]),
+          reader.listReservations()
+        ]);
+    const workById = new Map(workItems.map((work) => [work.meta.id, work]));
     const dependencyIds = subjectWork ? dependencyIdsForWork(subjectWork, graphEdges) : [];
     const dependencyWork = dependencyIds.map((id) => workById.get(id)).filter(isWorkItem);
     const activeBlockerIds = dependencyWork.filter((work) => isOpenWorkStatus(work.status)).map((work) => work.meta.id);
@@ -9059,6 +9347,97 @@ async function buildCliAgentDirectiveSnapshot(
       }
     });
   });
+}
+
+async function readCliAgentDirectiveWorkScope(
+  reader: BorealReader,
+  options: CliAgentDirectiveOptions
+): Promise<CliAgentDirectiveWorkScope> {
+  const subjectWork = options.subjectWork ?? (options.subjectWorkId ? await reader.getWorkItem(options.subjectWorkId) : undefined);
+  if (!subjectWork) {
+    return {
+      workItems: [],
+      graphEdges: []
+    };
+  }
+
+  const workById = new Map<WorkId, WorkItem>([[subjectWork.meta.id, subjectWork]]);
+  const graphEdgesById = new Map<GraphEdgeId, GraphEdge>();
+  const visited = new Set<WorkId>();
+  const pending: WorkId[] = [subjectWork.meta.id];
+
+  while (pending.length > 0) {
+    const workId = pending.shift() as WorkId;
+    if (visited.has(workId)) {
+      continue;
+    }
+    visited.add(workId);
+
+    const work = workById.get(workId);
+    const graphEdges = await reader.listGraphEdgesForSubject(workId);
+    for (const edge of graphEdges) {
+      graphEdgesById.set(edge.meta.id, edge);
+    }
+
+    if (!work) {
+      continue;
+    }
+    for (const dependencyId of dependencyIdsForWork(work, graphEdges)) {
+      if (!workById.has(dependencyId)) {
+        const dependency = await reader.getWorkItem(dependencyId);
+        if (dependency) {
+          workById.set(dependencyId, dependency);
+        }
+      }
+      if (!visited.has(dependencyId) && workById.has(dependencyId)) {
+        pending.push(dependencyId);
+      }
+    }
+  }
+
+  return {
+    subjectWork,
+    workItems: [...workById.values()],
+    graphEdges: [...graphEdgesById.values()]
+  };
+}
+
+async function readEvidenceForSubjects(
+  reader: BorealReader,
+  subjectIds: readonly WorkId[]
+): Promise<readonly EvidenceRecord[]> {
+  return uniqueRecordsById((await Promise.all(subjectIds.map((id) => reader.listEvidenceForSubject(id)))).flat());
+}
+
+async function readVerificationsForSubjects(
+  reader: BorealReader,
+  subjectIds: readonly WorkId[]
+): Promise<readonly VerificationRecord[]> {
+  return uniqueRecordsById((await Promise.all(subjectIds.map((id) => reader.listVerificationsForSubject(id)))).flat());
+}
+
+async function readAgentSummariesForSubjects(
+  reader: BorealReader,
+  subjectIds: readonly WorkId[]
+): Promise<readonly AgentSummaryRecord[]> {
+  return uniqueRecordsById((await Promise.all(subjectIds.map((id) => reader.listAgentSummariesForSubject(id)))).flat());
+}
+
+async function readReservationsForWorks(
+  reader: BorealReader,
+  workIds: readonly WorkId[]
+): Promise<readonly AgentReservation[]> {
+  return uniqueRecordsById((await Promise.all(workIds.map((id) => reader.listReservationsForWork(id)))).flat());
+}
+
+function uniqueRecordsById<TRecord extends { readonly meta: { readonly id: string } }>(
+  records: readonly TRecord[]
+): readonly TRecord[] {
+  const byId = new Map<string, TRecord>();
+  for (const record of records) {
+    byId.set(record.meta.id, record);
+  }
+  return [...byId.values()];
 }
 
 function directiveGateStatesFromCloseoutStatus(status: CloseoutGateStatusView): readonly AgentDirectiveGateStateSnapshot[] {
@@ -9250,16 +9629,42 @@ function cliHealthRecoveryNeeded(
   doctor: DoctorResult | undefined,
   syncStatus: SyncStatusResult
 ): boolean {
-  if (!syncStatus.ok) {
+  const syncDiagnostics = syncStatusDiagnostics(syncStatus);
+  const emitsHealthRecovery = cliCommandEmitsHealthRecovery(command);
+  const actionableSyncDiagnostics = emitsHealthRecovery
+    ? syncDiagnostics
+    : syncDiagnostics.filter((diagnostic) => !isCloseoutHealthDiagnostic(diagnostic.code));
+  if (actionableSyncDiagnostics.length > 0 && !commandSelfRefreshesGeneratedArtifacts(command, syncDiagnostics)) {
     return true;
   }
   if (doctor) {
-    return !doctor.ok || doctor.diagnostics.some(doctorDiagnosticNeedsAttention);
+    const actionableDoctorDiagnostics = emitsHealthRecovery
+      ? doctor.diagnostics
+      : doctor.diagnostics.filter((diagnostic) => !isCloseoutHealthDiagnostic(diagnostic.code));
+    return (!doctor.ok && (emitsHealthRecovery || actionableDoctorDiagnostics.length > 0)) ||
+      actionableDoctorDiagnostics.some(doctorDiagnosticNeedsAttention);
   }
   if (command === "doctor" || command.startsWith("sync ") || command.startsWith("lock ")) {
-    return syncStatusDiagnostics(syncStatus).length > 0;
+    return syncDiagnostics.length > 0;
   }
   return false;
+}
+
+function commandSelfRefreshesGeneratedArtifacts(
+  command: string,
+  syncDiagnostics: readonly AgentDirectiveDiagnosticSnapshot[]
+): boolean {
+  const definition = findCommandDefinition(command.split(/\s+/u));
+  if (!definition) {
+    return false;
+  }
+  const behavior = commandBehavior(definition);
+  return (
+    behavior.writesState &&
+    behavior.writesGeneratedArtifacts &&
+    syncDiagnostics.length > 0 &&
+    syncDiagnostics.every((diagnostic) => isGeneratedArtifactStalenessDiagnostic(diagnostic.code))
+  );
 }
 
 function doctorDiagnosticNeedsAttention(diagnostic: Diagnostic): boolean {
@@ -9291,6 +9696,79 @@ function cliCommandMutatesState(args: ParsedArgs): boolean {
   }
   const behavior = commandBehavior(definition);
   return behavior.writesState || behavior.writesGeneratedArtifacts;
+}
+
+function cliCommandIsReadOnly(args: ParsedArgs): boolean {
+  const definition = findCommandDefinition(args.command);
+  if (!definition) {
+    return false;
+  }
+  return commandBehavior(definition).readOnly;
+}
+
+function unprobedSyncStatus(context: CliContext): SyncStatusResult {
+  const contentHash = hashContent({ kind: "unprobed-sync", workspaceRoot: context.workspaceRoot }) as ContentHash;
+  return {
+    ok: true,
+    workspaceRoot: context.workspaceRoot,
+    checkedAt: nowIso(),
+    vault: {
+      ok: true,
+      initialized: false,
+      rootDir: join(context.workspaceRoot, "memory"),
+      schemaVersion: VAULT_SCHEMA_VERSION,
+      health: {
+        ok: true,
+        hasWarnings: false,
+        rawSourceCount: 0,
+        wikiPageCount: 0,
+        ledgerEventCount: 0,
+        brokenLinks: [],
+        orphanPages: [],
+        missingSourceRefs: [],
+        staleClaims: [],
+        malformedRawRecords: [],
+        malformedLedgerEvents: [],
+        missingArchiveRefs: [],
+        missingMergeRefs: []
+      },
+      requiredDirectories: [],
+      requiredFiles: [],
+      missingDirectories: [],
+      missingFiles: [],
+      invalidPaths: []
+    },
+    ledgers: {
+      ok: true,
+      path: join(context.workspaceRoot, ".boreal", "ledgers", "manifest.json"),
+      exists: false,
+      stale: false,
+      expectedContentHash: contentHash,
+      reconstructable: true
+    },
+    searchIndex: {
+      ok: true,
+      path: join(context.workspaceRoot, ".boreal", "runtime", "search-index.json"),
+      exists: false,
+      stale: false,
+      expectedContentHash: contentHash
+    },
+    git: {
+      ok: true,
+      available: false,
+      insideWorktree: false,
+      workspaceRoot: context.workspaceRoot,
+      detached: false,
+      protectedBranch: false,
+      protectedBranches: [],
+      checkedPaths: [],
+      collaborationDirtyPaths: [],
+      blockingDirtyPaths: [],
+      findings: [],
+      recommendedActions: []
+    },
+    recommendedActions: []
+  };
 }
 
 function uniqueGitPaths(paths: readonly { readonly status: string; readonly path: string }[]): readonly { readonly status: string; readonly path: string }[] {
@@ -9964,7 +10442,7 @@ async function docsCheckResult(context: CliContext) {
 async function gateCloseoutResult(context: CliContext, args: ParsedArgs) {
   const generatedAt = nowIso();
   const strict = hasFlag(args, "strict");
-  const autoPruneOperations = hasFlag(args, "auto-prune-operations");
+  const autoPruneOperations = !hasFlag(args, "no-auto-prune-operations");
   let checks = await runGateCloseoutChecks(context, strict);
   let operationPrune: GateOperationPruneResult | undefined;
   if (autoPruneOperations && shouldAutoPruneOperationVolume(checks, strict)) {
@@ -9983,6 +10461,8 @@ async function gateCloseoutResult(context: CliContext, args: ParsedArgs) {
     autoPruneOperations,
     operationPrune,
     ok: checks.ok,
+    fixed: checks.doctor.fixed || operationPrune !== undefined,
+    blockingDiagnosticCodes: checks.doctor.blockingDiagnosticCodes,
     reviewGates,
     sync: gateSyncView(checks.sync),
     doctor: gateDoctorView(checks.doctor),
@@ -10032,6 +10512,7 @@ function gateDoctorView(doctor: DoctorResult) {
     errors: doctor.diagnostics.filter((diagnostic) => diagnostic.severity === "error").length,
     warnings: doctor.diagnostics.filter((diagnostic) => diagnostic.severity === "warning").length,
     fixedCount: doctor.diagnostics.filter((diagnostic) => diagnostic.severity === "fixed").length,
+    blockingDiagnosticCodes: doctor.blockingDiagnosticCodes,
     diagnostics: doctor.diagnostics
   };
 }
@@ -10146,7 +10627,10 @@ async function registryCommand(
       return { exitCode: 0 };
     }
     case "remove": {
-      const result = await removeProjectRegistryEntry(requiredPositional(rest, 0, "project id"), options);
+      const result = await removeProjectRegistryEntry(requiredPositional(rest, 0, "project id"), {
+        ...options,
+        purge: hasFlag(args, "purge")
+      });
       output.write(json ? formatRecord(result, true) : formatRegistryRemove(result));
       return { exitCode: 0 };
     }
@@ -10168,6 +10652,7 @@ function formatRegistryList(result: RegistryListResult): string {
     result.entries.map((entry) => ({
       id: entry.id,
       name: entry.display.name,
+      lifecycle: entry.lifecycle,
       projectRoot: entry.projectRoot,
       memoryRoot: entry.memoryRoot,
       git: entry.memoryGitMode
@@ -10185,7 +10670,8 @@ function formatRegistryImport(result: RegistryImportSetupResult): string {
 }
 
 function formatRegistryRemove(result: RegistryRemoveResult): string {
-  return `Removed ${result.entry.display.name} (${result.entry.id})\n`;
+  const action = result.purged ? "Purged" : "Archived";
+  return `${action} ${result.entry.display.name} (${result.entry.id})\n`;
 }
 
 function formatRegistryDoctor(result: RegistryDoctorResult): string {
@@ -10299,7 +10785,10 @@ async function unlinkCommand(
   if (!id) {
     throw new BorealError("BOREAL_INVALID_INPUT", "Provide the project id to unlink: bwrk unlink <project-id>");
   }
-  const result = await removeProjectRegistryEntry(id, { registryRoot: flagValue(args, "registry-root") });
+  const result = await removeProjectRegistryEntry(id, {
+    registryRoot: flagValue(args, "registry-root"),
+    purge: hasFlag(args, "purge")
+  });
   output.write(json ? formatRecord(result, true) : formatRegistryRemove(result));
   return { exitCode: 0 };
 }
@@ -10484,8 +10973,9 @@ async function buildGlobalDashboardResult(context: CliContext, args: ParsedArgs)
     listProjectRegistry(registryOptions),
     doctorProjectRegistry(registryOptions)
   ]);
-  const registryEntries = registryList.entries.length > 0
-    ? registryList.entries
+  const activeRegistryEntries = registryList.entries.filter((entry) => entry.lifecycle !== "archived" && entry.lifecycle !== "paused");
+  const registryEntries = activeRegistryEntries.length > 0
+    ? activeRegistryEntries
     : [await currentWorkspaceDashboardRegistryEntry(context, generatedAt)];
   const limitedRegistryEntries = registryEntries.slice(0, projectLimit);
   const registryFindings = dashboardRegistryFindingsByProject(registryDoctor);
@@ -10978,8 +11468,14 @@ async function currentWorkspaceDashboardRegistryEntry(
   }
   const projectRoot = context.workspaceRoot;
   const memoryRoot = resolve(config?.memoryRoot ?? join(projectRoot, "memory"));
+  const identity = deriveProjectRegistryIdentity({
+    projectRoot,
+    projectConfig: config as unknown as Readonly<Record<string, unknown>> | undefined
+  });
   return {
-    id: "project_current",
+    id: projectRegistryEntryIdFromIdentity(identity),
+    identity,
+    lifecycle: "linked",
     display: {
       name: basename(projectRoot),
       labels: []
@@ -11082,28 +11578,35 @@ async function sprintCommand(
     case "close": {
       const sprint = await resolveSprintWork(context, rest[0] ?? "current");
       const reason = requiredFlag(args, "reason");
-	      const metrics = await sprintMetricsResult(context, sprint, args, reason);
-	      const closeoutSummary = await ensureAgentSummaryForClose(context, args, sprint, reason);
-	      const closed = await context.runtime.closeWork({
-	        workId: sprint.meta.id,
-	        reason,
-	        agentSummary: closeoutSummary.created?.summary,
-	        agentSummaryIds: closeoutSummary.summaries.map((summary) => summary.meta.id)
-	      });
-	      const createdArtifact = closeoutSummary.created
-	        ? await writeAgentSummaryArtifact(context, closeoutSummary.created.summary)
-	        : undefined;
-	      const result = {
-	        schemaVersion: "boreal.cli.sprint.close.v1",
-	        generatedAt: nowIso(),
-	        workspaceRoot: context.workspaceRoot,
-	        closed,
-	        metrics,
-	        agentSummaries: closeoutSummary.summaries,
-	        createdAgentSummary: closeoutSummary.created?.summary,
-	        createdAgentSummaryArtifact: createdArtifact
-	      };
-	      output.write(await formatRecordWithAgentDirectives(context, args, withCliResult(result, workCliResult(closed)), json, { subjectWork: closed }));
+      const autoReport = hasFlag(args, "auto-report")
+        ? await sprintCloseAutoReportResult(context, sprint, args)
+        : undefined;
+      const sprintForClose = autoReport
+        ? await context.store.read((reader) => requireCliWork(reader, sprint.meta.id))
+        : sprint;
+      const metrics = await sprintMetricsResult(context, sprintForClose, args, reason);
+      const closeoutSummary = await ensureAgentSummaryForClose(context, args, sprintForClose, reason);
+      const closed = await context.runtime.closeWork({
+        workId: sprint.meta.id,
+        reason,
+        agentSummary: closeoutSummary.created?.summary,
+        agentSummaryIds: closeoutSummary.summaries.map((summary) => summary.meta.id)
+      });
+      const createdArtifact = closeoutSummary.created
+        ? await writeAgentSummaryArtifact(context, closeoutSummary.created.summary)
+        : undefined;
+      const result = {
+        schemaVersion: "boreal.cli.sprint.close.v1",
+        generatedAt: nowIso(),
+        workspaceRoot: context.workspaceRoot,
+        closed,
+        metrics,
+        autoReport,
+        agentSummaries: closeoutSummary.summaries.map(agentSummaryRow),
+        createdAgentSummary: closeoutSummary.created ? agentSummaryRow(closeoutSummary.created.summary) : undefined,
+        createdAgentSummaryArtifact: createdArtifact
+      };
+      output.write(await formatRecordWithAgentDirectives(context, args, withCliResult(result, workCliResult(closed)), json, { subjectWork: closed }));
       return { exitCode: 0 };
     }
     default:
@@ -11346,11 +11849,119 @@ function metricWorkRow(work: WorkItemView): WorkListRow {
   };
 }
 
+async function sprintCloseAutoReportResult(
+  context: CliContext,
+  sprint: WorkItem,
+  args: ParsedArgs
+): Promise<SprintCloseAutoReportResult> {
+  const strict = hasFlag(args, "strict");
+  const sync = await buildSyncRefreshResult(context);
+  if (!sync.postRefreshStatusOk) {
+    throw new BorealError("BOREAL_POLICY_VIOLATION", "Sprint auto-report sync refresh did not finish healthy", {
+      sprintId: sprint.meta.id,
+      exitReason: sync.exitReason,
+      recommendedActions: sync.status.recommendedActions
+    });
+  }
+  const syncEvidence = await context.runtime.recordEvidence({
+    subjectId: sprint.meta.id,
+    subjectType: "work",
+    kind: "command",
+    outcome: "passed",
+    summary: "Sprint close auto-report sync refresh passed.",
+    command: "bwrk sync refresh --json"
+  });
+  await refreshGeneratedArtifactsInline(context);
+
+  const doctor = await runDoctor(context, false, strict);
+  if (!doctor.ok) {
+    throw new BorealError("BOREAL_POLICY_VIOLATION", "Sprint auto-report doctor gate did not pass", {
+      sprintId: sprint.meta.id,
+      strict,
+      blockingDiagnosticCodes: doctor.blockingDiagnosticCodes,
+      diagnostics: doctor.diagnostics
+        .filter((diagnostic) => diagnostic.severity !== "ok")
+        .map((diagnostic) => ({ code: diagnostic.code, severity: diagnostic.severity, message: diagnostic.message }))
+    });
+  }
+  const doctorEvidence = await context.runtime.recordEvidence({
+    subjectId: sprint.meta.id,
+    subjectType: "work",
+    kind: "command",
+    outcome: "passed",
+    summary: `Sprint close auto-report doctor${strict ? " strict" : ""} passed.`,
+    command: strict ? "bwrk doctor --strict --json" : "bwrk doctor --json"
+  });
+  const verification = await context.runtime.verifyWork({
+    workId: sprint.meta.id,
+    verdict: "passed",
+    evidenceIds: [syncEvidence.meta.id, doctorEvidence.meta.id],
+    notes: "Sprint auto-report verified sync and doctor closeout evidence."
+  });
+  const reportFormat = parseSprintReportFormat(flagValue(args, "report-format"));
+  const report = await sprintReportResultFromEvidence(context, sprint, args, {
+    doctorEvidenceId: doctorEvidence.meta.id,
+    syncEvidenceId: syncEvidence.meta.id,
+    out: flagValue(args, "report-out") ?? defaultSprintCloseoutReportPath(sprint.meta.id, reportFormat),
+    format: reportFormat
+  });
+
+  return {
+    sync: {
+      ok: sync.refreshOk,
+      postRefreshStatusOk: sync.postRefreshStatusOk,
+      evidence: evidenceRow(syncEvidence)
+    },
+    doctor: {
+      ok: doctor.ok,
+      strict,
+      blockingDiagnosticCodes: doctor.blockingDiagnosticCodes,
+      evidence: evidenceRow(doctorEvidence)
+    },
+    verification: {
+      id: verification.meta.id,
+      verdict: verification.verdict
+    },
+    report: {
+      schemaVersion: report.schemaVersion,
+      format: report.format,
+      path: report.path,
+      contentHash: report.contentHash,
+      sizeBytes: report.sizeBytes,
+      summary: report.report.summary,
+      closeoutEvidence: report.report.closeoutEvidence
+    }
+  };
+}
+
+function defaultSprintCloseoutReportPath(sprintId: WorkId, format: SprintReportFormat): string {
+  return `.boreal/results/sprint-closeout-${sprintId}.${format === "html" ? "html" : "md"}`;
+}
+
 async function sprintReportResult(context: CliContext, sprint: WorkItem, args: ParsedArgs): Promise<SprintReportResult> {
-  const format = parseSprintReportFormat(flagValue(args, "format"));
-  const limit = sprintScopeLimit(args);
   const doctorEvidenceId = asEvidenceId(requiredFlag(args, "doctor-evidence"));
   const syncEvidenceId = asEvidenceId(requiredFlag(args, "sync-evidence"));
+  return sprintReportResultFromEvidence(context, sprint, args, {
+    doctorEvidenceId,
+    syncEvidenceId,
+    format: parseSprintReportFormat(flagValue(args, "format")),
+    out: flagValue(args, "out")
+  });
+}
+
+async function sprintReportResultFromEvidence(
+  context: CliContext,
+  sprint: WorkItem,
+  args: ParsedArgs,
+  input: {
+    readonly doctorEvidenceId: EvidenceId;
+    readonly syncEvidenceId: EvidenceId;
+    readonly format: SprintReportFormat;
+    readonly out?: string;
+  }
+): Promise<SprintReportResult> {
+  const limit = sprintScopeLimit(args);
+  const { doctorEvidenceId, syncEvidenceId, format } = input;
   if (doctorEvidenceId === syncEvidenceId) {
     throw new BorealError("BOREAL_INVALID_INPUT", "Sprint report requires distinct doctor and sync evidence records");
   }
@@ -11363,7 +11974,7 @@ async function sprintReportResult(context: CliContext, sprint: WorkItem, args: P
   });
   const content = renderSprintReportContent(document);
   const contentHash = String(hashContent({ format, content }));
-  const out = flagValue(args, "out");
+  const out = input.out;
   const path = out ? await writeSprintReportArtifact(context, out, content) : undefined;
   return {
     schemaVersion: SPRINT_REPORT_SCHEMA_VERSION,
@@ -12311,7 +12922,7 @@ async function lockCommand(
 ): Promise<CommandResult> {
   switch (action) {
     case "inspect": {
-      const inspection = await inspectFileLock(context.paths.stateLockDir);
+      const inspection = await inspectRuntimeLocks(context);
       output.write(json ? formatRecord(inspection, true) : dashboardView(args) ? formatLockDashboard(inspection) : formatRecord(inspection, false));
       return { exitCode: 0 };
     }
@@ -13245,13 +13856,21 @@ async function buildHandoffResult(
   workId: WorkId,
   args: ParsedArgs,
   resultLimit: number,
-  fallbackWork?: WorkItem
+  fallbackWork?: WorkItem,
+  options: { readonly refreshGeneratedArtifacts?: boolean } = {}
 ): Promise<HandoffResult> {
   try {
+    if (options.refreshGeneratedArtifacts) {
+      await refreshGeneratedArtifactsInline(context);
+    }
+    const bundle = await buildHandoffBundle(context, workId, args, resultLimit);
+    if (options.refreshGeneratedArtifacts) {
+      await refreshGeneratedArtifactsInline(context);
+    }
     return {
       handoffComplete: true,
       warnings: [],
-      ...(await buildHandoffBundle(context, workId, args, resultLimit))
+      ...bundle
     };
   } catch (error) {
     return {
@@ -13452,6 +14071,150 @@ function isWorkItem(value: WorkItem | undefined): value is WorkItem {
   return value !== undefined;
 }
 
+interface WorkLineageCandidate {
+  readonly work: WorkItem;
+  readonly distance: number;
+  readonly explicitParent: boolean;
+}
+
+interface WorkParentEdge {
+  readonly parentId: WorkId;
+  readonly explicitParent: boolean;
+}
+
+function workLineageById(workItems: readonly WorkItem[], graphEdges: readonly GraphEdge[]): ReadonlyMap<WorkId, readonly WorkLineageEntry[]> {
+  const workById = new Map(workItems.map((work) => [work.meta.id, work]));
+  const parentsByChild = parentEdgesByChild(workItems, graphEdges);
+  return new Map(workItems.map((work) => [work.meta.id, workLineageForWork(work.meta.id, workById, parentsByChild)]));
+}
+
+function parentEdgesByChild(
+  workItems: readonly WorkItem[],
+  graphEdges: readonly GraphEdge[]
+): ReadonlyMap<WorkId, readonly WorkParentEdge[]> {
+  const byChild = new Map<WorkId, Map<WorkId, boolean>>();
+  const addParent = (childId: WorkId, parentId: WorkId, explicitParent: boolean): void => {
+    const parents = byChild.get(childId) ?? new Map<WorkId, boolean>();
+    parents.set(parentId, (parents.get(parentId) ?? false) || explicitParent);
+    byChild.set(childId, parents);
+  };
+
+  for (const work of workItems) {
+    for (const dependencyId of dependencyIdsForWork(work, graphEdges)) {
+      addParent(dependencyId, work.meta.id, false);
+    }
+    if (work.parentId) {
+      addParent(work.meta.id, work.parentId, true);
+    }
+  }
+
+  return new Map(
+    [...byChild.entries()].map(([childId, parents]) => [
+      childId,
+      [...parents.entries()]
+        .map(([parentId, explicitParent]) => ({ parentId, explicitParent }))
+        .sort((left, right) => left.parentId.localeCompare(right.parentId))
+    ])
+  );
+}
+
+function workLineageForWork(
+  workId: WorkId,
+  workById: ReadonlyMap<WorkId, WorkItem>,
+  parentsByChild: ReadonlyMap<WorkId, readonly WorkParentEdge[]>
+): readonly WorkLineageEntry[] {
+  const visited = new Set<WorkId>([workId]);
+  const candidates: WorkLineageCandidate[] = [];
+  const queue: Array<{ readonly id: WorkId; readonly distance: number }> = [{ id: workId, distance: 0 }];
+
+  for (let index = 0; index < queue.length; index += 1) {
+    const current = queue[index];
+    if (!current) {
+      continue;
+    }
+    for (const edge of parentsByChild.get(current.id) ?? []) {
+      if (visited.has(edge.parentId)) {
+        continue;
+      }
+      visited.add(edge.parentId);
+      const parent = workById.get(edge.parentId);
+      if (!parent) {
+        continue;
+      }
+      const distance = current.distance + 1;
+      if (includeLineageParent(parent, edge.explicitParent)) {
+        candidates.push({ work: parent, distance, explicitParent: edge.explicitParent });
+      }
+      queue.push({ id: edge.parentId, distance });
+    }
+  }
+
+  return candidates
+    .sort(
+      (left, right) =>
+        right.distance - left.distance ||
+        lineageRoleRank(lineageRole(left.work)) - lineageRoleRank(lineageRole(right.work)) ||
+        left.work.meta.id.localeCompare(right.work.meta.id)
+    )
+    .map(({ work }) => ({
+      id: work.meta.id,
+      kind: work.kind,
+      role: lineageRole(work),
+      title: work.title,
+      labels: work.labels
+    }));
+}
+
+function includeLineageParent(work: WorkItem, explicitParent: boolean): boolean {
+  return explicitParent || work.kind === "issue" || work.kind === "sprint" || work.kind === "milestone";
+}
+
+function lineageRole(work: WorkItem): WorkLineageEntry["role"] {
+  if (work.kind === "sprint") {
+    return "sprint";
+  }
+  if (work.kind === "milestone") {
+    return isPhaseWork(work) ? "phase" : "milestone";
+  }
+  if (work.kind === "issue") {
+    return "issue";
+  }
+  return "parent";
+}
+
+function isPhaseWork(work: WorkItem): boolean {
+  return work.labels.includes("phase") || /^phase\b/iu.test(work.title);
+}
+
+function lineageRoleRank(role: WorkLineageEntry["role"]): number {
+  switch (role) {
+    case "milestone":
+      return 0;
+    case "sprint":
+      return 1;
+    case "phase":
+      return 2;
+    case "issue":
+      return 3;
+    case "parent":
+      return 4;
+  }
+}
+
+function lineageParentIds(lineage: readonly WorkLineageEntry[] | undefined): readonly WorkId[] {
+  return lineage?.map((entry) => entry.id) ?? [];
+}
+
+function compactLineage(lineage: readonly WorkLineageEntry[] | undefined): string {
+  return lineageParentIds(lineage)
+    .map(shortWorkId)
+    .join(" > ");
+}
+
+function shortWorkId(id: string): string {
+  return id.startsWith("bw_work_") ? id.slice("bw_work_".length, "bw_work_".length + 8) : id;
+}
+
 function workListRow(work: {
   readonly meta: { readonly id: string };
   readonly title: string;
@@ -13459,7 +14222,8 @@ function workListRow(work: {
   readonly status: WorkStatus;
   readonly priority: string;
   readonly labels: readonly string[];
-}, containerId?: WorkId): WorkListRow {
+}, containerId?: WorkId, lineage: readonly WorkLineageEntry[] = []): WorkListRow {
+  const parentIds = lineageParentIds(lineage);
   return {
     id: work.meta.id,
     kind: work.kind,
@@ -13467,7 +14231,8 @@ function workListRow(work: {
     priority: work.priority,
     title: work.title,
     labels: [...work.labels],
-    ...(containerId ? { containerId } : {})
+    ...(containerId ? { containerId } : {}),
+    ...(parentIds.length > 0 ? { parentIds, lineage } : {})
   };
 }
 
@@ -13648,7 +14413,8 @@ function cycleKey(cycle: readonly string[]): string {
   return rotations.sort()[0] ?? cycle.join("|");
 }
 
-function workViewListRow(view: WorkItemView, containerId?: WorkId): WorkListRow {
+function workViewListRow(view: WorkItemView, containerId?: WorkId, lineage: readonly WorkLineageEntry[] = []): WorkListRow {
+  const parentIds = lineageParentIds(lineage);
   return {
     id: view.id,
     kind: view.kind,
@@ -13656,7 +14422,8 @@ function workViewListRow(view: WorkItemView, containerId?: WorkId): WorkListRow 
     priority: view.priority,
     title: view.title,
     labels: [...view.labels],
-    ...(containerId ? { containerId } : {})
+    ...(containerId ? { containerId } : {}),
+    ...(parentIds.length > 0 ? { parentIds, lineage } : {})
   };
 }
 
@@ -13695,6 +14462,7 @@ function textWorkListRow(row: WorkListRow): Record<string, string> {
     kind: row.kind,
     status: row.status,
     priority: row.priority,
+    parents: compactLineage(row.lineage),
     title: row.title,
     labels: row.labels.join(",")
   };

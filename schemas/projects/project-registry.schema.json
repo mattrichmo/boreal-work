@@ -5,7 +5,7 @@
   "type": "object",
   "required": ["schemaVersion", "storage", "entries"],
   "properties": {
-    "schemaVersion": { "const": "boreal.project-registry.v1" },
+    "schemaVersion": { "const": "boreal.project-registry.v2" },
     "storage": { "$ref": "#/$defs/storage" },
     "entries": {
       "type": "array",
@@ -45,6 +45,8 @@
       "type": "object",
       "required": [
         "id",
+        "identity",
+        "lifecycle",
         "display",
         "projectRoot",
         "borealDir",
@@ -64,6 +66,8 @@
       ],
       "properties": {
         "id": { "type": "string", "minLength": 1 },
+        "identity": { "$ref": "#/$defs/identity" },
+        "lifecycle": { "enum": ["linked", "paused", "archived", "missing"] },
         "display": { "$ref": "#/$defs/display" },
         "projectRoot": { "type": "string", "minLength": 1 },
         "borealDir": { "type": "string", "minLength": 1 },
@@ -90,6 +94,15 @@
         "addedAt": { "type": "string", "format": "date-time" },
         "updatedAt": { "type": "string", "format": "date-time" },
         "lastSeenAt": { "type": "string", "format": "date-time" }
+      },
+      "additionalProperties": false
+    },
+    "identity": {
+      "type": "object",
+      "required": ["strategy", "fingerprint"],
+      "properties": {
+        "strategy": { "enum": ["project-config", "git-remote", "path"] },
+        "fingerprint": { "type": "string", "minLength": 1 }
       },
       "additionalProperties": false
     },

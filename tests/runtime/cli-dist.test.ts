@@ -201,14 +201,15 @@ describe("bundled bwrk dist", () => {
     const init = await runBundle(repoBin, workspaceRoot, ["init", "--json"], { BOREAL_BWRK_DELEGATED: "1" });
     expect(init.exitCode).toBe(0);
 
-    const skewDoctor = await runBundle(repoBin, workspaceRoot, ["doctor", "--json"], {
+    const skewEnv = {
       BOREAL_BWRK_DELEGATED: "1",
       BOREAL_BWRK_LAUNCHER_NAME: "boreal-work",
       BOREAL_BWRK_LAUNCHER_VERSION: "0.2.0",
       BOREAL_BWRK_LAUNCHER_CHANNEL: "brew",
       BOREAL_BWRK_LAUNCHER_EXECUTABLE: "/opt/homebrew/bin/bwrk",
       BOREAL_BWRK_DELEGATED_BIN: repoBin
-    });
+    };
+    const skewDoctor = await runBundle(repoBin, workspaceRoot, ["doctor", "--json"], skewEnv);
     const skewPayload = parseData<{
       readonly diagnostics: readonly Array<{
         readonly code: string;
@@ -237,6 +238,35 @@ describe("bundled bwrk dist", () => {
             "Upgrade repo-pinned bwrk via npm: npm install -g @boreal/cli@latest."
           ])
         })
+      })
+    );
+
+    const skewResult = await runBundle(repoBin, workspaceRoot, ["work", "create", "Skew result envelope", "--ready", "--json"], skewEnv);
+    const skewResultPayload = parseData<{
+      readonly meta: { readonly id: string };
+      readonly result: { readonly schemaVersion: string; readonly id: string; readonly kind: string; readonly status: string };
+    }>(skewResult.stdout);
+    expect(skewResult.exitCode).toBe(0);
+    expect(skewResultPayload.result).toEqual(
+      expect.objectContaining({
+        schemaVersion: "boreal.cli.result.v1",
+        id: skewResultPayload.meta.id,
+        kind: "task",
+        status: "ready"
+      })
+    );
+
+    const skewBrief = await runBundle(repoBin, workspaceRoot, ["work", "show", skewResultPayload.meta.id, "--brief"], skewEnv);
+    const skewBriefPayload = parseData<{
+      readonly summary: { readonly id: string; readonly kind: string; readonly status: string; readonly title: string };
+    }>(skewBrief.stdout);
+    expect(skewBrief.exitCode).toBe(0);
+    expect(skewBriefPayload.summary).toEqual(
+      expect.objectContaining({
+        id: skewResultPayload.meta.id,
+        kind: "task",
+        status: "ready",
+        title: "Skew result envelope"
       })
     );
 

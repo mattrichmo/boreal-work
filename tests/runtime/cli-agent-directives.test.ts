@@ -743,6 +743,91 @@ describe("CLI agent directive envelopes", () => {
     expect(() => assertAgentDirectiveBundle(bundle)).not.toThrow();
   });
 
+  it("dedupes unchanged directive bundles within one session by source hash", async () => {
+    const rootDir = await makeTempWorkspace();
+    await runCli(rootDir, ["init", "--json"]);
+    const created = parseEnvelope<{ readonly meta: { readonly id: string } }>(
+      (await runCli(rootDir, ["work", "create", "Directive dedup target", "--label", "agent-directive-dedup", "--ready", "--json"])).stdout
+    );
+
+    const first = parseEnvelope<{ readonly id: string }>(
+      (await runCli(rootDir, ["work", "show", created.data.meta.id, "--session", "dedup-session", "--json"])).stdout
+    );
+    const firstBundle = first.agentDirectives?.[0];
+    expect(firstBundle).toBeDefined();
+    expect(() => assertAgentDirectiveBundle(firstBundle)).not.toThrow();
+    const firstHash = firstBundle?.meta.sourceSnapshotHash;
+    expect(firstHash).toMatch(/^sha256:[a-f0-9]{64}$/u);
+
+    const second = JSON.parse(
+      (await runCli(rootDir, ["work", "show", created.data.meta.id, "--session", "dedup-session", "--json"])).stdout
+    ) as {
+      readonly data: { readonly id: string };
+      readonly agentDirectives?: readonly AgentDirectiveBundle[] | { readonly unchanged: true; readonly sourceHash: string };
+    };
+    expect(second.data.id).toBe(created.data.meta.id);
+    expect(second.agentDirectives).toEqual({ unchanged: true, sourceHash: firstHash });
+
+    const otherSession = parseEnvelope<{ readonly id: string }>(
+      (await runCli(rootDir, ["work", "show", created.data.meta.id, "--session", "other-session", "--json"])).stdout
+    );
+    expect(otherSession.agentDirectives?.[0]?.meta.sourceSnapshotHash).toMatch(/^sha256:[a-f0-9]{64}$/u);
+    expect(() => assertAgentDirectiveBundle(otherSession.agentDirectives?.[0])).not.toThrow();
+  });
+
+  it("skips read-only directive sync probes and scopes subject reservations", async () => {
+    const rootDir = await makeTempWorkspace();
+    await runCli(rootDir, ["init", "--json"]);
+    const target = parseEnvelope<{ readonly meta: { readonly id: string } }>(
+      (await runCli(rootDir, ["work", "create", "Read-only directive scope target", "--ready", "--json"])).stdout
+    );
+    const unrelated = parseEnvelope<{ readonly meta: { readonly id: string } }>(
+      (await runCli(rootDir, ["work", "create", "Unrelated reserved work", "--ready", "--json"])).stdout
+    );
+    const targetReservation = parseEnvelope<{ readonly reservation: { readonly meta: { readonly id: string } } }>(
+      (
+        await runCli(rootDir, [
+          "work",
+          "reserve",
+          target.data.meta.id,
+          "--agent",
+          "scope-target-agent",
+          "--purpose",
+          "subject reservation",
+          "--json"
+        ])
+      ).stdout
+    );
+    const unrelatedReservation = parseEnvelope<{ readonly reservation: { readonly meta: { readonly id: string } } }>(
+      (
+        await runCli(rootDir, [
+          "work",
+          "reserve",
+          unrelated.data.meta.id,
+          "--agent",
+          "scope-unrelated-agent",
+          "--purpose",
+          "unrelated reservation",
+          "--json"
+        ])
+      ).stdout
+    );
+
+    const shown = parseEnvelope<{ readonly id: string }>(
+      (await runCli(rootDir, ["work", "show", target.data.meta.id, "--session", "read-only-scope", "--json"])).stdout
+    );
+    const directives = shown.agentDirectives?.flatMap((bundle) => bundle.directives) ?? [];
+    const workflowNext = directives.find((directive) => directive.registryId === "workflow_next.canonical-next-step");
+    const activeReservationIds = (workflowNext?.data as { readonly activeReservationIds?: readonly string[] } | undefined)
+      ?.activeReservationIds;
+
+    expect(shown.data.id).toBe(target.data.meta.id);
+    expect(directives.map((directive) => directive.registryId)).toContain("workflow_next.canonical-next-step");
+    expect(directives.map((directive) => directive.registryId)).not.toContain("doctor.recovery-required");
+    expect(activeReservationIds).toEqual([targetReservation.data.reservation.meta.id]);
+    expect(activeReservationIds).not.toContain(unrelatedReservation.data.reservation.meta.id);
+  });
+
   it("surfaces declared gate directives from work show, work claim, and agent start", async () => {
     const rootDir = await makeTempWorkspace();
     await runCli(rootDir, ["init", "--json"]);

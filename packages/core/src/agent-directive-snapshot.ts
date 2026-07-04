@@ -250,7 +250,8 @@ export function createAgentDirectiveSnapshot(input: AgentDirectiveSnapshotInput)
 
 export function agentDirectiveSnapshotHash(snapshot: AgentDirectiveSnapshot): ContentHash {
   assertAgentDirectiveSnapshot(snapshot);
-  return hashContent(snapshot);
+  const { capturedAt: _capturedAt, ...stableSnapshot } = snapshot;
+  return hashContent(stableSnapshot);
 }
 
 export function agentDirectiveSnapshotIssues(value: unknown): readonly AgentDirectiveSnapshotValidationIssue[] {

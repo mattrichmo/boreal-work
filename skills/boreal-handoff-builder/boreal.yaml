@@ -3,6 +3,6 @@ system: boreal
 skill: boreal-handoff-builder
 display_name: Boreal Handoff Builder
 workflows:
-  - 50-handoff/build-handoff.md
-  - 50-handoff/session-closeout.md
-  - 50-handoff/project-closeout.md
+  - boreal.workflow.build-handoff.v1
+  - boreal.workflow.session-closeout.v1
+  - boreal.workflow.project-closeout.v1

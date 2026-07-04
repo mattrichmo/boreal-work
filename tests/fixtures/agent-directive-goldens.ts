@@ -165,8 +165,8 @@ export const AGENT_DIRECTIVE_GOLDEN_CASES: readonly AgentDirectiveGoldenCase[] =
       blockingDiagnosticCodes: ["ledger.export_drift"],
       safeWorkflow: "workflows/30-health/sync-and-doctor.md",
       nextCommandPath: "bwrk sync refresh --json",
-      operationCount: 1029,
-      warningThreshold: 1025
+      operationCount: 1260,
+      warningThreshold: 1250
     },
     expected: {
       title: "Recover workspace health",

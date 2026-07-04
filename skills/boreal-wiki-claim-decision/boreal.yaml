@@ -3,7 +3,7 @@ system: boreal
 skill: boreal-wiki-claim-decision
 display_name: Boreal Wiki Claim Decision
 workflows:
-  - 30-knowledge/create-wiki-page.md
-  - 30-knowledge/create-claim.md
-  - 30-knowledge/capture-decision.md
-  - 30-knowledge/supersede-decision.md
+  - boreal.workflow.create-wiki-page.v1
+  - boreal.workflow.create-claim.v1
+  - boreal.workflow.capture-decision.v1
+  - boreal.workflow.supersede-decision.v1

@@ -86,6 +86,12 @@ export function wantsJsonOutput(argv: readonly string[]): boolean {
     if (arg.startsWith("--json=")) {
       return arg.slice("--json=".length) !== "false";
     }
+    if (arg === "--brief") {
+      return true;
+    }
+    if (arg.startsWith("--brief=")) {
+      return arg.slice("--brief=".length) !== "false";
+    }
   }
   return false;
 }

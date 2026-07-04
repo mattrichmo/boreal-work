@@ -3,6 +3,6 @@ system: boreal
 skill: boreal-health-doctor
 display_name: Boreal Health Doctor
 workflows:
-  - 60-health/sync-and-doctor.md
-  - 60-health/ledger-export-import.md
-  - 60-health/recover-from-failure.md
+  - boreal.workflow.sync-and-doctor.v1
+  - boreal.workflow.ledger-export-import.v1
+  - boreal.workflow.recover-from-failure.v1

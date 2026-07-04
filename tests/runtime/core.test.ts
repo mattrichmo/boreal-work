@@ -30,8 +30,10 @@ import {
   assertMcpResourceRealPathAllowed,
   bindMcpProjectBoundary,
   canonicalJson,
+  classifyBorealError,
   defineMcpToolContract,
   deterministicId,
+  deriveProjectRegistryIdentity,
   detectSuspiciousUnicode,
   ENFORCEMENT_GAP_CODES,
   enforcementGapSchemaIssues,
@@ -46,6 +48,7 @@ import {
   PROJECT_REGISTRY_ROOT_ENV,
   PROJECT_REGISTRY_SCHEMA_ID,
   PROJECT_REGISTRY_SCHEMA_VERSION,
+  projectRegistryEntryIdFromIdentity,
   projectRegistryDocumentSchemaIssues,
   randomId,
   readJsonFile,
@@ -126,6 +129,63 @@ describe("core hashing and ids", () => {
         })
       })
     );
+  });
+
+  it.each([
+    {
+      domain: "workflow",
+      details: {
+        ref: "workflows/40-work/closeot-work.md",
+        normalizedRef: "40-work/closeot-work.md",
+        didYouMean: [{ id: "boreal.workflow.closeout-work.v1", path: "40-work/closeout-work.md" }]
+      },
+      includes: ["workflow", "bwrk workflows list --json"],
+      excludes: ["work item or queue"]
+    },
+    {
+      domain: "summary",
+      details: { summaryId: "bw_summary_0123456789abcdef" },
+      includes: ["agent summary", "bw_summary_"],
+      excludes: ["work item or queue"]
+    },
+    {
+      domain: "evidence",
+      details: { workId: "bw_work_0123456789abcdef", evidenceId: "bw_evidence_0123456789abcdef" },
+      includes: ["evidence record", "bw_evidence_"],
+      excludes: ["work item or queue"]
+    },
+    {
+      domain: "lock",
+      details: { lockPath: ".boreal/runtime/state.lock" },
+      includes: ["runtime lock", "bwrk doctor --strict --json"],
+      excludes: ["work item or queue"]
+    },
+    {
+      domain: "work",
+      details: { workId: "bw_work_0123456789abcdef" },
+      includes: ["work item or reservation", "work item or queue"],
+      excludes: ["agent summary"]
+    }
+  ])("returns $domain-specific not-found recovery text", ({ details, includes, excludes }) => {
+    const recovery = classifyBorealError("BOREAL_NOT_FOUND", details).recovery.summary;
+
+    for (const expected of includes) {
+      expect(recovery).toContain(expected);
+    }
+    for (const unexpected of excludes) {
+      expect(recovery).not.toContain(unexpected);
+    }
+  });
+
+  it("keeps terminal work recovery text ahead of domain inference", () => {
+    const recovery = classifyBorealError("BOREAL_NOT_FOUND", {
+      workId: "bw_work_0123456789abcdef",
+      closedBy: "agent",
+      closedAt: "2026-01-01T00:00:00.000Z"
+    }).recovery.summary;
+
+    expect(recovery).toContain("already terminal");
+    expect(recovery).toContain("closed by agent");
   });
 
   it("enforces JSON file size limits before parsing", async () => {
@@ -812,6 +872,54 @@ describe("core hashing and ids", () => {
     );
   });
 
+  it("derives stable project registry identities from config, git remote, then path", () => {
+    const configIdentity = deriveProjectRegistryIdentity({
+      projectRoot: "/repo/moved",
+      projectConfig: {
+        schemaVersion: "boreal.project-setup.v1",
+        createdAt: "2026-01-01T00:00:00.000Z",
+        projectRoot: "/repo/original",
+        memoryRoot: "/repo/original/memory",
+        memoryLayout: "in-repo",
+        memoryGitMode: "shared",
+        skillTargets: ["codex"],
+        folderScoped: false
+      },
+      gitRemote: "git@example.invalid:org/project.git"
+    });
+    const movedConfigIdentity = deriveProjectRegistryIdentity({
+      projectRoot: "/repo/renamed",
+      projectConfig: {
+        schemaVersion: "boreal.project-setup.v1",
+        createdAt: "2026-01-01T00:00:00.000Z",
+        projectRoot: "/repo/renamed",
+        memoryRoot: "/repo/renamed/memory",
+        memoryLayout: "in-repo",
+        memoryGitMode: "shared",
+        skillTargets: ["codex"],
+        folderScoped: false
+      }
+    });
+    const remoteIdentity = deriveProjectRegistryIdentity({
+      projectRoot: "/repo/checkout-a",
+      projectConfig: { schemaVersion: "legacy" },
+      gitRemote: "git@example.invalid:org/project.git"
+    });
+    const movedRemoteIdentity = deriveProjectRegistryIdentity({
+      projectRoot: "/repo/checkout-b",
+      gitRemote: "git@example.invalid:org/project.git"
+    });
+    const pathIdentity = deriveProjectRegistryIdentity({ projectRoot: "/repo/checkout-a" });
+
+    expect(configIdentity.strategy).toBe("project-config");
+    expect(configIdentity).toEqual(movedConfigIdentity);
+    expect(projectRegistryEntryIdFromIdentity(configIdentity)).toBe(projectRegistryEntryIdFromIdentity(movedConfigIdentity));
+    expect(remoteIdentity.strategy).toBe("git-remote");
+    expect(remoteIdentity).toEqual(movedRemoteIdentity);
+    expect(pathIdentity.strategy).toBe("path");
+    expect(pathIdentity).not.toEqual(remoteIdentity);
+  });
+
   it("binds MCP resource access to one selected project per request", () => {
     const currentEntry = projectRegistryDocument().entries[0];
     const otherEntry = {
@@ -1181,6 +1289,11 @@ function projectRegistryDocument(): ProjectRegistryDocument {
     entries: [
       {
         id: "boreal-work",
+        identity: {
+          strategy: "project-config",
+          fingerprint: "sha256:registry-fixture"
+        },
+        lifecycle: "linked",
         display: {
           name: "Boreal Work",
           labels: ["runtime", "cli"]

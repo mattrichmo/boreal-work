@@ -411,6 +411,10 @@ export async function readProjectSetupConfig(projectRoot: string): Promise<Proje
   return config;
 }
 
+export async function readProjectSetupConfigFile(projectRoot: string): Promise<ProjectSetupConfig | undefined> {
+  return readExistingConfig(join(projectRoot, ".boreal", "project.json"));
+}
+
 export async function inspectProjectSetupDrift(
   context: CliContext,
   fix: boolean
