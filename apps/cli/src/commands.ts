@@ -120,11 +120,9 @@ import { inspectDaemonStatus, type DaemonStatusResult } from "@boreal/daemon";
 import type { SearchResult } from "@boreal/search";
 import {
   breakStaleFileLock,
-  rebuildSQLiteCache,
   writeTextFileAtomic,
   type BorealReader,
-  type BorealWriter,
-  type SQLiteCacheRebuildResult
+  type BorealWriter
 } from "@boreal/storage";
 import {
   buildGlobalActivityView,
@@ -155,12 +153,18 @@ import type { FinishReservedWorkSummaryFactory } from "@boreal/engine";
 
 import { flagValue, flagValues, hasFlag, requiredFlag, type ParsedArgs } from "./args.js";
 import { storageCommand } from "./commands/storage.js";
+import {
+  buildSyncRefreshResult,
+  buildSyncStatus,
+  rebuildProjectionsRespectingTombstones,
+  refreshGeneratedArtifactsInline,
+  syncCommand,
+  type SyncRefreshResult,
+  type SyncStatusResult
+} from "./commands/sync.js";
 import { vaultCommand } from "./commands/vault.js";
 import {
-  assertCircuitBreakerAllows,
   clearCircuitBreakers,
-  recordCircuitBreakerFailure,
-  recordCircuitBreakerSuccess,
   type CommandResult
 } from "./commands/shared.js";
 import {
@@ -190,7 +194,7 @@ import { keyValueRows, resultSummary, section, withPromptSession, type CliSelect
 import { applyManualMerge, buildManualMergePlan, scanDuplicates, type DuplicateDomain } from "./duplicates.js";
 import { workBranchName } from "./git-branch.js";
 import { isMissingGit, runGit } from "./git-exec.js";
-import { inspectGitWorktree, type GitWorktreeInspection } from "./git-worktree.js";
+import { inspectGitWorktree } from "./git-worktree.js";
 import {
   inspectBorealInstallStatus,
   installStatusHealthy,
@@ -217,9 +221,7 @@ import {
   importJson,
   ledgerStatus,
   listSnapshots,
-  readGeneratedLedgerTombstones,
-  showSnapshot,
-  type LedgerStatusResult
+  showSnapshot
 } from "./import-export.js";
 import { inspectRuntimeLocks, type RuntimeLockInspectionResult, type RuntimeLockState } from "./locks.js";
 import { createResultSpoolingOutput, formatRecord, table, type AgentDirectiveOutput, type CliOutput } from "./output.js";
@@ -249,7 +251,7 @@ import {
   type RegistryListResult,
   type RegistryRemoveResult
 } from "./registry.js";
-import { inspectSearchIndex, runSearch, writeSearchIndex, type SearchIndexInspection } from "./search-cli.js";
+import { runSearch, writeSearchIndex } from "./search-cli.js";
 import { dirtyPathNotesHaveReasonCode, requireCommitOrDirtyPathReason } from "./summary-policy.js";
 import {
   addRawSource,
@@ -260,8 +262,7 @@ import {
   listVaultWikiPages,
   listRawSourceRows,
   type RawSourceRow,
-  type WikiPageRecord,
-  type VaultStatusResult
+  type WikiPageRecord
 } from "./vault.js";
 import {
   buildSkillInstallPlan,
@@ -674,29 +675,6 @@ interface SprintCloseAutoReportResult {
     readonly summary: SprintReportDocument["summary"];
     readonly closeoutEvidence: SprintReportDocument["closeoutEvidence"];
   };
-}
-
-interface SyncStatusResult {
-  readonly ok: boolean;
-  readonly workspaceRoot: string;
-  readonly checkedAt: IsoTimestamp;
-  readonly vault: VaultStatusResult;
-  readonly ledgers: LedgerStatusResult;
-  readonly searchIndex: SearchIndexInspection & { readonly ok: boolean };
-  readonly git: GitWorktreeInspection;
-  readonly recommendedActions: readonly string[];
-}
-
-interface SyncRefreshResult {
-  readonly refreshed: true;
-  readonly refreshOk: true;
-  readonly postRefreshStatusOk: boolean;
-  readonly exitReason: "ok" | "post_refresh_status_unhealthy";
-  readonly contextViews: number;
-  readonly searchIndex: Awaited<ReturnType<typeof writeSearchIndex>>;
-  readonly ledgers: Awaited<ReturnType<typeof exportLedgers>>;
-  readonly sqliteCache: SQLiteCacheRebuildResult;
-  readonly status: SyncStatusResult;
 }
 
 interface OperationPruneResult {
@@ -1192,7 +1170,11 @@ export async function runCommand(args: ParsedArgs, output: CliOutput, cwd: strin
         result = await compactCommand(action, context, args, commandOutput, json);
         break;
       case "sync":
-        result = await syncCommand(action, context, args, commandOutput, json);
+        result = await syncCommand(action, context, args, commandOutput, json, {
+          dashboardView,
+          formatRecordWithAgentDirectives: ({ context: syncContext, args: syncArgs, result: syncResult, json: syncJson, options }) =>
+            formatRecordWithAgentDirectives(syncContext, syncArgs, syncResult, syncJson, options)
+        });
         break;
       case "storage":
         result = await storageCommand(action, context, args, commandOutput, json);
@@ -4180,26 +4162,6 @@ function formatAgentStatusDashboard(status: AgentStatus): string {
       ]
     ),
     section("Action", [status.recommendedAction.command ?? "none"])
-  ].join("\n\n") + "\n";
-}
-
-function formatSyncDashboard(status: SyncStatusResult): string {
-  return [
-    resultSummary({
-      status: status.ok ? "success" : "warning",
-      title: "Sync status",
-      detail: status.workspaceRoot
-    }),
-    section(
-      "Checks",
-      keyValueRows([
-        { key: "vault", value: status.vault.ok },
-        { key: "ledgers", value: status.ledgers.ok },
-        { key: "searchIndex", value: status.searchIndex.ok },
-        { key: "git", value: status.git.ok }
-      ]).split("\n")
-    ),
-    section("Recommended actions", status.recommendedActions.length > 0 ? status.recommendedActions : ["none"])
   ].join("\n\n") + "\n";
 }
 
@@ -8665,60 +8627,6 @@ async function importCommand(
   }
 }
 
-async function syncCommand(
-  action: string | undefined,
-  context: CliContext,
-  args: ParsedArgs,
-  output: CliOutput,
-  json: boolean
-): Promise<CommandResult> {
-  switch (action) {
-    case "status": {
-      const status = await buildSyncStatus(context);
-      output.write(json ? await formatRecordWithAgentDirectives(context, args, status, true, {
-        syncStatus: status,
-        subject: { type: "workspace", id: context.workspaceRoot, title: "Workspace" }
-      }) : dashboardView(args) ? formatSyncDashboard(status) : formatRecord(status, false));
-      return { exitCode: status.ok ? 0 : 1 };
-    }
-    case "refresh": {
-      await assertCircuitBreakerAllows(context, "sync refresh");
-      let result: SyncRefreshResult;
-      try {
-        result = await buildSyncRefreshResult(context);
-        await recordCircuitBreakerSuccess(context, "sync refresh");
-      } catch (error) {
-        await recordCircuitBreakerFailure(context, "sync refresh", error);
-        throw error;
-      }
-      output.write(await formatRecordWithAgentDirectives(context, args, result, json, {
-        syncStatus: result.status,
-        syncRefreshed: true,
-        subject: { type: "workspace", id: context.workspaceRoot, title: "Workspace" }
-      }));
-      return { exitCode: hasFlag(args, "strict") && !result.postRefreshStatusOk ? 1 : 0 };
-    }
-    default:
-      throw new BorealError("BOREAL_INVALID_INPUT", `Unknown sync command: ${action ?? ""}`);
-  }
-}
-
-async function buildSyncRefreshResult(context: CliContext): Promise<SyncRefreshResult> {
-  const { views, searchIndex, ledgers, sqliteCache } = await refreshGeneratedArtifactsInline(context);
-  const status = await buildSyncStatus(context);
-  return {
-    refreshed: true,
-    refreshOk: true,
-    postRefreshStatusOk: status.ok,
-    exitReason: status.ok ? "ok" : "post_refresh_status_unhealthy",
-    contextViews: views.length,
-    searchIndex,
-    ledgers,
-    sqliteCache,
-    status
-  };
-}
-
 function shouldRefreshGeneratedArtifactsAfterMutation(definition: CommandDefinition): boolean {
   const behavior = commandBehavior(definition);
   return (
@@ -8733,19 +8641,6 @@ function shouldRefreshGeneratedArtifactsAfterMutation(definition: CommandDefinit
 // command (O(all records) per mutation). Artifacts are content-hash stamped;
 // staleness is detected by sync status/doctor and rebuilt by `sync refresh`.
 const INLINE_GENERATED_ARTIFACT_REFRESH_COMMANDS = new Set<string>([]);
-
-async function refreshGeneratedArtifactsInline(context: CliContext) {
-  const views = await rebuildProjectionsRespectingTombstones(context);
-  const searchIndex = await writeSearchIndex(context);
-  const ledgers = await exportLedgers(context, undefined);
-  const cacheDocument = await buildExportDocument(context);
-  const sqliteCache = await rebuildSQLiteCache({
-    rootDir: context.workspaceRoot,
-    snapshot: cacheDocument.state,
-    sourceContentHash: cacheDocument.contentHash
-  });
-  return { views, searchIndex, ledgers, sqliteCache };
-}
 
 async function rawCommand(
   action: string | undefined,
@@ -8930,86 +8825,6 @@ async function compactCommand(
     }
     default:
       throw new BorealError("BOREAL_INVALID_INPUT", `Unknown compact command: ${action ?? ""}`);
-  }
-}
-
-async function buildSyncStatus(context: CliContext): Promise<SyncStatusResult> {
-  const [vault, ledgers, searchIndex, git] = await Promise.all([
-    inspectVaultForSyncStatus(context),
-    safeLedgerStatus(context),
-    inspectSearchIndex(context),
-    inspectGitWorktree(context)
-  ]);
-  const searchIndexOk = searchIndex.exists && !searchIndex.stale && !searchIndex.error;
-  const recommendedActions = syncRecommendedActions(vault, ledgers, searchIndexOk, git);
-  return {
-    ok: vault.ok && ledgers.ok && searchIndexOk && git.ok,
-    workspaceRoot: context.workspaceRoot,
-    checkedAt: nowIso(),
-    vault,
-    ledgers,
-    searchIndex: {
-      ...searchIndex,
-      ok: searchIndexOk
-    },
-    git,
-    recommendedActions
-  };
-}
-
-async function inspectVaultForSyncStatus(context: CliContext): Promise<VaultStatusResult> {
-  try {
-    return await inspectVault(context);
-  } catch (caught) {
-    if (!isBorealError(caught)) {
-      throw caught;
-    }
-    return unavailableVaultStatus(context);
-  }
-}
-
-function unavailableVaultStatus(context: CliContext): VaultStatusResult {
-  return {
-    ok: false,
-    initialized: false,
-    rootDir: join(context.workspaceRoot, "memory"),
-    schemaVersion: VAULT_SCHEMA_VERSION,
-    health: {
-      ok: false,
-      hasWarnings: true,
-      rawSourceCount: 0,
-      wikiPageCount: 0,
-      ledgerEventCount: 0,
-      brokenLinks: [],
-      orphanPages: [],
-      missingSourceRefs: [],
-      staleClaims: [],
-      malformedRawRecords: [],
-      malformedLedgerEvents: [],
-      missingArchiveRefs: [],
-      missingMergeRefs: []
-    },
-    requiredDirectories: [],
-    requiredFiles: [],
-    missingDirectories: [],
-    missingFiles: [],
-    invalidPaths: []
-  };
-}
-
-async function safeLedgerStatus(context: CliContext): Promise<LedgerStatusResult> {
-  try {
-    return await ledgerStatus(context, undefined);
-  } catch (error) {
-    return {
-      ok: false,
-      path: join(context.workspaceRoot, ".boreal/ledgers/manifest.json"),
-      exists: false,
-      stale: true,
-      expectedContentHash: "unavailable",
-      reconstructable: false,
-      error: error instanceof Error ? error.message : String(error)
-    };
   }
 }
 
@@ -10214,22 +10029,6 @@ function protocolAgentAction(
 
 function commandWithPositionalWork(command: string, workId: string): string {
   return command.replace("bwrk agent start", `bwrk agent start ${shellArg(workId)}`);
-}
-
-function syncRecommendedActions(
-  vault: VaultStatusResult,
-  ledgers: LedgerStatusResult,
-  searchIndexOk: boolean,
-  git: GitWorktreeInspection
-): readonly string[] {
-  const actions: string[] = [];
-  if (!vault.ok) {
-    actions.push("bwrk vault init --json");
-  }
-  if (!ledgers.ok || !searchIndexOk) {
-    actions.push("bwrk sync refresh --json");
-  }
-  return [...actions, ...git.recommendedActions];
 }
 
 async function ledgerCommand(
@@ -14018,14 +13817,6 @@ async function requireReservation(context: CliContext, reservationId: string): P
     throw new BorealError("BOREAL_CONFLICT", "Active reservation changed while starting agent", { reservationId });
   }
   return reservation;
-}
-
-async function rebuildProjectionsRespectingTombstones(context: CliContext): Promise<readonly WorkItemView[]> {
-  const tombstones = await readGeneratedLedgerTombstones(context);
-  return context.runtime.rebuildProjections({
-    skipContextPackIds: tombstones.contextPackIds,
-    skipProjectionIds: tombstones.projectionIds
-  });
 }
 
 async function buildHandoffBundle(
