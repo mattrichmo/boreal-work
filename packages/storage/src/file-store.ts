@@ -72,6 +72,10 @@ export class FileBorealStore implements BorealStore {
     return run;
   }
 
+  async snapshot(): Promise<StoreSnapshot> {
+    return (await this.loadSnapshotWithLog()).snapshot;
+  }
+
   private async writeOnce<T>(operation: (writer: BorealWriter) => Promise<T> | T): Promise<T> {
     await this.assertSafePaths();
     return withFileLock(this.lockDir, this.lockOptions, async () => {

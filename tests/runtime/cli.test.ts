@@ -11472,8 +11472,18 @@ async function runCli(cwd: string, argv: readonly string[]): Promise<CommandRun>
       stderr += text;
     }
   };
-  const exitCode = await main([...argv], output, cwd);
-  return { exitCode, stdout, stderr };
+  const previousInitStorage = process.env.BOREAL_INIT_STORAGE;
+  process.env.BOREAL_INIT_STORAGE = "file-v2";
+  try {
+    const exitCode = await main([...argv], output, cwd);
+    return { exitCode, stdout, stderr };
+  } finally {
+    if (previousInitStorage === undefined) {
+      delete process.env.BOREAL_INIT_STORAGE;
+    } else {
+      process.env.BOREAL_INIT_STORAGE = previousInitStorage;
+    }
+  }
 }
 
 function parseJson<T>(text: string): T {

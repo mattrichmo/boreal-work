@@ -3,7 +3,14 @@ import { execFile } from "node:child_process";
 import type { CliContext } from "./context.js";
 
 const DEFAULT_PROTECTED_BRANCHES = ["main", "master", "trunk"] as const;
-const COLLABORATION_PATHS = [".boreal/ledgers", ".boreal/runtime", "memory/raw/index.jsonl", "memory"] as const;
+const COLLABORATION_PATHS = [
+  ".boreal/ledgers",
+  ".boreal/log",
+  ".boreal/objects",
+  ".boreal/runtime",
+  "memory/raw/index.jsonl",
+  "memory"
+] as const;
 const GENERATED_ARTIFACT_PATHS = [
   ".boreal/ledgers",
   ".boreal/runtime",

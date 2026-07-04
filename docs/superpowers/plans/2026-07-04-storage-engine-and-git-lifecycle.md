@@ -631,7 +631,7 @@ it("rejects ids that escape the objects dir", async () => {
 **Interfaces:**
 - Produces: `.boreal/project.json` gains `"storage": "file-v2" | "objects-v1"` (absent = `file-v2`). The CLI context reads it and constructs the matching store. `bwrk storage migrate --to objects --json`: under the state lock, load via `FileBorealStore`, write every record + event through `ObjectDirBorealStore`, verify record counts + event chain, rename `state.json` → `state.json.migrated-<timestamp>`, set the marker. `--to file` does the reverse (escape hatch). New `bwrk init` defaults to `objects-v1`.
 
-- [ ] **Step 1: Failing test**
+- [x] **Step 1: Failing test**
 
 ```ts
 it("migrates a file-store workspace to objects and back", async () => {
@@ -645,11 +645,11 @@ it("migrates a file-store workspace to objects and back", async () => {
 });
 ```
 
-- [ ] **Step 2: Implement migration + factory.** Migration body: `const snapshot = await fileStore.snapshot(); const target = new ObjectDirBorealStore({ rootDir }); await target.write(async (w) => { for each section, for each record, await w.put...(record); });` then events: append each in original order to the log (they carry their own timestamps; the chain hash is new — that's fine, the chain starts at migration). Count-verify before renaming the old file. Update the marker with `writeTextFileAtomic`.
+- [x] **Step 2: Implement migration + factory.** Migration body: `const snapshot = await fileStore.snapshot(); const target = new ObjectDirBorealStore({ rootDir }); await target.write(async (w) => { for each section, for each record, await w.put...(record); });` then events: append each in original order to the log (they carry their own timestamps; the chain hash is new — that's fine, the chain starts at migration). Count-verify before renaming the old file. Update the marker with `writeTextFileAtomic`.
 
-- [ ] **Step 3: Add `.gitignore` guidance in the same commit:** `.boreal/objects/` and `.boreal/log/` are **meant to be committed** (that's the point); `.boreal/cache/`, `.boreal/tmp/`, `.boreal/results/`, `.boreal/runtime/` stay ignored. Update `GENERATED_ARTIFACT_PATHS` in `apps/cli/src/git-worktree.ts:7` so objects/log are treated as collaboration paths, not generated artifacts.
+- [x] **Step 3: Add `.gitignore` guidance in the same commit:** `.boreal/objects/` and `.boreal/log/` are **meant to be committed** (that's the point); `.boreal/cache/`, `.boreal/tmp/`, `.boreal/results/`, `.boreal/runtime/` stay ignored. Update `GENERATED_ARTIFACT_PATHS` in `apps/cli/src/git-worktree.ts:7` so objects/log are treated as collaboration paths, not generated artifacts.
 
-- [ ] **Step 4: Run test + full suite + benchmark against a migrated workspace. Commit** `feat: storage migrate command and objects-first init`.
+- [x] **Step 4: Run test + full suite + benchmark against a migrated workspace. Commit** `feat: storage migrate command and objects-first init`.
 
 ### Task 12: Optional SQLite read index (feature-detected)
 

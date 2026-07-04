@@ -222,6 +222,7 @@ import {
   projectSetupInputFromArgs,
   promptProjectInstallInput,
   readProjectSetupConfig,
+  writeProjectStorageMarker,
   validateProjectSetupInput,
   type ProjectSetupInput,
   type ProjectSetupResult
@@ -239,6 +240,7 @@ import {
   type RegistryRemoveResult
 } from "./registry.js";
 import { inspectSearchIndex, runSearch, writeSearchIndex, type SearchIndexInspection } from "./search-cli.js";
+import { migrateStorage } from "./storage-migrate.js";
 import { dirtyPathNotesHaveReasonCode, requireCommitOrDirtyPathReason } from "./summary-policy.js";
 import {
   addRawSource,
@@ -1206,6 +1208,9 @@ export async function runCommand(args: ParsedArgs, output: CliOutput, cwd: strin
       case "sync":
         result = await syncCommand(action, context, args, commandOutput, json);
         break;
+      case "storage":
+        result = await storageCommand(action, context, args, commandOutput, json);
+        break;
       case "ledger":
         result = await ledgerCommand(action, rest, context, args, commandOutput, json);
         break;
@@ -1747,6 +1752,9 @@ function optionalCommandPath(value: string | undefined): string | undefined {
 }
 
 function shouldRecordOperation(definition: CommandDefinition): boolean {
+  if (definition.path[0] === "storage" && definition.path[1] === "migrate") {
+    return false;
+  }
   return definition.requiresWorkspace || definition.path[0] === "init";
 }
 
@@ -2697,10 +2705,15 @@ function cliNeedsDoctorRecoveryDirective(snapshot: AgentDirectiveSnapshot): bool
 function cliAttentionDiagnostics(snapshot: AgentDirectiveSnapshot): readonly AgentDirectiveDiagnosticSnapshot[] {
   return snapshot.doctor.diagnostics.filter(
     (diagnostic) =>
-      diagnostic.severity === "warning" ||
-      diagnostic.severity === "error" ||
-      diagnostic.blocking
+      !isNonBlockingCollaborationDiagnostic(diagnostic) &&
+      (diagnostic.severity === "warning" ||
+        diagnostic.severity === "error" ||
+        diagnostic.blocking)
   );
+}
+
+function isNonBlockingCollaborationDiagnostic(diagnostic: AgentDirectiveDiagnosticSnapshot): boolean {
+  return diagnostic.code === "git.dirty_collaboration_path" && !diagnostic.blocking;
 }
 
 function cliRecoveryDiagnostics(snapshot: AgentDirectiveSnapshot): readonly AgentDirectiveDiagnosticSnapshot[] {
@@ -5820,11 +5833,13 @@ async function initCommand(
 ): Promise<CommandResult> {
   await ensureWorkspaceDirs(context);
   const result = await context.runtime.ensureWorkspaceInitialized();
+  const storage = await writeProjectStorageMarker(context.workspaceRoot, context.storage);
   const projectSetup = await maybeConfigureProjectSetup(context, args);
   const skillInstalls = projectSetup ? await installProjectSetupSkills(context, projectSetup) : undefined;
   const initResult = {
     initialized: result.initialized,
     workspaceRoot: context.workspaceRoot,
+    storage,
     eventId: result.event.meta.id,
     projectSetup,
     skillInstalls
@@ -5854,6 +5869,7 @@ async function installProjectSetupSkills(context: CliContext, projectSetup: Proj
 function formatInitResult(result: {
   readonly initialized: boolean;
   readonly workspaceRoot: string;
+  readonly storage?: { readonly storage: string };
   readonly eventId: string;
   readonly projectSetup?: ProjectSetupResult;
   readonly skillInstalls?: readonly SkillInstallSummary[];
@@ -5861,6 +5877,7 @@ function formatInitResult(result: {
   const lines = [
     "Boreal workspace initialized",
     `workspace: ${result.workspaceRoot}`,
+    `storage: ${result.storage?.storage ?? "file-v2"}`,
     `event: ${result.eventId}`
   ];
   if (result.projectSetup) {
@@ -8623,6 +8640,27 @@ async function importCommand(
     }
     default:
       throw new BorealError("BOREAL_INVALID_INPUT", `Unknown import command: ${action ?? ""}`);
+  }
+}
+
+async function storageCommand(
+  action: string | undefined,
+  context: CliContext,
+  args: ParsedArgs,
+  output: CliOutput,
+  json: boolean
+): Promise<CommandResult> {
+  switch (action) {
+    case "migrate": {
+      const to = requiredFlag(args, "to");
+      if (to !== "objects" && to !== "file") {
+        throw new BorealError("BOREAL_INVALID_INPUT", "--to must be objects or file", { to });
+      }
+      output.write(formatRecord(await migrateStorage(context, to), json));
+      return { exitCode: 0 };
+    }
+    default:
+      throw new BorealError("BOREAL_INVALID_INPUT", `Unknown storage command: ${action ?? ""}`);
   }
 }
 
@@ -15008,7 +15046,7 @@ const HELP_SECTIONS: readonly { readonly title: string; readonly categories: rea
   { title: "Knowledge", categories: ["source", "claim", "decision", "context", "search", "raw", "wiki", "vault"] },
   { title: "Agents", categories: ["agent", "session", "reservation", "operation", "directive"] },
   { title: "Dashboards", categories: ["dashboard", "registry"] },
-  { title: "Maintain", categories: ["doctor", "sync", "lock", "ledger", "snapshot", "duplicate", "merge", "compact", "daemon"] },
+  { title: "Maintain", categories: ["doctor", "sync", "storage", "lock", "ledger", "snapshot", "duplicate", "merge", "compact", "daemon"] },
   { title: "Data", categories: ["export", "import"] },
   { title: "Meta", categories: ["meta", "schema"] }
 ];

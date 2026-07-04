@@ -20,6 +20,7 @@ const execFileAsync = promisify(execFile);
 export type MemoryLayout = "in-repo" | "child" | "sibling";
 export type MemoryGitMode = "shared" | "separate" | "submodule";
 export type SkillTarget = "codex" | "claude";
+export type ProjectStorageKind = "file-v2" | "objects-v1";
 
 export interface SkillInstallRootConfig {
   readonly target: SkillTarget;
@@ -29,6 +30,7 @@ export interface SkillInstallRootConfig {
 
 export interface ProjectSetupConfig {
   readonly schemaVersion: typeof PROJECT_SETUP_SCHEMA_VERSION;
+  readonly storage?: ProjectStorageKind;
   readonly projectRoot: string;
   readonly memoryRoot: string;
   readonly memoryLayout: MemoryLayout;
@@ -187,7 +189,7 @@ const MEMORY_FILES = [
   {
     path: ".boreal/README.md",
     content:
-      "# Boreal Local Memory Runtime\n\nGenerated local memory cache, lock, and result files live under this directory. Most subdirectories are ignored by Git.\n"
+      "# Boreal Local Memory Runtime\n\nGenerated local memory cache, lock, and result files live under this directory. `.boreal/objects/` and `.boreal/log/` are durable collaboration data and are meant to be committed when present; `.boreal/runtime/`, `.boreal/cache/`, `.boreal/tmp/`, and `.boreal/results/` stay local.\n"
   },
   { path: "raw/index.jsonl", content: "" },
   { path: "graph/relationships.jsonl", content: "" },
@@ -413,6 +415,49 @@ export async function readProjectSetupConfig(projectRoot: string): Promise<Proje
 
 export async function readProjectSetupConfigFile(projectRoot: string): Promise<ProjectSetupConfig | undefined> {
   return readExistingConfig(join(projectRoot, ".boreal", "project.json"));
+}
+
+export async function readProjectStorage(projectRoot: string): Promise<ProjectStorageKind | undefined> {
+  const configPath = join(projectRoot, ".boreal", "project.json");
+  if (!existsSync(configPath)) {
+    return undefined;
+  }
+  try {
+    const parsed = JSON.parse(await readFile(configPath, "utf8")) as unknown;
+    if (!isRecord(parsed)) {
+      return undefined;
+    }
+    return isProjectStorageKind(parsed.storage) ? parsed.storage : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+export async function writeProjectStorageMarker(projectRoot: string, storage: ProjectStorageKind): Promise<{
+  readonly path: string;
+  readonly storage: ProjectStorageKind;
+}> {
+  const configPath = join(projectRoot, ".boreal", "project.json");
+  const now = nowIso();
+  const existing = await readProjectConfigDocument(configPath);
+  let document: Record<string, unknown>;
+  if (existing && isProjectSetupConfig(existing)) {
+    document = {
+      ...normalizedProjectSetupConfig(existing),
+      storage,
+      updatedAt: now
+    };
+  } else {
+    document = {
+      schemaVersion: PROJECT_SETUP_SCHEMA_VERSION,
+      storage,
+      projectRoot,
+      createdAt: typeof existing?.createdAt === "string" ? existing.createdAt : now,
+      updatedAt: now
+    };
+  }
+  await writeTextFileAtomic(configPath, `${JSON.stringify(document, null, 2)}\n`);
+  return { path: configPath, storage };
 }
 
 export async function inspectProjectSetupDrift(
@@ -704,9 +749,11 @@ export async function applyProjectSetup(input: ProjectSetupInput): Promise<Proje
   await validateProjectSetupInput(input);
   const now = nowIso();
   const configPath = join(input.projectRoot, ".boreal", "project.json");
+  const existingStorage = await readProjectStorage(input.projectRoot);
   const existingConfig = await readExistingConfig(configPath);
   const config: ProjectSetupConfig = {
     schemaVersion: PROJECT_SETUP_SCHEMA_VERSION,
+    storage: existingConfig?.storage ?? existingStorage ?? "objects-v1",
     projectRoot: input.projectRoot,
     memoryRoot: input.memoryRoot,
     memoryLayout: input.memoryLayout,
@@ -795,6 +842,19 @@ export async function validateProjectSetupInput(input: ProjectSetupInput): Promi
 }
 
 async function readExistingConfig(configPath: string): Promise<ProjectSetupConfig | undefined> {
+  const parsed = await readProjectConfigDocument(configPath);
+  if (!parsed || isProjectStorageMarker(parsed)) {
+    return undefined;
+  }
+  if (!isProjectSetupConfig(parsed)) {
+    throw new BorealError("BOREAL_CONFLICT", "Existing project setup config is invalid; repair it before re-running init", {
+      configPath
+    });
+  }
+  return normalizedProjectSetupConfig(parsed);
+}
+
+async function readProjectConfigDocument(configPath: string): Promise<Record<string, unknown> | undefined> {
   if (!existsSync(configPath)) {
     return undefined;
   }
@@ -803,12 +863,12 @@ async function readExistingConfig(configPath: string): Promise<ProjectSetupConfi
     schemaName: PROJECT_SETUP_SCHEMA_VERSION,
     expectedObject: true
   });
-  if (!isProjectSetupConfig(parsed)) {
+  if (!isRecord(parsed) || parsed.schemaVersion !== PROJECT_SETUP_SCHEMA_VERSION) {
     throw new BorealError("BOREAL_CONFLICT", "Existing project setup config is invalid; repair it before re-running init", {
       configPath
     });
   }
-  return normalizedProjectSetupConfig(parsed);
+  return parsed;
 }
 
 function normalizedProjectSetupConfig(config: ProjectSetupConfig): ProjectSetupConfig {
@@ -856,6 +916,7 @@ function isProjectSetupConfig(value: unknown): value is ProjectSetupConfig {
   const record = value as Record<string, unknown>;
   return (
     record.schemaVersion === PROJECT_SETUP_SCHEMA_VERSION &&
+    (record.storage === undefined || isProjectStorageKind(record.storage)) &&
     typeof record.projectRoot === "string" &&
     typeof record.memoryRoot === "string" &&
     (record.memoryLayout === "in-repo" || record.memoryLayout === "child" || record.memoryLayout === "sibling") &&
@@ -887,6 +948,18 @@ function isProjectSetupConfig(value: unknown): value is ProjectSetupConfig {
     typeof record.createdAt === "string" &&
     typeof record.updatedAt === "string"
   );
+}
+
+function isProjectStorageMarker(value: unknown): value is Record<string, unknown> & { readonly storage: ProjectStorageKind } {
+  return isRecord(value) && value.schemaVersion === PROJECT_SETUP_SCHEMA_VERSION && isProjectStorageKind(value.storage) && !isProjectSetupConfig(value);
+}
+
+function isProjectStorageKind(value: unknown): value is ProjectStorageKind {
+  return value === "file-v2" || value === "objects-v1";
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 async function ensureDirectory(path: string, memoryRoot: string): Promise<void> {

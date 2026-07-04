@@ -307,7 +307,12 @@ registry_project_count() {
 }
 
 is_initialized_boreal_workspace() {
-  [ -f ".boreal/runtime/state.json" ] && [ -f ".boreal/project.json" ]
+  [ -f ".boreal/project.json" ] || return 1
+  if grep -q '"storage"[[:space:]]*:[[:space:]]*"objects-v1"' ".boreal/project.json"; then
+    [ -f ".boreal/log/events.jsonl" ] || [ -d ".boreal/objects" ]
+    return
+  fi
+  [ -f ".boreal/runtime/state.json" ]
 }
 
 confirm() {

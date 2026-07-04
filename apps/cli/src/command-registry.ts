@@ -42,6 +42,7 @@ export interface CommandDefinition {
     | "merge"
     | "compact"
     | "sync"
+    | "storage"
     | "ledger"
     | "snapshot"
     | "doctor"
@@ -2132,6 +2133,18 @@ export const COMMAND_DEFINITIONS: readonly CommandDefinition[] = [
     supportsJson: true,
   },
   {
+    path: ["storage", "migrate"],
+    category: "storage",
+    summary: "Migrate the runtime storage backend.",
+    usage: "bwrk storage migrate --to objects|file [--json]",
+    description:
+      "Copies canonical runtime records between the legacy compact state document and the git-first per-record object store, then updates the workspace storage marker.",
+    flags: [flag("to", "value", "Target storage backend: objects or file.")],
+    positionals: { label: "arguments", min: 0, max: 0 },
+    requiresWorkspace: true,
+    supportsJson: true,
+  },
+  {
     path: ["ledger", "status"],
     category: "ledger",
     summary: "Compare exported JSONL ledgers with current runtime state.",
@@ -3816,6 +3829,18 @@ const COMMAND_BEHAVIOR: Readonly<Record<string, CommandBehaviorMetadata>> = {
     maxResultSizeChars: 300_000,
     humanOutputKind: "record",
     examples: ["bwrk sync refresh --json", "bwrk sync refresh --strict --json"],
+  }),
+  "storage migrate": commandMetadata("storage migrate", {
+    readOnly: false,
+    destructive: true,
+    writesState: true,
+    writesGeneratedArtifacts: false,
+    requiresFreshIndex: false,
+    concurrencySafe: false,
+    requiresLock: "state",
+    maxResultSizeChars: 50_000,
+    humanOutputKind: "record",
+    examples: ["bwrk storage migrate --to objects --json", "bwrk storage migrate --to file --json"],
   }),
   "ledger status": commandMetadata("ledger status", {
     readOnly: true,

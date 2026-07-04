@@ -17,6 +17,7 @@ import {
   projectRegistryDocumentSchemaIssues,
   readJsonFile,
   resolveProjectRegistryPaths,
+  resolveWorkspacePaths,
   type ProjectRegistryDocument,
   type ProjectRegistryEntry,
   type ProjectRegistryIdentity,
@@ -24,7 +25,7 @@ import {
 } from "@boreal/core";
 import { DEFAULT_FILE_LOCK_OPTIONS, withFileLock, writeTextFileAtomic } from "@boreal/storage";
 
-import { readProjectSetupConfigFile, skillInstallRootConfig, type ProjectSetupConfig } from "./project-setup.js";
+import { readProjectSetupConfigFile, readProjectStorage, skillInstallRootConfig, type ProjectSetupConfig } from "./project-setup.js";
 import { resolveRepoBwrkPin } from "./repo-binary-pin.js";
 
 const execFileAsync = promisify(execFile);
@@ -361,11 +362,18 @@ function migrateRegistryEntry(value: unknown): unknown {
 }
 
 async function readTargetProjectSetup(workspaceRoot: string): Promise<ProjectSetupConfig> {
-  const stateFile = join(workspaceRoot, ".boreal", "runtime", "state.json");
-  if (!existsSync(stateFile)) {
+  const paths = resolveWorkspacePaths(workspaceRoot);
+  const storage = (await readProjectStorage(workspaceRoot)) ?? "file-v2";
+  const initialized =
+    storage === "objects-v1"
+      ? existsSync(paths.eventLogFile) || existsSync(paths.objectsDir)
+      : existsSync(paths.stateFile);
+  if (!initialized) {
     throw new BorealError("BOREAL_INVALID_INPUT", "Registry add requires an initialized Boreal workspace", {
       workspaceRoot,
-      stateFile
+      storage,
+      stateFile: paths.stateFile,
+      eventLogFile: paths.eventLogFile
     });
   }
   const config = await readProjectSetupConfigFile(workspaceRoot);

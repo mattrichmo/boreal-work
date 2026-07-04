@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, readdirSync, statSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
 
@@ -58,6 +58,11 @@ const changedFiles = (before, after) =>
     .map(([path]) => path)
     .sort();
 
+const bytesUnder = (files, prefix) =>
+  [...files.entries()]
+    .filter(([path]) => path === prefix || path.startsWith(`${prefix}/`))
+    .reduce((total, [, stat]) => total + stat.size, 0);
+
 bwrk(["init"]);
 const ids = [];
 for (let i = 0; i < count; i += 1) {
@@ -104,7 +109,9 @@ const afterFiles = filesSnapshot(borealDir);
 const writtenFiles = changedFiles(beforeFiles, afterFiles);
 
 const stateFile = join(ws, ".boreal", "runtime", "state.json");
-const stateBytes = statSync(stateFile).size;
+const stateBytes = existsSync(stateFile) ? statSync(stateFile).size : 0;
+const objectBytes = bytesUnder(afterFiles, "objects");
+const logBytes = bytesUnder(afterFiles, "log");
 const runtimeDir = join(ws, ".boreal", "runtime");
 console.log(
   JSON.stringify(
@@ -113,9 +120,11 @@ console.log(
       count,
       closeMs: Math.round(closeMs),
       stateBytes,
+      objectBytes,
+      logBytes,
       filesWritten: writtenFiles.length,
       writtenFiles,
-      runtimeFiles: readdirSync(runtimeDir).sort()
+      runtimeFiles: existsSync(runtimeDir) ? readdirSync(runtimeDir).sort() : []
     },
     null,
     2

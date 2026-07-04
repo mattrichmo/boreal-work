@@ -108,6 +108,10 @@ export class ObjectDirBorealStore implements BorealStore {
     return run;
   }
 
+  async snapshot(): Promise<StoreSnapshot> {
+    return this.loadSnapshot();
+  }
+
   private async writeOnce<T>(operation: (writer: BorealWriter) => Promise<T> | T): Promise<T> {
     await this.assertSafePaths();
     return withFileLock(this.lockDir, this.lockOptions, async () => {

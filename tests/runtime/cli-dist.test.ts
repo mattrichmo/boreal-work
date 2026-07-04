@@ -198,7 +198,10 @@ describe("bundled bwrk dist", () => {
     const workspaceRoot = await makeTempDir("boreal-cli-compat-");
     const repoBin = await installBundledPackage(workspaceRoot, npmDist);
 
-    const init = await runBundle(repoBin, workspaceRoot, ["init", "--json"], { BOREAL_BWRK_DELEGATED: "1" });
+    const init = await runBundle(repoBin, workspaceRoot, ["init", "--json"], {
+      BOREAL_BWRK_DELEGATED: "1",
+      BOREAL_INIT_STORAGE: "file-v2"
+    });
     expect(init.exitCode).toBe(0);
 
     const skewEnv = {

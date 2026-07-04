@@ -13,9 +13,10 @@ import {
   type OperationId
 } from "@boreal/core";
 import { createBorealRuntime } from "@boreal/engine";
-import { FileBorealStore } from "@boreal/storage";
+import { FileBorealStore, ObjectDirBorealStore, type BorealStore } from "@boreal/storage";
 
 import { flagValue, hasFlag, type ParsedArgs } from "./args.js";
+import { readProjectStorage, type ProjectStorageKind } from "./project-setup.js";
 
 /** The global workspace lives at the machine-local registry root (app-state).
  * Passing env so BOREAL_PROJECT_REGISTRY_ROOT is honored (overrides + tests). */
@@ -32,7 +33,8 @@ export interface CliContext {
   readonly cwd: string;
   readonly workspaceRoot: string;
   readonly paths: ReturnType<typeof resolveWorkspacePaths>;
-  readonly store: FileBorealStore;
+  readonly storage: ProjectStorageKind;
+  readonly store: BorealStore;
   readonly runtime: ReturnType<typeof createBorealRuntime>;
   readonly actor: ActorRef;
   readonly sessionId: string;
@@ -59,9 +61,10 @@ export async function createCliContext(
   const paths = resolveWorkspacePaths(workspaceRoot);
   const actor = actorFromArgs(args);
   const sessionId = options.sessionId ? normalizeActorId(options.sessionId) : sessionIdFromArgs(args);
-  const store = new FileBorealStore({ rootDir: workspaceRoot });
+  const storage = await selectStorageKind(args, workspaceRoot, paths);
+  const store = storage === "objects-v1" ? new ObjectDirBorealStore({ rootDir: workspaceRoot }) : new FileBorealStore({ rootDir: workspaceRoot });
   const runtime = createBorealRuntime({ store, actor, operationId: options.operationId });
-  const context: CliContext = { cwd, workspaceRoot, paths, store, runtime, actor, sessionId, operationId: options.operationId };
+  const context: CliContext = { cwd, workspaceRoot, paths, storage, store, runtime, actor, sessionId, operationId: options.operationId };
   // The global workspace is auto-initialized on first use so it always exists.
   if (useGlobal) {
     await ensureWorkspaceDirs(context);
@@ -75,11 +78,35 @@ export async function ensureWorkspaceDirs(context: CliContext): Promise<void> {
 }
 
 export function assertInitialized(context: CliContext): void {
-  if (!existsSync(context.paths.borealDir) || !existsSync(context.paths.stateFile)) {
+  const initialized =
+    context.storage === "objects-v1"
+      ? existsSync(context.paths.borealDir) && (existsSync(context.paths.eventLogFile) || existsSync(context.paths.objectsDir))
+      : existsSync(context.paths.borealDir) && existsSync(context.paths.stateFile);
+  if (!initialized) {
     throw new BorealError("BOREAL_INVALID_INPUT", "Boreal workspace is not initialized; run `bwrk init`", {
-      workspaceRoot: context.workspaceRoot
+      workspaceRoot: context.workspaceRoot,
+      storage: context.storage
     });
   }
+}
+
+async function selectStorageKind(
+  args: ParsedArgs,
+  workspaceRoot: string,
+  paths: ReturnType<typeof resolveWorkspacePaths>
+): Promise<ProjectStorageKind> {
+  const configured = await readProjectStorage(workspaceRoot);
+  if (configured) {
+    return configured;
+  }
+  if (args.command[0] === "init" && !existsSync(paths.stateFile)) {
+    return initDefaultStorageKind();
+  }
+  return "file-v2";
+}
+
+function initDefaultStorageKind(): ProjectStorageKind {
+  return process.env.BOREAL_INIT_STORAGE === "file-v2" ? "file-v2" : "objects-v1";
 }
 
 function resolveExplicitWorkspaceRoot(start: string): string {

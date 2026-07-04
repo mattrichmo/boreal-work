@@ -1653,6 +1653,16 @@ JSON `data` contains `refreshed`, `refreshOk`, `postRefreshStatusOk`, `exitReaso
 
 By default the command exits `0` when the refresh itself succeeds, even if `postRefreshStatusOk` is false. Pass `--strict` to restore status-based exit semantics and exit `1` when the post-refresh sync status is still not clean, for example because the vault is missing or Git collaboration paths are dirty on a protected branch. Agents should treat `exitReason: post_refresh_status_unhealthy` as partial success: generated artifacts were refreshed, but the nested `status` object and `recommendedActions` describe the remaining repair.
 
+## `storage migrate`
+
+```bash
+bwrk storage migrate --to objects|file [--json]
+```
+
+Copies canonical runtime records between the legacy compact state document and the git-first per-record object store, verifies record counts and the event-log hash chain, then updates `.boreal/project.json` with the selected storage backend. `--to objects` writes one compact JSON file per canonical record under `.boreal/objects/`, keeps history in `.boreal/log/events.jsonl`, and renames `runtime/state.json` to a timestamped `.migrated-*` backup. `--to file` recreates `runtime/state.json` as an escape hatch.
+
+JSON `data` contains `migrated`, `from`, `to`, `records`, `eventLog`, `markerPath`, and, for file-to-object migration, `stateBackupPath`.
+
 ## `ledger status`
 
 ```bash

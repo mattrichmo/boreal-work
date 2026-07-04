@@ -1092,6 +1092,33 @@ async function readStateDocument(
   context: CliContext,
   diagnostics: Diagnostic[]
 ): Promise<Record<string, unknown> | undefined> {
+  if (context.storage === "objects-v1") {
+    const state = await context.store.read(async (reader) => ({
+      schemaVersion: FILE_STORE_SCHEMA_VERSION,
+      workItems: await reader.listWorkItems(),
+      agentSummaries: await reader.listAgentSummaries(),
+      evidence: await reader.listEvidence(),
+      verifications: await reader.listVerifications(),
+      directiveAcknowledgements: await reader.listDirectiveAcknowledgements(),
+      knowledgeSources: await reader.listKnowledgeSources(),
+      claims: await reader.listClaims(),
+      decisions: await reader.listDecisions(),
+      graphEdges: await reader.listGraphEdges(),
+      reservations: await reader.listReservations(),
+      reviewerHeartbeats: await reader.listReviewerHeartbeats(),
+      events: await reader.listEvents(),
+      operations: await reader.listOperations(),
+      projections: [],
+      contextPacks: []
+    }));
+    diagnostics.push({
+      code: "state.parse",
+      severity: "ok",
+      message: "Object store records loaded for runtime state validation"
+    });
+    return state;
+  }
+
   if (!existsSync(context.paths.stateFile)) {
     diagnostics.push({
       code: "state.missing",
