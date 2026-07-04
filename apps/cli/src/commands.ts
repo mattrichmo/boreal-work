@@ -152,6 +152,7 @@ import {
 import type { FinishReservedWorkSummaryFactory } from "@boreal/engine";
 
 import { flagValue, flagValues, hasFlag, requiredFlag, type ParsedArgs } from "./args.js";
+import { evidenceCommand } from "./commands/evidence.js";
 import { storageCommand } from "./commands/storage.js";
 import {
   buildSyncRefreshResult,
@@ -1065,7 +1066,13 @@ export async function runCommand(args: ParsedArgs, output: CliOutput, cwd: strin
         result = await depCommand(action, rest, context, args, commandOutput, json);
         break;
       case "evidence":
-        result = await evidenceCommand(action, rest, context, args, commandOutput, json);
+        result = await evidenceCommand(action, rest, context, args, commandOutput, json, {
+          requiredPositional,
+          resolveWorkId,
+          parseEvidenceKind,
+          parseOutcome,
+          resultForEvidence: (evidence) => withCliResult(evidence, evidenceCliResult(evidence))
+        });
         break;
       case "summary":
         result = await summaryCommand(action, rest, context, args, commandOutput, json);
@@ -6799,32 +6806,6 @@ async function depCommand(
     default:
       throw new BorealError("BOREAL_INVALID_INPUT", `Unknown dep command: ${action ?? ""}`);
   }
-}
-
-async function evidenceCommand(
-  action: string | undefined,
-  rest: readonly string[],
-  context: CliContext,
-  args: ParsedArgs,
-  output: CliOutput,
-  json: boolean
-): Promise<CommandResult> {
-  if (action !== "add") {
-    throw new BorealError("BOREAL_INVALID_INPUT", `Unknown evidence command: ${action ?? ""}`);
-  }
-
-  const evidence = await context.runtime.recordEvidence({
-    subjectId: await resolveWorkId(context, requiredPositional(rest, 0, "work reference")),
-    subjectType: "work",
-    kind: parseEvidenceKind(flagValue(args, "kind")),
-    summary: requiredFlag(args, "summary"),
-    outcome: parseOutcome(flagValue(args, "outcome")),
-    command: flagValue(args, "command"),
-    uri: flagValue(args, "uri")
-  });
-  const result = withCliResult(evidence, evidenceCliResult(evidence));
-  output.write(formatRecord(result, json));
-  return { exitCode: 0 };
 }
 
 async function summaryCommand(
