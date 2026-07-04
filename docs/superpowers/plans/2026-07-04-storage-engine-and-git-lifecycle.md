@@ -835,6 +835,7 @@ Progress:
 - [x] sprint
 - [x] protocol
 - [x] operation
+- [x] daemon
 
 ### Task 19: Directive machinery audit (decision task, not deletion task)
 

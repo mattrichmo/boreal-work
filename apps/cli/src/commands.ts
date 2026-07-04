@@ -145,6 +145,7 @@ import type { FinishReservedWorkSummaryFactory } from "@boreal/engine";
 
 import { flagValue, flagValues, hasFlag, requiredFlag, type ParsedArgs } from "./args.js";
 import { agentCommand, agentStartCommand, type AgentCommandDependencies } from "./commands/agent.js";
+import { daemonCommand, type DaemonCommandDependencies } from "./commands/daemon.js";
 import { evidenceCommand } from "./commands/evidence.js";
 import { healthCommand, type HealthCommandDependencies } from "./commands/health.js";
 import { knowledgeCommand } from "./commands/knowledge.js";
@@ -953,7 +954,7 @@ export async function runCommand(args: ParsedArgs, output: CliOutput, cwd: strin
         result = await unlinkCommand(action, args, commandOutput, json);
         break;
       case "daemon":
-        result = await daemonCommand(action, context, commandOutput, json);
+        result = await daemonCommand(action, context, commandOutput, json, daemonCommandDependencies());
         break;
       case "sprint":
         result = await sprintCommand(action, rest, context, args, commandOutput, json, sprintCommandDependencies());
@@ -1242,6 +1243,12 @@ function operationCommandDependencies(): OperationCommandDependencies {
     operationStats,
     pruneOperations,
     repairOperationLinks
+  };
+}
+
+function daemonCommandDependencies(): DaemonCommandDependencies {
+  return {
+    inspectDaemonStatus
   };
 }
 
@@ -9254,21 +9261,6 @@ function parsePort(value: string | undefined): number | undefined {
     throw new BorealError("BOREAL_INVALID_INPUT", "--port must be between 1 and 65535", { value });
   }
   return parsed;
-}
-
-async function daemonCommand(
-  action: string | undefined,
-  context: CliContext,
-  output: CliOutput,
-  json: boolean
-): Promise<CommandResult> {
-  switch (action) {
-    case "status":
-      output.write(formatRecord(await inspectDaemonStatus({ workspaceRoot: context.workspaceRoot }), json));
-      return { exitCode: 0 };
-    default:
-      throw new BorealError("BOREAL_INVALID_INPUT", `Unknown daemon command: ${action ?? ""}`);
-  }
 }
 
 interface GlobalDashboardProjectOverview {
