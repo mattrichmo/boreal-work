@@ -836,6 +836,7 @@ Progress:
 - [x] protocol
 - [x] operation
 - [x] daemon
+- [x] registry
 
 ### Task 19: Directive machinery audit (decision task, not deletion task)
 

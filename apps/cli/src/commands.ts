@@ -152,6 +152,12 @@ import { knowledgeCommand } from "./commands/knowledge.js";
 import { memoryCommand, resolveWikiPageIds } from "./commands/memory.js";
 import { operationCommand, type OperationCommandDependencies } from "./commands/operation.js";
 import { protocolCommand, type ProtocolCommandDependencies } from "./commands/protocol.js";
+import {
+  formatRegistryAdd,
+  formatRegistryRemove,
+  registryCommand,
+  type RegistryCommandDependencies
+} from "./commands/registry.js";
 import { sprintCommand, type SprintCommandDependencies } from "./commands/sprint.js";
 import { storageCommand } from "./commands/storage.js";
 import {
@@ -217,14 +223,9 @@ import {
 import {
   addProjectRegistryEntry,
   doctorProjectRegistry,
-  importProjectSetupRegistryEntry,
   listProjectRegistry,
   removeProjectRegistryEntry,
-  type RegistryAddResult,
-  type RegistryDoctorResult,
-  type RegistryImportSetupResult,
-  type RegistryListResult,
-  type RegistryRemoveResult
+  type RegistryDoctorResult
 } from "./registry.js";
 import { runSearch, writeSearchIndex } from "./search-cli.js";
 import { dirtyPathNotesHaveReasonCode, requireCommitOrDirtyPathReason } from "./summary-policy.js";
@@ -939,7 +940,7 @@ export async function runCommand(args: ParsedArgs, output: CliOutput, cwd: strin
         result = await installCommand(action, context, args, commandOutput, json);
         break;
       case "registry":
-        result = await registryCommand(action, rest, context, args, commandOutput, json);
+        result = await registryCommand(action, rest, context, args, commandOutput, json, registryCommandDependencies());
         break;
       case "dashboard":
         result = await dashboardCommand(action, context, args, commandOutput, json);
@@ -1249,6 +1250,12 @@ function operationCommandDependencies(): OperationCommandDependencies {
 function daemonCommandDependencies(): DaemonCommandDependencies {
   return {
     inspectDaemonStatus
+  };
+}
+
+function registryCommandDependencies(): RegistryCommandDependencies {
+  return {
+    requiredPositional
   };
 }
 
@@ -8913,101 +8920,6 @@ function installedSkillTargets(values: readonly string[]): readonly ("codex" | "
     seen.add(value);
   }
   return [...seen];
-}
-
-async function registryCommand(
-  action: string | undefined,
-  rest: readonly string[],
-  context: CliContext,
-  args: ParsedArgs,
-  output: CliOutput,
-  json: boolean
-): Promise<CommandResult> {
-  const options = { registryRoot: flagValue(args, "registry-root") };
-  switch (action) {
-    case "list": {
-      const result = await listProjectRegistry(options);
-      output.write(json ? formatRecord(result, true) : formatRegistryList(result));
-      return { exitCode: 0 };
-    }
-    case "add": {
-      const result = await addProjectRegistryEntry({
-        ...options,
-        workspaceRoot: requiredFlag(args, "workspace"),
-        name: flagValue(args, "name"),
-        labels: flagValues(args, "label")
-      });
-      output.write(json ? formatRecord(result, true) : formatRegistryAdd(result));
-      return { exitCode: 0 };
-    }
-    case "import-setup": {
-      const result = await importProjectSetupRegistryEntry({
-        ...options,
-        workspaceRoot: context.workspaceRoot,
-        name: flagValue(args, "name"),
-        labels: flagValues(args, "label")
-      });
-      output.write(json ? formatRecord(result, true) : formatRegistryImport(result));
-      return { exitCode: 0 };
-    }
-    case "remove": {
-      const result = await removeProjectRegistryEntry(requiredPositional(rest, 0, "project id"), {
-        ...options,
-        purge: hasFlag(args, "purge")
-      });
-      output.write(json ? formatRecord(result, true) : formatRegistryRemove(result));
-      return { exitCode: 0 };
-    }
-    case "doctor": {
-      const result = await doctorProjectRegistry(options);
-      output.write(json ? formatRecord(result, true) : formatRegistryDoctor(result));
-      return { exitCode: result.ok ? 0 : 1 };
-    }
-    default:
-      throw new BorealError("BOREAL_INVALID_INPUT", `Unknown registry command: ${action ?? ""}`);
-  }
-}
-
-function formatRegistryList(result: RegistryListResult): string {
-  if (result.entries.length === 0) {
-    return `No registered projects at ${result.storage.registryFile}\n`;
-  }
-  return table(
-    result.entries.map((entry) => ({
-      id: entry.id,
-      name: entry.display.name,
-      lifecycle: entry.lifecycle,
-      projectRoot: entry.projectRoot,
-      memoryRoot: entry.memoryRoot,
-      git: entry.memoryGitMode
-    }))
-  );
-}
-
-function formatRegistryAdd(result: RegistryAddResult): string {
-  return `${result.added ? "Added" : result.replaced ? "Updated" : "Registered"} ${result.entry.display.name} (${result.entry.id})\n`;
-}
-
-function formatRegistryImport(result: RegistryImportSetupResult): string {
-  const action = result.changed ? result.added ? "Imported" : "Updated" : "Already registered";
-  return `${action} ${result.entry.display.name} (${result.entry.id})\n`;
-}
-
-function formatRegistryRemove(result: RegistryRemoveResult): string {
-  const action = result.purged ? "Purged" : "Archived";
-  return `${action} ${result.entry.display.name} (${result.entry.id})\n`;
-}
-
-function formatRegistryDoctor(result: RegistryDoctorResult): string {
-  const header = `[${result.ok ? "ok" : "error"}] registry: ${result.entryCount} project(s) at ${result.storage.registryFile}`;
-  if (result.findings.length === 0) {
-    return `${header}\n`;
-  }
-  return `${header}\n${result.findings.map((finding) => {
-    const project = finding.projectId ? ` ${finding.projectId}` : "";
-    const path = finding.path ? ` ${finding.path}` : "";
-    return `[${finding.severity}] ${finding.code}${project}:${path} ${finding.message}`.trimEnd();
-  }).join("\n")}\n`;
 }
 
 async function dashboardCommand(
