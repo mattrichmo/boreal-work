@@ -7,9 +7,14 @@ import {
   nowIso,
   readJsonFile,
   type ContentHash,
-  type EnforcementGap
+  type ContextPack,
+  type EnforcementGap,
+  type GraphEdge,
+  type WorkId,
+  type WorkItem
 } from "@boreal/core";
 import {
+  buildContextPack,
   buildSearchIndex,
   isSearchIndexDocument,
   querySearchIndex,
@@ -249,13 +254,14 @@ async function readSearchIndex(path: string): Promise<SearchIndexDocument> {
 
 async function readSearchSnapshot(context: CliContext): Promise<SearchCorpusSnapshot> {
   return context.store.read(async (reader) => {
-    const [workItems, agentSummaries, evidence, knowledgeSources, claims, decisions, contextPacks] = await Promise.all([
+    const [workItems, agentSummaries, evidence, knowledgeSources, claims, decisions, graphEdges, contextPacks] = await Promise.all([
       reader.listWorkItems(),
       reader.listAgentSummaries(),
       reader.listEvidence(),
       reader.listKnowledgeSources(),
       reader.listClaims(),
       reader.listDecisions(),
+      reader.listGraphEdges(),
       reader.listContextPacks()
     ]);
     return {
@@ -265,9 +271,77 @@ async function readSearchSnapshot(context: CliContext): Promise<SearchCorpusSnap
       knowledgeSources,
       claims,
       decisions,
-      contextPacks
+      contextPacks: contextPacksWithSyntheticMissing({
+        workItems,
+        graphEdges,
+        evidence,
+        knowledgeSources,
+        claims,
+        decisions,
+        contextPacks,
+        actor: context.actor
+      })
     };
   });
+}
+
+function contextPacksWithSyntheticMissing(input: {
+  readonly workItems: readonly WorkItem[];
+  readonly graphEdges: readonly GraphEdge[];
+  readonly evidence: SearchCorpusSnapshot["evidence"];
+  readonly knowledgeSources: SearchCorpusSnapshot["knowledgeSources"];
+  readonly claims: SearchCorpusSnapshot["claims"];
+  readonly decisions: SearchCorpusSnapshot["decisions"];
+  readonly contextPacks: readonly ContextPack[];
+  readonly actor: CliContext["actor"];
+}): readonly ContextPack[] {
+  const existingSubjects = new Set(input.contextPacks.map((pack) => pack.subjectId));
+  const dependencyIdsByWork = dependencyIdsByWorkFromGraph(input.workItems, input.graphEdges);
+  const generatedAt = nowIso();
+  const synthetic = input.workItems
+    .filter((work) => !existingSubjects.has(work.meta.id))
+    .map((work) =>
+      buildContextPack({
+        work: { ...work, dependencyIds: dependencyIdsByWork.get(work.meta.id) ?? work.dependencyIds },
+        evidence: input.evidence.filter((record) => record.subjectId === work.meta.id),
+        sources: input.knowledgeSources,
+        claims: input.claims,
+        decisions: input.decisions,
+        actor: input.actor,
+        now: generatedAt
+      })
+    );
+  return [...input.contextPacks, ...synthetic];
+}
+
+function dependencyIdsByWorkFromGraph(
+  workItems: readonly WorkItem[],
+  graphEdges: readonly GraphEdge[]
+): ReadonlyMap<WorkId, readonly WorkId[]> {
+  const workIds = new Set(workItems.map((work) => work.meta.id));
+  const dependencyIdsByWork = new Map<WorkId, WorkId[]>();
+  for (const work of workItems) {
+    dependencyIdsByWork.set(work.meta.id, []);
+  }
+  for (const edge of graphEdges) {
+    if (
+      edge.kind !== "blocks" ||
+      edge.fromType !== "work" ||
+      edge.toType !== "work" ||
+      !workIds.has(edge.fromId as WorkId) ||
+      !workIds.has(edge.toId as WorkId)
+    ) {
+      continue;
+    }
+    const workId = edge.toId as WorkId;
+    dependencyIdsByWork.set(workId, [...(dependencyIdsByWork.get(workId) ?? []), edge.fromId as WorkId]);
+  }
+  return new Map(
+    [...dependencyIdsByWork.entries()].map(([workId, dependencyIds]) => [
+      workId,
+      [...new Set(dependencyIds)].sort((left, right) => left.localeCompare(right))
+    ])
+  );
 }
 
 function indexWriteResult(path: string, index: SearchIndexDocument): SearchIndexWriteResult {

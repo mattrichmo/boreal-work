@@ -21,9 +21,12 @@ export interface FileBorealStoreOptions {
   readonly lock?: Partial<FileLockOptions>;
 }
 
-export const FILE_STORE_SCHEMA_VERSION = "boreal.file-store.v1";
+export const FILE_STORE_SCHEMA_VERSION = "boreal.file-store.v2";
+const LEGACY_FILE_STORE_SCHEMA_VERSION = "boreal.file-store.v1";
 
-interface StateDocument extends Required<StoreSnapshot> {
+type PersistedStoreSnapshot = Omit<Required<StoreSnapshot>, "projections" | "contextPacks">;
+
+interface StateDocument extends PersistedStoreSnapshot {
   readonly schemaVersion: typeof FILE_STORE_SCHEMA_VERSION;
 }
 
@@ -114,9 +117,7 @@ function snapshotToDocument(snapshot: StoreSnapshot): StateDocument {
     reservations: snapshot.reservations ?? [],
     reviewerHeartbeats: snapshot.reviewerHeartbeats ?? [],
     events: snapshot.events ?? [],
-    operations: snapshot.operations ?? [],
-    projections: snapshot.projections ?? [],
-    contextPacks: snapshot.contextPacks ?? []
+    operations: snapshot.operations ?? []
   };
 }
 
@@ -125,7 +126,7 @@ function documentToSnapshot(value: unknown): StoreSnapshot {
     throw new BorealError("BOREAL_STORAGE_ERROR", "Boreal state file must contain an object");
   }
 
-  if (value.schemaVersion !== FILE_STORE_SCHEMA_VERSION) {
+  if (value.schemaVersion !== FILE_STORE_SCHEMA_VERSION && value.schemaVersion !== LEGACY_FILE_STORE_SCHEMA_VERSION) {
     throw new BorealError("BOREAL_STORAGE_ERROR", "Unsupported Boreal state file version", {
       schemaVersion: value.schemaVersion
     });
@@ -145,8 +146,8 @@ function documentToSnapshot(value: unknown): StoreSnapshot {
     reviewerHeartbeats: readOptionalArray(value, "reviewerHeartbeats"),
     events: readArray(value, "events"),
     operations: readOptionalArray(value, "operations"),
-    projections: readArray(value, "projections"),
-    contextPacks: readArray(value, "contextPacks")
+    projections: [],
+    contextPacks: []
   };
   const schemaIssues = runtimeSnapshotSchemaIssues(snapshot);
   if (schemaIssues.length > 0) {

@@ -205,6 +205,7 @@ const SNAPSHOT_SECTIONS: readonly SnapshotSection[] = [
 export const EXPORT_SCHEMA_VERSION = "boreal.export.v1";
 export const LEDGER_SCHEMA_VERSION = "boreal.ledgers.v1";
 export const LEDGER_DELETION_SCHEMA_VERSION = "boreal.ledger-deletion.v1";
+const LEGACY_FILE_STORE_SCHEMA_VERSION = "boreal.file-store.v1";
 const LEDGER_MANIFEST_FILE = "manifest.json";
 const LEDGER_DELETIONS_FILE = "deletions.jsonl";
 const LEDGER_FILES: Record<SnapshotSection, string> = {
@@ -1535,7 +1536,7 @@ function parseImportSnapshot(value: unknown): ExportSnapshot {
   if (value.schemaVersion === EXPORT_SCHEMA_VERSION) {
     return parseExportDocument(value).state;
   }
-  if (value.schemaVersion === FILE_STORE_SCHEMA_VERSION) {
+  if (value.schemaVersion === FILE_STORE_SCHEMA_VERSION || value.schemaVersion === LEGACY_FILE_STORE_SCHEMA_VERSION) {
     return normalizeSnapshot(value);
   }
   throw new BorealError("BOREAL_INVALID_INPUT", "Unsupported import schema version", {

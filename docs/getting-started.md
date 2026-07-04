@@ -83,7 +83,7 @@ node tools/install-local-bwrk.mjs
 
 Boreal supports three install scopes on one machine: a source checkout (`pnpm bwrk`), a machine-level binary (`bwrk` from npm or Homebrew), and a repo-pinned package at `node_modules/.bin/bwrk`. When a machine binary is run inside a repo that declares a pinned package, the launcher must delegate to that repo-pinned binary before touching runtime state. If the pinned binary is missing because dependencies are not installed, Boreal fails closed with a typed error that names `pnpm install`; it does not fall back to the machine binary.
 
-Patch-level skew between the machine launcher and repo-pinned binary is allowed. Major or minor skew is reported by `bwrk doctor` as `install.version_skew` with channel-correct upgrade commands. A binary may only operate on the file-store schema it supports (`boreal.file-store.v1` today); newer state files are rejected by doctor and by the storage adapter instead of being read silently.
+Patch-level skew between the machine launcher and repo-pinned binary is allowed. Major or minor skew is reported by `bwrk doctor` as `install.version_skew` with channel-correct upgrade commands. A binary may only operate on the file-store schema it supports (`boreal.file-store.v2` today, with `boreal.file-store.v1` accepted as a legacy migration input); newer state files are rejected by doctor and by the storage adapter instead of being read silently.
 
 The rest of this guide uses `pnpm bwrk`; substitute `bwrk` if you installed the npm package, Homebrew formula, machine installer, or local shim.
 

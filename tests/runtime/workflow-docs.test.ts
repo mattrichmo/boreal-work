@@ -199,7 +199,7 @@ describe("workflow, template, and skill docs", () => {
     expect(runtime).toContain("bwrk version --json");
     expect(runtime).toContain("boreal.cli.version.v1");
     expect(runtime).toContain("boreal.runtime.v1");
-    expect(runtime).toContain("boreal.file-store.v1");
+    expect(runtime).toContain("boreal.file-store.v2");
     expect(runtime).toContain("Migrations that cannot be cleanly reversed must create a `boreal.export.v1` recovery snapshot");
     expect(runtime).toContain("Breaking persisted runtime or adapter changes require a new schema version");
     expect(commands).toContain("`boreal.cli.version.v1`");

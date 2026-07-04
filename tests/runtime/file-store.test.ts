@@ -5,7 +5,14 @@ import { join } from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
 
-import { BorealError, nowIso, type ActorRef, type DirectiveAcknowledgementRecord } from "@boreal/core";
+import {
+  BorealError,
+  nowIso,
+  type ActorRef,
+  type ContextPack,
+  type DirectiveAcknowledgementRecord,
+  type ProjectionRecord
+} from "@boreal/core";
 import { createBorealRuntime } from "@boreal/engine";
 import { recordEvidence } from "@boreal/evidence-engine";
 import { createKnowledgeSource } from "@boreal/knowledge-engine";
@@ -62,7 +69,7 @@ describe("file-backed store", () => {
       schemaVersion: string;
       workItems: unknown[];
     };
-    expect(state.schemaVersion).toBe("boreal.file-store.v1");
+    expect(state.schemaVersion).toBe("boreal.file-store.v2");
     expect(state.workItems).toHaveLength(1);
   });
 
@@ -79,6 +86,100 @@ describe("file-backed store", () => {
 
     const raw = await readFile(store.stateFile, "utf8");
     expect(raw.startsWith('{"schemaVersion"')).toBe(true);
+  });
+
+  it("loads a v1 state file and drops derived sections", async () => {
+    const rootDir = await makeTempWorkspace();
+    const statePath = join(rootDir, ".boreal/runtime/state.json");
+    await mkdir(join(rootDir, ".boreal/runtime"), { recursive: true });
+    await writeFile(
+      statePath,
+      JSON.stringify(
+        emptyStateDocument({
+          projections: [{ meta: { id: "projection_legacy" }, subjectId: "bw_work_legacy" }],
+          contextPacks: [{ id: "context_pack_legacy", subjectId: "bw_work_legacy" }]
+        })
+      ),
+      "utf8"
+    );
+
+    const store = new FileBorealStore({ rootDir, lock });
+
+    await store.read(async (reader) => {
+      expect(await reader.listProjections()).toEqual([]);
+      expect(await reader.listContextPacks()).toEqual([]);
+    });
+  });
+
+  it("writes v2 without derived sections", async () => {
+    const rootDir = await makeTempWorkspace();
+    const store = new FileBorealStore({ rootDir, lock });
+    const work = createWorkItem({
+      title: "Persisted without derived sections",
+      actor,
+      now: nowIso(new Date("2026-01-01T00:00:00.000Z"))
+    });
+
+    await store.write(async (writer) => {
+      await writer.putWorkItem(work);
+      const projection: ProjectionRecord = {
+        meta: {
+          id: "projection_test" as ProjectionRecord["meta"]["id"],
+          schemaVersion: "boreal.runtime.v1",
+          createdAt: "2026-01-01T00:00:00.000Z",
+          updatedAt: "2026-01-01T00:00:00.000Z",
+          createdBy: actor,
+          updatedBy: actor,
+          sourceRefs: [],
+          tags: []
+        },
+        kind: "work.context",
+        subjectId: work.meta.id,
+        value: {}
+      };
+      const contextPack: ContextPack = {
+        id: "context_pack_test" as ContextPack["id"],
+        subjectId: work.meta.id,
+        generatedAt: "2026-01-01T00:00:00.000Z",
+        ledgerSeq: 1,
+        title: work.title,
+        summary: "Derived pack",
+        facts: [],
+        evidence: []
+      };
+      await writer.putProjection(projection);
+      await writer.putContextPack(contextPack);
+    });
+
+    const doc = JSON.parse(await readFile(store.stateFile, "utf8")) as Record<string, unknown>;
+    expect(doc.schemaVersion).toBe("boreal.file-store.v2");
+    expect(doc.projections).toBeUndefined();
+    expect(doc.contextPacks).toBeUndefined();
+  });
+
+  it("rebuilds context packs on miss after derived sections are evicted", async () => {
+    const rootDir = await makeTempWorkspace();
+    const runtime = createBorealRuntime({
+      store: new FileBorealStore({ rootDir, lock }),
+      actor
+    });
+    const work = await runtime.createWork({
+      title: "Rebuild context after reopen",
+      description: "Context packs are derived."
+    });
+
+    const reopenedRuntime = createBorealRuntime({
+      store: new FileBorealStore({ rootDir, lock }),
+      actor
+    });
+
+    await expect(reopenedRuntime.getContextPack(work.meta.id)).resolves.toMatchObject({
+      subjectId: work.meta.id,
+      title: "Rebuild context after reopen"
+    });
+    const doc = JSON.parse(await readFile(join(rootDir, ".boreal/runtime/state.json"), "utf8")) as Record<string, unknown>;
+    expect(doc.contextPacks).toBeUndefined();
+    expect(doc.projections).toBeUndefined();
   });
 
   it("persists directive acknowledgement records across store instances", async () => {

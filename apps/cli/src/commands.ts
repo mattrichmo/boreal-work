@@ -10067,28 +10067,26 @@ async function buildContextPackFreshnessSummary(
   context: CliContext,
   agentId: string
 ): Promise<ContextPackFreshnessSummary> {
-  const currentSeq = await currentLedgerSeq(context);
   const active = await context.store.read(async (reader) => {
-    const reservations = (await reader.listActiveReservationsForAgent(agentId))
+    return (await reader.listActiveReservationsForAgent(agentId))
       .filter((reservation) => !reservation.expiresAt || Date.parse(reservation.expiresAt) > Date.now())
       .sort((left, right) => left.workId.localeCompare(right.workId));
-    return Promise.all(
-      reservations.map(async (reservation): Promise<ContextPackFreshnessRow> => {
-        const pack = await reader.getContextPackForSubject(reservation.workId);
-        const packSeq = pack?.ledgerSeq;
-        return {
-          workId: reservation.workId,
-          ...(pack ? { contextPackId: pack.id, generatedAt: pack.generatedAt } : {}),
-          ...(packSeq !== undefined ? { contextPackLedgerSeq: packSeq } : {}),
-          currentLedgerSeq: currentSeq,
-          current: packSeq !== undefined && packSeq === currentSeq
-        };
-      })
-    );
   });
+  const packs = await Promise.all(active.map((reservation) => context.runtime.getContextPack(reservation.workId)));
+  const currentSeq = await currentLedgerSeq(context);
   return {
     currentLedgerSeq: currentSeq,
-    active
+    active: active.map((reservation, index): ContextPackFreshnessRow => {
+      const pack = packs[index];
+      const packSeq = pack?.ledgerSeq;
+      return {
+        workId: reservation.workId,
+        ...(pack ? { contextPackId: pack.id, generatedAt: pack.generatedAt } : {}),
+        ...(packSeq !== undefined ? { contextPackLedgerSeq: packSeq } : {}),
+        currentLedgerSeq: currentSeq,
+        current: packSeq !== undefined && packSeq === currentSeq
+      };
+    })
   };
 }
 
@@ -12791,9 +12789,13 @@ async function activeSprintProjection(reader: BorealReader): Promise<ProjectionR
   if (deterministic?.kind === ACTIVE_SPRINT_PROJECTION_KIND) {
     return deterministic;
   }
-  return (await reader.listProjections()).find(
+  const legacyProjection = (await reader.listProjections()).find(
     (projection) => projection.kind === ACTIVE_SPRINT_PROJECTION_KIND && projection.subjectId === "workspace"
   );
+  if (legacyProjection) {
+    return legacyProjection;
+  }
+  return activeSprintProjectionFromEvents(await reader.listEvents());
 }
 
 function activeSprintIdFromProjection(projection: ProjectionRecord | undefined): WorkId | undefined {
@@ -12825,6 +12827,46 @@ function activeSprintProjectionRecord(
         value
       };
   return withContentHash(record satisfies ProjectionRecord);
+}
+
+function activeSprintProjectionFromEvents(events: readonly RuntimeEvent[]): ProjectionRecord | undefined {
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const event = events[index];
+    if (event?.type !== "sprint.activated" || event.subjectType !== "sprint") {
+      continue;
+    }
+    const payload = event.payload;
+    if (!isRecord(payload)) {
+      continue;
+    }
+    const sprintId = typeof payload.sprintId === "string" ? payload.sprintId : event.subjectId;
+    if (!sprintId.startsWith("bw_work_")) {
+      continue;
+    }
+    return withContentHash({
+      meta: {
+        id: ACTIVE_SPRINT_PROJECTION_ID,
+        schemaVersion: event.meta.schemaVersion,
+        createdAt: event.meta.createdAt,
+        updatedAt: event.meta.updatedAt,
+        createdBy: event.meta.createdBy,
+        updatedBy: event.meta.updatedBy,
+        sourceRefs: event.meta.sourceRefs,
+        tags: event.meta.tags
+      },
+      kind: ACTIVE_SPRINT_PROJECTION_KIND,
+      subjectId: "workspace",
+      value: {
+        workspaceRoot: typeof payload.workspaceRoot === "string" ? payload.workspaceRoot : undefined,
+        sprintId,
+        activatedAt: event.meta.createdAt,
+        activatedBy: String(event.meta.createdBy.id),
+        previousSprintId: typeof payload.previousSprintId === "string" ? payload.previousSprintId : undefined,
+        eventId: event.meta.id
+      }
+    } satisfies ProjectionRecord);
+  }
+  return undefined;
 }
 
 function sprintProjectionSummary(projection: ProjectionRecord) {

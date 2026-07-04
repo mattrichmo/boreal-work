@@ -462,7 +462,7 @@ export function createBorealRuntime(options: BorealRuntimeOptions = {}): BorealR
             readyItems.push(graphItem);
           }
         }
-        return Promise.all(readyItems.map((item) => makeWorkView(reader, item)));
+        return Promise.all(readyItems.map((item) => makeWorkView(reader, item, actor, now())));
       });
     },
 
@@ -1034,12 +1034,20 @@ export function createBorealRuntime(options: BorealRuntimeOptions = {}): BorealR
     },
 
     async getContextPack(workId): Promise<ContextPack> {
-      return store.read(async (reader) => {
+      const cached = await store.read(async (reader) => {
         await requireWork(reader, workId);
-        const pack = await reader.getContextPackForSubject(workId);
-        if (!pack) {
-          throw new BorealError("BOREAL_NOT_FOUND", "Context pack not found; run `bwrk context rebuild`", { workId });
-        }
+        return reader.getContextPackForSubject(workId);
+      });
+      if (cached) {
+        return cached;
+      }
+
+      return store.write(async (writer) => {
+        const work = await requireWork(writer, workId);
+        const pack = await refreshWorkContext(writer, work, actor, now());
+        await appendEvent(writer, "context.refreshed", work.meta.id, "work", {
+          contextPackId: pack.id
+        });
         return pack;
       });
     },
@@ -1065,7 +1073,7 @@ export function createBorealRuntime(options: BorealRuntimeOptions = {}): BorealR
     },
 
     async getWorkView(workId): Promise<WorkItemView> {
-      return store.read(async (reader) => makeWorkView(reader, await requireWork(reader, workId)));
+      return store.read(async (reader) => makeWorkView(reader, await requireWork(reader, workId), actor, now()));
     },
 
     async listEvents(): Promise<readonly RuntimeEvent[]> {
@@ -2163,7 +2171,12 @@ async function recomputeAllReadiness(writer: BorealWriter): Promise<number> {
   throw new BorealError("BOREAL_INVARIANT", "Readiness recompute did not converge");
 }
 
-async function makeWorkView(reader: BorealReader, work: WorkItem): Promise<WorkItemView> {
+async function makeWorkView(
+  reader: BorealReader,
+  work: WorkItem,
+  actor: ActorRef,
+  current: IsoTimestamp
+): Promise<WorkItemView> {
   const workItems = await reader.listWorkItems();
   const graphWork = await workWithGraphDependencies(reader, work);
   const dependencies = graphWork.dependencyIds
@@ -2172,8 +2185,23 @@ async function makeWorkView(reader: BorealReader, work: WorkItem): Promise<WorkI
   const evidence = await reader.listEvidenceForSubject(work.meta.id);
   const verifications = await reader.listVerificationsForSubject(work.meta.id);
   const packs = await reader.listContextPacks();
-  const contextPack = packs.find((pack) => pack.subjectId === work.meta.id);
+  const contextPack = packs.find((pack) => pack.subjectId === work.meta.id) ?? await synthesizeContextPack(reader, graphWork, evidence, actor, current);
   return toWorkItemView({ work: graphWork, dependencies, evidence, verifications, contextPack });
+}
+
+async function synthesizeContextPack(
+  reader: BorealReader,
+  work: WorkItem,
+  evidence: readonly EvidenceRecord[],
+  actor: ActorRef,
+  current: IsoTimestamp
+): Promise<ContextPack> {
+  const [sources, claims, decisions] = await Promise.all([
+    reader.listKnowledgeSources(),
+    reader.listClaims(),
+    reader.listDecisions()
+  ]);
+  return buildContextPack({ work, evidence, sources, claims, decisions, actor, now: current });
 }
 
 async function refreshWorkContext(

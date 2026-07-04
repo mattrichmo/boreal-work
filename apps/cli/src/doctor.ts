@@ -81,10 +81,11 @@ const STATE_SECTIONS = [
   "graphEdges",
   "reservations",
   "events",
-  "operations",
-  "projections",
-  "contextPacks"
+  "operations"
 ] as const;
+
+const LEGACY_FILE_STORE_SCHEMA_VERSION = "boreal.file-store.v1";
+const SUPPORTED_FILE_STORE_SCHEMA_VERSIONS = new Set([LEGACY_FILE_STORE_SCHEMA_VERSION, FILE_STORE_SCHEMA_VERSION]);
 
 export const OPERATION_LOG_RECOMMENDED_KEEP = 1_000;
 const OPERATION_LOG_WARNING_GRACE = 250;
@@ -1035,7 +1036,7 @@ async function readStateDocument(
 
   try {
     const parsed = await readJsonFile(context.paths.stateFile, {
-      schemaName: "boreal.file-store.v1",
+      schemaName: FILE_STORE_SCHEMA_VERSION,
       expectedObject: true,
       maxBytes: 50 * 1024 * 1024
     });
@@ -1047,7 +1048,7 @@ async function readStateDocument(
       });
       return undefined;
     }
-    if (parsed.schemaVersion !== FILE_STORE_SCHEMA_VERSION) {
+    if (!SUPPORTED_FILE_STORE_SCHEMA_VERSIONS.has(String(parsed.schemaVersion))) {
       const upgrade = installUpgradeStatus(getVersionInfo().installChannel);
       diagnostics.push({
         code: "state.schema",
@@ -1203,6 +1204,7 @@ async function validateStoreRecords(
       const rawKnowledgeSources = stateSection<KnowledgeSource>(state, "knowledgeSources");
       const rawClaims = stateSection<ClaimRecord>(state, "claims");
       const rawDecisions = stateSection<DecisionRecord>(state, "decisions");
+      const derivedContextPersisted = state.schemaVersion === LEGACY_FILE_STORE_SCHEMA_VERSION;
       const rawContextPacks = stateSection<ContextPack>(state, "contextPacks");
       const rawGraphEdges = stateSection<GraphEdge>(state, "graphEdges");
       const rawReservations = stateSection<AgentReservation>(state, "reservations");
@@ -1432,20 +1434,24 @@ async function validateStoreRecords(
         return expected === work.status ? [] : [{ workId: work.meta.id, actual: work.status, expected }];
       });
       const contextPackSubjects = new Set(rawContextPacks.filter(isDoctorContextPack).map((pack) => pack.subjectId));
-      const missingContextPacks = workItems
-        .filter((work) => !contextPackSubjects.has(work.meta.id))
-        .filter((work) => !generatedTombstones.contextPackIds.has(expectedContextProjectionId(work.meta.id)))
-        .map((work) => work.meta.id);
+      const missingContextPacks = derivedContextPersisted
+        ? workItems
+            .filter((work) => !contextPackSubjects.has(work.meta.id))
+            .filter((work) => !generatedTombstones.contextPackIds.has(expectedContextProjectionId(work.meta.id)))
+            .map((work) => work.meta.id)
+        : [];
       const contextPackBySubject = new Map(
         rawContextPacks.filter(isDoctorContextPack).map((pack) => [pack.subjectId, pack])
       );
       const contextProjectionBySubject = new Map(
         projections.filter((projection) => projection.kind === "context-pack").map((projection) => [projection.subjectId, projection])
       );
-      const missingContextProjections = workItems
-        .filter((work) => !contextProjectionBySubject.has(work.meta.id))
-        .filter((work) => !generatedTombstones.projectionIds.has(expectedContextProjectionId(work.meta.id)))
-        .map((work) => work.meta.id);
+      const missingContextProjections = derivedContextPersisted
+        ? workItems
+            .filter((work) => !contextProjectionBySubject.has(work.meta.id))
+            .filter((work) => !generatedTombstones.projectionIds.has(expectedContextProjectionId(work.meta.id)))
+            .map((work) => work.meta.id)
+        : [];
       const contextPackDrift = workItems.flatMap((work) => {
         const pack = contextPackBySubject.get(work.meta.id);
         if (!pack) {
@@ -2036,7 +2042,7 @@ async function validateStoreRecords(
       ...summary.missingContextProjections.map((workId) => ({ workId, issue: "missing_context_projection" })),
       ...summary.contextProjectionDrift
     ];
-    if (contextPackIssues.length > 0 || contextProjectionIssues.length > 0 || (fix && workStateChanged)) {
+    if (contextPackIssues.length > 0 || contextProjectionIssues.length > 0 || (fix && workStateChanged && state.schemaVersion === LEGACY_FILE_STORE_SCHEMA_VERSION)) {
       if (fix) {
         await context.runtime.rebuildProjections({
           skipContextPackIds: generatedTombstones.contextPackIds,
@@ -2061,7 +2067,10 @@ async function validateStoreRecords(
       diagnostics.push({
         code: "projection.context_pack",
         severity: "ok",
-        message: "Context pack projections are present"
+        message:
+          state.schemaVersion === LEGACY_FILE_STORE_SCHEMA_VERSION
+            ? "Context pack projections are present"
+            : "Context pack projections are derived on demand"
       });
     }
   } catch (error) {
@@ -2829,7 +2838,7 @@ function searchIndexDiagnosticMessage(inspection: {
   return "Local search index is fresh";
 }
 
-function stateSection<T>(state: Record<string, unknown>, section: (typeof STATE_SECTIONS)[number]): readonly T[] {
+function stateSection<T>(state: Record<string, unknown>, section: string): readonly T[] {
   const values = state[section];
   return Array.isArray(values) ? (values as readonly T[]) : [];
 }

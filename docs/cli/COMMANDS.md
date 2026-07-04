@@ -1471,7 +1471,7 @@ JSON `data` contains `outDir`, `manifestPath`, `contentHash`, `recordCounts`, `d
 bwrk import json --from <path> [--allow-external-read] [--json]
 ```
 
-Imports a `boreal.export.v1` document or raw `boreal.file-store.v1` state document. Import validates required sections and references before writing, normalizes imported event operation links away, and never imports operation records from the source file. Existing records with identical IDs and identical content are skipped. Existing records with identical IDs and different content are rejected as conflicts.
+Imports a `boreal.export.v1` document or raw `boreal.file-store.v2` state document. Legacy raw `boreal.file-store.v1` documents are accepted for migration. Import validates required sections and references before writing, normalizes imported event operation links away, and never imports operation records from the source file. Existing records with identical IDs and identical content are skipped. Existing records with identical IDs and different content are rejected as conflicts.
 
 Directive acknowledgement records import only as durable runtime records with valid links. Import rejects acknowledgement records that point at missing evidence, verification, summaries, artifact URIs, handoffs, or work subjects. If the export carries a top-level `agentDirectives` bundle, import validates directive references against that carrier; the bundle itself remains transport metadata and is not added to runtime state. Historical closeout summaries without acknowledgement records import as legacy-compatible records and are classified by doctor/report surfaces instead of being silently modernized.
 

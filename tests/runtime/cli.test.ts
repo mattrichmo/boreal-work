@@ -884,20 +884,13 @@ describe("bwrk cli", () => {
     expect(otherCurrent.active).toBe(false);
 
     const state = parseJson<{
-      readonly projections: Array<{ readonly meta: { readonly id: string }; readonly kind: string; readonly subjectId: string; readonly value: Record<string, unknown> }>;
+      readonly projections?: Array<{ readonly meta: { readonly id: string }; readonly kind: string; readonly subjectId: string; readonly value: Record<string, unknown> }>;
       readonly events: Array<{ readonly meta: { readonly id: string }; readonly type: string; readonly subjectId: string; readonly operationId?: string }>;
       readonly operations: Array<{ readonly meta: { readonly id: string }; readonly commandPath: string; readonly eventIds: readonly string[]; readonly actorId: string }>;
     }>(await readFile(join(rootDir, ".boreal/runtime/state.json"), "utf8"));
-    const projection = state.projections.find((record) => record.meta.id === activated.projectionId);
     const event = state.events.find((record) => record.meta.id === activated.eventId);
     const operation = state.operations.find((record) => record.commandPath === "sprint activate");
-    expect(projection).toEqual(
-      expect.objectContaining({
-        kind: "active-sprint",
-        subjectId: "workspace",
-        value: expect.objectContaining({ sprintId: sprint.meta.id, eventId: activated.eventId, workspaceRoot: rootDir })
-      })
-    );
+    expect(state.projections).toBeUndefined();
     expect(event).toEqual(
       expect.objectContaining({
         type: "sprint.activated",
@@ -5103,12 +5096,12 @@ describe("bwrk cli", () => {
     expect(jsonPayload.cli).toEqual(expect.objectContaining({ packageName: "@boreal/cli", packageVersion: "0.1.0" }));
     expect(jsonPayload.runtime).toEqual({
       recordSchemaVersion: "boreal.runtime.v1",
-      fileStoreSchemaVersion: "boreal.file-store.v1"
+      fileStoreSchemaVersion: "boreal.file-store.v2"
     });
     expect(jsonPayload.schemas).toEqual(
       expect.objectContaining({
         runtimeRecord: "boreal.runtime.v1",
-        fileStore: "boreal.file-store.v1",
+        fileStore: "boreal.file-store.v2",
         export: "boreal.export.v1",
         ledgerManifest: "boreal.ledgers.v1",
         ledgerDeletion: "boreal.ledger-deletion.v1",
@@ -9373,82 +9366,25 @@ describe("bwrk cli", () => {
     );
     await runCli(rootDir, ["context", "rebuild", "--json"]);
     const generatedState = await readState<{
-      readonly projections: Array<{ readonly meta: { readonly id: string }; readonly subjectId: string }>;
-      readonly contextPacks: Array<{ readonly id: string; readonly subjectId: string }>;
+      readonly projections?: unknown;
+      readonly contextPacks?: unknown;
     }>(rootDir);
-    const projection = generatedState.projections.find((record) => record.subjectId === projectionWork.meta.id);
-    const contextPack = generatedState.contextPacks.find((record) => record.subjectId === projectionWork.meta.id);
-    expect(projection).toBeDefined();
-    expect(contextPack).toBeDefined();
-    const deletedProjection = await runCli(rootDir, [
-      "ledger",
-      "delete",
-      "projection",
-      projection?.meta.id ?? "",
-      "--reason",
-      "generated-cleanup",
-      "--json"
-    ]);
-    const deletedProjectionPayload = parseData<{
-      readonly section: string;
-      readonly id: string;
-      readonly ledger: { readonly deletedRecordCounts: { readonly projections: number } };
-    }>(deletedProjection.stdout);
-    expect(deletedProjection.exitCode).toBe(0);
-    expect(deletedProjectionPayload).toEqual(
-      expect.objectContaining({
-        section: "projections",
-        id: projection?.meta.id
-      })
+    expect(generatedState.projections).toBeUndefined();
+    expect(generatedState.contextPacks).toBeUndefined();
+    const rebuiltContext = parseData<{ readonly subjectId: string }>(
+      (await runCli(rootDir, ["context", "show", projectionWork.meta.id, "--json"])).stdout
     );
-    expect(deletedProjectionPayload.ledger.deletedRecordCounts.projections).toBe(1);
-
-    const deletedContextPack = await runCli(rootDir, [
-      "ledger",
-      "delete",
-      "context-pack",
-      contextPack?.id ?? "",
-      "--reason",
-      "generated-cleanup",
-      "--json"
-    ]);
-    const deletedContextPackPayload = parseData<{
-      readonly section: string;
-      readonly id: string;
-      readonly ledger: { readonly deletedRecordCounts: { readonly contextPacks: number } };
-    }>(deletedContextPack.stdout);
-    expect(deletedContextPack.exitCode).toBe(0);
-    expect(deletedContextPackPayload).toEqual(
-      expect.objectContaining({
-        section: "contextPacks",
-        id: contextPack?.id
-      })
-    );
-    expect(deletedContextPackPayload.ledger.deletedRecordCounts.contextPacks).toBe(1);
-
-    const tombstoneAwareRebuild = await runCli(rootDir, ["context", "rebuild", "--json"]);
-    expect(tombstoneAwareRebuild.exitCode).toBe(0);
-    const rebuiltGeneratedState = await readState<{
-      readonly projections: Array<{ readonly meta: { readonly id: string } }>;
-      readonly contextPacks: Array<{ readonly id: string }>;
-    }>(rootDir);
-    expect(rebuiltGeneratedState.projections.map((record) => record.meta.id)).not.toContain(projection?.meta.id);
-    expect(rebuiltGeneratedState.contextPacks.map((record) => record.id)).not.toContain(contextPack?.id);
-    const refreshedLedgerExport = await runCli(rootDir, ["export", "ledgers", "--json"]);
-    expect(refreshedLedgerExport.exitCode).toBe(0);
-    expect(
-      parseData<{ readonly deletedRecordCounts: { readonly projections: number; readonly contextPacks: number } }>(
-        refreshedLedgerExport.stdout
-      ).deletedRecordCounts
-    ).toEqual(expect.objectContaining({ projections: 1, contextPacks: 1 }));
-    const tombstoneAwareDoctor = await runCli(rootDir, ["doctor", "--json"]);
-    const tombstoneAwareDoctorPayload = parseData<{
+    expect(rebuiltContext.subjectId).toBe(projectionWork.meta.id);
+    const generatedDoctor = await runCli(rootDir, ["doctor", "--json"]);
+    const generatedDoctorPayload = parseData<{
       readonly diagnostics: Array<{ readonly code: string; readonly severity: string }>;
-    }>(tombstoneAwareDoctor.stdout);
-    expect(tombstoneAwareDoctor.exitCode).toBe(0);
-    expect(tombstoneAwareDoctorPayload.diagnostics).toEqual(
+    }>(generatedDoctor.stdout);
+    expect(generatedDoctor.exitCode).toBe(0);
+    expect(generatedDoctorPayload.diagnostics).toEqual(
       expect.arrayContaining([expect.objectContaining({ code: "projection.context_pack", severity: "ok" })])
     );
+    const refreshedLedgerExport = await runCli(rootDir, ["export", "ledgers", "--json"]);
+    expect(refreshedLedgerExport.exitCode).toBe(0);
 
     const sources = parseData<Array<{ readonly id: string }>>((await runCli(rootDir, ["source", "list", "--json"])).stdout);
     expect(sources.map((source) => source.id)).toContain(referencedSource.meta.id);
@@ -9470,8 +9406,6 @@ describe("bwrk cli", () => {
     expect(deletions).toContain(deletableWork.meta.id);
     expect(deletions).toContain(blockEdge?.meta.id);
     expect(deletions).toContain(activeReservation?.meta.id);
-    expect(deletions).toContain(projection?.meta.id);
-    expect(deletions).toContain(contextPack?.id);
     expect(deletions).toContain("\"reason\":\"duplicate\"");
 
     const status = await runCli(rootDir, ["ledger", "status", "--json"]);
@@ -9505,8 +9439,8 @@ describe("bwrk cli", () => {
           decisions: 1,
           graphEdges: 1,
           reservations: 1,
-          projections: 1,
-          contextPacks: 1
+          projections: 0,
+          contextPacks: 0
         })
       })
     );
@@ -9617,7 +9551,7 @@ describe("bwrk cli", () => {
     expect(refreshPayload.contextViews).toBeGreaterThanOrEqual(18);
     expect(refreshPayload.searchIndex.documentCount).toBeGreaterThanOrEqual(18);
     expect(refreshPayload.ledgers.recordCounts).toEqual(
-      expect.objectContaining({ workItems: 18, contextPacks: 18 })
+      expect.objectContaining({ workItems: 18, contextPacks: 0 })
     );
 
     const search = await runCli(rootDir, ["search", "query", "Concurrent projection work", "--json"]);
@@ -11247,7 +11181,7 @@ describe("bwrk cli", () => {
     expect(legacy.meta.id).toMatch(/^bw_work_/);
   });
 
-  it("repairs missing generated projection records through doctor", async () => {
+  it("treats generated context projections as on-demand state in doctor", async () => {
     const rootDir = await makeTempWorkspace();
     await runCli(rootDir, ["init", "--json"]);
     const work = parseData<{ readonly meta: { readonly id: string } }>(
@@ -11256,42 +11190,25 @@ describe("bwrk cli", () => {
     await runCli(rootDir, ["context", "rebuild", "--json"]);
 
     const state = await readState<{
-      readonly projections: Array<{ readonly meta: { readonly id: string }; readonly subjectId: string }>;
+      readonly projections?: unknown;
+      readonly contextPacks?: unknown;
     }>(rootDir);
-    const projection = state.projections.find((record) => record.subjectId === work.meta.id);
-    expect(projection).toBeDefined();
-    await updateState(rootDir, (current) => ({
-      ...current,
-      projections: ((current.projections as typeof state.projections | undefined) ?? []).filter(
-        (record) => record.meta.id !== projection?.meta.id
-      )
-    }));
+    expect(state.projections).toBeUndefined();
+    expect(state.contextPacks).toBeUndefined();
 
-    const warningDoctor = await runCli(rootDir, ["doctor", "--json"]);
-    const warningPayload = parseData<{
+    const doctor = await runCli(rootDir, ["doctor", "--json"]);
+    const payload = parseData<{
       readonly ok: boolean;
       readonly diagnostics: Array<{ readonly code: string; readonly severity: string }>;
-    }>(warningDoctor.stdout);
-    expect(warningDoctor.exitCode).toBe(0);
-    expect(warningPayload.ok).toBe(true);
-    expect(warningPayload.diagnostics).toEqual(
-      expect.arrayContaining([expect.objectContaining({ code: "projection.context_pack", severity: "warning" })])
+    }>(doctor.stdout);
+    expect(doctor.exitCode).toBe(0);
+    expect(payload.ok).toBe(true);
+    expect(payload.diagnostics).toEqual(
+      expect.arrayContaining([expect.objectContaining({ code: "projection.context_pack", severity: "ok" })])
     );
 
-    const fixedDoctor = await runCli(rootDir, ["doctor", "--fix", "--json"]);
-    const fixedPayload = parseData<{
-      readonly ok: boolean;
-      readonly diagnostics: Array<{ readonly code: string; readonly severity: string }>;
-    }>(fixedDoctor.stdout);
-    expect(fixedDoctor.exitCode).toBe(0);
-    expect(fixedPayload.ok).toBe(true);
-    expect(fixedPayload.diagnostics).toEqual(
-      expect.arrayContaining([expect.objectContaining({ code: "projection.context_pack", severity: "fixed" })])
-    );
-    const fixedState = await readState<{
-      readonly projections: Array<{ readonly meta: { readonly id: string }; readonly subjectId: string }>;
-    }>(rootDir);
-    expect(fixedState.projections.map((record) => record.meta.id)).toContain(projection?.meta.id);
+    const shown = parseData<{ readonly subjectId: string }>((await runCli(rootDir, ["context", "show", work.meta.id, "--json"])).stdout);
+    expect(shown.subjectId).toBe(work.meta.id);
   });
 
   it("repairs dependency projection drift from canonical block graph edges", async () => {
@@ -11347,7 +11264,7 @@ describe("bwrk cli", () => {
     expect(repairedPayload.diagnostics).toEqual(
       expect.arrayContaining([
         expect.objectContaining({ code: "graph.block_consistency", severity: "fixed" }),
-        expect.objectContaining({ code: "projection.context_pack", severity: "fixed" })
+        expect.objectContaining({ code: "projection.context_pack", severity: "ok" })
       ])
     );
 

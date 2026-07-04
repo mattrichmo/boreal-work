@@ -294,7 +294,7 @@ describe("bundled bwrk dist", () => {
         severity: "error",
         details: expect.objectContaining({
           schemaVersion: "boreal.file-store.v999",
-          supportedSchemaVersion: "boreal.file-store.v1",
+          supportedSchemaVersion: "boreal.file-store.v2",
           upgrade: expect.objectContaining({ channel: "npm", command: "npm install -g @boreal/cli@latest" }),
           repairCommand: "npm install -g @boreal/cli@latest",
           recommendedActions: expect.arrayContaining(["Upgrade this bwrk binary via npm: npm install -g @boreal/cli@latest."])

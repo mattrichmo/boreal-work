@@ -48,7 +48,7 @@ The SQLite generated cache lives at `.boreal/cache/runtime-cache.sqlite`. It is 
 
 ## Versioning And Migration Policy
 
-`bwrk version --json` is the canonical machine-readable compatibility contract for local automation. Its `boreal.cli.version.v1` payload reports the CLI package version, Node/package-manager runtime, `boreal.runtime.v1` record schema, `boreal.file-store.v1` state adapter schema, `boreal.export.v1` recovery snapshot schema, JSONL ledger schemas, generated search/SQLite cache schemas, project setup/registry/vault schemas, daemon status schemas, and the published schema IDs enforced by `PUBLISHED_SCHEMA_CONTRACTS`.
+`bwrk version --json` is the canonical machine-readable compatibility contract for local automation. Its `boreal.cli.version.v1` payload reports the CLI package version, Node/package-manager runtime, `boreal.runtime.v1` record schema, `boreal.file-store.v2` state adapter schema, `boreal.export.v1` recovery snapshot schema, JSONL ledger schemas, generated search/SQLite cache schemas, project setup/registry/vault schemas, daemon status schemas, and the published schema IDs enforced by `PUBLISHED_SCHEMA_CONTRACTS`.
 
 Install-scope compatibility is bounded by delegation and schema checks. A machine-level `bwrk` may launch in any repo, but when the repo declares a pinned `node_modules/.bin/bwrk` package the machine binary must delegate to it before reading or writing project state. Missing pinned dependencies are a hard floor error with `pnpm install` guidance, not permission to run the machine binary against that repo. Patch-level launcher/repo skew is tolerated; major or minor skew is doctor-visible as `install.version_skew` with upgrade commands derived from the detected install channels (`source`, `npm`, or `brew`).
 
