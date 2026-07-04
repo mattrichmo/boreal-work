@@ -90,7 +90,7 @@ export class FileBorealStore implements BorealStore {
   private async saveSnapshot(snapshot: StoreSnapshot): Promise<void> {
     const document = snapshotToDocument(snapshot);
     await assertRealPathInside(this.rootDir, this.stateFile);
-    await writeTextFileAtomic(this.stateFile, `${JSON.stringify(document, null, 2)}\n`);
+    await writeTextFileAtomic(this.stateFile, `${JSON.stringify(document)}\n`);
   }
 
   private async assertSafePaths(): Promise<void> {

@@ -66,6 +66,21 @@ describe("file-backed store", () => {
     expect(state.workItems).toHaveLength(1);
   });
 
+  it("persists compact JSON", async () => {
+    const rootDir = await makeTempWorkspace();
+    const store = new FileBorealStore({ rootDir, lock });
+    const work = createWorkItem({
+      title: "Compact persisted JSON",
+      actor,
+      now: nowIso(new Date("2026-01-01T00:00:00.000Z"))
+    });
+
+    await store.write((writer) => writer.putWorkItem(work));
+
+    const raw = await readFile(store.stateFile, "utf8");
+    expect(raw.startsWith('{"schemaVersion"')).toBe(true);
+  });
+
   it("persists directive acknowledgement records across store instances", async () => {
     const rootDir = await makeTempWorkspace();
     const store = new FileBorealStore({ rootDir, lock });
