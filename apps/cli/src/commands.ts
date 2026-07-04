@@ -117,7 +117,6 @@ import {
 import { inspectDaemonStatus, type DaemonStatusResult } from "@boreal/daemon";
 import type { SearchResult } from "@boreal/search";
 import {
-  breakStaleFileLock,
   writeTextFileAtomic,
   type BorealReader,
   type BorealWriter
@@ -152,6 +151,7 @@ import type { FinishReservedWorkSummaryFactory } from "@boreal/engine";
 import { flagValue, flagValues, hasFlag, requiredFlag, type ParsedArgs } from "./args.js";
 import { agentCommand, agentStartCommand, type AgentCommandDependencies } from "./commands/agent.js";
 import { evidenceCommand } from "./commands/evidence.js";
+import { healthCommand, type HealthCommandDependencies } from "./commands/health.js";
 import { knowledgeCommand } from "./commands/knowledge.js";
 import { memoryCommand, resolveWikiPageIds } from "./commands/memory.js";
 import { storageCommand } from "./commands/storage.js";
@@ -165,10 +165,7 @@ import {
 } from "./commands/sync.js";
 import { vaultCommand } from "./commands/vault.js";
 import { workCommand as workGroupCommand, type WorkCommandDependencies } from "./commands/work.js";
-import {
-  clearCircuitBreakers,
-  type CommandResult
-} from "./commands/shared.js";
+import type { CommandResult } from "./commands/shared.js";
 import {
   COMMAND_DEFINITIONS,
   commandBehavior,
@@ -202,7 +199,7 @@ import {
   type InstallStatus
 } from "./install-status.js";
 import { buildExportDocument } from "./import-export.js";
-import { inspectRuntimeLocks, type RuntimeLockInspectionResult, type RuntimeLockState } from "./locks.js";
+import type { RuntimeLockInspectionResult, RuntimeLockState } from "./locks.js";
 import { createResultSpoolingOutput, formatRecord, table, type AgentDirectiveOutput, type CliOutput } from "./output.js";
 import {
   applyProjectSetup,
@@ -1153,19 +1150,11 @@ export async function runCommand(args: ParsedArgs, output: CliOutput, cwd: strin
         });
         break;
       case "doctor":
-        result = await doctorCommand(action, context, args, commandOutput, json);
-        break;
       case "schema":
-        result = await schemaCommand(action, context, commandOutput, json);
-        break;
       case "docs":
-        result = await docsCommand(action, context, commandOutput, json);
-        break;
       case "gate":
-        result = await gateCommand(action, context, args, commandOutput, json);
-        break;
       case "lock":
-        result = await lockCommand(action, context, args, commandOutput, json);
+        result = await healthCommand(group, action, context, args, commandOutput, json, healthCommandDependencies());
         break;
       default:
         throw new BorealError("BOREAL_INVALID_INPUT", `Unknown command: ${group ?? ""}`);
@@ -1259,6 +1248,22 @@ function workCommandDependencies(): WorkCommandDependencies {
     formatRecordWithAgentDirectives,
     dependencyTreeRows: (tree) => dependencyTreeRows(tree as DependencyTreeNode),
     dependencyCyclesFromGraph: (graphEdges) => dependencyCyclesFromGraph(graphEdges as readonly GraphEdge[])
+  };
+}
+
+function healthCommandDependencies(): HealthCommandDependencies {
+  return {
+    installedSkillChecks,
+    formatSkillDoctor,
+    doctorResultCanAttachDirectives,
+    formatRecordWithAgentDirectives,
+    dashboardView,
+    formatDoctorDashboard,
+    formatDiagnostic,
+    schemaValidateResult,
+    docsCheckResult,
+    gateCloseoutResult,
+    formatLockDashboard
   };
 }
 
@@ -9202,92 +9207,8 @@ function commandWithPositionalWork(command: string, workId: string): string {
   return command.replace("bwrk agent start", `bwrk agent start ${shellArg(workId)}`);
 }
 
-async function doctorCommand(
-  action: string | undefined,
-  context: CliContext,
-  args: ParsedArgs,
-  output: CliOutput,
-  json: boolean
-): Promise<CommandResult> {
-  if (action === "skills") {
-    const result = await inspectWorkflowAssets({
-      workspaceRoot: context.workspaceRoot,
-      installChecks: await installedSkillChecks(context, args)
-    });
-    output.write(json ? formatRecord(result, true) : formatSkillDoctor(result));
-    return { exitCode: result.ok ? 0 : 1 };
-  }
-  if (action !== undefined) {
-    throw new BorealError("BOREAL_INVALID_INPUT", `Unknown doctor command: ${action}`);
-  }
-  const result = await runDoctor(context, hasFlag(args, "fix"), hasFlag(args, "strict"));
-  if (hasFlag(args, "fix") && result.ok) {
-    await clearCircuitBreakers(context);
-  }
-  if (json) {
-    output.write(
-      doctorResultCanAttachDirectives(result)
-        ? await formatRecordWithAgentDirectives(context, args, result, true, {
-            doctorResult: result,
-            subject: { type: "workspace", id: context.workspaceRoot, title: "Workspace" }
-          })
-        : formatRecord(result, true)
-    );
-  } else if (dashboardView(args)) {
-    output.write(formatDoctorDashboard(result));
-  } else {
-    output.write(result.diagnostics.map(formatDiagnostic).join("\n") + "\n");
-  }
-  return { exitCode: result.ok ? 0 : 1 };
-}
-
 function doctorResultCanAttachDirectives(result: DoctorResult): boolean {
   return !result.diagnostics.some((diagnostic) => diagnostic.code.startsWith("state.") && diagnostic.severity === "error");
-}
-
-async function schemaCommand(
-  action: string | undefined,
-  context: CliContext,
-  output: CliOutput,
-  json: boolean
-): Promise<CommandResult> {
-  if (action !== "validate") {
-    throw new BorealError("BOREAL_INVALID_INPUT", `Unknown schema command: ${action ?? ""}`);
-  }
-  const result = await schemaValidateResult(context);
-  output.write(formatRecord(result, json));
-  return { exitCode: result.ok ? 0 : 1 };
-}
-
-async function docsCommand(
-  action: string | undefined,
-  context: CliContext,
-  output: CliOutput,
-  json: boolean
-): Promise<CommandResult> {
-  if (action !== "check") {
-    throw new BorealError("BOREAL_INVALID_INPUT", `Unknown docs command: ${action ?? ""}`);
-  }
-  const result = await docsCheckResult(context);
-  output.write(formatRecord(result, json));
-  return { exitCode: result.ok ? 0 : 1 };
-}
-
-async function gateCommand(
-  action: string | undefined,
-  context: CliContext,
-  args: ParsedArgs,
-  output: CliOutput,
-  json: boolean
-): Promise<CommandResult> {
-  if (action !== undefined && action !== "closeout") {
-    throw new BorealError("BOREAL_INVALID_INPUT", `Unknown gate command: ${action}`);
-  }
-  const result = await gateCloseoutResult(context, args);
-  output.write(await formatRecordWithAgentDirectives(context, args, result, json, {
-    subject: { type: "workspace", id: context.workspaceRoot, title: "Workspace" }
-  }));
-  return { exitCode: result.ok ? 0 : 1 };
 }
 
 async function schemaValidateResult(context: CliContext) {
@@ -11979,32 +11900,6 @@ function formatSprintReport(result: SprintReportResult): string {
 
 function sprintScopeLimit(args: ParsedArgs): number {
   return parseLimit(flagValue(args, "limit"), { max: MAX_SPRINT_SCOPE_LIMIT }) ?? DEFAULT_SPRINT_SCOPE_LIMIT;
-}
-
-async function lockCommand(
-  action: string | undefined,
-  context: CliContext,
-  args: ParsedArgs,
-  output: CliOutput,
-  json: boolean
-): Promise<CommandResult> {
-  switch (action) {
-    case "inspect": {
-      const inspection = await inspectRuntimeLocks(context);
-      output.write(json ? formatRecord(inspection, true) : dashboardView(args) ? formatLockDashboard(inspection) : formatRecord(inspection, false));
-      return { exitCode: 0 };
-    }
-    case "break": {
-      if (!hasFlag(args, "stale-only")) {
-        throw new BorealError("BOREAL_INVALID_INPUT", "`bwrk lock break` requires --stale-only");
-      }
-      const result = await breakStaleFileLock(context.paths.stateLockDir);
-      output.write(formatRecord(result, json));
-      return { exitCode: 0 };
-    }
-    default:
-      throw new BorealError("BOREAL_INVALID_INPUT", `Unknown lock command: ${action ?? ""}`);
-  }
 }
 
 async function requireCliWork(reader: BorealReader, workId: WorkId): Promise<WorkItem> {
