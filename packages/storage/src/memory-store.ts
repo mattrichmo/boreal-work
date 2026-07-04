@@ -1,4 +1,4 @@
-import { deepClone } from "@boreal/core";
+import { deepClone, deepFreeze } from "@boreal/core";
 import type {
   AgentReservation,
   AgentSummaryId,
@@ -58,8 +58,8 @@ export class InMemoryBorealStore implements BorealStore {
   }
 
   async read<T>(operation: (reader: BorealReader) => Promise<T> | T): Promise<T> {
-    const snapshot = new MemoryTransaction(cloneState(this.#state));
-    return deepClone(await operation(snapshot));
+    const snapshot = new MemoryTransaction(this.#state);
+    return operation(snapshot);
   }
 
   async write<T>(operation: (writer: BorealWriter) => Promise<T> | T): Promise<T> {
@@ -67,7 +67,7 @@ export class InMemoryBorealStore implements BorealStore {
     const transaction = new MemoryTransaction(working);
     const result = await operation(transaction);
     this.#state = working;
-    return deepClone(result);
+    return result;
   }
 
   async snapshot(): Promise<StoreSnapshot> {
@@ -99,158 +99,153 @@ class MemoryTransaction implements BorealWriter {
   constructor(private readonly state: StoreState) {}
 
   async getWorkItem(id: WorkId): Promise<WorkItem | undefined> {
-    return cloneMaybe(this.state.workItems.get(id));
+    return this.state.workItems.get(id);
   }
 
   async listWorkItems(filter?: WorkItemFilter): Promise<readonly WorkItem[]> {
-    const items = [...this.state.workItems.values()].filter((item) => matchesWorkFilter(item, filter));
-    return deepClone(items);
+    return [...this.state.workItems.values()].filter((item) => matchesWorkFilter(item, filter));
   }
 
   async getAgentSummary(id: AgentSummaryId): Promise<AgentSummaryRecord | undefined> {
-    return cloneMaybe(this.state.agentSummaries.get(id));
+    return this.state.agentSummaries.get(id);
   }
 
   async listAgentSummaries(): Promise<readonly AgentSummaryRecord[]> {
-    return deepClone([...this.state.agentSummaries.values()]);
+    return [...this.state.agentSummaries.values()];
   }
 
   async listAgentSummariesForSubject(subjectId: string): Promise<readonly AgentSummaryRecord[]> {
-    return deepClone([...this.state.agentSummaries.values()].filter((record) => record.subjectId === subjectId));
+    return [...this.state.agentSummaries.values()].filter((record) => record.subjectId === subjectId);
   }
 
   async getEvidence(id: EvidenceId): Promise<EvidenceRecord | undefined> {
-    return cloneMaybe(this.state.evidence.get(id));
+    return this.state.evidence.get(id);
   }
 
   async listEvidence(): Promise<readonly EvidenceRecord[]> {
-    return deepClone([...this.state.evidence.values()]);
+    return [...this.state.evidence.values()];
   }
 
   async listEvidenceForSubject(subjectId: string): Promise<readonly EvidenceRecord[]> {
-    return deepClone([...this.state.evidence.values()].filter((record) => record.subjectId === subjectId));
+    return [...this.state.evidence.values()].filter((record) => record.subjectId === subjectId);
   }
 
   async getVerification(id: VerificationId): Promise<VerificationRecord | undefined> {
-    return cloneMaybe(this.state.verifications.get(id));
+    return this.state.verifications.get(id);
   }
 
   async listVerifications(): Promise<readonly VerificationRecord[]> {
-    return deepClone([...this.state.verifications.values()]);
+    return [...this.state.verifications.values()];
   }
 
   async listVerificationsForSubject(subjectId: string): Promise<readonly VerificationRecord[]> {
-    return deepClone([...this.state.verifications.values()].filter((record) => record.subjectId === subjectId));
+    return [...this.state.verifications.values()].filter((record) => record.subjectId === subjectId);
   }
 
   async getDirectiveAcknowledgement(id: DirectiveAcknowledgementId): Promise<DirectiveAcknowledgementRecord | undefined> {
-    return cloneMaybe(this.state.directiveAcknowledgements.get(id));
+    return this.state.directiveAcknowledgements.get(id);
   }
 
   async listDirectiveAcknowledgements(): Promise<readonly DirectiveAcknowledgementRecord[]> {
-    return deepClone([...this.state.directiveAcknowledgements.values()]);
+    return [...this.state.directiveAcknowledgements.values()];
   }
 
   async listDirectiveAcknowledgementsForSubject(subjectId: string): Promise<readonly DirectiveAcknowledgementRecord[]> {
-    return deepClone([...this.state.directiveAcknowledgements.values()].filter((record) => record.subjectId === subjectId));
+    return [...this.state.directiveAcknowledgements.values()].filter((record) => record.subjectId === subjectId);
   }
 
   async getKnowledgeSource(id: KnowledgeSourceId): Promise<KnowledgeSource | undefined> {
-    return cloneMaybe(this.state.knowledgeSources.get(id));
+    return this.state.knowledgeSources.get(id);
   }
 
   async listKnowledgeSources(): Promise<readonly KnowledgeSource[]> {
-    return deepClone([...this.state.knowledgeSources.values()]);
+    return [...this.state.knowledgeSources.values()];
   }
 
   async getClaim(id: ClaimId): Promise<ClaimRecord | undefined> {
-    return cloneMaybe(this.state.claims.get(id));
+    return this.state.claims.get(id);
   }
 
   async getDecision(id: DecisionId): Promise<DecisionRecord | undefined> {
-    return cloneMaybe(this.state.decisions.get(id));
+    return this.state.decisions.get(id);
   }
 
   async listClaims(): Promise<readonly ClaimRecord[]> {
-    return deepClone([...this.state.claims.values()]);
+    return [...this.state.claims.values()];
   }
 
   async listDecisions(): Promise<readonly DecisionRecord[]> {
-    return deepClone([...this.state.decisions.values()]);
+    return [...this.state.decisions.values()];
   }
 
   async getGraphEdge(id: GraphEdgeId): Promise<GraphEdge | undefined> {
-    return cloneMaybe(this.state.graphEdges.get(id));
+    return this.state.graphEdges.get(id);
   }
 
   async listGraphEdges(): Promise<readonly GraphEdge[]> {
-    return deepClone([...this.state.graphEdges.values()]);
+    return [...this.state.graphEdges.values()];
   }
 
   async listGraphEdgesForSubject(subjectId: string): Promise<readonly GraphEdge[]> {
-    return deepClone(
-      [...this.state.graphEdges.values()].filter((edge) => edge.fromId === subjectId || edge.toId === subjectId)
-    );
+    return [...this.state.graphEdges.values()].filter((edge) => edge.fromId === subjectId || edge.toId === subjectId);
   }
 
   async getReservation(id: ReservationId): Promise<AgentReservation | undefined> {
-    return cloneMaybe(this.state.reservations.get(id));
+    return this.state.reservations.get(id);
   }
 
   async listReservations(): Promise<readonly AgentReservation[]> {
-    return deepClone([...this.state.reservations.values()]);
+    return [...this.state.reservations.values()];
   }
 
   async listReservationsForWork(workId: WorkId): Promise<readonly AgentReservation[]> {
-    return deepClone([...this.state.reservations.values()].filter((record) => record.workId === workId));
+    return [...this.state.reservations.values()].filter((record) => record.workId === workId);
   }
 
   async listActiveReservationsForAgent(agentId: string): Promise<readonly AgentReservation[]> {
-    return deepClone(
-      [...this.state.reservations.values()].filter(
-        (record) => record.agentId === agentId && record.status === "active"
-      )
+    return [...this.state.reservations.values()].filter(
+      (record) => record.agentId === agentId && record.status === "active"
     );
   }
 
   async getReviewerHeartbeat(id: ReviewerHeartbeatId): Promise<ReviewerHeartbeatRecord | undefined> {
-    return cloneMaybe(this.state.reviewerHeartbeats.get(id));
+    return this.state.reviewerHeartbeats.get(id);
   }
 
   async listReviewerHeartbeats(): Promise<readonly ReviewerHeartbeatRecord[]> {
-    return deepClone([...this.state.reviewerHeartbeats.values()]);
+    return [...this.state.reviewerHeartbeats.values()];
   }
 
   async listEvents(): Promise<readonly RuntimeEvent[]> {
-    return deepClone([...this.state.events.values()]);
+    return [...this.state.events.values()];
   }
 
   async getOperation(id: OperationId): Promise<RuntimeOperation | undefined> {
-    return cloneMaybe(this.state.operations.get(id));
+    return this.state.operations.get(id);
   }
 
   async listOperations(): Promise<readonly RuntimeOperation[]> {
-    return deepClone([...this.state.operations.values()]);
+    return [...this.state.operations.values()];
   }
 
   async getProjection(id: ProjectionId): Promise<ProjectionRecord | undefined> {
-    return cloneMaybe(this.state.projections.get(id));
+    return this.state.projections.get(id);
   }
 
   async listProjections(): Promise<readonly ProjectionRecord[]> {
-    return deepClone([...this.state.projections.values()]);
+    return [...this.state.projections.values()];
   }
 
   async listContextPacks(): Promise<readonly ContextPack[]> {
-    return deepClone([...this.state.contextPacks.values()]);
+    return [...this.state.contextPacks.values()];
   }
 
   async getContextPackForSubject(subjectId: string): Promise<ContextPack | undefined> {
-    return cloneMaybe([...this.state.contextPacks.values()].find((record) => record.subjectId === subjectId));
+    return [...this.state.contextPacks.values()].find((record) => record.subjectId === subjectId);
   }
 
   async putWorkItem(item: WorkItem): Promise<void> {
-    this.state.workItems.set(item.meta.id, deepClone(item));
+    this.state.workItems.set(item.meta.id, frozenClone(item));
   }
 
   async deleteWorkItem(id: WorkId): Promise<boolean> {
@@ -258,7 +253,7 @@ class MemoryTransaction implements BorealWriter {
   }
 
   async putAgentSummary(record: AgentSummaryRecord): Promise<void> {
-    this.state.agentSummaries.set(record.meta.id, deepClone(record));
+    this.state.agentSummaries.set(record.meta.id, frozenClone(record));
   }
 
   async deleteAgentSummary(id: AgentSummaryId): Promise<boolean> {
@@ -266,7 +261,7 @@ class MemoryTransaction implements BorealWriter {
   }
 
   async putEvidence(record: EvidenceRecord): Promise<void> {
-    this.state.evidence.set(record.meta.id, deepClone(record));
+    this.state.evidence.set(record.meta.id, frozenClone(record));
   }
 
   async deleteEvidence(id: EvidenceId): Promise<boolean> {
@@ -274,7 +269,7 @@ class MemoryTransaction implements BorealWriter {
   }
 
   async putVerification(record: VerificationRecord): Promise<void> {
-    this.state.verifications.set(record.meta.id, deepClone(record));
+    this.state.verifications.set(record.meta.id, frozenClone(record));
   }
 
   async deleteVerification(id: VerificationId): Promise<boolean> {
@@ -282,7 +277,7 @@ class MemoryTransaction implements BorealWriter {
   }
 
   async putDirectiveAcknowledgement(record: DirectiveAcknowledgementRecord): Promise<void> {
-    this.state.directiveAcknowledgements.set(record.meta.id, deepClone(record));
+    this.state.directiveAcknowledgements.set(record.meta.id, frozenClone(record));
   }
 
   async deleteDirectiveAcknowledgement(id: DirectiveAcknowledgementId): Promise<boolean> {
@@ -290,7 +285,7 @@ class MemoryTransaction implements BorealWriter {
   }
 
   async putKnowledgeSource(record: KnowledgeSource): Promise<void> {
-    this.state.knowledgeSources.set(record.meta.id, deepClone(record));
+    this.state.knowledgeSources.set(record.meta.id, frozenClone(record));
   }
 
   async deleteKnowledgeSource(id: KnowledgeSourceId): Promise<boolean> {
@@ -298,7 +293,7 @@ class MemoryTransaction implements BorealWriter {
   }
 
   async putClaim(record: ClaimRecord): Promise<void> {
-    this.state.claims.set(record.meta.id, deepClone(record));
+    this.state.claims.set(record.meta.id, frozenClone(record));
   }
 
   async deleteClaim(id: ClaimId): Promise<boolean> {
@@ -306,7 +301,7 @@ class MemoryTransaction implements BorealWriter {
   }
 
   async putDecision(record: DecisionRecord): Promise<void> {
-    this.state.decisions.set(record.meta.id, deepClone(record));
+    this.state.decisions.set(record.meta.id, frozenClone(record));
   }
 
   async deleteDecision(id: DecisionId): Promise<boolean> {
@@ -314,7 +309,7 @@ class MemoryTransaction implements BorealWriter {
   }
 
   async putGraphEdge(record: GraphEdge): Promise<void> {
-    this.state.graphEdges.set(record.meta.id, deepClone(record));
+    this.state.graphEdges.set(record.meta.id, frozenClone(record));
   }
 
   async deleteGraphEdge(id: GraphEdgeId): Promise<boolean> {
@@ -322,7 +317,7 @@ class MemoryTransaction implements BorealWriter {
   }
 
   async putReservation(record: AgentReservation): Promise<void> {
-    this.state.reservations.set(record.meta.id, deepClone(record));
+    this.state.reservations.set(record.meta.id, frozenClone(record));
   }
 
   async deleteReservation(id: ReservationId): Promise<boolean> {
@@ -330,7 +325,7 @@ class MemoryTransaction implements BorealWriter {
   }
 
   async putReviewerHeartbeat(record: ReviewerHeartbeatRecord): Promise<void> {
-    this.state.reviewerHeartbeats.set(record.meta.id, deepClone(record));
+    this.state.reviewerHeartbeats.set(record.meta.id, frozenClone(record));
   }
 
   async deleteReviewerHeartbeat(id: ReviewerHeartbeatId): Promise<boolean> {
@@ -338,11 +333,11 @@ class MemoryTransaction implements BorealWriter {
   }
 
   async putEvent(record: RuntimeEvent): Promise<void> {
-    this.state.events.set(record.meta.id, deepClone(record));
+    this.state.events.set(record.meta.id, frozenClone(record));
   }
 
   async putOperation(record: RuntimeOperation): Promise<void> {
-    this.state.operations.set(record.meta.id, deepClone(record));
+    this.state.operations.set(record.meta.id, frozenClone(record));
   }
 
   async deleteOperation(id: OperationId): Promise<boolean> {
@@ -350,7 +345,7 @@ class MemoryTransaction implements BorealWriter {
   }
 
   async putProjection(record: ProjectionRecord): Promise<void> {
-    this.state.projections.set(record.meta.id, deepClone(record));
+    this.state.projections.set(record.meta.id, frozenClone(record));
   }
 
   async deleteProjection(id: ProjectionId): Promise<boolean> {
@@ -358,7 +353,7 @@ class MemoryTransaction implements BorealWriter {
   }
 
   async putContextPack(record: ContextPack): Promise<void> {
-    this.state.contextPacks.set(record.id, deepClone(record));
+    this.state.contextPacks.set(record.id, frozenClone(record));
   }
 
   async deleteContextPack(id: ProjectionId): Promise<boolean> {
@@ -368,28 +363,32 @@ class MemoryTransaction implements BorealWriter {
 
 function createState(seed?: PartialStoreSeed): StoreState {
   return {
-    workItems: new Map((seed?.workItems ?? []).map((item) => [item.meta.id, deepClone(item)])),
-    agentSummaries: new Map((seed?.agentSummaries ?? []).map((record) => [record.meta.id, deepClone(record)])),
-    evidence: new Map((seed?.evidence ?? []).map((record) => [record.meta.id, deepClone(record)])),
-    verifications: new Map((seed?.verifications ?? []).map((record) => [record.meta.id, deepClone(record)])),
+    workItems: new Map((seed?.workItems ?? []).map((item) => [item.meta.id, frozenClone(item)])),
+    agentSummaries: new Map((seed?.agentSummaries ?? []).map((record) => [record.meta.id, frozenClone(record)])),
+    evidence: new Map((seed?.evidence ?? []).map((record) => [record.meta.id, frozenClone(record)])),
+    verifications: new Map((seed?.verifications ?? []).map((record) => [record.meta.id, frozenClone(record)])),
     directiveAcknowledgements: new Map(
-      (seed?.directiveAcknowledgements ?? []).map((record) => [record.meta.id, deepClone(record)])
+      (seed?.directiveAcknowledgements ?? []).map((record) => [record.meta.id, frozenClone(record)])
     ),
-    knowledgeSources: new Map((seed?.knowledgeSources ?? []).map((record) => [record.meta.id, deepClone(record)])),
-    claims: new Map((seed?.claims ?? []).map((record) => [record.meta.id, deepClone(record)])),
-    decisions: new Map((seed?.decisions ?? []).map((record) => [record.meta.id, deepClone(record)])),
-    graphEdges: new Map((seed?.graphEdges ?? []).map((record) => [record.meta.id, deepClone(record)])),
-    reservations: new Map((seed?.reservations ?? []).map((record) => [record.meta.id, deepClone(record)])),
-    reviewerHeartbeats: new Map((seed?.reviewerHeartbeats ?? []).map((record) => [record.meta.id, deepClone(record)])),
-    events: new Map((seed?.events ?? []).map((record) => [record.meta.id, deepClone(record)])),
-    operations: new Map((seed?.operations ?? []).map((record) => [record.meta.id, deepClone(record)])),
-    projections: new Map((seed?.projections ?? []).map((record) => [record.meta.id, deepClone(record)])),
-    contextPacks: new Map((seed?.contextPacks ?? []).map((record) => [record.id, deepClone(record)]))
+    knowledgeSources: new Map((seed?.knowledgeSources ?? []).map((record) => [record.meta.id, frozenClone(record)])),
+    claims: new Map((seed?.claims ?? []).map((record) => [record.meta.id, frozenClone(record)])),
+    decisions: new Map((seed?.decisions ?? []).map((record) => [record.meta.id, frozenClone(record)])),
+    graphEdges: new Map((seed?.graphEdges ?? []).map((record) => [record.meta.id, frozenClone(record)])),
+    reservations: new Map((seed?.reservations ?? []).map((record) => [record.meta.id, frozenClone(record)])),
+    reviewerHeartbeats: new Map((seed?.reviewerHeartbeats ?? []).map((record) => [record.meta.id, frozenClone(record)])),
+    events: new Map((seed?.events ?? []).map((record) => [record.meta.id, frozenClone(record)])),
+    operations: new Map((seed?.operations ?? []).map((record) => [record.meta.id, frozenClone(record)])),
+    projections: new Map((seed?.projections ?? []).map((record) => [record.meta.id, frozenClone(record)])),
+    contextPacks: new Map((seed?.contextPacks ?? []).map((record) => [record.id, frozenClone(record)]))
   };
 }
 
 function cloneState(state: StoreState): StoreState {
   return createState(stateToSnapshot(state));
+}
+
+function frozenClone<T>(value: T): T {
+  return deepFreeze(deepClone(value));
 }
 
 function stateToSnapshot(state: StoreState): StoreSnapshot {
@@ -410,10 +409,6 @@ function stateToSnapshot(state: StoreState): StoreSnapshot {
     projections: [...state.projections.values()],
     contextPacks: [...state.contextPacks.values()]
   };
-}
-
-function cloneMaybe<T>(value: T | undefined): T | undefined {
-  return value === undefined ? undefined : deepClone(value);
 }
 
 function matchesWorkFilter(item: WorkItem, filter: WorkItemFilter | undefined): boolean {
