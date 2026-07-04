@@ -155,6 +155,8 @@ import {
 import type { FinishReservedWorkSummaryFactory } from "@boreal/engine";
 
 import { flagValue, flagValues, hasFlag, requiredFlag, type ParsedArgs } from "./args.js";
+import { storageCommand } from "./commands/storage.js";
+import type { CommandResult } from "./commands/shared.js";
 import {
   COMMAND_DEFINITIONS,
   commandBehavior,
@@ -242,7 +244,6 @@ import {
   type RegistryRemoveResult
 } from "./registry.js";
 import { inspectSearchIndex, runSearch, writeSearchIndex, type SearchIndexInspection } from "./search-cli.js";
-import { migrateStorage } from "./storage-migrate.js";
 import { dirtyPathNotesHaveReasonCode, requireCommitOrDirtyPathReason } from "./summary-policy.js";
 import {
   addRawSource,
@@ -315,9 +316,7 @@ const INSTALL_CONFIRM_OPTIONS: readonly CliSelectOption<"yes" | "no">[] = [
   }
 ];
 
-export interface CommandResult {
-  readonly exitCode: number;
-}
+export type { CommandResult } from "./commands/shared.js";
 
 const CLI_RESULT_SCHEMA_VERSION = "boreal.cli.result.v1";
 
@@ -8837,27 +8836,6 @@ async function importCommand(
     }
     default:
       throw new BorealError("BOREAL_INVALID_INPUT", `Unknown import command: ${action ?? ""}`);
-  }
-}
-
-async function storageCommand(
-  action: string | undefined,
-  context: CliContext,
-  args: ParsedArgs,
-  output: CliOutput,
-  json: boolean
-): Promise<CommandResult> {
-  switch (action) {
-    case "migrate": {
-      const to = requiredFlag(args, "to");
-      if (to !== "objects" && to !== "file") {
-        throw new BorealError("BOREAL_INVALID_INPUT", "--to must be objects or file", { to });
-      }
-      output.write(formatRecord(await migrateStorage(context, to), json));
-      return { exitCode: 0 };
-    }
-    default:
-      throw new BorealError("BOREAL_INVALID_INPUT", `Unknown storage command: ${action ?? ""}`);
   }
 }
 

@@ -821,6 +821,9 @@ Procedure (repeat per group, one commit each — do NOT do this in one commit):
 
 Order groups smallest-first (vault, storage, sync, …) to debug the pattern cheaply before tackling `work`/`agent`.
 
+Progress:
+- [x] storage
+
 ### Task 19: Directive machinery audit (decision task, not deletion task)
 
 **Files:**
