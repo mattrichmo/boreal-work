@@ -50,6 +50,30 @@ interface StoreState {
   readonly contextPacks: Map<ProjectionId, ContextPack>;
 }
 
+interface StoreOverlay {
+  readonly workItems: SectionOverlay<WorkId, WorkItem>;
+  readonly agentSummaries: SectionOverlay<AgentSummaryId, AgentSummaryRecord>;
+  readonly evidence: SectionOverlay<EvidenceId, EvidenceRecord>;
+  readonly verifications: SectionOverlay<VerificationId, VerificationRecord>;
+  readonly directiveAcknowledgements: SectionOverlay<DirectiveAcknowledgementId, DirectiveAcknowledgementRecord>;
+  readonly knowledgeSources: SectionOverlay<KnowledgeSourceId, KnowledgeSource>;
+  readonly claims: SectionOverlay<ClaimId, ClaimRecord>;
+  readonly decisions: SectionOverlay<DecisionId, DecisionRecord>;
+  readonly graphEdges: SectionOverlay<GraphEdgeId, GraphEdge>;
+  readonly reservations: SectionOverlay<ReservationId, AgentReservation>;
+  readonly reviewerHeartbeats: SectionOverlay<ReviewerHeartbeatId, ReviewerHeartbeatRecord>;
+  readonly events: SectionOverlay<string, RuntimeEvent>;
+  readonly operations: SectionOverlay<OperationId, RuntimeOperation>;
+  readonly projections: SectionOverlay<ProjectionId, ProjectionRecord>;
+  readonly contextPacks: SectionOverlay<ProjectionId, ContextPack>;
+}
+
+interface SectionOverlay<K, V> {
+  readonly base: ReadonlyMap<K, V>;
+  readonly pending: Map<K, V>;
+  readonly deleted: Set<K>;
+}
+
 export class InMemoryBorealStore implements BorealStore {
   #state: StoreState;
 
@@ -58,15 +82,15 @@ export class InMemoryBorealStore implements BorealStore {
   }
 
   async read<T>(operation: (reader: BorealReader) => Promise<T> | T): Promise<T> {
-    const snapshot = new MemoryTransaction(this.#state);
+    const snapshot = new MemoryTransaction(createOverlayState(this.#state));
     return operation(snapshot);
   }
 
   async write<T>(operation: (writer: BorealWriter) => Promise<T> | T): Promise<T> {
-    const working = cloneState(this.#state);
+    const working = createOverlayState(this.#state);
     const transaction = new MemoryTransaction(working);
     const result = await operation(transaction);
-    this.#state = working;
+    this.#state = commitOverlayState(working);
     return result;
   }
 
@@ -96,268 +120,266 @@ export interface StoreSnapshot {
 export type PartialStoreSeed = StoreSnapshot;
 
 class MemoryTransaction implements BorealWriter {
-  constructor(private readonly state: StoreState) {}
+  constructor(private readonly state: StoreOverlay) {}
 
   async getWorkItem(id: WorkId): Promise<WorkItem | undefined> {
-    return this.state.workItems.get(id);
+    return overlayGet(this.state.workItems, id);
   }
 
   async listWorkItems(filter?: WorkItemFilter): Promise<readonly WorkItem[]> {
-    return [...this.state.workItems.values()].filter((item) => matchesWorkFilter(item, filter));
+    return overlayValues(this.state.workItems).filter((item) => matchesWorkFilter(item, filter));
   }
 
   async getAgentSummary(id: AgentSummaryId): Promise<AgentSummaryRecord | undefined> {
-    return this.state.agentSummaries.get(id);
+    return overlayGet(this.state.agentSummaries, id);
   }
 
   async listAgentSummaries(): Promise<readonly AgentSummaryRecord[]> {
-    return [...this.state.agentSummaries.values()];
+    return overlayValues(this.state.agentSummaries);
   }
 
   async listAgentSummariesForSubject(subjectId: string): Promise<readonly AgentSummaryRecord[]> {
-    return [...this.state.agentSummaries.values()].filter((record) => record.subjectId === subjectId);
+    return overlayValues(this.state.agentSummaries).filter((record) => record.subjectId === subjectId);
   }
 
   async getEvidence(id: EvidenceId): Promise<EvidenceRecord | undefined> {
-    return this.state.evidence.get(id);
+    return overlayGet(this.state.evidence, id);
   }
 
   async listEvidence(): Promise<readonly EvidenceRecord[]> {
-    return [...this.state.evidence.values()];
+    return overlayValues(this.state.evidence);
   }
 
   async listEvidenceForSubject(subjectId: string): Promise<readonly EvidenceRecord[]> {
-    return [...this.state.evidence.values()].filter((record) => record.subjectId === subjectId);
+    return overlayValues(this.state.evidence).filter((record) => record.subjectId === subjectId);
   }
 
   async getVerification(id: VerificationId): Promise<VerificationRecord | undefined> {
-    return this.state.verifications.get(id);
+    return overlayGet(this.state.verifications, id);
   }
 
   async listVerifications(): Promise<readonly VerificationRecord[]> {
-    return [...this.state.verifications.values()];
+    return overlayValues(this.state.verifications);
   }
 
   async listVerificationsForSubject(subjectId: string): Promise<readonly VerificationRecord[]> {
-    return [...this.state.verifications.values()].filter((record) => record.subjectId === subjectId);
+    return overlayValues(this.state.verifications).filter((record) => record.subjectId === subjectId);
   }
 
   async getDirectiveAcknowledgement(id: DirectiveAcknowledgementId): Promise<DirectiveAcknowledgementRecord | undefined> {
-    return this.state.directiveAcknowledgements.get(id);
+    return overlayGet(this.state.directiveAcknowledgements, id);
   }
 
   async listDirectiveAcknowledgements(): Promise<readonly DirectiveAcknowledgementRecord[]> {
-    return [...this.state.directiveAcknowledgements.values()];
+    return overlayValues(this.state.directiveAcknowledgements);
   }
 
   async listDirectiveAcknowledgementsForSubject(subjectId: string): Promise<readonly DirectiveAcknowledgementRecord[]> {
-    return [...this.state.directiveAcknowledgements.values()].filter((record) => record.subjectId === subjectId);
+    return overlayValues(this.state.directiveAcknowledgements).filter((record) => record.subjectId === subjectId);
   }
 
   async getKnowledgeSource(id: KnowledgeSourceId): Promise<KnowledgeSource | undefined> {
-    return this.state.knowledgeSources.get(id);
+    return overlayGet(this.state.knowledgeSources, id);
   }
 
   async listKnowledgeSources(): Promise<readonly KnowledgeSource[]> {
-    return [...this.state.knowledgeSources.values()];
+    return overlayValues(this.state.knowledgeSources);
   }
 
   async getClaim(id: ClaimId): Promise<ClaimRecord | undefined> {
-    return this.state.claims.get(id);
+    return overlayGet(this.state.claims, id);
   }
 
   async getDecision(id: DecisionId): Promise<DecisionRecord | undefined> {
-    return this.state.decisions.get(id);
+    return overlayGet(this.state.decisions, id);
   }
 
   async listClaims(): Promise<readonly ClaimRecord[]> {
-    return [...this.state.claims.values()];
+    return overlayValues(this.state.claims);
   }
 
   async listDecisions(): Promise<readonly DecisionRecord[]> {
-    return [...this.state.decisions.values()];
+    return overlayValues(this.state.decisions);
   }
 
   async getGraphEdge(id: GraphEdgeId): Promise<GraphEdge | undefined> {
-    return this.state.graphEdges.get(id);
+    return overlayGet(this.state.graphEdges, id);
   }
 
   async listGraphEdges(): Promise<readonly GraphEdge[]> {
-    return [...this.state.graphEdges.values()];
+    return overlayValues(this.state.graphEdges);
   }
 
   async listGraphEdgesForSubject(subjectId: string): Promise<readonly GraphEdge[]> {
-    return [...this.state.graphEdges.values()].filter((edge) => edge.fromId === subjectId || edge.toId === subjectId);
+    return overlayValues(this.state.graphEdges).filter((edge) => edge.fromId === subjectId || edge.toId === subjectId);
   }
 
   async getReservation(id: ReservationId): Promise<AgentReservation | undefined> {
-    return this.state.reservations.get(id);
+    return overlayGet(this.state.reservations, id);
   }
 
   async listReservations(): Promise<readonly AgentReservation[]> {
-    return [...this.state.reservations.values()];
+    return overlayValues(this.state.reservations);
   }
 
   async listReservationsForWork(workId: WorkId): Promise<readonly AgentReservation[]> {
-    return [...this.state.reservations.values()].filter((record) => record.workId === workId);
+    return overlayValues(this.state.reservations).filter((record) => record.workId === workId);
   }
 
   async listActiveReservationsForAgent(agentId: string): Promise<readonly AgentReservation[]> {
-    return [...this.state.reservations.values()].filter(
-      (record) => record.agentId === agentId && record.status === "active"
-    );
+    return overlayValues(this.state.reservations).filter((record) => record.agentId === agentId && record.status === "active");
   }
 
   async getReviewerHeartbeat(id: ReviewerHeartbeatId): Promise<ReviewerHeartbeatRecord | undefined> {
-    return this.state.reviewerHeartbeats.get(id);
+    return overlayGet(this.state.reviewerHeartbeats, id);
   }
 
   async listReviewerHeartbeats(): Promise<readonly ReviewerHeartbeatRecord[]> {
-    return [...this.state.reviewerHeartbeats.values()];
+    return overlayValues(this.state.reviewerHeartbeats);
   }
 
   async listEvents(): Promise<readonly RuntimeEvent[]> {
-    return [...this.state.events.values()];
+    return overlayValues(this.state.events);
   }
 
   async getOperation(id: OperationId): Promise<RuntimeOperation | undefined> {
-    return this.state.operations.get(id);
+    return overlayGet(this.state.operations, id);
   }
 
   async listOperations(): Promise<readonly RuntimeOperation[]> {
-    return [...this.state.operations.values()];
+    return overlayValues(this.state.operations);
   }
 
   async getProjection(id: ProjectionId): Promise<ProjectionRecord | undefined> {
-    return this.state.projections.get(id);
+    return overlayGet(this.state.projections, id);
   }
 
   async listProjections(): Promise<readonly ProjectionRecord[]> {
-    return [...this.state.projections.values()];
+    return overlayValues(this.state.projections);
   }
 
   async listContextPacks(): Promise<readonly ContextPack[]> {
-    return [...this.state.contextPacks.values()];
+    return overlayValues(this.state.contextPacks);
   }
 
   async getContextPackForSubject(subjectId: string): Promise<ContextPack | undefined> {
-    return [...this.state.contextPacks.values()].find((record) => record.subjectId === subjectId);
+    return overlayValues(this.state.contextPacks).find((record) => record.subjectId === subjectId);
   }
 
   async putWorkItem(item: WorkItem): Promise<void> {
-    this.state.workItems.set(item.meta.id, frozenClone(item));
+    overlayPut(this.state.workItems, item.meta.id, frozenClone(item));
   }
 
   async deleteWorkItem(id: WorkId): Promise<boolean> {
-    return this.state.workItems.delete(id);
+    return overlayDelete(this.state.workItems, id);
   }
 
   async putAgentSummary(record: AgentSummaryRecord): Promise<void> {
-    this.state.agentSummaries.set(record.meta.id, frozenClone(record));
+    overlayPut(this.state.agentSummaries, record.meta.id, frozenClone(record));
   }
 
   async deleteAgentSummary(id: AgentSummaryId): Promise<boolean> {
-    return this.state.agentSummaries.delete(id);
+    return overlayDelete(this.state.agentSummaries, id);
   }
 
   async putEvidence(record: EvidenceRecord): Promise<void> {
-    this.state.evidence.set(record.meta.id, frozenClone(record));
+    overlayPut(this.state.evidence, record.meta.id, frozenClone(record));
   }
 
   async deleteEvidence(id: EvidenceId): Promise<boolean> {
-    return this.state.evidence.delete(id);
+    return overlayDelete(this.state.evidence, id);
   }
 
   async putVerification(record: VerificationRecord): Promise<void> {
-    this.state.verifications.set(record.meta.id, frozenClone(record));
+    overlayPut(this.state.verifications, record.meta.id, frozenClone(record));
   }
 
   async deleteVerification(id: VerificationId): Promise<boolean> {
-    return this.state.verifications.delete(id);
+    return overlayDelete(this.state.verifications, id);
   }
 
   async putDirectiveAcknowledgement(record: DirectiveAcknowledgementRecord): Promise<void> {
-    this.state.directiveAcknowledgements.set(record.meta.id, frozenClone(record));
+    overlayPut(this.state.directiveAcknowledgements, record.meta.id, frozenClone(record));
   }
 
   async deleteDirectiveAcknowledgement(id: DirectiveAcknowledgementId): Promise<boolean> {
-    return this.state.directiveAcknowledgements.delete(id);
+    return overlayDelete(this.state.directiveAcknowledgements, id);
   }
 
   async putKnowledgeSource(record: KnowledgeSource): Promise<void> {
-    this.state.knowledgeSources.set(record.meta.id, frozenClone(record));
+    overlayPut(this.state.knowledgeSources, record.meta.id, frozenClone(record));
   }
 
   async deleteKnowledgeSource(id: KnowledgeSourceId): Promise<boolean> {
-    return this.state.knowledgeSources.delete(id);
+    return overlayDelete(this.state.knowledgeSources, id);
   }
 
   async putClaim(record: ClaimRecord): Promise<void> {
-    this.state.claims.set(record.meta.id, frozenClone(record));
+    overlayPut(this.state.claims, record.meta.id, frozenClone(record));
   }
 
   async deleteClaim(id: ClaimId): Promise<boolean> {
-    return this.state.claims.delete(id);
+    return overlayDelete(this.state.claims, id);
   }
 
   async putDecision(record: DecisionRecord): Promise<void> {
-    this.state.decisions.set(record.meta.id, frozenClone(record));
+    overlayPut(this.state.decisions, record.meta.id, frozenClone(record));
   }
 
   async deleteDecision(id: DecisionId): Promise<boolean> {
-    return this.state.decisions.delete(id);
+    return overlayDelete(this.state.decisions, id);
   }
 
   async putGraphEdge(record: GraphEdge): Promise<void> {
-    this.state.graphEdges.set(record.meta.id, frozenClone(record));
+    overlayPut(this.state.graphEdges, record.meta.id, frozenClone(record));
   }
 
   async deleteGraphEdge(id: GraphEdgeId): Promise<boolean> {
-    return this.state.graphEdges.delete(id);
+    return overlayDelete(this.state.graphEdges, id);
   }
 
   async putReservation(record: AgentReservation): Promise<void> {
-    this.state.reservations.set(record.meta.id, frozenClone(record));
+    overlayPut(this.state.reservations, record.meta.id, frozenClone(record));
   }
 
   async deleteReservation(id: ReservationId): Promise<boolean> {
-    return this.state.reservations.delete(id);
+    return overlayDelete(this.state.reservations, id);
   }
 
   async putReviewerHeartbeat(record: ReviewerHeartbeatRecord): Promise<void> {
-    this.state.reviewerHeartbeats.set(record.meta.id, frozenClone(record));
+    overlayPut(this.state.reviewerHeartbeats, record.meta.id, frozenClone(record));
   }
 
   async deleteReviewerHeartbeat(id: ReviewerHeartbeatId): Promise<boolean> {
-    return this.state.reviewerHeartbeats.delete(id);
+    return overlayDelete(this.state.reviewerHeartbeats, id);
   }
 
   async putEvent(record: RuntimeEvent): Promise<void> {
-    this.state.events.set(record.meta.id, frozenClone(record));
+    overlayPut(this.state.events, record.meta.id, frozenClone(record));
   }
 
   async putOperation(record: RuntimeOperation): Promise<void> {
-    this.state.operations.set(record.meta.id, frozenClone(record));
+    overlayPut(this.state.operations, record.meta.id, frozenClone(record));
   }
 
   async deleteOperation(id: OperationId): Promise<boolean> {
-    return this.state.operations.delete(id);
+    return overlayDelete(this.state.operations, id);
   }
 
   async putProjection(record: ProjectionRecord): Promise<void> {
-    this.state.projections.set(record.meta.id, frozenClone(record));
+    overlayPut(this.state.projections, record.meta.id, frozenClone(record));
   }
 
   async deleteProjection(id: ProjectionId): Promise<boolean> {
-    return this.state.projections.delete(id);
+    return overlayDelete(this.state.projections, id);
   }
 
   async putContextPack(record: ContextPack): Promise<void> {
-    this.state.contextPacks.set(record.id, frozenClone(record));
+    overlayPut(this.state.contextPacks, record.id, frozenClone(record));
   }
 
   async deleteContextPack(id: ProjectionId): Promise<boolean> {
-    return this.state.contextPacks.delete(id);
+    return overlayDelete(this.state.contextPacks, id);
   }
 }
 
@@ -383,12 +405,100 @@ function createState(seed?: PartialStoreSeed): StoreState {
   };
 }
 
-function cloneState(state: StoreState): StoreState {
-  return createState(stateToSnapshot(state));
-}
-
 function frozenClone<T>(value: T): T {
   return deepFreeze(deepClone(value));
+}
+
+function createOverlayState(state: StoreState): StoreOverlay {
+  return {
+    workItems: createOverlay(state.workItems),
+    agentSummaries: createOverlay(state.agentSummaries),
+    evidence: createOverlay(state.evidence),
+    verifications: createOverlay(state.verifications),
+    directiveAcknowledgements: createOverlay(state.directiveAcknowledgements),
+    knowledgeSources: createOverlay(state.knowledgeSources),
+    claims: createOverlay(state.claims),
+    decisions: createOverlay(state.decisions),
+    graphEdges: createOverlay(state.graphEdges),
+    reservations: createOverlay(state.reservations),
+    reviewerHeartbeats: createOverlay(state.reviewerHeartbeats),
+    events: createOverlay(state.events),
+    operations: createOverlay(state.operations),
+    projections: createOverlay(state.projections),
+    contextPacks: createOverlay(state.contextPacks)
+  };
+}
+
+function commitOverlayState(state: StoreOverlay): StoreState {
+  return {
+    workItems: overlayCommit(state.workItems),
+    agentSummaries: overlayCommit(state.agentSummaries),
+    evidence: overlayCommit(state.evidence),
+    verifications: overlayCommit(state.verifications),
+    directiveAcknowledgements: overlayCommit(state.directiveAcknowledgements),
+    knowledgeSources: overlayCommit(state.knowledgeSources),
+    claims: overlayCommit(state.claims),
+    decisions: overlayCommit(state.decisions),
+    graphEdges: overlayCommit(state.graphEdges),
+    reservations: overlayCommit(state.reservations),
+    reviewerHeartbeats: overlayCommit(state.reviewerHeartbeats),
+    events: overlayCommit(state.events),
+    operations: overlayCommit(state.operations),
+    projections: overlayCommit(state.projections),
+    contextPacks: overlayCommit(state.contextPacks)
+  };
+}
+
+function createOverlay<K, V>(base: ReadonlyMap<K, V>): SectionOverlay<K, V> {
+  return {
+    base,
+    pending: new Map(),
+    deleted: new Set()
+  };
+}
+
+function overlayGet<K, V>(overlay: SectionOverlay<K, V>, id: K): V | undefined {
+  if (overlay.deleted.has(id)) {
+    return undefined;
+  }
+  return overlay.pending.get(id) ?? overlay.base.get(id);
+}
+
+function overlayValues<K, V>(overlay: SectionOverlay<K, V>): V[] {
+  const out: V[] = [];
+  for (const [id, value] of overlay.base) {
+    if (!overlay.deleted.has(id) && !overlay.pending.has(id)) {
+      out.push(value);
+    }
+  }
+  out.push(...overlay.pending.values());
+  return out;
+}
+
+function overlayPut<K, V>(overlay: SectionOverlay<K, V>, id: K, value: V): void {
+  overlay.pending.set(id, value);
+  overlay.deleted.delete(id);
+}
+
+function overlayDelete<K, V>(overlay: SectionOverlay<K, V>, id: K): boolean {
+  const existed = overlayGet(overlay, id) !== undefined;
+  overlay.pending.delete(id);
+  overlay.deleted.add(id);
+  return existed;
+}
+
+function overlayCommit<K, V>(overlay: SectionOverlay<K, V>): Map<K, V> {
+  if (overlay.pending.size === 0 && overlay.deleted.size === 0 && overlay.base instanceof Map) {
+    return overlay.base;
+  }
+  const merged = new Map(overlay.base);
+  for (const id of overlay.deleted) {
+    merged.delete(id);
+  }
+  for (const [id, value] of overlay.pending) {
+    merged.set(id, value);
+  }
+  return merged;
 }
 
 function stateToSnapshot(state: StoreState): StoreSnapshot {

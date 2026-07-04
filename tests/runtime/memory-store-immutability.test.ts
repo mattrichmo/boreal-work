@@ -33,6 +33,41 @@ describe("memory store immutability", () => {
       expect(got?.title).not.toBe("mutated after put");
     });
   });
+
+  it("rolls back all puts when the operation throws", async () => {
+    const store = new InMemoryBorealStore();
+
+    await expect(
+      store.write(async (writer) => {
+        await writer.putWorkItem(sampleWorkItem("bw_work_x" as WorkId));
+        throw new Error("boom");
+      })
+    ).rejects.toThrow("boom");
+
+    await store.read(async (reader) => {
+      expect(await reader.getWorkItem("bw_work_x" as WorkId)).toBeUndefined();
+    });
+  });
+
+  it("write transactions read their own uncommitted puts", async () => {
+    const store = new InMemoryBorealStore();
+
+    await store.write(async (writer) => {
+      await writer.putWorkItem(sampleWorkItem("bw_work_y" as WorkId));
+      expect(await writer.getWorkItem("bw_work_y" as WorkId)).toBeDefined();
+      expect(await writer.listWorkItems()).toHaveLength(1);
+    });
+  });
+
+  it("keeps untouched records shared across write commits", async () => {
+    const store = new InMemoryBorealStore({ workItems: [sampleWorkItem("bw_work_existing" as WorkId)] });
+    const before = await store.read((reader) => reader.getWorkItem("bw_work_existing" as WorkId));
+
+    await store.write((writer) => writer.putWorkItem(sampleWorkItem("bw_work_added" as WorkId)));
+
+    const after = await store.read((reader) => reader.getWorkItem("bw_work_existing" as WorkId));
+    expect(after).toBe(before);
+  });
 });
 
 function sampleWorkItem(id: WorkId): WorkItem {
