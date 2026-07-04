@@ -1,0 +1,957 @@
+import { spawn } from "node:child_process";
+import { existsSync } from "node:fs";
+import { basename, dirname, join, resolve } from "node:path";
+
+import {
+  BorealError,
+  deriveProjectRegistryIdentity,
+  isIsoTimestamp,
+  nowIso,
+  projectRegistryEntryIdFromIdentity,
+  type ProjectRegistryEntry as CoreProjectRegistryEntry,
+  type RuntimeOperation,
+  type WorkPriority
+} from "@boreal/core";
+import { inspectDaemonStatus, type DaemonStatusResult } from "@boreal/daemon";
+import {
+  buildGlobalActivityView,
+  buildGlobalHealthView,
+  buildGlobalSearchView,
+  buildGlobalSettingsView,
+  buildGlobalWorkQueuesView,
+  buildProjectRegistryView,
+  toWorkItemView,
+  type DashboardFinding,
+  type GlobalActivitySourceRow,
+  type GlobalSearchSourceRow,
+  type GlobalSettingsProjectInput,
+  type LockDashboardView,
+  type ProjectRegistryEntry as DashboardProjectRegistryEntry,
+  type ProjectSyncFreshness,
+  type SyncDashboardView,
+  type WorkItemView
+} from "@boreal/ui-model";
+
+import { flagValue, flagValues, hasFlag, type ParsedArgs } from "../args.js";
+import { assertInitialized, createCliContext, isGlobalContext, type CliContext } from "../context.js";
+import { runDoctor, type Diagnostic } from "../doctor.js";
+import { formatRecord, table, type CliOutput } from "../output.js";
+import { readProjectSetupConfig } from "../project-setup.js";
+import {
+  addProjectRegistryEntry,
+  doctorProjectRegistry,
+  listProjectRegistry,
+  removeProjectRegistryEntry,
+  type RegistryDoctorResult
+} from "../registry.js";
+import { runSearch } from "../search-cli.js";
+import { formatRegistryAdd, formatRegistryRemove } from "./registry.js";
+import type { CommandResult } from "./shared.js";
+import { buildSyncStatus, type SyncStatusResult } from "./sync.js";
+
+const DEFAULT_DASHBOARD_PROJECT_LIMIT = 100;
+const DEFAULT_DASHBOARD_WORK_LIMIT = 250;
+const DEFAULT_DASHBOARD_QUEUE_LIMIT = 200;
+const DEFAULT_DASHBOARD_SEARCH_LIMIT = 10;
+const DEFAULT_DASHBOARD_ACTIVITY_LIMIT = 20;
+
+const MAX_DASHBOARD_PROJECT_LIMIT = 100;
+const MAX_LIST_LIMIT = 1_000;
+
+interface GlobalDashboardProjectOverview {
+  readonly entry: DashboardProjectRegistryEntry;
+  readonly settings: GlobalSettingsProjectInput;
+  readonly work: readonly WorkItemView[];
+  readonly searchResults: readonly GlobalSearchSourceRow[];
+  readonly activityRows: readonly GlobalActivitySourceRow[];
+  readonly sync: SyncDashboardView;
+  readonly locks: LockDashboardView;
+  readonly daemon: DaemonStatusResult;
+}
+
+export async function dashboardCommand(
+  action: string | undefined,
+  context: CliContext,
+  args: ParsedArgs,
+  output: CliOutput,
+  json: boolean
+): Promise<CommandResult> {
+  const scope: "repo" | "global" = hasFlag(args, "global") ? "global" : "repo";
+  switch (action) {
+    case undefined:
+      // --json emits the cross-repo data payload (same as `dashboard global`).
+      if (json) {
+        return emitGlobalDashboardData(context, args, output, true);
+      }
+      // Terminal dashboard is the default; --web opts into the browser console.
+      if (hasFlag(args, "web")) {
+        return serveDashboardCommand(context, args, output, scope);
+      }
+      return launchTuiCommand(context, args, scope);
+    case "global":
+      // Retained data command; equivalent to `dashboard --global --json`.
+      return emitGlobalDashboardData(context, args, output, json);
+    default:
+      throw new BorealError("BOREAL_INVALID_INPUT", `Unknown dashboard command: ${action ?? ""}`);
+  }
+}
+
+// `bwrk global` is an ergonomic alias for `bwrk dashboard --global`, and also
+// hosts the `link` / `unlink` project-registry verbs.
+export async function globalCommand(
+  action: string | undefined,
+  rest: readonly string[],
+  context: CliContext,
+  args: ParsedArgs,
+  output: CliOutput,
+  json: boolean
+): Promise<CommandResult> {
+  if (action === "link") {
+    return linkCommand(rest[0], context, args, output, json);
+  }
+  if (action === "unlink") {
+    return unlinkCommand(rest[0], args, output, json);
+  }
+  if (action !== undefined) {
+    throw new BorealError("BOREAL_INVALID_INPUT", `Unknown global command: ${action}`);
+  }
+  if (json) {
+    return emitGlobalDashboardData(context, args, output, true);
+  }
+  if (hasFlag(args, "web")) {
+    return serveDashboardCommand(context, args, output, "global");
+  }
+  return launchTuiCommand(context, args, "global");
+}
+
+// Link a project into the global workspace (registry add, reframed). With no
+// path, links the current repo; inside the global context a path is required.
+export async function linkCommand(
+  pathArg: string | undefined,
+  context: CliContext,
+  args: ParsedArgs,
+  output: CliOutput,
+  json: boolean
+): Promise<CommandResult> {
+  const target = pathArg ? resolve(pathArg) : isGlobalContext(args) ? undefined : context.workspaceRoot;
+  if (!target) {
+    throw new BorealError("BOREAL_INVALID_INPUT", "Provide a project path to link: bwrk global link <path>");
+  }
+  const result = await addProjectRegistryEntry({
+    registryRoot: flagValue(args, "registry-root"),
+    workspaceRoot: target,
+    name: flagValue(args, "name"),
+    labels: flagValues(args, "label")
+  });
+  output.write(json ? formatRecord(result, true) : formatRegistryAdd(result));
+  return { exitCode: 0 };
+}
+
+export async function unlinkCommand(
+  idArg: string | undefined,
+  args: ParsedArgs,
+  output: CliOutput,
+  json: boolean
+): Promise<CommandResult> {
+  const id = idArg ?? "";
+  if (!id) {
+    throw new BorealError("BOREAL_INVALID_INPUT", "Provide the project id to unlink: bwrk unlink <project-id>");
+  }
+  const result = await removeProjectRegistryEntry(id, {
+    registryRoot: flagValue(args, "registry-root"),
+    purge: hasFlag(args, "purge")
+  });
+  output.write(json ? formatRecord(result, true) : formatRegistryRemove(result));
+  return { exitCode: 0 };
+}
+
+async function emitGlobalDashboardData(
+  context: CliContext,
+  args: ParsedArgs,
+  output: CliOutput,
+  json: boolean
+): Promise<CommandResult> {
+  const result = await buildGlobalDashboardResult(context, args);
+  output.write(json ? formatRecord(result, true) : formatGlobalDashboardSummary(result));
+  return { exitCode: 0 };
+}
+
+async function serveDashboardCommand(
+  context: CliContext,
+  args: ParsedArgs,
+  output: CliOutput,
+  scope: "repo" | "global"
+): Promise<CommandResult> {
+  const host = flagValue(args, "host") ?? "127.0.0.1";
+  const port = parsePort(flagValue(args, "port")) ?? 4318;
+  const mode = flagValue(args, "mode") === "fixture" ? "fixture" : "live";
+  const liveCacheTtlMs = parseNonNegativeInteger(flagValue(args, "live-cache-ttl-ms"), "--live-cache-ttl-ms") ?? 60_000;
+  const allowFixtureFallback = hasFlag(args, "allow-fixture-fallback");
+  const url = `http://${host}:${port}`;
+  const child = spawnDashboardServer({
+    workspaceRoot: context.workspaceRoot,
+    host,
+    port,
+    mode,
+    scope,
+    liveCacheTtlMs,
+    allowFixtureFallback
+  });
+  output.write(`Boreal ${scope === "global" ? "global console" : "dashboard"} starting at ${url}\n`);
+  output.write("Press Ctrl+C to stop.\n");
+  if (!hasFlag(args, "no-open")) {
+    setTimeout(() => openBrowser(url), 750);
+  }
+  return {
+    exitCode: await waitForDashboardProcess(child)
+  };
+}
+
+async function launchTuiCommand(context: CliContext, args: ParsedArgs, scope: "repo" | "global"): Promise<CommandResult> {
+  const refreshMs = parseNonNegativeInteger(flagValue(args, "refresh-ms"), "--refresh-ms");
+  const child = spawnAppProcess({
+    appDir: "tui",
+    distEntry: "index.js",
+    srcEntry: "index.tsx",
+    args: [
+      "--workspace",
+      context.workspaceRoot,
+      ...(scope === "global" ? ["--global"] : []),
+      ...(hasFlag(args, "mouse") ? ["--mouse"] : []),
+      ...(refreshMs !== undefined ? ["--refresh-ms", String(refreshMs)] : [])
+    ]
+  });
+  return { exitCode: await waitForDashboardProcess(child) };
+}
+
+function spawnDashboardServer(input: {
+  readonly workspaceRoot: string;
+  readonly host: string;
+  readonly port: number;
+  readonly mode: "live" | "fixture";
+  readonly scope: "repo" | "global";
+  readonly liveCacheTtlMs: number;
+  readonly allowFixtureFallback: boolean;
+}) {
+  const fallbackArgs = input.allowFixtureFallback ? ["--allow-fixture-fallback"] : [];
+  return spawnAppProcess({
+    appDir: "console",
+    distEntry: "server.js",
+    srcEntry: "server.ts",
+    args: [
+      "--workspace",
+      input.workspaceRoot,
+      "--host",
+      input.host,
+      "--port",
+      String(input.port),
+      "--mode",
+      input.mode,
+      "--scope",
+      input.scope,
+      "--live-cache-ttl-ms",
+      String(input.liveCacheTtlMs),
+      ...fallbackArgs
+    ]
+  });
+}
+
+// Prefer the compiled app output (works in any layout, no tsx, faster start);
+// fall back to running TypeScript source via tsx for in-repo dev checkouts.
+function spawnAppProcess(input: {
+  readonly appDir: string;
+  readonly distEntry: string;
+  readonly srcEntry: string;
+  readonly args: readonly string[];
+}) {
+  const sourceRoot = resolve(dirname(import.meta.url.replace(/^file:\/\//u, "")), "..", "..", "..", "..");
+  const distEntrypoint = join(sourceRoot, "apps", input.appDir, "dist", input.distEntry);
+  if (existsSync(distEntrypoint)) {
+    return spawn(process.execPath, [distEntrypoint, ...input.args], { cwd: sourceRoot, stdio: "inherit" });
+  }
+  const tsxBin = join(sourceRoot, "node_modules", ".bin", process.platform === "win32" ? "tsx.cmd" : "tsx");
+  const srcEntrypoint = join(sourceRoot, "apps", input.appDir, "src", input.srcEntry);
+  const tsconfig = join(sourceRoot, "apps", input.appDir, "tsconfig.json");
+  return spawn(tsxBin, ["--tsconfig", tsconfig, srcEntrypoint, ...input.args], {
+    cwd: sourceRoot,
+    stdio: "inherit"
+  });
+}
+
+function openBrowser(url: string): void {
+  const command = process.platform === "darwin" ? "open" : process.platform === "win32" ? "cmd" : "xdg-open";
+  const args = process.platform === "win32" ? ["/c", "start", "", url] : [url];
+  try {
+    const child = spawn(command, args, { detached: true, stdio: "ignore" });
+    child.unref();
+  } catch {
+    // Serving the dashboard is the primary contract; the URL is printed if browser launch fails.
+  }
+}
+
+function waitForDashboardProcess(child: ReturnType<typeof spawn>): Promise<number> {
+  return new Promise((resolvePromise) => {
+    const done = () => {
+      process.off("SIGINT", done);
+      process.off("SIGTERM", done);
+      child.kill("SIGTERM");
+    };
+    process.once("SIGINT", done);
+    process.once("SIGTERM", done);
+    child.once("exit", (code, signal) => {
+      process.off("SIGINT", done);
+      process.off("SIGTERM", done);
+      resolvePromise(signal ? 0 : code ?? 0);
+    });
+    child.once("error", () => {
+      process.off("SIGINT", done);
+      process.off("SIGTERM", done);
+      resolvePromise(1);
+    });
+  });
+}
+
+function parsePort(value: string | undefined): number | undefined {
+  const parsed = parseNonNegativeInteger(value, "--port");
+  if (parsed === undefined) {
+    return undefined;
+  }
+  if (parsed < 1 || parsed > 65_535) {
+    throw new BorealError("BOREAL_INVALID_INPUT", "--port must be between 1 and 65535", { value });
+  }
+  return parsed;
+}
+
+async function buildGlobalDashboardResult(context: CliContext, args: ParsedArgs) {
+  const generatedAt = nowIso();
+  const projectLimit = parseLimit(flagValue(args, "limit"), { max: MAX_DASHBOARD_PROJECT_LIMIT }) ?? DEFAULT_DASHBOARD_PROJECT_LIMIT;
+  const registryOptions = { registryRoot: flagValue(args, "registry-root") };
+  const [registryList, registryDoctor] = await Promise.all([
+    listProjectRegistry(registryOptions),
+    doctorProjectRegistry(registryOptions)
+  ]);
+  const activeRegistryEntries = registryList.entries.filter((entry) => entry.lifecycle !== "archived" && entry.lifecycle !== "paused");
+  const registryEntries = activeRegistryEntries.length > 0
+    ? activeRegistryEntries
+    : [await currentWorkspaceDashboardRegistryEntry(context, generatedAt)];
+  const limitedRegistryEntries = registryEntries.slice(0, projectLimit);
+  const registryFindings = dashboardRegistryFindingsByProject(registryDoctor);
+  const searchQuery = "v1-remainder global dashboard registry";
+  const overviews = await Promise.all(
+    limitedRegistryEntries.map((entry) =>
+      buildGlobalDashboardProjectOverview({
+        parentContext: context,
+        entry,
+        registryFindings: registryFindings.get(entry.id) ?? [],
+        generatedAt,
+        searchQuery
+      })
+    )
+  );
+
+  return {
+    schemaVersion: "boreal.cli.dashboard.global.v1",
+    generatedAt,
+    workspaceRoot: context.workspaceRoot,
+    searchQuery,
+    limits: {
+      projects: projectLimit,
+      workPerProject: DEFAULT_DASHBOARD_WORK_LIMIT,
+      queueRowsPerQueue: DEFAULT_DASHBOARD_QUEUE_LIMIT,
+      searchPerProject: DEFAULT_DASHBOARD_SEARCH_LIMIT,
+      activityPerProject: DEFAULT_DASHBOARD_ACTIVITY_LIMIT
+    },
+    truncated: {
+      projects: registryEntries.length > limitedRegistryEntries.length
+    },
+    registry: buildProjectRegistryView({
+      generatedAt,
+      entries: overviews.map((project) => project.entry)
+    }),
+    globalQueues: buildGlobalWorkQueuesView({
+      generatedAt,
+      limit: DEFAULT_DASHBOARD_QUEUE_LIMIT,
+      projects: overviews.map((project) => ({
+        projectId: project.entry.id,
+        projectName: project.entry.name,
+        projectRoot: project.entry.projectRoot,
+        work: project.work
+      }))
+    }),
+    globalSearch: buildGlobalSearchView({
+      generatedAt,
+      query: searchQuery,
+      projects: overviews.map((project) => ({
+        projectId: project.entry.id,
+        projectName: project.entry.name,
+        projectRoot: project.entry.projectRoot,
+        results: project.searchResults
+      }))
+    }),
+    globalActivity: buildGlobalActivityView({
+      generatedAt,
+      projects: overviews.map((project) => ({
+        projectId: project.entry.id,
+        projectName: project.entry.name,
+        projectRoot: project.entry.projectRoot,
+        operations: project.activityRows
+      }))
+    }),
+    globalHealth: buildGlobalHealthView({
+      generatedAt,
+      projects: overviews.map((project) => ({
+        projectId: project.entry.id,
+        projectName: project.entry.name,
+        projectRoot: project.entry.projectRoot,
+        memoryRoot: project.entry.memoryRoot,
+        health: project.entry.health,
+        stale: project.entry.stale,
+        syncFreshness: project.entry.syncFreshness,
+        syncOk: project.sync.ok,
+        vaultOk: project.sync.vaultOk,
+        ledgersOk: project.sync.ledgersOk,
+        searchIndexOk: project.sync.searchIndexOk,
+        gitOk: project.sync.gitOk,
+        findings: project.entry.findings,
+        locks: project.locks.locks
+      }))
+    }),
+    daemonStatus: {
+      generatedAt,
+      projects: overviews.map((project) => ({
+        projectId: project.entry.id,
+        projectName: project.entry.name,
+        projectRoot: project.entry.projectRoot,
+        state: project.daemon.state,
+        pid: project.daemon.pid,
+        processAlive: project.daemon.processAlive,
+        statusPath: project.daemon.statusPath,
+        findings: project.daemon.findings,
+        recommendedActions: project.daemon.recommendedActions
+      }))
+    },
+    globalSettings: buildGlobalSettingsView({
+      generatedAt,
+      projects: overviews.map((project) => project.settings)
+    })
+  };
+}
+
+async function buildGlobalDashboardProjectOverview(input: {
+  readonly parentContext: CliContext;
+  readonly entry: CoreProjectRegistryEntry;
+  readonly registryFindings: readonly DashboardFinding[];
+  readonly generatedAt: string;
+  readonly searchQuery: string;
+}): Promise<GlobalDashboardProjectOverview> {
+  try {
+    const projectContext = await dashboardProjectContext(input.parentContext, input.entry.projectRoot);
+    assertInitialized(projectContext);
+    const [work, reservations, sync, doctor, operations, searchResults, daemon] = await Promise.all([
+      dashboardWork(projectContext),
+      projectContext.store.read((reader) => reader.listReservations()),
+      buildSyncStatus(projectContext),
+      runDoctor(projectContext, false, false),
+      dashboardOperations(projectContext),
+      dashboardSearch(projectContext, input.searchQuery),
+      inspectDaemonStatus({ workspaceRoot: projectContext.workspaceRoot })
+    ]);
+    const syncView = syncDashboardViewFromStatus(sync, input.generatedAt);
+    const findings = [
+      ...input.registryFindings,
+      ...dashboardFindingsFromDiagnostics(doctor.diagnostics)
+    ];
+    const entry = dashboardEntryFromMetrics({
+      entry: input.entry,
+      generatedAt: input.generatedAt,
+      work,
+      sync: syncView,
+      findings,
+      activeReservationCount: reservations.filter((reservation) => reservation.status === "active").length
+    });
+    return {
+      entry,
+      settings: dashboardSettingsFromEntry(input.entry, entry),
+      work,
+      searchResults,
+      activityRows: operations,
+      sync: syncView,
+      locks: lockDashboardViewFromDiagnostics(doctor.diagnostics, input.entry.projectRoot, input.generatedAt),
+      daemon
+    };
+  } catch (error) {
+    const sync = syncDashboardViewFromFailure(input.entry.projectRoot, input.generatedAt);
+    const findings = [
+      ...input.registryFindings,
+      {
+        code: "dashboard.project_unreadable",
+        title: "dashboard.project_unreadable",
+        severity: "error" as const,
+        status: "failed" as const,
+        message: error instanceof Error ? error.message : String(error),
+        source: input.entry.projectRoot,
+        actions: []
+      }
+    ];
+    const entry = dashboardEntryFromMetrics({
+      entry: input.entry,
+      generatedAt: input.generatedAt,
+      work: [],
+      sync,
+      findings,
+      activeReservationCount: 0
+    });
+    return {
+      entry,
+      settings: dashboardSettingsFromEntry(input.entry, entry),
+      work: [],
+      searchResults: [],
+      activityRows: [],
+      sync,
+      locks: { generatedAt: input.generatedAt, ok: true, workspaceRoot: input.entry.projectRoot, locks: [] },
+      daemon: daemonStatusUnavailable(input.entry.projectRoot, input.generatedAt, error)
+    };
+  }
+}
+
+function daemonStatusUnavailable(workspaceRoot: string, generatedAt: string, error: unknown): DaemonStatusResult {
+  return {
+    schemaVersion: "boreal.daemon.status.v1",
+    generatedAt,
+    workspaceRoot,
+    statusPath: join(resolve(workspaceRoot), ".boreal", "daemon", "status.json"),
+    state: "missing",
+    locks: {
+      runtime: {
+        path: join(resolve(workspaceRoot), ".boreal", "runtime", "state.lock"),
+        exists: false,
+        stale: false,
+        status: "clear"
+      },
+      searchIndex: {
+        path: join(resolve(workspaceRoot), ".boreal", "runtime", "search-index.lock"),
+        exists: false,
+        stale: false,
+        status: "clear"
+      }
+    },
+    watch: {
+      paths: [],
+      writesTruth: false,
+      repairsAreCommandMediated: true
+    },
+    findings: [
+      {
+        code: "daemon.project_unreadable",
+        severity: "error",
+        message: error instanceof Error ? error.message : String(error)
+      }
+    ],
+    recommendedActions: [],
+    agentDirectives: [],
+    directiveObligations: unavailableDaemonDirectiveObligations(generatedAt)
+  };
+}
+
+function unavailableDaemonDirectiveObligations(generatedAt: string): DaemonStatusResult["directiveObligations"] {
+  const obligationGeneratedAt = isIsoTimestamp(generatedAt) ? generatedAt : nowIso();
+  return {
+    schemaVersion: "boreal.agent-runtime.directive-obligations.v1",
+    generatedAt: obligationGeneratedAt,
+    context: "health",
+    ok: true,
+    agentDirectives: [],
+    summary: {
+      context: "health",
+      bundleCount: 0,
+      directiveCount: 0,
+      selectedRegistryIds: [],
+      emittedRegistryIds: [],
+      advisoryRegistryIds: [],
+      requiredRegistryIds: [],
+      blockingRegistryIds: [],
+      closeoutBlockingRegistryIds: [],
+      advisoryCount: 0,
+      requiredCount: 0,
+      blockingCount: 0,
+      closeoutBlockingCount: 0,
+      conflictCount: 0,
+      deprecationCount: 0,
+      missingRequiredCount: 0
+    },
+    selectedRegistryIds: [],
+    dataByRegistryId: {},
+    issues: [],
+    missingRequired: []
+  };
+}
+
+async function dashboardProjectContext(parentContext: CliContext, workspaceRoot: string): Promise<CliContext> {
+  if (resolve(workspaceRoot) === parentContext.workspaceRoot) {
+    return parentContext;
+  }
+  return createCliContext({
+    command: [],
+    flags: new Map<string, readonly string[]>([
+      ["workspace", [workspaceRoot]],
+      ["session", [parentContext.sessionId]],
+      ["actor", [parentContext.actor.id]],
+      ["actor-kind", [parentContext.actor.kind]]
+    ])
+  }, parentContext.cwd, { sessionId: parentContext.sessionId });
+}
+
+async function dashboardWork(context: CliContext): Promise<readonly WorkItemView[]> {
+  const work = await context.store.read((reader) => reader.listWorkItems());
+  return work.map((item) => toWorkItemView({ work: item })).sort(compareWorkViews).slice(0, DEFAULT_DASHBOARD_WORK_LIMIT);
+}
+
+async function dashboardOperations(context: CliContext): Promise<readonly GlobalActivitySourceRow[]> {
+  return context.store.read(async (reader) => {
+    const operations = await reader.listOperations();
+    return [...operations]
+      .sort(compareOperationsNewestFirst)
+      .slice(0, DEFAULT_DASHBOARD_ACTIVITY_LIMIT)
+      .map(operationListRow);
+  });
+}
+
+async function dashboardSearch(context: CliContext, query: string): Promise<readonly GlobalSearchSourceRow[]> {
+  try {
+    return (await runSearch(context, query, { limit: DEFAULT_DASHBOARD_SEARCH_LIMIT })).map((result) => ({
+      id: result.id,
+      type: result.type,
+      recordId: result.recordId,
+      title: result.title,
+      summary: result.summary,
+      score: result.score
+    }));
+  } catch {
+    return [];
+  }
+}
+
+function dashboardEntryFromMetrics(input: {
+  readonly entry: CoreProjectRegistryEntry;
+  readonly generatedAt: string;
+  readonly work: readonly WorkItemView[];
+  readonly sync: SyncDashboardView;
+  readonly findings: readonly DashboardFinding[];
+  readonly activeReservationCount: number;
+}): DashboardProjectRegistryEntry {
+  const openWorkCount = input.work.filter((item) => isOpenWorkStatus(item.status)).length;
+  const readyWorkCount = input.work.filter((item) => item.status === "ready").length;
+  const blockedWorkCount = input.work.filter((item) => item.status === "blocked").length;
+  const syncFreshness: ProjectSyncFreshness = input.sync.ok ? "fresh" : "stale";
+  const stale = syncFreshness === "stale" || input.findings.some((finding) => finding.severity !== "info");
+  return {
+    id: input.entry.id,
+    name: input.entry.display.name,
+    projectRoot: input.entry.projectRoot,
+    memoryRoot: input.entry.memoryRoot,
+    memoryLayout: input.entry.memoryLayout,
+    memoryGitMode: input.entry.memoryGitMode,
+    installRoot: input.entry.installRoot,
+    bwrkPin: input.entry.bwrkPin,
+    health: projectHealthState(input.sync.ok, input.findings),
+    stale,
+    syncFreshness,
+    openWorkCount,
+    readyWorkCount,
+    blockedWorkCount,
+    activeReservationCount: input.activeReservationCount,
+    findings: input.findings,
+    lastSeenAt: input.entry.lastSeenAt ?? input.generatedAt
+  };
+}
+
+function dashboardSettingsFromEntry(
+  entry: CoreProjectRegistryEntry,
+  dashboardEntry: DashboardProjectRegistryEntry
+): GlobalSettingsProjectInput {
+  return {
+    projectId: dashboardEntry.id,
+    projectName: dashboardEntry.name,
+    projectRoot: dashboardEntry.projectRoot,
+    memoryRoot: dashboardEntry.memoryRoot,
+    memoryLayout: dashboardEntry.memoryLayout,
+    memoryGitMode: dashboardEntry.memoryGitMode,
+    memoryRemote: entry.memoryRemote,
+    installRoot: dashboardEntry.installRoot,
+    source: entry.source,
+    health: dashboardEntry.health,
+    stale: dashboardEntry.stale
+  };
+}
+
+function syncDashboardViewFromStatus(sync: SyncStatusResult, generatedAt: string): SyncDashboardView {
+  return {
+    generatedAt,
+    ok: sync.ok,
+    workspaceRoot: sync.workspaceRoot,
+    vaultOk: sync.vault.ok,
+    ledgersOk: sync.ledgers.ok,
+    searchIndexOk: sync.searchIndex.ok,
+    gitOk: sync.git.ok,
+    recommendedActions: sync.recommendedActions.map((command) => ({ label: command, command })),
+    findings: []
+  };
+}
+
+function syncDashboardViewFromFailure(workspaceRoot: string, generatedAt: string): SyncDashboardView {
+  return {
+    generatedAt,
+    ok: false,
+    workspaceRoot,
+    vaultOk: false,
+    ledgersOk: false,
+    searchIndexOk: false,
+    gitOk: false,
+    recommendedActions: [],
+    findings: []
+  };
+}
+
+function dashboardFindingsFromDiagnostics(diagnostics: readonly Diagnostic[]): readonly DashboardFinding[] {
+  return diagnostics.flatMap((diagnostic): readonly DashboardFinding[] => {
+    const severity = dashboardDiagnosticSeverity(diagnostic.severity);
+    if (severity === "info") {
+      return [];
+    }
+    return [{
+      code: diagnostic.code,
+      title: diagnostic.code,
+      severity,
+      status: severity === "error" ? "failed" : severity === "warning" ? "warning" : "ok",
+      message: diagnostic.message,
+      source: diagnosticSourcePath(diagnostic),
+      actions: diagnosticRepairCommand(diagnostic) ? [{ label: "Repair", command: diagnosticRepairCommand(diagnostic) }] : []
+    }];
+  });
+}
+
+function dashboardRegistryFindingsByProject(result: RegistryDoctorResult): ReadonlyMap<string, readonly DashboardFinding[]> {
+  const byProject = new Map<string, DashboardFinding[]>();
+  for (const finding of result.findings) {
+    if (finding.severity === "ok") {
+      continue;
+    }
+    const projectId = finding.projectId ?? "registry";
+    byProject.set(projectId, [
+      ...(byProject.get(projectId) ?? []),
+      {
+        code: finding.code,
+        title: finding.code,
+        severity: dashboardDiagnosticSeverity(finding.severity),
+        status: finding.severity === "error" ? "failed" : "warning",
+        message: finding.message,
+        source: finding.path,
+        actions: diagnosticRepairCommand(finding) ? [{ label: "Repair", command: diagnosticRepairCommand(finding) }] : []
+      }
+    ]);
+  }
+  return byProject;
+}
+
+function lockDashboardViewFromDiagnostics(
+  diagnostics: readonly Diagnostic[],
+  workspaceRoot: string,
+  generatedAt: string
+): LockDashboardView {
+  const locks = diagnostics.flatMap((diagnostic) => {
+    if (!diagnostic.code.startsWith("lock.")) {
+      return [];
+    }
+    return [{
+      domain: diagnostic.code,
+      path: ".boreal/locks",
+      status: diagnostic.severity === "ok" ? "clear" as const : "stale" as const,
+      repairCommand: diagnostic.severity === "ok" ? undefined : "bwrk doctor --fix --json"
+    }];
+  });
+  return {
+    generatedAt,
+    ok: locks.every((lock) => lock.status === "clear"),
+    workspaceRoot,
+    locks
+  };
+}
+
+function dashboardDiagnosticSeverity(value: string): DashboardFinding["severity"] {
+  if (value === "error" || value === "warning") {
+    return value;
+  }
+  return "info";
+}
+
+function diagnosticSourcePath(diagnostic: { readonly details?: unknown; readonly path?: string }): string | undefined {
+  if (typeof diagnostic.path === "string") {
+    return diagnostic.path;
+  }
+  const details = diagnostic.details;
+  if (details && typeof details === "object" && !Array.isArray(details)) {
+    const record = details as Record<string, unknown>;
+    for (const key of ["path", "configPath", "projectRoot", "workspaceRoot", "memoryRoot", "gitRoot", "rootDir", "statePath", "indexPath", "file"]) {
+      const value = record[key];
+      if (typeof value === "string" && value.length > 0) {
+        return value;
+      }
+    }
+  }
+  return undefined;
+}
+
+function diagnosticRepairCommand(diagnostic: { readonly details?: unknown; readonly repairCommand?: string }): string | undefined {
+  if (typeof diagnostic.repairCommand === "string") {
+    return diagnostic.repairCommand;
+  }
+  const details = diagnostic.details;
+  if (details && typeof details === "object" && !Array.isArray(details)) {
+    const repairCommand = (details as Record<string, unknown>).repairCommand;
+    return typeof repairCommand === "string" ? repairCommand : undefined;
+  }
+  return undefined;
+}
+
+async function currentWorkspaceDashboardRegistryEntry(
+  context: CliContext,
+  generatedAt: string
+): Promise<CoreProjectRegistryEntry> {
+  let config: Awaited<ReturnType<typeof readProjectSetupConfig>>;
+  try {
+    config = await readProjectSetupConfig(context.workspaceRoot);
+  } catch {
+    config = undefined;
+  }
+  const projectRoot = context.workspaceRoot;
+  const memoryRoot = resolve(config?.memoryRoot ?? join(projectRoot, "memory"));
+  const identity = deriveProjectRegistryIdentity({
+    projectRoot,
+    projectConfig: config as unknown as Readonly<Record<string, unknown>> | undefined
+  });
+  return {
+    id: projectRegistryEntryIdFromIdentity(identity),
+    identity,
+    lifecycle: "linked",
+    display: {
+      name: basename(projectRoot),
+      labels: []
+    },
+    projectRoot,
+    borealDir: join(projectRoot, ".boreal"),
+    runtimeDir: join(projectRoot, ".boreal", "runtime"),
+    runtimeStateFile: join(projectRoot, ".boreal", "runtime", "state.json"),
+    projectConfigPath: join(projectRoot, ".boreal", "project.json"),
+    memoryRoot,
+    memoryBorealDir: join(memoryRoot, ".boreal"),
+    memoryLayout: config?.memoryLayout ?? "in-repo",
+    memoryGitMode: config?.memoryGitMode ?? "separate",
+    memoryRemote: config?.memoryRemote,
+    installRoot: resolve(config?.installRoot ?? join(projectRoot, ".agents", "skills")),
+    skillTargets: config?.skillTargets ?? [],
+    folderScoped: config?.folderScoped ?? false,
+    source: config ? "project-setup" : "explicit",
+    addedAt: generatedAt,
+    updatedAt: generatedAt,
+    lastSeenAt: generatedAt
+  };
+}
+
+function isOpenWorkStatus(status: WorkItemView["status"]): boolean {
+  return status !== "closed" && status !== "cancelled" && status !== "verified";
+}
+
+function projectHealthState(syncOk: boolean, findings: readonly DashboardFinding[]): DashboardProjectRegistryEntry["health"] {
+  if (findings.some((finding) => finding.severity === "error")) {
+    return "error";
+  }
+  if (!syncOk || findings.some((finding) => finding.severity === "warning")) {
+    return "warning";
+  }
+  return "ok";
+}
+
+function formatGlobalDashboardSummary(result: Awaited<ReturnType<typeof buildGlobalDashboardResult>>): string {
+  return table(
+    result.registry.entries.map((entry) => ({
+      project: entry.name,
+      health: entry.health,
+      open: entry.openWorkCount,
+      ready: entry.readyWorkCount,
+      blocked: entry.blockedWorkCount,
+      stale: entry.stale ? "yes" : "no"
+    }))
+  );
+}
+
+function operationListRow(operation: RuntimeOperation): GlobalActivitySourceRow {
+  return {
+    id: operation.meta.id,
+    sessionId: operation.sessionId,
+    commandPath: operation.commandPath,
+    status: operation.status,
+    exitCode: operation.exitCode,
+    stateChanged: operation.stateChanged,
+    generatedArtifactsChanged: operation.generatedArtifactsChanged,
+    actorId: operation.actorId,
+    actorKind: operation.meta.createdBy.kind,
+    startedAt: operation.startedAt,
+    finishedAt: operation.finishedAt,
+    eventCount: operation.eventIds.length
+  };
+}
+
+function compareOperationsNewestFirst(left: RuntimeOperation, right: RuntimeOperation): number {
+  return (
+    Date.parse(right.finishedAt) - Date.parse(left.finishedAt) ||
+    Date.parse(right.startedAt) - Date.parse(left.startedAt) ||
+    right.meta.id.localeCompare(left.meta.id)
+  );
+}
+
+function compareWorkViews(left: WorkItemView, right: WorkItemView): number {
+  return (
+    priorityRank(right.priority) - priorityRank(left.priority) ||
+    left.title.localeCompare(right.title) ||
+    left.id.localeCompare(right.id)
+  );
+}
+
+function priorityRank(priority: WorkPriority): number {
+  switch (priority) {
+    case "critical":
+      return 4;
+    case "high":
+      return 3;
+    case "normal":
+      return 2;
+    case "low":
+      return 1;
+  }
+}
+
+function parseLimit(value: string | undefined, options: { readonly max?: number } = {}): number | undefined {
+  if (!value) {
+    return undefined;
+  }
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed <= 0) {
+    throw new BorealError("BOREAL_INVALID_INPUT", "--limit must be a positive integer");
+  }
+  const max = options.max ?? MAX_LIST_LIMIT;
+  if (parsed > max) {
+    throw new BorealError("BOREAL_INVALID_INPUT", `--limit must be at most ${max}`);
+  }
+  return parsed;
+}
+
+function parseNonNegativeInteger(value: string | undefined, label: string): number | undefined {
+  if (!value) {
+    return undefined;
+  }
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed < 0) {
+    throw new BorealError("BOREAL_INVALID_INPUT", `${label} must be a non-negative integer`);
+  }
+  return parsed;
+}
