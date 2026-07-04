@@ -2,8 +2,10 @@ import { basename } from "node:path";
 
 import { BorealError } from "@boreal/core";
 
-import { flagValue, flagValues, requiredFlag, type ParsedArgs } from "../args.js";
+import { flagValue, flagValues, hasFlag, requiredFlag, type ParsedArgs } from "../args.js";
 import type { CliContext } from "../context.js";
+import { analyzeCompaction, applyCompaction, type CompactDomain } from "../compact.js";
+import { applyManualMerge, buildManualMergePlan, scanDuplicates, type DuplicateDomain } from "../duplicates.js";
 import { formatRecord, table, type CliOutput } from "../output.js";
 import {
   addRawSource,
@@ -20,7 +22,7 @@ import type { CommandResult } from "./shared.js";
 const DEFAULT_RAW_PREVIEW_BYTES = 4_096;
 const MAX_RAW_PREVIEW_BYTES = 65_536;
 
-type MemoryCommandGroup = "raw" | "wiki";
+type MemoryCommandGroup = "raw" | "wiki" | "duplicate" | "merge" | "compact";
 
 export interface MemoryCommandDependencies {
   readonly defaultListLimit: number;
@@ -43,6 +45,12 @@ export async function memoryCommand(
       return rawCommand(action, rest, context, args, output, json, dependencies);
     case "wiki":
       return wikiCommand(action, rest, context, args, output, json, dependencies);
+    case "duplicate":
+      return duplicateCommand(action, context, args, output, json);
+    case "merge":
+      return mergeCommand(action, context, args, output, json);
+    case "compact":
+      return compactCommand(action, context, args, output, json);
   }
 }
 
@@ -133,6 +141,107 @@ async function wikiCommand(
   }
 }
 
+async function duplicateCommand(
+  action: string | undefined,
+  context: CliContext,
+  args: ParsedArgs,
+  output: CliOutput,
+  json: boolean
+): Promise<CommandResult> {
+  switch (action) {
+    case "scan": {
+      const result = await scanDuplicates(context, { domain: parseDuplicateDomain(flagValue(args, "domain") ?? "all") });
+      output.write(formatRecord(result, json));
+      return { exitCode: 0 };
+    }
+    default:
+      throw new BorealError("BOREAL_INVALID_INPUT", `Unknown duplicate command: ${action ?? ""}`);
+  }
+}
+
+async function mergeCommand(
+  action: string | undefined,
+  context: CliContext,
+  args: ParsedArgs,
+  output: CliOutput,
+  json: boolean
+): Promise<CommandResult> {
+  switch (action) {
+    case "plan": {
+      const duplicateIds = flagValues(args, "duplicate");
+      if (duplicateIds.length === 0) {
+        throw new BorealError("BOREAL_INVALID_INPUT", "merge plan requires at least one --duplicate");
+      }
+      output.write(
+        formatRecord(
+          buildManualMergePlan(parseMergeDomain(requiredFlag(args, "domain")), requiredFlag(args, "survivor"), duplicateIds),
+          json
+        )
+      );
+      return { exitCode: 0 };
+    }
+    case "apply": {
+      const duplicateIds = flagValues(args, "duplicate");
+      output.write(
+        formatRecord(
+          await applyManualMerge(context, {
+            domain: parseMergeDomain(requiredFlag(args, "domain")),
+            survivorId: requiredFlag(args, "survivor"),
+            duplicateIds,
+            planId: requiredFlag(args, "plan"),
+            confirm: hasFlag(args, "confirm")
+          }),
+          json
+        )
+      );
+      return { exitCode: 0 };
+    }
+    default:
+      throw new BorealError("BOREAL_INVALID_INPUT", `Unknown merge command: ${action ?? ""}`);
+  }
+}
+
+async function compactCommand(
+  action: string | undefined,
+  context: CliContext,
+  args: ParsedArgs,
+  output: CliOutput,
+  json: boolean
+): Promise<CommandResult> {
+  switch (action) {
+    case "analyze": {
+      output.write(
+        formatRecord(
+          await analyzeCompaction(context, {
+            domain: parseCompactDomain(flagValue(args, "domain") ?? "all"),
+            olderThanDays: parseOlderThanDays(flagValue(args, "older-than-days"))
+          }),
+          json
+        )
+      );
+      return { exitCode: 0 };
+    }
+    case "apply": {
+      output.write(
+        formatRecord(
+          await applyCompaction(context, {
+            domain: parseCompactApplyDomain(requiredFlag(args, "domain")),
+            targetId: requiredFlag(args, "target"),
+            planId: requiredFlag(args, "plan"),
+            summary: requiredFlag(args, "summary"),
+            confirm: hasFlag(args, "confirm"),
+            olderThanDays: parseOlderThanDays(flagValue(args, "older-than-days"))
+          }),
+          json
+        )
+      );
+      return { exitCode: 0 };
+    }
+    default:
+      throw new BorealError("BOREAL_INVALID_INPUT", `Unknown compact command: ${action ?? ""}`);
+  }
+}
+
 export async function resolveWikiPageIds(
   context: CliContext,
   references: readonly string[]
@@ -172,6 +281,45 @@ function parsePreviewBytes(value: string | undefined): number {
   }
   if (parsed > MAX_RAW_PREVIEW_BYTES) {
     throw new BorealError("BOREAL_INVALID_INPUT", `--preview-bytes must be at most ${MAX_RAW_PREVIEW_BYTES}`);
+  }
+  return parsed;
+}
+
+function parseDuplicateDomain(value: string): DuplicateDomain {
+  if (value === "all" || value === "work" || value === "raw" || value === "wiki") {
+    return value;
+  }
+  throw new BorealError("BOREAL_INVALID_INPUT", "--domain must be all, work, raw, or wiki");
+}
+
+function parseMergeDomain(value: string): Exclude<DuplicateDomain, "all"> {
+  if (value === "work" || value === "raw" || value === "wiki") {
+    return value;
+  }
+  throw new BorealError("BOREAL_INVALID_INPUT", "--domain must be work, raw, or wiki");
+}
+
+function parseCompactDomain(value: string): CompactDomain {
+  if (value === "all" || value === "work" || value === "wiki") {
+    return value;
+  }
+  throw new BorealError("BOREAL_INVALID_INPUT", "--domain must be all, work, or wiki");
+}
+
+function parseCompactApplyDomain(value: string): Exclude<CompactDomain, "all"> {
+  if (value === "work" || value === "wiki") {
+    return value;
+  }
+  throw new BorealError("BOREAL_INVALID_INPUT", "--domain must be work or wiki");
+}
+
+function parseOlderThanDays(value: string | undefined): number | undefined {
+  if (!value) {
+    return undefined;
+  }
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed < 0) {
+    throw new BorealError("BOREAL_INVALID_INPUT", "--older-than-days must be a non-negative integer");
   }
   return parsed;
 }

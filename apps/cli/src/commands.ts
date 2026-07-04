@@ -180,7 +180,6 @@ import {
   validateCommandFlags,
   type CommandDefinition
 } from "./command-registry.js";
-import { analyzeCompaction, applyCompaction, type CompactDomain } from "./compact.js";
 import { COMPLETION_SHELLS, generateShellCompletion, isCompletionShell } from "./completion.js";
 import {
   OPERATION_LOG_RECOMMENDED_KEEP,
@@ -193,7 +192,6 @@ import {
 } from "./doctor.js";
 import { assertInitialized, createCliContext, ensureWorkspaceDirs, isGlobalContext, type CliContext } from "./context.js";
 import { keyValueRows, resultSummary, section, withPromptSession, type CliSelectOption } from "./cli-ui.js";
-import { applyManualMerge, buildManualMergePlan, scanDuplicates, type DuplicateDomain } from "./duplicates.js";
 import { workBranchName } from "./git-branch.js";
 import { isMissingGit, runGit } from "./git-exec.js";
 import { inspectGitWorktree } from "./git-worktree.js";
@@ -1149,20 +1147,14 @@ export async function runCommand(args: ParsedArgs, output: CliOutput, cwd: strin
         break;
       case "raw":
       case "wiki":
+      case "duplicate":
+      case "merge":
+      case "compact":
         result = await memoryCommand(group, action, rest, context, args, commandOutput, json, {
           defaultListLimit: DEFAULT_LIST_LIMIT,
           parseLimit,
           requiredPositional
         });
-        break;
-      case "duplicate":
-        result = await duplicateCommand(action, context, args, commandOutput, json);
-        break;
-      case "merge":
-        result = await mergeCommand(action, context, args, commandOutput, json);
-        break;
-      case "compact":
-        result = await compactCommand(action, context, args, commandOutput, json);
         break;
       case "sync":
         result = await syncCommand(action, context, args, commandOutput, json, {
@@ -8225,107 +8217,6 @@ function shouldRefreshGeneratedArtifactsAfterMutation(definition: CommandDefinit
 // staleness is detected by sync status/doctor and rebuilt by `sync refresh`.
 const INLINE_GENERATED_ARTIFACT_REFRESH_COMMANDS = new Set<string>([]);
 
-async function duplicateCommand(
-  action: string | undefined,
-  context: CliContext,
-  args: ParsedArgs,
-  output: CliOutput,
-  json: boolean
-): Promise<CommandResult> {
-  switch (action) {
-    case "scan": {
-      const result = await scanDuplicates(context, { domain: parseDuplicateDomain(flagValue(args, "domain") ?? "all") });
-      output.write(formatRecord(result, json));
-      return { exitCode: 0 };
-    }
-    default:
-      throw new BorealError("BOREAL_INVALID_INPUT", `Unknown duplicate command: ${action ?? ""}`);
-  }
-}
-
-async function mergeCommand(
-  action: string | undefined,
-  context: CliContext,
-  args: ParsedArgs,
-  output: CliOutput,
-  json: boolean
-): Promise<CommandResult> {
-  switch (action) {
-    case "plan": {
-      const duplicateIds = flagValues(args, "duplicate");
-      if (duplicateIds.length === 0) {
-        throw new BorealError("BOREAL_INVALID_INPUT", "merge plan requires at least one --duplicate");
-      }
-      output.write(
-        formatRecord(
-          buildManualMergePlan(parseMergeDomain(requiredFlag(args, "domain")), requiredFlag(args, "survivor"), duplicateIds),
-          json
-        )
-      );
-      return { exitCode: 0 };
-    }
-    case "apply": {
-      const duplicateIds = flagValues(args, "duplicate");
-      output.write(
-        formatRecord(
-          await applyManualMerge(context, {
-            domain: parseMergeDomain(requiredFlag(args, "domain")),
-            survivorId: requiredFlag(args, "survivor"),
-            duplicateIds,
-            planId: requiredFlag(args, "plan"),
-            confirm: hasFlag(args, "confirm")
-          }),
-          json
-        )
-      );
-      return { exitCode: 0 };
-    }
-    default:
-      throw new BorealError("BOREAL_INVALID_INPUT", `Unknown merge command: ${action ?? ""}`);
-  }
-}
-
-async function compactCommand(
-  action: string | undefined,
-  context: CliContext,
-  args: ParsedArgs,
-  output: CliOutput,
-  json: boolean
-): Promise<CommandResult> {
-  switch (action) {
-    case "analyze": {
-      output.write(
-        formatRecord(
-          await analyzeCompaction(context, {
-            domain: parseCompactDomain(flagValue(args, "domain") ?? "all"),
-            olderThanDays: parseOlderThanDays(flagValue(args, "older-than-days"))
-          }),
-          json
-        )
-      );
-      return { exitCode: 0 };
-    }
-    case "apply": {
-      output.write(
-        formatRecord(
-          await applyCompaction(context, {
-            domain: parseCompactApplyDomain(requiredFlag(args, "domain")),
-            targetId: requiredFlag(args, "target"),
-            planId: requiredFlag(args, "plan"),
-            summary: requiredFlag(args, "summary"),
-            confirm: hasFlag(args, "confirm"),
-            olderThanDays: parseOlderThanDays(flagValue(args, "older-than-days"))
-          }),
-          json
-        )
-      );
-      return { exitCode: 0 };
-    }
-    default:
-      throw new BorealError("BOREAL_INVALID_INPUT", `Unknown compact command: ${action ?? ""}`);
-  }
-}
-
 interface CliAgentDirectiveSubject {
   readonly type: AgentDirectiveSubjectType;
   readonly id: string;
@@ -12971,45 +12862,6 @@ function parseFinishOutcome(value: string | undefined, verdict: VerificationVerd
     return parseOutcome(value);
   }
   return verdict === "passed" ? "passed" : "failed";
-}
-
-function parseDuplicateDomain(value: string): DuplicateDomain {
-  if (value === "all" || value === "work" || value === "raw" || value === "wiki") {
-    return value;
-  }
-  throw new BorealError("BOREAL_INVALID_INPUT", "--domain must be all, work, raw, or wiki");
-}
-
-function parseMergeDomain(value: string): Exclude<DuplicateDomain, "all"> {
-  if (value === "work" || value === "raw" || value === "wiki") {
-    return value;
-  }
-  throw new BorealError("BOREAL_INVALID_INPUT", "--domain must be work, raw, or wiki");
-}
-
-function parseCompactDomain(value: string): CompactDomain {
-  if (value === "all" || value === "work" || value === "wiki") {
-    return value;
-  }
-  throw new BorealError("BOREAL_INVALID_INPUT", "--domain must be all, work, or wiki");
-}
-
-function parseCompactApplyDomain(value: string): Exclude<CompactDomain, "all"> {
-  if (value === "work" || value === "wiki") {
-    return value;
-  }
-  throw new BorealError("BOREAL_INVALID_INPUT", "--domain must be work or wiki");
-}
-
-function parseOlderThanDays(value: string | undefined): number | undefined {
-  if (!value) {
-    return undefined;
-  }
-  const parsed = Number(value);
-  if (!Number.isInteger(parsed) || parsed < 0) {
-    throw new BorealError("BOREAL_INVALID_INPUT", "--older-than-days must be a non-negative integer");
-  }
-  return parsed;
 }
 
 function parseVerdict(value: string | undefined): VerificationVerdict {
