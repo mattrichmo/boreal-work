@@ -26,16 +26,24 @@ export async function prepareNpmPackage(options = {}) {
     throw new Error(`CLI package version ${cliVersion} must match root package version ${version}`);
   }
 
+  const snapshotDistDir = resolve(`${outDir}.dist-${process.pid}-${Date.now()}`);
   await run(process.execPath, [join(repoRoot, "tools", "build-cli-dist.mjs")], {
     cwd: repoRoot,
-    env: { ...process.env, BOREAL_INSTALL_CHANNEL: channel }
+    env: {
+      ...process.env,
+      BOREAL_INSTALL_CHANNEL: channel,
+      BOREAL_BUILD_DIST_SNAPSHOT_DIR: snapshotDistDir
+    }
   });
 
-  const distDir = join(repoRoot, "apps", "cli", "dist");
-  await stat(join(distDir, "index.js"));
+  await stat(join(snapshotDistDir, "index.js"));
   await rm(outDir, { recursive: true, force: true });
   await mkdir(outDir, { recursive: true });
-  await cp(distDir, join(outDir, "dist"), { recursive: true, force: true });
+  try {
+    await cp(snapshotDistDir, join(outDir, "dist"), { recursive: true, force: true });
+  } finally {
+    await rm(snapshotDistDir, { recursive: true, force: true });
+  }
   await cp(join(repoRoot, "README.md"), join(outDir, "README.md"));
 
   const packageJson = {

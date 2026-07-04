@@ -2678,10 +2678,11 @@ function cliNeedsDoctorRecoveryDirective(snapshot: AgentDirectiveSnapshot): bool
     snapshot.sync.operationCount !== undefined &&
     snapshot.sync.warningThreshold !== undefined &&
     snapshot.sync.operationCount >= snapshot.sync.warningThreshold;
-  const generatedArtifactsNeedRefresh = syncNeedsRefresh && !commandSelfRefreshesGeneratedArtifacts;
+  const generatedArtifactsNeedRefresh =
+    syncNeedsRefresh && !commandSelfRefreshesGeneratedArtifacts && recoveryDiagnostics.length > 0;
   const doctorNeedsRecovery =
     !snapshot.doctor.ok &&
-    (generatedArtifactsNeedRefresh || operationNeedsPrune || recoveryDiagnostics.length > 0);
+    (operationNeedsPrune || recoveryDiagnostics.length > 0);
   if (cliCommandEmitsHealthRecovery(snapshot.command.path)) {
     return (
       doctorNeedsRecovery ||
@@ -4336,9 +4337,7 @@ async function agentStartCommand(
     return { exitCode: 0 };
   }
 
-  const handoff = await buildHandoffResult(context, claim.work.meta.id, args, handoffResultLimit, claim.work, {
-    refreshGeneratedArtifacts: true
-  });
+  const handoff = await buildHandoffResult(context, claim.work.meta.id, args, handoffResultLimit, claim.work);
   const result = {
     started: true,
     action: "claimed_work",
@@ -8684,20 +8683,17 @@ async function buildSyncRefreshResult(context: CliContext): Promise<SyncRefreshR
 function shouldRefreshGeneratedArtifactsAfterMutation(definition: CommandDefinition): boolean {
   const behavior = commandBehavior(definition);
   return (
-  INLINE_GENERATED_ARTIFACT_REFRESH_COMMANDS.has(definition.path.join(" ")) &&
+    INLINE_GENERATED_ARTIFACT_REFRESH_COMMANDS.has(definition.path.join(" ")) &&
     behavior.writesState &&
     behavior.writesGeneratedArtifacts
   );
 }
 
-const INLINE_GENERATED_ARTIFACT_REFRESH_COMMANDS = new Set([
-  "agent finish",
-  "evidence add",
-  "sprint close",
-  "summary compose",
-  "work close",
-  "work verify"
-]);
+// Inline refresh after mutations was removed: it rewrote every projection,
+// the full search index, all ledgers, and the sqlite cache on each mutating
+// command (O(all records) per mutation). Artifacts are content-hash stamped;
+// staleness is detected by sync status/doctor and rebuilt by `sync refresh`.
+const INLINE_GENERATED_ARTIFACT_REFRESH_COMMANDS = new Set<string>([]);
 
 async function refreshGeneratedArtifactsInline(context: CliContext) {
   const views = await rebuildProjectionsRespectingTombstones(context);
@@ -9527,10 +9523,10 @@ function syncStatusDiagnostics(syncStatus: SyncStatusResult): readonly AgentDire
     diagnostics.push(syncDiagnostic("vault.health", "warning", "Vault health is not ok", false, syncStatus.recommendedActions));
   }
   if (!syncStatus.ledgers.ok) {
-    diagnostics.push(syncDiagnostic("ledger.status", "warning", "Ledger status is not ok", false, syncStatus.recommendedActions));
+    diagnostics.push(syncDiagnostic("ledger.status", "info", "Ledger status is not ok", false, syncStatus.recommendedActions));
   }
   if (!syncStatus.searchIndex.ok) {
-    diagnostics.push(syncDiagnostic("search.index", "warning", "Search index is not fresh", false, syncStatus.recommendedActions));
+    diagnostics.push(syncDiagnostic("search.index", "info", "Search index is not fresh", false, syncStatus.recommendedActions));
   }
   for (const finding of syncStatus.git.findings) {
     if (finding.severity === "info" && !finding.blocking && finding.recommendedActions.length === 0) {
@@ -9634,7 +9630,8 @@ function cliHealthRecoveryNeeded(
   const actionableSyncDiagnostics = emitsHealthRecovery
     ? syncDiagnostics
     : syncDiagnostics.filter((diagnostic) => !isCloseoutHealthDiagnostic(diagnostic.code));
-  if (actionableSyncDiagnostics.length > 0 && !commandSelfRefreshesGeneratedArtifacts(command, syncDiagnostics)) {
+  const attentionSyncDiagnostics = actionableSyncDiagnostics.filter(directiveDiagnosticNeedsAttention);
+  if (attentionSyncDiagnostics.length > 0 && !commandSelfRefreshesGeneratedArtifacts(command, syncDiagnostics)) {
     return true;
   }
   if (doctor) {
@@ -9645,7 +9642,7 @@ function cliHealthRecoveryNeeded(
       actionableDoctorDiagnostics.some(doctorDiagnosticNeedsAttention);
   }
   if (command === "doctor" || command.startsWith("sync ") || command.startsWith("lock ")) {
-    return syncDiagnostics.length > 0;
+    return syncDiagnostics.some(directiveDiagnosticNeedsAttention);
   }
   return false;
 }
@@ -9660,6 +9657,7 @@ function commandSelfRefreshesGeneratedArtifacts(
   }
   const behavior = commandBehavior(definition);
   return (
+    INLINE_GENERATED_ARTIFACT_REFRESH_COMMANDS.has(command) &&
     behavior.writesState &&
     behavior.writesGeneratedArtifacts &&
     syncDiagnostics.length > 0 &&
@@ -9669,6 +9667,10 @@ function commandSelfRefreshesGeneratedArtifacts(
 
 function doctorDiagnosticNeedsAttention(diagnostic: Diagnostic): boolean {
   return diagnostic.severity === "error" || strictBlockingWarning(diagnostic);
+}
+
+function directiveDiagnosticNeedsAttention(diagnostic: AgentDirectiveDiagnosticSnapshot): boolean {
+  return diagnostic.severity === "warning" || diagnostic.severity === "error" || diagnostic.blocking;
 }
 
 function cliDirectiveCommandPath(args: ParsedArgs): string {
@@ -11871,7 +11873,6 @@ async function sprintCloseAutoReportResult(
     summary: "Sprint close auto-report sync refresh passed.",
     command: "bwrk sync refresh --json"
   });
-  await refreshGeneratedArtifactsInline(context);
 
   const doctor = await runDoctor(context, false, strict);
   if (!doctor.ok) {
@@ -13856,17 +13857,10 @@ async function buildHandoffResult(
   workId: WorkId,
   args: ParsedArgs,
   resultLimit: number,
-  fallbackWork?: WorkItem,
-  options: { readonly refreshGeneratedArtifacts?: boolean } = {}
+  fallbackWork?: WorkItem
 ): Promise<HandoffResult> {
   try {
-    if (options.refreshGeneratedArtifacts) {
-      await refreshGeneratedArtifactsInline(context);
-    }
     const bundle = await buildHandoffBundle(context, workId, args, resultLimit);
-    if (options.refreshGeneratedArtifacts) {
-      await refreshGeneratedArtifactsInline(context);
-    }
     return {
       handoffComplete: true,
       warnings: [],

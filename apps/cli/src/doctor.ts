@@ -52,7 +52,7 @@ import { dirtyPathNotesHaveReasonCode } from "./summary-policy.js";
 import { inspectVault, listVaultRawSources, listVaultWikiPages, type RawSourceRecord, type WikiPageRecord } from "./vault.js";
 import { getVersionInfo, type VersionIdentity } from "./version.js";
 
-export type DiagnosticSeverity = "ok" | "warning" | "error" | "fixed";
+export type DiagnosticSeverity = "ok" | "info" | "warning" | "error" | "fixed";
 
 export interface Diagnostic {
   readonly code: string;
@@ -170,7 +170,7 @@ export async function runDoctor(context: CliContext, fix: boolean, strict = fals
       const ledgers = await ledgerStatus(context, undefined);
       diagnostics.push({
         code: "ledger.export_drift",
-        severity: ledgers.exists && !ledgers.ok ? "warning" : "ok",
+        severity: ledgers.exists && !ledgers.ok ? generatedArtifactDiagnosticSeverity(ledgers) : "ok",
         message: ledgerDriftMessage(ledgers),
         details:
           ledgers.exists && !ledgers.ok
@@ -187,7 +187,7 @@ export async function runDoctor(context: CliContext, fix: boolean, strict = fals
       });
       diagnostics.push({
         code: "cache.sqlite",
-        severity: sqliteCache.exists && !sqliteCache.ok ? "warning" : "ok",
+        severity: sqliteCache.exists && !sqliteCache.ok ? generatedArtifactDiagnosticSeverity(sqliteCache) : "ok",
         message: sqliteCacheMessage(sqliteCache),
         details:
           sqliteCache.exists && !sqliteCache.ok
@@ -953,6 +953,10 @@ function projectSetupRepairs(
   return inspection.repairs.filter((repair) => allowed.has(repair.kind));
 }
 
+function generatedArtifactDiagnosticSeverity(status: { readonly error?: string }): DiagnosticSeverity {
+  return status.error ? "warning" : "info";
+}
+
 async function validateSearchIndex(
   context: CliContext,
   fix: boolean
@@ -982,7 +986,7 @@ async function validateSearchIndex(
         diagnostics: [
           {
             code: "search.index",
-            severity: "warning",
+            severity: generatedArtifactDiagnosticSeverity(inspection),
             message: searchIndexDiagnosticMessage(inspection),
             details: inspection
           }

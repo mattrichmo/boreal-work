@@ -4645,7 +4645,7 @@ describe("bwrk cli", () => {
     );
   });
 
-  it("refreshes generated artifacts inline for closeout mutating commands", async () => {
+  it("leaves generated artifacts stale for closeout mutating commands until sync refresh", async () => {
     const rootDir = await makeTempWorkspace();
 
     await initGitRepository(rootDir, "main");
@@ -4669,6 +4669,7 @@ describe("bwrk cli", () => {
       "--json"
     ]);
     expectNoDoctorRecoveryDirective(started);
+    await runCli(rootDir, ["sync", "refresh", "--json"]);
     await expectSyncStatusOk(rootDir);
 
     const evidenceRun = await runCli(rootDir, [
@@ -4685,6 +4686,8 @@ describe("bwrk cli", () => {
     ]);
     expectNoDoctorRecoveryDirective(evidenceRun);
     const evidence = parseData<{ readonly meta: { readonly id: string } }>(evidenceRun.stdout);
+    await expectSyncStatusNeedsRefresh(rootDir);
+    await runCli(rootDir, ["sync", "refresh", "--json"]);
     await expectSyncStatusOk(rootDir);
 
     const verified = await runCli(rootDir, [
@@ -4700,6 +4703,8 @@ describe("bwrk cli", () => {
       "--json"
     ]);
     expectNoDoctorRecoveryDirective(verified);
+    await expectSyncStatusNeedsRefresh(rootDir);
+    await runCli(rootDir, ["sync", "refresh", "--json"]);
     await expectSyncStatusOk(rootDir);
 
     const summarized = await runCli(rootDir, [
@@ -4715,6 +4720,8 @@ describe("bwrk cli", () => {
       "--json"
     ]);
     expectNoDoctorRecoveryDirective(summarized);
+    await expectSyncStatusNeedsRefresh(rootDir);
+    await runCli(rootDir, ["sync", "refresh", "--json"]);
     await expectSyncStatusOk(rootDir);
 
     const closed = await runCli(rootDir, [
@@ -4728,6 +4735,8 @@ describe("bwrk cli", () => {
       "--json"
     ]);
     expectNoDoctorRecoveryDirective(closed);
+    await expectSyncStatusNeedsRefresh(rootDir);
+    await runCli(rootDir, ["sync", "refresh", "--json"]);
     await expectSyncStatusOk(rootDir);
   });
 
@@ -5307,7 +5316,7 @@ describe("bwrk cli", () => {
     const repairedPayload = parseData<{ readonly ok: boolean; readonly fixed: boolean }>(repaired.stdout);
     expect(repaired.exitCode).toBe(0);
     expect(repairedPayload.ok).toBe(true);
-    expect(repairedPayload.fixed).toBe(false);
+    expect(repairedPayload.fixed).toBe(true);
 
     const doctor = await runCli(rootDir, ["doctor", "--json"]);
     expect(doctor.exitCode).toBe(0);
@@ -6688,7 +6697,7 @@ describe("bwrk cli", () => {
     }>(finishedClosed.stdout);
 
     expectNoDoctorRecoveryDirective(finishedClosed);
-    await expectSyncStatusOk(rootDir);
+    await expectSyncStatusNeedsRefresh(rootDir);
     expect(finishedClosed.exitCode).toBe(0);
     expect(closedPayload.finished).toBe(true);
     expect(closedPayload.action).toBe("verified_and_closed");
@@ -6744,7 +6753,7 @@ describe("bwrk cli", () => {
     }>(finishedReleased.stdout);
 
     expectNoDoctorRecoveryDirective(finishedReleased);
-    await expectSyncStatusOk(rootDir);
+    await expectSyncStatusNeedsRefresh(rootDir);
     expect(finishedReleased.exitCode).toBe(0);
     expect(releasedPayload.action).toBe("verified_and_released");
     expect(releasedPayload.work.status).toBe("needs_verification");
@@ -6856,7 +6865,7 @@ describe("bwrk cli", () => {
     }>(finished.stdout);
 
     expectNoDoctorRecoveryDirective(finished);
-    await expectSyncStatusOk(rootDir);
+    await expectSyncStatusNeedsRefresh(rootDir);
     expect(finished.exitCode).toBe(0);
     expect(payload).toEqual(expect.objectContaining({ finished: true, action: "verified_and_closed" }));
     expect(payload.work).toEqual(expect.objectContaining({ id: work.meta.id, status: "closed" }));
@@ -8094,7 +8103,7 @@ describe("bwrk cli", () => {
     expect(doctorDiagnostic(stalePayload, "cache.sqlite")).toEqual(
       expect.objectContaining({
         code: "cache.sqlite",
-        severity: "warning",
+        severity: "info",
         message: "SQLite generated cache differs from current runtime state",
         details: expect.objectContaining({
           stale: true,
@@ -8273,7 +8282,7 @@ describe("bwrk cli", () => {
         ok: false,
         vault: expect.objectContaining({ ok: true }),
         ledgers: expect.objectContaining({ ok: true }),
-        searchIndex: expect.objectContaining({ ok: false, exists: true, stale: true }),
+        searchIndex: expect.objectContaining({ ok: false, exists: false, stale: true }),
         recommendedActions: ["bwrk sync refresh --json"]
       })
     );
@@ -8523,7 +8532,7 @@ describe("bwrk cli", () => {
       expect.arrayContaining([
         expect.objectContaining({
           code: "ledger.export_drift",
-          severity: "warning",
+          severity: "info",
           details: expect.objectContaining({ repairCommand: "bwrk sync refresh --json" })
         }),
         expect.objectContaining({
@@ -11588,6 +11597,18 @@ async function expectSyncStatusOk(rootDir: string): Promise<void> {
   expect(status.ok).toBe(true);
   expect(status.ledgers.ok).toBe(true);
   expect(status.searchIndex.ok).toBe(true);
+}
+
+async function expectSyncStatusNeedsRefresh(rootDir: string): Promise<void> {
+  const status = parseData<{
+    readonly ok: boolean;
+    readonly ledgers: { readonly ok: boolean };
+    readonly searchIndex: { readonly ok: boolean };
+    readonly recommendedActions: readonly string[];
+  }>((await runCli(rootDir, ["sync", "status", "--json"])).stdout);
+  expect(status.ok).toBe(false);
+  expect(status.ledgers.ok || status.searchIndex.ok).toBe(false);
+  expect(status.recommendedActions).toContain("bwrk sync refresh --json");
 }
 
 function projectMemoryGuardCount(text: string): number {

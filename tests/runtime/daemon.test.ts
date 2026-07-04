@@ -115,10 +115,7 @@ describe("boreal daemon runtime", () => {
     expect(watch.status.locks.runtime.status).toBe("active");
     expect(watch.status.watch.writesTruth).toBe(false);
     expect(watch.status.watch.repairsAreCommandMediated).toBe(true);
-    expect(watch.status.directiveObligations.summary.emittedRegistryIds).toEqual([
-      "doctor.recovery-required",
-      "workflow_next.canonical-next-step"
-    ]);
+    expect(watch.status.directiveObligations.summary.emittedRegistryIds).toEqual(["workflow_next.canonical-next-step"]);
   });
 
   it("observes bounded project paths when the project and locks are healthy", async () => {
