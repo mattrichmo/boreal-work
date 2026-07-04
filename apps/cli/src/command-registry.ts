@@ -391,7 +391,7 @@ export const COMMAND_DEFINITIONS: readonly CommandDefinition[] = [
     category: "agent",
     summary: "Alias for starting or resuming agent work.",
     usage:
-      "bwrk start [work-ref] [--agent <agent-id>] [--label <label>...] [--container <work-ref>] [--purpose <text>] [--expires-at <iso>|--ttl <duration>] [--query <text>] [--limit <n>] [--json]",
+      "bwrk start [work-ref] [--agent <agent-id>] [--label <label>...] [--container <work-ref>] [--purpose <text>] [--expires-at <iso>|--ttl <duration>] [--query <text>] [--limit <n>] [--no-branch] [--json]",
     description: "Golden-path alias for `bwrk agent start` with the same JSON output contract.",
     flags: [
       flag("agent", "value", "Agent identifier. Defaults to the CLI actor."),
@@ -402,6 +402,7 @@ export const COMMAND_DEFINITIONS: readonly CommandDefinition[] = [
       flag("ttl", "value", "Relative reservation duration for a new claim, for example 30m, 2h, or 1d."),
       flag("query", "value", "Optional handoff search query. Defaults to the selected work context."),
       flag("limit", "value", "Maximum number of handoff search results. Defaults to 8, max 50."),
+      flag("no-branch", "boolean", "Skip automatic git branch switching and reservation branch recording."),
     ],
     positionals: { label: "work reference", min: 0, max: 1 },
     requiresWorkspace: true,
@@ -1114,7 +1115,7 @@ export const COMMAND_DEFINITIONS: readonly CommandDefinition[] = [
     category: "work",
     summary: "Atomically claim next or specified ready work.",
     usage:
-      "bwrk work claim [work-ref] [--start] [--label <label>...] [--container <work-ref>] [--agent <agent-id>] [--purpose <text>] [--expires-at <iso>|--ttl <duration>] [--query <text>] [--limit <n>] [--json]",
+      "bwrk work claim [work-ref] [--start] [--label <label>...] [--container <work-ref>] [--agent <agent-id>] [--purpose <text>] [--expires-at <iso>|--ttl <duration>] [--query <text>] [--limit <n>] [--no-branch] [--json]",
     description:
       "Finds the next live ready work item or claims the specified ready work item, reserves it in one runtime write, refreshes context/search projections, and returns a handoff bundle.",
     flags: [
@@ -1127,6 +1128,7 @@ export const COMMAND_DEFINITIONS: readonly CommandDefinition[] = [
       flag("ttl", "value", "Relative reservation duration, for example 30m, 2h, or 1d."),
       flag("query", "value", "Optional handoff search query. Defaults to the claimed work context."),
       flag("limit", "value", "Maximum number of handoff search results. Defaults to 8, max 50."),
+      flag("no-branch", "boolean", "Skip automatic git branch switching and reservation branch recording."),
     ],
     positionals: { label: "work reference", min: 0, max: 1 },
     requiresWorkspace: true,
@@ -1721,7 +1723,7 @@ export const COMMAND_DEFINITIONS: readonly CommandDefinition[] = [
     category: "agent",
     summary: "Start or resume safe agent work.",
     usage:
-      "bwrk agent start [work-ref] [--agent <agent-id>] [--label <label>...] [--container <work-ref>] [--purpose <text>] [--expires-at <iso>|--ttl <duration>] [--query <text>] [--limit <n>] [--json]",
+      "bwrk agent start [work-ref] [--agent <agent-id>] [--label <label>...] [--container <work-ref>] [--purpose <text>] [--expires-at <iso>|--ttl <duration>] [--query <text>] [--limit <n>] [--no-branch] [--json]",
     description:
       "Preflights reservation state, blocks on stale active reservations, resumes existing active work, or atomically claims ready or exact work and returns a handoff bundle.",
     flags: [
@@ -1733,6 +1735,7 @@ export const COMMAND_DEFINITIONS: readonly CommandDefinition[] = [
       flag("ttl", "value", "Relative reservation duration for a new claim, for example 30m, 2h, or 1d."),
       flag("query", "value", "Optional handoff search query. Defaults to the selected work context."),
       flag("limit", "value", "Maximum number of handoff search results. Defaults to 8, max 50."),
+      flag("no-branch", "boolean", "Skip automatic git branch switching and reservation branch recording."),
     ],
     positionals: { label: "work reference", min: 0, max: 1 },
     requiresWorkspace: true,

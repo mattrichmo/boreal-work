@@ -590,6 +590,16 @@ export function agentReservationSchemaIssues(value: unknown, path = "$"): readon
   if (value.purpose !== undefined) {
     issues.push(...stringIssue(value.purpose, `${path}.purpose`, schemaId));
   }
+  if (value.git !== undefined) {
+    if (!isRecord(value.git)) {
+      issues.push(issue(schemaId, `${path}.git`, "must be an object"));
+    } else {
+      issues.push(
+        ...nonEmptyStringIssue(value.git.branch, `${path}.git.branch`, schemaId),
+        ...patternStringIssue(value.git.baseSha, `${path}.git.baseSha`, schemaId, /^[a-f0-9]{40,64}$/)
+      );
+    }
+  }
 
   return issues;
 }

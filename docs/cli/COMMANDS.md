@@ -332,7 +332,7 @@ Prints stable Boreal CLI package and runtime version information. `bwrk --versio
 ## `start`
 
 ```bash
-bwrk start [work-ref] [--agent <agent-id>] [--label <label>...] [--container <work-ref>] [--purpose <text>] [--expires-at <iso>|--ttl <duration>] [--query <text>] [--limit <n>] [--json]
+bwrk start [work-ref] [--agent <agent-id>] [--label <label>...] [--container <work-ref>] [--purpose <text>] [--expires-at <iso>|--ttl <duration>] [--query <text>] [--limit <n>] [--no-branch] [--json]
 ```
 
 Golden-path alias for `bwrk agent start`. With no work reference it resumes the selected agent's active work before claiming another ready item; with `work-ref` it starts or claims that exact work item. It returns the same JSON contract as `agent start`.
@@ -921,7 +921,7 @@ bwrk work reserve <work-id> --expires-at 2026-06-25T22:00:00.000Z
 ## `work claim`
 
 ```bash
-bwrk work claim [work-ref] [--start] [--label <label>...] [--container <work-ref>] [--agent <agent-id>] [--purpose <text>] [--expires-at <iso>|--ttl <duration>] [--query <text>] [--limit <n>] [--json]
+bwrk work claim [work-ref] [--start] [--label <label>...] [--container <work-ref>] [--agent <agent-id>] [--purpose <text>] [--expires-at <iso>|--ttl <duration>] [--query <text>] [--limit <n>] [--no-branch] [--json]
 ```
 
 Atomically finds the next live ready work item, or claims the specified ready work item, reserves it for the agent, rebuilds context-pack projections, rebuilds the local search index, and returns a handoff bundle.
@@ -1055,7 +1055,7 @@ Behavior:
 ## `agent start`
 
 ```bash
-bwrk agent start [work-ref] [--agent <agent-id>] [--label <label>...] [--container <work-ref>] [--purpose <text>] [--expires-at <iso>|--ttl <duration>] [--query <text>] [--limit <n>] [--json]
+bwrk agent start [work-ref] [--agent <agent-id>] [--label <label>...] [--container <work-ref>] [--purpose <text>] [--expires-at <iso>|--ttl <duration>] [--query <text>] [--limit <n>] [--no-branch] [--json]
 ```
 
 Safe entrypoint for an agent before it starts work:

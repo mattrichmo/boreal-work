@@ -1,6 +1,5 @@
-import { execFile } from "node:child_process";
-
 import type { CliContext } from "./context.js";
+import { isMissingGit, runGit } from "./git-exec.js";
 
 const DEFAULT_PROTECTED_BRANCHES = ["main", "master", "trunk"] as const;
 const COLLABORATION_PATHS = [
@@ -295,34 +294,4 @@ function shellPath(path: string): string {
 
 function uniqueStrings(values: readonly string[]): readonly string[] {
   return [...new Set(values)];
-}
-
-interface GitResult {
-  readonly ok: boolean;
-  readonly stdout: string;
-  readonly stderr: string;
-  readonly error?: string;
-  readonly code?: string | number;
-}
-
-function runGit(cwd: string, args: readonly string[]): Promise<GitResult> {
-  return new Promise((resolve) => {
-    execFile("git", ["-C", cwd, ...args], { maxBuffer: 5 * 1024 * 1024 }, (error, stdout, stderr) => {
-      if (error) {
-        resolve({
-          ok: false,
-          stdout,
-          stderr,
-          error: stderr.trim() || error.message,
-          code: "code" in error && error.code !== null ? error.code : undefined
-        });
-        return;
-      }
-      resolve({ ok: true, stdout, stderr });
-    });
-  });
-}
-
-function isMissingGit(result: GitResult): boolean {
-  return result.code === "ENOENT";
 }

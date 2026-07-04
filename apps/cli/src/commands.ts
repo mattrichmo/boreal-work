@@ -180,6 +180,8 @@ import {
 import { assertInitialized, createCliContext, ensureWorkspaceDirs, isGlobalContext, type CliContext } from "./context.js";
 import { keyValueRows, resultSummary, section, withPromptSession, type CliSelectOption } from "./cli-ui.js";
 import { applyManualMerge, buildManualMergePlan, scanDuplicates, type DuplicateDomain } from "./duplicates.js";
+import { workBranchName } from "./git-branch.js";
+import { isMissingGit, runGit } from "./git-exec.js";
 import { inspectGitWorktree, type GitWorktreeInspection } from "./git-worktree.js";
 import {
   inspectBorealInstallStatus,
@@ -4350,6 +4352,7 @@ async function agentStartCommand(
     return { exitCode: 0 };
   }
 
+  const branchResult = await attachGitBranchForClaim(context, args, claim);
   const handoff = await buildHandoffResult(context, claim.work.meta.id, args, handoffResultLimit, claim.work);
   const result = {
     started: true,
@@ -4357,8 +4360,9 @@ async function agentStartCommand(
     agentId,
     labels,
     status: await buildAgentStatus(context, agentId, labels),
-    reservation: claim.reservation,
+    reservation: branchResult.reservation,
     releasedReservations: claim.releasedReservations,
+    ...(branchResult.gitBranch ? { gitBranch: branchResult.gitBranch } : {}),
     postMutationWork: handoff.work,
     ...handoff
   } satisfies AgentStartResult;
@@ -5739,6 +5743,93 @@ async function claimExactWork(
   });
 }
 
+type ClaimResult = Awaited<ReturnType<CliContext["runtime"]["claimWork"]>>;
+
+type GitBranchAttachment =
+  | {
+      readonly status: "recorded";
+      readonly branch: string;
+      readonly baseSha: string;
+    }
+  | {
+      readonly status: "skipped";
+      readonly reason: "git_unavailable" | "not_git_repository" | "detached_head" | "head_unavailable";
+    };
+
+async function attachGitBranchForClaim(
+  context: CliContext,
+  args: ParsedArgs,
+  claim: ClaimResult
+): Promise<{ readonly reservation: AgentReservation; readonly gitBranch?: GitBranchAttachment }> {
+  if (hasFlag(args, "no-branch")) {
+    return { reservation: claim.reservation };
+  }
+
+  const root = await runGit(context.workspaceRoot, ["rev-parse", "--show-toplevel"]);
+  if (!root.ok) {
+    return {
+      reservation: claim.reservation,
+      gitBranch: {
+        status: "skipped",
+        reason: isMissingGit(root) ? "git_unavailable" : "not_git_repository"
+      }
+    };
+  }
+
+  const currentBranch = await runGit(context.workspaceRoot, ["symbolic-ref", "--quiet", "--short", "HEAD"]);
+  if (!currentBranch.ok || currentBranch.stdout.trim().length === 0) {
+    return {
+      reservation: claim.reservation,
+      gitBranch: {
+        status: "skipped",
+        reason: "detached_head"
+      }
+    };
+  }
+
+  const targetBranch = workBranchName(claim.work);
+  if (currentBranch.stdout.trim() !== targetBranch) {
+    const existing = await runGit(context.workspaceRoot, ["show-ref", "--verify", "--quiet", `refs/heads/${targetBranch}`]);
+    const switched = existing.ok
+      ? await runGit(context.workspaceRoot, ["switch", targetBranch])
+      : await runGit(context.workspaceRoot, ["switch", "-c", targetBranch]);
+    if (!switched.ok) {
+      throw new BorealError("BOREAL_CONFLICT", "Unable to switch to work branch", {
+        branch: targetBranch,
+        stderr: switched.stderr.trim(),
+        error: switched.error
+      });
+    }
+  }
+
+  const head = await runGit(context.workspaceRoot, ["rev-parse", "HEAD"]);
+  if (!head.ok || head.stdout.trim().length === 0) {
+    return {
+      reservation: claim.reservation,
+      gitBranch: {
+        status: "skipped",
+        reason: "head_unavailable"
+      }
+    };
+  }
+
+  const git = {
+    branch: targetBranch,
+    baseSha: head.stdout.trim()
+  };
+  const reservation = await context.runtime.attachReservationGit({
+    reservationId: claim.reservation.meta.id,
+    git
+  });
+  return {
+    reservation,
+    gitBranch: {
+      status: "recorded",
+      ...git
+    }
+  };
+}
+
 async function assertExactClaimMatchesFilters(
   context: CliContext,
   workId: WorkId,
@@ -6030,7 +6121,10 @@ async function workCommand(
         }
       }
       const view = await context.runtime.getWorkView(workId);
-      const viewWithGaps = json ? { ...view, gaps: (await closeoutGateStatusForWork(context, workId)).gaps } : view;
+      const reservation = view.activeReservationId ? await context.store.read((reader) => reader.getReservation(view.activeReservationId as ReservationId)) : undefined;
+      const viewWithGaps = json
+        ? { ...view, ...(reservation ? { reservation } : {}), gaps: (await closeoutGateStatusForWork(context, workId)).gaps }
+        : view;
       output.write(await formatRecordWithAgentDirectives(context, args, viewWithGaps, json, { subjectWorkId: workId }));
       return { exitCode: 0 };
     }
@@ -6099,12 +6193,14 @@ async function workCommand(
         return { exitCode: 0 };
       }
 
+      const branchResult = await attachGitBranchForClaim(context, args, claim);
       const handoff = await buildHandoffResult(context, claim.work.meta.id, args, handoffResultLimit, claim.work);
       const result = {
         claimed: true,
         work: handoff.work,
-        reservation: claim.reservation,
+        reservation: branchResult.reservation,
         releasedReservations: claim.releasedReservations,
+        ...(branchResult.gitBranch ? { gitBranch: branchResult.gitBranch } : {}),
         postMutationWork: handoff.work,
         ...handoff
       };

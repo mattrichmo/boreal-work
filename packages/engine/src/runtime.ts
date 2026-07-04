@@ -36,6 +36,7 @@ import {
   type KnowledgeSourceId,
   type OperationId,
   type ProjectionId,
+  type ReservationId,
   type RuntimeEvent,
   type RuntimePolicy,
   type VerificationId,
@@ -105,6 +106,11 @@ export interface ClaimNextWorkResult {
 export interface ReservationLifecycleResult {
   readonly work: WorkItem;
   readonly reservation: AgentReservation;
+}
+
+export interface ReservationGitAttachmentInput {
+  readonly reservationId: ReservationId;
+  readonly git: NonNullable<AgentReservation["git"]>;
 }
 
 export interface ExpireReservationsResult {
@@ -235,6 +241,7 @@ export interface BorealRuntime {
     readonly force?: boolean;
     readonly forceReason?: string;
   }): Promise<WorkItem>;
+  attachReservationGit(input: ReservationGitAttachmentInput): Promise<AgentReservation>;
   releaseWorkReservation(workId: WorkId): Promise<ReservationLifecycleResult>;
   renewWorkReservation(input: {
     readonly workId: WorkId;
@@ -585,6 +592,32 @@ export function createBorealRuntime(options: BorealRuntimeOptions = {}): BorealR
           forceReason: input.forceReason
         });
         return reservationResult.work;
+      });
+    },
+
+    async attachReservationGit(input): Promise<AgentReservation> {
+      return store.write(async (writer) => {
+        const reservation = await writer.getReservation(input.reservationId);
+        if (!reservation) {
+          throw new BorealError("BOREAL_NOT_FOUND", "Reservation not found", {
+            reservationId: input.reservationId
+          });
+        }
+        const updated = touchRecord(
+          {
+            ...reservation,
+            git: input.git
+          },
+          now(),
+          actor
+        );
+        await writer.putReservation(updated);
+        await appendEvent(writer, "work.reservation_git_attached", reservation.workId, "work", {
+          reservationId: reservation.meta.id,
+          branch: input.git.branch,
+          baseSha: input.git.baseSha
+        });
+        return updated;
       });
     },
 

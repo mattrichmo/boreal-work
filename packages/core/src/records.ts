@@ -312,6 +312,10 @@ export interface AgentReservation {
   readonly reservedAt: IsoTimestamp;
   readonly expiresAt?: IsoTimestamp;
   readonly purpose?: string;
+  readonly git?: {
+    readonly branch: string;
+    readonly baseSha: string;
+  };
 }
 
 export interface RuntimeEvent {

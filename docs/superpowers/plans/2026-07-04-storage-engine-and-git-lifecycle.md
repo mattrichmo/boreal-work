@@ -725,7 +725,7 @@ it("same input always yields same branch", () => { /* call twice, expect equal *
 - Consumes: `workBranchName` (Task 13); `runGit` pattern from `apps/cli/src/git-worktree.ts:301` (extract `runGit` to a shared `apps/cli/src/git-exec.ts` and re-export — do this as the first step of this task).
 - Produces: on claim, when the workspace is a git repo and not detached: compute `branch = workBranchName(work)`; if HEAD is already on it, record it; else `git switch -c <branch>` (or `git switch <branch>` if it exists); record `{ branch, baseSha: rev-parse HEAD }` on the reservation via a new runtime method `attachReservationGit(reservationId, git)` (a thin `store.write` that re-puts the reservation — additive to `BorealRuntime`). Behavior is **opt-out** via `--no-branch` flag and skipped with an `info` note when git is unavailable (keep non-git workspaces working).
 
-- [ ] **Step 1: Failing test**
+- [x] **Step 1: Failing test**
 
 ```ts
 it("claim creates and records the work branch", async () => {
@@ -744,9 +744,9 @@ it("claim with --no-branch skips git entirely", async () => { /* HEAD unchanged,
 it("claim in a non-git directory succeeds with a finding, not an error", async () => { /* ... */ });
 ```
 
-- [ ] **Step 2: Implement** (extract `git-exec.ts`; extend record + validator; wire the command handler; surface the branch in `work show` output).
+- [x] **Step 2: Implement** (extract `git-exec.ts`; extend record + validator; wire the command handler; surface the branch in `work show` output).
 
-- [ ] **Step 3: Run tests + suite, commit** `feat: claim mints/records deterministic work branch on reservation`.
+- [x] **Step 3: Run tests + suite, commit** `feat: claim mints/records deterministic work branch on reservation`.
 
 ### Task 15: Finish gate verifies branch + checkpoint
 
