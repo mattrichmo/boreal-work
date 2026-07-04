@@ -802,9 +802,9 @@ it("stamps branch and head sha on the closed work item", async () => {
 - Modify: throw sites in `packages/engine/src/runtime.ts` and `apps/cli/src/*.ts` — find them: `grep -rn 'BOREAL_NOT_FOUND' packages apps/cli/src | grep -v test`
 - Test: extend existing `tests/runtime/core.test.ts`
 
-- [ ] **Step 1: Failing test** — `classifyBorealError("BOREAL_NOT_FOUND", { domain: "evidence" })` returns the evidence recovery summary even when no `evidenceId` field is present.
-- [ ] **Step 2: Add `domain: "work" | "evidence" | "summary" | "workflow" | "lock"` to the `details` object at each `BOREAL_NOT_FOUND` / `BOREAL_POLICY_VIOLATION` throw site (mechanical; ~25 sites). Keep the sniffing heuristics as fallback for old spooled results; add a comment marking them deprecated.**
-- [ ] **Step 3: Run suite, commit** `refactor: declare error domain at throw sites`.
+- [x] **Step 1: Failing test** — `classifyBorealError("BOREAL_NOT_FOUND", { domain: "evidence" })` returns the evidence recovery summary even when no `evidenceId` field is present.
+- [x] **Step 2: Add `domain: "work" | "evidence" | "summary" | "workflow" | "lock"` to the `details` object at each `BOREAL_NOT_FOUND` / `BOREAL_POLICY_VIOLATION` throw site (mechanical; ~25 sites). Keep the sniffing heuristics as fallback for old spooled results; add a comment marking them deprecated.**
+- [x] **Step 3: Run suite, commit** `refactor: declare error domain at throw sites`.
 
 ### Task 18: Split `commands.ts` by command group
 

@@ -196,11 +196,17 @@ async function applyWorkMerge(context: CliContext, plan: DuplicateMergePlan): Pr
     const survivor = await writer.getWorkItem(plan.survivorId as WorkId);
     const duplicates = await Promise.all(plan.duplicateIds.map((duplicateId) => writer.getWorkItem(duplicateId as WorkId)));
     if (!survivor) {
-      throw new BorealError("BOREAL_NOT_FOUND", "Merge survivor work item not found", { survivorId: plan.survivorId });
+      throw new BorealError("BOREAL_NOT_FOUND", "Merge survivor work item not found", {
+        survivorId: plan.survivorId,
+        domain: "work"
+      });
     }
     const missing = plan.duplicateIds.filter((_, index) => duplicates[index] === undefined);
     if (missing.length > 0) {
-      throw new BorealError("BOREAL_NOT_FOUND", "Merge duplicate work item not found", { duplicateIds: missing });
+      throw new BorealError("BOREAL_NOT_FOUND", "Merge duplicate work item not found", {
+        duplicateIds: missing,
+        domain: "work"
+      });
     }
     const duplicateWork = duplicates.filter(isWorkItem);
     const active = duplicateWork.filter((work) => work.reservationId || work.status === "reserved" || work.status === "in_progress");
@@ -300,6 +306,7 @@ async function assertVaultRecordsExist(context: CliContext, plan: DuplicateMerge
   if (missing.length > 0) {
     throw new BorealError("BOREAL_NOT_FOUND", "Merge records were not found in the memory vault", {
       domain: plan.domain,
+      recordDomain: "work",
       missing
     });
   }

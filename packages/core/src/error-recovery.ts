@@ -136,6 +136,8 @@ function notFoundDomain(details: unknown): NotFoundDomain | undefined {
   if (!record) {
     return undefined;
   }
+  // Deprecated fallback for old spooled results and legacy throw sites that
+  // predate explicit `details.domain` declarations.
   if (hasAnyField(record, ["workflowId", "workflowRef", "workflowRefs", "recoveryWorkflow", "normalizedRef", "didYouMean"])) {
     return "workflow";
   }

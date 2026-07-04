@@ -166,7 +166,8 @@ export async function getWorkflowAsset(ref: string, options: WorkflowAssetRootOp
   throw new BorealError("BOREAL_NOT_FOUND", "Workflow not found", {
     ref,
     normalizedRef,
-    didYouMean: nearestWorkflowReferences(normalizedRef, workflows)
+    didYouMean: nearestWorkflowReferences(normalizedRef, workflows),
+    domain: "workflow"
   });
 }
 

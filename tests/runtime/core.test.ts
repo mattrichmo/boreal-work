@@ -177,6 +177,13 @@ describe("core hashing and ids", () => {
     }
   });
 
+  it("uses explicit not-found domains before field-name inference", () => {
+    const recovery = classifyBorealError("BOREAL_NOT_FOUND", { domain: "evidence" }).recovery.summary;
+
+    expect(recovery).toContain("evidence record");
+    expect(recovery).not.toContain("work item or queue");
+  });
+
   it("keeps terminal work recovery text ahead of domain inference", () => {
     const recovery = classifyBorealError("BOREAL_NOT_FOUND", {
       workId: "bw_work_0123456789abcdef",

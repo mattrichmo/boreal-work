@@ -413,7 +413,8 @@ export function createBorealRuntime(options: BorealRuntimeOptions = {}): BorealR
         if (matchingEdges.length === 0) {
           throw new BorealError("BOREAL_NOT_FOUND", "Blocking dependency not found", {
             blockedWorkId: blockedWork.meta.id,
-            blockingWorkId: blockingWork.meta.id
+            blockingWorkId: blockingWork.meta.id,
+            domain: "work"
           });
         }
         if (matchingEdges.length > 1) {
@@ -601,7 +602,8 @@ export function createBorealRuntime(options: BorealRuntimeOptions = {}): BorealR
         const reservation = await writer.getReservation(input.reservationId);
         if (!reservation) {
           throw new BorealError("BOREAL_NOT_FOUND", "Reservation not found", {
-            reservationId: input.reservationId
+            reservationId: input.reservationId,
+            domain: "work"
           });
         }
         const updated = touchRecord(
@@ -768,7 +770,8 @@ export function createBorealRuntime(options: BorealRuntimeOptions = {}): BorealR
                 workId: work.meta.id,
                 reservationId: reservation.meta.id,
                 agentId: reservation.agentId,
-                gaps
+                gaps,
+                domain: "work"
               },
               gaps
             );
@@ -1139,7 +1142,7 @@ async function createUniqueWorkItem(
 async function requireWork(reader: BorealReader, workId: WorkId): Promise<WorkItem> {
   const work = await reader.getWorkItem(workId);
   if (!work) {
-    throw new BorealError("BOREAL_NOT_FOUND", "Work item not found", { workId });
+    throw new BorealError("BOREAL_NOT_FOUND", "Work item not found", { workId, domain: "work" });
   }
   return work;
 }
@@ -1190,7 +1193,10 @@ async function resolveWorkReference(
       candidates: uniqueCandidates
     });
   }
-  throw new BorealError("BOREAL_NOT_FOUND", "Work reference did not match any work item", { ref: normalizedRef });
+  throw new BorealError("BOREAL_NOT_FOUND", "Work reference did not match any work item", {
+    ref: normalizedRef,
+    domain: "work"
+  });
 }
 
 async function resolveActiveWorkReference(
@@ -1223,7 +1229,8 @@ async function resolveActiveWorkReference(
   }
   throw new BorealError("BOREAL_NOT_FOUND", "Active work reference did not match any non-expired reservation", {
     ref,
-    agentId: options.agentId
+    agentId: options.agentId,
+    domain: "work"
   });
 }
 
@@ -1257,7 +1264,8 @@ async function requireActiveWorkReservation(reader: BorealReader, work: WorkItem
   if (!reservation) {
     throw new BorealError("BOREAL_NOT_FOUND", "Work item does not have an active reservation", {
       workId: work.meta.id,
-      reservationId: work.reservationId
+      reservationId: work.reservationId,
+      domain: "work"
     });
   }
   return reservation;
@@ -1309,7 +1317,7 @@ async function agentFinishReservation(
     throw new BorealError(
       "BOREAL_POLICY_VIOLATION",
       "Unreserved agent finish cannot bypass open blockers",
-      { workId: graphWork.meta.id, agentId, gaps },
+      { workId: graphWork.meta.id, agentId, gaps, domain: "work" },
       gaps
     );
   }
@@ -1380,7 +1388,8 @@ async function requireAgentWorkReservation(
           expiresAt: terminalReservation.expiresAt,
           reapedAt: terminalReservation.meta.updatedAt,
           repairCommand: `bwrk agent start ${work.meta.id} --agent ${normalizedAgentId} --json`,
-          gaps
+          gaps,
+          domain: "work"
         },
         gaps
       );
@@ -1390,7 +1399,8 @@ async function requireAgentWorkReservation(
       agentId: normalizedAgentId,
       reservationId: work.reservationId,
       latestReservationId: terminalReservation?.meta.id,
-      latestReservationStatus: terminalReservation?.status
+      latestReservationStatus: terminalReservation?.status,
+      domain: "work"
     });
   }
   if (String(reservation.agentId) !== normalizedAgentId) {
@@ -1413,7 +1423,8 @@ async function requireAgentWorkReservation(
         agentId: normalizedAgentId,
         reservationAgentId: reservation.agentId,
         reservationId: reservation.meta.id,
-        gaps
+        gaps,
+        domain: "work"
       },
       gaps
     );
@@ -1438,7 +1449,8 @@ async function requireAgentWorkReservation(
         agentId: normalizedAgentId,
         reservationId: reservation.meta.id,
         expiresAt: reservation.expiresAt,
-        gaps
+        gaps,
+        domain: "work"
       },
       gaps
     );
@@ -1485,7 +1497,10 @@ async function resolveCloseoutSummaries(
     }
   }
   if (missingSummaryIds.length > 0) {
-    throw new BorealError("BOREAL_NOT_FOUND", "Closeout references missing agent summary", { missingSummaryIds });
+    throw new BorealError("BOREAL_NOT_FOUND", "Closeout references missing agent summary", {
+      missingSummaryIds,
+      domain: "summary"
+    });
   }
   return summaries;
 }
@@ -1524,7 +1539,8 @@ function assertAgentSummaryClosePolicy(
         workId: work.meta.id,
         expectedSubjectType,
         summaryIds: summaries.map((summary) => summary.meta.id),
-        gaps
+        gaps,
+        domain: "summary"
       },
       gaps
     );
@@ -1550,7 +1566,10 @@ async function assertAgentSummaryReferences(
     }
   }
   if (missingEvidenceIds.length > 0) {
-    throw new BorealError("BOREAL_NOT_FOUND", "Agent summary references missing evidence", { missingEvidenceIds });
+    throw new BorealError("BOREAL_NOT_FOUND", "Agent summary references missing evidence", {
+      missingEvidenceIds,
+      domain: "evidence"
+    });
   }
 
   const extraVerificationIds = new Set((extras.verifications ?? []).map((verification) => verification.meta.id));
@@ -1564,7 +1583,10 @@ async function assertAgentSummaryReferences(
     }
   }
   if (missingVerificationIds.length > 0) {
-    throw new BorealError("BOREAL_NOT_FOUND", "Agent summary references missing verification", { missingVerificationIds });
+    throw new BorealError("BOREAL_NOT_FOUND", "Agent summary references missing verification", {
+      missingVerificationIds,
+      domain: "evidence"
+    });
   }
 
   const summaryIds = [...summary.childSummaryIds, ...(summary.parentSummaryId ? [summary.parentSummaryId] : [])];
@@ -1575,7 +1597,10 @@ async function assertAgentSummaryReferences(
     }
   }
   if (missingSummaryIds.length > 0) {
-    throw new BorealError("BOREAL_NOT_FOUND", "Agent summary references missing summary", { missingSummaryIds });
+    throw new BorealError("BOREAL_NOT_FOUND", "Agent summary references missing summary", {
+      missingSummaryIds,
+      domain: "summary"
+    });
   }
 }
 
@@ -1646,7 +1671,8 @@ async function applyRequiredCloseoutGatePolicy(input: CloseoutGateEvaluationInpu
     throw new BorealError("BOREAL_POLICY_VIOLATION", "Closeout requires satisfied required gates and resolved descendant work", {
       workId: input.work.meta.id,
       gateGaps: gaps.map(legacyCloseoutGateGap),
-      gaps: enforcementGaps
+      gaps: enforcementGaps,
+      domain: "work"
     }, enforcementGaps);
   }
 
@@ -2046,7 +2072,7 @@ function isResolvedForContainerClose(work: WorkItem): boolean {
 async function requireKnowledgeSource(reader: BorealReader, sourceId: KnowledgeSourceId): Promise<KnowledgeSource> {
   const source = await reader.getKnowledgeSource(sourceId);
   if (!source) {
-    throw new BorealError("BOREAL_NOT_FOUND", "Knowledge source not found", { sourceId });
+    throw new BorealError("BOREAL_NOT_FOUND", "Knowledge source not found", { sourceId, domain: "work" });
   }
   return source;
 }
@@ -2054,7 +2080,7 @@ async function requireKnowledgeSource(reader: BorealReader, sourceId: KnowledgeS
 async function requireClaim(reader: BorealReader, claimId: ClaimId): Promise<ClaimRecord> {
   const claim = await reader.getClaim(claimId);
   if (!claim) {
-    throw new BorealError("BOREAL_NOT_FOUND", "Claim not found", { claimId });
+    throw new BorealError("BOREAL_NOT_FOUND", "Claim not found", { claimId, domain: "work" });
   }
   return claim;
 }
@@ -2062,7 +2088,7 @@ async function requireClaim(reader: BorealReader, claimId: ClaimId): Promise<Cla
 async function requireDecision(reader: BorealReader, decisionId: DecisionId): Promise<DecisionRecord> {
   const decision = await reader.getDecision(decisionId);
   if (!decision) {
-    throw new BorealError("BOREAL_NOT_FOUND", "Decision not found", { decisionId });
+    throw new BorealError("BOREAL_NOT_FOUND", "Decision not found", { decisionId, domain: "work" });
   }
   return decision;
 }
@@ -2078,7 +2104,10 @@ async function requireKnowledgeSources(
     }
   }
   if (missingSourceIds.length > 0) {
-    throw new BorealError("BOREAL_NOT_FOUND", "Knowledge record references missing source", { missingSourceIds });
+    throw new BorealError("BOREAL_NOT_FOUND", "Knowledge record references missing source", {
+      missingSourceIds,
+      domain: "work"
+    });
   }
 }
 
@@ -2090,7 +2119,10 @@ async function requireEvidenceRecords(reader: BorealReader, evidenceIds: readonl
     }
   }
   if (missingEvidenceIds.length > 0) {
-    throw new BorealError("BOREAL_NOT_FOUND", "Knowledge record references missing evidence", { missingEvidenceIds });
+    throw new BorealError("BOREAL_NOT_FOUND", "Knowledge record references missing evidence", {
+      missingEvidenceIds,
+      domain: "evidence"
+    });
   }
 }
 
@@ -2106,7 +2138,10 @@ async function loadEvidenceRecords(reader: BorealReader, evidenceIds: readonly E
     }
   }
   if (missingEvidence.length > 0) {
-    throw new BorealError("BOREAL_NOT_FOUND", "Verification references missing evidence", { missingEvidence });
+    throw new BorealError("BOREAL_NOT_FOUND", "Verification references missing evidence", {
+      missingEvidence,
+      domain: "evidence"
+    });
   }
   return records;
 }

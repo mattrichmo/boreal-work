@@ -437,7 +437,7 @@ export async function getRawSourceDetail(
   const [rawSources, wikiPages] = await Promise.all([listVaultRawSources(context), listVaultWikiPages(context)]);
   const record = rawSources.find((source) => source.id === sourceId);
   if (!record) {
-    throw new BorealError("BOREAL_NOT_FOUND", "Raw source not found", { sourceId });
+    throw new BorealError("BOREAL_NOT_FOUND", "Raw source not found", { sourceId, domain: "evidence" });
   }
   const linkedPages = wikiPages.filter((page) => page.sourceRefs.includes(record.id));
   return {

@@ -190,7 +190,7 @@ export async function removeProjectRegistryEntry(
   return mutateRegistry(storage, (document) => {
     const entry = document.entries.find((candidate) => candidate.id === projectId);
     if (!entry) {
-      throw new BorealError("BOREAL_NOT_FOUND", "Registry entry not found", { projectId });
+      throw new BorealError("BOREAL_NOT_FOUND", "Registry entry not found", { projectId, domain: "workflow" });
     }
     const archivedEntry = {
       ...entry,

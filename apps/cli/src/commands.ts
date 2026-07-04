@@ -1391,7 +1391,7 @@ async function resolveOperation(context: CliContext, value: string): Promise<Run
   }
   const candidates = operations.filter((operation) => operation.meta.id.startsWith(value));
   if (candidates.length === 0) {
-    throw new BorealError("BOREAL_NOT_FOUND", "Operation not found", { operationId: value });
+    throw new BorealError("BOREAL_NOT_FOUND", "Operation not found", { operationId: value, domain: "workflow" });
   }
   if (candidates.length > 1) {
     throw new BorealError("BOREAL_CONFLICT", "Operation id prefix is ambiguous", {
@@ -2256,7 +2256,10 @@ async function createDirectiveAcknowledgement(
     ? AGENT_DIRECTIVE_REGISTRY.entries.find((entry) => entry.id === directiveRegistryId)
     : undefined;
   if (explicitRegistryId && !registryEntry) {
-    throw new BorealError("BOREAL_NOT_FOUND", "Directive registry entry not found", { registryId: directiveRegistryId });
+    throw new BorealError("BOREAL_NOT_FOUND", "Directive registry entry not found", {
+      registryId: directiveRegistryId,
+      domain: "workflow"
+    });
   }
   const directiveVersion = asAgentDirectiveVersion(flagValue(args, "version") ?? registryEntry?.version ?? "v1");
   const outcome = parseDirectiveAcknowledgementOutcome(requiredFlag(args, "outcome"));
@@ -2392,7 +2395,10 @@ async function showDirectiveAcknowledgement(
   const acknowledgementId = asDirectiveAcknowledgementId(acknowledgementRef);
   const acknowledgement = await context.store.read((reader) => reader.getDirectiveAcknowledgement(acknowledgementId));
   if (!acknowledgement) {
-    throw new BorealError("BOREAL_NOT_FOUND", "Directive acknowledgement not found", { acknowledgementId });
+    throw new BorealError("BOREAL_NOT_FOUND", "Directive acknowledgement not found", {
+      acknowledgementId,
+      domain: "workflow"
+    });
   }
   return {
     schemaVersion: "boreal.cli.directives.ack.show.v1",
@@ -2425,7 +2431,10 @@ function listDirectiveRegistry(args: ParsedArgs): DirectiveRegistryListResult {
 function showDirectiveRegistryEntry(id: string): DirectiveRegistryShowResult {
   const entry = AGENT_DIRECTIVE_REGISTRY.entries.find((candidate) => candidate.id === id);
   if (!entry) {
-    throw new BorealError("BOREAL_NOT_FOUND", `Directive registry entry not found: ${id}`);
+    throw new BorealError("BOREAL_NOT_FOUND", `Directive registry entry not found: ${id}`, {
+      registryId: id,
+      domain: "workflow"
+    });
   }
   const replacements = directiveReplacementIndex(AGENT_DIRECTIVE_REGISTRY);
   return {
@@ -2484,7 +2493,10 @@ function renderDirectiveDebugBundle(args: ParsedArgs): DirectiveRenderResult {
 function explainDirectiveEmission(id: string, args: ParsedArgs): DirectiveExplainResult {
   const entry = AGENT_DIRECTIVE_REGISTRY.entries.find((candidate) => candidate.id === id);
   if (!entry) {
-    throw new BorealError("BOREAL_NOT_FOUND", `Directive registry entry not found: ${id}`);
+    throw new BorealError("BOREAL_NOT_FOUND", `Directive registry entry not found: ${id}`, {
+      registryId: id,
+      domain: "workflow"
+    });
   }
   const input = directiveDebugInput(args, { defaultFixture: "blocked-work" });
   const result = assembleAgentDirectiveBundleFromGaps({
@@ -4476,7 +4488,8 @@ async function finishEvidenceInput(
   if (referencedEvidenceIds[0] && !referencedEvidence) {
     throw new BorealError("BOREAL_NOT_FOUND", "Referenced finish evidence was not found", {
       workId,
-      evidenceId: referencedEvidenceIds[0]
+      evidenceId: referencedEvidenceIds[0],
+      domain: "evidence"
     });
   }
   if (referencedEvidence && referencedEvidence.subjectId !== workId) {
@@ -4523,7 +4536,8 @@ async function finishReservedWorkWithCompositeState(
             completed: false,
             partialMutation: false,
             resultingWork
-          }
+          },
+          domain: "work"
         },
         error.gaps
       );
@@ -4597,7 +4611,8 @@ async function assertWorkNotAlreadyClosedForAgentFinish(context: CliContext, wor
     workId,
     closedBy: closed.closedBy,
     closedAt: closed.closedAt,
-    closingEventId: closed.closingEventId
+    closingEventId: closed.closingEventId,
+    domain: "work"
   });
 }
 
@@ -4929,7 +4944,10 @@ async function heartbeatCommand(
       const result = await context.store.write(async (writer) => {
         const stored = await writer.getReviewerHeartbeat(existing.meta.id);
         if (!stored) {
-          throw new BorealError("BOREAL_NOT_FOUND", "Reviewer heartbeat not found", { heartbeatId: existing.meta.id });
+          throw new BorealError("BOREAL_NOT_FOUND", "Reviewer heartbeat not found", {
+            heartbeatId: existing.meta.id,
+            domain: "work"
+          });
         }
         const heartbeat = withContentHash(
           touchRecord(
@@ -5014,7 +5032,7 @@ async function resolveReviewerHeartbeat(
   if (value.startsWith("bw_heartbeat_")) {
     const heartbeat = await context.store.read((reader) => reader.getReviewerHeartbeat(asReviewerHeartbeatId(value)));
     if (!heartbeat) {
-      throw new BorealError("BOREAL_NOT_FOUND", "Reviewer heartbeat not found", { heartbeatId: value });
+      throw new BorealError("BOREAL_NOT_FOUND", "Reviewer heartbeat not found", { heartbeatId: value, domain: "work" });
     }
     return heartbeat;
   }
@@ -5028,7 +5046,8 @@ async function resolveReviewerHeartbeat(
       heartbeatId,
       name,
       reviewerId,
-      containerId
+      containerId,
+      domain: "work"
     });
   }
   return heartbeat;
@@ -5056,7 +5075,7 @@ async function heartbeatCursorFromArgs(
         reader.listEvents()
       ]);
       if (!work) {
-        throw new BorealError("BOREAL_NOT_FOUND", "Heartbeat work cursor not found", { workId });
+        throw new BorealError("BOREAL_NOT_FOUND", "Heartbeat work cursor not found", { workId, domain: "work" });
       }
       if (!work.closedAt) {
         throw new BorealError("BOREAL_INVALID_INPUT", "Heartbeat work cursor must reference closed work", {
@@ -5067,7 +5086,10 @@ async function heartbeatCursorFromArgs(
       await assertWorkInHeartbeatScope(reader, work.meta.id, containerId, graphEdges);
       const explicitEventId = eventValue ? asEventId(eventValue) : undefined;
       if (explicitEventId && !events.some((event) => event.meta.id === explicitEventId)) {
-        throw new BorealError("BOREAL_NOT_FOUND", "Heartbeat event cursor not found", { eventId: explicitEventId });
+        throw new BorealError("BOREAL_NOT_FOUND", "Heartbeat event cursor not found", {
+          eventId: explicitEventId,
+          domain: "work"
+        });
       }
       const eventId = explicitEventId ?? workClosedEventId(events, work.meta.id);
       return {
@@ -5083,7 +5105,10 @@ async function heartbeatCursorFromArgs(
   if (explicitEventId) {
     await context.store.read(async (reader) => {
       if (!(await reader.listEvents()).some((event) => event.meta.id === explicitEventId)) {
-        throw new BorealError("BOREAL_NOT_FOUND", "Heartbeat event cursor not found", { eventId: explicitEventId });
+        throw new BorealError("BOREAL_NOT_FOUND", "Heartbeat event cursor not found", {
+          eventId: explicitEventId,
+          domain: "work"
+        });
       }
     });
   }
@@ -5493,7 +5518,10 @@ async function recentClosedCursorFromArgs(context: CliContext, value: string | u
   }
   const heartbeat = await context.store.read((reader) => reader.getReviewerHeartbeat(asReviewerHeartbeatId(value)));
   if (!heartbeat) {
-    throw new BorealError("BOREAL_NOT_FOUND", "Reviewer heartbeat checkpoint not found", { checkpointId: value });
+    throw new BorealError("BOREAL_NOT_FOUND", "Reviewer heartbeat checkpoint not found", {
+      checkpointId: value,
+      domain: "work"
+    });
   }
   return {
     value,
@@ -5869,7 +5897,8 @@ async function agentFinishGitPreflight(
         expectedBranch: reservation.git.branch,
         actualBranch: currentBranch,
         repairCommand: `git switch ${reservation.git.branch}`,
-        gaps: [gap]
+        gaps: [gap],
+        domain: "work"
       },
       [gap]
     );
@@ -6310,7 +6339,8 @@ async function workCommand(
         throw new BorealError("BOREAL_POLICY_VIOLATION", "Reserved work cannot be closed directly; use `bwrk agent finish`", {
           workId,
           reservationIds: activeReservations.map((reservation) => reservation.meta.id),
-          remedialCommand: `bwrk agent finish ${workId} --agent ${activeReservations[0]?.agentId ?? context.actor.id} --summary '<evidence summary>' --close --reason ${shellArg(reason)} --json`
+          remedialCommand: `bwrk agent finish ${workId} --agent ${activeReservations[0]?.agentId ?? context.actor.id} --summary '<evidence summary>' --close --reason ${shellArg(reason)} --json`,
+          domain: "work"
         });
       }
       assertLeafEvidenceGateForClose(work, args);
@@ -6355,7 +6385,8 @@ async function workCommand(
       if (activeReservations.length > 0) {
         throw new BorealError("BOREAL_POLICY_VIOLATION", "Cannot cancel work with an active non-expired reservation", {
           workId,
-          reservationIds: activeReservations.map((reservation) => reservation.meta.id)
+          reservationIds: activeReservations.map((reservation) => reservation.meta.id),
+          domain: "work"
         });
       }
       const closeoutSummary = await ensureAgentSummaryForClose(context, args, work, reason, {
@@ -6536,7 +6567,8 @@ function assertLeafEvidenceGateForClose(work: WorkItem, args: ParsedArgs): void 
       gateCode: "gate.verification.unsatisfied",
       remedialCommand: remediationCommand,
       forcePath: "Use --force-summary with --force-reason and --force-comment only for an audited bypass.",
-      gaps
+      gaps,
+      domain: "evidence"
     },
     gaps
   );
@@ -6588,7 +6620,8 @@ async function cancelWorkCommand(
     if (activeReservations.length > 0) {
       throw new BorealError("BOREAL_POLICY_VIOLATION", "Cannot cancel work with an active non-expired reservation", {
         workId,
-        reservationIds: activeReservations.map((reservation) => reservation.meta.id)
+        reservationIds: activeReservations.map((reservation) => reservation.meta.id),
+        domain: "work"
       });
     }
     const expiredReservationIds = await expireStaleReservationsForWork(writer, workId, current, context.actor);
@@ -6743,7 +6776,8 @@ function forceRequiredCloseoutGates(input: {
   if (missing.length > 0) {
     throw new BorealError("BOREAL_NOT_FOUND", "Required closeout gate not found for force request", {
       missing,
-      availableGates: input.gates.map((gate) => `${gate.id}:${gate.kind}:${gate.scope}`)
+      availableGates: input.gates.map((gate) => `${gate.id}:${gate.kind}:${gate.scope}`),
+      domain: "work"
     });
   }
   return forced;
@@ -7688,7 +7722,8 @@ async function latestSummaryForSubject(context: CliContext, subject: SummarySubj
   if (!summary) {
     throw new BorealError("BOREAL_NOT_FOUND", "No agent summary found for subject", {
       subjectId: subject.subjectId,
-      subjectType: subject.subjectType
+      subjectType: subject.subjectType,
+      domain: "summary"
     });
   }
   return summary;
@@ -7819,7 +7854,7 @@ function agentSummaryRow(summary: AgentSummaryRecord): AgentSummaryOutputRow {
 async function requireAgentSummary(reader: BorealReader, summaryId: AgentSummaryId): Promise<AgentSummaryRecord> {
   const summary = await reader.getAgentSummary(summaryId);
   if (!summary) {
-    throw new BorealError("BOREAL_NOT_FOUND", "Agent summary not found", { summaryId });
+    throw new BorealError("BOREAL_NOT_FOUND", "Agent summary not found", { summaryId, domain: "summary" });
   }
   return summary;
 }
@@ -7841,7 +7876,10 @@ async function requireSummaryReferences(
     }
   }
   if (missingVerificationIds.length > 0) {
-    throw new BorealError("BOREAL_NOT_FOUND", "Agent summary references missing verification", { missingVerificationIds });
+    throw new BorealError("BOREAL_NOT_FOUND", "Agent summary references missing verification", {
+      missingVerificationIds,
+      domain: "evidence"
+    });
   }
   const summaryIds = [...input.childSummaryIds, ...(input.parentSummaryId ? [input.parentSummaryId] : [])];
   const missingSummaryIds: AgentSummaryId[] = [];
@@ -7851,7 +7889,10 @@ async function requireSummaryReferences(
     }
   }
   if (missingSummaryIds.length > 0) {
-    throw new BorealError("BOREAL_NOT_FOUND", "Agent summary references missing summary", { missingSummaryIds });
+    throw new BorealError("BOREAL_NOT_FOUND", "Agent summary references missing summary", {
+      missingSummaryIds,
+      domain: "summary"
+    });
   }
 }
 
@@ -8070,7 +8111,8 @@ async function assertDirtyPathReasonMatchesGitState(
       reasonCode: "no_repo_changes",
       dirtyPaths,
       gitRoot: git.gitRoot,
-      branch: git.branch
+      branch: git.branch,
+      domain: "work"
     },
     [gap]
   );
@@ -8114,7 +8156,9 @@ async function latestFinalSummariesForSubject(context: CliContext, subjectId: st
 
 function assertCloseoutSummariesMatchWork(work: WorkItem, summaries: readonly AgentSummaryRecord[]): void {
   if (summaries.length === 0) {
-    throw new BorealError("BOREAL_POLICY_VIOLATION", "Closeout requires at least one agent summary");
+    throw new BorealError("BOREAL_POLICY_VIOLATION", "Closeout requires at least one agent summary", {
+      domain: "summary"
+    });
   }
   const expectedSubjectType = summarySubjectForWork(work).subjectType;
   const mismatches = summaries.filter(
@@ -8133,7 +8177,8 @@ function assertCloseoutSummariesMatchWork(work: WorkItem, summaries: readonly Ag
         subjectId: summary.subjectId,
         subjectType: summary.subjectType,
         status: summary.status
-      }))
+      })),
+      domain: "summary"
     });
   }
 }
@@ -8590,7 +8635,8 @@ async function assertCircuitBreakerAllows(
       lastError: entry.lastError,
       repairCommand: "bwrk doctor --strict --json",
       resetCommands: ["bwrk doctor --fix --json", `bwrk ${command} --json`],
-      gaps
+      gaps,
+      domain: "workflow"
     },
     gaps
   );
@@ -12184,7 +12230,8 @@ async function sprintCloseAutoReportResult(
     throw new BorealError("BOREAL_POLICY_VIOLATION", "Sprint auto-report sync refresh did not finish healthy", {
       sprintId: sprint.meta.id,
       exitReason: sync.exitReason,
-      recommendedActions: sync.status.recommendedActions
+      recommendedActions: sync.status.recommendedActions,
+      domain: "work"
     });
   }
   const syncEvidence = await context.runtime.recordEvidence({
@@ -12204,7 +12251,8 @@ async function sprintCloseAutoReportResult(
       blockingDiagnosticCodes: doctor.blockingDiagnosticCodes,
       diagnostics: doctor.diagnostics
         .filter((diagnostic) => diagnostic.severity !== "ok")
-        .map((diagnostic) => ({ code: diagnostic.code, severity: diagnostic.severity, message: diagnostic.message }))
+        .map((diagnostic) => ({ code: diagnostic.code, severity: diagnostic.severity, message: diagnostic.message })),
+      domain: "work"
     });
   }
   const doctorEvidence = await context.runtime.recordEvidence({
@@ -12449,7 +12497,10 @@ function resolveCloseoutEvidence(
 ): SprintReportEvidenceRow {
   const record = records.find((candidate) => candidate.meta.id === evidenceId);
   if (!record) {
-    throw new BorealError("BOREAL_NOT_FOUND", `Sprint report ${requiredKind} evidence was not found`, { evidenceId });
+    throw new BorealError("BOREAL_NOT_FOUND", `Sprint report ${requiredKind} evidence was not found`, {
+      evidenceId,
+      domain: "evidence"
+    });
   }
   if (record.subjectType !== "work" || !scopedWorkIds.has(record.subjectId)) {
     throw new BorealError("BOREAL_INVALID_INPUT", `Sprint report ${requiredKind} evidence must belong to the sprint scope`, {
@@ -12998,14 +13049,14 @@ async function resolveSprintWork(context: CliContext, value: string): Promise<Wo
         const projection = await activeSprintProjection(reader);
         const sprintId = activeSprintIdFromProjection(projection);
         if (!sprintId) {
-          throw new BorealError("BOREAL_NOT_FOUND", "No active sprint is selected");
+          throw new BorealError("BOREAL_NOT_FOUND", "No active sprint is selected", { domain: "work" });
         }
         return sprintId;
       })
     : await resolveWorkId(context, value);
   const work = await context.store.read((reader) => reader.getWorkItem(workId));
   if (!work) {
-    throw new BorealError("BOREAL_NOT_FOUND", "Sprint not found", { sprintId: workId });
+    throw new BorealError("BOREAL_NOT_FOUND", "Sprint not found", { sprintId: workId, domain: "work" });
   }
   if (work.kind !== "sprint") {
     throw new BorealError("BOREAL_INVALID_INPUT", "Sprint reference must resolve to work with kind sprint", {
@@ -13309,7 +13360,7 @@ async function lockCommand(
 async function requireCliWork(reader: BorealReader, workId: WorkId): Promise<WorkItem> {
   const work = await reader.getWorkItem(workId);
   if (!work) {
-    throw new BorealError("BOREAL_NOT_FOUND", "Work item not found", { workId });
+    throw new BorealError("BOREAL_NOT_FOUND", "Work item not found", { workId, domain: "work" });
   }
   return work;
 }
@@ -13317,7 +13368,7 @@ async function requireCliWork(reader: BorealReader, workId: WorkId): Promise<Wor
 async function requireCliClaim(reader: BorealReader, claimId: ClaimId): Promise<ClaimRecord> {
   const claim = await reader.getClaim(claimId);
   if (!claim) {
-    throw new BorealError("BOREAL_NOT_FOUND", "Claim not found", { claimId });
+    throw new BorealError("BOREAL_NOT_FOUND", "Claim not found", { claimId, domain: "evidence" });
   }
   return claim;
 }
@@ -13325,7 +13376,7 @@ async function requireCliClaim(reader: BorealReader, claimId: ClaimId): Promise<
 async function requireCliDecision(reader: BorealReader, decisionId: DecisionId): Promise<DecisionRecord> {
   const decision = await reader.getDecision(decisionId);
   if (!decision) {
-    throw new BorealError("BOREAL_NOT_FOUND", "Decision not found", { decisionId });
+    throw new BorealError("BOREAL_NOT_FOUND", "Decision not found", { decisionId, domain: "evidence" });
   }
   return decision;
 }
@@ -13338,7 +13389,10 @@ async function requireCliKnowledgeSources(reader: BorealReader, sourceIds: reado
     }
   }
   if (missingSourceIds.length > 0) {
-    throw new BorealError("BOREAL_NOT_FOUND", "Knowledge record references missing source", { missingSourceIds });
+    throw new BorealError("BOREAL_NOT_FOUND", "Knowledge record references missing source", {
+      missingSourceIds,
+      domain: "evidence"
+    });
   }
 }
 
@@ -13353,7 +13407,10 @@ async function requireCliEvidenceRecords(
     }
   }
   if (missingEvidenceIds.length > 0) {
-    throw new BorealError("BOREAL_NOT_FOUND", "Knowledge record references missing evidence", { missingEvidenceIds });
+    throw new BorealError("BOREAL_NOT_FOUND", "Knowledge record references missing evidence", {
+      missingEvidenceIds,
+      domain: "evidence"
+    });
   }
 }
 
@@ -14043,7 +14100,10 @@ async function requireDirectiveAcknowledgementEvidence(
     }
   }
   if (missingEvidenceIds.length > 0) {
-    throw new BorealError("BOREAL_NOT_FOUND", "Directive acknowledgement references missing evidence", { missingEvidenceIds });
+    throw new BorealError("BOREAL_NOT_FOUND", "Directive acknowledgement references missing evidence", {
+      missingEvidenceIds,
+      domain: "evidence"
+    });
   }
 }
 
@@ -14058,7 +14118,10 @@ async function requireDirectiveAcknowledgementSummaries(
     }
   }
   if (missingSummaryIds.length > 0) {
-    throw new BorealError("BOREAL_NOT_FOUND", "Directive acknowledgement references missing agent summary", { missingSummaryIds });
+    throw new BorealError("BOREAL_NOT_FOUND", "Directive acknowledgement references missing agent summary", {
+      missingSummaryIds,
+      domain: "summary"
+    });
   }
 }
 
@@ -14073,7 +14136,10 @@ async function requireDirectiveAcknowledgementVerifications(
     }
   }
   if (missingVerificationIds.length > 0) {
-    throw new BorealError("BOREAL_NOT_FOUND", "Directive acknowledgement references missing verification", { missingVerificationIds });
+    throw new BorealError("BOREAL_NOT_FOUND", "Directive acknowledgement references missing verification", {
+      missingVerificationIds,
+      domain: "evidence"
+    });
   }
 }
 
@@ -14916,7 +14982,8 @@ async function resolveWikiPageIds(context: CliContext, references: readonly stri
     throw new BorealError("BOREAL_NOT_FOUND", "Wiki page references require an initialized Boreal memory vault", {
       references,
       missingDirectories: vaultStatus.missingDirectories,
-      missingFiles: vaultStatus.missingFiles
+      missingFiles: vaultStatus.missingFiles,
+      domain: "summary"
     });
   }
   const pages = await listVaultWikiPages(context);
@@ -14941,7 +15008,7 @@ function resolveWikiPage(pages: readonly WikiPageRecord[], reference: string): W
     normalizeWikiReference(candidate.path) === normalized
   );
   if (!page) {
-    throw new BorealError("BOREAL_NOT_FOUND", "Wiki page not found", { reference });
+    throw new BorealError("BOREAL_NOT_FOUND", "Wiki page not found", { reference, domain: "summary" });
   }
   return page;
 }

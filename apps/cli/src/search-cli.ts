@@ -139,7 +139,8 @@ async function loadFreshSearchIndex(
     }
     throw new BorealError("BOREAL_POLICY_VIOLATION", "Search index is missing; run `bwrk search index`", {
       path: inspection.path,
-      expectedContentHash: inspection.expectedContentHash
+      expectedContentHash: inspection.expectedContentHash,
+      domain: "workflow"
     });
   }
   if (inspection.error) {
@@ -149,7 +150,8 @@ async function loadFreshSearchIndex(
     }
     throw new BorealError("BOREAL_POLICY_VIOLATION", "Search index is invalid; run `bwrk search index`", {
       path: inspection.path,
-      error: inspection.error
+      error: inspection.error,
+      domain: "workflow"
     });
   }
   if (inspection.stale) {
@@ -160,7 +162,8 @@ async function loadFreshSearchIndex(
     throw new BorealError("BOREAL_POLICY_VIOLATION", "Search index is stale; run `bwrk search index`", {
       path: inspection.path,
       contentHash: inspection.contentHash,
-      expectedContentHash: inspection.expectedContentHash
+      expectedContentHash: inspection.expectedContentHash,
+      domain: "workflow"
     });
   }
   return readSearchIndex(inspection.path);
@@ -194,7 +197,8 @@ async function rebuildSearchIndexIfStillNeeded(context: CliContext): Promise<Sea
             repairCommand: "bwrk doctor --strict --json",
             indexPath: searchIndexPath(context),
             originalError: error instanceof Error ? error.message : String(error),
-            gaps
+            gaps,
+            domain: "workflow"
           },
           gaps
         );

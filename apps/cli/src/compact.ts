@@ -165,6 +165,7 @@ async function resolveCompactApplyPlan(context: CliContext, options: CompactAppl
   if (!plan) {
     throw new BorealError("BOREAL_NOT_FOUND", "Compaction target is not currently eligible", {
       domain: options.domain,
+      recordDomain: options.domain === "work" ? "work" : "summary",
       targetId: options.targetId,
       olderThanDays: analyzed.olderThanDays
     });
@@ -184,13 +185,13 @@ async function applyWorkCompaction(context: CliContext, plan: CompactPlan, summa
   const archivePath = vaultDisplayPath(layout, `work/compacted/${plan.targetId}.md`);
   const currentWork = await context.store.read((reader) => reader.getWorkItem(plan.targetId as WorkId));
   if (!currentWork) {
-    throw new BorealError("BOREAL_NOT_FOUND", "Compaction work target not found", { targetId: plan.targetId });
+    throw new BorealError("BOREAL_NOT_FOUND", "Compaction work target not found", { targetId: plan.targetId, domain: "work" });
   }
   await writeWorkArchive(context, archivePath, currentWork, plan, summary, now);
   const { event } = await context.store.write(async (writer) => {
     const work = await writer.getWorkItem(plan.targetId as WorkId);
     if (!work) {
-      throw new BorealError("BOREAL_NOT_FOUND", "Compaction work target not found", { targetId: plan.targetId });
+      throw new BorealError("BOREAL_NOT_FOUND", "Compaction work target not found", { targetId: plan.targetId, domain: "work" });
     }
     const nextWork = touchRecord(
       {
@@ -233,7 +234,10 @@ async function applyWikiCompaction(context: CliContext, plan: CompactPlan, summa
   const pages = await listVaultWikiPages(context);
   const page = pages.find((entry) => (entry.id || entry.path) === plan.targetId);
   if (!page) {
-    throw new BorealError("BOREAL_NOT_FOUND", "Compaction wiki target not found", { targetId: plan.targetId });
+    throw new BorealError("BOREAL_NOT_FOUND", "Compaction wiki target not found", {
+      targetId: plan.targetId,
+      domain: "summary"
+    });
   }
   const now = nowIso();
   const layout = await resolveVaultLayout(context);
