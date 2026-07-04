@@ -115,6 +115,29 @@ describe("git branch lifecycle", () => {
 
     expect(show.git).toEqual({ branch, headSha });
   });
+
+  it("sprint launch branches from the container branch and records it on the sprint", async () => {
+    const rootDir = await createTestWorkspace({ git: true });
+    await runCli(rootDir, ["init", "--json"]);
+    const epic = parseData<{ readonly meta: { readonly id: string } }>(
+      (await runCli(rootDir, ["work", "create", "Launch Epic", "--kind", "milestone", "--ready", "--json"])).stdout
+    );
+    await runCli(rootDir, ["agent", "start", epic.meta.id, "--agent", "epic-agent", "--json"]);
+    const epicTip = git(rootDir, ["rev-parse", "HEAD"]);
+
+    const launched = parseData<{
+      readonly sprint: { readonly meta: { readonly id: string }; readonly git?: { readonly branch: string } };
+    }>((await runCli(rootDir, ["sprint", "launch", epic.meta.id, "--title", "Sprint Branch", "--json"])).stdout);
+
+    const branch = git(rootDir, ["symbolic-ref", "--short", "HEAD"]);
+    expect(branch).toBe(`sprint/${launched.sprint.meta.id.slice(-8)}-sprint-branch`);
+    expect(git(rootDir, ["branch", "--contains", epicTip])).toContain(branch);
+    expect(launched.sprint.git?.branch).toBe(branch);
+    const show = parseData<{ readonly git?: { readonly branch: string } }>(
+      (await runCli(rootDir, ["work", "show", launched.sprint.meta.id, "--json"])).stdout
+    );
+    expect(show.git?.branch).toBe(branch);
+  });
 });
 
 async function createTestWorkspace(options: { readonly git: boolean }): Promise<string> {

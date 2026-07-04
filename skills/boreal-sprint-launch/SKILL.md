@@ -17,6 +17,7 @@ Confirm the current project context. Prefer `bwrk prime --json` when the workspa
 - Stop and report the missing workflow source if `bwrk workflows show <ref>` cannot resolve the ID.
 - Follow the workflow's allowed commands and finish criteria.
 - Keep this skill as a thin adapter; do not invent steps that belong in the workflow file.
+- Sprint Git branching is automatic through the workflow's `bwrk sprint launch` command; do not create or switch sprint branches manually.
 - If the request crosses repositories, stop and ask for the explicit workspace and memory root.
 
 ## Agent Directive Handling

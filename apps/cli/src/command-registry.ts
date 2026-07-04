@@ -761,6 +761,24 @@ export const COMMAND_DEFINITIONS: readonly CommandDefinition[] = [
     supportsJson: true,
   },
   {
+    path: ["sprint", "launch"],
+    category: "sprint",
+    summary: "Create a sprint container under an existing work container.",
+    usage: "bwrk sprint launch <container-ref> --title <title> [--label <label>...] [--acceptance <text>...] [--ready] [--no-branch] [--json]",
+    description:
+      "Creates a sprint work item, links it under the selected container, and when possible creates a deterministic sprint branch from the container branch.",
+    flags: [
+      flag("title", "value", "Sprint title."),
+      flag("label", "value", "Sprint label; may be repeated.", true),
+      flag("acceptance", "value", "Sprint acceptance criterion; may be repeated.", true),
+      flag("ready", "boolean", "Mark the sprint ready after creation."),
+      flag("no-branch", "boolean", "Skip automatic sprint branch creation and work git stamping.")
+    ],
+    positionals: { label: "container reference", min: 1, max: 1 },
+    requiresWorkspace: true,
+    supportsJson: true,
+  },
+  {
     path: ["sprint", "show"],
     category: "sprint",
     summary: "Show one sprint and its dependency-scoped work tree.",
@@ -2741,6 +2759,18 @@ const COMMAND_BEHAVIOR: Readonly<Record<string, CommandBehaviorMetadata>> = {
     maxResultSizeChars: 125_000,
     humanOutputKind: "table",
     examples: ["bwrk sprint list --json"],
+  }),
+  "sprint launch": commandMetadata("sprint launch", {
+    readOnly: false,
+    destructive: false,
+    writesState: true,
+    writesGeneratedArtifacts: false,
+    requiresFreshIndex: false,
+    concurrencySafe: true,
+    requiresLock: "state",
+    maxResultSizeChars: 100_000,
+    humanOutputKind: "record",
+    examples: ["bwrk sprint launch bw_work_epic --title 'Sprint 04' --json"],
   }),
   "sprint show": commandMetadata("sprint show", {
     readOnly: true,

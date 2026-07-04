@@ -24,6 +24,7 @@ const DOCUMENTED_JSON_ENVELOPE_PATHS = new Set([
   "data.result",
   "data.summary",
   "data.meta.id",
+  "data.sprint.meta.id",
   "data.command",
   "data.commandPath",
   "data.recommendedCommands",

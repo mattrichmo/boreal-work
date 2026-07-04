@@ -559,6 +559,14 @@ bwrk sprint list [--limit <n>] [--json]
 
 Lists workspace-local work records with `kind: "sprint"` and marks the sprint selected by the explicit active-sprint projection. Results default to 200 rows and reject larger limits than 200.
 
+## `sprint launch`
+
+```bash
+bwrk sprint launch <container-ref> --title <title> [--label <label>...] [--acceptance <text>...] [--ready] [--no-branch] [--json]
+```
+
+Creates a sprint work item under an existing container such as a milestone/epic. The command links the new sprint into the dependency-scoped container tree, and when the container has a recorded or derivable Git branch, it creates the deterministic sprint branch from that container branch and records it on the sprint work item. Use `--no-branch` to skip Git entirely.
+
 ## `sprint show`
 
 ```bash

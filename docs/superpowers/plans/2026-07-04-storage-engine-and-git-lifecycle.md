@@ -787,9 +787,9 @@ it("stamps branch and head sha on the closed work item", async () => {
 **Interfaces:**
 - Produces: `sprint launch` for a sprint whose container epic has a recorded/derivable branch: create `sprint/<shortId>-<slug>` **from the epic branch** (`git switch -c <sprint> <epicBranch>`), record it on the sprint work item. Same `--no-branch` opt-out and non-git degradation as Task 14.
 
-- [ ] **Step 1: Failing test** — epic create → sprint launch → `git branch --contains <epic-branch-tip>` includes the sprint branch; sprint work item shows `git.branch`.
+- [x] **Step 1: Failing test** — epic create → sprint launch → `git branch --contains <epic-branch-tip>` includes the sprint branch; sprint work item shows `git.branch`.
 
-- [ ] **Step 2: Implement, update the two markdown docs, run, commit** `feat: sprint launch branches deterministically off epic branch`.
+- [x] **Step 2: Implement, update the two markdown docs, run, commit** `feat: sprint launch branches deterministically off epic branch`.
 
 ---
 

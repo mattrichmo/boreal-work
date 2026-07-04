@@ -9,6 +9,7 @@ requires_workspace: true
 allowed_commands:
   - session start
   - prime
+  - sprint launch
   - work create
   - dep add
   - work ready
@@ -43,7 +44,7 @@ Use this workflow when the user's request requires create a scoped sprint with t
 - Prefer source-backed claims, decisions, and wiki edits.
 - Use `--json` for commands that feed later automation.
 - Stop and ask when candidate records conflict or the workflow would overwrite user-authored truth.
-- When launching parallel agent lanes on a shared integration branch, assign a merge target branch, lane branch, and worktree path for each lane before any task is claimed.
+- Sprint branch creation is automatic through `bwrk sprint launch`; do not create the sprint branch manually.
 
 ## Agent Directives
 
@@ -65,18 +66,20 @@ Use this workflow when the user's request requires create a scoped sprint with t
 
 ## Command Sequences
 
-Use a sprint record as the container, attach ready leaf work beneath it, and define Git checkpoint boundaries before implementation starts.
+Use `sprint launch` to create the sprint container, attach ready leaf work beneath it, and define closeout checkpoint expectations before implementation starts.
 
 1. Start or inspect the session:
    `bwrk session start --agent <agent-id> --json`
    `bwrk prime --agent <agent-id> --label <label> --json`
-2. Create the sprint container:
+2. Create the sprint container from its parent container:
+   `bwrk sprint launch <container-id> --title "Sprint: <name>" --label sprint --label <label> --acceptance "<sprint gate>" --json`
+3. Capture the sprint ID from `data.sprint.meta.id`.
+4. If you must support an older CLI without `sprint launch`, create the sprint container manually:
    `bwrk work create "Sprint: <name>" --kind sprint --label sprint --label <label> --acceptance "<sprint gate>" --json`
-3. Capture the sprint ID from `data.meta.id`.
-4. Create each sprint task with acceptance criteria:
+   Capture the sprint ID from `data.meta.id`.
+5. Create each sprint task with acceptance criteria:
    `bwrk work create "<task title>" --kind task --priority normal --label <label> --acceptance "<criterion>" --json`
-5. For each task, phase, or milestone that can change repository state, include acceptance language requiring a scoped Git checkpoint or explicit no-commit reason code before closeout.
-6. For parallel lanes, record a lane isolation plan: merge target branch, lane branch, worktree path, base ref or base SHA, assigned agent, and post-merge validation command.
+6. For each task, phase, or milestone that can change repository state, include acceptance language requiring a scoped Git checkpoint or explicit no-commit reason code before closeout.
 7. Attach each task to the sprint and encode blockers:
    `bwrk dep add <sprint-id> <task-id> --json`
    `bwrk dep add <blocked-task-id> <blocker-task-id> --json`
@@ -91,6 +94,7 @@ Use a sprint record as the container, attach ready leaf work beneath it, and def
 
 - `bwrk session start`
 - `bwrk prime`
+- `bwrk sprint launch`
 - `bwrk work create`
 - `bwrk dep add`
 - `bwrk work ready`
@@ -102,8 +106,7 @@ Use a sprint record as the container, attach ready leaf work beneath it, and def
 - Record command/test/diff evidence before verification or closeout.
 - Keep raw source material immutable; reconcile into wiki, claims, decisions, or work instead of rewriting raw records.
 - For work changes, confirm dependency and readiness state after mutation.
-- At launch, inspect `sync.git.findings` and separate non-blocking protected-branch/generated-artifact caveats from blocking Git findings before deciding whether the sprint can start.
-- For multi-agent execution, treat the integration branch as a merge target only. Bootstrap, implementation, review, and hardening lanes must work from separate Git worktrees.
+- At launch, inspect the `gitBranch` result from `bwrk sprint launch --json`; if it is skipped, report the reason before assigning work.
 - Plan commit checkpoints as part of the sprint structure. Major refactors should be split into task, phase, or subsystem checkpoints rather than one final sprint-sized commit.
 - Sprint acceptance should require a final closeout summary with per-task outcomes, evidence, verification, commit SHA(s), and reason code(s).
 
@@ -119,7 +122,7 @@ Use a sprint record as the container, attach ready leaf work beneath it, and def
 - The requested outcome is represented in Boreal records or the workflow has returned a clear read-only answer.
 - Any new or updated durable memory has source/evidence support.
 - The sprint plan identifies checkpoint boundaries for task, phase, sprint, or milestone closeout.
-- Parallel sprint plans identify merge target, lane branch, worktree path, assigned agent, and serial merge gate for each lane.
+- The sprint work item records its deterministic Git branch or the launch output reports why branch creation was skipped.
 - `bwrk doctor --strict --json` passes or the remaining diagnostic is explicitly reported.
 
 ## Next Suggested Workflow

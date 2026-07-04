@@ -11730,6 +11730,15 @@ async function sprintCommand(
       output.write(json ? formatRecord(result, true) : formatSprintList(result));
       return { exitCode: 0 };
     }
+    case "launch": {
+      const containerId = await resolveWorkId(context, requiredPositional(rest, 0, "container reference"));
+      const container = await context.store.read((reader) => requireCliWork(reader, containerId));
+      const result = await sprintLaunchResult(context, args, container);
+      output.write(await formatRecordWithAgentDirectives(context, args, withCliResult(result, workCliResult(result.sprint)), json, {
+        subjectWork: result.sprint
+      }));
+      return { exitCode: 0 };
+    }
     case "show": {
       const sprint = await resolveSprintWork(context, requiredPositional(rest, 0, "sprint reference"));
       const result = await sprintShowResult(context, sprint, sprintScopeLimit(args));
@@ -11801,6 +11810,132 @@ async function sprintCommand(
     default:
       throw new BorealError("BOREAL_INVALID_INPUT", `Unknown sprint command: ${action ?? ""}`);
   }
+}
+
+async function sprintLaunchResult(context: CliContext, args: ParsedArgs, container: WorkItem) {
+  const created = await context.runtime.createWork({
+    title: requiredFlag(args, "title"),
+    kind: "sprint",
+    labels: uniqueStrings(["sprint", ...labelsFromArgs(args)]),
+    acceptanceCriteria: flagValues(args, "acceptance"),
+    parentId: container.meta.id,
+    ready: hasFlag(args, "ready")
+  });
+  await context.runtime.addBlockingDependency({
+    blockedWorkId: container.meta.id,
+    blockingWorkId: created.meta.id
+  });
+  const branch = await attachSprintLaunchBranch(context, args, created, container);
+  return {
+    schemaVersion: "boreal.cli.sprint.launch.v1",
+    generatedAt: nowIso(),
+    workspaceRoot: context.workspaceRoot,
+    container: workListRow(container),
+    sprint: branch.sprint,
+    ...(branch.gitBranch ? { gitBranch: branch.gitBranch } : {})
+  };
+}
+
+type SprintLaunchGitBranch =
+  | {
+      readonly status: "recorded";
+      readonly branch: string;
+      readonly headSha: string;
+      readonly baseBranch: string;
+    }
+  | {
+      readonly status: "skipped";
+      readonly reason: "git_unavailable" | "not_git_repository" | "base_branch_missing" | "head_unavailable";
+      readonly baseBranch?: string;
+    };
+
+async function attachSprintLaunchBranch(
+  context: CliContext,
+  args: ParsedArgs,
+  sprint: WorkItem,
+  container: WorkItem
+): Promise<{ readonly sprint: WorkItem; readonly gitBranch?: SprintLaunchGitBranch }> {
+  if (hasFlag(args, "no-branch")) {
+    return { sprint };
+  }
+  const root = await runGit(context.workspaceRoot, ["rev-parse", "--show-toplevel"]);
+  if (!root.ok) {
+    return {
+      sprint,
+      gitBranch: {
+        status: "skipped",
+        reason: isMissingGit(root) ? "git_unavailable" : "not_git_repository"
+      }
+    };
+  }
+
+  const baseBranch = await launchBaseBranchForWork(context, container);
+  const baseExists = await runGit(context.workspaceRoot, ["show-ref", "--verify", "--quiet", `refs/heads/${baseBranch}`]);
+  if (!baseExists.ok) {
+    return {
+      sprint,
+      gitBranch: {
+        status: "skipped",
+        reason: "base_branch_missing",
+        baseBranch
+      }
+    };
+  }
+
+  const targetBranch = workBranchName(sprint);
+  const targetExists = await runGit(context.workspaceRoot, ["show-ref", "--verify", "--quiet", `refs/heads/${targetBranch}`]);
+  const switched = targetExists.ok
+    ? await runGit(context.workspaceRoot, ["switch", targetBranch])
+    : await runGit(context.workspaceRoot, ["switch", "-c", targetBranch, baseBranch]);
+  if (!switched.ok) {
+    throw new BorealError("BOREAL_CONFLICT", "Unable to switch to sprint branch", {
+      branch: targetBranch,
+      baseBranch,
+      stderr: switched.stderr.trim(),
+      error: switched.error
+    });
+  }
+
+  const head = await runGit(context.workspaceRoot, ["rev-parse", "HEAD"]);
+  if (!head.ok || head.stdout.trim().length === 0) {
+    return {
+      sprint,
+      gitBranch: {
+        status: "skipped",
+        reason: "head_unavailable",
+        baseBranch
+      }
+    };
+  }
+
+  const updated = withContentHash({
+    ...sprint,
+    git: {
+      branch: targetBranch,
+      headSha: head.stdout.trim()
+    }
+  });
+  await context.store.write((writer) => writer.putWorkItem(updated));
+  return {
+    sprint: updated,
+    gitBranch: {
+      status: "recorded",
+      branch: targetBranch,
+      headSha: head.stdout.trim(),
+      baseBranch
+    }
+  };
+}
+
+async function launchBaseBranchForWork(context: CliContext, work: WorkItem): Promise<string> {
+  if (work.git?.branch) {
+    return work.git.branch;
+  }
+  const reservationBranch = await context.store.read(async (reader) => {
+    const activeReservations = (await reader.listReservationsForWork(work.meta.id)).filter((reservation) => reservation.status === "active");
+    return activeReservations.find((reservation) => reservation.git?.branch)?.git?.branch;
+  });
+  return reservationBranch ?? workBranchName(work);
 }
 
 async function sprintListResult(context: CliContext, args: ParsedArgs) {
