@@ -829,6 +829,7 @@ Progress:
 - [x] knowledge
 - [x] memory
 - [x] agent
+- [x] work
 - [x] work dependencies
 - [x] health
 - [x] sprint
