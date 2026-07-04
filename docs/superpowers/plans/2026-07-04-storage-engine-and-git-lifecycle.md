@@ -585,7 +585,7 @@ Replace `await recomputeAllReadiness(writer)` at `runtime.ts:781` (closeWork) an
 
 Constructor: `new ObjectDirBorealStore({ rootDir, lock?: Partial<FileLockOptions> })`. Concurrency: same `withFileLock` + in-process write queue as `FileBorealStore`. `read()` loads all sections into an `InMemoryBorealStore` (freeze-on-load makes this one clone per record, once); `write()` does the same under the lock, runs the op via the overlay transaction, then **persists only the records the overlay touched** (write pending files, delete tombstoned files) — this is the payoff: a close touches ~5 files, not one 11 MB blob. Record ids are already filesystem-safe (`bw_work_<hex>`); still validate with `assertPathInside` before every write.
 
-- [ ] **Step 1: Failing tests**
+- [x] **Step 1: Failing tests**
 
 ```ts
 // tests/runtime/object-store.test.ts
@@ -616,9 +616,9 @@ it("rejects ids that escape the objects dir", async () => {
 });
 ```
 
-- [ ] **Step 2: Implement.** Key detail: to persist only touched records, `write()` must see the overlay. Give `InMemoryBorealStore` an internal `writeWithChangeSet(op): Promise<{ result, changes: { section, id, record | null }[] }>` that Task 5's overlay already knows how to produce (pending = upserts, deleted = nulls). `ObjectDirBorealStore.write` = lock → load → `writeWithChangeSet` → for each change, `writeTextFileAtomic(sectionPath(id), JSON.stringify(record) + "\n")` or `rm` → append buffered events to `FileEventLog` → unlock. Loading = `readdir` each section dir, `readJsonFile` each file (bounded `maxBytes: 1MB` per record), validate with the section validators already used by `runtimeSnapshotSchemaIssues` (`packages/core/src/schema-validation.ts`) **per record on write, not the whole snapshot on read** — validating 392 files you didn't touch on every read is the old disease; validate on load only under `doctor --strict`.
+- [x] **Step 2: Implement.** Key detail: to persist only touched records, `write()` must see the overlay. Give `InMemoryBorealStore` an internal `writeWithChangeSet(op): Promise<{ result, changes: { section, id, record | null }[] }>` that Task 5's overlay already knows how to produce (pending = upserts, deleted = nulls). `ObjectDirBorealStore.write` = lock → load → `writeWithChangeSet` → for each change, `writeTextFileAtomic(sectionPath(id), JSON.stringify(record) + "\n")` or `rm` → append buffered events to `FileEventLog` → unlock. Loading = `readdir` each section dir, `readJsonFile` each file (bounded `maxBytes: 1MB` per record), validate with the section validators already used by `runtimeSnapshotSchemaIssues` (`packages/core/src/schema-validation.ts`) **per record on write, not the whole snapshot on read** — validating 392 files you didn't touch on every read is the old disease; validate on load only under `doctor --strict`.
 
-- [ ] **Step 3: Run tests. Commit** `feat: per-record object store (ObjectDirBorealStore)`.
+- [x] **Step 3: Run tests. Commit** `feat: per-record object store (ObjectDirBorealStore)`.
 
 ### Task 11: Store selection + migration command
 

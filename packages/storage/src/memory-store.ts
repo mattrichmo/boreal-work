@@ -87,11 +87,17 @@ export class InMemoryBorealStore implements BorealStore {
   }
 
   async write<T>(operation: (writer: BorealWriter) => Promise<T> | T): Promise<T> {
+    const { result } = await this.writeWithChangeSet(operation);
+    return result;
+  }
+
+  async writeWithChangeSet<T>(operation: (writer: BorealWriter) => Promise<T> | T): Promise<StoreWriteResult<T>> {
     const working = createOverlayState(this.#state);
     const transaction = new MemoryTransaction(working);
     const result = await operation(transaction);
+    const changes = overlayStateChanges(working);
     this.#state = commitOverlayState(working);
-    return result;
+    return { result, changes };
   }
 
   async snapshot(): Promise<StoreSnapshot> {
@@ -118,6 +124,19 @@ export interface StoreSnapshot {
 }
 
 export type PartialStoreSeed = StoreSnapshot;
+
+export type StoreSectionName = keyof Required<StoreSnapshot>;
+
+export interface StoreChange {
+  readonly section: StoreSectionName;
+  readonly id: string;
+  readonly record: unknown | null;
+}
+
+export interface StoreWriteResult<T> {
+  readonly result: T;
+  readonly changes: readonly StoreChange[];
+}
 
 class MemoryTransaction implements BorealWriter {
   constructor(private readonly state: StoreOverlay) {}
@@ -451,6 +470,41 @@ function commitOverlayState(state: StoreOverlay): StoreState {
     projections: overlayCommit(state.projections),
     contextPacks: overlayCommit(state.contextPacks)
   };
+}
+
+function overlayStateChanges(state: StoreOverlay): StoreChange[] {
+  return [
+    ...sectionChanges("workItems", state.workItems),
+    ...sectionChanges("agentSummaries", state.agentSummaries),
+    ...sectionChanges("evidence", state.evidence),
+    ...sectionChanges("verifications", state.verifications),
+    ...sectionChanges("directiveAcknowledgements", state.directiveAcknowledgements),
+    ...sectionChanges("knowledgeSources", state.knowledgeSources),
+    ...sectionChanges("claims", state.claims),
+    ...sectionChanges("decisions", state.decisions),
+    ...sectionChanges("graphEdges", state.graphEdges),
+    ...sectionChanges("reservations", state.reservations),
+    ...sectionChanges("reviewerHeartbeats", state.reviewerHeartbeats),
+    ...sectionChanges("events", state.events),
+    ...sectionChanges("operations", state.operations),
+    ...sectionChanges("projections", state.projections),
+    ...sectionChanges("contextPacks", state.contextPacks)
+  ];
+}
+
+function sectionChanges<K, V>(section: StoreSectionName, overlay: SectionOverlay<K, V>): StoreChange[] {
+  return [
+    ...[...overlay.pending].map(([id, record]) => ({
+      section,
+      id: String(id),
+      record
+    })),
+    ...[...overlay.deleted].map((id) => ({
+      section,
+      id: String(id),
+      record: null
+    }))
+  ];
 }
 
 function createOverlay<K, V>(base: ReadonlyMap<K, V>): SectionOverlay<K, V> {

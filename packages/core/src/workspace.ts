@@ -10,6 +10,7 @@ export interface BorealWorkspacePaths {
   readonly stateFile: string;
   readonly stateLockDir: string;
   readonly eventLogFile: string;
+  readonly objectsDir: string;
 }
 
 export function resolveWorkspacePaths(rootDir: string): BorealWorkspacePaths {
@@ -19,13 +20,15 @@ export function resolveWorkspacePaths(rootDir: string): BorealWorkspacePaths {
   const stateFile = join(runtimeDir, "state.json");
   const stateLockDir = join(runtimeDir, "state.lock");
   const eventLogFile = join(borealDir, "log", "events.jsonl");
+  const objectsDir = join(borealDir, "objects");
   return {
     rootDir: absoluteRoot,
     borealDir,
     runtimeDir,
     stateFile,
     stateLockDir,
-    eventLogFile
+    eventLogFile,
+    objectsDir
   };
 }
 
