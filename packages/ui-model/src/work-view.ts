@@ -20,6 +20,7 @@ export interface WorkItemView {
   readonly activeReservationId?: string;
   readonly activeReservation?: WorkReservationView;
   readonly closedReason?: string;
+  readonly git?: WorkItem["git"];
   readonly contextSummary?: string;
   readonly directiveSummary?: WorkDirectiveSummaryView;
 }
@@ -141,6 +142,7 @@ export function toWorkItemView(input: {
     requiredCloseoutGates: input.work.requiredCloseoutGates ?? [],
     activeReservationId: input.work.reservationId,
     closedReason: input.work.closedReason,
+    git: input.work.git,
     contextSummary: input.contextPack?.summary
   };
 }

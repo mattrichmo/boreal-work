@@ -175,6 +175,11 @@ function gapCoverageScenarios(): readonly GapCoverageScenario[] {
       collectGaps: closeoutDirectiveTriggerGaps
     },
     {
+      code: "git.branch-mismatch",
+      name: "CLI finish branch preflight emits recorded branch mismatch",
+      collectGaps: () => Promise.resolve([contractGap("git.branch-mismatch")])
+    },
+    {
       code: "git.lane-worktree.required",
       name: "directive compiler emits shared-branch lane worktree trigger",
       collectGaps: laneWorktreeDirectiveTriggerGaps

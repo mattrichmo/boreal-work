@@ -73,6 +73,48 @@ describe("git branch lifecycle", () => {
 
     expect(started.gitBranch).toEqual({ status: "skipped", reason: "not_git_repository" });
   });
+
+  it("refuses to finish from the wrong branch with a repair command", async () => {
+    const rootDir = await createTestWorkspace({ git: true });
+    await runCli(rootDir, ["init", "--json"]);
+    const created = parseData<{ readonly meta: { readonly id: string } }>(
+      (await runCli(rootDir, ["work", "create", "Wrong branch", "--kind", "task", "--ready", "--json"])).stdout
+    );
+    await runCli(rootDir, ["agent", "start", created.meta.id, "--agent", "a1", "--json"]);
+    execFileSync("git", ["switch", "-c", "somewhere-else"], { cwd: rootDir, stdio: "ignore" });
+
+    const result = await runCli(rootDir, finishArgs(created.meta.id), { expectFailure: true });
+    const error = JSON.parse(result.stderr) as {
+      readonly code: string;
+      readonly gaps?: readonly Array<{ readonly code: string }>;
+      readonly details?: { readonly repairCommand?: string };
+    };
+
+    expect(error.code).toBe("BOREAL_POLICY_VIOLATION");
+    expect(error.gaps?.[0]?.code).toBe("git.branch-mismatch");
+    expect(error.details?.repairCommand).toContain("git switch work/");
+  });
+
+  it("stamps branch and head sha on the closed work item", async () => {
+    const rootDir = await createTestWorkspace({ git: true });
+    await runCli(rootDir, ["init", "--json"]);
+    const created = parseData<{ readonly meta: { readonly id: string } }>(
+      (await runCli(rootDir, ["work", "create", "Stamp branch", "--kind", "task", "--ready", "--json"])).stdout
+    );
+    await runCli(rootDir, ["agent", "start", created.meta.id, "--agent", "a1", "--json"]);
+    await writeFile(join(rootDir, "implementation.txt"), "done\n", "utf8");
+    execFileSync("git", ["add", "implementation.txt"], { cwd: rootDir, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", "implement work"], { cwd: rootDir, stdio: "ignore" });
+    const headSha = git(rootDir, ["rev-parse", "HEAD"]);
+    const branch = git(rootDir, ["symbolic-ref", "--short", "HEAD"]);
+
+    await runCli(rootDir, finishArgs(created.meta.id));
+    const show = parseData<{ readonly git?: { readonly branch: string; readonly headSha: string } }>(
+      (await runCli(rootDir, ["work", "show", created.meta.id, "--json"])).stdout
+    );
+
+    expect(show.git).toEqual({ branch, headSha });
+  });
 });
 
 async function createTestWorkspace(options: { readonly git: boolean }): Promise<string> {
@@ -89,7 +131,11 @@ async function createTestWorkspace(options: { readonly git: boolean }): Promise<
   return rootDir;
 }
 
-async function runCli(cwd: string, argv: readonly string[]): Promise<CommandRun> {
+async function runCli(
+  cwd: string,
+  argv: readonly string[],
+  options: { readonly expectFailure?: boolean } = {}
+): Promise<CommandRun> {
   let stdout = "";
   let stderr = "";
   const output: CliOutput = {
@@ -101,8 +147,13 @@ async function runCli(cwd: string, argv: readonly string[]): Promise<CommandRun>
     }
   };
   const exitCode = await main([...argv], output, cwd);
-  expect(stderr).toBe("");
-  expect(exitCode).toBe(0);
+  if (options.expectFailure) {
+    expect(exitCode).not.toBe(0);
+    expect(stderr).not.toBe("");
+  } else {
+    expect(stderr).toBe("");
+    expect(exitCode).toBe(0);
+  }
   return { exitCode, stdout, stderr };
 }
 
@@ -114,4 +165,32 @@ function parseData<T>(text: string): T {
 
 function git(cwd: string, args: readonly string[]): string {
   return execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
+}
+
+function finishArgs(workId: string): readonly string[] {
+  return [
+    "agent",
+    "finish",
+    workId,
+    "--agent",
+    "a1",
+    "--summary",
+    "Git branch lifecycle closeout.",
+    "--kind",
+    "command",
+    "--outcome",
+    "passed",
+    "--command",
+    "pnpm test",
+    "--verdict",
+    "passed",
+    "--notes",
+    "Git branch lifecycle verification.",
+    "--close",
+    "--reason",
+    "done",
+    "--dirty-path",
+    "unrelated_dirty_state: object-store workspace metadata",
+    "--json"
+  ];
 }

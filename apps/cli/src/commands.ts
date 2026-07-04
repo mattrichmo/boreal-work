@@ -4401,6 +4401,7 @@ async function agentFinishCommand(
     return { exitCode: 0 };
   }
   await assertWorkNotAlreadyClosedForAgentFinish(context, workId);
+  const finishGit = await agentFinishGitPreflight(context, workId, agentId);
 
   const closeReason = close ? requiredFlag(args, "reason") : undefined;
   const closeoutSummaryFactory = closeReason
@@ -4415,7 +4416,7 @@ async function agentFinishCommand(
       verdict,
       notes: flagValue(args, "notes")
     },
-    close: closeReason ? { reason: closeReason, agentSummary: closeoutSummaryFactory } : undefined,
+    close: closeReason ? { reason: closeReason, agentSummary: closeoutSummaryFactory, ...(finishGit ? { git: finishGit } : {}) } : undefined,
     release
   });
   const closeoutSummaryArtifact = finished.agentSummary
@@ -5827,6 +5828,60 @@ async function attachGitBranchForClaim(
       status: "recorded",
       ...git
     }
+  };
+}
+
+async function agentFinishGitPreflight(
+  context: CliContext,
+  workId: WorkId,
+  agentId: string
+): Promise<NonNullable<WorkItem["git"]> | undefined> {
+  const normalizedAgentId = normalizeActorId(agentId);
+  const reservation = await context.store.read(async (reader) => {
+    const work = await reader.getWorkItem(workId);
+    const activeReservations = (await reader.listReservationsForWork(workId)).filter((candidate) => candidate.status === "active");
+    return work?.reservationId
+      ? activeReservations.find((candidate) => candidate.meta.id === work.reservationId)
+      : activeReservations.find((candidate) => String(candidate.agentId) === normalizedAgentId);
+  });
+  if (!reservation?.git) {
+    return undefined;
+  }
+
+  const branch = await runGit(context.workspaceRoot, ["symbolic-ref", "--quiet", "--short", "HEAD"]);
+  const currentBranch = branch.ok ? branch.stdout.trim() : "HEAD";
+  if (currentBranch !== reservation.git.branch) {
+    const gap: EnforcementGap = {
+      code: "git.branch-mismatch",
+      subjectType: "work",
+      subjectId: workId,
+      data: {
+        observed: [currentBranch],
+        reason: `finish must run from recorded work branch ${reservation.git.branch}`
+      }
+    };
+    throw new BorealError(
+      "BOREAL_POLICY_VIOLATION",
+      "Agent finish must run from the recorded work branch",
+      {
+        workId,
+        reservationId: reservation.meta.id,
+        expectedBranch: reservation.git.branch,
+        actualBranch: currentBranch,
+        repairCommand: `git switch ${reservation.git.branch}`,
+        gaps: [gap]
+      },
+      [gap]
+    );
+  }
+
+  const head = await runGit(context.workspaceRoot, ["rev-parse", "HEAD"]);
+  if (!head.ok || head.stdout.trim().length === 0) {
+    return undefined;
+  }
+  return {
+    branch: reservation.git.branch,
+    headSha: head.stdout.trim()
   };
 }
 

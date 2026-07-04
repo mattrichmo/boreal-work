@@ -275,6 +275,16 @@ export function workItemSchemaIssues(value: unknown, path = "$"): readonly Schem
   if (value.closedReason !== undefined) {
     issues.push(...stringIssue(value.closedReason, `${path}.closedReason`, schemaId));
   }
+  if (value.git !== undefined) {
+    if (!isRecord(value.git)) {
+      issues.push(issue(schemaId, `${path}.git`, "must be an object"));
+    } else {
+      issues.push(
+        ...nonEmptyStringIssue(value.git.branch, `${path}.git.branch`, schemaId),
+        ...patternStringIssue(value.git.headSha, `${path}.git.headSha`, schemaId, /^[a-f0-9]{40,64}$/)
+      );
+    }
+  }
 
   return issues;
 }

@@ -145,6 +145,7 @@ export interface FinishReservedWorkInput {
     readonly reason: string;
     readonly agentSummary?: FinishReservedWorkSummaryFactory;
     readonly agentSummaryIds?: readonly AgentSummaryId[];
+    readonly git?: NonNullable<WorkItem["git"]>;
   };
   readonly release?: boolean;
 }
@@ -895,6 +896,12 @@ export function createBorealRuntime(options: BorealRuntimeOptions = {}): BorealR
             closeoutSummaries
           });
           closedWork = closeWorkDomain(gatedWork, availableVerifications, policy, current, actor, input.close.reason);
+          if (input.close.git) {
+            closedWork = withContentHash({
+              ...closedWork,
+              git: input.close.git
+            });
+          }
           finalWork = closedWork;
         }
 

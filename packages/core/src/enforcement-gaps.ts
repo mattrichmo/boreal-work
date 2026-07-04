@@ -23,6 +23,7 @@ export const ENFORCEMENT_GAP_CODES = [
   "directive.workflow-next.available",
   "closeout.user-summary.required",
   "git.checkpoint.required",
+  "git.branch-mismatch",
   "git.lane-worktree.required",
   "doctor.recovery.required",
   "memory.reconcile-source.required",

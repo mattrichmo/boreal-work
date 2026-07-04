@@ -759,7 +759,7 @@ it("claim in a non-git directory succeeds with a finding, not an error", async (
 **Interfaces:**
 - Produces: `agent finish` fails with `BOREAL_POLICY_VIOLATION` + gap `git.branch-mismatch` when the reservation has `git.branch` and HEAD is on a different branch; fails with the existing checkpoint-gap machinery when tracked files are dirty (reuse `CHECKPOINT_DIRTY_PATH_REASON_CODES` — a `--checkpoint-reason <code>` flag maps to those codes for legitimate skips). On success, stamps `{ branch, headSha }` on the closed work item. The error's `details.repairCommand` must be the exact `git switch <branch>` to run — agents follow `nextCommand`s.
 
-- [ ] **Step 1: Failing tests**
+- [x] **Step 1: Failing tests**
 
 ```ts
 it("refuses to finish from the wrong branch with a repair command", async () => {
@@ -775,7 +775,7 @@ it("stamps branch and head sha on the closed work item", async () => {
 });
 ```
 
-- [ ] **Step 2: Implement, run, commit** `feat: finish gate enforces recorded branch and stamps head sha`.
+- [x] **Step 2: Implement, run, commit** `feat: finish gate enforces recorded branch and stamps head sha`.
 
 ### Task 16: Sprint launch branches off the epic branch
 

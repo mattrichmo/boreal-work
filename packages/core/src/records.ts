@@ -134,6 +134,10 @@ export interface WorkItem {
   readonly reservationId?: ReservationId;
   readonly closedAt?: IsoTimestamp;
   readonly closedReason?: string;
+  readonly git?: {
+    readonly branch: string;
+    readonly headSha: string;
+  };
 }
 
 export interface ReviewerHeartbeatRecord {
