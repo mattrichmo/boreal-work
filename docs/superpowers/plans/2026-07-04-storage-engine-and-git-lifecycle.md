@@ -698,7 +698,7 @@ export function shortWorkId(id: string): string;        // last 8 hex chars of b
 export function slugify(title: string, maxLen?: number): string; // lowercase, [a-z0-9-], collapse dashes, default maxLen 40
 ```
 
-- [ ] **Step 1: Failing tests**
+- [x] **Step 1: Failing tests**
 
 ```ts
 it("mints deterministic branch names", () => {
@@ -711,7 +711,7 @@ it("slugify strips unsafe chars and caps length", () => {
 it("same input always yields same branch", () => { /* call twice, expect equal */ });
 ```
 
-- [ ] **Step 2: Implement (≈30 lines), run tests, commit** `feat: deterministic work branch naming`.
+- [x] **Step 2: Implement (≈30 lines), run tests, commit** `feat: deterministic work branch naming`.
 
 ### Task 14: Claim records and enforces the branch
 
