@@ -164,6 +164,7 @@ import {
   type SyncStatusResult
 } from "./commands/sync.js";
 import { vaultCommand } from "./commands/vault.js";
+import { workCommand as workGroupCommand } from "./commands/work.js";
 import {
   clearCircuitBreakers,
   type CommandResult
@@ -1013,7 +1014,16 @@ export async function runCommand(args: ParsedArgs, output: CliOutput, cwd: strin
         result = await directiveAcknowledgementCommand(action, rest, context, args, commandOutput, json);
         break;
       case "dep":
-        result = await depCommand(action, rest, context, args, commandOutput, json);
+        result = await workGroupCommand("dep", action, rest, context, args, commandOutput, json, {
+          dependencyTypeFromArgs,
+          resolveWorkId,
+          requiredPositional,
+          dependencyTreeForWork: (workId, workItems, graphEdges) =>
+            dependencyTreeForWork(workId, workItems as readonly WorkItem[], graphEdges as readonly GraphEdge[]),
+          formatRecordWithAgentDirectives,
+          dependencyTreeRows: (tree) => dependencyTreeRows(tree as DependencyTreeNode),
+          dependencyCyclesFromGraph: (graphEdges) => dependencyCyclesFromGraph(graphEdges as readonly GraphEdge[])
+        });
         break;
       case "evidence":
         result = await evidenceCommand(action, rest, context, args, commandOutput, json, {
@@ -6554,53 +6564,6 @@ function closeoutGateRefMatches(gate: RequiredCloseoutGate, ref: CloseoutGateRef
     return gate.id === ref.id;
   }
   return gate.kind === ref.kind && (!ref.scope || gate.scope === ref.scope);
-}
-
-async function depCommand(
-  action: string | undefined,
-  rest: readonly string[],
-  context: CliContext,
-  args: ParsedArgs,
-  output: CliOutput,
-  json: boolean
-): Promise<CommandResult> {
-  switch (action) {
-    case "add": {
-      const type = dependencyTypeFromArgs(args);
-      const blockedWorkId = await resolveWorkId(context, requiredPositional(rest, 0, "dependent work reference"));
-      const blockingWorkId = await resolveWorkId(context, requiredPositional(rest, 1, "dependency work reference"));
-      const work = await context.runtime.addBlockingDependency({ blockedWorkId, blockingWorkId });
-      output.write(formatRecord({ type, work }, json));
-      return { exitCode: 0 };
-    }
-    case "remove": {
-      const type = dependencyTypeFromArgs(args);
-      const blockedWorkId = await resolveWorkId(context, requiredPositional(rest, 0, "dependent work reference"));
-      const blockingWorkId = await resolveWorkId(context, requiredPositional(rest, 1, "dependency work reference"));
-      const work = await context.runtime.removeBlockingDependency({ blockedWorkId, blockingWorkId });
-      output.write(formatRecord({ type, work }, json));
-      return { exitCode: 0 };
-    }
-    case "tree": {
-      const workId = await resolveWorkId(context, requiredPositional(rest, 0, "work reference"));
-      const tree = await context.store.read(async (reader) =>
-        dependencyTreeForWork(workId, await reader.listWorkItems(), await reader.listGraphEdges())
-      );
-      output.write(json ? await formatRecordWithAgentDirectives(context, args, tree, true, { subjectWorkId: workId }) : table(dependencyTreeRows(tree)));
-      return { exitCode: 0 };
-    }
-    case "cycles": {
-      const cycles = await context.store.read(async (reader) => dependencyCyclesFromGraph(await reader.listGraphEdges()));
-      output.write(
-        json
-          ? formatRecord(cycles, true)
-          : table(cycles.map((cycle, index) => ({ cycle: index + 1, path: cycle.cycle.join(" -> ") })))
-      );
-      return { exitCode: 0 };
-    }
-    default:
-      throw new BorealError("BOREAL_INVALID_INPUT", `Unknown dep command: ${action ?? ""}`);
-  }
 }
 
 async function summaryCommand(

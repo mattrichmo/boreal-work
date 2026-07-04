@@ -829,6 +829,7 @@ Progress:
 - [x] knowledge
 - [x] memory
 - [x] agent
+- [x] work dependencies
 
 ### Task 19: Directive machinery audit (decision task, not deletion task)
 
