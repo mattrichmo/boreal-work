@@ -64,6 +64,7 @@ export interface BorealReader {
   listActiveReservationsForAgent(agentId: string): Promise<readonly AgentReservation[]>;
   getReviewerHeartbeat(id: ReviewerHeartbeatId): Promise<ReviewerHeartbeatRecord | undefined>;
   listReviewerHeartbeats(): Promise<readonly ReviewerHeartbeatRecord[]>;
+  headSeq(): Promise<number>;
   listEvents(): Promise<readonly RuntimeEvent[]>;
   getOperation(id: OperationId): Promise<RuntimeOperation | undefined>;
   listOperations(): Promise<readonly RuntimeOperation[]>;

@@ -7,11 +7,17 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import {
   BorealError,
+  createRecordMeta,
   nowIso,
+  withContentHash,
   type ActorRef,
   type ContextPack,
   type DirectiveAcknowledgementRecord,
-  type ProjectionRecord
+  type EventId,
+  type OperationId,
+  type ProjectionRecord,
+  type RuntimeEvent,
+  type RuntimeOperation
 } from "@boreal/core";
 import { createBorealRuntime } from "@boreal/engine";
 import { recordEvidence } from "@boreal/evidence-engine";
@@ -155,6 +161,31 @@ describe("file-backed store", () => {
     expect(doc.schemaVersion).toBe("boreal.file-store.v2");
     expect(doc.projections).toBeUndefined();
     expect(doc.contextPacks).toBeUndefined();
+  });
+
+  it("routes events and operations through the append-only event log", async () => {
+    const rootDir = await makeTempWorkspace();
+    const store = new FileBorealStore({ rootDir, lock });
+    const event = sampleEvent("bw_event_000000000001" as EventId);
+    const operation = sampleOperation("bw_operation_000000000001" as OperationId, event.meta.id);
+
+    await store.write(async (writer) => {
+      await writer.putEvent(event);
+      await writer.putOperation(operation);
+    });
+
+    const doc = JSON.parse(await readFile(store.stateFile, "utf8")) as Record<string, unknown>;
+    expect(doc.events).toBeUndefined();
+    expect(doc.operations).toBeUndefined();
+    const logLines = (await readFile(store.eventLogFile, "utf8")).trim().split("\n");
+    expect(logLines).toHaveLength(2);
+
+    const reopened = new FileBorealStore({ rootDir, lock });
+    await reopened.read(async (reader) => {
+      expect(await reader.headSeq()).toBe(2);
+      expect(await reader.listEvents()).toEqual([event]);
+      expect(await reader.listOperations()).toEqual([operation]);
+    });
   });
 
   it("rebuilds context packs on miss after derived sections are evicted", async () => {
@@ -778,6 +809,41 @@ function directiveAcknowledgementFixture(subjectId: string): DirectiveAcknowledg
     handoffIds: ["handoff.session.deadbeefdead"],
     acknowledgedAt: timestamp
   };
+}
+
+function sampleEvent(id: EventId): RuntimeEvent {
+  return withContentHash({
+    meta: createRecordMeta({
+      id,
+      actor,
+      now: "2026-01-01T00:00:00.000Z"
+    }),
+    type: "file-store.event-log.test",
+    subjectId: "file-store",
+    subjectType: "workspace",
+    payload: {}
+  } satisfies RuntimeEvent);
+}
+
+function sampleOperation(id: OperationId, eventId: EventId): RuntimeOperation {
+  return withContentHash({
+    meta: createRecordMeta({
+      id,
+      actor,
+      now: "2026-01-01T00:00:00.000Z"
+    }),
+    sessionId: "file-store-session",
+    commandPath: "file-store test",
+    argv: ["file-store", "test"],
+    actorId: actor.id,
+    startedAt: "2026-01-01T00:00:00.000Z",
+    finishedAt: "2026-01-01T00:00:01.000Z",
+    exitCode: 0,
+    status: "succeeded",
+    stateChanged: true,
+    generatedArtifactsChanged: false,
+    eventIds: [eventId]
+  } satisfies RuntimeOperation);
 }
 
 function emptyStateDocument(overrides: Record<string, readonly unknown[]> = {}): Record<string, unknown> {

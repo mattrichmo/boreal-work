@@ -238,6 +238,10 @@ class MemoryTransaction implements BorealWriter {
     return overlayValues(this.state.reviewerHeartbeats);
   }
 
+  async headSeq(): Promise<number> {
+    return overlayValues(this.state.events).length + overlayValues(this.state.operations).length;
+  }
+
   async listEvents(): Promise<readonly RuntimeEvent[]> {
     return overlayValues(this.state.events);
   }

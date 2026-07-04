@@ -1817,7 +1817,7 @@ async function ledgerEnvelopeMetadata(context: CliContext): Promise<{ readonly l
 }
 
 async function currentLedgerSeq(context: CliContext): Promise<number> {
-  return (await context.store.read((reader) => reader.listEvents())).length;
+  return context.store.read((reader) => reader.headSeq());
 }
 
 function commandErrorExitCode(error: unknown): number {

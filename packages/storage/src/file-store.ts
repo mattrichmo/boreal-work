@@ -4,11 +4,15 @@ import {
   BorealError,
   assertPathInside,
   assertRealPathInside,
+  hashContent,
   readJsonFile,
   resolveWorkspacePaths,
-  runtimeSnapshotSchemaIssues
+  runtimeSnapshotSchemaIssues,
+  type RuntimeEvent,
+  type RuntimeOperation
 } from "@boreal/core";
 
+import { FileEventLog, type EventLogEntry } from "./event-log.js";
 import { normalizeFileLockOptions, withFileLock, type FileLockOptions } from "./file-lock.js";
 import { InMemoryBorealStore, type StoreSnapshot } from "./memory-store.js";
 import type { BorealReader, BorealStore, BorealWriter } from "./ports.js";
@@ -24,7 +28,7 @@ export interface FileBorealStoreOptions {
 export const FILE_STORE_SCHEMA_VERSION = "boreal.file-store.v2";
 const LEGACY_FILE_STORE_SCHEMA_VERSION = "boreal.file-store.v1";
 
-type PersistedStoreSnapshot = Omit<Required<StoreSnapshot>, "projections" | "contextPacks">;
+type PersistedStoreSnapshot = Omit<Required<StoreSnapshot>, "events" | "operations" | "projections" | "contextPacks">;
 
 interface StateDocument extends PersistedStoreSnapshot {
   readonly schemaVersion: typeof FILE_STORE_SCHEMA_VERSION;
@@ -33,24 +37,30 @@ interface StateDocument extends PersistedStoreSnapshot {
 export class FileBorealStore implements BorealStore {
   readonly rootDir: string;
   readonly stateFile: string;
+  readonly eventLogFile: string;
   readonly lockDir: string;
   readonly lockOptions: FileLockOptions;
 
   #writeQueue: Promise<void> = Promise.resolve();
+  #eventLog: FileEventLog;
 
   constructor(options: FileBorealStoreOptions) {
     const paths = resolveWorkspacePaths(options.rootDir);
     this.rootDir = paths.rootDir;
     this.stateFile = resolve(options.stateFile ?? paths.stateFile);
+    this.eventLogFile = paths.eventLogFile;
     this.lockDir = resolve(options.lockDir ?? (options.stateFile ? `${this.stateFile}.lock` : paths.stateLockDir));
     this.lockOptions = normalizeFileLockOptions(options.lock);
+    this.#eventLog = new FileEventLog({ path: this.eventLogFile });
     assertPathInside(this.rootDir, this.stateFile);
+    assertPathInside(this.rootDir, this.eventLogFile);
     assertPathInside(this.rootDir, this.lockDir);
   }
 
   async read<T>(operation: (reader: BorealReader) => Promise<T> | T): Promise<T> {
-    const memory = new InMemoryBorealStore(await this.loadSnapshot());
-    return memory.read(operation);
+    const loaded = await this.loadSnapshotWithLog();
+    const memory = new InMemoryBorealStore(loaded.snapshot);
+    return memory.read((reader) => operation(withHeadSeqReader(reader, async () => (await this.#eventLog.head()).seq)));
   }
 
   async write<T>(operation: (writer: BorealWriter) => Promise<T> | T): Promise<T> {
@@ -65,15 +75,46 @@ export class FileBorealStore implements BorealStore {
   private async writeOnce<T>(operation: (writer: BorealWriter) => Promise<T> | T): Promise<T> {
     await this.assertSafePaths();
     return withFileLock(this.lockDir, this.lockOptions, async () => {
-      const memory = new InMemoryBorealStore(await this.loadSnapshot());
-      const result = await memory.write(operation);
-      await this.saveSnapshot(await memory.snapshot());
+      const loaded = await this.loadSnapshotWithLog();
+      const memory = new InMemoryBorealStore(loaded.snapshot);
+      const baseHeadSeq = (await this.#eventLog.head()).seq;
+      const result = await memory.write((writer) => operation(withHeadSeqWriter(writer, loaded.snapshot, baseHeadSeq)));
+      const snapshot = await memory.snapshot();
+      const pendingLogRecords = pendingLogRecordsFromSnapshot(loaded.snapshot, snapshot, loaded.backfillLog);
+      await this.saveSnapshot(snapshot);
+      for (const pending of pendingLogRecords) {
+        await this.#eventLog.append(pending.kind, pending.record);
+      }
       return result;
     });
   }
 
-  private async loadSnapshot(): Promise<StoreSnapshot> {
+  private async loadSnapshotWithLog(): Promise<{
+    readonly snapshot: StoreSnapshot;
+    readonly backfillLog: boolean;
+  }> {
     await assertRealPathInside(this.rootDir, this.stateFile);
+    const documentSnapshot = await this.loadDocumentSnapshot();
+    const logEntries = await this.#eventLog.readAll();
+    const logSnapshot = snapshotFromLogEntries(logEntries);
+    const hasLogRecords = logEntries.length > 0;
+    const legacyEvents = documentSnapshot.events ?? [];
+    const legacyOperations = documentSnapshot.operations ?? [];
+    return {
+      snapshot: {
+        ...documentSnapshot,
+        ...(hasLogRecords
+          ? logSnapshot
+          : {
+              events: legacyEvents,
+              operations: legacyOperations
+            })
+      },
+      backfillLog: !hasLogRecords && (legacyEvents.length > 0 || legacyOperations.length > 0)
+    };
+  }
+
+  private async loadDocumentSnapshot(): Promise<StoreSnapshot> {
     try {
       return documentToSnapshot(
         await readJsonFile(this.stateFile, {
@@ -98,6 +139,7 @@ export class FileBorealStore implements BorealStore {
 
   private async assertSafePaths(): Promise<void> {
     await assertRealPathInside(this.rootDir, this.stateFile);
+    await assertRealPathInside(this.rootDir, this.eventLogFile);
     await assertRealPathInside(this.rootDir, this.lockDir);
   }
 }
@@ -115,9 +157,7 @@ function snapshotToDocument(snapshot: StoreSnapshot): StateDocument {
     decisions: snapshot.decisions ?? [],
     graphEdges: snapshot.graphEdges ?? [],
     reservations: snapshot.reservations ?? [],
-    reviewerHeartbeats: snapshot.reviewerHeartbeats ?? [],
-    events: snapshot.events ?? [],
-    operations: snapshot.operations ?? []
+    reviewerHeartbeats: snapshot.reviewerHeartbeats ?? []
   };
 }
 
@@ -144,7 +184,7 @@ function documentToSnapshot(value: unknown): StoreSnapshot {
     graphEdges: readArray(value, "graphEdges"),
     reservations: readArray(value, "reservations"),
     reviewerHeartbeats: readOptionalArray(value, "reviewerHeartbeats"),
-    events: readArray(value, "events"),
+    events: readOptionalArray(value, "events"),
     operations: readOptionalArray(value, "operations"),
     projections: [],
     contextPacks: []
@@ -157,6 +197,136 @@ function documentToSnapshot(value: unknown): StoreSnapshot {
     });
   }
   return snapshot;
+}
+
+function snapshotFromLogEntries(entries: readonly EventLogEntry[]): Pick<StoreSnapshot, "events" | "operations"> {
+  return {
+    events: latestLogRecords<RuntimeEvent>(entries, "event"),
+    operations: latestLogRecords<RuntimeOperation>(entries, "operation")
+  };
+}
+
+function latestLogRecords<TRecord extends RuntimeEvent | RuntimeOperation>(
+  entries: readonly EventLogEntry[],
+  kind: EventLogEntry["kind"]
+): readonly TRecord[] {
+  const records = new Map<string, TRecord>();
+  for (const entry of entries) {
+    if (entry.kind !== kind) {
+      continue;
+    }
+    const record = entry.record as TRecord;
+    if (kind === "operation" && isOperationTombstone(record)) {
+      records.delete(record.meta.id);
+      continue;
+    }
+    records.delete(record.meta.id);
+    records.set(record.meta.id, record);
+  }
+  return [...records.values()];
+}
+
+function pendingLogRecordsFromSnapshot(
+  before: StoreSnapshot,
+  after: StoreSnapshot,
+  backfillLog: boolean
+): Array<{ readonly kind: EventLogEntry["kind"]; readonly record: RuntimeEvent | RuntimeOperation }> {
+  return [
+    ...pendingRecords(before.events ?? [], after.events ?? [], "event", backfillLog),
+    ...pendingRecords(before.operations ?? [], after.operations ?? [], "operation", backfillLog),
+    ...deletedOperationRecords(before.operations ?? [], after.operations ?? [])
+  ];
+}
+
+function pendingRecords<TRecord extends RuntimeEvent | RuntimeOperation>(
+  before: readonly TRecord[],
+  after: readonly TRecord[],
+  kind: EventLogEntry["kind"],
+  includeExisting: boolean
+): Array<{ readonly kind: EventLogEntry["kind"]; readonly record: TRecord }> {
+  const beforeById = new Map(before.map((record) => [record.meta.id, record]));
+  return after
+    .filter((record) => includeExisting || recordChanged(beforeById.get(record.meta.id), record))
+    .map((record) => ({ kind, record }));
+}
+
+function recordChanged<TRecord extends RuntimeEvent | RuntimeOperation>(before: TRecord | undefined, after: TRecord): boolean {
+  return before === undefined || hashContent(before) !== hashContent(after);
+}
+
+function deletedOperationRecords(
+  before: readonly RuntimeOperation[],
+  after: readonly RuntimeOperation[]
+): Array<{ readonly kind: EventLogEntry["kind"]; readonly record: RuntimeOperation }> {
+  const afterIds = new Set(after.map((record) => record.meta.id));
+  return before
+    .filter((record) => !afterIds.has(record.meta.id))
+    .map((record) => ({ kind: "operation", record: operationTombstone(record) }));
+}
+
+function operationTombstone(record: RuntimeOperation): RuntimeOperation {
+  return { ...record, tombstone: true } as RuntimeOperation;
+}
+
+function isOperationTombstone(record: RuntimeEvent | RuntimeOperation): boolean {
+  return isRecord(record) && record.tombstone === true;
+}
+
+function withHeadSeqReader<TReader extends BorealReader>(
+  reader: TReader,
+  headSeq: () => Promise<number>
+): TReader {
+  return new Proxy(reader, {
+    get(target, property, receiver) {
+      if (property === "headSeq") {
+        return headSeq;
+      }
+      return Reflect.get(target, property, receiver);
+    }
+  });
+}
+
+function withHeadSeqWriter<TWriter extends BorealWriter>(
+  writer: TWriter,
+  before: StoreSnapshot,
+  baseHeadSeq: number
+): TWriter {
+  const pending = new Set<string>();
+  const beforeEvents = new Map((before.events ?? []).map((record) => [record.meta.id, record]));
+  const beforeOperations = new Map((before.operations ?? []).map((record) => [record.meta.id, record]));
+  return new Proxy(writer, {
+    get(target, property, receiver) {
+      if (property === "headSeq") {
+        return async () => baseHeadSeq + pending.size;
+      }
+      if (property === "putEvent") {
+        return async (record: RuntimeEvent) => {
+          await target.putEvent(record);
+          if (recordChanged(beforeEvents.get(record.meta.id), record)) {
+            pending.add(`event:${record.meta.id}`);
+          }
+        };
+      }
+      if (property === "putOperation") {
+        return async (record: RuntimeOperation) => {
+          await target.putOperation(record);
+          if (recordChanged(beforeOperations.get(record.meta.id), record)) {
+            pending.add(`operation:${record.meta.id}`);
+          }
+        };
+      }
+      if (property === "deleteOperation") {
+        return async (id: RuntimeOperation["meta"]["id"]) => {
+          const deleted = await target.deleteOperation(id);
+          if (deleted && beforeOperations.has(id)) {
+            pending.add(`operation:${id}:delete`);
+          }
+          return deleted;
+        };
+      }
+      return Reflect.get(target, property, receiver);
+    }
+  });
 }
 
 function readArray<T = unknown>(value: Record<string, unknown>, key: string): readonly T[] {

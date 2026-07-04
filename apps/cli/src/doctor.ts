@@ -29,6 +29,7 @@ import {
   type ProjectRegistryMemoryLayout,
   type ProjectionId,
   type ProjectionRecord,
+  type RuntimeEvent,
   type RuntimeOperation,
   type VerificationRecord,
   type WorkId,
@@ -36,7 +37,7 @@ import {
 } from "@boreal/core";
 import { inspectDaemonStatus, type DaemonStatusResult } from "@boreal/daemon";
 import { buildContextPack, buildContextProjection } from "@boreal/search";
-import { FILE_STORE_SCHEMA_VERSION, breakStaleFileLock, inspectSQLiteCache } from "@boreal/storage";
+import { FILE_STORE_SCHEMA_VERSION, FileEventLog, breakStaleFileLock, inspectSQLiteCache } from "@boreal/storage";
 import { deriveReadinessStatus } from "@boreal/work-engine";
 
 import type { CliContext } from "./context.js";
@@ -79,9 +80,7 @@ const STATE_SECTIONS = [
   "claims",
   "decisions",
   "graphEdges",
-  "reservations",
-  "events",
-  "operations"
+  "reservations"
 ] as const;
 
 const LEGACY_FILE_STORE_SCHEMA_VERSION = "boreal.file-store.v1";
@@ -119,6 +118,9 @@ export async function runDoctor(context: CliContext, fix: boolean, strict = fals
   const lockDiagnostics = await validateRuntimeLocks(context, fix);
   diagnostics.push(...lockDiagnostics.diagnostics);
   fixed = fixed || lockDiagnostics.fixed;
+  const eventLogDiagnostics = await validateEventLog(context, fix);
+  diagnostics.push(...eventLogDiagnostics.diagnostics);
+  fixed = fixed || eventLogDiagnostics.fixed;
 
   diagnostics.push(await validateGitWorktree(context));
   const projectSetupDiagnostics = await validateProjectSetup(context, fix);
@@ -140,7 +142,21 @@ export async function runDoctor(context: CliContext, fix: boolean, strict = fals
   validateStateSections(state, diagnostics);
   validateMissingIds(state, diagnostics);
   validateDuplicateIds(state, diagnostics);
-  const schemaIssues = validateSchemaConformance(state, diagnostics);
+  let logicalLogRecords:
+    | {
+        readonly events: readonly RuntimeEvent[];
+        readonly operations: readonly RuntimeOperation[];
+      }
+    | undefined;
+  try {
+    logicalLogRecords = await context.store.read(async (reader) => ({
+      events: await reader.listEvents(),
+      operations: await reader.listOperations()
+    }));
+  } catch {
+    logicalLogRecords = undefined;
+  }
+  const schemaIssues = validateSchemaConformance(state, diagnostics, logicalLogRecords);
   diagnostics.push(...validateAgentDirectiveHealth());
 
   const storeDiagnostics = await validateStoreRecords(context, fix, state);
@@ -295,6 +311,57 @@ async function validateRuntimeLocks(
   }
 
   return { fixed, diagnostics };
+}
+
+async function validateEventLog(
+  context: CliContext,
+  fix: boolean
+): Promise<{
+  readonly fixed: boolean;
+  readonly diagnostics: readonly Diagnostic[];
+}> {
+  const log = new FileEventLog({ path: context.paths.eventLogFile });
+  const verification = await log.verify();
+  if (verification.ok) {
+    return {
+      fixed: false,
+      diagnostics: [
+        {
+          code: "event_log.chain",
+          severity: "ok",
+          message: "Append-only event log hash chain verifies"
+        }
+      ]
+    };
+  }
+  if (fix) {
+    const rewritten = await log.rechain();
+    return {
+      fixed: rewritten > 0,
+      diagnostics: [
+        {
+          code: "event_log.chain",
+          severity: "fixed",
+          message: "Re-chained append-only event log after merge drift",
+          details: { brokenAtSeq: verification.brokenAtSeq, rewritten }
+        }
+      ]
+    };
+  }
+  return {
+    fixed: false,
+    diagnostics: [
+      {
+        code: "event_log.chain",
+        severity: "error",
+        message: "Append-only event log hash chain is broken; run `bwrk doctor --fix`",
+        details: {
+          brokenAtSeq: verification.brokenAtSeq,
+          repairCommand: "bwrk doctor --fix --json"
+        }
+      }
+    ]
+  };
 }
 
 async function validateGitWorktree(context: CliContext): Promise<Diagnostic> {
@@ -1084,9 +1151,6 @@ async function readStateDocument(
 function validateStateSections(state: Record<string, unknown>, diagnostics: Diagnostic[]): void {
   for (const section of STATE_SECTIONS) {
     const value = state[section];
-    if (value === undefined && section === "operations") {
-      continue;
-    }
     if (!Array.isArray(value)) {
       diagnostics.push({
         code: "state.section",
@@ -1152,7 +1216,11 @@ function validateDuplicateIds(state: Record<string, unknown>, diagnostics: Diagn
 
 function validateSchemaConformance(
   state: Record<string, unknown>,
-  diagnostics: Diagnostic[]
+  diagnostics: Diagnostic[],
+  logicalLogRecords?: {
+    readonly events: readonly RuntimeEvent[];
+    readonly operations: readonly RuntimeOperation[];
+  }
 ): ReturnType<typeof runtimeSnapshotSchemaIssues> {
   const issues = runtimeSnapshotSchemaIssues({
     workItems: stateSection(state, "workItems"),
@@ -1165,8 +1233,8 @@ function validateSchemaConformance(
     decisions: stateSection(state, "decisions"),
     graphEdges: stateSection(state, "graphEdges"),
     reservations: stateSection(state, "reservations"),
-    events: stateSection(state, "events"),
-    operations: stateSection(state, "operations"),
+    events: logicalLogRecords?.events ?? stateSection(state, "events"),
+    operations: logicalLogRecords?.operations ?? stateSection(state, "operations"),
     projections: stateSection(state, "projections"),
     contextPacks: stateSection(state, "contextPacks")
   });
@@ -1208,8 +1276,10 @@ async function validateStoreRecords(
       const rawContextPacks = stateSection<ContextPack>(state, "contextPacks");
       const rawGraphEdges = stateSection<GraphEdge>(state, "graphEdges");
       const rawReservations = stateSection<AgentReservation>(state, "reservations");
-      const rawEvents = stateSection<Record<string, unknown>>(state, "events");
-      const rawOperations = stateSection<RuntimeOperation>(state, "operations");
+      const [rawEvents, rawOperations] = await context.store.read(async (reader) => [
+        await reader.listEvents(),
+        await reader.listOperations()
+      ]);
       const rawProjections = stateSection<ProjectionRecord>(state, "projections");
       const malformedRecords = [
         ...malformedIndexes(rawWorkItems, isDoctorWorkItem, "workItems"),
@@ -1246,7 +1316,7 @@ async function validateStoreRecords(
       const summaryArtifactUris = new Set(agentSummaries.flatMap((summary) => (summary.artifactUri ? [summary.artifactUri] : [])));
       const operationById = new Map<string, RuntimeOperation>(operations.map((operation) => [operation.meta.id, operation]));
       const eventById = new Map<string, Record<string, unknown>>();
-      for (const event of rawEvents) {
+      for (const event of rawEvents as unknown as readonly Record<string, unknown>[]) {
         const eventId = readRecordId(event, "events");
         if (eventId) {
           eventById.set(eventId, event);

@@ -999,7 +999,7 @@ export function createBorealRuntime(options: BorealRuntimeOptions = {}): BorealR
 
     async rebuildProjections(options = {}): Promise<readonly WorkItemView[]> {
       return store.write(async (writer) => {
-        const ledgerSeq = (await writer.listEvents()).length + 1;
+        const ledgerSeq = await writer.headSeq() + 1;
         const workItems = await writer.listWorkItems();
         const sources = await writer.listKnowledgeSources();
         const claims = await writer.listClaims();
@@ -2210,7 +2210,7 @@ async function refreshWorkContext(
   actor: ActorRef,
   current: IsoTimestamp
 ): Promise<ContextPack> {
-  const ledgerSeq = (await writer.listEvents()).length + 1;
+  const ledgerSeq = await writer.headSeq() + 1;
   const graphWork = await workWithGraphDependencies(writer, work);
   const evidence = await writer.listEvidenceForSubject(work.meta.id);
   const sources = await writer.listKnowledgeSources();

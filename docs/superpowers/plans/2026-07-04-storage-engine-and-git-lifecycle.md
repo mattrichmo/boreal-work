@@ -363,7 +363,7 @@ function overlayCommit<K, V>(o: SectionOverlay<K, V>): Map<K, V> {
 **Interfaces:**
 - Produces: `FILE_STORE_SCHEMA_VERSION = "boreal.file-store.v2"`; the persisted document has **no** `projections` / `contextPacks` sections. Loader accepts v1 (silently dropping those sections) and v2. Context packs live only in memory for the life of a process; `getContextPack(workId)` rebuilds on miss via the existing `refreshWorkContext` logic instead of throwing "run context rebuild".
 
-- [ ] **Step 1: Failing tests**
+- [x] **Step 1: Failing tests**
 
 ```ts
 it("loads a v1 state file and drops derived sections", async () => {
@@ -384,9 +384,9 @@ it("writes v2 without derived sections", async () => {
 });
 ```
 
-- [ ] **Step 2: Implement.** In `documentToSnapshot`, accept `v1` **or** `v2`; for v1, ignore `projections`/`contextPacks`. In `snapshotToDocument`, omit both keys. In `runtime.ts` `getContextPack`, on cache miss call the module-level `refreshWorkContext(writer, work, actor, now)` inside a `store.write` and return the pack (replacing the `BOREAL_NOT_FOUND` throw at `runtime.ts:1041`).
+- [x] **Step 2: Implement.** In `documentToSnapshot`, accept `v1` **or** `v2`; for v1, ignore `projections`/`contextPacks`. In `snapshotToDocument`, omit both keys. In `runtime.ts` `getContextPack`, on cache miss call the module-level `refreshWorkContext(writer, work, actor, now)` inside a `store.write` and return the pack (replacing the `BOREAL_NOT_FOUND` throw at `runtime.ts:1041`).
 
-- [ ] **Step 3: Full suite; fix tests that asserted the old error. Commit** `perf: stop persisting derived projections/context packs (state v2 with v1 loader)`.
+- [x] **Step 3: Full suite; fix tests that asserted the old error. Commit** `perf: stop persisting derived projections/context packs (state v2 with v1 loader)`.
 
 ### Task 7: Hash-chained append-only event log
 
@@ -418,7 +418,7 @@ export class FileEventLog {
 
 - Consumes: `hashContent` from `@boreal/core` (`packages/core/src/hash.ts`).
 
-- [ ] **Step 1: Failing tests**
+- [x] **Step 1: Failing tests**
 
 ```ts
 // tests/runtime/event-log.test.ts
@@ -452,15 +452,15 @@ it("head() is cheap and correct after reopen", async () => {
 });
 ```
 
-- [ ] **Step 2: Implement `FileEventLog`.** Append = read last line only (open file, seek from end — or simplest correct version first: read file, take last line), compute `hash = hashContent({ seq, prevHash, record })`, append one JSON line with `appendFile`. Cache the head in the instance after first read so repeated appends in one process don't rescan. `verify()` recomputes each entry's hash and checks `prevHash` linkage.
+- [x] **Step 2: Implement `FileEventLog`.** Append = read last line only (open file, seek from end — or simplest correct version first: read file, take last line), compute `hash = hashContent({ seq, prevHash, record })`, append one JSON line with `appendFile`. Cache the head in the instance after first read so repeated appends in one process don't rescan. `verify()` recomputes each entry's hash and checks `prevHash` linkage.
 
-- [ ] **Step 3: Wire into `FileBorealStore`.** Log path: `join(dirname(this.stateFile), "..", "log", "events.jsonl")` — add it to `resolveWorkspacePaths` in `packages/core/src/workspace.ts` as `eventLogFile` instead of hardcoding. Inside `writeOnce`, buffer events/operations put during the transaction and append them to the log **after** the snapshot save succeeds (state first, then log — an orphaned state write without its events is detectable by doctor via seq gap; the reverse would fabricate history). `loadSnapshot` no longer reads events from the document; `listEvents`/`listOperations` seed from `FileEventLog.readAll()`. v2 loader: if a legacy document still contains `events`/`operations` and the log file does not exist, migrate them into the log on first write (one-time backfill: append each in array order).
+- [x] **Step 3: Wire into `FileBorealStore`.** Log path: `join(dirname(this.stateFile), "..", "log", "events.jsonl")` — add it to `resolveWorkspacePaths` in `packages/core/src/workspace.ts` as `eventLogFile` instead of hardcoding. Inside `writeOnce`, buffer events/operations put during the transaction and append them to the log **after** the snapshot save succeeds (state first, then log — an orphaned state write without its events is detectable by doctor via seq gap; the reverse would fabricate history). `loadSnapshot` no longer reads events from the document; `listEvents`/`listOperations` seed from `FileEventLog.readAll()`. v2 loader: if a legacy document still contains `events`/`operations` and the log file does not exist, migrate them into the log on first write (one-time backfill: append each in array order).
 
-- [ ] **Step 4: Replace `ledgerSeq` derivation.** `runtime.ts:1002` and `runtime.ts:2185` compute `listEvents().length + 1`. Add `headSeq(): Promise<number>` to `BorealReader` (additive — allowed), implemented by memory store as `events.size` and by file store from `FileEventLog.head()`. Use `await reader.headSeq() + 1`.
+- [x] **Step 4: Replace `ledgerSeq` derivation.** `runtime.ts:1002` and `runtime.ts:2185` compute `listEvents().length + 1`. Add `headSeq(): Promise<number>` to `BorealReader` (additive — allowed), implemented by memory store as `events.size` and by file store from `FileEventLog.head()`. Use `await reader.headSeq() + 1`.
 
-- [ ] **Step 5: Add a `.gitattributes` merge rule.** The repo already has a JSONL merge driver (`tests/runtime/jsonl-merge-driver.test.ts` — find its implementation with `grep -rn "jsonl-merge" tools/ apps/`). Register `*.boreal/log/events.jsonl merge=boreal-jsonl` the same way ledgers do. Note in the doctor: after a git merge of two divergent logs, seq/prevHash must be re-chained — add `FileEventLog.rechain(): Promise<number>` (rewrites seq/prevHash/hash in file order, returns entries rewritten) and surface it as `bwrk doctor --fix`.
+- [x] **Step 5: Add a `.gitattributes` merge rule.** The repo already has a JSONL merge driver (`tests/runtime/jsonl-merge-driver.test.ts` — find its implementation with `grep -rn "jsonl-merge" tools/ apps/`). Register `*.boreal/log/events.jsonl merge=boreal-jsonl` the same way ledgers do. Note in the doctor: after a git merge of two divergent logs, seq/prevHash must be re-chained — add `FileEventLog.rechain(): Promise<number>` (rewrites seq/prevHash/hash in file order, returns entries rewritten) and surface it as `bwrk doctor --fix`.
 
-- [ ] **Step 6: Full suite + benchmark. State file for the bench workspace should drop by the events share. Commit** `feat: hash-chained append-only event log, evicted from state document`.
+- [x] **Step 6: Full suite + benchmark. State file for the bench workspace should drop by the events share. Commit** `feat: hash-chained append-only event log, evicted from state document`.
 
 ---
 

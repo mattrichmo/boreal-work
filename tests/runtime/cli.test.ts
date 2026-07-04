@@ -17,6 +17,7 @@ import { installJsonStdoutGuard, isBrokenPipeError, main } from "../../apps/cli/
 import { inspectBorealInstallStatus } from "../../apps/cli/src/install-status.ts";
 import type { CliOutput } from "../../apps/cli/src/output.ts";
 import { inspectWorkflowAssets } from "../../apps/cli/src/workflow-assets.ts";
+import { EVENT_LOG_ENTRY_SCHEMA_VERSION, FileEventLog, type EventLogEntry } from "../../packages/storage/src/event-log.ts";
 
 interface CommandRun {
   readonly exitCode: number;
@@ -59,6 +60,11 @@ interface MutableWorkForTest {
 interface MutableStateForTest {
   readonly workItems: readonly MutableWorkForTest[];
   readonly [key: string]: unknown;
+}
+
+interface RuntimeLogForTest {
+  readonly events: Array<Record<string, unknown>>;
+  readonly operations: Array<Record<string, unknown>>;
 }
 
 interface CliResultForTest {
@@ -885,11 +891,14 @@ describe("bwrk cli", () => {
 
     const state = parseJson<{
       readonly projections?: Array<{ readonly meta: { readonly id: string }; readonly kind: string; readonly subjectId: string; readonly value: Record<string, unknown> }>;
-      readonly events: Array<{ readonly meta: { readonly id: string }; readonly type: string; readonly subjectId: string; readonly operationId?: string }>;
-      readonly operations: Array<{ readonly meta: { readonly id: string }; readonly commandPath: string; readonly eventIds: readonly string[]; readonly actorId: string }>;
     }>(await readFile(join(rootDir, ".boreal/runtime/state.json"), "utf8"));
-    const event = state.events.find((record) => record.meta.id === activated.eventId);
-    const operation = state.operations.find((record) => record.commandPath === "sprint activate");
+    const log = await readRuntimeLog(rootDir);
+    const event = log.events.find((record) => readTestRecordId(record) === activated.eventId) as
+      | { readonly meta: { readonly id: string }; readonly type: string; readonly subjectId: string; readonly operationId?: string }
+      | undefined;
+    const operation = log.operations.find((record) => record.commandPath === "sprint activate") as
+      | { readonly meta: { readonly id: string }; readonly commandPath: string; readonly eventIds: readonly string[]; readonly actorId: string }
+      | undefined;
     expect(state.projections).toBeUndefined();
     expect(event).toEqual(
       expect.objectContaining({
@@ -4473,26 +4482,29 @@ describe("bwrk cli", () => {
 
     const state = parseJson<{
       readonly workItems: Array<{ readonly title: string; readonly meta: { readonly sourceRefs: readonly Array<{ readonly uri: string }> } }>;
-      readonly events: Array<{ readonly meta: { readonly id: string }; readonly type: string; readonly operationId?: string }>;
-      readonly operations: Array<{
-        readonly meta: { readonly id: string; readonly contentHash: string };
-        readonly sessionId: string;
-        readonly commandPath: string;
-        readonly argv: readonly string[];
-        readonly actorId: string;
-        readonly exitCode: number;
-        readonly status: string;
-        readonly stateChanged: boolean;
-        readonly generatedArtifactsChanged: boolean;
-        readonly eventIds: readonly string[];
-      }>;
     }>(await readFile(join(rootDir, ".boreal/runtime/state.json"), "utf8"));
+    const log = await readRuntimeLog(rootDir);
     const createdWork = state.workItems.find((item) => item.title === "Operation tracked work");
-    const workCreatedEvent = state.events.find((event) => event.type === "work.created");
-    const operation = state.operations.find((entry) => entry.commandPath === "work create");
+    const workCreatedEvent = log.events.find((event) => event.type === "work.created") as
+      | { readonly meta: { readonly id: string }; readonly type: string; readonly operationId?: string }
+      | undefined;
+    const operation = log.operations.find((entry) => entry.commandPath === "work create") as
+      | {
+          readonly meta: { readonly id: string; readonly contentHash: string };
+          readonly sessionId: string;
+          readonly commandPath: string;
+          readonly argv: readonly string[];
+          readonly actorId: string;
+          readonly exitCode: number;
+          readonly status: string;
+          readonly stateChanged: boolean;
+          readonly generatedArtifactsChanged: boolean;
+          readonly eventIds: readonly string[];
+        }
+      | undefined;
 
     expect(createdWork?.meta.sourceRefs).toEqual([{ uri: "raw:bw_source_1" }]);
-    expect(state.operations.map((entry) => entry.commandPath)).toEqual(expect.arrayContaining(["init", "work create"]));
+    expect(log.operations.map((entry) => entry.commandPath)).toEqual(expect.arrayContaining(["init", "work create"]));
     expect(operation).toEqual(
       expect.objectContaining({
         sessionId: "run 42",
@@ -4573,16 +4585,14 @@ describe("bwrk cli", () => {
       readonly remainingAfterOperationLog: number;
       readonly keep: number;
     }>(pruned.stdout);
-    const state = parseJson<{
-      readonly operations: Array<{ readonly commandPath: string }>;
-    }>(await readFile(join(rootDir, ".boreal/runtime/state.json"), "utf8"));
+    const log = await readRuntimeLog(rootDir);
 
     expect(pruned.exitCode).toBe(0);
     expect(pruneResult.deleted).toBeGreaterThan(0);
     expect(pruneResult.keep).toBe(2);
     expect(pruneResult.remainingAfterOperationLog).toBe(2);
-    expect(state.operations).toHaveLength(2);
-    expect(state.operations.map((operation) => operation.commandPath)).toContain("operation prune");
+    expect(log.operations).toHaveLength(2);
+    expect(log.operations.map((operation) => operation.commandPath)).toContain("operation prune");
   });
 
   it("keeps strict doctor stable just above the operation prune target", async () => {
@@ -4592,19 +4602,16 @@ describe("bwrk cli", () => {
     await runCli(rootDir, ["init", "--setup-memory", "--json"]);
     await runCli(rootDir, ["sync", "refresh", "--json"]);
 
-    const initialState = await readState<{
-      readonly operations: Array<Record<string, unknown>>;
-      readonly [key: string]: unknown;
-    }>(rootDir);
-    const template = initialState.operations[0];
+    const initialLog = await readRuntimeLog(rootDir);
+    const template = initialLog.operations[0];
     if (!template) {
       throw new Error("expected init operation");
     }
     const templateMeta = template.meta as Record<string, unknown>;
     const syntheticOperationCount = 1001;
     const syntheticOperations = [
-      ...initialState.operations,
-      ...Array.from({ length: syntheticOperationCount - initialState.operations.length }, (_, index) => ({
+      ...initialLog.operations,
+      ...Array.from({ length: syntheticOperationCount - initialLog.operations.length }, (_, index) => ({
         ...template,
         meta: {
           ...templateMeta,
@@ -4615,10 +4622,7 @@ describe("bwrk cli", () => {
       }))
     ];
 
-    await updateState(rootDir, (state) => ({
-      ...state,
-      operations: syntheticOperations
-    }));
+    await replaceRuntimeOperations(rootDir, syntheticOperations);
 
     const strictDoctor = await runCli(rootDir, ["doctor", "--strict", "--json"]);
     const payload = parseData<DoctorPayload>(strictDoctor.stdout);
@@ -4740,31 +4744,25 @@ describe("bwrk cli", () => {
     await runCli(rootDir, ["init", "--setup-memory", "--json"]);
     await runCli(rootDir, ["sync", "refresh", "--json"]);
 
-    const initialState = await readState<{
-      readonly operations: Array<Record<string, unknown>>;
-      readonly [key: string]: unknown;
-    }>(rootDir);
-    const template = initialState.operations[0];
+    const initialLog = await readRuntimeLog(rootDir);
+    const template = initialLog.operations[0];
     if (!template) {
       throw new Error("expected init operation");
     }
     const templateMeta = template.meta as Record<string, unknown>;
     const syntheticOperationCount = 1_260;
-    await updateState(rootDir, (state) => ({
-      ...state,
-      operations: [
-        ...initialState.operations,
-        ...Array.from({ length: syntheticOperationCount - initialState.operations.length }, (_, index) => ({
-          ...template,
-          meta: {
-            ...templateMeta,
-            id: `bw_operation_${(index + 20_000).toString(16).padStart(12, "0")}`,
-            contentHash: `sha256:${(index + 20_000).toString(16).padStart(64, "0")}`
-          },
-          eventIds: []
-        }))
-      ]
-    }));
+    await replaceRuntimeOperations(rootDir, [
+      ...initialLog.operations,
+      ...Array.from({ length: syntheticOperationCount - initialLog.operations.length }, (_, index) => ({
+        ...template,
+        meta: {
+          ...templateMeta,
+          id: `bw_operation_${(index + 20_000).toString(16).padStart(12, "0")}`,
+          contentHash: `sha256:${(index + 20_000).toString(16).padStart(64, "0")}`
+        },
+        eventIds: []
+      }))
+    ]);
 
     const optOutGate = await runCli(rootDir, ["gate", "closeout", "--strict", "--no-auto-prune-operations", "--json"]);
     const optOutPayload = parseData<{
@@ -4817,9 +4815,7 @@ describe("bwrk cli", () => {
       };
     }>(autoGate.stdout);
     const autoOperationVolume = autoPayload.doctor.diagnostics.find((diagnostic) => diagnostic.code === "operation.volume");
-    const finalState = await readState<{
-      readonly operations: Array<{ readonly commandPath: string }>;
-    }>(rootDir);
+    const finalLog = await readRuntimeLog(rootDir);
 
     expect(autoGate.exitCode).toBe(0);
     expect(autoPayload.ok).toBe(true);
@@ -4837,8 +4833,8 @@ describe("bwrk cli", () => {
     expect(autoPayload.doctor.fixed).toBe(false);
     expect(autoPayload.doctor.blockingDiagnosticCodes).toEqual([]);
     expect(autoOperationVolume).toEqual(expect.objectContaining({ severity: "ok" }));
-    expect(finalState.operations).toHaveLength(1000);
-    expect(finalState.operations.map((operation) => operation.commandPath)).toContain("gate closeout");
+    expect(finalLog.operations).toHaveLength(1000);
+    expect(finalLog.operations.map((operation) => operation.commandPath)).toContain("gate closeout");
   }, 10_000);
 
   it("repairs legacy operation-event links and marks unlinked events", async () => {
@@ -4849,49 +4845,53 @@ describe("bwrk cli", () => {
     let createdEventId = "";
     let createdOperationId = "";
     let legacyEventId = "";
-    await updateState(rootDir, (state) => {
-      const events = (state.events as Array<Record<string, unknown>>) ?? [];
-      const operations = (state.operations as Array<Record<string, unknown>>) ?? [];
-      const createdEvent = events.find((event) => event.type === "work.created");
-      const initEvent = events.find((event) => event.type === "workspace.initialized");
-      createdEventId = String((createdEvent?.meta as Record<string, unknown> | undefined)?.id ?? "");
-      legacyEventId = String((initEvent?.meta as Record<string, unknown> | undefined)?.id ?? "");
-      const createdOperation = operations.find((operation) =>
-        ((operation.eventIds as readonly string[] | undefined) ?? []).includes(createdEventId)
-      );
-      createdOperationId = String((createdOperation?.meta as Record<string, unknown> | undefined)?.id ?? "");
-      return {
-        ...state,
-        events: events.map((event) => {
-          if (event.type === "work.created" || event.type === "workspace.initialized") {
-            const { operationId: _operationId, operationLink: _operationLink, ...legacyEvent } = event;
-            return legacyEvent;
-          }
-          return event;
-        }),
-        operations: operations.map((operation) => ({
-          ...operation,
-          eventIds: ((operation.eventIds as readonly string[] | undefined) ?? []).filter((eventId) => eventId !== legacyEventId)
-        }))
-      };
-    });
+    const initialLog = await readRuntimeLog(rootDir);
+    const createdEvent = initialLog.events.find((event) => event.type === "work.created");
+    const initEvent = initialLog.events.find((event) => event.type === "workspace.initialized");
+    createdEventId = String(readTestRecordId(createdEvent ?? {}) ?? "");
+    legacyEventId = String(readTestRecordId(initEvent ?? {}) ?? "");
+    const createdOperation = initialLog.operations.find((operation) =>
+      ((operation.eventIds as readonly string[] | undefined) ?? []).includes(createdEventId)
+    );
+    createdOperationId = String(readTestRecordId(createdOperation ?? {}) ?? "");
+    await updateRuntimeLog(rootDir, (entries) =>
+      entries.map((entry) => {
+        const record = entry.record as unknown as Record<string, unknown>;
+        if (entry.kind === "event" && (record.type === "work.created" || record.type === "workspace.initialized")) {
+          const { operationId: _operationId, operationLink: _operationLink, ...legacyEvent } = record;
+          return { ...entry, record: legacyEvent as EventLogEntry["record"] };
+        }
+        if (entry.kind === "operation") {
+          return {
+            ...entry,
+            record: {
+              ...record,
+              eventIds: ((record.eventIds as readonly string[] | undefined) ?? []).filter((eventId) => eventId !== legacyEventId)
+            } as EventLogEntry["record"]
+          };
+        }
+        return entry;
+      })
+    );
 
     const repaired = await runCli(rootDir, ["operation", "repair", "--json"]);
     const repairedPayload = parseData<{
       readonly linkedEvents: readonly string[];
       readonly markedLegacyEvents: readonly string[];
     }>(repaired.stdout);
-    const state = parseJson<{
-      readonly events: Array<{ readonly meta: { readonly id: string }; readonly operationId?: string; readonly operationLink?: string }>;
-    }>(await readFile(join(rootDir, ".boreal/runtime/state.json"), "utf8"));
-    const createdEvent = state.events.find((event) => event.meta.id === createdEventId);
-    const legacyEvent = state.events.find((event) => event.meta.id === legacyEventId);
+    const repairedLog = await readRuntimeLog(rootDir);
+    const repairedCreatedEvent = repairedLog.events.find((event) => readTestRecordId(event) === createdEventId) as
+      | { readonly meta: { readonly id: string }; readonly operationId?: string; readonly operationLink?: string }
+      | undefined;
+    const legacyEvent = repairedLog.events.find((event) => readTestRecordId(event) === legacyEventId) as
+      | { readonly meta: { readonly id: string }; readonly operationId?: string; readonly operationLink?: string }
+      | undefined;
 
     expect(repaired.exitCode).toBe(0);
     expect(repairedPayload.linkedEvents).toContain(createdEventId);
     expect(repairedPayload.markedLegacyEvents).toContain(legacyEventId);
-    expect(createdEvent?.operationId).toBe(createdOperationId);
-    expect(createdEvent?.operationLink).toBeUndefined();
+    expect(repairedCreatedEvent?.operationId).toBe(createdOperationId);
+    expect(repairedCreatedEvent?.operationLink).toBeUndefined();
     expect(legacyEvent?.operationId).toBeUndefined();
     expect(legacyEvent?.operationLink).toBe("legacy");
 
@@ -5580,12 +5580,13 @@ describe("bwrk cli", () => {
   it("reports malformed operation records in doctor without masking diagnostics", async () => {
     const rootDir = await makeTempWorkspace();
     await runCli(rootDir, ["init", "--json"]);
-    await updateState(rootDir, (state) => {
-      const operations = ((state.operations as Array<Record<string, unknown>> | undefined) ?? []).map((operation, index) =>
-        index === 0 ? { ...operation, status: "sideways" } : operation
-      );
-      return { ...state, operations };
-    });
+    await updateRuntimeLog(rootDir, (entries) =>
+      entries.map((entry, index) =>
+        entry.kind === "operation" && index === entries.findIndex((candidate) => candidate.kind === "operation")
+          ? { ...entry, record: { ...(entry.record as unknown as Record<string, unknown>), status: "sideways" } as EventLogEntry["record"] }
+          : entry
+      )
+    );
 
     const doctor = await runCli(rootDir, ["doctor", "--json"]);
     const payload = parseData<{
@@ -5608,12 +5609,14 @@ describe("bwrk cli", () => {
     const rootDir = await makeTempWorkspace();
     await runCli(rootDir, ["init", "--json"]);
     await runCli(rootDir, ["work", "create", "Causality mismatch", "--ready", "--json"]);
-    await updateState(rootDir, (state) => {
-      const events = ((state.events as Array<Record<string, unknown>> | undefined) ?? []).map((event) =>
-        event.type === "work.created" ? { ...event, operationId: "bw_operation_deadbeefdead" } : event
-      );
-      return { ...state, events };
-    });
+    await updateRuntimeLog(rootDir, (entries) =>
+      entries.map((entry) => {
+        const record = entry.record as unknown as Record<string, unknown>;
+        return entry.kind === "event" && record.type === "work.created"
+          ? { ...entry, record: { ...record, operationId: "bw_operation_deadbeefdead" } as EventLogEntry["record"] }
+          : entry;
+      })
+    );
 
     const doctor = await runCli(rootDir, ["doctor", "--json"]);
     const payload = parseData<{
@@ -7480,22 +7483,21 @@ describe("bwrk cli", () => {
               verificationIds: [`bw_verification_${work.meta.id.slice("bw_work_".length)}`]
             }
           : work
-      ),
-      events: [
-        ...((state.events as readonly unknown[] | undefined) ?? []),
-        ...[older, equal, newer, phase, outside].map((work, index) => ({
-          meta: {
-            ...testMeta(`bw_event_${String(index + 1).padStart(12, "0")}`),
-            createdAt: closedAtByWork.get(work.meta.id),
-            updatedAt: closedAtByWork.get(work.meta.id)
-          },
-          type: "work.closed",
-          subjectId: work.meta.id,
-          subjectType: "work",
-          payload: { reason: `${work.meta.id} closed` }
-        }))
-      ]
+      )
     }));
+    for (const [index, work] of [older, equal, newer, phase, outside].entries()) {
+      await appendRuntimeEvent(rootDir, {
+        meta: {
+          ...testMeta(`bw_event_${String(index + 1).padStart(12, "0")}`),
+          createdAt: closedAtByWork.get(work.meta.id),
+          updatedAt: closedAtByWork.get(work.meta.id)
+        },
+        type: "work.closed",
+        subjectId: work.meta.id,
+        subjectType: "work",
+        payload: { reason: `${work.meta.id} closed` }
+      });
+    }
 
     const checkpointRun = await runCli(rootDir, [
       "heartbeat",
@@ -8163,14 +8165,11 @@ describe("bwrk cli", () => {
       "--json"
     ]);
     await runCli(rootDir, ["context", "rebuild", "--json"]);
-    const sourceState = parseJson<{
-      readonly events: Array<{ readonly type: string; readonly subjectId: string; readonly operationId?: string; readonly operationLink?: string }>;
-      readonly operations: Array<{ readonly commandPath: string }>;
-    }>(await readFile(join(rootDir, ".boreal/runtime/state.json"), "utf8"));
-    expect(sourceState.operations.map((operation) => operation.commandPath)).toEqual(
+    const sourceLog = await readRuntimeLog(rootDir);
+    expect(sourceLog.operations.map((operation) => operation.commandPath)).toEqual(
       expect.arrayContaining(["work create", "evidence add", "source add", "context rebuild"])
     );
-    expect(sourceState.events.some((event) => event.operationId !== undefined || event.operationLink !== undefined)).toBe(true);
+    expect(sourceLog.events.some((event) => event.operationId !== undefined || event.operationLink !== undefined)).toBe(true);
 
     const exportPath = join(rootDir, "boreal-export.json");
     const exported = await runCli(rootDir, ["export", "json", "--out", "boreal-export.json", "--json"]);
@@ -8424,10 +8423,8 @@ describe("bwrk cli", () => {
     expect(importedLedgers.exitCode).toBe(0);
     expect(importedLedgerPayload.imported.workItems).toBe(1);
     expect(importedLedgerPayload.skipped.workItems).toBe(0);
-    const importedLedgerState = parseJson<{
-      readonly operations: Array<{ readonly commandPath: string }>;
-    }>(await readFile(join(ledgerTargetDir, ".boreal/runtime/state.json"), "utf8"));
-    expect(importedLedgerState.operations.map((operation) => operation.commandPath)).not.toEqual(
+    const importedLedgerLog = await readRuntimeLog(ledgerTargetDir);
+    expect(importedLedgerLog.operations.map((operation) => operation.commandPath)).not.toEqual(
       expect.arrayContaining(["work create", "evidence add", "source add", "context rebuild"])
     );
 
@@ -8581,16 +8578,13 @@ describe("bwrk cli", () => {
     );
     expect(importPayload.imported.workItems).toBe(1);
     expect(importPayload.skipped.workItems).toBe(0);
-    const importedState = parseJson<{
-      readonly events: Array<{ readonly type: string; readonly subjectId: string; readonly operationId?: string; readonly operationLink?: string }>;
-      readonly operations: Array<{ readonly commandPath: string }>;
-    }>(await readFile(join(targetDir, ".boreal/runtime/state.json"), "utf8"));
-    expect(importedState.operations.map((operation) => operation.commandPath)).not.toEqual(
+    const importedLog = await readRuntimeLog(targetDir);
+    expect(importedLog.operations.map((operation) => operation.commandPath)).not.toEqual(
       expect.arrayContaining(["work create", "evidence add", "source add", "context rebuild"])
     );
-    const importedWorkCreatedEvent = importedState.events.find(
+    const importedWorkCreatedEvent = importedLog.events.find(
       (event) => event.type === "work.created" && event.subjectId === work.meta.id
-    );
+    ) as { readonly type: string; readonly subjectId: string; readonly operationId?: string; readonly operationLink?: string } | undefined;
     expect(importedWorkCreatedEvent).toEqual(
       expect.objectContaining({ type: "work.created", subjectId: work.meta.id })
     );
@@ -9473,13 +9467,11 @@ describe("bwrk cli", () => {
       runCli(rootDir, ["init", "--json"])
     ]);
     const payloads = results.map((result) => parseData<{ readonly initialized: boolean }>(result.stdout));
-    const state = parseJson<{ readonly events: Array<{ readonly type: string }> }>(
-      await readFile(join(rootDir, ".boreal/runtime/state.json"), "utf8")
-    );
+    const log = await readRuntimeLog(rootDir);
 
     expect(results.map((result) => result.exitCode)).toEqual([0, 0, 0]);
     expect(payloads.filter((payload) => payload.initialized)).toHaveLength(1);
-    expect(state.events.filter((event) => event.type === "workspace.initialized")).toHaveLength(1);
+    expect(log.events.filter((event) => event.type === "workspace.initialized")).toHaveLength(1);
   });
 
   it("serializes concurrent runtime writers before refreshing search and context projections", async () => {
@@ -11587,6 +11579,34 @@ async function readState<T = MutableStateForTest>(rootDir: string): Promise<T> {
   return parseJson<T>(await readFile(join(rootDir, ".boreal/runtime/state.json"), "utf8"));
 }
 
+async function readRuntimeLog(rootDir: string): Promise<RuntimeLogForTest> {
+  const entries = await new FileEventLog({ path: runtimeEventLogPath(rootDir) }).readAll();
+  const events = new Map<string, Record<string, unknown>>();
+  const operations = new Map<string, Record<string, unknown>>();
+  for (const entry of entries) {
+    const record = entry.record as unknown as Record<string, unknown>;
+    const id = readTestRecordId(record);
+    if (!id) {
+      continue;
+    }
+    if (entry.kind === "event") {
+      events.delete(id);
+      events.set(id, record);
+      continue;
+    }
+    if (isRuntimeLogTombstone(record)) {
+      operations.delete(id);
+      continue;
+    }
+    operations.delete(id);
+    operations.set(id, record);
+  }
+  return {
+    events: [...events.values()],
+    operations: [...operations.values()]
+  };
+}
+
 async function updateState(
   rootDir: string,
   update: (state: MutableStateForTest) => MutableStateForTest
@@ -11594,6 +11614,56 @@ async function updateState(
   const statePath = join(rootDir, ".boreal/runtime/state.json");
   const state = await readState(rootDir);
   await writeFile(statePath, `${JSON.stringify(update(state), null, 2)}\n`, "utf8");
+}
+
+async function updateRuntimeLog(
+  rootDir: string,
+  update: (entries: readonly EventLogEntry[]) => readonly EventLogEntry[]
+): Promise<void> {
+  const path = runtimeEventLogPath(rootDir);
+  const entries = await new FileEventLog({ path }).readAll();
+  const updated = update(entries);
+  await mkdir(dirname(path), { recursive: true });
+  await writeFile(path, updated.length > 0 ? `${updated.map((entry) => JSON.stringify(entry)).join("\n")}\n` : "", "utf8");
+  await new FileEventLog({ path }).rechain();
+}
+
+async function replaceRuntimeOperations(rootDir: string, operations: readonly Record<string, unknown>[]): Promise<void> {
+  await updateRuntimeLog(rootDir, (entries) => [
+    ...entries.filter((entry) => entry.kind !== "operation"),
+    ...operations.map(
+      (record) =>
+        ({
+          schemaVersion: EVENT_LOG_ENTRY_SCHEMA_VERSION,
+          seq: 0,
+          prevHash: "",
+          hash: "",
+          kind: "operation",
+          record
+        }) as EventLogEntry
+    )
+  ]);
+}
+
+async function appendRuntimeEvent(rootDir: string, record: Record<string, unknown>): Promise<void> {
+  await new FileEventLog({ path: runtimeEventLogPath(rootDir) }).append("event", record as never);
+}
+
+function runtimeEventLogPath(rootDir: string): string {
+  return join(rootDir, ".boreal/log/events.jsonl");
+}
+
+function readTestRecordId(record: Record<string, unknown>): string | undefined {
+  const meta = record.meta;
+  if (typeof meta !== "object" || meta === null || !("id" in meta)) {
+    return undefined;
+  }
+  const id = (meta as Record<string, unknown>).id;
+  return typeof id === "string" ? id : undefined;
+}
+
+function isRuntimeLogTombstone(record: Record<string, unknown>): boolean {
+  return record.tombstone === true;
 }
 
 async function appendGraphEdge(

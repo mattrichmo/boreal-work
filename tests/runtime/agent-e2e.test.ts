@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import { main } from "../../apps/cli/src/index.ts";
 import type { CliOutput } from "../../apps/cli/src/output.ts";
+import { FileEventLog } from "../../packages/storage/src/event-log.ts";
 
 const AGENT_ID = "agent-e2e";
 const AGENT_LABEL = "agent-e2e";
@@ -392,11 +393,9 @@ describe("agent E2E fixture", () => {
     expect(ended.operations.failed).toBe(0);
 
     expect(completed).toEqual(AGENT_E2E_STEPS.map((step) => step.id));
-    const state = parseJson<{
-      readonly operations: Array<{ readonly sessionId: string; readonly commandPath: string }>;
-    }>(await readFile(join(rootDir, ".boreal/runtime/state.json"), "utf8"));
+    const operations = await readRuntimeOperations(rootDir);
     expectInOrder(
-      state.operations.filter((operation) => operation.sessionId === session.sessionId).map((operation) => operation.commandPath),
+      operations.filter((operation) => operation.sessionId === session.sessionId).map((operation) => operation.commandPath),
       [
         "session start",
         "prime",
@@ -425,6 +424,31 @@ async function makeTempWorkspace(): Promise<string> {
   const dir = await realpath(await mkdtemp(join(tmpdir(), "boreal-agent-e2e-")));
   tempDirs.push(dir);
   return dir;
+}
+
+async function readRuntimeOperations(
+  rootDir: string
+): Promise<Array<{ readonly sessionId: string; readonly commandPath: string }>> {
+  const entries = await new FileEventLog({ path: join(rootDir, ".boreal/log/events.jsonl") }).readAll();
+  const operations = new Map<string, Record<string, unknown>>();
+  for (const entry of entries) {
+    if (entry.kind !== "operation") {
+      continue;
+    }
+    const record = entry.record as unknown as Record<string, unknown>;
+    const meta = record.meta as Record<string, unknown> | undefined;
+    const id = typeof meta?.id === "string" ? meta.id : undefined;
+    if (!id) {
+      continue;
+    }
+    if (record.tombstone === true) {
+      operations.delete(id);
+      continue;
+    }
+    operations.delete(id);
+    operations.set(id, record);
+  }
+  return [...operations.values()] as Array<{ readonly sessionId: string; readonly commandPath: string }>;
 }
 
 async function runJsonStep<T>(
