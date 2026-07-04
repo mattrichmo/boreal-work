@@ -41,7 +41,7 @@ If the tree is already clean, just create the branch.
 **Interfaces:**
 - Produces: `node tools/bench-mutation.mjs <workspace-dir>` printing JSON `{ closeMs, stateBytes, filesWritten }`. Used at the end of every phase to prove the win.
 
-- [ ] **Step 1: Write the benchmark script**
+- [x] **Step 1: Write the benchmark script**
 
 ```js
 // tools/bench-mutation.mjs
@@ -94,12 +94,12 @@ console.log(JSON.stringify({ workspace: ws, count, closeMs: Math.round(closeMs),
 
 > Note: the exact `agent finish` flags must match `docs/cli/COMMANDS.md`. If a flag name differs, fix the script (not the CLI) — the script is a consumer.
 
-- [ ] **Step 2: Run it and record the baseline**
+- [x] **Step 2: Run it and record the baseline**
 
 Run: `node tools/bench-mutation.mjs 200`
 Expected: JSON output. Paste the numbers into the commit message.
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 git add tools/bench-mutation.mjs
@@ -116,7 +116,7 @@ git commit -m "test: add mutation benchmark (baseline: <closeMs>ms, <stateBytes>
 - Consumes: existing `inspectSearchIndex(context)` from `apps/cli/src/search-cli.ts` (returns `{ stale: boolean, ... }` via content hash).
 - Produces: mutation commands no longer rebuild search index / ledgers / sqlite cache / all projections inline. Staleness remains detectable via content hashes; `bwrk sync refresh` remains the explicit rebuild path. `bwrk doctor` must report stale artifacts as `info`, not `error`.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```ts
 // tests/runtime/generated-artifact-staleness.test.ts
@@ -147,9 +147,9 @@ describe("generated artifacts after mutation", () => {
 });
 ```
 
-- [ ] **Step 2: Run it, verify it fails** (`pnpm vitest run tests/runtime/generated-artifact-staleness.test.ts` — index mtime changes today).
+- [x] **Step 2: Run it, verify it fails** (`pnpm vitest run tests/runtime/generated-artifact-staleness.test.ts` — index mtime changes today).
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 In `apps/cli/src/commands.ts`, empty the set and leave a tombstone comment:
 
@@ -163,9 +163,9 @@ const INLINE_GENERATED_ARTIFACT_REFRESH_COMMANDS = new Set<string>([]);
 
 Then chase the other unconditional call sites found at `commands.ts:1238`, `:11874`, `:13864`, `:13868` — each of those is inside a specific command (read the surrounding function): keep the call **only** where the command's purpose *is* rebuilding (e.g. `sync refresh`, import/restore paths); delete it from mutation paths. Check `doctor.ts` treats `search.index` / `cache.sqlite` / `ledger.status` staleness (see `commands.ts:2732`) as non-error severity; downgrade if needed.
 
-- [ ] **Step 4: Run the new test and the full suite** (`pnpm vitest run tests/runtime/generated-artifact-staleness.test.ts && pnpm test`). Fix any test that asserted inline freshness by pointing it at `sync refresh` instead.
+- [x] **Step 4: Run the new test and the full suite** (`pnpm vitest run tests/runtime/generated-artifact-staleness.test.ts && pnpm test`). Fix any test that asserted inline freshness by pointing it at `sync refresh` instead.
 
-- [ ] **Step 5: Re-run benchmark, commit**
+- [x] **Step 5: Re-run benchmark, commit**
 
 ```bash
 node tools/bench-mutation.mjs 200
