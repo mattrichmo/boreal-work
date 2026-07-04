@@ -201,28 +201,7 @@ import {
   installStatusSummary,
   type InstallStatus
 } from "./install-status.js";
-import {
-  createSnapshot,
-  buildExportDocument,
-  deleteClaimWithTombstone,
-  deleteDecisionWithTombstone,
-  deleteEvidenceWithTombstone,
-  deleteContextPackWithTombstone,
-  deleteGraphEdgeWithTombstone,
-  deleteKnowledgeSourceWithTombstone,
-  deleteProjectionWithTombstone,
-  deleteReservationWithTombstone,
-  deleteVerificationWithTombstone,
-  deleteWorkItemWithTombstone,
-  exportLedgers,
-  exportJson,
-  exportMarkdown,
-  importLedgers,
-  importJson,
-  ledgerStatus,
-  listSnapshots,
-  showSnapshot
-} from "./import-export.js";
+import { buildExportDocument } from "./import-export.js";
 import { inspectRuntimeLocks, type RuntimeLockInspectionResult, type RuntimeLockState } from "./locks.js";
 import { createResultSpoolingOutput, formatRecord, table, type AgentDirectiveOutput, type CliOutput } from "./output.js";
 import {
@@ -1137,10 +1116,22 @@ export async function runCommand(args: ParsedArgs, output: CliOutput, cwd: strin
         result = await sprintCommand(action, rest, context, args, commandOutput, json);
         break;
       case "export":
-        result = await exportCommand(action, context, args, commandOutput, json);
-        break;
       case "import":
-        result = await importCommand(action, context, args, commandOutput, json);
+      case "storage":
+      case "ledger":
+      case "snapshot":
+        result = await storageCommand(group, action, rest, context, args, commandOutput, json, {
+          requiredPositional,
+          asWorkId,
+          asEvidenceId,
+          asVerificationId,
+          asSourceId,
+          asClaimId,
+          asDecisionId,
+          asGraphEdgeId,
+          asReservationId,
+          asProjectionId
+        });
         break;
       case "vault":
         result = await vaultCommand(action, context, commandOutput, json);
@@ -1162,15 +1153,6 @@ export async function runCommand(args: ParsedArgs, output: CliOutput, cwd: strin
           formatRecordWithAgentDirectives: ({ context: syncContext, args: syncArgs, result: syncResult, json: syncJson, options }) =>
             formatRecordWithAgentDirectives(syncContext, syncArgs, syncResult, syncJson, options)
         });
-        break;
-      case "storage":
-        result = await storageCommand(action, context, args, commandOutput, json);
-        break;
-      case "ledger":
-        result = await ledgerCommand(action, rest, context, args, commandOutput, json);
-        break;
-      case "snapshot":
-        result = await snapshotCommand(action, rest, context, args, commandOutput, json);
         break;
       case "doctor":
         result = await doctorCommand(action, context, args, commandOutput, json);
@@ -8142,66 +8124,6 @@ function formatContextPack(pack: ContextPack): string {
   return `${lines.join("\n")}\n`;
 }
 
-async function exportCommand(
-  action: string | undefined,
-  context: CliContext,
-  args: ParsedArgs,
-  output: CliOutput,
-  json: boolean
-): Promise<CommandResult> {
-  switch (action) {
-    case "json": {
-      output.write(formatRecord(await exportJson(context, flagValue(args, "out")), json));
-      return { exitCode: 0 };
-    }
-    case "markdown": {
-      output.write(formatRecord(await exportMarkdown(context, flagValue(args, "out")), json));
-      return { exitCode: 0 };
-    }
-    case "ledgers": {
-      output.write(formatRecord(await exportLedgers(context, flagValue(args, "out")), json));
-      return { exitCode: 0 };
-    }
-    default:
-      throw new BorealError("BOREAL_INVALID_INPUT", `Unknown export command: ${action ?? ""}`);
-  }
-}
-
-async function importCommand(
-  action: string | undefined,
-  context: CliContext,
-  args: ParsedArgs,
-  output: CliOutput,
-  json: boolean
-): Promise<CommandResult> {
-  switch (action) {
-    case "json": {
-      output.write(
-        formatRecord(
-          await importJson(context, requiredFlag(args, "from"), {
-            allowExternalRead: hasFlag(args, "allow-external-read")
-          }),
-          json
-        )
-      );
-      return { exitCode: 0 };
-    }
-    case "ledgers": {
-      output.write(
-        formatRecord(
-          await importLedgers(context, requiredFlag(args, "from"), {
-            allowExternalRead: hasFlag(args, "allow-external-read")
-          }),
-          json
-        )
-      );
-      return { exitCode: 0 };
-    }
-    default:
-      throw new BorealError("BOREAL_INVALID_INPUT", `Unknown import command: ${action ?? ""}`);
-  }
-}
-
 function shouldRefreshGeneratedArtifactsAfterMutation(definition: CommandDefinition): boolean {
   const behavior = commandBehavior(definition);
   return (
@@ -9418,101 +9340,6 @@ function protocolAgentAction(
 
 function commandWithPositionalWork(command: string, workId: string): string {
   return command.replace("bwrk agent start", `bwrk agent start ${shellArg(workId)}`);
-}
-
-async function ledgerCommand(
-  action: string | undefined,
-  rest: readonly string[],
-  context: CliContext,
-  args: ParsedArgs,
-  output: CliOutput,
-  json: boolean
-): Promise<CommandResult> {
-  switch (action) {
-    case "status": {
-      const status = await ledgerStatus(context, flagValue(args, "dir"));
-      output.write(formatRecord(status, json));
-      return { exitCode: status.ok ? 0 : 1 };
-    }
-    case "delete": {
-      const kind = requiredPositional(rest, 0, "ledger record kind");
-      const id = requiredPositional(rest, 1, "record id");
-      const reason = flagValue(args, "reason");
-      if (kind === "work") {
-        output.write(formatRecord(await deleteWorkItemWithTombstone(context, asWorkId(id), reason), json));
-        return { exitCode: 0 };
-      }
-      if (kind === "evidence") {
-        output.write(formatRecord(await deleteEvidenceWithTombstone(context, asEvidenceId(id), reason), json));
-        return { exitCode: 0 };
-      }
-      if (kind === "verification") {
-        output.write(formatRecord(await deleteVerificationWithTombstone(context, asVerificationId(id), reason), json));
-        return { exitCode: 0 };
-      }
-      if (kind === "source") {
-        output.write(formatRecord(await deleteKnowledgeSourceWithTombstone(context, asSourceId(id), reason), json));
-        return { exitCode: 0 };
-      }
-      if (kind === "claim") {
-        output.write(formatRecord(await deleteClaimWithTombstone(context, asClaimId(id), reason), json));
-        return { exitCode: 0 };
-      }
-      if (kind === "decision") {
-        output.write(formatRecord(await deleteDecisionWithTombstone(context, asDecisionId(id), reason), json));
-        return { exitCode: 0 };
-      }
-      if (kind === "graph-edge") {
-        output.write(formatRecord(await deleteGraphEdgeWithTombstone(context, asGraphEdgeId(id), reason), json));
-        return { exitCode: 0 };
-      }
-      if (kind === "reservation") {
-        output.write(formatRecord(await deleteReservationWithTombstone(context, asReservationId(id), reason), json));
-        return { exitCode: 0 };
-      }
-      if (kind === "projection") {
-        output.write(formatRecord(await deleteProjectionWithTombstone(context, asProjectionId(id), reason), json));
-        return { exitCode: 0 };
-      }
-      if (kind === "context-pack") {
-        output.write(formatRecord(await deleteContextPackWithTombstone(context, asProjectionId(id), reason), json));
-        return { exitCode: 0 };
-      }
-      throw new BorealError(
-        "BOREAL_INVALID_INPUT",
-        "ledger delete currently supports work, evidence, verification, source, claim, decision, graph-edge, reservation, projection, and context-pack records",
-        { kind }
-      );
-    }
-    default:
-      throw new BorealError("BOREAL_INVALID_INPUT", `Unknown ledger command: ${action ?? ""}`);
-  }
-}
-
-async function snapshotCommand(
-  action: string | undefined,
-  rest: readonly string[],
-  context: CliContext,
-  args: ParsedArgs,
-  output: CliOutput,
-  json: boolean
-): Promise<CommandResult> {
-  switch (action) {
-    case "create": {
-      output.write(formatRecord(await createSnapshot(context, flagValue(args, "name")), json));
-      return { exitCode: 0 };
-    }
-    case "list": {
-      output.write(formatRecord(await listSnapshots(context), json));
-      return { exitCode: 0 };
-    }
-    case "show": {
-      output.write(formatRecord(await showSnapshot(context, requiredPositional(rest, 0, "snapshot id")), json));
-      return { exitCode: 0 };
-    }
-    default:
-      throw new BorealError("BOREAL_INVALID_INPUT", `Unknown snapshot command: ${action ?? ""}`);
-  }
 }
 
 async function doctorCommand(
