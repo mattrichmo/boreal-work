@@ -5,7 +5,6 @@ import {
   type AgentSummaryRecord,
   type ClaimRecord,
   type ContentHash,
-  type ContextPack,
   type DecisionRecord,
   type EvidenceRecord,
   type IsoTimestamp,
@@ -15,11 +14,9 @@ import {
 
 export const SEARCH_INDEX_SCHEMA_VERSION = "boreal.search-index.v1";
 
-const SEARCH_INDEX_ALGORITHM = "boreal.search.hybrid.v1";
+export const SEARCH_INDEX_ALGORITHM = "boreal.search.hybrid.v1";
 const DEFAULT_LIMIT = 20;
 const MAX_INDEXED_TOKENS_PER_DOCUMENT = 400;
-const MAX_CONTEXT_CHUNKS_PER_PACK = 8;
-const MAX_CONTEXT_CHUNK_CHARS = 700;
 const VECTOR_DIMENSIONS = 4096;
 const VECTOR_TOKEN_WEIGHT = 1;
 const VECTOR_PREFIX_WEIGHT = 0.7;
@@ -33,18 +30,15 @@ export type SearchDocumentType =
   | "evidence"
   | "source"
   | "claim"
-  | "decision"
-  | "context_pack"
-  | "context_chunk";
+  | "decision";
 
 export interface SearchCorpusSnapshot {
   readonly workItems: readonly WorkItem[];
-  readonly agentSummaries: readonly AgentSummaryRecord[];
+  readonly agentSummaries?: readonly AgentSummaryRecord[];
   readonly evidence: readonly EvidenceRecord[];
   readonly knowledgeSources: readonly KnowledgeSource[];
   readonly claims: readonly ClaimRecord[];
   readonly decisions: readonly DecisionRecord[];
-  readonly contextPacks: readonly ContextPack[];
 }
 
 export interface SearchIndexDocument {
@@ -52,6 +46,7 @@ export interface SearchIndexDocument {
   readonly algorithm: typeof SEARCH_INDEX_ALGORITHM;
   readonly builtAt: IsoTimestamp;
   readonly contentHash: ContentHash;
+  readonly corpusFingerprint?: ContentHash;
   readonly documentCount: number;
   readonly tokenCount: number;
   readonly documentFrequencies: readonly (readonly [string, number])[];
@@ -166,12 +161,10 @@ const STOP_WORDS = new Set([
 const TYPE_ORDER: Record<SearchDocumentType, number> = {
   work: 0,
   agent_summary: 1,
-  context_pack: 2,
-  context_chunk: 3,
-  decision: 4,
-  claim: 5,
-  evidence: 6,
-  source: 7
+  decision: 2,
+  claim: 3,
+  evidence: 4,
+  source: 5
 };
 
 export function buildSearchIndex(snapshot: SearchCorpusSnapshot, builtAt: IsoTimestamp = nowIso()): SearchIndexDocument {
@@ -182,11 +175,24 @@ export function buildSearchIndex(snapshot: SearchCorpusSnapshot, builtAt: IsoTim
     algorithm: SEARCH_INDEX_ALGORITHM,
     builtAt,
     contentHash: searchIndexContentHash(snapshot),
+    corpusFingerprint: searchCorpusFingerprint(snapshot),
     documentCount: documents.length,
     tokenCount: documents.reduce((sum, document) => sum + document.tokenWeights.length, 0),
     documentFrequencies,
     documents
   };
+}
+
+export function searchCorpusFingerprint(snapshot: SearchCorpusSnapshot): ContentHash {
+  return hashContent({
+    schemaVersion: SEARCH_INDEX_SCHEMA_VERSION,
+    workItems: snapshot.workItems.map(metaPair),
+    agentSummaries: (snapshot.agentSummaries ?? []).map(metaPair),
+    evidence: snapshot.evidence.map(metaPair),
+    knowledgeSources: snapshot.knowledgeSources.map(metaPair),
+    claims: snapshot.claims.map(metaPair),
+    decisions: snapshot.decisions.map(metaPair)
+  });
 }
 
 export function searchIndexContentHash(snapshot: SearchCorpusSnapshot): ContentHash {
@@ -243,6 +249,7 @@ export function isSearchIndexDocument(value: unknown): value is SearchIndexDocum
     value.algorithm === SEARCH_INDEX_ALGORITHM &&
     typeof value.builtAt === "string" &&
     typeof value.contentHash === "string" &&
+    (value.corpusFingerprint === undefined || typeof value.corpusFingerprint === "string") &&
     typeof value.documentCount === "number" &&
     typeof value.tokenCount === "number" &&
     Array.isArray(value.documentFrequencies) &&
@@ -252,6 +259,10 @@ export function isSearchIndexDocument(value: unknown): value is SearchIndexDocum
   );
 }
 
+function metaPair(record: { readonly meta: { readonly id: string; readonly contentHash?: string } }): readonly [string, string] {
+  return [record.meta.id, record.meta.contentHash ?? ""];
+}
+
 function buildSearchEntries(snapshot: SearchCorpusSnapshot): readonly SearchIndexEntry[] {
   return [
     ...snapshot.workItems.map(workEntry),
@@ -259,8 +270,7 @@ function buildSearchEntries(snapshot: SearchCorpusSnapshot): readonly SearchInde
     ...snapshot.evidence.map(evidenceEntry),
     ...snapshot.knowledgeSources.map(sourceEntry),
     ...snapshot.claims.map(claimEntry),
-    ...snapshot.decisions.map(decisionEntry),
-    ...snapshot.contextPacks.flatMap(contextPackEntries)
+    ...snapshot.decisions.map(decisionEntry)
   ].sort((left, right) => left.id.localeCompare(right.id));
 }
 
@@ -350,68 +360,6 @@ function decisionEntry(decision: DecisionRecord): SearchIndexEntry {
     { field: "sourceIds", text: decision.sourceIds.join(" "), weight: 3 },
     { field: "wikiPageIds", text: (decision.wikiPageIds ?? []).join(" "), weight: 3 }
   ]);
-}
-
-function contextPackEntry(pack: ContextPack): SearchIndexEntry {
-  return entry(
-    "context_pack",
-    pack.id,
-    pack.title,
-    pack.summary,
-    [
-      { field: "id", text: pack.id, weight: 10 },
-      { field: "subjectId", text: pack.subjectId, weight: 8 },
-      { field: "title", text: pack.title, weight: 8 },
-      { field: "facts", text: pack.facts.join(" "), weight: 7 },
-      { field: "evidence", text: pack.evidence.join(" "), weight: 6 },
-      { field: "summary", text: pack.summary, weight: 5 }
-    ],
-    pack.subjectId
-  );
-}
-
-function contextPackEntries(pack: ContextPack): readonly SearchIndexEntry[] {
-  return [contextPackEntry(pack), ...contextChunkEntries(pack)];
-}
-
-function contextChunkEntries(pack: ContextPack): readonly SearchIndexEntry[] {
-  const chunks: SearchIndexEntry[] = [];
-
-  const addChunk = (key: string, label: string, field: string, text: string, weight: number) => {
-    if (chunks.length >= MAX_CONTEXT_CHUNKS_PER_PACK) {
-      return;
-    }
-    const boundedText = trimContextChunk(text);
-    if (!boundedText) {
-      return;
-    }
-    const weightedText = [
-      { field: "id", text: `${pack.id} ${key}`, weight: 10 },
-      { field: "subjectId", text: pack.subjectId, weight: 8 },
-      { field: "title", text: `${pack.title} ${label}`, weight: 7 },
-      { field, text: boundedText, weight }
-    ];
-    const weights = tokenWeights(weightedText);
-    chunks.push({
-      id: `context_chunk:${pack.id}:${key}`,
-      type: "context_chunk",
-      recordId: pack.id,
-      subjectId: pack.subjectId,
-      title: `${pack.title} (${label})`,
-      summary: trimSummary(boundedText),
-      tokenWeights: weights,
-      vectorWeights: vectorWeights(weights),
-      fieldWeights: fieldWeights(weightedText)
-    });
-  };
-
-  addChunk("summary", "summary", "summary", pack.summary, 6);
-  pack.facts.forEach((fact, index) => addChunk(`fact-${index.toString().padStart(3, "0")}`, `fact ${index + 1}`, "facts", fact, 8));
-  pack.evidence.forEach((evidence, index) =>
-    addChunk(`evidence-${index.toString().padStart(3, "0")}`, `evidence ${index + 1}`, "evidence", evidence, 7)
-  );
-
-  return chunks;
 }
 
 function entry(
@@ -787,11 +735,6 @@ function trimSummary(value: string): string {
   return compact.length > 180 ? `${compact.slice(0, 177)}...` : compact;
 }
 
-function trimContextChunk(value: string): string {
-  const compact = value.replace(/\s+/gu, " ").trim();
-  return compact.length > MAX_CONTEXT_CHUNK_CHARS ? `${compact.slice(0, MAX_CONTEXT_CHUNK_CHARS - 3)}...` : compact;
-}
-
 function isSearchIndexEntry(value: unknown): value is SearchIndexEntry {
   if (!isRecord(value)) {
     return false;
@@ -856,9 +799,7 @@ function isSearchDocumentType(value: unknown): value is SearchDocumentType {
     value === "evidence" ||
     value === "source" ||
     value === "claim" ||
-    value === "decision" ||
-    value === "context_pack" ||
-    value === "context_chunk"
+    value === "decision"
   );
 }
 

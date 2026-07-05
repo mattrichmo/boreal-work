@@ -1,4 +1,5 @@
 import { existsSync } from "node:fs";
+import { open } from "node:fs/promises";
 import { join } from "node:path";
 
 import {
@@ -7,36 +8,50 @@ import {
   nowIso,
   readJsonFile,
   type ContentHash,
-  type ContextPack,
-  type EnforcementGap,
-  type GraphEdge,
-  type WorkId,
-  type WorkItem
+  type EnforcementGap
 } from "@boreal/core";
 import {
-  buildContextPack,
   buildSearchIndex,
   isSearchIndexDocument,
   querySearchIndex,
-  searchIndexContentHash,
+  SEARCH_INDEX_ALGORITHM,
+  SEARCH_INDEX_SCHEMA_VERSION,
+  searchCorpusFingerprint,
   type SearchCorpusSnapshot,
   type SearchDocumentType,
   type SearchIndexDocument,
   type SearchResult
 } from "@boreal/search";
-import { normalizeFileLockOptions, withFileLock, writeTextFileAtomic } from "@boreal/storage";
+import {
+  FileEventLog,
+  loadNodeSqlite,
+  normalizeFileLockOptions,
+  objectIndexPath,
+  withFileLock,
+  writeTextFileAtomic
+} from "@boreal/storage";
 
 import type { CliContext } from "./context.js";
 
 const SEARCH_INDEX_MAX_READ_BYTES = 100 * 1024 * 1024;
+const SEARCH_INDEX_METADATA_READ_BYTES = 64 * 1024;
 const SEARCH_INDEX_LOCK_RETRY_ATTEMPTS = 3;
 const SEARCH_INDEX_LOCK_RETRY_DELAY_MS = 100;
+const SEARCH_FINGERPRINT_SECTIONS = [
+  "workItems",
+  "agentSummaries",
+  "evidence",
+  "knowledgeSources",
+  "claims",
+  "decisions"
+] as const;
 
 export interface SearchIndexWriteResult {
   readonly path: string;
   readonly schemaVersion: SearchIndexDocument["schemaVersion"];
   readonly builtAt: string;
   readonly contentHash: ContentHash;
+  readonly corpusFingerprint?: ContentHash;
   readonly documentCount: number;
   readonly tokenCount: number;
 }
@@ -45,8 +60,10 @@ export interface SearchIndexInspection {
   readonly path: string;
   readonly exists: boolean;
   readonly stale: boolean;
-  readonly expectedContentHash: ContentHash;
+  readonly expectedCorpusFingerprint: ContentHash;
+  readonly expectedContentHash?: ContentHash;
   readonly contentHash?: ContentHash;
+  readonly corpusFingerprint?: ContentHash;
   readonly builtAt?: string;
   readonly documentCount?: number;
   readonly tokenCount?: number;
@@ -71,35 +88,36 @@ export async function writeSearchIndex(context: CliContext): Promise<SearchIndex
 
 export async function inspectSearchIndex(context: CliContext): Promise<SearchIndexInspection> {
   const path = searchIndexPath(context);
-  const snapshot = await readSearchSnapshot(context);
-  const expectedContentHash = searchIndexContentHash(snapshot);
+  const snapshot = await readSearchFingerprintSnapshot(context);
+  const expectedCorpusFingerprint = searchCorpusFingerprint(snapshot);
   if (!existsSync(path)) {
     return {
       path,
       exists: false,
       stale: true,
-      expectedContentHash
+      expectedCorpusFingerprint
     };
   }
 
   try {
-    const index = await readSearchIndex(path);
+    const metadata = await readSearchIndexMetadata(path);
     return {
       path,
       exists: true,
-      stale: index.contentHash !== expectedContentHash,
-      expectedContentHash,
-      contentHash: index.contentHash,
-      builtAt: index.builtAt,
-      documentCount: index.documentCount,
-      tokenCount: index.tokenCount
+      stale: metadata.corpusFingerprint === undefined || metadata.corpusFingerprint !== expectedCorpusFingerprint,
+      expectedCorpusFingerprint,
+      contentHash: metadata.contentHash,
+      corpusFingerprint: metadata.corpusFingerprint,
+      builtAt: metadata.builtAt,
+      documentCount: metadata.documentCount,
+      tokenCount: metadata.tokenCount
     };
   } catch (error) {
     return {
       path,
       exists: true,
       stale: true,
-      expectedContentHash,
+      expectedCorpusFingerprint,
       error: error instanceof Error ? error.message : String(error)
     };
   }
@@ -139,6 +157,7 @@ async function loadFreshSearchIndex(
     }
     throw new BorealError("BOREAL_POLICY_VIOLATION", "Search index is missing; run `bwrk search index`", {
       path: inspection.path,
+      expectedCorpusFingerprint: inspection.expectedCorpusFingerprint,
       expectedContentHash: inspection.expectedContentHash,
       domain: "workflow"
     });
@@ -162,6 +181,8 @@ async function loadFreshSearchIndex(
     throw new BorealError("BOREAL_POLICY_VIOLATION", "Search index is stale; run `bwrk search index`", {
       path: inspection.path,
       contentHash: inspection.contentHash,
+      corpusFingerprint: inspection.corpusFingerprint,
+      expectedCorpusFingerprint: inspection.expectedCorpusFingerprint,
       expectedContentHash: inspection.expectedContentHash,
       domain: "workflow"
     });
@@ -256,17 +277,71 @@ async function readSearchIndex(path: string): Promise<SearchIndexDocument> {
   return parsed;
 }
 
-async function readSearchSnapshot(context: CliContext): Promise<SearchCorpusSnapshot> {
+interface SearchIndexMetadata {
+  readonly builtAt: string;
+  readonly contentHash: ContentHash;
+  readonly corpusFingerprint?: ContentHash;
+  readonly documentCount: number;
+  readonly tokenCount: number;
+}
+
+async function readSearchIndexMetadata(path: string): Promise<SearchIndexMetadata> {
+  const handle = await open(path, "r");
+  try {
+    const buffer = Buffer.alloc(SEARCH_INDEX_METADATA_READ_BYTES);
+    const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
+    const prefix = buffer.subarray(0, bytesRead).toString("utf8");
+    const schemaVersion = metadataString(prefix, "schemaVersion", true);
+    const algorithm = metadataString(prefix, "algorithm", true);
+    if (schemaVersion !== SEARCH_INDEX_SCHEMA_VERSION || algorithm !== SEARCH_INDEX_ALGORITHM) {
+      throw new BorealError("BOREAL_INVALID_INPUT", "Search index has an unsupported shape", { path });
+    }
+    return {
+      builtAt: metadataString(prefix, "builtAt", true),
+      contentHash: metadataString(prefix, "contentHash", true) as ContentHash,
+      corpusFingerprint: metadataString(prefix, "corpusFingerprint", false) as ContentHash | undefined,
+      documentCount: metadataNumber(prefix, "documentCount"),
+      tokenCount: metadataNumber(prefix, "tokenCount")
+    };
+  } finally {
+    await handle.close();
+  }
+}
+
+function metadataString(prefix: string, key: string, required: true): string;
+function metadataString(prefix: string, key: string, required: false): string | undefined;
+function metadataString(prefix: string, key: string, required: boolean): string | undefined {
+  const match = new RegExp(`"${key}"\\s*:\\s*"([^"\\\\]*(?:\\\\.[^"\\\\]*)*)"`).exec(prefix);
+  if (!match) {
+    if (required) {
+      throw new BorealError("BOREAL_INVALID_INPUT", "Search index metadata is incomplete", { key });
+    }
+    return undefined;
+  }
+  return JSON.parse(`"${match[1]}"`) as string;
+}
+
+function metadataNumber(prefix: string, key: string): number {
+  const match = new RegExp(`"${key}"\\s*:\\s*(\\d+)`).exec(prefix);
+  if (!match) {
+    throw new BorealError("BOREAL_INVALID_INPUT", "Search index metadata is incomplete", { key });
+  }
+  return Number(match[1]);
+}
+
+async function readSearchFingerprintSnapshot(context: CliContext): Promise<SearchCorpusSnapshot> {
+  const indexed = await readIndexedSearchFingerprintSnapshot(context);
+  if (indexed) {
+    return indexed;
+  }
   return context.store.read(async (reader) => {
-    const [workItems, agentSummaries, evidence, knowledgeSources, claims, decisions, graphEdges, contextPacks] = await Promise.all([
+    const [workItems, agentSummaries, evidence, knowledgeSources, claims, decisions] = await Promise.all([
       reader.listWorkItems(),
       reader.listAgentSummaries(),
       reader.listEvidence(),
       reader.listKnowledgeSources(),
       reader.listClaims(),
-      reader.listDecisions(),
-      reader.listGraphEdges(),
-      reader.listContextPacks()
+      reader.listDecisions()
     ]);
     return {
       workItems,
@@ -274,78 +349,89 @@ async function readSearchSnapshot(context: CliContext): Promise<SearchCorpusSnap
       evidence,
       knowledgeSources,
       claims,
-      decisions,
-      contextPacks: contextPacksWithSyntheticMissing({
-        workItems,
-        graphEdges,
-        evidence,
-        knowledgeSources,
-        claims,
-        decisions,
-        contextPacks,
-        actor: context.actor
-      })
+      decisions
     };
   });
 }
 
-function contextPacksWithSyntheticMissing(input: {
-  readonly workItems: readonly WorkItem[];
-  readonly graphEdges: readonly GraphEdge[];
-  readonly evidence: SearchCorpusSnapshot["evidence"];
-  readonly knowledgeSources: SearchCorpusSnapshot["knowledgeSources"];
-  readonly claims: SearchCorpusSnapshot["claims"];
-  readonly decisions: SearchCorpusSnapshot["decisions"];
-  readonly contextPacks: readonly ContextPack[];
-  readonly actor: CliContext["actor"];
-}): readonly ContextPack[] {
-  const existingSubjects = new Set(input.contextPacks.map((pack) => pack.subjectId));
-  const dependencyIdsByWork = dependencyIdsByWorkFromGraph(input.workItems, input.graphEdges);
-  const generatedAt = nowIso();
-  const synthetic = input.workItems
-    .filter((work) => !existingSubjects.has(work.meta.id))
-    .map((work) =>
-      buildContextPack({
-        work: { ...work, dependencyIds: dependencyIdsByWork.get(work.meta.id) ?? work.dependencyIds },
-        evidence: input.evidence.filter((record) => record.subjectId === work.meta.id),
-        sources: input.knowledgeSources,
-        claims: input.claims,
-        decisions: input.decisions,
-        actor: input.actor,
-        now: generatedAt
-      })
-    );
-  return [...input.contextPacks, ...synthetic];
+interface FingerprintRow {
+  readonly section: string;
+  readonly id: string;
+  readonly content_hash: string;
 }
 
-function dependencyIdsByWorkFromGraph(
-  workItems: readonly WorkItem[],
-  graphEdges: readonly GraphEdge[]
-): ReadonlyMap<WorkId, readonly WorkId[]> {
-  const workIds = new Set(workItems.map((work) => work.meta.id));
-  const dependencyIdsByWork = new Map<WorkId, WorkId[]>();
-  for (const work of workItems) {
-    dependencyIdsByWork.set(work.meta.id, []);
+async function readIndexedSearchFingerprintSnapshot(context: CliContext): Promise<SearchCorpusSnapshot | undefined> {
+  const sqlite = await loadNodeSqlite();
+  const path = objectIndexPath(context.workspaceRoot);
+  if (!sqlite || !existsSync(path)) {
+    return undefined;
   }
-  for (const edge of graphEdges) {
-    if (
-      edge.kind !== "blocks" ||
-      edge.fromType !== "work" ||
-      edge.toType !== "work" ||
-      !workIds.has(edge.fromId as WorkId) ||
-      !workIds.has(edge.toId as WorkId)
-    ) {
-      continue;
+
+  const expectedHead = await new FileEventLog({ path: context.paths.eventLogFile }).head();
+  let db: InstanceType<typeof sqlite.DatabaseSync> | undefined;
+  try {
+    db = new sqlite.DatabaseSync(path, { readOnly: true, timeout: 100 });
+    const head = db.prepare("SELECT seq, hash FROM head LIMIT 1;").get() as
+      | {
+          readonly seq?: unknown;
+          readonly hash?: unknown;
+        }
+      | undefined;
+    if (head?.seq !== expectedHead.seq || head.hash !== expectedHead.hash) {
+      return undefined;
     }
-    const workId = edge.toId as WorkId;
-    dependencyIdsByWork.set(workId, [...(dependencyIdsByWork.get(workId) ?? []), edge.fromId as WorkId]);
+
+    const placeholders = SEARCH_FINGERPRINT_SECTIONS.map(() => "?").join(", ");
+    const rows = db
+      .prepare(`SELECT section, id, content_hash FROM records WHERE section IN (${placeholders}) ORDER BY section, id;`)
+      .all(...SEARCH_FINGERPRINT_SECTIONS) as unknown as FingerprintRow[];
+    const bySection = new Map<string, FingerprintRow[]>();
+    for (const row of rows) {
+      bySection.set(row.section, [...(bySection.get(row.section) ?? []), row]);
+    }
+
+    const recordsFor = (section: (typeof SEARCH_FINGERPRINT_SECTIONS)[number]) =>
+      (bySection.get(section) ?? []).map((row) => ({
+        meta: {
+          id: row.id,
+          contentHash: row.content_hash as ContentHash
+        }
+      }));
+
+    return {
+      workItems: recordsFor("workItems") as unknown as SearchCorpusSnapshot["workItems"],
+      agentSummaries: recordsFor("agentSummaries") as unknown as SearchCorpusSnapshot["agentSummaries"],
+      evidence: recordsFor("evidence") as unknown as SearchCorpusSnapshot["evidence"],
+      knowledgeSources: recordsFor("knowledgeSources") as unknown as SearchCorpusSnapshot["knowledgeSources"],
+      claims: recordsFor("claims") as unknown as SearchCorpusSnapshot["claims"],
+      decisions: recordsFor("decisions") as unknown as SearchCorpusSnapshot["decisions"]
+    };
+  } catch {
+    return undefined;
+  } finally {
+    db?.close();
   }
-  return new Map(
-    [...dependencyIdsByWork.entries()].map(([workId, dependencyIds]) => [
-      workId,
-      [...new Set(dependencyIds)].sort((left, right) => left.localeCompare(right))
-    ])
-  );
+}
+
+async function readSearchSnapshot(context: CliContext): Promise<SearchCorpusSnapshot> {
+  return context.store.read(async (reader) => {
+    const [workItems, agentSummaries, evidence, knowledgeSources, claims, decisions] = await Promise.all([
+      reader.listWorkItems(),
+      reader.listAgentSummaries(),
+      reader.listEvidence(),
+      reader.listKnowledgeSources(),
+      reader.listClaims(),
+      reader.listDecisions()
+    ]);
+    return {
+      workItems,
+      agentSummaries,
+      evidence,
+      knowledgeSources,
+      claims,
+      decisions
+    };
+  });
 }
 
 function indexWriteResult(path: string, index: SearchIndexDocument): SearchIndexWriteResult {
@@ -354,6 +440,7 @@ function indexWriteResult(path: string, index: SearchIndexDocument): SearchIndex
     schemaVersion: index.schemaVersion,
     builtAt: index.builtAt,
     contentHash: index.contentHash,
+    corpusFingerprint: index.corpusFingerprint,
     documentCount: index.documentCount,
     tokenCount: index.tokenCount
   };

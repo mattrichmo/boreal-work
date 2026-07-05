@@ -309,7 +309,6 @@ async function contextCommand(
     case "search": {
       const results = await runSearch(context, rest.join(" "), {
         limit: dependencies.parseLimit(flagValue(args, "limit"), { max: dependencies.maxSearchLimit }),
-        types: ["context_pack", "context_chunk"],
         explain: hasFlag(args, "explain"),
         rebuildStaleIndex: !hasFlag(args, "no-rebuild")
       });

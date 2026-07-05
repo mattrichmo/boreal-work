@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { type ActorRef, type ContextPack, type IsoTimestamp, type ProjectionId } from "@boreal/core";
+import { type ActorRef, type IsoTimestamp } from "@boreal/core";
 import { buildSearchIndex, querySearchIndex } from "@boreal/search";
 import { createWorkItem } from "@boreal/work-engine";
 
@@ -25,8 +25,7 @@ describe("search ranking", () => {
       evidence: [],
       knowledgeSources: [],
       claims: [],
-      decisions: [],
-      contextPacks: []
+      decisions: []
     });
 
     const results = querySearchIndex(index, "remote sensing api client lock doctor");
@@ -55,8 +54,7 @@ describe("search ranking", () => {
       evidence: [],
       knowledgeSources: [],
       claims: [],
-      decisions: [],
-      contextPacks: []
+      decisions: []
     });
 
     const results = querySearchIndex(index, "common needle", { explain: true });
@@ -84,8 +82,7 @@ describe("search ranking", () => {
       evidence: [],
       knowledgeSources: [],
       claims: [],
-      decisions: [],
-      contextPacks: []
+      decisions: []
     });
 
     const results = querySearchIndex(index, "reservation", { explain: true });
@@ -98,36 +95,21 @@ describe("search ranking", () => {
     expect(vectorBreakdown?.matchedDimensions).toBeGreaterThan(0);
   });
 
-  it("adds bounded context chunks that can outrank the full context pack", () => {
-    const pack: ContextPack = {
-      id: "projection_context_chunk_test" as ProjectionId,
-      subjectId: "work_context_chunk_test",
-      generatedAt: now,
-      title: "Chunked Context Runtime",
-      summary: "Context pack summary for bounded retrieval.",
-      facts: Array.from({ length: 12 }, (_value, index) =>
-        index === 5 ? "claim: Quartz needle appears in the precise fact." : `claim: Routine bounded context fact ${index}.`
-      ),
-      evidence: ["passed: chunk cap evidence should not be indexed once the cap is reached."]
-    };
+  it("indexes only primary records", () => {
+    const work = createWorkItem({
+      title: "Primary Search Runtime",
+      description: "Search records without derived context documents.",
+      actor,
+      now
+    });
     const index = buildSearchIndex({
-      workItems: [],
+      workItems: [work],
       evidence: [],
       knowledgeSources: [],
       claims: [],
-      decisions: [],
-      contextPacks: [pack]
+      decisions: []
     });
 
-    const chunks = index.documents.filter((document) => document.type === "context_chunk");
-    const results = querySearchIndex(index, "quartz needle", {
-      types: ["context_pack", "context_chunk"]
-    });
-
-    expect(chunks).toHaveLength(8);
-    expect(chunks.map((chunk) => chunk.id)).toContain("context_chunk:projection_context_chunk_test:fact-005");
-    expect(chunks.map((chunk) => chunk.id)).not.toContain("context_chunk:projection_context_chunk_test:fact-010");
-    expect(results[0]?.type).toBe("context_chunk");
-    expect(results[0]?.recordId).toBe(pack.id);
+    expect([...new Set(index.documents.map((document) => document.type))]).toEqual(["work"]);
   });
 });

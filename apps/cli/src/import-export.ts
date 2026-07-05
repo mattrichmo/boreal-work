@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { mkdir, readFile, readdir, stat } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
 
@@ -38,7 +39,10 @@ import {
   type WorkItem
 } from "@boreal/core";
 import {
+  FileEventLog,
   FILE_STORE_SCHEMA_VERSION,
+  loadNodeSqlite,
+  objectIndexPath,
   writeTextFileAtomic,
   type BorealReader,
   type BorealStore,
@@ -201,6 +205,20 @@ const SNAPSHOT_SECTIONS: readonly SnapshotSection[] = [
   "projections",
   "contextPacks"
 ];
+
+const OBJECT_INDEX_LEDGER_SECTIONS = [
+  "workItems",
+  "agentSummaries",
+  "evidence",
+  "verifications",
+  "directiveAcknowledgements",
+  "knowledgeSources",
+  "claims",
+  "decisions",
+  "graphEdges",
+  "reservations",
+  "reviewerHeartbeats"
+] as const satisfies readonly SnapshotSection[];
 
 export const EXPORT_SCHEMA_VERSION = "boreal.export.v1";
 export const LEDGER_SCHEMA_VERSION = "boreal.ledgers.v1";
@@ -824,6 +842,11 @@ export async function deleteContextPackWithTombstone(
 }
 
 export async function ledgerStatus(context: CliContext, dir: string | undefined): Promise<LedgerStatusResult> {
+  const fastStatus = await tryFastFreshLedgerStatus(context, dir);
+  if (fastStatus) {
+    return fastStatus;
+  }
+
   const document = await buildExportDocument(context);
   const currentLedgerState = canonicalLedgerSnapshot(document.state);
   const emptyExpectedContentHash = ledgerContentHash(currentLedgerState, []);
@@ -868,6 +891,179 @@ export async function ledgerStatus(context: CliContext, dir: string | undefined)
       error: error instanceof Error ? error.message : String(error)
     };
   }
+}
+
+async function tryFastFreshLedgerStatus(context: CliContext, dir: string | undefined): Promise<LedgerStatusResult | undefined> {
+  if (context.storage !== "objects-v1") {
+    return undefined;
+  }
+  const resolvedDir = await resolveWorkspacePath(context, dir ?? ".boreal/ledgers");
+  const manifestPath = join(resolvedDir, LEDGER_MANIFEST_FILE);
+  try {
+    const manifest = parseLedgerManifest(
+      await readJsonFile(manifestPath, {
+        schemaName: LEDGER_SCHEMA_VERSION,
+        expectedObject: true,
+        maxBytes: 1024 * 1024
+      })
+    );
+    const deletions = await readLedgerDeletions(resolvedDir, manifest.deletions);
+    if (
+      deletions.length > 0 ||
+      Object.values(manifest.deletedRecordCounts).some((count) => count > 0) ||
+      manifest.files.projections.count > 0 ||
+      manifest.files.contextPacks.count > 0
+    ) {
+      return undefined;
+    }
+
+    const [ledgerFiles, sourceFiles] = await Promise.all([
+      readLedgerFileSummaries(resolvedDir, manifest),
+      sourceLedgerFileSummariesFromObjectIndex(context)
+    ]);
+    if (!sourceFiles) {
+      return undefined;
+    }
+    for (const section of SNAPSHOT_SECTIONS) {
+      if (!ledgerManifestFilesEqual(ledgerFiles[section], manifest.files[section])) {
+        return undefined;
+      }
+      if (!ledgerManifestFilesEqual(sourceFiles[section], manifest.files[section])) {
+        return undefined;
+      }
+    }
+
+    return {
+      ok: true,
+      path: manifestPath,
+      exists: true,
+      stale: false,
+      expectedContentHash: manifest.contentHash,
+      reconstructable: true,
+      contentHash: manifest.contentHash,
+      recordCounts: manifest.recordCounts,
+      deletedRecordCounts: manifest.deletedRecordCounts,
+      files: SNAPSHOT_SECTIONS.map((section) => manifest.files[section]),
+      deletions: manifest.deletions
+    };
+  } catch {
+    return undefined;
+  }
+}
+
+type LedgerFileSummaries = Record<SnapshotSection, LedgerManifestFile>;
+
+interface ObjectIndexLedgerRow {
+  readonly section: SnapshotSection;
+  readonly id: string;
+  readonly json: string;
+}
+
+async function readLedgerFileSummaries(dir: string, manifest: LedgerManifest): Promise<LedgerFileSummaries> {
+  return Object.fromEntries(
+    await Promise.all(
+      SNAPSHOT_SECTIONS.map(async (section) => {
+        const file = manifest.files[section];
+        const path = resolve(dir, file.path);
+        assertPathInside(dir, path);
+        const text = await readFile(path, "utf8");
+        const lines = text.trim().length > 0 ? text.trim().split("\n") : [];
+        return [
+          section,
+          {
+            section,
+            path: file.path,
+            count: lines.length,
+            contentHash: hashCanonicalJsonArray(lines)
+          }
+        ];
+      })
+    )
+  ) as LedgerFileSummaries;
+}
+
+async function sourceLedgerFileSummariesFromObjectIndex(context: CliContext): Promise<LedgerFileSummaries | undefined> {
+  const sqlite = await loadNodeSqlite();
+  const path = objectIndexPath(context.workspaceRoot);
+  if (!sqlite) {
+    return undefined;
+  }
+
+  const eventLog = new FileEventLog({ path: context.paths.eventLogFile });
+  const expectedHead = await eventLog.head();
+  let db: InstanceType<typeof sqlite.DatabaseSync> | undefined;
+  try {
+    db = new sqlite.DatabaseSync(path, { readOnly: true, timeout: 100 });
+    const head = db.prepare("SELECT seq, hash FROM head LIMIT 1;").get() as
+      | {
+          readonly seq?: unknown;
+          readonly hash?: unknown;
+        }
+      | undefined;
+    if (head?.seq !== expectedHead.seq || head.hash !== expectedHead.hash) {
+      return undefined;
+    }
+
+    const placeholders = OBJECT_INDEX_LEDGER_SECTIONS.map(() => "?").join(", ");
+    const rows = db
+      .prepare(`SELECT section, id, json FROM records WHERE section IN (${placeholders}) ORDER BY section, id;`)
+      .all(...OBJECT_INDEX_LEDGER_SECTIONS) as unknown as ObjectIndexLedgerRow[];
+    const jsonBySection = new Map<SnapshotSection, string[]>();
+    for (const row of rows) {
+      jsonBySection.set(row.section, [...(jsonBySection.get(row.section) ?? []), row.json]);
+    }
+
+    const files = Object.fromEntries(
+      OBJECT_INDEX_LEDGER_SECTIONS.map((section) => {
+        const records = jsonBySection.get(section) ?? [];
+        return [
+          section,
+          {
+            section,
+            path: LEDGER_FILES[section],
+            count: records.length,
+            contentHash: hashCanonicalJsonArray(records)
+          }
+        ];
+      })
+    ) as Partial<LedgerFileSummaries>;
+
+    const events = (await eventLog.readAll())
+      .filter((entry) => entry.kind === "event")
+      .map((entry) => portableEvent(entry.record as RuntimeEvent))
+      .sort((left, right) => (recordId("events", left) ?? "").localeCompare(recordId("events", right) ?? ""));
+    files.events = ledgerManifestFile("events", events);
+    files.projections = emptyLedgerManifestFile("projections");
+    files.contextPacks = emptyLedgerManifestFile("contextPacks");
+
+    return files as LedgerFileSummaries;
+  } catch {
+    return undefined;
+  } finally {
+    db?.close();
+  }
+}
+
+function emptyLedgerManifestFile(section: SnapshotSection): LedgerManifestFile {
+  return {
+    section,
+    path: LEDGER_FILES[section],
+    count: 0,
+    contentHash: hashCanonicalJsonArray([])
+  };
+}
+
+function ledgerManifestFilesEqual(left: LedgerManifestFile, right: LedgerManifestFile): boolean {
+  return left.section === right.section && left.path === right.path && left.count === right.count && left.contentHash === right.contentHash;
+}
+
+function hashCanonicalJsonArray(records: readonly string[]): string {
+  return hashCanonicalJson(`[${records.join(",")}]`);
+}
+
+function hashCanonicalJson(json: string): string {
+  const digest = createHash("sha256").update(json).digest("hex");
+  return `sha256:${digest}`;
 }
 
 export async function createSnapshot(context: CliContext, name: string | undefined): Promise<SnapshotCreateResult> {

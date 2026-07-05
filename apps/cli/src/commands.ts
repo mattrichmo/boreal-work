@@ -190,7 +190,6 @@ import { box, TAGLINE } from "./branding.js";
 
 const DEFAULT_HANDOFF_SEARCH_LIMIT = 8;
 const HANDOFF_SEARCH_MIN_CANDIDATES = 24;
-const HANDOFF_CONTEXT_CHUNK_LIMIT_RATIO = 3;
 const DEFAULT_LIST_LIMIT = 100;
 const DEFAULT_OPERATION_LIST_LIMIT = 50;
 const DEFAULT_RESULTS_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
@@ -1536,6 +1535,9 @@ function optionalCommandPath(value: string | undefined): string | undefined {
 
 function shouldRecordOperation(definition: CommandDefinition): boolean {
   if (definition.path[0] === "storage" && definition.path[1] === "migrate") {
+    return false;
+  }
+  if (definition.path[0] === "sync" && definition.path[1] === "status") {
     return false;
   }
   return definition.requiresWorkspace || definition.path[0] === "init";
@@ -6920,6 +6922,9 @@ async function formatRecordWithAgentDirectives(
   if (!json) {
     return formatRecord(value, false);
   }
+  if (args.command[0] === "sync" && args.command[1] === "status" && options.syncStatus?.ok) {
+    return formatRecord(value, true);
+  }
   const agentDirectives = await compileCliAgentDirectiveBundles(context, args, options);
   const outputDirectives = await agentDirectiveOutputForSession(context, agentDirectives);
   return formatRecord(value, true, { agentDirectives: outputDirectives });
@@ -7626,6 +7631,7 @@ function unprobedSyncStatus(context: CliContext): SyncStatusResult {
       path: join(context.workspaceRoot, ".boreal", "runtime", "search-index.json"),
       exists: false,
       stale: false,
+      expectedCorpusFingerprint: contentHash,
       expectedContentHash: contentHash
     },
     git: {
@@ -9084,8 +9090,8 @@ async function buildHandoffBundle(
   await writeSearchIndex(context);
   const queryFlag = flagValue(args, "query");
   const query = queryFlag ? normalizeSearchQuery(queryFlag) : handoffSearchQuery(work, contextPack);
-  const candidates = await runSearch(context, query, {
-    limit: Math.max(resultLimit * HANDOFF_CONTEXT_CHUNK_LIMIT_RATIO, HANDOFF_SEARCH_MIN_CANDIDATES)
+  const results = await runSearch(context, query, {
+    limit: Math.max(resultLimit, HANDOFF_SEARCH_MIN_CANDIDATES)
   });
   const ledgerSeq = await currentLedgerSeq(context);
   const contextPackLedgerSeq = contextPack.ledgerSeq ?? ledgerSeq;
@@ -9099,7 +9105,7 @@ async function buildHandoffBundle(
     },
     search: {
       query,
-      results: diversifyHandoffSearchResults(candidates, resultLimit)
+      results: results.slice(0, resultLimit)
     }
   };
 }
@@ -9726,36 +9732,6 @@ function handoffSearchQuery(work: WorkItemView, contextPack: ContextPack): strin
     .join(" ")
     .replace(/\s+/gu, " ")
     .trim();
-}
-
-function diversifyHandoffSearchResults(results: readonly SearchResult[], limit: number): readonly SearchResult[] {
-  const selected: SearchResult[] = [];
-  const deferredContextChunks: SearchResult[] = [];
-  const contextChunkLimit = Math.max(1, Math.floor(limit / HANDOFF_CONTEXT_CHUNK_LIMIT_RATIO));
-  let contextChunkCount = 0;
-
-  for (const result of results) {
-    if (result.type === "context_chunk") {
-      if (contextChunkCount >= contextChunkLimit) {
-        deferredContextChunks.push(result);
-        continue;
-      }
-      contextChunkCount += 1;
-    }
-    selected.push(result);
-    if (selected.length >= limit) {
-      return selected;
-    }
-  }
-
-  for (const result of deferredContextChunks) {
-    selected.push(result);
-    if (selected.length >= limit) {
-      break;
-    }
-  }
-
-  return selected;
 }
 
 function compareReservationRows(left: ReservationListRow, right: ReservationListRow): number {

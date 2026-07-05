@@ -5893,7 +5893,7 @@ describe("bwrk cli", () => {
     );
 
     const indexed = await runCli(rootDir, ["search", "index", "--json"]);
-    expect(parseData<{ readonly documentCount: number; readonly tokenCount: number }>(indexed.stdout).documentCount).toBeGreaterThan(8);
+    expect(parseData<{ readonly documentCount: number; readonly tokenCount: number }>(indexed.stdout).documentCount).toBe(6);
 
     const concurrentIndexes = await Promise.all([
       runCli(rootDir, ["search", "index", "--json"]),
@@ -5902,7 +5902,7 @@ describe("bwrk cli", () => {
     ]);
     expect(concurrentIndexes.map((result) => result.exitCode)).toEqual([0, 0, 0]);
     for (const result of concurrentIndexes) {
-      expect(parseData<{ readonly documentCount: number }>(result.stdout).documentCount).toBeGreaterThan(8);
+      expect(parseData<{ readonly documentCount: number }>(result.stdout).documentCount).toBe(6);
     }
 
     const searchIndexDocument = parseJson<{
@@ -5919,9 +5919,9 @@ describe("bwrk cli", () => {
     }>(await readFile(join(rootDir, ".boreal/runtime/search-index.json"), "utf8"));
     expect(searchIndexDocument.schemaVersion).toBe("boreal.search-index.v1");
     expect(searchIndexDocument.algorithm).toBe("boreal.search.hybrid.v1");
-    expect(searchIndexDocument.documentCount).toBeGreaterThan(8);
+    expect(searchIndexDocument.documentCount).toBe(6);
     expect(new Map(searchIndexDocument.documentFrequencies).get("search")).toBeGreaterThan(1);
-    expect(new Map(searchIndexDocument.documentFrequencies).get("content")).toBeGreaterThan(1);
+    expect(new Map(searchIndexDocument.documentFrequencies).get("content")).toBe(1);
     const indexedDecision = searchIndexDocument.documents.find(
       (document) => document.type === "decision" && document.title === "Use content hash search"
     );
@@ -5932,7 +5932,8 @@ describe("bwrk cli", () => {
 
     const query = await runCli(rootDir, ["search", "query", "content hash", "--json"]);
     const searchResults = parseData<Array<{ readonly type: string; readonly title: string; readonly explain?: unknown }>>(query.stdout);
-    expect(searchResults.map((result) => result.type)).toEqual(expect.arrayContaining(["decision", "context_pack"]));
+    expect(searchResults.map((result) => result.type)).toEqual(expect.arrayContaining(["decision"]));
+    expect(searchResults.map((result) => result.type)).not.toEqual(expect.arrayContaining(["context_pack", "context_chunk"]));
     expect(searchResults.map((result) => result.title)).toContain("Use content hash search");
     expect(searchResults.every((result) => result.explain === undefined)).toBe(true);
 
@@ -5997,11 +5998,11 @@ describe("bwrk cli", () => {
         readonly explain?: { readonly fieldMatches: Array<{ readonly field: string }> };
       }>
     >(contextSearch.stdout);
-    expect(contextResults.every((result) => result.type === "context_pack" || result.type === "context_chunk")).toBe(true);
-    expect(contextResults.map((result) => result.type)).toContain("context_chunk");
-    expect(contextResults.some((result) => result.summary.includes("Ship search runtime"))).toBe(true);
+    expect(contextResults.map((result) => result.type)).toContain("claim");
+    expect(contextResults.map((result) => result.type)).not.toEqual(expect.arrayContaining(["context_pack", "context_chunk"]));
+    expect(contextResults.some((result) => result.summary.includes("Search index must fail closed when stale."))).toBe(true);
     expect(contextResults.flatMap((result) => result.explain?.fieldMatches.map((match) => match.field) ?? [])).toEqual(
-      expect.arrayContaining(["facts"])
+      expect.arrayContaining(["statement"])
     );
 
     await runCli(rootDir, [
@@ -6140,9 +6141,8 @@ describe("bwrk cli", () => {
     expect(payload.contextFreshness.current).toBe(true);
     expect(payload.contextFreshness.contextPackLedgerSeq).toBe(payload.contextFreshness.currentLedgerSeq);
     expect(payload.search.query).toContain("Claim handoff runtime");
-    expect(payload.search.results.map((result) => result.type)).toEqual(
-      expect.arrayContaining(["work", "context_pack", "decision"])
-    );
+    expect(payload.search.results.map((result) => result.type)).toEqual(expect.arrayContaining(["work", "decision"]));
+    expect(payload.search.results.map((result) => result.type)).not.toContain("context_pack");
 
     const searchAfterClaim = await runCli(rootDir, ["search", "query", "focused search results", "--json"]);
     expect(parseData<Array<{ readonly type: string; readonly title: string }>>(searchAfterClaim.stdout)).toEqual(
@@ -6392,7 +6392,8 @@ describe("bwrk cli", () => {
     expect(startedPayload.contextPack?.subjectId).toBe(work.meta.id);
     expect(startedPayload.contextPack?.facts).toContain("claim: Agent start includes context.");
     expect(startedPayload.search?.query).toContain("Agent start CLI work");
-    expect(startedPayload.search?.results.map((result) => result.type)).toContain("context_pack");
+    expect(startedPayload.search?.results.map((result) => result.type)).toContain("work");
+    expect(startedPayload.search?.results.map((result) => result.type)).not.toContain("context_pack");
     expect(startedPayload.status.reservations.activeCount).toBe(1);
     expect(startedPayload.status.reservations.capacityRemaining).toBe(2);
     expect(startedPayload.status.readyWork.claimableCount).toBe(0);
@@ -8606,7 +8607,7 @@ describe("bwrk cli", () => {
     );
     const importedContextSearch = await runCli(targetDir, ["context", "search", "export import test passed", "--json"]);
     expect(parseData<Array<{ readonly type: string }>>(importedContextSearch.stdout).map((result) => result.type)).toContain(
-      "context_pack"
+      "evidence"
     );
 
     const conflictingPath = join(rootDir, "conflicting-export.json");
