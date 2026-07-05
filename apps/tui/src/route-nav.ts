@@ -92,7 +92,13 @@ export function reduceRouteNav(state: RouteNavState, action: RouteNavAction): Ro
       };
     }
     case "jump":
-      return { current: action.session };
+      // `jump` is only ever a same-surface section switch (number key or
+      // palette selection inside the current surface); openRepo is the only
+      // surface-switcher. Preserving `returnTo` here matters: without it, a
+      // repo session entered from global that then jumps between repo
+      // sections loses its breadcrumb and `esc` at the new root quits
+      // instead of returning to the preserved global frame.
+      return { ...state, current: action.session };
     default:
       return state;
   }

@@ -68,6 +68,35 @@ describe("route nav reducer", () => {
     expect(state.returnTo).toBeUndefined();
   });
 
+  it("preserves the return-to breadcrumb across a same-surface section jump inside the repo (numberKey/palette)", () => {
+    let state = initialRouteNavState("global", "/global", "global.projects", "Projects");
+    state = reduceRouteNav(state, { type: "setCursor", cursor: 2 });
+    const target: OpenRepoTarget = {
+      projectId: "proj-1",
+      projectName: "boreal-work",
+      projectRoot: "/repos/boreal-work",
+      returnToGlobalFrame: { routeId: "global.projects", title: "Projects", cursor: 2 }
+    };
+    state = reduceRouteNav(state, { type: "openRepo", target });
+
+    // Switch repo sections the way a number key or the palette does: a
+    // same-surface `jump` to a different repo route's root frame.
+    state = reduceRouteNav(state, {
+      type: "jump",
+      session: { surface: "repo", workspaceRoot: "/repos/boreal-work", stack: [rootFrame("repo.sprintBoard", "Sprint Board")] }
+    });
+    expect(state.current.surface).toBe("repo");
+    expect(topFrame(state).routeId).toBe("repo.sprintBoard");
+    expect(breadcrumbs(state)).toEqual(["global", "Sprint Board"]);
+
+    // esc at the new repo root must still return to the preserved global
+    // frame with its cursor intact, not quit.
+    state = reduceRouteNav(state, { type: "pop" });
+    expect(state.current.surface).toBe("global");
+    expect(topFrame(state).routeId).toBe("global.projects");
+    expect(topFrame(state).cursor).toBe(2);
+  });
+
   it("drilling further before returning still restores the original global cursor", () => {
     let state = initialRouteNavState("global", "/global", "global.queues", "Queues");
     state = reduceRouteNav(state, { type: "setCursor", cursor: 5 });

@@ -151,6 +151,11 @@ export function RouteApp({ workspaceRoot, global }: { readonly workspaceRoot: st
 
   const frame = topFrame(nav);
   const listLength = activeListLength(body, frame.filters);
+  // The stored frame cursor can point past the end right after a filter
+  // cycle or a refresh returns fewer rows (nothing clamps it until the next
+  // arrow key) -- so render and drill lookups both use this effective,
+  // always-in-bounds cursor rather than frame.cursor directly.
+  const effectiveCursor = Math.min(frame.cursor, Math.max(0, listLength - 1));
   const specs = useMemo(() => bindingsForRoute(frame.routeId), [frame.routeId]);
 
   const paletteResults = useMemo(() => {
@@ -330,7 +335,7 @@ export function RouteApp({ workspaceRoot, global }: { readonly workspaceRoot: st
   function handleDrill(): void {
     if (!body) return;
     if (body.kind === "repo.rollup") {
-      const node = rollupRowAt(body.value, frame.cursor, frame.filters);
+      const node = rollupRowAt(body.value, effectiveCursor, frame.filters);
       if (!node) return;
       if (node.kind === "sprint") {
         dispatch({ type: "push", frame: { routeId: "repo.sprintBoard", title: node.title, cursor: 0, entity: node.entity } });
@@ -340,7 +345,7 @@ export function RouteApp({ workspaceRoot, global }: { readonly workspaceRoot: st
       return;
     }
     if (body.kind === "repo.sprintBoard") {
-      const task = body.value.board?.lanes.flatMap((lane) => lane.items)[frame.cursor];
+      const task = body.value.board?.lanes.flatMap((lane) => lane.items)[effectiveCursor];
       if (!task) return;
       dispatch({
         type: "push",
@@ -354,12 +359,12 @@ export function RouteApp({ workspaceRoot, global }: { readonly workspaceRoot: st
       return;
     }
     if (body.kind === "repo.taskDetail") {
-      const action = body.value.actions[frame.cursor];
+      const action = body.value.actions[effectiveCursor];
       if (action) setConfirming(action);
       return;
     }
     if (body.kind === "global.projects") {
-      const entry = body.value.entries[frame.cursor];
+      const entry = body.value.entries[effectiveCursor];
       if (!entry) return;
       const target: OpenRepoTarget = {
         projectId: entry.id,
@@ -371,7 +376,7 @@ export function RouteApp({ workspaceRoot, global }: { readonly workspaceRoot: st
       return;
     }
     if (body.kind === "global.queues") {
-      const item = queueRowAt(body.value, frame.cursor, frame.filters);
+      const item = queueRowAt(body.value, effectiveCursor, frame.filters);
       if (!item) return;
       const target: OpenRepoTarget = {
         projectId: item.projectId,
@@ -435,7 +440,7 @@ export function RouteApp({ workspaceRoot, global }: { readonly workspaceRoot: st
           ) : !body ? (
             <Text color={COLOR.muted}>Loading…</Text>
           ) : (
-            <RouteBodyView body={body} cursor={frame.cursor} height={bodyHeight} width={bodyWidth} filters={frame.filters} />
+            <RouteBodyView body={body} cursor={effectiveCursor} height={bodyHeight} width={bodyWidth} filters={frame.filters} />
           )}
         </Box>
       </Box>
