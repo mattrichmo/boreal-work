@@ -1,3 +1,5 @@
+import { basename, dirname, join } from "node:path";
+
 import type { WorkItem } from "@boreal/core";
 
 export type BranchableWork = Pick<WorkItem, "title"> & {
@@ -7,6 +9,10 @@ export type BranchableWork = Pick<WorkItem, "title"> & {
 
 export function workBranchName(work: BranchableWork): string {
   return `${branchPrefix(work.kind)}/${shortWorkId(work.meta.id)}-${slugify(work.title)}`;
+}
+
+export function workWorktreePath(repoRoot: string, branch: string): string {
+  return join(dirname(repoRoot), `${basename(repoRoot)}--${branch.replaceAll("/", "-")}`);
 }
 
 export function shortWorkId(id: string): string {

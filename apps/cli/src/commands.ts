@@ -171,7 +171,7 @@ import {
 } from "./doctor.js";
 import { assertInitialized, createCliContext, type CliContext } from "./context.js";
 import { keyValueRows, resultSummary, section } from "./cli-ui.js";
-import { workBranchName } from "./git-branch.js";
+import { workBranchName, workWorktreePath } from "./git-branch.js";
 import { isMissingGit, runGit } from "./git-exec.js";
 import { inspectGitWorktree } from "./git-worktree.js";
 import { buildExportDocument } from "./import-export.js";
@@ -4838,6 +4838,7 @@ type GitBranchAttachment =
       readonly status: "recorded";
       readonly branch: string;
       readonly baseSha: string;
+      readonly worktreePath?: string;
     }
   | {
       readonly status: "skipped";
@@ -4864,7 +4865,13 @@ async function attachGitBranchForClaim(
     };
   }
 
+  const repoRoot = root.stdout.trim();
   const currentBranch = await runGit(context.workspaceRoot, ["symbolic-ref", "--quiet", "--short", "HEAD"]);
+  const targetBranch = workBranchName(claim.work);
+  if (hasFlag(args, "worktree")) {
+    return attachGitWorktreeForClaim(context, claim, repoRoot, targetBranch);
+  }
+
   if (!currentBranch.ok || currentBranch.stdout.trim().length === 0) {
     return {
       reservation: claim.reservation,
@@ -4875,7 +4882,6 @@ async function attachGitBranchForClaim(
     };
   }
 
-  const targetBranch = workBranchName(claim.work);
   if (currentBranch.stdout.trim() !== targetBranch) {
     const existing = await runGit(context.workspaceRoot, ["show-ref", "--verify", "--quiet", `refs/heads/${targetBranch}`]);
     const switched = existing.ok
@@ -4904,6 +4910,78 @@ async function attachGitBranchForClaim(
   const git = {
     branch: targetBranch,
     baseSha: head.stdout.trim()
+  };
+  const reservation = await context.runtime.attachReservationGit({
+    reservationId: claim.reservation.meta.id,
+    git
+  });
+  return {
+    reservation,
+    gitBranch: {
+      status: "recorded",
+      ...git
+    }
+  };
+}
+
+async function attachGitWorktreeForClaim(
+  context: CliContext,
+  claim: ClaimResult,
+  repoRoot: string,
+  targetBranch: string
+): Promise<{ readonly reservation: AgentReservation; readonly gitBranch?: GitBranchAttachment }> {
+  const baseHead = await runGit(repoRoot, ["rev-parse", "HEAD"]);
+  if (!baseHead.ok || baseHead.stdout.trim().length === 0) {
+    return {
+      reservation: claim.reservation,
+      gitBranch: {
+        status: "skipped",
+        reason: "head_unavailable"
+      }
+    };
+  }
+
+  const worktreePath = workWorktreePath(repoRoot, targetBranch);
+  if (existsSync(worktreePath)) {
+    const worktreeBranch = await runGit(worktreePath, ["symbolic-ref", "--quiet", "--short", "HEAD"]);
+    if (!worktreeBranch.ok || worktreeBranch.stdout.trim() !== targetBranch) {
+      throw new BorealError("BOREAL_CONFLICT", "Unable to reuse existing worktree path", {
+        branch: targetBranch,
+        worktreePath,
+        stderr: worktreeBranch.stderr.trim(),
+        error: worktreeBranch.error
+      });
+    }
+  } else {
+    const existing = await runGit(repoRoot, ["show-ref", "--verify", "--quiet", `refs/heads/${targetBranch}`]);
+    const added = existing.ok
+      ? await runGit(repoRoot, ["worktree", "add", worktreePath, targetBranch])
+      : await runGit(repoRoot, ["worktree", "add", "-b", targetBranch, worktreePath, baseHead.stdout.trim()]);
+    if (!added.ok) {
+      throw new BorealError("BOREAL_CONFLICT", "Unable to create worktree for work branch", {
+        branch: targetBranch,
+        worktreePath,
+        stderr: added.stderr.trim(),
+        error: added.error
+      });
+    }
+  }
+
+  const head = await runGit(worktreePath, ["rev-parse", "HEAD"]);
+  if (!head.ok || head.stdout.trim().length === 0) {
+    return {
+      reservation: claim.reservation,
+      gitBranch: {
+        status: "skipped",
+        reason: "head_unavailable"
+      }
+    };
+  }
+
+  const git = {
+    branch: targetBranch,
+    baseSha: head.stdout.trim(),
+    worktreePath
   };
   const reservation = await context.runtime.attachReservationGit({
     reservationId: claim.reservation.meta.id,

@@ -332,7 +332,7 @@ Prints stable Boreal CLI package and runtime version information. `bwrk --versio
 ## `start`
 
 ```bash
-bwrk start [work-ref] [--agent <agent-id>] [--label <label>...] [--container <work-ref>] [--purpose <text>] [--expires-at <iso>|--ttl <duration>] [--query <text>] [--limit <n>] [--no-branch] [--json]
+bwrk start [work-ref] [--agent <agent-id>] [--label <label>...] [--container <work-ref>] [--purpose <text>] [--expires-at <iso>|--ttl <duration>] [--query <text>] [--limit <n>] [--worktree] [--no-branch] [--json]
 ```
 
 Golden-path alias for `bwrk agent start`. With no work reference it resumes the selected agent's active work before claiming another ready item; with `work-ref` it starts or claims that exact work item. It returns the same JSON contract as `agent start`.
@@ -929,7 +929,7 @@ bwrk work reserve <work-id> --expires-at 2026-06-25T22:00:00.000Z
 ## `work claim`
 
 ```bash
-bwrk work claim [work-ref] [--start] [--label <label>...] [--container <work-ref>] [--agent <agent-id>] [--purpose <text>] [--expires-at <iso>|--ttl <duration>] [--query <text>] [--limit <n>] [--no-branch] [--json]
+bwrk work claim [work-ref] [--start] [--label <label>...] [--container <work-ref>] [--agent <agent-id>] [--purpose <text>] [--expires-at <iso>|--ttl <duration>] [--query <text>] [--limit <n>] [--worktree] [--no-branch] [--json]
 ```
 
 Atomically finds the next live ready work item, or claims the specified ready work item, reserves it for the agent, rebuilds context-pack projections, rebuilds the local search index, and returns a handoff bundle.
@@ -943,6 +943,7 @@ Selection behavior:
 - Claimed work is ordered by priority, title, then ID.
 - The runtime rechecks blocker-derived readiness inside the same write transaction before reserving.
 - `--start` returns the same start-shaped handoff payload as `bwrk agent start`, including resume behavior for an existing active reservation.
+- `--worktree` creates or reuses a sibling Git worktree for the work branch and records `reservation.git.worktreePath` without switching the main checkout.
 - If no work matches, the command exits `0` with `claimed: false`.
 
 Handoff output includes:
@@ -1063,7 +1064,7 @@ Behavior:
 ## `agent start`
 
 ```bash
-bwrk agent start [work-ref] [--agent <agent-id>] [--label <label>...] [--container <work-ref>] [--purpose <text>] [--expires-at <iso>|--ttl <duration>] [--query <text>] [--limit <n>] [--no-branch] [--json]
+bwrk agent start [work-ref] [--agent <agent-id>] [--label <label>...] [--container <work-ref>] [--purpose <text>] [--expires-at <iso>|--ttl <duration>] [--query <text>] [--limit <n>] [--worktree] [--no-branch] [--json]
 ```
 
 Safe entrypoint for an agent before it starts work:
@@ -1073,6 +1074,7 @@ Safe entrypoint for an agent before it starts work:
 - With no `work-ref`, atomically claims the next ready matching work only when the agent has no active work and has reservation capacity.
 - With `work-ref`, resumes that exact work if already reserved by the agent, otherwise atomically claims that exact ready work when reservation capacity remains.
 - `--container` restricts queue claims to the container and descendants; with `work-ref`, it validates the exact work item is inside that scope before reserving.
+- `--worktree` creates or reuses a sibling Git worktree for the work branch and records `reservation.git.worktreePath` without switching the main checkout.
 - Returns the selected work view, reservation, context pack, and handoff search results.
 - If context/search handoff generation fails after a reservation is claimed or resumed, returns the reservation with `handoffComplete: false`, a warning, and `repairCommand: "bwrk doctor --fix --json"` instead of losing the successful claim behind an error.
 - Returns `started: false` with `reason: "no_ready_work"` when no matching ready work exists.

@@ -200,6 +200,9 @@ export async function agentStartCommand(
   if (rest.length > 1) {
     throw new BorealError("BOREAL_INVALID_INPUT", "agent start accepts at most one work reference");
   }
+  if (hasFlag(args, "worktree") && hasFlag(args, "no-branch")) {
+    throw new BorealError("BOREAL_INVALID_INPUT", "--worktree cannot be combined with --no-branch");
+  }
   const agentId = dependencies.agentIdFromArgs(args, context.actor.id);
   const labels = dependencies.labelsFromArgs(args);
   const containerId = await dependencies.optionalContainerIdFromArgs(context, args);
