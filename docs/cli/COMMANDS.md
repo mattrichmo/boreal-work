@@ -570,10 +570,10 @@ Creates a sprint work item under an existing container such as a milestone/epic.
 ## `sprint show`
 
 ```bash
-bwrk sprint show <sprint-ref> [--limit <n>] [--json]
+bwrk sprint show <sprint-ref> [--limit <n>] [--wide] [--json]
 ```
 
-Shows one sprint resolved by exact ID, unambiguous ID prefix, exact title, or `current`. The returned `scope` is built from canonical `blocks` graph edges plus stored dependency IDs, not labels, and is capped at 500 descendant rows.
+Shows one sprint resolved by exact ID, unambiguous ID prefix, exact title, or `current`. The returned `scope` is built from canonical `blocks` graph edges plus stored dependency IDs, not labels, and is capped at 500 descendant rows. Human output renders the dependency-scoped work as a status/kind/title/owner table after the header lines, clamped to terminal width unless `--wide` is passed.
 
 ## `sprint current`
 
@@ -594,10 +594,10 @@ Sets the workspace-local active sprint. Activation fails closed for missing, amb
 ## `sprint board`
 
 ```bash
-bwrk sprint board [<sprint-ref>] [--limit <n>] [--json]
+bwrk sprint board [<sprint-ref>] [--limit <n>] [--wide] [--json]
 ```
 
-Returns the active or selected sprint as a `SprintBoardView` payload using schema `boreal.cli.sprint.board.v1`. The board groups dependency-scoped work into status lanes, lists milestone phases, summarizes status totals and reservations, and keeps `dependencyIds` separate from `activeBlockerIds`. Scope is built from canonical `blocks` graph edges plus dependency ID projections, not labels, and defaults to 500 descendant rows.
+Returns the active or selected sprint as a `SprintBoardView` payload using schema `boreal.cli.sprint.board.v1`. The board groups dependency-scoped work into status lanes, lists milestone phases, summarizes status totals and reservations, and keeps `dependencyIds` separate from `activeBlockerIds`. Scope is built from canonical `blocks` graph edges plus dependency ID projections, not labels, and defaults to 500 descendant rows. Human output renders each non-empty lane's items (status, title, priority, reserved agent) followed by a one-line count summary, clamped to terminal width unless `--wide` is passed.
 
 ## `sprint report`
 
@@ -754,10 +754,12 @@ Recomputes readiness for one work item and marks it `ready` if its dependencies 
 ## `work list`
 
 ```bash
-bwrk work list [--ready] [--status <status>] [--label <label>...] [--container <work-ref>] [--limit <n>] [--json]
+bwrk work list [--ready] [--status <status>] [--label <label>...] [--container <work-ref>] [--limit <n>] [--all|--closed] [--wide] [--json]
 ```
 
 Lists work items. `--label` may be repeated and all labels must match. `--container` scopes results to the container and its dependency-graph descendants; use it for epic/milestone/sprint-style scopes, while labels remain tags. `--ready` returns dependency-valid claimable work from the current graph; `--status ready` is a raw status filter. Default `--limit` is `100`; max is `1000`.
+
+Human output defaults to open (non-closed, non-cancelled, non-verified) work, sorted by status group (`in_progress`, `ready`, `blocked`, `draft`, then everything else), priority descending, and title, clamped to terminal width unless `--wide` is passed. Instead of the full ancestor id chain it prints a single truncated `container` column with the immediate parent's title. `--all`/`--closed` include closed work in human output; both are ignored in `--json` mode, which always keeps the legacy filter/order/limit contract below so agent scripts see no behavior change.
 
 Statuses:
 
@@ -809,6 +811,49 @@ JSON `data` shape:
 ```
 
 `containerId` is present only when `--container` is used. `parentIds` and `lineage` are present when Boreal can derive parent containers from explicit `parentId` or dependency-graph ancestry.
+
+## `work rollup`
+
+```bash
+bwrk work rollup [<container-ref>] [--all] [--kind issue|task|sprint|milestone] [--label <label>...] [--depth <n>] [--limit <n>] [--wide] [--json]
+```
+
+Renders the milestone -> sprint -> task hierarchy as an indented, terminal-width-clamped table using the same membership and progress derivation as the TUI Roll-Up route and `sprint show`/`sprint board` scope (`@boreal/ui-model`'s `buildRepoRollupView`) -- there is no second hierarchy/progress derivation in the CLI.
+
+With no argument, renders every root container: milestones, plus parentless sprints/issues that have children. With `<container-ref>`, resolved the same way as other work references, renders that subtree and always includes the container row itself regardless of its status. Defaults to open work (non-closed, non-cancelled, non-verified); pass `--all` to include closed work. Containers (nodes with children) show a `done/total` progress ratio and a blocked-descendant count in the `blk` column; leaves show `-` for both. The `owner` column is the active reservation's agent, if any.
+
+Examples:
+
+```bash
+bwrk work rollup
+bwrk work rollup bw_work_example --all --json
+```
+
+JSON `data` shape:
+
+```json
+{
+  "schemaVersion": "boreal.cli.work.rollup.v1",
+  "generatedAt": "2026-01-01T00:00:00.000Z",
+  "workspaceRoot": "/abs/path",
+  "filters": { "all": false, "kind": null, "labels": [], "depth": null, "limit": null, "containerId": null },
+  "summary": { "totalNodes": 42, "milestones": 3, "sprints": 5, "tasks": 30, "open": 20, "blocked": 4, "needsVerification": 1, "closed": 15, "cancelled": 2, "activeReservations": 1 },
+  "rows": [
+    {
+      "id": "bw_work_...",
+      "kind": "milestone",
+      "status": "blocked",
+      "title": "Search, Worktrees & Collab Overhaul",
+      "depth": 0,
+      "isContainer": true,
+      "done": 8,
+      "total": 12,
+      "blocked": 1,
+      "labels": []
+    }
+  ]
+}
+```
 
 ## `work recent-closed`
 

@@ -820,10 +820,13 @@ export const COMMAND_DEFINITIONS: readonly CommandDefinition[] = [
     path: ["sprint", "show"],
     category: "sprint",
     summary: "Show one sprint and its dependency-scoped work tree.",
-    usage: "bwrk sprint show <sprint-ref> [--limit <n>] [--json]",
+    usage: "bwrk sprint show <sprint-ref> [--limit <n>] [--wide] [--json]",
     description:
-      "Resolves a workspace-local sprint by ID, prefix, or title and returns its scope from work dependencies instead of label-only membership.",
-    flags: [flag("limit", "value", "Maximum dependency-scoped work rows to return. Defaults to 500 and is capped at 500.")],
+      "Resolves a workspace-local sprint by ID, prefix, or title and returns its scope from work dependencies instead of label-only membership. Human output renders the dependency-scoped work as a status/kind/title/owner table after the header lines.",
+    flags: [
+      flag("limit", "value", "Maximum dependency-scoped work rows to return. Defaults to 500 and is capped at 500."),
+      flag("wide", "boolean", "Human output only: disable terminal-width clamping."),
+    ],
     positionals: { label: "sprint reference", min: 1, max: 1 },
     requiresWorkspace: true,
     supportsJson: true,
@@ -854,10 +857,13 @@ export const COMMAND_DEFINITIONS: readonly CommandDefinition[] = [
     path: ["sprint", "board"],
     category: "sprint",
     summary: "Emit the sprint board JSON projection.",
-    usage: "bwrk sprint board [<sprint-ref>] [--limit <n>] [--json]",
+    usage: "bwrk sprint board [<sprint-ref>] [--limit <n>] [--wide] [--json]",
     description:
-      "Returns the active or selected sprint as a board view grouped by lane with phases, blockers, reservations, evidence, and verification counts.",
-    flags: [flag("limit", "value", "Maximum dependency-scoped work rows to return. Defaults to 500 and is capped at 500.")],
+      "Returns the active or selected sprint as a board view grouped by lane with phases, blockers, reservations, evidence, and verification counts. Human output renders each non-empty lane's items (status, title, priority, reserved agent) followed by a one-line count summary.",
+    flags: [
+      flag("limit", "value", "Maximum dependency-scoped work rows to return. Defaults to 500 and is capped at 500."),
+      flag("wide", "boolean", "Human output only: disable terminal-width clamping."),
+    ],
     positionals: { label: "sprint reference", min: 0, max: 1 },
     requiresWorkspace: true,
     supportsJson: true,

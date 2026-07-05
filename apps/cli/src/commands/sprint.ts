@@ -45,6 +45,7 @@ import { writeTextFileAtomic, type BorealReader } from "@boreal/storage";
 import { buildSprintBoardView, toWorkItemView, type WorkItemView } from "@boreal/ui-model";
 
 import { flagValue, flagValues, hasFlag, requiredFlag, type ParsedArgs } from "../args.js";
+import { boundedTable, type BoundedTableColumn } from "../cli-ui.js";
 import type { CliContext } from "../context.js";
 import { asEvidenceId, runDoctor } from "../doctor.js";
 import { workBranchName } from "../git-branch.js";
@@ -352,7 +353,7 @@ export async function sprintCommand(
     case "show": {
       const sprint = await resolveSprintWork(context, dependencies.requiredPositional(rest, 0, "sprint reference"), dependencies);
       const result = await sprintShowResult(context, sprint, sprintScopeLimit(args, dependencies), dependencies);
-      output.write(json ? formatRecord(result, true) : formatSprintShow(result));
+      output.write(json ? formatRecord(result, true) : formatSprintShow(result, hasFlag(args, "wide")));
       return { exitCode: 0 };
     }
     case "current": {
@@ -368,7 +369,7 @@ export async function sprintCommand(
     case "board": {
       const sprint = await resolveSprintWork(context, rest[0] ?? "current", dependencies);
       const result = await sprintBoardResult(context, sprint, sprintScopeLimit(args, dependencies), dependencies);
-      output.write(json ? formatRecord(result, true) : formatSprintBoard(result));
+      output.write(json ? formatRecord(result, true) : formatSprintBoard(result, hasFlag(args, "wide")));
       return { exitCode: 0 };
     }
     case "report": {
@@ -1872,13 +1873,33 @@ function formatSprintList(result: Awaited<ReturnType<typeof sprintListResult>>):
   );
 }
 
-function formatSprintShow(result: Awaited<ReturnType<typeof sprintShowResult>>): string {
-  return [
+const SPRINT_SCOPE_TABLE_COLUMNS: readonly BoundedTableColumn[] = [
+  { key: "status", header: "status" },
+  { key: "kind", header: "kind" },
+  { key: "title", header: "title", flex: true },
+  { key: "owner", header: "owner" }
+];
+
+function sprintScopeTableRows(descendants: readonly WorkItemView[]): readonly Record<string, string>[] {
+  return descendants.map((work) => ({
+    status: work.status,
+    kind: work.kind,
+    title: work.title,
+    owner: work.activeReservation?.agentId ?? "-"
+  }));
+}
+
+function formatSprintShow(result: Awaited<ReturnType<typeof sprintShowResult>>, wide: boolean): string {
+  const header = [
     `Sprint: ${result.sprint.title} (${result.sprint.id})`,
     `Status: ${result.sprint.status}`,
     `Active: ${result.active ? "yes" : "no"}`,
     `Scope: ${result.scope.totalDescendants}${result.scope.truncated ? " (truncated)" : ""}`
-  ].join("\n") + "\n";
+  ].join("\n");
+  if (result.scope.descendants.length === 0) {
+    return `${header}\nNo work in scope.\n`;
+  }
+  return `${header}\n\n${boundedTable(sprintScopeTableRows(result.scope.descendants), SPRINT_SCOPE_TABLE_COLUMNS, { wide })}`;
 }
 
 function formatSprintCurrent(result: Awaited<ReturnType<typeof sprintCurrentResult>>): string {
@@ -1895,12 +1916,44 @@ function formatSprintActivated(result: Awaited<ReturnType<typeof activateSprint>
   return `Activated sprint ${result.activeSprintId}${previous}\n`;
 }
 
-function formatSprintBoard(result: Awaited<ReturnType<typeof sprintBoardResult>>): string {
+const SPRINT_BOARD_ITEM_COLUMNS: readonly BoundedTableColumn[] = [
+  { key: "status", header: "status" },
+  { key: "title", header: "title", flex: true },
+  { key: "priority", header: "priority" },
+  { key: "owner", header: "owner" }
+];
+
+function formatSprintBoard(result: Awaited<ReturnType<typeof sprintBoardResult>>, wide: boolean): string {
   const lines = [
     `Sprint board: ${result.board.sprint.title} (${result.board.sprint.id})`,
     `Scope: ${result.scope.totalDescendants}${result.scope.truncated ? ` (truncated to ${result.scope.limit})` : ""}`,
-    table(result.board.lanes.map((lane) => ({ lane: lane.title, count: lane.count }))).trimEnd()
+    ""
   ];
+  const nonEmptyLanes = result.board.lanes.filter((lane) => lane.count > 0);
+  if (nonEmptyLanes.length === 0) {
+    lines.push("No work in scope.", "");
+  } else {
+    for (const lane of nonEmptyLanes) {
+      lines.push(`${lane.title} (${lane.count})`);
+      lines.push(
+        boundedTable(
+          lane.items.map((item) => ({
+            status: item.status,
+            title: item.title,
+            priority: item.priority,
+            owner: item.activeReservation?.agentId ?? "-"
+          })),
+          SPRINT_BOARD_ITEM_COLUMNS,
+          { wide }
+        ).trimEnd()
+      );
+      lines.push("");
+    }
+  }
+  const summary = result.board.summary;
+  lines.push(
+    `Total ${summary.total} · ready ${summary.ready} · in_progress ${summary.inProgress} · blocked ${summary.blocked} · needs_verification ${summary.needsVerification} · verified ${summary.verified} · closed ${summary.closed}`
+  );
   return `${lines.join("\n")}\n`;
 }
 
