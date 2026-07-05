@@ -3,6 +3,7 @@ import { EventEmitter } from "node:events";
 import { describe, expect, it } from "vitest";
 
 import {
+  boundedTable,
   choiceList,
   keyValueRows,
   resultSummary,
@@ -165,6 +166,74 @@ describe("cli ui", () => {
     expect(input.rawModes[0]).toBe(true);
     expect(input.rawModes.at(-1)).toBe(false);
     expect(output.text).toContain("\x1B[?25h");
+  });
+
+  describe("boundedTable", () => {
+    const columns = [
+      { key: "status", header: "status" },
+      { key: "title", header: "title", flex: true },
+      { key: "id", header: "id" }
+    ];
+
+    it("renders at natural width when it already fits", () => {
+      const rows = [{ status: "ready", title: "Short title", id: "bw_work_1" }];
+      const rendered = boundedTable(rows, columns, { width: 120 });
+      const lines = rendered.split("\n");
+      expect(lines[0]).toBe("status  title        id       ");
+      expect(lines[1]).toBe("------  -----------  ---------");
+      expect(lines[2]).toBe("ready   Short title  bw_work_1");
+    });
+
+    it("truncates only the flex column with a trailing ellipsis when the terminal is narrow", () => {
+      const rows = [
+        {
+          status: "in_progress",
+          title: "A very long title that would otherwise blow out the row width",
+          id: "bw_work_abcdefgh"
+        }
+      ];
+      const rendered = boundedTable(rows, columns, { width: 60 });
+      const lines = rendered.split("\n");
+      // Protected columns (status, id) keep their full natural width.
+      expect(lines[0]).toContain("status");
+      expect(lines[2]).toContain("in_progress");
+      expect(lines[2]).toContain("bw_work_abcdefgh");
+      expect(lines[2]).toContain("…");
+      // The whole line must respect the requested width (allowing for the
+      // trailing newline join, so compare each rendered row's length).
+      for (const line of lines.filter(Boolean)) {
+        expect(line.length).toBeLessThanOrEqual(60);
+      }
+    });
+
+    it("disables clamping with the wide escape hatch", () => {
+      const rows = [
+        {
+          status: "ready",
+          title: "A very long title that would otherwise blow out the row width",
+          id: "bw_work_abcdefgh"
+        }
+      ];
+      const rendered = boundedTable(rows, columns, { width: 40, wide: true });
+      expect(rendered).toContain("A very long title that would otherwise blow out the row width");
+      expect(rendered).not.toContain("…");
+    });
+
+    it("falls back to 120 columns when process.stdout.columns is not a TTY width", () => {
+      const originalColumns = process.stdout.columns;
+      try {
+        Object.defineProperty(process.stdout, "columns", { value: undefined, configurable: true });
+        const rows = [{ status: "ready", title: "Title", id: "bw_work_1" }];
+        const rendered = boundedTable(rows, columns);
+        expect(rendered.split("\n")[0]?.length).toBeLessThanOrEqual(120);
+      } finally {
+        Object.defineProperty(process.stdout, "columns", { value: originalColumns, configurable: true });
+      }
+    });
+
+    it("returns an empty string for no rows", () => {
+      expect(boundedTable([], columns)).toBe("");
+    });
   });
 });
 

@@ -370,3 +370,135 @@ function wrapText(text: string, width: number): readonly string[] {
 function isString(value: string | undefined): value is string {
   return typeof value === "string";
 }
+
+// ---------------------------------------------------------------------------
+// Bounded table renderer
+//
+// Human-facing tables (work list, sprint board, sprint show, dep tree, work
+// rollup) should clamp to the terminal width instead of printing rows that
+// wrap or truncate unpredictably. `boundedTable` truncates `flex` columns
+// (titles, container names) with a trailing "…" while keeping `protected`
+// columns (ids, statuses) at their natural width. Pass `--wide` through as
+// `options.wide` to disable clamping entirely.
+// ---------------------------------------------------------------------------
+
+const TABLE_COLUMN_SEPARATOR = "  ";
+const DEFAULT_MIN_FLEX_COLUMN_WIDTH = 8;
+export const DEFAULT_TABLE_FALLBACK_WIDTH = 120;
+
+export interface BoundedTableColumn {
+  readonly key: string;
+  readonly header: string;
+  /** Truncatable column (e.g. title). Columns without this flag are never shrunk. */
+  readonly flex?: boolean;
+  readonly minWidth?: number;
+}
+
+export interface BoundedTableOptions {
+  /** Explicit width, mainly for tests. Defaults to `process.stdout.columns` or 120. */
+  readonly width?: number;
+  /** Disable clamping entirely (the `--wide` escape hatch). */
+  readonly wide?: boolean;
+}
+
+export function boundedTable(
+  rows: readonly Record<string, string>[],
+  columns: readonly BoundedTableColumn[],
+  options: BoundedTableOptions = {}
+): string {
+  if (rows.length === 0 || columns.length === 0) {
+    return "";
+  }
+
+  const natural = new Map<string, number>(
+    columns.map((column) => [
+      column.key,
+      Math.max(column.header.length, ...rows.map((row) => String(row[column.key] ?? "").length))
+    ])
+  );
+
+  const separatorWidth = TABLE_COLUMN_SEPARATOR.length * Math.max(0, columns.length - 1);
+  const naturalTotalWidth = sumValues(natural) + separatorWidth;
+  const totalWidth = resolveTableWidth(options);
+
+  const widths =
+    options.wide === true || naturalTotalWidth <= totalWidth
+      ? natural
+      : shrinkFlexColumns(columns, natural, Math.max(0, totalWidth - separatorWidth));
+
+  const header = columns.map((column) => padCell(column.header, widths.get(column.key) ?? 0)).join(TABLE_COLUMN_SEPARATOR);
+  const divider = columns.map((column) => "-".repeat(widths.get(column.key) ?? 0)).join(TABLE_COLUMN_SEPARATOR);
+  const body = rows
+    .map((row) =>
+      columns
+        .map((column) => {
+          const width = widths.get(column.key) ?? 0;
+          return padCell(truncateLine(String(row[column.key] ?? ""), width), width);
+        })
+        .join(TABLE_COLUMN_SEPARATOR)
+    )
+    .join("\n");
+
+  return `${header}\n${divider}\n${body}\n`;
+}
+
+function resolveTableWidth(options: BoundedTableOptions): number {
+  if (options.wide === true) {
+    return Number.POSITIVE_INFINITY;
+  }
+  if (typeof options.width === "number") {
+    return options.width;
+  }
+  return typeof process.stdout.columns === "number" && process.stdout.columns > 0
+    ? process.stdout.columns
+    : DEFAULT_TABLE_FALLBACK_WIDTH;
+}
+
+function shrinkFlexColumns(
+  columns: readonly BoundedTableColumn[],
+  natural: ReadonlyMap<string, number>,
+  availableWidth: number
+): Map<string, number> {
+  const widths = new Map(natural);
+  const flexColumns = columns.filter((column) => column.flex === true);
+  if (flexColumns.length === 0) {
+    return widths;
+  }
+
+  const protectedTotal = columns
+    .filter((column) => column.flex !== true)
+    .reduce((sum, column) => sum + (natural.get(column.key) ?? 0), 0);
+  const flexNaturalTotal = flexColumns.reduce((sum, column) => sum + (natural.get(column.key) ?? 0), 0);
+  const minFlexTotal = flexColumns.reduce((sum, column) => sum + (column.minWidth ?? DEFAULT_MIN_FLEX_COLUMN_WIDTH), 0);
+  const availableForFlex = Math.max(availableWidth - protectedTotal, minFlexTotal);
+
+  let remaining = availableForFlex;
+  flexColumns.forEach((column, index) => {
+    const minWidth = column.minWidth ?? DEFAULT_MIN_FLEX_COLUMN_WIDTH;
+    const naturalWidth = natural.get(column.key) ?? minWidth;
+    const isLast = index === flexColumns.length - 1;
+    let width: number;
+    if (isLast) {
+      width = Math.max(minWidth, remaining);
+    } else {
+      const proportional = Math.round((availableForFlex * naturalWidth) / Math.max(flexNaturalTotal, 1));
+      width = Math.max(minWidth, Math.min(proportional, naturalWidth));
+    }
+    widths.set(column.key, width);
+    remaining -= width;
+  });
+
+  return widths;
+}
+
+function padCell(value: string, width: number): string {
+  return value.length >= width ? value : value.padEnd(width);
+}
+
+function sumValues(values: ReadonlyMap<string, number>): number {
+  let total = 0;
+  for (const value of values.values()) {
+    total += value;
+  }
+  return total;
+}
