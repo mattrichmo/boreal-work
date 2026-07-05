@@ -11411,6 +11411,151 @@ describe("bwrk cli", () => {
     );
     expect(searchIndexDocument.schemaVersion).toBe("boreal.search-index.v1");
   });
+
+  it("renders the work hierarchy for work rollup with human table rows and a matching JSON shape", async () => {
+    const rootDir = await makeTempWorkspace();
+    await runCli(rootDir, ["init", "--json"]);
+    const milestone = parseData<{ readonly meta: { readonly id: string } }>(
+      (await runCli(rootDir, ["work", "create", "Rollup Milestone", "--kind", "milestone", "--ready", "--json"])).stdout
+    );
+    // `sprint launch` sets the sprint's explicit parentId to the container, which is what
+    // buildRepoRollupView uses to attach a sprint under a milestone (a bare `blocks` edge is
+    // not enough -- that's only sprint-scope attachment for the sprint's own descendants).
+    const launched = parseData<{ readonly sprint: { readonly meta: { readonly id: string } } }>(
+      (await runCli(rootDir, ["sprint", "launch", milestone.meta.id, "--title", "Rollup Sprint", "--no-branch", "--ready", "--json"]))
+        .stdout
+    );
+    const sprint = launched.sprint;
+    const taskA = parseData<{ readonly meta: { readonly id: string } }>(
+      (await runCli(rootDir, ["work", "create", "Rollup Task A", "--kind", "task", "--ready", "--json"])).stdout
+    );
+    const taskB = parseData<{ readonly meta: { readonly id: string } }>(
+      (await runCli(rootDir, ["work", "create", "Rollup Task B", "--kind", "task", "--ready", "--json"])).stdout
+    );
+    await runCli(rootDir, ["dep", "add", sprint.meta.id, taskA.meta.id, "--json"]);
+    await runCli(rootDir, ["dep", "add", sprint.meta.id, taskB.meta.id, "--json"]);
+
+    const json = await runCli(rootDir, ["work", "rollup", "--json"]);
+    expect(json.exitCode).toBe(0);
+    const payload = parseData<{
+      readonly schemaVersion: string;
+      readonly rows: readonly Array<{
+        readonly id: string;
+        readonly kind: string;
+        readonly title: string;
+        readonly depth: number;
+        readonly isContainer: boolean;
+        readonly done?: number;
+        readonly total?: number;
+      }>;
+    }>(json.stdout);
+    expect(payload.schemaVersion).toBe("boreal.cli.work.rollup.v1");
+    const rowById = new Map(payload.rows.map((row) => [row.id, row]));
+    expect(rowById.get(milestone.meta.id)).toMatchObject({ depth: 0, isContainer: true, total: 2, done: 0 });
+    expect(rowById.get(sprint.meta.id)).toMatchObject({ depth: 1, isContainer: true, total: 2, done: 0 });
+    expect(rowById.get(taskA.meta.id)).toMatchObject({ depth: 2, isContainer: false });
+    expect(rowById.get(taskA.meta.id)?.total).toBeUndefined();
+
+    const human = await runCli(rootDir, ["work", "rollup"]);
+    expect(human.exitCode).toBe(0);
+    expect(human.stdout).toMatch(/^kind\s+status\s+title/);
+    expect(human.stdout).toContain("Rollup Milestone");
+    expect(human.stdout).toContain("  sprint");
+    expect(human.stdout).toContain("    task");
+    expect(human.stdout).toContain("0/2");
+
+    const subtree = await runCli(rootDir, ["work", "rollup", sprint.meta.id]);
+    expect(subtree.exitCode).toBe(0);
+    expect(subtree.stdout).toContain("Rollup Sprint");
+    expect(subtree.stdout).not.toContain("Rollup Milestone");
+  });
+
+  it("renders work list human output open-only by default, sorted, with a container column, distinct from --json", async () => {
+    const rootDir = await makeTempWorkspace();
+    await runCli(rootDir, ["init", "--json"]);
+    const sprint = parseData<{ readonly meta: { readonly id: string } }>(
+      (await runCli(rootDir, ["work", "create", "List Sprint", "--kind", "sprint", "--ready", "--json"])).stdout
+    );
+    const openTask = parseData<{ readonly meta: { readonly id: string } }>(
+      (
+        await runCli(rootDir, [
+          "work",
+          "create",
+          "Open Child Task",
+          "--kind",
+          "task",
+          "--priority",
+          "high",
+          "--ready",
+          "--json"
+        ])
+      ).stdout
+    );
+    const cancelledTask = parseData<{ readonly meta: { readonly id: string } }>(
+      (await runCli(rootDir, ["work", "create", "Cancelled Child Task", "--kind", "task", "--ready", "--json"])).stdout
+    );
+    await runCli(rootDir, ["dep", "add", sprint.meta.id, openTask.meta.id, "--json"]);
+    await runCli(rootDir, ["dep", "add", sprint.meta.id, cancelledTask.meta.id, "--json"]);
+    await runCli(rootDir, [
+      "work",
+      "cancel",
+      cancelledTask.meta.id,
+      "--reason",
+      "not needed",
+      "--dirty-path",
+      "no_repo_changes: list fixture",
+      "--json"
+    ]);
+
+    const humanDefault = await runCli(rootDir, ["work", "list"]);
+    expect(humanDefault.exitCode).toBe(0);
+    expect(humanDefault.stdout).toContain("Open Child Task");
+    expect(humanDefault.stdout).not.toContain("Cancelled Child Task");
+    expect(humanDefault.stdout).toContain("List Sprint");
+
+    const humanAll = await runCli(rootDir, ["work", "list", "--all"]);
+    expect(humanAll.exitCode).toBe(0);
+    expect(humanAll.stdout).toContain("Cancelled Child Task");
+
+    const json = await runCli(rootDir, ["work", "list", "--json"]);
+    const jsonRows = parseData<
+      readonly Array<{ readonly id: string; readonly status: string; readonly parentIds?: readonly string[] }>
+    >(json.stdout);
+    // JSON keeps the legacy contract: closed/cancelled work is included by default.
+    expect(jsonRows.some((row) => row.id === cancelledTask.meta.id)).toBe(true);
+    expect(jsonRows.find((row) => row.id === cancelledTask.meta.id)?.status).toBe("cancelled");
+  });
+
+  it("renders sprint board lane items for humans instead of only lane counts", async () => {
+    const rootDir = await makeTempWorkspace();
+    await runCli(rootDir, ["init", "--json"]);
+    const sprint = parseData<{ readonly meta: { readonly id: string } }>(
+      (await runCli(rootDir, ["work", "create", "Board Render Sprint", "--kind", "sprint", "--ready", "--json"])).stdout
+    );
+    const readyTask = parseData<{ readonly meta: { readonly id: string } }>(
+      (
+        await runCli(rootDir, [
+          "work",
+          "create",
+          "Board Render Ready Task",
+          "--kind",
+          "task",
+          "--priority",
+          "high",
+          "--ready",
+          "--json"
+        ])
+      ).stdout
+    );
+    await runCli(rootDir, ["dep", "add", sprint.meta.id, readyTask.meta.id, "--json"]);
+
+    const human = await runCli(rootDir, ["sprint", "board", sprint.meta.id]);
+    expect(human.exitCode).toBe(0);
+    expect(human.stdout).toContain("Ready (1)");
+    expect(human.stdout).toContain("Board Render Ready Task");
+    expect(human.stdout).toMatch(/status\s+title\s+priority\s+owner/);
+    expect(human.stdout).toContain("Total 1");
+  });
 });
 
 async function makeTempWorkspace(): Promise<string> {
