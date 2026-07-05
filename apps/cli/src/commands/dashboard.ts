@@ -258,6 +258,10 @@ function spawnDashboardServer(input: {
 
 // Prefer the compiled app output (works in any layout, no tsx, faster start);
 // fall back to running TypeScript source via tsx for in-repo dev checkouts.
+// When neither exists (e.g. the standalone install.sh / npm bundle, which
+// ships only the bundled CLI at <install>/dist/index.js with no apps/ tree),
+// fail loudly with the alternatives instead of spawning a doomed process --
+// previously `bwrk dashboard` exited code 1 with zero output in that layout.
 function spawnAppProcess(input: {
   readonly appDir: string;
   readonly distEntry: string;
@@ -271,6 +275,14 @@ function spawnAppProcess(input: {
   }
   const tsxBin = join(sourceRoot, "node_modules", ".bin", process.platform === "win32" ? "tsx.cmd" : "tsx");
   const srcEntrypoint = join(sourceRoot, "apps", input.appDir, "src", input.srcEntry);
+  if (!existsSync(tsxBin) || !existsSync(srcEntrypoint)) {
+    throw new BorealError(
+      "BOREAL_INVALID_INPUT",
+      `The ${input.appDir === "tui" ? "terminal dashboard" : "browser console"} app is not bundled with this bwrk installation. ` +
+        "Use `bwrk dashboard --json` for the data payload, or run from a source checkout (`pnpm bwrk dashboard`).",
+      { lookedFor: [distEntrypoint, srcEntrypoint], sourceRoot }
+    );
+  }
   const tsconfig = join(sourceRoot, "apps", input.appDir, "tsconfig.json");
   return spawn(tsxBin, ["--tsconfig", tsconfig, srcEntrypoint, ...input.args], {
     cwd: sourceRoot,
@@ -303,9 +315,12 @@ function waitForDashboardProcess(child: ReturnType<typeof spawn>): Promise<numbe
       process.off("SIGTERM", done);
       resolvePromise(signal ? 0 : code ?? 0);
     });
-    child.once("error", () => {
+    child.once("error", (error) => {
       process.off("SIGINT", done);
       process.off("SIGTERM", done);
+      // Surface the spawn failure (ENOENT etc.) -- swallowing it here made
+      // `bwrk dashboard` exit 1 with no output when the app was missing.
+      process.stderr.write(`Failed to launch dashboard process: ${error.message}\n`);
       resolvePromise(1);
     });
   });
