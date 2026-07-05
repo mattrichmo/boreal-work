@@ -429,7 +429,7 @@ export const COMMAND_DEFINITIONS: readonly CommandDefinition[] = [
     category: "agent",
     summary: "Alias for starting or resuming agent work.",
     usage:
-      "bwrk start [work-ref] [--agent <agent-id>] [--label <label>...] [--container <work-ref>] [--purpose <text>] [--expires-at <iso>|--ttl <duration>] [--query <text>] [--limit <n>] [--no-branch] [--json]",
+      "bwrk start [work-ref] [--agent <agent-id>] [--label <label>...] [--container <work-ref>] [--purpose <text>] [--expires-at <iso>|--ttl <duration>] [--query <text>] [--limit <n>] [--worktree] [--no-branch] [--json]",
     description: "Golden-path alias for `bwrk agent start` with the same JSON output contract.",
     flags: [
       flag("agent", "value", "Agent identifier. Defaults to the CLI actor."),
@@ -440,6 +440,7 @@ export const COMMAND_DEFINITIONS: readonly CommandDefinition[] = [
       flag("ttl", "value", "Relative reservation duration for a new claim, for example 30m, 2h, or 1d."),
       flag("query", "value", "Optional handoff search query. Defaults to the selected work context."),
       flag("limit", "value", "Maximum number of handoff search results. Defaults to 8, max 50."),
+      flag("worktree", "boolean", "Create or reuse a sibling git worktree for the work branch without switching the main checkout."),
       flag("no-branch", "boolean", "Skip automatic git branch switching and reservation branch recording."),
     ],
     positionals: { label: "work reference", min: 0, max: 1 },
@@ -1201,7 +1202,7 @@ export const COMMAND_DEFINITIONS: readonly CommandDefinition[] = [
     category: "work",
     summary: "Atomically claim next or specified ready work.",
     usage:
-      "bwrk work claim [work-ref] [--start] [--label <label>...] [--container <work-ref>] [--agent <agent-id>] [--purpose <text>] [--expires-at <iso>|--ttl <duration>] [--query <text>] [--limit <n>] [--no-branch] [--json]",
+      "bwrk work claim [work-ref] [--start] [--label <label>...] [--container <work-ref>] [--agent <agent-id>] [--purpose <text>] [--expires-at <iso>|--ttl <duration>] [--query <text>] [--limit <n>] [--worktree] [--no-branch] [--json]",
     description:
       "Finds the next live ready work item or claims the specified ready work item, reserves it in one runtime write, refreshes context/search projections, and returns a handoff bundle.",
     flags: [
@@ -1214,6 +1215,7 @@ export const COMMAND_DEFINITIONS: readonly CommandDefinition[] = [
       flag("ttl", "value", "Relative reservation duration, for example 30m, 2h, or 1d."),
       flag("query", "value", "Optional handoff search query. Defaults to the claimed work context."),
       flag("limit", "value", "Maximum number of handoff search results. Defaults to 8, max 50."),
+      flag("worktree", "boolean", "Create or reuse a sibling git worktree for the work branch without switching the main checkout."),
       flag("no-branch", "boolean", "Skip automatic git branch switching and reservation branch recording."),
     ],
     positionals: { label: "work reference", min: 0, max: 1 },
@@ -1781,7 +1783,7 @@ export const COMMAND_DEFINITIONS: readonly CommandDefinition[] = [
     category: "agent",
     summary: "Finish work with evidence and verification.",
     usage:
-      "bwrk agent finish <work-id> (--summary <text>|--evidence <inline-or-evidence-id>) (--close --reason <text>|--release) [--agent <agent-id>] [--kind command|test|diff|review|artifact|note] [--outcome passed|failed|observed|unknown] [--command <cmd>] [--uri <uri>] [--verdict passed|failed] [--notes <text>] [--commit <sha>...] [--dirty-path <note>...] [--json]",
+      "bwrk agent finish <work-id> (--summary <text>|--evidence <inline-or-evidence-id>) (--close --reason <text>|--release) [--agent <agent-id>] [--kind command|test|diff|review|artifact|note] [--outcome passed|failed|observed|unknown] [--command <cmd>] [--uri <uri>] [--verdict passed|failed] [--notes <text>] [--commit <sha>...] [--dirty-path <note>...] [--remove-worktree] [--json]",
     description:
       "Records evidence and verification, then closes or releases owned reserved work. Explicit unreserved work refs are auto-reserved and released in the same transaction.",
     flags: [
@@ -1799,6 +1801,7 @@ export const COMMAND_DEFINITIONS: readonly CommandDefinition[] = [
       flag("release", "boolean", "Release the reservation after verification without closing."),
       flag("commit", "value", "Git commit SHA to link in the generated closeout summary.", true),
       flag("dirty-path", "value", "No-commit or dirty-path reason-code note to include in the generated closeout summary.", true),
+      flag("remove-worktree", "boolean", "After a successful close, remove the recorded reservation worktree if one exists."),
     ],
     positionals: { label: "work id", min: 1, max: 1 },
     requiresWorkspace: true,
@@ -1809,7 +1812,7 @@ export const COMMAND_DEFINITIONS: readonly CommandDefinition[] = [
     category: "agent",
     summary: "Start or resume safe agent work.",
     usage:
-      "bwrk agent start [work-ref] [--agent <agent-id>] [--label <label>...] [--container <work-ref>] [--purpose <text>] [--expires-at <iso>|--ttl <duration>] [--query <text>] [--limit <n>] [--no-branch] [--json]",
+      "bwrk agent start [work-ref] [--agent <agent-id>] [--label <label>...] [--container <work-ref>] [--purpose <text>] [--expires-at <iso>|--ttl <duration>] [--query <text>] [--limit <n>] [--worktree] [--no-branch] [--json]",
     description:
       "Preflights reservation state, blocks on stale active reservations, resumes existing active work, or atomically claims ready or exact work and returns a handoff bundle.",
     flags: [
@@ -1821,6 +1824,7 @@ export const COMMAND_DEFINITIONS: readonly CommandDefinition[] = [
       flag("ttl", "value", "Relative reservation duration for a new claim, for example 30m, 2h, or 1d."),
       flag("query", "value", "Optional handoff search query. Defaults to the selected work context."),
       flag("limit", "value", "Maximum number of handoff search results. Defaults to 8, max 50."),
+      flag("worktree", "boolean", "Create or reuse a sibling git worktree for the work branch without switching the main checkout."),
       flag("no-branch", "boolean", "Skip automatic git branch switching and reservation branch recording."),
     ],
     positionals: { label: "work reference", min: 0, max: 1 },
@@ -2229,6 +2233,18 @@ export const COMMAND_DEFINITIONS: readonly CommandDefinition[] = [
     description:
       "Copies canonical runtime records between the legacy compact state document and the git-first per-record object store, then updates the workspace storage marker.",
     flags: [flag("to", "value", "Target storage backend: objects or file.")],
+    positionals: { label: "arguments", min: 0, max: 0 },
+    requiresWorkspace: true,
+    supportsJson: true,
+  },
+  {
+    path: ["storage", "rotate-log"],
+    category: "storage",
+    summary: "Rotate the append-only runtime event log.",
+    usage: "bwrk storage rotate-log [--max-bytes <bytes>] [--json]",
+    description:
+      "Archives .boreal/log/events.jsonl into a hash-chain-preserving archived file and starts a fresh live log linked to the archived head.",
+    flags: [flag("max-bytes", "value", "Skip rotation unless the live event log exceeds this many bytes.")],
     positionals: { label: "arguments", min: 0, max: 0 },
     requiresWorkspace: true,
     supportsJson: true,
@@ -3964,6 +3980,18 @@ const COMMAND_BEHAVIOR: Readonly<Record<string, CommandBehaviorMetadata>> = {
     maxResultSizeChars: 50_000,
     humanOutputKind: "record",
     examples: ["bwrk storage migrate --to objects --json", "bwrk storage migrate --to file --json"],
+  }),
+  "storage rotate-log": commandMetadata("storage rotate-log", {
+    readOnly: false,
+    destructive: false,
+    writesState: true,
+    writesGeneratedArtifacts: false,
+    requiresFreshIndex: false,
+    concurrencySafe: false,
+    requiresLock: "state",
+    maxResultSizeChars: 50_000,
+    humanOutputKind: "record",
+    examples: ["bwrk storage rotate-log --json", "bwrk storage rotate-log --max-bytes 10485760 --json"],
   }),
   "update self": commandMetadata("update self", {
     readOnly: true,

@@ -171,7 +171,7 @@ import {
 } from "./doctor.js";
 import { assertInitialized, createCliContext, type CliContext } from "./context.js";
 import { keyValueRows, resultSummary, section } from "./cli-ui.js";
-import { workBranchName } from "./git-branch.js";
+import { workBranchName, workWorktreePath } from "./git-branch.js";
 import { isMissingGit, runGit } from "./git-exec.js";
 import { inspectGitWorktree } from "./git-worktree.js";
 import { buildExportDocument } from "./import-export.js";
@@ -964,6 +964,7 @@ function agentCommandDependencies(): AgentCommandDependencies {
     finishReservedWorkWithCompositeState,
     writeAgentSummaryArtifact,
     captureGitFinishEvidence,
+    removeGitWorktreeAfterFinish,
     agentSummaryRow,
     resultForWork: (value, work) => withCliResult(value, workCliResult(work))
   };
@@ -3712,9 +3713,10 @@ async function assertWorkNotAlreadyClosedForAgentFinish(context: CliContext, wor
 
 async function captureGitFinishEvidence(
   context: CliContext,
-  workId: WorkId
+  workId: WorkId,
+  gitRoot?: string
 ): Promise<{ readonly evidence?: EvidenceRecord; readonly note?: string }> {
-  const probe = await gitFinishProbe(context.cwd);
+  const probe = await gitFinishProbe(gitRoot ?? context.cwd);
   if (!probe.insideWorktree) {
     return { note: probe.note ?? "No git worktree detected; finish continued without git evidence." };
   }
@@ -3732,6 +3734,27 @@ async function captureGitFinishEvidence(
     uri: probe.root
   });
   return { evidence };
+}
+
+async function removeGitWorktreeAfterFinish(
+  context: CliContext,
+  worktreePath: string | undefined
+): Promise<{ readonly removed: boolean; readonly worktreePath?: string; readonly warning?: string } | undefined> {
+  if (!worktreePath) {
+    return {
+      removed: false,
+      warning: "No recorded worktreePath found on the reservation; nothing to remove."
+    };
+  }
+  const removed = await runGit(context.workspaceRoot, ["worktree", "remove", worktreePath]);
+  if (removed.ok) {
+    return { removed: true, worktreePath };
+  }
+  return {
+    removed: false,
+    worktreePath,
+    warning: removed.stderr.trim() || removed.error || "git worktree remove failed"
+  };
 }
 
 async function gitFinishProbe(cwd: string): Promise<{
@@ -4838,6 +4861,7 @@ type GitBranchAttachment =
       readonly status: "recorded";
       readonly branch: string;
       readonly baseSha: string;
+      readonly worktreePath?: string;
     }
   | {
       readonly status: "skipped";
@@ -4864,7 +4888,13 @@ async function attachGitBranchForClaim(
     };
   }
 
+  const repoRoot = root.stdout.trim();
   const currentBranch = await runGit(context.workspaceRoot, ["symbolic-ref", "--quiet", "--short", "HEAD"]);
+  const targetBranch = workBranchName(claim.work);
+  if (hasFlag(args, "worktree")) {
+    return attachGitWorktreeForClaim(context, claim, repoRoot, targetBranch);
+  }
+
   if (!currentBranch.ok || currentBranch.stdout.trim().length === 0) {
     return {
       reservation: claim.reservation,
@@ -4875,7 +4905,6 @@ async function attachGitBranchForClaim(
     };
   }
 
-  const targetBranch = workBranchName(claim.work);
   if (currentBranch.stdout.trim() !== targetBranch) {
     const existing = await runGit(context.workspaceRoot, ["show-ref", "--verify", "--quiet", `refs/heads/${targetBranch}`]);
     const switched = existing.ok
@@ -4918,6 +4947,78 @@ async function attachGitBranchForClaim(
   };
 }
 
+async function attachGitWorktreeForClaim(
+  context: CliContext,
+  claim: ClaimResult,
+  repoRoot: string,
+  targetBranch: string
+): Promise<{ readonly reservation: AgentReservation; readonly gitBranch?: GitBranchAttachment }> {
+  const baseHead = await runGit(repoRoot, ["rev-parse", "HEAD"]);
+  if (!baseHead.ok || baseHead.stdout.trim().length === 0) {
+    return {
+      reservation: claim.reservation,
+      gitBranch: {
+        status: "skipped",
+        reason: "head_unavailable"
+      }
+    };
+  }
+
+  const worktreePath = workWorktreePath(repoRoot, targetBranch);
+  if (existsSync(worktreePath)) {
+    const worktreeBranch = await runGit(worktreePath, ["symbolic-ref", "--quiet", "--short", "HEAD"]);
+    if (!worktreeBranch.ok || worktreeBranch.stdout.trim() !== targetBranch) {
+      throw new BorealError("BOREAL_CONFLICT", "Unable to reuse existing worktree path", {
+        branch: targetBranch,
+        worktreePath,
+        stderr: worktreeBranch.stderr.trim(),
+        error: worktreeBranch.error
+      });
+    }
+  } else {
+    const existing = await runGit(repoRoot, ["show-ref", "--verify", "--quiet", `refs/heads/${targetBranch}`]);
+    const added = existing.ok
+      ? await runGit(repoRoot, ["worktree", "add", worktreePath, targetBranch])
+      : await runGit(repoRoot, ["worktree", "add", "-b", targetBranch, worktreePath, baseHead.stdout.trim()]);
+    if (!added.ok) {
+      throw new BorealError("BOREAL_CONFLICT", "Unable to create worktree for work branch", {
+        branch: targetBranch,
+        worktreePath,
+        stderr: added.stderr.trim(),
+        error: added.error
+      });
+    }
+  }
+
+  const head = await runGit(worktreePath, ["rev-parse", "HEAD"]);
+  if (!head.ok || head.stdout.trim().length === 0) {
+    return {
+      reservation: claim.reservation,
+      gitBranch: {
+        status: "skipped",
+        reason: "head_unavailable"
+      }
+    };
+  }
+
+  const git = {
+    branch: targetBranch,
+    baseSha: head.stdout.trim(),
+    worktreePath
+  };
+  const reservation = await context.runtime.attachReservationGit({
+    reservationId: claim.reservation.meta.id,
+    git
+  });
+  return {
+    reservation,
+    gitBranch: {
+      status: "recorded",
+      ...git
+    }
+  };
+}
+
 async function agentFinishGitPreflight(
   context: CliContext,
   workId: WorkId,
@@ -4935,7 +5036,8 @@ async function agentFinishGitPreflight(
     return undefined;
   }
 
-  const branch = await runGit(context.workspaceRoot, ["symbolic-ref", "--quiet", "--short", "HEAD"]);
+  const gitRoot = reservation.git.worktreePath ?? context.workspaceRoot;
+  const branch = await runGit(gitRoot, ["symbolic-ref", "--quiet", "--short", "HEAD"]);
   const currentBranch = branch.ok ? branch.stdout.trim() : "HEAD";
   if (currentBranch !== reservation.git.branch) {
     const gap: EnforcementGap = {
@@ -4944,18 +5046,22 @@ async function agentFinishGitPreflight(
       subjectId: workId,
       data: {
         observed: [currentBranch],
-        reason: `finish must run from recorded work branch ${reservation.git.branch}`
+        reason: `finish must run from recorded work branch ${reservation.git.branch}`,
+        ...(reservation.git.worktreePath ? { worktreePath: reservation.git.worktreePath } : {})
       }
     };
     throw new BorealError(
       "BOREAL_POLICY_VIOLATION",
-      "Agent finish must run from the recorded work branch",
+      "Agent finish must verify the recorded work branch",
       {
         workId,
         reservationId: reservation.meta.id,
         expectedBranch: reservation.git.branch,
         actualBranch: currentBranch,
-        repairCommand: `git switch ${reservation.git.branch}`,
+        ...(reservation.git.worktreePath ? { worktreePath: reservation.git.worktreePath } : {}),
+        repairCommand: reservation.git.worktreePath
+          ? `git -C ${reservation.git.worktreePath} switch ${reservation.git.branch}`
+          : `git switch ${reservation.git.branch}`,
         gaps: [gap],
         domain: "work"
       },
@@ -4963,13 +5069,43 @@ async function agentFinishGitPreflight(
     );
   }
 
-  const head = await runGit(context.workspaceRoot, ["rev-parse", "HEAD"]);
+  const dirty = await runGit(gitRoot, ["status", "--porcelain", "--untracked-files=no"]);
+  const dirtyPaths = dirty.ok ? dirty.stdout.split(/\r?\n/u).map((line) => line.trim()).filter(Boolean) : [];
+  if (dirtyPaths.length > 0) {
+    const gap: EnforcementGap = {
+      code: "git.checkpoint.required",
+      subjectType: "work",
+      subjectId: workId,
+      data: {
+        reason: "recorded worktree has uncommitted tracked changes",
+        observed: dirtyPaths
+      }
+    };
+    throw new BorealError(
+      "BOREAL_POLICY_VIOLATION",
+      "Agent finish requires a clean recorded worktree",
+      {
+        workId,
+        reservationId: reservation.meta.id,
+        dirtyPaths,
+        gitRoot,
+        branch: reservation.git.branch,
+        ...(reservation.git.worktreePath ? { worktreePath: reservation.git.worktreePath } : {}),
+        gaps: [gap],
+        domain: "work"
+      },
+      [gap]
+    );
+  }
+
+  const head = await runGit(gitRoot, ["rev-parse", "HEAD"]);
   if (!head.ok || head.stdout.trim().length === 0) {
     return undefined;
   }
   return {
     branch: reservation.git.branch,
-    headSha: head.stdout.trim()
+    headSha: head.stdout.trim(),
+    ...(reservation.git.worktreePath ? { worktreePath: reservation.git.worktreePath } : {})
   };
 }
 

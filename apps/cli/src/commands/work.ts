@@ -407,6 +407,9 @@ async function mainWorkCommand(
       if (rest.length > 1) {
         throw new BorealError("BOREAL_INVALID_INPUT", "work claim accepts at most one work reference");
       }
+      if (hasFlag(args, "worktree") && hasFlag(args, "no-branch")) {
+        throw new BorealError("BOREAL_INVALID_INPUT", "--worktree cannot be combined with --no-branch");
+      }
       if (hasFlag(args, "start")) {
         return dependencies.agentStartCommand(rest, context, args, output, json);
       }

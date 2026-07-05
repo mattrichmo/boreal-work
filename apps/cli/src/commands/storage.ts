@@ -1,3 +1,5 @@
+import { stat } from "node:fs/promises";
+
 import {
   BorealError,
   type ClaimId,
@@ -10,6 +12,7 @@ import {
   type VerificationId,
   type WorkId
 } from "@boreal/core";
+import { FileEventLog } from "@boreal/storage";
 
 import { flagValue, hasFlag, requiredFlag, type ParsedArgs } from "../args.js";
 import type { CliContext } from "../context.js";
@@ -93,9 +96,45 @@ async function storageMigrationCommand(
       output.write(formatRecord(await migrateStorage(context, to), json));
       return { exitCode: 0 };
     }
+    case "rotate-log": {
+      output.write(formatRecord(await rotateEventLog(context, flagValue(args, "max-bytes")), json));
+      return { exitCode: 0 };
+    }
     default:
       throw new BorealError("BOREAL_INVALID_INPUT", `Unknown storage command: ${action ?? ""}`);
   }
+}
+
+async function rotateEventLog(context: CliContext, maxBytesFlag: string | undefined) {
+  const maxBytes = maxBytesFlag === undefined ? undefined : parsePositiveInteger(maxBytesFlag, "--max-bytes");
+  const sizeBytes = await stat(context.paths.eventLogFile).then((stats) => stats.size).catch((error) => {
+    if (isNodeError(error) && error.code === "ENOENT") {
+      return 0;
+    }
+    throw error;
+  });
+  const base = {
+    path: context.paths.eventLogFile,
+    sizeBytes,
+    ...(maxBytes === undefined ? {} : { maxBytes })
+  };
+  if (maxBytes !== undefined && sizeBytes <= maxBytes) {
+    return {
+      ...base,
+      rotated: false,
+      skipped: true,
+      reason: "below_max_bytes"
+    };
+  }
+  const log = new FileEventLog({ path: context.paths.eventLogFile });
+  const rotation = await log.rotate();
+  return {
+    ...base,
+    rotated: true,
+    skipped: false,
+    ...rotation,
+    verification: await log.verifyDeep()
+  };
 }
 
 async function exportCommand(
@@ -253,4 +292,15 @@ async function snapshotCommand(
     default:
       throw new BorealError("BOREAL_INVALID_INPUT", `Unknown snapshot command: ${action ?? ""}`);
   }
+}
+
+function parsePositiveInteger(value: string, label: string): number {
+  if (!/^[1-9]\d*$/u.test(value)) {
+    throw new BorealError("BOREAL_INVALID_INPUT", `${label} must be a positive integer`, { value });
+  }
+  return Number(value);
+}
+
+function isNodeError(error: unknown): error is NodeJS.ErrnoException {
+  return typeof error === "object" && error !== null && "code" in error;
 }

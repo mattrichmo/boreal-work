@@ -618,7 +618,8 @@ export function createBorealRuntime(options: BorealRuntimeOptions = {}): BorealR
         await appendEvent(writer, "work.reservation_git_attached", reservation.workId, "work", {
           reservationId: reservation.meta.id,
           branch: input.git.branch,
-          baseSha: input.git.baseSha
+          baseSha: input.git.baseSha,
+          worktreePath: input.git.worktreePath
         });
         return updated;
       });

@@ -95,6 +95,7 @@ const AGENT_SUMMARY_POLICY_ENFORCED_AT = "2026-06-30T00:00:00.000Z";
 const AGENT_DIRECTIVE_ACKNOWLEDGEMENT_POLICY_ENFORCED_AT = "2026-07-01T00:00:00.000Z";
 const MCP_CONFIG_SCHEMA_VERSION = "boreal.mcp-config.v1";
 const DEFAULT_GIT_TRACKER_DRIFT_COMMIT_WINDOW = 50;
+const EVENT_LOG_ROTATION_RECOMMENDED_MAX_BYTES = 10 * 1024 * 1024;
 
 export async function runDoctor(context: CliContext, fix: boolean, strict = false): Promise<DoctorResult> {
   const diagnostics: Diagnostic[] = [];
@@ -312,20 +313,29 @@ async function validateEventLog(
   readonly diagnostics: readonly Diagnostic[];
 }> {
   const log = new FileEventLog({ path: context.paths.eventLogFile });
-  const verification = await log.verify();
+  const verification = await log.verifyDeep();
   if (verification.ok) {
+    const diagnostics: Diagnostic[] = [
+      {
+        code: "event_log.chain",
+        severity: "ok",
+        message:
+          verification.archives > 0
+            ? "Append-only event log hash chain verifies across archives"
+            : "Append-only event log hash chain verifies",
+        details: verification.archives > 0 ? { archives: verification.archives } : undefined
+      }
+    ];
+    const rotation = await eventLogRotationDiagnostic(context);
+    if (rotation) {
+      diagnostics.push(rotation);
+    }
     return {
       fixed: false,
-      diagnostics: [
-        {
-          code: "event_log.chain",
-          severity: "ok",
-          message: "Append-only event log hash chain verifies"
-        }
-      ]
+      diagnostics
     };
   }
-  if (fix) {
+  if (fix && verification.archives === 0) {
     const rewritten = await log.rechain();
     return {
       fixed: rewritten > 0,
@@ -334,7 +344,7 @@ async function validateEventLog(
           code: "event_log.chain",
           severity: "fixed",
           message: "Re-chained append-only event log after merge drift",
-          details: { brokenAtSeq: verification.brokenAtSeq, rewritten }
+          details: { brokenAtSeq: verification.brokenAtSeq, rewritten, archives: verification.archives }
         }
       ]
     };
@@ -348,10 +358,38 @@ async function validateEventLog(
         message: "Append-only event log hash chain is broken; run `bwrk doctor --fix`",
         details: {
           brokenAtSeq: verification.brokenAtSeq,
-          repairCommand: "bwrk doctor --fix --json"
+          archives: verification.archives,
+          repairCommand: verification.archives === 0 ? "bwrk doctor --fix --json" : undefined,
+          repairNote:
+            verification.archives > 0
+              ? "Archive-aware event log corruption requires manual recovery from a trusted Git revision or snapshot."
+              : undefined
         }
       }
     ]
+  };
+}
+
+async function eventLogRotationDiagnostic(context: CliContext): Promise<Diagnostic | undefined> {
+  const sizeBytes = await stat(context.paths.eventLogFile).then((stats) => stats.size).catch((error) => {
+    if (isNodeError(error) && error.code === "ENOENT") {
+      return 0;
+    }
+    throw error;
+  });
+  if (sizeBytes <= EVENT_LOG_ROTATION_RECOMMENDED_MAX_BYTES) {
+    return undefined;
+  }
+  return {
+    code: "log.rotation-suggested",
+    severity: "info",
+    message: "Runtime event log exceeds the recommended live-file size; run `bwrk storage rotate-log --json`",
+    details: {
+      path: context.paths.eventLogFile,
+      sizeBytes,
+      maxBytes: EVENT_LOG_ROTATION_RECOMMENDED_MAX_BYTES,
+      repairCommand: "bwrk storage rotate-log --json"
+    }
   };
 }
 
@@ -3783,6 +3821,10 @@ function isClaimStatus(value: unknown): value is ClaimRecord["status"] {
 
 function isDecisionStatus(value: unknown): value is DecisionRecord["status"] {
   return value === "proposed" || value === "accepted" || value === "superseded" || value === "rejected";
+}
+
+function isNodeError(error: unknown): error is NodeJS.ErrnoException {
+  return typeof error === "object" && error !== null && "code" in error;
 }
 
 function capitalize(value: string): string {

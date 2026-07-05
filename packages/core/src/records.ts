@@ -319,6 +319,7 @@ export interface AgentReservation {
   readonly git?: {
     readonly branch: string;
     readonly baseSha: string;
+    readonly worktreePath?: string;
   };
 }
 

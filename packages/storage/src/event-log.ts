@@ -1,9 +1,19 @@
-import { appendFile, mkdir, readFile } from "node:fs/promises";
-import { dirname, resolve } from "node:path";
+import { appendFile, mkdir, readFile, readdir } from "node:fs/promises";
+import { basename, dirname, join, resolve } from "node:path";
 
-import { hashContent, type RuntimeEvent, type RuntimeOperation } from "@boreal/core";
+import {
+  createRecordMeta,
+  hashContent,
+  nowIso,
+  randomId,
+  withContentHash,
+  type EventId,
+  type RuntimeEvent,
+  type RuntimeOperation
+} from "@boreal/core";
 
 import { writeTextFileAtomic } from "./atomic-write.js";
+import { DEFAULT_FILE_LOCK_OPTIONS, withFileLock } from "./file-lock.js";
 
 const GENESIS_HASH = "sha256:genesis";
 export const EVENT_LOG_ENTRY_SCHEMA_VERSION = "boreal.event-log-entry.v1";
@@ -15,6 +25,25 @@ export interface EventLogEntry {
   readonly hash: string;
   readonly kind: "event" | "operation";
   readonly record: RuntimeEvent | RuntimeOperation;
+}
+
+export interface EventLogRotationResult {
+  readonly archivedPath: string;
+  readonly archivedEntries: number;
+  readonly archivedHead: {
+    readonly seq: number;
+    readonly hash: string;
+  };
+  readonly genesisEntry: EventLogEntry;
+}
+
+export interface EventLogVerificationResult {
+  readonly ok: boolean;
+  readonly brokenAtSeq?: number;
+}
+
+export interface EventLogDeepVerificationResult extends EventLogVerificationResult {
+  readonly archives: number;
 }
 
 export class FileEventLog {
@@ -47,6 +76,11 @@ export class FileEventLog {
     return entries;
   }
 
+  async readAllIncludingArchives(): Promise<readonly EventLogEntry[]> {
+    const archiveEntries = await Promise.all((await this.archivePaths()).map(async (path) => parseEntries(await this.readText(path))));
+    return [...archiveEntries.flat(), ...(await this.readAll())];
+  }
+
   async head(): Promise<{ readonly seq: number; readonly hash: string }> {
     if (this.#head) {
       return this.#head;
@@ -57,27 +91,84 @@ export class FileEventLog {
     return this.#head;
   }
 
-  async verify(): Promise<{ readonly ok: boolean; readonly brokenAtSeq?: number }> {
+  async verify(): Promise<EventLogVerificationResult> {
     const entries = await this.readAll();
-    let prevHash = GENESIS_HASH;
-    for (let index = 0; index < entries.length; index += 1) {
-      const entry = entries[index];
-      const expectedSeq = index + 1;
-      if (!entry || entry.seq !== expectedSeq || entry.prevHash !== prevHash || entry.hash !== entryHash(entry)) {
-        return { ok: false, brokenAtSeq: entry?.seq ?? expectedSeq };
-      }
-      prevHash = entry.hash;
+    const first = entries[0];
+    if (!first) {
+      return { ok: true };
     }
-    return { ok: true };
+    if (first.seq < 1) {
+      return { ok: false, brokenAtSeq: first.seq };
+    }
+    return verifyChainedEntries(entries, {
+      seq: first.seq,
+      prevHash: first.seq === 1 ? GENESIS_HASH : first.prevHash
+    });
+  }
+
+  async verifyDeep(): Promise<EventLogDeepVerificationResult> {
+    const archivePaths = await this.archivePaths();
+    let expectedSeq = 1;
+    let prevHash = GENESIS_HASH;
+    for (const path of [...archivePaths, this.path]) {
+      const entries = parseEntries(await this.readText(path));
+      const verification = verifyChainedEntries(entries, {
+        seq: expectedSeq,
+        prevHash
+      });
+      if (!verification.ok) {
+        return { ...verification, archives: archivePaths.length };
+      }
+      const last = entries.at(-1);
+      if (last) {
+        expectedSeq = last.seq + 1;
+        prevHash = last.hash;
+      }
+    }
+    return { ok: true, archives: archivePaths.length };
+  }
+
+  async rotate(): Promise<EventLogRotationResult> {
+    return withFileLock(`${this.path}.lock`, DEFAULT_FILE_LOCK_OPTIONS, async () => {
+      const entries = parseEntries(await this.readText());
+      const archivedHead = entries.at(-1)
+        ? { seq: entries.at(-1)?.seq ?? 0, hash: entries.at(-1)?.hash ?? GENESIS_HASH }
+        : { seq: 0, hash: GENESIS_HASH };
+      const archivedPath = await this.nextArchivePath();
+      const archiveText = entries.length > 0 ? `${entries.map((entry) => JSON.stringify(entry)).join("\n")}\n` : "";
+      await mkdir(dirname(this.path), { recursive: true });
+      await writeTextFileAtomic(archivedPath, archiveText);
+
+      const genesisEntry = makeEntry({
+        seq: archivedHead.seq + 1,
+        prevHash: archivedHead.hash,
+        kind: "event",
+        record: rotationEvent({
+          archivedPath,
+          archivedEntries: entries.length,
+          archivedHead
+        })
+      });
+      await writeTextFileAtomic(this.path, `${JSON.stringify(genesisEntry)}\n`);
+      this.#head = { seq: genesisEntry.seq, hash: genesisEntry.hash };
+      return {
+        archivedPath,
+        archivedEntries: entries.length,
+        archivedHead,
+        genesisEntry
+      };
+    });
   }
 
   async rechain(): Promise<number> {
     const entries = await this.readAll();
     let rewritten = 0;
-    let prevHash = GENESIS_HASH;
+    const first = entries[0];
+    let prevHash = first && first.seq > 1 ? first.prevHash : GENESIS_HASH;
+    const firstSeq = first?.seq ?? 1;
     const chained = entries.map((entry, index) => {
       const next = makeEntry({
-        seq: index + 1,
+        seq: firstSeq + index,
         prevHash,
         kind: entry.kind,
         record: entry.record
@@ -95,15 +186,41 @@ export class FileEventLog {
     return rewritten;
   }
 
-  private async readText(): Promise<string> {
+  private async readText(path = this.path): Promise<string> {
     try {
-      return await readFile(this.path, "utf8");
+      return await readFile(path, "utf8");
     } catch (error) {
       if (isNodeError(error) && error.code === "ENOENT") {
         return "";
       }
       throw error;
     }
+  }
+
+  private async archivePaths(): Promise<readonly string[]> {
+    const dir = dirname(this.path);
+    const archivePattern = archiveNamePattern(this.path);
+    const names = await readdir(dir).catch((error) => {
+      if (isNodeError(error) && error.code === "ENOENT") {
+        return [] as string[];
+      }
+      throw error;
+    });
+    return names
+      .map((name) => ({ name, match: archivePattern.exec(name) }))
+      .filter((entry): entry is { readonly name: string; readonly match: RegExpExecArray } => entry.match !== null)
+      .sort((left, right) => Number(left.match[1]) - Number(right.match[1]))
+      .map((entry) => join(dir, entry.name));
+  }
+
+  private async nextArchivePath(): Promise<string> {
+    const archivePaths = await this.archivePaths();
+    const next = archivePaths
+      .map((path) => archiveNamePattern(this.path).exec(basename(path))?.[1])
+      .filter((value): value is string => value !== undefined)
+      .map((value) => Number(value))
+      .reduce((max, value) => Math.max(max, value), 0) + 1;
+    return join(dirname(this.path), `${archiveBaseName(this.path)}-${String(next).padStart(4, "0")}.jsonl.archived`);
   }
 }
 
@@ -122,6 +239,58 @@ function makeEntry(input: {
 
 function entryHash(entry: EventLogEntry): string {
   return hashContent({ seq: entry.seq, prevHash: entry.prevHash, record: entry.record });
+}
+
+function verifyChainedEntries(
+  entries: readonly EventLogEntry[],
+  start: { readonly seq: number; readonly prevHash: string }
+): EventLogVerificationResult {
+  let expectedSeq = start.seq;
+  let prevHash = start.prevHash;
+  for (const entry of entries) {
+    if (entry.seq !== expectedSeq || entry.prevHash !== prevHash || entry.hash !== entryHash(entry)) {
+      return { ok: false, brokenAtSeq: entry.seq };
+    }
+    expectedSeq = entry.seq + 1;
+    prevHash = entry.hash;
+  }
+  return { ok: true };
+}
+
+function rotationEvent(input: {
+  readonly archivedPath: string;
+  readonly archivedEntries: number;
+  readonly archivedHead: { readonly seq: number; readonly hash: string };
+}): RuntimeEvent {
+  const now = nowIso();
+  return withContentHash({
+    meta: createRecordMeta({
+      id: randomId<EventId>("event"),
+      actor: { id: "boreal.storage", kind: "system", displayName: "Boreal storage" },
+      now
+    }),
+    type: "log.rotated",
+    subjectId: "event-log",
+    subjectType: "workspace",
+    payload: {
+      archivedPath: input.archivedPath,
+      archivedEntries: input.archivedEntries,
+      archivedHead: input.archivedHead
+    }
+  } satisfies RuntimeEvent);
+}
+
+function archiveBaseName(path: string): string {
+  const name = basename(path);
+  return name.endsWith(".jsonl") ? name.slice(0, -".jsonl".length) : name;
+}
+
+function archiveNamePattern(path: string): RegExp {
+  return new RegExp(`^${escapeRegExp(archiveBaseName(path))}-(\\d{4})\\.jsonl\\.archived$`, "u");
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
 }
 
 function parseEntries(text: string): EventLogEntry[] {
