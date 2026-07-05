@@ -58,6 +58,61 @@ describe("file event log", () => {
 
     expect(await log2.head()).toEqual(expect.objectContaining({ seq: 1 }));
   });
+
+  it("rotation preserves the verifiable chain across files", async () => {
+    const dir = await makeTempDir();
+    const path = join(dir, "events.jsonl");
+    const log = new FileEventLog({ path });
+    for (let index = 0; index < 5; index += 1) {
+      await log.append("event", sampleEvent(`bw_event_00000000000${index}` as EventId));
+    }
+
+    const rotation = await log.rotate();
+    await log.append("event", sampleEvent("bw_event_000000000010" as EventId));
+
+    expect(rotation.archivedEntries).toBe(5);
+    expect((await log.head()).seq).toBe(7);
+    expect(await log.verify()).toEqual({ ok: true });
+    expect(await log.verifyDeep()).toEqual({ ok: true, archives: 1 });
+    expect(await log.readAll()).toHaveLength(2);
+    expect(await log.readAllIncludingArchives()).toHaveLength(7);
+  });
+
+  it("verifyDeep detects a tampered archive", async () => {
+    const dir = await makeTempDir();
+    const path = join(dir, "events.jsonl");
+    const log = new FileEventLog({ path });
+    await log.append("event", sampleEvent("bw_event_000000000001" as EventId));
+    await log.append("event", sampleEvent("bw_event_000000000002" as EventId));
+    const rotation = await log.rotate();
+    const lines = (await readFile(rotation.archivedPath, "utf8")).trim().split("\n");
+    const tampered = JSON.parse(lines[1] ?? "{}") as { record: { type: string } };
+    tampered.record.type = "tampered.archive";
+    await writeFile(rotation.archivedPath, `${[lines[0], JSON.stringify(tampered)].join("\n")}\n`, "utf8");
+
+    expect(await log.verifyDeep()).toEqual({ ok: false, brokenAtSeq: 2, archives: 1 });
+  });
+
+  it("rotation genesis links the archived head hash", async () => {
+    const dir = await makeTempDir();
+    const path = join(dir, "events.jsonl");
+    const log = new FileEventLog({ path });
+    const entry = await log.append("event", sampleEvent("bw_event_000000000001" as EventId));
+
+    const rotation = await log.rotate();
+    const genesis = JSON.parse((await readFile(path, "utf8")).trim()) as {
+      readonly seq: number;
+      readonly prevHash: string;
+      readonly record: { readonly type: string; readonly payload: Record<string, unknown> };
+    };
+
+    expect(rotation.archivedHead).toEqual({ seq: entry.seq, hash: entry.hash });
+    expect(genesis.seq).toBe(entry.seq + 1);
+    expect(genesis.prevHash).toBe(entry.hash);
+    expect(genesis.record.type).toBe("log.rotated");
+    expect(genesis.record.payload.archivedPath).toBe(rotation.archivedPath);
+    expect(genesis.record.payload.archivedHead).toEqual(rotation.archivedHead);
+  });
 });
 
 async function makeTempDir(): Promise<string> {

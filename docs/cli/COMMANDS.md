@@ -1655,9 +1655,9 @@ JSON `data` contains `ok`, `workspaceRoot`, `checkedAt`, `vault`, `ledgers`, `se
 bwrk sync refresh [--strict] [--json]
 ```
 
-Refreshes generated collaboration artifacts in one closeout command: context-pack projections, the local search index, the JSONL ledger export, and the optional SQLite generated cache at `.boreal/cache/runtime-cache.sqlite`. It then returns the same status shape as `sync status` under `data.status`. Snapshot creation remains explicit through `bwrk snapshot create --json` because snapshots are named baselines, not routine cache refreshes.
+Refreshes generated collaboration artifacts in one closeout command: context-pack projections, the local search index, and the JSONL ledger export. It then returns the same status shape as `sync status` under `data.status`. Snapshot creation remains explicit through `bwrk snapshot create --json` because snapshots are named baselines, not routine cache refreshes.
 
-JSON `data` contains `refreshed`, `refreshOk`, `postRefreshStatusOk`, `exitReason`, `contextViews`, `searchIndex`, `ledgers`, `sqliteCache`, and `status`. `refreshOk: true` means projections, search, ledger export, and the cache rebuild path completed. If `sqlite3` is unavailable, `sqliteCache.skipped` is `true` and file-store behavior remains supported. `postRefreshStatusOk` mirrors nested `status.ok` after the rebuild. `exitReason` is `ok` when post-refresh status is healthy, or `post_refresh_status_unhealthy` when the refresh completed but the final health gate still failed.
+JSON `data` contains `refreshed`, `refreshOk`, `postRefreshStatusOk`, `exitReason`, `contextViews`, `searchIndex`, `ledgers`, `sqliteCache`, and `status`. `refreshOk: true` means projections, search, and ledger export completed. `sqliteCache` is retained as a compatibility key and reports `{ "retired": true, "rebuilt": false, "skipped": true }`; the legacy `.boreal/cache/runtime-cache.sqlite` cache is no longer rebuilt. `postRefreshStatusOk` mirrors nested `status.ok` after the refresh. `exitReason` is `ok` when post-refresh status is healthy, or `post_refresh_status_unhealthy` when the refresh completed but the final health gate still failed.
 
 By default the command exits `0` when the refresh itself succeeds, even if `postRefreshStatusOk` is false. Pass `--strict` to restore status-based exit semantics and exit `1` when the post-refresh sync status is still not clean, for example because the vault is missing or Git collaboration paths are dirty on a protected branch. Agents should treat `exitReason: post_refresh_status_unhealthy` as partial success: generated artifacts were refreshed, but the nested `status` object and `recommendedActions` describe the remaining repair.
 
@@ -1670,6 +1670,16 @@ bwrk storage migrate --to objects|file [--json]
 Copies canonical runtime records between the legacy compact state document and the git-first per-record object store, verifies record counts and the event-log hash chain, then updates `.boreal/project.json` with the selected storage backend. `--to objects` writes one compact JSON file per canonical record under `.boreal/objects/`, keeps history in `.boreal/log/events.jsonl`, and renames `runtime/state.json` to a timestamped `.migrated-*` backup. `--to file` recreates `runtime/state.json` as an escape hatch.
 
 JSON `data` contains `migrated`, `from`, `to`, `records`, `eventLog`, `markerPath`, and, for file-to-object migration, `stateBackupPath`.
+
+## `storage rotate-log`
+
+```bash
+bwrk storage rotate-log [--max-bytes <bytes>] [--json]
+```
+
+Archives `.boreal/log/events.jsonl` to the next `.boreal/log/events-<NNNN>.jsonl.archived` file and starts a fresh live log with a `log.rotated` genesis event linked to the archived head hash. Sequence numbers remain monotonic across archives and the live log.
+
+JSON `data` contains `rotated`, `skipped`, `path`, `sizeBytes`, `archivedPath`, `archivedEntries`, `archivedHead`, `genesisEntry`, and `verification`. With `--max-bytes`, the command skips rotation when the live log is at or below the threshold and returns `reason: "below_max_bytes"`.
 
 ## `update self`
 

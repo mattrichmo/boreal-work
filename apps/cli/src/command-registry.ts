@@ -2195,6 +2195,18 @@ export const COMMAND_DEFINITIONS: readonly CommandDefinition[] = [
     supportsJson: true,
   },
   {
+    path: ["storage", "rotate-log"],
+    category: "storage",
+    summary: "Rotate the append-only runtime event log.",
+    usage: "bwrk storage rotate-log [--max-bytes <bytes>] [--json]",
+    description:
+      "Archives .boreal/log/events.jsonl into a hash-chain-preserving archived file and starts a fresh live log linked to the archived head.",
+    flags: [flag("max-bytes", "value", "Skip rotation unless the live event log exceeds this many bytes.")],
+    positionals: { label: "arguments", min: 0, max: 0 },
+    requiresWorkspace: true,
+    supportsJson: true,
+  },
+  {
     path: ["ledger", "status"],
     category: "ledger",
     summary: "Compare exported JSONL ledgers with current runtime state.",
@@ -3904,6 +3916,18 @@ const COMMAND_BEHAVIOR: Readonly<Record<string, CommandBehaviorMetadata>> = {
     maxResultSizeChars: 50_000,
     humanOutputKind: "record",
     examples: ["bwrk storage migrate --to objects --json", "bwrk storage migrate --to file --json"],
+  }),
+  "storage rotate-log": commandMetadata("storage rotate-log", {
+    readOnly: false,
+    destructive: false,
+    writesState: true,
+    writesGeneratedArtifacts: false,
+    requiresFreshIndex: false,
+    concurrencySafe: false,
+    requiresLock: "state",
+    maxResultSizeChars: 50_000,
+    humanOutputKind: "record",
+    examples: ["bwrk storage rotate-log --json", "bwrk storage rotate-log --max-bytes 10485760 --json"],
   }),
   "update self": commandMetadata("update self", {
     readOnly: true,

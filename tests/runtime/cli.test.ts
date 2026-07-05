@@ -8125,6 +8125,47 @@ describe("bwrk cli", () => {
     await expect(stat(cachePath)).rejects.toMatchObject({ code: "ENOENT" });
   });
 
+  it("rotates the runtime event log through the storage command", async () => {
+    const rootDir = await makeTempWorkspace();
+    await runCli(rootDir, ["init", "--json"]);
+    await runCli(rootDir, ["work", "create", "Event log rotation work", "--json"]);
+
+    const rotated = await runCli(rootDir, ["storage", "rotate-log", "--max-bytes", "1", "--json"]);
+    const rotatedPayload = parseData<{
+      readonly rotated: boolean;
+      readonly skipped: boolean;
+      readonly archivedPath: string;
+      readonly archivedEntries: number;
+      readonly verification: { readonly ok: boolean; readonly archives: number };
+    }>(rotated.stdout);
+    const log = new FileEventLog({ path: runtimeEventLogPath(rootDir) });
+
+    expect(rotated.exitCode).toBe(0);
+    expect(rotatedPayload).toEqual(
+      expect.objectContaining({
+        rotated: true,
+        skipped: false,
+        archivedEntries: expect.any(Number),
+        verification: { ok: true, archives: 1 }
+      })
+    );
+    expect(rotatedPayload.archivedEntries).toBeGreaterThan(0);
+    await expect(stat(rotatedPayload.archivedPath)).resolves.toEqual(expect.objectContaining({ isFile: expect.any(Function) }));
+    await expect(log.verifyDeep()).resolves.toEqual({ ok: true, archives: 1 });
+    const liveEntries = await log.readAll();
+    expect(liveEntries[0]).toEqual(
+      expect.objectContaining({
+        seq: rotatedPayload.archivedEntries + 1,
+        record: expect.objectContaining({ type: "log.rotated" })
+      })
+    );
+
+    const skipped = await runCli(rootDir, ["storage", "rotate-log", "--max-bytes", "999999999", "--json"]);
+    expect(parseData<{ readonly rotated: boolean; readonly skipped: boolean; readonly reason: string }>(skipped.stdout)).toEqual(
+      expect.objectContaining({ rotated: false, skipped: true, reason: "below_max_bytes" })
+    );
+  });
+
   it("exports, snapshots, imports, and rejects conflicting JSON snapshots", async () => {
     const rootDir = await makeTempWorkspace();
     await runCli(rootDir, ["init", "--json"]);
