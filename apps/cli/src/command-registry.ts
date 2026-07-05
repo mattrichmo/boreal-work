@@ -92,6 +92,14 @@ export interface CommandBehaviorMetadata {
   readonly jsonOutputSchema: string;
   readonly humanOutputKind: HumanOutputKind;
   readonly examples: readonly string[];
+  /**
+   * Who a command's *human* rendering is designed for. Defaults to "agent"
+   * (the overwhelming majority of commands were built for JSON-consuming
+   * agents and render minimally for humans). Set explicitly to "human" or
+   * "both" only for commands whose human rendering has been deliberately
+   * designed, e.g. `work list`, `sprint board`, `dep tree`, `work rollup`.
+   */
+  readonly audience: "agent" | "human" | "both";
 }
 
 export const GLOBAL_FLAGS: readonly FlagDefinition[] = [
@@ -151,13 +159,14 @@ const flag = (
 
 const commandMetadata = (
   command: string,
-  input: Omit<CommandBehaviorMetadata, "supportsExplain" | "jsonOutputSchema" | "examples" | "maxResultLines"> &
-    Partial<Pick<CommandBehaviorMetadata, "supportsExplain" | "jsonOutputSchema" | "maxResultLines">> & {
+  input: Omit<CommandBehaviorMetadata, "supportsExplain" | "jsonOutputSchema" | "examples" | "maxResultLines" | "audience"> &
+    Partial<Pick<CommandBehaviorMetadata, "supportsExplain" | "jsonOutputSchema" | "maxResultLines" | "audience">> & {
       readonly examples: readonly string[];
     },
 ): CommandBehaviorMetadata => ({
   supportsExplain: false,
   jsonOutputSchema: `boreal.cli.${command.replace(/\s+/gu, ".")}.v1`,
+  audience: "agent",
   ...input,
   maxResultLines: input.maxResultLines ?? defaultMaxResultLines(input.maxResultSizeChars),
 });
@@ -2560,6 +2569,7 @@ const COMMAND_BEHAVIOR: Readonly<Record<string, CommandBehaviorMetadata>> = {
     requiresLock: "none",
     maxResultSizeChars: 125_000,
     humanOutputKind: "record",
+    audience: "both",
     examples: ["bwrk status --agent agent-a --json"],
   }),
   "workflows list": commandMetadata("workflows list", {
@@ -2788,6 +2798,7 @@ const COMMAND_BEHAVIOR: Readonly<Record<string, CommandBehaviorMetadata>> = {
     requiresLock: "none",
     maxResultSizeChars: 125_000,
     humanOutputKind: "table",
+    audience: "both",
     examples: ["bwrk sprint list --json"],
   }),
   "sprint launch": commandMetadata("sprint launch", {
@@ -2812,6 +2823,7 @@ const COMMAND_BEHAVIOR: Readonly<Record<string, CommandBehaviorMetadata>> = {
     requiresLock: "none",
     maxResultSizeChars: 250_000,
     humanOutputKind: "record",
+    audience: "both",
     examples: ["bwrk sprint show bw_work_0123456789ab --json"],
   }),
   "sprint current": commandMetadata("sprint current", {
@@ -2848,6 +2860,7 @@ const COMMAND_BEHAVIOR: Readonly<Record<string, CommandBehaviorMetadata>> = {
     requiresLock: "none",
     maxResultSizeChars: 500_000,
     humanOutputKind: "table",
+    audience: "human",
     examples: ["bwrk sprint board --json", "bwrk sprint board bw_work_0123456789ab --json"],
   }),
   "sprint report": commandMetadata("sprint report", {
@@ -2938,6 +2951,7 @@ const COMMAND_BEHAVIOR: Readonly<Record<string, CommandBehaviorMetadata>> = {
     requiresLock: "none",
     maxResultSizeChars: 25_000,
     humanOutputKind: "table",
+    audience: "both",
     examples: ["bwrk work list --status ready --container bw_work_example --limit 10 --json"],
   }),
   "work recent-closed": commandMetadata("work recent-closed", {
@@ -2974,6 +2988,7 @@ const COMMAND_BEHAVIOR: Readonly<Record<string, CommandBehaviorMetadata>> = {
     requiresLock: "none",
     maxResultSizeChars: 75_000,
     humanOutputKind: "table",
+    audience: "both",
     examples: ["bwrk work next --container bw_work_example --label hardening --agent agent-a --json"],
   }),
   "work parallel": commandMetadata("work parallel", {
@@ -3046,6 +3061,7 @@ const COMMAND_BEHAVIOR: Readonly<Record<string, CommandBehaviorMetadata>> = {
     requiresLock: "none",
     maxResultSizeChars: 100_000,
     humanOutputKind: "table",
+    audience: "both",
     examples: ["bwrk dep tree bw_work_example --json"],
   }),
   "dep cycles": commandMetadata("dep cycles", {
@@ -3879,6 +3895,7 @@ const COMMAND_BEHAVIOR: Readonly<Record<string, CommandBehaviorMetadata>> = {
     requiresLock: "none",
     maxResultSizeChars: 125_000,
     humanOutputKind: "record",
+    audience: "both",
     examples: ["bwrk sync status --json"],
   }),
   "sync refresh": commandMetadata("sync refresh", {
@@ -3999,6 +4016,7 @@ const COMMAND_BEHAVIOR: Readonly<Record<string, CommandBehaviorMetadata>> = {
     requiresLock: "state+index",
     maxResultSizeChars: 250_000,
     humanOutputKind: "record",
+    audience: "both",
     examples: ["bwrk doctor --json", "bwrk doctor --strict --json", "bwrk doctor --fix --json"],
   }),
   "doctor skills": commandMetadata("doctor skills", {
