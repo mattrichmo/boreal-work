@@ -1744,7 +1744,7 @@ export const COMMAND_DEFINITIONS: readonly CommandDefinition[] = [
     category: "agent",
     summary: "Finish work with evidence and verification.",
     usage:
-      "bwrk agent finish <work-id> (--summary <text>|--evidence <inline-or-evidence-id>) (--close --reason <text>|--release) [--agent <agent-id>] [--kind command|test|diff|review|artifact|note] [--outcome passed|failed|observed|unknown] [--command <cmd>] [--uri <uri>] [--verdict passed|failed] [--notes <text>] [--commit <sha>...] [--dirty-path <note>...] [--json]",
+      "bwrk agent finish <work-id> (--summary <text>|--evidence <inline-or-evidence-id>) (--close --reason <text>|--release) [--agent <agent-id>] [--kind command|test|diff|review|artifact|note] [--outcome passed|failed|observed|unknown] [--command <cmd>] [--uri <uri>] [--verdict passed|failed] [--notes <text>] [--commit <sha>...] [--dirty-path <note>...] [--remove-worktree] [--json]",
     description:
       "Records evidence and verification, then closes or releases owned reserved work. Explicit unreserved work refs are auto-reserved and released in the same transaction.",
     flags: [
@@ -1762,6 +1762,7 @@ export const COMMAND_DEFINITIONS: readonly CommandDefinition[] = [
       flag("release", "boolean", "Release the reservation after verification without closing."),
       flag("commit", "value", "Git commit SHA to link in the generated closeout summary.", true),
       flag("dirty-path", "value", "No-commit or dirty-path reason-code note to include in the generated closeout summary.", true),
+      flag("remove-worktree", "boolean", "After a successful close, remove the recorded reservation worktree if one exists."),
     ],
     positionals: { label: "work id", min: 1, max: 1 },
     requiresWorkspace: true,

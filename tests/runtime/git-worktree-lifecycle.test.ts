@@ -161,6 +161,81 @@ describe("git worktree lifecycle", () => {
     expect(show.status).toBe("ready");
     expect(show.reservation).toBeUndefined();
   });
+
+  it("finish verifies the recorded worktree, not the invoking checkout", async () => {
+    const rootDir = await createTestWorkspace();
+    await runCli(rootDir, ["init", "--json"]);
+    const created = parseData<{ readonly meta: { readonly id: string } }>(
+      (await runCli(rootDir, ["work", "create", "Finish from main", "--kind", "task", "--ready", "--json"])).stdout
+    );
+    const started = parseData<StartedWork>(
+      (await runCli(rootDir, ["agent", "start", created.meta.id, "--agent", "a1", "--worktree", "--json"])).stdout
+    );
+    const worktreePath = requireWorktreePath(started);
+    const branch = started.reservation?.git?.branch ?? "";
+    tempDirs.push(worktreePath);
+    await writeFile(join(worktreePath, "implementation.txt"), "done in worktree\n", "utf8");
+    execFileSync("git", ["add", "implementation.txt"], { cwd: worktreePath, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", "implement in worktree"], { cwd: worktreePath, stdio: "ignore" });
+    const worktreeHead = git(worktreePath, ["rev-parse", "HEAD"]);
+
+    await runCli(rootDir, finishArgs(created.meta.id, worktreeHead));
+
+    expect(git(rootDir, ["symbolic-ref", "--short", "HEAD"])).toBe("main");
+    const show = parseData<{ readonly git?: { readonly branch: string; readonly headSha: string } }>(
+      (await runCli(rootDir, ["work", "show", created.meta.id, "--json"])).stdout
+    );
+    expect(show.git).toEqual({ branch, headSha: worktreeHead });
+  });
+
+  it("finish --remove-worktree prunes the worktree after close", async () => {
+    const rootDir = await createTestWorkspace();
+    await runCli(rootDir, ["init", "--json"]);
+    const created = parseData<{ readonly meta: { readonly id: string } }>(
+      (await runCli(rootDir, ["work", "create", "Remove worktree", "--kind", "task", "--ready", "--json"])).stdout
+    );
+    const started = parseData<StartedWork>(
+      (await runCli(rootDir, ["agent", "start", created.meta.id, "--agent", "a1", "--worktree", "--json"])).stdout
+    );
+    const worktreePath = requireWorktreePath(started);
+    tempDirs.push(worktreePath);
+    await writeFile(join(worktreePath, "implementation.txt"), "done then remove\n", "utf8");
+    execFileSync("git", ["add", "implementation.txt"], { cwd: worktreePath, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", "implement removable worktree"], { cwd: worktreePath, stdio: "ignore" });
+    const worktreeHead = git(worktreePath, ["rev-parse", "HEAD"]);
+
+    await runCli(rootDir, [...finishArgs(created.meta.id, worktreeHead), "--remove-worktree"]);
+
+    expect(existsSync(worktreePath)).toBe(false);
+    expect(git(rootDir, ["worktree", "list", "--porcelain"])).not.toContain(worktreePath);
+  });
+
+  it("finish refuses when the recorded worktree has uncommitted tracked changes", async () => {
+    const rootDir = await createTestWorkspace();
+    await runCli(rootDir, ["init", "--json"]);
+    const created = parseData<{ readonly meta: { readonly id: string } }>(
+      (await runCli(rootDir, ["work", "create", "Dirty worktree", "--kind", "task", "--ready", "--json"])).stdout
+    );
+    const started = parseData<StartedWork>(
+      (await runCli(rootDir, ["agent", "start", created.meta.id, "--agent", "a1", "--worktree", "--json"])).stdout
+    );
+    const worktreePath = requireWorktreePath(started);
+    tempDirs.push(worktreePath);
+    await writeFile(join(worktreePath, "README.md"), "tracked dirty change\n", "utf8");
+
+    const result = await runCli(rootDir, dirtyFinishArgs(created.meta.id), { expectFailure: true });
+    const error = JSON.parse(result.stderr) as {
+      readonly code: string;
+      readonly gaps?: readonly Array<{ readonly code: string }>;
+      readonly details?: { readonly worktreePath?: string };
+    };
+
+    expect(error.code).toBe("BOREAL_POLICY_VIOLATION");
+    expect(error.gaps).toEqual(expect.arrayContaining([expect.objectContaining({ code: "git.checkpoint.required" })]));
+    expect(error.details?.worktreePath).toBe(worktreePath);
+    const show = parseData<{ readonly status: string }>((await runCli(rootDir, ["work", "show", created.meta.id, "--json"])).stdout);
+    expect(show.status).toBe("in_progress");
+  });
 });
 
 async function createTestWorkspace(): Promise<string> {
@@ -209,4 +284,62 @@ function parseData<T>(text: string): T {
 
 function git(cwd: string, args: readonly string[]): string {
   return execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
+}
+
+function requireWorktreePath(started: StartedWork): string {
+  const worktreePath = started.reservation?.git?.worktreePath;
+  expect(worktreePath).toBeTruthy();
+  return worktreePath ?? "";
+}
+
+function finishArgs(workId: string, commit: string): readonly string[] {
+  return [
+    "agent",
+    "finish",
+    workId,
+    "--agent",
+    "a1",
+    "--summary",
+    "Verified the recorded worktree finish path.",
+    "--kind",
+    "command",
+    "--outcome",
+    "passed",
+    "--command",
+    "git worktree finish fixture",
+    "--verdict",
+    "passed",
+    "--notes",
+    "Recorded worktree finish path verified.",
+    "--close",
+    "--reason",
+    "done",
+    "--commit",
+    commit,
+    "--json"
+  ];
+}
+
+function dirtyFinishArgs(workId: string): readonly string[] {
+  return [
+    "agent",
+    "finish",
+    workId,
+    "--agent",
+    "a1",
+    "--summary",
+    "Should fail while the recorded worktree is dirty.",
+    "--kind",
+    "command",
+    "--outcome",
+    "passed",
+    "--command",
+    "git status --porcelain --untracked-files=no",
+    "--verdict",
+    "passed",
+    "--close",
+    "--reason",
+    "done",
+    "--json"
+  ];
 }

@@ -46,6 +46,12 @@ interface BranchResultLike {
   readonly gitBranch?: unknown;
 }
 
+interface FinishGitResult {
+  readonly branch: string;
+  readonly headSha: string;
+  readonly worktreePath?: string;
+}
+
 interface FinishEvidencePayloadLike {
   readonly evidence: {
     readonly kind: EvidenceKind;
@@ -127,7 +133,7 @@ export interface AgentCommandDependencies {
     context: CliContext,
     workId: WorkId,
     agentId: string
-  ) => Promise<NonNullable<WorkItem["git"]> | undefined>;
+  ) => Promise<FinishGitResult | undefined>;
   readonly agentFinishSummaryFactory: (
     context: CliContext,
     args: ParsedArgs,
@@ -148,8 +154,13 @@ export interface AgentCommandDependencies {
   readonly writeAgentSummaryArtifact: (context: CliContext, summary: AgentSummaryRecord) => Promise<unknown>;
   readonly captureGitFinishEvidence: (
     context: CliContext,
-    workId: WorkId
+    workId: WorkId,
+    gitRoot?: string
   ) => Promise<{ readonly evidence?: EvidenceRecord; readonly note?: string }>;
+  readonly removeGitWorktreeAfterFinish: (
+    context: CliContext,
+    worktreePath: string | undefined
+  ) => Promise<unknown | undefined>;
   readonly agentSummaryRow: (summary: AgentSummaryRecord) => unknown;
   readonly resultForWork: <T extends object>(value: T, work: WorkItem | WorkItemView) => T & { readonly result: unknown };
 }
@@ -319,6 +330,7 @@ async function agentFinishCommand(
   }
   await dependencies.assertWorkNotAlreadyClosedForAgentFinish(context, workId);
   const finishGit = await dependencies.agentFinishGitPreflight(context, workId, agentId);
+  const closeGit = finishGit ? { branch: finishGit.branch, headSha: finishGit.headSha } : undefined;
 
   const closeReason = close ? requiredFlag(args, "reason") : undefined;
   const closeoutSummaryFactory = closeReason
@@ -333,13 +345,16 @@ async function agentFinishCommand(
       verdict,
       notes: flagValue(args, "notes")
     },
-    close: closeReason ? { reason: closeReason, agentSummary: closeoutSummaryFactory, ...(finishGit ? { git: finishGit } : {}) } : undefined,
+    close: closeReason ? { reason: closeReason, agentSummary: closeoutSummaryFactory, ...(closeGit ? { git: closeGit } : {}) } : undefined,
     release
   });
   const closeoutSummaryArtifact = finished.agentSummary
     ? await dependencies.writeAgentSummaryArtifact(context, finished.agentSummary)
     : undefined;
-  const gitEvidence = await dependencies.captureGitFinishEvidence(context, workId);
+  const gitEvidence = await dependencies.captureGitFinishEvidence(context, workId, finishGit?.worktreePath);
+  const worktreeRemoval = close && hasFlag(args, "remove-worktree")
+    ? await dependencies.removeGitWorktreeAfterFinish(context, finishGit?.worktreePath)
+    : undefined;
 
   const result = {
     finished: true,
@@ -351,6 +366,7 @@ async function agentFinishCommand(
     inlineEvidence: finishEvidence.inlineEvidence,
     gitEvidence: gitEvidence.evidence,
     gitEvidenceNote: gitEvidence.note,
+    worktreeRemoval,
     verification: finished.verification,
     reservation: finished.reservation,
     closedWork: finished.closedWork,

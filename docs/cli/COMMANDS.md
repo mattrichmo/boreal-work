@@ -1046,7 +1046,7 @@ Prints the compact agent loop without requiring an initialized workspace. The gu
 ## `agent finish`
 
 ```bash
-bwrk agent finish <work-id> (--summary <text>|--evidence <inline-or-evidence-id>) (--close --reason <text>|--release) [--agent <agent-id>] [--kind command|test|diff|review|artifact|note] [--outcome passed|failed|observed|unknown] [--command <cmd>] [--uri <uri>] [--verdict passed|failed] [--notes <text>] [--commit <sha>...] [--dirty-path <note>...] [--json]
+bwrk agent finish <work-id> (--summary <text>|--evidence <inline-or-evidence-id>) (--close --reason <text>|--release) [--agent <agent-id>] [--kind command|test|diff|review|artifact|note] [--outcome passed|failed|observed|unknown] [--command <cmd>] [--uri <uri>] [--verdict passed|failed] [--notes <text>] [--commit <sha>...] [--dirty-path <note>...] [--remove-worktree] [--json]
 ```
 
 Guarded exit workflow for work with an active agent reservation, plus explicit unreserved work refs. When the work has an active reservation, the command requires the selected agent to own the active, non-expired reservation before it records evidence, verifies the work, and closes or releases anything. Use `current` or `active` as the work reference when the selected `--agent` has exactly one non-expired active reservation. When an explicit work ID or title has no active reservation, Boreal creates a short-lived reservation for the selected agent and releases it inside the same transaction. Evidence, verification, optional close, reservation release, readiness repair, and the final `agent.finished` event run as one engine transaction. One of `--close` or `--release` is required so finish cannot leave active ownership behind. When closing, the evidence summary becomes the generated agent closeout summary body and optional `--commit` / `--dirty-path` values are linked into that summary; if no `--commit` is provided, one `--dirty-path` must start with a checkpoint reason code such as `no_repo_changes: ...`.
@@ -1059,6 +1059,7 @@ Behavior:
 - Refreshes the work context/projection for the returned view so `work.status`, counts, and `contextSummary` describe the same post-finish state.
 - With `--close`, requires a passed verdict and `--reason`, closes the work, then releases the active reservation so closed work does not keep stale ownership.
 - With `--release`, releases the reservation after verification without closing.
+- When the reservation records `git.worktreePath`, branch/head and dirty checks run against that worktree; `--remove-worktree` prunes it after a successful close.
 - Rejects `--close --release` together.
 
 ## `agent start`
