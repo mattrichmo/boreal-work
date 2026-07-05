@@ -178,7 +178,7 @@ git add -A && git commit -m "perf: remove inline generated-artifact refresh from
 - Modify: `packages/storage/src/file-store.ts:93`
 - Test: `tests/runtime/file-store.test.ts` (existing — extend)
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```ts
 it("persists compact JSON", async () => {
@@ -189,13 +189,13 @@ it("persists compact JSON", async () => {
 });
 ```
 
-- [ ] **Step 2: Verify it fails**, then change `file-store.ts:93`:
+- [x] **Step 2: Verify it fails**, then change `file-store.ts:93`:
 
 ```ts
 await writeTextFileAtomic(this.stateFile, `${JSON.stringify(document)}\n`);
 ```
 
-- [ ] **Step 3: Run `pnpm vitest run tests/runtime/file-store.test.ts` → PASS. Commit** `perf: write state file compact`.
+- [x] **Step 3: Run `pnpm vitest run tests/runtime/file-store.test.ts` → PASS. Commit** `perf: write state file compact`.
 
 ### Task 4: Freeze-on-load reads — stop cloning on every get/list
 
@@ -207,7 +207,7 @@ await writeTextFileAtomic(this.stateFile, `${JSON.stringify(document)}\n`);
 **Interfaces:**
 - Produces: `deepFreeze<T>(value: T): T` (recursively `Object.freeze`s and returns the same reference). Read methods return **frozen shared references** instead of clones. Write methods (`put*`) still `deepClone` their input once (defensive copy of caller-owned data) and freeze it.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```ts
 // tests/runtime/memory-store-immutability.test.ts
@@ -239,9 +239,9 @@ describe("memory store immutability", () => {
 });
 ```
 
-- [ ] **Step 2: Verify it fails** (reads are cloned, not frozen; `a !== b`).
+- [x] **Step 2: Verify it fails** (reads are cloned, not frozen; `a !== b`).
 
-- [ ] **Step 3: Implement `deepFreeze`**
+- [x] **Step 3: Implement `deepFreeze`**
 
 ```ts
 // packages/core/src/clone.ts
@@ -260,7 +260,7 @@ export function deepFreeze<T>(value: T): T {
 }
 ```
 
-- [ ] **Step 4: Rewrite `MemoryTransaction` read/write paths**
+- [x] **Step 4: Rewrite `MemoryTransaction` read/write paths**
 
 In `memory-store.ts`: records stored in the state maps are **always frozen**. Every read method drops its `deepClone`/`cloneMaybe` wrapper and returns references directly, e.g.:
 
@@ -277,9 +277,9 @@ Every `put*` becomes `set(id, deepFreeze(deepClone(record)))`. In `createState`,
 
 Keep `cloneState` in `write()` for now — Task 5 removes it.
 
-- [ ] **Step 5: Run new test + full suite.** Failures here are *findings*: any code that mutated a record returned from the store was silently relying on clones — fix the caller to spread (`{ ...work, status }`), which is already the dominant style in `runtime.ts`.
+- [x] **Step 5: Run new test + full suite.** Failures here are *findings*: any code that mutated a record returned from the store was silently relying on clones — fix the caller to spread (`{ ...work, status }`), which is already the dominant style in `runtime.ts`.
 
-- [ ] **Step 6: Commit** `perf: freeze-on-load storage reads, clone only on put`.
+- [x] **Step 6: Commit** `perf: freeze-on-load storage reads, clone only on put`.
 
 ### Task 5: Copy-on-write transactions — stop cloning state per write
 
@@ -290,7 +290,7 @@ Keep `cloneState` in `write()` for now — Task 5 removes it.
 **Interfaces:**
 - Produces: `write()` runs the operation against an **overlay transaction** (pending puts/deletes in fresh Maps layered over the shared frozen base); commit = `new Map([...base, ...pending])` per touched section (cheap: copies references, not records). A thrown operation discards the overlay — same rollback semantics as today.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```ts
 it("rolls back all puts when the operation throws", async () => {
@@ -318,7 +318,7 @@ it("write transactions read their own uncommitted puts", async () => {
 
 (First already passes via cloneState — keep it as a regression guard; second is the overlay contract.)
 
-- [ ] **Step 2: Implement the overlay**
+- [x] **Step 2: Implement the overlay**
 
 ```ts
 interface SectionOverlay<K, V> {
@@ -347,7 +347,7 @@ function overlayCommit<K, V>(o: SectionOverlay<K, V>): Map<K, V> {
 
 `MemoryTransaction` holds one `SectionOverlay` per section; `put*` = `pending.set(id, deepFreeze(deepClone(r))); deleted.delete(id)`; `delete*` = `deleted.add(id); pending.delete(id)`. `InMemoryBorealStore.write` builds overlays over `#state`, runs the op, and on success replaces `#state` with committed maps. Delete `cloneState`.
 
-- [ ] **Step 3: Run tests, run benchmark, commit** `perf: copy-on-write transactions replace full-state clone (<closeMs>ms)`.
+- [x] **Step 3: Run tests, run benchmark, commit** `perf: copy-on-write transactions replace full-state clone (<closeMs>ms)`.
 
 ---
 
@@ -815,9 +815,9 @@ it("stamps branch and head sha on the closed work item", async () => {
 
 Procedure (repeat per group, one commit each — do NOT do this in one commit):
 
-- [ ] **Step 1:** `grep -n 'case "work"' apps/cli/src/commands.ts` to find the group's dispatch block and its helper functions (helpers are the functions only that block calls — verify with grep before moving).
-- [ ] **Step 2:** Move the block + private helpers verbatim into `apps/cli/src/commands/<group>.ts`, exporting one entry `export async function <group>Command(action, args, context, output, json): Promise<CommandResult>`. No logic edits — resist every temptation; behavior changes belong in their own commits.
-- [ ] **Step 3:** `pnpm check && pnpm test` after each group. Commit `refactor: extract <group> commands`.
+- [x] **Step 1:** `grep -n 'case "work"' apps/cli/src/commands.ts` to find the group's dispatch block and its helper functions (helpers are the functions only that block calls — verify with grep before moving).
+- [x] **Step 2:** Move the block + private helpers verbatim into `apps/cli/src/commands/<group>.ts`, exporting one entry `export async function <group>Command(action, args, context, output, json): Promise<CommandResult>`. No logic edits — resist every temptation; behavior changes belong in their own commits.
+- [x] **Step 3:** `pnpm check && pnpm test` after each group. Commit `refactor: extract <group> commands`.
 
 Order groups smallest-first (vault, storage, sync, …) to debug the pattern cheaply before tackling `work`/`agent`.
 
@@ -847,15 +847,15 @@ Progress:
 **Files:**
 - Create: `docs/decisions/directive-machinery-scope.md`
 
-- [ ] **Step 1:** Instrument nothing; instead measure statically: for each directive kind in `packages/core/src/agent-directive-registry.ts`, grep the skills/ and workflows/ trees for references. List directives that (a) duplicate a hard gate that already blocks the command, or (b) are referenced by no skill/workflow.
-- [ ] **Step 2:** Write the decision doc: keep hard gates (closeout gates, reservation checks, the new git gates), propose the deletion list for advisory directives, with line-count savings. **Do not delete anything in this plan** — that's a follow-up plan the user approves from the decision doc.
-- [ ] **Step 3:** Commit `docs: directive machinery scope decision`.
+- [x] **Step 1:** Instrument nothing; instead measure statically: for each directive kind in `packages/core/src/agent-directive-registry.ts`, grep the skills/ and workflows/ trees for references. List directives that (a) duplicate a hard gate that already blocks the command, or (b) are referenced by no skill/workflow.
+- [x] **Step 2:** Write the decision doc: keep hard gates (closeout gates, reservation checks, the new git gates), propose the deletion list for advisory directives, with line-count savings. **Do not delete anything in this plan** — that's a follow-up plan the user approves from the decision doc.
+- [x] **Step 3:** Commit `docs: directive machinery scope decision`.
 
 ### Task 20: Final verification
 
-- [ ] **Step 1:** `pnpm check && pnpm test` — all green.
-- [ ] **Step 2:** `node tools/bench-mutation.mjs 500` on an objects-migrated workspace; record final numbers vs. Task 1 baseline in the PR description.
-- [ ] **Step 3:** Migrate the dogfood workspace itself: `bwrk storage migrate --to objects --json` in this repo, run `bwrk doctor --strict --json`, and confirm `git status` shows small per-record diffs instead of an 11 MB `state.json`.
+- [x] **Step 1:** `pnpm check && pnpm test` — all green.
+- [x] **Step 2:** `node tools/bench-mutation.mjs 500` on an objects-migrated workspace; record final numbers vs. Task 1 baseline in the PR description.
+- [x] **Step 3:** Migrate the dogfood workspace itself: `bwrk storage migrate --to objects --json` in this repo, run `bwrk doctor --strict --json`, and confirm `git status` shows small per-record diffs instead of an 11 MB `state.json`.
 - [ ] **Step 4:** Use superpowers:finishing-a-development-branch to merge/PR.
 
 ---
