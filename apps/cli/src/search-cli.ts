@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import { open } from "node:fs/promises";
+import { open, rm } from "node:fs/promises";
 import { join } from "node:path";
 
 import {
@@ -24,9 +24,13 @@ import {
 } from "@boreal/search";
 import {
   FileEventLog,
+  FtsSearchIndex,
+  type FtsSearchResult,
   loadNodeSqlite,
   normalizeFileLockOptions,
+  ObjectReadIndex,
   objectIndexPath,
+  type StoreSnapshot,
   withFileLock,
   writeTextFileAtomic
 } from "@boreal/storage";
@@ -48,6 +52,7 @@ const SEARCH_FINGERPRINT_SECTIONS = [
 
 export interface SearchIndexWriteResult {
   readonly path: string;
+  readonly mode?: "json" | "fts";
   readonly schemaVersion: SearchIndexDocument["schemaVersion"];
   readonly builtAt: string;
   readonly contentHash: ContentHash;
@@ -58,6 +63,7 @@ export interface SearchIndexWriteResult {
 
 export interface SearchIndexInspection {
   readonly path: string;
+  readonly mode?: "json" | "fts";
   readonly exists: boolean;
   readonly stale: boolean;
   readonly expectedCorpusFingerprint: ContentHash;
@@ -87,6 +93,11 @@ export async function writeSearchIndex(context: CliContext): Promise<SearchIndex
 }
 
 export async function inspectSearchIndex(context: CliContext): Promise<SearchIndexInspection> {
+  const ftsInspection = await inspectFtsSearchIndex(context);
+  if (ftsInspection) {
+    return ftsInspection;
+  }
+
   const path = searchIndexPath(context);
   const snapshot = await readSearchFingerprintSnapshot(context);
   const expectedCorpusFingerprint = searchCorpusFingerprint(snapshot);
@@ -131,6 +142,11 @@ export async function runSearch(
   const normalizedQuery = normalizeSearchQuery(query);
   if (!normalizedQuery) {
     throw new BorealError("BOREAL_INVALID_INPUT", "Search query is required");
+  }
+
+  const ftsResults = await queryFtsSearchIndex(context, normalizedQuery, options);
+  if (ftsResults) {
+    return ftsResults;
   }
 
   const index = await loadFreshSearchIndex(context, { rebuildStaleIndex: options.rebuildStaleIndex ?? true });
@@ -198,7 +214,7 @@ async function rebuildSearchIndexIfStillNeeded(context: CliContext): Promise<Sea
         return undefined;
       }
       try {
-        return await writeSearchIndexUnlocked(context);
+        return await writeJsonSearchIndexUnlocked(context);
       } catch (error) {
         const gaps = [
           {
@@ -258,11 +274,190 @@ function isSearchIndexLockConflict(error: unknown, context: CliContext): boolean
 }
 
 async function writeSearchIndexUnlocked(context: CliContext): Promise<SearchIndexWriteResult> {
+  const ftsResult = await writeFtsSearchIndexIfAvailable(context);
+  if (ftsResult) {
+    return ftsResult;
+  }
+  return writeJsonSearchIndexUnlocked(context);
+}
+
+async function writeJsonSearchIndexUnlocked(context: CliContext): Promise<SearchIndexWriteResult> {
   const snapshot = await readSearchSnapshot(context);
   const index = buildSearchIndex(snapshot, nowIso());
   const path = searchIndexPath(context);
   await writeTextFileAtomic(path, `${JSON.stringify(index)}\n`);
-  return indexWriteResult(path, index);
+  return { ...indexWriteResult(path, index), mode: "json" };
+}
+
+async function queryFtsSearchIndex(
+  context: CliContext,
+  query: string,
+  options: SearchCommandOptions
+): Promise<readonly SearchResult[] | undefined> {
+  if (options.explain) {
+    return undefined;
+  }
+  const fts = await FtsSearchIndex.open(context.workspaceRoot, { create: false });
+  if (!fts) {
+    return undefined;
+  }
+  try {
+    const head = await new FileEventLog({ path: context.paths.eventLogFile }).head();
+    if (!fts.status(head).fresh) {
+      return undefined;
+    }
+    const types = [...(options.type ? [options.type] : []), ...(options.types ?? [])];
+    return fts.query(query, { limit: options.limit, types }).map(ftsResultToSearchResult);
+  } finally {
+    fts.close();
+  }
+}
+
+async function inspectFtsSearchIndex(context: CliContext): Promise<SearchIndexInspection | undefined> {
+  const fts = await FtsSearchIndex.open(context.workspaceRoot, { create: false });
+  if (!fts) {
+    return undefined;
+  }
+  try {
+    const head = await new FileEventLog({ path: context.paths.eventLogFile }).head();
+    const status = fts.status(head);
+    if (!status.fresh) {
+      return undefined;
+    }
+    const snapshot = await readSearchFingerprintSnapshot(context);
+    const corpusFingerprint = searchCorpusFingerprint(snapshot);
+    return {
+      path: fts.path,
+      mode: "fts",
+      exists: true,
+      stale: false,
+      expectedCorpusFingerprint: corpusFingerprint,
+      contentHash: head.hash as ContentHash,
+      corpusFingerprint,
+      builtAt: nowIso(),
+      documentCount: status.documentCount,
+      tokenCount: 0
+    };
+  } finally {
+    fts.close();
+  }
+}
+
+async function writeFtsSearchIndexIfAvailable(context: CliContext): Promise<SearchIndexWriteResult | undefined> {
+  const sqlite = await loadNodeSqlite();
+  if (!sqlite) {
+    return undefined;
+  }
+  const snapshot = await readFullStoreSnapshot(context);
+  const head = await new FileEventLog({ path: context.paths.eventLogFile }).head();
+  const objectIndex = new ObjectReadIndex({ path: objectIndexPath(context.workspaceRoot), sqlite });
+  const rebuilt = await objectIndex.rebuild(snapshot, head);
+  if (!rebuilt.available) {
+    return undefined;
+  }
+  const fts = await FtsSearchIndex.open(context.workspaceRoot, { sqlite });
+  if (!fts) {
+    return undefined;
+  }
+  try {
+    const status = fts.status(head);
+    if (!status.fresh) {
+      return undefined;
+    }
+    await rm(searchIndexPath(context), { force: true });
+    const corpusFingerprint = searchCorpusFingerprint(searchSnapshotFromStoreSnapshot(snapshot));
+    return {
+      path: fts.path,
+      mode: "fts",
+      schemaVersion: SEARCH_INDEX_SCHEMA_VERSION,
+      builtAt: nowIso(),
+      contentHash: head.hash as ContentHash,
+      corpusFingerprint,
+      documentCount: status.documentCount,
+      tokenCount: 0
+    };
+  } finally {
+    fts.close();
+  }
+}
+
+function ftsResultToSearchResult(result: FtsSearchResult): SearchResult {
+  return {
+    id: `${result.type}:${result.recordId}`,
+    type: result.type as SearchResult["type"],
+    recordId: result.recordId,
+    title: result.title,
+    summary: result.summary,
+    snippet: result.snippet,
+    score: result.score,
+    matches: result.snippet ? [result.snippet] : []
+  };
+}
+
+function searchSnapshotFromStoreSnapshot(snapshot: StoreSnapshot): SearchCorpusSnapshot {
+  return {
+    workItems: snapshot.workItems ?? [],
+    agentSummaries: snapshot.agentSummaries ?? [],
+    evidence: snapshot.evidence ?? [],
+    knowledgeSources: snapshot.knowledgeSources ?? [],
+    claims: snapshot.claims ?? [],
+    decisions: snapshot.decisions ?? []
+  };
+}
+
+async function readFullStoreSnapshot(context: CliContext): Promise<StoreSnapshot> {
+  return context.store.read(async (reader) => {
+    const [
+      workItems,
+      agentSummaries,
+      evidence,
+      verifications,
+      directiveAcknowledgements,
+      knowledgeSources,
+      claims,
+      decisions,
+      graphEdges,
+      reservations,
+      reviewerHeartbeats,
+      events,
+      operations,
+      projections,
+      contextPacks
+    ] = await Promise.all([
+      reader.listWorkItems(),
+      reader.listAgentSummaries(),
+      reader.listEvidence(),
+      reader.listVerifications(),
+      reader.listDirectiveAcknowledgements(),
+      reader.listKnowledgeSources(),
+      reader.listClaims(),
+      reader.listDecisions(),
+      reader.listGraphEdges(),
+      reader.listReservations(),
+      reader.listReviewerHeartbeats(),
+      reader.listEvents(),
+      reader.listOperations(),
+      reader.listProjections(),
+      reader.listContextPacks()
+    ]);
+    return {
+      workItems,
+      agentSummaries,
+      evidence,
+      verifications,
+      directiveAcknowledgements,
+      knowledgeSources,
+      claims,
+      decisions,
+      graphEdges,
+      reservations,
+      reviewerHeartbeats,
+      events,
+      operations,
+      projections,
+      contextPacks
+    };
+  });
 }
 
 async function readSearchIndex(path: string): Promise<SearchIndexDocument> {

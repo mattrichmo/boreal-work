@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import { readdir, stat } from "node:fs/promises";
+import { readdir, rm, stat } from "node:fs/promises";
 import { join, relative, resolve } from "node:path";
 
 import {
@@ -37,7 +37,7 @@ import {
 } from "@boreal/core";
 import { inspectDaemonStatus, type DaemonStatusResult } from "@boreal/daemon";
 import { buildContextPack, buildContextProjection } from "@boreal/search";
-import { FILE_STORE_SCHEMA_VERSION, FileEventLog, breakStaleFileLock, inspectSQLiteCache } from "@boreal/storage";
+import { FILE_STORE_SCHEMA_VERSION, FileEventLog, breakStaleFileLock } from "@boreal/storage";
 import { deriveReadinessStatus } from "@boreal/work-engine";
 
 import type { CliContext } from "./context.js";
@@ -45,7 +45,7 @@ import { resolveEnvironmentManifest } from "./environment-manifest.js";
 import { inspectGitWorktree } from "./git-worktree.js";
 import { installUpgradeStatus, normalizeInstallChannel } from "./install-channel.js";
 import { inspectBorealInstallStatus, installStatusHealthy, installStatusSummary } from "./install-status.js";
-import { buildExportDocument, exportDriftDiagnostics, ledgerStatus, readGeneratedLedgerTombstones } from "./import-export.js";
+import { exportDriftDiagnostics, ledgerStatus, readGeneratedLedgerTombstones } from "./import-export.js";
 import { inspectRuntimeLocks } from "./locks.js";
 import { inspectProjectSetupDrift, type ProjectSetupDriftInspection } from "./project-setup.js";
 import { inspectSearchIndex, writeSearchIndex } from "./search-cli.js";
@@ -168,7 +168,6 @@ export async function runDoctor(context: CliContext, fix: boolean, strict = fals
 
   if (schemaIssues.length === 0 && !hasStoreErrors) {
     try {
-      const exportDocument = await buildExportDocument(context);
       const drift = await exportDriftDiagnostics(context);
       diagnostics.push({
         code: "snapshot.export_drift",
@@ -197,22 +196,10 @@ export async function runDoctor(context: CliContext, fix: boolean, strict = fals
               }
             : ledgers
       });
-      const sqliteCache = await inspectSQLiteCache({
-        rootDir: context.workspaceRoot,
-        expectedSnapshot: exportDocument.state,
-        expectedSourceContentHash: exportDocument.contentHash
-      });
       diagnostics.push({
         code: "cache.sqlite",
-        severity: sqliteCache.exists && !sqliteCache.ok ? generatedArtifactDiagnosticSeverity(sqliteCache) : "ok",
-        message: sqliteCacheMessage(sqliteCache),
-        details:
-          sqliteCache.exists && !sqliteCache.ok
-            ? {
-                ...sqliteCache,
-                repairCommand: "bwrk sync refresh --json"
-              }
-            : sqliteCache
+        severity: "ok",
+        message: "Legacy SQLite cache is retired"
       });
     } catch (error) {
       diagnostics.push({
@@ -228,8 +215,8 @@ export async function runDoctor(context: CliContext, fix: boolean, strict = fals
       });
       diagnostics.push({
         code: "cache.sqlite",
-        severity: "warning",
-        message: "Skipped SQLite cache check because current runtime state is not exportable"
+        severity: "ok",
+        message: "Legacy SQLite cache is retired"
       });
     }
   } else {
@@ -249,10 +236,14 @@ export async function runDoctor(context: CliContext, fix: boolean, strict = fals
     });
     diagnostics.push({
       code: "cache.sqlite",
-      severity: "warning",
-      message: `Skipped SQLite cache check ${skipReason}`
+      severity: "ok",
+      message: "Legacy SQLite cache is retired"
     });
   }
+
+  const retiredCache = await validateRetiredSQLiteCache(context, fix);
+  diagnostics.push(...retiredCache.diagnostics);
+  fixed = fixed || retiredCache.fixed;
 
   const searchDiagnostics = await validateSearchIndex(context, fix);
   diagnostics.push(...searchDiagnostics.diagnostics);
@@ -1023,6 +1014,54 @@ function projectSetupRepairs(
 
 function generatedArtifactDiagnosticSeverity(status: { readonly error?: string }): DiagnosticSeverity {
   return status.error ? "warning" : "info";
+}
+
+async function validateRetiredSQLiteCache(
+  context: CliContext,
+  fix: boolean
+): Promise<{
+  readonly fixed: boolean;
+  readonly diagnostics: readonly Diagnostic[];
+}> {
+  const path = join(context.paths.borealDir, "cache", "runtime-cache.sqlite");
+  if (!existsSync(path)) {
+    return {
+      fixed: false,
+      diagnostics: [
+        {
+          code: "cache.sqlite.retired",
+          severity: "ok",
+          message: "Legacy SQLite runtime cache is retired",
+          details: { retired: true, path, exists: false }
+        }
+      ]
+    };
+  }
+  if (fix) {
+    await rm(path, { force: true });
+    return {
+      fixed: true,
+      diagnostics: [
+        {
+          code: "cache.sqlite.retired",
+          severity: "fixed",
+          message: "Removed retired SQLite runtime cache",
+          details: { retired: true, path, removed: true }
+        }
+      ]
+    };
+  }
+  return {
+    fixed: false,
+    diagnostics: [
+      {
+        code: "cache.sqlite.retired",
+        severity: "info",
+        message: "Legacy SQLite runtime cache is retired; run `bwrk doctor --fix --json` to remove it",
+        details: { retired: true, path, exists: true, repairCommand: "bwrk doctor --fix --json" }
+      }
+    ]
+  };
 }
 
 async function validateSearchIndex(
@@ -2597,22 +2636,6 @@ function ledgerDriftMessage(status: Awaited<ReturnType<typeof ledgerStatus>>): s
     return "JSONL ledger export differs from current runtime state";
   }
   return "JSONL ledger export matches current runtime state";
-}
-
-function sqliteCacheMessage(status: Awaited<ReturnType<typeof inspectSQLiteCache>>): string {
-  if (!status.exists) {
-    return "SQLite generated cache is not built yet";
-  }
-  if (!status.sqliteAvailable) {
-    return "SQLite generated cache exists but sqlite3 is unavailable";
-  }
-  if (status.error) {
-    return "SQLite generated cache is invalid";
-  }
-  if (status.stale) {
-    return "SQLite generated cache differs from current runtime state";
-  }
-  return "SQLite generated cache matches current runtime state";
 }
 
 function gitWorktreeDiagnosticMessage(status: Awaited<ReturnType<typeof inspectGitWorktree>>): string {

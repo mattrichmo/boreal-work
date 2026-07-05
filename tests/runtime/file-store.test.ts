@@ -1,6 +1,5 @@
 import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { hostname as osHostname, tmpdir } from "node:os";
-import { performance } from "node:perf_hooks";
 import { join } from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
@@ -20,17 +19,11 @@ import {
   type RuntimeOperation
 } from "@boreal/core";
 import { createBorealRuntime } from "@boreal/engine";
-import { recordEvidence } from "@boreal/evidence-engine";
-import { createKnowledgeSource } from "@boreal/knowledge-engine";
 import {
   FileBorealStore,
   breakStaleFileLock,
   inspectFileLock,
-  inspectSQLiteCache,
-  querySQLiteCacheRecords,
-  rebuildSQLiteCache,
-  withFileLock,
-  type StoreSnapshot
+  withFileLock
 } from "@boreal/storage";
 import { createWorkItem } from "@boreal/work-engine";
 
@@ -453,168 +446,6 @@ describe("file-backed store", () => {
     expect(() => new FileBorealStore({ rootDir, stateFile: join(rootDir, "../state.json") })).toThrow(BorealError);
   });
 
-  it("rebuilds and queries a generated SQLite cache without replacing the file store", async () => {
-    const rootDir = await makeTempWorkspace();
-    const work = createWorkItem({
-      title: "SQLite cached work",
-      actor,
-      now: nowIso(new Date("2026-01-01T00:00:00.000Z"))
-    });
-    const acknowledgement = directiveAcknowledgementFixture(work.meta.id);
-    const snapshot = { workItems: [work], directiveAcknowledgements: [acknowledgement] };
-
-    const first = await rebuildSQLiteCache({ rootDir, snapshot });
-    if (first.skipped) {
-      expect(first.sqliteAvailable).toBe(false);
-      return;
-    }
-
-    const second = await rebuildSQLiteCache({ rootDir, snapshot });
-    const inspection = await inspectSQLiteCache({ rootDir, expectedSnapshot: snapshot });
-    const staleInspection = await inspectSQLiteCache({
-      rootDir,
-      expectedSnapshot: snapshot,
-      expectedSourceContentHash: "sha256:stale"
-    });
-    const rows = await querySQLiteCacheRecords({ rootDir, section: "workItems" });
-    const acknowledgementRows = await querySQLiteCacheRecords({ rootDir, section: "directiveAcknowledgements" });
-    const store = new FileBorealStore({ rootDir, lock });
-
-    expect(first).toEqual(
-      expect.objectContaining({
-        rebuilt: true,
-        skipped: false,
-        recordCounts: expect.objectContaining({ workItems: 1 })
-      })
-    );
-    expect(second.sourceContentHash).toBe(first.sourceContentHash);
-    expect(inspection).toEqual(
-      expect.objectContaining({
-        ok: true,
-        exists: true,
-        stale: false,
-        sourceContentHash: first.sourceContentHash,
-        recordCounts: expect.objectContaining({ workItems: 1, directiveAcknowledgements: 1 })
-      })
-    );
-    expect(staleInspection).toEqual(expect.objectContaining({ ok: false, exists: true, stale: true }));
-    expect(rows).toEqual([
-      expect.objectContaining({
-        section: "workItems",
-        id: work.meta.id,
-        title: "SQLite cached work",
-        status: "draft",
-        kind: "task"
-      })
-    ]);
-    expect(acknowledgementRows).toEqual([
-      expect.objectContaining({
-        section: "directiveAcknowledgements",
-        id: acknowledgement.meta.id
-      })
-    ]);
-    await expect(store.read((reader) => reader.listWorkItems())).resolves.toHaveLength(0);
-  });
-
-  it("rebuilds a thousands-record SQLite cache with bounded query performance and drift detection", async () => {
-    const rootDir = await makeTempWorkspace();
-    const snapshot = largeCacheSnapshot();
-
-    const rebuildStartedAt = performance.now();
-    const rebuild = await rebuildSQLiteCache({ rootDir, snapshot });
-    const rebuildMs = performance.now() - rebuildStartedAt;
-    if (rebuild.skipped) {
-      expect(rebuild.sqliteAvailable).toBe(false);
-      return;
-    }
-
-    const secondRebuildStartedAt = performance.now();
-    const secondRebuild = await rebuildSQLiteCache({ rootDir, snapshot });
-    const secondRebuildMs = performance.now() - secondRebuildStartedAt;
-    const queryStartedAt = performance.now();
-    const rows = await querySQLiteCacheRecords({ rootDir, limit: 20_000 });
-    const queryMs = performance.now() - queryStartedAt;
-    const workRows = await querySQLiteCacheRecords({ rootDir, section: "workItems", limit: 50 });
-    const sourceRows = await querySQLiteCacheRecords({ rootDir, section: "knowledgeSources", limit: 50 });
-    const evidenceRows = await querySQLiteCacheRecords({ rootDir, section: "evidence", limit: 50 });
-    const inspection = await inspectSQLiteCache({ rootDir, expectedSnapshot: snapshot });
-    const staleInspection = await inspectSQLiteCache({
-      rootDir,
-      expectedSnapshot: {
-        ...snapshot,
-        workItems: snapshot.workItems?.slice(1)
-      }
-    });
-
-    expect(rebuild.recordCounts).toEqual(
-      expect.objectContaining({
-        workItems: 1_500,
-        knowledgeSources: 1_250,
-        evidence: 1_500
-      })
-    );
-    expect(secondRebuild.sourceContentHash).toBe(rebuild.sourceContentHash);
-    expect(rows).toHaveLength(1_000);
-    expect(workRows).toHaveLength(50);
-    expect(sourceRows).toHaveLength(50);
-    expect(evidenceRows).toHaveLength(50);
-    expect(workRows.every((row) => row.section === "workItems")).toBe(true);
-    expect(sourceRows.every((row) => row.section === "knowledgeSources")).toBe(true);
-    expect(evidenceRows.every((row) => row.section === "evidence")).toBe(true);
-    expect(inspection).toEqual(
-      expect.objectContaining({
-        ok: true,
-        exists: true,
-        stale: false,
-        sourceContentHash: rebuild.sourceContentHash,
-        recordCounts: expect.objectContaining({
-          workItems: 1_500,
-          knowledgeSources: 1_250,
-          evidence: 1_500
-        })
-      })
-    );
-    expect(staleInspection).toEqual(
-      expect.objectContaining({
-        ok: false,
-        exists: true,
-        stale: true,
-        recordCounts: expect.objectContaining({ workItems: 1_500 }),
-        expectedRecordCounts: expect.objectContaining({ workItems: 1_499 })
-      })
-    );
-    expect(rebuildMs).toBeLessThan(15_000);
-    expect(secondRebuildMs).toBeLessThan(15_000);
-    expect(queryMs).toBeLessThan(1_500);
-  });
-
-  it("inspects missing and corrupt SQLite cache states", async () => {
-    const rootDir = await makeTempWorkspace();
-    const snapshot = { workItems: [] };
-
-    const missing = await inspectSQLiteCache({ rootDir, expectedSnapshot: snapshot });
-    expect(missing).toEqual(
-      expect.objectContaining({
-        ok: true,
-        exists: false,
-        stale: false
-      })
-    );
-
-    await mkdir(join(rootDir, ".boreal/cache"), { recursive: true });
-    await writeFile(join(rootDir, ".boreal/cache/runtime-cache.sqlite"), "not a sqlite database", "utf8");
-    const corrupt = await inspectSQLiteCache({ rootDir, expectedSnapshot: snapshot });
-
-    expect(corrupt).toEqual(
-      expect.objectContaining({
-        ok: false,
-        exists: true,
-        stale: true,
-        error: expect.any(String)
-      })
-    );
-  });
-
   it("rejects symlinked runtime paths outside the workspace root", async () => {
     const rootDir = await makeTempWorkspace();
     const outsideDir = await makeTempWorkspace();
@@ -726,49 +557,6 @@ async function writeLockOwner(
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-function largeCacheSnapshot(): StoreSnapshot {
-  const workItems = Array.from({ length: 1_500 }, (_, index) =>
-    createWorkItem({
-      title: `SQLite volume work ${index}`,
-      description: "Volume fixture for SQLite cache rebuild hardening.",
-      labels: ["sqlite-volume"],
-      nonce: index,
-      actor,
-      now: nowIso(new Date(Date.UTC(2026, 0, 1, 0, 0, 0, index)))
-    })
-  );
-  const knowledgeSources = Array.from({ length: 1_250 }, (_, index) =>
-    createKnowledgeSource({
-      kind: index % 2 === 0 ? "document" : "code",
-      title: `SQLite volume source ${index}`,
-      uri: `file://sqlite-volume/source-${index}.md`,
-      summary: "Source fixture for SQLite cache rebuild hardening.",
-      actor,
-      now: nowIso(new Date(Date.UTC(2026, 0, 1, 1, 0, 0, index)))
-    })
-  );
-  const evidence = Array.from({ length: 1_500 }, (_, index) =>
-    recordEvidence({
-      subjectId: workItems[index % workItems.length]?.meta.id ?? "missing",
-      subjectType: "work",
-      kind: index % 3 === 0 ? "command" : "artifact",
-      summary: `SQLite volume evidence ${index}`,
-      outcome: index % 2 === 0 ? "passed" : "observed",
-      command: index % 3 === 0 ? `pnpm test --filter ${index}` : undefined,
-      uri: index % 3 === 0 ? undefined : `file://sqlite-volume/evidence-${index}.md`,
-      actor,
-      now: nowIso(new Date(Date.UTC(2026, 0, 1, 2, 0, 0, index))),
-      observedAt: nowIso(new Date(Date.UTC(2026, 0, 1, 2, 0, 0, index)))
-    })
-  );
-
-  return {
-    workItems,
-    knowledgeSources,
-    evidence
-  };
 }
 
 function directiveAcknowledgementFixture(subjectId: string): DirectiveAcknowledgementRecord {

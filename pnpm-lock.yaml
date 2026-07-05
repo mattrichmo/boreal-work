@@ -183,6 +183,9 @@ importers:
       '@boreal/core':
         specifier: workspace:*
         version: link:../core
+      '@boreal/search':
+        specifier: workspace:*
+        version: link:../search
 
   packages/ui-model:
     dependencies:

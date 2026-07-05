@@ -11,7 +11,7 @@ import {
 } from "@boreal/core";
 import { DAEMON_STATUS_SCHEMA_VERSION, DAEMON_WATCH_SCHEMA_VERSION } from "@boreal/daemon";
 import { SEARCH_INDEX_SCHEMA_VERSION } from "@boreal/search";
-import { FILE_STORE_SCHEMA_VERSION, SQLITE_CACHE_SCHEMA_VERSION } from "@boreal/storage";
+import { FILE_STORE_SCHEMA_VERSION } from "@boreal/storage";
 
 import { EXPORT_SCHEMA_VERSION, LEDGER_DELETION_SCHEMA_VERSION, LEDGER_SCHEMA_VERSION } from "./import-export.js";
 import { detectInstallChannel, type InstallChannel } from "./install-channel.js";
@@ -35,6 +35,7 @@ declare const BOREAL_BUILD_CLI_PACKAGE_VERSION: string | undefined;
 
 export const VERSION_INFO_SCHEMA_VERSION = "boreal.cli.version.v1";
 export const RUNTIME_MIGRATION_POLICY_VERSION = "boreal.runtime-migration-policy.v1";
+export const SQLITE_CACHE_SCHEMA_VERSION = "boreal.sqlite-cache.retired";
 
 export interface VersionInfo {
   readonly schemaVersion: typeof VERSION_INFO_SCHEMA_VERSION;

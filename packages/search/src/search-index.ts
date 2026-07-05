@@ -12,6 +12,8 @@ import {
   type WorkItem
 } from "@boreal/core";
 
+import { searchFieldsForRecord, type SearchDocumentType, type SearchRecordFields, type SearchWeightedText } from "./fields.js";
+
 export const SEARCH_INDEX_SCHEMA_VERSION = "boreal.search-index.v1";
 
 export const SEARCH_INDEX_ALGORITHM = "boreal.search.hybrid.v1";
@@ -23,14 +25,6 @@ const VECTOR_PREFIX_WEIGHT = 0.7;
 const VECTOR_TRIGRAM_WEIGHT = 0.3;
 const VECTOR_SCORE_WEIGHT = 4;
 const MIN_VECTOR_SIMILARITY = 0.06;
-
-export type SearchDocumentType =
-  | "work"
-  | "agent_summary"
-  | "evidence"
-  | "source"
-  | "claim"
-  | "decision";
 
 export interface SearchCorpusSnapshot {
   readonly workItems: readonly WorkItem[];
@@ -79,6 +73,7 @@ export interface SearchResult {
   readonly subjectId?: string;
   readonly title: string;
   readonly summary: string;
+  readonly snippet?: string;
   readonly score: number;
   readonly matches: readonly string[];
   readonly explain?: SearchResultExplain;
@@ -118,12 +113,6 @@ export interface SearchResultScoreContribution {
   readonly matchedDimensions?: number;
   readonly contribution: number;
   readonly fields?: readonly string[];
-}
-
-interface WeightedText {
-  readonly field: string;
-  readonly text: string;
-  readonly weight: number;
 }
 
 interface SearchScoringStats {
@@ -265,101 +254,19 @@ function metaPair(record: { readonly meta: { readonly id: string; readonly conte
 
 function buildSearchEntries(snapshot: SearchCorpusSnapshot): readonly SearchIndexEntry[] {
   return [
-    ...snapshot.workItems.map(workEntry),
-    ...(snapshot.agentSummaries ?? []).map(agentSummaryEntry),
-    ...snapshot.evidence.map(evidenceEntry),
-    ...snapshot.knowledgeSources.map(sourceEntry),
-    ...snapshot.claims.map(claimEntry),
-    ...snapshot.decisions.map(decisionEntry)
-  ].sort((left, right) => left.id.localeCompare(right.id));
+    ...snapshot.workItems.map((record) => searchFieldsForRecord("workItems", record)),
+    ...(snapshot.agentSummaries ?? []).map((record) => searchFieldsForRecord("agentSummaries", record)),
+    ...snapshot.evidence.map((record) => searchFieldsForRecord("evidence", record)),
+    ...snapshot.knowledgeSources.map((record) => searchFieldsForRecord("knowledgeSources", record)),
+    ...snapshot.claims.map((record) => searchFieldsForRecord("claims", record)),
+    ...snapshot.decisions.map((record) => searchFieldsForRecord("decisions", record))
+  ]
+    .map(entryFromFields)
+    .sort((left, right) => left.id.localeCompare(right.id));
 }
 
-function workEntry(work: WorkItem): SearchIndexEntry {
-  return entry("work", work.meta.id, work.title, work.description, [
-    { field: "id", text: work.meta.id, weight: 10 },
-    { field: "title", text: work.title, weight: 8 },
-    { field: "labels", text: work.labels.join(" "), weight: 6 },
-    { field: "acceptanceCriteria", text: work.acceptanceCriteria.join(" "), weight: 5 },
-    { field: "state", text: `${work.kind} ${work.status} ${work.priority}`, weight: 4 },
-    { field: "description", text: work.description, weight: 3 }
-  ]);
-}
-
-function agentSummaryEntry(summary: AgentSummaryRecord): SearchIndexEntry {
-  const completedWorkText = summary.completedWork
-    .map((work) => [work.workId ?? "", work.title, work.outcome, work.notes].join(" "))
-    .join(" ");
-  return entry(
-    "agent_summary",
-    summary.meta.id,
-    summary.title,
-    summary.body,
-    [
-      { field: "id", text: summary.meta.id, weight: 10 },
-      { field: "subjectId", text: summary.subjectId, weight: 8 },
-      { field: "title", text: summary.title, weight: 8 },
-      { field: "body", text: summary.body, weight: 7 },
-      { field: "completedWork", text: completedWorkText, weight: 6 },
-      { field: "evidenceIds", text: summary.evidenceIds.join(" "), weight: 5 },
-      { field: "verificationIds", text: summary.verificationIds.join(" "), weight: 5 },
-      { field: "commitShas", text: summary.commitShas.join(" "), weight: 5 },
-      { field: "state", text: `${summary.subjectType} ${summary.summaryKind} ${summary.status} ${summary.outcome}`, weight: 4 },
-      { field: "force", text: `${summary.forceReasonCode ?? ""} ${summary.forceComment ?? ""}`.trim(), weight: 3 }
-    ],
-    summary.subjectId
-  );
-}
-
-function evidenceEntry(record: EvidenceRecord): SearchIndexEntry {
-  return entry(
-    "evidence",
-    record.meta.id,
-    `${record.outcome} evidence`,
-    record.summary,
-    [
-      { field: "id", text: record.meta.id, weight: 10 },
-      { field: "subjectId", text: record.subjectId, weight: 7 },
-      { field: "summary", text: record.summary, weight: 6 },
-      { field: "command", text: record.command ?? "", weight: 5 },
-      { field: "uri", text: record.uri ?? "", weight: 4 },
-      { field: "state", text: `${record.kind} ${record.outcome}`, weight: 3 }
-    ],
-    record.subjectId
-  );
-}
-
-function sourceEntry(source: KnowledgeSource): SearchIndexEntry {
-  return entry("source", source.meta.id, source.title, source.summary, [
-    { field: "id", text: source.meta.id, weight: 10 },
-    { field: "title", text: source.title, weight: 8 },
-    { field: "summary", text: source.summary, weight: 5 },
-    { field: "uri", text: source.uri, weight: 4 },
-    { field: "kind", text: source.kind, weight: 3 }
-  ]);
-}
-
-function claimEntry(claim: ClaimRecord): SearchIndexEntry {
-  return entry("claim", claim.meta.id, trimSummary(claim.statement), claim.statement, [
-    { field: "id", text: claim.meta.id, weight: 10 },
-    { field: "statement", text: claim.statement, weight: 8 },
-    { field: "status", text: claim.status, weight: 4 },
-    { field: "sourceIds", text: claim.sourceIds.join(" "), weight: 3 },
-    { field: "evidenceIds", text: claim.evidenceIds.join(" "), weight: 3 },
-    { field: "wikiPageIds", text: (claim.wikiPageIds ?? []).join(" "), weight: 3 }
-  ]);
-}
-
-function decisionEntry(decision: DecisionRecord): SearchIndexEntry {
-  return entry("decision", decision.meta.id, decision.title, decision.decision, [
-    { field: "id", text: decision.meta.id, weight: 10 },
-    { field: "title", text: decision.title, weight: 8 },
-    { field: "decision", text: decision.decision, weight: 7 },
-    { field: "context", text: decision.context, weight: 5 },
-    { field: "consequences", text: decision.consequences.join(" "), weight: 4 },
-    { field: "status", text: decision.status, weight: 3 },
-    { field: "sourceIds", text: decision.sourceIds.join(" "), weight: 3 },
-    { field: "wikiPageIds", text: (decision.wikiPageIds ?? []).join(" "), weight: 3 }
-  ]);
+function entryFromFields(document: SearchRecordFields): SearchIndexEntry {
+  return entry(document.type, document.recordId, document.title, document.summary, document.fields, document.subjectId);
 }
 
 function entry(
@@ -367,7 +274,7 @@ function entry(
   recordId: string,
   title: string,
   summary: string,
-  weightedText: readonly WeightedText[],
+  weightedText: readonly SearchWeightedText[],
   subjectId?: string
 ): SearchIndexEntry {
   const weights = tokenWeights(weightedText);
@@ -384,7 +291,7 @@ function entry(
   };
 }
 
-function fieldWeights(weightedText: readonly WeightedText[]): readonly SearchIndexFieldWeights[] {
+function fieldWeights(weightedText: readonly SearchWeightedText[]): readonly SearchIndexFieldWeights[] {
   return weightedText
     .map(({ field, text, weight }) => ({
       field,
@@ -394,7 +301,7 @@ function fieldWeights(weightedText: readonly WeightedText[]): readonly SearchInd
     .filter((entry) => entry.tokenWeights.length > 0);
 }
 
-function tokenWeights(weightedText: readonly WeightedText[]): readonly (readonly [string, number])[] {
+function tokenWeights(weightedText: readonly SearchWeightedText[]): readonly (readonly [string, number])[] {
   const weights = new Map<string, number>();
   for (const { text, weight } of weightedText) {
     for (const token of tokenize(text)) {
@@ -693,7 +600,7 @@ function compareSearchResults(left: SearchResult, right: SearchResult): number {
   );
 }
 
-function tokenize(text: string): readonly string[] {
+export function tokenize(text: string): readonly string[] {
   const tokens: string[] = [];
   const seen = new Set<string>();
   for (const candidate of [normalizeText(text), normalizeText(expandTokenBoundaries(text))]) {
@@ -714,7 +621,7 @@ function normalizeText(text: string): string {
   return normalizeGeneratedSearchText(text);
 }
 
-function expandTokenBoundaries(text: string): string {
+export function expandTokenBoundaries(text: string): string {
   return text
     .replace(/([A-Z]+)([A-Z][a-z])/gu, "$1 $2")
     .replace(/([a-z0-9])([A-Z])/gu, "$1 $2")

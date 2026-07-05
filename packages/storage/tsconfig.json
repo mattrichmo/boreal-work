@@ -6,6 +6,5 @@
     "tsBuildInfoFile": "tsconfig.tsbuildinfo"
   },
   "include": ["src/**/*.ts"],
-  "references": [{ "path": "../core" }]
+  "references": [{ "path": "../core" }, { "path": "../search" }]
 }
-

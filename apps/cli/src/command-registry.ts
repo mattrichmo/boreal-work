@@ -1642,7 +1642,7 @@ export const COMMAND_DEFINITIONS: readonly CommandDefinition[] = [
     category: "search",
     summary: "Build the local search index.",
     usage: "bwrk search index [--json]",
-    description: "Writes a content-hashed index to .boreal/runtime/search-index.json.",
+    description: "Builds the local search index in .boreal/cache/index.sqlite when FTS5 is available, with JSON fallback.",
     flags: [],
     positionals: { label: "arguments", min: 0, max: 0 },
     requiresWorkspace: true,
@@ -1654,7 +1654,7 @@ export const COMMAND_DEFINITIONS: readonly CommandDefinition[] = [
     summary: "Search work and knowledge records.",
     usage: "bwrk search query <query> [--limit <n>] [--explain] [--no-rebuild] [--json]",
     description:
-      "Searches work, evidence, sources, claims, decisions, and agent summaries using a fresh hybrid local index.",
+      "Searches work, evidence, sources, claims, decisions, and agent summaries using FTS5 when available, with JSON fallback for explain output.",
     flags: [
       flag("limit", "value", "Maximum number of search results to print. Max 100."),
       flag("explain", "boolean", "Include query tokens, score breakdown, and field-level matches in JSON output."),

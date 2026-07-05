@@ -1,20 +1,13 @@
 import { join } from "node:path";
 
 import { BorealError, isBorealError, nowIso, type IsoTimestamp } from "@boreal/core";
-import { rebuildSQLiteCache, type SQLiteCacheRebuildResult } from "@boreal/storage";
 import type { WorkItemView } from "@boreal/ui-model";
 
 import { hasFlag, type ParsedArgs } from "../args.js";
 import { keyValueRows, resultSummary, section } from "../cli-ui.js";
 import type { CliContext } from "../context.js";
 import { inspectGitWorktree, type GitWorktreeInspection } from "../git-worktree.js";
-import {
-  buildExportDocument,
-  exportLedgers,
-  ledgerStatus,
-  readGeneratedLedgerTombstones,
-  type LedgerStatusResult
-} from "../import-export.js";
+import { exportLedgers, ledgerStatus, readGeneratedLedgerTombstones, type LedgerStatusResult } from "../import-export.js";
 import { formatRecord, type CliOutput } from "../output.js";
 import { inspectSearchIndex, writeSearchIndex, type SearchIndexInspection } from "../search-cli.js";
 import { inspectVault, VAULT_SCHEMA_VERSION, type VaultStatusResult } from "../vault.js";
@@ -44,8 +37,15 @@ export interface SyncRefreshResult {
   readonly contextViews: number;
   readonly searchIndex: Awaited<ReturnType<typeof writeSearchIndex>>;
   readonly ledgers: Awaited<ReturnType<typeof exportLedgers>>;
-  readonly sqliteCache: SQLiteCacheRebuildResult;
+  readonly sqliteCache: RetiredSQLiteCacheResult;
   readonly status: SyncStatusResult;
+}
+
+export interface RetiredSQLiteCacheResult {
+  readonly retired: true;
+  readonly path: string;
+  readonly rebuilt: false;
+  readonly skipped: true;
 }
 
 export interface SyncCommandDependencies {
@@ -136,13 +136,17 @@ export async function refreshGeneratedArtifactsInline(context: CliContext) {
   const views = await rebuildProjectionsRespectingTombstones(context);
   const searchIndex = await writeSearchIndex(context);
   const ledgers = await exportLedgers(context, undefined);
-  const cacheDocument = await buildExportDocument(context);
-  const sqliteCache = await rebuildSQLiteCache({
-    rootDir: context.workspaceRoot,
-    snapshot: cacheDocument.state,
-    sourceContentHash: cacheDocument.contentHash
-  });
+  const sqliteCache = retiredSQLiteCache(context);
   return { views, searchIndex, ledgers, sqliteCache };
+}
+
+function retiredSQLiteCache(context: CliContext): RetiredSQLiteCacheResult {
+  return {
+    retired: true,
+    path: join(context.paths.borealDir, "cache", "runtime-cache.sqlite"),
+    rebuilt: false,
+    skipped: true
+  };
 }
 
 export async function rebuildProjectionsRespectingTombstones(context: CliContext): Promise<readonly WorkItemView[]> {

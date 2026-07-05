@@ -79,7 +79,8 @@ describe("generated artifacts after mutation", () => {
       expect.arrayContaining([
         expect.objectContaining({ code: "search.index", severity: "info" }),
         expect.objectContaining({ code: "ledger.export_drift", severity: "info" }),
-        expect.objectContaining({ code: "cache.sqlite", severity: "info" })
+        expect.objectContaining({ code: "cache.sqlite", severity: "ok" }),
+        expect.objectContaining({ code: "cache.sqlite.retired", severity: "ok" })
       ])
     );
   });

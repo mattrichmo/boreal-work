@@ -3,6 +3,7 @@ import { mkdir, rm } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 
 import { canonicalJson, deepFreeze, hashContent, resolveWorkspacePaths, type WorkItem } from "@boreal/core";
+import { ftsDocumentInputFromFields, searchFieldsForRecord, type FtsDocumentInput, type SearchRecord, type SearchRecordSection } from "@boreal/search";
 
 import type { StoreChange, StoreSectionName, StoreSnapshot } from "./memory-store.js";
 import type { WorkItemFilter } from "./ports.js";
@@ -160,6 +161,7 @@ export class ObjectReadIndex {
     try {
       db.exec("BEGIN;");
       db.prepare("DELETE FROM records;").run();
+      const fts = clearSearchFtsDocuments(db) ? ftsStatements(db) : undefined;
       const insert = db.prepare(
         `INSERT OR REPLACE INTO records(section, id, status, kind, updated_at, content_hash, json)
          VALUES (?, ?, ?, ?, ?, ?, ?);`
@@ -168,6 +170,10 @@ export class ObjectReadIndex {
         for (const record of snapshot[section] ?? []) {
           const row = indexRow(section, record);
           insert.run(row.section, row.id, row.status, row.kind, row.updatedAt, row.contentHash, row.json);
+          const ftsDocument = ftsDocumentForRecord(section, record);
+          if (fts && ftsDocument) {
+            upsertSearchFtsDocument(fts, ftsDocument);
+          }
         }
       }
       writeHead(db, head);
@@ -211,13 +217,19 @@ export class ObjectReadIndex {
          VALUES (?, ?, ?, ?, ?, ?, ?);`
       );
       const remove = db.prepare("DELETE FROM records WHERE id = ?;");
+      const fts = initializeSearchFtsSchema(db) ? ftsStatements(db) : undefined;
       for (const change of indexedChanges) {
+        fts?.remove.run(change.id);
         if (change.record === null) {
           remove.run(change.id);
           continue;
         }
         const row = indexRow(change.section, change.record);
         upsert.run(row.section, row.id, row.status, row.kind, row.updatedAt, row.contentHash, row.json);
+        const ftsDocument = ftsDocumentForRecord(change.section, change.record);
+        if (fts && ftsDocument) {
+          upsertSearchFtsDocument(fts, ftsDocument);
+        }
       }
       writeHead(db, head);
       db.exec("COMMIT;");
@@ -315,6 +327,7 @@ function resetSchema(db: DatabaseSync): void {
   db.exec(`
     DROP TABLE IF EXISTS metadata;
     DROP TABLE IF EXISTS records;
+    DROP TABLE IF EXISTS search_fts;
     DROP TABLE IF EXISTS head;
   `);
   initializeSchema(db);
@@ -367,6 +380,76 @@ function headsEqual(stored: ObjectIndexHead | undefined, expected: ObjectIndexHe
 
 function isIndexedSection(section: StoreSectionName): boolean {
   return INDEXED_SECTIONS.includes(section as (typeof INDEXED_SECTIONS)[number]);
+}
+
+interface SearchFtsStatements {
+  readonly remove: ReturnType<DatabaseSync["prepare"]>;
+  readonly insert: ReturnType<DatabaseSync["prepare"]>;
+}
+
+function initializeSearchFtsSchema(db: DatabaseSync): boolean {
+  try {
+    db.exec(`
+      CREATE VIRTUAL TABLE IF NOT EXISTS search_fts USING fts5(
+        record_id UNINDEXED,
+        type UNINDEXED,
+        title,
+        summary,
+        id_text,
+        label_text,
+        body_text,
+        state_text,
+        tokenize = 'unicode61 remove_diacritics 2'
+      );
+    `);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function clearSearchFtsDocuments(db: DatabaseSync): boolean {
+  if (!initializeSearchFtsSchema(db)) {
+    return false;
+  }
+  db.prepare("DELETE FROM search_fts;").run();
+  return true;
+}
+
+function ftsStatements(db: DatabaseSync): SearchFtsStatements {
+  return {
+    remove: db.prepare("DELETE FROM search_fts WHERE record_id = ?;"),
+    insert: db.prepare(
+      `INSERT INTO search_fts(record_id, type, title, summary, id_text, label_text, body_text, state_text)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?);`
+    )
+  };
+}
+
+function upsertSearchFtsDocument(statements: SearchFtsStatements, entry: FtsDocumentInput): void {
+  statements.remove.run(entry.recordId);
+  statements.insert.run(entry.recordId, entry.type, entry.title, entry.summary, entry.idText, entry.labelText, entry.bodyText, entry.stateText);
+}
+
+function ftsDocumentForRecord(section: StoreSectionName, record: unknown): FtsDocumentInput | undefined {
+  if (!isSearchRecordSection(section)) {
+    return undefined;
+  }
+  if (!isRecord(record)) {
+    return undefined;
+  }
+  return ftsDocumentInputFromFields(searchFieldsForRecord(section, record as unknown as SearchRecord));
+}
+
+function isSearchRecordSection(section: StoreSectionName): section is SearchRecordSection {
+  return (
+    section === "workItems" ||
+    section === "agentSummaries" ||
+    section === "evidence" ||
+    section === "knowledgeSources" ||
+    section === "claims" ||
+    section === "decisions"
+  );
 }
 
 function matchesWorkFilter(item: WorkItem, filter: WorkItemFilter | undefined): boolean {

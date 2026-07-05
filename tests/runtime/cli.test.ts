@@ -5106,7 +5106,7 @@ describe("bwrk cli", () => {
         ledgerManifest: "boreal.ledgers.v1",
         ledgerDeletion: "boreal.ledger-deletion.v1",
         searchIndex: "boreal.search-index.v1",
-        sqliteCache: "boreal.sqlite-cache.v1",
+        sqliteCache: "boreal.sqlite-cache.retired",
         projectSetup: "boreal.project-setup.v1",
         projectRegistry: "boreal.project-registry.v2",
         vault: "boreal.vault.v1",
@@ -8050,79 +8050,79 @@ describe("bwrk cli", () => {
     expect(sprintSummary.summary.body).toContain(`force_evidence=${forceEvidence.meta.id}`);
   }, 20_000);
 
-  it("reports SQLite cache missing, stale, and corrupt states in doctor", async () => {
+  it("reports retired SQLite cache and removes stale files with doctor --fix", async () => {
     const rootDir = await makeTempWorkspace();
     await runCli(rootDir, ["init", "--json"]);
     await runCli(rootDir, ["vault", "init", "--json"]);
-    await runCli(rootDir, ["work", "create", "SQLite cache doctor work", "--json"]);
+    await runCli(rootDir, ["work", "create", "Retired SQLite cache doctor work", "--json"]);
+    const cachePath = join(rootDir, ".boreal/cache/runtime-cache.sqlite");
 
-    const missingDoctor = await runCli(rootDir, ["doctor", "--json"]);
-    const missingPayload = parseData<DoctorPayload>(missingDoctor.stdout);
-    expect(doctorDiagnostic(missingPayload, "cache.sqlite")).toEqual(
+    const initialDoctor = await runCli(rootDir, ["doctor", "--json"]);
+    const initialPayload = parseData<DoctorPayload>(initialDoctor.stdout);
+    expect(doctorDiagnostic(initialPayload, "cache.sqlite")).toEqual(
       expect.objectContaining({
         code: "cache.sqlite",
         severity: "ok",
-        message: "SQLite generated cache is not built yet",
-        details: expect.objectContaining({ exists: false })
+        message: "Legacy SQLite cache is retired"
+      })
+    );
+    expect(doctorDiagnostic(initialPayload, "cache.sqlite.retired")).toEqual(
+      expect.objectContaining({
+        code: "cache.sqlite.retired",
+        severity: "ok",
+        message: "Legacy SQLite runtime cache is retired",
+        details: expect.objectContaining({ retired: true, path: cachePath, exists: false })
       })
     );
 
     const refresh = await runCli(rootDir, ["sync", "refresh", "--json"]);
     const refreshPayload = parseData<{
       readonly sqliteCache: {
+        readonly retired: true;
         readonly path: string;
-        readonly sqliteAvailable: boolean;
         readonly rebuilt: boolean;
         readonly skipped: boolean;
       };
     }>(refresh.stdout);
     expect(refresh.exitCode).toBe(0);
-    if (!refreshPayload.sqliteCache.sqliteAvailable) {
-      expect(refreshPayload.sqliteCache).toEqual(expect.objectContaining({ rebuilt: false, skipped: true }));
-      return;
-    }
+    expect(refreshPayload.sqliteCache).toEqual({
+      retired: true,
+      path: cachePath,
+      rebuilt: false,
+      skipped: true
+    });
 
-    const freshDoctor = await runCli(rootDir, ["doctor", "--json"]);
-    const freshPayload = parseData<DoctorPayload>(freshDoctor.stdout);
-    expect(doctorDiagnostic(freshPayload, "cache.sqlite")).toEqual(
-      expect.objectContaining({
-        code: "cache.sqlite",
-        severity: "ok",
-        message: "SQLite generated cache matches current runtime state",
-        details: expect.objectContaining({ exists: true, stale: false })
-      })
-    );
-
-    await runCli(rootDir, ["work", "create", "SQLite cache drift work", "--json"]);
+    await mkdir(join(rootDir, ".boreal/cache"), { recursive: true });
+    await writeFile(cachePath, "retired sqlite cache fixture", "utf8");
     const staleDoctor = await runCli(rootDir, ["doctor", "--json"]);
     const stalePayload = parseData<DoctorPayload>(staleDoctor.stdout);
-    expect(doctorDiagnostic(stalePayload, "cache.sqlite")).toEqual(
+    expect(doctorDiagnostic(stalePayload, "cache.sqlite.retired")).toEqual(
       expect.objectContaining({
-        code: "cache.sqlite",
+        code: "cache.sqlite.retired",
         severity: "info",
-        message: "SQLite generated cache differs from current runtime state",
+        message: "Legacy SQLite runtime cache is retired; run `bwrk doctor --fix --json` to remove it",
         details: expect.objectContaining({
-          stale: true,
-          repairCommand: "bwrk sync refresh --json"
+          retired: true,
+          path: cachePath,
+          exists: true,
+          repairCommand: "bwrk doctor --fix --json"
         })
       })
     );
 
-    await runCli(rootDir, ["sync", "refresh", "--json"]);
-    await writeFile(refreshPayload.sqliteCache.path, "not a sqlite database", "utf8");
-    const corruptDoctor = await runCli(rootDir, ["doctor", "--json"]);
-    const corruptPayload = parseData<DoctorPayload>(corruptDoctor.stdout);
-    expect(doctorDiagnostic(corruptPayload, "cache.sqlite")).toEqual(
+    const fixedDoctor = await runCli(rootDir, ["doctor", "--fix", "--json"]);
+    const fixedPayload = parseData<DoctorPayload>(fixedDoctor.stdout);
+    expect(fixedDoctor.exitCode).toBe(0);
+    expect(fixedPayload.fixed).toBe(true);
+    expect(doctorDiagnostic(fixedPayload, "cache.sqlite.retired")).toEqual(
       expect.objectContaining({
-        code: "cache.sqlite",
-        severity: "warning",
-        message: "SQLite generated cache is invalid",
-        details: expect.objectContaining({
-          error: expect.any(String),
-          repairCommand: "bwrk sync refresh --json"
-        })
+        code: "cache.sqlite.retired",
+        severity: "fixed",
+        message: "Removed retired SQLite runtime cache",
+        details: expect.objectContaining({ retired: true, path: cachePath, removed: true })
       })
     );
+    await expect(stat(cachePath)).rejects.toMatchObject({ code: "ENOENT" });
   });
 
   it("exports, snapshots, imports, and rejects conflicting JSON snapshots", async () => {
@@ -8326,12 +8326,10 @@ describe("bwrk cli", () => {
       readonly exitReason: string;
       readonly contextViews: number;
       readonly sqliteCache: {
+        readonly retired: true;
         readonly path: string;
-        readonly sqliteAvailable: boolean;
         readonly rebuilt: boolean;
         readonly skipped: boolean;
-        readonly sourceContentHash: string;
-        readonly recordCounts: { readonly workItems: number };
       };
       readonly status: {
         readonly ok: boolean;
@@ -8346,14 +8344,12 @@ describe("bwrk cli", () => {
     expect(initialRefreshPayload.postRefreshStatusOk).toBe(true);
     expect(initialRefreshPayload.exitReason).toBe("ok");
     expect(initialRefreshPayload.contextViews).toBeGreaterThan(0);
-    expect(initialRefreshPayload.sqliteCache.path).toBe(join(rootDir, ".boreal/cache/runtime-cache.sqlite"));
-    expect(initialRefreshPayload.sqliteCache.sourceContentHash).toMatch(/^sha256:/);
-    expect(initialRefreshPayload.sqliteCache.recordCounts.workItems).toBe(1);
-    if (initialRefreshPayload.sqliteCache.sqliteAvailable) {
-      expect(initialRefreshPayload.sqliteCache).toEqual(expect.objectContaining({ rebuilt: true, skipped: false }));
-    } else {
-      expect(initialRefreshPayload.sqliteCache).toEqual(expect.objectContaining({ rebuilt: false, skipped: true }));
-    }
+    expect(initialRefreshPayload.sqliteCache).toEqual({
+      retired: true,
+      path: join(rootDir, ".boreal/cache/runtime-cache.sqlite"),
+      rebuilt: false,
+      skipped: true
+    });
     expect(initialRefreshPayload.status).toEqual(
       expect.objectContaining({
         ok: true,

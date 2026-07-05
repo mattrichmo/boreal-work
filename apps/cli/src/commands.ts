@@ -8182,7 +8182,7 @@ function gateSyncView(sync: SyncRefreshResult) {
     contextViews: sync.contextViews,
     ledgersOk: sync.status.ledgers.ok,
     searchIndexOk: sync.status.searchIndex.ok,
-    sqliteCacheOk: !sync.sqliteCache.error,
+    sqliteCacheOk: true,
     statusOk: sync.status.ok,
     recommendedActions: sync.status.recommendedActions
   };
