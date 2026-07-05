@@ -129,6 +129,7 @@ import { dashboardCommand, globalCommand, linkCommand, unlinkCommand } from "./c
 import { evidenceCommand } from "./commands/evidence.js";
 import { healthCommand, type HealthCommandDependencies } from "./commands/health.js";
 import { initCommand, installCommand, installRootFromArgs } from "./commands/install.js";
+import { updateCommand } from "./commands/update.js";
 import { knowledgeCommand } from "./commands/knowledge.js";
 import { memoryCommand, resolveWikiPageIds } from "./commands/memory.js";
 import { commandsCommand, completionCommand, HELP_SECTIONS } from "./commands/meta.js";
@@ -825,6 +826,9 @@ export async function runCommand(args: ParsedArgs, output: CliOutput, cwd: strin
         break;
       case "install":
         result = await installCommand(action, context, args, commandOutput, json);
+        break;
+      case "update":
+        result = await updateCommand(action, context, args, commandOutput, json);
         break;
       case "registry":
         result = await registryCommand(action, rest, context, args, commandOutput, json, registryCommandDependencies());

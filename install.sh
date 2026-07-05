@@ -3,14 +3,20 @@ set -euo pipefail
 
 usage() {
   cat <<'USAGE'
-Usage: install.sh [--repo|--machine] [--global|--no-global] [--yes] [--no-link]
+Usage: install.sh [--repo|--machine] [--from-github] [--global|--no-global] [--yes] [--no-link]
 
 Installs the bundled bwrk dist artifact.
 
+One-line install (no checkout needed):
+  curl -fsSL https://raw.githubusercontent.com/mattrichmo/boreal-work/main/install.sh | bash
+
 Modes:
-  default      Install or upgrade the machine bwrk binary, then offer global/link steps.
-  --machine   Install or upgrade the machine bwrk binary only.
-  --repo      Add bwrk as a dev dependency in the current repo and verify pnpm bwrk.
+  default        Install or upgrade the machine bwrk binary, then offer global/link steps.
+  --machine      Install or upgrade the machine bwrk binary only.
+  --repo         Add bwrk as a dev dependency in the current repo and verify pnpm bwrk.
+  --from-github  Clone the source repo, build, and install (automatic when run via curl).
+                 Use --ref <branch|tag> and --repo-url <url> to override the source.
+                 Already-installed users can run: bwrk update self
 
 Options:
   --global         Non-interactively accept global-manager setup when prompted.
@@ -30,8 +36,11 @@ mode="default"
 global_override="prompt"
 assume_yes=false
 link_repo=true
+from_github=false
+github_ref="${BOREAL_UPDATE_REF:-}"
+github_repo_url="${BOREAL_UPDATE_REPO_URL:-https://github.com/mattrichmo/boreal-work.git}"
 
-script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd -P || pwd -P)"
 dist_dir="${BOREAL_INSTALL_DIST_DIR:-$script_dir/apps/cli/dist}"
 bin_dir="${BOREAL_INSTALL_BIN_DIR:-${HOME:-}/.local/bin}"
 lib_dir="${BOREAL_INSTALL_LIB_DIR:-${XDG_DATA_HOME:-${HOME:-}/.local/share}/boreal/bwrk}"
@@ -101,6 +110,19 @@ while [ "$#" -gt 0 ]; do
       package_spec="$2"
       shift
       ;;
+    --from-github)
+      from_github=true
+      ;;
+    --ref)
+      require_value "$@"
+      github_ref="$2"
+      shift
+      ;;
+    --repo-url)
+      require_value "$@"
+      github_repo_url="$2"
+      shift
+      ;;
     --help|-h)
       usage
       exit 0
@@ -114,7 +136,62 @@ while [ "$#" -gt 0 ]; do
   shift
 done
 
+bootstrap_from_github() {
+  local stage
+  for tool in git node; do
+    if ! command -v "$tool" >/dev/null 2>&1; then
+      echo "install.sh: --from-github requires $tool on PATH" >&2
+      exit 1
+    fi
+  done
+  if ! command -v pnpm >/dev/null 2>&1; then
+    if command -v corepack >/dev/null 2>&1; then
+      corepack enable pnpm >/dev/null 2>&1 || true
+    fi
+    if ! command -v pnpm >/dev/null 2>&1; then
+      echo "install.sh: --from-github requires pnpm (try: corepack enable pnpm)" >&2
+      exit 1
+    fi
+  fi
+
+  stage="$(mktemp -d "${TMPDIR:-/tmp}/bwrk-install.XXXXXX")"
+  trap 'rm -rf "$stage"' EXIT
+
+  echo "Fetching Boreal from $github_repo_url${github_ref:+ ($github_ref)} ..."
+  if [ -n "$github_ref" ]; then
+    git clone --quiet --depth 1 --branch "$github_ref" "$github_repo_url" "$stage/src"
+  else
+    git clone --quiet --depth 1 "$github_repo_url" "$stage/src"
+  fi
+
+  echo "Building bwrk (pnpm install + build) ..."
+  (cd "$stage/src" && pnpm install --frozen-lockfile --silent && pnpm build >/dev/null)
+
+  echo "Handing off to the built installer ..."
+  local forwarded_args=()
+  case "$mode" in
+    machine) forwarded_args+=(--machine) ;;
+    repo) forwarded_args+=(--repo) ;;
+  esac
+  case "$global_override" in
+    yes) forwarded_args+=(--global) ;;
+    no) forwarded_args+=(--no-global) ;;
+  esac
+  [ "$assume_yes" = true ] && forwarded_args+=(--yes)
+  [ "$link_repo" = false ] && forwarded_args+=(--no-link)
+  [ -n "$registry_root" ] && forwarded_args+=(--registry-root "$registry_root")
+  BOREAL_INSTALL_BIN_DIR="$bin_dir" BOREAL_INSTALL_LIB_DIR="$lib_dir" \
+    bash "$stage/src/install.sh" ${forwarded_args[@]+"${forwarded_args[@]}"}
+  exit $?
+}
+
 main() {
+  if [ "$from_github" = true ]; then
+    bootstrap_from_github
+  elif [ ! -f "$dist_dir/index.js" ] && [ ! -f "$script_dir/package.json" ]; then
+    # Running outside a checkout (e.g. curl | bash) with no built dist: bootstrap.
+    bootstrap_from_github
+  fi
   require_dist
   registry_root="$(resolve_registry_root "$registry_root")"
   registry_file="$registry_root/registry/projects.json"

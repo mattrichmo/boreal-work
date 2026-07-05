@@ -26,37 +26,58 @@ Boreal turns tasks, sources, claims, decisions, verification, and workflow state
 
 ## Install
 
-Install the machine-level `bwrk` with npm or Homebrew after the owner publishes the prepared release artifacts:
+There are two install levels. Understand them once and the rest is one command each:
 
-```bash
-npm install -g @boreal/cli
-bwrk --version
-```
+- **Machine install** (`~/.local/bin/bwrk` → versioned bundle in `~/.local/share/boreal/bwrk`): the global project manager. This is a built, frozen copy — editing a source checkout never changes it.
+- **Repo install** (`bwrk init` / `bwrk install` inside a project): the tracker state (`.boreal/`), project memory (`memory/`), and agent skills for that repo. Repos can also pin their own `bwrk` version; the machine binary automatically delegates to a repo pin when one exists.
 
-```bash
-brew tap mattrichmo/boreal
-brew install boreal-work
-bwrk --version
-```
-
-The installer channel is available for release artifacts and source checkouts:
+### Machine install from GitHub (recommended)
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/mattrichmo/boreal-work/main/install.sh | bash -s -- --machine --yes
+bwrk --version
 ```
 
-For source development:
+This clones the repo to a temp directory, builds the bundled CLI, and installs the segmented machine binary. Requires `git`, `node` >= 22, and `pnpm` (or `corepack`). Pin a release with `--ref <tag>`.
+
+### Staying up to date
+
+```bash
+bwrk update self          # upgrade the machine install from GitHub (accepts --ref)
+bwrk update repo          # inside a project: migrate legacy storage to the
+                          # object store and refresh installed agent skills
+bwrk sync refresh --json  # rebuild generated artifacts after an update
+```
+
+Run `bwrk update repo` in each existing project after upgrading the machine binary — it converts old `state.json` workspaces to the git-first per-record object store and reinstalls the skills recorded in `.boreal/project.json`.
+
+### npm / Homebrew (after first publish)
+
+```bash
+npm install -g @boreal/cli
+# or
+brew tap mattrichmo/boreal && brew install boreal-work
+```
+
+### Project setup
+
+```bash
+cd your-project
+bwrk init            # initialize tracker + storage marker
+bwrk install         # interactive setup: quick mode asks one question
+```
+
+### Source development
 
 ```bash
 pnpm install
 pnpm build
+pnpm bwrk --help     # run straight from source
 
-# run the CLI straight from source
-pnpm bwrk --help
-
-# or install a local `bwrk` shim for this checkout
+# Optional: a source-linked shim for CLI development ONLY. Do not use this as
+# your daily bwrk: it executes live source, so mid-edit breakage becomes your
+# installed tool. Use the machine install above for real work.
 pnpm install:local
-bwrk --help
 ```
 
 A first loop, end to end:

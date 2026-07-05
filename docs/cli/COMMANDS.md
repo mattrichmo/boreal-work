@@ -1671,6 +1671,26 @@ Copies canonical runtime records between the legacy compact state document and t
 
 JSON `data` contains `migrated`, `from`, `to`, `records`, `eventLog`, `markerPath`, and, for file-to-object migration, `stateBackupPath`.
 
+## `update self`
+
+```bash
+bwrk update self [--ref <ref>] [--repo-url <url>] [--bin-dir <dir>] [--lib-dir <dir>] [--json]
+```
+
+Upgrades the machine `bwrk` install from the source repo: clones to a temp directory, builds the bundled CLI with pnpm, and installs the result into the segmented machine location (`~/.local/share/boreal/bwrk`) behind the `~/.local/bin/bwrk` shim. The staged clone is removed afterwards. Requires `git`, `node`, and `pnpm` on PATH. `--ref` pins a branch or tag; `--repo-url` (or `BOREAL_UPDATE_REPO_URL`) overrides the source repo. The machine install never points at a live source checkout, so upgrading cannot be broken by in-progress edits to a development clone.
+
+JSON `data` contains `updated`, `repoUrl`, `ref`, `previousVersion`, `installedVersion`, `binPath`, and per-step `steps` with durations.
+
+## `update repo`
+
+```bash
+bwrk update repo [--json]
+```
+
+Brings the current workspace up to the installed `bwrk` version: migrates legacy compact-state storage to the git-first per-record object store when the `.boreal/project.json` marker is not already `objects-v1`, then reinstalls agent skills into every install root recorded by project setup. Run it in each existing project after `bwrk update self`, then run `bwrk sync refresh` to rebuild generated artifacts. Exits `1` when a skill install reports issues.
+
+JSON `data` contains `workspaceRoot`, `storage` (`migrated`, `from`, `to`), `skillInstalls` (per target: `installRoot`, `written`, `issues`), and `nextCommand`.
+
 ## `ledger status`
 
 ```bash

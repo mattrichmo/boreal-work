@@ -349,6 +349,45 @@ const YES_NO_OPTIONS: readonly CliSelectOption<"yes" | "no">[] = [
   }
 ];
 
+const SETUP_MODE_OPTIONS: readonly CliSelectOption<"quick" | "custom">[] = [
+  {
+    value: "quick",
+    label: "Quick setup (recommended)",
+    description: "Memory in ./memory as its own Git repo (ignored by this repo), skills in .agents/skills. One question: which agents you use."
+  },
+  {
+    value: "custom",
+    label: "Custom setup",
+    description: "Choose memory location, Git tracking mode, and skill folders step by step."
+  }
+];
+
+const FOLDER_SCOPE_OPTIONS: readonly CliSelectOption<"yes" | "no">[] = [
+  {
+    value: "no",
+    label: "No (recommended)",
+    description: "One project-level skill folder; agents find skills from anywhere in the repo."
+  },
+  {
+    value: "yes",
+    label: "Yes",
+    description: "Duplicate skills under each folder agents open sessions in. Only for multi-root monorepos."
+  }
+];
+
+const INSTALL_APPLY_OPTIONS: readonly CliSelectOption<"yes" | "no">[] = [
+  {
+    value: "yes",
+    label: "Apply",
+    description: "Write the files listed above."
+  },
+  {
+    value: "no",
+    label: "Cancel",
+    description: "Exit without writing anything."
+  }
+];
+
 export async function maybeConfigureProjectSetup(
   context: CliContext,
   args: ParsedArgs
@@ -371,32 +410,51 @@ export async function promptProjectInstallInput(context: CliContext, args: Parse
     prompt.writeIntro(
       "Boreal Install",
       [
-        "Clean project setup for local-first work and memory.",
-        "Recommended: ./memory as a child Git repo, Codex skills in .agents/skills, no app-history pollution."
+        `Setting up this project for Boreal work tracking and memory: ${context.workspaceRoot}`,
+        "",
+        "This writes .boreal/ (tracker state), memory/ (project memory), and agent skills.",
+        "Quick setup uses the recommended layout and only asks which agents you use."
       ].join("\n")
     );
+    const setupMode = await prompt.select("Setup", SETUP_MODE_OPTIONS, "quick");
+
+    if (setupMode === "quick") {
+      const skillTargets = await prompt.multiselect("Which agents will work in this repo?", SKILL_TARGET_OPTIONS, defaults.skillTargets);
+      const reviewed = {
+        ...defaults,
+        skillTargets,
+        skillInstallRoots: skillTargets.map((target) => skillInstallRootConfig(defaults.projectRoot, defaults.installRoot, target))
+      };
+      prompt.writeIntro("About to write", formatProjectInstallReview(reviewed));
+      const confirmed = await prompt.select("Apply this setup?", INSTALL_APPLY_OPTIONS, "yes");
+      if (confirmed !== "yes") {
+        throw new BorealError("BOREAL_INVALID_INPUT", "Boreal install cancelled", { reason: "cancelled" });
+      }
+      return reviewed;
+    }
+
     const projectRoot = resolveUserPath(context.workspaceRoot, await prompt.text("Project root", defaults.projectRoot));
-    const memoryLayout = await prompt.select("Memory location", INSTALL_MEMORY_LAYOUT_OPTIONS, defaults.memoryLayout);
+    const memoryLayout = await prompt.select("Where should project memory live?", INSTALL_MEMORY_LAYOUT_OPTIONS, defaults.memoryLayout);
     const memoryRootDefault = flagValue(args, "memory-root")
       ? defaults.memoryRoot
       : defaultMemoryRoot(projectRoot, memoryLayout);
-    const memoryRoot = resolveUserPath(projectRoot, await prompt.text("Memory root", memoryRootDefault));
+    const memoryRoot = resolveUserPath(projectRoot, await prompt.text("Memory folder", memoryRootDefault));
     const memoryGitMode = await prompt.select(
-      "Memory Git mode",
+      "How should memory be tracked in Git?",
       installMemoryGitOptions(memoryLayout),
       installMemoryGitDefault(defaults.memoryGitMode, memoryLayout)
     );
     const memoryRemote =
       memoryGitMode === "submodule"
-        ? await prompt.text("Memory remote URL", defaults.memoryRemote ?? "")
+        ? await prompt.text("Memory remote URL (required for submodule)", defaults.memoryRemote ?? "")
         : defaults.memoryRemote;
-    const installRoot = resolveUserPath(projectRoot, await prompt.text("Skill install root", defaults.installRoot));
-    const skillTargets = await prompt.multiselect("Agent skills", SKILL_TARGET_OPTIONS, defaults.skillTargets);
+    const skillTargets = await prompt.multiselect("Which agents will work in this repo?", SKILL_TARGET_OPTIONS, defaults.skillTargets);
+    const installRoot = resolveUserPath(projectRoot, await prompt.text("Folder for installed agent skills", defaults.installRoot));
     const skillInstallRoots = skillTargets.map((target) => skillInstallRootConfig(projectRoot, installRoot, target));
-    const folderScoped = (await prompt.select("Folder scoped skills", YES_NO_OPTIONS, defaults.folderScoped ? "yes" : "no")) === "yes";
+    const folderScoped = (await prompt.select("Scope skills to the folder agents open?", FOLDER_SCOPE_OPTIONS, defaults.folderScoped ? "yes" : "no")) === "yes";
     const reviewed = { projectRoot, memoryRoot, memoryLayout, memoryGitMode, memoryRemote, installRoot, skillInstallRoots, skillTargets, folderScoped };
-    prompt.writeIntro("Install review", formatProjectInstallReview(reviewed));
-    const confirmed = await prompt.select("Write install files", YES_NO_OPTIONS, "yes");
+    prompt.writeIntro("About to write", formatProjectInstallReview(reviewed));
+    const confirmed = await prompt.select("Apply this setup?", INSTALL_APPLY_OPTIONS, "yes");
     if (confirmed !== "yes") {
       throw new BorealError("BOREAL_INVALID_INPUT", "Boreal install cancelled", { reason: "cancelled" });
     }
