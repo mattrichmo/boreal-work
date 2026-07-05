@@ -256,19 +256,27 @@ function spawnDashboardServer(input: {
   });
 }
 
-// Prefer the compiled app output (works in any layout, no tsx, faster start);
-// fall back to running TypeScript source via tsx for in-repo dev checkouts.
-// When neither exists (e.g. the standalone install.sh / npm bundle, which
-// ships only the bundled CLI at <install>/dist/index.js with no apps/ tree),
-// fail loudly with the alternatives instead of spawning a doomed process --
-// previously `bwrk dashboard` exited code 1 with zero output in that layout.
+// App entrypoint resolution, in preference order:
+// 1. A bundled sibling app next to the CLI entry itself
+//    (<install>/dist/<appDir>/index.js) -- what the standalone install.sh /
+//    npm artifact ships (built by tools/build-cli-dist.mjs).
+// 2. The compiled in-repo app output (apps/<appDir>/dist/<distEntry>).
+// 3. The TypeScript source via tsx for in-repo dev checkouts.
+// When none exist, fail loudly with the alternatives instead of spawning a
+// doomed process -- previously `bwrk dashboard` exited code 1 with zero
+// output in the standalone layout (bw_work_67f67c5afd2decc5).
 function spawnAppProcess(input: {
   readonly appDir: string;
   readonly distEntry: string;
   readonly srcEntry: string;
   readonly args: readonly string[];
 }) {
-  const sourceRoot = resolve(dirname(import.meta.url.replace(/^file:\/\//u, "")), "..", "..", "..", "..");
+  const cliDir = dirname(import.meta.url.replace(/^file:\/\//u, ""));
+  const bundledEntrypoint = join(cliDir, input.appDir, "index.js");
+  if (existsSync(bundledEntrypoint)) {
+    return spawn(process.execPath, [bundledEntrypoint, ...input.args], { cwd: cliDir, stdio: "inherit" });
+  }
+  const sourceRoot = resolve(cliDir, "..", "..", "..", "..");
   const distEntrypoint = join(sourceRoot, "apps", input.appDir, "dist", input.distEntry);
   if (existsSync(distEntrypoint)) {
     return spawn(process.execPath, [distEntrypoint, ...input.args], { cwd: sourceRoot, stdio: "inherit" });
@@ -279,8 +287,8 @@ function spawnAppProcess(input: {
     throw new BorealError(
       "BOREAL_INVALID_INPUT",
       `The ${input.appDir === "tui" ? "terminal dashboard" : "browser console"} app is not bundled with this bwrk installation. ` +
-        "Use `bwrk dashboard --json` for the data payload, or run from a source checkout (`pnpm bwrk dashboard`).",
-      { lookedFor: [distEntrypoint, srcEntrypoint], sourceRoot }
+        "Use `bwrk dashboard --json` for the data payload, reinstall bwrk (`bwrk update self`), or run from a source checkout (`pnpm bwrk dashboard`).",
+      { lookedFor: [bundledEntrypoint, distEntrypoint, srcEntrypoint], sourceRoot }
     );
   }
   const tsconfig = join(sourceRoot, "apps", input.appDir, "tsconfig.json");

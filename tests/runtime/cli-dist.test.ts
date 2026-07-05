@@ -91,6 +91,30 @@ describe("bundled bwrk dist", () => {
     expect(installDiagnostic?.details?.upgrade).toEqual(expect.objectContaining({ channel: "npm" }));
   }, 20_000);
 
+  it("bundles the terminal dashboard and launches it from a bare install without a source checkout", async () => {
+    const bundleRoot = await makeTempDir("boreal-cli-tui-bundle-");
+    const workspaceRoot = await makeTempDir("boreal-cli-tui-workspace-");
+    await cp(npmDistDir, join(bundleRoot, "dist"), { recursive: true });
+    const bundledBin = join(bundleRoot, "dist", "index.js");
+    const bundledTui = join(bundleRoot, "dist", "tui", "index.js");
+
+    // The TUI app ships inside the dist artifact (bw_work_67f67c5afd2decc5)...
+    expect(await isMissing(bundledTui)).toBe(false);
+
+    // ...its import graph (ink/react/yoga) loads without node_modules...
+    const help = await runBundle(bundledTui, workspaceRoot, ["--help"]);
+    expect(help.exitCode).toBe(0);
+    expect(help.stdout).toContain("Boreal terminal dashboard");
+
+    // ...and `bwrk dashboard` actually launches it (renders a frame) from
+    // the standalone layout. Previously this exited silently with code 1.
+    const init = await runBundle(bundledBin, workspaceRoot, ["init", "--json"]);
+    expect(init.exitCode).toBe(0);
+    const firstFrame = await captureFirstDashboardFrame(bundledBin, workspaceRoot);
+    expect(firstFrame).toContain("boreal");
+    expect(firstFrame).toContain("Roll-Up");
+  }, 30_000);
+
   it("runs as a repo dev-dependency bin through pnpm and npx without a machine bwrk binary", async () => {
     const workspaceRoot = await makeTempDir("boreal-cli-package-bin-");
     const installedBin = await installBundledPackage(workspaceRoot);
@@ -378,6 +402,58 @@ async function runBundle(
   envOverrides: NodeJS.ProcessEnv = {}
 ): Promise<CommandRun> {
   return runExternal(process.execPath, [bin, ...args], cwd, envOverrides);
+}
+
+/** Spawn `bwrk dashboard` from a bundled bin and return its ANSI-stripped
+ * output. On a non-TTY stdout Ink buffers rendering and flushes the frame on
+ * exit, so waiting for the frame before terminating would deadlock: instead
+ * wait for the alternate-screen enter sequence (proof the TUI process
+ * booted), give the route loader a beat, terminate, and collect the frame
+ * from the exit flush. */
+async function captureFirstDashboardFrame(bundledBin: string, cwd: string): Promise<string> {
+  const { spawn } = await import("node:child_process");
+  return new Promise<string>((resolvePromise, rejectPromise) => {
+    const child = spawn(process.execPath, [bundledBin, "dashboard"], {
+      cwd,
+      env: commandEnv({}),
+      stdio: ["ignore", "pipe", "pipe"]
+    });
+    let output = "";
+    let booted = false;
+    let settled = false;
+    const fail = (error: Error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(deadline);
+      child.kill("SIGKILL");
+      rejectPromise(error);
+    };
+    const deadline = setTimeout(
+      () => fail(new Error(`dashboard never entered the alt screen; output: ${output.slice(0, 500)}`)),
+      15_000
+    );
+    const collect = (chunk: Buffer) => {
+      output += chunk.toString();
+      if (!booted && output.includes("[?1049h")) {
+        booted = true;
+        setTimeout(() => child.kill("SIGTERM"), 2_000);
+      }
+    };
+    child.stdout.on("data", collect);
+    child.stderr.on("data", collect);
+    child.once("error", (error) => fail(error));
+    child.once("exit", () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(deadline);
+      if (!booted) {
+        rejectPromise(new Error(`dashboard exited before entering the alt screen; output: ${output.slice(0, 500)}`));
+        return;
+      }
+      // eslint-disable-next-line no-control-regex
+      resolvePromise(output.replace(/\u001b\[[0-9;?]*[a-zA-Z]/gu, ""));
+    });
+  });
 }
 
 async function runExternal(

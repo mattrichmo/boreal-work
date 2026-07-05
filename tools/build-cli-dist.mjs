@@ -10,6 +10,7 @@ const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const cliRoot = join(repoRoot, "apps", "cli");
 const distRoot = join(cliRoot, "dist");
 const outFile = join(distRoot, "index.js");
+const tuiOutFile = join(distRoot, "tui", "index.js");
 const assetRoot = join(distRoot, "assets");
 const lockDir = join(cliRoot, ".dist-build.lock");
 const lockTimeoutMs = 120_000;
@@ -51,6 +52,36 @@ await withBuildLock(async () => {
   });
 
   await chmod(outFile, 0o755);
+
+  // Bundle the terminal dashboard (apps/tui, Ink + React) alongside the CLI
+  // so `bwrk dashboard` works from a standalone install with no source
+  // checkout (bw_work_67f67c5afd2decc5). yoga-layout ships its WASM as
+  // base64-inlined JS, so the whole app bundles to one self-contained file.
+  // spawnAppProcess (apps/cli/src/commands/dashboard.ts) looks for this
+  // sibling `tui/index.js` next to the CLI entry before falling back to the
+  // in-repo apps/tui layout.
+  await build({
+    entryPoints: [join(repoRoot, "apps", "tui", "src", "index.tsx")],
+    outfile: tuiOutFile,
+    bundle: true,
+    platform: "node",
+    format: "esm",
+    target: "node22",
+    jsx: "automatic",
+    tsconfig: join(repoRoot, "tsconfig.base.json"),
+    sourcemap: true,
+    // Ink's devtools shim imports react-devtools-core only when DEV=true,
+    // but bundling hoists it into the static import graph -- alias it to an
+    // empty stub so the standalone bundle loads without the optional peer.
+    alias: { "react-devtools-core": join(repoRoot, "tools", "empty-module.mjs") },
+    // CJS deps in Ink's graph (signal-exit et al) require() node builtins at
+    // runtime; esbuild's ESM output shims dynamic require with a throw unless
+    // a real require is in scope.
+    banner: { js: 'import { createRequire as __bwrkCreateRequire } from "node:module"; const require = __bwrkCreateRequire(import.meta.url);' },
+    logLevel: "info"
+  });
+  await chmod(tuiOutFile, 0o755);
+
   await mkdir(assetRoot, { recursive: true });
   for (const directory of ["workflows", "templates", "skills", "schemas"]) {
     await cp(join(repoRoot, directory), join(assetRoot, directory), {
@@ -72,6 +103,7 @@ await withBuildLock(async () => {
 });
 
 console.log(`Built ${outFile}`);
+console.log(`Built ${tuiOutFile}`);
 console.log(`Install channel: ${installChannel}`);
 console.log(`Runtime assets: ${assetRoot}`);
 
