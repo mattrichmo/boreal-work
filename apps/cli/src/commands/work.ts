@@ -16,10 +16,18 @@ import {
   type WorkStatus
 } from "@boreal/core";
 import type { BorealReader } from "@boreal/storage";
-import type { WorkItemView } from "@boreal/ui-model";
+import {
+  buildRepoRollupView,
+  type RepoRollupSummary,
+  type RollupNodeKind,
+  type RollupNodeView,
+  type WorkItemView,
+  type WorkReservationView
+} from "@boreal/ui-model";
 import type { RequiredCloseoutGateInput } from "@boreal/work-engine";
 
 import { flagValue, flagValues, hasFlag, requiredFlag, type ParsedArgs } from "../args.js";
+import { boundedTable, type BoundedTableColumn } from "../cli-ui.js";
 import type { CliContext } from "../context.js";
 import { formatRecord, table, type CliOutput } from "../output.js";
 import type { CommandResult } from "./shared.js";
@@ -272,21 +280,36 @@ async function mainWorkCommand(
       const labels = dependencies.labelsFromArgs(args);
       const limit = dependencies.parseLimit(flagValue(args, "limit")) ?? dependencies.defaultListLimit;
       const containerId = await dependencies.optionalContainerIdFromArgs(context, args);
-      const rows = await context.store.read(async (reader) => {
+      // Human rendering defaults to open-only work, sorted for readability; JSON keeps the
+      // legacy filter/order/limit contract (closed included by default, storage order) so
+      // agent scripts relying on `work list --json` don't see a behavior change.
+      const includeClosedInHuman = hasFlag(args, "all") || hasFlag(args, "closed");
+      const { rows, humanRows } = await context.store.read(async (reader) => {
         const [workItems, graphEdges] = await Promise.all([reader.listWorkItems(), reader.listGraphEdges()]);
         const scopedIds = containerId ? dependencies.heartbeatScopeIds(containerId, workItems, graphEdges) : undefined;
         const lineageById = dependencies.workLineageById(workItems, graphEdges);
         const claimableIds = readyOnly
           ? new Set(dependencies.claimableWorkItems(workItems, labels, graphEdges).map((work) => work.meta.id))
           : undefined;
-        return workItems
+        const filtered = workItems
           .filter((work) => (claimableIds ? claimableIds.has(work.meta.id) : !status || work.status === status))
           .filter((work) => claimableIds || labels.every((label) => work.labels.includes(label)))
-          .filter((work) => !scopedIds || scopedIds.has(work.meta.id))
+          .filter((work) => !scopedIds || scopedIds.has(work.meta.id));
+        const toRow = (work: WorkItem) => dependencies.workListRow(work, containerId, lineageById.get(work.meta.id) ?? []);
+        const jsonRows = filtered.slice(0, limit).map(toRow);
+        const humanRows = (includeClosedInHuman ? filtered : filtered.filter((work) => isOpenWorkStatusForHumanList(work.status)))
+          .slice()
+          .sort(compareWorkListHumanOrder)
           .slice(0, limit)
-          .map((work) => dependencies.workListRow(work, containerId, lineageById.get(work.meta.id) ?? []));
+          .map(toRow);
+        return { rows: jsonRows, humanRows };
       });
-      output.write(json ? formatRecord(rows, true) : table(rows.map(dependencies.textWorkListRow)));
+      output.write(json ? formatRecord(rows, true) : formatWorkListHuman(humanRows, hasFlag(args, "wide"), includeClosedInHuman));
+      return { exitCode: 0 };
+    }
+    case "rollup": {
+      const result = await workRollupResult(context, rest[0], args, dependencies);
+      output.write(json ? formatRecord(result, true) : formatWorkRollup(result, hasFlag(args, "wide")));
       return { exitCode: 0 };
     }
     case "recent-closed": {
@@ -674,4 +697,280 @@ async function depCommand(
     default:
       throw new BorealError("BOREAL_INVALID_INPUT", `Unknown dep command: ${action ?? ""}`);
   }
+}
+
+// ---------------------------------------------------------------------------
+// `work list` human rendering: open-only by default, sorted for readability,
+// with a single truncated `container` (immediate parent title) column instead
+// of the full ancestor id chain. JSON output is computed separately in the
+// `list` case above and is untouched by any of this.
+// ---------------------------------------------------------------------------
+
+const WORK_LIST_STATUS_GROUP_RANK: Readonly<Record<string, number>> = {
+  in_progress: 0,
+  ready: 1,
+  blocked: 2,
+  draft: 3
+};
+
+function workListHumanStatusRank(status: WorkStatus): number {
+  return WORK_LIST_STATUS_GROUP_RANK[status] ?? 4;
+}
+
+function workListHumanPriorityRank(priority: WorkPriority): number {
+  switch (priority) {
+    case "critical":
+      return 4;
+    case "high":
+      return 3;
+    case "normal":
+      return 2;
+    case "low":
+      return 1;
+  }
+}
+
+function isOpenWorkStatusForHumanList(status: WorkStatus): boolean {
+  return status !== "closed" && status !== "cancelled" && status !== "verified";
+}
+
+function compareWorkListHumanOrder(left: WorkItem, right: WorkItem): number {
+  return (
+    workListHumanStatusRank(left.status) - workListHumanStatusRank(right.status) ||
+    workListHumanPriorityRank(right.priority) - workListHumanPriorityRank(left.priority) ||
+    left.title.localeCompare(right.title)
+  );
+}
+
+interface WorkListLineageEntryLike {
+  readonly title: string;
+}
+
+function immediateContainerTitle(row: WorkListRow): string | undefined {
+  const lineage = row.lineage as readonly WorkListLineageEntryLike[] | undefined;
+  if (!lineage || lineage.length === 0) {
+    return undefined;
+  }
+  // Lineage is ordered furthest ancestor first; the closest parent is last.
+  return lineage[lineage.length - 1]?.title;
+}
+
+const WORK_LIST_COLUMNS: readonly BoundedTableColumn[] = [
+  { key: "id", header: "id" },
+  { key: "kind", header: "kind" },
+  { key: "status", header: "status" },
+  { key: "priority", header: "priority" },
+  { key: "title", header: "title", flex: true },
+  { key: "container", header: "container", flex: true, minWidth: 12 },
+  { key: "labels", header: "labels", flex: true, minWidth: 10 }
+];
+
+function formatWorkListHuman(rows: readonly WorkListRow[], wide: boolean, includeClosed: boolean): string {
+  if (rows.length === 0) {
+    return includeClosed ? "No work found\n" : "No open work found (pass --all or --closed to include closed work)\n";
+  }
+  return boundedTable(
+    rows.map((row) => ({
+      id: row.id,
+      kind: row.kind,
+      status: row.status,
+      priority: row.priority,
+      title: row.title,
+      container: immediateContainerTitle(row) ?? "-",
+      labels: row.labels.join(",")
+    })),
+    WORK_LIST_COLUMNS,
+    { wide }
+  );
+}
+
+// ---------------------------------------------------------------------------
+// `work rollup`: renders the work hierarchy (milestone -> sprint -> task) as a
+// bounded table. Built entirely over `@boreal/ui-model`'s `buildRepoRollupView`
+// so the hierarchy/progress derivation matches the TUI Roll-Up route and
+// `sprint show`/`sprint board` scope membership exactly -- no second
+// derivation lives here.
+// ---------------------------------------------------------------------------
+
+interface WorkRollupFilters {
+  readonly all: boolean;
+  readonly kind?: WorkKind;
+  readonly labels: readonly string[];
+  readonly depth?: number;
+  readonly limit?: number;
+  readonly containerId?: string;
+}
+
+interface WorkRollupRow {
+  readonly id: string;
+  readonly kind: RollupNodeKind;
+  readonly status?: WorkStatus;
+  readonly title: string;
+  readonly depth: number;
+  readonly isContainer: boolean;
+  readonly done?: number;
+  readonly total?: number;
+  readonly blocked?: number;
+  readonly owner?: string;
+  readonly labels: readonly string[];
+}
+
+interface WorkRollupResult {
+  readonly schemaVersion: "boreal.cli.work.rollup.v1";
+  readonly generatedAt: string;
+  readonly workspaceRoot: string;
+  readonly filters: WorkRollupFilters;
+  readonly summary: RepoRollupSummary;
+  readonly rows: readonly WorkRollupRow[];
+}
+
+async function workRollupResult(
+  context: CliContext,
+  containerRef: string | undefined,
+  args: ParsedArgs,
+  dependencies: WorkCommandDependencies
+): Promise<WorkRollupResult> {
+  const generatedAt = nowIso();
+  const includeAll = hasFlag(args, "all");
+  const kindFilter = dependencies.parseWorkKind(flagValue(args, "kind"));
+  const labelFilters = dependencies.labelsFromArgs(args);
+  const depthLimit = dependencies.parseNonNegativeInteger(flagValue(args, "depth"), "--depth");
+  const rowLimit = dependencies.parseLimit(flagValue(args, "limit"));
+  const containerId = containerRef ? await dependencies.resolveWorkId(context, containerRef) : undefined;
+
+  const { workItems, graphEdges, reservations } = await context.store.read(async (reader) => ({
+    workItems: await reader.listWorkItems(),
+    graphEdges: await reader.listGraphEdges(),
+    reservations: await reader.listReservations()
+  }));
+
+  const generatedAtMs = Date.parse(generatedAt);
+  const reservationsByWorkId = new Map<string, WorkReservationView>();
+  for (const reservation of reservations) {
+    if (reservation.status !== "active") {
+      continue;
+    }
+    reservationsByWorkId.set(reservation.workId, {
+      id: reservation.meta.id,
+      agentId: String(reservation.agentId),
+      reservedAt: reservation.reservedAt,
+      expiresAt: reservation.expiresAt,
+      expired: reservation.expiresAt !== undefined && Date.parse(reservation.expiresAt) <= generatedAtMs
+    });
+  }
+
+  const projectName = context.workspaceRoot.split("/").filter(Boolean).at(-1) ?? context.workspaceRoot;
+  const view = buildRepoRollupView({
+    workspaceRoot: context.workspaceRoot,
+    generatedAt,
+    projectName,
+    work: workItems,
+    graphEdges,
+    reservationsByWorkId
+  });
+
+  const nodesById = new Map(view.flatRows.map((node) => [node.id, node] as const));
+  const rows: WorkRollupRow[] = [];
+
+  const passesNodeFilters = (node: RollupNodeView, forceOpen: boolean): boolean => {
+    const openOk = forceOpen || includeAll || node.workStatus === undefined || isOpenWorkStatusForHumanList(node.workStatus);
+    const kindOk = !kindFilter || node.kind === kindFilter;
+    const labelOk = labelFilters.every((label) => node.labels.includes(label));
+    return openOk && kindOk && labelOk;
+  };
+
+  const visit = (node: RollupNodeView, depth: number, forceOpen: boolean): void => {
+    if (depthLimit !== undefined && depth > depthLimit) {
+      return;
+    }
+    if (!passesNodeFilters(node, forceOpen)) {
+      return;
+    }
+    rows.push(toWorkRollupRow(node, depth));
+    for (const childId of node.childIds) {
+      const child = nodesById.get(childId);
+      if (child) {
+        visit(child, depth + 1, false);
+      }
+    }
+  };
+
+  if (containerId) {
+    const root = nodesById.get(containerId);
+    if (!root) {
+      throw new BorealError("BOREAL_NOT_FOUND", "Work item not found for rollup", { containerId });
+    }
+    visit(root, 0, true);
+  } else {
+    const rootContainers = view.root.childIds
+      .map((id) => nodesById.get(id))
+      .filter((node): node is RollupNodeView => node !== undefined)
+      .filter((node) => node.kind === "milestone" || node.childIds.length > 0)
+      .sort((left, right) => left.title.localeCompare(right.title));
+    for (const rootContainer of rootContainers) {
+      visit(rootContainer, 0, false);
+    }
+  }
+
+  const limitedRows = rowLimit !== undefined ? rows.slice(0, rowLimit) : rows;
+
+  return {
+    schemaVersion: "boreal.cli.work.rollup.v1",
+    generatedAt,
+    workspaceRoot: context.workspaceRoot,
+    filters: {
+      all: includeAll,
+      kind: kindFilter,
+      labels: labelFilters,
+      depth: depthLimit,
+      limit: rowLimit,
+      containerId
+    },
+    summary: view.summary,
+    rows: limitedRows
+  };
+}
+
+function toWorkRollupRow(node: RollupNodeView, depth: number): WorkRollupRow {
+  const isContainer = node.childIds.length > 0;
+  return {
+    id: node.id,
+    kind: node.kind,
+    status: node.workStatus,
+    title: node.title,
+    depth,
+    isContainer,
+    done: isContainer ? node.progress.done : undefined,
+    total: isContainer ? node.progress.total : undefined,
+    blocked: isContainer ? node.blockerSummary.blockedDescendantCount : undefined,
+    owner: node.reservation?.agentId,
+    labels: node.labels
+  };
+}
+
+const WORK_ROLLUP_COLUMNS: readonly BoundedTableColumn[] = [
+  { key: "kind", header: "kind" },
+  { key: "status", header: "status" },
+  { key: "title", header: "title", flex: true },
+  { key: "done", header: "done" },
+  { key: "blk", header: "blk" },
+  { key: "owner", header: "owner" }
+];
+
+function formatWorkRollup(result: WorkRollupResult, wide: boolean): string {
+  if (result.rows.length === 0) {
+    return "No work found for rollup\n";
+  }
+  return boundedTable(
+    result.rows.map((row) => ({
+      kind: `${"  ".repeat(row.depth)}${row.kind}`,
+      status: row.status ?? "",
+      title: row.title,
+      done: row.total !== undefined ? `${row.done}/${row.total}` : "-",
+      blk: row.isContainer ? String(row.blocked ?? 0) : "-",
+      owner: row.owner ?? "-"
+    })),
+    WORK_ROLLUP_COLUMNS,
+    { wide }
+  );
 }
