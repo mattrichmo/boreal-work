@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
 import type { ActorRef, WorkId } from "@boreal/core";
-import { FileBorealStore } from "@boreal/storage";
+import { FileBorealStore, ObjectDirBorealStore } from "@boreal/storage";
 import { createWorkItem } from "@boreal/work-engine";
 import type { DashboardGlobalPayload } from "../../apps/tui/src/loaders.js";
 import { globalOverviewBodyFromPayload, loadRepoRollup, loadRepoTaskDetail } from "../../apps/tui/src/loaders.js";
@@ -117,5 +117,19 @@ describe("repo route loaders: direct store read", () => {
 
     const missing = await loadRepoTaskDetail(rootDir, "bw_work_doesnotexist" as WorkId);
     expect(missing).toBeUndefined();
+  });
+
+  it("reads a real objects-v1 workspace (the CLI's default storage kind), not just the legacy file-v2 store", async () => {
+    const rootDir = await makeTempWorkspace();
+    const store = new ObjectDirBorealStore({ rootDir });
+    const task = createWorkItem({ title: "Object store task", kind: "task", actor, now: "2026-01-01T00:00:00.000Z" });
+    await store.write(async (writer) => {
+      await writer.putWorkItem(task);
+    });
+
+    const envelope = await loadRepoRollup(rootDir);
+    expect(envelope.warnings).toEqual([]);
+    expect(envelope.body.summary.tasks).toBe(1);
+    expect(envelope.body.flatRows.some((node) => node.id === task.meta.id)).toBe(true);
   });
 });
