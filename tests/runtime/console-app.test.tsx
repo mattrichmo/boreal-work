@@ -53,6 +53,9 @@ describe("console app runtime", () => {
     const html = renderConsoleHtml({ route: "/", data });
     expect(html).toContain("Boreal Global");
     expect(html).toContain('data-console-scope="global"');
+    expect(html).toContain("Global board");
+    expect(html).toContain("Inbox rail");
+    expect(html).toContain("Next rail");
   });
 
   it("provides fixture scenarios for stale, reservation, verification, and empty states", () => {
@@ -66,6 +69,33 @@ describe("console app runtime", () => {
     expect(reserved.registry.summary.activeReservationCount).toBe(1);
     expect(verification.work.summary.needsVerification).toBeGreaterThan(0);
     expect(empty.work.summary.total).toBe(0);
+  });
+
+  it("renders stale and missing global board lanes from fixture rollups", () => {
+    const data = createFixtureConsoleData({
+      workspaceRoot: "/workspace/boreal-work",
+      generatedAt: "2026-06-27T00:00:00.000Z",
+      scenario: "stale",
+      scope: "global"
+    });
+    const html = renderConsoleHtml({ route: "/", data });
+
+    expect(data.globalBoard.summary.missingLanes).toBe(1);
+    expect(data.globalBoard.summary.staleLanes).toBe(2);
+    expect(data.globalBoard.lanes.find((lane) => lane.projectId === "missing-work")?.columns.map((column) => column.id)).toEqual([
+      "draft",
+      "ready",
+      "in_progress",
+      "blocked",
+      "needs_verification",
+      "verified",
+      "closed"
+    ]);
+    expect(html).toContain("bw-global-board-lane--missing");
+    expect(html).toContain("bw-global-board-lane--stale");
+    expect(html).toContain("missing-work");
+    expect(html).toContain("missing project, last seen 2026-06-01T00:00:00.000Z");
+    expect(html).toContain("stale rollup from 2026-06-27T00:00:00.000Z");
   });
 
   it("loads live console data through the constrained CLI contract", async () => {
@@ -94,6 +124,24 @@ describe("console app runtime", () => {
     expect(data.globalQueues.summary.ready).toBeGreaterThan(1);
     expect(data.globalQueues.summary.blocked).toBeGreaterThan(0);
     expect(data.globalQueues.summary.needsVerification).toBeGreaterThan(0);
+    expect(data.globalBoard.summary).toMatchObject({
+      lanes: 2,
+      ready: 2,
+      blocked: 4,
+      needsVerification: 1,
+      next: 2
+    });
+    expect(data.globalBoard.rails.find((rail) => rail.id === "next")?.items.map((item) => item.projectName))
+      .toEqual(expect.arrayContaining(["boreal-work", "other-work"]));
+    expect(data.globalBoard.lanes.find((lane) => lane.projectId === "project_other_fixture")?.columns.map((column) => column.id)).toEqual([
+      "draft",
+      "ready",
+      "in_progress",
+      "blocked",
+      "needs_verification",
+      "verified",
+      "closed"
+    ]);
     expect(data.globalSearch.results[0]).toMatchObject({
       projectName: "boreal-work",
       sourceKind: "work"

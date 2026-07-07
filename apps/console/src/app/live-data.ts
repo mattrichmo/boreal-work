@@ -5,6 +5,7 @@ import { runBoundedProcess, type ProjectRegistryLifecycleState } from "@boreal/c
 import {
   buildDashboardHealthView,
   buildGlobalActivityView,
+  buildGlobalBoardView,
   buildGlobalHealthView,
   buildGlobalSearchView,
   buildGlobalSettingsView,
@@ -226,6 +227,22 @@ export async function loadLiveConsoleData(options: LoadLiveConsoleDataOptions): 
     registry: buildProjectRegistryView({
       generatedAt,
       entries: registryEntries
+    }),
+    globalBoard: buildGlobalBoardView({
+      generatedAt,
+      projects: projectOverviews.map((project) => ({
+        projectId: project.entry.id,
+        projectName: project.entry.name,
+        projectRoot: project.entry.projectRoot,
+        lifecycle: project.entry.lifecycle,
+        health: project.entry.health,
+        stale: project.entry.stale,
+        syncFreshness: project.entry.syncFreshness,
+        work: project.work,
+        generatedAt,
+        lastSeenAt: project.entry.lastSeenAt,
+        findingCount: project.entry.findings.length + project.locks.locks.filter((lock) => lock.status !== "clear").length
+      }))
     }),
     globalQueues: buildGlobalWorkQueuesView({
       generatedAt,
@@ -2477,7 +2494,7 @@ async function buildConsoleProjectOverviews(input: {
   readonly globalSearchQuery: string;
   readonly includeCurrentFallback?: boolean;
 }): Promise<readonly ConsoleProjectOverview[]> {
-  const registryRows = registryProjectRowsFromCli(input.registryList).filter((row) => row.lifecycle !== "archived" && row.lifecycle !== "paused");
+  const registryRows = registryProjectRowsFromCli(input.registryList);
   const registryFindings = registryFindingsByProject(input.registryDoctor);
   if (registryRows.length === 0 && input.includeCurrentFallback === false) {
     return [];
@@ -2502,6 +2519,9 @@ async function buildConsoleProjectOverviews(input: {
           registryRow,
           registryFindings: findings
         });
+      }
+      if (registryRow.lifecycle !== "linked") {
+        return inactiveRegisteredProjectOverview(registryRow, findings, input.generatedAt);
       }
       return loadRegisteredProjectOverview(input.runner, registryRow, findings, input.generatedAt, input.globalSearchQuery);
     })
@@ -2576,6 +2596,50 @@ async function loadRegisteredProjectOverview(
       locks: { generatedAt, ok: true, workspaceRoot: registryRow.projectRoot, locks: [] }
     };
   }
+}
+
+function inactiveRegisteredProjectOverview(
+  registryRow: RegistryProjectRow,
+  registryFindings: readonly DashboardFinding[],
+  generatedAt: string
+): ConsoleProjectOverview {
+  const finding: DashboardFinding = {
+    code: `console.registry_project_${registryRow.lifecycle}`,
+    title: `console.registry_project_${registryRow.lifecycle}`,
+    severity: registryRow.lifecycle === "missing" ? "error" : "warning",
+    status: registryRow.lifecycle === "missing" ? "failed" : "warning",
+    message: `Registry project is ${registryRow.lifecycle}; console board keeps the lane visible without loading workspace commands.`,
+    source: registryRow.projectRoot,
+    actions: []
+  };
+  const sync: SyncDashboardView = {
+    generatedAt,
+    ok: false,
+    workspaceRoot: registryRow.projectRoot,
+    vaultOk: false,
+    ledgersOk: false,
+    searchIndexOk: false,
+    gitOk: false,
+    recommendedActions: [],
+    findings: []
+  };
+  const entry = registryEntryFromMetrics({
+    registryRow,
+    generatedAt,
+    work: [],
+    sync,
+    findings: [...registryFindings, finding],
+    activeReservationCount: 0
+  });
+  return {
+    entry,
+    settings: settingsProjectFromRegistryRow(registryRow, entry),
+    work: [],
+    searchResults: [],
+    activityRows: [],
+    sync,
+    locks: { generatedAt, ok: true, workspaceRoot: registryRow.projectRoot, locks: [] }
+  };
 }
 
 function currentProjectOverview(input: {

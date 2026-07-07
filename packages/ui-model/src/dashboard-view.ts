@@ -1,4 +1,4 @@
-import { isBorealReferenceUri, type ActorKind, type WorkItem } from "@boreal/core";
+import { isBorealReferenceUri, type ActorKind, type ProjectRegistryLifecycleState, type WorkItem } from "@boreal/core";
 
 import type {
   DashboardAction,
@@ -72,6 +72,121 @@ export interface GlobalWorkQueuesView {
   readonly generatedAt?: string;
   readonly queues: readonly GlobalWorkQueueView[];
   readonly summary: GlobalWorkQueueSummary;
+}
+
+export type GlobalBoardColumnId =
+  | "draft"
+  | "ready"
+  | "in_progress"
+  | "blocked"
+  | "needs_verification"
+  | "verified"
+  | "closed";
+
+export type GlobalBoardLaneKind = "project" | "initiative";
+export type GlobalBoardRailId = "inbox" | "next";
+
+export interface GlobalBoardProject {
+  readonly projectId: string;
+  readonly projectName: string;
+  readonly projectRoot: string;
+  readonly lifecycle: ProjectRegistryLifecycleState;
+  readonly health: ProjectHealthState;
+  readonly stale: boolean;
+  readonly syncFreshness: ProjectSyncFreshness;
+  readonly work: readonly WorkItemView[];
+  readonly generatedAt?: string;
+  readonly lastSeenAt?: string;
+  readonly findingCount?: number;
+}
+
+export interface GlobalBoardWorkItem {
+  readonly id: string;
+  readonly projectId: string;
+  readonly projectName: string;
+  readonly projectRoot: string;
+  readonly work: WorkItemView;
+  readonly status: WorkItem["status"];
+  readonly columnId: GlobalBoardColumnId;
+  readonly hasBorealReferences: boolean;
+  readonly borealReferenceCount: number;
+  readonly claimCommand?: string;
+}
+
+export interface GlobalBoardColumnView {
+  readonly id: GlobalBoardColumnId;
+  readonly title: string;
+  readonly items: readonly GlobalBoardWorkItem[];
+  readonly count: number;
+}
+
+export interface GlobalBoardLaneView {
+  readonly id: string;
+  readonly kind: GlobalBoardLaneKind;
+  readonly projectId: string;
+  readonly projectName: string;
+  readonly projectRoot: string;
+  readonly lifecycle: ProjectRegistryLifecycleState;
+  readonly health: ProjectHealthState;
+  readonly stale: boolean;
+  readonly syncFreshness: ProjectSyncFreshness;
+  readonly generatedAt?: string;
+  readonly lastSeenAt?: string;
+  readonly stalenessLabel: string;
+  readonly columns: readonly GlobalBoardColumnView[];
+  readonly totalWork: number;
+  readonly openWork: number;
+  readonly blockedWork: number;
+  readonly readyWork: number;
+  readonly findingCount: number;
+}
+
+export interface GlobalBoardRailItem {
+  readonly id: string;
+  readonly projectId: string;
+  readonly projectName: string;
+  readonly projectRoot: string;
+  readonly title: string;
+  readonly detail: string;
+  readonly status: string;
+  readonly tone: "neutral" | "accent" | "success" | "warning" | "danger";
+  readonly workId?: string;
+  readonly command?: string;
+}
+
+export interface GlobalBoardRailView {
+  readonly id: GlobalBoardRailId;
+  readonly title: string;
+  readonly items: readonly GlobalBoardRailItem[];
+  readonly count: number;
+  readonly emptyLabel: string;
+}
+
+export interface GlobalBoardSummary {
+  readonly lanes: number;
+  readonly projects: number;
+  readonly initiatives: number;
+  readonly totalWork: number;
+  readonly openWork: number;
+  readonly staleLanes: number;
+  readonly pausedLanes: number;
+  readonly missingLanes: number;
+  readonly draft: number;
+  readonly ready: number;
+  readonly inProgress: number;
+  readonly blocked: number;
+  readonly needsVerification: number;
+  readonly verified: number;
+  readonly closed: number;
+  readonly inbox: number;
+  readonly next: number;
+}
+
+export interface GlobalBoardView {
+  readonly generatedAt?: string;
+  readonly lanes: readonly GlobalBoardLaneView[];
+  readonly rails: readonly GlobalBoardRailView[];
+  readonly summary: GlobalBoardSummary;
 }
 
 export interface GlobalSearchProject {
@@ -428,6 +543,92 @@ export function buildGlobalWorkQueuesView(input: {
   };
 }
 
+export function buildGlobalBoardView(input: {
+  readonly projects: readonly GlobalBoardProject[];
+  readonly generatedAt?: string;
+  readonly claimPurpose?: string;
+  readonly railLimit?: number;
+}): GlobalBoardView {
+  const lanes = input.projects
+    .map((project): GlobalBoardLaneView => {
+      const items = sortWork(project.work).map((work): GlobalBoardWorkItem => {
+        const borealReferenceCount = borealSourceRefCount(work.sourceRefs ?? []);
+        const columnId = globalBoardColumnId(work.status);
+        return {
+          id: `${project.projectId}:${work.id}`,
+          projectId: project.projectId,
+          projectName: project.projectName,
+          projectRoot: project.projectRoot,
+          work,
+          status: work.status,
+          columnId,
+          hasBorealReferences: borealReferenceCount > 0,
+          borealReferenceCount,
+          claimCommand: columnId === "ready"
+            ? buildClaimCommand(project.projectRoot, work.id, input.claimPurpose ?? "Claim from Boreal Console")
+            : undefined
+        };
+      });
+      const columns = GLOBAL_BOARD_COLUMN_DEFINITIONS.map((definition) => {
+        const columnItems = items.filter((item) => item.columnId === definition.id);
+        return {
+          id: definition.id,
+          title: definition.title,
+          items: columnItems,
+          count: columnItems.length
+        };
+      });
+      return {
+        id: project.projectId,
+        kind: "project",
+        projectId: project.projectId,
+        projectName: project.projectName,
+        projectRoot: project.projectRoot,
+        lifecycle: project.lifecycle,
+        health: project.health,
+        stale: project.stale,
+        syncFreshness: project.syncFreshness,
+        generatedAt: project.generatedAt ?? input.generatedAt,
+        lastSeenAt: project.lastSeenAt,
+        stalenessLabel: globalBoardStalenessLabel(project, input.generatedAt),
+        columns,
+        totalWork: items.length,
+        openWork: items.filter((item) => isOpenGlobalBoardItem(item)).length,
+        blockedWork: items.filter((item) => item.columnId === "blocked").length,
+        readyWork: items.filter((item) => item.columnId === "ready").length,
+        findingCount: project.findingCount ?? 0
+      };
+    })
+    .sort(compareGlobalBoardLanes);
+  const flatItems = lanes.flatMap((lane) => lane.columns.flatMap((column) => column.items));
+  const rails = buildGlobalBoardRails(lanes, flatItems, input.railLimit ?? 8);
+
+  return {
+    generatedAt: input.generatedAt,
+    lanes,
+    rails,
+    summary: {
+      lanes: lanes.length,
+      projects: lanes.filter((lane) => lane.kind === "project").length,
+      initiatives: lanes.filter((lane) => lane.kind === "initiative").length,
+      totalWork: flatItems.length,
+      openWork: flatItems.filter((item) => isOpenGlobalBoardItem(item)).length,
+      staleLanes: lanes.filter((lane) => lane.stale || lane.syncFreshness === "stale").length,
+      pausedLanes: lanes.filter((lane) => lane.lifecycle === "paused").length,
+      missingLanes: lanes.filter((lane) => lane.lifecycle === "missing").length,
+      draft: countBoardColumn(flatItems, "draft"),
+      ready: countBoardColumn(flatItems, "ready"),
+      inProgress: countBoardColumn(flatItems, "in_progress"),
+      blocked: countBoardColumn(flatItems, "blocked"),
+      needsVerification: countBoardColumn(flatItems, "needs_verification"),
+      verified: countBoardColumn(flatItems, "verified"),
+      closed: countBoardColumn(flatItems, "closed"),
+      inbox: rails.find((rail) => rail.id === "inbox")?.count ?? 0,
+      next: rails.find((rail) => rail.id === "next")?.count ?? 0
+    }
+  };
+}
+
 function borealSourceRefCount(sourceRefs: readonly { readonly uri: string }[]): number {
   return sourceRefs.filter((sourceRef) => isBorealReferenceUri(sourceRef.uri)).length;
 }
@@ -705,6 +906,172 @@ function priorityRank(priority: WorkItem["priority"]): number {
     case "low":
       return 1;
   }
+}
+
+function globalBoardColumnId(status: WorkItem["status"]): GlobalBoardColumnId {
+  switch (status) {
+    case "draft":
+      return "draft";
+    case "ready":
+      return "ready";
+    case "reserved":
+    case "in_progress":
+      return "in_progress";
+    case "blocked":
+      return "blocked";
+    case "needs_verification":
+      return "needs_verification";
+    case "verified":
+      return "verified";
+    case "closed":
+    case "cancelled":
+      return "closed";
+  }
+}
+
+function isOpenGlobalBoardItem(item: GlobalBoardWorkItem): boolean {
+  return item.columnId !== "closed" && item.columnId !== "verified";
+}
+
+function countBoardColumn(items: readonly GlobalBoardWorkItem[], columnId: GlobalBoardColumnId): number {
+  return items.filter((item) => item.columnId === columnId).length;
+}
+
+function buildGlobalBoardRails(
+  lanes: readonly GlobalBoardLaneView[],
+  items: readonly GlobalBoardWorkItem[],
+  limit: number
+): readonly GlobalBoardRailView[] {
+  const inboxItems = [
+    ...lanes.flatMap((lane) => globalBoardLaneAlert(lane)),
+    ...items
+      .filter((item) => item.columnId === "draft" || item.columnId === "blocked")
+      .sort(compareGlobalBoardItems)
+      .map((item) => globalBoardRailItemFromWork(item))
+  ];
+  const nextItems = items
+    .filter((item) => item.columnId === "ready")
+    .sort(compareGlobalBoardItems)
+    .map((item) => globalBoardRailItemFromWork(item));
+  return [
+    {
+      id: "inbox",
+      title: "Inbox rail",
+      items: inboxItems.slice(0, limit),
+      count: inboxItems.length,
+      emptyLabel: "No stale, missing, draft, or blocked project rows."
+    },
+    {
+      id: "next",
+      title: "Next rail",
+      items: nextItems.slice(0, limit),
+      count: nextItems.length,
+      emptyLabel: "No ready project work."
+    }
+  ];
+}
+
+function globalBoardLaneAlert(lane: GlobalBoardLaneView): readonly GlobalBoardRailItem[] {
+  if (lane.lifecycle === "missing") {
+    return [globalBoardProjectRailItem(lane, "Project missing", "missing", "danger")];
+  }
+  if (lane.lifecycle === "paused" || lane.lifecycle === "archived") {
+    return [globalBoardProjectRailItem(lane, `Project ${lane.lifecycle}`, lane.lifecycle, "warning")];
+  }
+  if (lane.stale || lane.syncFreshness === "stale") {
+    return [globalBoardProjectRailItem(lane, "Project rollup stale", "stale", "warning")];
+  }
+  return [];
+}
+
+function globalBoardProjectRailItem(
+  lane: GlobalBoardLaneView,
+  title: string,
+  status: string,
+  tone: GlobalBoardRailItem["tone"]
+): GlobalBoardRailItem {
+  return {
+    id: `${lane.projectId}:${status}`,
+    projectId: lane.projectId,
+    projectName: lane.projectName,
+    projectRoot: lane.projectRoot,
+    title,
+    detail: lane.stalenessLabel,
+    status,
+    tone
+  };
+}
+
+function globalBoardRailItemFromWork(item: GlobalBoardWorkItem): GlobalBoardRailItem {
+  return {
+    id: item.id,
+    projectId: item.projectId,
+    projectName: item.projectName,
+    projectRoot: item.projectRoot,
+    title: item.work.title,
+    detail: item.work.id,
+    status: item.work.status,
+    tone: globalBoardRailTone(item.columnId),
+    workId: item.work.id,
+    command: item.claimCommand
+  };
+}
+
+function globalBoardRailTone(columnId: GlobalBoardColumnId): GlobalBoardRailItem["tone"] {
+  switch (columnId) {
+    case "ready":
+    case "verified":
+      return "success";
+    case "blocked":
+    case "needs_verification":
+      return "warning";
+    case "in_progress":
+      return "accent";
+    case "closed":
+      return "neutral";
+    case "draft":
+      return "warning";
+  }
+}
+
+function globalBoardStalenessLabel(project: GlobalBoardProject, generatedAt: string | undefined): string {
+  const stamp = project.lastSeenAt ?? project.generatedAt ?? generatedAt;
+  if (project.lifecycle === "missing") {
+    return stamp ? `missing project, last seen ${stamp}` : "missing project";
+  }
+  if (project.stale || project.syncFreshness === "stale") {
+    return stamp ? `stale rollup from ${stamp}` : "stale rollup";
+  }
+  return stamp ? `rollup from ${stamp}` : "rollup current";
+}
+
+function compareGlobalBoardLanes(left: GlobalBoardLaneView, right: GlobalBoardLaneView): number {
+  return (
+    globalBoardLifecycleRank(right.lifecycle) - globalBoardLifecycleRank(left.lifecycle) ||
+    Number(right.stale || right.syncFreshness === "stale") - Number(left.stale || left.syncFreshness === "stale") ||
+    left.projectName.localeCompare(right.projectName)
+  );
+}
+
+function globalBoardLifecycleRank(lifecycle: ProjectRegistryLifecycleState): number {
+  switch (lifecycle) {
+    case "missing":
+      return 4;
+    case "paused":
+      return 3;
+    case "archived":
+      return 2;
+    case "linked":
+      return 1;
+  }
+}
+
+function compareGlobalBoardItems(left: GlobalBoardWorkItem, right: GlobalBoardWorkItem): number {
+  return (
+    left.projectName.localeCompare(right.projectName) ||
+    priorityRank(right.work.priority) - priorityRank(left.work.priority) ||
+    left.work.title.localeCompare(right.work.title)
+  );
 }
 
 function compareGlobalQueueItems(left: GlobalWorkQueueItem, right: GlobalWorkQueueItem): number {
@@ -995,6 +1362,19 @@ const GLOBAL_WORK_QUEUE_DEFINITIONS: readonly {
   { id: "ready", title: "Ready to claim", status: "ready" },
   { id: "blocked", title: "Blocked", status: "blocked" },
   { id: "needs_verification", title: "Needs verification", status: "needs_verification" }
+];
+
+const GLOBAL_BOARD_COLUMN_DEFINITIONS: readonly {
+  readonly id: GlobalBoardColumnId;
+  readonly title: string;
+}[] = [
+  { id: "draft", title: "Draft" },
+  { id: "ready", title: "Ready" },
+  { id: "in_progress", title: "In Progress" },
+  { id: "blocked", title: "Blocked" },
+  { id: "needs_verification", title: "Needs Verification" },
+  { id: "verified", title: "Verified" },
+  { id: "closed", title: "Closed" }
 ];
 
 const GLOBAL_HEALTH_CATEGORY_DEFINITIONS: readonly {

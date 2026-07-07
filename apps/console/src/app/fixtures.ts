@@ -3,6 +3,7 @@ import { basename } from "node:path";
 import {
   buildDashboardHealthView,
   buildGlobalActivityView,
+  buildGlobalBoardView,
   buildGlobalHealthView,
   buildGlobalSearchView,
   buildGlobalSettingsView,
@@ -86,6 +87,25 @@ export function createFixtureConsoleData(input: {
     findings: healthFindings,
     lastSeenAt: generatedAt
   };
+  const missingRegistryEntry = stale ? {
+    id: "missing-work",
+    name: "missing-work",
+    lifecycle: "missing" as const,
+    projectRoot: "/workspace/missing-work",
+    memoryRoot: "/workspace/missing-work/memory",
+    memoryLayout: "in-repo" as const,
+    memoryGitMode: "separate" as const,
+    health: "missing" as const,
+    stale: true,
+    syncFreshness: "stale" as const,
+    openWorkCount: 0,
+    readyWorkCount: 0,
+    blockedWorkCount: 0,
+    activeReservationCount: 0,
+    findings: [],
+    lastSeenAt: "2026-06-01T00:00:00.000Z"
+  } : undefined;
+  const registryEntries = [registryEntry, ...(missingRegistryEntry ? [missingRegistryEntry] : [])];
 
   return {
     workspace: {
@@ -101,7 +121,23 @@ export function createFixtureConsoleData(input: {
     routes: routesForScope(scope),
     registry: buildProjectRegistryView({
       generatedAt,
-      entries: [registryEntry]
+      entries: registryEntries
+    }),
+    globalBoard: buildGlobalBoardView({
+      generatedAt,
+      projects: registryEntries.map((entry) => ({
+        projectId: entry.id,
+        projectName: entry.name,
+        projectRoot: entry.projectRoot,
+        lifecycle: entry.lifecycle,
+        health: entry.health,
+        stale: entry.stale,
+        syncFreshness: entry.syncFreshness,
+        work: entry.id === registryEntry.id ? sprintWork : [],
+        generatedAt,
+        lastSeenAt: entry.lastSeenAt,
+        findingCount: entry.findings.length
+      }))
     }),
     globalQueues: buildGlobalWorkQueuesView({
       generatedAt,
@@ -146,24 +182,22 @@ export function createFixtureConsoleData(input: {
     }),
     globalHealth: buildGlobalHealthView({
       generatedAt,
-      projects: [
-        {
-          projectId: registryEntry.id,
-          projectName: registryEntry.name,
-          projectRoot: registryEntry.projectRoot,
-          memoryRoot: registryEntry.memoryRoot,
-          health: registryEntry.health,
-          stale: registryEntry.stale,
-          syncFreshness: registryEntry.syncFreshness,
-          syncOk: sync.ok,
-          vaultOk: sync.vaultOk,
-          ledgersOk: sync.ledgersOk,
-          searchIndexOk: sync.searchIndexOk,
-          gitOk: sync.gitOk,
-          findings: registryEntry.findings,
-          locks: locks.locks
-        }
-      ]
+      projects: registryEntries.map((entry) => ({
+        projectId: entry.id,
+        projectName: entry.name,
+        projectRoot: entry.projectRoot,
+        memoryRoot: entry.memoryRoot,
+        health: entry.health,
+        stale: entry.stale,
+        syncFreshness: entry.syncFreshness,
+        syncOk: entry.id === registryEntry.id ? sync.ok : false,
+        vaultOk: entry.id === registryEntry.id ? sync.vaultOk : false,
+        ledgersOk: entry.id === registryEntry.id ? sync.ledgersOk : false,
+        searchIndexOk: entry.id === registryEntry.id ? sync.searchIndexOk : false,
+        gitOk: entry.id === registryEntry.id ? sync.gitOk : false,
+        findings: entry.findings,
+        locks: entry.id === registryEntry.id ? locks.locks : []
+      }))
     }),
     globalSettings: buildGlobalSettingsView({
       generatedAt,

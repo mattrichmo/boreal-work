@@ -9,6 +9,7 @@ import {
   ClaimsTablePanel,
   DashboardHealthPanel,
   DirectiveSummaryPanel,
+  GlobalBoard,
   GlobalDriftPanel,
   GlobalHealthSummaryPanel,
   GlobalOverviewMetrics,
@@ -127,6 +128,7 @@ function OverviewPage({ data }: { readonly data: ConsoleDataSet }) {
         {hasProjects ? (
           <>
             <GlobalOverviewMetrics view={data.registry} />
+            <GlobalBoard view={data.globalBoard} />
             <BucketOverviewGrid view={data.registry} />
             <GlobalWorkQueues view={data.globalQueues} />
             <GlobalSearchPanel view={data.globalSearch} />

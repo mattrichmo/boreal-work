@@ -1,6 +1,7 @@
 import type {
   DashboardHealthView,
   GlobalActivityView,
+  GlobalBoardView,
   GlobalHealthView,
   GlobalSearchView,
   GlobalSettingsView,
@@ -39,6 +40,7 @@ export interface ConsoleDataSet {
   readonly workspace: ConsoleWorkspaceState;
   readonly routes: readonly ConsoleRoute[];
   readonly registry: ProjectRegistryView;
+  readonly globalBoard: GlobalBoardView;
   readonly globalQueues: GlobalWorkQueuesView;
   readonly globalSearch: GlobalSearchView;
   readonly globalActivity: GlobalActivityView;

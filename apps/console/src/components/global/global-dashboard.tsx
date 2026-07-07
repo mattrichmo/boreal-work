@@ -1,6 +1,9 @@
 import type {
   GlobalActivityActorKind,
   GlobalActivityView,
+  GlobalBoardColumnId,
+  GlobalBoardRailId,
+  GlobalBoardView,
   GlobalHealthAction,
   GlobalHealthCategory,
   GlobalHealthView,
@@ -15,7 +18,7 @@ import type {
 import type { ReactNode } from "react";
 
 import { Button, Card, FieldLabel, MetricCard, Notice, TextInput } from "../foundation/index.js";
-import { Badge, type Tone } from "../foundation/index.js";
+import { Badge, cx, type Tone } from "../foundation/index.js";
 import { SprintWorkTable } from "../sprint/index.js";
 
 export function AppShell({ sidebar, children }: { readonly sidebar: ReactNode; readonly children: ReactNode }) {
@@ -97,6 +100,117 @@ export function GlobalReadyQueue({ view }: { readonly view: WorkDashboardView })
   return (
     <Card title="Ready queue">
       {ready && ready.items.length > 0 ? <SprintWorkTable items={ready.items} /> : <Notice tone="success">No ready work.</Notice>}
+    </Card>
+  );
+}
+
+export function GlobalBoard({ view }: { readonly view: GlobalBoardView }) {
+  return (
+    <Card
+      title="Global board"
+      eyebrow={`${view.summary.lanes} lanes / ${view.summary.totalWork} work rows`}
+      actions={
+        <div className="bw-global-board__status">
+          <Badge tone={view.summary.missingLanes > 0 ? "danger" : "success"}>{view.summary.missingLanes} missing</Badge>
+          <Badge tone={view.summary.staleLanes > 0 ? "warning" : "success"}>{view.summary.staleLanes} stale</Badge>
+        </div>
+      }
+    >
+      <div className="bw-global-board">
+        <div className="bw-global-board__rails">
+          {view.rails.map((rail) => (
+            <section key={rail.id} className="bw-global-board-rail" aria-label={rail.title}>
+              <header className="bw-global-board-rail__header">
+                <strong>{rail.title}</strong>
+                <Badge tone={railTone(rail.id)}>{rail.count}</Badge>
+              </header>
+              {rail.items.length > 0 ? (
+                <div className="bw-global-board-rail__items">
+                  {rail.items.map((item) => (
+                    <article key={item.id} className="bw-global-board-rail__item">
+                      <div>
+                        <strong>{item.title}</strong>
+                        <span>{item.detail}</span>
+                      </div>
+                      <div className="bw-global-board-rail__meta">
+                        <Badge>{item.projectName}</Badge>
+                        <Badge tone={item.tone}>{item.status}</Badge>
+                      </div>
+                      {item.command ? <code>{item.command}</code> : null}
+                    </article>
+                  ))}
+                </div>
+              ) : (
+                <Notice tone="success">{rail.emptyLabel}</Notice>
+              )}
+            </section>
+          ))}
+        </div>
+
+        <div className="bw-global-board__lanes">
+          {view.lanes.map((lane) => (
+            <article
+              key={lane.id}
+              className={cx(
+                "bw-global-board-lane",
+                `bw-global-board-lane--${lane.lifecycle}`,
+                (lane.stale || lane.syncFreshness === "stale") && "bw-global-board-lane--stale"
+              )}
+            >
+              <header className="bw-global-board-lane__header">
+                <div className="bw-global-board-lane__identity">
+                  <strong>{lane.projectName}</strong>
+                  <code>{lane.projectRoot}</code>
+                </div>
+                <div className="bw-global-board-lane__badges">
+                  <Badge>{lane.kind}</Badge>
+                  <Badge tone={lifecycleTone(lane.lifecycle)}>{lane.lifecycle}</Badge>
+                  <Badge tone={healthTone(lane.health)}>{lane.health}</Badge>
+                  <Badge tone={lane.stale || lane.syncFreshness === "stale" ? "warning" : "success"}>{lane.stalenessLabel}</Badge>
+                  {lane.findingCount > 0 ? <Badge tone="warning">{lane.findingCount} findings</Badge> : null}
+                </div>
+              </header>
+              <div className="bw-global-board-lane__metrics">
+                <MetricCard label="Open" value={lane.openWork} />
+                <MetricCard label="Ready" value={lane.readyWork} />
+                <MetricCard label="Blocked" value={lane.blockedWork} tone={lane.blockedWork > 0 ? "warning" : "success"} />
+              </div>
+              <div className="bw-global-board-lane__columns">
+                {lane.columns.map((column) => (
+                  <section key={column.id} className={cx("bw-global-board-column", `bw-global-board-column--${column.id}`)} aria-label={column.title}>
+                    <header className="bw-global-board-column__header">
+                      <span>{column.title}</span>
+                      <Badge tone={boardColumnTone(column.id)}>{column.count}</Badge>
+                    </header>
+                    {column.items.length > 0 ? (
+                      <div className="bw-global-board-column__items">
+                        {column.items.map((item) => (
+                          <article key={item.id} className={cx("bw-global-board-card", `bw-global-board-card--${item.columnId}`)}>
+                            <div className="bw-global-board-card__main">
+                              <strong>{item.work.title}</strong>
+                              <span>{item.work.id}</span>
+                            </div>
+                            <div className="bw-global-board-card__meta">
+                              <Badge tone={boardColumnTone(item.columnId)}>{item.work.status}</Badge>
+                              <Badge>{item.work.priority}</Badge>
+                              {item.work.activeBlockerIds.length > 0 ? <span>{item.work.activeBlockerIds.length} blockers</span> : null}
+                              {item.hasBorealReferences ? <Badge tone="accent">{item.borealReferenceCount} refs</Badge> : null}
+                              <GlobalDirectiveBadges work={item.work} />
+                            </div>
+                            {item.claimCommand ? <code>{item.claimCommand}</code> : null}
+                          </article>
+                        ))}
+                      </div>
+                    ) : (
+                      <span className="bw-global-board-column__empty">No rows</span>
+                    )}
+                  </section>
+                ))}
+              </div>
+            </article>
+          ))}
+        </div>
+      </div>
     </Card>
   );
 }
@@ -416,6 +530,33 @@ function healthTone(health: string): Tone {
     return "danger";
   }
   return "warning";
+}
+
+function lifecycleTone(lifecycle: string): Tone {
+  if (lifecycle === "linked") {
+    return "success";
+  }
+  if (lifecycle === "missing") {
+    return "danger";
+  }
+  return "warning";
+}
+
+function boardColumnTone(columnId: GlobalBoardColumnId): Tone {
+  if (columnId === "ready" || columnId === "verified") {
+    return "success";
+  }
+  if (columnId === "blocked" || columnId === "needs_verification" || columnId === "draft") {
+    return "warning";
+  }
+  if (columnId === "in_progress") {
+    return "accent";
+  }
+  return "neutral";
+}
+
+function railTone(railId: GlobalBoardRailId): Tone {
+  return railId === "inbox" ? "warning" : "success";
 }
 
 function queueTone(queueId: GlobalWorkQueueId): Tone {

@@ -1,16 +1,18 @@
 import { renderToStaticMarkup } from "react-dom/server";
-import type {
-  DashboardHealthView,
-  GlobalActivityView,
-  GlobalHealthView,
-  GlobalSearchView,
-  GlobalWorkQueuesView,
-  LockDashboardView,
-  ProjectRegistryView,
-  SprintBoardView,
-  SyncDashboardView,
-  WorkDirectiveSummaryView,
-  WorkItemView
+import {
+  buildGlobalBoardView,
+  type DashboardHealthView,
+  type GlobalActivityView,
+  type GlobalBoardView,
+  type GlobalHealthView,
+  type GlobalSearchView,
+  type GlobalWorkQueuesView,
+  type LockDashboardView,
+  type ProjectRegistryView,
+  type SprintBoardView,
+  type SyncDashboardView,
+  type WorkDirectiveSummaryView,
+  type WorkItemView
 } from "@boreal/ui-model";
 
 import {
@@ -22,6 +24,7 @@ import {
   DiffViewer,
   ActorActivityPanel,
   GlobalDriftPanel,
+  GlobalBoard,
   GlobalHealthSummaryPanel,
   GlobalOverviewMetrics,
   GlobalSearchPanel,
@@ -94,6 +97,7 @@ export function ConsoleGallery({ viewport = "desktop" }: { readonly viewport?: C
       <section data-gallery-family="global-dashboard">
         <h2>Global Dashboard</h2>
         <GlobalOverviewMetrics view={registry} />
+        <GlobalBoard view={globalBoardView(work)} />
         <GlobalWorkQueues view={globalQueuesView(work)} />
         <GlobalSearchPanel view={globalSearchView(work)} />
         <GlobalHealthSummaryPanel view={globalHealth} />
@@ -364,6 +368,41 @@ function globalQueuesView(work: WorkItemView): GlobalWorkQueuesView {
       needsVerification: 0
     }
   };
+}
+
+function globalBoardView(work: WorkItemView): GlobalBoardView {
+  return buildGlobalBoardView({
+    generatedAt: "2026-06-27T00:00:00.000Z",
+    projects: [
+      {
+        projectId: "project-gallery",
+        projectName: "Gallery Project",
+        projectRoot: "/repo/gallery",
+        lifecycle: "linked",
+        health: "ok",
+        stale: false,
+        syncFreshness: "fresh",
+        work: [
+          work,
+          workItem({ id: "bw_work_gallery_blocked", title: "Resolve gallery blocker", status: "blocked" }),
+          workItem({ id: "bw_work_gallery_verified", title: "Verify gallery snapshot", status: "verified" })
+        ],
+        lastSeenAt: "2026-06-27T00:00:00.000Z"
+      },
+      {
+        projectId: "project-gallery-paused",
+        projectName: "Paused Gallery",
+        projectRoot: "/repo/paused-gallery",
+        lifecycle: "paused",
+        health: "warning",
+        stale: true,
+        syncFreshness: "stale",
+        work: [],
+        lastSeenAt: "2026-06-20T00:00:00.000Z",
+        findingCount: 1
+      }
+    ]
+  });
 }
 
 function globalSearchView(work: WorkItemView): GlobalSearchView {
