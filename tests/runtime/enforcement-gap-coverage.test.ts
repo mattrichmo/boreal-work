@@ -195,6 +195,11 @@ function gapCoverageScenarios(): readonly GapCoverageScenario[] {
       collectGaps: memoryDirectiveTriggerGaps
     },
     {
+      code: "inbox.triage.aging",
+      name: "global dashboard emits an aging raw inbox advisory trigger",
+      collectGaps: inboxTriageAgingTriggerGaps
+    },
+    {
       code: "handoff.session-summary.required",
       name: "directive compiler emits session handoff trigger",
       collectGaps: handoffDirectiveTriggerGaps
@@ -522,6 +527,26 @@ async function recoveryDirectiveTriggerGaps(): Promise<readonly EnforcementGap[]
 
 async function memoryDirectiveTriggerGaps(): Promise<readonly EnforcementGap[]> {
   return [contractGap("memory.reconcile-source.required")];
+}
+
+async function inboxTriageAgingTriggerGaps(): Promise<readonly EnforcementGap[]> {
+  return [
+    {
+      code: "inbox.triage.aging",
+      subjectType: "workspace",
+      subjectId: "/tmp/boreal-global",
+      targetId: "bw_source_aging0001",
+      data: {
+        rawSourceIds: ["bw_source_aging0001"],
+        rawSourceCount: 1,
+        oldestRawSourceId: "bw_source_aging0001",
+        oldestAgeDays: 8,
+        thresholdDays: 7,
+        command: "bwrk global raw triage <action> bw_source_aging0001 --json",
+        recommendedCommands: ["bwrk global raw triage <action> bw_source_aging0001 --json"]
+      }
+    }
+  ];
 }
 
 async function handoffDirectiveTriggerGaps(): Promise<readonly EnforcementGap[]> {

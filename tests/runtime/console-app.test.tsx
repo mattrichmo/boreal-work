@@ -616,7 +616,7 @@ function agentDirectivesFor(subjectId: string) {
   ];
 }
 
-function rawRow(id: string, title: string, kind: string, uri: string, processingStatus: "queued" | "linked") {
+function rawRow(id: string, title: string, kind: string, uri: string, processingStatus: "queued" | "linked" | "routed" | "kept_global" | "dropped") {
   return {
     id,
     title,

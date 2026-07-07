@@ -12,6 +12,7 @@ import {
   buildSprintBoardView,
   buildWorkDashboardView,
   type DashboardFinding,
+  type GlobalBoardInboxSourceItem,
   type LockDashboardView,
   type SyncDashboardView,
   type WorkDirectiveSummaryView,
@@ -106,6 +107,7 @@ export function createFixtureConsoleData(input: {
     lastSeenAt: "2026-06-01T00:00:00.000Z"
   } : undefined;
   const registryEntries = [registryEntry, ...(missingRegistryEntry ? [missingRegistryEntry] : [])];
+  const rawInbox = rawInboxView(generatedAt);
 
   return {
     workspace: {
@@ -125,6 +127,7 @@ export function createFixtureConsoleData(input: {
     }),
     globalBoard: buildGlobalBoardView({
       generatedAt,
+      inboxItems: rawInboxRailItems(rawInbox, input.workspaceRoot),
       projects: registryEntries.map((entry) => ({
         projectId: entry.id,
         projectName: entry.name,
@@ -225,7 +228,7 @@ export function createFixtureConsoleData(input: {
     health,
     sync,
     locks,
-    rawInbox: rawInboxView(generatedAt),
+    rawInbox,
     wikiExplorer: wikiExplorerView(generatedAt, `${input.workspaceRoot}/memory`),
     memoryActions: createMemoryDashboardActions(generatedAt),
     reports: reportsView(generatedAt, stale),
@@ -508,11 +511,30 @@ function rawInboxView(generatedAt: string): RawInboxView {
       total: rows.length,
       queued: rows.filter((row) => row.processingStatus === "queued").length,
       linked: rows.filter((row) => row.processingStatus === "linked").length,
+      routed: rows.filter((row) => row.processingStatus === "routed").length,
+      keptGlobal: rows.filter((row) => row.processingStatus === "kept_global").length,
+      dropped: rows.filter((row) => row.processingStatus === "dropped").length,
       missingPreview: 0,
       unsupportedPreview: 0
     },
     warnings: []
   };
+}
+
+function rawInboxRailItems(rawInbox: RawInboxView, workspaceRoot: string): readonly GlobalBoardInboxSourceItem[] {
+  return rawInbox.rows
+    .filter((row) => row.processingStatus === "queued")
+    .map((row) => ({
+      id: row.id,
+      title: row.title,
+      detail: row.summary ?? row.id,
+      status: "queued raw source",
+      projectId: "global",
+      projectName: "Global workspace",
+      projectRoot: workspaceRoot,
+      command: `bwrk global raw triage <action> ${row.id} --json`,
+      tone: "warning"
+    }));
 }
 
 function wikiExplorerView(generatedAt: string, memoryRoot: string): WikiExplorerView {
@@ -1096,7 +1118,7 @@ function rawRow(input: {
   readonly kind: string;
   readonly uri?: string;
   readonly summary?: string;
-  readonly processingStatus: "queued" | "linked";
+  readonly processingStatus: RawSourceRowView["processingStatus"];
   readonly linkedPageCount: number;
 }): RawSourceRowView {
   return {

@@ -30,6 +30,7 @@
         "git.checkpoint.required",
         "doctor.recovery.required",
         "memory.reconcile-source.required",
+        "inbox.triage.aging",
         "handoff.session-summary.required",
         "container.descendant-closeout.required",
         "phase.close-rollup.required",
@@ -69,7 +70,18 @@
           "items": { "type": "string", "pattern": "^bw_evidence_[a-f0-9]{12,64}$" },
           "uniqueItems": true
         },
-        "reason": { "type": "string", "minLength": 1 }
+        "reason": { "type": "string", "minLength": 1 },
+        "rawSourceIds": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 },
+          "uniqueItems": true
+        },
+        "rawSourceCount": { "type": "integer", "minimum": 0 },
+        "oldestRawSourceId": { "type": "string", "minLength": 1 },
+        "oldestAgeDays": { "type": "integer", "minimum": 0 },
+        "thresholdDays": { "type": "integer", "minimum": 0 },
+        "command": { "type": "string", "minLength": 1 },
+        "recommendedCommands": { "type": "array", "items": { "type": "string", "minLength": 1 } }
       }
     }
   }

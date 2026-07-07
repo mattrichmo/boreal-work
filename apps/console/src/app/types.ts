@@ -64,7 +64,7 @@ export interface ConsoleRenderOptions {
   readonly includeDocument?: boolean;
 }
 
-export type RawProcessingStatus = "queued" | "linked";
+export type RawProcessingStatus = "queued" | "linked" | "routed" | "kept_global" | "dropped";
 
 export type RawPreviewStatus =
   | "available"
@@ -129,6 +129,9 @@ export interface RawInboxView {
     readonly total: number;
     readonly queued: number;
     readonly linked: number;
+    readonly routed: number;
+    readonly keptGlobal: number;
+    readonly dropped: number;
     readonly missingPreview: number;
     readonly unsupportedPreview: number;
   };

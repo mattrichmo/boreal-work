@@ -4,12 +4,15 @@ import { basename, dirname, join, resolve } from "node:path";
 import { createInterface } from "node:readline/promises";
 
 import {
+  assembleAgentDirectiveBundleFromGaps,
   BorealError,
   deriveProjectRegistryIdentity,
   isIsoTimestamp,
   nowIso,
   resolveProjectRegistryPaths,
   projectRegistryEntryIdFromIdentity,
+  type AgentDirectiveBundle,
+  type EnforcementGap,
   type ProjectRegistryEntry as CoreProjectRegistryEntry,
   type ProjectRollupDocument,
   type ProjectRollupNextWork,
@@ -51,6 +54,7 @@ import {
   type RegistryDoctorResult
 } from "../registry.js";
 import { runSearch } from "../search-cli.js";
+import { listRawSourceRows, type RawSourceRow } from "../vault.js";
 import { initCommand } from "./install.js";
 import { formatRegistryAdd, formatRegistryRemove } from "./registry.js";
 import type { CommandResult } from "./shared.js";
@@ -62,9 +66,12 @@ const DEFAULT_DASHBOARD_QUEUE_LIMIT = 200;
 const DEFAULT_DASHBOARD_SEARCH_LIMIT = 10;
 const DEFAULT_DASHBOARD_ACTIVITY_LIMIT = 20;
 const DEFAULT_GLOBAL_NEXT_LIMIT = 10;
+const DEFAULT_GLOBAL_INBOX_LIMIT = 50;
+const DEFAULT_GLOBAL_INBOX_AGING_THRESHOLD_DAYS = 7;
 
 const MAX_DASHBOARD_PROJECT_LIMIT = 100;
 const MAX_GLOBAL_NEXT_LIMIT = 100;
+const MAX_GLOBAL_INBOX_AGING_THRESHOLD_DAYS = 365;
 const MAX_LIST_LIMIT = 1_000;
 const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -77,6 +84,45 @@ interface GlobalDashboardProjectOverview {
   readonly sync: SyncDashboardView;
   readonly locks: LockDashboardView;
   readonly daemon: DaemonStatusResult;
+}
+
+export interface GlobalInboxDashboardRow {
+  readonly id: string;
+  readonly title: string;
+  readonly kind: string;
+  readonly status: RawSourceRow["processingStatus"];
+  readonly addedAt: string;
+  readonly ageDays: number;
+  readonly retrievalCommand: string;
+  readonly triageCommand: string;
+}
+
+export interface GlobalInboxDashboardSummary {
+  readonly total: number;
+  readonly queued: number;
+  readonly linked: number;
+  readonly routed: number;
+  readonly keptGlobal: number;
+  readonly dropped: number;
+  readonly oldestQueuedAt?: string;
+  readonly oldestQueuedAgeDays: number | null;
+  readonly agingQueuedCount: number;
+}
+
+export interface GlobalInboxDashboardPolicy {
+  readonly agingThresholdDays: number;
+  readonly source: "flag" | "env" | "default";
+}
+
+export interface GlobalInboxDashboardResult {
+  readonly schemaVersion: "boreal.cli.global.inbox.v1";
+  readonly generatedAt: string;
+  readonly workspaceRoot: string;
+  readonly policy: GlobalInboxDashboardPolicy;
+  readonly summary: GlobalInboxDashboardSummary;
+  readonly rows: readonly GlobalInboxDashboardRow[];
+  readonly advisoryGap?: EnforcementGap;
+  readonly triageCommandTemplate: string;
 }
 
 export interface GlobalInitResult {
@@ -662,7 +708,8 @@ async function emitGlobalDashboardData(
   json: boolean
 ): Promise<CommandResult> {
   const result = await buildGlobalDashboardResult(context, args);
-  output.write(json ? formatRecord(result, true) : formatGlobalDashboardSummary(result));
+  const agentDirectives = globalDashboardAgentDirectives(result);
+  output.write(json ? formatRecord(result, true, { agentDirectives }) : formatGlobalDashboardSummary(result));
   return { exitCode: 0 };
 }
 
@@ -878,6 +925,7 @@ async function buildGlobalDashboardResult(context: CliContext, args: ParsedArgs)
           })
         )
       );
+  const globalInbox = await buildGlobalInboxDashboardResult(context, args, generatedAt);
 
   return {
     schemaVersion: "boreal.cli.dashboard.global.v1",
@@ -928,6 +976,7 @@ async function buildGlobalDashboardResult(context: CliContext, args: ParsedArgs)
         operations: project.activityRows
       }))
     }),
+    globalInbox,
     globalHealth: buildGlobalHealthView({
       generatedAt,
       projects: overviews.map((project) => ({
@@ -967,6 +1016,189 @@ async function buildGlobalDashboardResult(context: CliContext, args: ParsedArgs)
       projects: overviews.map((project) => project.settings)
     })
   };
+}
+
+async function buildGlobalInboxDashboardResult(
+  context: CliContext,
+  args: ParsedArgs,
+  generatedAt: string
+): Promise<GlobalInboxDashboardResult> {
+  const policy = globalInboxDashboardPolicy(args);
+  const globalContext = await globalDashboardContext(context, args);
+  const rows = await globalDashboardRawRows(globalContext);
+  const queuedRows = rows.filter((row) => row.processingStatus === "queued");
+  const agingRows = queuedRows.filter((row) => rawSourceAgeDays(row, generatedAt) >= policy.agingThresholdDays);
+  const oldestQueued = queuedRows
+    .map((row) => ({ row, ageDays: rawSourceAgeDays(row, generatedAt) }))
+    .sort((left, right) => right.ageDays - left.ageDays || left.row.id.localeCompare(right.row.id))[0];
+  const dashboardRows = rows
+    .map((row): GlobalInboxDashboardRow => ({
+      id: row.id,
+      title: row.title,
+      kind: row.kind,
+      status: row.processingStatus,
+      addedAt: row.addedAt,
+      ageDays: rawSourceAgeDays(row, generatedAt),
+      retrievalCommand: row.retrievalCommand,
+      triageCommand: globalRawTriageCommand(row.id)
+    }))
+    .sort(compareGlobalInboxRows);
+  const advisoryGap = oldestQueued && agingRows.length > 0
+    ? globalInboxAgingGap(globalContext, policy.agingThresholdDays, oldestQueued.row, oldestQueued.ageDays, agingRows)
+    : undefined;
+
+  return {
+    schemaVersion: "boreal.cli.global.inbox.v1",
+    generatedAt,
+    workspaceRoot: globalContext.workspaceRoot,
+    policy,
+    summary: {
+      total: rows.length,
+      queued: queuedRows.length,
+      linked: rows.filter((row) => row.processingStatus === "linked").length,
+      routed: rows.filter((row) => row.processingStatus === "routed").length,
+      keptGlobal: rows.filter((row) => row.processingStatus === "kept_global").length,
+      dropped: rows.filter((row) => row.processingStatus === "dropped").length,
+      oldestQueuedAt: oldestQueued?.row.addedAt,
+      oldestQueuedAgeDays: oldestQueued?.ageDays ?? null,
+      agingQueuedCount: agingRows.length
+    },
+    rows: dashboardRows,
+    ...(advisoryGap ? { advisoryGap } : {}),
+    triageCommandTemplate: "bwrk global raw triage <action> <raw-id> --json"
+  };
+}
+
+async function globalDashboardContext(context: CliContext, args: ParsedArgs): Promise<CliContext> {
+  const flags = new Map<string, string[]>();
+  for (const name of ["actor", "actor-kind", "session", "registry-root"]) {
+    const values = args.flags.get(name);
+    if (values) {
+      flags.set(name, [...values]);
+    }
+  }
+  const registryRoot = flagValue(args, "registry-root");
+  const expectedGlobalRoot = resolveProjectRegistryPaths({ rootDir: registryRoot, env: process.env }).rootDir;
+  if (resolve(context.workspaceRoot) === resolve(expectedGlobalRoot)) {
+    return context;
+  }
+  return createCliContext({ command: ["global"], flags }, context.cwd, {
+    sessionId: context.sessionId,
+    operationId: context.operationId
+  });
+}
+
+async function globalDashboardRawRows(context: CliContext): Promise<readonly RawSourceRow[]> {
+  try {
+    return await listRawSourceRows(context, { limit: DEFAULT_GLOBAL_INBOX_LIMIT });
+  } catch (error) {
+    if (error instanceof BorealError && error.code === "BOREAL_INVALID_INPUT" && error.message.includes("memory vault")) {
+      return [];
+    }
+    throw error;
+  }
+}
+
+function globalInboxDashboardPolicy(args: ParsedArgs): GlobalInboxDashboardPolicy {
+  const flag = parseBoundedNonNegativeInteger(
+    flagValue(args, "inbox-aging-days"),
+    "--inbox-aging-days",
+    MAX_GLOBAL_INBOX_AGING_THRESHOLD_DAYS
+  );
+  if (flag !== undefined) {
+    return { agingThresholdDays: flag, source: "flag" };
+  }
+  const env = parseBoundedNonNegativeInteger(
+    process.env.BOREAL_GLOBAL_INBOX_AGING_DAYS,
+    "BOREAL_GLOBAL_INBOX_AGING_DAYS",
+    MAX_GLOBAL_INBOX_AGING_THRESHOLD_DAYS
+  );
+  if (env !== undefined) {
+    return { agingThresholdDays: env, source: "env" };
+  }
+  return { agingThresholdDays: DEFAULT_GLOBAL_INBOX_AGING_THRESHOLD_DAYS, source: "default" };
+}
+
+function rawSourceAgeDays(row: RawSourceRow, generatedAt: string): number {
+  const generatedMs = Date.parse(generatedAt);
+  const addedMs = Date.parse(row.addedAt);
+  if (!Number.isFinite(generatedMs) || !Number.isFinite(addedMs)) {
+    return 0;
+  }
+  return Math.floor(Math.max(0, generatedMs - addedMs) / DAY_MS);
+}
+
+function compareGlobalInboxRows(left: GlobalInboxDashboardRow, right: GlobalInboxDashboardRow): number {
+  const leftQueued = left.status === "queued" ? 0 : 1;
+  const rightQueued = right.status === "queued" ? 0 : 1;
+  return leftQueued - rightQueued ||
+    right.ageDays - left.ageDays ||
+    left.title.localeCompare(right.title) ||
+    left.id.localeCompare(right.id);
+}
+
+function globalInboxAgingGap(
+  context: CliContext,
+  thresholdDays: number,
+  oldestRow: RawSourceRow,
+  oldestAgeDays: number,
+  agingRows: readonly RawSourceRow[]
+): EnforcementGap {
+  const rawSourceIds = agingRows.map((row) => row.id);
+  const command = globalRawTriageCommand(oldestRow.id);
+  return {
+    code: "inbox.triage.aging",
+    subjectType: "workspace",
+    subjectId: context.workspaceRoot,
+    targetId: oldestRow.id,
+    data: {
+      rawSourceIds,
+      rawSourceCount: rawSourceIds.length,
+      oldestRawSourceId: oldestRow.id,
+      oldestAgeDays,
+      thresholdDays,
+      command,
+      recommendedCommands: agingRows.slice(0, 5).map((row) => globalRawTriageCommand(row.id))
+    }
+  };
+}
+
+function globalDashboardAgentDirectives(
+  result: Awaited<ReturnType<typeof buildGlobalDashboardResult>>
+): readonly AgentDirectiveBundle[] {
+  const gap = result.globalInbox.advisoryGap;
+  if (!gap) {
+    return [];
+  }
+  const data = gap.data ?? {};
+  const bundleResult = assembleAgentDirectiveBundleFromGaps({
+    gaps: [gap],
+    dataByRegistryId: {
+      "inbox.triage-aging": {
+        rawSourceIds: data.rawSourceIds ?? [],
+        rawSourceCount: data.rawSourceCount ?? 0,
+        oldestRawSourceId: data.oldestRawSourceId ?? String(gap.targetId ?? ""),
+        oldestAgeDays: data.oldestAgeDays ?? 0,
+        thresholdDays: data.thresholdDays ?? result.globalInbox.policy.agingThresholdDays,
+        command: data.command ?? result.globalInbox.triageCommandTemplate,
+        recommendedCommands: data.recommendedCommands ?? []
+      }
+    },
+    commandPath: "dashboard global",
+    capturedAt: isIsoTimestamp(result.generatedAt) ? result.generatedAt : nowIso(),
+    envelopeSchema: result.schemaVersion,
+    subject: {
+      type: "workspace",
+      id: result.globalInbox.workspaceRoot,
+      title: "Global workspace"
+    },
+    generatedAt: isIsoTimestamp(result.generatedAt) ? result.generatedAt : nowIso()
+  });
+  return bundleResult.bundle && bundleResult.bundle.directives.length > 0 ? [bundleResult.bundle] : [];
+}
+
+function globalRawTriageCommand(rawSourceId: string): string {
+  return `bwrk global raw triage <action> ${shellArg(rawSourceId)} --json`;
 }
 
 function buildGlobalDashboardRollupOverview(input: {
@@ -1773,7 +2005,9 @@ function projectHealthState(syncOk: boolean, findings: readonly DashboardFinding
 }
 
 function formatGlobalDashboardSummary(result: Awaited<ReturnType<typeof buildGlobalDashboardResult>>): string {
-  return table(
+  const inbox = result.globalInbox.summary;
+  const inboxLine = `Inbox queued ${inbox.queued}, oldest ${inbox.oldestQueuedAgeDays ?? "-"} day(s), threshold ${result.globalInbox.policy.agingThresholdDays} day(s), aging ${inbox.agingQueuedCount}`;
+  return `${inboxLine}\n${table(
     result.registry.entries.map((entry) => ({
       project: entry.name,
       health: entry.health,
@@ -1782,7 +2016,7 @@ function formatGlobalDashboardSummary(result: Awaited<ReturnType<typeof buildGlo
       blocked: entry.blockedWorkCount,
       stale: entry.stale ? "yes" : "no"
     }))
-  );
+  )}`;
 }
 
 function operationListRow(operation: RuntimeOperation): GlobalActivitySourceRow {
@@ -1853,6 +2087,17 @@ function parseNonNegativeInteger(value: string | undefined, label: string): numb
   const parsed = Number(value);
   if (!Number.isInteger(parsed) || parsed < 0) {
     throw new BorealError("BOREAL_INVALID_INPUT", `${label} must be a non-negative integer`);
+  }
+  return parsed;
+}
+
+function parseBoundedNonNegativeInteger(value: string | undefined, label: string, max: number): number | undefined {
+  const parsed = parseNonNegativeInteger(value, label);
+  if (parsed === undefined) {
+    return undefined;
+  }
+  if (parsed > max) {
+    throw new BorealError("BOREAL_INVALID_INPUT", `${label} must be at most ${max}`);
   }
   return parsed;
 }

@@ -14,6 +14,7 @@ import {
   buildSprintBoardView,
   buildWorkDashboardView,
   type DashboardFinding,
+  type GlobalBoardInboxSourceItem,
   type GlobalSettingsProjectInput,
   type LockDashboardView,
   type ProjectRegistryEntry as DashboardProjectRegistryEntry,
@@ -230,6 +231,7 @@ export async function loadLiveConsoleData(options: LoadLiveConsoleDataOptions): 
     }),
     globalBoard: buildGlobalBoardView({
       generatedAt,
+      inboxItems: rawInboxRailItems(rawInbox, workspaceRoot),
       projects: projectOverviews.map((project) => ({
         projectId: project.entry.id,
         projectName: project.entry.name,
@@ -547,11 +549,30 @@ async function loadRawInbox(runner: ConsoleCliRunner, generatedAt: string, reque
       total: rows.length,
       queued: rows.filter((row) => row.processingStatus === "queued").length,
       linked: rows.filter((row) => row.processingStatus === "linked").length,
+      routed: rows.filter((row) => row.processingStatus === "routed").length,
+      keptGlobal: rows.filter((row) => row.processingStatus === "kept_global").length,
+      dropped: rows.filter((row) => row.processingStatus === "dropped").length,
       missingPreview: selected?.preview.status === "missing" ? 1 : 0,
       unsupportedPreview: selected?.preview.status === "unsupported" || selected?.preview.status === "outside_workspace" ? 1 : 0
     },
     warnings
   };
+}
+
+function rawInboxRailItems(rawInbox: RawInboxView, workspaceRoot: string): readonly GlobalBoardInboxSourceItem[] {
+  return rawInbox.rows
+    .filter((row) => row.processingStatus === "queued")
+    .map((row) => ({
+      id: row.id,
+      title: row.title,
+      detail: row.summary ?? row.id,
+      status: "queued raw source",
+      projectId: "global",
+      projectName: "Global workspace",
+      projectRoot: workspaceRoot,
+      command: `bwrk global raw triage <action> ${row.id} --json`,
+      tone: "warning"
+    }));
 }
 
 async function loadWikiExplorer(
@@ -3014,7 +3035,15 @@ function workPriority(value: string): WorkItemView["priority"] {
 }
 
 function rawProcessingStatus(value: unknown): RawProcessingStatus {
-  return value === "linked" ? "linked" : "queued";
+  if (
+    value === "linked" ||
+    value === "routed" ||
+    value === "kept_global" ||
+    value === "dropped"
+  ) {
+    return value;
+  }
+  return "queued";
 }
 
 function rawPreviewStatus(value: unknown): RawPreviewStatus {

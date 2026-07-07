@@ -193,6 +193,18 @@ export const AGENT_DIRECTIVE_REGISTRY: AgentDirectiveRegistry = {
       nextCommandTemplate: "bwrk raw triage --json"
     }),
     entry({
+      id: "inbox.triage-aging" as AgentDirectiveTemplateId,
+      family: "memory",
+      severity: "advisory",
+      audience: "agent",
+      kind: "obligation",
+      title: "Triage aging raw inbox items",
+      instruction:
+        "Review aging global raw inbox items and route, keep, or drop them through raw triage.",
+      triggerCodes: ["inbox.triage.aging"],
+      nextCommandTemplate: "bwrk global raw triage <action> <raw-id> --json"
+    }),
+    entry({
       id: "handoff.session-summary" as AgentDirectiveTemplateId,
       family: "handoff",
       severity: "advisory",

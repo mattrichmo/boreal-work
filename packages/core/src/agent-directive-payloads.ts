@@ -139,6 +139,16 @@ export interface MemoryReconcileSourcePayload {
   readonly claimIds?: PayloadArray;
 }
 
+export interface InboxTriageAgingPayload {
+  readonly rawSourceIds: PayloadArray;
+  readonly rawSourceCount: number;
+  readonly oldestRawSourceId: string;
+  readonly oldestAgeDays: number;
+  readonly thresholdDays: number;
+  readonly command: string;
+  readonly recommendedCommands?: PayloadArray;
+}
+
 export interface HandoffSessionSummaryPayload {
   readonly workId?: string;
   readonly summaryId?: string;
@@ -240,6 +250,7 @@ export interface AgentDirectivePayloadByRegistryId {
   readonly "closeout.summary-required": CloseoutSummaryRequiredPayload;
   readonly "doctor.recovery-required": DoctorRecoveryRequiredPayload;
   readonly "memory.reconcile-source": MemoryReconcileSourcePayload;
+  readonly "inbox.triage-aging": InboxTriageAgingPayload;
   readonly "handoff.session-summary": HandoffSessionSummaryPayload;
   readonly "container.descendant-closeout": ContainerDescendantCloseoutPayload;
   readonly "phase.close-rollup": PhaseCloseRollupPayload;
@@ -360,6 +371,15 @@ export const AGENT_DIRECTIVE_PAYLOAD_FIELDS = {
     requiredRecordTypes: field("requiredRecordTypes", "array", true, "Durable record types expected from the source."),
     wikiPageIds: field("wikiPageIds", "array", false, "Wiki pages linked to reconciled source truth."),
     claimIds: field("claimIds", "array", false, "Claim records linked to reconciled source truth.")
+  },
+  "inbox.triage-aging": {
+    rawSourceIds: field("rawSourceIds", "array", true, "Aging queued raw source ids."),
+    rawSourceCount: field("rawSourceCount", "number", true, "Number of queued raw sources older than the threshold."),
+    oldestRawSourceId: field("oldestRawSourceId", "id", true, "Oldest queued raw source id."),
+    oldestAgeDays: field("oldestAgeDays", "number", true, "Oldest queued raw source age in days."),
+    thresholdDays: field("thresholdDays", "number", true, "Configured aging threshold in days."),
+    command: field("command", "string", true, "Primary triage command."),
+    recommendedCommands: field("recommendedCommands", "array", false, "Safe triage commands for aging raw source ids.")
   },
   "handoff.session-summary": {
     workId: field("workId", "id", false, "Current or most recent work id."),

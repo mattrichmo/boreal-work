@@ -27,6 +27,7 @@ export const ENFORCEMENT_GAP_CODES = [
   "git.lane-worktree.required",
   "doctor.recovery.required",
   "memory.reconcile-source.required",
+  "inbox.triage.aging",
   "handoff.session-summary.required",
   "container.descendant-closeout.required",
   "phase.close-rollup.required",
@@ -66,6 +67,13 @@ export interface EnforcementGapData {
   readonly observed?: readonly string[];
   readonly evidenceIds?: readonly string[];
   readonly reason?: string;
+  readonly rawSourceIds?: readonly string[];
+  readonly rawSourceCount?: number;
+  readonly oldestRawSourceId?: string;
+  readonly oldestAgeDays?: number;
+  readonly thresholdDays?: number;
+  readonly command?: string;
+  readonly recommendedCommands?: readonly string[];
 }
 
 export interface EnforcementGap {

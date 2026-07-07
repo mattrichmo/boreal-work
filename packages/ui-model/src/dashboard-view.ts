@@ -154,6 +154,18 @@ export interface GlobalBoardRailItem {
   readonly command?: string;
 }
 
+export interface GlobalBoardInboxSourceItem {
+  readonly id: string;
+  readonly title: string;
+  readonly detail: string;
+  readonly status: string;
+  readonly projectId?: string;
+  readonly projectName?: string;
+  readonly projectRoot?: string;
+  readonly command?: string;
+  readonly tone?: GlobalBoardRailItem["tone"];
+}
+
 export interface GlobalBoardRailView {
   readonly id: GlobalBoardRailId;
   readonly title: string;
@@ -548,6 +560,7 @@ export function buildGlobalBoardView(input: {
   readonly generatedAt?: string;
   readonly claimPurpose?: string;
   readonly railLimit?: number;
+  readonly inboxItems?: readonly GlobalBoardInboxSourceItem[];
 }): GlobalBoardView {
   const lanes = input.projects
     .map((project): GlobalBoardLaneView => {
@@ -601,7 +614,7 @@ export function buildGlobalBoardView(input: {
     })
     .sort(compareGlobalBoardLanes);
   const flatItems = lanes.flatMap((lane) => lane.columns.flatMap((column) => column.items));
-  const rails = buildGlobalBoardRails(lanes, flatItems, input.railLimit ?? 8);
+  const rails = buildGlobalBoardRails(lanes, flatItems, input.railLimit ?? 8, input.inboxItems ?? []);
 
   return {
     generatedAt: input.generatedAt,
@@ -940,9 +953,11 @@ function countBoardColumn(items: readonly GlobalBoardWorkItem[], columnId: Globa
 function buildGlobalBoardRails(
   lanes: readonly GlobalBoardLaneView[],
   items: readonly GlobalBoardWorkItem[],
-  limit: number
+  limit: number,
+  sourceInboxItems: readonly GlobalBoardInboxSourceItem[]
 ): readonly GlobalBoardRailView[] {
   const inboxItems = [
+    ...sourceInboxItems.map(globalBoardRailItemFromInboxSource),
     ...lanes.flatMap((lane) => globalBoardLaneAlert(lane)),
     ...items
       .filter((item) => item.columnId === "draft" || item.columnId === "blocked")
@@ -969,6 +984,20 @@ function buildGlobalBoardRails(
       emptyLabel: "No ready project work."
     }
   ];
+}
+
+function globalBoardRailItemFromInboxSource(item: GlobalBoardInboxSourceItem): GlobalBoardRailItem {
+  return {
+    id: `raw:${item.id}`,
+    projectId: item.projectId ?? "global",
+    projectName: item.projectName ?? "Global workspace",
+    projectRoot: item.projectRoot ?? "",
+    title: item.title,
+    detail: item.detail,
+    status: item.status,
+    tone: item.tone ?? "warning",
+    command: item.command
+  };
 }
 
 function globalBoardLaneAlert(lane: GlobalBoardLaneView): readonly GlobalBoardRailItem[] {
