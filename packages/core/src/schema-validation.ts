@@ -4,6 +4,12 @@ import { agentDirectiveBundleIssues } from "./agent-directives.js";
 import { ENFORCEMENT_GAP_CODES } from "./enforcement-gaps.js";
 import { BorealError } from "./errors.js";
 import type { RuntimePolicy } from "./policies.js";
+import {
+  PROJECT_ROLLUP_SCHEMA_ID,
+  PROJECT_ROLLUP_SCHEMA_VERSION,
+  WORK_KINDS,
+  WORK_STATUSES
+} from "./project-rollup.js";
 import { PROJECT_REGISTRY_SCHEMA_ID, PROJECT_REGISTRY_SCHEMA_VERSION } from "./project-registry.js";
 
 export interface SchemaValidationIssue {
@@ -58,6 +64,7 @@ export const RUNTIME_SCHEMA_IDS = {
   runtimeOperation: "https://boreal.work/schemas/operations/runtime-operation.schema.json",
   projectionRecord: "https://boreal.work/schemas/projections/projection-record.schema.json",
   contextPack: "https://boreal.work/schemas/projections/context-pack.schema.json",
+  projectRollup: PROJECT_ROLLUP_SCHEMA_ID,
   enforcementGap: "https://boreal.work/schemas/enforcement/enforcement-gap.schema.json",
   runtimePolicy: "https://boreal.work/schemas/policies/runtime-policy.schema.json"
 } as const;
@@ -173,6 +180,13 @@ export const RUNTIME_SCHEMA_CONTRACTS = [
     schemaPath: "schemas/projections/context-pack.schema.json",
     runtimeSection: "contextPacks",
     validator: contextPackSchemaIssues
+  },
+  {
+    key: "projectRollup",
+    schemaId: RUNTIME_SCHEMA_IDS.projectRollup,
+    schemaPath: "schemas/projections/project-rollup.schema.json",
+    runtimeSection: undefined,
+    validator: projectRollupSchemaIssues
   },
   {
     key: "enforcementGap",
@@ -717,6 +731,223 @@ export function contextPackSchemaIssues(value: unknown, path = "$"): readonly Sc
     ...stringArrayIssue(value.facts, `${path}.facts`, schemaId),
     ...stringArrayIssue(value.evidence, `${path}.evidence`, schemaId)
   ];
+}
+
+export function projectRollupSchemaIssues(value: unknown, path = "$"): readonly SchemaValidationIssue[] {
+  const schemaId = RUNTIME_SCHEMA_IDS.projectRollup;
+  if (!isRecord(value)) {
+    return [issue(schemaId, path, "must be an object")];
+  }
+
+  return [
+    ...literalIssue(value.schemaVersion, `${path}.schemaVersion`, schemaId, PROJECT_ROLLUP_SCHEMA_VERSION),
+    ...nonEmptyStringIssue(value.projectId, `${path}.projectId`, schemaId),
+    ...absolutePathIssue(value.workspaceRoot, `${path}.workspaceRoot`, schemaId),
+    ...stringIssue(value.generatedAt, `${path}.generatedAt`, schemaId),
+    ...patternStringIssue(value.stateContentHash, `${path}.stateContentHash`, schemaId, /^sha256:[a-f0-9]{64}$/),
+    ...projectRollupCountsIssues(value.counts, `${path}.counts`, schemaId),
+    ...projectRollupLimboIssues(value.limbo, `${path}.limbo`, schemaId),
+    ...projectRollupReservationDetailIssues(value.reservations, `${path}.reservations`, schemaId),
+    ...projectRollupEnforcementIssues(value.enforcement, `${path}.enforcement`, schemaId),
+    ...projectRollupHealthIssues(value.health, `${path}.health`, schemaId),
+    ...projectRollupLastEventIssues(value.lastEvent, `${path}.lastEvent`, schemaId),
+    ...projectRollupLastOperationIssues(value.lastOperation, `${path}.lastOperation`, schemaId),
+    ...projectRollupNextIssues(value.next, `${path}.next`, schemaId)
+  ];
+}
+
+function projectRollupCountsIssues(value: unknown, path: string, schemaId: string): readonly SchemaValidationIssue[] {
+  if (!isRecord(value)) {
+    return [issue(schemaId, path, "must be an object")];
+  }
+  return [
+    ...projectRollupWorkCountsIssues(value.work, `${path}.work`, schemaId),
+    ...projectRollupReservationCountsIssues(value.reservations, `${path}.reservations`, schemaId)
+  ];
+}
+
+function projectRollupWorkCountsIssues(value: unknown, path: string, schemaId: string): readonly SchemaValidationIssue[] {
+  if (!isRecord(value)) {
+    return [issue(schemaId, path, "must be an object")];
+  }
+  return [
+    ...integerAtLeastIssue(value.total, `${path}.total`, schemaId, 0),
+    ...countObjectIssues(value.byStatus, `${path}.byStatus`, schemaId, WORK_STATUSES),
+    ...countObjectIssues(value.byKind, `${path}.byKind`, schemaId, WORK_KINDS)
+  ];
+}
+
+function projectRollupReservationCountsIssues(value: unknown, path: string, schemaId: string): readonly SchemaValidationIssue[] {
+  if (!isRecord(value)) {
+    return [issue(schemaId, path, "must be an object")];
+  }
+  return [
+    ...integerAtLeastIssue(value.total, `${path}.total`, schemaId, 0),
+    ...integerAtLeastIssue(value.active, `${path}.active`, schemaId, 0),
+    ...integerAtLeastIssue(value.expired, `${path}.expired`, schemaId, 0),
+    ...integerAtLeastIssue(value.released, `${path}.released`, schemaId, 0)
+  ];
+}
+
+function projectRollupLimboIssues(value: unknown, path: string, schemaId: string): readonly SchemaValidationIssue[] {
+  if (!isRecord(value)) {
+    return [issue(schemaId, path, "must be an object")];
+  }
+  return [
+    ...projectRollupLimboArrayIssues(value.needsVerification, `${path}.needsVerification`, schemaId, "needs_verification"),
+    ...projectRollupLimboArrayIssues(value.verified, `${path}.verified`, schemaId, "verified")
+  ];
+}
+
+function projectRollupLimboArrayIssues(
+  value: unknown,
+  path: string,
+  schemaId: string,
+  status: "needs_verification" | "verified"
+): readonly SchemaValidationIssue[] {
+  if (!Array.isArray(value)) {
+    return [issue(schemaId, path, "must be an array")];
+  }
+  return value.flatMap((entry, index) => projectRollupLimboEntryIssues(entry, `${path}[${index}]`, schemaId, status));
+}
+
+function projectRollupLimboEntryIssues(
+  value: unknown,
+  path: string,
+  schemaId: string,
+  status: "needs_verification" | "verified"
+): readonly SchemaValidationIssue[] {
+  if (!isRecord(value)) {
+    return [issue(schemaId, path, "must be an object")];
+  }
+  return [
+    ...patternStringIssue(value.workId, `${path}.workId`, schemaId, /^bw_work_[a-f0-9]{12,64}$/),
+    ...nonEmptyStringIssue(value.title, `${path}.title`, schemaId),
+    ...literalIssue(value.status, `${path}.status`, schemaId, status),
+    ...stringIssue(value.updatedAt, `${path}.updatedAt`, schemaId),
+    ...integerAtLeastIssue(value.ageMs, `${path}.ageMs`, schemaId, 0),
+    ...integerAtLeastIssue(value.ageDays, `${path}.ageDays`, schemaId, 0)
+  ];
+}
+
+function projectRollupReservationDetailIssues(value: unknown, path: string, schemaId: string): readonly SchemaValidationIssue[] {
+  if (!isRecord(value)) {
+    return [issue(schemaId, path, "must be an object")];
+  }
+  return [
+    ...uniquePatternStringArrayIssue(value.activeIds, `${path}.activeIds`, schemaId, /^bw_reservation_[a-f0-9]{12,64}$/),
+    ...uniquePatternStringArrayIssue(value.expiredIds, `${path}.expiredIds`, schemaId, /^bw_reservation_[a-f0-9]{12,64}$/)
+  ];
+}
+
+function projectRollupEnforcementIssues(value: unknown, path: string, schemaId: string): readonly SchemaValidationIssue[] {
+  if (!isRecord(value)) {
+    return [issue(schemaId, path, "must be an object")];
+  }
+  if (!isRecord(value.blockingGaps)) {
+    return [issue(schemaId, `${path}.blockingGaps`, "must be an object")];
+  }
+  const blockingGaps = value.blockingGaps;
+  return [
+    ...integerAtLeastIssue(blockingGaps.openCount, `${path}.blockingGaps.openCount`, schemaId, 0),
+    ...integerAtLeastIssue(blockingGaps.blockedWorkCount, `${path}.blockingGaps.blockedWorkCount`, schemaId, 0),
+    ...projectRollupBlockingGapSamplesIssues(blockingGaps.samples, `${path}.blockingGaps.samples`, schemaId)
+  ];
+}
+
+function projectRollupBlockingGapSamplesIssues(value: unknown, path: string, schemaId: string): readonly SchemaValidationIssue[] {
+  if (!Array.isArray(value)) {
+    return [issue(schemaId, path, "must be an array")];
+  }
+  return value.flatMap((entry, index) => {
+    if (!isRecord(entry)) {
+      return [issue(schemaId, `${path}[${index}]`, "must be an object")];
+    }
+    return [
+      ...patternStringIssue(entry.workId, `${path}[${index}].workId`, schemaId, /^bw_work_[a-f0-9]{12,64}$/),
+      ...nonEmptyStringIssue(entry.title, `${path}[${index}].title`, schemaId),
+      ...uniquePatternStringArrayIssue(entry.blockerIds, `${path}[${index}].blockerIds`, schemaId, /^bw_work_[a-f0-9]{12,64}$/)
+    ];
+  });
+}
+
+function projectRollupHealthIssues(value: unknown, path: string, schemaId: string): readonly SchemaValidationIssue[] {
+  if (!isRecord(value)) {
+    return [issue(schemaId, path, "must be an object")];
+  }
+  return [
+    ...nullableBooleanIssue(value.doctorOk, `${path}.doctorOk`, schemaId),
+    ...nullableBooleanIssue(value.syncOk, `${path}.syncOk`, schemaId)
+  ];
+}
+
+function projectRollupLastEventIssues(value: unknown, path: string, schemaId: string): readonly SchemaValidationIssue[] {
+  if (value === null) {
+    return [];
+  }
+  if (!isRecord(value)) {
+    return [issue(schemaId, path, "must be an object or null")];
+  }
+  return [
+    ...patternStringIssue(value.id, `${path}.id`, schemaId, /^bw_event_[a-f0-9]{12,64}$/),
+    ...nonEmptyStringIssue(value.type, `${path}.type`, schemaId),
+    ...nonEmptyStringIssue(value.subjectId, `${path}.subjectId`, schemaId),
+    ...stringIssue(value.at, `${path}.at`, schemaId)
+  ];
+}
+
+function projectRollupLastOperationIssues(value: unknown, path: string, schemaId: string): readonly SchemaValidationIssue[] {
+  if (value === null) {
+    return [];
+  }
+  if (!isRecord(value)) {
+    return [issue(schemaId, path, "must be an object or null")];
+  }
+  return [
+    ...patternStringIssue(value.id, `${path}.id`, schemaId, /^bw_operation_[a-f0-9]{12,64}$/),
+    ...nonEmptyStringIssue(value.commandPath, `${path}.commandPath`, schemaId),
+    ...enumIssue(value.status, `${path}.status`, schemaId, ["succeeded", "failed"]),
+    ...stringIssue(value.finishedAt, `${path}.finishedAt`, schemaId)
+  ];
+}
+
+function projectRollupNextIssues(value: unknown, path: string, schemaId: string): readonly SchemaValidationIssue[] {
+  if (!isRecord(value)) {
+    return [issue(schemaId, path, "must be an object")];
+  }
+  if (!Array.isArray(value.work)) {
+    return [issue(schemaId, `${path}.work`, "must be an array")];
+  }
+  return [
+    ...integerAtLeastIssue(value.limit, `${path}.limit`, schemaId, 1),
+    ...value.work.flatMap((entry, index) => projectRollupNextWorkIssues(entry, `${path}.work[${index}]`, schemaId))
+  ];
+}
+
+function projectRollupNextWorkIssues(value: unknown, path: string, schemaId: string): readonly SchemaValidationIssue[] {
+  if (!isRecord(value)) {
+    return [issue(schemaId, path, "must be an object")];
+  }
+  return [
+    ...patternStringIssue(value.workId, `${path}.workId`, schemaId, /^bw_work_[a-f0-9]{12,64}$/),
+    ...nonEmptyStringIssue(value.title, `${path}.title`, schemaId),
+    ...enumIssue(value.kind, `${path}.kind`, schemaId, WORK_KINDS),
+    ...enumIssue(value.priority, `${path}.priority`, schemaId, ["low", "normal", "high", "critical"]),
+    ...enumIssue(value.status, `${path}.status`, schemaId, WORK_STATUSES),
+    ...stringIssue(value.updatedAt, `${path}.updatedAt`, schemaId)
+  ];
+}
+
+function countObjectIssues(
+  value: unknown,
+  path: string,
+  schemaId: string,
+  keys: readonly string[]
+): readonly SchemaValidationIssue[] {
+  if (!isRecord(value)) {
+    return [issue(schemaId, path, "must be an object")];
+  }
+  return keys.flatMap((key) => integerAtLeastIssue(value[key], `${path}.${key}`, schemaId, 0));
 }
 
 export function enforcementGapSchemaIssues(value: unknown, path = "$"): readonly SchemaValidationIssue[] {
@@ -1328,6 +1559,10 @@ function recordIssue(value: unknown, path: string, schemaId: string): readonly S
 
 function booleanIssue(value: unknown, path: string, schemaId: string): readonly SchemaValidationIssue[] {
   return typeof value === "boolean" ? [] : [issue(schemaId, path, "must be a boolean")];
+}
+
+function nullableBooleanIssue(value: unknown, path: string, schemaId: string): readonly SchemaValidationIssue[] {
+  return typeof value === "boolean" || value === null ? [] : [issue(schemaId, path, "must be a boolean or null")];
 }
 
 function integerAtLeastIssue(value: unknown, path: string, schemaId: string, minimum: number): readonly SchemaValidationIssue[] {

@@ -20,6 +20,7 @@ Currently enforced schemas:
 - `schemas/operations/runtime-operation.schema.json`
 - `schemas/projections/projection-record.schema.json`
 - `schemas/projections/context-pack.schema.json`
+- `schemas/projections/project-rollup.schema.json`
 - `schemas/policies/runtime-policy.schema.json`
 - `schemas/directives/agent-directive-bundle.schema.json`
 - `schemas/projects/project-registry.schema.json`

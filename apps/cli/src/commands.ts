@@ -136,6 +136,7 @@ import { commandsCommand, completionCommand, HELP_SECTIONS } from "./commands/me
 import { operationCommand, type OperationCommandDependencies } from "./commands/operation.js";
 import { protocolCommand, type ProtocolCommandDependencies } from "./commands/protocol.js";
 import { registryCommand, type RegistryCommandDependencies } from "./commands/registry.js";
+import { rollupCommand } from "./commands/rollup.js";
 import { sprintCommand, type SprintCommandDependencies } from "./commands/sprint.js";
 import { storageCommand } from "./commands/storage.js";
 import {
@@ -178,6 +179,7 @@ import { buildExportDocument } from "./import-export.js";
 import type { RuntimeLockInspectionResult, RuntimeLockState } from "./locks.js";
 import { createResultSpoolingOutput, formatRecord, table, type AgentDirectiveOutput, type CliOutput } from "./output.js";
 import { readProjectSetupConfig } from "./project-setup.js";
+import { writeProjectRollup, type ProjectRollupWriteOptions } from "./rollup.js";
 import { runSearch, writeSearchIndex } from "./search-cli.js";
 import { dirtyPathNotesHaveReasonCode, requireCommitOrDirtyPathReason } from "./summary-policy.js";
 import { VAULT_SCHEMA_VERSION } from "./vault.js";
@@ -787,6 +789,9 @@ export async function runCommand(args: ParsedArgs, output: CliOutput, cwd: strin
           uniqueStrings
         });
         break;
+      case "rollup":
+        result = await rollupCommand(action, context, args, commandOutput, json);
+        break;
       case "reservation":
         result = await workGroupCommand("reservation", action, rest, context, args, commandOutput, json, workCommandDependencies());
         break;
@@ -920,6 +925,13 @@ export async function runCommand(args: ParsedArgs, output: CliOutput, cwd: strin
         const message = operationError instanceof Error ? operationError.message : String(operationError);
         output.error(`warning: failed to record operation: ${message}\n`);
       }
+    }
+  }
+  if (!thrown && result?.exitCode === 0 && shouldWriteProjectRollupAfterCommand(definition)) {
+    try {
+      await writeProjectRollup(context, projectRollupWriteOptionsForCommand(definition, result));
+    } catch (rollupError) {
+      thrown = rollupError;
     }
   }
   if (thrown) {
@@ -7008,6 +7020,25 @@ function shouldRefreshGeneratedArtifactsAfterMutation(definition: CommandDefinit
   );
 }
 
+function shouldWriteProjectRollupAfterCommand(definition: CommandDefinition): boolean {
+  const behavior = commandBehavior(definition);
+  return (
+    behavior.writesState &&
+    (definition.requiresWorkspace || definition.path[0] === "init" || commandPath(definition) === "doctor")
+  );
+}
+
+function projectRollupWriteOptionsForCommand(
+  definition: CommandDefinition,
+  result: CommandResult
+): ProjectRollupWriteOptions {
+  const command = commandPath(definition);
+  return {
+    ...(command === "doctor" ? { doctorOk: result.exitCode === 0 } : {}),
+    ...(command === "sync refresh" ? { syncOk: result.exitCode === 0 } : {})
+  };
+}
+
 // Inline refresh after mutations was removed: it rewrote every projection,
 // the full search index, all ledgers, and the sqlite cache on each mutating
 // command (O(all records) per mutation). Artifacts are content-hash stamped;
@@ -7769,6 +7800,13 @@ function unprobedSyncStatus(context: CliContext): SyncStatusResult {
       stale: false,
       expectedCorpusFingerprint: contentHash,
       expectedContentHash: contentHash
+    },
+    projectRollup: {
+      ok: true,
+      path: join(context.workspaceRoot, ".boreal", "rollup.json"),
+      exists: false,
+      stale: false,
+      expectedStateContentHash: contentHash
     },
     git: {
       ok: true,

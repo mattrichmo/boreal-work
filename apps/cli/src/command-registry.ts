@@ -23,6 +23,7 @@ export interface CommandDefinition {
     | "decision"
     | "context"
     | "search"
+    | "rollup"
     | "reservation"
     | "agent"
     | "session"
@@ -1743,6 +1744,18 @@ export const COMMAND_DEFINITIONS: readonly CommandDefinition[] = [
       flag("no-rebuild", "boolean", "Fail closed instead of rebuilding a missing, invalid, or stale search index."),
     ],
     positionals: { label: "query", min: 1 },
+    requiresWorkspace: true,
+    supportsJson: true,
+  },
+  {
+    path: ["rollup", "show"],
+    category: "rollup",
+    summary: "Show the project rollup projection.",
+    usage: "bwrk rollup show [--json]",
+    description:
+      "Reads the generated .boreal/rollup.json projection and reports whether it is fresh for the current runtime state.",
+    flags: [],
+    positionals: { label: "arguments", min: 0, max: 0 },
     requiresWorkspace: true,
     supportsJson: true,
   },
@@ -3609,6 +3622,19 @@ const COMMAND_BEHAVIOR: Readonly<Record<string, CommandBehaviorMetadata>> = {
     maxResultSizeChars: 150_000,
     humanOutputKind: "table",
     examples: ["bwrk search query 'reservation stale' --explain --json"],
+  }),
+  "rollup show": commandMetadata("rollup show", {
+    readOnly: true,
+    destructive: false,
+    writesState: false,
+    writesGeneratedArtifacts: false,
+    requiresFreshIndex: false,
+    concurrencySafe: true,
+    requiresLock: "none",
+    maxResultSizeChars: 150_000,
+    humanOutputKind: "record",
+    audience: "both",
+    examples: ["bwrk rollup show --json"],
   }),
   "reservation list": commandMetadata("reservation list", {
     readOnly: true,

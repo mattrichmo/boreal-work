@@ -15,6 +15,7 @@ export * from "./json-safe.js";
 export * from "./mcp-boundary.js";
 export * from "./policies.js";
 export * from "./process-runner.js";
+export * from "./project-rollup.js";
 export * from "./project-registry.js";
 export * from "./reference-uri.js";
 export * from "./records.js";

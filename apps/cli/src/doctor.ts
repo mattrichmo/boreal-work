@@ -48,6 +48,7 @@ import { inspectBorealInstallStatus, installStatusHealthy, installStatusSummary 
 import { exportDriftDiagnostics, ledgerStatus, readGeneratedLedgerTombstones } from "./import-export.js";
 import { inspectRuntimeLocks } from "./locks.js";
 import { inspectProjectSetupDrift, type ProjectSetupDriftInspection } from "./project-setup.js";
+import { inspectProjectRollup, writeProjectRollup } from "./rollup.js";
 import { inspectSearchIndex, writeSearchIndex } from "./search-cli.js";
 import { dirtyPathNotesHaveReasonCode } from "./summary-policy.js";
 import { inspectVault, listVaultRawSources, listVaultWikiPages, type RawSourceRecord, type WikiPageRecord } from "./vault.js";
@@ -249,6 +250,10 @@ export async function runDoctor(context: CliContext, fix: boolean, strict = fals
   const searchDiagnostics = await validateSearchIndex(context, fix);
   diagnostics.push(...searchDiagnostics.diagnostics);
   fixed = fixed || searchDiagnostics.fixed;
+
+  const rollupDiagnostics = await validateProjectRollup(context, fix);
+  diagnostics.push(...rollupDiagnostics.diagnostics);
+  fixed = fixed || rollupDiagnostics.fixed;
 
   return finalize(diagnostics, fixed, strict);
 }
@@ -1158,6 +1163,69 @@ async function validateSearchIndex(
           code: "search.index",
           severity: "warning",
           message: "Local search index could not be inspected",
+          details: error instanceof Error ? error.message : error
+        }
+      ]
+    };
+  }
+}
+
+async function validateProjectRollup(
+  context: CliContext,
+  fix: boolean
+): Promise<{
+  readonly fixed: boolean;
+  readonly diagnostics: readonly Diagnostic[];
+}> {
+  try {
+    const inspection = await inspectProjectRollup(context);
+    if (!inspection.exists || inspection.stale || inspection.error) {
+      if (fix) {
+        const rebuilt = await writeProjectRollup(context, { doctorOk: true });
+        return {
+          fixed: true,
+          diagnostics: [
+            {
+              code: "project.rollup",
+              severity: "fixed",
+              message: "Rebuilt project rollup",
+              details: { inspection, rebuilt }
+            }
+          ]
+        };
+      }
+      return {
+        fixed: false,
+        diagnostics: [
+          {
+            code: "project.rollup",
+            severity: generatedArtifactDiagnosticSeverity(inspection),
+            message: projectRollupDiagnosticMessage(inspection),
+            details: inspection
+          }
+        ]
+      };
+    }
+
+    return {
+      fixed: false,
+      diagnostics: [
+        {
+          code: "project.rollup",
+          severity: "ok",
+          message: "Project rollup is fresh",
+          details: inspection
+        }
+      ]
+    };
+  } catch (error) {
+    return {
+      fixed: false,
+      diagnostics: [
+        {
+          code: "project.rollup",
+          severity: "warning",
+          message: "Project rollup could not be inspected",
           details: error instanceof Error ? error.message : error
         }
       ]
@@ -2982,6 +3050,23 @@ function searchIndexDiagnosticMessage(inspection: {
   return "Local search index is fresh";
 }
 
+function projectRollupDiagnosticMessage(inspection: {
+  readonly exists: boolean;
+  readonly stale: boolean;
+  readonly error?: string;
+}): string {
+  if (!inspection.exists) {
+    return "Project rollup is missing; run `bwrk sync refresh --json` or `bwrk doctor --fix`";
+  }
+  if (inspection.error) {
+    return "Project rollup is invalid; run `bwrk sync refresh --json` or `bwrk doctor --fix`";
+  }
+  if (inspection.stale) {
+    return "Project rollup is stale; run `bwrk sync refresh --json` or `bwrk doctor --fix`";
+  }
+  return "Project rollup is fresh";
+}
+
 function stateSection<T>(state: Record<string, unknown>, section: string): readonly T[] {
   const values = state[section];
   return Array.isArray(values) ? (values as readonly T[]) : [];
@@ -3562,6 +3647,7 @@ const STRICT_ADVISORY_WARNING_CODES = new Set([
   "cache.sqlite",
   "git.tracker_drift",
   "search.index",
+  "project.rollup",
   "summary.directive_coverage",
   "summary.legacy_closeout_coverage",
   "summary.legacy_checkpoint_coverage",

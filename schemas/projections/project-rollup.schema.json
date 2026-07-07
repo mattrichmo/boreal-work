@@ -1,0 +1,234 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://boreal.work/schemas/projections/project-rollup.schema.json",
+  "title": "Boreal Project Rollup",
+  "type": "object",
+  "required": [
+    "schemaVersion",
+    "projectId",
+    "workspaceRoot",
+    "generatedAt",
+    "stateContentHash",
+    "counts",
+    "limbo",
+    "reservations",
+    "enforcement",
+    "health",
+    "lastEvent",
+    "lastOperation",
+    "next"
+  ],
+  "properties": {
+    "schemaVersion": { "const": "boreal.project-rollup.v1" },
+    "projectId": { "type": "string", "minLength": 1 },
+    "workspaceRoot": { "type": "string", "minLength": 1 },
+    "generatedAt": { "type": "string", "format": "date-time" },
+    "stateContentHash": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" },
+    "counts": {
+      "type": "object",
+      "required": ["work", "reservations"],
+      "properties": {
+        "work": {
+          "type": "object",
+          "required": ["total", "byStatus", "byKind"],
+          "properties": {
+            "total": { "type": "integer", "minimum": 0 },
+            "byStatus": { "$ref": "#/$defs/workStatusCounts" },
+            "byKind": { "$ref": "#/$defs/workKindCounts" }
+          },
+          "additionalProperties": false
+        },
+        "reservations": { "$ref": "#/$defs/reservationCounts" }
+      },
+      "additionalProperties": false
+    },
+    "limbo": {
+      "type": "object",
+      "required": ["needsVerification", "verified"],
+      "properties": {
+        "needsVerification": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/limboEntry" }
+        },
+        "verified": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/limboEntry" }
+        }
+      },
+      "additionalProperties": false
+    },
+    "reservations": {
+      "type": "object",
+      "required": ["activeIds", "expiredIds"],
+      "properties": {
+        "activeIds": {
+          "type": "array",
+          "items": { "type": "string", "pattern": "^bw_reservation_[a-f0-9]{12,64}$" },
+          "uniqueItems": true
+        },
+        "expiredIds": {
+          "type": "array",
+          "items": { "type": "string", "pattern": "^bw_reservation_[a-f0-9]{12,64}$" },
+          "uniqueItems": true
+        }
+      },
+      "additionalProperties": false
+    },
+    "enforcement": {
+      "type": "object",
+      "required": ["blockingGaps"],
+      "properties": {
+        "blockingGaps": {
+          "type": "object",
+          "required": ["openCount", "blockedWorkCount", "samples"],
+          "properties": {
+            "openCount": { "type": "integer", "minimum": 0 },
+            "blockedWorkCount": { "type": "integer", "minimum": 0 },
+            "samples": {
+              "type": "array",
+              "items": { "$ref": "#/$defs/blockingGapSample" }
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "health": {
+      "type": "object",
+      "required": ["doctorOk", "syncOk"],
+      "properties": {
+        "doctorOk": { "type": ["boolean", "null"] },
+        "syncOk": { "type": ["boolean", "null"] }
+      },
+      "additionalProperties": false
+    },
+    "lastEvent": {
+      "anyOf": [
+        { "type": "null" },
+        { "$ref": "#/$defs/lastEvent" }
+      ]
+    },
+    "lastOperation": {
+      "anyOf": [
+        { "type": "null" },
+        { "$ref": "#/$defs/lastOperation" }
+      ]
+    },
+    "next": {
+      "type": "object",
+      "required": ["limit", "work"],
+      "properties": {
+        "limit": { "type": "integer", "minimum": 1 },
+        "work": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/nextWork" }
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "workStatusCounts": {
+      "type": "object",
+      "required": ["draft", "ready", "reserved", "in_progress", "blocked", "needs_verification", "verified", "closed", "cancelled"],
+      "properties": {
+        "draft": { "type": "integer", "minimum": 0 },
+        "ready": { "type": "integer", "minimum": 0 },
+        "reserved": { "type": "integer", "minimum": 0 },
+        "in_progress": { "type": "integer", "minimum": 0 },
+        "blocked": { "type": "integer", "minimum": 0 },
+        "needs_verification": { "type": "integer", "minimum": 0 },
+        "verified": { "type": "integer", "minimum": 0 },
+        "closed": { "type": "integer", "minimum": 0 },
+        "cancelled": { "type": "integer", "minimum": 0 }
+      },
+      "additionalProperties": false
+    },
+    "workKindCounts": {
+      "type": "object",
+      "required": ["issue", "task", "sprint", "milestone"],
+      "properties": {
+        "issue": { "type": "integer", "minimum": 0 },
+        "task": { "type": "integer", "minimum": 0 },
+        "sprint": { "type": "integer", "minimum": 0 },
+        "milestone": { "type": "integer", "minimum": 0 }
+      },
+      "additionalProperties": false
+    },
+    "reservationCounts": {
+      "type": "object",
+      "required": ["total", "active", "expired", "released"],
+      "properties": {
+        "total": { "type": "integer", "minimum": 0 },
+        "active": { "type": "integer", "minimum": 0 },
+        "expired": { "type": "integer", "minimum": 0 },
+        "released": { "type": "integer", "minimum": 0 }
+      },
+      "additionalProperties": false
+    },
+    "limboEntry": {
+      "type": "object",
+      "required": ["workId", "title", "status", "updatedAt", "ageMs", "ageDays"],
+      "properties": {
+        "workId": { "type": "string", "pattern": "^bw_work_[a-f0-9]{12,64}$" },
+        "title": { "type": "string", "minLength": 1 },
+        "status": { "enum": ["needs_verification", "verified"] },
+        "updatedAt": { "type": "string", "format": "date-time" },
+        "ageMs": { "type": "integer", "minimum": 0 },
+        "ageDays": { "type": "integer", "minimum": 0 }
+      },
+      "additionalProperties": false
+    },
+    "blockingGapSample": {
+      "type": "object",
+      "required": ["workId", "title", "blockerIds"],
+      "properties": {
+        "workId": { "type": "string", "pattern": "^bw_work_[a-f0-9]{12,64}$" },
+        "title": { "type": "string", "minLength": 1 },
+        "blockerIds": {
+          "type": "array",
+          "items": { "type": "string", "pattern": "^bw_work_[a-f0-9]{12,64}$" },
+          "uniqueItems": true
+        }
+      },
+      "additionalProperties": false
+    },
+    "lastEvent": {
+      "type": "object",
+      "required": ["id", "type", "subjectId", "at"],
+      "properties": {
+        "id": { "type": "string", "pattern": "^bw_event_[a-f0-9]{12,64}$" },
+        "type": { "type": "string", "minLength": 1 },
+        "subjectId": { "type": "string", "minLength": 1 },
+        "at": { "type": "string", "format": "date-time" }
+      },
+      "additionalProperties": false
+    },
+    "lastOperation": {
+      "type": "object",
+      "required": ["id", "commandPath", "status", "finishedAt"],
+      "properties": {
+        "id": { "type": "string", "pattern": "^bw_operation_[a-f0-9]{12,64}$" },
+        "commandPath": { "type": "string", "minLength": 1 },
+        "status": { "enum": ["succeeded", "failed"] },
+        "finishedAt": { "type": "string", "format": "date-time" }
+      },
+      "additionalProperties": false
+    },
+    "nextWork": {
+      "type": "object",
+      "required": ["workId", "title", "kind", "priority", "status", "updatedAt"],
+      "properties": {
+        "workId": { "type": "string", "pattern": "^bw_work_[a-f0-9]{12,64}$" },
+        "title": { "type": "string", "minLength": 1 },
+        "kind": { "enum": ["issue", "task", "sprint", "milestone"] },
+        "priority": { "enum": ["low", "normal", "high", "critical"] },
+        "status": { "enum": ["draft", "ready", "reserved", "in_progress", "blocked", "needs_verification", "verified", "closed", "cancelled"] },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "additionalProperties": false
+    }
+  }
+}

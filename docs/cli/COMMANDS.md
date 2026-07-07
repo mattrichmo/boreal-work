@@ -1514,6 +1514,16 @@ Search commands rebuild a missing, invalid, or stale local search index by defau
 
 With `--no-rebuild`, the command fails closed when the index is missing, malformed, or stale. Rebuild with `bwrk search index` or `bwrk doctor --fix`.
 
+## `rollup show`
+
+```bash
+bwrk rollup show [--json]
+```
+
+Reads the generated `.boreal/rollup.json` project projection and reports whether it is fresh for the current runtime state. The rollup contains the project ID, schema version, generated timestamp, state content hash, work counts by status and kind, verification-limbo lists with ages, active and expired reservation counts, open blocking-dependency gap samples, doctor/sync flags, the latest event, and a bounded next-work list.
+
+JSON `data` contains `ok`, `inspection`, and `rollup`. The command exits `1` when the rollup is missing, stale, or invalid. Rebuild with `bwrk sync refresh --json` or `bwrk doctor --fix`.
+
 ## `export json`
 
 ```bash
@@ -1718,9 +1728,9 @@ Behavior:
 bwrk sync status [--view dashboard] [--json]
 ```
 
-Checks collaboration readiness without mutating state. The command combines repo-local memory vault readiness and content health, JSONL ledger freshness, generated search-index freshness, and Git worktree safety so agents can see whether the workspace is ready to share and query from one place. `--view dashboard` renders grouped checks and recommended actions.
+Checks collaboration readiness without mutating state. The command combines repo-local memory vault readiness and content health, JSONL ledger freshness, generated search-index freshness, project rollup freshness, and Git worktree safety so agents can see whether the workspace is ready to share and query from one place. `--view dashboard` renders grouped checks and recommended actions.
 
-JSON `data` contains `ok`, `workspaceRoot`, `checkedAt`, `vault`, `ledgers`, `searchIndex`, `git`, and `recommendedActions`. It exits `1` when the memory vault is missing/incomplete, when ledgers are missing/stale/invalid, when the local search index is missing/stale/invalid, or when `.boreal/ledgers` or `memory` paths are dirty on a protected branch or detached HEAD. Protected branches default to `main`, `master`, and `trunk`; set `BOREAL_PROTECTED_BRANCHES` to a comma-separated list to override. Recommended repairs are specific commands such as `bwrk vault init --json`, `bwrk sync refresh --json`, and `git switch -c boreal/sync-work`.
+JSON `data` contains `ok`, `workspaceRoot`, `checkedAt`, `vault`, `ledgers`, `searchIndex`, `projectRollup`, `git`, and `recommendedActions`. It exits `1` when the memory vault is missing/incomplete, when ledgers are missing/stale/invalid, when the local search index or project rollup is missing/stale/invalid, or when `.boreal/ledgers` or `memory` paths are dirty on a protected branch or detached HEAD. Protected branches default to `main`, `master`, and `trunk`; set `BOREAL_PROTECTED_BRANCHES` to a comma-separated list to override. Recommended repairs are specific commands such as `bwrk vault init --json`, `bwrk sync refresh --json`, and `git switch -c boreal/sync-work`.
 
 ## `sync refresh`
 
@@ -1728,9 +1738,9 @@ JSON `data` contains `ok`, `workspaceRoot`, `checkedAt`, `vault`, `ledgers`, `se
 bwrk sync refresh [--strict] [--json]
 ```
 
-Refreshes generated collaboration artifacts in one closeout command: context-pack projections, the local search index, and the JSONL ledger export. It then returns the same status shape as `sync status` under `data.status`. Snapshot creation remains explicit through `bwrk snapshot create --json` because snapshots are named baselines, not routine cache refreshes.
+Refreshes generated collaboration artifacts in one closeout command: context-pack projections, the project rollup, the local search index, and the JSONL ledger export. It then returns the same status shape as `sync status` under `data.status`. Snapshot creation remains explicit through `bwrk snapshot create --json` because snapshots are named baselines, not routine cache refreshes.
 
-JSON `data` contains `refreshed`, `refreshOk`, `postRefreshStatusOk`, `exitReason`, `contextViews`, `searchIndex`, `ledgers`, `sqliteCache`, and `status`. `refreshOk: true` means projections, search, and ledger export completed. `sqliteCache` is retained as a compatibility key and reports `{ "retired": true, "rebuilt": false, "skipped": true }`; the legacy `.boreal/cache/runtime-cache.sqlite` cache is no longer rebuilt. `postRefreshStatusOk` mirrors nested `status.ok` after the refresh. `exitReason` is `ok` when post-refresh status is healthy, or `post_refresh_status_unhealthy` when the refresh completed but the final health gate still failed.
+JSON `data` contains `refreshed`, `refreshOk`, `postRefreshStatusOk`, `exitReason`, `contextViews`, `projectRollup`, `searchIndex`, `ledgers`, `sqliteCache`, and `status`. `refreshOk: true` means projections, rollup, search, and ledger export completed. `sqliteCache` is retained as a compatibility key and reports `{ "retired": true, "rebuilt": false, "skipped": true }`; the legacy `.boreal/cache/runtime-cache.sqlite` cache is no longer rebuilt. `postRefreshStatusOk` mirrors nested `status.ok` after the refresh. `exitReason` is `ok` when post-refresh status is healthy, or `post_refresh_status_unhealthy` when the refresh completed but the final health gate still failed.
 
 By default the command exits `0` when the refresh itself succeeds, even if `postRefreshStatusOk` is false. Pass `--strict` to restore status-based exit semantics and exit `1` when the post-refresh sync status is still not clean, for example because the vault is missing or Git collaboration paths are dirty on a protected branch. Agents should treat `exitReason: post_refresh_status_unhealthy` as partial success: generated artifacts were refreshed, but the nested `status` object and `recommendedActions` describe the remaining repair.
 
@@ -1854,6 +1864,7 @@ Checks:
 - Derived readiness consistency.
 - Missing or stale context-pack projections.
 - Snapshot/export drift between the current export hash and the latest recovery snapshot.
+- Missing, malformed, or stale project rollup.
 - Missing, malformed, or stale local search index.
 - SQLite generated cache freshness when a cache file exists.
 - Runtime state and search-index lock state.
@@ -1867,6 +1878,7 @@ Directive migration diagnostics are split deliberately. `summary.directive_cover
 - Repair `work.dependencyIds` from canonical `blocks` graph edges.
 - Recompute derived readiness.
 - Rebuild context-pack projections.
+- Rebuild the project rollup.
 - Rebuild the local search index.
 - Expire stale active reservations and restore affected work to derived readiness.
 - Restore missing project/memory `.gitignore` guards.
@@ -1875,7 +1887,7 @@ Directive migration diagnostics are split deliberately. `summary.directive_cover
 
 `--fix` does not create a submodule gitlink, remove child memory from the project Git index, or delete stale non-submodule `.gitmodules` entries. Those are reported with exact Git details so a human can decide whether to run commands such as `git submodule add <remote> memory` or `git rm -r --cached -- memory`.
 
-`--strict` treats operationally blocking warnings as a failing doctor result for CI and hardening gates. Advisory warnings such as stopped/stale daemon status, install status caveats, generated artifact drift, SQLite cache drift, search-index rebuild guidance, current directive-acknowledgement coverage gaps, and legacy agent-summary coverage gaps are surfaced without failing strict mode unless they are paired with an error or a blocking Git finding. Diagnostic severities are not rewritten; JSON `data.ok` and the command exit code reflect the strict gate result.
+`--strict` treats operationally blocking warnings as a failing doctor result for CI and hardening gates. Advisory warnings such as stopped/stale daemon status, install status caveats, generated artifact drift, SQLite cache drift, rollup/search-index rebuild guidance, current directive-acknowledgement coverage gaps, and legacy agent-summary coverage gaps are surfaced without failing strict mode unless they are paired with an error or a blocking Git finding. Diagnostic severities are not rewritten; JSON `data.ok` and the command exit code reflect the strict gate result.
 
 Without `--strict`, doctor exits `1` when any diagnostic has severity `error`.
 

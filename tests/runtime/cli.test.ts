@@ -3978,6 +3978,7 @@ describe("bwrk cli", () => {
         "context search",
         "search index",
         "search query",
+        "rollup show",
         "dep add",
         "dep remove",
         "dep tree",
