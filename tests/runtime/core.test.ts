@@ -48,10 +48,15 @@ import {
   PROJECT_REGISTRY_ROOT_ENV,
   PROJECT_REGISTRY_SCHEMA_ID,
   PROJECT_REGISTRY_SCHEMA_VERSION,
+  borealReferenceRecordKind,
   projectRegistryEntryIdFromIdentity,
   projectRegistryDocumentSchemaIssues,
   randomId,
   readJsonFile,
+  formatBorealReferenceUri,
+  isBorealReferenceUri,
+  parseBorealReferenceUri,
+  resolveBorealReferenceUri,
   resolveProjectRegistryPaths,
   RUNTIME_SCHEMA_CONTRACTS,
   RUNTIME_SCHEMA_IDS,
@@ -925,6 +930,125 @@ describe("core hashing and ids", () => {
     expect(remoteIdentity).toEqual(movedRemoteIdentity);
     expect(pathIdentity.strategy).toBe("path");
     expect(pathIdentity).not.toEqual(remoteIdentity);
+  });
+
+  it("parses, formats, and classifies boreal reference URIs", () => {
+    const uri = formatBorealReferenceUri({
+      projectId: "project_deadbeefdead",
+      recordId: "bw_work_deadbeefdead"
+    });
+    const parsed = parseBorealReferenceUri(uri);
+
+    expect(uri).toBe("boreal://project_deadbeefdead/bw_work_deadbeefdead");
+    expect(parsed).toEqual({
+      ok: true,
+      reference: {
+        uri,
+        projectId: "project_deadbeefdead",
+        recordId: "bw_work_deadbeefdead",
+        recordKind: "work"
+      }
+    });
+    expect(isBorealReferenceUri(uri)).toBe(true);
+    expect(borealReferenceRecordKind("bw_evidence_deadbeefdead")).toBe("evidence");
+
+    expect(parseBorealReferenceUri(" boreal://project_deadbeefdead/bw_work_deadbeefdead")).toEqual(
+      expect.objectContaining({ ok: false })
+    );
+    expect(parseBorealReferenceUri("boreal://Project/bw_work_deadbeefdead")).toEqual(expect.objectContaining({ ok: false }));
+    expect(parseBorealReferenceUri("boreal://project/bad-id")).toEqual(expect.objectContaining({ ok: false }));
+    expect(parseBorealReferenceUri("boreal://project/bw_unknown_deadbeefdead")).toEqual(expect.objectContaining({ ok: false }));
+    expect(parseBorealReferenceUri("boreal://project/bw_work_deadbeefdead\u200b")).toEqual(expect.objectContaining({ ok: false }));
+  });
+
+  it("resolves boreal references through the registry without throwing for unresolved cases", async () => {
+    const linked = projectRegistryDocument().entries[0];
+    const archived = { ...linked, id: "archived-project", lifecycle: "archived" as const };
+    const missing = { ...linked, id: "missing-project", lifecycle: "missing" as const };
+    const registry = [linked, archived, missing];
+    const readRecord = async (entry: typeof linked, reference: { readonly recordId: string }) =>
+      entry.id === linked.id && reference.recordId === "bw_work_deadbeefdead"
+        ? { id: reference.recordId, title: "Referenced work" }
+        : undefined;
+
+    await expect(
+      resolveBorealReferenceUri({
+        registry,
+        uri: `boreal://${linked.id}/bw_work_deadbeefdead`,
+        readRecord
+      })
+    ).resolves.toEqual(
+      expect.objectContaining({
+        status: "resolved",
+        record: { id: "bw_work_deadbeefdead", title: "Referenced work" }
+      })
+    );
+    await expect(
+      resolveBorealReferenceUri({
+        registry,
+        uri: `boreal://${linked.id}/bw_work_cafebabecafe`,
+        readRecord
+      })
+    ).resolves.toEqual(expect.objectContaining({ status: "unresolved-missing-record" }));
+    await expect(
+      resolveBorealReferenceUri({
+        registry,
+        uri: "boreal://archived-project/bw_work_deadbeefdead",
+        readRecord,
+        lastKnownRollups: { "archived-project": { generatedAt: "2026-01-01T00:00:00.000Z" } }
+      })
+    ).resolves.toEqual(
+      expect.objectContaining({
+        status: "unresolved-unlinked",
+        projectLifecycle: "archived",
+        lastKnownRollup: { generatedAt: "2026-01-01T00:00:00.000Z" }
+      })
+    );
+    await expect(
+      resolveBorealReferenceUri({
+        registry,
+        uri: "boreal://missing-project/bw_work_deadbeefdead",
+        readRecord
+      })
+    ).resolves.toEqual(expect.objectContaining({ status: "unresolved-missing-project", projectLifecycle: "missing" }));
+    await expect(
+      resolveBorealReferenceUri({
+        registry,
+        uri: "boreal://unknown-project/bw_work_deadbeefdead",
+        readRecord
+      })
+    ).resolves.toEqual(expect.objectContaining({ status: "unresolved-missing-project" }));
+    await expect(
+      resolveBorealReferenceUri({
+        registry,
+        uri: "file://not-boreal",
+        readRecord
+      })
+    ).resolves.toEqual(expect.objectContaining({ status: "invalid-uri" }));
+  });
+
+  it("accepts boreal references as source ref URIs", () => {
+    const sourceRefUri = "boreal://project_deadbeefdead/bw_work_deadbeefdead";
+
+    expect(
+      runtimeSnapshotSchemaIssues({
+        workItems: [
+          {
+            meta: { ...runtimeMeta("bw_work_cafebabecafe"), sourceRefs: [{ uri: sourceRefUri }] },
+            kind: "task",
+            title: "Cross-project source ref",
+            description: "",
+            status: "ready",
+            priority: "normal",
+            acceptanceCriteria: [],
+            labels: [],
+            dependencyIds: [],
+            evidenceIds: [],
+            verificationIds: []
+          }
+        ]
+      })
+    ).toEqual([]);
   });
 
   it("binds MCP resource access to one selected project per request", () => {

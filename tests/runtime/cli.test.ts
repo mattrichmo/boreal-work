@@ -1775,6 +1775,40 @@ describe("bwrk cli", () => {
     expect(superseded.decision.meta.id).not.toBe(decision.meta.id);
   });
 
+  it("accepts boreal reference URIs through work create source refs", async () => {
+    const rootDir = await makeTempWorkspace();
+    await runCli(rootDir, [
+      "init",
+      "--setup-memory",
+      "--memory-root",
+      "memory",
+      "--memory-layout",
+      "in-repo",
+      "--memory-git-mode",
+      "shared",
+      "--json"
+    ]);
+
+    const sourceRefUri = "boreal://project_deadbeefdead/bw_work_deadbeefdead";
+    const work = parseData<{
+      readonly meta: { readonly sourceRefs: readonly Array<{ readonly uri: string }> };
+    }>(
+      (
+        await runCli(rootDir, [
+          "work",
+          "create",
+          "Cross-project source ref",
+          "--source",
+          sourceRefUri,
+          "--ready",
+          "--json"
+        ])
+      ).stdout
+    );
+
+    expect(work.meta.sourceRefs).toEqual([{ uri: sourceRefUri }]);
+  });
+
   it("computes sprint metrics and closes verified sprints", async () => {
     const rootDir = await makeTempWorkspace();
     await runCli(rootDir, ["init", "--json"]);
