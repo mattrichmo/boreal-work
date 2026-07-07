@@ -54,7 +54,7 @@ export async function createCliContext(
   const useGlobal = isGlobalContext(args);
   const explicitWorkspace = flagValue(args, "workspace") ?? flagValue(args, "project-root");
   const workspaceRoot = useGlobal
-    ? resolveGlobalWorkspaceRoot()
+    ? resolveProjectRegistryPaths({ rootDir: flagValue(args, "registry-root"), env: process.env }).rootDir
     : explicitWorkspace
       ? resolveExplicitWorkspaceRoot(explicitWorkspace)
       : resolveDiscoveredWorkspaceRoot(cwd);

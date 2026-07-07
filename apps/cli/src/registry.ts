@@ -37,6 +37,11 @@ export interface RegistryListResult {
   readonly entryCount: number;
 }
 
+export interface RegistryInitResult extends RegistryListResult {
+  readonly initialized: true;
+  readonly created: boolean;
+}
+
 export interface RegistryAddResult extends RegistryListResult {
   readonly added: boolean;
   readonly replaced: boolean;
@@ -109,6 +114,22 @@ export async function listProjectRegistry(options: RegistryCommandOptions = {}):
   const storage = registryStorage(options);
   const document = await readRegistryDocument(storage);
   return registryListResult({ ...document, storage });
+}
+
+export async function initProjectRegistry(options: RegistryCommandOptions = {}): Promise<RegistryInitResult> {
+  const storage = registryStorage(options);
+  return withFileLock(storage.lockDir, DEFAULT_FILE_LOCK_OPTIONS, async () => {
+    const created = !existsSync(storage.registryFile);
+    const current = await readRegistryDocument(storage);
+    const document = withRegistryUpdate(storage, current);
+    assertValidRegistryDocument(document, storage.registryFile);
+    await writeTextFileAtomic(storage.registryFile, `${JSON.stringify(document, null, 2)}\n`);
+    return {
+      ...registryListResult(document),
+      initialized: true,
+      created
+    };
+  });
 }
 
 export async function addProjectRegistryEntry(options: RegistryAddOptions): Promise<RegistryAddResult> {

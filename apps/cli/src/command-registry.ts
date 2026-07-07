@@ -762,10 +762,10 @@ export const COMMAND_DEFINITIONS: readonly CommandDefinition[] = [
   {
     path: ["global"],
     category: "dashboard",
-    summary: "Your global workspace: cross-repo dashboard, global work (global work ...), and link/unlink.",
-    usage: "bwrk global [link <path>|unlink <project-id>] [--web] [--json] [--mouse] [--refresh-ms <ms>] [--host <host>] [--port <n>] [--no-open] [--mode live|fixture] [--live-cache-ttl-ms <ms>] [--allow-fixture-fallback] [--name <text>] [--label <label>...] [--registry-root <dir>] [--init] [--purge] [--yes]",
+    summary: "Your global workspace: cross-repo dashboard, global work (global work ...), init, and link/unlink.",
+    usage: "bwrk global [init|link <path>|unlink <project-id>] [--web] [--json] [--mouse] [--refresh-ms <ms>] [--host <host>] [--port <n>] [--no-open] [--mode live|fixture] [--live-cache-ttl-ms <ms>] [--allow-fixture-fallback] [--name <text>] [--label <label>...] [--registry-root <dir>] [--init] [--purge] [--yes]",
     description:
-      "The machine-level global workspace. With no subcommand it opens the cross-repo dashboard (terminal by default; --web for the browser, --json for the data payload). `bwrk global work ...` (and any `bwrk global <command>`) runs that command against the global workspace. `bwrk global link <path>` links a project to be tracked; `bwrk global unlink <project-id>` removes it.",
+      "The machine-level global workspace. With no subcommand it opens the cross-repo dashboard (terminal by default; --web for the browser, --json for the data payload). `bwrk global init` creates the machine-local registry and global workspace. `bwrk global work ...` (and any `bwrk global <command>`) runs that command against the global workspace. `bwrk global link <path>` links a project to be tracked; `bwrk global unlink <project-id>` removes it.",
     flags: [
       flag("web", "boolean", "Open the browser console instead of the terminal dashboard."),
       flag("mouse", "boolean", "Terminal dashboard: enable mouse wheel (disables native text selection)."),
@@ -778,12 +778,26 @@ export const COMMAND_DEFINITIONS: readonly CommandDefinition[] = [
       flag("allow-fixture-fallback", "boolean", "Browser console (--web): render fixture data with warnings when live data fails."),
       flag("name", "value", "link: display name for the linked project."),
       flag("label", "value", "link: label for the linked project (repeatable).", true),
-      flag("registry-root", "value", "link/unlink: machine-local registry root override."),
+      flag("registry-root", "value", "init/link/unlink: machine-local registry root override."),
       flag("init", "boolean", "link: initialize a fresh target workspace before adding it to the registry."),
       flag("purge", "boolean", "unlink: remove the archived registry row instead of retaining it for references."),
       flag("yes", "boolean", "unlink --purge: confirm permanent registry-row removal. Short alias: -y.")
     ],
     positionals: { label: "arguments", min: 0, max: 2 },
+    requiresWorkspace: false,
+    supportsJson: true,
+  },
+  {
+    path: ["global", "init"],
+    category: "dashboard",
+    summary: "Initialize the machine-local global workspace.",
+    usage: "bwrk global init [--registry-root <dir>] [--json]",
+    description:
+      "Creates the project registry file and global workspace at the selected machine-local registry root. This is the explicit first-run bootstrap for global commands.",
+    flags: [
+      flag("registry-root", "value", "Machine-local registry root override. Defaults to the platform Boreal app-state directory.")
+    ],
+    positionals: { label: "arguments", min: 0, max: 0 },
     requiresWorkspace: false,
     supportsJson: true,
   },
@@ -2907,6 +2921,18 @@ const COMMAND_BEHAVIOR: Readonly<Record<string, CommandBehaviorMetadata>> = {
     maxResultSizeChars: 500_000,
     humanOutputKind: "none",
     examples: ["bwrk global", "bwrk global --web", "bwrk global --json", "bwrk global work list"],
+  }),
+  "global init": commandMetadata("global init", {
+    readOnly: false,
+    destructive: false,
+    writesState: true,
+    writesGeneratedArtifacts: false,
+    requiresFreshIndex: false,
+    concurrencySafe: true,
+    requiresLock: "registry",
+    maxResultSizeChars: 100_000,
+    humanOutputKind: "record",
+    examples: ["bwrk global init --json"],
   }),
   "link": commandMetadata("link", {
     readOnly: false,

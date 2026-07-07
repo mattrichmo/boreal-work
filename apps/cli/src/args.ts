@@ -3,9 +3,9 @@ import { BorealError } from "@boreal/core";
 import { isTopLevelGroup, registryValueFlagNames } from "./command-registry.js";
 
 // `bwrk global <group> ...` is sugar for `bwrk <group> ... --global`. Bare
-// `bwrk global` (and `global link/unlink`, `global --web/--json`) stay as the
-// global dashboard command and are left untouched.
-const GLOBAL_OWN_SUBCOMMANDS = new Set(["link", "unlink"]);
+// `bwrk global` (and `global init/link/unlink`, `global --web/--json`) stay as
+// the global dashboard command and are left untouched.
+const GLOBAL_OWN_SUBCOMMANDS = new Set(["init", "link", "unlink"]);
 
 export function expandGlobalNamespace(argv: readonly string[]): readonly string[] {
   const [first, second] = argv;

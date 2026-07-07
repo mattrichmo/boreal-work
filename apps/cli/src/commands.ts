@@ -126,7 +126,7 @@ import { flagValue, flagValues, hasFlag, requiredFlag, type ParsedArgs } from ".
 import { agentCommand, agentStartCommand, type AgentCommandDependencies } from "./commands/agent.js";
 import { captureCommand } from "./commands/capture.js";
 import { daemonCommand, type DaemonCommandDependencies } from "./commands/daemon.js";
-import { dashboardCommand, globalCommand, linkCommand, unlinkCommand } from "./commands/dashboard.js";
+import { bootstrapGlobalFirstRunIfNeeded, dashboardCommand, globalCommand, linkCommand, unlinkCommand } from "./commands/dashboard.js";
 import { evidenceCommand } from "./commands/evidence.js";
 import { healthCommand, type HealthCommandDependencies } from "./commands/health.js";
 import { initCommand, installCommand, installRootFromArgs } from "./commands/install.js";
@@ -710,6 +710,8 @@ export async function runCommand(args: ParsedArgs, output: CliOutput, cwd: strin
     output.write(json ? formatRecord(getVersionInfo(), true) : formatVersionInfo());
     return { exitCode: 0 };
   }
+
+  await bootstrapGlobalFirstRunIfNeeded(args, output, json, cwd);
 
   const shouldLogOperation = shouldRecordOperation(definition);
   const operationId = shouldLogOperation ? randomId<OperationId>("operation") : undefined;

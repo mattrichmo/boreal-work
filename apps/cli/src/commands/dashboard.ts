@@ -1,12 +1,14 @@
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
+import { createInterface } from "node:readline/promises";
 
 import {
   BorealError,
   deriveProjectRegistryIdentity,
   isIsoTimestamp,
   nowIso,
+  resolveProjectRegistryPaths,
   projectRegistryEntryIdFromIdentity,
   type ProjectRegistryEntry as CoreProjectRegistryEntry,
   type ProjectRollupDocument,
@@ -41,6 +43,7 @@ import { readProjectSetupConfig } from "../project-setup.js";
 import {
   addProjectRegistryEntry,
   doctorProjectRegistry,
+  initProjectRegistry,
   listProjectRegistry,
   removeProjectRegistryEntry,
   type RegistryDoctorResult
@@ -69,6 +72,16 @@ interface GlobalDashboardProjectOverview {
   readonly sync: SyncDashboardView;
   readonly locks: LockDashboardView;
   readonly daemon: DaemonStatusResult;
+}
+
+export interface GlobalInitResult {
+  readonly schemaVersion: "boreal.cli.global.init.v1";
+  readonly initialized: true;
+  readonly created: boolean;
+  readonly registryRoot: string;
+  readonly registryFile: string;
+  readonly workspaceRoot: string;
+  readonly initCommand: string;
 }
 
 export async function dashboardCommand(
@@ -108,6 +121,9 @@ export async function globalCommand(
   output: CliOutput,
   json: boolean
 ): Promise<CommandResult> {
+  if (action === "init") {
+    return globalInitCommand(context, args, output, json);
+  }
   if (action === "link") {
     return linkCommand(rest[0], context, args, output, json);
   }
@@ -124,6 +140,118 @@ export async function globalCommand(
     return serveDashboardCommand(context, args, output, "global");
   }
   return launchTuiCommand(context, args, "global");
+}
+
+export async function bootstrapGlobalFirstRunIfNeeded(
+  args: ParsedArgs,
+  output: CliOutput,
+  json: boolean,
+  cwd: string
+): Promise<void> {
+  if (!requiresGlobalFirstRunBootstrap(args) || globalRegistryExists(args)) {
+    return;
+  }
+  const command = globalInitCommandString(args);
+  const storage = globalRegistryStorage(args);
+  const details = {
+    registryRoot: storage.rootDir,
+    registryFile: storage.registryFile,
+    initCommand: command
+  };
+  if (json) {
+    throw new BorealError("BOREAL_INVALID_INPUT", `Global workspace is not initialized; run \`${command}\``, details);
+  }
+  if (!process.stdin.isTTY || !process.stdout.isTTY) {
+    throw new BorealError("BOREAL_INVALID_INPUT", `Global workspace is not initialized; run \`${command}\``, details);
+  }
+  const accepted = await promptGlobalFirstRunInit(storage.rootDir, command);
+  if (!accepted) {
+    throw new BorealError("BOREAL_INVALID_INPUT", "Global workspace initialization cancelled", details);
+  }
+  const initArgs = globalInitArgs(args);
+  const initContext = await createCliContext(initArgs, cwd);
+  const result = await initializeGlobalWorkspace(initContext, initArgs);
+  output.write(formatGlobalInit(result));
+}
+
+async function globalInitCommand(
+  context: CliContext,
+  args: ParsedArgs,
+  output: CliOutput,
+  json: boolean
+): Promise<CommandResult> {
+  const result = await initializeGlobalWorkspace(context, args);
+  output.write(json ? formatRecord(result, true) : formatGlobalInit(result));
+  return { exitCode: 0 };
+}
+
+async function initializeGlobalWorkspace(context: CliContext, args: ParsedArgs): Promise<GlobalInitResult> {
+  const registry = await initProjectRegistry({ registryRoot: flagValue(args, "registry-root") });
+  await context.runtime.ensureWorkspaceInitialized();
+  return {
+    schemaVersion: "boreal.cli.global.init.v1",
+    initialized: true,
+    created: registry.created,
+    registryRoot: registry.storage.rootDir,
+    registryFile: registry.storage.registryFile,
+    workspaceRoot: context.workspaceRoot,
+    initCommand: globalInitCommandString(args)
+  };
+}
+
+function requiresGlobalFirstRunBootstrap(args: ParsedArgs): boolean {
+  if (args.command[0] === "global" && args.command[1] === "init") {
+    return false;
+  }
+  return isGlobalContext(args);
+}
+
+function globalRegistryExists(args: ParsedArgs): boolean {
+  return existsSync(globalRegistryStorage(args).registryFile);
+}
+
+function globalRegistryStorage(args: ParsedArgs) {
+  return resolveProjectRegistryPaths({ rootDir: flagValue(args, "registry-root"), env: process.env });
+}
+
+function globalInitCommandString(args: ParsedArgs): string {
+  const registryRoot = flagValue(args, "registry-root");
+  return registryRoot ? `bwrk global init --registry-root ${registryRoot}` : "bwrk global init";
+}
+
+function globalInitArgs(args: ParsedArgs): ParsedArgs {
+  const flags = new Map<string, string[]>();
+  for (const name of ["actor", "actor-kind", "session", "registry-root"]) {
+    const values = args.flags.get(name);
+    if (values) {
+      flags.set(name, [...values]);
+    }
+  }
+  return { command: ["global", "init"], flags };
+}
+
+async function promptGlobalFirstRunInit(registryRoot: string, command: string): Promise<boolean> {
+  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  try {
+    const answer = await rl.question(`Run \`${command}\` to initialize Boreal global workspace at ${registryRoot}? [Y/n] `);
+    const normalized = answer.trim().toLowerCase();
+    if (!normalized) {
+      return true;
+    }
+    return normalized === "y" || normalized === "yes";
+  } finally {
+    rl.close();
+  }
+}
+
+function formatGlobalInit(result: GlobalInitResult): string {
+  return [
+    result.created ? "OK Global workspace initialized" : "OK Global workspace already initialized",
+    `registryRoot  ${result.registryRoot}`,
+    `registryFile  ${result.registryFile}`,
+    `workspaceRoot ${result.workspaceRoot}`,
+    `initCommand   ${result.initCommand}`
+  ].join("\n") + "\n";
 }
 
 // Link a project into the global workspace (registry add, reframed). With no

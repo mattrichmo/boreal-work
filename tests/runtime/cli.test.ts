@@ -802,6 +802,66 @@ describe("bwrk cli", () => {
     expect(removed).toEqual(expect.objectContaining({ removed: true, archived: false, purged: true, entryCount: 0 }));
   });
 
+  it("returns typed first-run bootstrap for json global commands", async () => {
+    const callerRoot = await makeTempWorkspace();
+    const registryRoot = join(await makeTempWorkspace(), "registry-home");
+
+    const missing = await runCli(callerRoot, ["global", "--registry-root", registryRoot, "--json"]);
+    const missingPayload = parseJson<{
+      readonly code: string;
+      readonly message: string;
+      readonly details: { readonly registryRoot: string; readonly registryFile: string; readonly initCommand: string };
+    }>(missing.stderr);
+
+    expect(missing.exitCode).toBe(2);
+    expect(missingPayload).toEqual(
+      expect.objectContaining({
+        code: "BOREAL_INVALID_INPUT",
+        message: expect.stringContaining("bwrk global init")
+      })
+    );
+    expect(missingPayload.details).toEqual(
+      expect.objectContaining({
+        registryRoot,
+        registryFile: join(registryRoot, "registry/projects.json"),
+        initCommand: `bwrk global init --registry-root ${registryRoot}`
+      })
+    );
+    expect(await fileMissing(join(registryRoot, "registry/projects.json"))).toBe(true);
+
+    const initialized = parseData<{
+      readonly schemaVersion: string;
+      readonly initialized: true;
+      readonly created: boolean;
+      readonly registryRoot: string;
+      readonly registryFile: string;
+      readonly workspaceRoot: string;
+      readonly initCommand: string;
+    }>((await runCli(callerRoot, ["global", "init", "--registry-root", registryRoot, "--json"])).stdout);
+    expect(initialized).toEqual(
+      expect.objectContaining({
+        schemaVersion: "boreal.cli.global.init.v1",
+        initialized: true,
+        created: true,
+        registryRoot,
+        registryFile: join(registryRoot, "registry/projects.json"),
+        workspaceRoot: registryRoot,
+        initCommand: `bwrk global init --registry-root ${registryRoot}`
+      })
+    );
+    expect(await fileMissing(join(registryRoot, "registry/projects.json"))).toBe(false);
+
+    const rerun = await runCli(callerRoot, ["global", "--registry-root", registryRoot, "--json"]);
+    const dashboard = parseData<{ readonly schemaVersion: string; readonly workspaceRoot: string }>(rerun.stdout);
+    expect(rerun.exitCode).toBe(0);
+    expect(dashboard).toEqual(
+      expect.objectContaining({
+        schemaVersion: "boreal.cli.dashboard.global.v1",
+        workspaceRoot: registryRoot
+      })
+    );
+  });
+
   it("links and unlinks global projects without mutating existing target workspaces", async () => {
     const callerRoot = await makeTempWorkspace();
     const registryHome = await makeTempWorkspace();
@@ -827,6 +887,17 @@ describe("bwrk cli", () => {
     const previousRegistryRoot = process.env.BOREAL_PROJECT_REGISTRY_ROOT;
     process.env.BOREAL_PROJECT_REGISTRY_ROOT = registryRoot;
     try {
+      const firstRun = await runCli(callerRoot, ["global", "link", freshRoot, "--registry-root", registryRoot, "--json"]);
+      expect(firstRun.exitCode).toBe(2);
+      expect(parseJson<{ readonly code: string; readonly details: { readonly initCommand: string } }>(firstRun.stderr)).toEqual(
+        expect.objectContaining({
+          code: "BOREAL_INVALID_INPUT",
+          details: expect.objectContaining({ initCommand: `bwrk global init --registry-root ${registryRoot}` })
+        })
+      );
+
+      await runCli(callerRoot, ["global", "init", "--registry-root", registryRoot, "--json"]);
+
       const offeredInit = await runCli(callerRoot, ["global", "link", freshRoot, "--registry-root", registryRoot, "--json"]);
       expect(offeredInit.exitCode).toBe(2);
       expect(parseJson<{ readonly code: string; readonly message: string }>(offeredInit.stderr)).toEqual(
@@ -3286,6 +3357,17 @@ describe("bwrk cli", () => {
 
     try {
       await runCli(projectRoot, ["init", "--json"]);
+
+      const missingCapture = await runCli(nonBorealRoot, ["capture", "Before init", "--json"]);
+      expect(missingCapture.exitCode).toBe(2);
+      expect(parseJson<{ readonly code: string; readonly details: { readonly initCommand: string } }>(missingCapture.stderr)).toEqual(
+        expect.objectContaining({
+          code: "BOREAL_INVALID_INPUT",
+          details: expect.objectContaining({ initCommand: "bwrk global init" })
+        })
+      );
+
+      await runCli(nonBorealRoot, ["global", "init", "--json"]);
 
       const projectCapture = await runCli(projectRoot, [
         "capture",
