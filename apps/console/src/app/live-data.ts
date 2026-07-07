@@ -1,7 +1,7 @@
 import { readdir, readFile, stat } from "node:fs/promises";
 import { basename, extname, join, relative, resolve } from "node:path";
 
-import { runBoundedProcess } from "@boreal/core";
+import { runBoundedProcess, type ProjectRegistryLifecycleState } from "@boreal/core";
 import {
   buildDashboardHealthView,
   buildGlobalActivityView,
@@ -1792,7 +1792,7 @@ interface RegistryProjectRow {
   readonly memoryRemote?: string;
   readonly installRoot?: string;
   readonly source?: string;
-  readonly lifecycle?: string;
+  readonly lifecycle: ProjectRegistryLifecycleState;
   readonly lastSeenAt?: string;
 }
 
@@ -2594,6 +2594,7 @@ function currentProjectOverview(input: {
   const registryRow = input.registryRow ?? {
     id: basename(input.workspaceRoot),
     name: basename(input.workspaceRoot),
+    lifecycle: "linked" as const,
     projectRoot: input.projectSetup.projectRoot ?? input.workspaceRoot,
     memoryRoot: input.projectSetup.memoryRoot ?? join(input.workspaceRoot, "memory"),
     memoryLayout: input.projectSetup.memoryLayout,
@@ -2641,6 +2642,7 @@ function registryEntryFromMetrics(input: {
   return {
     id: input.registryRow.id,
     name: input.registryRow.name,
+    lifecycle: input.registryRow.lifecycle,
     projectRoot: input.registryRow.projectRoot,
     memoryRoot: input.registryRow.memoryRoot,
     memoryLayout: input.registryRow.memoryLayout,
@@ -2684,7 +2686,7 @@ function registryProjectRowsFromCli(data: unknown): readonly RegistryProjectRow[
         memoryRemote: typeof entry.memoryRemote === "string" ? entry.memoryRemote : undefined,
         installRoot: typeof entry.installRoot === "string" ? entry.installRoot : undefined,
         source: typeof entry.source === "string" ? entry.source : undefined,
-        lifecycle: typeof entry.lifecycle === "string" ? entry.lifecycle : undefined,
+        lifecycle: projectRegistryLifecycle(entry.lifecycle),
         lastSeenAt: typeof entry.lastSeenAt === "string" ? entry.lastSeenAt : undefined
       }
     ];
@@ -2904,6 +2906,10 @@ function projectMemoryLayout(value: unknown): ProjectSetupMetadata["memoryLayout
 
 function projectMemoryGitMode(value: unknown): ProjectSetupMetadata["memoryGitMode"] {
   return value === "shared" || value === "submodule" || value === "separate" ? value : "separate";
+}
+
+function projectRegistryLifecycle(value: unknown): ProjectRegistryLifecycleState {
+  return value === "paused" || value === "archived" || value === "missing" || value === "linked" ? value : "linked";
 }
 
 function workKind(value: string, labels: readonly string[]): WorkItemView["kind"] {

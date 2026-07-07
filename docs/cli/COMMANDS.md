@@ -449,6 +449,30 @@ bwrk registry remove <project-id> [--registry-root <dir>] [--purge] [--json]
 
 Archives the registry row for a project by default so references can still resolve if it is relinked later. With `--purge`, removes only the registry row. It does not delete project files, memory files, or skill installs.
 
+## `registry set-state`
+
+```bash
+bwrk registry set-state <project-id> --state linked|paused|archived|missing [--registry-root <dir>] [--json]
+```
+
+Sets a registry row lifecycle without touching the linked project repository. Use `paused` to intentionally exclude a project from global refreshes, `missing` for a known absent path, `archived` to retain it only for reference resolution, and `linked` to resume active tracking.
+
+## `registry pause`
+
+```bash
+bwrk registry pause <project-id> [--registry-root <dir>] [--json]
+```
+
+Marks a linked project paused so global aggregation can skip it without unlinking it.
+
+## `registry resume`
+
+```bash
+bwrk registry resume <project-id> [--registry-root <dir>] [--json]
+```
+
+Marks a paused or missing project linked again without re-adding it.
+
 ## `registry import-setup`
 
 ```bash
@@ -463,7 +487,7 @@ Seeds or updates the registry from the selected workspace `.boreal/project.json`
 bwrk registry doctor [--registry-root <dir>] [--json]
 ```
 
-Validates registered project roots, Boreal runtime files, project setup config paths, memory roots, memory runtime directories, install roots, and setup mismatches. It exits nonzero when registered projects are stale, moved, invalid, or inconsistent with their `.boreal/project.json`.
+Validates registered project roots, Boreal runtime files, project setup config paths, memory roots, memory runtime directories, install roots, and setup mismatches. When a linked project path disappears it marks the row `missing`; when a missing path reappears it restores `linked`. It exits nonzero for unresolved stale or invalid project metadata.
 
 ## `dashboard`
 

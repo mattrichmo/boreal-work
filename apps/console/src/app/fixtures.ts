@@ -71,6 +71,7 @@ export function createFixtureConsoleData(input: {
   const registryEntry = {
     id: "boreal-work",
     name: "boreal-work",
+    lifecycle: "linked" as const,
     projectRoot: input.workspaceRoot,
     memoryRoot: `${input.workspaceRoot}/memory`,
     memoryLayout: "in-repo" as const,

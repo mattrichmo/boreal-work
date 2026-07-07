@@ -670,6 +670,7 @@ function dashboardEntryFromMetrics(input: {
   return {
     id: input.entry.id,
     name: input.entry.display.name,
+    lifecycle: input.entry.lifecycle,
     projectRoot: input.entry.projectRoot,
     memoryRoot: input.entry.memoryRoot,
     memoryLayout: input.entry.memoryLayout,

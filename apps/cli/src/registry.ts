@@ -21,6 +21,7 @@ import {
   type ProjectRegistryDocument,
   type ProjectRegistryEntry,
   type ProjectRegistryIdentity,
+  type ProjectRegistryLifecycleState,
   type ProjectRegistryStorage
 } from "@boreal/core";
 import { DEFAULT_FILE_LOCK_OPTIONS, withFileLock, writeTextFileAtomic } from "@boreal/storage";
@@ -49,6 +50,19 @@ export interface RegistryRemoveResult extends RegistryListResult {
   readonly entry: ProjectRegistryEntry;
 }
 
+export interface RegistryLifecycleUpdate {
+  readonly projectId: string;
+  readonly from: ProjectRegistryLifecycleState;
+  readonly to: ProjectRegistryLifecycleState;
+  readonly reason: string;
+}
+
+export interface RegistrySetLifecycleResult extends RegistryListResult {
+  readonly changed: boolean;
+  readonly previousLifecycle: ProjectRegistryLifecycleState;
+  readonly entry: ProjectRegistryEntry;
+}
+
 export interface RegistryImportSetupResult extends RegistryListResult {
   readonly imported: true;
   readonly changed: boolean;
@@ -72,6 +86,8 @@ export interface RegistryDoctorResult {
   readonly ok: boolean;
   readonly storage: ProjectRegistryStorage;
   readonly entryCount: number;
+  readonly changed: boolean;
+  readonly lifecycleUpdates: readonly RegistryLifecycleUpdate[];
   readonly findings: readonly RegistryDoctorFinding[];
 }
 
@@ -217,50 +233,116 @@ export async function removeProjectRegistryEntry(
   });
 }
 
+export async function setProjectRegistryLifecycle(
+  projectId: string,
+  lifecycle: ProjectRegistryLifecycleState,
+  options: RegistryCommandOptions = {}
+): Promise<RegistrySetLifecycleResult> {
+  const storage = registryStorage(options);
+  return mutateRegistry(storage, (document) => {
+    const entry = document.entries.find((candidate) => candidate.id === projectId);
+    if (!entry) {
+      throw new BorealError("BOREAL_NOT_FOUND", "Registry entry not found", { projectId, domain: "workflow" });
+    }
+    const changed = entry.lifecycle !== lifecycle;
+    const updatedAt = nowIso();
+    const updatedEntry = changed
+      ? {
+          ...entry,
+          lifecycle,
+          updatedAt,
+          ...(lifecycle === "linked" ? { lastSeenAt: updatedAt } : {})
+        }
+      : entry;
+    const nextDocument = changed
+      ? withRegistryUpdate(storage, {
+          ...document,
+          entries: document.entries.map((candidate) => candidate.id === projectId ? updatedEntry : candidate).sort(compareRegistryEntries)
+        })
+      : document;
+    return {
+      document: nextDocument,
+      result: {
+        ...registryListResult(nextDocument),
+        changed,
+        previousLifecycle: entry.lifecycle,
+        entry: updatedEntry
+      }
+    };
+  });
+}
+
 export async function doctorProjectRegistry(options: RegistryCommandOptions = {}): Promise<RegistryDoctorResult> {
   const storage = registryStorage(options);
-  let document: ProjectRegistryDocument;
-  try {
-    document = await readRegistryDocument(storage);
-  } catch (error) {
-    const finding = registryReadErrorFinding(error, storage);
+  return withFileLock(storage.lockDir, DEFAULT_FILE_LOCK_OPTIONS, async () => {
+    let document: ProjectRegistryDocument;
+    try {
+      document = await readRegistryDocument(storage);
+    } catch (error) {
+      const finding = registryReadErrorFinding(error, storage);
+      return {
+        ok: false,
+        storage,
+        entryCount: 0,
+        changed: false,
+        lifecycleUpdates: [],
+        findings: [finding]
+      };
+    }
+
+    const findings: RegistryDoctorFinding[] = [];
+    const lifecycleUpdates: RegistryLifecycleUpdate[] = [];
+    let entriesChanged = false;
+    const nextEntries: ProjectRegistryEntry[] = [];
+
+    if (!existsSync(storage.registryFile)) {
+      findings.push({
+        code: "registry.empty",
+        severity: "ok",
+        message: "No project registry file exists yet",
+        path: storage.registryFile
+      });
+    }
+    if (document.storage.registryFile !== storage.registryFile) {
+      findings.push({
+        code: "registry.storage_mismatch",
+        severity: "warning",
+        message: "Registry storage metadata does not match the selected registry root",
+        path: storage.registryFile,
+        details: { expected: storage, actual: document.storage }
+      });
+    }
+
+    for (const entry of document.entries) {
+      const inspected = await inspectAndReconcileRegistryEntry(entry);
+      nextEntries.push(inspected.entry);
+      findings.push(...inspected.findings);
+      if (inspected.update) {
+        entriesChanged = true;
+        lifecycleUpdates.push(inspected.update);
+      }
+    }
+
+    const nextDocument = entriesChanged
+      ? withRegistryUpdate(storage, {
+          ...document,
+          entries: nextEntries.sort(compareRegistryEntries)
+        })
+      : document;
+    if (entriesChanged) {
+      assertValidRegistryDocument(nextDocument, storage.registryFile);
+      await writeTextFileAtomic(storage.registryFile, `${JSON.stringify(nextDocument, null, 2)}\n`);
+    }
+
     return {
-      ok: false,
+      ok: findings.every((finding) => finding.severity === "ok"),
       storage,
-      entryCount: 0,
-      findings: [finding]
+      entryCount: nextDocument.entries.length,
+      changed: entriesChanged,
+      lifecycleUpdates,
+      findings
     };
-  }
-
-  const findings: RegistryDoctorFinding[] = [];
-  if (!existsSync(storage.registryFile)) {
-    findings.push({
-      code: "registry.empty",
-      severity: "ok",
-      message: "No project registry file exists yet",
-      path: storage.registryFile
-    });
-  }
-  if (document.storage.registryFile !== storage.registryFile) {
-    findings.push({
-      code: "registry.storage_mismatch",
-      severity: "warning",
-      message: "Registry storage metadata does not match the selected registry root",
-      path: storage.registryFile,
-      details: { expected: storage, actual: document.storage }
-    });
-  }
-
-  for (const entry of document.entries) {
-    findings.push(...await inspectRegistryEntry(entry));
-  }
-
-  return {
-    ok: findings.every((finding) => finding.severity === "ok"),
-    storage,
-    entryCount: document.entries.length,
-    findings
-  };
+  });
 }
 
 function registryStorage(options: RegistryCommandOptions): ProjectRegistryStorage {
@@ -519,6 +601,87 @@ function withCollisionSafeId(entry: ProjectRegistryEntry, existingEntries: reado
   return next;
 }
 
+interface RegistryEntryInspection {
+  readonly entry: ProjectRegistryEntry;
+  readonly findings: readonly RegistryDoctorFinding[];
+  readonly update?: RegistryLifecycleUpdate;
+}
+
+async function inspectAndReconcileRegistryEntry(entry: ProjectRegistryEntry): Promise<RegistryEntryInspection> {
+  if (entry.lifecycle === "archived") {
+    return { entry, findings: await inspectRegistryEntry(entry) };
+  }
+
+  const projectRootState = await pathState(entry.projectRoot);
+  if (projectRootState === "missing") {
+    if (entry.lifecycle === "missing") {
+      return {
+        entry,
+        findings: [{
+          code: "registry.lifecycle_missing",
+          severity: "ok",
+          message: "Registry entry remains marked missing because the project root is absent",
+          projectId: entry.id,
+          path: entry.projectRoot
+        }]
+      };
+    }
+    const updatedAt = nowIso();
+    const updatedEntry = {
+      ...entry,
+      lifecycle: "missing" as const,
+      updatedAt
+    };
+    return {
+      entry: updatedEntry,
+      findings: [{
+        code: "registry.lifecycle_missing",
+        severity: "ok",
+        message: "Project root is absent; registry lifecycle was marked missing",
+        projectId: entry.id,
+        path: entry.projectRoot
+      }],
+      update: {
+        projectId: entry.id,
+        from: entry.lifecycle,
+        to: "missing",
+        reason: "project_root_absent"
+      }
+    };
+  }
+
+  if (entry.lifecycle === "missing") {
+    const updatedAt = nowIso();
+    const updatedEntry = {
+      ...entry,
+      lifecycle: "linked" as const,
+      updatedAt,
+      lastSeenAt: updatedAt
+    };
+    return {
+      entry: updatedEntry,
+      findings: [
+        {
+          code: "registry.lifecycle_restored",
+          severity: "ok",
+          message: "Project root is present again; registry lifecycle was restored to linked",
+          projectId: entry.id,
+          path: entry.projectRoot
+        },
+        ...await inspectRegistryEntry(updatedEntry)
+      ],
+      update: {
+        projectId: entry.id,
+        from: "missing",
+        to: "linked",
+        reason: "project_root_present"
+      }
+    };
+  }
+
+  return { entry, findings: await inspectRegistryEntry(entry) };
+}
+
 async function inspectRegistryEntry(entry: ProjectRegistryEntry): Promise<readonly RegistryDoctorFinding[]> {
   if (entry.lifecycle === "archived") {
     return [{
@@ -566,6 +729,16 @@ async function inspectRegistryEntry(entry: ProjectRegistryEntry): Promise<readon
   }
 
   return findings;
+}
+
+async function pathState(path: string): Promise<"missing" | "present"> {
+  const info = await stat(path).catch((error: unknown) => {
+    if (isNodeError(error) && error.code === "ENOENT") {
+      return undefined;
+    }
+    throw error;
+  });
+  return info ? "present" : "missing";
 }
 
 function configMismatchFindings(entry: ProjectRegistryEntry, config: ProjectSetupConfig): readonly RegistryDoctorFinding[] {

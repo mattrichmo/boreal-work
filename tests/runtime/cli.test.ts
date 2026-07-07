@@ -624,6 +624,38 @@ describe("bwrk cli", () => {
     );
     expect(listed.entries).toEqual([expect.objectContaining({ id: added.entry.id, lifecycle: "linked", projectRoot: rootDir })]);
 
+    const paused = parseData<{
+      readonly changed: boolean;
+      readonly previousLifecycle: string;
+      readonly entry: { readonly id: string; readonly lifecycle: string };
+    }>((await runCli(rootDir, ["registry", "pause", added.entry.id, "--registry-root", registryRoot, "--json"])).stdout);
+    expect(paused).toEqual(
+      expect.objectContaining({
+        changed: true,
+        previousLifecycle: "linked",
+        entry: expect.objectContaining({ id: added.entry.id, lifecycle: "paused" })
+      })
+    );
+
+    const pausedDoctor = await runCli(rootDir, ["registry", "doctor", "--registry-root", registryRoot, "--json"]);
+    expect(pausedDoctor.exitCode).toBe(0);
+    expect(parseData<{ readonly changed: boolean; readonly ok: boolean }>(pausedDoctor.stdout)).toEqual(
+      expect.objectContaining({ changed: false, ok: true })
+    );
+
+    const resumed = parseData<{
+      readonly changed: boolean;
+      readonly previousLifecycle: string;
+      readonly entry: { readonly id: string; readonly lifecycle: string };
+    }>((await runCli(rootDir, ["registry", "set-state", added.entry.id, "--state", "linked", "--registry-root", registryRoot, "--json"])).stdout);
+    expect(resumed).toEqual(
+      expect.objectContaining({
+        changed: true,
+        previousLifecycle: "paused",
+        entry: expect.objectContaining({ id: added.entry.id, lifecycle: "linked" })
+      })
+    );
+
     const healthy = await runCli(rootDir, ["registry", "doctor", "--registry-root", registryRoot, "--json"]);
     const healthyPayload = parseData<{
       readonly ok: boolean;
@@ -662,6 +694,65 @@ describe("bwrk cli", () => {
     );
     expect(relinked).toEqual(expect.objectContaining({ added: false, replaced: true, entryCount: 1 }));
     expect(relinked.entry).toEqual(expect.objectContaining({ id: added.entry.id, lifecycle: "linked", projectRoot: rootDir }));
+
+    const missingProjectRoot = await makeTempWorkspace();
+    await runCli(missingProjectRoot, [
+      "init",
+      "--setup-memory",
+      "--memory-root",
+      "memory",
+      "--memory-layout",
+      "in-repo",
+      "--memory-git-mode",
+      "shared",
+      "--install-root",
+      ".agents/skills",
+      "--json"
+    ]);
+    await mkdir(join(missingProjectRoot, ".agents/skills"), { recursive: true });
+    const missingProject = parseData<{
+      readonly entry: { readonly id: string; readonly lifecycle: string; readonly projectRoot: string };
+    }>(
+      (await runCli(rootDir, ["registry", "add", "--workspace", missingProjectRoot, "--registry-root", registryRoot, "--json"])).stdout
+    );
+
+    const offlineRoot = `${missingProjectRoot}-offline`;
+    tempDirs.push(offlineRoot);
+    await rename(missingProjectRoot, offlineRoot);
+    const missingDoctor = await runCli(rootDir, ["registry", "doctor", "--registry-root", registryRoot, "--json"]);
+    const missingDoctorPayload = parseData<{
+      readonly ok: boolean;
+      readonly changed: boolean;
+      readonly lifecycleUpdates: Array<{ readonly projectId: string; readonly from: string; readonly to: string; readonly reason: string }>;
+      readonly findings: Array<{ readonly code: string; readonly severity: string; readonly projectId?: string }>;
+    }>(missingDoctor.stdout);
+    expect(missingDoctor.exitCode).toBe(0);
+    expect(missingDoctorPayload).toEqual(expect.objectContaining({ ok: true, changed: true }));
+    expect(missingDoctorPayload.lifecycleUpdates).toEqual([
+      { projectId: missingProject.entry.id, from: "linked", to: "missing", reason: "project_root_absent" }
+    ]);
+    expect(missingDoctorPayload.findings).toEqual(
+      expect.arrayContaining([expect.objectContaining({ code: "registry.lifecycle_missing", severity: "ok", projectId: missingProject.entry.id })])
+    );
+    expect(
+      parseData<{ readonly entries: Array<{ readonly id: string; readonly lifecycle: string }> }>(
+        (await runCli(rootDir, ["registry", "list", "--registry-root", registryRoot, "--json"])).stdout
+      ).entries
+    ).toEqual(expect.arrayContaining([expect.objectContaining({ id: missingProject.entry.id, lifecycle: "missing" })]));
+
+    await rename(offlineRoot, missingProjectRoot);
+    const restoredDoctor = await runCli(rootDir, ["registry", "doctor", "--registry-root", registryRoot, "--json"]);
+    const restoredDoctorPayload = parseData<{
+      readonly ok: boolean;
+      readonly changed: boolean;
+      readonly lifecycleUpdates: Array<{ readonly projectId: string; readonly from: string; readonly to: string; readonly reason: string }>;
+    }>(restoredDoctor.stdout);
+    expect(restoredDoctor.exitCode).toBe(0);
+    expect(restoredDoctorPayload).toEqual(expect.objectContaining({ ok: true, changed: true }));
+    expect(restoredDoctorPayload.lifecycleUpdates).toEqual([
+      { projectId: missingProject.entry.id, from: "missing", to: "linked", reason: "project_root_present" }
+    ]);
+    await runCli(rootDir, ["registry", "remove", missingProject.entry.id, "--registry-root", registryRoot, "--purge", "--json"]);
 
     await runCli(rootDir, ["registry", "remove", added.entry.id, "--registry-root", registryRoot, "--json"]);
     const movedRoot = `${rootDir}-moved`;
@@ -736,13 +827,14 @@ describe("bwrk cli", () => {
       readonly schemaVersion: string;
       readonly limits: { readonly projects: number; readonly queueRowsPerQueue: number; readonly searchPerProject: number; readonly activityPerProject: number };
       readonly truncated: { readonly projects: boolean };
-      readonly registry: { readonly summary: { readonly totalProjects: number }; readonly entries: Array<{ readonly projectRoot: string }> };
+      readonly registry: { readonly summary: { readonly totalProjects: number }; readonly entries: Array<{ readonly lifecycle: string; readonly projectRoot: string }> };
       readonly globalSettings: { readonly projects: Array<{ readonly projectRoot: string; readonly validateCommand: string }> };
     }>((await runCli(rootDir, ["dashboard", "global", "--registry-root", registryRoot, "--json"])).stdout);
     expect(empty.schemaVersion).toBe("boreal.cli.dashboard.global.v1");
     expect(empty.limits).toMatchObject({ projects: 100, queueRowsPerQueue: 200, searchPerProject: 10, activityPerProject: 20 });
     expect(empty.truncated.projects).toBe(false);
     expect(empty.registry.summary.totalProjects).toBe(1);
+    expect(empty.registry.entries[0]?.lifecycle).toBe("linked");
     expect(empty.registry.entries[0]?.projectRoot).toBe(rootDir);
     expect(empty.globalSettings.projects[0]?.validateCommand).toBe(`bwrk --workspace ${rootDir} doctor --json`);
 
@@ -3805,6 +3897,9 @@ describe("bwrk cli", () => {
         "registry list",
         "registry add",
         "registry remove",
+        "registry set-state",
+        "registry pause",
+        "registry resume",
         "registry import-setup",
         "registry doctor",
         "sprint list",

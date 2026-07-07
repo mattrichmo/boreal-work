@@ -1,4 +1,4 @@
-import type { WorkItem } from "@boreal/core";
+import type { ProjectRegistryLifecycleState, WorkItem } from "@boreal/core";
 
 import type { DashboardFinding } from "./health-view.js";
 
@@ -10,6 +10,7 @@ export type ProjectSyncFreshness = "fresh" | "stale" | "unknown";
 export interface ProjectRegistryEntry {
   readonly id: string;
   readonly name: string;
+  readonly lifecycle: ProjectRegistryLifecycleState;
   readonly projectRoot: string;
   readonly memoryRoot: string;
   readonly memoryLayout: ProjectMemoryLayout;
