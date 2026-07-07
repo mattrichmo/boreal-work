@@ -538,34 +538,35 @@ bwrk dashboard global --limit 10 --json
 ## `global`
 
 ```bash
-bwrk global [link <path>|unlink <project-id>] [--web] [--json] [--mouse] [--refresh-ms <ms>] [--host <host>] [--port <n>] [--no-open] [--mode live|fixture] [--live-cache-ttl-ms <ms>] [--allow-fixture-fallback] [--name <text>] [--label <label>...] [--registry-root <dir>] [--purge]
+bwrk global [link <path>|unlink <project-id>] [--web] [--json] [--mouse] [--refresh-ms <ms>] [--host <host>] [--port <n>] [--no-open] [--mode live|fixture] [--live-cache-ttl-ms <ms>] [--allow-fixture-fallback] [--name <text>] [--label <label>...] [--registry-root <dir>] [--init] [--purge] [--yes]
 ```
 
 The machine-level **global workspace**: a real Boreal workspace (its own to-dos, plans, tasks, sprints) that lives at the registry root, plus a monitor over the projects you've linked. It is not tied to any repo.
 
 - With **no subcommand**, opens the cross-repo dashboard — terminal by default, `--web` for the browser, `--json` for the bounded data payload. `bwrk dashboard` shows only the current workspace; `bwrk global` shows your global workspace plus all linked projects.
 - **`bwrk global <command> ...`** runs any command against the global workspace. For example `bwrk global work create "Plan Q3"`, `bwrk global work list`. This is sugar for `bwrk <command> ... --global`.
-- **`bwrk global link <path>`** links a project so it's tracked here; **`bwrk global unlink <project-id>`** removes it.
+- **`bwrk global link <path>`** links a project so it's tracked here; pass `--init` to initialize and link a fresh target directory.
+- **`bwrk global unlink <project-id>`** archives it by default; `--purge --yes` removes only the registry row.
 
 The global workspace is created automatically on first use. Nothing is tracked globally until you link it; `bwrk init` never auto-links a project.
 
-Options match `bwrk dashboard` (`--web`, `--mouse`, `--refresh-ms`, `--host`, `--port`, `--no-open`, `--mode`, `--live-cache-ttl-ms`, `--allow-fixture-fallback`), plus `--name`/`--label`/`--registry-root` for `link`.
+Options match `bwrk dashboard` (`--web`, `--mouse`, `--refresh-ms`, `--host`, `--port`, `--no-open`, `--mode`, `--live-cache-ttl-ms`, `--allow-fixture-fallback`), plus `--name`/`--label`/`--registry-root`/`--init` for `link`; `unlink --purge` requires `--yes`.
 
 ## `link`
 
 ```bash
-bwrk link [<path>] [--name <text>] [--label <label>...] [--registry-root <dir>] [--json]
+bwrk link [<path>] [--name <text>] [--label <label>...] [--registry-root <dir>] [--init] [--json]
 ```
 
-Links a project to your global workspace so the global dashboard tracks it (machine-local registry). With no path, links the current repo. Equivalent to `bwrk registry add`; nothing flows up to Global until you link it. Also available as `bwrk global link <path>`.
+Links a project to your global workspace so the global dashboard tracks it (machine-local registry). With no path, links the current repo. Existing Boreal workspaces are linked without writing inside the target project. Fresh target directories are rejected with an init recommendation unless `--init` is passed; `--init` runs the normal project setup defaults in the target first, then writes the machine-local registry row. Also available as `bwrk global link <path>`.
 
 ## `unlink`
 
 ```bash
-bwrk unlink <project-id> [--registry-root <dir>] [--purge] [--json]
+bwrk unlink <project-id> [--registry-root <dir>] [--purge] [--yes] [--json]
 ```
 
-Stops tracking a project in your global workspace by archiving it in the machine-local registry. Equivalent to `bwrk registry remove`. Also available as `bwrk global unlink <project-id>`.
+Stops tracking a project in your global workspace by archiving it in the machine-local registry. It never deletes or writes project files, memory files, or skill installs. With `--purge --yes`, removes only the registry row permanently. Also available as `bwrk global unlink <project-id>`.
 
 ## `daemon status`
 

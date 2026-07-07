@@ -86,13 +86,14 @@ absolute.
 
 Linking must be trivially reversible and non-invasive:
 
-- `bwrk global link <path> [--name --label]` — validates the target is (or can become) a Boreal workspace;
-  if uninitialized, offers `bwrk init` there (prompt, or `--init` flag non-interactively). Writes a registry
-  entry and backfills the first rollup. **Writes nothing into the project repo** — linking is a machine-local
-  registry fact, so linking someone else's checkout never dirties it.
+- `bwrk global link <path> [--name --label --init]` — validates the target is a Boreal workspace; if
+  uninitialized, offers `bwrk init` there and accepts `--init` as the non-interactive confirmation. Linking an
+  existing workspace writes only the machine-local registry entry and backfills the first rollup. **It writes
+  nothing into the project repo** — linking someone else's checkout never dirties it. The only project writes in
+  this flow are the explicit `--init` bootstrap writes for a fresh target.
 - `bwrk global unlink <project-id>` — soft by default: entry moves to `archived` (kept for reference
-  resolution and history), rollups stop refreshing, boards hide it. `--purge` removes the entry entirely.
-  **Never touches project data.**
+  resolution and history), rollups stop refreshing, boards hide it. `--purge --yes` removes the entry entirely
+  after explicit confirmation. **Never touches project data.**
 - Dangling references: global records referencing an unlinked project keep their references; resolution
   reports `unresolved (project unlinked)` with the last rollup snapshot. Relinking the same project id
   restores resolution. Registry ids must therefore be stable across unlink/relink (derive from project config

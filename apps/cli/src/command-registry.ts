@@ -761,7 +761,7 @@ export const COMMAND_DEFINITIONS: readonly CommandDefinition[] = [
     path: ["global"],
     category: "dashboard",
     summary: "Your global workspace: cross-repo dashboard, global work (global work ...), and link/unlink.",
-    usage: "bwrk global [link <path>|unlink <project-id>] [--web] [--json] [--mouse] [--refresh-ms <ms>] [--host <host>] [--port <n>] [--no-open] [--mode live|fixture] [--live-cache-ttl-ms <ms>] [--allow-fixture-fallback] [--name <text>] [--label <label>...] [--registry-root <dir>] [--purge]",
+    usage: "bwrk global [link <path>|unlink <project-id>] [--web] [--json] [--mouse] [--refresh-ms <ms>] [--host <host>] [--port <n>] [--no-open] [--mode live|fixture] [--live-cache-ttl-ms <ms>] [--allow-fixture-fallback] [--name <text>] [--label <label>...] [--registry-root <dir>] [--init] [--purge] [--yes]",
     description:
       "The machine-level global workspace. With no subcommand it opens the cross-repo dashboard (terminal by default; --web for the browser, --json for the data payload). `bwrk global work ...` (and any `bwrk global <command>`) runs that command against the global workspace. `bwrk global link <path>` links a project to be tracked; `bwrk global unlink <project-id>` removes it.",
     flags: [
@@ -777,7 +777,9 @@ export const COMMAND_DEFINITIONS: readonly CommandDefinition[] = [
       flag("name", "value", "link: display name for the linked project."),
       flag("label", "value", "link: label for the linked project (repeatable).", true),
       flag("registry-root", "value", "link/unlink: machine-local registry root override."),
-      flag("purge", "boolean", "unlink: remove the archived registry row instead of retaining it for references.")
+      flag("init", "boolean", "link: initialize a fresh target workspace before adding it to the registry."),
+      flag("purge", "boolean", "unlink: remove the archived registry row instead of retaining it for references."),
+      flag("yes", "boolean", "unlink --purge: confirm permanent registry-row removal. Short alias: -y.")
     ],
     positionals: { label: "arguments", min: 0, max: 2 },
     requiresWorkspace: false,
@@ -787,13 +789,14 @@ export const COMMAND_DEFINITIONS: readonly CommandDefinition[] = [
     path: ["link"],
     category: "dashboard",
     summary: "Link a project to your global workspace so it shows up in `bwrk global`.",
-    usage: "bwrk link [<path>] [--name <text>] [--label <label>...] [--registry-root <dir>] [--json]",
+    usage: "bwrk link [<path>] [--name <text>] [--label <label>...] [--registry-root <dir>] [--init] [--json]",
     description:
-      "Adds a project to the machine-local registry so the global dashboard tracks it. With no path, links the current repo. Equivalent to `bwrk registry add`; nothing is tracked globally until you link it.",
+      "Adds a project to the machine-local registry so the global dashboard tracks it. With no path, links the current repo. Use --init to initialize and link a fresh target directory.",
     flags: [
       flag("name", "value", "Display name for the linked project."),
       flag("label", "value", "Label for the linked project (repeatable).", true),
-      flag("registry-root", "value", "Machine-local registry root override.")
+      flag("registry-root", "value", "Machine-local registry root override."),
+      flag("init", "boolean", "Initialize a fresh target workspace before adding it to the registry.")
     ],
     positionals: { label: "path", min: 0, max: 1 },
     requiresWorkspace: false,
@@ -803,11 +806,12 @@ export const COMMAND_DEFINITIONS: readonly CommandDefinition[] = [
     path: ["unlink"],
     category: "dashboard",
     summary: "Stop tracking a project in your global workspace.",
-    usage: "bwrk unlink <project-id> [--registry-root <dir>] [--purge] [--json]",
-    description: "Archives a project in the machine-local registry. Equivalent to `bwrk registry remove`.",
+    usage: "bwrk unlink <project-id> [--registry-root <dir>] [--purge] [--yes] [--json]",
+    description: "Archives a project in the machine-local registry. Use --purge --yes to remove only the registry row permanently.",
     flags: [
       flag("registry-root", "value", "Machine-local registry root override."),
-      flag("purge", "boolean", "Remove the registry row instead of archiving it.")
+      flag("purge", "boolean", "Remove the registry row instead of archiving it."),
+      flag("yes", "boolean", "Confirm permanent registry-row removal. Short alias: -y.")
     ],
     positionals: { label: "project-id", min: 1, max: 1 },
     requiresWorkspace: false,

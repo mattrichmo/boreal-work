@@ -1,7 +1,7 @@
 import { execFile } from "node:child_process";
-import { chmod, mkdir, mkdtemp, readFile, rename, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, readdir, rename, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { hostname as osHostname, tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, relative } from "node:path";
 import { promisify } from "node:util";
 
 import { afterEach, describe, expect, it } from "vitest";
@@ -800,6 +800,116 @@ describe("bwrk cli", () => {
       (await runCli(movedRoot, ["registry", "remove", added.entry.id, "--registry-root", registryRoot, "--purge", "--json"])).stdout
     );
     expect(removed).toEqual(expect.objectContaining({ removed: true, archived: false, purged: true, entryCount: 0 }));
+  });
+
+  it("links and unlinks global projects without mutating existing target workspaces", async () => {
+    const callerRoot = await makeTempWorkspace();
+    const registryHome = await makeTempWorkspace();
+    const registryRoot = join(registryHome, "registry-home");
+    const freshRoot = await makeTempWorkspace();
+    const existingRoot = await makeTempWorkspace();
+    await runCli(callerRoot, ["init", "--json"]);
+    await runCli(existingRoot, [
+      "init",
+      "--setup-memory",
+      "--memory-root",
+      "memory",
+      "--memory-layout",
+      "in-repo",
+      "--memory-git-mode",
+      "shared",
+      "--install-root",
+      ".agents/skills",
+      "--json"
+    ]);
+    await mkdir(join(existingRoot, ".agents/skills"), { recursive: true });
+
+    const previousRegistryRoot = process.env.BOREAL_PROJECT_REGISTRY_ROOT;
+    process.env.BOREAL_PROJECT_REGISTRY_ROOT = registryRoot;
+    try {
+      const offeredInit = await runCli(callerRoot, ["global", "link", freshRoot, "--registry-root", registryRoot, "--json"]);
+      expect(offeredInit.exitCode).toBe(2);
+      expect(parseJson<{ readonly code: string; readonly message: string }>(offeredInit.stderr)).toEqual(
+        expect.objectContaining({
+          code: "BOREAL_INVALID_INPUT",
+          message: expect.stringContaining("--init")
+        })
+      );
+
+      const initialized = parseData<{
+        readonly added: boolean;
+        readonly entry: { readonly lifecycle: string; readonly projectRoot: string };
+      }>((await runCli(callerRoot, ["global", "link", freshRoot, "--init", "--registry-root", registryRoot, "--json"])).stdout);
+      expect(initialized.added).toBe(true);
+      expect(initialized.entry).toEqual(expect.objectContaining({ lifecycle: "linked", projectRoot: freshRoot }));
+      expect(await fileMissing(join(freshRoot, ".boreal", "project.json"))).toBe(false);
+
+      const beforeLink = await snapshotFileTree(existingRoot);
+      const linked = parseData<{
+        readonly added: boolean;
+        readonly entry: { readonly id: string; readonly lifecycle: string; readonly projectRoot: string };
+        readonly entryCount: number;
+      }>((await runCli(callerRoot, ["global", "link", existingRoot, "--registry-root", registryRoot, "--json"])).stdout);
+      expect(linked).toEqual(expect.objectContaining({ added: true, entryCount: 2 }));
+      expect(linked.entry).toEqual(expect.objectContaining({ lifecycle: "linked", projectRoot: existingRoot }));
+      expect(await snapshotFileTree(existingRoot)).toEqual(beforeLink);
+
+      const archived = parseData<{
+        readonly removed: true;
+        readonly archived: boolean;
+        readonly purged: boolean;
+        readonly entry: { readonly id: string; readonly lifecycle: string };
+      }>((await runCli(callerRoot, ["global", "unlink", linked.entry.id, "--registry-root", registryRoot, "--json"])).stdout);
+      expect(archived).toEqual(
+        expect.objectContaining({
+          removed: true,
+          archived: true,
+          purged: false,
+          entry: expect.objectContaining({ id: linked.entry.id, lifecycle: "archived" })
+        })
+      );
+      expect(await snapshotFileTree(existingRoot)).toEqual(beforeLink);
+
+      const unconfirmedPurge = await runCli(callerRoot, [
+        "global",
+        "unlink",
+        linked.entry.id,
+        "--registry-root",
+        registryRoot,
+        "--purge",
+        "--json"
+      ]);
+      expect(unconfirmedPurge.exitCode).toBe(2);
+      expect(parseJson<{ readonly code: string; readonly message: string }>(unconfirmedPurge.stderr)).toEqual(
+        expect.objectContaining({
+          code: "BOREAL_INVALID_INPUT",
+          message: expect.stringContaining("--yes")
+        })
+      );
+
+      const purged = parseData<{ readonly removed: true; readonly archived: boolean; readonly purged: boolean; readonly entryCount: number }>(
+        (
+          await runCli(callerRoot, [
+            "global",
+            "unlink",
+            linked.entry.id,
+            "--registry-root",
+            registryRoot,
+            "--purge",
+            "--yes",
+            "--json"
+          ])
+        ).stdout
+      );
+      expect(purged).toEqual(expect.objectContaining({ removed: true, archived: false, purged: true, entryCount: 1 }));
+      expect(await snapshotFileTree(existingRoot)).toEqual(beforeLink);
+    } finally {
+      if (previousRegistryRoot === undefined) {
+        delete process.env.BOREAL_PROJECT_REGISTRY_ROOT;
+      } else {
+        process.env.BOREAL_PROJECT_REGISTRY_ROOT = previousRegistryRoot;
+      }
+    }
   });
 
   it("emits bounded global dashboard payloads for empty, registered, and stale registries", async () => {
@@ -11743,6 +11853,30 @@ async function fileMissing(path: string): Promise<boolean> {
       return true;
     }
     throw error;
+  }
+}
+
+async function snapshotFileTree(root: string): Promise<Record<string, string>> {
+  const entries = new Map<string, string>();
+  await visitSnapshotTree(root, root, entries);
+  return Object.fromEntries([...entries.entries()].sort(([left], [right]) => left.localeCompare(right)));
+}
+
+async function visitSnapshotTree(root: string, dir: string, snapshot: Map<string, string>): Promise<void> {
+  const entries = await readdir(dir, { withFileTypes: true });
+  for (const entry of entries.sort((left, right) => left.name.localeCompare(right.name))) {
+    const absolutePath = join(dir, entry.name);
+    const relativePath = relative(root, absolutePath).replaceAll("\\", "/");
+    if (entry.isDirectory()) {
+      snapshot.set(`${relativePath}/`, "<dir>");
+      await visitSnapshotTree(root, absolutePath, snapshot);
+      continue;
+    }
+    if (entry.isFile()) {
+      snapshot.set(relativePath, Buffer.from(await readFile(absolutePath)).toString("base64"));
+      continue;
+    }
+    snapshot.set(relativePath, `<${entry.isSymbolicLink() ? "symlink" : "special"}>`);
   }
 }
 

@@ -45,6 +45,7 @@ import {
   type RegistryDoctorResult
 } from "../registry.js";
 import { runSearch } from "../search-cli.js";
+import { initCommand } from "./install.js";
 import { formatRegistryAdd, formatRegistryRemove } from "./registry.js";
 import type { CommandResult } from "./shared.js";
 import { buildSyncStatus, type SyncStatusResult } from "./sync.js";
@@ -137,12 +138,28 @@ export async function linkCommand(
   if (!target) {
     throw new BorealError("BOREAL_INVALID_INPUT", "Provide a project path to link: bwrk global link <path>");
   }
-  const result = await addProjectRegistryEntry({
+  const registryOptions = {
     registryRoot: flagValue(args, "registry-root"),
     workspaceRoot: target,
     name: flagValue(args, "name"),
     labels: flagValues(args, "label")
-  });
+  };
+  let result: Awaited<ReturnType<typeof addProjectRegistryEntry>>;
+  try {
+    result = await addProjectRegistryEntry(registryOptions);
+  } catch (error) {
+    if (!hasFlag(args, "init") || !isLinkInitCandidate(error)) {
+      if (isLinkInitCandidate(error)) {
+        throw new BorealError("BOREAL_INVALID_INPUT", "Link target is not an initialized Boreal project; rerun with --init to initialize and link it", {
+          workspaceRoot: target,
+          recommendedCommand: `bwrk link ${target} --init`
+        });
+      }
+      throw error;
+    }
+    await initializeLinkTarget(target, args);
+    result = await addProjectRegistryEntry(registryOptions);
+  }
   output.write(json ? formatRecord(result, true) : formatRegistryAdd(result));
   return { exitCode: 0 };
 }
@@ -157,12 +174,49 @@ export async function unlinkCommand(
   if (!id) {
     throw new BorealError("BOREAL_INVALID_INPUT", "Provide the project id to unlink: bwrk unlink <project-id>");
   }
+  if (hasFlag(args, "purge") && !hasFlag(args, "yes")) {
+    throw new BorealError("BOREAL_INVALID_INPUT", "Purge removes the registry row permanently; pass --yes to confirm", {
+      projectId: id,
+      recommendedCommand: `bwrk unlink ${id} --purge --yes`
+    });
+  }
   const result = await removeProjectRegistryEntry(id, {
     registryRoot: flagValue(args, "registry-root"),
     purge: hasFlag(args, "purge")
   });
   output.write(json ? formatRecord(result, true) : formatRegistryRemove(result));
   return { exitCode: 0 };
+}
+
+async function initializeLinkTarget(target: string, args: ParsedArgs): Promise<void> {
+  const initArgs = linkInitArgs(args);
+  const context = await createCliContext(initArgs, target);
+  await initCommand(context, initArgs, silentOutput, true);
+}
+
+function linkInitArgs(args: ParsedArgs): ParsedArgs {
+  const flags = new Map<string, string[]>();
+  for (const name of ["actor", "actor-kind", "session", "storage", "memory-root", "memory-layout", "memory-git-mode", "memory-remote", "install-root", "skill-target", "folder-scoped", "separate-git"]) {
+    const values = args.flags.get(name);
+    if (values) {
+      flags.set(name, [...values]);
+    }
+  }
+  if (!flags.has("setup-memory")) {
+    flags.set("setup-memory", ["true"]);
+  }
+  return { command: ["init"], flags };
+}
+
+const silentOutput: CliOutput = {
+  write() {},
+  error() {}
+};
+
+function isLinkInitCandidate(error: unknown): error is BorealError {
+  return error instanceof BorealError
+    && error.code === "BOREAL_INVALID_INPUT"
+    && error.message.startsWith("Registry add requires");
 }
 
 async function emitGlobalDashboardData(
