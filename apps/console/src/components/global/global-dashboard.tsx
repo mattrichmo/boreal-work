@@ -104,7 +104,7 @@ export function GlobalReadyQueue({ view }: { readonly view: WorkDashboardView })
   );
 }
 
-export function GlobalBoard({ view }: { readonly view: GlobalBoardView }) {
+export function GlobalBoard({ view, routePath = "/" }: { readonly view: GlobalBoardView; readonly routePath?: string }) {
   return (
     <Card
       title="Global board"
@@ -117,6 +117,13 @@ export function GlobalBoard({ view }: { readonly view: GlobalBoardView }) {
       }
     >
       <div className="bw-global-board">
+        <div
+          className="bw-global-board-refusal"
+          data-bw-board-refusal
+          hidden
+          aria-live="polite"
+          aria-atomic="true"
+        />
         <div className="bw-global-board__rails">
           {view.rails.map((rail) => (
             <section key={rail.id} className="bw-global-board-rail" aria-label={rail.title}>
@@ -177,7 +184,18 @@ export function GlobalBoard({ view }: { readonly view: GlobalBoardView }) {
               </div>
               <div className="bw-global-board-lane__columns">
                 {lane.columns.map((column) => (
-                  <section key={column.id} className={cx("bw-global-board-column", `bw-global-board-column--${column.id}`)} aria-label={column.title}>
+                  <section
+                    key={column.id}
+                    className={cx(
+                      "bw-global-board-column",
+                      `bw-global-board-column--${column.id}`,
+                      !isDroppableGlobalBoardColumn(column.id) && "bw-global-board-column--locked"
+                    )}
+                    aria-label={column.title}
+                    aria-disabled={isDroppableGlobalBoardColumn(column.id) ? undefined : true}
+                    data-bw-drop-column={column.id}
+                    data-bw-droppable={isDroppableGlobalBoardColumn(column.id) ? "true" : "false"}
+                  >
                     <header className="bw-global-board-column__header">
                       <span>{column.title}</span>
                       <Badge tone={boardColumnTone(column.id)}>{column.count}</Badge>
@@ -185,7 +203,16 @@ export function GlobalBoard({ view }: { readonly view: GlobalBoardView }) {
                     {column.items.length > 0 ? (
                       <div className="bw-global-board-column__items">
                         {column.items.map((item) => (
-                          <article key={item.id} className={cx("bw-global-board-card", `bw-global-board-card--${item.columnId}`)}>
+                          <article
+                            key={item.id}
+                            className={cx("bw-global-board-card", `bw-global-board-card--${item.columnId}`)}
+                            draggable={isDraggableGlobalBoardCard(item) ? true : undefined}
+                            data-bw-board-card
+                            data-work-id={item.work.id}
+                            data-work-title={item.work.title}
+                            data-project-root={item.projectRoot}
+                            data-current-column={item.columnId}
+                          >
                             <div className="bw-global-board-card__main">
                               <strong>{item.work.title}</strong>
                               <span>{item.work.id}</span>
@@ -198,6 +225,7 @@ export function GlobalBoard({ view }: { readonly view: GlobalBoardView }) {
                               <GlobalDirectiveBadges work={item.work} />
                             </div>
                             {item.claimCommand ? <code>{item.claimCommand}</code> : null}
+                            <GlobalBoardCardActions item={item} routePath={routePath} />
                           </article>
                         ))}
                       </div>
@@ -213,6 +241,90 @@ export function GlobalBoard({ view }: { readonly view: GlobalBoardView }) {
       </div>
     </Card>
   );
+}
+
+function GlobalBoardCardActions({
+  item,
+  routePath
+}: {
+  readonly item: GlobalBoardView["lanes"][number]["columns"][number]["items"][number];
+  readonly routePath: string;
+}) {
+  const canReserve = item.columnId === "ready";
+  const canRelease = item.columnId === "in_progress";
+  const canClose = item.columnId !== "closed" && item.columnId !== "verified";
+  if (!canReserve && !canRelease && !canClose) {
+    return null;
+  }
+  return (
+    <div className="bw-global-board-card__actions" data-bw-board-actions>
+      {canReserve ? (
+        <GlobalBoardCommandForm
+          action="/api/commands/work.reserve"
+          routePath={routePath}
+          item={item}
+          fields={{
+            agentId: "console",
+            purpose: "Console board drag"
+          }}
+        >
+          <Button type="submit" variant="secondary">Reserve</Button>
+        </GlobalBoardCommandForm>
+      ) : null}
+      {canRelease ? (
+        <GlobalBoardCommandForm action="/api/commands/work.release" routePath={routePath} item={item}>
+          <Button type="submit" variant="secondary">Release</Button>
+        </GlobalBoardCommandForm>
+      ) : null}
+      {canClose ? (
+        <GlobalBoardCommandForm
+          action="/api/commands/work.close"
+          routePath={routePath}
+          item={item}
+          fields={{
+            reason: "Closed from global board"
+          }}
+        >
+          <Button type="submit" variant="ghost">Close</Button>
+        </GlobalBoardCommandForm>
+      ) : null}
+    </div>
+  );
+}
+
+function GlobalBoardCommandForm({
+  action,
+  routePath,
+  item,
+  fields = {},
+  children
+}: {
+  readonly action: string;
+  readonly routePath: string;
+  readonly item: GlobalBoardView["lanes"][number]["columns"][number]["items"][number];
+  readonly fields?: Readonly<Record<string, string>>;
+  readonly children: ReactNode;
+}) {
+  return (
+    <form method="post" action={action} data-bw-board-command-form>
+      <input type="hidden" name="returnTo" value={routePath} />
+      <input type="hidden" name="confirm" value="yes" />
+      <input type="hidden" name="workId" value={item.work.id} />
+      <input type="hidden" name="projectRoot" value={item.projectRoot} />
+      {Object.entries(fields).map(([name, value]) => (
+        <input key={name} type="hidden" name={name} value={value} />
+      ))}
+      {children}
+    </form>
+  );
+}
+
+function isDroppableGlobalBoardColumn(columnId: GlobalBoardColumnId): boolean {
+  return columnId === "ready" || columnId === "in_progress" || columnId === "closed";
+}
+
+function isDraggableGlobalBoardCard(item: GlobalBoardView["lanes"][number]["columns"][number]["items"][number]): boolean {
+  return item.columnId !== "closed" && item.columnId !== "verified";
 }
 
 export function GlobalWorkQueues({ view }: { readonly view: GlobalWorkQueuesView }) {

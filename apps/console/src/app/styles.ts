@@ -67,6 +67,14 @@ code, pre { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospac
 .bw-bucket__link { min-height: 34px; border: 1px solid var(--bw-border); border-radius: 8px; color: var(--bw-text); display: inline-flex; align-items: center; justify-content: center; padding: 7px 10px; overflow-wrap: anywhere; text-align: center; }
 .bw-global-board { display: grid; gap: 12px; min-width: 0; }
 .bw-global-board__status, .bw-global-board-lane__badges, .bw-global-board-card__meta, .bw-global-board-rail__meta { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; min-width: 0; }
+.bw-global-board-refusal { min-width: 0; border: 1px solid rgba(223, 124, 124, 0.62); border-radius: 8px; background: rgba(223, 124, 124, 0.08); padding: 10px; display: grid; gap: 9px; }
+.bw-global-board-refusal[hidden] { display: none; }
+.bw-global-board-refusal header { min-width: 0; display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; }
+.bw-global-board-refusal strong { color: var(--bw-text); overflow-wrap: anywhere; }
+.bw-global-board-refusal p, .bw-global-board-refusal__gap span { margin: 0; color: var(--bw-body); font-size: 13px; line-height: 1.35; overflow-wrap: anywhere; }
+.bw-global-board-refusal code, .bw-global-board-refusal__commands code { display: block; border: 1px solid var(--bw-border); border-radius: 8px; background: #0b0f0c; color: var(--bw-body); padding: 7px; white-space: normal; overflow-wrap: anywhere; }
+.bw-global-board-refusal__list, .bw-global-board-refusal__commands { display: grid; gap: 6px; min-width: 0; }
+.bw-global-board-refusal__gap { min-width: 0; border: 1px solid var(--bw-border); border-radius: 8px; background: var(--bw-panel); padding: 8px; display: grid; gap: 4px; }
 .bw-global-board__rails { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; align-items: start; }
 .bw-global-board-rail { min-width: 0; border: 1px solid var(--bw-border); border-radius: 8px; background: rgba(255,255,255,0.015); padding: 10px; display: grid; gap: 10px; }
 .bw-global-board-rail__header, .bw-global-board-lane__header, .bw-global-board-column__header { min-width: 0; display: flex; align-items: start; justify-content: space-between; gap: 8px; }
@@ -84,11 +92,19 @@ code, pre { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospac
 .bw-global-board-lane__metrics { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
 .bw-global-board-lane__columns { display: grid; grid-template-columns: repeat(7, minmax(145px, 1fr)); gap: 8px; min-width: 0; overflow-x: auto; padding-bottom: 2px; }
 .bw-global-board-column { min-width: 145px; border: 1px solid var(--bw-border); border-radius: 8px; padding: 8px; background: rgba(0,0,0,0.12); display: grid; grid-template-rows: auto minmax(46px, auto); gap: 8px; align-content: start; }
+.bw-global-board-column--locked { background: rgba(0,0,0,0.18); }
+.bw-global-board-column--drop-target { outline: 2px solid var(--bw-focus); outline-offset: 2px; }
 .bw-global-board-column--blocked, .bw-global-board-column--needs_verification, .bw-global-board-card--blocked, .bw-global-board-card--needs_verification { border-color: rgba(215, 185, 105, 0.5); }
 .bw-global-board-column--in_progress, .bw-global-board-card--in_progress { border-color: rgba(113, 212, 139, 0.38); }
 .bw-global-board-column--verified, .bw-global-board-column--closed, .bw-global-board-card--verified, .bw-global-board-card--closed { border-color: rgba(113, 212, 139, 0.45); }
 .bw-global-board-column__header span { color: var(--bw-text); font-size: 12px; font-weight: 650; overflow-wrap: anywhere; }
 .bw-global-board-column__empty { color: var(--bw-muted); font-size: 12px; min-height: 46px; display: flex; align-items: center; }
+.bw-global-board-card[draggable="true"] { cursor: grab; }
+.bw-global-board-card--dragging { opacity: 0.72; }
+.bw-global-board-card--pending { opacity: 0.68; cursor: progress; }
+.bw-global-board-card__actions { min-width: 0; display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.bw-global-board-card__actions form { margin: 0; }
+.bw-global-board-card__actions .bw-button { min-height: 30px; padding: 5px 8px; font-size: 12px; }
 .bw-global-queues { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; align-items: start; }
 .bw-global-queue { min-width: 0; display: grid; gap: 10px; align-content: start; }
 .bw-global-queue__header { min-height: 32px; display: flex; align-items: center; justify-content: space-between; gap: 8px; color: var(--bw-text); }

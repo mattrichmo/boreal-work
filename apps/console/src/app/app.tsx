@@ -93,7 +93,7 @@ export function ConsoleApp({ routePath, data }: { readonly routePath: string; re
         <div className="bw-console__content">
           {data.workspace.stale ? <StaleBanner data={data} /> : null}
           {route.id === "overview" ? <RepoOverviewPage data={data} routePath={routePath} /> : null}
-          {route.id === "global" ? <OverviewPage data={data} /> : null}
+          {route.id === "global" ? <OverviewPage data={data} routePath={routePath} /> : null}
           {route.id === "sprint" ? <SprintPage data={data} routePath={routePath} /> : null}
           {route.id === "knowledge" ? <KnowledgePage data={data} routePath={routePath} /> : null}
           {route.id === "repo" ? <RepoPage data={data} /> : null}
@@ -116,7 +116,7 @@ function NavLink({ route, active }: { readonly route: ConsoleRoute; readonly act
   );
 }
 
-function OverviewPage({ data }: { readonly data: ConsoleDataSet }) {
+function OverviewPage({ data, routePath }: { readonly data: ConsoleDataSet; readonly routePath: string }) {
   const items = data.work.queues.flatMap((queue) => queue.items);
   const hasProjects = data.registry.entries.length > 0;
   return (
@@ -128,7 +128,7 @@ function OverviewPage({ data }: { readonly data: ConsoleDataSet }) {
         {hasProjects ? (
           <>
             <GlobalOverviewMetrics view={data.registry} />
-            <GlobalBoard view={data.globalBoard} />
+            <GlobalBoard view={data.globalBoard} routePath={routePath} />
             <BucketOverviewGrid view={data.registry} />
             <GlobalWorkQueues view={data.globalQueues} />
             <GlobalSearchPanel view={data.globalSearch} />

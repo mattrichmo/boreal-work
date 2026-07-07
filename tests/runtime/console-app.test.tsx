@@ -352,6 +352,41 @@ describe("console app runtime", () => {
     await expect(runSafeConsoleCommand({ id: "work.claim", workspaceRoot: "/workspace/boreal-work", runner }))
       .rejects.toThrow("requires target input");
   });
+
+  it("executes targeted work commands against the owning project workspace", async () => {
+    const calls: string[] = [];
+    const runner: ConsoleCliRunner = {
+      async run(args) {
+        calls.push(args.join(" "));
+        return { ok: true };
+      }
+    };
+
+    await runSafeConsoleCommand({
+      id: "work.reserve",
+      workspaceRoot: "/workspace/boreal-work",
+      runner,
+      params: new URLSearchParams({
+        workId: "bw_work_ready",
+        agentId: "console",
+        purpose: "Console board drag",
+        projectRoot: "/workspace/other-work"
+      })
+    });
+
+    expect(calls).toEqual([
+      "--workspace /workspace/other-work work reserve bw_work_ready --agent console --purpose Console board drag --json"
+    ]);
+    await expect(runSafeConsoleCommand({
+      id: "work.release",
+      workspaceRoot: "/workspace/boreal-work",
+      runner,
+      params: new URLSearchParams({
+        workId: "bw_work_ready",
+        projectRoot: "relative-workspace"
+      })
+    })).rejects.toThrow("projectRoot must be an absolute path");
+  });
 });
 
 function fakeRunner(): ConsoleCliRunner & { readonly calls: string[] } {

@@ -177,6 +177,16 @@ describe("console server", () => {
         expected: "work reserve bw_work_ready --agent cybertron --purpose Claim from test --ttl 2h --json"
       },
       {
+        id: "work.reserve",
+        body: {
+          workId: "bw_work_remote",
+          agentId: "console",
+          purpose: "Console board drag",
+          projectRoot: "/workspace/other-work"
+        },
+        expected: "--workspace /workspace/other-work work reserve bw_work_remote --agent console --purpose Console board drag --json"
+      },
+      {
         id: "work.release",
         body: { workId: "bw_work_ready" },
         expected: "work release bw_work_ready --json"
@@ -257,7 +267,9 @@ describe("console server", () => {
         readonly error?: {
           readonly code?: string;
           readonly message?: string;
-          readonly details?: Record<string, unknown>;
+          readonly details?: Record<string, unknown> & {
+            readonly gaps?: readonly { readonly code?: string; readonly data?: Record<string, unknown> }[];
+          };
           readonly recovery?: readonly { readonly command?: string }[];
         };
       };
@@ -268,6 +280,12 @@ describe("console server", () => {
         code: "BOREAL_RESERVATION_CONFLICT",
         message: "No active reservation",
         details: { workId: "bw_work_ready" }
+      });
+      expect(payload.error?.details?.gaps?.[0]).toMatchObject({
+        code: "gate.verification.unsatisfied",
+        data: {
+          command: "bwrk work verify bw_work_ready --evidence <evidence-id> --json"
+        }
       });
       expect(recoveryCommands).toContain("bwrk work show bw_work_ready --json");
       expect(recoveryCommands).toContain("bwrk sync refresh --json");
@@ -370,7 +388,19 @@ function failingActionRunner(): ConsoleCliRunner {
     async run(args) {
       if (args.join(" ") === "work release bw_work_ready --json") {
         throw new ConsoleCommandError("BOREAL_RESERVATION_CONFLICT", "No active reservation", {
-          workId: "bw_work_ready"
+          workId: "bw_work_ready",
+          gaps: [
+            {
+              code: "gate.verification.unsatisfied",
+              subjectType: "work",
+              subjectId: "bw_work_ready",
+              targetId: "bw_work_ready",
+              data: {
+                reason: "required gate has no satisfying evidence",
+                command: "bwrk work verify bw_work_ready --evidence <evidence-id> --json"
+              }
+            }
+          ]
         });
       }
       return { ok: true };

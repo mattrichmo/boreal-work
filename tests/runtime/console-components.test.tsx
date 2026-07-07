@@ -10,6 +10,7 @@ import {
   DashboardHealthPanel,
   DirectiveSummaryPanel,
   EntityDetailHeader,
+  GlobalBoard,
   GlobalDriftPanel,
   GlobalHealthSummaryPanel,
   GlobalOverviewMetrics,
@@ -49,6 +50,7 @@ import {
 import type {
   DashboardHealthView,
   GlobalActivityView,
+  GlobalBoardView,
   GlobalHealthView,
   GlobalSearchView,
   GlobalSettingsView,
@@ -126,6 +128,7 @@ describe("console component exports", () => {
   it("renders sprint, global, and operations dashboard primitives", () => {
     const board = sprintBoardView();
     const registry = registryView();
+    const globalBoard = globalBoardView();
     const queues = globalQueuesView();
     const search = globalSearchView();
     const activity = globalActivityView();
@@ -148,6 +151,7 @@ describe("console component exports", () => {
         <SprintTimelineView view={board} />
         <SprintBoardProgressView view={board} />
         <GlobalOverviewMetrics view={registry} />
+        <GlobalBoard view={globalBoard} routePath="/?mode=live" />
         <BucketOverviewGrid view={registry} />
         <GlobalWorkQueues view={queues} />
         <GlobalSearchPanel view={search} />
@@ -220,6 +224,18 @@ describe("console component exports", () => {
     expect(html).toContain("Sprint progress");
     expect(html).toContain("href=\"/sprint?view=table&amp;label=runtime\"");
     expect(html).toContain("Project buckets");
+    expect(html).toContain("Global board");
+    expect(html).toContain("data-bw-board-refusal");
+    expect(html).toContain("data-bw-drop-column=\"blocked\"");
+    expect(html).toContain("data-bw-droppable=\"false\"");
+    expect(html).toContain("data-bw-drop-column=\"in_progress\"");
+    expect(html).toContain("data-bw-droppable=\"true\"");
+    expect(html).toContain("draggable=\"true\"");
+    expect(html).toContain("/api/commands/work.reserve");
+    expect(html).toContain("/api/commands/work.release");
+    expect(html).toContain("/api/commands/work.close");
+    expect(html).toContain("projectRoot");
+    expect(html).toContain("/repo/b");
     expect(html).toContain("/repo?project=project-b");
     expect(html).toContain("Global queues");
     expect(html).toContain("Claim command");
@@ -544,6 +560,126 @@ function registryView(): ProjectRegistryView {
       readyWorkCount: 1,
       blockedWorkCount: 1,
       activeReservationCount: 1
+    }
+  };
+}
+
+function globalBoardView(): GlobalBoardView {
+  const ready = workItem({
+    id: "bw_work_ready",
+    title: "Ready board card",
+    status: "ready",
+    directiveSummary: directiveSummaryFixture("bw_work_ready")
+  });
+  const active = workItem({
+    id: "bw_work_active",
+    title: "Active board card",
+    status: "in_progress",
+    activeReservationId: "bw_reservation_active"
+  });
+  const blocked = workItem({
+    id: "bw_work_blocked",
+    title: "Blocked board card",
+    status: "blocked",
+    activeBlockerIds: ["bw_work_ready"],
+    blockedBy: ["bw_work_ready"]
+  });
+  const columns: GlobalBoardView["lanes"][number]["columns"] = [
+    { id: "draft", title: "Draft", count: 0, items: [] },
+    {
+      id: "ready",
+      title: "Ready",
+      count: 1,
+      items: [{
+        id: "project-b:bw_work_ready",
+        projectId: "project-b",
+        projectName: "B Project",
+        projectRoot: "/repo/b",
+        work: ready,
+        status: ready.status,
+        columnId: "ready",
+        hasBorealReferences: false,
+        borealReferenceCount: 0,
+        claimCommand: "bwrk --workspace /repo/b work reserve bw_work_ready --purpose 'Claim from Boreal Console' --json"
+      }]
+    },
+    {
+      id: "in_progress",
+      title: "In Progress",
+      count: 1,
+      items: [{
+        id: "project-b:bw_work_active",
+        projectId: "project-b",
+        projectName: "B Project",
+        projectRoot: "/repo/b",
+        work: active,
+        status: active.status,
+        columnId: "in_progress",
+        hasBorealReferences: false,
+        borealReferenceCount: 0
+      }]
+    },
+    {
+      id: "blocked",
+      title: "Blocked",
+      count: 1,
+      items: [{
+        id: "project-b:bw_work_blocked",
+        projectId: "project-b",
+        projectName: "B Project",
+        projectRoot: "/repo/b",
+        work: blocked,
+        status: blocked.status,
+        columnId: "blocked",
+        hasBorealReferences: false,
+        borealReferenceCount: 0
+      }]
+    },
+    { id: "needs_verification", title: "Needs Verification", count: 0, items: [] },
+    { id: "verified", title: "Verified", count: 0, items: [] },
+    { id: "closed", title: "Closed", count: 0, items: [] }
+  ];
+  return {
+    lanes: [{
+      id: "project-b",
+      kind: "project",
+      projectId: "project-b",
+      projectName: "B Project",
+      projectRoot: "/repo/b",
+      lifecycle: "linked",
+      health: "ok",
+      stale: false,
+      syncFreshness: "fresh",
+      stalenessLabel: "fresh",
+      columns,
+      totalWork: 3,
+      openWork: 3,
+      blockedWork: 1,
+      readyWork: 1,
+      findingCount: 0
+    }],
+    rails: [
+      { id: "inbox", title: "Inbox rail", items: [], count: 0, emptyLabel: "No inbox items." },
+      { id: "next", title: "Next rail", items: [], count: 0, emptyLabel: "No next work." }
+    ],
+    summary: {
+      lanes: 1,
+      projects: 1,
+      initiatives: 0,
+      totalWork: 3,
+      openWork: 3,
+      staleLanes: 0,
+      pausedLanes: 0,
+      missingLanes: 0,
+      draft: 0,
+      ready: 1,
+      inProgress: 1,
+      blocked: 1,
+      needsVerification: 0,
+      verified: 0,
+      closed: 0,
+      inbox: 0,
+      next: 0
     }
   };
 }

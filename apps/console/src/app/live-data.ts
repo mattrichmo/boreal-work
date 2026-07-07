@@ -1,5 +1,5 @@
 import { readdir, readFile, stat } from "node:fs/promises";
-import { basename, extname, join, relative, resolve } from "node:path";
+import { basename, extname, isAbsolute, join, relative, resolve } from "node:path";
 
 import { runBoundedProcess, type ProjectRegistryLifecycleState } from "@boreal/core";
 import {
@@ -338,7 +338,25 @@ export async function runSafeConsoleCommand(input: {
     });
   }
   const runner = input.runner ?? createNodeCliRunner({ workspaceRoot: input.workspaceRoot });
-  return runner.run(args);
+  return runner.run(scopedCommandArgs(args, input.workspaceRoot, input.params));
+}
+
+function scopedCommandArgs(args: readonly string[], workspaceRoot: string, params?: ConsoleCommandParams): readonly string[] {
+  const projectRoot = params ? optionalCommandParam(params, "projectRoot") : undefined;
+  if (!projectRoot) {
+    return args;
+  }
+  if (!isAbsolute(projectRoot)) {
+    throw new ConsoleCommandError("CONSOLE_COMMAND_INVALID_INPUT", "projectRoot must be an absolute path", {
+      field: "projectRoot",
+      projectRoot
+    });
+  }
+  const targetRoot = resolve(projectRoot);
+  if (targetRoot === resolve(workspaceRoot)) {
+    return args;
+  }
+  return ["--workspace", targetRoot, ...args];
 }
 
 function targetedCommandArgs(id: string, params?: ConsoleCommandParams): readonly string[] | undefined {
@@ -1649,10 +1667,16 @@ function firstCompleteJsonObject(text: string): string | undefined {
 async function resolveCliData(output: string, workspaceRoot: string): Promise<unknown> {
   const parsed = parseJsonObject(output, "boreal CLI response");
   if (parsed.ok !== true) {
+    const details = {
+      ...(isRecord(parsed.details) ? parsed.details : {}),
+      ...(Array.isArray(parsed.gaps) ? { gaps: parsed.gaps } : {}),
+      ...(Array.isArray(parsed.agentDirectives) ? { agentDirectives: parsed.agentDirectives } : {}),
+      ...(isRecord(parsed.recovery) ? { recovery: parsed.recovery } : {})
+    };
     throw new ConsoleCommandError(
       typeof parsed.code === "string" ? parsed.code : "BOREAL_COMMAND_FAILED",
       typeof parsed.message === "string" ? parsed.message : "Boreal CLI response was not ok",
-      isRecord(parsed.details) ? parsed.details : {}
+      details
     );
   }
   const data = parsed.data;
