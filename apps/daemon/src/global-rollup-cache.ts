@@ -175,7 +175,10 @@ async function refreshGlobalRollupCacheProject(input: {
   }
 
   try {
-    const rollup = await readProjectRollup(sourceRollupPath, input.entry.id);
+    const rollup = await readProjectRollup(sourceRollupPath, {
+      expectedProjectId: input.entry.id,
+      expectedWorkspaceRoot: input.entry.projectRoot
+    });
     await writeTextFileAtomic(cachePath, `${JSON.stringify(rollup, null, 2)}\n`);
     return globalRollupCacheProject(input.entry, {
       sourceRollupPath,
@@ -264,7 +267,7 @@ async function readCachedRollup(path: string, generatedAt: IsoTimestamp, ttlMs: 
   };
 }
 
-async function readProjectRollup(path: string, expectedProjectId?: string): Promise<ProjectRollupDocument> {
+async function readProjectRollup(path: string, expected?: { readonly expectedProjectId?: string; readonly expectedWorkspaceRoot?: string }): Promise<ProjectRollupDocument> {
   if (!existsSync(path)) {
     throw new BorealError("BOREAL_NOT_FOUND", "Project rollup is missing", { path });
   }
@@ -278,10 +281,13 @@ async function readProjectRollup(path: string, expectedProjectId?: string): Prom
     throw new BorealError("BOREAL_CONFLICT", "Project rollup failed schema validation", { path, issues });
   }
   const rollup = parsed as ProjectRollupDocument;
-  if (expectedProjectId && rollup.projectId !== expectedProjectId) {
+  const workspaceRootMatches = expected?.expectedWorkspaceRoot
+    ? resolve(rollup.workspaceRoot) === resolve(expected.expectedWorkspaceRoot)
+    : false;
+  if (expected?.expectedProjectId && rollup.projectId !== expected.expectedProjectId && !workspaceRootMatches) {
     throw new BorealError("BOREAL_CONFLICT", "Project rollup projectId does not match the registry entry", {
       path,
-      expectedProjectId,
+      expectedProjectId: expected.expectedProjectId,
       actualProjectId: rollup.projectId
     });
   }

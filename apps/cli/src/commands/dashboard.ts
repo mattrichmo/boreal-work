@@ -9,10 +9,11 @@ import {
   nowIso,
   projectRegistryEntryIdFromIdentity,
   type ProjectRegistryEntry as CoreProjectRegistryEntry,
+  type ProjectRollupDocument,
   type RuntimeOperation,
   type WorkPriority
 } from "@boreal/core";
-import { inspectDaemonStatus, refreshGlobalRollupCache, type DaemonStatusResult } from "@boreal/daemon";
+import { inspectDaemonStatus, refreshGlobalRollupCache, type DaemonStatusResult, type GlobalRollupCacheProject } from "@boreal/daemon";
 import {
   buildGlobalActivityView,
   buildGlobalHealthView,
@@ -421,17 +422,27 @@ async function buildGlobalDashboardResult(context: CliContext, args: ParsedArgs)
   const limitedRegistryEntries = registryEntries.slice(0, projectLimit);
   const registryFindings = dashboardRegistryFindingsByProject(registryDoctor);
   const searchQuery = "v1-remainder global dashboard registry";
-  const overviews = await Promise.all(
-    limitedRegistryEntries.map((entry) =>
-      buildGlobalDashboardProjectOverview({
-        parentContext: context,
-        entry,
-        registryFindings: registryFindings.get(entry.id) ?? [],
-        generatedAt,
-        searchQuery
-      })
-    )
-  );
+  const rollupsByProject = new Map(rollups.projects.map((project) => [project.projectId, project]));
+  const overviews = activeRegistryEntries.length > 0
+    ? limitedRegistryEntries.map((entry) =>
+        buildGlobalDashboardRollupOverview({
+          entry,
+          rollupProject: rollupsByProject.get(entry.id),
+          registryFindings: registryFindings.get(entry.id) ?? [],
+          generatedAt
+        })
+      )
+    : await Promise.all(
+        limitedRegistryEntries.map((entry) =>
+          buildGlobalDashboardProjectOverview({
+            parentContext: context,
+            entry,
+            registryFindings: registryFindings.get(entry.id) ?? [],
+            generatedAt,
+            searchQuery
+          })
+        )
+      );
 
   return {
     schemaVersion: "boreal.cli.dashboard.global.v1",
@@ -523,6 +534,36 @@ async function buildGlobalDashboardResult(context: CliContext, args: ParsedArgs)
   };
 }
 
+function buildGlobalDashboardRollupOverview(input: {
+  readonly entry: CoreProjectRegistryEntry;
+  readonly rollupProject?: GlobalRollupCacheProject;
+  readonly registryFindings: readonly DashboardFinding[];
+  readonly generatedAt: string;
+}): GlobalDashboardProjectOverview {
+  const rollup = input.rollupProject?.rollup;
+  const findings = [
+    ...input.registryFindings,
+    ...dashboardFindingsFromRollupProject(input.entry, input.rollupProject)
+  ];
+  const entry = dashboardEntryFromRollup({
+    entry: input.entry,
+    generatedAt: input.generatedAt,
+    rollupProject: input.rollupProject,
+    findings
+  });
+  const sync = syncDashboardViewFromRollupProject(input.entry, input.rollupProject, input.generatedAt);
+  return {
+    entry,
+    settings: dashboardSettingsFromEntry(input.entry, entry),
+    work: rollup ? dashboardWorkFromRollup(rollup) : [],
+    searchResults: rollup ? dashboardSearchFromRollup(rollup) : [],
+    activityRows: rollup ? dashboardActivityFromRollup(rollup) : [],
+    sync,
+    locks: { generatedAt: input.generatedAt, ok: true, workspaceRoot: input.entry.projectRoot, locks: [] },
+    daemon: daemonStatusFromRollupProject(input.entry, input.rollupProject, input.generatedAt)
+  };
+}
+
 async function buildGlobalDashboardProjectOverview(input: {
   readonly parentContext: CliContext;
   readonly entry: CoreProjectRegistryEntry;
@@ -598,6 +639,344 @@ async function buildGlobalDashboardProjectOverview(input: {
       daemon: daemonStatusUnavailable(input.entry.projectRoot, input.generatedAt, error)
     };
   }
+}
+
+function dashboardEntryFromRollup(input: {
+  readonly entry: CoreProjectRegistryEntry;
+  readonly generatedAt: string;
+  readonly rollupProject?: GlobalRollupCacheProject;
+  readonly findings: readonly DashboardFinding[];
+}): DashboardProjectRegistryEntry {
+  const rollup = input.rollupProject?.rollup;
+  const syncFreshness = rollupSyncFreshness(input.entry, input.rollupProject);
+  const stale = syncFreshness === "stale" || input.rollupProject?.stale === true || input.findings.some((finding) => finding.severity !== "info");
+  return {
+    id: input.entry.id,
+    name: input.entry.display.name,
+    lifecycle: input.entry.lifecycle,
+    projectRoot: input.entry.projectRoot,
+    memoryRoot: input.entry.memoryRoot,
+    memoryLayout: input.entry.memoryLayout,
+    memoryGitMode: input.entry.memoryGitMode,
+    installRoot: input.entry.installRoot,
+    bwrkPin: input.entry.bwrkPin,
+    health: rollupProjectHealthState(input.entry, input.rollupProject, input.findings),
+    stale,
+    syncFreshness,
+    openWorkCount: rollup ? openWorkCountFromRollup(rollup) : 0,
+    readyWorkCount: rollup?.counts.work.byStatus.ready ?? 0,
+    blockedWorkCount: rollup?.counts.work.byStatus.blocked ?? 0,
+    activeReservationCount: rollup?.counts.reservations.active ?? 0,
+    findings: input.findings,
+    lastSeenAt: input.rollupProject?.generatedAt ?? input.rollupProject?.fetchedAt ?? input.entry.lastSeenAt ?? input.generatedAt
+  };
+}
+
+function dashboardWorkFromRollup(rollup: ProjectRollupDocument): readonly WorkItemView[] {
+  const byId = new Map<string, WorkItemView>();
+  for (const work of rollup.next.work) {
+    mergeWorkView(byId, {
+      id: work.workId,
+      title: work.title,
+      kind: work.kind,
+      status: work.status,
+      priority: work.priority,
+      labels: ["rollup"],
+      dependencyIds: [],
+      activeBlockerIds: [],
+      blockedBy: [],
+      evidenceCount: 0,
+      verificationCount: 0,
+      requiredCloseoutGates: [],
+      contextSummary: `Rollup next-work sample updated at ${work.updatedAt}`
+    });
+  }
+  for (const work of [...rollup.limbo.needsVerification, ...rollup.limbo.verified]) {
+    mergeWorkView(byId, {
+      id: work.workId,
+      title: work.title,
+      kind: "task",
+      status: work.status,
+      priority: "normal",
+      labels: ["rollup", "limbo"],
+      dependencyIds: [],
+      activeBlockerIds: [],
+      blockedBy: [],
+      evidenceCount: 0,
+      verificationCount: 0,
+      requiredCloseoutGates: [],
+      contextSummary: `Rollup limbo age ${work.ageDays.toFixed(1)} day(s)`
+    });
+  }
+  for (const sample of rollup.enforcement.blockingGaps.samples) {
+    mergeWorkView(byId, {
+      id: sample.workId,
+      title: sample.title,
+      kind: "task",
+      status: "blocked",
+      priority: "normal",
+      labels: ["rollup", "blocking-gap"],
+      dependencyIds: sample.blockerIds,
+      activeBlockerIds: sample.blockerIds,
+      blockedBy: sample.blockerIds,
+      evidenceCount: 0,
+      verificationCount: 0,
+      requiredCloseoutGates: [],
+      contextSummary: `${sample.blockerIds.length} active blocker(s) from rollup sample`
+    });
+  }
+  return [...byId.values()].sort(compareWorkViews).slice(0, DEFAULT_DASHBOARD_WORK_LIMIT);
+}
+
+function dashboardSearchFromRollup(rollup: ProjectRollupDocument): readonly GlobalSearchSourceRow[] {
+  return rollup.next.work.slice(0, DEFAULT_DASHBOARD_SEARCH_LIMIT).map((work, index) => ({
+    id: `rollup-next:${work.workId}`,
+    type: "work",
+    recordId: work.workId,
+    title: work.title,
+    summary: `${work.kind} ${work.status} from project rollup`,
+    score: DEFAULT_DASHBOARD_SEARCH_LIMIT - index
+  }));
+}
+
+function dashboardActivityFromRollup(rollup: ProjectRollupDocument): readonly GlobalActivitySourceRow[] {
+  if (rollup.lastOperation) {
+    return [{
+      id: rollup.lastOperation.id,
+      sessionId: "rollup",
+      commandPath: rollup.lastOperation.commandPath,
+      status: rollup.lastOperation.status,
+      exitCode: rollup.lastOperation.status === "failed" ? 1 : 0,
+      stateChanged: false,
+      generatedArtifactsChanged: false,
+      actorId: "rollup",
+      actorKind: "system",
+      startedAt: rollup.lastOperation.finishedAt,
+      finishedAt: rollup.lastOperation.finishedAt,
+      eventCount: 0
+    }];
+  }
+  if (rollup.lastEvent) {
+    return [{
+      id: rollup.lastEvent.id,
+      sessionId: "rollup",
+      commandPath: rollup.lastEvent.type,
+      status: "observed",
+      exitCode: 0,
+      stateChanged: true,
+      generatedArtifactsChanged: false,
+      actorId: "rollup",
+      actorKind: "system",
+      startedAt: rollup.lastEvent.at,
+      finishedAt: rollup.lastEvent.at,
+      eventCount: 1
+    }];
+  }
+  return [];
+}
+
+function mergeWorkView(byId: Map<string, WorkItemView>, next: WorkItemView): void {
+  const current = byId.get(next.id);
+  if (!current) {
+    byId.set(next.id, next);
+    return;
+  }
+  const activeBlockerIds = uniqueStrings([...current.activeBlockerIds, ...next.activeBlockerIds]);
+  byId.set(next.id, {
+    ...current,
+    labels: uniqueStrings([...current.labels, ...next.labels]),
+    dependencyIds: uniqueStrings([...current.dependencyIds, ...next.dependencyIds]),
+    activeBlockerIds,
+    blockedBy: activeBlockerIds,
+    contextSummary: current.contextSummary ?? next.contextSummary
+  });
+}
+
+function syncDashboardViewFromRollupProject(
+  entry: CoreProjectRegistryEntry,
+  rollupProject: GlobalRollupCacheProject | undefined,
+  generatedAt: string
+): SyncDashboardView {
+  const ok = Boolean(rollupProject?.rollup) &&
+    !rollupProjectMissing(entry) &&
+    rollupProject?.status === "fresh" &&
+    rollupProject.rollup?.health.syncOk !== false &&
+    rollupProject.rollup?.health.doctorOk !== false;
+  return {
+    generatedAt,
+    ok,
+    workspaceRoot: entry.projectRoot,
+    vaultOk: ok,
+    ledgersOk: ok,
+    searchIndexOk: ok,
+    gitOk: ok,
+    recommendedActions: [],
+    findings: []
+  };
+}
+
+function daemonStatusFromRollupProject(
+  entry: CoreProjectRegistryEntry,
+  rollupProject: GlobalRollupCacheProject | undefined,
+  generatedAt: string
+): DaemonStatusResult {
+  if (rollupProjectMissing(entry) || rollupProject?.status === "degraded") {
+    return daemonStatusUnavailable(entry.projectRoot, generatedAt, new Error(rollupProject?.error ?? "Project rollup unavailable"));
+  }
+  return {
+    schemaVersion: "boreal.daemon.status.v1",
+    generatedAt,
+    workspaceRoot: entry.projectRoot,
+    statusPath: join(resolve(entry.projectRoot), ".boreal", "daemon", "status.json"),
+    state: "stopped",
+    locks: {
+      runtime: {
+        path: join(resolve(entry.projectRoot), ".boreal", "runtime", "state.lock"),
+        exists: false,
+        stale: false,
+        status: "clear"
+      },
+      searchIndex: {
+        path: join(resolve(entry.projectRoot), ".boreal", "runtime", "search-index.lock"),
+        exists: false,
+        stale: false,
+        status: "clear"
+      }
+    },
+    watch: {
+      paths: [],
+      writesTruth: false,
+      repairsAreCommandMediated: true
+    },
+    findings: [],
+    recommendedActions: [],
+    agentDirectives: [],
+    directiveObligations: unavailableDaemonDirectiveObligations(generatedAt)
+  };
+}
+
+function dashboardFindingsFromRollupProject(
+  entry: CoreProjectRegistryEntry,
+  rollupProject: GlobalRollupCacheProject | undefined
+): readonly DashboardFinding[] {
+  const findings: DashboardFinding[] = [];
+  if (rollupProjectMissing(entry)) {
+    findings.push({
+      code: "dashboard.project_missing",
+      title: "dashboard.project_missing",
+      severity: "error",
+      status: "failed",
+      message: "Registered project root is missing",
+      source: entry.projectRoot,
+      actions: []
+    });
+  }
+  if (!rollupProject) {
+    findings.push({
+      code: "dashboard.project_rollup_unavailable",
+      title: "dashboard.project_rollup_unavailable",
+      severity: "error",
+      status: "failed",
+      message: "No rollup cache row exists for this registry entry",
+      source: entry.projectRoot,
+      actions: []
+    });
+    return findings;
+  }
+  if (rollupProject.error) {
+    const severity = rollupProject.rollup ? "warning" : "error";
+    findings.push({
+      code: "dashboard.project_rollup_unavailable",
+      title: "dashboard.project_rollup_unavailable",
+      severity,
+      status: severity === "error" ? "failed" : "warning",
+      message: rollupProject.error,
+      source: rollupProject.sourceRollupPath,
+      actions: []
+    });
+  }
+  if (rollupProject.stale || rollupProject.status === "stale") {
+    findings.push({
+      code: "dashboard.project_rollup_stale",
+      title: "dashboard.project_rollup_stale",
+      severity: "warning",
+      status: "warning",
+      message: `Project rollup cache is stale after ${rollupProject.cacheAgeMs ?? 0}ms`,
+      source: rollupProject.cachePath,
+      actions: []
+    });
+  }
+  if (rollupProject.rollup?.health.doctorOk === false) {
+    findings.push({
+      code: "dashboard.project_doctor_not_ok",
+      title: "dashboard.project_doctor_not_ok",
+      severity: "warning",
+      status: "warning",
+      message: "Project rollup reports doctor not ok",
+      source: rollupProject.sourceRollupPath,
+      actions: []
+    });
+  }
+  if (rollupProject.rollup?.health.syncOk === false) {
+    findings.push({
+      code: "dashboard.project_sync_not_ok",
+      title: "dashboard.project_sync_not_ok",
+      severity: "warning",
+      status: "warning",
+      message: "Project rollup reports sync not ok",
+      source: rollupProject.sourceRollupPath,
+      actions: []
+    });
+  }
+  return findings;
+}
+
+function rollupProjectHealthState(
+  entry: CoreProjectRegistryEntry,
+  rollupProject: GlobalRollupCacheProject | undefined,
+  findings: readonly DashboardFinding[]
+): DashboardProjectRegistryEntry["health"] {
+  if (rollupProjectMissing(entry)) {
+    return "missing";
+  }
+  if (findings.some((finding) => finding.severity === "error")) {
+    return "error";
+  }
+  if (!rollupProject?.rollup || rollupProject.status === "degraded") {
+    return "error";
+  }
+  if (rollupProject.stale || rollupProject.status === "stale" || rollupProject.rollup.health.doctorOk === false || rollupProject.rollup.health.syncOk === false) {
+    return "warning";
+  }
+  return "ok";
+}
+
+function rollupSyncFreshness(
+  entry: CoreProjectRegistryEntry,
+  rollupProject: GlobalRollupCacheProject | undefined
+): ProjectSyncFreshness {
+  if (rollupProjectMissing(entry) || !rollupProject?.rollup) {
+    return "unknown";
+  }
+  if (rollupProject.stale || rollupProject.status === "stale" || rollupProject.rollup.health.syncOk === false) {
+    return "stale";
+  }
+  return "fresh";
+}
+
+function rollupProjectMissing(entry: CoreProjectRegistryEntry): boolean {
+  return !existsSync(entry.projectRoot);
+}
+
+function openWorkCountFromRollup(rollup: ProjectRollupDocument): number {
+  return rollup.counts.work.total -
+    rollup.counts.work.byStatus.closed -
+    rollup.counts.work.byStatus.cancelled -
+    rollup.counts.work.byStatus.verified;
+}
+
+function uniqueStrings(values: readonly string[]): string[] {
+  return [...new Set(values)];
 }
 
 function daemonStatusUnavailable(workspaceRoot: string, generatedAt: string, error: unknown): DaemonStatusResult {

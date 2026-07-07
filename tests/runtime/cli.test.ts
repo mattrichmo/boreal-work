@@ -932,6 +932,12 @@ describe("bwrk cli", () => {
       ]);
       await mkdir(join(workspace, ".agents/skills"), { recursive: true });
     }
+    const readyWork = parseData<{ readonly meta: { readonly id: string } }>(
+      (await runCli(rootDir, ["work", "create", "Rollup visible ready work", "--kind", "task", "--ready", "--json"])).stdout
+    );
+    const remoteReadyWork = parseData<{ readonly meta: { readonly id: string } }>(
+      (await runCli(secondRoot, ["work", "create", "Rollup visible remote work", "--kind", "task", "--ready", "--json"])).stdout
+    );
 
     const empty = parseData<{
       readonly schemaVersion: string;
@@ -958,13 +964,17 @@ describe("bwrk cli", () => {
 
     const capped = parseData<{
       readonly truncated: { readonly projects: boolean };
-      readonly registry: { readonly entries: readonly unknown[] };
-      readonly globalQueues: { readonly queues: Array<{ readonly items: readonly unknown[] }> };
+      readonly registry: { readonly entries: Array<{ readonly lastSeenAt?: string; readonly syncFreshness: string }> };
+      readonly globalQueues: { readonly queues: Array<{ readonly id: string; readonly items: Array<{ readonly work: { readonly id: string } }> }> };
       readonly rollups: { readonly source: string; readonly ttlMs: number; readonly projectCount: number };
     }>((await runCli(rootDir, ["dashboard", "global", "--registry-root", registryRoot, "--limit", "1", "--json"])).stdout);
     expect(capped.truncated.projects).toBe(true);
     expect(capped.registry.entries).toHaveLength(1);
+    expect(capped.registry.entries[0]).toEqual(expect.objectContaining({ syncFreshness: "fresh", lastSeenAt: expect.any(String) }));
     expect(capped.globalQueues.queues.every((queue) => queue.items.length <= 200)).toBe(true);
+    expect(capped.globalQueues.queues.find((queue) => queue.id === "ready")?.items.map((item) => item.work.id)).toEqual(
+      expect.arrayContaining([expect.stringMatching(new RegExp(`${readyWork.meta.id}|${remoteReadyWork.meta.id}`))])
+    );
     expect(capped.rollups).toEqual(expect.objectContaining({ source: "lazy", ttlMs: 60_000, projectCount: 2 }));
 
     const ttlPayload = parseData<{
@@ -973,6 +983,33 @@ describe("bwrk cli", () => {
     }>((await runCli(rootDir, ["dashboard", "global", "--registry-root", registryRoot, "--live-cache-ttl-ms", "1", "--json"])).stdout);
     expect(ttlPayload.limits.rollupCacheTtlMs).toBe(1);
     expect(ttlPayload.rollups.ttlMs).toBe(1);
+
+    await rm(secondRoot, { recursive: true, force: true });
+    const missing = parseData<{
+      readonly registry: {
+        readonly entries: Array<{
+          readonly projectRoot: string;
+          readonly health: string;
+          readonly stale: boolean;
+          readonly syncFreshness: string;
+          readonly findings: Array<{ readonly code: string; readonly severity: string }>;
+        }>;
+      };
+      readonly globalHealth: { readonly summary: { readonly errorProjects: number; readonly staleProjects: number } };
+      readonly rollups: {
+        readonly projects: Array<{ readonly projectRoot: string; readonly status: string; readonly error?: string }>;
+      };
+    }>((await runCli(rootDir, ["dashboard", "global", "--registry-root", registryRoot, "--live-cache-ttl-ms", "0", "--json"])).stdout);
+    const missingEntry = missing.registry.entries.find((entry) => entry.projectRoot === secondRoot);
+    expect(missingEntry).toMatchObject({ health: "missing", stale: true, syncFreshness: "unknown" });
+    expect(missingEntry?.findings).toEqual(
+      expect.arrayContaining([expect.objectContaining({ code: "dashboard.project_missing", severity: "error" })])
+    );
+    expect(missing.globalHealth.summary.errorProjects).toBeGreaterThanOrEqual(1);
+    expect(missing.globalHealth.summary.staleProjects).toBeGreaterThanOrEqual(1);
+    expect(missing.rollups.projects.find((project) => project.projectRoot === secondRoot)).toEqual(
+      expect.objectContaining({ status: expect.stringMatching(/stale|degraded/), error: expect.any(String) })
+    );
 
     const configPath = join(rootDir, ".boreal/project.json");
     const config = parseJson<Record<string, unknown>>(await readFile(configPath, "utf8"));

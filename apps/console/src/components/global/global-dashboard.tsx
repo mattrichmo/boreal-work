@@ -74,6 +74,8 @@ export function BucketOverviewGrid({ view }: { readonly view: ProjectRegistryVie
               </dl>
               <div className="bw-bucket__meta">
                 <Badge tone={entry.syncFreshness === "fresh" ? "success" : "warning"}>{entry.syncFreshness}</Badge>
+                <Badge>{entry.lifecycle}</Badge>
+                {entry.lastSeenAt ? <Badge tone={entry.stale ? "warning" : "success"}>{entry.lastSeenAt}</Badge> : null}
                 <Badge>{entry.memoryGitMode}</Badge>
                 <Badge>{entry.memoryLayout}</Badge>
               </div>
