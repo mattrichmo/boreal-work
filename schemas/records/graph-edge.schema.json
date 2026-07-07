@@ -7,8 +7,10 @@
   "properties": {
     "meta": { "type": "object" },
     "kind": { "enum": ["blocks", "depends_on", "relates_to", "supports", "contradicts", "verifies", "references"] },
+    "fromProjectId": { "type": "string", "minLength": 1 },
     "fromId": { "type": "string", "minLength": 1 },
     "fromType": { "type": "string", "minLength": 1 },
+    "toProjectId": { "type": "string", "minLength": 1 },
     "toId": { "type": "string", "minLength": 1 },
     "toType": { "type": "string", "minLength": 1 },
     "directed": { "type": "boolean" }

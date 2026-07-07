@@ -126,6 +126,7 @@ export interface WorkItem {
   readonly priority: WorkPriority;
   readonly acceptanceCriteria: readonly string[];
   readonly labels: readonly string[];
+  readonly binding?: WorkBinding;
   readonly parentId?: WorkId;
   readonly dependencyIds: readonly WorkId[];
   readonly evidenceIds: readonly EvidenceId[];
@@ -138,6 +139,16 @@ export interface WorkItem {
     readonly branch: string;
     readonly headSha: string;
   };
+}
+
+export interface WorkBinding {
+  readonly workflowRef?: string;
+  readonly outputContract?: string;
+  readonly command?: string;
+  readonly templateNodeKey?: string;
+  readonly templateId?: string;
+  readonly templateVersion?: string;
+  readonly templateRunId?: string;
 }
 
 export interface ReviewerHeartbeatRecord {
@@ -205,8 +216,10 @@ export type EdgeKind =
 export interface GraphEdge {
   readonly meta: RecordMeta<GraphEdgeId>;
   readonly kind: EdgeKind;
+  readonly fromProjectId?: string;
   readonly fromId: string;
   readonly fromType: string;
+  readonly toProjectId?: string;
   readonly toId: string;
   readonly toType: string;
   readonly directed: boolean;

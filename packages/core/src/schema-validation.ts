@@ -266,6 +266,9 @@ export function workItemSchemaIssues(value: unknown, path = "$"): readonly Schem
   if (value.parentId !== undefined) {
     issues.push(...stringIssue(value.parentId, `${path}.parentId`, schemaId));
   }
+  if (value.binding !== undefined) {
+    issues.push(...workBindingIssues(value.binding, `${path}.binding`, schemaId));
+  }
   if (value.reservationId !== undefined) {
     issues.push(...stringIssue(value.reservationId, `${path}.reservationId`, schemaId));
   }
@@ -286,6 +289,20 @@ export function workItemSchemaIssues(value: unknown, path = "$"): readonly Schem
     }
   }
 
+  return issues;
+}
+
+function workBindingIssues(value: unknown, path: string, schemaId: string): readonly SchemaValidationIssue[] {
+  if (!isRecord(value)) {
+    return [issue(schemaId, path, "must be an object")];
+  }
+  const issues: SchemaValidationIssue[] = [];
+  const fields = ["workflowRef", "outputContract", "command", "templateNodeKey", "templateId", "templateVersion", "templateRunId"] as const;
+  for (const field of fields) {
+    if (value[field] !== undefined) {
+      issues.push(...nonEmptyStringIssue(value[field], `${path}.${field}`, schemaId));
+    }
+  }
   return issues;
 }
 
@@ -572,8 +589,10 @@ export function graphEdgeSchemaIssues(value: unknown, path = "$"): readonly Sche
       "verifies",
       "references"
     ]),
+    ...(value.fromProjectId === undefined ? [] : nonEmptyStringIssue(value.fromProjectId, `${path}.fromProjectId`, schemaId)),
     ...nonEmptyStringIssue(value.fromId, `${path}.fromId`, schemaId),
     ...nonEmptyStringIssue(value.fromType, `${path}.fromType`, schemaId),
+    ...(value.toProjectId === undefined ? [] : nonEmptyStringIssue(value.toProjectId, `${path}.toProjectId`, schemaId)),
     ...nonEmptyStringIssue(value.toId, `${path}.toId`, schemaId),
     ...nonEmptyStringIssue(value.toType, `${path}.toType`, schemaId),
     ...booleanIssue(value.directed, `${path}.directed`, schemaId)

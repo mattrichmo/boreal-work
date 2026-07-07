@@ -19,6 +19,7 @@ import {
   type RuntimeOperation
 } from "@boreal/core";
 import { createBorealRuntime } from "@boreal/engine";
+import { createGraphEdge } from "@boreal/graph-engine";
 import {
   FileBorealStore,
   breakStaleFileLock,
@@ -85,6 +86,28 @@ describe("file-backed store", () => {
 
     const raw = await readFile(store.stateFile, "utf8");
     expect(raw.startsWith('{"schemaVersion"')).toBe(true);
+  });
+
+  it("round-trips graph edges with cross-project endpoints", async () => {
+    const rootDir = await makeTempWorkspace();
+    const store = new FileBorealStore({ rootDir, lock });
+    const edge = createGraphEdge({
+      kind: "references",
+      fromProjectId: "project_alpha",
+      fromId: "bw_work_deadbeefdead",
+      fromType: "work",
+      toProjectId: "project_beta",
+      toId: "bw_work_cafebabecafe",
+      toType: "work",
+      actor,
+      now: nowIso(new Date("2026-01-01T00:00:00.000Z"))
+    });
+
+    await store.write((writer) => writer.putGraphEdge(edge));
+
+    await expect(store.read((reader) => reader.listGraphEdges())).resolves.toEqual([edge]);
+    const raw = JSON.parse(await readFile(store.stateFile, "utf8")) as { readonly graphEdges?: readonly unknown[] };
+    expect(raw.graphEdges).toEqual([expect.objectContaining({ fromProjectId: "project_alpha", toProjectId: "project_beta" })]);
   });
 
   it("loads a v1 state file and drops derived sections", async () => {
