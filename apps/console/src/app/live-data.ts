@@ -413,15 +413,18 @@ function targetedCommandArgs(id: string, params?: ConsoleCommandParams): readonl
         "--json"
       ];
     }
-    case "work.close":
+    case "work.close": {
+      const dirtyPath = optionalCommandParam(params, "dirtyPath");
       return [
         "work",
         "close",
         requiredCommandParam(params, "workId", id),
         "--reason",
         requiredCommandParam(params, "reason", id),
+        ...(dirtyPath ? ["--dirty-path", dirtyPath] : []),
         "--json"
       ];
+    }
     case "work.create": {
       const title = requiredCommandParam(params, "title", id);
       const sourceRef = requiredCommandParam(params, "sourceRef", id);

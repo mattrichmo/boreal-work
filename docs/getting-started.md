@@ -166,6 +166,50 @@ pnpm bwrk agent finish <work-id> --agent agent-a \
 
 > **Work references** accept an exact work ID, an unambiguous ID prefix (≥12 chars), or an exact normalized title. `current` / `active` resolve to the selected actor or agent's single active reservation.
 
+## Global manager loop
+
+Use the global manager when you want one cross-project board without moving each project's tracker state into a central backlog.
+
+### 1. Link projects
+
+Set up a registry location once, then import each project from that project's workspace:
+
+```bash
+pnpm bwrk global init --registry-root ~/.boreal/global --json
+pnpm bwrk registry import-setup --registry-root ~/.boreal/global --name "API" --json
+pnpm bwrk --workspace ../web registry import-setup --registry-root ~/.boreal/global --name "Web" --json
+```
+
+Linked projects keep their own `.boreal` state. The global layer reads project rollups and runs commands back against the owning workspace.
+
+### 2. Capture first, triage later
+
+Use capture when the destination is unclear:
+
+```bash
+pnpm bwrk capture "Follow up on deployment checklist" --label inbox --json
+pnpm bwrk raw triage promote <raw-id> --to <project-id> --as work --title "Deployment checklist follow-up" --ready --global --json
+```
+
+Promoted work keeps a `boreal://global/<raw-id>` provenance reference so the project card still points back to the original capture.
+
+### 3. Pick the next cross-project action
+
+```bash
+pnpm bwrk global next --json
+pnpm bwrk dashboard global --json
+```
+
+`global next` ranks one actionable directive per linked project. `dashboard global` returns the same live data used by the console.
+
+### 4. Use the board as a command surface
+
+```bash
+pnpm bwrk dashboard --global --web --no-open
+```
+
+The global board is honest kanban: card positions are derived from each project's tracker state. Dragging a card issues the same command the CLI would use against the owning workspace. Ready to In Progress reserves work, In Progress to Ready releases it, and non-terminal cards can close only when closeout gates are satisfied. Failed drags leave the card in place and render the gate gaps plus clearing commands.
+
 ## Capture knowledge
 
 Sources back claims; claims and decisions feed context packs:

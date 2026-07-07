@@ -252,7 +252,7 @@ function GlobalBoardCardActions({
 }) {
   const canReserve = item.columnId === "ready";
   const canRelease = item.columnId === "in_progress";
-  const canClose = item.columnId !== "closed" && item.columnId !== "verified";
+  const canClose = item.columnId !== "closed";
   if (!canReserve && !canRelease && !canClose) {
     return null;
   }
@@ -282,7 +282,8 @@ function GlobalBoardCardActions({
           routePath={routePath}
           item={item}
           fields={{
-            reason: "Closed from global board"
+            reason: "Closed from global board",
+            dirtyPath: "no_repo_changes: closed from global board"
           }}
         >
           <Button type="submit" variant="ghost">Close</Button>
@@ -324,7 +325,7 @@ function isDroppableGlobalBoardColumn(columnId: GlobalBoardColumnId): boolean {
 }
 
 function isDraggableGlobalBoardCard(item: GlobalBoardView["lanes"][number]["columns"][number]["items"][number]): boolean {
-  return item.columnId !== "closed" && item.columnId !== "verified";
+  return item.columnId !== "closed";
 }
 
 export function GlobalWorkQueues({ view }: { readonly view: GlobalWorkQueuesView }) {

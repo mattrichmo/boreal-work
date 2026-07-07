@@ -127,8 +127,8 @@ export const SAFE_CONSOLE_COMMANDS: readonly SafeConsoleCommand[] = [
   {
     id: "work.close",
     label: "Close work",
-    command: "bwrk work close <work-id> --reason <text> --json",
-    args: ["work", "close", "<work-id>", "--reason", "<text>", "--json"],
+    command: "bwrk work close <work-id> --reason <text> [--dirty-path <reason>] --json",
+    args: ["work", "close", "<work-id>", "--reason", "<text>", "--dirty-path", "<reason>", "--json"],
     mutatesState: true,
     requiresConfirmation: true,
     executable: false

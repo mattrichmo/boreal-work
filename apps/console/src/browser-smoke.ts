@@ -1,7 +1,9 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { existsSync, readdirSync } from "node:fs";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { homedir, platform, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
-import { tmpdir } from "node:os";
+import { pathToFileURL } from "node:url";
 
 import { listenConsole } from "./server.js";
 import {
@@ -24,7 +26,7 @@ interface BrowserSmokeOptions {
   readonly mode: ConsoleDataMode;
   readonly outFile?: string;
   readonly screenshotDir: string;
-  readonly chromeExecutable: string;
+  readonly browserExecutable: string;
 }
 
 interface BrowserSnapshot {
@@ -51,8 +53,8 @@ async function runBrowserSmokeCli(argv: readonly string[]): Promise<void> {
     port: 0,
     mode: options.mode
   });
-  const chrome = await launchChrome(options.chromeExecutable);
-  const client = await DevToolsClient.connect(chrome.wsUrl);
+  const browser = await launchChromium(options.browserExecutable);
+  const client = await DevToolsClient.connect(browser.wsUrl);
 
   try {
     await mkdir(options.screenshotDir, { recursive: true });
@@ -74,8 +76,8 @@ async function runBrowserSmokeCli(argv: readonly string[]): Promise<void> {
       ok: true,
       url: running.url,
       mode: options.mode,
-      chrome: {
-        executable: options.chromeExecutable
+      browser: {
+        executable: options.browserExecutable
       },
       screenshotDir: options.screenshotDir,
       routes: results
@@ -87,7 +89,7 @@ async function runBrowserSmokeCli(argv: readonly string[]): Promise<void> {
     process.stdout.write(`${JSON.stringify(output, null, 2)}\n`);
   } finally {
     await closeWithTimeout("devtools client", () => client.close(), 1_000);
-    await closeWithTimeout("chrome", () => chrome.close(), 3_000);
+    await closeWithTimeout("chromium", () => browser.close(), 3_000);
     await closeWithTimeout("console server", () => running.close(), 1_000);
   }
 }
@@ -237,14 +239,15 @@ function formatLogEntry(params: unknown): string {
   return entry?.text ? String(entry.text) : "log error";
 }
 
-interface ChromeLaunch {
+interface ChromiumLaunch {
   readonly wsUrl: string;
   close(): Promise<void>;
 }
 
-async function launchChrome(executable: string): Promise<ChromeLaunch> {
-  const userDataDir = await mkdtemp(join(tmpdir(), "boreal-console-chrome-"));
-  const chromeProcess = spawn(executable, [
+export async function launchChromium(executable = resolvePlaywrightChromiumExecutable()): Promise<ChromiumLaunch> {
+  assertAllowedBrowserExecutable(executable);
+  const userDataDir = await mkdtemp(join(tmpdir(), "boreal-console-chromium-"));
+  const chromiumProcess = spawn(executable, [
     "--headless=new",
     "--remote-debugging-port=0",
     `--user-data-dir=${userDataDir}`,
@@ -256,21 +259,21 @@ async function launchChrome(executable: string): Promise<ChromeLaunch> {
     "--no-first-run",
     "about:blank"
   ]);
-  const wsUrl = await waitForDevToolsUrl(chromeProcess).catch(async (error: unknown) => {
-    chromeProcess.kill("SIGTERM");
+  const wsUrl = await waitForDevToolsUrl(chromiumProcess).catch(async (error: unknown) => {
+    chromiumProcess.kill("SIGTERM");
     await rm(userDataDir, { recursive: true, force: true });
     throw error;
   });
   return {
     wsUrl,
     async close() {
-      if (chromeProcess.exitCode === null && chromeProcess.signalCode === null) {
-        chromeProcess.kill("SIGTERM");
+      if (chromiumProcess.exitCode === null && chromiumProcess.signalCode === null) {
+        chromiumProcess.kill("SIGTERM");
       }
-      await waitForProcessExit(chromeProcess, 1_000);
-      if (chromeProcess.exitCode === null && chromeProcess.signalCode === null) {
-        chromeProcess.kill("SIGKILL");
-        await waitForProcessExit(chromeProcess, 1_000);
+      await waitForProcessExit(chromiumProcess, 1_000);
+      if (chromiumProcess.exitCode === null && chromiumProcess.signalCode === null) {
+        chromiumProcess.kill("SIGKILL");
+        await waitForProcessExit(chromiumProcess, 1_000);
       }
       await rm(userDataDir, { recursive: true, force: true });
     }
@@ -309,18 +312,18 @@ async function closeWithTimeout(label: string, close: () => Promise<void>, timeo
   }
 }
 
-function waitForDevToolsUrl(chromeProcess: ChildProcessWithoutNullStreams): Promise<string> {
+function waitForDevToolsUrl(chromiumProcess: ChildProcessWithoutNullStreams): Promise<string> {
   return new Promise((resolvePromise, reject) => {
     let stderr = "";
     const timer = setTimeout(() => {
       cleanup();
-      reject(new Error(`Chrome did not expose DevTools in time: ${stderr.slice(-800)}`));
+      reject(new Error(`Chromium did not expose DevTools in time: ${stderr.slice(-800)}`));
     }, 10_000);
     const cleanup = () => {
       clearTimeout(timer);
-      chromeProcess.stderr.off("data", onData);
-      chromeProcess.off("error", onError);
-      chromeProcess.off("exit", onExit);
+      chromiumProcess.stderr.off("data", onData);
+      chromiumProcess.off("error", onError);
+      chromiumProcess.off("exit", onExit);
     };
     const onData = (chunk: Buffer) => {
       stderr += chunk.toString("utf8");
@@ -336,11 +339,11 @@ function waitForDevToolsUrl(chromeProcess: ChildProcessWithoutNullStreams): Prom
     };
     const onExit = (code: number | null) => {
       cleanup();
-      reject(new Error(`Chrome exited before DevTools became available: ${code ?? "signal"}`));
+      reject(new Error(`Chromium exited before DevTools became available: ${code ?? "signal"}`));
     };
-    chromeProcess.stderr.on("data", onData);
-    chromeProcess.once("error", onError);
-    chromeProcess.once("exit", onExit);
+    chromiumProcess.stderr.on("data", onData);
+    chromiumProcess.once("error", onError);
+    chromiumProcess.once("exit", onExit);
   });
 }
 
@@ -371,7 +374,7 @@ interface WebSocketLike {
 
 type WebSocketConstructor = new (url: string) => WebSocketLike;
 
-class DevToolsClient {
+export class DevToolsClient {
   private nextId = 1;
   private readonly pending = new Map<number, DevToolsPending>();
   private readonly listeners: DevToolsEventListener[] = [];
@@ -473,13 +476,83 @@ function parseArgs(argv: readonly string[]): BrowserSmokeOptions {
   const out = valueAfter(argv, "--out");
   const screenshotDir = valueAfter(argv, "--screenshots")
     ?? (out ? join(dirname(resolve(out)), "console-browser-smoke") : ".boreal/results/console-browser-smoke");
+  const browserExecutable = resolve(valueAfter(argv, "--browser-executable")
+    ?? valueAfter(argv, "--chromium")
+    ?? valueAfter(argv, "--chrome")
+    ?? resolvePlaywrightChromiumExecutable());
   return {
     workspaceRoot: resolve(valueAfter(argv, "--workspace") ?? "../.."),
     mode: valueAfter(argv, "--mode") === "live" ? "live" : "fixture",
     outFile: out ? resolve(out) : undefined,
     screenshotDir: resolve(screenshotDir),
-    chromeExecutable: valueAfter(argv, "--chrome") ?? "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+    browserExecutable
   };
+}
+
+export function resolvePlaywrightChromiumExecutable(cacheRoot = defaultPlaywrightCacheRoot()): string {
+  const allEntries = readdirSync(cacheRoot, { withFileTypes: true }).filter((entry) => entry.isDirectory());
+  const entries = [
+    ...allEntries.filter((entry) => /^chromium_headless_shell-\d+$/u.test(entry.name)),
+    ...allEntries.filter((entry) => /^chromium-\d+$/u.test(entry.name))
+  ].sort((left, right) => playwrightRevision(right.name) - playwrightRevision(left.name));
+  for (const entry of entries) {
+    for (const candidate of playwrightChromiumCandidates(join(cacheRoot, entry.name))) {
+      if (existsSync(candidate)) {
+        return candidate;
+      }
+    }
+  }
+  throw new Error(`No Playwright-managed Chromium executable found under ${cacheRoot}`);
+}
+
+function defaultPlaywrightCacheRoot(): string {
+  const configured = process.env.PLAYWRIGHT_BROWSERS_PATH;
+  if (configured && configured !== "0") {
+    return resolve(configured);
+  }
+  switch (platform()) {
+    case "darwin":
+      return join(homedir(), "Library", "Caches", "ms-playwright");
+    case "win32":
+      return join(process.env.LOCALAPPDATA ?? join(homedir(), "AppData", "Local"), "ms-playwright");
+    default:
+      return join(process.env.XDG_CACHE_HOME ?? join(homedir(), ".cache"), "ms-playwright");
+  }
+}
+
+function playwrightChromiumCandidates(root: string): readonly string[] {
+  switch (platform()) {
+    case "darwin":
+      return [
+        join(root, "chrome-headless-shell-mac-arm64", "chrome-headless-shell"),
+        join(root, "chrome-headless-shell-mac", "chrome-headless-shell"),
+        join(root, "chrome-mac-arm64", "Google Chrome for Testing.app", "Contents", "MacOS", "Google Chrome for Testing"),
+        join(root, "chrome-mac", "Google Chrome for Testing.app", "Contents", "MacOS", "Google Chrome for Testing"),
+        join(root, "chrome-mac-arm64", "Chromium.app", "Contents", "MacOS", "Chromium"),
+        join(root, "chrome-mac", "Chromium.app", "Contents", "MacOS", "Chromium")
+      ];
+    case "win32":
+      return [
+        join(root, "chrome-headless-shell-win64", "chrome-headless-shell.exe"),
+        join(root, "chrome-headless-shell-win32", "chrome-headless-shell.exe"),
+        join(root, "chrome-win", "chrome.exe")
+      ];
+    default:
+      return [
+        join(root, "chrome-headless-shell-linux64", "chrome-headless-shell"),
+        join(root, "chrome-linux", "chrome")
+      ];
+  }
+}
+
+function playwrightRevision(name: string): number {
+  return Number(name.replace(/^chromium(?:_headless_shell)?-/u, "")) || 0;
+}
+
+function assertAllowedBrowserExecutable(executable: string): void {
+  if (resolve(executable).startsWith("/Applications/Google Chrome.app/")) {
+    throw new Error("System Google Chrome.app is not allowed for automated console browser smoke tests; use Playwright-managed Chromium.");
+  }
 }
 
 function valueAfter(argv: readonly string[], flag: string): string | undefined {
@@ -487,4 +560,10 @@ function valueAfter(argv: readonly string[], flag: string): string | undefined {
   return index >= 0 ? argv[index + 1] : undefined;
 }
 
-await runBrowserSmokeCli(process.argv.slice(2));
+if (isMainModule(import.meta.url, process.argv[1])) {
+  await runBrowserSmokeCli(process.argv.slice(2));
+}
+
+function isMainModule(moduleUrl: string, argvPath: string | undefined): boolean {
+  return argvPath ? moduleUrl === pathToFileURL(resolve(argvPath)).href : false;
+}

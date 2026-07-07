@@ -129,6 +129,7 @@ function consoleClientScript(): string {
         return;
       }
       params.set("reason", reason);
+      params.set("dirtyPath", "no_repo_changes: closed from global board");
     }
 
     card.classList.add("bw-global-board-card--pending");
@@ -165,7 +166,7 @@ function consoleClientScript(): string {
       return currentColumn === "in_progress" ? "work.release" : "";
     }
     if (targetColumn === "closed") {
-      return currentColumn !== "closed" && currentColumn !== "verified" ? "work.close" : "";
+      return currentColumn !== "closed" ? "work.close" : "";
     }
     return "";
   }

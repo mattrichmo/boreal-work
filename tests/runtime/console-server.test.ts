@@ -208,8 +208,8 @@ describe("console server", () => {
       },
       {
         id: "work.close",
-        body: { workId: "bw_work_ready", reason: "done" },
-        expected: "work close bw_work_ready --reason done --json"
+        body: { workId: "bw_work_ready", reason: "done", dirtyPath: "no_repo_changes: console test" },
+        expected: "work close bw_work_ready --reason done --dirty-path no_repo_changes: console test --json"
       },
       {
         id: "work.create",
