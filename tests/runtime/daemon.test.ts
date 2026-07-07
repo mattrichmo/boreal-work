@@ -422,6 +422,37 @@ function projectRollup(entry: ProjectRegistryEntry, totalWork: number): ProjectR
     next: {
       limit: 10,
       work: []
+    },
+    aging: {
+      ready: {
+        count: 0,
+        oldestAgeMs: 0,
+        oldestAgeDays: 0,
+        items: []
+      },
+      limbo: {
+        count: 0,
+        oldestAgeMs: 0,
+        oldestAgeDays: 0,
+        items: []
+      },
+      expiredReservations: {
+        count: 0,
+        oldestAgeMs: 0,
+        oldestAgeDays: 0,
+        items: []
+      },
+      maxima: {
+        readyAgeMs: 0,
+        limboAgeMs: 0,
+        expiredReservationAgeMs: 0
+      },
+      approximation: {
+        readySinceSource: "work.meta.updatedAt",
+        limboSinceSource: "work.meta.updatedAt",
+        expiredReservationSinceSource: "reservation.expiresAt_or_meta.updatedAt",
+        eventHistoryScanned: false
+      }
     }
   };
 }

@@ -5,9 +5,24 @@ import { join } from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
 
+import { ObjectDirBorealStore } from "@boreal/storage";
+import { createWorkItem } from "@boreal/work-engine";
 import { main } from "../../apps/cli/src/index.ts";
 import type { CliOutput } from "../../apps/cli/src/output.ts";
-import { projectRollupSchemaIssues, type ProjectRollupDocument } from "../../packages/core/src/index.ts";
+import {
+  createRecordMeta,
+  deterministicId,
+  projectRollupSchemaIssues,
+  withContentHash,
+  type ActorRef,
+  type AgentReservation,
+  type IsoTimestamp,
+  type ProjectRollupDocument,
+  type ReservationId,
+  type WorkId,
+  type WorkItem,
+  type WorkStatus
+} from "../../packages/core/src/index.ts";
 
 interface CommandRun {
   readonly exitCode: number;
@@ -21,6 +36,7 @@ interface JsonEnvelope<T> {
 }
 
 const tempDirs: string[] = [];
+const TEST_ACTOR = { id: "rollup-test", kind: "agent", displayName: "Rollup Test" } satisfies ActorRef;
 
 afterEach(async () => {
   await Promise.all(tempDirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
@@ -60,6 +76,100 @@ describe("generated artifacts after mutation", () => {
       (await runCli(rootDir, ["sync", "status", "--json"])).stdout
     );
     expect(status.projectRollup).toEqual(expect.objectContaining({ ok: true, stale: false }));
+  });
+
+  it("writes ready, limbo, and expired reservation aging metrics from backdated records", async () => {
+    const rootDir = await createTestWorkspace();
+    await runCli(rootDir, ["init", "--json"]);
+
+    const readySince = iso("2026-01-01T00:00:00.000Z");
+    const needsVerificationSince = iso("2026-01-02T00:00:00.000Z");
+    const verifiedSince = iso("2026-01-03T00:00:00.000Z");
+    const reservedAt = iso("2026-01-04T00:00:00.000Z");
+    const expiresAt = iso("2026-01-05T00:00:00.000Z");
+    const ready = fixtureWork("Backdated ready rollup work", "ready", readySince, 1);
+    const needsVerification = fixtureWork("Backdated needs-verification rollup work", "needs_verification", needsVerificationSince, 2);
+    const verified = fixtureWork("Backdated verified rollup work", "verified", verifiedSince, 3);
+    const reserved = fixtureWork("Backdated reserved rollup work", "reserved", reservedAt, 4);
+    const expiredReservation = fixtureReservation(reserved.meta.id, reservedAt, expiresAt);
+
+    await new ObjectDirBorealStore({ rootDir }).write(async (writer) => {
+      for (const work of [ready, needsVerification, verified, reserved]) {
+        await writer.putWorkItem(work);
+      }
+      await writer.putReservation(expiredReservation);
+    });
+
+    await runCli(rootDir, ["sync", "refresh", "--json"]);
+    const rollup = await readProjectRollup(rootDir);
+
+    expect(projectRollupSchemaIssues(rollup)).toEqual([]);
+    expect(rollup.schemaVersion).toBe("boreal.project-rollup.v2");
+    expect(rollup.aging.approximation).toEqual({
+      readySinceSource: "work.meta.updatedAt",
+      limboSinceSource: "work.meta.updatedAt",
+      expiredReservationSinceSource: "reservation.expiresAt_or_meta.updatedAt",
+      eventHistoryScanned: false
+    });
+    expect(rollup.aging.ready.count).toBe(1);
+    expect(rollup.aging.ready.items).toEqual([
+      expect.objectContaining({
+        workId: ready.meta.id,
+        status: "ready",
+        since: readySince,
+        ageMs: expectedAgeMs(rollup, readySince),
+        ageDays: expectedAgeDays(rollup, readySince)
+      })
+    ]);
+    expect(rollup.aging.limbo.count).toBe(2);
+    expect(rollup.aging.limbo.items.map((entry) => entry.workId)).toEqual([
+      needsVerification.meta.id,
+      verified.meta.id
+    ]);
+    expect(rollup.aging.expiredReservations.count).toBe(1);
+    expect(rollup.aging.expiredReservations.items).toEqual([
+      expect.objectContaining({
+        reservationId: expiredReservation.meta.id,
+        workId: reserved.meta.id,
+        status: "active",
+        expiresAt,
+        since: expiresAt,
+        ageMs: expectedAgeMs(rollup, expiresAt),
+        ageDays: expectedAgeDays(rollup, expiresAt)
+      })
+    ]);
+    expect(rollup.aging.maxima).toEqual({
+      readyAgeMs: expectedAgeMs(rollup, readySince),
+      limboAgeMs: expectedAgeMs(rollup, needsVerificationSince),
+      expiredReservationAgeMs: expectedAgeMs(rollup, expiresAt)
+    });
+  });
+
+  it("keeps rollup aging projection bounded for hundreds of ready records", async () => {
+    const rootDir = await createTestWorkspace();
+    await runCli(rootDir, ["init", "--json"]);
+    const base = Date.parse("2026-01-01T00:00:00.000Z");
+    const readyItems = Array.from({ length: 350 }, (_, index) =>
+      fixtureWork(`Bounded aging ready work ${index.toString().padStart(3, "0")}`, "ready", new Date(base + index * 1000).toISOString() as IsoTimestamp, index)
+    );
+
+    await new ObjectDirBorealStore({ rootDir }).write(async (writer) => {
+      for (const work of readyItems) {
+        await writer.putWorkItem(work);
+      }
+    });
+
+    await runCli(rootDir, ["sync", "refresh", "--json"]);
+    const rollup = await readProjectRollup(rootDir);
+
+    expect(projectRollupSchemaIssues(rollup)).toEqual([]);
+    expect(rollup.counts.work.total).toBe(readyItems.length);
+    expect(rollup.aging.ready.count).toBe(readyItems.length);
+    expect(rollup.aging.ready.items).toHaveLength(10);
+    expect(rollup.aging.ready.items[0]?.workId).toBe(readyItems[0]?.meta.id);
+    expect(rollup.aging.ready.oldestAgeMs).toBe(expectedAgeMs(rollup, readyItems[0]?.meta.updatedAt ?? rollup.generatedAt));
+    expect(rollup.aging.limbo.items).toHaveLength(0);
+    expect(rollup.aging.expiredReservations.items).toHaveLength(0);
   });
 
   it("flags stale project rollups in doctor", async () => {
@@ -150,6 +260,50 @@ async function createTestWorkspace(): Promise<string> {
   const rootDir = await mkdtemp(join(tmpdir(), "boreal-generated-artifacts-"));
   tempDirs.push(rootDir);
   return rootDir;
+}
+
+async function readProjectRollup(rootDir: string): Promise<ProjectRollupDocument> {
+  return JSON.parse(await readFile(join(rootDir, ".boreal", "rollup.json"), "utf8")) as ProjectRollupDocument;
+}
+
+function fixtureWork(title: string, status: WorkStatus, now: IsoTimestamp, nonce: number): WorkItem {
+  return withContentHash({
+    ...createWorkItem({
+      title,
+      kind: "task",
+      actor: TEST_ACTOR,
+      now,
+      nonce
+    }),
+    status
+  });
+}
+
+function fixtureReservation(workId: WorkId, reservedAt: IsoTimestamp, expiresAt: IsoTimestamp): AgentReservation {
+  return withContentHash({
+    meta: createRecordMeta({
+      id: deterministicId<ReservationId>("reservation", { workId, reservedAt, expiresAt }),
+      now: reservedAt,
+      actor: TEST_ACTOR
+    }),
+    workId,
+    agentId: "rollup-test",
+    status: "active",
+    reservedAt,
+    expiresAt
+  });
+}
+
+function expectedAgeMs(rollup: ProjectRollupDocument, since: IsoTimestamp): number {
+  return Math.max(0, Date.parse(rollup.generatedAt) - Date.parse(since));
+}
+
+function expectedAgeDays(rollup: ProjectRollupDocument, since: IsoTimestamp): number {
+  return Math.floor(expectedAgeMs(rollup, since) / (24 * 60 * 60 * 1000));
+}
+
+function iso(value: string): IsoTimestamp {
+  return value as IsoTimestamp;
 }
 
 async function runCli(cwd: string, argv: readonly string[]): Promise<CommandRun> {

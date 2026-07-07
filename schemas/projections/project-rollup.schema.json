@@ -16,10 +16,11 @@
     "health",
     "lastEvent",
     "lastOperation",
-    "next"
+    "next",
+    "aging"
   ],
   "properties": {
-    "schemaVersion": { "const": "boreal.project-rollup.v1" },
+    "schemaVersion": { "const": "boreal.project-rollup.v2" },
     "projectId": { "type": "string", "minLength": 1 },
     "workspaceRoot": { "type": "string", "minLength": 1 },
     "generatedAt": { "type": "string", "format": "date-time" },
@@ -126,6 +127,37 @@
         }
       },
       "additionalProperties": false
+    },
+    "aging": {
+      "type": "object",
+      "required": ["ready", "limbo", "expiredReservations", "maxima", "approximation"],
+      "properties": {
+        "ready": { "$ref": "#/$defs/agingWorkBucket" },
+        "limbo": { "$ref": "#/$defs/agingWorkBucket" },
+        "expiredReservations": { "$ref": "#/$defs/agingReservationBucket" },
+        "maxima": {
+          "type": "object",
+          "required": ["readyAgeMs", "limboAgeMs", "expiredReservationAgeMs"],
+          "properties": {
+            "readyAgeMs": { "type": "integer", "minimum": 0 },
+            "limboAgeMs": { "type": "integer", "minimum": 0 },
+            "expiredReservationAgeMs": { "type": "integer", "minimum": 0 }
+          },
+          "additionalProperties": false
+        },
+        "approximation": {
+          "type": "object",
+          "required": ["readySinceSource", "limboSinceSource", "expiredReservationSinceSource", "eventHistoryScanned"],
+          "properties": {
+            "readySinceSource": { "const": "work.meta.updatedAt" },
+            "limboSinceSource": { "const": "work.meta.updatedAt" },
+            "expiredReservationSinceSource": { "const": "reservation.expiresAt_or_meta.updatedAt" },
+            "eventHistoryScanned": { "const": false }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
     }
   },
   "additionalProperties": false,
@@ -227,6 +259,63 @@
         "priority": { "enum": ["low", "normal", "high", "critical"] },
         "status": { "enum": ["draft", "ready", "reserved", "in_progress", "blocked", "needs_verification", "verified", "closed", "cancelled"] },
         "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "additionalProperties": false
+    },
+    "agingWorkBucket": {
+      "type": "object",
+      "required": ["count", "oldestAgeMs", "oldestAgeDays", "items"],
+      "properties": {
+        "count": { "type": "integer", "minimum": 0 },
+        "oldestAgeMs": { "type": "integer", "minimum": 0 },
+        "oldestAgeDays": { "type": "integer", "minimum": 0 },
+        "items": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/agingWorkEntry" }
+        }
+      },
+      "additionalProperties": false
+    },
+    "agingReservationBucket": {
+      "type": "object",
+      "required": ["count", "oldestAgeMs", "oldestAgeDays", "items"],
+      "properties": {
+        "count": { "type": "integer", "minimum": 0 },
+        "oldestAgeMs": { "type": "integer", "minimum": 0 },
+        "oldestAgeDays": { "type": "integer", "minimum": 0 },
+        "items": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/agingReservationEntry" }
+        }
+      },
+      "additionalProperties": false
+    },
+    "agingWorkEntry": {
+      "type": "object",
+      "required": ["workId", "title", "status", "since", "ageMs", "ageDays"],
+      "properties": {
+        "workId": { "type": "string", "pattern": "^bw_work_[a-f0-9]{12,64}$" },
+        "title": { "type": "string", "minLength": 1 },
+        "status": { "enum": ["ready", "needs_verification", "verified"] },
+        "since": { "type": "string", "format": "date-time" },
+        "ageMs": { "type": "integer", "minimum": 0 },
+        "ageDays": { "type": "integer", "minimum": 0 }
+      },
+      "additionalProperties": false
+    },
+    "agingReservationEntry": {
+      "type": "object",
+      "required": ["reservationId", "workId", "agentId", "status", "reservedAt", "since", "ageMs", "ageDays"],
+      "properties": {
+        "reservationId": { "type": "string", "pattern": "^bw_reservation_[a-f0-9]{12,64}$" },
+        "workId": { "type": "string", "pattern": "^bw_work_[a-f0-9]{12,64}$" },
+        "agentId": { "type": "string", "minLength": 1 },
+        "status": { "enum": ["active", "expired"] },
+        "reservedAt": { "type": "string", "format": "date-time" },
+        "expiresAt": { "type": "string", "format": "date-time" },
+        "since": { "type": "string", "format": "date-time" },
+        "ageMs": { "type": "integer", "minimum": 0 },
+        "ageDays": { "type": "integer", "minimum": 0 }
       },
       "additionalProperties": false
     }

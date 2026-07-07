@@ -8,7 +8,7 @@ import type {
 import type { IsoTimestamp } from "./time.js";
 import type { WorkKind, WorkPriority, WorkStatus } from "./records.js";
 
-export const PROJECT_ROLLUP_SCHEMA_VERSION = "boreal.project-rollup.v1";
+export const PROJECT_ROLLUP_SCHEMA_VERSION = "boreal.project-rollup.v2";
 export const PROJECT_ROLLUP_SCHEMA_ID = "https://boreal.work/schemas/projections/project-rollup.schema.json";
 
 export const WORK_STATUSES = [
@@ -116,6 +116,51 @@ export interface ProjectRollupNextDirectives {
   readonly work: readonly ProjectRollupNextWork[];
 }
 
+export interface ProjectRollupAgingWorkEntry {
+  readonly workId: WorkId;
+  readonly title: string;
+  readonly status: Extract<WorkStatus, "ready" | "needs_verification" | "verified">;
+  readonly since: IsoTimestamp;
+  readonly ageMs: number;
+  readonly ageDays: number;
+}
+
+export interface ProjectRollupAgingReservationEntry {
+  readonly reservationId: ReservationId;
+  readonly workId: WorkId;
+  readonly agentId: string;
+  readonly status: "active" | "expired";
+  readonly reservedAt: IsoTimestamp;
+  readonly expiresAt?: IsoTimestamp;
+  readonly since: IsoTimestamp;
+  readonly ageMs: number;
+  readonly ageDays: number;
+}
+
+export interface ProjectRollupAgingBucket<TEntry> {
+  readonly count: number;
+  readonly oldestAgeMs: number;
+  readonly oldestAgeDays: number;
+  readonly items: readonly TEntry[];
+}
+
+export interface ProjectRollupAgingSummary {
+  readonly ready: ProjectRollupAgingBucket<ProjectRollupAgingWorkEntry>;
+  readonly limbo: ProjectRollupAgingBucket<ProjectRollupAgingWorkEntry>;
+  readonly expiredReservations: ProjectRollupAgingBucket<ProjectRollupAgingReservationEntry>;
+  readonly maxima: {
+    readonly readyAgeMs: number;
+    readonly limboAgeMs: number;
+    readonly expiredReservationAgeMs: number;
+  };
+  readonly approximation: {
+    readonly readySinceSource: "work.meta.updatedAt";
+    readonly limboSinceSource: "work.meta.updatedAt";
+    readonly expiredReservationSinceSource: "reservation.expiresAt_or_meta.updatedAt";
+    readonly eventHistoryScanned: false;
+  };
+}
+
 export interface ProjectRollupDocument {
   readonly schemaVersion: typeof PROJECT_ROLLUP_SCHEMA_VERSION;
   readonly projectId: string;
@@ -138,4 +183,5 @@ export interface ProjectRollupDocument {
   readonly lastEvent: ProjectRollupLastEvent | null;
   readonly lastOperation: ProjectRollupLastOperation | null;
   readonly next: ProjectRollupNextDirectives;
+  readonly aging: ProjectRollupAgingSummary;
 }

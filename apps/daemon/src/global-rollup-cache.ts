@@ -5,6 +5,7 @@ import { join, resolve } from "node:path";
 import {
   BorealError,
   PROJECT_REGISTRY_SCHEMA_VERSION,
+  PROJECT_ROLLUP_SCHEMA_VERSION,
   nowIso,
   projectRegistryDocumentSchemaIssues,
   projectRollupSchemaIssues,
@@ -272,7 +273,7 @@ async function readProjectRollup(path: string, expected?: { readonly expectedPro
     throw new BorealError("BOREAL_NOT_FOUND", "Project rollup is missing", { path });
   }
   const parsed = await readJsonFile(path, {
-    schemaName: "boreal.project-rollup.v1",
+    schemaName: PROJECT_ROLLUP_SCHEMA_VERSION,
     expectedObject: true,
     maxBytes: PROJECT_ROLLUP_MAX_READ_BYTES
   });

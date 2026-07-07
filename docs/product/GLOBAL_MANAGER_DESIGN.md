@@ -72,6 +72,9 @@ live fan-out), rank, and return the single most important directive per project 
 PM's morning view, and no other tracker can build it honestly because no other tracker's "needs to happen"
 column is derived from enforcement. Ranking inputs: severity, priority of subject, **age of obligation**
 (ready-rot, limbo age, expired reservations — all derivable from event logs projects already write).
+Project rollup v2 carries these aging inputs as bounded top-item lists. Ready and limbo ages use
+`work.meta.updatedAt`; expired reservation age uses `reservation.expiresAt` when available and otherwise
+`reservation.meta.updatedAt`. This is an explicit bounded approximation, not a full historical event-log scan.
 
 ### 6. Honest kanban (the thin gorgeous layer)
 

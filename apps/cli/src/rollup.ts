@@ -24,6 +24,9 @@ import {
   type KnowledgeSource,
   type ProjectRollupDocument,
   type ProjectRollupHealthFlags,
+  type ProjectRollupAgingBucket,
+  type ProjectRollupAgingReservationEntry,
+  type ProjectRollupAgingWorkEntry,
   type ProjectRollupKindCounts,
   type ProjectRollupLimboEntry,
   type ProjectRollupNextWork,
@@ -46,6 +49,8 @@ const PROJECT_ROLLUP_MAX_READ_BYTES = 5 * 1024 * 1024;
 const PROJECT_ROLLUP_LIMBO_LIMIT = 25;
 const PROJECT_ROLLUP_BLOCKING_GAP_SAMPLE_LIMIT = 25;
 const PROJECT_ROLLUP_NEXT_LIMIT = 10;
+const PROJECT_ROLLUP_AGING_ITEM_LIMIT = 10;
+const DAY_MS = 24 * 60 * 60 * 1000;
 
 const PRIORITY_RANK: Record<WorkPriority, number> = {
   critical: 0,
@@ -231,7 +236,8 @@ function buildProjectRollupDocument(
     next: {
       limit: PROJECT_ROLLUP_NEXT_LIMIT,
       work: projectRollupNextWork(snapshot.workItems)
-    }
+    },
+    aging: projectRollupAging(snapshot.workItems, snapshot.reservations, generatedAt)
   };
 }
 
@@ -362,6 +368,120 @@ function reservationIsExpired(reservation: AgentReservation, generatedAt: IsoTim
   );
 }
 
+function projectRollupAging(
+  workItems: readonly WorkItem[],
+  reservations: readonly AgentReservation[],
+  generatedAt: IsoTimestamp
+): ProjectRollupDocument["aging"] {
+  const readyItems = agingWorkItems(workItems, ["ready"], generatedAt);
+  const limboItems = agingWorkItems(workItems, ["needs_verification", "verified"], generatedAt);
+  const expiredReservations = agingExpiredReservations(reservations, generatedAt);
+  return {
+    ready: agingBucket(readyItems),
+    limbo: agingBucket(limboItems),
+    expiredReservations: agingBucket(expiredReservations),
+    maxima: {
+      readyAgeMs: oldestAgeMs(readyItems),
+      limboAgeMs: oldestAgeMs(limboItems),
+      expiredReservationAgeMs: oldestAgeMs(expiredReservations)
+    },
+    approximation: {
+      readySinceSource: "work.meta.updatedAt",
+      limboSinceSource: "work.meta.updatedAt",
+      expiredReservationSinceSource: "reservation.expiresAt_or_meta.updatedAt",
+      eventHistoryScanned: false
+    }
+  };
+}
+
+function agingWorkItems(
+  workItems: readonly WorkItem[],
+  statuses: readonly ProjectRollupAgingWorkEntry["status"][],
+  generatedAt: IsoTimestamp
+): readonly ProjectRollupAgingWorkEntry[] {
+  const statusSet = new Set<WorkStatus>(statuses);
+  return workItems
+    .filter((work) => statusSet.has(work.status))
+    .map((work) => {
+      const ageMs = ageSince(work.meta.updatedAt, generatedAt);
+      return {
+        workId: work.meta.id,
+        title: work.title,
+        status: work.status as ProjectRollupAgingWorkEntry["status"],
+        since: work.meta.updatedAt,
+        ageMs,
+        ageDays: ageDays(ageMs)
+      };
+    })
+    .sort(compareAgingWorkEntries);
+}
+
+function agingExpiredReservations(
+  reservations: readonly AgentReservation[],
+  generatedAt: IsoTimestamp
+): readonly ProjectRollupAgingReservationEntry[] {
+  return reservations
+    .filter((reservation) => reservationIsExpired(reservation, generatedAt))
+    .map((reservation) => {
+      const since = expiredReservationSince(reservation, generatedAt);
+      const ageMs = ageSince(since, generatedAt);
+      return {
+        reservationId: reservation.meta.id,
+        workId: reservation.workId,
+        agentId: String(reservation.agentId),
+        status: reservation.status === "released" ? "expired" : reservation.status,
+        reservedAt: reservation.reservedAt,
+        ...(reservation.expiresAt ? { expiresAt: reservation.expiresAt } : {}),
+        since,
+        ageMs,
+        ageDays: ageDays(ageMs)
+      };
+    })
+    .sort(compareAgingReservationEntries);
+}
+
+function expiredReservationSince(reservation: AgentReservation, generatedAt: IsoTimestamp): IsoTimestamp {
+  if (reservation.expiresAt !== undefined && Date.parse(reservation.expiresAt) <= Date.parse(generatedAt)) {
+    return reservation.expiresAt;
+  }
+  return reservation.meta.updatedAt;
+}
+
+function agingBucket<TEntry extends { readonly ageMs: number }>(
+  items: readonly TEntry[]
+): ProjectRollupAgingBucket<TEntry> {
+  const oldest = oldestAgeMs(items);
+  return {
+    count: items.length,
+    oldestAgeMs: oldest,
+    oldestAgeDays: ageDays(oldest),
+    items: items.slice(0, PROJECT_ROLLUP_AGING_ITEM_LIMIT)
+  };
+}
+
+function oldestAgeMs(items: readonly { readonly ageMs: number }[]): number {
+  return items[0]?.ageMs ?? 0;
+}
+
+function ageSince(since: IsoTimestamp, generatedAt: IsoTimestamp): number {
+  return Math.max(0, Date.parse(generatedAt) - Date.parse(since));
+}
+
+function ageDays(ageMs: number): number {
+  return Math.floor(ageMs / DAY_MS);
+}
+
+function compareAgingWorkEntries(left: ProjectRollupAgingWorkEntry, right: ProjectRollupAgingWorkEntry): number {
+  return right.ageMs - left.ageMs || left.workId.localeCompare(right.workId);
+}
+
+function compareAgingReservationEntries(
+  left: ProjectRollupAgingReservationEntry,
+  right: ProjectRollupAgingReservationEntry
+): number {
+  return right.ageMs - left.ageMs || left.reservationId.localeCompare(right.reservationId);
+}
+
 function projectRollupLimbo(
   workItems: readonly WorkItem[],
   status: "needs_verification" | "verified",
@@ -377,7 +497,7 @@ function projectRollupLimbo(
         status,
         updatedAt: work.meta.updatedAt,
         ageMs,
-        ageDays: Math.floor(ageMs / (24 * 60 * 60 * 1000))
+        ageDays: ageDays(ageMs)
       };
     })
     .sort((left, right) => right.ageMs - left.ageMs || left.workId.localeCompare(right.workId))

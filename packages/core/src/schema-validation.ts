@@ -75,6 +75,10 @@ export const AGENT_DIRECTIVE_SCHEMA_IDS = {
   agentDirectiveBundle: "https://boreal.work/schemas/directives/agent-directive-bundle.schema.json"
 } as const;
 
+export const TEMPLATE_SCHEMA_IDS = {
+  workStructureTemplate: "https://boreal.work/schemas/work-structure-template.schema.json"
+} as const;
+
 export const RUNTIME_SCHEMA_CONTRACTS = [
   {
     key: "workItem",
@@ -224,10 +228,21 @@ export const AGENT_DIRECTIVE_SCHEMA_CONTRACTS = [
   }
 ] as const satisfies readonly PublishedSchemaContract[];
 
+export const TEMPLATE_SCHEMA_CONTRACTS = [
+  {
+    key: "workStructureTemplate",
+    schemaId: TEMPLATE_SCHEMA_IDS.workStructureTemplate,
+    schemaPath: "schemas/work-structure-template.schema.json",
+    runtimeSection: undefined,
+    validator: workStructureTemplateSchemaIssues
+  }
+] as const satisfies readonly PublishedSchemaContract[];
+
 export const PUBLISHED_SCHEMA_CONTRACTS = [
   ...RUNTIME_SCHEMA_CONTRACTS,
   ...AGENT_DIRECTIVE_SCHEMA_CONTRACTS,
-  ...PROJECT_SCHEMA_CONTRACTS
+  ...PROJECT_SCHEMA_CONTRACTS,
+  ...TEMPLATE_SCHEMA_CONTRACTS
 ] as const satisfies readonly PublishedSchemaContract[];
 
 export function runtimeSnapshotSchemaIssues(snapshot: RuntimeSnapshotSchemaInput): readonly SchemaValidationIssue[] {
@@ -318,6 +333,160 @@ function workBindingIssues(value: unknown, path: string, schemaId: string): read
     }
   }
   return issues;
+}
+
+export function workStructureTemplateSchemaIssues(value: unknown, path = "$"): readonly SchemaValidationIssue[] {
+  const schemaId = TEMPLATE_SCHEMA_IDS.workStructureTemplate;
+  if (!isRecord(value)) {
+    return [issue(schemaId, path, "must be an object")];
+  }
+  const issues: SchemaValidationIssue[] = [
+    ...literalIssue(value.schemaVersion, `${path}.schemaVersion`, schemaId, "boreal.work-template.v1"),
+    ...nonEmptyStringIssue(value.id, `${path}.id`, schemaId),
+    ...(typeof value.version === "string" || typeof value.version === "number"
+      ? []
+      : [issue(schemaId, `${path}.version`, "must be a string or number")]),
+    ...templateVariableArrayIssues(value.variables, `${path}.variables`, schemaId),
+    ...templateNodeArrayIssues(value.nodes, `${path}.nodes`, schemaId)
+  ];
+  if (value.edges !== undefined) {
+    issues.push(...templateEdgeArrayIssues(value.edges, `${path}.edges`, schemaId));
+  }
+  if (value.title !== undefined) {
+    issues.push(...stringIssue(value.title, `${path}.title`, schemaId));
+  }
+  if (value.description !== undefined) {
+    issues.push(...stringIssue(value.description, `${path}.description`, schemaId));
+  }
+  return issues;
+}
+
+function templateVariableArrayIssues(value: unknown, path: string, schemaId: string): readonly SchemaValidationIssue[] {
+  if (!Array.isArray(value)) {
+    return [issue(schemaId, path, "must be an array")];
+  }
+  return value.flatMap((entry, index) => {
+    const entryPath = `${path}[${index}]`;
+    if (!isRecord(entry)) {
+      return [issue(schemaId, entryPath, "must be an object")];
+    }
+    const issues: SchemaValidationIssue[] = [
+      ...patternStringIssue(entry.name, `${entryPath}.name`, schemaId, /^[A-Za-z][A-Za-z0-9_]*$/u)
+    ];
+    if (entry.description !== undefined) {
+      issues.push(...stringIssue(entry.description, `${entryPath}.description`, schemaId));
+    }
+    if (entry.default !== undefined && !["string", "number", "boolean"].includes(typeof entry.default)) {
+      issues.push(issue(schemaId, `${entryPath}.default`, "must be a string, number, or boolean"));
+    }
+    if (entry.required !== undefined) {
+      issues.push(...booleanIssue(entry.required, `${entryPath}.required`, schemaId));
+    }
+    return issues;
+  });
+}
+
+function templateNodeArrayIssues(value: unknown, path: string, schemaId: string): readonly SchemaValidationIssue[] {
+  if (!Array.isArray(value)) {
+    return [issue(schemaId, path, "must be an array")];
+  }
+  if (value.length === 0) {
+    return [issue(schemaId, path, "must contain at least one node")];
+  }
+  return value.flatMap((entry, index) => templateNodeIssues(entry, `${path}[${index}]`, schemaId));
+}
+
+function templateNodeIssues(value: unknown, path: string, schemaId: string): readonly SchemaValidationIssue[] {
+  if (!isRecord(value)) {
+    return [issue(schemaId, path, "must be an object")];
+  }
+  const issues: SchemaValidationIssue[] = [
+    ...nonEmptyStringIssue(value.key, `${path}.key`, schemaId),
+    ...enumIssue(value.kind, `${path}.kind`, schemaId, ["issue", "task", "sprint", "milestone"]),
+    ...nonEmptyStringIssue(value.title, `${path}.title`, schemaId)
+  ];
+  if (value.description !== undefined) {
+    issues.push(...stringIssue(value.description, `${path}.description`, schemaId));
+  }
+  if (value.priority !== undefined) {
+    issues.push(...enumIssue(value.priority, `${path}.priority`, schemaId, ["low", "normal", "high", "critical"]));
+  }
+  if (value.labels !== undefined) {
+    issues.push(...stringArrayIssue(value.labels, `${path}.labels`, schemaId));
+  }
+  if (value.acceptance !== undefined) {
+    issues.push(...stringArrayIssue(value.acceptance, `${path}.acceptance`, schemaId));
+  }
+  if (value.gates !== undefined) {
+    issues.push(...templateGateArrayIssues(value.gates, `${path}.gates`, schemaId));
+  }
+  if (value.binding !== undefined) {
+    issues.push(...templateBindingIssues(value.binding, `${path}.binding`, schemaId));
+  }
+  if (value.children !== undefined) {
+    issues.push(...templateNodeArrayIssues(value.children, `${path}.children`, schemaId));
+  }
+  return issues;
+}
+
+function templateGateArrayIssues(value: unknown, path: string, schemaId: string): readonly SchemaValidationIssue[] {
+  if (!Array.isArray(value)) {
+    return [issue(schemaId, path, "must be an array")];
+  }
+  return value.flatMap((entry, index) => {
+    const entryPath = `${path}[${index}]`;
+    if (!isRecord(entry)) {
+      return [issue(schemaId, entryPath, "must be an object")];
+    }
+    const issues: SchemaValidationIssue[] = [
+      ...enumIssue(entry.kind, `${entryPath}.kind`, schemaId, ["verification", "checkpoint", "review", "audit"])
+    ];
+    if (entry.scope !== undefined) {
+      issues.push(...enumIssue(entry.scope, `${entryPath}.scope`, schemaId, ["self", "direct_children", "descendants"]));
+    }
+    if (entry.requiredEvidenceKinds !== undefined) {
+      issues.push(...enumArrayIssue(entry.requiredEvidenceKinds, `${entryPath}.requiredEvidenceKinds`, schemaId, ["command", "test", "diff", "review", "artifact", "note"]));
+    }
+    if (entry.minEvidenceCount !== undefined) {
+      issues.push(...integerAtLeastIssue(entry.minEvidenceCount, `${entryPath}.minEvidenceCount`, schemaId, 0));
+    }
+    if (entry.declaredCommand !== undefined) {
+      issues.push(...nonEmptyStringIssue(entry.declaredCommand, `${entryPath}.declaredCommand`, schemaId));
+    }
+    if (entry.expectedObservable !== undefined) {
+      issues.push(...nonEmptyStringIssue(entry.expectedObservable, `${entryPath}.expectedObservable`, schemaId));
+    }
+    return issues;
+  });
+}
+
+function templateBindingIssues(value: unknown, path: string, schemaId: string): readonly SchemaValidationIssue[] {
+  if (!isRecord(value)) {
+    return [issue(schemaId, path, "must be an object")];
+  }
+  const keys = ["workflow", "workflowRef", "contract", "outputContract", "command"] as const;
+  const present = keys.filter((key) => value[key] !== undefined);
+  const issues: SchemaValidationIssue[] = present.length === 1 ? [] : [issue(schemaId, path, "must set exactly one binding target")];
+  for (const key of present) {
+    issues.push(...nonEmptyStringIssue(value[key], `${path}.${key}`, schemaId));
+  }
+  return issues;
+}
+
+function templateEdgeArrayIssues(value: unknown, path: string, schemaId: string): readonly SchemaValidationIssue[] {
+  if (!Array.isArray(value)) {
+    return [issue(schemaId, path, "must be an array")];
+  }
+  return value.flatMap((entry, index) => {
+    const entryPath = `${path}[${index}]`;
+    if (!isRecord(entry)) {
+      return [issue(schemaId, entryPath, "must be an object")];
+    }
+    return [
+      ...nonEmptyStringIssue(entry.dependent, `${entryPath}.dependent`, schemaId),
+      ...nonEmptyStringIssue(entry.dependency, `${entryPath}.dependency`, schemaId)
+    ];
+  });
 }
 
 export function agentSummaryRecordSchemaIssues(value: unknown, path = "$"): readonly SchemaValidationIssue[] {
@@ -752,7 +921,8 @@ export function projectRollupSchemaIssues(value: unknown, path = "$"): readonly 
     ...projectRollupHealthIssues(value.health, `${path}.health`, schemaId),
     ...projectRollupLastEventIssues(value.lastEvent, `${path}.lastEvent`, schemaId),
     ...projectRollupLastOperationIssues(value.lastOperation, `${path}.lastOperation`, schemaId),
-    ...projectRollupNextIssues(value.next, `${path}.next`, schemaId)
+    ...projectRollupNextIssues(value.next, `${path}.next`, schemaId),
+    ...projectRollupAgingIssues(value.aging, `${path}.aging`, schemaId)
   ];
 }
 
@@ -935,6 +1105,137 @@ function projectRollupNextWorkIssues(value: unknown, path: string, schemaId: str
     ...enumIssue(value.priority, `${path}.priority`, schemaId, ["low", "normal", "high", "critical"]),
     ...enumIssue(value.status, `${path}.status`, schemaId, WORK_STATUSES),
     ...stringIssue(value.updatedAt, `${path}.updatedAt`, schemaId)
+  ];
+}
+
+function projectRollupAgingIssues(value: unknown, path: string, schemaId: string): readonly SchemaValidationIssue[] {
+  if (!isRecord(value)) {
+    return [issue(schemaId, path, "must be an object")];
+  }
+  return [
+    ...projectRollupAgingWorkBucketIssues(value.ready, `${path}.ready`, schemaId, ["ready"]),
+    ...projectRollupAgingWorkBucketIssues(value.limbo, `${path}.limbo`, schemaId, ["needs_verification", "verified"]),
+    ...projectRollupAgingReservationBucketIssues(value.expiredReservations, `${path}.expiredReservations`, schemaId),
+    ...projectRollupAgingMaximaIssues(value.maxima, `${path}.maxima`, schemaId),
+    ...projectRollupAgingApproximationIssues(value.approximation, `${path}.approximation`, schemaId)
+  ];
+}
+
+function projectRollupAgingWorkBucketIssues(
+  value: unknown,
+  path: string,
+  schemaId: string,
+  statuses: readonly string[]
+): readonly SchemaValidationIssue[] {
+  const bucketIssues = projectRollupAgingBucketIssues(value, path, schemaId);
+  if (!isRecord(value) || !Array.isArray(value.items)) {
+    return bucketIssues;
+  }
+  return [
+    ...bucketIssues,
+    ...value.items.flatMap((entry, index) =>
+      projectRollupAgingWorkEntryIssues(entry, `${path}.items[${index}]`, schemaId, statuses)
+    )
+  ];
+}
+
+function projectRollupAgingReservationBucketIssues(
+  value: unknown,
+  path: string,
+  schemaId: string
+): readonly SchemaValidationIssue[] {
+  const bucketIssues = projectRollupAgingBucketIssues(value, path, schemaId);
+  if (!isRecord(value) || !Array.isArray(value.items)) {
+    return bucketIssues;
+  }
+  return [
+    ...bucketIssues,
+    ...value.items.flatMap((entry, index) =>
+      projectRollupAgingReservationEntryIssues(entry, `${path}.items[${index}]`, schemaId)
+    )
+  ];
+}
+
+function projectRollupAgingBucketIssues(value: unknown, path: string, schemaId: string): readonly SchemaValidationIssue[] {
+  if (!isRecord(value)) {
+    return [issue(schemaId, path, "must be an object")];
+  }
+  return [
+    ...integerAtLeastIssue(value.count, `${path}.count`, schemaId, 0),
+    ...integerAtLeastIssue(value.oldestAgeMs, `${path}.oldestAgeMs`, schemaId, 0),
+    ...integerAtLeastIssue(value.oldestAgeDays, `${path}.oldestAgeDays`, schemaId, 0),
+    ...(Array.isArray(value.items) ? [] : [issue(schemaId, `${path}.items`, "must be an array")])
+  ];
+}
+
+function projectRollupAgingWorkEntryIssues(
+  value: unknown,
+  path: string,
+  schemaId: string,
+  statuses: readonly string[]
+): readonly SchemaValidationIssue[] {
+  if (!isRecord(value)) {
+    return [issue(schemaId, path, "must be an object")];
+  }
+  return [
+    ...patternStringIssue(value.workId, `${path}.workId`, schemaId, /^bw_work_[a-f0-9]{12,64}$/),
+    ...nonEmptyStringIssue(value.title, `${path}.title`, schemaId),
+    ...enumIssue(value.status, `${path}.status`, schemaId, statuses),
+    ...stringIssue(value.since, `${path}.since`, schemaId),
+    ...integerAtLeastIssue(value.ageMs, `${path}.ageMs`, schemaId, 0),
+    ...integerAtLeastIssue(value.ageDays, `${path}.ageDays`, schemaId, 0)
+  ];
+}
+
+function projectRollupAgingReservationEntryIssues(
+  value: unknown,
+  path: string,
+  schemaId: string
+): readonly SchemaValidationIssue[] {
+  if (!isRecord(value)) {
+    return [issue(schemaId, path, "must be an object")];
+  }
+  const issues: SchemaValidationIssue[] = [
+    ...patternStringIssue(value.reservationId, `${path}.reservationId`, schemaId, /^bw_reservation_[a-f0-9]{12,64}$/),
+    ...patternStringIssue(value.workId, `${path}.workId`, schemaId, /^bw_work_[a-f0-9]{12,64}$/),
+    ...nonEmptyStringIssue(value.agentId, `${path}.agentId`, schemaId),
+    ...enumIssue(value.status, `${path}.status`, schemaId, ["active", "expired"]),
+    ...stringIssue(value.reservedAt, `${path}.reservedAt`, schemaId),
+    ...stringIssue(value.since, `${path}.since`, schemaId),
+    ...integerAtLeastIssue(value.ageMs, `${path}.ageMs`, schemaId, 0),
+    ...integerAtLeastIssue(value.ageDays, `${path}.ageDays`, schemaId, 0)
+  ];
+  if (value.expiresAt !== undefined) {
+    issues.push(...stringIssue(value.expiresAt, `${path}.expiresAt`, schemaId));
+  }
+  return issues;
+}
+
+function projectRollupAgingMaximaIssues(value: unknown, path: string, schemaId: string): readonly SchemaValidationIssue[] {
+  if (!isRecord(value)) {
+    return [issue(schemaId, path, "must be an object")];
+  }
+  return [
+    ...integerAtLeastIssue(value.readyAgeMs, `${path}.readyAgeMs`, schemaId, 0),
+    ...integerAtLeastIssue(value.limboAgeMs, `${path}.limboAgeMs`, schemaId, 0),
+    ...integerAtLeastIssue(value.expiredReservationAgeMs, `${path}.expiredReservationAgeMs`, schemaId, 0)
+  ];
+}
+
+function projectRollupAgingApproximationIssues(value: unknown, path: string, schemaId: string): readonly SchemaValidationIssue[] {
+  if (!isRecord(value)) {
+    return [issue(schemaId, path, "must be an object")];
+  }
+  return [
+    ...literalIssue(value.readySinceSource, `${path}.readySinceSource`, schemaId, "work.meta.updatedAt"),
+    ...literalIssue(value.limboSinceSource, `${path}.limboSinceSource`, schemaId, "work.meta.updatedAt"),
+    ...literalIssue(
+      value.expiredReservationSinceSource,
+      `${path}.expiredReservationSinceSource`,
+      schemaId,
+      "reservation.expiresAt_or_meta.updatedAt"
+    ),
+    ...(value.eventHistoryScanned === false ? [] : [issue(schemaId, `${path}.eventHistoryScanned`, "must be false")])
   ];
 }
 
