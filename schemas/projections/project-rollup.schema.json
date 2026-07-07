@@ -128,6 +128,20 @@
       },
       "additionalProperties": false
     },
+    "workIndex": {
+      "type": "object",
+      "required": ["limit", "total", "truncated", "work"],
+      "properties": {
+        "limit": { "type": "integer", "minimum": 1 },
+        "total": { "type": "integer", "minimum": 0 },
+        "truncated": { "type": "boolean" },
+        "work": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/workIndexEntry" }
+        }
+      },
+      "additionalProperties": false
+    },
     "aging": {
       "type": "object",
       "required": ["ready", "limbo", "expiredReservations", "maxima", "approximation"],
@@ -250,6 +264,19 @@
       "additionalProperties": false
     },
     "nextWork": {
+      "type": "object",
+      "required": ["workId", "title", "kind", "priority", "status", "updatedAt"],
+      "properties": {
+        "workId": { "type": "string", "pattern": "^bw_work_[a-f0-9]{12,64}$" },
+        "title": { "type": "string", "minLength": 1 },
+        "kind": { "enum": ["issue", "task", "sprint", "milestone"] },
+        "priority": { "enum": ["low", "normal", "high", "critical"] },
+        "status": { "enum": ["draft", "ready", "reserved", "in_progress", "blocked", "needs_verification", "verified", "closed", "cancelled"] },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "additionalProperties": false
+    },
+    "workIndexEntry": {
       "type": "object",
       "required": ["workId", "title", "kind", "priority", "status", "updatedAt"],
       "properties": {

@@ -76,6 +76,13 @@ export interface WorkCommandDependencies {
   readonly defaultListLimit: number;
   readonly defaultReadyWorkLimit: number;
   readonly dependencyTypeFromArgs: (args: ParsedArgs) => string;
+  readonly isBorealReferenceUri: (value: string) => boolean;
+  readonly addExternalBlockingDependency: (
+    context: CliContext,
+    args: ParsedArgs,
+    blockedWorkId: WorkId,
+    blockerUri: string
+  ) => Promise<unknown>;
   readonly optionalAgentIdFromArgs: (args: ParsedArgs) => string | undefined;
   readonly agentIdFromArgs: (args: ParsedArgs, fallback: string) => string;
   readonly resolveWorkId: (context: CliContext, value: string, options?: { readonly agentId?: string }) => Promise<WorkId>;
@@ -379,8 +386,9 @@ async function mainWorkCommand(
       }
       const view = await dependencies.resolveBorealSourceRefs(context, args, await context.runtime.getWorkView(workId));
       const reservation = view.activeReservationId ? await context.store.read((reader) => reader.getReservation(view.activeReservationId as ReservationId)) : undefined;
+      const closeoutGateStatus = await dependencies.closeoutGateStatusForWork(context, workId);
       const viewWithGaps = json
-        ? { ...view, ...(reservation ? { reservation } : {}), gaps: (await dependencies.closeoutGateStatusForWork(context, workId)).gaps }
+        ? { ...view, ...(reservation ? { reservation } : {}), gaps: closeoutGateStatus.gaps }
         : view;
       output.write(await dependencies.formatRecordWithAgentDirectives(context, args, viewWithGaps, json, { subjectWorkId: workId }));
       return { exitCode: 0 };
@@ -670,7 +678,13 @@ async function depCommand(
     case "add": {
       const type = dependencies.dependencyTypeFromArgs(args);
       const blockedWorkId = await dependencies.resolveWorkId(context, dependencies.requiredPositional(rest, 0, "dependent work reference"));
-      const blockingWorkId = await dependencies.resolveWorkId(context, dependencies.requiredPositional(rest, 1, "dependency work reference"));
+      const dependencyRef = dependencies.requiredPositional(rest, 1, "dependency work reference");
+      if (dependencies.isBorealReferenceUri(dependencyRef)) {
+        const result = await dependencies.addExternalBlockingDependency(context, args, blockedWorkId, dependencyRef);
+        output.write(formatRecord({ type, ...asRecord(result) }, json));
+        return { exitCode: 0 };
+      }
+      const blockingWorkId = await dependencies.resolveWorkId(context, dependencyRef);
       const work = await context.runtime.addBlockingDependency({ blockedWorkId, blockingWorkId });
       output.write(formatRecord({ type, work }, json));
       return { exitCode: 0 };
@@ -734,6 +748,10 @@ function workListHumanPriorityRank(priority: WorkPriority): number {
     case "low":
       return 1;
   }
+}
+
+function asRecord(value: unknown): Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value) ? value as Record<string, unknown> : {};
 }
 
 function isOpenWorkStatusForHumanList(status: WorkStatus): boolean {

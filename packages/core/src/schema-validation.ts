@@ -922,6 +922,7 @@ export function projectRollupSchemaIssues(value: unknown, path = "$"): readonly 
     ...projectRollupLastEventIssues(value.lastEvent, `${path}.lastEvent`, schemaId),
     ...projectRollupLastOperationIssues(value.lastOperation, `${path}.lastOperation`, schemaId),
     ...projectRollupNextIssues(value.next, `${path}.next`, schemaId),
+    ...(value.workIndex === undefined ? [] : projectRollupWorkIndexIssues(value.workIndex, `${path}.workIndex`, schemaId)),
     ...projectRollupAgingIssues(value.aging, `${path}.aging`, schemaId)
   ];
 }
@@ -1105,6 +1106,21 @@ function projectRollupNextWorkIssues(value: unknown, path: string, schemaId: str
     ...enumIssue(value.priority, `${path}.priority`, schemaId, ["low", "normal", "high", "critical"]),
     ...enumIssue(value.status, `${path}.status`, schemaId, WORK_STATUSES),
     ...stringIssue(value.updatedAt, `${path}.updatedAt`, schemaId)
+  ];
+}
+
+function projectRollupWorkIndexIssues(value: unknown, path: string, schemaId: string): readonly SchemaValidationIssue[] {
+  if (!isRecord(value)) {
+    return [issue(schemaId, path, "must be an object")];
+  }
+  if (!Array.isArray(value.work)) {
+    return [issue(schemaId, `${path}.work`, "must be an array")];
+  }
+  return [
+    ...integerAtLeastIssue(value.limit, `${path}.limit`, schemaId, 1),
+    ...integerAtLeastIssue(value.total, `${path}.total`, schemaId, 0),
+    ...booleanIssue(value.truncated, `${path}.truncated`, schemaId),
+    ...value.work.flatMap((entry, index) => projectRollupNextWorkIssues(entry, `${path}.work[${index}]`, schemaId))
   ];
 }
 

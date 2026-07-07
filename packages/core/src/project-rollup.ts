@@ -111,6 +111,22 @@ export interface ProjectRollupNextWork {
   readonly updatedAt: IsoTimestamp;
 }
 
+export interface ProjectRollupWorkIndexEntry {
+  readonly workId: WorkId;
+  readonly title: string;
+  readonly kind: WorkKind;
+  readonly priority: WorkPriority;
+  readonly status: WorkStatus;
+  readonly updatedAt: IsoTimestamp;
+}
+
+export interface ProjectRollupWorkIndex {
+  readonly limit: number;
+  readonly total: number;
+  readonly truncated: boolean;
+  readonly work: readonly ProjectRollupWorkIndexEntry[];
+}
+
 export interface ProjectRollupNextDirectives {
   readonly limit: number;
   readonly work: readonly ProjectRollupNextWork[];
@@ -183,5 +199,6 @@ export interface ProjectRollupDocument {
   readonly lastEvent: ProjectRollupLastEvent | null;
   readonly lastOperation: ProjectRollupLastOperation | null;
   readonly next: ProjectRollupNextDirectives;
+  readonly workIndex?: ProjectRollupWorkIndex;
   readonly aging: ProjectRollupAgingSummary;
 }

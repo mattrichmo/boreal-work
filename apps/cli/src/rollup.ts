@@ -30,6 +30,7 @@ import {
   type ProjectRollupKindCounts,
   type ProjectRollupLimboEntry,
   type ProjectRollupNextWork,
+  type ProjectRollupWorkIndex,
   type ProjectRollupReservationCounts,
   type ProjectRollupCountSet,
   type ReviewerHeartbeatRecord,
@@ -49,6 +50,7 @@ const PROJECT_ROLLUP_MAX_READ_BYTES = 5 * 1024 * 1024;
 const PROJECT_ROLLUP_LIMBO_LIMIT = 25;
 const PROJECT_ROLLUP_BLOCKING_GAP_SAMPLE_LIMIT = 25;
 const PROJECT_ROLLUP_NEXT_LIMIT = 10;
+const PROJECT_ROLLUP_WORK_INDEX_LIMIT = 2_000;
 const PROJECT_ROLLUP_AGING_ITEM_LIMIT = 10;
 const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -237,6 +239,7 @@ function buildProjectRollupDocument(
       limit: PROJECT_ROLLUP_NEXT_LIMIT,
       work: projectRollupNextWork(snapshot.workItems)
     },
+    workIndex: projectRollupWorkIndex(snapshot.workItems),
     aging: projectRollupAging(snapshot.workItems, snapshot.reservations, generatedAt)
   };
 }
@@ -578,6 +581,27 @@ function projectRollupNextWork(workItems: readonly WorkItem[]): readonly Project
       status: work.status,
       updatedAt: work.meta.updatedAt
     }));
+}
+
+function projectRollupWorkIndex(workItems: readonly WorkItem[]): ProjectRollupWorkIndex {
+  const work = workItems
+    .slice()
+    .sort((left, right) => left.meta.id.localeCompare(right.meta.id))
+    .slice(0, PROJECT_ROLLUP_WORK_INDEX_LIMIT)
+    .map((item) => ({
+      workId: item.meta.id,
+      title: item.title,
+      kind: item.kind,
+      priority: item.priority,
+      status: item.status,
+      updatedAt: item.meta.updatedAt
+    }));
+  return {
+    limit: PROJECT_ROLLUP_WORK_INDEX_LIMIT,
+    total: workItems.length,
+    truncated: workItems.length > PROJECT_ROLLUP_WORK_INDEX_LIMIT,
+    work
+  };
 }
 
 function compareNextWork(left: WorkItem, right: WorkItem): number {

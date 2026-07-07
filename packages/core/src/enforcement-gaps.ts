@@ -49,6 +49,15 @@ export type EnforcementGapSubjectType =
 
 export interface EnforcementGapData {
   readonly blockerIds?: readonly WorkId[];
+  readonly externalBlockers?: readonly {
+    readonly uri: string;
+    readonly projectId: string;
+    readonly workId: WorkId;
+    readonly status?: string;
+    readonly title?: string;
+    readonly reason: "open" | "stale" | "unresolved";
+    readonly message?: string;
+  }[];
   readonly gateIds?: readonly CloseoutGateId[];
   readonly requiredEvidenceKinds?: readonly EvidenceKind[];
   readonly minEvidenceCount?: number;

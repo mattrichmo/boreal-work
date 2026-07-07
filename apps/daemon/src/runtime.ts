@@ -16,15 +16,21 @@ import {
   hashContent,
   nowIso,
   safeParseJson,
+  resolveProjectRegistryPaths,
+  resolveWorkspacePaths,
   type AgentDirectiveBundle,
   type AgentDirectiveDiagnosticSnapshot,
   type AgentDirectiveSnapshot,
   type ContentHash,
   type IsoTimestamp,
   type McpProjectBoundary,
-  type ProjectRegistryMemoryLayout
+  type ProjectRegistryMemoryLayout,
+  type ProjectRollupDocument,
+  type ProjectRollupWorkIndexEntry,
+  type WorkId
 } from "@boreal/core";
-import { inspectFileLock, writeTextFileAtomic, type FileLockInspection } from "@boreal/storage";
+import { createBorealRuntime, type ExternalDependencyResolution } from "@boreal/engine";
+import { FileBorealStore, ObjectDirBorealStore, inspectFileLock, writeTextFileAtomic, type BorealStore, type FileLockInspection } from "@boreal/storage";
 
 import { emptyGlobalRollupCacheResult, refreshGlobalRollupCache, type GlobalRollupCacheResult } from "./global-rollup-cache.js";
 
@@ -83,6 +89,7 @@ export interface DaemonStatusResult {
 
 export interface DaemonWatchResult {
   readonly schemaVersion: typeof DAEMON_WATCH_SCHEMA_VERSION;
+  readonly globalReadiness: DaemonGlobalReadinessSummary;
   readonly generatedAt: string;
   readonly workspaceRoot: string;
   readonly action: DaemonWatchAction;
@@ -91,6 +98,14 @@ export interface DaemonWatchResult {
   readonly globalRollups: GlobalRollupCacheResult;
   readonly observedPaths: readonly string[];
   readonly recommendedActions: readonly string[];
+}
+
+export interface DaemonGlobalReadinessSummary {
+  readonly enabled: true;
+  readonly evaluated: number;
+  readonly changed: number;
+  readonly blocked: number;
+  readonly skippedReason?: string;
 }
 
 export interface DaemonRuntimeOptions {
@@ -243,9 +258,16 @@ export async function runDaemonWatchOnce(options: DaemonRuntimeOptions): Promise
         source: "daemon",
         now: () => generatedAt
       });
+  const globalReadiness = action === "observed"
+    ? await recomputeGlobalReadinessFromRollups({
+        registryRoot: options.registryRoot,
+        globalRollups
+      })
+    : emptyGlobalReadiness("watch skipped");
 
   return {
     schemaVersion: DAEMON_WATCH_SCHEMA_VERSION,
+    globalReadiness,
     generatedAt,
     workspaceRoot: status.workspaceRoot,
     action,
@@ -255,6 +277,109 @@ export async function runDaemonWatchOnce(options: DaemonRuntimeOptions): Promise
     observedPaths: action === "observed" ? status.watch.paths : [],
     recommendedActions: status.recommendedActions
   };
+}
+
+async function recomputeGlobalReadinessFromRollups(input: {
+  readonly registryRoot?: string;
+  readonly globalRollups: GlobalRollupCacheResult;
+}): Promise<DaemonGlobalReadinessSummary> {
+  const globalRoot = resolveProjectRegistryPaths({ rootDir: input.registryRoot }).rootDir;
+  const paths = resolveWorkspacePaths(globalRoot);
+  if (!existsSync(paths.borealDir)) {
+    return emptyGlobalReadiness("global workspace not initialized");
+  }
+  const runtime = createBorealRuntime({ store: new FileBorealStore({ rootDir: globalRoot }) });
+  const result = await runtime.recomputeExternalReadiness({
+    resolveExternalDependency: (edge) => externalDependencyResolutionFromRollups(edge, input.globalRollups)
+  });
+  return {
+    enabled: true,
+    evaluated: result.evaluated,
+    changed: result.changed,
+    blocked: result.blocked
+  };
+}
+
+function emptyGlobalReadiness(skippedReason: string): DaemonGlobalReadinessSummary {
+  return {
+    enabled: true,
+    evaluated: 0,
+    changed: 0,
+    blocked: 0,
+    skippedReason
+  };
+}
+
+function externalDependencyResolutionFromRollups(
+  edge: { readonly fromProjectId?: string; readonly fromId: string },
+  rollups: GlobalRollupCacheResult
+): ExternalDependencyResolution {
+  const projectId = edge.fromProjectId ?? "unknown";
+  const workId = edge.fromId as WorkId;
+  const referenceUri = `boreal://${projectId}/${workId}`;
+  const project = rollups.projects.find((candidate) => candidate.projectId === projectId);
+  if (!project) {
+    return unresolvedExternalDependency(referenceUri, projectId, workId, rollups.registryError ?? "project not found in global rollup cache");
+  }
+  if (project.stale || project.status === "stale") {
+    return {
+      referenceUri,
+      projectId,
+      workId,
+      terminal: false,
+      reason: "stale",
+      message: project.error ?? `project rollup cache is stale after ${project.cacheAgeMs ?? 0}ms`
+    };
+  }
+  if (!project.rollup || project.status === "degraded") {
+    return unresolvedExternalDependency(referenceUri, projectId, workId, project.error ?? "project rollup unavailable");
+  }
+  const work = projectRollupWorkIndexEntry(project.rollup, workId);
+  if (!work) {
+    return unresolvedExternalDependency(
+      referenceUri,
+      projectId,
+      workId,
+      project.rollup.workIndex ? "work record not present in project rollup workIndex" : "project rollup does not include workIndex"
+    );
+  }
+  const terminal = isTerminalWorkStatus(work.status);
+  return {
+    referenceUri,
+    projectId,
+    workId,
+    terminal,
+    status: work.status,
+    title: work.title,
+    ...(terminal ? {} : { reason: "open" as const, message: `referenced work is ${work.status}` })
+  };
+}
+
+function unresolvedExternalDependency(
+  referenceUri: string,
+  projectId: string,
+  workId: WorkId,
+  message: string
+): ExternalDependencyResolution {
+  return {
+    referenceUri,
+    projectId,
+    workId,
+    terminal: false,
+    reason: "unresolved",
+    message
+  };
+}
+
+function projectRollupWorkIndexEntry(
+  rollup: ProjectRollupDocument,
+  workId: WorkId
+): ProjectRollupWorkIndexEntry | undefined {
+  return rollup.workIndex?.work.find((entry) => entry.workId === workId);
+}
+
+function isTerminalWorkStatus(status: ProjectRollupWorkIndexEntry["status"]): boolean {
+  return status === "closed" || status === "cancelled" || status === "verified";
 }
 
 export async function compileDaemonDirectiveObligations(

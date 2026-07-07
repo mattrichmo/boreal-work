@@ -32,6 +32,8 @@ export function dependencyIdsForWork(work: WorkItem, graphEdges: readonly GraphE
       edge.kind === "blocks" &&
       edge.fromType === "work" &&
       edge.toType === "work" &&
+      edge.fromProjectId === undefined &&
+      edge.toProjectId === undefined &&
       edge.toId === work.meta.id
     ) {
       ids.add(edge.fromId);

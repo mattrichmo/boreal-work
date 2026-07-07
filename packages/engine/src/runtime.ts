@@ -43,9 +43,11 @@ import {
   type VerificationRecord,
   type WorkId,
   type WorkItem,
+  type WorkStatus,
   withContentHash
 } from "@boreal/core";
 import { recordEvidence as recordEvidenceDomain, verifySubject } from "@boreal/evidence-engine";
+import { createGraphEdge } from "@boreal/graph-engine";
 import { createClaim, createDecision, createKnowledgeSource } from "@boreal/knowledge-engine";
 import { buildContextPack, buildContextProjection } from "@boreal/search";
 import type { BorealReader, BorealStore, BorealWriter } from "@boreal/storage";
@@ -120,6 +122,29 @@ export interface ExpireReservationsResult {
 export interface RepairDependencyProjectionResult {
   readonly dependencyChanged: number;
   readonly readinessChanged: number;
+}
+
+export type ExternalDependencyBlockReason = "open" | "stale" | "unresolved";
+
+export interface ExternalDependencyResolution {
+  readonly referenceUri: string;
+  readonly projectId: string;
+  readonly workId: WorkId;
+  readonly terminal: boolean;
+  readonly status?: WorkStatus;
+  readonly title?: string;
+  readonly reason?: ExternalDependencyBlockReason;
+  readonly message?: string;
+}
+
+export type ExternalDependencyResolver = (
+  edge: GraphEdge
+) => ExternalDependencyResolution | Promise<ExternalDependencyResolution>;
+
+export interface ExternalReadinessRecomputeResult {
+  readonly changed: number;
+  readonly blocked: number;
+  readonly evaluated: number;
 }
 
 export interface WorkReferenceCandidate {
@@ -226,6 +251,16 @@ export interface BorealRuntime {
     readonly blockedWorkId: WorkId;
     readonly blockingWorkId: WorkId;
   }): Promise<WorkItem>;
+  addExternalBlockingDependency(input: {
+    readonly blockedWorkId: WorkId;
+    readonly blockerProjectId: string;
+    readonly blockerWorkId: WorkId;
+    readonly resolveExternalDependency?: ExternalDependencyResolver;
+  }): Promise<{
+    readonly work: WorkItem;
+    readonly edge: GraphEdge;
+    readonly gaps: readonly EnforcementGap[];
+  }>;
   removeBlockingDependency(input: {
     readonly blockedWorkId: WorkId;
     readonly blockingWorkId: WorkId;
@@ -277,6 +312,9 @@ export interface BorealRuntime {
   getContextPack(workId: WorkId): Promise<ContextPack>;
   refreshWorkContext(workId: WorkId): Promise<ContextPack>;
   recomputeReadiness(): Promise<{ readonly changed: number }>;
+  recomputeExternalReadiness(input: {
+    readonly resolveExternalDependency: ExternalDependencyResolver;
+  }): Promise<ExternalReadinessRecomputeResult>;
   getWorkView(workId: WorkId): Promise<WorkItemView>;
   listEvents(): Promise<readonly RuntimeEvent[]>;
 }
@@ -395,6 +433,47 @@ export function createBorealRuntime(options: BorealRuntimeOptions = {}): BorealR
           edgeId: result.edge.meta.id
         });
         return result.blockedWork;
+      });
+    },
+
+    async addExternalBlockingDependency(input): Promise<{
+      readonly work: WorkItem;
+      readonly edge: GraphEdge;
+      readonly gaps: readonly EnforcementGap[];
+    }> {
+      return store.write(async (writer) => {
+        const blockedWork = await workWithGraphDependencies(writer, await requireWork(writer, input.blockedWorkId));
+        if (!input.blockerProjectId.trim()) {
+          throw new BorealError("BOREAL_INVALID_INPUT", "External blocker project id is required");
+        }
+        const current = now();
+        const edge = createGraphEdge({
+          kind: "blocks",
+          fromProjectId: input.blockerProjectId,
+          fromId: input.blockerWorkId,
+          fromType: "work",
+          toId: blockedWork.meta.id,
+          toType: "work",
+          actor,
+          now: current
+        });
+        await writer.putGraphEdge(edge);
+        const localDependencies = await loadDependencies(writer, blockedWork);
+        const gaps = await externalReadinessGapsForWork(
+          [edge],
+          input.resolveExternalDependency ?? unresolvedExternalDependency
+        );
+        const status = deriveReadinessStatusWithExternalGaps(blockedWork, localDependencies, gaps);
+        const work = status === blockedWork.status ? blockedWork : { ...blockedWork, status };
+        await writer.putWorkItem(work);
+        await appendEvent(writer, "work.external_dependency_added", work.meta.id, "work", {
+          blockerProjectId: input.blockerProjectId,
+          blockerWorkId: input.blockerWorkId,
+          edgeId: edge.meta.id,
+          status: work.status,
+          gaps: gaps.map((gap) => gap.data)
+        });
+        return { work, edge, gaps };
       });
     },
 
@@ -1114,6 +1193,14 @@ export function createBorealRuntime(options: BorealRuntimeOptions = {}): BorealR
         const changed = await recomputeAllReadiness(writer);
         await appendEvent(writer, "work.readiness_recomputed_all", "work", "work", { changed });
         return { changed };
+      });
+    },
+
+    async recomputeExternalReadiness(input): Promise<ExternalReadinessRecomputeResult> {
+      return store.write(async (writer) => {
+        const result = await recomputeExternalReadiness(writer, input.resolveExternalDependency);
+        await appendEvent(writer, "work.external_readiness_recomputed", "work", "work", { ...result });
+        return result;
       });
     },
 
@@ -2155,9 +2242,25 @@ async function graphDependencyIds(reader: BorealReader, workId: WorkId): Promise
   const edges = await reader.listGraphEdges();
   return unique(
     edges
-      .filter((edge) => edge.kind === "blocks" && edge.fromType === "work" && edge.toType === "work" && edge.toId === workId)
+      .filter((edge) => isLocalBlockingWorkEdge(edge) && edge.toId === workId)
       .map((edge) => edge.fromId as WorkId)
   ).sort((left, right) => left.localeCompare(right));
+}
+
+function isLocalBlockingWorkEdge(edge: GraphEdge): boolean {
+  return edge.kind === "blocks" &&
+    edge.fromType === "work" &&
+    edge.toType === "work" &&
+    edge.fromProjectId === undefined &&
+    edge.toProjectId === undefined;
+}
+
+function isExternalBlockingWorkEdge(edge: GraphEdge): boolean {
+  return edge.kind === "blocks" &&
+    edge.fromType === "work" &&
+    edge.toType === "work" &&
+    edge.fromProjectId !== undefined &&
+    edge.toProjectId === undefined;
 }
 
 async function workDependencyScopeIds(
@@ -2176,7 +2279,7 @@ async function workDependencyScopeIds(
     const dependencyIds = unique([
       ...work.dependencyIds,
       ...edges
-        .filter((edge) => edge.kind === "blocks" && edge.fromType === "work" && edge.toType === "work" && edge.toId === workId)
+        .filter((edge) => isLocalBlockingWorkEdge(edge) && edge.toId === workId)
         .map((edge) => edge.fromId as WorkId)
     ]);
     for (const dependencyId of dependencyIds) {
@@ -2205,7 +2308,7 @@ async function repairDependencyProjection(writer: BorealWriter): Promise<RepairD
   for (const work of workItems) {
     const dependencyIds = unique(
       graphEdges
-        .filter((edge) => edge.kind === "blocks" && edge.fromType === "work" && edge.toType === "work" && edge.toId === work.meta.id)
+        .filter((edge) => isLocalBlockingWorkEdge(edge) && edge.toId === work.meta.id)
         .map((edge) => edge.fromId as WorkId)
         .filter((dependencyId) => workById.has(dependencyId))
     ).sort((left, right) => left.localeCompare(right));
@@ -2283,6 +2386,113 @@ async function recomputeReadinessFrom(writer: BorealWriter, changedWorkIds: read
   return changed;
 }
 
+async function recomputeExternalReadiness(
+  writer: BorealWriter,
+  resolveExternalDependency: ExternalDependencyResolver
+): Promise<ExternalReadinessRecomputeResult> {
+  const graphEdges = await writer.listGraphEdges();
+  const externalEdgesByWork = new Map<WorkId, GraphEdge[]>();
+  for (const edge of graphEdges) {
+    if (!isExternalBlockingWorkEdge(edge)) {
+      continue;
+    }
+    const workId = edge.toId as WorkId;
+    externalEdgesByWork.set(workId, [...(externalEdgesByWork.get(workId) ?? []), edge]);
+  }
+
+  const changedWorkIds: WorkId[] = [];
+  let blocked = 0;
+  let evaluated = 0;
+  for (const [workId, externalEdges] of externalEdgesByWork) {
+    const work = await writer.getWorkItem(workId);
+    if (!work) {
+      continue;
+    }
+    evaluated += 1;
+    const graphWork = await workWithGraphDependencies(writer, work);
+    const localDependencies = await loadDependencies(writer, graphWork);
+    const gaps = await externalReadinessGapsForWork(externalEdges, resolveExternalDependency);
+    if (gaps.length > 0) {
+      blocked += 1;
+    }
+    const status = deriveReadinessStatusWithExternalGaps(graphWork, localDependencies, gaps);
+    if (status !== work.status) {
+      await writer.putWorkItem({ ...graphWork, status });
+      changedWorkIds.push(workId);
+    }
+  }
+
+  const cascaded = changedWorkIds.length > 0 ? await recomputeReadinessFrom(writer, changedWorkIds) : 0;
+  return { changed: changedWorkIds.length + cascaded, blocked, evaluated };
+}
+
+async function externalReadinessGapsForWork(
+  edges: readonly GraphEdge[],
+  resolveExternalDependency: ExternalDependencyResolver
+): Promise<readonly EnforcementGap[]> {
+  const blockers: Array<NonNullable<NonNullable<EnforcementGap["data"]>["externalBlockers"]>[number]> = [];
+  for (const edge of edges) {
+    const resolution = await resolveExternalDependency(edge);
+    if (resolution.terminal) {
+      continue;
+    }
+    blockers.push({
+      uri: resolution.referenceUri,
+      projectId: resolution.projectId,
+      workId: resolution.workId,
+      status: resolution.status,
+      title: resolution.title,
+      reason: resolution.reason ?? "open",
+      message: resolution.message
+    });
+  }
+  if (blockers.length === 0) {
+    return [];
+  }
+  return [
+    {
+      code: "work.blocked.open-dependency",
+      subjectType: "work",
+      subjectId: edges[0]?.toId ?? "work",
+      data: {
+        blockerIds: blockers.map((blocker) => blocker.uri as WorkId),
+        externalBlockers: blockers
+      }
+    }
+  ];
+}
+
+function deriveReadinessStatusWithExternalGaps(
+  work: WorkItem,
+  localDependencies: readonly WorkItem[],
+  externalGaps: readonly EnforcementGap[]
+): WorkStatus {
+  if (work.status === "closed" || work.status === "cancelled" || work.status === "verified") {
+    return work.status;
+  }
+  if (externalGaps.length > 0) {
+    return "blocked";
+  }
+  return deriveReadinessStatus(work, localDependencies);
+}
+
+function unresolvedExternalDependency(edge: GraphEdge): ExternalDependencyResolution {
+  const projectId = edge.fromProjectId ?? "unknown";
+  const workId = edge.fromId as WorkId;
+  return {
+    referenceUri: externalDependencyReferenceUri(edge),
+    projectId,
+    workId,
+    terminal: false,
+    reason: "unresolved",
+    message: "external dependency was not resolved"
+  };
+}
+
+function externalDependencyReferenceUri(edge: GraphEdge): string {
+  return `boreal://${edge.fromProjectId ?? "unknown"}/${edge.fromId}`;
+}
+
 function buildWorkDependencyIndexes(edges: readonly GraphEdge[]): {
   readonly blockedBy: Map<WorkId, WorkId[]>;
   readonly blocks: Map<WorkId, WorkId[]>;
@@ -2290,7 +2500,7 @@ function buildWorkDependencyIndexes(edges: readonly GraphEdge[]): {
   const blockedBy = new Map<WorkId, WorkId[]>();
   const blocks = new Map<WorkId, WorkId[]>();
   for (const edge of edges) {
-    if (edge.kind !== "blocks" || edge.fromType !== "work" || edge.toType !== "work") {
+    if (!isLocalBlockingWorkEdge(edge)) {
       continue;
     }
     const blockingWorkId = edge.fromId as WorkId;

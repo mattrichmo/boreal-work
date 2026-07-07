@@ -94,6 +94,8 @@ import {
   type KnowledgeSourceId,
   type OperationId,
   type ProjectRegistryEntry,
+  type ProjectRollupDocument,
+  type ProjectRollupWorkIndexEntry,
   type ProjectionId,
   type ReservationId,
   type ReservationStatus,
@@ -113,7 +115,7 @@ import {
   type WorkPriority,
   type WorkStatus
 } from "@boreal/core";
-import { inspectDaemonStatus } from "@boreal/daemon";
+import { inspectDaemonStatus, refreshGlobalRollupCache, type GlobalRollupCacheResult } from "@boreal/daemon";
 import type { SearchResult } from "@boreal/search";
 import {
   FileBorealStore,
@@ -130,7 +132,7 @@ import {
   deriveReadinessStatus,
   type RequiredCloseoutGateInput
 } from "@boreal/work-engine";
-import type { FinishReservedWorkSummaryFactory } from "@boreal/engine";
+import type { ExternalDependencyResolution, FinishReservedWorkSummaryFactory } from "@boreal/engine";
 
 import { flagValue, flagValues, hasFlag, requiredFlag, type ParsedArgs } from "./args.js";
 import { agentCommand, agentStartCommand, type AgentCommandDependencies } from "./commands/agent.js";
@@ -1043,6 +1045,8 @@ function workCommandDependencies(): WorkCommandDependencies {
     defaultListLimit: DEFAULT_LIST_LIMIT,
     defaultReadyWorkLimit: DEFAULT_READY_WORK_LIMIT,
     dependencyTypeFromArgs,
+    isBorealReferenceUri,
+    addExternalBlockingDependency: addExternalBlockingDependencyCommand,
     optionalAgentIdFromArgs,
     agentIdFromArgs,
     resolveWorkId,
@@ -5987,7 +5991,7 @@ async function closeoutGateStatusForSummary(
 }
 
 async function closeoutGateStatusForWork(context: CliContext, workId: WorkId): Promise<CloseoutGateStatusView> {
-  return context.store.read(async (reader) => {
+  const status = await context.store.read(async (reader) => {
     const [work, workItems, graphEdges, evidence, verifications, summaries] = await Promise.all([
       requireCliWork(reader, workId),
       reader.listWorkItems(),
@@ -5998,6 +6002,8 @@ async function closeoutGateStatusForWork(context: CliContext, workId: WorkId): P
     ]);
     return closeoutGateStatusFromSnapshot(work, workItems, graphEdges, evidence, verifications, summaries);
   });
+  const externalGaps = await externalReadinessGapsForWork(context, workId);
+  return externalGaps.length > 0 ? { ...status, gaps: [...status.gaps, ...externalGaps] } : status;
 }
 
 function closeoutGateStatusFromSnapshot(
@@ -6033,6 +6039,76 @@ function closeoutGateStatusFromSnapshot(
     gateGaps,
     gaps: gateGaps.map(enforcementGapFromCloseoutGateGapRow)
   };
+}
+
+async function externalReadinessGapsForWork(context: CliContext, workId: WorkId): Promise<readonly EnforcementGap[]> {
+  const externalEdges = await context.store.read(async (reader) =>
+    (await reader.listGraphEdges()).filter((edge) => isExternalBlockingWorkEdgeFor(edge, workId))
+  );
+  if (externalEdges.length === 0) {
+    return [];
+  }
+  const rollups = await refreshGlobalRollupCache({
+    registryRoot: context.workspaceRoot,
+    source: "lazy"
+  });
+  const blockers = externalEdges
+    .map((edge) => externalDependencyResolutionFromRollups(externalReferenceUriFromEdge(edge), rollups))
+    .filter((resolution) => !resolution.terminal);
+  if (blockers.length === 0) {
+    return [];
+  }
+  return [
+    {
+      code: "work.blocked.open-dependency",
+      subjectType: "work",
+      subjectId: workId,
+      data: {
+        blockerIds: blockers.map((blocker) => blocker.referenceUri as WorkId),
+        externalBlockers: blockers.map((blocker) => ({
+          uri: blocker.referenceUri,
+          projectId: blocker.projectId,
+          workId: blocker.workId,
+          status: blocker.status,
+          title: blocker.title,
+          reason: blocker.reason ?? "open",
+          message: blocker.message
+        }))
+      }
+    }
+  ];
+}
+
+function isExternalBlockingWorkEdgeFor(edge: GraphEdge, workId: WorkId): boolean {
+  return edge.kind === "blocks" &&
+    edge.fromType === "work" &&
+    edge.toType === "work" &&
+    edge.toId === workId &&
+    edge.fromProjectId !== undefined &&
+    edge.toProjectId === undefined;
+}
+
+function externalReferenceUriFromEdge(edge: GraphEdge): string {
+  return `boreal://${edge.fromProjectId ?? "unknown"}/${edge.fromId}`;
+}
+
+async function externalActiveBlockerIdsFromGraph(
+  context: CliContext,
+  workId: WorkId,
+  graphEdges: readonly GraphEdge[]
+): Promise<readonly string[]> {
+  const externalEdges = graphEdges.filter((edge) => isExternalBlockingWorkEdgeFor(edge, workId));
+  if (externalEdges.length === 0) {
+    return [];
+  }
+  const rollups = await refreshGlobalRollupCache({
+    registryRoot: context.workspaceRoot,
+    source: "lazy"
+  });
+  return externalEdges
+    .map((edge) => externalDependencyResolutionFromRollups(externalReferenceUriFromEdge(edge), rollups))
+    .filter((resolution) => !resolution.terminal)
+    .map((resolution) => resolution.referenceUri);
 }
 
 function closeoutGateStatusRow(
@@ -7315,7 +7391,13 @@ async function buildCliAgentDirectiveSnapshot(
     const workById = new Map(workItems.map((work) => [work.meta.id, work]));
     const dependencyIds = subjectWork ? dependencyIdsForWork(subjectWork, graphEdges) : [];
     const dependencyWork = dependencyIds.map((id) => workById.get(id)).filter(isWorkItem);
-    const activeBlockerIds = dependencyWork.filter((work) => isOpenWorkStatus(work.status)).map((work) => work.meta.id);
+    const externalActiveBlockerIds = subjectWork
+      ? await externalActiveBlockerIdsFromGraph(context, subjectWork.meta.id, graphEdges)
+      : [];
+    const activeBlockerIds = uniqueStrings([
+      ...dependencyWork.filter((work) => isOpenWorkStatus(work.status)).map((work) => work.meta.id),
+      ...externalActiveBlockerIds
+    ]) as readonly WorkId[];
     const tree = subjectWork ? dependencyTreeForWork(subjectWork.meta.id, workItems, graphEdges) : undefined;
     const descendantNodes = tree ? flattenDependencyTree(tree).filter((node) => node.id !== subjectWorkId) : [];
     const descendantWorkIds = descendantNodes.map((node) => node.id as WorkId);
@@ -9262,6 +9344,46 @@ async function resolveCommand(rest: readonly string[], args: ParsedArgs, output:
   return { exitCode: 0 };
 }
 
+async function addExternalBlockingDependencyCommand(
+  context: CliContext,
+  args: ParsedArgs,
+  blockedWorkId: WorkId,
+  blockerUri: string
+): Promise<{
+  readonly schemaVersion: "boreal.cli.dep.external-add.v1";
+  readonly edge: GraphEdge;
+  readonly work: WorkItem;
+  readonly gaps: readonly EnforcementGap[];
+  readonly externalDependency: ExternalDependencyResolution;
+}> {
+  const parsed = parseBorealReferenceUri(blockerUri);
+  if (!parsed.ok) {
+    throw new BorealError("BOREAL_INVALID_INPUT", parsed.reason, { uri: blockerUri, domain: "work" });
+  }
+  if (parsed.reference.recordKind !== "work") {
+    throw new BorealError("BOREAL_INVALID_INPUT", "External blocking dependencies must reference work records", {
+      uri: blockerUri,
+      recordKind: parsed.reference.recordKind,
+      domain: "work"
+    });
+  }
+  const rollups = await refreshGlobalRollupCacheForArgs(args);
+  const externalDependency = externalDependencyResolutionFromRollups(parsed.reference.uri, rollups);
+  const result = await context.runtime.addExternalBlockingDependency({
+    blockedWorkId,
+    blockerProjectId: parsed.reference.projectId,
+    blockerWorkId: parsed.reference.recordId as unknown as WorkId,
+    resolveExternalDependency: () => externalDependency
+  });
+  return {
+    schemaVersion: "boreal.cli.dep.external-add.v1",
+    edge: result.edge,
+    work: result.work,
+    gaps: result.gaps,
+    externalDependency
+  };
+}
+
 async function resolveBorealReferenceForCli(uri: string, args: ParsedArgs): Promise<BorealResolveResult> {
   const registry = await listProjectRegistry({ registryRoot: flagValue(args, "registry-root") });
   const parsed = parseBorealReferenceUri(uri);
@@ -9293,6 +9415,96 @@ async function readRegisteredProjectRollup(project: ProjectRegistryEntry): Promi
   } catch {
     return undefined;
   }
+}
+
+async function refreshGlobalRollupCacheForArgs(args: ParsedArgs): Promise<GlobalRollupCacheResult> {
+  return refreshGlobalRollupCache({
+    registryRoot: flagValue(args, "registry-root"),
+    ttlMs: parseNonNegativeInteger(flagValue(args, "live-cache-ttl-ms"), "--live-cache-ttl-ms") ?? 60_000,
+    source: "lazy"
+  });
+}
+
+function externalDependencyResolutionFromRollups(
+  uri: string,
+  rollups: GlobalRollupCacheResult
+): ExternalDependencyResolution {
+  const parsed = parseBorealReferenceUri(uri);
+  if (!parsed.ok) {
+    return unresolvedExternalDependencyResolution(uri, "unknown", "unknown" as WorkId, parsed.reason);
+  }
+  const reference = parsed.reference;
+  const project = rollups.projects.find((candidate) => candidate.projectId === reference.projectId);
+  if (!project) {
+    return unresolvedExternalDependencyResolution(
+      reference.uri,
+      reference.projectId,
+      reference.recordId as unknown as WorkId,
+      rollups.registryError ? `registry unresolved: ${rollups.registryError}` : "project not found in global rollup cache"
+    );
+  }
+  if (project.stale || project.status === "stale") {
+    return {
+      referenceUri: reference.uri,
+      projectId: reference.projectId,
+      workId: reference.recordId as unknown as WorkId,
+      terminal: false,
+      reason: "stale",
+      message: project.error ?? `project rollup cache is stale after ${project.cacheAgeMs ?? 0}ms`
+    };
+  }
+  if (!project.rollup || project.status === "degraded") {
+    return unresolvedExternalDependencyResolution(
+      reference.uri,
+      reference.projectId,
+      reference.recordId as unknown as WorkId,
+      project.error ?? "project rollup unavailable"
+    );
+  }
+  const work = projectRollupWorkIndexEntry(project.rollup, reference.recordId as unknown as WorkId);
+  if (!work) {
+    return unresolvedExternalDependencyResolution(
+      reference.uri,
+      reference.projectId,
+      reference.recordId as unknown as WorkId,
+      project.rollup.workIndex
+        ? "work record not present in project rollup workIndex"
+        : "project rollup does not include workIndex"
+    );
+  }
+  const terminal = !isOpenWorkStatus(work.status);
+  return {
+    referenceUri: reference.uri,
+    projectId: reference.projectId,
+    workId: work.workId,
+    terminal,
+    status: work.status,
+    title: work.title,
+    ...(terminal ? {} : { reason: "open" as const, message: `referenced work is ${work.status}` })
+  };
+}
+
+function unresolvedExternalDependencyResolution(
+  referenceUri: string,
+  projectId: string,
+  workId: WorkId,
+  message: string
+): ExternalDependencyResolution {
+  return {
+    referenceUri,
+    projectId,
+    workId,
+    terminal: false,
+    reason: "unresolved",
+    message
+  };
+}
+
+function projectRollupWorkIndexEntry(
+  rollup: ProjectRollupDocument,
+  workId: WorkId
+): ProjectRollupWorkIndexEntry | undefined {
+  return rollup.workIndex?.work.find((entry) => entry.workId === workId);
 }
 
 async function readRegisteredProjectRecord(project: ProjectRegistryEntry, reference: BorealReference): Promise<unknown | undefined> {
@@ -10024,7 +10236,14 @@ function dependencyIdsByWorkFromGraph(
     dependencyIdsByWork.set(work.meta.id, []);
   }
   for (const edge of graphEdges) {
-    if (edge.kind !== "blocks" || edge.fromType !== "work" || edge.toType !== "work" || !workIds.has(edge.toId as WorkId)) {
+    if (
+      edge.kind !== "blocks" ||
+      edge.fromType !== "work" ||
+      edge.toType !== "work" ||
+      edge.fromProjectId !== undefined ||
+      edge.toProjectId !== undefined ||
+      !workIds.has(edge.toId as WorkId)
+    ) {
       continue;
     }
     const workId = edge.toId as WorkId;
@@ -10109,7 +10328,13 @@ function dependencyTreeRows(tree: DependencyTreeNode): Array<Record<string, stri
 function dependencyCyclesFromGraph(graphEdges: readonly GraphEdge[]): Array<{ readonly cycle: readonly string[] }> {
   const adjacency = new Map<string, string[]>();
   for (const edge of graphEdges) {
-    if (edge.kind !== "blocks" || edge.fromType !== "work" || edge.toType !== "work") {
+    if (
+      edge.kind !== "blocks" ||
+      edge.fromType !== "work" ||
+      edge.toType !== "work" ||
+      edge.fromProjectId !== undefined ||
+      edge.toProjectId !== undefined
+    ) {
       continue;
     }
     adjacency.set(edge.fromId, [...(adjacency.get(edge.fromId) ?? []), edge.toId].sort((left, right) => left.localeCompare(right)));

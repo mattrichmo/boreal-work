@@ -128,7 +128,8 @@ describe("boreal daemon runtime", () => {
 
   it("observes bounded project paths when the project and locks are healthy", async () => {
     const root = await makeProjectWorkspace();
-    const watch = await runDaemonWatchOnce({ workspaceRoot: root });
+    const registryRoot = await makeTempDir();
+    const watch = await runDaemonWatchOnce({ workspaceRoot: root, registryRoot });
 
     expect(watch.action).toBe("observed");
     expect(watch.observedPaths).toEqual(
@@ -422,6 +423,19 @@ function projectRollup(entry: ProjectRegistryEntry, totalWork: number): ProjectR
     next: {
       limit: 10,
       work: []
+    },
+    workIndex: {
+      limit: 10,
+      total: totalWork,
+      truncated: false,
+      work: Array.from({ length: totalWork }, (_, index) => ({
+        workId: `bw_work_${String(index + 1).padStart(12, "0")}` as WorkId,
+        title: `Rollup work ${index + 1}`,
+        kind: "task" as const,
+        priority: "normal" as const,
+        status: "ready" as const,
+        updatedAt: "2026-06-27T00:00:00.000Z" as IsoTimestamp
+      }))
     },
     aging: {
       ready: {
