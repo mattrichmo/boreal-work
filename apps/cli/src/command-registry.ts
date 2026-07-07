@@ -2203,6 +2203,32 @@ export const COMMAND_DEFINITIONS: readonly CommandDefinition[] = [
     supportsJson: true,
   },
   {
+    path: ["raw", "triage"],
+    category: "raw",
+    summary: "Route a raw source into a project or global record.",
+    usage:
+      "bwrk raw triage promote|keep-global|drop <raw-id> [--to <project-id>] [--as work|source|claim|decision] [--title <text>] [--summary <text>] [--description <text>] [--statement <text>] [--context <text>] [--decision <text>] [--reason <text>] [--work-kind issue|task|sprint|milestone] [--label <label>...] [--ready] [--json]",
+    description:
+      "Records an immutable triage outcome for a raw source. promote writes through a linked project workspace; keep-global creates a global record; drop records a reason.",
+    flags: [
+      flag("to", "value", "Target project id for promote."),
+      flag("as", "value", "Target record kind: work, source, claim, or decision."),
+      flag("title", "value", "Target title."),
+      flag("summary", "value", "Target source summary."),
+      flag("description", "value", "Target work description."),
+      flag("statement", "value", "Target claim statement."),
+      flag("context", "value", "Target decision context."),
+      flag("decision", "value", "Target decision body."),
+      flag("reason", "value", "Drop reason."),
+      flag("work-kind", "value", "Target work kind."),
+      flag("label", "value", "Label for created work.", true),
+      flag("ready", "boolean", "Mark created work ready.")
+    ],
+    positionals: { label: "action raw-id", min: 2, max: 2 },
+    requiresWorkspace: true,
+    supportsJson: true,
+  },
+  {
     path: ["wiki", "list"],
     category: "wiki",
     summary: "List memory vault wiki pages.",
@@ -4065,6 +4091,21 @@ const COMMAND_BEHAVIOR: Readonly<Record<string, CommandBehaviorMetadata>> = {
     maxResultSizeChars: 125_000,
     humanOutputKind: "record",
     examples: ["bwrk raw show bw_source_example --preview-bytes 4096 --json"],
+  }),
+  "raw triage": commandMetadata("raw triage", {
+    readOnly: false,
+    destructive: false,
+    writesState: true,
+    writesGeneratedArtifacts: true,
+    requiresFreshIndex: false,
+    concurrencySafe: true,
+    requiresLock: "state",
+    maxResultSizeChars: 125_000,
+    humanOutputKind: "record",
+    examples: [
+      "bwrk global raw triage promote bw_source_example --to project_example --as work --title 'Route me' --json",
+      "bwrk raw triage drop bw_source_example --global --reason duplicate --json"
+    ],
   }),
   "wiki list": commandMetadata("wiki list", {
     readOnly: true,

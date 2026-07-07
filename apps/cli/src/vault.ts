@@ -74,7 +74,22 @@ export interface RawSourceRecord {
   readonly contentHash: string;
 }
 
-export type RawProcessingStatus = "queued" | "linked";
+export type RawProcessingStatus = "queued" | "linked" | "routed" | "kept_global" | "dropped";
+
+export type RawTriageOutcome = "promoted" | "kept_global" | "dropped";
+
+export interface RawTriageState {
+  readonly outcome: RawTriageOutcome;
+  readonly eventId: string;
+  readonly updatedAt: string;
+  readonly provenanceUri?: string;
+  readonly targetProjectId?: string;
+  readonly targetProjectName?: string;
+  readonly targetRecordKind?: string;
+  readonly targetRecordId?: string;
+  readonly targetRecordUri?: string;
+  readonly reason?: string;
+}
 
 export interface RawSourceRow {
   readonly id: string;
@@ -90,6 +105,7 @@ export interface RawSourceRow {
   readonly immutable: true;
   readonly processingStatus: RawProcessingStatus;
   readonly linkedPageCount: number;
+  readonly triage?: RawTriageState;
   readonly retrievalCommand: string;
   readonly previewCommand: string;
 }
@@ -127,6 +143,18 @@ export interface RawAddResult {
   readonly added: true;
   readonly indexPath: string;
   readonly record: RawSourceRecord;
+}
+
+export interface RawTriageEventInput {
+  readonly rawSourceId: string;
+  readonly outcome: RawTriageOutcome;
+  readonly provenanceUri?: string;
+  readonly targetProjectId?: string;
+  readonly targetProjectName?: string;
+  readonly targetRecordKind?: string;
+  readonly targetRecordId?: string;
+  readonly targetRecordUri?: string;
+  readonly reason?: string;
 }
 
 export interface WikiCreateInput {
@@ -421,11 +449,16 @@ export async function listRawSourceRows(
   options: { readonly limit?: number } = {}
 ): Promise<readonly RawSourceRow[]> {
   await requireInitializedVault(context);
-  const [rawSources, wikiPages] = await Promise.all([listVaultRawSources(context), listVaultWikiPages(context)]);
+  const [rawSources, wikiPages, ledgerEvents] = await Promise.all([
+    listVaultRawSources(context),
+    listVaultWikiPages(context),
+    listVaultLedgerEvents(context)
+  ]);
   const linkedPageCounts = rawLinkedPageCounts(rawSources, wikiPages);
+  const triageByRawSource = rawTriageStateBySource(ledgerEvents);
   return rawSources
     .slice(0, options.limit ?? rawSources.length)
-    .map((record) => rawSourceRow(record, linkedPageCounts.get(record.id) ?? 0));
+    .map((record) => rawSourceRow(record, linkedPageCounts.get(record.id) ?? 0, triageByRawSource.get(record.id)));
 }
 
 export async function getRawSourceDetail(
@@ -434,14 +467,19 @@ export async function getRawSourceDetail(
   options: { readonly previewBytes?: number } = {}
 ): Promise<RawSourceDetail> {
   await requireInitializedVault(context);
-  const [rawSources, wikiPages] = await Promise.all([listVaultRawSources(context), listVaultWikiPages(context)]);
+  const [rawSources, wikiPages, ledgerEvents] = await Promise.all([
+    listVaultRawSources(context),
+    listVaultWikiPages(context),
+    listVaultLedgerEvents(context)
+  ]);
   const record = rawSources.find((source) => source.id === sourceId);
   if (!record) {
     throw new BorealError("BOREAL_NOT_FOUND", "Raw source not found", { sourceId, domain: "evidence" });
   }
   const linkedPages = wikiPages.filter((page) => page.sourceRefs.includes(record.id));
+  const triage = rawTriageStateBySource(ledgerEvents).get(record.id);
   return {
-    ...rawSourceRow(record, linkedPages.length),
+    ...rawSourceRow(record, linkedPages.length, triage),
     linkedPages,
     preview: await previewRawSource(context, record, options.previewBytes ?? DEFAULT_RAW_PREVIEW_BYTES)
   };
@@ -476,6 +514,28 @@ export async function appendVaultLedgerEvent(context: CliContext, input: VaultLe
   };
   await appendVaultJsonlRecord(context, "ledgers/events.jsonl", "ledger-events", record);
   return record;
+}
+
+export async function appendRawTriageEvent(context: CliContext, input: RawTriageEventInput): Promise<VaultLedgerEvent> {
+  return appendVaultLedgerEvent(context, {
+    type: "raw.triaged",
+    subjectType: "raw",
+    subjectId: input.rawSourceId,
+    payload: {
+      outcome: input.outcome,
+      provenanceUri: input.provenanceUri,
+      targetProjectId: input.targetProjectId,
+      targetProjectName: input.targetProjectName,
+      targetRecordKind: input.targetRecordKind,
+      targetRecordId: input.targetRecordId,
+      targetRecordUri: input.targetRecordUri,
+      reason: input.reason
+    }
+  });
+}
+
+export function rawSourceProvenanceUri(sourceId: string): string {
+  return `boreal://global/${normalizeMachineString(sourceId, "raw source id")}`;
 }
 
 export async function resolveVaultLayout(context: CliContext): Promise<VaultLayout> {
@@ -644,7 +704,7 @@ function rawLinkedPageCounts(
   return counts;
 }
 
-function rawSourceRow(record: RawSourceRecord, linkedPageCount: number): RawSourceRow {
+function rawSourceRow(record: RawSourceRecord, linkedPageCount: number, triage?: RawTriageState): RawSourceRow {
   return {
     id: record.id,
     title: record.title,
@@ -657,11 +717,56 @@ function rawSourceRow(record: RawSourceRecord, linkedPageCount: number): RawSour
     contentHash: record.contentHash,
     sourceBacked: true,
     immutable: true,
-    processingStatus: linkedPageCount > 0 ? "linked" : "queued",
+    processingStatus: rawProcessingStatus(linkedPageCount, triage),
     linkedPageCount,
+    triage,
     retrievalCommand: `bwrk raw show ${record.id} --json`,
     previewCommand: `bwrk raw show ${record.id} --preview-bytes ${DEFAULT_RAW_PREVIEW_BYTES} --json`
   };
+}
+
+function rawProcessingStatus(linkedPageCount: number, triage: RawTriageState | undefined): RawProcessingStatus {
+  if (!triage) {
+    return linkedPageCount > 0 ? "linked" : "queued";
+  }
+  switch (triage.outcome) {
+    case "promoted":
+      return "routed";
+    case "kept_global":
+      return "kept_global";
+    case "dropped":
+      return "dropped";
+  }
+}
+
+function rawTriageStateBySource(events: readonly VaultLedgerEvent[]): ReadonlyMap<string, RawTriageState> {
+  const states = new Map<string, RawTriageState>();
+  for (const event of events) {
+    if (event.type !== "raw.triaged" || event.subjectType !== "raw") {
+      continue;
+    }
+    const outcome = rawTriageOutcome(event.payload.outcome);
+    if (!outcome) {
+      continue;
+    }
+    states.set(event.subjectId, {
+      outcome,
+      eventId: event.id,
+      updatedAt: event.createdAt,
+      provenanceUri: stringPayloadValue(event.payload, "provenanceUri"),
+      targetProjectId: stringPayloadValue(event.payload, "targetProjectId"),
+      targetProjectName: stringPayloadValue(event.payload, "targetProjectName"),
+      targetRecordKind: stringPayloadValue(event.payload, "targetRecordKind"),
+      targetRecordId: stringPayloadValue(event.payload, "targetRecordId"),
+      targetRecordUri: stringPayloadValue(event.payload, "targetRecordUri"),
+      reason: stringPayloadValue(event.payload, "reason")
+    });
+  }
+  return states;
+}
+
+function rawTriageOutcome(value: unknown): RawTriageOutcome | undefined {
+  return value === "promoted" || value === "kept_global" || value === "dropped" ? value : undefined;
 }
 
 async function previewRawSource(

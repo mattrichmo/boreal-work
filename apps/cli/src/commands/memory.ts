@@ -1,19 +1,35 @@
+import { existsSync } from "node:fs";
 import { basename } from "node:path";
 
-import { BorealError } from "@boreal/core";
+import {
+  BorealError,
+  type ClaimRecord,
+  type DecisionRecord,
+  type KnowledgeSource,
+  type KnowledgeSourceKind,
+  type ProjectRegistryEntry,
+  type SourceRef,
+  type WorkItem,
+  type WorkKind
+} from "@boreal/core";
 
 import { flagValue, flagValues, hasFlag, requiredFlag, type ParsedArgs } from "../args.js";
-import type { CliContext } from "../context.js";
+import { createCliContext, type CliContext } from "../context.js";
 import { analyzeCompaction, applyCompaction, type CompactDomain } from "../compact.js";
 import { applyManualMerge, buildManualMergePlan, scanDuplicates, type DuplicateDomain } from "../duplicates.js";
 import { formatRecord, table, type CliOutput } from "../output.js";
+import { listProjectRegistry } from "../registry.js";
 import {
   addRawSource,
+  appendRawTriageEvent,
   createWikiPage,
   getRawSourceDetail,
   inspectVault,
   listRawSourceRows,
+  listVaultRawSources,
   listVaultWikiPages,
+  rawSourceProvenanceUri,
+  type RawSourceRecord,
   type RawSourceRow,
   type WikiPageRecord
 } from "../vault.js";
@@ -23,6 +39,31 @@ const DEFAULT_RAW_PREVIEW_BYTES = 4_096;
 const MAX_RAW_PREVIEW_BYTES = 65_536;
 
 type MemoryCommandGroup = "raw" | "wiki" | "duplicate" | "merge" | "compact";
+type RawTriageAction = "promote" | "keep-global" | "drop";
+type RawTriageTargetKind = "work" | "source" | "claim" | "decision";
+type RawTriageTargetRecord = WorkItem | KnowledgeSource | ClaimRecord | DecisionRecord;
+
+interface RawTriageTargetProject {
+  readonly id: string;
+  readonly name: string;
+  readonly context: CliContext;
+}
+
+interface RawTriageResult {
+  readonly schemaVersion: "boreal.cli.raw.triage.v1";
+  readonly action: RawTriageAction;
+  readonly rawSource: RawSourceRecord;
+  readonly provenanceUri: string;
+  readonly targetProject?: {
+    readonly id: string;
+    readonly name: string;
+    readonly root: string;
+  };
+  readonly targetRecord?: RawTriageTargetRecord;
+  readonly targetRecordKind?: RawTriageTargetKind;
+  readonly targetRecordUri?: string;
+  readonly triageEvent: unknown;
+}
 
 export interface MemoryCommandDependencies {
   readonly defaultListLimit: number;
@@ -92,9 +133,242 @@ async function rawCommand(
       );
       return { exitCode: 0 };
     }
+    case "triage": {
+      output.write(formatRecord(await rawTriageCommand(rest, context, args, dependencies), json));
+      return { exitCode: 0 };
+    }
     default:
       throw new BorealError("BOREAL_INVALID_INPUT", `Unknown raw command: ${action ?? ""}`);
   }
+}
+
+async function rawTriageCommand(
+  rest: readonly string[],
+  context: CliContext,
+  args: ParsedArgs,
+  dependencies: MemoryCommandDependencies
+): Promise<RawTriageResult> {
+  const action = parseRawTriageAction(dependencies.requiredPositional(rest, 0, "triage action"));
+  const rawSourceId = dependencies.requiredPositional(rest, 1, "raw source id");
+  const rawSource = await requireUntriagedRawSource(context, rawSourceId);
+  const provenanceUri = rawSourceProvenanceUri(rawSource.id);
+
+  if (action === "drop") {
+    const reason = requiredFlag(args, "reason");
+    const triageEvent = await appendRawTriageEvent(context, {
+      rawSourceId: rawSource.id,
+      outcome: "dropped",
+      provenanceUri,
+      reason
+    });
+    return {
+      schemaVersion: "boreal.cli.raw.triage.v1",
+      action,
+      rawSource,
+      provenanceUri,
+      triageEvent
+    };
+  }
+
+  const targetKind = parseRawTriageTargetKind(requiredFlag(args, "as"));
+  const targetProject = action === "promote"
+    ? await resolveRawTriageTargetProject(context, args, requiredFlag(args, "to"))
+    : {
+        id: "global",
+        name: "Global workspace",
+        context
+      };
+  const targetRecord = await createRawTriageTargetRecord(targetProject.context, targetKind, rawSource, provenanceUri, args);
+  const targetRecordId = recordId(targetRecord);
+  const targetRecordUri = `boreal://${targetProject.id}/${targetRecordId}`;
+  const triageEvent = await appendRawTriageEvent(context, {
+    rawSourceId: rawSource.id,
+    outcome: action === "promote" ? "promoted" : "kept_global",
+    provenanceUri,
+    targetProjectId: targetProject.id,
+    targetProjectName: targetProject.name,
+    targetRecordKind: targetKind,
+    targetRecordId,
+    targetRecordUri
+  });
+
+  return {
+    schemaVersion: "boreal.cli.raw.triage.v1",
+    action,
+    rawSource,
+    provenanceUri,
+    targetProject: {
+      id: targetProject.id,
+      name: targetProject.name,
+      root: targetProject.context.workspaceRoot
+    },
+    targetRecord,
+    targetRecordKind: targetKind,
+    targetRecordUri,
+    triageEvent
+  };
+}
+
+async function requireUntriagedRawSource(context: CliContext, rawSourceId: string): Promise<RawSourceRecord> {
+  const [records, rows] = await Promise.all([listVaultRawSources(context), listRawSourceRows(context)]);
+  const row = rows.find((candidate) => candidate.id === rawSourceId);
+  if (!row) {
+    throw new BorealError("BOREAL_NOT_FOUND", "Raw source not found", { rawSourceId, domain: "raw" });
+  }
+  if (row.triage) {
+    throw new BorealError("BOREAL_CONFLICT", "Raw source has already been triaged", {
+      rawSourceId,
+      triage: row.triage
+    });
+  }
+  const record = records.find((candidate) => candidate.id === rawSourceId);
+  if (!record) {
+    throw new BorealError("BOREAL_NOT_FOUND", "Raw source not found", { rawSourceId, domain: "raw" });
+  }
+  return record;
+}
+
+async function resolveRawTriageTargetProject(
+  context: CliContext,
+  args: ParsedArgs,
+  projectId: string
+): Promise<RawTriageTargetProject> {
+  const registry = await listProjectRegistry({ registryRoot: flagValue(args, "registry-root") });
+  const entry = registry.entries.find((candidate) => candidate.id === projectId);
+  if (!entry) {
+    throw new BorealError("BOREAL_NOT_FOUND", "Registry entry not found", { projectId, domain: "registry" });
+  }
+  assertRoutableProject(entry);
+  const targetContext = await createCliContext(projectWorkspaceArgs(args, entry.projectRoot), entry.projectRoot, {
+    sessionId: context.sessionId
+  });
+  return {
+    id: entry.id,
+    name: entry.display.name,
+    context: targetContext
+  };
+}
+
+function assertRoutableProject(entry: ProjectRegistryEntry): void {
+  if (entry.lifecycle !== "linked") {
+    throw new BorealError("BOREAL_POLICY_VIOLATION", `Cannot route raw source to ${entry.lifecycle} project`, {
+      projectId: entry.id,
+      lifecycle: entry.lifecycle
+    });
+  }
+  if (!existsSync(entry.projectRoot) || !existsSync(entry.projectConfigPath)) {
+    throw new BorealError("BOREAL_POLICY_VIOLATION", "Cannot route raw source to missing project", {
+      projectId: entry.id,
+      lifecycle: "missing",
+      projectRoot: entry.projectRoot
+    });
+  }
+}
+
+function projectWorkspaceArgs(args: ParsedArgs, workspaceRoot: string): ParsedArgs {
+  const flags = new Map<string, string[]>();
+  for (const name of ["actor", "actor-kind", "session"]) {
+    const values = args.flags.get(name);
+    if (values) {
+      flags.set(name, [...values]);
+    }
+  }
+  flags.set("workspace", [workspaceRoot]);
+  return { command: ["work"], flags };
+}
+
+async function createRawTriageTargetRecord(
+  context: CliContext,
+  targetKind: RawTriageTargetKind,
+  rawSource: RawSourceRecord,
+  provenanceUri: string,
+  args: ParsedArgs
+): Promise<RawTriageTargetRecord> {
+  switch (targetKind) {
+    case "work":
+      return context.runtime.createWork({
+        title: flagValue(args, "title") ?? rawSource.title,
+        description: flagValue(args, "description") ?? rawSource.summary,
+        kind: parseWorkKind(flagValue(args, "work-kind")),
+        labels: flagValues(args, "label"),
+        sourceRefs: provenanceSourceRefs(provenanceUri),
+        ready: hasFlag(args, "ready")
+      });
+    case "source":
+      return context.runtime.createKnowledgeSource({
+        kind: knowledgeSourceKind(rawSource.kind),
+        title: flagValue(args, "title") ?? rawSource.title,
+        uri: provenanceUri,
+        summary: flagValue(args, "summary") ?? rawSource.summary
+      });
+    case "claim": {
+      const source = await context.runtime.createKnowledgeSource({
+        kind: knowledgeSourceKind(rawSource.kind),
+        title: flagValue(args, "title") ?? rawSource.title,
+        uri: provenanceUri,
+        summary: flagValue(args, "summary") ?? rawSource.summary
+      });
+      return context.runtime.createClaim({
+        statement: flagValue(args, "statement") ?? rawSource.summary ?? rawSource.title,
+        sourceIds: [source.meta.id]
+      });
+    }
+    case "decision": {
+      const source = await context.runtime.createKnowledgeSource({
+        kind: knowledgeSourceKind(rawSource.kind),
+        title: flagValue(args, "title") ?? rawSource.title,
+        uri: provenanceUri,
+        summary: flagValue(args, "summary") ?? rawSource.summary
+      });
+      return context.runtime.createDecision({
+        title: flagValue(args, "title") ?? rawSource.title,
+        context: flagValue(args, "context") ?? rawSource.summary ?? "",
+        decision: flagValue(args, "decision") ?? rawSource.title,
+        sourceIds: [source.meta.id]
+      });
+    }
+  }
+}
+
+function provenanceSourceRefs(provenanceUri: string): readonly SourceRef[] {
+  return [{ uri: provenanceUri, label: "global raw capture" }];
+}
+
+function parseRawTriageAction(value: string): RawTriageAction {
+  if (value === "promote" || value === "keep-global" || value === "drop") {
+    return value;
+  }
+  throw new BorealError("BOREAL_INVALID_INPUT", "raw triage action must be promote, keep-global, or drop", {
+    value
+  });
+}
+
+function parseRawTriageTargetKind(value: string): RawTriageTargetKind {
+  if (value === "work" || value === "source" || value === "claim" || value === "decision") {
+    return value;
+  }
+  throw new BorealError("BOREAL_INVALID_INPUT", "--as must be work, source, claim, or decision", { value });
+}
+
+function parseWorkKind(value: string | undefined): WorkKind | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  if (value === "issue" || value === "task" || value === "sprint" || value === "milestone") {
+    return value;
+  }
+  throw new BorealError("BOREAL_INVALID_INPUT", "--work-kind must be issue, task, sprint, or milestone", { value });
+}
+
+function knowledgeSourceKind(value: string): KnowledgeSourceKind {
+  if (value === "raw" || value === "document" || value === "chat" || value === "code" || value === "artifact") {
+    return value;
+  }
+  return "raw";
+}
+
+function recordId(record: RawTriageTargetRecord): string {
+  return record.meta.id;
 }
 
 async function wikiCommand(

@@ -8,6 +8,9 @@ writes_state: true
 requires_workspace: true
 allowed_commands:
   - vault status
+  - raw list
+  - raw show
+  - raw triage
   - search query
   - context search
   - work create
@@ -22,11 +25,11 @@ templates:
 
 ## Purpose
 
-Review raw inbox items and decide whether to reconcile, defer, or reject.
+Review raw inbox items and decide whether to promote them into a project, keep them as global memory, defer, or drop them.
 
 ## When To Use
 
-Use this workflow when the user's request requires review raw inbox items and decide whether to reconcile, defer, or reject. Do not use it for adjacent work when a narrower workflow exists.
+Use this workflow when the user's request requires reviewing raw inbox items and deciding whether to promote, keep, defer, or drop them. Do not use it for adjacent work when a narrower workflow exists.
 
 ## Inputs Required
 
@@ -55,16 +58,20 @@ Use this workflow when the user's request requires review raw inbox items and de
 1. Confirm the workspace with `bwrk prime --json` or `bwrk sync status --json`.
 2. Inspect the latest `agentDirectives` bundle, follow required or blocking directives first, and use `workflow_next` or recovery directives to choose the next canonical workflow.
 3. Gather current context using only the allowed commands listed in frontmatter.
-4. Execute the smallest state-changing command set required by the user request.
-5. Attach evidence or source references for any durable claim, decision, or closed work.
-6. Rebuild derived artifacts when the workflow changes memory, context, or search.
-7. Run `bwrk doctor --strict --json` unless the workflow is explicitly read-only and no generated artifacts changed.
+4. Inspect queued items with `bwrk raw list --json` and `bwrk raw show <raw-id> --json`.
+5. Execute the smallest state-changing command set required by the user request: `bwrk raw triage promote <raw-id> --to <project-id> --as work|source|claim|decision --json`, `bwrk raw triage keep-global <raw-id> --as source|claim|decision|work --json`, or `bwrk raw triage drop <raw-id> --reason <reason> --json`.
+6. Attach evidence or source references for any durable claim, decision, or closed work.
+7. Rebuild derived artifacts when the workflow changes memory, context, or search.
+8. Run `bwrk doctor --strict --json` unless the workflow is explicitly read-only and no generated artifacts changed.
 
 
 
 ## CLI Commands
 
 - `bwrk vault status`
+- `bwrk raw list`
+- `bwrk raw show`
+- `bwrk raw triage`
 - `bwrk search query`
 - `bwrk context search`
 - `bwrk work create`
