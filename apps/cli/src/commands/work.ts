@@ -214,7 +214,13 @@ export interface WorkCommandDependencies {
   readonly reservationListRow: (reservation: unknown, work: unknown, now: number) => Record<string, unknown>;
   readonly compareReservationRows: (left: Record<string, unknown>, right: Record<string, unknown>) => number;
   readonly textReservationListRow: (row: Record<string, unknown>) => Record<string, string | number>;
-  readonly dependencyTreeForWork: (workId: WorkId, workItems: readonly unknown[], graphEdges: readonly unknown[]) => unknown;
+  readonly dependencyTreeForWork: (
+    context: CliContext,
+    args: ParsedArgs,
+    workId: WorkId,
+    workItems: readonly unknown[],
+    graphEdges: readonly unknown[]
+  ) => Promise<unknown> | unknown;
   readonly formatRecordWithAgentDirectives: (
     context: CliContext,
     args: ParsedArgs,
@@ -699,9 +705,10 @@ async function depCommand(
     }
     case "tree": {
       const workId = await dependencies.resolveWorkId(context, dependencies.requiredPositional(rest, 0, "work reference"));
-      const tree = await context.store.read(async (reader) =>
-        dependencies.dependencyTreeForWork(workId, await reader.listWorkItems(), await reader.listGraphEdges())
+      const [workItems, graphEdges] = await context.store.read(async (reader) =>
+        Promise.all([reader.listWorkItems(), reader.listGraphEdges()])
       );
+      const tree = await dependencies.dependencyTreeForWork(context, args, workId, workItems, graphEdges);
       output.write(json ? await dependencies.formatRecordWithAgentDirectives(context, args, tree, true, { subjectWorkId: workId }) : table(dependencies.dependencyTreeRows(tree)));
       return { exitCode: 0 };
     }

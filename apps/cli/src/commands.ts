@@ -420,11 +420,27 @@ interface DependencyTreeNode {
   readonly id: string;
   readonly title?: string;
   readonly status?: WorkStatus;
+  readonly external?: boolean;
+  readonly projectId?: string;
+  readonly projectName?: string;
+  readonly workId?: WorkId;
+  readonly referenceUri?: string;
+  readonly reason?: string;
+  readonly resolutionState?: ExternalDependencyResolutionState;
+  readonly message?: string;
+  readonly stale?: boolean;
   readonly missing?: boolean;
   readonly cycle?: boolean;
   readonly shared?: boolean;
   readonly dependencies: readonly DependencyTreeNode[];
 }
+
+type ExternalDependencyResolutionState =
+  | "resolved-open"
+  | "resolved-terminal"
+  | "stale"
+  | "unresolved-unlinked"
+  | "unresolved-missing";
 
 interface ReservationListRow {
   readonly id: string;
@@ -1128,8 +1144,8 @@ function workCommandDependencies(): WorkCommandDependencies {
     compareReservationRows: (left, right) =>
       compareReservationRows(left as unknown as ReservationListRow, right as unknown as ReservationListRow),
     textReservationListRow: (row) => textReservationListRow(row as unknown as ReservationListRow),
-    dependencyTreeForWork: (workId, workItems, graphEdges) =>
-      dependencyTreeForWork(workId, workItems as readonly WorkItem[], graphEdges as readonly GraphEdge[]),
+    dependencyTreeForWork: (context, args, workId, workItems, graphEdges) =>
+      dependencyTreeForWorkWithExternal(context, args, workId, workItems as readonly WorkItem[], graphEdges as readonly GraphEdge[]),
     formatRecordWithAgentDirectives,
     dependencyTreeRows: (tree) => dependencyTreeRows(tree as DependencyTreeNode),
     dependencyCyclesFromGraph: (graphEdges) => dependencyCyclesFromGraph(graphEdges as readonly GraphEdge[])
@@ -10267,6 +10283,23 @@ function dependencyTreeForWork(
   return dependencyTreeNode(workId, workById, dependencyIdsByWork, [], new Set());
 }
 
+async function dependencyTreeForWorkWithExternal(
+  _context: CliContext,
+  args: ParsedArgs,
+  workId: WorkId,
+  workItems: readonly WorkItem[],
+  graphEdges: readonly GraphEdge[]
+): Promise<DependencyTreeNode> {
+  const workById = new Map(workItems.map((work) => [work.meta.id, work]));
+  const dependencyIdsByWork = dependencyIdsByWorkFromGraph(workItems, graphEdges);
+  const externalEdgesByWork = externalDependencyEdgesByWorkFromGraph(workItems, graphEdges);
+  if (!dependencyTreeHasExternalEdges(workId, dependencyIdsByWork, externalEdgesByWork, new Set())) {
+    return dependencyTreeNode(workId, workById, dependencyIdsByWork, [], new Set());
+  }
+  const rollups = await refreshGlobalRollupCacheForArgs(args);
+  return dependencyTreeNodeWithExternal(workId, workById, dependencyIdsByWork, externalEdgesByWork, rollups, [], new Set());
+}
+
 function dependencyTreeNode(
   workId: WorkId,
   workById: ReadonlyMap<WorkId, WorkItem>,
@@ -10307,6 +10340,135 @@ function dependencyTreeNode(
   };
 }
 
+function dependencyTreeNodeWithExternal(
+  workId: WorkId,
+  workById: ReadonlyMap<WorkId, WorkItem>,
+  dependencyIdsByWork: ReadonlyMap<WorkId, readonly WorkId[]>,
+  externalEdgesByWork: ReadonlyMap<WorkId, readonly GraphEdge[]>,
+  rollups: GlobalRollupCacheResult,
+  path: readonly WorkId[],
+  expanded: Set<WorkId>
+): DependencyTreeNode {
+  const work = workById.get(workId);
+  if (path.includes(workId)) {
+    return {
+      id: workId,
+      title: work?.title,
+      status: work?.status,
+      missing: work === undefined ? true : undefined,
+      cycle: true,
+      dependencies: []
+    };
+  }
+  if (expanded.has(workId)) {
+    return {
+      id: workId,
+      title: work?.title,
+      status: work?.status,
+      missing: work === undefined ? true : undefined,
+      shared: true,
+      dependencies: []
+    };
+  }
+  expanded.add(workId);
+  return {
+    id: workId,
+    title: work?.title,
+    status: work?.status,
+    missing: work === undefined ? true : undefined,
+    dependencies: [
+      ...(dependencyIdsByWork.get(workId) ?? []).map((dependencyId) =>
+        dependencyTreeNodeWithExternal(dependencyId, workById, dependencyIdsByWork, externalEdgesByWork, rollups, [...path, workId], expanded)
+      ),
+      ...(externalEdgesByWork.get(workId) ?? []).map((edge) => externalDependencyTreeNode(edge, rollups))
+    ]
+  };
+}
+
+function externalDependencyEdgesByWorkFromGraph(
+  workItems: readonly WorkItem[],
+  graphEdges: readonly GraphEdge[]
+): ReadonlyMap<WorkId, readonly GraphEdge[]> {
+  const workIds = new Set(workItems.map((work) => work.meta.id));
+  const edgesByWork = new Map<WorkId, GraphEdge[]>();
+  for (const edge of graphEdges) {
+    if (
+      edge.kind !== "blocks" ||
+      edge.fromType !== "work" ||
+      edge.toType !== "work" ||
+      edge.fromProjectId === undefined ||
+      edge.toProjectId !== undefined ||
+      !workIds.has(edge.toId as WorkId)
+    ) {
+      continue;
+    }
+    const workId = edge.toId as WorkId;
+    edgesByWork.set(workId, [...(edgesByWork.get(workId) ?? []), edge]);
+  }
+  return new Map(
+    [...edgesByWork.entries()].map(([blockedWorkId, edges]) => [
+      blockedWorkId,
+      edges.slice().sort((left, right) => externalReferenceUriFromEdge(left).localeCompare(externalReferenceUriFromEdge(right)))
+    ])
+  );
+}
+
+function dependencyTreeHasExternalEdges(
+  workId: WorkId,
+  dependencyIdsByWork: ReadonlyMap<WorkId, readonly WorkId[]>,
+  externalEdgesByWork: ReadonlyMap<WorkId, readonly GraphEdge[]>,
+  visited: Set<WorkId>
+): boolean {
+  if ((externalEdgesByWork.get(workId) ?? []).length > 0) {
+    return true;
+  }
+  if (visited.has(workId)) {
+    return false;
+  }
+  visited.add(workId);
+  return (dependencyIdsByWork.get(workId) ?? []).some((dependencyId) =>
+    dependencyTreeHasExternalEdges(dependencyId, dependencyIdsByWork, externalEdgesByWork, visited)
+  );
+}
+
+function externalDependencyTreeNode(edge: GraphEdge, rollups: GlobalRollupCacheResult): DependencyTreeNode {
+  const uri = externalReferenceUriFromEdge(edge);
+  const resolution = externalDependencyResolutionFromRollups(uri, rollups);
+  const project = rollups.projects.find((candidate) => candidate.projectId === resolution.projectId);
+  const resolutionState = externalDependencyResolutionState(resolution, project);
+  return {
+    id: resolution.referenceUri,
+    title: resolution.title,
+    status: resolution.status,
+    external: true,
+    projectId: resolution.projectId,
+    projectName: project?.projectName,
+    workId: resolution.workId,
+    referenceUri: resolution.referenceUri,
+    reason: resolution.reason,
+    resolutionState,
+    message: resolution.message,
+    stale: resolutionState === "stale" ? true : undefined,
+    dependencies: []
+  };
+}
+
+function externalDependencyResolutionState(
+  resolution: ExternalDependencyResolution,
+  project: GlobalRollupCacheResult["projects"][number] | undefined
+): ExternalDependencyResolutionState {
+  if (resolution.reason === "stale" || project?.stale || project?.status === "stale") {
+    return "stale";
+  }
+  if (resolution.terminal) {
+    return "resolved-terminal";
+  }
+  if (resolution.reason === "open" || resolution.status) {
+    return "resolved-open";
+  }
+  return project ? "unresolved-missing" : "unresolved-unlinked";
+}
+
 function dependencyTreeRows(tree: DependencyTreeNode): Array<Record<string, string | number>> {
   const rows: Array<Record<string, string | number>> = [];
   const visit = (node: DependencyTreeNode, depth: number): void => {
@@ -10315,7 +10477,17 @@ function dependencyTreeRows(tree: DependencyTreeNode): Array<Record<string, stri
       id: node.id,
       status: node.status ?? (node.missing ? "missing" : ""),
       title: node.title ?? "",
-      flags: [node.cycle ? "cycle" : "", node.missing ? "missing" : "", node.shared ? "shared" : ""].filter(Boolean).join(",")
+      project: node.projectName ?? node.projectId ?? "",
+      resolution: node.resolutionState ?? "",
+      reason: node.reason ?? "",
+      message: node.message ?? "",
+      flags: [
+        node.external ? "external" : "",
+        node.stale ? "stale" : "",
+        node.cycle ? "cycle" : "",
+        node.missing ? "missing" : "",
+        node.shared ? "shared" : ""
+      ].filter(Boolean).join(",")
     });
     for (const dependency of node.dependencies) {
       visit(dependency, depth + 1);
