@@ -12,7 +12,9 @@ import {
   projectRegistryEntryIdFromIdentity,
   type ProjectRegistryEntry as CoreProjectRegistryEntry,
   type ProjectRollupDocument,
+  type ProjectRollupNextWork,
   type RuntimeOperation,
+  type WorkStatus,
   type WorkPriority
 } from "@boreal/core";
 import { inspectDaemonStatus, refreshGlobalRollupCache, type DaemonStatusResult, type GlobalRollupCacheProject } from "@boreal/daemon";
@@ -59,9 +61,12 @@ const DEFAULT_DASHBOARD_WORK_LIMIT = 250;
 const DEFAULT_DASHBOARD_QUEUE_LIMIT = 200;
 const DEFAULT_DASHBOARD_SEARCH_LIMIT = 10;
 const DEFAULT_DASHBOARD_ACTIVITY_LIMIT = 20;
+const DEFAULT_GLOBAL_NEXT_LIMIT = 10;
 
 const MAX_DASHBOARD_PROJECT_LIMIT = 100;
+const MAX_GLOBAL_NEXT_LIMIT = 100;
 const MAX_LIST_LIMIT = 1_000;
+const DAY_MS = 24 * 60 * 60 * 1000;
 
 interface GlobalDashboardProjectOverview {
   readonly entry: DashboardProjectRegistryEntry;
@@ -82,6 +87,70 @@ export interface GlobalInitResult {
   readonly registryFile: string;
   readonly workspaceRoot: string;
   readonly initCommand: string;
+}
+
+export interface GlobalNextScoreBreakdown {
+  readonly severity: number;
+  readonly priority: number;
+  readonly aging: number;
+}
+
+export interface GlobalNextDirectiveRow {
+  readonly projectId: string;
+  readonly projectName: string;
+  readonly projectRoot: string;
+  readonly workId: string;
+  readonly subjectId: string;
+  readonly title: string;
+  readonly kind: string;
+  readonly priority: WorkPriority;
+  readonly status: WorkStatus;
+  readonly updatedAt: string;
+  readonly ageDays: number;
+  readonly stale: boolean;
+  readonly projectStatus: GlobalRollupCacheProject["status"];
+  readonly command: string;
+  readonly score: number;
+  readonly scoreBreakdown: GlobalNextScoreBreakdown;
+  readonly selectionKey: string;
+}
+
+export interface GlobalNextProjectRow {
+  readonly projectId: string;
+  readonly projectName: string;
+  readonly projectRoot: string;
+  readonly lifecycle: CoreProjectRegistryEntry["lifecycle"];
+  readonly status: GlobalRollupCacheProject["status"] | "excluded";
+  readonly stale: boolean;
+  readonly winner: GlobalNextDirectiveRow | null;
+  readonly candidateCount: number;
+  readonly note?: string;
+  readonly error?: string;
+}
+
+export interface GlobalNextExcludedProject {
+  readonly projectId: string;
+  readonly projectName: string;
+  readonly projectRoot: string;
+  readonly lifecycle: CoreProjectRegistryEntry["lifecycle"];
+  readonly reason: string;
+}
+
+export interface GlobalNextResult {
+  readonly schemaVersion: "boreal.cli.global.next.v1";
+  readonly generatedAt: string;
+  readonly registryRoot: string;
+  readonly registryFile: string;
+  readonly limit: number;
+  readonly agentId?: string;
+  readonly projectCount: number;
+  readonly rankedProjectCount: number;
+  readonly staleProjectCount: number;
+  readonly degradedProjectCount: number;
+  readonly excludedProjectCount: number;
+  readonly overall: GlobalNextDirectiveRow | null;
+  readonly projects: readonly GlobalNextProjectRow[];
+  readonly excludedProjects: readonly GlobalNextExcludedProject[];
 }
 
 export async function dashboardCommand(
@@ -123,6 +192,9 @@ export async function globalCommand(
 ): Promise<CommandResult> {
   if (action === "init") {
     return globalInitCommand(context, args, output, json);
+  }
+  if (action === "next") {
+    return globalNextCommand(args, output, json);
   }
   if (action === "link") {
     return linkCommand(rest[0], context, args, output, json);
@@ -252,6 +324,241 @@ function formatGlobalInit(result: GlobalInitResult): string {
     `workspaceRoot ${result.workspaceRoot}`,
     `initCommand   ${result.initCommand}`
   ].join("\n") + "\n";
+}
+
+async function globalNextCommand(args: ParsedArgs, output: CliOutput, json: boolean): Promise<CommandResult> {
+  const result = await buildGlobalNextResult(args);
+  output.write(json ? formatRecord(result, true) : formatGlobalNext(result));
+  return { exitCode: 0 };
+}
+
+async function buildGlobalNextResult(args: ParsedArgs): Promise<GlobalNextResult> {
+  const generatedAt = nowIso();
+  const limit = parseLimit(flagValue(args, "limit"), { max: MAX_GLOBAL_NEXT_LIMIT }) ?? DEFAULT_GLOBAL_NEXT_LIMIT;
+  const registryRoot = flagValue(args, "registry-root");
+  const liveCacheTtlMs = parseNonNegativeInteger(flagValue(args, "live-cache-ttl-ms"), "--live-cache-ttl-ms") ?? 60_000;
+  const agentId = flagValue(args, "agent");
+  const [registry, rollups] = await Promise.all([
+    listProjectRegistry({ registryRoot }),
+    refreshGlobalRollupCache({
+      registryRoot,
+      ttlMs: liveCacheTtlMs,
+      source: "lazy",
+      now: () => generatedAt
+    })
+  ]);
+  const excludedProjects = registry.entries
+    .filter((entry) => entry.lifecycle !== "linked")
+    .map(globalNextExcludedProject)
+    .sort((left, right) => left.projectId.localeCompare(right.projectId));
+  const allProjects = rollups.projects
+    .map((project) => globalNextProjectRow(project, agentId, generatedAt))
+    .sort(compareGlobalNextProjects);
+  const winners = allProjects
+    .map((project) => project.winner)
+    .filter((winner): winner is GlobalNextDirectiveRow => winner !== null)
+    .sort(compareGlobalNextDirectives);
+  const projects = allProjects.slice(0, limit);
+  return {
+    schemaVersion: "boreal.cli.global.next.v1",
+    generatedAt,
+    registryRoot: rollups.registryRoot,
+    registryFile: rollups.registryFile,
+    limit,
+    ...(agentId ? { agentId } : {}),
+    projectCount: rollups.projectCount,
+    rankedProjectCount: winners.length,
+    staleProjectCount: rollups.staleCount,
+    degradedProjectCount: rollups.degradedCount,
+    excludedProjectCount: excludedProjects.length,
+    overall: winners[0] ?? null,
+    projects,
+    excludedProjects
+  };
+}
+
+function globalNextProjectRow(
+  project: GlobalRollupCacheProject,
+  agentId: string | undefined,
+  generatedAt: string
+): GlobalNextProjectRow {
+  if (!project.rollup) {
+    return {
+      projectId: project.projectId,
+      projectName: project.projectName,
+      projectRoot: project.projectRoot,
+      lifecycle: project.lifecycle,
+      status: project.status,
+      stale: project.stale,
+      winner: null,
+      candidateCount: 0,
+      note: project.status === "degraded" ? "Project rollup unavailable; no candidate ranked." : "No project rollup candidate is available.",
+      ...(project.error ? { error: project.error } : {})
+    };
+  }
+  const candidates = project.rollup.next.work
+    .map((work) => globalNextDirectiveRow(project, project.rollup as ProjectRollupDocument, work, agentId, generatedAt))
+    .sort(compareGlobalNextDirectives);
+  return {
+    projectId: project.projectId,
+    projectName: project.projectName,
+    projectRoot: project.projectRoot,
+    lifecycle: project.lifecycle,
+    status: project.status,
+    stale: project.stale,
+    winner: candidates[0] ?? null,
+    candidateCount: candidates.length,
+    ...(candidates.length === 0 ? { note: "No ready work in project rollup." } : {}),
+    ...(project.error ? { error: project.error } : {})
+  };
+}
+
+function globalNextDirectiveRow(
+  project: GlobalRollupCacheProject,
+  rollup: ProjectRollupDocument,
+  work: ProjectRollupNextWork,
+  agentId: string | undefined,
+  generatedAt: string
+): GlobalNextDirectiveRow {
+  const ageDays = globalNextWorkAgeDays(rollup, work, generatedAt);
+  const scoreBreakdown = {
+    severity: globalNextProjectSeverityScore(project, rollup),
+    priority: globalNextPriorityScore(work.priority),
+    aging: Math.min(ageDays, 365)
+  };
+  const score = scoreBreakdown.severity + scoreBreakdown.priority + scoreBreakdown.aging;
+  return {
+    projectId: project.projectId,
+    projectName: project.projectName,
+    projectRoot: project.projectRoot,
+    workId: work.workId,
+    subjectId: work.workId,
+    title: work.title,
+    kind: work.kind,
+    priority: work.priority,
+    status: work.status,
+    updatedAt: work.updatedAt,
+    ageDays,
+    stale: project.stale || project.status === "stale",
+    projectStatus: project.status,
+    command: globalNextExecutableCommand(project.projectRoot, work.workId, agentId),
+    score,
+    scoreBreakdown,
+    selectionKey: [
+      score.toString().padStart(4, "0"),
+      project.projectId,
+      work.workId
+    ].join(":")
+  };
+}
+
+function globalNextExcludedProject(entry: CoreProjectRegistryEntry): GlobalNextExcludedProject {
+  return {
+    projectId: entry.id,
+    projectName: entry.display.name,
+    projectRoot: entry.projectRoot,
+    lifecycle: entry.lifecycle,
+    reason: `Project lifecycle is ${entry.lifecycle}; global next ranks only linked projects.`
+  };
+}
+
+function globalNextProjectSeverityScore(project: GlobalRollupCacheProject, rollup: ProjectRollupDocument): number {
+  return (
+    (project.status === "stale" || project.stale ? 25 : 0) +
+    (rollup.health.doctorOk === false ? 50 : 0) +
+    (rollup.health.syncOk === false ? 50 : 0)
+  );
+}
+
+function globalNextPriorityScore(priority: WorkPriority): number {
+  switch (priority) {
+    case "critical":
+      return 400;
+    case "high":
+      return 300;
+    case "normal":
+      return 200;
+    case "low":
+      return 100;
+  }
+}
+
+function globalNextWorkAgeDays(rollup: ProjectRollupDocument, work: ProjectRollupNextWork, generatedAt: string): number {
+  const agingEntry = rollup.aging.ready.items.find((entry) => entry.workId === work.workId);
+  if (agingEntry) {
+    return agingEntry.ageDays;
+  }
+  const generatedMs = Date.parse(rollup.generatedAt || generatedAt);
+  const updatedMs = Date.parse(work.updatedAt);
+  if (!Number.isFinite(generatedMs) || !Number.isFinite(updatedMs)) {
+    return 0;
+  }
+  return Math.floor(Math.max(0, generatedMs - updatedMs) / DAY_MS);
+}
+
+function globalNextExecutableCommand(projectRoot: string, workId: string, agentId: string | undefined): string {
+  const agent = agentId ? ` --agent ${shellArg(agentId)}` : "";
+  return `bwrk --workspace ${shellArg(projectRoot)} agent start ${shellArg(workId)}${agent} --json`;
+}
+
+function compareGlobalNextProjects(left: GlobalNextProjectRow, right: GlobalNextProjectRow): number {
+  if (left.winner && right.winner) {
+    return compareGlobalNextDirectives(left.winner, right.winner);
+  }
+  if (left.winner) {
+    return -1;
+  }
+  if (right.winner) {
+    return 1;
+  }
+  return globalNextProjectStatusRank(left.status) - globalNextProjectStatusRank(right.status) ||
+    left.projectId.localeCompare(right.projectId);
+}
+
+function compareGlobalNextDirectives(left: GlobalNextDirectiveRow, right: GlobalNextDirectiveRow): number {
+  return right.score - left.score ||
+    left.projectId.localeCompare(right.projectId) ||
+    left.subjectId.localeCompare(right.subjectId);
+}
+
+function globalNextProjectStatusRank(status: GlobalNextProjectRow["status"]): number {
+  switch (status) {
+    case "fresh":
+      return 0;
+    case "stale":
+      return 1;
+    case "degraded":
+      return 2;
+    case "excluded":
+      return 3;
+  }
+}
+
+function formatGlobalNext(result: GlobalNextResult): string {
+  const lines = [
+    `[${result.overall ? "ok" : "empty"}] global next: ${result.rankedProjectCount}/${result.projectCount} linked project(s) ranked`
+  ];
+  if (result.projects.length > 0) {
+    lines.push(table(result.projects.map((project) => ({
+      project: project.projectName,
+      status: project.status,
+      stale: project.stale ? "yes" : "no",
+      priority: project.winner?.priority ?? "-",
+      ageDays: project.winner?.ageDays ?? "-",
+      score: project.winner?.score ?? "-",
+      work: project.winner?.title ?? project.note ?? "-",
+      command: project.winner?.command ?? ""
+    }))));
+  }
+  if (result.excludedProjects.length > 0) {
+    lines.push(`Excluded: ${result.excludedProjects.map((project) => `${project.projectName} (${project.lifecycle})`).join(", ")}`);
+  }
+  if (!result.overall) {
+    lines.push("No global next command available.");
+    return lines.join("\n") + "\n";
+  }
+  lines.push(result.overall.command);
+  return lines.join("\n") + "\n";
 }
 
 // Link a project into the global workspace (registry add, reframed). With no
@@ -1548,4 +1855,11 @@ function parseNonNegativeInteger(value: string | undefined, label: string): numb
     throw new BorealError("BOREAL_INVALID_INPUT", `${label} must be a non-negative integer`);
   }
   return parsed;
+}
+
+function shellArg(value: string): string {
+  if (/^[A-Za-z0-9_./:@=-]+$/.test(value)) {
+    return value;
+  }
+  return `'${value.replace(/'/g, "'\\''")}'`;
 }

@@ -538,20 +538,21 @@ bwrk dashboard global --limit 10 --json
 ## `global`
 
 ```bash
-bwrk global [init|link <path>|unlink <project-id>] [--web] [--json] [--mouse] [--refresh-ms <ms>] [--host <host>] [--port <n>] [--no-open] [--mode live|fixture] [--live-cache-ttl-ms <ms>] [--allow-fixture-fallback] [--name <text>] [--label <label>...] [--registry-root <dir>] [--init] [--purge] [--yes]
+bwrk global [init|next|link <path>|unlink <project-id>] [--web] [--json] [--mouse] [--refresh-ms <ms>] [--host <host>] [--port <n>] [--no-open] [--mode live|fixture] [--live-cache-ttl-ms <ms>] [--allow-fixture-fallback] [--agent <agent-id>] [--limit <n>] [--name <text>] [--label <label>...] [--registry-root <dir>] [--init] [--purge] [--yes]
 ```
 
 The machine-level **global workspace**: a real Boreal workspace (its own to-dos, plans, tasks, sprints) that lives at the registry root, plus a monitor over the projects you've linked. It is not tied to any repo.
 
 - With **no subcommand**, opens the cross-repo dashboard — terminal by default, `--web` for the browser, `--json` for the bounded data payload. `bwrk dashboard` shows only the current workspace; `bwrk global` shows your global workspace plus all linked projects.
 - **`bwrk global init`** creates the machine-local registry file and global workspace. On first run, JSON global commands return a typed error naming this exact init command instead of silently creating state; interactive terminal commands prompt before running the same init path.
+- **`bwrk global next`** ranks one cached rollup directive per linked project and prints a workspace-qualified start command for the overall winner on the last line in text mode.
 - **`bwrk global <command> ...`** runs any command against the global workspace. For example `bwrk global work create "Plan Q3"`, `bwrk global work list`. This is sugar for `bwrk <command> ... --global`.
 - **`bwrk global link <path>`** links a project so it's tracked here; pass `--init` to initialize and link a fresh target directory.
 - **`bwrk global unlink <project-id>`** archives it by default; `--purge --yes` removes only the registry row.
 
 The registry is initialized explicitly through `bwrk global init`. After the registry exists, global commands may ensure the global workspace directory exists. Nothing is tracked globally until you link it; `bwrk init` never auto-links a project.
 
-Options match `bwrk dashboard` (`--web`, `--mouse`, `--refresh-ms`, `--host`, `--port`, `--no-open`, `--mode`, `--live-cache-ttl-ms`, `--allow-fixture-fallback`), plus `--name`/`--label`/`--registry-root`/`--init` for `link`; `unlink --purge` requires `--yes`; `init` accepts `--registry-root`.
+Options match `bwrk dashboard` (`--web`, `--mouse`, `--refresh-ms`, `--host`, `--port`, `--no-open`, `--mode`, `--live-cache-ttl-ms`, `--allow-fixture-fallback`), plus `--agent`/`--limit` for `next`; `--name`/`--label`/`--registry-root`/`--init` for `link`; `unlink --purge` requires `--yes`; `init` and `next` accept `--registry-root`.
 
 ## `global init`
 
@@ -562,6 +563,16 @@ bwrk global init [--registry-root <dir>] [--json]
 Creates the selected machine-local project registry file and initializes the global workspace. The command is idempotent. `--registry-root` overrides the platform default; `BOREAL_PROJECT_REGISTRY_ROOT` is also honored.
 
 JSON `data` uses schema `boreal.cli.global.init.v1` and includes `created`, `registryRoot`, `registryFile`, `workspaceRoot`, and `initCommand`.
+
+## `global next`
+
+```bash
+bwrk global next [--agent <agent-id>] [--limit <n>] [--registry-root <dir>] [--live-cache-ttl-ms <ms>] [--json]
+```
+
+Reads linked-project rollup cache rows, ranks each project winner by project severity, work priority, and aging, and returns the overall directive with an executable `bwrk --workspace <projectRoot> agent start ... --json` command. Stale projects remain ranked with a stale marker; degraded projects are surfaced without a candidate.
+
+JSON `data` uses schema `boreal.cli.global.next.v1` and includes `overall`, `projects`, `excludedProjects`, stale/degraded counts, and the emitted command for every ranked winner.
 
 ## `link`
 

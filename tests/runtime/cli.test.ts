@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { chmod, mkdir, mkdtemp, readFile, readdir, rename, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, readdir, rename, rm, stat, symlink, utimes, writeFile } from "node:fs/promises";
 import { hostname as osHostname, tmpdir } from "node:os";
 import { dirname, join, relative } from "node:path";
 import { promisify } from "node:util";
@@ -1116,6 +1116,170 @@ describe("bwrk cli", () => {
         })
       ])
     );
+  });
+
+  it("ranks global next directives across fresh, stale, degraded, and excluded projects", async () => {
+    const rootDir = await makeTempWorkspace();
+    const staleRoot = await makeTempWorkspace();
+    const degradedRoot = await makeTempWorkspace();
+    const pausedRoot = await makeTempWorkspace();
+    const registryRoot = join(rootDir, "registry-home");
+    const workspaces = [rootDir, staleRoot, degradedRoot, pausedRoot];
+    for (const workspace of workspaces) {
+      await runCli(workspace, [
+        "init",
+        "--setup-memory",
+        "--memory-root",
+        "memory",
+        "--memory-layout",
+        "in-repo",
+        "--memory-git-mode",
+        "shared",
+        "--install-root",
+        ".agents/skills",
+        "--json"
+      ]);
+      await mkdir(join(workspace, ".agents/skills"), { recursive: true });
+    }
+
+    const freshWork = parseData<{ readonly meta: { readonly id: string } }>(
+      (await runCli(rootDir, ["work", "create", "Fresh global next winner", "--kind", "task", "--priority", "critical", "--ready", "--json"])).stdout
+    );
+    const staleWork = parseData<{ readonly meta: { readonly id: string } }>(
+      (await runCli(staleRoot, ["work", "create", "Stale global next candidate", "--kind", "task", "--priority", "high", "--ready", "--json"])).stdout
+    );
+    await runCli(degradedRoot, ["work", "create", "Degraded global next candidate", "--kind", "task", "--priority", "critical", "--ready", "--json"]);
+    await runCli(pausedRoot, ["work", "create", "Paused global next candidate", "--kind", "task", "--priority", "critical", "--ready", "--json"]);
+
+    const freshEntry = parseData<{ readonly entry: { readonly id: string } }>(
+      (await runCli(rootDir, ["registry", "import-setup", "--registry-root", registryRoot, "--name", "Fresh Project", "--json"])).stdout
+    );
+    const staleEntry = parseData<{ readonly entry: { readonly id: string } }>(
+      (await runCli(staleRoot, ["registry", "import-setup", "--registry-root", registryRoot, "--name", "Stale Project", "--json"])).stdout
+    );
+
+    const warmup = await runCli(rootDir, ["global", "next", "--registry-root", registryRoot, "--agent", "pm-agent", "--json"]);
+    expect(warmup.exitCode).toBe(0);
+    expect(parseData<{ readonly overall: { readonly workId: string } }>(warmup.stdout).overall.workId).toBe(freshWork.meta.id);
+
+    await rm(join(staleRoot, ".boreal/rollup.json"), { force: true });
+    const staleCachePath = join(registryRoot, "cache", "rollups", `${staleEntry.entry.id}.json`);
+    const oldCacheTime = new Date(Date.now() - 120_000);
+    await utimes(staleCachePath, oldCacheTime, oldCacheTime);
+
+    const degradedEntry = parseData<{ readonly entry: { readonly id: string } }>(
+      (await runCli(degradedRoot, ["registry", "import-setup", "--registry-root", registryRoot, "--name", "Degraded Project", "--json"])).stdout
+    );
+    await rm(join(degradedRoot, ".boreal/rollup.json"), { force: true });
+
+    const pausedEntry = parseData<{ readonly entry: { readonly id: string } }>(
+      (await runCli(pausedRoot, ["registry", "import-setup", "--registry-root", registryRoot, "--name", "Paused Project", "--json"])).stdout
+    );
+    await runCli(pausedRoot, ["registry", "pause", pausedEntry.entry.id, "--registry-root", registryRoot, "--json"]);
+
+    const result = parseData<{
+      readonly schemaVersion: string;
+      readonly overall: { readonly workId: string; readonly command: string } | null;
+      readonly rankedProjectCount: number;
+      readonly staleProjectCount: number;
+      readonly degradedProjectCount: number;
+      readonly excludedProjectCount: number;
+      readonly projects: Array<{
+        readonly projectId: string;
+        readonly projectName: string;
+        readonly projectRoot: string;
+        readonly status: string;
+        readonly stale: boolean;
+        readonly error?: string;
+        readonly winner: { readonly workId: string; readonly command: string } | null;
+      }>;
+      readonly excludedProjects: Array<{ readonly projectId: string; readonly lifecycle: string; readonly reason: string }>;
+    }>(
+      (
+        await runCli(rootDir, [
+          "global",
+          "next",
+          "--registry-root",
+          registryRoot,
+          "--agent",
+          "pm-agent",
+          "--live-cache-ttl-ms",
+          "0",
+          "--json"
+        ])
+      ).stdout
+    );
+    const expectedCommand = `bwrk --workspace ${rootDir} agent start ${freshWork.meta.id} --agent pm-agent --json`;
+    expect(result.schemaVersion).toBe("boreal.cli.global.next.v1");
+    expect(result.overall).toEqual(expect.objectContaining({ workId: freshWork.meta.id, command: expectedCommand }));
+    expect(result.rankedProjectCount).toBe(2);
+    expect(result.staleProjectCount).toBe(1);
+    expect(result.degradedProjectCount).toBe(1);
+    expect(result.excludedProjectCount).toBe(1);
+    expect(result.projects.find((project) => project.projectId === freshEntry.entry.id)).toEqual(
+      expect.objectContaining({
+        projectName: "Fresh Project",
+        projectRoot: rootDir,
+        status: "fresh",
+        stale: false,
+        winner: expect.objectContaining({ workId: freshWork.meta.id, command: expectedCommand })
+      })
+    );
+    expect(result.projects.find((project) => project.projectId === staleEntry.entry.id)).toEqual(
+      expect.objectContaining({
+        projectName: "Stale Project",
+        status: "stale",
+        stale: true,
+        error: expect.stringContaining("Project rollup is missing"),
+        winner: expect.objectContaining({
+          workId: staleWork.meta.id,
+          command: `bwrk --workspace ${staleRoot} agent start ${staleWork.meta.id} --agent pm-agent --json`
+        })
+      })
+    );
+    expect(result.projects.find((project) => project.projectId === degradedEntry.entry.id)).toEqual(
+      expect.objectContaining({
+        projectName: "Degraded Project",
+        status: "degraded",
+        stale: false,
+        error: expect.stringContaining("Project rollup is missing"),
+        winner: null
+      })
+    );
+    expect(result.excludedProjects).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          projectId: pausedEntry.entry.id,
+          lifecycle: "paused",
+          reason: expect.stringContaining("global next ranks only linked projects")
+        })
+      ])
+    );
+
+    const repeat = parseData<typeof result>(
+      (
+        await runCli(rootDir, [
+          "global",
+          "next",
+          "--registry-root",
+          registryRoot,
+          "--agent",
+          "pm-agent",
+          "--live-cache-ttl-ms",
+          "0",
+          "--json"
+        ])
+      ).stdout
+    );
+    expect(repeat.overall?.command).toBe(result.overall?.command);
+    expect(repeat.projects.map((project) => [project.projectId, project.status, project.winner?.workId ?? null])).toEqual(
+      result.projects.map((project) => [project.projectId, project.status, project.winner?.workId ?? null])
+    );
+
+    const human = await runCli(rootDir, ["global", "next", "--registry-root", registryRoot, "--agent", "pm-agent", "--live-cache-ttl-ms", "0"]);
+    const humanLines = human.stdout.trimEnd().split(/\r?\n/u).filter((line) => line.trim().length > 0);
+    expect(human.exitCode).toBe(0);
+    expect(humanLines.at(-1)).toBe(expectedCommand);
   });
 
   it("manages active sprint command contracts with workspace-scoped audit events", async () => {

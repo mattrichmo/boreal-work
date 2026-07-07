@@ -762,10 +762,10 @@ export const COMMAND_DEFINITIONS: readonly CommandDefinition[] = [
   {
     path: ["global"],
     category: "dashboard",
-    summary: "Your global workspace: cross-repo dashboard, global work (global work ...), init, and link/unlink.",
-    usage: "bwrk global [init|link <path>|unlink <project-id>] [--web] [--json] [--mouse] [--refresh-ms <ms>] [--host <host>] [--port <n>] [--no-open] [--mode live|fixture] [--live-cache-ttl-ms <ms>] [--allow-fixture-fallback] [--name <text>] [--label <label>...] [--registry-root <dir>] [--init] [--purge] [--yes]",
+    summary: "Your global workspace: cross-repo dashboard, global work (global work ...), init/next, and link/unlink.",
+    usage: "bwrk global [init|next|link <path>|unlink <project-id>] [--web] [--json] [--mouse] [--refresh-ms <ms>] [--host <host>] [--port <n>] [--no-open] [--mode live|fixture] [--live-cache-ttl-ms <ms>] [--allow-fixture-fallback] [--agent <agent-id>] [--limit <n>] [--name <text>] [--label <label>...] [--registry-root <dir>] [--init] [--purge] [--yes]",
     description:
-      "The machine-level global workspace. With no subcommand it opens the cross-repo dashboard (terminal by default; --web for the browser, --json for the data payload). `bwrk global init` creates the machine-local registry and global workspace. `bwrk global work ...` (and any `bwrk global <command>`) runs that command against the global workspace. `bwrk global link <path>` links a project to be tracked; `bwrk global unlink <project-id>` removes it.",
+      "The machine-level global workspace. With no subcommand it opens the cross-repo dashboard (terminal by default; --web for the browser, --json for the data payload). `bwrk global init` creates the machine-local registry and global workspace. `bwrk global next` ranks one next directive per linked project from the rollup cache. `bwrk global work ...` (and any `bwrk global <command>`) runs that command against the global workspace. `bwrk global link <path>` links a project to be tracked; `bwrk global unlink <project-id>` removes it.",
     flags: [
       flag("web", "boolean", "Open the browser console instead of the terminal dashboard."),
       flag("mouse", "boolean", "Terminal dashboard: enable mouse wheel (disables native text selection)."),
@@ -776,9 +776,11 @@ export const COMMAND_DEFINITIONS: readonly CommandDefinition[] = [
       flag("mode", "value", "Data mode: live or fixture. Defaults to live."),
       flag("live-cache-ttl-ms", "value", "Browser console (--web) live data cache TTL between route clicks. Defaults to 60000."),
       flag("allow-fixture-fallback", "boolean", "Browser console (--web): render fixture data with warnings when live data fails."),
+      flag("agent", "value", "next: include this agent id in emitted start commands."),
+      flag("limit", "value", "next: maximum ranked project rows to show. Defaults to 10 and is capped at 100."),
       flag("name", "value", "link: display name for the linked project."),
       flag("label", "value", "link: label for the linked project (repeatable).", true),
-      flag("registry-root", "value", "init/link/unlink: machine-local registry root override."),
+      flag("registry-root", "value", "init/next/link/unlink: machine-local registry root override."),
       flag("init", "boolean", "link: initialize a fresh target workspace before adding it to the registry."),
       flag("purge", "boolean", "unlink: remove the archived registry row instead of retaining it for references."),
       flag("yes", "boolean", "unlink --purge: confirm permanent registry-row removal. Short alias: -y.")
@@ -796,6 +798,23 @@ export const COMMAND_DEFINITIONS: readonly CommandDefinition[] = [
       "Creates the project registry file and global workspace at the selected machine-local registry root. This is the explicit first-run bootstrap for global commands.",
     flags: [
       flag("registry-root", "value", "Machine-local registry root override. Defaults to the platform Boreal app-state directory.")
+    ],
+    positionals: { label: "arguments", min: 0, max: 0 },
+    requiresWorkspace: false,
+    supportsJson: true,
+  },
+  {
+    path: ["global", "next"],
+    category: "dashboard",
+    summary: "Rank the top next directive across linked projects.",
+    usage: "bwrk global next [--agent <agent-id>] [--limit <n>] [--registry-root <dir>] [--live-cache-ttl-ms <ms>] [--json]",
+    description:
+      "Reads the aggregate rollup cache without live project fan-out, ranks one next-work directive per linked project by project severity, work priority, and aging signals, and emits workspace-qualified commands. Stale and degraded projects are surfaced explicitly.",
+    flags: [
+      flag("agent", "value", "Agent identifier to include in emitted start commands."),
+      flag("limit", "value", "Maximum ranked project rows to show. Defaults to 10 and is capped at 100."),
+      flag("registry-root", "value", "Machine-local registry root override. Defaults to the platform Boreal app-state directory."),
+      flag("live-cache-ttl-ms", "value", "Global rollup cache TTL for lazy reads. Defaults to 60000.")
     ],
     positionals: { label: "arguments", min: 0, max: 0 },
     requiresWorkspace: false,
@@ -2933,6 +2952,18 @@ const COMMAND_BEHAVIOR: Readonly<Record<string, CommandBehaviorMetadata>> = {
     maxResultSizeChars: 100_000,
     humanOutputKind: "record",
     examples: ["bwrk global init --json"],
+  }),
+  "global next": commandMetadata("global next", {
+    readOnly: true,
+    destructive: false,
+    writesState: false,
+    writesGeneratedArtifacts: false,
+    requiresFreshIndex: false,
+    concurrencySafe: true,
+    requiresLock: "none",
+    maxResultSizeChars: 250_000,
+    humanOutputKind: "table",
+    examples: ["bwrk global next --agent cybertron --json", "bwrk global next --limit 5"],
   }),
   "link": commandMetadata("link", {
     readOnly: false,
