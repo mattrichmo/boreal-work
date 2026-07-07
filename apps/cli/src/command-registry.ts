@@ -530,6 +530,20 @@ export const COMMAND_DEFINITIONS: readonly CommandDefinition[] = [
     supportsJson: true,
   },
   {
+    path: ["resolve"],
+    category: "registry",
+    summary: "Resolve a Boreal cross-project reference URI.",
+    usage: "bwrk resolve <boreal-uri> [--registry-root <dir>] [--json]",
+    description:
+      "Resolves `boreal://<project-id>/<record-id>` through the machine-local project registry and returns a typed resolved or unresolved result without mutating project state.",
+    flags: [
+      flag("registry-root", "value", "Machine-local registry root override. Defaults to the platform Boreal app-state directory.")
+    ],
+    positionals: { label: "boreal reference uri", min: 1, max: 1 },
+    requiresWorkspace: false,
+    supportsJson: true,
+  },
+  {
     path: ["install"],
     category: "install",
     summary: "Install Boreal into this project.",
@@ -2748,6 +2762,18 @@ const COMMAND_BEHAVIOR: Readonly<Record<string, CommandBehaviorMetadata>> = {
     maxResultSizeChars: 250_000,
     humanOutputKind: "markdown",
     examples: ["bwrk workflows show boreal.workflow.launch-sprint.v1"],
+  }),
+  resolve: commandMetadata("resolve", {
+    readOnly: true,
+    destructive: false,
+    writesState: false,
+    writesGeneratedArtifacts: false,
+    requiresFreshIndex: false,
+    concurrencySafe: true,
+    requiresLock: "none",
+    maxResultSizeChars: 100_000,
+    humanOutputKind: "record",
+    examples: ["bwrk resolve boreal://project_0123456789abcdef/bw_work_0123456789ab --json"],
   }),
   install: commandMetadata("install", {
     readOnly: false,

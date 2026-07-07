@@ -1,5 +1,22 @@
 import type { ContextPack, EvidenceRecord, SourceRef, VerificationRecord, WorkItem } from "@boreal/core";
 
+export interface BorealSourceRefResolutionView {
+  readonly status: "resolved" | "unresolved-unlinked" | "unresolved-missing-project" | "unresolved-missing-record" | "invalid-uri";
+  readonly uri: string;
+  readonly projectId?: string;
+  readonly projectName?: string;
+  readonly projectLifecycle?: string;
+  readonly recordId?: string;
+  readonly recordKind?: string;
+  readonly title?: string;
+  readonly targetStatus?: string;
+  readonly reason?: string;
+}
+
+export interface WorkSourceRefView extends SourceRef {
+  readonly borealReference?: BorealSourceRefResolutionView;
+}
+
 export interface WorkItemView {
   readonly id: string;
   readonly title: string;
@@ -9,7 +26,8 @@ export interface WorkItemView {
   readonly priority: WorkItem["priority"];
   readonly acceptanceCriteria?: readonly string[];
   readonly labels: readonly string[];
-  readonly sourceRefs?: readonly SourceRef[];
+  readonly sourceRefs?: readonly WorkSourceRefView[];
+  readonly sourceRefResolutions?: readonly BorealSourceRefResolutionView[];
   readonly parentId?: WorkItem["parentId"];
   readonly dependencyIds: readonly string[];
   readonly activeBlockerIds: readonly string[];

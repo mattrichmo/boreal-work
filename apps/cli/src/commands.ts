@@ -20,6 +20,7 @@ import {
   gitDirectiveDataByRegistryId,
   hashContent,
   handoffDirectiveDataByRegistryId,
+  isBorealReferenceUri,
   isBorealError,
   isIsoTimestamp,
   normalizeActorId,
@@ -27,7 +28,9 @@ import {
   normalizeMachineString,
   normalizeSearchQuery,
   nowIso,
+  parseBorealReferenceUri,
   randomId,
+  resolveBorealReferenceUri,
   runBoundedProcess,
   recoveryDirectiveDataByRegistryId,
   runtimeSnapshotSchemaIssues,
@@ -62,6 +65,9 @@ import {
   type AgentSummaryRecord,
   type AgentSummaryStatus,
   type AgentSummarySubjectType,
+  type BorealReference,
+  type BorealReferenceRecordKind,
+  type BorealReferenceResolution,
   type ClaimId,
   type ClaimRecord,
   type CloseoutGateForceReasonCode,
@@ -87,6 +93,7 @@ import {
   type IsoTimestamp,
   type KnowledgeSourceId,
   type OperationId,
+  type ProjectRegistryEntry,
   type ProjectionId,
   type ReservationId,
   type ReservationStatus,
@@ -109,11 +116,14 @@ import {
 import { inspectDaemonStatus } from "@boreal/daemon";
 import type { SearchResult } from "@boreal/search";
 import {
+  FileBorealStore,
+  ObjectDirBorealStore,
   writeTextFileAtomic,
   type BorealReader,
+  type BorealStore,
   type BorealWriter
 } from "@boreal/storage";
-import { toWorkItemView, type WorkItemView } from "@boreal/ui-model";
+import { toWorkItemView, type BorealSourceRefResolutionView, type WorkItemView, type WorkSourceRefView } from "@boreal/ui-model";
 import {
   closeoutGateSubjectTypeForWorkKind,
   createRequiredCloseoutGates,
@@ -179,7 +189,8 @@ import { inspectGitWorktree } from "./git-worktree.js";
 import { buildExportDocument } from "./import-export.js";
 import type { RuntimeLockInspectionResult, RuntimeLockState } from "./locks.js";
 import { createResultSpoolingOutput, formatRecord, table, type AgentDirectiveOutput, type CliOutput } from "./output.js";
-import { readProjectSetupConfig } from "./project-setup.js";
+import { readProjectSetupConfig, readProjectStorage, type ProjectStorageKind } from "./project-setup.js";
+import { listProjectRegistry } from "./registry.js";
 import { writeProjectRollup, type ProjectRollupWriteOptions } from "./rollup.js";
 import { runSearch, writeSearchIndex } from "./search-cli.js";
 import { dirtyPathNotesHaveReasonCode, requireCommitOrDirtyPathReason } from "./summary-policy.js";
@@ -228,6 +239,8 @@ interface WorkListRow {
   readonly priority: string;
   readonly title: string;
   readonly labels: readonly string[];
+  readonly hasBorealReferences?: boolean;
+  readonly borealReferenceCount?: number;
   readonly containerId?: WorkId;
   readonly parentIds?: readonly WorkId[];
   readonly lineage?: readonly WorkLineageEntry[];
@@ -235,6 +248,37 @@ interface WorkListRow {
   readonly showCommand?: string;
   readonly agentStartCommand?: string;
   readonly workClaimCommand?: string;
+}
+
+interface BorealReferenceProjectView {
+  readonly id: string;
+  readonly name: string;
+  readonly lifecycle: string;
+  readonly projectRoot: string;
+}
+
+interface BorealReferenceTargetView {
+  readonly id?: string;
+  readonly kind?: string;
+  readonly title?: string;
+  readonly status?: string;
+}
+
+interface BorealReferenceResolutionCliView extends BorealSourceRefResolutionView {
+  readonly reference?: BorealReference;
+  readonly project?: BorealReferenceProjectView;
+  readonly target?: BorealReferenceTargetView;
+  readonly record?: unknown;
+  readonly lastKnownRollup?: unknown;
+}
+
+interface BorealResolveResult {
+  readonly schemaVersion: "boreal.cli.resolve.v1";
+  readonly generatedAt: IsoTimestamp;
+  readonly uri: string;
+  readonly registryRoot: string;
+  readonly registryFile: string;
+  readonly resolution: BorealReferenceResolutionCliView;
 }
 
 function withCliResult<T extends object>(
@@ -819,6 +863,9 @@ export async function runCommand(args: ParsedArgs, output: CliOutput, cwd: strin
       case "workflows":
         result = await workflowsCommand(action, rest, context, args, commandOutput, json, workflowsCommandDependencies());
         break;
+      case "resolve":
+        result = await resolveCommand(action ? [action, ...rest] : rest, args, commandOutput, json);
+        break;
       case "start":
         result = await agentCommand("start", rest, context, args, commandOutput, json, agentCommandDependencies());
         break;
@@ -1043,6 +1090,7 @@ function workCommandDependencies(): WorkCommandDependencies {
     formatWorkParallelResult: (result) => formatWorkParallelResult(result as WorkParallelResult),
     workFreshnessSince,
     closeoutGateStatusForWork,
+    resolveBorealSourceRefs,
     requireWork: requireCliWork,
     parseReservationExpiresAt,
     requiredReservationExpiresAt,
@@ -9207,6 +9255,255 @@ function sourceRefsFromArgs(args: ParsedArgs): readonly SourceRef[] {
   return flagValues(args, "source").map((source) => ({ uri: normalizeMachineString(source, "source ref uri") }));
 }
 
+async function resolveCommand(rest: readonly string[], args: ParsedArgs, output: CliOutput, json: boolean): Promise<CommandResult> {
+  const uri = requiredPositional(rest, 0, "boreal reference uri");
+  const result = await resolveBorealReferenceForCli(uri, args);
+  output.write(json ? formatRecord(result, true) : formatBorealResolveResult(result));
+  return { exitCode: 0 };
+}
+
+async function resolveBorealReferenceForCli(uri: string, args: ParsedArgs): Promise<BorealResolveResult> {
+  const registry = await listProjectRegistry({ registryRoot: flagValue(args, "registry-root") });
+  const parsed = parseBorealReferenceUri(uri);
+  const project = parsed.ok ? registry.entries.find((entry) => entry.id === parsed.reference.projectId) : undefined;
+  const lastKnownRollup = project ? await readRegisteredProjectRollup(project) : undefined;
+  const resolution = await resolveBorealReferenceUri({
+    registry: registry.entries,
+    uri,
+    readRecord: (entry, reference) => readRegisteredProjectRecord(entry, reference),
+    ...(project && lastKnownRollup !== undefined ? { lastKnownRollups: { [project.id]: lastKnownRollup } } : {})
+  });
+  return {
+    schemaVersion: "boreal.cli.resolve.v1",
+    generatedAt: nowIso(),
+    uri,
+    registryRoot: registry.storage.rootDir,
+    registryFile: registry.storage.registryFile,
+    resolution: borealReferenceResolutionCliView(resolution)
+  };
+}
+
+async function readRegisteredProjectRollup(project: ProjectRegistryEntry): Promise<unknown | undefined> {
+  const rollupPath = join(project.borealDir, "rollup.json");
+  if (!existsSync(rollupPath)) {
+    return undefined;
+  }
+  try {
+    return JSON.parse(await readFile(rollupPath, "utf8")) as unknown;
+  } catch {
+    return undefined;
+  }
+}
+
+async function readRegisteredProjectRecord(project: ProjectRegistryEntry, reference: BorealReference): Promise<unknown | undefined> {
+  try {
+    if (!existsSync(project.projectRoot) || !existsSync(project.projectConfigPath)) {
+      return undefined;
+    }
+    const storage = await readProjectStorage(project.projectRoot) ?? "file-v2";
+    const store = openRegisteredProjectStoreForResolve(project.projectRoot, storage);
+    return await store.read((reader) => readBorealReferenceRecord(reader, reference.recordKind, reference.recordId));
+  } catch {
+    return undefined;
+  }
+}
+
+function openRegisteredProjectStoreForResolve(rootDir: string, storage: ProjectStorageKind): BorealStore {
+  return storage === "objects-v1" ? new ObjectDirBorealStore({ rootDir }) : new FileBorealStore({ rootDir });
+}
+
+async function readBorealReferenceRecord(
+  reader: BorealReader,
+  recordKind: BorealReferenceRecordKind,
+  recordId: string
+): Promise<unknown | undefined> {
+  switch (recordKind) {
+    case "acknowledgement":
+      return reader.getDirectiveAcknowledgement(recordId as DirectiveAcknowledgementId);
+    case "claim":
+      return reader.getClaim(recordId as ClaimId);
+    case "decision":
+      return reader.getDecision(recordId as DecisionId);
+    case "edge":
+      return reader.getGraphEdge(recordId as GraphEdgeId);
+    case "event":
+      return (await reader.listEvents()).find((event) => event.meta.id === recordId);
+    case "evidence":
+      return reader.getEvidence(recordId as EvidenceId);
+    case "gate":
+      return readRequiredGateRecord(reader, recordId);
+    case "heartbeat":
+      return reader.getReviewerHeartbeat(recordId as ReviewerHeartbeatId);
+    case "operation":
+      return reader.getOperation(recordId as OperationId);
+    case "projection":
+      return reader.getProjection(recordId as ProjectionId);
+    case "reservation":
+      return reader.getReservation(recordId as ReservationId);
+    case "source":
+      return reader.getKnowledgeSource(recordId as KnowledgeSourceId);
+    case "summary":
+      return reader.getAgentSummary(recordId as AgentSummaryId);
+    case "verification":
+      return reader.getVerification(recordId as VerificationId);
+    case "work":
+      return reader.getWorkItem(recordId as WorkId);
+    case "agent":
+    case "page":
+      return undefined;
+  }
+}
+
+async function readRequiredGateRecord(reader: BorealReader, recordId: string): Promise<RequiredCloseoutGate | undefined> {
+  for (const work of await reader.listWorkItems()) {
+    const gate = (work.requiredCloseoutGates ?? []).find((candidate) => candidate.id === recordId);
+    if (gate) {
+      return gate;
+    }
+  }
+  return undefined;
+}
+
+function borealReferenceResolutionCliView(resolution: BorealReferenceResolution): BorealReferenceResolutionCliView {
+  switch (resolution.status) {
+    case "resolved": {
+      const target = borealReferenceTargetView(resolution.record);
+      return {
+        status: "resolved",
+        uri: resolution.reference.uri,
+        projectId: resolution.reference.projectId,
+        projectName: resolution.project.display.name,
+        projectLifecycle: resolution.project.lifecycle,
+        recordId: resolution.reference.recordId,
+        recordKind: resolution.reference.recordKind,
+        title: target.title,
+        targetStatus: target.status,
+        reference: resolution.reference,
+        project: borealReferenceProjectView(resolution.project),
+        target,
+        record: resolution.record
+      };
+    }
+    case "unresolved-unlinked":
+      return {
+        status: "unresolved-unlinked",
+        uri: resolution.reference.uri,
+        projectId: resolution.reference.projectId,
+        projectName: resolution.project.display.name,
+        projectLifecycle: resolution.projectLifecycle,
+        recordId: resolution.reference.recordId,
+        recordKind: resolution.reference.recordKind,
+        reason: `project ${resolution.projectLifecycle}`,
+        reference: resolution.reference,
+        project: borealReferenceProjectView(resolution.project),
+        lastKnownRollup: resolution.lastKnownRollup
+      };
+    case "unresolved-missing-project":
+      return {
+        status: "unresolved-missing-project",
+        uri: resolution.reference.uri,
+        projectId: resolution.reference.projectId,
+        projectName: resolution.project?.display.name,
+        projectLifecycle: resolution.projectLifecycle ?? resolution.project?.lifecycle,
+        recordId: resolution.reference.recordId,
+        recordKind: resolution.reference.recordKind,
+        reason: resolution.projectLifecycle === "missing" ? "project missing" : "project not found in registry",
+        reference: resolution.reference,
+        ...(resolution.project ? { project: borealReferenceProjectView(resolution.project) } : {}),
+        lastKnownRollup: resolution.lastKnownRollup
+      };
+    case "unresolved-missing-record":
+      return {
+        status: "unresolved-missing-record",
+        uri: resolution.reference.uri,
+        projectId: resolution.reference.projectId,
+        projectName: resolution.project.display.name,
+        projectLifecycle: resolution.project.lifecycle,
+        recordId: resolution.reference.recordId,
+        recordKind: resolution.reference.recordKind,
+        reason: `${resolution.reference.recordKind} record not found`,
+        reference: resolution.reference,
+        project: borealReferenceProjectView(resolution.project),
+        lastKnownRollup: resolution.lastKnownRollup
+      };
+    case "invalid-uri":
+      return {
+        status: "invalid-uri",
+        uri: resolution.uri,
+        reason: resolution.reason
+      };
+  }
+}
+
+function borealReferenceProjectView(project: ProjectRegistryEntry): BorealReferenceProjectView {
+  return {
+    id: project.id,
+    name: project.display.name,
+    lifecycle: project.lifecycle,
+    projectRoot: project.projectRoot
+  };
+}
+
+function borealReferenceTargetView(record: unknown): BorealReferenceTargetView {
+  if (!isRecord(record)) {
+    return {};
+  }
+  const meta = isRecord(record.meta) ? record.meta : undefined;
+  return {
+    id: typeof meta?.id === "string" ? meta.id : undefined,
+    kind: typeof record.kind === "string" ? record.kind : undefined,
+    title: typeof record.title === "string" ? record.title : undefined,
+    status: typeof record.status === "string" ? record.status : undefined
+  };
+}
+
+function borealSourceRefResolutionView(resolution: BorealReferenceResolutionCliView): BorealSourceRefResolutionView {
+  return {
+    status: resolution.status,
+    uri: resolution.uri,
+    projectId: resolution.projectId,
+    projectName: resolution.projectName,
+    projectLifecycle: resolution.projectLifecycle,
+    recordId: resolution.recordId,
+    recordKind: resolution.recordKind,
+    title: resolution.title,
+    targetStatus: resolution.targetStatus,
+    reason: resolution.reason
+  };
+}
+
+async function resolveBorealSourceRefs(_context: CliContext, args: ParsedArgs, view: WorkItemView): Promise<WorkItemView> {
+  const sourceRefs = view.sourceRefs ?? [];
+  if (sourceRefs.length === 0) {
+    return view;
+  }
+  const resolvedRefs: WorkSourceRefView[] = [];
+  const resolutions: BorealSourceRefResolutionView[] = [];
+  for (const sourceRef of sourceRefs) {
+    if (!isBorealSourceRefCandidate(sourceRef.uri)) {
+      resolvedRefs.push(sourceRef);
+      continue;
+    }
+    const result = await resolveBorealReferenceForCli(sourceRef.uri, args);
+    const resolution = borealSourceRefResolutionView(result.resolution);
+    resolutions.push(resolution);
+    resolvedRefs.push({ ...sourceRef, borealReference: resolution });
+  }
+  return resolutions.length > 0 ? { ...view, sourceRefs: resolvedRefs, sourceRefResolutions: resolutions } : view;
+}
+
+function isBorealSourceRefCandidate(uri: string): boolean {
+  return uri.startsWith("boreal://");
+}
+
+function formatBorealResolveResult(result: BorealResolveResult): string {
+  const resolution = result.resolution;
+  const target = resolution.title || resolution.recordId || result.uri;
+  const suffix = resolution.status === "resolved" && resolution.targetStatus ? ` (${resolution.targetStatus})` : "";
+  const reason = resolution.reason ? `: ${resolution.reason}` : "";
+  return `[${resolution.status}] ${result.uri} -> ${target}${suffix}${reason}\n`;
+}
+
 function requiredCloseoutGateInputsFromArgs(args: ParsedArgs): readonly RequiredCloseoutGateInput[] {
   const gateValues = flagValues(args, "required-gate");
   const gateCommands = flagValues(args, "gate-command");
@@ -9269,7 +9566,8 @@ async function buildHandoffBundle(
   args: ParsedArgs,
   resultLimit: number
 ): Promise<HandoffBundle> {
-  const [work, contextPack] = await Promise.all([context.runtime.getWorkView(workId), context.runtime.getContextPack(workId)]);
+  const [rawWork, contextPack] = await Promise.all([context.runtime.getWorkView(workId), context.runtime.getContextPack(workId)]);
+  const work = await resolveBorealSourceRefs(context, args, rawWork);
   await writeSearchIndex(context);
   const queryFlag = flagValue(args, "query");
   const query = queryFlag ? normalizeSearchQuery(queryFlag) : handoffSearchQuery(work, contextPack);
@@ -9651,7 +9949,7 @@ function shortWorkId(id: string): string {
 }
 
 function workListRow(work: {
-  readonly meta: { readonly id: string };
+  readonly meta: { readonly id: string; readonly sourceRefs?: readonly SourceRef[] };
   readonly title: string;
   readonly kind: WorkKind;
   readonly status: WorkStatus;
@@ -9659,6 +9957,7 @@ function workListRow(work: {
   readonly labels: readonly string[];
 }, containerId?: WorkId, lineage: readonly WorkLineageEntry[] = []): WorkListRow {
   const parentIds = lineageParentIds(lineage);
+  const borealReferenceCount = borealSourceRefCount(work.meta.sourceRefs ?? []);
   return {
     id: work.meta.id,
     kind: work.kind,
@@ -9666,6 +9965,7 @@ function workListRow(work: {
     priority: work.priority,
     title: work.title,
     labels: [...work.labels],
+    ...(borealReferenceCount > 0 ? { hasBorealReferences: true, borealReferenceCount } : {}),
     ...(containerId ? { containerId } : {}),
     ...(parentIds.length > 0 ? { parentIds, lineage } : {})
   };
@@ -9850,6 +10150,7 @@ function cycleKey(cycle: readonly string[]): string {
 
 function workViewListRow(view: WorkItemView, containerId?: WorkId, lineage: readonly WorkLineageEntry[] = []): WorkListRow {
   const parentIds = lineageParentIds(lineage);
+  const borealReferenceCount = borealSourceRefCount(view.sourceRefs ?? []);
   return {
     id: view.id,
     kind: view.kind,
@@ -9857,9 +10158,14 @@ function workViewListRow(view: WorkItemView, containerId?: WorkId, lineage: read
     priority: view.priority,
     title: view.title,
     labels: [...view.labels],
+    ...(borealReferenceCount > 0 ? { hasBorealReferences: true, borealReferenceCount } : {}),
     ...(containerId ? { containerId } : {}),
     ...(parentIds.length > 0 ? { parentIds, lineage } : {})
   };
+}
+
+function borealSourceRefCount(sourceRefs: readonly { readonly uri: string }[]): number {
+  return sourceRefs.filter((sourceRef) => isBorealReferenceUri(sourceRef.uri)).length;
 }
 
 function textReservationListRow(row: ReservationListRow): Record<string, string> {

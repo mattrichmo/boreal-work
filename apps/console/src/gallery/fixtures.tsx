@@ -348,6 +348,8 @@ function globalQueuesView(work: WorkItemView): GlobalWorkQueuesView {
             projectName: "Gallery Project",
             projectRoot: "/repo/gallery",
             work,
+            hasBorealReferences: false,
+            borealReferenceCount: 0,
             claimCommand: `bwrk --workspace /repo/gallery work reserve ${work.id} --purpose 'Claim from Boreal Console' --json`
           }
         ]

@@ -1,4 +1,4 @@
-import type { ActorKind, WorkItem } from "@boreal/core";
+import { isBorealReferenceUri, type ActorKind, type WorkItem } from "@boreal/core";
 
 import type {
   DashboardAction,
@@ -49,6 +49,8 @@ export interface GlobalWorkQueueItem {
   readonly projectName: string;
   readonly projectRoot: string;
   readonly work: WorkItemView;
+  readonly hasBorealReferences: boolean;
+  readonly borealReferenceCount: number;
   readonly claimCommand?: string;
 }
 
@@ -388,16 +390,21 @@ export function buildGlobalWorkQueuesView(input: {
       .flatMap((project) =>
         sortWork(project.work)
           .filter((work) => work.status === definition.status)
-          .map((work): GlobalWorkQueueItem => ({
-            id: `${project.projectId}:${work.id}`,
-            projectId: project.projectId,
-            projectName: project.projectName,
-            projectRoot: project.projectRoot,
-            work,
-            claimCommand: definition.id === "ready"
-              ? buildClaimCommand(project.projectRoot, work.id, input.claimPurpose ?? "Claim from Boreal Console")
-              : undefined
-          }))
+          .map((work): GlobalWorkQueueItem => {
+            const borealReferenceCount = borealSourceRefCount(work.sourceRefs ?? []);
+            return {
+              id: `${project.projectId}:${work.id}`,
+              projectId: project.projectId,
+              projectName: project.projectName,
+              projectRoot: project.projectRoot,
+              work,
+              hasBorealReferences: borealReferenceCount > 0,
+              borealReferenceCount,
+              claimCommand: definition.id === "ready"
+                ? buildClaimCommand(project.projectRoot, work.id, input.claimPurpose ?? "Claim from Boreal Console")
+                : undefined
+            };
+          })
       )
       .sort(compareGlobalQueueItems)
       .slice(0, input.limit ?? Number.POSITIVE_INFINITY);
@@ -419,6 +426,10 @@ export function buildGlobalWorkQueuesView(input: {
       needsVerification: queueCount(queues, "needs_verification")
     }
   };
+}
+
+function borealSourceRefCount(sourceRefs: readonly { readonly uri: string }[]): number {
+  return sourceRefs.filter((sourceRef) => isBorealReferenceUri(sourceRef.uri)).length;
 }
 
 export function buildGlobalSearchView(input: {

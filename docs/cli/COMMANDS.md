@@ -385,6 +385,14 @@ bwrk workflows show <workflow-id|path|slug> [--json]
 
 Shows one workflow playbook by exact workflow ID, relative path under `workflows/`, or filename slug. Human output is the Markdown workflow text; JSON output includes metadata and text.
 
+## `resolve`
+
+```bash
+bwrk resolve <boreal-uri> [--registry-root <dir>] [--json]
+```
+
+Resolves a `boreal://<project-id>/<record-id>` URI through the machine-local project registry without mutating project state. JSON output uses schema `boreal.cli.resolve.v1` and returns one typed resolution: `resolved`, `unresolved-unlinked`, `unresolved-missing-project`, `unresolved-missing-record`, or `invalid-uri`.
+
 ## `install`
 
 ```bash
@@ -956,6 +964,9 @@ bwrk work show <work-id> [--since <ledger-seq>] [--json]
 ```
 
 Shows the work view for one item, including evidence, verification, dependency, active-blocker, and context-pack summary fields when present. In JSON output, `dependencyIds` is the full dependency list, `activeBlockerIds` is the unresolved blocker list, and the legacy `blockedBy` field mirrors `activeBlockerIds`.
+
+When `sourceRefs` contain `boreal://...` URIs, `work show --json` annotates those refs with `borealReference`. Resolved refs include the target title and status; unresolved refs include the typed unresolved status and reason. Resolution is lazy and fail-soft for only the refs displayed.
+
 When `--since` is supplied, JSON output returns a minimal unchanged payload if no newer ledger event touches that item.
 
 ## `work block`

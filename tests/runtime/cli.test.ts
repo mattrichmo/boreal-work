@@ -2292,6 +2292,114 @@ describe("bwrk cli", () => {
     expect(work.meta.sourceRefs).toEqual([{ uri: sourceRefUri }]);
   });
 
+  it("resolves boreal reference URIs and annotates displayed source refs", async () => {
+    const rootDir = await makeTempWorkspace();
+    const registryHome = await makeTempWorkspace();
+    const registryRoot = join(registryHome, "registry-home");
+    await runCli(rootDir, [
+      "init",
+      "--setup-memory",
+      "--memory-root",
+      "memory",
+      "--memory-layout",
+      "in-repo",
+      "--memory-git-mode",
+      "shared",
+      "--install-root",
+      ".agents/skills",
+      "--json"
+    ]);
+    await mkdir(join(rootDir, ".agents/skills"), { recursive: true });
+
+    const target = parseData<{ readonly meta: { readonly id: string } }>(
+      (await runCli(rootDir, ["work", "create", "Reference Target", "--ready", "--json"])).stdout
+    );
+    const added = parseData<{ readonly entry: { readonly id: string } }>(
+      (await runCli(rootDir, ["registry", "add", "--workspace", rootDir, "--registry-root", registryRoot, "--json"])).stdout
+    );
+    const resolvedUri = `boreal://${added.entry.id}/${target.meta.id}`;
+    const missingRecordUri = `boreal://${added.entry.id}/bw_work_deadbeefdead`;
+    const missingProjectUri = `boreal://project_missing/${target.meta.id}`;
+    const source = parseData<{ readonly meta: { readonly id: string } }>(
+      (
+        await runCli(rootDir, [
+          "work",
+          "create",
+          "Reference Source",
+          "--source",
+          resolvedUri,
+          "--source",
+          missingRecordUri,
+          "--source",
+          missingProjectUri,
+          "--ready",
+          "--json"
+        ])
+      ).stdout
+    );
+
+    const resolvedRun = await runCli(rootDir, ["resolve", resolvedUri, "--registry-root", registryRoot, "--json"]);
+    expect(resolvedRun).toMatchObject({ exitCode: 0, stderr: "" });
+    const resolved = parseData<{
+      readonly resolution: { readonly status: string; readonly title?: string; readonly targetStatus?: string };
+    }>(resolvedRun.stdout);
+    expect(resolved.resolution).toEqual(expect.objectContaining({ status: "resolved", title: "Reference Target", targetStatus: "ready" }));
+
+    const missingRecordRun = await runCli(rootDir, ["resolve", missingRecordUri, "--registry-root", registryRoot, "--json"]);
+    expect(missingRecordRun).toMatchObject({ exitCode: 0, stderr: "" });
+    const missingRecord = parseData<{ readonly resolution: { readonly status: string; readonly reason?: string } }>(missingRecordRun.stdout);
+    expect(missingRecord.resolution).toEqual(expect.objectContaining({ status: "unresolved-missing-record", reason: "work record not found" }));
+
+    const missingProjectRun = await runCli(rootDir, ["resolve", missingProjectUri, "--registry-root", registryRoot, "--json"]);
+    expect(missingProjectRun).toMatchObject({ exitCode: 0, stderr: "" });
+    const missingProject = parseData<{ readonly resolution: { readonly status: string; readonly reason?: string } }>(missingProjectRun.stdout);
+    expect(missingProject.resolution).toEqual(expect.objectContaining({ status: "unresolved-missing-project", reason: "project not found in registry" }));
+
+    const previousRegistryRoot = process.env.BOREAL_PROJECT_REGISTRY_ROOT;
+    process.env.BOREAL_PROJECT_REGISTRY_ROOT = registryRoot;
+    try {
+      const shown = parseData<{
+        readonly sourceRefs: Array<{
+          readonly uri: string;
+          readonly borealReference?: { readonly status: string; readonly title?: string; readonly targetStatus?: string; readonly reason?: string };
+        }>;
+        readonly sourceRefResolutions: Array<{ readonly uri: string; readonly status: string }>;
+      }>((await runCli(rootDir, ["work", "show", source.meta.id, "--json"])).stdout);
+      expect(shown.sourceRefs.find((ref) => ref.uri === resolvedUri)?.borealReference).toEqual(
+        expect.objectContaining({ status: "resolved", title: "Reference Target", targetStatus: "ready" })
+      );
+      expect(shown.sourceRefs.find((ref) => ref.uri === missingRecordUri)?.borealReference).toEqual(
+        expect.objectContaining({ status: "unresolved-missing-record", reason: "work record not found" })
+      );
+      expect(shown.sourceRefs.find((ref) => ref.uri === missingProjectUri)?.borealReference).toEqual(
+        expect.objectContaining({ status: "unresolved-missing-project", reason: "project not found in registry" })
+      );
+      expect(shown.sourceRefResolutions.map((resolution) => resolution.uri)).toEqual([resolvedUri, missingRecordUri, missingProjectUri]);
+
+      const globalWork = parseData<{ readonly meta: { readonly id: string } }>(
+        (await runCli(rootDir, ["global", "work", "create", "Global Reference Carrier", "--source", resolvedUri, "--ready", "--json"])).stdout
+      );
+      const globalRows = parseData<
+        Array<{ readonly id: string; readonly hasBorealReferences?: boolean; readonly borealReferenceCount?: number }>
+      >((await runCli(rootDir, ["global", "work", "list", "--json"])).stdout);
+      expect(globalRows.find((row) => row.id === globalWork.meta.id)).toEqual(
+        expect.objectContaining({ hasBorealReferences: true, borealReferenceCount: 1 })
+      );
+    } finally {
+      if (previousRegistryRoot === undefined) {
+        delete process.env.BOREAL_PROJECT_REGISTRY_ROOT;
+      } else {
+        process.env.BOREAL_PROJECT_REGISTRY_ROOT = previousRegistryRoot;
+      }
+    }
+
+    await runCli(rootDir, ["registry", "pause", added.entry.id, "--registry-root", registryRoot, "--json"]);
+    const unlinkedRun = await runCli(rootDir, ["resolve", resolvedUri, "--registry-root", registryRoot, "--json"]);
+    expect(unlinkedRun).toMatchObject({ exitCode: 0, stderr: "" });
+    const unlinked = parseData<{ readonly resolution: { readonly status: string; readonly reason?: string } }>(unlinkedRun.stdout);
+    expect(unlinked.resolution).toEqual(expect.objectContaining({ status: "unresolved-unlinked", reason: "project paused" }));
+  });
+
   it("computes sprint metrics and closes verified sprints", async () => {
     const rootDir = await makeTempWorkspace();
     await runCli(rootDir, ["init", "--json"]);

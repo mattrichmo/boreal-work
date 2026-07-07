@@ -41,6 +41,8 @@ interface WorkListRow {
   readonly priority: string;
   readonly title: string;
   readonly labels: readonly string[];
+  readonly hasBorealReferences?: boolean;
+  readonly borealReferenceCount?: number;
   readonly containerId?: WorkId;
   readonly parentIds?: readonly WorkId[];
   readonly lineage?: readonly unknown[];
@@ -134,6 +136,7 @@ export interface WorkCommandDependencies {
     since: number
   ) => Promise<{ readonly unchanged: boolean; readonly ledgerSeq: number; readonly latestTouchSeq: number }>;
   readonly closeoutGateStatusForWork: (context: CliContext, workId: WorkId) => Promise<{ readonly gaps: readonly unknown[] }>;
+  readonly resolveBorealSourceRefs: (context: CliContext, args: ParsedArgs, view: WorkItemView) => Promise<WorkItemView>;
   readonly requireWork: (reader: BorealReader, workId: WorkId) => Promise<WorkItem>;
   readonly parseReservationExpiresAt: (args: ParsedArgs) => IsoTimestamp | undefined;
   readonly requiredReservationExpiresAt: (args: ParsedArgs) => IsoTimestamp;
@@ -374,7 +377,7 @@ async function mainWorkCommand(
           return { exitCode: 0 };
         }
       }
-      const view = await context.runtime.getWorkView(workId);
+      const view = await dependencies.resolveBorealSourceRefs(context, args, await context.runtime.getWorkView(workId));
       const reservation = view.activeReservationId ? await context.store.read((reader) => reader.getReservation(view.activeReservationId as ReservationId)) : undefined;
       const viewWithGaps = json
         ? { ...view, ...(reservation ? { reservation } : {}), gaps: (await dependencies.closeoutGateStatusForWork(context, workId)).gaps }
