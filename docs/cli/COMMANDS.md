@@ -1606,6 +1606,19 @@ The status also scans raw source JSONL and wiki pages for malformed raw records,
 
 JSON `data` contains `ok`, `initialized`, `rootDir`, `schemaVersion`, `health`, `requiredDirectories`, `requiredFiles`, `missingDirectories`, `missingFiles`, and `invalidPaths`.
 
+## `capture`
+
+```bash
+bwrk capture <text> [--label <label>...] [--uri <ref>] [--kind raw|document|chat|code|artifact] [--json]
+bwrk capture --list [--limit <n>] [--json]
+```
+
+Appends an immutable raw source record to the global workspace vault from any current directory. The command always targets the global workspace, initializes the global vault scaffold if needed, and stores `--label` values as raw source tags. `--uri` preserves an optional artifact or reference URI.
+
+`bwrk capture --list` is a thin alias for listing the global raw inbox.
+
+JSON `data` matches `raw add` for captures and `raw list` for `--list`.
+
 ## `raw add`
 
 ```bash

@@ -124,6 +124,7 @@ import type { FinishReservedWorkSummaryFactory } from "@boreal/engine";
 
 import { flagValue, flagValues, hasFlag, requiredFlag, type ParsedArgs } from "./args.js";
 import { agentCommand, agentStartCommand, type AgentCommandDependencies } from "./commands/agent.js";
+import { captureCommand } from "./commands/capture.js";
 import { daemonCommand, type DaemonCommandDependencies } from "./commands/daemon.js";
 import { dashboardCommand, globalCommand, linkCommand, unlinkCommand } from "./commands/dashboard.js";
 import { evidenceCommand } from "./commands/evidence.js";
@@ -885,6 +886,12 @@ export async function runCommand(args: ParsedArgs, output: CliOutput, cwd: strin
           defaultListLimit: DEFAULT_LIST_LIMIT,
           parseLimit,
           requiredPositional
+        });
+        break;
+      case "capture":
+        result = await captureCommand(action, rest, context, args, commandOutput, json, {
+          defaultListLimit: DEFAULT_LIST_LIMIT,
+          parseLimit
         });
         break;
       case "sync":

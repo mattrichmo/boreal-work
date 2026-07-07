@@ -3277,6 +3277,71 @@ describe("bwrk cli", () => {
     );
   });
 
+  it("captures global raw inbox items from project and non-Boreal directories", async () => {
+    const projectRoot = await makeTempWorkspace();
+    const nonBorealRoot = await makeTempWorkspace();
+    const registryRoot = join(await makeTempWorkspace(), "registry");
+    const previousRegistryRoot = process.env.BOREAL_PROJECT_REGISTRY_ROOT;
+    process.env.BOREAL_PROJECT_REGISTRY_ROOT = registryRoot;
+
+    try {
+      await runCli(projectRoot, ["init", "--json"]);
+
+      const projectCapture = await runCli(projectRoot, [
+        "capture",
+        "Project capture note",
+        "--label",
+        "Project Intake",
+        "--uri",
+        "note://project",
+        "--json"
+      ]);
+      const outsideCapture = await runCli(nonBorealRoot, [
+        "capture",
+        "Outside capture note",
+        "--label",
+        "Outside",
+        "--json"
+      ]);
+      const projectPayload = parseData<{
+        readonly indexPath: string;
+        readonly record: { readonly title: string; readonly uri?: string; readonly tags: readonly string[] };
+      }>(projectCapture.stdout);
+      const outsidePayload = parseData<{
+        readonly indexPath: string;
+        readonly record: { readonly title: string; readonly tags: readonly string[] };
+      }>(outsideCapture.stdout);
+
+      expect(projectCapture.exitCode).toBe(0);
+      expect(outsideCapture.exitCode).toBe(0);
+      expect(projectPayload.indexPath).toBe(join(registryRoot, "memory/raw/index.jsonl"));
+      expect(outsidePayload.indexPath).toBe(join(registryRoot, "memory/raw/index.jsonl"));
+      expect(projectPayload.record).toEqual(
+        expect.objectContaining({ title: "Project capture note", uri: "note://project", tags: ["project intake"] })
+      );
+      expect(outsidePayload.record).toEqual(expect.objectContaining({ title: "Outside capture note", tags: ["outside"] }));
+      expect(await fileMissing(join(projectRoot, "memory/raw/index.jsonl"))).toBe(true);
+
+      const listed = await runCli(nonBorealRoot, ["capture", "--list", "--json"]);
+      const rows = parseData<Array<{ readonly title: string; readonly tags: readonly string[]; readonly uri?: string }>>(listed.stdout);
+
+      expect(listed.exitCode).toBe(0);
+      expect(rows).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ title: "Project capture note", tags: ["project intake"], uri: "note://project" }),
+          expect.objectContaining({ title: "Outside capture note", tags: ["outside"] })
+        ])
+      );
+      expect(await readFile(join(registryRoot, "memory/raw/index.jsonl"), "utf8")).toContain("Project capture note");
+    } finally {
+      if (previousRegistryRoot === undefined) {
+        delete process.env.BOREAL_PROJECT_REGISTRY_ROOT;
+      } else {
+        process.env.BOREAL_PROJECT_REGISTRY_ROOT = previousRegistryRoot;
+      }
+    }
+  });
+
   it("lists raw vault sources and shows bounded source previews", async () => {
     const rootDir = await makeTempWorkspace();
     await runCli(rootDir, ["init", "--json"]);

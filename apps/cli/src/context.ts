@@ -26,7 +26,7 @@ export function resolveGlobalWorkspaceRoot(): string {
 
 /** True when the command should operate on the global workspace. */
 export function isGlobalContext(args: ParsedArgs): boolean {
-  return hasFlag(args, "global") || args.command[0] === "global";
+  return hasFlag(args, "global") || args.command[0] === "global" || args.command[0] === "capture";
 }
 
 export interface CliContext {

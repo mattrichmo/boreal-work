@@ -2097,6 +2097,25 @@ export const COMMAND_DEFINITIONS: readonly CommandDefinition[] = [
     supportsJson: true,
   },
   {
+    path: ["capture"],
+    category: "raw",
+    summary: "Capture a note into the global raw inbox.",
+    usage: "bwrk capture <text> [--label <label>...] [--uri <ref>] [--kind raw|document|chat|code|artifact] [--list] [--limit <n>] [--json]",
+    description:
+      "Appends an immutable raw source record to the global workspace vault from any current directory. Use --list to list the global raw inbox.",
+    flags: [
+      flag("label", "value", "Label to attach to the captured source.", true),
+      flag("tag", "value", "Tag alias for --label.", true),
+      flag("uri", "value", "Source URI or local artifact reference."),
+      flag("kind", "value", "Raw source kind. Defaults to raw."),
+      flag("list", "boolean", "List the global raw inbox instead of capturing text."),
+      flag("limit", "value", "Maximum number of raw source rows to return with --list.")
+    ],
+    positionals: { label: "text", min: 0 },
+    requiresWorkspace: false,
+    supportsJson: true,
+  },
+  {
     path: ["raw", "add"],
     category: "raw",
     summary: "Append a raw source record to the memory vault.",
@@ -3915,6 +3934,18 @@ const COMMAND_BEHAVIOR: Readonly<Record<string, CommandBehaviorMetadata>> = {
     maxResultSizeChars: 125_000,
     humanOutputKind: "record",
     examples: ["bwrk vault status --json"],
+  }),
+  "capture": commandMetadata("capture", {
+    readOnly: false,
+    destructive: false,
+    writesState: false,
+    writesGeneratedArtifacts: true,
+    requiresFreshIndex: false,
+    concurrencySafe: true,
+    requiresLock: "vault",
+    maxResultSizeChars: 100_000,
+    humanOutputKind: "record",
+    examples: ["bwrk capture 'Remember the handoff gap' --label handoff --uri note://handoff --json"],
   }),
   "raw add": commandMetadata("raw add", {
     readOnly: false,
