@@ -26,6 +26,8 @@ import {
 } from "@boreal/core";
 import { inspectFileLock, writeTextFileAtomic, type FileLockInspection } from "@boreal/storage";
 
+import { emptyGlobalRollupCacheResult, refreshGlobalRollupCache, type GlobalRollupCacheResult } from "./global-rollup-cache.js";
+
 export const DAEMON_STATUS_SCHEMA_VERSION = "boreal.daemon.status.v1";
 export const DAEMON_WATCH_SCHEMA_VERSION = "boreal.daemon.watch.v1";
 
@@ -86,12 +88,15 @@ export interface DaemonWatchResult {
   readonly action: DaemonWatchAction;
   readonly reason?: string;
   readonly status: DaemonStatusResult;
+  readonly globalRollups: GlobalRollupCacheResult;
   readonly observedPaths: readonly string[];
   readonly recommendedActions: readonly string[];
 }
 
 export interface DaemonRuntimeOptions {
   readonly workspaceRoot: string;
+  readonly registryRoot?: string;
+  readonly liveCacheTtlMs?: number;
   readonly pidExists?: (pid: number) => boolean;
   readonly now?: () => string;
 }
@@ -224,14 +229,29 @@ export async function runDaemonWatchOnce(options: DaemonRuntimeOptions): Promise
     : lockConflict
       ? "lock_conflict"
       : undefined;
+  const generatedAt = options.now?.() ?? nowIso();
+  const globalRollups = action === "observed"
+    ? await refreshGlobalRollupCache({
+        registryRoot: options.registryRoot,
+        ttlMs: options.liveCacheTtlMs,
+        source: "daemon",
+        now: () => generatedAt
+      })
+    : emptyGlobalRollupCacheResult({
+        registryRoot: options.registryRoot,
+        ttlMs: options.liveCacheTtlMs,
+        source: "daemon",
+        now: () => generatedAt
+      });
 
   return {
     schemaVersion: DAEMON_WATCH_SCHEMA_VERSION,
-    generatedAt: options.now?.() ?? nowIso(),
+    generatedAt,
     workspaceRoot: status.workspaceRoot,
     action,
     reason,
     status,
+    globalRollups,
     observedPaths: action === "observed" ? status.watch.paths : [],
     recommendedActions: status.recommendedActions
   };

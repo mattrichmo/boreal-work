@@ -960,10 +960,19 @@ describe("bwrk cli", () => {
       readonly truncated: { readonly projects: boolean };
       readonly registry: { readonly entries: readonly unknown[] };
       readonly globalQueues: { readonly queues: Array<{ readonly items: readonly unknown[] }> };
+      readonly rollups: { readonly source: string; readonly ttlMs: number; readonly projectCount: number };
     }>((await runCli(rootDir, ["dashboard", "global", "--registry-root", registryRoot, "--limit", "1", "--json"])).stdout);
     expect(capped.truncated.projects).toBe(true);
     expect(capped.registry.entries).toHaveLength(1);
     expect(capped.globalQueues.queues.every((queue) => queue.items.length <= 200)).toBe(true);
+    expect(capped.rollups).toEqual(expect.objectContaining({ source: "lazy", ttlMs: 60_000, projectCount: 2 }));
+
+    const ttlPayload = parseData<{
+      readonly limits: { readonly rollupCacheTtlMs: number };
+      readonly rollups: { readonly ttlMs: number };
+    }>((await runCli(rootDir, ["dashboard", "global", "--registry-root", registryRoot, "--live-cache-ttl-ms", "1", "--json"])).stdout);
+    expect(ttlPayload.limits.rollupCacheTtlMs).toBe(1);
+    expect(ttlPayload.rollups.ttlMs).toBe(1);
 
     const configPath = join(rootDir, ".boreal/project.json");
     const config = parseJson<Record<string, unknown>>(await readFile(configPath, "utf8"));

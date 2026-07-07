@@ -1,6 +1,6 @@
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
 
@@ -8,6 +8,7 @@ import {
   DAEMON_STATUS_SCHEMA_VERSION,
   compileDaemonDirectiveObligations,
   daemonStatusPath,
+  refreshGlobalRollupCache,
   inspectDaemonStatus,
   runDaemonWatchOnce,
   writeDaemonRunningStatus,
@@ -15,10 +16,17 @@ import {
 } from "@boreal/daemon";
 import {
   AGENT_DIRECTIVE_SNAPSHOT_CONTEXT_KEYS,
+  PROJECT_REGISTRY_SCHEMA_VERSION,
+  PROJECT_ROLLUP_SCHEMA_VERSION,
   createAgentDirectiveSnapshot,
+  deriveProjectRegistryIdentity,
   hashContent,
+  projectRegistryEntryIdFromIdentity,
+  resolveProjectRegistryPaths,
   type ContentHash,
   type IsoTimestamp,
+  type ProjectRegistryEntry,
+  type ProjectRollupDocument,
   type WorkId
 } from "@boreal/core";
 
@@ -136,6 +144,86 @@ describe("boreal daemon runtime", () => {
     ]);
   });
 
+  it("refreshes linked project rollups into the global cache and degrades broken projects", async () => {
+    const registryRoot = await makeTempDir();
+    const linkedRoot = await makeProjectWorkspace();
+    const pausedRoot = await makeProjectWorkspace();
+    const brokenRoot = await makeProjectWorkspace();
+    const linked = registryEntry(linkedRoot, "linked-project");
+    const paused = registryEntry(pausedRoot, "paused-project", "paused");
+    const broken = registryEntry(brokenRoot, "broken-project");
+    await writeProjectRollup(linked, 3);
+    await writeProjectRollup(paused, 9);
+    await rm(brokenRoot, { recursive: true, force: true });
+    await writeRegistry(registryRoot, [linked, paused, broken]);
+
+    const watch = await runDaemonWatchOnce({
+      workspaceRoot: linkedRoot,
+      registryRoot,
+      now: () => "2026-06-27T00:00:00.000Z"
+    });
+
+    expect(watch.action).toBe("observed");
+    expect(watch.globalRollups).toEqual(
+      expect.objectContaining({
+        schemaVersion: "boreal.global-rollup-cache.v1",
+        projectCount: 2,
+        freshCount: 1,
+        degradedCount: 1
+      })
+    );
+    expect(watch.globalRollups.projects.map((project) => project.projectId)).not.toContain(paused.id);
+    const linkedRow = watch.globalRollups.projects.find((project) => project.projectId === linked.id);
+    expect(linkedRow).toEqual(
+      expect.objectContaining({
+        source: "daemon",
+        status: "fresh",
+        stale: false,
+        sourceRollupPath: join(linkedRoot, ".boreal", "rollup.json")
+      })
+    );
+    expect(linkedRow?.rollup?.counts.work.total).toBe(3);
+    expect(parseJson<ProjectRollupDocument>(await readFile(linkedRow?.cachePath ?? "", "utf8")).projectId).toBe(linked.id);
+    const brokenRow = watch.globalRollups.projects.find((project) => project.projectId === broken.id);
+    expect(brokenRow).toEqual(expect.objectContaining({ source: "daemon", status: "degraded" }));
+    expect(brokenRow?.error).toContain("Project rollup is missing");
+  });
+
+  it("serves lazy fresh-enough cache entries and marks stale cache beyond TTL when refresh fails", async () => {
+    const registryRoot = await makeTempDir();
+    const root = await makeProjectWorkspace();
+    const entry = registryEntry(root, "lazy-project");
+    await writeProjectRollup(entry, 2);
+    await writeRegistry(registryRoot, [entry]);
+
+    const warmed = await refreshGlobalRollupCache({
+      registryRoot,
+      source: "daemon",
+      now: () => "2026-06-27T00:00:00.000Z"
+    });
+    const cachePath = warmed.projects[0]?.cachePath ?? "";
+    await rm(join(root, ".boreal", "rollup.json"), { force: true });
+
+    const freshEnough = await refreshGlobalRollupCache({
+      registryRoot,
+      source: "lazy",
+      ttlMs: Number.MAX_SAFE_INTEGER,
+      now: () => "2026-06-27T00:00:01.000Z"
+    });
+    expect(freshEnough.projects[0]).toEqual(expect.objectContaining({ source: "cache", status: "fresh", stale: false }));
+
+    const old = new Date("2026-06-26T00:00:00.000Z");
+    await utimes(cachePath, old, old);
+    const stale = await refreshGlobalRollupCache({
+      registryRoot,
+      source: "lazy",
+      ttlMs: 1,
+      now: () => "2026-06-27T00:00:00.000Z"
+    });
+    expect(stale.projects[0]).toEqual(expect.objectContaining({ source: "cache", status: "stale", stale: true }));
+    expect(stale.projects[0]?.error).toContain("Project rollup is missing");
+  });
+
   it("lets daemon callers request bounded directive obligations for runtime contexts", async () => {
     const root = await makeProjectWorkspace();
     const result = await compileDaemonDirectiveObligations({
@@ -212,6 +300,130 @@ async function makeProjectWorkspace(): Promise<string> {
     "utf8"
   );
   return root;
+}
+
+async function writeRegistry(registryRoot: string, entries: readonly ProjectRegistryEntry[]): Promise<void> {
+  const storage = resolveProjectRegistryPaths({ rootDir: registryRoot });
+  await mkdir(dirname(storage.registryFile), { recursive: true });
+  await writeFile(
+    storage.registryFile,
+    `${JSON.stringify(
+      {
+        schemaVersion: PROJECT_REGISTRY_SCHEMA_VERSION,
+        storage,
+        entries,
+        updatedAt: "2026-06-27T00:00:00.000Z"
+      },
+      null,
+      2
+    )}\n`,
+    "utf8"
+  );
+}
+
+function registryEntry(
+  root: string,
+  name: string,
+  lifecycle: ProjectRegistryEntry["lifecycle"] = "linked"
+): ProjectRegistryEntry {
+  const identity = deriveProjectRegistryIdentity({ projectRoot: root });
+  return {
+    id: projectRegistryEntryIdFromIdentity(identity),
+    identity,
+    lifecycle,
+    display: {
+      name,
+      labels: []
+    },
+    projectRoot: root,
+    borealDir: join(root, ".boreal"),
+    runtimeDir: join(root, ".boreal", "runtime"),
+    runtimeStateFile: join(root, ".boreal", "runtime", "state.json"),
+    projectConfigPath: join(root, ".boreal", "project.json"),
+    memoryRoot: join(root, "memory"),
+    memoryBorealDir: join(root, "memory", ".boreal"),
+    memoryLayout: "in-repo",
+    memoryGitMode: "shared",
+    installRoot: join(root, ".agents", "skills"),
+    skillTargets: ["codex"],
+    folderScoped: false,
+    source: "project-setup",
+    addedAt: "2026-06-27T00:00:00.000Z",
+    updatedAt: "2026-06-27T00:00:00.000Z",
+    lastSeenAt: "2026-06-27T00:00:00.000Z"
+  };
+}
+
+async function writeProjectRollup(entry: ProjectRegistryEntry, totalWork: number): Promise<void> {
+  await mkdir(entry.borealDir, { recursive: true });
+  await writeFile(
+    join(entry.borealDir, "rollup.json"),
+    `${JSON.stringify(projectRollup(entry, totalWork), null, 2)}\n`,
+    "utf8"
+  );
+}
+
+function projectRollup(entry: ProjectRegistryEntry, totalWork: number): ProjectRollupDocument {
+  return {
+    schemaVersion: PROJECT_ROLLUP_SCHEMA_VERSION,
+    projectId: entry.id,
+    workspaceRoot: entry.projectRoot,
+    generatedAt: "2026-06-27T00:00:00.000Z" as IsoTimestamp,
+    stateContentHash: hashContent({ projectId: entry.id, totalWork }) as ContentHash,
+    counts: {
+      work: {
+        total: totalWork,
+        byStatus: {
+          draft: 0,
+          ready: totalWork,
+          reserved: 0,
+          in_progress: 0,
+          blocked: 0,
+          needs_verification: 0,
+          verified: 0,
+          closed: 0,
+          cancelled: 0
+        },
+        byKind: {
+          issue: 0,
+          task: totalWork,
+          sprint: 0,
+          milestone: 0
+        }
+      },
+      reservations: {
+        total: 0,
+        active: 0,
+        expired: 0,
+        released: 0
+      }
+    },
+    limbo: {
+      needsVerification: [],
+      verified: []
+    },
+    reservations: {
+      activeIds: [],
+      expiredIds: []
+    },
+    enforcement: {
+      blockingGaps: {
+        openCount: 0,
+        blockedWorkCount: 0,
+        samples: []
+      }
+    },
+    health: {
+      doctorOk: null,
+      syncOk: null
+    },
+    lastEvent: null,
+    lastOperation: null,
+    next: {
+      limit: 10,
+      work: []
+    }
+  };
 }
 
 async function makeTempDir(): Promise<string> {
@@ -316,4 +528,8 @@ function daemonWorkSnapshot(root: string) {
       activeReservationIds: []
     }
   });
+}
+
+function parseJson<T>(text: string): T {
+  return JSON.parse(text) as T;
 }

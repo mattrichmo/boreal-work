@@ -521,12 +521,12 @@ Options:
 ## `dashboard global`
 
 ```bash
-bwrk dashboard global [--limit <n>] [--registry-root <dir>] [--json]
+bwrk dashboard global [--limit <n>] [--registry-root <dir>] [--live-cache-ttl-ms <ms>] [--json]
 ```
 
 Emits the bounded global dashboard payload for registered projects, or the current workspace when the registry is empty. The command reads runtime state and registry metadata only; it does not render the browser dashboard or mutate project state.
 
-The JSON `data` payload uses schema `boreal.cli.dashboard.global.v1` and includes registry, global queue, search, activity, health, daemon status, and settings view-model sections. Results are capped at 100 projects, 250 work rows per project, 200 rows per queue, 10 search rows per project, and 20 activity rows per project.
+The JSON `data` payload uses schema `boreal.cli.dashboard.global.v1` and includes registry, global rollup cache metadata, global queue, search, activity, health, daemon status, and settings view-model sections. Results are capped at 100 projects, 250 work rows per project, 200 rows per queue, 10 search rows per project, and 20 activity rows per project. `--live-cache-ttl-ms` controls when the lazy global rollup cache refreshes from linked project `.boreal/rollup.json` files; the default is `60000`.
 
 Examples:
 

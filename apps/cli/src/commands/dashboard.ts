@@ -12,7 +12,7 @@ import {
   type RuntimeOperation,
   type WorkPriority
 } from "@boreal/core";
-import { inspectDaemonStatus, type DaemonStatusResult } from "@boreal/daemon";
+import { inspectDaemonStatus, refreshGlobalRollupCache, type DaemonStatusResult } from "@boreal/daemon";
 import {
   buildGlobalActivityView,
   buildGlobalHealthView,
@@ -402,10 +402,17 @@ function parsePort(value: string | undefined): number | undefined {
 async function buildGlobalDashboardResult(context: CliContext, args: ParsedArgs) {
   const generatedAt = nowIso();
   const projectLimit = parseLimit(flagValue(args, "limit"), { max: MAX_DASHBOARD_PROJECT_LIMIT }) ?? DEFAULT_DASHBOARD_PROJECT_LIMIT;
+  const liveCacheTtlMs = parseNonNegativeInteger(flagValue(args, "live-cache-ttl-ms"), "--live-cache-ttl-ms") ?? 60_000;
   const registryOptions = { registryRoot: flagValue(args, "registry-root") };
-  const [registryList, registryDoctor] = await Promise.all([
+  const [registryList, registryDoctor, rollups] = await Promise.all([
     listProjectRegistry(registryOptions),
-    doctorProjectRegistry(registryOptions)
+    doctorProjectRegistry(registryOptions),
+    refreshGlobalRollupCache({
+      registryRoot: registryOptions.registryRoot,
+      ttlMs: liveCacheTtlMs,
+      source: "lazy",
+      now: () => generatedAt
+    })
   ]);
   const activeRegistryEntries = registryList.entries.filter((entry) => entry.lifecycle !== "archived" && entry.lifecycle !== "paused");
   const registryEntries = activeRegistryEntries.length > 0
@@ -436,7 +443,8 @@ async function buildGlobalDashboardResult(context: CliContext, args: ParsedArgs)
       workPerProject: DEFAULT_DASHBOARD_WORK_LIMIT,
       queueRowsPerQueue: DEFAULT_DASHBOARD_QUEUE_LIMIT,
       searchPerProject: DEFAULT_DASHBOARD_SEARCH_LIMIT,
-      activityPerProject: DEFAULT_DASHBOARD_ACTIVITY_LIMIT
+      activityPerProject: DEFAULT_DASHBOARD_ACTIVITY_LIMIT,
+      rollupCacheTtlMs: liveCacheTtlMs
     },
     truncated: {
       projects: registryEntries.length > limitedRegistryEntries.length
@@ -507,6 +515,7 @@ async function buildGlobalDashboardResult(context: CliContext, args: ParsedArgs)
         recommendedActions: project.daemon.recommendedActions
       }))
     },
+    rollups,
     globalSettings: buildGlobalSettingsView({
       generatedAt,
       projects: overviews.map((project) => project.settings)

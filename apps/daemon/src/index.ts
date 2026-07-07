@@ -7,6 +7,7 @@ import {
 } from "./runtime.js";
 
 export * from "./runtime.js";
+export * from "./global-rollup-cache.js";
 
 declare const BOREAL_BUNDLED_CLI: boolean | undefined;
 

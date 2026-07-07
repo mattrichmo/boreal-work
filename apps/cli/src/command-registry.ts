@@ -747,12 +747,13 @@ export const COMMAND_DEFINITIONS: readonly CommandDefinition[] = [
     path: ["dashboard", "global"],
     category: "dashboard",
     summary: "Emit the bounded global dashboard data payload.",
-    usage: "bwrk dashboard global [--limit <n>] [--registry-root <dir>] [--json]",
+    usage: "bwrk dashboard global [--limit <n>] [--registry-root <dir>] [--live-cache-ttl-ms <ms>] [--json]",
     description:
-      "Returns bounded registry, global queue, search, activity, health, and settings view-model data for registered projects, or the current workspace when the registry is empty.",
+      "Returns bounded registry, rollup cache metadata, global queue, search, activity, health, and settings view-model data for registered projects, or the current workspace when the registry is empty.",
     flags: [
       flag("limit", "value", "Maximum registered projects to include. Defaults to 100 and is capped at 100."),
-      flag("registry-root", "value", "Machine-local registry root override. Defaults to the platform Boreal app-state directory.")
+      flag("registry-root", "value", "Machine-local registry root override. Defaults to the platform Boreal app-state directory."),
+      flag("live-cache-ttl-ms", "value", "Global rollup cache TTL for lazy dashboard reads. Defaults to 60000.")
     ],
     positionals: { label: "arguments", min: 0, max: 0 },
     requiresWorkspace: true,
