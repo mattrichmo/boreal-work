@@ -1,0 +1,4778 @@
+{
+  "schemaVersion": "boreal.project-rollup.v2",
+  "projectId": "project_5b36e807eda66e00",
+  "workspaceRoot": "/Users/cybertron/Code/boreal-work",
+  "generatedAt": "2026-07-10T22:17:09.819Z",
+  "stateContentHash": "sha256:a8e7f78a4b03cc6faa63af1b998f994fd3968451af15ce397e54157e3ad7455c",
+  "counts": {
+    "work": {
+      "total": 529,
+      "byStatus": {
+        "draft": 0,
+        "ready": 62,
+        "reserved": 0,
+        "in_progress": 0,
+        "blocked": 53,
+        "needs_verification": 1,
+        "verified": 0,
+        "closed": 413,
+        "cancelled": 0
+      },
+      "byKind": {
+        "issue": 92,
+        "task": 323,
+        "sprint": 57,
+        "milestone": 57
+      }
+    },
+    "reservations": {
+      "total": 343,
+      "active": 0,
+      "expired": 1,
+      "released": 342
+    }
+  },
+  "limbo": {
+    "needsVerification": [
+      {
+        "workId": "bw_work_f950290c75d88a24",
+        "title": "Competitive Parity and Trustworthy Public Beta",
+        "status": "needs_verification",
+        "updatedAt": "2026-07-10T22:17:09.299Z",
+        "ageMs": 520,
+        "ageDays": 0
+      }
+    ],
+    "verified": []
+  },
+  "reservations": {
+    "activeIds": [],
+    "expiredIds": [
+      "bw_reservation_173669bfccb238fb"
+    ]
+  },
+  "enforcement": {
+    "blockingGaps": {
+      "openCount": 187,
+      "blockedWorkCount": 54,
+      "samples": [
+        {
+          "workId": "bw_work_3695a3716234e67a",
+          "title": "Bug Fixes and Hardening",
+          "blockerIds": [
+            "bw_work_0637fabeac4d9c4f",
+            "bw_work_0f006f25ca7a6883",
+            "bw_work_107f807e7cb52c3d",
+            "bw_work_132f329de1305c27",
+            "bw_work_1340533172df0513",
+            "bw_work_15424a50ddf0f7bd",
+            "bw_work_1616f76565b363c0",
+            "bw_work_163b82dfe9df9dba",
+            "bw_work_17c929054464f19f",
+            "bw_work_193fbc48817155d5",
+            "bw_work_2038a65757fddf80",
+            "bw_work_20e94e18ec2efac0",
+            "bw_work_2256157af1dd03e3",
+            "bw_work_23c004af89823110",
+            "bw_work_261582816f8cf91a",
+            "bw_work_3473642f882af84f",
+            "bw_work_399d5deedc09c490",
+            "bw_work_3b6e1b51777b266d",
+            "bw_work_426f99e4b4e5de3e",
+            "bw_work_449f4b7e2e10eb79",
+            "bw_work_48fe1d96891bfa61",
+            "bw_work_4956ed35cb8744d5",
+            "bw_work_49b34597473ca36b",
+            "bw_work_4ea3f878e3ba5f9d",
+            "bw_work_52f31f8b1d954328",
+            "bw_work_5ab6fada501c9970",
+            "bw_work_5cbd317cae480b08",
+            "bw_work_608a261817b6c8b5",
+            "bw_work_62a8f896229c0ec0",
+            "bw_work_6b666ed5cee15fe2",
+            "bw_work_6d1f6dbe85035670",
+            "bw_work_729ea3c25fca6b4a",
+            "bw_work_83310623b2f62418",
+            "bw_work_84e266c37e3d8da1",
+            "bw_work_88212d97f4170718",
+            "bw_work_884c1aa9d9e17515",
+            "bw_work_920aacf620f34130",
+            "bw_work_98910d9b7bb5201e",
+            "bw_work_9ebb1a5c89c6223e",
+            "bw_work_b1c9d6ae0a1dfc60",
+            "bw_work_b1ecf1da65669b06",
+            "bw_work_b3b0fa49a849e8ff",
+            "bw_work_b3d6b61ed29810fe",
+            "bw_work_b91cf4678055202d",
+            "bw_work_bdff86f90fc97c59",
+            "bw_work_c1e99dbc7badb383",
+            "bw_work_c2599dc1b4eca4b2",
+            "bw_work_c78d7b985efa5d82",
+            "bw_work_c7ea1e2624deacc7",
+            "bw_work_d2dd668dd776bbee",
+            "bw_work_d6be21814e00541a",
+            "bw_work_d91e1b790e889b77",
+            "bw_work_d9206f856b2f7b2b",
+            "bw_work_d94310945c2a4cbb",
+            "bw_work_db34287362992ec2",
+            "bw_work_ed5249ddde1c9d92",
+            "bw_work_edd19b745b8eb29f",
+            "bw_work_f1e985dc765a799c",
+            "bw_work_fbb670db73c9c7b0"
+          ]
+        },
+        {
+          "workId": "bw_work_e06dfffff9f6ef9b",
+          "title": "S01 - Public Product Contract and Release Boundary",
+          "blockerIds": [
+            "bw_work_0acecb86dff442f4",
+            "bw_work_7971e6f401b6bd63",
+            "bw_work_ca9ba6b4f3f20e1e",
+            "bw_work_e9382d8a7e085ea6",
+            "bw_work_effa1e62fd798d75"
+          ]
+        },
+        {
+          "workId": "bw_work_e9382d8a7e085ea6",
+          "title": "S01T04 - Define SemVer, schema compatibility, migration, and rollback contracts",
+          "blockerIds": [
+            "bw_work_ca9ba6b4f3f20e1e"
+          ]
+        },
+        {
+          "workId": "bw_work_effa1e62fd798d75",
+          "title": "S01T05 - Establish the cross-platform public release CI baseline",
+          "blockerIds": [
+            "bw_work_0acecb86dff442f4",
+            "bw_work_e9382d8a7e085ea6"
+          ]
+        },
+        {
+          "workId": "bw_work_30fd269614f63b76",
+          "title": "S02T02 - Implement safe execution policy for declared verification gates",
+          "blockerIds": [
+            "bw_work_00c3eacd2a50526a"
+          ]
+        },
+        {
+          "workId": "bw_work_46629a6b80abb282",
+          "title": "S02T03 - Capture witnessed command, Git, environment, and artifact provenance",
+          "blockerIds": [
+            "bw_work_30fd269614f63b76"
+          ]
+        },
+        {
+          "workId": "bw_work_142a37a3c8028ff3",
+          "title": "S02T04 - Enforce current witnessed evidence at verification and closeout",
+          "blockerIds": [
+            "bw_work_46629a6b80abb282"
+          ]
+        },
+        {
+          "workId": "bw_work_1743f7a8c376717e",
+          "title": "S02T05 - Add CI attestations, trust reporting, trace views, and end-to-end tests",
+          "blockerIds": [
+            "bw_work_142a37a3c8028ff3"
+          ]
+        },
+        {
+          "workId": "bw_work_0b52b31b4cd80c8f",
+          "title": "S03T02 - Implement remote bootstrap, push, pull, and offline rejoin",
+          "blockerIds": [
+            "bw_work_8d730c95bb3f791d"
+          ]
+        },
+        {
+          "workId": "bw_work_1b3795d44dba60ef",
+          "title": "S03T03 - Implement per-record conflict, deletion, and event-log reconciliation",
+          "blockerIds": [
+            "bw_work_8d730c95bb3f791d"
+          ]
+        },
+        {
+          "workId": "bw_work_7c504e6bd7de793b",
+          "title": "S03T04 - Add interrupted-sync recovery, backups, doctor repairs, and observability",
+          "blockerIds": [
+            "bw_work_0b52b31b4cd80c8f",
+            "bw_work_1b3795d44dba60ef"
+          ]
+        },
+        {
+          "workId": "bw_work_caee0dec620daf62",
+          "title": "S03T05 - Prove two-clone, multi-writer, worktree, and scale behavior",
+          "blockerIds": [
+            "bw_work_7c504e6bd7de793b"
+          ]
+        },
+        {
+          "workId": "bw_work_6a00769cb6c46b80",
+          "title": "S04T02 - Implement review request, claim, approve, and request-changes workflows",
+          "blockerIds": [
+            "bw_work_de5c25efdef3222b"
+          ]
+        },
+        {
+          "workId": "bw_work_14fe0d5b8c160743",
+          "title": "S04T03 - Enforce descendant review and acceptance coverage on containers",
+          "blockerIds": [
+            "bw_work_6a00769cb6c46b80"
+          ]
+        },
+        {
+          "workId": "bw_work_7a38f0a77aa2d69d",
+          "title": "S04T04 - Implement scoped merge prepare, apply, resume, rollback, and cleanup",
+          "blockerIds": [
+            "bw_work_6a00769cb6c46b80"
+          ]
+        },
+        {
+          "workId": "bw_work_fbb7ff20bb7e56cf",
+          "title": "S04T05 - Ship review queues, merge status, and lifecycle end-to-end coverage",
+          "blockerIds": [
+            "bw_work_14fe0d5b8c160743",
+            "bw_work_7a38f0a77aa2d69d"
+          ]
+        },
+        {
+          "workId": "bw_work_cfacff11dfe65e4b",
+          "title": "S05T02 - Implement OpenSpec import, link, status, and validation",
+          "blockerIds": [
+            "bw_work_f855f902b6d039f4"
+          ]
+        },
+        {
+          "workId": "bw_work_3a13e5d05d36e46e",
+          "title": "S05T03 - Connect spec deltas, archive, supersession, and impact tracing",
+          "blockerIds": [
+            "bw_work_cfacff11dfe65e4b"
+          ]
+        },
+        {
+          "workId": "bw_work_709c853e6f82b94a",
+          "title": "S05T04 - Add Spec Kit and generic AGENTS-compatible adapters",
+          "blockerIds": [
+            "bw_work_f855f902b6d039f4"
+          ]
+        },
+        {
+          "workId": "bw_work_68e889e9827d2b39",
+          "title": "S05T05 - Ship spec/change search, console views, templates, and end-to-end fixtures",
+          "blockerIds": [
+            "bw_work_3a13e5d05d36e46e",
+            "bw_work_709c853e6f82b94a"
+          ]
+        },
+        {
+          "workId": "bw_work_78722c3e15d143ba",
+          "title": "S06T02 - Migrate Codex and Claude integrations onto the manifest contract",
+          "blockerIds": [
+            "bw_work_26c79b1dc4aa42d2"
+          ]
+        },
+        {
+          "workId": "bw_work_c0d1bb8f2a1f7627",
+          "title": "S06T03 - Add Gemini, Cursor, OpenCode, Copilot, Windsurf, Roo/Cline, and Kiro adapters",
+          "blockerIds": [
+            "bw_work_26c79b1dc4aa42d2"
+          ]
+        },
+        {
+          "workId": "bw_work_936da4b96e2889ae",
+          "title": "S06T04 - Add VS Code MCP and generic AGENTS.md/MCP adapters with context budgets",
+          "blockerIds": [
+            "bw_work_26c79b1dc4aa42d2"
+          ]
+        },
+        {
+          "workId": "bw_work_2cb23e3c5e1db048",
+          "title": "S06T05 - Complete adapter lifecycle, compatibility matrix, and clean-machine fixtures",
+          "blockerIds": [
+            "bw_work_78722c3e15d143ba",
+            "bw_work_936da4b96e2889ae",
+            "bw_work_c0d1bb8f2a1f7627"
+          ]
+        },
+        {
+          "workId": "bw_work_9182a6cd0594a668",
+          "title": "S07T02 - Expose workflow, template, policy, gate, and validator extension points",
+          "blockerIds": [
+            "bw_work_9a88c3aa9bc74809"
+          ]
+        }
+      ]
+    }
+  },
+  "health": {
+    "doctorOk": null,
+    "syncOk": null
+  },
+  "lastEvent": {
+    "id": "bw_event_7bfe8d7a961d0fa76e7c4d7ec474c411",
+    "type": "evidence.recorded",
+    "subjectId": "bw_evidence_f95caa0c3054d10d",
+    "at": "2026-07-10T22:17:09.302Z"
+  },
+  "lastOperation": {
+    "id": "bw_operation_fa8054937853bbe9da32d7582d53d183",
+    "commandPath": "evidence add",
+    "status": "succeeded",
+    "finishedAt": "2026-07-10T22:17:09.352Z"
+  },
+  "next": {
+    "limit": 10,
+    "work": [
+      {
+        "workId": "bw_work_b3b0fa49a849e8ff",
+        "title": "Expired active reservations can be renewed back to life",
+        "kind": "issue",
+        "priority": "critical",
+        "status": "ready",
+        "updatedAt": "2026-07-07T14:18:38.539Z"
+      },
+      {
+        "workId": "bw_work_98910d9b7bb5201e",
+        "title": "Reserved work can become blocked and still be closed by agent finish",
+        "kind": "issue",
+        "priority": "critical",
+        "status": "ready",
+        "updatedAt": "2026-07-07T14:18:39.241Z"
+      },
+      {
+        "workId": "bw_work_20e94e18ec2efac0",
+        "title": "Container closeout can miss open descendants when dependency projection is stale",
+        "kind": "issue",
+        "priority": "critical",
+        "status": "ready",
+        "updatedAt": "2026-07-07T14:18:39.915Z"
+      },
+      {
+        "workId": "bw_work_b1ecf1da65669b06",
+        "title": "Repo-pinned delegation can execute an out-of-workspace binary",
+        "kind": "issue",
+        "priority": "critical",
+        "status": "ready",
+        "updatedAt": "2026-07-07T14:39:32.400Z"
+      },
+      {
+        "workId": "bw_work_d6be21814e00541a",
+        "title": "Remote-bound console POST protection can be bypassed with local Host spoofing",
+        "kind": "issue",
+        "priority": "critical",
+        "status": "ready",
+        "updatedAt": "2026-07-07T14:39:34.124Z"
+      },
+      {
+        "workId": "bw_work_3473642f882af84f",
+        "title": "Event-log rotate and rechain bypass the runtime write lock",
+        "kind": "issue",
+        "priority": "critical",
+        "status": "ready",
+        "updatedAt": "2026-07-07T14:39:38.152Z"
+      },
+      {
+        "workId": "bw_work_b3d6b61ed29810fe",
+        "title": "Object loading follows symlinked JSON records outside .boreal/objects",
+        "kind": "issue",
+        "priority": "critical",
+        "status": "ready",
+        "updatedAt": "2026-07-07T14:40:16.465Z"
+      },
+      {
+        "workId": "bw_work_84e266c37e3d8da1",
+        "title": "Adding a blocker does not cascade readiness to downstream dependents",
+        "kind": "issue",
+        "priority": "critical",
+        "status": "ready",
+        "updatedAt": "2026-07-07T14:42:24.981Z"
+      },
+      {
+        "workId": "bw_work_163b82dfe9df9dba",
+        "title": "Workflow asset roots can be hijacked by repo-local or ambient env assets",
+        "kind": "issue",
+        "priority": "critical",
+        "status": "ready",
+        "updatedAt": "2026-07-07T15:03:18.728Z"
+      },
+      {
+        "workId": "bw_work_edd19b745b8eb29f",
+        "title": "MCP server workspace binding can be overridden per tool call",
+        "kind": "issue",
+        "priority": "critical",
+        "status": "ready",
+        "updatedAt": "2026-07-07T15:03:37.408Z"
+      }
+    ]
+  },
+  "workIndex": {
+    "limit": 2000,
+    "total": 529,
+    "truncated": false,
+    "work": [
+      {
+        "workId": "bw_work_0027bd439e3ee00c",
+        "title": "Inbox surfacing and aging nudges on the global dashboard",
+        "kind": "task",
+        "priority": "low",
+        "status": "closed",
+        "updatedAt": "2026-07-07T19:29:42.729Z"
+      },
+      {
+        "workId": "bw_work_00c3eacd2a50526a",
+        "title": "S02T01 - Define evidence trust levels and attestation schemas",
+        "kind": "task",
+        "priority": "high",
+        "status": "blocked",
+        "updatedAt": "2026-07-10T17:10:03.035Z"
+      },
+      {
+        "workId": "bw_work_00ef10545c9f24be",
+        "title": "S12T06 - Add file lock heartbeat or long operation stale-lock guard",
+        "kind": "task",
+        "priority": "normal",
+        "status": "closed",
+        "updatedAt": "2026-06-27T15:15:20.281Z"
+      },
+      {
+        "workId": "bw_work_0104fb19a9253b73",
+        "title": "S02T07 - Compile blocked and doctor recovery directives",
+        "kind": "task",
+        "priority": "high",
+        "status": "closed",
+        "updatedAt": "2026-07-01T16:00:09.216Z"
+      },
+      {
+        "workId": "bw_work_02587a58d96dd33a",
+        "title": "S04T05 - Expose directive obligations via daemon and agent-runtime",
+        "kind": "task",
+        "priority": "high",
+        "status": "closed",
+        "updatedAt": "2026-07-01T21:36:50.787Z"
+      },
+      {
+        "workId": "bw_work_033ef46a8aa5a0df",
+        "title": "Phase 10B - Generated docs and agent test suite",
+        "kind": "milestone",
+        "priority": "critical",
+        "status": "closed",
+        "updatedAt": "2026-06-27T12:02:23.255Z"
+      },
+      {
+        "workId": "bw_work_034a98a67c8eda38",
+        "title": "Rollup projection schema and per-project producer",
+        "kind": "task",
+        "priority": "high",
+        "status": "closed",
+        "updatedAt": "2026-07-07T15:30:13.689Z"
+      },
+      {
+        "workId": "bw_work_0359c6fdc049d6dd",
+        "title": "S07T01 - Implement raw inbox queue and source preview panels",
+        "kind": "task",
+        "priority": "high",
+        "status": "closed",
+        "updatedAt": "2026-06-27T07:36:06.699Z"
+      },
+      {
+        "workId": "bw_work_03c5074347ba8f8b",
+        "title": "Rebalance doctor severity and live console safety defaults",
+        "kind": "issue",
+        "priority": "normal",
+        "status": "closed",
+        "updatedAt": "2026-06-28T18:53:22.329Z"
+      },
+      {
+        "workId": "bw_work_0429124749256705",
+        "title": "Drive the two non-terminal global items to terminal state",
+        "kind": "task",
+        "priority": "normal",
+        "status": "closed",
+        "updatedAt": "2026-07-02T16:37:10.841Z"
+      },
+      {
+        "workId": "bw_work_05435b8aea1dca4f",
+        "title": "Phase 03B - Tokens, theme, accessibility, and icons",
+        "kind": "milestone",
+        "priority": "critical",
+        "status": "closed",
+        "updatedAt": "2026-06-27T02:10:39.911Z"
+      },
+      {
+        "workId": "bw_work_05f71bd2594232c4",
+        "title": "Sprint 14 - V2 storage scale and collaboration design",
+        "kind": "sprint",
+        "priority": "normal",
+        "status": "closed",
+        "updatedAt": "2026-06-27T15:52:13.650Z"
+      },
+      {
+        "workId": "bw_work_0637fabeac4d9c4f",
+        "title": "Spooled result files trust .boreal/results without realpath containment",
+        "kind": "issue",
+        "priority": "high",
+        "status": "ready",
+        "updatedAt": "2026-07-07T15:21:53.122Z"
+      },
+      {
+        "workId": "bw_work_069d81450ec2a601",
+        "title": "Board dogfood - end-to-end against linked fixture projects",
+        "kind": "task",
+        "priority": "low",
+        "status": "closed",
+        "updatedAt": "2026-07-07T20:06:58.856Z"
+      },
+      {
+        "workId": "bw_work_0737f5647e30700b",
+        "title": "S02T06 - Add interactive install review for codex, claude, and generic skills",
+        "kind": "task",
+        "priority": "high",
+        "status": "closed",
+        "updatedAt": "2026-06-27T01:43:48.260Z"
+      },
+      {
+        "workId": "bw_work_083989ed96d04e83",
+        "title": "Phase 06A - Sprint activation and board commands",
+        "kind": "milestone",
+        "priority": "critical",
+        "status": "closed",
+        "updatedAt": "2026-06-27T05:54:59.515Z"
+      },
+      {
+        "workId": "bw_work_0858a0bc3b2e517f",
+        "title": "Sprint G6 - aggregate next and aging signals",
+        "kind": "sprint",
+        "priority": "normal",
+        "status": "closed",
+        "updatedAt": "2026-07-07T17:01:49.946Z"
+      },
+      {
+        "workId": "bw_work_0887e1073a76a4a4",
+        "title": "Make Git doctor topology-aware across project and memory repos",
+        "kind": "issue",
+        "priority": "high",
+        "status": "closed",
+        "updatedAt": "2026-06-28T18:53:07.677Z"
+      },
+      {
+        "workId": "bw_work_08e86d236924710c",
+        "title": "S01T05 - Add directive bundle validation and safe-data helpers",
+        "kind": "task",
+        "priority": "critical",
+        "status": "closed",
+        "updatedAt": "2026-07-01T13:58:41.241Z"
+      },
+      {
+        "workId": "bw_work_097d001fc0e2eda1",
+        "title": "S06T01 - Add sprint list/show/current/activate command contracts",
+        "kind": "task",
+        "priority": "critical",
+        "status": "closed",
+        "updatedAt": "2026-06-27T05:43:21.091Z"
+      },
+      {
+        "workId": "bw_work_0acecb86dff442f4",
+        "title": "S01T03 - Complete licensing, provenance, dependency, secret, and public-history audit",
+        "kind": "task",
+        "priority": "high",
+        "status": "ready",
+        "updatedAt": "2026-07-10T17:10:35.218Z"
+      },
+      {
+        "workId": "bw_work_0b52b31b4cd80c8f",
+        "title": "S03T02 - Implement remote bootstrap, push, pull, and offline rejoin",
+        "kind": "task",
+        "priority": "high",
+        "status": "blocked",
+        "updatedAt": "2026-07-10T17:09:17.667Z"
+      },
+      {
+        "workId": "bw_work_0c4ebab1739890ba",
+        "title": "S08T09 - Add shell completion generation",
+        "kind": "task",
+        "priority": "critical",
+        "status": "closed",
+        "updatedAt": "2026-06-27T10:20:39.504Z"
+      },
+      {
+        "workId": "bw_work_0d377c02f09bb703",
+        "title": "Sprint 02 - Directive compiler and runtime integration",
+        "kind": "sprint",
+        "priority": "critical",
+        "status": "closed",
+        "updatedAt": "2026-07-01T19:16:20.885Z"
+      },
+      {
+        "workId": "bw_work_0d8cf33353154654",
+        "title": "S08T06 - Add contradiction and stale truth repair workflows to doctor",
+        "kind": "task",
+        "priority": "critical",
+        "status": "closed",
+        "updatedAt": "2026-06-27T09:54:11.896Z"
+      },
+      {
+        "workId": "bw_work_0dc6b1c4c005e7f9",
+        "title": "Phase 05C - Global health and settings surfaces",
+        "kind": "milestone",
+        "priority": "high",
+        "status": "closed",
+        "updatedAt": "2026-06-27T05:28:36.998Z"
+      },
+      {
+        "workId": "bw_work_0f006f25ca7a6883",
+        "title": "Console browser-smoke defaults to system Chrome on macOS",
+        "kind": "issue",
+        "priority": "high",
+        "status": "ready",
+        "updatedAt": "2026-07-07T14:18:31.576Z"
+      },
+      {
+        "workId": "bw_work_0f2021a45f5bdebb",
+        "title": "Workspace hygiene - prune operation log and re-audit doctor warnings",
+        "kind": "task",
+        "priority": "low",
+        "status": "closed",
+        "updatedAt": "2026-07-02T16:43:54.300Z"
+      },
+      {
+        "workId": "bw_work_0f55e2240849c396",
+        "title": "S02T01 - Define directive compiler input snapshots",
+        "kind": "task",
+        "priority": "critical",
+        "status": "closed",
+        "updatedAt": "2026-07-01T15:59:42.013Z"
+      },
+      {
+        "workId": "bw_work_100b7cc7dcc6e5dd",
+        "title": "Phase 08B - Schema and vault truth hardening",
+        "kind": "milestone",
+        "priority": "critical",
+        "status": "closed",
+        "updatedAt": "2026-06-27T09:55:11.410Z"
+      },
+      {
+        "workId": "bw_work_104e5f9a54410b7e",
+        "title": "sprint close composite generates metrics, report, and rollup summary",
+        "kind": "task",
+        "priority": "normal",
+        "status": "closed",
+        "updatedAt": "2026-07-04T07:37:13.298Z"
+      },
+      {
+        "workId": "bw_work_107f807e7cb52c3d",
+        "title": "Global registry aggregation lacks per-project timeout and concurrency limits",
+        "kind": "issue",
+        "priority": "normal",
+        "status": "ready",
+        "updatedAt": "2026-07-07T14:42:50.623Z"
+      },
+      {
+        "workId": "bw_work_130627157d05e8ae",
+        "title": "Replay regression tests for every audited transcript failure",
+        "kind": "task",
+        "priority": "normal",
+        "status": "closed",
+        "updatedAt": "2026-07-04T07:47:50.250Z"
+      },
+      {
+        "workId": "bw_work_132f329de1305c27",
+        "title": "Storage migration validation ignores archived event-log corruption",
+        "kind": "issue",
+        "priority": "normal",
+        "status": "ready",
+        "updatedAt": "2026-07-07T14:18:37.838Z"
+      },
+      {
+        "workId": "bw_work_1336bf9172fa2f75",
+        "title": "S03 - Multi-Machine Collaboration and Recovery",
+        "kind": "sprint",
+        "priority": "high",
+        "status": "blocked",
+        "updatedAt": "2026-07-10T17:10:04.057Z"
+      },
+      {
+        "workId": "bw_work_1340533172df0513",
+        "title": "Generated package artifacts under src are unignored and uncleaned",
+        "kind": "issue",
+        "priority": "normal",
+        "status": "ready",
+        "updatedAt": "2026-07-07T14:18:33.030Z"
+      },
+      {
+        "workId": "bw_work_140974d61d53d20e",
+        "title": "S06T02 - Add sprint board JSON projection",
+        "kind": "task",
+        "priority": "critical",
+        "status": "closed",
+        "updatedAt": "2026-06-27T05:51:24.417Z"
+      },
+      {
+        "workId": "bw_work_14111c7345395dd2",
+        "title": "Sprint 08 - Runtime storage and collaboration hardening",
+        "kind": "sprint",
+        "priority": "critical",
+        "status": "closed",
+        "updatedAt": "2026-06-27T10:21:47.013Z"
+      },
+      {
+        "workId": "bw_work_142a37a3c8028ff3",
+        "title": "S02T04 - Enforce current witnessed evidence at verification and closeout",
+        "kind": "task",
+        "priority": "high",
+        "status": "blocked",
+        "updatedAt": "2026-07-10T17:09:15.623Z"
+      },
+      {
+        "workId": "bw_work_14fe0d5b8c160743",
+        "title": "S04T03 - Enforce descendant review and acceptance coverage on containers",
+        "kind": "task",
+        "priority": "normal",
+        "status": "blocked",
+        "updatedAt": "2026-07-10T17:09:24.393Z"
+      },
+      {
+        "workId": "bw_work_15424a50ddf0f7bd",
+        "title": "JSON search freshness misses records without contentHash",
+        "kind": "issue",
+        "priority": "normal",
+        "status": "ready",
+        "updatedAt": "2026-07-07T14:18:35.189Z"
+      },
+      {
+        "workId": "bw_work_1566afd51cac3012",
+        "title": "Bound live console route smoke and expose live adapter failures",
+        "kind": "task",
+        "priority": "high",
+        "status": "closed",
+        "updatedAt": "2026-06-27T15:49:45.535Z"
+      },
+      {
+        "workId": "bw_work_1616f76565b363c0",
+        "title": "Separate memory repos miss JSONL merge-driver setup and doctor checks",
+        "kind": "issue",
+        "priority": "normal",
+        "status": "ready",
+        "updatedAt": "2026-07-07T14:18:37.183Z"
+      },
+      {
+        "workId": "bw_work_163b82dfe9df9dba",
+        "title": "Workflow asset roots can be hijacked by repo-local or ambient env assets",
+        "kind": "issue",
+        "priority": "critical",
+        "status": "ready",
+        "updatedAt": "2026-07-07T15:03:18.728Z"
+      },
+      {
+        "workId": "bw_work_166a035030c4df5d",
+        "title": "Stale reservation reaping in doctor",
+        "kind": "task",
+        "priority": "normal",
+        "status": "closed",
+        "updatedAt": "2026-07-02T23:02:49.175Z"
+      },
+      {
+        "workId": "bw_work_168ca5ee1d5bf0e5",
+        "title": "Uniform data.result block on every mutating command response",
+        "kind": "task",
+        "priority": "high",
+        "status": "closed",
+        "updatedAt": "2026-07-03T23:32:51.850Z"
+      },
+      {
+        "workId": "bw_work_169c0d5abd0a9642",
+        "title": "S02T03 - Implement directive conflict and severity resolution",
+        "kind": "task",
+        "priority": "high",
+        "status": "closed",
+        "updatedAt": "2026-07-01T15:59:58.875Z"
+      },
+      {
+        "workId": "bw_work_16b7bcc858860e4f",
+        "title": "Design required closeout gate contract",
+        "kind": "task",
+        "priority": "high",
+        "status": "closed",
+        "updatedAt": "2026-07-01T00:06:13.356Z"
+      },
+      {
+        "workId": "bw_work_1743f7a8c376717e",
+        "title": "S02T05 - Add CI attestations, trust reporting, trace views, and end-to-end tests",
+        "kind": "task",
+        "priority": "high",
+        "status": "blocked",
+        "updatedAt": "2026-07-10T17:09:16.637Z"
+      },
+      {
+        "workId": "bw_work_17c929054464f19f",
+        "title": "Evidence command redaction misses secret headers and JSON payload secrets",
+        "kind": "issue",
+        "priority": "high",
+        "status": "ready",
+        "updatedAt": "2026-07-07T15:03:21.329Z"
+      },
+      {
+        "workId": "bw_work_181b9a5b886addcb",
+        "title": "S08T01 - Define canonical rebuild contract for runtime state",
+        "kind": "task",
+        "priority": "critical",
+        "status": "closed",
+        "updatedAt": "2026-06-27T09:05:43.021Z"
+      },
+      {
+        "workId": "bw_work_188f5f499f75814a",
+        "title": "Evidence-gated close: refuse closeout with zero evidence",
+        "kind": "task",
+        "priority": "high",
+        "status": "closed",
+        "updatedAt": "2026-07-02T23:03:54.934Z"
+      },
+      {
+        "workId": "bw_work_18b5f26ef45e0655",
+        "title": "S03T06 - Select and wire the icon strategy",
+        "kind": "task",
+        "priority": "critical",
+        "status": "closed",
+        "updatedAt": "2026-06-27T02:10:25.531Z"
+      },
+      {
+        "workId": "bw_work_18bd82caaa659c9d",
+        "title": "S01T02 - Author Agent Directive architecture contract",
+        "kind": "task",
+        "priority": "critical",
+        "status": "closed",
+        "updatedAt": "2026-07-01T13:58:00.691Z"
+      },
+      {
+        "workId": "bw_work_193fbc48817155d5",
+        "title": "Remote-bound console exposes live state and mutation token over GET",
+        "kind": "issue",
+        "priority": "critical",
+        "status": "ready",
+        "updatedAt": "2026-07-07T15:03:39.202Z"
+      },
+      {
+        "workId": "bw_work_19a2607248cd92bc",
+        "title": "Console: remove AI-tell styling anti-patterns",
+        "kind": "issue",
+        "priority": "high",
+        "status": "closed",
+        "updatedAt": "2026-06-27T18:06:28.705Z"
+      },
+      {
+        "workId": "bw_work_1a22aa87decedf13",
+        "title": "Auto-prune operation volume at the gate; widen warning grace",
+        "kind": "task",
+        "priority": "normal",
+        "status": "closed",
+        "updatedAt": "2026-07-04T04:23:10.063Z"
+      },
+      {
+        "workId": "bw_work_1a9b836bd3ce8f2e",
+        "title": "S09 - Public Beta Release and External Validation",
+        "kind": "sprint",
+        "priority": "high",
+        "status": "blocked",
+        "updatedAt": "2026-07-10T17:10:28.943Z"
+      },
+      {
+        "workId": "bw_work_1adeda1a3c7867ff",
+        "title": "S09T02 - Rehearse clean installs, upgrades, downgrades, migrations, and rollback",
+        "kind": "task",
+        "priority": "normal",
+        "status": "blocked",
+        "updatedAt": "2026-07-10T17:09:56.453Z"
+      },
+      {
+        "workId": "bw_work_1b336f25558ac9e9",
+        "title": "S06 - Manifest-Driven Agent Integration Matrix",
+        "kind": "sprint",
+        "priority": "high",
+        "status": "blocked",
+        "updatedAt": "2026-07-10T17:10:12.333Z"
+      },
+      {
+        "workId": "bw_work_1b3795d44dba60ef",
+        "title": "S03T03 - Implement per-record conflict, deletion, and event-log reconciliation",
+        "kind": "task",
+        "priority": "high",
+        "status": "blocked",
+        "updatedAt": "2026-07-10T17:09:18.675Z"
+      },
+      {
+        "workId": "bw_work_1bd1bb9cf50ddeaa",
+        "title": "Git-to-tracker drift detector in doctor",
+        "kind": "task",
+        "priority": "normal",
+        "status": "closed",
+        "updatedAt": "2026-07-02T23:02:32.395Z"
+      },
+      {
+        "workId": "bw_work_1c08821f3f662232",
+        "title": "Sprint 09 - Scoped MCP and daemon surfaces",
+        "kind": "sprint",
+        "priority": "high",
+        "status": "closed",
+        "updatedAt": "2026-06-27T11:03:10.340Z"
+      },
+      {
+        "workId": "bw_work_1c43f5fb152a89f4",
+        "title": "Aging signals in rollups - ready-rot limbo age expired reservations",
+        "kind": "task",
+        "priority": "normal",
+        "status": "closed",
+        "updatedAt": "2026-07-07T16:12:09.627Z"
+      },
+      {
+        "workId": "bw_work_1c7d06baecb86928",
+        "title": "S01T07 - Specify dashboard command namespace and JSON schemas",
+        "kind": "task",
+        "priority": "critical",
+        "status": "closed",
+        "updatedAt": "2026-06-27T01:29:46.047Z"
+      },
+      {
+        "workId": "bw_work_1c93c0cdcf435894",
+        "title": "Scope staleness and volume directives to closeout-relevant commands",
+        "kind": "task",
+        "priority": "high",
+        "status": "closed",
+        "updatedAt": "2026-07-04T04:10:55.806Z"
+      },
+      {
+        "workId": "bw_work_1d5aa7f6da7583e5",
+        "title": "Phase 05C - End-to-end dogfood, release, and parent closeout",
+        "kind": "milestone",
+        "priority": "high",
+        "status": "closed",
+        "updatedAt": "2026-07-02T00:23:46.099Z"
+      },
+      {
+        "workId": "bw_work_1daaf2f27b5fd255",
+        "title": "Sprint G1 - registry lifecycle and link delink semantics",
+        "kind": "sprint",
+        "priority": "high",
+        "status": "closed",
+        "updatedAt": "2026-07-07T16:44:05.128Z"
+      },
+      {
+        "workId": "bw_work_1e5b08220fc41f5f",
+        "title": "S02T04 - Replace line prompts with guided init wizard selections",
+        "kind": "task",
+        "priority": "high",
+        "status": "closed",
+        "updatedAt": "2026-06-27T01:43:47.060Z"
+      },
+      {
+        "workId": "bw_work_1e9a08e6cb50b3fd",
+        "title": "Generate a single environment manifest for skills, memory, git, and asset roots",
+        "kind": "issue",
+        "priority": "normal",
+        "status": "closed",
+        "updatedAt": "2026-06-28T18:53:09.642Z"
+      },
+      {
+        "workId": "bw_work_1efee186fff31372",
+        "title": "Phase 01B - Core directive schema and shared exports",
+        "kind": "milestone",
+        "priority": "critical",
+        "status": "closed",
+        "updatedAt": "2026-07-01T13:57:27.302Z"
+      },
+      {
+        "workId": "bw_work_1f36933d37fc181d",
+        "title": "Sprint 5 - bwrk next and dogfood hardening",
+        "kind": "sprint",
+        "priority": "normal",
+        "status": "closed",
+        "updatedAt": "2026-07-02T07:25:46.113Z"
+      },
+      {
+        "workId": "bw_work_2038a65757fddf80",
+        "title": "Direct work reserve bypasses graph-derived readiness",
+        "kind": "issue",
+        "priority": "high",
+        "status": "ready",
+        "updatedAt": "2026-07-07T14:18:40.589Z"
+      },
+      {
+        "workId": "bw_work_204cf73191b7352f",
+        "title": "bwrk global first-run bootstrap",
+        "kind": "task",
+        "priority": "normal",
+        "status": "closed",
+        "updatedAt": "2026-07-07T16:42:46.954Z"
+      },
+      {
+        "workId": "bw_work_20e94e18ec2efac0",
+        "title": "Container closeout can miss open descendants when dependency projection is stale",
+        "kind": "issue",
+        "priority": "critical",
+        "status": "ready",
+        "updatedAt": "2026-07-07T14:18:39.915Z"
+      },
+      {
+        "workId": "bw_work_21ed32d69bf5b693",
+        "title": "S13T01 - Add golden-path start done pause status and gate aliases",
+        "kind": "task",
+        "priority": "normal",
+        "status": "closed",
+        "updatedAt": "2026-06-27T15:43:15.946Z"
+      },
+      {
+        "workId": "bw_work_22381c9ddbc13bf0",
+        "title": "T6 Worktree-per-agent claim",
+        "kind": "task",
+        "priority": "normal",
+        "status": "closed",
+        "updatedAt": "2026-07-05T17:55:59.176Z"
+      },
+      {
+        "workId": "bw_work_2256157af1dd03e3",
+        "title": "Expired active reservations are counted as active UI capacity",
+        "kind": "issue",
+        "priority": "high",
+        "status": "ready",
+        "updatedAt": "2026-07-07T14:42:43.416Z"
+      },
+      {
+        "workId": "bw_work_22f1c5333429dc14",
+        "title": "S08T08 - Add volume and concurrency regression tests",
+        "kind": "task",
+        "priority": "critical",
+        "status": "closed",
+        "updatedAt": "2026-06-27T10:09:04.865Z"
+      },
+      {
+        "workId": "bw_work_2371d5ee38084c14",
+        "title": "Auto-capture git evidence at agent finish",
+        "kind": "task",
+        "priority": "high",
+        "status": "closed",
+        "updatedAt": "2026-07-02T23:01:42.083Z"
+      },
+      {
+        "workId": "bw_work_239b559b327ab25d",
+        "title": "Phase 08A - Canonical rebuild and SQLite cache adapter",
+        "kind": "milestone",
+        "priority": "critical",
+        "status": "closed",
+        "updatedAt": "2026-06-27T09:24:11.855Z"
+      },
+      {
+        "workId": "bw_work_23c004af89823110",
+        "title": "File-to-object migration duplicates existing log records",
+        "kind": "issue",
+        "priority": "high",
+        "status": "ready",
+        "updatedAt": "2026-07-07T14:18:35.856Z"
+      },
+      {
+        "workId": "bw_work_2582d53fe1108bbb",
+        "title": "S11T04 - Harden generated artifact tracking and ignore policy",
+        "kind": "task",
+        "priority": "critical",
+        "status": "closed",
+        "updatedAt": "2026-06-27T02:11:09.978Z"
+      },
+      {
+        "workId": "bw_work_25f49d2c2a07c396",
+        "title": "One-shot finish for unreserved work",
+        "kind": "task",
+        "priority": "normal",
+        "status": "closed",
+        "updatedAt": "2026-07-04T07:36:24.162Z"
+      },
+      {
+        "workId": "bw_work_261582816f8cf91a",
+        "title": "Doctor required-gate coverage ignores declared command and observable constraints",
+        "kind": "issue",
+        "priority": "high",
+        "status": "ready",
+        "updatedAt": "2026-07-07T15:03:46.234Z"
+      },
+      {
+        "workId": "bw_work_26a8de0b61232700",
+        "title": "Phase 07A - Raw inbox and reconcile dashboard",
+        "kind": "milestone",
+        "priority": "high",
+        "status": "closed",
+        "updatedAt": "2026-06-27T07:46:35.983Z"
+      },
+      {
+        "workId": "bw_work_26c79b1dc4aa42d2",
+        "title": "S06T01 - Define the agent adapter manifest and capability registry",
+        "kind": "task",
+        "priority": "normal",
+        "status": "blocked",
+        "updatedAt": "2026-07-10T17:10:13.363Z"
+      },
+      {
+        "workId": "bw_work_27c391ede42960e8",
+        "title": "Sprint 02 - CLI dashboard primitives and installer UX",
+        "kind": "sprint",
+        "priority": "high",
+        "status": "closed",
+        "updatedAt": "2026-06-27T01:58:48.584Z"
+      },
+      {
+        "workId": "bw_work_29d42bc1d609c59d",
+        "title": "S08T05 - Add CI and IDE status surfaces and make an explicit TUI ship/defer decision",
+        "kind": "task",
+        "priority": "normal",
+        "status": "blocked",
+        "updatedAt": "2026-07-10T17:09:55.305Z"
+      },
+      {
+        "workId": "bw_work_2a2b37f801502b39",
+        "title": "Reduce console live-data CLI fan-out across dashboard routes",
+        "kind": "task",
+        "priority": "high",
+        "status": "closed",
+        "updatedAt": "2026-06-27T15:49:48.002Z"
+      },
+      {
+        "workId": "bw_work_2b33e09358888d0b",
+        "title": "S13T02 - Add work edit cancel reopen and split lifecycle commands",
+        "kind": "task",
+        "priority": "normal",
+        "status": "closed",
+        "updatedAt": "2026-06-27T15:43:20.509Z"
+      },
+      {
+        "workId": "bw_work_2b9baa907aa24c27",
+        "title": "Sprint 03 - Component primitive import and design system extraction",
+        "kind": "sprint",
+        "priority": "critical",
+        "status": "closed",
+        "updatedAt": "2026-06-27T02:28:24.897Z"
+      },
+      {
+        "workId": "bw_work_2cb23e3c5e1db048",
+        "title": "S06T05 - Complete adapter lifecycle, compatibility matrix, and clean-machine fixtures",
+        "kind": "task",
+        "priority": "normal",
+        "status": "blocked",
+        "updatedAt": "2026-07-10T17:09:40.780Z"
+      },
+      {
+        "workId": "bw_work_2cbacca003dd110b",
+        "title": "S10T03 - Add versioning and migration policy for v1 records",
+        "kind": "task",
+        "priority": "critical",
+        "status": "closed",
+        "updatedAt": "2026-06-27T11:38:37.846Z"
+      },
+      {
+        "workId": "bw_work_2d3c8a10e491c2b8",
+        "title": "Phase 07B - Wiki, claims, decisions, and source coverage",
+        "kind": "milestone",
+        "priority": "high",
+        "status": "closed",
+        "updatedAt": "2026-06-27T08:22:40.052Z"
+      },
+      {
+        "workId": "bw_work_2d916951b65bd885",
+        "title": "S09T01 - Produce signed npm, Homebrew, shell, and PowerShell release candidates",
+        "kind": "task",
+        "priority": "normal",
+        "status": "blocked",
+        "updatedAt": "2026-07-10T17:10:29.971Z"
+      },
+      {
+        "workId": "bw_work_2dc0118e535ecbe6",
+        "title": "Enforce declared gates in closeout evaluation",
+        "kind": "task",
+        "priority": "high",
+        "status": "closed",
+        "updatedAt": "2026-07-02T04:26:29.571Z"
+      },
+      {
+        "workId": "bw_work_2e006d52fa424696",
+        "title": "Portfolio container views - cross-boundary dep tree and blocked reasons",
+        "kind": "task",
+        "priority": "low",
+        "status": "closed",
+        "updatedAt": "2026-07-07T18:43:31.030Z"
+      },
+      {
+        "workId": "bw_work_2edc7cc0e173f77c",
+        "title": "S08T07 - Implement JSONL merge driver fixture and local Git config docs",
+        "kind": "task",
+        "priority": "critical",
+        "status": "closed",
+        "updatedAt": "2026-06-27T10:00:59.523Z"
+      },
+      {
+        "workId": "bw_work_2f07afe4a207a46f",
+        "title": "Hardening S2: Remove the self-staleness sync/doctor ratchet",
+        "kind": "sprint",
+        "priority": "high",
+        "status": "closed",
+        "updatedAt": "2026-07-04T04:38:08.411Z"
+      },
+      {
+        "workId": "bw_work_2f20f22a5101d590",
+        "title": "Phase 08C - Git collaboration and merge driver hardening",
+        "kind": "milestone",
+        "priority": "critical",
+        "status": "closed",
+        "updatedAt": "2026-06-27T10:21:17.429Z"
+      },
+      {
+        "workId": "bw_work_2fa2ba0e21589d1b",
+        "title": "S03T07 - Convert foundation primitives",
+        "kind": "task",
+        "priority": "critical",
+        "status": "closed",
+        "updatedAt": "2026-06-27T02:20:06.737Z"
+      },
+      {
+        "workId": "bw_work_2fa49e8300b51cd3",
+        "title": "S11T02 - Build cross-repo reproduction fixtures for git health states",
+        "kind": "task",
+        "priority": "critical",
+        "status": "closed",
+        "updatedAt": "2026-06-27T02:11:03.776Z"
+      },
+      {
+        "workId": "bw_work_2fdee15327628db4",
+        "title": "Domain-accurate recovery text for not-found errors by record type",
+        "kind": "task",
+        "priority": "normal",
+        "status": "closed",
+        "updatedAt": "2026-07-04T00:21:43.617Z"
+      },
+      {
+        "workId": "bw_work_2fe269a85a304487",
+        "title": "Version-skew policy - handshake doctor integration and floor behavior",
+        "kind": "task",
+        "priority": "normal",
+        "status": "closed",
+        "updatedAt": "2026-07-02T19:31:57.244Z"
+      },
+      {
+        "workId": "bw_work_3006c0b7f9a0cb7e",
+        "title": "S06T09 - Implement sprint review generator and static sprint report",
+        "kind": "task",
+        "priority": "critical",
+        "status": "closed",
+        "updatedAt": "2026-06-27T07:15:23.525Z"
+      },
+      {
+        "workId": "bw_work_308534e1ff80988e",
+        "title": "S08T03 - Reduce time-to-first-value and make recovery progressive",
+        "kind": "task",
+        "priority": "normal",
+        "status": "blocked",
+        "updatedAt": "2026-07-10T17:09:51.354Z"
+      },
+      {
+        "workId": "bw_work_308d3ce46b880ea4",
+        "title": "Object-store writes can report failure after durable mutation succeeds",
+        "kind": "issue",
+        "priority": "high",
+        "status": "closed",
+        "updatedAt": "2026-07-10T13:45:15.072Z"
+      },
+      {
+        "workId": "bw_work_30c5438d99da6ce6",
+        "title": "Sprint: Audit remediation 2026-06-28",
+        "kind": "sprint",
+        "priority": "high",
+        "status": "closed",
+        "updatedAt": "2026-06-28T18:53:43.333Z"
+      },
+      {
+        "workId": "bw_work_30fd269614f63b76",
+        "title": "S02T02 - Implement safe execution policy for declared verification gates",
+        "kind": "task",
+        "priority": "high",
+        "status": "blocked",
+        "updatedAt": "2026-07-10T17:09:13.538Z"
+      },
+      {
+        "workId": "bw_work_31589ea96f95e0be",
+        "title": "Sprint G4 - rollup contract and aggregation",
+        "kind": "sprint",
+        "priority": "high",
+        "status": "closed",
+        "updatedAt": "2026-07-07T16:02:53.816Z"
+      },
+      {
+        "workId": "bw_work_326532450181b676",
+        "title": "T2 Drop context packs/chunks from search corpus",
+        "kind": "task",
+        "priority": "normal",
+        "status": "closed",
+        "updatedAt": "2026-07-05T15:15:36.274Z"
+      },
+      {
+        "workId": "bw_work_32fcca3fa8d9dc32",
+        "title": "Self-contained dist build with bin entry and channel detection",
+        "kind": "task",
+        "priority": "high",
+        "status": "closed",
+        "updatedAt": "2026-07-02T18:44:15.693Z"
+      },
+      {
+        "workId": "bw_work_339c40f5a2f5ff9a",
+        "title": "Add a brief JSON output profile",
+        "kind": "task",
+        "priority": "normal",
+        "status": "closed",
+        "updatedAt": "2026-07-04T05:46:29.256Z"
+      },
+      {
+        "workId": "bw_work_3473642f882af84f",
+        "title": "Event-log rotate and rechain bypass the runtime write lock",
+        "kind": "issue",
+        "priority": "critical",
+        "status": "ready",
+        "updatedAt": "2026-07-07T14:39:38.152Z"
+      },
+      {
+        "workId": "bw_work_3532e08164c759e6",
+        "title": "Agent Directive System: trusted runtime instruction bundles",
+        "kind": "issue",
+        "priority": "critical",
+        "status": "closed",
+        "updatedAt": "2026-07-02T00:29:09.663Z"
+      },
+      {
+        "workId": "bw_work_366358206adbea9a",
+        "title": "Stop emitting required obligations for satisfied or terminal subjects",
+        "kind": "task",
+        "priority": "high",
+        "status": "closed",
+        "updatedAt": "2026-07-02T16:38:10.401Z"
+      },
+      {
+        "workId": "bw_work_3695a3716234e67a",
+        "title": "Bug Fixes and Hardening",
+        "kind": "milestone",
+        "priority": "critical",
+        "status": "blocked",
+        "updatedAt": "2026-07-10T13:07:11.933Z"
+      },
+      {
+        "workId": "bw_work_37479cf2e2bdfc50",
+        "title": "Phase 03A - Component source inventory and extraction map",
+        "kind": "milestone",
+        "priority": "critical",
+        "status": "closed",
+        "updatedAt": "2026-06-27T02:05:56.824Z"
+      },
+      {
+        "workId": "bw_work_37f06475bc203a4c",
+        "title": "Phase 05B - Migration, compatibility, and backfill",
+        "kind": "milestone",
+        "priority": "high",
+        "status": "closed",
+        "updatedAt": "2026-07-02T00:23:48.923Z"
+      },
+      {
+        "workId": "bw_work_38ba809d13493164",
+        "title": "S05T02 - Add registry list/add/remove/doctor commands",
+        "kind": "task",
+        "priority": "high",
+        "status": "closed",
+        "updatedAt": "2026-06-27T03:44:32.884Z"
+      },
+      {
+        "workId": "bw_work_38ce2f620c7f6365",
+        "title": "S07T04 - Implement extension install, inspect, update, remove, doctor, and recovery",
+        "kind": "task",
+        "priority": "normal",
+        "status": "blocked",
+        "updatedAt": "2026-07-10T17:09:46.715Z"
+      },
+      {
+        "workId": "bw_work_392f1d042d74f85b",
+        "title": "Issue - Dashboard and console UX regression audit",
+        "kind": "issue",
+        "priority": "critical",
+        "status": "closed",
+        "updatedAt": "2026-06-27T15:49:50.549Z"
+      },
+      {
+        "workId": "bw_work_393b24b2ac03f7e3",
+        "title": "Phase 05B - Global overview dashboard",
+        "kind": "milestone",
+        "priority": "high",
+        "status": "closed",
+        "updatedAt": "2026-06-27T04:45:44.759Z"
+      },
+      {
+        "workId": "bw_work_3992f6f5f1027854",
+        "title": "Version-skew coverage for new envelope schemas",
+        "kind": "task",
+        "priority": "normal",
+        "status": "closed",
+        "updatedAt": "2026-07-04T07:48:35.552Z"
+      },
+      {
+        "workId": "bw_work_399d5deedc09c490",
+        "title": "Sprint launch mutates tracker state before branch setup can fail",
+        "kind": "issue",
+        "priority": "high",
+        "status": "ready",
+        "updatedAt": "2026-07-07T14:18:41.307Z"
+      },
+      {
+        "workId": "bw_work_3a13e5d05d36e46e",
+        "title": "S05T03 - Connect spec deltas, archive, supersession, and impact tracing",
+        "kind": "task",
+        "priority": "normal",
+        "status": "blocked",
+        "updatedAt": "2026-07-10T17:09:30.003Z"
+      },
+      {
+        "workId": "bw_work_3ab760fe568426d9",
+        "title": "S11T06 - Add regression coverage for the git check matrix",
+        "kind": "task",
+        "priority": "critical",
+        "status": "closed",
+        "updatedAt": "2026-06-27T02:11:15.500Z"
+      },
+      {
+        "workId": "bw_work_3ae789cea5fc8f40",
+        "title": "Route finish-work requests through claim/start in work-execution skill",
+        "kind": "task",
+        "priority": "normal",
+        "status": "closed",
+        "updatedAt": "2026-07-04T07:38:06.405Z"
+      },
+      {
+        "workId": "bw_work_3b3a231fc89bcd6a",
+        "title": "Sprint 12 - Audit-verified lifecycle and local security hardening",
+        "kind": "sprint",
+        "priority": "critical",
+        "status": "closed",
+        "updatedAt": "2026-06-27T15:16:20.594Z"
+      },
+      {
+        "workId": "bw_work_3b6e1b51777b266d",
+        "title": "Sync status can crash before returning search-index remediation",
+        "kind": "issue",
+        "priority": "high",
+        "status": "ready",
+        "updatedAt": "2026-07-07T14:39:48.307Z"
+      },
+      {
+        "workId": "bw_work_3c5791d07eb76647",
+        "title": "Phase 04C - Console directive visibility and operator UX",
+        "kind": "milestone",
+        "priority": "high",
+        "status": "closed",
+        "updatedAt": "2026-07-01T21:37:06.042Z"
+      },
+      {
+        "workId": "bw_work_3c6deb91deadcf44",
+        "title": "Composite lifecycle commands: claim --start and finish --evidence --close",
+        "kind": "task",
+        "priority": "normal",
+        "status": "closed",
+        "updatedAt": "2026-07-02T23:04:11.272Z"
+      },
+      {
+        "workId": "bw_work_3c87da7f7df15469",
+        "title": "S13T03 - Add claim review and decision supersession commands",
+        "kind": "task",
+        "priority": "normal",
+        "status": "closed",
+        "updatedAt": "2026-06-27T15:43:25.296Z"
+      },
+      {
+        "workId": "bw_work_3c962ef6c33a101d",
+        "title": "FTS rebuild can stamp stale snapshot with fresh head",
+        "kind": "issue",
+        "priority": "high",
+        "status": "closed",
+        "updatedAt": "2026-07-10T13:44:56.688Z"
+      },
+      {
+        "workId": "bw_work_3cc50623d36aa119",
+        "title": "PR workflow skips runtime tests and strict doctor gates",
+        "kind": "issue",
+        "priority": "high",
+        "status": "closed",
+        "updatedAt": "2026-07-10T14:02:20.008Z"
+      },
+      {
+        "workId": "bw_work_3cdfe7e7023b38e1",
+        "title": "Store target-specific skill install roots and surface them consistently",
+        "kind": "issue",
+        "priority": "high",
+        "status": "closed",
+        "updatedAt": "2026-06-28T18:52:05.326Z"
+      },
+      {
+        "workId": "bw_work_3d186fa512813be1",
+        "title": "S10T01 - Harden local and global bwrk install flow",
+        "kind": "task",
+        "priority": "critical",
+        "status": "closed",
+        "updatedAt": "2026-06-27T11:15:35.253Z"
+      },
+      {
+        "workId": "bw_work_3d651d8d9d4feb18",
+        "title": "Search integrity and backend parity hardening",
+        "kind": "issue",
+        "priority": "critical",
+        "status": "closed",
+        "updatedAt": "2026-07-10T13:45:50.222Z"
+      },
+      {
+        "workId": "bw_work_3dc600705890b337",
+        "title": "Fix dashboard CLI compile regression before dispatch",
+        "kind": "task",
+        "priority": "critical",
+        "status": "closed",
+        "updatedAt": "2026-06-27T15:49:43.126Z"
+      },
+      {
+        "workId": "bw_work_3e05c3d876fa11af",
+        "title": "S04T01 - Update canonical workflows to consume directives",
+        "kind": "task",
+        "priority": "high",
+        "status": "closed",
+        "updatedAt": "2026-07-01T21:36:38.641Z"
+      },
+      {
+        "workId": "bw_work_3e07ba43e078db19",
+        "title": "Document spec-channel contract and paired-work-order blocking convention",
+        "kind": "task",
+        "priority": "normal",
+        "status": "closed",
+        "updatedAt": "2026-07-02T04:09:31.373Z"
+      },
+      {
+        "workId": "bw_work_3e196a6d7402fcb3",
+        "title": "S01T06 - Add global registry view model contract",
+        "kind": "task",
+        "priority": "critical",
+        "status": "closed",
+        "updatedAt": "2026-06-27T01:27:26.563Z"
+      },
+      {
+        "workId": "bw_work_3e4ef779557f2eab",
+        "title": "Sprint 01 - Truth baseline and dashboard contracts",
+        "kind": "sprint",
+        "priority": "critical",
+        "status": "closed",
+        "updatedAt": "2026-06-27T01:30:50.530Z"
+      },
+      {
+        "workId": "bw_work_3e653c0902d852d6",
+        "title": "S04T07 - Add console directive panels to work and sprint views",
+        "kind": "task",
+        "priority": "high",
+        "status": "closed",
+        "updatedAt": "2026-07-01T21:36:58.565Z"
+      },
+      {
+        "workId": "bw_work_3ea8b47e0d33d987",
+        "title": "Sprint 06 - Active sprint Kanban and work execution boards",
+        "kind": "sprint",
+        "priority": "critical",
+        "status": "closed",
+        "updatedAt": "2026-06-27T07:17:32.622Z"
+      },
+      {
+        "workId": "bw_work_3eb9dab8252a86ff",
+        "title": "S08T02 - Make install, status, start, done, and doctor the public golden path",
+        "kind": "task",
+        "priority": "normal",
+        "status": "blocked",
+        "updatedAt": "2026-07-10T17:09:49.473Z"
+      },
+      {
+        "workId": "bw_work_3ec57adac55abd82",
+        "title": "V1 Completion Bucket - dashboards, runtime hardening, scoped integrations",
+        "kind": "milestone",
+        "priority": "critical",
+        "status": "closed",
+        "updatedAt": "2026-06-27T12:31:28.010Z"
+      },
+      {
+        "workId": "bw_work_3ee8c5a23e575708",
+        "title": "S04T06 - Add MCP and daemon directive tests",
+        "kind": "task",
+        "priority": "normal",
+        "status": "closed",
+        "updatedAt": "2026-07-01T21:36:53.459Z"
+      },
+      {
+        "workId": "bw_work_3f7f260bf6186160",
+        "title": "Sprint 6 - directive refactor hardening pass 1",
+        "kind": "sprint",
+        "priority": "high",
+        "status": "closed",
+        "updatedAt": "2026-07-02T16:56:03.766Z"
+      },
+      {
+        "workId": "bw_work_426f99e4b4e5de3e",
+        "title": "Console live-data cache stores rejected loads",
+        "kind": "issue",
+        "priority": "high",
+        "status": "ready",
+        "updatedAt": "2026-07-07T14:42:34.943Z"
+      },
+      {
+        "workId": "bw_work_42a3543394e352cf",
+        "title": "Phase 01B - Shared dashboard view-model contracts",
+        "kind": "milestone",
+        "priority": "critical",
+        "status": "closed",
+        "updatedAt": "2026-06-27T01:28:18.653Z"
+      },
+      {
+        "workId": "bw_work_42c24f9cf68b0cf1",
+        "title": "S02T02 - Implement stepper, shortcut hint, and windowed choice list primitives",
+        "kind": "task",
+        "priority": "high",
+        "status": "closed",
+        "updatedAt": "2026-06-27T01:33:37.554Z"
+      },
+      {
+        "workId": "bw_work_42f548c4e7764b9b",
+        "title": "Repair workspace bootstrap placeholders and fragile test aliases",
+        "kind": "issue",
+        "priority": "normal",
+        "status": "closed",
+        "updatedAt": "2026-06-28T18:53:18.439Z"
+      },
+      {
+        "workId": "bw_work_43d2d2777dd1a45b",
+        "title": "Triage routing - promote inbox items into projects with provenance",
+        "kind": "task",
+        "priority": "normal",
+        "status": "closed",
+        "updatedAt": "2026-07-07T18:57:55.232Z"
+      },
+      {
+        "workId": "bw_work_449f4b7e2e10eb79",
+        "title": "Update self runs unbounded overridable update steps with full inherited env",
+        "kind": "issue",
+        "priority": "high",
+        "status": "ready",
+        "updatedAt": "2026-07-07T14:39:35.999Z"
+      },
+      {
+        "workId": "bw_work_46629a6b80abb282",
+        "title": "S02T03 - Capture witnessed command, Git, environment, and artifact provenance",
+        "kind": "task",
+        "priority": "high",
+        "status": "blocked",
+        "updatedAt": "2026-07-10T17:09:14.565Z"
+      },
+      {
+        "workId": "bw_work_471bdf1fc9a42621",
+        "title": "S05 - Specification and Change Interoperability",
+        "kind": "sprint",
+        "priority": "high",
+        "status": "blocked",
+        "updatedAt": "2026-07-10T17:10:10.266Z"
+      },
+      {
+        "workId": "bw_work_47ba02626578872b",
+        "title": "H2 Hardened machinery: fail-closed guards and self-healing health",
+        "kind": "sprint",
+        "priority": "high",
+        "status": "closed",
+        "updatedAt": "2026-07-02T23:05:30.433Z"
+      },
+      {
+        "workId": "bw_work_48bcadb62085777f",
+        "title": "S05T05 - Implement global ready, blocked, and verification queues",
+        "kind": "task",
+        "priority": "high",
+        "status": "closed",
+        "updatedAt": "2026-06-27T04:26:16.236Z"
+      },
+      {
+        "workId": "bw_work_48fe1d96891bfa61",
+        "title": "Sprint status undercounts reservations and stale claims past the limit",
+        "kind": "issue",
+        "priority": "high",
+        "status": "ready",
+        "updatedAt": "2026-07-07T14:42:26.379Z"
+      },
+      {
+        "workId": "bw_work_495522b74631e3d2",
+        "title": "S05T03 - Link acknowledgements to evidence, summaries, and handoffs",
+        "kind": "task",
+        "priority": "high",
+        "status": "closed",
+        "updatedAt": "2026-07-02T00:23:56.822Z"
+      },
+      {
+        "workId": "bw_work_4956ed35cb8744d5",
+        "title": "Doctor can crash before malformed object diagnostics",
+        "kind": "issue",
+        "priority": "high",
+        "status": "ready",
+        "updatedAt": "2026-07-07T14:18:36.517Z"
+      },
+      {
+        "workId": "bw_work_4989ec10d44e5e9a",
+        "title": "Dogfood e2e next-driven loop and rewrite directive docs",
+        "kind": "task",
+        "priority": "normal",
+        "status": "closed",
+        "updatedAt": "2026-07-02T07:13:35.969Z"
+      },
+      {
+        "workId": "bw_work_49b34597473ca36b",
+        "title": "Live console Sprint page is hard-coded to sprint-04",
+        "kind": "issue",
+        "priority": "high",
+        "status": "ready",
+        "updatedAt": "2026-07-07T14:18:28.725Z"
+      },
+      {
+        "workId": "bw_work_4af1a6dbac5cea07",
+        "title": "S01T04 - Add work queue and sprint board view models to packages/ui-model",
+        "kind": "task",
+        "priority": "critical",
+        "status": "closed",
+        "updatedAt": "2026-06-27T01:27:25.394Z"
+      },
+      {
+        "workId": "bw_work_4bb812557402998a",
+        "title": "S05T07 - Implement global health summary and drift panels",
+        "kind": "task",
+        "priority": "high",
+        "status": "closed",
+        "updatedAt": "2026-06-27T04:56:34.671Z"
+      },
+      {
+        "workId": "bw_work_4be25f6192355797",
+        "title": "Create review candidate pool and gate evidence flow",
+        "kind": "task",
+        "priority": "normal",
+        "status": "closed",
+        "updatedAt": "2026-07-01T02:42:29.241Z"
+      },
+      {
+        "workId": "bw_work_4c344141ccb11d79",
+        "title": "S03T03 - Decide client framework and dependency boundary for component conversion",
+        "kind": "task",
+        "priority": "critical",
+        "status": "closed",
+        "updatedAt": "2026-06-27T02:05:40.952Z"
+      },
+      {
+        "workId": "bw_work_4c93e7b686910424",
+        "title": "Phase 09A - MCP threat model and scope contract",
+        "kind": "milestone",
+        "priority": "high",
+        "status": "closed",
+        "updatedAt": "2026-06-27T10:34:35.844Z"
+      },
+      {
+        "workId": "bw_work_4cba2cfb0682300b",
+        "title": "npm publish pipeline and Homebrew formula preparation",
+        "kind": "task",
+        "priority": "normal",
+        "status": "closed",
+        "updatedAt": "2026-07-02T20:14:26.209Z"
+      },
+      {
+        "workId": "bw_work_4d2074fb3e18a3ff",
+        "title": "Sprint: Search & Collab v1",
+        "kind": "sprint",
+        "priority": "normal",
+        "status": "closed",
+        "updatedAt": "2026-07-05T21:46:15.815Z"
+      },
+      {
+        "workId": "bw_work_4d459f4a375674ed",
+        "title": "bwrk capture - global inbox from any cwd",
+        "kind": "task",
+        "priority": "normal",
+        "status": "closed",
+        "updatedAt": "2026-07-07T16:23:59.184Z"
+      },
+      {
+        "workId": "bw_work_4ea3f878e3ba5f9d",
+        "title": "Corrupt generated ledger metadata can dead-end sync refresh",
+        "kind": "issue",
+        "priority": "high",
+        "status": "ready",
+        "updatedAt": "2026-07-07T14:39:42.107Z"
+      },
+      {
+        "workId": "bw_work_4eaf8d1746617e1d",
+        "title": "Teach bwrk next the verified and needs_verification limbo states",
+        "kind": "task",
+        "priority": "normal",
+        "status": "closed",
+        "updatedAt": "2026-07-02T16:42:57.969Z"
+      },
+      {
+        "workId": "bw_work_4ef420806f403b5e",
+        "title": "T7 Finish gate honors worktree",
+        "kind": "task",
+        "priority": "normal",
+        "status": "closed",
+        "updatedAt": "2026-07-05T18:22:43.353Z"
+      },
+      {
+        "workId": "bw_work_4f2661d6b0bd5953",
+        "title": "Console: Knowledge detail panels frozen on first record",
+        "kind": "issue",
+        "priority": "critical",
+        "status": "closed",
+        "updatedAt": "2026-06-27T18:06:27.273Z"
+      },
+      {
+        "workId": "bw_work_4fe11ab99f20ca2d",
+        "title": "Clarify skill no-leak rules for reading the current installed skill folder",
+        "kind": "issue",
+        "priority": "normal",
+        "status": "closed",
+        "updatedAt": "2026-06-27T00:57:36.182Z"
+      },
+      {
+        "workId": "bw_work_50c9de9ff5a87afe",
+        "title": "S03T04 - Implement directives list and show commands",
+        "kind": "task",
+        "priority": "high",
+        "status": "closed",
+        "updatedAt": "2026-07-01T19:18:02.482Z"
+      },
+      {
+        "workId": "bw_work_51a4e68e4d3ca9d5",
+        "title": "Refresh subject context pack on every mutating command",
+        "kind": "task",
+        "priority": "high",
+        "status": "closed",
+        "updatedAt": "2026-07-02T04:09:53.981Z"
+      },
+      {
+        "workId": "bw_work_51c5751805c8dae4",
+        "title": "End-to-end ceremony budget test",
+        "kind": "task",
+        "priority": "normal",
+        "status": "closed",
+        "updatedAt": "2026-07-04T07:49:25.322Z"
+      },
+      {
+        "workId": "bw_work_5202b53065f3f085",
+        "title": "S07T03 - Expose import, export, search, spec, agent, and dashboard adapter points",
+        "kind": "task",
+        "priority": "normal",
+        "status": "blocked",
+        "updatedAt": "2026-07-10T17:09:44.336Z"
+      },
+      {
+        "workId": "bw_work_52f31f8b1d954328",
+        "title": "TUI refresh-ms flag is parsed by CLI but ignored by the TUI",
+        "kind": "issue",
+        "priority": "normal",
+        "status": "ready",
+        "updatedAt": "2026-07-07T14:42:31.969Z"
+      },
+      {
+        "workId": "bw_work_534295e2daf65102",
+        "title": "S04T01 - Scaffold apps/console package and workspace scripts",
+        "kind": "task",
+        "priority": "high",
+        "status": "closed",
+        "updatedAt": "2026-06-27T02:54:50.308Z"
+      },
+      {
+        "workId": "bw_work_53f1d70d17a21ac3",
+        "title": "Add doctor, gate, report, and summary coverage for required gates",
+        "kind": "task",
+        "priority": "normal",
+        "status": "closed",
+        "updatedAt": "2026-07-01T02:55:18.891Z"
+      },
+      {
+        "workId": "bw_work_5476e1d6fd4b1f4b",
+        "title": "sync refresh exits 0 on successful refresh; --strict opts into status exit",
+        "kind": "task",
+        "priority": "high",
+        "status": "closed",
+        "updatedAt": "2026-07-04T04:15:05.106Z"
+      },
+      {
+        "workId": "bw_work_565115293d70fe51",
+        "title": "Persist reviewer heartbeat checkpoints",
+        "kind": "task",
+        "priority": "normal",
+        "status": "closed",
+        "updatedAt": "2026-07-01T01:30:55.543Z"
+      },
+      {
+        "workId": "bw_work_5749013b37b916b7",
+        "title": "S05T08 - Run release hardening and package smoke coverage",
+        "kind": "task",
+        "priority": "high",
+        "status": "closed",
+        "updatedAt": "2026-07-02T00:24:10.340Z"
+      },
+      {
+        "workId": "bw_work_581a01314378e4e0",
+        "title": "S02T10 - Decide Ink/TUI runtime boundary for rich CLI dashboards",
+        "kind": "task",
+        "priority": "high",
+        "status": "closed",
+        "updatedAt": "2026-06-27T01:33:38.741Z"
+      },
+      {
+        "workId": "bw_work_588c00483ff77e3e",
+        "title": "S07T05 - Implement claims table and decision timeline",
+        "kind": "task",
+        "priority": "high",
+        "status": "closed",
+        "updatedAt": "2026-06-27T08:12:13.176Z"
+      },
+      {
+        "workId": "bw_work_58b99ff57627546c",
+        "title": "S09T08 - Scaffold apps/daemon status and watch loop",
+        "kind": "task",
+        "priority": "high",
+        "status": "closed",
+        "updatedAt": "2026-06-27T11:01:14.576Z"
+      },
+      {
+        "workId": "bw_work_59b2f5ebbfd15a95",
+        "title": "S03T02 - Classify components into foundation, entity, global, sprint, repo-memory, and operations modules",
+        "kind": "task",
+        "priority": "critical",
+        "status": "closed",
+        "updatedAt": "2026-06-27T02:05:27.112Z"
+      },
+      {
+        "workId": "bw_work_5a0399987c209a48",
+        "title": "S05T08 - Implement global settings form for project roots and memory git modes",
+        "kind": "task",
+        "priority": "high",
+        "status": "closed",
+        "updatedAt": "2026-06-27T05:08:06.886Z"
+      },
+      {
+        "workId": "bw_work_5ab6fada501c9970",
+        "title": "Build dist snapshot env var can recursively delete arbitrary paths",
+        "kind": "issue",
+        "priority": "high",
+        "status": "ready",
+        "updatedAt": "2026-07-07T15:21:50.200Z"
+      },
+      {
+        "workId": "bw_work_5ad8d0985d25477c",
+        "title": "Phase 06C - Sprint execution workflows and reports",
+        "kind": "milestone",
+        "priority": "critical",
+        "status": "closed",
+        "updatedAt": "2026-06-27T07:16:40.563Z"
+      },
+      {
+        "workId": "bw_work_5b7c9e9e995f96a7",
+        "title": "S02T03 - Snapshot-test CLI primitive output",
+        "kind": "task",
+        "priority": "high",
+        "status": "closed",
+        "updatedAt": "2026-06-27T01:33:38.171Z"
+      },
+      {
+        "workId": "bw_work_5c253fe4363ea9cc",
+        "title": "Sprint 3 - registry inversion and taxonomy cut",
+        "kind": "sprint",
+        "priority": "high",
+        "status": "closed",
+        "updatedAt": "2026-07-02T06:31:00.236Z"
+      },
+      {
+        "workId": "bw_work_5cbd317cae480b08",
+        "title": "TUI task detail drops reservation context and offers invalid close",
+        "kind": "issue",
+        "priority": "high",
+        "status": "ready",
+        "updatedAt": "2026-07-07T14:18:30.119Z"
+      },
+      {
+        "workId": "bw_work_5d13bd2a7e5090f2",
+        "title": "Sprint 3: Capture from existing structure (bwrk template capture)",
+        "kind": "sprint",
+        "priority": "normal",
+        "status": "closed",
+        "updatedAt": "2026-07-07T14:39:13.224Z"
+      },
+      {
+        "workId": "bw_work_5d61b84c8d43c6a9",
+        "title": "Sprint 04 - Client console app foundation",
+        "kind": "sprint",
+        "priority": "high",
+        "status": "closed",
+        "updatedAt": "2026-06-27T03:19:03.127Z"
+      },
+      {
+        "workId": "bw_work_5de16632534c3db3",
+        "title": "S01T08 - Add directive registry fixtures and golden tests",
+        "kind": "task",
+        "priority": "high",
+        "status": "closed",
+        "updatedAt": "2026-07-01T13:59:19.399Z"
+      },
+      {
+        "workId": "bw_work_5e209fdf3d7c172c",
+        "title": "S14T01 - Decide V2 primary storage writer architecture",
+        "kind": "task",
+        "priority": "normal",
+        "status": "closed",
+        "updatedAt": "2026-06-27T15:50:42.611Z"
+      },
+      {
+        "workId": "bw_work_5e51e2c55b98c622",
+        "title": "Workflow ref resolution accepts workflows/ prefix and returns didYouMean",
+        "kind": "task",
+        "priority": "high",
+        "status": "closed",
+        "updatedAt": "2026-07-03T23:43:48.154Z"
+      },
+      {
+        "workId": "bw_work_5ee1f40e4cb70e99",
+        "title": "Property tests for gap emission coverage",
+        "kind": "task",
+        "priority": "normal",
+        "status": "closed",
+        "updatedAt": "2026-07-02T05:16:48.038Z"
+      },
+      {
+        "workId": "bw_work_5f44a349630b97a0",
+        "title": "Console: Knowledge page cognitive overload + dead components",
+        "kind": "issue",
+        "priority": "high",
+        "status": "closed",
+        "updatedAt": "2026-06-27T18:06:30.097Z"
+      },
+      {
+        "workId": "bw_work_60261a80e5623ff7",
+        "title": "Phase 10A - Package and install hardening",
+        "kind": "milestone",
+        "priority": "critical",
+        "status": "closed",
+        "updatedAt": "2026-06-27T11:39:34.697Z"
+      },
+      {
+        "workId": "bw_work_60459710b0455152",
+        "title": "Phase 02C - Optional rich status dashboards",
+        "kind": "milestone",
+        "priority": "high",
+        "status": "closed",
+        "updatedAt": "2026-06-27T01:58:17.760Z"
+      },
+      {
+        "workId": "bw_work_608a261817b6c8b5",
+        "title": "Daemon watch renews reservations while reporting no truth writes",
+        "kind": "issue",
+        "priority": "high",
+        "status": "ready",
+        "updatedAt": "2026-07-07T15:03:44.558Z"
+      },
+      {
+        "workId": "bw_work_62a47b9ec49699b5",
+        "title": "H1 Free machinery: response-shape changes derived from existing state",
+        "kind": "sprint",
+        "priority": "high",
+        "status": "closed",
+        "updatedAt": "2026-07-02T23:05:14.688Z"
+      },
+      {
+        "workId": "bw_work_62a8f896229c0ec0",
+        "title": "Global web console labels repo-local work as Global work",
+        "kind": "issue",
+        "priority": "normal",
+        "status": "ready",
+        "updatedAt": "2026-07-07T14:42:39.640Z"
+      },
+      {
+        "workId": "bw_work_62f08b62ed0b23ef",
+        "title": "S02T09 - Add work next and workflows picker dashboards",
+        "kind": "task",
+        "priority": "high",
+        "status": "closed",
+        "updatedAt": "2026-06-27T01:57:44.785Z"
+      },
+      {
+        "workId": "bw_work_63102943fac5fc58",
+        "title": "S06T03 - Add lane transition command design for safe board actions",
+        "kind": "task",
+        "priority": "critical",
+        "status": "closed",
+        "updatedAt": "2026-06-27T05:54:18.929Z"
+      },
+      {
+        "workId": "bw_work_647d098a42df257f",
+        "title": "S01T04 - Add core AgentDirective types and exports",
+        "kind": "task",
+        "priority": "critical",
+        "status": "closed",
+        "updatedAt": "2026-07-01T13:58:30.788Z"
+      },
+      {
+        "workId": "bw_work_64cbeba31ce6aeca",
+        "title": "Replace dataRequirements with typed payload interfaces",
+        "kind": "task",
+        "priority": "normal",
+        "status": "closed",
+        "updatedAt": "2026-07-02T06:19:22.819Z"
+      },
+      {
+        "workId": "bw_work_64f6a5f5b5ea0828",
+        "title": "Sprint 1: Template schema and validation",
+        "kind": "sprint",
+        "priority": "high",
+        "status": "closed",
+        "updatedAt": "2026-07-07T14:37:22.630Z"
+      },
+      {
+        "workId": "bw_work_654176c575986881",
+        "title": "Add declaredCommand and expectedObservable to RequiredCloseoutGate schema",
+        "kind": "task",
+        "priority": "high",
+        "status": "closed",
+        "updatedAt": "2026-07-02T04:10:51.486Z"
+      },
+      {
+        "workId": "bw_work_658ec14e15a797c9",
+        "title": "S03T04 - Extract Boreal color, typography, spacing, and radius tokens",
+        "kind": "task",
+        "priority": "critical",
+        "status": "closed",
+        "updatedAt": "2026-06-27T02:09:52.742Z"
+      },
+      {
+        "workId": "bw_work_67f67c5afd2decc5",
+        "title": "Bundle TUI app into the release dist so bwrk dashboard works from the machine install",
+        "kind": "task",
+        "priority": "high",
+        "status": "closed",
+        "updatedAt": "2026-07-05T17:18:13.337Z"
+      },
+      {
+        "workId": "bw_work_6837ad9e915bd698",
+        "title": "Global aggregator - daemon refresh with lazy TTL fallback",
+        "kind": "task",
+        "priority": "high",
+        "status": "closed",
+        "updatedAt": "2026-07-07T15:48:15.236Z"
+      },
+      {
+        "workId": "bw_work_689d9cc07fb8de38",
+        "title": "Phase 04B - MCP, daemon, and agent-runtime directive APIs",
+        "kind": "milestone",
+        "priority": "high",
+        "status": "closed",
+        "updatedAt": "2026-07-01T21:36:55.978Z"
+      },
+      {
+        "workId": "bw_work_68e889e9827d2b39",
+        "title": "S05T05 - Ship spec/change search, console views, templates, and end-to-end fixtures",
+        "kind": "task",
+        "priority": "normal",
+        "status": "blocked",
+        "updatedAt": "2026-07-10T17:09:33.053Z"
+      },
+      {
+        "workId": "bw_work_693c3817f34ac9d8",
+        "title": "Global dashboard reads rollups only with staleness display",
+        "kind": "task",
+        "priority": "normal",
+        "status": "closed",
+        "updatedAt": "2026-07-07T16:01:56.352Z"
+      },
+      {
+        "workId": "bw_work_6a00769cb6c46b80",
+        "title": "S04T02 - Implement review request, claim, approve, and request-changes workflows",
+        "kind": "task",
+        "priority": "normal",
+        "status": "blocked",
+        "updatedAt": "2026-07-10T17:09:22.745Z"
+      },
+      {
+        "workId": "bw_work_6a4bf5e159d52199",
+        "title": "S05T05 - Backfill directive references or document legacy-only records",
+        "kind": "task",
+        "priority": "normal",
+        "status": "closed",
+        "updatedAt": "2026-07-02T00:23:51.633Z"
+      },
+      {
+        "workId": "bw_work_6a9af2fa7ed41af1",
+        "title": "Sprint: First-class review and audit closeout gates",
+        "kind": "sprint",
+        "priority": "high",
+        "status": "closed",
+        "updatedAt": "2026-07-01T03:02:27.023Z"
+      },
+      {
+        "workId": "bw_work_6b666ed5cee15fe2",
+        "title": "Sibling memory root validation skips realpath boundary checks",
+        "kind": "issue",
+        "priority": "high",
+        "status": "ready",
+        "updatedAt": "2026-07-07T15:03:35.450Z"
+      },
+      {
+        "workId": "bw_work_6d1f6dbe85035670",
+        "title": "Fresh object index can hide deleted object files",
+        "kind": "issue",
+        "priority": "high",
+        "status": "ready",
+        "updatedAt": "2026-07-07T14:18:33.698Z"
+      },
+      {
+        "workId": "bw_work_6d84e592ce2e9e63",
+        "title": "Collapse directive taxonomy to blocking required advisory",
+        "kind": "task",
+        "priority": "normal",
+        "status": "closed",
+        "updatedAt": "2026-07-02T06:05:11.923Z"
+      },
+      {
+        "workId": "bw_work_6dca4409ad4ac24a",
+        "title": "Unknown-flag errors suggest nearest registered flag",
+        "kind": "task",
+        "priority": "normal",
+        "status": "closed",
+        "updatedAt": "2026-07-04T00:29:45.076Z"
+      },
+      {
+        "workId": "bw_work_6e5d2e099cb41f87",
+        "title": "Sprint 2: Instantiation engine (bwrk template run)",
+        "kind": "sprint",
+        "priority": "high",
+        "status": "closed",
+        "updatedAt": "2026-07-07T14:39:01.332Z"
+      },
+      {
+        "workId": "bw_work_6fb7ac64b49e7742",
+        "title": "S12T02 - Centralize child process timeouts and output caps",
+        "kind": "task",
+        "priority": "high",
+        "status": "closed",
+        "updatedAt": "2026-06-27T15:14:02.214Z"
+      },
+      {
+        "workId": "bw_work_6fe0f71fedfcd8a7",
+        "title": "S03T01 - Parse Components.dc.html into a component inventory artifact",
+        "kind": "task",
+        "priority": "critical",
+        "status": "closed",
+        "updatedAt": "2026-06-27T02:05:12.192Z"
+      },
+      {
+        "workId": "bw_work_709c853e6f82b94a",
+        "title": "S05T04 - Add Spec Kit and generic AGENTS-compatible adapters",
+        "kind": "task",
+        "priority": "normal",
+        "status": "blocked",
+        "updatedAt": "2026-07-10T17:09:31.017Z"
+      },
+      {
+        "workId": "bw_work_710151bcfda1669e",
+        "title": "S01T07 - Implement the static master directive registry",
+        "kind": "task",
+        "priority": "critical",
+        "status": "closed",
+        "updatedAt": "2026-07-01T13:59:09.131Z"
+      },
+      {
+        "workId": "bw_work_729ea3c25fca6b4a",
+        "title": "Dependency edges can be added to terminal work without reopening it",
+        "kind": "issue",
+        "priority": "high",
+        "status": "ready",
+        "updatedAt": "2026-07-07T15:21:59.223Z"
+      },
+      {
+        "workId": "bw_work_731f19a7fbd53810",
+        "title": "S04T07 - Add browser smoke tests for console route loading",
+        "kind": "task",
+        "priority": "high",
+        "status": "closed",
+        "updatedAt": "2026-06-27T03:10:58.996Z"
+      },
+      {
+        "workId": "bw_work_74080ec9903fffb2",
+        "title": "S10T04 - Generate command reference and dashboard usage docs",
+        "kind": "task",
+        "priority": "critical",
+        "status": "closed",
+        "updatedAt": "2026-06-27T11:47:57.100Z"
+      },
+      {
+        "workId": "bw_work_750a67aa09e8ebd9",
+        "title": "Rewrite closeout-work.md around gate closeout and agent finish",
+        "kind": "task",
+        "priority": "normal",
+        "status": "closed",
+        "updatedAt": "2026-07-04T07:39:01.470Z"
+      },
+      {
+        "workId": "bw_work_75362a64c98917a1",
+        "title": "S02T01 - Implement status, section, key-value, and result summary primitives",
+        "kind": "task",
+        "priority": "high",
+        "status": "closed",
+        "updatedAt": "2026-06-27T01:33:36.940Z"
+      },
+      {
+        "workId": "bw_work_759dacd2c62727ad",
+        "title": "Phase 03B - Directive operator commands",
+        "kind": "milestone",
+        "priority": "high",
+        "status": "closed",
+        "updatedAt": "2026-07-01T19:16:55.863Z"
+      },
+      {
+        "workId": "bw_work_7682e978c8b2c08e",
+        "title": "T8 Merge driver wiring and rechain repair",
+        "kind": "task",
+        "priority": "normal",
+        "status": "closed",
+        "updatedAt": "2026-07-05T20:26:49.585Z"
+      },
+      {
+        "workId": "bw_work_76ef0067e2d2ec8f",
+        "title": "Console: stale search index silently drops whole live console to fixtures",
+        "kind": "issue",
+        "priority": "high",
+        "status": "closed",
+        "updatedAt": "2026-06-27T18:06:31.502Z"
+      },
+      {
+        "workId": "bw_work_77971342b74d3615",
+        "title": "Hardening S1: Envelope and reference contracts",
+        "kind": "sprint",
+        "priority": "high",
+        "status": "closed",
+        "updatedAt": "2026-07-04T03:41:26.621Z"
+      },
+      {
+        "workId": "bw_work_785e124dc1c7ecd4",
+        "title": "Phase 04A - Workflow and skill directive adoption",
+        "kind": "milestone",
+        "priority": "high",
+        "status": "closed",
+        "updatedAt": "2026-07-01T21:36:45.908Z"
+      },
+      {
+        "workId": "bw_work_78722c3e15d143ba",
+        "title": "S06T02 - Migrate Codex and Claude integrations onto the manifest contract",
+        "kind": "task",
+        "priority": "normal",
+        "status": "blocked",
+        "updatedAt": "2026-07-10T17:09:34.077Z"
+      },
+      {
+        "workId": "bw_work_78fc08c8268fe818",
+        "title": "S06T07 - Add sprint dashboard actions for claim, release, renew, verify, close, and refresh",
+        "kind": "task",
+        "priority": "critical",
+        "status": "closed",
+        "updatedAt": "2026-06-27T06:37:53.166Z"
+      },
+      {
+        "workId": "bw_work_7971e6f401b6bd63",
+        "title": "S01T01 - Define the public-beta wedge, audience, profiles, and non-goals",
+        "kind": "task",
+        "priority": "high",
+        "status": "ready",
+        "updatedAt": "2026-07-10T17:10:33.104Z"
+      },
+      {
+        "workId": "bw_work_7a38f0a77aa2d69d",
+        "title": "S04T04 - Implement scoped merge prepare, apply, resume, rollback, and cleanup",
+        "kind": "task",
+        "priority": "normal",
+        "status": "blocked",
+        "updatedAt": "2026-07-10T17:09:25.866Z"
+      },
+      {
+        "workId": "bw_work_7a78a4b7d9c25f4d",
+        "title": "T1 Search staleness by corpus fingerprint",
+        "kind": "task",
+        "priority": "normal",
+        "status": "closed",
+        "updatedAt": "2026-07-05T14:47:37.720Z"
+      },
+      {
+        "workId": "bw_work_7b9e5a7e6ba14620",
+        "title": "Sprint 05 - Directive acknowledgement, migration, and release hardening",
+        "kind": "sprint",
+        "priority": "high",
+        "status": "closed",
+        "updatedAt": "2026-07-02T00:25:24.832Z"
+      },
+      {
+        "workId": "bw_work_7c504e6bd7de793b",
+        "title": "S03T04 - Add interrupted-sync recovery, backups, doctor repairs, and observability",
+        "kind": "task",
+        "priority": "high",
+        "status": "blocked",
+        "updatedAt": "2026-07-10T17:09:20.707Z"
+      },
+      {
+        "workId": "bw_work_7c7ce47e834467bc",
+        "title": "Phase 05A - Project and bucket registry runtime",
+        "kind": "milestone",
+        "priority": "high",
+        "status": "closed",
+        "updatedAt": "2026-06-27T04:00:39.915Z"
+      },
+      {
+        "workId": "bw_work_7d32023f7bd48de3",
+        "title": "S09T03 - Add MCP leakage and path traversal test plan",
+        "kind": "task",
+        "priority": "high",
+        "status": "closed",
+        "updatedAt": "2026-06-27T10:33:49.848Z"
+      },
+      {
+        "workId": "bw_work_7ec3f08689c6cfb0",
+        "title": "S02T02 - Implement directive bundle assembly pipeline",
+        "kind": "task",
+        "priority": "critical",
+        "status": "closed",
+        "updatedAt": "2026-07-01T15:59:21.465Z"
+      },
+      {
+        "workId": "bw_work_7edc1647b208240b",
+        "title": "S04T09 - Add console component, gallery, and smoke tests",
+        "kind": "task",
+        "priority": "normal",
+        "status": "closed",
+        "updatedAt": "2026-07-01T21:37:03.545Z"
+      },
+      {
+        "workId": "bw_work_7f8f98b10817ca8b",
+        "title": "S03T10 - Build a local component gallery route or fixture",
+        "kind": "task",
+        "priority": "critical",
+        "status": "closed",
+        "updatedAt": "2026-06-27T02:24:38.068Z"
+      },
+      {
+        "workId": "bw_work_7fcfae6ab4a9d20c",
+        "title": "Ledger sequence stamp on every JSON response plus work show --since",
+        "kind": "task",
+        "priority": "high",
+        "status": "closed",
+        "updatedAt": "2026-07-02T23:00:16.212Z"
+      },
+      {
+        "workId": "bw_work_802a3a492fd7462a",
+        "title": "S08 - Progressive UX and Surface Parity",
+        "kind": "sprint",
+        "priority": "high",
+        "status": "blocked",
+        "updatedAt": "2026-07-10T17:10:21.633Z"
+      },
+      {
+        "workId": "bw_work_8178f36940dd8cf9",
+        "title": "S04T05 - Add command execution boundary for safe dashboard actions",
+        "kind": "task",
+        "priority": "high",
+        "status": "closed",
+        "updatedAt": "2026-06-27T03:01:42.881Z"
+      },
+      {
+        "workId": "bw_work_81e840dc016baf25",
+        "title": "S05T04 - Implement global overview metrics and bucket grid",
+        "kind": "task",
+        "priority": "high",
+        "status": "closed",
+        "updatedAt": "2026-06-27T04:13:09.491Z"
+      },
+      {
+        "workId": "bw_work_82217510ab7a36db",
+        "title": "Sprint 1 - executor context fidelity",
+        "kind": "sprint",
+        "priority": "high",
+        "status": "closed",
+        "updatedAt": "2026-07-02T04:13:52.677Z"
+      },
+      {
+        "workId": "bw_work_8316c381f988bbdb",
+        "title": "S11T08 - Reconcile overlap with existing runtime and release hardening work",
+        "kind": "task",
+        "priority": "critical",
+        "status": "closed",
+        "updatedAt": "2026-06-27T02:11:19.792Z"
+      },
+      {
+        "workId": "bw_work_83310623b2f62418",
+        "title": "File-lock directories can write owner metadata through symlink escapes",
+        "kind": "issue",
+        "priority": "high",
+        "status": "ready",
+        "updatedAt": "2026-07-07T15:21:54.897Z"
+      },
+      {
+        "workId": "bw_work_83ba3cd38f37b9f0",
+        "title": "S01T09 - Add generated command-doc check plan",
+        "kind": "task",
+        "priority": "critical",
+        "status": "closed",
+        "updatedAt": "2026-06-27T01:29:47.155Z"
+      },
+      {
+        "workId": "bw_work_83d26ba4b699e252",
+        "title": "Termination property test for the next loop",
+        "kind": "task",
+        "priority": "normal",
+        "status": "closed",
+        "updatedAt": "2026-07-02T06:57:40.568Z"
+      },
+      {
+        "workId": "bw_work_84a3cc15615ae7c1",
+        "title": "S05T02 - Add directive acknowledgement runtime and CLI commands",
+        "kind": "task",
+        "priority": "high",
+        "status": "closed",
+        "updatedAt": "2026-07-02T00:24:21.645Z"
+      },
+      {
+        "workId": "bw_work_84aed5746b6e16e8",
+        "title": "S02T08 - Compile handoff and workflow-next directives",
+        "kind": "task",
+        "priority": "high",
+        "status": "closed",
+        "updatedAt": "2026-07-01T16:00:20.328Z"
+      },
+      {
+        "workId": "bw_work_84db80b73ef1a6f4",
+        "title": "S05T09 - Add global dashboard command/data endpoint",
+        "kind": "task",
+        "priority": "high",
+        "status": "closed",
+        "updatedAt": "2026-06-27T05:27:53.841Z"
+      },
+      {
+        "workId": "bw_work_84e266c37e3d8da1",
+        "title": "Adding a blocker does not cascade readiness to downstream dependents",
+        "kind": "issue",
+        "priority": "critical",
+        "status": "ready",
+        "updatedAt": "2026-07-07T14:42:24.981Z"
+      },
+      {
+        "workId": "bw_work_84f19476708d17f3",
+        "title": "Phase 07C - Reports, Obsidian links, and static exports",
+        "kind": "milestone",
+        "priority": "high",
+        "status": "closed",
+        "updatedAt": "2026-06-27T08:59:38.176Z"
+      },
+      {
+        "workId": "bw_work_85570d841936e595",
+        "title": "Phase 03D - Component gallery and visual verification",
+        "kind": "milestone",
+        "priority": "critical",
+        "status": "closed",
+        "updatedAt": "2026-06-27T02:26:35.740Z"
+      },
+      {
+        "workId": "bw_work_855968120dba50c0",
+        "title": "Global manager layer - first-class cross-project PM addon",
+        "kind": "milestone",
+        "priority": "high",
+        "status": "closed",
+        "updatedAt": "2026-07-07T20:08:57.504Z"
+      },
+      {
+        "workId": "bw_work_88212d97f4170718",
+        "title": "MCP tools/call notifications can mutate without returning operation evidence",
+        "kind": "issue",
+        "priority": "high",
+        "status": "ready",
+        "updatedAt": "2026-07-07T15:03:40.787Z"
+      },
+      {
+        "workId": "bw_work_884c1aa9d9e17515",
+        "title": "TUI command descriptors are not exact copyable commands",
+        "kind": "issue",
+        "priority": "normal",
+        "status": "ready",
+        "updatedAt": "2026-07-07T14:18:30.826Z"
+      },
+      {
+        "workId": "bw_work_892c846fd67abe24",
+        "title": "S11T07 - Update agent workflows and handoff wording for git health caveats",
+        "kind": "task",
+        "priority": "critical",
+        "status": "closed",
+        "updatedAt": "2026-06-27T02:11:17.694Z"
+      },
+      {
+        "workId": "bw_work_899c9d3694405808",
+        "title": "S09T06 - Add MCP install/docs workflow",
+        "kind": "task",
+        "priority": "high",
+        "status": "closed",
+        "updatedAt": "2026-06-27T10:50:55.479Z"
+      },
+      {
+        "workId": "bw_work_899ec001153f8f94",
+        "title": "S03T05 - Implement directives compile, render, and explain commands",
+        "kind": "task",
+        "priority": "high",
+        "status": "closed",
+        "updatedAt": "2026-07-01T19:18:15.715Z"
+      },
+      {
+        "workId": "bw_work_8a5d149544a31fe1",
+        "title": "Issue - Boreal V1 audit action backlog",
+        "kind": "issue",
+        "priority": "high",
+        "status": "closed",
+        "updatedAt": "2026-06-27T15:53:20.139Z"
+      },
+      {
+        "workId": "bw_work_8aaa9c8c8b9c9158",
+        "title": "Fix skill frontmatter YAML compatibility and standards-based validation",
+        "kind": "issue",
+        "priority": "high",
+        "status": "closed",
+        "updatedAt": "2026-06-28T18:53:11.399Z"
+      },
+      {
+        "workId": "bw_work_8b2d4f46a128440d",
+        "title": "S12T03 - Add console CSRF origin and session token protection",
+        "kind": "task",
+        "priority": "high",
+        "status": "closed",
+        "updatedAt": "2026-06-27T15:14:21.286Z"
+      },
+      {
+        "workId": "bw_work_8b936d89babd0334",
+        "title": "S02T08 - Add sync, lock, and agent status dashboard views",
+        "kind": "task",
+        "priority": "high",
+        "status": "closed",
+        "updatedAt": "2026-06-27T01:57:44.018Z"
+      },
+      {
+        "workId": "bw_work_8d730c95bb3f791d",
+        "title": "S03T01 - Ratify one canonical storage, synchronization, and conflict contract",
+        "kind": "task",
+        "priority": "high",
+        "status": "blocked",
+        "updatedAt": "2026-07-10T17:10:05.143Z"
+      },
+      {
+        "workId": "bw_work_8e38487249e3c3c7",
+        "title": "Sprint 4: Step bindings, docs, and end-to-end example",
+        "kind": "sprint",
+        "priority": "normal",
+        "status": "closed",
+        "updatedAt": "2026-07-07T14:39:25.468Z"
+      },
+      {
+        "workId": "bw_work_8e88beec04892ea1",
+        "title": "S09T02 - Define MCP read/write permission tiers",
+        "kind": "task",
+        "priority": "high",
+        "status": "closed",
+        "updatedAt": "2026-06-27T10:30:45.509Z"
+      },
+      {
+        "workId": "bw_work_8f671bf4c9b165e1",
+        "title": "Search, Worktrees & Collaboration Overhaul",
+        "kind": "milestone",
+        "priority": "normal",
+        "status": "closed",
+        "updatedAt": "2026-07-05T21:47:07.747Z"
+      },
+      {
+        "workId": "bw_work_8fc2e901435de2fb",
+        "title": "Stable doctor and gate verdict shape under result truncation",
+        "kind": "task",
+        "priority": "normal",
+        "status": "closed",
+        "updatedAt": "2026-07-04T00:44:42.711Z"
+      },
+      {
+        "workId": "bw_work_907b022e44e9d270",
+        "title": "Circuit breaker on sync refresh and vault init failures",
+        "kind": "task",
+        "priority": "high",
+        "status": "closed",
+        "updatedAt": "2026-07-02T23:01:58.468Z"
+      },
+      {
+        "workId": "bw_work_9182a6cd0594a668",
+        "title": "S07T02 - Expose workflow, template, policy, gate, and validator extension points",
+        "kind": "task",
+        "priority": "normal",
+        "status": "blocked",
+        "updatedAt": "2026-07-10T17:09:42.912Z"
+      },
+      {
+        "workId": "bw_work_91ea3e65bf848373",
+        "title": "Stable registry project ids derived from project identity",
+        "kind": "task",
+        "priority": "high",
+        "status": "closed",
+        "updatedAt": "2026-07-04T01:47:12.379Z"
+      },
+      {
+        "workId": "bw_work_920aacf620f34130",
+        "title": "prepare-npm-package --out can recursively delete an unbounded path",
+        "kind": "issue",
+        "priority": "high",
+        "status": "ready",
+        "updatedAt": "2026-07-07T15:03:25.120Z"
+      },
+      {
+        "workId": "bw_work_923ad83e0bbaf046",
+        "title": "S04T04 - Add live Boreal data adapter for dashboard view models",
+        "kind": "task",
+        "priority": "high",
+        "status": "closed",
+        "updatedAt": "2026-06-27T03:01:23.075Z"
+      },
+      {
+        "workId": "bw_work_928d7251af2a0422",
+        "title": "T3 FTS5 search in index.sqlite",
+        "kind": "task",
+        "priority": "normal",
+        "status": "closed",
+        "updatedAt": "2026-07-05T16:14:04.691Z"
+      },
+      {
+        "workId": "bw_work_93432bddd7920d1b",
+        "title": "Canonicalize deterministic ID inputs before hashing record content",
+        "kind": "issue",
+        "priority": "high",
+        "status": "closed",
+        "updatedAt": "2026-06-28T18:53:16.693Z"
+      },
+      {
+        "workId": "bw_work_936da4b96e2889ae",
+        "title": "S06T04 - Add VS Code MCP and generic AGENTS.md/MCP adapters with context budgets",
+        "kind": "task",
+        "priority": "normal",
+        "status": "blocked",
+        "updatedAt": "2026-07-10T17:09:36.224Z"
+      },
+      {
+        "workId": "bw_work_93c7fb7ee4b40b51",
+        "title": "Phase 04C - Console verification harness",
+        "kind": "milestone",
+        "priority": "high",
+        "status": "closed",
+        "updatedAt": "2026-06-27T03:17:14.304Z"
+      },
+      {
+        "workId": "bw_work_946d2f650badbcca",
+        "title": "Phase 01C - Dashboard and sprint command contracts",
+        "kind": "milestone",
+        "priority": "critical",
+        "status": "closed",
+        "updatedAt": "2026-06-27T01:30:17.630Z"
+      },
+      {
+        "workId": "bw_work_94b91db1ed588817",
+        "title": "S03T08 - Add closeout gate and import-export directive validation",
+        "kind": "task",
+        "priority": "high",
+        "status": "closed",
+        "updatedAt": "2026-07-01T19:19:06.152Z"
+      },
+      {
+        "workId": "bw_work_955684b17c4a9349",
+        "title": "Trim mutation response payloads",
+        "kind": "task",
+        "priority": "normal",
+        "status": "closed",
+        "updatedAt": "2026-07-04T05:58:18.806Z"
+      },
+      {
+        "workId": "bw_work_95ca197bf5b36d26",
+        "title": "S04T08 - Add CLI-to-console contract tests",
+        "kind": "task",
+        "priority": "high",
+        "status": "closed",
+        "updatedAt": "2026-06-27T03:14:32.115Z"
+      },
+      {
+        "workId": "bw_work_963fc14a5f02f660",
+        "title": "Directive bundle dedup via sourceHash",
+        "kind": "task",
+        "priority": "normal",
+        "status": "closed",
+        "updatedAt": "2026-07-04T06:06:31.428Z"
+      },
+      {
+        "workId": "bw_work_97543f6cab7ab9ef",
+        "title": "S07T03 - Implement contradiction review panel",
+        "kind": "task",
+        "priority": "high",
+        "status": "closed",
+        "updatedAt": "2026-06-27T07:46:05.923Z"
+      },
+      {
+        "workId": "bw_work_982454b209365350",
+        "title": "S09T05 - Add mutating MCP tools through CLI command contracts",
+        "kind": "task",
+        "priority": "high",
+        "status": "closed",
+        "updatedAt": "2026-06-27T10:50:35.076Z"
+      },
+      {
+        "workId": "bw_work_98910d9b7bb5201e",
+        "title": "Reserved work can become blocked and still be closed by agent finish",
+        "kind": "issue",
+        "priority": "critical",
+        "status": "ready",
+        "updatedAt": "2026-07-07T14:18:39.241Z"
+      },
+      {
+        "workId": "bw_work_98d8ef05f2335267",
+        "title": "Console: command buttons dump raw JSON instead of returning to page",
+        "kind": "issue",
+        "priority": "critical",
+        "status": "closed",
+        "updatedAt": "2026-06-27T18:06:25.730Z"
+      },
+      {
+        "workId": "bw_work_990a8e5778b8a8e1",
+        "title": "S02T05 - Add non-TTY fallback and terminal cleanup safeguards",
+        "kind": "task",
+        "priority": "high",
+        "status": "closed",
+        "updatedAt": "2026-06-27T01:43:47.633Z"
+      },
+      {
+        "workId": "bw_work_9940c6168ebfb499",
+        "title": "Registry lifecycle states with doctor integration",
+        "kind": "task",
+        "priority": "high",
+        "status": "closed",
+        "updatedAt": "2026-07-07T14:46:41.505Z"
+      },
+      {
+        "workId": "bw_work_9a88c3aa9bc74809",
+        "title": "S07T01 - Define extension manifest, identity, permissions, dependencies, and compatibility",
+        "kind": "task",
+        "priority": "normal",
+        "status": "blocked",
+        "updatedAt": "2026-07-10T17:10:15.425Z"
+      },
+      {
+        "workId": "bw_work_9a961b516478adae",
+        "title": "Workflow custom templates",
+        "kind": "milestone",
+        "priority": "high",
+        "status": "closed",
+        "updatedAt": "2026-07-07T14:39:38.642Z"
+      },
+      {
+        "workId": "bw_work_9b9ac1a3465ac087",
+        "title": "Mutating commands refresh derived artifacts inline",
+        "kind": "task",
+        "priority": "high",
+        "status": "closed",
+        "updatedAt": "2026-07-04T01:21:23.222Z"
+      },
+      {
+        "workId": "bw_work_9c79eef4a091c420",
+        "title": "S02T04 - Compile closeout and cancellation directives",
+        "kind": "task",
+        "priority": "critical",
+        "status": "closed",
+        "updatedAt": "2026-07-01T15:59:30.942Z"
+      },
+      {
+        "workId": "bw_work_9d293e42857ac20e",
+        "title": "S01T08 - Specify sprint activation and board command contracts",
+        "kind": "task",
+        "priority": "critical",
+        "status": "closed",
+        "updatedAt": "2026-06-27T01:29:46.589Z"
+      },
+      {
+        "workId": "bw_work_9da7a4389cd428e9",
+        "title": "S03T12 - Audit converted language and UI copy",
+        "kind": "task",
+        "priority": "critical",
+        "status": "closed",
+        "updatedAt": "2026-06-27T02:25:07.094Z"
+      },
+      {
+        "workId": "bw_work_9ebb1a5c89c6223e",
+        "title": "Workspace audits have no record-free read-only mode",
+        "kind": "issue",
+        "priority": "normal",
+        "status": "ready",
+        "updatedAt": "2026-07-07T14:42:54.144Z"
+      },
+      {
+        "workId": "bw_work_9ef6934194be3516",
+        "title": "Hardening S4: Golden-path workflows and one-shot closeout",
+        "kind": "sprint",
+        "priority": "normal",
+        "status": "closed",
+        "updatedAt": "2026-07-04T07:42:04.141Z"
+      },
+      {
+        "workId": "bw_work_9f430ed36592199d",
+        "title": "S10T05 - Add full agent E2E test suite instructions and fixture automation",
+        "kind": "task",
+        "priority": "critical",
+        "status": "closed",
+        "updatedAt": "2026-06-27T11:57:48.047Z"
+      },
+      {
+        "workId": "bw_work_9fff3f7de3cff52d",
+        "title": "Phase 03A - agentDirectives CLI envelope contract",
+        "kind": "milestone",
+        "priority": "high",
+        "status": "closed",
+        "updatedAt": "2026-07-01T19:16:42.344Z"
+      },
+      {
+        "workId": "bw_work_a04168615012b6f5",
+        "title": "S06T08 - Implement sprint discoveries and verification queues",
+        "kind": "task",
+        "priority": "critical",
+        "status": "closed",
+        "updatedAt": "2026-06-27T06:55:01.654Z"
+      },
+      {
+        "workId": "bw_work_a144a8bd521545ab",
+        "title": "T11 global status across projects",
+        "kind": "task",
+        "priority": "normal",
+        "status": "closed",
+        "updatedAt": "2026-07-05T21:34:59.481Z"
+      },
+      {
+        "workId": "bw_work_a159117052d5ee40",
+        "title": "Sprint 07 - Memory, raw inbox, and knowledge dashboards",
+        "kind": "sprint",
+        "priority": "high",
+        "status": "closed",
+        "updatedAt": "2026-06-27T09:00:10.702Z"
+      },
+      {
+        "workId": "bw_work_a17e8675d61caf56",
+        "title": "Emit EnforcementGaps from all enforcement points",
+        "kind": "task",
+        "priority": "high",
+        "status": "closed",
+        "updatedAt": "2026-07-02T04:26:02.092Z"
+      },
+      {
+        "workId": "bw_work_a17fd98f95db6956",
+        "title": "Enforce required gates during work and sprint closeout",
+        "kind": "task",
+        "priority": "high",
+        "status": "closed",
+        "updatedAt": "2026-07-01T01:01:31.059Z"
+      },
+      {
+        "workId": "bw_work_a29c59951564c071",
+        "title": "T5 Chain-preserving event log rotation",
+        "kind": "task",
+        "priority": "normal",
+        "status": "closed",
+        "updatedAt": "2026-07-05T17:30:14.087Z"
+      },
+      {
+        "workId": "bw_work_a2e2ed156686ae43",
+        "title": "Fix readyWork.next narrowing typecheck failure and gate closes on pnpm check",
+        "kind": "task",
+        "priority": "critical",
+        "status": "closed",
+        "updatedAt": "2026-07-02T16:37:42.475Z"
+      },
+      {
+        "workId": "bw_work_a30b298a14fd752b",
+        "title": "S03T09 - Add CLI enforcement and fixture regression tests",
+        "kind": "task",
+        "priority": "high",
+        "status": "closed",
+        "updatedAt": "2026-07-01T19:19:20.315Z"
+      },
+      {
+        "workId": "bw_work_a347472ff81df21c",
+        "title": "S03T03 - Add CLI JSON compatibility contract tests",
+        "kind": "task",
+        "priority": "high",
+        "status": "closed",
+        "updatedAt": "2026-07-01T19:17:49.203Z"
+      },
+      {
+        "workId": "bw_work_a38b7fda0499dc3b",
+        "title": "boreal reference URI scheme with fail-soft registry resolution",
+        "kind": "task",
+        "priority": "high",
+        "status": "closed",
+        "updatedAt": "2026-07-07T14:22:43.962Z"
+      },
+      {
+        "workId": "bw_work_a3a5e85cdfbfd212",
+        "title": "Issue - Git health checks misclassify protected-main collaboration state",
+        "kind": "issue",
+        "priority": "critical",
+        "status": "closed",
+        "updatedAt": "2026-06-27T02:12:02.178Z"
+      },
+      {
+        "workId": "bw_work_a421ab972bea37fc",
+        "title": "H3 Optimizations: composite lifecycle, freshness stamps, retention",
+        "kind": "sprint",
+        "priority": "normal",
+        "status": "closed",
+        "updatedAt": "2026-07-02T23:05:46.653Z"
+      },
+      {
+        "workId": "bw_work_a4b29fdf59640f94",
+        "title": "Phase 10C - V1 release gate and closeout",
+        "kind": "milestone",
+        "priority": "critical",
+        "status": "closed",
+        "updatedAt": "2026-06-27T12:30:49.733Z"
+      },
+      {
+        "workId": "bw_work_a5f6cd2e0899f7b4",
+        "title": "Sprint 4 - declared done-gates tier 1",
+        "kind": "sprint",
+        "priority": "high",
+        "status": "closed",
+        "updatedAt": "2026-07-02T06:34:38.601Z"
+      },
+      {
+        "workId": "bw_work_a77c72fee51fe8c2",
+        "title": "Object index cache can be redirected through symlinked .boreal/cache",
+        "kind": "issue",
+        "priority": "high",
+        "status": "closed",
+        "updatedAt": "2026-07-10T13:44:39.657Z"
+      },
+      {
+        "workId": "bw_work_a78755255b237c59",
+        "title": "Cross-project graph edge endpoints",
+        "kind": "task",
+        "priority": "high",
+        "status": "closed",
+        "updatedAt": "2026-07-07T14:31:52.277Z"
+      },
+      {
+        "workId": "bw_work_a7bb9c5d12374674",
+        "title": "Lock lifecycle: contention retry, single source of truth, decidable staleness",
+        "kind": "task",
+        "priority": "normal",
+        "status": "closed",
+        "updatedAt": "2026-07-04T04:32:38.964Z"
+      },
+      {
+        "workId": "bw_work_a7dec8d6612ca269",
+        "title": "S13T04 - Add sprint capacity commitment and closeout metrics",
+        "kind": "task",
+        "priority": "normal",
+        "status": "closed",
+        "updatedAt": "2026-06-27T15:43:29.840Z"
+      },
+      {
+        "workId": "bw_work_a99e751b23f33287",
+        "title": "S02T06 - Compile git checkpoint and dirty-state directives",
+        "kind": "task",
+        "priority": "high",
+        "status": "closed",
+        "updatedAt": "2026-07-01T16:00:30.986Z"
+      },
+      {
+        "workId": "bw_work_a9c29939b0ffd287",
+        "title": "S10T07 - Run strict doctor, sync refresh, tests, and browser verification",
+        "kind": "task",
+        "priority": "critical",
+        "status": "closed",
+        "updatedAt": "2026-06-27T12:14:30.228Z"
+      },
+      {
+        "workId": "bw_work_aa797c6589245dcc",
+        "title": "Results directory retention: extend operation prune to spilled query outputs",
+        "kind": "task",
+        "priority": "low",
+        "status": "closed",
+        "updatedAt": "2026-07-02T23:03:06.034Z"
+      },
+      {
+        "workId": "bw_work_aac15271c8621eed",
+        "title": "File and surface declared gates via CLI and directives",
+        "kind": "task",
+        "priority": "high",
+        "status": "closed",
+        "updatedAt": "2026-07-02T05:35:54.057Z"
+      },
+      {
+        "workId": "bw_work_aaca400c1ecaddb6",
+        "title": "Phase 03C - Split primitives into component files",
+        "kind": "milestone",
+        "priority": "critical",
+        "status": "closed",
+        "updatedAt": "2026-06-27T02:21:02.834Z"
+      },
+      {
+        "workId": "bw_work_aaf62b5b049152db",
+        "title": "S02T09 - Add runtime compiler integration tests",
+        "kind": "task",
+        "priority": "high",
+        "status": "closed",
+        "updatedAt": "2026-07-01T16:00:41.628Z"
+      },
+      {
+        "workId": "bw_work_ab2088db3b3cb2d4",
+        "title": "S05T06 - Update import-export, docs, and release notes for migration",
+        "kind": "task",
+        "priority": "normal",
+        "status": "closed",
+        "updatedAt": "2026-07-02T00:24:05.009Z"
+      },
+      {
+        "workId": "bw_work_aba97aad1662e01a",
+        "title": "S10T09 - Close v1 milestone with evidence and verification",
+        "kind": "task",
+        "priority": "critical",
+        "status": "closed",
+        "updatedAt": "2026-06-27T12:30:23.678Z"
+      },
+      {
+        "workId": "bw_work_abdd58eae33f9127",
+        "title": "S01T01 - Snapshot live Boreal state and command coverage",
+        "kind": "task",
+        "priority": "critical",
+        "status": "closed",
+        "updatedAt": "2026-06-27T01:21:30.576Z"
+      },
+      {
+        "workId": "bw_work_ac21d6f37eb204e2",
+        "title": "Phase 02B - Closeout, summary, sprint, and gate directive integration",
+        "kind": "milestone",
+        "priority": "critical",
+        "status": "closed",
+        "updatedAt": "2026-07-01T15:58:46.123Z"
+      },
+      {
+        "workId": "bw_work_ac64e106359041e5",
+        "title": "Phase 01A - Confirm current state and backlog contract",
+        "kind": "milestone",
+        "priority": "critical",
+        "status": "closed",
+        "updatedAt": "2026-06-27T01:23:00.936Z"
+      },
+      {
+        "workId": "bw_work_ac840c148254ac0c",
+        "title": "S04T02 - Implement the dashboard shell, sidebar, topbar, and route layout",
+        "kind": "task",
+        "priority": "high",
+        "status": "closed",
+        "updatedAt": "2026-06-27T02:56:45.209Z"
+      },
+      {
+        "workId": "bw_work_acca613bc7cc82a6",
+        "title": "Phase 01C - Static registry, fixtures, and validation tests",
+        "kind": "milestone",
+        "priority": "critical",
+        "status": "closed",
+        "updatedAt": "2026-07-01T13:57:38.333Z"
+      },
+      {
+        "workId": "bw_work_ad05324b7dc0ace9",
+        "title": "S14T04 - Establish scale benchmarks and migration gates",
+        "kind": "task",
+        "priority": "normal",
+        "status": "closed",
+        "updatedAt": "2026-06-27T15:51:38.285Z"
+      },
+      {
+        "workId": "bw_work_ada82d27cb3eef95",
+        "title": "Directive-first runtime refactor - directives as projections of enforcement",
+        "kind": "milestone",
+        "priority": "high",
+        "status": "closed",
+        "updatedAt": "2026-07-02T07:31:09.001Z"
+      },
+      {
+        "workId": "bw_work_adfa599abfd9140d",
+        "title": "S07T09 - Wire memory dashboard actions to skills/workflows",
+        "kind": "task",
+        "priority": "high",
+        "status": "closed",
+        "updatedAt": "2026-06-27T08:57:18.091Z"
+      },
+      {
+        "workId": "bw_work_ae35c6a76db5f6e0",
+        "title": "T12 Final verification and dogfood pass",
+        "kind": "task",
+        "priority": "normal",
+        "status": "closed",
+        "updatedAt": "2026-07-05T21:44:58.697Z"
+      },
+      {
+        "workId": "bw_work_ae3fccec127caea8",
+        "title": "Make workflow playbooks role-specific enough to prevent command guessing",
+        "kind": "issue",
+        "priority": "high",
+        "status": "closed",
+        "updatedAt": "2026-06-27T00:52:50.711Z"
+      },
+      {
+        "workId": "bw_work_af3ced730f470a9e",
+        "title": "Phase 01A - Directive architecture and safety contract",
+        "kind": "milestone",
+        "priority": "critical",
+        "status": "closed",
+        "updatedAt": "2026-07-01T13:57:15.145Z"
+      },
+      {
+        "workId": "bw_work_b0575962b2bbf531",
+        "title": "Add recent closed-work query command",
+        "kind": "task",
+        "priority": "high",
+        "status": "closed",
+        "updatedAt": "2026-07-01T02:21:52.851Z"
+      },
+      {
+        "workId": "bw_work_b06599d03c5f7a3e",
+        "title": "S10T06 - Re-audit skills, workflows, and templates after new commands",
+        "kind": "task",
+        "priority": "critical",
+        "status": "closed",
+        "updatedAt": "2026-06-27T12:01:43.826Z"
+      },
+      {
+        "workId": "bw_work_b09849054f44389f",
+        "title": "S05T06 - Implement global search and actor activity panels",
+        "kind": "task",
+        "priority": "high",
+        "status": "closed",
+        "updatedAt": "2026-06-27T04:42:11.516Z"
+      },
+      {
+        "workId": "bw_work_b0c02f91b7314d3c",
+        "title": "Contractual link and unlink semantics - non-invasive and reversible",
+        "kind": "task",
+        "priority": "high",
+        "status": "closed",
+        "updatedAt": "2026-07-07T15:00:03.127Z"
+      },
+      {
+        "workId": "bw_work_b12e989965546764",
+        "title": "S05T03 - Add registry migration/import path from existing project setup",
+        "kind": "task",
+        "priority": "high",
+        "status": "closed",
+        "updatedAt": "2026-06-27T03:51:14.580Z"
+      },
+      {
+        "workId": "bw_work_b14cc1f377cc2f7c",
+        "title": "Phase 05A - Directive acknowledgement records and commands",
+        "kind": "milestone",
+        "priority": "high",
+        "status": "closed",
+        "updatedAt": "2026-07-02T00:24:27.049Z"
+      },
+      {
+        "workId": "bw_work_b1c9d6ae0a1dfc60",
+        "title": "Homebrew formula drift is not caught by CI",
+        "kind": "issue",
+        "priority": "normal",
+        "status": "ready",
+        "updatedAt": "2026-07-07T14:42:29.739Z"
+      },
+      {
+        "workId": "bw_work_b1ec9c9de728d80d",
+        "title": "S03T11 - Add browser visual smoke checks for key components",
+        "kind": "task",
+        "priority": "critical",
+        "status": "closed",
+        "updatedAt": "2026-06-27T02:25:58.609Z"
+      },
+      {
+        "workId": "bw_work_b1ecf1da65669b06",
+        "title": "Repo-pinned delegation can execute an out-of-workspace binary",
+        "kind": "issue",
+        "priority": "critical",
+        "status": "ready",
+        "updatedAt": "2026-07-07T14:39:32.400Z"
+      },
+      {
+        "workId": "bw_work_b214e465cdcf424c",
+        "title": "S11T01 - Inventory git health call sites and current failure modes",
+        "kind": "task",
+        "priority": "critical",
+        "status": "closed",
+        "updatedAt": "2026-06-27T02:10:20.927Z"
+      },
+      {
+        "workId": "bw_work_b3b0fa49a849e8ff",
+        "title": "Expired active reservations can be renewed back to life",
+        "kind": "issue",
+        "priority": "critical",
+        "status": "ready",
+        "updatedAt": "2026-07-07T14:18:38.539Z"
+      },
+      {
+        "workId": "bw_work_b3d2c815792e4d31",
+        "title": "Sprint 11 - Git health surface hardening",
+        "kind": "sprint",
+        "priority": "critical",
+        "status": "closed",
+        "updatedAt": "2026-06-27T02:12:00.047Z"
+      },
+      {
+        "workId": "bw_work_b3d63fc05083d118",
+        "title": "Phase 02A - Shared CLI render primitives",
+        "kind": "milestone",
+        "priority": "high",
+        "status": "closed",
+        "updatedAt": "2026-06-27T01:34:12.813Z"
+      },
+      {
+        "workId": "bw_work_b3d6b61ed29810fe",
+        "title": "Object loading follows symlinked JSON records outside .boreal/objects",
+        "kind": "issue",
+        "priority": "critical",
+        "status": "ready",
+        "updatedAt": "2026-07-07T14:40:16.465Z"
+      },
+      {
+        "workId": "bw_work_b3d8000fb9705638",
+        "title": "CLI resolve surface and cross-reference rendering",
+        "kind": "task",
+        "priority": "normal",
+        "status": "closed",
+        "updatedAt": "2026-07-07T17:35:38.481Z"
+      },
+      {
+        "workId": "bw_work_b4845319e4ec3a0e",
+        "title": "Phase 02B - Interactive init and installer flows",
+        "kind": "milestone",
+        "priority": "high",
+        "status": "closed",
+        "updatedAt": "2026-06-27T01:44:17.499Z"
+      },
+      {
+        "workId": "bw_work_b4cbe135491b4e74",
+        "title": "S03T01 - Extend CLI output envelope with agentDirectives",
+        "kind": "task",
+        "priority": "high",
+        "status": "closed",
+        "updatedAt": "2026-07-01T19:17:22.983Z"
+      },
+      {
+        "workId": "bw_work_b4d4261f0cc959ad",
+        "title": "Console global board - lanes columns rails and staleness",
+        "kind": "task",
+        "priority": "normal",
+        "status": "closed",
+        "updatedAt": "2026-07-07T17:57:31.635Z"
+      },
+      {
+        "workId": "bw_work_b6f5826aedc08881",
+        "title": "S09T04 - Finalize public repository governance, documentation, and support boundaries",
+        "kind": "task",
+        "priority": "normal",
+        "status": "blocked",
+        "updatedAt": "2026-07-10T17:10:32.087Z"
+      },
+      {
+        "workId": "bw_work_b71214b0896e55b6",
+        "title": "S01T02 - Document dashboard scope from component dump and existing docs",
+        "kind": "task",
+        "priority": "critical",
+        "status": "closed",
+        "updatedAt": "2026-06-27T01:21:31.073Z"
+      },
+      {
+        "workId": "bw_work_b7798104fa017b79",
+        "title": "Shrink directive compiler to a gap projection",
+        "kind": "task",
+        "priority": "high",
+        "status": "closed",
+        "updatedAt": "2026-07-02T05:49:30.628Z"
+      },
+      {
+        "workId": "bw_work_b8218c125e55f801",
+        "title": "S12T05 - Harden evidence command redaction and evidence-run capture",
+        "kind": "task",
+        "priority": "normal",
+        "status": "closed",
+        "updatedAt": "2026-06-27T15:15:01.270Z"
+      },
+      {
+        "workId": "bw_work_b84a64ebd10d70ce",
+        "title": "S03T07 - Add directive doctor diagnostics",
+        "kind": "task",
+        "priority": "high",
+        "status": "closed",
+        "updatedAt": "2026-07-01T19:18:47.677Z"
+      },
+      {
+        "workId": "bw_work_b89f76d2d1eb1590",
+        "title": "S08T05 - Link runtime claims and decisions to memory wiki pages",
+        "kind": "task",
+        "priority": "critical",
+        "status": "closed",
+        "updatedAt": "2026-06-27T09:47:47.139Z"
+      },
+      {
+        "workId": "bw_work_b91cf4678055202d",
+        "title": "Scoped required gates pass when target resolution is empty",
+        "kind": "issue",
+        "priority": "high",
+        "status": "ready",
+        "updatedAt": "2026-07-07T15:03:47.758Z"
+      },
+      {
+        "workId": "bw_work_ba595f5b3a4ab92c",
+        "title": "S04T09 - Document local console development workflow",
+        "kind": "task",
+        "priority": "high",
+        "status": "closed",
+        "updatedAt": "2026-06-27T03:16:03.330Z"
+      },
+      {
+        "workId": "bw_work_bb8510ce1375df49",
+        "title": "Self-healing search index: auto-rebuild on staleness or corruption",
+        "kind": "task",
+        "priority": "high",
+        "status": "closed",
+        "updatedAt": "2026-07-02T23:02:15.148Z"
+      },
+      {
+        "workId": "bw_work_bb88a0139ee6fffa",
+        "title": "Retire directive health coherence checker",
+        "kind": "task",
+        "priority": "low",
+        "status": "closed",
+        "updatedAt": "2026-07-02T06:25:59.754Z"
+      },
+      {
+        "workId": "bw_work_bb8e04af25c1c8cb",
+        "title": "Idempotent agent finish and work release",
+        "kind": "task",
+        "priority": "normal",
+        "status": "closed",
+        "updatedAt": "2026-07-02T23:01:23.859Z"
+      },
+      {
+        "workId": "bw_work_bbd34b7ef6f302d8",
+        "title": "Hardening S3: Output diet and per-command latency",
+        "kind": "sprint",
+        "priority": "normal",
+        "status": "closed",
+        "updatedAt": "2026-07-04T07:02:17.669Z"
+      },
+      {
+        "workId": "bw_work_bc5f45766cc5d4ea",
+        "title": "S08T03 - Add cache rebuild/doctor/performance tests",
+        "kind": "task",
+        "priority": "critical",
+        "status": "closed",
+        "updatedAt": "2026-06-27T09:22:32.588Z"
+      },
+      {
+        "workId": "bw_work_bc6f8a940af85b67",
+        "title": "S05T07 - Dogfood directive-guided Boreal closeout",
+        "kind": "task",
+        "priority": "high",
+        "status": "closed",
+        "updatedAt": "2026-07-02T00:24:13.101Z"
+      },
+      {
+        "workId": "bw_work_bdff86f90fc97c59",
+        "title": "Route TUI ignores active sprint projection",
+        "kind": "issue",
+        "priority": "high",
+        "status": "ready",
+        "updatedAt": "2026-07-07T14:18:29.437Z"
+      },
+      {
+        "workId": "bw_work_be257b5cfbcc0536",
+        "title": "S09T06 - Make the evidence-based go, iterate, narrow, or stop decision",
+        "kind": "task",
+        "priority": "normal",
+        "status": "blocked",
+        "updatedAt": "2026-07-10T17:10:00.854Z"
+      },
+      {
+        "workId": "bw_work_beca72d119df641e",
+        "title": "Sprint 03 - CLI directive commands, envelopes, and enforcement",
+        "kind": "sprint",
+        "priority": "high",
+        "status": "closed",
+        "updatedAt": "2026-07-01T19:23:38.879Z"
+      },
+      {
+        "workId": "bw_work_bf03e16bada47a53",
+        "title": "Expose review and audit gate planning in CLI workflows",
+        "kind": "task",
+        "priority": "normal",
+        "status": "closed",
+        "updatedAt": "2026-07-01T02:05:33.016Z"
+      },
+      {
+        "workId": "bw_work_bfca3cc4cef37c92",
+        "title": "S09T03 - Run comparative reliability and context-continuity benchmarks",
+        "kind": "task",
+        "priority": "normal",
+        "status": "blocked",
+        "updatedAt": "2026-07-10T17:10:31.034Z"
+      },
+      {
+        "workId": "bw_work_bfdebb8dc4161572",
+        "title": "S11T03 - Define git health classification and exit-code contract",
+        "kind": "task",
+        "priority": "critical",
+        "status": "closed",
+        "updatedAt": "2026-06-27T02:11:06.109Z"
+      },
+      {
+        "workId": "bw_work_c0d1bb8f2a1f7627",
+        "title": "S06T03 - Add Gemini, Cursor, OpenCode, Copilot, Windsurf, Roo/Cline, and Kiro adapters",
+        "kind": "task",
+        "priority": "normal",
+        "status": "blocked",
+        "updatedAt": "2026-07-10T17:09:35.191Z"
+      },
+      {
+        "workId": "bw_work_c108d1e5c7e34938",
+        "title": "Sprint G7 - portfolio containers",
+        "kind": "sprint",
+        "priority": "normal",
+        "status": "closed",
+        "updatedAt": "2026-07-07T18:44:14.961Z"
+      },
+      {
+        "workId": "bw_work_c1e99dbc7badb383",
+        "title": "Snapshot archive directory can be redirected outside the workspace",
+        "kind": "issue",
+        "priority": "high",
+        "status": "ready",
+        "updatedAt": "2026-07-07T15:03:33.372Z"
+      },
+      {
+        "workId": "bw_work_c2599dc1b4eca4b2",
+        "title": "Console Refresh form omits required confirmation",
+        "kind": "issue",
+        "priority": "high",
+        "status": "ready",
+        "updatedAt": "2026-07-07T14:18:27.134Z"
+      },
+      {
+        "workId": "bw_work_c2fc1310c64c5c17",
+        "title": "S04 - Independent Review, Acceptance, and Resumable Merge",
+        "kind": "sprint",
+        "priority": "high",
+        "status": "blocked",
+        "updatedAt": "2026-07-10T17:10:07.194Z"
+      },
+      {
+        "workId": "bw_work_c30813a1edb7a49f",
+        "title": "S01T06 - Wire directive schema into package and import-export contracts",
+        "kind": "task",
+        "priority": "high",
+        "status": "closed",
+        "updatedAt": "2026-07-01T13:58:51.864Z"
+      },
+      {
+        "workId": "bw_work_c30f6d2ebe98beab",
+        "title": "S13T05 - Add gate closeout schema validate and doc-check commands",
+        "kind": "task",
+        "priority": "normal",
+        "status": "closed",
+        "updatedAt": "2026-06-27T15:43:34.529Z"
+      },
+      {
+        "workId": "bw_work_c33d02e3b5ce565e",
+        "title": "S09T07 - Define daemon responsibilities and non-goals",
+        "kind": "task",
+        "priority": "high",
+        "status": "closed",
+        "updatedAt": "2026-06-27T11:00:52.175Z"
+      },
+      {
+        "workId": "bw_work_c4553e70794a89d7",
+        "title": "Drag as command - writes through contracts with visible refusal",
+        "kind": "task",
+        "priority": "normal",
+        "status": "closed",
+        "updatedAt": "2026-07-07T19:40:19.944Z"
+      },
+      {
+        "workId": "bw_work_c4d90b8db56fa21e",
+        "title": "S07 - Extension SDK, Policy Packs, and Safe Customization",
+        "kind": "sprint",
+        "priority": "high",
+        "status": "blocked",
+        "updatedAt": "2026-07-10T17:10:14.370Z"
+      },
+      {
+        "workId": "bw_work_c587c44b5c83c032",
+        "title": "S07T02 - Implement ingest plan and diff review panels",
+        "kind": "task",
+        "priority": "high",
+        "status": "closed",
+        "updatedAt": "2026-06-27T07:41:44.831Z"
+      },
+      {
+        "workId": "bw_work_c5fc574bfd258843",
+        "title": "S06T06 - Implement board table, dependency, timeline, and progress views",
+        "kind": "task",
+        "priority": "critical",
+        "status": "closed",
+        "updatedAt": "2026-06-27T06:14:20.646Z"
+      },
+      {
+        "workId": "bw_work_c6e1d7bd372b2029",
+        "title": "S01T09 - Add unsafe-content and registry lifecycle regression tests",
+        "kind": "task",
+        "priority": "high",
+        "status": "closed",
+        "updatedAt": "2026-07-01T13:59:30.355Z"
+      },
+      {
+        "workId": "bw_work_c78d7b985efa5d82",
+        "title": "Agent summary parent and child links are not subject-tree constrained",
+        "kind": "issue",
+        "priority": "normal",
+        "status": "ready",
+        "updatedAt": "2026-07-07T15:22:05.197Z"
+      },
+      {
+        "workId": "bw_work_c799e3ef3637122a",
+        "title": "Scope directive snapshot reads; skip sync probe for read-only commands",
+        "kind": "task",
+        "priority": "normal",
+        "status": "closed",
+        "updatedAt": "2026-07-04T06:53:12.947Z"
+      },
+      {
+        "workId": "bw_work_c7ea1e2624deacc7",
+        "title": "Event-log rotate and rechain follow symlinked log directories",
+        "kind": "issue",
+        "priority": "high",
+        "status": "ready",
+        "updatedAt": "2026-07-07T15:21:56.678Z"
+      },
+      {
+        "workId": "bw_work_c8552d8ffbc0d698",
+        "title": "bwrk operation stats: per-session self-audit command",
+        "kind": "task",
+        "priority": "normal",
+        "status": "closed",
+        "updatedAt": "2026-07-02T23:01:06.592Z"
+      },
+      {
+        "workId": "bw_work_c85cf267e9a20c67",
+        "title": "S08T02 - Implement SQLite generated cache adapter behind the store boundary",
+        "kind": "task",
+        "priority": "critical",
+        "status": "closed",
+        "updatedAt": "2026-06-27T09:14:56.803Z"
+      },
+      {
+        "workId": "bw_work_c8b7496193667e12",
+        "title": "S10T02 - Add package smoke tests for clean checkout and initialized project",
+        "kind": "task",
+        "priority": "critical",
+        "status": "closed",
+        "updatedAt": "2026-06-27T11:28:04.505Z"
+      },
+      {
+        "workId": "bw_work_c90a89e61f23a011",
+        "title": "S08T04 - Complete console parity, accessibility, responsive behavior, and command safety",
+        "kind": "task",
+        "priority": "normal",
+        "status": "blocked",
+        "updatedAt": "2026-07-10T17:09:52.664Z"
+      },
+      {
+        "workId": "bw_work_c9774fca8e076998",
+        "title": "S07T07 - Implement reports browser and static knowledge report",
+        "kind": "task",
+        "priority": "high",
+        "status": "closed",
+        "updatedAt": "2026-06-27T08:31:33.621Z"
+      },
+      {
+        "workId": "bw_work_ca9ba6b4f3f20e1e",
+        "title": "S01T02 - Reconcile live command, storage, surface, and documentation truth",
+        "kind": "task",
+        "priority": "high",
+        "status": "ready",
+        "updatedAt": "2026-07-10T17:10:34.143Z"
+      },
+      {
+        "workId": "bw_work_caa2b587f9f5b977",
+        "title": "S04T02 - Update generated skill adapters for directive consumption",
+        "kind": "task",
+        "priority": "high",
+        "status": "closed",
+        "updatedAt": "2026-07-01T21:36:41.106Z"
+      },
+      {
+        "workId": "bw_work_caa619f2ed9b24e7",
+        "title": "Make strict doctor and sync refresh concurrency safe for gates",
+        "kind": "issue",
+        "priority": "high",
+        "status": "closed",
+        "updatedAt": "2026-07-02T16:35:40.992Z"
+      },
+      {
+        "workId": "bw_work_caee0dec620daf62",
+        "title": "S03T05 - Prove two-clone, multi-writer, worktree, and scale behavior",
+        "kind": "task",
+        "priority": "high",
+        "status": "blocked",
+        "updatedAt": "2026-07-10T17:09:21.733Z"
+      },
+      {
+        "workId": "bw_work_caf7f36084c1f3b8",
+        "title": "Phase 06B - Sprint Kanban UI",
+        "kind": "milestone",
+        "priority": "critical",
+        "status": "closed",
+        "updatedAt": "2026-06-27T06:15:27.462Z"
+      },
+      {
+        "workId": "bw_work_cb8a4b593513de10",
+        "title": "Sprint 05 - Global dashboard and project registry",
+        "kind": "sprint",
+        "priority": "high",
+        "status": "closed",
+        "updatedAt": "2026-06-27T05:29:01.148Z"
+      },
+      {
+        "workId": "bw_work_cc44dcb914f5892f",
+        "title": "Recompute readiness from the full dependency graph after adding blockers",
+        "kind": "issue",
+        "priority": "high",
+        "status": "closed",
+        "updatedAt": "2026-06-28T18:53:14.925Z"
+      },
+      {
+        "workId": "bw_work_cc9767a9b60b4b78",
+        "title": "Persist required closeout gates on work records",
+        "kind": "task",
+        "priority": "high",
+        "status": "closed",
+        "updatedAt": "2026-07-01T00:43:31.523Z"
+      },
+      {
+        "workId": "bw_work_cc9d864c47c34baa",
+        "title": "Agent-loop hardening: cut agent ceremony cost without weakening rails",
+        "kind": "milestone",
+        "priority": "high",
+        "status": "closed",
+        "updatedAt": "2026-07-07T04:37:08.320Z"
+      },
+      {
+        "workId": "bw_work_cca92c5f157f8790",
+        "title": "Make workflow and MCP asset resolution independent of source checkout layout",
+        "kind": "issue",
+        "priority": "normal",
+        "status": "closed",
+        "updatedAt": "2026-06-28T18:53:20.200Z"
+      },
+      {
+        "workId": "bw_work_ccac30f242fad7b6",
+        "title": "Validate installed skill roots, not just source skill assets",
+        "kind": "issue",
+        "priority": "high",
+        "status": "closed",
+        "updatedAt": "2026-06-27T00:52:51.134Z"
+      },
+      {
+        "workId": "bw_work_ccc70ee2cd6d077e",
+        "title": "Implement bwrk next single-directive command",
+        "kind": "task",
+        "priority": "normal",
+        "status": "closed",
+        "updatedAt": "2026-07-02T06:47:15.797Z"
+      },
+      {
+        "workId": "bw_work_ccf8620fa3250a58",
+        "title": "T9 sprint status command",
+        "kind": "task",
+        "priority": "normal",
+        "status": "closed",
+        "updatedAt": "2026-07-05T20:54:48.070Z"
+      },
+      {
+        "workId": "bw_work_cd28d24ebd9a785b",
+        "title": "Make sprint close enforce unresolved descendant work",
+        "kind": "issue",
+        "priority": "high",
+        "status": "closed",
+        "updatedAt": "2026-07-02T16:36:07.695Z"
+      },
+      {
+        "workId": "bw_work_cda240cb14c33d2a",
+        "title": "Sprint G8 - honest kanban global board",
+        "kind": "sprint",
+        "priority": "normal",
+        "status": "closed",
+        "updatedAt": "2026-07-07T20:07:59.190Z"
+      },
+      {
+        "workId": "bw_work_cfacff11dfe65e4b",
+        "title": "S05T02 - Implement OpenSpec import, link, status, and validation",
+        "kind": "task",
+        "priority": "normal",
+        "status": "blocked",
+        "updatedAt": "2026-07-10T17:09:29.012Z"
+      },
+      {
+        "workId": "bw_work_d088be462a64e7a3",
+        "title": "S12T01 - Make direct work close reservation-aware",
+        "kind": "task",
+        "priority": "critical",
+        "status": "closed",
+        "updatedAt": "2026-06-27T15:13:36.956Z"
+      },
+      {
+        "workId": "bw_work_d09eca1501862185",
+        "title": "Phase 04A - Console package, routes, and build tooling",
+        "kind": "milestone",
+        "priority": "high",
+        "status": "closed",
+        "updatedAt": "2026-06-27T02:57:24.109Z"
+      },
+      {
+        "workId": "bw_work_d10a66f387b640ec",
+        "title": "S04T06 - Add console state refresh and stale-data handling",
+        "kind": "task",
+        "priority": "high",
+        "status": "closed",
+        "updatedAt": "2026-06-27T03:04:09.368Z"
+      },
+      {
+        "workId": "bw_work_d1a1bb6021643312",
+        "title": "S06T05 - Implement SprintKanbanBoard, KanbanColumn, and SprintKanbanCard",
+        "kind": "task",
+        "priority": "critical",
+        "status": "closed",
+        "updatedAt": "2026-06-27T06:06:47.965Z"
+      },
+      {
+        "workId": "bw_work_d1ad786830750a35",
+        "title": "S05T01 - Define the global project registry schema and storage location",
+        "kind": "task",
+        "priority": "high",
+        "status": "closed",
+        "updatedAt": "2026-06-27T03:32:19.021Z"
+      },
+      {
+        "workId": "bw_work_d20db814e1c0f214",
+        "title": "S09T09 - Add daemon security and lifecycle tests",
+        "kind": "task",
+        "priority": "high",
+        "status": "closed",
+        "updatedAt": "2026-06-27T11:01:39.985Z"
+      },
+      {
+        "workId": "bw_work_d22ad76934d1175a",
+        "title": "Context-pack freshness stamp on handoff bundles and prime",
+        "kind": "task",
+        "priority": "normal",
+        "status": "closed",
+        "updatedAt": "2026-07-02T23:04:28.601Z"
+      },
+      {
+        "workId": "bw_work_d2dd668dd776bbee",
+        "title": "Sprint close auto-report mutates before doctor gate passes",
+        "kind": "issue",
+        "priority": "normal",
+        "status": "ready",
+        "updatedAt": "2026-07-07T14:18:42.008Z"
+      },
+      {
+        "workId": "bw_work_d3415afb9c29a1c7",
+        "title": "S01T01 - Audit directive-adjacent runtime and CLI surfaces",
+        "kind": "task",
+        "priority": "critical",
+        "status": "closed",
+        "updatedAt": "2026-07-01T13:57:50.338Z"
+      },
+      {
+        "workId": "bw_work_d39f4451d2e514ce",
+        "title": "Document and harden sync refresh exit semantics for partial success",
+        "kind": "issue",
+        "priority": "normal",
+        "status": "closed",
+        "updatedAt": "2026-06-27T00:57:36.621Z"
+      },
+      {
+        "workId": "bw_work_d3fae8b00d20e6e2",
+        "title": "Review and audit the closeout gate implementation",
+        "kind": "task",
+        "priority": "high",
+        "status": "closed",
+        "updatedAt": "2026-07-01T02:57:15.789Z"
+      },
+      {
+        "workId": "bw_work_d5007574a3524a77",
+        "title": "S07T04 - Implement wiki explorer and page detail views",
+        "kind": "task",
+        "priority": "high",
+        "status": "closed",
+        "updatedAt": "2026-06-27T08:03:02.267Z"
+      },
+      {
+        "workId": "bw_work_d51784f02fca54c9",
+        "title": "S01T05 - Add health, sync, and lock dashboard view models",
+        "kind": "task",
+        "priority": "critical",
+        "status": "closed",
+        "updatedAt": "2026-06-27T01:27:25.931Z"
+      },
+      {
+        "workId": "bw_work_d66664bdd5504d61",
+        "title": "S09T05 - Run the five-user unassisted external beta",
+        "kind": "task",
+        "priority": "normal",
+        "status": "blocked",
+        "updatedAt": "2026-07-10T17:09:59.771Z"
+      },
+      {
+        "workId": "bw_work_d6b0cf8944a3b729",
+        "title": "Define typed EnforcementGap contract with stable gap codes",
+        "kind": "task",
+        "priority": "high",
+        "status": "closed",
+        "updatedAt": "2026-07-02T04:10:34.508Z"
+      },
+      {
+        "workId": "bw_work_d6be21814e00541a",
+        "title": "Remote-bound console POST protection can be bypassed with local Host spoofing",
+        "kind": "issue",
+        "priority": "critical",
+        "status": "ready",
+        "updatedAt": "2026-07-07T14:39:34.124Z"
+      },
+      {
+        "workId": "bw_work_d74272673c86d4fd",
+        "title": "Phase 09B - MCP server implementation",
+        "kind": "milestone",
+        "priority": "high",
+        "status": "closed",
+        "updatedAt": "2026-06-27T10:51:21.805Z"
+      },
+      {
+        "workId": "bw_work_d7739574d92be28e",
+        "title": "S07T08 - Add Obsidian compatibility dashboard panels",
+        "kind": "task",
+        "priority": "high",
+        "status": "closed",
+        "updatedAt": "2026-06-27T08:43:18.306Z"
+      },
+      {
+        "workId": "bw_work_d77c011d358bc584",
+        "title": "Remove gapsFromDetails inference shim from BorealError",
+        "kind": "task",
+        "priority": "normal",
+        "status": "closed",
+        "updatedAt": "2026-07-02T16:38:40.052Z"
+      },
+      {
+        "workId": "bw_work_d79d7793898f4dc4",
+        "title": "Sprint 01 - Agent directive contract and registry foundation",
+        "kind": "sprint",
+        "priority": "critical",
+        "status": "closed",
+        "updatedAt": "2026-07-01T14:05:22.146Z"
+      },
+      {
+        "workId": "bw_work_d7c2883646b67b89",
+        "title": "Sprint G3 - cross-workspace reference URIs",
+        "kind": "sprint",
+        "priority": "high",
+        "status": "closed",
+        "updatedAt": "2026-07-07T17:36:44.471Z"
+      },
+      {
+        "workId": "bw_work_d91e1b790e889b77",
+        "title": "Agent start and work claim can strand reservations when Git setup fails",
+        "kind": "issue",
+        "priority": "high",
+        "status": "ready",
+        "updatedAt": "2026-07-07T14:42:23.338Z"
+      },
+      {
+        "workId": "bw_work_d9206f856b2f7b2b",
+        "title": "Global overview attention rows advertise open but Enter is a no-op",
+        "kind": "issue",
+        "priority": "normal",
+        "status": "ready",
+        "updatedAt": "2026-07-07T14:42:33.389Z"
+      },
+      {
+        "workId": "bw_work_d94310945c2a4cbb",
+        "title": "Rotated event-log archives are invisible to runtime history readers",
+        "kind": "issue",
+        "priority": "high",
+        "status": "ready",
+        "updatedAt": "2026-07-07T14:39:39.851Z"
+      },
+      {
+        "workId": "bw_work_da58b5ab46b37139",
+        "title": "Distribution and install - bwrk as a package with scoped install tiers",
+        "kind": "milestone",
+        "priority": "high",
+        "status": "closed",
+        "updatedAt": "2026-07-02T20:45:04.810Z"
+      },
+      {
+        "workId": "bw_work_db34287362992ec2",
+        "title": "Daemon status fails open on unreadable project setup config",
+        "kind": "issue",
+        "priority": "high",
+        "status": "ready",
+        "updatedAt": "2026-07-07T15:03:42.833Z"
+      },
+      {
+        "workId": "bw_work_db37d7f236699b75",
+        "title": "S03T09 - Convert board, sprint, global, and operations primitives",
+        "kind": "task",
+        "priority": "critical",
+        "status": "closed",
+        "updatedAt": "2026-06-27T02:20:43.809Z"
+      },
+      {
+        "workId": "bw_work_dc2f09be20147e5f",
+        "title": "S11T05 - Implement policy-aware git diagnostics and remediation hints",
+        "kind": "task",
+        "priority": "critical",
+        "status": "closed",
+        "updatedAt": "2026-06-27T02:11:13.093Z"
+      },
+      {
+        "workId": "bw_work_dd093b45cbb7a17a",
+        "title": "Complete the gap inversion - compiler consumes gaps instead of synthesizing them",
+        "kind": "task",
+        "priority": "high",
+        "status": "closed",
+        "updatedAt": "2026-07-02T16:45:51.171Z"
+      },
+      {
+        "workId": "bw_work_de5c25efdef3222b",
+        "title": "S04T01 - Define review records, reviewer ownership, and separation-of-duty policy",
+        "kind": "task",
+        "priority": "normal",
+        "status": "blocked",
+        "updatedAt": "2026-07-10T17:10:09.242Z"
+      },
+      {
+        "workId": "bw_work_de6bb36f0e71ba78",
+        "title": "Sprint G2 - packaging and install track",
+        "kind": "sprint",
+        "priority": "high",
+        "status": "closed",
+        "updatedAt": "2026-07-02T20:32:33.229Z"
+      },
+      {
+        "workId": "bw_work_df73967d940b6d11",
+        "title": "S09T04 - Scaffold apps/mcp server with read-only tools first",
+        "kind": "task",
+        "priority": "high",
+        "status": "closed",
+        "updatedAt": "2026-06-27T10:50:17.243Z"
+      },
+      {
+        "workId": "bw_work_df812aca73cc91ab",
+        "title": "S04T03 - Add workflow and skill documentation tests",
+        "kind": "task",
+        "priority": "normal",
+        "status": "closed",
+        "updatedAt": "2026-07-01T21:36:43.514Z"
+      },
+      {
+        "workId": "bw_work_e06dfffff9f6ef9b",
+        "title": "S01 - Public Product Contract and Release Boundary",
+        "kind": "sprint",
+        "priority": "high",
+        "status": "blocked",
+        "updatedAt": "2026-07-10T17:08:16.869Z"
+      },
+      {
+        "workId": "bw_work_e1165682f096d0c0",
+        "title": "Sprint 2 - enforcement gap contract",
+        "kind": "sprint",
+        "priority": "high",
+        "status": "closed",
+        "updatedAt": "2026-07-02T05:52:14.314Z"
+      },
+      {
+        "workId": "bw_work_e18576ee0b941f1c",
+        "title": "Repo-scoped install mode and machine-binary delegation",
+        "kind": "task",
+        "priority": "high",
+        "status": "closed",
+        "updatedAt": "2026-07-02T19:11:52.981Z"
+      },
+      {
+        "workId": "bw_work_e26e3751f058721d",
+        "title": "Sprint 13 - CLI lifecycle and memory command adoption",
+        "kind": "sprint",
+        "priority": "normal",
+        "status": "closed",
+        "updatedAt": "2026-06-27T15:44:09.052Z"
+      },
+      {
+        "workId": "bw_work_e28937f1fa385d2d",
+        "title": "Runtime hardening: agent-efficient responses, fail-closed guards, lifecycle optimization",
+        "kind": "milestone",
+        "priority": "high",
+        "status": "closed",
+        "updatedAt": "2026-07-02T23:06:30.491Z"
+      },
+      {
+        "workId": "bw_work_e335ff4dadcbd6ed",
+        "title": "bwrk global next - ranked cross-project directive queue",
+        "kind": "task",
+        "priority": "normal",
+        "status": "closed",
+        "updatedAt": "2026-07-07T17:00:53.287Z"
+      },
+      {
+        "workId": "bw_work_e4737e9227e76e2e",
+        "title": "Mutation responses carry the post-mutation work state",
+        "kind": "task",
+        "priority": "high",
+        "status": "closed",
+        "updatedAt": "2026-07-02T23:00:32.321Z"
+      },
+      {
+        "workId": "bw_work_e4f0cd4b46364475",
+        "title": "Phase 02A - Directive compiler domain model",
+        "kind": "milestone",
+        "priority": "critical",
+        "status": "closed",
+        "updatedAt": "2026-07-01T15:58:56.300Z"
+      },
+      {
+        "workId": "bw_work_e5cbc80c9e639c71",
+        "title": "S03T05 - Normalize focus, keyboard, and density rules across primitives",
+        "kind": "task",
+        "priority": "critical",
+        "status": "closed",
+        "updatedAt": "2026-06-27T02:10:07.212Z"
+      },
+      {
+        "workId": "bw_work_e69364e5658b1889",
+        "title": "S05T09 - Final audit, review evidence, sprint report, and parent closeout",
+        "kind": "task",
+        "priority": "high",
+        "status": "closed",
+        "updatedAt": "2026-07-02T00:10:12.614Z"
+      },
+      {
+        "workId": "bw_work_e6de7664fc624e59",
+        "title": "Installed skills carry their workflow sources or reference canonical IDs only",
+        "kind": "task",
+        "priority": "normal",
+        "status": "closed",
+        "updatedAt": "2026-07-04T03:33:14.389Z"
+      },
+      {
+        "workId": "bw_work_e6f837a71ac49529",
+        "title": "Sprint 10 - V1 packaging, docs, and release verification",
+        "kind": "sprint",
+        "priority": "critical",
+        "status": "closed",
+        "updatedAt": "2026-06-27T12:31:04.024Z"
+      },
+      {
+        "workId": "bw_work_e73e46fd112c5c5c",
+        "title": "Phase 09C - Daemon and watch-mode foundation",
+        "kind": "milestone",
+        "priority": "high",
+        "status": "closed",
+        "updatedAt": "2026-06-27T11:02:13.608Z"
+      },
+      {
+        "workId": "bw_work_e7a9fd7fcf73b38f",
+        "title": "Auto-rebuild stale search index inside runSearch",
+        "kind": "task",
+        "priority": "high",
+        "status": "closed",
+        "updatedAt": "2026-07-02T04:10:17.004Z"
+      },
+      {
+        "workId": "bw_work_e92716edc9d0b645",
+        "title": "Cross-boundary readiness derivation for global containers",
+        "kind": "task",
+        "priority": "normal",
+        "status": "closed",
+        "updatedAt": "2026-07-07T18:34:40.795Z"
+      },
+      {
+        "workId": "bw_work_e9382d8a7e085ea6",
+        "title": "S01T04 - Define SemVer, schema compatibility, migration, and rollback contracts",
+        "kind": "task",
+        "priority": "high",
+        "status": "blocked",
+        "updatedAt": "2026-07-10T17:09:10.366Z"
+      },
+      {
+        "workId": "bw_work_ea4baa2606a0cfad",
+        "title": "Terminal error payloads: retryable flag and recovery narrative on every error",
+        "kind": "task",
+        "priority": "high",
+        "status": "closed",
+        "updatedAt": "2026-07-02T23:00:49.047Z"
+      },
+      {
+        "workId": "bw_work_eaca72b5df05f45b",
+        "title": "Commit and publish the epic working tree and validate dirty-path reason codes",
+        "kind": "task",
+        "priority": "critical",
+        "status": "closed",
+        "updatedAt": "2026-07-02T16:49:36.557Z"
+      },
+      {
+        "workId": "bw_work_ead0474256745cfe",
+        "title": "Add version command and handle closed stdout pipes cleanly",
+        "kind": "issue",
+        "priority": "normal",
+        "status": "closed",
+        "updatedAt": "2026-06-27T00:52:51.555Z"
+      },
+      {
+        "workId": "bw_work_eb057b992271d5c7",
+        "title": "S05T04 - Add migration and compatibility bridge for legacy closeout data",
+        "kind": "task",
+        "priority": "high",
+        "status": "closed",
+        "updatedAt": "2026-07-02T00:24:18.477Z"
+      },
+      {
+        "workId": "bw_work_eb6b8e5438d37eed",
+        "title": "S01T03 - Define v1 backlog readiness and closeout gates",
+        "kind": "task",
+        "priority": "critical",
+        "status": "closed",
+        "updatedAt": "2026-06-27T01:21:31.590Z"
+      },
+      {
+        "workId": "bw_work_ed5249ddde1c9d92",
+        "title": "Vault initialization trusts symlinked memory directories",
+        "kind": "issue",
+        "priority": "high",
+        "status": "ready",
+        "updatedAt": "2026-07-07T15:03:28.285Z"
+      },
+      {
+        "workId": "bw_work_edd19b745b8eb29f",
+        "title": "MCP server workspace binding can be overridden per tool call",
+        "kind": "issue",
+        "priority": "critical",
+        "status": "ready",
+        "updatedAt": "2026-07-07T15:03:37.408Z"
+      },
+      {
+        "workId": "bw_work_ef04fdb0a62c9d89",
+        "title": "S09T01 - Define MCP resource boundary and project-root guard",
+        "kind": "task",
+        "priority": "high",
+        "status": "closed",
+        "updatedAt": "2026-06-27T10:27:35.866Z"
+      },
+      {
+        "workId": "bw_work_ef140961e52c9c72",
+        "title": "S14T02 - Define state generation and freshness model",
+        "kind": "task",
+        "priority": "normal",
+        "status": "closed",
+        "updatedAt": "2026-06-27T15:51:03.008Z"
+      },
+      {
+        "workId": "bw_work_ef26450108a622ce",
+        "title": "S01T03 - Define directive families and precedence matrix",
+        "kind": "task",
+        "priority": "critical",
+        "status": "closed",
+        "updatedAt": "2026-07-01T13:58:11.113Z"
+      },
+      {
+        "workId": "bw_work_ef2e2e290dfc17ac",
+        "title": "Sprint 04 - Workflow, skill, MCP, daemon, and console adoption",
+        "kind": "sprint",
+        "priority": "high",
+        "status": "closed",
+        "updatedAt": "2026-07-02T00:24:15.766Z"
+      },
+      {
+        "workId": "bw_work_effa1e62fd798d75",
+        "title": "S01T05 - Establish the cross-platform public release CI baseline",
+        "kind": "task",
+        "priority": "high",
+        "status": "blocked",
+        "updatedAt": "2026-07-10T17:09:12.507Z"
+      },
+      {
+        "workId": "bw_work_f0734e55cb219b1b",
+        "title": "S04T04 - Expose directive compilation through MCP tools",
+        "kind": "task",
+        "priority": "high",
+        "status": "closed",
+        "updatedAt": "2026-07-01T21:36:48.238Z"
+      },
+      {
+        "workId": "bw_work_f0b382330fdc900b",
+        "title": "S04T03 - Add local fixture data for UI development",
+        "kind": "task",
+        "priority": "high",
+        "status": "closed",
+        "updatedAt": "2026-06-27T02:57:06.151Z"
+      },
+      {
+        "workId": "bw_work_f0e1357b26c16efc",
+        "title": "S04T08 - Add console conflict, blocker, and next-step states",
+        "kind": "task",
+        "priority": "high",
+        "status": "closed",
+        "updatedAt": "2026-07-01T21:37:01.048Z"
+      },
+      {
+        "workId": "bw_work_f14baaa786e881c4",
+        "title": "Doc-truth lint: workflow refs and documented JSON paths validated by doctor",
+        "kind": "task",
+        "priority": "normal",
+        "status": "closed",
+        "updatedAt": "2026-07-04T07:39:48.579Z"
+      },
+      {
+        "workId": "bw_work_f1500b41cca2c75c",
+        "title": "Read-only search and status paths can mutate the SQLite FTS index",
+        "kind": "issue",
+        "priority": "normal",
+        "status": "closed",
+        "updatedAt": "2026-07-10T13:45:22.548Z"
+      },
+      {
+        "workId": "bw_work_f1dce9a545528299",
+        "title": "Phase 02C - Blocked, doctor, handoff, and workflow-next directives",
+        "kind": "milestone",
+        "priority": "high",
+        "status": "closed",
+        "updatedAt": "2026-07-01T15:59:06.825Z"
+      },
+      {
+        "workId": "bw_work_f1e985dc765a799c",
+        "title": "Global console project dashboard links fall back to global route",
+        "kind": "issue",
+        "priority": "high",
+        "status": "ready",
+        "updatedAt": "2026-07-07T14:18:27.997Z"
+      },
+      {
+        "workId": "bw_work_f2fb286d6164443d",
+        "title": "S14T03 - Add query pushdown and indexes for hot paths",
+        "kind": "task",
+        "priority": "normal",
+        "status": "closed",
+        "updatedAt": "2026-06-27T15:51:19.263Z"
+      },
+      {
+        "workId": "bw_work_f344091c46a66bb1",
+        "title": "Add spec fields to WorkItemView and executor surfaces",
+        "kind": "task",
+        "priority": "high",
+        "status": "closed",
+        "updatedAt": "2026-07-02T04:08:16.099Z"
+      },
+      {
+        "workId": "bw_work_f392d344c12a78eb",
+        "title": "Sprint G5 - global capture and triage",
+        "kind": "sprint",
+        "priority": "normal",
+        "status": "closed",
+        "updatedAt": "2026-07-07T20:08:19.478Z"
+      },
+      {
+        "workId": "bw_work_f3ae70d4613fe4a0",
+        "title": "S07T06 - Add source coverage and stale truth health checks",
+        "kind": "task",
+        "priority": "high",
+        "status": "closed",
+        "updatedAt": "2026-06-27T08:21:59.791Z"
+      },
+      {
+        "workId": "bw_work_f4989ca6003c5f79",
+        "title": "Hardening S5: Transcript-replay regression harness and ceremony budget",
+        "kind": "sprint",
+        "priority": "normal",
+        "status": "closed",
+        "updatedAt": "2026-07-04T07:52:40.564Z"
+      },
+      {
+        "workId": "bw_work_f50c6596bde56fbf",
+        "title": "T10 Bulk reservation renewal + daemon heartbeat",
+        "kind": "task",
+        "priority": "normal",
+        "status": "closed",
+        "updatedAt": "2026-07-05T21:16:34.305Z"
+      },
+      {
+        "workId": "bw_work_f50e1f6e26b1986c",
+        "title": "S02T05 - Compile summary, sprint report, and gate directives",
+        "kind": "task",
+        "priority": "critical",
+        "status": "closed",
+        "updatedAt": "2026-07-01T16:00:54.253Z"
+      },
+      {
+        "workId": "bw_work_f576e12c21ba3ae8",
+        "title": "Draft tier 2 execute-at-close gates behind a policy flag",
+        "kind": "task",
+        "priority": "low",
+        "status": "closed",
+        "updatedAt": "2026-07-02T06:33:10.710Z"
+      },
+      {
+        "workId": "bw_work_f5945533bc62b4d1",
+        "title": "S05T01 - Add directive acknowledgement record schema",
+        "kind": "task",
+        "priority": "high",
+        "status": "closed",
+        "updatedAt": "2026-07-02T00:24:24.369Z"
+      },
+      {
+        "workId": "bw_work_f67c298c1d23cdfc",
+        "title": "Phase 04B - Live data adapter and project guardrails",
+        "kind": "milestone",
+        "priority": "high",
+        "status": "closed",
+        "updatedAt": "2026-06-27T03:04:39.368Z"
+      },
+      {
+        "workId": "bw_work_f6e8537060f716f6",
+        "title": "S10T08 - Produce v1 closeout report and adoption guide",
+        "kind": "task",
+        "priority": "critical",
+        "status": "closed",
+        "updatedAt": "2026-06-27T12:27:01.737Z"
+      },
+      {
+        "workId": "bw_work_f71171ac56bc3d4e",
+        "title": "Skill and agent-surface hardening backlog",
+        "kind": "milestone",
+        "priority": "normal",
+        "status": "closed",
+        "updatedAt": "2026-06-27T01:04:27.106Z"
+      },
+      {
+        "workId": "bw_work_f7462ea2f70614ea",
+        "title": "S07T05 - Ship an external security-assurance pack and extension authoring guide",
+        "kind": "task",
+        "priority": "normal",
+        "status": "blocked",
+        "updatedAt": "2026-07-10T17:09:48.054Z"
+      },
+      {
+        "workId": "bw_work_f749d60959e26c13",
+        "title": "Phase 03C - Directive doctor, gate, and import-export enforcement",
+        "kind": "milestone",
+        "priority": "high",
+        "status": "closed",
+        "updatedAt": "2026-07-01T19:17:08.393Z"
+      },
+      {
+        "workId": "bw_work_f762984b8b9d2036",
+        "title": "S03T02 - Preserve directive bundles through result spooling",
+        "kind": "task",
+        "priority": "high",
+        "status": "closed",
+        "updatedAt": "2026-07-01T19:17:36.638Z"
+      },
+      {
+        "workId": "bw_work_f84cc24540d604cb",
+        "title": "S03T08 - Convert entity and work detail primitives",
+        "kind": "task",
+        "priority": "critical",
+        "status": "closed",
+        "updatedAt": "2026-06-27T02:20:24.517Z"
+      },
+      {
+        "workId": "bw_work_f855f902b6d039f4",
+        "title": "S05T01 - Define the specification and change adapter contract",
+        "kind": "task",
+        "priority": "normal",
+        "status": "blocked",
+        "updatedAt": "2026-07-10T17:10:11.279Z"
+      },
+      {
+        "workId": "bw_work_f8bec47babe97008",
+        "title": "Re-key directive registry by gap code and delete appliesTo matcher",
+        "kind": "task",
+        "priority": "high",
+        "status": "closed",
+        "updatedAt": "2026-07-02T04:58:04.929Z"
+      },
+      {
+        "workId": "bw_work_f927e3d6695fcacd",
+        "title": "S08T01 - Implement Simple, Team, and Governed capability profiles",
+        "kind": "task",
+        "priority": "normal",
+        "status": "blocked",
+        "updatedAt": "2026-07-10T17:10:27.922Z"
+      },
+      {
+        "workId": "bw_work_f950290c75d88a24",
+        "title": "Competitive Parity and Trustworthy Public Beta",
+        "kind": "milestone",
+        "priority": "critical",
+        "status": "needs_verification",
+        "updatedAt": "2026-07-10T22:17:09.299Z"
+      },
+      {
+        "workId": "bw_work_f993f99e5e0f418a",
+        "title": "install.sh orchestrator - machine, repo, and non-interactive flows",
+        "kind": "task",
+        "priority": "high",
+        "status": "closed",
+        "updatedAt": "2026-07-02T19:30:56.254Z"
+      },
+      {
+        "workId": "bw_work_f9e21f5ba759eeb2",
+        "title": "S02 - Witnessed Evidence and Trustworthy Closeout",
+        "kind": "sprint",
+        "priority": "high",
+        "status": "blocked",
+        "updatedAt": "2026-07-10T17:10:01.962Z"
+      },
+      {
+        "workId": "bw_work_fa4776152a8178af",
+        "title": "Deduplicate project setup .gitignore guards during install/init",
+        "kind": "issue",
+        "priority": "low",
+        "status": "closed",
+        "updatedAt": "2026-06-27T00:57:37.060Z"
+      },
+      {
+        "workId": "bw_work_fa807f5f40585286",
+        "title": "T4 Retire legacy shell-out sqlite cache",
+        "kind": "task",
+        "priority": "normal",
+        "status": "closed",
+        "updatedAt": "2026-07-05T16:55:10.212Z"
+      },
+      {
+        "workId": "bw_work_fac43657d420760d",
+        "title": "Envelope size budget tests in CI",
+        "kind": "task",
+        "priority": "normal",
+        "status": "closed",
+        "updatedAt": "2026-07-04T06:59:50.510Z"
+      },
+      {
+        "workId": "bw_work_fbb670db73c9c7b0",
+        "title": "Curl stdin installer fails from Node projects with package.json",
+        "kind": "issue",
+        "priority": "high",
+        "status": "ready",
+        "updatedAt": "2026-07-07T14:18:32.339Z"
+      },
+      {
+        "workId": "bw_work_fbb7ff20bb7e56cf",
+        "title": "S04T05 - Ship review queues, merge status, and lifecycle end-to-end coverage",
+        "kind": "task",
+        "priority": "normal",
+        "status": "blocked",
+        "updatedAt": "2026-07-10T17:09:28.013Z"
+      },
+      {
+        "workId": "bw_work_fc77ef02834f0d7d",
+        "title": "S12T04 - Enforce verification evidence subject matching",
+        "kind": "task",
+        "priority": "high",
+        "status": "closed",
+        "updatedAt": "2026-06-27T15:14:41.266Z"
+      },
+      {
+        "workId": "bw_work_fce348266244ac0b",
+        "title": "Define and enforce true submodule mode semantics for child memory repos",
+        "kind": "issue",
+        "priority": "high",
+        "status": "closed",
+        "updatedAt": "2026-06-28T18:53:13.181Z"
+      },
+      {
+        "workId": "bw_work_fd87d42fa5f5014a",
+        "title": "S03T06 - Register directive commands in help, completion, and docs",
+        "kind": "task",
+        "priority": "normal",
+        "status": "closed",
+        "updatedAt": "2026-07-01T19:18:32.174Z"
+      },
+      {
+        "workId": "bw_work_fdd26c5840a6d95d",
+        "title": "S06T04 - Implement SprintHeader and SprintScopeSummary",
+        "kind": "task",
+        "priority": "critical",
+        "status": "closed",
+        "updatedAt": "2026-06-27T06:01:26.788Z"
+      },
+      {
+        "workId": "bw_work_fec35f8933001ca2",
+        "title": "S02T07 - Add doctor dashboard view",
+        "kind": "task",
+        "priority": "high",
+        "status": "closed",
+        "updatedAt": "2026-06-27T01:57:43.447Z"
+      },
+      {
+        "workId": "bw_work_ffc11d61a68b2a83",
+        "title": "S08T04 - Generate or round-trip runtime schemas from TypeScript contracts",
+        "kind": "task",
+        "priority": "critical",
+        "status": "closed",
+        "updatedAt": "2026-06-27T09:30:38.686Z"
+      }
+    ]
+  },
+  "aging": {
+    "ready": {
+      "count": 62,
+      "oldestAgeMs": 287922685,
+      "oldestAgeDays": 3,
+      "items": [
+        {
+          "workId": "bw_work_c2599dc1b4eca4b2",
+          "title": "Console Refresh form omits required confirmation",
+          "status": "ready",
+          "since": "2026-07-07T14:18:27.134Z",
+          "ageMs": 287922685,
+          "ageDays": 3
+        },
+        {
+          "workId": "bw_work_f1e985dc765a799c",
+          "title": "Global console project dashboard links fall back to global route",
+          "status": "ready",
+          "since": "2026-07-07T14:18:27.997Z",
+          "ageMs": 287921822,
+          "ageDays": 3
+        },
+        {
+          "workId": "bw_work_49b34597473ca36b",
+          "title": "Live console Sprint page is hard-coded to sprint-04",
+          "status": "ready",
+          "since": "2026-07-07T14:18:28.725Z",
+          "ageMs": 287921094,
+          "ageDays": 3
+        },
+        {
+          "workId": "bw_work_bdff86f90fc97c59",
+          "title": "Route TUI ignores active sprint projection",
+          "status": "ready",
+          "since": "2026-07-07T14:18:29.437Z",
+          "ageMs": 287920382,
+          "ageDays": 3
+        },
+        {
+          "workId": "bw_work_5cbd317cae480b08",
+          "title": "TUI task detail drops reservation context and offers invalid close",
+          "status": "ready",
+          "since": "2026-07-07T14:18:30.119Z",
+          "ageMs": 287919700,
+          "ageDays": 3
+        },
+        {
+          "workId": "bw_work_884c1aa9d9e17515",
+          "title": "TUI command descriptors are not exact copyable commands",
+          "status": "ready",
+          "since": "2026-07-07T14:18:30.826Z",
+          "ageMs": 287918993,
+          "ageDays": 3
+        },
+        {
+          "workId": "bw_work_0f006f25ca7a6883",
+          "title": "Console browser-smoke defaults to system Chrome on macOS",
+          "status": "ready",
+          "since": "2026-07-07T14:18:31.576Z",
+          "ageMs": 287918243,
+          "ageDays": 3
+        },
+        {
+          "workId": "bw_work_fbb670db73c9c7b0",
+          "title": "Curl stdin installer fails from Node projects with package.json",
+          "status": "ready",
+          "since": "2026-07-07T14:18:32.339Z",
+          "ageMs": 287917480,
+          "ageDays": 3
+        },
+        {
+          "workId": "bw_work_1340533172df0513",
+          "title": "Generated package artifacts under src are unignored and uncleaned",
+          "status": "ready",
+          "since": "2026-07-07T14:18:33.030Z",
+          "ageMs": 287916789,
+          "ageDays": 3
+        },
+        {
+          "workId": "bw_work_6d1f6dbe85035670",
+          "title": "Fresh object index can hide deleted object files",
+          "status": "ready",
+          "since": "2026-07-07T14:18:33.698Z",
+          "ageMs": 287916121,
+          "ageDays": 3
+        }
+      ]
+    },
+    "limbo": {
+      "count": 1,
+      "oldestAgeMs": 520,
+      "oldestAgeDays": 0,
+      "items": [
+        {
+          "workId": "bw_work_f950290c75d88a24",
+          "title": "Competitive Parity and Trustworthy Public Beta",
+          "status": "needs_verification",
+          "since": "2026-07-10T22:17:09.299Z",
+          "ageMs": 520,
+          "ageDays": 0
+        }
+      ]
+    },
+    "expiredReservations": {
+      "count": 1,
+      "oldestAgeMs": 823914581,
+      "oldestAgeDays": 9,
+      "items": [
+        {
+          "reservationId": "bw_reservation_173669bfccb238fb",
+          "workId": "bw_work_5de16632534c3db3",
+          "agentId": "cybertron",
+          "status": "expired",
+          "reservedAt": "2026-07-01T05:25:15.306Z",
+          "expiresAt": "2026-07-01T09:25:15.238Z",
+          "since": "2026-07-01T09:25:15.238Z",
+          "ageMs": 823914581,
+          "ageDays": 9
+        }
+      ]
+    },
+    "maxima": {
+      "readyAgeMs": 287922685,
+      "limboAgeMs": 520,
+      "expiredReservationAgeMs": 823914581
+    },
+    "approximation": {
+      "readySinceSource": "work.meta.updatedAt",
+      "limboSinceSource": "work.meta.updatedAt",
+      "expiredReservationSinceSource": "reservation.expiresAt_or_meta.updatedAt",
+      "eventHistoryScanned": false
+    }
+  }
+}
