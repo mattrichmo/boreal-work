@@ -25,6 +25,7 @@ The complete map of Boreal documentation. Start with the guides, drop into the r
 | [Runtime architecture](architecture/RUNTIME.md) | Ports, pure domain operations, and the `@boreal/engine` boundary. |
 | [CLI UX](architecture/CLI_UX.md) | The JSON / plain-text / dashboard layering and its design boundary. |
 | [CLI ↔ TUI runtime boundary](architecture/CLI_TUI_RUNTIME_BOUNDARY.md) | How terminal surfaces share the runtime. |
+| [TUI surface contracts](architecture/TUI_SURFACE_CONTRACTS.md) | Detailed global and repo terminal UI pages, flows, and data shapes. |
 | [Skills & workflows](architecture/SKILLS_AND_WORKFLOWS.md) | Workflows (canonical), skills (adapters), and templates (output shapes). |
 | [Project setup](architecture/PROJECT_SETUP.md) | Project, memory, and install roots, and supported layouts. |
 | [Prior art & originality](architecture/PRIOR_ART_ORIGINALITY.md) | Positioning against adjacent local-first and agent-workflow tools. |

@@ -13,6 +13,7 @@ import {
   touchRecord,
   withContentHash,
   type ActorRef,
+  type AgentReservation,
   type AgentSummaryForceReasonCode,
   type AgentSummaryKind,
   type AgentSummaryOutcome,
@@ -65,6 +66,7 @@ const ACTIVE_SPRINT_PROJECTION_ID = deterministicId<ProjectionId>("projection", 
 });
 type SprintReportFormat = "markdown" | "html";
 const SPRINT_REPORT_SCHEMA_VERSION = "boreal.cli.sprint.report.v1";
+const SPRINT_STATUS_SCHEMA_VERSION = "boreal.cli.sprint.status.v1";
 const SPRINT_REPORT_FORMATS = new Set<SprintReportFormat>(["markdown", "html"]);
 
 interface WorkListRow {
@@ -92,6 +94,48 @@ interface SprintScope {
   readonly descendants: readonly WorkItemView[];
   readonly totalDescendants: number;
   readonly truncated: boolean;
+}
+
+interface SprintStatusCounts {
+  readonly total: number;
+  readonly closed: number;
+  readonly verified: number;
+  readonly ready: number;
+  readonly blocked: number;
+  readonly inProgress: number;
+}
+
+interface SprintStatusReservationRow {
+  readonly workId: WorkId;
+  readonly title: string;
+  readonly agentId: string;
+  readonly expiresAt?: string;
+  readonly branch?: string;
+}
+
+interface SprintStatusTopBlockerRow {
+  readonly workId: WorkId;
+  readonly title: string;
+  readonly blocksCount: number;
+}
+
+interface SprintStatusStaleClaimRow {
+  readonly workId: WorkId;
+  readonly agentId: string;
+  readonly expiresAt: string;
+}
+
+interface SprintStatusResult {
+  readonly schemaVersion: typeof SPRINT_STATUS_SCHEMA_VERSION;
+  readonly generatedAt: string;
+  readonly workspaceRoot: string;
+  readonly sprintId: WorkId;
+  readonly title: string;
+  readonly status: WorkStatus;
+  readonly counts: SprintStatusCounts;
+  readonly reservations: readonly SprintStatusReservationRow[];
+  readonly topBlockers: readonly SprintStatusTopBlockerRow[];
+  readonly staleClaims: readonly SprintStatusStaleClaimRow[];
 }
 
 interface ReviewGateKindSummary {
@@ -354,6 +398,12 @@ export async function sprintCommand(
       const sprint = await resolveSprintWork(context, dependencies.requiredPositional(rest, 0, "sprint reference"), dependencies);
       const result = await sprintShowResult(context, sprint, sprintScopeLimit(args, dependencies), dependencies);
       output.write(json ? formatRecord(result, true) : formatSprintShow(result, hasFlag(args, "wide")));
+      return { exitCode: 0 };
+    }
+    case "status": {
+      const sprint = await resolveSprintWork(context, rest[0] ?? "current", dependencies);
+      const result = await sprintStatusResult(context, sprint, sprintScopeLimit(args, dependencies));
+      output.write(json ? formatRecord(result, true) : formatSprintStatus(result, hasFlag(args, "wide")));
       return { exitCode: 0 };
     }
     case "current": {
@@ -1075,6 +1125,131 @@ async function buildSprintReportDocument(
   };
 }
 
+async function sprintStatusResult(context: CliContext, sprint: WorkItem, limit: number): Promise<SprintStatusResult> {
+  const generatedAt = nowIso();
+  const nowMs = Date.parse(generatedAt);
+  const snapshot = await context.store.read(async (reader) => ({
+    workItems: await reader.listWorkItems(),
+    graphEdges: await reader.listGraphEdges(),
+    reservations: await reader.listReservations()
+  }));
+  const workById = new Map(snapshot.workItems.map((work) => [work.meta.id, work]));
+  const memberIds = sprintScopeMemberIds(sprint, snapshot.workItems, snapshot.graphEdges);
+  const members = [...memberIds]
+    .map((id) => workById.get(id))
+    .filter(isWorkItem)
+    .slice(0, limit);
+  const memberIdSet = new Set(members.map((work) => work.meta.id));
+  const scopedReservations = snapshot.reservations
+    .filter((reservation) => reservation.status === "active" && memberIdSet.has(reservation.workId))
+    .sort(compareSprintStatusReservations(snapshot.workItems));
+  return {
+    schemaVersion: SPRINT_STATUS_SCHEMA_VERSION,
+    generatedAt,
+    workspaceRoot: context.workspaceRoot,
+    sprintId: sprint.meta.id,
+    title: sprint.title,
+    status: sprint.status,
+    counts: sprintStatusCounts(members),
+    reservations: scopedReservations.map((reservation) => sprintStatusReservationRow(reservation, workById)),
+    topBlockers: sprintStatusTopBlockers(members, workById, snapshot.graphEdges),
+    staleClaims: scopedReservations
+      .filter((reservation) => reservation.expiresAt !== undefined && Date.parse(reservation.expiresAt) <= nowMs)
+      .map((reservation) => ({
+        workId: reservation.workId,
+        agentId: String(reservation.agentId),
+        expiresAt: reservation.expiresAt ?? ""
+      }))
+  };
+}
+
+function sprintStatusCounts(members: readonly WorkItem[]): SprintStatusCounts {
+  return {
+    total: members.length,
+    closed: members.filter((work) => work.status === "closed").length,
+    verified: members.filter((work) => work.status === "verified").length,
+    ready: members.filter((work) => work.status === "ready").length,
+    blocked: members.filter((work) => work.status === "blocked").length,
+    inProgress: members.filter((work) => work.status === "in_progress").length
+  };
+}
+
+function sprintStatusReservationRow(
+  reservation: AgentReservation,
+  workById: ReadonlyMap<WorkId, WorkItem>
+): SprintStatusReservationRow {
+  const work = workById.get(reservation.workId);
+  return {
+    workId: reservation.workId,
+    title: work?.title ?? reservation.workId,
+    agentId: String(reservation.agentId),
+    expiresAt: reservation.expiresAt,
+    branch: reservation.git?.branch
+  };
+}
+
+function sprintStatusTopBlockers(
+  members: readonly WorkItem[],
+  workById: ReadonlyMap<WorkId, WorkItem>,
+  graphEdges: readonly GraphEdge[]
+): readonly SprintStatusTopBlockerRow[] {
+  const memberIds = new Set(members.map((work) => work.meta.id));
+  const blocksCount = new Map<WorkId, number>();
+  for (const work of members) {
+    for (const dependencyId of transitiveDependencyIds(work.meta.id, workById, graphEdges)) {
+      if (dependencyId === work.meta.id || !memberIds.has(work.meta.id)) {
+        continue;
+      }
+      blocksCount.set(dependencyId, (blocksCount.get(dependencyId) ?? 0) + 1);
+    }
+  }
+  return [...blocksCount.entries()]
+    .map(([workId, count]) => {
+      const work = workById.get(workId);
+      return work ? { workId, title: work.title, blocksCount: count } : undefined;
+    })
+    .filter(isSprintStatusTopBlockerRow)
+    .sort((left, right) => right.blocksCount - left.blocksCount || left.title.localeCompare(right.title) || left.workId.localeCompare(right.workId))
+    .slice(0, 5);
+}
+
+function transitiveDependencyIds(
+  workId: WorkId,
+  workById: ReadonlyMap<WorkId, WorkItem>,
+  graphEdges: readonly GraphEdge[],
+  visited = new Set<WorkId>()
+): ReadonlySet<WorkId> {
+  const work = workById.get(workId);
+  if (!work) {
+    return visited;
+  }
+  for (const dependencyId of dependencyIdsForWork(work, graphEdges)) {
+    if (visited.has(dependencyId)) {
+      continue;
+    }
+    visited.add(dependencyId);
+    transitiveDependencyIds(dependencyId, workById, graphEdges, visited);
+  }
+  return visited;
+}
+
+function compareSprintStatusReservations(workItems: readonly WorkItem[]) {
+  const workById = new Map(workItems.map((work) => [work.meta.id, work]));
+  return (left: AgentReservation, right: AgentReservation): number => {
+    const leftWork = workById.get(left.workId);
+    const rightWork = workById.get(right.workId);
+    return (
+      String(left.agentId).localeCompare(String(right.agentId)) ||
+      (leftWork?.title ?? left.workId).localeCompare(rightWork?.title ?? right.workId) ||
+      left.workId.localeCompare(right.workId)
+    );
+  };
+}
+
+function isSprintStatusTopBlockerRow(value: SprintStatusTopBlockerRow | undefined): value is SprintStatusTopBlockerRow {
+  return value !== undefined;
+}
+
 function resolveCloseoutEvidence(
   records: readonly EvidenceRecord[],
   scopedWorkIds: ReadonlySet<string>,
@@ -1683,7 +1858,7 @@ async function buildSprintScope(
     const workById = new Map(workItems.map((item) => [item.meta.id, item]));
     const evidenceByWork = recordsByWorkSubject(evidence);
     const verificationsByWork = recordsByWorkSubject(verifications);
-    const directChildIds = dependencyIdsForWork(sprint, graphEdges);
+    const directChildIds = sprintDirectChildIds(sprint, workItems, graphEdges);
     const descendants: WorkItem[] = [];
     const visited = new Set<string>();
     const visit = (workId: string): void => {
@@ -1696,7 +1871,7 @@ async function buildSprintScope(
       }
       visited.add(workId);
       descendants.push(work);
-      for (const childId of dependencyIdsForWork(work, graphEdges)) {
+      for (const childId of sprintDirectChildIds(work, workItems, graphEdges)) {
         visit(childId);
       }
     };
@@ -1718,6 +1893,36 @@ async function buildSprintScope(
       truncated: descendants.length > limitedDescendants.length
     };
   });
+}
+
+function sprintScopeMemberIds(sprint: WorkItem, workItems: readonly WorkItem[], graphEdges: readonly GraphEdge[]): ReadonlySet<WorkId> {
+  const ids = new Set<WorkId>();
+  const workById = new Map(workItems.map((work) => [work.meta.id, work]));
+  const visit = (work: WorkItem): void => {
+    for (const childId of sprintDirectChildIds(work, workItems, graphEdges)) {
+      if (ids.has(childId)) {
+        continue;
+      }
+      ids.add(childId);
+      const child = workById.get(childId);
+      if (child) {
+        visit(child);
+      }
+    }
+  };
+  visit(sprint);
+  return ids;
+}
+
+function sprintDirectChildIds(work: WorkItem, workItems: readonly WorkItem[], graphEdges: readonly GraphEdge[]): readonly WorkId[] {
+  return uniqueWorkIds([
+    ...dependencyIdsForWork(work, graphEdges),
+    ...workItems.filter((item) => item.parentId === work.meta.id).map((item) => item.meta.id)
+  ]);
+}
+
+function uniqueWorkIds(ids: readonly WorkId[]): readonly WorkId[] {
+  return [...new Set(ids)].sort((left, right) => left.localeCompare(right));
 }
 
 function sprintWorkView(
@@ -1871,6 +2076,75 @@ function formatSprintList(result: Awaited<ReturnType<typeof sprintListResult>>):
       title: row.title
     }))
   );
+}
+
+function formatSprintStatus(result: SprintStatusResult, wide: boolean): string {
+  return [
+    `Sprint status: ${result.title} (${result.sprintId})`,
+    `state: ${result.status}`,
+    "",
+    "Counts",
+    table([
+      { status: "total", count: result.counts.total },
+      { status: "closed", count: result.counts.closed },
+      { status: "verified", count: result.counts.verified },
+      { status: "ready", count: result.counts.ready },
+      { status: "blocked", count: result.counts.blocked },
+      { status: "in_progress", count: result.counts.inProgress }
+    ]),
+    "Reservations",
+    result.reservations.length > 0
+      ? boundedTable(
+          result.reservations.map((row) => ({
+            workId: row.workId,
+            agent: row.agentId,
+            expires: row.expiresAt ?? "",
+            branch: row.branch ?? "",
+            title: row.title
+          })),
+          [
+            { key: "workId", header: "work" },
+            { key: "agent", header: "agent" },
+            { key: "expires", header: "expires" },
+            { key: "branch", header: "branch" },
+            { key: "title", header: "title", flex: true }
+          ],
+          { wide }
+        )
+      : "none\n",
+    "Top blockers",
+    result.topBlockers.length > 0
+      ? boundedTable(
+          result.topBlockers.map((row) => ({
+            workId: row.workId,
+            blocks: String(row.blocksCount),
+            title: row.title
+          })),
+          [
+            { key: "workId", header: "work" },
+            { key: "blocks", header: "blocks" },
+            { key: "title", header: "title", flex: true }
+          ],
+          { wide }
+        )
+      : "none\n",
+    "Stale claims",
+    result.staleClaims.length > 0
+      ? boundedTable(
+          result.staleClaims.map((row) => ({
+            workId: row.workId,
+            agent: row.agentId,
+            expires: row.expiresAt
+          })),
+          [
+            { key: "workId", header: "work" },
+            { key: "agent", header: "agent" },
+            { key: "expires", header: "expires" }
+          ],
+          { wide }
+        )
+      : "none\n"
+  ].join("\n");
 }
 
 const SPRINT_SCOPE_TABLE_COLUMNS: readonly BoundedTableColumn[] = [

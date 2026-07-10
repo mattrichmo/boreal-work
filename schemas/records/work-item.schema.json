@@ -13,6 +13,7 @@
     "priority": { "enum": ["low", "normal", "high", "critical"] },
     "acceptanceCriteria": { "type": "array", "items": { "type": "string" } },
     "labels": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
+    "binding": { "$ref": "#/$defs/binding" },
     "parentId": { "type": "string" },
     "dependencyIds": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
     "evidenceIds": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
@@ -48,6 +49,18 @@
         "id": { "type": "string" },
         "kind": { "enum": ["human", "agent", "system"] },
         "displayName": { "type": "string" }
+      }
+    },
+    "binding": {
+      "type": "object",
+      "properties": {
+        "workflowRef": { "type": "string", "minLength": 1 },
+        "outputContract": { "type": "string", "minLength": 1 },
+        "command": { "type": "string", "minLength": 1 },
+        "templateNodeKey": { "type": "string", "minLength": 1 },
+        "templateId": { "type": "string", "minLength": 1 },
+        "templateVersion": { "type": "string", "minLength": 1 },
+        "templateRunId": { "type": "string", "minLength": 1 }
       }
     },
     "requiredCloseoutGate": {

@@ -449,6 +449,7 @@ describe("bwrk cli", () => {
 
   it("surfaces daemon status in CLI, doctor, and global dashboard", async () => {
     const rootDir = await makeTempWorkspace();
+    const registryRoot = join(rootDir, ".boreal", "test-registry");
     await runCli(rootDir, [
       "init",
       "--setup-memory",
@@ -469,7 +470,7 @@ describe("bwrk cli", () => {
 
     const dashboard = parseData<{
       readonly daemonStatus: { readonly projects: readonly Array<{ readonly projectRoot: string; readonly state: string }> };
-    }>((await runCli(rootDir, ["dashboard", "global", "--json"])).stdout);
+    }>((await runCli(rootDir, ["dashboard", "global", "--registry-root", registryRoot, "--json"])).stdout);
     expect(dashboard.daemonStatus.projects).toEqual(
       expect.arrayContaining([expect.objectContaining({ projectRoot: rootDir, state: "stopped" })])
     );

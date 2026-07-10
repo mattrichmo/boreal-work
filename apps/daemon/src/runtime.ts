@@ -21,6 +21,7 @@ import {
   type AgentDirectiveBundle,
   type AgentDirectiveDiagnosticSnapshot,
   type AgentDirectiveSnapshot,
+  type AgentReservation,
   type ContentHash,
   type IsoTimestamp,
   type McpProjectBoundary,
@@ -30,12 +31,15 @@ import {
   type WorkId
 } from "@boreal/core";
 import { createBorealRuntime, type ExternalDependencyResolution } from "@boreal/engine";
-import { FileBorealStore, inspectFileLock, writeTextFileAtomic, type FileLockInspection } from "@boreal/storage";
+import { FileBorealStore, ObjectDirBorealStore, inspectFileLock, writeTextFileAtomic, type BorealStore, type FileLockInspection } from "@boreal/storage";
 
 import { emptyGlobalRollupCacheResult, refreshGlobalRollupCache, type GlobalRollupCacheResult } from "./global-rollup-cache.js";
 
 export const DAEMON_STATUS_SCHEMA_VERSION = "boreal.daemon.status.v1";
 export const DAEMON_WATCH_SCHEMA_VERSION = "boreal.daemon.watch.v1";
+const DAEMON_WATCH_INTERVAL_MS = 30_000;
+const DAEMON_RESERVATION_RENEWAL_WINDOW_MS = DAEMON_WATCH_INTERVAL_MS * 2;
+const DAEMON_RESERVATION_LEASE_MS = 30 * 60_000;
 
 export type DaemonState = "missing" | "stopped" | "running" | "stale" | "drift";
 export type DaemonWatchAction = "observed" | "skipped";
@@ -96,6 +100,7 @@ export interface DaemonWatchResult {
   readonly reason?: string;
   readonly status: DaemonStatusResult;
   readonly globalRollups: GlobalRollupCacheResult;
+  readonly reservationRenewals: DaemonReservationRenewalSummary;
   readonly observedPaths: readonly string[];
   readonly recommendedActions: readonly string[];
 }
@@ -145,10 +150,36 @@ interface ProjectSetupLike {
   readonly projectRoot?: string;
   readonly memoryRoot?: string;
   readonly memoryLayout?: ProjectRegistryMemoryLayout;
+  readonly storage?: DaemonProjectStorageKind;
+}
+
+type DaemonProjectStorageKind = "file-v2" | "objects-v1";
+
+interface DaemonReservationRenewalRow {
+  readonly workId: WorkId;
+  readonly reservationId: string;
+  readonly agentId: string;
+  readonly previousExpiresAt?: string;
+  readonly expiresAt: string;
+}
+
+interface DaemonReservationRenewalSkippedRow {
+  readonly workId: WorkId;
+  readonly reservationId: string;
+  readonly agentId: string;
+  readonly reason: string;
+}
+
+export interface DaemonReservationRenewalSummary {
+  readonly enabled: true;
+  readonly windowMs: number;
+  readonly leaseMs: number;
+  readonly renewed: readonly DaemonReservationRenewalRow[];
+  readonly skipped: readonly DaemonReservationRenewalSkippedRow[];
 }
 
 export async function inspectDaemonStatus(options: DaemonRuntimeOptions): Promise<DaemonStatusResult> {
-  const generatedAt = options.now?.() ?? nowIso();
+  const generatedAt = (options.now?.() ?? nowIso()) as IsoTimestamp;
   const workspaceRoot = resolve(options.workspaceRoot);
   const statusPath = daemonStatusPath(workspaceRoot);
   const binding = await bindDaemonProject(workspaceRoot);
@@ -244,7 +275,10 @@ export async function runDaemonWatchOnce(options: DaemonRuntimeOptions): Promise
     : lockConflict
       ? "lock_conflict"
       : undefined;
-  const generatedAt = options.now?.() ?? nowIso();
+  const generatedAt = (options.now?.() ?? nowIso()) as IsoTimestamp;
+  const reservationRenewals = action === "observed"
+    ? await renewDaemonReservations(status.workspaceRoot, generatedAt)
+    : emptyDaemonReservationRenewals();
   const globalRollups = action === "observed"
     ? await refreshGlobalRollupCache({
         registryRoot: options.registryRoot,
@@ -274,6 +308,7 @@ export async function runDaemonWatchOnce(options: DaemonRuntimeOptions): Promise
     reason,
     status,
     globalRollups,
+    reservationRenewals,
     observedPaths: action === "observed" ? status.watch.paths : [],
     recommendedActions: status.recommendedActions
   };
@@ -505,11 +540,91 @@ async function readProjectSetup(workspaceRoot: string): Promise<ProjectSetupLike
     return {
       projectRoot: typeof parsed.projectRoot === "string" ? parsed.projectRoot : undefined,
       memoryRoot: typeof parsed.memoryRoot === "string" ? parsed.memoryRoot : undefined,
-      memoryLayout: memoryLayout(parsed.memoryLayout)
+      memoryLayout: memoryLayout(parsed.memoryLayout),
+      storage: projectStorageKind(parsed.storage)
     };
   } catch {
     return {};
   }
+}
+
+async function renewDaemonReservations(workspaceRoot: string, now: IsoTimestamp): Promise<DaemonReservationRenewalSummary> {
+  const setup = await readProjectSetup(workspaceRoot);
+  const store = daemonStore(workspaceRoot, setup.storage);
+  const nowMs = Date.parse(now);
+  const expiresAt = new Date(nowMs + DAEMON_RESERVATION_LEASE_MS).toISOString() as IsoTimestamp;
+  const runtime = createBorealRuntime({
+    store,
+    actor: {
+      id: "boreal-daemon",
+      kind: "system",
+      displayName: "Boreal daemon"
+    },
+    clock: () => new Date(nowMs)
+  });
+  const candidates = await store.read(async (reader) => {
+    const reservations = await reader.listReservations();
+    return reservations
+      .filter((reservation) => reservation.status === "active")
+      .filter((reservation) => daemonReservationNeedsRenewal(reservation, nowMs))
+      .slice()
+      .sort((left, right) => left.agentId.localeCompare(right.agentId) || left.workId.localeCompare(right.workId) || left.meta.id.localeCompare(right.meta.id));
+  });
+  const renewed: DaemonReservationRenewalRow[] = [];
+  const skipped: DaemonReservationRenewalSkippedRow[] = [];
+  for (const reservation of candidates) {
+    try {
+      const result = await runtime.renewWorkReservation({
+        workId: reservation.workId,
+        expiresAt
+      });
+      renewed.push({
+        workId: result.work.meta.id,
+        reservationId: result.reservation.meta.id,
+        agentId: String(result.reservation.agentId),
+        previousExpiresAt: reservation.expiresAt,
+        expiresAt: result.reservation.expiresAt ?? expiresAt
+      });
+    } catch (error) {
+      skipped.push({
+        workId: reservation.workId,
+        reservationId: reservation.meta.id,
+        agentId: String(reservation.agentId),
+        reason: error instanceof BorealError ? error.code : "renew_failed"
+      });
+    }
+  }
+  return {
+    ...emptyDaemonReservationRenewals(),
+    renewed,
+    skipped
+  };
+}
+
+function daemonReservationNeedsRenewal(reservation: AgentReservation, nowMs: number): boolean {
+  if (!reservation.expiresAt) {
+    return false;
+  }
+  const expiresAtMs = Date.parse(reservation.expiresAt);
+  if (!Number.isFinite(expiresAtMs) || expiresAtMs <= nowMs) {
+    return false;
+  }
+  return expiresAtMs - nowMs <= DAEMON_RESERVATION_RENEWAL_WINDOW_MS;
+}
+
+function emptyDaemonReservationRenewals(): DaemonReservationRenewalSummary {
+  return {
+    enabled: true,
+    windowMs: DAEMON_RESERVATION_RENEWAL_WINDOW_MS,
+    leaseMs: DAEMON_RESERVATION_LEASE_MS,
+    renewed: [],
+    skipped: []
+  };
+}
+
+function daemonStore(workspaceRoot: string, configuredStorage: DaemonProjectStorageKind | undefined): BorealStore {
+  const storage = configuredStorage ?? (existsSync(join(resolve(workspaceRoot), ".boreal", "objects")) ? "objects-v1" : "file-v2");
+  return storage === "objects-v1" ? new ObjectDirBorealStore({ rootDir: workspaceRoot }) : new FileBorealStore({ rootDir: workspaceRoot });
 }
 
 async function readDaemonStatusFile(path: string): Promise<DaemonStatusFile | undefined> {
@@ -836,6 +951,10 @@ function defaultPidExists(pid: number): boolean {
 
 function memoryLayout(value: unknown): ProjectRegistryMemoryLayout | undefined {
   return value === "in-repo" || value === "child" || value === "sibling" ? value : undefined;
+}
+
+function projectStorageKind(value: unknown): DaemonProjectStorageKind | undefined {
+  return value === "file-v2" || value === "objects-v1" ? value : undefined;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

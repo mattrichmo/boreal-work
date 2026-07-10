@@ -8,207 +8,260 @@
 
 # Boreal Work
 
-**Local runtime for evidence-backed work, project memory, and agent handoff.**
+**Keep project truth alive between humans, coding agents, and sessions.**
 
-Boreal turns tasks, sources, claims, decisions, verification, and workflow state into durable records with JSON-first command contracts and repairable Git-native artifacts. The `.boreal/` runtime tracks operational truth; the `memory/` vault preserves human-readable knowledge, ledgers, and handoff material that people can diff and agents can coordinate against.
+Boreal Work is a local-first project operating layer. It preserves the state around the code: why work exists, what blocks it, who owns it, which sources and decisions matter, what evidence proves completion, and what the next person or agent should do.
 
-> **Status:** v1 local runtime. `apps/cli` (`bwrk`) is the canonical command surface; the MCP server, daemon, and browser console are built on the same JSON-first contracts. npm and Homebrew packaging are prepared; the first public publish and tap push are owner actions.
+Most agent tools optimize one run. Boreal optimizes the continuity between runs. The result is less context reconstruction, safer parallel work, and closeouts that can be trusted instead of merely asserted.
 
----
+[Get started](docs/getting-started.md) · [Understand the model](docs/concepts.md) · [Browse CLI commands](docs/cli/COMMANDS.md) · [Open the documentation map](docs/README.md)
 
-## Why Boreal
+> **Status:** Boreal is currently a v0.1.0 local runtime. The `bwrk` CLI is the canonical interface; the browser console, MCP server, and daemon share its project-scoped contracts. The GitHub installer works today. npm and Homebrew packaging are prepared, but their first public publication remains an owner action.
 
-- **Evidence-backed operational truth.** Work, evidence, verification, sources, claims, and decisions are records — not Slack threads. They survive process restarts and diff cleanly.
-- **Evidence-gated closure.** Work doesn't close because someone says so; it closes because a verification record points at evidence (a passing command, a test run, a note).
-- **Built for agent handoff.** Every command has a stable `--json` envelope. Agents claim work atomically, hand off safely, and read the same records people read.
-- **Deterministic by design.** IDs carry actor + timestamp + nonce so imports don't collide; readiness is derived and explicitly recomputable; relationship edges use deterministic natural keys.
-- **Git-native, fail-closed.** State is a file-backed store with cross-process write locking, schema-drift rejection, and a `doctor` that repairs projections and indexes.
+## The problem Boreal solves
 
-## Install
+Serious project work rarely lives in one place. The ticket holds the task, a chat holds the reasoning, a terminal holds the test result, a person remembers the decision, and an agent session disappears with the handoff context. When the next session starts, it has to reconstruct the project before it can move it forward.
 
-There are two install levels. Understand them once and the rest is one command each:
+Boreal turns that fragmented context into durable, inspectable project records. The same local workspace can answer:
 
-- **Machine install** (`~/.local/bin/bwrk` → versioned bundle in `~/.local/share/boreal/bwrk`): the global project manager. This is a built, frozen copy — editing a source checkout never changes it.
-- **Repo install** (`bwrk init` / `bwrk install` inside a project): the tracker state (`.boreal/`), project memory (`memory/`), and agent skills for that repo. Repos can also pin their own `bwrk` version; the machine binary automatically delegates to a repo pin when one exists.
+- What work is actually ready, and what is still blocked?
+- Who or what has claimed it?
+- Which source, claim, or decision explains the work?
+- What acceptance gates remain?
+- What concrete evidence proves it is complete?
+- Where should the next human or agent resume?
+- Is the workspace healthy, current, and recoverable?
 
-### Machine install from GitHub (recommended)
+This makes Boreal more than a task list. It is the continuity and accountability layer between planning, implementation, verification, memory, and handoff.
+
+## What you gain
+
+| Moment | Without durable project state | With Boreal |
+| --- | --- | --- |
+| A new session begins | Re-read chats and rediscover the repo | Load current work, decisions, context, and next actions |
+| Several agents are active | Duplicate effort and branch collisions | Atomic reservations, dependency-aware queues, and lane metadata |
+| Someone says “done” | Completion depends on a summary | Evidence, verification, acceptance gates, and closeout records |
+| A decision is questioned later | Re-litigate it from memory | Trace it to sources, claims, and recorded rationale |
+| Generated state drifts | Quietly trust stale output | Detect and repair it with `sync` and `doctor` |
+| Work changes hands | Pass a fragile prose recap | Hand off structured state plus human-readable artifacts |
+
+## One continuous project loop
+
+```text
+capture a request or source
+        ↓
+reconcile durable knowledge
+        ↓
+structure work and dependencies
+        ↓
+claim an actionable item
+        ↓
+implement with current context
+        ↓
+record evidence and verification
+        ↓
+close, summarize, and hand off
+        ↓
+refresh and health-check the workspace
+```
+
+Boreal supports the whole loop without requiring a hosted service:
+
+- **Capture and memory** preserve raw inputs, wiki pages, claims, decisions, and source provenance.
+- **Work and planning** model tasks, sprints, milestones, dependencies, readiness, priority, and acceptance gates.
+- **Coordination** gives humans and agents atomic claims, expiring reservations, scoped queues, sessions, and worktree-aware handoffs.
+- **Proof and closeout** connect evidence to verification, verification to closure, and closure to summaries and Git checkpoints.
+- **Health and recovery** rebuild derived artifacts, detect stale or inconsistent state, repair safe failures, and export portable records.
+
+## What Boreal is—and is not
+
+Boreal is project-scoped infrastructure for work and memory. It runs locally, stores durable collaboration records beside the project, emits stable JSON for automation, and keeps human-readable knowledge available for review and Git history.
+
+It does not choose what to build, replace Git, or act as an autonomous coding agent. It gives people and agent clients a shared operating contract so they can work from the same truth. It can be the local tracker for a project or the execution layer beneath a broader issue-tracking process.
+
+## Quick start
+
+Requirements: Git, Node.js 22 or newer, and pnpm (or Corepack).
+
+### 1. Install the machine CLI
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/mattrichmo/boreal-work/main/install.sh | bash -s -- --machine --yes
+curl -fsSL https://raw.githubusercontent.com/mattrichmo/boreal-work/main/install.sh \
+  | bash -s -- --machine --yes
+
 bwrk --version
 ```
 
-This clones the repo to a temp directory, builds the bundled CLI, and installs the segmented machine binary. Requires `git`, `node` >= 22, and `pnpm` (or `corepack`). Pin a release with `--ref <tag>`.
+The installer builds a versioned bundle and places a `bwrk` shim in `~/.local/bin`. Pin an explicit release or Git ref with `--ref <tag-or-ref>`.
 
-### Staying up to date
-
-```bash
-bwrk update self          # upgrade the machine install from GitHub (accepts --ref)
-bwrk update repo          # inside a project: migrate legacy storage to the
-                          # object store and refresh installed agent skills
-bwrk sync refresh --json  # rebuild generated artifacts after an update
-```
-
-Run `bwrk update repo` in each existing project after upgrading the machine binary — it converts old `state.json` workspaces to the git-first per-record object store and reinstalls the skills recorded in `.boreal/project.json`.
-
-### npm / Homebrew (after first publish)
-
-```bash
-npm install -g @boreal/cli
-# or
-brew tap mattrichmo/boreal && brew install boreal-work
-```
-
-### Project setup
+### 2. Install Boreal into a project
 
 ```bash
 cd your-project
-bwrk init            # initialize tracker + storage marker
-bwrk install         # interactive setup: quick mode asks one question
+bwrk install --yes
+bwrk agent guide
+bwrk prime --json
 ```
 
-### Source development
+The recommended setup creates project-scoped runtime state, a child `memory/` repository with separate Git history, and Codex skill adapters under `.agents/skills`. Use interactive `bwrk install` to choose another memory or agent layout, or preview all writes with `bwrk install --dry-run`.
+
+### 3. Run an evidence-backed work loop
 
 ```bash
-pnpm install
-pnpm build
-pnpm bwrk --help     # run straight from source
+bwrk work create "Add a service health check" \
+  --description "Expose health state for operators" \
+  --acceptance "The health check passes in the test suite" \
+  --required-gate verification \
+  --gate-command "pnpm test" \
+  --gate-expect "tests pass" \
+  --ready \
+  --json
 
-# Optional: a source-linked shim for CLI development ONLY. Do not use this as
-# your daily bwrk: it executes live source, so mid-edit breakage becomes your
-# installed tool. Use the machine install above for real work.
-pnpm install:local
+bwrk work claim <work-id> \
+  --agent agent-a \
+  --purpose "implement the health check" \
+  --start \
+  --json
+
+# After implementation, validation, and a Git checkpoint:
+bwrk agent finish <work-id> \
+  --agent agent-a \
+  --summary "Implemented the health check; tests pass" \
+  --kind test \
+  --command "pnpm test" \
+  --verdict passed \
+  --close \
+  --reason "acceptance criteria verified" \
+  --commit <commit-sha> \
+  --json
+
+bwrk sync refresh --strict --json
+bwrk doctor --strict --json
 ```
 
-A first loop, end to end:
+The important distinction is that `agent finish` does not merely flip a status. It records evidence, creates verification, composes the closeout summary, links the checkpoint, closes the work, and releases its reservation through one guarded workflow.
 
-```bash
-pnpm bwrk init
-pnpm bwrk work create "Build CLI surface" --ready
-pnpm bwrk work claim --label cli --agent agent-a --purpose "start implementation"
-pnpm bwrk evidence add <work-id> --summary "pnpm test passed" --kind test --outcome passed --command "pnpm test"
-pnpm bwrk work verify <work-id> --evidence <evidence-id>
-pnpm bwrk work close <work-id> --reason "verified by tests"
-```
+For a slower walkthrough with setup variants and individual evidence commands, use the [getting-started guide](docs/getting-started.md).
 
-Full walkthrough → **[docs/getting-started.md](docs/getting-started.md)**.
+## How Boreal stores truth
 
-## Core concepts
+New workspaces use a Git-friendly per-record object store:
 
-| Concept | What it is |
-| --- | --- |
-| **Work** | The unit of tracked effort. Has status, labels, dependencies, and derived readiness. |
-| **Evidence & verification** | Proof a work item is actually done. Closure is gated on a verification record. |
-| **Sources, claims, decisions** | The knowledge layer — what's true, what backs it, and what was decided. |
-| **Context packs** | Projected, searchable bundles of the records relevant to a work item. |
-| **Reservations** | How an agent claims work without colliding with another agent. |
-| **Memory vault** | The `memory/` tree of durable, human-readable wiki/ledger/raw records. |
-| **Sprints & workflows** | Higher-level grouping and the canonical agent procedures that drive them. |
-
-Mental model in depth → **[docs/concepts.md](docs/concepts.md)**.
-
-## Surfaces
-
-Boreal is a workspace with several front ends over one runtime (`@boreal/engine`):
-
-| Surface | Package | Role |
+| Path | Purpose | Durability |
 | --- | --- | --- |
-| **CLI** (`bwrk`) | `apps/cli` | Canonical command surface. Stable JSON, plain text, opt-in dashboard views. |
-| **MCP server** | `apps/mcp` | Project-scoped stdio MCP server for local agent clients. |
-| **Daemon** | `apps/daemon` | Observer/coordinator that watches runtime paths and reports lock/process state. |
-| **Console** | `apps/console` | Local browser dashboard over CLI JSON contracts. |
-| **TUI** *(planned)* | `apps/tui` | Terminal UI surface — scaffold only, no implementation yet. |
+| `.boreal/objects/` | Canonical structured work, evidence, knowledge, graph, reservation, and summary records | Durable collaboration data |
+| `.boreal/log/` | Append-only, hash-linked operation and event history | Durable collaboration data |
+| `.boreal/project.json` | Project, memory, storage, and installed-skill configuration | Durable project metadata |
+| `memory/` | Human-readable wiki, raw sources, ledgers, work artifacts, and handoffs | Durable knowledge; separate Git history by default |
+| `.boreal/cache/`, `.boreal/runtime/`, `.boreal/tmp/`, `.boreal/results/` | Locks, indexes, generated read models, and local results | Local and rebuildable |
 
-## Documentation
+`bwrk sync refresh` rebuilds context projections, local search, and JSONL ledgers from canonical records. `bwrk doctor` checks record shape, references, graph consistency, reservations, verification policy, readiness, and installed workflow assets; repairable problems can be handled with `--fix`.
 
-| Guide | Read it for |
+Existing compact `state.json` workspaces can be migrated with `bwrk update repo`, which also refreshes installed agent skills.
+
+## Interfaces over one runtime
+
+| Interface | Role |
 | --- | --- |
-| **[Documentation index](docs/README.md)** | The full map of every doc in this repo. |
-| **[Getting started](docs/getting-started.md)** | Install, initialize, and run your first work loop. |
-| **[Publishing](docs/release/publishing.md)** | Release package gates, npm publish dry run, and Homebrew tap handoff. |
-| **[Concepts](docs/concepts.md)** | The mental model behind work, evidence, knowledge, and memory. |
-| **[CLI commands](docs/cli/COMMANDS.md)** | The complete `bwrk` command contract (every flag, every envelope). |
-| **[Runtime architecture](docs/architecture/RUNTIME.md)** | Ports, domain operations, and the engine boundary. |
-| **[Skills & workflows](docs/architecture/SKILLS_AND_WORKFLOWS.md)** | How workflows, skills, and templates fit together. |
-| **[Prior art & originality](docs/architecture/PRIOR_ART_ORIGINALITY.md)** | How Boreal positions itself against adjacent local-first and agent-workflow tools. |
-| **[V1 closeout & adoption](docs/product/V1_CLOSEOUT_ADOPTION_GUIDE.md)** | Where v1 landed and how to adopt it. |
+| **CLI (`bwrk`)** | Canonical human and automation surface with plain output and stable JSON envelopes |
+| **Browser console** | Local project and global-manager boards built from CLI contracts |
+| **MCP server** | Project-scoped tools for compatible agent clients |
+| **Daemon** | Observer and coordination status surface; it does not silently rewrite project truth |
+| **TUI** | Planned terminal interface; currently a scaffold and contract set |
 
-## Repository layout
+The engine remains the source of domain behavior, so interfaces do not invent their own lifecycle rules. See [runtime architecture](docs/architecture/RUNTIME.md) for the boundary.
 
-```text
-apps/        cli, mcp, daemon, console — front ends over the runtime (tui is a planned scaffold)
-packages/    core, storage, engine, work-engine, evidence-engine,
-             knowledge-engine, graph-engine, agent-runtime, search, ui-model
-workflows/   canonical agent procedures (source of truth)
-skills/      thin adapters that route to workflows
-templates/   output shapes for workflow artifacts
-schemas/     record, event, projection, and policy schemas
-memory/      the durable memory vault (wiki, ledgers, raw, work)
-docs/        architecture, CLI, and product documentation
-```
+## Find the right documentation
 
-### Runtime packages
+### Start here
 
-- `packages/core` — durable record types, deterministic IDs, canonical hashing, timestamps, errors, policies.
-- `packages/storage` — storage ports, an in-memory transactional store, and a file-backed store at `.boreal/runtime/state.json` with cross-process write locking.
-- `packages/work-engine` — work lifecycle, dependency readiness, evidence-gated closure.
-- `packages/evidence-engine` — evidence records and verification records.
-- `packages/knowledge-engine` — sources, claims, and decisions.
-- `packages/graph-engine` — deterministic relationship edges and cycle checks.
-- `packages/agent-runtime` — reservations and collision policy.
-- `packages/search` — context-pack projection helpers and deterministic hybrid local search-index ranking.
-- `packages/ui-model` — shared view models for the CLI/TUI/console surfaces.
-- `packages/engine` — outer runtime composition every surface calls.
+| Guide | Use it for |
+| --- | --- |
+| [Getting started](docs/getting-started.md) | Installation, workspace setup, the first closeout, and the global manager |
+| [Core concepts](docs/concepts.md) | Work, evidence, knowledge, context packs, reservations, memory, and determinism |
+| [Complete CLI reference](docs/cli/COMMANDS.md) | Command groups, flags, examples, JSON envelopes, and error behavior |
+| [Documentation map](docs/README.md) | Every maintained guide, reference, architecture note, and product document |
 
-## Development
+### Operate Boreal
 
-```bash
-pnpm check          # typecheck the workspace (tsc -b)
-pnpm test           # run the vitest suite
-pnpm build          # build all packages
-pnpm doctor:strict  # CI-style hardening gate (run `pnpm bwrk init` first)
-```
+| Guide | Use it for |
+| --- | --- |
+| [Canonical workflows](workflows/README.md) | The source procedures for context, memory, knowledge, work, handoff, and health |
+| [Skills and workflows](docs/architecture/SKILLS_AND_WORKFLOWS.md) | How agent skill adapters route to workflows and templates |
+| [Project setup](docs/architecture/PROJECT_SETUP.md) | Project roots, memory layouts, Git modes, skill roots, and no-leak rules |
+| [Sync and doctor workflow](workflows/60-health/sync-and-doctor.md) | Routine health checks, safe repairs, and finish criteria |
+| [Closeout gate contract](docs/architecture/CLOSEOUT_GATE_CONTRACT.md) | Verification, checkpoint, review, and audit gates |
+| [Lane worktree isolation](docs/architecture/LANE_WORKTREE_ISOLATION.md) | Safe parallel execution across agents and branches |
+| [Agent end-to-end fixture](docs/architecture/AGENT_E2E_FIXTURE.md) | The complete agent lifecycle exercised by the test suite |
 
-`pnpm doctor:strict` runs `bwrk doctor --workspace . --strict --json` and fails on warnings as well as errors.
+### Understand and extend the system
 
-### Verified proof slice
+| Guide | Use it for |
+| --- | --- |
+| [Runtime architecture](docs/architecture/RUNTIME.md) | Engine, storage, domain, and interface boundaries |
+| [CLI UX contracts](docs/architecture/CLI_UX.md) | Human output, JSON output, dashboards, and exit behavior |
+| [MCP server](docs/architecture/MCP_SERVER.md) | Project-scoped MCP tools and safety boundaries |
+| [Daemon](docs/architecture/DAEMON.md) | Observer lifecycle, status, and ownership boundaries |
+| [Console app](docs/architecture/CONSOLE_APP.md) | Browser console routes and CLI-backed data loading |
+| [Schemas](schemas/README.md) | Durable record, event, projection, and policy shapes |
+| [Templates](templates/README.md) | Human-readable artifact contracts |
+| [Publishing](docs/release/publishing.md) | npm and Homebrew release preparation and owner handoff |
 
-The runtime test covers the full happy path end to end:
+## Discover commands from the CLI
 
-```text
-init -> create work -> add dependency -> derive readiness -> reserve
--> record evidence -> verify -> close -> rebuild projections -> event trail
-```
-
-The file-backed store is additionally tested for persistence across runtime instances, rollback on failed transactions, concurrent-writer serialization, stale-lock recovery, schema-drift rejection, invalid-JSON rejection, and path-escape rejection. The CLI integration test covers init fail-closed behavior, workspace resolution, idempotent concurrent init, bounded/filtered listing, atomic claim handoffs, reservation lifecycle, the full create→verify→close path, knowledge commands, search, export/import, recovery snapshots, projection/search-index repair through `doctor --fix`, and stale-lock repair through `lock break --stale-only`.
-
-The agent E2E fixture in [docs/architecture/AGENT_E2E_FIXTURE.md](docs/architecture/AGENT_E2E_FIXTURE.md) runs the ordered local path from `init --setup-memory` through raw-source reconciliation, sprint launch, agent claim/finish, `sync refresh`, strict doctor, and JSON/Markdown/ledger exports:
+The checked-in CLI reference is the narrative guide. The live registry is the exact command truth for the installed version:
 
 ```bash
-pnpm test -- tests/runtime/agent-e2e.test.ts
+bwrk --help
+bwrk help work
+bwrk commands --format markdown
+bwrk commands --json
 ```
 
-### Runtime invariants
+Every command supports project discovery from the nearest parent `.boreal` directory. Use `--workspace /absolute/path/to/project` when automation must bind to an exact project. Most commands support `--json`; mutating commands fail closed when no Boreal workspace is resolved.
 
-Boreal adopts common invariants from Git-native issue trackers and agent workflow tools while implementing them independently in TypeScript:
-
-- Stable natural-key IDs belong on relationship records.
-- Work IDs include actor, timestamp, and nonce inputs so same-title imports do not collide.
-- Event IDs use random entropy instead of per-process sequence counters.
-- Dependency edges keep deterministic natural-key IDs.
-- Derived readiness has an explicit recompute/repair operation.
-- Search and ready-work paths stay bounded and filterable.
-- State-file writes use temp file, fsync, and rename so readers never observe a partial JSON document.
-
-## Artifact policy
-
-This repo is a source workspace, not a checked-in runnable bundle. Do **not** commit `node_modules/`, `dist/`, `*.tsbuildinfo`, or `.boreal/runtime` cache artifacts. Rebuild local artifacts with:
+## Develop from source
 
 ```bash
 pnpm install
 pnpm build
+pnpm bwrk --help
+
+pnpm check
+pnpm test
 ```
 
-## Conventions
+For a source-linked development shim:
 
-Every command accepts `--workspace <path>` and most accept `--json` for automation. Without `--workspace`, commands discover the nearest parent `.boreal`; with `--workspace`, the path is treated as the exact workspace root. See the [CLI commands reference](docs/cli/COMMANDS.md) for the global flag set, output modes, and JSON envelope contract.
+```bash
+pnpm install:local
+bwrk install status --json
+```
+
+The source-linked shim executes the checkout, so use the segmented machine install for ordinary project work and the shim only while developing Boreal itself.
+
+Before a release or milestone closeout, run:
+
+```bash
+pnpm bwrk sync refresh --json
+pnpm bwrk doctor --strict --json
+pnpm check
+pnpm test
+git diff --check
+```
+
+## Repository map
+
+```text
+apps/        CLI, MCP server, daemon, browser console, and planned TUI surfaces
+packages/    core records, storage, domain engines, search, and shared UI models
+workflows/   canonical operating procedures
+skills/      thin agent-facing adapters to workflows
+templates/   human-readable artifact shapes
+schemas/     durable record and policy contracts
+memory/      this project's Boreal knowledge vault
+docs/        guides, command reference, architecture, product, and release notes
+tests/       runtime, CLI, storage, workflow, and end-to-end verification
+```
+
+Build outputs, dependency trees, TypeScript build info, and local Boreal caches are generated artifacts. Do not commit `node_modules/`, `dist/`, `*.tsbuildinfo`, `.boreal/cache/`, `.boreal/runtime/`, `.boreal/tmp/`, or `.boreal/results/`.

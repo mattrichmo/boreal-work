@@ -81,6 +81,9 @@ importers:
       '@boreal/core':
         specifier: workspace:*
         version: link:../../packages/core
+      '@boreal/engine':
+        specifier: workspace:*
+        version: link:../../packages/engine
       '@boreal/storage':
         specifier: workspace:*
         version: link:../../packages/storage

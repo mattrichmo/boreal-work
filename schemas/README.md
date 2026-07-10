@@ -4,6 +4,8 @@ These JSON schemas describe the durable record envelopes used by the TypeScript 
 
 The current runtime types cover work, agent summaries, graph edges, evidence, verification, knowledge sources, claims, decisions, reservations, events, and projections. Enforcement gap schemas describe typed runtime misses that directives can project from later, but are not durable runtime snapshot sections yet. Agent directive bundle schemas describe trusted runtime instruction bundles carried by command envelopes and imports, but are intentionally separate from durable runtime snapshots. The project registry schema is a machine-local coordination contract for known Boreal workspaces and is intentionally separate from runtime snapshots.
 
+Work-structure templates use `schemas/work-structure-template.schema.json`. They are declarative YAML files under `templates/work-structures/`, distinct from Markdown output-contract templates, and are validated by `bwrk template validate`.
+
 Currently enforced schemas:
 
 - `schemas/records/work-item.schema.json`

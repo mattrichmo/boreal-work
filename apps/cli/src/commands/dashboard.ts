@@ -12,15 +12,18 @@ import {
   resolveProjectRegistryPaths,
   projectRegistryEntryIdFromIdentity,
   type AgentDirectiveBundle,
+  type AgentReservation,
   type EnforcementGap,
   type ProjectRegistryEntry as CoreProjectRegistryEntry,
   type ProjectRollupDocument,
   type ProjectRollupNextWork,
   type RuntimeOperation,
+  type WorkItem,
   type WorkStatus,
   type WorkPriority
 } from "@boreal/core";
 import { inspectDaemonStatus, refreshGlobalRollupCache, type DaemonStatusResult, type GlobalRollupCacheProject } from "@boreal/daemon";
+import { FileBorealStore, ObjectDirBorealStore, type BorealStore } from "@boreal/storage";
 import {
   buildGlobalActivityView,
   buildGlobalHealthView,
@@ -44,7 +47,7 @@ import { flagValue, flagValues, hasFlag, type ParsedArgs } from "../args.js";
 import { assertInitialized, createCliContext, isGlobalContext, type CliContext } from "../context.js";
 import { runDoctor, type Diagnostic } from "../doctor.js";
 import { formatRecord, table, type CliOutput } from "../output.js";
-import { readProjectSetupConfig } from "../project-setup.js";
+import { readProjectSetupConfig, readProjectStorage, type ProjectStorageKind } from "../project-setup.js";
 import {
   addProjectRegistryEntry,
   doctorProjectRegistry,
@@ -85,6 +88,30 @@ interface GlobalDashboardProjectOverview {
   readonly sync: SyncDashboardView;
   readonly locks: LockDashboardView;
   readonly daemon: DaemonStatusResult;
+}
+
+export interface GlobalStatusProjectRow {
+  readonly projectId: string;
+  readonly rootDir: string;
+  readonly storage?: ProjectStorageKind;
+  readonly workOpen?: number;
+  readonly workReady?: number;
+  readonly workBlocked?: number;
+  readonly activeReservations?: number;
+  readonly lastEventAt?: string;
+  readonly ok: boolean;
+  readonly error?: string;
+}
+
+export interface GlobalStatusResult {
+  readonly schemaVersion: "boreal.cli.global.status.v1";
+  readonly generatedAt: string;
+  readonly registryRoot: string;
+  readonly registryFile: string;
+  readonly projectCount: number;
+  readonly okCount: number;
+  readonly errorCount: number;
+  readonly projects: readonly GlobalStatusProjectRow[];
 }
 
 export interface GlobalInboxDashboardRow {
@@ -248,6 +275,9 @@ export async function globalCommand(
   }
   if (action === "unlink") {
     return unlinkCommand(rest[0], args, output, json);
+  }
+  if (action === "status") {
+    return globalStatusCommand(args, output, json);
   }
   if (action !== undefined) {
     throw new BorealError("BOREAL_INVALID_INPUT", `Unknown global command: ${action}`);
@@ -606,6 +636,106 @@ function formatGlobalNext(result: GlobalNextResult): string {
   }
   lines.push(result.overall.command);
   return lines.join("\n") + "\n";
+}
+
+async function globalStatusCommand(args: ParsedArgs, output: CliOutput, json: boolean): Promise<CommandResult> {
+  const result = await buildGlobalStatusResult(args);
+  output.write(json ? formatRecord(result, true) : formatGlobalStatus(result));
+  return { exitCode: result.errorCount > 0 && hasFlag(args, "strict") ? 1 : 0 };
+}
+
+async function buildGlobalStatusResult(args: ParsedArgs): Promise<GlobalStatusResult> {
+  const generatedAt = nowIso();
+  const registry = await listProjectRegistry({ registryRoot: flagValue(args, "registry-root") });
+  const projects = await Promise.all(
+    registry.entries
+      .filter((entry) => entry.lifecycle !== "archived")
+      .map((entry) => globalStatusProjectRow(entry))
+  );
+  const errorCount = projects.filter((project) => !project.ok).length;
+  return {
+    schemaVersion: "boreal.cli.global.status.v1",
+    generatedAt,
+    registryRoot: registry.storage.rootDir,
+    registryFile: registry.storage.registryFile,
+    projectCount: projects.length,
+    okCount: projects.length - errorCount,
+    errorCount,
+    projects
+  };
+}
+
+async function globalStatusProjectRow(entry: CoreProjectRegistryEntry): Promise<GlobalStatusProjectRow> {
+  const rootDir = entry.projectRoot;
+  try {
+    assertReadableRegisteredProject(entry);
+    const storage = await readProjectStorage(rootDir) ?? "file-v2";
+    const store = openRegisteredProjectStore(rootDir, storage);
+    const [workItems, reservations, events] = await store.read((reader) =>
+      Promise.all([
+        reader.listWorkItems(),
+        reader.listReservations(),
+        reader.listEvents()
+      ])
+    );
+    return {
+      projectId: entry.id,
+      rootDir,
+      storage,
+      workOpen: workItems.filter(isOpenGlobalStatusWork).length,
+      workReady: workItems.filter((work) => work.status === "ready").length,
+      workBlocked: workItems.filter((work) => work.status === "blocked").length,
+      activeReservations: reservations.filter(isActiveReservation).length,
+      lastEventAt: latestEventTimestamp(events),
+      ok: true
+    };
+  } catch (error) {
+    return {
+      projectId: entry.id,
+      rootDir,
+      ok: false,
+      error: error instanceof Error ? error.message : String(error)
+    };
+  }
+}
+
+function assertReadableRegisteredProject(entry: CoreProjectRegistryEntry): void {
+  if (!existsSync(entry.projectRoot)) {
+    throw new BorealError("BOREAL_NOT_FOUND", "Registered project root is missing", {
+      projectId: entry.id,
+      projectRoot: entry.projectRoot
+    });
+  }
+  if (!existsSync(entry.projectConfigPath)) {
+    throw new BorealError("BOREAL_NOT_FOUND", "Registered project setup metadata is missing", {
+      projectId: entry.id,
+      projectConfigPath: entry.projectConfigPath
+    });
+  }
+}
+
+function openRegisteredProjectStore(rootDir: string, storage: ProjectStorageKind): BorealStore {
+  return storage === "objects-v1" ? new ObjectDirBorealStore({ rootDir }) : new FileBorealStore({ rootDir });
+}
+
+function isOpenGlobalStatusWork(work: WorkItem): boolean {
+  return !isTerminalWorkStatus(work.status);
+}
+
+function isTerminalWorkStatus(status: WorkStatus): boolean {
+  return status === "closed" || status === "verified" || status === "cancelled";
+}
+
+function isActiveReservation(reservation: AgentReservation): boolean {
+  return reservation.status === "active";
+}
+
+function latestEventTimestamp(events: readonly { readonly meta: { readonly createdAt: string; readonly updatedAt: string } }[]): string | undefined {
+  return events
+    .map((event) => event.meta.updatedAt || event.meta.createdAt)
+    .filter(isIsoTimestamp)
+    .sort()
+    .at(-1);
 }
 
 // Link a project into the global workspace (registry add, reframed). With no
@@ -2026,6 +2156,26 @@ function formatGlobalDashboardSummary(result: Awaited<ReturnType<typeof buildGlo
       stale: entry.stale ? "yes" : "no"
     }))
   )}`;
+}
+
+function formatGlobalStatus(result: GlobalStatusResult): string {
+  const header = `[${result.errorCount === 0 ? "ok" : "warning"}] global status: ${result.okCount}/${result.projectCount} project(s) readable`;
+  if (result.projects.length === 0) {
+    return `${header}\nNo registered projects at ${result.registryFile}\n`;
+  }
+  const rows = result.projects.map((project) => ({
+    project: project.projectId,
+    ok: project.ok ? "yes" : "no",
+    storage: project.storage ?? "unknown",
+    open: project.workOpen ?? "-",
+    ready: project.workReady ?? "-",
+    blocked: project.workBlocked ?? "-",
+    reservations: project.activeReservations ?? "-",
+    lastEventAt: project.lastEventAt ?? "-",
+    root: project.rootDir,
+    error: project.error ?? ""
+  }));
+  return `${header}\n${table(rows)}`;
 }
 
 function operationListRow(operation: RuntimeOperation): GlobalActivitySourceRow {

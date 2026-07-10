@@ -46,6 +46,16 @@ export interface EventLogDeepVerificationResult extends EventLogVerificationResu
   readonly archives: number;
 }
 
+export interface EventLogRepairInspection {
+  readonly ok: boolean;
+  readonly repairable: boolean;
+  readonly entries: number;
+  readonly brokenAtSeq?: number;
+  readonly invalidAtSeq?: number;
+  readonly reason?: "parse_error" | "entry_integrity";
+  readonly error?: string;
+}
+
 export class FileEventLog {
   readonly path: string;
 
@@ -126,6 +136,54 @@ export class FileEventLog {
       }
     }
     return { ok: true, archives: archivePaths.length };
+  }
+
+  async inspectRepairableChainBreak(): Promise<EventLogRepairInspection> {
+    let entries: readonly EventLogEntry[];
+    try {
+      entries = parseEntries(await this.readText());
+    } catch (error) {
+      return {
+        ok: false,
+        repairable: false,
+        entries: 0,
+        reason: "parse_error",
+        error: error instanceof Error ? error.message : String(error)
+      };
+    }
+
+    const first = entries[0];
+    const verification = !first
+      ? { ok: true }
+      : first.seq < 1
+        ? { ok: false, brokenAtSeq: first.seq }
+        : verifyChainedEntries(entries, {
+            seq: first.seq,
+            prevHash: first.seq === 1 ? GENESIS_HASH : first.prevHash
+          });
+    if (verification.ok) {
+      return { ok: true, repairable: false, entries: entries.length };
+    }
+
+    const invalid = entries.find((entry) => entryIntegrityIssue(entry) !== undefined);
+    if (invalid) {
+      return {
+        ok: false,
+        repairable: false,
+        entries: entries.length,
+        brokenAtSeq: verification.brokenAtSeq,
+        invalidAtSeq: invalid.seq,
+        reason: "entry_integrity",
+        error: entryIntegrityIssue(invalid)
+      };
+    }
+
+    return {
+      ok: false,
+      repairable: true,
+      entries: entries.length,
+      brokenAtSeq: verification.brokenAtSeq
+    };
   }
 
   async rotate(): Promise<EventLogRotationResult> {
@@ -239,6 +297,28 @@ function makeEntry(input: {
 
 function entryHash(entry: EventLogEntry): string {
   return hashContent({ seq: entry.seq, prevHash: entry.prevHash, record: entry.record });
+}
+
+function entryIntegrityIssue(entry: EventLogEntry): string | undefined {
+  if (!Number.isSafeInteger(entry.seq) || entry.seq < 1) {
+    return "Event log entry seq must be a positive safe integer";
+  }
+  if (typeof entry.prevHash !== "string" || entry.prevHash.length === 0) {
+    return "Event log entry prevHash must be a non-empty string";
+  }
+  if (typeof entry.hash !== "string" || entry.hash.length === 0) {
+    return "Event log entry hash must be a non-empty string";
+  }
+  if (entry.kind !== "event" && entry.kind !== "operation") {
+    return "Event log entry kind must be event or operation";
+  }
+  if (!isRecord(entry.record)) {
+    return "Event log entry record must be an object";
+  }
+  if (entry.hash !== entryHash(entry)) {
+    return "Event log entry hash does not match its content";
+  }
+  return undefined;
 }
 
 function verifyChainedEntries(

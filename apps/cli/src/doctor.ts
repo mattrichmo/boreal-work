@@ -47,7 +47,12 @@ import { installUpgradeStatus, normalizeInstallChannel } from "./install-channel
 import { inspectBorealInstallStatus, installStatusHealthy, installStatusSummary } from "./install-status.js";
 import { exportDriftDiagnostics, ledgerStatus, readGeneratedLedgerTombstones } from "./import-export.js";
 import { inspectRuntimeLocks } from "./locks.js";
-import { inspectProjectSetupDrift, type ProjectSetupDriftInspection } from "./project-setup.js";
+import {
+  ensureBorealJsonlMergeDriver,
+  inspectBorealJsonlMergeDriver,
+  inspectProjectSetupDrift,
+  type ProjectSetupDriftInspection
+} from "./project-setup.js";
 import { inspectProjectRollup, writeProjectRollup } from "./rollup.js";
 import { inspectSearchIndex, writeSearchIndex } from "./search-cli.js";
 import { dirtyPathNotesHaveReasonCode } from "./summary-policy.js";
@@ -123,8 +128,14 @@ export async function runDoctor(context: CliContext, fix: boolean, strict = fals
   const eventLogDiagnostics = await validateEventLog(context, fix);
   diagnostics.push(...eventLogDiagnostics.diagnostics);
   fixed = fixed || eventLogDiagnostics.fixed;
+  if (eventLogDiagnostics.diagnostics.some((diagnostic) => diagnostic.code === "log.corrupt" && diagnostic.severity === "error")) {
+    return finalize(diagnostics, fixed, strict);
+  }
 
   diagnostics.push(await validateGitWorktree(context));
+  const mergeDriverDiagnostics = await validateJsonlMergeDriver(context, fix);
+  diagnostics.push(...mergeDriverDiagnostics.diagnostics);
+  fixed = fixed || mergeDriverDiagnostics.fixed;
   const projectSetupDiagnostics = await validateProjectSetup(context, fix);
   diagnostics.push(...projectSetupDiagnostics.diagnostics);
   fixed = fixed || projectSetupDiagnostics.fixed;
@@ -318,7 +329,26 @@ async function validateEventLog(
   readonly diagnostics: readonly Diagnostic[];
 }> {
   const log = new FileEventLog({ path: context.paths.eventLogFile });
-  const verification = await log.verifyDeep();
+  let verification: Awaited<ReturnType<FileEventLog["verifyDeep"]>>;
+  try {
+    verification = await log.verifyDeep();
+  } catch (error) {
+    return {
+      fixed: false,
+      diagnostics: [
+        {
+          code: "log.corrupt",
+          severity: "error",
+          message: "Append-only event log is corrupt and cannot be auto-repaired",
+          details: {
+            path: context.paths.eventLogFile,
+            error: error instanceof Error ? error.message : String(error),
+            repairNote: "Recover the event log from a trusted Git revision or snapshot."
+          }
+        }
+      ]
+    };
+  }
   if (verification.ok) {
     const diagnostics: Diagnostic[] = [
       {
@@ -340,16 +370,53 @@ async function validateEventLog(
       diagnostics
     };
   }
-  if (fix && verification.archives === 0) {
+  if (verification.archives > 0) {
+    return {
+      fixed: false,
+      diagnostics: [
+        {
+          code: "log.corrupt",
+          severity: "error",
+          message: "Archive-aware event log hash chain is broken and requires manual recovery",
+          details: {
+            brokenAtSeq: verification.brokenAtSeq,
+            archives: verification.archives,
+            repairNote: "Recover archives and the live event log from a trusted Git revision or snapshot."
+          }
+        }
+      ]
+    };
+  }
+
+  const repair = await log.inspectRepairableChainBreak();
+  if (!repair.repairable) {
+    return {
+      fixed: false,
+      diagnostics: [
+        {
+          code: "log.corrupt",
+          severity: "error",
+          message: "Append-only event log is corrupt and cannot be auto-repaired",
+          details: {
+            path: context.paths.eventLogFile,
+            brokenAtSeq: verification.brokenAtSeq,
+            ...repair,
+            repairNote: "Recover the event log from a trusted Git revision or snapshot."
+          }
+        }
+      ]
+    };
+  }
+  if (fix) {
     const rewritten = await log.rechain();
     return {
       fixed: rewritten > 0,
       diagnostics: [
         {
-          code: "event_log.chain",
+          code: "log.rechain-needed",
           severity: "fixed",
           message: "Re-chained append-only event log after merge drift",
-          details: { brokenAtSeq: verification.brokenAtSeq, rewritten, archives: verification.archives }
+          details: { brokenAtSeq: repair.brokenAtSeq, rewritten, entries: repair.entries }
         }
       ]
     };
@@ -358,17 +425,13 @@ async function validateEventLog(
     fixed: false,
     diagnostics: [
       {
-        code: "event_log.chain",
+        code: "log.rechain-needed",
         severity: "error",
-        message: "Append-only event log hash chain is broken; run `bwrk doctor --fix`",
+        message: "Append-only event log needs re-chaining after a JSONL merge; run `bwrk doctor --fix`",
         details: {
-          brokenAtSeq: verification.brokenAtSeq,
-          archives: verification.archives,
-          repairCommand: verification.archives === 0 ? "bwrk doctor --fix --json" : undefined,
-          repairNote:
-            verification.archives > 0
-              ? "Archive-aware event log corruption requires manual recovery from a trusted Git revision or snapshot."
-              : undefined
+          brokenAtSeq: repair.brokenAtSeq,
+          entries: repair.entries,
+          repairCommand: "bwrk doctor --fix --json"
         }
       }
     ]
@@ -437,6 +500,83 @@ async function validateGitWorktree(context: CliContext): Promise<Diagnostic> {
       project,
       memory
     }
+  };
+}
+
+async function validateJsonlMergeDriver(
+  context: CliContext,
+  fix: boolean
+): Promise<{
+  readonly fixed: boolean;
+  readonly diagnostics: readonly Diagnostic[];
+}> {
+  const inspection = await inspectBorealJsonlMergeDriver(context.workspaceRoot);
+  if (!inspection.available) {
+    return {
+      fixed: false,
+      diagnostics: [
+        {
+          code: "git.merge-driver",
+          severity: "ok",
+          message: "Skipped Boreal JSONL merge driver check because Git is unavailable",
+          details: inspection
+        }
+      ]
+    };
+  }
+  if (!inspection.insideWorktree) {
+    return {
+      fixed: false,
+      diagnostics: [
+        {
+          code: "git.merge-driver",
+          severity: "ok",
+          message: "Skipped Boreal JSONL merge driver check outside a Git worktree",
+          details: inspection
+        }
+      ]
+    };
+  }
+  if (inspection.configured) {
+    return {
+      fixed: false,
+      diagnostics: [
+        {
+          code: "git.merge-driver",
+          severity: "ok",
+          message: "Boreal JSONL merge driver is configured in local Git config",
+          details: inspection
+        }
+      ]
+    };
+  }
+  if (fix) {
+    const installed = await ensureBorealJsonlMergeDriver(context.workspaceRoot);
+    return {
+      fixed: installed.installed,
+      diagnostics: [
+        {
+          code: "git.merge-driver-missing",
+          severity: "fixed",
+          message: "Installed Boreal JSONL merge driver in local Git config",
+          details: installed
+        }
+      ]
+    };
+  }
+  return {
+    fixed: false,
+    diagnostics: [
+      {
+        code: "git.merge-driver-missing",
+        severity: "warning",
+        message: "Boreal JSONL merge driver is missing or stale in local Git config; run `bwrk doctor --fix`",
+        details: {
+          ...inspection,
+          repairCommand: "bwrk doctor --fix --json"
+        }
+      }
+    ]
   };
 }
 

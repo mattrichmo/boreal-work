@@ -7,6 +7,11 @@ risk: medium
 writes_state: true
 requires_workspace: true
 allowed_commands:
+  - template list
+  - template show
+  - template validate
+  - template run
+  - template capture
   - work create
   - work ready
   - dep add
@@ -25,7 +30,7 @@ Create issues, tasks, sprints, milestones, and dependencies from a plan.
 
 ## When To Use
 
-Use this workflow when the user's request requires create issues, tasks, sprints, milestones, and dependencies from a plan. Do not use it for adjacent work when a narrower workflow exists.
+Use this workflow when the user's request requires create issues, tasks, sprints, milestones, and dependencies from a plan. If the request asks for a reusable, repeatable, or captured work structure, use `bwrk template validate` and `bwrk template run` or `bwrk template capture` instead of manually replaying `work create` / `dep add`. Do not use it for adjacent work when a narrower workflow exists.
 
 ## Inputs Required
 
@@ -64,6 +69,20 @@ Use this workflow when the user's request requires create issues, tasks, sprints
 
 Use exact create output IDs from JSON responses; do not invent parent, sprint, or task IDs.
 
+For reusable structures, prefer work-structure templates:
+
+1. List or inspect existing templates:
+   `bwrk template list --json`
+   `bwrk template show <template-id|path> --json`
+2. Validate placeholders and graph shape before mutation:
+   `bwrk template validate <template-id|path> --var <name=value> --json`
+3. Instantiate the structure as a fresh run:
+   `bwrk template run <template-id|path> --var <name=value> --json`
+4. Capture a hand-built structure only when the request is to create a reusable mold from existing work:
+   `bwrk template capture <work-ref> --out templates/work-structures/<name>.yaml --var <name=value> --json`
+
+For one-off structures, use manual work commands:
+
 1. Create a container when the request describes a program, backlog, milestone, or issue group:
    `bwrk work create "<container title>" --kind issue --label <label> --json`
 2. Capture the returned container ID from `data.meta.id`.
@@ -85,6 +104,11 @@ Use exact create output IDs from JSON responses; do not invent parent, sprint, o
 - `bwrk work ready`
 - `bwrk dep add`
 - `bwrk dep tree`
+- `bwrk template list`
+- `bwrk template show`
+- `bwrk template validate`
+- `bwrk template run`
+- `bwrk template capture`
 - `bwrk doctor`
 - `bwrk sync refresh`
 
@@ -109,6 +133,7 @@ Use exact create output IDs from JSON responses; do not invent parent, sprint, o
 - The requested outcome is represented in Boreal records or the workflow has returned a clear read-only answer.
 - Any new or updated durable memory has source/evidence support.
 - New sprint, phase, milestone, or major-task structures identify where Git checkpoints are expected.
+- Reusable structures are represented as validated `templates/work-structures/*.yaml` files or instantiated with `bwrk template run`.
 - `bwrk doctor --strict --json` passes or the remaining diagnostic is explicitly reported.
 
 ## Next Suggested Workflow

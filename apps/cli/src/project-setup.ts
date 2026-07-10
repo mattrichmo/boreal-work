@@ -2,6 +2,7 @@ import { execFile } from "node:child_process";
 import { existsSync } from "node:fs";
 import { lstat, mkdir, readFile } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 
 import { BorealError, assertPathInside, assertRealPathInside, nowIso, safeParseJson } from "@boreal/core";
@@ -74,6 +75,7 @@ export interface ProjectGitSetupResult {
   readonly memoryRepoExisting: boolean;
   readonly memoryGitignoreUpdated: boolean;
   readonly projectGitignoreUpdated: boolean;
+  readonly jsonlMergeDriverConfigured: boolean;
   readonly gitmodulesUpdated: boolean;
   readonly ignoredByProject: boolean;
   readonly memoryGitDir?: string;
@@ -86,6 +88,21 @@ export interface ProjectSetupRepair {
   readonly kind: "project_gitignore" | "memory_gitignore" | "memory_repo" | "gitmodules";
   readonly path: string;
   readonly details?: unknown;
+}
+
+export interface BorealJsonlMergeDriverInspection {
+  readonly available: boolean;
+  readonly insideWorktree: boolean;
+  readonly configured: boolean;
+  readonly configKey: string;
+  readonly expected: string;
+  readonly driverPath: string;
+  readonly current?: string;
+  readonly error?: string;
+}
+
+export interface BorealJsonlMergeDriverInstallResult extends BorealJsonlMergeDriverInspection {
+  readonly installed: boolean;
 }
 
 export interface ProjectSetupPathInspection {
@@ -387,6 +404,74 @@ const INSTALL_APPLY_OPTIONS: readonly CliSelectOption<"yes" | "no">[] = [
     description: "Exit without writing anything."
   }
 ];
+
+const BOREAL_JSONL_MERGE_DRIVER_CONFIG_KEY = "merge.boreal-jsonl.driver";
+
+export function borealJsonlMergeDriverCommand(): string {
+  return `${shellSingleQuote(process.execPath)} ${shellSingleQuote(borealJsonlMergeDriverPath())} %O %A %B`;
+}
+
+export function borealJsonlMergeDriverPath(): string {
+  return fileURLToPath(new URL("../../../tools/boreal-jsonl-merge-driver.mjs", import.meta.url));
+}
+
+export async function inspectBorealJsonlMergeDriver(projectRoot: string): Promise<BorealJsonlMergeDriverInspection> {
+  const expected = borealJsonlMergeDriverCommand();
+  const driverPath = borealJsonlMergeDriverPath();
+  const base = {
+    configKey: BOREAL_JSONL_MERGE_DRIVER_CONFIG_KEY,
+    expected,
+    driverPath
+  };
+  const gitRoot = await runGit(projectRoot, ["rev-parse", "--show-toplevel"]);
+  if (!gitRoot.ok) {
+    return {
+      ...base,
+      available: !isMissingGit(gitRoot),
+      insideWorktree: false,
+      configured: false,
+      error: isMissingGit(gitRoot) ? undefined : gitRoot.error
+    };
+  }
+
+  const configured = await runGit(projectRoot, ["config", "--get", BOREAL_JSONL_MERGE_DRIVER_CONFIG_KEY]);
+  if (!configured.ok) {
+    const missingConfig = configured.code === 1 && configured.stdout.trim().length === 0 && configured.stderr.trim().length === 0;
+    return {
+      ...base,
+      available: true,
+      insideWorktree: true,
+      configured: false,
+      error: missingConfig ? undefined : configured.error
+    };
+  }
+
+  const current = configured.stdout.trim();
+  return {
+    ...base,
+    available: true,
+    insideWorktree: true,
+    configured: current === expected,
+    current
+  };
+}
+
+export async function ensureBorealJsonlMergeDriver(projectRoot: string): Promise<BorealJsonlMergeDriverInstallResult> {
+  const before = await inspectBorealJsonlMergeDriver(projectRoot);
+  if (!before.available || !before.insideWorktree || before.configured) {
+    return { ...before, installed: false };
+  }
+  const result = await runGit(projectRoot, ["config", BOREAL_JSONL_MERGE_DRIVER_CONFIG_KEY, before.expected]);
+  if (!result.ok) {
+    throw new BorealError("BOREAL_CONFLICT", "Unable to configure Boreal JSONL merge driver", {
+      projectRoot,
+      configKey: BOREAL_JSONL_MERGE_DRIVER_CONFIG_KEY,
+      error: result.error
+    });
+  }
+  const after = await inspectBorealJsonlMergeDriver(projectRoot);
+  return { ...after, installed: true };
+}
 
 export async function maybeConfigureProjectSetup(
   context: CliContext,
@@ -1135,6 +1220,7 @@ function relativeMemoryPath(memoryRoot: string, path: string): string {
 
 async function applyGitSetup(input: ProjectSetupInput, memoryGitignoreUpdated: boolean): Promise<ProjectGitSetupResult> {
   const projectGitignore = await ensureIgnoreFile(join(input.projectRoot, ".gitignore"), projectIgnorePatterns(input));
+  const mergeDriver = await ensureBorealJsonlMergeDriver(input.projectRoot);
   const memoryRepoBefore = existsSync(join(input.memoryRoot, ".git"));
   const memoryRepoInitialized =
     input.memoryGitMode === "shared" ? false : await ensureGitRepository(input.memoryRoot, "memory root");
@@ -1148,6 +1234,7 @@ async function applyGitSetup(input: ProjectSetupInput, memoryGitignoreUpdated: b
     memoryRepoExisting: memoryRepoBefore,
     memoryGitignoreUpdated,
     projectGitignoreUpdated: projectGitignore.updated,
+    jsonlMergeDriverConfigured: mergeDriver.configured,
     gitmodulesUpdated,
     ignoredByProject: input.memoryGitMode === "separate" && input.memoryLayout !== "sibling",
     memoryGitDir: input.memoryGitMode === "shared" ? undefined : join(input.memoryRoot, ".git"),
@@ -1191,6 +1278,10 @@ function canonicalIgnorePattern(pattern: string): string {
   }
   const withoutLeadingRoot = trimmed.replace(/^\/+/u, "");
   return trimmed.endsWith("/") ? withoutLeadingRoot.replace(/\/+$/u, "/") : withoutLeadingRoot;
+}
+
+function shellSingleQuote(value: string): string {
+  return `'${value.replace(/'/g, "'\\''")}'`;
 }
 
 async function ensureGitRepository(path: string, label: string): Promise<boolean> {

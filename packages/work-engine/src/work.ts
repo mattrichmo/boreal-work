@@ -22,6 +22,7 @@ import {
   type VerificationRecord,
   type WorkId,
   type WorkItem,
+  type WorkBinding,
   type WorkKind,
   type WorkPriority,
   type WorkStatus,
@@ -36,6 +37,7 @@ export interface CreateWorkItemInput {
   readonly priority?: WorkPriority;
   readonly acceptanceCriteria?: readonly string[];
   readonly labels?: readonly string[];
+  readonly binding?: WorkBinding;
   readonly requiredCloseoutGates?: readonly RequiredCloseoutGateInput[];
   readonly parentId?: WorkId;
   readonly sourceRefs?: readonly SourceRef[];
@@ -103,6 +105,7 @@ export function createWorkItem(input: CreateWorkItemInput): WorkItem {
     priority: input.priority ?? "normal",
     acceptanceCriteria: input.acceptanceCriteria ?? [],
     labels,
+    ...(input.binding ? { binding: input.binding } : {}),
     requiredCloseoutGates: createRequiredCloseoutGates({
       subjectId: id,
       subjectType: closeoutGateSubjectTypeForWorkKind(kind),

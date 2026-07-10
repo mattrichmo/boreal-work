@@ -17,6 +17,7 @@ import {
   applyProjectSetup,
   configuredInstallRootForTarget,
   configuredInstallRootMatchesTarget,
+  ensureBorealJsonlMergeDriver,
   formatProjectInstallReview,
   maybeConfigureProjectSetup,
   projectSetupInputFromArgs,
@@ -125,6 +126,7 @@ export async function initCommand(
   await ensureWorkspaceDirs(context);
   const result = await context.runtime.ensureWorkspaceInitialized();
   const storage = await writeProjectStorageMarker(context.workspaceRoot, context.storage);
+  const mergeDriver = await ensureBorealJsonlMergeDriver(context.workspaceRoot);
   const projectSetup = await maybeConfigureProjectSetup(context, args);
   const skillInstalls = projectSetup ? await installProjectSetupSkills(context, projectSetup) : undefined;
   const initResult = {
@@ -132,6 +134,7 @@ export async function initCommand(
     workspaceRoot: context.workspaceRoot,
     storage,
     eventId: result.event.meta.id,
+    mergeDriver,
     projectSetup,
     skillInstalls
   };

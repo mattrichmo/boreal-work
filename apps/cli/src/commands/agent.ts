@@ -64,8 +64,32 @@ interface FinishEvidencePayloadLike {
   readonly inlineEvidence?: string;
 }
 
+interface AgentRenewRow {
+  readonly workId: WorkId;
+  readonly reservationId: string;
+  readonly expiresAt: string;
+  readonly previousExpiresAt?: string;
+}
+
+interface AgentRenewSkippedRow {
+  readonly workId: WorkId;
+  readonly reservationId: string;
+  readonly reason: string;
+}
+
+interface AgentRenewResult {
+  readonly schemaVersion: "boreal.cli.agent.renew.v1";
+  readonly generatedAt: IsoTimestamp;
+  readonly agentId: string;
+  readonly extend: string;
+  readonly expiresAt: IsoTimestamp;
+  readonly renewed: readonly AgentRenewRow[];
+  readonly skipped: readonly AgentRenewSkippedRow[];
+}
+
 export interface AgentCommandDependencies {
   readonly agentIdFromArgs: (args: ParsedArgs, fallback: string) => string;
+  readonly nowIso: () => IsoTimestamp;
   readonly labelsFromArgs: (args: ParsedArgs) => readonly string[];
   readonly buildAgentGuide: (context: CliContext, agentId: string, labels: readonly string[]) => Promise<unknown>;
   readonly formatAgentGuide: (guide: unknown) => string;
@@ -186,6 +210,8 @@ export async function agentCommand(
     }
     case "finish":
       return agentFinishCommand(rest, context, args, output, json, dependencies);
+    case "renew":
+      return agentRenewCommand(rest, context, args, output, json, dependencies);
     case "start":
       return agentStartCommand(rest, context, args, output, json, dependencies);
     case "status": {
@@ -297,6 +323,79 @@ export async function agentStartCommand(
     subjectWork: claim.work
   }));
   return { exitCode: 0 };
+}
+
+async function agentRenewCommand(
+  rest: readonly string[],
+  context: CliContext,
+  args: ParsedArgs,
+  output: CliOutput,
+  json: boolean,
+  dependencies: AgentCommandDependencies
+): Promise<CommandResult> {
+  if (rest.length > 0) {
+    throw new BorealError("BOREAL_INVALID_INPUT", "agent renew does not accept positional arguments");
+  }
+  if (!hasFlag(args, "all")) {
+    throw new BorealError("BOREAL_INVALID_INPUT", "agent renew currently requires --all");
+  }
+  const agentId = dependencies.agentIdFromArgs(args, context.actor.id);
+  const extend = parseAgentRenewExtend(flagValue(args, "extend") ?? "30m");
+  const generatedAt = dependencies.nowIso();
+  const expiresAt = new Date(Date.parse(generatedAt) + extend.ms).toISOString() as IsoTimestamp;
+  const reservations = await context.store.read(async (reader) =>
+    (await reader.listActiveReservationsForAgent(agentId))
+      .slice()
+      .sort((left, right) => left.workId.localeCompare(right.workId) || left.meta.id.localeCompare(right.meta.id))
+  );
+  const renewed: AgentRenewRow[] = [];
+  const skipped: AgentRenewSkippedRow[] = [];
+  for (const reservation of reservations) {
+    const work = await context.store.read((reader) => reader.getWorkItem(reservation.workId));
+    if (!work || work.reservationId !== reservation.meta.id) {
+      skipped.push({
+        workId: reservation.workId,
+        reservationId: reservation.meta.id,
+        reason: work ? "work_reservation_mismatch" : "work_missing"
+      });
+      continue;
+    }
+    const result = await context.runtime.renewWorkReservation({
+      workId: reservation.workId,
+      expiresAt
+    });
+    renewed.push({
+      workId: result.work.meta.id,
+      reservationId: result.reservation.meta.id,
+      expiresAt: result.reservation.expiresAt ?? expiresAt,
+      previousExpiresAt: reservation.expiresAt
+    });
+  }
+  const result: AgentRenewResult = {
+    schemaVersion: "boreal.cli.agent.renew.v1",
+    generatedAt,
+    agentId,
+    extend: extend.value,
+    expiresAt,
+    renewed,
+    skipped
+  };
+  output.write(json ? formatRecord(result, true) : formatRecord(result, false));
+  return { exitCode: 0 };
+}
+
+function parseAgentRenewExtend(value: string): { readonly value: string; readonly ms: number } {
+  const trimmed = value.trim();
+  const match = /^([1-9][0-9]*)(m|h)$/.exec(trimmed);
+  if (!match) {
+    throw new BorealError("BOREAL_INVALID_INPUT", "--extend must be a positive duration like 30m or 2h");
+  }
+  const amount = Number(match[1]);
+  const unit = match[2];
+  return {
+    value: trimmed,
+    ms: amount * (unit === "m" ? 60_000 : 3_600_000)
+  };
 }
 
 async function agentFinishCommand(

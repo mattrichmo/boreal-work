@@ -26,6 +26,7 @@ export interface WorkItemView {
   readonly priority: WorkItem["priority"];
   readonly acceptanceCriteria?: readonly string[];
   readonly labels: readonly string[];
+  readonly binding?: WorkItem["binding"];
   readonly sourceRefs?: readonly WorkSourceRefView[];
   readonly sourceRefResolutions?: readonly BorealSourceRefResolutionView[];
   readonly parentId?: WorkItem["parentId"];
@@ -150,6 +151,7 @@ export function toWorkItemView(input: {
     priority: input.work.priority,
     acceptanceCriteria: input.work.acceptanceCriteria,
     labels: input.work.labels,
+    binding: input.work.binding,
     sourceRefs: input.work.meta.sourceRefs,
     parentId: input.work.parentId,
     dependencyIds,

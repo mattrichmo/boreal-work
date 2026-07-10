@@ -160,6 +160,7 @@ import {
   type SyncRefreshResult,
   type SyncStatusResult
 } from "./commands/sync.js";
+import { templateCommand } from "./commands/template.js";
 import { vaultCommand } from "./commands/vault.js";
 import { workCommand as workGroupCommand, type WorkCommandDependencies } from "./commands/work.js";
 import { workflowsCommand, type WorkflowsCommandDependencies } from "./commands/workflows.js";
@@ -786,7 +787,7 @@ export async function runCommand(args: ParsedArgs, output: CliOutput, cwd: strin
     assertInitialized(context);
   }
   const startedAt = shouldLogOperation ? nowIso() : undefined;
-  const eventIdsBefore = shouldLogOperation ? await listEventIds(context) : new Set<EventId>();
+  const eventIdsBefore = shouldLogOperation ? await listEventIdsForOperation(context, definition) : new Set<EventId>();
   const spoolingOutput = json
     ? createResultSpoolingOutput(output, {
         workspaceRoot: context.workspaceRoot,
@@ -883,6 +884,9 @@ export async function runCommand(args: ParsedArgs, output: CliOutput, cwd: strin
         break;
       case "resolve":
         result = await resolveCommand(action ? [action, ...rest] : rest, args, commandOutput, json);
+        break;
+      case "template":
+        result = await templateCommand(action, rest, context, args, commandOutput, json);
         break;
       case "start":
         result = await agentCommand("start", rest, context, args, commandOutput, json, agentCommandDependencies());
@@ -1021,6 +1025,7 @@ export async function runCommand(args: ParsedArgs, output: CliOutput, cwd: strin
 function agentCommandDependencies(): AgentCommandDependencies {
   return {
     agentIdFromArgs,
+    nowIso,
     labelsFromArgs,
     buildAgentGuide,
     formatAgentGuide: (guide) => formatAgentGuide(guide as AgentGuide),
@@ -1685,6 +1690,17 @@ async function recordCliOperation(
 
 async function listEventIds(context: CliContext): Promise<ReadonlySet<EventId>> {
   return new Set((await context.store.read((reader) => reader.listEvents())).map((event) => event.meta.id));
+}
+
+async function listEventIdsForOperation(context: CliContext, definition: CommandDefinition): Promise<ReadonlySet<EventId>> {
+  try {
+    return await listEventIds(context);
+  } catch (error) {
+    if (definition.path[0] === "doctor") {
+      return new Set();
+    }
+    throw error;
+  }
 }
 
 async function ledgerEnvelopeMetadata(context: CliContext): Promise<{ readonly ledgerSeq: number | null }> {
@@ -8415,7 +8431,9 @@ function commandWithPositionalWork(command: string, workId: string): string {
 }
 
 function doctorResultCanAttachDirectives(result: DoctorResult): boolean {
-  return !result.diagnostics.some((diagnostic) => diagnostic.code.startsWith("state.") && diagnostic.severity === "error");
+  return !result.diagnostics.some(
+    (diagnostic) => diagnostic.severity === "error" && (diagnostic.code.startsWith("state.") || diagnostic.code === "log.corrupt")
+  );
 }
 
 async function schemaValidateResult(context: CliContext) {

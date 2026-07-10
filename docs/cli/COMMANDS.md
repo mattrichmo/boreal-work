@@ -393,6 +393,46 @@ bwrk resolve <boreal-uri> [--registry-root <dir>] [--json]
 
 Resolves a `boreal://<project-id>/<record-id>` URI through the machine-local project registry without mutating project state. JSON output uses schema `boreal.cli.resolve.v1` and returns one typed resolution: `resolved`, `unresolved-unlinked`, `unresolved-missing-project`, `unresolved-missing-record`, or `invalid-uri`.
 
+## `template list`
+
+```bash
+bwrk template list [--json]
+```
+
+Lists work-structure templates from `templates/work-structures/`. These are executable YAML work molds, distinct from Markdown output-contract templates.
+
+## `template show`
+
+```bash
+bwrk template show <template-id|path> [--var <name=value>...] [--json]
+```
+
+Shows one work-structure template and its validation summary. `--var` may be repeated to preview placeholder resolution.
+
+## `template validate`
+
+```bash
+bwrk template validate <template-id|path> [--var <name=value>...] [--json]
+```
+
+Validates the template schema, declared placeholders, work kinds, optional bindings, and dependency cycles. When `--var` is provided, validation also requires all placeholders to resolve.
+
+## `template run`
+
+```bash
+bwrk template run <template-id|path> [--var <name=value>...] [--dry-run] [--json]
+```
+
+Instantiates a fresh work tree from a template in one runtime write. Every created item is labelled with `template:<id>`, `template-version:<version>`, and `template-run:<run-id>`, and receives a `template://<id>@<version>` source reference. Nested nodes become parent/child work and dependency edges; explicit `edges` add additional blockers. Bound nodes surface `binding` in `work show` and claim handoff JSON.
+
+## `template capture`
+
+```bash
+bwrk template capture <work-ref> --out <file> [--var <name=value>...] [--overwrite] [--json]
+```
+
+Captures an existing work subtree into a YAML work-structure template. Repeated `--var name=value` entries replace concrete text with `{{name}}` placeholders in captured titles, descriptions, labels, and acceptance criteria.
+
 ## `install`
 
 ```bash
@@ -546,21 +586,22 @@ bwrk dashboard global --limit 10 --json
 ## `global`
 
 ```bash
-bwrk global [init|next|link <path>|unlink <project-id>] [--web] [--json] [--mouse] [--refresh-ms <ms>] [--host <host>] [--port <n>] [--no-open] [--mode live|fixture] [--live-cache-ttl-ms <ms>] [--allow-fixture-fallback] [--agent <agent-id>] [--limit <n>] [--name <text>] [--label <label>...] [--registry-root <dir>] [--init] [--purge] [--yes]
+bwrk global [next|status|link <path>|unlink <project-id>] [--web] [--json] [--mouse] [--refresh-ms <ms>] [--host <host>] [--port <n>] [--no-open] [--mode live|fixture] [--live-cache-ttl-ms <ms>] [--allow-fixture-fallback] [--agent <agent-id>] [--limit <n>] [--name <text>] [--label <label>...] [--registry-root <dir>] [--init] [--purge] [--yes] [--strict]
 ```
 
 The machine-level **global workspace**: a real Boreal workspace (its own to-dos, plans, tasks, sprints) that lives at the registry root, plus a monitor over the projects you've linked. It is not tied to any repo.
 
 - With **no subcommand**, opens the cross-repo dashboard — terminal by default, `--web` for the browser, `--json` for the bounded data payload. `bwrk dashboard` shows only the current workspace; `bwrk global` shows your global workspace plus all linked projects.
-- **`bwrk global init`** creates the machine-local registry file and global workspace. On first run, JSON global commands return a typed error naming this exact init command instead of silently creating state; interactive terminal commands prompt before running the same init path.
+- **`bwrk global init`** creates the machine-local registry file and global workspace. On first run, JSON global commands return a typed error naming this exact init command instead of silently creating state.
 - **`bwrk global next`** ranks one cached rollup directive per linked project and prints a workspace-qualified start command for the overall winner on the last line in text mode.
+- **`bwrk global status`** summarizes every non-archived registered project read-only, including work counts, active reservations, storage kind, last event time, and per-project unreadable errors.
 - **`bwrk global <command> ...`** runs any command against the global workspace. For example `bwrk global work create "Plan Q3"`, `bwrk global work list`. This is sugar for `bwrk <command> ... --global`.
 - **`bwrk global link <path>`** links a project so it's tracked here; pass `--init` to initialize and link a fresh target directory.
 - **`bwrk global unlink <project-id>`** archives it by default; `--purge --yes` removes only the registry row.
 
-The registry is initialized explicitly through `bwrk global init`. After the registry exists, global commands may ensure the global workspace directory exists. Nothing is tracked globally until you link it; `bwrk init` never auto-links a project.
+The global workspace is created automatically on first use. Nothing is tracked globally until you link it; `bwrk init` never auto-links a project.
 
-Options match `bwrk dashboard` (`--web`, `--mouse`, `--refresh-ms`, `--host`, `--port`, `--no-open`, `--mode`, `--live-cache-ttl-ms`, `--allow-fixture-fallback`), plus `--agent`/`--limit` for `next`; `--name`/`--label`/`--registry-root`/`--init` for `link`; `unlink --purge` requires `--yes`; `init` and `next` accept `--registry-root`.
+Options match `bwrk dashboard` (`--web`, `--mouse`, `--refresh-ms`, `--host`, `--port`, `--no-open`, `--mode`, `--live-cache-ttl-ms`, `--allow-fixture-fallback`), plus `--agent`/`--limit` for `next`; `--name`/`--label`/`--registry-root`/`--init` for `link`; `unlink --purge` requires `--yes`; `init`, `next`, and `status` accept `--registry-root`; `status` also accepts `--strict`, which exits nonzero when any registered project is unreadable.
 
 ## `global init`
 
@@ -581,6 +622,16 @@ bwrk global next [--agent <agent-id>] [--limit <n>] [--registry-root <dir>] [--l
 Reads linked-project rollup cache rows, ranks each project winner by project severity, work priority, and aging, and returns the overall directive with an executable `bwrk --workspace <projectRoot> agent start ... --json` command. Stale projects remain ranked with a stale marker; degraded projects are surfaced without a candidate.
 
 JSON `data` uses schema `boreal.cli.global.next.v1` and includes `overall`, `projects`, `excludedProjects`, stale/degraded counts, and the emitted command for every ranked winner.
+
+## `global status`
+
+```bash
+bwrk global status [--registry-root <dir>] [--strict] [--json]
+```
+
+Reports one row per non-archived registered project without mutating any project. Broken or deleted projects are included as `{ ok: false, error }` rows; the command exits 0 by default so agents can inspect the full inventory. With `--strict`, any unreadable project makes the command exit nonzero.
+
+The JSON `data` payload uses schema `boreal.cli.global.status.v1` and includes `projectId`, `rootDir`, `storage`, `workOpen`, `workReady`, `workBlocked`, `activeReservations`, `lastEventAt`, `ok`, and optional `error` for each row.
 
 ## `link`
 
@@ -629,6 +680,14 @@ bwrk sprint show <sprint-ref> [--limit <n>] [--wide] [--json]
 ```
 
 Shows one sprint resolved by exact ID, unambiguous ID prefix, exact title, or `current`. The returned `scope` is built from canonical `blocks` graph edges plus stored dependency IDs, not labels, and is capped at 500 descendant rows. Human output renders the dependency-scoped work as a status/kind/title/owner table after the header lines, clamped to terminal width unless `--wide` is passed.
+
+## `sprint status`
+
+```bash
+bwrk sprint status [<sprint-ref>] [--limit <n>] [--wide] [--json]
+```
+
+Summarizes execution state for the active or selected sprint. The payload uses schema `boreal.cli.sprint.status.v1` and reports dependency-scoped counts, active reservations, top transitive blockers, and stale active claims. Scope is built from canonical `blocks` graph edges plus stored dependency IDs and sprint parent links, defaults to 500 rows, and rejects larger limits than 500. Human output renders compact tables for counts, reservations, blockers, and stale claims, clamped to terminal width unless `--wide` is passed.
 
 ## `sprint current`
 
@@ -1164,6 +1223,14 @@ Behavior:
 - With `--release`, releases the reservation after verification without closing.
 - When the reservation records `git.worktreePath`, branch/head and dirty checks run against that worktree; `--remove-worktree` prunes it after a successful close.
 - Rejects `--close --release` together.
+
+## `agent renew`
+
+```bash
+bwrk agent renew --all [--agent <agent-id>] [--extend <duration>] [--json]
+```
+
+Renews every active reservation owned by the selected agent to `now + duration`. `--all` is required, `--agent` defaults to the CLI actor, and `--extend` defaults to `30m`. Durations support positive minute and hour values such as `30m` and `2h`; other units are rejected with `BOREAL_INVALID_INPUT`. JSON output uses schema `boreal.cli.agent.renew.v1` and returns `renewed` rows with `{ workId, reservationId, expiresAt }` plus `skipped` rows for mismatched or missing work records.
 
 ## `agent start`
 

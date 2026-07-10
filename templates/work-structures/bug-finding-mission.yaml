@@ -1,0 +1,81 @@
+schemaVersion: "boreal.work-template.v1"
+id: "bug-finding-mission"
+version: "1"
+title: "Bug finding mission"
+description: "A reusable structure for scoped bug discovery, remediation, and reporting."
+variables:
+  - name: "target"
+    description: "Component, workflow, or repository area to inspect."
+    required: true
+  - name: "label"
+    description: "Additional label applied to every created item."
+    default: "bug-finding"
+    required: false
+nodes:
+  - key: "mission"
+    kind: "milestone"
+    title: "{{target}} bug finding mission"
+    description: "Find, verify, fix, and report important bugs in {{target}}."
+    labels:
+      - "{{label}}"
+    acceptance:
+      - "All child sprints close with evidence and checkpoint coverage."
+    children:
+      - key: "audit"
+        kind: "sprint"
+        title: "Audit {{target}}"
+        description: "Inspect the current implementation and identify reproducible defects."
+        labels:
+          - "{{label}}"
+          - "audit"
+        acceptance:
+          - "Verified findings are recorded with reproduction notes."
+        children:
+          - key: "audit-pass"
+            kind: "task"
+            title: "Run focused audit for {{target}}"
+            description: "Inspect code, tests, and runtime behavior for {{target}}."
+            labels:
+              - "{{label}}"
+              - "audit"
+            acceptance:
+              - "Findings include severity, reproduction, and affected files."
+            binding:
+              workflow: "workflows/40-work/discovery-to-work.md"
+      - key: "fix"
+        kind: "sprint"
+        title: "Fix {{target}} defects"
+        description: "Implement and verify fixes for accepted findings."
+        labels:
+          - "{{label}}"
+          - "fix"
+        acceptance:
+          - "Accepted findings are fixed or explicitly deferred."
+        children:
+          - key: "fix-pass"
+            kind: "task"
+            title: "Implement {{target}} bug fixes"
+            description: "Patch the accepted defects and run focused verification."
+            labels:
+              - "{{label}}"
+              - "fix"
+            acceptance:
+              - "Regression coverage exists for each fixed defect."
+            binding:
+              workflow: "workflows/40-work/claim-and-finish-work.md"
+      - key: "report"
+        kind: "task"
+        title: "Produce {{target}} bug mission report"
+        description: "Summarize findings, fixes, verification, and deferred risks."
+        labels:
+          - "{{label}}"
+          - "report"
+        acceptance:
+          - "Report cites work IDs, evidence IDs, verification commands, and residual risks."
+        binding:
+          contract: "discovery-report"
+edges:
+  - dependent: "fix"
+    dependency: "audit"
+  - dependent: "report"
+    dependency: "fix"

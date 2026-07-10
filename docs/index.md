@@ -33,6 +33,7 @@ Boreal turns tasks, sources, claims, decisions, verification, and workflow state
 ## Architecture & product
 
 - [Runtime architecture](architecture/RUNTIME.md)
+- [TUI surface contracts](architecture/TUI_SURFACE_CONTRACTS.md)
 - [Skills & workflows](architecture/SKILLS_AND_WORKFLOWS.md)
 - [Project setup](architecture/PROJECT_SETUP.md)
 - [Prior art & originality](architecture/PRIOR_ART_ORIGINALITY.md)
