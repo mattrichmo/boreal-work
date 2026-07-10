@@ -135,7 +135,7 @@ describe("boreal daemon runtime", () => {
     expect(watch.observedPaths).toEqual(
       expect.arrayContaining([
         join(root, ".boreal/runtime/state.json"),
-        join(root, ".boreal/runtime/search-index.json"),
+        join(root, ".boreal/cache/index.sqlite"),
         join(root, ".boreal/ledgers/manifest.json"),
         join(root, "memory")
       ])

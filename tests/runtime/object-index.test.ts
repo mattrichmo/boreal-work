@@ -30,7 +30,7 @@ afterEach(async () => {
 });
 
 describe("object store SQLite read index", () => {
-  it("rebuilds when the event-log head is stale", async () => {
+  it("falls back without rebuilding when the event-log head is stale", async () => {
     const sqlite = await loadNodeSqlite();
     if (!sqlite) {
       expect(sqlite).toBeUndefined();
@@ -49,7 +49,7 @@ describe("object store SQLite read index", () => {
     const readyItems = await reopened.read((reader) => reader.listWorkItems({ status: "ready" }));
 
     expect(readyItems.map((item) => item.meta.id)).toEqual(["bw_work_000000000001"]);
-    expect((await index.status(await log.head())).fresh).toBe(true);
+    expect((await index.status(await log.head())).fresh).toBe(false);
   });
 
   it("serves filtered work item lists from a fresh index", async () => {

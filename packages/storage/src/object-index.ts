@@ -7,8 +7,14 @@ import { ftsDocumentInputFromFields, searchFieldsForRecord, type FtsDocumentInpu
 
 import type { StoreChange, StoreSectionName, StoreSnapshot } from "./memory-store.js";
 import type { WorkItemFilter } from "./ports.js";
+import {
+  clearSearchFtsDocuments,
+  initializeSearchFtsSchema,
+  searchFtsStatements,
+  upsertSearchFtsDocument
+} from "./search-fts-schema.js";
 
-export const OBJECT_INDEX_SCHEMA_VERSION = "boreal.object-index.v1";
+export const OBJECT_INDEX_SCHEMA_VERSION = "boreal.object-index.v2";
 
 export type NodeSqliteModule = typeof import("node:sqlite");
 
@@ -161,7 +167,7 @@ export class ObjectReadIndex {
     try {
       db.exec("BEGIN;");
       db.prepare("DELETE FROM records;").run();
-      const fts = clearSearchFtsDocuments(db) ? ftsStatements(db) : undefined;
+      const fts = clearSearchFtsDocuments(db) ? searchFtsStatements(db) : undefined;
       const insert = db.prepare(
         `INSERT OR REPLACE INTO records(section, id, status, kind, updated_at, content_hash, json)
          VALUES (?, ?, ?, ?, ?, ?, ?);`
@@ -190,7 +196,11 @@ export class ObjectReadIndex {
     }
   }
 
-  async applyChanges(changes: readonly StoreChange[], head: ObjectIndexHead): Promise<ObjectIndexMutationResult> {
+  async applyChanges(
+    changes: readonly StoreChange[],
+    head: ObjectIndexHead,
+    expectedPreviousHead?: ObjectIndexHead
+  ): Promise<ObjectIndexMutationResult> {
     const indexedChanges = changes.filter((change) => isIndexedSection(change.section));
     const sqlite = await this.sqlite();
     if (!sqlite) {
@@ -211,13 +221,20 @@ export class ObjectReadIndex {
       throw error;
     }
     try {
+      if (expectedPreviousHead) {
+        const storedHead = readHead(db);
+        const initializingFromEmptyStore = storedHead === undefined && expectedPreviousHead.seq === 0;
+        if (!initializingFromEmptyStore && !headsEqual(storedHead, expectedPreviousHead)) {
+          return { path: this.path, available: true, changed: false };
+        }
+      }
       db.exec("BEGIN;");
       const upsert = db.prepare(
         `INSERT OR REPLACE INTO records(section, id, status, kind, updated_at, content_hash, json)
          VALUES (?, ?, ?, ?, ?, ?, ?);`
       );
       const remove = db.prepare("DELETE FROM records WHERE id = ?;");
-      const fts = initializeSearchFtsSchema(db) ? ftsStatements(db) : undefined;
+      const fts = initializeSearchFtsSchema(db) ? searchFtsStatements(db) : undefined;
       for (const change of indexedChanges) {
         fts?.remove.run(change.id);
         if (change.record === null) {
@@ -243,6 +260,10 @@ export class ObjectReadIndex {
     } finally {
       db.close();
     }
+  }
+
+  async invalidate(): Promise<void> {
+    await rm(this.path, { force: true });
   }
 
   private async sqlite(): Promise<NodeSqliteModule | undefined> {
@@ -380,55 +401,6 @@ function headsEqual(stored: ObjectIndexHead | undefined, expected: ObjectIndexHe
 
 function isIndexedSection(section: StoreSectionName): boolean {
   return INDEXED_SECTIONS.includes(section as (typeof INDEXED_SECTIONS)[number]);
-}
-
-interface SearchFtsStatements {
-  readonly remove: ReturnType<DatabaseSync["prepare"]>;
-  readonly insert: ReturnType<DatabaseSync["prepare"]>;
-}
-
-function initializeSearchFtsSchema(db: DatabaseSync): boolean {
-  try {
-    db.exec(`
-      CREATE VIRTUAL TABLE IF NOT EXISTS search_fts USING fts5(
-        record_id UNINDEXED,
-        type UNINDEXED,
-        title,
-        summary,
-        id_text,
-        label_text,
-        body_text,
-        state_text,
-        tokenize = 'unicode61 remove_diacritics 2'
-      );
-    `);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-function clearSearchFtsDocuments(db: DatabaseSync): boolean {
-  if (!initializeSearchFtsSchema(db)) {
-    return false;
-  }
-  db.prepare("DELETE FROM search_fts;").run();
-  return true;
-}
-
-function ftsStatements(db: DatabaseSync): SearchFtsStatements {
-  return {
-    remove: db.prepare("DELETE FROM search_fts WHERE record_id = ?;"),
-    insert: db.prepare(
-      `INSERT INTO search_fts(record_id, type, title, summary, id_text, label_text, body_text, state_text)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?);`
-    )
-  };
-}
-
-function upsertSearchFtsDocument(statements: SearchFtsStatements, entry: FtsDocumentInput): void {
-  statements.remove.run(entry.recordId);
-  statements.insert.run(entry.recordId, entry.type, entry.title, entry.summary, entry.idText, entry.labelText, entry.bodyText, entry.stateText);
 }
 
 function ftsDocumentForRecord(section: StoreSectionName, record: unknown): FtsDocumentInput | undefined {

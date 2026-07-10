@@ -6598,7 +6598,13 @@ describe("bwrk cli", () => {
     );
 
     const indexed = await runCli(rootDir, ["search", "index", "--json"]);
-    expect(parseData<{ readonly documentCount: number; readonly tokenCount: number }>(indexed.stdout).documentCount).toBe(6);
+    const indexedResult = parseData<{
+      readonly path: string;
+      readonly mode?: "fts" | "json";
+      readonly documentCount: number;
+      readonly tokenCount: number;
+    }>(indexed.stdout);
+    expect(indexedResult.documentCount).toBe(6);
 
     const concurrentIndexes = await Promise.all([
       runCli(rootDir, ["search", "index", "--json"]),
@@ -6610,7 +6616,7 @@ describe("bwrk cli", () => {
       expect(parseData<{ readonly documentCount: number }>(result.stdout).documentCount).toBe(6);
     }
 
-    const searchIndexDocument = parseJson<{
+    const searchIndexDocument = indexedResult.mode === "json" ? parseJson<{
       readonly schemaVersion: string;
       readonly algorithm: string;
       readonly documentCount: number;
@@ -6621,19 +6627,24 @@ describe("bwrk cli", () => {
         readonly vectorWeights?: readonly unknown[];
         readonly fieldWeights?: Array<{ readonly field: string; readonly tokenWeights: readonly unknown[] }>;
       }>;
-    }>(await readFile(join(rootDir, ".boreal/runtime/search-index.json"), "utf8"));
-    expect(searchIndexDocument.schemaVersion).toBe("boreal.search-index.v1");
-    expect(searchIndexDocument.algorithm).toBe("boreal.search.hybrid.v1");
-    expect(searchIndexDocument.documentCount).toBe(6);
-    expect(new Map(searchIndexDocument.documentFrequencies).get("search")).toBeGreaterThan(1);
-    expect(new Map(searchIndexDocument.documentFrequencies).get("content")).toBe(1);
-    const indexedDecision = searchIndexDocument.documents.find(
-      (document) => document.type === "decision" && document.title === "Use content hash search"
-    );
-    expect(indexedDecision?.vectorWeights?.length).toBeGreaterThan(0);
-    expect(indexedDecision?.fieldWeights?.map((field) => field.field)).toEqual(
-      expect.arrayContaining(["id", "title", "decision", "context"])
-    );
+    }>(await readFile(indexedResult.path, "utf8")) : undefined;
+    if (searchIndexDocument) {
+      expect(searchIndexDocument.schemaVersion).toBe("boreal.search-index.v1");
+      expect(searchIndexDocument.algorithm).toBe("boreal.search.hybrid.v1");
+      expect(searchIndexDocument.documentCount).toBe(6);
+      expect(new Map(searchIndexDocument.documentFrequencies).get("search")).toBeGreaterThan(1);
+      expect(new Map(searchIndexDocument.documentFrequencies).get("content")).toBe(1);
+      const indexedDecision = searchIndexDocument.documents.find(
+        (document) => document.type === "decision" && document.title === "Use content hash search"
+      );
+      expect(indexedDecision?.vectorWeights?.length).toBeGreaterThan(0);
+      expect(indexedDecision?.fieldWeights?.map((field) => field.field)).toEqual(
+        expect.arrayContaining(["id", "title", "decision", "context"])
+      );
+    } else {
+      expect(indexedResult.path).toBe(join(rootDir, ".boreal/cache/index.sqlite"));
+      expect(indexedResult.tokenCount).toBe(0);
+    }
 
     const query = await runCli(rootDir, ["search", "query", "content hash", "--json"]);
     const searchResults = parseData<Array<{ readonly type: string; readonly title: string; readonly explain?: unknown }>>(query.stdout);
@@ -6694,6 +6705,27 @@ describe("bwrk cli", () => {
       ])
     );
     expect(explainedDecision?.explain?.fieldMatches.every((match) => match.idf > 0)).toBe(true);
+
+    if (indexedResult.mode === "fts") {
+      await writeFile(indexedResult.path, "not a sqlite database", "utf8");
+      const invalid = await runCli(rootDir, ["search", "query", "content hash", "--no-rebuild", "--json"]);
+      expect(invalid.exitCode).toBe(1);
+      expect(parseJson<{ readonly message: string }>(invalid.stderr).message).toContain("invalid");
+
+      const explainWithBrokenCache = await runCli(rootDir, ["search", "query", "content hash", "--explain", "--json"]);
+      expect(explainWithBrokenCache.exitCode).toBe(0);
+      expect(parseData<Array<{ readonly explain?: unknown }>>(explainWithBrokenCache.stdout)[0]?.explain).toBeDefined();
+
+      const autoRepaired = await runCli(rootDir, ["search", "query", "content hash", "--json"]);
+      expect(autoRepaired.exitCode).toBe(0);
+    } else {
+      const validJson = await readFile(indexedResult.path, "utf8");
+      await writeFile(indexedResult.path, validJson.slice(0, Math.max(1, validJson.length - 20)), "utf8");
+      const truncated = await runCli(rootDir, ["search", "query", "content hash", "--no-rebuild", "--json"]);
+      expect(truncated.exitCode).toBe(1);
+      expect(parseJson<{ readonly message: string }>(truncated.stderr).message).toContain("invalid");
+      expect((await runCli(rootDir, ["search", "query", "content hash", "--json"])).exitCode).toBe(0);
+    }
 
     const contextSearch = await runCli(rootDir, ["context", "search", "fail closed stale", "--explain", "--json"]);
     const contextResults = parseData<

@@ -1,9 +1,9 @@
 import { existsSync, statSync } from "node:fs";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   createRecordMeta,
@@ -14,7 +14,7 @@ import {
   type WorkId,
   type WorkItem
 } from "@boreal/core";
-import { ObjectDirBorealStore } from "@boreal/storage";
+import { ObjectDirBorealStore, ObjectReadIndex } from "@boreal/storage";
 import { createWorkItem } from "@boreal/work-engine";
 
 const actor: ActorRef = {
@@ -88,6 +88,19 @@ describe("object directory store", () => {
     await expect(store.write((writer) => writer.putWorkItem(sampleWorkItem("../../evil" as WorkId)))).rejects.toThrow();
   });
 
+  it("rejects a symlinked SQLite cache that escapes the workspace", async () => {
+    const rootDir = await makeTempWorkspace();
+    const outsideDir = await makeTempWorkspace();
+    await mkdir(join(rootDir, ".boreal"), { recursive: true });
+    await symlink(outsideDir, join(rootDir, ".boreal", "cache"), "dir");
+    const store = new ObjectDirBorealStore({ rootDir });
+
+    await expect(store.write((writer) => writer.putWorkItem(sampleWorkItem("bw_work_00000000000a" as WorkId)))).rejects.toThrow(
+      "Path escapes Boreal workspace"
+    );
+    expect(existsSync(join(outsideDir, "index.sqlite"))).toBe(false);
+  });
+
   it("routes events through the hash-chained event log", async () => {
     const rootDir = await makeTempWorkspace();
     const store = new ObjectDirBorealStore({ rootDir });
@@ -101,6 +114,39 @@ describe("object directory store", () => {
       expect(await reader.headSeq()).toBe(1);
       expect(await reader.listEvents()).toEqual([event]);
     });
+  });
+
+  it("does not create or repair the SQLite cache during reads", async () => {
+    const rootDir = await makeTempWorkspace();
+    const store = new ObjectDirBorealStore({ rootDir });
+    await store.write((writer) => writer.putWorkItem(sampleWorkItem("bw_work_00000000000a" as WorkId)));
+    const indexPath = join(rootDir, ".boreal", "cache", "index.sqlite");
+    await rm(indexPath, { force: true });
+
+    await new ObjectDirBorealStore({ rootDir }).read(async (reader) => {
+      expect(await reader.listWorkItems()).toHaveLength(1);
+    });
+
+    expect(existsSync(indexPath)).toBe(false);
+  });
+
+  it("does not report a durable write as failed when cache apply fails", async () => {
+    const rootDir = await makeTempWorkspace();
+    const apply = vi.spyOn(ObjectReadIndex.prototype, "applyChanges").mockRejectedValueOnce(new Error("injected cache failure"));
+    try {
+      const store = new ObjectDirBorealStore({ rootDir });
+
+      await expect(
+        store.write((writer) => writer.putWorkItem(sampleWorkItem("bw_work_00000000000a" as WorkId)))
+      ).resolves.toBeUndefined();
+
+      await new ObjectDirBorealStore({ rootDir, sqlite: undefined }).read(async (reader) => {
+        expect((await reader.listWorkItems()).map((work) => work.meta.id)).toEqual(["bw_work_00000000000a"]);
+      });
+      expect(existsSync(join(rootDir, ".boreal", "cache", "index.sqlite"))).toBe(false);
+    } finally {
+      apply.mockRestore();
+    }
   });
 });
 

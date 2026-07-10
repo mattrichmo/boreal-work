@@ -1,4 +1,5 @@
 import {
+  BorealError,
   hashContent,
   normalizeGeneratedSearchText,
   nowIso,
@@ -12,7 +13,13 @@ import {
   type WorkItem
 } from "@boreal/core";
 
-import { searchFieldsForRecord, type SearchDocumentType, type SearchRecordFields, type SearchWeightedText } from "./fields.js";
+import {
+  MAX_SEARCH_QUERY_CHARS,
+  searchFieldsForRecord,
+  type SearchDocumentType,
+  type SearchRecordFields,
+  type SearchWeightedText
+} from "./fields.js";
 
 export const SEARCH_INDEX_SCHEMA_VERSION = "boreal.search-index.v1";
 
@@ -210,13 +217,19 @@ export function querySearchIndex(
   query: string,
   options: SearchQueryOptions = {}
 ): readonly SearchResult[] {
+  if (query.length > MAX_SEARCH_QUERY_CHARS) {
+    throw new BorealError("BOREAL_INVALID_INPUT", `Search query exceeds ${MAX_SEARCH_QUERY_CHARS} characters`, {
+      maximum: MAX_SEARCH_QUERY_CHARS,
+      actual: query.length
+    });
+  }
   const normalizedQuery = normalizeText(query);
   const queryTokens = tokenize(query);
   if (!normalizedQuery || queryTokens.length === 0) {
     return [];
   }
 
-  const limit = options.limit ?? DEFAULT_LIMIT;
+  const limit = Math.min(100, Math.max(0, Math.floor(options.limit ?? DEFAULT_LIMIT)));
   const scoringStats = searchScoringStats(index);
   const allowedTypes = searchDocumentTypeFilter(options);
   const queryVectorWeights = vectorWeights(queryTokens.map((token) => [token, 1] as const));

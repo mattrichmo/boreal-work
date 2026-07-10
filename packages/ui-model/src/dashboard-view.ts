@@ -206,6 +206,7 @@ export interface GlobalSearchProject {
   readonly projectName: string;
   readonly projectRoot: string;
   readonly results: readonly GlobalSearchSourceRow[];
+  readonly error?: string;
 }
 
 export interface GlobalSearchSourceRow {
@@ -227,12 +228,22 @@ export interface GlobalSearchResultItem {
   readonly title: string;
   readonly summary?: string;
   readonly score: number;
+  readonly sourceScore?: number;
+  readonly projectRank?: number;
+}
+
+export interface GlobalSearchFailure {
+  readonly projectId: string;
+  readonly projectName: string;
+  readonly projectRoot: string;
+  readonly error: string;
 }
 
 export interface GlobalSearchView {
   readonly generatedAt?: string;
   readonly query: string;
   readonly results: readonly GlobalSearchResultItem[];
+  readonly failures?: readonly GlobalSearchFailure[];
   readonly count: number;
 }
 
@@ -654,7 +665,7 @@ export function buildGlobalSearchView(input: {
 }): GlobalSearchView {
   const results = input.projects
     .flatMap((project) =>
-      project.results.map((result): GlobalSearchResultItem => ({
+      project.results.map((result, index): GlobalSearchResultItem => ({
         id: `${project.projectId}:${result.id}`,
         projectId: project.projectId,
         projectName: project.projectName,
@@ -663,7 +674,11 @@ export function buildGlobalSearchView(input: {
         recordId: result.recordId,
         title: result.title,
         summary: result.summary,
-        score: result.score
+        // Raw scores are backend- and corpus-specific. Reciprocal project rank
+        // is stable and comparable when merging results across workspaces.
+        score: 1 / (index + 1),
+        sourceScore: result.score,
+        projectRank: index + 1
       }))
     )
     .sort(compareGlobalSearchResults)
@@ -673,6 +688,11 @@ export function buildGlobalSearchView(input: {
     generatedAt: input.generatedAt,
     query: input.query,
     results,
+    failures: input.projects.flatMap((project) =>
+      project.error
+        ? [{ projectId: project.projectId, projectName: project.projectName, projectRoot: project.projectRoot, error: project.error }]
+        : []
+    ),
     count: results.length
   };
 }

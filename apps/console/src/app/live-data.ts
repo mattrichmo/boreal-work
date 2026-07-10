@@ -170,7 +170,7 @@ export async function loadLiveConsoleData(options: LoadLiveConsoleDataOptions): 
     findings: projectFindings
   });
   const allWork = mergeWork(mergeWork(listedWork, readyWork), sprintWork);
-  const [currentSearchResults, currentActivityRows] = await Promise.all([
+  const [currentSearch, currentActivityRows] = await Promise.all([
     loadProjectSearchResults(runner, [], globalSearchQuery),
     loadProjectActivityRows(runner, [])
   ]);
@@ -192,7 +192,8 @@ export async function loadLiveConsoleData(options: LoadLiveConsoleDataOptions): 
           currentSync: sync,
           currentFindings: projectFindings,
           currentReservations: activeReservations,
-          currentSearchResults,
+          currentSearchResults: currentSearch.results,
+          currentSearchError: currentSearch.error,
           currentActivityRows,
           globalSearchQuery,
           includeCurrentFallback: false
@@ -262,7 +263,8 @@ export async function loadLiveConsoleData(options: LoadLiveConsoleDataOptions): 
         projectId: project.entry.id,
         projectName: project.entry.name,
         projectRoot: project.entry.projectRoot,
-        results: project.searchResults
+        results: project.searchResults,
+        error: project.searchError
       }))
     }),
     globalActivity: buildGlobalActivityView({
@@ -508,14 +510,16 @@ async function loadProjectSearchResults(
   runner: ConsoleCliRunner,
   workspaceArg: readonly string[],
   query: string
-): Promise<readonly SearchResultRow[]> {
+): Promise<SearchLoadResult> {
   try {
-    return await cliArray<SearchResultRow>(runner, [...workspaceArg, "search", "query", query, "--limit", "10", "--json"]);
+    return {
+      results: await cliArray<SearchResultRow>(runner, [...workspaceArg, "search", "query", query, "--limit", "10", "--json"])
+    };
   } catch (error) {
     if (error instanceof ConsoleCliContractError) {
       throw error;
     }
-    return [];
+    return { results: [], error: error instanceof Error ? error.message : String(error) };
   }
 }
 
@@ -1754,6 +1758,11 @@ interface SearchResultRow {
   readonly score: number;
 }
 
+interface SearchLoadResult {
+  readonly results: readonly SearchResultRow[];
+  readonly error?: string;
+}
+
 interface OperationListRow {
   readonly id: string;
   readonly sessionId: string;
@@ -1866,6 +1875,7 @@ interface ConsoleProjectOverview {
   readonly settings: GlobalSettingsProjectInput;
   readonly work: readonly WorkItemView[];
   readonly searchResults: readonly SearchResultRow[];
+  readonly searchError?: string;
   readonly activityRows: readonly OperationListRow[];
   readonly sync: SyncDashboardView;
   readonly locks: LockDashboardView;
@@ -2538,6 +2548,7 @@ async function buildConsoleProjectOverviews(input: {
   readonly currentFindings: readonly DashboardFinding[];
   readonly currentReservations: readonly ReservationListRow[];
   readonly currentSearchResults: readonly SearchResultRow[];
+  readonly currentSearchError?: string;
   readonly currentActivityRows: readonly OperationListRow[];
   readonly globalSearchQuery: string;
   readonly includeCurrentFallback?: boolean;
@@ -2585,7 +2596,7 @@ async function loadRegisteredProjectOverview(
 ): Promise<ConsoleProjectOverview> {
   const workspaceArg = ["--workspace", registryRow.projectRoot] as const;
   try {
-    const [workRows, syncStatus, doctorResult, reservations, searchResults, activityRows] = await Promise.all([
+    const [workRows, syncStatus, doctorResult, reservations, search, activityRows] = await Promise.all([
       cliArray<WorkListRow>(runner, [...workspaceArg, "work", "list", "--limit", "250", "--json"]),
       cliData<unknown>(runner, [...workspaceArg, "sync", "status", "--json"]),
       cliData<unknown>(runner, [...workspaceArg, "doctor", "--json"]),
@@ -2609,7 +2620,8 @@ async function loadRegisteredProjectOverview(
       entry,
       settings: settingsProjectFromRegistryRow(registryRow, entry),
       work,
-      searchResults,
+      searchResults: search.results,
+      searchError: search.error,
       activityRows,
       sync,
       locks
@@ -2639,6 +2651,7 @@ async function loadRegisteredProjectOverview(
       settings: settingsProjectFromRegistryRow(registryRow, entry),
       work: [],
       searchResults: [],
+      searchError: error instanceof Error ? error.message : String(error),
       activityRows: [],
       sync,
       locks: { generatedAt, ok: true, workspaceRoot: registryRow.projectRoot, locks: [] }
@@ -2684,6 +2697,7 @@ function inactiveRegisteredProjectOverview(
     settings: settingsProjectFromRegistryRow(registryRow, entry),
     work: [],
     searchResults: [],
+    searchError: finding.message,
     activityRows: [],
     sync,
     locks: { generatedAt, ok: true, workspaceRoot: registryRow.projectRoot, locks: [] }
@@ -2699,6 +2713,7 @@ function currentProjectOverview(input: {
   readonly currentFindings: readonly DashboardFinding[];
   readonly currentReservations: readonly ReservationListRow[];
   readonly currentSearchResults: readonly SearchResultRow[];
+  readonly currentSearchError?: string;
   readonly currentActivityRows: readonly OperationListRow[];
   readonly registryRow?: RegistryProjectRow;
   readonly registryFindings: readonly DashboardFinding[];
@@ -2728,6 +2743,7 @@ function currentProjectOverview(input: {
     settings: settingsProjectFromRegistryRow(registryRow, entry),
     work: input.currentWork,
     searchResults: input.currentSearchResults,
+    searchError: input.currentSearchError,
     activityRows: input.currentActivityRows,
     sync: input.currentSync,
     locks: lockViewFromDoctor(

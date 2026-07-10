@@ -169,7 +169,14 @@ describe("ui model dashboard contracts", () => {
               type: "work",
               recordId: "bw_work_1",
               title: "Work result",
-              score: 10
+              score: 0.01
+            },
+            {
+              id: "work:bw_work_2",
+              type: "work",
+              recordId: "bw_work_2",
+              title: "Second result",
+              score: 500
             }
           ]
         },
@@ -183,9 +190,10 @@ describe("ui model dashboard contracts", () => {
               type: "context_pack",
               recordId: "bw_work_1",
               title: "Context result",
-              score: 9
+              score: 999
             }
-          ]
+          ],
+          error: "project search unavailable"
         }
       ]
     });
@@ -213,9 +221,14 @@ describe("ui model dashboard contracts", () => {
 
     expect(search.results.map((result) => result.id)).toEqual([
       "project-a:work:bw_work_1",
-      "project-b:work:bw_work_1"
+      "project-b:work:bw_work_1",
+      "project-a:work:bw_work_2"
     ]);
     expect(search.results[1]).toMatchObject({ projectName: "B Project", sourceKind: "context_pack" });
+    expect(search.results[0]).toMatchObject({ score: 1, sourceScore: 0.01, projectRank: 1 });
+    expect(search.failures).toEqual([
+      expect.objectContaining({ projectId: "project-b", error: "project search unavailable" })
+    ]);
     expect(activity.summary).toMatchObject({ total: 3, human: 1, agent: 1, system: 1, unknown: 0 });
     expect(activity.items.map((item) => item.actorKind).sort()).toEqual(["agent", "human", "system"]);
   });

@@ -126,7 +126,8 @@ export class ObjectDirBorealStore implements BorealStore {
     return withFileLock(this.lockDir, this.lockOptions, async () => {
       const snapshot = await this.loadSnapshot();
       const memory = new InMemoryBorealStore(snapshot);
-      const baseHeadSeq = (await this.#eventLog.head()).seq;
+      const baseHead = await this.#eventLog.head();
+      const baseHeadSeq = baseHead.seq;
       const { result, changes } = await memory.writeWithChangeSet((writer) =>
         operation(withHeadSeqWriter(writer, snapshot, baseHeadSeq))
       );
@@ -134,7 +135,19 @@ export class ObjectDirBorealStore implements BorealStore {
       for (const pending of logRecordsFromChanges(snapshot, changes)) {
         await this.#eventLog.append(pending.kind, pending.record);
       }
-      await this.#index.applyChanges(changes, await this.#eventLog.head());
+      try {
+        await this.#index.applyChanges(changes, await this.#eventLog.head(), baseHead);
+      } catch {
+        // The SQLite index is a disposable cache. Durable object and event-log
+        // writes have already committed, so invalidate it and let the next read
+        // rebuild instead of reporting the durable operation as failed.
+        try {
+          await this.#index.invalidate();
+        } catch {
+          // Cache cleanup is best effort for the same reason: canonical writes
+          // are already durable and must remain the command's source of truth.
+        }
+      }
       return result;
     });
   }
@@ -187,10 +200,10 @@ export class ObjectDirBorealStore implements BorealStore {
     if (!status.available) {
       return undefined;
     }
-    const snapshot = await this.loadSnapshot();
-    const refreshedHead = await this.#eventLog.head();
-    await this.#index.rebuild(snapshot, refreshedHead);
-    return this.#index.listWorkItems(filter, refreshedHead);
+    // Reads never repair or initialize the disposable SQLite cache. This keeps
+    // status, list, and inspection commands physically read-only; explicit
+    // search rebuilds and durable writes are responsible for cache updates.
+    return undefined;
   }
 
   private async loadSnapshot(): Promise<StoreSnapshot> {
@@ -270,6 +283,7 @@ export class ObjectDirBorealStore implements BorealStore {
   private async assertSafePaths(): Promise<void> {
     await assertRealPathInside(this.rootDir, this.objectsDir);
     await assertRealPathInside(this.rootDir, this.eventLogFile);
+    await assertRealPathInside(this.rootDir, this.objectIndexFile);
     await assertRealPathInside(this.rootDir, this.lockDir);
   }
 }

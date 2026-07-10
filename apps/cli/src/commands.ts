@@ -7950,7 +7950,7 @@ function unprobedSyncStatus(context: CliContext): SyncStatusResult {
     },
     searchIndex: {
       ok: true,
-      path: join(context.workspaceRoot, ".boreal", "runtime", "search-index.json"),
+      path: join(context.workspaceRoot, ".boreal", "cache", "index.sqlite"),
       exists: false,
       stale: false,
       expectedCorpusFingerprint: contentHash,

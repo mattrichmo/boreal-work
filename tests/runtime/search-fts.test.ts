@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, stat, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -57,6 +57,56 @@ describe("FTS search index", () => {
     }
   });
 
+  it("uses partial OR semantics for every query token", async () => {
+    const fts = await openFts();
+    if (!fts) {
+      return;
+    }
+    try {
+      fts.upsert([doc("bw_work_a", "work", "parser recovery", "handles input safely", "parser")]);
+
+      const results = fts.query("pars missing-term");
+
+      expect(results[0]?.recordId).toBe("bw_work_a");
+      expect(results[0]?.matches).toEqual(["pars"]);
+      expect(results[0]?.snippet).toContain("[parser]");
+    } finally {
+      fts.close();
+    }
+  });
+
+  it("rejects an invalid type filter instead of broadening the query", async () => {
+    const fts = await openFts();
+    if (!fts) {
+      return;
+    }
+    try {
+      fts.upsert([doc("bw_work_a", "work", "parser recovery", "handles input safely", "parser")]);
+
+      expect(fts.query("parser", { types: ["not_a_type"] })).toEqual([]);
+    } finally {
+      fts.close();
+    }
+  });
+
+  it("returns subject identity and a snippet from the matching field", async () => {
+    const fts = await openFts();
+    if (!fts) {
+      return;
+    }
+    try {
+      fts.upsert([{ ...doc("bw_summary_a", "agent_summary", "parser handoff", "safe closeout", "unrelated"), subjectId: "bw_work_a" }]);
+
+      const result = fts.query("parser")[0];
+
+      expect(result?.subjectId).toBe("bw_work_a");
+      expect(result?.snippet).toContain("[parser]");
+      expect(result?.snippet).not.toContain("unrelated");
+    } finally {
+      fts.close();
+    }
+  });
+
   it("upsert replaces prior docs for the same record id", async () => {
     const fts = await openFts();
     if (!fts) {
@@ -79,6 +129,19 @@ describe("FTS search index", () => {
     const rootDir = await makeTempWorkspace();
 
     await expect(FtsSearchIndex.open(rootDir, { sqlite: undefined })).resolves.toBeUndefined();
+  });
+
+  it("rejects a symlinked cache escape on read-only open", async () => {
+    const sqlite = await loadNodeSqlite();
+    if (!sqlite) {
+      return;
+    }
+    const rootDir = await makeTempWorkspace();
+    const outsideDir = await makeTempWorkspace();
+    await mkdir(join(rootDir, ".boreal"), { recursive: true });
+    await symlink(outsideDir, join(rootDir, ".boreal", "cache"), "dir");
+
+    await expect(FtsSearchIndex.open(rootDir, { sqlite, create: false })).rejects.toThrow("Path escapes Boreal workspace");
   });
 
   it("is populated by object-index writes and tracks the event-log head", async () => {
@@ -109,8 +172,81 @@ describe("FTS search index", () => {
     try {
       const head = await new FileEventLog({ path: join(rootDir, ".boreal", "log", "events.jsonl") }).head();
 
-      expect(fts.status(head)).toMatchObject({ fresh: true, documentCount: 1, recordCount: 1 });
+      expect(fts.status(head)).toMatchObject({
+        fresh: true,
+        integrityValid: true,
+        documentCount: 1,
+        recordCount: 1,
+        mismatchedCount: 0
+      });
       expect(fts.query("parser crash")[0]?.type).toBe("work");
+    } finally {
+      fts.close();
+    }
+  });
+
+  it("does not modify an existing index during read-only open and query", async () => {
+    const sqlite = await loadNodeSqlite();
+    if (!sqlite) {
+      return;
+    }
+    const rootDir = await makeTempWorkspace();
+    const store = new ObjectDirBorealStore({ rootDir, sqlite });
+    await store.write((writer) =>
+      writer.putWorkItem(
+        createWorkItem({
+          title: "Read-only parser search",
+          description: "The query must not write SQLite.",
+          labels: ["read-only"],
+          actor,
+          now: "2026-01-01T00:00:00.000Z"
+        })
+      )
+    );
+    const path = join(rootDir, ".boreal", "cache", "index.sqlite");
+    const before = await stat(path);
+
+    const fts = await FtsSearchIndex.open(rootDir, { sqlite, create: false });
+    expect(fts?.query("parser")[0]?.type).toBe("work");
+    fts?.close();
+
+    const after = await stat(path);
+    expect(after.mtimeMs).toBe(before.mtimeMs);
+    expect(after.size).toBe(before.size);
+  });
+
+  it("marks equal-count indexes stale when canonical content hashes diverge", async () => {
+    const sqlite = await loadNodeSqlite();
+    if (!sqlite) {
+      return;
+    }
+    const rootDir = await makeTempWorkspace();
+    const store = new ObjectDirBorealStore({ rootDir, sqlite });
+    await store.write((writer) =>
+      writer.putWorkItem(
+        createWorkItem({
+          title: "Content-bound search row",
+          description: "Detect equal-count drift.",
+          labels: ["integrity"],
+          actor,
+          now: "2026-01-01T00:00:00.000Z"
+        })
+      )
+    );
+    const path = join(rootDir, ".boreal", "cache", "index.sqlite");
+    const db = new sqlite.DatabaseSync(path);
+    db.prepare("UPDATE records SET content_hash = 'sha256:tampered';").run();
+    db.close();
+
+    const fts = await FtsSearchIndex.open(rootDir, { sqlite, create: false });
+    expect(fts).toBeDefined();
+    if (!fts) {
+      return;
+    }
+    try {
+      const head = await new FileEventLog({ path: join(rootDir, ".boreal", "log", "events.jsonl") }).head();
+      expect(fts.status(head)).toMatchObject({ fresh: false, documentCount: 1, recordCount: 1 });
+      expect(fts.status(head).mismatchedCount).toBeGreaterThan(0);
     } finally {
       fts.close();
     }
@@ -131,6 +267,7 @@ function doc(recordId: string, type: FtsDocumentInput["type"], title: string, su
   return {
     recordId,
     type,
+    contentHash: `sha256:${recordId}`,
     title,
     summary,
     idText: recordId,

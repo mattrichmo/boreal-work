@@ -30,7 +30,7 @@ import {
   type WorkId
 } from "@boreal/core";
 import { createBorealRuntime, type ExternalDependencyResolution } from "@boreal/engine";
-import { FileBorealStore, ObjectDirBorealStore, inspectFileLock, writeTextFileAtomic, type BorealStore, type FileLockInspection } from "@boreal/storage";
+import { FileBorealStore, inspectFileLock, writeTextFileAtomic, type FileLockInspection } from "@boreal/storage";
 
 import { emptyGlobalRollupCacheResult, refreshGlobalRollupCache, type GlobalRollupCacheResult } from "./global-rollup-cache.js";
 
@@ -819,7 +819,7 @@ function daemonWatchPaths(workspaceRoot: string): readonly string[] {
   const root = resolve(workspaceRoot);
   return [
     join(root, ".boreal", "runtime", "state.json"),
-    join(root, ".boreal", "runtime", "search-index.json"),
+    join(root, ".boreal", "cache", "index.sqlite"),
     join(root, ".boreal", "ledgers", "manifest.json"),
     join(root, "memory")
   ];

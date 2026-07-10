@@ -529,7 +529,7 @@ Options:
 ## `dashboard global`
 
 ```bash
-bwrk dashboard global [--limit <n>] [--registry-root <dir>] [--live-cache-ttl-ms <ms>] [--json]
+bwrk dashboard global [--limit <n>] [--registry-root <dir>] [--live-cache-ttl-ms <ms>] [--inbox-aging-days <n>] [--json]
 ```
 
 Emits the bounded global dashboard payload for registered projects, or the current workspace when the registry is empty. The command reads runtime state and registry metadata only; it does not render the browser dashboard or mutate project state.
@@ -1530,7 +1530,7 @@ Search commands rebuild a missing, invalid, or stale local search index by defau
 bwrk search index [--json]
 ```
 
-Builds a deterministic local search index at `.boreal/runtime/search-index.json`. Rebuilds are serialized with `.boreal/runtime/search-index.lock` and use atomic fsync writes. The index stores compact weighted aggregate tokens, per-field tokens, document-frequency statistics, compact vector-lite weights, and result summaries for work, evidence, sources, claims, decisions, context packs, and bounded context chunks; it does not store full record bodies.
+Builds the versioned FTS5 search table inside `.boreal/cache/index.sqlite`; runtimes without SQLite use `.boreal/runtime/search-index.json` as a compatibility fallback. Rebuilds take the runtime write lock before `.boreal/runtime/search-index.lock`, retry bounded lock contention, validate the completed artifact against canonical content hashes, and never silently downgrade a busy SQLite index to JSON. Indexed text and query sizes are bounded.
 
 JSON `data` contains `path`, `schemaVersion`, `builtAt`, `contentHash`, `documentCount`, and `tokenCount`.
 
@@ -1540,9 +1540,9 @@ JSON `data` contains `path`, `schemaVersion`, `builtAt`, `contentHash`, `documen
 bwrk search query <query> [--limit <n>] [--explain] [--no-rebuild] [--json]
 ```
 
-Searches work, evidence, sources, claims, decisions, context packs, and bounded context chunks. `--limit` is capped at `100`. Results are ranked by ID prefix matches, field-weighted token matches adjusted by document frequency, deterministic vector-lite similarity, and stable type/title ordering. Tokenization preserves compact tokens while adding camelCase, path/URI, underscore, and alpha-numeric split variants.
+Searches work, agent summaries, evidence, sources, claims, and decisions. `--limit` is capped at `100`. FTS and JSON fallback results share subject IDs, matched query tokens, matching-field snippets, partial multi-term semantics, strict type filters, stable ordering, and normalized per-project scores. Cross-project search combines projects by reciprocal result rank rather than comparing backend-specific raw scores.
 
-Use `--explain` to include the normalized query tokens, score contributions, document frequencies, IDF factors, vector similarity, and field-level matches that caused each result to rank.
+Use `--explain` to include normalized query tokens, score contributions, document frequencies, IDF factors, vector similarity, and field-level matches. Explain mode builds its deterministic audit model from the current canonical snapshot and does not read the SQLite artifact as JSON.
 Search commands rebuild a missing, invalid, or stale local search index by default. Use `--no-rebuild` to preserve fail-closed behavior.
 
 With `--no-rebuild`, the command fails closed when the index is missing, malformed, or stale. Rebuild with `bwrk search index` or `bwrk doctor --fix`.
@@ -1642,8 +1642,7 @@ JSON `data` contains `ok`, `initialized`, `rootDir`, `schemaVersion`, `health`, 
 ## `capture`
 
 ```bash
-bwrk capture <text> [--label <label>...] [--uri <ref>] [--kind raw|document|chat|code|artifact] [--json]
-bwrk capture --list [--limit <n>] [--json]
+bwrk capture <text> [--label <label>...] [--uri <ref>] [--kind raw|document|chat|code|artifact] [--list] [--limit <n>] [--json]
 ```
 
 Appends an immutable raw source record to the global workspace vault from any current directory. The command always targets the global workspace, initializes the global vault scaffold if needed, and stores `--label` values as raw source tags. `--uri` preserves an optional artifact or reference URI.
@@ -1681,6 +1680,14 @@ bwrk raw show <raw-id> [--preview-bytes <n>] [--json]
 Shows one immutable raw source record with linked wiki pages, retrieval commands, and a bounded local asset preview. Local previews are restricted to the workspace or configured memory root. External URIs are not fetched, missing files are reported as missing, directories and binary assets are reported as unsupported, and large text assets are truncated to `--preview-bytes`.
 
 JSON `data.preview` contains `status`, `mediaType`, `message`, `maxBytes`, `truncated`, and optional `path`, `body`, `bytes`, and `totalBytes`.
+
+## `raw triage`
+
+```bash
+bwrk raw triage promote|keep-global|drop <raw-id> [--to <project-id>] [--as work|source|claim|decision] [--title <text>] [--summary <text>] [--description <text>] [--statement <text>] [--context <text>] [--decision <text>] [--reason <text>] [--work-kind issue|task|sprint|milestone] [--label <label>...] [--ready] [--json]
+```
+
+Records an immutable triage outcome for a raw source. `promote` writes through a linked project workspace, `keep-global` creates a record in the global workspace, and `drop` records the supplied reason.
 
 ## `wiki create`
 

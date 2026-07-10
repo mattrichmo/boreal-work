@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import { open, rm } from "node:fs/promises";
+import { rm } from "node:fs/promises";
 import { join } from "node:path";
 
 import {
@@ -14,7 +14,6 @@ import {
   buildSearchIndex,
   isSearchIndexDocument,
   querySearchIndex,
-  SEARCH_INDEX_ALGORITHM,
   SEARCH_INDEX_SCHEMA_VERSION,
   searchCorpusFingerprint,
   type SearchCorpusSnapshot,
@@ -38,7 +37,6 @@ import {
 import type { CliContext } from "./context.js";
 
 const SEARCH_INDEX_MAX_READ_BYTES = 100 * 1024 * 1024;
-const SEARCH_INDEX_METADATA_READ_BYTES = 64 * 1024;
 const SEARCH_INDEX_LOCK_RETRY_ATTEMPTS = 3;
 const SEARCH_INDEX_LOCK_RETRY_DELAY_MS = 100;
 const SEARCH_FINGERPRINT_SECTIONS = [
@@ -86,9 +84,9 @@ export interface SearchCommandOptions {
 
 export async function writeSearchIndex(context: CliContext): Promise<SearchIndexWriteResult> {
   return withSearchIndexLockRetry(context, () =>
-    withFileLock(searchIndexLockDir(context), normalizeFileLockOptions(), async () => {
-      return writeSearchIndexUnlocked(context);
-    })
+    withFileLock(context.paths.stateLockDir, normalizeFileLockOptions(), () =>
+      withFileLock(searchIndexLockDir(context), normalizeFileLockOptions(), () => writeSearchIndexUnlocked(context))
+    )
   );
 }
 
@@ -111,17 +109,18 @@ export async function inspectSearchIndex(context: CliContext): Promise<SearchInd
   }
 
   try {
-    const metadata = await readSearchIndexMetadata(path);
+    const index = await readSearchIndex(path);
     return {
       path,
       exists: true,
-      stale: metadata.corpusFingerprint === undefined || metadata.corpusFingerprint !== expectedCorpusFingerprint,
+      mode: "json",
+      stale: index.corpusFingerprint === undefined || index.corpusFingerprint !== expectedCorpusFingerprint,
       expectedCorpusFingerprint,
-      contentHash: metadata.contentHash,
-      corpusFingerprint: metadata.corpusFingerprint,
-      builtAt: metadata.builtAt,
-      documentCount: metadata.documentCount,
-      tokenCount: metadata.tokenCount
+      contentHash: index.contentHash,
+      corpusFingerprint: index.corpusFingerprint,
+      builtAt: index.builtAt,
+      documentCount: index.documentCount,
+      tokenCount: index.tokenCount
     };
   } catch (error) {
     return {
@@ -143,14 +142,37 @@ export async function runSearch(
   if (!normalizedQuery) {
     throw new BorealError("BOREAL_INVALID_INPUT", "Search query is required");
   }
-
-  const ftsResults = await queryFtsSearchIndex(context, normalizedQuery, options);
-  if (ftsResults) {
-    return ftsResults;
+  if (options.explain) {
+    const snapshot = await readSearchSnapshot(context);
+    return querySearchIndex(buildSearchIndex(snapshot, nowIso()), normalizedQuery, options);
   }
 
-  const index = await loadFreshSearchIndex(context, { rebuildStaleIndex: options.rebuildStaleIndex ?? true });
-  return querySearchIndex(index, normalizedQuery, options);
+  let inspection = await inspectSearchIndex(context);
+  if (!inspection.exists || inspection.stale || inspection.error) {
+    if (!(options.rebuildStaleIndex ?? true)) {
+      throw unavailableSearchIndexError(inspection);
+    }
+    try {
+      await writeSearchIndex(context);
+      inspection = await inspectSearchIndex(context);
+    } catch (error) {
+      throw automaticSearchRepairError(context, error);
+    }
+  }
+  if (!inspection.exists || inspection.stale || inspection.error) {
+    throw unavailableSearchIndexError(inspection);
+  }
+  if (inspection.mode === "fts") {
+    const results = await queryFtsSearchIndex(context, normalizedQuery, options);
+    if (results) {
+      return results;
+    }
+    throw new BorealError("BOREAL_STORAGE_ERROR", "FTS search index became unavailable during query", {
+      path: inspection.path,
+      repairCommand: "bwrk search index"
+    });
+  }
+  return querySearchIndex(await readSearchIndex(inspection.path), normalizedQuery, options);
 }
 
 export function searchIndexPath(context: CliContext): string {
@@ -161,86 +183,39 @@ export function searchIndexLockDir(context: CliContext): string {
   return join(context.paths.runtimeDir, "search-index.lock");
 }
 
-async function loadFreshSearchIndex(
-  context: CliContext,
-  options: { readonly rebuildStaleIndex: boolean }
-): Promise<SearchIndexDocument> {
-  const inspection = await inspectSearchIndex(context);
-  if (!inspection.exists) {
-    if (options.rebuildStaleIndex) {
-      await rebuildSearchIndexIfStillNeeded(context);
-      return readSearchIndex(inspection.path);
-    }
-    throw new BorealError("BOREAL_POLICY_VIOLATION", "Search index is missing; run `bwrk search index`", {
-      path: inspection.path,
-      expectedCorpusFingerprint: inspection.expectedCorpusFingerprint,
-      expectedContentHash: inspection.expectedContentHash,
-      domain: "workflow"
-    });
-  }
-  if (inspection.error) {
-    if (options.rebuildStaleIndex) {
-      await rebuildSearchIndexIfStillNeeded(context);
-      return readSearchIndex(inspection.path);
-    }
-    throw new BorealError("BOREAL_POLICY_VIOLATION", "Search index is invalid; run `bwrk search index`", {
-      path: inspection.path,
-      error: inspection.error,
-      domain: "workflow"
-    });
-  }
-  if (inspection.stale) {
-    if (options.rebuildStaleIndex) {
-      await rebuildSearchIndexIfStillNeeded(context);
-      return readSearchIndex(inspection.path);
-    }
-    throw new BorealError("BOREAL_POLICY_VIOLATION", "Search index is stale; run `bwrk search index`", {
-      path: inspection.path,
-      contentHash: inspection.contentHash,
-      corpusFingerprint: inspection.corpusFingerprint,
-      expectedCorpusFingerprint: inspection.expectedCorpusFingerprint,
-      expectedContentHash: inspection.expectedContentHash,
-      domain: "workflow"
-    });
-  }
-  return readSearchIndex(inspection.path);
+function unavailableSearchIndexError(inspection: SearchIndexInspection): BorealError {
+  const state = !inspection.exists ? "missing" : inspection.error ? "invalid" : "stale";
+  return new BorealError("BOREAL_POLICY_VIOLATION", `Search index is ${state}; run \`bwrk search index\``, {
+    path: inspection.path,
+    error: inspection.error,
+    corpusFingerprint: inspection.corpusFingerprint,
+    expectedCorpusFingerprint: inspection.expectedCorpusFingerprint,
+    repairCommand: "bwrk search index",
+    domain: "workflow"
+  });
 }
 
-async function rebuildSearchIndexIfStillNeeded(context: CliContext): Promise<SearchIndexWriteResult | undefined> {
-  return withSearchIndexLockRetry(context, () =>
-    withFileLock(searchIndexLockDir(context), normalizeFileLockOptions(), async () => {
-      const inspection = await inspectSearchIndex(context);
-      if (inspection.exists && !inspection.stale && !inspection.error) {
-        return undefined;
-      }
-      try {
-        return await writeJsonSearchIndexUnlocked(context);
-      } catch (error) {
-        const gaps = [
-          {
-            code: "doctor.recovery.required",
-            subjectType: "workspace",
-            subjectId: context.workspaceRoot,
-            data: {
-              reason: "automatic search index rebuild failed"
-            }
-          }
-        ] satisfies readonly EnforcementGap[];
-        throw new BorealError(
-          "BOREAL_POLICY_VIOLATION",
-          "Automatic search index rebuild failed; run `bwrk doctor --strict --json`",
-          {
-            doNotRetry: true,
-            repairCommand: "bwrk doctor --strict --json",
-            indexPath: searchIndexPath(context),
-            originalError: error instanceof Error ? error.message : String(error),
-            gaps,
-            domain: "workflow"
-          },
-          gaps
-        );
-      }
-    })
+function automaticSearchRepairError(context: CliContext, error: unknown): BorealError {
+  const gaps = [
+    {
+      code: "doctor.recovery.required",
+      subjectType: "workspace",
+      subjectId: context.workspaceRoot,
+      data: { reason: "automatic search index rebuild failed" }
+    }
+  ] satisfies readonly EnforcementGap[];
+  return new BorealError(
+    "BOREAL_POLICY_VIOLATION",
+    "Automatic search index rebuild failed; run `bwrk doctor --strict --json`",
+    {
+      doNotRetry: true,
+      repairCommand: "bwrk doctor --strict --json",
+      indexPath: objectIndexPath(context.workspaceRoot),
+      originalError: error instanceof Error ? error.message : String(error),
+      gaps,
+      domain: "workflow"
+    },
+    gaps
   );
 }
 
@@ -265,11 +240,12 @@ function isSearchIndexLockConflict(error: unknown, context: CliContext): boolean
     return false;
   }
   const details = error.details;
-  return (
+  return error.message.includes("Search index is busy") || (
     typeof details === "object" &&
     details !== null &&
     "lockDir" in details &&
-    (details as { readonly lockDir?: unknown }).lockDir === searchIndexLockDir(context)
+    ((details as { readonly lockDir?: unknown }).lockDir === searchIndexLockDir(context) ||
+      (details as { readonly lockDir?: unknown }).lockDir === context.paths.stateLockDir)
   );
 }
 
@@ -294,9 +270,6 @@ async function queryFtsSearchIndex(
   query: string,
   options: SearchCommandOptions
 ): Promise<readonly SearchResult[] | undefined> {
-  if (options.explain) {
-    return undefined;
-  }
   const fts = await FtsSearchIndex.open(context.workspaceRoot, { create: false });
   if (!fts) {
     return undefined;
@@ -314,32 +287,45 @@ async function queryFtsSearchIndex(
 }
 
 async function inspectFtsSearchIndex(context: CliContext): Promise<SearchIndexInspection | undefined> {
-  const fts = await FtsSearchIndex.open(context.workspaceRoot, { create: false });
-  if (!fts) {
+  const path = objectIndexPath(context.workspaceRoot);
+  if (!existsSync(path)) {
     return undefined;
   }
+  const snapshot = await readSearchFingerprintSnapshot(context);
+  const expectedCorpusFingerprint = searchCorpusFingerprint(snapshot);
+  let fts: FtsSearchIndex | undefined;
   try {
-    const head = await new FileEventLog({ path: context.paths.eventLogFile }).head();
-    const status = fts.status(head);
-    if (!status.fresh) {
+    fts = await FtsSearchIndex.open(context.workspaceRoot, { create: false });
+    if (!fts) {
       return undefined;
     }
-    const snapshot = await readSearchFingerprintSnapshot(context);
-    const corpusFingerprint = searchCorpusFingerprint(snapshot);
+    const head = await new FileEventLog({ path: context.paths.eventLogFile }).head();
+    const status = fts.status(head);
     return {
       path: fts.path,
       mode: "fts",
       exists: true,
-      stale: false,
-      expectedCorpusFingerprint: corpusFingerprint,
+      stale: !status.fresh,
+      expectedCorpusFingerprint,
       contentHash: head.hash as ContentHash,
-      corpusFingerprint,
-      builtAt: nowIso(),
+      corpusFingerprint: expectedCorpusFingerprint,
       documentCount: status.documentCount,
-      tokenCount: 0
+      tokenCount: 0,
+      ...(!status.integrityValid || status.mismatchedCount > 0
+        ? { error: `FTS integrity failed (${status.mismatchedCount} mismatched records)` }
+        : {})
+    };
+  } catch (error) {
+    return {
+      path,
+      mode: "fts",
+      exists: true,
+      stale: true,
+      expectedCorpusFingerprint,
+      error: error instanceof Error ? error.message : String(error)
     };
   } finally {
-    fts.close();
+    fts?.close();
   }
 }
 
@@ -353,7 +339,10 @@ async function writeFtsSearchIndexIfAvailable(context: CliContext): Promise<Sear
   const objectIndex = new ObjectReadIndex({ path: objectIndexPath(context.workspaceRoot), sqlite });
   const rebuilt = await objectIndex.rebuild(snapshot, head);
   if (!rebuilt.available) {
-    return undefined;
+    throw new BorealError("BOREAL_CONFLICT", "Search index is busy; retry the command", {
+      path: rebuilt.path,
+      repairCommand: "bwrk search index"
+    });
   }
   const fts = await FtsSearchIndex.open(context.workspaceRoot, { sqlite });
   if (!fts) {
@@ -362,7 +351,10 @@ async function writeFtsSearchIndexIfAvailable(context: CliContext): Promise<Sear
   try {
     const status = fts.status(head);
     if (!status.fresh) {
-      return undefined;
+      throw new BorealError("BOREAL_STORAGE_ERROR", "Rebuilt search index failed integrity validation", {
+        path: fts.path,
+        status
+      });
     }
     await rm(searchIndexPath(context), { force: true });
     const corpusFingerprint = searchCorpusFingerprint(searchSnapshotFromStoreSnapshot(snapshot));
@@ -386,11 +378,12 @@ function ftsResultToSearchResult(result: FtsSearchResult): SearchResult {
     id: `${result.type}:${result.recordId}`,
     type: result.type as SearchResult["type"],
     recordId: result.recordId,
+    ...(result.subjectId ? { subjectId: result.subjectId } : {}),
     title: result.title,
     summary: result.summary,
     snippet: result.snippet,
     score: result.score,
-    matches: result.snippet ? [result.snippet] : []
+    matches: result.matches
   };
 }
 
@@ -472,57 +465,6 @@ async function readSearchIndex(path: string): Promise<SearchIndexDocument> {
   return parsed;
 }
 
-interface SearchIndexMetadata {
-  readonly builtAt: string;
-  readonly contentHash: ContentHash;
-  readonly corpusFingerprint?: ContentHash;
-  readonly documentCount: number;
-  readonly tokenCount: number;
-}
-
-async function readSearchIndexMetadata(path: string): Promise<SearchIndexMetadata> {
-  const handle = await open(path, "r");
-  try {
-    const buffer = Buffer.alloc(SEARCH_INDEX_METADATA_READ_BYTES);
-    const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
-    const prefix = buffer.subarray(0, bytesRead).toString("utf8");
-    const schemaVersion = metadataString(prefix, "schemaVersion", true);
-    const algorithm = metadataString(prefix, "algorithm", true);
-    if (schemaVersion !== SEARCH_INDEX_SCHEMA_VERSION || algorithm !== SEARCH_INDEX_ALGORITHM) {
-      throw new BorealError("BOREAL_INVALID_INPUT", "Search index has an unsupported shape", { path });
-    }
-    return {
-      builtAt: metadataString(prefix, "builtAt", true),
-      contentHash: metadataString(prefix, "contentHash", true) as ContentHash,
-      corpusFingerprint: metadataString(prefix, "corpusFingerprint", false) as ContentHash | undefined,
-      documentCount: metadataNumber(prefix, "documentCount"),
-      tokenCount: metadataNumber(prefix, "tokenCount")
-    };
-  } finally {
-    await handle.close();
-  }
-}
-
-function metadataString(prefix: string, key: string, required: true): string;
-function metadataString(prefix: string, key: string, required: false): string | undefined;
-function metadataString(prefix: string, key: string, required: boolean): string | undefined {
-  const match = new RegExp(`"${key}"\\s*:\\s*"([^"\\\\]*(?:\\\\.[^"\\\\]*)*)"`).exec(prefix);
-  if (!match) {
-    if (required) {
-      throw new BorealError("BOREAL_INVALID_INPUT", "Search index metadata is incomplete", { key });
-    }
-    return undefined;
-  }
-  return JSON.parse(`"${match[1]}"`) as string;
-}
-
-function metadataNumber(prefix: string, key: string): number {
-  const match = new RegExp(`"${key}"\\s*:\\s*(\\d+)`).exec(prefix);
-  if (!match) {
-    throw new BorealError("BOREAL_INVALID_INPUT", "Search index metadata is incomplete", { key });
-  }
-  return Number(match[1]);
-}
 
 async function readSearchFingerprintSnapshot(context: CliContext): Promise<SearchCorpusSnapshot> {
   const indexed = await readIndexedSearchFingerprintSnapshot(context);

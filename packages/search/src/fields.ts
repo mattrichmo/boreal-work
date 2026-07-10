@@ -1,3 +1,4 @@
+import { hashContent } from "@boreal/core";
 import type {
   AgentSummaryRecord,
   ClaimRecord,
@@ -31,6 +32,8 @@ export type SearchRecord =
   | ClaimRecord
   | DecisionRecord;
 
+export const MAX_SEARCH_QUERY_CHARS = 4_096;
+
 export interface SearchWeightedText {
   readonly field: string;
   readonly text: string;
@@ -40,6 +43,7 @@ export interface SearchWeightedText {
 export interface SearchRecordFields {
   readonly type: SearchDocumentType;
   readonly recordId: string;
+  readonly contentHash: string;
   readonly subjectId?: string;
   readonly title: string;
   readonly summary: string;
@@ -49,6 +53,8 @@ export interface SearchRecordFields {
 export interface FtsDocumentInput {
   readonly recordId: string;
   readonly type: SearchDocumentType;
+  readonly contentHash: string;
+  readonly subjectId?: string;
   readonly title: string;
   readonly summary: string;
   readonly idText: string;
@@ -104,12 +110,14 @@ export function ftsDocumentInputFromFields(document: SearchRecordFields): FtsDoc
   return {
     recordId: document.recordId,
     type: document.type,
-    title: document.title,
-    summary: document.summary,
-    idText: idText.join(" "),
-    labelText: labelText.join(" "),
-    bodyText: bodyText.join(" "),
-    stateText: stateText.join(" ")
+    contentHash: document.contentHash,
+    ...(document.subjectId ? { subjectId: document.subjectId } : {}),
+    title: boundedText(document.title),
+    summary: boundedText(document.summary),
+    idText: boundedText(idText.join(" ")),
+    labelText: boundedText(labelText.join(" ")),
+    bodyText: boundedText(bodyText.join(" ")),
+    stateText: boundedText(stateText.join(" "))
   };
 }
 
@@ -117,6 +125,7 @@ function workFields(work: WorkItem): SearchRecordFields {
   return {
     type: "work",
     recordId: work.meta.id,
+    contentHash: work.meta.contentHash ?? hashContent(work),
     title: work.title,
     summary: work.description,
     fields: [
@@ -137,6 +146,7 @@ function agentSummaryFields(summary: AgentSummaryRecord): SearchRecordFields {
   return {
     type: "agent_summary",
     recordId: summary.meta.id,
+    contentHash: summary.meta.contentHash ?? hashContent(summary),
     subjectId: summary.subjectId,
     title: summary.title,
     summary: summary.body,
@@ -159,6 +169,7 @@ function evidenceFields(record: EvidenceRecord): SearchRecordFields {
   return {
     type: "evidence",
     recordId: record.meta.id,
+    contentHash: record.meta.contentHash ?? hashContent(record),
     subjectId: record.subjectId,
     title: `${record.outcome} evidence`,
     summary: record.summary,
@@ -177,6 +188,7 @@ function sourceFields(source: KnowledgeSource): SearchRecordFields {
   return {
     type: "source",
     recordId: source.meta.id,
+    contentHash: source.meta.contentHash ?? hashContent(source),
     title: source.title,
     summary: source.summary,
     fields: [
@@ -193,6 +205,7 @@ function claimFields(claim: ClaimRecord): SearchRecordFields {
   return {
     type: "claim",
     recordId: claim.meta.id,
+    contentHash: claim.meta.contentHash ?? hashContent(claim),
     title: trimSummary(claim.statement),
     summary: claim.statement,
     fields: [
@@ -210,6 +223,7 @@ function decisionFields(decision: DecisionRecord): SearchRecordFields {
   return {
     type: "decision",
     recordId: decision.meta.id,
+    contentHash: decision.meta.contentHash ?? hashContent(decision),
     title: decision.title,
     summary: decision.decision,
     fields: [
@@ -236,4 +250,10 @@ function isStateField(field: string): boolean {
 function trimSummary(value: string): string {
   const compact = value.replace(/\s+/gu, " ").trim();
   return compact.length > 180 ? `${compact.slice(0, 177)}...` : compact;
+}
+
+const MAX_FTS_FIELD_CHARS = 32_768;
+
+function boundedText(value: string): string {
+  return value.length <= MAX_FTS_FIELD_CHARS ? value : value.slice(0, MAX_FTS_FIELD_CHARS);
 }

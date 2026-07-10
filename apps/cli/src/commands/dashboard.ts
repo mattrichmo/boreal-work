@@ -80,6 +80,7 @@ interface GlobalDashboardProjectOverview {
   readonly settings: GlobalSettingsProjectInput;
   readonly work: readonly WorkItemView[];
   readonly searchResults: readonly GlobalSearchSourceRow[];
+  readonly searchError?: string;
   readonly activityRows: readonly GlobalActivitySourceRow[];
   readonly sync: SyncDashboardView;
   readonly locks: LockDashboardView;
@@ -964,7 +965,8 @@ async function buildGlobalDashboardResult(context: CliContext, args: ParsedArgs)
         projectId: project.entry.id,
         projectName: project.entry.name,
         projectRoot: project.entry.projectRoot,
-        results: project.searchResults
+        results: project.searchResults,
+        error: project.searchError
       }))
     }),
     globalActivity: buildGlobalActivityView({
@@ -1241,7 +1243,7 @@ async function buildGlobalDashboardProjectOverview(input: {
   try {
     const projectContext = await dashboardProjectContext(input.parentContext, input.entry.projectRoot);
     assertInitialized(projectContext);
-    const [work, reservations, sync, doctor, operations, searchResults, daemon] = await Promise.all([
+    const [work, reservations, sync, doctor, operations, search, daemon] = await Promise.all([
       dashboardWork(projectContext),
       projectContext.store.read((reader) => reader.listReservations()),
       buildSyncStatus(projectContext),
@@ -1267,7 +1269,8 @@ async function buildGlobalDashboardProjectOverview(input: {
       entry,
       settings: dashboardSettingsFromEntry(input.entry, entry),
       work,
-      searchResults,
+      searchResults: search.results,
+      searchError: search.error,
       activityRows: operations,
       sync: syncView,
       locks: lockDashboardViewFromDiagnostics(doctor.diagnostics, input.entry.projectRoot, input.generatedAt),
@@ -1300,6 +1303,7 @@ async function buildGlobalDashboardProjectOverview(input: {
       settings: dashboardSettingsFromEntry(input.entry, entry),
       work: [],
       searchResults: [],
+      searchError: error instanceof Error ? error.message : String(error),
       activityRows: [],
       sync,
       locks: { generatedAt: input.generatedAt, ok: true, workspaceRoot: input.entry.projectRoot, locks: [] },
@@ -1748,18 +1752,23 @@ async function dashboardOperations(context: CliContext): Promise<readonly Global
   });
 }
 
-async function dashboardSearch(context: CliContext, query: string): Promise<readonly GlobalSearchSourceRow[]> {
+async function dashboardSearch(
+  context: CliContext,
+  query: string
+): Promise<{ readonly results: readonly GlobalSearchSourceRow[]; readonly error?: string }> {
   try {
-    return (await runSearch(context, query, { limit: DEFAULT_DASHBOARD_SEARCH_LIMIT })).map((result) => ({
-      id: result.id,
-      type: result.type,
-      recordId: result.recordId,
-      title: result.title,
-      summary: result.summary,
-      score: result.score
-    }));
-  } catch {
-    return [];
+    return {
+      results: (await runSearch(context, query, { limit: DEFAULT_DASHBOARD_SEARCH_LIMIT })).map((result) => ({
+        id: result.id,
+        type: result.type,
+        recordId: result.recordId,
+        title: result.title,
+        summary: result.summary,
+        score: result.score
+      }))
+    };
+  } catch (error) {
+    return { results: [], error: error instanceof Error ? error.message : String(error) };
   }
 }
 
