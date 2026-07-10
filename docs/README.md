@@ -47,6 +47,7 @@ The complete map of Boreal documentation. Start with the guides, drop into the r
 
 | Doc | Read it for |
 | --- | --- |
+| [Product contract](product/PRODUCT_CONTRACT.md) | Boreal's product wedge, measurable invariants, capability profiles, safety boundaries, and non-goals. |
 | [V1 closeout & adoption guide](product/V1_CLOSEOUT_ADOPTION_GUIDE.md) | Where v1 landed and how to adopt it. |
 | [V1 workflows](product/V1_WORKFLOWS.md) | The canonical v1 workflow set. |
 | [V1 remainder baseline](product/V1_REMAINDER_BASELINE.md) | The v1 remainder tracker baseline. |
