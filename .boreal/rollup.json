@@ -2,8 +2,8 @@
   "schemaVersion": "boreal.project-rollup.v2",
   "projectId": "project_5b36e807eda66e00",
   "workspaceRoot": "/Users/cybertron/Code/boreal-work",
-  "generatedAt": "2026-07-10T22:17:09.819Z",
-  "stateContentHash": "sha256:a8e7f78a4b03cc6faa63af1b998f994fd3968451af15ce397e54157e3ad7455c",
+  "generatedAt": "2026-07-10T22:30:18.032Z",
+  "stateContentHash": "sha256:f4f255769d9b1d2536377b5a1de671831a6537be2975e2b2a2084835d5c34340",
   "counts": {
     "work": {
       "total": 529,
@@ -12,8 +12,8 @@
         "ready": 62,
         "reserved": 0,
         "in_progress": 0,
-        "blocked": 53,
-        "needs_verification": 1,
+        "blocked": 54,
+        "needs_verification": 0,
         "verified": 0,
         "closed": 413,
         "cancelled": 0
@@ -33,16 +33,7 @@
     }
   },
   "limbo": {
-    "needsVerification": [
-      {
-        "workId": "bw_work_f950290c75d88a24",
-        "title": "Competitive Parity and Trustworthy Public Beta",
-        "status": "needs_verification",
-        "updatedAt": "2026-07-10T22:17:09.299Z",
-        "ageMs": 520,
-        "ageDays": 0
-      }
-    ],
+    "needsVerification": [],
     "verified": []
   },
   "reservations": {
@@ -53,7 +44,7 @@
   },
   "enforcement": {
     "blockingGaps": {
-      "openCount": 187,
+      "openCount": 189,
       "blockedWorkCount": 54,
       "samples": [
         {
@@ -122,29 +113,10 @@
           ]
         },
         {
-          "workId": "bw_work_e06dfffff9f6ef9b",
-          "title": "S01 - Public Product Contract and Release Boundary",
-          "blockerIds": [
-            "bw_work_0acecb86dff442f4",
-            "bw_work_7971e6f401b6bd63",
-            "bw_work_ca9ba6b4f3f20e1e",
-            "bw_work_e9382d8a7e085ea6",
-            "bw_work_effa1e62fd798d75"
-          ]
-        },
-        {
           "workId": "bw_work_e9382d8a7e085ea6",
           "title": "S01T04 - Define SemVer, schema compatibility, migration, and rollback contracts",
           "blockerIds": [
             "bw_work_ca9ba6b4f3f20e1e"
-          ]
-        },
-        {
-          "workId": "bw_work_effa1e62fd798d75",
-          "title": "S01T05 - Establish the cross-platform public release CI baseline",
-          "blockerIds": [
-            "bw_work_0acecb86dff442f4",
-            "bw_work_e9382d8a7e085ea6"
           ]
         },
         {
@@ -298,25 +270,40 @@
           "blockerIds": [
             "bw_work_9a88c3aa9bc74809"
           ]
+        },
+        {
+          "workId": "bw_work_5202b53065f3f085",
+          "title": "S07T03 - Expose import, export, search, spec, agent, and dashboard adapter points",
+          "blockerIds": [
+            "bw_work_9a88c3aa9bc74809"
+          ]
+        },
+        {
+          "workId": "bw_work_38ce2f620c7f6365",
+          "title": "S07T04 - Implement extension install, inspect, update, remove, doctor, and recovery",
+          "blockerIds": [
+            "bw_work_5202b53065f3f085",
+            "bw_work_9182a6cd0594a668"
+          ]
         }
       ]
     }
   },
   "health": {
     "doctorOk": null,
-    "syncOk": null
+    "syncOk": true
   },
   "lastEvent": {
-    "id": "bw_event_7bfe8d7a961d0fa76e7c4d7ec474c411",
-    "type": "evidence.recorded",
-    "subjectId": "bw_evidence_f95caa0c3054d10d",
-    "at": "2026-07-10T22:17:09.302Z"
+    "id": "bw_event_82b42e00beae7acb3c2e403225958dbf",
+    "type": "projection.rebuilt",
+    "subjectId": "projections",
+    "at": "2026-07-10T22:30:12.795Z"
   },
   "lastOperation": {
-    "id": "bw_operation_fa8054937853bbe9da32d7582d53d183",
-    "commandPath": "evidence add",
+    "id": "bw_operation_e52f39c85452f5da03e026cbcebe1cb3",
+    "commandPath": "sync refresh",
     "status": "succeeded",
-    "finishedAt": "2026-07-10T22:17:09.352Z"
+    "finishedAt": "2026-07-10T22:30:17.594Z"
   },
   "next": {
     "limit": 10,
@@ -570,11 +557,11 @@
       },
       {
         "workId": "bw_work_0acecb86dff442f4",
-        "title": "S01T03 - Complete licensing, provenance, dependency, secret, and public-history audit",
+        "title": "S01T03 - Complete provenance, dependency, secret, and repository-boundary audit",
         "kind": "task",
         "priority": "high",
         "status": "ready",
-        "updatedAt": "2026-07-10T17:10:35.218Z"
+        "updatedAt": "2026-07-10T22:27:04.442Z"
       },
       {
         "workId": "bw_work_0b52b31b4cd80c8f",
@@ -866,11 +853,11 @@
       },
       {
         "workId": "bw_work_1a9b836bd3ce8f2e",
-        "title": "S09 - Public Beta Release and External Validation",
+        "title": "S09 - Technical Release Readiness and Comparative Validation",
         "kind": "sprint",
         "priority": "high",
         "status": "blocked",
-        "updatedAt": "2026-07-10T17:10:28.943Z"
+        "updatedAt": "2026-07-10T22:28:44.562Z"
       },
       {
         "workId": "bw_work_1adeda1a3c7867ff",
@@ -2378,11 +2365,11 @@
       },
       {
         "workId": "bw_work_7971e6f401b6bd63",
-        "title": "S01T01 - Define the public-beta wedge, audience, profiles, and non-goals",
+        "title": "S01T01 - Define the product wedge, operator profiles, and non-goals",
         "kind": "task",
         "priority": "high",
         "status": "ready",
-        "updatedAt": "2026-07-10T17:10:33.104Z"
+        "updatedAt": "2026-07-10T22:26:54.575Z"
       },
       {
         "workId": "bw_work_7a38f0a77aa2d69d",
@@ -3378,11 +3365,11 @@
       },
       {
         "workId": "bw_work_b6f5826aedc08881",
-        "title": "S09T04 - Finalize public repository governance, documentation, and support boundaries",
+        "title": "S09T04 - Finalize repository documentation, security, and support boundaries",
         "kind": "task",
         "priority": "normal",
         "status": "blocked",
-        "updatedAt": "2026-07-10T17:10:32.087Z"
+        "updatedAt": "2026-07-10T22:27:33.567Z"
       },
       {
         "workId": "bw_work_b71214b0896e55b6",
@@ -3498,11 +3485,11 @@
       },
       {
         "workId": "bw_work_be257b5cfbcc0536",
-        "title": "S09T06 - Make the evidence-based go, iterate, narrow, or stop decision",
+        "title": "S09T06 - Make the evidence-based technical readiness decision",
         "kind": "task",
         "priority": "normal",
         "status": "blocked",
-        "updatedAt": "2026-07-10T17:10:00.854Z"
+        "updatedAt": "2026-07-10T22:28:16.159Z"
       },
       {
         "workId": "bw_work_beca72d119df641e",
@@ -3938,11 +3925,11 @@
       },
       {
         "workId": "bw_work_d66664bdd5504d61",
-        "title": "S09T05 - Run the five-user unassisted external beta",
+        "title": "Deferred - External User Validation",
         "kind": "task",
-        "priority": "normal",
+        "priority": "low",
         "status": "blocked",
-        "updatedAt": "2026-07-10T17:09:59.771Z"
+        "updatedAt": "2026-07-10T22:28:34.245Z"
       },
       {
         "workId": "bw_work_d6b0cf8944a3b729",
@@ -4098,11 +4085,11 @@
       },
       {
         "workId": "bw_work_e06dfffff9f6ef9b",
-        "title": "S01 - Public Product Contract and Release Boundary",
+        "title": "S01 - Product Contract and Compatibility Boundary",
         "kind": "sprint",
         "priority": "high",
         "status": "blocked",
-        "updatedAt": "2026-07-10T17:08:16.869Z"
+        "updatedAt": "2026-07-10T22:26:42.458Z"
       },
       {
         "workId": "bw_work_e1165682f096d0c0",
@@ -4314,11 +4301,11 @@
       },
       {
         "workId": "bw_work_effa1e62fd798d75",
-        "title": "S01T05 - Establish the cross-platform public release CI baseline",
+        "title": "S01T05 - Establish the cross-platform release CI baseline",
         "kind": "task",
         "priority": "high",
         "status": "blocked",
-        "updatedAt": "2026-07-10T17:09:12.507Z"
+        "updatedAt": "2026-07-10T22:27:13.946Z"
       },
       {
         "workId": "bw_work_f0734e55cb219b1b",
@@ -4530,11 +4517,11 @@
       },
       {
         "workId": "bw_work_f950290c75d88a24",
-        "title": "Competitive Parity and Trustworthy Public Beta",
+        "title": "Competitive Parity and Technical Product Hardening",
         "kind": "milestone",
         "priority": "critical",
-        "status": "needs_verification",
-        "updatedAt": "2026-07-10T22:17:09.299Z"
+        "status": "blocked",
+        "updatedAt": "2026-07-10T22:26:32.882Z"
       },
       {
         "workId": "bw_work_f993f99e5e0f418a",
@@ -4645,7 +4632,7 @@
   "aging": {
     "ready": {
       "count": 62,
-      "oldestAgeMs": 287922685,
+      "oldestAgeMs": 288710898,
       "oldestAgeDays": 3,
       "items": [
         {
@@ -4653,7 +4640,7 @@
           "title": "Console Refresh form omits required confirmation",
           "status": "ready",
           "since": "2026-07-07T14:18:27.134Z",
-          "ageMs": 287922685,
+          "ageMs": 288710898,
           "ageDays": 3
         },
         {
@@ -4661,7 +4648,7 @@
           "title": "Global console project dashboard links fall back to global route",
           "status": "ready",
           "since": "2026-07-07T14:18:27.997Z",
-          "ageMs": 287921822,
+          "ageMs": 288710035,
           "ageDays": 3
         },
         {
@@ -4669,7 +4656,7 @@
           "title": "Live console Sprint page is hard-coded to sprint-04",
           "status": "ready",
           "since": "2026-07-07T14:18:28.725Z",
-          "ageMs": 287921094,
+          "ageMs": 288709307,
           "ageDays": 3
         },
         {
@@ -4677,7 +4664,7 @@
           "title": "Route TUI ignores active sprint projection",
           "status": "ready",
           "since": "2026-07-07T14:18:29.437Z",
-          "ageMs": 287920382,
+          "ageMs": 288708595,
           "ageDays": 3
         },
         {
@@ -4685,7 +4672,7 @@
           "title": "TUI task detail drops reservation context and offers invalid close",
           "status": "ready",
           "since": "2026-07-07T14:18:30.119Z",
-          "ageMs": 287919700,
+          "ageMs": 288707913,
           "ageDays": 3
         },
         {
@@ -4693,7 +4680,7 @@
           "title": "TUI command descriptors are not exact copyable commands",
           "status": "ready",
           "since": "2026-07-07T14:18:30.826Z",
-          "ageMs": 287918993,
+          "ageMs": 288707206,
           "ageDays": 3
         },
         {
@@ -4701,7 +4688,7 @@
           "title": "Console browser-smoke defaults to system Chrome on macOS",
           "status": "ready",
           "since": "2026-07-07T14:18:31.576Z",
-          "ageMs": 287918243,
+          "ageMs": 288706456,
           "ageDays": 3
         },
         {
@@ -4709,7 +4696,7 @@
           "title": "Curl stdin installer fails from Node projects with package.json",
           "status": "ready",
           "since": "2026-07-07T14:18:32.339Z",
-          "ageMs": 287917480,
+          "ageMs": 288705693,
           "ageDays": 3
         },
         {
@@ -4717,7 +4704,7 @@
           "title": "Generated package artifacts under src are unignored and uncleaned",
           "status": "ready",
           "since": "2026-07-07T14:18:33.030Z",
-          "ageMs": 287916789,
+          "ageMs": 288705002,
           "ageDays": 3
         },
         {
@@ -4725,29 +4712,20 @@
           "title": "Fresh object index can hide deleted object files",
           "status": "ready",
           "since": "2026-07-07T14:18:33.698Z",
-          "ageMs": 287916121,
+          "ageMs": 288704334,
           "ageDays": 3
         }
       ]
     },
     "limbo": {
-      "count": 1,
-      "oldestAgeMs": 520,
+      "count": 0,
+      "oldestAgeMs": 0,
       "oldestAgeDays": 0,
-      "items": [
-        {
-          "workId": "bw_work_f950290c75d88a24",
-          "title": "Competitive Parity and Trustworthy Public Beta",
-          "status": "needs_verification",
-          "since": "2026-07-10T22:17:09.299Z",
-          "ageMs": 520,
-          "ageDays": 0
-        }
-      ]
+      "items": []
     },
     "expiredReservations": {
       "count": 1,
-      "oldestAgeMs": 823914581,
+      "oldestAgeMs": 824702794,
       "oldestAgeDays": 9,
       "items": [
         {
@@ -4758,15 +4736,15 @@
           "reservedAt": "2026-07-01T05:25:15.306Z",
           "expiresAt": "2026-07-01T09:25:15.238Z",
           "since": "2026-07-01T09:25:15.238Z",
-          "ageMs": 823914581,
+          "ageMs": 824702794,
           "ageDays": 9
         }
       ]
     },
     "maxima": {
-      "readyAgeMs": 287922685,
-      "limboAgeMs": 520,
-      "expiredReservationAgeMs": 823914581
+      "readyAgeMs": 288710898,
+      "limboAgeMs": 0,
+      "expiredReservationAgeMs": 824702794
     },
     "approximation": {
       "readySinceSource": "work.meta.updatedAt",
