@@ -22,5 +22,7 @@ jobs:
       - run: corepack enable
       - run: pnpm install --frozen-lockfile
       - run: pnpm check
+      - run: pnpm test
+      - run: pnpm ci:doctor:strict
       - run: pnpm release:npm:smoke
       - run: pnpm release:npm:dry-run

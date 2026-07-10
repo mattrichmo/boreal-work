@@ -42,6 +42,12 @@ export interface SearchCorpusSnapshot {
   readonly decisions: readonly DecisionRecord[];
 }
 
+export interface SearchCorpusIdentity {
+  readonly type: SearchDocumentType;
+  readonly recordId: string;
+  readonly contentHash?: string;
+}
+
 export interface SearchIndexDocument {
   readonly schemaVersion: typeof SEARCH_INDEX_SCHEMA_VERSION;
   readonly algorithm: typeof SEARCH_INDEX_ALGORITHM;
@@ -180,14 +186,27 @@ export function buildSearchIndex(snapshot: SearchCorpusSnapshot, builtAt: IsoTim
 }
 
 export function searchCorpusFingerprint(snapshot: SearchCorpusSnapshot): ContentHash {
+  return searchCorpusFingerprintFromIdentities([
+    ...snapshot.workItems.map((record) => corpusIdentity("work", record)),
+    ...(snapshot.agentSummaries ?? []).map((record) => corpusIdentity("agent_summary", record)),
+    ...snapshot.evidence.map((record) => corpusIdentity("evidence", record)),
+    ...snapshot.knowledgeSources.map((record) => corpusIdentity("source", record)),
+    ...snapshot.claims.map((record) => corpusIdentity("claim", record)),
+    ...snapshot.decisions.map((record) => corpusIdentity("decision", record))
+  ]);
+}
+
+export function searchCorpusFingerprintFromIdentities(
+  identities: readonly SearchCorpusIdentity[]
+): ContentHash {
   return hashContent({
     schemaVersion: SEARCH_INDEX_SCHEMA_VERSION,
-    workItems: snapshot.workItems.map(metaPair),
-    agentSummaries: (snapshot.agentSummaries ?? []).map(metaPair),
-    evidence: snapshot.evidence.map(metaPair),
-    knowledgeSources: snapshot.knowledgeSources.map(metaPair),
-    claims: snapshot.claims.map(metaPair),
-    decisions: snapshot.decisions.map(metaPair)
+    workItems: identityPairs(identities, "work"),
+    agentSummaries: identityPairs(identities, "agent_summary"),
+    evidence: identityPairs(identities, "evidence"),
+    knowledgeSources: identityPairs(identities, "source"),
+    claims: identityPairs(identities, "claim"),
+    decisions: identityPairs(identities, "decision")
   });
 }
 
@@ -261,8 +280,21 @@ export function isSearchIndexDocument(value: unknown): value is SearchIndexDocum
   );
 }
 
-function metaPair(record: { readonly meta: { readonly id: string; readonly contentHash?: string } }): readonly [string, string] {
-  return [record.meta.id, record.meta.contentHash ?? ""];
+function corpusIdentity(
+  type: SearchDocumentType,
+  record: { readonly meta: { readonly id: string; readonly contentHash?: string } }
+): SearchCorpusIdentity {
+  return { type, recordId: record.meta.id, contentHash: record.meta.contentHash };
+}
+
+function identityPairs(
+  identities: readonly SearchCorpusIdentity[],
+  type: SearchDocumentType
+): readonly (readonly [string, string])[] {
+  return identities
+    .filter((identity) => identity.type === type)
+    .map((identity) => [identity.recordId, identity.contentHash ?? ""] as const)
+    .sort(([left], [right]) => left.localeCompare(right));
 }
 
 function buildSearchEntries(snapshot: SearchCorpusSnapshot): readonly SearchIndexEntry[] {

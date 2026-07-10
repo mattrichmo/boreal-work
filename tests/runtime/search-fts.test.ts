@@ -4,7 +4,13 @@ import { join } from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
 
-import { type ActorRef } from "@boreal/core";
+import {
+  createRecordMeta,
+  withContentHash,
+  type ActorRef,
+  type EventId,
+  type RuntimeEvent
+} from "@boreal/core";
 import { FileEventLog, FtsSearchIndex, ObjectDirBorealStore, loadNodeSqlite, type FtsDocumentInput } from "@boreal/storage";
 import { createWorkItem } from "@boreal/work-engine";
 
@@ -185,6 +191,47 @@ describe("FTS search index", () => {
     }
   });
 
+  it("stays search-fresh when only an unrelated audit event advances the shared log", async () => {
+    const sqlite = await loadNodeSqlite();
+    if (!sqlite) {
+      return;
+    }
+    const rootDir = await makeTempWorkspace();
+    const store = new ObjectDirBorealStore({ rootDir, sqlite });
+    await store.write((writer) =>
+      writer.putWorkItem(
+        createWorkItem({
+          title: "Stable search corpus",
+          description: "Audit-only events must not invalidate searchable content.",
+          labels: ["freshness"],
+          actor,
+          now: "2026-01-01T00:00:00.000Z"
+        })
+      )
+    );
+    const log = new FileEventLog({ path: join(rootDir, ".boreal", "log", "events.jsonl") });
+    const fts = await FtsSearchIndex.open(rootDir, { sqlite, create: false });
+    expect(fts).toBeDefined();
+    if (!fts) {
+      return;
+    }
+    try {
+      const initialHead = await log.head();
+      const fingerprint = fts.status(initialHead).corpusFingerprint;
+
+      await log.append("event", auditOnlyEvent());
+      const advancedHead = await log.head();
+
+      expect(fts.status(advancedHead).fresh).toBe(false);
+      expect(fts.status(advancedHead, fingerprint)).toMatchObject({
+        fresh: true,
+        corpusFingerprint: fingerprint
+      });
+    } finally {
+      fts.close();
+    }
+  });
+
   it("does not modify an existing index during read-only open and query", async () => {
     const sqlite = await loadNodeSqlite();
     if (!sqlite) {
@@ -275,4 +322,19 @@ function doc(recordId: string, type: FtsDocumentInput["type"], title: string, su
     bodyText,
     stateText: type
   };
+}
+
+function auditOnlyEvent(): RuntimeEvent {
+  return withContentHash({
+    meta: createRecordMeta({
+      id: "bw_event_000000000001" as EventId,
+      now: "2026-01-01T00:00:01.000Z",
+      actor,
+      tags: ["audit"]
+    }),
+    type: "install.skills_checked",
+    subjectId: "fixture",
+    subjectType: "workspace",
+    payload: {}
+  } satisfies RuntimeEvent);
 }

@@ -2,9 +2,10 @@ import { existsSync } from "node:fs";
 import { mkdir } from "node:fs/promises";
 import { dirname } from "node:path";
 
-import { BorealError, assertRealPathInside } from "@boreal/core";
+import { BorealError, assertRealPathInside, type ContentHash } from "@boreal/core";
 import {
   MAX_SEARCH_QUERY_CHARS,
+  searchCorpusFingerprintFromIdentities,
   tokenize,
   type FtsDocumentInput,
   type SearchDocumentType
@@ -53,6 +54,8 @@ export interface FtsSearchStatus {
   readonly documentCount: number;
   readonly recordCount: number;
   readonly mismatchedCount: number;
+  readonly indexedHead?: ObjectIndexHead;
+  readonly corpusFingerprint: ContentHash;
 }
 
 export class FtsSearchIndex {
@@ -112,24 +115,29 @@ export class FtsSearchIndex {
     this.db.close();
   }
 
-  status(expectedHead: ObjectIndexHead): FtsSearchStatus {
+  status(expectedHead: ObjectIndexHead, expectedCorpusFingerprint?: ContentHash): FtsSearchStatus {
     const head = readHead(this.db);
     const documentCount = this.count();
     const recordCount = searchableRecordCount(this.db);
     const mismatchedCount = mismatchedRecordCount(this.db);
     const integrityValid = sqliteIntegrityValid(this.db);
+    const corpusFingerprint = searchCorpusFingerprintFromIdentities(searchCorpusIdentities(this.db, this.path));
+    const sourceFresh = expectedCorpusFingerprint
+      ? corpusFingerprint === expectedCorpusFingerprint
+      : head?.seq === expectedHead.seq && head.hash === expectedHead.hash;
     return {
       available: true,
       fresh:
         integrityValid &&
-        head?.seq === expectedHead.seq &&
-        head.hash === expectedHead.hash &&
+        sourceFresh &&
         documentCount === recordCount &&
         mismatchedCount === 0,
       integrityValid,
       documentCount,
       recordCount,
-      mismatchedCount
+      mismatchedCount,
+      ...(head ? { indexedHead: head } : {}),
+      corpusFingerprint
     };
   }
 
@@ -266,6 +274,27 @@ function parseFtsRow(
       ...(typeof row.snippet === "string" && row.snippet.includes("[") ? { snippet: row.snippet } : {})
     }
   ];
+}
+
+function searchCorpusIdentities(db: DatabaseSync, path: string): Array<{
+  readonly type: SearchDocumentType;
+  readonly recordId: string;
+  readonly contentHash: string;
+}> {
+  const rows = db
+    .prepare("SELECT record_id, type, content_hash FROM search_fts ORDER BY record_id;")
+    .all() as Array<{ readonly record_id?: SqlValue; readonly type?: SqlValue; readonly content_hash?: SqlValue }>;
+  return rows.map((row) => {
+    if (
+      typeof row.record_id !== "string" ||
+      typeof row.type !== "string" ||
+      !isSearchDocumentType(row.type) ||
+      typeof row.content_hash !== "string"
+    ) {
+      throw invalidIndexError(path, "FTS corpus identity is unreadable");
+    }
+    return { type: row.type, recordId: row.record_id, contentHash: row.content_hash };
+  });
 }
 
 function ftsMatchQuery(tokens: readonly string[]): string | undefined {

@@ -13,6 +13,7 @@
     "build": "tsc -b && pnpm --dir apps/cli build:dist",
     "check": "tsc -b --pretty false",
     "cli:dist": "pnpm --dir apps/cli build:dist",
+    "ci:doctor:strict": "node tools/ci-doctor-strict.mjs",
     "clean": "pnpm -r exec rm -rf dist tsconfig.tsbuildinfo && rm -rf coverage",
     "console:browser-smoke": "pnpm --dir apps/console browser-smoke",
     "console:build": "pnpm --dir apps/console build",

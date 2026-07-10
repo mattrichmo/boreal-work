@@ -18,6 +18,13 @@ describe("search corpus fingerprint", () => {
     expect(searchCorpusFingerprint(sampleCorpus())).toBe(searchCorpusFingerprint(sampleCorpus()));
   });
 
+  it("is stable when canonical records arrive in a different order", () => {
+    const original = sampleCorpus();
+    const reordered = { ...original, workItems: [...original.workItems].reverse() };
+
+    expect(searchCorpusFingerprint(reordered)).toBe(searchCorpusFingerprint(original));
+  });
+
   it("changes when any record content hash changes", () => {
     const original = sampleCorpus();
     const firstWork = original.workItems[0];

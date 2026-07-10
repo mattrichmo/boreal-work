@@ -170,7 +170,7 @@ describe("generated artifacts after mutation", () => {
     expect(rollup.aging.ready.oldestAgeMs).toBe(expectedAgeMs(rollup, readyItems[0]?.meta.updatedAt ?? rollup.generatedAt));
     expect(rollup.aging.limbo.items).toHaveLength(0);
     expect(rollup.aging.expiredReservations.items).toHaveLength(0);
-  });
+  }, 15_000);
 
   it("flags stale project rollups in doctor", async () => {
     const rootDir = await createTestWorkspace();

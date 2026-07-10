@@ -163,7 +163,12 @@ export async function runSearch(
     throw unavailableSearchIndexError(inspection);
   }
   if (inspection.mode === "fts") {
-    const results = await queryFtsSearchIndex(context, normalizedQuery, options);
+    const results = await queryFtsSearchIndex(
+      context,
+      normalizedQuery,
+      options,
+      inspection.expectedCorpusFingerprint
+    );
     if (results) {
       return results;
     }
@@ -268,7 +273,8 @@ async function writeJsonSearchIndexUnlocked(context: CliContext): Promise<Search
 async function queryFtsSearchIndex(
   context: CliContext,
   query: string,
-  options: SearchCommandOptions
+  options: SearchCommandOptions,
+  expectedCorpusFingerprint: ContentHash
 ): Promise<readonly SearchResult[] | undefined> {
   const fts = await FtsSearchIndex.open(context.workspaceRoot, { create: false });
   if (!fts) {
@@ -276,7 +282,7 @@ async function queryFtsSearchIndex(
   }
   try {
     const head = await new FileEventLog({ path: context.paths.eventLogFile }).head();
-    if (!fts.status(head).fresh) {
+    if (!fts.status(head, expectedCorpusFingerprint).fresh) {
       return undefined;
     }
     const types = [...(options.type ? [options.type] : []), ...(options.types ?? [])];
@@ -300,15 +306,15 @@ async function inspectFtsSearchIndex(context: CliContext): Promise<SearchIndexIn
       return undefined;
     }
     const head = await new FileEventLog({ path: context.paths.eventLogFile }).head();
-    const status = fts.status(head);
+    const status = fts.status(head, expectedCorpusFingerprint);
     return {
       path: fts.path,
       mode: "fts",
       exists: true,
       stale: !status.fresh,
       expectedCorpusFingerprint,
-      contentHash: head.hash as ContentHash,
-      corpusFingerprint: expectedCorpusFingerprint,
+      ...(status.indexedHead ? { contentHash: status.indexedHead.hash as ContentHash } : {}),
+      corpusFingerprint: status.corpusFingerprint,
       documentCount: status.documentCount,
       tokenCount: 0,
       ...(!status.integrityValid || status.mismatchedCount > 0
