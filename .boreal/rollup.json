@@ -2,8 +2,8 @@
   "schemaVersion": "boreal.project-rollup.v2",
   "projectId": "project_5b36e807eda66e00",
   "workspaceRoot": "/Users/cybertron/Code/boreal-work",
-  "generatedAt": "2026-07-13T05:23:34.906Z",
-  "stateContentHash": "sha256:0e5788ef29e55d2ad8e621ac62bdf1480142ea0545087c6e690a8f5c4fbf65d3",
+  "generatedAt": "2026-07-13T06:08:34.966Z",
+  "stateContentHash": "sha256:6cae15db387013a904a61f4d13697467970932aee82ffafd87d3a00dd694db80",
   "counts": {
     "work": {
       "total": 529,
@@ -11,11 +11,11 @@
         "draft": 0,
         "ready": 63,
         "reserved": 0,
-        "in_progress": 1,
-        "blocked": 44,
+        "in_progress": 0,
+        "blocked": 41,
         "needs_verification": 0,
         "verified": 0,
-        "closed": 421,
+        "closed": 425,
         "cancelled": 0
       },
       "byKind": {
@@ -26,10 +26,10 @@
       }
     },
     "reservations": {
-      "total": 352,
-      "active": 1,
+      "total": 354,
+      "active": 0,
       "expired": 1,
-      "released": 350
+      "released": 353
     }
   },
   "limbo": {
@@ -37,17 +37,15 @@
     "verified": []
   },
   "reservations": {
-    "activeIds": [
-      "bw_reservation_c9aa772884ae4d5d"
-    ],
+    "activeIds": [],
     "expiredIds": [
       "bw_reservation_173669bfccb238fb"
     ]
   },
   "enforcement": {
     "blockingGaps": {
-      "openCount": 166,
-      "blockedWorkCount": 44,
+      "openCount": 156,
+      "blockedWorkCount": 41,
       "samples": [
         {
           "workId": "bw_work_3695a3716234e67a",
@@ -112,20 +110,6 @@
             "bw_work_edd19b745b8eb29f",
             "bw_work_f1e985dc765a799c",
             "bw_work_fbb670db73c9c7b0"
-          ]
-        },
-        {
-          "workId": "bw_work_142a37a3c8028ff3",
-          "title": "S02T04 - Enforce current witnessed evidence at verification and closeout",
-          "blockerIds": [
-            "bw_work_46629a6b80abb282"
-          ]
-        },
-        {
-          "workId": "bw_work_1743f7a8c376717e",
-          "title": "S02T05 - Add CI attestations, trust reporting, trace views, and end-to-end tests",
-          "blockerIds": [
-            "bw_work_142a37a3c8028ff3"
           ]
         },
         {
@@ -287,6 +271,21 @@
           "blockerIds": [
             "bw_work_3eb9dab8252a86ff"
           ]
+        },
+        {
+          "workId": "bw_work_c90a89e61f23a011",
+          "title": "S08T04 - Complete console parity, accessibility, responsive behavior, and command safety",
+          "blockerIds": [
+            "bw_work_f927e3d6695fcacd"
+          ]
+        },
+        {
+          "workId": "bw_work_29d42bc1d609c59d",
+          "title": "S08T05 - Add CI and IDE status surfaces and make an explicit TUI ship/defer decision",
+          "blockerIds": [
+            "bw_work_308534e1ff80988e",
+            "bw_work_c90a89e61f23a011"
+          ]
         }
       ]
     }
@@ -296,16 +295,16 @@
     "syncOk": null
   },
   "lastEvent": {
-    "id": "bw_event_28a4e197c0da8eb9e0503c476ddf11ad",
-    "type": "context.refreshed",
-    "subjectId": "bw_work_46629a6b80abb282",
-    "at": "2026-07-13T05:23:26.828Z"
+    "id": "bw_event_52cead33d59c61827ea8cc1fe4d85ff8",
+    "type": "work.closed",
+    "subjectId": "bw_work_f9e21f5ba759eeb2",
+    "at": "2026-07-13T06:08:32.477Z"
   },
   "lastOperation": {
-    "id": "bw_operation_f1ddd801b865648f9b2ac49c09f6ebd3",
-    "commandPath": "agent start",
+    "id": "bw_operation_d23a535861cc23f3102779540d2a642a",
+    "commandPath": "sprint close",
     "status": "succeeded",
-    "finishedAt": "2026-07-13T05:23:34.261Z"
+    "finishedAt": "2026-07-13T06:08:34.449Z"
   },
   "next": {
     "limit": 10,
@@ -706,8 +705,8 @@
         "title": "S02T04 - Enforce current witnessed evidence at verification and closeout",
         "kind": "task",
         "priority": "high",
-        "status": "blocked",
-        "updatedAt": "2026-07-10T17:09:15.623Z"
+        "status": "closed",
+        "updatedAt": "2026-07-13T06:00:22.039Z"
       },
       {
         "workId": "bw_work_14fe0d5b8c160743",
@@ -786,8 +785,8 @@
         "title": "S02T05 - Add CI attestations, trust reporting, trace views, and end-to-end tests",
         "kind": "task",
         "priority": "high",
-        "status": "blocked",
-        "updatedAt": "2026-07-10T17:09:16.637Z"
+        "status": "closed",
+        "updatedAt": "2026-07-13T06:00:47.861Z"
       },
       {
         "workId": "bw_work_17c929054464f19f",
@@ -1650,8 +1649,8 @@
         "title": "S02T03 - Capture witnessed command, Git, environment, and artifact provenance",
         "kind": "task",
         "priority": "high",
-        "status": "in_progress",
-        "updatedAt": "2026-07-13T05:23:26.216Z"
+        "status": "closed",
+        "updatedAt": "2026-07-13T05:59:56.301Z"
       },
       {
         "workId": "bw_work_471bdf1fc9a42621",
@@ -4538,8 +4537,8 @@
         "title": "S02 - Witnessed Evidence and Trustworthy Closeout",
         "kind": "sprint",
         "priority": "high",
-        "status": "blocked",
-        "updatedAt": "2026-07-10T17:10:01.962Z"
+        "status": "closed",
+        "updatedAt": "2026-07-13T06:08:32.473Z"
       },
       {
         "workId": "bw_work_fa4776152a8178af",
@@ -4634,7 +4633,7 @@
   "aging": {
     "ready": {
       "count": 63,
-      "oldestAgeMs": 486307772,
+      "oldestAgeMs": 489007832,
       "oldestAgeDays": 5,
       "items": [
         {
@@ -4642,7 +4641,7 @@
           "title": "Console Refresh form omits required confirmation",
           "status": "ready",
           "since": "2026-07-07T14:18:27.134Z",
-          "ageMs": 486307772,
+          "ageMs": 489007832,
           "ageDays": 5
         },
         {
@@ -4650,7 +4649,7 @@
           "title": "Global console project dashboard links fall back to global route",
           "status": "ready",
           "since": "2026-07-07T14:18:27.997Z",
-          "ageMs": 486306909,
+          "ageMs": 489006969,
           "ageDays": 5
         },
         {
@@ -4658,7 +4657,7 @@
           "title": "Live console Sprint page is hard-coded to sprint-04",
           "status": "ready",
           "since": "2026-07-07T14:18:28.725Z",
-          "ageMs": 486306181,
+          "ageMs": 489006241,
           "ageDays": 5
         },
         {
@@ -4666,7 +4665,7 @@
           "title": "Route TUI ignores active sprint projection",
           "status": "ready",
           "since": "2026-07-07T14:18:29.437Z",
-          "ageMs": 486305469,
+          "ageMs": 489005529,
           "ageDays": 5
         },
         {
@@ -4674,7 +4673,7 @@
           "title": "TUI task detail drops reservation context and offers invalid close",
           "status": "ready",
           "since": "2026-07-07T14:18:30.119Z",
-          "ageMs": 486304787,
+          "ageMs": 489004847,
           "ageDays": 5
         },
         {
@@ -4682,7 +4681,7 @@
           "title": "TUI command descriptors are not exact copyable commands",
           "status": "ready",
           "since": "2026-07-07T14:18:30.826Z",
-          "ageMs": 486304080,
+          "ageMs": 489004140,
           "ageDays": 5
         },
         {
@@ -4690,7 +4689,7 @@
           "title": "Console browser-smoke defaults to system Chrome on macOS",
           "status": "ready",
           "since": "2026-07-07T14:18:31.576Z",
-          "ageMs": 486303330,
+          "ageMs": 489003390,
           "ageDays": 5
         },
         {
@@ -4698,7 +4697,7 @@
           "title": "Curl stdin installer fails from Node projects with package.json",
           "status": "ready",
           "since": "2026-07-07T14:18:32.339Z",
-          "ageMs": 486302567,
+          "ageMs": 489002627,
           "ageDays": 5
         },
         {
@@ -4706,7 +4705,7 @@
           "title": "Generated package artifacts under src are unignored and uncleaned",
           "status": "ready",
           "since": "2026-07-07T14:18:33.030Z",
-          "ageMs": 486301876,
+          "ageMs": 489001936,
           "ageDays": 5
         },
         {
@@ -4714,7 +4713,7 @@
           "title": "Fresh object index can hide deleted object files",
           "status": "ready",
           "since": "2026-07-07T14:18:33.698Z",
-          "ageMs": 486301208,
+          "ageMs": 489001268,
           "ageDays": 5
         }
       ]
@@ -4727,7 +4726,7 @@
     },
     "expiredReservations": {
       "count": 1,
-      "oldestAgeMs": 1022299668,
+      "oldestAgeMs": 1024999728,
       "oldestAgeDays": 11,
       "items": [
         {
@@ -4738,15 +4737,15 @@
           "reservedAt": "2026-07-01T05:25:15.306Z",
           "expiresAt": "2026-07-01T09:25:15.238Z",
           "since": "2026-07-01T09:25:15.238Z",
-          "ageMs": 1022299668,
+          "ageMs": 1024999728,
           "ageDays": 11
         }
       ]
     },
     "maxima": {
-      "readyAgeMs": 486307772,
+      "readyAgeMs": 489007832,
       "limboAgeMs": 0,
-      "expiredReservationAgeMs": 1022299668
+      "expiredReservationAgeMs": 1024999728
     },
     "approximation": {
       "readySinceSource": "work.meta.updatedAt",
