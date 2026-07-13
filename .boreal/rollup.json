@@ -2,8 +2,8 @@
   "schemaVersion": "boreal.project-rollup.v2",
   "projectId": "project_5b36e807eda66e00",
   "workspaceRoot": "/Users/cybertron/Code/boreal-work",
-  "generatedAt": "2026-07-13T06:08:34.966Z",
-  "stateContentHash": "sha256:6cae15db387013a904a61f4d13697467970932aee82ffafd87d3a00dd694db80",
+  "generatedAt": "2026-07-13T06:10:57.031Z",
+  "stateContentHash": "sha256:68387084b178daf1cc069cf4cfa7e597c14aea58120e6b57663d2e83925437c9",
   "counts": {
     "work": {
       "total": 529,
@@ -291,20 +291,20 @@
     }
   },
   "health": {
-    "doctorOk": null,
+    "doctorOk": true,
     "syncOk": null
   },
   "lastEvent": {
-    "id": "bw_event_52cead33d59c61827ea8cc1fe4d85ff8",
-    "type": "work.closed",
-    "subjectId": "bw_work_f9e21f5ba759eeb2",
-    "at": "2026-07-13T06:08:32.477Z"
+    "id": "bw_event_96a78c57878c6eac8b6aa2ac469135fe",
+    "type": "projection.rebuilt",
+    "subjectId": "projections",
+    "at": "2026-07-13T06:10:39.404Z"
   },
   "lastOperation": {
-    "id": "bw_operation_d23a535861cc23f3102779540d2a642a",
-    "commandPath": "sprint close",
+    "id": "bw_operation_826133b8d9bd21a5f67580749f32686e",
+    "commandPath": "sync refresh",
     "status": "succeeded",
-    "finishedAt": "2026-07-13T06:08:34.449Z"
+    "finishedAt": "2026-07-13T06:10:44.308Z"
   },
   "next": {
     "limit": 10,
@@ -4633,7 +4633,7 @@
   "aging": {
     "ready": {
       "count": 63,
-      "oldestAgeMs": 489007832,
+      "oldestAgeMs": 489149897,
       "oldestAgeDays": 5,
       "items": [
         {
@@ -4641,7 +4641,7 @@
           "title": "Console Refresh form omits required confirmation",
           "status": "ready",
           "since": "2026-07-07T14:18:27.134Z",
-          "ageMs": 489007832,
+          "ageMs": 489149897,
           "ageDays": 5
         },
         {
@@ -4649,7 +4649,7 @@
           "title": "Global console project dashboard links fall back to global route",
           "status": "ready",
           "since": "2026-07-07T14:18:27.997Z",
-          "ageMs": 489006969,
+          "ageMs": 489149034,
           "ageDays": 5
         },
         {
@@ -4657,7 +4657,7 @@
           "title": "Live console Sprint page is hard-coded to sprint-04",
           "status": "ready",
           "since": "2026-07-07T14:18:28.725Z",
-          "ageMs": 489006241,
+          "ageMs": 489148306,
           "ageDays": 5
         },
         {
@@ -4665,7 +4665,7 @@
           "title": "Route TUI ignores active sprint projection",
           "status": "ready",
           "since": "2026-07-07T14:18:29.437Z",
-          "ageMs": 489005529,
+          "ageMs": 489147594,
           "ageDays": 5
         },
         {
@@ -4673,7 +4673,7 @@
           "title": "TUI task detail drops reservation context and offers invalid close",
           "status": "ready",
           "since": "2026-07-07T14:18:30.119Z",
-          "ageMs": 489004847,
+          "ageMs": 489146912,
           "ageDays": 5
         },
         {
@@ -4681,7 +4681,7 @@
           "title": "TUI command descriptors are not exact copyable commands",
           "status": "ready",
           "since": "2026-07-07T14:18:30.826Z",
-          "ageMs": 489004140,
+          "ageMs": 489146205,
           "ageDays": 5
         },
         {
@@ -4689,7 +4689,7 @@
           "title": "Console browser-smoke defaults to system Chrome on macOS",
           "status": "ready",
           "since": "2026-07-07T14:18:31.576Z",
-          "ageMs": 489003390,
+          "ageMs": 489145455,
           "ageDays": 5
         },
         {
@@ -4697,7 +4697,7 @@
           "title": "Curl stdin installer fails from Node projects with package.json",
           "status": "ready",
           "since": "2026-07-07T14:18:32.339Z",
-          "ageMs": 489002627,
+          "ageMs": 489144692,
           "ageDays": 5
         },
         {
@@ -4705,7 +4705,7 @@
           "title": "Generated package artifacts under src are unignored and uncleaned",
           "status": "ready",
           "since": "2026-07-07T14:18:33.030Z",
-          "ageMs": 489001936,
+          "ageMs": 489144001,
           "ageDays": 5
         },
         {
@@ -4713,7 +4713,7 @@
           "title": "Fresh object index can hide deleted object files",
           "status": "ready",
           "since": "2026-07-07T14:18:33.698Z",
-          "ageMs": 489001268,
+          "ageMs": 489143333,
           "ageDays": 5
         }
       ]
@@ -4726,7 +4726,7 @@
     },
     "expiredReservations": {
       "count": 1,
-      "oldestAgeMs": 1024999728,
+      "oldestAgeMs": 1025141793,
       "oldestAgeDays": 11,
       "items": [
         {
@@ -4737,15 +4737,15 @@
           "reservedAt": "2026-07-01T05:25:15.306Z",
           "expiresAt": "2026-07-01T09:25:15.238Z",
           "since": "2026-07-01T09:25:15.238Z",
-          "ageMs": 1024999728,
+          "ageMs": 1025141793,
           "ageDays": 11
         }
       ]
     },
     "maxima": {
-      "readyAgeMs": 489007832,
+      "readyAgeMs": 489149897,
       "limboAgeMs": 0,
-      "expiredReservationAgeMs": 1024999728
+      "expiredReservationAgeMs": 1025141793
     },
     "approximation": {
       "readySinceSource": "work.meta.updatedAt",
