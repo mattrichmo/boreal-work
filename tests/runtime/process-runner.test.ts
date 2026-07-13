@@ -29,7 +29,10 @@ describe("bounded process runner", () => {
         stderrMaxBytes: 128
       })
     ).rejects.toMatchObject({
-      code: "BOREAL_COMMAND_TIMEOUT"
+      code: "BOREAL_COMMAND_TIMEOUT",
+      details: {
+        result: expect.objectContaining({ timedOut: true, durationMs: expect.any(Number) })
+      }
     } satisfies Partial<BorealError>);
   });
 
@@ -44,7 +47,11 @@ describe("bounded process runner", () => {
       })
     ).rejects.toMatchObject({
       code: "BOREAL_COMMAND_OUTPUT_LIMIT",
-      details: { stream: "stdout", maxBytes: 16 }
+      details: {
+        stream: "stdout",
+        maxBytes: 16,
+        result: expect.objectContaining({ stdout: expect.objectContaining({ bytes: 1024, truncated: true }) })
+      }
     } satisfies Partial<BorealError>);
 
     await expect(
@@ -57,7 +64,32 @@ describe("bounded process runner", () => {
       })
     ).rejects.toMatchObject({
       code: "BOREAL_COMMAND_OUTPUT_LIMIT",
-      details: { stream: "stderr", maxBytes: 16 }
+      details: {
+        stream: "stderr",
+        maxBytes: 16,
+        result: expect.objectContaining({ stderr: expect.objectContaining({ bytes: 1024, truncated: true }) })
+      }
+    } satisfies Partial<BorealError>);
+  });
+
+  it("supports cancellation with bounded diagnostic hashes", async () => {
+    const controller = new AbortController();
+    const running = runBoundedProcess({
+      command: process.execPath,
+      args: ["-e", "process.stdout.write('started'); setTimeout(() => undefined, 10_000)"],
+      timeoutMs: 5_000,
+      stdoutMaxBytes: 128,
+      stderrMaxBytes: 128,
+      signal: controller.signal
+    });
+    setTimeout(() => controller.abort(), 25);
+    await expect(running).rejects.toMatchObject({
+      code: "BOREAL_COMMAND_CANCELLED",
+      details: {
+        stdoutHash: expect.stringMatching(/^sha256:/u),
+        stderrHash: expect.stringMatching(/^sha256:/u),
+        result: expect.objectContaining({ cancelled: true })
+      }
     } satisfies Partial<BorealError>);
   });
 });

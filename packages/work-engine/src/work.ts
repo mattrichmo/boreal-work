@@ -14,6 +14,7 @@ import {
   type EvidenceKind,
   type EvidenceId,
   type EnforcementGap,
+  type EvidenceTrustLevel,
   type GraphEdge,
   type IsoTimestamp,
   type RequiredCloseoutGate,
@@ -53,6 +54,9 @@ export interface RequiredCloseoutGateInput {
   readonly minEvidenceCount?: number;
   readonly declaredCommand?: string;
   readonly expectedObservable?: string;
+  readonly requiredTrustLevels?: readonly EvidenceTrustLevel[];
+  readonly requireCurrentRevision?: boolean;
+  readonly requireCurrentGitHead?: boolean;
 }
 
 export interface AddBlockingDependencyInput {
@@ -133,6 +137,12 @@ export function createRequiredCloseoutGates(input: {
     const minEvidenceCount = gate.minEvidenceCount ?? 1;
     const declaredCommand = optionalNonEmptyString(gate.declaredCommand, "declared command");
     const expectedObservable = optionalNonEmptyString(gate.expectedObservable, "expected observable");
+    const requiredTrustLevels = gate.requiredTrustLevels === undefined
+      ? undefined
+      : [...new Set(gate.requiredTrustLevels)].sort();
+    if (requiredTrustLevels?.length === 0) {
+      throw new BorealError("BOREAL_INVALID_INPUT", "required trust levels must not be empty");
+    }
     return {
       id: deterministicId<CloseoutGateId>("gate", {
         subjectId: input.subjectId,
@@ -143,6 +153,9 @@ export function createRequiredCloseoutGates(input: {
         minEvidenceCount,
         declaredCommand,
         expectedObservable,
+        requiredTrustLevels,
+        requireCurrentRevision: gate.requireCurrentRevision ?? false,
+        requireCurrentGitHead: gate.requireCurrentGitHead ?? false,
         index
       }),
       subjectType: input.subjectType,
@@ -155,6 +168,9 @@ export function createRequiredCloseoutGates(input: {
       minEvidenceCount,
       ...(declaredCommand ? { declaredCommand } : {}),
       ...(expectedObservable ? { expectedObservable } : {}),
+      ...(requiredTrustLevels ? { requiredTrustLevels } : {}),
+      ...(gate.requireCurrentRevision ? { requireCurrentRevision: true } : {}),
+      ...(gate.requireCurrentGitHead ? { requireCurrentGitHead: true } : {}),
       createdAt: input.now,
       createdBy: input.actor
     };

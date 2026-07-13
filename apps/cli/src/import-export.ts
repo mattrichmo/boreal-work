@@ -2265,12 +2265,18 @@ function markdownFiles(document: ExportDocument): Array<{ path: string; content:
           subject_id: record.subjectId,
           command: record.command,
           uri: record.uri,
+          trust_level: record.attestation?.trustLevel ?? "legacy_unattested",
+          witness_kind: record.attestation?.witness?.kind,
+          issuer: record.attestation?.external?.issuer ?? record.attestation?.witness?.issuer,
+          subject_revision: record.attestation?.subjectRevision?.contentHash,
+          git_head: record.attestation?.git?.headSha,
+          external_verification_status: record.attestation?.external?.verificationStatus,
           observed_at: record.observedAt,
           created_at: record.meta.createdAt,
           updated_at: record.meta.updatedAt,
           tags: record.meta.tags
         }) +
-        `# ${record.summary}\n\nOutcome: ${record.outcome}\nKind: ${record.kind}\nSubject: ${record.subjectType}:${record.subjectId}\n\n${record.command ? `Command: \`${record.command}\`\n` : ""}${record.uri ? `URI: ${record.uri}\n` : ""}`
+        `# ${record.summary}\n\nOutcome: ${record.outcome}\nKind: ${record.kind}\nSubject: ${record.subjectType}:${record.subjectId}\nTrust: ${record.attestation?.trustLevel ?? "legacy_unattested"}\n${record.attestation?.subjectRevision?.contentHash ? `Subject revision: ${record.attestation.subjectRevision.contentHash}\n` : ""}${record.attestation?.git?.headSha ? `Git HEAD: ${record.attestation.git.headSha}\n` : ""}${record.attestation?.external ? `External verification: ${record.attestation.external.verificationStatus} by ${record.attestation.external.issuer}\nResult: ${record.attestation.external.resultUri}\n` : ""}\n${record.command ? `Command: \`${record.command}\`\n` : ""}${record.attestation?.command ? `Exit: ${record.attestation.command.exitCode ?? "none"}; timeout: ${Boolean(record.attestation.command.timedOut)}; cancelled: ${Boolean(record.attestation.command.cancelled)}\n` : ""}${record.attestation?.output ? `Output: stdout ${record.attestation.output.stdoutBytes} bytes (${record.attestation.output.stdoutHash ?? "no hash"}); stderr ${record.attestation.output.stderrBytes} bytes (${record.attestation.output.stderrHash ?? "no hash"}); truncated: ${Boolean(record.attestation.output.truncated)}\n` : ""}${record.uri ? `URI: ${record.uri}\n` : ""}`
     })),
     ...document.state.directiveAcknowledgements.map((record) => ({
       path: `directive-acknowledgements/${record.meta.id}.md`,

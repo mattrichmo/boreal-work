@@ -117,6 +117,7 @@ export function EventTimelinePanel({ events }: { readonly events: readonly Timel
 }
 
 export function VerificationPanel({ work }: { readonly work: WorkItemView }) {
+  const requiredCloseoutGates = work.requiredCloseoutGates ?? [];
   return (
     <Card title="Verification" eyebrow={work.id}>
       <div className="bw-verification">
@@ -127,6 +128,18 @@ export function VerificationPanel({ work }: { readonly work: WorkItemView }) {
           {work.evidenceCount} evidence item{work.evidenceCount === 1 ? "" : "s"}
         </Badge>
       </div>
+      {requiredCloseoutGates.length > 0 ? (
+        <dl className="bw-definition-list">
+          {requiredCloseoutGates.map((gate) => (
+            <div key={gate.id}>
+              <dt>{gate.kind}:{gate.scope}</dt>
+              <dd>
+                {gate.status}; trust {gate.requiredTrustLevels?.join(", ") || "legacy-compatible"}; revision {gate.requireCurrentRevision ? "current" : "any"}; Git {gate.requireCurrentGitHead ? "current checkpoint" : "any"}
+              </dd>
+            </div>
+          ))}
+        </dl>
+      ) : null}
     </Card>
   );
 }

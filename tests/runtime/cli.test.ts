@@ -138,6 +138,136 @@ describe("bwrk cli", () => {
     expect(payload.code).toBe("BOREAL_INVALID_INPUT");
   });
 
+  it("runs declared gates with witnessed provenance and preserves external trust across trace and Markdown export", async () => {
+    const rootDir = await makeTempWorkspace();
+    await runCli(rootDir, ["init", "--json"]);
+    await initGitRepository(rootDir, "main");
+
+    const declaredCommand = "node -e \"process.stdout.write('cli witness passed')\"";
+    const work = parseData<{ readonly meta: { readonly id: string } }>((await runCli(rootDir, [
+      "work", "create", "CLI witnessed evidence target",
+      "--required-gate", "verification",
+      "--gate-command", declaredCommand,
+      "--gate-expect", "cli witness passed",
+      "--gate-trust", "boreal_witnessed",
+      "--gate-current-revision",
+      "--gate-current-git",
+      "--json"
+    ])).stdout);
+
+    const witnessedRun = await runCli(rootDir, ["evidence", "run", work.meta.id, "--json"]);
+    const witnessed = parseData<{
+      readonly meta: { readonly id: string };
+      readonly outcome: string;
+      readonly attestation: {
+        readonly trustLevel: string;
+        readonly subjectRevision: { readonly contentHash: string };
+        readonly command: { readonly exitCode: number; readonly expectedObservableMatched: boolean };
+        readonly output: { readonly stdoutHash: string; readonly stdoutBytes: number; readonly stdoutExcerpt: string };
+        readonly git: { readonly branch: string; readonly headSha: string; readonly dirtyFingerprint: string };
+        readonly tools: readonly Array<{ readonly name: string; readonly version: string }>;
+      };
+    }>(witnessedRun.stdout);
+    expect(witnessedRun.exitCode).toBe(0);
+    expect(witnessed).toMatchObject({
+      outcome: "passed",
+      attestation: {
+        trustLevel: "boreal_witnessed",
+        command: { exitCode: 0, expectedObservableMatched: true },
+        output: { stdoutBytes: 18, stdoutExcerpt: "cli witness passed" },
+        git: { branch: "main" }
+      }
+    });
+    expect(witnessed.attestation.subjectRevision.contentHash).toMatch(/^sha256:/u);
+    expect(witnessed.attestation.output.stdoutHash).toMatch(/^sha256:/u);
+    expect(witnessed.attestation.git.headSha).toMatch(/^[a-f0-9]{40}$/u);
+    expect(witnessed.attestation.git.dirtyFingerprint).toMatch(/^sha256:/u);
+    expect(witnessed.attestation.tools.map((tool) => tool.name)).toEqual(expect.arrayContaining(["boreal-work", "node", "git"]));
+
+    const verified = await runCli(rootDir, [
+      "work", "verify", work.meta.id,
+      "--evidence", witnessed.meta.id,
+      "--verdict", "passed",
+      "--json"
+    ]);
+    expect(verified.exitCode).toBe(0);
+
+    const failedWork = parseData<{ readonly meta: { readonly id: string } }>((await runCli(rootDir, [
+      "work", "create", "CLI failed witness target",
+      "--required-gate", "verification",
+      "--gate-command", "node -e \"process.stderr.write('failed run'); process.exit(3)\"",
+      "--gate-trust", "boreal_witnessed",
+      "--json"
+    ])).stdout);
+    const failedRun = await runCli(rootDir, ["evidence", "run", failedWork.meta.id, "--json"]);
+    const failedEvidence = parseData<{
+      readonly meta: { readonly id: string };
+      readonly outcome: string;
+      readonly attestation: { readonly command: { readonly exitCode: number }; readonly output: { readonly stderrExcerpt: string } };
+    }>(failedRun.stdout);
+    expect(failedRun.exitCode).toBe(1);
+    expect(failedEvidence).toMatchObject({
+      outcome: "failed",
+      attestation: { command: { exitCode: 3 }, output: { stderrExcerpt: "failed run" } }
+    });
+
+    const external = await runCli(rootDir, [
+      "evidence", "add", work.meta.id,
+      "--summary", "external CI result",
+      "--kind", "test",
+      "--outcome", "passed",
+      "--attestation", "external-ci",
+      "--issuer", "example-ci",
+      "--result-uri", "https://ci.example/runs/99",
+      "--verification-status", "verified",
+      "--subject-revision", witnessed.attestation.subjectRevision.contentHash,
+      "--attestation-id", "ci-run-99",
+      "--json"
+    ]);
+    const externalEvidence = parseData<{
+      readonly meta: { readonly id: string };
+      readonly attestation: {
+        readonly trustLevel: string;
+        readonly witness: { readonly kind: string; readonly issuer: string };
+        readonly external: { readonly issuer: string; readonly resultUri: string; readonly verificationStatus: string; readonly attestationId: string };
+      };
+    }>(external.stdout);
+    expect(externalEvidence.attestation).toMatchObject({
+      trustLevel: "external_attested",
+      witness: { kind: "external_ci", issuer: "example-ci" },
+      external: {
+        issuer: "example-ci",
+        resultUri: "https://ci.example/runs/99",
+        verificationStatus: "verified",
+        attestationId: "ci-run-99"
+      }
+    });
+
+    const log = await readRuntimeLog(rootDir);
+    expect(log.events).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        type: "evidence.recorded",
+        payload: expect.objectContaining({
+          trustLevel: "boreal_witnessed",
+          subjectRevision: witnessed.attestation.subjectRevision.contentHash,
+          gitHead: witnessed.attestation.git.headSha
+        })
+      }),
+      expect.objectContaining({
+        type: "evidence.recorded",
+        payload: expect.objectContaining({ trustLevel: "external_attested", externalVerificationStatus: "verified" })
+      })
+    ]));
+
+    const exported = await runCli(rootDir, ["export", "markdown", "--out", "trust-export", "--json"]);
+    expect(exported.exitCode).toBe(0);
+    const markdown = await readFile(join(rootDir, "trust-export", "evidence", `${externalEvidence.meta.id}.md`), "utf8");
+    expect(markdown).toContain("trust_level: external_attested");
+    expect(markdown).toContain("external_verification_status: verified");
+    expect(markdown).toContain("External verification: verified by example-ci");
+    expect(markdown).toContain("Result: https://ci.example/runs/99");
+  });
+
   it("fails closed before init", async () => {
     const rootDir = await makeTempWorkspace();
 
@@ -5784,6 +5914,12 @@ describe("bwrk cli", () => {
       readonly schemas: Record<string, string>;
       readonly publishedSchemas: { readonly totalCount: number; readonly ids: readonly string[] };
       readonly migrationPolicy: { readonly version: string; readonly snapshotSchemaVersion: string; readonly rules: readonly string[] };
+      readonly compatibility: {
+        readonly semver: { readonly releaseLine: string; readonly patch: string; readonly minor: string };
+        readonly launcher: { readonly patchSkew: string; readonly repoPinPrecedence: boolean };
+        readonly storage: readonly { readonly kind: string; readonly mode: string }[];
+        readonly installedSkills: { readonly schema: string; readonly policy: string };
+      };
     }>(json.stdout);
     const shortcutPayload = parseData<{ readonly schemaVersion: string; readonly runtime: { readonly recordSchemaVersion: string } }>(
       shortcutJson.stdout
@@ -5830,6 +5966,16 @@ describe("bwrk cli", () => {
     expect(jsonPayload.migrationPolicy.rules.join("\n")).toContain(
       "Non-reversible migrations must create a boreal.export.v1 recovery snapshot"
     );
+    expect(jsonPayload.compatibility).toMatchObject({
+      semver: { releaseLine: "0.x", patch: "backward-compatible", minor: "may-change-contracts-with-migration-notes" },
+      launcher: { patchSkew: "supported", repoPinPrecedence: true },
+      installedSkills: { schema: "boreal.skill.v1", policy: "reinstall-on-repo-update" }
+    });
+    expect(jsonPayload.compatibility.storage).toEqual([
+      { kind: "objects-v1", mode: "default-read-write" },
+      { kind: "file-v2", mode: "legacy-read-write" },
+      { kind: "file-v1", mode: "import-only" }
+    ]);
     expect(shortcutPayload).toEqual(
       expect.objectContaining({
         schemaVersion: "boreal.cli.version.v1",

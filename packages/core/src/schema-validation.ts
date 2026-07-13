@@ -615,7 +615,156 @@ export function evidenceRecordSchemaIssues(value: unknown, path = "$"): readonly
   if (value.uri !== undefined) {
     issues.push(...stringIssue(value.uri, `${path}.uri`, schemaId));
   }
+  if (value.attestation !== undefined) {
+    issues.push(...evidenceAttestationIssues(value.attestation, `${path}.attestation`, schemaId));
+  }
 
+  return issues;
+}
+
+function evidenceAttestationIssues(value: unknown, path: string, schemaId: string): readonly SchemaValidationIssue[] {
+  if (!isRecord(value)) return [issue(schemaId, path, "must be an object")];
+  const issues: SchemaValidationIssue[] = [
+    ...literalIssue(value.schemaVersion, `${path}.schemaVersion`, schemaId, "boreal.evidence-attestation.v1"),
+    ...enumIssue(value.trustLevel, `${path}.trustLevel`, schemaId, [
+      "legacy_unattested",
+      "self_reported",
+      "boreal_witnessed",
+      "external_attested"
+    ]),
+    ...actorRefIssues(value.producer, `${path}.producer`, schemaId),
+    ...stringIssue(value.recordedAt, `${path}.recordedAt`, schemaId)
+  ];
+  if (isRecord(value.producer)) {
+    if (value.producer.system !== undefined) issues.push(...stringIssue(value.producer.system, `${path}.producer.system`, schemaId));
+    if (value.producer.version !== undefined) issues.push(...stringIssue(value.producer.version, `${path}.producer.version`, schemaId));
+  }
+  if (value.witness !== undefined) {
+    if (!isRecord(value.witness)) {
+      issues.push(issue(schemaId, `${path}.witness`, "must be an object"));
+    } else {
+      issues.push(
+        ...enumIssue(value.witness.kind, `${path}.witness.kind`, schemaId, ["boreal", "external_ci", "human"]),
+        ...nonEmptyStringIssue(value.witness.id, `${path}.witness.id`, schemaId)
+      );
+      if (value.witness.issuer !== undefined) issues.push(...stringIssue(value.witness.issuer, `${path}.witness.issuer`, schemaId));
+    }
+  }
+  if (value.witnessedAt !== undefined) issues.push(...stringIssue(value.witnessedAt, `${path}.witnessedAt`, schemaId));
+  if (value.subjectRevision !== undefined) {
+    if (!isRecord(value.subjectRevision)) {
+      issues.push(issue(schemaId, `${path}.subjectRevision`, "must be an object"));
+    } else {
+      issues.push(...patternStringIssue(value.subjectRevision.contentHash, `${path}.subjectRevision.contentHash`, schemaId, /^sha256:[a-f0-9]{64}$/));
+      if (value.subjectRevision.updatedAt !== undefined) issues.push(...stringIssue(value.subjectRevision.updatedAt, `${path}.subjectRevision.updatedAt`, schemaId));
+    }
+  }
+  if (value.environment !== undefined) {
+    if (!isRecord(value.environment)) {
+      issues.push(issue(schemaId, `${path}.environment`, "must be an object"));
+    } else {
+      issues.push(
+        ...nonEmptyStringIssue(value.environment.platform, `${path}.environment.platform`, schemaId),
+        ...nonEmptyStringIssue(value.environment.arch, `${path}.environment.arch`, schemaId)
+      );
+      if (value.environment.nodeVersion !== undefined) issues.push(...stringIssue(value.environment.nodeVersion, `${path}.environment.nodeVersion`, schemaId));
+      if (value.environment.cwdHash !== undefined) issues.push(...patternStringIssue(value.environment.cwdHash, `${path}.environment.cwdHash`, schemaId, /^sha256:[a-f0-9]{64}$/));
+    }
+  }
+  if (value.command !== undefined) {
+    if (!isRecord(value.command)) {
+      issues.push(issue(schemaId, `${path}.command`, "must be an object"));
+    } else {
+      issues.push(...patternStringIssue(value.command.commandHash, `${path}.command.commandHash`, schemaId, /^sha256:[a-f0-9]{64}$/));
+      if (value.command.startedAt !== undefined) issues.push(...stringIssue(value.command.startedAt, `${path}.command.startedAt`, schemaId));
+      if (value.command.completedAt !== undefined) issues.push(...stringIssue(value.command.completedAt, `${path}.command.completedAt`, schemaId));
+      if (value.command.durationMs !== undefined) issues.push(...integerAtLeastIssue(value.command.durationMs, `${path}.command.durationMs`, schemaId, 0));
+      if (value.command.exitCode !== undefined) issues.push(...integerAtLeastIssue(value.command.exitCode, `${path}.command.exitCode`, schemaId, 0));
+      if (value.command.signal !== undefined) issues.push(...stringIssue(value.command.signal, `${path}.command.signal`, schemaId));
+      if (value.command.timedOut !== undefined) issues.push(...booleanIssue(value.command.timedOut, `${path}.command.timedOut`, schemaId));
+      if (value.command.cancelled !== undefined) issues.push(...booleanIssue(value.command.cancelled, `${path}.command.cancelled`, schemaId));
+      if (value.command.expectedObservableMatched !== undefined) issues.push(...booleanIssue(value.command.expectedObservableMatched, `${path}.command.expectedObservableMatched`, schemaId));
+    }
+  }
+  if (value.output !== undefined) {
+    if (!isRecord(value.output)) {
+      issues.push(issue(schemaId, `${path}.output`, "must be an object"));
+    } else {
+      issues.push(
+        ...integerAtLeastIssue(value.output.stdoutBytes, `${path}.output.stdoutBytes`, schemaId, 0),
+        ...integerAtLeastIssue(value.output.stderrBytes, `${path}.output.stderrBytes`, schemaId, 0)
+      );
+      if (value.output.stdoutHash !== undefined) issues.push(...patternStringIssue(value.output.stdoutHash, `${path}.output.stdoutHash`, schemaId, /^sha256:[a-f0-9]{64}$/));
+      if (value.output.stderrHash !== undefined) issues.push(...patternStringIssue(value.output.stderrHash, `${path}.output.stderrHash`, schemaId, /^sha256:[a-f0-9]{64}$/));
+      if (value.output.truncated !== undefined) issues.push(...booleanIssue(value.output.truncated, `${path}.output.truncated`, schemaId));
+      if (value.output.stdoutExcerpt !== undefined) issues.push(...stringIssue(value.output.stdoutExcerpt, `${path}.output.stdoutExcerpt`, schemaId));
+      if (value.output.stderrExcerpt !== undefined) issues.push(...stringIssue(value.output.stderrExcerpt, `${path}.output.stderrExcerpt`, schemaId));
+    }
+  }
+  if (value.git !== undefined) {
+    if (!isRecord(value.git)) {
+      issues.push(issue(schemaId, `${path}.git`, "must be an object"));
+    } else {
+      issues.push(
+        ...stringIssue(value.git.branch, `${path}.git.branch`, schemaId),
+        ...patternStringIssue(value.git.headSha, `${path}.git.headSha`, schemaId, /^[a-f0-9]{40,64}$/),
+        ...booleanIssue(value.git.dirty, `${path}.git.dirty`, schemaId),
+        ...patternStringIssue(value.git.dirtyFingerprint, `${path}.git.dirtyFingerprint`, schemaId, /^sha256:[a-f0-9]{64}$/),
+        ...integerAtLeastIssue(value.git.dirtyFileCount, `${path}.git.dirtyFileCount`, schemaId, 0)
+      );
+    }
+  }
+  if (value.tools !== undefined) {
+    if (!Array.isArray(value.tools)) {
+      issues.push(issue(schemaId, `${path}.tools`, "must be an array"));
+    } else {
+      value.tools.forEach((tool, index) => {
+        if (!isRecord(tool)) {
+          issues.push(issue(schemaId, `${path}.tools[${index}]`, "must be an object"));
+        } else {
+          issues.push(
+            ...nonEmptyStringIssue(tool.name, `${path}.tools[${index}].name`, schemaId),
+            ...nonEmptyStringIssue(tool.version, `${path}.tools[${index}].version`, schemaId)
+          );
+        }
+      });
+    }
+  }
+  if (value.artifacts !== undefined) {
+    if (!Array.isArray(value.artifacts)) {
+      issues.push(issue(schemaId, `${path}.artifacts`, "must be an array"));
+    } else {
+      value.artifacts.forEach((artifact, index) => {
+        if (!isRecord(artifact)) {
+          issues.push(issue(schemaId, `${path}.artifacts[${index}]`, "must be an object"));
+        } else {
+          issues.push(
+            ...nonEmptyStringIssue(artifact.path, `${path}.artifacts[${index}].path`, schemaId),
+            ...patternStringIssue(artifact.contentHash, `${path}.artifacts[${index}].contentHash`, schemaId, /^sha256:[a-f0-9]{64}$/),
+            ...integerAtLeastIssue(artifact.bytes, `${path}.artifacts[${index}].bytes`, schemaId, 0)
+          );
+        }
+      });
+    }
+  }
+  if (value.external !== undefined) {
+    if (!isRecord(value.external)) {
+      issues.push(issue(schemaId, `${path}.external`, "must be an object"));
+    } else {
+      issues.push(
+        ...nonEmptyStringIssue(value.external.issuer, `${path}.external.issuer`, schemaId),
+        ...nonEmptyStringIssue(value.external.resultUri, `${path}.external.resultUri`, schemaId),
+        ...enumIssue(value.external.verificationStatus, `${path}.external.verificationStatus`, schemaId, ["unverified", "verified", "rejected"])
+      );
+      if (value.external.attestationId !== undefined) issues.push(...stringIssue(value.external.attestationId, `${path}.external.attestationId`, schemaId));
+    }
+  }
+  if (value.trustLevel === "boreal_witnessed" && (!isRecord(value.witness) || value.witness.kind !== "boreal")) {
+    issues.push(issue(schemaId, `${path}.witness`, "boreal_witnessed evidence requires a Boreal witness"));
+  }
+  if (value.trustLevel === "external_attested" && (!isRecord(value.external) || !isRecord(value.witness))) {
+    issues.push(issue(schemaId, path, "external_attested evidence requires witness and external identity"));
+  }
   return issues;
 }
 
@@ -1699,6 +1848,23 @@ function requiredCloseoutGateIssues(value: unknown, path: string, schemaId: stri
   if (value.expectedObservable !== undefined) {
     issues.push(...nonEmptyStringIssue(value.expectedObservable, `${path}.expectedObservable`, schemaId));
   }
+  if (value.requiredTrustLevels !== undefined) {
+    issues.push(...enumArrayIssue(value.requiredTrustLevels, `${path}.requiredTrustLevels`, schemaId, [
+      "legacy_unattested",
+      "self_reported",
+      "boreal_witnessed",
+      "external_attested"
+    ]));
+    if (Array.isArray(value.requiredTrustLevels) && value.requiredTrustLevels.length === 0) {
+      issues.push(issue(schemaId, `${path}.requiredTrustLevels`, "must contain at least one trust level"));
+    }
+  }
+  if (value.requireCurrentRevision !== undefined) {
+    issues.push(...booleanIssue(value.requireCurrentRevision, `${path}.requireCurrentRevision`, schemaId));
+  }
+  if (value.requireCurrentGitHead !== undefined) {
+    issues.push(...booleanIssue(value.requireCurrentGitHead, `${path}.requireCurrentGitHead`, schemaId));
+  }
   if (value.satisfiedBy !== undefined) {
     issues.push(...requiredCloseoutGateSatisfactionIssues(value.satisfiedBy, `${path}.satisfiedBy`, schemaId));
   }
@@ -1740,6 +1906,20 @@ function enforcementGapDataIssues(value: unknown, path: string, schemaId: string
   }
   if (value.expectedObservable !== undefined) {
     issues.push(...nonEmptyStringIssue(value.expectedObservable, `${path}.expectedObservable`, schemaId));
+  }
+  if (value.requiredTrustLevels !== undefined) {
+    issues.push(...enumArrayIssue(value.requiredTrustLevels, `${path}.requiredTrustLevels`, schemaId, [
+      "legacy_unattested",
+      "self_reported",
+      "boreal_witnessed",
+      "external_attested"
+    ]));
+  }
+  if (value.requiredRevision !== undefined) {
+    issues.push(...patternStringIssue(value.requiredRevision, `${path}.requiredRevision`, schemaId, /^sha256:[a-f0-9]{64}$/));
+  }
+  if (value.requiredGitHead !== undefined) {
+    issues.push(...patternStringIssue(value.requiredGitHead, `${path}.requiredGitHead`, schemaId, /^[a-f0-9]{40,64}$/));
   }
   if (value.observed !== undefined) {
     issues.push(...stringArrayIssue(value.observed, `${path}.observed`, schemaId));

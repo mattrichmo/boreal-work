@@ -43,6 +43,10 @@ describe("storage migration", () => {
       readonly to: string;
       readonly records: { readonly workItems: number; readonly graphEdges: number };
       readonly eventLog: { readonly ok: boolean; readonly seq: number };
+      readonly preflight: { readonly sourceReadable: boolean; readonly sourceStorage: string; readonly targetStorage: string };
+      readonly parity: { readonly counts: boolean; readonly contentHash: boolean; readonly sourceContentHash: string; readonly targetContentHash: string };
+      readonly rollback: { readonly command: string; readonly sourceRetained: boolean; readonly backupPath?: string };
+      readonly stateBackupPath?: string;
     }>((await runCli(rootDir, ["storage", "migrate", "--to", "objects", "--json"])).stdout);
 
     expect(migrated.migrated).toBe(true);
@@ -51,6 +55,12 @@ describe("storage migration", () => {
     expect(migrated.records.graphEdges).toBe(1);
     expect(migrated.eventLog.ok).toBe(true);
     expect(migrated.eventLog.seq).toBeGreaterThan(0);
+    expect(migrated.preflight).toEqual({ sourceReadable: true, sourceStorage: "file-v2", targetStorage: "objects-v1" });
+    expect(migrated.parity).toMatchObject({ counts: true, contentHash: true });
+    expect(migrated.parity.sourceContentHash).toBe(migrated.parity.targetContentHash);
+    expect(migrated.rollback).toMatchObject({ command: "bwrk storage migrate --to file --json", sourceRetained: false });
+    expect(migrated.rollback.backupPath).toBe(migrated.stateBackupPath);
+    expect(migrated.stateBackupPath && existsSync(migrated.stateBackupPath)).toBe(true);
     expect(existsSync(join(rootDir, ".boreal", "runtime", "state.json"))).toBe(false);
     expect(existsSync(join(rootDir, ".boreal", "objects", "work", `${a.meta.id}.json`))).toBe(true);
     expect(JSON.parse(await readFile(join(rootDir, ".boreal", "project.json"), "utf8")).storage).toBe("objects-v1");
@@ -62,11 +72,16 @@ describe("storage migration", () => {
       readonly migrated: boolean;
       readonly to: string;
       readonly records: { readonly workItems: number; readonly graphEdges: number };
+      readonly parity: { readonly counts: boolean; readonly contentHash: boolean; readonly sourceContentHash: string; readonly targetContentHash: string };
+      readonly rollback: { readonly command: string; readonly sourceRetained: boolean };
     }>((await runCli(rootDir, ["storage", "migrate", "--to", "file", "--json"])).stdout);
     expect(reverted.migrated).toBe(true);
     expect(reverted.to).toBe("file-v2");
     expect(reverted.records.workItems).toBe(3);
     expect(reverted.records.graphEdges).toBe(1);
+    expect(reverted.parity).toMatchObject({ counts: true, contentHash: true });
+    expect(reverted.parity.sourceContentHash).toBe(reverted.parity.targetContentHash);
+    expect(reverted.rollback).toEqual({ command: "bwrk storage migrate --to objects --json", sourceRetained: true });
     expect(existsSync(join(rootDir, ".boreal", "runtime", "state.json"))).toBe(true);
     expect(JSON.parse(await readFile(join(rootDir, ".boreal", "project.json"), "utf8")).storage).toBe("file-v2");
     const fileList = parseData<readonly unknown[]>((await runCli(rootDir, ["work", "list", "--json"])).stdout);

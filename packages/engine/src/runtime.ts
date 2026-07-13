@@ -15,6 +15,7 @@ import {
   nowIso,
   randomId,
   touchRecord,
+  workRevisionContentHash,
   type ActorRef,
   type AgentId,
   type AgentReservation,
@@ -46,7 +47,13 @@ import {
   type WorkStatus,
   withContentHash
 } from "@boreal/core";
-import { recordEvidence as recordEvidenceDomain, verifySubject } from "@boreal/evidence-engine";
+import {
+  evidenceSatisfiesTrustRequirement,
+  evidenceTrustGap,
+  recordEvidence as recordEvidenceDomain,
+  verifySubject,
+  type EvidenceTrustRequirement
+} from "@boreal/evidence-engine";
 import { createGraphEdge } from "@boreal/graph-engine";
 import { createClaim, createDecision, createKnowledgeSource } from "@boreal/knowledge-engine";
 import { buildContextPack, buildContextProjection } from "@boreal/search";
@@ -291,6 +298,7 @@ export interface BorealRuntime {
     readonly verdict: VerificationRecord["verdict"];
     readonly evidenceIds: readonly EvidenceId[];
     readonly notes?: string;
+    readonly currentGitHead?: string;
   }): Promise<VerificationRecord>;
   closeWork(input: {
     readonly workId: WorkId;
@@ -791,7 +799,11 @@ export function createBorealRuntime(options: BorealRuntimeOptions = {}): BorealR
         await appendEvent(writer, "evidence.recorded", evidence.meta.id, "evidence", {
           subjectId: evidence.subjectId,
           kind: evidence.kind,
-          outcome: evidence.outcome
+          outcome: evidence.outcome,
+          trustLevel: evidence.attestation?.trustLevel ?? "legacy_unattested",
+          subjectRevision: evidence.attestation?.subjectRevision?.contentHash,
+          gitHead: evidence.attestation?.git?.headSha,
+          externalVerificationStatus: evidence.attestation?.external?.verificationStatus
         });
         return evidence;
       });
@@ -810,6 +822,7 @@ export function createBorealRuntime(options: BorealRuntimeOptions = {}): BorealR
           availableEvidence,
           notes: input.notes,
           policy,
+          trustRequirements: verificationTrustRequirements(work, input.currentGitHead),
           actor,
           now: current
         });
@@ -1806,7 +1819,7 @@ function evaluateRequiredCloseoutGate(input: {
   for (const target of targets) {
     const satisfaction = targetCloseoutGateSatisfaction(input.gate, target, input.evidence, input.verifications, input.summaries);
     if (!satisfaction) {
-      gaps.push(unsatisfiedGateGap(input.gate, input.owner, target, input.evidence, input.verifications));
+      gaps.push(unsatisfiedGateGap(input.gate, input.owner, target, input.evidence, input.verifications, input.summaries));
     } else {
       satisfactions.push(satisfaction);
     }
@@ -1835,12 +1848,12 @@ function targetCloseoutGateSatisfaction(
 ): CloseoutGateSatisfaction | undefined {
   switch (gate.kind) {
     case "verification":
-      return verificationGateSatisfaction(gate, target, evidence, verifications);
+      return verificationGateSatisfaction(gate, target, evidence, verifications, summaries);
     case "checkpoint":
       return checkpointGateSatisfaction(gate, target, summaries);
     case "review":
     case "audit":
-      return evidenceGateSatisfaction(gate, target, evidence);
+      return evidenceGateSatisfaction(gate, target, evidence, summaries);
   }
 }
 
@@ -1848,7 +1861,8 @@ function verificationGateSatisfaction(
   gate: RequiredCloseoutGate,
   target: WorkItem,
   evidence: readonly EvidenceRecord[],
-  verifications: readonly VerificationRecord[]
+  verifications: readonly VerificationRecord[],
+  summaries: readonly AgentSummaryRecord[]
 ): CloseoutGateSatisfaction | undefined {
   const evidenceById = new Map(evidence.map((record) => [record.meta.id, record]));
   const matches = verifications.filter((verification) => {
@@ -1860,7 +1874,7 @@ function verificationGateSatisfaction(
       return (
         record?.subjectId === target.meta.id &&
         (record.outcome === "passed" || record.outcome === "observed") &&
-        evidenceSatisfiesDeclaredGate(gate, record)
+        evidenceSatisfiesDeclaredGate(gate, record, target, summaries)
       );
     });
   });
@@ -1870,7 +1884,7 @@ function verificationGateSatisfaction(
       return (
         record?.subjectId === target.meta.id &&
         (record.outcome === "passed" || record.outcome === "observed") &&
-        evidenceSatisfiesDeclaredGate(gate, record)
+        evidenceSatisfiesDeclaredGate(gate, record, target, summaries)
       );
     })
   ));
@@ -1912,7 +1926,8 @@ function checkpointGateSatisfaction(
 function evidenceGateSatisfaction(
   gate: RequiredCloseoutGate,
   target: WorkItem,
-  evidence: readonly EvidenceRecord[]
+  evidence: readonly EvidenceRecord[],
+  summaries: readonly AgentSummaryRecord[]
 ): CloseoutGateSatisfaction | undefined {
   const allowedKinds = new Set(gate.requiredEvidenceKinds);
   const matches = evidence.filter(
@@ -1920,7 +1935,7 @@ function evidenceGateSatisfaction(
       record.subjectId === target.meta.id &&
       record.outcome === gate.requiredOutcome &&
       allowedKinds.has(record.kind) &&
-      evidenceSatisfiesDeclaredGate(gate, record)
+      evidenceSatisfiesDeclaredGate(gate, record, target, summaries)
   );
   if (matches.length < gate.minEvidenceCount) {
     return undefined;
@@ -1973,14 +1988,20 @@ function forcedRequiredGateIsValid(gate: RequiredCloseoutGate): boolean {
   return Boolean(gate.force?.reason && gate.force.comment.trim() && gate.force.actor && gate.force.forcedAt);
 }
 
-function evidenceSatisfiesDeclaredGate(gate: RequiredCloseoutGate, record: EvidenceRecord): boolean {
+function evidenceSatisfiesDeclaredGate(
+  gate: RequiredCloseoutGate,
+  record: EvidenceRecord,
+  target: WorkItem,
+  summaries: readonly AgentSummaryRecord[]
+): boolean {
   if (gate.declaredCommand && record.command !== gate.declaredCommand) {
     return false;
   }
   if (gate.expectedObservable && !record.summary.includes(gate.expectedObservable)) {
     return false;
   }
-  return true;
+  const requirement = trustRequirementForGate(gate, target, summaries);
+  return requirement ? evidenceSatisfiesTrustRequirement(record, requirement) : true;
 }
 
 function unsatisfiedGateGap(
@@ -1988,7 +2009,8 @@ function unsatisfiedGateGap(
   owner: WorkItem,
   target: WorkItem,
   evidence: readonly EvidenceRecord[],
-  verifications: readonly VerificationRecord[]
+  verifications: readonly VerificationRecord[],
+  summaries: readonly AgentSummaryRecord[]
 ): CloseoutGateGap {
   const targetEvidence = candidateEvidenceForGate(gate, target, evidence, verifications);
   if (gate.declaredCommand) {
@@ -2020,6 +2042,23 @@ function unsatisfiedGateGap(
       });
     }
   }
+  const trustRequirement = trustRequirementForGate(gate, target, summaries);
+  if (trustRequirement) {
+    const trustCandidates = targetEvidence.filter((record) =>
+      (!gate.declaredCommand || record.command === gate.declaredCommand) &&
+      (!gate.expectedObservable || record.summary.includes(gate.expectedObservable))
+    );
+    if (!trustCandidates.some((record) => evidenceSatisfiesTrustRequirement(record, trustRequirement))) {
+      const trustGap = evidenceTrustGap(target.meta.id, "work", trustCandidates, trustRequirement);
+      return gateGap(
+        gate,
+        owner,
+        target,
+        typeof trustGap.data?.reason === "string" ? trustGap.data.reason : "required evidence is stale or insufficiently trusted",
+        { code: trustGap.code, data: trustGap.data }
+      );
+    }
+  }
   return gateGap(gate, owner, target, "required gate has no satisfying evidence");
 }
 
@@ -2046,9 +2085,47 @@ function candidateEvidenceForGate(
   return evidence.filter(
     (record) =>
       record.subjectId === target.meta.id &&
-      record.outcome === gate.requiredOutcome &&
       allowedKinds.has(record.kind)
   );
+}
+
+function verificationTrustRequirements(work: WorkItem, currentGitHead: string | undefined): readonly EvidenceTrustRequirement[] {
+  return (work.requiredCloseoutGates ?? [])
+    .filter((gate) => gate.kind === "verification" && gate.scope === "self")
+    .map((gate) => trustRequirementForGate(gate, work, [], currentGitHead))
+    .filter((requirement): requirement is EvidenceTrustRequirement => requirement !== undefined);
+}
+
+function trustRequirementForGate(
+  gate: RequiredCloseoutGate,
+  target: WorkItem,
+  summaries: readonly AgentSummaryRecord[],
+  currentGitHead?: string
+): EvidenceTrustRequirement | undefined {
+  if (!gate.requiredTrustLevels?.length && !gate.requireCurrentRevision && !gate.requireCurrentGitHead) {
+    return undefined;
+  }
+  const checkpointHead = currentGitHead ?? currentGitCheckpointForTarget(target, summaries);
+  return {
+    gateId: gate.id,
+    ...(gate.requiredTrustLevels?.length ? { requiredTrustLevels: gate.requiredTrustLevels } : {}),
+    ...(gate.requireCurrentRevision ? { currentRevision: workRevisionContentHash(target) } : {}),
+    ...(gate.requireCurrentGitHead ? { currentGitHead: checkpointHead ?? "0000000000000000000000000000000000000000" } : {}),
+    rerunCommand: `bwrk evidence run ${target.meta.id} --gate ${gate.id} --json`
+  };
+}
+
+function currentGitCheckpointForTarget(
+  target: WorkItem,
+  summaries: readonly AgentSummaryRecord[]
+): string | undefined {
+  return summaries
+    .filter((summary) =>
+      summary.subjectId === target.meta.id &&
+      (summary.status === "final" || summary.status === "forced")
+    )
+    .flatMap((summary) => summary.commitShas)
+    .at(0);
 }
 
 function gateGap(
@@ -2074,6 +2151,9 @@ function gateGap(
       gateIds: [gate.id],
       requiredEvidenceKinds: gate.requiredEvidenceKinds,
       minEvidenceCount: gate.minEvidenceCount,
+      ...(gate.requiredTrustLevels?.length ? { requiredTrustLevels: gate.requiredTrustLevels } : {}),
+      ...(gate.requireCurrentRevision ? { requiredRevision: workRevisionContentHash(target ?? owner) } : {}),
+      ...(gate.requireCurrentGitHead ? { requiredGitHead: "0000000000000000000000000000000000000000" } : {}),
       ...(gate.declaredCommand ? { declaredCommand: gate.declaredCommand } : {}),
       ...(gate.expectedObservable ? { expectedObservable: gate.expectedObservable } : {}),
       ...options.data,

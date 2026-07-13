@@ -1,10 +1,12 @@
 # V2 Storage And Collaboration Plan
 
-Status: accepted for V2 implementation planning.
+Status: superseded as an implementation contract; retained as a historical design record.
+
+The shipped storage direction is now `objects-v1`: per-record canonical JSON under `.boreal/objects/`, a hash-linked event log under `.boreal/log/`, and a disposable SQLite read/search index at `.boreal/cache/index.sqlite`. `file-v2` remains the legacy compatibility and rollback adapter. The proposal below predates that implementation and must not be read as current runtime truth or as authority to replace the current writer. A future writer change requires a new decision based on the shipped object-store collaboration and benchmark evidence.
 
 Audit basis: Sprint 14 from the Boreal V1 audit reconciliation. This document is a design artifact, not the implementation. It turns the remaining storage scale and collaboration findings into concrete architecture, freshness, query, benchmark, and migration gates.
 
-## Current Runtime Truth
+## Runtime Truth At The Time Of The Proposal
 
 - `FileBorealStore` is still the durable writer. Each read loads `.boreal/runtime/state.json` into `InMemoryBorealStore`; each write loads the full snapshot, runs a transaction, then replaces the full JSON file under the state lock.
 - `InMemoryBorealStore` has maps for record lookup, but `FileBorealStore` rebuilds those maps per operation from the full snapshot.
@@ -16,7 +18,7 @@ Audit basis: Sprint 14 from the Boreal V1 audit reconciliation. This document is
 - The SQLite cache at `.boreal/cache/runtime-cache.sqlite` is disposable. It stores one `records` row per portable runtime record plus `schemaVersion`, `sourceContentHash`, and counts, but it is not the runtime writer.
 - Portable export and ledger hashes intentionally exclude local-only operation history and operation-linked event drift.
 
-## Decision
+## Superseded Decision
 
 V2 should make SQLite the primary local runtime writer behind the existing `BorealStore` port, with an append-only mutation/event journal and deterministic export/ledger/snapshot compatibility as the collaboration boundary.
 

@@ -58,7 +58,7 @@ Source command:
 node apps/cli/dist/index.js commands --json
 ```
 
-The registry currently exposes 81 commands across workspace, meta, workflow, install, registry, agent, work, dependency, evidence, source, claim, decision, context, search, reservation, session, operation, export, import, vault, raw, wiki, duplicate, merge, compact, sync, ledger, snapshot, doctor, and lock categories.
+At this snapshot date, the registry exposed 81 commands across workspace, meta, workflow, install, registry, agent, work, dependency, evidence, source, claim, decision, context, search, reservation, session, operation, export, import, vault, raw, wiki, duplicate, merge, compact, sync, ledger, snapshot, doctor, and lock categories. This is historical evidence, not a live inventory; use `bwrk commands --json` for the installed version.
 
 Important existing commands for work execution:
 

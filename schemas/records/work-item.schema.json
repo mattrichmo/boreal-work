@@ -93,6 +93,14 @@
         "minEvidenceCount": { "type": "integer", "minimum": 0 },
         "declaredCommand": { "type": "string", "minLength": 1 },
         "expectedObservable": { "type": "string", "minLength": 1 },
+        "requiredTrustLevels": {
+          "type": "array",
+          "items": { "enum": ["legacy_unattested", "self_reported", "boreal_witnessed", "external_attested"] },
+          "uniqueItems": true,
+          "minItems": 1
+        },
+        "requireCurrentRevision": { "type": "boolean" },
+        "requireCurrentGitHead": { "type": "boolean" },
         "createdAt": { "type": "string", "format": "date-time" },
         "createdBy": { "$ref": "#/$defs/actor" },
         "satisfiedBy": {

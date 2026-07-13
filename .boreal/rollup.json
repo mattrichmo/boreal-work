@@ -2,20 +2,20 @@
   "schemaVersion": "boreal.project-rollup.v2",
   "projectId": "project_5b36e807eda66e00",
   "workspaceRoot": "/Users/cybertron/Code/boreal-work",
-  "generatedAt": "2026-07-10T22:30:18.032Z",
-  "stateContentHash": "sha256:f4f255769d9b1d2536377b5a1de671831a6537be2975e2b2a2084835d5c34340",
+  "generatedAt": "2026-07-13T05:23:34.906Z",
+  "stateContentHash": "sha256:0e5788ef29e55d2ad8e621ac62bdf1480142ea0545087c6e690a8f5c4fbf65d3",
   "counts": {
     "work": {
       "total": 529,
       "byStatus": {
         "draft": 0,
-        "ready": 62,
+        "ready": 63,
         "reserved": 0,
-        "in_progress": 0,
-        "blocked": 54,
+        "in_progress": 1,
+        "blocked": 44,
         "needs_verification": 0,
         "verified": 0,
-        "closed": 413,
+        "closed": 421,
         "cancelled": 0
       },
       "byKind": {
@@ -26,10 +26,10 @@
       }
     },
     "reservations": {
-      "total": 343,
-      "active": 0,
+      "total": 352,
+      "active": 1,
       "expired": 1,
-      "released": 342
+      "released": 350
     }
   },
   "limbo": {
@@ -37,15 +37,17 @@
     "verified": []
   },
   "reservations": {
-    "activeIds": [],
+    "activeIds": [
+      "bw_reservation_c9aa772884ae4d5d"
+    ],
     "expiredIds": [
       "bw_reservation_173669bfccb238fb"
     ]
   },
   "enforcement": {
     "blockingGaps": {
-      "openCount": 189,
-      "blockedWorkCount": 54,
+      "openCount": 166,
+      "blockedWorkCount": 44,
       "samples": [
         {
           "workId": "bw_work_3695a3716234e67a",
@@ -110,27 +112,6 @@
             "bw_work_edd19b745b8eb29f",
             "bw_work_f1e985dc765a799c",
             "bw_work_fbb670db73c9c7b0"
-          ]
-        },
-        {
-          "workId": "bw_work_e9382d8a7e085ea6",
-          "title": "S01T04 - Define SemVer, schema compatibility, migration, and rollback contracts",
-          "blockerIds": [
-            "bw_work_ca9ba6b4f3f20e1e"
-          ]
-        },
-        {
-          "workId": "bw_work_30fd269614f63b76",
-          "title": "S02T02 - Implement safe execution policy for declared verification gates",
-          "blockerIds": [
-            "bw_work_00c3eacd2a50526a"
-          ]
-        },
-        {
-          "workId": "bw_work_46629a6b80abb282",
-          "title": "S02T03 - Capture witnessed command, Git, environment, and artifact provenance",
-          "blockerIds": [
-            "bw_work_30fd269614f63b76"
           ]
         },
         {
@@ -285,25 +266,46 @@
             "bw_work_5202b53065f3f085",
             "bw_work_9182a6cd0594a668"
           ]
+        },
+        {
+          "workId": "bw_work_f7462ea2f70614ea",
+          "title": "S07T05 - Ship an external security-assurance pack and extension authoring guide",
+          "blockerIds": [
+            "bw_work_38ce2f620c7f6365"
+          ]
+        },
+        {
+          "workId": "bw_work_3eb9dab8252a86ff",
+          "title": "S08T02 - Make install, status, start, done, and doctor the public golden path",
+          "blockerIds": [
+            "bw_work_f927e3d6695fcacd"
+          ]
+        },
+        {
+          "workId": "bw_work_308534e1ff80988e",
+          "title": "S08T03 - Reduce time-to-first-value and make recovery progressive",
+          "blockerIds": [
+            "bw_work_3eb9dab8252a86ff"
+          ]
         }
       ]
     }
   },
   "health": {
     "doctorOk": null,
-    "syncOk": true
+    "syncOk": null
   },
   "lastEvent": {
-    "id": "bw_event_82b42e00beae7acb3c2e403225958dbf",
-    "type": "projection.rebuilt",
-    "subjectId": "projections",
-    "at": "2026-07-10T22:30:12.795Z"
+    "id": "bw_event_28a4e197c0da8eb9e0503c476ddf11ad",
+    "type": "context.refreshed",
+    "subjectId": "bw_work_46629a6b80abb282",
+    "at": "2026-07-13T05:23:26.828Z"
   },
   "lastOperation": {
-    "id": "bw_operation_e52f39c85452f5da03e026cbcebe1cb3",
-    "commandPath": "sync refresh",
+    "id": "bw_operation_f1ddd801b865648f9b2ac49c09f6ebd3",
+    "commandPath": "agent start",
     "status": "succeeded",
-    "finishedAt": "2026-07-10T22:30:17.594Z"
+    "finishedAt": "2026-07-13T05:23:34.261Z"
   },
   "next": {
     "limit": 10,
@@ -408,8 +410,8 @@
         "title": "S02T01 - Define evidence trust levels and attestation schemas",
         "kind": "task",
         "priority": "high",
-        "status": "blocked",
-        "updatedAt": "2026-07-10T17:10:03.035Z"
+        "status": "closed",
+        "updatedAt": "2026-07-10T23:02:27.572Z"
       },
       {
         "workId": "bw_work_00ef10545c9f24be",
@@ -560,8 +562,8 @@
         "title": "S01T03 - Complete provenance, dependency, secret, and repository-boundary audit",
         "kind": "task",
         "priority": "high",
-        "status": "ready",
-        "updatedAt": "2026-07-10T22:27:04.442Z"
+        "status": "closed",
+        "updatedAt": "2026-07-10T22:46:55.100Z"
       },
       {
         "workId": "bw_work_0b52b31b4cd80c8f",
@@ -1088,7 +1090,7 @@
         "title": "S06T01 - Define the agent adapter manifest and capability registry",
         "kind": "task",
         "priority": "normal",
-        "status": "blocked",
+        "status": "ready",
         "updatedAt": "2026-07-10T17:10:13.363Z"
       },
       {
@@ -1272,8 +1274,8 @@
         "title": "S02T02 - Implement safe execution policy for declared verification gates",
         "kind": "task",
         "priority": "high",
-        "status": "blocked",
-        "updatedAt": "2026-07-10T17:09:13.538Z"
+        "status": "closed",
+        "updatedAt": "2026-07-10T23:05:38.543Z"
       },
       {
         "workId": "bw_work_31589ea96f95e0be",
@@ -1648,8 +1650,8 @@
         "title": "S02T03 - Capture witnessed command, Git, environment, and artifact provenance",
         "kind": "task",
         "priority": "high",
-        "status": "blocked",
-        "updatedAt": "2026-07-10T17:09:14.565Z"
+        "status": "in_progress",
+        "updatedAt": "2026-07-13T05:23:26.216Z"
       },
       {
         "workId": "bw_work_471bdf1fc9a42621",
@@ -2368,8 +2370,8 @@
         "title": "S01T01 - Define the product wedge, operator profiles, and non-goals",
         "kind": "task",
         "priority": "high",
-        "status": "ready",
-        "updatedAt": "2026-07-10T22:26:54.575Z"
+        "status": "closed",
+        "updatedAt": "2026-07-10T22:34:45.869Z"
       },
       {
         "workId": "bw_work_7a38f0a77aa2d69d",
@@ -2648,7 +2650,7 @@
         "title": "S03T01 - Ratify one canonical storage, synchronization, and conflict contract",
         "kind": "task",
         "priority": "high",
-        "status": "blocked",
+        "status": "ready",
         "updatedAt": "2026-07-10T17:10:05.143Z"
       },
       {
@@ -2848,7 +2850,7 @@
         "title": "S07T01 - Define extension manifest, identity, permissions, dependencies, and compatibility",
         "kind": "task",
         "priority": "normal",
-        "status": "blocked",
+        "status": "ready",
         "updatedAt": "2026-07-10T17:10:15.425Z"
       },
       {
@@ -3696,8 +3698,8 @@
         "title": "S01T02 - Reconcile live command, storage, surface, and documentation truth",
         "kind": "task",
         "priority": "high",
-        "status": "ready",
-        "updatedAt": "2026-07-10T17:10:34.143Z"
+        "status": "closed",
+        "updatedAt": "2026-07-10T22:41:50.751Z"
       },
       {
         "workId": "bw_work_caa2b587f9f5b977",
@@ -4088,8 +4090,8 @@
         "title": "S01 - Product Contract and Compatibility Boundary",
         "kind": "sprint",
         "priority": "high",
-        "status": "blocked",
-        "updatedAt": "2026-07-10T22:26:42.458Z"
+        "status": "closed",
+        "updatedAt": "2026-07-10T22:57:21.379Z"
       },
       {
         "workId": "bw_work_e1165682f096d0c0",
@@ -4208,8 +4210,8 @@
         "title": "S01T04 - Define SemVer, schema compatibility, migration, and rollback contracts",
         "kind": "task",
         "priority": "high",
-        "status": "blocked",
-        "updatedAt": "2026-07-10T17:09:10.366Z"
+        "status": "closed",
+        "updatedAt": "2026-07-10T22:52:57.391Z"
       },
       {
         "workId": "bw_work_ea4baa2606a0cfad",
@@ -4304,8 +4306,8 @@
         "title": "S01T05 - Establish the cross-platform release CI baseline",
         "kind": "task",
         "priority": "high",
-        "status": "blocked",
-        "updatedAt": "2026-07-10T22:27:13.946Z"
+        "status": "closed",
+        "updatedAt": "2026-07-10T22:56:24.571Z"
       },
       {
         "workId": "bw_work_f0734e55cb219b1b",
@@ -4496,7 +4498,7 @@
         "title": "S05T01 - Define the specification and change adapter contract",
         "kind": "task",
         "priority": "normal",
-        "status": "blocked",
+        "status": "ready",
         "updatedAt": "2026-07-10T17:10:11.279Z"
       },
       {
@@ -4631,89 +4633,89 @@
   },
   "aging": {
     "ready": {
-      "count": 62,
-      "oldestAgeMs": 288710898,
-      "oldestAgeDays": 3,
+      "count": 63,
+      "oldestAgeMs": 486307772,
+      "oldestAgeDays": 5,
       "items": [
         {
           "workId": "bw_work_c2599dc1b4eca4b2",
           "title": "Console Refresh form omits required confirmation",
           "status": "ready",
           "since": "2026-07-07T14:18:27.134Z",
-          "ageMs": 288710898,
-          "ageDays": 3
+          "ageMs": 486307772,
+          "ageDays": 5
         },
         {
           "workId": "bw_work_f1e985dc765a799c",
           "title": "Global console project dashboard links fall back to global route",
           "status": "ready",
           "since": "2026-07-07T14:18:27.997Z",
-          "ageMs": 288710035,
-          "ageDays": 3
+          "ageMs": 486306909,
+          "ageDays": 5
         },
         {
           "workId": "bw_work_49b34597473ca36b",
           "title": "Live console Sprint page is hard-coded to sprint-04",
           "status": "ready",
           "since": "2026-07-07T14:18:28.725Z",
-          "ageMs": 288709307,
-          "ageDays": 3
+          "ageMs": 486306181,
+          "ageDays": 5
         },
         {
           "workId": "bw_work_bdff86f90fc97c59",
           "title": "Route TUI ignores active sprint projection",
           "status": "ready",
           "since": "2026-07-07T14:18:29.437Z",
-          "ageMs": 288708595,
-          "ageDays": 3
+          "ageMs": 486305469,
+          "ageDays": 5
         },
         {
           "workId": "bw_work_5cbd317cae480b08",
           "title": "TUI task detail drops reservation context and offers invalid close",
           "status": "ready",
           "since": "2026-07-07T14:18:30.119Z",
-          "ageMs": 288707913,
-          "ageDays": 3
+          "ageMs": 486304787,
+          "ageDays": 5
         },
         {
           "workId": "bw_work_884c1aa9d9e17515",
           "title": "TUI command descriptors are not exact copyable commands",
           "status": "ready",
           "since": "2026-07-07T14:18:30.826Z",
-          "ageMs": 288707206,
-          "ageDays": 3
+          "ageMs": 486304080,
+          "ageDays": 5
         },
         {
           "workId": "bw_work_0f006f25ca7a6883",
           "title": "Console browser-smoke defaults to system Chrome on macOS",
           "status": "ready",
           "since": "2026-07-07T14:18:31.576Z",
-          "ageMs": 288706456,
-          "ageDays": 3
+          "ageMs": 486303330,
+          "ageDays": 5
         },
         {
           "workId": "bw_work_fbb670db73c9c7b0",
           "title": "Curl stdin installer fails from Node projects with package.json",
           "status": "ready",
           "since": "2026-07-07T14:18:32.339Z",
-          "ageMs": 288705693,
-          "ageDays": 3
+          "ageMs": 486302567,
+          "ageDays": 5
         },
         {
           "workId": "bw_work_1340533172df0513",
           "title": "Generated package artifacts under src are unignored and uncleaned",
           "status": "ready",
           "since": "2026-07-07T14:18:33.030Z",
-          "ageMs": 288705002,
-          "ageDays": 3
+          "ageMs": 486301876,
+          "ageDays": 5
         },
         {
           "workId": "bw_work_6d1f6dbe85035670",
           "title": "Fresh object index can hide deleted object files",
           "status": "ready",
           "since": "2026-07-07T14:18:33.698Z",
-          "ageMs": 288704334,
-          "ageDays": 3
+          "ageMs": 486301208,
+          "ageDays": 5
         }
       ]
     },
@@ -4725,8 +4727,8 @@
     },
     "expiredReservations": {
       "count": 1,
-      "oldestAgeMs": 824702794,
-      "oldestAgeDays": 9,
+      "oldestAgeMs": 1022299668,
+      "oldestAgeDays": 11,
       "items": [
         {
           "reservationId": "bw_reservation_173669bfccb238fb",
@@ -4736,15 +4738,15 @@
           "reservedAt": "2026-07-01T05:25:15.306Z",
           "expiresAt": "2026-07-01T09:25:15.238Z",
           "since": "2026-07-01T09:25:15.238Z",
-          "ageMs": 824702794,
-          "ageDays": 9
+          "ageMs": 1022299668,
+          "ageDays": 11
         }
       ]
     },
     "maxima": {
-      "readyAgeMs": 288710898,
+      "readyAgeMs": 486307772,
       "limboAgeMs": 0,
-      "expiredReservationAgeMs": 824702794
+      "expiredReservationAgeMs": 1022299668
     },
     "approximation": {
       "readySinceSource": "work.meta.updatedAt",

@@ -37,6 +37,7 @@ import {
   selectAgentDirectiveRegistryEntriesFromGaps,
   summaryDirectiveDataByRegistryId,
   touchRecord,
+  workRevisionContentHash,
   withContentHash,
   type ActorRef,
   type ActorKind,
@@ -86,6 +87,7 @@ import {
   type EvidenceRecord,
   type EvidenceKind,
   type EvidenceOutcome,
+  type EvidenceTrustLevel,
   type EnforcementGap,
   type EnforcementGapCode,
   type GraphEdge,
@@ -116,6 +118,11 @@ import {
   type WorkStatus
 } from "@boreal/core";
 import { inspectDaemonStatus, refreshGlobalRollupCache, type GlobalRollupCacheResult } from "@boreal/daemon";
+import {
+  evidenceSatisfiesTrustRequirement,
+  evidenceTrustGap,
+  type EvidenceTrustRequirement
+} from "@boreal/evidence-engine";
 import type { SearchResult } from "@boreal/search";
 import {
   FileBorealStore,
@@ -185,6 +192,7 @@ import {
   type DoctorResult
 } from "./doctor.js";
 import { assertInitialized, createCliContext, type CliContext } from "./context.js";
+import { inspectDocumentationTruth } from "./documentation-truth.js";
 import { keyValueRows, resultSummary, section } from "./cli-ui.js";
 import { workBranchName, workWorktreePath } from "./git-branch.js";
 import { isMissingGit, runGit } from "./git-exec.js";
@@ -200,6 +208,7 @@ import { dirtyPathNotesHaveReasonCode, requireCommitOrDirtyPathReason } from "./
 import { VAULT_SCHEMA_VERSION } from "./vault.js";
 import {
   inspectWorkflowAssets,
+  resolveWorkflowAssetRoots,
   validateInstalledSkillRoot,
 } from "./workflow-assets.js";
 import { formatVersionInfo, getVersionInfo } from "./version.js";
@@ -824,7 +833,8 @@ export async function runCommand(args: ParsedArgs, output: CliOutput, cwd: strin
           resolveWorkId,
           parseEvidenceKind,
           parseOutcome,
-          resultForEvidence: (evidence) => withCliResult(evidence, evidenceCliResult(evidence))
+          resultForEvidence: (evidence) => withCliResult(evidence, evidenceCliResult(evidence)),
+          borealVersion: getVersionInfo().version
         });
         break;
       case "summary":
@@ -1129,6 +1139,10 @@ function workCommandDependencies(): WorkCommandDependencies {
     idempotentWorkReleaseResult,
     asEvidenceId,
     parseVerdict,
+    currentGitHead: async (context) => {
+      const probe = await gitFinishProbe(context.workspaceRoot);
+      return probe.insideWorktree && !probe.error ? probe.headSha : undefined;
+    },
     withCliResult,
     verificationCliResult,
     workCliResult,
@@ -5982,6 +5996,9 @@ interface CloseoutGateStatusRow {
   readonly requiredEvidenceKinds: readonly EvidenceKind[];
   readonly requiredOutcome: "passed";
   readonly minEvidenceCount: number;
+  readonly requiredTrustLevels?: readonly EvidenceTrustLevel[];
+  readonly requireCurrentRevision?: boolean;
+  readonly requireCurrentGitHead?: boolean;
   readonly declaredCommand?: string;
   readonly expectedObservable?: string;
   readonly satisfiedBy?: RequiredCloseoutGate["satisfiedBy"];
@@ -5995,6 +6012,7 @@ interface CloseoutGateTargetStatusRow {
   readonly workStatus: WorkStatus;
   readonly status: "open" | "satisfied";
   readonly satisfiedBy?: RequiredCloseoutGate["satisfiedBy"];
+  readonly gap?: EnforcementGap;
 }
 
 interface CloseoutGateGapRow {
@@ -6159,7 +6177,8 @@ function closeoutGateStatusRow(
       title: target.title,
       workStatus: target.status,
       status: satisfiedBy ? "satisfied" as const : "open" as const,
-      satisfiedBy
+      satisfiedBy,
+      gap: satisfiedBy ? undefined : closeoutGateTrustGap(gate, target, evidence, verifications, summaries)
     };
   });
   const status =
@@ -6177,6 +6196,9 @@ function closeoutGateStatusRow(
     requiredEvidenceKinds: gate.requiredEvidenceKinds,
     requiredOutcome: gate.requiredOutcome,
     minEvidenceCount: gate.minEvidenceCount,
+    requiredTrustLevels: gate.requiredTrustLevels,
+    requireCurrentRevision: gate.requireCurrentRevision,
+    requireCurrentGitHead: gate.requireCurrentGitHead,
     declaredCommand: gate.declaredCommand,
     expectedObservable: gate.expectedObservable,
     satisfiedBy: gate.satisfiedBy ?? mergeCloseoutGateSatisfactions(targets.flatMap((target) => target.satisfiedBy ? [target.satisfiedBy] : [])),
@@ -6216,12 +6238,12 @@ function closeoutGateTargetSatisfaction(
 ): RequiredCloseoutGate["satisfiedBy"] | undefined {
   switch (gate.kind) {
     case "verification":
-      return verificationGateStatusSatisfaction(gate, target, evidence, verifications);
+      return verificationGateStatusSatisfaction(gate, target, evidence, verifications, summaries);
     case "checkpoint":
       return checkpointGateStatusSatisfaction(gate, target, summaries);
     case "review":
     case "audit":
-      return evidenceGateStatusSatisfaction(gate, target, evidence);
+      return evidenceGateStatusSatisfaction(gate, target, evidence, summaries);
   }
 }
 
@@ -6229,7 +6251,8 @@ function verificationGateStatusSatisfaction(
   gate: RequiredCloseoutGate,
   target: WorkItem,
   evidence: readonly EvidenceRecord[],
-  verifications: readonly VerificationRecord[]
+  verifications: readonly VerificationRecord[],
+  summaries: readonly AgentSummaryRecord[]
 ): RequiredCloseoutGate["satisfiedBy"] | undefined {
   const evidenceById = new Map(evidence.map((record) => [record.meta.id, record]));
   const matches = verifications.filter((verification) => {
@@ -6241,7 +6264,7 @@ function verificationGateStatusSatisfaction(
       return (
         record?.subjectId === target.meta.id &&
         (record.outcome === "passed" || record.outcome === "observed") &&
-        evidenceSatisfiesCloseoutGate(gate, record)
+        evidenceSatisfiesCloseoutGate(gate, record, target, summaries)
       );
     });
   });
@@ -6251,7 +6274,7 @@ function verificationGateStatusSatisfaction(
       return (
         record?.subjectId === target.meta.id &&
         (record.outcome === "passed" || record.outcome === "observed") &&
-        evidenceSatisfiesCloseoutGate(gate, record)
+        evidenceSatisfiesCloseoutGate(gate, record, target, summaries)
       );
     })
   ));
@@ -6293,7 +6316,8 @@ function checkpointGateStatusSatisfaction(
 function evidenceGateStatusSatisfaction(
   gate: RequiredCloseoutGate,
   target: WorkItem,
-  evidence: readonly EvidenceRecord[]
+  evidence: readonly EvidenceRecord[],
+  summaries: readonly AgentSummaryRecord[]
 ): RequiredCloseoutGate["satisfiedBy"] | undefined {
   const allowedKinds = new Set(gate.requiredEvidenceKinds);
   const matches = evidence.filter(
@@ -6301,7 +6325,7 @@ function evidenceGateStatusSatisfaction(
       record.subjectId === target.meta.id &&
       record.outcome === gate.requiredOutcome &&
       allowedKinds.has(record.kind) &&
-      evidenceSatisfiesCloseoutGate(gate, record)
+      evidenceSatisfiesCloseoutGate(gate, record, target, summaries)
   );
   if (matches.length < gate.minEvidenceCount) {
     return undefined;
@@ -6315,14 +6339,20 @@ function evidenceGateStatusSatisfaction(
   };
 }
 
-function evidenceSatisfiesCloseoutGate(gate: RequiredCloseoutGate, record: EvidenceRecord): boolean {
+function evidenceSatisfiesCloseoutGate(
+  gate: RequiredCloseoutGate,
+  record: EvidenceRecord,
+  target: WorkItem,
+  summaries: readonly AgentSummaryRecord[]
+): boolean {
   if (gate.declaredCommand && record.command !== gate.declaredCommand) {
     return false;
   }
   if (gate.expectedObservable && !record.summary.includes(gate.expectedObservable)) {
     return false;
   }
-  return true;
+  const requirement = closeoutTrustRequirement(gate, target, summaries);
+  return requirement ? evidenceSatisfiesTrustRequirement(record, requirement) : true;
 }
 
 function closeoutGateGapRow(
@@ -6330,8 +6360,9 @@ function closeoutGateGapRow(
   owner: WorkItem,
   target: CloseoutGateTargetStatusRow
 ): CloseoutGateGapRow {
-  const reason = declaredGateGapReason(gate) ?? "required gate has no satisfying evidence";
-  const code = declaredGateGapCode(gate) ?? defaultCloseoutGateGapCode(gate.kind);
+  const trustReason = typeof target.gap?.data?.reason === "string" ? target.gap.data.reason : undefined;
+  const reason = trustReason ?? declaredGateGapReason(gate) ?? "required gate has no satisfying evidence";
+  const code = target.gap?.code ?? declaredGateGapCode(gate) ?? defaultCloseoutGateGapCode(gate.kind);
   return {
     code,
     gateId: gate.id,
@@ -6345,10 +6376,81 @@ function closeoutGateGapRow(
       gateIds: [gate.id as CloseoutGateId],
       requiredEvidenceKinds: gate.requiredEvidenceKinds,
       minEvidenceCount: gate.minEvidenceCount,
+      ...(gate.requiredTrustLevels?.length ? { requiredTrustLevels: gate.requiredTrustLevels } : {}),
+      ...(gate.requireCurrentRevision ? { requiredRevision: workRevisionContentHash(owner) } : {}),
+      ...(gate.requireCurrentGitHead ? { requiredGitHead: "0000000000000000000000000000000000000000" } : {}),
       ...(gate.declaredCommand ? { declaredCommand: gate.declaredCommand } : {}),
       ...(gate.expectedObservable ? { expectedObservable: gate.expectedObservable } : {}),
+      ...target.gap?.data,
       reason
     }
+  };
+}
+
+function closeoutGateTrustGap(
+  gate: RequiredCloseoutGate,
+  target: WorkItem,
+  evidence: readonly EvidenceRecord[],
+  verifications: readonly VerificationRecord[],
+  summaries: readonly AgentSummaryRecord[]
+): EnforcementGap | undefined {
+  const requirement = closeoutTrustRequirement(gate, target, summaries);
+  if (!requirement || gate.kind === "checkpoint") {
+    return undefined;
+  }
+  const available = closeoutCandidateEvidence(gate, target, evidence, verifications);
+  const commandMatches = gate.declaredCommand
+    ? available.filter((record) => record.command === gate.declaredCommand)
+    : available;
+  if (gate.declaredCommand && commandMatches.length === 0) {
+    return undefined;
+  }
+  const candidates = commandMatches.filter((record) =>
+    (!gate.declaredCommand || record.command === gate.declaredCommand) &&
+    (!gate.expectedObservable || record.summary.includes(gate.expectedObservable))
+  );
+  if (gate.expectedObservable && candidates.length === 0) {
+    return undefined;
+  }
+  return candidates.some((record) => evidenceSatisfiesTrustRequirement(record, requirement))
+    ? undefined
+    : evidenceTrustGap(target.meta.id, "work", candidates, requirement);
+}
+
+function closeoutCandidateEvidence(
+  gate: RequiredCloseoutGate,
+  target: WorkItem,
+  evidence: readonly EvidenceRecord[],
+  verifications: readonly VerificationRecord[]
+): readonly EvidenceRecord[] {
+  const allowedKinds = new Set(gate.requiredEvidenceKinds);
+  if (gate.kind === "verification") {
+    const verifiedEvidenceIds = new Set(verifications
+      .filter((verification) => verification.subjectId === target.meta.id && verification.verdict === "passed")
+      .flatMap((verification) => verification.evidenceIds));
+    return evidence.filter((record) => verifiedEvidenceIds.has(record.meta.id) && record.subjectId === target.meta.id);
+  }
+  return evidence.filter((record) => record.subjectId === target.meta.id && allowedKinds.has(record.kind));
+}
+
+function closeoutTrustRequirement(
+  gate: RequiredCloseoutGate,
+  target: WorkItem,
+  summaries: readonly AgentSummaryRecord[]
+): EvidenceTrustRequirement | undefined {
+  if (!gate.requiredTrustLevels?.length && !gate.requireCurrentRevision && !gate.requireCurrentGitHead) {
+    return undefined;
+  }
+  const currentGitHead = summaries
+    .filter((summary) => summary.subjectId === target.meta.id && (summary.status === "final" || summary.status === "forced"))
+    .flatMap((summary) => summary.commitShas)
+    .at(0);
+  return {
+    gateId: gate.id,
+    ...(gate.requiredTrustLevels?.length ? { requiredTrustLevels: gate.requiredTrustLevels } : {}),
+    ...(gate.requireCurrentRevision ? { currentRevision: workRevisionContentHash(target) } : {}),
+    ...(gate.requireCurrentGitHead ? { currentGitHead: currentGitHead ?? "0000000000000000000000000000000000000000" } : {}),
+    rerunCommand: `bwrk evidence run ${target.meta.id} --gate ${gate.id} --json`
   };
 }
 
@@ -8456,16 +8558,19 @@ async function schemaValidateResult(context: CliContext) {
 async function docsCheckResult(context: CliContext) {
   const generatedAt = nowIso();
   const assets = await inspectWorkflowAssets({ workspaceRoot: context.workspaceRoot });
+  const roots = resolveWorkflowAssetRoots({ workspaceRoot: context.workspaceRoot });
+  const documentationTruth = await inspectDocumentationTruth(roots.assetRoot);
   const commandMetadata = commandMetadataValidationResult();
   return {
     schemaVersion: "boreal.cli.docs.check.v1",
     generatedAt,
-    ok: assets.ok && commandMetadata.ok,
+    ok: assets.ok && commandMetadata.ok && documentationTruth.issueCount === 0,
     workflowCount: assets.workflowCount,
     templateCount: assets.templateCount,
     skillCount: assets.skillCount,
     assetIssueCount: assets.issues.length,
     assetIssues: assets.issues,
+    documentationTruth,
     commandMetadata
   };
 }
@@ -9754,13 +9859,25 @@ function requiredCloseoutGateInputsFromArgs(args: ParsedArgs): readonly Required
   const gateValues = flagValues(args, "required-gate");
   const gateCommands = flagValues(args, "gate-command");
   const gateExpectedObservables = flagValues(args, "gate-expect");
+  const gateTrust = flagValues(args, "gate-trust");
+  const requireCurrentRevision = hasFlag(args, "gate-current-revision");
+  const requireCurrentGitHead = hasFlag(args, "gate-current-git");
   if (gateValues.length === 0 && (gateCommands.length > 0 || gateExpectedObservables.length > 0)) {
     throw new BorealError("BOREAL_INVALID_INPUT", "--gate-command and --gate-expect require --required-gate");
+  }
+  if (gateValues.length === 0 && (gateTrust.length > 0 || requireCurrentRevision || requireCurrentGitHead)) {
+    throw new BorealError("BOREAL_INVALID_INPUT", "Gate policy flags require --required-gate");
   }
   if (gateCommands.length > gateValues.length || gateExpectedObservables.length > gateValues.length) {
     throw new BorealError(
       "BOREAL_INVALID_INPUT",
       "--gate-command and --gate-expect must not be repeated more times than --required-gate"
+    );
+  }
+  if (gateTrust.length > gateValues.length) {
+    throw new BorealError(
+      "BOREAL_INVALID_INPUT",
+      "--gate-trust must not be repeated more times than --required-gate"
     );
   }
   return gateValues.map((value, index) => {
@@ -9770,13 +9887,34 @@ function requiredCloseoutGateInputsFromArgs(args: ParsedArgs): readonly Required
     }
     const declaredCommand = optionalRequiredGateText(gateCommands[index], "--gate-command");
     const expectedObservable = optionalRequiredGateText(gateExpectedObservables[index], "--gate-expect");
+    const requiredTrustLevels = parseGateTrustLevels(gateTrust[index]);
     return {
       kind: parseCloseoutGateKind(kindValue),
       scope: parseCloseoutGateScope(scopeValue),
       ...(declaredCommand ? { declaredCommand } : {}),
-      ...(expectedObservable ? { expectedObservable } : {})
+      ...(expectedObservable ? { expectedObservable } : {}),
+      ...(requiredTrustLevels ? { requiredTrustLevels } : {}),
+      ...(requireCurrentRevision ? { requireCurrentRevision: true } : {}),
+      ...(requireCurrentGitHead ? { requireCurrentGitHead: true } : {})
     };
   });
+}
+
+function parseGateTrustLevels(value: string | undefined): readonly EvidenceTrustLevel[] | undefined {
+  if (value === undefined) return undefined;
+  if (value === "trusted") return ["boreal_witnessed", "external_attested"];
+  if (
+    value === "legacy_unattested" ||
+    value === "self_reported" ||
+    value === "boreal_witnessed" ||
+    value === "external_attested"
+  ) {
+    return [value];
+  }
+  throw new BorealError(
+    "BOREAL_INVALID_INPUT",
+    "--gate-trust must be trusted, legacy_unattested, self_reported, boreal_witnessed, or external_attested"
+  );
 }
 
 function optionalRequiredGateText(value: string | undefined, flagName: string): string | undefined {

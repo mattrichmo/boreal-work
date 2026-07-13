@@ -1,6 +1,6 @@
 # Tier 2 Execute-At-Close Gates
 
-Status: proposed
+Status: accepted for the technical-hardening milestone; safe execution boundary implemented, closeout wiring follows in S02T03-S02T04.
 
 Date: 2026-07-02
 
@@ -12,7 +12,7 @@ The runtime already has the building block for bounded command execution in `run
 
 ## Decision
 
-Keep execute-at-close gates proposal-only until the owner signs off on implementation. The current milestone completion request approves this design note only; no implementation task is filed by this decision.
+The owner approved the business-logic improvements while explicitly deferring users and license changes. The safe execution boundary is therefore active as an implementation contract; gate-to-evidence and closeout enforcement remain separate follow-up tasks.
 
 When implementation is approved, gate execution should be guarded by a new `RuntimePolicy` flag such as `executeDeclaredGatesAtClose`, defaulting to `false`. Existing tier 1 declared-gate behavior stays unchanged when the flag is disabled.
 
@@ -30,4 +30,4 @@ Closeout can become slower or less deterministic when the policy is enabled, so 
 
 The provenance rule keeps the safety boundary clear: trusted code executes only gate-declared commands, while untrusted runtime text remains evidence data.
 
-Before implementation work is opened, owner sign-off must explicitly accept the sandbox model, cwd contract, environment contract, timeout and output defaults, and how flaky or non-deterministic gate commands should be handled.
+`executeDeclaredGate` now enforces this boundary: no shell, strict token parsing, approved executable list, workspace-contained real path, allowlisted environment keys, dry-run preview, timeout and stream caps, and abort-signal cancellation. It accepts only `source: required_closeout_gate`; callers cannot route work descriptions, notes, summaries, or evidence text through the API.

@@ -182,6 +182,7 @@ export interface WorkCommandDependencies {
   readonly idempotentWorkReleaseResult: (context: CliContext, workId: WorkId) => Promise<unknown | undefined>;
   readonly asEvidenceId: (value: string) => EvidenceRecord["meta"]["id"];
   readonly parseVerdict: (value: string | undefined) => VerificationVerdict;
+  readonly currentGitHead: (context: CliContext) => Promise<string | undefined>;
   readonly withCliResult: <T extends object>(value: T, result: CliMutationResultInput) => T & { readonly result: unknown };
   readonly verificationCliResult: (verification: RuntimeVerification) => CliMutationResultInput;
   readonly workCliResult: (work: WorkItem | WorkItemView) => CliMutationResultInput;
@@ -512,7 +513,8 @@ async function mainWorkCommand(
         workId,
         verdict: dependencies.parseVerdict(flagValue(args, "verdict")),
         evidenceIds,
-        notes: flagValue(args, "notes")
+        notes: flagValue(args, "notes"),
+        currentGitHead: await dependencies.currentGitHead(context)
       });
       const result = dependencies.withCliResult(
         { ...verification, closeoutGateStatus: await dependencies.closeoutGateStatusForWork(context, workId) },

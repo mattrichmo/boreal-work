@@ -1,0 +1,46 @@
+name: technical portability
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  build-package-migrate-smoke:
+    name: ${{ matrix.os }} / Node ${{ matrix.node }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-latest
+          - windows-latest
+        node:
+          - "22"
+          - "24"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+      - run: corepack enable
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm check
+      - run: pnpm build
+      - name: Validate migration, rollback, package, install, and diagnostics
+        run: >-
+          pnpm exec vitest run
+          tests/runtime/storage-migrate.test.ts
+          tests/runtime/package-smoke.test.ts
+          tests/runtime/release-boundary-audit.test.ts
+          tests/runtime/process-runner.test.ts
+          --reporter=dot
+      - name: Pack, install, and probe the private UNLICENSED artifact
+        run: node tools/smoke-npm-package.mjs --json
+      - name: Verify documentation and package boundaries
+        run: node tools/audit-release-boundary.mjs --json

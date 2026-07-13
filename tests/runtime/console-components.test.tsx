@@ -76,7 +76,21 @@ describe("console component exports", () => {
     const directiveWork = workItem({
       id: "bw_work_1",
       title: "Evidence gate",
-      directiveSummary: directiveSummaryFixture("bw_work_1")
+      directiveSummary: directiveSummaryFixture("bw_work_1"),
+      requiredCloseoutGates: [{
+        id: "bw_gate_trustfixture" as WorkItemView["requiredCloseoutGates"][number]["id"],
+        subjectId: "bw_work_1" as WorkItemView["requiredCloseoutGates"][number]["subjectId"],
+        subjectType: "work",
+        kind: "verification",
+        scope: "self",
+        status: "open",
+        requiredEvidenceKinds: ["test"],
+        requiredOutcome: "passed",
+        minEvidenceCount: 1,
+        requiredTrustLevels: ["boreal_witnessed", "external_attested"],
+        requireCurrentRevision: true,
+        requireCurrentGitHead: true
+      }]
     });
     const html = renderToStaticMarkup(
       <>
@@ -101,6 +115,9 @@ describe("console component exports", () => {
     expect(html).toContain("Directive acknowledgements");
     expect(html).toContain("acknowledgement before close");
     expect(html).toContain("The user-facing closeout summary must be prepared from verified data.");
+    expect(html).toContain("trust boreal_witnessed, external_attested");
+    expect(html).toContain("revision current");
+    expect(html).toContain("Git current checkpoint");
     expect(html).toContain("closeout.summary-required");
     expect(html).toContain("workflows/40-work/claim-and-finish-work.md");
   });

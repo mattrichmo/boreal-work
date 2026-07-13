@@ -1,7 +1,7 @@
 import { existsSync } from "node:fs";
-import { rename, rm } from "node:fs/promises";
+import { copyFile, rm } from "node:fs/promises";
 
-import { BorealError, nowIso, resolveWorkspacePaths, type RuntimeEvent, type RuntimeOperation } from "@boreal/core";
+import { BorealError, hashContent, nowIso, resolveWorkspacePaths, withContentHash, type RuntimeEvent, type RuntimeOperation } from "@boreal/core";
 import {
   FileBorealStore,
   FileEventLog,
@@ -43,6 +43,22 @@ export interface StorageMigrationResult {
     readonly seq: number;
     readonly hash: string;
   };
+  readonly preflight: {
+    readonly sourceReadable: true;
+    readonly sourceStorage: ProjectStorageKind;
+    readonly targetStorage: ProjectStorageKind;
+  };
+  readonly parity: {
+    readonly counts: true;
+    readonly contentHash: true;
+    readonly sourceContentHash: string;
+    readonly targetContentHash: string;
+  };
+  readonly rollback: {
+    readonly command: string;
+    readonly sourceRetained: boolean;
+    readonly backupPath?: string;
+  };
   readonly markerPath: string;
   readonly stateBackupPath?: string;
 }
@@ -56,6 +72,7 @@ export async function migrateStorage(context: CliContext, target: "objects" | "f
   if (from === to) {
     const snapshot = await snapshotForStorage(context.workspaceRoot, from);
     const head = await new FileEventLog({ path: paths.eventLogFile }).head();
+    const contentHash = snapshotContentHash(snapshot);
     return {
       schemaVersion: STORAGE_MIGRATION_SCHEMA_VERSION,
       migrated: false,
@@ -64,6 +81,9 @@ export async function migrateStorage(context: CliContext, target: "objects" | "f
       workspaceRoot: context.workspaceRoot,
       records: countSnapshot(snapshot),
       eventLog: { ok: true, ...head },
+      preflight: { sourceReadable: true, sourceStorage: from, targetStorage: to },
+      parity: { counts: true, contentHash: true, sourceContentHash: contentHash, targetContentHash: contentHash },
+      rollback: { command: `bwrk storage migrate --to ${to === "objects-v1" ? "file" : "objects"} --json`, sourceRetained: true },
       markerPath
     };
   }
@@ -83,16 +103,19 @@ async function migrateFileToObjects(
   await rm(paths.objectsDir, { recursive: true, force: true });
   const target = new ObjectDirBorealStore({ rootDir });
   await target.write((writer) => writeSnapshot(writer, snapshot));
-  await assertMigratedCounts(snapshot, await target.snapshot());
+  const parity = assertMigratedParity(snapshot, await target.snapshot());
   const eventLog = await verifiedEventLog(paths.eventLogFile);
 
   const stateBackupPath = existsSync(paths.stateFile)
     ? `${paths.stateFile}.migrated-${nowIso().replace(/[:.]/gu, "-")}`
     : undefined;
   if (stateBackupPath) {
-    await rename(paths.stateFile, stateBackupPath);
+    await copyFile(paths.stateFile, stateBackupPath);
   }
   const marker = await writeProjectStorageMarker(rootDir, to);
+  if (stateBackupPath) {
+    await rm(paths.stateFile, { force: true });
+  }
   return {
     schemaVersion: STORAGE_MIGRATION_SCHEMA_VERSION,
     migrated: true,
@@ -101,6 +124,13 @@ async function migrateFileToObjects(
     workspaceRoot: rootDir,
     records: countSnapshot(snapshot),
     eventLog,
+    preflight: { sourceReadable: true, sourceStorage: from, targetStorage: to },
+    parity,
+    rollback: {
+      command: "bwrk storage migrate --to file --json",
+      sourceRetained: false,
+      ...(stateBackupPath ? { backupPath: stateBackupPath } : {})
+    },
     markerPath: marker.path,
     stateBackupPath
   };
@@ -118,7 +148,7 @@ async function migrateObjectsToFile(
   await rm(paths.stateFile, { force: true });
   const target = new FileBorealStore({ rootDir });
   await target.write((writer) => writeSnapshot(writer, snapshot));
-  await assertMigratedCounts(snapshot, await target.snapshot());
+  const parity = assertMigratedParity(snapshot, await target.snapshot());
   const eventLog = await verifiedEventLog(paths.eventLogFile);
   const marker = await writeProjectStorageMarker(rootDir, to);
 
@@ -130,6 +160,9 @@ async function migrateObjectsToFile(
     workspaceRoot: rootDir,
     records: countSnapshot(snapshot),
     eventLog,
+    preflight: { sourceReadable: true, sourceStorage: from, targetStorage: to },
+    parity,
+    rollback: { command: "bwrk storage migrate --to objects --json", sourceRetained: true },
     markerPath: marker.path
   };
 }
@@ -154,7 +187,7 @@ async function writeSnapshot(writer: BorealWriter, snapshot: StoreSnapshot): Pro
   for (const record of snapshot.operations ?? []) await writer.putOperation(record as RuntimeOperation);
 }
 
-async function assertMigratedCounts(expected: StoreSnapshot, actual: StoreSnapshot): Promise<void> {
+function assertMigratedParity(expected: StoreSnapshot, actual: StoreSnapshot): StorageMigrationResult["parity"] {
   const expectedCounts = countSnapshot(expected);
   const actualCounts = countSnapshot(actual);
   if (JSON.stringify(expectedCounts) !== JSON.stringify(actualCounts)) {
@@ -163,6 +196,57 @@ async function assertMigratedCounts(expected: StoreSnapshot, actual: StoreSnapsh
       actual: actualCounts
     });
   }
+  const sourceContentHash = snapshotContentHash(expected);
+  const targetContentHash = snapshotContentHash(actual);
+  if (sourceContentHash !== targetContentHash) {
+    const sourceSections = migrationSectionHashes(expected);
+    const targetSections = migrationSectionHashes(actual);
+    throw new BorealError("BOREAL_STORAGE_ERROR", "Storage migration content parity verification failed", {
+      sourceContentHash,
+      targetContentHash,
+      differingSections: Object.keys(sourceSections).filter((section) => sourceSections[section] !== targetSections[section]),
+      sourceSections,
+      targetSections
+    });
+  }
+  return { counts: true, contentHash: true, sourceContentHash, targetContentHash };
+}
+
+function snapshotContentHash(snapshot: StoreSnapshot): string {
+  return hashContent(portableMigrationSnapshot(snapshot));
+}
+
+function portableMigrationSnapshot(snapshot: StoreSnapshot) {
+  return {
+    workItems: stableRecords(snapshot.workItems),
+    agentSummaries: stableRecords(snapshot.agentSummaries),
+    evidence: stableRecords(snapshot.evidence),
+    verifications: stableRecords(snapshot.verifications),
+    directiveAcknowledgements: stableRecords(snapshot.directiveAcknowledgements),
+    knowledgeSources: stableRecords(snapshot.knowledgeSources),
+    claims: stableRecords(snapshot.claims),
+    decisions: stableRecords(snapshot.decisions),
+    graphEdges: stableRecords(snapshot.graphEdges),
+    reservations: stableRecords(snapshot.reservations),
+    reviewerHeartbeats: stableRecords(snapshot.reviewerHeartbeats),
+    events: (snapshot.events ?? []).map(portableMigrationEvent)
+  };
+}
+
+function stableRecords<T extends { readonly meta: { readonly id: string } }>(records: readonly T[] | undefined): readonly T[] {
+  return [...(records ?? [])].sort((left, right) => left.meta.id.localeCompare(right.meta.id));
+}
+
+function migrationSectionHashes(snapshot: StoreSnapshot): Record<string, string> {
+  return Object.fromEntries(
+    Object.entries(portableMigrationSnapshot(snapshot)).map(([section, records]) => [section, hashContent(records)])
+  );
+}
+
+function portableMigrationEvent(value: RuntimeEvent): RuntimeEvent {
+  if (value.operationId === undefined && value.operationLink === undefined) return value;
+  const { operationId: _operationId, operationLink: _operationLink, ...event } = value;
+  return withContentHash(event as RuntimeEvent);
 }
 
 async function verifiedEventLog(path: string): Promise<StorageMigrationResult["eventLog"]> {

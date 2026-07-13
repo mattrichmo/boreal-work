@@ -1,13 +1,18 @@
 import {
   BorealError,
+  EVIDENCE_ATTESTATION_SCHEMA_VERSION,
   createRecordMeta,
   deterministicId,
   normalizeMachineString,
   type ActorRef,
+  type CloseoutGateId,
+  type ContentHash,
   type EvidenceId,
+  type EvidenceAttestation,
   type EvidenceKind,
   type EvidenceOutcome,
   type EvidenceRecord,
+  type EvidenceTrustLevel,
   type EnforcementGap,
   type IsoTimestamp,
   type RuntimePolicy,
@@ -26,6 +31,7 @@ export interface RecordEvidenceInput {
   readonly command?: string;
   readonly uri?: string;
   readonly observedAt?: IsoTimestamp;
+  readonly attestation?: EvidenceAttestation;
   readonly actor: ActorRef;
   readonly now: IsoTimestamp;
 }
@@ -38,8 +44,17 @@ export interface VerifySubjectInput {
   readonly availableEvidence: readonly EvidenceRecord[];
   readonly notes?: string;
   readonly policy: Pick<RuntimePolicy, "requireEvidenceForVerification">;
+  readonly trustRequirements?: readonly EvidenceTrustRequirement[];
   readonly actor: ActorRef;
   readonly now: IsoTimestamp;
+}
+
+export interface EvidenceTrustRequirement {
+  readonly gateId?: CloseoutGateId;
+  readonly requiredTrustLevels?: readonly EvidenceTrustLevel[];
+  readonly currentRevision?: ContentHash;
+  readonly currentGitHead?: string;
+  readonly rerunCommand?: string;
 }
 
 export function recordEvidence(input: RecordEvidenceInput): EvidenceRecord {
@@ -47,13 +62,20 @@ export function recordEvidence(input: RecordEvidenceInput): EvidenceRecord {
   const observedAt = input.observedAt ?? input.now;
   const command = redactSensitiveCommand(input.command);
   const uri = input.uri === undefined ? undefined : normalizeMachineString(input.uri, "uri");
+  const attestation = input.attestation ?? {
+    schemaVersion: EVIDENCE_ATTESTATION_SCHEMA_VERSION,
+    trustLevel: "self_reported",
+    producer: input.actor,
+    recordedAt: input.now
+  };
   const id = deterministicId<EvidenceId>("evidence", {
     subjectId: input.subjectId,
     kind: input.kind,
     summary,
     command: command ?? null,
     uri: uri ?? null,
-    observedAt
+    observedAt,
+    attestation
   });
 
   return withContentHash({
@@ -69,8 +91,13 @@ export function recordEvidence(input: RecordEvidenceInput): EvidenceRecord {
     outcome: input.outcome ?? "observed",
     command,
     uri,
-    observedAt
+    observedAt,
+    attestation
   });
+}
+
+export function evidenceTrustLevel(record: EvidenceRecord): EvidenceTrustLevel {
+  return record.attestation?.trustLevel ?? "legacy_unattested";
 }
 
 export function verifySubject(input: VerifySubjectInput): VerificationRecord {
@@ -133,6 +160,22 @@ export function verifySubject(input: VerifySubjectInput): VerificationRecord {
       gaps
     );
   }
+  if (input.verdict === "passed") {
+    const trustGaps = (input.trustRequirements ?? []).flatMap((requirement) => {
+      const candidates = selectedEvidence.filter((record) => record.outcome === "passed");
+      return candidates.some((record) => evidenceSatisfiesTrustRequirement(record, requirement))
+        ? []
+        : [evidenceTrustGap(input.subjectId, input.subjectType, candidates, requirement)];
+    });
+    if (trustGaps.length > 0) {
+      throw new BorealError(
+        "BOREAL_POLICY_VIOLATION",
+        "Passed verification does not satisfy evidence trust and freshness policy",
+        { evidenceIds, gaps: trustGaps },
+        trustGaps
+      );
+    }
+  }
 
   const id = deterministicId<VerificationId>("verification", {
     subjectId: input.subjectId,
@@ -154,6 +197,73 @@ export function verifySubject(input: VerifySubjectInput): VerificationRecord {
     verifiedAt: input.now,
     notes
   });
+}
+
+export function evidenceSatisfiesTrustRequirement(
+  record: EvidenceRecord,
+  requirement: EvidenceTrustRequirement
+): boolean {
+  if (record.outcome !== "passed") return false;
+  const attestation = record.attestation;
+  if (attestation?.command) {
+    if (
+      attestation.command.exitCode !== undefined && attestation.command.exitCode !== 0 ||
+      attestation.command.timedOut ||
+      attestation.command.cancelled ||
+      attestation.command.expectedObservableMatched === false
+    ) return false;
+  }
+  if (attestation?.trustLevel === "external_attested" && attestation.external?.verificationStatus !== "verified") {
+    return false;
+  }
+  if (requirement.requiredTrustLevels?.length && !requirement.requiredTrustLevels.includes(evidenceTrustLevel(record))) {
+    return false;
+  }
+  if (requirement.currentRevision && attestation?.subjectRevision?.contentHash !== requirement.currentRevision) {
+    return false;
+  }
+  if (requirement.currentGitHead && attestation?.git?.headSha !== requirement.currentGitHead) {
+    return false;
+  }
+  return true;
+}
+
+export function evidenceTrustGap(
+  subjectId: string,
+  subjectType: string,
+  candidates: readonly EvidenceRecord[],
+  requirement: EvidenceTrustRequirement
+): EnforcementGap {
+  const base = {
+    subjectType: enforcementSubjectType(subjectType),
+    subjectId,
+    data: {
+      ...(requirement.gateId ? { gateIds: [requirement.gateId] } : {}),
+      evidenceIds: candidates.map((record) => record.meta.id),
+      ...(requirement.requiredTrustLevels ? { requiredTrustLevels: requirement.requiredTrustLevels } : {}),
+      ...(requirement.currentRevision ? { requiredRevision: requirement.currentRevision } : {}),
+      ...(requirement.currentGitHead ? { requiredGitHead: requirement.currentGitHead } : {}),
+      ...(requirement.rerunCommand ? { recommendedCommands: [requirement.rerunCommand], command: requirement.rerunCommand } : {})
+    }
+  } as const;
+  const failed = candidates.filter((record) => {
+    const command = record.attestation?.command;
+    return record.outcome !== "passed" || command?.timedOut || command?.cancelled ||
+      command?.expectedObservableMatched === false || (command?.exitCode !== undefined && command.exitCode !== 0);
+  });
+  if (failed.length > 0 || candidates.length === 0) {
+    return { ...base, code: "gate.evidence.failed", data: { ...base.data, reason: candidates.length === 0 ? "no passed evidence selected" : "selected evidence records a failed or interrupted execution" } };
+  }
+  if (candidates.some((record) => record.attestation?.trustLevel === "external_attested" && record.attestation.external?.verificationStatus !== "verified")) {
+    return { ...base, code: "gate.evidence.external-unverified", data: { ...base.data, reason: "external attestation is not verified" } };
+  }
+  if (requirement.requiredTrustLevels?.length && candidates.every((record) => !requirement.requiredTrustLevels?.includes(evidenceTrustLevel(record)))) {
+    return { ...base, code: "gate.evidence.trust-insufficient", data: { ...base.data, observed: candidates.map(evidenceTrustLevel), reason: "evidence trust level is not accepted by the gate" } };
+  }
+  if (requirement.currentRevision && candidates.every((record) => record.attestation?.subjectRevision?.contentHash !== requirement.currentRevision)) {
+    return { ...base, code: "gate.evidence.revision-stale", data: { ...base.data, observed: candidates.map((record) => record.attestation?.subjectRevision?.contentHash ?? "<missing>"), reason: "evidence was captured for a different work revision" } };
+  }
+  return { ...base, code: "gate.evidence.git-stale", data: { ...base.data, observed: candidates.map((record) => record.attestation?.git?.headSha ?? "<missing>"), reason: "evidence was captured for a different Git head" } };
 }
 
 function redactSensitiveCommand(command: string | undefined): string | undefined {

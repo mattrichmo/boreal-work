@@ -1,5 +1,7 @@
 # Publishing Boreal Work
 
+> Publication is not currently authorized. The repository remains private/unlicensed, and the technical portability workflow only packs, installs, hashes, and probes a temporary `UNLICENSED` artifact. See the [release boundary audit](../security/RELEASE_BOUNDARY_AUDIT.md). The commands below are retained as release-engineering documentation, not as approval to publish or change the license.
+
 This is the owner handoff for the npm and Homebrew release channels. The source workspace stays private and workspace-shaped; the publishable npm package is staged from the bundled CLI dist artifact.
 
 ## Version policy

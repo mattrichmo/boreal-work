@@ -4,6 +4,7 @@ import { basename, dirname, join, relative } from "node:path";
 import { describe, expect, it } from "vitest";
 
 import { COMMAND_DEFINITIONS, commandPath } from "../../apps/cli/src/command-registry.ts";
+import { inspectDocumentationTruth } from "../../apps/cli/src/documentation-truth.ts";
 
 const rootDir = new URL("../..", import.meta.url).pathname;
 const requiredWorkflowSections = [
@@ -29,6 +30,17 @@ const directiveGuidanceMarkers = [
 ] as const;
 
 describe("workflow, template, and skill docs", () => {
+  it("keeps public command, storage, and interface docs aligned with live contracts", async () => {
+    const result = await inspectDocumentationTruth(rootDir);
+
+    expect(result.checked).toBe(true);
+    expect(result.commandCount).toBe(COMMAND_DEFINITIONS.length);
+    expect(result.documentedCommandCount).toBe(COMMAND_DEFINITIONS.length);
+    expect(result.storageContract).toBe("objects-v1-default-file-v2-legacy");
+    expect(result.interfaceStatus.tui).toBe("implemented-optional");
+    expect(result.issues).toEqual([]);
+  });
+
   it("keeps every workflow machine-checkable and routed to valid CLI commands", async () => {
     const workflowFiles = (await listMarkdownFiles(join(rootDir, "workflows"))).filter(
       (file) => !file.endsWith("README.md") && !file.endsWith("_workflow-template.md")
@@ -193,6 +205,7 @@ describe("workflow, template, and skill docs", () => {
 
   it("keeps runtime versioning and migration policy explicit", async () => {
     const runtime = await readFile(join(rootDir, "docs/architecture/RUNTIME.md"), "utf8");
+    const compatibility = await readFile(join(rootDir, "docs/architecture/COMPATIBILITY_POLICY.md"), "utf8");
     const commands = await readFile(join(rootDir, "docs/cli/COMMANDS.md"), "utf8");
 
     expect(runtime).toContain("## Versioning And Migration Policy");
@@ -202,8 +215,23 @@ describe("workflow, template, and skill docs", () => {
     expect(runtime).toContain("boreal.file-store.v2");
     expect(runtime).toContain("Migrations that cannot be cleanly reversed must create a `boreal.export.v1` recovery snapshot");
     expect(runtime).toContain("Breaking persisted runtime or adapter changes require a new schema version");
+    expect(compatibility).toContain("## Support Matrix");
+    expect(compatibility).toContain("## Migration Transaction Contract");
+    expect(compatibility).toContain("canonical snapshot content hash");
+    expect(compatibility).toContain("This policy changes neither the repository's current private/unlicensed state nor its publication status");
     expect(commands).toContain("`boreal.cli.version.v1`");
     expect(commands).toContain("Non-reversible migrations must be snapshot-backed by a `boreal.export.v1` recovery snapshot");
+  });
+
+  it("keeps evidence outcome separate from provenance strength", async () => {
+    const trust = await readFile(join(rootDir, "docs/architecture/EVIDENCE_TRUST.md"), "utf8");
+    expect(trust).toContain("`legacy_unattested`");
+    expect(trust).toContain("`self_reported`");
+    expect(trust).toContain("`boreal_witnessed`");
+    expect(trust).toContain("`external_attested`");
+    expect(trust).toContain("Missing attestation data is never upgraded");
+    expect(trust).toContain("Producer and witness are distinct identities");
+    expect(trust).toContain("never invokes a shell");
   });
 
   it("keeps dashboard usage docs distinct from JSON and plain CLI modes", async () => {

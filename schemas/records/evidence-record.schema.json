@@ -13,7 +13,131 @@
     "outcome": { "enum": ["passed", "failed", "observed", "unknown"] },
     "command": { "type": "string" },
     "uri": { "type": "string" },
-    "observedAt": { "type": "string", "format": "date-time" }
+    "observedAt": { "type": "string", "format": "date-time" },
+    "attestation": { "$ref": "#/$defs/attestation" }
+  },
+  "$defs": {
+    "contentHash": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" },
+    "actor": {
+      "type": "object",
+      "required": ["id", "kind"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "kind": { "enum": ["human", "agent", "system"] },
+        "displayName": { "type": "string" },
+        "system": { "type": "string" },
+        "version": { "type": "string" }
+      }
+    },
+    "attestation": {
+      "type": "object",
+      "required": ["schemaVersion", "trustLevel", "producer", "recordedAt"],
+      "properties": {
+        "schemaVersion": { "const": "boreal.evidence-attestation.v1" },
+        "trustLevel": { "enum": ["legacy_unattested", "self_reported", "boreal_witnessed", "external_attested"] },
+        "producer": { "$ref": "#/$defs/actor" },
+        "witness": {
+          "type": "object",
+          "required": ["kind", "id"],
+          "properties": {
+            "kind": { "enum": ["boreal", "external_ci", "human"] },
+            "id": { "type": "string", "minLength": 1 },
+            "issuer": { "type": "string" }
+          }
+        },
+        "recordedAt": { "type": "string", "format": "date-time" },
+        "witnessedAt": { "type": "string", "format": "date-time" },
+        "subjectRevision": {
+          "type": "object",
+          "required": ["contentHash"],
+          "properties": {
+            "contentHash": { "$ref": "#/$defs/contentHash" },
+            "updatedAt": { "type": "string", "format": "date-time" }
+          }
+        },
+        "environment": {
+          "type": "object",
+          "required": ["platform", "arch"],
+          "properties": {
+            "platform": { "type": "string", "minLength": 1 },
+            "arch": { "type": "string", "minLength": 1 },
+            "nodeVersion": { "type": "string" },
+            "cwdHash": { "$ref": "#/$defs/contentHash" }
+          }
+        },
+        "command": {
+          "type": "object",
+          "required": ["commandHash"],
+          "properties": {
+            "commandHash": { "$ref": "#/$defs/contentHash" },
+            "startedAt": { "type": "string", "format": "date-time" },
+            "completedAt": { "type": "string", "format": "date-time" },
+            "durationMs": { "type": "integer", "minimum": 0 },
+            "exitCode": { "type": "integer", "minimum": 0 },
+            "signal": { "type": "string" },
+            "timedOut": { "type": "boolean" },
+            "cancelled": { "type": "boolean" },
+            "expectedObservableMatched": { "type": "boolean" }
+          }
+        },
+        "output": {
+          "type": "object",
+          "required": ["stdoutBytes", "stderrBytes"],
+          "properties": {
+            "stdoutHash": { "$ref": "#/$defs/contentHash" },
+            "stderrHash": { "$ref": "#/$defs/contentHash" },
+            "stdoutBytes": { "type": "integer", "minimum": 0 },
+            "stderrBytes": { "type": "integer", "minimum": 0 },
+            "truncated": { "type": "boolean" },
+            "stdoutExcerpt": { "type": "string" },
+            "stderrExcerpt": { "type": "string" }
+          }
+        },
+        "git": {
+          "type": "object",
+          "required": ["branch", "headSha", "dirty", "dirtyFingerprint", "dirtyFileCount"],
+          "properties": {
+            "branch": { "type": "string" },
+            "headSha": { "type": "string", "pattern": "^[a-f0-9]{40,64}$" },
+            "dirty": { "type": "boolean" },
+            "dirtyFingerprint": { "$ref": "#/$defs/contentHash" },
+            "dirtyFileCount": { "type": "integer", "minimum": 0 }
+          }
+        },
+        "tools": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["name", "version"],
+            "properties": {
+              "name": { "type": "string", "minLength": 1 },
+              "version": { "type": "string", "minLength": 1 }
+            }
+          }
+        },
+        "artifacts": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["path", "contentHash", "bytes"],
+            "properties": {
+              "path": { "type": "string", "minLength": 1 },
+              "contentHash": { "$ref": "#/$defs/contentHash" },
+              "bytes": { "type": "integer", "minimum": 0 }
+            }
+          }
+        },
+        "external": {
+          "type": "object",
+          "required": ["issuer", "resultUri", "verificationStatus"],
+          "properties": {
+            "issuer": { "type": "string", "minLength": 1 },
+            "resultUri": { "type": "string", "minLength": 1 },
+            "verificationStatus": { "enum": ["unverified", "verified", "rejected"] },
+            "attestationId": { "type": "string" }
+          }
+        }
+      }
+    }
   }
 }
-

@@ -85,6 +85,8 @@ Boreal supports three install scopes on one machine: a source checkout (`pnpm bw
 
 Patch-level skew between the machine launcher and repo-pinned binary is allowed. Major or minor skew is reported by `bwrk doctor` as `install.version_skew` with channel-correct upgrade commands. A binary may only operate on the file-store schema it supports (`boreal.file-store.v2` today, with `boreal.file-store.v1` accepted as a legacy migration input); newer state files are rejected by doctor and by the storage adapter instead of being read silently.
 
+`bwrk version --json` publishes the full `0.x` SemVer, runtime, storage, launcher, and installed-skill support matrix. See the [compatibility policy](architecture/COMPATIBILITY_POLICY.md) before a minor-version upgrade or storage migration. New workspaces use `objects-v1`; `file-v2` is the legacy read/write and rollback adapter, while `boreal.file-store.v1` is import-only.
+
 The rest of this guide uses `pnpm bwrk`; substitute `bwrk` if you installed the npm package, Homebrew formula, machine installer, or local shim.
 
 ## Install Boreal into a project

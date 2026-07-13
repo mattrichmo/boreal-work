@@ -227,7 +227,7 @@ JSON `data` uses schema `boreal.cli.directives.show.v1`.
 bwrk directives compile [--fixture <name>] [--command <command-path>] [--subject-type <type>] [--subject-id <id>] [--subject-title <title>] [--status <status>] [--json]
 ```
 
-Compiles a trusted agent directive bundle from a deterministic debug fixture or explicit command and subject snapshot. Use repeated `--label`, `--dependency`, `--active-blocker`, `--open-descendant`, `--evidence`, `--verification`, `--commit`, and `--dirty-path` flags to shape the synthetic snapshot.
+Compiles a trusted agent directive bundle from a deterministic debug fixture or explicit command and subject snapshot. Use repeated `--label`, `--dependency`, `--active-blocker`, `--open-descendant`, `--evidence`, `--verification`, `--commit`, and `--dirty-path` flags to shape the synthetic snapshot. `--summary-id` and `--summary-uri` provide closeout or handoff summary context.
 
 JSON `data` uses schema `boreal.cli.directives.compile.v1` and includes the snapshot command path, selected registry IDs, selection provenance, data payloads, missing requirements, assembly issues, and compiled bundle.
 
@@ -247,7 +247,7 @@ JSON `data` uses schema `boreal.cli.directives.render.v1` and includes the rende
 bwrk directives explain <directive-id> [--fixture <name>] [--json]
 ```
 
-Explains why a directive was emitted, selected but blocked by missing data, or not selected for a debug fixture or explicit command and subject snapshot. The same compile-shaping flags accepted by `directives compile` are accepted here.
+Explains why a directive was emitted, selected but blocked by missing data, or not selected for a debug fixture or explicit command and subject snapshot. The same compile-shaping flags accepted by `directives compile` are accepted here: `--command`, `--subject-type`, `--subject-id`, `--subject-title`, `--status`, repeated `--label`, `--dependency`, `--active-blocker`, `--open-descendant`, `--evidence`, `--verification`, `--commit`, and `--dirty-path`, plus `--summary-id` and `--summary-uri`.
 
 JSON `data` uses schema `boreal.cli.directives.explain.v1` and includes selector checks, selection provenance, relevant issues, missing data, conflicts, and the emitted directive when present.
 
@@ -327,7 +327,7 @@ JSON mode returns:
 bwrk version [--json]
 ```
 
-Prints stable Boreal CLI package and runtime version information. `bwrk --version` remains a one-line human probe (`boreal-work <version>`). `bwrk version --json` and `bwrk --version --json` return a `boreal.cli.version.v1` payload with the root package version, `@boreal/cli` package version, Node/package-manager runtime, runtime record schema, file-store schema, export/snapshot schema, JSONL ledger schemas, generated search and SQLite cache schemas, project setup/registry/vault schemas, daemon status schemas, published schema IDs, and the v1 migration policy. Non-reversible migrations must be snapshot-backed by a `boreal.export.v1` recovery snapshot.
+Prints stable Boreal CLI package and runtime version information. `bwrk --version` remains a one-line human probe (`boreal-work <version>`). `bwrk version --json` and `bwrk --version --json` return a `boreal.cli.version.v1` payload with the root package version, `@boreal/cli` package version, Node/package-manager runtime, runtime record schema, file-store schema, export/snapshot schema, JSONL ledger schemas, generated search and SQLite cache schemas, project setup/registry/vault schemas, daemon status schemas, published schema IDs, the v1 migration policy, and the machine-readable `0.x` compatibility matrix for launcher skew, storage modes, and installed skills. Non-reversible migrations must be snapshot-backed by a `boreal.export.v1` recovery snapshot.
 
 ## `start`
 
@@ -838,7 +838,7 @@ JSON `data` shape:
 ## `work create`
 
 ```bash
-bwrk work create <title> [--description <text>] [--priority low|normal|high|critical] [--kind <kind>] [--label <label>...] [--acceptance <text>...] [--required-gate verification|checkpoint|review|audit[:self|direct_children|descendants]...] [--gate-command <command>...] [--gate-expect <text>...] [--source <source-ref>...] [--ready] [--json]
+bwrk work create <title> [--description <text>] [--priority low|normal|high|critical] [--kind <kind>] [--label <label>...] [--acceptance <text>...] [--required-gate verification|checkpoint|review|audit[:self|direct_children|descendants]...] [--gate-command <command>...] [--gate-expect <text>...] [--gate-trust trusted|boreal_witnessed|external_attested...] [--gate-current-revision] [--gate-current-git] [--source <source-ref>...] [--ready] [--json]
 ```
 
 Creates a work item. `--label`, `--acceptance`, `--required-gate`, and `--source` may be repeated. Source references are stored on the work record metadata so promoted discoveries keep their original context.
@@ -849,6 +849,8 @@ Behavior:
 - Default `priority` is `normal`.
 - `--required-gate` stores first-class closeout gate metadata on the work record. Use `kind` for a self-scoped gate or `kind:scope` for `self`, `direct_children`, or `descendants`; for example `--required-gate review --required-gate audit:descendants`.
 - `--gate-command` and `--gate-expect` attach declared command and observable metadata to the same-index `--required-gate`.
+- `--gate-trust` limits acceptable evidence to Boreal-witnessed or verified external attestations. `trusted` accepts either; repeated flags align with repeated gates by index.
+- `--gate-current-revision` and `--gate-current-git` make verification and closeout reject evidence captured for an older work contract or Git checkpoint.
 - `--ready` marks the new item ready in the same runtime write transaction.
 
 Example:
@@ -1343,16 +1345,28 @@ JSON `data` includes inspected counts, linked event IDs, legacy-marked event IDs
 ## `evidence add`
 
 ```bash
-bwrk evidence add <work-id> --summary <text> [--kind command|test|diff|review|artifact|note] [--outcome passed|failed|observed|unknown] [--command <cmd>] [--uri <uri>] [--json]
+bwrk evidence add <work-id> --summary <text> [--kind command|test|diff|review|artifact|note] [--outcome passed|failed|observed|unknown] [--command <cmd>] [--uri <uri>] [--attestation external-ci|human --issuer <id> --result-uri <uri> --verification-status unverified|verified|rejected] [--json]
 ```
 
 Records evidence against a work item and moves the work item to `needs_verification` unless it is already closed. Use `--kind artifact` for files or generated artifacts such as source maps; `document` is a source/raw kind, not an evidence kind. JSON output includes the created evidence record and `data.result`; inspect `closeoutGateStatus` through `work verify`, `summary compose`, or `summary show`. A passed `--kind review` record satisfies `review` gates and can satisfy `audit` gates; passed `command` and `artifact` evidence can also satisfy `audit` gates.
+
+Use `--attestation external-ci|human` with issuer, result URI, and verification status to import evidence produced outside Boreal. Imported records remain `external_attested`; they never impersonate a Boreal witness. Add `--subject-revision sha256:...`, `--subject-updated-at <iso>`, and `--attestation-id <id>` when the external system provides them. Gates accept external evidence only when its verification status is `verified` and its revision matches any configured freshness policy.
 
 Example:
 
 ```bash
 bwrk evidence add bw_work_... --summary "pnpm test passed" --kind test --outcome passed --command "pnpm test"
 ```
+
+## `evidence run`
+
+```bash
+bwrk evidence run <work-ref> [--gate <gate-id|kind[:scope]>] [--cwd <path>] [--artifact <path>...] [--timeout-ms <n>] [--stdout-max-bytes <n>] [--stderr-max-bytes <n>] [--dry-run] [--json]
+```
+
+Executes exactly one command already declared on the work item's closeout gates. The runner is shell-free, workspace-contained, timeout-bounded, and output-bounded. It persists the command and working directory, timing and exit state, output byte counts/hashes/excerpts, Git branch/HEAD/dirty fingerprint, tool versions, subject revision, and hashes for repeated `--artifact` paths.
+
+Failure, timeout, cancellation, output truncation, and observable mismatch are retained as failed evidence and return a non-zero exit code. They cannot satisfy a passed gate. `--dry-run` previews the executable, arguments, working directory, environment boundary, and limits without executing or recording evidence.
 
 ## `summary create`
 
@@ -1370,7 +1384,7 @@ Forced summaries require both `--force-reason` and `--force-comment`. Use forced
 bwrk summary compose <work-ref|subject-id> [--subject-type work|sprint|milestone|phase|project|session] [--kind task|sprint|milestone|phase|project|session|legacy_backfill] [--title <text>] [--status draft|final|forced] [--outcome completed|partial|deferred|duplicate|cancelled|blocked|no_change] [--evidence <id>...] [--verification <id>...] [--commit <sha>...] [--dirty-path <note>...] [--child-summary <id>...] [--parent-summary <id>] [--duplicate-of <id>] [--force-reason <code>] [--force-comment <text>] [--artifact-uri <uri>] [--no-render] [--json]
 ```
 
-Builds the summary body from the current work item, evidence, verification, child dependency tree, closeout gate status, and prior summaries, then persists the same record shape as `summary create`. Generated Markdown includes a `Closeout Gates` section.
+Builds the summary body from the current work item, evidence, verification, child dependency tree, closeout gate status, and prior summaries, then persists the same record shape as `summary create`. Repeat `--completed <work|title|outcome|notes>` to add an explicit completed-work row. Generated Markdown includes a `Closeout Gates` section.
 
 ## `summary show`
 
@@ -1423,12 +1437,12 @@ Closes a work item. Runtime policy requires a passing verification before close,
 ## `work edit`
 
 ```bash
-bwrk work edit <work-ref> [--title <text>] [--description <text>] [--kind issue|task|sprint|milestone] [--priority low|normal|high|critical] [--label <label>...] [--acceptance <text>...] [--required-gate verification|checkpoint|review|audit[:self|direct_children|descendants]... [--gate-command <command>...] [--gate-expect <text>...]|--clear-required-gates] [--force-gate <gate-id|kind[:scope]>... --force-gate-reason <code> --force-gate-comment <text>] [--force-gate-evidence <evidence-id>...] [--json]
+bwrk work edit <work-ref> [--title <text>] [--description <text>] [--kind issue|task|sprint|milestone] [--priority low|normal|high|critical] [--label <label>...] [--acceptance <text>...] [--required-gate verification|checkpoint|review|audit[:self|direct_children|descendants]... [--gate-command <command>...] [--gate-expect <text>...] [--gate-trust trusted|boreal_witnessed|external_attested...] [--gate-current-revision] [--gate-current-git]|--clear-required-gates] [--force-gate <gate-id|kind[:scope]>... --force-gate-reason <code> --force-gate-comment <text>] [--force-gate-evidence <evidence-id>...] [--json]
 ```
 
 Updates mutable work fields while preserving source refs, evidence IDs, verification IDs, dependencies, reservation history, and audit events. Repeated `--label` and `--acceptance` values replace those lists. Repeated `--required-gate` replaces required closeout gate metadata; `--clear-required-gates` removes it.
 
-Use `--gate-command` and `--gate-expect` with repeated `--required-gate` values to replace declared command and observable metadata for the same-index required gate.
+Use `--gate-command`, `--gate-expect`, and `--gate-trust` with repeated `--required-gate` values to replace declaration and trust metadata for the same-index gate. `--gate-current-revision` and `--gate-current-git` apply freshness enforcement to the replacement gates.
 
 Use `--force-gate` for an audited bypass of an existing required gate, not as normal satisfaction. It accepts a gate id, kind, or `kind:scope`, requires `--force-gate-reason` and `--force-gate-comment`, and may attach support records with repeated `--force-gate-evidence`. Allowed force reason codes are `review_unavailable`, `audit_unavailable`, `external_review_record`, `legacy_backfill`, `user_accepted_risk`, and `emergency_closeout`. `--force-summary` does not force required review or audit gates.
 
@@ -1712,7 +1726,7 @@ JSON `data` contains `ok`, `initialized`, `rootDir`, `schemaVersion`, `health`, 
 bwrk capture <text> [--label <label>...] [--uri <ref>] [--kind raw|document|chat|code|artifact] [--list] [--limit <n>] [--json]
 ```
 
-Appends an immutable raw source record to the global workspace vault from any current directory. The command always targets the global workspace, initializes the global vault scaffold if needed, and stores `--label` values as raw source tags. `--uri` preserves an optional artifact or reference URI.
+Appends an immutable raw source record to the global workspace vault from any current directory. The command always targets the global workspace, initializes the global vault scaffold if needed, and stores `--label` values as raw source tags; repeatable `--tag` is an alias for `--label`. `--uri` preserves an optional artifact or reference URI.
 
 `bwrk capture --list` is a thin alias for listing the global raw inbox.
 
@@ -1872,7 +1886,7 @@ bwrk storage migrate --to objects|file [--json]
 
 Copies canonical runtime records between the legacy compact state document and the git-first per-record object store, verifies record counts and the event-log hash chain, then updates `.boreal/project.json` with the selected storage backend. `--to objects` writes one compact JSON file per canonical record under `.boreal/objects/`, keeps history in `.boreal/log/events.jsonl`, and renames `runtime/state.json` to a timestamped `.migrated-*` backup. `--to file` recreates `runtime/state.json` as an escape hatch.
 
-JSON `data` contains `migrated`, `from`, `to`, `records`, `eventLog`, `markerPath`, and, for file-to-object migration, `stateBackupPath`.
+JSON `data` contains `migrated`, `from`, `to`, `records`, `eventLog`, `preflight`, `parity`, `rollback`, `markerPath`, and, for file-to-object migration, `stateBackupPath`. `parity` proves both record-count and canonical snapshot content-hash equality before activation. `rollback` names the inverse command and whether the source was retained; file-to-object migration copies a timestamped state backup before switching the project marker.
 
 ## `storage rotate-log`
 
@@ -2043,7 +2057,7 @@ Validates current runtime records against the published schema contracts and che
 bwrk docs check [--json]
 ```
 
-Checks workflow, template, skill, and command documentation assets from the resolved workflow asset root. The payload includes workflow asset counts, asset issues, and command metadata validation status. Skill frontmatter uses standards-compatible YAML scalars; values containing `: ` must be quoted. Workflow and skill Markdown references to machine-readable `data.*` extraction paths are validated against the known JSON envelope paths so stale automation instructions fail the docs gate.
+Checks workflow, template, skill, command, storage, and interface documentation assets from the resolved workflow asset root. The payload includes workflow asset counts, asset issues, command metadata validation, and `documentationTruth` with the live command count, documented command count, storage contract, interface status, and drift issues. Every CLI guide command heading, usage line, and flag is compared with `COMMAND_DEFINITIONS`. Skill frontmatter uses standards-compatible YAML scalars; values containing `: ` must be quoted. Workflow and skill Markdown references to machine-readable `data.*` extraction paths are validated against the known JSON envelope paths so stale automation instructions fail the docs gate.
 
 ## `gate`
 
@@ -2051,7 +2065,7 @@ Checks workflow, template, skill, and command documentation assets from the reso
 bwrk gate [--strict] [--no-auto-prune-operations] [--json]
 ```
 
-Golden-path alias for `bwrk gate closeout`. Use it as a compact final gate before closing work or handing off.
+Golden-path alias for `bwrk gate closeout`. Use it as a compact final gate before closing work or handing off. `--auto-prune-operations` is a deprecated compatibility no-op because safe operation-volume pruning is already the default; use `--no-auto-prune-operations` to disable it.
 
 ## `gate closeout`
 
@@ -2062,6 +2076,8 @@ bwrk gate closeout [--strict] [--no-auto-prune-operations] [--json]
 Runs the closeout sequence: `sync refresh`, `doctor`, `schema validate`, and `docs check`. JSON `data.ok` is true only when all nested checks pass; `--strict` makes doctor warnings fail the gate.
 
 When `--strict` is set and the only strict gate blocker is the `operation.volume` doctor warning, the gate prunes local operation history to the recommended keep target by default, refreshes generated state again, and reruns the closeout checks. The JSON payload includes `autoPruneOperations: true` and an `operationPrune` result when pruning ran. Pass `--no-auto-prune-operations` to disable this maintenance step and preserve the hard operation-volume block.
+
+The legacy `--auto-prune-operations` flag is retained as a deprecated no-op for script compatibility.
 
 ## `lock inspect`
 

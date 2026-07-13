@@ -8,10 +8,12 @@ The mental model behind Boreal. Read this once and the [CLI commands](cli/COMMAN
 
 Most project context is ephemeral: it lives in chat, in tickets that rot, in someone's memory. Boreal makes that context **durable records** with explicit evidence, verification, sources, claims, decisions, and workflow state. A record is created once, transitions through explicit states, and leaves an event trail. Humans read the records; agents coordinate against them; Git versions the repairable artifacts.
 
-Two roots hold everything:
+Two durable roots hold project truth:
 
-- **`.boreal/runtime/`** — the durable runtime store (`state.json`), a file-backed transactional store with cross-process write locking. This is the operational source of truth.
+- **`.boreal/objects/`** and **`.boreal/log/`** — the default `objects-v1` store: one canonical JSON record per object plus an append-only, hash-linked event log. This is the operational source of truth for new workspaces.
 - **`memory/`** — the human-readable vault of wiki pages, ledgers, and raw sources. This is the narrative/knowledge source of truth.
+
+Legacy `file-v2` workspaces keep the same portable record model in `.boreal/runtime/state.json`. `bwrk update repo` migrates them to `objects-v1`; the file adapter remains a tested rollback and compatibility path, not the default for new projects. `.boreal/cache/`, `.boreal/runtime/`, `.boreal/results/`, and `.boreal/tmp/` otherwise contain local or rebuildable artifacts.
 
 ## Work
 
@@ -28,6 +30,7 @@ Lifecycle: `create` → (becomes `ready` when deps clear) → `reserved`/claimed
 This is the invariant that makes Boreal more than a to-do list: **work cannot close on assertion.**
 
 - **Evidence** is a record of something that happened — a command that ran, a test that passed, a note. It has a kind, an outcome, and optionally the command that produced it.
+- Evidence provenance is explicit: legacy unattested, self-reported, Boreal-witnessed, or externally attested. A passed result does not imply a stronger trust level; see [Evidence trust](architecture/EVIDENCE_TRUST.md).
 - **Verification** is a separate record that points at evidence and says "this satisfies the work."
 - `work close` is **gated** on a verification record. No verification, no close.
 
@@ -96,5 +99,6 @@ One runtime, several front ends — none of them is a second source of truth:
 - **MCP server** exposes the same operations to local agent clients.
 - **Daemon** observes and coordinates; it watches paths and reports lock/process state but never silently writes truth.
 - **Console** renders the CLI's JSON in a local browser dashboard.
+- **TUI (`bwrk-tui`)** is the optional Ink terminal dashboard for project roll-ups, sprint boards, work detail, and global project queues.
 
 See [Runtime architecture](architecture/RUNTIME.md) for the engine boundary that keeps this honest.

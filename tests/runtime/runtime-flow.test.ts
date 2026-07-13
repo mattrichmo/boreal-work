@@ -2,21 +2,27 @@ import { describe, expect, it } from "vitest";
 
 import {
   BorealError,
+  EVIDENCE_ATTESTATION_SCHEMA_VERSION,
   createRecordMeta,
   deterministicId,
+  evidenceRecordSchemaIssues,
+  hashContent,
+  workRevisionContentHash,
   withContentHash,
   type ActorRef,
   type AgentDirectiveId,
   type AgentSummaryId,
   type AgentSummaryRecord,
   type EvidenceId,
+  type EvidenceAttestation,
+  type EvidenceRecord,
   type IsoTimestamp,
   type KnowledgeSourceId,
   type VerificationId,
   type WorkItem
 } from "@boreal/core";
 import { createBorealRuntime } from "@boreal/engine";
-import { recordEvidence, verifySubject } from "@boreal/evidence-engine";
+import { evidenceTrustLevel, recordEvidence, verifySubject } from "@boreal/evidence-engine";
 import { createClaim, createDecision, createKnowledgeSource } from "@boreal/knowledge-engine";
 import { InMemoryBorealStore } from "@boreal/storage";
 import { closeWork as closeWorkDomain } from "@boreal/work-engine";
@@ -72,6 +78,53 @@ function closeoutSummaryFor(
     artifactUri: `agent-summaries/${summaryId}.md`,
     generatedAt
   } satisfies AgentSummaryRecord);
+}
+
+function witnessedAttestationFor(
+  work: WorkItem,
+  input: {
+    readonly trustLevel?: EvidenceAttestation["trustLevel"];
+    readonly revision?: EvidenceAttestation["subjectRevision"];
+    readonly gitHead?: string;
+    readonly exitCode?: number;
+    readonly externalStatus?: "unverified" | "verified" | "rejected";
+  } = {}
+): EvidenceAttestation {
+  const trustLevel = input.trustLevel ?? "boreal_witnessed";
+  return {
+    schemaVersion: EVIDENCE_ATTESTATION_SCHEMA_VERSION,
+    trustLevel,
+    producer: actor,
+    witness: trustLevel === "external_attested"
+      ? { kind: "external_ci", id: "ci-run-42", issuer: "example-ci" }
+      : { kind: "boreal", id: "runtime-test-witness", issuer: "boreal-work" },
+    recordedAt: "2026-01-01T00:00:00.000Z" as IsoTimestamp,
+    witnessedAt: "2026-01-01T00:00:00.000Z" as IsoTimestamp,
+    subjectRevision: input.revision ?? { contentHash: workRevisionContentHash(work), updatedAt: work.meta.updatedAt },
+    command: {
+      commandHash: hashContent("runtime trust command"),
+      exitCode: input.exitCode ?? 0,
+      timedOut: false,
+      cancelled: false,
+      expectedObservableMatched: true
+    },
+    git: {
+      branch: "main",
+      headSha: input.gitHead ?? "abc1234",
+      dirty: false,
+      dirtyFingerprint: hashContent("clean"),
+      dirtyFileCount: 0
+    },
+    ...(trustLevel === "external_attested"
+      ? {
+          external: {
+            issuer: "example-ci",
+            resultUri: "https://ci.example/runs/42",
+            verificationStatus: input.externalStatus ?? "unverified"
+          }
+        }
+      : {})
+  };
 }
 
 describe("boreal runtime proof slice", () => {
@@ -519,6 +572,60 @@ describe("boreal runtime proof slice", () => {
     expect(decision.meta.id).toBe(sameDecision.meta.id);
     expect(decision.consequences).toEqual(["A", "B"]);
     expect(decision.meta.contentHash).toBe(sameDecision.meta.contentHash);
+  });
+
+  it("distinguishes legacy, self-reported, witnessed, and external evidence without upgrading imports", () => {
+    const now = "2026-01-01T00:00:00.000Z" as IsoTimestamp;
+    const selfReported = recordEvidence({
+      subjectId: "bw_work_subject",
+      subjectType: "work",
+      kind: "test",
+      summary: "Agent-reported test",
+      outcome: "passed",
+      actor,
+      now
+    });
+    expect(evidenceTrustLevel(selfReported)).toBe("self_reported");
+    expect(selfReported.attestation).toMatchObject({
+      schemaVersion: "boreal.evidence-attestation.v1",
+      producer: actor,
+      recordedAt: now
+    });
+
+    const external = recordEvidence({
+      subjectId: "bw_work_subject",
+      subjectType: "work",
+      kind: "test",
+      summary: "CI attestation",
+      outcome: "passed",
+      actor,
+      now,
+      attestation: {
+        schemaVersion: "boreal.evidence-attestation.v1",
+        trustLevel: "external_attested",
+        producer: { id: "github-actions", kind: "system", system: "github-actions", version: "v4" },
+        witness: { kind: "external_ci", id: "run-42", issuer: "https://github.com/example/repo/actions" },
+        recordedAt: now,
+        witnessedAt: now,
+        subjectRevision: { contentHash: hashContent("work revision"), updatedAt: now },
+        environment: { platform: "linux", arch: "x64", nodeVersion: "v22.0.0", cwdHash: hashContent("/workspace") },
+        command: { commandHash: hashContent("pnpm test"), startedAt: now, completedAt: now, exitCode: 0, timedOut: false },
+        output: { stdoutHash: hashContent("passed"), stderrHash: hashContent(""), stdoutBytes: 6, stderrBytes: 0, truncated: false },
+        external: {
+          issuer: "github-actions",
+          resultUri: "https://github.com/example/repo/actions/runs/42",
+          verificationStatus: "verified",
+          attestationId: "run-42"
+        }
+      }
+    });
+    expect(evidenceTrustLevel(external)).toBe("external_attested");
+    expect(evidenceRecordSchemaIssues(external)).toEqual([]);
+
+    const { attestation: _attestation, ...legacyShape } = selfReported;
+    const legacy = legacyShape as EvidenceRecord;
+    expect(evidenceTrustLevel(legacy)).toBe("legacy_unattested");
+    expect(evidenceRecordSchemaIssues(legacy)).toEqual([]);
   });
 
   it("repairs stale derived readiness with an explicit recompute", async () => {
@@ -1156,6 +1263,154 @@ describe("boreal runtime proof slice", () => {
     });
     expect(finished.closedWork?.status).toBe("closed");
     expect(finished.closedWork?.requiredCloseoutGates?.[0]).toEqual(expect.objectContaining({ status: "satisfied" }));
+  });
+
+  it("rejects weak, failed, stale, or Git-mismatched evidence and accepts a current Boreal witness", async () => {
+    const runtime = createBorealRuntime({ actor });
+    const gate = {
+      kind: "verification" as const,
+      requiredTrustLevels: ["boreal_witnessed" as const],
+      requireCurrentRevision: true,
+      requireCurrentGitHead: true
+    };
+
+    const weak = await runtime.createWork({ title: "Weak evidence trust target", requiredCloseoutGates: [gate] });
+    const weakEvidence = await runtime.recordEvidence({
+      subjectId: weak.meta.id,
+      subjectType: "work",
+      kind: "test",
+      summary: "claimed pass",
+      outcome: "passed"
+    });
+    await expect(runtime.verifyWork({
+      workId: weak.meta.id,
+      verdict: "passed",
+      evidenceIds: [weakEvidence.meta.id],
+      currentGitHead: "abc1234"
+    })).rejects.toMatchObject({
+      code: "BOREAL_POLICY_VIOLATION",
+      gaps: [expect.objectContaining({ code: "gate.evidence.trust-insufficient" })]
+    } satisfies Partial<BorealError>);
+
+    const failed = await runtime.createWork({ title: "Failed witness target", requiredCloseoutGates: [gate] });
+    const failedEvidence = await runtime.recordEvidence({
+      subjectId: failed.meta.id,
+      subjectType: "work",
+      kind: "test",
+      summary: "tampered pass label",
+      outcome: "passed",
+      attestation: witnessedAttestationFor(failed, { exitCode: 1 })
+    });
+    await expect(runtime.verifyWork({
+      workId: failed.meta.id,
+      verdict: "passed",
+      evidenceIds: [failedEvidence.meta.id],
+      currentGitHead: "abc1234"
+    })).rejects.toMatchObject({
+      gaps: [expect.objectContaining({ code: "gate.evidence.failed" })]
+    } satisfies Partial<BorealError>);
+
+    const staleRevision = await runtime.createWork({ title: "Stale revision target", requiredCloseoutGates: [gate] });
+    const staleRevisionEvidence = await runtime.recordEvidence({
+      subjectId: staleRevision.meta.id,
+      subjectType: "work",
+      kind: "test",
+      summary: "old revision pass",
+      outcome: "passed",
+      attestation: witnessedAttestationFor(staleRevision, { revision: { contentHash: hashContent("old revision") } })
+    });
+    await expect(runtime.verifyWork({
+      workId: staleRevision.meta.id,
+      verdict: "passed",
+      evidenceIds: [staleRevisionEvidence.meta.id],
+      currentGitHead: "abc1234"
+    })).rejects.toMatchObject({
+      gaps: [expect.objectContaining({
+        code: "gate.evidence.revision-stale",
+        data: expect.objectContaining({ recommendedCommands: [expect.stringContaining("bwrk evidence run")] })
+      })]
+    } satisfies Partial<BorealError>);
+
+    const staleGit = await runtime.createWork({ title: "Stale Git target", requiredCloseoutGates: [gate] });
+    const staleGitEvidence = await runtime.recordEvidence({
+      subjectId: staleGit.meta.id,
+      subjectType: "work",
+      kind: "test",
+      summary: "old Git pass",
+      outcome: "passed",
+      attestation: witnessedAttestationFor(staleGit, { gitHead: "old-head" })
+    });
+    await expect(runtime.verifyWork({
+      workId: staleGit.meta.id,
+      verdict: "passed",
+      evidenceIds: [staleGitEvidence.meta.id],
+      currentGitHead: "abc1234"
+    })).rejects.toMatchObject({
+      gaps: [expect.objectContaining({ code: "gate.evidence.git-stale" })]
+    } satisfies Partial<BorealError>);
+
+    const current = await runtime.createWork({ title: "Current witnessed target", requiredCloseoutGates: [gate] });
+    const currentEvidence = await runtime.recordEvidence({
+      subjectId: current.meta.id,
+      subjectType: "work",
+      kind: "test",
+      summary: "current witnessed pass",
+      outcome: "passed",
+      attestation: witnessedAttestationFor(current)
+    });
+    const verification = await runtime.verifyWork({
+      workId: current.meta.id,
+      verdict: "passed",
+      evidenceIds: [currentEvidence.meta.id],
+      currentGitHead: "abc1234"
+    });
+    const closed = await runtime.closeWork({
+      workId: current.meta.id,
+      reason: "current witness satisfied",
+      agentSummary: closeoutSummaryFor(current, {
+        evidenceIds: [currentEvidence.meta.id],
+        verificationIds: [verification.meta.id],
+        nonce: "current-witness"
+      })
+    });
+    expect(closed.requiredCloseoutGates?.[0]).toEqual(expect.objectContaining({ status: "satisfied" }));
+  });
+
+  it("keeps external CI provenance distinct and requires verified attestations", async () => {
+    const runtime = createBorealRuntime({ actor });
+    const work = await runtime.createWork({
+      title: "External attestation target",
+      requiredCloseoutGates: [{ kind: "verification", requiredTrustLevels: ["external_attested"] }]
+    });
+    const unverified = await runtime.recordEvidence({
+      subjectId: work.meta.id,
+      subjectType: "work",
+      kind: "test",
+      summary: "external result",
+      outcome: "passed",
+      attestation: witnessedAttestationFor(work, { trustLevel: "external_attested", externalStatus: "unverified" })
+    });
+    await expect(runtime.verifyWork({
+      workId: work.meta.id,
+      verdict: "passed",
+      evidenceIds: [unverified.meta.id]
+    })).rejects.toMatchObject({
+      gaps: [expect.objectContaining({ code: "gate.evidence.external-unverified" })]
+    } satisfies Partial<BorealError>);
+
+    const verified = await runtime.recordEvidence({
+      subjectId: work.meta.id,
+      subjectType: "work",
+      kind: "test",
+      summary: "verified external result",
+      outcome: "passed",
+      attestation: witnessedAttestationFor(work, { trustLevel: "external_attested", externalStatus: "verified" })
+    });
+    await expect(runtime.verifyWork({
+      workId: work.meta.id,
+      verdict: "passed",
+      evidenceIds: [verified.meta.id]
+    })).resolves.toMatchObject({ verdict: "passed", evidenceIds: [verified.meta.id] });
   });
 
   it("preserves directive links when satisfying closeout gates", async () => {

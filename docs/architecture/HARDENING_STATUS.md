@@ -46,6 +46,8 @@ This file is the current checkpoint for the broad hardening goal. It separates a
 - Git health uses the policy in `docs/architecture/GIT_HEALTH_HARDENING.md` to distinguish blocking Git failures from protected-branch, generated-artifact, and memory-index caveats.
 - The machine-local project registry contract has a published schema, explicit storage-location helper, display metadata, project/memory/install path bindings, and no implicit directory scanning.
 - MCP/daemon resource scoping has shared `@boreal/core` boundary and tool-contract guards that bind each request to one selected project, validate workspace/project/memory roots, reject lexical and realpath traversal under unselected or external projects, keep read tools safe by default, and require command previews plus audit operation IDs for mutating tools.
+- The per-record `.boreal/objects/` store is the default durable runtime adapter for new workspaces, with a hash-linked event log and a disposable SQLite read/search index; `FileBorealStore` remains the legacy compatibility and rollback adapter.
+- The optional Ink TUI is implemented with project roll-up, sprint board, task detail, global overview, project, and queue routes over the shared engine and UI-model contracts.
 
 ## Hardened In This Checkpoint
 
@@ -83,25 +85,24 @@ This file is the current checkpoint for the broad hardening goal. It separates a
 - `.boreal/mcp.json` is a local-only project-scoped config marker, and `bwrk doctor` now reports `mcp.config` drift when copied configs point at another project or omit `--workspace`.
 - `bwrk daemon status --json`, `dashboard global --json`, and `doctor` now surface daemon state without requiring the daemon to run; stale PID files and boundary drift are warnings.
 - Golden-path command aliases, explicit closeout gates, work edit/cancel/reopen/split lifecycle commands, claim review, decision supersession, sprint metrics/close, schema validation, docs checking, and `gate`/`gate closeout` now have CLI contracts, registry metadata, command docs, and runtime tests.
-- `docs/architecture/V2_STORAGE_COLLABORATION_PLAN.md` records the accepted V2 storage/collaboration design: SQLite as the primary local writer, JSONL ledgers and snapshots as the collaboration/recovery boundary, generation-based freshness metadata, query pushdown/index contracts, and scale/migration gates.
+- `docs/architecture/V2_STORAGE_COLLABORATION_PLAN.md` is retained as a superseded design record. The shipped `objects-v1` boundary uses per-record canonical files plus a hash-linked log, while SQLite is a disposable read/search index rather than the primary writer.
 - Agent directive migration docs now define the release boundary between emitted `agentDirectives` transport metadata, durable `directiveAcknowledgements` runtime records, and legacy-compatible closeout summaries. JSON export, JSONL ledgers, Markdown export, import validation, and doctor/report classifications all preserve acknowledgement proof without fabricating it for historical records.
 
 ## Remaining Architecture Work
 
-- Single-file `.boreal/runtime/state.json` is still the durable runtime adapter. JSONL ledgers and Markdown vault files exist, but they are not yet the primary collaboration/recovery boundary for a SQLite writer.
-- SQLite is currently a generated cache/read model, not the primary runtime writer. The V2 writer decision is documented in `docs/architecture/V2_STORAGE_COLLABORATION_PLAN.md`; implementation is still pending.
+- Multi-clone import, conflict, deletion, and recovery semantics still need end-to-end proof around the object store, event-log generations, JSONL ledgers, and tombstones.
+- SQLite is deliberately a disposable read/search index, not the primary runtime writer. Any future writer change requires a new accepted decision instead of treating the superseded V2 plan as authority.
 - Schema validation is still hand-written. Schema/validator parity now fails in CI, but schemas are not generated from TypeScript nor are TypeScript validators generated from schema files.
 - Runtime claims and decisions can link to vault wiki pages, but runtime JSON remains the primary source of truth; wiki pages are not yet the primary rebuild source for claim/decision records.
 - Global project/bucket registry has the schema, storage-location contract, list/add/remove/import/doctor commands, setup import path, overview buckets, scoped global work queues, search results, actor activity, global health/drift panels, guarded settings forms, and the first-class `bwrk dashboard global --json` endpoint. The remaining dashboard command work is to add narrower project, dashboard-sprint, queue, health, and status endpoints over the same model boundary.
-- The hand-written CLI guide is not fully generated yet; `bwrk commands --format markdown` now provides the registry-backed reference surface.
+- The hand-written CLI guide is now checked against every registry command heading, usage line, and flag by `bwrk docs check`; `bwrk commands --format markdown` remains the fully generated reference surface.
 - Work lifecycle semantics still retain legacy `reserved` as an accepted imported state; the live runtime uses reservation leases plus `in_progress`.
 
 ## Next Priority Slices
 
-1. Implement the V2 storage plan in `docs/architecture/V2_STORAGE_COLLABORATION_PLAN.md`, starting with generation metadata and query contracts before switching the writer.
-2. Add optional shared CLI dashboard primitives for status icons, shortcut hints, grouped diagnostics, stepper output, and windowed choice lists without changing JSON or stable plain text defaults.
+1. Prove two-clone object-store collaboration, conflict identity, deletion, offline rejoin, worktree, and recovery behavior with deterministic fixtures.
+2. Harden evidence provenance, review/merge, and specification-change business rules behind the engine boundary.
 3. Add narrower project, dashboard-sprint, queue, health, and status dashboard JSON endpoints over the existing global dashboard model boundary.
-4. Generate more of the hand-written CLI guide from `COMMAND_DEFINITIONS` so the static guide and generated command reference cannot drift.
-5. Expand the JSONL merge-driver fixture to cover generated ledger directories from real `export ledgers` output.
-6. Add larger MCP client fixtures once a real client config is checked against local stdio transport behavior.
-7. Decide whether the daemon should gain an opt-in explicit `sync refresh` trigger, still mediated through the CLI command contract.
+4. Expand the JSONL merge-driver fixture to cover generated ledger directories from real `export ledgers` output.
+5. Add larger MCP client fixtures once a real client config is checked against local stdio transport behavior.
+6. Decide whether the daemon should gain an opt-in explicit `sync refresh` trigger, still mediated through the CLI command contract.

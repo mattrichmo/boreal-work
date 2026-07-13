@@ -167,7 +167,7 @@ Existing compact `state.json` workspaces can be migrated with `bwrk update repo`
 | **Browser console** | Local project and global-manager boards built from CLI contracts |
 | **MCP server** | Project-scoped tools for compatible agent clients |
 | **Daemon** | Observer and coordination status surface; it does not silently rewrite project truth |
-| **TUI** | Planned terminal interface; currently a scaffold and contract set |
+| **TUI** | Optional terminal dashboard (`bwrk-tui`) with project and global views |
 
 The engine remains the source of domain behavior, so interfaces do not invent their own lifecycle rules. See [runtime architecture](docs/architecture/RUNTIME.md) for the boundary.
 

@@ -1,4 +1,5 @@
 export * from "./clone.js";
+export * from "./declared-gate-runner.js";
 export * from "./agent-directive-compiler.js";
 export * from "./agent-directive-health.js";
 export * from "./agent-directive-payloads.js";
@@ -23,3 +24,4 @@ export * from "./schema-validation.js";
 export * from "./string-safety.js";
 export * from "./time.js";
 export * from "./workspace.js";
+export * from "./work-revision.js";

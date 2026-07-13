@@ -11,6 +11,7 @@ The complete map of Boreal documentation. Start with the guides, drop into the r
 | [Getting started](getting-started.md) | Install, initialize a workspace, and run your first work loop. |
 | [Concepts](concepts.md) | The mental model: work, evidence, knowledge, context, memory, agents. |
 | [Publishing](release/publishing.md) | npm package staging, dry-run publish gate, and Homebrew tap handoff. |
+| [Release boundary audit](security/RELEASE_BOUNDARY_AUDIT.md) | Secret and dependency-license scans, provenance, private tracker history, and the unchanged license state. |
 
 ## CLI reference
 
@@ -23,6 +24,8 @@ The complete map of Boreal documentation. Start with the guides, drop into the r
 | Doc | Read it for |
 | --- | --- |
 | [Runtime architecture](architecture/RUNTIME.md) | Ports, pure domain operations, and the `@boreal/engine` boundary. |
+| [Evidence trust](architecture/EVIDENCE_TRUST.md) | Trust levels, producer/witness identities, subject revisions, output hashes, and legacy behavior. |
+| [Compatibility policy](architecture/COMPATIBILITY_POLICY.md) | SemVer, launcher/repo-pin support, schema/storage matrix, migration parity, and rollback. |
 | [CLI UX](architecture/CLI_UX.md) | The JSON / plain-text / dashboard layering and its design boundary. |
 | [CLI ↔ TUI runtime boundary](architecture/CLI_TUI_RUNTIME_BOUNDARY.md) | How terminal surfaces share the runtime. |
 | [TUI surface contracts](architecture/TUI_SURFACE_CONTRACTS.md) | Detailed global and repo terminal UI pages, flows, and data shapes. |

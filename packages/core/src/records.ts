@@ -111,6 +111,9 @@ export interface RequiredCloseoutGate {
   readonly minEvidenceCount: number;
   readonly declaredCommand?: string;
   readonly expectedObservable?: string;
+  readonly requiredTrustLevels?: readonly EvidenceTrustLevel[];
+  readonly requireCurrentRevision?: boolean;
+  readonly requireCurrentGitHead?: boolean;
   readonly createdAt: IsoTimestamp;
   readonly createdBy: ActorRef;
   readonly satisfiedBy?: RequiredCloseoutGateSatisfaction;
@@ -227,6 +230,73 @@ export interface GraphEdge {
 
 export type EvidenceKind = "command" | "test" | "diff" | "review" | "artifact" | "note";
 export type EvidenceOutcome = "passed" | "failed" | "observed" | "unknown";
+export const EVIDENCE_ATTESTATION_SCHEMA_VERSION = "boreal.evidence-attestation.v1";
+export type EvidenceTrustLevel = "legacy_unattested" | "self_reported" | "boreal_witnessed" | "external_attested";
+
+export interface EvidenceAttestation {
+  readonly schemaVersion: typeof EVIDENCE_ATTESTATION_SCHEMA_VERSION;
+  readonly trustLevel: EvidenceTrustLevel;
+  readonly producer: ActorRef & { readonly system?: string; readonly version?: string };
+  readonly witness?: {
+    readonly kind: "boreal" | "external_ci" | "human";
+    readonly id: string;
+    readonly issuer?: string;
+  };
+  readonly recordedAt: IsoTimestamp;
+  readonly witnessedAt?: IsoTimestamp;
+  readonly subjectRevision?: {
+    readonly contentHash: ContentHash;
+    readonly updatedAt?: IsoTimestamp;
+  };
+  readonly environment?: {
+    readonly platform: string;
+    readonly arch: string;
+    readonly nodeVersion?: string;
+    readonly cwdHash?: ContentHash;
+  };
+  readonly command?: {
+    readonly commandHash: ContentHash;
+    readonly startedAt?: IsoTimestamp;
+    readonly completedAt?: IsoTimestamp;
+    readonly durationMs?: number;
+    readonly exitCode?: number;
+    readonly signal?: string;
+    readonly timedOut?: boolean;
+    readonly cancelled?: boolean;
+    readonly expectedObservableMatched?: boolean;
+  };
+  readonly output?: {
+    readonly stdoutHash?: ContentHash;
+    readonly stderrHash?: ContentHash;
+    readonly stdoutBytes: number;
+    readonly stderrBytes: number;
+    readonly truncated?: boolean;
+    readonly stdoutExcerpt?: string;
+    readonly stderrExcerpt?: string;
+  };
+  readonly git?: {
+    readonly branch: string;
+    readonly headSha: string;
+    readonly dirty: boolean;
+    readonly dirtyFingerprint: ContentHash;
+    readonly dirtyFileCount: number;
+  };
+  readonly tools?: readonly {
+    readonly name: string;
+    readonly version: string;
+  }[];
+  readonly artifacts?: readonly {
+    readonly path: string;
+    readonly contentHash: ContentHash;
+    readonly bytes: number;
+  }[];
+  readonly external?: {
+    readonly issuer: string;
+    readonly resultUri: string;
+    readonly verificationStatus: "unverified" | "verified" | "rejected";
+    readonly attestationId?: string;
+  };
+}
 
 export interface EvidenceRecord {
   readonly meta: RecordMeta<EvidenceId>;
@@ -238,6 +308,8 @@ export interface EvidenceRecord {
   readonly command?: string;
   readonly uri?: string;
   readonly observedAt: IsoTimestamp;
+  /** Missing only on legacy imported evidence; absence derives to legacy_unattested. */
+  readonly attestation?: EvidenceAttestation;
 }
 
 export type VerificationVerdict = "passed" | "failed";

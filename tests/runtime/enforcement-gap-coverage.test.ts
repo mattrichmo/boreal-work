@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   BorealError,
+  EVIDENCE_ATTESTATION_SCHEMA_VERSION,
   AGENT_DIRECTIVE_SNAPSHOT_CONTEXT_KEYS,
   ENFORCEMENT_GAP_CODES,
   compileCloseoutAgentDirectiveBundle,
@@ -12,7 +13,9 @@ import {
   createAgentDirectiveSnapshot,
   createRecordMeta,
   deterministicId,
+  hashContent,
   isEnforcementGapCode,
+  workRevisionContentHash,
   withContentHash,
   type ActorRef,
   type AgentDirectiveGateStateSnapshot,
@@ -113,6 +116,31 @@ function gapCoverageScenarios(): readonly GapCoverageScenario[] {
       code: "gate.expected-observable.mismatch",
       name: "runtime closeout rejects declared observable when evidence lacks expected text",
       collectGaps: () => expectedObservableGaps("mismatch")
+    },
+    {
+      code: "gate.evidence.trust-insufficient",
+      name: "verification rejects self-reported evidence when a Boreal witness is required",
+      collectGaps: () => trustedEvidenceGaps("trust")
+    },
+    {
+      code: "gate.evidence.failed",
+      name: "verification rejects a passed label whose witnessed command failed",
+      collectGaps: () => trustedEvidenceGaps("failed")
+    },
+    {
+      code: "gate.evidence.revision-stale",
+      name: "verification rejects evidence for an older work revision",
+      collectGaps: () => trustedEvidenceGaps("revision")
+    },
+    {
+      code: "gate.evidence.git-stale",
+      name: "verification rejects evidence for a different Git checkpoint",
+      collectGaps: () => trustedEvidenceGaps("git")
+    },
+    {
+      code: "gate.evidence.external-unverified",
+      name: "verification rejects an external result that has not been verified",
+      collectGaps: () => trustedEvidenceGaps("external")
     },
     {
       code: "work.blocked.open-dependency",
@@ -353,6 +381,69 @@ async function expectedObservableGaps(mode: "missing" | "mismatch"): Promise<rea
       })
     })
   );
+}
+
+async function trustedEvidenceGaps(
+  mode: "trust" | "failed" | "revision" | "git" | "external"
+): Promise<readonly EnforcementGap[]> {
+  const runtime = createBorealRuntime({ actor });
+  const external = mode === "external";
+  const work = await runtime.createWork({
+    title: `trusted evidence ${mode}`,
+    requiredCloseoutGates: [{
+      kind: "verification",
+      requiredTrustLevels: [external ? "external_attested" : "boreal_witnessed"],
+      requireCurrentRevision: !external,
+      requireCurrentGitHead: !external
+    }]
+  });
+  const attestation = {
+    schemaVersion: EVIDENCE_ATTESTATION_SCHEMA_VERSION,
+    trustLevel: mode === "trust" ? "self_reported" as const : external ? "external_attested" as const : "boreal_witnessed" as const,
+    producer: actor,
+    witness: external
+      ? { kind: "external_ci" as const, id: "ci-unverified", issuer: "example-ci" }
+      : { kind: "boreal" as const, id: "coverage-witness", issuer: "boreal-work" },
+    recordedAt: "2026-01-01T00:00:00.000Z" as IsoTimestamp,
+    subjectRevision: {
+      contentHash: mode === "revision" ? hashContent("old revision") : workRevisionContentHash(work)
+    },
+    command: {
+      commandHash: hashContent("coverage command"),
+      exitCode: mode === "failed" ? 1 : 0,
+      timedOut: false,
+      cancelled: false,
+      expectedObservableMatched: true
+    },
+    git: {
+      branch: "main",
+      headSha: mode === "git" ? "1111111111111111111111111111111111111111" : "2222222222222222222222222222222222222222",
+      dirty: false,
+      dirtyFingerprint: hashContent("clean"),
+      dirtyFileCount: 0
+    },
+    ...(external ? {
+      external: {
+        issuer: "example-ci",
+        resultUri: "https://ci.example/runs/unverified",
+        verificationStatus: "unverified" as const
+      }
+    } : {})
+  };
+  const evidence = await runtime.recordEvidence({
+    subjectId: work.meta.id,
+    subjectType: "work",
+    kind: "test",
+    summary: `${mode} evidence`,
+    outcome: "passed",
+    attestation
+  });
+  return expectBorealGaps(() => runtime.verifyWork({
+    workId: work.meta.id,
+    verdict: "passed",
+    evidenceIds: [evidence.meta.id],
+    currentGitHead: "2222222222222222222222222222222222222222"
+  }));
 }
 
 async function openDependencyGaps(): Promise<readonly EnforcementGap[]> {

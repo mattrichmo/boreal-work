@@ -1,5 +1,5 @@
 import type { CloseoutGateId, WorkId } from "./ids.js";
-import type { EvidenceKind } from "./records.js";
+import type { EvidenceKind, EvidenceTrustLevel } from "./records.js";
 
 export const ENFORCEMENT_GAP_CODES = [
   "gate.verification.unsatisfied",
@@ -11,6 +11,11 @@ export const ENFORCEMENT_GAP_CODES = [
   "gate.declared-command.mismatch",
   "gate.expected-observable.missing",
   "gate.expected-observable.mismatch",
+  "gate.evidence.trust-insufficient",
+  "gate.evidence.revision-stale",
+  "gate.evidence.git-stale",
+  "gate.evidence.external-unverified",
+  "gate.evidence.failed",
   "work.blocked.open-dependency",
   "work.container.open-descendant",
   "reservation.not-ready",
@@ -64,6 +69,9 @@ export interface EnforcementGapData {
   readonly minEvidenceCount?: number;
   readonly declaredCommand?: string;
   readonly expectedObservable?: string;
+  readonly requiredTrustLevels?: readonly EvidenceTrustLevel[];
+  readonly requiredRevision?: string;
+  readonly requiredGitHead?: string;
   readonly observed?: readonly string[];
   readonly evidenceIds?: readonly string[];
   readonly reason?: string;

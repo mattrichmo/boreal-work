@@ -171,7 +171,7 @@ git config --local merge.boreal-jsonl.driver "node tools/boreal-jsonl-merge-driv
 
 ## Command Inventory
 
-The current registry exposes 95 commands across these categories: agent, claim, compact, context, daemon, dashboard, decision, dependency, doctor, duplicate, evidence, export, import, install, ledger, lock, merge, meta, operation, raw, registry, reservation, search, session, snapshot, source, sprint, sync, vault, wiki, work, workflow, and workspace.
+At the time this V1 closeout snapshot was written, the registry exposed 95 commands across these categories: agent, claim, compact, context, daemon, dashboard, decision, dependency, doctor, duplicate, evidence, export, import, install, ledger, lock, merge, meta, operation, raw, registry, reservation, search, session, snapshot, source, sprint, sync, vault, wiki, work, workflow, and workspace. Use `bwrk commands --json` or `bwrk docs check --json` for the live inventory.
 
 Use these references instead of copying command text into downstream docs:
 
@@ -187,7 +187,7 @@ Historical closeout summaries that predate directive acknowledgement policy are 
 
 ## Known Limitations
 
-- `.boreal/runtime/state.json` is still the primary durable runtime adapter.
+- This guide predates the `objects-v1` default. New workspaces now use per-record objects plus the hash-linked event log; `state.json` remains the legacy `file-v2` compatibility adapter.
 - JSONL ledgers are deterministic export/import collaboration artifacts, not the primary runtime backend.
 - SQLite is a generated cache only.
 - Schema validation is hand-written, although schema/validator parity is now tested.

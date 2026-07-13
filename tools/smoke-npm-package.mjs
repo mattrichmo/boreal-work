@@ -59,7 +59,7 @@ export async function smokeNpmPackage(options = {}) {
         npm_config_cache: join(tempRoot, "npm-cache")
       })
     });
-    const bin = join(prefix, "bin", "bwrk");
+    const bin = installedBinaryPath(prefix);
     const version = await runCapture(bin, ["--version"], {
       cwd: tempRoot,
       env: cleanBorealEnv()
@@ -81,6 +81,14 @@ export async function smokeNpmPackage(options = {}) {
   }
 }
 
+function installedBinaryPath(prefix) {
+  return process.platform === "win32" ? join(prefix, "bwrk.cmd") : join(prefix, "bin", "bwrk");
+}
+
+function quoteCmdArgument(value) {
+  return `"${String(value).replaceAll('"', '""')}"`;
+}
+
 async function main() {
   const args = process.argv.slice(2);
   const json = args.includes("--json");
@@ -98,8 +106,9 @@ async function main() {
 }
 
 async function runCapture(command, args, options) {
+  const invocation = windowsInvocation(command, args);
   try {
-    const result = await execFileAsync(command, args, {
+    const result = await execFileAsync(invocation.command, invocation.args, {
       ...options,
       maxBuffer: 10 * 1024 * 1024
     });
@@ -119,6 +128,15 @@ async function runCapture(command, args, options) {
         .join("\n")
     );
   }
+}
+
+function windowsInvocation(command, args) {
+  if (process.platform !== "win32" || command.toLowerCase().endsWith(".exe")) return { command, args };
+  const commandLine = [quoteCmdArgument(command), ...args.map(quoteCmdArgument)].join(" ");
+  return {
+    command: process.env.ComSpec ?? "cmd.exe",
+    args: ["/d", "/s", "/c", commandLine]
+  };
 }
 
 function npmEnv(overrides = {}) {

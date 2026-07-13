@@ -78,6 +78,31 @@ export interface VersionInfo {
     readonly snapshotSchemaVersion: typeof EXPORT_SCHEMA_VERSION;
     readonly rules: readonly string[];
   };
+  readonly compatibility: {
+    readonly semver: {
+      readonly releaseLine: "0.x";
+      readonly patch: "backward-compatible";
+      readonly minor: "may-change-contracts-with-migration-notes";
+      readonly major: "reserved-for-stable-contract-breaks";
+    };
+    readonly launcher: {
+      readonly patchSkew: "supported";
+      readonly majorOrMinorSkew: "doctor-warning-and-repo-pin-delegation";
+      readonly repoPinPrecedence: true;
+    };
+    readonly runtime: {
+      readonly recordSchema: typeof BOREAL_SCHEMA_VERSION;
+      readonly mode: "read-write";
+    };
+    readonly storage: readonly {
+      readonly kind: "objects-v1" | "file-v2" | "file-v1";
+      readonly mode: "default-read-write" | "legacy-read-write" | "import-only";
+    }[];
+    readonly installedSkills: {
+      readonly schema: "boreal.skill.v1";
+      readonly policy: "reinstall-on-repo-update";
+    };
+  };
   readonly delegation?: VersionDelegationInfo;
 }
 
@@ -153,6 +178,32 @@ export function getVersionInfo(): VersionInfo {
         "Non-reversible migrations must create a boreal.export.v1 recovery snapshot before mutation."
       ]
     },
+    compatibility: {
+      semver: {
+        releaseLine: "0.x",
+        patch: "backward-compatible",
+        minor: "may-change-contracts-with-migration-notes",
+        major: "reserved-for-stable-contract-breaks"
+      },
+      launcher: {
+        patchSkew: "supported",
+        majorOrMinorSkew: "doctor-warning-and-repo-pin-delegation",
+        repoPinPrecedence: true
+      },
+      runtime: {
+        recordSchema: BOREAL_SCHEMA_VERSION,
+        mode: "read-write"
+      },
+      storage: [
+        { kind: "objects-v1", mode: "default-read-write" },
+        { kind: "file-v2", mode: "legacy-read-write" },
+        { kind: "file-v1", mode: "import-only" }
+      ],
+      installedSkills: {
+        schema: "boreal.skill.v1",
+        policy: "reinstall-on-repo-update"
+      }
+    },
     delegation: delegatedVersionInfo()
   };
   return cachedVersionInfo;
@@ -180,7 +231,8 @@ export function formatVersionInfo(info = getVersionInfo()): string {
     `vault: ${info.schemas.vault}`,
     `daemonStatus: ${info.schemas.daemonStatus}`,
     `publishedSchemas: ${info.publishedSchemas.totalCount}`,
-    `migrationPolicy: ${info.migrationPolicy.version}`
+    `migrationPolicy: ${info.migrationPolicy.version}`,
+    `compatibility: ${info.compatibility.semver.releaseLine} (${info.compatibility.launcher.patchSkew} patch skew)`
   ]
     .filter((line): line is string => line !== undefined)
     .join("\n")

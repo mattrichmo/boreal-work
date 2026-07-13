@@ -9,6 +9,7 @@
     "node": ">=22.0.0"
   },
   "scripts": {
+    "audit:release-boundary": "node tools/audit-release-boundary.mjs",
     "bwrk": "tsx --tsconfig tsconfig.base.json apps/cli/src/index.ts",
     "build": "tsc -b && pnpm --dir apps/cli build:dist",
     "check": "tsc -b --pretty false",
