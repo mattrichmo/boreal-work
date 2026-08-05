@@ -26,6 +26,9 @@ import {
   type DirectiveAcknowledgementId,
   type EvidenceId,
   type EventId,
+  type EventCursorId,
+  type EventCursorRecord,
+  type ExecutionRun,
   type GraphEdge,
   type GraphEdgeId,
   type IsoTimestamp,
@@ -33,6 +36,9 @@ import {
   type ProjectionId,
   type ReservationId,
   type ReviewerHeartbeatId,
+  type RunCheckpoint,
+  type RunCheckpointId,
+  type RunId,
   type RuntimeEvent,
   type VerificationId,
   type WorkId,
@@ -183,6 +189,9 @@ export type SnapshotSection =
   | "graphEdges"
   | "reservations"
   | "reviewerHeartbeats"
+  | "runs"
+  | "checkpoints"
+  | "eventCursors"
   | "events"
   | "projections"
   | "contextPacks";
@@ -201,6 +210,9 @@ const SNAPSHOT_SECTIONS: readonly SnapshotSection[] = [
   "graphEdges",
   "reservations",
   "reviewerHeartbeats",
+  "runs",
+  "checkpoints",
+  "eventCursors",
   "events",
   "projections",
   "contextPacks"
@@ -217,7 +229,10 @@ const OBJECT_INDEX_LEDGER_SECTIONS = [
   "decisions",
   "graphEdges",
   "reservations",
-  "reviewerHeartbeats"
+  "reviewerHeartbeats",
+  "runs",
+  "checkpoints",
+  "eventCursors"
 ] as const satisfies readonly SnapshotSection[];
 
 export const EXPORT_SCHEMA_VERSION = "boreal.export.v1";
@@ -238,6 +253,9 @@ const LEDGER_FILES: Record<SnapshotSection, string> = {
   graphEdges: "graph-edges.jsonl",
   reservations: "reservations.jsonl",
   reviewerHeartbeats: "reviewer-heartbeats.jsonl",
+  runs: "runs.jsonl",
+  checkpoints: "run-checkpoints.jsonl",
+  eventCursors: "event-cursors.jsonl",
   events: "events.jsonl",
   projections: "projections.jsonl",
   contextPacks: "context-packs.jsonl"
@@ -932,6 +950,9 @@ async function readSnapshot(reader: BorealReader): Promise<ExportSnapshot> {
     graphEdges: await reader.listGraphEdges(),
     reservations: await reader.listReservations(),
     reviewerHeartbeats: await reader.listReviewerHeartbeats(),
+    runs: await reader.listRuns(),
+    checkpoints: await reader.listCheckpoints(),
+    eventCursors: await reader.listEventCursors(),
     events: (await reader.listEvents()).map(portableEvent),
     projections: await reader.listProjections(),
     contextPacks: await reader.listContextPacks()
@@ -1234,6 +1255,15 @@ async function deleteImportedRecords(
       case "reviewerHeartbeats":
         deleted = await writer.deleteReviewerHeartbeat(deletion.id as ReviewerHeartbeatId);
         break;
+      case "runs":
+        deleted = await writer.deleteRun(deletion.id as RunId);
+        break;
+      case "checkpoints":
+        deleted = await writer.deleteCheckpoint(deletion.id as RunCheckpointId);
+        break;
+      case "eventCursors":
+        deleted = await writer.deleteEventCursor(deletion.id as EventCursorId);
+        break;
       case "projections":
         deleted = await writer.deleteProjection(deletion.id as ProjectionId);
         break;
@@ -1265,6 +1295,7 @@ async function assertWorkItemCanBeDeleted(reader: BorealReader, workId: WorkId):
     graphEdges,
     reservations,
     reviewerHeartbeats,
+    runs,
     projections,
     contextPacks
   ] = await Promise.all([
@@ -1276,6 +1307,7 @@ async function assertWorkItemCanBeDeleted(reader: BorealReader, workId: WorkId):
     reader.listGraphEdges(),
     reader.listReservations(),
     reader.listReviewerHeartbeats(),
+    reader.listRuns(),
     reader.listProjections(),
     reader.listContextPacks()
   ]);
@@ -1305,6 +1337,7 @@ async function assertWorkItemCanBeDeleted(reader: BorealReader, workId: WorkId):
   const reviewerHeartbeatIds = reviewerHeartbeats
     .filter((record) => record.containerId === workId || record.lastWorkId === workId)
     .map((record) => record.meta.id);
+  const runIds = runs.filter((run) => run.workId === workId).map((run) => run.meta.id);
   const projectionIds = projections
     .filter((projection) => projection.subjectId === workId)
     .map((projection) => projection.meta.id);
@@ -1320,6 +1353,7 @@ async function assertWorkItemCanBeDeleted(reader: BorealReader, workId: WorkId):
     graphEdgeIds.length > 0 ||
     reservationIds.length > 0 ||
     reviewerHeartbeatIds.length > 0 ||
+    runIds.length > 0 ||
     projectionIds.length > 0 ||
     contextPackIds.length > 0
   ) {
@@ -1335,6 +1369,7 @@ async function assertWorkItemCanBeDeleted(reader: BorealReader, workId: WorkId):
         graphEdges: graphEdgeIds,
         reservations: reservationIds,
         reviewerHeartbeats: reviewerHeartbeatIds,
+        runs: runIds,
         projections: projectionIds,
         contextPacks: contextPackIds
       }
@@ -2114,6 +2149,15 @@ async function writeImportedRecords(
   }
   for (const record of incoming.reviewerHeartbeats.filter((entry) => importableIds.reviewerHeartbeats.has(entry.meta.id))) {
     await writer.putReviewerHeartbeat(record);
+  }
+  for (const record of incoming.runs.filter((entry) => importableIds.runs.has(entry.meta.id))) {
+    await writer.putRun(record as ExecutionRun);
+  }
+  for (const record of incoming.checkpoints.filter((entry) => importableIds.checkpoints.has(entry.meta.id))) {
+    await writer.putCheckpoint(record as RunCheckpoint);
+  }
+  for (const record of incoming.eventCursors.filter((entry) => importableIds.eventCursors.has(entry.meta.id))) {
+    await writer.putEventCursor(record as EventCursorRecord);
   }
   for (const record of incoming.events.filter((entry) => importableIds.events.has(entry.meta.id))) {
     await writer.putEvent(record);

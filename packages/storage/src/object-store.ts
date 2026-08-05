@@ -14,9 +14,12 @@ import {
   decisionRecordSchemaIssues,
   directiveAcknowledgementRecordSchemaIssues,
   evidenceRecordSchemaIssues,
+  eventCursorSchemaIssues,
+  executionRunSchemaIssues,
   graphEdgeSchemaIssues,
   knowledgeSourceSchemaIssues,
   reviewerHeartbeatSchemaIssues,
+  runCheckpointSchemaIssues,
   runtimeEventSchemaIssues,
   runtimeOperationSchemaIssues,
   verificationRecordSchemaIssues,
@@ -80,7 +83,10 @@ const OBJECT_SECTIONS: readonly ObjectSectionDefinition[] = [
   { section: "decisions", directory: "decisions", validator: decisionRecordSchemaIssues },
   { section: "graphEdges", directory: "edges", validator: graphEdgeSchemaIssues },
   { section: "reservations", directory: "reservations", validator: agentReservationSchemaIssues },
-  { section: "reviewerHeartbeats", directory: "reviewer-heartbeats", validator: reviewerHeartbeatSchemaIssues }
+  { section: "reviewerHeartbeats", directory: "reviewer-heartbeats", validator: reviewerHeartbeatSchemaIssues },
+  { section: "runs", directory: "runs", validator: executionRunSchemaIssues },
+  { section: "checkpoints", directory: "run-checkpoints", validator: runCheckpointSchemaIssues },
+  { section: "eventCursors", directory: "event-cursors", validator: eventCursorSchemaIssues }
 ];
 
 const SECTION_BY_NAME = new Map<StoreSectionName, ObjectSectionDefinition>(

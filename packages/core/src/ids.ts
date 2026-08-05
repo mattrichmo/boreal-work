@@ -13,12 +13,15 @@ export type ContentHash = Brand<string, "ContentHash">;
 export type DecisionId = Brand<string, "DecisionId">;
 export type DirectiveAcknowledgementId = Brand<string, "DirectiveAcknowledgementId">;
 export type EventId = Brand<string, "EventId">;
+export type EventCursorId = Brand<string, "EventCursorId">;
 export type EvidenceId = Brand<string, "EvidenceId">;
 export type GraphEdgeId = Brand<string, "GraphEdgeId">;
 export type KnowledgeSourceId = Brand<string, "KnowledgeSourceId">;
 export type OperationId = Brand<string, "OperationId">;
 export type ProjectionId = Brand<string, "ProjectionId">;
 export type ReservationId = Brand<string, "ReservationId">;
+export type RunCheckpointId = Brand<string, "RunCheckpointId">;
+export type RunId = Brand<string, "RunId">;
 export type ReviewerHeartbeatId = Brand<string, "ReviewerHeartbeatId">;
 export type VerificationId = Brand<string, "VerificationId">;
 export type WorkId = Brand<string, "WorkId">;
@@ -31,6 +34,7 @@ export type EntityPrefix =
   | "decision"
   | "edge"
   | "event"
+  | "cursor"
   | "evidence"
   | "gate"
   | "heartbeat"
@@ -38,6 +42,8 @@ export type EntityPrefix =
   | "page"
   | "projection"
   | "reservation"
+  | "checkpoint"
+  | "run"
   | "source"
   | "verification"
   | "work";

@@ -2,7 +2,7 @@
 
 `apps/daemon` provides a project-scoped status and watch surface.
 
-The daemon is an observer and coordinator, not a second runtime writer. It may watch selected-project runtime and generated-artifact paths, report stale process state, and surface lock conflicts. It must not silently write memory truth, mutate work records, repair ledgers, rebuild search, or edit vault files.
+The daemon is an observer and coordinator, not a second runtime writer. It may watch selected-project runtime and generated-artifact paths, report stale process state, and reconcile durable execution runs. It must not silently write memory truth, mutate work records, execute arbitrary commands, repair ledgers, rebuild search, or edit vault files.
 
 ## Responsibilities
 
@@ -18,6 +18,7 @@ The daemon is an observer and coordinator, not a second runtime writer. It may w
 - Return command-mediated repair recommendations such as `bwrk doctor --fix --json` or `bwrk sync refresh --json`.
 - Surface registry-backed directive obligations for daemon health and caller-supplied work/session/closeout/health/handoff snapshots.
 - Handle missing or renamed project roots by skipping watch work and reporting findings.
+- Reconcile missed run heartbeats and wake eligible timer waits through the run service.
 
 ## Non-Goals
 
@@ -62,4 +63,4 @@ The exported `compileDaemonDirectiveObligations()` helper binds the selected pro
 - `runDaemonWatchOnce()`
 - `compileDaemonDirectiveObligations()`
 
-Tests cover running/stopped/stale PID states, stop/restart behavior, missing project roots, lock conflicts, and bounded watch paths. The watch loop returns `action: "skipped"` for unhealthy boundaries or active locks, and `action: "observed"` only when the selected project and locks are healthy.
+Tests cover running/stopped/stale PID states, stop/restart behavior, missing project roots, lock conflicts, and bounded watch paths. The watch loop returns `action: "skipped"` for unhealthy boundaries or active locks, and `action: "observed"` only when the selected project and locks are healthy. Observed watch results include `executionRuns.expired` and `executionRuns.requeued`; the worker remains an explicit `bwrk run worker` invocation.

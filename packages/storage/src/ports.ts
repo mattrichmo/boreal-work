@@ -9,6 +9,8 @@ import type {
   DecisionRecord,
   DirectiveAcknowledgementId,
   DirectiveAcknowledgementRecord,
+  EventCursorId,
+  EventCursorRecord,
   EvidenceId,
   EvidenceRecord,
   GraphEdge,
@@ -21,6 +23,10 @@ import type {
   ReservationId,
   ReviewerHeartbeatId,
   ReviewerHeartbeatRecord,
+  RunCheckpoint,
+  RunCheckpointId,
+  RunId,
+  ExecutionRun,
   RuntimeEvent,
   RuntimeOperation,
   VerificationId,
@@ -64,6 +70,14 @@ export interface BorealReader {
   listActiveReservationsForAgent(agentId: string): Promise<readonly AgentReservation[]>;
   getReviewerHeartbeat(id: ReviewerHeartbeatId): Promise<ReviewerHeartbeatRecord | undefined>;
   listReviewerHeartbeats(): Promise<readonly ReviewerHeartbeatRecord[]>;
+  getRun(id: RunId): Promise<ExecutionRun | undefined>;
+  listRuns(): Promise<readonly ExecutionRun[]>;
+  listRunsForWork(workId: WorkId): Promise<readonly ExecutionRun[]>;
+  getCheckpoint(id: RunCheckpointId): Promise<RunCheckpoint | undefined>;
+  listCheckpoints(): Promise<readonly RunCheckpoint[]>;
+  listCheckpointsForRun(runId: RunId): Promise<readonly RunCheckpoint[]>;
+  getEventCursor(id: EventCursorId): Promise<EventCursorRecord | undefined>;
+  listEventCursors(): Promise<readonly EventCursorRecord[]>;
   headSeq(): Promise<number>;
   listEvents(): Promise<readonly RuntimeEvent[]>;
   getOperation(id: OperationId): Promise<RuntimeOperation | undefined>;
@@ -97,6 +111,12 @@ export interface BorealWriter extends BorealReader {
   deleteReservation(id: ReservationId): Promise<boolean>;
   putReviewerHeartbeat(record: ReviewerHeartbeatRecord): Promise<void>;
   deleteReviewerHeartbeat(id: ReviewerHeartbeatId): Promise<boolean>;
+  putRun(record: ExecutionRun): Promise<void>;
+  deleteRun(id: RunId): Promise<boolean>;
+  putCheckpoint(record: RunCheckpoint): Promise<void>;
+  deleteCheckpoint(id: RunCheckpointId): Promise<boolean>;
+  putEventCursor(record: EventCursorRecord): Promise<void>;
+  deleteEventCursor(id: EventCursorId): Promise<boolean>;
   putEvent(record: RuntimeEvent): Promise<void>;
   putOperation(record: RuntimeOperation): Promise<void>;
   deleteOperation(id: OperationId): Promise<boolean>;

@@ -16,6 +16,8 @@ export interface BoundedProcessOptions {
   readonly stderrMaxBytes?: number;
   readonly env?: NodeJS.ProcessEnv;
   readonly signal?: AbortSignal;
+  /** Start a dedicated process group and terminate descendants on timeout/cancel. */
+  readonly killProcessGroup?: boolean;
 }
 
 export interface BoundedProcessStream {
@@ -61,7 +63,8 @@ export async function runBoundedProcess(input: BoundedProcessOptions): Promise<B
     const child = spawn(input.command, args, {
       cwd: input.cwd,
       env: input.env,
-      stdio: [input.input === undefined ? "ignore" : "pipe", "pipe", "pipe"]
+      stdio: [input.input === undefined ? "ignore" : "pipe", "pipe", "pipe"],
+      detached: input.killProcessGroup === true
     });
     const stdout = createBoundedCapture("stdout", stdoutMaxBytes);
     const stderr = createBoundedCapture("stderr", stderrMaxBytes);
@@ -80,17 +83,17 @@ export async function runBoundedProcess(input: BoundedProcessOptions): Promise<B
 
     const timer = setTimeout(() => {
       timedOut = true;
-      child.kill("SIGTERM");
+      terminateChild(child, "SIGTERM", input.killProcessGroup === true);
       setTimeout(() => {
         if (!closed) {
-          child.kill("SIGKILL");
+          terminateChild(child, "SIGKILL", input.killProcessGroup === true);
         }
       }, 1_000).unref();
     }, timeoutMs);
     timer.unref();
     const cancel = () => {
       cancelled = true;
-      child.kill("SIGTERM");
+      terminateChild(child, "SIGTERM", input.killProcessGroup === true);
     };
     input.signal?.addEventListener("abort", cancel, { once: true });
 
@@ -183,6 +186,18 @@ export async function runBoundedProcess(input: BoundedProcessOptions): Promise<B
       stdinStream.end(input.input);
     }
   });
+}
+
+function terminateChild(child: ReturnType<typeof spawn>, signal: NodeJS.Signals, processGroup: boolean): void {
+  if (processGroup && process.platform !== "win32" && child.pid !== undefined) {
+    try {
+      process.kill(-child.pid, signal);
+      return;
+    } catch {
+      // The process may already have exited; fall back to the direct child.
+    }
+  }
+  child.kill(signal);
 }
 
 function createBoundedCapture(name: "stdout" | "stderr", maxBytes: number): {

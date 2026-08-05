@@ -82,7 +82,7 @@ export async function createCliContext(
   assertCommandToolchainCompatibility(args, toolchain);
   const storage = await selectStorageKind(args, workspaceRoot, paths);
   const store = storage === "objects-v1" ? new ObjectDirBorealStore({ rootDir: workspaceRoot }) : new FileBorealStore({ rootDir: workspaceRoot });
-  const runtime = createBorealRuntime({ store, actor, operationId: options.operationId });
+  const runtime = createBorealRuntime({ store, actor, operationId: options.operationId, workspaceRoot });
   const context: CliContext = {
     cwd,
     workspaceRoot,

@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://boreal.work/schemas/runs/run-checkpoint.schema.json",
+  "title": "Boreal Run Checkpoint",
+  "type": "object",
+  "required": ["meta", "runId", "sequence", "artifactUris"],
+  "properties": {
+    "meta": { "type": "object" },
+    "runId": { "type": "string", "pattern": "^bw_run_[a-f0-9]{12,64}$" },
+    "sequence": { "type": "integer", "minimum": 1 },
+    "phase": { "type": "string" },
+    "progress": { "type": "object" },
+    "cursor": { "type": "string", "maxLength": 4096 },
+    "artifactUris": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
+    "note": { "type": "string", "maxLength": 2000 }
+  }
+}

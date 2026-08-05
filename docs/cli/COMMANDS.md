@@ -649,6 +649,26 @@ bwrk unlink <project-id> [--registry-root <dir>] [--purge] [--yes] [--json]
 
 Stops tracking a project in your global workspace by archiving it in the machine-local registry. It never deletes or writes project files, memory files, or skill installs. With `--purge --yes`, removes only the registry row permanently. Also available as `bwrk global unlink <project-id>`.
 
+## `run`
+
+```text
+bwrk run start|list|show|heartbeat|checkpoint|wait|pause|resume|cancel|succeed|fail|retry|reconcile|worker ... [--json]
+```
+
+Manages durable execution attempts separately from work items. `run start` creates an idempotent queued attempt; `heartbeat`, `checkpoint`, `wait`, `pause`, `resume`, `cancel`, `succeed`, `fail`, and `retry` advance its lifecycle. `run reconcile` marks missed worker heartbeats as `needs_attention` and requeues eligible timer waits. `run worker` claims one queued capability-bounded command and persists bounded output hashes, excerpts, and exit state; `run worker --loop` keeps a local worker polling until interrupted.
+
+Important flags include `--command`, `--cwd`, `--timeout-ms`, `--stdout-max-bytes`, `--stderr-max-bytes`, `--idempotency-key`, `--reservation`, `--stale-after-ms`, `--max-attempts`, `--backoff-ms`, `--work`, `--status`, `--limit`, `--worker`, `--loop`, `--interval-ms`, `--phase`, `--completed`, `--total`, `--unit`, `--label`, `--cursor`, `--artifact`, `--note`, `--kind`, `--reason-code`, `--reason`, `--wake-at`, `--deadline`, `--source-ref`, `--error-code`, and `--error`.
+
+Run commands never execute through a shell. Local workers allow only `bwrk`, `git`, `node`, `npm`, and `pnpm`; external workers can create runs without a command and drive them through the durable lifecycle.
+
+## `events`
+
+```text
+bwrk events tail|cursor [name] [--after-event <id>] [--cursor <name>] [--consumer <id>] [--event <id>] [--seq <n>] [--limit <n>] [--json]
+```
+
+Reads runtime events after an event id or named durable cursor. `events cursor <name>` advances a consumer cursor by event id and optional sequence watermark. Event cursors are separate from reviewer heartbeats and are included in portable exports.
+
 ## `daemon status`
 
 ```bash

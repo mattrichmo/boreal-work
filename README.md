@@ -36,6 +36,7 @@ use requires separate written permission from the copyright holder.
 | Search | SQLite FTS5 index with a content-hashed JSON compatibility fallback |
 | Human memory | Markdown and JSONL vault under `memory/`, normally with separate Git history |
 | Recovery | Deterministic projections, ledgers, and indexes rebuilt by `sync` and checked by `doctor` |
+| Long-running execution | Durable runs, checkpoints, wait conditions, retries, event cursors, and a bounded local worker |
 | Interfaces | CLI, MCP server, daemon, browser console, and terminal UI over shared runtime contracts |
 
 Boreal is not a hosted issue tracker or an autonomous coding agent. It is a project-scoped state and coordination layer that other tools can call.
@@ -85,6 +86,8 @@ Important consequences:
 - The CLI discovers the nearest parent `.boreal` directory. Automation can bind to an exact project with `--workspace /absolute/path`.
 
 See [runtime architecture](docs/architecture/RUNTIME.md), [evidence trust](docs/architecture/EVIDENCE_TRUST.md), and [project setup](docs/architecture/PROJECT_SETUP.md) for the full contracts.
+
+For resumable work, see [long-running tasks](docs/architecture/LONG_RUNNING_TASKS.md). Execution attempts are durable and observable, but a successful run does not bypass Boreal's evidence, verification, or closeout rules.
 
 ## Install and initialize
 

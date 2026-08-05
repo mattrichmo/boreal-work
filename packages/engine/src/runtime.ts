@@ -71,9 +71,11 @@ import {
   markWorkReady,
   removeBlockingDependency as removeBlockingDependencyDomain
 } from "@boreal/work-engine";
+import { createExecutionRunService, type ExecutionRunService } from "./runs.js";
 
 export interface BorealRuntimeOptions {
   readonly store?: BorealStore;
+  readonly workspaceRoot?: string;
   readonly policy?: Partial<RuntimePolicy>;
   readonly actor?: ActorRef;
   readonly operationId?: OperationId;
@@ -260,6 +262,7 @@ const CHECKPOINT_DIRTY_PATH_REASON_CODES = new Set([
 
 export interface BorealRuntime {
   readonly policy: RuntimePolicy;
+  readonly runs: ExecutionRunService;
   initWorkspace(): Promise<RuntimeEvent>;
   ensureWorkspaceInitialized(): Promise<WorkspaceInitializationResult>;
   resolveWorkReference(ref: string, options?: ResolveWorkReferenceOptions): Promise<WorkId>;
@@ -345,6 +348,7 @@ export function createBorealRuntime(options: BorealRuntimeOptions = {}): BorealR
   const operationId = options.operationId;
   const clock = options.clock ?? (() => new Date());
   const now = () => nowIso(clock());
+  const runs = createExecutionRunService({ store, actor, operationId, clock, workspaceRoot: options.workspaceRoot });
 
   async function appendEvent(
     writer: BorealWriter,
@@ -389,6 +393,7 @@ export function createBorealRuntime(options: BorealRuntimeOptions = {}): BorealR
 
   return {
     policy,
+    runs,
 
     async initWorkspace(): Promise<RuntimeEvent> {
       return (await ensureInitialized()).event;

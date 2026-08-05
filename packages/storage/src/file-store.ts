@@ -211,7 +211,10 @@ function snapshotToDocument(snapshot: StoreSnapshot): StateDocument {
     decisions: snapshot.decisions ?? [],
     graphEdges: snapshot.graphEdges ?? [],
     reservations: snapshot.reservations ?? [],
-    reviewerHeartbeats: snapshot.reviewerHeartbeats ?? []
+    reviewerHeartbeats: snapshot.reviewerHeartbeats ?? [],
+    runs: snapshot.runs ?? [],
+    checkpoints: snapshot.checkpoints ?? [],
+    eventCursors: snapshot.eventCursors ?? []
   };
 }
 
@@ -238,6 +241,9 @@ function documentToSnapshot(value: unknown): StoreSnapshot {
     graphEdges: readArray(value, "graphEdges"),
     reservations: readArray(value, "reservations"),
     reviewerHeartbeats: readOptionalArray(value, "reviewerHeartbeats"),
+    runs: readOptionalArray(value, "runs"),
+    checkpoints: readOptionalArray(value, "checkpoints"),
+    eventCursors: readOptionalArray(value, "eventCursors"),
     events: readOptionalArray(value, "events"),
     operations: readOptionalArray(value, "operations"),
     projections: [],

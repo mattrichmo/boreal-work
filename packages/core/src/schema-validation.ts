@@ -32,6 +32,9 @@ export interface RuntimeSnapshotSchemaInput {
   readonly graphEdges?: readonly unknown[];
   readonly reservations?: readonly unknown[];
   readonly reviewerHeartbeats?: readonly unknown[];
+  readonly runs?: readonly unknown[];
+  readonly checkpoints?: readonly unknown[];
+  readonly eventCursors?: readonly unknown[];
   readonly events?: readonly unknown[];
   readonly operations?: readonly unknown[];
   readonly projections?: readonly unknown[];
@@ -60,6 +63,9 @@ export const RUNTIME_SCHEMA_IDS = {
   decisionRecord: "https://boreal.work/schemas/records/decision-record.schema.json",
   agentReservation: "https://boreal.work/schemas/records/agent-reservation.schema.json",
   reviewerHeartbeat: "https://boreal.work/schemas/records/reviewer-heartbeat.schema.json",
+  executionRun: "https://boreal.work/schemas/runs/execution-run.schema.json",
+  runCheckpoint: "https://boreal.work/schemas/runs/run-checkpoint.schema.json",
+  eventCursor: "https://boreal.work/schemas/records/event-cursor.schema.json",
   runtimeEvent: "https://boreal.work/schemas/events/runtime-event.schema.json",
   runtimeOperation: "https://boreal.work/schemas/operations/runtime-operation.schema.json",
   projectionRecord: "https://boreal.work/schemas/projections/projection-record.schema.json",
@@ -161,6 +167,27 @@ export const RUNTIME_SCHEMA_CONTRACTS = [
     schemaPath: "schemas/records/reviewer-heartbeat.schema.json",
     runtimeSection: "reviewerHeartbeats",
     validator: reviewerHeartbeatSchemaIssues
+  },
+  {
+    key: "executionRun",
+    schemaId: RUNTIME_SCHEMA_IDS.executionRun,
+    schemaPath: "schemas/runs/execution-run.schema.json",
+    runtimeSection: "runs",
+    validator: executionRunSchemaIssues
+  },
+  {
+    key: "runCheckpoint",
+    schemaId: RUNTIME_SCHEMA_IDS.runCheckpoint,
+    schemaPath: "schemas/runs/run-checkpoint.schema.json",
+    runtimeSection: "checkpoints",
+    validator: runCheckpointSchemaIssues
+  },
+  {
+    key: "eventCursor",
+    schemaId: RUNTIME_SCHEMA_IDS.eventCursor,
+    schemaPath: "schemas/records/event-cursor.schema.json",
+    runtimeSection: "eventCursors",
+    validator: eventCursorSchemaIssues
   },
   {
     key: "runtimeEvent",
@@ -642,6 +669,140 @@ export function reviewerHeartbeatSchemaIssues(value: unknown, path = "$"): reado
   if (value.lastWorkId !== undefined) {
     issues.push(...patternStringIssue(value.lastWorkId, `${path}.lastWorkId`, schemaId, /^bw_work_[a-f0-9]{12,64}$/));
   }
+  return issues;
+}
+
+export function executionRunSchemaIssues(value: unknown, path = "$"): readonly SchemaValidationIssue[] {
+  const schemaId = RUNTIME_SCHEMA_IDS.executionRun;
+  if (!isRecord(value)) return [issue(schemaId, path, "must be an object")];
+  const issues: SchemaValidationIssue[] = [
+    ...recordMetaIssues(value.meta, `${path}.meta`, schemaId, /^bw_run_[a-f0-9]{12,64}$/),
+    ...patternStringIssue(value.workId, `${path}.workId`, schemaId, /^bw_work_[a-f0-9]{12,64}$/),
+    ...integerAtLeastIssue(value.attempt, `${path}.attempt`, schemaId, 1),
+    ...enumIssue(value.status, `${path}.status`, schemaId, [
+      "queued",
+      "running",
+      "waiting",
+      "paused",
+      "succeeded",
+      "failed",
+      "cancelled",
+      "expired",
+      "needs_attention"
+    ]),
+    ...optionalStringIssue(value.workerId, `${path}.workerId`, schemaId),
+    ...optionalStringIssue(value.reservationId, `${path}.reservationId`, schemaId),
+    ...optionalStringIssue(value.idempotencyKey, `${path}.idempotencyKey`, schemaId),
+    ...optionalStringIssue(value.parentRunId, `${path}.parentRunId`, schemaId),
+    ...stringIssue(value.createdAt, `${path}.createdAt`, schemaId),
+    ...optionalStringIssue(value.startedAt, `${path}.startedAt`, schemaId),
+    ...optionalStringIssue(value.heartbeatAt, `${path}.heartbeatAt`, schemaId),
+    ...optionalStringIssue(value.finishedAt, `${path}.finishedAt`, schemaId),
+    ...integerAtLeastIssue(value.staleAfterMs, `${path}.staleAfterMs`, schemaId, 1),
+    ...optionalStringIssue(value.currentCheckpointId, `${path}.currentCheckpointId`, schemaId),
+    ...integerAtLeastIssue(value.checkpointSequence, `${path}.checkpointSequence`, schemaId, 0),
+    ...optionalStringIssue(value.phase, `${path}.phase`, schemaId),
+    ...runProgressSchemaIssues(value.progress, `${path}.progress`, schemaId),
+    ...runWaitSchemaIssues(value.wait, `${path}.wait`, schemaId),
+    ...runRetrySchemaIssues(value.retry, `${path}.retry`, schemaId),
+    ...runResultSchemaIssues(value.result, `${path}.result`, schemaId),
+    ...optionalStringIssue(value.errorCode, `${path}.errorCode`, schemaId),
+    ...optionalStringIssue(value.errorMessage, `${path}.errorMessage`, schemaId)
+  ];
+  if (value.command !== undefined) {
+    if (!isRecord(value.command)) {
+      issues.push(issue(schemaId, `${path}.command`, "must be an object"));
+    } else {
+      issues.push(
+        ...nonEmptyStringIssue(value.command.executable, `${path}.command.executable`, schemaId),
+        ...stringArrayIssue(value.command.args, `${path}.command.args`, schemaId),
+        ...optionalStringIssue(value.command.cwd, `${path}.command.cwd`, schemaId),
+        ...integerAtLeastIssue(value.command.timeoutMs, `${path}.command.timeoutMs`, schemaId, 1),
+        ...integerAtLeastIssue(value.command.stdoutMaxBytes, `${path}.command.stdoutMaxBytes`, schemaId, 1),
+        ...integerAtLeastIssue(value.command.stderrMaxBytes, `${path}.command.stderrMaxBytes`, schemaId, 1)
+      );
+    }
+  }
+  return issues;
+}
+
+export function runCheckpointSchemaIssues(value: unknown, path = "$"): readonly SchemaValidationIssue[] {
+  const schemaId = RUNTIME_SCHEMA_IDS.runCheckpoint;
+  if (!isRecord(value)) return [issue(schemaId, path, "must be an object")];
+  return [
+    ...recordMetaIssues(value.meta, `${path}.meta`, schemaId, /^bw_checkpoint_[a-f0-9]{12,64}$/),
+    ...patternStringIssue(value.runId, `${path}.runId`, schemaId, /^bw_run_[a-f0-9]{12,64}$/),
+    ...integerAtLeastIssue(value.sequence, `${path}.sequence`, schemaId, 1),
+    ...optionalStringIssue(value.phase, `${path}.phase`, schemaId),
+    ...runProgressSchemaIssues(value.progress, `${path}.progress`, schemaId),
+    ...optionalStringIssue(value.cursor, `${path}.cursor`, schemaId),
+    ...uniqueStringArrayIssue(value.artifactUris, `${path}.artifactUris`, schemaId),
+    ...optionalStringIssue(value.note, `${path}.note`, schemaId)
+  ];
+}
+
+export function eventCursorSchemaIssues(value: unknown, path = "$"): readonly SchemaValidationIssue[] {
+  const schemaId = RUNTIME_SCHEMA_IDS.eventCursor;
+  if (!isRecord(value)) return [issue(schemaId, path, "must be an object")];
+  return [
+    ...recordMetaIssues(value.meta, `${path}.meta`, schemaId, /^bw_cursor_[a-f0-9]{12,64}$/),
+    ...nonEmptyStringIssue(value.name, `${path}.name`, schemaId),
+    ...nonEmptyStringIssue(value.consumerId, `${path}.consumerId`, schemaId),
+    ...literalIssue(value.stream, `${path}.stream`, schemaId, "runtime-events"),
+    ...optionalPatternStringIssue(value.lastEventId, `${path}.lastEventId`, schemaId, /^bw_event_[a-f0-9]{12,64}$/),
+    ...optionalIntegerAtLeastIssue(value.lastSeq, `${path}.lastSeq`, schemaId, 0),
+    ...stringIssue(value.advancedAt, `${path}.advancedAt`, schemaId)
+  ];
+}
+
+function runProgressSchemaIssues(value: unknown, path: string, schemaId: string): readonly SchemaValidationIssue[] {
+  if (value === undefined) return [];
+  if (!isRecord(value)) return [issue(schemaId, path, "must be an object")];
+  return [
+    ...optionalIntegerAtLeastIssue(value.completed, `${path}.completed`, schemaId, 0),
+    ...optionalIntegerAtLeastIssue(value.total, `${path}.total`, schemaId, 0),
+    ...optionalStringIssue(value.unit, `${path}.unit`, schemaId),
+    ...optionalStringIssue(value.label, `${path}.label`, schemaId)
+  ];
+}
+
+function runWaitSchemaIssues(value: unknown, path: string, schemaId: string): readonly SchemaValidationIssue[] {
+  if (value === undefined) return [];
+  if (!isRecord(value)) return [issue(schemaId, path, "must be an object")];
+  return [
+    ...enumIssue(value.kind, `${path}.kind`, schemaId, ["dependency", "human", "external", "timer", "rate_limit"]),
+    ...nonEmptyStringIssue(value.reasonCode, `${path}.reasonCode`, schemaId),
+    ...nonEmptyStringIssue(value.reason, `${path}.reason`, schemaId),
+    ...optionalStringIssue(value.wakeAt, `${path}.wakeAt`, schemaId),
+    ...optionalStringIssue(value.deadline, `${path}.deadline`, schemaId),
+    ...optionalStringIssue(value.sourceRef, `${path}.sourceRef`, schemaId)
+  ];
+}
+
+function runRetrySchemaIssues(value: unknown, path: string, schemaId: string): readonly SchemaValidationIssue[] {
+  if (!isRecord(value)) return [issue(schemaId, path, "must be an object")];
+  return [
+    ...integerAtLeastIssue(value.maxAttempts, `${path}.maxAttempts`, schemaId, 1),
+    ...integerAtLeastIssue(value.backoffMs, `${path}.backoffMs`, schemaId, 0),
+    ...optionalStringIssue(value.nextAttemptAt, `${path}.nextAttemptAt`, schemaId)
+  ];
+}
+
+function runResultSchemaIssues(value: unknown, path: string, schemaId: string): readonly SchemaValidationIssue[] {
+  if (value === undefined) return [];
+  if (!isRecord(value)) return [issue(schemaId, path, "must be an object")];
+  const issues: SchemaValidationIssue[] = [
+    ...optionalIntegerAtLeastIssue(value.exitCode, `${path}.exitCode`, schemaId, 0),
+    ...optionalStringIssue(value.signal, `${path}.signal`, schemaId),
+    ...optionalBooleanIssue(value.timedOut, `${path}.timedOut`, schemaId),
+    ...optionalBooleanIssue(value.cancelled, `${path}.cancelled`, schemaId),
+    ...optionalPatternStringIssue(value.stdoutHash, `${path}.stdoutHash`, schemaId, /^sha256:[a-f0-9]{64}$/),
+    ...optionalPatternStringIssue(value.stderrHash, `${path}.stderrHash`, schemaId, /^sha256:[a-f0-9]{64}$/),
+    ...optionalIntegerAtLeastIssue(value.stdoutBytes, `${path}.stdoutBytes`, schemaId, 0),
+    ...optionalIntegerAtLeastIssue(value.stderrBytes, `${path}.stderrBytes`, schemaId, 0),
+    ...optionalStringIssue(value.stdoutExcerpt, `${path}.stdoutExcerpt`, schemaId),
+    ...optionalStringIssue(value.stderrExcerpt, `${path}.stderrExcerpt`, schemaId)
+  ];
   return issues;
 }
 
@@ -2146,6 +2307,22 @@ function integerAtLeastIssue(value: unknown, path: string, schemaId: string, min
   return Number.isInteger(value) && Number(value) >= minimum
     ? []
     : [issue(schemaId, path, `must be an integer >= ${minimum}`)];
+}
+
+function optionalStringIssue(value: unknown, path: string, schemaId: string): readonly SchemaValidationIssue[] {
+  return value === undefined ? [] : stringIssue(value, path, schemaId);
+}
+
+function optionalPatternStringIssue(value: unknown, path: string, schemaId: string, pattern: RegExp): readonly SchemaValidationIssue[] {
+  return value === undefined ? [] : patternStringIssue(value, path, schemaId, pattern);
+}
+
+function optionalIntegerAtLeastIssue(value: unknown, path: string, schemaId: string, minimum: number): readonly SchemaValidationIssue[] {
+  return value === undefined ? [] : integerAtLeastIssue(value, path, schemaId, minimum);
+}
+
+function optionalBooleanIssue(value: unknown, path: string, schemaId: string): readonly SchemaValidationIssue[] {
+  return value === undefined ? [] : booleanIssue(value, path, schemaId);
 }
 
 function stringArrayIssue(value: unknown, path: string, schemaId: string): readonly SchemaValidationIssue[] {

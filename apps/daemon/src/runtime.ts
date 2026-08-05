@@ -113,8 +113,15 @@ export interface DaemonWatchResult {
   readonly status: DaemonStatusResult;
   readonly globalRollups: GlobalRollupCacheResult;
   readonly reservationRenewals: DaemonReservationRenewalSummary;
+  readonly executionRuns: DaemonExecutionRunSummary;
   readonly observedPaths: readonly string[];
   readonly recommendedActions: readonly string[];
+}
+
+export interface DaemonExecutionRunSummary {
+  readonly enabled: true;
+  readonly expired: readonly string[];
+  readonly requeued: readonly string[];
 }
 
 export interface DaemonGlobalReadinessSummary {
@@ -298,6 +305,9 @@ export async function runDaemonWatchOnce(options: DaemonRuntimeOptions): Promise
   const reservationRenewals = action === "observed"
     ? await renewDaemonReservations(status.workspaceRoot, generatedAt)
     : emptyDaemonReservationRenewals();
+  const executionRuns = action === "observed"
+    ? await reconcileDaemonRuns(status.workspaceRoot, generatedAt)
+    : emptyDaemonExecutionRuns();
   const globalRollups = action === "observed"
     ? await refreshGlobalRollupCache({
         registryRoot: options.registryRoot,
@@ -328,9 +338,26 @@ export async function runDaemonWatchOnce(options: DaemonRuntimeOptions): Promise
     status,
     globalRollups,
     reservationRenewals,
+    executionRuns,
     observedPaths: action === "observed" ? status.watch.paths : [],
     recommendedActions: status.recommendedActions
   };
+}
+
+async function reconcileDaemonRuns(workspaceRoot: string, generatedAt: IsoTimestamp): Promise<DaemonExecutionRunSummary> {
+  const setup = await readProjectSetup(workspaceRoot);
+  const runtime = createBorealRuntime({
+    store: daemonStore(workspaceRoot, setup.storage),
+    actor: { id: "boreal-daemon", kind: "system", displayName: "Boreal daemon" },
+    clock: () => new Date(Date.parse(generatedAt)),
+    workspaceRoot
+  });
+  const result = await runtime.runs.reconcile();
+  return { enabled: true, expired: result.expired, requeued: result.requeued };
+}
+
+function emptyDaemonExecutionRuns(): DaemonExecutionRunSummary {
+  return { enabled: true, expired: [], requeued: [] };
 }
 
 async function recomputeGlobalReadinessFromRollups(input: {

@@ -78,7 +78,10 @@ const INDEXED_SECTIONS = [
   "decisions",
   "graphEdges",
   "reservations",
-  "reviewerHeartbeats"
+  "reviewerHeartbeats",
+  "runs",
+  "checkpoints",
+  "eventCursors"
 ] as const satisfies readonly StoreSectionName[];
 
 export function objectIndexPath(rootDir: string): string {

@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://boreal.work/schemas/records/event-cursor.schema.json",
+  "title": "Boreal Runtime Event Cursor",
+  "type": "object",
+  "required": ["meta", "name", "consumerId", "stream", "advancedAt"],
+  "properties": {
+    "meta": { "type": "object" },
+    "name": { "type": "string", "minLength": 1, "maxLength": 128 },
+    "consumerId": { "type": "string", "minLength": 1, "maxLength": 256 },
+    "stream": { "const": "runtime-events" },
+    "lastEventId": { "type": "string", "pattern": "^bw_event_[a-f0-9]{12,64}$" },
+    "lastSeq": { "type": "integer", "minimum": 0 },
+    "advancedAt": { "type": "string", "format": "date-time" }
+  }
+}

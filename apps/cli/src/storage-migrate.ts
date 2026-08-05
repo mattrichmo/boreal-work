@@ -27,6 +27,9 @@ export interface StorageRecordCounts {
   readonly graphEdges: number;
   readonly reservations: number;
   readonly reviewerHeartbeats: number;
+  readonly runs: number;
+  readonly checkpoints: number;
+  readonly eventCursors: number;
   readonly events: number;
   readonly operations: number;
 }
@@ -183,6 +186,9 @@ async function writeSnapshot(writer: BorealWriter, snapshot: StoreSnapshot): Pro
   for (const record of snapshot.graphEdges ?? []) await writer.putGraphEdge(record);
   for (const record of snapshot.reservations ?? []) await writer.putReservation(record);
   for (const record of snapshot.reviewerHeartbeats ?? []) await writer.putReviewerHeartbeat(record);
+  for (const record of snapshot.runs ?? []) await writer.putRun(record);
+  for (const record of snapshot.checkpoints ?? []) await writer.putCheckpoint(record);
+  for (const record of snapshot.eventCursors ?? []) await writer.putEventCursor(record);
   for (const record of snapshot.events ?? []) await writer.putEvent(record as RuntimeEvent);
   for (const record of snapshot.operations ?? []) await writer.putOperation(record as RuntimeOperation);
 }
@@ -229,6 +235,9 @@ function portableMigrationSnapshot(snapshot: StoreSnapshot) {
     graphEdges: stableRecords(snapshot.graphEdges),
     reservations: stableRecords(snapshot.reservations),
     reviewerHeartbeats: stableRecords(snapshot.reviewerHeartbeats),
+    runs: stableRecords(snapshot.runs),
+    checkpoints: stableRecords(snapshot.checkpoints),
+    eventCursors: stableRecords(snapshot.eventCursors),
     events: (snapshot.events ?? []).map(portableMigrationEvent)
   };
 }
@@ -274,6 +283,9 @@ function countSnapshot(snapshot: StoreSnapshot): StorageRecordCounts {
     graphEdges: snapshot.graphEdges?.length ?? 0,
     reservations: snapshot.reservations?.length ?? 0,
     reviewerHeartbeats: snapshot.reviewerHeartbeats?.length ?? 0,
+    runs: snapshot.runs?.length ?? 0,
+    checkpoints: snapshot.checkpoints?.length ?? 0,
+    eventCursors: snapshot.eventCursors?.length ?? 0,
     events: snapshot.events?.length ?? 0,
     operations: snapshot.operations?.length ?? 0
   };

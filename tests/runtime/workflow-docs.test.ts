@@ -218,7 +218,7 @@ describe("workflow, template, and skill docs", () => {
     expect(compatibility).toContain("## Support Matrix");
     expect(compatibility).toContain("## Migration Transaction Contract");
     expect(compatibility).toContain("canonical snapshot content hash");
-    expect(compatibility).toContain("This policy changes neither the repository's current private/unlicensed state nor its publication status");
+    expect(compatibility).toContain("This policy applies alongside the [PolyForm Noncommercial License 1.0.0]");
     expect(commands).toContain("`boreal.cli.version.v1`");
     expect(commands).toContain("Non-reversible migrations must be snapshot-backed by a `boreal.export.v1` recovery snapshot");
   });

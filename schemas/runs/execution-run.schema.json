@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://boreal.work/schemas/runs/execution-run.schema.json",
+  "title": "Boreal Execution Run",
+  "type": "object",
+  "required": ["meta", "workId", "attempt", "status", "createdAt", "staleAfterMs", "checkpointSequence", "retry"],
+  "properties": {
+    "meta": { "type": "object" },
+    "workId": { "type": "string", "pattern": "^bw_work_[a-f0-9]{12,64}$" },
+    "attempt": { "type": "integer", "minimum": 1 },
+    "status": { "enum": ["queued", "running", "waiting", "paused", "succeeded", "failed", "cancelled", "expired", "needs_attention"] },
+    "workerId": { "type": "string" },
+    "reservationId": { "type": "string" },
+    "idempotencyKey": { "type": "string", "maxLength": 512 },
+    "parentRunId": { "type": "string", "pattern": "^bw_run_[a-f0-9]{12,64}$" },
+    "command": { "type": "object" },
+    "createdAt": { "type": "string", "format": "date-time" },
+    "startedAt": { "type": "string", "format": "date-time" },
+    "heartbeatAt": { "type": "string", "format": "date-time" },
+    "finishedAt": { "type": "string", "format": "date-time" },
+    "staleAfterMs": { "type": "integer", "minimum": 1 },
+    "currentCheckpointId": { "type": "string", "pattern": "^bw_checkpoint_[a-f0-9]{12,64}$" },
+    "checkpointSequence": { "type": "integer", "minimum": 0 },
+    "phase": { "type": "string" },
+    "progress": { "type": "object" },
+    "wait": { "type": "object" },
+    "retry": { "type": "object" },
+    "result": { "type": "object" },
+    "errorCode": { "type": "string" },
+    "errorMessage": { "type": "string", "maxLength": 2000 }
+  }
+}

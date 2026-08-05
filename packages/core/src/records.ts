@@ -6,6 +6,7 @@ import type {
   ContentHash,
   DecisionId,
   DirectiveAcknowledgementId,
+  EventCursorId,
   EventId,
   EvidenceId,
   GraphEdgeId,
@@ -13,6 +14,8 @@ import type {
   OperationId,
   ProjectionId,
   ReservationId,
+  RunCheckpointId,
+  RunId,
   ReviewerHeartbeatId,
   VerificationId,
   WorkId
@@ -162,6 +165,110 @@ export interface ReviewerHeartbeatRecord {
   readonly lastClosedAt?: IsoTimestamp;
   readonly lastEventId?: EventId;
   readonly lastWorkId?: WorkId;
+  readonly advancedAt: IsoTimestamp;
+}
+
+export type ExecutionRunStatus =
+  | "queued"
+  | "running"
+  | "waiting"
+  | "paused"
+  | "succeeded"
+  | "failed"
+  | "cancelled"
+  | "expired"
+  | "needs_attention";
+
+export type RunWaitKind = "dependency" | "human" | "external" | "timer" | "rate_limit";
+
+export interface RunWaitCondition {
+  readonly kind: RunWaitKind;
+  readonly reasonCode: string;
+  readonly reason: string;
+  readonly wakeAt?: IsoTimestamp;
+  readonly deadline?: IsoTimestamp;
+  readonly sourceRef?: string;
+}
+
+export interface RunProgress {
+  readonly completed?: number;
+  readonly total?: number;
+  readonly unit?: string;
+  readonly label?: string;
+}
+
+export interface RunRetryPolicy {
+  readonly maxAttempts: number;
+  readonly backoffMs: number;
+  readonly nextAttemptAt?: IsoTimestamp;
+}
+
+export interface ExecutionRunCommand {
+  readonly executable: string;
+  readonly args: readonly string[];
+  readonly cwd?: string;
+  readonly timeoutMs: number;
+  readonly stdoutMaxBytes: number;
+  readonly stderrMaxBytes: number;
+}
+
+export interface ExecutionRunResult {
+  readonly exitCode?: number;
+  readonly signal?: string;
+  readonly timedOut?: boolean;
+  readonly cancelled?: boolean;
+  readonly stdoutHash?: ContentHash;
+  readonly stderrHash?: ContentHash;
+  readonly stdoutBytes?: number;
+  readonly stderrBytes?: number;
+  readonly stdoutExcerpt?: string;
+  readonly stderrExcerpt?: string;
+}
+
+export interface ExecutionRun {
+  readonly meta: RecordMeta<RunId>;
+  readonly workId: WorkId;
+  readonly attempt: number;
+  readonly status: ExecutionRunStatus;
+  readonly workerId?: string;
+  readonly reservationId?: ReservationId;
+  readonly idempotencyKey?: string;
+  readonly parentRunId?: RunId;
+  readonly command?: ExecutionRunCommand;
+  readonly createdAt: IsoTimestamp;
+  readonly startedAt?: IsoTimestamp;
+  readonly heartbeatAt?: IsoTimestamp;
+  readonly finishedAt?: IsoTimestamp;
+  readonly staleAfterMs: number;
+  readonly currentCheckpointId?: RunCheckpointId;
+  readonly checkpointSequence: number;
+  readonly phase?: string;
+  readonly progress?: RunProgress;
+  readonly wait?: RunWaitCondition;
+  readonly retry: RunRetryPolicy;
+  readonly result?: ExecutionRunResult;
+  readonly errorCode?: string;
+  readonly errorMessage?: string;
+}
+
+export interface RunCheckpoint {
+  readonly meta: RecordMeta<RunCheckpointId>;
+  readonly runId: RunId;
+  readonly sequence: number;
+  readonly phase?: string;
+  readonly progress?: RunProgress;
+  readonly cursor?: string;
+  readonly artifactUris: readonly string[];
+  readonly note?: string;
+}
+
+export interface EventCursorRecord {
+  readonly meta: RecordMeta<EventCursorId>;
+  readonly name: string;
+  readonly consumerId: string;
+  readonly stream: "runtime-events";
+  readonly lastEventId?: EventId;
+  readonly lastSeq?: number;
   readonly advancedAt: IsoTimestamp;
 }
 

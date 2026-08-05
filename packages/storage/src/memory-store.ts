@@ -10,6 +10,8 @@ import type {
   DecisionRecord,
   DirectiveAcknowledgementId,
   DirectiveAcknowledgementRecord,
+  EventCursorId,
+  EventCursorRecord,
   EvidenceId,
   EvidenceRecord,
   GraphEdge,
@@ -22,6 +24,10 @@ import type {
   ReservationId,
   ReviewerHeartbeatId,
   ReviewerHeartbeatRecord,
+  RunCheckpoint,
+  RunCheckpointId,
+  RunId,
+  ExecutionRun,
   RuntimeEvent,
   RuntimeOperation,
   VerificationId,
@@ -44,6 +50,9 @@ interface StoreState {
   readonly graphEdges: Map<GraphEdgeId, GraphEdge>;
   readonly reservations: Map<ReservationId, AgentReservation>;
   readonly reviewerHeartbeats: Map<ReviewerHeartbeatId, ReviewerHeartbeatRecord>;
+  readonly runs: Map<RunId, ExecutionRun>;
+  readonly checkpoints: Map<RunCheckpointId, RunCheckpoint>;
+  readonly eventCursors: Map<EventCursorId, EventCursorRecord>;
   readonly events: Map<string, RuntimeEvent>;
   readonly operations: Map<OperationId, RuntimeOperation>;
   readonly projections: Map<ProjectionId, ProjectionRecord>;
@@ -62,6 +71,9 @@ interface StoreOverlay {
   readonly graphEdges: SectionOverlay<GraphEdgeId, GraphEdge>;
   readonly reservations: SectionOverlay<ReservationId, AgentReservation>;
   readonly reviewerHeartbeats: SectionOverlay<ReviewerHeartbeatId, ReviewerHeartbeatRecord>;
+  readonly runs: SectionOverlay<RunId, ExecutionRun>;
+  readonly checkpoints: SectionOverlay<RunCheckpointId, RunCheckpoint>;
+  readonly eventCursors: SectionOverlay<EventCursorId, EventCursorRecord>;
   readonly events: SectionOverlay<string, RuntimeEvent>;
   readonly operations: SectionOverlay<OperationId, RuntimeOperation>;
   readonly projections: SectionOverlay<ProjectionId, ProjectionRecord>;
@@ -117,6 +129,9 @@ export interface StoreSnapshot {
   readonly graphEdges?: readonly GraphEdge[];
   readonly reservations?: readonly AgentReservation[];
   readonly reviewerHeartbeats?: readonly ReviewerHeartbeatRecord[];
+  readonly runs?: readonly ExecutionRun[];
+  readonly checkpoints?: readonly RunCheckpoint[];
+  readonly eventCursors?: readonly EventCursorRecord[];
   readonly events?: readonly RuntimeEvent[];
   readonly operations?: readonly RuntimeOperation[];
   readonly projections?: readonly ProjectionRecord[];
@@ -257,6 +272,40 @@ class MemoryTransaction implements BorealWriter {
     return overlayValues(this.state.reviewerHeartbeats);
   }
 
+  async getRun(id: RunId): Promise<ExecutionRun | undefined> {
+    return overlayGet(this.state.runs, id);
+  }
+
+  async listRuns(): Promise<readonly ExecutionRun[]> {
+    return overlayValues(this.state.runs);
+  }
+
+  async listRunsForWork(workId: WorkId): Promise<readonly ExecutionRun[]> {
+    return overlayValues(this.state.runs).filter((record) => record.workId === workId);
+  }
+
+  async getCheckpoint(id: RunCheckpointId): Promise<RunCheckpoint | undefined> {
+    return overlayGet(this.state.checkpoints, id);
+  }
+
+  async listCheckpoints(): Promise<readonly RunCheckpoint[]> {
+    return overlayValues(this.state.checkpoints);
+  }
+
+  async listCheckpointsForRun(runId: RunId): Promise<readonly RunCheckpoint[]> {
+    return overlayValues(this.state.checkpoints)
+      .filter((record) => record.runId === runId)
+      .sort((left, right) => left.sequence - right.sequence);
+  }
+
+  async getEventCursor(id: EventCursorId): Promise<EventCursorRecord | undefined> {
+    return overlayGet(this.state.eventCursors, id);
+  }
+
+  async listEventCursors(): Promise<readonly EventCursorRecord[]> {
+    return overlayValues(this.state.eventCursors);
+  }
+
   async headSeq(): Promise<number> {
     return overlayValues(this.state.events).length + overlayValues(this.state.operations).length;
   }
@@ -377,6 +426,30 @@ class MemoryTransaction implements BorealWriter {
     return overlayDelete(this.state.reviewerHeartbeats, id);
   }
 
+  async putRun(record: ExecutionRun): Promise<void> {
+    overlayPut(this.state.runs, record.meta.id, frozenClone(record));
+  }
+
+  async deleteRun(id: RunId): Promise<boolean> {
+    return overlayDelete(this.state.runs, id);
+  }
+
+  async putCheckpoint(record: RunCheckpoint): Promise<void> {
+    overlayPut(this.state.checkpoints, record.meta.id, frozenClone(record));
+  }
+
+  async deleteCheckpoint(id: RunCheckpointId): Promise<boolean> {
+    return overlayDelete(this.state.checkpoints, id);
+  }
+
+  async putEventCursor(record: EventCursorRecord): Promise<void> {
+    overlayPut(this.state.eventCursors, record.meta.id, frozenClone(record));
+  }
+
+  async deleteEventCursor(id: EventCursorId): Promise<boolean> {
+    return overlayDelete(this.state.eventCursors, id);
+  }
+
   async putEvent(record: RuntimeEvent): Promise<void> {
     overlayPut(this.state.events, record.meta.id, frozenClone(record));
   }
@@ -421,6 +494,9 @@ function createState(seed?: PartialStoreSeed): StoreState {
     graphEdges: new Map((seed?.graphEdges ?? []).map((record) => [record.meta.id, frozenClone(record)])),
     reservations: new Map((seed?.reservations ?? []).map((record) => [record.meta.id, frozenClone(record)])),
     reviewerHeartbeats: new Map((seed?.reviewerHeartbeats ?? []).map((record) => [record.meta.id, frozenClone(record)])),
+    runs: new Map((seed?.runs ?? []).map((record) => [record.meta.id, frozenClone(record)])),
+    checkpoints: new Map((seed?.checkpoints ?? []).map((record) => [record.meta.id, frozenClone(record)])),
+    eventCursors: new Map((seed?.eventCursors ?? []).map((record) => [record.meta.id, frozenClone(record)])),
     events: new Map((seed?.events ?? []).map((record) => [record.meta.id, frozenClone(record)])),
     operations: new Map((seed?.operations ?? []).map((record) => [record.meta.id, frozenClone(record)])),
     projections: new Map((seed?.projections ?? []).map((record) => [record.meta.id, frozenClone(record)])),
@@ -445,6 +521,9 @@ function createOverlayState(state: StoreState): StoreOverlay {
     graphEdges: createOverlay(state.graphEdges),
     reservations: createOverlay(state.reservations),
     reviewerHeartbeats: createOverlay(state.reviewerHeartbeats),
+    runs: createOverlay(state.runs),
+    checkpoints: createOverlay(state.checkpoints),
+    eventCursors: createOverlay(state.eventCursors),
     events: createOverlay(state.events),
     operations: createOverlay(state.operations),
     projections: createOverlay(state.projections),
@@ -465,6 +544,9 @@ function commitOverlayState(state: StoreOverlay): StoreState {
     graphEdges: overlayCommit(state.graphEdges),
     reservations: overlayCommit(state.reservations),
     reviewerHeartbeats: overlayCommit(state.reviewerHeartbeats),
+    runs: overlayCommit(state.runs),
+    checkpoints: overlayCommit(state.checkpoints),
+    eventCursors: overlayCommit(state.eventCursors),
     events: overlayCommit(state.events),
     operations: overlayCommit(state.operations),
     projections: overlayCommit(state.projections),
@@ -485,6 +567,9 @@ function overlayStateChanges(state: StoreOverlay): StoreChange[] {
     ...sectionChanges("graphEdges", state.graphEdges),
     ...sectionChanges("reservations", state.reservations),
     ...sectionChanges("reviewerHeartbeats", state.reviewerHeartbeats),
+    ...sectionChanges("runs", state.runs),
+    ...sectionChanges("checkpoints", state.checkpoints),
+    ...sectionChanges("eventCursors", state.eventCursors),
     ...sectionChanges("events", state.events),
     ...sectionChanges("operations", state.operations),
     ...sectionChanges("projections", state.projections),
@@ -572,6 +657,9 @@ function stateToSnapshot(state: StoreState): StoreSnapshot {
     graphEdges: [...state.graphEdges.values()],
     reservations: [...state.reservations.values()],
     reviewerHeartbeats: [...state.reviewerHeartbeats.values()],
+    runs: [...state.runs.values()],
+    checkpoints: [...state.checkpoints.values()],
+    eventCursors: [...state.eventCursors.values()],
     events: [...state.events.values()],
     operations: [...state.operations.values()],
     projections: [...state.projections.values()],

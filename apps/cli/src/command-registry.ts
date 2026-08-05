@@ -25,6 +25,8 @@ export interface CommandDefinition {
     | "search"
     | "rollup"
     | "reservation"
+    | "run"
+    | "events"
     | "agent"
     | "session"
     | "operation"
@@ -951,6 +953,69 @@ export const COMMAND_DEFINITIONS: readonly CommandDefinition[] = [
     ],
     positionals: { label: "project-id", min: 1, max: 1 },
     requiresWorkspace: false,
+    supportsJson: true,
+  },
+  {
+    path: ["run"],
+    category: "run",
+    summary: "Manage durable long-running execution runs.",
+    usage: "bwrk run start|list|show|heartbeat|checkpoint|wait|pause|resume|cancel|succeed|fail|retry|reconcile|worker ... [--json]",
+    description:
+      "Tracks execution attempts separately from planning work. Runs persist heartbeats, checkpoints, wait conditions, retry policy, bounded command results, and stale-worker reconciliation.",
+    flags: [
+      flag("command", "value", "Capability-bounded command for a local worker. Shell operators are rejected."),
+      flag("cwd", "value", "Command working directory relative to the workspace root."),
+      flag("timeout-ms", "value", "Worker command timeout in milliseconds."),
+      flag("stdout-max-bytes", "value", "Maximum captured stdout bytes."),
+      flag("stderr-max-bytes", "value", "Maximum captured stderr bytes."),
+      flag("idempotency-key", "value", "Stable caller key; repeated starts return the existing run."),
+      flag("reservation", "value", "Reservation id associated with the run."),
+      flag("stale-after-ms", "value", "Heartbeat age after which reconciliation marks a run needs_attention."),
+      flag("max-attempts", "value", "Maximum attempts permitted by the retry policy."),
+      flag("backoff-ms", "value", "Delay before a manually queued retry."),
+      flag("work", "value", "Filter runs by work reference."),
+      flag("status", "value", "Filter runs by status or all."),
+      flag("limit", "value", "Maximum rows to return."),
+      flag("worker", "value", "Worker identity used for fencing and heartbeats."),
+      flag("loop", "boolean", "Keep the local worker alive and poll for queued runs."),
+      flag("interval-ms", "value", "Worker loop poll interval; defaults to 5000ms."),
+      flag("phase", "value", "Checkpoint phase."),
+      flag("completed", "value", "Checkpoint completed count."),
+      flag("total", "value", "Checkpoint total count."),
+      flag("unit", "value", "Checkpoint progress unit."),
+      flag("label", "value", "Checkpoint progress label."),
+      flag("cursor", "value", "Opaque checkpoint cursor or event cursor name."),
+      flag("artifact", "value", "Checkpoint artifact URI; may be repeated.", true),
+      flag("note", "value", "Checkpoint note."),
+      flag("kind", "value", "Wait kind: dependency, human, external, timer, or rate_limit."),
+      flag("reason-code", "value", "Stable wait reason code."),
+      flag("reason", "value", "Human-readable wait reason."),
+      flag("wake-at", "value", "Timer wake timestamp."),
+      flag("deadline", "value", "Wait deadline timestamp."),
+      flag("source-ref", "value", "External dependency or source reference."),
+      flag("error-code", "value", "Failure code when marking a run failed."),
+      flag("error", "value", "Failure message when marking a run failed.")
+    ],
+    positionals: { label: "run command and arguments", min: 0, max: 2 },
+    requiresWorkspace: true,
+    supportsJson: true,
+  },
+  {
+    path: ["events"],
+    category: "events",
+    summary: "Read runtime events with durable consumer cursors.",
+    usage: "bwrk events tail|cursor [name] [--after-event <id>] [--cursor <name>] [--consumer <id>] [--event <id>] [--seq <n>] [--limit <n>] [--json]",
+    description: "Tails the durable runtime event stream and advances named consumer cursors without coupling consumers to work-item heartbeats.",
+    flags: [
+      flag("after-event", "value", "Return events after this event id."),
+      flag("cursor", "value", "Read after this named cursor."),
+      flag("consumer", "value", "Consumer identity for cursor operations."),
+      flag("event", "value", "Event id to store in a cursor."),
+      flag("seq", "value", "Optional external sequence watermark to store in a cursor."),
+      flag("limit", "value", "Maximum events to return; max 1000.")
+    ],
+    positionals: { label: "events command and cursor name", min: 0, max: 2 },
+    requiresWorkspace: true,
     supportsJson: true,
   },
   {
@@ -2714,7 +2779,7 @@ const COMMAND_BEHAVIOR: Readonly<Record<string, CommandBehaviorMetadata>> = {
     requiresFreshIndex: false,
     concurrencySafe: true,
     requiresLock: "state",
-    maxResultSizeChars: 20_000,
+    maxResultSizeChars: 100_000,
     humanOutputKind: "record",
     examples: [
       "bwrk init --json",
@@ -2734,6 +2799,38 @@ const COMMAND_BEHAVIOR: Readonly<Record<string, CommandBehaviorMetadata>> = {
     maxResultLines: 20_000,
     humanOutputKind: "table",
     examples: ["bwrk commands --json", "bwrk commands --format markdown"],
+  }),
+  run: commandMetadata("run", {
+    readOnly: false,
+    destructive: false,
+    writesState: true,
+    writesGeneratedArtifacts: false,
+    requiresFreshIndex: false,
+    concurrencySafe: true,
+    requiresLock: "state",
+    maxResultSizeChars: 150_000,
+    humanOutputKind: "record",
+    examples: [
+      "bwrk run start bw_work_example --command 'pnpm test' --idempotency-key ci:tests --json",
+      "bwrk run checkpoint bw_run_example --phase ingest --completed 10 --total 100 --json",
+      "bwrk run reconcile --json",
+      "bwrk run worker --json"
+    ],
+  }),
+  events: commandMetadata("events", {
+    readOnly: false,
+    destructive: false,
+    writesState: true,
+    writesGeneratedArtifacts: false,
+    requiresFreshIndex: false,
+    concurrencySafe: true,
+    requiresLock: "state",
+    maxResultSizeChars: 250_000,
+    humanOutputKind: "record",
+    examples: [
+      "bwrk events tail --limit 50 --json",
+      "bwrk events cursor ci-consumer --consumer ci --event bw_event_example --json"
+    ],
   }),
   "directives list": commandMetadata("directives list", {
     readOnly: true,

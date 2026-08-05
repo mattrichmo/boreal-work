@@ -227,7 +227,34 @@ function briefJsonEnvelope(text: string, readOnly: boolean): string {
 
 function briefJsonResult(value: unknown): unknown {
   if (isRecord(value) && isRecord(value.result)) {
+    if (typeof value.result.schemaVersion === "string") {
+      return value.result;
+    }
+    const meta = isRecord(value.meta) ? value.meta : undefined;
+    const id = typeof value.id === "string" ? value.id : typeof meta?.id === "string" ? meta.id : undefined;
+    if (id) {
+      return pickDefined({
+        schemaVersion: "boreal.cli.result.v1",
+        id,
+        kind: typeof value.result.kind === "string" ? value.result.kind : typeof value.kind === "string" ? value.kind : "record",
+        status: typeof value.result.status === "string" ? value.result.status : typeof value.status === "string" ? value.status : "succeeded",
+        subjectId: typeof value.result.subjectId === "string" ? value.result.subjectId : id
+      });
+    }
     return value.result;
+  }
+  if (isRecord(value)) {
+    const meta = isRecord(value.meta) ? value.meta : undefined;
+    const id = typeof value.id === "string" ? value.id : typeof meta?.id === "string" ? meta.id : undefined;
+    if (id) {
+      return pickDefined({
+        schemaVersion: "boreal.cli.result.v1",
+        id,
+        kind: typeof value.kind === "string" ? value.kind : "record",
+        status: typeof value.status === "string" ? value.status : "succeeded",
+        subjectId: id
+      });
+    }
   }
   return briefJsonSummary(value);
 }

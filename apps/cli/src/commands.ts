@@ -160,6 +160,7 @@ import { operationCommand, type OperationCommandDependencies } from "./commands/
 import { protocolCommand, type ProtocolCommandDependencies } from "./commands/protocol.js";
 import { registryCommand, type RegistryCommandDependencies } from "./commands/registry.js";
 import { rollupCommand } from "./commands/rollup.js";
+import { eventsCommand, runCommand as executionRunCommand } from "./commands/runs.js";
 import { sprintCommand, type SprintCommandDependencies } from "./commands/sprint.js";
 import { storageCommand } from "./commands/storage.js";
 import {
@@ -979,6 +980,15 @@ export async function runCommand(args: ParsedArgs, output: CliOutput, cwd: strin
         break;
       case "heartbeat":
         result = await heartbeatCommand(action, rest, context, args, executableOutput, json);
+        break;
+      case "run":
+        result = await executionRunCommand(action, rest, context, args, executableOutput, json, {
+          requiredPositional,
+          resolveWorkId
+        });
+        break;
+      case "events":
+        result = await eventsCommand(action, rest, context, args, executableOutput, json, { requiredPositional });
         break;
       case "prime":
         result = await protocolCommand("prime", action, context, args, executableOutput, json, protocolCommandDependencies());
