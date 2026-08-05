@@ -89,3 +89,9 @@ pnpm bwrk --help
 
 `bwrk update self` fetches and builds the configured upstream repository; it
 does not install the current uncommitted working tree.
+
+## License
+
+Boreal Work is available under the PolyForm Noncommercial License 1.0.0.
+Commercial use requires separate written permission. See [LICENSE](LICENSE)
+for the complete terms.

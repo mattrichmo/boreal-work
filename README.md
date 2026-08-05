@@ -16,6 +16,13 @@ The `bwrk` CLI is the canonical interface. Human-readable output is intended for
 
 [Install](#install-and-initialize) · [Run a work loop](#example-an-evidence-backed-work-loop) · [Understand the runtime](#runtime-architecture) · [CLI reference](docs/cli/COMMANDS.md) · [Documentation map](docs/README.md)
 
+## License
+
+Boreal Work is source-available under the [PolyForm Noncommercial License
+1.0.0](https://polyformproject.org/licenses/noncommercial/1.0.0). You may use,
+modify, and redistribute the software for noncommercial purposes. Commercial
+use requires separate written permission from the copyright holder.
+
 ## Technical overview
 
 | Concern | Boreal's implementation |
