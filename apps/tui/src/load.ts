@@ -177,7 +177,7 @@ export async function loadTuiData(workspaceRoot: string): Promise<TuiData> {
       sprints: [],
       timeline: [],
       details: {},
-      warnings: ["Workspace is not initialized. Run `bwrk init` in this directory."]
+      warnings: ["Workspace is not set up. Run `bwrk install` in this directory."]
     };
   }
 

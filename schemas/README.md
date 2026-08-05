@@ -26,5 +26,7 @@ Currently enforced schemas:
 - `schemas/policies/runtime-policy.schema.json`
 - `schemas/directives/agent-directive-bundle.schema.json`
 - `schemas/projects/project-registry.schema.json`
+- `schemas/projects/project-manifest.schema.json`
+- `schemas/projects/toolchain-lock.schema.json`
 
 Published schema parity is enforced through `PUBLISHED_SCHEMA_CONTRACTS` in `packages/core/src/schema-validation.ts`. Each entry binds a schema ID, schema file path, and validator function; runtime snapshot schemas also bind the state section they validate. CI fails when a `.schema.json` file is missing from that registry, when a registry entry points at the wrong `$id`, or when a validator no longer reports issues under its published schema ID.

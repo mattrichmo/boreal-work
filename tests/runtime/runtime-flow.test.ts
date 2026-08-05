@@ -1019,6 +1019,47 @@ describe("boreal runtime proof slice", () => {
     );
   });
 
+  it("finishes from referenced witnessed evidence without rewriting its provenance", async () => {
+    const store = new InMemoryBorealStore();
+    const runtime = createBorealRuntime({ store, actor });
+    const work = await runtime.createWork({ title: "Referenced witnessed finish target" });
+    await runtime.markReady(work.meta.id);
+    await runtime.reserveWork({ workId: work.meta.id, agentId: actor.id });
+    const witnessed = await runtime.recordEvidence({
+      subjectId: work.meta.id,
+      subjectType: "work",
+      kind: "test",
+      summary: "Boreal witnessed node --version passed",
+      outcome: "passed",
+      command: "node --version",
+      attestation: witnessedAttestationFor(work)
+    });
+
+    const finished = await runtime.finishReservedWork({
+      workId: work.meta.id,
+      agentId: actor.id,
+      evidenceId: witnessed.meta.id,
+      verification: { verdict: "passed" },
+      close: {
+        reason: "closed from referenced witnessed evidence",
+        agentSummary: ({ closedWork, evidence, verification }) =>
+          closeoutSummaryFor(closedWork, {
+            evidenceIds: [evidence.meta.id],
+            verificationIds: [verification.meta.id],
+            nonce: "referenced-witnessed-finish"
+          })
+      }
+    });
+
+    expect(finished.evidence).toEqual(witnessed);
+    expect(evidenceTrustLevel(finished.evidence)).toBe("boreal_witnessed");
+    expect(finished.closedWork?.status).toBe("closed");
+    const persistedEvidence = await store.read((reader) => reader.listEvidenceForSubject(work.meta.id));
+    expect(persistedEvidence).toEqual([witnessed]);
+    const evidenceEvents = (await runtime.listEvents()).filter((event) => event.type === "evidence.recorded");
+    expect(evidenceEvents).toHaveLength(1);
+  });
+
   it("requires review gate evidence before direct runtime close", async () => {
     const runtime = createBorealRuntime({ actor });
     const work = await runtime.createWork({

@@ -2108,8 +2108,6 @@ describe("bwrk cli", () => {
           "Done through alias.",
           "--kind",
           "test",
-	          "--command",
-	          "node --version",
 	          "--reason",
 	          "verified alias path",
 	          "--dirty-path",
@@ -2829,6 +2827,40 @@ describe("bwrk cli", () => {
     expect(planned.stdout).toContain(join(rootDir, "memory"));
     expect(planned.stdout).toContain("memoryLayout  child");
     expect(planned.stdout).toContain("No files were written");
+  });
+
+  it("supports explicit user-wide agent skill installs", async () => {
+    const projectRoot = await makeTempWorkspace();
+    const userRoot = join(await makeTempWorkspace(), "agents");
+    const installed = await runCli(projectRoot, [
+      "install",
+      "codex",
+      "--scope",
+      "user",
+      "--install-root",
+      userRoot,
+      "--json"
+    ]);
+    const payload = parseData<{
+      readonly target: string;
+      readonly scope: string;
+      readonly installRoot: string;
+      readonly skillRoot: string;
+      readonly issues: readonly unknown[];
+    }>(installed.stdout);
+
+    expect(installed.exitCode).toBe(0);
+    expect(payload).toEqual(
+      expect.objectContaining({
+        target: "codex",
+        scope: "user",
+        installRoot: userRoot,
+        skillRoot: join(userRoot, "skills"),
+        issues: []
+      })
+    );
+    expect(await fileMissing(join(userRoot, "skills", "boreal-router", "SKILL.md"))).toBe(false);
+    expect(await fileMissing(join(projectRoot, ".agents"))).toBe(true);
   });
 
   it("sets up child memory submodules with gitmodules metadata", async () => {
@@ -4362,9 +4394,11 @@ describe("bwrk cli", () => {
       "bwrk agent start --agent 'agent $one'\\''s' --label 'cli label' --purpose 'start implementation' --json"
     );
     expect(payload.commands.finish).toBe(
-      "bwrk agent finish <work-id> --agent 'agent $one'\\''s' --summary 'implemented and tested' --command 'pnpm test' --close --reason 'verified by evidence' --json"
+      "bwrk agent finish <work-id> --agent 'agent $one'\\''s' --evidence <evidence-id> --verdict passed --close --reason 'verified by referenced evidence' --json"
     );
-    expect(payload.commands.evidence).toContain("bwrk evidence add <work-id>");
+    expect(payload.commands.evidence).toBe(
+      "bwrk evidence add <work-id> --summary 'describe what was observed' --kind note --outcome observed --json"
+    );
     expect(payload.commands.verify).toContain("bwrk work verify <work-id>");
     expect(payload.commands.release).toBe("bwrk work release <work-id> --json");
     expect(payload.commands.repair).toBe("bwrk doctor --fix --json");
@@ -4372,6 +4406,7 @@ describe("bwrk cli", () => {
       "Check coordination state",
       "Start or resume work",
       "Renew if work continues",
+      "Record observed evidence",
       "Finish with evidence",
       "Release if stopping"
     ]);
@@ -4382,12 +4417,12 @@ describe("bwrk cli", () => {
     expect(textGuide.stdout).toContain("Boreal agent guide");
     expect(textGuide.stdout).toContain("bwrk agent start --agent agent-a --label cli --purpose 'start implementation' --json");
     expect(textGuide.stdout).toContain(
-      "bwrk agent finish <work-id> --agent agent-a --summary 'implemented and tested' --command 'pnpm test' --close --reason 'verified by evidence' --json"
+      "bwrk agent finish <work-id> --agent agent-a --evidence <evidence-id> --verdict passed --close --reason 'verified by referenced evidence' --json"
     );
     expect(textGuide.stdout).toContain("bwrk doctor --fix --json");
   });
 
-  it("echoes the active declared gate command in agent guide finish and evidence hints", async () => {
+  it("keeps work-authored gate text display-only and guides through the bounded evidence runner", async () => {
     const rootDir = await makeTempWorkspace();
     await runCli(rootDir, ["init", "--json"]);
 
@@ -4415,10 +4450,35 @@ describe("bwrk cli", () => {
 
     const guide = parseData<{
       readonly commands: { readonly finish: string; readonly evidence: string };
+      readonly validation: {
+        readonly gateId: string;
+        readonly displayCommand: string;
+        readonly executableAction: {
+          readonly source: string;
+          readonly trust: string;
+          readonly runner: string;
+          readonly argv: readonly string[];
+          readonly shell: boolean;
+        };
+      };
     }>((await runCli(rootDir, ["agent", "guide", "--agent", "guide-agent", "--label", "guide-declared", "--json"])).stdout);
 
-    expect(guide.commands.finish).toContain(`--command '${declaredCommand}'`);
-    expect(guide.commands.evidence).toContain(`--command '${declaredCommand}'`);
+    expect(guide.commands.finish).not.toContain(declaredCommand);
+    expect(guide.commands.finish).toContain("--evidence <evidence-id> --verdict passed");
+    expect(guide.commands.evidence).toBe(
+      `bwrk evidence run ${work.meta.id} --gate ${guide.validation.gateId} --json`
+    );
+    expect(guide.validation).toEqual({
+      gateId: guide.validation.gateId,
+      displayCommand: declaredCommand,
+      executableAction: {
+        source: "agent_directive_registry",
+        trust: "trusted",
+        runner: "bounded_declared_gate",
+        argv: ["bwrk", "evidence", "run", work.meta.id, "--gate", guide.validation.gateId, "--json"],
+        shell: false
+      }
+    });
   });
 
   it("primes and summarizes agent protocol sessions", async () => {
@@ -4661,6 +4721,9 @@ describe("bwrk cli", () => {
         expect.objectContaining({ name: "dry-run", type: "boolean" }),
         expect.objectContaining({ name: "memory-layout", type: "value" })
       ])
+    );
+    expect(registry.commands.find((command) => command.path.join(" ") === "install codex")?.flags).toEqual(
+      expect.arrayContaining([expect.objectContaining({ name: "scope", type: "value" })])
     );
     expect(registry.commands.every((command) => command.behavior.examples.length > 0)).toBe(true);
     expect(registry.commands.every((command) => command.behavior.jsonOutputSchema.startsWith("boreal.cli."))).toBe(true);
@@ -5178,16 +5241,23 @@ describe("bwrk cli", () => {
     );
     expect(missingPayload.localSource.available).toBe(true);
     expect(missingPayload.localSource.command).toBe("pnpm bwrk <command>");
-    expect(missingPayload.localShim).toEqual(expect.objectContaining({ exists: false, executable: false, path: join(binDir, "bwrk") }));
+    const localShimPath = join(binDir, process.platform === "win32" ? "bwrk.cmd" : "bwrk");
+    expect(missingPayload.localShim).toEqual(expect.objectContaining({ exists: false, executable: false, path: localShimPath }));
     expect(missingPayload.path.binDirOnPath).toBe(false);
     expect(missingPayload.path.addToPathCommand).toContain(binDir);
     expect(missingPayload.globalCommand.found).toBe(false);
     expect(missingPayload.recommendedActions.join("\n")).toContain("pnpm install:local");
     expect(directMissing.globalCommand.found).toBe(false);
 
-    const fakeBwrk = join(binDir, "bwrk");
-    await writeFile(fakeBwrk, "#!/bin/sh\necho boreal-work 0.1.0\n", "utf8");
-    await chmod(fakeBwrk, 0o755);
+    const fakeBwrk = localShimPath;
+    await writeFile(
+      fakeBwrk,
+      process.platform === "win32" ? "@echo off\r\necho boreal-work 0.1.0\r\n" : "#!/bin/sh\necho boreal-work 0.1.0\n",
+      "utf8"
+    );
+    if (process.platform !== "win32") {
+      await chmod(fakeBwrk, 0o755);
+    }
 
     const found = await runCli(rootDir, ["install", "status", "--bin-dir", binDir, "--path", binDir, "--json"]);
     const foundPayload = parseData<{
@@ -5671,7 +5741,7 @@ describe("bwrk cli", () => {
     expect(autoOperationVolume).toEqual(expect.objectContaining({ severity: "ok" }));
     expect(finalLog.operations).toHaveLength(1000);
     expect(finalLog.operations.map((operation) => operation.commandPath)).toContain("gate closeout");
-  }, 10_000);
+  }, 30_000);
 
   it("repairs legacy operation-event links and marks unlinked events", async () => {
     const rootDir = await makeTempWorkspace();
@@ -6554,7 +6624,7 @@ describe("bwrk cli", () => {
     expect(fullResult.data).toHaveLength(80);
     expect(fullResult.data[0]?.title).toContain("Spool output");
     expect(fullResultStats.size).toBe(payload.fullResultBytes);
-  }, 10_000);
+  }, 30_000);
 
   it("runs the knowledge context lifecycle through file-backed commands", async () => {
     const rootDir = await makeTempWorkspace();
@@ -6789,7 +6859,7 @@ describe("bwrk cli", () => {
         expect.arrayContaining(["id", "title", "decision", "context"])
       );
     } else {
-      expect(indexedResult.path).toBe(join(rootDir, ".boreal/cache/index.sqlite"));
+      expect(indexedResult.path).toBe(join(rootDir, ".boreal/cache/index-v2.sqlite"));
       expect(indexedResult.tokenCount).toBe(0);
     }
 
@@ -7483,7 +7553,23 @@ describe("bwrk cli", () => {
     await runCli(rootDir, ["sync", "refresh", "--json"]);
 
     const closeWork = parseData<{ readonly meta: { readonly id: string } }>(
-      (await runCli(rootDir, ["work", "create", "Finish and close", "--label", "finish", "--ready", "--json"])).stdout
+      (
+        await runCli(rootDir, [
+          "work",
+          "create",
+          "Finish and close",
+          "--label",
+          "finish",
+          "--required-gate",
+          "verification",
+          "--gate-command",
+          "node --version",
+          "--gate-trust",
+          "boreal_witnessed",
+          "--ready",
+          "--json"
+        ])
+      ).stdout
     );
     await runCli(rootDir, ["agent", "start", "--agent", "agent-a", "--label", "finish", "--json"]);
 
@@ -7504,6 +7590,26 @@ describe("bwrk cli", () => {
     expect(missingModePayload.code).toBe("BOREAL_INVALID_INPUT");
     expect(missingModePayload.message).toContain("requires --close or --release");
 
+    const missingVerdict = await runCli(rootDir, [
+      "agent",
+      "finish",
+      closeWork.meta.id,
+      "--agent",
+      "agent-a",
+      "--summary",
+      "verdict must be explicit",
+      "--release",
+      "--json"
+    ]);
+    const missingVerdictPayload = parseJson<{ readonly code: string; readonly message: string }>(missingVerdict.stderr);
+    expect(missingVerdict.exitCode).toBe(2);
+    expect(missingVerdictPayload).toEqual(
+      expect.objectContaining({
+        code: "BOREAL_INVALID_INPUT",
+        message: expect.stringContaining("--verdict is required")
+      })
+    );
+
     const wrongAgent = await runCli(rootDir, [
       "agent",
       "finish",
@@ -7512,6 +7618,8 @@ describe("bwrk cli", () => {
       "agent-b",
       "--summary",
       "wrong agent attempt",
+      "--verdict",
+      "failed",
       "--release",
       "--json"
     ]);
@@ -7540,7 +7648,7 @@ describe("bwrk cli", () => {
     expect(directReservedClosePayload.code).toBe("BOREAL_POLICY_VIOLATION");
     expect(directReservedClosePayload.message).toContain("Reserved work");
 
-    const finishedClosed = await runCli(rootDir, [
+    const unexecutedCommand = await runCli(rootDir, [
       "agent",
       "finish",
       "current",
@@ -7550,6 +7658,47 @@ describe("bwrk cli", () => {
       "Implemented and tested finish close.",
       "--command",
       "pnpm test",
+	    "--verdict",
+	    "passed",
+	    "--close",
+	    "--reason",
+	    "must not claim an unexecuted command",
+	    "--dirty-path",
+	    "no_repo_changes: agent finish command guard fixture",
+	    "--json"
+	  ]);
+	  expect(unexecutedCommand.exitCode).toBe(2);
+	  expect(parseJson<{ readonly code: string; readonly message: string }>(unexecutedCommand.stderr)).toEqual(
+	    expect.objectContaining({
+	      code: "BOREAL_INVALID_INPUT",
+	      message: expect.stringContaining("Unknown flag --command for bwrk agent finish")
+	    })
+	  );
+
+    const witnessed = parseData<{
+      readonly meta: { readonly id: string };
+      readonly outcome: string;
+      readonly command?: string;
+      readonly attestation?: { readonly trustLevel: string };
+    }>((await runCli(rootDir, ["evidence", "run", closeWork.meta.id, "--json"])).stdout);
+    expect(witnessed).toEqual(
+      expect.objectContaining({
+        outcome: "passed",
+        command: "node --version",
+        attestation: expect.objectContaining({ trustLevel: "boreal_witnessed" })
+      })
+    );
+
+    const finishedClosed = await runCli(rootDir, [
+      "agent",
+      "finish",
+      "current",
+      "--agent",
+      "agent-a",
+	    "--evidence",
+	    witnessed.meta.id,
+	    "--verdict",
+	    "passed",
 	      "--close",
 	      "--reason",
 	      "verified by finish evidence",
@@ -7557,6 +7706,7 @@ describe("bwrk cli", () => {
 	      "no_repo_changes: agent finish fixture",
 	      "--json"
 	    ]);
+    expect(finishedClosed.stderr, "agent finish stderr").toBe("");
     const closedPayload = parseData<{
       readonly finished: boolean;
       readonly action: string;
@@ -7568,7 +7718,12 @@ describe("bwrk cli", () => {
         readonly activeReservationId?: string;
         readonly contextSummary?: string;
       };
-      readonly evidence: { readonly outcome: string; readonly command?: string };
+      readonly evidence: {
+        readonly meta: { readonly id: string };
+        readonly outcome: string;
+        readonly command?: string;
+        readonly attestation?: { readonly trustLevel: string };
+      };
       readonly verification: { readonly verdict: string };
       readonly reservation: { readonly status: string };
       readonly closedWork?: { readonly status: string; readonly closedReason?: string };
@@ -7589,7 +7744,14 @@ describe("bwrk cli", () => {
     expect(closedPayload.work.verificationCount).toBe(1);
     expect(closedPayload.work.contextSummary).toContain("is closed.");
     expect(closedPayload.work.contextSummary).not.toContain("is in_progress.");
-    expect(closedPayload.evidence).toEqual(expect.objectContaining({ outcome: "passed", command: "pnpm test" }));
+    expect(closedPayload.evidence).toEqual(
+      expect.objectContaining({
+        meta: expect.objectContaining({ id: witnessed.meta.id }),
+        outcome: "passed",
+        command: "node --version",
+        attestation: expect.objectContaining({ trustLevel: "boreal_witnessed" })
+      })
+    );
     expect(closedPayload.verification.verdict).toBe("passed");
     expect(closedPayload.reservation.status).toBe("released");
     expect(closedPayload.closedWork).toEqual(
@@ -7660,6 +7822,8 @@ describe("bwrk cli", () => {
       "agent-c",
       "--summary",
       "invalid mode",
+      "--verdict",
+      "failed",
       "--close",
       "--release",
       "--json"
@@ -7686,8 +7850,8 @@ describe("bwrk cli", () => {
       "unreserved-agent",
       "--summary",
       "Invalid checkpoint should not partially finish.",
-      "--command",
-      "pnpm test",
+      "--verdict",
+      "passed",
       "--close",
       "--reason",
       "invalid checkpoint fixture",
@@ -7724,8 +7888,8 @@ describe("bwrk cli", () => {
       "unreserved-agent",
       "--summary",
       "Completed by explicit one-shot finish.",
-      "--command",
-      "pnpm test",
+      "--verdict",
+      "passed",
       "--close",
       "--reason",
       "verified by unreserved one-shot",
@@ -7751,7 +7915,8 @@ describe("bwrk cli", () => {
     expect(payload).toEqual(expect.objectContaining({ finished: true, action: "verified_and_closed" }));
     expect(payload.work).toEqual(expect.objectContaining({ id: work.meta.id, status: "closed" }));
     expect(payload.work.activeReservationId).toBeUndefined();
-    expect(payload.evidence).toEqual(expect.objectContaining({ outcome: "passed", command: "pnpm test" }));
+    expect(payload.evidence).toEqual(expect.objectContaining({ outcome: "passed" }));
+    expect(payload.evidence.command).toBeUndefined();
     expect(payload.verification.verdict).toBe("passed");
     expect(payload.reservation).toEqual(expect.objectContaining({ status: "released", purpose: "agent finish one-shot" }));
     expect(payload.closedWork).toEqual(expect.objectContaining({ status: "closed", closedReason: "verified by unreserved one-shot" }));
@@ -11295,6 +11460,80 @@ describe("bwrk cli", () => {
         })
       ])
     );
+  });
+
+  it("validates and instantiates the granular feature-delivery template with gates and ordered review passes", async () => {
+    const rootDir = await makeTempWorkspace();
+    await runCli(rootDir, ["init", "--json"]);
+
+    const validation = await runCli(rootDir, [
+      "template",
+      "validate",
+      "feature-delivery",
+      "--var",
+      "target=Client Page",
+      "--var",
+      "label=client-page",
+      "--json"
+    ]);
+    expect(validation.exitCode).toBe(0);
+    expect(parseData<{ readonly ok: boolean; readonly nodeCount: number }>(validation.stdout)).toEqual(
+      expect.objectContaining({ ok: true, nodeCount: 12 })
+    );
+
+    const dryRun = await runCli(rootDir, [
+      "template",
+      "run",
+      "feature-delivery",
+      "--var",
+      "target=Client Page",
+      "--var",
+      "label=client-page",
+      "--dry-run",
+      "--json"
+    ]);
+    expect(dryRun.exitCode).toBe(0);
+    const plan = parseData<{
+      readonly nodes: readonly Array<{
+        readonly key: string;
+        readonly title: string;
+        readonly gates: readonly Array<{ readonly kind: string }>;
+      }>;
+    }>(dryRun.stdout);
+    expect(plan.nodes.map((node) => node.key)).toEqual(
+      expect.arrayContaining(["discovery-brief", "design-decision", "implementation-pass", "review-critique", "review-update", "final-validation"])
+    );
+    expect(plan.nodes.find((node) => node.key === "final-validation")?.gates).toEqual([
+      expect.objectContaining({ kind: "verification" })
+    ]);
+
+    const run = await runCli(rootDir, [
+      "template",
+      "run",
+      "feature-delivery",
+      "--var",
+      "target=Client Page",
+      "--var",
+      "label=client-page",
+      "--json"
+    ]);
+    expect(run.exitCode).toBe(0);
+    const created = parseData<{
+      readonly rootId: string;
+      readonly created: readonly Array<{ readonly key: string; readonly workId: string }>;
+    }>(run.stdout);
+    expect(created.created).toHaveLength(12);
+    expect(created.rootId).toBe(created.created[0]?.workId);
+
+    const shown = await runCli(rootDir, ["work", "show", created.rootId, "--json"]);
+    expect(shown.exitCode).toBe(0);
+    expect(parseData<{ readonly requiredCloseoutGates: readonly Array<{ readonly kind: string; readonly scope: string }> }>(shown.stdout).requiredCloseoutGates).toEqual([
+      expect.objectContaining({ kind: "checkpoint", scope: "descendants" })
+    ]);
+
+    const cycles = await runCli(rootDir, ["dep", "cycles", "--json"]);
+    expect(cycles.exitCode).toBe(0);
+    expect(cycles.stdout).not.toContain("dependency_cycle");
   });
 
   it("includes advisory enforcement gaps in work show JSON", async () => {

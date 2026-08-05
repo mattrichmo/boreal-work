@@ -2,9 +2,14 @@ import { spawnSync } from "node:child_process";
 import { homedir } from "node:os";
 import { isAbsolute, resolve } from "node:path";
 
+import { expandGlobalNamespace, parseArgs } from "./args.js";
+import { commandBehavior, commandPath, findCommandDefinition } from "./command-registry.js";
 import {
   BWRK_DELEGATED_BIN_ENV,
   BWRK_DELEGATION_GUARD_ENV,
+  BWRK_LAUNCHER_AGENT_ASSET_DIGEST_ENV,
+  BWRK_LAUNCHER_ARTIFACT_DIGEST_ENV,
+  BWRK_LAUNCHER_BUILD_SHA_ENV,
   BWRK_LAUNCHER_CHANNEL_ENV,
   BWRK_LAUNCHER_EXECUTABLE_ENV,
   BWRK_LAUNCHER_NAME_ENV,
@@ -16,6 +21,12 @@ import {
   pathsReferToSameFile,
   resolveRepoBwrkPinForDelegation
 } from "./repo-binary-pin.js";
+import {
+  assertCanonicalWritesAllowed,
+  inspectProjectToolchainSync,
+  isToolchainRecoveryCommand,
+  type ProjectToolchainStatus
+} from "./toolchain.js";
 import { getVersionInfo } from "./version.js";
 
 export const NO_DELEGATE_FLAG = "--no-delegate";
@@ -26,6 +37,7 @@ export interface DelegationResult {
   readonly reason?: string;
   readonly pinPath?: string;
   readonly workspaceRoot?: string;
+  readonly toolchainMode?: ProjectToolchainStatus["mode"];
 }
 
 export interface DelegateToRepoBwrkOptions {
@@ -56,9 +68,15 @@ export function delegateToRepoPinnedBwrk(options: DelegateToRepoBwrkOptions = {}
     return { delegated: false, reason: "no-workspace" };
   }
 
+  const launcherToolchain = inspectProjectToolchainSync(workspaceRoot);
+
   const pinResolution = resolveRepoBwrkPinForDelegation(workspaceRoot);
   if (pinResolution.status === "none") {
-    return { delegated: false, reason: "no-pin", workspaceRoot };
+    if (argvWritesCanonicalState(argv) && !launcherToolchain.canonicalWritesAllowed) {
+      writeToolchainMismatchError(launcherToolchain, argv);
+      return { delegated: true, exitCode: 1, reason: "toolchain-incompatible", workspaceRoot, toolchainMode: launcherToolchain.mode };
+    }
+    return { delegated: false, reason: "no-pin", workspaceRoot, toolchainMode: launcherToolchain.mode };
   }
   if (pinResolution.status === "missing") {
     writeMissingRepoPinError(workspaceRoot, pinResolution, argv);
@@ -66,10 +84,43 @@ export function delegateToRepoPinnedBwrk(options: DelegateToRepoBwrkOptions = {}
   }
   const pin = pinResolution.pin;
   if (pathsReferToSameFile(currentExecutable, pin.binPath)) {
-    return { delegated: false, reason: "self", workspaceRoot, pinPath: pin.binPath };
+    if (argvWritesCanonicalState(argv) && !launcherToolchain.canonicalWritesAllowed) {
+      writeToolchainMismatchError(launcherToolchain, argv);
+      return {
+        delegated: true,
+        exitCode: 1,
+        reason: "toolchain-incompatible",
+        workspaceRoot,
+        pinPath: pin.binPath,
+        toolchainMode: launcherToolchain.mode
+      };
+    }
+    return { delegated: false, reason: "self", workspaceRoot, pinPath: pin.binPath, toolchainMode: launcherToolchain.mode };
   }
 
   const launcher = getVersionInfo();
+  if (argvWritesCanonicalState(argv)) {
+    const pinnedIdentity = probePinnedBuildIdentity(pin.binPath, cwd, env);
+    const pinnedToolchain = pinnedIdentity
+      ? inspectProjectToolchainSync(workspaceRoot, pinnedIdentity)
+      : {
+          ...launcherToolchain,
+          mode: "compatibility-read" as const,
+          canonicalWritesAllowed: false,
+          findings: ["repo_pinned_build_identity_unavailable"]
+        };
+    if (!pinnedToolchain.canonicalWritesAllowed) {
+      writeToolchainMismatchError(pinnedToolchain, argv);
+      return {
+        delegated: true,
+        exitCode: 1,
+        reason: "toolchain-incompatible",
+        workspaceRoot,
+        pinPath: pin.binPath,
+        toolchainMode: pinnedToolchain.mode
+      };
+    }
+  }
   const result = spawnSync(pin.binPath, [...argv], {
     cwd,
     env: {
@@ -79,6 +130,9 @@ export function delegateToRepoPinnedBwrk(options: DelegateToRepoBwrkOptions = {}
       [BWRK_LAUNCHER_VERSION_ENV]: launcher.version,
       [BWRK_LAUNCHER_CHANNEL_ENV]: launcher.installChannel,
       [BWRK_LAUNCHER_EXECUTABLE_ENV]: currentExecutable ?? "",
+      [BWRK_LAUNCHER_BUILD_SHA_ENV]: launcher.build.buildSha,
+      [BWRK_LAUNCHER_ARTIFACT_DIGEST_ENV]: launcher.build.artifactDigest,
+      [BWRK_LAUNCHER_AGENT_ASSET_DIGEST_ENV]: launcher.build.agentAssetDigest,
       [BWRK_DELEGATED_BIN_ENV]: pin.binPath
     },
     stdio: "inherit"
@@ -98,8 +152,68 @@ export function delegateToRepoPinnedBwrk(options: DelegateToRepoBwrkOptions = {}
     exitCode: result.status ?? 0,
     reason: "delegated",
     workspaceRoot,
-    pinPath: pin.binPath
+    pinPath: pin.binPath,
+    toolchainMode: launcherToolchain.mode
   };
+}
+
+function probePinnedBuildIdentity(
+  binPath: string,
+  cwd: string,
+  env: NodeJS.ProcessEnv
+): ReturnType<typeof getVersionInfo>["build"] | undefined {
+  const result = spawnSync(binPath, ["--no-delegate", "--version", "--json"], {
+    cwd,
+    env: { ...env, [BWRK_DELEGATION_GUARD_ENV]: "1" },
+    encoding: "utf8",
+    timeout: 10_000,
+    maxBuffer: 1_000_000
+  });
+  if (result.error || result.signal || result.status !== 0 || typeof result.stdout !== "string") {
+    return undefined;
+  }
+  try {
+    const parsed = JSON.parse(result.stdout) as { readonly data?: { readonly build?: ReturnType<typeof getVersionInfo>["build"] } };
+    return parsed.data?.build;
+  } catch {
+    return undefined;
+  }
+}
+
+function argvWritesCanonicalState(argv: readonly string[]): boolean {
+  if (argv.includes("--version") || argv.includes("--about") || argv.includes("--help") || argv[0] === "help") {
+    return false;
+  }
+  try {
+    const parsed = parseArgs(expandGlobalNamespace(stripNoDelegateArgv(argv)));
+    const definition = findCommandDefinition(parsed.command);
+    return definition
+      ? commandBehavior(definition).writesState && !isToolchainRecoveryCommand(commandPath(definition))
+      : false;
+  } catch {
+    return false;
+  }
+}
+
+function writeToolchainMismatchError(status: ProjectToolchainStatus, argv: readonly string[]): void {
+  let error: unknown;
+  try {
+    assertCanonicalWritesAllowed(status, argv.join(" "));
+  } catch (caught) {
+    error = caught;
+  }
+  const candidate = error as { readonly code?: string; readonly message?: string; readonly details?: unknown };
+  const payload = {
+    ok: false,
+    code: candidate.code ?? "BOREAL_POLICY_VIOLATION",
+    message: candidate.message ?? "Boreal toolchain lock mismatch",
+    details: candidate.details ?? { findings: status.findings }
+  };
+  if (argvWantsJson(argv)) {
+    process.stderr.write(`${JSON.stringify(payload, null, 2)}\n`);
+    return;
+  }
+  process.stderr.write(`${payload.code}: ${payload.message}\n`);
 }
 
 export function stripNoDelegateArgv(argv: readonly string[]): readonly string[] {

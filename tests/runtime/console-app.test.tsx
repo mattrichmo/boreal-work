@@ -515,7 +515,7 @@ function fakeRunner(): ConsoleCliRunner & { readonly calls: string[] } {
       }
       if (command === "operation list --limit 20 --json") {
         return [
-          operationRow("bw_operation_human", "work list", "cybertron", "human")
+          operationRow("bw_operation_human", "work list", "example-agent", "human")
         ];
       }
       if (command === "raw list --limit 50 --json") {
@@ -660,7 +660,7 @@ function rawRow(id: string, title: string, kind: string, uri: string, processing
     summary: `${title} source summary`,
     tags: ["raw-inbox"],
     addedAt: "2026-06-27T00:00:00.000Z",
-    actorId: "cybertron",
+    actorId: "example-agent",
     contentHash: "sha256:fixture",
     sourceBacked: true,
     immutable: true,

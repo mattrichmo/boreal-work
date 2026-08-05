@@ -1,6 +1,7 @@
+import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
-import { mkdir, rm } from "node:fs/promises";
-import { dirname, join, resolve } from "node:path";
+import { mkdir, rename, rm } from "node:fs/promises";
+import { basename, dirname, join, resolve } from "node:path";
 
 import { canonicalJson, deepFreeze, hashContent, resolveWorkspacePaths, type WorkItem } from "@boreal/core";
 import { ftsDocumentInputFromFields, searchFieldsForRecord, type FtsDocumentInput, type SearchRecord, type SearchRecordSection } from "@boreal/search";
@@ -15,6 +16,9 @@ import {
 } from "./search-fts-schema.js";
 
 export const OBJECT_INDEX_SCHEMA_VERSION = "boreal.object-index.v2";
+export const OBJECT_INDEX_FILENAME = "index-v2.sqlite";
+
+const WORK_ITEMS_FINGERPRINT_KEY = "workItemsFingerprint";
 
 export type NodeSqliteModule = typeof import("node:sqlite");
 
@@ -34,6 +38,24 @@ export interface ObjectIndexStatus {
   readonly available: boolean;
   readonly exists: boolean;
   readonly fresh: boolean;
+}
+
+export class ObjectIndexCompatibilityError extends Error {
+  readonly code = "BOREAL_OBJECT_INDEX_INCOMPATIBLE";
+  readonly path: string;
+  readonly actualSchemaVersion: string | undefined;
+
+  constructor(path: string, actualSchemaVersion: string | undefined, cause?: unknown) {
+    super(
+      actualSchemaVersion
+        ? `Object index schema ${actualSchemaVersion} is incompatible with ${OBJECT_INDEX_SCHEMA_VERSION}`
+        : `Object index at ${path} has an unknown or unreadable schema`,
+      cause === undefined ? undefined : { cause }
+    );
+    this.name = "ObjectIndexCompatibilityError";
+    this.path = path;
+    this.actualSchemaVersion = actualSchemaVersion;
+  }
 }
 
 export interface ObjectIndexMutationResult {
@@ -61,7 +83,22 @@ const INDEXED_SECTIONS = [
 
 export function objectIndexPath(rootDir: string): string {
   const paths = resolveWorkspacePaths(rootDir);
-  return join(paths.borealDir, "cache", "index.sqlite");
+  return join(paths.borealDir, "cache", OBJECT_INDEX_FILENAME);
+}
+
+export function objectIndexWorkItemsFingerprint(workItems: readonly unknown[]): string {
+  return hashContent(
+    workItems
+      .map((record) => {
+        const object = isRecord(record) ? record : {};
+        const meta = isRecord(object.meta) ? object.meta : {};
+        return {
+          id: stringValue(meta.id) ?? hashContent(record),
+          contentHash: hashContent(record)
+        };
+      })
+      .sort((left, right) => left.id.localeCompare(right.id))
+  );
 }
 
 export async function loadNodeSqlite(): Promise<NodeSqliteModule | undefined> {
@@ -87,7 +124,7 @@ export class ObjectReadIndex {
     this.#loadSqlite = hasExplicitSqlite ? undefined : (options.loadSqlite ?? loadNodeSqlite);
   }
 
-  async status(expectedHead: ObjectIndexHead): Promise<ObjectIndexStatus> {
+  async status(expectedHead: ObjectIndexHead, expectedWorkItemsFingerprint?: string): Promise<ObjectIndexStatus> {
     const sqlite = await this.sqlite();
     if (!sqlite) {
       return { path: this.path, available: false, exists: false, fresh: false };
@@ -103,12 +140,17 @@ export class ObjectReadIndex {
       return this.statusForOpenError(error);
     }
     try {
+      if (!hasCurrentSchema(db)) {
+        return { path: this.path, available: true, exists: true, fresh: false };
+      }
       const storedHead = readHead(db);
       return {
         path: this.path,
         available: true,
         exists: storedHead !== undefined,
-        fresh: headsEqual(storedHead, expectedHead)
+        fresh:
+          headsEqual(storedHead, expectedHead) &&
+          (expectedWorkItemsFingerprint === undefined || readMetadata(db, WORK_ITEMS_FINGERPRINT_KEY) === expectedWorkItemsFingerprint)
       };
     } catch (error) {
       if (isLockedSqliteError(error)) {
@@ -120,7 +162,11 @@ export class ObjectReadIndex {
     }
   }
 
-  async listWorkItems(filter: WorkItemFilter | undefined, expectedHead: ObjectIndexHead): Promise<readonly WorkItem[] | undefined> {
+  async listWorkItems(
+    filter: WorkItemFilter | undefined,
+    expectedHead: ObjectIndexHead,
+    expectedWorkItemsFingerprint: string
+  ): Promise<readonly WorkItem[] | undefined> {
     const sqlite = await this.sqlite();
     if (!sqlite) {
       return undefined;
@@ -136,7 +182,11 @@ export class ObjectReadIndex {
       return undefined;
     }
     try {
-      if (!headsEqual(readHead(db), expectedHead)) {
+      if (
+        !hasCurrentSchema(db) ||
+        !headsEqual(readHead(db), expectedHead) ||
+        readMetadata(db, WORK_ITEMS_FINGERPRINT_KEY) !== expectedWorkItemsFingerprint
+      ) {
         return undefined;
       }
       const rows = queryWorkRows(db, filter);
@@ -155,58 +205,77 @@ export class ObjectReadIndex {
     }
 
     await mkdir(dirname(this.path), { recursive: true });
-    let db: DatabaseSync;
     try {
-      db = await this.openWritable(sqlite);
+      await assertExistingIndexCompatible(sqlite, this.path);
     } catch (error) {
       if (isLockedSqliteError(error)) {
         return { path: this.path, available: false, changed: false };
       }
       throw error;
     }
+    const temporaryPath = temporaryIndexPath(this.path);
+    let db: DatabaseSync | undefined;
     try {
-      db.exec("BEGIN;");
-      db.prepare("DELETE FROM records;").run();
-      const fts = clearSearchFtsDocuments(db) ? searchFtsStatements(db) : undefined;
-      const insert = db.prepare(
-        `INSERT OR REPLACE INTO records(section, id, status, kind, updated_at, content_hash, json)
-         VALUES (?, ?, ?, ?, ?, ?, ?);`
-      );
-      for (const section of INDEXED_SECTIONS) {
-        for (const record of snapshot[section] ?? []) {
-          const row = indexRow(section, record);
-          insert.run(row.section, row.id, row.status, row.kind, row.updatedAt, row.contentHash, row.json);
-          const ftsDocument = ftsDocumentForRecord(section, record);
-          if (fts && ftsDocument) {
-            upsertSearchFtsDocument(fts, ftsDocument);
+      db = new sqlite.DatabaseSync(temporaryPath, { timeout: 250 });
+      initializeSchema(db, temporaryPath);
+      try {
+        db.exec("BEGIN;");
+        db.prepare("DELETE FROM records;").run();
+        const fts = clearSearchFtsDocuments(db) ? searchFtsStatements(db) : undefined;
+        const insert = db.prepare(
+          `INSERT OR REPLACE INTO records(section, id, status, kind, updated_at, content_hash, json)
+           VALUES (?, ?, ?, ?, ?, ?, ?);`
+        );
+        for (const section of INDEXED_SECTIONS) {
+          for (const record of snapshot[section] ?? []) {
+            const row = indexRow(section, record);
+            insert.run(row.section, row.id, row.status, row.kind, row.updatedAt, row.contentHash, row.json);
+            const ftsDocument = ftsDocumentForRecord(section, record);
+            if (fts && ftsDocument) {
+              upsertSearchFtsDocument(fts, ftsDocument);
+            }
           }
         }
+        writeHead(db, head);
+        writeMetadata(db, WORK_ITEMS_FINGERPRINT_KEY, objectIndexWorkItemsFingerprint(snapshot.workItems ?? []));
+        db.exec("COMMIT;");
+      } catch (error) {
+        rollback(db);
+        throw error;
+      } finally {
+        db.close();
+        db = undefined;
       }
-      writeHead(db, head);
-      db.exec("COMMIT;");
+      await assertExistingIndexCompatible(sqlite, this.path);
+      await removeSqliteSidecars(this.path);
+      await rename(temporaryPath, this.path);
       return { path: this.path, available: true, changed: true };
     } catch (error) {
-      rollback(db);
       if (isLockedSqliteError(error)) {
         return { path: this.path, available: false, changed: false };
       }
       throw error;
     } finally {
-      db.close();
+      db?.close();
+      await removeSqliteFiles(temporaryPath);
     }
   }
 
   async applyChanges(
     changes: readonly StoreChange[],
     head: ObjectIndexHead,
-    expectedPreviousHead?: ObjectIndexHead
+    expectedPreviousHead: ObjectIndexHead | undefined,
+    workItemsFingerprint: string
   ): Promise<ObjectIndexMutationResult> {
     const indexedChanges = changes.filter((change) => isIndexedSection(change.section));
     const sqlite = await this.sqlite();
     if (!sqlite) {
       return { path: this.path, available: false, changed: false };
     }
-    if (indexedChanges.length === 0 && (await this.status(head)).fresh) {
+    if (!existsSync(this.path)) {
+      return { path: this.path, available: true, changed: false };
+    }
+    if (indexedChanges.length === 0 && (await this.status(head, workItemsFingerprint)).fresh) {
       return { path: this.path, available: true, changed: false };
     }
 
@@ -223,8 +292,7 @@ export class ObjectReadIndex {
     try {
       if (expectedPreviousHead) {
         const storedHead = readHead(db);
-        const initializingFromEmptyStore = storedHead === undefined && expectedPreviousHead.seq === 0;
-        if (!initializingFromEmptyStore && !headsEqual(storedHead, expectedPreviousHead)) {
+        if (!headsEqual(storedHead, expectedPreviousHead)) {
           return { path: this.path, available: true, changed: false };
         }
       }
@@ -249,6 +317,7 @@ export class ObjectReadIndex {
         }
       }
       writeHead(db, head);
+      writeMetadata(db, WORK_ITEMS_FINGERPRINT_KEY, workItemsFingerprint);
       db.exec("COMMIT;");
       return { path: this.path, available: true, changed: indexedChanges.length > 0 };
     } catch (error) {
@@ -263,7 +332,12 @@ export class ObjectReadIndex {
   }
 
   async invalidate(): Promise<void> {
-    await rm(this.path, { force: true });
+    const sqlite = await this.sqlite();
+    if (!sqlite || !existsSync(this.path)) {
+      return;
+    }
+    await assertExistingIndexCompatible(sqlite, this.path);
+    await removeSqliteFiles(this.path);
   }
 
   private async sqlite(): Promise<NodeSqliteModule | undefined> {
@@ -286,19 +360,14 @@ export class ObjectReadIndex {
 
   private async openWritable(sqlite: NodeSqliteModule): Promise<DatabaseSync> {
     await mkdir(dirname(this.path), { recursive: true });
+    await assertExistingIndexCompatible(sqlite, this.path);
     const db = new sqlite.DatabaseSync(this.path, { timeout: 250 });
     try {
-      initializeSchema(db);
+      initializeSchema(db, this.path);
       return db;
     } catch (error) {
       db.close();
-      if (isLockedSqliteError(error)) {
-        throw error;
-      }
-      await rm(this.path, { force: true });
-      const retry = new sqlite.DatabaseSync(this.path, { timeout: 250 });
-      initializeSchema(retry);
-      return retry;
+      throw error;
     }
   }
 
@@ -320,7 +389,22 @@ interface IndexRow {
   readonly json: string;
 }
 
-function initializeSchema(db: DatabaseSync): void {
+export function initializeObjectIndexSchema(db: DatabaseSync, path: string): void {
+  initializeSchema(db, path);
+}
+
+export function objectIndexSchemaVersion(db: DatabaseSync): string | undefined {
+  return readMetadata(db, "schemaVersion");
+}
+
+function initializeSchema(db: DatabaseSync, path: string): void {
+  const existingTables = userTableNames(db);
+  if (existingTables.length > 0) {
+    const schemaVersion = readMetadata(db, "schemaVersion");
+    if (schemaVersion !== OBJECT_INDEX_SCHEMA_VERSION) {
+      throw new ObjectIndexCompatibilityError(path, schemaVersion);
+    }
+  }
   db.exec(`
     CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS records (
@@ -336,22 +420,71 @@ function initializeSchema(db: DatabaseSync): void {
     CREATE INDEX IF NOT EXISTS records_section_kind_idx ON records(section, kind);
     CREATE TABLE IF NOT EXISTS head (seq INTEGER NOT NULL, hash TEXT NOT NULL);
   `);
-  const row = db.prepare("SELECT value FROM metadata WHERE key = 'schemaVersion';").get() as { value?: SqlValue } | undefined;
-  if (row?.value !== undefined && row.value !== OBJECT_INDEX_SCHEMA_VERSION) {
-    resetSchema(db);
-    return;
-  }
-  db.prepare("INSERT OR REPLACE INTO metadata(key, value) VALUES ('schemaVersion', ?);").run(OBJECT_INDEX_SCHEMA_VERSION);
+  writeMetadata(db, "schemaVersion", OBJECT_INDEX_SCHEMA_VERSION);
 }
 
-function resetSchema(db: DatabaseSync): void {
-  db.exec(`
-    DROP TABLE IF EXISTS metadata;
-    DROP TABLE IF EXISTS records;
-    DROP TABLE IF EXISTS search_fts;
-    DROP TABLE IF EXISTS head;
-  `);
-  initializeSchema(db);
+async function assertExistingIndexCompatible(sqlite: NodeSqliteModule, path: string): Promise<void> {
+  if (!existsSync(path)) {
+    return;
+  }
+  let db: DatabaseSync | undefined;
+  try {
+    db = new sqlite.DatabaseSync(path, { readOnly: true, timeout: 100 });
+    const schemaVersion = objectIndexSchemaVersion(db);
+    if (schemaVersion !== OBJECT_INDEX_SCHEMA_VERSION) {
+      throw new ObjectIndexCompatibilityError(path, schemaVersion);
+    }
+  } catch (error) {
+    if (error instanceof ObjectIndexCompatibilityError || isLockedSqliteError(error)) {
+      throw error;
+    }
+    throw new ObjectIndexCompatibilityError(path, undefined, error);
+  } finally {
+    db?.close();
+  }
+}
+
+function hasCurrentSchema(db: DatabaseSync): boolean {
+  try {
+    return objectIndexSchemaVersion(db) === OBJECT_INDEX_SCHEMA_VERSION;
+  } catch {
+    return false;
+  }
+}
+
+function userTableNames(db: DatabaseSync): readonly string[] {
+  return (
+    db
+      .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name;")
+      .all() as Array<{ readonly name?: SqlValue }>
+  ).flatMap((row) => (typeof row.name === "string" ? [row.name] : []));
+}
+
+function readMetadata(db: DatabaseSync, key: string): string | undefined {
+  const metadataExists = db
+    .prepare("SELECT 1 AS found FROM sqlite_master WHERE type = 'table' AND name = 'metadata' LIMIT 1;")
+    .get() as { readonly found?: SqlValue } | undefined;
+  if (metadataExists?.found !== 1) {
+    return undefined;
+  }
+  const row = db.prepare("SELECT value FROM metadata WHERE key = ?;").get(key) as { readonly value?: SqlValue } | undefined;
+  return typeof row?.value === "string" ? row.value : undefined;
+}
+
+function writeMetadata(db: DatabaseSync, key: string, value: string): void {
+  db.prepare("INSERT OR REPLACE INTO metadata(key, value) VALUES (?, ?);").run(key, value);
+}
+
+function temporaryIndexPath(path: string): string {
+  return join(dirname(path), `.${basename(path)}.${process.pid}.${randomUUID()}.tmp`);
+}
+
+async function removeSqliteFiles(path: string): Promise<void> {
+  await Promise.all([rm(path, { force: true }), removeSqliteSidecars(path)]);
+}
+
+async function removeSqliteSidecars(path: string): Promise<void> {
+  await Promise.all([`${path}-journal`, `${path}-shm`, `${path}-wal`].map((candidate) => rm(candidate, { force: true })));
 }
 
 function indexRow(section: StoreSectionName, record: unknown): IndexRow {

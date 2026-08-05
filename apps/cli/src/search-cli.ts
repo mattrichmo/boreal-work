@@ -84,9 +84,7 @@ export interface SearchCommandOptions {
 
 export async function writeSearchIndex(context: CliContext): Promise<SearchIndexWriteResult> {
   return withSearchIndexLockRetry(context, () =>
-    withFileLock(context.paths.stateLockDir, normalizeFileLockOptions(), () =>
-      withFileLock(searchIndexLockDir(context), normalizeFileLockOptions(), () => writeSearchIndexUnlocked(context))
-    )
+    withFileLock(searchIndexLockDir(context), normalizeFileLockOptions(), () => writeSearchIndexUnlocked(context))
   );
 }
 

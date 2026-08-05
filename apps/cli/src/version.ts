@@ -16,9 +16,14 @@ import { FILE_STORE_SCHEMA_VERSION } from "@boreal/storage";
 import { EXPORT_SCHEMA_VERSION, LEDGER_DELETION_SCHEMA_VERSION, LEDGER_SCHEMA_VERSION } from "./import-export.js";
 import { detectInstallChannel, type InstallChannel } from "./install-channel.js";
 import { PROJECT_SETUP_SCHEMA_VERSION } from "./project-setup.js";
+import { getRuntimeBuildIdentity, type RuntimeBuildIdentity } from "./build-identity.js";
+import { PORTABLE_PROJECT_MANIFEST_SCHEMA_VERSION, TOOLCHAIN_LOCK_SCHEMA_VERSION } from "./toolchain.js";
 import { VAULT_SCHEMA_VERSION } from "./vault.js";
 import {
   BWRK_DELEGATED_BIN_ENV,
+  BWRK_LAUNCHER_AGENT_ASSET_DIGEST_ENV,
+  BWRK_LAUNCHER_ARTIFACT_DIGEST_ENV,
+  BWRK_LAUNCHER_BUILD_SHA_ENV,
   BWRK_LAUNCHER_CHANNEL_ENV,
   BWRK_LAUNCHER_EXECUTABLE_ENV,
   BWRK_LAUNCHER_NAME_ENV,
@@ -44,6 +49,7 @@ export interface VersionInfo {
   readonly packageManager?: string;
   readonly installChannel: InstallChannel;
   readonly node: string;
+  readonly build: RuntimeBuildIdentity;
   readonly cli: {
     readonly packageName: string;
     readonly packageVersion: string;
@@ -61,6 +67,8 @@ export interface VersionInfo {
     readonly searchIndex: typeof SEARCH_INDEX_SCHEMA_VERSION;
     readonly sqliteCache: typeof SQLITE_CACHE_SCHEMA_VERSION;
     readonly projectSetup: typeof PROJECT_SETUP_SCHEMA_VERSION;
+    readonly projectManifest: typeof PORTABLE_PROJECT_MANIFEST_SCHEMA_VERSION;
+    readonly toolchainLock: typeof TOOLCHAIN_LOCK_SCHEMA_VERSION;
     readonly projectRegistry: typeof PROJECT_REGISTRY_SCHEMA_VERSION;
     readonly vault: typeof VAULT_SCHEMA_VERSION;
     readonly daemonStatus: typeof DAEMON_STATUS_SCHEMA_VERSION;
@@ -111,6 +119,9 @@ export interface VersionIdentity {
   readonly version: string;
   readonly installChannel: string;
   readonly executable?: string;
+  readonly buildSha?: string;
+  readonly artifactDigest?: string;
+  readonly agentAssetDigest?: string;
 }
 
 export interface VersionDelegationInfo {
@@ -139,6 +150,7 @@ export function getVersionInfo(): VersionInfo {
     packageManager: parsed.packageManager,
     installChannel: detectInstallChannel(),
     node: process.version,
+    build: getRuntimeBuildIdentity(),
     cli: {
       packageName: cliPackage.name ?? "@boreal/cli",
       packageVersion: cliPackage.version ?? parsed.version ?? "0.0.0"
@@ -156,6 +168,8 @@ export function getVersionInfo(): VersionInfo {
       searchIndex: SEARCH_INDEX_SCHEMA_VERSION,
       sqliteCache: SQLITE_CACHE_SCHEMA_VERSION,
       projectSetup: PROJECT_SETUP_SCHEMA_VERSION,
+      projectManifest: PORTABLE_PROJECT_MANIFEST_SCHEMA_VERSION,
+      toolchainLock: TOOLCHAIN_LOCK_SCHEMA_VERSION,
       projectRegistry: PROJECT_REGISTRY_SCHEMA_VERSION,
       vault: VAULT_SCHEMA_VERSION,
       daemonStatus: DAEMON_STATUS_SCHEMA_VERSION,
@@ -217,6 +231,13 @@ export function formatVersionInfo(info = getVersionInfo()): string {
     `node: ${info.node}`,
     info.packageManager ? `packageManager: ${info.packageManager}` : undefined,
     `installChannel: ${info.installChannel}`,
+    `buildSha: ${info.build.buildSha}`,
+    `artifactDigest: ${info.build.artifactDigest}`,
+    `protocolEpoch: ${info.build.protocolEpoch}`,
+    `writerEpoch: ${info.build.writerEpoch}`,
+    `readerEpoch: ${info.build.readerEpoch}`,
+    `cacheEpoch: ${info.build.cacheEpoch}`,
+    `agentAssetDigest: ${info.build.agentAssetDigest}`,
     `runtimeRecord: ${info.runtime.recordSchemaVersion}`,
     `fileStore: ${info.runtime.fileStoreSchemaVersion}`,
     info.delegation
@@ -227,6 +248,8 @@ export function formatVersionInfo(info = getVersionInfo()): string {
     `searchIndex: ${info.schemas.searchIndex}`,
     `sqliteCache: ${info.schemas.sqliteCache}`,
     `projectSetup: ${info.schemas.projectSetup}`,
+    `projectManifest: ${info.schemas.projectManifest}`,
+    `toolchainLock: ${info.schemas.toolchainLock}`,
     `projectRegistry: ${info.schemas.projectRegistry}`,
     `vault: ${info.schemas.vault}`,
     `daemonStatus: ${info.schemas.daemonStatus}`,
@@ -278,13 +301,19 @@ function delegatedVersionInfo(info?: Pick<VersionInfo, "name" | "version" | "ins
       name: launcherName,
       version: launcherVersion,
       installChannel: launcherChannel,
-      executable: process.env[BWRK_LAUNCHER_EXECUTABLE_ENV] || undefined
+      executable: process.env[BWRK_LAUNCHER_EXECUTABLE_ENV] || undefined,
+      buildSha: process.env[BWRK_LAUNCHER_BUILD_SHA_ENV] || undefined,
+      artifactDigest: process.env[BWRK_LAUNCHER_ARTIFACT_DIGEST_ENV] || undefined,
+      agentAssetDigest: process.env[BWRK_LAUNCHER_AGENT_ASSET_DIGEST_ENV] || undefined
     },
     delegated: {
       name: delegated.name,
       version: delegated.version,
       installChannel: delegated.installChannel,
-      executable: process.env[BWRK_DELEGATED_BIN_ENV] || process.argv[1]
+      executable: process.env[BWRK_DELEGATED_BIN_ENV] || process.argv[1],
+      buildSha: getRuntimeBuildIdentity().buildSha,
+      artifactDigest: getRuntimeBuildIdentity().artifactDigest,
+      agentAssetDigest: getRuntimeBuildIdentity().agentAssetDigest
     }
   };
 }

@@ -117,7 +117,7 @@ describe("cli ui", () => {
     expect(output.text).toContain("\x1B[?25h");
   });
 
-  it("toggles multiselect values without allowing an empty selection", async () => {
+  it("toggles multiselect values", async () => {
     const input = new FakeInput();
     const output = new FakeOutput();
     const selectedPromise = withPromptSession(fakeIo(input, output), (prompt) =>
@@ -131,7 +131,6 @@ describe("cli ui", () => {
       )
     );
 
-    input.emit("keypress", "", { name: "space" });
     input.emit("keypress", "", { name: "down" });
     input.emit("keypress", "", { name: "space" });
     input.emit("keypress", "", { name: "return" });
@@ -140,6 +139,24 @@ describe("cli ui", () => {
     expect(input.rawModes[0]).toBe(true);
     expect(input.rawModes.at(-1)).toBe(false);
     expect(output.text).toContain("Space toggle   Enter accept   Up/Down move");
+  });
+
+  it("allows a user to choose no agent skills", async () => {
+    const input = new FakeInput();
+    const output = new FakeOutput();
+    const selectedPromise = withPromptSession(fakeIo(input, output), (prompt) =>
+      prompt.multiselect(
+        "Skill targets",
+        [{ value: "codex", label: "Codex", description: "Install Codex skills." }],
+        ["codex"]
+      )
+    );
+
+    input.emit("keypress", "", { name: "space" });
+    input.emit("keypress", "", { name: "return" });
+
+    await expect(selectedPromise).resolves.toEqual([]);
+    expect(input.rawModes.at(-1)).toBe(false);
   });
 
   it("cancels prompts with ctrl-c and restores terminal state", async () => {

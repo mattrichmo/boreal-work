@@ -1,6 +1,9 @@
 #!/usr/bin/env node
+import { createHash } from "node:crypto";
+import { execFileSync } from "node:child_process";
+import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { chmod, cp, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join, relative, resolve, sep } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 
@@ -25,6 +28,11 @@ const installChannel = process.env.BOREAL_INSTALL_CHANNEL && validChannels.has(p
 
 const rootPackage = await readJson(join(repoRoot, "package.json"));
 const cliPackage = await readJson(join(cliRoot, "package.json"));
+const buildIdentity = {
+  buildSha: resolveBuildSha(repoRoot),
+  artifactDigest: digestArtifactInputs(repoRoot),
+  agentAssetDigest: digestAgentAssets(repoRoot)
+};
 
 await withBuildLock(async () => {
   await rm(distRoot, { recursive: true, force: true });
@@ -46,7 +54,10 @@ await withBuildLock(async () => {
       BOREAL_BUILD_PACKAGE_VERSION: JSON.stringify(stringField(rootPackage, "version")),
       BOREAL_BUILD_PACKAGE_MANAGER: JSON.stringify(stringField(rootPackage, "packageManager")),
       BOREAL_BUILD_CLI_PACKAGE_NAME: JSON.stringify(stringField(cliPackage, "name")),
-      BOREAL_BUILD_CLI_PACKAGE_VERSION: JSON.stringify(stringField(cliPackage, "version"))
+      BOREAL_BUILD_CLI_PACKAGE_VERSION: JSON.stringify(stringField(cliPackage, "version")),
+      BOREAL_BUILD_SHA: JSON.stringify(buildIdentity.buildSha),
+      BOREAL_BUILD_ARTIFACT_DIGEST: JSON.stringify(buildIdentity.artifactDigest),
+      BOREAL_BUILD_AGENT_ASSET_DIGEST: JSON.stringify(buildIdentity.agentAssetDigest)
     },
     logLevel: "info"
   });
@@ -106,6 +117,79 @@ console.log(`Built ${outFile}`);
 console.log(`Built ${tuiOutFile}`);
 console.log(`Install channel: ${installChannel}`);
 console.log(`Runtime assets: ${assetRoot}`);
+console.log(`Build SHA: ${buildIdentity.buildSha}`);
+console.log(`Artifact digest: ${buildIdentity.artifactDigest}`);
+console.log(`Agent asset digest: ${buildIdentity.agentAssetDigest}`);
+
+function resolveBuildSha(root) {
+  const explicit = process.env.BOREAL_BUILD_SHA;
+  if (explicit && /^[a-f0-9]{40,64}$/u.test(explicit)) {
+    return explicit;
+  }
+  return execFileSync("git", ["rev-parse", "HEAD"], { cwd: root, encoding: "utf8" }).trim();
+}
+
+function digestArtifactInputs(root) {
+  const packageRoots = existsSync(join(root, "packages"))
+    ? readdirSync(join(root, "packages"), { withFileTypes: true })
+        .filter((entry) => entry.isDirectory())
+        .map((entry) => join(root, "packages", entry.name, "src"))
+        .filter(existsSync)
+    : [];
+  return digestFiles(root, [
+    ...collectFiles([
+      join(root, "apps", "cli", "src"),
+      join(root, "apps", "daemon", "src"),
+      join(root, "apps", "tui", "src"),
+      ...packageRoots
+    ]),
+    ...["package.json", "pnpm-lock.yaml", "tsconfig.base.json", "tools/build-cli-dist.mjs"]
+      .map((path) => join(root, path))
+      .filter(existsSync)
+  ]);
+}
+
+function digestAgentAssets(root) {
+  return digestFiles(root, collectFiles(["workflows", "templates", "skills", "schemas"].map((path) => join(root, path))));
+}
+
+function collectFiles(roots) {
+  const files = [];
+  for (const root of roots) {
+    visit(root, files);
+  }
+  return files;
+}
+
+function visit(path, files) {
+  if (!existsSync(path)) {
+    return;
+  }
+  const info = statSync(path);
+  if (info.isFile()) {
+    files.push(resolve(path));
+    return;
+  }
+  if (!info.isDirectory()) {
+    return;
+  }
+  for (const entry of readdirSync(path, { withFileTypes: true }).sort((left, right) => left.name.localeCompare(right.name))) {
+    if (!entry.isSymbolicLink()) {
+      visit(join(path, entry.name), files);
+    }
+  }
+}
+
+function digestFiles(root, files) {
+  const hash = createHash("sha256");
+  for (const path of [...new Set(files.map((entry) => resolve(entry)))].sort()) {
+    hash.update(relative(root, path).split(sep).join("/"));
+    hash.update("\0");
+    hash.update(readFileSync(path));
+    hash.update("\0");
+  }
+  return `sha256:${hash.digest("hex")}`;
+}
 
 async function readJson(path) {
   return JSON.parse(await readFile(path, "utf8"));

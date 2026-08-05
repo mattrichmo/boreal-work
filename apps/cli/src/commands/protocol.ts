@@ -70,11 +70,16 @@ async function primeCommand(
 ): Promise<CommandResult> {
   const agentId = dependencies.agentIdFromArgs(args, context.actor.id);
   const labels = dependencies.labelsFromArgs(args);
-  const result = await dependencies.buildAgentProtocolBrief("prime", context, agentId, labels);
+  const brief = await dependencies.buildAgentProtocolBrief("prime", context, agentId, labels);
+  const result = isRecord(brief) ? { ...brief, toolchain: context.toolchain } : brief;
   output.write(await dependencies.formatRecordWithAgentDirectives(context, args, result, json, {
     subject: { type: "workspace", id: context.workspaceRoot, title: context.workspaceRoot }
   }));
   return { exitCode: 0 };
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 async function nextCommand(

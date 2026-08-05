@@ -340,7 +340,7 @@ Golden-path alias for `bwrk agent start`. With no work reference it resumes the 
 ## `done`
 
 ```bash
-bwrk done --summary <text> --reason <text> [--agent <agent-id>] [--kind command|test|diff|review|artifact|note] [--outcome passed|failed|observed|unknown] [--command <cmd>] [--uri <uri>] [--notes <text>] [--commit <sha>...] [--dirty-path <note>...] [--json]
+bwrk done (--summary <text>|--evidence <evidence-id>) --reason <text> [--agent <agent-id>] [--kind command|test|diff|review|artifact|note] [--outcome passed|failed|observed|unknown] [--uri <uri>] [--notes <text>] [--commit <sha>...] [--dirty-path <note>...] [--json]
 ```
 
 Golden-path alias for `bwrk agent finish current --close` with a passed verification. It records evidence, verifies, closes, releases the active reservation, creates an agent closeout summary, and returns the same finish payload as `agent finish`.
@@ -348,7 +348,7 @@ Golden-path alias for `bwrk agent finish current --close` with a passed verifica
 ## `pause`
 
 ```bash
-bwrk pause --summary <text> [--agent <agent-id>] [--kind command|test|diff|review|artifact|note] [--outcome passed|failed|observed|unknown] [--command <cmd>] [--uri <uri>] [--verdict passed|failed] [--notes <text>] [--json]
+bwrk pause (--summary <text>|--evidence <evidence-id>) [--agent <agent-id>] [--kind command|test|diff|review|artifact|note] [--outcome passed|failed|observed|unknown] [--uri <uri>] [--verdict passed|failed] [--notes <text>] [--json]
 ```
 
 Golden-path alias for `bwrk agent finish current --release`. It records evidence and verification, then releases the active reservation without closing the work. The default verdict is `failed` so partial work does not look complete accidentally.
@@ -367,7 +367,7 @@ Compatibility alias for `bwrk prime`. It prints the compact agent/session startu
 bwrk next [--agent <agent-id>] [--label <label>...] [--json]
 ```
 
-Returns the next single executable directive for an agent. The command checks active reservations first, then claimable ready work, then workspace health. JSON output uses schema `boreal.cli.next.v1` and returns `state`, `checked`, one selected `directive` with `command`, and a top-level `agentDirectives` bundle containing exactly that directive. When nothing applies, it returns `state: "idle"` with `directive: null`. Plain output prints the executable command on the last line when a directive has a command.
+Returns the next trusted exact-argv action for an agent. The command checks active reservations first, then claimable ready work, then workspace health. JSON output uses schema `boreal.cli.next.v1` and separates work-authored `displayCommand` text from `executableAction`, which includes its trust source, runner, cwd, `shell: false`, and exact argv. The legacy `command` field contains only the trusted rendered action. Declared gates resolve to `bwrk evidence run ...`, never to their work-authored command text. When nothing applies, it returns `state: "idle"` with `directive: null`.
 
 ## `workflows list`
 
@@ -439,31 +439,31 @@ Captures an existing work subtree into a YAML work-structure template. Repeated 
 bwrk install [--yes] [--dry-run] [--interactive] [--workspace <dir>|--project-root <dir>] [--memory-root <dir>] [--memory-layout in-repo|child|sibling] [--memory-git-mode shared|separate|submodule] [--memory-remote <url>] [--install-root <dir>] [--skill-target codex|claude...] [--folder-scoped] [--json]
 ```
 
-Runs the first-run project installer. In a TTY, bare `bwrk install` opens the setup flow. `bwrk install --yes` applies the recommended safe default: `./memory` as a child Git repository ignored by the app repo, Codex skills in `.agents/skills`, and folder-scoped skill metadata. `bwrk install --dry-run` previews the same plan without writing files. `bwrk install --json` is non-mutating unless `--yes` is also supplied. Short alias: `-y` means `--yes`.
+Runs the first-run project installer. In a TTY, bare `bwrk install` opens the setup flow. `bwrk install --yes` applies the recommended safe default: `./memory` as a child Git repository ignored by the app repo, Codex skills in `.agents/skills`, and project-level skill metadata. `bwrk install --dry-run` previews the same plan without writing files. `bwrk install --json` is non-mutating unless `--yes` is also supplied. Short alias: `-y` means `--yes`.
 
 ## `install codex`
 
 ```bash
-bwrk install codex [--install-root <dir>] [--dry-run] [--interactive] [--json]
+bwrk install codex [--scope project|user] [--install-root <dir>] [--dry-run] [--interactive] [--json]
 ```
 
-Plans or installs Boreal skill adapters for Codex. Defaults to the configured `.agents/skills` root when project setup exists, otherwise `.agents` under the selected workspace. Both `.agents` and `.agents/skills` are accepted; the actual scanned skill root is reported as `skillRoot`. Installed skills include Codex UI metadata in `agents/openai.yaml` and reference workflows by canonical IDs that resolve through `bwrk workflows show <ref>`. Use `--dry-run` before writing. Use `--interactive` in a TTY to review the install plan before files are written.
+Plans or installs Boreal skill adapters for Codex. `--scope project` is the default and writes to the configured `.agents/skills` root. `--scope user` writes to `~/.agents/skills`, making the adapters available from every repo. Both `.agents` and `.agents/skills` are accepted as install roots; the actual scanned skill root is reported as `skillRoot`. Installed skills include Codex UI metadata in `agents/openai.yaml` and reference workflows by canonical IDs that resolve through `bwrk workflows show <ref>`. Use `--dry-run` before writing. Use `--interactive` in a TTY to review the install plan before files are written.
 
 ## `install claude`
 
 ```bash
-bwrk install claude [--install-root <dir>] [--dry-run] [--interactive] [--json]
+bwrk install claude [--scope project|user] [--install-root <dir>] [--dry-run] [--interactive] [--json]
 ```
 
-Plans or installs Boreal skill adapters for Claude. Defaults to a configured `.claude/skills` root when project setup uses one, otherwise `.claude` under the selected workspace. Both `.claude` and `.claude/skills` are accepted; the actual scanned skill root is reported as `skillRoot`. Codex-specific `agents/openai.yaml` files are omitted, and workflow references remain canonical IDs resolvable by `bwrk workflows show <ref>`. Use `--dry-run` before writing. Use `--interactive` in a TTY to review the install plan before files are written.
+Plans or installs Boreal skill adapters for Claude. `--scope project` is the default and writes to the configured `.claude/skills` root. `--scope user` writes to `~/.claude/skills`, making the adapters available from every repo. Both `.claude` and `.claude/skills` are accepted as install roots; the actual scanned skill root is reported as `skillRoot`. Codex-specific `agents/openai.yaml` files are omitted, and workflow references remain canonical IDs resolvable by `bwrk workflows show <ref>`. Use `--dry-run` before writing. Use `--interactive` in a TTY to review the install plan before files are written.
 
 ## `install skills`
 
 ```bash
-bwrk install skills [--install-root <dir>] [--dry-run] [--interactive] [--json]
+bwrk install skills [--scope project|user] [--install-root <dir>] [--dry-run] [--interactive] [--json]
 ```
 
-Plans or installs generic namespaced Boreal skill folders into a folder-scoped skill root. Defaults to the configured install root when project setup exists, otherwise `.agents/skills` under the selected workspace. Workflow references are installed as canonical IDs that `bwrk workflows show <ref>` accepts verbatim. Use `--interactive` in a TTY to review the install plan before files are written.
+Plans or installs generic namespaced Boreal skill folders. Project scope defaults to the configured install root; user scope defaults to `~/.agents/skills`. Workflow references are installed as canonical IDs that `bwrk workflows show <ref>` accepts verbatim. Use `--interactive` in a TTY to review the install plan before files are written.
 
 ## `install status`
 
@@ -747,7 +747,7 @@ With `--auto-report`, sprint close runs sync refresh and doctor, records sprint-
 bwrk init [--workspace <dir>|--project-root <dir>] [--setup-memory] [--memory-root <dir>] [--memory-layout in-repo|child|sibling] [--memory-git-mode shared|separate|submodule] [--memory-remote <url>] [--separate-git] [--install-root <dir>] [--skill-target codex|claude...] [--folder-scoped] [--interactive] [--json]
 ```
 
-Initializes a Boreal workspace by creating durable runtime state under `.boreal/runtime/state.json`.
+Low-level runtime initializer that creates durable runtime state under `.boreal/runtime/state.json`. Most users should run `bwrk install`, which initializes the workspace and also scaffolds project memory and agent skills.
 
 Behavior:
 
@@ -1210,16 +1210,17 @@ Prints the compact agent loop without requiring an initialized workspace. The gu
 ## `agent finish`
 
 ```bash
-bwrk agent finish <work-id> (--summary <text>|--evidence <inline-or-evidence-id>) (--close --reason <text>|--release) [--agent <agent-id>] [--kind command|test|diff|review|artifact|note] [--outcome passed|failed|observed|unknown] [--command <cmd>] [--uri <uri>] [--verdict passed|failed] [--notes <text>] [--commit <sha>...] [--dirty-path <note>...] [--remove-worktree] [--json]
+bwrk agent finish <work-id> (--summary <text>|--evidence <inline-or-evidence-id>) --verdict passed|failed (--close --reason <text>|--release) [--agent <agent-id>] [--kind command|test|diff|review|artifact|note] [--outcome passed|failed|observed|unknown] [--uri <uri>] [--notes <text>] [--commit <sha>...] [--dirty-path <note>...] [--remove-worktree] [--json]
 ```
 
 Guarded exit workflow for work with an active agent reservation, plus explicit unreserved work refs. When the work has an active reservation, the command requires the selected agent to own the active, non-expired reservation before it records evidence, verifies the work, and closes or releases anything. Use `current` or `active` as the work reference when the selected `--agent` has exactly one non-expired active reservation. When an explicit work ID or title has no active reservation, Boreal creates a short-lived reservation for the selected agent and releases it inside the same transaction. Evidence, verification, optional close, reservation release, readiness repair, and the final `agent.finished` event run as one engine transaction. One of `--close` or `--release` is required so finish cannot leave active ownership behind. When closing, the evidence summary becomes the generated agent closeout summary body and optional `--commit` / `--dirty-path` values are linked into that summary; if no `--commit` is provided, one `--dirty-path` must start with a checkpoint reason code such as `no_repo_changes: ...`.
 
 Behavior:
 
-- Records one evidence item against the work. If `--outcome` is omitted, it defaults to `passed` for a passed verdict and `failed` for a failed verdict.
-- `--evidence` can supply an inline evidence summary or an existing evidence ID as the finish evidence source when `--summary` is omitted.
-- Verifies the work using the new evidence ID.
+- Requires an explicit `--verdict`; omission never defaults to `passed`.
+- Records self-reported evidence for `--summary` or inline `--evidence` text. It does not accept or execute `--command`.
+- Uses an existing `--evidence <evidence-id>` unchanged, preserving witnessed provenance instead of cloning it as self-reported evidence.
+- Verifies the work using the selected evidence ID. Use `bwrk evidence run` first when a declared gate requires Boreal-witnessed proof.
 - Refreshes the work context/projection for the returned view so `work.status`, counts, and `contextSummary` describe the same post-finish state.
 - With `--close`, requires a passed verdict and `--reason`, closes the work, then releases the active reservation so closed work does not keep stale ownership.
 - With `--release`, releases the reservation after verification without closing.
@@ -1421,10 +1422,10 @@ Creates `legacy_backfill` summaries for existing work items that do not already 
 ## `work verify`
 
 ```bash
-bwrk work verify <work-id> --evidence <evidence-id>... [--verdict passed|failed] [--notes <text>] [--json]
+bwrk work verify <work-id> --evidence <evidence-id>... --verdict passed|failed [--notes <text>] [--json]
 ```
 
-Creates a verification record. `--evidence` may be repeated. Verification fails if referenced evidence is not attached to the work item. A `passed` verdict requires at least one referenced evidence record with outcome `passed`. JSON output includes `closeoutGateStatus` so callers can see whether required review, audit, verification, or checkpoint gates are still open.
+Creates a verification record. `--verdict` is required and `--evidence` may be repeated. Verification fails if referenced evidence is not attached to the work item. A `passed` verdict requires at least one referenced evidence record with outcome `passed`. JSON output includes `closeoutGateStatus` so callers can see whether required review, audit, verification, or checkpoint gates are still open.
 
 ## `work close`
 
@@ -1611,7 +1612,7 @@ Search commands rebuild a missing, invalid, or stale local search index by defau
 bwrk search index [--json]
 ```
 
-Builds the versioned FTS5 search table inside `.boreal/cache/index.sqlite`; runtimes without SQLite use `.boreal/runtime/search-index.json` as a compatibility fallback. Rebuilds take the runtime write lock before `.boreal/runtime/search-index.lock`, retry bounded lock contention, validate the completed artifact against canonical content hashes, and never silently downgrade a busy SQLite index to JSON. Indexed text and query sizes are bounded.
+Builds the versioned FTS5 search table inside `.boreal/cache/index-v2.sqlite`; runtimes without SQLite use `.boreal/runtime/search-index.json` as a compatibility fallback. Rebuilds take the runtime write lock before `.boreal/runtime/search-index.lock`, retry bounded lock contention, validate the completed artifact against canonical content hashes, and never silently downgrade a busy SQLite index to JSON. Indexed text and query sizes are bounded.
 
 JSON `data` contains `path`, `schemaVersion`, `builtAt`, `contentHash`, `documentCount`, and `tokenCount`.
 
@@ -1901,20 +1902,20 @@ JSON `data` contains `rotated`, `skipped`, `path`, `sizeBytes`, `archivedPath`, 
 ## `update self`
 
 ```bash
-bwrk update self [--ref <ref>] [--repo-url <url>] [--bin-dir <dir>] [--lib-dir <dir>] [--json]
+bwrk update self [--ref <ref>] [--repo-url <url>] [--bin-dir <dir>] [--lib-dir <dir>] [--dry-run] [--json]
 ```
 
-Upgrades the machine `bwrk` install from the source repo: clones to a temp directory, builds the bundled CLI with pnpm, and installs the result into the segmented machine location (`~/.local/share/boreal/bwrk`) behind the `~/.local/bin/bwrk` shim. The staged clone is removed afterwards. Requires `git`, `node`, and `pnpm` on PATH. `--ref` pins a branch or tag; `--repo-url` (or `BOREAL_UPDATE_REPO_URL`) overrides the source repo. The machine install never points at a live source checkout, so upgrading cannot be broken by in-progress edits to a development clone.
+Upgrades the machine `bwrk` install from the source repo: clones to a temp directory, builds the bundled CLI with pnpm, and installs the result into the segmented machine location (`~/.local/share/boreal/bwrk`) behind the `~/.local/bin/bwrk` shim. The staged clone is removed afterwards. Requires `git`, `node`, and `pnpm` on PATH. `--ref` pins a branch or tag; `--repo-url` (or `BOREAL_UPDATE_REPO_URL`) overrides the source repo; `--dry-run` performs discovery and verification without changing the machine install. The machine install never points at a live source checkout, so upgrading cannot be broken by in-progress edits to a development clone.
 
 JSON `data` contains `updated`, `repoUrl`, `ref`, `previousVersion`, `installedVersion`, `binPath`, and per-step `steps` with durations.
 
 ## `update repo`
 
 ```bash
-bwrk update repo [--json]
+bwrk update repo [--dry-run] [--json]
 ```
 
-Brings the current workspace up to the installed `bwrk` version: migrates legacy compact-state storage to the git-first per-record object store when the `.boreal/project.json` marker is not already `objects-v1`, then reinstalls agent skills into every install root recorded by project setup. Run it in each existing project after `bwrk update self`, then run `bwrk sync refresh` to rebuild generated artifacts. Exits `1` when a skill install reports issues.
+Brings the current workspace up to the installed `bwrk` version: migrates legacy compact-state storage to the git-first per-record object store when the `.boreal/project.json` marker is not already `objects-v1`, then reinstalls agent skills into every install root recorded by project setup. Run it in each existing project after `bwrk update self`, then run `bwrk sync refresh` to rebuild generated artifacts. `--dry-run` reports the migration and skill-install plan without changing the workspace. Exits `1` when a skill install reports issues.
 
 JSON `data` contains `workspaceRoot`, `storage` (`migrated`, `from`, `to`), `skillInstalls` (per target: `installRoot`, `written`, `issues`), and `nextCommand`.
 
@@ -2036,7 +2037,7 @@ Runs `bwrk doctor --workspace . --strict --json` from the repository root.
 ## `doctor skills`
 
 ```bash
-bwrk doctor skills [--install-root <dir>] [--skill-target codex|claude|skills...] [--json]
+bwrk doctor skills [--scope project|user] [--install-root <dir>] [--skill-target codex|claude|skills...] [--json]
 ```
 
 Validates the checked-in workflow, template, and skill source files without requiring an initialized workspace. It checks duplicate workflow IDs, workflow command references, workflow template references, and skill workflow references. Skill `boreal.yaml` files and `SKILL.md` workflow lists must use canonical workflow IDs that `bwrk workflows show <ref>` accepts verbatim.

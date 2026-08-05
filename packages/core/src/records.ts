@@ -418,7 +418,7 @@ export interface RuntimeEvent {
   readonly payload: Record<string, unknown>;
 }
 
-export type RuntimeOperationStatus = "succeeded" | "failed";
+export type RuntimeOperationStatus = "started" | "in_progress" | "succeeded" | "failed" | "partial" | "unknown";
 
 export interface RuntimeOperation {
   readonly meta: RecordMeta<OperationId>;
@@ -433,6 +433,16 @@ export interface RuntimeOperation {
   readonly stateChanged: boolean;
   readonly generatedArtifactsChanged: boolean;
   readonly eventIds: readonly EventId[];
+  readonly phase?: string;
+  readonly durationMs?: number;
+  readonly lockWaitMs?: number;
+  readonly processId?: number;
+  readonly host?: string;
+  readonly storageHeadSeq?: number;
+  readonly stateChangeOutcome?: "changed" | "unchanged" | "partial" | "unknown";
+  readonly generatedArtifactOutcome?: "changed" | "unchanged" | "partial" | "unknown";
+  readonly auditOutcome?: "complete" | "incomplete" | "unknown";
+  readonly resultUri?: string;
   readonly errorCode?: string;
   readonly errorMessage?: string;
 }

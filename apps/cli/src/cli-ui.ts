@@ -194,7 +194,7 @@ export class CliPromptSession {
     const { input: stdin, output: stdout } = this.io;
     const defaultSet = new Set(defaultValues);
     const selected = new Set(options.filter((option) => defaultSet.has(option.value)).map((option) => option.value));
-    if (selected.size === 0) {
+    if (!input.multiple && selected.size === 0) {
       selected.add(options[0]?.value as T);
     }
     let index = Math.max(0, options.findIndex((option) => selected.has(option.value)));
@@ -244,7 +244,7 @@ export class CliPromptSession {
           if (input.multiple && key.name === "space") {
             const current = options[index];
             if (current) {
-              if (selected.has(current.value) && selected.size > 1) {
+              if (selected.has(current.value)) {
                 selected.delete(current.value);
               } else {
                 selected.add(current.value);

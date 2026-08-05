@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://boreal.work/schemas/projects/toolchain-lock.schema.json",
+  "title": "Boreal Toolchain Lock",
+  "type": "object",
+  "required": [
+    "schemaVersion",
+    "projectId",
+    "semanticVersion",
+    "buildSha",
+    "artifactDigest",
+    "protocolEpoch",
+    "writerEpoch",
+    "readerEpoch",
+    "cacheEpoch",
+    "agentAssetDigest"
+  ],
+  "properties": {
+    "schemaVersion": { "const": "boreal.toolchain-lock.v1" },
+    "projectId": { "type": "string", "pattern": "^project_[a-z0-9]{16,64}$" },
+    "semanticVersion": { "type": "string", "pattern": "^\\d+\\.\\d+\\.\\d+(?:[-+][0-9A-Za-z.-]+)?$" },
+    "buildSha": { "type": "string", "pattern": "^[a-f0-9]{40,64}$" },
+    "artifactDigest": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" },
+    "protocolEpoch": { "type": "integer", "minimum": 1 },
+    "writerEpoch": { "type": "integer", "minimum": 1 },
+    "readerEpoch": { "type": "integer", "minimum": 1 },
+    "cacheEpoch": { "type": "integer", "minimum": 1 },
+    "agentAssetDigest": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" }
+  },
+  "additionalProperties": false
+}

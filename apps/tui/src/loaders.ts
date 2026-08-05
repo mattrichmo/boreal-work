@@ -196,7 +196,7 @@ export async function loadRepoRollup(workspaceRoot: string): Promise<TuiEnvelope
       surface: "repo",
       workspaceRoot,
       generatedAt,
-      warnings: ["Workspace is not initialized. Run `bwrk init` in this directory."],
+      warnings: ["Workspace is not set up. Run `bwrk install` in this directory."],
       body: buildRepoRollupView({ workspaceRoot, generatedAt, projectName: "(uninitialized)", work: [], graphEdges: [] })
     });
   }
@@ -237,7 +237,7 @@ export async function loadRepoSprintBoard(
       surface: "repo",
       workspaceRoot,
       generatedAt,
-      warnings: ["Workspace is not initialized. Run `bwrk init` in this directory."],
+      warnings: ["Workspace is not set up. Run `bwrk install` in this directory."],
       body: { sprints: [] }
     });
   }

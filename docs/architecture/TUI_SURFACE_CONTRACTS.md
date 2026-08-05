@@ -1432,7 +1432,7 @@ bwrk --workspace <projectRoot> work reserve <work-id> --agent <agent-id> --purpo
 4. For owned reservations, TUI should prefer the single transaction command:
 
 ```bash
-bwrk agent finish current --agent <agent-id> --summary <text> --kind <kind> --command <cmd> --verdict passed --close --reason <text> --json
+bwrk agent finish current --agent <agent-id> --evidence <evidence-id> --verdict passed --close --reason <text> --json
 ```
 
 5. The resulting operation, event, evidence, verification, and work status are shown after refresh.

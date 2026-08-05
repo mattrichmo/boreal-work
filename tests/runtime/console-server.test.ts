@@ -170,11 +170,11 @@ describe("console server", () => {
         id: "work.reserve",
         body: {
           workId: "bw_work_ready",
-          agentId: "cybertron",
+          agentId: "example-agent",
           ttl: "2h",
           purpose: "Claim from test"
         },
-        expected: "work reserve bw_work_ready --agent cybertron --purpose Claim from test --ttl 2h --json"
+        expected: "work reserve bw_work_ready --agent example-agent --purpose Claim from test --ttl 2h --json"
       },
       {
         id: "work.reserve",
@@ -284,7 +284,7 @@ describe("console server", () => {
       expect(payload.error?.details?.gaps?.[0]).toMatchObject({
         code: "gate.verification.unsatisfied",
         data: {
-          command: "bwrk work verify bw_work_ready --evidence <evidence-id> --json"
+          command: "bwrk work verify bw_work_ready --evidence <evidence-id> --verdict passed --json"
         }
       });
       expect(recoveryCommands).toContain("bwrk work show bw_work_ready --json");
@@ -397,7 +397,7 @@ function failingActionRunner(): ConsoleCliRunner {
               targetId: "bw_work_ready",
               data: {
                 reason: "required gate has no satisfying evidence",
-                command: "bwrk work verify bw_work_ready --evidence <evidence-id> --json"
+                command: "bwrk work verify bw_work_ready --evidence <evidence-id> --verdict passed --json"
               }
             }
           ]

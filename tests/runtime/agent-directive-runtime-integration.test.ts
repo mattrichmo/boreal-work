@@ -661,7 +661,7 @@ function snapshotFixture(
     git: {
       roots: [
         {
-          root: "/Users/cybertron/Code/boreal-work",
+          root: "/workspace/boreal-work",
           branchName: "main",
           detached: false,
           protectedBranch: true,
@@ -708,11 +708,11 @@ function snapshotFixture(
     },
     actor: {
       actor: {
-        id: "cybertron" as AgentId,
+        id: "example-agent" as AgentId,
         kind: "agent",
-        displayName: "cybertron"
+        displayName: "example-agent"
       },
-      activeAgentId: "cybertron" as AgentId,
+      activeAgentId: "example-agent" as AgentId,
       activeReservationIds: options.activeReservationIds ?? [],
       purpose: "Runtime directive compiler integration"
     }

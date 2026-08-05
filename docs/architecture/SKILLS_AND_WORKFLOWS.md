@@ -16,7 +16,19 @@ Each workflow uses frontmatter with `id`, `title`, `group`, `status`, `risk`, `w
 
 ## Skill Metadata
 
-Each skill declares the workflow files it can route to. Skill text must reference workflow files and must not duplicate detailed workflow steps.
+Each skill declares the canonical workflow IDs it can route to. Skill text must reference those IDs and must not duplicate detailed workflow steps.
+
+## Planning Depth
+
+The planning skill chooses the smallest executable shape for the request:
+
+- Quick: one bounded task with observable acceptance and an appropriate verification or checkpoint gate.
+- Standard: a container or sprint with implementation tasks, dependencies, and final validation.
+- Granular: separate discovery/design, implementation, review/critique, update, and validation passes when uncertainty, design judgment, or risk justifies them.
+
+The `feature-delivery` Markdown contract records the rationale and evidence strategy. The `templates/work-structures/feature-delivery.yaml` template is the reusable state shape for the granular mode; it is validated and dry-run before instantiation.
+
+Review and validation are first-class work when they change delivery confidence. Review findings block the update pass, and final validation blocks parent closeout.
 
 ## Installer Behavior
 

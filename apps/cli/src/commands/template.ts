@@ -299,6 +299,10 @@ async function validateTemplate(
     for (const [index, criterion] of entry.node.acceptance.entries()) {
       validatePlaceholders(criterion, `${nodePath}.acceptance[${index}]`, variableNames, issues);
     }
+    for (const [index, gate] of entry.node.gates.entries()) {
+      validatePlaceholders(gate.declaredCommand ?? "", `${nodePath}.gates[${index}].declaredCommand`, variableNames, issues);
+      validatePlaceholders(gate.expectedObservable ?? "", `${nodePath}.gates[${index}].expectedObservable`, variableNames, issues);
+    }
     if (entry.node.binding) {
       await validateBinding(context, entry.node.binding, `${nodePath}.binding`, issues);
     }
@@ -328,6 +332,10 @@ async function validateTemplate(
       }
       for (const [index, criterion] of node.acceptance.entries()) {
         validateNoPlaceholders(criterion, `$.nodes.${entry.node.key}.acceptance[${index}]`, issues);
+      }
+      for (const [index, gate] of node.gates.entries()) {
+        validateNoPlaceholders(gate.declaredCommand ?? "", `$.nodes.${entry.node.key}.gates[${index}].declaredCommand`, issues);
+        validateNoPlaceholders(gate.expectedObservable ?? "", `$.nodes.${entry.node.key}.gates[${index}].expectedObservable`, issues);
       }
     }
   }
@@ -397,6 +405,7 @@ function buildInstantiationPlan(template: WorkTemplate, providedVariables: Reado
     priority: entry.node.priority ?? "normal",
     labels: entry.node.labels.map((label) => substituteString(label, variables)),
     acceptance: entry.node.acceptance.map((criterion) => substituteString(criterion, variables)),
+    gates: entry.node.gates.map((gate) => substituteGate(gate, variables)),
     binding: entry.node.binding ? substituteBinding(entry.node.binding, variables) : undefined
   }));
   const runId = templateRunId(template, variables);
@@ -467,6 +476,7 @@ async function instantiateTemplate(
           `template-run:${plan.runId}`
         ],
         acceptanceCriteria: node.acceptance,
+        requiredCloseoutGates: node.gates,
         parentId,
         sourceRefs: [sourceRef],
         binding,
@@ -752,8 +762,17 @@ function substituteNode(node: TemplateNode, variables: ReadonlyMap<string, strin
     description: node.description ? substituteString(node.description, variables) : undefined,
     labels: node.labels.map((label) => substituteString(label, variables)),
     acceptance: node.acceptance.map((criterion) => substituteString(criterion, variables)),
+    gates: node.gates.map((gate) => substituteGate(gate, variables)),
     binding: node.binding ? substituteBinding(node.binding, variables) : undefined,
     children: node.children.map((child) => substituteNode(child, variables))
+  };
+}
+
+function substituteGate(gate: RequiredCloseoutGateInput, variables: ReadonlyMap<string, string>): RequiredCloseoutGateInput {
+  return {
+    ...gate,
+    declaredCommand: gate.declaredCommand ? substituteString(gate.declaredCommand, variables) : undefined,
+    expectedObservable: gate.expectedObservable ? substituteString(gate.expectedObservable, variables) : undefined
   };
 }
 

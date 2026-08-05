@@ -53,13 +53,14 @@ interface FinishGitResult {
 }
 
 interface FinishEvidencePayloadLike {
-  readonly evidence: {
+  readonly evidence?: {
     readonly kind: EvidenceKind;
     readonly summary: string;
     readonly outcome: EvidenceOutcome;
     readonly command?: string;
     readonly uri?: string;
   };
+  readonly evidenceId?: EvidenceId;
   readonly evidenceRefs: readonly EvidenceId[];
   readonly inlineEvidence?: string;
 }
@@ -408,7 +409,6 @@ async function agentFinishCommand(
 ): Promise<CommandResult> {
   const agentId = dependencies.agentIdFromArgs(args, context.actor.id);
   const workId = await dependencies.resolveWorkId(context, dependencies.requiredPositional(rest, 0, "work reference"), { agentId });
-  const verdict = dependencies.parseVerdict(flagValue(args, "verdict"));
   const close = hasFlag(args, "close");
   const release = hasFlag(args, "release");
 
@@ -418,6 +418,7 @@ async function agentFinishCommand(
   if (!close && !release) {
     throw new BorealError("BOREAL_INVALID_INPUT", "Agent finish requires --close or --release");
   }
+  const verdict = dependencies.parseVerdict(flagValue(args, "verdict"));
   if (close && verdict !== "passed") {
     throw new BorealError("BOREAL_INVALID_INPUT", "--close requires a passed verification verdict");
   }
@@ -439,7 +440,9 @@ async function agentFinishCommand(
   const finished = await dependencies.finishReservedWorkWithCompositeState(context, workId, {
     workId,
     agentId,
-    evidence: finishEvidence.evidence,
+    ...(finishEvidence.evidenceId
+      ? { evidenceId: finishEvidence.evidenceId }
+      : { evidence: finishEvidence.evidence as NonNullable<typeof finishEvidence.evidence> }),
     verification: {
       verdict,
       notes: flagValue(args, "notes")

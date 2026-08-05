@@ -428,7 +428,7 @@ function globalSearchView(work: WorkItemView): GlobalSearchView {
 function globalActivityView(): GlobalActivityView {
   return {
     items: [
-      activityItem("human", "cybertron", "work list"),
+      activityItem("human", "example-agent", "work list"),
       activityItem("agent", "codex", "agent start"),
       activityItem("system", "system", "sync refresh")
     ],

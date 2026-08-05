@@ -36,7 +36,21 @@ import {
   type StoreSectionName,
   type StoreSnapshot
 } from "./memory-store.js";
-import { ObjectReadIndex, objectIndexPath, type NodeSqliteModule } from "./object-index.js";
+import {
+  ObjectReadIndex,
+  objectIndexPath,
+  objectIndexWorkItemsFingerprint,
+  type NodeSqliteModule
+} from "./object-index.js";
+import {
+  createTransactionJournal,
+  logRecordFingerprint,
+  readTransactionJournals,
+  removeTransactionJournal,
+  transactionDirectory,
+  updateTransactionJournal,
+  type PendingLogRecord
+} from "./transaction-journal.js";
 import type { BorealReader, BorealStore, BorealWriter, WorkItemFilter } from "./ports.js";
 
 export interface ObjectDirBorealStoreOptions {
@@ -105,7 +119,7 @@ export class ObjectDirBorealStore implements BorealStore {
   }
 
   async read<T>(operation: (reader: BorealReader) => Promise<T> | T): Promise<T> {
-    return operation(this.createReader());
+    return withFileLock(this.lockDir, this.lockOptions, async () => operation(this.createReader()));
   }
 
   async write<T>(operation: (writer: BorealWriter) => Promise<T> | T): Promise<T> {
@@ -118,12 +132,13 @@ export class ObjectDirBorealStore implements BorealStore {
   }
 
   async snapshot(): Promise<StoreSnapshot> {
-    return this.loadSnapshot();
+    return withFileLock(this.lockDir, this.lockOptions, () => this.loadSnapshot());
   }
 
   private async writeOnce<T>(operation: (writer: BorealWriter) => Promise<T> | T): Promise<T> {
     await this.assertSafePaths();
     return withFileLock(this.lockDir, this.lockOptions, async () => {
+      await this.recoverTransactions();
       const snapshot = await this.loadSnapshot();
       const memory = new InMemoryBorealStore(snapshot);
       const baseHead = await this.#eventLog.head();
@@ -131,12 +146,31 @@ export class ObjectDirBorealStore implements BorealStore {
       const { result, changes } = await memory.writeWithChangeSet((writer) =>
         operation(withHeadSeqWriter(writer, snapshot, baseHeadSeq))
       );
+      const pendingLogRecords = logRecordsFromChanges(snapshot, changes);
+      const transaction = await createTransactionJournal({
+        rootDir: this.rootDir,
+        storeKind: "object",
+        changes,
+        pendingLogRecords
+      });
       await this.persistObjectChanges(changes);
-      for (const pending of logRecordsFromChanges(snapshot, changes)) {
-        await this.#eventLog.append(pending.kind, pending.record);
-      }
+      let journal = await updateTransactionJournal(transaction.path, transaction.journal, "state_written");
+      await this.appendMissingLogRecords(pendingLogRecords);
+      journal = await updateTransactionJournal(transaction.path, journal, "log_written");
       try {
-        await this.#index.applyChanges(changes, await this.#eventLog.head(), baseHead);
+        const nextHead = await this.#eventLog.head();
+        const baseFingerprint = await this.canonicalWorkItemsFingerprint();
+        const indexStatus = await this.#index.status(baseHead, baseFingerprint);
+        if (!indexStatus.exists) {
+          await this.#index.rebuild(await this.loadSnapshot(), nextHead);
+        } else {
+          await this.#index.applyChanges(
+            changes,
+            nextHead,
+            baseHead,
+            await this.canonicalWorkItemsFingerprint()
+          );
+        }
       } catch {
         // The SQLite index is a disposable cache. Durable object and event-log
         // writes have already committed, so invalidate it and let the next read
@@ -148,8 +182,39 @@ export class ObjectDirBorealStore implements BorealStore {
           // are already durable and must remain the command's source of truth.
         }
       }
+      await removeTransactionJournal(transaction.path);
       return result;
     });
+  }
+
+  private async recoverTransactions(): Promise<void> {
+    for (const { path, journal } of await readTransactionJournals(this.rootDir)) {
+      if (journal.storeKind !== "object") {
+        continue;
+      }
+      if (journal.changes) {
+        await this.persistObjectChanges(journal.changes);
+      }
+      await this.appendMissingLogRecords(journal.pendingLogRecords);
+      await removeTransactionJournal(path);
+    }
+  }
+
+  private async appendMissingLogRecords(records: readonly PendingLogRecord[]): Promise<void> {
+    if (records.length === 0) {
+      return;
+    }
+    const existing = new Set(
+      (await this.#eventLog.readAll()).map((entry) => `${entry.kind}:${logRecordFingerprint(entry.record)}`)
+    );
+    for (const pending of records) {
+      const key = `${pending.kind}:${logRecordFingerprint(pending.record)}`;
+      if (existing.has(key)) {
+        continue;
+      }
+      await this.#eventLog.append(pending.kind, pending.record);
+      existing.add(key);
+    }
   }
 
   private createReader(): BorealReader {
@@ -192,11 +257,12 @@ export class ObjectDirBorealStore implements BorealStore {
 
   private async listIndexedWorkItems(filter?: WorkItemFilter): Promise<readonly WorkItem[] | undefined> {
     const head = await this.#eventLog.head();
-    const indexed = await this.#index.listWorkItems(filter, head);
+    const workItemsFingerprint = await this.canonicalWorkItemsFingerprint();
+    const indexed = await this.#index.listWorkItems(filter, head, workItemsFingerprint);
     if (indexed !== undefined) {
       return indexed;
     }
-    const status = await this.#index.status(head);
+    const status = await this.#index.status(head, workItemsFingerprint);
     if (!status.available) {
       return undefined;
     }
@@ -204,6 +270,14 @@ export class ObjectDirBorealStore implements BorealStore {
     // status, list, and inspection commands physically read-only; explicit
     // search rebuilds and durable writes are responsible for cache updates.
     return undefined;
+  }
+
+  private async canonicalWorkItemsFingerprint(): Promise<string> {
+    const definition = SECTION_BY_NAME.get("workItems");
+    if (!definition) {
+      throw new Error("Object-store work-item section is not configured");
+    }
+    return objectIndexWorkItemsFingerprint(await this.loadObjectSection(definition));
   }
 
   private async loadSnapshot(): Promise<StoreSnapshot> {
@@ -285,6 +359,7 @@ export class ObjectDirBorealStore implements BorealStore {
     await assertRealPathInside(this.rootDir, this.eventLogFile);
     await assertRealPathInside(this.rootDir, this.objectIndexFile);
     await assertRealPathInside(this.rootDir, this.lockDir);
+    await assertRealPathInside(this.rootDir, transactionDirectory(this.rootDir));
   }
 }
 

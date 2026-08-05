@@ -6,6 +6,7 @@ Boreal setup has four root families:
 - Memory root: the `memory/` vault, either in-repo, child repo, or sibling repo.
 - Install root: the user-selected skill root preference, such as `.agents/skills`.
 - Target-specific skill roots: resolved per-agent install roots stored in project setup and registry state, such as `.agents/skills` for Codex and `.claude/skills` for Claude.
+- User-wide skill roots: explicit `--scope user` installs use `~/.agents/skills` for Codex/generic skills or `~/.claude/skills` for Claude and do not initialize or modify a project setup record.
 - Workflow asset root: the source of Boreal workflows, templates, and skill adapters. It resolves from `BOREAL_ASSET_ROOT`, the workspace root, or the installed/source checkout that contains `workflows/`, `templates/`, and `skills/`.
 
 ## Supported Layouts
@@ -30,4 +31,4 @@ Boreal setup has four root families:
 
 ## Install Direction
 
-`bwrk install` is the human setup surface. It should ask for project root, memory layout, Git preference, install root, target agents, and folder-scope, with child `memory/` plus a separate Git repository as the safe default. `bwrk install --yes` applies those defaults without prompting, and `bwrk init` remains the low-level idempotent runtime primitive.
+`bwrk install` is the human project setup surface. It should ask for project root, memory layout, Git preference, install root, target agents, and folder-scope, with child `memory/` plus a separate Git repository as the safe default. `bwrk install --yes` applies those defaults without prompting. `bwrk install codex|claude --scope user` is the separate machine-wide skill installation surface, and `bwrk init` remains the low-level idempotent runtime primitive.

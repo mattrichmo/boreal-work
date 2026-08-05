@@ -9,6 +9,7 @@ coverage/
 *.tsbuildinfo
 
 # Boreal local workspace binding and runtime artifacts
+.boreal/
 .boreal/project.json
 .boreal/mcp.json
 .boreal/runtime/
@@ -20,10 +21,31 @@ coverage/
 .boreal/results/
 .boreal/**/*.db
 .boreal/**/*.db-*
+
+# Local credentials and machine-specific configuration
+.env
+.env.*
+!.env.example
+.npmrc
+!.npmrc.example
+*.pem
+*.key
+*.p12
+*.pfx
+*.local
+vitest.config.ts.timestamp-*.mjs
 apps/console/.boreal/
 .agents/
 .claude/
 dump/
+
+# Private local audit artifacts; keep these out of the public distribution.
+docs/architecture/LIVE_E2E_RESULTS_HARDENING_*.md
+docs/architecture/NEXT_LOOP_DOGFOOD_TRANSCRIPT_*.md
+docs/architecture/AUDIT_*_ACCOUNTABILITY_*.md
+docs/architecture/FULL_AUDIT_REMEDIATION_CONTRACT.md
+docs/product/V1_REMAINDER_BASELINE.md
+docs/LOGGING_AUDIT_FIX_PLAN_*.md
 
 # Nested Boreal memory repository
 /memory/

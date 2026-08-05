@@ -17,6 +17,15 @@ import { normalizeFileLockOptions, withFileLock, type FileLockOptions } from "./
 import { InMemoryBorealStore, type StoreSnapshot } from "./memory-store.js";
 import type { BorealReader, BorealStore, BorealWriter } from "./ports.js";
 import { writeTextFileAtomic } from "./atomic-write.js";
+import {
+  createTransactionJournal,
+  logRecordFingerprint,
+  readTransactionJournals,
+  removeTransactionJournal,
+  transactionDirectory,
+  updateTransactionJournal,
+  type PendingLogRecord
+} from "./transaction-journal.js";
 
 export interface FileBorealStoreOptions {
   readonly rootDir: string;
@@ -58,9 +67,11 @@ export class FileBorealStore implements BorealStore {
   }
 
   async read<T>(operation: (reader: BorealReader) => Promise<T> | T): Promise<T> {
-    const loaded = await this.loadSnapshotWithLog();
-    const memory = new InMemoryBorealStore(loaded.snapshot);
-    return memory.read((reader) => operation(withHeadSeqReader(reader, async () => (await this.#eventLog.head()).seq)));
+    return withFileLock(this.lockDir, this.lockOptions, async () => {
+      const loaded = await this.loadSnapshotWithLog();
+      const memory = new InMemoryBorealStore(loaded.snapshot);
+      return memory.read((reader) => operation(withHeadSeqReader(reader, async () => (await this.#eventLog.head()).seq)));
+    });
   }
 
   async write<T>(operation: (writer: BorealWriter) => Promise<T> | T): Promise<T> {
@@ -73,24 +84,62 @@ export class FileBorealStore implements BorealStore {
   }
 
   async snapshot(): Promise<StoreSnapshot> {
-    return (await this.loadSnapshotWithLog()).snapshot;
+    return withFileLock(this.lockDir, this.lockOptions, async () => (await this.loadSnapshotWithLog()).snapshot);
   }
 
   private async writeOnce<T>(operation: (writer: BorealWriter) => Promise<T> | T): Promise<T> {
     await this.assertSafePaths();
     return withFileLock(this.lockDir, this.lockOptions, async () => {
+      await this.recoverTransactions();
       const loaded = await this.loadSnapshotWithLog();
       const memory = new InMemoryBorealStore(loaded.snapshot);
       const baseHeadSeq = (await this.#eventLog.head()).seq;
       const result = await memory.write((writer) => operation(withHeadSeqWriter(writer, loaded.snapshot, baseHeadSeq)));
       const snapshot = await memory.snapshot();
       const pendingLogRecords = pendingLogRecordsFromSnapshot(loaded.snapshot, snapshot, loaded.backfillLog);
+      const transaction = await createTransactionJournal({
+        rootDir: this.rootDir,
+        storeKind: "file",
+        snapshot,
+        pendingLogRecords
+      });
       await this.saveSnapshot(snapshot);
-      for (const pending of pendingLogRecords) {
-        await this.#eventLog.append(pending.kind, pending.record);
-      }
+      let journal = await updateTransactionJournal(transaction.path, transaction.journal, "state_written");
+      await this.appendMissingLogRecords(pendingLogRecords);
+      journal = await updateTransactionJournal(transaction.path, journal, "log_written");
+      await removeTransactionJournal(transaction.path);
       return result;
     });
+  }
+
+  private async recoverTransactions(): Promise<void> {
+    for (const { path, journal } of await readTransactionJournals(this.rootDir)) {
+      if (journal.storeKind !== "file") {
+        continue;
+      }
+      if (journal.snapshot) {
+        await this.saveSnapshot(journal.snapshot);
+      }
+      await this.appendMissingLogRecords(journal.pendingLogRecords);
+      await removeTransactionJournal(path);
+    }
+  }
+
+  private async appendMissingLogRecords(records: readonly PendingLogRecord[]): Promise<void> {
+    if (records.length === 0) {
+      return;
+    }
+    const existing = new Set(
+      (await this.#eventLog.readAll()).map((entry) => `${entry.kind}:${logRecordFingerprint(entry.record)}`)
+    );
+    for (const pending of records) {
+      const key = `${pending.kind}:${logRecordFingerprint(pending.record)}`;
+      if (existing.has(key)) {
+        continue;
+      }
+      await this.#eventLog.append(pending.kind, pending.record);
+      existing.add(key);
+    }
   }
 
   private async loadSnapshotWithLog(): Promise<{
@@ -145,6 +194,7 @@ export class FileBorealStore implements BorealStore {
     await assertRealPathInside(this.rootDir, this.stateFile);
     await assertRealPathInside(this.rootDir, this.eventLogFile);
     await assertRealPathInside(this.rootDir, this.lockDir);
+    await assertRealPathInside(this.rootDir, transactionDirectory(this.rootDir));
   }
 }
 

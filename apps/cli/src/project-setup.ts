@@ -13,6 +13,15 @@ import { BOREAL_WORK_BANNER } from "./branding.js";
 import { keyValueRows, section, withPromptSession, type CliSelectOption } from "./cli-ui.js";
 import type { CliContext } from "./context.js";
 import type { ProjectConfigBwrkPin } from "./repo-binary-pin.js";
+import {
+  PORTABLE_PROJECT_MANIFEST_PATH,
+  TOOLCHAIN_LOCK_PATH,
+  createPortableProjectManifest,
+  createStableProjectId,
+  createToolchainLock,
+  readPortableProjectManifestSync,
+  readToolchainLockSync
+} from "./toolchain.js";
 
 export const PROJECT_SETUP_SCHEMA_VERSION = "boreal.project-setup.v1";
 const VAULT_SCHEMA_VERSION = "boreal.vault.v1";
@@ -227,6 +236,8 @@ const MEMORY_GITIGNORE_PATTERNS = [
 
 const PROJECT_GITIGNORE_PATTERNS = [
   "# Boreal local workspace binding and runtime artifacts",
+  // Absolute roots and machine-local install selections stay here. The
+  // portable project identity and toolchain lock use separately tracked files.
   ".boreal/project.json",
   ".boreal/mcp.json",
   ".boreal/runtime/",
@@ -353,42 +364,29 @@ function installMemoryGitDefault(current: MemoryGitMode, memoryLayout: MemoryLay
   return options.some((option) => option.value === current) ? current : options[0]?.value ?? "separate";
 }
 
-const YES_NO_OPTIONS: readonly CliSelectOption<"yes" | "no">[] = [
-  {
-    value: "yes",
-    label: "Yes",
-    description: "Install skills under the folder where agent sessions are opened."
-  },
-  {
-    value: "no",
-    label: "No",
-    description: "Use the project-level skill install root."
-  }
-];
-
 const SETUP_MODE_OPTIONS: readonly CliSelectOption<"quick" | "custom">[] = [
   {
     value: "quick",
-    label: "Quick setup (recommended)",
-    description: "Memory in ./memory as its own Git repo (ignored by this repo), skills in .agents/skills. One question: which agents you use."
+    label: "Recommended project setup",
+    description: "Creates ./memory as its own Git repo and .agents/skills for this project. Only asks which agent tools you use."
   },
   {
     value: "custom",
-    label: "Custom setup",
-    description: "Choose memory location, Git tracking mode, and skill folders step by step."
+    label: "Advanced project setup",
+    description: "Choose the memory location, Git tracking mode, skill targets, and skill folder behavior."
   }
 ];
 
 const FOLDER_SCOPE_OPTIONS: readonly CliSelectOption<"yes" | "no">[] = [
   {
-    value: "no",
-    label: "No (recommended)",
-    description: "One project-level skill folder; agents find skills from anywhere in the repo."
+    value: "yes",
+    label: "Every folder in the project (recommended)",
+    description: "Keep project skills discoverable when agents open sessions from nested folders."
   },
   {
-    value: "yes",
-    label: "Yes",
-    description: "Duplicate skills under each folder agents open sessions in. Only for multi-root monorepos."
+    value: "no",
+    label: "One project folder",
+    description: "Keep one project-level skill folder and use it from the repository root."
   }
 ];
 
@@ -497,14 +495,14 @@ export async function promptProjectInstallInput(context: CliContext, args: Parse
       [
         `Setting up this project for Boreal work tracking and memory: ${context.workspaceRoot}`,
         "",
-        "This writes .boreal/ (tracker state), memory/ (project memory), and agent skills.",
-        "Quick setup uses the recommended layout and only asks which agents you use."
+        "This project setup writes .boreal/ (tracker state), memory/ (project memory), and project agent skills.",
+        "For skills shared across every repository, use: bwrk install codex --scope user"
       ].join("\n")
     );
-    const setupMode = await prompt.select("Setup", SETUP_MODE_OPTIONS, "quick");
+    const setupMode = await prompt.select("How much should Boreal configure?", SETUP_MODE_OPTIONS, "quick");
 
     if (setupMode === "quick") {
-      const skillTargets = await prompt.multiselect("Which agents will work in this repo?", SKILL_TARGET_OPTIONS, defaults.skillTargets);
+      const skillTargets = await prompt.multiselect("Which agent tools should this project support?", SKILL_TARGET_OPTIONS, defaults.skillTargets);
       const reviewed = {
         ...defaults,
         skillTargets,
@@ -518,12 +516,12 @@ export async function promptProjectInstallInput(context: CliContext, args: Parse
       return reviewed;
     }
 
-    const projectRoot = resolveUserPath(context.workspaceRoot, await prompt.text("Project root", defaults.projectRoot));
+    const projectRoot = resolveUserPath(context.workspaceRoot, await prompt.text("Project root (Enter to keep current)", defaults.projectRoot));
     const memoryLayout = await prompt.select("Where should project memory live?", INSTALL_MEMORY_LAYOUT_OPTIONS, defaults.memoryLayout);
     const memoryRootDefault = flagValue(args, "memory-root")
       ? defaults.memoryRoot
       : defaultMemoryRoot(projectRoot, memoryLayout);
-    const memoryRoot = resolveUserPath(projectRoot, await prompt.text("Memory folder", memoryRootDefault));
+    const memoryRoot = resolveUserPath(projectRoot, await prompt.text("Project memory folder", memoryRootDefault));
     const memoryGitMode = await prompt.select(
       "How should memory be tracked in Git?",
       installMemoryGitOptions(memoryLayout),
@@ -533,10 +531,10 @@ export async function promptProjectInstallInput(context: CliContext, args: Parse
       memoryGitMode === "submodule"
         ? await prompt.text("Memory remote URL (required for submodule)", defaults.memoryRemote ?? "")
         : defaults.memoryRemote;
-    const skillTargets = await prompt.multiselect("Which agents will work in this repo?", SKILL_TARGET_OPTIONS, defaults.skillTargets);
-    const installRoot = resolveUserPath(projectRoot, await prompt.text("Folder for installed agent skills", defaults.installRoot));
+    const skillTargets = await prompt.multiselect("Which agent tools should this project support?", SKILL_TARGET_OPTIONS, defaults.skillTargets);
+    const installRoot = resolveUserPath(projectRoot, await prompt.text("Project skill folder", defaults.installRoot));
     const skillInstallRoots = skillTargets.map((target) => skillInstallRootConfig(projectRoot, installRoot, target));
-    const folderScoped = (await prompt.select("Scope skills to the folder agents open?", FOLDER_SCOPE_OPTIONS, defaults.folderScoped ? "yes" : "no")) === "yes";
+    const folderScoped = (await prompt.select("Where should project skills be visible?", FOLDER_SCOPE_OPTIONS, defaults.folderScoped ? "yes" : "no")) === "yes";
     const reviewed = { projectRoot, memoryRoot, memoryLayout, memoryGitMode, memoryRemote, installRoot, skillInstallRoots, skillTargets, folderScoped };
     prompt.writeIntro("About to write", formatProjectInstallReview(reviewed));
     const confirmed = await prompt.select("Apply this setup?", INSTALL_APPLY_OPTIONS, "yes");
@@ -561,6 +559,16 @@ export async function readProjectSetupConfigFile(projectRoot: string): Promise<P
 }
 
 export async function readProjectStorage(projectRoot: string): Promise<ProjectStorageKind | undefined> {
+  try {
+    const portable = readPortableProjectManifestSync(projectRoot);
+    if (portable) {
+      return portable.storage;
+    }
+  } catch {
+    // Preserve read/migration compatibility with legacy local configuration.
+    // Toolchain inspection reports the malformed portable manifest and blocks
+    // ordinary canonical writes before dispatch.
+  }
   const configPath = join(projectRoot, ".boreal", "project.json");
   if (!existsSync(configPath)) {
     return undefined;
@@ -600,6 +608,7 @@ export async function writeProjectStorageMarker(projectRoot: string, storage: Pr
     };
   }
   await writeTextFileAtomic(configPath, `${JSON.stringify(document, null, 2)}\n`);
+  await ensurePortableProjectContract(projectRoot, storage);
   return { path: configPath, storage };
 }
 
@@ -773,40 +782,43 @@ async function promptProjectSetupInput(context: CliContext, args: ParsedArgs): P
   }
   const defaults = projectSetupInputFromArgs(context, args);
   return withPromptSession({ input: process.stdin, output: process.stdout }, async (prompt) => {
-    prompt.writeIntro(BOREAL_WORK_BANNER, "Boreal project setup\nUse arrow keys to choose options. Press Enter to accept.");
+    prompt.writeIntro(
+      BOREAL_WORK_BANNER,
+      "Advanced Boreal project setup\nMost users should run `bwrk install`. Use arrow keys to choose options; press Enter to accept."
+    );
     const projectRoot = resolveUserPath(
       context.workspaceRoot,
-      await prompt.text("Project root", defaults.projectRoot)
+      await prompt.text("Project root (Enter to keep current)", defaults.projectRoot)
     );
     const memoryLayout = await prompt.select(
-      "Memory layout",
+      "Project memory layout",
       MEMORY_LAYOUT_OPTIONS,
       defaults.memoryLayout
     );
     const memoryRootDefault = flagValue(args, "memory-root")
       ? defaults.memoryRoot
       : defaultMemoryRoot(projectRoot, memoryLayout);
-    const memoryRoot = resolveUserPath(projectRoot, await prompt.text("Memory root", memoryRootDefault));
+    const memoryRoot = resolveUserPath(projectRoot, await prompt.text("Project memory folder", memoryRootDefault));
     const memoryGitMode = await prompt.select(
-      "Memory git mode",
+      "How should project memory be tracked in Git?",
       MEMORY_GIT_OPTIONS,
       defaults.memoryGitMode
     );
     const memoryRemote =
       memoryGitMode === "submodule"
-        ? await prompt.text("Memory remote URL", defaults.memoryRemote ?? "")
+        ? await prompt.text("Project memory remote URL", defaults.memoryRemote ?? "")
         : defaults.memoryRemote;
-    const installRoot = resolveUserPath(projectRoot, await prompt.text("Skill install root", defaults.installRoot));
+    const installRoot = resolveUserPath(projectRoot, await prompt.text("Project skill folder", defaults.installRoot));
     const skillTargets = await prompt.multiselect(
-      "Skill targets",
+      "Which agent tools should this project support?",
       SKILL_TARGET_OPTIONS,
       defaults.skillTargets
     );
     const skillInstallRoots = skillTargets.map((target) => skillInstallRootConfig(projectRoot, installRoot, target));
-    const folderScoped = (await prompt.select("Folder scoped skills", YES_NO_OPTIONS, defaults.folderScoped ? "yes" : "no")) === "yes";
+    const folderScoped = (await prompt.select("Where should project skills be visible?", FOLDER_SCOPE_OPTIONS, defaults.folderScoped ? "yes" : "no")) === "yes";
     const reviewed = { projectRoot, memoryRoot, memoryLayout, memoryGitMode, memoryRemote, installRoot, skillInstallRoots, skillTargets, folderScoped };
     prompt.writeIntro("Review project setup", formatProjectSetupReview(reviewed));
-    const confirmed = await prompt.select("Write setup files", YES_NO_OPTIONS, "yes");
+    const confirmed = await prompt.select("Apply project setup?", INSTALL_APPLY_OPTIONS, "yes");
     if (confirmed !== "yes") {
       throw new BorealError("BOREAL_INVALID_INPUT", "Project setup cancelled", { reason: "cancelled" });
     }
@@ -827,7 +839,7 @@ export function formatProjectSetupReview(input: ProjectSetupInput): string {
         { key: "installRoot", value: input.installRoot },
         { key: "skillInstallRoots", value: input.skillInstallRoots.map((entry) => `${entry.target}=${entry.skillRoot}`).join(", ") },
         { key: "skillTargets", value: input.skillTargets.join(", ") },
-        { key: "folderScoped", value: input.folderScoped }
+        { key: "skillVisibility", value: input.folderScoped ? "every folder in project" : "one project folder" }
       ]).split("\n")
     ),
     section("Directories", MEMORY_DIRECTORIES.map((entry) => `ensure ${relative(input.projectRoot, join(input.memoryRoot, entry))}`)),
@@ -843,7 +855,8 @@ export function formatProjectInstallReview(input: ProjectSetupInput): string {
       [
         "project stays the app repository",
         "memory gets its own Git repository",
-        "project Git ignores local memory and generated agent surfaces"
+        "project Git ignores local memory and generated agent surfaces",
+        "this setup changes only the selected project"
       ]
     ),
     section(
@@ -857,12 +870,12 @@ export function formatProjectInstallReview(input: ProjectSetupInput): string {
     ),
     section(
       "Choices",
-      keyValueRows([
-        { key: "memoryLayout", value: input.memoryLayout },
-        { key: "memoryGit", value: input.memoryGitMode },
-        { key: "skillTargets", value: input.skillTargets.join(", ") },
-        { key: "folderScoped", value: input.folderScoped }
-      ]).split("\n")
+      [
+        `memoryLayout  ${input.memoryLayout}`,
+        `memoryGit  ${input.memoryGitMode}`,
+        `skillTargets  ${input.skillTargets.join(", ")}`,
+        `skillVisibility  ${input.folderScoped ? "every folder in project" : "one project folder"}`
+      ]
     ),
     section("Git effects", projectSetupGitReviewRows(input))
   ].join("\n\n");
@@ -938,7 +951,24 @@ export async function applyProjectSetup(input: ProjectSetupInput): Promise<Proje
   const gitSetup = await applyGitSetup(input, memoryGitignore.updated);
 
   await writeTextFileAtomic(configPath, `${JSON.stringify(config, null, 2)}\n`);
+  await ensurePortableProjectContract(input.projectRoot, config.storage ?? "objects-v1");
   return { configured: true, configPath, config, createdDirectories, existingDirectories, createdFiles, existingFiles, gitSetup };
+}
+
+async function ensurePortableProjectContract(projectRoot: string, storage: ProjectStorageKind): Promise<void> {
+  const existing = readPortableProjectManifestSync(projectRoot);
+  const defaultLock = readToolchainLockSync(projectRoot);
+  const manifest = createPortableProjectManifest(existing?.projectId ?? defaultLock?.projectId ?? createStableProjectId(), storage);
+  const manifestPath = join(projectRoot, PORTABLE_PROJECT_MANIFEST_PATH);
+  await writeTextFileAtomic(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
+
+  const existingLock = readToolchainLockSync(projectRoot, manifest);
+  if (existingLock) {
+    return;
+  }
+  const lockPath = join(projectRoot, TOOLCHAIN_LOCK_PATH);
+  const lock = createToolchainLock(manifest.projectId);
+  await writeTextFileAtomic(lockPath, `${JSON.stringify(lock, null, 2)}\n`);
 }
 
 export async function validateProjectSetupInput(input: ProjectSetupInput): Promise<void> {

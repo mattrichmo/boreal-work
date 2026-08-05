@@ -9,7 +9,7 @@ import { expandGlobalNamespace, parseArgs, wantsJsonOutput } from "./args.js";
 import { aboutText } from "./branding.js";
 import { runCommand } from "./commands.js";
 import { delegateToRepoPinnedBwrk, stripNoDelegateArgv } from "./delegation.js";
-import { formatRecord } from "./output.js";
+import { cliErrorMetadata, formatRecord } from "./output.js";
 import type { CliOutput } from "./output.js";
 import { formatVersionProbe, getVersionInfo } from "./version.js";
 
@@ -199,6 +199,7 @@ function formatError(error: unknown): string {
 }
 
 function errorPayload(error: unknown): Record<string, unknown> {
+  const metadata = cliErrorMetadata(error);
   if (error instanceof BorealError) {
     const classification = classifyBorealError(error.code, error.details);
     return {
@@ -209,7 +210,8 @@ function errorPayload(error: unknown): Record<string, unknown> {
       retryable: classification.retryable,
       recovery: classification.recovery,
       details: error.details,
-      gaps: error.gaps
+      gaps: error.gaps,
+      ...(metadata ?? {})
     };
   }
   if (error instanceof Error) {
@@ -219,7 +221,8 @@ function errorPayload(error: unknown): Record<string, unknown> {
       code: "BOREAL_UNEXPECTED",
       message: error.message,
       retryable: false,
-      recovery: classifyBorealError("BOREAL_INVARIANT").recovery
+      recovery: classifyBorealError("BOREAL_INVARIANT").recovery,
+      ...(metadata ?? {})
     };
   }
   return {
@@ -228,6 +231,7 @@ function errorPayload(error: unknown): Record<string, unknown> {
     code: "BOREAL_UNEXPECTED",
     message: String(error),
     retryable: false,
-    recovery: classifyBorealError("BOREAL_INVARIANT").recovery
+    recovery: classifyBorealError("BOREAL_INVARIANT").recovery,
+    ...(metadata ?? {})
   };
 }

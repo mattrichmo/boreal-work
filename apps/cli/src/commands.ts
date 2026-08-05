@@ -1,6 +1,7 @@
 import { existsSync } from "node:fs";
 import { mkdir, readFile, readdir, rm, stat } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
+import { hostname } from "node:os";
 
 import {
   AGENT_DIRECTIVE_SUBJECT_TYPES,
@@ -29,6 +30,7 @@ import {
   normalizeSearchQuery,
   nowIso,
   parseBorealReferenceUri,
+  parseDeclaredCommand,
   randomId,
   resolveBorealReferenceUri,
   runBoundedProcess,
@@ -127,6 +129,7 @@ import type { SearchResult } from "@boreal/search";
 import {
   FileBorealStore,
   ObjectDirBorealStore,
+  objectIndexPath,
   writeTextFileAtomic,
   type BorealReader,
   type BorealStore,
@@ -148,7 +151,7 @@ import { daemonCommand, type DaemonCommandDependencies } from "./commands/daemon
 import { bootstrapGlobalFirstRunIfNeeded, dashboardCommand, globalCommand, linkCommand, unlinkCommand } from "./commands/dashboard.js";
 import { evidenceCommand } from "./commands/evidence.js";
 import { healthCommand, type HealthCommandDependencies } from "./commands/health.js";
-import { initCommand, installCommand, installRootFromArgs } from "./commands/install.js";
+import { initCommand, installCommand, installRootFromArgs, skillInstallScopeFromArgs } from "./commands/install.js";
 import { updateCommand } from "./commands/update.js";
 import { knowledgeCommand } from "./commands/knowledge.js";
 import { memoryCommand, resolveWikiPageIds } from "./commands/memory.js";
@@ -199,7 +202,17 @@ import { isMissingGit, runGit } from "./git-exec.js";
 import { inspectGitWorktree } from "./git-worktree.js";
 import { buildExportDocument } from "./import-export.js";
 import type { RuntimeLockInspectionResult, RuntimeLockState } from "./locks.js";
-import { createResultSpoolingOutput, formatRecord, table, type AgentDirectiveOutput, type CliOutput } from "./output.js";
+import {
+  attachCliErrorMetadata,
+  createResultSpoolingOutput,
+  formatRecord,
+  table,
+  type AgentDirectiveOutput,
+  type CliEnvelopeMetadata,
+  type CliOperationPhase,
+  type CliOutput,
+  type CliStateOutcome
+} from "./output.js";
 import { readProjectSetupConfig, readProjectStorage, type ProjectStorageKind } from "./project-setup.js";
 import { listProjectRegistry } from "./registry.js";
 import { writeProjectRollup, type ProjectRollupWriteOptions } from "./rollup.js";
@@ -570,10 +583,23 @@ interface NextCommandResult {
   };
   readonly subject?: NextCommandDirective["subject"];
   readonly directive: NextCommandDirective | null;
+  /** @deprecated Use executableAction.argv for execution. */
   readonly command?: string;
+  readonly displayCommand?: string;
+  readonly executableAction?: NextExecutableAction;
   readonly why: string;
   readonly selectionKey?: string;
   readonly bundleMeta?: AgentDirectiveBundle["meta"];
+}
+
+interface NextExecutableAction {
+  readonly source: "agent_directive_registry" | "boreal_runtime";
+  readonly trust: "trusted";
+  readonly runner: "boreal_cli" | "bounded_declared_gate";
+  readonly registryId?: string;
+  readonly argv: readonly string[];
+  readonly cwd: string;
+  readonly shell: false;
 }
 
 interface AgentGuideStep {
@@ -596,6 +622,17 @@ interface AgentGuide {
     readonly release: string;
     readonly doctor: string;
     readonly repair: string;
+  };
+  readonly validation?: {
+    readonly gateId: string;
+    readonly displayCommand: string;
+    readonly executableAction: {
+      readonly source: "agent_directive_registry";
+      readonly trust: "trusted";
+      readonly runner: "bounded_declared_gate";
+      readonly argv: readonly string[];
+      readonly shell: false;
+    };
   };
   readonly loop: readonly AgentGuideStep[];
   readonly recovery: readonly AgentGuideStep[];
@@ -743,6 +780,17 @@ interface ContextPackFreshnessRow {
   readonly generatedAt?: IsoTimestamp;
 }
 
+interface CliOperationLifecycle {
+  readonly operationId: OperationId;
+  readonly startedAt: IsoTimestamp;
+  sessionId: string;
+  phase: CliOperationPhase;
+  finishedAt?: IsoTimestamp;
+  stateOutcome: CliStateOutcome;
+  diagnosticId?: string;
+  diagnosticIds?: readonly string[];
+}
+
 interface ReservationLifecycleResult {
   readonly work: WorkItem;
   readonly reservation: AgentReservation;
@@ -783,52 +831,110 @@ export async function runCommand(args: ParsedArgs, output: CliOutput, cwd: strin
     return { exitCode: 0 };
   }
 
-  await bootstrapGlobalFirstRunIfNeeded(args, output, json, cwd);
-
   const shouldLogOperation = shouldRecordOperation(definition);
   const operationId = shouldLogOperation ? randomId<OperationId>("operation") : undefined;
-  const context = await createCliContext(args, cwd, {
-    operationId,
-    sessionId: operationSessionIdFromArgs(args)
-  });
-  const [group, action, ...rest] = args.command;
-  if (definition.requiresWorkspace) {
-    assertInitialized(context);
-  }
   const startedAt = shouldLogOperation ? nowIso() : undefined;
-  const eventIdsBefore = shouldLogOperation ? await listEventIdsForOperation(context, definition) : new Set<EventId>();
-  const spoolingOutput = json
-    ? createResultSpoolingOutput(output, {
-        workspaceRoot: context.workspaceRoot,
-        command: commandPath(definition),
-        maxResultSizeChars: commandBehavior(definition).maxResultSizeChars,
-        jsonOutputProfile: briefJson ? "brief" : "full",
-        readOnly: commandBehavior(definition).readOnly,
-        jsonEnvelopeMetadata: () => ledgerEnvelopeMetadata(context)
-      })
+  const lifecycle: CliOperationLifecycle | undefined = operationId && startedAt
+    ? {
+        operationId,
+        startedAt,
+        sessionId: anticipatedOperationSessionId(args),
+        phase: "preflight" as const,
+        stateOutcome: "unknown" as const
+      }
     : undefined;
+  let context: CliContext | undefined;
+  let eventIdsBefore: ReadonlySet<EventId> = new Set<EventId>();
+  let spoolingOutput: ReturnType<typeof createResultSpoolingOutput> | undefined;
+  let bufferedJsonOutput = "";
   const commandOutput = json
-    ? outputWithInferredCliResult(spoolingOutput ?? output, definition, context.workspaceRoot)
+    ? undefined
     : output;
 
   let result: CommandResult | undefined;
   let thrown: unknown;
+  let operationStartPersisted = false;
   try {
+    await bootstrapGlobalFirstRunIfNeeded(args, output, json, cwd);
+    context = await createCliContext(operationContextArgs(args, definition), cwd, {
+      operationId,
+      sessionId: operationSessionIdFromArgs(args),
+      initializeGlobal: !usesImplicitMachineLedger(definition, args)
+    });
+    const commandContext = context;
+    if (lifecycle) {
+      lifecycle.sessionId = commandContext.sessionId;
+    }
+    const [group, action, ...rest] = args.command;
+    if (definition.requiresWorkspace) {
+      assertInitialized(context);
+    }
+    eventIdsBefore = shouldLogOperation ? await listEventIdsForOperation(context, definition) : new Set<EventId>();
+    if (json) {
+      const bufferedOutput: CliOutput = {
+        write(text) {
+          bufferedJsonOutput += text;
+        },
+        error(text) {
+          output.error(text);
+        }
+      };
+      spoolingOutput = createResultSpoolingOutput(outputWithInferredCliResult(bufferedOutput, definition, commandContext.workspaceRoot), {
+        workspaceRoot: commandContext.workspaceRoot,
+        command: commandPath(definition),
+        maxResultSizeChars: commandBehavior(definition).maxResultSizeChars,
+        jsonOutputProfile: briefJson ? "brief" : "full",
+        readOnly: commandBehavior(definition).readOnly,
+        jsonEnvelopeMetadata: () => ledgerEnvelopeMetadata(commandContext).then((metadata) => ({
+          ...metadata,
+          ...(lifecycle ? cliEnvelopeMetadata(lifecycle) : {})
+        }))
+      });
+    }
+    if (operationId && startedAt && lifecycle) {
+      try {
+        await recordCliOperation(
+          commandContext,
+          operationId,
+          definition,
+          args,
+          startedAt,
+          eventIdsBefore,
+          undefined,
+          undefined,
+          lifecycle,
+          "start"
+        );
+        operationStartPersisted = true;
+      } catch (error) {
+        if (!isRecoveryCommandDefinition(definition)) {
+          throw error;
+        }
+        applyErrorToLifecycle(lifecycle, error);
+      }
+    }
+    const executableOutput = json ? spoolingOutput : commandOutput;
+    if (!executableOutput) {
+      throw new BorealError("BOREAL_INVARIANT", "CLI output was not initialized");
+    }
+    if (lifecycle) {
+      lifecycle.phase = "execution";
+    }
     switch (group) {
       case "init":
-        result = await initCommand(context, args, commandOutput, json);
+        result = await initCommand(context, args, executableOutput, json);
         break;
       case "work":
-        result = await workGroupCommand("work", action, rest, context, args, commandOutput, json, workCommandDependencies());
+        result = await workGroupCommand("work", action, rest, context, args, executableOutput, json, workCommandDependencies());
         break;
       case "directives":
-        result = await directiveAcknowledgementCommand(action, rest, context, args, commandOutput, json);
+        result = await directiveAcknowledgementCommand(action, rest, context, args, executableOutput, json);
         break;
       case "dep":
-        result = await workGroupCommand("dep", action, rest, context, args, commandOutput, json, workCommandDependencies());
+        result = await workGroupCommand("dep", action, rest, context, args, executableOutput, json, workCommandDependencies());
         break;
       case "evidence":
-        result = await evidenceCommand(action, rest, context, args, commandOutput, json, {
+        result = await evidenceCommand(action, rest, context, args, executableOutput, json, {
           requiredPositional,
           resolveWorkId,
           parseEvidenceKind,
@@ -838,14 +944,14 @@ export async function runCommand(args: ParsedArgs, output: CliOutput, cwd: strin
         });
         break;
       case "summary":
-        result = await summaryCommand(action, rest, context, args, commandOutput, json);
+        result = await summaryCommand(action, rest, context, args, executableOutput, json);
         break;
       case "source":
       case "claim":
       case "decision":
       case "context":
       case "search":
-        result = await knowledgeCommand(group, action, rest, context, args, commandOutput, json, {
+        result = await knowledgeCommand(group, action, rest, context, args, executableOutput, json, {
           defaultListLimit: DEFAULT_LIST_LIMIT,
           maxSearchLimit: MAX_SEARCH_LIMIT,
           parseLimit,
@@ -866,83 +972,83 @@ export async function runCommand(args: ParsedArgs, output: CliOutput, cwd: strin
         });
         break;
       case "rollup":
-        result = await rollupCommand(action, context, args, commandOutput, json);
+        result = await rollupCommand(action, context, args, executableOutput, json);
         break;
       case "reservation":
-        result = await workGroupCommand("reservation", action, rest, context, args, commandOutput, json, workCommandDependencies());
+        result = await workGroupCommand("reservation", action, rest, context, args, executableOutput, json, workCommandDependencies());
         break;
       case "heartbeat":
-        result = await heartbeatCommand(action, rest, context, args, commandOutput, json);
+        result = await heartbeatCommand(action, rest, context, args, executableOutput, json);
         break;
       case "prime":
-        result = await protocolCommand("prime", action, context, args, commandOutput, json, protocolCommandDependencies());
+        result = await protocolCommand("prime", action, context, args, executableOutput, json, protocolCommandDependencies());
         break;
       case "next":
-        result = await protocolCommand("next", action, context, args, commandOutput, json, protocolCommandDependencies());
+        result = await protocolCommand("next", action, context, args, executableOutput, json, protocolCommandDependencies());
         break;
       case "agent":
-        result = await agentCommand(action, rest, context, args, commandOutput, json, agentCommandDependencies());
+        result = await agentCommand(action, rest, context, args, executableOutput, json, agentCommandDependencies());
         break;
       case "session":
-        result = await protocolCommand("session", action, context, args, commandOutput, json, protocolCommandDependencies());
+        result = await protocolCommand("session", action, context, args, executableOutput, json, protocolCommandDependencies());
         break;
       case "operation":
-        result = await operationCommand(action, rest, context, args, commandOutput, json, operationCommandDependencies());
+        result = await operationCommand(action, rest, context, args, executableOutput, json, operationCommandDependencies());
         break;
       case "workflows":
-        result = await workflowsCommand(action, rest, context, args, commandOutput, json, workflowsCommandDependencies());
+        result = await workflowsCommand(action, rest, context, args, executableOutput, json, workflowsCommandDependencies());
         break;
       case "resolve":
-        result = await resolveCommand(action ? [action, ...rest] : rest, args, commandOutput, json);
+        result = await resolveCommand(action ? [action, ...rest] : rest, args, executableOutput, json);
         break;
       case "template":
-        result = await templateCommand(action, rest, context, args, commandOutput, json);
+        result = await templateCommand(action, rest, context, args, executableOutput, json);
         break;
       case "start":
-        result = await agentCommand("start", rest, context, args, commandOutput, json, agentCommandDependencies());
+        result = await agentCommand("start", rest, context, args, executableOutput, json, agentCommandDependencies());
         break;
       case "done":
-        result = await doneAliasCommand(context, args, commandOutput, json);
+        result = await doneAliasCommand(context, args, executableOutput, json);
         break;
       case "pause":
-        result = await pauseAliasCommand(context, args, commandOutput, json);
+        result = await pauseAliasCommand(context, args, executableOutput, json);
         break;
       case "status":
-        result = await protocolCommand("status", action, context, args, commandOutput, json, protocolCommandDependencies());
+        result = await protocolCommand("status", action, context, args, executableOutput, json, protocolCommandDependencies());
         break;
       case "install":
-        result = await installCommand(action, context, args, commandOutput, json);
+        result = await installCommand(action, context, args, executableOutput, json);
         break;
       case "update":
-        result = await updateCommand(action, context, args, commandOutput, json);
+        result = await updateCommand(action, context, args, executableOutput, json);
         break;
       case "registry":
-        result = await registryCommand(action, rest, context, args, commandOutput, json, registryCommandDependencies());
+        result = await registryCommand(action, rest, context, args, executableOutput, json, registryCommandDependencies());
         break;
       case "dashboard":
-        result = await dashboardCommand(action, context, args, commandOutput, json);
+        result = await dashboardCommand(action, context, args, executableOutput, json);
         break;
       case "global":
-        result = await globalCommand(action, rest, context, args, commandOutput, json);
+        result = await globalCommand(action, rest, context, args, executableOutput, json);
         break;
       case "link":
-        result = await linkCommand(action, context, args, commandOutput, json);
+        result = await linkCommand(action, context, args, executableOutput, json);
         break;
       case "unlink":
-        result = await unlinkCommand(action, args, commandOutput, json);
+        result = await unlinkCommand(action, args, executableOutput, json);
         break;
       case "daemon":
-        result = await daemonCommand(action, context, commandOutput, json, daemonCommandDependencies());
+        result = await daemonCommand(action, context, executableOutput, json, daemonCommandDependencies());
         break;
       case "sprint":
-        result = await sprintCommand(action, rest, context, args, commandOutput, json, sprintCommandDependencies());
+        result = await sprintCommand(action, rest, context, args, executableOutput, json, sprintCommandDependencies());
         break;
       case "export":
       case "import":
       case "storage":
       case "ledger":
       case "snapshot":
-        result = await storageCommand(group, action, rest, context, args, commandOutput, json, {
+        result = await storageCommand(group, action, rest, context, args, executableOutput, json, {
           requiredPositional,
           asWorkId,
           asEvidenceId,
@@ -956,27 +1062,27 @@ export async function runCommand(args: ParsedArgs, output: CliOutput, cwd: strin
         });
         break;
       case "vault":
-        result = await vaultCommand(action, context, commandOutput, json);
+        result = await vaultCommand(action, context, executableOutput, json);
         break;
       case "raw":
       case "wiki":
       case "duplicate":
       case "merge":
       case "compact":
-        result = await memoryCommand(group, action, rest, context, args, commandOutput, json, {
+        result = await memoryCommand(group, action, rest, context, args, executableOutput, json, {
           defaultListLimit: DEFAULT_LIST_LIMIT,
           parseLimit,
           requiredPositional
         });
         break;
       case "capture":
-        result = await captureCommand(action, rest, context, args, commandOutput, json, {
+        result = await captureCommand(action, rest, context, args, executableOutput, json, {
           defaultListLimit: DEFAULT_LIST_LIMIT,
           parseLimit
         });
         break;
       case "sync":
-        result = await syncCommand(action, context, args, commandOutput, json, {
+        result = await syncCommand(action, context, args, executableOutput, json, {
           dashboardView,
           formatRecordWithAgentDirectives: ({ context: syncContext, args: syncArgs, result: syncResult, json: syncJson, options }) =>
             formatRecordWithAgentDirectives(syncContext, syncArgs, syncResult, syncJson, options)
@@ -987,49 +1093,99 @@ export async function runCommand(args: ParsedArgs, output: CliOutput, cwd: strin
       case "docs":
       case "gate":
       case "lock":
-        result = await healthCommand(group, action, context, args, commandOutput, json, healthCommandDependencies());
+        result = await healthCommand(group, action, context, args, executableOutput, json, healthCommandDependencies());
         break;
       default:
         throw new BorealError("BOREAL_INVALID_INPUT", `Unknown command: ${group ?? ""}`);
+    }
+    if (context && commandChangesStorageBackend(definition)) {
+      context = await createCliContext(operationContextArgs(args, definition), cwd, {
+        operationId,
+        sessionId: operationSessionIdFromArgs(args),
+        initializeGlobal: !usesImplicitMachineLedger(definition, args)
+      });
     }
   } catch (error) {
     thrown = error;
   }
   if (!thrown && result && shouldRefreshGeneratedArtifactsAfterMutation(definition)) {
+    if (lifecycle) {
+      lifecycle.phase = "artifact_refresh";
+    }
     try {
-      await refreshGeneratedArtifactsInline(context);
+      await refreshGeneratedArtifactsInline(context as CliContext);
     } catch (error) {
       thrown = error;
     }
   }
-  if (operationId && startedAt) {
-    try {
-      await recordCliOperation(context, operationId, definition, args, startedAt, eventIdsBefore, result, thrown);
-    } catch (operationError) {
-      if (thrown) {
-        throw thrown;
-      }
-      if (!json) {
-        const message = operationError instanceof Error ? operationError.message : String(operationError);
-        output.error(`warning: failed to record operation: ${message}\n`);
-      }
-    }
-  }
   if (!thrown && result?.exitCode === 0 && shouldWriteProjectRollupAfterCommand(definition)) {
+    if (lifecycle) {
+      lifecycle.phase = "rollup";
+    }
     try {
-      await writeProjectRollup(context, projectRollupWriteOptionsForCommand(definition, result));
+      await writeProjectRollup(context as CliContext, projectRollupWriteOptionsForCommand(definition, result));
     } catch (rollupError) {
       thrown = rollupError;
     }
   }
-  if (thrown) {
-    throw thrown;
+  if (!thrown && !result) {
+    thrown = new BorealError("BOREAL_INVARIANT", "Command did not return a result");
   }
-  await spoolingOutput?.flush();
+  if (!thrown && result) {
+    if (lifecycle) {
+      lifecycle.phase = "completed";
+      lifecycle.stateOutcome = stateOutcomeForResult(commandBehavior(definition), result);
+      lifecycle.finishedAt = nowIso();
+    }
+    if (spoolingOutput) {
+      try {
+        await spoolingOutput.flush();
+      } catch (error) {
+        thrown = error;
+        if (lifecycle) {
+          lifecycle.phase = "result";
+        }
+      }
+    }
+  }
+  if (lifecycle && thrown) {
+    applyErrorToLifecycle(lifecycle, thrown);
+    lifecycle.stateOutcome = stateOutcomeForFailure(commandBehavior(definition), lifecycle.phase, result);
+    lifecycle.finishedAt = nowIso();
+  }
+  if (operationId && startedAt && context && operationStartPersisted) {
+    try {
+      await recordCliOperation(context, operationId, definition, args, startedAt, eventIdsBefore, result, thrown, lifecycle);
+    } catch (operationError) {
+      if (!thrown) {
+        if (lifecycle) {
+          lifecycle.phase = "finalization";
+          lifecycle.stateOutcome = stateOutcomeForFailure(commandBehavior(definition), lifecycle.phase, result);
+          lifecycle.finishedAt = nowIso();
+          applyErrorToLifecycle(lifecycle, operationError);
+        }
+        thrown = new BorealError("BOREAL_STORAGE_ERROR", "Failed to finalize CLI operation", {
+          operationId,
+          message: safeErrorMessage(operationError),
+          diagnosticId: lifecycle?.diagnosticId
+        });
+      }
+    }
+  }
+  if (thrown) {
+    throw attachCliErrorMetadata(thrown, lifecycle ? cliEnvelopeMetadata(lifecycle) : {});
+  }
   if (!result) {
     throw new BorealError("BOREAL_INVARIANT", "Command did not return a result");
   }
+  if (bufferedJsonOutput) {
+    output.write(bufferedJsonOutput);
+  }
   return result;
+}
+
+function isRecoveryCommandDefinition(definition: CommandDefinition): boolean {
+  return definition.path[0] === "doctor" || definition.path[0] === "schema" || definition.path[0] === "gate";
 }
 
 function agentCommandDependencies(): AgentCommandDependencies {
@@ -1408,13 +1564,19 @@ async function pruneOperationsWithPolicy(
 ): Promise<OperationPruneResult> {
   const operationResult = await context.store.write(async (writer) => {
     const operations = [...(await writer.listOperations())].sort(compareOperationsNewestFirst);
+    const currentOperationId = context.operationId;
+    const pruneCandidates = currentOperationId
+      ? operations.filter((operation) => operation.meta.id !== currentOperationId)
+      : operations;
     const beforeMs = policy.before ? Date.parse(policy.before) : undefined;
-    const eligibleByAge = operations.filter(
+    const eligibleByAge = pruneCandidates.filter(
       (operation) => beforeMs === undefined || Date.parse(operation.finishedAt) >= beforeMs
     );
-    const keepBeforeOperationLog = policy.keep === undefined ? eligibleByAge.length : Math.max(0, policy.keep - 1);
+    const keepBeforeOperationLog = policy.keep === undefined
+      ? eligibleByAge.length
+      : Math.max(0, policy.keep - (currentOperationId ? 1 : 0));
     const keptIds = new Set(eligibleByAge.slice(0, keepBeforeOperationLog).map((operation) => operation.meta.id));
-    const deleted = operations.filter((operation) => !keptIds.has(operation.meta.id));
+    const deleted = pruneCandidates.filter((operation) => !keptIds.has(operation.meta.id));
     for (const operation of deleted) {
       await writer.deleteOperation(operation.meta.id);
     }
@@ -1422,7 +1584,7 @@ async function pruneOperationsWithPolicy(
     return {
       deleted: deleted.length,
       keptBeforeOperationLog,
-      remainingAfterOperationLog: keptBeforeOperationLog + 1,
+      remainingAfterOperationLog: keptBeforeOperationLog + (currentOperationId ? 0 : 1),
       keep: policy.keep,
       before: policy.before,
       deletedIds: deleted.map((operation) => operation.meta.id)
@@ -1643,13 +1805,39 @@ function optionalCommandPath(value: string | undefined): string | undefined {
 }
 
 function shouldRecordOperation(definition: CommandDefinition): boolean {
-  if (definition.path[0] === "storage" && definition.path[1] === "migrate") {
-    return false;
-  }
   if (definition.path[0] === "sync" && definition.path[1] === "status") {
     return false;
   }
-  return definition.requiresWorkspace || definition.path[0] === "init";
+  const behavior = commandBehavior(definition);
+  return behavior.writesState || behavior.writesGeneratedArtifacts || definition.path[0] === "init";
+}
+
+function commandChangesStorageBackend(definition: CommandDefinition): boolean {
+  return (
+    (definition.path[0] === "storage" && definition.path[1] === "migrate") ||
+    (definition.path[0] === "update" && definition.path[1] === "repo")
+  );
+}
+
+function operationContextArgs(args: ParsedArgs, definition: CommandDefinition): ParsedArgs {
+  const machineOperation = usesImplicitMachineLedger(definition, args);
+  if (!machineOperation || hasFlag(args, "global")) {
+    return args;
+  }
+  const flags = new Map<string, string[]>();
+  for (const [name, values] of args.flags.entries()) {
+    flags.set(name, [...values]);
+  }
+  flags.set("global", ["true"]);
+  return { command: args.command, flags };
+}
+
+function usesImplicitMachineLedger(definition: CommandDefinition, args: ParsedArgs): boolean {
+  const userScopedSkillInstall = definition.path[0] === "install" && definition.path.length > 1 && flagValue(args, "scope") === "user";
+  return (
+    !hasFlag(args, "global") &&
+    ((definition.path[0] === "update" && definition.path[1] === "self") || userScopedSkillInstall)
+  );
 }
 
 function isStaticDirectivesCommand(path: readonly string[]): boolean {
@@ -1667,12 +1855,17 @@ async function recordCliOperation(
   startedAt: IsoTimestamp,
   eventIdsBefore: ReadonlySet<EventId>,
   result: CommandResult | undefined,
-  error: unknown
+  error: unknown,
+  lifecycle: CliOperationLifecycle | undefined,
+  mode: "start" | "finish" = "finish"
 ): Promise<void> {
-  const finishedAt = nowIso();
-  const exitCode = error ? commandErrorExitCode(error) : result?.exitCode ?? 1;
+  const finishedAt = mode === "start" ? startedAt : lifecycle?.finishedAt ?? nowIso();
+  const exitCode = mode === "start" ? 0 : error ? commandErrorExitCode(error) : result?.exitCode ?? 1;
   const behavior = commandBehavior(definition);
-  const status = exitCode === 0 ? "succeeded" : "failed";
+  const status = mode === "start" ? "in_progress" : exitCode === 0 ? "succeeded" : "failed";
+  const stateOutcome = mode === "start" ? "unknown" : lifecycle?.stateOutcome ?? stateOutcomeForResult(behavior, result);
+  const generatedArtifactOutcome = stateOutcomeForOperation(stateOutcome, behavior.writesGeneratedArtifacts);
+  const storageHeadSeq = await context.store.read((reader) => reader.headSeq()).catch(() => undefined);
   const operation = {
     meta: createRecordMeta({
       id: operationId,
@@ -1688,9 +1881,18 @@ async function recordCliOperation(
     finishedAt,
     exitCode,
     status,
-    stateChanged: status === "succeeded" && behavior.writesState,
-    generatedArtifactsChanged: status === "succeeded" && behavior.writesGeneratedArtifacts,
+    stateChanged: mode !== "start" && (stateOutcome === "changed" || stateOutcome === "partial") ? behavior.writesState : false,
+    generatedArtifactsChanged:
+      mode !== "start" && (stateOutcome === "changed" || stateOutcome === "partial") ? behavior.writesGeneratedArtifacts : false,
     eventIds: [],
+    phase: lifecycle?.phase,
+    durationMs: Math.max(0, Date.parse(finishedAt) - Date.parse(startedAt)),
+    processId: process.pid,
+    host: hostname(),
+    ...(storageHeadSeq === undefined ? {} : { storageHeadSeq }),
+    stateChangeOutcome: stateOutcome,
+    generatedArtifactOutcome,
+    auditOutcome: mode === "start" ? "incomplete" : "complete",
     ...operationErrorFields(error, exitCode)
   } satisfies RuntimeOperation;
 
@@ -1700,6 +1902,16 @@ async function recordCliOperation(
       .map((event) => event.meta.id);
     await writer.putOperation(withContentHash({ ...operation, eventIds } satisfies RuntimeOperation));
   });
+}
+
+function stateOutcomeForOperation(
+  outcome: CliStateOutcome,
+  writesGeneratedArtifacts: boolean
+): RuntimeOperation["generatedArtifactOutcome"] {
+  if (!writesGeneratedArtifacts) {
+    return "unchanged";
+  }
+  return outcome;
 }
 
 async function listEventIds(context: CliContext): Promise<ReadonlySet<EventId>> {
@@ -1743,14 +1955,94 @@ function operationErrorFields(error: unknown, exitCode: number): Pick<RuntimeOpe
   if (error) {
     return {
       errorCode: isBorealError(error) ? error.code : "BOREAL_UNEXPECTED_ERROR",
-      errorMessage: isBorealError(error) ? error.code : "Unexpected command failure"
+      errorMessage: safeErrorMessage(error)
     };
   }
   return exitCode === 0 ? {} : { errorCode: "BOREAL_COMMAND_EXIT_NONZERO", errorMessage: "Command returned a non-zero exit code" };
 }
 
+function anticipatedOperationSessionId(args: ParsedArgs): string {
+  return (
+    operationSessionIdFromArgs(args) ??
+    normalizeActorId(flagValue(args, "session") ?? process.env.BOREAL_SESSION_ID ?? "local")
+  );
+}
+
+function cliEnvelopeMetadata(lifecycle: CliOperationLifecycle): CliEnvelopeMetadata {
+  return {
+    operationId: lifecycle.operationId,
+    sessionId: lifecycle.sessionId,
+    phase: lifecycle.phase,
+    startedAt: lifecycle.startedAt,
+    finishedAt: lifecycle.finishedAt,
+    stateOutcome: lifecycle.stateOutcome,
+    ...(lifecycle.diagnosticId ? { diagnosticId: lifecycle.diagnosticId } : {}),
+    ...(lifecycle.diagnosticIds && lifecycle.diagnosticIds.length > 0 ? { diagnosticIds: lifecycle.diagnosticIds } : {})
+  };
+}
+
+function stateOutcomeForResult(
+  behavior: ReturnType<typeof commandBehavior>,
+  result: CommandResult | undefined
+): CliStateOutcome {
+  if (!behavior.writesState && !behavior.writesGeneratedArtifacts) {
+    return "unchanged";
+  }
+  if (result?.exitCode === 0) {
+    return "changed";
+  }
+  return "partial";
+}
+
+function stateOutcomeForFailure(
+  behavior: ReturnType<typeof commandBehavior>,
+  phase: CliOperationPhase,
+  result: CommandResult | undefined
+): CliStateOutcome {
+  if (!behavior.writesState && !behavior.writesGeneratedArtifacts) {
+    return "unchanged";
+  }
+  if (result || phase === "artifact_refresh" || phase === "rollup" || phase === "result" || phase === "finalization") {
+    return "partial";
+  }
+  return "unknown";
+}
+
+function applyErrorToLifecycle(lifecycle: CliOperationLifecycle, error: unknown): void {
+  const ids = diagnosticIdsForError(error);
+  lifecycle.diagnosticId = ids[0];
+  lifecycle.diagnosticIds = ids.length > 0 ? ids : undefined;
+}
+
+function diagnosticIdsForError(error: unknown): readonly string[] {
+  const detailsValue = isBorealError(error) ? error.details : undefined;
+  const details = isRecordValue(detailsValue) ? detailsValue : undefined;
+  const explicit = details?.diagnosticIds;
+  const explicitIds = Array.isArray(explicit)
+    ? explicit.filter((value): value is string => typeof value === "string" && value.length > 0)
+    : [];
+  const diagnosticId = typeof details?.diagnosticId === "string" && details.diagnosticId.length > 0 ? [details.diagnosticId] : [];
+  const gapIds = isBorealError(error) ? error.gaps?.map((gap) => gap.code) ?? [] : [];
+  return [...new Set([...diagnosticId, ...explicitIds, ...gapIds])];
+}
+
+function safeErrorMessage(error: unknown): string {
+  if (isBorealError(error)) {
+    return error.message;
+  }
+  return "Unexpected command failure";
+}
+
+function isRecordValue(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
 function redactedArgv(definition: CommandDefinition, args: ParsedArgs): readonly string[] {
   const values: string[] = [...definition.path];
+  for (const positional of args.command.slice(definition.path.length)) {
+    const safeId = /^bw_[a-z0-9]+_[a-z0-9_-]+$/iu.test(positional);
+    values.push(safeId ? positional : `<arg:${hashContent(positional).slice(0, 20)}>`);
+  }
   const valueFlags = registryValueFlagNames();
   for (const [name, flagValuesForName] of args.flags.entries()) {
     for (const value of flagValuesForName) {
@@ -3675,13 +3967,14 @@ function formatRuntimeLockDashboardRows(lock: RuntimeLockState): readonly string
 }
 
 interface FinishEvidencePayload {
-  readonly evidence: {
+  readonly evidence?: {
     readonly kind: EvidenceKind;
     readonly summary: string;
     readonly outcome: EvidenceOutcome;
     readonly command?: string;
     readonly uri?: string;
   };
+  readonly evidenceId?: EvidenceId;
   readonly evidenceRefs: readonly EvidenceId[];
   readonly inlineEvidence?: string;
 }
@@ -3696,6 +3989,18 @@ async function finishEvidenceInput(
   const explicitSummary = flagValue(args, "summary");
   const referencedEvidenceIds = evidenceValues.filter((value) => value.startsWith("bw_evidence_")).map(asEvidenceId);
   const inlineEvidence = evidenceValues.find((value) => !value.startsWith("bw_evidence_"));
+  if (flagValue(args, "command")) {
+    throw new BorealError(
+      "BOREAL_INVALID_INPUT",
+      "Agent finish does not execute --command and cannot record it as witnessed evidence; run `bwrk evidence run` for a declared gate or `bwrk evidence add`, then pass --evidence <evidence-id>"
+    );
+  }
+  if (referencedEvidenceIds.length > 1) {
+    throw new BorealError("BOREAL_INVALID_INPUT", "Agent finish accepts exactly one referenced evidence id", {
+      workId,
+      evidenceIds: referencedEvidenceIds
+    });
+  }
   const referencedEvidence = referencedEvidenceIds[0]
     ? await context.store.read((reader) => reader.getEvidence(referencedEvidenceIds[0] as EvidenceId))
     : undefined;
@@ -3713,17 +4018,36 @@ async function finishEvidenceInput(
       evidenceSubjectId: referencedEvidence.subjectId
     });
   }
-  const summary = explicitSummary ?? inlineEvidence ?? referencedEvidence?.summary;
+  if (referencedEvidence) {
+    const incompatibleFlags = [
+      explicitSummary ? "--summary" : undefined,
+      inlineEvidence ? "--evidence <inline-text>" : undefined,
+      flagValue(args, "kind") ? "--kind" : undefined,
+      flagValue(args, "outcome") ? "--outcome" : undefined,
+      flagValue(args, "uri") ? "--uri" : undefined
+    ].filter((value): value is string => value !== undefined);
+    if (incompatibleFlags.length > 0) {
+      throw new BorealError(
+        "BOREAL_INVALID_INPUT",
+        "Referenced finish evidence is immutable; do not combine --evidence <evidence-id> with inline evidence fields",
+        { workId, evidenceId: referencedEvidence.meta.id, incompatibleFlags }
+      );
+    }
+    return {
+      evidenceId: referencedEvidence.meta.id,
+      evidenceRefs: [referencedEvidence.meta.id]
+    };
+  }
+  const summary = explicitSummary ?? inlineEvidence;
   if (!summary?.trim()) {
     throw new BorealError("BOREAL_INVALID_INPUT", "Agent finish requires --summary or --evidence <inline-or-evidence-id>");
   }
   return {
     evidence: {
-      kind: parseEvidenceKind(flagValue(args, "kind") ?? referencedEvidence?.kind),
+      kind: parseEvidenceKind(flagValue(args, "kind")),
       summary,
-      outcome: parseFinishOutcome(flagValue(args, "outcome") ?? referencedEvidence?.outcome, verdict),
-      command: flagValue(args, "command") ?? referencedEvidence?.command,
-      uri: flagValue(args, "uri") ?? referencedEvidence?.uri
+      outcome: parseFinishOutcome(flagValue(args, "outcome"), verdict),
+      uri: flagValue(args, "uri")
     },
     evidenceRefs: referencedEvidenceIds,
     ...(inlineEvidence ? { inlineEvidence } : {})
@@ -4041,7 +4365,9 @@ async function finishCurrentReservationCommand(input: {
   const finished = await finishReservedWorkWithCompositeState(input.context, workId, {
     workId,
     agentId,
-    evidence: finishEvidence.evidence,
+    ...(finishEvidence.evidenceId
+      ? { evidenceId: finishEvidence.evidenceId }
+      : { evidence: finishEvidence.evidence as NonNullable<typeof finishEvidence.evidence> }),
     verification: {
       verdict: input.verdict,
       notes: flagValue(input.args, "notes")
@@ -7088,10 +7414,22 @@ async function agentFinishSummaryFactory(
 ): Promise<FinishReservedWorkSummaryFactory> {
   const work = await context.store.read((reader) => requireCliWork(reader, workId));
   const childSummaryIds = await childAgentSummaryIdsForWork(context, work);
+  const evidenceValues = flagValues(args, "evidence");
+  const referencedEvidenceId = evidenceValues.find((value) => value.startsWith("bw_evidence_"));
+  const referencedEvidence = referencedEvidenceId
+    ? await context.store.read((reader) => reader.getEvidence(asEvidenceId(referencedEvidenceId)))
+    : undefined;
+  const summaryText =
+    flagValue(args, "summary") ??
+    evidenceValues.find((value) => !value.startsWith("bw_evidence_")) ??
+    referencedEvidence?.summary;
+  if (!summaryText?.trim()) {
+    throw new BorealError("BOREAL_INVALID_INPUT", "Agent finish closeout summary requires --summary or valid --evidence");
+  }
   const body = [
     "## Agent Finish Summary",
     "",
-    requiredFlag(args, "summary"),
+    summaryText,
     "",
     `Close reason: ${reason}`
   ].join("\n");
@@ -8068,7 +8406,7 @@ function unprobedSyncStatus(context: CliContext): SyncStatusResult {
     },
     searchIndex: {
       ok: true,
-      path: join(context.workspaceRoot, ".boreal", "cache", "index.sqlite"),
+      path: objectIndexPath(context.workspaceRoot),
       exists: false,
       stale: false,
       expectedCorpusFingerprint: contentHash,
@@ -8228,6 +8566,7 @@ function nextCommandResultFromSelection(
   fallbackCommand: string | undefined
 ): NextCommandResult {
   if (!selected) {
+    const fallbackAction = runtimeExecutableAction(context.workspaceRoot, fallbackCommand);
     return {
       schemaVersion: "boreal.cli.next.v1",
       workspaceRoot: context.workspaceRoot,
@@ -8236,12 +8575,14 @@ function nextCommandResultFromSelection(
       state,
       checked,
       directive: null,
-      command: fallbackCommand,
+      command: fallbackAction?.command,
+      displayCommand: fallbackAction?.command,
+      executableAction: fallbackAction?.executableAction,
       why: status.recommendedAction.reason
     };
   }
-  const command = executableCommandForDirective(selected.directive, fallbackCommand);
-  if (!command) {
+  const action = executableActionForDirective(context.workspaceRoot, selected.directive, fallbackCommand);
+  if (!action) {
     throw new BorealError("BOREAL_INVARIANT", "Selected next directive does not include an executable command", {
       registryId: selected.directive.registryId,
       state
@@ -8256,10 +8597,35 @@ function nextCommandResultFromSelection(
     checked,
     subject: selected.directive.subject,
     directive: selected.directive,
-    command,
+    command: action.command,
+    displayCommand: action.displayCommand,
+    executableAction: action.executableAction,
     why: `${selected.directive.title}: ${selected.directive.instruction}`,
     selectionKey: nextDirectiveSelectionKey(selected.directive),
     bundleMeta: selected.bundle.meta
+  };
+}
+
+function runtimeExecutableAction(
+  workspaceRoot: string,
+  command: string | undefined
+): { readonly command: string; readonly executableAction: NextExecutableAction } | undefined {
+  const normalized = ensureJsonBwrkCommand(command);
+  if (!normalized?.startsWith("bwrk ")) {
+    return undefined;
+  }
+  const argv = parseTrustedBwrkArgv(normalized, "boreal-runtime-fallback");
+  const rendered = shellCommandFromArgv(argv);
+  return {
+    command: rendered,
+    executableAction: {
+      source: "boreal_runtime",
+      trust: "trusted",
+      runner: "boreal_cli",
+      argv,
+      cwd: workspaceRoot,
+      shell: false
+    }
   };
 }
 
@@ -8276,17 +8642,93 @@ function nextResultBundle(result: NextCommandResult): AgentDirectiveBundle {
   };
 }
 
-function executableCommandForDirective(
+function executableActionForDirective(
+  workspaceRoot: string,
   directive: NextCommandDirective,
   fallbackCommand: string | undefined
-): string | undefined {
+): {
+  readonly command: string;
+  readonly displayCommand: string;
+  readonly executableAction: NextExecutableAction;
+} | undefined {
   const data = isRecord(directive.data) ? directive.data : {};
+  const workAuthoredDisplayCommand =
+    stringDataValue(data, "command") ?? firstStringArrayValue(data, "declaredCommands");
+  const subjectId = stringDataValue(data, "subjectId") ?? directive.subject?.id;
+  const gateId = firstStringArrayValue(data, "gateIds");
+
+  if (directive.registryId === "verification.evidence-required" && subjectId && gateId) {
+    const argv = ["bwrk", "evidence", "run", subjectId, "--gate", gateId, "--json"] as const;
+    const command = shellCommandFromArgv(argv);
+    return {
+      command,
+      displayCommand: workAuthoredDisplayCommand ?? command,
+      executableAction: {
+        source: "agent_directive_registry",
+        trust: "trusted",
+        runner: "bounded_declared_gate",
+        registryId: directive.registryId,
+        argv,
+        cwd: workspaceRoot,
+        shell: false
+      }
+    };
+  }
+
   const directCommand =
-    stringDataValue(data, "command") ??
     stringDataValue(data, "commandPath") ??
     firstStringArrayValue(data, "recommendedCommands") ??
     stringDataValue(data, "nextCommandPath");
-  return ensureJsonBwrkCommand(directCommand ?? fallbackCommand);
+  const preferredCommand = ensureJsonBwrkCommand(directCommand);
+  const candidate = preferredCommand?.startsWith("bwrk ") ? preferredCommand : ensureJsonBwrkCommand(fallbackCommand);
+  const safeCommand = candidate?.startsWith("bwrk ")
+    ? candidate
+    : subjectId
+      ? `bwrk work show ${shellArg(subjectId)} --json`
+      : undefined;
+  if (!safeCommand) {
+    return undefined;
+  }
+  const argv = parseTrustedBwrkArgv(safeCommand, directive.registryId);
+  const command = shellCommandFromArgv(argv);
+  return {
+    command,
+    displayCommand: workAuthoredDisplayCommand ?? command,
+    executableAction: {
+      source: "agent_directive_registry",
+      trust: "trusted",
+      runner: "boreal_cli",
+      registryId: directive.registryId,
+      argv,
+      cwd: workspaceRoot,
+      shell: false
+    }
+  };
+}
+
+function parseTrustedBwrkArgv(command: string, registryId: string): readonly string[] {
+  let argv: readonly string[];
+  try {
+    argv = parseDeclaredCommand(command);
+  } catch (error) {
+    throw new BorealError("BOREAL_INVARIANT", "Registry-projected next action is not a safe exact-argv command", {
+      registryId,
+      command,
+      cause: error instanceof Error ? error.message : String(error)
+    });
+  }
+  if (argv[0] !== "bwrk") {
+    throw new BorealError("BOREAL_INVARIANT", "Registry-projected next action must invoke the Boreal CLI", {
+      registryId,
+      command,
+      executable: argv[0]
+    });
+  }
+  return argv;
+}
+
+function shellCommandFromArgv(argv: readonly string[]): string {
+  return argv.map(shellArg).join(" ");
 }
 
 function stringDataValue(data: Record<string, unknown>, key: string): string | undefined {
@@ -8703,6 +9145,7 @@ async function installedSkillChecks(
 ): Promise<readonly Parameters<typeof validateInstalledSkillRoot>[0][]> {
   const targets = installedSkillTargets(flagValues(args, "skill-target"));
   const explicitRoot = flagValue(args, "install-root");
+  const scope = skillInstallScopeFromArgs(args);
   if (!explicitRoot && targets.length === 0) {
     return [];
   }
@@ -8710,7 +9153,7 @@ async function installedSkillChecks(
   return Promise.all(
     resolvedTargets.map(async (target) => ({
       target,
-      installRoot: explicitRoot ? resolve(context.workspaceRoot, explicitRoot) : await installRootFromArgs(context, args, target)
+      installRoot: await installRootFromArgs(context, args, target, scope)
     }))
   );
 }
@@ -9276,7 +9719,10 @@ function parseFinishOutcome(value: string | undefined, verdict: VerificationVerd
 }
 
 function parseVerdict(value: string | undefined): VerificationVerdict {
-  const verdict = value ?? "passed";
+  if (value === undefined) {
+    throw new BorealError("BOREAL_INVALID_INPUT", "--verdict is required and must be passed or failed");
+  }
+  const verdict = value;
   if (verdict === "passed" || verdict === "failed") {
     return verdict;
   }
@@ -10056,18 +10502,21 @@ async function buildAgentGuide(context: CliContext, agentId: string, labels: rea
   const normalizedAgentId = normalizeActorId(agentId);
   const normalizedLabels = normalizeLabels(labels);
   const declaredGateHint = await agentGuideDeclaredGateHint(context, normalizedAgentId, normalizedLabels);
-  const validationCommand = declaredGateHint?.declaredCommand ?? "pnpm test";
   const agentFlag = `--agent ${shellArg(normalizedAgentId)}`;
   const scopedFlags = `${agentFlag}${labelFlags(normalizedLabels)}`;
+  const evidenceArgv = declaredGateHint
+    ? ["bwrk", "evidence", "run", declaredGateHint.workId, "--gate", declaredGateHint.gateId, "--json"]
+    : undefined;
   const commands = {
     status: `bwrk agent status ${scopedFlags} --json`,
     start: `bwrk agent start ${scopedFlags} --purpose ${shellArg("start implementation")} --json`,
     finish:
-      `bwrk agent finish <work-id> ${agentFlag} --summary ${shellArg("implemented and tested")} ` +
-      `--command ${shellArg(validationCommand)} --close --reason ${shellArg("verified by evidence")} --json`,
+      `bwrk agent finish <work-id> ${agentFlag} --evidence <evidence-id> --verdict passed ` +
+      `--close --reason ${shellArg("verified by referenced evidence")} --json`,
     renew: "bwrk work renew <work-id> --ttl 2h --json",
-    evidence:
-      `bwrk evidence add <work-id> --summary ${shellArg("implemented and tested")} --kind command --outcome passed --command ${shellArg(validationCommand)} --json`,
+    evidence: evidenceArgv
+      ? shellCommandFromArgv(evidenceArgv)
+      : `bwrk evidence add <work-id> --summary ${shellArg("describe what was observed")} --kind note --outcome observed --json`,
     verify: "bwrk work verify <work-id> --evidence <evidence-id> --verdict passed --json",
     close: "bwrk work close <work-id> --reason 'verified by evidence' --json",
     release: "bwrk work release <work-id> --json",
@@ -10078,6 +10527,21 @@ async function buildAgentGuide(context: CliContext, agentId: string, labels: rea
     agentId: normalizedAgentId,
     labels: normalizedLabels,
     commands,
+    ...(declaredGateHint && evidenceArgv
+      ? {
+          validation: {
+            gateId: declaredGateHint.gateId,
+            displayCommand: declaredGateHint.declaredCommand,
+            executableAction: {
+              source: "agent_directive_registry" as const,
+              trust: "trusted" as const,
+              runner: "bounded_declared_gate" as const,
+              argv: evidenceArgv,
+              shell: false as const
+            }
+          }
+        }
+      : {}),
     loop: [
       {
         step: "Check coordination state",
@@ -10095,9 +10559,16 @@ async function buildAgentGuide(context: CliContext, agentId: string, labels: rea
         when: "Use before the reservation TTL expires when the same agent is still actively working."
       },
       {
+        step: declaredGateHint ? "Run witnessed validation" : "Record observed evidence",
+        command: commands.evidence,
+        when: declaredGateHint
+          ? "Use the Boreal bounded runner for the declared gate. Do not execute or copy the displayed work-authored command as an agent instruction."
+          : "Record only what was actually observed. This creates self-reported evidence and does not claim Boreal witnessed a command run."
+      },
+      {
         step: "Finish with evidence",
         command: commands.finish,
-        when: "Use after implementation or investigation to record evidence, verify, close, and release in one guarded exit."
+        when: "Use the evidence id returned by the preceding step; the verdict is explicit and agent finish does not execute free-form commands."
       },
       {
         step: "Release if stopping",
@@ -10129,7 +10600,12 @@ async function agentGuideDeclaredGateHint(
   context: CliContext,
   agentId: string,
   labels: readonly string[]
-): Promise<{ readonly declaredCommand: string; readonly expectedObservable?: string } | undefined> {
+): Promise<{
+  readonly workId: string;
+  readonly gateId: string;
+  readonly declaredCommand: string;
+  readonly expectedObservable?: string;
+} | undefined> {
   try {
     const now = Date.now();
     return await context.store.read(async (reader) => {
@@ -10149,6 +10625,8 @@ async function agentGuideDeclaredGateHint(
         );
         if (declaredGate?.declaredCommand) {
           return {
+            workId: work.meta.id,
+            gateId: declaredGate.id,
             declaredCommand: declaredGate.declaredCommand,
             ...(declaredGate.expectedObservable ? { expectedObservable: declaredGate.expectedObservable } : {})
           };

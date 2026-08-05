@@ -3,6 +3,7 @@ import { join, resolve } from "node:path";
 import type { CliContext } from "./context.js";
 import { readProjectSetupConfig, skillInstallRootConfig, type MemoryGitMode, type MemoryLayout, type SkillInstallRootConfig, type SkillTarget } from "./project-setup.js";
 import { resolveWorkflowAssetRoots, type WorkflowAssetRoots } from "./workflow-assets.js";
+import type { ProjectToolchainStatus } from "./toolchain.js";
 
 export const ENVIRONMENT_MANIFEST_SCHEMA_VERSION = "boreal.environment-manifest.v1";
 
@@ -14,6 +15,10 @@ export interface EnvironmentManifest {
   readonly runtimeDir: string;
   readonly runtimeStateFile: string;
   readonly projectConfigPath: string;
+  readonly portableProjectManifestPath: string;
+  readonly toolchainLockPath: string;
+  readonly projectId?: string;
+  readonly toolchain: ProjectToolchainStatus;
   readonly memoryRoot: string;
   readonly memoryBorealDir: string;
   readonly memoryLayout: MemoryLayout;
@@ -44,6 +49,10 @@ export async function resolveEnvironmentManifest(context: CliContext): Promise<E
     runtimeDir: context.paths.runtimeDir,
     runtimeStateFile: context.paths.stateFile,
     projectConfigPath: join(projectRoot, ".boreal", "project.json"),
+    portableProjectManifestPath: context.toolchain.manifestPath,
+    toolchainLockPath: context.toolchain.lockPath,
+    projectId: context.toolchain.manifest?.projectId,
+    toolchain: context.toolchain,
     memoryRoot,
     memoryBorealDir: join(memoryRoot, ".boreal"),
     memoryLayout,

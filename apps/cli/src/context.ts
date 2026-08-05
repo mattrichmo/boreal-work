@@ -16,7 +16,14 @@ import { createBorealRuntime } from "@boreal/engine";
 import { FileBorealStore, ObjectDirBorealStore, type BorealStore } from "@boreal/storage";
 
 import { flagValue, hasFlag, type ParsedArgs } from "./args.js";
+import { commandBehavior, commandPath, findCommandDefinition } from "./command-registry.js";
 import { readProjectStorage, type ProjectStorageKind } from "./project-setup.js";
+import {
+  assertCanonicalWritesAllowed,
+  inspectProjectToolchainSync,
+  isToolchainRecoveryCommand,
+  type ProjectToolchainStatus
+} from "./toolchain.js";
 
 /** The global workspace lives at the machine-local registry root (app-state).
  * Passing env so BOREAL_PROJECT_REGISTRY_ROOT is honored (overrides + tests). */
@@ -36,6 +43,7 @@ export interface CliContext {
   readonly storage: ProjectStorageKind;
   readonly store: BorealStore;
   readonly runtime: ReturnType<typeof createBorealRuntime>;
+  readonly toolchain: ProjectToolchainStatus;
   readonly actor: ActorRef;
   readonly sessionId: string;
   readonly operationId?: OperationId;
@@ -44,6 +52,7 @@ export interface CliContext {
 export interface CreateCliContextOptions {
   readonly operationId?: OperationId;
   readonly sessionId?: string;
+  readonly initializeGlobal?: boolean;
 }
 
 export async function createCliContext(
@@ -61,16 +70,49 @@ export async function createCliContext(
   const paths = resolveWorkspacePaths(workspaceRoot);
   const actor = actorFromArgs(args);
   const sessionId = options.sessionId ? normalizeActorId(options.sessionId) : sessionIdFromArgs(args);
+  const inspectedToolchain = inspectProjectToolchainSync(workspaceRoot);
+  const toolchain = useGlobal && !inspectedToolchain.manifest
+    ? {
+        ...inspectedToolchain,
+        mode: "legacy" as const,
+        canonicalWritesAllowed: true,
+        findings: ["machine_global_workspace_not_project_locked"]
+      }
+    : inspectedToolchain;
+  assertCommandToolchainCompatibility(args, toolchain);
   const storage = await selectStorageKind(args, workspaceRoot, paths);
   const store = storage === "objects-v1" ? new ObjectDirBorealStore({ rootDir: workspaceRoot }) : new FileBorealStore({ rootDir: workspaceRoot });
   const runtime = createBorealRuntime({ store, actor, operationId: options.operationId });
-  const context: CliContext = { cwd, workspaceRoot, paths, storage, store, runtime, actor, sessionId, operationId: options.operationId };
+  const context: CliContext = {
+    cwd,
+    workspaceRoot,
+    paths,
+    storage,
+    store,
+    runtime,
+    toolchain,
+    actor,
+    sessionId,
+    operationId: options.operationId
+  };
   // The global workspace is auto-initialized on first use so it always exists.
-  if (useGlobal) {
+  if (useGlobal && options.initializeGlobal !== false) {
     await ensureWorkspaceDirs(context);
     await runtime.ensureWorkspaceInitialized();
   }
   return context;
+}
+
+export function assertCommandToolchainCompatibility(args: ParsedArgs, status: ProjectToolchainStatus): void {
+  const definition = findCommandDefinition(args.command);
+  if (!definition) {
+    return;
+  }
+  const path = commandPath(definition);
+  if (!commandBehavior(definition).writesState || isToolchainRecoveryCommand(path)) {
+    return;
+  }
+  assertCanonicalWritesAllowed(status, path);
 }
 
 export async function ensureWorkspaceDirs(context: CliContext): Promise<void> {
@@ -101,6 +143,17 @@ async function selectStorageKind(
   }
   if (args.command[0] === "init" && !existsSync(paths.stateFile)) {
     return initDefaultStorageKind();
+  }
+  // Legacy/fault-recovery reads must not silently select file-v2 when the
+  // tracked object store is plainly present but local absolute config is not.
+  if (existsSync(paths.objectsDir)) {
+    return "objects-v1";
+  }
+  if (existsSync(paths.stateFile)) {
+    return "file-v2";
+  }
+  if (existsSync(paths.eventLogFile)) {
+    return "objects-v1";
   }
   return "file-v2";
 }

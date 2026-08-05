@@ -340,7 +340,10 @@ export function App({
           {!data ? (
             <Text color={COLOR.muted}>Loading workspace…</Text>
           ) : !data.initialized ? (
-            <EmptyState title="Not initialized" lines={[data.warnings[0] ?? "Run `bwrk init` here."]} />
+            <EmptyState
+              title="Boreal is not set up here"
+              lines={[data.warnings[0] ?? "Run `bwrk install` to set up project memory and agent skills."]}
+            />
           ) : paletteOpen ? (
             <Palette query={query} results={results} cursor={paletteCursor} height={bodyHeight} width={columns - 16} />
           ) : (

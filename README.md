@@ -101,6 +101,27 @@ bwrk agent guide
 bwrk prime --json
 ```
 
+Install the agent adapters for every project on this machine:
+
+```bash
+bwrk install codex --scope user
+bwrk install claude --scope user
+```
+
+Use `--scope project` (the default) when the adapter should be checked out with one repository. The global CLI, user-wide adapters, and project state are separate: `bwrk update self` updates the CLI, rerun the user-scope skill install commands to refresh global adapters, and use `bwrk update repo` for an initialized project.
+
+In short:
+
+| Goal | Command | Writes to |
+| --- | --- | --- |
+| Install the `bwrk` CLI for this machine | `./install.sh --machine --yes` (from a checkout) | `~/.local/bin` and the CLI install directory |
+| Make Codex skills available in every repo | `bwrk install codex --scope user` | `~/.agents/skills` |
+| Set up the current repository | `bwrk install --yes` | `.boreal/`, `memory/`, and `.agents/skills` |
+
+The CLI installer does not install agent skills, and a user-wide skill install
+does not initialize a project. `bwrk update self` updates the machine CLI from
+the configured upstream ref; it does not package the current working tree.
+
 The recommended install creates:
 
 ```text
@@ -117,7 +138,7 @@ your-project/
 └── memory/                human-readable project vault
 ```
 
-By default `memory/` is a child repository with separate Git history. Run interactive `bwrk install` to select another layout, or preview writes first:
+By default `memory/` is a child repository with separate Git history, and project skills are installed at `.agents/skills` without folder-scoped duplication. Run interactive `bwrk install` to select another layout, or preview writes first:
 
 ```bash
 bwrk install --dry-run
@@ -193,14 +214,16 @@ bwrk work claim <work-id> \
   --json
 ```
 
-After implementation and a Git checkpoint, finish the work:
+After implementation and a Git checkpoint, run the declared gate through Boreal's bounded runner, then finish with the returned evidence ID:
+
+```bash
+bwrk evidence run <work-id> --gate <gate-id> --json
+```
 
 ```bash
 bwrk agent finish <work-id> \
   --agent agent-api \
-  --summary "Implemented request tracing; pnpm test passes" \
-  --kind test \
-  --command "pnpm test" \
+  --evidence <evidence-id> \
   --verdict passed \
   --close \
   --reason "acceptance criteria verified" \
@@ -350,7 +373,7 @@ bwrk context search "request tracing" --limit 10 --explain --json
 bwrk search query "traceparent logs" --limit 10 --json
 ```
 
-Search normally uses a versioned FTS5 table in `.boreal/cache/index.sqlite`. If SQLite is unavailable, Boreal uses `.boreal/runtime/search-index.json`. Both paths share result fields and scoring behavior.
+Search normally uses a versioned FTS5 table in `.boreal/cache/index-v2.sqlite`. If SQLite is unavailable, Boreal uses `.boreal/runtime/search-index.json`. Both paths share result fields and scoring behavior.
 
 Queries repair missing or stale indexes by default. Use `--no-rebuild` when automation should fail closed instead:
 
@@ -407,7 +430,7 @@ Not every file below `.boreal/` has the same authority:
 | `.boreal/runtime/` | Locks, compatibility projections, and JSON search fallback | Local and rebuildable |
 | `.boreal/results/` | Local spooled command results | Local and disposable |
 
-New workspaces use `ObjectDirBorealStore`. The legacy `FileBorealStore` remains a supported compatibility and rollback adapter around `.boreal/runtime/state.json`. Both implement the same storage port and portable record model.
+New workspaces use a Git-friendly per-record object store (`ObjectDirBorealStore`). The legacy `FileBorealStore` remains a supported compatibility and rollback adapter around `.boreal/runtime/state.json`. Both implement the same storage port and portable record model.
 
 Canonical writes use atomic replacement. Cross-process mutations are serialized by `.boreal/runtime/state.lock`, with bounded waiting, owner metadata, token-based release, and guarded stale-lock recovery. Object-store commits verify the event-log head before applying changes.
 
@@ -419,7 +442,7 @@ Canonical writes use atomic replacement. Cross-process mutations are serialized 
 | MCP server | Selected-project tools that call scoped CLI/runtime contracts |
 | Daemon | Observer and coordination status; repairs remain explicit commands |
 | Browser console | Project and global-manager views loaded from CLI contracts |
-| TUI | Terminal dashboards using shared UI models and runtime loaders |
+| **TUI** | Optional terminal dashboard using shared UI models and runtime loaders |
 
 The MCP and daemon boundaries reject paths that leave the selected project or enter another registered project. See [MCP server](docs/architecture/MCP_SERVER.md), [daemon](docs/architecture/DAEMON.md), [console app](docs/architecture/CONSOLE_APP.md), and [TUI contracts](docs/architecture/TUI_SURFACE_CONTRACTS.md).
 

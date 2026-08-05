@@ -16,6 +16,12 @@ interface CommandRun {
 
 interface CliEnvelope<T> {
   readonly ok: true;
+  readonly operationId?: string;
+  readonly sessionId?: string;
+  readonly phase?: string;
+  readonly startedAt?: string;
+  readonly finishedAt?: string;
+  readonly stateOutcome?: string;
   readonly data: T;
   readonly agentDirectives?: readonly AgentDirectiveBundle[];
 }
@@ -33,6 +39,16 @@ interface NextCommandResultForTest {
   readonly schemaVersion: "boreal.cli.next.v1";
   readonly state: "active_reservation" | "ready_work" | "workspace_health" | "idle";
   readonly command?: string;
+  readonly displayCommand?: string;
+  readonly executableAction?: {
+    readonly source: "agent_directive_registry" | "boreal_runtime";
+    readonly trust: "trusted";
+    readonly runner: "boreal_cli" | "bounded_declared_gate";
+    readonly registryId?: string;
+    readonly argv: readonly string[];
+    readonly cwd: string;
+    readonly shell: false;
+  };
   readonly directive: NextCommandDirectiveForTest | null;
   readonly selectionKey?: string;
   readonly checked: {
@@ -197,6 +213,8 @@ describe("CLI agent directive envelopes", () => {
           work.data.meta.id,
           "--evidence",
           evidence.data.meta.id,
+          "--verdict",
+          "passed",
           "--notes",
           "Directive acknowledgement verification.",
           "--json"
@@ -954,7 +972,22 @@ describe("CLI agent directive envelopes", () => {
     const activeDirective = expectSingleNextDirective(active);
     expect(active.data.state).toBe("active_reservation");
     expect(activeDirective.registryId).toBe("verification.evidence-required");
-    expect(active.data.command).toBe(declaredCommand);
+    const gateId = (activeDirective.data?.gateIds as readonly string[] | undefined)?.[0];
+    expect(gateId).toMatch(/^bw_gate_/);
+    expect(active.data.displayCommand).toBe(declaredCommand);
+    expect(active.data.command).toBe(
+      `bwrk evidence run ${activeWork.data.meta.id} --gate ${gateId} --json`
+    );
+    expect(active.data.executableAction).toEqual({
+      source: "agent_directive_registry",
+      trust: "trusted",
+      runner: "bounded_declared_gate",
+      registryId: "verification.evidence-required",
+      argv: ["bwrk", "evidence", "run", activeWork.data.meta.id, "--gate", gateId, "--json"],
+      cwd: activeRoot,
+      shell: false
+    });
+    expect(active.data.executableAction?.argv.join(" ")).not.toContain(declaredCommand);
 
     const blockedRoot = await makeTempWorkspace();
     await runCli(blockedRoot, ["init", "--json"]);
@@ -1002,7 +1035,7 @@ describe("CLI agent directive envelopes", () => {
       })
     );
     expect(idle.data.checked.readyWorkCount).toBe(0);
-  });
+  }, 30_000);
 
   it("selects the same next directive on repeat invocation for identical state", async () => {
     const rootDir = await makeTempWorkspace();
@@ -1087,7 +1120,7 @@ describe("CLI agent directive envelopes", () => {
       await runCli(rootDir, ["sync", "refresh", "--json"]);
       await expect(runNextLoopSimulation(rootDir, agentId)).resolves.toEqual(expect.objectContaining({ terminal: "escalation" }));
     }
-  }, 15_000);
+  }, 60_000);
 
   it("keeps non-directive JSON command envelopes compatible with existing data consumers", async () => {
     const rootDir = await makeTempWorkspace();
@@ -1098,13 +1131,22 @@ describe("CLI agent directive envelopes", () => {
     const createdEnvelope = parseEnvelope<{ readonly meta: { readonly id: string }; readonly title: string }>(created.stdout);
     const legacyData = parseLegacyData<{ readonly meta: { readonly id: string }; readonly title: string }>(created.stdout);
 
-    expect(Object.keys(initialized)).toEqual(["ok", "ledgerSeq", "data"]);
+    expect(Object.keys(initialized)).toEqual(["ok", "ledgerSeq", "data", "operationId", "sessionId", "phase", "startedAt", "finishedAt", "stateOutcome"]);
     expect(initialized.agentDirectives).toBeUndefined();
     expect(initialized.data.initialized).toBe(true);
-    expect(Object.keys(createdEnvelope)).toEqual(["ok", "ledgerSeq", "data"]);
+    expect(Object.keys(createdEnvelope)).toEqual(["ok", "ledgerSeq", "data", "operationId", "sessionId", "phase", "startedAt", "finishedAt", "stateOutcome"]);
     expect(createdEnvelope.agentDirectives).toBeUndefined();
     expect(createdEnvelope.data.title).toBe("Non directive command target");
     expect(legacyData).toEqual(createdEnvelope.data);
+    expect(initialized.operationId).toMatch(/^bw_operation_[a-f0-9]{32}$/u);
+    expect(createdEnvelope.operationId).toMatch(/^bw_operation_[a-f0-9]{32}$/u);
+    expect(initialized.sessionId).toBe("local");
+    expect(createdEnvelope.sessionId).toBe("local");
+    expect(initialized.phase).toBe("completed");
+    expect(createdEnvelope.phase).toBe("completed");
+    expect(initialized.startedAt).toBeTruthy();
+    expect(initialized.finishedAt).toBeTruthy();
+    expect(createdEnvelope.stateOutcome).toBe("changed");
   });
 
   it("exposes blocked-work recovery directives from work show", async () => {

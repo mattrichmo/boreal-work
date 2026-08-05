@@ -3,6 +3,7 @@ system: boreal
 skill: boreal-work-planning
 display_name: Boreal Work Planning
 workflows:
+  - boreal.workflow.plan-work.v1
   - boreal.workflow.create-work-structure.v1
   - boreal.workflow.update-work-structure.v1
   - boreal.workflow.discovery-to-work.v1

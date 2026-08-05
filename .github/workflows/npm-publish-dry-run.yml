@@ -21,6 +21,7 @@ jobs:
           registry-url: https://registry.npmjs.org
       - run: corepack enable
       - run: pnpm install --frozen-lockfile
+      - run: npx --yes playwright@1.61.1 install --with-deps chromium
       - run: pnpm check
       - run: pnpm test
       - run: pnpm ci:doctor:strict

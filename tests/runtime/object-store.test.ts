@@ -14,7 +14,7 @@ import {
   type WorkId,
   type WorkItem
 } from "@boreal/core";
-import { ObjectDirBorealStore, ObjectReadIndex } from "@boreal/storage";
+import { ObjectDirBorealStore, ObjectReadIndex, objectIndexPath } from "@boreal/storage";
 import { createWorkItem } from "@boreal/work-engine";
 
 const actor: ActorRef = {
@@ -98,7 +98,7 @@ describe("object directory store", () => {
     await expect(store.write((writer) => writer.putWorkItem(sampleWorkItem("bw_work_00000000000a" as WorkId)))).rejects.toThrow(
       "Path escapes Boreal workspace"
     );
-    expect(existsSync(join(outsideDir, "index.sqlite"))).toBe(false);
+    expect(existsSync(join(outsideDir, "index-v2.sqlite"))).toBe(false);
   });
 
   it("routes events through the hash-chained event log", async () => {
@@ -120,7 +120,7 @@ describe("object directory store", () => {
     const rootDir = await makeTempWorkspace();
     const store = new ObjectDirBorealStore({ rootDir });
     await store.write((writer) => writer.putWorkItem(sampleWorkItem("bw_work_00000000000a" as WorkId)));
-    const indexPath = join(rootDir, ".boreal", "cache", "index.sqlite");
+    const indexPath = objectIndexPath(rootDir);
     await rm(indexPath, { force: true });
 
     await new ObjectDirBorealStore({ rootDir }).read(async (reader) => {
@@ -132,18 +132,21 @@ describe("object directory store", () => {
 
   it("does not report a durable write as failed when cache apply fails", async () => {
     const rootDir = await makeTempWorkspace();
+    const store = new ObjectDirBorealStore({ rootDir });
+    await store.write((writer) => writer.putWorkItem(sampleWorkItem("bw_work_00000000000a" as WorkId)));
     const apply = vi.spyOn(ObjectReadIndex.prototype, "applyChanges").mockRejectedValueOnce(new Error("injected cache failure"));
     try {
-      const store = new ObjectDirBorealStore({ rootDir });
-
       await expect(
-        store.write((writer) => writer.putWorkItem(sampleWorkItem("bw_work_00000000000a" as WorkId)))
+        store.write((writer) => writer.putWorkItem(sampleWorkItem("bw_work_00000000000b" as WorkId)))
       ).resolves.toBeUndefined();
 
       await new ObjectDirBorealStore({ rootDir, sqlite: undefined }).read(async (reader) => {
-        expect((await reader.listWorkItems()).map((work) => work.meta.id)).toEqual(["bw_work_00000000000a"]);
+        expect((await reader.listWorkItems()).map((work) => work.meta.id)).toEqual([
+          "bw_work_00000000000a",
+          "bw_work_00000000000b"
+        ]);
       });
-      expect(existsSync(join(rootDir, ".boreal", "cache", "index.sqlite"))).toBe(false);
+      expect(existsSync(objectIndexPath(rootDir))).toBe(false);
     } finally {
       apply.mockRestore();
     }

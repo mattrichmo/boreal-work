@@ -83,6 +83,7 @@ describe("agent E2E fixture", () => {
       "Check coordination state",
       "Start or resume work",
       "Renew if work continues",
+      "Record observed evidence",
       "Finish with evidence",
       "Release if stopping"
     ]);
@@ -287,8 +288,6 @@ describe("agent E2E fixture", () => {
       "test",
       "--outcome",
       "passed",
-      "--command",
-      "agent-e2e fixture",
       "--verdict",
       "passed",
 	      "--close",

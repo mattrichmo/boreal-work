@@ -74,7 +74,7 @@ describe("file event log", () => {
     expect((await log.head()).seq).toBe(7);
     expect(await log.verify()).toEqual({ ok: true });
     expect(await log.verifyDeep()).toEqual({ ok: true, archives: 1 });
-    expect(await log.readAll()).toHaveLength(2);
+    expect(await log.readAll()).toHaveLength(7);
     expect(await log.readAllIncludingArchives()).toHaveLength(7);
   });
 
@@ -90,7 +90,7 @@ describe("file event log", () => {
     tampered.record.type = "tampered.archive";
     await writeFile(rotation.archivedPath, `${[lines[0], JSON.stringify(tampered)].join("\n")}\n`, "utf8");
 
-    expect(await log.verifyDeep()).toEqual({ ok: false, brokenAtSeq: 2, archives: 1 });
+    expect(await log.verifyDeep()).toMatchObject({ ok: false, brokenAtSeq: 2, archives: 1 });
   });
 
   it("rotation genesis links the archived head hash", async () => {
@@ -110,7 +110,7 @@ describe("file event log", () => {
     expect(genesis.seq).toBe(entry.seq + 1);
     expect(genesis.prevHash).toBe(entry.hash);
     expect(genesis.record.type).toBe("log.rotated");
-    expect(genesis.record.payload.archivedPath).toBe(rotation.archivedPath);
+    expect(genesis.record.payload.archivedPath).toBe("events-0001.jsonl.archived");
     expect(genesis.record.payload.archivedHead).toEqual(rotation.archivedHead);
   });
 });

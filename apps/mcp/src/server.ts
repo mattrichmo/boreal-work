@@ -34,24 +34,34 @@ export interface JsonRpcResponse {
 }
 
 export async function handleBorealMcpRequest(
-  request: JsonRpcRequest,
+  request: unknown,
   options: BorealMcpServerOptions = {}
 ): Promise<JsonRpcResponse | undefined> {
-  if (request.id === undefined) {
-    await handleNotification(request, options);
+  const normalized = normalizeRequest(request);
+  if (!normalized) {
+    return invalidRequestResponse(requestId(request));
+  }
+
+  if (normalized.id === undefined) {
+    try {
+      await handleNotification(normalized, options);
+    } catch {
+      // JSON-RPC notifications do not have a response channel. A malformed or
+      // failed notification must not tear down the long-lived stdio server.
+    }
     return undefined;
   }
 
   try {
     return {
       jsonrpc: "2.0",
-      id: request.id,
-      result: await dispatchRequest(request, options)
+      id: normalized.id,
+      result: await dispatchRequest(normalized, options)
     };
   } catch (error) {
     return {
       jsonrpc: "2.0",
-      id: request.id,
+      id: normalized.id,
       error: jsonRpcError(error)
     };
   }
@@ -69,7 +79,14 @@ export async function serveBorealMcpStdio(options: BorealMcpServerOptions = {}):
       if (!trimmed) {
         continue;
       }
-      const response = await handleBorealMcpRequest(parseRequest(trimmed), options);
+      let response: JsonRpcResponse | undefined;
+      try {
+        response = await handleBorealMcpRequest(parseRequest(trimmed), options);
+      } catch {
+        // Parsing is deliberately isolated per line. The next JSON-RPC message
+        // must remain serviceable after malformed input.
+        response = parseErrorResponse();
+      }
       if (response) {
         process.stdout.write(`${JSON.stringify(response)}\n`);
       }
@@ -119,28 +136,106 @@ async function callTool(params: unknown, options: BorealMcpServerOptions): Promi
 }
 
 function parseRequest(line: string): JsonRpcRequest {
-  const parsed = safeParseJson(line, { schemaName: "boreal.mcp.json-rpc.v1", expectedObject: true });
-  if (!isRecord(parsed) || typeof parsed.method !== "string") {
-    throw new BorealError("BOREAL_INVALID_INPUT", "MCP JSON-RPC message must include a method");
-  }
-  return parsed as unknown as JsonRpcRequest;
+  return safeParseJson(line, { schemaName: "boreal.mcp.json-rpc.v1" }) as JsonRpcRequest;
 }
 
 function jsonRpcError(error: unknown): JsonRpcResponse["error"] {
   if (isBorealError(error)) {
     return {
       code: -32602,
-      message: error.message,
+      message: boundedMessage(error.message),
       data: {
         code: error.code,
-        details: error.details
+        details: boundedDiagnostic(error.details)
       }
     };
   }
   return {
     code: -32603,
-    message: error instanceof Error ? error.message : String(error)
+    message: "Internal MCP server error"
   };
+}
+
+function normalizeRequest(value: unknown): JsonRpcRequest | undefined {
+  if (!isRecord(value) || (value.jsonrpc !== undefined && value.jsonrpc !== "2.0") || typeof value.method !== "string") {
+    return undefined;
+  }
+  if (Object.prototype.hasOwnProperty.call(value, "id") && !isJsonRpcId(value.id)) {
+    return undefined;
+  }
+  return value as unknown as JsonRpcRequest;
+}
+
+function requestId(value: unknown): string | number | null {
+  if (!isRecord(value) || !isJsonRpcId(value.id)) {
+    return null;
+  }
+  return value.id;
+}
+
+function isJsonRpcId(value: unknown): value is string | number | null {
+  return value === null || typeof value === "string" || (typeof value === "number" && Number.isFinite(value));
+}
+
+function invalidRequestResponse(id: string | number | null): JsonRpcResponse {
+  return {
+    jsonrpc: "2.0",
+    id,
+    error: {
+      code: -32600,
+      message: "Invalid JSON-RPC request"
+    }
+  };
+}
+
+function parseErrorResponse(): JsonRpcResponse {
+  return {
+    jsonrpc: "2.0",
+    id: null,
+    error: {
+      code: -32700,
+      message: "Invalid JSON-RPC message"
+    }
+  };
+}
+
+const MAX_DIAGNOSTIC_DEPTH = 3;
+const MAX_DIAGNOSTIC_ITEMS = 20;
+const MAX_DIAGNOSTIC_STRING_LENGTH = 1_000;
+const SENSITIVE_DIAGNOSTIC_KEY = /(authorization|api[-_]?key|cookie|credential|password|private[-_]?key|secret|token)/iu;
+
+function boundedMessage(value: string): string {
+  return redactDiagnosticText(value).slice(0, MAX_DIAGNOSTIC_STRING_LENGTH);
+}
+
+function boundedDiagnostic(value: unknown, depth = 0): unknown {
+  if (value === null || typeof value === "number" || typeof value === "boolean") {
+    return value;
+  }
+  if (typeof value === "string") {
+    return redactDiagnosticText(value).slice(0, MAX_DIAGNOSTIC_STRING_LENGTH);
+  }
+  if (depth >= MAX_DIAGNOSTIC_DEPTH) {
+    return "[diagnostic depth limited]";
+  }
+  if (Array.isArray(value)) {
+    return value.slice(0, MAX_DIAGNOSTIC_ITEMS).map((entry) => boundedDiagnostic(entry, depth + 1));
+  }
+  if (isRecord(value)) {
+    return Object.fromEntries(
+      Object.entries(value).slice(0, MAX_DIAGNOSTIC_ITEMS).map(([key, entry]) => [
+        key,
+        SENSITIVE_DIAGNOSTIC_KEY.test(key) ? "[redacted]" : boundedDiagnostic(entry, depth + 1)
+      ])
+    );
+  }
+  return String(value).slice(0, MAX_DIAGNOSTIC_STRING_LENGTH);
+}
+
+function redactDiagnosticText(value: string): string {
+  return value
+    .replace(/((?:authorization|api[-_]?key|cookie|credential|password|private[-_]?key|secret|token)\s*[:=]\s*)[^\s,;]+/giu, "$1[redacted]")
+    .replace(/([?&](?:api[-_]?key|password|secret|token)=)[^&\s]+/giu, "$1[redacted]");
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

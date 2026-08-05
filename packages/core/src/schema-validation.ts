@@ -79,6 +79,11 @@ export const TEMPLATE_SCHEMA_IDS = {
   workStructureTemplate: "https://boreal.work/schemas/work-structure-template.schema.json"
 } as const;
 
+export const PROJECT_SCHEMA_IDS = {
+  projectManifest: "https://boreal.work/schemas/projects/project-manifest.schema.json",
+  toolchainLock: "https://boreal.work/schemas/projects/toolchain-lock.schema.json"
+} as const;
+
 export const RUNTIME_SCHEMA_CONTRACTS = [
   {
     key: "workItem",
@@ -210,6 +215,20 @@ export const RUNTIME_SCHEMA_CONTRACTS = [
 
 export const PROJECT_SCHEMA_CONTRACTS = [
   {
+    key: "projectManifest",
+    schemaId: PROJECT_SCHEMA_IDS.projectManifest,
+    schemaPath: "schemas/projects/project-manifest.schema.json",
+    runtimeSection: undefined,
+    validator: projectManifestSchemaIssues
+  },
+  {
+    key: "toolchainLock",
+    schemaId: PROJECT_SCHEMA_IDS.toolchainLock,
+    schemaPath: "schemas/projects/toolchain-lock.schema.json",
+    runtimeSection: undefined,
+    validator: toolchainLockSchemaIssues
+  },
+  {
     key: "projectRegistry",
     schemaId: PROJECT_REGISTRY_SCHEMA_ID,
     schemaPath: "schemas/projects/project-registry.schema.json",
@@ -217,6 +236,39 @@ export const PROJECT_SCHEMA_CONTRACTS = [
     validator: projectRegistryDocumentSchemaIssues
   }
 ] as const satisfies readonly PublishedSchemaContract[];
+
+export function projectManifestSchemaIssues(value: unknown, path = "$"): readonly SchemaValidationIssue[] {
+  const schemaId = PROJECT_SCHEMA_IDS.projectManifest;
+  if (!isRecord(value)) {
+    return [issue(schemaId, path, "must be an object")];
+  }
+  return [
+    ...literalIssue(value.schemaVersion, `${path}.schemaVersion`, schemaId, "boreal.project-manifest.v1"),
+    ...patternStringIssue(value.projectId, `${path}.projectId`, schemaId, /^project_[a-z0-9]{16,64}$/u),
+    ...enumIssue(value.storage, `${path}.storage`, schemaId, ["file-v2", "objects-v1"]),
+    ...literalIssue(value.toolchainLock, `${path}.toolchainLock`, schemaId, ".boreal/toolchain.lock.json"),
+    ...literalIssue(value.localConfig, `${path}.localConfig`, schemaId, ".boreal/project.json")
+  ];
+}
+
+export function toolchainLockSchemaIssues(value: unknown, path = "$"): readonly SchemaValidationIssue[] {
+  const schemaId = PROJECT_SCHEMA_IDS.toolchainLock;
+  if (!isRecord(value)) {
+    return [issue(schemaId, path, "must be an object")];
+  }
+  return [
+    ...literalIssue(value.schemaVersion, `${path}.schemaVersion`, schemaId, "boreal.toolchain-lock.v1"),
+    ...patternStringIssue(value.projectId, `${path}.projectId`, schemaId, /^project_[a-z0-9]{16,64}$/u),
+    ...patternStringIssue(value.semanticVersion, `${path}.semanticVersion`, schemaId, /^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/u),
+    ...patternStringIssue(value.buildSha, `${path}.buildSha`, schemaId, /^[a-f0-9]{40,64}$/u),
+    ...patternStringIssue(value.artifactDigest, `${path}.artifactDigest`, schemaId, /^sha256:[a-f0-9]{64}$/u),
+    ...integerAtLeastIssue(value.protocolEpoch, `${path}.protocolEpoch`, schemaId, 1),
+    ...integerAtLeastIssue(value.writerEpoch, `${path}.writerEpoch`, schemaId, 1),
+    ...integerAtLeastIssue(value.readerEpoch, `${path}.readerEpoch`, schemaId, 1),
+    ...integerAtLeastIssue(value.cacheEpoch, `${path}.cacheEpoch`, schemaId, 1),
+    ...patternStringIssue(value.agentAssetDigest, `${path}.agentAssetDigest`, schemaId, /^sha256:[a-f0-9]{64}$/u)
+  ];
+}
 
 export const AGENT_DIRECTIVE_SCHEMA_CONTRACTS = [
   {
@@ -1004,7 +1056,7 @@ export function runtimeOperationSchemaIssues(value: unknown, path = "$"): readon
     ...stringIssue(value.startedAt, `${path}.startedAt`, schemaId),
     ...stringIssue(value.finishedAt, `${path}.finishedAt`, schemaId),
     ...integerAtLeastIssue(value.exitCode, `${path}.exitCode`, schemaId, 0),
-    ...enumIssue(value.status, `${path}.status`, schemaId, ["succeeded", "failed"]),
+    ...enumIssue(value.status, `${path}.status`, schemaId, ["started", "in_progress", "succeeded", "failed", "partial", "unknown"]),
     ...booleanIssue(value.stateChanged, `${path}.stateChanged`, schemaId),
     ...booleanIssue(value.generatedArtifactsChanged, `${path}.generatedArtifactsChanged`, schemaId),
     ...uniqueStringArrayIssue(value.eventIds, `${path}.eventIds`, schemaId)
@@ -1015,6 +1067,34 @@ export function runtimeOperationSchemaIssues(value: unknown, path = "$"): readon
   }
   if (value.errorMessage !== undefined) {
     issues.push(...stringIssue(value.errorMessage, `${path}.errorMessage`, schemaId));
+  }
+  if (value.phase !== undefined) {
+    issues.push(...nonEmptyStringIssue(value.phase, `${path}.phase`, schemaId));
+  }
+  for (const [key, current] of [
+    ["durationMs", value.durationMs],
+    ["lockWaitMs", value.lockWaitMs],
+    ["processId", value.processId],
+    ["storageHeadSeq", value.storageHeadSeq]
+  ] as const) {
+    if (current !== undefined) {
+      issues.push(...integerAtLeastIssue(current, `${path}.${key}`, schemaId, 0));
+    }
+  }
+  if (value.host !== undefined) {
+    issues.push(...nonEmptyStringIssue(value.host, `${path}.host`, schemaId));
+  }
+  if (value.resultUri !== undefined) {
+    issues.push(...nonEmptyStringIssue(value.resultUri, `${path}.resultUri`, schemaId));
+  }
+  if (value.stateChangeOutcome !== undefined) {
+    issues.push(...enumIssue(value.stateChangeOutcome, `${path}.stateChangeOutcome`, schemaId, ["changed", "unchanged", "partial", "unknown"]));
+  }
+  if (value.generatedArtifactOutcome !== undefined) {
+    issues.push(...enumIssue(value.generatedArtifactOutcome, `${path}.generatedArtifactOutcome`, schemaId, ["changed", "unchanged", "partial", "unknown"]));
+  }
+  if (value.auditOutcome !== undefined) {
+    issues.push(...enumIssue(value.auditOutcome, `${path}.auditOutcome`, schemaId, ["complete", "incomplete", "unknown"]));
   }
 
   return issues;

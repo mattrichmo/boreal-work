@@ -219,7 +219,7 @@ function agentDirectiveSnapshotFixture(): AgentDirectiveSnapshot {
     git: {
       roots: [
         {
-          root: "/Users/cybertron/Code/boreal-work",
+          root: "/workspace/boreal-work",
           branchName: "main",
           detached: false,
           protectedBranch: true,
@@ -252,7 +252,7 @@ function agentDirectiveSnapshotFixture(): AgentDirectiveSnapshot {
         {
           code: "workspace.root",
           severity: "ok",
-          message: "Workspace root: /Users/cybertron/Code/boreal-work",
+          message: "Workspace root: /workspace/boreal-work",
           blocking: false,
           recommendedCommands: []
         }
@@ -280,11 +280,11 @@ function agentDirectiveSnapshotFixture(): AgentDirectiveSnapshot {
     },
     actor: {
       actor: {
-        id: "cybertron" as AgentId,
+        id: "example-agent" as AgentId,
         kind: "agent",
-        displayName: "cybertron"
+        displayName: "example-agent"
       },
-      activeAgentId: "cybertron" as AgentId,
+      activeAgentId: "example-agent" as AgentId,
       activeReservationIds: [reservationId],
       purpose: "Implement directive compiler input snapshots"
     }

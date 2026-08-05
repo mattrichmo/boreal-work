@@ -26,6 +26,11 @@ export const BOREAL_MCP_CONFIG_SCHEMA_VERSION = "boreal.mcp-config.v1";
 const DEFAULT_LIST_LIMIT = 20;
 const MAX_LIST_LIMIT = 100;
 const MAX_PAYLOAD_CHARS = 64_000;
+const MAX_DIAGNOSTIC_CHARS = 4_000;
+const MAX_DIAGNOSTIC_DEPTH = 8;
+const MAX_DIAGNOSTIC_ITEMS = 24;
+const MAX_DIAGNOSTIC_STRING_LENGTH = 1_000;
+const SENSITIVE_DIAGNOSTIC_KEY = /(authorization|api[-_]?key|cookie|credential|password|private[-_]?key|secret|token)/iu;
 
 export type BorealMcpToolName =
   | "boreal_command_catalog"
@@ -46,13 +51,20 @@ export type BorealMcpToolName =
   | "boreal_agent_finish"
   | "boreal_sync_refresh";
 
+export interface BorealCliRunOptions {
+  readonly workspaceRoot: string;
+  /** Correlates an adapter invocation with the operation it produced. */
+  readonly correlationId?: string;
+}
+
 export interface BorealCliRunner {
-  run(args: readonly string[], options: { readonly workspaceRoot: string }): Promise<unknown>;
-  runEnvelope?(args: readonly string[], options: { readonly workspaceRoot: string }): Promise<BorealCliEnvelope>;
+  run(args: readonly string[], options: BorealCliRunOptions): Promise<unknown>;
+  runEnvelope?(args: readonly string[], options: BorealCliRunOptions): Promise<BorealCliEnvelope>;
 }
 
 export interface BorealMcpServerOptions {
   readonly workspaceRoot?: string;
+  readonly registryEntries?: readonly McpProjectRegistryEntry[];
   readonly runner?: BorealCliRunner;
   readonly sessionIdFactory?: () => string;
 }
@@ -134,11 +146,10 @@ interface BorealCliEnvelope {
 }
 
 const COMMON_PROPERTIES = {
-  workspaceRoot: { type: "string", description: "Explicit Boreal project root. Required unless the MCP server was launched with --workspace." },
-  projectRoot: { type: "string", description: "Selected project root. Defaults to workspaceRoot." },
-  memoryRoot: { type: "string", description: "Selected memory root. Defaults to .boreal/project.json or <project>/memory." },
-  memoryLayout: { type: "string", enum: ["in-repo", "child", "sibling"] },
-  selectedProjectId: { type: "string" }
+  selectedProjectId: {
+    type: "string",
+    description: "Stable project ID. Used only by a global MCP server backed by its own authoritative project registry."
+  }
 } as const;
 
 const CONFIRM_PROPERTY = {
@@ -526,6 +537,7 @@ export async function callBorealMcpTool(
     throw new BorealError("BOREAL_NOT_FOUND", "Unknown Boreal MCP tool", { name });
   }
   try {
+    validateToolInput(spec.inputSchema, args);
     const boundary = await boundaryFromInput(args, options);
     const runner = options.runner ?? createNodeBorealCliRunner({ workspaceRoot: boundary.workspaceRoot });
     const context = { boundary, runner };
@@ -589,6 +601,7 @@ async function executeMutatingTool(
   }
 
   const sessionId = normalizeActorId(options.sessionIdFactory?.() ?? `mcp-${randomUUID()}`);
+  const correlationId = sessionId;
   const commandArgs = spec.command(input, context.boundary);
   const commandPreview = ["bwrk", "--workspace", context.boundary.workspaceRoot, "--session", sessionId, ...commandArgs];
   const contract = defineMcpToolContract(context.boundary, {
@@ -599,8 +612,16 @@ async function executeMutatingTool(
     returnsOperationId: true,
     commandPreview
   });
-  const result = await context.runner.run(commandPreview.slice(1), { workspaceRoot: context.boundary.workspaceRoot });
-  const operation = await loadMutationOperation(context.runner, context.boundary.workspaceRoot, sessionId);
+  const result = await context.runner.run(commandPreview.slice(1), {
+    workspaceRoot: context.boundary.workspaceRoot,
+    correlationId
+  });
+  const operation = await loadMutationOperation(
+    context.runner,
+    context.boundary.workspaceRoot,
+    correlationId,
+    mcpCommandPath(commandArgs)
+  );
 
   return toolResult({
     schemaVersion: BOREAL_MCP_TOOL_VERSION,
@@ -610,6 +631,7 @@ async function executeMutatingTool(
     memoryRoot: context.boundary.memoryRoot,
     contract,
     commandPreview,
+    correlationId,
     operationId: operation.id,
     operation,
     result
@@ -619,20 +641,35 @@ async function executeMutatingTool(
 async function loadMutationOperation(
   runner: BorealCliRunner,
   workspaceRoot: string,
-  sessionId: string
+  correlationId: string,
+  commandPath: string
 ): Promise<OperationListRow> {
   const rows = await runner.run(
-    ["--workspace", workspaceRoot, "operation", "list", "--session-id", sessionId, "--limit", "1", "--json"],
-    { workspaceRoot }
+    ["--workspace", workspaceRoot, "operation", "list", "--session-id", correlationId, "--command", commandPath, "--limit", "20", "--json"],
+    { workspaceRoot, correlationId }
   );
-  if (!Array.isArray(rows) || rows.length === 0 || !isRecord(rows[0]) || typeof rows[0].id !== "string") {
+  const candidates = Array.isArray(rows)
+    ? rows.filter((row): row is Record<string, unknown> =>
+        isRecord(row) &&
+        row.sessionId === correlationId &&
+        row.commandPath === commandPath &&
+        typeof row.id === "string"
+      )
+    : [];
+  if (candidates.length !== 1) {
     throw new BorealError("BOREAL_INVARIANT", "Confirmed MCP mutation did not produce a queryable operation record", {
       workspaceRoot,
-      sessionId,
-      rows
+      correlationId,
+      commandPath,
+      candidateCount: candidates.length,
+      candidateIds: candidates.slice(0, MAX_DIAGNOSTIC_ITEMS).map((row) => row.id)
     });
   }
-  return rows[0] as unknown as OperationListRow;
+  return candidates[0] as unknown as OperationListRow;
+}
+
+function mcpCommandPath(args: readonly string[]): string {
+  return args.slice(0, 2).join(" ");
 }
 
 async function scopedRead(context: ToolContext, args: readonly string[]): Promise<unknown> {
@@ -661,21 +698,36 @@ async function boundaryFromInput(
   input: ToolInput,
   options: BorealMcpServerOptions
 ): Promise<McpProjectBoundary> {
-  const workspaceRootValue = optionalString(input, "workspaceRoot") ?? options.workspaceRoot;
-  if (!workspaceRootValue) {
-    throw new BorealError("BOREAL_INVALID_INPUT", "Boreal MCP tools require workspaceRoot or a server --workspace");
+  if (options.workspaceRoot) {
+    const workspaceRoot = resolve(options.workspaceRoot);
+    const setup = await readProjectSetup(workspaceRoot);
+    const projectRoot = resolve(setup.projectRoot ?? workspaceRoot);
+    const memoryRoot = resolve(setup.memoryRoot ?? join(projectRoot, "memory"));
+    return bindMcpProjectBoundary({
+      workspaceRoot,
+      projectRoot,
+      memoryRoot,
+      memoryLayout: setup.memoryLayout,
+      selectedProjectId: optionalString(input, "selectedProjectId"),
+      registryEntries: options.registryEntries
+    });
   }
-  const workspaceRoot = resolve(workspaceRootValue);
-  const setup = await readProjectSetup(workspaceRoot);
-  const projectRoot = resolve(optionalString(input, "projectRoot") ?? setup.projectRoot ?? workspaceRoot);
-  const memoryRoot = resolve(optionalString(input, "memoryRoot") ?? setup.memoryRoot ?? join(projectRoot, "memory"));
+
+  const selectedProjectId = requiredString(input, "selectedProjectId");
+  const registryEntries = options.registryEntries ?? [];
+  const selected = registryEntries.find((entry) => entry.id === selectedProjectId);
+  if (!selected) {
+    throw new BorealError("BOREAL_NOT_FOUND", "Selected MCP project is not present in the server registry", {
+      selectedProjectId
+    });
+  }
   return bindMcpProjectBoundary({
-    workspaceRoot,
-    projectRoot,
-    memoryRoot,
-    memoryLayout: memoryLayoutInput(input, setup.memoryLayout),
-    selectedProjectId: optionalString(input, "selectedProjectId"),
-    registryEntries: registryEntriesInput(input)
+    workspaceRoot: selected.projectRoot,
+    projectRoot: selected.projectRoot,
+    memoryRoot: selected.memoryRoot,
+    memoryLayout: selected.memoryLayout,
+    selectedProjectId,
+    registryEntries
   });
 }
 
@@ -732,13 +784,33 @@ async function runCommand(input: {
   const out = result.stdout.text;
   const err = result.stderr.text;
   const payload = firstJsonPayload(out, err);
+  if (result.exitCode !== 0) {
+    const parsedFailure = parseCliFailurePayload(payload);
+    const diagnostics = boundedDiagnostic({
+      exitCode: result.exitCode,
+      signal: result.signal,
+      timedOut: result.timedOut,
+      cancelled: result.cancelled,
+      stdout: errExcerpt(out),
+      stderr: errExcerpt(err)
+    });
+    if (parsedFailure) {
+      throw new BorealError(
+        cliErrorCode(parsedFailure.code),
+        boundedDiagnosticText(typeof parsedFailure.message === "string" ? parsedFailure.message : "Boreal CLI command failed"),
+        {
+          exitCode: result.exitCode,
+          diagnostics,
+          details: boundedDiagnostic(parsedFailure.details)
+        }
+      );
+    }
+    throw new BorealError("BOREAL_STORAGE_ERROR", `Boreal CLI exited with code ${result.exitCode ?? "unknown"}`, diagnostics);
+  }
   if (payload) {
     return payload;
   }
-  if (result.exitCode === 0) {
-    return out;
-  }
-  throw new BorealError("BOREAL_STORAGE_ERROR", err.trim() || out.trim() || `bwrk exited with ${result.exitCode ?? "unknown"}`);
+  return out;
 }
 
 function parseCliEnvelope(output: string): BorealCliEnvelope {
@@ -756,6 +828,27 @@ function parseCliEnvelope(output: string): BorealCliEnvelope {
 
 function parseCliData(output: string): unknown {
   return parseCliEnvelope(output).data;
+}
+
+interface CliFailurePayload {
+  readonly code?: unknown;
+  readonly message?: unknown;
+  readonly details?: unknown;
+}
+
+function parseCliFailurePayload(payload: string | undefined): CliFailurePayload | undefined {
+  if (!payload) {
+    return undefined;
+  }
+  try {
+    const parsed = JSON.parse(payload) as unknown;
+    if (!isRecord(parsed) || parsed.ok !== false) {
+      return undefined;
+    }
+    return parsed as CliFailurePayload;
+  } catch {
+    return undefined;
+  }
 }
 
 function cliEnvelopeFromRecord(value: Readonly<Record<string, unknown>>): BorealCliEnvelope {
@@ -784,37 +877,85 @@ function toolError(error: unknown): BorealMcpToolResult {
     ? {
         ok: false,
         code: error.code,
-        message: error.message,
+        message: boundedDiagnosticText(error.message),
         retryable: classifyBorealError(error.code, error.details).retryable,
         recovery: classifyBorealError(error.code, error.details).recovery,
-        details: error.details
+        details: boundedDiagnostic(error.details)
       }
     : {
         ok: false,
         code: "BOREAL_INVARIANT",
-        message: error instanceof Error ? error.message : String(error),
+        message: boundedDiagnosticText(error instanceof Error ? error.message : String(error)),
         retryable: false,
         recovery: classifyBorealError("BOREAL_INVARIANT").recovery
       };
+  const bounded = boundedPayload(payload);
   return {
     isError: true,
-    content: [{ type: "text", text: `${JSON.stringify(payload, null, 2)}\n` }],
-    structuredContent: payload
+    content: [{ type: "text", text: `${JSON.stringify(bounded, null, 2)}\n` }],
+    structuredContent: bounded
   };
 }
 
 function boundedPayload(value: unknown): unknown {
-  const text = JSON.stringify(value);
+  const sanitized = boundedDiagnostic(value);
+  const text = safeJsonStringify(sanitized);
   if (text.length <= MAX_PAYLOAD_CHARS) {
-    return value;
+    return sanitized;
   }
   return {
     schemaVersion: BOREAL_MCP_TOOL_VERSION,
     truncated: true,
     fullSizeChars: text.length,
     maxSizeChars: MAX_PAYLOAD_CHARS,
-    preview: previewJsonValue(value, 0)
+    preview: previewJsonValue(sanitized, 0)
   };
+}
+
+function boundedDiagnostic(value: unknown, depth = 0): unknown {
+  if (value === null || typeof value === "number" || typeof value === "boolean") {
+    return value;
+  }
+  if (typeof value === "string") {
+    return redactDiagnosticText(value).slice(0, MAX_DIAGNOSTIC_STRING_LENGTH);
+  }
+  if (depth >= MAX_DIAGNOSTIC_DEPTH) {
+    return "[diagnostic depth limited]";
+  }
+  if (Array.isArray(value)) {
+    return value.slice(0, MAX_DIAGNOSTIC_ITEMS).map((entry) => boundedDiagnostic(entry, depth + 1));
+  }
+  if (isRecord(value)) {
+    return Object.fromEntries(
+      Object.entries(value).slice(0, MAX_DIAGNOSTIC_ITEMS).map(([key, entry]) => [
+        key,
+        SENSITIVE_DIAGNOSTIC_KEY.test(key) ? "[redacted]" : boundedDiagnostic(entry, depth + 1)
+      ])
+    );
+  }
+  return String(value).slice(0, MAX_DIAGNOSTIC_STRING_LENGTH);
+}
+
+function boundedDiagnosticText(value: string): string {
+  return redactDiagnosticText(value).slice(0, MAX_DIAGNOSTIC_STRING_LENGTH);
+}
+
+function errExcerpt(value: string): string {
+  return boundedDiagnosticText(value.trim()).slice(0, MAX_DIAGNOSTIC_CHARS);
+}
+
+function redactDiagnosticText(value: string): string {
+  return value
+    .replace(/((?:authorization|api[-_]?key|cookie|credential|password|private[-_]?key|secret|token)\s*[:=]\s*)[^\s,;]+/giu, "$1[redacted]")
+    .replace(/([?&](?:api[-_]?key|password|secret|token)=)[^&\s]+/giu, "$1[redacted]");
+}
+
+function safeJsonStringify(value: unknown): string {
+  try {
+    return JSON.stringify(value) ?? "null";
+  } catch {
+    return JSON.stringify({ truncated: true, reason: "diagnostic_not_serializable" });
+  }
 }
 
 function previewJsonValue(value: unknown, depth: number): unknown {
@@ -849,6 +990,79 @@ function schema(properties: Readonly<Record<string, unknown>>, required: readonl
     required,
     additionalProperties: false
   };
+}
+
+function validateToolInput(schema: JsonSchemaObject, input: ToolInput): void {
+  const allowed = new Set(Object.keys(schema.properties));
+  const unknown = Object.keys(input).filter((key) => !allowed.has(key));
+  if (schema.additionalProperties === false && unknown.length > 0) {
+    throw new BorealError("BOREAL_INVALID_INPUT", "MCP tool arguments contain unsupported properties", {
+      unknown,
+      allowed: [...allowed].sort((left, right) => left.localeCompare(right))
+    });
+  }
+
+  const missing = (schema.required ?? []).filter((key) => input[key] === undefined);
+  if (missing.length > 0) {
+    throw new BorealError("BOREAL_INVALID_INPUT", "MCP tool arguments are missing required properties", { missing });
+  }
+
+  for (const [key, value] of Object.entries(input)) {
+    const definition = schema.properties[key];
+    if (!isRecord(definition)) {
+      continue;
+    }
+    const expectedType = definition.type;
+    const valid = expectedType === "array"
+      ? Array.isArray(value)
+      : expectedType === "number"
+        ? typeof value === "number" && Number.isFinite(value)
+        : expectedType === "boolean"
+          ? typeof value === "boolean"
+          : expectedType === "string"
+            ? typeof value === "string"
+            : true;
+    if (!valid) {
+      throw new BorealError("BOREAL_INVALID_INPUT", "MCP tool argument has the wrong type", {
+        property: key,
+        expectedType,
+        actualType: Array.isArray(value) ? "array" : typeof value
+      });
+    }
+    if (Array.isArray(definition.enum) && !definition.enum.includes(value)) {
+      throw new BorealError("BOREAL_INVALID_INPUT", "MCP tool argument is outside the allowed enum", {
+        property: key,
+        value,
+        allowed: definition.enum
+      });
+    }
+    if (typeof value === "number") {
+      if (typeof definition.minimum === "number" && value < definition.minimum) {
+        throw new BorealError("BOREAL_INVALID_INPUT", "MCP tool numeric argument is below its minimum", {
+          property: key,
+          value,
+          minimum: definition.minimum
+        });
+      }
+      if (typeof definition.maximum === "number" && value > definition.maximum) {
+        throw new BorealError("BOREAL_INVALID_INPUT", "MCP tool numeric argument exceeds its maximum", {
+          property: key,
+          value,
+          maximum: definition.maximum
+        });
+      }
+    }
+    if (Array.isArray(value) && isRecord(definition.items) && definition.items.type === "string") {
+      const invalidIndex = value.findIndex((entry) => typeof entry !== "string");
+      if (invalidIndex >= 0) {
+        throw new BorealError("BOREAL_INVALID_INPUT", "MCP tool array argument contains an invalid item", {
+          property: key,
+          index: invalidIndex,
+          expectedType: "string"
+        });
+      }
+    }
+  }
 }
 
 function requiredString(input: ToolInput, name: string): string {
@@ -995,31 +1209,8 @@ function isDefined<T>(value: T | undefined): value is T {
   return value !== undefined;
 }
 
-function memoryLayoutInput(input: ToolInput, fallback?: ProjectRegistryMemoryLayout): ProjectRegistryMemoryLayout | undefined {
-  return memoryLayoutValue(input.memoryLayout) ?? fallback;
-}
-
 function memoryLayoutValue(value: unknown): ProjectRegistryMemoryLayout | undefined {
   return value === "in-repo" || value === "child" || value === "sibling" ? value : undefined;
-}
-
-function registryEntriesInput(input: ToolInput): readonly McpProjectRegistryEntry[] {
-  const value = input.registryEntries;
-  if (!Array.isArray(value)) {
-    return [];
-  }
-  return value.flatMap((entry): readonly McpProjectRegistryEntry[] => {
-    if (!isRecord(entry)) {
-      return [];
-    }
-    const id = typeof entry.id === "string" ? entry.id : undefined;
-    const projectRoot = typeof entry.projectRoot === "string" ? entry.projectRoot : undefined;
-    const memoryRoot = typeof entry.memoryRoot === "string" ? entry.memoryRoot : undefined;
-    const memoryLayout = memoryLayoutValue(entry.memoryLayout);
-    return id && projectRoot && memoryRoot && memoryLayout
-      ? [{ id, projectRoot, memoryRoot, memoryLayout }]
-      : [];
-  });
 }
 
 function cliErrorCode(value: unknown): ConstructorParameters<typeof BorealError>[0] {

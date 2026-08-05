@@ -130,7 +130,7 @@ Allowed board transitions:
 | Add completion evidence | `bwrk evidence add <work-id> --summary <text> --kind <kind> --outcome <outcome> [--command <cmd>] [--uri <uri>] --json` | Mutating; `requiresConfirmation: true`; evidence must be recorded before verification. |
 | Verify a card | `bwrk work verify <work-id> --evidence <evidence-id> --verdict passed --json` | Mutating; `requiresConfirmation: true`; passed verification requires passed evidence under runtime policy. |
 | Close a card | `bwrk work close <work-id> --reason <text> --json` | Mutating; `requiresConfirmation: true`; close reason required and verification policy must already be satisfied. |
-| Reserved-work closeout | `bwrk agent finish current --agent <agent-id> --summary <text> --kind <kind> --command <cmd> --verdict passed --close --reason <text> --json` | Preferred for owned active reservations because evidence, verification, close, release, readiness recompute, and eventing are one transaction. |
+| Reserved-work closeout | `bwrk agent finish current --agent <agent-id> --evidence <evidence-id> --verdict passed --close --reason <text> --json` | Preferred after `evidence run` because referenced evidence retains its witnessed provenance while verification, close, release, readiness recompute, and eventing remain one transaction. |
 | Add or remove blockers | `bwrk dep add <work-id> <depends-on-work-id> --json` or `bwrk dep remove <work-id> <depends-on-work-id> --json` | Mutating; `requiresConfirmation: true`; dependency cycles and missing graph edges fail closed. |
 
 Forbidden board transitions:

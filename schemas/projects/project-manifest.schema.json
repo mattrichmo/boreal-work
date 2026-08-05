@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://boreal.work/schemas/projects/project-manifest.schema.json",
+  "title": "Boreal Portable Project Manifest",
+  "type": "object",
+  "required": ["schemaVersion", "projectId", "storage", "toolchainLock", "localConfig"],
+  "properties": {
+    "schemaVersion": { "const": "boreal.project-manifest.v1" },
+    "projectId": { "type": "string", "pattern": "^project_[a-z0-9]{16,64}$" },
+    "storage": { "enum": ["file-v2", "objects-v1"] },
+    "toolchainLock": { "const": ".boreal/toolchain.lock.json" },
+    "localConfig": { "const": ".boreal/project.json" }
+  },
+  "additionalProperties": false
+}

@@ -7,6 +7,8 @@ import {
   assertPathInside,
   assertRealPathInside,
   canonicalJson,
+  createRecordMeta,
+  deterministicId,
   agentDirectiveBundleSchemaIssues,
   hashContent,
   nowIso,
@@ -18,23 +20,21 @@ import {
   type AgentDirectiveBundle,
   type AgentDirectiveBundleCarrier,
   type AgentReservation,
+  type AgentSummaryId,
   type ClaimId,
-  type ClaimRecord,
-  type ContextPack,
   type DecisionId,
-  type DecisionRecord,
+  type DirectiveAcknowledgementId,
   type EvidenceId,
-  type EvidenceRecord,
+  type EventId,
   type GraphEdge,
   type GraphEdgeId,
-  type KnowledgeSource,
+  type IsoTimestamp,
   type KnowledgeSourceId,
   type ProjectionId,
-  type ProjectionRecord,
   type ReservationId,
+  type ReviewerHeartbeatId,
   type RuntimeEvent,
   type VerificationId,
-  type VerificationRecord,
   type WorkId,
   type WorkItem
 } from "@boreal/core";
@@ -45,7 +45,6 @@ import {
   objectIndexPath,
   writeTextFileAtomic,
   type BorealReader,
-  type BorealStore,
   type BorealWriter,
   type StoreSnapshot
 } from "@boreal/storage";
@@ -150,6 +149,7 @@ export interface GeneratedLedgerTombstones {
 export interface ImportResult {
   readonly imported: Record<SnapshotSection, number>;
   readonly skipped: Record<SnapshotSection, number>;
+  readonly deleted: Record<SnapshotSection, number>;
 }
 
 export interface ImportJsonOptions {
@@ -323,8 +323,11 @@ async function exportLedgersWithAdditionalDeletions(
   const document = await buildExportDocument(context);
   const resolvedDir = await resolveWorkspacePath(context, outDir ?? ".boreal/ledgers");
   const existingDeletions = await readExistingLedgerDeletions(resolvedDir);
-  const ledgerDeletions = canonicalLedgerDeletions([...existingDeletions, ...additionalDeletions]);
-  assertUniqueDeletions(ledgerDeletions);
+  const ledgerDeletions = mergeLedgerDeletions(
+    existingDeletions,
+    canonicalDeletionsFromEvents(document.state.events),
+    additionalDeletions
+  );
   await mkdir(resolvedDir, { recursive: true });
 
   const ledgerState = canonicalLedgerSnapshot(document.state);
@@ -374,7 +377,7 @@ export async function importJson(context: CliContext, fromPath: string, options:
     maxBytes: 50 * 1024 * 1024
   });
   const incoming = parseImportSnapshot(parsed);
-  return importSnapshot(context.store, incoming);
+  return importSnapshot(context, incoming, []);
 }
 
 export async function importLedgers(
@@ -383,8 +386,8 @@ export async function importLedgers(
   options: ImportJsonOptions = {}
 ): Promise<ImportResult> {
   const resolvedDir = await resolveReadablePath(context, fromDir, Boolean(options.allowExternalRead));
-  const incoming = (await readLedgerDirectory(resolvedDir)).state;
-  return importSnapshot(context.store, incoming);
+  const incoming = await readLedgerDirectory(resolvedDir);
+  return importSnapshot(context, incoming.state, incoming.deletions);
 }
 
 export async function deleteWorkItemWithTombstone(
@@ -392,44 +395,17 @@ export async function deleteWorkItemWithTombstone(
   workId: WorkId,
   reason: string | undefined
 ): Promise<LedgerDeleteRecordResult> {
-  let deletedWork: WorkItem | undefined;
-  let tombstone: LedgerDeletionRecord | undefined;
-  try {
-    deletedWork = await context.store.write(async (writer) => {
-      const work = await writer.getWorkItem(workId);
-      if (!work) {
-        throw new BorealError("BOREAL_INVALID_INPUT", "Work item does not exist", { workId });
-      }
-      await assertWorkItemCanBeDeleted(writer, workId);
-      const deleted = await writer.deleteWorkItem(workId);
-      if (!deleted) {
-        throw new BorealError("BOREAL_CONFLICT", "Work item changed before deletion", { workId });
-      }
-      return work;
-    });
-    tombstone = {
-      schemaVersion: LEDGER_DELETION_SCHEMA_VERSION,
-      section: "workItems",
-      id: workId,
-      deletedAt: nowIso(),
-      reason,
-      deletedContentHash: deletedWork.meta.contentHash ?? hashContent(deletedWork)
-    };
-    const ledger = await exportLedgersWithAdditionalDeletions(context, undefined, [tombstone]);
-    return {
-      deleted: true,
-      section: "workItems",
-      id: workId,
-      tombstone,
-      ledger
-    };
-  } catch (error) {
-    const restoreWork = deletedWork;
-    if (restoreWork && tombstone) {
-      await context.store.write((writer) => writer.putWorkItem(restoreWork));
-    }
-    throw error;
-  }
+  return deleteCanonicalRecord(context, reason, {
+    section: "workItems",
+    id: workId,
+    missingMessage: "Work item does not exist",
+    changedMessage: "Work item changed before deletion",
+    details: { workId },
+    get: (writer) => writer.getWorkItem(workId),
+    validate: (writer) => assertWorkItemCanBeDeleted(writer, workId),
+    delete: (writer) => writer.deleteWorkItem(workId),
+    contentHash: (record) => record.meta.contentHash ?? hashContent(record)
+  });
 }
 
 export async function deleteEvidenceWithTombstone(
@@ -437,44 +413,17 @@ export async function deleteEvidenceWithTombstone(
   evidenceId: EvidenceId,
   reason: string | undefined
 ): Promise<LedgerDeleteRecordResult> {
-  let deletedEvidence: EvidenceRecord | undefined;
-  let tombstone: LedgerDeletionRecord | undefined;
-  try {
-    deletedEvidence = await context.store.write(async (writer) => {
-      const evidence = await writer.getEvidence(evidenceId);
-      if (!evidence) {
-        throw new BorealError("BOREAL_INVALID_INPUT", "Evidence does not exist", { evidenceId });
-      }
-      await assertEvidenceCanBeDeleted(writer, evidenceId);
-      const deleted = await writer.deleteEvidence(evidenceId);
-      if (!deleted) {
-        throw new BorealError("BOREAL_CONFLICT", "Evidence changed before deletion", { evidenceId });
-      }
-      return evidence;
-    });
-    tombstone = {
-      schemaVersion: LEDGER_DELETION_SCHEMA_VERSION,
-      section: "evidence",
-      id: evidenceId,
-      deletedAt: nowIso(),
-      reason,
-      deletedContentHash: deletedEvidence.meta.contentHash ?? hashContent(deletedEvidence)
-    };
-    const ledger = await exportLedgersWithAdditionalDeletions(context, undefined, [tombstone]);
-    return {
-      deleted: true,
-      section: "evidence",
-      id: evidenceId,
-      tombstone,
-      ledger
-    };
-  } catch (error) {
-    const restoreEvidence = deletedEvidence;
-    if (restoreEvidence && tombstone) {
-      await context.store.write((writer) => writer.putEvidence(restoreEvidence));
-    }
-    throw error;
-  }
+  return deleteCanonicalRecord(context, reason, {
+    section: "evidence",
+    id: evidenceId,
+    missingMessage: "Evidence does not exist",
+    changedMessage: "Evidence changed before deletion",
+    details: { evidenceId },
+    get: (writer) => writer.getEvidence(evidenceId),
+    validate: (writer) => assertEvidenceCanBeDeleted(writer, evidenceId),
+    delete: (writer) => writer.deleteEvidence(evidenceId),
+    contentHash: (record) => record.meta.contentHash ?? hashContent(record)
+  });
 }
 
 export async function deleteVerificationWithTombstone(
@@ -482,44 +431,17 @@ export async function deleteVerificationWithTombstone(
   verificationId: VerificationId,
   reason: string | undefined
 ): Promise<LedgerDeleteRecordResult> {
-  let deletedVerification: VerificationRecord | undefined;
-  let tombstone: LedgerDeletionRecord | undefined;
-  try {
-    deletedVerification = await context.store.write(async (writer) => {
-      const verification = await writer.getVerification(verificationId);
-      if (!verification) {
-        throw new BorealError("BOREAL_INVALID_INPUT", "Verification does not exist", { verificationId });
-      }
-      await assertVerificationCanBeDeleted(writer, verificationId);
-      const deleted = await writer.deleteVerification(verificationId);
-      if (!deleted) {
-        throw new BorealError("BOREAL_CONFLICT", "Verification changed before deletion", { verificationId });
-      }
-      return verification;
-    });
-    tombstone = {
-      schemaVersion: LEDGER_DELETION_SCHEMA_VERSION,
-      section: "verifications",
-      id: verificationId,
-      deletedAt: nowIso(),
-      reason,
-      deletedContentHash: deletedVerification.meta.contentHash ?? hashContent(deletedVerification)
-    };
-    const ledger = await exportLedgersWithAdditionalDeletions(context, undefined, [tombstone]);
-    return {
-      deleted: true,
-      section: "verifications",
-      id: verificationId,
-      tombstone,
-      ledger
-    };
-  } catch (error) {
-    const restoreVerification = deletedVerification;
-    if (restoreVerification && tombstone) {
-      await context.store.write((writer) => writer.putVerification(restoreVerification));
-    }
-    throw error;
-  }
+  return deleteCanonicalRecord(context, reason, {
+    section: "verifications",
+    id: verificationId,
+    missingMessage: "Verification does not exist",
+    changedMessage: "Verification changed before deletion",
+    details: { verificationId },
+    get: (writer) => writer.getVerification(verificationId),
+    validate: (writer) => assertVerificationCanBeDeleted(writer, verificationId),
+    delete: (writer) => writer.deleteVerification(verificationId),
+    contentHash: (record) => record.meta.contentHash ?? hashContent(record)
+  });
 }
 
 export async function deleteKnowledgeSourceWithTombstone(
@@ -527,44 +449,17 @@ export async function deleteKnowledgeSourceWithTombstone(
   sourceId: KnowledgeSourceId,
   reason: string | undefined
 ): Promise<LedgerDeleteRecordResult> {
-  let deletedSource: KnowledgeSource | undefined;
-  let tombstone: LedgerDeletionRecord | undefined;
-  try {
-    deletedSource = await context.store.write(async (writer) => {
-      const source = await writer.getKnowledgeSource(sourceId);
-      if (!source) {
-        throw new BorealError("BOREAL_INVALID_INPUT", "Knowledge source does not exist", { sourceId });
-      }
-      await assertKnowledgeSourceCanBeDeleted(writer, sourceId);
-      const deleted = await writer.deleteKnowledgeSource(sourceId);
-      if (!deleted) {
-        throw new BorealError("BOREAL_CONFLICT", "Knowledge source changed before deletion", { sourceId });
-      }
-      return source;
-    });
-    tombstone = {
-      schemaVersion: LEDGER_DELETION_SCHEMA_VERSION,
-      section: "knowledgeSources",
-      id: sourceId,
-      deletedAt: nowIso(),
-      reason,
-      deletedContentHash: deletedSource.meta.contentHash ?? hashContent(deletedSource)
-    };
-    const ledger = await exportLedgersWithAdditionalDeletions(context, undefined, [tombstone]);
-    return {
-      deleted: true,
-      section: "knowledgeSources",
-      id: sourceId,
-      tombstone,
-      ledger
-    };
-  } catch (error) {
-    const restoreSource = deletedSource;
-    if (restoreSource && tombstone) {
-      await context.store.write((writer) => writer.putKnowledgeSource(restoreSource));
-    }
-    throw error;
-  }
+  return deleteCanonicalRecord(context, reason, {
+    section: "knowledgeSources",
+    id: sourceId,
+    missingMessage: "Knowledge source does not exist",
+    changedMessage: "Knowledge source changed before deletion",
+    details: { sourceId },
+    get: (writer) => writer.getKnowledgeSource(sourceId),
+    validate: (writer) => assertKnowledgeSourceCanBeDeleted(writer, sourceId),
+    delete: (writer) => writer.deleteKnowledgeSource(sourceId),
+    contentHash: (record) => record.meta.contentHash ?? hashContent(record)
+  });
 }
 
 export async function deleteClaimWithTombstone(
@@ -572,44 +467,17 @@ export async function deleteClaimWithTombstone(
   claimId: ClaimId,
   reason: string | undefined
 ): Promise<LedgerDeleteRecordResult> {
-  let deletedClaim: ClaimRecord | undefined;
-  let tombstone: LedgerDeletionRecord | undefined;
-  try {
-    deletedClaim = await context.store.write(async (writer) => {
-      const claim = await writer.getClaim(claimId);
-      if (!claim) {
-        throw new BorealError("BOREAL_INVALID_INPUT", "Claim does not exist", { claimId });
-      }
-      await assertRecordHasNoGraphEdges(writer, "claim", claimId);
-      const deleted = await writer.deleteClaim(claimId);
-      if (!deleted) {
-        throw new BorealError("BOREAL_CONFLICT", "Claim changed before deletion", { claimId });
-      }
-      return claim;
-    });
-    tombstone = {
-      schemaVersion: LEDGER_DELETION_SCHEMA_VERSION,
-      section: "claims",
-      id: claimId,
-      deletedAt: nowIso(),
-      reason,
-      deletedContentHash: deletedClaim.meta.contentHash ?? hashContent(deletedClaim)
-    };
-    const ledger = await exportLedgersWithAdditionalDeletions(context, undefined, [tombstone]);
-    return {
-      deleted: true,
-      section: "claims",
-      id: claimId,
-      tombstone,
-      ledger
-    };
-  } catch (error) {
-    const restoreClaim = deletedClaim;
-    if (restoreClaim && tombstone) {
-      await context.store.write((writer) => writer.putClaim(restoreClaim));
-    }
-    throw error;
-  }
+  return deleteCanonicalRecord(context, reason, {
+    section: "claims",
+    id: claimId,
+    missingMessage: "Claim does not exist",
+    changedMessage: "Claim changed before deletion",
+    details: { claimId },
+    get: (writer) => writer.getClaim(claimId),
+    validate: (writer) => assertRecordHasNoGraphEdges(writer, "claim", claimId),
+    delete: (writer) => writer.deleteClaim(claimId),
+    contentHash: (record) => record.meta.contentHash ?? hashContent(record)
+  });
 }
 
 export async function deleteDecisionWithTombstone(
@@ -617,44 +485,17 @@ export async function deleteDecisionWithTombstone(
   decisionId: DecisionId,
   reason: string | undefined
 ): Promise<LedgerDeleteRecordResult> {
-  let deletedDecision: DecisionRecord | undefined;
-  let tombstone: LedgerDeletionRecord | undefined;
-  try {
-    deletedDecision = await context.store.write(async (writer) => {
-      const decision = await writer.getDecision(decisionId);
-      if (!decision) {
-        throw new BorealError("BOREAL_INVALID_INPUT", "Decision does not exist", { decisionId });
-      }
-      await assertRecordHasNoGraphEdges(writer, "decision", decisionId);
-      const deleted = await writer.deleteDecision(decisionId);
-      if (!deleted) {
-        throw new BorealError("BOREAL_CONFLICT", "Decision changed before deletion", { decisionId });
-      }
-      return decision;
-    });
-    tombstone = {
-      schemaVersion: LEDGER_DELETION_SCHEMA_VERSION,
-      section: "decisions",
-      id: decisionId,
-      deletedAt: nowIso(),
-      reason,
-      deletedContentHash: deletedDecision.meta.contentHash ?? hashContent(deletedDecision)
-    };
-    const ledger = await exportLedgersWithAdditionalDeletions(context, undefined, [tombstone]);
-    return {
-      deleted: true,
-      section: "decisions",
-      id: decisionId,
-      tombstone,
-      ledger
-    };
-  } catch (error) {
-    const restoreDecision = deletedDecision;
-    if (restoreDecision && tombstone) {
-      await context.store.write((writer) => writer.putDecision(restoreDecision));
-    }
-    throw error;
-  }
+  return deleteCanonicalRecord(context, reason, {
+    section: "decisions",
+    id: decisionId,
+    missingMessage: "Decision does not exist",
+    changedMessage: "Decision changed before deletion",
+    details: { decisionId },
+    get: (writer) => writer.getDecision(decisionId),
+    validate: (writer) => assertRecordHasNoGraphEdges(writer, "decision", decisionId),
+    delete: (writer) => writer.deleteDecision(decisionId),
+    contentHash: (record) => record.meta.contentHash ?? hashContent(record)
+  });
 }
 
 export async function deleteGraphEdgeWithTombstone(
@@ -662,50 +503,17 @@ export async function deleteGraphEdgeWithTombstone(
   edgeId: GraphEdgeId,
   reason: string | undefined
 ): Promise<LedgerDeleteRecordResult> {
-  let deletedEdge: GraphEdge | undefined;
-  let repairedWorkBefore: WorkItem | undefined;
-  let tombstone: LedgerDeletionRecord | undefined;
-  try {
-    deletedEdge = await context.store.write(async (writer) => {
-      const edge = await writer.getGraphEdge(edgeId);
-      if (!edge) {
-        throw new BorealError("BOREAL_INVALID_INPUT", "Graph edge does not exist", { edgeId });
-      }
-      const deleted = await writer.deleteGraphEdge(edgeId);
-      if (!deleted) {
-        throw new BorealError("BOREAL_CONFLICT", "Graph edge changed before deletion", { edgeId });
-      }
-      repairedWorkBefore = await repairWorkAfterGraphEdgeDelete(writer, edge, context);
-      return edge;
-    });
-    tombstone = {
-      schemaVersion: LEDGER_DELETION_SCHEMA_VERSION,
-      section: "graphEdges",
-      id: edgeId,
-      deletedAt: nowIso(),
-      reason,
-      deletedContentHash: deletedEdge.meta.contentHash ?? hashContent(deletedEdge)
-    };
-    const ledger = await exportLedgersWithAdditionalDeletions(context, undefined, [tombstone]);
-    return {
-      deleted: true,
-      section: "graphEdges",
-      id: edgeId,
-      tombstone,
-      ledger
-    };
-  } catch (error) {
-    const restoreEdge = deletedEdge;
-    if (restoreEdge && tombstone) {
-      await context.store.write(async (writer) => {
-        await writer.putGraphEdge(restoreEdge);
-        if (repairedWorkBefore) {
-          await writer.putWorkItem(repairedWorkBefore);
-        }
-      });
-    }
-    throw error;
-  }
+  return deleteCanonicalRecord(context, reason, {
+    section: "graphEdges",
+    id: edgeId,
+    missingMessage: "Graph edge does not exist",
+    changedMessage: "Graph edge changed before deletion",
+    details: { edgeId },
+    get: (writer) => writer.getGraphEdge(edgeId),
+    delete: (writer) => writer.deleteGraphEdge(edgeId),
+    afterDelete: (writer, edge) => repairWorkAfterGraphEdgeDelete(writer, edge, context).then(() => undefined),
+    contentHash: (record) => record.meta.contentHash ?? hashContent(record)
+  });
 }
 
 export async function deleteReservationWithTombstone(
@@ -713,44 +521,17 @@ export async function deleteReservationWithTombstone(
   reservationId: ReservationId,
   reason: string | undefined
 ): Promise<LedgerDeleteRecordResult> {
-  let deletedReservation: AgentReservation | undefined;
-  let tombstone: LedgerDeletionRecord | undefined;
-  try {
-    deletedReservation = await context.store.write(async (writer) => {
-      const reservation = await writer.getReservation(reservationId);
-      if (!reservation) {
-        throw new BorealError("BOREAL_INVALID_INPUT", "Reservation does not exist", { reservationId });
-      }
-      await assertReservationCanBeDeleted(writer, reservation);
-      const deleted = await writer.deleteReservation(reservationId);
-      if (!deleted) {
-        throw new BorealError("BOREAL_CONFLICT", "Reservation changed before deletion", { reservationId });
-      }
-      return reservation;
-    });
-    tombstone = {
-      schemaVersion: LEDGER_DELETION_SCHEMA_VERSION,
-      section: "reservations",
-      id: reservationId,
-      deletedAt: nowIso(),
-      reason,
-      deletedContentHash: deletedReservation.meta.contentHash ?? hashContent(deletedReservation)
-    };
-    const ledger = await exportLedgersWithAdditionalDeletions(context, undefined, [tombstone]);
-    return {
-      deleted: true,
-      section: "reservations",
-      id: reservationId,
-      tombstone,
-      ledger
-    };
-  } catch (error) {
-    const restoreReservation = deletedReservation;
-    if (restoreReservation && tombstone) {
-      await context.store.write((writer) => writer.putReservation(restoreReservation));
-    }
-    throw error;
-  }
+  return deleteCanonicalRecord(context, reason, {
+    section: "reservations",
+    id: reservationId,
+    missingMessage: "Reservation does not exist",
+    changedMessage: "Reservation changed before deletion",
+    details: { reservationId },
+    get: (writer) => writer.getReservation(reservationId),
+    validate: async (writer, reservation) => assertReservationCanBeDeleted(writer, reservation),
+    delete: (writer) => writer.deleteReservation(reservationId),
+    contentHash: (record) => record.meta.contentHash ?? hashContent(record)
+  });
 }
 
 export async function deleteProjectionWithTombstone(
@@ -758,43 +539,16 @@ export async function deleteProjectionWithTombstone(
   projectionId: ProjectionId,
   reason: string | undefined
 ): Promise<LedgerDeleteRecordResult> {
-  let deletedProjection: ProjectionRecord | undefined;
-  let tombstone: LedgerDeletionRecord | undefined;
-  try {
-    deletedProjection = await context.store.write(async (writer) => {
-      const projection = await writer.getProjection(projectionId);
-      if (!projection) {
-        throw new BorealError("BOREAL_INVALID_INPUT", "Projection does not exist", { projectionId });
-      }
-      const deleted = await writer.deleteProjection(projectionId);
-      if (!deleted) {
-        throw new BorealError("BOREAL_CONFLICT", "Projection changed before deletion", { projectionId });
-      }
-      return projection;
-    });
-    tombstone = {
-      schemaVersion: LEDGER_DELETION_SCHEMA_VERSION,
-      section: "projections",
-      id: projectionId,
-      deletedAt: nowIso(),
-      reason,
-      deletedContentHash: deletedProjection.meta.contentHash ?? hashContent(deletedProjection)
-    };
-    const ledger = await exportLedgersWithAdditionalDeletions(context, undefined, [tombstone]);
-    return {
-      deleted: true,
-      section: "projections",
-      id: projectionId,
-      tombstone,
-      ledger
-    };
-  } catch (error) {
-    const restoreProjection = deletedProjection;
-    if (restoreProjection && tombstone) {
-      await context.store.write((writer) => writer.putProjection(restoreProjection));
-    }
-    throw error;
-  }
+  return deleteCanonicalRecord(context, reason, {
+    section: "projections",
+    id: projectionId,
+    missingMessage: "Projection does not exist",
+    changedMessage: "Projection changed before deletion",
+    details: { projectionId },
+    get: (writer) => writer.getProjection(projectionId),
+    delete: (writer) => writer.deleteProjection(projectionId),
+    contentHash: (record) => record.meta.contentHash ?? hashContent(record)
+  });
 }
 
 export async function deleteContextPackWithTombstone(
@@ -802,43 +556,66 @@ export async function deleteContextPackWithTombstone(
   contextPackId: ProjectionId,
   reason: string | undefined
 ): Promise<LedgerDeleteRecordResult> {
-  let deletedContextPack: ContextPack | undefined;
-  let tombstone: LedgerDeletionRecord | undefined;
-  try {
-    deletedContextPack = await context.store.write(async (writer) => {
-      const contextPack = (await writer.listContextPacks()).find((pack) => pack.id === contextPackId);
-      if (!contextPack) {
-        throw new BorealError("BOREAL_INVALID_INPUT", "Context pack does not exist", { contextPackId });
-      }
-      const deleted = await writer.deleteContextPack(contextPackId);
-      if (!deleted) {
-        throw new BorealError("BOREAL_CONFLICT", "Context pack changed before deletion", { contextPackId });
-      }
-      return contextPack;
-    });
-    tombstone = {
+  return deleteCanonicalRecord(context, reason, {
+    section: "contextPacks",
+    id: contextPackId,
+    missingMessage: "Context pack does not exist",
+    changedMessage: "Context pack changed before deletion",
+    details: { contextPackId },
+    get: async (writer) => (await writer.listContextPacks()).find((pack) => pack.id === contextPackId),
+    delete: (writer) => writer.deleteContextPack(contextPackId),
+    contentHash: hashContent
+  });
+}
+
+interface CanonicalDeleteOptions<TRecord> {
+  readonly section: SnapshotSection;
+  readonly id: string;
+  readonly missingMessage: string;
+  readonly changedMessage: string;
+  readonly details: Record<string, unknown>;
+  readonly get: (writer: BorealWriter) => Promise<TRecord | undefined>;
+  readonly validate?: (writer: BorealWriter, record: TRecord) => Promise<void>;
+  readonly delete: (writer: BorealWriter) => Promise<boolean>;
+  readonly afterDelete?: (writer: BorealWriter, record: TRecord) => Promise<void>;
+  readonly contentHash: (record: TRecord) => string;
+}
+
+async function deleteCanonicalRecord<TRecord>(
+  context: CliContext,
+  reason: string | undefined,
+  options: CanonicalDeleteOptions<TRecord>
+): Promise<LedgerDeleteRecordResult> {
+  const tombstone = await context.store.write(async (writer) => {
+    const record = await options.get(writer);
+    if (!record) {
+      throw new BorealError("BOREAL_INVALID_INPUT", options.missingMessage, options.details);
+    }
+    await options.validate?.(writer, record);
+    const deletion: LedgerDeletionRecord = {
       schemaVersion: LEDGER_DELETION_SCHEMA_VERSION,
-      section: "contextPacks",
-      id: contextPackId,
+      section: options.section,
+      id: options.id,
       deletedAt: nowIso(),
       reason,
-      deletedContentHash: hashContent(deletedContextPack)
+      deletedContentHash: options.contentHash(record)
     };
-    const ledger = await exportLedgersWithAdditionalDeletions(context, undefined, [tombstone]);
-    return {
-      deleted: true,
-      section: "contextPacks",
-      id: contextPackId,
-      tombstone,
-      ledger
-    };
-  } catch (error) {
-    const restoreContextPack = deletedContextPack;
-    if (restoreContextPack && tombstone) {
-      await context.store.write((writer) => writer.putContextPack(restoreContextPack));
+    if (!(await options.delete(writer))) {
+      throw new BorealError("BOREAL_CONFLICT", options.changedMessage, options.details);
     }
-    throw error;
-  }
+    await options.afterDelete?.(writer, record);
+    await writer.putEvent(canonicalDeletionEvent(context, deletion));
+    return deletion;
+  });
+
+  const ledger = await exportLedgersWithAdditionalDeletions(context, undefined, [tombstone]);
+  return {
+    deleted: true,
+    section: options.section,
+    id: options.id,
+    tombstone,
+    ledger
+  };
 }
 
 export async function ledgerStatus(context: CliContext, dir: string | undefined): Promise<LedgerStatusResult> {
@@ -849,14 +626,16 @@ export async function ledgerStatus(context: CliContext, dir: string | undefined)
 
   const document = await buildExportDocument(context);
   const currentLedgerState = canonicalLedgerSnapshot(document.state);
-  const emptyExpectedContentHash = ledgerContentHash(currentLedgerState, []);
+  const canonicalDeletions = canonicalDeletionsFromEvents(document.state.events);
+  const emptyExpectedContentHash = ledgerContentHash(currentLedgerState, canonicalDeletions);
   const resolvedDir = await resolveWorkspacePath(context, dir ?? ".boreal/ledgers");
   const manifestPath = join(resolvedDir, LEDGER_MANIFEST_FILE);
 
   try {
     const { manifest, deletions } = await readLedgerDirectory(resolvedDir);
-    assertNoDeletedLiveRecords(currentLedgerState, deletions);
-    const expectedContentHash = ledgerContentHash(currentLedgerState, deletions);
+    const expectedDeletions = mergeLedgerDeletions(deletions, canonicalDeletions);
+    assertNoDeletedLiveRecords(currentLedgerState, expectedDeletions);
+    const expectedContentHash = ledgerContentHash(currentLedgerState, expectedDeletions);
     return {
       ok: manifest.contentHash === expectedContentHash,
       path: manifestPath,
@@ -1317,15 +1096,163 @@ async function readLedgerDeletions(
   return records;
 }
 
-async function importSnapshot(store: BorealStore, incoming: ExportSnapshot): Promise<ImportResult> {
+async function importSnapshot(
+  context: CliContext,
+  incoming: ExportSnapshot,
+  deletions: readonly LedgerDeletionRecord[]
+): Promise<ImportResult> {
   validateSnapshot(incoming);
-  return store.write(async (writer) => {
+  assertUniqueDeletions(deletions);
+  return context.store.write(async (writer) => {
     const current = await readSnapshot(writer);
-    const merged = mergeSnapshot(current, incoming);
+    const prepared = prepareImportedDeletions(current, deletions);
+    const incomingWithDeletionEvents = attachCanonicalDeletionEvents(
+      context,
+      prepared.state.events,
+      incoming,
+      prepared.applied
+    );
+    const merged = mergeSnapshot(prepared.state, incomingWithDeletionEvents);
     validateSnapshot(merged.state);
-    await writeImportedRecords(writer, incoming, merged.importableIds);
-    return { imported: merged.imported, skipped: merged.skipped };
+    await deleteImportedRecords(writer, prepared.applied);
+    await writeImportedRecords(writer, incomingWithDeletionEvents, merged.importableIds);
+    return { imported: merged.imported, skipped: merged.skipped, deleted: prepared.deleted };
   });
+}
+
+interface PreparedImportedDeletions {
+  readonly state: ExportSnapshot;
+  readonly deleted: Record<SnapshotSection, number>;
+  readonly applied: readonly LedgerDeletionRecord[];
+}
+
+function prepareImportedDeletions(
+  current: ExportSnapshot,
+  deletions: readonly LedgerDeletionRecord[]
+): PreparedImportedDeletions {
+  const state = Object.fromEntries(
+    SNAPSHOT_SECTIONS.map((section) => [section, [...(current[section] as readonly unknown[])]])
+  ) as Record<SnapshotSection, unknown[]>;
+  const deleted = emptySectionCounts();
+  const applied: LedgerDeletionRecord[] = [];
+
+  for (const deletion of canonicalLedgerDeletions(deletions)) {
+    const records = state[deletion.section];
+    const index = records.findIndex((record) => recordId(deletion.section, record) === deletion.id);
+    if (index < 0) {
+      continue;
+    }
+    if (deletion.section === "events") {
+      throw new BorealError("BOREAL_CONFLICT", "Canonical runtime events cannot be deleted by ledger import", {
+        section: deletion.section,
+        id: deletion.id
+      });
+    }
+    const record = records[index];
+    const actualContentHash = storedRecordContentHash(record);
+    if (deletion.deletedContentHash && deletion.deletedContentHash !== actualContentHash) {
+      throw new BorealError("BOREAL_CONFLICT", "Ledger tombstone does not match the live record content", {
+        section: deletion.section,
+        id: deletion.id,
+        deletedContentHash: deletion.deletedContentHash,
+        actualContentHash
+      });
+    }
+    state[deletion.section] = records.filter((_, recordIndex) => recordIndex !== index);
+    deleted[deletion.section] += 1;
+    applied.push(deletion);
+  }
+
+  return { state: state as unknown as ExportSnapshot, deleted, applied };
+}
+
+function attachCanonicalDeletionEvents(
+  context: CliContext,
+  currentEvents: readonly RuntimeEvent[],
+  incoming: ExportSnapshot,
+  deletions: readonly LedgerDeletionRecord[]
+): ExportSnapshot {
+  const events = [...incoming.events];
+  const existingById = new Map([...currentEvents, ...events].map((event) => [event.meta.id, event]));
+  for (const deletion of deletions) {
+    const event = canonicalDeletionEvent(context, deletion);
+    const existing = existingById.get(event.meta.id);
+    if (existing) {
+      const existingDeletion = deletionFromCanonicalEvent(existing);
+      if (existingDeletion && canonicalJson(existingDeletion) === canonicalJson(deletion)) {
+        continue;
+      }
+      throw new BorealError("BOREAL_CONFLICT", "Canonical deletion event id collides with different content", {
+        eventId: event.meta.id,
+        section: deletion.section,
+        id: deletion.id
+      });
+    }
+    events.push(event);
+    existingById.set(event.meta.id, event);
+  }
+  return events.length === incoming.events.length ? incoming : { ...incoming, events };
+}
+
+async function deleteImportedRecords(
+  writer: BorealWriter,
+  deletions: readonly LedgerDeletionRecord[]
+): Promise<void> {
+  for (const deletion of deletions) {
+    let deleted: boolean;
+    switch (deletion.section) {
+      case "workItems":
+        deleted = await writer.deleteWorkItem(deletion.id as WorkId);
+        break;
+      case "agentSummaries":
+        deleted = await writer.deleteAgentSummary(deletion.id as AgentSummaryId);
+        break;
+      case "evidence":
+        deleted = await writer.deleteEvidence(deletion.id as EvidenceId);
+        break;
+      case "verifications":
+        deleted = await writer.deleteVerification(deletion.id as VerificationId);
+        break;
+      case "directiveAcknowledgements":
+        deleted = await writer.deleteDirectiveAcknowledgement(deletion.id as DirectiveAcknowledgementId);
+        break;
+      case "knowledgeSources":
+        deleted = await writer.deleteKnowledgeSource(deletion.id as KnowledgeSourceId);
+        break;
+      case "claims":
+        deleted = await writer.deleteClaim(deletion.id as ClaimId);
+        break;
+      case "decisions":
+        deleted = await writer.deleteDecision(deletion.id as DecisionId);
+        break;
+      case "graphEdges":
+        deleted = await writer.deleteGraphEdge(deletion.id as GraphEdgeId);
+        break;
+      case "reservations":
+        deleted = await writer.deleteReservation(deletion.id as ReservationId);
+        break;
+      case "reviewerHeartbeats":
+        deleted = await writer.deleteReviewerHeartbeat(deletion.id as ReviewerHeartbeatId);
+        break;
+      case "projections":
+        deleted = await writer.deleteProjection(deletion.id as ProjectionId);
+        break;
+      case "contextPacks":
+        deleted = await writer.deleteContextPack(deletion.id as ProjectionId);
+        break;
+      case "events":
+        throw new BorealError("BOREAL_CONFLICT", "Canonical runtime events cannot be deleted by ledger import", {
+          section: deletion.section,
+          id: deletion.id
+        });
+    }
+    if (!deleted) {
+      throw new BorealError("BOREAL_CONFLICT", "Live record changed while applying ledger tombstone", {
+        section: deletion.section,
+        id: deletion.id
+      });
+    }
+  }
 }
 
 async function assertWorkItemCanBeDeleted(reader: BorealReader, workId: WorkId): Promise<void> {
@@ -2541,6 +2468,78 @@ function parseLedgerDeletionRecord(value: unknown): LedgerDeletionRecord {
     reason: value.reason,
     deletedContentHash: value.deletedContentHash
   };
+}
+
+function canonicalDeletionEvent(context: CliContext, deletion: LedgerDeletionRecord): RuntimeEvent {
+  return withContentHash({
+    meta: createRecordMeta({
+      id: deterministicId<EventId>("event", {
+        type: "record.deleted",
+        tombstone: deletion
+      }),
+      now: deletion.deletedAt as IsoTimestamp,
+      actor: context.actor,
+      tags: ["canonical-deletion"]
+    }),
+    type: "record.deleted",
+    subjectId: deletion.id,
+    subjectType: deletion.section,
+    operationId: context.operationId,
+    payload: { tombstone: deletion }
+  } satisfies RuntimeEvent);
+}
+
+function deletionFromCanonicalEvent(event: RuntimeEvent): LedgerDeletionRecord | undefined {
+  if (event.type !== "record.deleted") {
+    return undefined;
+  }
+  const tombstone = event.payload.tombstone;
+  if (tombstone === undefined) {
+    throw new BorealError("BOREAL_INVALID_INPUT", "Canonical deletion event is missing its tombstone", {
+      eventId: event.meta.id
+    });
+  }
+  const deletion = parseLedgerDeletionRecord(tombstone);
+  if (deletion.id !== event.subjectId || deletion.section !== event.subjectType) {
+    throw new BorealError("BOREAL_INVALID_INPUT", "Canonical deletion event subject does not match its tombstone", {
+      eventId: event.meta.id,
+      subjectId: event.subjectId,
+      subjectType: event.subjectType,
+      deletionId: deletion.id,
+      deletionSection: deletion.section
+    });
+  }
+  return deletion;
+}
+
+function canonicalDeletionsFromEvents(events: readonly RuntimeEvent[]): readonly LedgerDeletionRecord[] {
+  return mergeLedgerDeletions(
+    events.flatMap((event) => {
+      const deletion = deletionFromCanonicalEvent(event);
+      return deletion ? [deletion] : [];
+    })
+  );
+}
+
+function mergeLedgerDeletions(
+  ...groups: ReadonlyArray<readonly LedgerDeletionRecord[]>
+): readonly LedgerDeletionRecord[] {
+  const byKey = new Map<string, LedgerDeletionRecord>();
+  for (const record of groups.flat()) {
+    const key = deletionKey(record);
+    const existing = byKey.get(key);
+    if (!existing || record.deletedAt >= existing.deletedAt) {
+      byKey.set(key, record);
+    }
+  }
+  return canonicalLedgerDeletions([...byKey.values()]);
+}
+
+function storedRecordContentHash(record: unknown): string {
+  if (isRecord(record) && isRecord(record.meta) && typeof record.meta.contentHash === "string") {
+    return record.meta.contentHash;
+  }
+  return hashContent(record);
 }
 
 function canonicalLedgerDeletions(records: readonly LedgerDeletionRecord[]): readonly LedgerDeletionRecord[] {

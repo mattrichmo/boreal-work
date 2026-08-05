@@ -52,6 +52,11 @@ pnpm build
 ./install.sh --machine --yes
 ```
 
+For an already-installed machine CLI, `bwrk update self` fetches and builds
+the configured upstream Git ref; it does not update the global binary from
+whatever working tree happens to be current. Use `pnpm bwrk` or the local shim
+when you explicitly want to run this checkout.
+
 ### Source checkout
 
 ```bash
@@ -97,6 +102,18 @@ pnpm bwrk install
 
 The installer walks through project setup in a TTY. The recommended default creates `memory/` inside the project as a separate Git repository, keeps the app repository clean with `.gitignore` guards, and installs Codex skills into `.agents/skills`.
 
+This is the project installer. If you want Boreal skills available in every
+repository on this machine, install them separately with an explicit user-wide
+scope:
+
+```bash
+pnpm bwrk install codex --scope user
+pnpm bwrk install claude --scope user
+```
+
+User-wide installs write to `~/.agents/skills` or `~/.claude/skills`; they do
+not initialize the current repository.
+
 For unattended setup with the recommended defaults:
 
 ```bash
@@ -109,7 +126,7 @@ To preview without writing files:
 pnpm bwrk install --dry-run
 ```
 
-`init` remains the low-level primitive. Plain `init` is idempotent and creates durable runtime state at `.boreal/runtime/state.json`; it does **not** create memory files. Use `init --setup-memory` only when you need explicit noninteractive setup flags.
+`init` remains the low-level primitive. Plain `init` is idempotent and creates durable runtime state at `.boreal/runtime/state.json`; it does **not** create memory files. Most users should use `install`, which runs initialization and project setup together. Use `init --setup-memory` only when you need explicit noninteractive setup flags.
 
 See [Project setup](architecture/PROJECT_SETUP.md) for sibling, shared-history, and submodule layouts.
 
@@ -154,7 +171,7 @@ Work doesn't close on assertion — it closes on evidence plus a verification re
 
 ```bash
 pnpm bwrk evidence add <work-id> --summary "pnpm test passed" --kind test --outcome passed --command "pnpm test"
-pnpm bwrk work verify <work-id> --evidence <evidence-id>
+pnpm bwrk work verify <work-id> --evidence <evidence-id> --verdict passed
 pnpm bwrk work close  <work-id> --reason "verified by tests"
 ```
 
@@ -162,8 +179,8 @@ An agent can do evidence → verify → close in one handoff:
 
 ```bash
 pnpm bwrk agent finish <work-id> --agent agent-a \
-  --summary "implemented and tested" --command "pnpm test" \
-  --close --reason "verified by evidence"
+  --evidence <evidence-id> --verdict passed \
+  --close --reason "verified by referenced evidence"
 ```
 
 > **Work references** accept an exact work ID, an unambiguous ID prefix (≥12 chars), or an exact normalized title. `current` / `active` resolve to the selected actor or agent's single active reservation.

@@ -289,7 +289,7 @@ describe("agent directive bundle assembly", () => {
       commitShas: ["0123456789abcdef0123456789abcdef01234567"]
     });
     expect(result.dataByRegistryId["git.checkpoint-required"]).toMatchObject({
-      gitRoot: "/Users/cybertron/Code/boreal-work",
+      gitRoot: "/workspace/boreal-work",
       reasonCode: "scoped_commit_recorded",
       branchName: "main"
     });
@@ -610,7 +610,7 @@ describe("agent directive bundle assembly", () => {
       dirtyPathNotes: ["README.md is unrelated pre-existing work"],
       gitRoots: [
         {
-          root: "/Users/cybertron/Code/boreal-work",
+          root: "/workspace/boreal-work",
           branchName: "main",
           detached: false,
           protectedBranch: true,
@@ -633,7 +633,7 @@ describe("agent directive bundle assembly", () => {
     expect(result.bundle?.directives.some((directive) => directive.registryId === "git.checkpoint-required")).toBe(false);
     const git = result.dataByRegistryId["git.checkpoint-required"];
     expect(git).toMatchObject({
-      gitRoot: "/Users/cybertron/Code/boreal-work",
+      gitRoot: "/workspace/boreal-work",
       branchName: "main",
       protectedBranch: true,
       protectedBranchCaveat: "protected_branch_checkpoint",
@@ -654,7 +654,7 @@ describe("agent directive bundle assembly", () => {
     expect(git?.roots).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
-          root: "/Users/cybertron/Code/boreal-work",
+          root: "/workspace/boreal-work",
           protectedBranch: true,
           clean: false
         })
@@ -667,7 +667,7 @@ describe("agent directive bundle assembly", () => {
       commandPath: "sync status",
       gitRoots: [
         {
-          root: "/Users/cybertron/Code/boreal-work",
+          root: "/workspace/boreal-work",
           branchName: "codex/no-change",
           detached: false,
           protectedBranch: false,
@@ -966,7 +966,7 @@ describe("agent directive bundle assembly", () => {
       commitShas: ["5555555555555555555555555555555555555555"],
       subjectStatus: "closed",
       branchName: "main",
-      gitRoot: "/Users/cybertron/Code/boreal-work",
+      gitRoot: "/workspace/boreal-work",
       evidenceIds: ["bw_evidence_handoff0001"],
       verificationIds: ["bw_verification_handoff0001"],
       openBlockerIds: ["bw_work_handoffblock1"],
@@ -1013,7 +1013,7 @@ describe("agent directive bundle assembly", () => {
       currentStatus: "ready",
       subjectId: "bw_work_7ec3f08689c6cfb0",
       branchName: "main",
-      gitRoot: "/Users/cybertron/Code/boreal-work",
+      gitRoot: "/workspace/boreal-work",
       evidenceIds: ["bw_evidence_workflow0001"],
       verificationIds: ["bw_verification_workflow0001"],
       openBlockerIds: ["bw_work_workflowblock1"],
@@ -1319,7 +1319,7 @@ function agentDirectiveCompilerSnapshotFixture(
     git: {
       roots: options.gitRoots ?? [
         {
-          root: "/Users/cybertron/Code/boreal-work",
+          root: "/workspace/boreal-work",
           branchName: "main",
           detached: false,
           protectedBranch: true,
@@ -1365,11 +1365,11 @@ function agentDirectiveCompilerSnapshotFixture(
     },
     actor: {
       actor: {
-        id: "cybertron" as AgentId,
+        id: "example-agent" as AgentId,
         kind: "agent",
-        displayName: "cybertron"
+        displayName: "example-agent"
       },
-      activeAgentId: "cybertron" as AgentId,
+      activeAgentId: "example-agent" as AgentId,
       activeReservationIds: options.activeReservationIds ?? [],
       purpose: "Implement directive bundle assembly pipeline"
     }

@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { appendFile } from "node:fs/promises";
 import { join, relative } from "node:path";
 
 import { safeParseJson, type AgentDirectiveBundle } from "@boreal/core";
@@ -9,9 +10,37 @@ export interface CliOutput {
   error(text: string): void;
 }
 
+export type CliOperationPhase =
+  | "preflight"
+  | "execution"
+  | "artifact_refresh"
+  | "rollup"
+  | "result"
+  | "finalization"
+  | "completed";
+
+export type CliStateOutcome = "unchanged" | "changed" | "partial" | "unknown";
+
+export interface CliEnvelopeMetadata {
+  readonly operationId?: string;
+  readonly sessionId?: string;
+  readonly phase?: CliOperationPhase;
+  readonly startedAt?: string;
+  readonly finishedAt?: string;
+  readonly stateOutcome?: CliStateOutcome;
+  readonly diagnosticId?: string;
+  readonly diagnosticIds?: readonly string[];
+}
+
 export interface CliSuccessEnvelope {
   readonly ok: true;
   readonly ledgerSeq: number | null;
+  readonly operationId?: string;
+  readonly sessionId?: string;
+  readonly phase?: CliOperationPhase;
+  readonly startedAt?: string;
+  readonly finishedAt?: string;
+  readonly stateOutcome?: CliStateOutcome;
   readonly data: unknown;
   readonly agentDirectives?: AgentDirectiveOutput;
 }
@@ -41,12 +70,17 @@ export interface ResultSpoolingOptions {
 export function formatRecord(
   value: unknown,
   json: boolean,
-  options: { readonly agentDirectives?: AgentDirectiveOutput; readonly ledgerSeq?: number | null } = {}
+  options: {
+    readonly agentDirectives?: AgentDirectiveOutput;
+    readonly ledgerSeq?: number | null;
+    readonly envelopeMetadata?: CliEnvelopeMetadata;
+  } = {}
 ): string {
   if (json) {
     const envelope: CliSuccessEnvelope = {
       ok: true,
       ledgerSeq: options.ledgerSeq ?? null,
+      ...options.envelopeMetadata,
       data: value,
       ...(hasAgentDirectiveOutput(options.agentDirectives)
         ? { agentDirectives: options.agentDirectives }
@@ -66,8 +100,30 @@ function hasAgentDirectiveOutput(value: AgentDirectiveOutput | undefined): value
 
 export function createResultSpoolingOutput(output: CliOutput, options: ResultSpoolingOptions): ResultSpoolingOutput {
   let stdout = "";
+  let stdoutBytes = 0;
+  let spillPath: string | undefined;
+  let spillPromise: Promise<void> = Promise.resolve();
+
+  const spillLimit = Math.max(options.maxResultSizeChars, 64_000);
+  const switchToSpill = (text: string): void => {
+    spillPath ??= resultPath(options.workspaceRoot);
+    const initial = stdout;
+    stdout = "";
+    spillPromise = spillPromise.then(async () => {
+      if (initial.length > 0) {
+        await writeTextFileAtomic(spillPath as string, initial);
+      }
+      await appendFile(spillPath as string, text, "utf8");
+    });
+  };
   return {
     write(text) {
+      const nextBytes = stdoutBytes + Buffer.byteLength(text, "utf8");
+      stdoutBytes = nextBytes;
+      if (spillPath || nextBytes > spillLimit) {
+        switchToSpill(text);
+        return;
+      }
       stdout += text;
     },
     error(text) {
@@ -75,25 +131,47 @@ export function createResultSpoolingOutput(output: CliOutput, options: ResultSpo
     },
     async flush() {
       const metadata = await options.jsonEnvelopeMetadata?.();
+      if (spillPath) {
+        await spillPromise;
+        output.write(
+          decorateJsonEnvelope(
+            formatRecord(
+              {
+                ...stableTruncatedVerdictFields(options.command, stdout),
+                truncated: true,
+                command: options.command,
+                maxResultSizeChars: options.maxResultSizeChars,
+                fullResultPath: relative(options.workspaceRoot, spillPath),
+                fullResultBytes: stdoutBytes,
+                preview: previewJsonEnvelope(stdout)
+              },
+              true
+            ),
+            metadata
+          )
+        );
+        return;
+      }
       const text = options.jsonOutputProfile === "brief" ? briefJsonEnvelope(stdout, options.readOnly ?? false) : stdout;
-      if (text.length <= options.maxResultSizeChars) {
-        output.write(decorateJsonEnvelope(text, metadata));
+      const decoratedText = decorateJsonEnvelope(text, metadata);
+      if (decoratedText.length <= options.maxResultSizeChars) {
+        output.write(decoratedText);
         return;
       }
 
       const fullResultPath = resultPath(options.workspaceRoot);
-      await writeTextFileAtomic(fullResultPath, text);
+      await writeTextFileAtomic(fullResultPath, decoratedText);
       output.write(
         decorateJsonEnvelope(
           formatRecord(
             {
-              ...stableTruncatedVerdictFields(options.command, text),
+              ...stableTruncatedVerdictFields(options.command, decoratedText),
               truncated: true,
               command: options.command,
               maxResultSizeChars: options.maxResultSizeChars,
               fullResultPath: relative(options.workspaceRoot, fullResultPath),
-              fullResultBytes: Buffer.byteLength(text, "utf8"),
-              preview: previewJsonEnvelope(text)
+              fullResultBytes: Buffer.byteLength(decoratedText, "utf8"),
+              preview: previewJsonEnvelope(decoratedText)
             },
             true
           ),
@@ -102,6 +180,29 @@ export function createResultSpoolingOutput(output: CliOutput, options: ResultSpo
       );
     }
   };
+}
+
+const CLI_ERROR_METADATA = Symbol("boreal.cli.error-metadata");
+
+export function attachCliErrorMetadata(error: unknown, metadata: CliEnvelopeMetadata): unknown {
+  if ((typeof error !== "object" || error === null) && typeof error !== "function") {
+    return error;
+  }
+  Object.defineProperty(error, CLI_ERROR_METADATA, {
+    configurable: true,
+    enumerable: false,
+    value: metadata,
+    writable: true
+  });
+  return error;
+}
+
+export function cliErrorMetadata(error: unknown): CliEnvelopeMetadata | undefined {
+  if ((typeof error !== "object" || error === null) && typeof error !== "function") {
+    return undefined;
+  }
+  const metadata = (error as { readonly [CLI_ERROR_METADATA]?: unknown })[CLI_ERROR_METADATA];
+  return isRecord(metadata) ? (metadata as CliEnvelopeMetadata) : undefined;
 }
 
 function briefJsonEnvelope(text: string, readOnly: boolean): string {

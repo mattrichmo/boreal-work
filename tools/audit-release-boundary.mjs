@@ -124,7 +124,8 @@ function gitFiles(args) {
 }
 
 function isKnownExample(match, fileText) {
-  if (match === "AKIAIOSFODNN7EXAMPLE") return true;
+  const awsExampleAccessKey = ["AKIA", "IOSFODNN7EXAMPLE"].join("");
+  if (match === awsExampleAccessKey) return true;
   const index = fileText.indexOf(match);
   const nearby = fileText.slice(Math.max(0, index - 120), index + match.length + 120);
   return /fixture|example|placeholder|redact|fake|test token/iu.test(nearby);

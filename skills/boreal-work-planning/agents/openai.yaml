@@ -1,4 +1,4 @@
 interface:
   display_name: "Boreal Work Planning"
-  short_description: "Plan Boreal work and dependencies"
-  default_prompt: "Use $boreal-work-planning to run the matching Boreal workflow in this project."
+  short_description: "Plan right-sized Boreal work, including granular delivery passes"
+  default_prompt: "Use $boreal-work-planning to choose the right planning depth and create or update the matching Boreal work structure in this project."

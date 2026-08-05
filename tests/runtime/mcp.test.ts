@@ -1,7 +1,12 @@
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
 import { describe, expect, it } from "vitest";
 
 import {
   callBorealMcpTool,
+  createNodeBorealCliRunner,
   handleBorealMcpRequest,
   listBorealMcpTools,
   type BorealCliRunner
@@ -53,8 +58,8 @@ describe("boreal MCP server", () => {
 
     const result = await callBorealMcpTool(
       "boreal_work_next",
-      { workspaceRoot: WORKSPACE, memoryRoot: MEMORY, label: "v1-remainder", containerId: "bw_work_container", limit: 999 },
-      { runner }
+      { label: "v1-remainder", containerId: "bw_work_container", limit: 100 },
+      { runner, workspaceRoot: WORKSPACE }
     );
     const payload = result.structuredContent as {
       readonly contract: { readonly readOnly: boolean };
@@ -71,15 +76,13 @@ describe("boreal MCP server", () => {
     const parallelResult = await callBorealMcpTool(
       "boreal_work_parallel",
       {
-        workspaceRoot: WORKSPACE,
-        memoryRoot: MEMORY,
         label: "v1-remainder",
         containerId: "bw_work_container",
         agentPrefix: "worker",
         purpose: "hardening",
         limit: 3
       },
-      { runner }
+      { runner, workspaceRoot: WORKSPACE }
     );
     const parallelPayload = parallelResult.structuredContent as {
       readonly contract: { readonly readOnly: boolean };
@@ -193,8 +196,8 @@ describe("boreal MCP server", () => {
 
     const result = await callBorealMcpTool(
       "boreal_directives_current",
-      { workspaceRoot: WORKSPACE, memoryRoot: MEMORY, workId: "bw_work_blocked" },
-      { runner }
+      { workId: "bw_work_blocked" },
+      { runner, workspaceRoot: WORKSPACE }
     );
     const payload = result.structuredContent as {
       readonly result: {
@@ -238,14 +241,14 @@ describe("boreal MCP server", () => {
     const runner = fakeRunner({});
     const result = await callBorealMcpTool(
       "boreal_directives_current",
-      { workspaceRoot: WORKSPACE, memoryRoot: MEMORY },
-      { runner }
+      {},
+      { runner, workspaceRoot: WORKSPACE }
     );
-    const payload = result.structuredContent as { readonly code: string; readonly details?: { readonly name?: string } };
+    const payload = result.structuredContent as { readonly code: string; readonly details?: { readonly missing?: readonly string[] } };
 
     expect(result.isError).toBe(true);
     expect(payload.code).toBe("BOREAL_INVALID_INPUT");
-    expect(payload.details?.name).toBe("workId");
+    expect(payload.details?.missing).toEqual(["workId"]);
     expect(runner.calls).toEqual([]);
   });
 
@@ -275,15 +278,13 @@ describe("boreal MCP server", () => {
     const compiled = await callBorealMcpTool(
       "boreal_directives_compile",
       {
-        workspaceRoot: WORKSPACE,
-        memoryRoot: MEMORY,
         commandPath: "work show",
         subjectType: "work",
         subjectId: "bw_work_blocked",
         status: "blocked",
         activeBlockers: ["bw_work_blocker"]
       },
-      { runner }
+      { runner, workspaceRoot: WORKSPACE }
     );
     const compilePayload = compiled.structuredContent as {
       readonly result: { readonly bundle: { readonly conflicts: readonly unknown[] } };
@@ -292,12 +293,10 @@ describe("boreal MCP server", () => {
     const explained = await callBorealMcpTool(
       "boreal_directives_explain",
       {
-        workspaceRoot: WORKSPACE,
-        memoryRoot: MEMORY,
         directiveId: "blocked.resolve-blockers",
         fixture: "blocked-work"
       },
-      { runner }
+      { runner, workspaceRoot: WORKSPACE }
     );
     const explainPayload = explained.structuredContent as {
       readonly result: { readonly emitted: boolean; readonly reason: string };
@@ -333,8 +332,8 @@ describe("boreal MCP server", () => {
 
     const result = await callBorealMcpTool(
       "boreal_directives_compile",
-      { workspaceRoot: WORKSPACE, memoryRoot: MEMORY, fixture: "blocked-work" },
-      { runner }
+      { fixture: "blocked-work" },
+      { runner, workspaceRoot: WORKSPACE }
     );
     const payload = result.structuredContent as {
       readonly result: { readonly issues: readonly [{ readonly kind: string; readonly path: string }] };
@@ -347,14 +346,12 @@ describe("boreal MCP server", () => {
     expect(runner.calls).toEqual(["--workspace /workspace/boreal-work directives compile --fixture blocked-work --json"]);
   });
 
-  it("fails closed before CLI execution when project selection crosses registry roots", async () => {
+  it("rejects caller-supplied roots and registry authority on a project-scoped server", async () => {
     const runner = fakeRunner({});
     const result = await callBorealMcpTool(
       "boreal_command_catalog",
       {
-        workspaceRoot: WORKSPACE,
-        memoryRoot: MEMORY,
-        selectedProjectId: "project-other",
+        workspaceRoot: "/workspace/other",
         registryEntries: [
           {
             id: "project-other",
@@ -364,12 +361,71 @@ describe("boreal MCP server", () => {
           }
         ]
       },
-      { runner }
+      { runner, workspaceRoot: WORKSPACE }
     );
     const payload = result.structuredContent as { readonly code: string };
 
     expect(result.isError).toBe(true);
     expect(payload.code).toBe("BOREAL_INVALID_INPUT");
+    expect(runner.calls).toEqual([]);
+  });
+
+  it("resolves global project selection only through the server-owned registry", async () => {
+    const otherRoot = "/workspace/other";
+    const runner = fakeRunner({
+      "--workspace /workspace/other commands --json": [{ path: ["work", "list"], summary: "List work" }]
+    });
+    const result = await callBorealMcpTool(
+      "boreal_command_catalog",
+      { selectedProjectId: "project-other" },
+      {
+        runner,
+        registryEntries: [
+          {
+            id: "project-other",
+            projectRoot: otherRoot,
+            memoryRoot: `${otherRoot}/memory`,
+            memoryLayout: "in-repo"
+          }
+        ]
+      }
+    );
+    const payload = result.structuredContent as {
+      readonly workspaceRoot: string;
+      readonly projectRoot: string;
+      readonly memoryRoot: string;
+    };
+
+    expect(result.isError).toBeUndefined();
+    expect(payload).toEqual(
+      expect.objectContaining({
+        workspaceRoot: otherRoot,
+        projectRoot: otherRoot,
+        memoryRoot: `${otherRoot}/memory`
+      })
+    );
+    expect(runner.calls).toEqual(["--workspace /workspace/other commands --json"]);
+  });
+
+  it("rejects project-root overrides through real JSON-RPC tools/call", async () => {
+    const runner = fakeRunner({});
+    const response = await handleBorealMcpRequest(
+      {
+        jsonrpc: "2.0",
+        id: 77,
+        method: "tools/call",
+        params: {
+          name: "boreal_command_catalog",
+          arguments: { workspaceRoot: "/workspace/other" }
+        }
+      },
+      { runner, workspaceRoot: WORKSPACE }
+    );
+    const result = response?.result as { readonly isError?: boolean; readonly structuredContent?: { readonly code?: string } };
+
+    expect(response?.error).toBeUndefined();
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent?.code).toBe("BOREAL_INVALID_INPUT");
     expect(runner.calls).toEqual([]);
   });
 
@@ -379,7 +435,7 @@ describe("boreal MCP server", () => {
         claimed: true,
         work: { id: "bw_work_ready" }
       },
-      "--workspace /workspace/boreal-work operation list --session-id mcp-test --limit 1 --json": [
+      "--workspace /workspace/boreal-work operation list --session-id mcp-test --command work claim --limit 20 --json": [
         {
           id: "bw_operation_audit",
           sessionId: "mcp-test",
@@ -395,8 +451,8 @@ describe("boreal MCP server", () => {
 
     const blocked = await callBorealMcpTool(
       "boreal_work_claim",
-      { workspaceRoot: WORKSPACE, memoryRoot: MEMORY, agentId: "codex", label: "v1-remainder" },
-      { runner }
+      { agentId: "codex", label: "v1-remainder" },
+      { runner, workspaceRoot: WORKSPACE }
     );
     expect(blocked.isError).toBe(true);
     expect(runner.calls).toEqual([]);
@@ -404,8 +460,6 @@ describe("boreal MCP server", () => {
     const confirmed = await callBorealMcpTool(
       "boreal_work_claim",
       {
-        workspaceRoot: WORKSPACE,
-        memoryRoot: MEMORY,
         confirmed: true,
         workId: "bw_work_ready",
         agentId: "codex",
@@ -413,7 +467,7 @@ describe("boreal MCP server", () => {
         purpose: "hardening",
         ttl: "2h"
       },
-      { runner, sessionIdFactory: () => "mcp-test" }
+      { runner, workspaceRoot: WORKSPACE, sessionIdFactory: () => "mcp-test" }
     );
     const payload = confirmed.structuredContent as {
       readonly operationId: string;
@@ -426,6 +480,7 @@ describe("boreal MCP server", () => {
 
     expect(confirmed.isError).toBeUndefined();
     expect(payload.operationId).toBe("bw_operation_audit");
+    expect((payload as { readonly correlationId: string }).correlationId).toBe("mcp-test");
     expect(payload.contract.requiresConfirmation).toBe(true);
     expect(payload.contract.returnsOperationId).toBe(true);
     expect(payload.contract.commandPreview?.argv).toEqual([
@@ -459,7 +514,8 @@ describe("boreal MCP server", () => {
       ]
     });
 
-    const initialized = await handleBorealMcpRequest({ jsonrpc: "2.0", id: 1, method: "initialize" }, { runner });
+    const serverOptions = { runner, workspaceRoot: WORKSPACE };
+    const initialized = await handleBorealMcpRequest({ jsonrpc: "2.0", id: 1, method: "initialize" }, serverOptions);
     expect(initialized?.result).toEqual(
       expect.objectContaining({
         capabilities: { tools: {} },
@@ -467,7 +523,7 @@ describe("boreal MCP server", () => {
       })
     );
 
-    const listed = await handleBorealMcpRequest({ jsonrpc: "2.0", id: 2, method: "tools/list" }, { runner });
+    const listed = await handleBorealMcpRequest({ jsonrpc: "2.0", id: 2, method: "tools/list" }, serverOptions);
     expect((listed?.result as { readonly tools: readonly unknown[] }).tools.length).toBeGreaterThan(0);
 
     const called = await handleBorealMcpRequest(
@@ -477,13 +533,60 @@ describe("boreal MCP server", () => {
         method: "tools/call",
         params: {
           name: "boreal_command_catalog",
-          arguments: { workspaceRoot: WORKSPACE, memoryRoot: MEMORY }
+          arguments: {}
         }
       },
-      { runner }
+      serverOptions
     );
     expect(called?.error).toBeUndefined();
     expect(called?.result).toEqual(expect.objectContaining({ content: expect.any(Array) }));
+  });
+
+  it("returns protocol errors for malformed requests without throwing or terminating notification handling", async () => {
+    const malformed = await handleBorealMcpRequest({ jsonrpc: "2.0", id: 9, params: {} });
+    expect(malformed).toEqual({
+      jsonrpc: "2.0",
+      id: 9,
+      error: { code: -32600, message: "Invalid JSON-RPC request" }
+    });
+
+    await expect(handleBorealMcpRequest({ method: "tools/call", params: null }, { workspaceRoot: WORKSPACE })).resolves.toBeUndefined();
+    await expect(handleBorealMcpRequest("not-json-rpc")).resolves.toEqual({
+      jsonrpc: "2.0",
+      id: null,
+      error: { code: -32600, message: "Invalid JSON-RPC request" }
+    });
+  });
+
+  it("fails MCP calls when the CLI exits nonzero even if it emits a JSON error", async () => {
+    const root = await mkdtemp(join(tmpdir(), "boreal-mcp-runner-"));
+    const cliPath = join(root, "failure-cli.mjs");
+    await writeFile(
+      cliPath,
+      "process.stdout.write(JSON.stringify({ ok: false, code: 'BOREAL_INVALID_INPUT', message: 'bad token=super-secret', details: { token: 'super-secret' } })); process.exitCode = 7;\n",
+      "utf8"
+    );
+    try {
+      const result = await callBorealMcpTool(
+        "boreal_command_catalog",
+        {},
+        { runner: createNodeBorealCliRunner({ workspaceRoot: process.cwd(), cliPath }), workspaceRoot: process.cwd() }
+      );
+      const payload = result.structuredContent as {
+        readonly code: string;
+        readonly message: string;
+        readonly details?: { readonly exitCode?: number; readonly token?: string };
+      };
+
+      expect(result.isError).toBe(true);
+      expect(payload.code).toBe("BOREAL_INVALID_INPUT");
+      expect(payload.message).toContain("[redacted]");
+      expect(payload.message).not.toContain("super-secret");
+      expect(payload.details?.exitCode).toBe(7);
+      expect(payload.details?.token).not.toBe("super-secret");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
   });
 });
 

@@ -10,6 +10,7 @@ import {
   daemonStatusPath,
   refreshGlobalRollupCache,
   inspectDaemonStatus,
+  runDaemonCli,
   runDaemonWatchOnce,
   writeDaemonRunningStatus,
   writeDaemonStoppedStatus
@@ -29,6 +30,7 @@ import {
   type ProjectRollupDocument,
   type WorkId
 } from "@boreal/core";
+import { objectIndexPath } from "@boreal/storage";
 
 const tempDirs: string[] = [];
 
@@ -37,6 +39,61 @@ afterEach(async () => {
 });
 
 describe("boreal daemon runtime", () => {
+  it("fails closed on malformed project setup and returns a nonzero daemon status", async () => {
+    const root = await makeProjectWorkspace();
+    await writeFile(join(root, ".boreal/project.json"), "{\"token\":\"setup-secret\"\n", "utf8");
+
+    const status = await inspectDaemonStatus({ workspaceRoot: root });
+    expect(status.state).toBe("drift");
+    expect(status.findings).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ code: "daemon.setup_invalid", severity: "error" })
+      ])
+    );
+    expect(JSON.stringify(status)).not.toContain("setup-secret");
+
+    const watch = await runDaemonWatchOnce({ workspaceRoot: root });
+    expect(watch.action).toBe("skipped");
+    expect(watch.reason).toBe("project_boundary_unhealthy");
+    expect(watch.observedPaths).toEqual([]);
+
+    let stdout = "";
+    let stderr = "";
+    const exitCode = await runDaemonCli(["status", "--workspace", root], {
+      write(text) {
+        stdout += text;
+      },
+      error(text) {
+        stderr += text;
+      }
+    });
+    expect(exitCode).toBe(1);
+    expect(stderr).toBe("");
+    expect(JSON.parse(stdout)).toMatchObject({ state: "drift" });
+  });
+
+  it("returns a nonzero exit code and bounded JSON diagnostics for corrupt daemon status", async () => {
+    const root = await makeProjectWorkspace();
+    await mkdir(join(root, ".boreal/daemon"), { recursive: true });
+    await writeFile(join(root, ".boreal/daemon/status.json"), "{\"password\":\"status-secret\"\n", "utf8");
+
+    let stdout = "";
+    let stderr = "";
+    const exitCode = await runDaemonCli(["status", "--workspace", root], {
+      write(text) {
+        stdout += text;
+      },
+      error(text) {
+        stderr += text;
+      }
+    });
+
+    expect(exitCode).toBe(1);
+    expect(stdout).toBe("");
+    expect(JSON.parse(stderr)).toMatchObject({ ok: false, code: "BOREAL_INVALID_INPUT" });
+    expect(stderr).not.toContain("status-secret");
+  });
+
   it("handles missing or renamed projects without watching paths", async () => {
     const root = join(await makeTempDir(), "missing-project");
     const status = await inspectDaemonStatus({ workspaceRoot: root });
@@ -135,7 +192,7 @@ describe("boreal daemon runtime", () => {
     expect(watch.observedPaths).toEqual(
       expect.arrayContaining([
         join(root, ".boreal/runtime/state.json"),
-        join(root, ".boreal/cache/index.sqlite"),
+        objectIndexPath(root),
         join(root, ".boreal/ledgers/manifest.json"),
         join(root, "memory")
       ])

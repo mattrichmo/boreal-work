@@ -15,6 +15,7 @@ import {
   readJsonFile,
   runBoundedProcess,
   runtimeSnapshotSchemaIssues,
+  touchRecord,
   type AgentDirectiveHealthIssue,
   type AgentReservation,
   type AgentSummaryRecord,
@@ -37,7 +38,7 @@ import {
 } from "@boreal/core";
 import { inspectDaemonStatus, type DaemonStatusResult } from "@boreal/daemon";
 import { buildContextPack, buildContextProjection } from "@boreal/search";
-import { FILE_STORE_SCHEMA_VERSION, FileEventLog, breakStaleFileLock } from "@boreal/storage";
+import { FILE_STORE_SCHEMA_VERSION, FileEventLog, breakStaleFileLock, readTransactionJournals } from "@boreal/storage";
 import { deriveReadinessStatus } from "@boreal/work-engine";
 
 import type { CliContext } from "./context.js";
@@ -102,6 +103,7 @@ const AGENT_DIRECTIVE_ACKNOWLEDGEMENT_POLICY_ENFORCED_AT = "2026-07-01T00:00:00.
 const MCP_CONFIG_SCHEMA_VERSION = "boreal.mcp-config.v1";
 const DEFAULT_GIT_TRACKER_DRIFT_COMMIT_WINDOW = 50;
 const EVENT_LOG_ROTATION_RECOMMENDED_MAX_BYTES = 10 * 1024 * 1024;
+const OPERATION_STALE_AFTER_MS = 30 * 60 * 1000;
 
 export async function runDoctor(context: CliContext, fix: boolean, strict = false): Promise<DoctorResult> {
   const diagnostics: Diagnostic[] = [];
@@ -128,10 +130,6 @@ export async function runDoctor(context: CliContext, fix: boolean, strict = fals
   const eventLogDiagnostics = await validateEventLog(context, fix);
   diagnostics.push(...eventLogDiagnostics.diagnostics);
   fixed = fixed || eventLogDiagnostics.fixed;
-  if (eventLogDiagnostics.diagnostics.some((diagnostic) => diagnostic.code === "log.corrupt" && diagnostic.severity === "error")) {
-    return finalize(diagnostics, fixed, strict);
-  }
-
   diagnostics.push(await validateGitWorktree(context));
   const mergeDriverDiagnostics = await validateJsonlMergeDriver(context, fix);
   diagnostics.push(...mergeDriverDiagnostics.diagnostics);
@@ -155,24 +153,20 @@ export async function runDoctor(context: CliContext, fix: boolean, strict = fals
   validateStateSections(state, diagnostics);
   validateMissingIds(state, diagnostics);
   validateDuplicateIds(state, diagnostics);
-  let logicalLogRecords:
-    | {
-        readonly events: readonly RuntimeEvent[];
-        readonly operations: readonly RuntimeOperation[];
-      }
-    | undefined;
-  try {
-    logicalLogRecords = await context.store.read(async (reader) => ({
-      events: await reader.listEvents(),
-      operations: await reader.listOperations()
-    }));
-  } catch {
-    logicalLogRecords = undefined;
+  const logicalLogRecords = await readDoctorLogRecords(context);
+  if (logicalLogRecords) {
+    const operationLiveness = await validateOperationLiveness(
+      context,
+      logicalLogRecords.operations.filter((operation) => operation.meta.id !== context.operationId),
+      fix
+    );
+    diagnostics.push(...operationLiveness.diagnostics);
+    fixed = fixed || operationLiveness.fixed;
   }
   const schemaIssues = validateSchemaConformance(state, diagnostics, logicalLogRecords);
   diagnostics.push(...validateAgentDirectiveHealth());
 
-  const storeDiagnostics = await validateStoreRecords(context, fix, state);
+  const storeDiagnostics = await validateStoreRecords(context, fix, state, logicalLogRecords);
   diagnostics.push(...storeDiagnostics.diagnostics);
   fixed = fixed || storeDiagnostics.fixed;
   const hasStoreErrors = storeDiagnostics.diagnostics.some(
@@ -269,6 +263,110 @@ export async function runDoctor(context: CliContext, fix: boolean, strict = fals
   return finalize(diagnostics, fixed, strict);
 }
 
+async function readDoctorLogRecords(context: CliContext): Promise<{
+  readonly events: readonly RuntimeEvent[];
+  readonly operations: readonly RuntimeOperation[];
+} | undefined> {
+  try {
+    return await context.store.read(async (reader) => ({
+      events: await reader.listEvents(),
+      operations: await reader.listOperations()
+    }));
+  } catch {
+    try {
+      const entries = await new FileEventLog({ path: context.paths.eventLogFile }).readLive();
+      return {
+        events: entries.filter((entry) => entry.kind === "event").map((entry) => entry.record as RuntimeEvent),
+        operations: entries.filter((entry) => entry.kind === "operation").map((entry) => entry.record as RuntimeOperation)
+      };
+    } catch {
+      return undefined;
+    }
+  }
+}
+
+async function validateOperationLiveness(
+  context: CliContext,
+  operations: readonly RuntimeOperation[],
+  fix: boolean
+): Promise<{
+  readonly fixed: boolean;
+  readonly diagnostics: readonly Diagnostic[];
+}> {
+  const now = Date.now();
+  const stale = operations.filter((operation) => {
+    if (operation.status !== "started" && operation.status !== "in_progress") {
+      return false;
+    }
+    const startedAt = Date.parse(operation.startedAt);
+    return Number.isFinite(startedAt) && now - startedAt >= OPERATION_STALE_AFTER_MS;
+  });
+  if (stale.length === 0) {
+    return {
+      fixed: false,
+      diagnostics: [{ code: "operation.lifecycle", severity: "ok", message: "No stale in-progress operations found" }]
+    };
+  }
+
+  const details = stale.map((operation) => ({
+    operationId: operation.meta.id,
+    commandPath: operation.commandPath,
+    startedAt: operation.startedAt,
+    ageMs: Math.max(0, now - Date.parse(operation.startedAt))
+  }));
+  if (!fix) {
+    return {
+      fixed: false,
+      diagnostics: [
+        {
+          code: "operation.stale",
+          severity: "error",
+          message: `${stale.length} operation(s) are still marked in progress after the stale threshold`,
+          details: { thresholdMs: OPERATION_STALE_AFTER_MS, operations: details, repairCommand: "bwrk doctor --fix --json" }
+        }
+      ]
+    };
+  }
+
+  const finishedAt = nowIso();
+  await context.store.write(async (writer) => {
+    for (const operation of stale) {
+      await writer.putOperation(
+        touchRecord(
+          {
+            ...operation,
+            finishedAt,
+            exitCode: 1,
+            status: "unknown",
+            phase: "reconciliation",
+            durationMs: Math.max(0, Date.parse(finishedAt) - Date.parse(operation.startedAt)),
+            stateChanged: false,
+            generatedArtifactsChanged: false,
+            stateChangeOutcome: "unknown",
+            generatedArtifactOutcome: "unknown",
+            auditOutcome: "unknown",
+            errorCode: "BOREAL_OPERATION_STALE",
+            errorMessage: "Operation did not finalize before the stale-operation threshold"
+          } satisfies RuntimeOperation,
+          finishedAt,
+          context.actor
+        )
+      );
+    }
+  });
+  return {
+    fixed: true,
+    diagnostics: [
+      {
+        code: "operation.stale",
+        severity: "fixed",
+        message: `Reconciled ${stale.length} stale in-progress operation(s) as unknown`,
+        details: { thresholdMs: OPERATION_STALE_AFTER_MS, operations: details }
+      }
+    ]
+  };
+}
+
 async function validateRuntimeLocks(
   context: CliContext,
   fix: boolean
@@ -361,6 +459,34 @@ async function validateEventLog(
         details: verification.archives > 0 ? { archives: verification.archives } : undefined
       }
     ];
+    const pendingTransactions = await readTransactionJournals(context.workspaceRoot).catch((error) => [{
+      path: "<unreadable>",
+      journal: { error: error instanceof Error ? error.message : String(error) }
+    }]);
+    if (pendingTransactions.length > 0) {
+      diagnostics.push({
+        code: "transaction.incomplete",
+        severity: "error",
+        message: "Durable store transaction journal(s) require recovery before the workspace is healthy",
+        details: { count: pendingTransactions.length, paths: pendingTransactions.map((item) => item.path) }
+      });
+    }
+    const archiveInfo = await log.archiveInfo();
+    if (archiveInfo.length > 0) {
+      diagnostics.push({
+        code: "event_log.archives",
+        severity: "info",
+        message: `${archiveInfo.length} archived event-log segment(s) retained for replay and verification`,
+        details: {
+          archives: archiveInfo.map((archive) => ({
+            path: relative(context.workspaceRoot, archive.path),
+            bytes: archive.bytes,
+            modifiedAt: archive.modifiedAt
+          })),
+          totalBytes: archiveInfo.reduce((total, archive) => total + archive.bytes, 0)
+        }
+      });
+    }
     const rotation = await eventLogRotationDiagnostic(context);
     if (rotation) {
       diagnostics.push(rotation);
@@ -381,7 +507,8 @@ async function validateEventLog(
           details: {
             brokenAtSeq: verification.brokenAtSeq,
             archives: verification.archives,
-            repairNote: "Recover archives and the live event log from a trusted Git revision or snapshot."
+            repairNote: "Recover archives and the live event log from a trusted Git revision or snapshot.",
+            diagnostics: verification.diagnostics
           }
         }
       ]
@@ -1563,7 +1690,11 @@ function validateSchemaConformance(
 async function validateStoreRecords(
   context: CliContext,
   fix: boolean,
-  state: Record<string, unknown>
+  state: Record<string, unknown>,
+  logicalLogRecords?: {
+    readonly events: readonly RuntimeEvent[];
+    readonly operations: readonly RuntimeOperation[];
+  }
 ): Promise<{
   readonly fixed: boolean;
   readonly diagnostics: readonly Diagnostic[];
@@ -1588,10 +1719,9 @@ async function validateStoreRecords(
       const rawContextPacks = stateSection<ContextPack>(state, "contextPacks");
       const rawGraphEdges = stateSection<GraphEdge>(state, "graphEdges");
       const rawReservations = stateSection<AgentReservation>(state, "reservations");
-      const [rawEvents, rawOperations] = await context.store.read(async (reader) => [
-        await reader.listEvents(),
-        await reader.listOperations()
-      ]);
+      const [rawEvents, rawOperations] = logicalLogRecords
+        ? [logicalLogRecords.events, logicalLogRecords.operations]
+        : await context.store.read(async (reader) => [await reader.listEvents(), await reader.listOperations()]);
       const rawProjections = stateSection<ProjectionRecord>(state, "projections");
       const malformedRecords = [
         ...malformedIndexes(rawWorkItems, isDoctorWorkItem, "workItems"),
@@ -1618,7 +1748,9 @@ async function validateStoreRecords(
       const decisions = rawDecisions.filter(isDoctorDecision);
       const graphEdges = rawGraphEdges.filter(isDoctorGraphEdge);
       const reservations = rawReservations.filter(isDoctorReservation);
-      const operations = rawOperations.filter(isDoctorOperation);
+      const operations = rawOperations
+        .filter(isDoctorOperation)
+        .filter((operation) => operation.meta.id !== context.operationId);
       const projections = rawProjections.filter(isDoctorProjection);
       const evidenceById = new Map(evidence.map((record) => [record.meta.id, record]));
       const sourceById = new Map(knowledgeSources.map((record) => [record.meta.id, record]));
@@ -2450,7 +2582,12 @@ async function validateStoreRecords(
         details: error.details
       });
     } else {
-      throw error;
+      diagnostics.push({
+        code: "store.load",
+        severity: "error",
+        message: error instanceof Error ? error.message : String(error),
+        details: diagnosticErrorDetails(error)
+      });
     }
   }
 
@@ -3992,7 +4129,12 @@ function isDoctorOperation(value: unknown): value is RuntimeOperation {
     typeof value.startedAt === "string" &&
     typeof value.finishedAt === "string" &&
     Number.isInteger(value.exitCode) &&
-    (value.status === "succeeded" || value.status === "failed") &&
+    (value.status === "started" ||
+      value.status === "in_progress" ||
+      value.status === "succeeded" ||
+      value.status === "failed" ||
+      value.status === "partial" ||
+      value.status === "unknown") &&
     typeof value.stateChanged === "boolean" &&
     typeof value.generatedArtifactsChanged === "boolean" &&
     Array.isArray(value.eventIds)

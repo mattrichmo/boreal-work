@@ -185,7 +185,7 @@ export const COMMAND_DEFINITIONS: readonly CommandDefinition[] = [
     usage:
       "bwrk init [--workspace <dir>|--project-root <dir>] [--setup-memory] [--memory-root <dir>] [--memory-layout in-repo|child|sibling] [--memory-git-mode shared|separate|submodule] [--memory-remote <url>] [--separate-git] [--install-root <dir>] [--skill-target codex|claude...] [--folder-scoped] [--interactive] [--json]",
     description:
-      "Creates the workspace metadata directory and state store. With setup flags, also writes .boreal/project.json, scaffolds the selected memory root, and installs selected agent skills.",
+      "Low-level runtime initializer. Plain init creates only the workspace metadata and state store; most users should run bwrk install, which also scaffolds project memory and agent skills. With setup flags, init writes .boreal/project.json, scaffolds the selected memory root, and installs selected agent skills.",
     flags: [
       flag("project-root", "value", "Project root alias for --workspace during setup."),
       flag("setup-memory", "boolean", "Write project setup config and scaffold the selected memory root."),
@@ -207,14 +207,15 @@ export const COMMAND_DEFINITIONS: readonly CommandDefinition[] = [
     path: ["update", "self"],
     category: "meta",
     summary: "Upgrade the machine bwrk install from the GitHub repo.",
-    usage: "bwrk update self [--ref <ref>] [--repo-url <url>] [--bin-dir <dir>] [--lib-dir <dir>] [--json]",
+    usage: "bwrk update self [--ref <ref>] [--repo-url <url>] [--bin-dir <dir>] [--lib-dir <dir>] [--dry-run] [--json]",
     description:
       "Clones the Boreal source repo, builds the bundled CLI, and installs it into the segmented machine location (~/.local/share/boreal/bwrk) with a shim at ~/.local/bin/bwrk. Requires git, node, and pnpm on PATH.",
     flags: [
       flag("ref", "value", "Git ref (branch or tag) to install. Defaults to the default branch."),
       flag("repo-url", "value", "Source repo URL. Defaults to BOREAL_UPDATE_REPO_URL or the canonical GitHub repo."),
       flag("bin-dir", "value", "Machine binary directory. Defaults to BOREAL_INSTALL_BIN_DIR or ~/.local/bin."),
-      flag("lib-dir", "value", "Machine install directory. Defaults to BOREAL_INSTALL_LIB_DIR or ~/.local/share/boreal/bwrk.")
+      flag("lib-dir", "value", "Machine install directory. Defaults to BOREAL_INSTALL_LIB_DIR or ~/.local/share/boreal/bwrk."),
+      flag("dry-run", "boolean", "Fetch and build a verified candidate without changing the machine install.")
     ],
     positionals: { label: "arguments", min: 0, max: 0 },
     requiresWorkspace: false,
@@ -224,10 +225,10 @@ export const COMMAND_DEFINITIONS: readonly CommandDefinition[] = [
     path: ["update", "repo"],
     category: "meta",
     summary: "Bring this repo's Boreal assets up to the installed version.",
-    usage: "bwrk update repo [--json]",
+    usage: "bwrk update repo [--dry-run] [--json]",
     description:
       "Migrates legacy runtime storage to the per-record object store when needed, then reinstalls agent skills into the install roots recorded in .boreal/project.json. Run after upgrading the machine binary.",
-    flags: [],
+    flags: [flag("dry-run", "boolean", "Preview storage migration and skill refresh without writing files.")],
     positionals: { label: "arguments", min: 0, max: 0 },
     requiresWorkspace: true,
     supportsJson: true,
@@ -454,14 +455,14 @@ export const COMMAND_DEFINITIONS: readonly CommandDefinition[] = [
     category: "agent",
     summary: "Alias for finishing current reserved work and closing it.",
     usage:
-      "bwrk done --summary <text> --reason <text> [--agent <agent-id>] [--kind command|test|diff|review|artifact|note] [--outcome passed|failed|observed|unknown] [--command <cmd>] [--uri <uri>] [--notes <text>] [--commit <sha>...] [--dirty-path <note>...] [--json]",
+      "bwrk done (--summary <text>|--evidence <evidence-id>) --reason <text> [--agent <agent-id>] [--kind command|test|diff|review|artifact|note] [--outcome passed|failed|observed|unknown] [--uri <uri>] [--notes <text>] [--commit <sha>...] [--dirty-path <note>...] [--json]",
     description: "Golden-path alias for `bwrk agent finish current --close` with the same JSON output contract.",
     flags: [
       flag("summary", "value", "Evidence summary."),
+      flag("evidence", "value", "Existing evidence id to use without rewriting its provenance."),
       flag("agent", "value", "Agent identifier. Defaults to the CLI actor."),
       flag("kind", "value", "Evidence kind: command, test, diff, review, artifact, or note. Defaults to command."),
       flag("outcome", "value", "Evidence outcome. Defaults to the verification verdict outcome."),
-      flag("command", "value", "Command that produced the evidence."),
       flag("uri", "value", "Evidence artifact URI."),
       flag("notes", "value", "Verification notes."),
       flag("reason", "value", "Close reason."),
@@ -477,14 +478,14 @@ export const COMMAND_DEFINITIONS: readonly CommandDefinition[] = [
     category: "agent",
     summary: "Alias for finishing current reserved work and releasing it.",
     usage:
-      "bwrk pause --summary <text> [--agent <agent-id>] [--kind command|test|diff|review|artifact|note] [--outcome passed|failed|observed|unknown] [--command <cmd>] [--uri <uri>] [--verdict passed|failed] [--notes <text>] [--json]",
+      "bwrk pause (--summary <text>|--evidence <evidence-id>) [--agent <agent-id>] [--kind command|test|diff|review|artifact|note] [--outcome passed|failed|observed|unknown] [--uri <uri>] [--verdict passed|failed] [--notes <text>] [--json]",
     description: "Golden-path alias for `bwrk agent finish current --release` with the same JSON output contract.",
     flags: [
       flag("summary", "value", "Evidence summary."),
+      flag("evidence", "value", "Existing evidence id to use without rewriting its provenance."),
       flag("agent", "value", "Agent identifier. Defaults to the CLI actor."),
       flag("kind", "value", "Evidence kind: command, test, diff, review, artifact, or note. Defaults to command."),
       flag("outcome", "value", "Evidence outcome. Defaults to the verification verdict outcome."),
-      flag("command", "value", "Command that produced the evidence."),
       flag("uri", "value", "Evidence artifact URI."),
       flag("verdict", "value", "Verification verdict. Defaults to failed for pause."),
       flag("notes", "value", "Verification notes."),
@@ -636,9 +637,11 @@ export const COMMAND_DEFINITIONS: readonly CommandDefinition[] = [
     path: ["install", "codex"],
     category: "install",
     summary: "Install Boreal skills for Codex.",
-    usage: "bwrk install codex [--install-root <dir>] [--dry-run] [--interactive] [--json]",
-    description: "Installs project-scoped Boreal skill adapters for Codex. Defaults to .agents and writes .agents/skills/boreal-*; also accepts .agents/skills as the install root.",
+    usage: "bwrk install codex [--scope project|user] [--install-root <dir>] [--dry-run] [--interactive] [--json]",
+    description:
+      "Installs Boreal skill adapters for Codex. Project scope (default) writes into this repo; user scope writes to ~/.agents/skills so the skills are available from every repo.",
     flags: [
+      flag("scope", "value", "Install scope: project (default) or user-wide."),
       flag("install-root", "value", "Skill install root. Defaults to configured .agents/skills or .agents under the selected workspace."),
       flag("dry-run", "boolean", "Plan install paths without writing files."),
       flag("interactive", "boolean", "Review the install plan in a TTY before writing files.")
@@ -651,9 +654,11 @@ export const COMMAND_DEFINITIONS: readonly CommandDefinition[] = [
     path: ["install", "claude"],
     category: "install",
     summary: "Install Boreal skills for Claude.",
-    usage: "bwrk install claude [--install-root <dir>] [--dry-run] [--interactive] [--json]",
-    description: "Installs project-scoped Boreal skill adapters for Claude. Defaults to .claude and writes .claude/skills/boreal-*; also accepts .claude/skills as the install root.",
+    usage: "bwrk install claude [--scope project|user] [--install-root <dir>] [--dry-run] [--interactive] [--json]",
+    description:
+      "Installs Boreal skill adapters for Claude. Project scope (default) writes into this repo; user scope writes to ~/.claude/skills so the skills are available from every repo.",
     flags: [
+      flag("scope", "value", "Install scope: project (default) or user-wide."),
       flag("install-root", "value", "Skill install root. Defaults to configured .claude/skills or .claude under the selected workspace."),
       flag("dry-run", "boolean", "Plan install paths without writing files."),
       flag("interactive", "boolean", "Review the install plan in a TTY before writing files.")
@@ -666,9 +671,10 @@ export const COMMAND_DEFINITIONS: readonly CommandDefinition[] = [
     path: ["install", "skills"],
     category: "install",
     summary: "Install Boreal generic skill files.",
-    usage: "bwrk install skills [--install-root <dir>] [--dry-run] [--interactive] [--json]",
-    description: "Installs namespaced Boreal skill source folders into a folder-scoped skill root. Defaults to .agents/skills.",
+    usage: "bwrk install skills [--scope project|user] [--install-root <dir>] [--dry-run] [--interactive] [--json]",
+    description: "Installs namespaced Boreal skill source folders at project or user scope. Defaults to .agents/skills for a project install.",
     flags: [
+      flag("scope", "value", "Install scope: project (default) or user-wide."),
       flag("install-root", "value", "Skill install root. Defaults to .agents/skills under the selected workspace."),
       flag("dry-run", "boolean", "Plan install paths without writing files."),
       flag("interactive", "boolean", "Review the install plan in a TTY before writing files.")
@@ -1137,10 +1143,10 @@ export const COMMAND_DEFINITIONS: readonly CommandDefinition[] = [
   {
     path: ["next"],
     category: "agent",
-    summary: "Return the next single executable directive for an agent.",
+    summary: "Return the next trusted exact-argv action for an agent.",
     usage: "bwrk next [--agent <agent-id>] [--label <label>...] [--json]",
     description:
-      "Resolves active reservations, claimable ready work, and workspace health into one registry-projected directive with its executable command.",
+      "Resolves active reservations, claimable ready work, and workspace health into one registry-projected directive. Work-authored commands are display-only; executableAction contains the trusted source, runner, cwd, and exact argv.",
     flags: [
       flag("agent", "value", "Agent identifier. Defaults to the CLI actor."),
       flag("label", "value", "Only consider ready work with this label when computing claimable work.", true),
@@ -1440,10 +1446,10 @@ export const COMMAND_DEFINITIONS: readonly CommandDefinition[] = [
     path: ["work", "verify"],
     category: "work",
     summary: "Verify work with evidence.",
-    usage: "bwrk work verify <work-id> --evidence <evidence-id>... [--verdict passed|failed] [--notes <text>] [--json]",
+    usage: "bwrk work verify <work-id> --evidence <evidence-id>... --verdict passed|failed [--notes <text>] [--json]",
     flags: [
       flag("evidence", "value", "Evidence record to attach to the verification.", true),
-      flag("verdict", "value", "Verification verdict. Defaults to passed."),
+      flag("verdict", "value", "Required verification verdict: passed or failed."),
       flag("notes", "value", "Verification notes."),
     ],
     positionals: { label: "work id", min: 1, max: 1 },
@@ -1902,7 +1908,7 @@ export const COMMAND_DEFINITIONS: readonly CommandDefinition[] = [
     category: "search",
     summary: "Build the local search index.",
     usage: "bwrk search index [--json]",
-    description: "Builds and integrity-checks the versioned FTS index in .boreal/cache/index.sqlite, with JSON fallback only when SQLite is unavailable.",
+    description: "Builds and integrity-checks the versioned FTS index in .boreal/cache/index-v2.sqlite, with JSON fallback only when SQLite is unavailable.",
     flags: [],
     positionals: { label: "arguments", min: 0, max: 0 },
     requiresWorkspace: true,
@@ -2014,18 +2020,17 @@ export const COMMAND_DEFINITIONS: readonly CommandDefinition[] = [
     category: "agent",
     summary: "Finish work with evidence and verification.",
     usage:
-      "bwrk agent finish <work-id> (--summary <text>|--evidence <inline-or-evidence-id>) (--close --reason <text>|--release) [--agent <agent-id>] [--kind command|test|diff|review|artifact|note] [--outcome passed|failed|observed|unknown] [--command <cmd>] [--uri <uri>] [--verdict passed|failed] [--notes <text>] [--commit <sha>...] [--dirty-path <note>...] [--remove-worktree] [--json]",
+      "bwrk agent finish <work-id> (--summary <text>|--evidence <inline-or-evidence-id>) --verdict passed|failed (--close --reason <text>|--release) [--agent <agent-id>] [--kind command|test|diff|review|artifact|note] [--outcome passed|failed|observed|unknown] [--uri <uri>] [--notes <text>] [--commit <sha>...] [--dirty-path <note>...] [--remove-worktree] [--json]",
     description:
-      "Records evidence and verification, then closes or releases owned reserved work. Explicit unreserved work refs are auto-reserved and released in the same transaction.",
+      "Uses referenced evidence unchanged or records self-reported evidence, then verifies and closes or releases owned work. It never executes free-form commands; use `bwrk evidence run` for Boreal-witnessed gate execution.",
     flags: [
       flag("summary", "value", "Evidence summary."),
       flag("evidence", "value", "Inline evidence summary or existing evidence id to use as the finish evidence source.", true),
       flag("agent", "value", "Agent identifier. Defaults to the CLI actor."),
       flag("kind", "value", "Evidence kind: command, test, diff, review, artifact, or note. Defaults to command."),
       flag("outcome", "value", "Evidence outcome. Defaults to the verification verdict outcome."),
-      flag("command", "value", "Command that produced the evidence."),
       flag("uri", "value", "Evidence artifact URI."),
-      flag("verdict", "value", "Verification verdict. Defaults to passed."),
+      flag("verdict", "value", "Required verification verdict: passed or failed."),
       flag("notes", "value", "Verification notes."),
       flag("close", "boolean", "Close the work after passing verification and release its reservation."),
       flag("reason", "value", "Close reason. Required with --close."),
@@ -2614,10 +2619,11 @@ export const COMMAND_DEFINITIONS: readonly CommandDefinition[] = [
     path: ["doctor", "skills"],
     category: "doctor",
     summary: "Inspect workflow, template, and skill integrity.",
-    usage: "bwrk doctor skills [--install-root <dir>] [--skill-target codex|claude|skills...] [--json]",
+    usage: "bwrk doctor skills [--scope project|user] [--install-root <dir>] [--skill-target codex|claude|skills...] [--json]",
     description:
       "Validates workflow command references, template references, canonical skill workflow IDs, duplicate workflow IDs, and optionally installed skill roots.",
     flags: [
+      flag("scope", "value", "Skill root scope: project (default) or user-wide."),
       flag("install-root", "value", "Installed skill root to validate. Defaults to configured roots when --skill-target is set."),
       flag("skill-target", "value", "Installed skill target to validate: codex, claude, or skills.", true),
     ],
@@ -3028,7 +3034,7 @@ const COMMAND_BEHAVIOR: Readonly<Record<string, CommandBehaviorMetadata>> = {
     requiresLock: "generated",
     maxResultSizeChars: 250_000,
     humanOutputKind: "record",
-    examples: ["bwrk install codex --dry-run --json"],
+    examples: ["bwrk install codex --dry-run --json", "bwrk install codex --scope user --json"],
   }),
   "install claude": commandMetadata("install claude", {
     readOnly: false,
@@ -3040,7 +3046,7 @@ const COMMAND_BEHAVIOR: Readonly<Record<string, CommandBehaviorMetadata>> = {
     requiresLock: "generated",
     maxResultSizeChars: 250_000,
     humanOutputKind: "record",
-    examples: ["bwrk install claude --dry-run --json"],
+    examples: ["bwrk install claude --dry-run --json", "bwrk install claude --scope user --json"],
   }),
   "install skills": commandMetadata("install skills", {
     readOnly: false,
@@ -3052,7 +3058,7 @@ const COMMAND_BEHAVIOR: Readonly<Record<string, CommandBehaviorMetadata>> = {
     requiresLock: "generated",
     maxResultSizeChars: 250_000,
     humanOutputKind: "record",
-    examples: ["bwrk install skills --dry-run --json"],
+    examples: ["bwrk install skills --dry-run --json", "bwrk install skills --scope user --json"],
   }),
   "install status": commandMetadata("install status", {
     readOnly: true,
@@ -3220,7 +3226,7 @@ const COMMAND_BEHAVIOR: Readonly<Record<string, CommandBehaviorMetadata>> = {
     requiresLock: "none",
     maxResultSizeChars: 250_000,
     humanOutputKind: "table",
-    examples: ["bwrk global next --agent cybertron --json", "bwrk global next --limit 5"],
+    examples: ["bwrk global next --agent example-agent --json", "bwrk global next --limit 5"],
   }),
   "global status": commandMetadata("global status", {
     readOnly: true,
@@ -3642,7 +3648,7 @@ const COMMAND_BEHAVIOR: Readonly<Record<string, CommandBehaviorMetadata>> = {
     requiresLock: "state+generated",
     maxResultSizeChars: 50_000,
     humanOutputKind: "record",
-    examples: ["bwrk work verify bw_work_example --evidence bw_evidence_example --json"],
+    examples: ["bwrk work verify bw_work_example --evidence bw_evidence_example --verdict passed --json"],
   }),
   "work close": commandMetadata("work close", {
     readOnly: false,
@@ -4065,7 +4071,7 @@ const COMMAND_BEHAVIOR: Readonly<Record<string, CommandBehaviorMetadata>> = {
     requiresLock: "state+index",
     maxResultSizeChars: 100_000,
     humanOutputKind: "record",
-    examples: ["bwrk agent finish bw_work_example --agent agent-a --summary 'tests passed' --release --json"],
+    examples: ["bwrk agent finish bw_work_example --agent agent-a --summary 'tests failed' --verdict failed --release --json"],
   }),
   "agent renew": commandMetadata("agent renew", {
     readOnly: false,
@@ -4507,16 +4513,16 @@ const COMMAND_BEHAVIOR: Readonly<Record<string, CommandBehaviorMetadata>> = {
     examples: ["bwrk storage rotate-log --json", "bwrk storage rotate-log --max-bytes 10485760 --json"],
   }),
   "update self": commandMetadata("update self", {
-    readOnly: true,
+    readOnly: false,
     destructive: false,
     writesState: false,
-    writesGeneratedArtifacts: false,
+    writesGeneratedArtifacts: true,
     requiresFreshIndex: false,
     concurrencySafe: false,
     requiresLock: "none",
     maxResultSizeChars: 50_000,
     humanOutputKind: "record",
-    examples: ["bwrk update self --json", "bwrk update self --ref v0.2.0 --json"],
+    examples: ["bwrk update self --json", "bwrk update self --dry-run --json", "bwrk update self --ref v0.2.0 --json"],
   }),
   "update repo": commandMetadata("update repo", {
     readOnly: false,
@@ -4528,7 +4534,7 @@ const COMMAND_BEHAVIOR: Readonly<Record<string, CommandBehaviorMetadata>> = {
     requiresLock: "state",
     maxResultSizeChars: 50_000,
     humanOutputKind: "record",
-    examples: ["bwrk update repo --json"],
+    examples: ["bwrk update repo --dry-run --json", "bwrk update repo --json"],
   }),
   "ledger status": commandMetadata("ledger status", {
     readOnly: true,

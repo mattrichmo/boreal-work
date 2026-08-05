@@ -257,7 +257,7 @@ function sprint04FixtureWork(scenario: ConsoleFixtureScenario): readonly WorkIte
       activeReservationId: reserved ? "bw_reservation_fixture" : undefined,
       activeReservation: reserved ? {
         id: "bw_reservation_fixture",
-        agentId: "cybertron",
+        agentId: "example-agent",
         reservedAt: "2026-06-27T00:00:00.000Z",
         expiresAt: "2099-01-01T00:00:00.000Z",
         expired: false
@@ -1129,7 +1129,7 @@ function rawRow(input: {
     summary: input.summary,
     tags: ["raw-inbox"],
     addedAt: "2026-06-27T00:00:00.000Z",
-    actorId: "cybertron",
+    actorId: "example-agent",
     contentHash: "sha256:fixture",
     sourceBacked: true,
     immutable: true,
@@ -1185,7 +1185,7 @@ function fixtureActivityRows(generatedAt: string) {
     operationRow({
       id: "bw_operation_human",
       commandPath: "work list",
-      actorId: "cybertron",
+      actorId: "example-agent",
       actorKind: "human",
       startedAt: generatedAt,
       finishedAt: generatedAt

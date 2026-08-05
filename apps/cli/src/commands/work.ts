@@ -532,7 +532,7 @@ async function mainWorkCommand(
         throw new BorealError("BOREAL_POLICY_VIOLATION", "Reserved work cannot be closed directly; use `bwrk agent finish`", {
           workId,
           reservationIds: activeReservations.map((reservation) => reservation.meta.id),
-          remedialCommand: `bwrk agent finish ${workId} --agent ${activeReservations[0]?.agentId ?? context.actor.id} --summary '<evidence summary>' --close --reason ${dependencies.shellArg(reason)} --json`,
+          remedialCommand: `bwrk agent finish ${workId} --agent ${activeReservations[0]?.agentId ?? context.actor.id} --evidence <evidence-id> --verdict passed --close --reason ${dependencies.shellArg(reason)} --json`,
           domain: "work"
         });
       }

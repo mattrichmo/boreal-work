@@ -1,6 +1,10 @@
-import { join, resolve } from "node:path";
+import { randomUUID } from "node:crypto";
+import { lstat, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { homedir, tmpdir } from "node:os";
+import { isAbsolute, join, relative, resolve } from "node:path";
 
-import { BorealError, nowIso } from "@boreal/core";
+import { assertPathInside, BorealError, hashContent, nowIso } from "@boreal/core";
+import { writeTextFileAtomic } from "@boreal/storage";
 
 import { flagValue, hasFlag, type ParsedArgs } from "../args.js";
 import { box } from "../branding.js";
@@ -30,9 +34,9 @@ import {
 } from "../project-setup.js";
 import {
   buildSkillInstallPlan,
-  installSkillsFromPlan,
   type SkillInstallPlan
 } from "../workflow-assets.js";
+import { getVersionInfo, type VersionInfo } from "../version.js";
 import type { CommandResult } from "./shared.js";
 
 const INSTALL_CONFIRM_OPTIONS: readonly CliSelectOption<"yes" | "no">[] = [
@@ -53,6 +57,55 @@ interface SkillInstallSummary {
   readonly installRoot: string;
   readonly skillRoot: string;
   readonly fileCount: number;
+  readonly provenance: InstallProvenance;
+}
+
+export type SkillInstallScope = "project" | "user";
+
+export const INSTALL_PROVENANCE_SCHEMA_VERSION = "boreal.install.provenance.v1";
+
+export interface InstallProvenance {
+  readonly schemaVersion: typeof INSTALL_PROVENANCE_SCHEMA_VERSION;
+  readonly transactionId: string;
+  readonly operation: "install.skills" | "install.setup" | "update.repo";
+  readonly status: "planned" | "committed";
+  readonly startedAt: string;
+  readonly finishedAt?: string;
+  readonly actor: {
+    readonly pid: number;
+    readonly cwd: string;
+  };
+  readonly source: {
+    readonly assetRoot: string;
+    readonly packageName: string;
+    readonly packageVersion: string;
+    readonly installChannel: string;
+    readonly build: VersionInfo["build"];
+  };
+  readonly target: {
+    readonly kind: "skills";
+    readonly target: SkillInstallPlan["target"];
+    readonly installRoot: string;
+    readonly skillRoot: string;
+    readonly scope?: SkillInstallScope;
+  };
+  readonly files: readonly {
+    readonly path: string;
+    readonly bytes: number;
+    readonly contentHash: string;
+  }[];
+  readonly verification: {
+    readonly checkedFiles: number;
+    readonly ok: boolean;
+  };
+  readonly rollback: {
+    readonly available: boolean;
+    readonly performed: boolean;
+  };
+}
+
+export interface AtomicSkillInstallResult extends SkillInstallPlan {
+  readonly provenance: InstallProvenance;
 }
 
 interface InstallSetupResult {
@@ -70,6 +123,14 @@ interface InstallSetupResult {
     readonly installRoot: string;
     readonly skillTargets: readonly string[];
     readonly folderScoped: boolean;
+  };
+  readonly provenance?: {
+    readonly transactionId: string;
+    readonly operation: "install.setup";
+    readonly status: "planned" | "committed";
+    readonly startedAt: string;
+    readonly finishedAt?: string;
+    readonly target: string;
   };
   readonly projectSetup?: ProjectSetupResult;
   readonly skillInstalls?: readonly SkillInstallSummary[];
@@ -98,22 +159,41 @@ export async function installCommand(
   }
 
   const target = installTarget(action);
+  const scope = skillInstallScopeFromArgs(args);
   const dryRun = hasFlag(args, "dry-run");
   const interactive = hasFlag(args, "interactive");
+  const transactionId = randomUUID();
+  const startedAt = nowIso();
   if (interactive && json) {
     throw new BorealError("BOREAL_INVALID_INPUT", "--interactive cannot be combined with --json");
   }
   const plan = await buildSkillInstallPlan({
     target,
     dryRun,
-    installRoot: await installRootFromArgs(context, args, target),
+    installRoot: await installRootFromArgs(context, args, target, scope),
     workspaceRoot: context.workspaceRoot
   });
   if (interactive && !dryRun) {
-    await confirmSkillInstallPlan(plan);
+    await confirmSkillInstallPlan(plan, scope);
   }
-  const result = dryRun ? plan : await installSkillsFromPlan(plan);
-  output.write(json ? formatRecord(result, true) : formatSkillInstallPlan(result));
+  const result = dryRun
+    ? {
+        ...plan,
+        provenance: await buildInstallProvenance(plan, {
+          transactionId,
+          operation: "install.skills",
+          status: "planned",
+          startedAt,
+          scope
+        })
+      }
+    : await installSkillsFromPlanAtomically(plan, {
+        transactionId,
+        operation: "install.skills",
+        startedAt,
+        scope
+      });
+  output.write(json ? formatRecord({ ...result, scope }, true) : formatSkillInstallPlan(result, scope));
   return { exitCode: result.issues.length === 0 ? 0 : 1 };
 }
 
@@ -128,7 +208,9 @@ export async function initCommand(
   const storage = await writeProjectStorageMarker(context.workspaceRoot, context.storage);
   const mergeDriver = await ensureBorealJsonlMergeDriver(context.workspaceRoot);
   const projectSetup = await maybeConfigureProjectSetup(context, args);
-  const skillInstalls = projectSetup ? await installProjectSetupSkills(context, projectSetup) : undefined;
+  const skillInstalls = projectSetup
+    ? await installProjectSetupSkills(context, projectSetup, randomUUID(), nowIso())
+    : undefined;
   const initResult = {
     initialized: result.initialized,
     workspaceRoot: context.workspaceRoot,
@@ -145,11 +227,15 @@ export async function initCommand(
 export async function installRootFromArgs(
   context: CliContext,
   args: ParsedArgs,
-  target: "codex" | "claude" | "skills"
+  target: "codex" | "claude" | "skills",
+  scope: SkillInstallScope = "project"
 ): Promise<string> {
   const explicit = flagValue(args, "install-root");
   if (explicit) {
-    return resolve(context.workspaceRoot, explicit);
+    return resolveInstallPath(scope === "user" ? homedir() : context.workspaceRoot, explicit);
+  }
+  if (scope === "user") {
+    return defaultUserInstallRoot(target);
   }
   const config = await readProjectSetupConfig(context.workspaceRoot);
   if (config?.installRoot && (target === "skills" || configuredInstallRootMatchesTarget(config.installRoot, target))) {
@@ -162,6 +248,23 @@ export async function installRootFromArgs(
     }
   }
   return defaultInstallRoot(context.workspaceRoot, target);
+}
+
+export function skillInstallScopeFromArgs(args: ParsedArgs): SkillInstallScope {
+  const scope = flagValue(args, "scope") ?? "project";
+  if (scope !== "project" && scope !== "user") {
+    throw new BorealError("BOREAL_INVALID_INPUT", "--scope must be project or user", { scope });
+  }
+  return scope;
+}
+
+function resolveInstallPath(baseDir: string, value: string): string {
+  const expanded = value.replace(/^~(?=$|\/)/u, homedir());
+  return resolve(isAbsolute(expanded) ? expanded : join(baseDir, expanded));
+}
+
+function defaultUserInstallRoot(target: "codex" | "claude" | "skills"): string {
+  return target === "claude" ? join(homedir(), ".claude") : join(homedir(), ".agents");
 }
 
 async function installSetupCommand(
@@ -191,22 +294,47 @@ async function installSetupCommand(
     : projectSetupInputFromArgs(context, setupArgs);
   await validateProjectSetupInput(input);
   const plan = installSetupPlan(input);
+  const transactionId = randomUUID();
+  const startedAt = nowIso();
   if (dryRun) {
     const result: InstallSetupResult = {
       kind: "install",
       dryRun: true,
       yes,
       workspaceRoot: context.workspaceRoot,
-      plan
+      plan,
+      provenance: {
+        transactionId,
+        operation: "install.setup",
+        status: "planned",
+        startedAt,
+        target: input.projectRoot
+      }
     };
-    output.write(json ? formatRecord(result, true) : formatInstallSetupResult(result, input));
+    output.write(
+      json
+        ? formatRecord(
+            {
+              ...result,
+              provenance: {
+                transactionId,
+                operation: "install.setup",
+                status: "planned",
+                startedAt,
+                target: input.projectRoot
+              }
+            },
+            true
+          )
+        : formatInstallSetupResult(result, input)
+    );
     return { exitCode: 0 };
   }
 
   await ensureWorkspaceDirs(context);
   const initialized = await context.runtime.ensureWorkspaceInitialized();
   const projectSetup = await applyProjectSetup(input);
-  const skillInstalls = await installProjectSetupSkills(context, projectSetup);
+  const skillInstalls = await installProjectSetupSkills(context, projectSetup, transactionId, startedAt);
   const result: InstallSetupResult = {
     kind: "install",
     dryRun: false,
@@ -215,10 +343,35 @@ async function installSetupCommand(
     workspaceRoot: context.workspaceRoot,
     eventId: initialized.event.meta.id,
     plan,
+    provenance: {
+      transactionId,
+      operation: "install.setup",
+      status: "committed",
+      startedAt,
+      finishedAt: nowIso(),
+      target: input.projectRoot
+    },
     projectSetup,
     skillInstalls
   };
-  output.write(json ? formatRecord(result, true) : formatInstallSetupResult(result, input));
+  output.write(
+    json
+      ? formatRecord(
+          {
+            ...result,
+            provenance: {
+              transactionId,
+              operation: "install.setup",
+              status: "committed",
+              startedAt,
+              finishedAt: nowIso(),
+              target: input.projectRoot
+            }
+          },
+          true
+        )
+      : formatInstallSetupResult(result, input)
+  );
   return { exitCode: 0 };
 }
 
@@ -248,8 +401,8 @@ function installSetupPlan(input: ProjectSetupInput): InstallSetupResult["plan"] 
 function formatInstallSetupResult(result: InstallSetupResult, input: ProjectSetupInput): string {
   const title = result.dryRun ? "Boreal install plan" : "Boreal install complete";
   const detail = result.dryRun
-    ? "No files were written. Run bwrk install --yes to apply this plan."
-    : "Workspace runtime, child memory, Git guards, and agent skills are ready.";
+    ? "No files were written. Rerun without --dry-run to apply these choices."
+    : "Project runtime, memory, Git guards, and project agent skills are ready.";
   const lines = [
     box(["Boreal Install", "Clean local setup for project memory and agent skills"]),
     "",
@@ -281,6 +434,10 @@ function formatInstallSetupResult(result: InstallSetupResult, input: ProjectSetu
       )
     );
   }
+  lines.push(
+    "",
+    section("Next", result.dryRun ? ["rerun bwrk install to apply this plan"] : ["run bwrk prime --json to verify the project"])
+  );
   return `${lines.join("\n")}\n`;
 }
 
@@ -354,12 +511,12 @@ function defaultInstallRoot(workspaceRoot: string, target: "codex" | "claude" | 
   }
 }
 
-async function confirmSkillInstallPlan(plan: SkillInstallPlan): Promise<void> {
+async function confirmSkillInstallPlan(plan: SkillInstallPlan, scope: SkillInstallScope): Promise<void> {
   if (!process.stdin.isTTY || !process.stdout.isTTY) {
     throw new BorealError("BOREAL_INVALID_INPUT", "--interactive requires a TTY; use --dry-run to review install plans in automation");
   }
   const accepted = await withPromptSession({ input: process.stdin, output: process.stdout }, async (prompt) => {
-    prompt.writeIntro("Boreal skill install review", formatSkillInstallPlan(plan));
+    prompt.writeIntro("Boreal skill install review", formatSkillInstallPlan(plan, scope));
     return prompt.select("Write install files", INSTALL_CONFIRM_OPTIONS, "yes");
   });
   if (accepted !== "yes") {
@@ -367,10 +524,10 @@ async function confirmSkillInstallPlan(plan: SkillInstallPlan): Promise<void> {
   }
 }
 
-function formatSkillInstallPlan(plan: SkillInstallPlan): string {
+function formatSkillInstallPlan(plan: SkillInstallPlan & { readonly provenance?: InstallProvenance }, scope: SkillInstallScope = "project"): string {
   const summaryStatus = plan.issues.length > 0 ? "warning" : plan.dryRun ? "pending" : "success";
   const fileRows = plan.files.map((file) => {
-    const action = file.wouldWrite ? "write" : "skip";
+    const action = plan.dryRun ? "would write" : file.wouldWrite ? "write" : "skip";
     return `${action} ${file.destination} (${file.workflowRefs.length} workflows)`;
   });
   return [
@@ -383,6 +540,7 @@ function formatSkillInstallPlan(plan: SkillInstallPlan): string {
       "Paths",
       keyValueRows([
         { key: "target", value: plan.target },
+        { key: "scope", value: scope === "user" ? "user-wide" : "project" },
         { key: "dryRun", value: plan.dryRun },
         { key: "assetRoot", value: plan.assetRoot },
         { key: "installRoot", value: plan.installRoot },
@@ -390,6 +548,18 @@ function formatSkillInstallPlan(plan: SkillInstallPlan): string {
       ]).split("\n")
     ),
     section("Files", fileRows.length > 0 ? fileRows : ["none"]),
+    plan.provenance
+      ? section(
+          "Provenance",
+          keyValueRows([
+            { key: "transactionId", value: plan.provenance.transactionId },
+            { key: "status", value: plan.provenance.status },
+            { key: "buildSha", value: plan.provenance.source.build.buildSha },
+            { key: "artifactDigest", value: plan.provenance.source.build.artifactDigest },
+            { key: "rollback", value: plan.provenance.rollback.available }
+          ]).split("\n")
+        )
+      : undefined,
     plan.issues.length > 0
       ? section(
           "Issues",
@@ -401,22 +571,187 @@ function formatSkillInstallPlan(plan: SkillInstallPlan): string {
     .join("\n\n") + "\n";
 }
 
-async function installProjectSetupSkills(context: CliContext, projectSetup: ProjectSetupResult): Promise<readonly SkillInstallSummary[]> {
+async function installProjectSetupSkills(
+  context: CliContext,
+  projectSetup: ProjectSetupResult,
+  transactionId: string,
+  startedAt: string
+): Promise<readonly SkillInstallSummary[]> {
   const results: SkillInstallSummary[] = [];
   for (const target of projectSetup.config.skillTargets) {
     const installRoot =
       projectSetup.config.skillInstallRoots?.find((entry) => entry.target === target)?.installRoot ??
       configuredInstallRootForTarget(context.workspaceRoot, projectSetup.config.installRoot, target);
     const plan = await buildSkillInstallPlan({ target, dryRun: false, installRoot, workspaceRoot: context.workspaceRoot });
-    const installed = await installSkillsFromPlan(plan);
+    const installed = await installSkillsFromPlanAtomically(plan, {
+      transactionId,
+      operation: "install.setup",
+      startedAt,
+      scope: "project"
+    });
     results.push({
       target: installed.target,
       installRoot: installed.installRoot,
       skillRoot: installed.skillRoot,
-      fileCount: installed.files.length
+      fileCount: installed.files.length,
+      provenance: installed.provenance
     });
   }
   return results;
+}
+
+export interface SkillInstallTransactionInput {
+  readonly transactionId: string;
+  readonly operation: InstallProvenance["operation"];
+  readonly startedAt: string;
+  readonly scope?: SkillInstallScope;
+}
+
+export async function installSkillsFromPlanAtomically(
+  plan: SkillInstallPlan,
+  input: SkillInstallTransactionInput
+): Promise<AtomicSkillInstallResult> {
+  if (plan.issues.length > 0) {
+    throw new BorealError("BOREAL_INVALID_INPUT", "Cannot install skills while workflow assets are invalid", {
+      issues: plan.issues,
+      transactionId: input.transactionId
+    });
+  }
+
+  await mkdir(plan.installRoot, { recursive: true });
+  const stageDir = await mkdtemp(join(tmpdir(), `bwrk-install-${input.transactionId}-`));
+  const markerPath = join(plan.installRoot, ".boreal-install-provenance.json");
+  const destinations = [...plan.files.map((file) => file.destination), markerPath];
+  const backups: Array<{ readonly path: string; readonly existed: boolean; readonly content?: string; readonly mode?: number }> = [];
+
+  try {
+    const stagedFiles = await Promise.all(
+      plan.files.map(async (file, index) => {
+        assertPathInside(plan.installRoot, file.destination);
+        const source = await readFile(resolve(plan.assetRoot, file.source), "utf8");
+        const stagedPath = join(stageDir, String(index));
+        await writeFile(stagedPath, source, "utf8");
+        const content = await readFile(stagedPath, "utf8");
+        if (content !== source) {
+          throw new BorealError("BOREAL_STORAGE_ERROR", "Staged skill content failed verification", {
+            transactionId: input.transactionId,
+            path: file.destination
+          });
+        }
+        return { file, content };
+      })
+    );
+
+    for (const path of destinations) {
+      const existing = await lstat(path).catch(() => undefined);
+      if (!existing) {
+        backups.push({ path, existed: false });
+        continue;
+      }
+      if (!existing.isFile()) {
+        throw new BorealError("BOREAL_CONFLICT", "Install destination is not a regular file", {
+          transactionId: input.transactionId,
+          path
+        });
+      }
+      backups.push({ path, existed: true, content: await readFile(path, "utf8"), mode: existing.mode & 0o777 });
+    }
+
+    for (const { file, content } of stagedFiles) {
+      await writeTextFileAtomic(file.destination, content, { mode: modeForBackup(backups, file.destination) });
+      const written = await readFile(file.destination, "utf8");
+      if (written !== content) {
+        throw new BorealError("BOREAL_STORAGE_ERROR", "Installed skill file failed verification", {
+          transactionId: input.transactionId,
+          path: file.destination
+        });
+      }
+    }
+
+    const provenance = await provenanceForFiles(plan, input, stagedFiles.map(({ file, content }) => ({ file, content })));
+    await writeTextFileAtomic(markerPath, `${JSON.stringify(provenance, null, 2)}\n`, {
+      mode: modeForBackup(backups, markerPath)
+    });
+    const marker = await readFile(markerPath, "utf8");
+    if (JSON.parse(marker).transactionId !== input.transactionId) {
+      throw new BorealError("BOREAL_STORAGE_ERROR", "Install provenance failed verification", {
+        transactionId: input.transactionId,
+        path: markerPath
+      });
+    }
+
+    return { ...plan, provenance };
+  } catch (error) {
+    for (const backup of [...backups].reverse()) {
+      try {
+        if (backup.existed) {
+          await writeTextFileAtomic(backup.path, backup.content ?? "", { mode: backup.mode });
+        } else {
+          await rm(backup.path, { force: true });
+        }
+      } catch {
+        // Preserve the original failure; the provenance result will not claim a commit.
+      }
+    }
+    throw error;
+  } finally {
+    await rm(stageDir, { recursive: true, force: true }).catch(() => undefined);
+  }
+}
+
+async function buildInstallProvenance(
+  plan: SkillInstallPlan,
+  input: SkillInstallTransactionInput & { readonly status: "planned" }
+): Promise<InstallProvenance> {
+  const files = await Promise.all(
+    plan.files.map(async (file) => ({ file, content: await readFile(resolve(plan.assetRoot, file.source), "utf8") }))
+  );
+  return provenanceForFiles(plan, input, files);
+}
+
+async function provenanceForFiles(
+  plan: SkillInstallPlan,
+  input: SkillInstallTransactionInput & { readonly status?: "planned" | "committed" },
+  files: readonly { readonly file: SkillInstallPlan["files"][number]; readonly content: string }[]
+): Promise<InstallProvenance> {
+  const version = getVersionInfo();
+  return {
+    schemaVersion: INSTALL_PROVENANCE_SCHEMA_VERSION,
+    transactionId: input.transactionId,
+    operation: input.operation,
+    status: input.status ?? "committed",
+    startedAt: input.startedAt,
+    ...(input.status !== "planned" ? { finishedAt: nowIso() } : {}),
+    actor: { pid: process.pid, cwd: process.cwd() },
+    source: {
+      assetRoot: plan.assetRoot,
+      packageName: version.name,
+      packageVersion: version.version,
+      installChannel: version.installChannel,
+      build: version.build
+    },
+    target: {
+      kind: "skills",
+      target: plan.target,
+      installRoot: plan.installRoot,
+      skillRoot: plan.skillRoot,
+      ...(input.scope ? { scope: input.scope } : {})
+    },
+    files: files.map(({ file, content }) => ({
+      path: relative(plan.installRoot, file.destination),
+      bytes: Buffer.byteLength(content, "utf8"),
+      contentHash: String(hashContent(content))
+    })),
+    verification: { checkedFiles: files.length, ok: input.status !== "planned" },
+    rollback: { available: input.status !== "planned", performed: false }
+  };
+}
+
+function modeForBackup(
+  backups: readonly { readonly path: string; readonly mode?: number }[],
+  path: string
+): number {
+  return backups.find((backup) => backup.path === path)?.mode ?? 0o644;
 }
 
 function formatInitResult(result: {
@@ -446,7 +781,7 @@ function formatInitResult(result: {
       `gitmodules updated: ${result.projectSetup.gitSetup.gitmodulesUpdated ? "yes" : "no"}`,
       `skills: ${result.projectSetup.config.installRoot}`,
       `targets: ${result.projectSetup.config.skillTargets.join(", ")}`,
-      `folder scoped: ${result.projectSetup.config.folderScoped ? "yes" : "no"}`,
+      `skill visibility: ${result.projectSetup.config.folderScoped ? "every folder in project" : "one project folder"}`,
       `created: ${result.projectSetup.createdDirectories.length} directories, ${result.projectSetup.createdFiles.length} files`,
       `existing: ${result.projectSetup.existingDirectories.length} directories, ${result.projectSetup.existingFiles.length} files`
     );
@@ -458,5 +793,9 @@ function formatInitResult(result: {
       ...result.skillInstalls.map((install) => `${install.target}: ${install.skillRoot} (${install.fileCount} files)`)
     );
   }
+  lines.push(
+    "",
+    result.projectSetup ? "Next: run bwrk prime --json to verify the project." : "Next: run bwrk install to add project memory and agent skills."
+  );
   return `${lines.join("\n")}\n`;
 }

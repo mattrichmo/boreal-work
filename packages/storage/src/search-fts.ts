@@ -11,7 +11,15 @@ import {
   type SearchDocumentType
 } from "@boreal/search";
 
-import { loadNodeSqlite, objectIndexPath, type NodeSqliteModule, type ObjectIndexHead } from "./object-index.js";
+import {
+  OBJECT_INDEX_SCHEMA_VERSION,
+  initializeObjectIndexSchema,
+  loadNodeSqlite,
+  objectIndexPath,
+  objectIndexSchemaVersion,
+  type NodeSqliteModule,
+  type ObjectIndexHead
+} from "./object-index.js";
 import {
   initializeSearchFtsSchema,
   removeSearchFtsDocuments,
@@ -89,7 +97,21 @@ export class FtsSearchIndex {
 
     let db: DatabaseSync | undefined;
     try {
+      if (existsSync(path)) {
+        const inspection = new sqlite.DatabaseSync(path, { readOnly: true, timeout: 100 });
+        try {
+          const schemaVersion = objectIndexSchemaVersion(inspection);
+          if (schemaVersion !== OBJECT_INDEX_SCHEMA_VERSION) {
+            throw invalidIndexError(path, `object-index schema is ${schemaVersion ?? "unknown"}`);
+          }
+        } finally {
+          inspection.close();
+        }
+      }
       db = new sqlite.DatabaseSync(path, create ? { timeout: 250 } : { readOnly: true, timeout: 250 });
+      if (create) {
+        initializeObjectIndexSchema(db, path);
+      }
       const schemaValid = create ? initializeSearchFtsSchema(db) : validateSearchFtsSchema(db);
       if (!schemaValid) {
         db.close();

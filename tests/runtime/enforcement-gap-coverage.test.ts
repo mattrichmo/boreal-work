@@ -538,7 +538,7 @@ async function closeoutDirectiveTriggerGaps(): Promise<readonly EnforcementGap[]
     activeReservationIds: ["bw_reservation_closeout0001"],
     gitRoots: [
       {
-        root: "/Users/cybertron/Code/boreal-work",
+        root: "/workspace/boreal-work",
         branchName: "main",
         detached: false,
         protectedBranch: true,
@@ -749,7 +749,7 @@ function contractGap(code: EnforcementGapCode): EnforcementGap {
   return {
     code,
     subjectType: "workspace",
-    subjectId: "/Users/cybertron/Code/boreal-work",
+    subjectId: "/workspace/boreal-work",
     data: { reason: "checked-in gap contract member has explicit coverage row" }
   };
 }
@@ -928,7 +928,7 @@ function snapshotFixture(
     git: {
       roots: [
         {
-          root: "/Users/cybertron/Code/boreal-work",
+          root: "/workspace/boreal-work",
           branchName: "main",
           detached: false,
           protectedBranch: true,
@@ -975,11 +975,11 @@ function snapshotFixture(
     },
     actor: {
       actor: {
-        id: "cybertron" as AgentId,
+        id: "example-agent" as AgentId,
         kind: "agent",
-        displayName: "cybertron"
+        displayName: "example-agent"
       },
-      activeAgentId: "cybertron" as AgentId,
+      activeAgentId: "example-agent" as AgentId,
       activeReservationIds: options.activeReservationIds ?? [],
       purpose: "Cover enforcement gap emissions"
     }

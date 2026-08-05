@@ -212,7 +212,7 @@ describe("console component exports", () => {
     expect(html).toContain("bw-kanban-card--needs_verification");
     expect(html).toContain("bw-kanban-card--closed");
     expect(html).toContain("reserved");
-    expect(html).toContain("cybertron");
+    expect(html).toContain("example-agent");
     expect(html).toContain("advisory directives");
     expect(html).toContain("required directives");
     expect(html).toContain("blocking directives");
@@ -493,7 +493,7 @@ function sprintBoardView(): SprintBoardView {
     activeReservationId: "bw_reservation_active",
     activeReservation: {
       id: "bw_reservation_active",
-      agentId: "cybertron",
+      agentId: "example-agent",
       reservedAt: "2026-06-27T00:00:00.000Z",
       expiresAt: "2099-01-01T00:00:00.000Z",
       expired: false
@@ -800,7 +800,7 @@ function rawInboxView(): RawInboxView {
     summary: "Captured source transcript.",
     tags: ["raw-inbox"],
     addedAt: "2026-06-27T00:00:00.000Z",
-    actorId: "cybertron",
+    actorId: "example-agent",
     contentHash: "sha256:fixture",
     sourceBacked: true as const,
     immutable: true as const,

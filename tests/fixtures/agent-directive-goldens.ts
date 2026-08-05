@@ -205,7 +205,7 @@ export const AGENT_DIRECTIVE_GOLDEN_CASES: readonly AgentDirectiveGoldenCase[] =
       commitShas: ["abcdef0123456789abcdef0123456789abcdef01"],
       subjectStatus: "closed",
       branchName: "main",
-      gitRoot: "/Users/cybertron/Code/boreal-work",
+      gitRoot: "/workspace/boreal-work",
       evidenceIds: ["bw_evidence_deadbeef0007"],
       verificationIds: ["bw_verification_deadbeef0007"],
       openBlockerIds: ["bw_work_deadbeef0012"],
@@ -248,14 +248,14 @@ export const AGENT_DIRECTIVE_GOLDEN_CASES: readonly AgentDirectiveGoldenCase[] =
     subjectType: "work",
     commandPath: "summary compose",
     data: {
-      gitRoot: "/Users/cybertron/Code/boreal-work",
+      gitRoot: "/workspace/boreal-work",
       commitShas: ["1111111111111111111111111111111111111111"],
       dirtyPathNotes: ["README.md left dirty because it predates this work"],
       reasonCode: "scoped_commit_recorded",
       branchName: "main",
       roots: [
         {
-          root: "/Users/cybertron/Code/boreal-work",
+          root: "/workspace/boreal-work",
           branchName: "main",
           detached: false,
           protectedBranch: true,
@@ -367,7 +367,7 @@ export const AGENT_DIRECTIVE_GOLDEN_CASES: readonly AgentDirectiveGoldenCase[] =
       currentStatus: "ready",
       subjectId: "bw_work_deadbeef0008",
       branchName: "main",
-      gitRoot: "/Users/cybertron/Code/boreal-work",
+      gitRoot: "/workspace/boreal-work",
       evidenceIds: ["bw_evidence_deadbeef0008"],
       verificationIds: ["bw_verification_deadbeef0008"],
       openBlockerIds: ["bw_work_deadbeef0014"],
@@ -465,7 +465,7 @@ export const AGENT_DIRECTIVE_GOLDEN_CASES: readonly AgentDirectiveGoldenCase[] =
     commandPath: "raw triage",
     data: {
       sourceIds: ["bw_source_deadbeef0011"],
-      memoryRoot: "/Users/cybertron/Code/boreal-work/memory",
+      memoryRoot: "/workspace/boreal-work/memory",
       requiredRecordTypes: ["wiki", "claim", "decision"],
       wikiPageIds: ["bw_wiki_deadbeef0011"],
       claimIds: ["bw_claim_deadbeef0011"]

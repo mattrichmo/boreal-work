@@ -2,14 +2,14 @@ import { execFile } from "node:child_process";
 import { constants } from "node:fs";
 import { access, readFile, stat } from "node:fs/promises";
 import { homedir } from "node:os";
-import { basename, delimiter, join, resolve } from "node:path";
+import { basename, delimiter, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 
 import { readJsonFile, type IsoTimestamp } from "@boreal/core";
 
 import { installUpgradeStatus, type InstallChannel, type InstallUpgradeStatus } from "./install-channel.js";
-import { getVersionInfo } from "./version.js";
+import { getVersionInfo, type VersionInfo } from "./version.js";
 
 const execFileAsync = promisify(execFile);
 const SOURCE_ROOT = fileURLToPath(new URL("../../..", import.meta.url));
@@ -17,6 +17,7 @@ const DEFAULT_BIN_DIR = join(homedir(), ".local", "bin");
 const GLOBAL_PROBE_TIMEOUT_MS = 5_000;
 
 export const INSTALL_STATUS_SCHEMA_VERSION = "boreal.cli.install.status.v1";
+export const BINARY_IDENTITY_SCHEMA_VERSION = "boreal.cli.binary.identity.v1";
 
 export interface InstallStatusOptions {
   readonly workspaceRoot: string;
@@ -36,7 +37,27 @@ export interface InstallStatus {
   readonly localShim: LocalShimStatus;
   readonly path: PathStatus;
   readonly globalCommand: GlobalCommandStatus;
+  readonly effectiveBinary: EffectiveBinaryStatus;
   readonly recommendedActions: readonly string[];
+}
+
+export interface BinaryIdentity {
+  readonly schemaVersion: typeof BINARY_IDENTITY_SCHEMA_VERSION;
+  readonly name: string;
+  readonly version: string;
+  readonly installChannel: string;
+  readonly executable?: string;
+  readonly build?: VersionInfo["build"];
+}
+
+export interface InstallProvenanceStatus {
+  readonly manifestPath: string;
+  readonly schemaVersion?: string;
+  readonly transactionId?: string;
+  readonly operation?: string;
+  readonly status?: string;
+  readonly installedAt?: string;
+  readonly source?: unknown;
 }
 
 export interface InstallPackageStatus {
@@ -54,6 +75,7 @@ export interface LocalSourceStatus {
   readonly packageScript: string;
   readonly packagePath: string;
   readonly cliEntrypoint: string;
+  readonly identity: BinaryIdentity;
   readonly reason?: string;
 }
 
@@ -63,6 +85,7 @@ export interface LocalShimStatus {
   readonly exists: boolean;
   readonly executable: boolean;
   readonly targetCli?: string;
+  readonly provenance?: InstallProvenanceStatus;
   readonly reason?: string;
 }
 
@@ -78,6 +101,17 @@ export interface GlobalCommandStatus {
   readonly found: boolean;
   readonly path?: string;
   readonly probe?: CommandProbeStatus;
+  readonly identity?: BinaryIdentity;
+  readonly provenance?: InstallProvenanceStatus;
+}
+
+export interface EffectiveBinaryStatus {
+  readonly source: "path" | "source" | "unavailable";
+  readonly path?: string;
+  readonly identity?: BinaryIdentity;
+  readonly provenance?: InstallProvenanceStatus;
+  readonly verified: boolean;
+  readonly reason?: string;
 }
 
 export interface CommandProbeStatus {
@@ -101,7 +135,9 @@ export async function inspectBorealInstallStatus(options: InstallStatusOptions):
         command: commandName,
         found: true,
         path: globalPath,
-        probe: await probeCommand(globalPath, ["--version"])
+        probe: await probeCommand(globalPath, ["--version"]),
+        identity: await probeBinaryIdentity(globalPath),
+        provenance: await readInstallProvenanceForExecutable(globalPath)
       }
     : {
         command: commandName,
@@ -114,6 +150,23 @@ export async function inspectBorealInstallStatus(options: InstallStatusOptions):
     addToPathCommand: pathAddCommand(binDir)
   };
   const upgrade = installUpgradeStatus(versionInfo.installChannel);
+  const effectiveBinary: EffectiveBinaryStatus = globalCommand.found
+    ? {
+        source: "path",
+        path: globalCommand.path,
+        identity: globalCommand.identity,
+        provenance: globalCommand.provenance,
+        verified: Boolean(globalCommand.probe?.ok && globalCommand.identity),
+        ...(globalCommand.identity ? {} : { reason: "Resolved command did not return a machine-readable build identity" })
+      }
+    : localSource.available
+      ? {
+          source: "source",
+          path: localSource.cliEntrypoint,
+          identity: localSource.identity,
+          verified: true
+        }
+      : { source: "unavailable", verified: false, reason: "No executable or source CLI is available" };
 
   return {
     schemaVersion: INSTALL_STATUS_SCHEMA_VERSION,
@@ -131,6 +184,7 @@ export async function inspectBorealInstallStatus(options: InstallStatusOptions):
     localShim,
     path: pathStatus,
     globalCommand,
+    effectiveBinary,
     recommendedActions: installStatusRecommendedActions({ localSource, localShim, pathStatus, globalCommand, upgrade })
   };
 }
@@ -162,13 +216,14 @@ function executableCandidates(directory: string, command: string): readonly stri
     .split(";")
     .map((extension) => extension.trim())
     .filter((extension) => extension.length > 0);
-  return [join(directory, command), ...extensions.map((extension) => join(directory, `${command}${extension}`))];
+  return [...extensions.map((extension) => join(directory, `${command}${extension}`)), join(directory, command)];
 }
 
 async function inspectLocalSource(): Promise<LocalSourceStatus> {
   const packagePath = join(SOURCE_ROOT, "package.json");
   const cliEntrypoint = join(SOURCE_ROOT, "apps", "cli", "src", "index.ts");
   const command = "pnpm bwrk <command>";
+  const identity = binaryIdentityFromVersionInfo(getVersionInfo(), cliEntrypoint);
   try {
     const parsed = await readJsonFile(packagePath, {
       schemaName: "boreal.package.v1",
@@ -184,6 +239,7 @@ async function inspectLocalSource(): Promise<LocalSourceStatus> {
         packageScript: "",
         packagePath,
         cliEntrypoint,
+        identity,
         reason: "Root package.json does not define a bwrk script"
       };
     }
@@ -195,6 +251,7 @@ async function inspectLocalSource(): Promise<LocalSourceStatus> {
         packageScript: script,
         packagePath,
         cliEntrypoint,
+        identity,
         reason: "CLI source entrypoint is missing"
       };
     }
@@ -204,7 +261,8 @@ async function inspectLocalSource(): Promise<LocalSourceStatus> {
       command,
       packageScript: script,
       packagePath,
-      cliEntrypoint
+      cliEntrypoint,
+      identity
     };
   } catch (error) {
     return {
@@ -214,13 +272,18 @@ async function inspectLocalSource(): Promise<LocalSourceStatus> {
       packageScript: "",
       packagePath,
       cliEntrypoint,
+      identity,
       reason: error instanceof Error ? error.message : String(error)
     };
   }
 }
 
 async function inspectLocalShim(binDir: string, commandName: string): Promise<LocalShimStatus> {
-  const shimPath = join(binDir, commandName);
+  const candidates = executableCandidates(binDir, commandName);
+  const preferredPath = process.platform === "win32" && !/\.[a-z0-9]+$/iu.test(commandName)
+    ? join(binDir, `${commandName}.cmd`)
+    : join(binDir, commandName);
+  const shimPath = await firstRegularFile([preferredPath, ...candidates]) ?? preferredPath;
   if (!(await isRegularFile(shimPath))) {
     return {
       binDir,
@@ -237,6 +300,7 @@ async function inspectLocalShim(binDir: string, commandName: string): Promise<Lo
     exists: true,
     executable,
     targetCli,
+    provenance: await readInstallProvenanceForExecutable(targetCli ?? shimPath),
     reason: executable ? undefined : "Shim exists but is not executable"
   };
 }
@@ -245,8 +309,9 @@ async function readShimTarget(path: string): Promise<string | undefined> {
   try {
     const text = await readFile(path, "utf8");
     const sourceRunnerMatch = /--tsconfig '[^']+' '([^']+)' "\$@"/u.exec(text);
+    const windowsSourceRunnerMatch = /--tsconfig "[^"]+" "([^"]+)" %\*/u.exec(text);
     const distRunnerMatch = /exec node '([^']+)' "\$@"/u.exec(text);
-    return sourceRunnerMatch?.[1] ?? distRunnerMatch?.[1];
+    return sourceRunnerMatch?.[1] ?? windowsSourceRunnerMatch?.[1] ?? distRunnerMatch?.[1];
   } catch {
     return undefined;
   }
@@ -255,7 +320,12 @@ async function readShimTarget(path: string): Promise<string | undefined> {
 async function probeCommand(command: string, args: readonly string[]): Promise<CommandProbeStatus> {
   const probeCommandLine = [command, ...args];
   try {
-    const result = await execFileAsync(command, [...args], {
+    const isWindowsCommandScript = process.platform === "win32" && /\.(?:cmd|bat)$/iu.test(command);
+    const executable = isWindowsCommandScript ? process.env.ComSpec ?? "cmd.exe" : command;
+    const executableArgs = isWindowsCommandScript
+      ? ["/d", "/s", "/c", windowsCommandLine(command, args)]
+      : [...args];
+    const result = await execFileAsync(executable, executableArgs, {
       timeout: GLOBAL_PROBE_TIMEOUT_MS,
       windowsHide: true,
       maxBuffer: 64 * 1024
@@ -278,6 +348,92 @@ async function probeCommand(command: string, args: readonly string[]): Promise<C
   }
 }
 
+async function probeBinaryIdentity(command: string): Promise<BinaryIdentity | undefined> {
+  const probe = await probeCommand(command, ["--no-delegate", "--version", "--json"]);
+  if (!probe.ok) {
+    return undefined;
+  }
+  try {
+    const parsed = JSON.parse(probe.stdout) as { readonly data?: unknown };
+    if (!isRecord(parsed?.data)) {
+      return undefined;
+    }
+    const data = parsed.data;
+    if (typeof data.name !== "string" || typeof data.version !== "string" || typeof data.installChannel !== "string") {
+      return undefined;
+    }
+    const build = parseBuildIdentity(data.build);
+    return {
+      schemaVersion: BINARY_IDENTITY_SCHEMA_VERSION,
+      name: data.name,
+      version: data.version,
+      installChannel: data.installChannel,
+      executable: command,
+      ...(build ? { build } : {})
+    };
+  } catch {
+    return undefined;
+  }
+}
+
+function binaryIdentityFromVersionInfo(info: VersionInfo, executable: string): BinaryIdentity {
+  return {
+    schemaVersion: BINARY_IDENTITY_SCHEMA_VERSION,
+    name: info.name,
+    version: info.version,
+    installChannel: info.installChannel,
+    executable,
+    build: info.build
+  };
+}
+
+function parseBuildIdentity(value: unknown): VersionInfo["build"] | undefined {
+  if (!isRecord(value)) {
+    return undefined;
+  }
+  const strings = ["semanticVersion", "buildSha", "artifactDigest", "agentAssetDigest"];
+  const numbers = ["protocolEpoch", "writerEpoch", "readerEpoch", "cacheEpoch"];
+  if (!strings.every((key) => typeof value[key] === "string") || !numbers.every((key) => typeof value[key] === "number")) {
+    return undefined;
+  }
+  return {
+    semanticVersion: value.semanticVersion as string,
+    buildSha: value.buildSha as string,
+    artifactDigest: value.artifactDigest as string,
+    protocolEpoch: value.protocolEpoch as number,
+    writerEpoch: value.writerEpoch as number,
+    readerEpoch: value.readerEpoch as number,
+    cacheEpoch: value.cacheEpoch as number,
+    agentAssetDigest: value.agentAssetDigest as string
+  };
+}
+
+async function readInstallProvenanceForExecutable(executable: string): Promise<InstallProvenanceStatus | undefined> {
+  const target = await readShimTarget(executable) ?? executable;
+  const manifestPath = join(dirname(dirname(resolve(target))), "install-manifest.json");
+  try {
+    const parsed = await readJsonFile(manifestPath, {
+      schemaName: "boreal.install.manifest.v1",
+      expectedObject: true,
+      maxBytes: 256 * 1024
+    });
+    if (!isRecord(parsed)) {
+      return undefined;
+    }
+    return {
+      manifestPath,
+      ...(typeof parsed.schemaVersion === "string" ? { schemaVersion: parsed.schemaVersion } : {}),
+      ...(typeof parsed.transactionId === "string" ? { transactionId: parsed.transactionId } : {}),
+      ...(typeof parsed.operation === "string" ? { operation: parsed.operation } : {}),
+      ...(typeof parsed.status === "string" ? { status: parsed.status } : {}),
+      ...(typeof parsed.installedAt === "string" ? { installedAt: parsed.installedAt } : {}),
+      ...("source" in parsed ? { source: parsed.source } : {})
+    };
+  } catch {
+    return undefined;
+  }
+}
+
 async function isRegularFile(path: string): Promise<boolean> {
   try {
     const info = await stat(path);
@@ -287,8 +443,20 @@ async function isRegularFile(path: string): Promise<boolean> {
   }
 }
 
+async function firstRegularFile(paths: readonly string[]): Promise<string | undefined> {
+  for (const path of [...new Set(paths)]) {
+    if (await isRegularFile(path)) {
+      return path;
+    }
+  }
+  return undefined;
+}
+
 async function isExecutableFile(path: string): Promise<boolean> {
   try {
+    if (process.platform === "win32") {
+      return (await stat(path)).isFile();
+    }
     await access(path, constants.X_OK);
     return (await stat(path)).isFile();
   } catch {
@@ -297,6 +465,9 @@ async function isExecutableFile(path: string): Promise<boolean> {
 }
 
 function pathAddCommand(binDir: string): string {
+  if (process.platform === "win32") {
+    return `set "PATH=${binDir};%PATH%"`;
+  }
   return `export PATH=${shellQuote(binDir)}:$PATH`;
 }
 
@@ -328,7 +499,18 @@ function installStatusRecommendedActions(input: {
 }
 
 function shellQuote(value: string): string {
+  if (process.platform === "win32") {
+    return cmdQuote(value);
+  }
   return `'${value.replaceAll("'", "'\\''")}'`;
+}
+
+function windowsCommandLine(command: string, args: readonly string[]): string {
+  return [command, ...args].map(cmdQuote).join(" ");
+}
+
+function cmdQuote(value: string): string {
+  return `"${value.replaceAll('"', '""')}"`;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

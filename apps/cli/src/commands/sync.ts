@@ -6,6 +6,7 @@ import type { WorkItemView } from "@boreal/ui-model";
 import { hasFlag, type ParsedArgs } from "../args.js";
 import { keyValueRows, resultSummary, section } from "../cli-ui.js";
 import type { CliContext } from "../context.js";
+import type { ProjectToolchainStatus } from "../toolchain.js";
 import { inspectGitWorktree, type GitWorktreeInspection } from "../git-worktree.js";
 import { exportLedgers, ledgerStatus, readGeneratedLedgerTombstones, type LedgerStatusResult } from "../import-export.js";
 import { formatRecord, type CliOutput } from "../output.js";
@@ -23,6 +24,7 @@ export interface SyncStatusResult {
   readonly ok: boolean;
   readonly workspaceRoot: string;
   readonly checkedAt: IsoTimestamp;
+  readonly toolchain?: ProjectToolchainStatus;
   readonly vault: VaultStatusResult;
   readonly ledgers: LedgerStatusResult;
   readonly searchIndex: SearchIndexInspection & { readonly ok: boolean };
@@ -172,11 +174,13 @@ export async function buildSyncStatus(context: CliContext): Promise<SyncStatusRe
   ]);
   const searchIndexOk = searchIndex.exists && !searchIndex.stale && !searchIndex.error;
   const projectRollupOk = projectRollup.exists && !projectRollup.stale && !projectRollup.error;
-  const recommendedActions = syncRecommendedActions(vault, ledgers, searchIndexOk, projectRollupOk, git);
+  const toolchainOk = context.toolchain.mode !== "compatibility-read";
+  const recommendedActions = syncRecommendedActions(context.toolchain, vault, ledgers, searchIndexOk, projectRollupOk, git);
   return {
-    ok: vault.ok && ledgers.ok && searchIndexOk && projectRollupOk && git.ok,
+    ok: toolchainOk && vault.ok && ledgers.ok && searchIndexOk && projectRollupOk && git.ok,
     workspaceRoot: context.workspaceRoot,
     checkedAt: nowIso(),
+    toolchain: context.toolchain,
     vault,
     ledgers,
     searchIndex: {
@@ -249,6 +253,7 @@ async function safeLedgerStatus(context: CliContext): Promise<LedgerStatusResult
 }
 
 function syncRecommendedActions(
+  toolchain: ProjectToolchainStatus,
   vault: VaultStatusResult,
   ledgers: LedgerStatusResult,
   searchIndexOk: boolean,
@@ -256,6 +261,9 @@ function syncRecommendedActions(
   git: GitWorktreeInspection
 ): readonly string[] {
   const actions: string[] = [];
+  if (toolchain.mode === "compatibility-read") {
+    actions.push("Use the exact build recorded in .boreal/toolchain.lock.json or run an explicit toolchain migration/update.");
+  }
   if (!vault.ok) {
     actions.push("bwrk vault init --json");
   }
@@ -276,6 +284,7 @@ function formatSyncDashboard(status: SyncStatusResult): string {
       "Checks",
       keyValueRows([
         { key: "vault", value: status.vault.ok },
+        { key: "toolchain", value: status.toolchain?.mode ?? "unprobed" },
         { key: "ledgers", value: status.ledgers.ok },
         { key: "searchIndex", value: status.searchIndex.ok },
         { key: "projectRollup", value: status.projectRollup.ok },

@@ -7,3 +7,4 @@ export * from "./object-index.js";
 export * from "./object-store.js";
 export * from "./ports.js";
 export * from "./search-fts.js";
+export * from "./transaction-journal.js";

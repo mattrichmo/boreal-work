@@ -31,7 +31,15 @@ import {
   type WorkId
 } from "@boreal/core";
 import { createBorealRuntime, type ExternalDependencyResolution } from "@boreal/engine";
-import { FileBorealStore, ObjectDirBorealStore, inspectFileLock, writeTextFileAtomic, type BorealStore, type FileLockInspection } from "@boreal/storage";
+import {
+  FileBorealStore,
+  ObjectDirBorealStore,
+  inspectFileLock,
+  objectIndexPath,
+  writeTextFileAtomic,
+  type BorealStore,
+  type FileLockInspection
+} from "@boreal/storage";
 
 import { emptyGlobalRollupCacheResult, refreshGlobalRollupCache, type GlobalRollupCacheResult } from "./global-rollup-cache.js";
 
@@ -40,6 +48,10 @@ export const DAEMON_WATCH_SCHEMA_VERSION = "boreal.daemon.watch.v1";
 const DAEMON_WATCH_INTERVAL_MS = 30_000;
 const DAEMON_RESERVATION_RENEWAL_WINDOW_MS = DAEMON_WATCH_INTERVAL_MS * 2;
 const DAEMON_RESERVATION_LEASE_MS = 30 * 60_000;
+const MAX_DAEMON_DIAGNOSTIC_DEPTH = 4;
+const MAX_DAEMON_DIAGNOSTIC_ITEMS = 24;
+const MAX_DAEMON_DIAGNOSTIC_STRING_LENGTH = 1_000;
+const SENSITIVE_DAEMON_DIAGNOSTIC_KEY = /(authorization|api[-_]?key|cookie|credential|password|private[-_]?key|secret|token)/iu;
 
 export type DaemonState = "missing" | "stopped" | "running" | "stale" | "drift";
 export type DaemonWatchAction = "observed" | "skipped";
@@ -151,6 +163,13 @@ interface ProjectSetupLike {
   readonly memoryRoot?: string;
   readonly memoryLayout?: ProjectRegistryMemoryLayout;
   readonly storage?: DaemonProjectStorageKind;
+  readonly setupError?: DaemonSetupError;
+}
+
+interface DaemonSetupError {
+  readonly code: string;
+  readonly message: string;
+  readonly details: unknown;
 }
 
 type DaemonProjectStorageKind = "file-v2" | "objects-v1";
@@ -497,6 +516,18 @@ async function bindDaemonProject(workspaceRoot: string): Promise<DaemonProjectBi
     };
   }
   const setup = await readProjectSetup(workspaceRoot);
+  if (setup.setupError) {
+    return {
+      findings: [
+        {
+          code: "daemon.setup_invalid",
+          severity: "error",
+          message: setup.setupError.message,
+          details: setup.setupError.details
+        }
+      ]
+    };
+  }
   const projectRoot = setup.projectRoot ?? workspaceRoot;
   const memoryRoot = setup.memoryRoot ?? join(projectRoot, "memory");
   try {
@@ -515,8 +546,8 @@ async function bindDaemonProject(workspaceRoot: string): Promise<DaemonProjectBi
         {
           code: "daemon.boundary",
           severity: "error",
-          message: error instanceof Error ? error.message : String(error),
-          details: error instanceof BorealError ? error.details : undefined
+          message: boundedDaemonMessage(error instanceof Error ? error.message : String(error)),
+          details: boundedDaemonDiagnostic(error instanceof BorealError ? error.details : undefined)
         }
       ]
     };
@@ -535,7 +566,15 @@ async function readProjectSetup(workspaceRoot: string): Promise<ProjectSetupLike
       expectedObject: true
     });
     if (!isRecord(parsed)) {
-      return {};
+      return {
+        setupError: daemonSetupError(path, "Project setup must be a JSON object")
+      };
+    }
+    const shapeIssue = projectSetupShapeIssue(parsed);
+    if (shapeIssue) {
+      return {
+        setupError: daemonSetupError(path, shapeIssue)
+      };
     }
     return {
       projectRoot: typeof parsed.projectRoot === "string" ? parsed.projectRoot : undefined,
@@ -543,8 +582,10 @@ async function readProjectSetup(workspaceRoot: string): Promise<ProjectSetupLike
       memoryLayout: memoryLayout(parsed.memoryLayout),
       storage: projectStorageKind(parsed.storage)
     };
-  } catch {
-    return {};
+  } catch (error) {
+    return {
+      setupError: daemonSetupError(path, error)
+    };
   }
 }
 
@@ -631,26 +672,33 @@ async function readDaemonStatusFile(path: string): Promise<DaemonStatusFile | un
   if (!existsSync(path)) {
     return undefined;
   }
-  const parsed = safeParseJson(await readFile(path, "utf8"), {
-    path,
-    schemaName: DAEMON_STATUS_SCHEMA_VERSION,
-    expectedObject: true
-  });
-  if (!isRecord(parsed)) {
-    return undefined;
+  try {
+    const parsed = safeParseJson(await readFile(path, "utf8"), {
+      path,
+      schemaName: DAEMON_STATUS_SCHEMA_VERSION,
+      expectedObject: true
+    });
+    if (!isRecord(parsed)) {
+      throw new BorealError("BOREAL_INVALID_INPUT", "Daemon status file must be a JSON object");
+    }
+    return {
+      schemaVersion: DAEMON_STATUS_SCHEMA_VERSION,
+      workspaceRoot: typeof parsed.workspaceRoot === "string" ? parsed.workspaceRoot : "",
+      projectRoot: typeof parsed.projectRoot === "string" ? parsed.projectRoot : "",
+      memoryRoot: typeof parsed.memoryRoot === "string" ? parsed.memoryRoot : "",
+      memoryLayout: memoryLayout(parsed.memoryLayout) ?? "in-repo",
+      pid: typeof parsed.pid === "number" ? parsed.pid : 0,
+      state: parsed.state === "stopped" ? "stopped" : "running",
+      startedAt: typeof parsed.startedAt === "string" ? parsed.startedAt : "",
+      updatedAt: typeof parsed.updatedAt === "string" ? parsed.updatedAt : "",
+      stoppedAt: typeof parsed.stoppedAt === "string" ? parsed.stoppedAt : undefined
+    };
+  } catch (error) {
+    throw new BorealError("BOREAL_INVALID_INPUT", "Daemon status file is unreadable", {
+      path,
+      causeCode: error instanceof BorealError ? error.code : "BOREAL_UNEXPECTED"
+    });
   }
-  return {
-    schemaVersion: DAEMON_STATUS_SCHEMA_VERSION,
-    workspaceRoot: typeof parsed.workspaceRoot === "string" ? parsed.workspaceRoot : "",
-    projectRoot: typeof parsed.projectRoot === "string" ? parsed.projectRoot : "",
-    memoryRoot: typeof parsed.memoryRoot === "string" ? parsed.memoryRoot : "",
-    memoryLayout: memoryLayout(parsed.memoryLayout) ?? "in-repo",
-    pid: typeof parsed.pid === "number" ? parsed.pid : 0,
-    state: parsed.state === "stopped" ? "stopped" : "running",
-    startedAt: typeof parsed.startedAt === "string" ? parsed.startedAt : "",
-    updatedAt: typeof parsed.updatedAt === "string" ? parsed.updatedAt : "",
-    stoppedAt: typeof parsed.stoppedAt === "string" ? parsed.stoppedAt : undefined
-  };
 }
 
 async function writeDaemonStatusFile(workspaceRoot: string, status: DaemonStatusFile): Promise<void> {
@@ -934,7 +982,7 @@ function daemonWatchPaths(workspaceRoot: string): readonly string[] {
   const root = resolve(workspaceRoot);
   return [
     join(root, ".boreal", "runtime", "state.json"),
-    join(root, ".boreal", "cache", "index.sqlite"),
+    objectIndexPath(root),
     join(root, ".boreal", "ledgers", "manifest.json"),
     join(root, "memory")
   ];
@@ -955,6 +1003,84 @@ function memoryLayout(value: unknown): ProjectRegistryMemoryLayout | undefined {
 
 function projectStorageKind(value: unknown): DaemonProjectStorageKind | undefined {
   return value === "file-v2" || value === "objects-v1" ? value : undefined;
+}
+
+function projectSetupShapeIssue(value: Record<string, unknown>): string | undefined {
+  if (value.schemaVersion !== "boreal.project-setup.v1") {
+    return "Project setup has an unsupported schema version";
+  }
+  if (typeof value.projectRoot !== "string" || typeof value.memoryRoot !== "string") {
+    return "Project setup is missing projectRoot or memoryRoot";
+  }
+  if (memoryLayout(value.memoryLayout) === undefined) {
+    return "Project setup has an invalid memoryLayout";
+  }
+  if (value.storage !== undefined && projectStorageKind(value.storage) === undefined) {
+    return "Project setup has an invalid storage kind";
+  }
+  return undefined;
+}
+
+export function daemonErrorPayload(error: unknown): Record<string, unknown> {
+  if (error instanceof BorealError) {
+    return {
+      ok: false,
+      code: error.code,
+      message: boundedDaemonMessage(error.message),
+      details: boundedDaemonDiagnostic(error.details)
+    };
+  }
+  return {
+    ok: false,
+    code: "BOREAL_UNEXPECTED",
+    message: boundedDaemonMessage(error instanceof Error ? error.message : String(error))
+  };
+}
+
+function daemonSetupError(path: string, error: unknown): DaemonSetupError {
+  return {
+    code: error instanceof BorealError ? error.code : "BOREAL_UNEXPECTED",
+    message: "Daemon project setup is unreadable; refusing to watch or repair the workspace",
+    details: {
+      path,
+      causeCode: error instanceof BorealError ? error.code : "BOREAL_UNEXPECTED",
+      cause: boundedDaemonMessage(error instanceof Error ? error.message : String(error))
+    }
+  };
+}
+
+function boundedDaemonMessage(value: string): string {
+  return redactDaemonText(value).slice(0, MAX_DAEMON_DIAGNOSTIC_STRING_LENGTH);
+}
+
+function boundedDaemonDiagnostic(value: unknown, depth = 0): unknown {
+  if (value === null || typeof value === "number" || typeof value === "boolean") {
+    return value;
+  }
+  if (typeof value === "string") {
+    return redactDaemonText(value).slice(0, MAX_DAEMON_DIAGNOSTIC_STRING_LENGTH);
+  }
+  if (depth >= MAX_DAEMON_DIAGNOSTIC_DEPTH) {
+    return "[diagnostic depth limited]";
+  }
+  if (Array.isArray(value)) {
+    return value.slice(0, MAX_DAEMON_DIAGNOSTIC_ITEMS).map((entry) => boundedDaemonDiagnostic(entry, depth + 1));
+  }
+  if (isRecord(value)) {
+    return Object.fromEntries(
+      Object.entries(value).slice(0, MAX_DAEMON_DIAGNOSTIC_ITEMS).map(([key, entry]) => [
+        key,
+        SENSITIVE_DAEMON_DIAGNOSTIC_KEY.test(key) ? "[redacted]" : boundedDaemonDiagnostic(entry, depth + 1)
+      ])
+    );
+  }
+  return String(value).slice(0, MAX_DAEMON_DIAGNOSTIC_STRING_LENGTH);
+}
+
+function redactDaemonText(value: string): string {
+  return value
+    .replace(/((?:authorization|api[-_]?key|cookie|credential|password|private[-_]?key|secret|token)\s*[:=]\s*)[^\s,;]+/giu, "$1[redacted]")
+    .replace(/([?&](?:api[-_]?key|password|secret|token)=)[^&\s]+/giu, "$1[redacted]");
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

@@ -11,7 +11,7 @@ The daemon is an observer and coordinator, not a second runtime writer. It may w
 - Detect whether a recorded daemon PID is still alive.
 - Watch bounded project paths:
   - `.boreal/runtime/state.json`
-  - `.boreal/cache/index.sqlite`
+  - `.boreal/cache/index-v2.sqlite`
   - `.boreal/ledgers/manifest.json`
   - `memory/`
 - Inspect runtime and search-index locks before doing watch work.

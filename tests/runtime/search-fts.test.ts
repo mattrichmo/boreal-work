@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm, stat, symlink } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, stat, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -11,7 +11,14 @@ import {
   type EventId,
   type RuntimeEvent
 } from "@boreal/core";
-import { FileEventLog, FtsSearchIndex, ObjectDirBorealStore, loadNodeSqlite, type FtsDocumentInput } from "@boreal/storage";
+import {
+  FileEventLog,
+  FtsSearchIndex,
+  ObjectDirBorealStore,
+  loadNodeSqlite,
+  objectIndexPath,
+  type FtsDocumentInput
+} from "@boreal/storage";
 import { createWorkItem } from "@boreal/work-engine";
 
 const actor: ActorRef = {
@@ -250,7 +257,7 @@ describe("FTS search index", () => {
         })
       )
     );
-    const path = join(rootDir, ".boreal", "cache", "index.sqlite");
+    const path = objectIndexPath(rootDir);
     const before = await stat(path);
 
     const fts = await FtsSearchIndex.open(rootDir, { sqlite, create: false });
@@ -260,6 +267,36 @@ describe("FTS search index", () => {
     const after = await stat(path);
     expect(after.mtimeMs).toBe(before.mtimeMs);
     expect(after.size).toBe(before.size);
+  });
+
+  it("does not add FTS tables to an incompatible object-index schema", async () => {
+    const sqlite = await loadNodeSqlite();
+    if (!sqlite) {
+      return;
+    }
+    const rootDir = await makeTempWorkspace();
+    const path = objectIndexPath(rootDir);
+    await mkdir(join(rootDir, ".boreal", "cache"), { recursive: true });
+    const incompatible = new sqlite.DatabaseSync(path);
+    incompatible.exec("CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);");
+    incompatible.prepare("INSERT INTO metadata(key, value) VALUES ('schemaVersion', 'boreal.object-index.v99');").run();
+    incompatible.exec("CREATE TABLE sentinel (value TEXT NOT NULL);");
+    incompatible.prepare("INSERT INTO sentinel(value) VALUES ('preserve-me');").run();
+    incompatible.close();
+    const before = await readFile(path);
+
+    await expect(FtsSearchIndex.open(rootDir, { sqlite })).rejects.toMatchObject({
+      code: "BOREAL_STORAGE_ERROR",
+      details: { detail: "object-index schema is boreal.object-index.v99" }
+    });
+
+    expect((await readFile(path)).equals(before)).toBe(true);
+    const verification = new sqlite.DatabaseSync(path, { readOnly: true });
+    expect(
+      (verification.prepare("SELECT COUNT(*) AS count FROM sqlite_master WHERE name = 'search_fts';").get() as { count: number })
+        .count
+    ).toBe(0);
+    verification.close();
   });
 
   it("marks equal-count indexes stale when canonical content hashes diverge", async () => {
@@ -280,7 +317,7 @@ describe("FTS search index", () => {
         })
       )
     );
-    const path = join(rootDir, ".boreal", "cache", "index.sqlite");
+    const path = objectIndexPath(rootDir);
     const db = new sqlite.DatabaseSync(path);
     db.prepare("UPDATE records SET content_hash = 'sha256:tampered';").run();
     db.close();

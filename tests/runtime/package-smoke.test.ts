@@ -51,7 +51,7 @@ describe("package smoke", () => {
       BOREAL_BIN_DIR: binDir,
       PATH: `${binDir}${delimiter}${process.env.PATH ?? ""}`
     };
-    const bwrk = join(binDir, "bwrk");
+    const bwrk = join(binDir, process.platform === "win32" ? "bwrk.cmd" : "bwrk");
 
     await initGit(project);
     await initGit(siblingProject);
@@ -216,10 +216,16 @@ async function run(
   timeout = 30_000
 ): Promise<CommandRun> {
   try {
-    const result = await execFileAsync(command, [...args], {
+    const isWindowsCommandScript = process.platform === "win32" && /\.(?:cmd|bat)$/iu.test(command);
+    const executable = isWindowsCommandScript ? process.env.ComSpec ?? "cmd.exe" : command;
+    const executableArgs = isWindowsCommandScript
+      ? ["/d", "/s", "/c", windowsCommandLine(command, args)]
+      : [...args];
+    const result = await execFileAsync(executable, executableArgs, {
       cwd,
       env,
       timeout,
+      windowsHide: true,
       maxBuffer: 10 * 1024 * 1024
     });
     return { stdout: String(result.stdout), stderr: String(result.stderr) };
@@ -235,6 +241,14 @@ async function run(
       ].join("\n")
     );
   }
+}
+
+function windowsCommandLine(command: string, args: readonly string[]): string {
+  return [command, ...args].map(cmdQuote).join(" ");
+}
+
+function cmdQuote(value: string): string {
+  return `"${value.replaceAll('"', '""')}"`;
 }
 
 interface CommandRun {

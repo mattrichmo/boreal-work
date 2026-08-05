@@ -125,7 +125,8 @@ bwrk agent guide --agent <agent-id> --json
 bwrk session start --agent <agent-id> --json
 bwrk prime --agent <agent-id> --json
 bwrk agent start --agent <agent-id> --purpose "start implementation" --json
-bwrk agent finish current --agent <agent-id> --summary "implemented and tested" --kind test --command "pnpm test" --verdict passed --close --reason "verified" --json
+bwrk evidence run <work-id> --gate <gate-id> --json
+bwrk agent finish current --agent <agent-id> --evidence <evidence-id> --verdict passed --close --reason "verified by referenced evidence" --json
 ```
 
 Console development and verification:

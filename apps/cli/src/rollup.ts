@@ -555,9 +555,11 @@ function projectRollupLastEvent(events: readonly RuntimeEvent[]): ProjectRollupD
 }
 
 function projectRollupLastOperation(operations: readonly RuntimeOperation[]): ProjectRollupDocument["lastOperation"] {
-  const operation = [...operations].sort(
+  const operation = operations
+    .filter((candidate) => candidate.status === "succeeded" || candidate.status === "failed")
+    .sort(
     (left, right) => right.finishedAt.localeCompare(left.finishedAt) || right.meta.id.localeCompare(left.meta.id)
-  )[0];
+    )[0];
   return operation
     ? {
         id: operation.meta.id,

@@ -11,7 +11,7 @@ One-line install (no checkout needed):
   curl -fsSL https://raw.githubusercontent.com/mattrichmo/boreal-work/main/install.sh | bash
 
 Modes:
-  default        Install or upgrade the machine bwrk binary, then offer global/link steps.
+  default        Install or upgrade the machine bwrk binary, then offer manager-registry/link steps.
   --machine      Install or upgrade the machine bwrk binary only.
   --repo         Add bwrk as a dev dependency in the current repo and verify pnpm bwrk.
   --from-github  Clone the source repo, build, and install (automatic when run via curl).
@@ -19,8 +19,8 @@ Modes:
                  Already-installed users can run: bwrk update self
 
 Options:
-  --global         Non-interactively accept global-manager setup when prompted.
-  --no-global      Skip global-manager setup and repo linking.
+  --global         Non-interactively accept global manager registry setup (not agent skills).
+  --no-global      Skip global manager-registry setup and repo linking.
   --yes, -y        Accept prompts non-interactively.
   --no-link        Skip linking the current repo to an existing registry.
   --bin-dir DIR    Machine binary directory. Defaults to BOREAL_INSTALL_BIN_DIR or ~/.local/bin.
@@ -222,20 +222,33 @@ require_dist() {
 }
 
 install_machine_binary() {
-  local target_dist bin_path version
+  local target_dist bin_path version version_json transaction_id manifest_path
+  transaction_id="${BOREAL_INSTALL_TRANSACTION_ID:-$(node -e 'console.log(require("crypto").randomUUID())')}"
   bin_dir="$(resolve_path "$bin_dir")"
   lib_dir="$(resolve_path "$lib_dir")"
   target_dist="$lib_dir/dist"
   bin_path="$bin_dir/bwrk"
+  manifest_path="$lib_dir/install-manifest.json"
 
   mkdir -p "$bin_dir" "$lib_dir"
   copy_dist "$target_dist"
   write_machine_shim "$bin_path" "$target_dist/index.js"
 
   version="$("$bin_path" --version)"
+  version_json="$("$bin_path" --no-delegate --version --json)"
+  printf '%s\n' "$version_json" > "$manifest_path.tmp"
+  node -e 'const fs=require("fs"); const [input,output,transactionId,operation,repoUrl,ref,binaryPath,bundlePath]=process.argv.slice(1); const doc=JSON.parse(fs.readFileSync(input,"utf8")); if (doc?.ok !== true || typeof doc.data?.build?.buildSha !== "string") process.exit(1); const data=doc.data; fs.writeFileSync(output,JSON.stringify({schemaVersion:"boreal.install.manifest.v1",transactionId,operation,status:"committed",installedAt:new Date().toISOString(),source:{repoUrl:repoUrl||undefined,ref:ref||undefined},binaryPath,bundlePath,identity:{name:data.name,version:data.version,installChannel:data.installChannel,build:data.build}},null,2)+"\n");' "$manifest_path.tmp" "$manifest_path.tmp.final" "$transaction_id" "${BOREAL_INSTALL_PROVENANCE_OPERATION:-install.machine}" "${BOREAL_INSTALL_SOURCE_REPO_URL:-}" "${BOREAL_INSTALL_SOURCE_REF:-}" "$bin_path" "$target_dist"
+  mv "$manifest_path.tmp.final" "$manifest_path"
+  rm -f "$manifest_path.tmp"
   echo "Installed bwrk machine binary: $bin_path"
   echo "Installed bwrk bundle: $target_dist"
   echo "Verification: $version"
+  echo "Transaction: $transaction_id"
+  echo "Provenance: $manifest_path"
+  echo "Next steps:"
+  echo "  project setup: bwrk install --yes"
+  echo "  user-wide Codex skills: bwrk install codex --scope user"
+  echo "  user-wide Claude skills: bwrk install claude --scope user"
 }
 
 install_repo_dependency() {

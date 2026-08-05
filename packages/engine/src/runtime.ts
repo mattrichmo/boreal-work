@@ -165,10 +165,9 @@ export interface ResolveWorkReferenceOptions {
   readonly agentId?: AgentId | string;
 }
 
-export interface FinishReservedWorkInput {
+interface FinishReservedWorkInputBase {
   readonly workId: WorkId;
   readonly agentId: AgentId | string;
-  readonly evidence: Omit<Parameters<typeof recordEvidenceDomain>[0], "actor" | "now" | "subjectId" | "subjectType">;
   readonly verification: {
     readonly verdict: VerificationRecord["verdict"];
     readonly notes?: string;
@@ -181,6 +180,17 @@ export interface FinishReservedWorkInput {
   };
   readonly release?: boolean;
 }
+
+export type FinishReservedWorkInput = FinishReservedWorkInputBase & (
+  | {
+      readonly evidence: Omit<Parameters<typeof recordEvidenceDomain>[0], "actor" | "now" | "subjectId" | "subjectType">;
+      readonly evidenceId?: never;
+    }
+  | {
+      readonly evidence?: never;
+      readonly evidenceId: EvidenceId;
+    }
+);
 
 export interface FinishReservedWorkSummaryInput {
   readonly work: WorkItem;
@@ -935,15 +945,39 @@ export function createBorealRuntime(options: BorealRuntimeOptions = {}): BorealR
           current
         });
 
-        const evidence = recordEvidenceDomain({
-          ...input.evidence,
-          subjectId: input.workId,
-          subjectType: "work",
-          actor,
-          now: current
-        });
+        const createdEvidence = input.evidence
+          ? recordEvidenceDomain({
+              ...input.evidence,
+              subjectId: input.workId,
+              subjectType: "work",
+              actor,
+              now: current
+            })
+          : undefined;
+        const referencedEvidence = "evidenceId" in input && input.evidenceId
+          ? (await loadEvidenceRecords(writer, [input.evidenceId]))[0]
+          : undefined;
+        const evidence = createdEvidence ?? referencedEvidence;
+        if (!evidence) {
+          throw new BorealError("BOREAL_NOT_FOUND", "Referenced finish evidence was not found", {
+            workId: input.workId,
+            evidenceId: input.evidenceId,
+            domain: "evidence"
+          });
+        }
+        if (evidence.subjectId !== input.workId || evidence.subjectType !== "work") {
+          throw new BorealError("BOREAL_INVALID_INPUT", "Referenced finish evidence belongs to a different subject", {
+            workId: input.workId,
+            evidenceId: evidence.meta.id,
+            evidenceSubjectId: evidence.subjectId,
+            evidenceSubjectType: evidence.subjectType
+          });
+        }
         const workWithEvidence = attachEvidenceToWork(work, evidence.meta.id, current, actor);
-        const availableEvidence = [...(await writer.listEvidenceForSubject(input.workId)), evidence];
+        const persistedSubjectEvidence = await writer.listEvidenceForSubject(input.workId);
+        const availableEvidence = persistedSubjectEvidence.some((record) => record.meta.id === evidence.meta.id)
+          ? persistedSubjectEvidence
+          : [...persistedSubjectEvidence, evidence];
         const verification = verifySubject({
           subjectId: input.workId,
           subjectType: "work",
@@ -1014,7 +1048,9 @@ export function createBorealRuntime(options: BorealRuntimeOptions = {}): BorealR
         finalWork = await clearWorkReservation(writer, finalWork, current, actor);
         closedWork = closedWork ? finalWork : undefined;
 
-        await writer.putEvidence(evidence);
+        if (createdEvidence) {
+          await writer.putEvidence(createdEvidence);
+        }
         await writer.putVerification(verification);
         await writer.putReservation(releasedReservation);
         if (agentSummary) {
@@ -1025,11 +1061,13 @@ export function createBorealRuntime(options: BorealRuntimeOptions = {}): BorealR
           await recomputeReadinessFrom(writer, [finalWork.meta.id]);
         }
         await refreshWorkContext(writer, finalWork, actor, current);
-        await appendEvent(writer, "evidence.recorded", evidence.meta.id, "evidence", {
-          subjectId: evidence.subjectId,
-          kind: evidence.kind,
-          outcome: evidence.outcome
-        });
+        if (createdEvidence) {
+          await appendEvent(writer, "evidence.recorded", createdEvidence.meta.id, "evidence", {
+            subjectId: createdEvidence.subjectId,
+            kind: createdEvidence.kind,
+            outcome: createdEvidence.outcome
+          });
+        }
         await appendEvent(writer, "work.verified", input.workId, "work", {
           verdict: verification.verdict,
           verificationId: verification.meta.id

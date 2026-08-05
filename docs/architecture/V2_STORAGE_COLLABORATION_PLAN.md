@@ -2,7 +2,7 @@
 
 Status: superseded as an implementation contract; retained as a historical design record.
 
-The shipped storage direction is now `objects-v1`: per-record canonical JSON under `.boreal/objects/`, a hash-linked event log under `.boreal/log/`, and a disposable SQLite read/search index at `.boreal/cache/index.sqlite`. `file-v2` remains the legacy compatibility and rollback adapter. The proposal below predates that implementation and must not be read as current runtime truth or as authority to replace the current writer. A future writer change requires a new decision based on the shipped object-store collaboration and benchmark evidence.
+The shipped storage direction is now `objects-v1`: per-record canonical JSON under `.boreal/objects/`, a hash-linked event log under `.boreal/log/`, and a disposable SQLite read/search index at `.boreal/cache/index-v2.sqlite`. `file-v2` remains the legacy compatibility and rollback adapter. The proposal below predates that implementation and must not be read as current runtime truth or as authority to replace the current writer. A future writer change requires a new decision based on the shipped object-store collaboration and benchmark evidence.
 
 Audit basis: Sprint 14 from the Boreal V1 audit reconciliation. This document is a design artifact, not the implementation. It turns the remaining storage scale and collaboration findings into concrete architecture, freshness, query, benchmark, and migration gates.
 

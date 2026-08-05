@@ -1,0 +1,173 @@
+schemaVersion: boreal.work-template.v1
+id: feature-delivery
+version: "1"
+title: "{{target}} Feature Delivery"
+description: "A reusable granular delivery shape for discovery, implementation, review, update, and validation. Use only when the work benefits from explicit passes."
+variables:
+  - name: target
+    description: "Feature, page, workflow, or other bounded delivery target"
+    required: true
+  - name: label
+    description: "Primary label for every created work item"
+    default: feature
+    required: false
+nodes:
+  - key: delivery
+    kind: milestone
+    title: "{{target}} delivery"
+    description: "Coordinate the bounded delivery and preserve the planning rationale, child outcomes, evidence, and deferred work."
+    labels:
+      - "{{label}}"
+      - delivery
+    acceptance:
+      - "All planned child work is complete or explicitly deferred with a reason."
+      - "Review findings, validation evidence, and checkpoint decisions are represented before closeout."
+    gates:
+      - kind: checkpoint
+        scope: descendants
+    children:
+      - key: discovery-design
+        kind: sprint
+        title: "{{target}} discovery and design"
+        description: "Resolve the highest-risk questions and record the design direction before implementation."
+        labels:
+          - "{{label}}"
+          - discovery
+          - design
+        acceptance:
+          - "The target, constraints, non-goals, open questions, and chosen direction are recorded."
+          - "The implementation task has an explicit, reviewable design basis."
+        children:
+          - key: discovery-brief
+            kind: task
+            title: "{{target}} discovery brief"
+            description: "Bound the problem and collect the facts needed to make an implementation decision."
+            labels:
+              - "{{label}}"
+              - discovery
+            acceptance:
+              - "Objective, scope, constraints, non-goals, assumptions, and open questions are documented."
+          - key: design-ideation
+            kind: task
+            title: "{{target}} design ideation"
+            description: "Explore viable interaction, information, or technical directions and their tradeoffs."
+            labels:
+              - "{{label}}"
+              - design
+            acceptance:
+              - "At least one viable direction and its material tradeoffs are recorded."
+          - key: design-decision
+            kind: task
+            title: "{{target}} design decision"
+            description: "Select the direction that implementation and review will use."
+            labels:
+              - "{{label}}"
+              - design
+              - decision
+            acceptance:
+              - "A chosen direction, rejected alternatives, and implementation implications are recorded."
+            gates:
+              - kind: review
+                scope: self
+      - key: implementation
+        kind: sprint
+        title: "{{target}} implementation"
+        description: "Build the approved target and its focused automated or manual checks."
+        labels:
+          - "{{label}}"
+          - implementation
+        acceptance:
+          - "The approved direction is implemented within the recorded scope."
+          - "Implementation evidence identifies the changed surfaces and the checks run."
+        children:
+          - key: implementation-pass
+            kind: task
+            title: "{{target}} implementation pass"
+            description: "Implement the approved feature or page direction."
+            labels:
+              - "{{label}}"
+              - implementation
+            acceptance:
+              - "The target behavior or page is implemented and the scoped change is checkpointed or has an explicit no-commit reason."
+            gates:
+              - kind: checkpoint
+                scope: self
+          - key: implementation-checks
+            kind: task
+            title: "{{target}} implementation checks"
+            description: "Add or run focused checks for the implementation before review."
+            labels:
+              - "{{label}}"
+              - implementation
+              - verification
+            acceptance:
+              - "Focused tests, static checks, or a documented manual check cover the changed behavior."
+            gates:
+              - kind: verification
+                scope: self
+      - key: review-validation
+        kind: sprint
+        title: "{{target}} review and validation"
+        description: "Critique the delivered result, apply warranted updates, and prove the final state."
+        labels:
+          - "{{label}}"
+          - review
+          - validation
+        acceptance:
+          - "Review findings have an explicit disposition and final validation evidence is attached."
+        children:
+          - key: review-critique
+            kind: task
+            title: "{{target}} review and critique"
+            description: "Review the implementation against the objective, design decision, usability, quality, and risk."
+            labels:
+              - "{{label}}"
+              - review
+              - critique
+            acceptance:
+              - "The changed artifact is inspected and findings are recorded with severity and disposition."
+              - "A no-change review records an explicit no-change disposition."
+            gates:
+              - kind: review
+                scope: self
+          - key: review-update
+            kind: task
+            title: "{{target}} review updates"
+            description: "Apply accepted review findings, or record why no update is required."
+            labels:
+              - "{{label}}"
+              - update
+            acceptance:
+              - "Accepted findings are addressed, or each deferred finding has a reason and follow-up work."
+              - "The final artifact remains within scope and its checkpoint state is recorded."
+            gates:
+              - kind: checkpoint
+                scope: self
+          - key: final-validation
+            kind: task
+            title: "{{target}} final validation"
+            description: "Prove the updated result against acceptance, regression, accessibility, and visual needs that apply."
+            labels:
+              - "{{label}}"
+              - validation
+            acceptance:
+              - "Required commands, tests, visual checks, accessibility checks, or acceptance walkthroughs pass and their evidence is attached."
+              - "Remaining risks and accepted deferrals are reported before parent closeout."
+            gates:
+              - kind: verification
+                scope: self
+edges:
+  - dependent: design-decision
+    dependency: discovery-brief
+  - dependent: design-decision
+    dependency: design-ideation
+  - dependent: implementation-pass
+    dependency: design-decision
+  - dependent: implementation-checks
+    dependency: implementation-pass
+  - dependent: review-critique
+    dependency: implementation-checks
+  - dependent: review-update
+    dependency: review-critique
+  - dependent: final-validation
+    dependency: review-update

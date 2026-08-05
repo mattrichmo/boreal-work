@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 
 import {
   borealComponentInventory,
@@ -28,6 +30,12 @@ import {
   type WorkItemView
 } from "@boreal/ui-model";
 import type { AgentReservation, WorkItem } from "@boreal/core";
+
+const repoRoot = fileURLToPath(new URL("../..", import.meta.url));
+const componentInventorySourcePath = join(repoRoot, borealComponentInventorySource.path);
+const designTokenSourcePath = join(repoRoot, borealDesignTokenSource.path);
+const itWithComponentInventorySource = existsSync(componentInventorySourcePath) ? it : it.skip;
+const itWithDesignTokenSource = existsSync(designTokenSourcePath) ? it : it.skip;
 
 describe("ui model dashboard contracts", () => {
   it("builds work queues with reservation summary counts", () => {
@@ -419,20 +427,27 @@ describe("ui model dashboard contracts", () => {
     });
   });
 
-  it("tracks every component label from the source design catalog", () => {
-    const html = readFileSync(borealComponentInventorySource.path, "utf8");
+  it("keeps the component inventory internally consistent in clean checkouts", () => {
+    const inventoryLabels = borealComponentInventory.map((item) => item.name);
+
+    expect(borealComponentInventory).toHaveLength(borealComponentInventorySource.count);
+    expect(new Set(inventoryLabels).size).toBe(inventoryLabels.length);
+    expect(borealComponentInventory.every((item) => item.sourcePath === borealComponentInventorySource.path)).toBe(true);
+    expect(findComponentInventoryItem("SprintKanbanBoard")).toMatchObject({
+      module: "sprint",
+      sourcePath: borealComponentInventorySource.path
+    });
+  });
+
+  itWithComponentInventorySource("matches every component label when the optional source design export is available", () => {
+    const html = readFileSync(componentInventorySourcePath, "utf8");
     const sourceLabels = [...html.matchAll(/data-screen-label="([^"]+)"/g)].map((match) =>
       match[1].replaceAll("&amp;", "&")
     );
     const inventoryLabels = borealComponentInventory.map((item) => item.name);
 
     expect(sourceLabels).toHaveLength(borealComponentInventorySource.count);
-    expect(new Set(inventoryLabels).size).toBe(inventoryLabels.length);
     expect([...inventoryLabels].sort()).toEqual([...sourceLabels].sort());
-    expect(findComponentInventoryItem("SprintKanbanBoard")).toMatchObject({
-      module: "sprint",
-      sourcePath: borealComponentInventorySource.path
-    });
   });
 
   it("summarizes the component import modules and target directories", () => {
@@ -481,8 +496,17 @@ describe("ui model dashboard contracts", () => {
     expect(listComponentInventoryByModule("operations")).toHaveLength(30);
   });
 
-  it("tracks every CSS design token declaration from globals.css", () => {
-    const css = readFileSync(borealDesignTokenSource.path, "utf8");
+  it("keeps design token declarations internally consistent in clean checkouts", () => {
+    const modelKeys = borealDesignTokens.map((token) => `${token.theme ?? "global"}:${token.name}`);
+
+    expect(borealDesignTokens).toHaveLength(borealDesignTokenSource.declarationCount);
+    expect(new Set(modelKeys).size).toBe(modelKeys.length);
+    expect(findDesignToken("--bw-bg", "dark")?.value).toBe("var(--bw-ink-900)");
+    expect(findDesignToken("--bw-bg", "light")?.value).toBe("var(--bw-paper-200)");
+  });
+
+  itWithDesignTokenSource("matches every CSS design token when the optional source export is available", () => {
+    const css = readFileSync(designTokenSourcePath, "utf8");
     const sourceDeclarations = [...css.matchAll(/--(bw-[A-Za-z0-9-]+):\s*([^;]+);/g)].map(
       (match) => `--${match[1]}:${match[2].trim()}`
     );
@@ -490,8 +514,6 @@ describe("ui model dashboard contracts", () => {
 
     expect(sourceDeclarations).toHaveLength(borealDesignTokenSource.declarationCount);
     expect([...modelDeclarations].sort()).toEqual([...sourceDeclarations].sort());
-    expect(findDesignToken("--bw-bg", "dark")?.value).toBe("var(--bw-ink-900)");
-    expect(findDesignToken("--bw-bg", "light")?.value).toBe("var(--bw-paper-200)");
   });
 
   it("summarizes token, interaction, and icon design contracts", () => {
