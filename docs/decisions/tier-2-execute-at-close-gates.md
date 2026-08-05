@@ -1,6 +1,6 @@
 # Tier 2 Execute-At-Close Gates
 
-Status: accepted for the technical-hardening milestone; safe execution boundary implemented, closeout wiring follows in S02T03-S02T04.
+Status: accepted design; the safe execution boundary is implemented and closeout integration remains opt-in.
 
 Date: 2026-07-02
 
@@ -12,7 +12,7 @@ The runtime already has the building block for bounded command execution in `run
 
 ## Decision
 
-The owner approved the business-logic improvements while explicitly deferring users and license changes. The safe execution boundary is therefore active as an implementation contract; gate-to-evidence and closeout enforcement remain separate follow-up tasks.
+The safe execution boundary is active as an implementation contract; gate-to-evidence and closeout enforcement remain separate integrations.
 
 When implementation is approved, gate execution should be guarded by a new `RuntimePolicy` flag such as `executeDeclaredGatesAtClose`, defaulting to `false`. Existing tier 1 declared-gate behavior stays unchanged when the flag is disabled.
 

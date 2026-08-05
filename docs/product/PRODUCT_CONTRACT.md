@@ -137,17 +137,17 @@ Non-goals:
 - Safe failure is preferred to silent inference when project identity, evidence provenance, dependency state, or mutation authority is ambiguous.
 - Installation should begin with a useful minimal profile and allow Team or Governed capabilities to be enabled without migrating to a different product.
 
-## Explicitly deferred
+## Current boundaries
 
-The current technical-hardening milestone does not require:
+Boreal is distributed under the PolyForm Noncommercial License 1.0.0. The repository and release artifacts must preserve that license and must not imply commercial-use rights.
 
-- changing or selecting a public license;
-- publishing a public release or repository;
+The current product does not include:
+
 - recruiting an external beta cohort;
 - measuring user retention, preference, or willingness to pay;
 - adding hosted billing, accounts, or organization administration.
 
-Those decisions require separate owner authorization and evidence. Deferring them does not relax the technical contracts above.
+These boundaries do not relax the technical contracts above.
 
 ## Acceptance use
 

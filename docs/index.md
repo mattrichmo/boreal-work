@@ -41,7 +41,7 @@ Boreal turns tasks, sources, claims, decisions, verification, and workflow state
 - [Skills & workflows](architecture/SKILLS_AND_WORKFLOWS.md)
 - [Project setup](architecture/PROJECT_SETUP.md)
 - [Prior art & originality](architecture/PRIOR_ART_ORIGINALITY.md)
-- [V1 closeout & adoption guide](product/V1_CLOSEOUT_ADOPTION_GUIDE.md)
+- [Release and publishing guide](release/publishing.md)
 
 ---
 

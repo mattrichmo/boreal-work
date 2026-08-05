@@ -1,6 +1,6 @@
 # Git Health Hardening
 
-Sprint 11 hardens the Git-facing health surface used by `bwrk sync status`, `bwrk sync refresh`, `bwrk prime`, agent protocol briefs, and `bwrk doctor`.
+This page defines the Git-facing health contract used by `bwrk sync status`, `bwrk sync refresh`, `bwrk prime`, agent protocol briefs, and `bwrk doctor`.
 
 ## Problem
 

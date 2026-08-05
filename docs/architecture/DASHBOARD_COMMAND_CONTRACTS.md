@@ -1,8 +1,6 @@
 # Dashboard Command Contracts
 
-Status: global dashboard command and sprint list/show/current/activate/board commands implemented; remaining dashboard views are planning contracts.
-
-This document specifies the command surface that the client console, optional CLI dashboard, and future TUI should consume. It is intentionally JSON-first. Rich terminal or browser views may render this data, but they must not become the only contract.
+This document specifies the JSON-first command surface consumed by the client console, optional CLI dashboard, and TUI. Rich terminal or browser views may render this data, but they must not become the only contract.
 
 ## Contract Rules
 

@@ -1,8 +1,6 @@
-# Global Manager Layer — Design Recommendation (2026-07-02)
+# Global Manager Layer
 
-Status: proposal for owner review. Companion to
-`docs/architecture/AUDIT_2026-07-01_ACCOUNTABILITY_AND_AGENT_CONTEXT.md` and the directive-refactor epic
-(`bw_work_ada82d27cb3eef95`). Nothing here is filed as work yet.
+The global manager is a cross-project layer for linked Boreal workspaces. It provides project discovery, rollups, an inbox, and a ranked next queue without becoming a second source of project truth.
 
 ## Product definition
 
@@ -28,8 +26,7 @@ The moment global state can disagree with a project about that project's truth, 
 A qualified reference form — `boreal://<project-id>/<record-id>` — accepted wherever a `SourceRef` URI or
 graph-edge endpoint is accepted, resolved through the registry. Design constraints:
 
-- References are **by registry project id, never by filesystem path**, so they survive repo moves and are not
-  machine-coupled (this matters for the multi-machine future in `V2_STORAGE_COLLABORATION_PLAN.md`).
+- References are **by registry project id, never by filesystem path**, so they survive repository moves and do not depend on one machine's directory layout. The storage and collaboration constraints are documented in [Storage and Collaboration Direction](../architecture/V2_STORAGE_COLLABORATION_PLAN.md).
 - Resolution is read-only and fail-soft: a reference into an unlinked or missing project resolves to a typed
   `unresolved` result carrying the last-known rollup snapshot, never an exception that breaks a board.
 - Graph edges gain optional `fromProjectId`/`toProjectId` (additive), letting global containers block on
@@ -190,9 +187,7 @@ global backlog from becoming a junk drawer.
 | 6 | Console global board (honest kanban, drag=command) | 2, 4; 5 for initiative lanes |
 | A/B | npm dist build → install.sh → brew formula | independent track, start anytime |
 
-Phases 0, 2, and A are independent and can start immediately; 1 touches core record types and should wait for
-Sprint 6 (hardening) to land. The packaging track is deliberately decoupled — a distributable binary makes
-every other phase easier to dogfood.
+Phases 0, 2, and A are independent. The packaging track is deliberately decoupled so a distributable binary can be validated independently from cross-project features.
 
 ## Explicit non-goals
 
@@ -200,4 +195,4 @@ every other phase easier to dogfood.
 - No second workflow engine at the global level — global directives come from the same registry mechanism.
 - No multi-user/multi-machine sync in v1 — but reference URIs and registry ids are designed now so they
   survive that transition (`V2_STORAGE_COLLABORATION_PLAN.md`).
-- The UI stays thin: renders CLI JSON, writes through commands, adds zero private state beyond view prefs.
+- The UI stays thin: it renders CLI JSON, writes through commands, and keeps only view preferences locally.

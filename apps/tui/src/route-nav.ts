@@ -1,5 +1,5 @@
-// Route-based navigation reducer for the v1 TUI shell (see
-// docs/superpowers/plans/2026-07-05-tui-shell-v1.md). Kept pure and free of
+// Route-based navigation reducer for the TUI shell (see
+// docs/architecture/TUI_SURFACE_CONTRACTS.md). Kept pure and free of
 // React/Ink so drill-in/back/global<->repo breadcrumb behavior can be
 // unit-tested without rendering anything.
 //

@@ -125,4 +125,4 @@ The remaining closeout-gates tasks should follow this order:
 2. Enforce required gates in work, sprint, and agent closeout paths.
 3. Expose planning and force controls through CLI/workflow commands.
 4. Add doctor, `gate closeout`, sprint report, and agent summary coverage.
-5. Run the review/audit dogfood task against the implementation.
+5. Run the review and audit validation suite against the implementation.

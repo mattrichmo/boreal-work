@@ -1,6 +1,6 @@
 # MCP Server
 
-Status: `apps/mcp` provides the first project-scoped stdio MCP server for local clients.
+`apps/mcp` provides a project-scoped stdio MCP server for local clients.
 
 The server is intentionally scoped to one Boreal project. Launch it from this repository with an explicit workspace root:
 

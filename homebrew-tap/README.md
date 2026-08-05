@@ -1,10 +1,10 @@
 # Boreal Work Homebrew Tap
 
-This directory is the prepared tap payload for the first owner-published Homebrew tap.
+This directory contains the prepared Homebrew tap payload for Boreal Work.
 
 The formula wraps the npm package tarball for `@boreal/cli` and depends on Homebrew `node`. That is the supported v1 route for this Node CLI. A node-free single executable can be evaluated later without blocking this channel.
 
-Owner publish flow:
+Verification flow:
 
 ```bash
 pnpm release:npm:pack

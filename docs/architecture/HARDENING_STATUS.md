@@ -1,8 +1,6 @@
-# Boreal Hardening Status
+# Boreal Release Readiness
 
-Audit basis: `Boreal Current-State Hardening Audit` from June 2026, reconciled against the live repo.
-
-This file is the current checkpoint for the broad hardening goal. It separates archive-specific or already-fixed findings from the remaining architecture work so future slices do not re-litigate stale audit items.
+This page summarizes the runtime guarantees, release checks, and known boundaries of the current Boreal release. It is maintained alongside the implementation and is descriptive rather than an authorization or project tracker.
 
 ## Verified In Current Repo
 
@@ -39,7 +37,7 @@ This file is the current checkpoint for the broad hardening goal. It separates a
 - Runtime regression coverage now exercises stale-lock recovery under concurrent writer bursts, concurrent CLI state writes, dependency projection status, generated context/search refresh, and spooled large-result envelopes.
 - Shell completion scripts for bash, zsh, and fish are generated from `COMMAND_DEFINITIONS`.
 - `apps/mcp` now exposes the first project-scoped stdio MCP server with read-only project tools and confirmed mutating tools routed through exact scoped CLI commands plus operation evidence.
-- `apps/daemon` now exposes the first project-scoped daemon status/watch scaffold with stale PID detection, lock awareness, bounded watched paths, CLI/global-dashboard visibility, and doctor drift diagnostics.
+- `apps/daemon` exposes a project-scoped daemon status/watch surface with stale PID detection, lock awareness, bounded watched paths, CLI/global-dashboard visibility, and doctor drift diagnostics.
 - Repo-local `memory/` vault scaffolding, raw source index, wiki pages, duplicate scan, merge plans, and compaction plans exist.
 - Project setup now separates memory Git history by default with child ignored memory repos, while still supporting sibling memory repos, child submodule metadata, generated `.gitignore` guards, and explicit `shared` opt-in for mixed project history.
 - Doctor validates project setup drift, schema shape, IDs, references, dependencies, reservations, context drift, ledger drift, search freshness, operation/event causality, and locks.
@@ -49,7 +47,7 @@ This file is the current checkpoint for the broad hardening goal. It separates a
 - The per-record `.boreal/objects/` store is the default durable runtime adapter for new workspaces, with a hash-linked event log and a disposable SQLite read/search index; `FileBorealStore` remains the legacy compatibility and rollback adapter.
 - The optional Ink TUI is implemented with project roll-up, sprint board, task detail, global overview, project, and queue routes over the shared engine and UI-model contracts.
 
-## Hardened In This Checkpoint
+## Current Runtime Guarantees
 
 - `dep remove` now removes canonical dependency graph edges transactionally and recomputes readiness/projection.
 - CLI docs coverage is derived from `COMMAND_DEFINITIONS` so command additions cannot silently miss documentation headings.
@@ -60,7 +58,7 @@ This file is the current checkpoint for the broad hardening goal. It separates a
 - Runtime claims and decisions can now store `wikiPageIds` through repeatable `--wiki` flags, and `doctor` detects dangling wiki references, source-backed records missing wiki coverage, and stale source-backed claims.
 - `doctor` now emits workflow-aware stale truth findings for accepted claim contradictions, superseded decisions without accepted replacements, and raw sources waiting for memory reconciliation. Findings separate safe recheck commands from manual review commands.
 - `bwrk commands --format markdown` emits a generated command reference from `COMMAND_DEFINITIONS`.
-- Claude Code sourcemap material is now treated as an ignored research artifact only; Boreal has a separate CLI UX direction document for original prompt/dashboard primitives, with richer views kept opt-in behind stable JSON and plain text command contracts.
+- The CLI UX contract keeps JSON and deterministic plain text canonical, with richer views opt-in behind explicit commands or flags.
 - `bwrk doctor` now detects project setup drift for copied configs, missing memory Git repositories, missing ignore guards, child memory tracked by project Git, and stale child submodule metadata; `doctor --fix` repairs the safe/idempotent subset.
 - `bwrk sync status`, `sync refresh`, `prime`, and `doctor` now surface categorized Git findings instead of making expected protected-main collaboration caveats look like sync failures.
 - The global project registry foundation is now a machine-local `boreal.project-registry.v2` document at the resolved registry root, with validation that rejects cross-project path leakage and records stable project identity plus lifecycle state.
@@ -85,10 +83,10 @@ This file is the current checkpoint for the broad hardening goal. It separates a
 - `.boreal/mcp.json` is a local-only project-scoped config marker, and `bwrk doctor` now reports `mcp.config` drift when copied configs point at another project or omit `--workspace`.
 - `bwrk daemon status --json`, `dashboard global --json`, and `doctor` now surface daemon state without requiring the daemon to run; stale PID files and boundary drift are warnings.
 - Golden-path command aliases, explicit closeout gates, work edit/cancel/reopen/split lifecycle commands, claim review, decision supersession, sprint metrics/close, schema validation, docs checking, and `gate`/`gate closeout` now have CLI contracts, registry metadata, command docs, and runtime tests.
-- `docs/architecture/V2_STORAGE_COLLABORATION_PLAN.md` is retained as a superseded design record. The shipped `objects-v1` boundary uses per-record canonical files plus a hash-linked log, while SQLite is a disposable read/search index rather than the primary writer.
+- `docs/architecture/V2_STORAGE_COLLABORATION_PLAN.md` documents the superseded storage alternative and the collaboration invariants around the shipped `objects-v1` boundary. SQLite remains a disposable read/search index rather than the primary writer.
 - Agent directive migration docs now define the release boundary between emitted `agentDirectives` transport metadata, durable `directiveAcknowledgements` runtime records, and legacy-compatible closeout summaries. JSON export, JSONL ledgers, Markdown export, import validation, and doctor/report classifications all preserve acknowledgement proof without fabricating it for historical records.
 
-## Remaining Architecture Work
+## Known Boundaries
 
 - Multi-clone import, conflict, deletion, and recovery semantics still need end-to-end proof around the object store, event-log generations, JSONL ledgers, and tombstones.
 - SQLite is deliberately a disposable read/search index, not the primary runtime writer. Any future writer change requires a new accepted decision instead of treating the superseded V2 plan as authority.
@@ -98,7 +96,7 @@ This file is the current checkpoint for the broad hardening goal. It separates a
 - The hand-written CLI guide is now checked against every registry command heading, usage line, and flag by `bwrk docs check`; `bwrk commands --format markdown` remains the fully generated reference surface.
 - Work lifecycle semantics still retain legacy `reserved` as an accepted imported state; the live runtime uses reservation leases plus `in_progress`.
 
-## Next Priority Slices
+## Future Work
 
 1. Prove two-clone object-store collaboration, conflict identity, deletion, offline rejoin, worktree, and recovery behavior with deterministic fixtures.
 2. Harden evidence provenance, review/merge, and specification-change business rules behind the engine boundary.

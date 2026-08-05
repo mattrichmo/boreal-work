@@ -4,8 +4,7 @@ The installed command is `bwrk`.
 
 ## Update the global CLI
 
-After the GitHub repository is public, update the machine-level CLI from the
-repository's `main` branch:
+Update the machine-level CLI from the public repository's `main` branch:
 
 ```bash
 bwrk update self \

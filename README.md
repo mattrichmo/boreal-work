@@ -12,7 +12,7 @@ Boreal Work is a local-first runtime for evidence-backed work, project memory, a
 
 The `bwrk` CLI is the canonical interface. Human-readable output is intended for operators; `--json` exposes versioned contracts for agents and automation.
 
-> **Current status:** Boreal is at `0.1.0`. The runtime record schema is `boreal.runtime.v1`, and new workspaces use the `objects-v1` store. The GitHub installer works today. npm and Homebrew publication are prepared but remain an owner release action.
+> **Current release:** Boreal is at `0.1.0`. The runtime record schema is `boreal.runtime.v1`, and new workspaces use the `objects-v1` store. The GitHub installer works today; npm and Homebrew are supported release channels when published.
 
 [Install](#install-and-initialize) · [Run a work loop](#example-an-evidence-backed-work-loop) · [Understand the runtime](#runtime-architecture) · [CLI reference](docs/cli/COMMANDS.md) · [Documentation map](docs/README.md)
 
@@ -161,7 +161,7 @@ Machine-readable commands return a stable top-level envelope:
   "ledgerSeq": 5,
   "data": {
     "meta": {
-      "id": "bw_work_300ab465a91f18c2",
+      "id": "bw_work_example",
       "schemaVersion": "boreal.runtime.v1"
     },
     "kind": "task",

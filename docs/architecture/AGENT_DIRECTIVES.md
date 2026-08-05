@@ -2,7 +2,7 @@
 
 Agent directives are trusted command-output bundles that tell an agent what live Boreal state requires next. They are generated from enforcement gaps, looked up in a checked-in registry, and returned as typed JSON data. They are not free-form work content and they are not a second workflow engine.
 
-This contract is the implementation boundary for the Agent Directive System. The surface audit is in [Agent Directive Surface Audit](AGENT_DIRECTIVE_SURFACE_AUDIT.md).
+This contract is the implementation boundary for the Agent Directive System. The emitted bundle, acknowledgement records, and workflow integrations described here are the public runtime contract.
 
 ## Current Architecture
 

@@ -1,7 +1,5 @@
 # Console App
 
-Status: Sprint 04 local development runbook.
-
 The console app lives in `apps/console`. It is a local browser dashboard for the current Boreal workspace, backed by the same JSON-first CLI contracts that agents use. It is not a replacement source of truth; runtime records, memory files, generated ledgers, and `bwrk` JSON output remain canonical.
 
 ## Local Commands
@@ -34,7 +32,7 @@ Do not assume a global `bwrk` binary exists. In this repo, use `pnpm bwrk <comma
 Live mode reads the selected workspace through constrained JSON commands:
 
 - `work list --label <sprint-label> --limit 100 --json`
-- `work list --ready --label v1-remainder --limit 20 --json`
+- `work list --ready --label active-sprint --limit 20 --json`
 - `work list --limit 250 --json`
 - `work show <work-id> --json`
 - `registry list --json`

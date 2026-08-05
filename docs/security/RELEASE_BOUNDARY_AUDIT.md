@@ -1,59 +1,49 @@
-# Release Boundary, Provenance, And License Audit
+# Security And Release Boundary
 
-Last verified: 2026-07-10
+This page documents the checks that protect Boreal's source tree, package artifacts, local project data, and dependency boundary.
 
-This is the current technical boundary for dependency provenance, secret scanning, repository history, and distributable artifacts. It does not authorize publication and it does not change Boreal's license.
+## License
 
-## Current License State
+Boreal Work is distributed under the [PolyForm Noncommercial License 1.0.0](../../LICENSE). The license permits noncommercial use under its terms; commercial use requires separate written permission. Release artifacts must include the same license notice and must not advertise commercial-use rights.
 
-- The repository has no root `LICENSE`, `COPYING`, or package `license` field.
-- The root package and `@boreal/cli` package are both marked `private: true`.
-- Therefore the current state is **private and unlicensed for external reuse**. Copyright defaults remain with the author; this audit does not choose or apply a license.
-- A future open-source or commercial distribution decision must be explicit. Until then, release automation must not infer a license from dependency licenses or from public visibility.
+## Automated audit
 
-## Automated Audit
-
-Run:
+Run the release-boundary audit from the repository root:
 
 ```bash
 node tools/audit-release-boundary.mjs --json
 ```
 
-The audit fails when it finds a likely committed secret, an installed dependency with a missing, unapproved, or copyleft/source-available license, a blocked local root tracked by Git, or a package boundary that is no longer private and dist-only. It reports paths and pattern classes, never secret values.
+The audit checks for likely committed secrets, unsupported dependency licenses, blocked local roots, and package-boundary drift. It reports paths and pattern classes without printing secret values. Run it after dependency or packaging changes and in release CI after installing from the frozen lockfile.
 
-The 2026-07-10 baseline scanned 93 installed third-party package versions: 85 MIT, 4 ISC, 2 Apache-2.0, 1 BSD-3-Clause, and 1 `(MIT OR CC0-1.0)`. No dependency-license exception is currently required. Re-run after every lockfile change; this is an installed-tree audit, so CI must install with the frozen lockfile first.
+## Repository boundary
 
-## Repository And Publication Boundary
+The public repository contains source code, reviewed documentation, schemas, tests, examples, and release configuration. The following data is local or generated and must remain uncommitted:
 
-| Path | Current role | Package boundary | Public-repository boundary |
-| --- | --- | --- | --- |
-| `apps/cli/dist/` | Built CLI artifact | The only `@boreal/cli` package payload | Scan and smoke-test before any distribution |
-| `.boreal/objects/`, `.boreal/log/`, `.boreal/rollup.json` | Project tracker, evidence, summaries, operations, and historical machine paths | Excluded by the CLI package's `files: ["dist"]` allowlist | Do not publish current history without a deliberate tracker scrub or a clean export repository |
-| `memory/` | Separate child knowledge repository | Excluded | Keep separate; review and publish independently if ever authorized |
-| `dump/` | Local research/import material | Ignored and excluded | Never publish |
-| `.agents/`, `.claude/` | Installed/local agent adapters | Ignored and excluded from the CLI package | Regenerate from reviewed source skills; do not ship local installs |
-| `.boreal/runtime/`, `.boreal/cache/`, `.boreal/results/`, `.boreal/tmp/`, `.boreal/release/` | Machine-local locks, indexes, spools, and staging | Ignored and excluded | Never publish |
-| `claude-code-sourcemap-main/` | Prior-art research artifact | Ignored and excluded | Never publish or copy from it |
+| Path | Role | Release rule |
+| --- | --- | --- |
+| `.boreal/` | Project records, events, caches, ledgers, locks, and result spools | Never commit runtime data or generated local history. |
+| `memory/` | Human-readable project knowledge | Keep as a separate knowledge repository or publish only after independent review. |
+| `.agents/` and `.claude/` | Installed local adapters | Regenerate from reviewed `skills/` and do not commit installations. |
+| `dump/` and other local research directories | Temporary source or comparison material | Keep ignored and outside release artifacts. |
+| `node_modules/`, `dist/`, and temporary package staging | Installed or generated build output | Rebuild from the lockfile and release scripts. |
 
-Machine-specific absolute paths remain in the tracked Boreal ledger and historical audit fixtures. That is acceptable for the private working repository and unacceptable for a public-history push. The safe future route is a clean export repository containing reviewed source/docs and generated release artifacts, not rewriting or casually pushing the current tracker history.
+The CLI package is staged from the bundled `dist` artifact and uses an explicit file allowlist. Source-only files, local project state, and ignored installs are not package payload.
 
-## Prior Art And AI-Assisted Authorship
+## Provenance and attribution
 
-The originality boundary in [PRIOR_ART_ORIGINALITY.md](../architecture/PRIOR_ART_ORIGINALITY.md) remains authoritative:
+Use category-level prior art without copying implementation source, distinctive prose, command help, fixtures, or UI assets. Keep third-party dependencies and their license notices reviewable. AI-assisted changes receive the same code review, dependency, test, and attribution checks as any other change.
 
-- Boreal may use category-level ideas from local-first, Git-native, and agent workflow systems.
-- Do not copy implementation source, distinctive prose, command help, fixtures, or UI assets from researched projects.
-- Research dumps and sourcemaps are evidence for comparison only and are excluded from distribution.
-- AI-assisted code is not automatically provenance-safe. Every generated change remains subject to repository review, dependency attribution, tests, and similarity review when it touches a known competing design.
-- Claims of independent implementation must be based on inspected source history and concrete similarity checks, not the model's assurance.
+## Release checklist
 
-The main residual risk is not an identified copied file; it is accidental reproduction of distinctive competitor text or structure during later AI-assisted feature work. Mitigation is to write Boreal's contract first, retain source references for research, review suspiciously close output, and keep dependency/license scans separate from originality review.
+Before a release:
 
-## Release Preconditions Not Yet Met
+1. Confirm the version and license metadata are consistent across the root package, CLI package, `LICENSE`, README, and staged artifact.
+2. Install dependencies with the frozen lockfile.
+3. Run `pnpm check` and the relevant test and package-smoke commands.
+4. Run `node tools/audit-release-boundary.mjs --json`.
+5. Build the staged npm artifact, inspect its file list, and run the installed-binary smoke test.
+6. Verify the Homebrew formula references the same version and tarball hash.
+7. Review the final Git diff for secrets, machine paths, generated state, and accidental local files.
 
-- No external distribution license has been selected.
-- The current Git history contains private tracker records and machine paths.
-- Public repository security/support policy is deferred to technical release readiness work.
-- External user validation is deferred and is not required for the technical-hardening milestone.
-
-These are deliberate boundaries, not failures of the current private development workflow.
+These checks protect the release boundary; they do not replace the license terms or the review required for a commercial distribution arrangement.

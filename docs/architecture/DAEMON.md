@@ -1,6 +1,6 @@
 # Boreal Daemon
 
-Status: `apps/daemon` contains the first local daemon status and watch-loop scaffold.
+`apps/daemon` provides a project-scoped status and watch surface.
 
 The daemon is an observer and coordinator, not a second runtime writer. It may watch selected-project runtime and generated-artifact paths, report stale process state, and surface lock conflicts. It must not silently write memory truth, mutate work records, repair ledgers, rebuild search, or edit vault files.
 

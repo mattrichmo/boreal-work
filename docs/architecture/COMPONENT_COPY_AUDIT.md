@@ -1,7 +1,6 @@
 # Component Copy Audit
 
-Status: Sprint 03 Phase 03D copy pass  
-Scope: converted `apps/console` component primitives and gallery fixture
+This page defines the language and attribution rules for `apps/console` component primitives and gallery fixtures.
 
 ## Rules
 

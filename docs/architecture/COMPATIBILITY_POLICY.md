@@ -56,10 +56,10 @@ Every nontrivial migration must expose the same phases:
 - Generated indexes, projections, ledgers, and caches are rebuilt after rollback; they are never the recovery authority.
 - A migration backup is not silently deleted by the migration that created it.
 
-This policy changes neither the repository's current private/unlicensed state nor its publication status.
+This policy applies alongside the [PolyForm Noncommercial License 1.0.0](../../LICENSE). Compatibility guarantees do not grant commercial-use rights or override the license terms.
 
 ## Cross-Platform Validation Baseline
 
 `.github/workflows/technical-portability.yml` runs the supported Node 22 and Node 24 lines on Linux, macOS, and Windows. Every matrix cell installs from the frozen lockfile, type-checks, builds, exercises storage migration and rollback, validates failure diagnostics, packs the CLI, installs the tarball into a temporary prefix, probes the installed binary, and re-runs the secret/dependency/package-boundary audit. The Windows smoke path resolves npm's `bwrk.cmd` shim through `ComSpec`; Unix-like systems execute `<prefix>/bin/bwrk` directly.
 
-This workflow creates and tests a private `UNLICENSED` artifact only. It contains no publish command, registry credential, provenance upload, release creation, or license mutation.
+This workflow creates and tests a temporary release artifact only. It contains no registry credentials or implicit publication step; publication remains an explicit release action governed by the repository license.

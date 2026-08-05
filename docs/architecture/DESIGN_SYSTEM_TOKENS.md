@@ -1,12 +1,10 @@
 # Design System Tokens
 
-Status: Sprint 03 Phase 03B token, accessibility, and icon contract  
-Source: `dump/Brand design system setup/globals.css`  
-Model: `packages/ui-model/src/design-system.ts`
+The canonical typed token model is `packages/ui-model/src/design-system.ts`. The console consumes these tokens through its theme stylesheet; runtime and CLI packages remain browser-independent.
 
 ## Token Inventory
 
-The source CSS contains 89 token declarations. `@boreal/ui-model` exposes those declarations as metadata and the tests compare each token name/value pair against `globals.css`.
+The model exposes the token declarations as metadata, and tests verify that the console theme remains aligned with the typed inventory.
 
 | Group | Count | Notes |
 | --- | ---: | --- |

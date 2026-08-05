@@ -1,62 +1,61 @@
 # Boreal Documentation
 
-The complete map of Boreal documentation. Start with the guides, drop into the reference and architecture docs as needed.
+Use this index to move from installation and first use into the CLI reference, architecture contracts, and release guidance.
 
-← [Documentation home](index.md) · [project README](../README.md) (repo).
+← [Documentation home](index.md) · [Project README](../README.md)
 
 ## Guides
 
-| Doc | Read it for |
+| Document | Read it for |
 | --- | --- |
-| [Getting started](getting-started.md) | Install, initialize a workspace, and run your first work loop. |
-| [Concepts](concepts.md) | The mental model: work, evidence, knowledge, context, memory, agents. |
-| [Publishing](release/publishing.md) | npm package staging, dry-run publish gate, and Homebrew tap handoff. |
-| [Release boundary audit](security/RELEASE_BOUNDARY_AUDIT.md) | Secret and dependency-license scans, provenance, private tracker history, and the unchanged license state. |
+| [Getting started](getting-started.md) | Install Boreal, initialize a workspace, and run a first work loop. |
+| [Concepts](concepts.md) | The mental model for work, evidence, knowledge, context, memory, and agents. |
+| [Release and publishing](release/publishing.md) | Package preparation, smoke tests, and npm/Homebrew release steps. |
+| [Security and release boundary](security/RELEASE_BOUNDARY_AUDIT.md) | Secret scanning, dependency provenance, ignored local data, and release checks. |
 
 ## CLI reference
 
-| Doc | Read it for |
+| Document | Read it for |
 | --- | --- |
-| [CLI commands](cli/COMMANDS.md) | The complete `bwrk` command contract — every group, flag, and JSON envelope. |
+| [CLI commands](cli/COMMANDS.md) | The complete `bwrk` command contract, flags, and JSON envelopes. |
 
 ## Architecture
 
-| Doc | Read it for |
+| Document | Read it for |
 | --- | --- |
-| [Runtime architecture](architecture/RUNTIME.md) | Ports, pure domain operations, and the `@boreal/engine` boundary. |
-| [Evidence trust](architecture/EVIDENCE_TRUST.md) | Trust levels, producer/witness identities, subject revisions, output hashes, and legacy behavior. |
-| [Compatibility policy](architecture/COMPATIBILITY_POLICY.md) | SemVer, launcher/repo-pin support, schema/storage matrix, migration parity, and rollback. |
-| [CLI UX](architecture/CLI_UX.md) | The JSON / plain-text / dashboard layering and its design boundary. |
-| [CLI ↔ TUI runtime boundary](architecture/CLI_TUI_RUNTIME_BOUNDARY.md) | How terminal surfaces share the runtime. |
-| [TUI surface contracts](architecture/TUI_SURFACE_CONTRACTS.md) | Detailed global and repo terminal UI pages, flows, and data shapes. |
-| [Skills & workflows](architecture/SKILLS_AND_WORKFLOWS.md) | Workflows (canonical), skills (adapters), and templates (output shapes). |
-| [Project setup](architecture/PROJECT_SETUP.md) | Project, memory, and install roots, and supported layouts. |
-| [Prior art & originality](architecture/PRIOR_ART_ORIGINALITY.md) | Positioning against adjacent local-first and agent-workflow tools. |
-| [MCP server](architecture/MCP_SERVER.md) | The project-scoped stdio MCP server in `apps/mcp`. |
-| [MCP ↔ daemon boundary](architecture/MCP_DAEMON_BOUNDARY.md) | The shared boundary guard between MCP and the daemon. |
-| [Daemon](architecture/DAEMON.md) | The observer/coordinator daemon in `apps/daemon`. |
-| [Console app](architecture/CONSOLE_APP.md) | The local browser dashboard in `apps/console`. |
-| [Dashboard command contracts](architecture/DASHBOARD_COMMAND_CONTRACTS.md) | The data contracts behind dashboard views. |
-| [Design system tokens](architecture/DESIGN_SYSTEM_TOKENS.md) | Shared visual tokens for console/TUI surfaces. |
-| [Component import plan](architecture/COMPONENT_IMPORT_PLAN.md) | UI component sourcing plan. |
-| [Component copy audit](architecture/COMPONENT_COPY_AUDIT.md) | Licensing/copy audit for imported components. |
-| [Agent E2E fixture](architecture/AGENT_E2E_FIXTURE.md) | The ordered local agent path exercised by the E2E test. |
-| [Git health hardening](architecture/GIT_HEALTH_HARDENING.md) | Git-level health checks and hardening. |
+| [Runtime architecture](architecture/RUNTIME.md) | Ports, domain operations, storage, locks, and generated artifacts. |
+| [Evidence trust](architecture/EVIDENCE_TRUST.md) | Trust levels, provenance, revisions, hashes, and verification behavior. |
+| [Compatibility policy](architecture/COMPATIBILITY_POLICY.md) | SemVer, supported storage versions, migration, and rollback. |
+| [CLI UX](architecture/CLI_UX.md) | JSON, plain-text, and optional dashboard interaction layers. |
+| [CLI and TUI runtime boundary](architecture/CLI_TUI_RUNTIME_BOUNDARY.md) | How terminal surfaces share runtime contracts. |
+| [TUI surface contracts](architecture/TUI_SURFACE_CONTRACTS.md) | Global and repository terminal UI pages, flows, and data shapes. |
+| [Skills and workflows](architecture/SKILLS_AND_WORKFLOWS.md) | Canonical workflows, skill adapters, and templates. |
+| [Project setup](architecture/PROJECT_SETUP.md) | Project, memory, and install roots and supported layouts. |
+| [Originality and attribution](architecture/PRIOR_ART_ORIGINALITY.md) | Category boundaries, independent implementation, and attribution rules. |
+| [Agent directives](architecture/AGENT_DIRECTIVES.md) | Typed runtime guidance generated from enforcement gaps. |
+| [MCP server](architecture/MCP_SERVER.md) | The project-scoped stdio MCP server. |
+| [MCP and daemon boundary](architecture/MCP_DAEMON_BOUNDARY.md) | Request binding and filesystem safety for adapters. |
+| [Daemon](architecture/DAEMON.md) | The project-scoped observer and status surface. |
+| [Console app](architecture/CONSOLE_APP.md) | The local browser dashboard and its data modes. |
+| [Dashboard command contracts](architecture/DASHBOARD_COMMAND_CONTRACTS.md) | JSON contracts behind dashboard views. |
+| [Design system tokens](architecture/DESIGN_SYSTEM_TOKENS.md) | Shared console and TUI visual tokens. |
+| [Component inventory](architecture/COMPONENT_IMPORT_PLAN.md) | The typed console component inventory and package boundaries. |
+| [Component language rules](architecture/COMPONENT_COPY_AUDIT.md) | UI copy, command labels, and attribution rules. |
+| [Git health](architecture/GIT_HEALTH_HARDENING.md) | Git status classification and generated-artifact handling. |
 | [JSONL merge driver](architecture/JSONL_MERGE_DRIVER.md) | Conflict-friendly merging of append-style ledgers. |
-| [Hardening status](architecture/HARDENING_STATUS.md) | Running status of hardening work. |
-| [Live E2E results (2026-06-26)](architecture/LIVE_E2E_RESULTS_HARDENING_2026-06-26.md) | A captured live end-to-end hardening run. |
+| [Storage and collaboration direction](architecture/V2_STORAGE_COLLABORATION_PLAN.md) | Current storage boundaries and future collaboration constraints. |
 
 ## Product
 
-| Doc | Read it for |
+| Document | Read it for |
 | --- | --- |
-| [Product contract](product/PRODUCT_CONTRACT.md) | Boreal's product wedge, measurable invariants, capability profiles, safety boundaries, and non-goals. |
-| [V1 closeout & adoption guide](product/V1_CLOSEOUT_ADOPTION_GUIDE.md) | Where v1 landed and how to adopt it. |
-| [V1 workflows](product/V1_WORKFLOWS.md) | The canonical v1 workflow set. |
-| [V1 remainder baseline](product/V1_REMAINDER_BASELINE.md) | The v1 remainder tracker baseline. |
+| [Product contract](product/PRODUCT_CONTRACT.md) | Boreal's product wedge, invariants, capability profiles, and non-goals. |
+| [Global manager design](product/GLOBAL_MANAGER_DESIGN.md) | Cross-project registry, rollups, capture, and dashboard direction. |
+| [V1 workflows](product/V1_WORKFLOWS.md) | The canonical workflow set for the current product line. |
 
-## Elsewhere in the repo
+## Elsewhere in the repository
 
-- [`workflows/`](../workflows/README.md) — canonical agent procedures (source of truth).
+- [`workflows/`](../workflows/README.md) — canonical agent procedures.
 - [`templates/`](../templates/README.md) — output shapes for workflow artifacts.
 - [`schemas/`](../schemas/README.md) — record, event, projection, and policy schemas.
+- [`skills/`](../skills/) — thin adapters that point agents at canonical workflows.

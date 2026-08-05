@@ -803,22 +803,22 @@ describe("core hashing and ids", () => {
   it("resolves the machine-local project registry path without workspace scanning", () => {
     const storage = resolveProjectRegistryPaths({
       env: {},
-      homeDir: "/Users/alice",
+      homeDir: "/fixture-home",
       platform: "darwin"
     });
 
     expect(storage).toEqual({
       scope: "machine-local",
-      rootDir: "/Users/alice/Library/Application Support/Boreal",
-      registryDir: "/Users/alice/Library/Application Support/Boreal/registry",
-      registryFile: "/Users/alice/Library/Application Support/Boreal/registry/projects.json",
-      lockDir: "/Users/alice/Library/Application Support/Boreal/registry/projects.lock"
+      rootDir: "/fixture-home/Library/Application Support/Boreal",
+      registryDir: "/fixture-home/Library/Application Support/Boreal/registry",
+      registryFile: "/fixture-home/Library/Application Support/Boreal/registry/projects.json",
+      lockDir: "/fixture-home/Library/Application Support/Boreal/registry/projects.lock"
     });
 
     expect(
       resolveProjectRegistryPaths({
         env: { [PROJECT_REGISTRY_ROOT_ENV]: "/tmp/boreal-registry" },
-        homeDir: "/Users/alice",
+        homeDir: "/fixture-home",
         platform: "darwin"
       }).registryFile
     ).toBe("/tmp/boreal-registry/registry/projects.json");
@@ -1412,10 +1412,10 @@ function projectRegistryDocument(): ProjectRegistryDocument {
     schemaVersion: PROJECT_REGISTRY_SCHEMA_VERSION,
     storage: {
       scope: "machine-local",
-      rootDir: "/Users/alice/Library/Application Support/Boreal",
-      registryDir: "/Users/alice/Library/Application Support/Boreal/registry",
-      registryFile: "/Users/alice/Library/Application Support/Boreal/registry/projects.json",
-      lockDir: "/Users/alice/Library/Application Support/Boreal/registry/projects.lock"
+      rootDir: "/fixture-home/Library/Application Support/Boreal",
+      registryDir: "/fixture-home/Library/Application Support/Boreal/registry",
+      registryFile: "/fixture-home/Library/Application Support/Boreal/registry/projects.json",
+      lockDir: "/fixture-home/Library/Application Support/Boreal/registry/projects.lock"
     },
     entries: [
       {

@@ -1,6 +1,6 @@
 # CLI UX And Dashboard Direction
 
-Reference checked: `claude-code-sourcemap-main`, an ignored local research artifact restored from the public Claude Code npm package sourcemap. Its license is all-rights-reserved, so Boreal must not copy implementation code. The useful takeaways are interface conventions and architecture shape only.
+This document defines Boreal's original CLI interaction model and the boundary between machine-readable output, plain text, and optional interactive views.
 
 ## Design Boundary
 
@@ -54,7 +54,6 @@ V1 should prioritize dashboards where clarity prevents mistakes:
 
 ## Implementation Rules
 
-- Do not import or copy code from the Claude reference.
 - Keep Boreal output deterministic enough for tests; snapshot the rendered primitives.
 - Keep JSON mode and stable plain text separate from optional dashboard rendering.
 - Interactive commands must detect non-TTY input and offer equivalent flags.

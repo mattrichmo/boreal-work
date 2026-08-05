@@ -1,6 +1,6 @@
 # MCP And Daemon Boundary
 
-Status: boundary contract, shared guard, the first `apps/mcp` stdio adapter, and the first `apps/daemon` status/watch scaffold are implemented.
+The MCP and daemon adapters share the project-boundary guard described here. Both surfaces are project-scoped and command-mediated.
 
 MCP and daemon surfaces must bind every request to exactly one Boreal project before exposing runtime, memory, or generated artifact data. Global project discovery can list registered project identity, but it must not read another project's runtime or memory roots unless the request explicitly selects that project.
 

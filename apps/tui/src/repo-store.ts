@@ -1,5 +1,5 @@
 // Direct-store repo reads used by the Roll-Up / Sprint Board / Task Detail
-// route loaders (see docs/superpowers/plans/2026-07-05-tui-shell-v1.md for
+// route loaders (see docs/architecture/TUI_SURFACE_CONTRACTS.md for
 // why: no CLI command currently emits a rollup-shaped envelope with graph
 // edges, so these routes read the object store directly -- this is the one
 // documented direct-store read path besides the event-log head poll).

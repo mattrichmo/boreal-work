@@ -1,14 +1,10 @@
 # Component Import Plan
 
-Status: Sprint 03 Phase 03A import map  
-Source: `dump/Brand design system setup/Components.dc.html`  
-Token source: `dump/Brand design system setup/globals.css`
+This page documents the maintained component inventory for the Boreal console. The canonical typed inventory lives in `packages/ui-model/src/component-inventory.ts`; browser components are implemented in `apps/console` and do not import runtime state directly.
 
 ## Current Source Truth
 
-The source catalog contains 177 `data-screen-label` sections. The catalog is a declarative HTML/DC demo with tokenized inline styles, `globals.css`, and a generated `support.js` runtime. For Boreal, the source is a visual and naming reference, not an app runtime dependency.
-
-`@boreal/ui-model` now exposes a typed inventory from `packages/ui-model/src/component-inventory.ts`. Runtime tests compare that inventory to the live `Components.dc.html` labels so drift is caught when the source catalog changes.
+The inventory is grouped by responsibility so the console can grow without coupling UI packages to the engine, storage, or CLI implementation.
 
 ## Import Buckets
 
@@ -25,12 +21,11 @@ The source catalog contains 177 `data-screen-label` sections. The catalog is a d
 
 Use `apps/console` as the browser dashboard surface and keep it separate from CLI/TUI/runtime packages.
 
-- Console framework: Vite + React + TypeScript when Sprint 04 scaffolds the browser app.
+- Console framework: Vite + React + TypeScript.
 - Shared model boundary: `@boreal/ui-model` owns dashboard/component inventory data contracts and has no browser dependency.
 - Runtime boundary: `@boreal/core`, `@boreal/engine`, storage, work, graph, evidence, and search packages must not import React, Vite, DOM APIs, or console CSS.
 - CLI/TUI boundary: the CLI rich text/dashboard views stay terminal-first and consume JSON/model contracts only; they do not reuse browser components.
-- Styling boundary: import the `globals.css` token contract into the console as Boreal theme CSS, then convert inline catalog styles into class-based component CSS or scoped CSS modules during Sprint 03B/03C.
-- DC runtime boundary: do not ship `support.js` or `<x-dc>` templating as a Boreal dependency. Keep it in `dump/` as source evidence unless a future migration explicitly chooses that runtime.
+- Styling boundary: import the Boreal token contract into the console as theme CSS and keep component styles class-based or scoped.
 
 ## Bucket Labels
 

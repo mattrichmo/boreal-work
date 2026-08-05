@@ -1,7 +1,5 @@
 # CLI TUI Runtime Boundary
 
-Status: Sprint 02 Phase 02A decision.
-
 ## Decision
 
 Boreal should keep `apps/cli` dependency-light for v1 and use render-only primitives in `apps/cli/src/cli-ui.ts` for installer prompts, health summaries, queues, and other opt-in rich terminal views.

@@ -1,6 +1,6 @@
 # TUI Surface Contracts
 
-Status: planning contract for the two first-class terminal UI surfaces.
+This page defines the two first-class terminal UI surfaces and their typed data contracts.
 
 This document describes the terminal dashboard contracts Boreal should expose for humans and agents. It is intentionally JSON-first: the TUI renders bounded view models and emits command descriptors for mutations, but durable records, CLI JSON envelopes, memory files, ledgers, and runtime operations remain canonical.
 
@@ -286,13 +286,13 @@ METRICS: projects ok warning error stale | ready blocked verify | active reserva
 Attention Queue
 status  project       item                               age/why
 err     boreal-work   search index stale                 search
-warn    crm-demo      4 blocked tasks                    blockers
+warn    project-alpha 4 blocked tasks                    blockers
 ready   cli-tools     Implement fixture smoke            high
 
 Linked Projects
 health  project       open  ready  blocked  reserve  stale  root
 ok      boreal-work   81    9      2        1        no     /...
-warn    crm-demo      17    3      4        0        yes    /...
+warn    project-alpha 17    3      4        0        yes    /...
 
 Recent Activity
 time      project       actor   command                 state
@@ -344,8 +344,8 @@ Project detail layout:
 
 ```text
 Project: boreal-work
-Root: /Users/.../boreal-work
-Memory: /Users/.../boreal-work/memory
+Root: /path/to/project
+Memory: /path/to/project/memory
 Mode: child + separate git
 Health: warning, sync stale
 
@@ -404,7 +404,7 @@ Layout:
 ```text
 READY (9)                         BLOCKED (2)                       VERIFY (3)
 project      title        prio    project      title        why     project      title
-boreal-work  Add ...      high    crm-demo     Import ...   2 deps  cli-tools    ...
+project-alpha Add ...    high    project-alpha Import ...  2 deps  project-beta ...
 ```
 
 Narrow terminals use a single table with a queue column.
@@ -433,10 +433,10 @@ Purpose: search all registered projects without conflating identical IDs.
 Layout:
 
 ```text
-Search: [v1-remainder dashboard]
+Search: [active-sprint dashboard]
 type       project       title                         score   source
 work       boreal-work   Add global dashboard ...      0.91    bw_work_...
-decision   crm-demo      Memory Git mode cut           0.73    bw_decision_...
+decision   project-beta  Memory Git mode choice       0.73    bw_decision_...
 raw        cli-tools     Smoke output                  0.62    bw_source_...
 ```
 
@@ -654,14 +654,14 @@ total  ready  active  blocked  verify  reserved  sprints  milestones
 81     9      1       2        3       1         5        4
 
 Active Sprint
-Sprint 04 - Terminal dashboard hardening
+Terminal dashboard
 [############------] 12/18  67%
 blockers 2 | active reservations 1 | verify 3
 
 Next Work
 status  title                              priority  labels       agent
 ready   Add repo roll-up filters           high      tui,rollup   -
-blocked Close sprint report gaps           normal    closeout     agent-x
+blocked Close sprint report gaps           normal    closeout     worker-a
 
 Recent Activity
 time      type              subject
@@ -728,9 +728,9 @@ ROLL-UP  filter: open only  sort: status, priority
 kind       status   title                              done   blk  gate  owner
 project    warn    boreal-work                         39/81  2    4     -
   milestone ready  Terminal dashboard                  12/18  2    1     -
-    sprint  active Sprint 04 - TUI contracts           8/12   1    1     agent-a
+    sprint  active Terminal UI contracts               8/12   1    1     worker-a
       task  ready  Add repo roll-up filters            -      0    -     -
-      task  block  Close sprint report gaps            -      2    review agent-b
+      task  block  Close sprint report gaps            -      2    review worker-b
   milestone draft  MCP polish                          2/9    0    0     -
 ```
 
@@ -961,7 +961,7 @@ Lanes:
 Layout:
 
 ```text
-Sprint: Sprint 04 - TUI contracts        active | 8/12 | blockers 1
+Scope: TUI contracts                    active | 8/12 | blockers 1
 
 DRAFT (1)        READY (3)          BLOCKED (1)        IN PROGRESS (1)
 title            title              title              title
@@ -1526,6 +1526,6 @@ Live smoke:
 ## Open Questions
 
 - Should repo route payloads be exposed as `bwrk dashboard repo --json` subcommands, or should `apps/tui` continue reading the local store directly for repo-only pages?
-- Should the Global TUI and Repo TUI be one process with an internal surface switch, or separate launches connected by explicit command invocation?
+- Should the Global TUI and Repo TUI be one process with a shared surface switch, or separate launches connected by explicit command invocation?
 - Should knowledge/report view models move wholesale into `@boreal/ui-model`, or should TUI start with read-only subsets?
 - Should filters become CLI flags on dashboard endpoints, or remain TUI-local until a list exceeds bounded payload limits?
