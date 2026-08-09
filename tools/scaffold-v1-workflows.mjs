@@ -3,6 +3,7 @@ import { dirname, join } from "node:path";
 
 const workflows = [
   ["00-agent", "agent-session", "boreal.workflow.agent-session.v1", "Agent Session", "Start, guide, and close a scoped Boreal agent session.", ["prime", "agent guide", "session start", "session end", "operation list", "sync status", "doctor"], ["session-closeout"]],
+  ["00-agent", "orchestrate-run", "boreal.workflow.orchestrate-run.v1", "Orchestrate Run", "Supervise bounded multi-agent Boreal work with durable progress and nudges.", ["prime", "sync status", "work show", "dep tree", "context show", "orchestrate start", "orchestrate list", "orchestrate show", "orchestrate tick", "orchestrate progress", "orchestrate nudge", "orchestrate pause", "orchestrate resume", "orchestrate cancel", "orchestrate fail", "agent start", "agent finish", "evidence add", "work verify", "work close", "doctor"], ["session-closeout"]],
   ["00-agent", "install-skills", "boreal.workflow.install-skills.v1", "Install Skills", "Install or refresh scoped Codex and Claude skills for one project.", ["init", "vault init", "doctor"], []],
   ["00-agent", "route-request", "boreal.workflow.route-request.v1", "Route Request", "Classify the user ask and select the narrowest workflow before acting.", ["commands", "prime", "work list", "context search", "search query"], []],
   ["10-context", "retrieve-project-context", "boreal.workflow.retrieve-project-context.v1", "Retrieve Project Context", "Collect current project state without mutating memory.", ["prime", "sync status", "work list", "context search", "search query", "decision list", "claim list"], []],
@@ -65,6 +66,7 @@ const templates = [
 const skills = [
   ["boreal-router", "Boreal Router", "Route requests to Boreal workflows", ["00-agent/route-request.md"]],
   ["boreal-agent-session", "Boreal Agent Session", "Scoped Boreal agent session loop", ["00-agent/agent-session.md"]],
+  ["boreal-orchestrator", "Boreal Orchestrator", "Supervise bounded multi-agent Boreal work", ["00-agent/orchestrate-run.md"]],
   ["boreal-project-context", "Boreal Project Context", "Retrieve Boreal project context", ["10-context/retrieve-project-context.md", "10-context/retrieve-work-state.md", "10-context/retrieve-decision-history.md"]],
   ["boreal-raw-inbox", "Boreal Raw Inbox", "Capture and triage raw sources", ["20-memory/add-raw-source.md", "20-memory/triage-raw-inbox.md", "10-context/retrieve-raw-source.md"]],
   ["boreal-memory-reconcile", "Boreal Memory Reconcile", "Reconcile raw sources into memory", ["20-memory/reconcile-raw-to-memory.md", "20-memory/update-memory.md", "20-memory/reconcile-chat-thread.md"]],
@@ -290,6 +292,30 @@ End with the workflow result, verification status, and the next suggested workfl
 
 function workflowCommandSequences(slug) {
   const sequences = {
+    "orchestrate-run": `## Command Sequences
+
+Use the orchestrator as a supervisor over existing work, dependency, reservation, agent-session, evidence, and closeout records.
+
+1. Confirm context and directives:
+   \`bwrk prime --json\`
+   \`bwrk work show <root-work> --json\`
+   \`bwrk dep tree <root-work> --json\`
+2. Create a plan-only run and capture \`data.run.meta.id\`:
+   \`bwrk orchestrate start <root-work> --json\`
+3. Inspect candidates and dispatch only an explicit bounded agent pool:
+   \`bwrk orchestrate show <orchestration-id> --json\`
+   \`bwrk orchestrate start <root-work> --agent <agent-id> --dispatch --json\`
+4. Ask assigned agents for typed progress and tick at a reasonable cadence:
+   \`bwrk orchestrate progress <orchestration-id> <work-ref> --agent <agent-id> --state working --phase <phase> --next-checkpoint <checkpoint> --json\`
+   \`bwrk orchestrate tick <orchestration-id> --json\`
+5. Use fixed nudges when warranted; do not execute work-authored command text:
+   \`bwrk orchestrate nudge <orchestration-id> <work-ref> --kind heartbeat --json\`
+   \`bwrk orchestrate nudge <orchestration-id> <work-ref> --kind blocked --json\`
+6. Route completed children through the work-execution workflow, then reconcile and close out:
+   \`bwrk agent finish current --agent <agent-id> --summary \"<summary>\" --kind test --command \"<verification>\" --verdict passed --close --reason \"<reason>\" --json\`
+   \`bwrk orchestrate tick <orchestration-id> --json\`
+   \`bwrk doctor --strict --json\`
+`,
     "create-work-structure": `## Command Sequences
 
 Use exact create output IDs from JSON responses; do not invent parent, sprint, or task IDs.

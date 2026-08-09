@@ -18,6 +18,8 @@ export type EvidenceId = Brand<string, "EvidenceId">;
 export type GraphEdgeId = Brand<string, "GraphEdgeId">;
 export type KnowledgeSourceId = Brand<string, "KnowledgeSourceId">;
 export type OperationId = Brand<string, "OperationId">;
+export type OrchestrationId = Brand<string, "OrchestrationId">;
+export type OrchestrationNudgeId = Brand<string, "OrchestrationNudgeId">;
 export type ProjectionId = Brand<string, "ProjectionId">;
 export type ReconciliationObligationId = Brand<string, "ReconciliationObligationId">;
 export type ReservationId = Brand<string, "ReservationId">;
@@ -40,6 +42,8 @@ export type EntityPrefix =
   | "gate"
   | "heartbeat"
   | "operation"
+  | "orchestration"
+  | "nudge"
   | "page"
   | "projection"
   | "obligation"

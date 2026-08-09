@@ -1,0 +1,6 @@
+schema_version: boreal.skill.v1
+system: boreal
+skill: boreal-orchestrator
+display_name: Boreal Orchestrator
+workflows:
+  - boreal.workflow.orchestrate-run.v1

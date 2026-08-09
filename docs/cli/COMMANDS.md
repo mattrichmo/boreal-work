@@ -710,6 +710,86 @@ Important flags include `--command`, `--cwd`, `--timeout-ms`, `--stdout-max-byte
 
 Run commands never execute through a shell. Local workers allow only `bwrk`, `git`, `node`, `npm`, and `pnpm`; external workers can create runs without a command and drive them through the durable lifecycle.
 
+## `orchestrate start`
+
+```bash
+bwrk orchestrate start <root-work> [--agent <agent-id>...] [--max-concurrent <n>] [--nudge-after-ms <ms>] [--stale-after-ms <ms>] [--max-nudges <n>] [--purpose <text>] [--dispatch] [--json]
+```
+
+Creates a durable supervisory run over the dependency scope of a root work item. The default is plan-only; `--dispatch` claims one bounded wave through the existing reservation path and only for the explicit `--agent` pool.
+
+## `orchestrate list`
+
+```bash
+bwrk orchestrate list [--status active|paused|needs_attention|succeeded|failed|cancelled|all] [--limit <n>] [--json]
+```
+
+Lists durable orchestration snapshots. Use `--status needs_attention` to find runs whose assignments have exhausted their nudge budget or otherwise require supervisor review.
+
+## `orchestrate show`
+
+```bash
+bwrk orchestrate show <orchestration-id> [--json]
+```
+
+Shows the orchestration policy, waves, assignments, nudges, scoped work IDs, and current ready candidates with trusted agent-start commands.
+
+## `orchestrate tick`
+
+```bash
+bwrk orchestrate tick <orchestration-id> [--dispatch] [--json]
+```
+
+Reconciles reservations and underlying work state, issues threshold-based heartbeat or blocker nudges, and optionally dispatches the next bounded wave. It never executes work-authored command text.
+
+## `orchestrate progress`
+
+```bash
+bwrk orchestrate progress <orchestration-id> <work-ref> --agent <agent-id> --state working|waiting|blocked|completed [--phase <text>] [--next-checkpoint <text>] [--blocker-code <code>] [--note <text>] [--evidence <id>...] [--artifact <uri>...] [--touched-path <path>...] [--json]
+```
+
+Records typed assignment progress and acknowledges outstanding nudges for that assignment. Progress is coordination evidence, not verification or closeout; child work still follows the work-execution workflow.
+
+## `orchestrate nudge`
+
+```bash
+bwrk orchestrate nudge <orchestration-id> <work-ref> --kind heartbeat|checkpoint|scope|blocked|replan [--agent <agent-id>] [--json]
+```
+
+Issues a bounded, audited nudge with a fixed instruction and trusted next command. Nudge limits are enforced per assignment; after the limit, the orchestration requires attention rather than escalating pressure.
+
+## `orchestrate pause`
+
+```bash
+bwrk orchestrate pause <orchestration-id> [--json]
+```
+
+Pauses new orchestration dispatch while preserving reservations, progress, and nudges.
+
+## `orchestrate resume`
+
+```bash
+bwrk orchestrate resume <orchestration-id> [--json]
+```
+
+Resumes a paused or attention-required orchestration. It does not automatically claim work until `orchestrate tick --dispatch` is requested.
+
+## `orchestrate cancel`
+
+```bash
+bwrk orchestrate cancel <orchestration-id> [--json]
+```
+
+Marks an orchestration cancelled without deleting its audit trail or silently releasing work reservations.
+
+## `orchestrate fail`
+
+```bash
+bwrk orchestrate fail <orchestration-id> [--json]
+```
+
+Marks an orchestration failed while preserving assignment, reservation, progress, and nudge history for repair or handoff.
+
 ## `events`
 
 ```text

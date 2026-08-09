@@ -77,6 +77,7 @@ import {
   removeBlockingDependency as removeBlockingDependencyDomain
 } from "@boreal/work-engine";
 import { createExecutionRunService, type ExecutionRunService } from "./runs.js";
+import { createOrchestrationService, type OrchestrationService } from "./orchestrator.js";
 
 export interface BorealRuntimeOptions {
   readonly store?: BorealStore;
@@ -268,6 +269,7 @@ const CHECKPOINT_DIRTY_PATH_REASON_CODES = new Set([
 export interface BorealRuntime {
   readonly policy: RuntimePolicy;
   readonly runs: ExecutionRunService;
+  readonly orchestrator: OrchestrationService;
   initWorkspace(): Promise<RuntimeEvent>;
   ensureWorkspaceInitialized(): Promise<WorkspaceInitializationResult>;
   resolveWorkReference(ref: string, options?: ResolveWorkReferenceOptions): Promise<WorkId>;
@@ -360,6 +362,28 @@ export function createBorealRuntime(options: BorealRuntimeOptions = {}): BorealR
   const clock = options.clock ?? (() => new Date());
   const now = () => nowIso(clock());
   const runs = createExecutionRunService({ store, actor, operationId, clock, workspaceRoot: options.workspaceRoot });
+  let runtimeValue: BorealRuntime;
+  const orchestrator = createOrchestrationService({
+    store,
+    actor,
+    operationId,
+    clock,
+    bridge: {
+      listReadyWork: async () => (await runtimeValue.listReadyWork()).map((work) => ({
+        id: work.id,
+        title: work.title,
+        ...(work.description ? { description: work.description } : {}),
+        acceptanceCriteria: work.acceptanceCriteria,
+        labels: work.labels,
+        dependencyIds: work.dependencyIds,
+        ...(work.contextSummary ? { contextSummary: work.contextSummary } : {}),
+        priority: work.priority,
+        status: work.status
+      })),
+      claimWork: (input) => runtimeValue.claimWork(input),
+      expireStaleReservations: () => runtimeValue.expireStaleReservations()
+    }
+  });
 
   async function appendEvent(
     writer: BorealWriter,
@@ -402,9 +426,10 @@ export function createBorealRuntime(options: BorealRuntimeOptions = {}): BorealR
     });
   }
 
-  return {
+  runtimeValue = {
     policy,
     runs,
+    orchestrator,
 
     async initWorkspace(): Promise<RuntimeEvent> {
       return (await ensureInitialized()).event;
@@ -1330,6 +1355,7 @@ export function createBorealRuntime(options: BorealRuntimeOptions = {}): BorealR
       return store.read((reader) => reader.listEvents());
     }
   };
+  return runtimeValue;
 }
 
 async function createUniqueWorkItem(

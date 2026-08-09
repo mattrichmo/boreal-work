@@ -32,7 +32,7 @@ export const HELP_SECTIONS: readonly { readonly title: string; readonly categori
   { title: "Work", categories: ["work", "dependency", "evidence", "gate"] },
   { title: "Plan", categories: ["sprint", "workflow"] },
   { title: "Knowledge", categories: ["source", "claim", "decision", "context", "search", "raw", "wiki", "vault"] },
-  { title: "Agents", categories: ["agent", "session", "reservation", "operation", "directive"] },
+  { title: "Agents", categories: ["agent", "session", "reservation", "operation", "directive", "orchestrator"] },
   { title: "Dashboards", categories: ["dashboard", "registry"] },
   { title: "Maintain", categories: ["doctor", "sync", "storage", "lock", "ledger", "snapshot", "duplicate", "merge", "compact", "daemon"] },
   { title: "Data", categories: ["export", "import"] },

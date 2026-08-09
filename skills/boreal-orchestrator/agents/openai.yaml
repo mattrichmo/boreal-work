@@ -1,0 +1,4 @@
+interface:
+  display_name: "Boreal Orchestrator"
+  short_description: "Supervise bounded multi-agent Boreal work"
+  default_prompt: "Use $boreal-orchestrator to run the bounded Boreal orchestration workflow in this project."
