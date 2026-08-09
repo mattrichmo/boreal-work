@@ -31,4 +31,4 @@ Boreal setup has four root families:
 
 ## Install Direction
 
-`bwrk install` is the human project setup surface. It should ask for project root, memory layout, Git preference, install root, target agents, and folder-scope, with child `memory/` plus a separate Git repository as the safe default. `bwrk install --yes` applies those defaults without prompting. `bwrk install codex|claude --scope user` is the separate machine-wide skill installation surface, and `bwrk init` remains the low-level idempotent runtime primitive.
+`bwrk setup` is the human project setup surface. It asks for project root, memory layout, Git preference, install root, target agents, and folder-scope, with child `memory/` plus a separate Git repository as the safe default. `bwrk setup --yes` applies those defaults without prompting. `bwrk install` remains a compatibility alias. `bwrk integrations add codex|claude --scope user` is the separate machine-wide skill installation surface, and `bwrk init` remains the low-level idempotent runtime primitive.

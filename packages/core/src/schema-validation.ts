@@ -4,6 +4,7 @@ import { agentDirectiveBundleIssues } from "./agent-directives.js";
 import { ENFORCEMENT_GAP_CODES } from "./enforcement-gaps.js";
 import { BorealError } from "./errors.js";
 import type { RuntimePolicy } from "./policies.js";
+import { hasUnsafeExecutionArguments, isTrustedExecutableCapability } from "./process-runner.js";
 import {
   PROJECT_ROLLUP_SCHEMA_ID,
   PROJECT_ROLLUP_SCHEMA_VERSION,
@@ -368,7 +369,8 @@ export function workItemSchemaIssues(value: unknown, path = "$"): readonly Schem
     ...uniqueStringArrayIssue(value.dependencyIds, `${path}.dependencyIds`, schemaId),
     ...uniqueStringArrayIssue(value.evidenceIds, `${path}.evidenceIds`, schemaId),
     ...uniqueStringArrayIssue(value.verificationIds, `${path}.verificationIds`, schemaId),
-    ...optionalRequiredCloseoutGateArrayIssues(value.requiredCloseoutGates, `${path}.requiredCloseoutGates`, schemaId)
+    ...optionalRequiredCloseoutGateArrayIssues(value.requiredCloseoutGates, `${path}.requiredCloseoutGates`, schemaId),
+    ...optionalReconciliationObligationArrayIssues(value.reconciliationObligations, `${path}.reconciliationObligations`, schemaId)
   ];
 
   if (value.parentId !== undefined) {
@@ -489,6 +491,14 @@ function templateNodeIssues(value: unknown, path: string, schemaId: string): rea
   }
   if (value.priority !== undefined) {
     issues.push(...enumIssue(value.priority, `${path}.priority`, schemaId, ["low", "normal", "high", "critical"]));
+  }
+  if (value.findingProducer !== undefined) {
+    issues.push(...booleanIssue(value.findingProducer, `${path}.findingProducer`, schemaId));
+  }
+  for (const field of ["reconciliationOf", "revalidates"] as const) {
+    if (value[field] !== undefined) {
+      issues.push(...stringArrayIssue(value[field], `${path}.${field}`, schemaId));
+    }
   }
   if (value.labels !== undefined) {
     issues.push(...stringArrayIssue(value.labels, `${path}.labels`, schemaId));
@@ -722,6 +732,27 @@ export function executionRunSchemaIssues(value: unknown, path = "$"): readonly S
         ...integerAtLeastIssue(value.command.stderrMaxBytes, `${path}.command.stderrMaxBytes`, schemaId, 1)
       );
     }
+  }
+  return issues;
+}
+
+/**
+ * Validate the executable capability at an import or execution trust boundary.
+ * Shape validation intentionally remains portable; this stricter validator
+ * rejects machine-specific paths and code-loading arguments from snapshots.
+ */
+export function executionRunCapabilitySchemaIssues(value: unknown, path = "$"): readonly SchemaValidationIssue[] {
+  const schemaId = RUNTIME_SCHEMA_IDS.executionRun;
+  if (!isRecord(value) || value.command === undefined) return [];
+  if (!isRecord(value.command)) return [issue(schemaId, `${path}.command`, "must be an object")];
+  const executable = value.command.executable;
+  const args = value.command.args;
+  const issues: SchemaValidationIssue[] = [];
+  if (typeof executable === "string" && !isTrustedExecutableCapability(executable, undefined, { allowRuntimePath: false })) {
+    issues.push(issue(schemaId, `${path}.command.executable`, "must be a trusted bare executable capability"));
+  }
+  if (typeof executable === "string" && Array.isArray(args) && args.every((arg) => typeof arg === "string") && hasUnsafeExecutionArguments(executable, args)) {
+    issues.push(issue(schemaId, `${path}.command.args`, "contains an untrusted code-loading capability"));
   }
   return issues;
 }
@@ -2059,6 +2090,92 @@ function optionalRequiredCloseoutGateArrayIssues(value: unknown, path: string, s
   return value.flatMap((entry, index) => requiredCloseoutGateIssues(entry, `${path}[${index}]`, schemaId));
 }
 
+function optionalReconciliationObligationArrayIssues(value: unknown, path: string, schemaId: string): readonly SchemaValidationIssue[] {
+  if (value === undefined) {
+    return [];
+  }
+  if (!Array.isArray(value)) {
+    return [issue(schemaId, path, "must be an array")];
+  }
+  return value.flatMap((entry, index) => reconciliationObligationIssues(entry, `${path}[${index}]`, schemaId));
+}
+
+function reconciliationObligationIssues(value: unknown, path: string, schemaId: string): readonly SchemaValidationIssue[] {
+  if (!isRecord(value)) {
+    return [issue(schemaId, path, "must be an object")];
+  }
+  const issues: SchemaValidationIssue[] = [
+    ...patternStringIssue(value.id, `${path}.id`, schemaId, /^bw_obligation_[a-f0-9]{12,64}$/),
+    ...nonEmptyStringIssue(value.findingId, `${path}.findingId`, schemaId),
+    ...recordIssue(value.subjectScope, `${path}.subjectScope`, schemaId),
+    ...reconciliationRequiredChangeArrayIssues(value.requiredChanges, `${path}.requiredChanges`, schemaId),
+    ...nonEmptyStringIssue(value.revalidationCommand, `${path}.revalidationCommand`, schemaId),
+    ...recordIssue(value.reconciliationInputs, `${path}.reconciliationInputs`, schemaId),
+    ...enumIssue(value.status, `${path}.status`, schemaId, [
+      "open",
+      "remediation-in-progress",
+      "revalidation-failed",
+      "reconciled",
+      "deferred",
+      "blocked"
+    ]),
+    ...uniquePatternStringArrayIssue(value.unlocks, `${path}.unlocks`, schemaId, /^bw_work_[a-f0-9]{12,64}$/),
+    ...stringIssue(value.createdAt, `${path}.createdAt`, schemaId),
+    ...stringIssue(value.updatedAt, `${path}.updatedAt`, schemaId),
+    ...actorRefIssues(value.createdBy, `${path}.createdBy`, schemaId),
+    ...actorRefIssues(value.updatedBy, `${path}.updatedBy`, schemaId)
+  ];
+  if (isRecord(value.subjectScope)) {
+    issues.push(
+      ...nonEmptyStringIssue(value.subjectScope.subjectType, `${path}.subjectScope.subjectType`, schemaId),
+      ...nonEmptyStringIssue(value.subjectScope.subjectId, `${path}.subjectScope.subjectId`, schemaId)
+    );
+    if (value.subjectScope.projectId !== undefined) {
+      issues.push(...nonEmptyStringIssue(value.subjectScope.projectId, `${path}.subjectScope.projectId`, schemaId));
+    }
+  }
+  for (const field of ["producerOperationId", "resolvedBy", "revalidatedBy", "reconciledBy"] as const) {
+    if (value[field] !== undefined) {
+      issues.push(...patternStringIssue(value[field], `${path}.${field}`, schemaId, /^bw_operation_[a-f0-9]{12,64}$/));
+    }
+  }
+  if (isRecord(value.reconciliationInputs)) {
+    for (const [key, inputValue] of Object.entries(value.reconciliationInputs)) {
+      if (!["string", "number", "boolean"].includes(typeof inputValue)) {
+        issues.push(issue(schemaId, `${path}.reconciliationInputs.${key}`, "must be a string, number, or boolean"));
+      }
+    }
+  }
+  return issues;
+}
+
+function reconciliationRequiredChangeArrayIssues(value: unknown, path: string, schemaId: string): readonly SchemaValidationIssue[] {
+  if (!Array.isArray(value)) {
+    return [issue(schemaId, path, "must be an array")];
+  }
+  return value.flatMap((entry, index) => {
+    const entryPath = `${path}[${index}]`;
+    if (!isRecord(entry)) {
+      return [issue(schemaId, entryPath, "must be an object")];
+    }
+    const issues: SchemaValidationIssue[] = [
+      ...enumIssue(entry.kind, `${entryPath}.kind`, schemaId, [
+        "code",
+        "contract",
+        "data",
+        "documentation",
+        "configuration",
+        "generated-artifact"
+      ]),
+      ...nonEmptyStringIssue(entry.description, `${entryPath}.description`, schemaId)
+    ];
+    if (entry.target !== undefined) {
+      issues.push(...nonEmptyStringIssue(entry.target, `${entryPath}.target`, schemaId));
+    }
+    return issues;
+  });
+}
+
 function requiredCloseoutGateIssues(value: unknown, path: string, schemaId: string): readonly SchemaValidationIssue[] {
   if (!isRecord(value)) {
     return [issue(schemaId, path, "must be an object")];
@@ -2167,6 +2284,15 @@ function enforcementGapDataIssues(value: unknown, path: string, schemaId: string
   }
   if (value.evidenceIds !== undefined) {
     issues.push(...uniquePatternStringArrayIssue(value.evidenceIds, `${path}.evidenceIds`, schemaId, /^bw_evidence_[a-f0-9]{12,64}$/));
+  }
+  if (value.obligationIds !== undefined) {
+    issues.push(...uniquePatternStringArrayIssue(value.obligationIds, `${path}.obligationIds`, schemaId, /^bw_obligation_[a-f0-9]{12,64}$/));
+  }
+  if (value.findingIds !== undefined) {
+    issues.push(...uniqueStringArrayIssue(value.findingIds, `${path}.findingIds`, schemaId));
+  }
+  if (value.revalidationCommands !== undefined) {
+    issues.push(...stringArrayIssue(value.revalidationCommands, `${path}.revalidationCommands`, schemaId));
   }
   if (value.reason !== undefined) {
     issues.push(...nonEmptyStringIssue(value.reason, `${path}.reason`, schemaId));

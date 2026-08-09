@@ -13,7 +13,6 @@ import {
 } from "./app/live-data.js";
 import { renderConsoleHtml } from "./app/render.js";
 import { consoleStatePayload } from "./app/render.js";
-import { routeFromPath } from "./app/routes.js";
 import type { ConsoleDataMode, ConsoleDataSet, ConsoleScope, ConsoleSelection } from "./app/types.js";
 
 export interface ConsoleServerOptions {
@@ -62,7 +61,6 @@ export function createConsoleHttpServer(options: ConsoleServerOptions): Server {
         await handleProjectSettings({ request, response, workspaceRoot, runner: options.runner, csrfToken, host, afterMutation: liveCache.invalidate });
         return;
       }
-      const route = routeFromPath(url.pathname, scope);
       const data = await liveCache.load({
         workspaceRoot,
         mode: url.searchParams.get("mode") === "fixture" ? "fixture" : mode,
@@ -74,7 +72,10 @@ export function createConsoleHttpServer(options: ConsoleServerOptions): Server {
           rawSource: url.searchParams.get("source") ?? undefined
         }
       });
-      sendHtml(response, injectConsoleToken(renderConsoleHtml({ route: `${route.path}${url.search}`, data }), csrfToken));
+      // Preserve the requested path so the renderer can show an explicit
+      // unsupported-route state instead of silently rendering the fallback
+      // route with its actions attached.
+      sendHtml(response, injectConsoleToken(renderConsoleHtml({ route: `${url.pathname}${url.search}`, data }), csrfToken));
     } catch (error) {
       sendError(response, error);
     }

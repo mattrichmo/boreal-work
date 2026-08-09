@@ -433,13 +433,24 @@ bwrk template capture <work-ref> --out <file> [--var <name=value>...] [--overwri
 
 Captures an existing work subtree into a YAML work-structure template. Repeated `--var name=value` entries replace concrete text with `{{name}}` placeholders in captured titles, descriptions, labels, and acceptance criteria.
 
+## `setup`
+
+```bash
+bwrk setup [--yes] [--dry-run] [--interactive] [--workspace <dir>|--project-root <dir>] [--memory-root <dir>] [--memory-layout in-repo|child|sibling] [--memory-git-mode shared|separate|submodule] [--memory-remote <url>] [--install-root <dir>] [--skill-target codex|claude...] [--folder-scoped] [--json]
+```
+
+The recommended project setup command. It initializes the runtime, scaffolds
+project memory, configures Git guards, and installs project agent skills.
+`bwrk install` remains a compatibility alias. `--yes` applies the recommended
+defaults; `--dry-run` previews without writing.
+
 ## `install`
 
 ```bash
 bwrk install [--yes] [--dry-run] [--interactive] [--workspace <dir>|--project-root <dir>] [--memory-root <dir>] [--memory-layout in-repo|child|sibling] [--memory-git-mode shared|separate|submodule] [--memory-remote <url>] [--install-root <dir>] [--skill-target codex|claude...] [--folder-scoped] [--json]
 ```
 
-Runs the first-run project installer. In a TTY, bare `bwrk install` opens the setup flow. `bwrk install --yes` applies the recommended safe default: `./memory` as a child Git repository ignored by the app repo, Codex skills in `.agents/skills`, and project-level skill metadata. `bwrk install --dry-run` previews the same plan without writing files. `bwrk install --json` is non-mutating unless `--yes` is also supplied. Short alias: `-y` means `--yes`.
+Compatibility alias for `bwrk setup`. In a TTY, bare `bwrk install` opens the setup flow. `bwrk install --yes` applies the recommended safe default: `./memory` as a child Git repository ignored by the app repo, Codex skills in `.agents/skills`, and project-level skill metadata. `bwrk install --dry-run` previews the same plan without writing files. `bwrk install --json` is non-mutating unless `--yes` is also supplied. Short alias: `-y` means `--yes`.
 
 ## `install codex`
 
@@ -472,6 +483,34 @@ bwrk install status [--bin-dir <dir>] [--path <value>] [--json]
 ```
 
 Inspects local and global `bwrk` availability without writing files. JSON output includes the local source runner command, generated shim path, whether the shim directory is on PATH, the resolved global command, and `--version` probe output. Use `--bin-dir` to check a non-default local shim directory and `--path` to inspect a supplied PATH value.
+
+## `integrations`
+
+```bash
+bwrk integrations [add|status] [codex|claude|skills] [--scope project|user] [--json]
+```
+
+Manages agent integrations without mixing them into project setup or machine
+CLI installation. Use `bwrk integrations add <target>` to install an adapter
+and `bwrk integrations status` to validate installed files.
+
+## `integrations add`
+
+```bash
+bwrk integrations add <codex|claude|skills> [--scope project|user] [--install-root <dir>] [--dry-run] [--interactive] [--json]
+```
+
+Installs one Boreal skill adapter. Project scope is the default; user scope
+makes the integration available from every repository.
+
+## `integrations status`
+
+```bash
+bwrk integrations status [--scope project|user] [--target codex|claude|skills...] [--install-root <dir>] [--json]
+```
+
+Checks selected integration roots against the bundled workflows and skill
+assets. When no target is supplied, project setup targets or Codex are checked.
 
 ## `registry list`
 
@@ -565,6 +604,16 @@ Options:
 - `--mode`: `live` for workspace data or `fixture` for demo data. Defaults to `live`.
 - `--live-cache-ttl-ms`: browser console (`--web`) live data cache TTL between route clicks. Defaults to `60000`.
 - `--allow-fixture-fallback`: browser console (`--web`) renders deterministic fixture data with warnings if live data fails. Without this flag, live data failures return an error.
+
+## `view`
+
+```bash
+bwrk view [--web] [--global] [--json] [--mouse] [--refresh-ms <ms>] [--host <host>] [--port <n>] [--no-open] [--mode live|fixture] [--live-cache-ttl-ms <ms>] [--allow-fixture-fallback]
+```
+
+The simple dashboard entry point. It opens the current project by default;
+add `--global` for every linked project and `--web` for the browser console.
+`bwrk dashboard` remains a compatibility alias.
 
 ## `dashboard global`
 
@@ -1447,6 +1496,14 @@ bwrk work verify <work-id> --evidence <evidence-id>... --verdict passed|failed [
 
 Creates a verification record. `--verdict` is required and `--evidence` may be repeated. Verification fails if referenced evidence is not attached to the work item. A `passed` verdict requires at least one referenced evidence record with outcome `passed`. JSON output includes `closeoutGateStatus` so callers can see whether required review, audit, verification, or checkpoint gates are still open.
 
+## `work reconcile`
+
+```bash
+bwrk work reconcile <work-id> <obligation-id> --transition resolve|revalidate|reconcile|defer [--revalidation passed|failed] [--json]
+```
+
+Advances one typed reconciliation obligation. Use `resolve` after updating the affected code, contract, data, or artifact; use `revalidate --revalidation passed` after rerunning the required check; then use `reconcile` to unlock downstream readiness. Open, failed, or deferred obligations continue to block advancement.
+
 ## `work close`
 
 ```bash
@@ -1938,6 +1995,17 @@ bwrk update repo [--dry-run] [--json]
 Brings the current workspace up to the installed `bwrk` version: migrates legacy compact-state storage to the git-first per-record object store when the `.boreal/project.json` marker is not already `objects-v1`, then reinstalls agent skills into every install root recorded by project setup. Run it in each existing project after `bwrk update self`, then run `bwrk sync refresh` to rebuild generated artifacts. `--dry-run` reports the migration and skill-install plan without changing the workspace. Exits `1` when a skill install reports issues.
 
 JSON `data` contains `workspaceRoot`, `storage` (`migrated`, `from`, `to`), `skillInstalls` (per target: `installRoot`, `written`, `issues`), and `nextCommand`.
+
+## `upgrade`
+
+```bash
+bwrk upgrade [--machine|--project] [--ref <ref>] [--repo-url <url>] [--bin-dir <dir>] [--lib-dir <dir>] [--dry-run] [--json]
+```
+
+Runs the project asset update when inside an initialized project and the
+machine CLI update otherwise. In a project, the default updates both scopes,
+project assets first. Use `--machine` or `--project` to select one scope.
+`bwrk update self` and `bwrk update repo` remain advanced equivalents.
 
 ## `ledger status`
 

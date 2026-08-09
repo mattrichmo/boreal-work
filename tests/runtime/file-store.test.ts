@@ -274,8 +274,9 @@ describe("file-backed store", () => {
 
   it("serializes writes from separate store instances without losing updates", async () => {
     const rootDir = await makeTempWorkspace();
-    const storeA = new FileBorealStore({ rootDir, lock });
-    const storeB = new FileBorealStore({ rootDir, lock });
+    const concurrentLock = { ...lock, waitTimeoutMs: 2_000 };
+    const storeA = new FileBorealStore({ rootDir, lock: concurrentLock });
+    const storeB = new FileBorealStore({ rootDir, lock: concurrentLock });
     const workA = createWorkItem({
       title: "Concurrent write A",
       actor,

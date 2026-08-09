@@ -51,8 +51,10 @@ import {
   readTransactionJournals,
   removeTransactionJournal,
   transactionDirectory,
+  toRecoveryRequiredError,
   updateTransactionJournal,
-  type PendingLogRecord
+  type PendingLogRecord,
+  type StoreTransactionJournal
 } from "./transaction-journal.js";
 import type { BorealReader, BorealStore, BorealWriter, WorkItemFilter } from "./ports.js";
 
@@ -125,7 +127,10 @@ export class ObjectDirBorealStore implements BorealStore {
   }
 
   async read<T>(operation: (reader: BorealReader) => Promise<T> | T): Promise<T> {
-    return withFileLock(this.lockDir, this.lockOptions, async () => operation(this.createReader()));
+    return withFileLock(this.lockDir, this.lockOptions, async () => {
+      await this.recoverTransactions();
+      return operation(this.createReader());
+    });
   }
 
   async write<T>(operation: (writer: BorealWriter) => Promise<T> | T): Promise<T> {
@@ -138,7 +143,10 @@ export class ObjectDirBorealStore implements BorealStore {
   }
 
   async snapshot(): Promise<StoreSnapshot> {
-    return withFileLock(this.lockDir, this.lockOptions, () => this.loadSnapshot());
+    return withFileLock(this.lockDir, this.lockOptions, async () => {
+      await this.recoverTransactions();
+      return this.loadSnapshot();
+    });
   }
 
   private async writeOnce<T>(operation: (writer: BorealWriter) => Promise<T> | T): Promise<T> {
@@ -194,15 +202,35 @@ export class ObjectDirBorealStore implements BorealStore {
   }
 
   private async recoverTransactions(): Promise<void> {
-    for (const { path, journal } of await readTransactionJournals(this.rootDir)) {
+    let journals: readonly { path: string; journal: StoreTransactionJournal }[];
+    try {
+      journals = await readTransactionJournals(this.rootDir);
+    } catch (error) {
+      throw toRecoveryRequiredError(error, {
+        rootDir: this.rootDir,
+        storeKind: "object",
+        phase: "read_journals"
+      });
+    }
+    for (const { path, journal } of journals) {
       if (journal.storeKind !== "object") {
         continue;
       }
-      if (journal.changes) {
-        await this.persistObjectChanges(journal.changes);
+      try {
+        if (journal.changes) {
+          await this.persistObjectChanges(journal.changes);
+        }
+        await this.appendMissingLogRecords(journal.pendingLogRecords);
+        await removeTransactionJournal(path);
+      } catch (error) {
+        throw toRecoveryRequiredError(error, {
+          rootDir: this.rootDir,
+          storeKind: "object",
+          journalPath: path,
+          journalId: journal.id,
+          phase: journal.phase
+        });
       }
-      await this.appendMissingLogRecords(journal.pendingLogRecords);
-      await removeTransactionJournal(path);
     }
   }
 

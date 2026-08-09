@@ -26,6 +26,7 @@ Use this index to move from installation and first use into the CLI reference, a
 | --- | --- |
 | [Runtime architecture](architecture/RUNTIME.md) | Ports, domain operations, storage, locks, and generated artifacts. |
 | [Long-running tasks](architecture/LONG_RUNNING_TASKS.md) | Durable runs, checkpoints, waits, retries, workers, and event cursors. |
+| [Reconciliation-first hardening plan](architecture/RECONCILIATION_FIRST_FEATURE_HARDENING_PLAN.md) | Consolidated feature, hardening, security, optimization, and proof gates from the parallel review. |
 | [Evidence trust](architecture/EVIDENCE_TRUST.md) | Trust levels, provenance, revisions, hashes, and verification behavior. |
 | [Compatibility policy](architecture/COMPATIBILITY_POLICY.md) | SemVer, supported storage versions, migration, and rollback. |
 | [CLI UX](architecture/CLI_UX.md) | JSON, plain-text, and optional dashboard interaction layers. |

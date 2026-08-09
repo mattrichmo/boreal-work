@@ -484,19 +484,19 @@ export async function maybeConfigureProjectSetup(
   return applyProjectSetup(input);
 }
 
-export async function promptProjectInstallInput(context: CliContext, args: ParsedArgs): Promise<ProjectSetupInput> {
+export async function promptProjectInstallInput(context: CliContext, args: ParsedArgs, commandName = "install"): Promise<ProjectSetupInput> {
   if (!process.stdin.isTTY || !process.stdout.isTTY) {
-    throw new BorealError("BOREAL_INVALID_INPUT", "bwrk install requires a TTY; use --yes for defaults or --dry-run to preview");
+    throw new BorealError("BOREAL_INVALID_INPUT", `bwrk ${commandName} requires a TTY; use --yes for defaults or --dry-run to preview`);
   }
   const defaults = projectSetupInputFromArgs(context, args);
   return withPromptSession({ input: process.stdin, output: process.stdout }, async (prompt) => {
     prompt.writeIntro(
-      "Boreal Install",
+      `Boreal ${commandName === "setup" ? "Setup" : "Install"}`,
       [
         `Setting up this project for Boreal work tracking and memory: ${context.workspaceRoot}`,
         "",
         "This project setup writes .boreal/ (tracker state), memory/ (project memory), and project agent skills.",
-        "For skills shared across every repository, use: bwrk install codex --scope user"
+        "For skills shared across every repository, use: bwrk integrations add codex --scope user"
       ].join("\n")
     );
     const setupMode = await prompt.select("How much should Boreal configure?", SETUP_MODE_OPTIONS, "quick");
@@ -784,7 +784,7 @@ async function promptProjectSetupInput(context: CliContext, args: ParsedArgs): P
   return withPromptSession({ input: process.stdin, output: process.stdout }, async (prompt) => {
     prompt.writeIntro(
       BOREAL_WORK_BANNER,
-      "Advanced Boreal project setup\nMost users should run `bwrk install`. Use arrow keys to choose options; press Enter to accept."
+      "Advanced Boreal project setup\nMost users should run `bwrk setup`. Use arrow keys to choose options; press Enter to accept."
     );
     const projectRoot = resolveUserPath(
       context.workspaceRoot,

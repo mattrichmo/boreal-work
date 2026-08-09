@@ -22,6 +22,10 @@
       "type": "array",
       "items": { "$ref": "#/$defs/requiredCloseoutGate" }
     },
+    "reconciliationObligations": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/reconciliationObligation" }
+    },
     "reservationId": { "type": "string" },
     "closedAt": { "type": "string", "format": "date-time" },
     "closedReason": { "type": "string" }
@@ -133,6 +137,70 @@
             "forcedAt": { "type": "string", "format": "date-time" }
           }
         }
+      }
+    },
+    "reconciliationObligation": {
+      "type": "object",
+      "required": [
+        "id",
+        "findingId",
+        "subjectScope",
+        "requiredChanges",
+        "revalidationCommand",
+        "reconciliationInputs",
+        "status",
+        "unlocks",
+        "createdAt",
+        "updatedAt",
+        "createdBy",
+        "updatedBy"
+      ],
+      "properties": {
+        "id": { "type": "string", "pattern": "^bw_obligation_[a-f0-9]{12,64}$" },
+        "findingId": { "type": "string", "minLength": 1 },
+        "producerOperationId": { "type": "string", "pattern": "^bw_operation_[a-f0-9]{12,64}$" },
+        "subjectScope": {
+          "type": "object",
+          "required": ["subjectType", "subjectId"],
+          "properties": {
+            "subjectType": { "type": "string", "minLength": 1 },
+            "subjectId": { "type": "string", "minLength": 1 },
+            "projectId": { "type": "string", "minLength": 1 }
+          }
+        },
+        "requiredChanges": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "required": ["kind", "description"],
+            "properties": {
+              "kind": { "enum": ["code", "contract", "data", "documentation", "configuration", "generated-artifact"] },
+              "description": { "type": "string", "minLength": 1 },
+              "target": { "type": "string", "minLength": 1 }
+            }
+          }
+        },
+        "revalidationCommand": { "type": "string", "minLength": 1 },
+        "reconciliationInputs": {
+          "type": "object",
+          "additionalProperties": { "type": ["string", "number", "boolean"] }
+        },
+        "status": {
+          "enum": ["open", "remediation-in-progress", "revalidation-failed", "reconciled", "deferred", "blocked"]
+        },
+        "resolvedBy": { "type": "string", "pattern": "^bw_operation_[a-f0-9]{12,64}$" },
+        "revalidatedBy": { "type": "string", "pattern": "^bw_operation_[a-f0-9]{12,64}$" },
+        "reconciledBy": { "type": "string", "pattern": "^bw_operation_[a-f0-9]{12,64}$" },
+        "unlocks": {
+          "type": "array",
+          "items": { "type": "string", "pattern": "^bw_work_[a-f0-9]{12,64}$" },
+          "uniqueItems": true
+        },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" },
+        "createdBy": { "$ref": "#/$defs/actor" },
+        "updatedBy": { "$ref": "#/$defs/actor" }
       }
     }
   }

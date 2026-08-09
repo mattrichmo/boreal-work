@@ -2815,6 +2815,13 @@ describe("bwrk cli", () => {
     expect(parseData<{ readonly projectSetup: { readonly config: { readonly memoryRoot: string } } }>(alias.stdout).projectSetup.config.memoryRoot).toBe(
       join(aliasRoot, "memory")
     );
+
+    const setupRoot = await makeTempWorkspace();
+    const setup = await runCli(setupRoot, ["setup", "--yes", "--json"]);
+    expect(setup.exitCode).toBe(0);
+    expect(parseData<{ readonly kind: string; readonly projectSetup: { readonly config: { readonly memoryRoot: string } } }>(setup.stdout)).toEqual(
+      expect.objectContaining({ kind: "install", projectSetup: expect.objectContaining({ config: expect.objectContaining({ memoryRoot: join(setupRoot, "memory") }) }) })
+    );
   });
 
   it("prints a readable bare install plan in human mode", async () => {
@@ -2861,6 +2868,53 @@ describe("bwrk cli", () => {
     );
     expect(await fileMissing(join(userRoot, "skills", "boreal-router", "SKILL.md"))).toBe(false);
     expect(await fileMissing(join(projectRoot, ".agents"))).toBe(true);
+  });
+
+  it("supports the integrations install and status surface", async () => {
+    const projectRoot = await makeTempWorkspace();
+    const installRoot = join(await makeTempWorkspace(), "agents");
+    const installed = await runCli(projectRoot, [
+      "integrations",
+      "add",
+      "codex",
+      "--install-root",
+      installRoot,
+      "--json"
+    ]);
+    expect(installed.exitCode).toBe(0);
+
+    const status = await runCli(projectRoot, [
+      "integrations",
+      "status",
+      "--target",
+      "codex",
+      "--install-root",
+      installRoot,
+      "--json"
+    ]);
+    const payload = parseData<{
+      readonly schemaVersion: string;
+      readonly targets: readonly string[];
+      readonly installedChecks: readonly Array<{ readonly target: string; readonly checkedFileCount: number; readonly expectedFileCount: number }>;
+    }>(status.stdout);
+
+    expect(status.exitCode).toBe(0);
+    expect(payload.schemaVersion).toBe("boreal.cli.integrations.status.v1");
+    expect(payload.targets).toEqual(["codex"]);
+    expect(payload.installedChecks[0]).toEqual(
+      expect.objectContaining({ target: "codex", checkedFileCount: payload.installedChecks[0]?.expectedFileCount })
+    );
+  });
+
+  it("keeps upgrade scope selection explicit and safe", async () => {
+    const rootDir = await makeTempWorkspace();
+    const conflict = await runCli(rootDir, ["upgrade", "--machine", "--project", "--json"]);
+    expect(conflict.exitCode).toBe(2);
+    expect(conflict.stderr).toContain("cannot combine --machine and --project");
+
+    const missingProject = await runCli(rootDir, ["upgrade", "--project", "--json"]);
+    expect(missingProject.exitCode).toBe(2);
+    expect(missingProject.stderr).toContain("run `bwrk setup` first");
   });
 
   it("sets up child memory submodules with gitmodules metadata", async () => {
@@ -4658,9 +4712,15 @@ describe("bwrk cli", () => {
         "workflows list",
         "workflows show",
         "install",
+        "setup",
         "install codex",
         "install claude",
         "install skills",
+        "integrations",
+        "integrations add",
+        "integrations status",
+        "upgrade",
+        "view",
         "registry list",
         "registry add",
         "registry remove",
@@ -6205,6 +6265,8 @@ describe("bwrk cli", () => {
       work.meta.id,
       "--evidence",
       evidenceRecord.meta.id,
+      "--verdict",
+      "passed",
       "--notes",
       "Verified by CLI integration test.",
       "--json"
@@ -11462,7 +11524,7 @@ describe("bwrk cli", () => {
     );
   });
 
-  it("validates and instantiates the granular feature-delivery template with gates and ordered review passes", async () => {
+  it("validates and instantiates the granular feature-delivery template with gates and ordered review/reconciliation passes", async () => {
     const rootDir = await makeTempWorkspace();
     await runCli(rootDir, ["init", "--json"]);
 
@@ -11477,8 +11539,8 @@ describe("bwrk cli", () => {
       "--json"
     ]);
     expect(validation.exitCode).toBe(0);
-    expect(parseData<{ readonly ok: boolean; readonly nodeCount: number }>(validation.stdout)).toEqual(
-      expect.objectContaining({ ok: true, nodeCount: 12 })
+    expect(parseData<{ readonly ok: boolean; readonly nodeCount: number; readonly edgeCount: number }>(validation.stdout)).toEqual(
+      expect.objectContaining({ ok: true, nodeCount: 14, edgeCount: 9 })
     );
 
     const dryRun = await runCli(rootDir, [
@@ -11499,13 +11561,31 @@ describe("bwrk cli", () => {
         readonly title: string;
         readonly gates: readonly Array<{ readonly kind: string }>;
       }>;
+      readonly edges: readonly Array<{ readonly dependent: string; readonly dependency: string }>;
     }>(dryRun.stdout);
     expect(plan.nodes.map((node) => node.key)).toEqual(
-      expect.arrayContaining(["discovery-brief", "design-decision", "implementation-pass", "review-critique", "review-update", "final-validation"])
+      expect.arrayContaining([
+        "discovery-brief",
+        "design-decision",
+        "implementation-pass",
+        "review-critique",
+        "review-update",
+        "final-validation",
+        "validation-reconciliation",
+        "validation-recheck"
+      ])
     );
     expect(plan.nodes.find((node) => node.key === "final-validation")?.gates).toEqual([
       expect.objectContaining({ kind: "verification" })
     ]);
+    expect(plan.edges).toEqual(
+      expect.arrayContaining([
+        { dependent: "review-update", dependency: "review-critique" },
+        { dependent: "final-validation", dependency: "review-update" },
+        { dependent: "validation-reconciliation", dependency: "final-validation" },
+        { dependent: "validation-recheck", dependency: "validation-reconciliation" }
+      ])
+    );
 
     const run = await runCli(rootDir, [
       "template",
@@ -11522,7 +11602,7 @@ describe("bwrk cli", () => {
       readonly rootId: string;
       readonly created: readonly Array<{ readonly key: string; readonly workId: string }>;
     }>(run.stdout);
-    expect(created.created).toHaveLength(12);
+    expect(created.created).toHaveLength(14);
     expect(created.rootId).toBe(created.created[0]?.workId);
 
     const shown = await runCli(rootDir, ["work", "show", created.rootId, "--json"]);

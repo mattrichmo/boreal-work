@@ -36,7 +36,8 @@
         "phase.close-rollup.required",
         "sprint.close-rollup.required",
         "sprint.launch-plan.required",
-        "search.index-stale"
+        "search.index-stale",
+        "reconciliation.obligation.open"
       ]
     },
     "subjectType": {
@@ -69,6 +70,20 @@
           "type": "array",
           "items": { "type": "string", "pattern": "^bw_evidence_[a-f0-9]{12,64}$" },
           "uniqueItems": true
+        },
+        "obligationIds": {
+          "type": "array",
+          "items": { "type": "string", "pattern": "^bw_obligation_[a-f0-9]{12,64}$" },
+          "uniqueItems": true
+        },
+        "findingIds": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 },
+          "uniqueItems": true
+        },
+        "revalidationCommands": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
         },
         "reason": { "type": "string", "minLength": 1 },
         "rawSourceIds": {

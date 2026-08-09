@@ -19,7 +19,7 @@ Raw material is captured first, then triaged, then reconciled into durable memor
 
 - Every common user ask routes to a workflow.
 - Planning can be quick, standard, or granular without forcing every request into the most elaborate shape.
-- Granular delivery can represent discovery/design, implementation, review/critique, update, and final validation as separate dependent work.
+- Granular delivery can represent discovery/design, implementation, review/critique, update, final validation, reconciliation, and revalidation as separate dependent work; later sprints and parent closeout advance only after the reconciliation gate.
 - Every skill references existing workflow files.
 - Every workflow lists allowed commands, templates, safety constraints, failure handling, and finish criteria.
 - Skill installs are explicitly project- or user-scoped; project installs may opt into folder-scoped metadata, and they never fall back to another repository.

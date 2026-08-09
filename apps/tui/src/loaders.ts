@@ -106,6 +106,7 @@ export async function loadGlobalOverview(workspaceRoot: string): Promise<TuiEnve
       surface: "global",
       workspaceRoot,
       generatedAt,
+      stale: true,
       warnings: error ? [error] : [],
       body: { registrySummary: emptyRegistrySummary(), queueSummary: emptyQueueSummary(), attention: [] }
     });
@@ -126,6 +127,7 @@ export async function loadGlobalProjects(workspaceRoot: string): Promise<TuiEnve
       surface: "global",
       workspaceRoot,
       generatedAt,
+      stale: true,
       warnings: error ? [error] : [],
       body: buildProjectRegistryView({ entries: [] })
     });
@@ -141,6 +143,7 @@ export async function loadGlobalQueues(workspaceRoot: string): Promise<TuiEnvelo
       surface: "global",
       workspaceRoot,
       generatedAt,
+      stale: true,
       warnings: error ? [error] : [],
       body: { queues: [], summary: emptyQueueSummary() }
     });
@@ -196,6 +199,7 @@ export async function loadRepoRollup(workspaceRoot: string): Promise<TuiEnvelope
       surface: "repo",
       workspaceRoot,
       generatedAt,
+      stale: true,
       warnings: ["Workspace is not set up. Run `bwrk install` in this directory."],
       body: buildRepoRollupView({ workspaceRoot, generatedAt, projectName: "(uninitialized)", work: [], graphEdges: [] })
     });
@@ -237,6 +241,7 @@ export async function loadRepoSprintBoard(
       surface: "repo",
       workspaceRoot,
       generatedAt,
+      stale: true,
       warnings: ["Workspace is not set up. Run `bwrk install` in this directory."],
       body: { sprints: [] }
     });

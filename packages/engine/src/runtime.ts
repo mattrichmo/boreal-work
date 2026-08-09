@@ -14,6 +14,9 @@ import {
   normalizeSearchQuery,
   nowIso,
   randomId,
+  reconciliationObligationGaps,
+  hasOpenReconciliationObligations,
+  transitionReconciliationObligation,
   touchRecord,
   workRevisionContentHash,
   type ActorRef,
@@ -37,6 +40,8 @@ import {
   type KnowledgeSourceId,
   type OperationId,
   type ProjectionId,
+  type ReconciliationObligationId,
+  type ReconciliationTransition,
   type ReservationId,
   type RuntimeEvent,
   type RuntimePolicy,
@@ -313,6 +318,12 @@ export interface BorealRuntime {
     readonly notes?: string;
     readonly currentGitHead?: string;
   }): Promise<VerificationRecord>;
+  transitionReconciliation(input: {
+    readonly workId: WorkId;
+    readonly obligationId: ReconciliationObligationId;
+    readonly transition: ReconciliationTransition;
+    readonly revalidationPassed?: boolean;
+  }): Promise<WorkItem>;
   closeWork(input: {
     readonly workId: WorkId;
     readonly reason: string;
@@ -845,11 +856,50 @@ export function createBorealRuntime(options: BorealRuntimeOptions = {}): BorealR
         const updated = attachVerificationToWork(work, verification, current, actor);
         await writer.putWorkItem(updated);
         await refreshWorkContext(writer, updated, actor, current);
-        await appendEvent(writer, "work.verified", input.workId, "work", {
-          verdict: verification.verdict,
-          verificationId: verification.meta.id
-        });
+        await appendEvent(
+          writer,
+          verification.verdict === "passed" && updated.status === "verified" ? "work.verified" : "work.verification_recorded",
+          input.workId,
+          "work",
+          {
+            verdict: verification.verdict,
+            verificationId: verification.meta.id,
+            effectiveStatus: updated.status,
+            reconciliationObligationIds: (updated.reconciliationObligations ?? [])
+              .filter((obligation) => obligation.status !== "reconciled")
+              .map((obligation) => obligation.id)
+          }
+        );
         return verification;
+      });
+    },
+
+    async transitionReconciliation(input): Promise<WorkItem> {
+      return store.write(async (writer) => {
+        const current = now();
+        const work = await requireWork(writer, input.workId);
+        const transitioned = transitionReconciliationObligation(work, {
+          obligationId: input.obligationId,
+          transition: input.transition,
+          revalidationPassed: input.revalidationPassed,
+          operationId: operationId ?? randomId<OperationId>("operation"),
+          actor,
+          now: current
+        });
+        const updated = transitioned === work
+          ? work
+          : markWorkReady(transitioned, await loadDependencies(writer, transitioned), current, actor);
+        if (updated !== work) {
+          await writer.putWorkItem(updated);
+          await refreshWorkContext(writer, updated, actor, current);
+          await appendEvent(writer, "work.reconciliation_updated", input.workId, "work", {
+            obligationId: input.obligationId,
+            transition: input.transition,
+            status: updated.reconciliationObligations?.find((obligation) => obligation.id === input.obligationId)?.status,
+            effectiveStatus: updated.status
+          });
+        }
+        return updated;
       });
     },
 
@@ -1073,10 +1123,22 @@ export function createBorealRuntime(options: BorealRuntimeOptions = {}): BorealR
             outcome: createdEvidence.outcome
           });
         }
-        await appendEvent(writer, "work.verified", input.workId, "work", {
-          verdict: verification.verdict,
-          verificationId: verification.meta.id
-        });
+        await appendEvent(
+          writer,
+          verification.verdict === "passed" && (finalWork.status === "verified" || Boolean(input.close))
+            ? "work.verified"
+            : "work.verification_recorded",
+          input.workId,
+          "work",
+          {
+            verdict: verification.verdict,
+            verificationId: verification.meta.id,
+            effectiveStatus: finalWork.status,
+            reconciliationObligationIds: (finalWork.reconciliationObligations ?? [])
+              .filter((obligation) => obligation.status !== "reconciled")
+              .map((obligation) => obligation.id)
+          }
+        );
         if (input.close) {
           if (agentSummary) {
             await appendEvent(
@@ -1760,19 +1822,34 @@ async function applyRequiredCloseoutGatePolicy(input: CloseoutGateEvaluationInpu
   const descendants = dependencyDescendants(input.work, workItems);
   const gaps: CloseoutGateGap[] = [];
 
+  for (const reconciliationGap of reconciliationObligationGaps(input.work)) {
+    gaps.push({
+      code: reconciliationGap.code,
+      gateId: "reconciliation-obligations",
+      gateKind: "reconciliation",
+      gateScope: "self",
+      subjectType: reconciliationGap.subjectType,
+      subjectId: reconciliationGap.subjectId,
+      reason: reconciliationGap.data?.reason ?? "required reconciliation obligations are open",
+      data: reconciliationGap.data
+    });
+  }
+
   if (isContainerWork(input.work)) {
     for (const descendant of descendants) {
-      if (!isResolvedForContainerClose(descendant)) {
+      const descendantReconciliationGaps = reconciliationObligationGaps(descendant);
+      if (!isResolvedForContainerClose(descendant) || descendantReconciliationGaps.length > 0) {
+        const reconciliationGap = descendantReconciliationGaps[0];
         gaps.push({
-          code: "work.container.open-descendant",
-          gateId: "descendant-work",
-          gateKind: "descendant_work",
-          gateScope: "descendants",
-          subjectType: closeoutGateSubjectTypeForWorkKind(input.work.kind),
+          code: reconciliationGap?.code ?? "work.container.open-descendant",
+          gateId: reconciliationGap ? "reconciliation-obligations" : "descendant-work",
+          gateKind: reconciliationGap ? "reconciliation" : "descendant_work",
+          gateScope: reconciliationGap ? "self" : "descendants",
+          subjectType: reconciliationGap?.subjectType ?? closeoutGateSubjectTypeForWorkKind(input.work.kind),
           subjectId: input.work.meta.id,
           targetId: descendant.meta.id,
-          reason: `descendant work is ${descendant.status}`,
-          data: {
+          reason: reconciliationGap?.data?.reason ?? `descendant work is ${descendant.status}`,
+          data: reconciliationGap?.data ?? {
             blockerIds: [descendant.meta.id],
             reason: `descendant work is ${descendant.status}`
           }
@@ -2277,7 +2354,10 @@ function isContainerWork(work: WorkItem): boolean {
 }
 
 function isResolvedForContainerClose(work: WorkItem): boolean {
-  return work.status === "closed" || work.status === "cancelled" || work.status === "verified";
+  return (
+    (work.status === "closed" || work.status === "cancelled" || work.status === "verified") &&
+    !hasOpenReconciliationObligations(work)
+  );
 }
 
 async function requireKnowledgeSource(reader: BorealReader, sourceId: KnowledgeSourceId): Promise<KnowledgeSource> {

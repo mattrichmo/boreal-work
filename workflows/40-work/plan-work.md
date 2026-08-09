@@ -33,7 +33,7 @@ templates:
 
 ## Purpose
 
-Turn a request into a right-sized, reviewable Boreal work structure with explicit acceptance, dependencies, checkpoints, and validation passes.
+Turn a request into a right-sized, reviewable Boreal work structure with explicit acceptance, dependencies, checkpoints, validation passes, and post-validation reconciliation gates.
 
 ## When To Use
 
@@ -54,6 +54,8 @@ Use this workflow when a request needs more than a single task, when the user as
 - Treat planning depth as a decision, not a default: choose quick, standard, or granular from the uncertainty and review needs of the request.
 - Use `--dry-run` for a reusable template before instantiation and preserve the returned IDs from JSON responses.
 - Every leaf must have observable acceptance criteria. Use a separate review or validation task when the work needs human critique, visual inspection, regression testing, or a post-review update.
+- Any finding-producing review, validation, audit, browser check, red-team check, or data-quality/cost gate must have an explicit follow-up reconciliation task. That task resolves findings, updates affected contracts/artifacts/work records, records accepted no-change or deferred findings, and identifies the checks that must be rerun.
+- Do not let a subsequent sprint, phase, or parent closeout depend directly on a finding-producing check. Its prerequisite chain must be `check → reconcile findings and update contracts/artifacts → revalidate or record an approved deferral → advance`.
 - Do not mark a blocked or container item ready merely because it exists; mark only claimable leaves ready after dependencies are checked.
 - Stop when the proposed structure conflicts with existing user-authored work or a required parent/target cannot be identified.
 
@@ -72,11 +74,11 @@ Use this workflow when a request needs more than a single task, when the user as
 3. Write the planning brief using the `feature-delivery` output contract: objective, constraints, non-goals, assumptions, decision points, done definition, validation strategy, and next action.
 4. Select a planning mode:
    - Quick: one task with concrete acceptance and one appropriate verification or checkpoint gate.
-   - Standard: a container or sprint, implementation tasks, dependencies, and a final validation task.
+   - Standard: a container or sprint, implementation tasks, dependencies, a final validation task, and a post-validation reconciliation/revalidation gate whenever validation can produce findings.
    - Granular: separate discovery/design, implementation, review/critique, update, and validation tasks when uncertainty, visual quality, risk, or explicit review requires them.
 5. Prefer `feature-delivery` for repeatable granular feature/page delivery. Validate it, inspect its dry-run graph, then instantiate only when state creation is authorized.
-6. Encode the dependency direction explicitly: a dependent is blocked by its prerequisite. Make review findings block the update task, and make final validation block parent closeout.
-7. Give each task an acceptance statement that names the observable result and its evidence. Put human design/critique in tasks; put deterministic command/test requirements in closeout gates.
+6. Encode the dependency direction explicitly: a dependent is blocked by its prerequisite. Make review findings block the reconciliation/update task, and make every finding-producing check block reconciliation, affected contract/artifact updates, and revalidation before parent closeout or the next sprint can advance. A passing check still gets a reconciliation disposition when the check can produce findings; “no findings” is an explicit outcome, not an omitted task.
+7. Give each task an acceptance statement that names the observable result and its evidence. Reconciliation acceptance must name the findings disposition, updated contracts/artifacts/work records, rerun checks, and any owner/date for approved deferrals. Put human design/critique in tasks; put deterministic command/test requirements in closeout gates.
 8. Mark only currently unblocked leaves ready, inspect `dep tree` and `dep cycles`, then run strict doctor and refresh derived artifacts after mutation.
 
 ## Command Sequences
@@ -97,7 +99,7 @@ For a repeatable granular plan, use the feature-delivery structure:
 1. `bwrk template show feature-delivery --json`
 2. `bwrk template validate feature-delivery --var target=<target> --var label=<label> --json`
 3. `bwrk template run feature-delivery --var target=<target> --var label=<label> --dry-run --json`
-4. Review the dry-run nodes, gates, parent/child edges, and explicit review-to-update-to-validation chain.
+4. Review the dry-run nodes, gates, parent/child edges, and explicit review-to-update-to-validation-to-reconciliation-to-revalidation chain. Confirm that any later sprint or parent gate depends on the revalidation/reconciliation result rather than directly on the check.
 5. When authorized, run `bwrk template run feature-delivery --var target=<target> --var label=<label> --json`.
 6. Capture the returned root ID, then run `bwrk dep tree <root-id> --json` and `bwrk dep cycles --json`.
 7. Mark only the returned discovery/design leaves ready with `bwrk work ready <leaf-id> --json`; do not ready the parent or a blocked task.
@@ -105,7 +107,7 @@ For a repeatable granular plan, use the feature-delivery structure:
 
 The reusable template intentionally models a common but optional flow:
 
-`discovery/design → implementation → review/critique → update → validation`
+`discovery/design → implementation → review/critique → update → validation → reconciliation/update → revalidation → advance`
 
 Collapse stages into fewer tasks when the work is low-risk, already decided, or independently verifiable. Add a separate ideation or accessibility task when the product surface or user risk justifies it.
 
@@ -135,6 +137,7 @@ Collapse stages into fewer tasks when the work is low-risk, already decided, or 
 - Record the rationale for the selected depth, especially when a user asks for granular planning or when a seemingly complex request is intentionally kept standard.
 - Review and critique tasks should record the inspected artifact, findings, severity, and disposition. A no-change review still needs an explicit no-change disposition.
 - Validation tasks should name the commands, visual checks, or acceptance walkthroughs that prove the final state; attach evidence before verification or closeout.
+- Finding-producing validation must be followed by reconciliation evidence showing that findings were resolved, affected contracts/artifacts/work records were updated, and the affected checks were rerun. If no change is required, record an explicit no-change disposition; if work is deferred, record the owner, follow-up work, and dependency that prevents unsafe advancement.
 - Use checkpoint gates for repository-changing tasks and verification gates for deterministic validation. Parent acceptance must summarize child outcomes and remaining deferred work.
 - Confirm dependency and readiness state after mutation, and report all remaining dirty paths or uncommitted checkpoint decisions during closeout.
 
@@ -150,7 +153,8 @@ Collapse stages into fewer tasks when the work is low-risk, already decided, or 
 
 - The selected planning mode and rationale are recorded in the planning brief or work description.
 - Every created leaf has concrete acceptance criteria, a clear prerequisite shape, and an appropriate gate or validation path.
-- Granular plans have an explicit discovery/design, implementation, review/critique, update, and final validation chain when those stages were selected.
+- No finding-producing review or validation is terminal: granular plans have an explicit discovery/design, implementation, review/critique, update, final validation, reconciliation/update, and revalidation chain when those stages were selected.
+- No subsequent sprint, phase, or parent closeout advances directly from a finding-producing check; the dependency points to the reconciliation/revalidation result.
 - `bwrk dep cycles --json` reports no cycles, only claimable leaves are ready, and the root tree is inspectable.
 - `bwrk doctor --strict --json` passes or the remaining diagnostic is explicitly reported.
 

@@ -28,6 +28,7 @@ import type {
   AgentDirectiveVersion
 } from "./agent-directives.js";
 import type { IsoTimestamp } from "./time.js";
+import type { ReconciliationObligation } from "./reconciliation.js";
 
 export const BOREAL_SCHEMA_VERSION = "boreal.runtime.v1";
 
@@ -138,6 +139,8 @@ export interface WorkItem {
   readonly evidenceIds: readonly EvidenceId[];
   readonly verificationIds: readonly VerificationId[];
   readonly requiredCloseoutGates?: readonly RequiredCloseoutGate[];
+  /** Finding remediation and revalidation obligations that must reconcile before advancement. */
+  readonly reconciliationObligations?: readonly ReconciliationObligation[];
   readonly reservationId?: ReservationId;
   readonly closedAt?: IsoTimestamp;
   readonly closedReason?: string;

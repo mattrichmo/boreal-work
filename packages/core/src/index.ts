@@ -18,6 +18,7 @@ export * from "./policies.js";
 export * from "./process-runner.js";
 export * from "./project-rollup.js";
 export * from "./project-registry.js";
+export * from "./reconciliation.js";
 export * from "./reference-uri.js";
 export * from "./records.js";
 export * from "./schema-validation.js";

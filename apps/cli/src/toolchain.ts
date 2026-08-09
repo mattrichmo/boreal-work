@@ -205,6 +205,8 @@ export function isToolchainRecoveryCommand(command: string): boolean {
     command === "storage migrate" ||
     command === "update repo" ||
     command === "install" ||
+    command === "setup" ||
+    command === "upgrade" ||
     command === "install status" ||
     command === "doctor" ||
     command === "doctor skills" ||

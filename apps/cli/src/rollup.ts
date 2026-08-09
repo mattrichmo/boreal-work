@@ -40,7 +40,8 @@ import {
   type WorkItem,
   type WorkKind,
   type WorkPriority,
-  type WorkStatus
+  type WorkStatus,
+  type WorkId
 } from "@boreal/core";
 import { writeTextFileAtomic, type BorealReader } from "@boreal/storage";
 
@@ -105,6 +106,80 @@ interface ProjectRollupSnapshot {
   readonly reviewerHeartbeats: readonly ReviewerHeartbeatRecord[];
   readonly events: readonly RuntimeEvent[];
   readonly operations: readonly RuntimeOperation[];
+}
+
+export interface TopKSelection<T> {
+  readonly total: number;
+  readonly items: readonly T[];
+}
+
+/**
+ * Select the best `limit` values without sorting the complete input.
+ *
+ * `compare` follows Array#sort semantics: negative means the left value is
+ * earlier/better. A max-heap keeps the current worst selected value at its
+ * root, so replacement is O(log limit) and the final result is ordered exactly
+ * as it was by the previous full-sort implementation.
+ */
+export function selectTopK<T>(
+  values: Iterable<T>,
+  limit: number,
+  compare: (left: T, right: T) => number
+): TopKSelection<T> {
+  const boundedLimit = Number.isFinite(limit) ? Math.max(0, Math.floor(limit)) : 0;
+  const heap: T[] = [];
+  let total = 0;
+
+  for (const value of values) {
+    total += 1;
+    if (boundedLimit === 0) {
+      continue;
+    }
+    if (heap.length < boundedLimit) {
+      heap.push(value);
+      siftUpWorst(heap, heap.length - 1, compare);
+      continue;
+    }
+    if (compare(value, heap[0] as T) < 0) {
+      heap[0] = value;
+      siftDownWorst(heap, 0, compare);
+    }
+  }
+
+  heap.sort(compare);
+  return { total, items: heap };
+}
+
+function siftUpWorst<T>(heap: T[], index: number, compare: (left: T, right: T) => number): void {
+  let current = index;
+  while (current > 0) {
+    const parent = Math.floor((current - 1) / 2);
+    if (compare(heap[current] as T, heap[parent] as T) <= 0) {
+      return;
+    }
+    [heap[current], heap[parent]] = [heap[parent] as T, heap[current] as T];
+    current = parent;
+  }
+}
+
+function siftDownWorst<T>(heap: T[], index: number, compare: (left: T, right: T) => number): void {
+  let current = index;
+  while (true) {
+    const left = current * 2 + 1;
+    const right = left + 1;
+    let worst = current;
+    if (left < heap.length && compare(heap[left] as T, heap[worst] as T) > 0) {
+      worst = left;
+    }
+    if (right < heap.length && compare(heap[right] as T, heap[worst] as T) > 0) {
+      worst = right;
+    }
+    if (worst === current) {
+      return;
+    }
+    [heap[current], heap[worst]] = [heap[worst] as T, heap[current] as T];
+    current = worst;
+  }
 }
 
 export function projectRollupPath(context: CliContext): string {
@@ -384,9 +459,9 @@ function projectRollupAging(
     limbo: agingBucket(limboItems),
     expiredReservations: agingBucket(expiredReservations),
     maxima: {
-      readyAgeMs: oldestAgeMs(readyItems),
-      limboAgeMs: oldestAgeMs(limboItems),
-      expiredReservationAgeMs: oldestAgeMs(expiredReservations)
+      readyAgeMs: oldestAgeMs(readyItems.items),
+      limboAgeMs: oldestAgeMs(limboItems.items),
+      expiredReservationAgeMs: oldestAgeMs(expiredReservations.items)
     },
     approximation: {
       readySinceSource: "work.meta.updatedAt",
@@ -401,11 +476,13 @@ function agingWorkItems(
   workItems: readonly WorkItem[],
   statuses: readonly ProjectRollupAgingWorkEntry["status"][],
   generatedAt: IsoTimestamp
-): readonly ProjectRollupAgingWorkEntry[] {
+): TopKSelection<ProjectRollupAgingWorkEntry> {
   const statusSet = new Set<WorkStatus>(statuses);
-  return workItems
-    .filter((work) => statusSet.has(work.status))
-    .map((work) => {
+  return selectTopK(
+    mappedCandidates(workItems, (work) => {
+      if (!statusSet.has(work.status)) {
+        return undefined;
+      }
       const ageMs = ageSince(work.meta.updatedAt, generatedAt);
       return {
         workId: work.meta.id,
@@ -415,17 +492,21 @@ function agingWorkItems(
         ageMs,
         ageDays: ageDays(ageMs)
       };
-    })
-    .sort(compareAgingWorkEntries);
+    }),
+    PROJECT_ROLLUP_AGING_ITEM_LIMIT,
+    compareAgingWorkEntries
+  );
 }
 
 function agingExpiredReservations(
   reservations: readonly AgentReservation[],
   generatedAt: IsoTimestamp
-): readonly ProjectRollupAgingReservationEntry[] {
-  return reservations
-    .filter((reservation) => reservationIsExpired(reservation, generatedAt))
-    .map((reservation) => {
+): TopKSelection<ProjectRollupAgingReservationEntry> {
+  return selectTopK(
+    mappedCandidates(reservations, (reservation) => {
+      if (!reservationIsExpired(reservation, generatedAt)) {
+        return undefined;
+      }
       const since = expiredReservationSince(reservation, generatedAt);
       const ageMs = ageSince(since, generatedAt);
       return {
@@ -439,8 +520,10 @@ function agingExpiredReservations(
         ageMs,
         ageDays: ageDays(ageMs)
       };
-    })
-    .sort(compareAgingReservationEntries);
+    }),
+    PROJECT_ROLLUP_AGING_ITEM_LIMIT,
+    compareAgingReservationEntries
+  );
 }
 
 function expiredReservationSince(reservation: AgentReservation, generatedAt: IsoTimestamp): IsoTimestamp {
@@ -451,14 +534,14 @@ function expiredReservationSince(reservation: AgentReservation, generatedAt: Iso
 }
 
 function agingBucket<TEntry extends { readonly ageMs: number }>(
-  items: readonly TEntry[]
+  selection: TopKSelection<TEntry>
 ): ProjectRollupAgingBucket<TEntry> {
-  const oldest = oldestAgeMs(items);
+  const oldest = oldestAgeMs(selection.items);
   return {
-    count: items.length,
+    count: selection.total,
     oldestAgeMs: oldest,
     oldestAgeDays: ageDays(oldest),
-    items: items.slice(0, PROJECT_ROLLUP_AGING_ITEM_LIMIT)
+    items: selection.items
   };
 }
 
@@ -490,9 +573,11 @@ function projectRollupLimbo(
   status: "needs_verification" | "verified",
   generatedAt: IsoTimestamp
 ): readonly ProjectRollupLimboEntry[] {
-  return workItems
-    .filter((work) => work.status === status)
-    .map((work) => {
+  return selectTopK(
+    mappedCandidates(workItems, (work) => {
+      if (work.status !== status) {
+        return undefined;
+      }
       const ageMs = Math.max(0, Date.parse(generatedAt) - Date.parse(work.meta.updatedAt));
       return {
         workId: work.meta.id,
@@ -502,29 +587,43 @@ function projectRollupLimbo(
         ageMs,
         ageDays: ageDays(ageMs)
       };
-    })
-    .sort((left, right) => right.ageMs - left.ageMs || left.workId.localeCompare(right.workId))
-    .slice(0, PROJECT_ROLLUP_LIMBO_LIMIT);
+    }),
+    PROJECT_ROLLUP_LIMBO_LIMIT,
+    (left, right) => right.ageMs - left.ageMs || left.workId.localeCompare(right.workId)
+  ).items;
 }
 
 function projectRollupBlockingGaps(workItems: readonly WorkItem[]) {
   const workById = new Map(workItems.map((work) => [work.meta.id, work]));
-  const blocked = workItems
-    .filter((work) => !TERMINAL_WORK_STATUSES.has(work.status))
-    .map((work) => {
-      const blockerIds = work.dependencyIds.filter((dependencyId) => {
-        const dependency = workById.get(dependencyId);
-        return dependency ? !TERMINAL_WORK_STATUSES.has(dependency.status) : true;
-      });
-      return { work, blockerIds };
-    })
-    .filter((entry) => entry.blockerIds.length > 0);
+  let openCount = 0;
+  let blockedWorkCount = 0;
+  const blocked: Array<{ readonly work: WorkItem; readonly blockerIds: readonly WorkId[] }> = [];
+  for (const work of workItems) {
+    if (TERMINAL_WORK_STATUSES.has(work.status)) {
+      continue;
+    }
+    const blockerIds = work.dependencyIds.filter((dependencyId) => {
+      const dependency = workById.get(dependencyId);
+      return dependency ? !TERMINAL_WORK_STATUSES.has(dependency.status) : true;
+    });
+    if (blockerIds.length === 0) {
+      continue;
+    }
+    openCount += blockerIds.length;
+    blockedWorkCount += 1;
+    const candidate = { work, blockerIds };
+    const selected = selectTopK(
+      [...blocked, candidate],
+      PROJECT_ROLLUP_BLOCKING_GAP_SAMPLE_LIMIT,
+      (left, right) => left.work.meta.updatedAt.localeCompare(right.work.meta.updatedAt) || left.work.meta.id.localeCompare(right.work.meta.id)
+    );
+    blocked.length = 0;
+    blocked.push(...selected.items);
+  }
   return {
-    openCount: blocked.reduce((total, entry) => total + entry.blockerIds.length, 0),
-    blockedWorkCount: blocked.length,
+    openCount,
+    blockedWorkCount,
     samples: blocked
-      .sort((left, right) => left.work.meta.updatedAt.localeCompare(right.work.meta.updatedAt) || left.work.meta.id.localeCompare(right.work.meta.id))
-      .slice(0, PROJECT_ROLLUP_BLOCKING_GAP_SAMPLE_LIMIT)
       .map((entry) => ({
         workId: entry.work.meta.id,
         title: entry.work.title,
@@ -541,9 +640,9 @@ function projectRollupHealth(options: ProjectRollupWriteOptions): ProjectRollupH
 }
 
 function projectRollupLastEvent(events: readonly RuntimeEvent[]): ProjectRollupDocument["lastEvent"] {
-  const event = [...events].sort(
-    (left, right) => right.meta.createdAt.localeCompare(left.meta.createdAt) || right.meta.id.localeCompare(left.meta.id)
-  )[0];
+  const event = latestBy(events, (left, right) =>
+    left.meta.createdAt.localeCompare(right.meta.createdAt) || left.meta.id.localeCompare(right.meta.id)
+  );
   return event
     ? {
         id: event.meta.id,
@@ -555,11 +654,10 @@ function projectRollupLastEvent(events: readonly RuntimeEvent[]): ProjectRollupD
 }
 
 function projectRollupLastOperation(operations: readonly RuntimeOperation[]): ProjectRollupDocument["lastOperation"] {
-  const operation = operations
-    .filter((candidate) => candidate.status === "succeeded" || candidate.status === "failed")
-    .sort(
-    (left, right) => right.finishedAt.localeCompare(left.finishedAt) || right.meta.id.localeCompare(left.meta.id)
-    )[0];
+  const operation = latestBy(
+    operations.filter((candidate) => candidate.status === "succeeded" || candidate.status === "failed"),
+    (left, right) => left.finishedAt.localeCompare(right.finishedAt) || left.meta.id.localeCompare(right.meta.id)
+  );
   return operation
     ? {
         id: operation.meta.id,
@@ -571,10 +669,11 @@ function projectRollupLastOperation(operations: readonly RuntimeOperation[]): Pr
 }
 
 function projectRollupNextWork(workItems: readonly WorkItem[]): readonly ProjectRollupNextWork[] {
-  return workItems
-    .filter((work) => work.status === "ready")
-    .sort(compareNextWork)
-    .slice(0, PROJECT_ROLLUP_NEXT_LIMIT)
+  return selectTopK(
+    workItems.filter((work) => work.status === "ready"),
+    PROJECT_ROLLUP_NEXT_LIMIT,
+    compareNextWork
+  ).items
     .map((work) => ({
       workId: work.meta.id,
       title: work.title,
@@ -586,10 +685,11 @@ function projectRollupNextWork(workItems: readonly WorkItem[]): readonly Project
 }
 
 function projectRollupWorkIndex(workItems: readonly WorkItem[]): ProjectRollupWorkIndex {
-  const work = workItems
-    .slice()
-    .sort((left, right) => left.meta.id.localeCompare(right.meta.id))
-    .slice(0, PROJECT_ROLLUP_WORK_INDEX_LIMIT)
+  const work = selectTopK(
+    workItems,
+    PROJECT_ROLLUP_WORK_INDEX_LIMIT,
+    (left, right) => left.meta.id.localeCompare(right.meta.id)
+  ).items
     .map((item) => ({
       workId: item.meta.id,
       title: item.title,
@@ -604,6 +704,30 @@ function projectRollupWorkIndex(workItems: readonly WorkItem[]): ProjectRollupWo
     truncated: workItems.length > PROJECT_ROLLUP_WORK_INDEX_LIMIT,
     work
   };
+}
+
+function latestBy<T>(values: readonly T[], compare: (left: T, right: T) => number): T | undefined {
+  let latest: T | undefined;
+  for (const value of values) {
+    if (latest === undefined || compare(value, latest) > 0) {
+      latest = value;
+    }
+  }
+  return latest;
+}
+
+function mappedCandidates<T, U>(
+  values: Iterable<T>,
+  map: (value: T) => U | undefined
+): Iterable<U> {
+  return (function* (): Generator<U> {
+    for (const value of values) {
+      const mapped = map(value);
+      if (mapped !== undefined) {
+        yield mapped;
+      }
+    }
+  })();
 }
 
 function compareNextWork(left: WorkItem, right: WorkItem): number {

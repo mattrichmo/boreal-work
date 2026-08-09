@@ -52,10 +52,10 @@ pnpm build
 ./install.sh --machine --yes
 ```
 
-For an already-installed machine CLI, `bwrk update self` fetches and builds
-the configured upstream Git ref; it does not update the global binary from
-whatever working tree happens to be current. Use `pnpm bwrk` or the local shim
-when you explicitly want to run this checkout.
+For an already-installed machine CLI, `bwrk upgrade --machine` fetches and
+builds the configured upstream Git ref; it does not update the global binary
+from whatever working tree happens to be current. Use `pnpm bwrk` or the local
+shim when you explicitly want to run this checkout.
 
 ### Source checkout
 
@@ -94,10 +94,10 @@ Patch-level skew between the machine launcher and repo-pinned binary is allowed.
 
 The rest of this guide uses `pnpm bwrk`; substitute `bwrk` if you installed the npm package, Homebrew formula, machine installer, or local shim.
 
-## Install Boreal into a project
+## Set up Boreal in a project
 
 ```bash
-pnpm bwrk install
+pnpm bwrk setup
 ```
 
 The installer walks through project setup in a TTY. The recommended default creates `memory/` inside the project as a separate Git repository, keeps the app repository clean with `.gitignore` guards, and installs Codex skills into `.agents/skills`.
@@ -107,8 +107,8 @@ repository on this machine, install them separately with an explicit user-wide
 scope:
 
 ```bash
-pnpm bwrk install codex --scope user
-pnpm bwrk install claude --scope user
+pnpm bwrk integrations add codex --scope user
+pnpm bwrk integrations add claude --scope user
 ```
 
 User-wide installs write to `~/.agents/skills` or `~/.claude/skills`; they do
@@ -117,16 +117,28 @@ not initialize the current repository.
 For unattended setup with the recommended defaults:
 
 ```bash
-pnpm bwrk install --yes
+pnpm bwrk setup --yes
 ```
 
 To preview without writing files:
 
 ```bash
-pnpm bwrk install --dry-run
+pnpm bwrk setup --dry-run
 ```
 
-`init` remains the low-level primitive. Plain `init` is idempotent and creates durable runtime state at `.boreal/runtime/state.json`; it does **not** create memory files. Most users should use `install`, which runs initialization and project setup together. Use `init --setup-memory` only when you need explicit noninteractive setup flags.
+`install` remains a compatibility alias for `setup`. `init` is the low-level
+primitive: plain `init` is idempotent and creates durable runtime state, but it
+does not create memory files. Use `init --setup-memory` only for advanced
+noninteractive setup flags.
+
+For a quick integration check:
+
+```bash
+pnpm bwrk integrations status
+```
+
+Use `pnpm bwrk view` for the current project dashboard and
+`pnpm bwrk view --global` for the cross-project dashboard.
 
 See [Project setup](architecture/PROJECT_SETUP.md) for sibling, shared-history, and submodule layouts.
 
@@ -216,7 +228,7 @@ Promoted work keeps a `boreal://global/<raw-id>` provenance reference so the pro
 
 ```bash
 pnpm bwrk global next --json
-pnpm bwrk dashboard global --json
+pnpm bwrk view --global --json
 ```
 
 `global next` ranks one actionable directive per linked project. `dashboard global` returns the same live data used by the console.
@@ -224,7 +236,7 @@ pnpm bwrk dashboard global --json
 ### 4. Use the board as a command surface
 
 ```bash
-pnpm bwrk dashboard --global --web --no-open
+pnpm bwrk view --global --web --no-open
 ```
 
 The global board is honest kanban: card positions are derived from each project's tracker state. Dragging a card issues the same command the CLI would use against the owning workspace. Ready to In Progress reserves work, In Progress to Ready releases it, and non-terminal cards can close only when closeout gates are satisfied. Failed drags leave the card in place and render the gate gaps plus clearing commands.

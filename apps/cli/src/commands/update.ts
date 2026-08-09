@@ -87,7 +87,7 @@ export async function updateCommand(
     default:
       throw new BorealError(
         "BOREAL_INVALID_INPUT",
-        "Unknown update command; use `bwrk update self` (upgrade the machine install from GitHub) or `bwrk update repo` (migrate storage and refresh installed skills in this repo)",
+        "Unknown update command; use `bwrk upgrade`, `bwrk update self` (machine install), or `bwrk update repo` (current project assets)",
         { action: action ?? "" }
       );
   }
@@ -395,7 +395,7 @@ function formatUpdateRepo(result: UpdateRepoResult): string {
     ...result.skillInstalls.map(
       (install) => `  skills[${install.target}]: ${result.dryRun ? `${install.planned ?? 0} planned` : `${install.written} installed`} at ${install.installRoot}${install.issues > 0 ? ` (${install.issues} issue(s))` : ""}`
     ),
-    ...(result.skillInstalls.length === 0 ? ["  skills: no recorded install roots (run `bwrk install` to configure)"] : []),
+    ...(result.skillInstalls.length === 0 ? ["  skills: no recorded install roots (run `bwrk setup` to configure)"] : []),
     `  next: ${result.nextCommand}`
   ];
   return `${lines.join("\n")}\n`;

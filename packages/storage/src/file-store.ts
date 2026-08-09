@@ -23,8 +23,10 @@ import {
   readTransactionJournals,
   removeTransactionJournal,
   transactionDirectory,
+  toRecoveryRequiredError,
   updateTransactionJournal,
-  type PendingLogRecord
+  type PendingLogRecord,
+  type StoreTransactionJournal
 } from "./transaction-journal.js";
 
 export interface FileBorealStoreOptions {
@@ -68,6 +70,7 @@ export class FileBorealStore implements BorealStore {
 
   async read<T>(operation: (reader: BorealReader) => Promise<T> | T): Promise<T> {
     return withFileLock(this.lockDir, this.lockOptions, async () => {
+      await this.recoverTransactions();
       const loaded = await this.loadSnapshotWithLog();
       const memory = new InMemoryBorealStore(loaded.snapshot);
       return memory.read((reader) => operation(withHeadSeqReader(reader, async () => (await this.#eventLog.head()).seq)));
@@ -84,7 +87,10 @@ export class FileBorealStore implements BorealStore {
   }
 
   async snapshot(): Promise<StoreSnapshot> {
-    return withFileLock(this.lockDir, this.lockOptions, async () => (await this.loadSnapshotWithLog()).snapshot);
+    return withFileLock(this.lockDir, this.lockOptions, async () => {
+      await this.recoverTransactions();
+      return (await this.loadSnapshotWithLog()).snapshot;
+    });
   }
 
   private async writeOnce<T>(operation: (writer: BorealWriter) => Promise<T> | T): Promise<T> {
@@ -113,15 +119,35 @@ export class FileBorealStore implements BorealStore {
   }
 
   private async recoverTransactions(): Promise<void> {
-    for (const { path, journal } of await readTransactionJournals(this.rootDir)) {
+    let journals: readonly { path: string; journal: StoreTransactionJournal }[];
+    try {
+      journals = await readTransactionJournals(this.rootDir);
+    } catch (error) {
+      throw toRecoveryRequiredError(error, {
+        rootDir: this.rootDir,
+        storeKind: "file",
+        phase: "read_journals"
+      });
+    }
+    for (const { path, journal } of journals) {
       if (journal.storeKind !== "file") {
         continue;
       }
-      if (journal.snapshot) {
-        await this.saveSnapshot(journal.snapshot);
+      try {
+        if (journal.snapshot) {
+          await this.saveSnapshot(journal.snapshot);
+        }
+        await this.appendMissingLogRecords(journal.pendingLogRecords);
+        await removeTransactionJournal(path);
+      } catch (error) {
+        throw toRecoveryRequiredError(error, {
+          rootDir: this.rootDir,
+          storeKind: "file",
+          journalPath: path,
+          journalId: journal.id,
+          phase: journal.phase
+        });
       }
-      await this.appendMissingLogRecords(journal.pendingLogRecords);
-      await removeTransactionJournal(path);
     }
   }
 

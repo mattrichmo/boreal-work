@@ -45,6 +45,7 @@ Use this workflow when the user's request requires create issues, tasks, sprints
 - Run read-only retrieval before creating or updating records.
 - Prefer source-backed claims, decisions, and wiki edits.
 - Use `--json` for commands that feed later automation.
+- Any finding-producing review, validation, audit, browser check, red-team check, or data-quality/cost gate must be followed by explicit reconciliation work before downstream work or a parent can advance. The reconciliation work resolves findings, updates affected contracts/artifacts/work records, and either reruns the affected checks or records an approved deferral.
 - Stop and ask when candidate records conflict or the workflow would overwrite user-authored truth.
 
 ## Agent Directives
@@ -92,6 +93,7 @@ For one-off structures, use manual work commands:
 5. Link container and blockers explicitly:
    `bwrk dep add <container-id> <child-work-id> --json`
    `bwrk dep add <blocked-work-id> <blocker-work-id> --json`
+   For a finding-producing check, add the full gate chain: `check → reconciliation/update → revalidation`, and make later sprints/phases/parents depend on revalidation rather than directly on the check.
 6. Mark only claimable leaf work ready:
    `bwrk work ready <child-work-id> --json`
 7. Verify structure before handoff:
@@ -119,6 +121,7 @@ For one-off structures, use manual work commands:
 - For work changes, confirm dependency and readiness state after mutation.
 - Treat `sync.git.findings` with `blocking: false` as Git caveats when creating work structure; do not block planning only because the workspace is on protected main with generated-artifact or memory-index changes.
 - Plan checkpoint boundaries before implementation begins. For major refactors, create child tasks or phases small enough to commit independently.
+- Plan a reconciliation/update task after every check that can discover findings, including checks that pass. Its acceptance must record resolved, no-change, or explicitly deferred findings and the contract/artifact/work-record updates that make the result safe to consume.
 - Parent acceptance criteria should require commit checkpoint(s) or no-commit reason code(s) before parent closeout.
 
 ## Failure And Repair

@@ -37,6 +37,7 @@ import {
 import type { CliContext } from "./context.js";
 
 const SEARCH_INDEX_MAX_READ_BYTES = 100 * 1024 * 1024;
+export const MAX_SEARCH_RESULT_LIMIT = 100;
 const SEARCH_INDEX_LOCK_RETRY_ATTEMPTS = 3;
 const SEARCH_INDEX_LOCK_RETRY_DELAY_MS = 100;
 const SEARCH_FINGERPRINT_SECTIONS = [
@@ -80,6 +81,22 @@ export interface SearchCommandOptions {
   readonly types?: readonly SearchDocumentType[];
   readonly explain?: boolean;
   readonly rebuildStaleIndex?: boolean;
+}
+
+export function boundedSearchOptions(options: SearchCommandOptions = {}): SearchCommandOptions {
+  if (options.limit === undefined) {
+    return options;
+  }
+  return {
+    ...options,
+    // A zero limit historically meant "all" in the lower-level search
+    // package. The CLI boundary is payload-bounded, so direct callers get at
+    // least one and never turn a bounded query into an unbounded response.
+    limit: Math.min(
+      MAX_SEARCH_RESULT_LIMIT,
+      Math.max(1, Number.isFinite(options.limit) ? Math.floor(options.limit) : MAX_SEARCH_RESULT_LIMIT)
+    )
+  };
 }
 
 export async function writeSearchIndex(context: CliContext): Promise<SearchIndexWriteResult> {
@@ -136,18 +153,19 @@ export async function runSearch(
   query: string,
   options: SearchCommandOptions = {}
 ): Promise<readonly SearchResult[]> {
+  const boundedOptions = boundedSearchOptions(options);
   const normalizedQuery = normalizeSearchQuery(query);
   if (!normalizedQuery) {
     throw new BorealError("BOREAL_INVALID_INPUT", "Search query is required");
   }
-  if (options.explain) {
+  if (boundedOptions.explain) {
     const snapshot = await readSearchSnapshot(context);
-    return querySearchIndex(buildSearchIndex(snapshot, nowIso()), normalizedQuery, options);
+    return querySearchIndex(buildSearchIndex(snapshot, nowIso()), normalizedQuery, boundedOptions);
   }
 
   let inspection = await inspectSearchIndex(context);
   if (!inspection.exists || inspection.stale || inspection.error) {
-    if (!(options.rebuildStaleIndex ?? true)) {
+    if (!(boundedOptions.rebuildStaleIndex ?? true)) {
       throw unavailableSearchIndexError(inspection);
     }
     try {
@@ -164,8 +182,8 @@ export async function runSearch(
     const results = await queryFtsSearchIndex(
       context,
       normalizedQuery,
-      options,
-      inspection.expectedCorpusFingerprint
+      boundedOptions,
+      inspection
     );
     if (results) {
       return results;
@@ -175,7 +193,7 @@ export async function runSearch(
       repairCommand: "bwrk search index"
     });
   }
-  return querySearchIndex(await readSearchIndex(inspection.path), normalizedQuery, options);
+  return querySearchIndex(await readSearchIndex(inspection.path), normalizedQuery, boundedOptions);
 }
 
 export function searchIndexPath(context: CliContext): string {
@@ -272,7 +290,7 @@ async function queryFtsSearchIndex(
   context: CliContext,
   query: string,
   options: SearchCommandOptions,
-  expectedCorpusFingerprint: ContentHash
+  inspection: SearchIndexInspection
 ): Promise<readonly SearchResult[] | undefined> {
   const fts = await FtsSearchIndex.open(context.workspaceRoot, { create: false });
   if (!fts) {
@@ -280,7 +298,8 @@ async function queryFtsSearchIndex(
   }
   try {
     const head = await new FileEventLog({ path: context.paths.eventLogFile }).head();
-    if (!fts.status(head, expectedCorpusFingerprint).fresh) {
+    const inspectionMatchesHead = !inspection.stale && inspection.contentHash !== undefined && inspection.contentHash === head.hash;
+    if (!inspectionMatchesHead && !fts.status(head).fresh) {
       return undefined;
     }
     const types = [...(options.type ? [options.type] : []), ...(options.types ?? [])];
@@ -295,8 +314,6 @@ async function inspectFtsSearchIndex(context: CliContext): Promise<SearchIndexIn
   if (!existsSync(path)) {
     return undefined;
   }
-  const snapshot = await readSearchFingerprintSnapshot(context);
-  const expectedCorpusFingerprint = searchCorpusFingerprint(snapshot);
   let fts: FtsSearchIndex | undefined;
   try {
     fts = await FtsSearchIndex.open(context.workspaceRoot, { create: false });
@@ -304,13 +321,17 @@ async function inspectFtsSearchIndex(context: CliContext): Promise<SearchIndexIn
       return undefined;
     }
     const head = await new FileEventLog({ path: context.paths.eventLogFile }).head();
-    const status = fts.status(head, expectedCorpusFingerprint);
+    // FTS status validates the indexed head and the index's own integrity
+    // metadata. Avoid rereading canonical records on every warm search; a
+    // normal canonical write advances the shared event head and is detected
+    // here without a corpus-wide file scan.
+    const status = fts.status(head);
     return {
       path: fts.path,
       mode: "fts",
       exists: true,
       stale: !status.fresh,
-      expectedCorpusFingerprint,
+      expectedCorpusFingerprint: status.corpusFingerprint,
       ...(status.indexedHead ? { contentHash: status.indexedHead.hash as ContentHash } : {}),
       corpusFingerprint: status.corpusFingerprint,
       documentCount: status.documentCount,
@@ -325,7 +346,7 @@ async function inspectFtsSearchIndex(context: CliContext): Promise<SearchIndexIn
       mode: "fts",
       exists: true,
       stale: true,
-      expectedCorpusFingerprint,
+      expectedCorpusFingerprint: "" as ContentHash,
       error: error instanceof Error ? error.message : String(error)
     };
   } finally {

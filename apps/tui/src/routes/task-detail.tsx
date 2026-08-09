@@ -1,6 +1,8 @@
 import { Box, Text } from "ink";
+import type { WorkItemView } from "@boreal/ui-model";
 
 import type { RepoTaskDetailBody } from "../loaders.js";
+import { reconciliationStatusForWork } from "../reconciliation.js";
 import { COLOR, statusColor, statusLabel } from "../theme.js";
 import { Field, Pane } from "../ui.js";
 
@@ -69,7 +71,26 @@ export function TaskDetailRoute({
           ))}
         </Box>
       ) : null}
+      <ReconciliationStatus work={task} width={width} />
     </Pane>
+  );
+}
+
+function ReconciliationStatus({ work, width }: { readonly work: WorkItemView; readonly width: number }) {
+  const status = reconciliationStatusForWork(work);
+  return (
+    <Box marginTop={1} flexDirection="column">
+      <Text color={COLOR.faint}>RECONCILIATION · {status.overall.replaceAll("_", " ")}</Text>
+      {status.steps.map((step) => (
+        <Text key={step.id} wrap="truncate">
+          <Text color={step.status === "blocked" ? COLOR.danger : step.status === "pending" ? COLOR.warn : step.status === "complete" ? COLOR.accent : COLOR.faint}>
+            {step.status === "complete" ? "✓" : step.status === "blocked" ? "!" : step.status === "pending" ? "·" : "—"}
+          </Text>
+          <Text color={COLOR.text}>{` ${step.label}: `}</Text>
+          <Text color={COLOR.muted}>{clamp(step.detail, Math.max(20, width - 18))}</Text>
+        </Text>
+      ))}
+    </Box>
   );
 }
 

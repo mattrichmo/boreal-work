@@ -40,6 +40,7 @@ import {
   type SprintViewMode,
   SprintDashboardActions,
   SprintHeader,
+  ReconciliationStatusPanel,
   SprintBoardProgressView,
   SprintBoardTable,
   SprintDependencyView,
@@ -52,12 +53,21 @@ import {
   SyncStatusPanel,
   ViewModeTabs
 } from "../components/index.js";
-import { routeFromPath, type ConsoleRoute } from "./routes.js";
+import { isKnownConsoleRoute, routeFromPath, type ConsoleRoute } from "./routes.js";
 import type { ConsoleDataSet } from "./types.js";
 
 export function ConsoleApp({ routePath, data }: { readonly routePath: string; readonly data: ConsoleDataSet }) {
   const route = routeFromPath(routePath, data.workspace.scope);
   const global = data.workspace.scope === "global";
+  const knownRoute = isKnownConsoleRoute(routePath, data.workspace.scope);
+  const actionsBlocked = !knownRoute || data.workspace.stale || data.workspace.warnings.length > 0;
+  const actionBlockReason = !knownRoute
+    ? `The requested route is not supported: ${routePath.split(/[?#]/, 1)[0] || "/"}. Choose a route from the navigation.`
+    : data.workspace.stale
+      ? "This view is stale. Refresh before taking any state-changing action."
+      : data.workspace.warnings.length > 0
+        ? "This view has warnings. Resolve them and refresh before taking any state-changing action."
+        : undefined;
   return (
     <div className="bw-console" data-console-route={route.id} data-console-scope={data.workspace.scope}>
       <aside className="bw-console__sidebar">
@@ -92,18 +102,43 @@ export function ConsoleApp({ routePath, data }: { readonly routePath: string; re
         </header>
         <div className="bw-console__content">
           {data.workspace.stale ? <StaleBanner data={data} /> : null}
-          {route.id === "overview" ? <RepoOverviewPage data={data} routePath={routePath} /> : null}
-          {route.id === "global" ? <OverviewPage data={data} routePath={routePath} /> : null}
-          {route.id === "sprint" ? <SprintPage data={data} routePath={routePath} /> : null}
-          {route.id === "knowledge" ? <KnowledgePage data={data} routePath={routePath} /> : null}
-          {route.id === "repo" ? <RepoPage data={data} /> : null}
-          {route.id === "reports" ? <ReportsPage data={data} /> : null}
-          {route.id === "settings" ? <SettingsPage data={data} routePath={routePath} /> : null}
-          {route.id === "work" ? <WorkPage data={data} /> : null}
-          {route.id === "health" ? <HealthPage data={data} routePath={routePath} /> : null}
+          {!knownRoute ? <UnsupportedRouteState routePath={routePath} /> : null}
+          {knownRoute && actionBlockReason ? (
+            <Notice tone="warning" label="Read-only until refreshed" tabIndex={-1} data-bw-action-safety="true">
+              {actionBlockReason}
+            </Notice>
+          ) : null}
+          {knownRoute ? (
+            <fieldset
+              className="bw-action-safety-fieldset"
+              disabled={actionsBlocked}
+              data-bw-actions-blocked={actionsBlocked ? "true" : "false"}
+              aria-disabled={actionsBlocked || undefined}
+            >
+              <div data-bw-action-scope="true">
+                {route.id === "overview" ? <RepoOverviewPage data={data} routePath={routePath} /> : null}
+                {route.id === "global" ? <OverviewPage data={data} routePath={routePath} /> : null}
+                {route.id === "sprint" ? <SprintPage data={data} routePath={routePath} /> : null}
+                {route.id === "knowledge" ? <KnowledgePage data={data} routePath={routePath} /> : null}
+                {route.id === "repo" ? <RepoPage data={data} /> : null}
+                {route.id === "reports" ? <ReportsPage data={data} /> : null}
+                {route.id === "settings" ? <SettingsPage data={data} routePath={routePath} /> : null}
+                {route.id === "work" ? <WorkPage data={data} /> : null}
+                {route.id === "health" ? <HealthPage data={data} routePath={routePath} /> : null}
+              </div>
+            </fieldset>
+          ) : null}
         </div>
       </main>
     </div>
+  );
+}
+
+function UnsupportedRouteState({ routePath }: { readonly routePath: string }) {
+  return (
+    <Notice tone="warning" label="Unsupported route" tabIndex={-1} data-bw-action-safety="true">
+      {`No console view is registered for ${routePath.split(/[?#]/, 1)[0] || "/"}. Use the navigation links to choose a supported route.`}
+    </Notice>
   );
 }
 
@@ -179,6 +214,7 @@ function SprintPage({ data, routePath }: { readonly data: ConsoleDataSet; readon
     <div className="bw-page-stack">
       <SprintHeader view={data.sprint} />
       <SprintScopeSummary view={data.sprint} />
+      <ReconciliationStatusPanel work={data.sprint.sprint} />
       <DirectiveSummaryPanel work={data.sprint.sprint} title="Sprint agent directives" />
       <ViewModeTabs active={viewMode} routePath={routePath} />
       <SprintReviewQueues view={data.sprint} routePath={routePath} />

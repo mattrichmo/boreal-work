@@ -24,6 +24,7 @@ jobs:
       - run: npx --yes playwright@1.61.1 install --with-deps chromium
       - run: pnpm check
       - run: pnpm test
+      - run: pnpm console:browser-smoke
       - run: pnpm ci:doctor:strict
       - run: pnpm release:npm:smoke
       - run: pnpm release:npm:dry-run

@@ -2,27 +2,28 @@
 
 The installed command is `bwrk`.
 
-## Update the global CLI
+## Install or update the CLI
 
-Update the machine-level CLI from the public repository's `main` branch:
+After publishing the npm package, the shortest machine install is:
 
 ```bash
-bwrk update self \
+npm install -g @boreal/cli
+bwrk --version
+```
+
+For the GitHub bootstrap path, install or update from the public repository:
+
+```bash
+bwrk upgrade --machine \
   --repo-url https://github.com/mattrichmo/boreal-work.git \
   --ref main \
   --json
-
-bwrk install codex --scope user --json
-bwrk install claude --scope user --json   # optional
-
-bwrk version --json
-bwrk install status --json
 ```
 
-To update only the latest published npm package instead:
+Check the installed integration roots with:
 
 ```bash
-npm install -g @boreal/cli@latest
+bwrk integrations status --json
 ```
 
 ## Update an existing Boreal project
@@ -32,7 +33,7 @@ Run these commands inside each already-initialized project:
 ```bash
 cd /path/to/existing-repo
 
-bwrk update repo --json
+bwrk upgrade --project --json
 bwrk sync refresh --strict --json
 bwrk doctor --strict --json
 bwrk prime --json
@@ -48,7 +49,7 @@ git init
 git branch -M main
 git remote add origin git@github.com:YOUR_USER/YOUR_REPO.git
 
-bwrk install --yes --json
+bwrk setup --yes --json
 bwrk sync refresh --strict --json
 bwrk doctor --strict --json
 bwrk prime --json
@@ -58,7 +59,7 @@ git commit -m "Initialize Boreal workspace"
 git push -u origin main
 ```
 
-`bwrk install --yes` creates the project runtime, the default child `memory/`
+`bwrk setup --yes` creates the project runtime, the default child `memory/`
 repository, and project-scoped Codex skills.
 
 ## Add a project to the global dashboard
@@ -73,7 +74,7 @@ Then link a project from its own directory:
 
 ```bash
 bwrk global link . --name "New Repo" --json
-bwrk global status --json
+bwrk view --global
 ```
 
 ## Source checkout development
@@ -86,8 +87,10 @@ pnpm build
 pnpm bwrk --help
 ```
 
-`bwrk update self` fetches and builds the configured upstream repository; it
-does not install the current uncommitted working tree.
+`bwrk upgrade --machine` fetches and builds the configured upstream repository;
+it does not install the current uncommitted working tree. `bwrk setup` and
+`bwrk view` are the preferred public commands; `install`, `dashboard`, and
+`update self|repo` remain compatibility and advanced commands.
 
 ## License
 

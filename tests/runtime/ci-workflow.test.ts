@@ -13,6 +13,7 @@ describe("pull request hardening workflow", () => {
     const orderedSteps = [
       "pnpm check",
       "pnpm test",
+      "pnpm console:browser-smoke",
       "pnpm ci:doctor:strict",
       "pnpm release:npm:smoke",
       "pnpm release:npm:dry-run"

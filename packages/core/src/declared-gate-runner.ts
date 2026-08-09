@@ -4,7 +4,10 @@ import { BorealError } from "./errors.js";
 import {
   DEFAULT_BOUNDED_PROCESS_STREAM_MAX_BYTES,
   DEFAULT_BOUNDED_PROCESS_TIMEOUT_MS,
+  hasUnsafeExecutionArguments,
+  isTrustedExecutableCapability,
   runBoundedProcess,
+  sanitizeProcessEnvironment,
   type BoundedProcessResult
 } from "./process-runner.js";
 import { assertPathInside, assertRealPathInside } from "./workspace.js";
@@ -68,11 +71,12 @@ export async function executeDeclaredGate(input: DeclaredGateExecutionInput): Pr
   if (input.dryRun) return { dryRun: true, preview };
   const environment = selectedEnvironment(input.environment ?? process.env, preview.environmentKeys);
   const result = await runBoundedProcess({
-    command: preview.executable,
+    command: preview.executable === "node" ? process.execPath : preview.executable,
     args: preview.args,
     cwd: preview.cwd,
     env: environment,
     signal: input.signal,
+    killProcessGroup: true,
     ...preview.limits
   });
   return { dryRun: false, preview, result };
@@ -89,9 +93,10 @@ export async function previewDeclaredGate(input: DeclaredGateExecutionInput): Pr
   if (!executable) throw new BorealError("BOREAL_INVALID_INPUT", "Declared gate command is empty");
   const allowed = new Set(input.policy.allowedExecutables ?? DEFAULT_DECLARED_GATE_EXECUTABLES);
   const executableName = basename(executable).replace(/\.(?:cmd|exe)$/iu, "");
-  if (!allowed.has(executableName)) {
+  if (!isTrustedExecutableCapability(executable, [...allowed], { allowRuntimePath: true })) {
     throw new BorealError("BOREAL_POLICY_VIOLATION", "Declared gate executable is not policy-approved", {
-      executable: executableName,
+      executable,
+      executableName,
       allowedExecutables: [...allowed].sort()
     });
   }
@@ -99,10 +104,16 @@ export async function previewDeclaredGate(input: DeclaredGateExecutionInput): Pr
   const cwd = resolve(workspaceRoot, input.cwd ?? ".");
   assertPathInside(workspaceRoot, cwd);
   await assertRealPathInside(workspaceRoot, cwd);
+  if (hasUnsafeExecutionArguments(executable, args) && resolve(executable) !== resolve(process.execPath)) {
+    throw new BorealError("BOREAL_POLICY_VIOLATION", "Declared gate arguments request an untrusted code-loading capability", {
+      executable: executableName,
+      args
+    });
+  }
   const environment = input.environment ?? process.env;
-  const environmentKeys = [...new Set(input.policy.environmentKeys ?? DEFAULT_DECLARED_GATE_ENV_KEYS)]
-    .filter((key) => environment[key] !== undefined)
-    .sort();
+  const requestedEnvironmentKeys = [...new Set(input.policy.environmentKeys ?? DEFAULT_DECLARED_GATE_ENV_KEYS)];
+  const sanitizedEnvironment = sanitizeProcessEnvironment(environment, requestedEnvironmentKeys);
+  const environmentKeys = Object.keys(sanitizedEnvironment).sort();
   return {
     source: input.source,
     executable,
@@ -163,7 +174,7 @@ export function parseDeclaredCommand(command: string): readonly string[] {
 }
 
 function selectedEnvironment(environment: NodeJS.ProcessEnv, keys: readonly string[]): NodeJS.ProcessEnv {
-  return Object.fromEntries(keys.flatMap((key) => environment[key] === undefined ? [] : [[key, environment[key]]])) as NodeJS.ProcessEnv;
+  return sanitizeProcessEnvironment(environment, keys);
 }
 
 function unsafeCommand(reason: string): BorealError {

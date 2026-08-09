@@ -38,6 +38,11 @@ function consoleClientScript(): string {
   let draggedCard = null;
 
   document.addEventListener("dragstart", (event) => {
+    if (actionsBlocked()) {
+      event.preventDefault();
+      focusActionSafety();
+      return;
+    }
     const card = closest(event.target, cardSelector);
     if (!card || card.getAttribute("draggable") !== "true") {
       return;
@@ -79,6 +84,12 @@ function consoleClientScript(): string {
   });
 
   document.addEventListener("drop", async (event) => {
+    if (actionsBlocked()) {
+      event.preventDefault();
+      clearDropTargets();
+      focusActionSafety();
+      return;
+    }
     const column = closest(event.target, columnSelector);
     if (!column || !draggedCard) {
       return;
@@ -86,6 +97,34 @@ function consoleClientScript(): string {
     event.preventDefault();
     clearDropTargets();
     await submitBoardDrop(draggedCard, column.dataset.bwDropColumn || "");
+  });
+
+  document.addEventListener("submit", (event) => {
+    const form = event.target;
+    if (!(form instanceof HTMLFormElement) || !form.closest("[data-bw-action-scope]")) {
+      return;
+    }
+    if (actionsBlocked()) {
+      event.preventDefault();
+      focusActionSafety();
+      return;
+    }
+    const confirmation = form.querySelector("input[name=confirm][required]");
+    if (confirmation instanceof HTMLInputElement && !confirmation.checked) {
+      event.preventDefault();
+      confirmation.focus();
+      return;
+    }
+    if (form.dataset.bwSubmitting === "true") {
+      event.preventDefault();
+      return;
+    }
+    form.dataset.bwSubmitting = "true";
+    form.setAttribute("aria-busy", "true");
+    const submitter = event.submitter;
+    if (submitter instanceof HTMLButtonElement) {
+      submitter.disabled = true;
+    }
   });
 
   async function submitBoardDrop(card, targetColumn) {
@@ -177,6 +216,8 @@ function consoleClientScript(): string {
       return;
     }
     panel.hidden = false;
+    panel.setAttribute("tabindex", "-1");
+    panel.setAttribute("aria-live", "assertive");
     panel.replaceChildren();
 
     const header = document.createElement("header");
@@ -217,6 +258,19 @@ function consoleClientScript(): string {
         commandList.append(line);
       }
       panel.append(commandList);
+    }
+    panel.focus();
+  }
+
+  function actionsBlocked() {
+    const root = document.querySelector("[data-bw-actions-blocked]");
+    return root?.getAttribute("data-bw-actions-blocked") === "true";
+  }
+
+  function focusActionSafety() {
+    const notice = document.querySelector("[data-bw-action-safety]");
+    if (notice instanceof HTMLElement) {
+      notice.focus();
     }
   }
 

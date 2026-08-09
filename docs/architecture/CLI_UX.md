@@ -50,7 +50,7 @@ V1 should prioritize dashboards where clarity prevents mistakes:
 - `bwrk agent status --view dashboard`: active reservation, TTL, current work, stale ownership, and next command.
 - `bwrk work next --view dashboard`: ready queue with blockers, priority, owner, and claim command preview.
 - `bwrk workflows list --interactive`: workflow picker with allowed commands and templates.
-- `bwrk install codex|claude|skills --interactive`: plan-first installer with target roots, files to write, existing files, and setup notes.
+- `bwrk integrations add codex|claude|skills --interactive`: plan-first installer with target roots, files to write, existing files, and setup notes. `bwrk install codex|claude|skills` remains a compatibility alias.
 
 ## Implementation Rules
 

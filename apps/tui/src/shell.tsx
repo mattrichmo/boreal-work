@@ -26,7 +26,7 @@ import { filteredQueueItems, GlobalQueuesRoute, queueFilterLabel, queueRowAt, QU
 import { rollupFilterLabel, rollupRowAt, visibleRollupRows, RepoRollupRoute, ROLLUP_FILTER_CYCLE } from "./routes/rollup.js";
 import { SprintBoardRoute } from "./routes/sprint-board.js";
 import { TaskDetailRoute } from "./routes/task-detail.js";
-import { railFor, routeByNumberKey, type RouteSpec } from "./routes.js";
+import { railFor, routeById, routeByNumberKey, REPO_TASK_DETAIL_ROUTE, type RouteSpec } from "./routes.js";
 import { useAltScreen } from "./runtime.js";
 import { COLOR } from "./theme.js";
 import { EmptyState, KeyHints, SectionRail, Table, TopBar, type TableColumn, type TableRow } from "./ui.js";
@@ -150,6 +150,8 @@ export function RouteApp({ workspaceRoot, global }: { readonly workspaceRoot: st
   const [paletteCursor, setPaletteCursor] = useState(0);
 
   const frame = topFrame(nav);
+  const routeSpec = routeById(frame.routeId);
+  const unsupportedRoute = frame.routeId !== REPO_TASK_DETAIL_ROUTE && (!routeSpec || routeSpec.isStub === true);
   const listLength = activeListLength(body, frame.filters);
   // The stored frame cursor can point past the end right after a filter
   // cycle or a refresh returns fewer rows (nothing clamps it until the next
@@ -168,12 +170,21 @@ export function RouteApp({ workspaceRoot, global }: { readonly workspaceRoot: st
 
   const refresh = useCallback(async () => {
     setLoading(true);
+    // Never leave the previous route payload mounted while a new payload is
+    // being read. A failed refresh must not leave old rows/actions available.
+    setBody(undefined);
+    setEnvelope(undefined);
+    setError(undefined);
+    setConfirming(undefined);
+    setCommandError(undefined);
     try {
       const result = await loadForFrame(nav.current.workspaceRoot, frame.routeId, frame.entity?.id);
       if (result) {
         setEnvelope(result.envelope);
         setBody(result.body);
         setError(undefined);
+      } else {
+        setError(unsupportedRoute ? `Route ${frame.routeId} is unsupported.` : `No data is available for ${frame.routeId}.`);
       }
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : String(caught));
@@ -181,7 +192,7 @@ export function RouteApp({ workspaceRoot, global }: { readonly workspaceRoot: st
       setLoading(false);
       setNow(Date.now());
     }
-  }, [nav.current.surface, nav.current.workspaceRoot, frame.routeId, frame.entity?.id]);
+  }, [nav.current.surface, nav.current.workspaceRoot, frame.routeId, frame.entity?.id, unsupportedRoute]);
 
   useEffect(() => {
     void refresh();
@@ -211,6 +222,10 @@ export function RouteApp({ workspaceRoot, global }: { readonly workspaceRoot: st
 
   const runDescriptor = useCallback(
     async (descriptor: TuiCommandDescriptor) => {
+      if (actionsBlocked(unsupportedRoute, loading, error, envelope)) {
+        setCommandError("This route is read-only until its data is fresh and warning-free.");
+        return;
+      }
       setCommandRunning(true);
       setCommandError(undefined);
       try {
@@ -226,7 +241,7 @@ export function RouteApp({ workspaceRoot, global }: { readonly workspaceRoot: st
         setCommandRunning(false);
       }
     },
-    [refresh]
+    [refresh, unsupportedRoute, loading, error, envelope]
   );
 
   const closePalette = useCallback(() => {
@@ -317,7 +332,7 @@ export function RouteApp({ workspaceRoot, global }: { readonly workspaceRoot: st
       }
       if (action.startsWith("numberKey:")) {
         const route = routeByNumberKey(nav.current.surface, Number(action.slice("numberKey:".length)));
-        if (route && atRoot(nav)) jumpToRoute(route);
+        if (route && !route.isStub && atRoot(nav)) jumpToRoute(route);
         return;
       }
       if (action === "move") {
@@ -359,6 +374,7 @@ export function RouteApp({ workspaceRoot, global }: { readonly workspaceRoot: st
       return;
     }
     if (body.kind === "repo.taskDetail") {
+      if (actionsBlocked(unsupportedRoute, loading, error, envelope)) return;
       const action = body.value.actions[effectiveCursor];
       if (action) setConfirming(action);
       return;
@@ -397,6 +413,8 @@ export function RouteApp({ workspaceRoot, global }: { readonly workspaceRoot: st
   const bodyWidth = Math.max(40, columns - 16);
   const ageSec = envelope ? Math.max(0, Math.round((now - new Date(envelope.generatedAt).getTime()) / 1000)) : undefined;
   const stale = envelope?.stale ?? false;
+  const warningCount = envelope?.warnings.length ?? 0;
+  const blocked = actionsBlocked(unsupportedRoute, loading, error, envelope);
   const currentFilterLabel = filterLabel(frame.routeId, frame.filters);
 
   const footerHints = confirming
@@ -426,6 +444,7 @@ export function RouteApp({ workspaceRoot, global }: { readonly workspaceRoot: st
           {`${nav.current.surface} · ${nav.current.workspaceRoot}`}
           {currentFilterLabel ? `  ·  filter: ${currentFilterLabel}` : ""}
           {stale ? "  ·  STALE" : ""}
+          {warningCount > 0 ? `  ·  ${warningCount} warning${warningCount === 1 ? "" : "s"}` : ""}
           {ageSec !== undefined ? `  ·  data: ${ageSec}s old` : ""}
         </Text>
       </Box>
@@ -433,10 +452,16 @@ export function RouteApp({ workspaceRoot, global }: { readonly workspaceRoot: st
         <SectionRail sections={rail} active={frame.routeId} />
         <Box flexDirection="column" flexGrow={1}>
           {error ? <Text color={COLOR.danger}>{`! ${error}`}</Text> : null}
+          {envelope?.warnings.map((warning) => <Text key={warning} color={COLOR.warn} wrap="truncate">{`⚠ ${warning}`}</Text>)}
+          {blocked && !loading && !error && !unsupportedRoute ? (
+            <Text color={COLOR.warn}>Read-only: refresh and resolve warnings before running state-changing actions.</Text>
+          ) : null}
           {confirming ? (
             <CommandConfirmPanel descriptor={confirming} running={commandRunning} error={commandError} />
           ) : paletteOpen ? (
             <Palette query={paletteQuery} results={paletteResults} cursor={paletteCursor} height={bodyHeight} width={bodyWidth} />
+          ) : error ? (
+            <EmptyState title={unsupportedRoute ? "Unsupported route" : "Data unavailable"} lines={[error, "Press r to retry or esc to return."]} />
           ) : !body ? (
             <Text color={COLOR.muted}>Loading…</Text>
           ) : (
@@ -447,6 +472,19 @@ export function RouteApp({ workspaceRoot, global }: { readonly workspaceRoot: st
       <KeyHints hints={footerHints} />
     </Box>
   );
+}
+
+function actionsBlocked(
+  unsupportedRoute: boolean,
+  loading: boolean,
+  error: string | undefined,
+  envelope: TuiEnvelope<unknown> | undefined
+): boolean {
+  return unsupportedRoute || loading || Boolean(error) || Boolean(envelope?.stale) || (envelope?.warnings.length ?? 0) > 0 || hasTruncation(envelope?.truncated);
+}
+
+function hasTruncation(truncated: TuiEnvelope<unknown>["truncated"] | undefined): boolean {
+  return Boolean(truncated && Object.values(truncated).some(Boolean));
 }
 
 function KeyBindings({ onKey }: { readonly onKey: (input: string, key: Key) => void }) {

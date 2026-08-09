@@ -1,16 +1,20 @@
-import { basename, resolve } from "node:path";
+import { resolve } from "node:path";
 
 import {
   BorealError,
   DEFAULT_DECLARED_GATE_ENV_KEYS,
+  DEFAULT_TRUSTED_EXECUTABLE_NAMES,
   assertPathInside,
   assertRealPathInside,
   createRecordMeta,
   deterministicId,
+  isTrustedExecutableCapability,
   nowIso,
+  normalizedExecutableName,
   parseDeclaredCommand,
   randomId,
   runBoundedProcess,
+  sanitizeProcessEnvironment,
   touchRecord,
   withContentHash,
   type ActorRef,
@@ -35,7 +39,7 @@ const DEFAULT_RUN_STALE_AFTER_MS = 2 * 60_000;
 const DEFAULT_RUN_TIMEOUT_MS = 60 * 60_000;
 const DEFAULT_RUN_STREAM_MAX_BYTES = 1024 * 1024;
 const MAX_RUN_EXCERPT_CHARS = 4_000;
-const APPROVED_RUN_EXECUTABLES = new Set(["bwrk", "git", "node", "npm", "pnpm"]);
+const APPROVED_RUN_EXECUTABLES = new Set(DEFAULT_TRUSTED_EXECUTABLE_NAMES);
 
 export interface StartExecutionRunInput {
   readonly workId: WorkId;
@@ -390,6 +394,22 @@ export function createExecutionRunService(options: {
           await appendEvent(writer, "run.needs_attention", candidate.meta.id, { errorCode: attention.errorCode });
           return undefined;
         }
+        try {
+          validateExecutionRunCommand(candidate.command);
+        } catch (error) {
+          const errorCode = error instanceof BorealError ? error.code : "BOREAL_RUN_COMMAND_UNTRUSTED";
+          const errorMessage = error instanceof Error ? error.message : "Execution run command failed capability validation.";
+          const attention = withContentHash(touchRecord({
+            ...candidate,
+            status: "needs_attention" as const,
+            finishedAt: timestamp,
+            errorCode,
+            errorMessage
+          }, timestamp, options.actor));
+          await writer.putRun(attention);
+          await appendEvent(writer, "run.needs_attention", candidate.meta.id, { errorCode, reason: "command_capability_validation" });
+          return undefined;
+        }
         const running = withContentHash(touchRecord({
           ...candidate,
           status: "running" as const,
@@ -423,15 +443,14 @@ export function createExecutionRunService(options: {
 
       try {
         const command = claimed.command;
+        validateExecutionRunCommand(command);
         const cwd = resolve(options.workspaceRoot ?? process.cwd(), command.cwd ?? ".");
         const workspaceRoot = resolve(options.workspaceRoot ?? process.cwd());
         assertPathInside(workspaceRoot, cwd);
         await assertRealPathInside(workspaceRoot, cwd);
-        const env = Object.fromEntries(
-          DEFAULT_DECLARED_GATE_ENV_KEYS.flatMap((key) => process.env[key] === undefined ? [] : [[key, process.env[key]]])
-        ) as NodeJS.ProcessEnv;
+        const env = sanitizeProcessEnvironment(process.env, DEFAULT_DECLARED_GATE_ENV_KEYS);
         const result = await runBoundedProcess({
-          command: command.executable,
+          command: trustedRuntimeExecutable(command.executable),
           args: command.args,
           cwd,
           timeoutMs: command.timeoutMs,
@@ -510,12 +529,20 @@ export function executionRunCommandFromText(input: {
 }): ExecutionRunCommand {
   const [executable, ...args] = parseDeclaredCommand(input.command);
   if (!executable) throw new BorealError("BOREAL_INVALID_INPUT", "Execution run command cannot be empty");
-  const executableName = basename(executable).replace(/\.(?:cmd|exe)$/iu, "");
-  if (!APPROVED_RUN_EXECUTABLES.has(executableName)) {
+  const executableName = normalizedExecutableName(executable);
+  if (!isTrustedExecutableCapability(executable, [...APPROVED_RUN_EXECUTABLES], { allowRuntimePath: true })) {
     throw new BorealError("BOREAL_POLICY_VIOLATION", "Execution run executable is not approved", {
-      executable: executableName,
+      executable,
+      executableName,
       allowedExecutables: [...APPROVED_RUN_EXECUTABLES].sort()
     });
+  }
+  if (
+    executableName === "node" &&
+    resolve(executable) !== resolve(process.execPath) &&
+    args.some((arg) => /^--(?:eval|import|loader|require)|^-{1,2}(?:e|p|r)$/u.test(arg))
+  ) {
+    throw new BorealError("BOREAL_POLICY_VIOLATION", "Execution run command requests an untrusted code-loading capability", { executable, args });
   }
   return {
     executable,
@@ -528,13 +555,20 @@ export function executionRunCommandFromText(input: {
 }
 
 function validateExecutionRunCommand(command: ExecutionRunCommand): void {
-  const executableName = basename(command.executable).replace(/\.(?:cmd|exe)$/iu, "");
-  if (!APPROVED_RUN_EXECUTABLES.has(executableName)) {
-    throw new BorealError("BOREAL_POLICY_VIOLATION", "Execution run executable is not approved", { executable: executableName });
+  const executableName = normalizedExecutableName(command.executable);
+  if (!isTrustedExecutableCapability(command.executable, [...APPROVED_RUN_EXECUTABLES], { allowRuntimePath: true })) {
+    throw new BorealError("BOREAL_POLICY_VIOLATION", "Execution run executable is not approved", {
+      executable: command.executable,
+      executableName
+    });
   }
   if (!Number.isInteger(command.timeoutMs) || command.timeoutMs <= 0) throw new BorealError("BOREAL_INVALID_INPUT", "Run timeout must be a positive integer");
   if (!Number.isInteger(command.stdoutMaxBytes) || command.stdoutMaxBytes <= 0) throw new BorealError("BOREAL_INVALID_INPUT", "Run stdout cap must be a positive integer");
   if (!Number.isInteger(command.stderrMaxBytes) || command.stderrMaxBytes <= 0) throw new BorealError("BOREAL_INVALID_INPUT", "Run stderr cap must be a positive integer");
+}
+
+function trustedRuntimeExecutable(executable: string): string {
+  return executable === "node" ? process.execPath : executable;
 }
 
 function processResultSummary(result: unknown): ExecutionRunResult {

@@ -38,7 +38,8 @@ export const ENFORCEMENT_GAP_CODES = [
   "phase.close-rollup.required",
   "sprint.close-rollup.required",
   "sprint.launch-plan.required",
-  "search.index-stale"
+  "search.index-stale",
+  "reconciliation.obligation.open"
 ] as const;
 
 export type EnforcementGapCode = (typeof ENFORCEMENT_GAP_CODES)[number];
@@ -82,6 +83,9 @@ export interface EnforcementGapData {
   readonly thresholdDays?: number;
   readonly command?: string;
   readonly recommendedCommands?: readonly string[];
+  readonly obligationIds?: readonly string[];
+  readonly findingIds?: readonly string[];
+  readonly revalidationCommands?: readonly string[];
 }
 
 export interface EnforcementGap {

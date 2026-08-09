@@ -16,7 +16,7 @@ Modes:
   --repo         Add bwrk as a dev dependency in the current repo and verify pnpm bwrk.
   --from-github  Clone the source repo, build, and install (automatic when run via curl).
                  Use --ref <branch|tag> and --repo-url <url> to override the source.
-                 Already-installed users can run: bwrk update self
+                 Already-installed users can run: bwrk upgrade --machine
 
 Options:
   --global         Non-interactively accept global manager registry setup (not agent skills).
@@ -180,6 +180,7 @@ bootstrap_from_github() {
   [ "$assume_yes" = true ] && forwarded_args+=(--yes)
   [ "$link_repo" = false ] && forwarded_args+=(--no-link)
   [ -n "$registry_root" ] && forwarded_args+=(--registry-root "$registry_root")
+  [ -n "$package_spec" ] && forwarded_args+=(--package-spec "$package_spec")
   BOREAL_INSTALL_BIN_DIR="$bin_dir" BOREAL_INSTALL_LIB_DIR="$lib_dir" \
     bash "$stage/src/install.sh" ${forwarded_args[@]+"${forwarded_args[@]}"}
   exit $?
@@ -246,9 +247,9 @@ install_machine_binary() {
   echo "Transaction: $transaction_id"
   echo "Provenance: $manifest_path"
   echo "Next steps:"
-  echo "  project setup: bwrk install --yes"
-  echo "  user-wide Codex skills: bwrk install codex --scope user"
-  echo "  user-wide Claude skills: bwrk install claude --scope user"
+  echo "  project setup: bwrk setup --yes"
+  echo "  user-wide Codex skills: bwrk integrations add codex --scope user"
+  echo "  user-wide Claude skills: bwrk integrations add claude --scope user"
 }
 
 install_repo_dependency() {
@@ -335,7 +336,8 @@ maybe_handle_global_setup() {
   fi
 
   if [ "$global_override" = "yes" ] || confirm "Set up the global manager (cross-repo boards, inbox, next queue)? [Y/n]" "yes"; then
-    echo "Global manager first-run bootstrap is not implemented by install.sh yet; run bwrk global init when sprint G1 lands."
+    "$bin_dir/bwrk" global init --registry-root "$registry_root" --json >/dev/null
+    echo "Global manager ready: $registry_file"
   else
     echo "Global manager setup skipped."
   fi

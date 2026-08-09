@@ -16,6 +16,7 @@ import {
 
 import { writeTextFileAtomic } from "./atomic-write.js";
 import { DEFAULT_FILE_LOCK_OPTIONS, withFileLock } from "./file-lock.js";
+import { RecoveryRequiredError } from "./transaction-journal.js";
 
 const GENESIS_HASH = "sha256:genesis";
 const LEGACY_EVENT_LOG_ENTRY_SCHEMA_VERSION = "boreal.event-log-entry.v1";
@@ -75,6 +76,22 @@ export interface EventLogRepairInspection {
   readonly invalidAtSeq?: number;
   readonly reason?: "parse_error" | "entry_integrity";
   readonly error?: string;
+}
+
+export type EventLogCorruptionReason =
+  | "malformed_record"
+  | "torn_final_record"
+  | "entry_integrity"
+  | "history_integrity";
+
+export class EventLogCorruptionError extends RecoveryRequiredError {
+  readonly reason: EventLogCorruptionReason;
+
+  constructor(message: string, reason: EventLogCorruptionReason, details?: Record<string, unknown>) {
+    super(message, { reason, ...details });
+    this.name = "EventLogCorruptionError";
+    this.reason = reason;
+  }
 }
 
 export class FileEventLog {
@@ -294,10 +311,18 @@ export class FileEventLog {
     const entries = await this.readPaths(paths);
     const verification = verifyHistoryGraph(entries, { allowExternalParents: false });
     if (!verification.ok) {
-      throw new Error(
+      const invalid = entries.find((entry) => entryIntegrityIssue(entry) !== undefined);
+      throw new EventLogCorruptionError(
         `Event history graph is invalid at seq ${String(verification.brokenAtSeq ?? "unknown")}${
           verification.diagnostics?.length ? `: ${verification.diagnostics.join("; ")}` : ""
-        }`
+        }`,
+        invalid ? "entry_integrity" : "history_integrity",
+        {
+          paths,
+          brokenAtSeq: verification.brokenAtSeq,
+          invalidAtSeq: invalid?.seq,
+          diagnostics: verification.diagnostics
+        }
       );
     }
     this.#headCache = { signature, heads: graphHeads(entries) };
@@ -306,7 +331,7 @@ export class FileEventLog {
   }
 
   private async readLiveUnlocked(): Promise<readonly EventLogEntry[]> {
-    return normalizeHistoryEntries(parseEntries(await this.readText()));
+    return normalizeHistoryEntries(parseEntries(await this.readText(), this.path));
   }
 
   private async verifiedHeads(): Promise<readonly EventLogHead[]> {
@@ -318,7 +343,17 @@ export class FileEventLog {
     const entries = await this.readPaths(paths);
     const verification = verifyHistoryGraph(entries, { allowExternalParents: false });
     if (!verification.ok) {
-      throw new Error(`Event history graph is invalid at seq ${String(verification.brokenAtSeq ?? "unknown")}`);
+      const invalid = entries.find((entry) => entryIntegrityIssue(entry) !== undefined);
+      throw new EventLogCorruptionError(
+        `Event history graph is invalid at seq ${String(verification.brokenAtSeq ?? "unknown")}`,
+        invalid ? "entry_integrity" : "history_integrity",
+        {
+          paths,
+          brokenAtSeq: verification.brokenAtSeq,
+          invalidAtSeq: invalid?.seq,
+          diagnostics: verification.diagnostics
+        }
+      );
     }
     const heads = graphHeads(entries);
     this.#headCache = { signature, heads };
@@ -342,7 +377,7 @@ export class FileEventLog {
 
   private async readPaths(paths: readonly string[]): Promise<readonly EventLogEntry[]> {
     return normalizeHistoryEntries(
-      (await Promise.all(paths.map(async (path) => parseEntries(await this.readText(path))))).flat()
+      (await Promise.all(paths.map(async (path) => parseEntries(await this.readText(path), path)))).flat()
     );
   }
 
@@ -589,7 +624,11 @@ function normalizeHistoryEntries(entries: readonly EventLogEntry[]): readonly Ev
     const semanticHash = hashContent(entry);
     const existing = byHash.get(entry.hash);
     if (existing && existing.semanticHash !== semanticHash) {
-      throw new Error(`Event history contains different entries with hash ${entry.hash}`);
+      throw new EventLogCorruptionError(
+        `Event history contains different entries with hash ${entry.hash}`,
+        "entry_integrity",
+        { hash: entry.hash }
+      );
     }
     if (!existing) {
       byHash.set(entry.hash, { entry, semanticHash });
@@ -660,7 +699,7 @@ function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
 }
 
-function parseEntries(text: string): EventLogEntry[] {
+function parseEntries(text: string, path: string): EventLogEntry[] {
   if (!text.trim()) {
     return [];
   }
@@ -675,10 +714,18 @@ function parseEntries(text: string): EventLogEntry[] {
       entries.push(normalizeEntry(JSON.parse(line)));
     } catch (error) {
       const isFinalPartialLine = !hasFinalNewline && index === lines.length - 1;
-      if (isFinalPartialLine) {
-        continue;
-      }
-      throw new Error(`Event log line ${index + 1} is invalid: ${error instanceof Error ? error.message : String(error)}`);
+      throw new EventLogCorruptionError(
+        isFinalPartialLine
+          ? `Event log final record is torn at line ${index + 1}`
+          : `Event log line ${index + 1} is malformed`,
+        isFinalPartialLine ? "torn_final_record" : "malformed_record",
+        {
+          path,
+          line: index + 1,
+          finalNewlinePresent: hasFinalNewline,
+          cause: error instanceof Error ? error.message : String(error)
+        }
+      );
     }
   }
   return entries;

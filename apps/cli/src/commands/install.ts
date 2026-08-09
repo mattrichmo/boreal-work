@@ -289,8 +289,9 @@ async function installSetupCommand(
   }
 
   const setupArgs = installSetupArgs(args);
+  const commandName = args.command[0] === "setup" ? "setup" : "install";
   const input = interactive
-    ? await promptProjectInstallInput(context, setupArgs)
+    ? await promptProjectInstallInput(context, setupArgs, commandName)
     : projectSetupInputFromArgs(context, setupArgs);
   await validateProjectSetupInput(input);
   const plan = installSetupPlan(input);
@@ -326,7 +327,7 @@ async function installSetupCommand(
             },
             true
           )
-        : formatInstallSetupResult(result, input)
+        : formatInstallSetupResult(result, input, commandName)
     );
     return { exitCode: 0 };
   }
@@ -370,7 +371,7 @@ async function installSetupCommand(
           },
           true
         )
-      : formatInstallSetupResult(result, input)
+      : formatInstallSetupResult(result, input, commandName)
   );
   return { exitCode: 0 };
 }
@@ -398,13 +399,13 @@ function installSetupPlan(input: ProjectSetupInput): InstallSetupResult["plan"] 
   };
 }
 
-function formatInstallSetupResult(result: InstallSetupResult, input: ProjectSetupInput): string {
-  const title = result.dryRun ? "Boreal install plan" : "Boreal install complete";
+function formatInstallSetupResult(result: InstallSetupResult, input: ProjectSetupInput, commandName = "install"): string {
+  const title = result.dryRun ? `Boreal ${commandName} plan` : `Boreal ${commandName} complete`;
   const detail = result.dryRun
     ? "No files were written. Rerun without --dry-run to apply these choices."
     : "Project runtime, memory, Git guards, and project agent skills are ready.";
   const lines = [
-    box(["Boreal Install", "Clean local setup for project memory and agent skills"]),
+    box([`Boreal ${commandName === "setup" ? "Setup" : "Install"}`, "Clean local setup for project memory and agent skills"]),
     "",
     resultSummary({ status: result.dryRun ? "pending" : "success", title, detail }),
     "",
@@ -436,7 +437,7 @@ function formatInstallSetupResult(result: InstallSetupResult, input: ProjectSetu
   }
   lines.push(
     "",
-    section("Next", result.dryRun ? ["rerun bwrk install to apply this plan"] : ["run bwrk prime --json to verify the project"])
+    section("Next", result.dryRun ? [`rerun bwrk ${commandName} to apply this plan`] : ["run bwrk prime --json to verify the project"])
   );
   return `${lines.join("\n")}\n`;
 }

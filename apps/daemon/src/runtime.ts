@@ -48,6 +48,8 @@ export const DAEMON_WATCH_SCHEMA_VERSION = "boreal.daemon.watch.v1";
 const DAEMON_WATCH_INTERVAL_MS = 30_000;
 const DAEMON_RESERVATION_RENEWAL_WINDOW_MS = DAEMON_WATCH_INTERVAL_MS * 2;
 const DAEMON_RESERVATION_LEASE_MS = 30 * 60_000;
+export const DAEMON_RESERVATION_RENEWAL_BATCH_LIMIT = 100;
+const DAEMON_RESERVATION_RENEWAL_SKIPPED_SAMPLE_LIMIT = 25;
 const MAX_DAEMON_DIAGNOSTIC_DEPTH = 4;
 const MAX_DAEMON_DIAGNOSTIC_ITEMS = 24;
 const MAX_DAEMON_DIAGNOSTIC_STRING_LENGTH = 1_000;
@@ -200,8 +202,51 @@ export interface DaemonReservationRenewalSummary {
   readonly enabled: true;
   readonly windowMs: number;
   readonly leaseMs: number;
+  readonly batchLimit: number;
   readonly renewed: readonly DaemonReservationRenewalRow[];
   readonly skipped: readonly DaemonReservationRenewalSkippedRow[];
+  readonly skippedCount: number;
+}
+
+export interface DaemonRenewalBatch<T> {
+  readonly selected: readonly T[];
+  readonly deferred: readonly T[];
+}
+
+/** Select a deterministic renewal batch without sorting the full candidate set. */
+export function selectDaemonRenewalBatch<T>(
+  values: readonly T[],
+  limit: number,
+  compare: (left: T, right: T) => number
+): DaemonRenewalBatch<T> {
+  const boundedLimit = Number.isFinite(limit) ? Math.max(0, Math.floor(limit)) : 0;
+  if (boundedLimit === 0) {
+    return { selected: [], deferred: values };
+  }
+
+  const selected: T[] = [];
+  for (const value of values) {
+    if (selected.length < boundedLimit) {
+      selected.push(value);
+      continue;
+    }
+    let worstIndex = 0;
+    for (let index = 1; index < selected.length; index += 1) {
+      if (compare(selected[index] as T, selected[worstIndex] as T) > 0) {
+        worstIndex = index;
+      }
+    }
+    if (compare(value, selected[worstIndex] as T) < 0) {
+      selected[worstIndex] = value;
+    }
+  }
+
+  selected.sort(compare);
+  const selectedSet = new Set(selected);
+  return {
+    selected,
+    deferred: values.filter((value) => !selectedSet.has(value))
+  };
 }
 
 export async function inspectDaemonStatus(options: DaemonRuntimeOptions): Promise<DaemonStatusResult> {
@@ -634,13 +679,28 @@ async function renewDaemonReservations(workspaceRoot: string, now: IsoTimestamp)
     const reservations = await reader.listReservations();
     return reservations
       .filter((reservation) => reservation.status === "active")
-      .filter((reservation) => daemonReservationNeedsRenewal(reservation, nowMs))
-      .slice()
-      .sort((left, right) => left.agentId.localeCompare(right.agentId) || left.workId.localeCompare(right.workId) || left.meta.id.localeCompare(right.meta.id));
+      .filter((reservation) => daemonReservationNeedsRenewal(reservation, nowMs));
   });
+  const renewalBatch = selectDaemonRenewalBatch(
+    candidates,
+    DAEMON_RESERVATION_RENEWAL_BATCH_LIMIT,
+    compareDaemonReservations
+  );
   const renewed: DaemonReservationRenewalRow[] = [];
   const skipped: DaemonReservationRenewalSkippedRow[] = [];
-  for (const reservation of candidates) {
+  let skippedCount = 0;
+  for (const reservation of renewalBatch.deferred) {
+    skippedCount += 1;
+    if (skipped.length < DAEMON_RESERVATION_RENEWAL_SKIPPED_SAMPLE_LIMIT) {
+      skipped.push({
+        workId: reservation.workId,
+        reservationId: reservation.meta.id,
+        agentId: String(reservation.agentId),
+        reason: "batch_limit"
+      });
+    }
+  }
+  for (const reservation of renewalBatch.selected) {
     try {
       const result = await runtime.renewWorkReservation({
         workId: reservation.workId,
@@ -654,19 +714,27 @@ async function renewDaemonReservations(workspaceRoot: string, now: IsoTimestamp)
         expiresAt: result.reservation.expiresAt ?? expiresAt
       });
     } catch (error) {
-      skipped.push({
-        workId: reservation.workId,
-        reservationId: reservation.meta.id,
-        agentId: String(reservation.agentId),
-        reason: error instanceof BorealError ? error.code : "renew_failed"
-      });
+      skippedCount += 1;
+      if (skipped.length < DAEMON_RESERVATION_RENEWAL_SKIPPED_SAMPLE_LIMIT) {
+        skipped.push({
+          workId: reservation.workId,
+          reservationId: reservation.meta.id,
+          agentId: String(reservation.agentId),
+          reason: error instanceof BorealError ? error.code : "renew_failed"
+        });
+      }
     }
   }
   return {
     ...emptyDaemonReservationRenewals(),
     renewed,
-    skipped
+    skipped,
+    skippedCount
   };
+}
+
+function compareDaemonReservations(left: AgentReservation, right: AgentReservation): number {
+  return left.agentId.localeCompare(right.agentId) || left.workId.localeCompare(right.workId) || left.meta.id.localeCompare(right.meta.id);
 }
 
 function daemonReservationNeedsRenewal(reservation: AgentReservation, nowMs: number): boolean {
@@ -685,8 +753,10 @@ function emptyDaemonReservationRenewals(): DaemonReservationRenewalSummary {
     enabled: true,
     windowMs: DAEMON_RESERVATION_RENEWAL_WINDOW_MS,
     leaseMs: DAEMON_RESERVATION_LEASE_MS,
+    batchLimit: DAEMON_RESERVATION_RENEWAL_BATCH_LIMIT,
     renewed: [],
-    skipped: []
+    skipped: [],
+    skippedCount: 0
   };
 }
 

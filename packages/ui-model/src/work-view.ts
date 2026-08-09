@@ -1,4 +1,4 @@
-import type { ContextPack, EvidenceRecord, SourceRef, VerificationRecord, WorkItem } from "@boreal/core";
+import { hasOpenReconciliationObligations, type ContextPack, type EvidenceRecord, type SourceRef, type VerificationRecord, type WorkItem } from "@boreal/core";
 
 export interface BorealSourceRefResolutionView {
   readonly status: "resolved" | "unresolved-unlinked" | "unresolved-missing-project" | "unresolved-missing-record" | "invalid-uri";
@@ -36,6 +36,7 @@ export interface WorkItemView {
   readonly evidenceCount: number;
   readonly verificationCount: number;
   readonly requiredCloseoutGates: WorkItem["requiredCloseoutGates"];
+  readonly reconciliationObligations?: WorkItem["reconciliationObligations"];
   readonly activeReservationId?: string;
   readonly activeReservation?: WorkReservationView;
   readonly closedReason?: string;
@@ -139,7 +140,7 @@ export function toWorkItemView(input: {
   const activeBlockerIds = dependencies
     ? dependencyIds.filter((dependencyId) => {
         const dependency = dependencies.find((candidate) => candidate.meta.id === dependencyId);
-        return dependency ? !isTerminalDependencyStatus(dependency.status) : true;
+        return dependency ? !isTerminalDependencyStatus(dependency) : true;
       })
     : dependencyIds;
   return {
@@ -160,6 +161,7 @@ export function toWorkItemView(input: {
     evidenceCount: input.evidence?.length ?? input.work.evidenceIds.length,
     verificationCount: input.verifications?.length ?? input.work.verificationIds.length,
     requiredCloseoutGates: input.work.requiredCloseoutGates ?? [],
+    reconciliationObligations: input.work.reconciliationObligations,
     activeReservationId: input.work.reservationId,
     closedReason: input.work.closedReason,
     git: input.work.git,
@@ -167,6 +169,6 @@ export function toWorkItemView(input: {
   };
 }
 
-function isTerminalDependencyStatus(status: WorkItem["status"]): boolean {
-  return status === "closed" || status === "cancelled" || status === "verified";
+function isTerminalDependencyStatus(work: WorkItem): boolean {
+  return (work.status === "closed" || work.status === "cancelled" || work.status === "verified") && !hasOpenReconciliationObligations(work);
 }

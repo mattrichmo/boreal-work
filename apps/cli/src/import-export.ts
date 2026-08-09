@@ -10,6 +10,7 @@ import {
   createRecordMeta,
   deterministicId,
   agentDirectiveBundleSchemaIssues,
+  executionRunCapabilitySchemaIssues,
   hashContent,
   nowIso,
   parseJsonlStrict,
@@ -1123,6 +1124,7 @@ async function importSnapshot(
   deletions: readonly LedgerDeletionRecord[]
 ): Promise<ImportResult> {
   validateSnapshot(incoming);
+  validateImportedExecutionCapabilities(incoming);
   assertUniqueDeletions(deletions);
   return context.store.write(async (writer) => {
     const current = await readSnapshot(writer);
@@ -1139,6 +1141,16 @@ async function importSnapshot(
     await writeImportedRecords(writer, incomingWithDeletionEvents, merged.importableIds);
     return { imported: merged.imported, skipped: merged.skipped, deleted: prepared.deleted };
   });
+}
+
+function validateImportedExecutionCapabilities(snapshot: ExportSnapshot): void {
+  const issues = snapshot.runs.flatMap((run, index) => executionRunCapabilitySchemaIssues(run, `runs[${index}]`));
+  if (issues.length > 0) {
+    throw new BorealError("BOREAL_POLICY_VIOLATION", "Imported execution runs contain untrusted executable capabilities", {
+      issues: issues.slice(0, 50),
+      issueCount: issues.length
+    });
+  }
 }
 
 interface PreparedImportedDeletions {

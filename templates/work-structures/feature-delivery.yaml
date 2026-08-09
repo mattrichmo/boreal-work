@@ -2,7 +2,7 @@ schemaVersion: boreal.work-template.v1
 id: feature-delivery
 version: "1"
 title: "{{target}} Feature Delivery"
-description: "A reusable granular delivery shape for discovery, implementation, review, update, and validation. Use only when the work benefits from explicit passes."
+description: "A reusable granular delivery shape for discovery, implementation, review, update, validation, reconciliation, and revalidation. Use only when the work benefits from explicit passes."
 variables:
   - name: target
     description: "Feature, page, workflow, or other bounded delivery target"
@@ -21,7 +21,7 @@ nodes:
       - delivery
     acceptance:
       - "All planned child work is complete or explicitly deferred with a reason."
-      - "Review findings, validation evidence, and checkpoint decisions are represented before closeout."
+      - "Review findings, validation evidence, reconciliation/revalidation evidence, and checkpoint decisions are represented before closeout."
     gates:
       - kind: checkpoint
         scope: descendants
@@ -114,12 +114,13 @@ nodes:
           - review
           - validation
         acceptance:
-          - "Review findings have an explicit disposition and final validation evidence is attached."
+          - "Review findings have an explicit disposition, final validation evidence is attached, and validation findings are reconciled and revalidated before advancement."
         children:
           - key: review-critique
             kind: task
             title: "{{target}} review and critique"
             description: "Review the implementation against the objective, design decision, usability, quality, and risk."
+            findingProducer: true
             labels:
               - "{{label}}"
               - review
@@ -132,27 +133,65 @@ nodes:
                 scope: self
           - key: review-update
             kind: task
-            title: "{{target}} review updates"
-            description: "Apply accepted review findings, or record why no update is required."
+            title: "{{target}} review finding reconciliation and updates"
+            description: "Resolve accepted review findings, update affected contracts and artifacts, or record why no update is required before validation."
+            reconciliationOf:
+              - review-critique
             labels:
               - "{{label}}"
               - update
+              - reconciliation
             acceptance:
-              - "Accepted findings are addressed, or each deferred finding has a reason and follow-up work."
-              - "The final artifact remains within scope and its checkpoint state is recorded."
+              - "Accepted findings are resolved, or each no-change/deferred finding has an explicit disposition, reason, owner, and follow-up work."
+              - "Affected contracts, artifacts, and linked work records are updated, and the final artifact remains within scope with its checkpoint state recorded."
             gates:
               - kind: checkpoint
                 scope: self
           - key: final-validation
             kind: task
             title: "{{target}} final validation"
-            description: "Prove the updated result against acceptance, regression, accessibility, and visual needs that apply."
+            description: "Prove the updated result against acceptance, regression, accessibility, visual, and other applicable quality gates."
+            findingProducer: true
             labels:
               - "{{label}}"
               - validation
             acceptance:
               - "Required commands, tests, visual checks, accessibility checks, or acceptance walkthroughs pass and their evidence is attached."
               - "Remaining risks and accepted deferrals are reported before parent closeout."
+            gates:
+              - kind: verification
+                scope: self
+          - key: validation-reconciliation
+            kind: task
+            title: "{{target}} validation finding reconciliation"
+            description: "Resolve findings from final validation, update affected contracts, artifacts, and work records, and prepare the advancement gate."
+            reconciliationOf:
+              - final-validation
+            labels:
+              - "{{label}}"
+              - validation
+              - reconciliation
+              - update
+            acceptance:
+              - "Every validation finding has a disposition: resolved, accepted no-change, or explicitly deferred with an owner and follow-up work."
+              - "Resolved findings update affected contracts, artifacts, dependencies, or evidence, and the checks affected by those updates are identified for rerun."
+            gates:
+              - kind: checkpoint
+                scope: self
+          - key: validation-recheck
+            kind: task
+            title: "{{target}} post-reconciliation validation"
+            description: "Re-run affected checks after reconciliation and prove that the result is safe for downstream sprint or parent advancement."
+            revalidates:
+              - review-critique
+              - final-validation
+            labels:
+              - "{{label}}"
+              - validation
+              - verification
+            acceptance:
+              - "Affected validation checks are rerun after reconciliation and pass, or explicitly approved deferrals remain linked to follow-up work and do not violate the advancement gate."
+              - "The evidence names the reconciled findings, updated contracts/artifacts, commands or walkthroughs rerun, and the downstream gate it unlocks."
             gates:
               - kind: verification
                 scope: self
@@ -171,3 +210,7 @@ edges:
     dependency: review-critique
   - dependent: final-validation
     dependency: review-update
+  - dependent: validation-reconciliation
+    dependency: final-validation
+  - dependent: validation-recheck
+    dependency: validation-reconciliation

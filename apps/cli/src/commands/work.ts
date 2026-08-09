@@ -523,6 +523,29 @@ async function mainWorkCommand(
       output.write(await dependencies.formatRecordWithAgentDirectives(context, args, result, json, { subjectWorkId: workId }));
       return { exitCode: 0 };
     }
+    case "reconcile": {
+      const workId = await dependencies.resolveWorkId(context, dependencies.requiredPositional(rest, 0, "work reference"));
+      const obligationId = dependencies.requiredPositional(rest, 1, "reconciliation obligation id");
+      const transition = flagValue(args, "transition");
+      if (!transition || !["resolve", "revalidate", "reconcile", "defer"].includes(transition)) {
+        throw new BorealError("BOREAL_INVALID_INPUT", "work reconcile requires --transition resolve|revalidate|reconcile|defer");
+      }
+      const revalidation = flagValue(args, "revalidation");
+      if (revalidation !== undefined && revalidation !== "passed" && revalidation !== "failed") {
+        throw new BorealError("BOREAL_INVALID_INPUT", "--revalidation must be passed or failed");
+      }
+      if (transition === "revalidate" && revalidation === undefined) {
+        throw new BorealError("BOREAL_INVALID_INPUT", "work reconcile --transition revalidate requires --revalidation passed|failed");
+      }
+      const work = await context.runtime.transitionReconciliation({
+        workId,
+        obligationId: obligationId as Parameters<typeof context.runtime.transitionReconciliation>[0]["obligationId"],
+        transition: transition as Parameters<typeof context.runtime.transitionReconciliation>[0]["transition"],
+        ...(revalidation !== undefined ? { revalidationPassed: revalidation === "passed" } : {})
+      });
+      output.write(await dependencies.formatRecordWithAgentDirectives(context, args, work, json, { subjectWorkId: workId }));
+      return { exitCode: 0 };
+    }
     case "close": {
       const workId = await dependencies.resolveWorkId(context, dependencies.requiredPositional(rest, 0, "work reference"));
       const reason = requiredFlag(args, "reason");

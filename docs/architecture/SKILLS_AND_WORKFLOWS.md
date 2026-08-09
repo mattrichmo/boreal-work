@@ -28,7 +28,7 @@ The planning skill chooses the smallest executable shape for the request:
 
 The `feature-delivery` Markdown contract records the rationale and evidence strategy. The `templates/work-structures/feature-delivery.yaml` template is the reusable state shape for the granular mode; it is validated and dry-run before instantiation.
 
-Review and validation are first-class work when they change delivery confidence. Review findings block the update pass, and final validation blocks parent closeout.
+Review and validation are first-class work when they change delivery confidence. Review findings block the reconciliation/update pass, and every finding-producing validation must block reconciliation, affected contract/artifact updates, and revalidation before parent closeout or the next sprint can advance. A no-findings result is an explicit reconciliation disposition.
 
 ## Installer Behavior
 

@@ -2,6 +2,7 @@ import { Box, Text } from "ink";
 
 import type { WorkItemView } from "@boreal/ui-model";
 import type { RepoSprintBoardBody } from "../loaders.js";
+import { reconciliationStatusForWork } from "../reconciliation.js";
 import { COLOR, statusColor, statusLabel } from "../theme.js";
 import { Table, type TableColumn, type TableRow } from "../ui.js";
 
@@ -60,7 +61,23 @@ export function SprintBoardRoute({
           ))
         )}
       </Box>
+      {body.board?.sprint ? <SprintReconciliationStatus work={body.board.sprint} /> : null}
       <Table columns={columns} rows={rows} cursor={cursor} height={height - 5} emptyLabel="No work in this sprint yet." />
+    </Box>
+  );
+}
+
+function SprintReconciliationStatus({ work }: { readonly work: WorkItemView }) {
+  const status = reconciliationStatusForWork(work);
+  const pending = status.steps.filter((step) => step.status === "pending" || step.status === "blocked").length;
+  return (
+    <Box marginBottom={1} flexDirection="column">
+      <Text color={pending > 0 ? COLOR.warn : COLOR.accent}>
+        {`RECONCILIATION · ${status.overall.replaceAll("_", " ")} · ${pending} follow-up step${pending === 1 ? "" : "s"}`}
+      </Text>
+      <Text color={COLOR.muted} wrap="truncate">
+        {status.steps.map((step) => `${step.label}: ${step.status.replaceAll("_", " ")}`).join("  ·  ")}
+      </Text>
     </Box>
   );
 }

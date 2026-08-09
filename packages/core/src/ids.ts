@@ -19,6 +19,7 @@ export type GraphEdgeId = Brand<string, "GraphEdgeId">;
 export type KnowledgeSourceId = Brand<string, "KnowledgeSourceId">;
 export type OperationId = Brand<string, "OperationId">;
 export type ProjectionId = Brand<string, "ProjectionId">;
+export type ReconciliationObligationId = Brand<string, "ReconciliationObligationId">;
 export type ReservationId = Brand<string, "ReservationId">;
 export type RunCheckpointId = Brand<string, "RunCheckpointId">;
 export type RunId = Brand<string, "RunId">;
@@ -41,6 +42,7 @@ export type EntityPrefix =
   | "operation"
   | "page"
   | "projection"
+  | "obligation"
   | "reservation"
   | "checkpoint"
   | "run"

@@ -64,6 +64,9 @@ interface TemplateNode {
   readonly labels: readonly string[];
   readonly acceptance: readonly string[];
   readonly gates: readonly RequiredCloseoutGateInput[];
+  readonly findingProducer?: boolean;
+  readonly reconciliationOf?: readonly string[];
+  readonly revalidates?: readonly string[];
   readonly binding?: TemplateBinding;
   readonly children: readonly TemplateNode[];
 }
@@ -321,6 +324,7 @@ async function validateTemplate(
   for (const cycle of dependencyCycles(flatNodes, template.edges)) {
     issues.push(issue("template.dependency_cycle", "$.edges", `dependency cycle: ${cycle.join(" -> ")}`));
   }
+  validateReconciliationTopology(flatNodes, template.edges, issues);
   if (options.requireResolvedVariables && issues.length === 0) {
     const substituted = buildSubstitutionMap(template, providedVariables);
     for (const entry of flatNodes) {
@@ -386,6 +390,80 @@ function validateNoPlaceholders(value: string, path: string, issues: TemplateVal
   const placeholders = placeholdersIn(value);
   if (placeholders.length > 0) {
     issues.push(issue("template.unresolved_placeholder", path, `unresolved placeholders: ${placeholders.map((name) => `{{${name}}}`).join(", ")}`));
+  }
+}
+
+function validateReconciliationTopology(
+  flatNodes: readonly FlatNode[],
+  edges: readonly TemplateEdge[],
+  issues: TemplateValidationIssue[]
+): void {
+  const nodesByKey = new Map(flatNodes.map((entry) => [entry.node.key, entry.node]));
+  const downstream = new Map<string, string[]>();
+  const addEdge = (dependency: string, dependent: string): void => {
+    const current = downstream.get(dependency) ?? [];
+    current.push(dependent);
+    downstream.set(dependency, current);
+  };
+  for (const edge of edges) {
+    addEdge(edge.dependency, edge.dependent);
+  }
+  for (const entry of flatNodes) {
+    if (entry.parentKey) {
+      addEdge(entry.node.key, entry.parentKey);
+    }
+  }
+
+  const reachableFrom = (key: string): ReadonlySet<string> => {
+    const seen = new Set<string>();
+    const queue = [key];
+    while (queue.length > 0) {
+      const current = queue.shift();
+      if (!current || seen.has(current)) {
+        continue;
+      }
+      seen.add(current);
+      for (const dependent of downstream.get(current) ?? []) {
+        if (!seen.has(dependent)) {
+          queue.push(dependent);
+        }
+      }
+    }
+    return seen;
+  };
+
+  for (const entry of flatNodes) {
+    const node = entry.node;
+    for (const [field, references] of [
+      ["reconciliationOf", node.reconciliationOf ?? []],
+      ["revalidates", node.revalidates ?? []]
+    ] as const) {
+      for (const reference of references) {
+        if (!nodesByKey.has(reference)) {
+          issues.push(issue("template.unknown_reconciliation_node", `$.nodes.${node.key}.${field}`, `unknown node ${reference}`));
+        }
+      }
+    }
+    if (!node.findingProducer) {
+      continue;
+    }
+    const reconciliation = flatNodes.filter((candidate) => candidate.node.reconciliationOf?.includes(node.key));
+    const revalidation = flatNodes.filter((candidate) => candidate.node.revalidates?.includes(node.key));
+    if (reconciliation.length === 0) {
+      issues.push(issue("template.reconciliation_missing", `$.nodes.${node.key}`, "finding-producing nodes require a reconciliation/update node"));
+    }
+    if (revalidation.length === 0) {
+      issues.push(issue("template.revalidation_missing", `$.nodes.${node.key}`, "finding-producing nodes require a downstream revalidation node"));
+    }
+    for (const update of reconciliation) {
+      if (!revalidation.some((candidate) => reachableFrom(update.node.key).has(candidate.node.key))) {
+        issues.push(issue(
+          "template.revalidation_not_downstream",
+          `$.nodes.${update.node.key}`,
+          `revalidation for ${node.key} must be downstream of the reconciliation/update node`
+        ));
+      }
+    }
   }
 }
 
@@ -968,6 +1046,9 @@ function normalizeNode(value: unknown, path: string): TemplateNode {
     labels: stringArray(record.labels),
     acceptance: stringArray(record.acceptance ?? record.acceptanceCriteria),
     gates: arrayValue(record.gates).map((entry, index) => normalizeGate(entry, `${path}.gates[${index}]`)),
+    findingProducer: record.findingProducer === true || record.finding_producer === true,
+    reconciliationOf: stringArray(record.reconciliationOf ?? record.reconciliation_of),
+    revalidates: stringArray(record.revalidates),
     binding: record.binding === undefined ? undefined : normalizeBinding(record.binding, `${path}.binding`),
     children: arrayValue(record.children).map((entry, index) => normalizeNode(entry, `${path}.children[${index}]`))
   };
@@ -1224,6 +1305,9 @@ function nodeToYaml(node: TemplateNode, indent: number): readonly string[] {
     `${childPad}title: ${yamlScalar(node.title)}`,
     node.description ? `${childPad}description: ${yamlScalar(node.description)}` : undefined,
     node.priority ? `${childPad}priority: ${yamlScalar(node.priority)}` : undefined,
+    node.findingProducer ? `${childPad}findingProducer: true` : undefined,
+    node.reconciliationOf?.length ? `${childPad}reconciliationOf: [${node.reconciliationOf.map(yamlScalar).join(", ")}]` : undefined,
+    node.revalidates?.length ? `${childPad}revalidates: [${node.revalidates.map(yamlScalar).join(", ")}]` : undefined,
     `${childPad}labels:`,
     ...node.labels.map((label) => `${childPad}  - ${yamlScalar(label)}`),
     `${childPad}acceptance:`,

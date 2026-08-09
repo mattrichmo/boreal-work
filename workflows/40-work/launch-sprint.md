@@ -24,7 +24,7 @@ templates:
 
 ## Purpose
 
-Create a scoped sprint with tasks, dependencies, gates, and session context.
+Create a scoped sprint with tasks, dependencies, validation/reconciliation gates, and session context.
 
 ## When To Use
 
@@ -45,6 +45,7 @@ Use this workflow when the user's request requires create a scoped sprint with t
 - Use `--json` for commands that feed later automation.
 - Stop and ask when candidate records conflict or the workflow would overwrite user-authored truth.
 - Sprint branch creation is automatic through `bwrk sprint launch`; do not create the sprint branch manually.
+- Do not make the next sprint or parent closeout depend directly on a finding-producing review or validation task. Insert reconciliation/update and, when changes are possible, revalidation work between the check and advancement.
 
 ## Agent Directives
 
@@ -83,6 +84,7 @@ Use `sprint launch` to create the sprint container, attach ready leaf work benea
 7. Attach each task to the sprint and encode blockers:
    `bwrk dep add <sprint-id> <task-id> --json`
    `bwrk dep add <blocked-task-id> <blocker-task-id> --json`
+   For every finding-producing check, add `check → reconciliation/update → revalidation` and attach any later sprint, phase, or parent gate to the revalidation result. A passing check still needs a recorded no-findings/no-change disposition when it can produce findings.
 8. Mark only unblocked sprint tasks ready:
    `bwrk work ready <task-id> --json`
 9. Verify launch shape:
@@ -108,6 +110,7 @@ Use `sprint launch` to create the sprint container, attach ready leaf work benea
 - For work changes, confirm dependency and readiness state after mutation.
 - At launch, inspect the `gitBranch` result from `bwrk sprint launch --json`; if it is skipped, report the reason before assigning work.
 - Plan commit checkpoints as part of the sprint structure. Major refactors should be split into task, phase, or subsystem checkpoints rather than one final sprint-sized commit.
+- Treat reconciliation as a real work step: its evidence must show findings disposition, updated contracts/artifacts/work records, affected checks rerun, and explicit owner/dependency details for any deferral.
 - Sprint acceptance should require a final closeout summary with per-task outcomes, evidence, verification, commit SHA(s), and reason code(s).
 
 ## Failure And Repair
@@ -122,6 +125,7 @@ Use `sprint launch` to create the sprint container, attach ready leaf work benea
 - The requested outcome is represented in Boreal records or the workflow has returned a clear read-only answer.
 - Any new or updated durable memory has source/evidence support.
 - The sprint plan identifies checkpoint boundaries for task, phase, sprint, or milestone closeout.
+- Every finding-producing check has a reconciliation/update gate before downstream sprint or parent advancement, plus revalidation when reconciliation can change the result.
 - The sprint work item records its deterministic Git branch or the launch output reports why branch creation was skipped.
 - `bwrk doctor --strict --json` passes or the remaining diagnostic is explicitly reported.
 

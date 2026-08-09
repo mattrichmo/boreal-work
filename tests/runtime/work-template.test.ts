@@ -49,7 +49,7 @@ describe("work-structure templates", () => {
     const validation = parseData<{ readonly ok: boolean; readonly nodeCount: number; readonly edgeCount: number }>(
       (await runCli(rootDir, ["template", "validate", "bug-finding-mission", "--var", "target=CLI", "--json"])).stdout
     );
-    expect(validation).toEqual(expect.objectContaining({ ok: true, nodeCount: 6, edgeCount: 2 }));
+    expect(validation).toEqual(expect.objectContaining({ ok: true, nodeCount: 7, edgeCount: 3 }));
 
     const first = parseData<TemplateRunPayload>(
       (await runCli(rootDir, ["template", "run", "bug-finding-mission", "--var", "target=CLI", "--json"])).stdout
@@ -101,6 +101,7 @@ describe("work-structure templates", () => {
     const unknownPlaceholder = join(rootDir, "unknown-placeholder.yaml");
     const invalidKind = join(rootDir, "invalid-kind.yaml");
     const cycle = join(rootDir, "cycle.yaml");
+    const unreconciled = join(rootDir, "unreconciled.yaml");
     await writeFile(
       unknownPlaceholder,
       [
@@ -151,10 +152,26 @@ describe("work-structure templates", () => {
       ].join("\n"),
       "utf8"
     );
+    await writeFile(
+      unreconciled,
+      [
+        'schemaVersion: "boreal.work-template.v1"',
+        'id: "unreconciled"',
+        'version: "1"',
+        "variables:",
+        "nodes:",
+        '  - key: "audit"',
+        '    kind: "task"',
+        '    title: "Audit"',
+        '    findingProducer: true'
+      ].join("\n"),
+      "utf8"
+    );
 
     await expectTemplateError(rootDir, unknownPlaceholder, "template.unknown_placeholder");
     await expectTemplateError(rootDir, invalidKind, "template.invalid_kind");
     await expectTemplateError(rootDir, cycle, "template.dependency_cycle");
+    await expectTemplateError(rootDir, unreconciled, "template.reconciliation_missing");
   });
 
   it("captures an existing work subtree into a valid YAML template", async () => {

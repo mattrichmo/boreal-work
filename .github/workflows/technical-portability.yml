@@ -39,6 +39,9 @@ jobs:
           tests/runtime/package-smoke.test.ts
           tests/runtime/release-boundary-audit.test.ts
           tests/runtime/process-runner.test.ts
+          tests/runtime/declared-gate-runner.test.ts
+          tests/runtime/long-running-runs.test.ts
+          tests/runtime/work-template.test.ts
           --reporter=dot
       - name: Pack, install, and probe the private UNLICENSED artifact
         run: node tools/smoke-npm-package.mjs --json

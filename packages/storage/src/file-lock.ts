@@ -34,6 +34,17 @@ export interface LockOwner {
   readonly lastHeartbeatAt?: string;
 }
 
+export class LockHeartbeatError extends BorealError {
+  constructor(lockDir: string, reason: "owner_lost" | "heartbeat_write_failed", details?: Record<string, unknown>) {
+    super("BOREAL_CONFLICT", "Boreal file lock heartbeat failed; lock ownership is no longer trusted", {
+      lockDir,
+      reason,
+      ...details
+    });
+    this.name = "LockHeartbeatError";
+  }
+}
+
 export interface FileLockInspection {
   readonly exists: boolean;
   readonly stale: boolean;
@@ -51,12 +62,37 @@ export async function withFileLock<T>(
 ): Promise<T> {
   const lock = await acquireFileLock(lockDir, options);
   const heartbeat = startLockHeartbeat(lockDir, lock, options);
+  let result: T | undefined;
+  let operationError: unknown;
+  let operationFailed = false;
+  let heartbeatError: unknown;
+  let releaseError: unknown;
   try {
-    return await operation();
-  } finally {
-    await heartbeat.stop();
-    await releaseFileLock(lockDir, lock.token);
+    result = await operation();
+  } catch (error) {
+    operationFailed = true;
+    operationError = error;
   }
+  try {
+    await heartbeat.stop();
+  } catch (error) {
+    heartbeatError = error;
+  }
+  try {
+    await releaseFileLock(lockDir, lock.token);
+  } catch (error) {
+    releaseError = error;
+  }
+  if (operationFailed) {
+    throw operationError;
+  }
+  if (heartbeatError !== undefined) {
+    throw heartbeatError;
+  }
+  if (releaseError !== undefined) {
+    throw releaseError;
+  }
+  return result as T;
 }
 
 export async function inspectFileLock(
@@ -286,12 +322,20 @@ function startLockHeartbeat(
   const intervalMs = Math.max(10, Math.min(10_000, Math.floor(options.staleAfterMs / 3)));
   const pending = new Set<Promise<void>>();
   let stopped = false;
+  let failure: unknown;
+  const recordFailure = (error: unknown): void => {
+    failure ??= error instanceof Error
+      ? error
+      : new LockHeartbeatError(lockDir, "heartbeat_write_failed", { cause: String(error) });
+  };
   const interval = setInterval(() => {
     if (stopped) {
       return;
     }
     const heartbeat = heartbeatLockOwner(lockDir, owner)
-      .catch(() => undefined)
+      .catch((error) => {
+        recordFailure(error);
+      })
       .finally(() => {
         pending.delete(heartbeat);
       });
@@ -303,16 +347,35 @@ function startLockHeartbeat(
       stopped = true;
       clearInterval(interval);
       await Promise.all([...pending]);
+      if (failure) {
+        throw failure;
+      }
     }
   };
 }
 
 async function heartbeatLockOwner(lockDir: string, owner: LockOwner): Promise<void> {
-  const currentOwner = await readLockOwner(lockDir).catch(() => undefined);
-  if (!currentOwner || !sameLockOwner(currentOwner, owner)) {
-    return;
+  let currentOwner: LockOwner | undefined;
+  try {
+    currentOwner = await readLockOwner(lockDir);
+  } catch (error) {
+    throw new LockHeartbeatError(lockDir, "heartbeat_write_failed", {
+      cause: error instanceof Error ? error.message : String(error)
+    });
   }
-  await writeLockOwner(lockDir, { ...currentOwner, lastHeartbeatAt: nowIso() });
+  if (!currentOwner || !sameLockOwner(currentOwner, owner)) {
+    throw new LockHeartbeatError(lockDir, "owner_lost", {
+      expectedToken: owner.token,
+      actualToken: currentOwner?.token
+    });
+  }
+  try {
+    await writeLockOwner(lockDir, { ...currentOwner, lastHeartbeatAt: nowIso() });
+  } catch (error) {
+    throw new LockHeartbeatError(lockDir, isNodeError(error) && error.code === "ENOENT" ? "owner_lost" : "heartbeat_write_failed", {
+      cause: error instanceof Error ? error.message : String(error)
+    });
+  }
 }
 
 async function writeLockOwner(lockDir: string, owner: LockOwner): Promise<void> {
@@ -335,7 +398,10 @@ async function readLockOwner(lockDir: string): Promise<LockOwner | undefined> {
       return undefined;
     }
     if (error instanceof BorealError && error.code === "BOREAL_JSON_PARSE") {
-      return undefined;
+      throw new BorealError("BOREAL_STORAGE_ERROR", "Boreal file lock owner is malformed", {
+        lockDir,
+        reason: "lock_owner_malformed"
+      });
     }
     throw error;
   }

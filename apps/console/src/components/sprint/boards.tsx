@@ -1,6 +1,7 @@
 import type { ReactNode } from "react";
 import type { SprintBoardView, WorkDashboardView, WorkItemView } from "@boreal/ui-model";
 
+import { reconciliationStatusForWork, type ReconciliationStepStatus } from "../../app/reconciliation.js";
 import { Badge, Button, Card, cx, MetricCard, Notice, type Tone } from "../foundation/index.js";
 
 export type SprintViewMode = "kanban" | "table" | "dependency" | "timeline" | "progress";
@@ -381,6 +382,44 @@ export function SprintReviewQueues({ view, routePath }: { readonly view: SprintB
       </div>
     </Card>
   );
+}
+
+export function ReconciliationStatusPanel({ work }: { readonly work: WorkItemView }) {
+  const status = reconciliationStatusForWork(work);
+  const overallTone = reconciliationTone(status.overall);
+  return (
+    <Card title="Reconciliation" eyebrow={`${work.title} · required advancement chain`}>
+      <div className="bw-reconciliation">
+        <Notice tone={overallTone} label={`Overall: ${reconciliationStatusLabel(status.overall)}`}>
+          Review findings, resolve and update affected artifacts, revalidate, reconcile, then advance.
+        </Notice>
+        <ol className="bw-reconciliation__steps" aria-label="Reconciliation status">
+          {status.steps.map((step) => (
+            <li key={step.id} className={`bw-reconciliation__step bw-reconciliation__step--${step.status}`}>
+              <div className="bw-reconciliation__step-header">
+                <strong>{step.label}</strong>
+                <Badge tone={reconciliationTone(step.status)}>{reconciliationStatusLabel(step.status)}</Badge>
+              </div>
+              <span>{step.detail}</span>
+            </li>
+          ))}
+        </ol>
+        <p className="bw-reconciliation__caveat">{status.caveat}</p>
+      </div>
+    </Card>
+  );
+}
+
+function reconciliationTone(status: ReconciliationStepStatus): Tone {
+  if (status === "blocked") return "danger";
+  if (status === "pending") return "warning";
+  if (status === "complete") return "success";
+  return "neutral";
+}
+
+function reconciliationStatusLabel(status: ReconciliationStepStatus): string {
+  if (status === "not_modeled") return "not modeled";
+  return status;
 }
 
 function ActionForm({

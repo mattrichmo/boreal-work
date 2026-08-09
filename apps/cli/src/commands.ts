@@ -151,8 +151,10 @@ import { daemonCommand, type DaemonCommandDependencies } from "./commands/daemon
 import { bootstrapGlobalFirstRunIfNeeded, dashboardCommand, globalCommand, linkCommand, unlinkCommand } from "./commands/dashboard.js";
 import { evidenceCommand } from "./commands/evidence.js";
 import { healthCommand, type HealthCommandDependencies } from "./commands/health.js";
+import { integrationsCommand } from "./commands/integrations.js";
 import { initCommand, installCommand, installRootFromArgs, skillInstallScopeFromArgs } from "./commands/install.js";
 import { updateCommand } from "./commands/update.js";
+import { upgradeCommand, validateUpgradeScope } from "./commands/upgrade.js";
 import { knowledgeCommand } from "./commands/knowledge.js";
 import { memoryCommand, resolveWikiPageIds } from "./commands/memory.js";
 import { commandsCommand, completionCommand, HELP_SECTIONS } from "./commands/meta.js";
@@ -816,6 +818,9 @@ export async function runCommand(args: ParsedArgs, output: CliOutput, cwd: strin
     throw new BorealError("BOREAL_INVALID_INPUT", `Unknown command: ${args.command.join(" ")}`);
   }
   validateCommandFlags(args, definition);
+  if (definition.path[0] === "upgrade") {
+    validateUpgradeScope(args);
+  }
   const json = hasFlag(args, "json") || hasFlag(args, "brief");
   const briefJson = hasFlag(args, "brief");
   if (definition.path[0] === "commands") {
@@ -925,6 +930,9 @@ export async function runCommand(args: ParsedArgs, output: CliOutput, cwd: strin
       case "init":
         result = await initCommand(context, args, executableOutput, json);
         break;
+      case "setup":
+        result = await installCommand(undefined, context, args, executableOutput, json);
+        break;
       case "work":
         result = await workGroupCommand("work", action, rest, context, args, executableOutput, json, workCommandDependencies());
         break;
@@ -1029,14 +1037,23 @@ export async function runCommand(args: ParsedArgs, output: CliOutput, cwd: strin
       case "install":
         result = await installCommand(action, context, args, executableOutput, json);
         break;
+      case "integrations":
+        result = await integrationsCommand(action, rest, context, args, executableOutput, json);
+        break;
       case "update":
         result = await updateCommand(action, context, args, executableOutput, json);
+        break;
+      case "upgrade":
+        result = await upgradeCommand(context, args, executableOutput, json);
         break;
       case "registry":
         result = await registryCommand(action, rest, context, args, executableOutput, json, registryCommandDependencies());
         break;
       case "dashboard":
         result = await dashboardCommand(action, context, args, executableOutput, json);
+        break;
+      case "view":
+        result = await dashboardCommand(undefined, context, args, executableOutput, json);
         break;
       case "global":
         result = await globalCommand(action, rest, context, args, executableOutput, json);
@@ -1843,10 +1860,14 @@ function operationContextArgs(args: ParsedArgs, definition: CommandDefinition): 
 }
 
 function usesImplicitMachineLedger(definition: CommandDefinition, args: ParsedArgs): boolean {
-  const userScopedSkillInstall = definition.path[0] === "install" && definition.path.length > 1 && flagValue(args, "scope") === "user";
+  const userScopedSkillInstall =
+    ((definition.path[0] === "install" && definition.path.length > 1) ||
+      (definition.path[0] === "integrations" && definition.path[1] === "add")) &&
+    flagValue(args, "scope") === "user";
+  const machineScopedUpgrade = definition.path[0] === "upgrade" && hasFlag(args, "machine");
   return (
     !hasFlag(args, "global") &&
-    ((definition.path[0] === "update" && definition.path[1] === "self") || userScopedSkillInstall)
+    ((definition.path[0] === "update" && definition.path[1] === "self") || userScopedSkillInstall || machineScopedUpgrade)
   );
 }
 

@@ -388,6 +388,18 @@ tr.bw-row--selected .bw-row-select { text-decoration-color: var(--bw-accent); }
 .bw-command-confirm { color: var(--bw-muted); font-size: 12px; }
 .bw-json-state { display: none; }
 .bw-stale-banner { border-color: rgba(215, 185, 105, 0.7); }
+.bw-action-safety-fieldset { min-width: 0; margin: 0; padding: 0; border: 0; }
+.bw-action-safety-fieldset:disabled { opacity: 0.86; }
+.bw-action-safety-fieldset:disabled .bw-button, .bw-action-safety-fieldset:disabled input, .bw-action-safety-fieldset:disabled select { cursor: not-allowed; }
+.bw-reconciliation { display: grid; gap: 10px; }
+.bw-reconciliation__steps { list-style: none; display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 8px; margin: 0; padding: 0; }
+.bw-reconciliation__step { min-width: 0; border: 1px solid var(--bw-border); border-radius: 8px; background: rgba(255,255,255,0.015); padding: 9px; display: grid; gap: 7px; }
+.bw-reconciliation__step--blocked { border-color: rgba(223, 124, 124, 0.6); }
+.bw-reconciliation__step--pending { border-color: rgba(215, 185, 105, 0.55); }
+.bw-reconciliation__step--complete { border-color: rgba(113, 212, 139, 0.45); }
+.bw-reconciliation__step-header { min-width: 0; display: flex; align-items: start; justify-content: space-between; gap: 6px; }
+.bw-reconciliation__step strong, .bw-reconciliation__step span { overflow-wrap: anywhere; }
+.bw-reconciliation__step > span, .bw-reconciliation__caveat { color: var(--bw-muted); font-size: 12px; line-height: 1.35; margin: 0; }
 @media (max-width: 860px) {
   .bw-console { grid-template-columns: 1fr; }
   .bw-console__sidebar { position: static; height: auto; border-right: 0; border-bottom: 1px solid var(--bw-border); }
@@ -408,6 +420,7 @@ tr.bw-row--selected .bw-row-select { text-decoration-color: var(--bw-accent); }
   .bw-ingest-diff { grid-template-columns: 1fr; }
   .bw-contradiction-assertions { grid-template-columns: 1fr; }
   .bw-sprint-header, .bw-scope-phase { grid-template-columns: 1fr; }
+  .bw-reconciliation__steps { grid-template-columns: 1fr; }
   .bw-scope-phase__meta { justify-content: flex-start; }
   .bw-activity-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .bw-activity-row__main { display: grid; }

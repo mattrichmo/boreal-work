@@ -49,6 +49,12 @@ export function routesForScope(scope: ConsoleScope): readonly ConsoleRoute[] {
   return CONSOLE_ROUTES.filter((route) => route.scopes.includes(scope));
 }
 
+export function isKnownConsoleRoute(pathname: string, scope: ConsoleScope): boolean {
+  const pathOnly = pathname.split(/[?#]/, 1)[0] || "/";
+  const withoutSlash = pathOnly.endsWith("/") && pathOnly !== "/" ? pathOnly.slice(0, -1) : pathOnly;
+  return routesForScope(scope).some((route) => route.path === withoutSlash);
+}
+
 export function routeFromPath(pathname: string, scope: ConsoleScope = "repo"): ConsoleRoute {
   const routes = routesForScope(scope);
   const pathOnly = pathname.split(/[?#]/, 1)[0] || "/";

@@ -36,6 +36,7 @@ Boreal turns tasks, sources, claims, decisions, verification, and workflow state
 - [Release boundary audit](security/RELEASE_BOUNDARY_AUDIT.md)
 - [Runtime architecture](architecture/RUNTIME.md)
 - [Long-running tasks](architecture/LONG_RUNNING_TASKS.md)
+- [Reconciliation-first hardening plan](architecture/RECONCILIATION_FIRST_FEATURE_HARDENING_PLAN.md)
 - [Evidence trust](architecture/EVIDENCE_TRUST.md)
 - [Compatibility policy](architecture/COMPATIBILITY_POLICY.md)
 - [TUI surface contracts](architecture/TUI_SURFACE_CONTRACTS.md)

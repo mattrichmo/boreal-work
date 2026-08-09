@@ -1,7 +1,10 @@
 import {
   BorealError,
   createRecordMeta,
+  createReconciliationObligation,
   deterministicId,
+  hasOpenReconciliationObligations,
+  reconciliationObligationGaps,
   normalizeActorId,
   normalizeLabels,
   normalizeMachineString,
@@ -18,6 +21,7 @@ import {
   type GraphEdge,
   type IsoTimestamp,
   type RequiredCloseoutGate,
+  type ReconciliationObligationDraft,
   type RuntimePolicy,
   type SourceRef,
   type VerificationRecord,
@@ -40,6 +44,7 @@ export interface CreateWorkItemInput {
   readonly labels?: readonly string[];
   readonly binding?: WorkBinding;
   readonly requiredCloseoutGates?: readonly RequiredCloseoutGateInput[];
+  readonly reconciliationObligations?: readonly ReconciliationObligationDraft[];
   readonly parentId?: WorkId;
   readonly sourceRefs?: readonly SourceRef[];
   readonly nonce?: number;
@@ -117,6 +122,13 @@ export function createWorkItem(input: CreateWorkItemInput): WorkItem {
       actor: input.actor,
       now: input.now
     }),
+    ...(input.reconciliationObligations && input.reconciliationObligations.length > 0
+      ? {
+          reconciliationObligations: input.reconciliationObligations.map((draft) =>
+            createReconciliationObligation({ workId: id, draft, actor: input.actor, now: input.now })
+          )
+        }
+      : {}),
     parentId: input.parentId,
     dependencyIds: [],
     evidenceIds: [],
@@ -314,7 +326,9 @@ export function attachVerificationToWork(
     {
       ...work,
       verificationIds: unique([...work.verificationIds, verification.meta.id]),
-      status: verification.verdict === "passed" ? "verified" : "needs_verification"
+      status: verification.verdict === "passed"
+        ? reconciliationObligationGaps(work).length > 0 ? "blocked" : "verified"
+        : "needs_verification"
     },
     now,
     actor
@@ -329,6 +343,16 @@ export function closeWork(
   actor: ActorRef,
   reason: string
 ): WorkItem {
+  const reconciliationGaps = reconciliationObligationGaps(work);
+  if (reconciliationGaps.length > 0) {
+    throw new BorealError(
+      "BOREAL_POLICY_VIOLATION",
+      "Work cannot close while reconciliation obligations are open",
+      { gaps: reconciliationGaps },
+      reconciliationGaps,
+      "work"
+    );
+  }
   const hasPassingVerification = verifications.some((verification) => verification.verdict === "passed");
   if (policy.requirePassingVerificationForClose && !hasPassingVerification) {
     const gaps = [
@@ -360,7 +384,7 @@ export function closeWork(
 }
 
 export function deriveReadinessStatus(work: WorkItem, dependencies: readonly WorkItem[]): WorkStatus {
-  if (work.status === "closed" || work.status === "cancelled" || work.status === "verified") {
+  if (work.status === "closed" || work.status === "cancelled") {
     return work.status;
   }
 
@@ -368,24 +392,37 @@ export function deriveReadinessStatus(work: WorkItem, dependencies: readonly Wor
     return "blocked";
   }
 
+  if (work.status === "verified") {
+    return work.status;
+  }
+
   return work.status === "draft" || work.status === "blocked" ? "ready" : work.status;
 }
 
 export function workReadinessGaps(work: WorkItem, dependencies: readonly WorkItem[]): readonly EnforcementGap[] {
+  const gaps: EnforcementGap[] = [];
   const blockerIds = dependencies
-    .filter((dependency) => dependency.status !== "closed" && dependency.status !== "cancelled" && dependency.status !== "verified")
+    .filter((dependency) =>
+      !(
+        (dependency.status === "closed" || dependency.status === "cancelled" || dependency.status === "verified") &&
+        !hasOpenReconciliationObligations(dependency)
+      )
+    )
     .map((dependency) => dependency.meta.id);
   if (blockerIds.length === 0) {
-    return [];
+    gaps.push(...reconciliationObligationGaps(work));
+    return gaps;
   }
-  return [
+  gaps.push(
     {
       code: "work.blocked.open-dependency",
       subjectType: workSubjectType(work),
       subjectId: work.meta.id,
       data: { blockerIds }
     }
-  ];
+  );
+  gaps.push(...reconciliationObligationGaps(work));
+  return gaps;
 }
 
 export function setWorkStatus(work: WorkItem, status: WorkStatus, now: IsoTimestamp, actor: ActorRef): WorkItem {

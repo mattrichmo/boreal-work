@@ -86,6 +86,32 @@ export interface ConsoleCommandParams {
   get(name: string): string | null;
 }
 
+export const MAX_CONSOLE_GLOBAL_PROJECTS = 50;
+export const CONSOLE_GLOBAL_PROJECT_CONCURRENCY = 4;
+export const CONSOLE_SPRINT_DETAIL_CONCURRENCY = 4;
+
+export async function mapWithConcurrencyLimit<T, U>(
+  values: readonly T[],
+  limit: number,
+  mapper: (value: T, index: number) => Promise<U>
+): Promise<readonly U[]> {
+  const boundedLimit = Number.isFinite(limit) ? Math.max(1, Math.floor(limit)) : 1;
+  const results = new Array<U>(values.length);
+  let nextIndex = 0;
+  const worker = async (): Promise<void> => {
+    while (true) {
+      const index = nextIndex;
+      nextIndex += 1;
+      if (index >= values.length) {
+        return;
+      }
+      results[index] = await mapper(values[index] as T, index);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(boundedLimit, values.length) }, () => worker()));
+  return results;
+}
+
 export class ConsoleCommandError extends Error {
   constructor(
     readonly code: string,
@@ -150,7 +176,15 @@ export async function loadLiveConsoleData(options: LoadLiveConsoleDataOptions): 
           cliData<unknown>(runner, ["registry", "doctor", "--json"])
         ])
       : [undefined, undefined];
-  const sprintWork = await Promise.all(sprintRows.map((row) => loadWorkView(runner, row)));
+  const globalRegistryRows = scope === "global" ? registryProjectRowsFromCli(registryList) : [];
+  const projectLimitWarning = globalRegistryRows.length > MAX_CONSOLE_GLOBAL_PROJECTS
+    ? `Global console limited to ${MAX_CONSOLE_GLOBAL_PROJECTS} projects; ${globalRegistryRows.length - MAX_CONSOLE_GLOBAL_PROJECTS} project(s) were not loaded.`
+    : undefined;
+  const sprintWork = await mapWithConcurrencyLimit(
+    sprintRows,
+    CONSOLE_SPRINT_DETAIL_CONCURRENCY,
+    (row) => loadWorkView(runner, row)
+  );
   const readyWork = readyRows.map((row) => workViewFromRow(row));
   const listedWork = allRows.map((row) => workViewFromRow(row));
   const sprint = sprintWork.find((item) => item.kind === "sprint") ?? sprintWork[0] ?? workViewFromRow({
@@ -176,9 +210,10 @@ export async function loadLiveConsoleData(options: LoadLiveConsoleDataOptions): 
   ]);
   const staleWarnings = [
     ...(!sync.ok ? ["Sync status reports stale or unhealthy generated state."] : []),
-    ...projectFindings.filter((finding) => finding.severity !== "info").map((finding) => finding.message)
+    ...projectFindings.filter((finding) => finding.severity !== "info").map((finding) => finding.message),
+    ...(projectLimitWarning ? [projectLimitWarning] : [])
   ];
-  const workspaceStale = !sync.ok || health.summary.errors > 0 || health.summary.warnings > 0;
+  const workspaceStale = Boolean(projectLimitWarning) || !sync.ok || health.summary.errors > 0 || health.summary.warnings > 0;
   const projectOverviews =
     scope === "global"
       ? await buildConsoleProjectOverviews({
@@ -1898,6 +1933,7 @@ function workViewFromRecord(data: unknown): WorkItemView {
     evidenceCount: numberField(data, "evidenceCount"),
     verificationCount: numberField(data, "verificationCount"),
     requiredCloseoutGates: requiredCloseoutGatesView(data.requiredCloseoutGates),
+    reconciliationObligations: reconciliationObligationsView(data.reconciliationObligations),
     activeReservationId: typeof data.activeReservationId === "string" ? data.activeReservationId : undefined,
     contextSummary: typeof data.contextSummary === "string" ? data.contextSummary : undefined,
     directiveSummary: directiveSummaryFromBundles(data.agentDirectives)
@@ -1927,6 +1963,13 @@ function requiredCloseoutGatesView(value: unknown): WorkItemView["requiredCloseo
     return [];
   }
   return value.filter(isRecord) as unknown as NonNullable<WorkItemView["requiredCloseoutGates"]>;
+}
+
+function reconciliationObligationsView(value: unknown): WorkItemView["reconciliationObligations"] {
+  if (!Array.isArray(value)) {
+    return undefined;
+  }
+  return value.filter(isRecord) as unknown as NonNullable<WorkItemView["reconciliationObligations"]>;
 }
 
 function directiveSummaryFromBundles(value: unknown): WorkDirectiveSummaryView | undefined {
@@ -2568,8 +2611,11 @@ async function buildConsoleProjectOverviews(input: {
     ];
   }
 
-  return Promise.all(
-    registryRows.map(async (registryRow) => {
+  const boundedRegistryRows = registryRows.slice(0, MAX_CONSOLE_GLOBAL_PROJECTS);
+  return mapWithConcurrencyLimit(
+    boundedRegistryRows,
+    CONSOLE_GLOBAL_PROJECT_CONCURRENCY,
+    async (registryRow) => {
       const projectRoot = resolve(registryRow.projectRoot);
       const findings = registryFindings.get(registryRow.id) ?? [];
       if (projectRoot === input.workspaceRoot) {
@@ -2583,7 +2629,7 @@ async function buildConsoleProjectOverviews(input: {
         return inactiveRegisteredProjectOverview(registryRow, findings, input.generatedAt);
       }
       return loadRegisteredProjectOverview(input.runner, registryRow, findings, input.generatedAt, input.globalSearchQuery);
-    })
+    }
   );
 }
 

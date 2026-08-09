@@ -76,7 +76,30 @@ const MAX_DASHBOARD_PROJECT_LIMIT = 100;
 const MAX_GLOBAL_NEXT_LIMIT = 100;
 const MAX_GLOBAL_INBOX_AGING_THRESHOLD_DAYS = 365;
 const MAX_LIST_LIMIT = 1_000;
+export const GLOBAL_STATUS_PROJECT_CONCURRENCY = 8;
 const DAY_MS = 24 * 60 * 60 * 1000;
+
+export async function mapWithConcurrencyLimit<T, U>(
+  values: readonly T[],
+  limit: number,
+  mapper: (value: T, index: number) => Promise<U>
+): Promise<readonly U[]> {
+  const boundedLimit = Number.isFinite(limit) ? Math.max(1, Math.floor(limit)) : 1;
+  const results = new Array<U>(values.length);
+  let nextIndex = 0;
+  const worker = async (): Promise<void> => {
+    while (true) {
+      const index = nextIndex;
+      nextIndex += 1;
+      if (index >= values.length) {
+        return;
+      }
+      results[index] = await mapper(values[index] as T, index);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(boundedLimit, values.length) }, () => worker()));
+  return results;
+}
 
 interface GlobalDashboardProjectOverview {
   readonly entry: DashboardProjectRegistryEntry;
@@ -647,10 +670,10 @@ async function globalStatusCommand(args: ParsedArgs, output: CliOutput, json: bo
 async function buildGlobalStatusResult(args: ParsedArgs): Promise<GlobalStatusResult> {
   const generatedAt = nowIso();
   const registry = await listProjectRegistry({ registryRoot: flagValue(args, "registry-root") });
-  const projects = await Promise.all(
-    registry.entries
-      .filter((entry) => entry.lifecycle !== "archived")
-      .map((entry) => globalStatusProjectRow(entry))
+  const projects = await mapWithConcurrencyLimit(
+    registry.entries.filter((entry) => entry.lifecycle !== "archived"),
+    GLOBAL_STATUS_PROJECT_CONCURRENCY,
+    (entry) => globalStatusProjectRow(entry)
   );
   const errorCount = projects.filter((project) => !project.ok).length;
   return {
@@ -955,7 +978,7 @@ function spawnAppProcess(input: {
     throw new BorealError(
       "BOREAL_INVALID_INPUT",
       `The ${input.appDir === "tui" ? "terminal dashboard" : "browser console"} app is not bundled with this bwrk installation. ` +
-        "Use `bwrk dashboard --json` for the data payload, reinstall bwrk (`bwrk update self`), or run from a source checkout (`pnpm bwrk dashboard`).",
+        "Use `bwrk dashboard --json` for the data payload, reinstall bwrk (`bwrk upgrade --machine`), or run from a source checkout (`pnpm bwrk view`).",
       { lookedFor: [bundledEntrypoint, distEntrypoint, srcEntrypoint], sourceRoot }
     );
   }

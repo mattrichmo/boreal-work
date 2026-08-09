@@ -35,6 +35,7 @@ nodes:
             kind: "task"
             title: "Run focused audit for {{target}}"
             description: "Inspect code, tests, and runtime behavior for {{target}}."
+            findingProducer: true
             labels:
               - "{{label}}"
               - "audit"
@@ -56,11 +57,29 @@ nodes:
             kind: "task"
             title: "Implement {{target}} bug fixes"
             description: "Patch the accepted defects and run focused verification."
+            reconciliationOf:
+              - "audit-pass"
             labels:
               - "{{label}}"
               - "fix"
             acceptance:
               - "Regression coverage exists for each fixed defect."
+            binding:
+              workflow: "workflows/40-work/claim-and-finish-work.md"
+          - key: "revalidate"
+            kind: "task"
+            title: "Revalidate {{target}} bug fixes"
+            description: "Rerun the affected checks after remediation and reconcile the result before reporting or advancing."
+            revalidates:
+              - "audit-pass"
+            labels:
+              - "{{label}}"
+              - "revalidation"
+            acceptance:
+              - "Every resolved finding is rechecked after the fix and the result is linked to the affected finding."
+            gates:
+              - kind: "verification"
+                scope: "self"
             binding:
               workflow: "workflows/40-work/claim-and-finish-work.md"
       - key: "report"
@@ -77,5 +96,7 @@ nodes:
 edges:
   - dependent: "fix"
     dependency: "audit"
+  - dependent: "revalidate"
+    dependency: "fix-pass"
   - dependent: "report"
-    dependency: "fix"
+    dependency: "revalidate"

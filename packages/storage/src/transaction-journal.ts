@@ -2,12 +2,43 @@ import { randomUUID } from "node:crypto";
 import { readdir, readFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 
-import { hashContent, nowIso, type RuntimeEvent, type RuntimeOperation } from "@boreal/core";
+import { BorealError, hashContent, nowIso, type RuntimeEvent, type RuntimeOperation } from "@boreal/core";
 
 import { writeTextFileAtomic } from "./atomic-write.js";
 import type { StoreChange, StoreSnapshot } from "./memory-store.js";
 
 export const STORE_TRANSACTION_SCHEMA_VERSION = "boreal.store-transaction.v1";
+
+export class RecoveryRequiredError extends BorealError {
+  readonly recoveryRequired = true;
+
+  constructor(message: string, details?: Record<string, unknown>) {
+    super("BOREAL_STORAGE_ERROR", message, {
+      recoveryRequired: true,
+      ...details
+    });
+    this.name = "RecoveryRequiredError";
+  }
+}
+
+export function isRecoveryRequiredError(error: unknown): error is RecoveryRequiredError {
+  return error instanceof RecoveryRequiredError ||
+    (error instanceof BorealError && error.details !== null && typeof error.details === "object" &&
+      (error.details as Record<string, unknown>).recoveryRequired === true);
+}
+
+export function toRecoveryRequiredError(
+  error: unknown,
+  details: Record<string, unknown>
+): RecoveryRequiredError {
+  if (error instanceof RecoveryRequiredError) {
+    return error;
+  }
+  return new RecoveryRequiredError("Boreal storage recovery could not complete; recovery is required", {
+    ...details,
+    cause: error instanceof Error ? error.message : String(error)
+  });
+}
 
 export interface PendingLogRecord {
   readonly kind: "event" | "operation";
@@ -77,11 +108,31 @@ export async function readTransactionJournals(rootDir: string): Promise<readonly
   const journals: Array<{ path: string; journal: StoreTransactionJournal }> = [];
   for (const name of names.filter((value) => value.endsWith(".json")).sort()) {
     const path = join(directory, name);
-    const journal = JSON.parse(await readFile(path, "utf8")) as StoreTransactionJournal;
-    if (journal.schemaVersion !== STORE_TRANSACTION_SCHEMA_VERSION || !Array.isArray(journal.pendingLogRecords)) {
-      throw new Error(`Unsupported store transaction journal: ${name}`);
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(await readFile(path, "utf8"));
+    } catch (error) {
+      throw new RecoveryRequiredError("Boreal storage transaction journal is malformed; recovery is required", {
+        journalPath: path,
+        journalName: name,
+        reason: "journal_parse_error",
+        cause: error instanceof Error ? error.message : String(error)
+      });
     }
-    journals.push({ path, journal });
+    if (!isRecord(parsed) ||
+      parsed.schemaVersion !== STORE_TRANSACTION_SCHEMA_VERSION ||
+      typeof parsed.id !== "string" ||
+      typeof parsed.createdAt !== "string" ||
+      (parsed.storeKind !== "object" && parsed.storeKind !== "file") ||
+      (parsed.phase !== "prepared" && parsed.phase !== "state_written" && parsed.phase !== "log_written") ||
+      !Array.isArray(parsed.pendingLogRecords)) {
+      throw new RecoveryRequiredError("Unsupported Boreal storage transaction journal; recovery is required", {
+        journalPath: path,
+        journalName: name,
+        reason: "journal_schema_error"
+      });
+    }
+    journals.push({ path, journal: parsed as unknown as StoreTransactionJournal });
   }
   return journals;
 }
@@ -96,4 +147,8 @@ async function writeTransactionJournal(path: string, journal: StoreTransactionJo
 
 function isNodeError(error: unknown): error is NodeJS.ErrnoException {
   return typeof error === "object" && error !== null && "code" in error;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
