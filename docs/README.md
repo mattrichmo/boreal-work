@@ -10,6 +10,7 @@ Use this index to move from installation and first use into the CLI reference, a
 | --- | --- |
 | [Getting started](getting-started.md) | Install Boreal, initialize a workspace, and run a first work loop. |
 | [Concepts](concepts.md) | The mental model for work, evidence, knowledge, context, memory, and agents. |
+| [Agent manual](../AGENT_README.md) | Explicit agent protocol, JSON contracts, workflows, gates, checkpoints, and recovery procedures. |
 | [Release and publishing](release/publishing.md) | Package preparation, smoke tests, and npm/Homebrew release steps. |
 | [Security and release boundary](security/RELEASE_BOUNDARY_AUDIT.md) | Secret scanning, dependency provenance, ignored local data, and release checks. |
 
