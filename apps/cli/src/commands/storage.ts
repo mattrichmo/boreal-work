@@ -37,6 +37,7 @@ import {
   listSnapshots,
   showSnapshot
 } from "../import-export.js";
+import { withRuntimeWriteLock } from "../locks.js";
 import { formatRecord, type CliOutput } from "../output.js";
 import { migrateStorage } from "../storage-migrate.js";
 import type { CommandResult } from "./shared.js";
@@ -106,35 +107,37 @@ async function storageMigrationCommand(
 }
 
 async function rotateEventLog(context: CliContext, maxBytesFlag: string | undefined) {
-  const maxBytes = maxBytesFlag === undefined ? undefined : parsePositiveInteger(maxBytesFlag, "--max-bytes");
-  const sizeBytes = await stat(context.paths.eventLogFile).then((stats) => stats.size).catch((error) => {
-    if (isNodeError(error) && error.code === "ENOENT") {
-      return 0;
+  return withRuntimeWriteLock(context, async () => {
+    const maxBytes = maxBytesFlag === undefined ? undefined : parsePositiveInteger(maxBytesFlag, "--max-bytes");
+    const sizeBytes = await stat(context.paths.eventLogFile).then((stats) => stats.size).catch((error) => {
+      if (isNodeError(error) && error.code === "ENOENT") {
+        return 0;
+      }
+      throw error;
+    });
+    const base = {
+      path: context.paths.eventLogFile,
+      sizeBytes,
+      ...(maxBytes === undefined ? {} : { maxBytes })
+    };
+    if (maxBytes !== undefined && sizeBytes <= maxBytes) {
+      return {
+        ...base,
+        rotated: false,
+        skipped: true,
+        reason: "below_max_bytes"
+      };
     }
-    throw error;
-  });
-  const base = {
-    path: context.paths.eventLogFile,
-    sizeBytes,
-    ...(maxBytes === undefined ? {} : { maxBytes })
-  };
-  if (maxBytes !== undefined && sizeBytes <= maxBytes) {
+    const log = new FileEventLog({ path: context.paths.eventLogFile });
+    const rotation = await log.rotate();
     return {
       ...base,
-      rotated: false,
-      skipped: true,
-      reason: "below_max_bytes"
+      rotated: true,
+      skipped: false,
+      ...rotation,
+      verification: await log.verifyDeep()
     };
-  }
-  const log = new FileEventLog({ path: context.paths.eventLogFile });
-  const rotation = await log.rotate();
-  return {
-    ...base,
-    rotated: true,
-    skipped: false,
-    ...rotation,
-    verification: await log.verifyDeep()
-  };
+  });
 }
 
 async function exportCommand(

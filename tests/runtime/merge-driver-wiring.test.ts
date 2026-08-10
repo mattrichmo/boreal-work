@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
 import { createRecordMeta, withContentHash, type ActorRef, type EventId, type RuntimeEvent } from "@boreal/core";
-import { FileEventLog } from "@boreal/storage";
+import { FileBorealStore, FileEventLog } from "@boreal/storage";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { main } from "../../apps/cli/src/index.ts";
@@ -83,6 +83,46 @@ describe("merge driver wiring", () => {
     expect(await new FileEventLog({ path: eventLogPath }).verify()).toEqual({ ok: true });
   });
 
+  it("serializes event-log rotation behind an active store writer", async () => {
+    const rootDir = await createInitializedGitWorkspace();
+    await runCli(rootDir, ["work", "create", "rotation lock work", "--json"]);
+    const eventLogPath = join(rootDir, ".boreal", "log", "events.jsonl");
+    const before = await readFile(eventLogPath, "utf8");
+    const writer = await startHeldStoreWrite(rootDir);
+
+    const rotating = runCli(rootDir, ["storage", "rotate-log", "--max-bytes", "1", "--json"]);
+    await delay(50);
+    expect(await readFile(eventLogPath, "utf8")).toBe(before);
+
+    writer.release();
+    await Promise.all([writer.finished, rotating]);
+
+    const log = new FileEventLog({ path: eventLogPath });
+    await expect(log.verifyDeep()).resolves.toEqual({ ok: true, archives: 1 });
+    const entries = await log.readAll();
+    expect(new Set(entries.map((entry) => entry.seq)).size).toBe(entries.length);
+  });
+
+  it("serializes doctor rechain behind an active store writer", async () => {
+    const rootDir = await createInitializedGitWorkspace();
+    const eventLogPath = join(rootDir, ".boreal", "log", "events.jsonl");
+    const writer = await startHeldStoreWrite(rootDir);
+    await writeRepairableMergedLog(eventLogPath);
+    const before = await readFile(eventLogPath, "utf8");
+
+    const repairing = runCli(rootDir, ["doctor", "--fix", "--json"]);
+    await delay(50);
+    expect(await readFile(eventLogPath, "utf8")).toBe(before);
+
+    writer.release();
+    await Promise.all([writer.finished, repairing]);
+
+    const log = new FileEventLog({ path: eventLogPath });
+    await expect(log.verifyDeep()).resolves.toEqual({ ok: true, archives: 0 });
+    const entries = await log.readAll();
+    expect(new Set(entries.map((entry) => entry.seq)).size).toBe(entries.length);
+  });
+
   it("doctor reports corrupt logs without auto-fixing them", async () => {
     const rootDir = await createInitializedGitWorkspace();
     const eventLogPath = join(rootDir, ".boreal", "log", "events.jsonl");
@@ -142,6 +182,32 @@ async function writeRepairableMergedLog(path: string): Promise<void> {
     commonText + (await readFile(current, "utf8")).slice(commonText.length) + (await readFile(other, "utf8")).slice(commonText.length),
     "utf8"
   );
+}
+
+async function startHeldStoreWrite(rootDir: string): Promise<{
+  readonly finished: Promise<void>;
+  readonly release: () => void;
+}> {
+  let enter!: () => void;
+  const entered = new Promise<void>((resolve) => {
+    enter = resolve;
+  });
+  let release!: () => void;
+  const released = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const finished = new FileBorealStore({ rootDir })
+    .write(async () => {
+      enter();
+      await released;
+    })
+    .then(() => undefined);
+  await entered;
+  return { finished, release };
+}
+
+function delay(milliseconds: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
 function testEvent(id: EventId): RuntimeEvent {

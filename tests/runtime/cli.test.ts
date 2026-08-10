@@ -9263,7 +9263,7 @@ describe("bwrk cli", () => {
     expect(rotatedPayload.archivedEntries).toBeGreaterThan(0);
     await expect(stat(rotatedPayload.archivedPath)).resolves.toEqual(expect.objectContaining({ isFile: expect.any(Function) }));
     await expect(log.verifyDeep()).resolves.toEqual({ ok: true, archives: 1 });
-    const liveEntries = await log.readAll();
+    const liveEntries = await log.readLive();
     expect(liveEntries[0]).toEqual(
       expect.objectContaining({
         seq: rotatedPayload.archivedEntries + 1,

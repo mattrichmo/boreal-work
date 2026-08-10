@@ -1,5 +1,9 @@
-import type { FileLockInspection } from "@boreal/storage";
-import { inspectFileLock } from "@boreal/storage";
+import {
+  DEFAULT_FILE_LOCK_OPTIONS,
+  inspectFileLock,
+  withFileLock,
+  type FileLockInspection
+} from "@boreal/storage";
 
 import type { CliContext } from "./context.js";
 import { searchIndexLockDir } from "./search-cli.js";
@@ -32,6 +36,15 @@ export interface RuntimeLockInspectionResult extends FileLockInspection {
   readonly locks: readonly RuntimeLockState[];
   readonly state: FileLockInspection;
   readonly searchIndex: FileLockInspection;
+}
+
+/**
+ * Runtime writers acquire the workspace state lock before the event-log lock.
+ * Keep maintenance mutations on the same order so they cannot interleave with
+ * FileBorealStore/ObjectDirBorealStore transactions.
+ */
+export function withRuntimeWriteLock<T>(context: CliContext, operation: () => Promise<T>): Promise<T> {
+  return withFileLock(context.paths.stateLockDir, DEFAULT_FILE_LOCK_OPTIONS, operation);
 }
 
 export async function inspectRuntimeLocks(context: CliContext): Promise<RuntimeLockInspectionResult> {

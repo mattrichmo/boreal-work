@@ -200,7 +200,11 @@ export class FileEventLog {
   async inspectRepairableChainBreak(): Promise<EventLogRepairInspection> {
     let entries: readonly EventLogEntry[];
     try {
-      entries = await this.readAll();
+      // A merge-repair candidate can have duplicate sequence numbers or a
+      // forked chain, which readAll intentionally rejects. Rechain operates
+      // on the live segment, so inspect that raw segment when no archives are
+      // present and reserve archive-aware failures for manual recovery.
+      entries = (await this.archivePaths()).length === 0 ? await this.readLive() : await this.readAll();
     } catch (error) {
       return {
         ok: false,

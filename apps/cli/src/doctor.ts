@@ -47,7 +47,7 @@ import { inspectGitWorktree } from "./git-worktree.js";
 import { installUpgradeStatus, normalizeInstallChannel } from "./install-channel.js";
 import { inspectBorealInstallStatus, installStatusHealthy, installStatusSummary } from "./install-status.js";
 import { exportDriftDiagnostics, ledgerStatus, readGeneratedLedgerTombstones } from "./import-export.js";
-import { inspectRuntimeLocks } from "./locks.js";
+import { inspectRuntimeLocks, withRuntimeWriteLock } from "./locks.js";
 import {
   ensureBorealJsonlMergeDriver,
   inspectBorealJsonlMergeDriver,
@@ -535,7 +535,7 @@ async function validateEventLog(
     };
   }
   if (fix) {
-    const rewritten = await log.rechain();
+    const rewritten = await withRuntimeWriteLock(context, () => log.rechain());
     return {
       fixed: rewritten > 0,
       diagnostics: [
@@ -1505,33 +1505,43 @@ async function readStateDocument(
   diagnostics: Diagnostic[]
 ): Promise<Record<string, unknown> | undefined> {
   if (context.storage === "objects-v1") {
-    const state = await context.store.read(async (reader) => ({
-      schemaVersion: FILE_STORE_SCHEMA_VERSION,
-      workItems: await reader.listWorkItems(),
-      agentSummaries: await reader.listAgentSummaries(),
-      evidence: await reader.listEvidence(),
-      verifications: await reader.listVerifications(),
-      directiveAcknowledgements: await reader.listDirectiveAcknowledgements(),
-      knowledgeSources: await reader.listKnowledgeSources(),
-      claims: await reader.listClaims(),
-      decisions: await reader.listDecisions(),
-      graphEdges: await reader.listGraphEdges(),
-      reservations: await reader.listReservations(),
-      reviewerHeartbeats: await reader.listReviewerHeartbeats(),
-      runs: await reader.listRuns(),
-      checkpoints: await reader.listCheckpoints(),
-      eventCursors: await reader.listEventCursors(),
-      events: await reader.listEvents(),
-      operations: await reader.listOperations(),
-      projections: [],
-      contextPacks: []
-    }));
-    diagnostics.push({
-      code: "state.parse",
-      severity: "ok",
-      message: "Object store records loaded for runtime state validation"
-    });
-    return state;
+    try {
+      const state = await context.store.read(async (reader) => ({
+        schemaVersion: FILE_STORE_SCHEMA_VERSION,
+        workItems: await reader.listWorkItems(),
+        agentSummaries: await reader.listAgentSummaries(),
+        evidence: await reader.listEvidence(),
+        verifications: await reader.listVerifications(),
+        directiveAcknowledgements: await reader.listDirectiveAcknowledgements(),
+        knowledgeSources: await reader.listKnowledgeSources(),
+        claims: await reader.listClaims(),
+        decisions: await reader.listDecisions(),
+        graphEdges: await reader.listGraphEdges(),
+        reservations: await reader.listReservations(),
+        reviewerHeartbeats: await reader.listReviewerHeartbeats(),
+        runs: await reader.listRuns(),
+        checkpoints: await reader.listCheckpoints(),
+        eventCursors: await reader.listEventCursors(),
+        events: await reader.listEvents(),
+        operations: await reader.listOperations(),
+        projections: [],
+        contextPacks: []
+      }));
+      diagnostics.push({
+        code: "state.parse",
+        severity: "ok",
+        message: "Object store records loaded for runtime state validation"
+      });
+      return state;
+    } catch (error) {
+      diagnostics.push({
+        code: "state.parse",
+        severity: "error",
+        message: "Object store records could not be loaded",
+        details: diagnosticErrorDetails(error)
+      });
+      return undefined;
+    }
   }
 
   if (!existsSync(context.paths.stateFile)) {
