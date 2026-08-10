@@ -21,7 +21,6 @@ import {
   type AgentDirectiveBundle,
   type AgentDirectiveDiagnosticSnapshot,
   type AgentDirectiveSnapshot,
-  type AgentReservation,
   type ContentHash,
   type IsoTimestamp,
   type McpProjectBoundary,
@@ -45,11 +44,6 @@ import { emptyGlobalRollupCacheResult, refreshGlobalRollupCache, type GlobalRoll
 
 export const DAEMON_STATUS_SCHEMA_VERSION = "boreal.daemon.status.v1";
 export const DAEMON_WATCH_SCHEMA_VERSION = "boreal.daemon.watch.v1";
-const DAEMON_WATCH_INTERVAL_MS = 30_000;
-const DAEMON_RESERVATION_RENEWAL_WINDOW_MS = DAEMON_WATCH_INTERVAL_MS * 2;
-const DAEMON_RESERVATION_LEASE_MS = 30 * 60_000;
-export const DAEMON_RESERVATION_RENEWAL_BATCH_LIMIT = 100;
-const DAEMON_RESERVATION_RENEWAL_SKIPPED_SAMPLE_LIMIT = 25;
 const MAX_DAEMON_DIAGNOSTIC_DEPTH = 4;
 const MAX_DAEMON_DIAGNOSTIC_ITEMS = 24;
 const MAX_DAEMON_DIAGNOSTIC_STRING_LENGTH = 1_000;
@@ -199,54 +193,14 @@ interface DaemonReservationRenewalSkippedRow {
 }
 
 export interface DaemonReservationRenewalSummary {
-  readonly enabled: true;
+  readonly enabled: false;
+  readonly reason: "observer_only";
   readonly windowMs: number;
   readonly leaseMs: number;
   readonly batchLimit: number;
   readonly renewed: readonly DaemonReservationRenewalRow[];
   readonly skipped: readonly DaemonReservationRenewalSkippedRow[];
   readonly skippedCount: number;
-}
-
-export interface DaemonRenewalBatch<T> {
-  readonly selected: readonly T[];
-  readonly deferred: readonly T[];
-}
-
-/** Select a deterministic renewal batch without sorting the full candidate set. */
-export function selectDaemonRenewalBatch<T>(
-  values: readonly T[],
-  limit: number,
-  compare: (left: T, right: T) => number
-): DaemonRenewalBatch<T> {
-  const boundedLimit = Number.isFinite(limit) ? Math.max(0, Math.floor(limit)) : 0;
-  if (boundedLimit === 0) {
-    return { selected: [], deferred: values };
-  }
-
-  const selected: T[] = [];
-  for (const value of values) {
-    if (selected.length < boundedLimit) {
-      selected.push(value);
-      continue;
-    }
-    let worstIndex = 0;
-    for (let index = 1; index < selected.length; index += 1) {
-      if (compare(selected[index] as T, selected[worstIndex] as T) > 0) {
-        worstIndex = index;
-      }
-    }
-    if (compare(value, selected[worstIndex] as T) < 0) {
-      selected[worstIndex] = value;
-    }
-  }
-
-  selected.sort(compare);
-  const selectedSet = new Set(selected);
-  return {
-    selected,
-    deferred: values.filter((value) => !selectedSet.has(value))
-  };
 }
 
 export async function inspectDaemonStatus(options: DaemonRuntimeOptions): Promise<DaemonStatusResult> {
@@ -347,9 +301,9 @@ export async function runDaemonWatchOnce(options: DaemonRuntimeOptions): Promise
       ? "lock_conflict"
       : undefined;
   const generatedAt = (options.now?.() ?? nowIso()) as IsoTimestamp;
-  const reservationRenewals = action === "observed"
-    ? await renewDaemonReservations(status.workspaceRoot, generatedAt)
-    : emptyDaemonReservationRenewals();
+  // The watch surface is observer-only for reservations. Renewal is an explicit
+  // agent command so ownership and audit checks cannot be bypassed by a daemon tick.
+  const reservationRenewals = emptyDaemonReservationRenewals();
   const executionRuns = action === "observed"
     ? await reconcileDaemonRuns(status.workspaceRoot, generatedAt)
     : emptyDaemonExecutionRuns();
@@ -661,99 +615,13 @@ async function readProjectSetup(workspaceRoot: string): Promise<ProjectSetupLike
   }
 }
 
-async function renewDaemonReservations(workspaceRoot: string, now: IsoTimestamp): Promise<DaemonReservationRenewalSummary> {
-  const setup = await readProjectSetup(workspaceRoot);
-  const store = daemonStore(workspaceRoot, setup.storage);
-  const nowMs = Date.parse(now);
-  const expiresAt = new Date(nowMs + DAEMON_RESERVATION_LEASE_MS).toISOString() as IsoTimestamp;
-  const runtime = createBorealRuntime({
-    store,
-    actor: {
-      id: "boreal-daemon",
-      kind: "system",
-      displayName: "Boreal daemon"
-    },
-    clock: () => new Date(nowMs)
-  });
-  const candidates = await store.read(async (reader) => {
-    const reservations = await reader.listReservations();
-    return reservations
-      .filter((reservation) => reservation.status === "active")
-      .filter((reservation) => daemonReservationNeedsRenewal(reservation, nowMs));
-  });
-  const renewalBatch = selectDaemonRenewalBatch(
-    candidates,
-    DAEMON_RESERVATION_RENEWAL_BATCH_LIMIT,
-    compareDaemonReservations
-  );
-  const renewed: DaemonReservationRenewalRow[] = [];
-  const skipped: DaemonReservationRenewalSkippedRow[] = [];
-  let skippedCount = 0;
-  for (const reservation of renewalBatch.deferred) {
-    skippedCount += 1;
-    if (skipped.length < DAEMON_RESERVATION_RENEWAL_SKIPPED_SAMPLE_LIMIT) {
-      skipped.push({
-        workId: reservation.workId,
-        reservationId: reservation.meta.id,
-        agentId: String(reservation.agentId),
-        reason: "batch_limit"
-      });
-    }
-  }
-  for (const reservation of renewalBatch.selected) {
-    try {
-      const result = await runtime.renewWorkReservation({
-        workId: reservation.workId,
-        expiresAt
-      });
-      renewed.push({
-        workId: result.work.meta.id,
-        reservationId: result.reservation.meta.id,
-        agentId: String(result.reservation.agentId),
-        previousExpiresAt: reservation.expiresAt,
-        expiresAt: result.reservation.expiresAt ?? expiresAt
-      });
-    } catch (error) {
-      skippedCount += 1;
-      if (skipped.length < DAEMON_RESERVATION_RENEWAL_SKIPPED_SAMPLE_LIMIT) {
-        skipped.push({
-          workId: reservation.workId,
-          reservationId: reservation.meta.id,
-          agentId: String(reservation.agentId),
-          reason: error instanceof BorealError ? error.code : "renew_failed"
-        });
-      }
-    }
-  }
-  return {
-    ...emptyDaemonReservationRenewals(),
-    renewed,
-    skipped,
-    skippedCount
-  };
-}
-
-function compareDaemonReservations(left: AgentReservation, right: AgentReservation): number {
-  return left.agentId.localeCompare(right.agentId) || left.workId.localeCompare(right.workId) || left.meta.id.localeCompare(right.meta.id);
-}
-
-function daemonReservationNeedsRenewal(reservation: AgentReservation, nowMs: number): boolean {
-  if (!reservation.expiresAt) {
-    return false;
-  }
-  const expiresAtMs = Date.parse(reservation.expiresAt);
-  if (!Number.isFinite(expiresAtMs) || expiresAtMs <= nowMs) {
-    return false;
-  }
-  return expiresAtMs - nowMs <= DAEMON_RESERVATION_RENEWAL_WINDOW_MS;
-}
-
 function emptyDaemonReservationRenewals(): DaemonReservationRenewalSummary {
   return {
-    enabled: true,
-    windowMs: DAEMON_RESERVATION_RENEWAL_WINDOW_MS,
-    leaseMs: DAEMON_RESERVATION_LEASE_MS,
-    batchLimit: DAEMON_RESERVATION_RENEWAL_BATCH_LIMIT,
+    enabled: false,
+    reason: "observer_only",
+    windowMs: 0,
+    leaseMs: 0,
+    batchLimit: 0,
     renewed: [],
     skipped: [],
     skippedCount: 0

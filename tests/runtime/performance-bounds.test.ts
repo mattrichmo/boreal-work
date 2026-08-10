@@ -15,10 +15,6 @@ import {
   MAX_CONSOLE_GLOBAL_PROJECTS,
   mapWithConcurrencyLimit as mapConsoleWithConcurrencyLimit
 } from "../../apps/console/src/app/live-data.ts";
-import {
-  DAEMON_RESERVATION_RENEWAL_BATCH_LIMIT,
-  selectDaemonRenewalBatch
-} from "../../apps/daemon/src/runtime.ts";
 
 describe("bounded performance paths", () => {
   it("selects the same ordered top-k result as a full sort", () => {
@@ -60,26 +56,6 @@ describe("bounded performance paths", () => {
     expect(projectObserved.results).toEqual(Array.from({ length: 18 }, (_, index) => index));
   });
 
-  it("publishes an explicit daemon renewal batch budget", () => {
-    expect(DAEMON_RESERVATION_RENEWAL_BATCH_LIMIT).toBe(100);
-  });
-
-  it("selects the deterministic daemon batch without sorting all candidates", () => {
-    const values = Array.from({ length: 1_000 }, (_, index) => ({
-      agent: `agent-${index % 17}`,
-      work: `work-${String((index * 19) % 1_000).padStart(4, "0")}`,
-      id: `reservation-${String(index).padStart(4, "0")}`
-    }));
-    const compare = (left: (typeof values)[number], right: (typeof values)[number]) =>
-      left.agent.localeCompare(right.agent) || left.work.localeCompare(right.work) || left.id.localeCompare(right.id);
-
-    const expected = values.slice().sort(compare).slice(0, DAEMON_RESERVATION_RENEWAL_BATCH_LIMIT);
-    const batch = selectDaemonRenewalBatch(values, DAEMON_RESERVATION_RENEWAL_BATCH_LIMIT, compare);
-
-    expect(batch.selected).toEqual(expected);
-    expect(batch.deferred).toHaveLength(values.length - expected.length);
-    expect(new Set([...batch.selected, ...batch.deferred]).size).toBe(values.length);
-  });
 });
 
 async function exerciseConcurrency(

@@ -152,10 +152,10 @@ describe("agent renew --all", () => {
     });
   });
 
-  it("renews near-expiry reservations during daemon watch", async () => {
+  it("does not renew reservations during daemon watch", async () => {
     const rootDir = await createTestWorkspace();
     const registryRoot = await createTestWorkspace();
-    await runCli(rootDir, ["init", "--json"]);
+    await runCli(rootDir, ["init", "--setup-memory", "--json"]);
     const nearWork = await createWork(rootDir, "Daemon near expiry");
     const farWork = await createWork(rootDir, "Daemon far expiry");
     const nearReservation = await reserve(rootDir, nearWork.meta.id, "daemon-agent", "1h");
@@ -172,27 +172,36 @@ describe("agent renew --all", () => {
     });
 
     expect(watch.action).toBe("observed");
-    expect(watch.reservationRenewals.renewed).toEqual([
-      expect.objectContaining({
-        workId: nearWork.meta.id,
-        reservationId: nearReservation.reservationId,
-        agentId: "daemon-agent",
-        previousExpiresAt: nearExpiry
-      })
-    ]);
-    expect(watch.reservationRenewals.skipped).toEqual([]);
-    expect(Date.parse(watch.reservationRenewals.renewed[0]?.expiresAt ?? "")).toBeGreaterThan(Date.parse(nearExpiry));
+    expect(watch.reservationRenewals).toEqual({
+      enabled: false,
+      reason: "observer_only",
+      windowMs: 0,
+      leaseMs: 0,
+      batchLimit: 0,
+      renewed: [],
+      skipped: [],
+      skippedCount: 0
+    });
 
-    const farRows = parseData<ReservationRow[]>(
-      (await runCli(rootDir, ["reservation", "list", "--agent", "far-agent", "--status", "active", "--json"])).stdout
+    const activeRows = parseData<ReservationRow[]>(
+      (await runCli(rootDir, ["reservation", "list", "--status", "active", "--json"])).stdout
     );
-    expect(farRows).toEqual([
-      expect.objectContaining({
-        id: farReservation.reservationId,
-        workId: farWork.meta.id,
-        expiresAt: farReservation.reservation.expiresAt
-      })
-    ]);
+    expect(activeRows).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: nearReservation.reservationId,
+          workId: nearWork.meta.id,
+          agentId: "daemon-agent",
+          expiresAt: nearExpiry
+        }),
+        expect.objectContaining({
+          id: farReservation.reservationId,
+          workId: farWork.meta.id,
+          agentId: "far-agent",
+          expiresAt: farReservation.reservation.expiresAt
+        })
+      ])
+    );
   });
 });
 

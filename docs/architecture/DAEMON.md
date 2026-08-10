@@ -2,7 +2,7 @@
 
 `apps/daemon` provides a project-scoped status and watch surface.
 
-The daemon is an observer and coordinator, not a second runtime writer. It may watch selected-project runtime and generated-artifact paths, report stale process state, and reconcile durable execution runs. It must not silently write memory truth, mutate work records, execute arbitrary commands, repair ledgers, rebuild search, or edit vault files.
+The daemon is an observer and coordinator, not a second runtime writer. It may watch selected-project runtime and generated-artifact paths, report stale process state, and reconcile durable execution runs. Agent reservation renewal remains an explicit command-mediated operation; a watch tick never renews reservations. It must not silently write memory truth, mutate work records, execute arbitrary commands, repair ledgers, rebuild search, or edit vault files.
 
 ## Responsibilities
 
