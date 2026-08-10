@@ -1,5 +1,5 @@
-import { execFile } from "node:child_process";
-import { access, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { execFile, spawn } from "node:child_process";
+import { access, chmod, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -169,6 +169,25 @@ describe("install.sh", () => {
     expect(skippedRegistry.entries).toEqual([]);
     expect(await exists(join(globalSkipped.binDir, "bwrk"))).toBe(true);
   }, 50_000);
+
+  it("bootstraps stdin installs from a Node project with package.json", async () => {
+    const fixture = await makeFixture("boreal-install-stdin-package-");
+    await writePackageJson(fixture.cwd);
+    const stubs = await makeStdinBootstrapStubs(fixture);
+
+    const installed = await runInstallFromStdin(fixture, ["--machine", "--yes", "--repo-url", "fixture://boreal"], {
+      PATH: `${stubs.binDir}:${process.env.PATH ?? ""}`,
+      BOREAL_INSTALL_DIST_DIR: "",
+      BOREAL_TEST_INSTALL_SCRIPT: installScript,
+      BOREAL_TEST_DIST: stubs.distPath
+    });
+
+    expect(installed.exitCode, installed.stderr).toBe(0);
+    expect(installed.stdout).toContain("Installed bwrk machine binary");
+    expect(await exists(join(fixture.binDir, "bwrk"))).toBe(true);
+    const version = await runExternal(join(fixture.binDir, "bwrk"), ["--version"], fixture.cwd, fixtureEnv(fixture));
+    expect(version).toEqual(expect.objectContaining({ exitCode: 0, stdout: "boreal-work 0.1.0 (stdin-fixture)\n" }));
+  }, 30_000);
 });
 
 async function makeFixture(prefix: string): Promise<InstallFixture> {
@@ -233,6 +252,56 @@ function registryFile(registryRoot: string): string {
 
 async function runInstall(fixture: InstallFixture, args: readonly string[]): Promise<CommandRun> {
   return runExternal("bash", [installScript, ...args], fixture.cwd, fixtureEnv(fixture));
+}
+
+async function runInstallFromStdin(
+  fixture: InstallFixture,
+  args: readonly string[],
+  envOverrides: NodeJS.ProcessEnv
+): Promise<CommandRun> {
+  const source = await readFile(installScript, "utf8");
+  return new Promise((resolve) => {
+    const child = spawn("bash", ["-s", "--", ...args], {
+      cwd: fixture.cwd,
+      env: commandEnv({ ...fixtureEnv(fixture), ...envOverrides }),
+      stdio: ["pipe", "pipe", "pipe"]
+    });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (chunk: Buffer | string) => {
+      stdout += chunk.toString();
+    });
+    child.stderr.on("data", (chunk: Buffer | string) => {
+      stderr += chunk.toString();
+    });
+    child.on("error", (error) => {
+      stderr += error instanceof Error ? error.message : String(error);
+      resolve({ exitCode: null, stdout, stderr });
+    });
+    child.on("close", (exitCode) => resolve({ exitCode, stdout, stderr }));
+    child.stdin.end(source);
+  });
+}
+
+async function makeStdinBootstrapStubs(fixture: InstallFixture): Promise<{ readonly binDir: string; readonly distPath: string }> {
+  const binDir = join(fixture.root, "bootstrap-stubs");
+  const distPath = join(fixture.root, "bootstrap-dist", "index.js");
+  await mkdir(binDir, { recursive: true });
+  await mkdir(join(fixture.root, "bootstrap-dist"), { recursive: true });
+  await writeFile(
+    join(binDir, "git"),
+    "#!/usr/bin/env bash\nset -euo pipefail\ndestination=\"${!#}\"\nmkdir -p \"$destination/apps/cli/dist\"\ncp \"$BOREAL_TEST_INSTALL_SCRIPT\" \"$destination/install.sh\"\ncp \"$BOREAL_TEST_DIST\" \"$destination/apps/cli/dist/index.js\"\n",
+    "utf8"
+  );
+  await writeFile(join(binDir, "pnpm"), "#!/usr/bin/env bash\nexit 0\n", "utf8");
+  await chmod(join(binDir, "git"), 0o755);
+  await chmod(join(binDir, "pnpm"), 0o755);
+  await writeFile(
+    distPath,
+    "#!/usr/bin/env node\nconst args = process.argv.slice(2);\nif (args.includes(\"--json\")) { console.log(JSON.stringify({ ok: true, data: { name: \"boreal-work\", version: \"0.1.0\", installChannel: \"stdin-fixture\", build: { buildSha: \"stdin-fixture\" } } })); } else if (args.includes(\"--version\")) { console.log(\"boreal-work 0.1.0 (stdin-fixture)\"); }\n",
+    "utf8"
+  );
+  return { binDir, distPath };
 }
 
 async function runExternal(

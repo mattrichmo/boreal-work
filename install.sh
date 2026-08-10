@@ -40,7 +40,14 @@ from_github=false
 github_ref="${BOREAL_UPDATE_REF:-}"
 github_repo_url="${BOREAL_UPDATE_REPO_URL:-https://github.com/mattrichmo/boreal-work.git}"
 
-script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd -P || pwd -P)"
+script_source="${BASH_SOURCE[0]:-}"
+running_from_stdin=false
+if [ -n "$script_source" ] && [ -f "$script_source" ]; then
+  script_dir="$(cd -- "$(dirname -- "$script_source")" 2>/dev/null && pwd -P || pwd -P)"
+else
+  script_dir="$(pwd -P)"
+  running_from_stdin=true
+fi
 dist_dir="${BOREAL_INSTALL_DIST_DIR:-$script_dir/apps/cli/dist}"
 bin_dir="${BOREAL_INSTALL_BIN_DIR:-${HOME:-}/.local/bin}"
 lib_dir="${BOREAL_INSTALL_LIB_DIR:-${XDG_DATA_HOME:-${HOME:-}/.local/share}/boreal/bwrk}"
@@ -188,6 +195,10 @@ bootstrap_from_github() {
 
 main() {
   if [ "$from_github" = true ]; then
+    bootstrap_from_github
+  elif [ "$running_from_stdin" = true ]; then
+    # A curl | bash invocation has no checkout-relative dist to reuse. Bootstrap
+    # even when the caller happens to be a Node project with package.json.
     bootstrap_from_github
   elif [ ! -f "$dist_dir/index.js" ] && [ ! -f "$script_dir/package.json" ]; then
     # Running outside a checkout (e.g. curl | bash) with no built dist: bootstrap.
