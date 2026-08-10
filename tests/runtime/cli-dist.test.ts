@@ -7,6 +7,8 @@ import { promisify } from "node:util";
 
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 
+import { resolveDistSnapshotRoot } from "../../tools/build-cli-dist.mjs";
+
 interface CommandRun {
   readonly exitCode: number | null;
   readonly stdout: string;
@@ -33,6 +35,30 @@ afterAll(async () => {
 });
 
 describe("bundled bwrk dist", () => {
+  it("rejects unsafe dist snapshot paths before deleting anything", async () => {
+    const symlinkRoot = await makeTempDir("boreal-cli-dist-link-");
+    await symlink(repoRoot, join(symlinkRoot, "escape"), "dir");
+
+    const unsafePaths = [
+      repoRoot,
+      join(repoRoot, ".."),
+      join(repoRoot, "..", ".."),
+      tmpdir(),
+      "/",
+      join(symlinkRoot, "escape", "snapshot")
+    ];
+    for (const snapshotPath of unsafePaths) {
+      await expect(resolveDistSnapshotRoot(snapshotPath), snapshotPath).rejects.toThrow("BOREAL_BUILD_DIST_SNAPSHOT_DIR");
+    }
+  });
+
+  it("accepts a child of the OS temporary directory as a dist snapshot", async () => {
+    const snapshotRoot = await makeTempDir("boreal-cli-dist-valid-");
+    const snapshotDist = join(snapshotRoot, "dist");
+
+    await expect(resolveDistSnapshotRoot(snapshotDist)).resolves.toBe(snapshotDist);
+  }, 30_000);
+
   it("runs from a copied dist directory without a source checkout or node_modules", async () => {
     const bundleRoot = await makeTempDir("boreal-cli-bundle-");
     const workspaceRoot = await makeTempDir("boreal-cli-workspace-");

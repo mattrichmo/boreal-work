@@ -2,8 +2,9 @@
 import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
-import { chmod, cp, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
-import { dirname, join, relative, resolve, sep } from "node:path";
+import { chmod, cp, mkdir, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
+import { homedir, tmpdir } from "node:os";
+import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 
@@ -18,9 +19,9 @@ const assetRoot = join(distRoot, "assets");
 const lockDir = join(cliRoot, ".dist-build.lock");
 const lockTimeoutMs = 120_000;
 const staleLockMs = 300_000;
-const distSnapshotRoot = process.env.BOREAL_BUILD_DIST_SNAPSHOT_DIR
-  ? resolve(process.env.BOREAL_BUILD_DIST_SNAPSHOT_DIR)
-  : undefined;
+
+async function main() {
+const distSnapshotRoot = await resolveDistSnapshotRoot(process.env.BOREAL_BUILD_DIST_SNAPSHOT_DIR);
 const validChannels = new Set(["npm", "brew"]);
 const installChannel = process.env.BOREAL_INSTALL_CHANNEL && validChannels.has(process.env.BOREAL_INSTALL_CHANNEL)
   ? process.env.BOREAL_INSTALL_CHANNEL
@@ -120,6 +121,11 @@ console.log(`Runtime assets: ${assetRoot}`);
 console.log(`Build SHA: ${buildIdentity.buildSha}`);
 console.log(`Artifact digest: ${buildIdentity.artifactDigest}`);
 console.log(`Agent asset digest: ${buildIdentity.agentAssetDigest}`);
+}
+
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  await main();
+}
 
 function resolveBuildSha(root) {
   const explicit = process.env.BOREAL_BUILD_SHA;
@@ -193,6 +199,82 @@ function digestFiles(root, files) {
 
 async function readJson(path) {
   return JSON.parse(await readFile(path, "utf8"));
+}
+
+export async function resolveDistSnapshotRoot(value) {
+  if (!value) {
+    return undefined;
+  }
+
+  const candidate = resolve(value);
+  // The normal build output is already a controlled path and is not copied as
+  // a snapshot when explicitly repeated in the environment.
+  if (candidate === distRoot) {
+    return candidate;
+  }
+
+  const [repoRealRoot, homeRoot, tempRoot, releaseRoot, candidateRealPath] = await Promise.all([
+    realpath(repoRoot),
+    realpath(homedir()),
+    realpath(tmpdir()),
+    realpathWithMissingTail(join(repoRoot, ".boreal", "release")),
+    realpathWithMissingTail(candidate)
+  ]);
+
+  if (!isWithin(repoRealRoot, releaseRoot)) {
+    throw new Error(
+      `BOREAL_BUILD_DIST_SNAPSHOT_DIR cannot use a symlinked release root: ${candidate}`
+    );
+  }
+
+  const forbiddenAncestor = [
+    [repoRealRoot, "the repository root or an ancestor"],
+    [homeRoot, "the home directory or an ancestor"],
+    [sep, "the filesystem root"]
+  ].find(([ancestor]) => isWithin(candidateRealPath, ancestor));
+  if (forbiddenAncestor) {
+    throw new Error(
+      `BOREAL_BUILD_DIST_SNAPSHOT_DIR cannot target ${forbiddenAncestor[1]}: ${candidate}`
+    );
+  }
+
+  const allowedParent = [tempRoot, releaseRoot].find(
+    (parent) => isWithin(parent, candidateRealPath) && parent !== candidateRealPath
+  );
+  if (!allowedParent) {
+    throw new Error(
+      `BOREAL_BUILD_DIST_SNAPSHOT_DIR must be a child of the OS temporary directory or .boreal/release: ${candidate}`
+    );
+  }
+
+  return candidate;
+}
+
+async function realpathWithMissingTail(path) {
+  let current = path;
+  const missingTail = [];
+  while (true) {
+    try {
+      const canonical = await realpath(current);
+      return join(canonical, ...missingTail);
+    } catch (error) {
+      if (errorCode(error) !== "ENOENT") {
+        throw error;
+      }
+      const parent = dirname(current);
+      if (parent === current) {
+        throw error;
+      }
+      missingTail.unshift(basename(current));
+      current = parent;
+    }
+  }
+}
+
+function isWithin(parent, child) {
+  const childRelative = relative(parent, child);
+  return childRelative === "" ||
+    (childRelative !== ".." && !childRelative.startsWith(`..${sep}`) && !childRelative.startsWith(sep));
 }
 
 function stringField(value, key) {
