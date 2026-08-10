@@ -102,4 +102,59 @@ describe("boreal orchestrator", () => {
     const resumed = await runtime.orchestrator.transition(orchestration.meta.id, "resumed");
     expect(resumed.status).toBe("active");
   });
+
+  it("persists the session and Git handoff returned by the injected start adapter", async () => {
+    const store = new InMemoryBorealStore();
+    const runtime = createBorealRuntime({
+      actor,
+      store,
+      orchestrationClaimWork: async (input, dependencies) => {
+        const claim = await dependencies.claimWork(input);
+        const reservation = await dependencies.attachReservationGit({
+          reservationId: claim.reservation.meta.id,
+          git: {
+            branch: "work/orchestration-child",
+            baseSha: "abc123",
+            worktreePath: "/tmp/boreal-orchestration-child"
+          }
+        });
+        return { ...claim, reservation };
+      }
+    });
+    const root = await runtime.createWork({ title: "Session handoff root", kind: "sprint" });
+    const child = await runtime.createWork({ title: "Session handoff child", kind: "task", ready: true });
+    await runtime.addBlockingDependency({ blockedWorkId: root.meta.id, blockingWorkId: child.meta.id });
+
+    const orchestration = await runtime.orchestrator.start({
+      rootWorkId: root.meta.id,
+      agentPool: ["agent-a"],
+      sessionId: "session-42",
+      worktree: true
+    });
+    expect(orchestration.sessionId).toBe("session-42");
+    expect(orchestration.worktree).toBe(true);
+
+    const planned = await runtime.orchestrator.show(orchestration.meta.id);
+    expect(planned.readyCandidates[0]?.command).toContain("--session session-42");
+    expect(planned.readyCandidates[0]?.command).toContain("--worktree");
+
+    const dispatched = await runtime.orchestrator.tick({ orchestrationId: orchestration.meta.id, dispatch: true });
+    expect(dispatched.assigned[0]).toMatchObject({
+      workId: child.meta.id,
+      agentId: "agent-a",
+      sessionId: "session-42",
+      git: {
+        branch: "work/orchestration-child",
+        baseSha: "abc123",
+        worktreePath: "/tmp/boreal-orchestration-child"
+      }
+    });
+
+    const reloaded = createBorealRuntime({ actor, store });
+    const shown = await reloaded.orchestrator.show(orchestration.meta.id);
+    expect(shown.run.assignments[0]).toMatchObject({
+      sessionId: "session-42",
+      git: { worktreePath: "/tmp/boreal-orchestration-child" }
+    });
+  });
 });

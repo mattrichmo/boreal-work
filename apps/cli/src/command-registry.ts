@@ -1132,7 +1132,7 @@ export const COMMAND_DEFINITIONS: readonly CommandDefinition[] = [
     path: ["orchestrate", "start"],
     category: "orchestrator",
     summary: "Start a durable supervisory orchestration run.",
-    usage: "bwrk orchestrate start <root-work> [--agent <agent-id>...] [--max-concurrent <n>] [--nudge-after-ms <ms>] [--stale-after-ms <ms>] [--max-nudges <n>] [--purpose <text>] [--dispatch] [--json]",
+    usage: "bwrk orchestrate start <root-work> [--agent <agent-id>...] [--max-concurrent <n>] [--nudge-after-ms <ms>] [--stale-after-ms <ms>] [--max-nudges <n>] [--purpose <text>] [--worktree] [--dispatch] [--json]",
     description: "Creates a bounded orchestration over a work scope. With --dispatch, it claims the next wave through the existing reservation path for the explicit agent pool.",
     flags: [
       flag("agent", "value", "Agent pool member for dispatch. Repeat for multiple agents.", true),
@@ -1141,6 +1141,7 @@ export const COMMAND_DEFINITIONS: readonly CommandDefinition[] = [
       flag("stale-after-ms", "value", "Idle time before an assignment is marked stale."),
       flag("max-nudges", "value", "Maximum nudges per assignment before attention is required."),
       flag("purpose", "value", "Purpose recorded on dispatched reservations."),
+      flag("worktree", "boolean", "Create sibling Git worktrees for dispatched assignments and record the handoff."),
       flag("dispatch", "boolean", "Claim the first bounded wave immediately for the explicit agent pool.")
     ],
     positionals: { label: "root work reference", min: 1, max: 1 },

@@ -44,6 +44,8 @@ export interface StartOrchestrationInput {
   readonly agentPool?: readonly (AgentId | string)[];
   readonly policy?: Partial<OrchestrationPolicy>;
   readonly purpose?: string;
+  readonly sessionId?: string;
+  readonly worktree?: boolean;
 }
 
 export interface ListOrchestrationsOptions {
@@ -132,6 +134,8 @@ export interface OrchestratorRuntimeBridge {
     readonly workId: WorkId;
     readonly agentId: AgentId | string;
     readonly purpose?: string;
+    readonly sessionId?: string;
+    readonly worktree?: boolean;
   }) => Promise<{
     readonly work: WorkItem;
     readonly reservation: AgentReservation;
@@ -262,7 +266,9 @@ export function createOrchestrationService(options: {
         : options.actor.id;
       const loadKey = String(agentId);
       agentLoads.set(loadKey, (agentLoads.get(loadKey) ?? 0) + 1);
-      const command = `bwrk agent start ${work.id} --agent ${agentId} --purpose orchestration:${run.meta.id} --json`;
+      const sessionFlag = run.sessionId ? ` --session ${run.sessionId}` : "";
+      const gitFlag = run.worktree === true ? " --worktree" : run.worktree === false ? " --no-branch" : "";
+      const command = `bwrk agent start ${work.id} --agent ${agentId} --purpose orchestration:${run.meta.id}${sessionFlag}${gitFlag} --json`;
       return {
         workId: work.id as WorkId,
         title: work.title,
@@ -309,6 +315,8 @@ export function createOrchestrationService(options: {
         rootWorkId: input.rootWorkId,
         status: "active" as const,
         ...(input.purpose?.trim() ? { purpose: input.purpose.trim() } : {}),
+        ...(input.sessionId?.trim() ? { sessionId: input.sessionId.trim() } : {}),
+        ...(input.worktree !== undefined ? { worktree: input.worktree } : {}),
         policy,
         agentPool,
         contextLedgerSeq: await writer.headSeq(),
@@ -366,12 +374,16 @@ export function createOrchestrationService(options: {
           const claim = await options.bridge.claimWork({
             workId: candidate.workId,
             agentId,
-            purpose: run.purpose ?? `orchestration:${run.meta.id}`
+            purpose: run.purpose ?? `orchestration:${run.meta.id}`,
+            ...(run.sessionId ? { sessionId: run.sessionId } : {}),
+            ...(run.worktree !== undefined ? { worktree: run.worktree } : {})
           });
           const assignment: OrchestrationAssignment = {
             workId: candidate.workId,
             agentId,
             reservationId: claim.reservation.meta.id,
+            ...(run.sessionId ? { sessionId: run.sessionId } : {}),
+            ...(claim.reservation.git ? { git: claim.reservation.git } : {}),
             wave: dispatchWave,
             state: "assigned",
             assignedAt: timestamp,
@@ -560,15 +572,34 @@ export function createOrchestrationService(options: {
     const current = await options.store.read(async (reader) => {
       const workItems = new Map((await reader.listWorkItems()).map((work) => [work.meta.id, work]));
       const reservations = new Map((await reader.listReservations()).map((reservation) => [reservation.meta.id, reservation]));
-      return { workItems, reservations };
+      const summaries = await reader.listAgentSummaries();
+      return { workItems, reservations, summaries };
     });
     const issuedNudges: OrchestrationNudge[] = [];
     const assignments = run.assignments.map((assignment) => {
       const work = current.workItems.get(assignment.workId);
       const reservation = assignment.reservationId ? current.reservations.get(assignment.reservationId) : undefined;
       if (!work) return assignment;
+      const workSummaries = current.summaries.filter((summary) =>
+        summary.subjectType === "work" && summary.subjectId === work.meta.id && (summary.status === "final" || summary.status === "forced")
+      );
+      const gateMetadata = closeoutGateMetadata(work);
+      const observedMetadata = {
+        ...(work.evidenceIds.length > 0 ? { evidenceIds: work.evidenceIds } : {}),
+        ...(work.verificationIds.length > 0 ? { verificationIds: work.verificationIds } : {}),
+        ...(workSummaries.length > 0 ? {
+          agentSummaryIds: workSummaries.map((summary) => summary.meta.id),
+          commitShas: uniqueStrings(workSummaries.flatMap((summary) => summary.commitShas))
+        } : {}),
+        ...gateMetadata
+      } satisfies Partial<OrchestrationAssignment>;
       if (isTerminalWork(work.status)) {
-        return { ...assignment, state: "completed" as const, completedAt: assignment.completedAt ?? timestamp };
+        return {
+          ...assignment,
+          ...observedMetadata,
+          state: "completed" as const,
+          completedAt: assignment.completedAt ?? timestamp
+        };
       }
       let state = assignment.state;
       if (work.status === "blocked") {
@@ -598,7 +629,9 @@ export function createOrchestrationService(options: {
       }
       return {
         ...assignment,
+        ...observedMetadata,
         state,
+        ...(reservation?.git ? { git: reservation.git } : {}),
         nudgeCount,
         ...(lastNudgeAt ? { lastNudgeAt } : {})
       } satisfies OrchestrationAssignment;
@@ -627,6 +660,18 @@ function normalizePolicy(input: Partial<OrchestrationPolicy> | undefined): Orche
     throw new BorealError("BOREAL_INVALID_INPUT", "staleAfterMs must be greater than or equal to nudgeAfterMs", { policy });
   }
   return policy;
+}
+
+function closeoutGateMetadata(work: WorkItem): Partial<OrchestrationAssignment> {
+  const gates = work.requiredCloseoutGates ?? [];
+  const openCloseoutGateIds = gates.filter((gate) => gate.status === "open").map((gate) => gate.id);
+  const satisfiedCloseoutGateIds = gates
+    .filter((gate) => gate.status === "satisfied" || gate.status === "forced")
+    .map((gate) => gate.id);
+  return {
+    ...(openCloseoutGateIds.length > 0 ? { openCloseoutGateIds } : {}),
+    ...(satisfiedCloseoutGateIds.length > 0 ? { satisfiedCloseoutGateIds } : {})
+  };
 }
 
 function latestRuns(events: readonly RuntimeEvent[]): OrchestrationRun[] {

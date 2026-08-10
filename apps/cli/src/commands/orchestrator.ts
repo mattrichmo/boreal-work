@@ -48,6 +48,8 @@ export async function orchestratorCommand(
         rootWorkId,
         ...(flagValues(args, "agent").length > 0 ? { agentPool: flagValues(args, "agent") } : {}),
         ...(flagValue(args, "purpose") ? { purpose: flagValue(args, "purpose") } : {}),
+        sessionId: context.sessionId,
+        worktree: hasFlag(args, "worktree"),
         policy: policyFromArgs(args)
       });
       const tick = hasFlag(args, "dispatch")

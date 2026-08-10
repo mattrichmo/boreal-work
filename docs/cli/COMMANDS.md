@@ -713,10 +713,10 @@ Run commands never execute through a shell. Local workers allow only `bwrk`, `gi
 ## `orchestrate start`
 
 ```bash
-bwrk orchestrate start <root-work> [--agent <agent-id>...] [--max-concurrent <n>] [--nudge-after-ms <ms>] [--stale-after-ms <ms>] [--max-nudges <n>] [--purpose <text>] [--dispatch] [--json]
+bwrk orchestrate start <root-work> [--agent <agent-id>...] [--max-concurrent <n>] [--nudge-after-ms <ms>] [--stale-after-ms <ms>] [--max-nudges <n>] [--purpose <text>] [--worktree] [--dispatch] [--json]
 ```
 
-Creates a durable supervisory run over the dependency scope of a root work item. The default is plan-only; `--dispatch` claims one bounded wave through the existing reservation path and only for the explicit `--agent` pool.
+Creates a durable supervisory run over the dependency scope of a root work item. The default is plan-only; `--dispatch` claims one bounded wave through the existing reservation path and only for the explicit `--agent` pool. `--worktree` opts dispatched assignments into sibling Git worktree handoffs; the agent still finishes through the normal evidence, verification, and closeout lifecycle.
 
 ## `orchestrate list`
 

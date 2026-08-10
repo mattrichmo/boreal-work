@@ -17,6 +17,7 @@ import { FileBorealStore, ObjectDirBorealStore, type BorealStore } from "@boreal
 
 import { flagValue, hasFlag, type ParsedArgs } from "./args.js";
 import { commandBehavior, commandPath, findCommandDefinition } from "./command-registry.js";
+import { createOrchestrationClaimWorkAdapter } from "./orchestration-adapter.js";
 import { readProjectStorage, type ProjectStorageKind } from "./project-setup.js";
 import {
   assertCanonicalWritesAllowed,
@@ -82,7 +83,13 @@ export async function createCliContext(
   assertCommandToolchainCompatibility(args, toolchain);
   const storage = await selectStorageKind(args, workspaceRoot, paths);
   const store = storage === "objects-v1" ? new ObjectDirBorealStore({ rootDir: workspaceRoot }) : new FileBorealStore({ rootDir: workspaceRoot });
-  const runtime = createBorealRuntime({ store, actor, operationId: options.operationId, workspaceRoot });
+  const runtime = createBorealRuntime({
+    store,
+    actor,
+    operationId: options.operationId,
+    workspaceRoot,
+    orchestrationClaimWork: createOrchestrationClaimWorkAdapter(workspaceRoot)
+  });
   const context: CliContext = {
     cwd,
     workspaceRoot,

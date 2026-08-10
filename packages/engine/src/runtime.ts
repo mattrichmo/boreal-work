@@ -86,6 +86,7 @@ export interface BorealRuntimeOptions {
   readonly actor?: ActorRef;
   readonly operationId?: OperationId;
   readonly clock?: () => Date;
+  readonly orchestrationClaimWork?: OrchestrationClaimWorkAdapter;
 }
 
 export type CreateWorkInput = Omit<Parameters<typeof createWorkItem>[0], "actor" | "now">;
@@ -114,6 +115,11 @@ export interface ClaimWorkInput {
   readonly expiresAt?: IsoTimestamp;
 }
 
+export interface OrchestrationClaimWorkInput extends ClaimWorkInput {
+  readonly sessionId?: string;
+  readonly worktree?: boolean;
+}
+
 export interface ClaimNextWorkResult {
   readonly work: WorkItem;
   readonly reservation: AgentReservation;
@@ -124,6 +130,17 @@ export interface ReservationLifecycleResult {
   readonly work: WorkItem;
   readonly reservation: AgentReservation;
 }
+
+export interface OrchestrationClaimWorkDependencies {
+  readonly claimWork: (input: ClaimWorkInput) => Promise<ClaimNextWorkResult>;
+  readonly attachReservationGit: (input: ReservationGitAttachmentInput) => Promise<AgentReservation>;
+  readonly releaseWorkReservation: (workId: WorkId) => Promise<ReservationLifecycleResult>;
+}
+
+export type OrchestrationClaimWorkAdapter = (
+  input: OrchestrationClaimWorkInput,
+  dependencies: OrchestrationClaimWorkDependencies
+) => Promise<ClaimNextWorkResult>;
 
 export interface ReservationGitAttachmentInput {
   readonly reservationId: ReservationId;
@@ -380,7 +397,13 @@ export function createBorealRuntime(options: BorealRuntimeOptions = {}): BorealR
         priority: work.priority,
         status: work.status
       })),
-      claimWork: (input) => runtimeValue.claimWork(input),
+      claimWork: (input) => options.orchestrationClaimWork
+        ? options.orchestrationClaimWork(input, {
+            claimWork: (claimInput) => runtimeValue.claimWork(claimInput),
+            attachReservationGit: (gitInput) => runtimeValue.attachReservationGit(gitInput),
+            releaseWorkReservation: (workId) => runtimeValue.releaseWorkReservation(workId)
+          })
+        : runtimeValue.claimWork(input),
       expireStaleReservations: () => runtimeValue.expireStaleReservations()
     }
   });

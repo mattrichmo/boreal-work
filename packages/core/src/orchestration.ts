@@ -1,13 +1,15 @@
 import type {
   AgentId,
+  AgentSummaryId,
   EvidenceId,
   OrchestrationId,
   OrchestrationNudgeId,
   ReservationId,
+  VerificationId,
   WorkId
 } from "./ids.js";
 import type { IsoTimestamp } from "./time.js";
-import type { RecordMeta } from "./records.js";
+import type { AgentReservation, RecordMeta } from "./records.js";
 
 export const ORCHESTRATION_SCHEMA_VERSION = "boreal.orchestration.v1";
 
@@ -57,6 +59,14 @@ export interface OrchestrationAssignment {
   readonly workId: WorkId;
   readonly agentId: AgentId | string;
   readonly reservationId?: ReservationId;
+  readonly sessionId?: string;
+  readonly git?: NonNullable<AgentReservation["git"]>;
+  readonly evidenceIds?: readonly EvidenceId[];
+  readonly verificationIds?: readonly VerificationId[];
+  readonly agentSummaryIds?: readonly AgentSummaryId[];
+  readonly commitShas?: readonly string[];
+  readonly openCloseoutGateIds?: readonly string[];
+  readonly satisfiedCloseoutGateIds?: readonly string[];
   readonly wave: number;
   readonly state: OrchestrationAssignmentState;
   readonly assignedAt: IsoTimestamp;
@@ -86,6 +96,8 @@ export interface OrchestrationRun {
   readonly rootWorkId: WorkId;
   readonly status: OrchestrationStatus;
   readonly purpose?: string;
+  readonly sessionId?: string;
+  readonly worktree?: boolean;
   readonly policy: OrchestrationPolicy;
   readonly agentPool: readonly (AgentId | string)[];
   readonly contextLedgerSeq?: number;
