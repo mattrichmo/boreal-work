@@ -7,7 +7,7 @@ Boreal setup has four root families:
 - Install root: the user-selected skill root preference, such as `.agents/skills`.
 - Target-specific skill roots: resolved per-agent install roots stored in project setup and registry state, such as `.agents/skills` for Codex and `.claude/skills` for Claude.
 - User-wide skill roots: explicit `--scope user` installs use `~/.agents/skills` for Codex/generic skills or `~/.claude/skills` for Claude and do not initialize or modify a project setup record.
-- Workflow asset root: the source of Boreal workflows, templates, and skill adapters. It resolves from `BOREAL_ASSET_ROOT`, the workspace root, or the installed/source checkout that contains `workflows/`, `templates/`, and `skills/`.
+- Workflow asset root: the source of Boreal workflows, templates, and skill adapters. It resolves from an explicitly selected trusted asset root, then the bundled or trusted source checkout assets. Repo-local workspace directories and inherited `BOREAL_ASSET_ROOT` values are never implicit trust sources.
 
 ## Supported Layouts
 

@@ -1,7 +1,7 @@
 import { execFile } from "node:child_process";
 import { chmod, mkdir, mkdtemp, readFile, readdir, rename, rm, stat, symlink, utimes, writeFile } from "node:fs/promises";
 import { hostname as osHostname, tmpdir } from "node:os";
-import { dirname, join, relative } from "node:path";
+import { dirname, join, relative, resolve } from "node:path";
 import { promisify } from "node:util";
 
 import { afterEach, describe, expect, it } from "vitest";
@@ -16,7 +16,7 @@ import {
 import { installJsonStdoutGuard, isBrokenPipeError, main } from "../../apps/cli/src/index.ts";
 import { inspectBorealInstallStatus } from "../../apps/cli/src/install-status.ts";
 import type { CliOutput } from "../../apps/cli/src/output.ts";
-import { inspectWorkflowAssets } from "../../apps/cli/src/workflow-assets.ts";
+import { inspectWorkflowAssets, resolveWorkflowAssetRoots } from "../../apps/cli/src/workflow-assets.ts";
 import { EVENT_LOG_ENTRY_SCHEMA_VERSION, FileEventLog, type EventLogEntry } from "../../packages/storage/src/event-log.ts";
 
 interface CommandRun {
@@ -4904,6 +4904,34 @@ describe("bwrk cli", () => {
     expect(invalid.exitCode).toBe(2);
     expect(invalidPayload.code).toBe("BOREAL_INVALID_INPUT");
     expect(invalidPayload.message).toContain("bash, zsh, fish");
+  });
+
+  it("does not trust repo-local or ambient asset roots without explicit selection", async () => {
+    const rootDir = await makeTempWorkspace();
+    const projectRoot = join(rootDir, "project");
+    const ambientRoot = join(rootDir, "ambient-assets");
+    await Promise.all(
+      [projectRoot, ambientRoot].flatMap((root) =>
+        ["workflows", "templates", "skills"].map((directory) => mkdir(join(root, directory), { recursive: true }))
+      )
+    );
+
+    const defaults = resolveWorkflowAssetRoots({
+      workspaceRoot: projectRoot,
+      env: { BOREAL_ASSET_ROOT: ambientRoot }
+    });
+    expect(["bundle", "source"]).toContain(defaults.source);
+    expect(defaults.assetRoot).not.toBe(resolve(projectRoot));
+    expect(defaults.assetRoot).not.toBe(resolve(ambientRoot));
+
+    const explicitlyTrusted = resolveWorkflowAssetRoots({
+      workspaceRoot: projectRoot,
+      env: { BOREAL_ASSET_ROOT: ambientRoot },
+      assetRoot: ambientRoot
+    });
+    expect(explicitlyTrusted).toEqual(
+      expect.objectContaining({ source: "explicit", assetRoot: resolve(ambientRoot) })
+    );
   });
 
   it("lists workflows, shows workflow markdown, plans skill installs, and doctors skill assets", async () => {

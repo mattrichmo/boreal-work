@@ -18,7 +18,6 @@ const SKILL_DIRECTIVE_HANDLING_MARKERS = [
   "missingRequired",
   "typed data"
 ] as const;
-const ASSET_ROOT_ENV = "BOREAL_ASSET_ROOT";
 const DOCUMENTED_JSON_ENVELOPE_PATHS = new Set([
   "data.ok",
   "data.result",
@@ -62,8 +61,11 @@ export interface AssetValidationIssue {
 }
 
 export interface WorkflowAssetRootOptions {
+  /** Workspace context is never treated as an asset trust boundary. */
   readonly workspaceRoot?: string;
+  /** Explicitly selected asset root. Callers are responsible for trusting this source. */
   readonly assetRoot?: string;
+  /** Retained for caller compatibility; inherited environment values are never trusted implicitly. */
   readonly env?: Readonly<Record<string, string | undefined>>;
 }
 
@@ -74,7 +76,7 @@ export interface WorkflowAssetRoots {
   readonly templatesRoot: string;
   readonly skillsRoot: string;
   readonly schemasRoot: string;
-  readonly source: "explicit" | "environment" | "workspace" | "bundle" | "source";
+  readonly source: "explicit" | "bundle" | "source";
 }
 
 export interface InstalledSkillRootValidationInput {
@@ -107,11 +109,8 @@ export interface SkillInstallPlan {
 }
 
 export function resolveWorkflowAssetRoots(options: WorkflowAssetRootOptions = {}): WorkflowAssetRoots {
-  const envRoot = options.env?.[ASSET_ROOT_ENV] ?? process.env[ASSET_ROOT_ENV];
   const candidates = [
     options.assetRoot ? { root: options.assetRoot, source: "explicit" as const } : undefined,
-    envRoot ? { root: envRoot, source: "environment" as const } : undefined,
-    options.workspaceRoot ? { root: options.workspaceRoot, source: "workspace" as const } : undefined,
     { root: bundledAssetRoot, source: "bundle" as const },
     { root: sourceRoot, source: "source" as const }
   ].filter((entry): entry is { readonly root: string; readonly source: WorkflowAssetRoots["source"] } => Boolean(entry));
