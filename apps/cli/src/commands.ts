@@ -5364,6 +5364,13 @@ async function attachGitBranchForClaim(
 
     const root = await runGit(context.workspaceRoot, ["rev-parse", "--show-toplevel"]);
     if (!root.ok) {
+      if (hasFlag(args, "worktree")) {
+        throw new BorealError("BOREAL_CONFLICT", "Git worktree claims require a Git repository", {
+          workspaceRoot: context.workspaceRoot,
+          stderr: root.stderr.trim(),
+          error: root.error
+        });
+      }
       return {
         reservation: claim.reservation,
         gitBranch: {

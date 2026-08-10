@@ -162,6 +162,53 @@ describe("git worktree lifecycle", () => {
     expect(show.reservation).toBeUndefined();
   });
 
+  it("releases claims when --worktree setup is attempted outside a Git repository", async () => {
+    const rootDir = await mkdtemp(join(tmpdir(), "boreal-git-worktree-no-repo-"));
+    tempDirs.push(rootDir);
+    await runCli(rootDir, ["init", "--json"]);
+
+    const cases = [
+      ["Agent start Git failure", ["agent", "start"], "agent-start-git-failure"],
+      ["Work claim Git failure", ["work", "claim"], "work-claim-git-failure"]
+    ] as const;
+
+    for (const [title, command, agentId] of cases) {
+      const created = parseData<{ readonly meta: { readonly id: string } }>(
+        (await runCli(rootDir, ["work", "create", title, "--ready", "--json"])).stdout
+      );
+      const failed = await runCli(
+        rootDir,
+        [...command, created.meta.id, "--agent", agentId, "--worktree", "--json"],
+        { expectFailure: true }
+      );
+
+      expect(failed.exitCode).not.toBe(0);
+      expect(JSON.parse(failed.stderr)).toMatchObject({
+        code: "BOREAL_CONFLICT",
+        message: "Git worktree claims require a Git repository"
+      });
+
+      const shown = parseData<{
+        readonly status: string;
+        readonly reservation?: unknown;
+        readonly activeReservationId?: string;
+      }>((await runCli(rootDir, ["work", "show", created.meta.id, "--json"])).stdout);
+      expect(shown).toMatchObject({ status: "ready" });
+      expect(shown.reservation).toBeUndefined();
+      expect(shown.activeReservationId).toBeUndefined();
+
+      const status = parseData<{
+        readonly reservations: { readonly activeCount: number };
+      }>((await runCli(rootDir, ["agent", "status", "--agent", agentId, "--json"])).stdout);
+      expect(status.reservations.activeCount).toBe(0);
+
+      const ready = parseData<readonly { readonly id: string }[]>(
+        (await runCli(rootDir, ["work", "next", "--json"])).stdout
+      );
+      expect(ready.map((row) => row.id)).toContain(created.meta.id);
+    }
+  });
+
   it("finish verifies the recorded worktree, not the invoking checkout", async () => {
     const rootDir = await createTestWorkspace();
     await runCli(rootDir, ["init", "--json"]);
