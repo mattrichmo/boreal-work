@@ -90,8 +90,12 @@ export function ConsoleApp({ routePath, data }: { readonly routePath: string; re
             <p>{data.workspace.projectName}</p>
           </div>
           <div className="bw-console__actions">
-            <form method="post" action="/api/commands/sync.refresh">
+            <form className="bw-console__refresh-form" method="post" action="/api/commands/sync.refresh">
               <input type="hidden" name="returnTo" value={routePath} />
+              <label className="bw-command-confirm">
+                <input name="confirm" value="yes" type="checkbox" required />
+                <span>Confirm refresh</span>
+              </label>
               <Button type="submit" variant="primary" icon={<RefreshCw size={16} />}>Refresh</Button>
             </form>
             <a className="bw-button bw-button--secondary bw-button--md" href="/api/state">

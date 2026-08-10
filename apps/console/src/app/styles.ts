@@ -38,6 +38,7 @@ code, pre { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospac
 .bw-console__title h1 { margin: 0; color: var(--bw-text); font-size: 22px; line-height: 1.2; letter-spacing: 0; }
 .bw-console__title p { margin: 4px 0 0; color: var(--bw-muted); font-size: 13px; overflow-wrap: anywhere; }
 .bw-console__actions { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; justify-content: flex-end; }
+.bw-console__refresh-form { display: inline-flex; align-items: center; flex-wrap: wrap; gap: 8px; }
 .bw-console__content { min-width: 0; padding: 22px; display: grid; gap: 18px; align-content: start; }
 .bw-page-grid { display: grid; grid-template-columns: minmax(0, 1.45fr) minmax(280px, 0.8fr); gap: 16px; align-items: start; }
 .bw-page-stack { display: grid; gap: 16px; align-content: start; }

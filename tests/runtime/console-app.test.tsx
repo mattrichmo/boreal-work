@@ -40,6 +40,9 @@ describe("console app runtime", () => {
     expect(tableHtml).toContain("data-console-route=\"sprint\"");
     expect(tableHtml).toContain("Dense sprint table");
     expect(tableHtml).toContain("href=\"/sprint?view=dependency&amp;label=runtime\"");
+    expect(tableHtml).toMatch(
+      /<form class="bw-console__refresh-form" action="\/api\/commands\/sync\.refresh" method="post">[\s\S]*?<input type="checkbox" required="" name="confirm" value="yes"\/>/
+    );
   });
 
   it("renders the global scope with only registry routes", () => {
