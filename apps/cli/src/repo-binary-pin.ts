@@ -1,6 +1,6 @@
 import { existsSync, realpathSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { dirname, isAbsolute, join, normalize as normalizePath, relative, resolve, sep } from "node:path";
 
 export const DEFAULT_REPO_BWRK_RELATIVE_BIN = "node_modules/.bin/bwrk";
 export const DEFAULT_REPO_BWRK_PACKAGE = "@boreal/cli";
@@ -31,6 +31,12 @@ export type RepoBwrkPinResolution =
       readonly reason: string;
     }
   | {
+      readonly status: "invalid";
+      readonly pin: RepoBwrkPin;
+      readonly reason: string;
+      readonly recoveryAction: string;
+    }
+  | {
       readonly status: "none";
     };
 
@@ -46,14 +52,16 @@ export function resolveRepoBwrkPin(
   const configPin = readProjectConfigBwrkPin(root);
   if (configPin) {
     const resolved = resolvePinPath(root, configPin.binPath);
-    if (!options.requireExisting || existsSync(resolved)) {
-      return pinMetadata(root, resolved, "project-config", configPin.packageName ?? inferPinnedPackageName(root));
+    const pin = pinMetadata(root, resolved, "project-config", configPin.packageName ?? inferPinnedPackageName(root));
+    if (!validatePinPath(root, pin.binPath, pin.source) && (!options.requireExisting || existsSync(resolved))) {
+      return pin;
     }
   }
 
   const defaultBin = join(root, DEFAULT_REPO_BWRK_RELATIVE_BIN);
-  if (!options.requireExisting || existsSync(defaultBin)) {
-    return pinMetadata(root, defaultBin, "node_modules", inferPinnedPackageName(root));
+  const defaultPin = pinMetadata(root, defaultBin, "node_modules", inferPinnedPackageName(root));
+  if (!validatePinPath(root, defaultPin.binPath, defaultPin.source) && (!options.requireExisting || existsSync(defaultBin))) {
+    return defaultPin;
   }
   return undefined;
 }
@@ -64,6 +72,15 @@ export function resolveRepoBwrkPinForDelegation(workspaceRoot: string): RepoBwrk
   if (configPin) {
     const resolved = resolvePinPath(root, configPin.binPath);
     const pin = pinMetadata(root, resolved, "project-config", configPin.packageName ?? inferPinnedPackageName(root));
+    const invalidReason = validatePinPath(root, pin.binPath, pin.source);
+    if (invalidReason) {
+      return {
+        status: "invalid",
+        pin,
+        reason: invalidReason,
+        recoveryAction: recoveryActionForPinSource(pin.source)
+      };
+    }
     if (existsSync(resolved)) {
       return { status: "found", pin };
     }
@@ -76,8 +93,18 @@ export function resolveRepoBwrkPinForDelegation(workspaceRoot: string): RepoBwrk
   }
 
   const defaultBin = join(root, DEFAULT_REPO_BWRK_RELATIVE_BIN);
+  const defaultPin = pinMetadata(root, defaultBin, "node_modules", inferPinnedPackageName(root));
+  const invalidReason = validatePinPath(root, defaultPin.binPath, defaultPin.source);
+  if (invalidReason) {
+    return {
+      status: "invalid",
+      pin: defaultPin,
+      reason: invalidReason,
+      recoveryAction: recoveryActionForPinSource(defaultPin.source)
+    };
+  }
   if (existsSync(defaultBin)) {
-    return { status: "found", pin: pinMetadata(root, defaultBin, "node_modules", inferPinnedPackageName(root)) };
+    return { status: "found", pin: defaultPin };
   }
   return { status: "none" };
 }
@@ -145,6 +172,38 @@ function pinMetadata(
     relativeBinPath: relative(workspaceRoot, absoluteBin) || ".",
     packageName
   };
+}
+
+function validatePinPath(workspaceRoot: string, binPath: string, source: RepoBwrkPinSource): string | undefined {
+  const root = resolveUserPath(workspaceRoot);
+  const absoluteBin = resolve(binPath);
+  if (source === "project-config" && relative(root, absoluteBin) !== normalizePath(DEFAULT_REPO_BWRK_RELATIVE_BIN)) {
+    return `Configured repo-pinned bwrk path must use the expected ${DEFAULT_REPO_BWRK_RELATIVE_BIN} shape`;
+  }
+  if (!isPathInside(root, absoluteBin)) {
+    return "Configured repo-pinned bwrk path must stay inside the workspace";
+  }
+  if (!existsSync(absoluteBin)) {
+    return undefined;
+  }
+  try {
+    const realRoot = realpathSync(root);
+    const realBin = realpathSync(absoluteBin);
+    return isPathInside(realRoot, realBin) ? undefined : "Configured repo-pinned bwrk symlink must resolve inside the workspace";
+  } catch {
+    return "Configured repo-pinned bwrk path could not be resolved safely";
+  }
+}
+
+function isPathInside(root: string, candidate: string): boolean {
+  const relativePath = relative(root, candidate);
+  return relativePath !== ".." && !relativePath.startsWith(`..${sep}`) && !isAbsolute(relativePath);
+}
+
+function recoveryActionForPinSource(source: RepoBwrkPinSource): string {
+  return source === "project-config"
+    ? `Edit .boreal/project.json and set bwrkPin.binPath to ${DEFAULT_REPO_BWRK_RELATIVE_BIN}, then run pnpm install`
+    : `Reinstall repo dependencies with pnpm install so ${DEFAULT_REPO_BWRK_RELATIVE_BIN} resolves inside the workspace`;
 }
 
 function inferPinnedPackageName(workspaceRoot: string): string | undefined {

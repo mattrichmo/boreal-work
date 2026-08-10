@@ -82,6 +82,10 @@ export function delegateToRepoPinnedBwrk(options: DelegateToRepoBwrkOptions = {}
     writeMissingRepoPinError(workspaceRoot, pinResolution, argv);
     return { delegated: true, exitCode: 1, reason: "pin-missing", workspaceRoot, pinPath: pinResolution.pin.binPath };
   }
+  if (pinResolution.status === "invalid") {
+    writeInvalidRepoPinError(workspaceRoot, pinResolution, argv);
+    return { delegated: true, exitCode: 1, reason: "invalid-pin", workspaceRoot, pinPath: pinResolution.pin.binPath };
+  }
   const pin = pinResolution.pin;
   if (pathsReferToSameFile(currentExecutable, pin.binPath)) {
     if (argvWritesCanonicalState(argv) && !launcherToolchain.canonicalWritesAllowed) {
@@ -280,6 +284,28 @@ function writeMissingRepoPinError(
         2
       )}\n`
     );
+    return;
+  }
+  process.stderr.write(`BOREAL_POLICY_VIOLATION: ${message}\n`);
+}
+
+function writeInvalidRepoPinError(
+  workspaceRoot: string,
+  resolution: Extract<ReturnType<typeof resolveRepoBwrkPinForDelegation>, { readonly status: "invalid" }>,
+  argv: readonly string[]
+): void {
+  const message = `${resolution.reason} at ${resolution.pin.relativeBinPath}; ${resolution.recoveryAction}.`;
+  const details = {
+    reason: "repo_pinned_bwrk_invalid",
+    workspaceRoot,
+    pinPath: resolution.pin.binPath,
+    relativeBinPath: resolution.pin.relativeBinPath,
+    source: resolution.pin.source,
+    packageName: resolution.pin.packageName,
+    recoveryAction: resolution.recoveryAction
+  };
+  if (argvWantsJson(argv)) {
+    process.stderr.write(`${JSON.stringify({ ok: false, code: "BOREAL_POLICY_VIOLATION", message, details }, null, 2)}\n`);
     return;
   }
   process.stderr.write(`BOREAL_POLICY_VIOLATION: ${message}\n`);

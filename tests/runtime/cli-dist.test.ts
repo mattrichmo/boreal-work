@@ -215,6 +215,44 @@ describe("bundled bwrk dist", () => {
       })
     );
     expect(missingPin.stdout).toBe("");
+
+    const outsidePinWorkspace = await makeTempDir("boreal-cli-outside-pin-");
+    await mkdir(join(outsidePinWorkspace, ".boreal"), { recursive: true });
+    await writeFile(
+      join(outsidePinWorkspace, ".boreal", "project.json"),
+      `${JSON.stringify({ bwrkPin: { binPath: machineBin, packageName: "@boreal/cli" } }, null, 2)}\n`,
+      "utf8"
+    );
+    const outsidePin = await runBundle(machineBin, outsidePinWorkspace, ["doctor", "--json"]);
+    const outsidePinPayload = parseError<{
+      readonly code: string;
+      readonly message: string;
+      readonly details: { readonly reason: string; readonly recoveryAction: string };
+    }>(outsidePin.stderr);
+    expect(outsidePin.exitCode).toBe(1);
+    expect(outsidePin.stdout).toBe("");
+    expect(outsidePinPayload.code).toBe("BOREAL_POLICY_VIOLATION");
+    expect(outsidePinPayload.details.reason).toBe("repo_pinned_bwrk_invalid");
+    expect(outsidePinPayload.details.recoveryAction).toContain("node_modules/.bin/bwrk");
+
+    const symlinkPinWorkspace = await makeTempDir("boreal-cli-symlink-pin-");
+    const symlinkBinDir = join(symlinkPinWorkspace, "node_modules", ".bin");
+    await mkdir(symlinkBinDir, { recursive: true });
+    await symlink(machineBin, join(symlinkBinDir, "bwrk"));
+    await mkdir(join(symlinkPinWorkspace, ".boreal"), { recursive: true });
+    await writeFile(
+      join(symlinkPinWorkspace, ".boreal", "project.json"),
+      `${JSON.stringify({ bwrkPin: { binPath: "node_modules/.bin/bwrk", packageName: "@boreal/cli" } }, null, 2)}\n`,
+      "utf8"
+    );
+    const symlinkPin = await runBundle(machineBin, symlinkPinWorkspace, ["doctor", "--json"]);
+    const symlinkPinPayload = parseError<{
+      readonly code: string;
+      readonly details: { readonly reason: string };
+    }>(symlinkPin.stderr);
+    expect(symlinkPin.exitCode).toBe(1);
+    expect(symlinkPinPayload.code).toBe("BOREAL_POLICY_VIOLATION");
+    expect(symlinkPinPayload.details.reason).toBe("repo_pinned_bwrk_invalid");
   }, 40_000);
 
   it("reports version-skew warnings and unsupported state-schema errors with channel-correct commands", async () => {
