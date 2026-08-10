@@ -4,7 +4,7 @@
 
 Boreal should keep `apps/cli` dependency-light for v1 and use render-only primitives in `apps/cli/src/cli-ui.ts` for installer prompts, health summaries, queues, and other opt-in rich terminal views.
 
-Do not adopt Ink in `apps/cli` for v1. Keep `apps/tui` as the future ownership boundary for an Ink or React-style terminal app if the terminal dashboard grows beyond deterministic command rendering.
+Do not adopt Ink in `apps/cli` for v1. `apps/tui` is the separate ownership boundary for the optional Ink/React terminal app, which is now implemented independently from the CLI command runtime.
 
 ## Why
 
@@ -36,21 +36,21 @@ Ownership:
 
 - `apps/cli`: command registry, strict JSON/plain contracts, small prompt and render primitives.
 - `packages/ui-model`: shared typed data contracts for CLI dashboard, console, TUI, and MCP.
-- `apps/tui`: future full-screen terminal app or Ink runtime if needed.
+- `apps/tui`: optional full-screen Ink/React terminal app over the shared view-model and command-descriptor contracts.
 - `apps/console`: browser dashboard using the same `packages/ui-model` contracts.
 
 ## Revisit Trigger
 
-Reconsider Ink or another terminal UI runtime only when at least two of these are true:
+Revisit the TUI runtime or its contract boundary when at least two of these are true:
 
 - The CLI dashboard needs persistent full-screen state rather than short command output.
 - Multiple views require keyboard focus, nested panels, async refresh, or background subscriptions.
 - Snapshot-tested string primitives become harder to maintain than a component runtime.
 - `apps/tui` has a clear package boundary and does not affect ordinary `bwrk --json` or plain text command startup.
 
-## Adoption Conditions
+## TUI Expansion Conditions
 
-If Ink is adopted later:
+The current Ink implementation remains isolated under `apps/tui`. Any further TUI expansion must:
 
 - Add it only under `apps/tui`, not `apps/cli`.
 - Keep `packages/ui-model` as the data contract source.
@@ -60,7 +60,7 @@ If Ink is adopted later:
 
 ## V1 Path
 
-For v1, continue with:
+For CLI-level v1 output, continue with:
 
 - `statusIcon`
 - `shortcutHint`
@@ -71,3 +71,5 @@ For v1, continue with:
 - `choiceList`
 
 These primitives cover the immediate installer and dashboard needs without changing the dependency posture of the CLI.
+
+The optional TUI can evolve separately over the same contracts. Its current v1 scope is the global overview/projects/queues routes, repo roll-up and sprint board routes, and task-detail drill-down; unsupported rail routes remain explicit planned placeholders.

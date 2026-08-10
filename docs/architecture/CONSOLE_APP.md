@@ -1,6 +1,6 @@
 # Console App
 
-The console app lives in `apps/console`. It is a local browser dashboard for the current Boreal workspace, backed by the same JSON-first CLI contracts that agents use. It is not a replacement source of truth; runtime records, memory files, generated ledgers, and `bwrk` JSON output remain canonical.
+The console app lives in `apps/console`. It is a local-by-default browser dashboard for the current Boreal workspace, backed by the same JSON-first CLI contracts that agents use. It is not a replacement source of truth; runtime records, memory files, generated ledgers, and `bwrk` JSON output remain canonical.
 
 ## Local Commands
 
@@ -26,6 +26,8 @@ node apps/console/dist/browser-smoke.js --workspace . --mode fixture --out .bore
 ```
 
 Do not assume a global `bwrk` binary exists. In this repo, use `pnpm bwrk <command>` for source-mode CLI work or `node apps/cli/dist/index.js <command>` after `pnpm build`. A plain `bwrk` command is only expected after `pnpm install:local` has been run for this machine.
+
+The server binds to loopback by default. A non-loopback `--host` is rejected unless `--allow-remote` is explicitly supplied. Remote mode is a deliberate security boundary: GET responses omit the mutation token, while mutating POST requests still require the per-server token and matching Host/Origin validation. Do not expose the console remotely without an intentional access-control and network boundary.
 
 ## Data Modes
 
@@ -89,7 +91,7 @@ Use browser smoke before closing UI route work:
 node apps/console/dist/browser-smoke.js --workspace . --mode fixture --out .boreal/results/console-browser-smoke.json
 ```
 
-The browser smoke command launches local Chrome through the DevTools protocol, visits every console route at desktop `1440x960` and mobile `390x844`, captures screenshots, checks route markers, checks nonblank text, fails on console/runtime errors, and fails on page-level horizontal overflow.
+The browser smoke command launches Playwright-managed Chromium—not the system Google Chrome application—through the DevTools protocol, visits every console route at desktop `1440x960` and mobile `390x844`, captures screenshots, checks route markers, checks nonblank text, fails on console/runtime errors, and fails on page-level horizontal overflow.
 
 Use a live render before closing data-adapter work:
 
@@ -99,7 +101,7 @@ node apps/console/dist/render-file.js --workspace . --mode live --route /health 
 
 ## Command Boundary
 
-The console server only executes command endpoints through `POST /api/commands/<id>`. Read commands can run directly. Mutating commands require explicit confirmation in the request body. Targeted template commands such as claim/release/sprint-start are listed for operator visibility but stay disabled until the UI supplies concrete target inputs.
+The console server only executes command endpoints through `POST /api/commands/<id>`. Read commands can run directly. Mutating commands require explicit confirmation in the request body and the console security token/origin checks. Targeted template commands such as claim/release/sprint-start are listed for operator visibility but stay disabled until the UI supplies concrete target inputs.
 
 Global queue claim commands are displayed as concrete operator commands, not server-side command actions. If they later become executable UI actions, the request must carry the queue item's target `projectRoot` and `workId`, and the handler must route through `--workspace <projectRoot>`.
 

@@ -43,6 +43,7 @@ Read tools:
 - `boreal_directives_compile`
 - `boreal_directives_explain`
 - `boreal_work_next`
+- `boreal_work_parallel`
 - `boreal_work_show`
 - `boreal_work_context`
 - `boreal_search`

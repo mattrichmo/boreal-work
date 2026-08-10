@@ -88,7 +88,7 @@ This keeps the daemon process root, local registry root, and selected Boreal wor
 
 ## Leakage And Traversal Fixtures
 
-The core regression suite covers the future MCP fixture matrix before the adapter exists:
+The core regression suite covers the boundary and adapter fixture matrix:
 
 | Fixture | Expected result | Current coverage |
 | --- | --- | --- |

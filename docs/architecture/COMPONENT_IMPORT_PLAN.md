@@ -1,6 +1,6 @@
 # Component Import Plan
 
-This page documents the maintained component inventory for the Boreal console. The canonical typed inventory lives in `packages/ui-model/src/component-inventory.ts`; browser components are implemented in `apps/console` and do not import runtime state directly.
+This page documents the maintained component inventory and import plan for the Boreal console. The canonical typed inventory lives in `packages/ui-model/src/component-inventory.ts`; it includes shipped primitives and planned component slots. Browser components are implemented in `apps/console` and do not import runtime state directly.
 
 ## Current Source Truth
 
@@ -21,7 +21,7 @@ The inventory is grouped by responsibility so the console can grow without coupl
 
 Use `apps/console` as the browser dashboard surface and keep it separate from CLI/TUI/runtime packages.
 
-- Console framework: Vite + React + TypeScript.
+- Console runtime: React + TypeScript static HTML rendering behind the local Node HTTP server; the package is built with the repository's TypeScript project references rather than Vite.
 - Shared model boundary: `@boreal/ui-model` owns dashboard/component inventory data contracts and has no browser dependency.
 - Runtime boundary: `@boreal/core`, `@boreal/engine`, storage, work, graph, evidence, and search packages must not import React, Vite, DOM APIs, or console CSS.
 - CLI/TUI boundary: the CLI rich text/dashboard views stay terminal-first and consume JSON/model contracts only; they do not reuse browser components.

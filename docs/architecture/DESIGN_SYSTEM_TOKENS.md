@@ -49,12 +49,12 @@ Representative source-token contrast checks:
 
 ## Icon Strategy
 
-Use `lucide-react` in `apps/console` only, after the console app is scaffolded. Keep icon names as data in shared contracts until then.
+Use `lucide-react` in `apps/console` only. Keep icon names as data in shared contracts so the browser package owns icon rendering without leaking it into runtime or machine-facing surfaces.
 
 - Scope: browser console only.
 - Import policy: named imports in the console package.
 - Runtime policy: no React or lucide dependency in `@boreal/core`, runtime engines, storage, CLI, or TUI packages.
 - Machine output policy: icons never replace JSON fields or text labels in CLI machine-readable output.
-- CLI rich views: keep terminal symbols/text in the CLI render primitives unless a future TUI package explicitly adds an icon renderer.
+- CLI rich views: keep terminal symbols/text in the CLI render primitives unless the TUI explicitly adds an icon renderer.
 
 Initial icon intents are modeled in `borealIconRegistry` for dashboard, sprint board, search, filtering, refresh, verification, locks, git, import/export, entity editing, and settings surfaces.

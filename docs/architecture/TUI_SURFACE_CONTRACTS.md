@@ -4,7 +4,7 @@ This page defines the two first-class terminal UI surfaces and their typed data 
 
 This document describes the terminal dashboard contracts Boreal should expose for humans and agents. It is intentionally JSON-first: the TUI renders bounded view models and emits command descriptors for mutations, but durable records, CLI JSON envelopes, memory files, ledgers, and runtime operations remain canonical.
 
-The current `apps/tui` implementation already covers a narrow repo dashboard (`overview`, `sprints`, `work`, `activity`) plus a small global project rollup in `--global` mode. This document defines the full target contract for two first-class TUI surfaces:
+The current `apps/tui` implementation is an optional Ink/React shell. Its implemented routes are global `Overview`, `Projects`, and `Queues`; repo `Roll-Up` and `Sprint Board`; and task-detail drill-down. The remaining rail routes intentionally render planned placeholders. This document defines the full target contract for two first-class TUI surfaces:
 
 - Global TUI: a cross-repo operator surface for registered projects.
 - Repo TUI: a single-repository execution surface with roll-ups, milestones, sprints, tasks, drill-downs, filters, and closeout flows.
@@ -1483,12 +1483,14 @@ The TUI composite schemas should be thin route envelopes over shared view models
 
 ## Implementation Order
 
+The v1 shell already implements shared route navigation, global overview/projects/queues, repo roll-up/sprint board, and task-detail drill-down. The order below is the remaining expansion sequence; completed items are retained to show the contract's intended dependency order.
+
 1. Move any console-only view models needed by TUI into `@boreal/ui-model`.
 2. Add `TuiCommandDescriptor`, `TuiEntityRef`, filters, and route request/response types to `@boreal/ui-model`.
 3. Add repo route payload builders for roll-up, milestone list/detail, work detail, activity detail, health bundle, knowledge, and reports.
-4. Extend `apps/tui` navigation from the current four sections to route-based sections with preserved filter/cursor state.
-5. Implement Global TUI pages over `dashboard global --json`, including project open flow.
-6. Implement Repo Roll-Up, Milestones, Sprint Board, Work, and Task Detail first; these carry the main execution loop.
+4. Expand `apps/tui` route coverage while preserving filter/cursor state.
+5. Expand Global TUI pages over `dashboard global --json`, including project open flow.
+6. Expand Repo Roll-Up, Milestones, Sprint Board, Work, and Task Detail coverage; these carry the main execution loop.
 7. Add Knowledge, Reports, Health, and Settings after their shared model boundaries move out of `apps/console`.
 8. Add fixture tests and terminal lifecycle tests for every route.
 

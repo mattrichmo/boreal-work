@@ -2,7 +2,7 @@
 
 Required closeout gates are per-work policy requirements that must be satisfied before a work item, sprint, phase, milestone, or project can close. They are separate from the `gate closeout` workspace health command: `gate closeout` checks workspace readiness, while required closeout gates check whether a specific subject has the review, audit, verification, and checkpoint proof its plan requires.
 
-This contract defines the implementation boundary for the closeout-gates sprint. Runtime and CLI changes should preserve these terms so schema, enforcement, reports, and workflows do not drift.
+This contract is the normative boundary for the shipped v0.1 closeout-gate implementation. Required gates are persisted on work records, evaluated by runtime close paths, exposed through CLI controls, and covered by doctor, report, workflow, and test surfaces. Runtime and CLI changes must preserve these terms so schema, enforcement, reports, and workflows do not drift.
 
 ## Gate Kinds
 
@@ -31,7 +31,7 @@ The subject identity must be stored with the gate as `subjectType` and `subjectI
 
 ## Runtime Shape
 
-The runtime model should persist required gates as typed records or a typed work-record field with this logical shape:
+The runtime model persists required gates as typed records or a typed work-record field with this logical shape:
 
 ```ts
 type CloseoutGateKind = "verification" | "checkpoint" | "review" | "audit";
@@ -50,6 +50,9 @@ interface RequiredCloseoutGate {
   minEvidenceCount: number;
   declaredCommand?: string;
   expectedObservable?: string;
+  requiredTrustLevels?: ("legacy_unattested" | "self_reported" | "boreal_witnessed" | "external_attested")[];
+  requireCurrentRevision?: boolean;
+  requireCurrentGitHead?: boolean;
   createdAt: string;
   createdBy: ActorRef;
   satisfiedBy?: {
@@ -58,12 +61,16 @@ interface RequiredCloseoutGate {
     agentSummaryIds?: string[];
     commitShas?: string[];
     dirtyPathNotes?: string[];
+    directiveIds?: string[];
+    acknowledgementIds?: string[];
   };
   force?: {
     reason: string;
     comment: string;
     actor: ActorRef;
     evidenceIds?: string[];
+    directiveIds?: string[];
+    acknowledgementIds?: string[];
     forcedAt: string;
   };
 }
@@ -71,7 +78,7 @@ interface RequiredCloseoutGate {
 
 The schema may store this inline on work records or in a separate state section, but command output should expose the same logical fields so later reports and agents can depend on one contract.
 
-`declaredCommand` is an optional exact command string that the filer expects closeout evidence to record. `expectedObservable` is an optional deterministic substring that must appear in satisfying evidence text or a linked artifact once evaluation is wired. It is intentionally a substring, not a regular expression, so gate declarations cannot smuggle executable or ambiguous matching logic into closeout. Both fields are additive: existing gates omit them and evaluate exactly as before. When present, they participate in the deterministic gate ID so two gate declarations with different done conditions do not collapse into one record.
+`declaredCommand` is an optional exact command string that the filer expects closeout evidence to record. `expectedObservable` is an optional deterministic substring that must appear in satisfying evidence text or a linked artifact during gate evaluation. `requiredTrustLevels`, `requireCurrentRevision`, and `requireCurrentGitHead` optionally strengthen the provenance and freshness requirements. The observable is intentionally a substring, not a regular expression, so gate declarations cannot smuggle executable or ambiguous matching logic into closeout. These fields are additive: existing gates omit them and evaluate exactly as before. When present, they participate in the deterministic gate ID so two gate declarations with different done conditions do not collapse into one record.
 
 ## Evidence Requirements
 
@@ -105,7 +112,7 @@ Suggested initial force reason codes:
 
 ## Closeout And Summary Output
 
-Every command that can close or cancel gated work must return gate status in its JSON envelope. The output should include:
+Every command that can close or cancel gated work must return gate status in its JSON envelope. The output must include:
 
 - `requiredGates`: every gate evaluated for the subject.
 - `gate.status`: `satisfied`, `open`, or `forced`.
@@ -117,12 +124,12 @@ Agent summary Markdown must render a `Closeout Gates` section listing each gate,
 
 Doctor, `gate closeout`, and generated reports should treat unsatisfied required gates as blocking for non-legacy terminal work. Legacy imported terminal work can remain warning-only when it predates the policy enforcement date.
 
-## Downstream Implementation Order
+## Maintenance And Extension Order
 
-The remaining closeout-gates tasks should follow this order:
+The shipped implementation covers the original persistence, enforcement, CLI-control, reporting, and validation steps. Future gate changes should follow this order:
 
-1. Persist the `RequiredCloseoutGate` contract on work records or a dedicated runtime section.
-2. Enforce required gates in work, sprint, and agent closeout paths.
-3. Expose planning and force controls through CLI/workflow commands.
+1. Update the `RequiredCloseoutGate` schema and typed record shape.
+2. Update evaluation and all work, sprint, and agent closeout paths.
+3. Expose planning and force behavior through CLI/workflow commands.
 4. Add doctor, `gate closeout`, sprint report, and agent summary coverage.
 5. Run the review and audit validation suite against the implementation.
