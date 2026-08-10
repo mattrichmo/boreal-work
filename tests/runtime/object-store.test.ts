@@ -1,5 +1,5 @@
 import { existsSync, statSync } from "node:fs";
-import { mkdir, mkdtemp, readFile, rm, symlink } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -99,6 +99,23 @@ describe("object directory store", () => {
       "Path escapes Boreal workspace"
     );
     expect(existsSync(join(outsideDir, "index-v2.sqlite"))).toBe(false);
+  });
+
+  it("rejects symlinked object records that escape their section", async () => {
+    const rootDir = await makeTempWorkspace();
+    const outsideDir = await makeTempWorkspace();
+    const objectSection = join(rootDir, ".boreal", "objects", "work");
+    const outsideRecord = join(outsideDir, "external.json");
+    const linkedRecord = join(objectSection, "bw_work_00000000000a.json");
+    await mkdir(objectSection, { recursive: true });
+    await writeFile(outsideRecord, `${JSON.stringify(sampleWorkItem("bw_work_00000000000a" as WorkId))}\n`, "utf8");
+    await symlink(outsideRecord, linkedRecord, "file");
+
+    await expect(
+      new ObjectDirBorealStore({ rootDir, sqlite: undefined }).read((reader) => reader.listWorkItems())
+    ).rejects.toMatchObject({
+      code: "BOREAL_INVALID_INPUT"
+    });
   });
 
   it("routes events through the hash-chained event log", async () => {

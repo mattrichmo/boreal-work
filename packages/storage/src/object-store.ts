@@ -348,6 +348,7 @@ export class ObjectDirBorealStore implements BorealStore {
       }
       const path = join(directory, entry);
       assertPathInside(directory, path);
+      await assertRealPathInside(directory, path);
       records.push(
         await readJsonFile(path, {
           schemaName: `boreal.object-store.${definition.section}`,
