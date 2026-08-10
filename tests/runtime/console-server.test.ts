@@ -126,6 +126,29 @@ describe("console server", () => {
     }
   });
 
+  it("retries a rejected live load instead of caching the failure", async () => {
+    const runner = failOnceLiveRunner();
+    const running = await listenConsole({
+      workspaceRoot: "/workspace/boreal-work",
+      mode: "live",
+      port: 0,
+      runner,
+      liveCacheTtlMs: 30_000
+    });
+    try {
+      const first = await fetch(`${running.url}/api/state`);
+      const second = await fetch(`${running.url}/api/state`);
+      const secondPayload = await second.json() as { readonly workspace?: { readonly mode?: string } };
+
+      expect(first.status).toBe(500);
+      expect(second.status).toBe(200);
+      expect(secondPayload.workspace?.mode).toBe("live");
+      expect(runner.calls.filter((command) => command === "work list --label sprint-04 --limit 100 --json")).toHaveLength(2);
+    } finally {
+      await running.close();
+    }
+  });
+
   it("guards project settings writes with confirmation and doctor validation", async () => {
     const runner = settingsRunner();
     const running = await listenConsole({
@@ -520,6 +543,37 @@ function failingLiveRunner(): ConsoleCliRunner & { readonly calls: string[] } {
         return { ok: true };
       }
       throw new Error(`simulated live failure for ${command}`);
+    }
+  };
+}
+
+function failOnceLiveRunner(): ConsoleCliRunner & { readonly calls: string[] } {
+  const calls: string[] = [];
+  let shouldFail = true;
+  return {
+    calls,
+    async run(args) {
+      const command = args.join(" ");
+      calls.push(command);
+      if (shouldFail) {
+        shouldFail = false;
+        throw new Error(`simulated first live failure for ${command}`);
+      }
+      if (command === "sync status --json") {
+        return {
+          ok: true,
+          workspaceRoot: "/workspace/boreal-work",
+          vault: { ok: true },
+          ledgers: { ok: true },
+          searchIndex: { ok: true },
+          git: { ok: true },
+          recommendedActions: []
+        };
+      }
+      if (command === "doctor --json") {
+        return { ok: true, diagnostics: [] };
+      }
+      return [];
     }
   };
 }

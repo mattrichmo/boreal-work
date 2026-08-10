@@ -300,11 +300,17 @@ function createConsoleDataCache(ttlMs: number): {
       const key = `${input.mode}:${input.scope ?? "repo"}:${resolve(input.workspaceRoot)}:${input.runner ? "custom" : "default"}:${selectionKey}`;
       const now = Date.now();
       if (!cached || cached.key !== key || cached.expiresAt <= now) {
-        cached = {
+        const entry = {
           key,
           expiresAt: now + ttlMs,
           value: loadConsoleData(input)
         };
+        cached = entry;
+        void entry.value.catch(() => {
+          if (cached === entry) {
+            cached = undefined;
+          }
+        });
       }
       return cached.value;
     },
