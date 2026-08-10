@@ -1612,12 +1612,21 @@ describe("boreal runtime proof slice", () => {
   });
 
   it("refuses sprint closeout while descendant work remains unresolved", async () => {
-    const runtime = createBorealRuntime({ actor });
+    const store = new InMemoryBorealStore();
+    const runtime = createBorealRuntime({ store, actor });
     const sprint = await runtime.createWork({ title: "Container gate sprint", kind: "sprint", ready: true });
     const child = await runtime.createWork({ title: "Container gate child", ready: true });
     await runtime.addBlockingDependency({
       blockedWorkId: sprint.meta.id,
       blockingWorkId: child.meta.id
+    });
+
+    await store.write(async (writer) => {
+      const stale = await writer.getWorkItem(sprint.meta.id);
+      if (!stale) {
+        throw new Error("missing stale container fixture");
+      }
+      await writer.putWorkItem({ ...stale, dependencyIds: [] });
     });
 
     const sprintEvidence = await runtime.recordEvidence({

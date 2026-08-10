@@ -1868,7 +1868,8 @@ async function applyRequiredCloseoutGatePolicy(input: CloseoutGateEvaluationInpu
   const evidence = [...(await input.reader.listEvidence()), ...(input.pendingEvidence ?? [])];
   const verifications = [...(await input.reader.listVerifications()), ...(input.pendingVerifications ?? [])];
   const summaries = uniqueAgentSummaries([...(await input.reader.listAgentSummaries()), ...(input.closeoutSummaries ?? [])]);
-  const descendants = dependencyDescendants(input.work, workItems);
+  const graphEdges = await input.reader.listGraphEdges();
+  const descendants = dependencyDescendants(input.work, workItems, graphEdges);
   const gaps: CloseoutGateGap[] = [];
 
   for (const reconciliationGap of reconciliationObligationGaps(input.work)) {
@@ -1912,6 +1913,7 @@ async function applyRequiredCloseoutGatePolicy(input: CloseoutGateEvaluationInpu
       gate,
       owner: input.work,
       workItems,
+      graphEdges,
       evidence,
       verifications,
       summaries
@@ -1927,6 +1929,7 @@ async function applyRequiredCloseoutGatePolicy(input: CloseoutGateEvaluationInpu
           gate,
           owner: descendant,
           workItems,
+          graphEdges,
           evidence,
           verifications,
           summaries
@@ -1964,6 +1967,7 @@ function evaluateRequiredCloseoutGate(input: {
   readonly gate: RequiredCloseoutGate;
   readonly owner: WorkItem;
   readonly workItems: readonly WorkItem[];
+  readonly graphEdges: readonly GraphEdge[];
   readonly evidence: readonly EvidenceRecord[];
   readonly verifications: readonly VerificationRecord[];
   readonly summaries: readonly AgentSummaryRecord[];
@@ -1981,7 +1985,7 @@ function evaluateRequiredCloseoutGate(input: {
         };
   }
 
-  const targets = requiredGateTargets(input.gate, input.owner, input.workItems);
+  const targets = requiredGateTargets(input.gate, input.owner, input.workItems, input.graphEdges);
   const gaps: CloseoutGateGap[] = [];
   const satisfactions: CloseoutGateSatisfaction[] = [];
 
@@ -2118,25 +2122,36 @@ function evidenceGateSatisfaction(
   };
 }
 
-function requiredGateTargets(gate: RequiredCloseoutGate, owner: WorkItem, workItems: readonly WorkItem[]): readonly WorkItem[] {
+function requiredGateTargets(
+  gate: RequiredCloseoutGate,
+  owner: WorkItem,
+  workItems: readonly WorkItem[],
+  graphEdges: readonly GraphEdge[]
+): readonly WorkItem[] {
+  const { blockedBy } = buildWorkDependencyIndexes(graphEdges);
   switch (gate.scope) {
     case "self":
       return [owner];
     case "direct_children":
-      return owner.dependencyIds
+      return (blockedBy.get(owner.meta.id) ?? [])
         .map((id) => workItems.find((item) => item.meta.id === id))
         .filter(isWorkItem);
     case "descendants":
-      return dependencyDescendants(owner, workItems);
+      return dependencyDescendants(owner, workItems, graphEdges);
   }
 }
 
-function dependencyDescendants(work: WorkItem, workItems: readonly WorkItem[]): readonly WorkItem[] {
+function dependencyDescendants(
+  work: WorkItem,
+  workItems: readonly WorkItem[],
+  graphEdges: readonly GraphEdge[]
+): readonly WorkItem[] {
   const byId = new Map(workItems.map((item) => [item.meta.id, item]));
+  const { blockedBy } = buildWorkDependencyIndexes(graphEdges);
   const descendants: WorkItem[] = [];
   const visited = new Set<string>();
   const visit = (item: WorkItem): void => {
-    for (const dependencyId of item.dependencyIds) {
+    for (const dependencyId of blockedBy.get(item.meta.id) ?? []) {
       if (visited.has(dependencyId)) {
         continue;
       }
