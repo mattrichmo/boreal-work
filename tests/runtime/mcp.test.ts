@@ -1,4 +1,4 @@
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -370,6 +370,38 @@ describe("boreal MCP server", () => {
     expect(runner.calls).toEqual([]);
   });
 
+  it("accepts only root inputs that match the project-scoped server binding", async () => {
+    const runner = fakeRunner({
+      "--workspace /workspace/boreal-work commands --json": [{ path: ["work", "list"], summary: "List work" }]
+    });
+
+    const accepted = await callBorealMcpTool(
+      "boreal_command_catalog",
+      { workspaceRoot: WORKSPACE, projectRoot: WORKSPACE },
+      { runner, workspaceRoot: WORKSPACE }
+    );
+    expect(accepted.isError).toBeUndefined();
+
+    const workspaceOverride = await callBorealMcpTool(
+      "boreal_command_catalog",
+      { workspaceRoot: "/workspace/other" },
+      { runner, workspaceRoot: WORKSPACE }
+    );
+    const workspacePayload = workspaceOverride.structuredContent as { readonly code: string };
+    expect(workspaceOverride.isError).toBe(true);
+    expect(workspacePayload.code).toBe("BOREAL_INVALID_INPUT");
+
+    const projectOverride = await callBorealMcpTool(
+      "boreal_command_catalog",
+      { projectRoot: "/workspace/other" },
+      { runner, workspaceRoot: WORKSPACE }
+    );
+    const projectPayload = projectOverride.structuredContent as { readonly code: string };
+    expect(projectOverride.isError).toBe(true);
+    expect(projectPayload.code).toBe("BOREAL_INVALID_INPUT");
+    expect(runner.calls).toEqual(["--workspace /workspace/boreal-work commands --json"]);
+  });
+
   it("resolves global project selection only through the server-owned registry", async () => {
     const otherRoot = "/workspace/other";
     const runner = fakeRunner({
@@ -584,6 +616,25 @@ describe("boreal MCP server", () => {
       expect(payload.message).not.toContain("super-secret");
       expect(payload.details?.exitCode).toBe(7);
       expect(payload.details?.token).not.toBe("super-secret");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("runs the trusted MCP-installation CLI instead of a workspace-local CLI", async () => {
+    const root = await mkdtemp(join(tmpdir(), "boreal-mcp-trusted-cli-"));
+    const workspaceCliPath = join(root, "apps", "cli", "dist", "index.js");
+    await mkdir(join(root, "apps", "cli", "dist"), { recursive: true });
+    await writeFile(
+      workspaceCliPath,
+      "process.stderr.write('workspace-local-cli-used'); process.exitCode = 97;\n",
+      "utf8"
+    );
+    try {
+      const runner = createNodeBorealCliRunner({ workspaceRoot: root });
+      await expect(
+        runner.run(["--workspace", root, "commands", "--json"], { workspaceRoot: root })
+      ).resolves.toBeDefined();
     } finally {
       await rm(root, { recursive: true, force: true });
     }

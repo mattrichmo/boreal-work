@@ -1,7 +1,8 @@
 import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
 import {
   type AgentDirectiveBundle,
@@ -31,6 +32,12 @@ const MAX_DIAGNOSTIC_DEPTH = 8;
 const MAX_DIAGNOSTIC_ITEMS = 24;
 const MAX_DIAGNOSTIC_STRING_LENGTH = 1_000;
 const SENSITIVE_DIAGNOSTIC_KEY = /(authorization|api[-_]?key|cookie|credential|password|private[-_]?key|secret|token)/iu;
+const TRUSTED_MCP_MODULE_DIR = dirname(fileURLToPath(import.meta.url));
+const TRUSTED_CLI_DIST_PATH = resolve(TRUSTED_MCP_MODULE_DIR, "..", "..", "cli", "dist", "index.js");
+const TRUSTED_CLI_SOURCE_PATH = resolve(TRUSTED_MCP_MODULE_DIR, "..", "..", "cli", "src", "index.ts");
+const TRUSTED_REPO_ROOT = resolve(TRUSTED_MCP_MODULE_DIR, "..", "..", "..");
+const TRUSTED_TSX_CLI_PATH = join(TRUSTED_REPO_ROOT, "node_modules", "tsx", "dist", "cli.mjs");
+const TRUSTED_TSCONFIG_PATH = join(TRUSTED_REPO_ROOT, "tsconfig.base.json");
 
 export type BorealMcpToolName =
   | "boreal_command_catalog"
@@ -146,6 +153,14 @@ interface BorealCliEnvelope {
 }
 
 const COMMON_PROPERTIES = {
+  workspaceRoot: {
+    type: "string",
+    description: "Optional workspace root. When the MCP server is launched with --workspace, this must match that server binding."
+  },
+  projectRoot: {
+    type: "string",
+    description: "Optional project root. When the MCP server is launched with --workspace, this must match the selected project."
+  },
   selectedProjectId: {
     type: "string",
     description: "Stable project ID. Used only by a global MCP server backed by its own authoritative project registry."
@@ -564,7 +579,7 @@ export function createNodeBorealCliRunner(input: { readonly workspaceRoot: strin
   const workspaceRoot = resolve(input.workspaceRoot);
   return {
     async run(args) {
-      const invocation = cliInvocation(workspaceRoot, input.cliPath);
+      const invocation = cliInvocation(input.cliPath);
       const output = await runCommand({
         cwd: workspaceRoot,
         command: invocation.command,
@@ -573,7 +588,7 @@ export function createNodeBorealCliRunner(input: { readonly workspaceRoot: strin
       return parseCliData(output);
     },
     async runEnvelope(args) {
-      const invocation = cliInvocation(workspaceRoot, input.cliPath);
+      const invocation = cliInvocation(input.cliPath);
       const output = await runCommand({
         cwd: workspaceRoot,
         command: invocation.command,
@@ -698,10 +713,15 @@ async function boundaryFromInput(
   input: ToolInput,
   options: BorealMcpServerOptions
 ): Promise<McpProjectBoundary> {
+  const requestedWorkspaceRoot = optionalString(input, "workspaceRoot");
+  const requestedProjectRoot = optionalString(input, "projectRoot");
+
   if (options.workspaceRoot) {
     const workspaceRoot = resolve(options.workspaceRoot);
+    assertRequestedRootMatches("workspaceRoot", requestedWorkspaceRoot, workspaceRoot, "server launch");
     const setup = await readProjectSetup(workspaceRoot);
     const projectRoot = resolve(setup.projectRoot ?? workspaceRoot);
+    assertRequestedRootMatches("projectRoot", requestedProjectRoot, projectRoot, "server project setup");
     const memoryRoot = resolve(setup.memoryRoot ?? join(projectRoot, "memory"));
     return bindMcpProjectBoundary({
       workspaceRoot,
@@ -721,6 +741,8 @@ async function boundaryFromInput(
       selectedProjectId
     });
   }
+  assertRequestedRootMatches("workspaceRoot", requestedWorkspaceRoot, selected.projectRoot, "server registry");
+  assertRequestedRootMatches("projectRoot", requestedProjectRoot, selected.projectRoot, "server registry");
   return bindMcpProjectBoundary({
     workspaceRoot: selected.projectRoot,
     projectRoot: selected.projectRoot,
@@ -729,6 +751,34 @@ async function boundaryFromInput(
     selectedProjectId,
     registryEntries
   });
+}
+
+function assertRequestedRootMatches(
+  field: "workspaceRoot" | "projectRoot",
+  requested: string | undefined,
+  expected: string,
+  source: "server launch" | "server project setup" | "server registry"
+): void {
+  if (requested === undefined) {
+    return;
+  }
+  const requestedRoot = resolveCheckedMcpPath(requested, field);
+  const expectedRoot = resolveCheckedMcpPath(expected, field);
+  if (requestedRoot !== expectedRoot) {
+    throw new BorealError("BOREAL_INVALID_INPUT", `MCP ${field} must match the server-selected workspace`, {
+      field,
+      requestedRoot,
+      expectedRoot,
+      source
+    });
+  }
+}
+
+function resolveCheckedMcpPath(value: string, field: string): string {
+  if (value.includes("\0")) {
+    throw new BorealError("BOREAL_INVALID_INPUT", "MCP path contains a null byte", { field });
+  }
+  return resolve(value);
 }
 
 async function readProjectSetup(workspaceRoot: string): Promise<ProjectSetupLike> {
@@ -751,19 +801,25 @@ async function readProjectSetup(workspaceRoot: string): Promise<ProjectSetupLike
   };
 }
 
-function cliInvocation(workspaceRoot: string, cliPath?: string): { readonly command: string; readonly args: readonly string[] } {
-  const distCliPath = cliPath ?? join(workspaceRoot, "apps", "cli", "dist", "index.js");
+function cliInvocation(cliPath?: string): { readonly command: string; readonly args: readonly string[] } {
+  const distCliPath = cliPath ? resolve(cliPath) : TRUSTED_CLI_DIST_PATH;
   if (existsSync(distCliPath)) {
     return { command: process.execPath, args: [distCliPath] };
   }
-  const tsxCliPath = join(workspaceRoot, "node_modules", "tsx", "dist", "cli.mjs");
+  if (!existsSync(TRUSTED_TSX_CLI_PATH) || !existsSync(TRUSTED_CLI_SOURCE_PATH)) {
+    throw new BorealError("BOREAL_STORAGE_ERROR", "Trusted Boreal CLI is unavailable to the MCP server", {
+      trustedCliPath: distCliPath,
+      trustedSourcePath: TRUSTED_CLI_SOURCE_PATH,
+      trustedTsxPath: TRUSTED_TSX_CLI_PATH
+    });
+  }
   return {
     command: process.execPath,
     args: [
-      tsxCliPath,
+      TRUSTED_TSX_CLI_PATH,
       "--tsconfig",
-      join(workspaceRoot, "tsconfig.base.json"),
-      join(workspaceRoot, "apps", "cli", "src", "index.ts")
+      TRUSTED_TSCONFIG_PATH,
+      TRUSTED_CLI_SOURCE_PATH
     ]
   };
 }
