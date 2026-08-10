@@ -72,6 +72,39 @@ describe("boreal daemon runtime", () => {
     expect(JSON.parse(stdout)).toMatchObject({ state: "drift" });
   });
 
+  it("fails closed on invalid project roots and skips daemon watch work", async () => {
+    const root = await makeProjectWorkspace();
+    await writeFile(
+      join(root, ".boreal/project.json"),
+      `${JSON.stringify(
+        {
+          schemaVersion: "boreal.project-setup.v1",
+          projectRoot: join(root, "nested-project"),
+          memoryRoot: join(root, "memory"),
+          memoryLayout: "in-repo"
+        },
+        null,
+        2
+      )}\n`,
+      "utf8"
+    );
+
+    const status = await inspectDaemonStatus({ workspaceRoot: root });
+    expect(status.state).toBe("drift");
+    expect(status.projectRoot).toBeUndefined();
+    expect(status.memoryRoot).toBeUndefined();
+    expect(status.findings).toEqual(
+      expect.arrayContaining([expect.objectContaining({ code: "daemon.boundary", severity: "error" })])
+    );
+
+    const watch = await runDaemonWatchOnce({ workspaceRoot: root });
+    expect(watch).toEqual(expect.objectContaining({ action: "skipped", reason: "project_boundary_unhealthy" }));
+    expect(watch.reservationRenewals.renewed).toEqual([]);
+    expect(watch.executionRuns.expired).toEqual([]);
+    expect(watch.executionRuns.requeued).toEqual([]);
+    expect(watch.observedPaths).toEqual([]);
+  });
+
   it("returns a nonzero exit code and bounded JSON diagnostics for corrupt daemon status", async () => {
     const root = await makeProjectWorkspace();
     await mkdir(join(root, ".boreal/daemon"), { recursive: true });
