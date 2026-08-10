@@ -1019,6 +1019,58 @@ describe("boreal runtime proof slice", () => {
     );
   });
 
+  it("rejects reserved closeout after a new graph blocker is added", async () => {
+    const store = new InMemoryBorealStore();
+    const runtime = createBorealRuntime({ store, actor });
+    const work = await runtime.createWork({ title: "Reserved blocker close target", ready: true });
+    const blocker = await runtime.createWork({ title: "Added after reservation blocker" });
+    await runtime.reserveWork({ workId: work.meta.id, agentId: actor.id });
+
+    const blocked = await runtime.addBlockingDependency({
+      blockedWorkId: work.meta.id,
+      blockingWorkId: blocker.meta.id
+    });
+    expect(blocked.status).toBe("blocked");
+
+    await expect(
+      runtime.finishReservedWork({
+        workId: work.meta.id,
+        agentId: actor.id,
+        evidence: {
+          kind: "test",
+          summary: "blocked close must not write finish evidence",
+          outcome: "passed"
+        },
+        verification: { verdict: "passed" },
+        close: { reason: "must remain blocked" }
+      })
+    ).rejects.toMatchObject({
+      code: "BOREAL_POLICY_VIOLATION",
+      gaps: [
+        expect.objectContaining({
+          code: "work.blocked.open-dependency",
+          subjectId: work.meta.id,
+          data: expect.objectContaining({ blockerIds: [blocker.meta.id] })
+        })
+      ]
+    } satisfies Partial<BorealError>);
+
+    await expect(runtime.getWorkView(work.meta.id)).resolves.toMatchObject({
+      status: "blocked",
+      activeReservationId: expect.any(String),
+      blockedBy: [blocker.meta.id]
+    });
+    await expect(store.read(async (reader) => ({
+      evidence: await reader.listEvidenceForSubject(work.meta.id),
+      verifications: await reader.listVerificationsForSubject(work.meta.id),
+      reservations: await reader.listReservationsForWork(work.meta.id)
+    }))).resolves.toMatchObject({
+      evidence: [],
+      verifications: [],
+      reservations: [expect.objectContaining({ status: "active", agentId: actor.id })]
+    });
+  });
+
   it("finishes from referenced witnessed evidence without rewriting its provenance", async () => {
     const store = new InMemoryBorealStore();
     const runtime = createBorealRuntime({ store, actor });

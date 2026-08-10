@@ -963,9 +963,11 @@ export function createBorealRuntime(options: BorealRuntimeOptions = {}): BorealR
           actor,
           now: current
         });
-        const updated = transitioned === work
-          ? work
-          : markWorkReady(transitioned, await loadDependencies(writer, transitioned), current, actor);
+        let updated = work;
+        if (transitioned !== work) {
+          const graphTransitioned = await workWithGraphDependencies(writer, transitioned);
+          updated = markWorkReady(graphTransitioned, await loadDependencies(writer, graphTransitioned), current, actor);
+        }
         if (updated !== work) {
           await writer.putWorkItem(updated);
           await refreshWorkContext(writer, updated, actor, current);
@@ -1076,6 +1078,26 @@ export function createBorealRuntime(options: BorealRuntimeOptions = {}): BorealR
           policy,
           current
         });
+        if (input.close && work.status === "blocked") {
+          const dependencies = await loadDependencies(writer, work);
+          const gaps = openDependencyFinishGaps(
+            work,
+            dependencies,
+            "reserved agent finish cannot bypass open blockers"
+          );
+          throw new BorealError(
+            "BOREAL_POLICY_VIOLATION",
+            "Reserved agent finish cannot bypass open blockers",
+            {
+              workId: work.meta.id,
+              agentId,
+              reservationId: reservation.meta.id,
+              gaps,
+              domain: "work"
+            },
+            gaps
+          );
+        }
 
         const createdEvidence = input.evidence
           ? recordEvidenceDomain({
@@ -1177,7 +1199,7 @@ export function createBorealRuntime(options: BorealRuntimeOptions = {}): BorealR
           });
         }
         const releasedReservation = releaseReservation(reservation, current, actor);
-        finalWork = await clearWorkReservation(writer, finalWork, current, actor);
+        finalWork = await clearWorkReservation(writer, finalWork, current, actor, { canonicalDependencies: true });
         closedWork = closedWork ? finalWork : undefined;
 
         if (createdEvidence) {
@@ -1573,31 +1595,23 @@ async function agentFinishReservation(
     .filter((reservation) => reservation.status === "expired")
     .sort((left, right) => right.meta.updatedAt.localeCompare(left.meta.updatedAt))
     .at(0);
+  const graphWork = await workWithGraphDependencies(reader, work);
+  const dependencies = await loadDependencies(reader, graphWork);
+  const derivedStatus = deriveReadinessStatus(graphWork, dependencies);
   if (work.reservationId || activeReservation || expiredAgentReservation) {
     return {
-      work,
-      reservation: await requireAgentWorkReservation(reader, work, agentId, current),
+      work: { ...graphWork, status: derivedStatus },
+      reservation: await requireAgentWorkReservation(reader, graphWork, agentId, current),
       autoReserved: false
     };
   }
 
-  const graphWork = await workWithGraphDependencies(reader, work);
-  const dependencies = await loadDependencies(reader, graphWork);
-  const derivedStatus = deriveReadinessStatus(graphWork, dependencies);
   if (derivedStatus === "blocked") {
-    const gaps = [
-      {
-        code: "work.blocked.open-dependency",
-        subjectType: closeoutGateSubjectTypeForWorkKind(graphWork.kind),
-        subjectId: graphWork.meta.id,
-        data: {
-          blockerIds: dependencies
-            .filter((dependency) => dependency.status !== "closed" && dependency.status !== "cancelled" && dependency.status !== "verified")
-            .map((dependency) => dependency.meta.id),
-          reason: "unreserved agent finish cannot bypass open blockers"
-        }
-      }
-    ] satisfies readonly EnforcementGap[];
+    const gaps = openDependencyFinishGaps(
+      graphWork,
+      dependencies,
+      "unreserved agent finish cannot bypass open blockers"
+    );
     throw new BorealError(
       "BOREAL_POLICY_VIOLATION",
       "Unreserved agent finish cannot bypass open blockers",
@@ -1623,6 +1637,26 @@ async function agentFinishReservation(
     reservation: reservationResult.reservation,
     autoReserved: true
   };
+}
+
+function openDependencyFinishGaps(
+  work: WorkItem,
+  dependencies: readonly WorkItem[],
+  reason: string
+): readonly EnforcementGap[] {
+  return [
+    {
+      code: "work.blocked.open-dependency",
+      subjectType: closeoutGateSubjectTypeForWorkKind(work.kind),
+      subjectId: work.meta.id,
+      data: {
+        blockerIds: dependencies
+          .filter((dependency) => dependency.status !== "closed" && dependency.status !== "cancelled" && dependency.status !== "verified")
+          .map((dependency) => dependency.meta.id),
+        reason
+      }
+    }
+  ] satisfies readonly EnforcementGap[];
 }
 
 async function getActiveWorkReservation(reader: BorealReader, work: WorkItem): Promise<AgentReservation | undefined> {
@@ -1750,14 +1784,15 @@ async function clearWorkReservation(
   reader: BorealReader,
   work: WorkItem,
   now: IsoTimestamp,
-  actor: ActorRef
+  actor: ActorRef,
+  options: { readonly canonicalDependencies?: boolean } = {}
 ): Promise<WorkItem> {
   const base = {
     ...work,
     status: work.status === "reserved" || work.status === "in_progress" ? ("draft" as const) : work.status,
     reservationId: undefined
   };
-  const graphBase = await workWithGraphDependencies(reader, base);
+  const graphBase = options.canonicalDependencies ? base : await workWithGraphDependencies(reader, base);
   const dependencies = await loadDependencies(reader, graphBase);
   return touchRecord({ ...graphBase, status: deriveReadinessStatus(graphBase, dependencies) }, now, actor);
 }
@@ -2531,7 +2566,7 @@ async function loadEvidenceRecords(reader: BorealReader, evidenceIds: readonly E
 }
 
 async function loadDependencies(reader: BorealReader, work: WorkItem): Promise<readonly WorkItem[]> {
-  return Promise.all((await graphDependencyIds(reader, work.meta.id)).map((dependencyId) => requireWork(reader, dependencyId)));
+  return Promise.all(work.dependencyIds.map((dependencyId) => requireWork(reader, dependencyId)));
 }
 
 async function graphDependencyIds(reader: BorealReader, workId: WorkId): Promise<readonly WorkId[]> {
