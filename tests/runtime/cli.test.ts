@@ -12652,6 +12652,47 @@ describe("bwrk cli", () => {
     }
   }, 20_000);
 
+  it("recovers sync refresh after corrupt generated ledger metadata", async () => {
+    const corruptions = [
+      { path: "manifest.json", contents: "{not-json\n" },
+      { path: "deletions.jsonl", contents: "not-json\n" }
+    ] as const;
+
+    for (const corruption of corruptions) {
+      const rootDir = await makeTempWorkspace();
+      await runCli(rootDir, ["init", "--json"]);
+      await runCli(rootDir, ["vault", "init", "--json"]);
+      await runCli(rootDir, ["work", "create", "Recoverable ledger metadata", "--ready", "--json"]);
+      const initialRefresh = await runCli(rootDir, ["sync", "refresh", "--json"]);
+      expect(initialRefresh.exitCode).toBe(0);
+
+      await writeFile(join(rootDir, ".boreal/ledgers", corruption.path), corruption.contents);
+
+      const refreshed = await runCli(rootDir, ["sync", "refresh", "--json"]);
+      expect(refreshed.exitCode, refreshed.stderr).toBe(0);
+      const refreshedPayload = parseData<{
+        readonly refreshOk: boolean;
+        readonly postRefreshStatusOk: boolean;
+        readonly status: { readonly ledgers: { readonly ok: boolean } };
+      }>(refreshed.stdout);
+      expect(refreshedPayload).toEqual(
+        expect.objectContaining({
+          refreshOk: true,
+          postRefreshStatusOk: true,
+          status: expect.objectContaining({ ledgers: expect.objectContaining({ ok: true }) })
+        })
+      );
+
+      const manifest = parseJson<{
+        readonly schemaVersion: string;
+        readonly deletions: { readonly path: string; readonly count: number };
+      }>(await readFile(join(rootDir, ".boreal/ledgers/manifest.json"), "utf8"));
+      expect(manifest.schemaVersion).toBe("boreal.ledgers.v1");
+      expect(manifest.deletions).toEqual(expect.objectContaining({ path: "deletions.jsonl", count: 0 }));
+      expect(await readFile(join(rootDir, ".boreal/ledgers/deletions.jsonl"), "utf8")).toBe("");
+    }
+  });
+
   it("repairs stale generated search index locks through doctor", async () => {
     const rootDir = await makeTempWorkspace();
     await runCli(rootDir, ["init", "--json"]);

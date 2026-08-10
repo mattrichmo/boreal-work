@@ -1059,13 +1059,23 @@ async function readExistingLedgerDeletions(dir: string): Promise<readonly Ledger
         maxBytes: 1024 * 1024
       })
     );
-    return readLedgerDeletions(dir, manifest.deletions);
+    return await readLedgerDeletions(dir, manifest.deletions);
   } catch (error) {
     if (isNodeError(error) && error.code === "ENOENT") {
       return [];
     }
+    if (isRecoverableGeneratedLedgerMetadataError(error)) {
+      return [];
+    }
     throw error;
   }
+}
+
+function isRecoverableGeneratedLedgerMetadataError(error: unknown): boolean {
+  if (!isRecord(error)) {
+    return false;
+  }
+  return error.code === "BOREAL_INVALID_INPUT" || error.code === "BOREAL_JSON_PARSE";
 }
 
 async function readLedgerDeletions(
