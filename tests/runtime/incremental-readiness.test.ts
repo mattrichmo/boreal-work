@@ -4,6 +4,44 @@ import { createBorealRuntime } from "@boreal/engine";
 import { InMemoryBorealStore, type BorealReader, type BorealStore, type BorealWriter } from "@boreal/storage";
 
 describe("incremental readiness recompute", () => {
+  it("adding a blocker cascades stored status through transitive dependents", async () => {
+    const store = new InMemoryBorealStore();
+    const runtime = createBorealRuntime({
+      store,
+      policy: { requireAgentSummaryForClose: false }
+    });
+    const a = await runtime.createWork({ title: "a", kind: "task", ready: true });
+    const b = await runtime.createWork({ title: "b", kind: "task", ready: true });
+    const c = await runtime.createWork({ title: "c", kind: "task", ready: true });
+
+    const evidence = await runtime.recordEvidence({
+      subjectId: b.meta.id,
+      subjectType: "work",
+      kind: "test",
+      summary: "b is verified before its dependency changes",
+      outcome: "passed"
+    });
+    await runtime.verifyWork({ workId: b.meta.id, verdict: "passed", evidenceIds: [evidence.meta.id] });
+    await runtime.addBlockingDependency({ blockedWorkId: c.meta.id, blockingWorkId: b.meta.id });
+    expect((await runtime.getWorkView(c.meta.id)).status).toBe("ready");
+
+    await runtime.addBlockingDependency({ blockedWorkId: b.meta.id, blockingWorkId: a.meta.id });
+
+    await expect(runtime.getWorkView(b.meta.id)).resolves.toMatchObject({ status: "blocked" });
+    await expect(runtime.getWorkView(c.meta.id)).resolves.toMatchObject({ status: "blocked" });
+    await expect(
+      store.read(async (reader) =>
+        Promise.all([reader.getWorkItem(b.meta.id), reader.getWorkItem(c.meta.id)])
+      )
+    ).resolves.toEqual([
+      expect.objectContaining({ status: "blocked" }),
+      expect.objectContaining({ status: "blocked" })
+    ]);
+    await expect(runtime.listReadyWork()).resolves.toEqual([
+      expect.objectContaining({ id: a.meta.id, status: "ready" })
+    ]);
+  });
+
   it("closing a blocker readies only its transitive dependents", async () => {
     const store = new CountingGraphEdgeStore();
     const runtime = createBorealRuntime({

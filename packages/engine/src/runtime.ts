@@ -510,6 +510,7 @@ export function createBorealRuntime(options: BorealRuntimeOptions = {}): BorealR
         });
         await writer.putGraphEdge(result.edge);
         await writer.putWorkItem(result.blockedWork);
+        await recomputeReadinessFrom(writer, [result.blockedWork.meta.id]);
         await appendEvent(writer, "work.dependency_added", result.blockedWork.meta.id, "work", {
           blockingWorkId: blockingWork.meta.id,
           edgeId: result.edge.meta.id
@@ -548,6 +549,7 @@ export function createBorealRuntime(options: BorealRuntimeOptions = {}): BorealR
         const status = deriveReadinessStatusWithExternalGaps(blockedWork, localDependencies, gaps);
         const work = status === blockedWork.status ? blockedWork : { ...blockedWork, status };
         await writer.putWorkItem(work);
+        await recomputeReadinessFrom(writer, [work.meta.id]);
         await appendEvent(writer, "work.external_dependency_added", work.meta.id, "work", {
           blockerProjectId: input.blockerProjectId,
           blockerWorkId: input.blockerWorkId,
@@ -600,6 +602,7 @@ export function createBorealRuntime(options: BorealRuntimeOptions = {}): BorealR
           now: now()
         });
         await writer.putWorkItem(updatedWork);
+        await recomputeReadinessFrom(writer, [updatedWork.meta.id]);
         await appendEvent(writer, "work.dependency_removed", updatedWork.meta.id, "work", {
           blockingWorkId: blockingWork.meta.id,
           edgeId: edge.meta.id
