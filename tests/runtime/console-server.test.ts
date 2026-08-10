@@ -1,3 +1,5 @@
+import { request as httpRequest } from "node:http";
+
 import { describe, expect, it } from "vitest";
 
 import { ConsoleCommandError, type ConsoleCliRunner } from "@boreal/console";
@@ -333,16 +335,41 @@ describe("console server", () => {
       await running.close();
     }
 
-    const remote = await listenConsole({
+    await expect(listenConsole({
       workspaceRoot: "/workspace/boreal-work",
       mode: "fixture",
       host: "0.0.0.0",
       port: 0
+    })).rejects.toMatchObject({ code: "CONSOLE_SECURITY_REMOTE_BIND_REJECTED" });
+
+    const remote = await listenConsole({
+      workspaceRoot: "/workspace/boreal-work",
+      mode: "fixture",
+      host: "0.0.0.0",
+      port: 0,
+      allowRemote: true
     });
     try {
       expect(remote.warnings).toEqual([
-        "Console is bound to 0.0.0.0; mutating POST requests still require the per-server token and same Host/Origin validation."
+        "Console is bound to 0.0.0.0; remote access was explicitly enabled; GET responses omit mutation tokens and mutating POST requests require the per-server token and Host/Origin validation."
       ]);
+
+      const remoteUrl = remote.url.replace("0.0.0.0", "127.0.0.1");
+      const remoteHtml = await fetch(remoteUrl);
+      const remoteHtmlBody = await remoteHtml.text();
+      expect(remoteHtml.status).toBe(200);
+      expect(remoteHtmlBody).not.toContain(remote.csrfToken);
+      expect(remoteHtmlBody).not.toContain('name="consoleToken"');
+
+      const remoteState = await fetch(`${remoteUrl}/api/state`);
+      const remoteStateBody = await remoteState.text();
+      expect(remoteState.status).toBe(200);
+      expect(remoteStateBody).not.toContain(remote.csrfToken);
+
+      const rejectedHost = await getWithHost(remoteUrl, "evil.example.test");
+      const rejectedHostPayload = JSON.parse(rejectedHost.body) as { readonly error?: { readonly code?: string } };
+      expect(rejectedHost.statusCode).toBe(403);
+      expect(rejectedHostPayload.error?.code).toBe("CONSOLE_SECURITY_HOST_REJECTED");
     } finally {
       await remote.close();
     }
@@ -352,6 +379,24 @@ describe("console server", () => {
 function htmlWithToken(html: string): string {
   expect(html).toContain('name="consoleToken"');
   return html;
+}
+
+function getWithHost(url: string, host: string): Promise<{ readonly statusCode: number | undefined; readonly body: string }> {
+  const parsed = new URL(url);
+  return new Promise((resolve, reject) => {
+    const request = httpRequest({
+      hostname: parsed.hostname,
+      port: parsed.port,
+      path: `${parsed.pathname}${parsed.search}`,
+      headers: { host }
+    }, (response) => {
+      const chunks: Buffer[] = [];
+      response.on("data", (chunk: Buffer) => chunks.push(chunk));
+      response.on("end", () => resolve({ statusCode: response.statusCode, body: Buffer.concat(chunks).toString("utf8") }));
+    });
+    request.on("error", reject);
+    request.end();
+  });
 }
 
 function settingsRunner(): ConsoleCliRunner & { readonly calls: string[] } {

@@ -25,6 +25,8 @@ export interface ConsoleServerOptions {
   readonly csrfToken?: string;
   readonly liveCacheTtlMs?: number;
   readonly allowFixtureFallback?: boolean;
+  /** Explicitly opt in to binding the console beyond loopback. */
+  readonly allowRemote?: boolean;
 }
 
 const DEFAULT_LIVE_CACHE_TTL_MS = 60_000;
@@ -43,11 +45,15 @@ export function createConsoleHttpServer(options: ConsoleServerOptions): Server {
   const mode = options.mode ?? "live";
   const scope = options.scope ?? "repo";
   const host = options.host ?? "127.0.0.1";
+  const allowRemote = options.allowRemote ?? false;
+  assertConsoleBindAllowed(host, allowRemote);
   const csrfToken = options.csrfToken ?? createConsoleToken();
   const liveCache = createConsoleDataCache(options.liveCacheTtlMs ?? DEFAULT_LIVE_CACHE_TTL_MS);
   const allowFixtureFallback = options.allowFixtureFallback ?? false;
+  const exposeToken = isLocalConsoleHost(normalizeHostname(host));
   return createServer(async (request, response) => {
     try {
+      validateConsoleHost(request, host);
       const url = requestUrl(request);
       if (url.pathname === "/api/state") {
         await sendJson(response, consoleStatePayload(await liveCache.load({ workspaceRoot, mode, scope, runner: options.runner, allowFixtureFallback })));
@@ -75,7 +81,8 @@ export function createConsoleHttpServer(options: ConsoleServerOptions): Server {
       // Preserve the requested path so the renderer can show an explicit
       // unsupported-route state instead of silently rendering the fallback
       // route with its actions attached.
-      sendHtml(response, injectConsoleToken(renderConsoleHtml({ route: `${url.pathname}${url.search}`, data }), csrfToken));
+      const html = renderConsoleHtml({ route: `${url.pathname}${url.search}`, data });
+      sendHtml(response, exposeToken ? injectConsoleToken(html, csrfToken) : html);
     } catch (error) {
       sendError(response, error);
     }
@@ -100,7 +107,7 @@ export async function listenConsole(options: ConsoleServerOptions): Promise<Runn
     server,
     url: `http://${host}:${actualPort}`,
     csrfToken,
-    warnings: consoleBindWarnings(host),
+    warnings: consoleBindWarnings(host, options.allowRemote ?? false),
     close: () => new Promise((resolvePromise, reject) => server.close((error) => error ? reject(error) : resolvePromise()))
   };
 }
@@ -425,15 +432,22 @@ function validateMutatingConsoleRequest(
   validateConsoleOrigin(request, configuredHost);
 }
 
-function validateConsoleOrigin(request: IncomingMessage, configuredHost: string): void {
+function validateConsoleHost(request: IncomingMessage, configuredHost: string): void {
   const host = headerValue(request, "host");
   if (!host) {
-    throw new ConsoleCommandError("CONSOLE_SECURITY_HOST_REJECTED", "Console POST requests require a Host header");
+    throw new ConsoleCommandError("CONSOLE_SECURITY_HOST_REJECTED", "Console requests require a Host header");
   }
   const hostName = hostnameFromHeader(host);
   if (!hostName || !isAllowedConsoleHost(hostName, configuredHost)) {
-    throw new ConsoleCommandError("CONSOLE_SECURITY_HOST_REJECTED", "Console POST Host is not allowed", { host });
+    throw new ConsoleCommandError("CONSOLE_SECURITY_HOST_REJECTED", "Console Host is not allowed", { host });
   }
+}
+
+function validateConsoleOrigin(request: IncomingMessage, configuredHost: string): void {
+  const host = headerValue(request, "host");
+  validateConsoleHost(request, configuredHost);
+  // validateConsoleHost guarantees that Host is present.
+  const validatedHost = host as string;
   const origin = headerValue(request, "origin");
   if (!origin) {
     return;
@@ -447,7 +461,7 @@ function validateConsoleOrigin(request: IncomingMessage, configuredHost: string)
   if (originUrl.protocol !== "http:" && originUrl.protocol !== "https:") {
     throw new ConsoleCommandError("CONSOLE_SECURITY_ORIGIN_REJECTED", "Console POST Origin protocol is not allowed", { origin });
   }
-  const expectedHost = normalizeHostHeader(host);
+  const expectedHost = normalizeHostHeader(validatedHost);
   const originHost = normalizeHostHeader(originUrl.host);
   if (originHost !== expectedHost) {
     throw new ConsoleCommandError("CONSOLE_SECURITY_ORIGIN_REJECTED", "Console POST Origin must match Host", {
@@ -500,13 +514,24 @@ function isSpecificBindHost(hostname: string): boolean {
   return hostname !== "0.0.0.0" && hostname !== "::" && hostname !== "";
 }
 
-function consoleBindWarnings(host: string): readonly string[] {
+function assertConsoleBindAllowed(host: string, allowRemote: boolean): void {
+  if (!isLocalConsoleHost(normalizeHostname(host)) && !allowRemote) {
+    throw new ConsoleCommandError(
+      "CONSOLE_SECURITY_REMOTE_BIND_REJECTED",
+      `Console refuses non-loopback bind ${host} without explicit remote access opt-in`,
+      { host }
+    );
+  }
+}
+
+function consoleBindWarnings(host: string, allowRemote: boolean): readonly string[] {
   const normalized = normalizeHostname(host);
   if (isLocalConsoleHost(normalized)) {
     return [];
   }
+  const remoteAccess = allowRemote ? "remote access was explicitly enabled" : "remote access is disabled";
   return [
-    `Console is bound to ${host}; mutating POST requests still require the per-server token and same Host/Origin validation.`
+    `Console is bound to ${host}; ${remoteAccess}; GET responses omit mutation tokens and mutating POST requests require the per-server token and Host/Origin validation.`
   ];
 }
 
@@ -582,7 +607,8 @@ function parseServerArgs(argv: readonly string[]): ConsoleServerOptions {
     mode: valueAfter(argv, "--mode") === "fixture" ? "fixture" : "live",
     scope: valueAfter(argv, "--scope") === "global" ? "global" : "repo",
     liveCacheTtlMs: numberAfter(argv, "--live-cache-ttl-ms"),
-    allowFixtureFallback: argv.includes("--allow-fixture-fallback")
+    allowFixtureFallback: argv.includes("--allow-fixture-fallback"),
+    allowRemote: argv.includes("--allow-remote")
   };
 }
 
