@@ -448,8 +448,12 @@ function validateConsoleOrigin(request: IncomingMessage, configuredHost: string)
   validateConsoleHost(request, configuredHost);
   // validateConsoleHost guarantees that Host is present.
   const validatedHost = host as string;
+  const configuredHostname = normalizeHostname(configuredHost);
   const origin = headerValue(request, "origin");
   if (!origin) {
+    if (!isLocalConsoleHost(configuredHostname)) {
+      throw new ConsoleCommandError("CONSOLE_SECURITY_ORIGIN_REJECTED", "Remote console POST requests require an Origin header");
+    }
     return;
   }
   let originUrl: URL;
@@ -503,15 +507,11 @@ function normalizeHostname(hostname: string): string {
 
 function isAllowedConsoleHost(hostname: string, configuredHost: string): boolean {
   const configured = normalizeHostname(configuredHost);
-  return isLocalConsoleHost(hostname) || (isSpecificBindHost(configured) && hostname === configured);
+  return isLocalConsoleHost(configured) ? isLocalConsoleHost(hostname) : hostname === configured;
 }
 
 function isLocalConsoleHost(hostname: string): boolean {
   return hostname === "localhost" || hostname === "::1" || hostname.startsWith("127.");
-}
-
-function isSpecificBindHost(hostname: string): boolean {
-  return hostname !== "0.0.0.0" && hostname !== "::" && hostname !== "";
 }
 
 function assertConsoleBindAllowed(host: string, allowRemote: boolean): void {

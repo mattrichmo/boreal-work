@@ -355,21 +355,45 @@ describe("console server", () => {
       ]);
 
       const remoteUrl = remote.url.replace("0.0.0.0", "127.0.0.1");
-      const remoteHtml = await fetch(remoteUrl);
-      const remoteHtmlBody = await remoteHtml.text();
-      expect(remoteHtml.status).toBe(200);
+      const remoteHtml = await getWithHost(remoteUrl, "0.0.0.0");
+      const remoteHtmlBody = remoteHtml.body;
+      expect(remoteHtml.statusCode).toBe(200);
       expect(remoteHtmlBody).not.toContain(remote.csrfToken);
       expect(remoteHtmlBody).not.toContain('name="consoleToken"');
 
-      const remoteState = await fetch(`${remoteUrl}/api/state`);
-      const remoteStateBody = await remoteState.text();
-      expect(remoteState.status).toBe(200);
+      const remoteState = await getWithHost(`${remoteUrl}/api/state`, "0.0.0.0");
+      const remoteStateBody = remoteState.body;
+      expect(remoteState.statusCode).toBe(200);
       expect(remoteStateBody).not.toContain(remote.csrfToken);
 
       const rejectedHost = await getWithHost(remoteUrl, "evil.example.test");
       const rejectedHostPayload = JSON.parse(rejectedHost.body) as { readonly error?: { readonly code?: string } };
       expect(rejectedHost.statusCode).toBe(403);
       expect(rejectedHostPayload.error?.code).toBe("CONSOLE_SECURITY_HOST_REJECTED");
+
+      const spoofedHost = await getWithHost(remoteUrl, "localhost");
+      const spoofedHostPayload = JSON.parse(spoofedHost.body) as { readonly error?: { readonly code?: string } };
+      expect(spoofedHost.statusCode).toBe(403);
+      expect(spoofedHostPayload.error?.code).toBe("CONSOLE_SECURITY_HOST_REJECTED");
+
+      const missingOrigin = await postWithHost(
+        `${remoteUrl}/api/commands/sync.refresh`,
+        "0.0.0.0",
+        new URLSearchParams({ confirm: "yes", consoleToken: remote.csrfToken }).toString()
+      );
+      const missingOriginPayload = JSON.parse(missingOrigin.body) as { readonly error?: { readonly code?: string } };
+      expect(missingOrigin.statusCode).toBe(403);
+      expect(missingOriginPayload.error?.code).toBe("CONSOLE_SECURITY_ORIGIN_REJECTED");
+
+      const spoofedPost = await postWithHost(
+        `${remoteUrl}/api/commands/sync.refresh`,
+        "localhost",
+        new URLSearchParams({ confirm: "yes", consoleToken: remote.csrfToken }).toString(),
+        "http://localhost"
+      );
+      const spoofedPostPayload = JSON.parse(spoofedPost.body) as { readonly error?: { readonly code?: string } };
+      expect(spoofedPost.statusCode).toBe(403);
+      expect(spoofedPostPayload.error?.code).toBe("CONSOLE_SECURITY_HOST_REJECTED");
     } finally {
       await remote.close();
     }
@@ -396,6 +420,38 @@ function getWithHost(url: string, host: string): Promise<{ readonly statusCode: 
     });
     request.on("error", reject);
     request.end();
+  });
+}
+
+function postWithHost(
+  url: string,
+  host: string,
+  body: string,
+  origin?: string
+): Promise<{ readonly statusCode: number | undefined; readonly body: string }> {
+  const parsed = new URL(url);
+  return new Promise((resolve, reject) => {
+    const headers: Record<string, string> = {
+      host,
+      "content-type": "application/x-www-form-urlencoded",
+      "content-length": String(Buffer.byteLength(body))
+    };
+    if (origin) {
+      headers.origin = origin;
+    }
+    const request = httpRequest({
+      hostname: parsed.hostname,
+      port: parsed.port,
+      path: `${parsed.pathname}${parsed.search}`,
+      method: "POST",
+      headers
+    }, (response) => {
+      const chunks: Buffer[] = [];
+      response.on("data", (chunk: Buffer) => chunks.push(chunk));
+      response.on("end", () => resolve({ statusCode: response.statusCode, body: Buffer.concat(chunks).toString("utf8") }));
+    });
+    request.on("error", reject);
+    request.end(body);
   });
 }
 
