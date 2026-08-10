@@ -1,7 +1,8 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+import { withContentHash } from "@boreal/core";
 import { runDaemonWatchOnce } from "@boreal/daemon";
 import { afterEach, describe, expect, it } from "vitest";
 
@@ -113,6 +114,44 @@ describe("agent renew --all", () => {
     });
   });
 
+  it("skips expired active reservations and directs repair and reclaim", async () => {
+    const rootDir = await createTestWorkspace();
+    await runCli(rootDir, ["init", "--json"]);
+    const work = await createWork(rootDir, "Expired renew all");
+    const reserved = await reserve(rootDir, work.meta.id, "agent-x", "5m");
+    await setReservationExpiresAt(rootDir, reserved.reservationId, "2000-01-01T00:00:00.000Z");
+
+    const renewed = parseData<AgentRenewPayload>(
+      (await runCli(rootDir, ["agent", "renew", "--all", "--agent", "agent-x", "--extend", "30m", "--json"])).stdout
+    );
+
+    expect(renewed.renewed).toEqual([]);
+    expect(renewed.skipped).toEqual([
+      expect.objectContaining({
+        workId: work.meta.id,
+        reservationId: reserved.reservationId,
+        reason: "expired_active_reservation",
+        repairCommand: "bwrk doctor --fix",
+        reclaimCommand: `bwrk agent start ${work.meta.id} --agent agent-x --json`
+      })
+    ]);
+
+    const directRenew = await runCli(
+      rootDir,
+      ["work", "renew", work.meta.id, "--expires-at", new Date(Date.now() + 30 * 60_000).toISOString(), "--json"],
+      { expectFailure: true }
+    );
+    expect(JSON.parse(directRenew.stderr)).toMatchObject({
+      ok: false,
+      code: "BOREAL_POLICY_VIOLATION",
+      message: "Agent reservation is expired; run `bwrk doctor --fix` and reclaim the work",
+      details: {
+        repairCommand: "bwrk doctor --fix",
+        reclaimCommand: `bwrk agent start ${work.meta.id} --agent agent-x --json`
+      }
+    });
+  });
+
   it("renews near-expiry reservations during daemon watch", async () => {
     const rootDir = await createTestWorkspace();
     const registryRoot = await createTestWorkspace();
@@ -171,6 +210,12 @@ async function reserve(rootDir: string, workId: string, agentId: string, ttl: st
   return parseData<ReservationPayload>(
     (await runCli(rootDir, ["work", "reserve", workId, "--agent", agentId, "--ttl", ttl, "--json"])).stdout
   );
+}
+
+async function setReservationExpiresAt(rootDir: string, reservationId: string, expiresAt: string): Promise<void> {
+  const path = join(rootDir, ".boreal/objects/reservations", `${reservationId}.json`);
+  const reservation = JSON.parse(await readFile(path, "utf8")) as Record<string, unknown>;
+  await writeFile(path, `${JSON.stringify(withContentHash({ ...reservation, expiresAt }))}\n`, "utf8");
 }
 
 async function runCli(

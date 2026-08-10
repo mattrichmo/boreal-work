@@ -807,11 +807,40 @@ export function createBorealRuntime(options: BorealRuntimeOptions = {}): BorealR
       return store.write(async (writer) => {
         const work = await requireWork(writer, input.workId);
         const reservation = await requireActiveWorkReservation(writer, work);
+        const current = now();
+        if (isReservationExpired(reservation, current)) {
+          const gaps = [
+            {
+              code: "reservation.not-ready",
+              subjectType: closeoutGateSubjectTypeForWorkKind(work.kind),
+              subjectId: work.meta.id,
+              data: {
+                observed: [reservation.expiresAt ?? ""],
+                reason: "agent reservation is expired"
+              }
+            }
+          ] satisfies readonly EnforcementGap[];
+          throw new BorealError(
+            "BOREAL_POLICY_VIOLATION",
+            "Agent reservation is expired; run `bwrk doctor --fix` and reclaim the work",
+            {
+              workId: work.meta.id,
+              agentId: reservation.agentId,
+              reservationId: reservation.meta.id,
+              expiresAt: reservation.expiresAt,
+              repairCommand: "bwrk doctor --fix",
+              reclaimCommand: `bwrk agent start ${work.meta.id} --agent ${reservation.agentId} --json`,
+              gaps,
+              domain: "work"
+            },
+            gaps
+          );
+        }
         const renewed = renewReservation({
           reservation,
           expiresAt: input.expiresAt,
           actor,
-          now: now()
+          now: current
         });
         await writer.putReservation(renewed);
         await appendEvent(writer, "work.reservation_renewed", work.meta.id, "work", {

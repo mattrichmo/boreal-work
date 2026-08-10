@@ -76,6 +76,8 @@ interface AgentRenewSkippedRow {
   readonly workId: WorkId;
   readonly reservationId: string;
   readonly reason: string;
+  readonly repairCommand?: string;
+  readonly reclaimCommand?: string;
 }
 
 interface AgentRenewResult {
@@ -361,6 +363,16 @@ async function agentRenewCommand(
       });
       continue;
     }
+    if (reservationExpiredAt(reservation, generatedAt)) {
+      skipped.push({
+        workId: reservation.workId,
+        reservationId: reservation.meta.id,
+        reason: "expired_active_reservation",
+        repairCommand: "bwrk doctor --fix",
+        reclaimCommand: `bwrk agent start ${reservation.workId} --agent ${agentId} --json`
+      });
+      continue;
+    }
     const result = await context.runtime.renewWorkReservation({
       workId: reservation.workId,
       expiresAt
@@ -397,6 +409,10 @@ function parseAgentRenewExtend(value: string): { readonly value: string; readonl
     value: trimmed,
     ms: amount * (unit === "m" ? 60_000 : 3_600_000)
   };
+}
+
+function reservationExpiredAt(reservation: AgentReservation, current: IsoTimestamp): boolean {
+  return Boolean(reservation.expiresAt && Date.parse(reservation.expiresAt) <= Date.parse(current));
 }
 
 async function agentFinishCommand(
