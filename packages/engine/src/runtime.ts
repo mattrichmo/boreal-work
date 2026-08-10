@@ -67,6 +67,7 @@ import { InMemoryBorealStore } from "@boreal/storage";
 import { toWorkItemView, type WorkItemView } from "@boreal/ui-model";
 import {
   addBlockingDependency as addBlockingDependencyDomain,
+  assertWorkDependencyMutationAllowed,
   attachEvidenceToWork,
   attachVerificationToWork,
   closeoutGateSubjectTypeForWorkKind,
@@ -528,6 +529,7 @@ export function createBorealRuntime(options: BorealRuntimeOptions = {}): BorealR
         if (!input.blockerProjectId.trim()) {
           throw new BorealError("BOREAL_INVALID_INPUT", "External blocker project id is required");
         }
+        assertWorkDependencyMutationAllowed(blockedWork, "add");
         const current = now();
         const edge = createGraphEdge({
           kind: "blocks",

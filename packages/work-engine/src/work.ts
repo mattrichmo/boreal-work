@@ -82,6 +82,31 @@ export interface RemoveBlockingDependencyInput {
   readonly now: IsoTimestamp;
 }
 
+const TERMINAL_DEPENDENCY_MUTATION_STATUSES = new Set<WorkStatus>(["closed", "cancelled", "verified"]);
+
+export function assertWorkDependencyMutationAllowed(
+  work: WorkItem,
+  operation: "add" | "remove"
+): void {
+  if (!TERMINAL_DEPENDENCY_MUTATION_STATUSES.has(work.status)) {
+    return;
+  }
+
+  throw new BorealError(
+    "BOREAL_POLICY_VIOLATION",
+    `Cannot ${operation} a blocking dependency on terminal work`,
+    {
+      workId: work.meta.id,
+      status: work.status,
+      operation,
+      reason: "terminal_work_dependency_mutation",
+      reopenCommand: `bwrk work reopen ${work.meta.id} --ready --reason <reason>`
+    },
+    undefined,
+    "work"
+  );
+}
+
 export function createWorkItem(input: CreateWorkItemInput): WorkItem {
   const title = normalizeMachineString(input.title, "title");
   const description = input.description?.trim() ?? "";
@@ -250,6 +275,8 @@ export function addBlockingDependency(input: AddBlockingDependencyInput): {
     throw new BorealError("BOREAL_INVALID_INPUT", "A work item cannot block itself");
   }
 
+  assertWorkDependencyMutationAllowed(input.blockedWork, "add");
+
   if (
     input.policy.preventDependencyCycles &&
     wouldCreateCycle(
@@ -287,6 +314,7 @@ export function addBlockingDependency(input: AddBlockingDependencyInput): {
 }
 
 export function removeBlockingDependency(input: RemoveBlockingDependencyInput): WorkItem {
+  assertWorkDependencyMutationAllowed(input.blockedWork, "remove");
   const dependencyIds = input.blockedWork.dependencyIds.filter((id) => id !== input.blockingWork.meta.id);
   return touchRecord(
     {

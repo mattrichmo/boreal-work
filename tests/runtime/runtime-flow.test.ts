@@ -838,6 +838,64 @@ describe("boreal runtime proof slice", () => {
     expect(events.map((event) => event.type)).toContain("work.dependency_removed");
   });
 
+  it("rejects dependency mutations on closed, cancelled, and verified work", async () => {
+    for (const terminalStatus of ["closed", "cancelled", "verified"] as const) {
+      const store = new InMemoryBorealStore();
+      const runtime = createBorealRuntime({ store, actor });
+      const blocked = await runtime.createWork({ title: `${terminalStatus} dependency target`, ready: true });
+      const existingBlocker = await runtime.createWork({ title: `${terminalStatus} existing blocker`, ready: true });
+      await runtime.addBlockingDependency({
+        blockedWorkId: blocked.meta.id,
+        blockingWorkId: existingBlocker.meta.id
+      });
+
+      await store.write(async (writer) => {
+        const current = await writer.getWorkItem(blocked.meta.id);
+        if (!current) {
+          throw new Error("missing terminal dependency target");
+        }
+        await writer.putWorkItem(withContentHash({ ...current, status: terminalStatus }));
+      });
+
+      const newBlocker = await runtime.createWork({ title: `${terminalStatus} new blocker`, ready: true });
+      const beforeEdges = await store.read((reader) => reader.listGraphEdges());
+
+      await expect(
+        runtime.addBlockingDependency({
+          blockedWorkId: blocked.meta.id,
+          blockingWorkId: newBlocker.meta.id
+        })
+      ).rejects.toMatchObject({
+        code: "BOREAL_POLICY_VIOLATION",
+        details: expect.objectContaining({
+          workId: blocked.meta.id,
+          status: terminalStatus,
+          operation: "add"
+        })
+      });
+
+      await expect(
+        runtime.removeBlockingDependency({
+          blockedWorkId: blocked.meta.id,
+          blockingWorkId: existingBlocker.meta.id
+        })
+      ).rejects.toMatchObject({
+        code: "BOREAL_POLICY_VIOLATION",
+        details: expect.objectContaining({
+          workId: blocked.meta.id,
+          status: terminalStatus,
+          operation: "remove"
+        })
+      });
+
+      await expect(runtime.getWorkView(blocked.meta.id)).resolves.toMatchObject({
+        status: terminalStatus,
+        blockedBy: [existingBlocker.meta.id]
+      });
+      await expect(store.read((reader) => reader.listGraphEdges())).resolves.toEqual(beforeEdges);
+    }
+  });
+
   it("renews, releases, and expires active reservations", async () => {
     let current = new Date("2026-01-01T00:00:00.000Z");
     const store = new InMemoryBorealStore();
