@@ -732,6 +732,33 @@ describe("boreal runtime proof slice", () => {
     expect(forced.status).toBe("in_progress");
   });
 
+  it("recomputes graph readiness before directly reserving stale ready work", async () => {
+    const store = new InMemoryBorealStore();
+    const runtime = createBorealRuntime({ store, actor });
+    const blocker = await runtime.createWork({ title: "Direct reservation blocker", ready: true });
+    const target = await runtime.createWork({ title: "Stale ready direct reservation target", ready: true });
+    const blocked = await runtime.addBlockingDependency({
+      blockedWorkId: target.meta.id,
+      blockingWorkId: blocker.meta.id
+    });
+
+    await store.write(async (writer) => {
+      await writer.putWorkItem({ ...blocked, status: "ready" });
+    });
+
+    await expect(
+      runtime.reserveWork({
+        workId: target.meta.id,
+        agentId: "agent-a"
+      })
+    ).rejects.toMatchObject({
+      code: "BOREAL_POLICY_VIOLATION",
+      details: expect.objectContaining({ status: "blocked" })
+    } satisfies Partial<BorealError>);
+
+    await expect(store.read((reader) => reader.listReservationsForWork(target.meta.id))).resolves.toHaveLength(0);
+  });
+
   it("atomically claims the next blocker-valid ready work by label and priority", async () => {
     const store = new InMemoryBorealStore();
     const runtime = createBorealRuntime({ store, actor });

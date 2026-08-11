@@ -731,9 +731,13 @@ export function createBorealRuntime(options: BorealRuntimeOptions = {}): BorealR
     async reserveWork(input): Promise<WorkItem> {
       return store.write(async (writer) => {
         const agentId = normalizeActorId(String(input.agentId));
-        const work = await requireWork(writer, input.workId);
+        const graphWork = await workWithGraphDependencies(writer, await requireWork(writer, input.workId));
+        const dependencies = await loadDependencies(writer, graphWork);
+        const derivedStatus = deriveReadinessStatus(graphWork, dependencies);
         const reservationResult = reserveWorkDomain({
-          work,
+          // Keep explicit draft/blocked transitions subject to reservation force policy while
+          // preventing a stale ready projection from bypassing graph-derived blockers.
+          work: graphWork.status === "ready" ? { ...graphWork, status: derivedStatus } : graphWork,
           agentId,
           existingReservationsForWork: await writer.listReservationsForWork(input.workId),
           activeReservationsForAgent: await writer.listActiveReservationsForAgent(agentId),
@@ -750,7 +754,7 @@ export function createBorealRuntime(options: BorealRuntimeOptions = {}): BorealR
         }
         await writer.putReservation(reservationResult.reservation);
         await writer.putWorkItem(reservationResult.work);
-        await appendEvent(writer, "work.reserved", work.meta.id, "work", {
+        await appendEvent(writer, "work.reserved", graphWork.meta.id, "work", {
           agentId,
           reservationId: reservationResult.reservation.meta.id,
           forced: Boolean(input.force),
