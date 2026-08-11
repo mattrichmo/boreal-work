@@ -1534,6 +1534,14 @@ async function readStateDocument(
       });
       return state;
     } catch (error) {
+      if (error instanceof BorealError && error.code === "BOREAL_STORAGE_ERROR" && isRecord(error.details)) {
+        diagnostics.push({
+          code: "state.record_shape",
+          severity: "error",
+          message: "Malformed runtime records",
+          details: [error.details]
+        });
+      }
       diagnostics.push({
         code: "state.parse",
         severity: "error",

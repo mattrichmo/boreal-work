@@ -6617,6 +6617,37 @@ describe("bwrk cli", () => {
     );
   });
 
+  it("reports malformed object records in doctor without crashing state construction", async () => {
+    const rootDir = await makeTempWorkspace();
+    await runCli(rootDir, ["init", "--json"]);
+    await runCli(rootDir, ["storage", "migrate", "--to", "objects", "--json"]);
+    await mkdir(join(rootDir, ".boreal", "objects", "work"), { recursive: true });
+    await writeFile(join(rootDir, ".boreal", "objects", "work", "malformed-record.json"), "{}\n", "utf8");
+
+    const doctor = await runCli(rootDir, ["doctor", "--json"]);
+    const payload = parseData<DoctorPayload>(doctor.stdout);
+    const shapeDiagnostic = doctorDiagnostic(payload, "state.record_shape");
+
+    expect(doctor.exitCode).toBe(1);
+    expect(payload.ok).toBe(false);
+    expect(shapeDiagnostic).toEqual(
+      expect.objectContaining({
+        severity: "error",
+        details: [
+          expect.objectContaining({
+            section: "workItems",
+            id: "malformed-record",
+            path: join(rootDir, ".boreal", "objects", "work", "malformed-record.json"),
+            issues: expect.any(Array)
+          })
+        ]
+      })
+    );
+    expect(payload.diagnostics).toEqual(
+      expect.arrayContaining([expect.objectContaining({ code: "state.parse", severity: "error" })])
+    );
+  });
+
   it("reports operation event causality mismatches in doctor", async () => {
     const rootDir = await makeTempWorkspace();
     await runCli(rootDir, ["init", "--json"]);

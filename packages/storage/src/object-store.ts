@@ -349,13 +349,13 @@ export class ObjectDirBorealStore implements BorealStore {
       const path = join(directory, entry);
       assertPathInside(directory, path);
       await assertRealPathInside(directory, path);
-      records.push(
-        await readJsonFile(path, {
-          schemaName: `boreal.object-store.${definition.section}`,
-          expectedObject: true,
-          maxBytes: RECORD_MAX_BYTES
-        })
-      );
+      const record = await readJsonFile(path, {
+        schemaName: `boreal.object-store.${definition.section}`,
+        expectedObject: true,
+        maxBytes: RECORD_MAX_BYTES
+      });
+      validateRecord(definition, entry.slice(0, -".json".length), record, path);
+      records.push(record);
     }
     return records;
   }
@@ -398,12 +398,13 @@ export class ObjectDirBorealStore implements BorealStore {
   }
 }
 
-function validateRecord(definition: ObjectSectionDefinition, id: string, record: unknown): void {
+function validateRecord(definition: ObjectSectionDefinition, id: string, record: unknown, path?: string): void {
   const issues = definition.validator(record, `${definition.section}.${id}`);
   if (issues.length > 0) {
     throw new BorealError("BOREAL_STORAGE_ERROR", "Object store record failed schema validation", {
       section: definition.section,
       id,
+      ...(path ? { path } : {}),
       issues: issues.slice(0, 50),
       issueCount: issues.length
     });
