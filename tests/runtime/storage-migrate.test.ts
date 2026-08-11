@@ -5,8 +5,9 @@ import { join } from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
 
+import { createRecordMeta, nowIso, withContentHash } from "@boreal/core";
 import { createBorealRuntime } from "@boreal/engine";
-import { FileBorealStore } from "@boreal/storage";
+import { FileBorealStore, FileEventLog } from "@boreal/storage";
 
 import { main } from "../../apps/cli/src/index.ts";
 import type { CliOutput } from "../../apps/cli/src/output.ts";
@@ -103,6 +104,56 @@ describe("storage migration", () => {
       (await runCli(rootDir, ["work", "create", "object-backed work", "--ready", "--json"])).stdout
     );
     expect(existsSync(join(rootDir, ".boreal", "objects", "work", `${created.meta.id}.json`))).toBe(true);
+  });
+
+  it("does not re-append existing event and operation records during migration", async () => {
+    const rootDir = await makeTempWorkspace();
+    const runtime = createBorealRuntime({ store: new FileBorealStore({ rootDir }) });
+    await runtime.ensureWorkspaceInitialized();
+    const eventLog = new FileEventLog({ path: join(rootDir, ".boreal", "log", "events.jsonl") });
+    await runtime.createWork({ title: "migration fixture", kind: "task", ready: true });
+    const timestamp = nowIso();
+    await eventLog.append(
+      "operation",
+      withContentHash({
+        meta: createRecordMeta({
+          id: "bw_operation_0123456789ab",
+          now: timestamp,
+          actor: { id: "migration-fixture", kind: "system" }
+        }),
+        sessionId: "migration-fixture",
+        commandPath: "fixture",
+        argv: [],
+        actorId: "migration-fixture",
+        startedAt: timestamp,
+        finishedAt: timestamp,
+        exitCode: 0,
+        status: "succeeded",
+        stateChanged: true,
+        generatedArtifactsChanged: false,
+        eventIds: []
+      })
+    );
+    const before = await eventLog.readAll();
+    expect(before.some((entry) => entry.kind === "event")).toBe(true);
+    expect(before.some((entry) => entry.kind === "operation")).toBe(true);
+
+    await runCli(rootDir, ["storage", "migrate", "--to", "objects", "--json"]);
+
+    const after = await eventLog.readAll();
+    const counts = new Map<string, number>();
+    const logicalCounts = new Map<string, number>();
+    for (const entry of after) {
+      const key = `${entry.kind}:${JSON.stringify(entry.record)}`;
+      counts.set(key, (counts.get(key) ?? 0) + 1);
+      const logicalKey = `${entry.kind}:${entry.record.meta.id}`;
+      logicalCounts.set(logicalKey, (logicalCounts.get(logicalKey) ?? 0) + 1);
+    }
+    for (const entry of before) {
+      const key = `${entry.kind}:${JSON.stringify(entry.record)}`;
+      expect(counts.get(key)).toBe(1);
+      expect(logicalCounts.get(`${entry.kind}:${entry.record.meta.id}`)).toBe(1);
+    }
   });
 });
 
