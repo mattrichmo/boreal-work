@@ -1,29 +1,29 @@
 # Boreal Work
 
 <p align="center">
-  A local project operating layer for humans and coding agents
+  A local-first CLI and project runtime for humans and coding agents
 </p>
 
-> Boreal helps a project remember why, choose safe next work, prove completion, and hand off without replaying chat.
+> Boreal stores project context, work state, dependencies, ownership, evidence, and handoffs in local, inspectable records.
 
-[Why Boreal](#why-boreal) · [How it works](#how-boreal-works) · [Quick start](#quick-start) · [First work loop](#your-first-work-loop) · [Agent manual](AGENT_README.md) · [CLI reference](docs/cli/COMMANDS.md) · [Documentation](docs/README.md)
+[What it is](#what-boreal-is) · [Quick start](#quick-start) · [Contributing](CONTRIBUTING.md) · [First work loop](#your-first-work-loop) · [Agent manual](AGENT_README.md) · [CLI reference](docs/cli/COMMANDS.md) · [Documentation](docs/README.md)
 
 > [!NOTE]
-> **Early release:** Boreal is at `0.1.0`. The GitHub installer is available now. Interfaces may evolve before 1.0; see the [compatibility policy](docs/architecture/COMPATIBILITY_POLICY.md) for upgrade and migration expectations.
+> **Early release:** Boreal is at `0.1.0`. Interfaces may evolve before 1.0; see the [compatibility policy](docs/architecture/COMPATIBILITY_POLICY.md) for upgrade and migration expectations. The project is source-available under the [PolyForm Noncommercial License 1.0.0](https://polyformproject.org/licenses/noncommercial/1.0.0).
 
-## Why Boreal
+## What Boreal is
 
-Boreal is for projects where work must survive a chat session, an interruption, or a change of hands. It gives humans and coding agents a shared local record of intent, dependencies, ownership, evidence, and handoff.
+Boreal is a local-first CLI and project runtime for work that must survive a chat session, an interruption, or a change of hands. It gives humans and coding agents a shared local record of intent, dependencies, ownership, evidence, and handoff.
 
-Imagine one agent starts a feature, another agent continues it later, and a reviewer needs to understand what changed. Boreal keeps the decision, safe next action, active owner, proof, and remaining risk attached to the project instead of leaving them in a chat transcript.
+The records live with the project rather than in a hosted service or chat transcript. Boreal is not a hosted issue tracker and not an autonomous coding agent; it is a local state and coordination layer that other tools can call.
 
-### The problem Boreal solves
+### The problem
 
-Project context is usually scattered across chat, tickets, documents, local branches, and agent sessions. When that context disappears, teams repeat work, miss dependencies, lose the reason behind decisions, or mark tasks complete without proof.
+Project context is often scattered across chat, tickets, documents, local branches, and agent sessions. When that context disappears, people repeat work, miss dependencies, lose the reason behind decisions, or mark tasks complete without proof.
 
-## What Boreal gives you
+### Core capabilities
 
-| If you are worried about… | Boreal gives you… |
+| Concern | Boreal records or enforces… |
 | --- | --- |
 | Losing the “why” behind a task | Sources, claims, decisions, and human-readable memory linked to work. |
 | Starting work that is not safe yet | Only unblocked work is ready, and reservations prevent double-claiming while they are active. |
@@ -49,39 +49,39 @@ flowchart LR
 
 In plain English: turn a request into explicit scenarios, make dependencies determine what is safe, reserve work atomically, attach proof to the result, and leave the next actor a usable handoff. New context can enter the same loop without silently changing the project’s history.
 
-The loop is local-first. The project keeps its own operational records and memory vault. Boreal is not a hosted issue tracker and not an autonomous coding agent; it is the state and coordination layer that other tools can call.
+The loop uses local project records and a memory vault. Other tools can call the same state through the CLI, MCP server, console, TUI, or daemon.
 
-### See it in action
+### Example interface
 
-The same project state is useful in a human-facing terminal dashboard and a scriptable CLI. This capture uses illustrative demo data, but it shows the real TUI surface reading the same work, dependency, reservation, and readiness records that agents and scripts use.
+The terminal dashboard and scriptable CLI read the same project state. This capture uses illustrative demo data and shows the TUI reading work, dependency, reservation, and readiness records.
 
 <p align="center">
   <img src="docs/assets/boreal-tui.png" alt="Boreal terminal dashboard showing ready, blocked, and active work" width="920">
 </p>
 
-<p align="center"><sub>Terminal dashboard: scan the project roll-up, see blockers, and choose the next safe lane.</sub></p>
+<p align="center"><sub>Terminal dashboard showing ready, blocked, and active work.</sub></p>
 
-## Who Boreal is for
+## Usage contexts
 
-| Profile | Best for | What becomes easier |
+| Context | Typical use | Supported operations |
 | --- | --- | --- |
 | **Simple** | One operator or one coding agent in one repository. | Capture context, order work, verify results, and resume later. |
 | **Team** | Several humans or agents using branches, worktrees, sessions, or machines. | Reserve work safely, isolate lanes, exchange handoffs, and recover from interruptions. |
 | **Governed** | Projects that require enforceable tests, review, audit, or provenance. | Require verification, checkpoints, trusted evidence, and explicit closeout policy. |
 
-Profiles change how much is exposed, not the underlying safety rules or canonical records.
+These profiles change the exposed capabilities and defaults, not the underlying safety rules or canonical records. See the [product contract](docs/product/PRODUCT_CONTRACT.md) for the full profile definitions.
 
-### Is Boreal a fit?
+### When it is useful
 
-Use Boreal when a project has meaningful context to preserve, multiple actors to coordinate, or a real cost to unverifiable completion. It is especially useful for coding-agent workflows where the next session must understand what happened and what is safe to do next.
+Boreal is useful when a project has context to preserve, multiple actors to coordinate, or a real cost to unverifiable completion. It is particularly suited to coding-agent workflows where the next session must understand what happened and what is safe to do next.
 
-A conventional tracker records that someone intended to do work. Boreal also records why the work exists, whether it is safe to start, who owns it, what proves it is complete, and how another actor can resume it.
+A conventional tracker records that someone intends to do work. Boreal also records why the work exists, whether it is safe to start, who owns it, what proves it is complete, and how another actor can resume it.
 
-It does not replace Git hosting, code review, a general-purpose ticketing service, or the coding agent itself. It gives those tools a shared, inspectable project state.
+Boreal does not replace Git hosting, code review, a general-purpose ticketing service, or the coding agent itself. It provides those tools with a shared, inspectable project state.
 
 ## Quick start
 
-For the GitHub installer, you need Git, Node.js 22 or newer, and pnpm or Corepack. Source development also requires pnpm.
+To install a released machine CLI, you need Git, Node.js 22 or newer, and pnpm or Corepack. For source development, see the [contributor guide](CONTRIBUTING.md).
 
 ### 1. Install the machine CLI
 
@@ -104,7 +104,7 @@ bwrk agent guide
 
 After setup, the project has a machine-readable operational state in `.boreal/`, a human-readable memory vault in `memory/`, and project-scoped agent guidance under `.agents/skills/`. `bwrk agent guide` prints the instructions an agent should follow in this project.
 
-For agents, that guidance covers workspace binding, read-only inspection, stable JSON IDs, directives, safe claiming, evidence, closeout, recovery, and handoff. For humans, the [agent manual](AGENT_README.md) is the detailed protocol; the rest of this README focuses on the product and its useful path.
+For agents, that guidance covers workspace binding, read-only inspection, stable JSON IDs, directives, safe claiming, evidence, closeout, recovery, and handoff. For the detailed protocol, see the [agent manual](AGENT_README.md).
 
 To make an integration available in every repository on this machine:
 
@@ -135,6 +135,10 @@ bwrk setup --dry-run
 ~~~
 
 </details>
+
+## Contributing
+
+The repository is open to bug reports, design discussion, documentation changes, and code contributions within the project license. The [contributor guide](CONTRIBUTING.md) covers local setup, checks, and the expectations for changes to the CLI and its persisted contracts.
 
 ## Your first work loop
 
@@ -457,7 +461,7 @@ See [evidence trust](docs/architecture/EVIDENCE_TRUST.md) for the difference bet
 
 </details>
 
-## How the runtime stays trustworthy
+## Runtime properties
 
 The CLI, MCP server, console, TUI, and daemon are different ways to use Boreal, not different sources of truth. A claim made through one interface and a claim made through another go through the same engine and storage contracts.
 
@@ -482,9 +486,9 @@ flowchart TB
     operational --> views
 ~~~
 
-This gives Boreal a few important guarantees:
+These shared contracts define the runtime's important properties:
 
-| Guarantee | What it means in practice |
+| Property | What it means in practice |
 | --- | --- |
 | **Readiness is derived** | Open dependency blockers cannot be hidden by a stale status field. |
 | **Ownership is atomic** | Finding work and reserving it happen in one locked transaction. |
@@ -525,9 +529,9 @@ bwrk ledger status --json
 
 </details>
 
-## What setup creates
+## Project layout
 
-The recommended setup creates three useful boundaries:
+The recommended setup creates three project boundaries:
 
 - `.boreal/` stores machine-readable operational records, locks, and rebuildable projections.
 - `memory/` stores human-readable project knowledge, raw inputs, ledgers, and handoffs.
@@ -554,9 +558,9 @@ By default, <code>memory/</code> is a child repository with separate Git history
 
 </details>
 
-## One project state, several interfaces
+## Interfaces
 
-Use the interface that fits the actor. The project state and safety contracts stay the same:
+The interfaces use the same project state and safety contracts:
 
 | Interface | Best for |
 | --- | --- |
@@ -567,20 +571,6 @@ Use the interface that fits the actor. The project state and safety contracts st
 | **TUI** | Optional terminal dashboard using shared runtime loaders and UI models. |
 
 See [MCP server](docs/architecture/MCP_SERVER.md), [daemon](docs/architecture/DAEMON.md), [console app](docs/architecture/CONSOLE_APP.md), and [TUI contracts](docs/architecture/TUI_SURFACE_CONTRACTS.md).
-
-## For contributors
-
-This section is for people changing Boreal itself. For ordinary project work, use the installed machine CLI from the [quick start](#quick-start).
-
-~~~bash
-pnpm install
-pnpm build
-pnpm check
-pnpm test
-git diff --check
-~~~
-
-Use `pnpm bwrk ...` or `pnpm install:local` when you need the current checkout instead of the versioned machine install. See the [release guide](docs/release/publishing.md) for publishing and closeout checks.
 
 ## Documentation map
 
