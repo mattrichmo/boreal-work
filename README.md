@@ -1,39 +1,29 @@
 # Boreal Work
 
-<p align="center">
-  A local-first CLI and project runtime for humans and coding agents
-</p>
+Boreal Work is a local CLI for keeping project context and work state in the repository. It is useful when work moves between people, coding agents, and sessions.
 
-> Boreal stores project context, work state, dependencies, ownership, evidence, and handoffs in local, inspectable records.
-
-[What it is](#what-boreal-is) · [Quick start](#quick-start) · [Contributing](CONTRIBUTING.md) · [First work loop](#your-first-work-loop) · [Agent manual](AGENT_README.md) · [CLI reference](docs/cli/COMMANDS.md) · [Documentation](docs/README.md)
+[Quick start](#quick-start) · [Contributing](CONTRIBUTING.md) · [First work loop](#your-first-work-loop) · [Agent manual](AGENT_README.md) · [CLI reference](docs/cli/COMMANDS.md) · [Documentation](docs/README.md)
 
 > [!NOTE]
-> **Early release:** Boreal is at `0.1.0`. Interfaces may evolve before 1.0; see the [compatibility policy](docs/architecture/COMPATIBILITY_POLICY.md) for upgrade and migration expectations. The project is source-available under the [PolyForm Noncommercial License 1.0.0](https://polyformproject.org/licenses/noncommercial/1.0.0).
+> **Early release:** Boreal is at `0.1.0`. The interfaces may change before 1.0. See the [compatibility policy](docs/architecture/COMPATIBILITY_POLICY.md) for the current expectations. The project is source-available under the [PolyForm Noncommercial License 1.0.0](https://polyformproject.org/licenses/noncommercial/1.0.0).
 
-## What Boreal is
+## What it does
 
-Boreal is a local-first CLI and project runtime for work that must survive a chat session, an interruption, or a change of hands. It gives humans and coding agents a shared local record of intent, dependencies, ownership, evidence, and handoff.
+Projects spread their context across chats, tickets, documents, branches, and agent sessions. Boreal puts the parts that need to survive there into the project itself.
 
-The records live with the project rather than in a hosted service or chat transcript. Boreal is not a hosted issue tracker and not an autonomous coding agent; it is a local state and coordination layer that other tools can call.
+It records:
 
-### The problem
+- work items, acceptance criteria, and dependencies;
+- reservations, so two people or agents do not take the same work;
+- sources, claims, and decisions behind the work;
+- evidence and verification results; and
+- handoffs for the next person or agent.
 
-Project context is often scattered across chat, tickets, documents, local branches, and agent sessions. When that context disappears, people repeat work, miss dependencies, lose the reason behind decisions, or mark tasks complete without proof.
+Boreal runs in the project and does not require a hosted service. You still use Git hosting, code review, a ticketing system, and a coding agent. Boreal gives them a common place to read and update project state.
 
-### Core capabilities
+## How it works
 
-| Concern | Boreal records or enforces… |
-| --- | --- |
-| Losing the “why” behind a task | Sources, claims, decisions, and human-readable memory linked to work. |
-| Starting work that is not safe yet | Only unblocked work is ready, and reservations prevent double-claiming while they are active. |
-| “Done” meaning “someone said so” | Evidence, verification, and closeout gates that refuse closure when required proof is missing. |
-| Agents colliding or crossing project boundaries | Project-scoped ownership, Git/worktree boundaries, and durable handoffs. |
-| State drifting after an interruption | Authoritative records plus `sync` and `doctor` commands that rebuild or repair derived views. |
-
-## How Boreal works
-
-A Boreal task is an inspectable chain from intent to proof:
+The usual path looks like this:
 
 ~~~mermaid
 flowchart LR
@@ -47,13 +37,13 @@ flowchart LR
     H -. "new context" .-> B
 ~~~
 
-In plain English: turn a request into explicit scenarios, make dependencies determine what is safe, reserve work atomically, attach proof to the result, and leave the next actor a usable handoff. New context can enter the same loop without silently changing the project’s history.
+Start with a request, break it into work, claim a lane, run the checks, and leave enough context for someone else to continue. Dependencies decide what is ready, and closeout can require evidence before work is marked complete.
 
-The loop uses local project records and a memory vault. Other tools can call the same state through the CLI, MCP server, console, TUI, or daemon.
+The same project state is available through the CLI, MCP server, console, TUI, and daemon.
 
-### Example interface
+### Screenshot
 
-The terminal dashboard and scriptable CLI read the same project state. This capture uses illustrative demo data and shows the TUI reading work, dependency, reservation, and readiness records.
+This is the terminal dashboard using demo data. It reads the same work and reservation records as the CLI.
 
 <p align="center">
   <img src="docs/assets/boreal-tui.png" alt="Boreal terminal dashboard showing ready, blocked, and active work" width="920">
@@ -61,27 +51,13 @@ The terminal dashboard and scriptable CLI read the same project state. This capt
 
 <p align="center"><sub>Terminal dashboard showing ready, blocked, and active work.</sub></p>
 
-## Usage contexts
+## Scope
 
-| Context | Typical use | Supported operations |
-| --- | --- | --- |
-| **Simple** | One operator or one coding agent in one repository. | Capture context, order work, verify results, and resume later. |
-| **Team** | Several humans or agents using branches, worktrees, sessions, or machines. | Reserve work safely, isolate lanes, exchange handoffs, and recover from interruptions. |
-| **Governed** | Projects that require enforceable tests, review, audit, or provenance. | Require verification, checkpoints, trusted evidence, and explicit closeout policy. |
-
-These profiles change the exposed capabilities and defaults, not the underlying safety rules or canonical records. See the [product contract](docs/product/PRODUCT_CONTRACT.md) for the full profile definitions.
-
-### When it is useful
-
-Boreal is useful when a project has context to preserve, multiple actors to coordinate, or a real cost to unverifiable completion. It is particularly suited to coding-agent workflows where the next session must understand what happened and what is safe to do next.
-
-A conventional tracker records that someone intends to do work. Boreal also records why the work exists, whether it is safe to start, who owns it, what proves it is complete, and how another actor can resume it.
-
-Boreal does not replace Git hosting, code review, a general-purpose ticketing service, or the coding agent itself. It provides those tools with a shared, inspectable project state.
+Boreal works for a single repository and a single operator, but the same records also support multiple agents, worktrees, and stricter review or audit requirements. The [product contract](docs/product/PRODUCT_CONTRACT.md) describes those profiles in detail.
 
 ## Quick start
 
-To install a released machine CLI, you need Git, Node.js 22 or newer, and pnpm or Corepack. For source development, see the [contributor guide](CONTRIBUTING.md).
+For the released CLI, you need Git, Node.js 22 or newer, and pnpm or Corepack. If you are working on Boreal itself, start with the [contributor guide](CONTRIBUTING.md).
 
 ### 1. Install the machine CLI
 
@@ -100,11 +76,11 @@ bwrk setup --yes
 bwrk agent guide
 ~~~
 
-<code>bwrk setup</code> initializes the current repository and creates the project runtime, memory vault, Git guards, and project-level agent skills. The machine CLI installation and project setup are separate operations.
+<code>bwrk setup</code> initializes the current repository. It creates the `.boreal/` state directory, the memory vault, Git guards, and project-level agent skills. Installing the CLI and setting up a project are separate steps.
 
-After setup, the project has a machine-readable operational state in `.boreal/`, a human-readable memory vault in `memory/`, and project-scoped agent guidance under `.agents/skills/`. `bwrk agent guide` prints the instructions an agent should follow in this project.
+After setup, `.boreal/` holds project state, `memory/` holds the project notes and handoffs, and `.agents/skills/` holds the agent guidance. `bwrk agent guide` prints the instructions for this project.
 
-For agents, that guidance covers workspace binding, read-only inspection, stable JSON IDs, directives, safe claiming, evidence, closeout, recovery, and handoff. For the detailed protocol, see the [agent manual](AGENT_README.md).
+The generated guide covers workspace binding, read-only inspection, JSON IDs, safe claiming, evidence, closeout, recovery, and handoff. The full protocol is in the [agent manual](AGENT_README.md).
 
 To make an integration available in every repository on this machine:
 
@@ -138,13 +114,13 @@ bwrk setup --dry-run
 
 ## Contributing
 
-The repository is open to bug reports, design discussion, documentation changes, and code contributions within the project license. The [contributor guide](CONTRIBUTING.md) covers local setup, checks, and the expectations for changes to the CLI and its persisted contracts.
+Bug reports, documentation fixes, design discussion, and code changes are welcome within the project license. The [contributor guide](CONTRIBUTING.md) has the local setup and checks.
 
 ## Your first work loop
 
-The example below starts with an already-scoped work item. For a real feature, planning comes first: route the request, capture the relevant sources, split the work into scenarios and acceptance criteria, and add dependencies before anyone claims a lane. The [agent control loop](AGENT_README.md#the-agent-control-loop) shows the full protocol.
+Here is a small example using an already-scoped work item. For a larger feature, capture the relevant sources, split the request into scenarios and acceptance criteria, and add dependencies first. The [agent control loop](AGENT_README.md#the-agent-control-loop) has the full procedure.
 
-The shortest execution loop is: create work, claim it, record proof, and close it with a handoff.
+The basic flow is: create the work, claim it, record the check, then close it with a handoff.
 
 ### 1. Create work
 
@@ -155,8 +131,7 @@ bwrk work create "Add request tracing" \
   --ready
 ~~~
 
-Boreal prints a work ID such as <code>bw_work_...</code>. Use that ID in the commands below.
-The task now has an explicit outcome instead of being only a sentence in a request.
+<code>bwrk</code> prints a work ID such as <code>bw_work_...</code>. Use that ID in the commands below.
 
 ### 2. Claim it
 
@@ -167,8 +142,7 @@ bwrk work claim <work-id> \
   --ttl 2h
 ~~~
 
-The claim is atomic: Boreal rechecks blockers, reserves the work for the agent, refreshes its context, and returns a handoff bundle. The reservation expires unless it is renewed.
-Other actors can now see that this lane is owned, why it is being worked, and when the ownership expires.
+The claim checks blockers and reserves the work in one operation. It also returns the current context for the agent. The reservation expires unless it is renewed, and other actors can see who owns the work and when that ownership ends.
 
 ### 3. Record proof
 
@@ -184,7 +158,7 @@ bwrk evidence add <work-id> \
   --command "pnpm test"
 ~~~
 
-The proof is attached to the work item, where a later agent or reviewer can inspect it instead of searching through terminal history.
+The result is attached to the work item, so a later agent or reviewer does not have to search through terminal history.
 
 ### 4. Close and hand off
 
@@ -200,12 +174,12 @@ bwrk agent finish <work-id> \
   --commit <full-commit-sha>
 ~~~
 
-Closeout now has a subject-matched proof, a verification result, a checkpoint, and a handoff. Dependent work can be recomputed from that durable state.
+The work now has its proof, verification result, checkpoint, and handoff. Dependent work can be updated from that state.
 
 > [!IMPORTANT]
 > The <code>--command</code> on <code>evidence add</code> records what you report; it does not execute the command. For Boreal-witnessed execution, use [declared gates](#require-boreal-witnessed-evidence).
 
-The quick path below is simplified, but it includes the states that matter when work cannot safely advance:
+The simplified state flow is:
 
 ~~~mermaid
 stateDiagram-v2
@@ -222,9 +196,9 @@ stateDiagram-v2
 ~~~
 
 <details>
-<summary><strong>What happens automatically at finish</strong></summary>
+<summary><strong>What <code>agent finish</code> does</strong></summary>
 
-In one guarded workflow, <code>agent finish</code>:
+<code>agent finish</code>:
 
 1. validates reservation ownership and expiration;
 2. records or reuses evidence against the work;
@@ -236,32 +210,32 @@ In one guarded workflow, <code>agent finish</code>:
 
 </details>
 
-## The mental model
+## The records
 
-You do not need to understand Boreal’s storage internals to use it. These are the records that matter:
+You can use Boreal without knowing how it stores files. These are the main records:
 
-| Boreal concept | Plain-English meaning | Why it matters |
+| Record | Meaning | Use |
 | --- | --- | --- |
-| **Work structure** | A request broken into scenarios, dependencies, and acceptance criteria. | Makes scope explicit before an agent starts changing code. |
-| **Work** | The thing to do, with acceptance criteria. | Makes “done” explicit. |
-| **Dependency** | A relationship that says one item blocks another. | The ready queue reflects what is actually safe to start. |
-| **Reservation** | A time-limited claim by a human or agent. | Prevents two actors from silently owning the same work. |
-| **Source / claim / decision** | The reference, statement, and choice behind the work. | Keeps the reason near the task after the conversation ends. |
-| **Evidence / verification** | Proof that something happened, plus the check that it satisfies the work. | Prevents closure on assertion alone. |
-| **Memory vault** | Human-readable pages, raw inputs, ledgers, and handoffs. | Makes project knowledge easy to read and version. |
+| **Work structure** | A request split into scenarios, dependencies, and acceptance criteria. | Plan before changing code. |
+| **Work** | A task with an expected result. | Track what needs to happen. |
+| **Dependency** | A relationship where one item blocks another. | Keep blocked work out of the ready list. |
+| **Reservation** | A time-limited claim by a person or agent. | Avoid duplicate ownership. |
+| **Source / claim / decision** | The reference, statement, and choice behind a task. | Keep the reason for the work. |
+| **Evidence / verification** | A reported result and the check against the acceptance criteria. | Support a closeout. |
+| **Memory vault** | Pages, raw inputs, ledgers, and handoffs. | Keep project knowledge readable and versioned. |
 
-The key distinction is simple:
+These files have different roles:
 
-- **Canonical records** are the project’s authority.
-- **Views and indexes** are convenient copies that can be rebuilt.
-- **Git** versions the durable artifacts and checkpoints.
+- **Records** are the source of truth.
+- **Views and indexes** can be rebuilt.
+- **Git** versions the files and checkpoints.
 
-## The JSON command contract
+## Machine-readable output
 
-This section is primarily for agents, scripts, and CI. Humans can use the normal command output; automation should use the machine-readable contract. Every command has both modes. Add <code>--json</code> when a later decision depends on the result:
+Humans can use the normal output. Scripts and CI should add <code>--json</code> when they need to make a decision from the result:
 
 <details>
-<summary><strong>Show the JSON contract</strong></summary>
+<summary><strong>Show JSON output</strong></summary>
 
 ~~~bash
 bwrk work list
@@ -269,7 +243,7 @@ bwrk work list --json
 bwrk commands --json
 ~~~
 
-State-changing commands expose a stable result block:
+State-changing commands return a result block like this:
 
 ~~~json
 {
@@ -285,7 +259,7 @@ State-changing commands expose a stable result block:
 }
 ~~~
 
-Use the returned ID rather than parsing human output. The live registry is the exact syntax source for the installed version:
+Use the returned ID instead of parsing the human output. For the exact commands supported by the installed version, use:
 
 ~~~bash
 bwrk --help
@@ -299,11 +273,11 @@ See the [complete CLI command reference](docs/cli/COMMANDS.md) for flags, behavi
 
 </details>
 
-## Technical examples by need
+## More examples
 
-The examples below are optional patterns. They show how the same project records handle dependencies, parallel work, durable knowledge, context retrieval, and trusted evidence.
+These examples cover dependencies, parallel work, project knowledge, search, and witnessed evidence. They are optional; the [CLI reference](docs/cli/COMMANDS.md) is the complete command list.
 
-### Make dependencies explicit
+### Dependencies
 
 <details>
 <summary><strong>Show dependency graph commands</strong></summary>
@@ -335,7 +309,7 @@ bwrk doctor --strict --json
 
 </details>
 
-### Coordinate parallel agents
+### Parallel work
 
 <details>
 <summary><strong>Show parallel-agent commands</strong></summary>
@@ -357,13 +331,13 @@ bwrk reservation list --status active --json
 bwrk agent renew --all --agent agent-a --extend 30m --json
 ~~~
 
-Reservations are leases, not a separate work phase. Expiration or explicit release removes ownership and restores blocker-derived readiness. A stale list cannot cause a duplicate claim because selection and reservation happen inside the same locked transaction.
+Reservations are leases, not a separate work phase. When one expires or is released, the work can become ready again. Selection and reservation happen in one locked transaction, so a stale list cannot result in two claims.
 
 See [lane worktree isolation](docs/architecture/LANE_WORKTREE_ISOLATION.md) for branch naming, worktree cleanup, and the full contract.
 
 </details>
 
-### Preserve sources, claims, and decisions
+### Project knowledge
 
 <details>
 <summary><strong>Show knowledge-capture commands</strong></summary>
@@ -411,7 +385,7 @@ bwrk wiki show request-tracing --json
 
 </details>
 
-### Resume work with context and search
+### Context and search
 
 <details>
 <summary><strong>Show context and search commands</strong></summary>
@@ -433,7 +407,7 @@ bwrk search index --json
 
 </details>
 
-### Require Boreal-witnessed evidence
+### Witnessed evidence
 
 <details>
 <summary><strong>Show witnessed-evidence commands</strong></summary>
@@ -455,17 +429,17 @@ bwrk evidence run <work-id> --gate verification --dry-run --json
 bwrk evidence run <work-id> --gate verification --json
 ~~~
 
-The runner executes only the command already declared on the gate. It does not invoke a shell, and it records the executable, arguments, exit state, bounded output excerpts and hashes, environment and tool versions, subject revision, Git HEAD and dirty fingerprint, and requested artifact hashes. Failed and timed-out executions remain inspectable evidence but cannot satisfy a passing gate.
+The runner only executes the command declared on the gate. It records the command, exit state, bounded output, hashes, tool versions, revision, and Git state. A failed or timed-out run remains visible but cannot satisfy a passing gate.
 
 See [evidence trust](docs/architecture/EVIDENCE_TRUST.md) for the difference between self-reported, Boreal-witnessed, and externally attested evidence.
 
 </details>
 
-## Runtime properties
+## Runtime details
 
-The CLI, MCP server, console, TUI, and daemon are different ways to use Boreal, not different sources of truth. A claim made through one interface and a claim made through another go through the same engine and storage contracts.
+The CLI, MCP server, console, TUI, and daemon all use the same engine and storage. A change made through one surface is handled the same way as a change made through another.
 
-All interfaces use the same engine and storage contracts:
+The main pieces are:
 
 ~~~mermaid
 flowchart TB
@@ -486,22 +460,22 @@ flowchart TB
     operational --> views
 ~~~
 
-These shared contracts define the runtime's important properties:
+The important rules are:
 
-| Property | What it means in practice |
+| Rule | Behavior |
 | --- | --- |
-| **Readiness is derived** | Open dependency blockers cannot be hidden by a stale status field. |
-| **Ownership is atomic** | Finding work and reserving it happen in one locked transaction. |
-| **Closure is evidence-gated** | Verification, checkpoint, review, and audit requirements remain distinct. |
-| **Provenance is visible** | Agent-reported, Boreal-witnessed, and external proof are not presented as equivalent. |
-| **Boundaries fail closed** | Workspace, memory, Git, worktree, and path resolution cannot silently cross projects. |
-| **Recovery is explicit** | Generated state can be rebuilt, and repair commands report what they changed. |
+| **Readiness follows dependencies** | Blocked work does not appear in the ready list. |
+| **Claims are atomic** | Finding and reserving work happen in one locked operation. |
+| **Closeout can require evidence** | Verification, checkpoints, reviews, and audits stay separate. |
+| **Evidence shows its source** | Reported, witnessed, and external evidence are distinguishable. |
+| **Project boundaries are enforced** | Workspace, memory, Git, worktree, and path lookups cannot silently cross projects. |
+| **Generated state can be repaired** | Rebuild and repair commands report what they changed. |
 
 For the full contracts, see [runtime architecture](docs/architecture/RUNTIME.md), [closeout gates](docs/architecture/CLOSEOUT_GATE_CONTRACT.md), and [long-running tasks](docs/architecture/LONG_RUNNING_TASKS.md).
 
 ## Sync, health, and recovery
 
-These are advanced recovery tools. Most users reach for them when CI, a handoff, or a project status check reports drift or stale generated state.
+These commands are for stale indexes, interrupted work, and other project-state problems.
 
 <details>
 <summary><strong>Show recovery commands and behavior</strong></summary>
@@ -514,7 +488,7 @@ bwrk doctor --strict --json
 bwrk doctor --fix --json
 ~~~
 
-<code>sync refresh</code> rebuilds generated context projections, search indexes, project rollups, and JSONL ledgers from canonical state. <code>doctor</code> checks schema and references, dependency consistency, reservations, gate policy, readiness, source and wiki coverage, Git guards, index freshness, ledger drift, and stale locks.
+<code>sync refresh</code> rebuilds context projections, search indexes, project rollups, and JSONL ledgers. <code>doctor</code> checks schema and references, dependencies, reservations, gates, readiness, source and wiki coverage, Git guards, index freshness, ledger drift, and stale locks.
 
 <code>doctor --fix</code> is limited to idempotent repairs such as expiring stale reservations, recomputing readiness, rebuilding projections and indexes, restoring ignore guards, and removing stale locks. It does not silently remove tracked files or rewrite canonical meaning.
 
@@ -531,14 +505,14 @@ bwrk ledger status --json
 
 ## Project layout
 
-The recommended setup creates three project boundaries:
+Setup creates three directories with different jobs:
 
 - `.boreal/` stores machine-readable operational records, locks, and rebuildable projections.
 - `memory/` stores human-readable project knowledge, raw inputs, ledgers, and handoffs.
 - `.agents/skills/` stores project-scoped instructions that connect an agent client to the project workflows.
 
 <details>
-<summary><strong>Project layout</strong></summary>
+<summary><strong>Directory layout</strong></summary>
 
 ~~~text
 your-project/
@@ -554,21 +528,21 @@ your-project/
 └── memory/                human-readable project vault
 ~~~
 
-By default, <code>memory/</code> is a child repository with separate Git history. Project skills are installed at <code>.agents/skills</code>. New workspaces use a Git-friendly per-record object store (<code>ObjectDirBorealStore</code>). The legacy file store remains a compatibility and rollback adapter. See [runtime architecture](docs/architecture/RUNTIME.md) for storage boundaries, event history, locks, and migrations.
+By default, <code>memory/</code> is a child repository with separate Git history. Project skills are installed at <code>.agents/skills</code>. New workspaces use a Git-friendly per-record object store (<code>ObjectDirBorealStore</code>). The legacy file store remains available for compatibility and rollback. See [runtime architecture](docs/architecture/RUNTIME.md) for storage boundaries, event history, locks, and migrations.
 
 </details>
 
 ## Interfaces
 
-The interfaces use the same project state and safety contracts:
+The interfaces all read and write the same project state:
 
 | Interface | Best for |
 | --- | --- |
-| <code>bwrk</code> CLI | Canonical commands, scripting, and automation. |
-| MCP server | Giving a selected project’s contracts to a local agent client. |
-| Daemon | Observing project and coordination status. Repairs remain explicit commands. |
-| Browser console | Local project and cross-project dashboards. |
-| **TUI** | Optional terminal dashboard using shared runtime loaders and UI models. |
+| <code>bwrk</code> CLI | Run commands, scripts, and automation. |
+| MCP server | Let a local agent work with a selected project. |
+| Daemon | Watch project and coordination status. |
+| Browser console | Browse local project and cross-project dashboards. |
+| **TUI** | Use the terminal dashboard. |
 
 See [MCP server](docs/architecture/MCP_SERVER.md), [daemon](docs/architecture/DAEMON.md), [console app](docs/architecture/CONSOLE_APP.md), and [TUI contracts](docs/architecture/TUI_SURFACE_CONTRACTS.md).
 
