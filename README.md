@@ -165,20 +165,26 @@ The work now has its proof, verification result, checkpoint, and handoff. Depend
 > [!IMPORTANT]
 > The <code>--command</code> on <code>evidence add</code> records what you report; it does not execute the command. For Boreal-witnessed execution, use [declared gates](#require-boreal-witnessed-evidence).
 
-The simplified state flow is:
+The main path runs left to right. Side paths cover blocked work, failed checks, and released claims:
 
 ~~~mermaid
 stateDiagram-v2
+    direction LR
+
+    state "In progress" as InProgress
+    state "Needs verification" as NeedsVerification
+
     [*] --> Ready
-    Ready --> InProgress: atomic claim
-    Ready --> Blocked: open dependency
-    Blocked --> Ready: blocker resolves
-    InProgress --> NeedsVerification: evidence submitted
-    NeedsVerification --> Verified: verification passes
-    NeedsVerification --> InProgress: verification fails
-    Verified --> Closed: closeout gates pass
-    InProgress --> Ready: release or expiry
+    Ready --> InProgress: claim
+    InProgress --> NeedsVerification: evidence
+    NeedsVerification --> Verified: checks pass
+    Verified --> Closed: gates pass
     Closed --> [*]
+
+    Ready --> Blocked: dependency opens
+    Blocked --> Ready: dependency clears
+    NeedsVerification --> InProgress: checks fail
+    InProgress --> Ready: release / expiry
 ~~~
 
 <details>
