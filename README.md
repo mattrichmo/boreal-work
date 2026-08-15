@@ -23,32 +23,7 @@ Boreal runs in the project and does not require a hosted service. You still use 
 
 ## How it works
 
-The usual path looks like this:
-
-~~~mermaid
-flowchart TD
-    A["1. Capture request<br/>chat · docs · code"] --> B["2. Plan the work<br/>scenarios · acceptance"]
-    B --> C["3. Check dependencies<br/>what is ready?"]
-    C --> D["4. Claim a lane<br/>one owner"]
-    D --> E["5. Do the work<br/>checkpoint as you go"]
-    E --> F["6. Verify the result<br/>attach evidence"]
-    F --> G["7. Close or hand off<br/>leave the next step"]
-    G -. "new context" .-> A
-
-    classDef capture fill:#263238,stroke:#90a4ae,color:#ffffff,stroke-width:1px
-    classDef plan fill:#203b5f,stroke:#7aa7d9,color:#ffffff,stroke-width:1px
-    classDef work fill:#3b2d5c,stroke:#b39ddb,color:#ffffff,stroke-width:1px
-    classDef verify fill:#214d3b,stroke:#81c995,color:#ffffff,stroke-width:1px
-    classDef finish fill:#5a3b1f,stroke:#e0a66b,color:#ffffff,stroke-width:1px
-
-    class A capture
-    class B,C plan
-    class D,E work
-    class F verify
-    class G finish
-~~~
-
-Start with a request, break it into work, claim a lane, run the checks, and leave enough context for someone else to continue. Dependencies decide what is ready, and closeout can require evidence before work is marked complete.
+Requests become work structures with scenarios, acceptance criteria, and dependencies. Once the dependencies are clear, a person or agent can claim the work. Checks produce evidence; closeout records verification, a checkpoint, and a handoff. The [runtime details](#runtime-details) section shows how those records move through the engine and storage.
 
 The same project state is available through the CLI, MCP server, console, TUI, and daemon.
 
