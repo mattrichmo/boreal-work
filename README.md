@@ -425,25 +425,28 @@ See [evidence trust](docs/architecture/EVIDENCE_TRUST.md) for the difference bet
 
 The CLI, MCP server, console, TUI, and daemon all use the same engine and storage. A change made through one surface is handled the same way as a change made through another.
 
-The main pieces are:
+Each interface calls the same engine:
 
 ~~~mermaid
-flowchart TB
-    subgraph surfaces["Interfaces"]
-        cli["bwrk CLI"]
-        mcp["MCP server"]
-        console["Browser console / TUI"]
-        daemon["Daemon"]
-    end
-    engine["Shared Boreal engine"]
-    operational["Canonical operational records<br/>.boreal/objects + .boreal/log"]
-    memory["Human-readable memory vault<br/>memory/"]
-    views["Rebuildable views<br/>context packs, indexes, ledgers"]
+flowchart LR
+    cli["bwrk CLI"] --> engine["Shared Boreal engine"]
+    mcp["MCP server"] --> engine
+    console["Browser console / TUI"] --> engine
+    daemon["Daemon"] --> engine
 
-    surfaces --> engine
-    engine --> operational
-    engine --> memory
-    operational --> views
+    engine --> records["Canonical records<br/>.boreal/objects + .boreal/log"]
+    engine --> memory["Project memory<br/>memory/"]
+    records --> views["Rebuildable views<br/>indexes · context packs · ledgers"]
+
+    classDef interface fill:#253043,stroke:#8aa4c7,color:#f0f3f6,stroke-width:1px
+    classDef engine fill:#4a2f67,stroke:#c29ee8,color:#ffffff,stroke-width:1px
+    classDef store fill:#1f4d3b,stroke:#81c995,color:#ffffff,stroke-width:1px
+    classDef view fill:#5a3b1f,stroke:#e0a66b,color:#ffffff,stroke-width:1px
+
+    class cli,mcp,console,daemon interface
+    class engine engine
+    class records,memory store
+    class views view
 ~~~
 
 The important rules are:
