@@ -21,7 +21,15 @@ export function reconciliationStatusForWork(work: WorkItemView): TuiReconciliati
   const reviewGates = gates.filter((gate) => gate.kind === "review");
   const verificationGates = gates.filter((gate) => gate.kind === "verification");
   const directiveSummary = work.directiveSummary;
-  const blockers = work.activeBlockerIds.length + (directiveSummary?.blocking ?? 0) + (directiveSummary?.conflictCount ?? 0) + (directiveSummary?.required ?? 0);
+  // `toWorkItemView` folds named directive blockers into activeBlockerIds;
+  // retain the aggregate signals as well so conflict and missing-required
+  // directives remain blocking even when their bundle did not provide IDs.
+  const directiveBlockers =
+    (directiveSummary?.blocking ?? 0) +
+    (directiveSummary?.conflictCount ?? 0) +
+    (directiveSummary?.required ?? 0) +
+    (directiveSummary?.missingRequiredCount ?? 0);
+  const blockers = work.activeBlockerIds.length + directiveBlockers;
   const obligations = work.reconciliationObligations ?? [];
   const openObligations = obligations.filter((obligation) => obligation.status !== "reconciled");
   const unresolvedObligations = blockers + openObligations.length;

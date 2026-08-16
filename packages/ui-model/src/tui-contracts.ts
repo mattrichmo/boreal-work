@@ -12,6 +12,8 @@ export type TuiSurfaceKind = "global" | "repo";
 export interface TuiLimits {
   readonly projects?: number;
   readonly workPerProject?: number;
+  readonly queueRowsPerQueue?: number;
+  readonly rollupCacheTtlMs?: number;
   readonly rowsPerPage?: number;
   readonly searchResults?: number;
   readonly activityRows?: number;
@@ -21,6 +23,7 @@ export interface TuiLimits {
 export interface TuiTruncation {
   readonly projects?: boolean;
   readonly work?: boolean;
+  readonly queues?: boolean;
   readonly search?: boolean;
   readonly activity?: boolean;
   readonly tree?: boolean;
@@ -32,6 +35,8 @@ export interface TuiEnvelope<TBody> {
   readonly surface: TuiSurfaceKind;
   readonly workspaceRoot: string;
   readonly stale: boolean;
+  /** Present when the payload could not be loaded or validated. */
+  readonly error?: string;
   readonly warnings: readonly string[];
   readonly limits: TuiLimits;
   readonly truncated: TuiTruncation;
@@ -46,6 +51,7 @@ export function buildTuiEnvelope<TBody>(input: {
   readonly generatedAt: string;
   readonly body: TBody;
   readonly stale?: boolean;
+  readonly error?: string;
   readonly warnings?: readonly string[];
   readonly limits?: TuiLimits;
   readonly truncated?: TuiTruncation;
@@ -57,6 +63,7 @@ export function buildTuiEnvelope<TBody>(input: {
     surface: input.surface,
     workspaceRoot: input.workspaceRoot,
     stale: input.stale ?? false,
+    ...(input.error ? { error: input.error } : {}),
     warnings: input.warnings ?? [],
     limits: input.limits ?? {},
     truncated: input.truncated ?? {},
@@ -188,7 +195,7 @@ export function buildCommandDescriptor(input: {
     projectId: input.projectId,
     subject: input.subject,
     argv: input.argv,
-    displayCommand: [bin, ...input.argv].join(" "),
+    displayCommand: [bin, ...input.argv].map(displayCommandArg).join(" "),
     effect: input.effect,
     mutatesState,
     requiresConfirmation: mutatesState,
@@ -196,6 +203,12 @@ export function buildCommandDescriptor(input: {
     disabledReason: input.disabledReason,
     expectedSchemaVersion: input.expectedSchemaVersion
   };
+}
+
+/** Render argv for a human-readable command preview without changing argv. */
+function displayCommandArg(value: string): string {
+  if (/^[A-Za-z0-9_./:@%+=,-]+$/.test(value)) return value;
+  return JSON.stringify(value);
 }
 
 // ---------------------------------------------------------------------------
@@ -301,12 +314,25 @@ const TERMINAL_STATUSES = new Set<WorkStatus>(["verified", "closed", "cancelled"
  * scope commands can't drift into two different membership definitions.
  */
 export function childWorkIds(work: WorkItem, graphEdges: readonly GraphEdge[]): readonly string[] {
-  const ids = new Set<string>(work.dependencyIds);
+  const blockersByTarget = buildBlockerIndex(graphEdges);
+  return childWorkIdsWithIndex(work, blockersByTarget);
+}
+
+function buildBlockerIndex(graphEdges: readonly GraphEdge[]): ReadonlyMap<string, readonly string[]> {
+  const blockersByTarget = new Map<string, string[]>();
   for (const edge of graphEdges) {
-    if (edge.kind === "blocks" && edge.fromType === "work" && edge.toType === "work" && edge.toId === work.meta.id) {
-      ids.add(edge.fromId);
+    if (edge.kind === "blocks" && edge.fromType === "work" && edge.toType === "work") {
+      const blockers = blockersByTarget.get(edge.toId) ?? [];
+      blockers.push(edge.fromId);
+      blockersByTarget.set(edge.toId, blockers);
     }
   }
+  return blockersByTarget;
+}
+
+function childWorkIdsWithIndex(work: WorkItem, blockersByTarget: ReadonlyMap<string, readonly string[]>): readonly string[] {
+  const ids = new Set<string>(work.dependencyIds);
+  for (const blockerId of blockersByTarget.get(work.meta.id) ?? []) ids.add(blockerId);
   return [...ids];
 }
 
@@ -315,18 +341,26 @@ export function computeScopeIds(
   byId: ReadonlyMap<string, WorkItem>,
   graphEdges: readonly GraphEdge[]
 ): ReadonlySet<string> {
+  return computeScopeIdsWithIndex(rootId, byId, buildBlockerIndex(graphEdges));
+}
+
+function computeScopeIdsWithIndex(
+  rootId: string,
+  byId: ReadonlyMap<string, WorkItem>,
+  blockersByTarget: ReadonlyMap<string, readonly string[]>
+): ReadonlySet<string> {
   const visited = new Set<string>();
   const visit = (workId: string): void => {
     if (visited.has(workId) || !byId.has(workId)) return;
     visited.add(workId);
     const work = byId.get(workId);
     if (work) {
-      for (const childId of childWorkIds(work, graphEdges)) visit(childId);
+      for (const childId of childWorkIdsWithIndex(work, blockersByTarget)) visit(childId);
     }
   };
   const root = byId.get(rootId);
   if (root) {
-    for (const childId of childWorkIds(root, graphEdges)) visit(childId);
+    for (const childId of childWorkIdsWithIndex(root, blockersByTarget)) visit(childId);
   }
   return visited;
 }
@@ -355,6 +389,7 @@ export function buildRepoRollupView(input: {
   readonly actionsForWork?: (work: WorkItem) => readonly TuiCommandDescriptor[];
 }): RepoRollupView {
   const byId = new Map<string, WorkItem>(input.work.map((work) => [work.meta.id, work]));
+  const blockersByTarget = buildBlockerIndex(input.graphEdges);
   const explicitParentOf = new Map<string, string>();
   for (const work of input.work) {
     if (work.parentId && byId.has(work.parentId)) {
@@ -366,7 +401,7 @@ export function buildRepoRollupView(input: {
   const sprintOwnerOf = new Map<string, string>();
   for (const work of input.work) {
     if (work.kind !== "sprint") continue;
-    const scope = computeScopeIds(work.meta.id, byId, input.graphEdges);
+    const scope = computeScopeIdsWithIndex(work.meta.id, byId, blockersByTarget);
     for (const memberId of scope) {
       if (explicitParentOf.has(memberId) || sprintOwnerOf.has(memberId) || memberId === work.meta.id) continue;
       sprintOwnerOf.set(memberId, work.meta.id);
@@ -385,35 +420,64 @@ export function buildRepoRollupView(input: {
     childIdsByParent.set(parentId, list);
   }
 
+  for (const children of childIdsByParent.values()) {
+    children.sort((left, right) => (byId.get(left)?.title ?? left).localeCompare(byId.get(right)?.title ?? right) || left.localeCompare(right));
+  }
+
   const nodesById = new Map<string, RollupNodeView>();
+  const buildingNodes = new Set<string>();
+
+  const progressById = new Map<string, RollupProgressView>();
+  const progressInFlight = new Set<string>();
 
   function progressFor(nodeId: string): RollupProgressView {
+    const cached = progressById.get(nodeId);
+    if (cached) return cached;
+    if (progressInFlight.has(nodeId)) {
+      // A malformed parent graph should not take down the entire TUI.
+      return { total: 0, done: 0, open: 0, cancelled: 0, percentDone: 0 };
+    }
+    progressInFlight.add(nodeId);
     const node = byId.get(nodeId);
     const childIds = childIdsByParent.get(nodeId) ?? [];
+    let result: RollupProgressView;
     if (childIds.length === 0) {
       const status = node?.status;
       const done = status ? (TERMINAL_STATUSES.has(status) && status !== "cancelled" ? 1 : 0) : 0;
       const cancelled = status === "cancelled" ? 1 : 0;
       const total = 1;
       const open = total - done - cancelled;
-      return { total, done, open, cancelled, percentDone: total > 0 ? Math.round((done / total) * 100) : 0 };
+      result = { total, done, open, cancelled, percentDone: total > 0 ? Math.round((done / total) * 100) : 0 };
+    } else {
+      let total = 0;
+      let done = 0;
+      let cancelled = 0;
+      for (const childId of childIds) {
+        const child = progressFor(childId);
+        total += child.total;
+        done += child.done;
+        cancelled += child.cancelled;
+      }
+      const open = total - done - cancelled;
+      result = { total, done, open, cancelled, percentDone: total > 0 ? Math.round((done / total) * 100) : 0 };
     }
-    let total = 0;
-    let done = 0;
-    let cancelled = 0;
-    for (const childId of childIds) {
-      const child = progressFor(childId);
-      total += child.total;
-      done += child.done;
-      cancelled += child.cancelled;
-    }
-    const open = total - done - cancelled;
-    return { total, done, open, cancelled, percentDone: total > 0 ? Math.round((done / total) * 100) : 0 };
+    progressInFlight.delete(nodeId);
+    progressById.set(nodeId, result);
+    return result;
   }
 
+  const blockerSummaryById = new Map<string, RollupBlockerSummary>();
+  const blockerSummaryInFlight = new Set<string>();
+
   function blockerSummaryFor(nodeId: string): RollupBlockerSummary {
+    const cached = blockerSummaryById.get(nodeId);
+    if (cached) return cached;
+    if (blockerSummaryInFlight.has(nodeId)) {
+      return { activeBlockerCount: 0, blockedDescendantCount: 0, blockerIds: [] };
+    }
+    blockerSummaryInFlight.add(nodeId);
     const node = byId.get(nodeId);
-    const own = node ? childWorkIds(node, input.graphEdges).filter((id) => {
+    const own = node ? childWorkIdsWithIndex(node, blockersByTarget).filter((id) => {
       const dep = byId.get(id);
       return dep ? !TERMINAL_STATUSES.has(dep.status) : true;
     }) : [];
@@ -423,12 +487,20 @@ export function buildRepoRollupView(input: {
       const childSummary = blockerSummaryFor(childId);
       blockedDescendantCount += childSummary.blockedDescendantCount;
     }
-    return { activeBlockerCount: own.length, blockedDescendantCount, blockerIds: own };
+    const result = { activeBlockerCount: own.length, blockedDescendantCount, blockerIds: own };
+    blockerSummaryInFlight.delete(nodeId);
+    blockerSummaryById.set(nodeId, result);
+    return result;
   }
 
   function buildNode(id: string, depth: number, parentId: string | undefined): RollupNodeView {
+    // Parent links are runtime data. Break only a malformed back-edge so a
+    // cyclic graph cannot recurse forever and take down the TUI.
+    buildingNodes.add(id);
     if (id === ROOT_ID) {
-      const childIds = (childIdsByParent.get(ROOT_ID) ?? []).map((childId) => buildNode(childId, depth + 1, ROOT_ID).id);
+      const childIds = (childIdsByParent.get(ROOT_ID) ?? [])
+        .filter((childId) => !buildingNodes.has(childId))
+        .map((childId) => buildNode(childId, depth + 1, ROOT_ID).id);
       const progress = progressFor(ROOT_ID);
       const blockerSummary = blockerSummaryFor(ROOT_ID);
       const rootNode: RollupNodeView = {
@@ -453,6 +525,7 @@ export function buildRepoRollupView(input: {
         actions: []
       };
       nodesById.set(ROOT_ID, rootNode);
+      buildingNodes.delete(id);
       return rootNode;
     }
     const work = byId.get(id);
@@ -460,7 +533,7 @@ export function buildRepoRollupView(input: {
       throw new Error(`buildRepoRollupView: unknown work id ${id}`);
     }
     const childIds = (childIdsByParent.get(id) ?? [])
-      .sort((a, b) => (byId.get(a)?.title ?? a).localeCompare(byId.get(b)?.title ?? b))
+      .filter((childId) => !buildingNodes.has(childId))
       .map((childId) => buildNode(childId, depth + 1, id).id);
     const node: RollupNodeView = {
       id,
@@ -486,6 +559,7 @@ export function buildRepoRollupView(input: {
       actions: input.actionsForWork?.(work) ?? []
     };
     nodesById.set(id, node);
+    buildingNodes.delete(id);
     return node;
   }
 

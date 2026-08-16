@@ -886,7 +886,8 @@ async function serveDashboardCommand(
     mode,
     scope,
     liveCacheTtlMs,
-    allowFixtureFallback
+    allowFixtureFallback,
+    registryRoot: scope === "global" ? flagValue(args, "registry-root") : undefined
   });
   output.write(`Boreal ${scope === "global" ? "global console" : "dashboard"} starting at ${url}\n`);
   output.write("Press Ctrl+C to stop.\n");
@@ -908,6 +909,9 @@ async function launchTuiCommand(context: CliContext, args: ParsedArgs, scope: "r
       "--workspace",
       context.workspaceRoot,
       ...(scope === "global" ? ["--global"] : []),
+      ...(scope === "global" && flagValue(args, "registry-root")
+        ? ["--registry-root", flagValue(args, "registry-root") as string]
+        : []),
       ...(hasFlag(args, "mouse") ? ["--mouse"] : []),
       ...(refreshMs !== undefined ? ["--refresh-ms", String(refreshMs)] : [])
     ]
@@ -923,6 +927,7 @@ function spawnDashboardServer(input: {
   readonly scope: "repo" | "global";
   readonly liveCacheTtlMs: number;
   readonly allowFixtureFallback: boolean;
+  readonly registryRoot?: string;
 }) {
   const fallbackArgs = input.allowFixtureFallback ? ["--allow-fixture-fallback"] : [];
   return spawnAppProcess({
@@ -943,7 +948,8 @@ function spawnDashboardServer(input: {
       "--live-cache-ttl-ms",
       String(input.liveCacheTtlMs),
       ...fallbackArgs
-    ]
+    ],
+    env: input.registryRoot ? { BOREAL_PROJECT_REGISTRY_ROOT: input.registryRoot } : undefined
   });
 }
 
@@ -961,16 +967,21 @@ function spawnAppProcess(input: {
   readonly distEntry: string;
   readonly srcEntry: string;
   readonly args: readonly string[];
+  readonly env?: NodeJS.ProcessEnv;
 }) {
+  const spawnOptions = {
+    stdio: "inherit" as const,
+    ...(input.env ? { env: { ...process.env, ...input.env } } : {})
+  };
   const cliDir = dirname(import.meta.url.replace(/^file:\/\//u, ""));
   const bundledEntrypoint = join(cliDir, input.appDir, "index.js");
   if (existsSync(bundledEntrypoint)) {
-    return spawn(process.execPath, [bundledEntrypoint, ...input.args], { cwd: cliDir, stdio: "inherit" });
+    return spawn(process.execPath, [bundledEntrypoint, ...input.args], { ...spawnOptions, cwd: cliDir });
   }
   const sourceRoot = resolve(cliDir, "..", "..", "..", "..");
   const distEntrypoint = join(sourceRoot, "apps", input.appDir, "dist", input.distEntry);
   if (existsSync(distEntrypoint)) {
-    return spawn(process.execPath, [distEntrypoint, ...input.args], { cwd: sourceRoot, stdio: "inherit" });
+    return spawn(process.execPath, [distEntrypoint, ...input.args], { ...spawnOptions, cwd: sourceRoot });
   }
   const tsxBin = join(sourceRoot, "node_modules", ".bin", process.platform === "win32" ? "tsx.cmd" : "tsx");
   const srcEntrypoint = join(sourceRoot, "apps", input.appDir, "src", input.srcEntry);
@@ -984,8 +995,8 @@ function spawnAppProcess(input: {
   }
   const tsconfig = join(sourceRoot, "apps", input.appDir, "tsconfig.json");
   return spawn(tsxBin, ["--tsconfig", tsconfig, srcEntrypoint, ...input.args], {
-    cwd: sourceRoot,
-    stdio: "inherit"
+    ...spawnOptions,
+    cwd: sourceRoot
   });
 }
 
@@ -1040,6 +1051,7 @@ async function buildGlobalDashboardResult(context: CliContext, args: ParsedArgs)
   const generatedAt = nowIso();
   const projectLimit = parseLimit(flagValue(args, "limit"), { max: MAX_DASHBOARD_PROJECT_LIMIT }) ?? DEFAULT_DASHBOARD_PROJECT_LIMIT;
   const liveCacheTtlMs = parseNonNegativeInteger(flagValue(args, "live-cache-ttl-ms"), "--live-cache-ttl-ms") ?? 60_000;
+  const writeCache = !hasFlag(args, "no-cache-write");
   const registryOptions = { registryRoot: flagValue(args, "registry-root") };
   const [registryList, registryDoctor, rollups] = await Promise.all([
     listProjectRegistry(registryOptions),
@@ -1048,6 +1060,7 @@ async function buildGlobalDashboardResult(context: CliContext, args: ParsedArgs)
       registryRoot: registryOptions.registryRoot,
       ttlMs: liveCacheTtlMs,
       source: "lazy",
+      writeCache,
       now: () => generatedAt
     })
   ]);
@@ -1078,8 +1091,20 @@ async function buildGlobalDashboardResult(context: CliContext, args: ParsedArgs)
             searchQuery
           })
         )
-      );
+  );
   const globalInbox = await buildGlobalInboxDashboardResult(context, args, generatedAt);
+  const globalQueues = buildGlobalWorkQueuesView({
+    generatedAt,
+    limit: DEFAULT_DASHBOARD_QUEUE_LIMIT,
+    projects: overviews.map((project) => ({
+      projectId: project.entry.id,
+      projectName: project.entry.name,
+      projectRoot: project.entry.projectRoot,
+      work: project.work
+    }))
+  });
+  const workTruncated = overviews.some((project) => project.work.length >= DEFAULT_DASHBOARD_WORK_LIMIT)
+    || globalQueues.queues.some((queue) => queue.truncated === true);
 
   return {
     schemaVersion: "boreal.cli.dashboard.global.v1",
@@ -1095,22 +1120,15 @@ async function buildGlobalDashboardResult(context: CliContext, args: ParsedArgs)
       rollupCacheTtlMs: liveCacheTtlMs
     },
     truncated: {
-      projects: registryEntries.length > limitedRegistryEntries.length
+      projects: registryEntries.length > limitedRegistryEntries.length,
+      work: workTruncated,
+      queues: globalQueues.queues.some((queue) => queue.truncated === true)
     },
     registry: buildProjectRegistryView({
       generatedAt,
       entries: overviews.map((project) => project.entry)
     }),
-    globalQueues: buildGlobalWorkQueuesView({
-      generatedAt,
-      limit: DEFAULT_DASHBOARD_QUEUE_LIMIT,
-      projects: overviews.map((project) => ({
-        projectId: project.entry.id,
-        projectName: project.entry.name,
-        projectRoot: project.entry.projectRoot,
-        work: project.work
-      }))
-    }),
+    globalQueues,
     globalSearch: buildGlobalSearchView({
       generatedAt,
       query: searchQuery,

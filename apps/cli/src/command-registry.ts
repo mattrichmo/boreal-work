@@ -898,7 +898,7 @@ export const COMMAND_DEFINITIONS: readonly CommandDefinition[] = [
     path: ["dashboard"],
     category: "dashboard",
     summary: "Open the terminal dashboard (default); --web for the browser console, --global for all projects.",
-    usage: "bwrk dashboard [--web] [--global] [--json] [--mouse] [--refresh-ms <ms>] [--host <host>] [--port <n>] [--no-open] [--mode live|fixture] [--live-cache-ttl-ms <ms>] [--allow-fixture-fallback]",
+    usage: "bwrk dashboard [--web] [--global] [--json] [--mouse] [--refresh-ms <ms>] [--registry-root <dir>] [--host <host>] [--port <n>] [--no-open] [--mode live|fixture] [--live-cache-ttl-ms <ms>] [--allow-fixture-fallback]",
     description:
       "Opens the Boreal dashboard for the current workspace. By default it runs the live terminal dashboard (no server, no browser). Pass --web for the browser console (binds 127.0.0.1:4318 and opens a browser), --global to scope to every registered project, and --json for the bounded data payload. Surface (--web) and scope (--global) are independent.",
     flags: [
@@ -906,6 +906,7 @@ export const COMMAND_DEFINITIONS: readonly CommandDefinition[] = [
       flag("mouse", "boolean", "Terminal dashboard: enable mouse wheel (disables native text selection)."),
       flag("tui", "boolean", "Deprecated and ignored: the terminal dashboard is now the default."),
       flag("refresh-ms", "value", "Terminal dashboard auto-refresh interval in ms. Defaults to 5000."),
+      flag("registry-root", "value", "Global dashboard registry root override."),
       flag("host", "value", "Browser console (--web) bind host. Defaults to 127.0.0.1."),
       flag("port", "value", "Browser console (--web) bind port. Defaults to 4318."),
       flag("no-open", "boolean", "Browser console (--web): start the server without opening a browser."),
@@ -921,13 +922,14 @@ export const COMMAND_DEFINITIONS: readonly CommandDefinition[] = [
     path: ["view"],
     category: "dashboard",
     summary: "Open the project or global dashboard.",
-    usage: "bwrk view [--web] [--global] [--json] [--mouse] [--refresh-ms <ms>] [--host <host>] [--port <n>] [--no-open] [--mode live|fixture] [--live-cache-ttl-ms <ms>] [--allow-fixture-fallback]",
+    usage: "bwrk view [--web] [--global] [--json] [--mouse] [--refresh-ms <ms>] [--registry-root <dir>] [--host <host>] [--port <n>] [--no-open] [--mode live|fixture] [--live-cache-ttl-ms <ms>] [--allow-fixture-fallback]",
     description:
       "The simple dashboard entry point. It opens the current project by default; add --global for every linked project and --web for the browser console. `bwrk dashboard` remains a compatibility alias.",
     flags: [
       flag("web", "boolean", "Open the browser console instead of the terminal dashboard."),
       flag("mouse", "boolean", "Terminal dashboard: enable mouse wheel (disables native text selection)."),
       flag("refresh-ms", "value", "Terminal dashboard auto-refresh interval in ms. Defaults to 5000."),
+      flag("registry-root", "value", "Global dashboard registry root override."),
       flag("host", "value", "Browser console (--web) bind host. Defaults to 127.0.0.1."),
       flag("port", "value", "Browser console (--web) bind port. Defaults to 4318."),
       flag("no-open", "boolean", "Browser console (--web): start the server without opening a browser."),
@@ -943,13 +945,14 @@ export const COMMAND_DEFINITIONS: readonly CommandDefinition[] = [
     path: ["dashboard", "global"],
     category: "dashboard",
     summary: "Emit the bounded global dashboard data payload.",
-    usage: "bwrk dashboard global [--limit <n>] [--registry-root <dir>] [--live-cache-ttl-ms <ms>] [--inbox-aging-days <n>] [--json]",
+    usage: "bwrk dashboard global [--limit <n>] [--registry-root <dir>] [--live-cache-ttl-ms <ms>] [--no-cache-write] [--inbox-aging-days <n>] [--json]",
     description:
       "Returns bounded registry, rollup cache metadata, global queue, search, activity, health, and settings view-model data for registered projects, or the current workspace when the registry is empty.",
     flags: [
       flag("limit", "value", "Maximum registered projects to include. Defaults to 100 and is capped at 100."),
       flag("registry-root", "value", "Machine-local registry root override. Defaults to the platform Boreal app-state directory."),
       flag("live-cache-ttl-ms", "value", "Global rollup cache TTL for lazy dashboard reads. Defaults to 60000."),
+      flag("no-cache-write", "boolean", "Read global rollups without updating the derived cache on disk."),
       flag("inbox-aging-days", "value", "Advisory threshold for queued global raw inbox items. Defaults to 7 and is capped at 365.")
     ],
     positionals: { label: "arguments", min: 0, max: 0 },

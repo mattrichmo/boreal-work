@@ -17,7 +17,17 @@ import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 
-import { resolveWorkspacePaths, type AgentReservation, type GraphEdge, type WorkItem } from "@boreal/core";
+import {
+  deterministicId,
+  resolveWorkspacePaths,
+  type AgentReservation,
+  type GraphEdge,
+  type ProjectionId,
+  type ProjectionRecord,
+  type RuntimeEvent,
+  type WorkId,
+  type WorkItem
+} from "@boreal/core";
 import { FileBorealStore, ObjectDirBorealStore, type BorealStore } from "@boreal/storage";
 import type { WorkReservationView } from "@boreal/ui-model";
 
@@ -28,7 +38,15 @@ export interface RepoWorkGraph {
   readonly items: readonly WorkItem[];
   readonly graphEdges: readonly GraphEdge[];
   readonly reservations: readonly AgentReservation[];
+  /** The active sprint resolved from the same store snapshot as the graph. */
+  readonly activeSprintId?: WorkId;
 }
+
+const ACTIVE_SPRINT_PROJECTION_KIND = "active-sprint";
+const ACTIVE_SPRINT_PROJECTION_ID = deterministicId<ProjectionId>("projection", {
+  kind: ACTIVE_SPRINT_PROJECTION_KIND,
+  subjectId: "workspace"
+});
 
 async function readProjectStorageMarker(workspaceRoot: string): Promise<RepoStorageKind | undefined> {
   const configPath = join(workspaceRoot, ".boreal", "project.json");
@@ -65,27 +83,104 @@ export async function readRepoWorkGraph(workspaceRoot: string): Promise<RepoWork
   }
   const store: BorealStore =
     storageKind === "objects-v1" ? new ObjectDirBorealStore({ rootDir: workspaceRoot }) : new FileBorealStore({ rootDir: workspaceRoot });
-  const [items, graphEdges, reservations] = await Promise.all([
-    store.read((reader) => reader.listWorkItems()),
-    store.read((reader) => reader.listGraphEdges()),
-    store.read((reader) => reader.listReservations())
-  ]);
-  return { initialized: true, items, graphEdges, reservations };
+  // Keep all related reads inside one store transaction. The file and object
+  // stores lock per `read()` call, so separate calls can otherwise observe a
+  // writer between the item, edge, and reservation reads.
+  return store.read(async (reader) => {
+    const [items, graphEdges, reservations, projections] = await Promise.all([
+      reader.listWorkItems(),
+      reader.listGraphEdges(),
+      reader.listReservations(),
+      reader.listProjections()
+    ]);
+    const activeProjection = selectActiveSprintProjection(projections);
+    const activeSprintId = activeSprintIdFromProjection(activeProjection) ?? activeSprintIdFromEvents(await reader.listEvents());
+    return { initialized: true, items, graphEdges, reservations, activeSprintId };
+  });
 }
 
 /** Active reservations keyed by work id, in the shape the roll-up builder
  * and sprint board builder both expect. */
-export function activeReservationViewsByWorkId(reservations: readonly AgentReservation[]): Map<string, WorkReservationView> {
-  const map = new Map<string, WorkReservationView>();
+export function activeReservationViewsByWorkId(
+  reservations: readonly AgentReservation[],
+  now: Date | string | number = new Date(),
+  preferredReservationIds?: ReadonlyMap<string, string>
+): Map<string, WorkReservationView> {
+  const activeByWorkId = new Map<string, AgentReservation[]>();
   for (const reservation of reservations) {
     if (reservation.status !== "active") continue;
-    map.set(reservation.workId, {
-      id: reservation.meta.id,
-      agentId: String(reservation.agentId),
-      reservedAt: reservation.reservedAt,
-      expiresAt: reservation.expiresAt,
-      expired: false
-    });
+    const rows = activeByWorkId.get(reservation.workId) ?? [];
+    rows.push(reservation);
+    activeByWorkId.set(reservation.workId, rows);
+  }
+  const map = new Map<string, WorkReservationView>();
+  for (const [workId, rows] of activeByWorkId) {
+    const preferredId = preferredReservationIds?.get(workId);
+    const candidate = rows.find((reservation) => reservation.meta.id === preferredId) ??
+      rows.reduce<AgentReservation | undefined>((best, reservation) => {
+        if (!best) return reservation;
+        const candidateView = reservationViewFrom(reservation, now);
+        const bestView = reservationViewFrom(best, now);
+        return reservationViewIsPreferred(candidateView, bestView) ? reservation : best;
+      }, undefined);
+    if (candidate) map.set(workId, reservationViewFrom(candidate, now));
   }
   return map;
+}
+
+/** Convert the persisted reservation record to the one canonical TUI shape. */
+export function reservationViewFrom(
+  reservation: AgentReservation,
+  now: Date | string | number = new Date()
+): WorkReservationView {
+  return {
+    id: reservation.meta.id,
+    agentId: String(reservation.agentId),
+    reservedAt: reservation.reservedAt,
+    expiresAt: reservation.expiresAt,
+    expired: reservationExpiredAt(reservation.expiresAt, now)
+  };
+}
+
+export function reservationExpiredAt(expiresAt: string | undefined, now: Date | string | number = new Date()): boolean {
+  if (!expiresAt) return false;
+  const expiryMs = Date.parse(expiresAt);
+  if (!Number.isFinite(expiryMs)) return false;
+  const nowMs = now instanceof Date ? now.getTime() : typeof now === "number" ? now : Date.parse(now);
+  return Number.isFinite(nowMs) && expiryMs <= nowMs;
+}
+
+function reservationViewIsPreferred(candidate: WorkReservationView, existing: WorkReservationView): boolean {
+  if (candidate.expired !== existing.expired) return candidate.expired !== true;
+  const reservedAt = String(candidate.reservedAt ?? "").localeCompare(String(existing.reservedAt ?? ""));
+  return reservedAt !== 0 ? reservedAt > 0 : candidate.id.localeCompare(existing.id) > 0;
+}
+
+function selectActiveSprintProjection(
+  projections: readonly ProjectionRecord[]
+): ProjectionRecord | undefined {
+  const deterministic = projections.find(
+    (projection) => projection.meta.id === ACTIVE_SPRINT_PROJECTION_ID && projection.kind === ACTIVE_SPRINT_PROJECTION_KIND && projection.subjectId === "workspace"
+  );
+  if (deterministic) return deterministic;
+  return projections
+    .filter((projection) => projection.kind === ACTIVE_SPRINT_PROJECTION_KIND && projection.subjectId === "workspace")
+    .sort((left, right) => right.meta.updatedAt.localeCompare(left.meta.updatedAt))[0];
+}
+
+function activeSprintIdFromProjection(
+  projection: { readonly value: Record<string, unknown> } | undefined
+): WorkId | undefined {
+  const value = projection?.value.sprintId;
+  return typeof value === "string" && value.startsWith("bw_work_") ? value as WorkId : undefined;
+}
+
+function activeSprintIdFromEvents(events: readonly RuntimeEvent[]): WorkId | undefined {
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const event = events[index];
+    if (event?.type !== "sprint.activated" || event.subjectType !== "sprint") continue;
+    const sprintId = typeof event.payload.sprintId === "string" ? event.payload.sprintId : event.subjectId;
+    if (sprintId.startsWith("bw_work_")) return sprintId as WorkId;
+  }
+  return undefined;
 }

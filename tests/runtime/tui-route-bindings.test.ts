@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import { bindingsForRoute, resolveRouteAction, routeFooterHints } from "../../apps/tui/src/route-bindings.js";
 import { rollupFilterLabel, visibleRollupRows, ROLLUP_FILTER_CYCLE } from "../../apps/tui/src/routes/rollup.js";
 import { filteredQueueItems, queueFilterLabel, QUEUE_FILTER_CYCLE } from "../../apps/tui/src/routes/global-queues.js";
+import { GLOBAL_ROUTES, REPO_ROUTES, railFor, routeById, routeByNumberKey } from "../../apps/tui/src/routes.js";
 import type { RepoRollupView, RollupNodeView } from "@boreal/ui-model";
 import type { GlobalWorkQueuesView } from "@boreal/ui-model";
 
@@ -27,6 +28,15 @@ function key(overrides: Partial<import("ink").Key> = {}): import("ink").Key {
 }
 
 describe("route bindings: footer hints come from the same specs the dispatcher uses", () => {
+  it("hides stub routes from rails and number keys while retaining them for diagnostics", () => {
+    expect(railFor("global")).toEqual(GLOBAL_ROUTES);
+    expect(railFor("repo")).toEqual(REPO_ROUTES);
+    expect(railFor("global").some((route) => route.isStub)).toBe(false);
+    expect(railFor("repo").some((route) => route.isStub)).toBe(false);
+    expect(routeById("global.health")?.isStub).toBe(true);
+    expect(routeByNumberKey("global", 6)).toBeUndefined();
+  });
+
   it("only offers the filter binding on routes with a status facet", () => {
     const rollupSpecs = bindingsForRoute("repo.rollup");
     const taskDetailSpecs = bindingsForRoute("repo.taskDetail");
@@ -41,6 +51,22 @@ describe("route bindings: footer hints come from the same specs the dispatcher u
     expect(resolveRouteAction(specs, "f", key())).toBe("filter");
     expect(resolveRouteAction(specs, "", key({ return: true }))).toBe("drill");
     expect(resolveRouteAction(specs, "5", key())).toBe("numberKey:5");
+  });
+
+  it("advertises the overview finding drill that the shell handles", () => {
+    const specs = bindingsForRoute("global.overview");
+    expect(specs.some((spec) => spec.action === "drill")).toBe(true);
+    expect(routeFooterHints(specs)).toContainEqual({ keys: "⏎", label: "open finding" });
+    expect(resolveRouteAction(specs, "", key({ return: true }))).toBe("drill");
+  });
+
+  it("labels route-specific Enter actions and avoids duplicate footer hints", () => {
+    const projectHints = routeFooterHints(bindingsForRoute("global.projects"));
+    expect(projectHints).toContainEqual({ keys: "⏎", label: "open project" });
+    expect(new Set(projectHints.map((hint) => `${hint.keys}:${hint.label}`)).size).toBe(projectHints.length);
+
+    const actionHints = routeFooterHints(bindingsForRoute("repo.taskDetail"));
+    expect(actionHints).toContainEqual({ keys: "⏎", label: "run action" });
   });
 });
 

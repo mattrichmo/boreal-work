@@ -12,6 +12,10 @@ import type { OpenRepoTarget, TuiEntityRef, TuiFilterState, TuiNavFrame, TuiSurf
 export interface RouteSession {
   readonly surface: TuiSurfaceKind;
   readonly workspaceRoot: string;
+  /** Project identity is retained when a global row opens a repo session so
+   * section jumps do not erase the project breadcrumb. */
+  readonly projectId?: string;
+  readonly projectName?: string;
   /** Always at least one frame; the last entry is the active screen. */
   readonly stack: readonly TuiNavFrame[];
 }
@@ -82,12 +86,18 @@ export function reduceRouteNav(state: RouteNavState, action: RouteNavAction): Ro
       const initialEntity: TuiEntityRef | undefined = action.target.initialEntity;
       const repoFrame: TuiNavFrame = {
         routeId: action.target.initialRoute ?? "repo.rollup",
-        title: action.target.projectName,
+        title: initialEntity?.label ?? action.target.projectName,
         cursor: 0,
         entity: initialEntity
       };
       return {
-        current: { surface: "repo", workspaceRoot: action.target.projectRoot, stack: [repoFrame] },
+        current: {
+          surface: "repo",
+          workspaceRoot: action.target.projectRoot,
+          projectId: action.target.projectId,
+          projectName: action.target.projectName,
+          stack: [repoFrame]
+        },
         returnTo: replaceTopOf(state.current, action.target.returnToGlobalFrame)
       };
     }
@@ -98,7 +108,16 @@ export function reduceRouteNav(state: RouteNavState, action: RouteNavAction): Ro
       // repo session entered from global that then jumps between repo
       // sections loses its breadcrumb and `esc` at the new root quits
       // instead of returning to the preserved global frame.
-      return { ...state, current: action.session };
+      return {
+        ...state,
+        current: {
+          ...action.session,
+          // A repo section jump creates a new root frame. Carry the project
+          // identity from the existing repo session across that jump.
+          projectId: action.session.projectId ?? state.current.projectId,
+          projectName: action.session.projectName ?? state.current.projectName
+        }
+      };
     default:
       return state;
   }
@@ -109,7 +128,11 @@ export function reduceRouteNav(state: RouteNavState, action: RouteNavAction): Ro
 export function breadcrumbs(state: RouteNavState): readonly string[] {
   const own = state.current.stack.map((frame) => frame.title);
   if (state.current.surface === "repo" && state.returnTo) {
-    return ["global", ...own];
+    const project = state.current.projectName ?? own[0] ?? "project";
+    // The repo root frame is named after the project for the global->repo
+    // transition. Once a section is selected, the project is no longer in
+    // the stack, so insert it explicitly and avoid duplicating it at root.
+    return ["global", project, ...(own[0] === project ? own.slice(1) : own)];
   }
   return own;
 }

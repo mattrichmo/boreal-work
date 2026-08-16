@@ -12,10 +12,16 @@ export interface RouteSpec {
   readonly isStub?: boolean;
 }
 
+/** Routes that have a live loader and are safe to expose in the rail. */
 export const GLOBAL_ROUTES: readonly RouteSpec[] = [
   { id: "global.overview", surface: "global", label: "Overview", numberKey: 1 },
   { id: "global.projects", surface: "global", label: "Projects", numberKey: 2 },
-  { id: "global.queues", surface: "global", label: "Queues", numberKey: 3 },
+  { id: "global.queues", surface: "global", label: "Queues", numberKey: 3 }
+];
+
+/** Documented v1 follow-ups stay addressable for validation, but are hidden
+ * from the active rail and number-key palette until they have loaders. */
+export const GLOBAL_STUB_ROUTES: readonly RouteSpec[] = [
   { id: "global.search", surface: "global", label: "Search", numberKey: 4, isStub: true },
   { id: "global.activity", surface: "global", label: "Activity", numberKey: 5, isStub: true },
   { id: "global.health", surface: "global", label: "Health", numberKey: 6, isStub: true },
@@ -24,7 +30,10 @@ export const GLOBAL_ROUTES: readonly RouteSpec[] = [
 
 export const REPO_ROUTES: readonly RouteSpec[] = [
   { id: "repo.rollup", surface: "repo", label: "Roll-Up", numberKey: 1 },
-  { id: "repo.sprintBoard", surface: "repo", label: "Sprint Board", numberKey: 2 },
+  { id: "repo.sprintBoard", surface: "repo", label: "Sprint Board", numberKey: 2 }
+];
+
+export const REPO_STUB_ROUTES: readonly RouteSpec[] = [
   { id: "repo.work", surface: "repo", label: "Work", numberKey: 3, isStub: true },
   { id: "repo.activity", surface: "repo", label: "Activity", numberKey: 4, isStub: true },
   { id: "repo.knowledge", surface: "repo", label: "Knowledge", numberKey: 5, isStub: true },
@@ -42,7 +51,7 @@ export function railFor(surface: TuiSurfaceKind): readonly RouteSpec[] {
 }
 
 export function routeById(id: string): RouteSpec | undefined {
-  return [...GLOBAL_ROUTES, ...REPO_ROUTES].find((route) => route.id === id);
+  return [...GLOBAL_ROUTES, ...GLOBAL_STUB_ROUTES, ...REPO_ROUTES, ...REPO_STUB_ROUTES].find((route) => route.id === id);
 }
 
 export function routeByNumberKey(surface: TuiSurfaceKind, key: number): RouteSpec | undefined {

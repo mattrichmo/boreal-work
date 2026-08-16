@@ -87,7 +87,7 @@ describe("route nav reducer", () => {
     });
     expect(state.current.surface).toBe("repo");
     expect(topFrame(state).routeId).toBe("repo.sprintBoard");
-    expect(breadcrumbs(state)).toEqual(["global", "Sprint Board"]);
+    expect(breadcrumbs(state)).toEqual(["global", "boreal-work", "Sprint Board"]);
 
     // esc at the new repo root must still return to the preserved global
     // frame with its cursor intact, not quit.
@@ -117,5 +117,26 @@ describe("route nav reducer", () => {
     state = drive(state, { type: "pop" }, { type: "pop" }, { type: "pop" });
     expect(state.current.surface).toBe("global");
     expect(topFrame(state).cursor).toBe(5);
+  });
+
+  it("keeps project identity in breadcrumbs for a queue task opened directly", () => {
+    const state = reduceRouteNav(
+      initialRouteNavState("global", "/global", "global.queues", "Queues"),
+      {
+        type: "openRepo",
+        target: {
+          projectId: "p",
+          projectName: "demo",
+          projectRoot: "/repos/demo",
+          initialRoute: "repo.taskDetail",
+          initialEntity: { kind: "task", id: "task-1", workspaceRoot: "/repos/demo", label: "Task 1" },
+          returnToGlobalFrame: { routeId: "global.queues", title: "Queues", cursor: 0 }
+        }
+      }
+    );
+
+    expect(breadcrumbs(state)).toEqual(["global", "demo", "Task 1"]);
+    expect(state.current.projectId).toBe("p");
+    expect(state.current.projectName).toBe("demo");
   });
 });

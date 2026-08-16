@@ -59,6 +59,9 @@ export interface GlobalWorkQueueView {
   readonly title: string;
   readonly items: readonly GlobalWorkQueueItem[];
   readonly count: number;
+  /** Number of matching rows before the bounded display sample is applied. */
+  readonly totalCount?: number;
+  readonly truncated?: boolean;
 }
 
 export interface GlobalWorkQueueSummary {
@@ -524,7 +527,7 @@ export function buildGlobalWorkQueuesView(input: {
   readonly limit?: number;
 }): GlobalWorkQueuesView {
   const queues = GLOBAL_WORK_QUEUE_DEFINITIONS.map((definition) => {
-    const items = input.projects
+    const allItems = input.projects
       .flatMap((project) =>
         sortWork(project.work)
           .filter((work) => work.status === definition.status)
@@ -545,12 +548,14 @@ export function buildGlobalWorkQueuesView(input: {
           })
       )
       .sort(compareGlobalQueueItems)
-      .slice(0, input.limit ?? Number.POSITIVE_INFINITY);
+    const items = allItems.slice(0, input.limit ?? Number.POSITIVE_INFINITY);
     return {
       id: definition.id,
       title: definition.title,
       items,
-      count: items.length
+      count: items.length,
+      totalCount: allItems.length,
+      truncated: items.length < allItems.length
     };
   });
 
@@ -837,6 +842,8 @@ export function buildSprintBoardView(input: {
   readonly generatedAt?: string;
 }): SprintBoardView {
   const work = sortWork(withReservationViews(input.work, input.reservations ?? []));
+  const workIds = new Set(work.map((item) => item.id));
+  const scopedReservations = (input.reservations ?? []).filter((reservation) => workIds.has(reservation.workId));
   const phases = work.filter((item) => item.kind === "milestone");
   const lanes = SPRINT_BOARD_LANE_DEFINITIONS.map((definition) => {
     const items = work.filter((item) => item.status === definition.id);
@@ -847,7 +854,7 @@ export function buildSprintBoardView(input: {
       count: items.length
     };
   });
-  const summary = buildWorkDashboardSummary(work, input.reservations ?? []);
+  const summary = buildWorkDashboardSummary(work, scopedReservations);
 
   return {
     sprint: input.sprint,

@@ -1,4 +1,5 @@
-// Refresh contract: poll the event-log head (seq + hash) every ~2s while the
+// Refresh contract: poll the event-log head (seq + hash) on the configured
+// refresh interval (5s by default) while the
 // shell is focused. Head unchanged -> do nothing. Head advanced -> caller
 // refetches only the current route payload.
 //
@@ -19,35 +20,53 @@ export interface EventLogHead {
   readonly hash: string;
 }
 
+export const DEFAULT_TUI_REFRESH_MS = 5_000;
+
 export async function readHead(workspaceRoot: string): Promise<EventLogHead> {
   const paths = resolveWorkspacePaths(workspaceRoot);
   const log = new FileEventLog({ path: paths.eventLogFile });
   return log.head();
 }
 
+export function headsDiffer(previous: EventLogHead | undefined, next: EventLogHead): boolean {
+  return previous !== undefined && (previous.seq !== next.seq || previous.hash !== next.hash);
+}
+
+export function normalizeRefreshInterval(intervalMs: number | undefined, defaultMs = DEFAULT_TUI_REFRESH_MS): number {
+  if (intervalMs === undefined || !Number.isFinite(intervalMs)) return defaultMs;
+  return Math.max(500, Math.floor(intervalMs));
+}
+
 export function watchHead(
   workspaceRoot: string,
   onChange: (head: EventLogHead) => void,
-  intervalMs = 2000
+  intervalMs = DEFAULT_TUI_REFRESH_MS
 ): () => void {
-  let lastSeq: number | undefined;
+  let lastHead: EventLogHead | undefined;
   let cancelled = false;
+  let inFlight = false;
 
   const tick = async (): Promise<void> => {
-    if (cancelled) return;
+    if (cancelled || inFlight) return;
+    inFlight = true;
     try {
       const head = await readHead(workspaceRoot);
-      if (head.seq !== lastSeq) {
-        lastSeq = head.seq;
+      // The first read establishes the baseline. The route effect already
+      // performs the initial payload load; emitting here would duplicate it.
+      if (cancelled) return;
+      if (headsDiffer(lastHead, head)) {
         onChange(head);
       }
+      lastHead = head;
     } catch {
       // Uninitialized workspace or transient read error: skip this tick.
+    } finally {
+      inFlight = false;
     }
   };
 
   void tick();
-  const timer = setInterval(() => void tick(), Math.max(500, intervalMs));
+  const timer = setInterval(() => void tick(), normalizeRefreshInterval(intervalMs));
   return () => {
     cancelled = true;
     clearInterval(timer);

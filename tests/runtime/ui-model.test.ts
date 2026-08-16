@@ -160,6 +160,7 @@ describe("ui model dashboard contracts", () => {
 
     expect(view.queues.find((queue) => queue.id === "ready")?.items).toHaveLength(2);
     expect(view.queues.find((queue) => queue.id === "blocked")?.items).toHaveLength(2);
+    expect(view.queues.find((queue) => queue.id === "ready")).toMatchObject({ totalCount: 3, truncated: true });
     expect(view.summary).toMatchObject({ total: 4, ready: 2, blocked: 2 });
   });
 

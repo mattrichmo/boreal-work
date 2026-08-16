@@ -20,6 +20,10 @@ export function useAltScreen(enableMouse = false): void {
   const { stdout } = useStdout();
   useInsertionEffect(() => {
     const out = stdout ?? process.stdout;
+    // RouteApp can also be rendered by tests or embedded callers without a
+    // real terminal. Never emit alternate-screen or mouse escape sequences
+    // into a pipe/log stream where there is no lifecycle to restore them.
+    if (out.isTTY !== true || process.stdin.isTTY !== true) return undefined;
     const write = (value: string): void => {
       try {
         out.write(value);

@@ -32,6 +32,8 @@ export interface GlobalRollupCacheOptions {
   readonly registryRoot?: string;
   readonly ttlMs?: number;
   readonly source?: GlobalRollupCacheRefreshSource;
+  /** Read fresh source rollups without updating the derived cache on disk. */
+  readonly writeCache?: boolean;
   readonly now?: () => string;
 }
 
@@ -103,7 +105,8 @@ export async function refreshGlobalRollupCache(options: GlobalRollupCacheOptions
         cacheDir,
         generatedAt,
         ttlMs,
-        source
+        source,
+        writeCache: options.writeCache !== false
       }))
   );
 
@@ -159,6 +162,7 @@ async function refreshGlobalRollupCacheProject(input: {
   readonly generatedAt: IsoTimestamp;
   readonly ttlMs: number;
   readonly source: GlobalRollupCacheRefreshSource;
+  readonly writeCache: boolean;
 }): Promise<GlobalRollupCacheProject> {
   const cachePath = join(input.cacheDir, `${input.entry.id}.json`);
   const sourceRollupPath = projectRollupPath(input.entry);
@@ -180,7 +184,9 @@ async function refreshGlobalRollupCacheProject(input: {
       expectedProjectId: input.entry.id,
       expectedWorkspaceRoot: input.entry.projectRoot
     });
-    await writeTextFileAtomic(cachePath, `${JSON.stringify(rollup, null, 2)}\n`);
+    if (input.writeCache) {
+      await writeTextFileAtomic(cachePath, `${JSON.stringify(rollup, null, 2)}\n`);
+    }
     return globalRollupCacheProject(input.entry, {
       sourceRollupPath,
       cachePath,

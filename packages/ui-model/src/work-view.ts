@@ -1,4 +1,12 @@
-import { hasOpenReconciliationObligations, type ContextPack, type EvidenceRecord, type SourceRef, type VerificationRecord, type WorkItem } from "@boreal/core";
+import {
+  hasOpenReconciliationObligations,
+  type ContextPack,
+  type EvidenceRecord,
+  type GraphEdge,
+  type SourceRef,
+  type VerificationRecord,
+  type WorkItem
+} from "@boreal/core";
 
 export interface BorealSourceRefResolutionView {
   readonly status: "resolved" | "unresolved-unlinked" | "unresolved-missing-project" | "unresolved-missing-record" | "invalid-uri";
@@ -131,18 +139,42 @@ export interface WorkDirectiveSummaryView {
 export function toWorkItemView(input: {
   readonly work: WorkItem;
   readonly dependencies?: readonly WorkItem[];
+  readonly graphEdges?: readonly GraphEdge[];
   readonly evidence?: readonly EvidenceRecord[];
   readonly verifications?: readonly VerificationRecord[];
   readonly contextPack?: ContextPack;
+  readonly reservation?: WorkReservationView;
+  readonly directiveSummary?: WorkDirectiveSummaryView;
 }): WorkItemView {
   const dependencyIds = input.work.dependencyIds;
   const dependencies = input.dependencies;
-  const activeBlockerIds = dependencies
+  const dependencyById = dependencies ? new Map<string, WorkItem>(dependencies.map((candidate) => [String(candidate.meta.id), candidate])) : undefined;
+  const dependencyBlockerIds = dependencies
     ? dependencyIds.filter((dependencyId) => {
-        const dependency = dependencies.find((candidate) => candidate.meta.id === dependencyId);
+        const dependency = dependencyById?.get(String(dependencyId));
         return dependency ? !isTerminalDependencyStatus(dependency) : true;
       })
     : dependencyIds;
+  const graphBlockerIds = input.graphEdges
+    ?.filter(
+      (edge) =>
+        edge.kind === "blocks" &&
+        edge.fromType === "work" &&
+        edge.toType === "work" &&
+        edge.fromProjectId === undefined &&
+        edge.toProjectId === undefined &&
+        edge.toId === input.work.meta.id
+    )
+    .map((edge) => edge.fromId)
+    .filter((blockerId) => {
+      const blocker = dependencyById?.get(blockerId);
+      return blocker ? !isTerminalDependencyStatus(blocker) : true;
+    }) ?? [];
+  const activeBlockerIds = uniqueIds([
+    ...dependencyBlockerIds,
+    ...graphBlockerIds,
+    ...(input.directiveSummary?.blockerIds ?? [])
+  ]);
   return {
     id: input.work.meta.id,
     title: input.work.title,
@@ -162,11 +194,17 @@ export function toWorkItemView(input: {
     verificationCount: input.verifications?.length ?? input.work.verificationIds.length,
     requiredCloseoutGates: input.work.requiredCloseoutGates ?? [],
     reconciliationObligations: input.work.reconciliationObligations,
-    activeReservationId: input.work.reservationId,
+    activeReservationId: input.reservation?.id ?? input.work.reservationId,
+    activeReservation: input.reservation,
     closedReason: input.work.closedReason,
     git: input.work.git,
-    contextSummary: input.contextPack?.summary
+    contextSummary: input.contextPack?.summary,
+    directiveSummary: input.directiveSummary
   };
+}
+
+function uniqueIds(ids: readonly string[]): readonly string[] {
+  return [...new Set(ids)];
 }
 
 function isTerminalDependencyStatus(work: WorkItem): boolean {

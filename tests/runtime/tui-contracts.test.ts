@@ -71,6 +71,18 @@ describe("tui-contracts: buildCommandDescriptor", () => {
     expect(descriptor.displayCommand).toBe("bwrk work list --json");
   });
 
+  it("quotes command preview arguments without changing argv", () => {
+    const descriptor = buildCommandDescriptor({
+      id: "work.close",
+      label: "Close",
+      workspaceRoot: "/repo",
+      argv: ["work", "close", "bw_work_1", "--reason", "needs operator review"],
+      effect: "danger"
+    });
+    expect(descriptor.argv).toEqual(["work", "close", "bw_work_1", "--reason", "needs operator review"]);
+    expect(descriptor.displayCommand).toBe('bwrk work close bw_work_1 --reason "needs operator review"');
+  });
+
   it("requires confirmation for write and danger effects but not read", () => {
     const read = buildCommandDescriptor({
       id: "work.show",
