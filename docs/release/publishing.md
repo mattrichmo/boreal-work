@@ -1,49 +1,60 @@
 # Publishing Boreal Work
 
-This guide covers the npm and Homebrew release channels. The source repository is the development tree; the npm package is staged from the bundled CLI distribution and carries the repository's PolyForm Noncommercial License 1.0.0.
+This guide covers the GitHub Release channel and its Homebrew tap. The source
+repository is the development tree; published artifacts are staged from the
+bundled CLI distribution and carry the repository's PolyForm Noncommercial
+License 1.0.0.
 
 ## Version policy
 
-The root `package.json` is the release version source of truth. `apps/cli/package.json` must carry the same version, and `tools/prepare-npm-package.mjs` fails if they drift. The staged package under `.boreal/release/npm-package` receives its version from the root package and contains only the distributable CLI payload, package metadata, license, and README.
+The root package.json is the release version source of truth. apps/cli/package.json
+must carry the same version. Releases use matching v<version> Git tags.
 
 ## Local gates
 
-```bash
-pnpm release:npm:smoke
-pnpm release:brew:verify
-pnpm release:npm:dry-run
-pnpm check
-node tools/audit-release-boundary.mjs --json
-```
+    pnpm release:brew:verify
+    pnpm check
+    node tools/audit-release-boundary.mjs --json
 
-`release:npm:smoke` builds the bundled CLI, creates the npm tarball, installs it into a temporary prefix, and runs `bwrk --version`.
+release:brew:verify builds a local release bundle, injects it into the
+prepared Homebrew formula through local-only overrides, runs the formula smoke
+test, and removes the temporary installation when appropriate.
 
-`release:brew:verify` builds the same tarball, injects it into the prepared Homebrew formula through local-only overrides, runs the formula smoke test, and removes the temporary installation when appropriate.
+## GitHub Release
 
-## npm release
+Push a version tag after updating both package versions:
 
-Prepare and inspect the package before publishing:
+    git tag v0.1.1
+    git push origin v0.1.1
 
-```bash
-pnpm release:npm:prepare
-pnpm release:npm:pack
-```
+The upgrade-release workflow builds the verified bundle, checks the release
+identity, smoke-tests it on Linux and macOS, and publishes:
 
-Review the staged file list and license metadata, then publish the prepared package with the appropriate registry credentials:
+- bwrk-upgrade.tar.gz
+- SHA256SUMS
+- bwrk-release.json
 
-```bash
-npm publish .boreal/release/npm-package --access public --provenance
-```
-
-Publishing the package does not change the license. Commercial use remains subject to separate written permission under the PolyForm Noncommercial License.
+The default install.sh path downloads and verifies this bundle, so users do not
+need Git, pnpm, Corepack, or npm.
 
 ## Homebrew release
 
-After the npm package is published, copy the reviewed contents of `homebrew-tap/` into the tap repository. Keep `Formula/boreal-work.rb` on the same version as the root package and update the formula SHA when the tarball changes.
+Homebrew does not require a separate account; the tap is a GitHub repository
+named homebrew-boreal. After the GitHub Release is published:
 
-```bash
-shasum -a 256 .boreal/release/boreal-cli-*.tgz
-pnpm release:brew:verify
-```
+1. Copy homebrew-tap/Formula/boreal-work.rb into the tap repository.
+2. Keep the formula version aligned with root package.json.
+3. Set the formula URL to the matching v<version> release asset.
+4. Set sha256 to the SHA256 of bwrk-upgrade.tar.gz printed by the release.
+5. Commit and push the tap repository.
 
-The formula wraps the npm tarball and depends on Homebrew `node`, which is the supported route for this Node CLI. A node-free binary is a future packaging option, not a prerequisite for npm or Homebrew.
+Users then install Boreal with:
+
+    brew tap mattrichmo/boreal
+    brew install boreal-work
+
+The formula wraps the GitHub Release bundle and depends on Homebrew node,
+which is the supported route for this Node CLI. A node-free binary is a future
+packaging option, not a prerequisite for either channel. Commercial use
+remains subject to separate written permission under the PolyForm
+Noncommercial License.

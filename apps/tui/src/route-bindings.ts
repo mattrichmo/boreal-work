@@ -7,9 +7,21 @@ import type { Key } from "ink";
 import { matchToken } from "./key-matcher.js";
 
 export type RouteActionId =
+  | "focusRail"
   | "move"
   | "drill"
   | "toggleDisclosure"
+  | "toggleFocus"
+  | "togglePreview"
+  | "toggleMaximize"
+  | "toggleLayout"
+  | "toggleXray"
+  | "toggleSelect"
+  | "selectAll"
+  | "batch"
+  | "toggleLive"
+  | "theme"
+  | "commandPalette"
   | "expand"
   | "collapse"
   | "ready"
@@ -33,8 +45,19 @@ const DRILL_PROJECT: RouteBindingSpec = { token: "drill", action: "drill", hint:
 const DRILL_WORK: RouteBindingSpec = { token: "drill", action: "drill", hint: { keys: "⏎", label: "open work" } };
 const DRILL_ROLLUP: RouteBindingSpec = { token: "drillRollup", action: "drill", hint: { keys: "⏎", label: "open" } };
 const TOGGLE_DISCLOSURE: RouteBindingSpec = { token: "toggleDisclosure", action: "toggleDisclosure", hint: { keys: "space", label: "fold" } };
+const TOGGLE_DETAIL_FOCUS: RouteBindingSpec = { token: "toggleFocus", action: "toggleFocus", hint: { keys: "tab", label: "focus" } };
+const TOGGLE_PREVIEW: RouteBindingSpec = { token: "p", action: "togglePreview", hint: { keys: "p", label: "preview" } };
+const TOGGLE_MAXIMIZE: RouteBindingSpec = { token: "e", action: "toggleMaximize", hint: { keys: "e", label: "maximize" } };
+const TOGGLE_LAYOUT: RouteBindingSpec = { token: "P", action: "toggleLayout", hint: { keys: "P", label: "right/bottom" } };
+const TOGGLE_XRAY: RouteBindingSpec = { token: "x", action: "toggleXray", hint: { keys: "x", label: "xray" } };
+const TOGGLE_SELECT: RouteBindingSpec = { token: "v", action: "toggleSelect", hint: { keys: "v", label: "mark" } };
+const SELECT_ALL: RouteBindingSpec = { token: "V", action: "selectAll", hint: { keys: "V", label: "mark all" } };
+const BATCH: RouteBindingSpec = { token: "b", action: "batch", hint: { keys: "b", label: "batch" } };
+const TOGGLE_LIVE: RouteBindingSpec = { token: "F", action: "toggleLive", hint: { keys: "F", label: "live" } };
+const THEME: RouteBindingSpec = { token: "T", action: "theme", hint: { keys: "T", label: "theme" } };
+const COMMAND_PALETTE: RouteBindingSpec = { token: ":", action: "commandPalette", hint: { keys: ":", label: "commands" } };
 const EXPAND_DISCLOSURE: RouteBindingSpec = { token: "expandDisclosure", action: "expand", hint: { keys: "→/l", label: "expand" } };
-const COLLAPSE_DISCLOSURE: RouteBindingSpec = { token: "collapseDisclosure", action: "collapse", hint: { keys: "←/h", label: "collapse" } };
+const COLLAPSE_DISCLOSURE: RouteBindingSpec = { token: "collapseDisclosure", action: "collapse", hint: { keys: "h", label: "collapse" } };
 const READY_FILTER: RouteBindingSpec = { token: "readyFilter", action: "ready", hint: { keys: "a", label: "ready" } };
 const DRILL_FINDING: RouteBindingSpec = { token: "drill", action: "drill", hint: { keys: "⏎", label: "open finding" } };
 const DRILL_ACTION: RouteBindingSpec = { token: "drill", action: "drill", hint: { keys: "⏎", label: "run action" } };
@@ -46,8 +69,9 @@ const REFRESH: RouteBindingSpec = { token: "r", action: "refresh", hint: { keys:
 const FILTER: RouteBindingSpec = { token: "f", action: "filter", hint: { keys: "f", label: "filter" } };
 const QUIT: RouteBindingSpec = { token: "q", action: "quit", hint: { keys: "q", label: "quit" } };
 const SECTIONS: RouteBindingSpec = { token: "numberKey", action: "numberKey:0", hint: { keys: "1-9", label: "sections" } };
+const FOCUS_RAIL: RouteBindingSpec = { token: "focusRail", action: "focusRail", hint: { keys: "←", label: "section rail" } };
 
-const FILTERABLE_ROUTES = new Set(["repo.rollup", "repo.sprintBoard", "repo.work", "global.queues"]);
+const FILTERABLE_ROUTES = new Set(["repo.now", "repo.rollup", "repo.sprintBoard", "repo.work", "global.queues"]);
 const PROJECT_DRILL_ROUTES = new Set(["global.projects"]);
 const WORK_DRILL_ROUTES = new Set(["global.queues", "repo.sprintBoard", "repo.now", "repo.milestones", "repo.sprints", "repo.work", "repo.ops"]);
 const FINDING_DRILL_ROUTES = new Set(["global.overview"]);
@@ -58,14 +82,16 @@ const SECTION_ROUTES = new Set(["global.overview", "global.projects", "global.qu
  * Return only bindings that have a meaningful action on the active route.
  */
 export function bindingsForRoute(routeId: string): readonly RouteBindingSpec[] {
-  const specs: RouteBindingSpec[] = [MOVE];
+  const specs: RouteBindingSpec[] = [FOCUS_RAIL, MOVE];
   if (PROJECT_DRILL_ROUTES.has(routeId)) specs.push(DRILL_PROJECT);
   if (routeId === "repo.rollup") specs.push(TOGGLE_DISCLOSURE, EXPAND_DISCLOSURE, COLLAPSE_DISCLOSURE, READY_FILTER, DRILL_ROLLUP);
+  else if (routeId === "repo.milestones") specs.push(TOGGLE_DISCLOSURE, EXPAND_DISCLOSURE, COLLAPSE_DISCLOSURE, DRILL_WORK);
   else if (WORK_DRILL_ROUTES.has(routeId)) specs.push(DRILL_WORK);
+  if (routeId === "repo.taskDetail") specs.push(TOGGLE_DISCLOSURE, EXPAND_DISCLOSURE, COLLAPSE_DISCLOSURE, TOGGLE_DETAIL_FOCUS, TOGGLE_PREVIEW, TOGGLE_MAXIMIZE, TOGGLE_LAYOUT, TOGGLE_XRAY, TOGGLE_SELECT, SELECT_ALL, BATCH);
   if (FINDING_DRILL_ROUTES.has(routeId)) specs.push(DRILL_FINDING);
   if (ACTION_DRILL_ROUTES.has(routeId)) specs.push(DRILL_ACTION);
   if (routeId === "repo.sprintBoard") specs.push(PREVIOUS_SPRINT, NEXT_SPRINT);
-  specs.push(BACK, SEARCH);
+  specs.push(BACK, SEARCH, COMMAND_PALETTE, TOGGLE_LIVE, THEME);
   if (FILTERABLE_ROUTES.has(routeId)) specs.push(FILTER);
   if (SECTION_ROUTES.has(routeId)) specs.push(SECTIONS);
   specs.push(REFRESH, QUIT);

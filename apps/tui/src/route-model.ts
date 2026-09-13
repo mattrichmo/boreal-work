@@ -2,7 +2,7 @@ import type { TuiEnvelope, TuiEntityKind, TuiFilterState, ProjectRegistryView, G
 import { loadGlobalOverview, loadGlobalProjects, loadGlobalQueues, loadRepoMilestones, loadRepoNow, loadRepoOps, loadRepoRollup, loadRepoSprintBoard, loadRepoTaskDetail, loadRepoWork, type GlobalOverviewBody, type RepoMilestonesBody, type RepoNowBody, type RepoOpsBody, type RepoSprintBoardBody, type RepoTaskDetailBody, type RepoWorkBody } from "./loaders.js";
 import { visibleRollupStructureRows, type RollupDisclosureState } from "./routes/rollup.js";
 import { visibleSprintRows } from "./routes/sprint-board.js";
-import { visibleWorkRows } from "./routes/repo-sections.js";
+import { visibleMilestoneRows, visibleNowRows, visibleWorkRows } from "./routes/repo-sections.js";
 import { filteredQueueItems } from "./routes/global-queues.js";
 
 export type RouteBody =
@@ -81,12 +81,12 @@ export function selectedRowCursor(ids: readonly string[], selectedId: string | u
   return index >= 0 ? index : Math.max(0, Math.min(fallback, ids.length - 1));
 }
 
-export function activeRowIds(body: RouteBody | undefined, filters?: TuiFilterState, expandedIds?: RollupDisclosureState): readonly string[] {
+export function activeRowIds(body: RouteBody | undefined, filters?: TuiFilterState, expandedIds?: RollupDisclosureState, milestoneExpandedIds?: ReadonlySet<string>): readonly string[] {
   if (!body) return [];
   switch (body.kind) {
-    case "repo.now": return body.value.rows.map((row) => row.id);
+    case "repo.now": return visibleNowRows(body.value, filters).map((row) => row.id);
     case "repo.rollup": return visibleRollupStructureRows(body.value, filters, expandedIds).map((row) => row.id);
-    case "repo.milestones": return body.value.milestones.map((row) => row.id);
+    case "repo.milestones": return visibleMilestoneRows(body.value, milestoneExpandedIds).map((row) => row.node.id);
     case "repo.sprints": return body.value.sprints.map((row) => row.view.id);
     case "repo.work": return visibleWorkRows(body.value, filters).map((row) => row.id);
     case "repo.ops": return body.value.reservations.map((row) => row.id);

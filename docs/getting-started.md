@@ -6,6 +6,13 @@ This guide takes you from a fresh checkout to a closed, evidence-backed work ite
 
 ## Prerequisites
 
+For a released machine install:
+
+- **Node.js >= 22**
+- **curl** and **tar** for the GitHub release installer, or Homebrew on macOS
+
+For a source checkout:
+
 - **Node.js >= 22**
 - **pnpm 9** (`packageManager` is pinned to `pnpm@9.15.1`)
 - Git (Boreal is git-native; state and memory are meant to be committed)
@@ -14,35 +21,24 @@ This guide takes you from a fresh checkout to a closed, evidence-backed work ite
 
 Choose the install scope that matches how you want to run `bwrk`.
 
-### npm global package
+### GitHub Release installer
 
-After the owner publishes the prepared npm package:
+The installer downloads and verifies the same prebuilt release bundle used by
+the updater. It does not clone the repository or install pnpm dependencies:
 
 ```bash
-npm install -g @boreal/cli
+curl -fsSL https://raw.githubusercontent.com/mattrichmo/boreal-work/main/install.sh | bash -s -- --machine --yes
 bwrk --version
 ```
 
-This installs the bundled CLI dist artifact as a machine-level `bwrk` binary. The npm package is prepared from the repo version and is published with npm provenance by the owner.
+### Homebrew on macOS
 
-### Homebrew
-
-After the owner publishes the prepared tap:
+The tap consumes the verified GitHub Release bundle directly:
 
 ```bash
 brew tap mattrichmo/boreal
 brew install boreal-work
 bwrk --version
-```
-
-The Homebrew formula wraps the npm tarball and depends on Homebrew `node`. A future node-free single executable can be added later; it is not required for the v1 install path.
-
-### install.sh
-
-For release artifacts and source checkouts, the installer can install or upgrade the machine binary:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/mattrichmo/boreal-work/main/install.sh | bash -s -- --machine --yes
 ```
 
 From a built source checkout, the same installer can install the local dist:
@@ -52,10 +48,10 @@ pnpm build
 ./install.sh --machine --yes
 ```
 
-For an already-installed machine CLI, `bwrk upgrade --machine` fetches and
-builds the configured upstream Git ref; it does not update the global binary
-from whatever working tree happens to be current. Use `pnpm bwrk` or the local
-shim when you explicitly want to run this checkout.
+For an already-installed machine CLI, `bwrk upgrade --machine` downloads and
+verifies the latest published GitHub release; it does not update the global
+binary from whatever working tree happens to be current. Use `pnpm bwrk` or
+the local shim when you explicitly want to run this checkout.
 
 ### Source checkout
 
@@ -86,13 +82,13 @@ node tools/install-local-bwrk.mjs
 
 ### Version compatibility
 
-Boreal supports three install scopes on one machine: a source checkout (`pnpm bwrk`), a machine-level binary (`bwrk` from npm or Homebrew), and a repo-pinned package at `node_modules/.bin/bwrk`. When a machine binary is run inside a repo that declares a pinned package, the launcher must delegate to that repo-pinned binary before touching runtime state. If the pinned binary is missing because dependencies are not installed, Boreal fails closed with a typed error that names `pnpm install`; it does not fall back to the machine binary.
+Boreal supports three install scopes on one machine: a source checkout (`pnpm bwrk`), a machine-level binary (`bwrk` from GitHub Releases or Homebrew), and a repo-pinned package at `node_modules/.bin/bwrk`. When a machine binary is run inside a repo that declares a pinned package, the launcher must delegate to that repo-pinned binary before touching runtime state. If the pinned binary is missing because dependencies are not installed, Boreal fails closed with a typed error that names `pnpm install`; it does not fall back to the machine binary.
 
 Patch-level skew between the machine launcher and repo-pinned binary is allowed. Major or minor skew is reported by `bwrk doctor` as `install.version_skew` with channel-correct upgrade commands. A binary may only operate on the file-store schema it supports (`boreal.file-store.v2` today, with `boreal.file-store.v1` accepted as a legacy migration input); newer state files are rejected by doctor and by the storage adapter instead of being read silently.
 
 `bwrk version --json` publishes the full `0.x` SemVer, runtime, storage, launcher, and installed-skill support matrix. See the [compatibility policy](architecture/COMPATIBILITY_POLICY.md) before a minor-version upgrade or storage migration. New workspaces use `objects-v1`; `file-v2` is the legacy read/write and rollback adapter, while `boreal.file-store.v1` is import-only.
 
-The rest of this guide uses `pnpm bwrk`; substitute `bwrk` if you installed the npm package, Homebrew formula, machine installer, or local shim.
+The rest of this guide uses `pnpm bwrk`; substitute `bwrk` if you installed the Homebrew formula, GitHub release installer, or local shim.
 
 ## Set up Boreal in a project
 

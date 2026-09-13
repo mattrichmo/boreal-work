@@ -80,6 +80,27 @@ export function useAltScreen(enableMouse = false): void {
 
 export type WheelDirection = "up" | "down";
 
+export interface MouseInput {
+  readonly action: "press" | "release" | "motion";
+  readonly button: "left" | "middle" | "right" | "wheelUp" | "wheelDown" | "unknown";
+  readonly column: number;
+  readonly row: number;
+}
+
+/** Decode the SGR mouse sequence Ink leaves in the raw input string. */
+export function mouseFromInput(input: string): MouseInput | undefined {
+  const match = /\[<(\d+);(\d+);(\d+)([mM])/u.exec(input);
+  if (!match) return undefined;
+  const code = Number(match[1]);
+  const column = Number(match[2]);
+  const row = Number(match[3]);
+  const action = match[4] === "m" ? "release" : code & 32 ? "motion" : "press";
+  const button = code & 64
+    ? code & 1 ? "wheelDown" : "wheelUp"
+    : (code & 3) === 0 ? "left" : (code & 3) === 1 ? "middle" : (code & 3) === 2 ? "right" : "unknown";
+  return { action, button, column, row };
+}
+
 // SGR mouse wheel arrives as ESC [ < 64 ; col ; row M (up) / 65 (down).
 // Ink surfaces unrecognised sequences as raw `input`; detect the wheel there.
 export function wheelFromInput(input: string): WheelDirection | undefined {

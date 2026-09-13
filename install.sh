@@ -3,20 +3,23 @@ set -euo pipefail
 
 usage() {
   cat <<'USAGE'
-Usage: install.sh [--repo|--machine] [--from-github] [--global|--no-global] [--yes] [--no-link]
+Usage: install.sh [--repo|--machine] [--from-release|--from-github] [--global|--no-global] [--yes] [--no-link]
 
 Installs the bundled bwrk dist artifact.
 
 One-line install (no checkout needed):
-  curl -fsSL https://raw.githubusercontent.com/mattrichmo/boreal-work/main/install.sh | bash
+  curl -fsSL https://raw.githubusercontent.com/mattrichmo/boreal-work/main/install.sh | bash -s -- --machine --yes
 
 Modes:
   default        Install or upgrade the machine bwrk binary, then offer manager-registry/link steps.
   --machine      Install or upgrade the machine bwrk binary only.
   --repo         Add bwrk as a dev dependency in the current repo and verify pnpm bwrk.
-  --from-github  Clone the source repo, build, and install (automatic when run via curl).
-                 Use --ref <branch|tag> and --repo-url <url> to override the source.
-                 Already-installed users can run: bwrk upgrade --machine
+  --from-release  Download and install the latest verified GitHub release.
+                  This is automatic when run via curl.
+  --from-github   Clone the source repo, build, and install. Use this for
+                  development snapshots or before the first release exists.
+                  Use --ref <branch|tag> and --repo-url <url> to override source.
+                  Already-installed users can run: bwrk upgrade --machine
 
 Options:
   --global         Non-interactively accept global manager registry setup (not agent skills).
@@ -37,6 +40,7 @@ global_override="prompt"
 assume_yes=false
 link_repo=true
 from_github=false
+from_release=false
 github_ref="${BOREAL_UPDATE_REF:-}"
 github_repo_url="${BOREAL_UPDATE_REPO_URL:-https://github.com/mattrichmo/boreal-work.git}"
 
@@ -120,6 +124,9 @@ while [ "$#" -gt 0 ]; do
     --from-github)
       from_github=true
       ;;
+    --from-release)
+      from_release=true
+      ;;
     --ref)
       require_value "$@"
       github_ref="$2"
@@ -175,7 +182,81 @@ bootstrap_from_github() {
   (cd "$stage/src" && pnpm install --frozen-lockfile --silent && pnpm build >/dev/null)
 
   echo "Handing off to the built installer ..."
-  local forwarded_args=()
+  run_packaged_installer "$stage/src" "install.source" "${github_ref:-source}"
+  exit $?
+}
+
+bootstrap_from_release() {
+  local stage repository owner repo release_endpoint release_json release_tag encoded_tag
+  local archive_url manifest_url checksums_url archive_path manifest_path checksums_path expected_sha actual_sha listed_sha
+
+  for tool in curl node tar; do
+    if ! command -v "$tool" >/dev/null 2>&1; then
+      echo "install.sh: --from-release requires $tool on PATH" >&2
+      exit 1
+    fi
+  done
+  repository="$(github_repository "$github_repo_url")" || exit 1
+  owner="${repository%%/*}"
+  repo="${repository#*/}"
+  release_endpoint="latest"
+  if [ -n "$github_ref" ]; then
+    release_endpoint="tags/$(url_encode "$github_ref")"
+  fi
+
+  stage="$(mktemp -d "${TMPDIR:-/tmp}/boreal-release-install.XXXXXX")"
+  trap 'rm -rf "$stage"' EXIT
+  release_json="$stage/release.json"
+  echo "Checking the latest Boreal release ..."
+  download_url "https://api.github.com/repos/$repository/releases/$release_endpoint" "$release_json" "GitHub release metadata" "application/vnd.github+json"
+  release_tag="$(node -e 'const fs=require("fs"); const doc=JSON.parse(fs.readFileSync(process.argv[1],"utf8")); if (doc?.draft || doc?.prerelease || typeof doc?.tag_name !== "string" || !doc.tag_name) process.exit(1); const names=new Set(Array.isArray(doc.assets) ? doc.assets.map((asset)=>asset?.name) : []); for (const name of ["bwrk-upgrade.tar.gz","bwrk-release.json","SHA256SUMS"]) if (!names.has(name)) process.exit(1); process.stdout.write(doc.tag_name);' "$release_json")" || {
+    echo "install.sh: no complete published Boreal release was found for $repository." >&2
+    echo "Publish a release first, or use a source checkout with: install.sh --from-github" >&2
+    exit 1
+  }
+  encoded_tag="$(url_encode "$release_tag")"
+  archive_url="https://github.com/$owner/$repo/releases/download/$encoded_tag/bwrk-upgrade.tar.gz"
+  manifest_url="https://github.com/$owner/$repo/releases/download/$encoded_tag/bwrk-release.json"
+  checksums_url="https://github.com/$owner/$repo/releases/download/$encoded_tag/SHA256SUMS"
+  archive_path="$stage/bwrk-upgrade.tar.gz"
+  manifest_path="$stage/bwrk-release.json"
+  checksums_path="$stage/SHA256SUMS"
+
+  download_url "$manifest_url" "$manifest_path" "Boreal release manifest"
+  download_url "$checksums_url" "$checksums_path" "Boreal release checksums"
+  expected_sha="$(node -e 'const fs=require("fs"); const doc=JSON.parse(fs.readFileSync(process.argv[1],"utf8")); if (doc?.schemaVersion !== "boreal.upgrade.release.v1" || doc.archive !== "bwrk-upgrade.tar.gz" || !/^[a-f0-9]{64}$/.test(doc.sha256 || "")) process.exit(1); process.stdout.write(doc.sha256);' "$manifest_path")" || {
+    echo "install.sh: the Boreal release manifest is invalid; nothing was installed." >&2
+    exit 1
+  }
+  listed_sha="$(awk '$2 == "bwrk-upgrade.tar.gz" { print $1; exit }' "$checksums_path")"
+  if [ "$listed_sha" != "$expected_sha" ]; then
+    echo "install.sh: release manifest and checksum file disagree; nothing was installed." >&2
+    exit 1
+  fi
+  download_url "$archive_url" "$archive_path" "Boreal release bundle"
+  actual_sha="$(sha256_file "$archive_path")"
+  if [ "$actual_sha" != "$expected_sha" ]; then
+    echo "install.sh: release checksum verification failed; nothing was installed." >&2
+    exit 1
+  fi
+  validate_release_archive "$archive_path"
+  mkdir -p "$stage/src"
+  tar -xzf "$archive_path" -C "$stage/src" --no-same-owner --no-same-permissions
+  if [ ! -f "$stage/src/apps/cli/dist/index.js" ] || [ ! -f "$stage/src/install.sh" ]; then
+    echo "install.sh: release bundle is incomplete; nothing was installed." >&2
+    exit 1
+  fi
+  echo "Installing Boreal $release_tag ..."
+  run_packaged_installer "$stage/src" "install.release" "$release_tag"
+  exit $?
+}
+
+run_packaged_installer() {
+  local package_root operation ref
+  local -a forwarded_args=()
+  package_root="$1"
+  operation="$2"
+  ref="$3"
   case "$mode" in
     machine) forwarded_args+=(--machine) ;;
     repo) forwarded_args+=(--repo) ;;
@@ -188,21 +269,89 @@ bootstrap_from_github() {
   [ "$link_repo" = false ] && forwarded_args+=(--no-link)
   [ -n "$registry_root" ] && forwarded_args+=(--registry-root "$registry_root")
   [ -n "$package_spec" ] && forwarded_args+=(--package-spec "$package_spec")
-  BOREAL_INSTALL_BIN_DIR="$bin_dir" BOREAL_INSTALL_LIB_DIR="$lib_dir" \
-    bash "$stage/src/install.sh" ${forwarded_args[@]+"${forwarded_args[@]}"}
-  exit $?
+  BOREAL_INSTALL_BIN_DIR="$bin_dir" BOREAL_INSTALL_LIB_DIR="$lib_dir" BOREAL_INSTALL_PROVENANCE_OPERATION="$operation" BOREAL_INSTALL_SOURCE_REPO_URL="$github_repo_url" BOREAL_INSTALL_SOURCE_REF="$ref" bash "$package_root/install.sh" "${forwarded_args[@]}"
+}
+
+download_url() {
+  local url="$1" destination="$2" label="$3" accept="${4:-application/octet-stream}"
+  if ! curl -fsSL --retry 3 --connect-timeout 10 --max-time 120 -H "User-Agent: boreal-work-installer" -H "Accept: $accept" "$url" -o "$destination"; then
+    echo "install.sh: unable to download $label." >&2
+    exit 1
+  fi
+}
+
+github_repository() {
+  local value="$1" path owner repo
+  case "$value" in
+    https://github.com/*) ;;
+    *)
+      echo "install.sh: release installs require an HTTPS GitHub repository URL; got $value" >&2
+      return 1
+      ;;
+  esac
+  path="${value#https://github.com/}"
+  path="${path%.git}"
+  path="${path%/}"
+  owner="${path%%/*}"
+  repo="${path#*/}"
+  if [ -z "$owner" ] || [ -z "$repo" ] || [ "$repo" = "$path" ] || [[ "$repo" == */* ]]; then
+    echo "install.sh: invalid GitHub repository URL: $value" >&2
+    return 1
+  fi
+  printf '%s/%s\n' "$owner" "$repo"
+}
+
+url_encode() {
+  node -e 'console.log(encodeURIComponent(process.argv[1]))' "$1"
+}
+
+sha256_file() {
+  if command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$1" | awk '{ print $1 }'
+  elif command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | awk '{ print $1 }'
+  else
+    echo "install.sh: release installs require shasum or sha256sum on PATH" >&2
+    exit 1
+  fi
+}
+
+validate_release_archive() {
+  local archive="$1" entry normalized
+  while IFS= read -r entry; do
+    normalized="${entry#./}"
+    case "$normalized" in
+      apps/|apps/cli/|apps/cli/dist/|apps/cli/dist/*|install.sh) ;;
+      *)
+        echo "install.sh: release bundle contains an unsafe entry ($entry); nothing was installed." >&2
+        exit 1
+        ;;
+    esac
+    case "$normalized" in
+      /*|../*|*/../*|*/./*|./*)
+        echo "install.sh: release bundle contains an unsafe path ($entry); nothing was installed." >&2
+        exit 1
+        ;;
+    esac
+  done < <(tar -tzf "$archive")
 }
 
 main() {
-  if [ "$from_github" = true ]; then
+  if [ "$from_github" = true ] && [ "$from_release" = true ]; then
+    echo "install.sh: --from-release and --from-github cannot be combined" >&2
+    exit 2
+  fi
+  if [ "$from_release" = true ]; then
+    bootstrap_from_release
+  elif [ "$from_github" = true ]; then
     bootstrap_from_github
   elif [ "$running_from_stdin" = true ]; then
-    # A curl | bash invocation has no checkout-relative dist to reuse. Bootstrap
-    # even when the caller happens to be a Node project with package.json.
-    bootstrap_from_github
+    # A curl | bash invocation has no checkout-relative dist to reuse. Download
+    # the verified release artifact instead of cloning and building the source.
+    bootstrap_from_release
   elif [ ! -f "$dist_dir/index.js" ] && [ ! -f "$script_dir/package.json" ]; then
-    # Running outside a checkout (e.g. curl | bash) with no built dist: bootstrap.
-    bootstrap_from_github
+    # Running outside a checkout with no built dist: use the release artifact.
+    bootstrap_from_release
   fi
   require_dist
   registry_root="$(resolve_registry_root "$registry_root")"
@@ -257,6 +406,16 @@ install_machine_binary() {
   echo "Verification: $version"
   echo "Transaction: $transaction_id"
   echo "Provenance: $manifest_path"
+  case ":${PATH:-}:" in
+    *":$bin_dir:"*)
+      echo "PATH check: ok"
+      ;;
+    *)
+      echo "PATH check: $bin_dir is not on PATH"
+      echo "Add it for this shell with: export PATH=$(shell_quote "$bin_dir"):\$PATH"
+      echo "Then verify with: bwrk --version"
+      ;;
+  esac
   echo "Next steps:"
   echo "  project setup: bwrk setup --yes"
   echo "  user-wide Codex skills: bwrk integrations add codex --scope user"

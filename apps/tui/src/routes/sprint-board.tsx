@@ -8,7 +8,9 @@ export const SPRINT_FILTERS = ["open", "all", "ready", "blocked", "in_progress",
 export function sprintFilterLabel(filters?: TuiFilterState): string {
   return filters?.query ?? "open";
 }
-export function fullSprintStatusLabel(status: string): string { return statusLabel(status); }
+export function fullSprintStatusLabel(status: string): string {
+  return status === "closed" || status === "verified" ? "complete" : statusLabel(status);
+}
 export function sprintTitleLabel(title: string): string { return title.startsWith("Sprint: ") ? title.slice("Sprint: ".length) : title; }
 export function compactStatusLabel(status: string): string {
   return ({ needs_verification: "verify", in_progress: "working" } as Record<string, string>)[status] ?? statusLabel(status);
@@ -23,7 +25,7 @@ export function visibleSprintRows(body: RepoSprintBoardBody, filters?: TuiFilter
     return filter === "all" || (filter === "open"
       ? !terminal
       : filter === "complete"
-        ? item.status === "closed" || item.status === "verified"
+        ? item.status === "verified"
         : filter === "closed"
           ? item.status === "closed"
           : item.status === filter);

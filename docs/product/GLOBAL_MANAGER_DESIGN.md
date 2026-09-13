@@ -121,14 +121,14 @@ activated by a command, not a different install artifact.
 
 ### Packaging track
 
-- **Phase A (now → npm):** build `apps/cli` to a self-contained `dist` with a real bin entry (the current
-  shim runs `tsx` against source and requires a checkout — fine for dev, not distributable). Publish as a
-  single npm package (`npm i -g bwrk` or `@boreal/bwrk`). All workspace packages bundle in; no runtime
-  `node_modules` resolution outside the package.
-- **Phase B (Homebrew):** formula wrapping the npm tarball (node dependency), the standard route for
-  node CLIs. Later, if node-free install matters, a Node SEA / bun-compiled single binary — but do not block
-  brew on that.
-- The CLI must know its install channel (`bwrk --version` reporting `source|npm|brew`) so `doctor` can give
+- **Phase A (now → GitHub Release):** build `apps/cli` to a self-contained `dist` with a real bundled
+  entry (the current shim runs `tsx` against source and requires a checkout — fine for dev, not
+  distributable). Publish the verified `bwrk-upgrade.tar.gz` bundle to a versioned GitHub Release. All
+  workspace packages bundle in; no runtime `node_modules` resolution outside the bundle.
+- **Phase B (Homebrew):** formula wrapping the same GitHub Release bundle (node dependency), the standard
+  route for node CLIs. Later, if node-free install matters, a Node SEA / bun-compiled single binary —
+  but do not block brew on that.
+- The CLI must know its install channel (`bwrk --version` reporting `source|github|npm|brew`) so `doctor` can give
   channel-correct upgrade advice; `install-status.ts` already does a version of this for the shim.
 
 ### install.sh flow
@@ -137,7 +137,7 @@ A curl-able `install.sh` that orchestrates, with every prompt skippable by flags
 
 ```
 install.sh                  # interactive default
-  1. Install/upgrade bwrk binary (npm global or brew if available; else download).
+  1. Install/upgrade bwrk binary (brew if available; else download from GitHub Releases).
   2. Detect existing global: registry file at the registry root?
      - exists  -> "Global manager already set up (N projects linked)." (skip prompt)
      - missing -> "Set up the global manager (cross-repo boards, inbox, next queue)? [Y/n]"
@@ -185,7 +185,7 @@ global backlog from becoming a junk drawer.
 | 4 | `bwrk global next` + aging signals | 2 |
 | 5 | Portfolio containers (cross-boundary readiness) | 1, 2 |
 | 6 | Console global board (honest kanban, drag=command) | 2, 4; 5 for initiative lanes |
-| A/B | npm dist build → install.sh → brew formula | independent track, start anytime |
+| A/B | GitHub release bundle → install.sh → brew formula | independent track, start anytime |
 
 Phases 0, 2, and A are independent. The packaging track is deliberately decoupled so a distributable binary can be validated independently from cross-project features.
 

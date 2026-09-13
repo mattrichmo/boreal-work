@@ -83,7 +83,11 @@ function printHelp(): void {
       "Projects / Queues surface; without it, opens the repo Now / Roll-Up /",
       "Milestones / Sprints / Work / Ops surface for the current workspace.",
       "",
-      "Keys: 1-6 sections · ↑↓/jk move · ⏎ open/run · esc back · r refresh · / search · ? help · q quit",
+      "Keys: 1-6 sections · ← rail · ↑↓/jk move · ⏎ open/run · space fold · h fold/back · esc back",
+      "Now: f filter by milestone or sprint · : commands · Enter opens work",
+      "Milestones: space fold/expand · Enter opens selected milestone, sprint, or task",
+      "Task detail: p preview · e maximize · P layout · x XRay · v/V mark · b batch · / filter · : commands",
+      "Global: F freeze/live · T theme · r refresh · ? help · q quit",
       ""
     ].join("\n")
   );

@@ -42,8 +42,8 @@ Before a release:
 2. Install dependencies with the frozen lockfile.
 3. Run `pnpm check` and the relevant test and package-smoke commands.
 4. Run `node tools/audit-release-boundary.mjs --json`.
-5. Build the staged npm artifact, inspect its file list, and run the installed-binary smoke test.
-6. Verify the Homebrew formula references the same version and tarball hash.
+5. Build the GitHub release artifact, inspect its file list, and run the installed-binary smoke test.
+6. Verify the Homebrew formula references the same version, release asset, and tarball hash.
 7. Review the final Git diff for secrets, machine paths, generated state, and accidental local files.
 
 These checks protect the release boundary; they do not replace the license terms or the review required for a commercial distribution arrangement.

@@ -227,7 +227,7 @@ export interface SectionRailLayout {
 
 export function sectionRailLayout(availableWidth: number): SectionRailLayout {
   const width = Math.max(1, Math.floor(availableWidth));
-  if (width >= 80) return { width: 16, compact: false };
+  if (width >= 80) return { width: 15, compact: false };
   if (width >= 56) return { width: 9, compact: true };
   if (width >= 48) return { width: 5, compact: true };
   return { width: 0, compact: true };
@@ -236,10 +236,12 @@ export function sectionRailLayout(availableWidth: number): SectionRailLayout {
 export function SectionRail({
   sections,
   active,
-  width
+  width,
+  focused = false
 }: {
   readonly sections: readonly { readonly id: string; readonly label: string; readonly key: string }[];
   readonly active: string;
+  readonly focused?: boolean;
   /** Total terminal width used to select full, compact, or key-only rail mode. */
   readonly width?: number;
 }) {
@@ -250,11 +252,11 @@ export function SectionRail({
     <Box flexDirection="column" width={layout.width} marginRight={1}>
       {sections.map((section) => {
         const isActive = section.id === active;
-        const marker = isActive ? "▍ " : "  ";
+        const marker = isActive ? focused ? "▶ " : "▍ " : "  ";
         const name = section.label === "Sprint Board" ? "Sprints" : section.label;
-        const label = layout.width < 8 ? `${marker}${section.key}` : layout.compact ? `${marker}${section.key} ${name}` : `${marker}${name} ${section.key}`;
+        const label = layout.width < 8 ? `${marker}${section.key}` : `${marker}${section.key} ${name}`;
         return (
-          <Text key={section.id} color={isActive ? COLOR.accent : COLOR.muted} bold={isActive}>
+          <Text key={section.id} color={isActive ? COLOR.accent : COLOR.muted} bold={isActive} backgroundColor={focused && isActive ? COLOR.selectionBg : undefined}>
             {fit(label, layout.width)}
           </Text>
         );

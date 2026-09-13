@@ -82,10 +82,30 @@ export function resolveColorMode(env: Readonly<Record<string, string | undefined
 }
 
 export function createColorPalette(mode: ColorMode): ColorPalette {
-  return COLOR_PALETTES[mode];
+  return { ...COLOR_PALETTES[mode] };
 }
 
-export const COLOR = createColorPalette(resolveColorMode());
+let ACTIVE_COLOR_MODE: ColorMode = resolveColorMode();
+export const COLOR: ColorPalette = createColorPalette(ACTIVE_COLOR_MODE);
+
+export function currentColorMode(): ColorMode {
+  return ACTIVE_COLOR_MODE;
+}
+
+export function setColorMode(mode: ColorMode): ColorMode {
+  ACTIVE_COLOR_MODE = mode;
+  Object.assign(COLOR, createColorPalette(mode));
+  return mode;
+}
+
+export function cycleColorMode(mode: ColorMode = ACTIVE_COLOR_MODE): ColorMode {
+  const modes: readonly ColorMode[] = ["color", "high-contrast", "terminal-default", "none", "light"];
+  return modes[(modes.indexOf(mode) + 1) % modes.length] ?? "color";
+}
+
+export function colorModeLabel(mode: ColorMode = ACTIVE_COLOR_MODE): string {
+  return { color: "color", light: "light", "terminal-default": "terminal", "high-contrast": "high contrast", none: "no color" }[mode];
+}
 
 export function statusColor(status: string): string {
   switch (status) {
@@ -118,7 +138,7 @@ const STATUS_LABEL: Readonly<Record<string, string>> = {
   blocked: "blocked",
   verified: "complete",
   complete: "complete",
-  closed: "complete",
+  closed: "closed",
   cancelled: "cancelled",
   draft: "draft"
 };
@@ -132,7 +152,7 @@ export function statusGlyph(status: string): string {
     blocked: "!",
     verified: "✓",
     complete: "✓",
-    closed: "✓",
+    closed: "■",
     cancelled: "×"
   }[status] ?? "·";
 }

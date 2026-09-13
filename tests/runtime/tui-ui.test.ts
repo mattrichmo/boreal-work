@@ -49,7 +49,7 @@ describe("tui bounded terminal layout helpers", () => {
   });
 
   it("falls back from a labeled rail to a rail-free narrow layout", () => {
-    expect(sectionRailLayout(100)).toEqual({ width: 13, compact: false });
+    expect(sectionRailLayout(100)).toEqual({ width: 15, compact: false });
     expect(sectionRailLayout(60)).toEqual({ width: 9, compact: true });
     expect(sectionRailLayout(48)).toEqual({ width: 5, compact: true });
     expect(sectionRailLayout(47)).toEqual({ width: 0, compact: true });

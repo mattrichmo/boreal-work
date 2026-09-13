@@ -28,6 +28,7 @@ describe("release package preparation", () => {
       readonly name: string;
       readonly version: string;
       readonly private?: boolean;
+      readonly license?: string;
       readonly dependencies?: Record<string, string>;
       readonly files: readonly string[];
       readonly publishConfig?: { readonly access?: string; readonly provenance?: boolean };
@@ -36,6 +37,7 @@ describe("release package preparation", () => {
     expect(packageJson.name).toBe("@boreal/cli");
     expect(packageJson.version).toBe(rootPackage.version);
     expect(packageJson.private).toBeUndefined();
+    expect(packageJson.license).toBe("SEE LICENSE IN LICENSE");
     expect(packageJson.dependencies).toBeUndefined();
     expect(packageJson.files).toEqual(["dist"]);
     expect(packageJson.publishConfig).toEqual(expect.objectContaining({ access: "public", provenance: true }));
@@ -51,16 +53,17 @@ describe("release package preparation", () => {
     const files = records[0]?.files.map((file) => file.path).sort() ?? [];
     expect(files).toContain("package.json");
     expect(files).toContain("README.md");
-    expect(files.every((file) => file === "package.json" || file === "README.md" || file.startsWith("dist/"))).toBe(true);
+    expect(files).toContain("LICENSE");
+    expect(files.every((file) => file === "package.json" || file === "README.md" || file === "LICENSE" || file.startsWith("dist/"))).toBe(true);
     expect(files.some((file) => file.startsWith("src/") || file.includes("node_modules"))).toBe(false);
   }, 30_000);
 
-  it("keeps the Homebrew formula wired to the npm tarball and brew channel wrapper", async () => {
+  it("keeps the Homebrew formula wired to the GitHub release bundle and brew channel wrapper", async () => {
     const rootPackage = parseJson<{ readonly version: string }>(await readFile(join(repoRoot, "package.json"), "utf8"));
     const formula = await readFile(join(repoRoot, "homebrew-tap", "Formula", "boreal-work.rb"), "utf8");
 
     expect(formula).toContain(`version "${rootPackage.version}"`);
-    expect(formula).toContain(`url "https://registry.npmjs.org/@boreal/cli/-/cli-${rootPackage.version}.tgz"`);
+    expect(formula).toContain(`url "https://github.com/mattrichmo/boreal-work/releases/download/v${rootPackage.version}/bwrk-upgrade.tar.gz"`);
     expect(formula).toContain('depends_on "node"');
     expect(formula).toContain("BOREAL_INSTALL_CHANNEL=brew");
   });

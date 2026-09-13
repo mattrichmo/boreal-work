@@ -22,7 +22,7 @@ const staleLockMs = 300_000;
 
 async function main() {
 const distSnapshotRoot = await resolveDistSnapshotRoot(process.env.BOREAL_BUILD_DIST_SNAPSHOT_DIR);
-const validChannels = new Set(["npm", "brew"]);
+const validChannels = new Set(["github", "npm", "brew"]);
 const installChannel = process.env.BOREAL_INSTALL_CHANNEL && validChannels.has(process.env.BOREAL_INSTALL_CHANNEL)
   ? process.env.BOREAL_INSTALL_CHANNEL
   : "npm";

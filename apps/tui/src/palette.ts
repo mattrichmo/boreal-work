@@ -4,12 +4,13 @@ import type {
   RepoRollupView,
   TuiEntityRef,
   TuiEntityKind,
-  WorkItemView
+  WorkItemView,
+  TuiCommandDescriptor
 } from "@boreal/ui-model";
 import type { RepoSprintBoardBody } from "./loaders.js";
 import { fuzzyScore } from "./search.js";
 
-export type PaletteKind = "route" | "sprint" | "task" | "issue" | "project";
+export type PaletteKind = "route" | "sprint" | "task" | "issue" | "project" | "command";
 
 export interface PaletteItem {
   readonly id: string;
@@ -20,6 +21,7 @@ export interface PaletteItem {
   readonly entity?: TuiEntityRef;
   readonly projectId?: string;
   readonly workspaceRoot: string;
+  readonly descriptors?: readonly TuiCommandDescriptor[];
 }
 
 export interface PaletteResult extends PaletteItem {
@@ -33,6 +35,7 @@ export interface PaletteInput {
   readonly sprintBody?: RepoSprintBoardBody;
   readonly projects?: ProjectRegistryView;
   readonly queues?: GlobalWorkQueuesView;
+  readonly commands?: readonly Pick<PaletteItem, "id" | "label" | "hint" | "workspaceRoot">[];
 }
 
 function entityFor(work: Pick<WorkItemView, "id" | "title" | "kind">, workspaceRoot: string, project?: { readonly id: string; readonly name: string }): TuiEntityRef {
@@ -56,6 +59,9 @@ function addWork(items: PaletteItem[], work: Pick<WorkItemView, "id" | "title" |
 
 export function buildPaletteItems(input: PaletteInput): readonly PaletteItem[] {
   const items: PaletteItem[] = [];
+  for (const command of input.commands ?? []) {
+    items.push({ ...command, kind: "command", routeId: "", workspaceRoot: command.workspaceRoot });
+  }
   for (const route of input.routes ?? []) {
     items.push({ id: route.id, label: route.label, hint: route.surface, kind: "route", routeId: route.id, workspaceRoot: input.workspaceRoot });
   }

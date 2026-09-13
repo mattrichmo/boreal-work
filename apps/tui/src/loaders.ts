@@ -31,7 +31,7 @@ import {
   type WorkItemView,
   type WorkReservationView
 } from "@boreal/ui-model";
-import type { AgentSummaryRecord, WorkItem } from "@boreal/core";
+import type { AgentSummaryRecord, GraphEdge, WorkItem } from "@boreal/core";
 
 import { activeReservationViewsByWorkId, readRepoTaskCloseoutRecords, readRepoWorkGraph, reservationViewFrom } from "./repo-store.js";
 import { displayStatusForNode } from "./status-display.js";
@@ -387,16 +387,29 @@ export interface RepoNowRow {
   readonly id: string;
   readonly lane: RepoNowLane;
   readonly node: RollupNodeView;
+  readonly milestoneId?: string;
+  readonly milestoneTitle?: string;
+  readonly sprintId?: string;
+  readonly sprintTitle?: string;
+}
+
+export interface RepoNowScope {
+  readonly kind: "milestone" | "sprint";
+  readonly id: string;
+  readonly title: string;
+  readonly count: number;
 }
 
 export interface RepoNowBody {
   readonly currentSprint?: RepoSprintRow;
   readonly rows: readonly RepoNowRow[];
+  readonly allRows?: readonly RepoNowRow[];
   readonly overflowCount: number;
   readonly workingCount: number;
   readonly attentionCount: number;
   readonly nextCount: number;
   readonly summary: RepoRollupSummary;
+  readonly scopes?: readonly RepoNowScope[];
 }
 
 function leafWorkNodes(body: RepoRollupView): readonly RollupNodeView[] {
@@ -405,6 +418,25 @@ function leafWorkNodes(body: RepoRollupView): readonly RollupNodeView[] {
 
 function nodeStatus(node: RollupNodeView): string {
   return node.workStatus ?? "draft";
+}
+
+function nowScopeForNode(node: RollupNodeView, byId: ReadonlyMap<string, RollupNodeView>): {
+  readonly milestone?: RollupNodeView;
+  readonly sprint?: RollupNodeView;
+} {
+  let parentId = node.parentId;
+  const seen = new Set<string>();
+  let milestone: RollupNodeView | undefined;
+  let sprint: RollupNodeView | undefined;
+  while (parentId && !seen.has(parentId)) {
+    seen.add(parentId);
+    const parent = byId.get(parentId);
+    if (!parent) break;
+    if (parent.kind === "milestone" && !milestone) milestone = parent;
+    if (parent.kind === "sprint" && !sprint) sprint = parent;
+    parentId = parent.parentId;
+  }
+  return { milestone, sprint };
 }
 
 /** The repo landing view is deliberately a bounded operational queue, not a
@@ -416,15 +448,26 @@ export async function loadRepoNow(workspaceRoot: string): Promise<TuiEnvelope<Re
     loadRepoSprintBoard(workspaceRoot)
   ]);
   const nodes = leafWorkNodes(rollup.body);
+  const byId = new Map(rollup.body.flatRows.map((node) => [node.id, node]));
+  const addScope = (node: RollupNodeView, lane: RepoNowLane): RepoNowRow => {
+    const scope = nowScopeForNode(node, byId);
+    return {
+      id: `${lane}:${node.id}`,
+      lane,
+      node,
+      ...(scope.milestone ? { milestoneId: scope.milestone.id, milestoneTitle: scope.milestone.title } : {}),
+      ...(scope.sprint ? { sprintId: scope.sprint.id, sprintTitle: scope.sprint.title } : {})
+    };
+  };
   const inFlight = nodes.filter((node) => nodeStatus(node) === "in_progress" || nodeStatus(node) === "reserved");
   const attention = nodes.filter((node) =>
     !inFlight.includes(node) && (nodeStatus(node) === "blocked" || nodeStatus(node) === "needs_verification" || node.blockerSummary.activeBlockerCount > 0)
   );
   const next = nodes.filter((node) => nodeStatus(node) === "ready" && node.blockerSummary.activeBlockerCount === 0);
   const allRows: RepoNowRow[] = [
-    ...inFlight.map((node) => ({ id: `in-flight:${node.id}`, lane: "in flight" as const, node })),
-    ...attention.map((node) => ({ id: `attention:${node.id}`, lane: "attention" as const, node })),
-    ...next.map((node) => ({ id: `next:${node.id}`, lane: "next" as const, node }))
+    ...inFlight.map((node) => addScope(node, "in flight")),
+    ...attention.map((node) => addScope(node, "attention")),
+    ...next.map((node) => addScope(node, "next"))
   ];
   // Keep Now useful as a triage screen. Work remains the exhaustive flat
   // queue, while Now reserves space for each operational lane.
@@ -435,6 +478,19 @@ export async function loadRepoNow(workspaceRoot: string): Promise<TuiEnvelope<Re
   ];
   const currentSprint = sprintBoard.body.sprints.find((sprint) => sprint.active) ??
     sprintBoard.body.sprints.find((sprint) => sprint.view.id === sprintBoard.body.selectedSprintId);
+  const scopeByKey = new Map<string, RepoNowScope>();
+  for (const row of allRows) {
+    for (const scope of [
+      row.milestoneId && row.milestoneTitle ? { kind: "milestone" as const, id: row.milestoneId, title: row.milestoneTitle } : undefined,
+      row.sprintId && row.sprintTitle ? { kind: "sprint" as const, id: row.sprintId, title: row.sprintTitle } : undefined
+    ]) {
+      if (!scope) continue;
+      const key = `${scope.kind}:${scope.id}`;
+      const existing = scopeByKey.get(key);
+      scopeByKey.set(key, { ...scope, count: (existing?.count ?? 0) + 1 });
+    }
+  }
+  const scopes = [...scopeByKey.values()].sort((left, right) => left.kind.localeCompare(right.kind) || left.title.localeCompare(right.title) || left.id.localeCompare(right.id));
   const warnings = [...new Set([...rollup.warnings, ...sprintBoard.warnings])];
   return buildTuiEnvelope({
     surface: "repo",
@@ -445,19 +501,27 @@ export async function loadRepoNow(workspaceRoot: string): Promise<TuiEnvelope<Re
     body: {
       currentSprint,
       rows,
+      allRows,
       overflowCount: allRows.length - rows.length,
       workingCount: inFlight.length,
       attentionCount: attention.length,
       nextCount: next.length,
-      summary: rollup.body.summary
+      summary: rollup.body.summary,
+      scopes
     }
   });
+}
+
+export interface RepoMilestoneTree {
+  readonly root: RollupNodeView;
+  readonly nodes: readonly RollupNodeView[];
 }
 
 export interface RepoMilestonesBody {
   readonly milestones: readonly RollupNodeView[];
   readonly summary: RepoRollupSummary;
   readonly warnings?: readonly string[];
+  readonly trees?: readonly RepoMilestoneTree[];
 }
 
 export async function loadRepoMilestones(workspaceRoot: string): Promise<TuiEnvelope<RepoMilestonesBody>> {
@@ -473,13 +537,27 @@ export async function loadRepoMilestones(workspaceRoot: string): Promise<TuiEnve
       };
       return priority(left) - priority(right) || left.title.localeCompare(right.title);
     });
+  const trees = milestones.map((root): RepoMilestoneTree => {
+    const nodes: RollupNodeView[] = [];
+    const seen = new Set<string>();
+    const visit = (id: string): void => {
+      if (seen.has(id)) return;
+      seen.add(id);
+      const node = byId.get(id);
+      if (!node) return;
+      nodes.push(node);
+      for (const childId of node.childIds) visit(childId);
+    };
+    for (const childId of root.childIds) visit(childId);
+    return { root, nodes };
+  });
   return buildTuiEnvelope({
     surface: "repo",
     workspaceRoot,
     generatedAt: envelope.generatedAt,
     stale: envelope.stale,
     warnings: envelope.warnings,
-    body: { milestones, summary: envelope.body.summary, warnings: envelope.warnings }
+    body: { milestones, summary: envelope.body.summary, warnings: envelope.warnings, trees }
   });
 }
 
@@ -692,6 +770,133 @@ export interface RepoTaskDetailBody {
   readonly dependencyTitles: readonly string[];
   readonly blockerTitles?: readonly string[];
   readonly actions: readonly TuiCommandDescriptor[];
+  /**
+   * Container descendants are kept separate from the prose detail so the
+   * detail route can present a navigable work tree without replacing the
+   * milestone description.
+   */
+  readonly hierarchy?: RepoTaskDetailHierarchy;
+}
+
+export interface RepoTaskDetailHierarchy {
+  readonly root: RollupNodeView;
+  readonly nodes: readonly RollupNodeView[];
+  /**
+   * Relationship edges are kept separate from the display tree. Roll-up
+   * childIds intentionally combine containment, dependency, and blocker scope
+   * membership, so the X-Ray pane must use the source graph to label those
+   * links accurately.
+   */
+  readonly relations?: readonly RepoTaskDetailRelation[];
+}
+
+export interface RepoTaskDetailRelation {
+  readonly id: string;
+  readonly kind: "contains" | GraphEdge["kind"];
+  readonly fromId: string;
+  readonly toId: string;
+  readonly fromTitle: string;
+  readonly toTitle: string;
+  readonly directed: boolean;
+}
+
+function taskDetailRelations(
+  root: RollupNodeView,
+  nodes: readonly RollupNodeView[],
+  workItems: readonly WorkItem[],
+  graphEdges: readonly GraphEdge[]
+): readonly RepoTaskDetailRelation[] {
+  const rollupById = new Map<string, RollupNodeView>([
+    [root.id, root],
+    ...nodes.map((node) => [node.id, node] as const)
+  ]);
+  const workById = new Map<string, WorkItem>(workItems.map((work) => [work.meta.id, work] as const));
+  const hierarchyIds = new Set(rollupById.keys());
+  const relations: RepoTaskDetailRelation[] = [];
+  const seen = new Set<string>();
+  const titleFor = (id: string): string => rollupById.get(id)?.title ?? workById.get(id)?.title ?? id;
+  const add = (input: Omit<RepoTaskDetailRelation, "id">): void => {
+    if (input.fromId === input.toId) return;
+    const id = `${input.kind}:${input.fromId}:${input.toId}`;
+    if (seen.has(id)) return;
+    seen.add(id);
+    relations.push({ ...input, id });
+  };
+
+  // Preserve the hierarchy's display order for containment edges. These are
+  // derived from the rendered tree, not from mixed roll-up scope childIds.
+  for (const parent of rollupById.values()) {
+    for (const childId of parent.childIds) {
+      if (!hierarchyIds.has(childId)) continue;
+      add({
+        kind: "contains",
+        fromId: parent.id,
+        toId: childId,
+        fromTitle: parent.title,
+        toTitle: titleFor(childId),
+        directed: true
+      });
+    }
+  }
+
+  // Work dependencyIds are authoritative even when a legacy store has not
+  // materialized a matching graph edge yet. Keep external dependencies visible
+  // in X-Ray rather than silently hiding them from the hierarchy pane.
+  for (const node of rollupById.values()) {
+    const work = workById.get(node.id);
+    if (!work) continue;
+    for (const dependencyId of work.dependencyIds) {
+      add({
+        kind: "depends_on",
+        fromId: node.id,
+        toId: dependencyId,
+        fromTitle: node.title,
+        toTitle: titleFor(dependencyId),
+        directed: true
+      });
+    }
+  }
+
+  // Include actual graph edges touching this detail scope, including edges to
+  // work outside the containment tree. That makes the pane a relationship
+  // view, not a second copy of the tree.
+  for (const edge of graphEdges) {
+    if (edge.fromType !== "work" || edge.toType !== "work") continue;
+    if (!hierarchyIds.has(edge.fromId) && !hierarchyIds.has(edge.toId)) continue;
+    add({
+      kind: edge.kind,
+      fromId: edge.fromId,
+      toId: edge.toId,
+      fromTitle: titleFor(edge.fromId),
+      toTitle: titleFor(edge.toId),
+      directed: edge.directed
+    });
+  }
+
+  return relations;
+}
+
+function taskDetailHierarchy(
+  body: RepoRollupView,
+  workId: string,
+  workItems: readonly WorkItem[],
+  graphEdges: readonly GraphEdge[]
+): RepoTaskDetailHierarchy | undefined {
+  const root = body.flatRows.find((node) => node.id === workId);
+  if (!root || root.childIds.length === 0) return undefined;
+  const byId = new Map(body.flatRows.map((node) => [node.id, node]));
+  const nodes: RollupNodeView[] = [];
+  const seen = new Set<string>();
+  const visit = (id: string): void => {
+    if (seen.has(id)) return;
+    seen.add(id);
+    const node = byId.get(id);
+    if (!node) return;
+    nodes.push(node);
+    for (const childId of node.childIds) visit(childId);
+  };
+  for (const childId of root.childIds) visit(childId);
+  return { root, nodes, relations: taskDetailRelations(root, nodes, workItems, graphEdges) };
 }
 
 function latestCloseoutSummary(
@@ -725,6 +930,15 @@ export async function loadRepoTaskDetail(
   }
   const byId = new Map<string, WorkItem>(graph.items.map((item) => [item.meta.id, item]));
   const reservationsByWorkId = activeReservationViewsByWorkId(graph.reservations, new Date(generatedAt), preferredReservationIds(graph.items));
+  const rollup = buildRepoRollupView({
+    workspaceRoot,
+    generatedAt,
+    projectName: basename(workspaceRoot) || workspaceRoot,
+    work: graph.items,
+    graphEdges: graph.graphEdges,
+    reservationsByWorkId,
+    actionsForWork: (work) => rollupActionsForWork(workspaceRoot, work, reservationsByWorkId.get(work.meta.id))
+  });
   const reservation = reservationsByWorkId.get(target.meta.id);
   const closeout = await readRepoTaskCloseoutRecords(workspaceRoot, target.meta.id);
   const view = toWorkItemView({
@@ -777,7 +991,18 @@ export async function loadRepoTaskDetail(
       })
     );
   }
-  return buildTuiEnvelope({ surface: "repo", workspaceRoot, generatedAt, body: { work: view, dependencyTitles, blockerTitles, actions } });
+  return buildTuiEnvelope({
+    surface: "repo",
+    workspaceRoot,
+    generatedAt,
+    body: {
+      work: view,
+      dependencyTitles,
+      blockerTitles,
+      actions,
+      hierarchy: taskDetailHierarchy(rollup, target.meta.id, graph.items, graph.graphEdges)
+    }
+  });
 }
 
 // ---------------------------------------------------------------------------

@@ -1,10 +1,10 @@
 import { describe, expect, it } from "vitest";
 import { createElement } from "../../apps/tui/node_modules/react/index.js";
 import { renderToString } from "../../apps/tui/node_modules/ink/build/index.js";
-import type { TuiCommandDescriptor, WorkItemView } from "@boreal/ui-model";
-import { cellWidth } from "../../apps/tui/src/theme.js";
+import type { RollupNodeView, TuiCommandDescriptor, WorkItemView } from "@boreal/ui-model";
+import { cellWidth, setColorMode } from "../../apps/tui/src/theme.js";
 import { CommandConfirmPanel, commandPanelMaxScroll, commandPreviewLines } from "../../apps/tui/src/command-panel.js";
-import { TaskDetailRoute, taskDetailMaxScroll } from "../../apps/tui/src/routes/task-detail.js";
+import { TaskDetailRoute, taskDetailMaxScroll, visibleTaskDetailRows } from "../../apps/tui/src/routes/task-detail.js";
 import { SprintBoardRoute } from "../../apps/tui/src/routes/sprint-board.js";
 import { GlobalOverviewRoute } from "../../apps/tui/src/routes/global-overview.js";
 import { GlobalProjectsRoute } from "../../apps/tui/src/routes/global-projects.js";
@@ -16,6 +16,36 @@ function work(input: Partial<WorkItemView> = {}): WorkItemView {
 
 function detail(): Parameters<typeof TaskDetailRoute>[0]["body"] {
   return { work: work({ description: Array.from({ length: 20 }, (_, i) => `description line ${i}`).join("\n"), acceptanceCriteria: Array.from({ length: 12 }, (_, i) => `criterion ${i}`) }), dependencyTitles: ["dependency with a very long title that must wrap and remain reachable"], actions: [] };
+}
+
+function treeNode(id: string, kind: RollupNodeView["kind"], title: string, childIds: readonly string[], depth: number, parentId?: string): RollupNodeView {
+  return {
+    id,
+    entity: { kind: kind === "milestone" ? "milestone" : kind === "sprint" ? "sprint" : "task", id, workspaceRoot: "/repo", label: title },
+    kind,
+    title,
+    workStatus: "ready",
+    depth,
+    parentId,
+    childIds,
+    expandedByDefault: false,
+    progress: { total: 1, done: 0, open: 1, cancelled: 0, percentDone: 0 },
+    blockerSummary: { activeBlockerCount: 0, blockedDescendantCount: 0, blockerIds: [] },
+    labels: [],
+    stale: false,
+    actions: []
+  };
+}
+
+function hierarchyDetail(): Parameters<typeof TaskDetailRoute>[0]["body"] {
+  const taskNode = treeNode("task-1", "task", "Task One", [], 3, "sprint-1");
+  const sprintNode = treeNode("sprint-1", "sprint", "Sprint One", [taskNode.id], 2, "milestone-1");
+  const root = treeNode("milestone-1", "milestone", "Milestone One", [sprintNode.id], 1);
+  return {
+    ...detail(),
+    work: work({ id: root.id, kind: "milestone", title: root.title, description: "Milestone description" }),
+    hierarchy: { root, nodes: [sprintNode, taskNode] }
+  };
 }
 
 function lines(output: string): string[] {
@@ -38,6 +68,109 @@ describe("rendered terminal layout bounds", () => {
     const offset = taskDetailMaxScroll(body, width, height);
     const output = renderToString(createElement(TaskDetailRoute, { body, width, height, selectedActionIndex: 0, scrollOffset: offset }), { columns: width, rows: height });
     expect(output).toContain("criterion 11");
+  });
+
+  it("keeps milestone prose beside a disclosure tree and reveals nested work on expansion", () => {
+    const body = hierarchyDetail();
+    expect(visibleTaskDetailRows(body.hierarchy!, new Set()).map((row) => row.node.id)).toEqual(["sprint-1"]);
+    expect(visibleTaskDetailRows(body.hierarchy!, new Set(["sprint-1"])).map((row) => row.node.id)).toEqual(["sprint-1", "task-1"]);
+
+    const output = renderToString(createElement(TaskDetailRoute, {
+      body,
+      width: 103,
+      height: 24,
+      selectedActionIndex: 0,
+      treeCursor: 0,
+      expandedIds: new Set(["sprint-1"]),
+      focus: "scope"
+    }), { columns: 103, rows: 24 });
+    expect(output).toContain("CHILD WORK");
+    expect(output).toContain("PgUp/PgDn");
+    expect(output).toContain("Sprint One");
+    expect(output).toContain("Task One");
+    expect(lines(output).length).toBeLessThanOrEqual(24);
+    expect(Math.max(...lines(output).map(cellWidth))).toBeLessThanOrEqual(103);
+  });
+
+  it("renders the focus contract across bottom layout, XRay, filtering, and pane modes", () => {
+    const body = hierarchyDetail();
+    const bottom = renderToString(createElement(TaskDetailRoute, {
+      body,
+      width: 103,
+      height: 24,
+      selectedActionIndex: 0,
+      expandedIds: new Set(["sprint-1"]),
+      focus: "scope",
+      layoutMode: "bottom"
+    }), { columns: 103, rows: 24 });
+    expect(bottom).toContain("DETAILS");
+    expect(bottom).toContain("CHILD WORK · FOCUS");
+
+    const xray = renderToString(createElement(TaskDetailRoute, {
+      body,
+      width: 103,
+      height: 24,
+      selectedActionIndex: 0,
+      expandedIds: new Set(["sprint-1"]),
+      focus: "scope",
+      panel: "xray"
+    }), { columns: 103, rows: 24 });
+    expect(xray).toContain("X-RAY · FOCUS");
+    expect(xray).toContain("contains SP Sprint One");
+
+    const filtered = renderToString(createElement(TaskDetailRoute, {
+      body,
+      width: 103,
+      height: 24,
+      selectedActionIndex: 0,
+      expandedIds: new Set(["sprint-1"]),
+      focus: "scope",
+      filterQuery: "task one"
+    }), { columns: 103, rows: 24 });
+    expect(filtered).toContain("filter");
+    expect(filtered).toContain("Task One");
+
+    const maximized = renderToString(createElement(TaskDetailRoute, {
+      body,
+      width: 103,
+      height: 24,
+      selectedActionIndex: 0,
+      expandedIds: new Set(["sprint-1"]),
+      focus: "scope",
+      maximized: "scope"
+    }), { columns: 103, rows: 24 });
+    expect(maximized).toContain("CHILD WORK · FOCUS");
+    expect(maximized).not.toContain("DETAILS ·");
+
+    const hidden = renderToString(createElement(TaskDetailRoute, {
+      body,
+      width: 103,
+      height: 24,
+      selectedActionIndex: 0,
+      focus: "actions",
+      paneVisible: false
+    }), { columns: 103, rows: 24 });
+    expect(hidden).toContain("DETAILS · FOCUS");
+    expect(hidden).not.toContain("CHILD WORK");
+  });
+
+  it("keeps the focused row discoverable without color", () => {
+    const body = hierarchyDetail();
+    setColorMode("none");
+    try {
+      const output = renderToString(createElement(TaskDetailRoute, {
+        body,
+        width: 103,
+        height: 24,
+        selectedActionIndex: 0,
+        expandedIds: new Set(["sprint-1"]),
+        focus: "scope"
+      }), { columns: 103, rows: 24 });
+      expect(output).toContain("CHILD WORK · FOCUS");
+      expect(output).toContain("▸");
+    } finally {
+      setColorMode("color");
+    }
   });
 
   it("renders closeout information for completed work", () => {

@@ -229,6 +229,10 @@ describe("repo route loaders: direct store read", () => {
     expect(envelope.body.summary.tasks).toBe(1);
     const milestoneNode = envelope.body.flatRows.find((node) => node.id === milestone.meta.id);
     expect(milestoneNode?.childIds).toEqual([task.meta.id]);
+
+    const detail = await loadRepoTaskDetail(rootDir, milestone.meta.id, "milestone");
+    expect(detail?.body.hierarchy?.root.id).toBe(milestone.meta.id);
+    expect(detail?.body.hierarchy?.nodes.map((node) => node.id)).toEqual([task.meta.id]);
   });
 
   it("loadRepoTaskDetail fetches a single work item on demand and returns undefined for unknown ids", async () => {

@@ -1,11 +1,12 @@
 #!/usr/bin/env node
 import { execFile } from "node:child_process";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { tmpdir } from "node:os";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 
-import { packNpmPackage } from "./smoke-npm-package.mjs";
+import { packageUpgradeRelease } from "./package-upgrade-release.mjs";
 
 const execFileAsync = promisify(execFile);
 const repoRoot = fileURLToPath(new URL("..", import.meta.url));
@@ -16,7 +17,7 @@ const tappedFormulaName = `${tapName}/boreal-work`;
 async function main() {
   const args = process.argv.slice(2);
   const keepInstalled = args.includes("--keep-installed");
-  const packed = await packNpmPackage();
+  const packed = await prepareLocalRelease();
   await assertFormulaVersion(packed.version);
 
   const wasInstalled = await commandSucceeds("brew", ["list", "--formula", "boreal-work"]);
@@ -52,7 +53,7 @@ async function main() {
       throw new Error(`Unexpected Homebrew bwrk version probe. Expected ${JSON.stringify(expected)}, got ${JSON.stringify(version.stdout)}`);
     }
     await run("brew", ["test", tappedFormulaName], { cwd: repoRoot, env });
-    process.stdout.write(`Homebrew formula installed and tested from ${packed.tarballPath}\n`);
+    process.stdout.write("Homebrew formula installed and tested from " + packed.archivePath + "\n");
     process.stdout.write(`sha256: ${packed.sha256}\n`);
     process.stdout.write(`Smoke: ${version.stdout.trim()}\n`);
   } finally {
@@ -62,7 +63,24 @@ async function main() {
     if (tapCreated) {
       await run("brew", ["untap", tapName], { cwd: repoRoot, env });
     }
+    await rm(packed.workRoot, { recursive: true, force: true });
   }
+}
+
+async function prepareLocalRelease() {
+  const workRoot = await mkdtemp(join(tmpdir(), "boreal-brew-release-"));
+  const dist = join(workRoot, "dist");
+  const out = join(workRoot, "out");
+  await run(process.execPath, [join(repoRoot, "tools", "build-cli-dist.mjs")], {
+    cwd: repoRoot,
+    env: {
+      ...process.env,
+      BOREAL_INSTALL_CHANNEL: "brew",
+      BOREAL_BUILD_DIST_SNAPSHOT_DIR: dist
+    }
+  });
+  const packed = await packageUpgradeRelease({ dist, out });
+  return { ...packed, workRoot };
 }
 
 async function assertFormulaVersion(version) {
@@ -73,10 +91,10 @@ async function assertFormulaVersion(version) {
 }
 
 async function writeLocalFormulaCopy(targetPath, packed) {
-  const remoteUrl = `https://registry.npmjs.org/@boreal/cli/-/cli-${packed.version}.tgz`;
+  const remoteUrl = "https://github.com/mattrichmo/boreal-work/releases/download/v" + packed.version + "/bwrk-upgrade.tar.gz";
   const text = await readFile(formulaPath, "utf8");
   const localText = text
-    .replace(`url "${remoteUrl}"`, `url "${pathToFileURL(packed.tarballPath).href}"`)
+    .replace(`url "${remoteUrl}"`, `url "${pathToFileURL(packed.archivePath).href}"`)
     .replace(/sha256 "[a-f0-9]{64}"/u, `sha256 "${packed.sha256}"`);
   await mkdir(join(targetPath, ".."), { recursive: true });
   await writeFile(targetPath, localText, "utf8");

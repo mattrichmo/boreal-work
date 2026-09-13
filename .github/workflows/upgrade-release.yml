@@ -2,8 +2,8 @@ name: upgrade release
 
 on:
   push:
-    branches:
-      - main
+    tags:
+      - "v*"
   workflow_dispatch:
 
 concurrency:
@@ -15,7 +15,6 @@ permissions:
 
 jobs:
   build:
-    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -28,6 +27,16 @@ jobs:
       - run: corepack enable
       - run: pnpm install --frozen-lockfile
       - run: pnpm build
+        env:
+          BOREAL_INSTALL_CHANNEL: github
+      - name: Verify release tag
+        shell: bash
+        run: |
+          version="$(node -p 'require("./package.json").version')"
+          if [ "$GITHUB_EVENT_NAME" = "push" ] && [ "$GITHUB_REF_NAME" != "v$version" ]; then
+            echo "Release tag $GITHUB_REF_NAME does not match package version $version" >&2
+            exit 1
+          fi
       - run: node node_modules/vitest/vitest.mjs run tests/runtime/update-release.test.ts tests/runtime/update-install.test.ts tests/runtime/upgrade-command.test.ts tests/tools/package-upgrade-release.test.ts
       - run: node tools/package-upgrade-release.mjs --out .boreal/release
       - uses: actions/upload-artifact@v4
@@ -77,11 +86,12 @@ jobs:
         with:
           name: upgrade-release
           path: .boreal/release
-      - name: Publish complete commit release
+      - name: Publish GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          tag="upgrade-${GITHUB_SHA}"
+          version="$(node -p 'require("./package.json").version')"
+          tag="v$version"
           if existing_draft="$(gh release view "$tag" --json isDraft --jq .isDraft 2>/dev/null)"; then
             if [ "$existing_draft" = "true" ]; then
               gh release upload "$tag" .boreal/release/bwrk-upgrade.tar.gz .boreal/release/SHA256SUMS .boreal/release/bwrk-release.json --clobber
@@ -96,8 +106,8 @@ jobs:
             .boreal/release/SHA256SUMS \
             .boreal/release/bwrk-release.json \
             --target "$GITHUB_SHA" \
-            --title "Boreal upgrade ${GITHUB_SHA}" \
-            --notes "Immutable upgrade artifact for commit ${GITHUB_SHA}." \
+            --title "Boreal ${tag}" \
+            --notes "Verified Boreal release bundle for ${tag}." \
             --draft \
             --latest=false
           gh release edit "$tag" --draft=false --latest=true

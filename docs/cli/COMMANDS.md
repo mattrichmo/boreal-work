@@ -595,7 +595,7 @@ Options:
 - `--web`: open the browser console instead of the terminal dashboard.
 - `--global`: scope to every registered project instead of the current repo.
 - `--json`: print the bounded data payload instead of launching a UI.
-- `--mouse`: terminal dashboard mouse wheel (off by default; enabling it disables the terminal's native text selection).
+- `--mouse`: terminal dashboard mouse wheel and pane-focus clicks (off by default; enabling it disables the terminal's native text selection).
 - `--tui`: deprecated and ignored; the terminal dashboard is now the default.
 - `--refresh-ms`: terminal dashboard auto-refresh interval in milliseconds. Defaults to `30000`.
 - `--host`: browser console (`--web`) bind address. Defaults to `127.0.0.1`.
@@ -605,7 +605,7 @@ Options:
 - `--live-cache-ttl-ms`: browser console (`--web`) live data cache TTL between route clicks. Defaults to `60000`.
 - `--allow-fixture-fallback`: browser console (`--web`) renders deterministic fixture data with warnings if live data fails. Without this flag, live data failures return an error.
 
-Terminal dashboard interaction: `s` opens the sprint picker on Sprint Board, `f` cycles the route's status filter, `d` toggles the sprint scope view, `/` opens fuzzy search, and `?` opens help. Use `PgUp`/`PgDn` or `g`/`G` to scroll task detail. Automatic refresh defaults to 30 seconds and is completion based; `r` requests an immediate refresh. Overlapping refreshes are coalesced and repeated failures use bounded backoff.
+Terminal dashboard interaction: `s` opens the sprint picker on Sprint Board, `f` cycles the route's status filter (on Now it opens a milestone/sprint scope picker), `d` toggles the sprint scope view, `/` opens fuzzy search (or filters child work when the child-work pane is focused), `:` opens the command palette, and `?` opens help. The Milestones route is an expandable tree: `Space` or the arrow keys fold/expand a milestone, sprint, or task, while `Enter` opens the selected item. In task detail, `Tab` or a mouse click focuses the details/tree pane; `Space` folds a branch, `p` hides the child-work pane, `e` maximizes the focused pane, `P` switches right/bottom layout, `x` toggles dependency XRay, `v` marks the current child, `V` marks all visible children, and `b` opens batch actions. `F` freezes/resumes automatic refresh, while `T` cycles color, high-contrast, terminal-default, no-color, and light modes. Use `PgUp`/`PgDn` or `g`/`G` to scroll the focused surface. Automatic refresh defaults to 30 seconds and is completion based; `r` requests an immediate refresh. Overlapping refreshes are coalesced and repeated failures use bounded backoff.
 
 ## `view`
 
@@ -2090,7 +2090,7 @@ bwrk upgrade [--machine|--project] [--ref <tag>] [--source] [--repo-url <url>] [
 
 Updates the machine CLI to the latest published release, then refreshes the current initialized project's assets using the installed binary. A failed machine update does not touch project assets. Outside a project, only the machine installation is updated. Use `--machine` or `--project` to select one scope. `--skip-skills` skips skill installation while still updating project storage/toolchain assets. Dry-run checks the release and previews project changes using the current process without executing a new binary. `bwrk update self` and `bwrk update repo` remain advanced equivalents.
 
-Release artifacts are built and smoke-tested in `.github/workflows/upgrade-release.yml`, then published under a commit-specific tag. The default updater follows GitHub's latest published release. Existing source-building CLI installations need one upgrade to receive this updater; publishing the first release is required before the download-based path is usable.
+Release artifacts are built and smoke-tested in `.github/workflows/upgrade-release.yml`, then published under matching `v<version>` tags. The default updater follows GitHub's latest published release. The curl installer and Homebrew tap use the same verified bundle, so fresh users do not need Git, pnpm, Corepack, or npm. Existing source-building CLI installations need one upgrade to receive this updater; publishing the first release is required before the download-based path is usable.
 
 ## `ledger status`
 

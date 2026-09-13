@@ -1,4 +1,4 @@
-export const INSTALL_CHANNELS = ["source", "npm", "brew"] as const;
+export const INSTALL_CHANNELS = ["source", "github", "npm", "brew"] as const;
 
 export type InstallChannel = (typeof INSTALL_CHANNELS)[number];
 
@@ -37,6 +37,12 @@ export function detectInstallChannel(options: InstallChannelDetectionOptions = {
 
 export function installUpgradeStatus(channel: InstallChannel): InstallUpgradeStatus {
   switch (channel) {
+    case "github":
+      return {
+        channel,
+        command: "bwrk upgrade --machine",
+        guidance: "Upgrade the machine binary from the latest verified GitHub Release."
+      };
     case "brew":
       return {
         channel,
@@ -59,7 +65,7 @@ export function installUpgradeStatus(channel: InstallChannel): InstallUpgradeSta
 }
 
 export function normalizeInstallChannel(value: string | undefined): InstallChannel | undefined {
-  if (value === "source" || value === "npm" || value === "brew") {
+  if (value === "source" || value === "github" || value === "npm" || value === "brew") {
     return value;
   }
   return undefined;

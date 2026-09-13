@@ -45,13 +45,14 @@ export async function prepareNpmPackage(options = {}) {
     await rm(snapshotDistDir, { recursive: true, force: true });
   }
   await cp(join(repoRoot, "README.md"), join(outDir, "README.md"));
+  await cp(join(repoRoot, "LICENSE"), join(outDir, "LICENSE"));
 
   const packageJson = {
     name: requiredString(cliPackage.name, "CLI package name"),
     version,
     description: stringField(rootPackage.description) ?? "Boreal Work CLI.",
     type: "module",
-    license: stringField(rootPackage.license) ?? "UNLICENSED",
+    license: "SEE LICENSE IN LICENSE",
     bin: {
       bwrk: "dist/index.js"
     },

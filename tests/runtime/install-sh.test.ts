@@ -1,7 +1,8 @@
 import { execFile, spawn } from "node:child_process";
-import { access, chmod, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { access, chmod, cp, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { delimiter, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 
@@ -58,8 +59,8 @@ describe("install.sh", () => {
     const second = await runInstall(fixture, ["--machine", "--yes"]);
     const version = await runExternal(join(fixture.binDir, "bwrk"), ["--version"], fixture.cwd, fixtureEnv(fixture));
 
-    expect(first.exitCode).toBe(0);
-    expect(second.exitCode).toBe(0);
+    expect(first.exitCode, first.stderr || first.stdout).toBe(0);
+    expect(second.exitCode, second.stderr || second.stdout).toBe(0);
     expect(first.stdout).toContain("Machine install complete; skipped global manager prompts.");
     expect(second.stdout).toContain("Machine install complete; skipped global manager prompts.");
     expect(version).toEqual(expect.objectContaining({ exitCode: 0, stdout: "boreal-work 0.1.0 (npm)\n" }));
@@ -77,8 +78,8 @@ describe("install.sh", () => {
     const second = await runInstall(fixture, ["--yes"]);
     const registry = await readRegistry(fixture.registryRoot);
 
-    expect(first.exitCode).toBe(0);
-    expect(second.exitCode).toBe(0);
+    expect(first.exitCode, first.stderr || first.stdout).toBe(0);
+    expect(second.exitCode, second.stderr || second.stdout).toBe(0);
     expect(first.stdout).toContain("Global manager registry already exists");
     expect(first.stdout).toContain("Linked current repo to global manager registry");
     expect(second.stdout).toContain("Linked current repo to global manager registry");
@@ -98,8 +99,8 @@ describe("install.sh", () => {
       readonly devDependencies?: Record<string, string>;
     };
 
-    expect(first.exitCode).toBe(0);
-    expect(second.exitCode).toBe(0);
+    expect(first.exitCode, first.stderr || first.stdout).toBe(0);
+    expect(second.exitCode, second.stderr || second.stdout).toBe(0);
     expect(first.stdout).toContain("Global manager registry not found; repo install did not create global state.");
     expect(version.exitCode).toBe(0);
     expect(version.stdout).toContain("boreal-work 0.1.0 (npm)");
@@ -118,7 +119,7 @@ describe("install.sh", () => {
     const linkedRun = await runInstall(linked, ["--repo", "--yes"]);
     const linkedRegistry = await readRegistry(linked.registryRoot);
 
-    expect(linkedRun.exitCode).toBe(0);
+    expect(linkedRun.exitCode, linkedRun.stderr || linkedRun.stdout).toBe(0);
     expect(linkedRun.stdout).toContain("Linked current repo to global manager registry");
     expect(linkedRegistry.entries).toHaveLength(1);
     expect(linkedRegistry.entries[0]?.bwrkPin).toEqual(
@@ -146,14 +147,14 @@ describe("install.sh", () => {
     expect(await exists(skipped.libDir)).toBe(false);
   }, 60_000);
 
-  it("honors non-interactive global overrides without creating global bootstrap state", async () => {
+  it("honors non-interactive global overrides and creates global bootstrap state", async () => {
     const globalRequested = await makeFixture("boreal-install-global-flag-");
     const requested = await runInstall(globalRequested, ["--global", "--yes"]);
 
     expect(requested.exitCode).toBe(0);
-    expect(requested.stdout).toContain("Global manager first-run bootstrap is not implemented by install.sh yet");
+    expect(requested.stdout).toContain("Global manager ready:");
     expect(await exists(join(globalRequested.binDir, "bwrk"))).toBe(true);
-    expect(await exists(registryFile(globalRequested.registryRoot))).toBe(false);
+    expect(await exists(registryFile(globalRequested.registryRoot))).toBe(true);
 
     const globalSkipped = await makeFixture("boreal-install-no-global-");
     await writePackageJson(globalSkipped.cwd);
@@ -175,7 +176,7 @@ describe("install.sh", () => {
     await writePackageJson(fixture.cwd);
     const stubs = await makeStdinBootstrapStubs(fixture);
 
-    const installed = await runInstallFromStdin(fixture, ["--machine", "--yes", "--repo-url", "fixture://boreal"], {
+    const installed = await runInstallFromStdin(fixture, ["--from-github", "--machine", "--yes", "--repo-url", "fixture://boreal"], {
       PATH: `${stubs.binDir}:${process.env.PATH ?? ""}`,
       BOREAL_INSTALL_DIST_DIR: "",
       BOREAL_TEST_INSTALL_SCRIPT: installScript,
@@ -187,6 +188,26 @@ describe("install.sh", () => {
     expect(await exists(join(fixture.binDir, "bwrk"))).toBe(true);
     const version = await runExternal(join(fixture.binDir, "bwrk"), ["--version"], fixture.cwd, fixtureEnv(fixture));
     expect(version).toEqual(expect.objectContaining({ exitCode: 0, stdout: "boreal-work 0.1.0 (stdin-fixture)\n" }));
+  }, 30_000);
+
+  it("bootstraps stdin installs from the verified GitHub release without git or pnpm", async () => {
+    const fixture = await makeFixture("boreal-install-stdin-release-");
+    const stubs = await makeReleaseBootstrapStubs(fixture);
+
+    const installed = await runInstallFromStdin(fixture, ["--machine", "--yes", "--repo-url", "https://github.com/fixture/boreal-work.git"], {
+      PATH: [stubs.binDir, process.env.PATH ?? ""].join(delimiter),
+      BOREAL_INSTALL_DIST_DIR: "",
+      BOREAL_TEST_RELEASE_API: stubs.apiPath,
+      BOREAL_TEST_RELEASE_MANIFEST: stubs.manifestPath,
+      BOREAL_TEST_RELEASE_CHECKSUMS: stubs.checksumsPath,
+      BOREAL_TEST_RELEASE_ARCHIVE: stubs.archivePath
+    });
+
+    expect(installed.exitCode, installed.stderr).toBe(0);
+    expect(installed.stdout).toContain("Installing Boreal v0.1.0");
+    expect(installed.stdout).toContain("Installed bwrk machine binary");
+    const version = await runExternal(join(fixture.binDir, "bwrk"), ["--version"], fixture.cwd, fixtureEnv(fixture));
+    expect(version).toEqual(expect.objectContaining({ exitCode: 0, stdout: "boreal-work 0.1.0 (release-fixture)\n" }));
   }, 30_000);
 });
 
@@ -304,6 +325,92 @@ async function makeStdinBootstrapStubs(fixture: InstallFixture): Promise<{ reado
   return { binDir, distPath };
 }
 
+async function makeReleaseBootstrapStubs(fixture: InstallFixture): Promise<{
+  readonly binDir: string;
+  readonly apiPath: string;
+  readonly manifestPath: string;
+  readonly checksumsPath: string;
+  readonly archivePath: string;
+}> {
+  const binDir = join(fixture.root, "release-bootstrap-stubs");
+  const payloadRoot = join(fixture.root, "release-payload");
+  const distRoot = join(payloadRoot, "apps", "cli", "dist");
+  const apiPath = join(fixture.root, "release-api.json");
+  const manifestPath = join(fixture.root, "release-manifest.json");
+  const checksumsPath = join(fixture.root, "release-SHA256SUMS");
+  const archivePath = join(fixture.root, "bwrk-upgrade.tar.gz");
+  await mkdir(binDir, { recursive: true });
+  await mkdir(distRoot, { recursive: true });
+  await writeFile(
+    join(distRoot, "index.js"),
+    "#!/usr/bin/env node\nconst args = process.argv.slice(2);\nif (args.includes(\"--json\")) { console.log(JSON.stringify({ ok: true, data: { name: \"boreal-work\", version: \"0.1.0\", installChannel: \"release-fixture\", build: { buildSha: \"release-fixture\" } } })); } else if (args.includes(\"--version\")) { console.log(\"boreal-work 0.1.0 (release-fixture)\"); }\n",
+    "utf8"
+  );
+  await cp(installScript, join(payloadRoot, "install.sh"));
+  await execFileAsync("tar", ["-czf", archivePath, "-C", payloadRoot, "apps/cli/dist", "install.sh"]);
+  const sha256 = createHash("sha256").update(await readFile(archivePath)).digest("hex");
+  await writeFile(
+    manifestPath,
+    JSON.stringify({
+      schemaVersion: "boreal.upgrade.release.v1",
+      buildSha: "release-fixture",
+      artifactDigest: "sha256:" + "a".repeat(64),
+      version: "0.1.0",
+      archive: "bwrk-upgrade.tar.gz",
+      sha256
+    }) + "\n",
+    "utf8"
+  );
+  await writeFile(checksumsPath, sha256 + "  bwrk-upgrade.tar.gz\n", "utf8");
+  await writeFile(
+    apiPath,
+    JSON.stringify({
+      tag_name: "v0.1.0",
+      draft: false,
+      prerelease: false,
+      assets: [
+        { name: "bwrk-upgrade.tar.gz" },
+        { name: "bwrk-release.json" },
+        { name: "SHA256SUMS" }
+      ]
+    }) + "\n",
+    "utf8"
+  );
+  await writeFile(
+    join(binDir, "curl"),
+    [
+      "#!/usr/bin/env bash",
+      "set -euo pipefail",
+      "destination=\"\"",
+      "url=\"\"",
+      "next_is_destination=false",
+      "for arg in \"$@\"; do",
+      "  if [ \"$next_is_destination\" = true ]; then destination=\"$arg\"; next_is_destination=false; continue; fi",
+      "  case \"$arg\" in",
+      "    -o) next_is_destination=true ;;",
+      "    http*) url=\"$arg\" ;;",
+      "  esac",
+      "done",
+      "case \"$url\" in",
+      "  *api.github.com*) cp \"$BOREAL_TEST_RELEASE_API\" \"$destination\" ;;",
+      "  *bwrk-release.json) cp \"$BOREAL_TEST_RELEASE_MANIFEST\" \"$destination\" ;;",
+      "  *SHA256SUMS) cp \"$BOREAL_TEST_RELEASE_CHECKSUMS\" \"$destination\" ;;",
+      "  *bwrk-upgrade.tar.gz) cp \"$BOREAL_TEST_RELEASE_ARCHIVE\" \"$destination\" ;;",
+      "  *) echo \"unexpected curl URL: $url\" >&2; exit 1 ;;",
+      "esac",
+      ""
+    ].join("\n"),
+    "utf8"
+  );
+  await chmod(join(binDir, "curl"), 0o755);
+  for (const command of ["git", "pnpm"]) {
+    const path = join(binDir, command);
+    await writeFile(path, "#!/usr/bin/env bash\nexit 99\n", "utf8");
+    await chmod(path, 0o755);
+  }
+  return { binDir, apiPath, manifestPath, checksumsPath, archivePath };
+}
+
 async function runExternal(
   command: string,
   args: readonly string[],
@@ -343,6 +450,7 @@ function fixtureEnv(fixture: InstallFixture): NodeJS.ProcessEnv {
     BOREAL_INSTALL_DIST_DIR: installDistDir,
     BOREAL_PROJECT_REGISTRY_ROOT: fixture.registryRoot,
     PNPM_HOME: join(fixture.root, "pnpm-home"),
+    COREPACK_HOME: join(fixture.root, "corepack-home"),
     XDG_DATA_HOME: join(fixture.root, "xdg-data"),
     XDG_CACHE_HOME: join(fixture.root, "xdg-cache"),
     npm_config_cache: join(fixture.root, "npm-cache")

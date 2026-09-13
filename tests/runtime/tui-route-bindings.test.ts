@@ -63,7 +63,11 @@ describe("route bindings: footer hints come from the same specs the dispatcher u
     const taskDetailSpecs = bindingsForRoute("repo.taskDetail");
     expect(rollupSpecs.some((spec) => spec.action === "filter")).toBe(true);
     expect(taskDetailSpecs.some((spec) => spec.action === "filter")).toBe(false);
+    expect(taskDetailSpecs.some((spec) => spec.action === "toggleDisclosure")).toBe(true);
+    expect(taskDetailSpecs.some((spec) => spec.action === "toggleFocus")).toBe(true);
     expect(bindingsForRoute("repo.work").some((spec) => spec.action === "filter")).toBe(true);
+    expect(bindingsForRoute("repo.now").some((spec) => spec.action === "filter")).toBe(true);
+    expect(bindingsForRoute("repo.milestones").some((spec) => spec.action === "toggleDisclosure")).toBe(true);
   });
 
   it("resolves the same action the footer hint advertises", () => {
@@ -72,15 +76,32 @@ describe("route bindings: footer hints come from the same specs the dispatcher u
     expect(hints.some((hint) => hint.keys === "f" && hint.label === "filter")).toBe(true);
     expect(hints).toContainEqual({ keys: "space", label: "fold" });
     expect(hints).toContainEqual({ keys: "→/l", label: "expand" });
-    expect(hints).toContainEqual({ keys: "←/h", label: "collapse" });
+    expect(hints).toContainEqual({ keys: "←", label: "section rail" });
+    expect(hints).toContainEqual({ keys: "h", label: "collapse" });
     expect(hints).toContainEqual({ keys: "a", label: "ready" });
     expect(resolveRouteAction(specs, "f", key())).toBe("filter");
     expect(resolveRouteAction(specs, "", key({ return: true }))).toBe("drill");
     expect(resolveRouteAction(specs, " ", key())).toBe("toggleDisclosure");
     expect(resolveRouteAction(specs, "", key({ rightArrow: true }))).toBe("expand");
-    expect(resolveRouteAction(specs, "", key({ leftArrow: true }))).toBe("collapse");
+    expect(resolveRouteAction(specs, "", key({ leftArrow: true }))).toBe("focusRail");
     expect(resolveRouteAction(specs, "a", key())).toBe("ready");
     expect(resolveRouteAction(specs, "5", key())).toBe("numberKey:5");
+
+    const taskDetailSpecs = bindingsForRoute("repo.taskDetail");
+    expect(routeFooterHints(taskDetailSpecs)).toContainEqual({ keys: "space", label: "fold" });
+    expect(routeFooterHints(taskDetailSpecs)).toContainEqual({ keys: "tab", label: "focus" });
+    expect(resolveRouteAction(taskDetailSpecs, " ", key())).toBe("toggleDisclosure");
+    expect(resolveRouteAction(taskDetailSpecs, "", key({ tab: true }))).toBe("toggleFocus");
+    expect(resolveRouteAction(taskDetailSpecs, "p", key())).toBe("togglePreview");
+    expect(resolveRouteAction(taskDetailSpecs, "e", key())).toBe("toggleMaximize");
+    expect(resolveRouteAction(taskDetailSpecs, "P", key())).toBe("toggleLayout");
+    expect(resolveRouteAction(taskDetailSpecs, "x", key())).toBe("toggleXray");
+    expect(resolveRouteAction(taskDetailSpecs, "v", key())).toBe("toggleSelect");
+    expect(resolveRouteAction(taskDetailSpecs, "V", key())).toBe("selectAll");
+    expect(resolveRouteAction(taskDetailSpecs, "b", key())).toBe("batch");
+    expect(resolveRouteAction(taskDetailSpecs, ":", key())).toBe("commandPalette");
+    expect(resolveRouteAction(taskDetailSpecs, "F", key())).toBe("toggleLive");
+    expect(resolveRouteAction(taskDetailSpecs, "T", key())).toBe("theme");
   });
 
   it("advertises the overview finding drill that the shell handles", () => {

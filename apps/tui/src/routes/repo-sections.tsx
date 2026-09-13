@@ -1,7 +1,7 @@
 import { Box, Text } from "ink";
 
 import type { TuiFilterState, RollupNodeView } from "@boreal/ui-model";
-import type { RepoMilestonesBody, RepoNowBody, RepoOpsBody, RepoSprintBoardBody, RepoWorkBody } from "../loaders.js";
+import type { RepoMilestoneTree, RepoMilestonesBody, RepoNowBody, RepoNowRow, RepoOpsBody, RepoSprintBoardBody, RepoWorkBody } from "../loaders.js";
 import { displayStatusColor, displayStatusForNode, displayStatusGlyph, displayStatusLabel } from "../status-display.js";
 import { sprintTitleLabel } from "./sprint-board.js";
 import { COLOR, fit } from "../theme.js";
@@ -138,23 +138,78 @@ function nowGroupTone(lane: "in flight" | "attention" | "next"): string {
   return lane === "attention" ? COLOR.warn : lane === "in flight" ? COLOR.accentSoft : COLOR.accent;
 }
 
-export function RepoNowRoute({ body, cursor, height, width }: {
+export function nowScopeFilterLabel(body: RepoNowBody, filters?: TuiFilterState): string | undefined {
+  const value = filters?.clauses.find((clause) => clause.field === "nowScope")?.value;
+  if (!value || value === "all") return value ? "all milestones and sprints" : undefined;
+  const scope = (body.scopes ?? []).find((candidate) => candidate.kind + ":" + candidate.id === value);
+  return scope ? scope.kind + ": " + scope.title : "scope: " + value;
+}
+
+export function visibleNowRows(body: RepoNowBody, filters?: TuiFilterState): readonly RepoNowRow[] {
+  const value = filters?.clauses.find((clause) => clause.field === "nowScope")?.value;
+  if (!value || value === "all") return body.rows;
+  return (body.allRows ?? body.rows).filter((row) => [
+    row.milestoneId ? "milestone:" + row.milestoneId : undefined,
+    row.sprintId ? "sprint:" + row.sprintId : undefined
+  ].filter((candidate): candidate is string => Boolean(candidate)).includes(value));
+}
+
+export interface RepoMilestoneTreeRow {
+  readonly node: RollupNodeView;
+  readonly depth: number;
+  readonly expanded: boolean;
+}
+
+function milestoneRowsForTree(tree: RepoMilestoneTree, expandedIds: ReadonlySet<string>): readonly RepoMilestoneTreeRow[] {
+  const byId = new Map<string, RollupNodeView>([
+    [tree.root.id, tree.root],
+    ...tree.nodes.map((node) => [node.id, node] as const)
+  ]);
+  const rows: RepoMilestoneTreeRow[] = [];
+  const seen = new Set<string>();
+  const visit = (node: RollupNodeView, depth: number): void => {
+    if (seen.has(node.id)) return;
+    seen.add(node.id);
+    const expanded = node.childIds.length > 0 && expandedIds.has(node.id);
+    rows.push({ node, depth, expanded });
+    if (expanded) {
+      for (const childId of node.childIds) {
+        const child = byId.get(childId);
+        if (child) visit(child, depth + 1);
+      }
+    }
+  };
+  visit(tree.root, 0);
+  return rows;
+}
+
+export function visibleMilestoneRows(body: RepoMilestonesBody, expandedIds: ReadonlySet<string> = new Set()): readonly RepoMilestoneTreeRow[] {
+  if (body.trees && body.trees.length > 0) return body.trees.flatMap((tree) => milestoneRowsForTree(tree, expandedIds));
+  return body.milestones.map((node) => ({ node, depth: 0, expanded: false }));
+}
+
+export function RepoNowRoute({ body, cursor, height, width, filters }: {
   readonly body: RepoNowBody;
   readonly cursor: number;
   readonly height: number;
   readonly width: number;
+  readonly filters?: TuiFilterState;
 }) {
   const current = body.currentSprint;
-  const rows = body.rows;
+  const rows = visibleNowRows(body, filters);
+  const workingCount = rows.filter((row) => row.lane === "in flight").length;
+  const attentionCount = rows.filter((row) => row.lane === "attention").length;
+  const nextCount = rows.filter((row) => row.lane === "next").length;
   const groups = (["in flight", "attention", "next"] as const)
     .map((lane) => ({
       lane,
       rows: rows.filter((row) => row.lane === lane),
-      total: lane === "in flight" ? body.workingCount : lane === "attention" ? body.attentionCount : body.nextCount
+      total: lane === "in flight" ? workingCount : lane === "attention" ? attentionCount : nextCount
     }))
     .filter((group) => group.rows.length > 0);
   const columns = repoTableColumns(width, 20);
-  const summary = `OPEN ${body.summary.open} · IN FLIGHT ${body.workingCount} · BLOCKED ${body.summary.blocked} · VERIFY ${body.summary.needsVerification}`;
+  const scopeLabel = nowScopeFilterLabel(body, filters);
+  const summary = "OPEN " + rows.length + " · IN FLIGHT " + workingCount + " · ATTENTION " + attentionCount + " · NEXT " + nextCount;
   const headerLines = 5;
   const groupHeight = groups.length > 0
     ? Math.max(2, Math.floor(Math.max(2, height - headerLines - groups.length) / groups.length))
@@ -162,13 +217,13 @@ export function RepoNowRoute({ body, cursor, height, width }: {
   let offset = 0;
   return (
     <Box flexDirection="column" width={width} height={height} overflow="hidden">
-      <Text color={COLOR.faint} bold wrap="truncate">CURRENT SPRINT</Text>
+      <Text color={COLOR.faint} bold wrap="truncate">NOW {scopeLabel ? "· " + scopeLabel : "· all milestones and sprints"}</Text>
       <Text color={COLOR.text} wrap="truncate">
         {current ? `${sprintTitleLabel(current.view.title)} · ${current.scopeCount} scoped items${current.active ? " · active" : ""} · ${displayStatusLabel(sprintDisplayStatus(current))}` : "No active sprint selected · press 4 for Sprints"}
       </Text>
       {current ? <Text color={COLOR.faint} wrap="truncate">{fit(`ID ${current.view.id} · ${progressText(current.doneCount ?? 0, current.scopeCount, 7)}`, width)}</Text> : null}
       <Text color={COLOR.muted} wrap="truncate">{fit(summary, width)}</Text>
-      <Text color={COLOR.faint} wrap="truncate">QUEUE · {rows.length} surfaced{body.overflowCount > 0 ? ` · ${body.overflowCount} more in Work` : ""} · Enter opens work</Text>
+      <Text color={COLOR.faint} wrap="truncate">{fit("QUEUE · " + rows.length + " surfaced" + (body.overflowCount > 0 ? " · " + body.overflowCount + " more in Work" : "") + " · Enter opens work · f scope · : commands", width)}</Text>
       {groups.length === 0 ? <Text color={COLOR.muted}>No active, blocked, or ready work to surface.</Text> : null}
       {groups.map((group) => {
         const start = offset;
@@ -193,11 +248,12 @@ export function RepoNowRoute({ body, cursor, height, width }: {
   );
 }
 
-export function RepoMilestonesRoute({ body, cursor, height, width }: {
+export function RepoMilestonesRoute({ body, cursor, height, width, expandedIds = new Set<string>() }: {
   readonly body: RepoMilestonesBody;
   readonly cursor: number;
   readonly height: number;
   readonly width: number;
+  readonly expandedIds?: ReadonlySet<string>;
 }) {
   const milestoneStatuses = body.milestones.map(displayStatusForNode);
   const completeCount = milestoneStatuses.filter((status) => status === "complete").length;
@@ -215,33 +271,39 @@ export function RepoMilestonesRoute({ body, cursor, height, width }: {
       nodes: body.milestones.filter((node) => milestoneGroupKey(displayStatusForNode(node)) === key)
     }))
     .filter((group) => group.nodes.length > 0);
-  const rowsFor = (nodes: readonly RollupNodeView[]): readonly TableRow[] => nodes.map((node) => {
+  const treeById = new Map((body.trees ?? []).map((tree) => [tree.root.id, tree]));
+  const rowsFor = (rows: readonly RepoMilestoneTreeRow[]): readonly TableRow[] => rows.map(({ node, depth, expanded }) => {
     const state = nodeState(node);
     const displayStatus = displayStatusForNode(node);
     return {
       key: node.id,
       cells: [
         { text: state.text, color: state.color },
-        { text: node.title, color: COLOR.text },
+        { text: "  ".repeat(depth) + (node.childIds.length > 0 ? expanded ? "▼ " : "▶ " : "  ") + typeLabel(node.kind) + " " + node.title, color: COLOR.text },
         { text: progressText(node.progress.done, node.progress.total), color: progressColor(displayStatus), bold: false },
         { text: String(node.blockerSummary.activeBlockerCount), color: node.blockerSummary.activeBlockerCount > 0 ? COLOR.warn : COLOR.faint }
       ]
     };
   });
+  const rowsByGroup = (nodes: readonly RollupNodeView[]): readonly RepoMilestoneTreeRow[] => nodes.flatMap((root) => {
+    const tree = treeById.get(root.id);
+    return tree ? milestoneRowsForTree(tree, expandedIds) : [{ node: root, depth: 0, expanded: false }];
+  });
   const warningLines = (body.warnings ?? []).slice(0, 1);
-  const available = Math.max(1, height - 1 - warningLines.length - grouped.length);
-  const groupHeights = milestoneGroupHeights(grouped.map((group) => group.nodes.length), available);
+  const visibleGroups = grouped.map((group) => ({ ...group, rows: rowsByGroup(group.nodes) }));
+  const available = Math.max(1, height - 1 - warningLines.length - visibleGroups.length);
+  const groupHeights = milestoneGroupHeights(visibleGroups.map((group) => group.rows.length), available);
   let offset = 0;
   return (
     <Box flexDirection="column" width={width} height={height} overflow="hidden">
-      <Text color={COLOR.faint} wrap="truncate">MILESTONES · {body.milestones.length} top-level · {activeCount} active · {blockedCount} blocked · {completeCount} complete · Enter opens detail</Text>
+      <Text color={COLOR.faint} wrap="truncate">MILESTONES · {body.milestones.length} top-level · {activeCount} active · {blockedCount} blocked · {completeCount} complete · Enter detail · Space fold</Text>
       {warningLines.map((warning) => <Text key={warning} color={COLOR.warn} wrap="truncate">{fit(`⚠ ${warning}`, width)}</Text>)}
-      {grouped.map((group, groupIndex) => {
+      {visibleGroups.map((group, groupIndex) => {
         const start = offset;
-        offset += group.nodes.length;
+        offset += group.rows.length;
         return <Box key={group.key} flexDirection="column">
-          <Text color={group.key === "blocked" ? COLOR.danger : group.key === "complete" ? COLOR.accent : COLOR.muted} bold wrap="truncate">{milestoneGroupTitle(group.key, group.nodes.length)}</Text>
-          <Table columns={columns} rows={rowsFor(group.nodes)} cursor={cursor - start} height={groupHeights[groupIndex] ?? 1} width={width} emptyLabel="No milestones in this group." />
+          <Text color={group.key === "blocked" ? COLOR.danger : group.key === "complete" ? COLOR.accent : COLOR.muted} bold wrap="truncate">{milestoneGroupTitle(group.key, group.nodes.length) + (group.rows.length > group.nodes.length ? " · " + (group.rows.length - group.nodes.length) + " child work visible" : "")}</Text>
+          <Table columns={columns} rows={rowsFor(group.rows)} cursor={cursor - start} height={groupHeights[groupIndex] ?? 1} width={width} emptyLabel="No milestones in this group." />
         </Box>;
       })}
       {grouped.length === 0 ? <Text color={COLOR.muted}>No top-level milestones. Create one with bwrk work create --kind milestone.</Text> : null}

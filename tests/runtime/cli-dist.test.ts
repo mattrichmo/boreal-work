@@ -117,6 +117,15 @@ describe("bundled bwrk dist", () => {
     expect(installDiagnostic?.details?.upgrade).toEqual(expect.objectContaining({ channel: "npm" }));
   }, 20_000);
 
+  it("labels the GitHub release bundle with the GitHub upgrade channel", async () => {
+    const githubDist = await buildCliDist("github");
+    const version = await runBundle(join(githubDist, "index.js"), await makeTempDir("boreal-cli-github-workspace-"), ["--version", "--json"]);
+    const payload = parseData<{ readonly installChannel: string }>(version.stdout);
+
+    expect(version.exitCode).toBe(0);
+    expect(payload.installChannel).toBe("github");
+  }, 20_000);
+
   it("bundles the terminal dashboard and guards non-TTY launches from a bare install", async () => {
     const bundleRoot = await makeTempDir("boreal-cli-tui-bundle-");
     const workspaceRoot = await makeTempDir("boreal-cli-tui-workspace-");
@@ -432,7 +441,7 @@ async function makeTempDir(prefix: string): Promise<string> {
   return dir;
 }
 
-async function buildCliDist(channel: "npm" | "brew", lifetime: "test" | "suite" = "test"): Promise<string> {
+async function buildCliDist(channel: "github" | "npm" | "brew", lifetime: "test" | "suite" = "test"): Promise<string> {
   const snapshotRoot = await mkdtemp(join(tmpdir(), `boreal-cli-dist-${channel}-`));
   (lifetime === "suite" ? suiteTempDirs : tempDirs).push(snapshotRoot);
   const snapshotDist = join(snapshotRoot, "dist");

@@ -909,7 +909,7 @@ export const COMMAND_DEFINITIONS: readonly CommandDefinition[] = [
       "Opens the Boreal dashboard for the current workspace. By default it runs the live terminal dashboard (no server, no browser). Pass --web for the browser console (binds 127.0.0.1:4318 and opens a browser), --global to scope to every registered project, and --json for the bounded data payload. Surface (--web) and scope (--global) are independent.",
     flags: [
       flag("web", "boolean", "Open the browser console instead of the terminal dashboard."),
-      flag("mouse", "boolean", "Terminal dashboard: enable mouse wheel (disables native text selection)."),
+      flag("mouse", "boolean", "Terminal dashboard: enable mouse wheel and pane-focus clicks (disables native text selection)."),
       flag("tui", "boolean", "Deprecated and ignored: the terminal dashboard is now the default."),
       flag("refresh-ms", "value", "Terminal dashboard auto-refresh interval in ms. Defaults to 5000."),
       flag("registry-root", "value", "Global dashboard registry root override."),
@@ -933,7 +933,7 @@ export const COMMAND_DEFINITIONS: readonly CommandDefinition[] = [
       "The simple dashboard entry point. It opens the current project by default; add --global for every linked project and --web for the browser console. `bwrk dashboard` remains a compatibility alias.",
     flags: [
       flag("web", "boolean", "Open the browser console instead of the terminal dashboard."),
-      flag("mouse", "boolean", "Terminal dashboard: enable mouse wheel (disables native text selection)."),
+      flag("mouse", "boolean", "Terminal dashboard: enable mouse wheel and pane-focus clicks (disables native text selection)."),
       flag("refresh-ms", "value", "Terminal dashboard auto-refresh interval in ms. Defaults to 5000."),
       flag("registry-root", "value", "Global dashboard registry root override."),
       flag("host", "value", "Browser console (--web) bind host. Defaults to 127.0.0.1."),
@@ -974,7 +974,7 @@ export const COMMAND_DEFINITIONS: readonly CommandDefinition[] = [
       "The machine-level global workspace. With no subcommand it opens the cross-repo dashboard (terminal by default; --web for the browser, --json for the data payload). `bwrk global next` ranks one next directive per linked project from the rollup cache. `bwrk global status` summarizes linked projects read-only. `bwrk global work ...` (and any `bwrk global <command>`) runs that command against the global workspace. `bwrk global link <path>` links a project to be tracked; `bwrk global unlink <project-id>` removes it.",
     flags: [
       flag("web", "boolean", "Open the browser console instead of the terminal dashboard."),
-      flag("mouse", "boolean", "Terminal dashboard: enable mouse wheel (disables native text selection)."),
+      flag("mouse", "boolean", "Terminal dashboard: enable mouse wheel and pane-focus clicks (disables native text selection)."),
       flag("refresh-ms", "value", "Terminal dashboard auto-refresh interval in ms. Defaults to 5000."),
       flag("host", "value", "Browser console (--web) bind host. Defaults to 127.0.0.1."),
       flag("port", "value", "Browser console (--web) bind port. Defaults to 4318."),

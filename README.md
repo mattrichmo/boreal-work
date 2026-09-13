@@ -43,14 +43,24 @@ Boreal works for a single repository and a single operator, but the same records
 
 ## Quick start
 
-For the released CLI, you need Git, Node.js 22 or newer, and pnpm or Corepack. If you are working on Boreal itself, start with the [contributor guide](CONTRIBUTING.md).
+For the released CLI, you need Node.js 22 or newer. Git and pnpm/Corepack are only needed when developing Boreal from source. If you are working on Boreal itself, start with the [contributor guide](CONTRIBUTING.md).
 
 ### 1. Install the machine CLI
+
+Install the latest verified GitHub release:
 
 ~~~bash
 curl -fsSL https://raw.githubusercontent.com/mattrichmo/boreal-work/main/install.sh \
   | bash -s -- --machine --yes
 
+bwrk --version
+~~~
+
+On macOS, the Homebrew tap is an equivalent managed install:
+
+~~~bash
+brew tap mattrichmo/boreal
+brew install boreal-work
 bwrk --version
 ~~~
 
@@ -88,7 +98,7 @@ pnpm build
 ./install.sh --machine --yes
 ~~~
 
-For an already-installed machine CLI, <code>bwrk upgrade --machine</code> fetches and builds the configured upstream Git ref. The advanced equivalents are <code>bwrk update self</code> and <code>bwrk update repo</code>. None of these commands package the current working tree.
+For an already-installed machine CLI, <code>bwrk upgrade --machine</code> downloads and verifies the latest published GitHub release. The advanced equivalents are <code>bwrk update self</code> and <code>bwrk update repo</code>. None of these commands package the current working tree.
 
 Preview project setup before writing:
 

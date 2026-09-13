@@ -43,7 +43,7 @@ jobs:
           tests/runtime/long-running-runs.test.ts
           tests/runtime/work-template.test.ts
           --reporter=dot
-      - name: Pack, install, and probe the private UNLICENSED artifact
+      - name: Pack, install, and probe the bundled package artifact
         run: node tools/smoke-npm-package.mjs --json
       - name: Verify documentation and package boundaries
         run: node tools/audit-release-boundary.mjs --json

@@ -31,11 +31,11 @@ describe("release boundary audit", () => {
     expect(result.secrets.findingCount).toBe(0);
     expect(result.dependencies.scannedPackageCount).toBeGreaterThan(0);
     expect(result.dependencies.issueCount).toBe(0);
-    expect(result.licenseState).toMatchObject({ classification: "private-unlicensed", changedByAudit: false });
+    expect(result.licenseState).toMatchObject({ classification: "declared", changedByAudit: false });
     expect(result.repositoryBoundary).toMatchObject({
       blockedTrackedFileCount: 0,
       packageBoundaryOk: true,
-      publicRepositoryRequiresTrackerSanitization: true
+      publicRepositoryRequiresTrackerSanitization: false
     });
   });
 });

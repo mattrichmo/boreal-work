@@ -47,6 +47,15 @@ describe("active TUI shell interaction", () => {
     try {
     await vi.waitFor(() => expect(output).toContain("Now"));
     output = "";
+    stdin.write("\u001b[D\u001b[D");
+    await vi.waitFor(() => expect(output).toContain("▶ 1 Now"));
+    expect(output).not.toContain("press again to quit");
+    output = "";
+    stdin.write("\u001b[B");
+    await vi.waitFor(() => expect(output).toContain("▶ 2 Roll-Up"));
+    stdin.write("\u001b[C");
+    await settle();
+    output = "";
     stdin.write("4");
     await vi.waitFor(() => expect(output).toContain("Sprint One"));
     output = "";
