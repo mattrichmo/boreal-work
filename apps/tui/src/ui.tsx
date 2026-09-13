@@ -166,7 +166,7 @@ export function Table({
               const cell = item.cells[columnIndex];
               return (
                 <Box key={columnIndex} width={fittedWidth} marginLeft={columnIndex === visibleColumns[0]?.index ? 0 : columnGap}>
-                  <Text color={cell?.color ?? COLOR.text} bold={cell?.bold || selected}>
+                  <Text color={cell?.color ?? COLOR.text} bold={cell?.bold ?? selected}>
                     {fit(cell?.text ?? "", fittedWidth, column.align)}
                   </Text>
                 </Box>
@@ -227,7 +227,7 @@ export interface SectionRailLayout {
 
 export function sectionRailLayout(availableWidth: number): SectionRailLayout {
   const width = Math.max(1, Math.floor(availableWidth));
-  if (width >= 80) return { width: 13, compact: false };
+  if (width >= 80) return { width: 16, compact: false };
   if (width >= 56) return { width: 9, compact: true };
   if (width >= 48) return { width: 5, compact: true };
   return { width: 0, compact: true };
@@ -252,7 +252,7 @@ export function SectionRail({
         const isActive = section.id === active;
         const marker = isActive ? "▍ " : "  ";
         const name = section.label === "Sprint Board" ? "Sprints" : section.label;
-        const label = layout.compact && layout.width < 8 ? `${marker}${section.key}` : `${marker}${name} ${section.key}`;
+        const label = layout.width < 8 ? `${marker}${section.key}` : layout.compact ? `${marker}${section.key} ${name}` : `${marker}${name} ${section.key}`;
         return (
           <Text key={section.id} color={isActive ? COLOR.accent : COLOR.muted} bold={isActive}>
             {fit(label, layout.width)}

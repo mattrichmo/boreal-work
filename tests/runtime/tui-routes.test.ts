@@ -20,6 +20,7 @@ import {
 } from "../../apps/tui/src/routes/task-detail.js";
 import { globalRouteState, globalStatusLabels } from "../../apps/tui/src/routes/global-overview.js";
 import { fullQueueStatusLabel } from "../../apps/tui/src/routes/global-queues.js";
+import { displayStatusForNode } from "../../apps/tui/src/status-display.js";
 import type { RepoSprintBoardBody } from "../../apps/tui/src/loaders.js";
 
 const actor = { id: "tui-route-test", kind: "agent" as const };
@@ -42,7 +43,7 @@ function view(input: Partial<WorkItemView> = {}): WorkItemView {
   };
 }
 
-function work(input: { readonly id: string; readonly title: string; readonly kind: WorkItem["kind"]; readonly parentId?: string }): WorkItem {
+function work(input: { readonly id: string; readonly title: string; readonly kind: WorkItem["kind"]; readonly parentId?: string; readonly status?: WorkItem["status"] }): WorkItem {
   return {
     meta: {
       id: input.id as WorkItem["meta"]["id"],
@@ -57,7 +58,7 @@ function work(input: { readonly id: string; readonly title: string; readonly kin
     kind: input.kind,
     title: input.title,
     description: "",
-    status: "draft",
+    status: input.status ?? "draft",
     priority: "normal",
     acceptanceCriteria: [],
     labels: [],
@@ -92,6 +93,9 @@ describe("route-local project/global UX helpers", () => {
     expect(visibleRollupRows(body, undefined, expanded).map((node) => node.id)).toEqual([milestone.meta.id, task.meta.id]);
     expect(rollupNodeCanOpen(milestoneNode)).toBe(true);
     expect(fullRollupStatusLabel("needs_verification")).toBe("needs verification");
+    expect(fullRollupStatusLabel("closed")).toBe("complete");
+    expect(fullTaskStatusLabel("closed")).toBe("complete");
+    expect(fullSprintStatusLabel("closed")).toBe("complete");
   });
 
   it("keeps a selected sprint inside a bounded selector window", () => {
@@ -107,6 +111,15 @@ describe("route-local project/global UX helpers", () => {
     expect(selected).toHaveLength(3);
     expect(selected.some((sprint) => sprint.view.id === body.selectedSprintId)).toBe(true);
     expect(fullSprintStatusLabel("in_progress")).toBe("in progress");
+  });
+
+  it("derives container status from descendant work", () => {
+    expect(displayStatusForNode({
+      workStatus: "closed",
+      childIds: ["bw_task_status"],
+      progress: { total: 1, done: 0, open: 1, cancelled: 0, percentDone: 0 },
+      blockerSummary: { activeBlockerCount: 0, blockedDescendantCount: 0, blockerIds: [] }
+    })).toBe("in_progress");
   });
 
   it("bounds detail text without splitting emoji and makes reservation actions honest", () => {

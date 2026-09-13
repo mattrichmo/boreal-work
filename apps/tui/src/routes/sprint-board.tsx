@@ -9,6 +9,7 @@ export function sprintFilterLabel(filters?: TuiFilterState): string {
   return filters?.query ?? "open";
 }
 export function fullSprintStatusLabel(status: string): string { return statusLabel(status); }
+export function sprintTitleLabel(title: string): string { return title.startsWith("Sprint: ") ? title.slice("Sprint: ".length) : title; }
 export function compactStatusLabel(status: string): string {
   return ({ needs_verification: "verify", in_progress: "working" } as Record<string, string>)[status] ?? statusLabel(status);
 }
@@ -22,7 +23,7 @@ export function visibleSprintRows(body: RepoSprintBoardBody, filters?: TuiFilter
     return filter === "all" || (filter === "open"
       ? !terminal
       : filter === "complete"
-        ? item.status === "verified"
+        ? item.status === "closed" || item.status === "verified"
         : filter === "closed"
           ? item.status === "closed"
           : item.status === filter);
@@ -52,16 +53,20 @@ export function SprintBoardRoute({ body, cursor, height, width, filters }: {
   const scope = filters?.clauses.find((clause) => clause.field === "scope")?.value ?? "all";
   const dependencies = new Set(body.dependencyWorkIds ?? []);
   const all = body.board?.lanes.flatMap((lane) => lane.items) ?? [];
-  const headerLines = Math.min(3, Math.max(1, budget - 2));
+  const headerLines = Math.min(4, Math.max(1, budget - 2));
+  const viewCount = sprintFilterLabel(filters) === "all"
+    ? `${items.length} work items`
+    : `${items.length} ${sprintFilterLabel(filters).replaceAll("_", " ")} / ${all.length} total`;
   const columns: TableColumn[] = [
     { header: "state", width: 10, minWidth: 7, priority: 1 },
     { header: "work", width: Math.max(10, width - 32), minWidth: 10, priority: 0 },
     { header: "context", width: 17, minWidth: 9, priority: 2 }
   ];
   return <Box flexDirection="column" width={width} height={budget} overflow="hidden">
-    <Text bold color={COLOR.text} wrap="truncate">{fit(`Sprint: ${body.board?.sprint.title ?? "Unavailable"}${body.selectedSprintId === body.activeSprintId ? " · active" : ""}  [s change]`, width)}</Text>
-    {headerLines >= 2 ? <Text color={COLOR.muted} wrap="truncate">{fit(`View: ${sprintFilterLabel(filters).replaceAll("_", " ")} · ${items.length}/${all.length} work items · ${body.board?.summary.activeBlockerCount ?? 0} blockers`, width)}</Text> : null}
-    {headerLines >= 3 ? <Text color={COLOR.faint} wrap="truncate">{fit(`Scope: ${scope} · ${body.assignedWorkIds?.length ?? 0} assigned + ${dependencies.size} dependencies · d scope`, width)}</Text> : null}
+    <Text bold color={COLOR.text} wrap="truncate">{fit(`Sprint: ${sprintTitleLabel(body.board?.sprint.title ?? "Unavailable")}${body.selectedSprintId === body.activeSprintId ? " · active" : ""}  [s change]`, width)}</Text>
+    {headerLines >= 2 ? <Text color={COLOR.accent} wrap="truncate">{fit(`ID ${body.board?.sprint.id ?? body.selectedSprintId ?? "—"}`, width)}</Text> : null}
+    {headerLines >= 3 ? <Text color={COLOR.muted} wrap="truncate">{fit(`View: ${viewCount} · ${body.board?.summary.activeBlockerCount ?? 0} blockers`, width)}</Text> : null}
+    {headerLines >= 4 ? <Text color={COLOR.faint} wrap="truncate">{fit(`Scope: ${scope} · ${body.assignedWorkIds?.length ?? 0} assigned + ${dependencies.size} dependencies · d scope`, width)}</Text> : null}
     <Table columns={columns} rows={items.map((item) => ({ key: item.id, cells: [
       { text: `${statusGlyph(item.status)} ${compactStatusLabel(item.status)}`, color: statusColor(item.status) },
       { text: `${dependencies.has(item.id) ? "↳ " : ""}${item.title}`, color: COLOR.text },

@@ -18,7 +18,7 @@ export function FreshnessLine({ generatedAt, label, filter, error, stale, warnin
 
 export function HelpView({ width, height, hints, workspace, scrollOffset, diagnostics }: { readonly width: number; readonly height: number; readonly hints: readonly { readonly keys: string; readonly label: string }[]; readonly workspace: string; readonly scrollOffset: number; readonly diagnostics: readonly string[] }) {
   const lines = [
-    "↑↓/jk move · Enter open or confirm · Space fold/collapse",
+    "↑↓/jk move · Enter open or confirm · Space expand/collapse",
     "←/→ fold one level · PgUp/PgDn scroll · g/G top/bottom",
     "f filters · / search · r refresh · q or Ctrl-C twice quits",
     ...hints.map((hint) => `${hint.keys}  ${hint.label}`),

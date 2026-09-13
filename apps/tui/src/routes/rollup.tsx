@@ -1,7 +1,8 @@
 import { Box, Text } from "ink";
 
 import type { RepoRollupView, RollupNodeView, TuiFilterState } from "@boreal/ui-model";
-import { COLOR, statusColor } from "../theme.js";
+import { displayStatusColor, displayStatusForNode, displayStatusGlyph, displayStatusLabel } from "../status-display.js";
+import { COLOR } from "../theme.js";
 import { Table, type TableColumn, type TableRow } from "../ui.js";
 
 export type RollupDisclosureState = ReadonlySet<string>;
@@ -89,6 +90,17 @@ export function visibleRollupRows(
   return visibleRows(body.root, byId, filters, expandedIds, matches, hasVisibilityFilter(filters, mode));
 }
 
+/** Roll-Up is a hierarchy browser. Keep root-level ungrouped task/issue rows
+ * out of this view so milestones and sprints remain the first-class structure;
+ * those loose items are still fully available from the Work section. */
+export function visibleRollupStructureRows(
+  body: RepoRollupView,
+  filters?: TuiFilterState,
+  expandedIds?: RollupDisclosureState
+): readonly RollupNodeView[] {
+  return visibleRollupRows(body, filters, expandedIds).filter((node) => !(node.depth === 1 && node.childIds.length === 0));
+}
+
 function visibleRows(
   root: RollupNodeView,
   byId: ReadonlyMap<string, RollupNodeView>,
@@ -162,6 +174,7 @@ export function fullRollupStatusLabel(status: string | undefined): string {
     needs_verification: "needs verification",
     reserved: "reserved",
     verified: "complete",
+    closed: "complete",
     cancelled: "cancelled"
   }[status] ?? status.replaceAll("_", " ");
 }
@@ -172,8 +185,8 @@ function rollupTypeLabel(kind: RollupNodeView["kind"]): string {
 
 function rollupStatusLabel(status: string | undefined): string {
   if (!status) return "—";
-  const icon = { ready: "○", in_progress: "●", reserved: "◉", needs_verification: "◇", blocked: "!", verified: "✓", closed: "■", cancelled: "×" }[status] ?? "·";
-  const label = status === "needs_verification" ? "verify" : status === "in_progress" ? "working" : fullRollupStatusLabel(status);
+  const icon = displayStatusGlyph(status);
+  const label = status === "needs_verification" ? "verify" : status === "in_progress" ? "working" : displayStatusLabel(status);
   return `${icon} ${label}`;
 }
 
@@ -210,8 +223,8 @@ export function RepoRollupRoute({
   /** Route-local disclosure state owned by the shell. */
   readonly expandedIds?: RollupDisclosureState;
 }) {
-  const rows = visibleRollupRows(body, filters, expandedIds);
-  const byId = new Map(body.flatRows.map((node) => [node.id, node]));
+  const rows = visibleRollupStructureRows(body, filters, expandedIds);
+  const ungroupedCount = body.flatRows.filter((node) => node.depth === 1 && node.childIds.length === 0 && (node.kind === "task" || node.kind === "issue")).length;
   const readyCount = body.flatRows.filter((node) => node.childIds.length === 0 && node.workStatus === "ready").length;
   // Keep the identity column as the last column to compress. Table's fitting
   // logic can then hide secondary metrics on small terminals rather than
@@ -225,14 +238,13 @@ export function RepoRollupRoute({
   ];
   const tableRows: readonly TableRow[] = rows.map((node): TableRow => {
     const indent = node.depth > 1 ? "│ ".repeat(node.depth - 1) : "";
-    const hiddenDescendants = hiddenRollupDescendantCount(node, byId, expandedIds);
-    const disclosure = node.childIds.length === 0 ? "  " : isRollupNodeExpanded(node, expandedIds) ? "▾ " : "▸ ";
-    const context = hiddenDescendants > 0 ? ` · ${hiddenDescendants} hidden` : "";
+    const disclosure = node.childIds.length === 0 ? "  " : isRollupNodeExpanded(node, expandedIds) ? "▼ " : "▶ ";
+    const displayStatus = displayStatusForNode(node);
     return {
       key: node.id,
       cells: [
-        { text: `${indent}${disclosure}${rollupTypeLabel(node.kind)} ${node.title}${context}`, color: COLOR.text },
-        { text: rollupStatusLabel(node.workStatus), color: node.workStatus ? statusColor(node.workStatus) : COLOR.faint },
+        { text: `${indent}${disclosure}${rollupTypeLabel(node.kind)} ${node.title}`, color: COLOR.text },
+        { text: rollupStatusLabel(displayStatus), color: displayStatus ? displayStatusColor(displayStatus) : COLOR.faint },
         { text: `${node.progress.done}/${node.progress.total}`, color: COLOR.muted },
         { text: String(node.blockerSummary.activeBlockerCount), color: node.blockerSummary.activeBlockerCount > 0 ? COLOR.warn : COLOR.faint }
       ]
@@ -241,7 +253,7 @@ export function RepoRollupRoute({
   return (
     <Box flexDirection="column" width={width} height={height} overflow="hidden">
       <Text color={COLOR.faint} wrap="truncate">
-        {`ROLL-UP · READY ${readyCount} · ${pluralize(body.summary.milestones, "milestone")} · ${pluralize(body.summary.sprints, "sprint")} · ${pluralize(body.summary.tasks, "task")} · ${body.summary.blocked} blocked status · ${pluralize(body.summary.cancelled, "cancelled item")}`}
+        {`ROLL-UP · structure · READY ${readyCount} · ${pluralize(body.summary.milestones, "milestone")} · ${pluralize(body.summary.sprints, "sprint")} · ${pluralize(body.summary.tasks, "task")} · ${body.summary.blocked} blocked · ${ungroupedCount} ungrouped in Work`}
       </Text>
       <Table columns={columns} rows={tableRows} cursor={cursor} height={Math.max(0, height - 1)} width={width} emptyLabel="No work in this repo yet. Create work with bwrk work create." />
     </Box>
@@ -249,7 +261,7 @@ export function RepoRollupRoute({
 }
 
 /** Row lookup helper for the shell's drill/action dispatch. Uses the same
- * `visibleRollupRows` list the table renders, so the cursor length the shell
+ * structure-filtered list the table renders, so the cursor length the shell
  * computes and the rows actually on screen never drift apart. */
 export function rollupRowAt(
   body: RepoRollupView,
@@ -257,7 +269,7 @@ export function rollupRowAt(
   filters?: TuiFilterState,
   expandedIds?: RollupDisclosureState
 ): RollupNodeView | undefined {
-  return visibleRollupRows(body, filters, expandedIds)[index];
+  return visibleRollupStructureRows(body, filters, expandedIds)[index];
 }
 
 export const ROLLUP_FILTER_CYCLE: readonly (TuiFilterState | undefined)[] = [

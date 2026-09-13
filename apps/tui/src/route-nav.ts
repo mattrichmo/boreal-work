@@ -93,7 +93,7 @@ export function reduceRouteNav(state: RouteNavState, action: RouteNavAction): Ro
     case "openRepo": {
       const initialEntity: TuiEntityRef | undefined = action.target.initialEntity;
       const repoFrame: TuiNavFrame = {
-        routeId: action.target.initialRoute ?? "repo.rollup",
+        routeId: action.target.initialRoute ?? "repo.now",
         title: initialEntity?.label ?? action.target.projectName,
         cursor: 0,
         entity: initialEntity

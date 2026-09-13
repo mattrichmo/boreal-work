@@ -18,7 +18,9 @@ import {
   type GlobalWorkQueuesView,
   type ProjectRegistryView,
   type ProjectRegistryEntry,
+  type RepoRollupSummary,
   type RepoRollupView,
+  type RollupNodeView,
   type SprintBoardView,
   type TuiCommandDescriptor,
   type TuiEnvelope,
@@ -32,6 +34,7 @@ import {
 import type { AgentSummaryRecord, WorkItem } from "@boreal/core";
 
 import { activeReservationViewsByWorkId, readRepoTaskCloseoutRecords, readRepoWorkGraph, reservationViewFrom } from "./repo-store.js";
+import { displayStatusForNode } from "./status-display.js";
 
 const execFileAsync = promisify(execFile);
 const DASHBOARD_GLOBAL_SCHEMA_VERSION = "boreal.cli.dashboard.global.v1";
@@ -378,9 +381,185 @@ export async function loadRepoRollup(workspaceRoot: string): Promise<TuiEnvelope
   return buildTuiEnvelope({ surface: "repo", workspaceRoot, generatedAt, body, warnings });
 }
 
+export type RepoNowLane = "in flight" | "attention" | "next";
+
+export interface RepoNowRow {
+  readonly id: string;
+  readonly lane: RepoNowLane;
+  readonly node: RollupNodeView;
+}
+
+export interface RepoNowBody {
+  readonly currentSprint?: RepoSprintRow;
+  readonly rows: readonly RepoNowRow[];
+  readonly overflowCount: number;
+  readonly workingCount: number;
+  readonly attentionCount: number;
+  readonly nextCount: number;
+  readonly summary: RepoRollupSummary;
+}
+
+function leafWorkNodes(body: RepoRollupView): readonly RollupNodeView[] {
+  return body.flatRows.filter((node) => node.childIds.length === 0 && (node.kind === "task" || node.kind === "issue"));
+}
+
+function nodeStatus(node: RollupNodeView): string {
+  return node.workStatus ?? "draft";
+}
+
+/** The repo landing view is deliberately a bounded operational queue, not a
+ * second hierarchy. It reuses the roll-up projection so all sections agree on
+ * status, blockers, progress, and entity identity. */
+export async function loadRepoNow(workspaceRoot: string): Promise<TuiEnvelope<RepoNowBody>> {
+  const [rollup, sprintBoard] = await Promise.all([
+    loadRepoRollup(workspaceRoot),
+    loadRepoSprintBoard(workspaceRoot)
+  ]);
+  const nodes = leafWorkNodes(rollup.body);
+  const inFlight = nodes.filter((node) => nodeStatus(node) === "in_progress" || nodeStatus(node) === "reserved");
+  const attention = nodes.filter((node) =>
+    !inFlight.includes(node) && (nodeStatus(node) === "blocked" || nodeStatus(node) === "needs_verification" || node.blockerSummary.activeBlockerCount > 0)
+  );
+  const next = nodes.filter((node) => nodeStatus(node) === "ready" && node.blockerSummary.activeBlockerCount === 0);
+  const allRows: RepoNowRow[] = [
+    ...inFlight.map((node) => ({ id: `in-flight:${node.id}`, lane: "in flight" as const, node })),
+    ...attention.map((node) => ({ id: `attention:${node.id}`, lane: "attention" as const, node })),
+    ...next.map((node) => ({ id: `next:${node.id}`, lane: "next" as const, node }))
+  ];
+  // Keep Now useful as a triage screen. Work remains the exhaustive flat
+  // queue, while Now reserves space for each operational lane.
+  const rows: RepoNowRow[] = [
+    ...allRows.filter((row) => row.lane === "in flight").slice(0, 8),
+    ...allRows.filter((row) => row.lane === "attention").slice(0, 10),
+    ...allRows.filter((row) => row.lane === "next").slice(0, 8)
+  ];
+  const currentSprint = sprintBoard.body.sprints.find((sprint) => sprint.active) ??
+    sprintBoard.body.sprints.find((sprint) => sprint.view.id === sprintBoard.body.selectedSprintId);
+  const warnings = [...new Set([...rollup.warnings, ...sprintBoard.warnings])];
+  return buildTuiEnvelope({
+    surface: "repo",
+    workspaceRoot,
+    generatedAt: rollup.generatedAt,
+    stale: rollup.stale || sprintBoard.stale,
+    warnings,
+    body: {
+      currentSprint,
+      rows,
+      overflowCount: allRows.length - rows.length,
+      workingCount: inFlight.length,
+      attentionCount: attention.length,
+      nextCount: next.length,
+      summary: rollup.body.summary
+    }
+  });
+}
+
+export interface RepoMilestonesBody {
+  readonly milestones: readonly RollupNodeView[];
+  readonly summary: RepoRollupSummary;
+  readonly warnings?: readonly string[];
+}
+
+export async function loadRepoMilestones(workspaceRoot: string): Promise<TuiEnvelope<RepoMilestonesBody>> {
+  const envelope = await loadRepoRollup(workspaceRoot);
+  const byId = new Map(envelope.body.flatRows.map((node) => [node.id, node]));
+  const milestones = envelope.body.root.childIds
+    .map((id) => byId.get(id))
+    .filter((node): node is RollupNodeView => node?.kind === "milestone")
+    .sort((left, right) => {
+      const priority = (node: RollupNodeView): number => {
+        const status = displayStatusForNode(node);
+        return status === "blocked" ? 0 : status === "in_progress" || status === "needs_verification" || status === "reserved" ? 1 : status === "ready" ? 2 : status === "complete" ? 3 : 4;
+      };
+      return priority(left) - priority(right) || left.title.localeCompare(right.title);
+    });
+  return buildTuiEnvelope({
+    surface: "repo",
+    workspaceRoot,
+    generatedAt: envelope.generatedAt,
+    stale: envelope.stale,
+    warnings: envelope.warnings,
+    body: { milestones, summary: envelope.body.summary, warnings: envelope.warnings }
+  });
+}
+
+export interface RepoWorkBody {
+  readonly items: readonly RollupNodeView[];
+  readonly summary: RepoRollupSummary;
+}
+
+export async function loadRepoWork(workspaceRoot: string): Promise<TuiEnvelope<RepoWorkBody>> {
+  const envelope = await loadRepoRollup(workspaceRoot);
+  return buildTuiEnvelope({
+    surface: "repo",
+    workspaceRoot,
+    generatedAt: envelope.generatedAt,
+    stale: envelope.stale,
+    warnings: envelope.warnings,
+    body: { items: leafWorkNodes(envelope.body), summary: envelope.body.summary }
+  });
+}
+
+export interface RepoOpsReservationRow {
+  readonly id: string;
+  readonly workId: string;
+  readonly title: string;
+  readonly agentId: string;
+  readonly status: string;
+  readonly expiresAt?: string;
+  readonly expired: boolean;
+  readonly entity?: RollupNodeView["entity"];
+}
+
+export interface RepoOpsBody {
+  readonly reservations: readonly RepoOpsReservationRow[];
+  readonly historicalReservationCount: number;
+  readonly warnings: readonly string[];
+  readonly summary: RepoRollupSummary;
+}
+
+export async function loadRepoOps(workspaceRoot: string): Promise<TuiEnvelope<RepoOpsBody>> {
+  const [rollup, graph] = await Promise.all([loadRepoRollup(workspaceRoot), readRepoWorkGraph(workspaceRoot)]);
+  const byId = new Map(graph.items.map((item) => [item.meta.id, item]));
+  const now = new Date(rollup.generatedAt);
+  const allReservations = graph.reservations
+    .map((reservation): RepoOpsReservationRow => {
+      const view = reservationViewFrom(reservation, now);
+      const work = byId.get(reservation.workId);
+      return {
+        id: reservation.meta.id,
+        workId: reservation.workId,
+        title: work?.title ?? reservation.workId,
+        agentId: String(reservation.agentId),
+        status: reservation.status === "active" && view.expired ? "expired" : reservation.status,
+        expiresAt: reservation.expiresAt,
+        expired: Boolean(view.expired),
+        entity: work ? {
+          kind: work.kind as RollupNodeView["entity"]["kind"],
+          id: work.meta.id,
+          workspaceRoot,
+          label: work.title
+        } : undefined
+      };
+    })
+    .sort((left, right) => Number(right.status === "active") - Number(left.status === "active") || left.title.localeCompare(right.title));
+  const reservations = allReservations.filter((reservation) => reservation.status === "active" || reservation.status === "expired");
+  return buildTuiEnvelope({
+    surface: "repo",
+    workspaceRoot,
+    generatedAt: rollup.generatedAt,
+    stale: rollup.stale || !graph.initialized,
+    warnings: rollup.warnings,
+    body: { reservations, historicalReservationCount: allReservations.length - reservations.length, warnings: rollup.warnings, summary: rollup.body.summary }
+  });
+}
+
 export interface RepoSprintRow {
   readonly view: WorkItemView;
   readonly scopeCount: number;
+  readonly doneCount?: number;
+  readonly openCount?: number;
+  readonly blockedCount?: number;
   readonly active: boolean;
 }
 
@@ -431,7 +610,17 @@ export async function loadRepoSprintBoard(
         reservation: reservationsByWorkId.get(sprintItem.meta.id)
       });
       const scope = computeScopeIds(sprintItem.meta.id, byId, graph.graphEdges);
-      return { view, scopeCount: scope.size, active: sprintItem.meta.id === activeProjectionSprintId };
+      const scopedWork = graph.items.filter((work) => scope.has(work.meta.id) && work.meta.id !== sprintItem.meta.id);
+      const doneCount = scopedWork.filter((work) => work.status === "closed" || work.status === "verified").length;
+      const blockedCount = scopedWork.filter((work) => work.status === "blocked").length;
+      return {
+        view,
+        scopeCount: scope.size,
+        doneCount,
+        openCount: scopedWork.length - doneCount,
+        blockedCount,
+        active: sprintItem.meta.id === activeProjectionSprintId
+      };
     })
     .sort((a, b) => Number(b.active) - Number(a.active) || a.view.title.localeCompare(b.view.title));
 

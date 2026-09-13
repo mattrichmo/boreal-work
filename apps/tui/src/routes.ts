@@ -1,6 +1,5 @@
-// Route table for the v1 shell. Only the routes named in the v1 scope cut
-// are implemented; everything else in TUI_SURFACE_CONTRACTS.md renders a
-// "planned" placeholder via `isStub`.
+// Route table for the repo shell. The rail is intentionally question-oriented
+// so a large workspace does not force every task into one tree.
 
 import type { TuiSurfaceKind } from "@boreal/ui-model";
 
@@ -29,17 +28,25 @@ export const GLOBAL_STUB_ROUTES: readonly RouteSpec[] = [
 ];
 
 export const REPO_ROUTES: readonly RouteSpec[] = [
-  { id: "repo.rollup", surface: "repo", label: "Roll-Up", numberKey: 1 },
-  { id: "repo.sprintBoard", surface: "repo", label: "Sprint Board", numberKey: 2 }
+  { id: "repo.now", surface: "repo", label: "Now", numberKey: 1 },
+  { id: "repo.rollup", surface: "repo", label: "Roll-Up", numberKey: 2 },
+  { id: "repo.milestones", surface: "repo", label: "Milestones", numberKey: 3 },
+  { id: "repo.sprints", surface: "repo", label: "Sprints", numberKey: 4 },
+  { id: "repo.work", surface: "repo", label: "Work", numberKey: 5 },
+  { id: "repo.ops", surface: "repo", label: "Ops", numberKey: 6 }
+];
+
+/** Live repo routes that are reached by drilling, not shown in the rail. */
+export const REPO_DETAIL_ROUTES: readonly RouteSpec[] = [
+  { id: "repo.sprintBoard", surface: "repo", label: "Sprint Board", numberKey: 0 }
 ];
 
 export const REPO_STUB_ROUTES: readonly RouteSpec[] = [
-  { id: "repo.work", surface: "repo", label: "Work", numberKey: 3, isStub: true },
-  { id: "repo.activity", surface: "repo", label: "Activity", numberKey: 4, isStub: true },
-  { id: "repo.knowledge", surface: "repo", label: "Knowledge", numberKey: 5, isStub: true },
-  { id: "repo.reports", surface: "repo", label: "Reports", numberKey: 6, isStub: true },
-  { id: "repo.health", surface: "repo", label: "Health", numberKey: 7, isStub: true },
-  { id: "repo.settings", surface: "repo", label: "Settings", numberKey: 8, isStub: true }
+  { id: "repo.activity", surface: "repo", label: "Activity", numberKey: 7, isStub: true },
+  { id: "repo.knowledge", surface: "repo", label: "Knowledge", numberKey: 8, isStub: true },
+  { id: "repo.reports", surface: "repo", label: "Reports", numberKey: 9, isStub: true },
+  { id: "repo.health", surface: "repo", label: "Health", numberKey: 0, isStub: true },
+  { id: "repo.settings", surface: "repo", label: "Settings", numberKey: 0, isStub: true }
 ];
 
 // Task Detail is reached only by drilling from Roll-Up/Sprint Board (never a
@@ -51,7 +58,7 @@ export function railFor(surface: TuiSurfaceKind): readonly RouteSpec[] {
 }
 
 export function routeById(id: string): RouteSpec | undefined {
-  return [...GLOBAL_ROUTES, ...GLOBAL_STUB_ROUTES, ...REPO_ROUTES, ...REPO_STUB_ROUTES].find((route) => route.id === id);
+  return [...GLOBAL_ROUTES, ...GLOBAL_STUB_ROUTES, ...REPO_ROUTES, ...REPO_DETAIL_ROUTES, ...REPO_STUB_ROUTES].find((route) => route.id === id);
 }
 
 export function routeByNumberKey(surface: TuiSurfaceKind, key: number): RouteSpec | undefined {

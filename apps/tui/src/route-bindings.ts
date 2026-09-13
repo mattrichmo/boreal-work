@@ -47,12 +47,12 @@ const FILTER: RouteBindingSpec = { token: "f", action: "filter", hint: { keys: "
 const QUIT: RouteBindingSpec = { token: "q", action: "quit", hint: { keys: "q", label: "quit" } };
 const SECTIONS: RouteBindingSpec = { token: "numberKey", action: "numberKey:0", hint: { keys: "1-9", label: "sections" } };
 
-const FILTERABLE_ROUTES = new Set(["repo.rollup", "repo.sprintBoard", "global.queues"]);
+const FILTERABLE_ROUTES = new Set(["repo.rollup", "repo.sprintBoard", "repo.work", "global.queues"]);
 const PROJECT_DRILL_ROUTES = new Set(["global.projects"]);
-const WORK_DRILL_ROUTES = new Set(["global.queues", "repo.sprintBoard"]);
+const WORK_DRILL_ROUTES = new Set(["global.queues", "repo.sprintBoard", "repo.now", "repo.milestones", "repo.sprints", "repo.work", "repo.ops"]);
 const FINDING_DRILL_ROUTES = new Set(["global.overview"]);
 const ACTION_DRILL_ROUTES = new Set(["repo.taskDetail"]);
-const SECTION_ROUTES = new Set(["global.overview", "global.projects", "global.queues", "repo.rollup", "repo.sprintBoard"]);
+const SECTION_ROUTES = new Set(["global.overview", "global.projects", "global.queues", "repo.now", "repo.rollup", "repo.milestones", "repo.sprints", "repo.work", "repo.ops"]);
 
 /**
  * Return only bindings that have a meaningful action on the active route.

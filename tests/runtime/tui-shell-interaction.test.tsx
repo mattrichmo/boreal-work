@@ -22,6 +22,7 @@ let boardTasks = [task, task2];
 vi.mock("../../apps/tui/src/loaders.js", () => ({
   invalidateGlobalDashboardCache: vi.fn(),
   loadRepoRollup: vi.fn(async () => envelope({ workspaceRoot: "/repo", root: { id: "__root__", entity: { kind: "work", id: "__root__", workspaceRoot: "/repo", label: "root" }, kind: "project", title: "repo", childIds: ["s1"], depth: 0, expandedByDefault: true, progress: { total: 1, done: 0, open: 1, cancelled: 0, percentDone: 0 }, blockerSummary: { blockerIds: [], activeBlockerCount: 0, blockedDescendantCount: 0 }, labels: [], stale: false, actions: [] }, flatRows: [{ id: "s1", entity: { kind: "sprint", id: "s1", workspaceRoot: "/repo", label: "Sprint One" }, kind: "sprint", title: "Sprint One", childIds: [], depth: 1, expandedByDefault: true, progress: { total: 1, done: 0, open: 1, cancelled: 0, percentDone: 0 }, blockerSummary: { blockerIds: [], activeBlockerCount: 0, blockedDescendantCount: 0 }, labels: [], stale: false, actions: [] }, { id: "t2", entity: { kind: "task", id: "t2", workspaceRoot: "/repo", label: "Second Task" }, kind: "task", title: "Second Task", childIds: [], depth: 1, expandedByDefault: true, progress: { total: 1, done: 0, open: 1, cancelled: 0, percentDone: 0 }, blockerSummary: { blockerIds: [], activeBlockerCount: 0, blockedDescendantCount: 0 }, labels: [], stale: false, actions: [] }], summary: {}, warnings: [] })),
+  loadRepoNow: vi.fn(async () => envelope({ currentSprint: { view: sprint, scopeCount: 2, active: true }, rows: [], overflowCount: 0, workingCount: 0, attentionCount: 0, nextCount: 0, summary: {} })),
   loadRepoSprintBoard: vi.fn(async (_root: string, id?: string) => { const selected = id === "s2" ? { ...sprint, id: "s2", title: "Sprint Two" } : sprint; return envelope({ sprints: [{ view: sprint, scopeCount: 2, active: true }, { view: { ...sprint, id: "s2", title: "Sprint Two" }, scopeCount: 0, active: false }], selectedSprintId: id ?? "s1", activeSprintId: "s1", board: { sprint: selected, lanes: [{ id: "ready", title: "Ready", items: boardTasks, count: boardTasks.length }], summary: { taskCount: boardTasks.length, activeBlockerCount: 0 } } }); }),
   loadRepoTaskDetail: vi.fn(async (_root: string, id: string) => envelope({ work: id === task2.id ? task2 : task, dependencyTitles: [], actions: [] }))
 }));
@@ -44,6 +45,9 @@ describe("active TUI shell interaction", () => {
     stdout.on("data", (chunk) => { lastFrame = String(chunk); output += lastFrame; });
     const instance = render(createElement(RouteApp, { workspaceRoot: "/repo", refreshMs: 30_000, mouse: false }), { stdin, stdout, exitOnCtrlC: false, debug: true });
     try {
+    await vi.waitFor(() => expect(output).toContain("Now"));
+    output = "";
+    stdin.write("4");
     await vi.waitFor(() => expect(output).toContain("Sprint One"));
     output = "";
     stdin.write("\r");
@@ -55,12 +59,14 @@ describe("active TUI shell interaction", () => {
     boardTasks = [task2, task];
     stdin.write("r");
     await vi.waitFor(() => expect(loadRepoSprintBoard).toHaveBeenCalledTimes(2), { timeout: 1_000 });
+    await settle();
     stdin.write("\r");
     await vi.waitFor(() => expect(loadRepoTaskDetail).toHaveBeenCalledWith("/repo", "t2", "task"));
     expect(output).toContain("Scoped Task");
+    output = "";
     stdin.write("\x1b");
     await vi.waitFor(() => expect(loadRepoSprintBoard).toHaveBeenCalledTimes(3), { timeout: 1_000 });
-    await settle();
+    await vi.waitFor(() => expect(output).toContain("Sprint: Sprint One"));
     output = "";
     stdin.write("s");
     await vi.waitFor(() => expect(output).toContain("Choose sprint"));

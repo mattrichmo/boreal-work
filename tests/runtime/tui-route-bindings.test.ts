@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import { bindingsForRoute, resolveRouteAction, routeFooterHints } from "../../apps/tui/src/route-bindings.js";
 import { rollupFilterLabel, visibleRollupRows, ROLLUP_FILTER_CYCLE } from "../../apps/tui/src/routes/rollup.js";
 import { filteredQueueItems, queueFilterLabel, QUEUE_FILTER_CYCLE } from "../../apps/tui/src/routes/global-queues.js";
+import { visibleWorkRows } from "../../apps/tui/src/routes/repo-sections.js";
 import { GLOBAL_ROUTES, REPO_ROUTES, railFor, routeById, routeByNumberKey } from "../../apps/tui/src/routes.js";
 import type { RepoRollupView, RollupNodeView } from "@boreal/ui-model";
 import type { GlobalWorkQueuesView } from "@boreal/ui-model";
@@ -27,6 +28,23 @@ function key(overrides: Partial<import("ink").Key> = {}): import("ink").Key {
   };
 }
 
+function node(overrides: Partial<RollupNodeView> & Pick<RollupNodeView, "id">): RollupNodeView {
+  return {
+    entity: { kind: "task", id: overrides.id, workspaceRoot: "/repo", label: overrides.id },
+    kind: "task",
+    title: overrides.id,
+    depth: 1,
+    childIds: [],
+    expandedByDefault: true,
+    progress: { total: 1, done: 0, open: 1, cancelled: 0, percentDone: 0 },
+    blockerSummary: { activeBlockerCount: 0, blockedDescendantCount: 0, blockerIds: [] },
+    labels: [],
+    stale: false,
+    actions: [],
+    ...overrides
+  };
+}
+
 describe("route bindings: footer hints come from the same specs the dispatcher uses", () => {
   it("hides stub routes from rails and number keys while retaining them for diagnostics", () => {
     expect(railFor("global")).toEqual(GLOBAL_ROUTES);
@@ -35,6 +53,9 @@ describe("route bindings: footer hints come from the same specs the dispatcher u
     expect(railFor("repo").some((route) => route.isStub)).toBe(false);
     expect(routeById("global.health")?.isStub).toBe(true);
     expect(routeByNumberKey("global", 6)).toBeUndefined();
+    expect(REPO_ROUTES.map((route) => route.label)).toEqual(["Now", "Roll-Up", "Milestones", "Sprints", "Work", "Ops"]);
+    expect(routeByNumberKey("repo", 1)?.id).toBe("repo.now");
+    expect(routeById("repo.sprintBoard")?.isStub).not.toBe(true);
   });
 
   it("only offers the filter binding on routes with a status facet", () => {
@@ -42,6 +63,7 @@ describe("route bindings: footer hints come from the same specs the dispatcher u
     const taskDetailSpecs = bindingsForRoute("repo.taskDetail");
     expect(rollupSpecs.some((spec) => spec.action === "filter")).toBe(true);
     expect(taskDetailSpecs.some((spec) => spec.action === "filter")).toBe(false);
+    expect(bindingsForRoute("repo.work").some((spec) => spec.action === "filter")).toBe(true);
   });
 
   it("resolves the same action the footer hint advertises", () => {
@@ -78,24 +100,35 @@ describe("route bindings: footer hints come from the same specs the dispatcher u
   });
 });
 
-describe("rollup status facet", () => {
-  function node(overrides: Partial<RollupNodeView> & Pick<RollupNodeView, "id">): RollupNodeView {
-    return {
-      entity: { kind: "task", id: overrides.id, workspaceRoot: "/repo", label: overrides.id },
-      kind: "task",
-      title: overrides.id,
-      depth: 1,
-      childIds: [],
-      expandedByDefault: true,
-      progress: { total: 1, done: 0, open: 1, cancelled: 0, percentDone: 0 },
-      blockerSummary: { activeBlockerCount: 0, blockedDescendantCount: 0, blockerIds: [] },
-      labels: [],
-      stale: false,
-      actions: [],
-      ...overrides
+describe("repo section projections", () => {
+  it("keeps the work section flat while cycling terminal status views", () => {
+    const body = {
+      items: [
+        node({ id: "ready", workStatus: "ready" }),
+        node({ id: "blocked", workStatus: "blocked" }),
+        node({ id: "closed", workStatus: "closed" }),
+        node({ id: "cancelled", workStatus: "cancelled" })
+      ],
+      summary: {
+        totalNodes: 4,
+        milestones: 0,
+        sprints: 0,
+        tasks: 4,
+        open: 2,
+        blocked: 1,
+        needsVerification: 0,
+        closed: 1,
+        cancelled: 1,
+        activeReservations: 0
+      }
     };
-  }
+    expect(visibleWorkRows(body).map((row) => row.id)).toEqual(["ready", "blocked"]);
+    expect(visibleWorkRows(body, { query: "blocked", clauses: [], sort: [] }).map((row) => row.id)).toEqual(["blocked"]);
+    expect(visibleWorkRows(body, { query: "all", clauses: [], sort: [] }).map((row) => row.id)).toEqual(["ready", "blocked", "closed"]);
+  });
+});
 
+describe("rollup status facet", () => {
   it("hides closed/cancelled leaves through the filter cycle but keeps containers", () => {
     const closedLeaf = node({ id: "closed", workStatus: "closed" });
     const cancelledLeaf = node({ id: "cancelled", workStatus: "cancelled" });

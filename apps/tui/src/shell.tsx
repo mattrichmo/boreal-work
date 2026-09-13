@@ -4,7 +4,7 @@ import { promisify } from "node:util";
 import { Box, Text, useApp, useInput, useStdin, useStdout, useWindowSize, type Key } from "ink";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState } from "react";
 
-import type { OpenRepoTarget, TuiCommandDescriptor, TuiEnvelope, TuiEntityKind, TuiFilterState } from "@boreal/ui-model";
+import type { OpenRepoTarget, TuiCommandDescriptor, TuiEnvelope, TuiEntityKind, TuiEntityRef, TuiFilterState } from "@boreal/ui-model";
 import { CommandConfirmPanel, commandPanelMaxScroll } from "./command-panel.js";
 import { DEFAULT_TUI_REFRESH_MS, normalizeRefreshInterval } from "./head-poll.js";
 import { createRefreshScheduler, type RefreshScheduler } from "./refresh-scheduler.js";
@@ -12,7 +12,7 @@ import { buildPaletteItems, searchPalette, type PaletteItem } from "./palette.js
 import { activeRowIds, loadForFrame, selectedRowCursor, type RouteBody } from "./route-model.js";
 import { FreshnessLine, HelpView, Palette } from "./shell-chrome.js";
 export { selectedRowCursor } from "./route-model.js";
-import { loadRepoRollup, invalidateGlobalDashboardCache } from "./loaders.js";
+import { invalidateGlobalDashboardCache, loadRepoRollup } from "./loaders.js";
 import { bindingsForRoute, resolveRouteAction, routeFooterHints } from "./route-bindings.js";
 import { atRoot, breadcrumbs, initialRouteNavState, reduceRouteNav, rootFrame, topFrame } from "./route-nav.js";
 import { GlobalOverviewRoute, type GlobalRouteState } from "./routes/global-overview.js";
@@ -29,6 +29,7 @@ import {
   type RollupDisclosureState
 } from "./routes/rollup.js";
 import { SprintBoardRoute, SPRINT_FILTERS, sprintFilterLabel, visibleSprintRows } from "./routes/sprint-board.js";
+import { RepoMilestonesRoute, RepoNowRoute, RepoOpsRoute, RepoSprintsRoute, RepoWorkRoute, visibleWorkRows, WORK_FILTERS, workFilterLabel } from "./routes/repo-sections.js";
 import { TaskDetailRoute, taskActionDisplay, taskDetailMaxScroll } from "./routes/task-detail.js";
 import { railFor, routeById, routeByNumberKey, REPO_TASK_DETAIL_ROUTE, type RouteSpec } from "./routes.js";
 import { useAltScreen, wheelFromInput } from "./runtime.js";
@@ -56,6 +57,10 @@ function nextFilter(routeId: string, current: TuiFilterState | undefined): TuiFi
     const index = SPRINT_FILTERS.findIndex((filter) => filter === sprintFilterLabel(current));
     return { clauses: current?.clauses ?? [], sort: [], query: SPRINT_FILTERS[(index + 1) % SPRINT_FILTERS.length] };
   }
+  if (routeId === "repo.work") {
+    const index = WORK_FILTERS.findIndex((filter) => filter === workFilterLabel(current));
+    return { clauses: [], sort: [], query: WORK_FILTERS[(index + 1) % WORK_FILTERS.length] };
+  }
   const cycle = FILTER_CYCLES[routeId];
   if (!cycle) return current;
   const index = cycle.findIndex((candidate) => JSON.stringify(candidate) === JSON.stringify(current));
@@ -66,6 +71,7 @@ function filterLabel(routeId: string, filters: TuiFilterState | undefined): stri
   if (routeId === "repo.rollup") return rollupFilterLabel(filters);
   if (routeId === "global.queues") return queueFilterLabel(filters);
   if (routeId === "repo.sprintBoard") return sprintFilterLabel(filters);
+  if (routeId === "repo.work") return workFilterLabel(filters);
   return undefined;
 }
 
@@ -156,8 +162,8 @@ export function RouteApp({
   const interactiveTerminal = process.stdin.isTTY === true && stdout?.isTTY === true;
 
   const surface = global ? "global" : "repo";
-  const initialRoute = global ? "global.overview" : "repo.rollup";
-  const initialTitle = global ? "Overview" : "Roll-Up";
+  const initialRoute = global ? "global.overview" : "repo.now";
+  const initialTitle = global ? "Overview" : "Now";
   const [nav, dispatch] = useReducer(reduceRouteNav, undefined, () =>
     initialRouteNavState(surface, workspaceRoot, initialRoute, initialTitle)
   );
@@ -452,7 +458,7 @@ export function RouteApp({
         projectId: item.projectId ?? item.entity?.projectId ?? item.workspaceRoot,
         projectName: item.entity?.projectName ?? item.label,
         projectRoot: item.workspaceRoot,
-        initialRoute: item.kind === "project" ? "repo.rollup" : item.routeId,
+        initialRoute: item.kind === "project" ? "repo.now" : item.routeId,
         initialEntity: item.kind === "project" ? undefined : item.entity,
         returnToGlobalFrame: frame
       } });
@@ -465,6 +471,43 @@ export function RouteApp({
 
   const handleDrill = useCallback((): void => {
     if (!currentBody) return;
+    const openEntity = (entity: TuiEntityRef): void => {
+      dispatch({
+        type: "push",
+        frame: {
+          routeId: entity.kind === "sprint" ? "repo.sprintBoard" : "repo.taskDetail",
+          title: entity.label,
+          cursor: 0,
+          entity
+        }
+      });
+    };
+    if (currentBody.kind === "repo.now") {
+      const row = currentBody.value.rows[effectiveCursor];
+      if (row) openEntity(row.node.entity);
+      return;
+    }
+    if (currentBody.kind === "repo.milestones") {
+      const row = currentBody.value.milestones[effectiveCursor];
+      if (row) openEntity(row.entity);
+      return;
+    }
+    if (currentBody.kind === "repo.sprints") {
+      const row = currentBody.value.sprints[effectiveCursor];
+      if (!row) return;
+      openEntity({ kind: "sprint", id: row.view.id, workspaceRoot: nav.current.workspaceRoot, label: row.view.title });
+      return;
+    }
+    if (currentBody.kind === "repo.work") {
+      const row = visibleWorkRows(currentBody.value, frame.filters)[effectiveCursor];
+      if (row) openEntity(row.entity);
+      return;
+    }
+    if (currentBody.kind === "repo.ops") {
+      const row = currentBody.value.reservations[effectiveCursor];
+      if (row?.entity) openEntity(row.entity);
+      return;
+    }
     if (currentBody.kind === "repo.rollup") {
       const expandedIds = rollupDisclosure.key === currentFrameKey ? rollupDisclosure.ids : undefined;
       const node = rollupRowAt(currentBody.value, effectiveCursor, frame.filters, expandedIds);
@@ -922,8 +965,18 @@ function RouteBodyView({
       return <GlobalProjectsRoute body={body.value} cursor={cursor} height={height} width={width} state={state} />;
     case "global.queues":
       return <GlobalQueuesRoute body={body.value} cursor={cursor} height={height} width={width} filters={filters} state={state} />;
+    case "repo.now":
+      return <RepoNowRoute body={body.value} cursor={cursor} height={height} width={width} />;
     case "repo.rollup":
       return <RepoRollupRoute body={body.value} cursor={cursor} height={height} width={width} filters={filters} expandedIds={expandedIds} />;
+    case "repo.milestones":
+      return <RepoMilestonesRoute body={body.value} cursor={cursor} height={height} width={width} />;
+    case "repo.sprints":
+      return <RepoSprintsRoute body={body.value} cursor={cursor} height={height} width={width} />;
+    case "repo.work":
+      return <RepoWorkRoute body={body.value} cursor={cursor} height={height} width={width} filters={filters} />;
+    case "repo.ops":
+      return <RepoOpsRoute body={body.value} cursor={cursor} height={height} width={width} />;
     case "repo.sprintBoard":
       return <SprintBoardRoute body={body.value} cursor={cursor} height={height} width={width} filters={filters} />;
     case "repo.taskDetail":

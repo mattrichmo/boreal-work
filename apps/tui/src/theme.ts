@@ -95,9 +95,10 @@ export function statusColor(status: string): string {
     case "reserved":
       return COLOR.accentSoft;
     case "verified":
+    case "complete":
       return COLOR.accent;
     case "closed":
-      return COLOR.muted;
+      return COLOR.accent;
     case "blocked":
       return COLOR.danger;
     case "needs_verification":
@@ -116,7 +117,8 @@ const STATUS_LABEL: Readonly<Record<string, string>> = {
   needs_verification: "needs verification",
   blocked: "blocked",
   verified: "complete",
-  closed: "closed",
+  complete: "complete",
+  closed: "complete",
   cancelled: "cancelled",
   draft: "draft"
 };
@@ -129,7 +131,8 @@ export function statusGlyph(status: string): string {
     needs_verification: "◇",
     blocked: "!",
     verified: "✓",
-    closed: "■",
+    complete: "✓",
+    closed: "✓",
     cancelled: "×"
   }[status] ?? "·";
 }

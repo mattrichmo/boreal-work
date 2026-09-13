@@ -12,6 +12,7 @@ export function fullTaskStatusLabel(status: string): string {
     needs_verification: "needs verification",
     reserved: "reserved",
     verified: "complete",
+    closed: "complete",
     cancelled: "cancelled"
   }[status] ?? status.replaceAll("_", " ");
 }
@@ -119,7 +120,6 @@ export function buildTaskDetailLines(body: RepoTaskDetailBody, width: number): r
   const contentWidth = Math.max(1, Math.floor(width) - 4);
   const reservation = reservationDisplay(task);
   const lines = [
-    `id          ${task.id}`,
     `labels      ${task.labels.length > 0 ? task.labels.join(", ") : "none"}`,
     `blockers    ${task.activeBlockerIds.length > 0 ? task.activeBlockerIds.join(", ") : "none"}`,
     `reservation ${reservation.label}`,
@@ -200,6 +200,7 @@ export function TaskDetailRoute({ body, width, selectedActionIndex, height, scro
   const below = Math.max(0, maxScroll - offset);
   const scrollLabel = maxScroll > 0 ? `↑ ${above} above · ↓ ${below} below` : "all content visible";
   return <Pane title={task.title} tone={statusColor(task.status)} width={width} height={height}>
+    <Text color={COLOR.accent} bold wrap="truncate">{fit(`ID  ${task.id}`, contentWidth)}</Text>
     <Text color={statusColor(task.status)} wrap="truncate">{fit(`${fullTaskStatusLabel(task.status)} · ${task.kind} · ${task.priority} · ${scrollLabel}`, contentWidth)}</Text>
     <Box flexDirection="column" height={viewport}>
       {visible.map((line, index) => <Text key={index} color={/^(DESCRIPTION|ACCEPTANCE|RECONCILIATION|COMPLETION|ACTIONS)/u.test(line) ? COLOR.accent : COLOR.text} bold={/^(DESCRIPTION|ACCEPTANCE|RECONCILIATION|COMPLETION|ACTIONS)/u.test(line)} wrap="truncate">{fit(line, contentWidth)}</Text>)}

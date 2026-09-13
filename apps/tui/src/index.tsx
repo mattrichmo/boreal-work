@@ -80,10 +80,10 @@ function printHelp(): void {
       "Usage: bwrk-tui [--global] [--workspace <dir>] [--registry-root <dir>] [--mouse] [--refresh-ms <ms>]",
       "",
       "One process, two surfaces: `--global` opens the cross-repo Overview /",
-      "Projects / Queues surface; without it, opens the repo Roll-Up / Sprint",
-      "Board / Task Detail surface for the current workspace.",
+      "Projects / Queues surface; without it, opens the repo Now / Roll-Up /",
+      "Milestones / Sprints / Work / Ops surface for the current workspace.",
       "",
-      "Keys: 1-3 sections · ↑↓/jk move · ⏎ open/run · esc back · r refresh · / search · ? help · q quit",
+      "Keys: 1-6 sections · ↑↓/jk move · ⏎ open/run · esc back · r refresh · / search · ? help · q quit",
       ""
     ].join("\n")
   );
