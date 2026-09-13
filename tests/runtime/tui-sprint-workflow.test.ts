@@ -27,14 +27,15 @@ function body(): RepoSprintBoardBody {
   const sprint = work("sprint", "in_progress");
   const assignedOpen = work("assigned-open", "ready");
   const assignedDone = work("assigned-done", "closed");
+  const assignedComplete = work("assigned-complete", "verified");
   const dependencyOpen = work("dependency-open", "ready");
-  const board = buildSprintBoardView({ sprint, work: [assignedOpen, assignedDone, dependencyOpen] });
+  const board = buildSprintBoardView({ sprint, work: [assignedOpen, assignedDone, assignedComplete, dependencyOpen] });
   return {
-    sprints: [{ view: sprint, scopeCount: 3, active: true }],
+    sprints: [{ view: sprint, scopeCount: 4, active: true }],
     selectedSprintId: sprint.id,
     activeSprintId: sprint.id,
     board,
-    assignedWorkIds: [assignedOpen.id, assignedDone.id],
+    assignedWorkIds: [assignedOpen.id, assignedDone.id, assignedComplete.id],
     dependencyWorkIds: [dependencyOpen.id]
   };
 }
@@ -52,7 +53,8 @@ describe("TUI sprint workflow contract", () => {
     const sprint = body();
     expect(visibleSprintRows(sprint, filter("open", "assigned")).map((item) => item.id)).toEqual(["assigned-open"]);
     expect(visibleSprintRows(sprint, filter("open", "dependencies")).map((item) => item.id)).toEqual(["dependency-open"]);
-    expect(visibleSprintRows(sprint, filter("complete", "assigned")).map((item) => item.id)).toEqual(["assigned-done"]);
+    expect(visibleSprintRows(sprint, filter("complete", "assigned")).map((item) => item.id)).toEqual(["assigned-complete"]);
+    expect(visibleSprintRows(sprint, filter("closed", "assigned")).map((item) => item.id)).toEqual(["assigned-done"]);
   });
 
   it("keeps cursor anchored by row identity and falls back safely after deletion", () => {

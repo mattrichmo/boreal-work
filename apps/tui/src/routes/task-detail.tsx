@@ -11,7 +11,7 @@ export function fullTaskStatusLabel(status: string): string {
     in_progress: "in progress",
     needs_verification: "needs verification",
     reserved: "reserved",
-    verified: "verified",
+    verified: "complete",
     cancelled: "cancelled"
   }[status] ?? status.replaceAll("_", " ");
 }

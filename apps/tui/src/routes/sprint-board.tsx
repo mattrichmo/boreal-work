@@ -1,10 +1,10 @@
 import { Box, Text } from "ink";
 import type { TuiFilterState, WorkItemView } from "@boreal/ui-model";
 import type { RepoSprintBoardBody } from "../loaders.js";
-import { COLOR, fit, statusColor, statusLabel } from "../theme.js";
+import { COLOR, fit, statusColor, statusGlyph, statusLabel } from "../theme.js";
 import { Table, type TableColumn } from "../ui.js";
 
-export const SPRINT_FILTERS = ["open", "all", "ready", "blocked", "in_progress", "needs_verification", "complete"] as const;
+export const SPRINT_FILTERS = ["open", "all", "ready", "blocked", "in_progress", "needs_verification", "complete", "closed", "cancelled"] as const;
 export function sprintFilterLabel(filters?: TuiFilterState): string {
   return filters?.query ?? "open";
 }
@@ -19,7 +19,13 @@ export function visibleSprintRows(body: RepoSprintBoardBody, filters?: TuiFilter
   return (body.board?.lanes.flatMap((lane) => lane.items) ?? []).filter((item) => {
     if (scopeIds && !scopeIds.includes(item.id)) return false;
     const terminal = ["closed", "verified", "cancelled"].includes(item.status);
-    return filter === "all" || (filter === "open" ? !terminal : filter === "complete" ? terminal : item.status === filter);
+    return filter === "all" || (filter === "open"
+      ? !terminal
+      : filter === "complete"
+        ? item.status === "verified"
+        : filter === "closed"
+          ? item.status === "closed"
+          : item.status === filter);
   });
 }
 export function sprintSelectionRows(body: RepoSprintBoardBody, maxRows = 5): readonly RepoSprintBoardBody["sprints"][number][] {
@@ -57,7 +63,7 @@ export function SprintBoardRoute({ body, cursor, height, width, filters }: {
     {headerLines >= 2 ? <Text color={COLOR.muted} wrap="truncate">{fit(`View: ${sprintFilterLabel(filters).replaceAll("_", " ")} · ${items.length}/${all.length} work items · ${body.board?.summary.activeBlockerCount ?? 0} blockers`, width)}</Text> : null}
     {headerLines >= 3 ? <Text color={COLOR.faint} wrap="truncate">{fit(`Scope: ${scope} · ${body.assignedWorkIds?.length ?? 0} assigned + ${dependencies.size} dependencies · d scope`, width)}</Text> : null}
     <Table columns={columns} rows={items.map((item) => ({ key: item.id, cells: [
-      { text: compactStatusLabel(item.status), color: statusColor(item.status) },
+      { text: `${statusGlyph(item.status)} ${compactStatusLabel(item.status)}`, color: statusColor(item.status) },
       { text: `${dependencies.has(item.id) ? "↳ " : ""}${item.title}`, color: COLOR.text },
       { text: context(item), color: item.activeBlockerIds.length ? COLOR.warn : COLOR.muted }
     ] }))} cursor={cursor} height={Math.max(0, budget - headerLines)} width={width} emptyLabel={all.length ? "No work matches this view. Press f for another view." : "No work assigned to this sprint yet."} />

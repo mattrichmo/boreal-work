@@ -158,6 +158,33 @@ describe("rollup status facet", () => {
     expect(preset).toBeDefined();
     expect(visibleRollupRows(body, preset, new Set()).map((row) => row.id)).toEqual([openMilestone.id]);
   });
+
+  it("offers a ready-to-claim preset for actionable leaves", () => {
+    const ready = node({ id: "ready", workStatus: "ready" });
+    const closed = node({ id: "closed", workStatus: "closed" });
+    const root: RollupNodeView = { ...node({ id: "__root__" }), kind: "project", childIds: [ready.id, closed.id], depth: 0 };
+    const body: RepoRollupView = {
+      generatedAt: "2026-01-01T00:00:00.000Z",
+      workspaceRoot: "/repo",
+      root,
+      flatRows: [root, ready, closed],
+      summary: {
+        totalNodes: 2,
+        milestones: 0,
+        sprints: 0,
+        tasks: 2,
+        open: 1,
+        blocked: 0,
+        needsVerification: 0,
+        closed: 1,
+        cancelled: 0,
+        activeReservations: 0
+      }
+    };
+    const preset = ROLLUP_FILTER_CYCLE.find((filter) => rollupFilterLabel(filter) === "ready to claim");
+    expect(preset).toBeDefined();
+    expect(visibleRollupRows(body, preset, new Set()).map((row) => row.id)).toEqual([ready.id]);
+  });
 });
 
 describe("global queue status facet", () => {

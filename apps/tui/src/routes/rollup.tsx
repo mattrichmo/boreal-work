@@ -6,11 +6,11 @@ import { Table, type TableColumn, type TableRow } from "../ui.js";
 
 export type RollupDisclosureState = ReadonlySet<string>;
 
-type RollupFilterMode = "milestones-open" | "blocked" | "actionable";
+type RollupFilterMode = "milestones-open" | "blocked" | "actionable" | "ready";
 
 function rollupFilterMode(filters: TuiFilterState | undefined): RollupFilterMode | undefined {
   const value = filters?.clauses.find((clause) => clause.field === "rollup" && clause.operator === "is")?.value;
-  return value === "milestones-open" || value === "blocked" || value === "actionable" ? value : undefined;
+  return value === "milestones-open" || value === "blocked" || value === "actionable" || value === "ready" ? value : undefined;
 }
 
 function passesStatusFilter(node: RollupNodeView, filters: TuiFilterState | undefined): boolean {
@@ -30,6 +30,7 @@ function matchesLeafMode(node: RollupNodeView, mode: RollupFilterMode): boolean 
   // its child tasks are not themselves marked blocked.
   if (mode === "milestones-open") return false;
   if (mode === "blocked") return node.workStatus === "blocked" || node.blockerSummary.activeBlockerCount > 0;
+  if (mode === "ready") return node.workStatus === "ready" && node.blockerSummary.activeBlockerCount === 0;
   if (mode === "actionable") return isOpen(node) && node.workStatus !== "blocked" && node.blockerSummary.activeBlockerCount === 0;
   return false;
 }
@@ -155,18 +156,18 @@ export function fullRollupStatusLabel(status: string | undefined): string {
     in_progress: "in progress",
     needs_verification: "needs verification",
     reserved: "reserved",
-    verified: "verified",
+    verified: "complete",
     cancelled: "cancelled"
   }[status] ?? status.replaceAll("_", " ");
 }
 
 function rollupTypeLabel(kind: RollupNodeView["kind"]): string {
-  return { milestone: "MS", sprint: "SP", task: "TK", issue: "IS", work: "WK", project: "PR" }[kind] ?? "WK";
+  return { milestone: "MS", sprint: "SP", task: "TK", issue: "IS", project: "PR" }[kind] ?? "WK";
 }
 
 function rollupStatusLabel(status: string | undefined): string {
   if (!status) return "—";
-  const icon = { ready: "○", in_progress: "●", reserved: "●", needs_verification: "!", blocked: "!", verified: "✓", closed: "✓", cancelled: "×" }[status] ?? "·";
+  const icon = { ready: "○", in_progress: "●", reserved: "◉", needs_verification: "◇", blocked: "!", verified: "✓", closed: "■", cancelled: "×" }[status] ?? "·";
   const label = status === "needs_verification" ? "verify" : status === "in_progress" ? "working" : fullRollupStatusLabel(status);
   return `${icon} ${label}`;
 }
@@ -181,6 +182,7 @@ export function rollupFilterLabel(filters: TuiFilterState | undefined): string |
   if (mode === "milestones-open") return "milestones with open work";
   if (mode === "blocked") return "blocked work";
   if (mode === "actionable") return "actionable work";
+  if (mode === "ready") return "ready to claim";
   if (filters.showClosed === false && filters.showCancelled === false) return "open only";
   if (filters.showClosed === false) return "hide closed";
   if (filters.showCancelled === false) return "hide cancelled";
@@ -205,6 +207,7 @@ export function RepoRollupRoute({
 }) {
   const rows = visibleRollupRows(body, filters, expandedIds);
   const byId = new Map(body.flatRows.map((node) => [node.id, node]));
+  const readyCount = body.flatRows.filter((node) => node.childIds.length === 0 && node.workStatus === "ready").length;
   // Keep the identity column as the last column to compress. Table's fitting
   // logic can then hide secondary metrics on small terminals rather than
   // turning the title into an unreadable sliver.
@@ -233,7 +236,7 @@ export function RepoRollupRoute({
   return (
     <Box flexDirection="column" width={width} height={height} overflow="hidden">
       <Text color={COLOR.faint} wrap="truncate">
-        {`ROLL-UP · ${pluralize(body.summary.milestones, "milestone")} · ${pluralize(body.summary.sprints, "sprint")} · ${pluralize(body.summary.tasks, "task")} · ${body.summary.blocked} blocked status · ${pluralize(body.summary.cancelled, "cancelled item")}`}
+        {`ROLL-UP · READY ${readyCount} · ${pluralize(body.summary.milestones, "milestone")} · ${pluralize(body.summary.sprints, "sprint")} · ${pluralize(body.summary.tasks, "task")} · ${body.summary.blocked} blocked status · ${pluralize(body.summary.cancelled, "cancelled item")}`}
       </Text>
       <Table columns={columns} rows={tableRows} cursor={cursor} height={Math.max(0, height - 1)} width={width} emptyLabel="No work in this repo yet. Create work with bwrk work create." />
     </Box>
@@ -258,5 +261,6 @@ export const ROLLUP_FILTER_CYCLE: readonly (TuiFilterState | undefined)[] = [
   { clauses: [], sort: [], showClosed: false, showCancelled: false },
   { clauses: [{ field: "rollup", operator: "is", value: "milestones-open" }], sort: [] },
   { clauses: [{ field: "rollup", operator: "is", value: "blocked" }], sort: [] },
-  { clauses: [{ field: "rollup", operator: "is", value: "actionable" }], sort: [] }
+  { clauses: [{ field: "rollup", operator: "is", value: "actionable" }], sort: [] },
+  { clauses: [{ field: "rollup", operator: "is", value: "ready" }], sort: [] }
 ];

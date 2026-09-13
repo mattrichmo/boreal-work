@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { cellWidth, createColorPalette, fit, resolveColorMode, truncate } from "../../apps/tui/src/theme.js";
+import { cellWidth, createColorPalette, fit, resolveColorMode, statusGlyph, statusLabel, truncate } from "../../apps/tui/src/theme.js";
 
 describe("tui fit()", () => {
   it("pads short values to width", () => {
@@ -58,5 +58,15 @@ describe("tui color modes", () => {
     expect(resolveColorMode({ NO_COLOR: "", BOREAL_TUI_COLOR_MODE: "light" })).toBe("none");
     expect(createColorPalette("light").selectionBg).not.toBe("");
     expect(createColorPalette("terminal-default").accent).toBe("green");
+  });
+});
+
+describe("tui work status language", () => {
+  it("keeps complete/verified visually distinct from closed", () => {
+    expect(statusLabel("verified")).toBe("complete");
+    expect(statusLabel("closed")).toBe("closed");
+    expect(statusGlyph("verified")).toBe("✓");
+    expect(statusGlyph("closed")).toBe("■");
+    expect(createColorPalette("color").accent).not.toBe(createColorPalette("color").muted);
   });
 });

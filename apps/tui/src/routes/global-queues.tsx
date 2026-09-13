@@ -2,7 +2,7 @@ import { Box, Text } from "ink";
 
 import type { GlobalWorkQueueItem, GlobalWorkQueuesView, TuiFilterState } from "@boreal/ui-model";
 import { boundedWarnings, globalRouteState, globalStatusLabels, type GlobalRouteState } from "./global-overview.js";
-import { COLOR, fit, statusColor } from "../theme.js";
+import { COLOR, fit, statusColor, statusGlyph } from "../theme.js";
 import { Table, type TableColumn, type TableRow } from "../ui.js";
 
 function queueFilterValue(filters: TuiFilterState | undefined): string | undefined {
@@ -26,7 +26,7 @@ export function fullQueueStatusLabel(status: string): string {
     in_progress: "in progress",
     needs_verification: "needs verification",
     reserved: "reserved",
-    verified: "verified",
+    verified: "complete",
     cancelled: "cancelled"
   }[status] ?? status.replaceAll("_", " ");
 }
@@ -82,7 +82,7 @@ export function GlobalQueuesRoute({
   const rows: readonly TableRow[] = items.map((item) => ({
     key: item.id,
     cells: [
-      { text: fullQueueStatusLabel(item.work.status), color: statusColor(item.work.status) },
+      { text: `${statusGlyph(item.work.status)} ${fullQueueStatusLabel(item.work.status)}`, color: statusColor(item.work.status) },
       { text: "open", color: COLOR.accent },
       { text: fit(item.projectName, projectWidth ?? 1), color: COLOR.muted },
       { text: fit(`${item.work.title} · ${queueContext(item)}`, workWidth ?? 1), color: COLOR.text },
