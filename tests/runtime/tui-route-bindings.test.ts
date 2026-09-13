@@ -51,11 +51,13 @@ describe("route bindings: footer hints come from the same specs the dispatcher u
     expect(hints).toContainEqual({ keys: "space", label: "fold" });
     expect(hints).toContainEqual({ keys: "→/l", label: "expand" });
     expect(hints).toContainEqual({ keys: "←/h", label: "collapse" });
+    expect(hints).toContainEqual({ keys: "a", label: "ready" });
     expect(resolveRouteAction(specs, "f", key())).toBe("filter");
     expect(resolveRouteAction(specs, "", key({ return: true }))).toBe("drill");
     expect(resolveRouteAction(specs, " ", key())).toBe("toggleDisclosure");
     expect(resolveRouteAction(specs, "", key({ rightArrow: true }))).toBe("expand");
     expect(resolveRouteAction(specs, "", key({ leftArrow: true }))).toBe("collapse");
+    expect(resolveRouteAction(specs, "a", key())).toBe("ready");
     expect(resolveRouteAction(specs, "5", key())).toBe("numberKey:5");
   });
 

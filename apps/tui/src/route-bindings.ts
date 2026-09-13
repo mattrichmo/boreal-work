@@ -12,6 +12,7 @@ export type RouteActionId =
   | "toggleDisclosure"
   | "expand"
   | "collapse"
+  | "ready"
   | "back"
   | "search"
   | "refresh"
@@ -34,6 +35,7 @@ const DRILL_ROLLUP: RouteBindingSpec = { token: "drillRollup", action: "drill", 
 const TOGGLE_DISCLOSURE: RouteBindingSpec = { token: "toggleDisclosure", action: "toggleDisclosure", hint: { keys: "space", label: "fold" } };
 const EXPAND_DISCLOSURE: RouteBindingSpec = { token: "expandDisclosure", action: "expand", hint: { keys: "→/l", label: "expand" } };
 const COLLAPSE_DISCLOSURE: RouteBindingSpec = { token: "collapseDisclosure", action: "collapse", hint: { keys: "←/h", label: "collapse" } };
+const READY_FILTER: RouteBindingSpec = { token: "readyFilter", action: "ready", hint: { keys: "a", label: "ready" } };
 const DRILL_FINDING: RouteBindingSpec = { token: "drill", action: "drill", hint: { keys: "⏎", label: "open finding" } };
 const DRILL_ACTION: RouteBindingSpec = { token: "drill", action: "drill", hint: { keys: "⏎", label: "run action" } };
 const PREVIOUS_SPRINT: RouteBindingSpec = { token: "[", action: "previousSprint", hint: { keys: "[", label: "previous sprint" } };
@@ -58,7 +60,7 @@ const SECTION_ROUTES = new Set(["global.overview", "global.projects", "global.qu
 export function bindingsForRoute(routeId: string): readonly RouteBindingSpec[] {
   const specs: RouteBindingSpec[] = [MOVE];
   if (PROJECT_DRILL_ROUTES.has(routeId)) specs.push(DRILL_PROJECT);
-  if (routeId === "repo.rollup") specs.push(TOGGLE_DISCLOSURE, EXPAND_DISCLOSURE, COLLAPSE_DISCLOSURE, DRILL_ROLLUP);
+  if (routeId === "repo.rollup") specs.push(TOGGLE_DISCLOSURE, EXPAND_DISCLOSURE, COLLAPSE_DISCLOSURE, READY_FILTER, DRILL_ROLLUP);
   else if (WORK_DRILL_ROUTES.has(routeId)) specs.push(DRILL_WORK);
   if (FINDING_DRILL_ROUTES.has(routeId)) specs.push(DRILL_FINDING);
   if (ACTION_DRILL_ROUTES.has(routeId)) specs.push(DRILL_ACTION);

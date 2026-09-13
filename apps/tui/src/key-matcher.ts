@@ -15,6 +15,8 @@ export function matchToken(token: string, input: string, key: Key): boolean {
       return Boolean(key.rightArrow) || input === "l";
     case "collapseDisclosure":
       return Boolean(key.leftArrow) || input === "h";
+    case "readyFilter":
+      return input === "a";
     case "back":
       return Boolean(key.escape || key.backspace || key.delete || key.leftArrow) || input === "h";
     default:

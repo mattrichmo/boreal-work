@@ -24,6 +24,7 @@ import {
   rollupRowAt,
   RepoRollupRoute,
   ROLLUP_FILTER_CYCLE,
+  ROLLUP_READY_FILTER,
   toggleRollupDisclosure,
   type RollupDisclosureState
 } from "./routes/rollup.js";
@@ -692,6 +693,11 @@ export function RouteApp({
       }
       if (action === "filter") {
         dispatch({ type: "setFilters", filters: nextFilter(frame.routeId, frame.filters) });
+        return;
+      }
+      if (action === "ready") {
+        if (frame.routeId !== "repo.rollup") return;
+        dispatch({ type: "setFilters", filters: ROLLUP_READY_FILTER });
         return;
       }
       if (action === "toggleDisclosure" || action === "expand" || action === "collapse") {

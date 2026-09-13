@@ -8,6 +8,11 @@ export type RollupDisclosureState = ReadonlySet<string>;
 
 type RollupFilterMode = "milestones-open" | "blocked" | "actionable" | "ready";
 
+export const ROLLUP_READY_FILTER: TuiFilterState = {
+  clauses: [{ field: "rollup", operator: "is", value: "ready" }],
+  sort: []
+};
+
 function rollupFilterMode(filters: TuiFilterState | undefined): RollupFilterMode | undefined {
   const value = filters?.clauses.find((clause) => clause.field === "rollup" && clause.operator === "is")?.value;
   return value === "milestones-open" || value === "blocked" || value === "actionable" || value === "ready" ? value : undefined;
@@ -262,5 +267,5 @@ export const ROLLUP_FILTER_CYCLE: readonly (TuiFilterState | undefined)[] = [
   { clauses: [{ field: "rollup", operator: "is", value: "milestones-open" }], sort: [] },
   { clauses: [{ field: "rollup", operator: "is", value: "blocked" }], sort: [] },
   { clauses: [{ field: "rollup", operator: "is", value: "actionable" }], sort: [] },
-  { clauses: [{ field: "rollup", operator: "is", value: "ready" }], sort: [] }
+  ROLLUP_READY_FILTER
 ];
