@@ -4,7 +4,7 @@ import { hostname as osHostname, tmpdir } from "node:os";
 import { dirname, join, relative, resolve } from "node:path";
 import { promisify } from "node:util";
 
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { flagValue, parseArgs } from "../../apps/cli/src/args.ts";
 import {
@@ -13,6 +13,7 @@ import {
   registryValueFlagNames,
   validateCommandBehaviorMetadata
 } from "../../apps/cli/src/command-registry.ts";
+import * as buildIdentity from "../../apps/cli/src/build-identity.ts";
 import { installJsonStdoutGuard, isBrokenPipeError, main } from "../../apps/cli/src/index.ts";
 import { inspectBorealInstallStatus } from "../../apps/cli/src/install-status.ts";
 import type { CliOutput } from "../../apps/cli/src/output.ts";
@@ -500,6 +501,74 @@ describe("bwrk cli", () => {
     expect(invalidConfig.exitCode).toBe(1);
     expect(invalidConfigPayload.code).toBe("BOREAL_CONFLICT");
     expect(invalidConfigPayload.message).toContain("Existing project setup config is invalid");
+  });
+
+  it("refreshes a mismatched project toolchain through the explicit repo update path", async ({ onTestFinished }) => {
+    // Clean checkouts have no local toolchain lock; model a released binary
+    // explicitly instead of depending on the developer's build provenance.
+    const identity = { ...buildIdentity.getRuntimeBuildIdentity(), buildSha: "d".repeat(40) };
+    const identityProbe = vi.spyOn(buildIdentity, "getRuntimeBuildIdentity").mockReturnValue(identity);
+    onTestFinished(() => identityProbe.mockRestore());
+    const rootDir = await makeTempWorkspace();
+    await runCli(rootDir, ["init", "--json"]);
+
+    const lockPath = join(rootDir, ".boreal/toolchain.lock.json");
+    const staleLock = parseJson<Record<string, unknown>>(await readFile(lockPath, "utf8"));
+    await writeFile(
+      lockPath,
+      `${JSON.stringify(
+        {
+          ...staleLock,
+          buildSha: "a".repeat(40),
+          artifactDigest: `sha256:${"b".repeat(64)}`
+        },
+        null,
+        2
+      )}\n`,
+      "utf8"
+    );
+
+    const planned = await runCli(rootDir, ["update", "repo", "--dry-run", "--json"]);
+    const plannedToolchain = parseData<{
+      readonly toolchain: { readonly planned?: boolean; readonly refreshed: boolean; readonly previousBuildSha?: string };
+    }>(planned.stdout).toolchain;
+    expect(planned.exitCode).toBe(0);
+    expect(plannedToolchain).toEqual(
+      expect.objectContaining({ planned: true, refreshed: false, previousBuildSha: "a".repeat(40) })
+    );
+    expect(parseJson<Record<string, unknown>>(await readFile(lockPath, "utf8"))).toEqual(
+      expect.objectContaining({ buildSha: "a".repeat(40) })
+    );
+
+    const refreshed = await runCli(rootDir, ["update", "repo", "--json"]);
+    const refreshedToolchain = parseData<{
+      readonly toolchain: { readonly refreshed: boolean; readonly buildSha?: string; readonly artifactDigest?: string };
+    }>(refreshed.stdout).toolchain;
+    const runtime = buildIdentity.getRuntimeBuildIdentity();
+    const lock = parseJson<{
+      readonly buildSha: string;
+      readonly artifactDigest: string;
+      readonly agentAssetDigest: string;
+    }>(await readFile(lockPath, "utf8"));
+
+    expect(refreshed.exitCode).toBe(0);
+    expect(refreshedToolchain).toEqual(
+      expect.objectContaining({
+        refreshed: true,
+        buildSha: runtime.buildSha,
+        artifactDigest: runtime.artifactDigest
+      })
+    );
+    expect(lock).toEqual(
+      expect.objectContaining({
+        buildSha: runtime.buildSha,
+        artifactDigest: runtime.artifactDigest,
+        agentAssetDigest: runtime.agentAssetDigest
+      })
+    );
+
+    const created = await runCli(rootDir, ["work", "create", "post-update write", "--json"]);
+    expect(created.exitCode).toBe(0);
   });
 
   it("validates project-scoped MCP config drift in doctor", async () => {

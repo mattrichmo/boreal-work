@@ -234,16 +234,17 @@ export const COMMAND_DEFINITIONS: readonly CommandDefinition[] = [
   {
     path: ["update", "self"],
     category: "meta",
-    summary: "Upgrade the machine bwrk install from the GitHub repo.",
-    usage: "bwrk update self [--ref <ref>] [--repo-url <url>] [--bin-dir <dir>] [--lib-dir <dir>] [--dry-run] [--json]",
+    summary: "Update the machine bwrk install to the latest ready-to-run release.",
+    usage: "bwrk update self [--ref <tag>] [--source] [--repo-url <url>] [--bin-dir <dir>] [--lib-dir <dir>] [--dry-run] [--json]",
     description:
-      "Clones the Boreal source repo, builds the bundled CLI, and installs it into the segmented machine location (~/.local/share/boreal/bwrk) with a shim at ~/.local/bin/bwrk. Requires git, node, and pnpm on PATH.",
+      "Downloads a checksum-verified release and safely replaces the machine installation. Requires Node and tar, not git or pnpm. Development source builds require explicit --source.",
     flags: [
-      flag("ref", "value", "Git ref (branch or tag) to install. Defaults to the default branch."),
+      flag("ref", "value", "Release tag to install; defaults to latest. With --source, a Git branch or tag."),
+      flag("source", "boolean", "Explicitly build from source using git and pnpm instead of downloading a release."),
       flag("repo-url", "value", "Source repo URL. Defaults to BOREAL_UPDATE_REPO_URL or the canonical GitHub repo."),
       flag("bin-dir", "value", "Machine binary directory. Defaults to BOREAL_INSTALL_BIN_DIR or ~/.local/bin."),
       flag("lib-dir", "value", "Machine install directory. Defaults to BOREAL_INSTALL_LIB_DIR or ~/.local/share/boreal/bwrk."),
-      flag("dry-run", "boolean", "Fetch and build a verified candidate without changing the machine install.")
+      flag("dry-run", "boolean", "Check release metadata without downloading or installing the bundle; --source builds a candidate.")
     ],
     positionals: { label: "arguments", min: 0, max: 0 },
     requiresWorkspace: false,
@@ -253,10 +254,13 @@ export const COMMAND_DEFINITIONS: readonly CommandDefinition[] = [
     path: ["update", "repo"],
     category: "meta",
     summary: "Bring this repo's Boreal assets up to the installed version.",
-    usage: "bwrk update repo [--dry-run] [--json]",
+    usage: "bwrk update repo [--dry-run] [--skip-skills] [--json]",
     description:
-      "Migrates legacy runtime storage to the per-record object store when needed, then reinstalls agent skills into the install roots recorded in .boreal/project.json. Run after upgrading the machine binary.",
-    flags: [flag("dry-run", "boolean", "Preview storage migration and skill refresh without writing files.")],
+      "Migrates legacy runtime storage when needed, refreshes the committed project toolchain lock to the executing build, and reinstalls agent skills into the install roots recorded in .boreal/project.json. Run this explicit recovery/update workflow after upgrading the machine binary or changing the local build.",
+    flags: [
+      flag("dry-run", "boolean", "Preview storage migration, toolchain refresh, and skill refresh without writing files."),
+      flag("skip-skills", "boolean", "Skip agent-skill installation while still applying storage and toolchain updates.")
+    ],
     positionals: { label: "arguments", min: 0, max: 0 },
     requiresWorkspace: true,
     supportsJson: true,
@@ -265,16 +269,18 @@ export const COMMAND_DEFINITIONS: readonly CommandDefinition[] = [
     path: ["upgrade"],
     category: "meta",
     summary: "Upgrade the machine CLI and current project when available.",
-    usage: "bwrk upgrade [--machine|--project] [--ref <ref>] [--repo-url <url>] [--bin-dir <dir>] [--lib-dir <dir>] [--dry-run] [--json]",
+    usage: "bwrk upgrade [--machine|--project] [--ref <tag>] [--source] [--repo-url <url>] [--bin-dir <dir>] [--lib-dir <dir>] [--skip-skills] [--dry-run] [--json]",
     description:
-      "Runs the project asset update when inside an initialized project and the machine CLI update otherwise. Use --machine or --project to select one scope explicitly. Project assets are refreshed before the machine binary.",
+      "Installs the latest ready-to-run release, then refreshes initialized project assets using the installed binary. Use --machine or --project to select one scope explicitly. Source builds require --source.",
     flags: [
       flag("machine", "boolean", "Upgrade only the machine-level CLI."),
       flag("project", "boolean", "Upgrade only the current initialized project."),
-      flag("ref", "value", "Git ref (branch or tag) for the machine CLI update."),
+      flag("ref", "value", "Release tag for the machine update; with --source, a Git branch or tag."),
+      flag("source", "boolean", "Explicitly build the machine CLI from source using git and pnpm."),
       flag("repo-url", "value", "Source repo URL for the machine CLI update."),
       flag("bin-dir", "value", "Machine binary directory."),
       flag("lib-dir", "value", "Machine install directory."),
+      flag("skip-skills", "boolean", "Skip project skill installation while refreshing storage and toolchain assets."),
       flag("dry-run", "boolean", "Preview selected updates without changing installed state.")
     ],
     positionals: { label: "arguments", min: 0, max: 0 },

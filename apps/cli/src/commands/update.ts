@@ -5,6 +5,7 @@ import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { BorealError } from "@boreal/core";
+import { writeTextFileAtomic } from "@boreal/storage";
 
 import { flagValue, hasFlag, type ParsedArgs } from "../args.js";
 import { type CliContext } from "../context.js";
@@ -18,6 +19,8 @@ import { readProjectSetupConfig } from "../project-setup.js";
 import { migrateStorage, type StorageMigrationResult } from "../storage-migrate.js";
 import { getVersionInfo, type VersionInfo } from "../version.js";
 import { BINARY_IDENTITY_SCHEMA_VERSION, type BinaryIdentity } from "../install-status.js";
+import { createToolchainLock } from "../toolchain.js";
+import { updateFromRelease } from "./update-release.js";
 import { buildSkillInstallPlan, type SkillInstallPlan } from "../workflow-assets.js";
 import type { CommandResult } from "./shared.js";
 
@@ -58,6 +61,17 @@ export interface UpdateRepoResult {
     readonly issues: number;
     readonly provenance?: InstallProvenance;
   }[];
+  readonly skillsSkipped?: boolean;
+  readonly toolchain: {
+    readonly path: string;
+    readonly refreshed: boolean;
+    readonly planned?: boolean;
+    readonly previousBuildSha?: string;
+    readonly buildSha?: string;
+    readonly previousArtifactDigest?: string;
+    readonly artifactDigest?: string;
+    readonly skippedReason?: string;
+  };
   readonly provenance: {
     readonly actor: { readonly pid: number; readonly cwd: string };
     readonly build: ReturnType<typeof getVersionInfo>["build"];
@@ -94,6 +108,16 @@ export async function updateCommand(
 }
 
 async function updateSelfCommand(args: ParsedArgs, output: CliOutput, json: boolean): Promise<CommandResult> {
+  if (!hasFlag(args, "source")) {
+    const result = await updateFromRelease(args, captureBinaryIdentity, (line) => {
+      output.error(`${line}\n`);
+    });
+    const message = result.dryRun
+      ? `Boreal release ${result.ref} checked; no changes made.`
+      : result.updated ? "Boreal updated successfully." : "Boreal is already up to date.";
+    output.write(json ? formatRecord(result, true) : `${message}\n`);
+    return { exitCode: 0 };
+  }
   const repoUrl = flagValue(args, "repo-url") ?? process.env.BOREAL_UPDATE_REPO_URL ?? DEFAULT_UPDATE_REPO_URL;
   const ref = flagValue(args, "ref");
   const dryRun = hasFlag(args, "dry-run");
@@ -117,7 +141,7 @@ async function updateSelfCommand(args: ParsedArgs, output: CliOutput, json: bool
     progress(`Fetching ${repoUrl}${ref ? ` (${ref})` : ""} ...`);
     steps.push(await runStep("fetch", "git", cloneArgs, process.cwd(), json, {}, transactionId));
     progress("Installing build dependencies ...");
-    steps.push(await runStep("dependencies", "pnpm", ["install", "--frozen-lockfile", "--silent"], stageDir, json, {}, transactionId));
+    steps.push(await runStep("dependencies", "pnpm", ["install", "--frozen-lockfile", "--reporter=append-only"], stageDir, json, { COREPACK_ENABLE_DOWNLOAD_PROMPT: "0" }, transactionId));
     progress("Building bwrk bundle ...");
     steps.push(await runStep("build", "pnpm", ["build"], stageDir, json, {}, transactionId));
     const stagedPath = join(stageDir, "apps", "cli", "dist", "index.js");
@@ -174,36 +198,40 @@ async function updateRepoCommand(context: CliContext, args: ParsedArgs, output: 
     migration = await migrateStorage(context, "objects");
   }
 
-  const config = await readProjectSetupConfig(context.workspaceRoot);
+  const toolchain = await refreshProjectToolchain(context, dryRun);
   const skillInstalls: Array<UpdateRepoResult["skillInstalls"][number]> = [];
-  for (const root of config?.skillInstallRoots ?? []) {
-    const plan: SkillInstallPlan = await buildSkillInstallPlan({
-      target: root.target,
-      dryRun,
-      installRoot: root.installRoot,
-      workspaceRoot: context.workspaceRoot
-    });
-    if (dryRun) {
-      skillInstalls.push({
+  const skillsSkipped = hasFlag(args, "skip-skills");
+  if (!skillsSkipped) {
+    const config = await readProjectSetupConfig(context.workspaceRoot);
+    for (const root of config?.skillInstallRoots ?? []) {
+      const plan: SkillInstallPlan = await buildSkillInstallPlan({
         target: root.target,
+        dryRun,
         installRoot: root.installRoot,
-        written: 0,
-        planned: plan.files.length,
-        issues: plan.issues.length
+        workspaceRoot: context.workspaceRoot
       });
-    } else {
-      const applied = await installSkillsFromPlanAtomically(plan, {
-        transactionId,
-        operation: "update.repo",
-        startedAt
-      } satisfies SkillInstallTransactionInput);
-      skillInstalls.push({
-        target: root.target,
-        installRoot: root.installRoot,
-        written: applied.files.length,
-        issues: applied.issues.length,
-        provenance: applied.provenance
-      });
+      if (dryRun) {
+        skillInstalls.push({
+          target: root.target,
+          installRoot: root.installRoot,
+          written: 0,
+          planned: plan.files.length,
+          issues: plan.issues.length
+        });
+      } else {
+        const applied = await installSkillsFromPlanAtomically(plan, {
+          transactionId,
+          operation: "update.repo",
+          startedAt
+        } satisfies SkillInstallTransactionInput);
+        skillInstalls.push({
+          target: root.target,
+          installRoot: root.installRoot,
+          written: applied.files.length,
+          issues: applied.issues.length,
+          provenance: applied.provenance
+        });
+      }
     }
   }
 
@@ -215,12 +243,59 @@ async function updateRepoCommand(context: CliContext, args: ParsedArgs, output: 
       ? { migrated: true, from: migration.from, to: migration.to, rollback: migration.rollback }
       : { migrated: false, ...(dryRun && context.storage !== "objects-v1" ? { planned: true } : {}), to: context.storage },
     skillInstalls,
+    ...(skillsSkipped ? { skillsSkipped: true } : {}),
+    toolchain,
     provenance: { actor: { pid: process.pid, cwd: process.cwd() }, build: getVersionInfo().build },
     nextCommand: "bwrk sync refresh --json"
   };
   output.write(json ? formatRecord(result, true) : formatUpdateRepo(result));
   const hasIssues = skillInstalls.some((install) => install.issues > 0);
   return { exitCode: hasIssues ? 1 : 0 };
+}
+
+async function refreshProjectToolchain(
+  context: CliContext,
+  dryRun: boolean
+): Promise<UpdateRepoResult["toolchain"]> {
+  const projectId = context.toolchain.manifest?.projectId ?? context.toolchain.lock?.projectId;
+  if (!projectId) {
+    return {
+      path: context.toolchain.lockPath,
+      refreshed: false,
+      skippedReason: "project_manifest_missing"
+    };
+  }
+
+  const previous = context.toolchain.lock;
+  const next = createToolchainLock(projectId);
+  const changed =
+    !previous ||
+    previous.semanticVersion !== next.semanticVersion ||
+    previous.buildSha !== next.buildSha ||
+    previous.artifactDigest !== next.artifactDigest ||
+    previous.protocolEpoch !== next.protocolEpoch ||
+    previous.writerEpoch !== next.writerEpoch ||
+    previous.readerEpoch !== next.readerEpoch ||
+    previous.cacheEpoch !== next.cacheEpoch ||
+    previous.agentAssetDigest !== next.agentAssetDigest;
+
+  if (changed && !dryRun) {
+    await writeTextFileAtomic(context.toolchain.lockPath, `${JSON.stringify(next, null, 2)}\n`);
+  }
+
+  return {
+    path: context.toolchain.lockPath,
+    refreshed: changed && !dryRun,
+    ...(changed && dryRun ? { planned: true } : {}),
+    ...(previous
+      ? {
+          previousBuildSha: previous.buildSha,
+          previousArtifactDigest: previous.artifactDigest
+        }
+      : {}),
+    buildSha: next.buildSha,
+    artifactDigest: next.artifactDigest
+  };
 }
 
 function runStep(
@@ -237,11 +312,13 @@ function runStep(
     const child = spawn(command, commandArgs, {
       cwd,
       env: { ...process.env, ...extraEnv },
-      stdio: json ? ["ignore", "ignore", "pipe"] : ["ignore", "ignore", "inherit"]
+      timeout: 300_000,
+      killSignal: "SIGKILL",
+      stdio: json ? ["ignore", "ignore", "pipe"] : ["ignore", "inherit", "inherit"]
     });
     let stderr = "";
     child.stderr?.on("data", (chunk: Buffer) => {
-      stderr += chunk.toString();
+      stderr = (stderr + chunk.toString()).slice(-8000);
     });
     child.on("error", (error) => {
       rejectPromise(
@@ -274,7 +351,8 @@ function runStep(
 
 function captureCommand(command: string, commandArgs: readonly string[], cwd = process.cwd(), json = false): Promise<string> {
   return new Promise((resolvePromise, rejectPromise) => {
-    const child = spawn(command, commandArgs, { cwd, stdio: ["ignore", "pipe", "pipe"] });
+    const child = spawn(command, commandArgs, { cwd, timeout: 15_000, killSignal: "SIGKILL", stdio: ["ignore", "pipe", "pipe"] });
+    child.stderr.resume();
     let stdout = "";
     child.stdout.on("data", (chunk: Buffer) => {
       if (stdout.length < 1_000_000) {
@@ -396,6 +474,10 @@ function formatUpdateRepo(result: UpdateRepoResult): string {
       (install) => `  skills[${install.target}]: ${result.dryRun ? `${install.planned ?? 0} planned` : `${install.written} installed`} at ${install.installRoot}${install.issues > 0 ? ` (${install.issues} issue(s))` : ""}`
     ),
     ...(result.skillInstalls.length === 0 ? ["  skills: no recorded install roots (run `bwrk setup` to configure)"] : []),
+    result.toolchain.skippedReason
+      ? `  toolchain: skipped (${result.toolchain.skippedReason})`
+      : `  toolchain: ${result.dryRun ? (result.toolchain.planned ? "refresh planned" : "already current") : result.toolchain.refreshed ? "refreshed" : "already current"}`,
+    ...(result.skillsSkipped ? ["  skills: skipped (--skip-skills)"] : []),
     `  next: ${result.nextCommand}`
   ];
   return `${lines.join("\n")}\n`;

@@ -2061,33 +2061,34 @@ JSON `data` contains `rotated`, `skipped`, `path`, `sizeBytes`, `archivedPath`, 
 ## `update self`
 
 ```bash
-bwrk update self [--ref <ref>] [--repo-url <url>] [--bin-dir <dir>] [--lib-dir <dir>] [--dry-run] [--json]
+bwrk update self [--ref <tag>] [--source] [--repo-url <url>] [--bin-dir <dir>] [--lib-dir <dir>] [--dry-run] [--json]
 ```
 
-Upgrades the machine `bwrk` install from the source repo: clones to a temp directory, builds the bundled CLI with pnpm, and installs the result into the segmented machine location (`~/.local/share/boreal/bwrk`) behind the `~/.local/bin/bwrk` shim. The staged clone is removed afterwards. Requires `git`, `node`, and `pnpm` on PATH. `--ref` pins a branch or tag; `--repo-url` (or `BOREAL_UPDATE_REPO_URL`) overrides the source repo; `--dry-run` performs discovery and verification without changing the machine install. The machine install never points at a live source checkout, so upgrading cannot be broken by in-progress edits to a development clone.
+Downloads the latest published, ready-to-run GitHub release, checks its SHA-256 checksum and embedded build identity, then replaces the machine installation behind the `~/.local/bin/bwrk` shim. An already-current build skips the bundle download. Failed installation verification restores the previous installation. Requires Node and `tar`, not Git, pnpm, or Corepack. Network requests and child processes have bounded timeouts.
+
+`--ref` selects a published release tag; `--repo-url` (or `BOREAL_UPDATE_REPO_URL`) selects an HTTPS GitHub repository. `--dry-run` checks release metadata without downloading or installing the bundle. If no release is available, the updater exits clearly without changing the installation; it never silently builds from source. Development source builds remain available through explicit `--source`, where `--ref` selects a Git branch or tag and Git/pnpm are required.
 
 JSON `data` contains `updated`, `repoUrl`, `ref`, `previousVersion`, `installedVersion`, `binPath`, and per-step `steps` with durations.
 
 ## `update repo`
 
 ```bash
-bwrk update repo [--dry-run] [--json]
+bwrk update repo [--dry-run] [--skip-skills] [--json]
 ```
 
-Brings the current workspace up to the installed `bwrk` version: migrates legacy compact-state storage to the git-first per-record object store when the `.boreal/project.json` marker is not already `objects-v1`, then reinstalls agent skills into every install root recorded by project setup. Run it in each existing project after `bwrk update self`, then run `bwrk sync refresh` to rebuild generated artifacts. `--dry-run` reports the migration and skill-install plan without changing the workspace. Exits `1` when a skill install reports issues.
+Brings the current workspace up to the executing `bwrk` version: migrates legacy compact-state storage to the git-first per-record object store when the `.boreal/project.json` marker is not already `objects-v1`, refreshes `.boreal/toolchain.lock.json` to the executing build, and reinstalls agent skills into every install root recorded by project setup. Run it in each existing project after `bwrk update self`, then run `bwrk sync refresh` to rebuild generated artifacts. `--dry-run` reports the migration, toolchain-lock, and skill-install plan without changing the workspace. `--skip-skills` is the recovery option when an install root is managed or unwritable; it still repairs the project toolchain. Exits `1` when a skill install reports issues.
 
-JSON `data` contains `workspaceRoot`, `storage` (`migrated`, `from`, `to`), `skillInstalls` (per target: `installRoot`, `written`, `issues`), and `nextCommand`.
+JSON `data` contains `workspaceRoot`, `storage` (`migrated`, `from`, `to`), `toolchain` (`path`, `refreshed`, current build identity, and previous identity when changed), `skillInstalls` (per target: `installRoot`, `written`, `issues`), optional `skillsSkipped`, and `nextCommand`.
 
 ## `upgrade`
 
 ```bash
-bwrk upgrade [--machine|--project] [--ref <ref>] [--repo-url <url>] [--bin-dir <dir>] [--lib-dir <dir>] [--dry-run] [--json]
+bwrk upgrade [--machine|--project] [--ref <tag>] [--source] [--repo-url <url>] [--bin-dir <dir>] [--lib-dir <dir>] [--skip-skills] [--dry-run] [--json]
 ```
 
-Runs the project asset update when inside an initialized project and the
-machine CLI update otherwise. In a project, the default updates both scopes,
-project assets first. Use `--machine` or `--project` to select one scope.
-`bwrk update self` and `bwrk update repo` remain advanced equivalents.
+Updates the machine CLI to the latest published release, then refreshes the current initialized project's assets using the installed binary. A failed machine update does not touch project assets. Outside a project, only the machine installation is updated. Use `--machine` or `--project` to select one scope. `--skip-skills` skips skill installation while still updating project storage/toolchain assets. Dry-run checks the release and previews project changes using the current process without executing a new binary. `bwrk update self` and `bwrk update repo` remain advanced equivalents.
+
+Release artifacts are built and smoke-tested in `.github/workflows/upgrade-release.yml`, then published under a commit-specific tag. The default updater follows GitHub's latest published release. Existing source-building CLI installations need one upgrade to receive this updater; publishing the first release is required before the download-based path is usable.
 
 ## `ledger status`
 
