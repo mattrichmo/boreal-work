@@ -209,6 +209,49 @@ describe("tui-contracts: buildRepoRollupView", () => {
     expect(rollup.summary.closed).toBe(1);
   });
 
+  it("reports ambiguous fallback ownership when unparented work overlaps sprint scopes", () => {
+    const firstSprint = work({
+      id: "bw_sprint_1",
+      title: "Sprint 1",
+      kind: "sprint",
+      status: "in_progress",
+      dependencyIds: ["bw_task_1"]
+    });
+    const secondSprint = work({
+      id: "bw_sprint_2",
+      title: "Sprint 2",
+      kind: "sprint",
+      status: "in_progress",
+      dependencyIds: [firstSprint.meta.id]
+    });
+    const task = work({ id: "bw_task_1", title: "Overlapping task", kind: "task", status: "ready" });
+
+    const rollup = buildRepoRollupView({
+      workspaceRoot: "/repo",
+      generatedAt: "2026-01-01T00:00:00.000Z",
+      projectName: "demo",
+      work: [firstSprint, secondSprint, task],
+      graphEdges: []
+    });
+
+    expect(rollup.warnings).toEqual([
+      expect.objectContaining({
+        workId: task.meta.id,
+        candidateSprintIds: [firstSprint.meta.id, secondSprint.meta.id],
+        candidateSprintTitles: [firstSprint.title, secondSprint.title]
+      })
+    ]);
+
+    const repaired = buildRepoRollupView({
+      workspaceRoot: "/repo",
+      generatedAt: "2026-01-01T00:00:00.000Z",
+      projectName: "demo",
+      work: [firstSprint, secondSprint, { ...task, parentId: firstSprint.meta.id }],
+      graphEdges: []
+    });
+    expect(repaired.warnings).toEqual([]);
+  });
+
   it("treats verified/closed/cancelled as terminal for progress and reports cancelled separately", () => {
     const parent = work({ id: "bw_milestone_1", title: "Milestone", kind: "milestone", status: "ready" });
     const done = work({ id: "bw_task_1", title: "Done", kind: "task", status: "closed", parentId: "bw_milestone_1" });

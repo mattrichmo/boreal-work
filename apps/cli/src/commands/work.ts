@@ -21,6 +21,7 @@ import {
   type RepoRollupSummary,
   type RollupNodeKind,
   type RollupNodeView,
+  type RollupScopeAmbiguity,
   type WorkItemView,
   type WorkReservationView
 } from "@boreal/ui-model";
@@ -269,6 +270,8 @@ async function mainWorkCommand(
       if (!title) {
         throw new BorealError("BOREAL_INVALID_INPUT", "Work title is required");
       }
+      const parentRef = flagValue(args, "parent");
+      const parentId = parentRef ? await dependencies.resolveWorkId(context, parentRef) : undefined;
       const work = await context.runtime.createWork({
         title,
         description: flagValue(args, "description"),
@@ -278,6 +281,7 @@ async function mainWorkCommand(
         labels: dependencies.labelsFromArgs(args),
         requiredCloseoutGates: dependencies.requiredCloseoutGateInputsFromArgs(args),
         sourceRefs: dependencies.sourceRefsFromArgs(args),
+        parentId,
         ready: hasFlag(args, "ready")
       });
       output.write(formatRecord(work, json));
@@ -877,6 +881,7 @@ interface WorkRollupResult {
   readonly workspaceRoot: string;
   readonly filters: WorkRollupFilters;
   readonly summary: RepoRollupSummary;
+  readonly warnings: readonly RollupScopeAmbiguity[];
   readonly rows: readonly WorkRollupRow[];
 }
 
@@ -983,8 +988,28 @@ async function workRollupResult(
       containerId
     },
     summary: view.summary,
+    warnings: containerId ? rollupWarningsForContainer(view, containerId) : view.warnings,
     rows: limitedRows
   };
+}
+
+function rollupWarningsForContainer(
+  view: { readonly flatRows: readonly RollupNodeView[]; readonly warnings: readonly RollupScopeAmbiguity[] },
+  containerId: WorkId
+): readonly RollupScopeAmbiguity[] {
+  const nodesById = new Map(view.flatRows.map((node) => [node.id, node] as const));
+  const scopedIds = new Set<string>();
+  const visit = (workId: string): void => {
+    if (scopedIds.has(workId)) {
+      return;
+    }
+    scopedIds.add(workId);
+    for (const childId of nodesById.get(workId)?.childIds ?? []) {
+      visit(childId);
+    }
+  };
+  visit(containerId);
+  return view.warnings.filter((warning) => scopedIds.has(warning.workId));
 }
 
 function toWorkRollupRow(node: RollupNodeView, depth: number): WorkRollupRow {
@@ -1014,19 +1039,27 @@ const WORK_ROLLUP_COLUMNS: readonly BoundedTableColumn[] = [
 ];
 
 function formatWorkRollup(result: WorkRollupResult, wide: boolean): string {
-  if (result.rows.length === 0) {
-    return "No work found for rollup\n";
+  const tableOutput = result.rows.length === 0
+    ? "No work found for rollup\n"
+    : boundedTable(
+        result.rows.map((row) => ({
+          kind: `${"  ".repeat(row.depth)}${row.kind}`,
+          status: row.status ?? "",
+          title: row.title,
+          done: row.total !== undefined ? `${row.done}/${row.total}` : "-",
+          blk: row.isContainer ? String(row.blocked ?? 0) : "-",
+          owner: row.owner ?? "-"
+        })),
+        WORK_ROLLUP_COLUMNS,
+        { wide }
+      );
+  if (result.warnings.length === 0) {
+    return tableOutput;
   }
-  return boundedTable(
-    result.rows.map((row) => ({
-      kind: `${"  ".repeat(row.depth)}${row.kind}`,
-      status: row.status ?? "",
-      title: row.title,
-      done: row.total !== undefined ? `${row.done}/${row.total}` : "-",
-      blk: row.isContainer ? String(row.blocked ?? 0) : "-",
-      owner: row.owner ?? "-"
-    })),
-    WORK_ROLLUP_COLUMNS,
-    { wide }
-  );
+  const sample = result.warnings
+    .slice(0, 3)
+    .map((warning) => `${warning.workTitle} (${warning.candidateSprintTitles.join(", ")})`)
+    .join("; ");
+  const suffix = result.warnings.length > 3 ? `; plus ${result.warnings.length - 3} more` : "";
+  return `${tableOutput}⚠ ${result.warnings.length} unparented work item(s) match multiple sprint scopes; set an explicit --parent. Examples: ${sample}${suffix}\n`;
 }

@@ -20,6 +20,7 @@ Confirm the current project context. Prefer `bwrk prime --json` when the workspa
 - When the user asks to plan, break down, decompose, or make work granular, route to `boreal.workflow.plan-work.v1`.
 - Choose planning depth deliberately: quick for one bounded task, standard for a small dependency-aware delivery, and granular when uncertainty, design judgment, explicit critique, visual/accessibility risk, or separate validation materially changes the work.
 - When the user asks for a reusable, captured, or repeatable work structure, route through `boreal.workflow.plan-work.v1` or `boreal.workflow.create-work-structure.v1` and use the `bwrk template` path instead of manually replaying one-off `work create` commands.
+- When manually creating a hierarchy, set `--parent <work-ref>` on every child work item. Treat dependency edges as prerequisites/scope signals only; they must not be used as a substitute for roll-up containment. After creating or repairing a structure, inspect `bwrk work rollup --all --json` and resolve any `rollup.ambiguous_scope` doctor warning with explicit parents.
 - If the request crosses repositories, stop and ask for the explicit workspace and memory root.
 
 ## Canonical Workflow IDs

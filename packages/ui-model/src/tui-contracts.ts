@@ -295,12 +295,21 @@ export interface RepoRollupSummary {
   readonly activeReservations: number;
 }
 
+export interface RollupScopeAmbiguity {
+  readonly workId: string;
+  readonly workTitle: string;
+  readonly candidateSprintIds: readonly string[];
+  readonly candidateSprintTitles: readonly string[];
+}
+
 export interface RepoRollupView {
   readonly generatedAt: string;
   readonly workspaceRoot: string;
   readonly root: RollupNodeView;
   readonly flatRows: readonly RollupNodeView[];
   readonly summary: RepoRollupSummary;
+  /** Unparented work that belongs to more than one inferred sprint scope. */
+  readonly warnings: readonly RollupScopeAmbiguity[];
 }
 
 const TERMINAL_STATUSES = new Set<WorkStatus>(["verified", "closed", "cancelled"]);
@@ -406,6 +415,57 @@ function computeScopeIdsWithIndex(
   return visited;
 }
 
+export function findRollupScopeAmbiguities(input: {
+  readonly work: readonly WorkItem[];
+  readonly graphEdges: readonly GraphEdge[];
+}): readonly RollupScopeAmbiguity[] {
+  const byId = new Map<string, WorkItem>(input.work.map((work) => [work.meta.id, work]));
+  return findRollupScopeAmbiguitiesWithIndex(input.work, byId, buildBlockerIndex(input.graphEdges));
+}
+
+function findRollupScopeAmbiguitiesWithIndex(
+  workItems: readonly WorkItem[],
+  byId: ReadonlyMap<string, WorkItem>,
+  blockersByTarget: ReadonlyMap<string, readonly string[]>
+): readonly RollupScopeAmbiguity[] {
+  const explicitParented = new Set<string>(
+    workItems
+      .filter((work) => work.parentId !== undefined && byId.has(work.parentId))
+      .map((work) => work.meta.id)
+  );
+  const sprintByMember = new Map<string, Set<string>>();
+  const sprints = workItems.filter((work) => work.kind === "sprint");
+
+  for (const sprint of sprints) {
+    const scope = computeScopeIdsWithIndex(sprint.meta.id, byId, blockersByTarget, buildParentIndex(workItems));
+    for (const memberId of scope) {
+      if (memberId === sprint.meta.id || explicitParented.has(memberId)) {
+        continue;
+      }
+      const candidateSprints = sprintByMember.get(memberId) ?? new Set<string>();
+      candidateSprints.add(sprint.meta.id);
+      sprintByMember.set(memberId, candidateSprints);
+    }
+  }
+
+  return [...sprintByMember.entries()]
+    .filter(([, sprintIds]) => sprintIds.size > 1)
+    .map(([workId, sprintIds]) => {
+      const orderedSprints = [...sprintIds]
+        .map((sprintId) => byId.get(sprintId))
+        .filter((sprint): sprint is WorkItem => sprint !== undefined)
+        .sort((left, right) => left.title.localeCompare(right.title) || left.meta.id.localeCompare(right.meta.id));
+      const work = byId.get(workId);
+      return {
+        workId,
+        workTitle: work?.title ?? workId,
+        candidateSprintIds: orderedSprints.map((sprint) => sprint.meta.id),
+        candidateSprintTitles: orderedSprints.map((sprint) => sprint.title)
+      };
+    })
+    .sort((left, right) => left.workTitle.localeCompare(right.workTitle) || left.workId.localeCompare(right.workId));
+}
+
 function rollupKind(kind: WorkKind): RollupNodeKind {
   return kind;
 }
@@ -417,7 +477,9 @@ function rollupKind(kind: WorkKind): RollupNodeKind {
  * `sprint show`/`sprint board` scope), so a sprint's scoped tasks show up as
  * roll-up children even when they were never explicitly parented to it.
  * Each work item appears exactly once: parentId wins over sprint-scope
- * attachment, which wins over falling back to the root.
+ * attachment, which wins over falling back to the root. Ambiguous fallback
+ * ownership is retained in `warnings` so callers can surface the repair path
+ * instead of treating the first inferred sprint as canonical.
  */
 export function buildRepoRollupView(input: {
   readonly workspaceRoot: string;
@@ -432,6 +494,7 @@ export function buildRepoRollupView(input: {
   const byId = new Map<string, WorkItem>(input.work.map((work) => [work.meta.id, work]));
   const blockersByTarget = buildBlockerIndex(input.graphEdges);
   const childrenByParent = buildParentIndex(input.work);
+  const warnings = findRollupScopeAmbiguitiesWithIndex(input.work, byId, blockersByTarget);
   const explicitParentOf = new Map<string, string>();
   for (const work of input.work) {
     if (work.parentId && byId.has(work.parentId)) {
@@ -627,6 +690,7 @@ export function buildRepoRollupView(input: {
     workspaceRoot: input.workspaceRoot,
     root,
     flatRows,
-    summary
+    summary,
+    warnings
   };
 }

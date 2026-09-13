@@ -39,7 +39,8 @@ import {
 import { inspectDaemonStatus, type DaemonStatusResult } from "@boreal/daemon";
 import { buildContextPack, buildContextProjection } from "@boreal/search";
 import { FILE_STORE_SCHEMA_VERSION, FileEventLog, breakStaleFileLock, readTransactionJournals } from "@boreal/storage";
-import { deriveReadinessStatus } from "@boreal/work-engine";
+import { findRollupScopeAmbiguities } from "@boreal/ui-model";
+import { deriveReadinessStatus, workParentIssues } from "@boreal/work-engine";
 
 import type { CliContext } from "./context.js";
 import { resolveEnvironmentManifest } from "./environment-manifest.js";
@@ -1781,6 +1782,8 @@ async function validateStoreRecords(
       const sourceById = new Map(knowledgeSources.map((record) => [record.meta.id, record]));
       const verificationsById = new Map(verifications.map((record) => [record.meta.id, record]));
       const workById = new Map(workItems.map((work) => [work.meta.id, work]));
+      const parentIssues = workParentIssues(workItems);
+      const rollupScopeAmbiguities = findRollupScopeAmbiguities({ work: workItems, graphEdges });
       const summariesById = new Map(agentSummaries.map((record) => [record.meta.id, record]));
       const summaryArtifactUris = new Set(agentSummaries.flatMap((summary) => (summary.artifactUri ? [summary.artifactUri] : [])));
       const operationById = new Map<string, RuntimeOperation>(operations.map((operation) => [operation.meta.id, operation]));
@@ -2226,6 +2229,8 @@ async function validateStoreRecords(
 
       return {
         workCount: workItems.length,
+        parentIssues,
+        rollupScopeAmbiguities,
         operationCount: operations.length,
         malformedRecords,
         danglingDependencies,
@@ -2319,6 +2324,25 @@ async function validateStoreRecords(
     });
     diagnostics.push(await validateResultsDirectory(context));
     diagnostics.push(diagnosticFromList("state.record_shape", "Malformed runtime records", summary.malformedRecords));
+    diagnostics.push(
+      diagnosticFromList("work.parent_links", "Invalid work parent links", summary.parentIssues)
+    );
+    diagnostics.push({
+      code: "rollup.ambiguous_scope",
+      severity: summary.rollupScopeAmbiguities.length > 0 ? "warning" : "ok",
+      message:
+        summary.rollupScopeAmbiguities.length > 0
+          ? "Unparented work matches multiple sprint scopes; global roll-up ownership is ambiguous"
+          : "Roll-up sprint-scope ownership is unambiguous",
+      details:
+        summary.rollupScopeAmbiguities.length > 0
+          ? {
+              items: summary.rollupScopeAmbiguities,
+              repairCommand: "bwrk work edit <work-ref> --parent <sprint-ref> --json",
+              repairNote: "Use explicit parent links for hierarchy; keep dependency edges for prerequisites and scope."
+            }
+          : undefined
+    });
     diagnostics.push(diagnosticFromList("work.dangling_dependencies", "Dangling work dependencies", summary.danglingDependencies));
     diagnostics.push(diagnosticFromList("work.dangling_evidence", "Dangling work evidence references", summary.danglingEvidence));
     diagnostics.push(

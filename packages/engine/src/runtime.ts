@@ -68,6 +68,7 @@ import { toWorkItemView, type WorkItemView } from "@boreal/ui-model";
 import {
   addBlockingDependency as addBlockingDependencyDomain,
   assertWorkDependencyMutationAllowed,
+  assertWorkParentLink,
   attachEvidenceToWork,
   attachVerificationToWork,
   closeoutGateSubjectTypeForWorkKind,
@@ -476,6 +477,12 @@ export function createBorealRuntime(options: BorealRuntimeOptions = {}): BorealR
       return store.write(async (writer) => {
         const { ready, ...workInput } = input;
         const createdAt = now();
+        if (workInput.parentId) {
+          assertWorkParentLink({
+            parentId: workInput.parentId,
+            workItems: await writer.listWorkItems()
+          });
+        }
         const work = await createUniqueWorkItem(writer, {
           ...workInput,
           actor,

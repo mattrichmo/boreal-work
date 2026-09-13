@@ -18,6 +18,7 @@ Confirm the current project context. Prefer `bwrk prime --json` when the workspa
 - Follow the workflow's allowed commands and finish criteria.
 - Keep this skill as a thin adapter; do not invent steps that belong in the workflow file.
 - Sprint Git branching is automatic through the workflow's `bwrk sprint launch` command; do not create or switch sprint branches manually.
+- Tasks added manually to a launched sprint must use `bwrk work create ... --parent <sprint-ref>` (or `work edit ... --parent <sprint-ref>` during repair). A dependency edge alone does not establish hierarchy containment for the roll-up.
 - If the request crosses repositories, stop and ask for the explicit workspace and memory root.
 
 ## Agent Directive Handling

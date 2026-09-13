@@ -137,6 +137,7 @@ import {
 } from "@boreal/storage";
 import { toWorkItemView, type BorealSourceRefResolutionView, type WorkItemView, type WorkSourceRefView } from "@boreal/ui-model";
 import {
+  assertWorkParentLink,
   closeoutGateSubjectTypeForWorkKind,
   createRequiredCloseoutGates,
   deriveReadinessStatus,
@@ -5651,6 +5652,8 @@ async function editWorkCommand(context: CliContext, workId: WorkId, args: Parsed
   const description = flagValue(args, "description");
   const kind = parseWorkKind(flagValue(args, "kind"));
   const priority = parsePriority(flagValue(args, "priority"));
+  const parentRef = flagValue(args, "parent");
+  const clearParent = hasFlag(args, "clear-parent");
   const labels = flagValues(args, "label");
   const acceptanceCriteria = flagValues(args, "acceptance");
   const requiredCloseoutGateInputs = requiredCloseoutGateInputsFromArgs(args);
@@ -5668,9 +5671,14 @@ async function editWorkCommand(context: CliContext, workId: WorkId, args: Parsed
     acceptanceCriteria.length === 0 &&
     requiredCloseoutGateInputs.length === 0 &&
     !clearRequiredCloseoutGates &&
-    forceGateRefs.length === 0
+    forceGateRefs.length === 0 &&
+    parentRef === undefined &&
+    !clearParent
   ) {
     throw new BorealError("BOREAL_INVALID_INPUT", "work edit requires at least one mutable field flag");
+  }
+  if (parentRef !== undefined && clearParent) {
+    throw new BorealError("BOREAL_INVALID_INPUT", "work edit cannot combine --parent with --clear-parent");
   }
   if (requiredCloseoutGateInputs.length > 0 && clearRequiredCloseoutGates) {
     throw new BorealError("BOREAL_INVALID_INPUT", "work edit cannot combine --required-gate with --clear-required-gates");
@@ -5684,10 +5692,19 @@ async function editWorkCommand(context: CliContext, workId: WorkId, args: Parsed
   if (forceGateRefs.length === 0 && (forceGateReason || forceGateComment || forceGateEvidenceIds.length > 0)) {
     throw new BorealError("BOREAL_INVALID_INPUT", "--force-gate-reason, --force-gate-comment, and --force-gate-evidence require --force-gate");
   }
+  const parentId = parentRef ? await context.runtime.resolveWorkReference(parentRef) : undefined;
 
   const current = nowIso();
   const result = await context.store.write(async (writer) => {
     const work = await requireCliWork(writer, workId);
+    const nextParentId = clearParent ? undefined : parentRef !== undefined ? parentId : work.parentId;
+    if (parentRef !== undefined || clearParent) {
+      assertWorkParentLink({
+        workId: work.meta.id,
+        parentId: nextParentId,
+        workItems: await writer.listWorkItems()
+      });
+    }
     const nextLabels = labels.length > 0 ? labelsFromArgs(args) : work.labels;
     const nextKind = kind ?? work.kind;
     let requiredCloseoutGates =
@@ -5724,6 +5741,7 @@ async function editWorkCommand(context: CliContext, workId: WorkId, args: Parsed
         acceptanceCriteria: acceptanceCriteria.length > 0 ? normalizedNonEmptyStrings(acceptanceCriteria) : work.acceptanceCriteria,
         requiredCloseoutGates,
         labels: nextLabels,
+        parentId: nextParentId,
         meta: {
           ...work.meta,
           tags: nextLabels
@@ -5925,6 +5943,7 @@ function workEditChangedFields(before: WorkItem, after: WorkItem): readonly stri
   if (before.description !== after.description) changed.push("description");
   if (before.kind !== after.kind) changed.push("kind");
   if (before.priority !== after.priority) changed.push("priority");
+  if (before.parentId !== after.parentId) changed.push("parentId");
   if (!arraysEqual(before.labels, after.labels)) changed.push("labels");
   if (!arraysEqual(before.acceptanceCriteria, after.acceptanceCriteria)) changed.push("acceptanceCriteria");
   if (JSON.stringify(before.requiredCloseoutGates ?? []) !== JSON.stringify(after.requiredCloseoutGates ?? [])) {

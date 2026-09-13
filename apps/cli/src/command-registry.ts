@@ -1470,8 +1470,9 @@ export const COMMAND_DEFINITIONS: readonly CommandDefinition[] = [
     category: "work",
     summary: "Create a work item.",
     usage:
-      "bwrk work create <title> [--description <text>] [--priority low|normal|high|critical] [--kind <kind>] [--label <label>...] [--acceptance <text>...] [--required-gate verification|checkpoint|review|audit[:self|direct_children|descendants]...] [--gate-command <command>...] [--gate-expect <text>...] [--gate-trust trusted|boreal_witnessed|external_attested...] [--gate-current-revision] [--gate-current-git] [--source <source-ref>...] [--ready] [--json]",
+      "bwrk work create <title> [--parent <work-ref>] [--description <text>] [--priority low|normal|high|critical] [--kind <kind>] [--label <label>...] [--acceptance <text>...] [--required-gate verification|checkpoint|review|audit[:self|direct_children|descendants]...] [--gate-command <command>...] [--gate-expect <text>...] [--gate-trust trusted|boreal_witnessed|external_attested...] [--gate-current-revision] [--gate-current-git] [--source <source-ref>...] [--ready] [--json]",
     flags: [
+      flag("parent", "value", "Explicit hierarchy parent work reference. Use this for roll-up containment; dependencies remain prerequisites."),
       flag("description", "value", "Work description."),
       flag("priority", "value", "Work priority: low, normal, high, or critical."),
       flag("kind", "value", "Work kind."),
@@ -1527,7 +1528,7 @@ export const COMMAND_DEFINITIONS: readonly CommandDefinition[] = [
     summary: "Render the work hierarchy as a bounded table.",
     usage: "bwrk work rollup [<container-ref>] [--all] [--kind issue|task|sprint|milestone] [--label <label>...] [--depth <n>] [--limit <n>] [--wide] [--json]",
     description:
-      "Renders the milestone -> sprint -> task hierarchy as an indented, terminal-width-clamped table using the same membership and progress derivation as the TUI Roll-Up route and `sprint show`/`sprint board` scope (`buildRepoRollupView`). With no argument, renders every root container (milestones and parentless sprints/issues with children). With <container-ref>, renders that subtree, always including the container itself regardless of its status. Defaults to open work; pass --all to include closed/cancelled/verified work. Containers show a done/total ratio and blocked-descendant count; leaves show `-` for both.",
+      "Renders the milestone -> sprint -> task hierarchy as an indented, terminal-width-clamped table using the same membership and progress derivation as the TUI Roll-Up route and `sprint show`/`sprint board` scope (`buildRepoRollupView`). With no argument, renders every root container (milestones and parentless sprints/issues with children). With <container-ref>, renders that subtree, always including the container itself regardless of its status. Defaults to open work; pass --all to include closed/cancelled/verified work. Containers show a done/total ratio and blocked-descendant count; leaves show `-` for both. JSON includes `warnings` when unparented work matches multiple inferred sprint scopes; repair those items with `work edit --parent`.",
     flags: [
       flag("all", "boolean", "Include closed, cancelled, and verified work."),
       flag("kind", "value", "Only include nodes of this kind."),
@@ -1803,9 +1804,11 @@ export const COMMAND_DEFINITIONS: readonly CommandDefinition[] = [
     path: ["work", "edit"],
     category: "work",
     summary: "Edit work item fields.",
-    usage: "bwrk work edit <work-ref> [--title <text>] [--description <text>] [--kind issue|task|sprint|milestone] [--priority low|normal|high|critical] [--label <label>...] [--acceptance <text>...] [--required-gate verification|checkpoint|review|audit[:self|direct_children|descendants]... [--gate-command <command>...] [--gate-expect <text>...] [--gate-trust trusted|boreal_witnessed|external_attested...] [--gate-current-revision] [--gate-current-git]|--clear-required-gates] [--force-gate <gate-id|kind[:scope]>... --force-gate-reason <code> --force-gate-comment <text>] [--force-gate-evidence <evidence-id>...] [--json]",
+    usage: "bwrk work edit <work-ref> [--parent <work-ref>|--clear-parent] [--title <text>] [--description <text>] [--kind issue|task|sprint|milestone] [--priority low|normal|high|critical] [--label <label>...] [--acceptance <text>...] [--required-gate verification|checkpoint|review|audit[:self|direct_children|descendants]... [--gate-command <command>...] [--gate-expect <text>...] [--gate-trust trusted|boreal_witnessed|external_attested...] [--gate-current-revision] [--gate-current-git]|--clear-required-gates] [--force-gate <gate-id|kind[:scope]>... --force-gate-reason <code> --force-gate-comment <text>] [--force-gate-evidence <evidence-id>...] [--json]",
     description: "Updates mutable work fields while preserving source refs, evidence, verification, dependencies, and audit events.",
     flags: [
+      flag("parent", "value", "Set the explicit hierarchy parent work reference. Dependencies are preserved."),
+      flag("clear-parent", "boolean", "Remove the explicit hierarchy parent; use only when intentionally making work root-level."),
       flag("title", "value", "Replacement title."),
       flag("description", "value", "Replacement description."),
       flag("kind", "value", "Replacement kind."),

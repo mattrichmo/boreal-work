@@ -82,6 +82,110 @@ export interface RemoveBlockingDependencyInput {
   readonly now: IsoTimestamp;
 }
 
+export interface WorkParentIssue {
+  readonly workId: WorkId;
+  readonly parentId: WorkId;
+  readonly issue: "dangling_parent" | "self_parent" | "parent_cycle";
+  readonly cycle?: readonly WorkId[];
+}
+
+/**
+ * Validate an explicit parent link before it is persisted. Dependency edges
+ * describe prerequisites and scope; they are not a substitute for the
+ * hierarchy parent used by roll-up views.
+ */
+export function assertWorkParentLink(input: {
+  readonly workId?: WorkId;
+  readonly parentId?: WorkId;
+  readonly workItems: readonly WorkItem[];
+}): void {
+  const parentId = input.parentId;
+  if (!parentId) {
+    return;
+  }
+
+  const byId = new Map(input.workItems.map((work) => [work.meta.id, work]));
+  if (!byId.has(parentId)) {
+    throw new BorealError("BOREAL_NOT_FOUND", "Parent work item not found", {
+      parentId,
+      domain: "work.parent"
+    });
+  }
+  if (input.workId === parentId) {
+    throw new BorealError("BOREAL_INVALID_INPUT", "A work item cannot be its own parent", {
+      workId: input.workId,
+      parentId,
+      domain: "work.parent"
+    });
+  }
+
+  const seen = new Set<WorkId>(input.workId ? [input.workId] : []);
+  const chain: WorkId[] = [];
+  let current: WorkId | undefined = parentId;
+  while (current) {
+    if (seen.has(current)) {
+      throw new BorealError("BOREAL_INVALID_INPUT", "Work parent would create a cycle", {
+        workId: input.workId,
+        parentId,
+        cycle: [...chain, current],
+        domain: "work.parent"
+      });
+    }
+    seen.add(current);
+    chain.push(current);
+    const parent = byId.get(current);
+    if (!parent) {
+      throw new BorealError("BOREAL_CONFLICT", "Parent chain contains a missing work item", {
+        workId: input.workId,
+        parentId,
+        missingId: current,
+        domain: "work.parent"
+      });
+    }
+    current = parent.parentId;
+  }
+}
+
+/** Return persisted parent-link defects for doctor and roll-up health checks. */
+export function workParentIssues(workItems: readonly WorkItem[]): readonly WorkParentIssue[] {
+  const byId = new Map(workItems.map((work) => [work.meta.id, work]));
+  const issues: WorkParentIssue[] = [];
+
+  for (const work of workItems) {
+    const parentId = work.parentId;
+    if (!parentId) {
+      continue;
+    }
+    if (!byId.has(parentId)) {
+      issues.push({ workId: work.meta.id, parentId, issue: "dangling_parent" });
+      continue;
+    }
+    if (parentId === work.meta.id) {
+      issues.push({ workId: work.meta.id, parentId, issue: "self_parent", cycle: [work.meta.id, parentId] });
+      continue;
+    }
+
+    const seen = new Set<WorkId>([work.meta.id]);
+    const chain: WorkId[] = [work.meta.id];
+    let current: WorkId | undefined = parentId;
+    while (current) {
+      if (seen.has(current)) {
+        issues.push({ workId: work.meta.id, parentId, issue: "parent_cycle", cycle: [...chain, current] });
+        break;
+      }
+      seen.add(current);
+      chain.push(current);
+      const parent = byId.get(current);
+      if (!parent) {
+        break;
+      }
+      current = parent.parentId;
+    }
+  }
+
+  return issues;
+}
+
 const TERMINAL_DEPENDENCY_MUTATION_STATUSES = new Set<WorkStatus>(["closed", "cancelled", "verified"]);
 
 export function assertWorkDependencyMutationAllowed(

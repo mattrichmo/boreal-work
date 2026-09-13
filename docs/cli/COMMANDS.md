@@ -989,10 +989,10 @@ JSON `data` shape:
 ## `work create`
 
 ```bash
-bwrk work create <title> [--description <text>] [--priority low|normal|high|critical] [--kind <kind>] [--label <label>...] [--acceptance <text>...] [--required-gate verification|checkpoint|review|audit[:self|direct_children|descendants]...] [--gate-command <command>...] [--gate-expect <text>...] [--gate-trust trusted|boreal_witnessed|external_attested...] [--gate-current-revision] [--gate-current-git] [--source <source-ref>...] [--ready] [--json]
+bwrk work create <title> [--parent <work-ref>] [--description <text>] [--priority low|normal|high|critical] [--kind <kind>] [--label <label>...] [--acceptance <text>...] [--required-gate verification|checkpoint|review|audit[:self|direct_children|descendants]...] [--gate-command <command>...] [--gate-expect <text>...] [--gate-trust trusted|boreal_witnessed|external_attested...] [--gate-current-revision] [--gate-current-git] [--source <source-ref>...] [--ready] [--json]
 ```
 
-Creates a work item. `--label`, `--acceptance`, `--required-gate`, and `--source` may be repeated. Source references are stored on the work record metadata so promoted discoveries keep their original context.
+Creates a work item. `--label`, `--acceptance`, `--required-gate`, and `--source` may be repeated. `--parent` sets the explicit hierarchy parent used by roll-up views; dependency edges remain prerequisites and scope signals. Source references are stored on the work record metadata so promoted discoveries keep their original context.
 
 Behavior:
 
@@ -1003,6 +1003,7 @@ Behavior:
 - `--gate-trust` limits acceptable evidence to Boreal-witnessed or verified external attestations. `trusted` accepts either; repeated flags align with repeated gates by index.
 - `--gate-current-revision` and `--gate-current-git` make verification and closeout reject evidence captured for an older work contract or Git checkpoint.
 - `--ready` marks the new item ready in the same runtime write transaction.
+- Use `--parent <work-ref>` whenever the item belongs under a milestone, sprint, or other work container. The runtime rejects missing parent references and parent cycles.
 
 Example:
 
@@ -1085,7 +1086,7 @@ JSON `data` shape:
 bwrk work rollup [<container-ref>] [--all] [--kind issue|task|sprint|milestone] [--label <label>...] [--depth <n>] [--limit <n>] [--wide] [--json]
 ```
 
-Renders the milestone -> sprint -> task hierarchy as an indented, terminal-width-clamped table using the same membership and progress derivation as the TUI Roll-Up route and `sprint show`/`sprint board` scope (`@boreal/ui-model`'s `buildRepoRollupView`) -- there is no second hierarchy/progress derivation in the CLI.
+Renders the milestone -> sprint -> task hierarchy as an indented, terminal-width-clamped table using the same membership and progress derivation as the TUI Roll-Up route and `sprint show`/`sprint board` scope (`@boreal/ui-model`'s `buildRepoRollupView`) -- there is no second hierarchy/progress derivation in the CLI. When unparented work matches multiple inferred sprint scopes, JSON includes `warnings` and human output points to `work edit --parent`; dependency edges remain prerequisites/scope signals, not hierarchy containment.
 
 With no argument, renders every root container: milestones, plus parentless sprints/issues that have children. With `<container-ref>`, resolved the same way as other work references, renders that subtree and always includes the container row itself regardless of its status. Defaults to open work (non-closed, non-cancelled, non-verified); pass `--all` to include closed work. Containers (nodes with children) show a `done/total` progress ratio and a blocked-descendant count in the `blk` column; leaves show `-` for both. The `owner` column is the active reservation's agent, if any.
 
@@ -1105,6 +1106,7 @@ JSON `data` shape:
   "workspaceRoot": "/abs/path",
   "filters": { "all": false, "kind": null, "labels": [], "depth": null, "limit": null, "containerId": null },
   "summary": { "totalNodes": 42, "milestones": 3, "sprints": 5, "tasks": 30, "open": 20, "blocked": 4, "needsVerification": 1, "closed": 15, "cancelled": 2, "activeReservations": 1 },
+  "warnings": [],
   "rows": [
     {
       "id": "bw_work_...",
@@ -1597,10 +1599,10 @@ Closes a work item. Runtime policy requires a passing verification before close,
 ## `work edit`
 
 ```bash
-bwrk work edit <work-ref> [--title <text>] [--description <text>] [--kind issue|task|sprint|milestone] [--priority low|normal|high|critical] [--label <label>...] [--acceptance <text>...] [--required-gate verification|checkpoint|review|audit[:self|direct_children|descendants]... [--gate-command <command>...] [--gate-expect <text>...] [--gate-trust trusted|boreal_witnessed|external_attested...] [--gate-current-revision] [--gate-current-git]|--clear-required-gates] [--force-gate <gate-id|kind[:scope]>... --force-gate-reason <code> --force-gate-comment <text>] [--force-gate-evidence <evidence-id>...] [--json]
+bwrk work edit <work-ref> [--parent <work-ref>|--clear-parent] [--title <text>] [--description <text>] [--kind issue|task|sprint|milestone] [--priority low|normal|high|critical] [--label <label>...] [--acceptance <text>...] [--required-gate verification|checkpoint|review|audit[:self|direct_children|descendants]... [--gate-command <command>...] [--gate-expect <text>...] [--gate-trust trusted|boreal_witnessed|external_attested...] [--gate-current-revision] [--gate-current-git]|--clear-required-gates] [--force-gate <gate-id|kind[:scope]>... --force-gate-reason <code> --force-gate-comment <text>] [--force-gate-evidence <evidence-id>...] [--json]
 ```
 
-Updates mutable work fields while preserving source refs, evidence IDs, verification IDs, dependencies, reservation history, and audit events. Repeated `--label` and `--acceptance` values replace those lists. Repeated `--required-gate` replaces required closeout gate metadata; `--clear-required-gates` removes it.
+Updates mutable work fields while preserving source refs, evidence IDs, verification IDs, dependencies, reservation history, and audit events. `--parent` repairs or changes the explicit hierarchy parent; `--clear-parent` intentionally makes the item root-level. Repeated `--label` and `--acceptance` values replace those lists. Repeated `--required-gate` replaces required closeout gate metadata; `--clear-required-gates` removes it.
 
 Use `--gate-command`, `--gate-expect`, and `--gate-trust` with repeated `--required-gate` values to replace declaration and trust metadata for the same-index gate. `--gate-current-revision` and `--gate-current-git` apply freshness enforcement to the replacement gates.
 

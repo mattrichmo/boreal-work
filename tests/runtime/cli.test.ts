@@ -2490,6 +2490,84 @@ describe("bwrk cli", () => {
     expect(work.meta.sourceRefs).toEqual([{ uri: sourceRefUri }]);
   });
 
+  it("preserves explicit hierarchy parents for manual work and safely repairs legacy links", async () => {
+    const rootDir = await makeTempWorkspace();
+    await runCli(rootDir, ["init", "--json"]);
+
+    const milestone = parseData<{ readonly meta: { readonly id: string } }>(
+      (await runCli(rootDir, ["work", "create", "Hierarchy milestone", "--kind", "milestone", "--ready", "--json"])).stdout
+    );
+    const explicitChild = parseData<{ readonly meta: { readonly id: string }; readonly parentId?: string }>(
+      (
+        await runCli(rootDir, [
+          "work",
+          "create",
+          "Explicit child",
+          "--parent",
+          milestone.meta.id,
+          "--ready",
+          "--json"
+        ])
+      ).stdout
+    );
+    expect(explicitChild.parentId).toBe(milestone.meta.id);
+
+    const legacyChild = parseData<{ readonly meta: { readonly id: string }; readonly parentId?: string }>(
+      (await runCli(rootDir, ["work", "create", "Legacy child", "--ready", "--json"])).stdout
+    );
+    expect(legacyChild.parentId).toBeUndefined();
+    const repaired = parseData<{ readonly work: { readonly parentId?: string }; readonly event: { readonly type: string } }>(
+      (
+        await runCli(rootDir, ["work", "edit", legacyChild.meta.id, "--parent", milestone.meta.id, "--json"])
+      ).stdout
+    );
+    expect(repaired.work.parentId).toBe(milestone.meta.id);
+    expect(repaired.event.type).toBe("work.edited");
+
+    const cleared = parseData<{ readonly work: { readonly parentId?: string } }>(
+      (await runCli(rootDir, ["work", "edit", legacyChild.meta.id, "--clear-parent", "--json"])).stdout
+    );
+    expect(cleared.work.parentId).toBeUndefined();
+
+    const missingParent = await runCli(rootDir, ["work", "create", "Missing parent child", "--parent", "missing-parent", "--json"]);
+    expect(missingParent.exitCode).toBe(1);
+    expect(parseJson<{ readonly code: string }>(missingParent.stderr).code).toBe("BOREAL_NOT_FOUND");
+
+    const cycle = await runCli(rootDir, ["work", "edit", milestone.meta.id, "--parent", explicitChild.meta.id, "--json"]);
+    expect(cycle.exitCode).toBe(2);
+    expect(parseJson<{ readonly code: string }>(cycle.stderr).code).toBe("BOREAL_INVALID_INPUT");
+  });
+
+  it("surfaces ambiguous legacy sprint-scope ownership in rollup and doctor", async () => {
+    const rootDir = await makeTempWorkspace();
+    await runCli(rootDir, ["init", "--json"]);
+    const firstSprint = parseData<{ readonly meta: { readonly id: string } }>(
+      (await runCli(rootDir, ["work", "create", "First manual sprint", "--kind", "sprint", "--ready", "--json"])).stdout
+    );
+    const secondSprint = parseData<{ readonly meta: { readonly id: string } }>(
+      (await runCli(rootDir, ["work", "create", "Second manual sprint", "--kind", "sprint", "--ready", "--json"])).stdout
+    );
+    const task = parseData<{ readonly meta: { readonly id: string } }>(
+      (await runCli(rootDir, ["work", "create", "Overlapping manual task", "--ready", "--json"])).stdout
+    );
+    await runCli(rootDir, ["dep", "add", firstSprint.meta.id, task.meta.id, "--json"]);
+    await runCli(rootDir, ["dep", "add", secondSprint.meta.id, firstSprint.meta.id, "--json"]);
+
+    const rollup = parseData<{
+      readonly warnings: readonly Array<{ readonly workId: string; readonly candidateSprintIds: readonly string[] }>;
+    }>((await runCli(rootDir, ["work", "rollup", "--all", "--json"])).stdout);
+    expect(rollup.warnings).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ workId: task.meta.id, candidateSprintIds: [firstSprint.meta.id, secondSprint.meta.id] })
+      ])
+    );
+
+    const doctor = parseData<DoctorPayload>((await runCli(rootDir, ["doctor", "--json"])).stdout);
+    expect(doctorDiagnostic(doctor, "rollup.ambiguous_scope")).toEqual(
+      expect.objectContaining({ severity: "warning", details: expect.objectContaining({ repairCommand: expect.stringContaining("--parent") }) })
+    );
+  });
+
   it("resolves boreal reference URIs and annotates displayed source refs", async () => {
     const rootDir = await makeTempWorkspace();
     const registryHome = await makeTempWorkspace();
@@ -5466,7 +5544,7 @@ describe("bwrk cli", () => {
     expect(markdown.stdout).toContain("# Boreal Command Reference");
     expect(markdown.stdout).toContain("## `version`");
     expect(markdown.stdout).toContain("## `work create`");
-    expect(markdown.stdout).toContain("bwrk work create <title> [--description <text>] [--priority low|normal|high|critical]");
+    expect(markdown.stdout).toContain("bwrk work create <title> [--parent <work-ref>] [--description <text>] [--priority low|normal|high|critical]");
     expect(markdown.stdout).toContain("bwrk evidence add <work-id> --summary <text> [--kind command|test|diff|review|artifact|note]");
     expect(markdown.stdout).toContain(
       "`--kind <value>`: Evidence kind: command, test, diff, review, artifact, or note. Defaults to command."
@@ -6005,7 +6083,7 @@ describe("bwrk cli", () => {
     expect(invalidPayload.message).toContain("Unknown flag --prio");
     expect(invalidPayload.details).toEqual(expect.objectContaining({ flag: "prio", didYouMean: "--priority" }));
 
-    const parent = await runCli(rootDir, ["work", "list", "--parent", "--json"]);
+    const parent = await runCli(rootDir, ["work", "list", "--parent", "ignored", "--json"]);
     const parentPayload = parseJson<{
       readonly ok: false;
       readonly code: string;
