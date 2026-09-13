@@ -1,7 +1,7 @@
 import { Box, Text } from "ink";
 
 import type { ProjectRegistryView } from "@boreal/ui-model";
-import { globalRouteState, globalStatusLabels, type GlobalRouteState } from "./global-overview.js";
+import { boundedWarnings, globalRouteState, globalStatusLabels, type GlobalRouteState } from "./global-overview.js";
 import { COLOR, healthColor } from "../theme.js";
 import { fit } from "../theme.js";
 import { Table, type TableColumn, type TableRow } from "../ui.js";
@@ -104,7 +104,7 @@ export function GlobalProjectsRoute({
       {`PROJECTS · showing ${body.entries.length}/${body.summary.totalProjects} · ENTER opens repo; missing rows show a link command`}
       </Text>
       {statusLabels.length > 0 ? <Text color={derivedState.missing || derivedState.stale ? COLOR.warn : COLOR.faint}>{`DATA STATE · ${statusLabels.join(" · ")}`}</Text> : null}
-      {derivedState.warnings?.map((warning) => <Text key={warning} color={COLOR.warn} wrap="truncate">{`⚠ ${warning}`}</Text>)}
+      {boundedWarnings(derivedState.warnings).map((warning) => <Text key={warning} color={COLOR.warn} wrap="truncate">{`⚠ ${warning}`}</Text>)}
       <Table
         columns={columns}
         rows={rows}

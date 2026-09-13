@@ -1,7 +1,7 @@
 import { Box, Text } from "ink";
 
 import type { RepoRollupView, RollupNodeView, TuiFilterState } from "@boreal/ui-model";
-import { COLOR, fit, statusColor } from "../theme.js";
+import { COLOR, statusColor } from "../theme.js";
 import { Table, type TableColumn, type TableRow } from "../ui.js";
 
 export type RollupDisclosureState = ReadonlySet<string>;
@@ -98,24 +98,6 @@ export function fullRollupStatusLabel(status: string | undefined): string {
   }[status] ?? status.replaceAll("_", " ");
 }
 
-function rollupColumnWidths(width: number): readonly [number, number, number, number, number, number] {
-  const total = Math.max(1, width - 2); // Table reserves two cells for its cursor marker.
-  let titleWidth = Math.max(10, Math.floor(total * 0.42));
-  const minimums = [4, 6, 4, 4, 3] as const;
-  const minimumFixed = minimums.reduce((sum, value) => sum + value, 0);
-  if (total - titleWidth < minimumFixed) titleWidth = Math.max(1, total - minimumFixed);
-  const fixedTotal = Math.max(minimumFixed, total - titleWidth);
-  const extra = fixedTotal - minimumFixed;
-  const weights = [0.2, 0.27, 0.18, 0.2, 0.15] as const;
-  const fixed = minimums.map((minimum, index) => minimum + Math.floor(extra * (weights[index] ?? 0))) as number[];
-  let remainder = fixedTotal - fixed.reduce((sum, value) => sum + value, 0);
-  for (let index = 0; remainder > 0; index = (index + 1) % fixed.length) {
-    fixed[index] = (fixed[index] ?? 0) + 1;
-    remainder -= 1;
-  }
-  return [fixed[0] ?? 1, fixed[1] ?? 1, fixed[2] ?? 1, fixed[3] ?? 1, fixed[4] ?? 1, titleWidth];
-}
-
 export function rollupFilterLabel(filters: TuiFilterState | undefined): string | undefined {
   if (!filters) return undefined;
   if (filters.showClosed === false && filters.showCancelled === false) return "open only";
@@ -142,14 +124,12 @@ export function RepoRollupRoute({
 }) {
   const rows = visibleRollupRows(body, filters, expandedIds);
   const byId = new Map(body.flatRows.map((node) => [node.id, node]));
-  const [kindWidth, statusWidth, actionWidth, doneWidth, blockerWidth, nameWidth] = rollupColumnWidths(width);
+  const nameWidth = Math.max(12, width - 30);
   const columns: readonly TableColumn[] = [
-    { header: "kind", width: kindWidth },
-    { header: "status", width: statusWidth },
-    { header: "open", width: actionWidth },
-    { header: "done", width: doneWidth, align: "right" },
-    { header: "blk", width: blockerWidth, align: "right" },
-    { header: "title", width: nameWidth }
+    { header: "work", width: nameWidth, minWidth: 12 },
+    { header: "state", width: 12, minWidth: 7 },
+    { header: "done", width: 7, minWidth: 4, align: "right" },
+    { header: "blocked", width: 7, minWidth: 3, align: "right" }
   ];
   const tableRows: readonly TableRow[] = rows.map((node): TableRow => {
     const indent = "  ".repeat(node.depth - 1);
@@ -159,24 +139,19 @@ export function RepoRollupRoute({
     return {
       key: node.id,
       cells: [
-        { text: node.kind, color: COLOR.muted },
-        { text: fullRollupStatusLabel(node.workStatus), color: node.workStatus ? statusColor(node.workStatus) : COLOR.faint },
-        { text: node.kind === "milestone" && node.childIds.length > 0 ? "expand" : rollupNodeCanOpen(node) ? "open" : "view only", color: rollupNodeCanOpen(node) || node.kind === "milestone" ? COLOR.accent : COLOR.faint },
+        { text: `${indent}${disclosure}${node.title}${node.kind === "task" ? "" : ` · ${node.kind}`}${context}`, color: COLOR.text },
+        { text: node.workStatus === "needs_verification" ? "verify" : node.workStatus === "in_progress" ? "working" : fullRollupStatusLabel(node.workStatus), color: node.workStatus ? statusColor(node.workStatus) : COLOR.faint },
         { text: `${node.progress.done}/${node.progress.total}`, color: COLOR.muted },
-        { text: String(node.blockerSummary.activeBlockerCount), color: node.blockerSummary.activeBlockerCount > 0 ? COLOR.warn : COLOR.faint },
-        { text: fit(`${disclosure}${indent}${node.title}${context}`, nameWidth), color: COLOR.text }
+        { text: String(node.blockerSummary.activeBlockerCount), color: node.blockerSummary.activeBlockerCount > 0 ? COLOR.warn : COLOR.faint }
       ]
     };
   });
   return (
-    <Box flexDirection="column">
+    <Box flexDirection="column" width={width} height={height} overflow="hidden">
       <Text color={COLOR.faint} wrap="truncate">
         {`ROLL-UP · ${body.summary.milestones} milestones · ${body.summary.sprints} sprints · ${body.summary.tasks} tasks · ${body.summary.blocked} blocked · ${body.summary.cancelled} cancelled`}
       </Text>
-      <Text color={COLOR.muted} wrap="truncate">
-        {"ENTER open/expand  ·  view only rows are not drillable  ·  ▸ means descendants are hidden"}
-      </Text>
-      <Table columns={columns} rows={tableRows} cursor={cursor} height={Math.max(1, height - 5)} width={width} emptyLabel="No work in this repo yet." />
+      <Table columns={columns} rows={tableRows} cursor={cursor} height={Math.max(0, height - 1)} width={width} emptyLabel="No work in this repo yet. Create work with bwrk work create." />
     </Box>
   );
 }

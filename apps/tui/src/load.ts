@@ -78,6 +78,7 @@ export interface TuiData {
   readonly warnings: readonly string[];
 }
 
+/** @deprecated The active RouteApp uses `workspace.ts`; retained for legacy App consumers. */
 export function resolveWorkspaceRoot(explicit: string | undefined, cwd: string = process.cwd()): string {
   if (explicit) {
     return resolve(explicit.replace(/^~(?=$|\/)/u, homedir()));

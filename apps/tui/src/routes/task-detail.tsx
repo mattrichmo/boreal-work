@@ -2,9 +2,9 @@ import { Box, Text } from "ink";
 import type { TuiCommandDescriptor, WorkItemView } from "@boreal/ui-model";
 
 import type { RepoTaskDetailBody } from "../loaders.js";
-import { reconciliationStatusForWork, type TuiReconciliationStep } from "../reconciliation.js";
+import { reconciliationStatusForWork } from "../reconciliation.js";
 import { cellWidth, COLOR, fit, graphemeClusters, statusColor } from "../theme.js";
-import { Field, Pane, windowList } from "../ui.js";
+import { Pane } from "../ui.js";
 
 export function fullTaskStatusLabel(status: string): string {
   return {
@@ -99,139 +99,65 @@ function actionLine(action: TuiCommandDescriptor, task: WorkItemView): string {
   return `${display.label} · ${action.mutatesState ? "confirmation required" : "read-only"} · ${action.displayCommand}`;
 }
 
-function reconciliationColor(status: TuiReconciliationStep["status"]): string {
-  if (status === "blocked") return COLOR.danger;
-  if (status === "pending") return COLOR.warn;
-  if (status === "complete") return COLOR.accent;
-  return COLOR.faint;
+export function buildTaskDetailLines(body: RepoTaskDetailBody, width: number): readonly string[] {
+  const task = body.work;
+  const contentWidth = Math.max(1, Math.floor(width) - 4);
+  const reservation = reservationDisplay(task);
+  const lines = [
+    `id          ${task.id}`,
+    `labels      ${task.labels.length > 0 ? task.labels.join(", ") : "none"}`,
+    `blockers    ${task.activeBlockerIds.length > 0 ? task.activeBlockerIds.join(", ") : "none"}`,
+    `reservation ${reservation.label}`,
+    `evidence    ${task.evidenceCount} · verifications ${task.verificationCount}`,
+    `depends on  ${body.dependencyTitles.length > 0 ? body.dependencyTitles.join(", ") : "none"}`
+  ];
+  if (body.blockerTitles?.length) lines.push(`blocked by  ${body.blockerTitles.join(", ")}`);
+  if (task.directiveSummary) lines.push(`directives   ${task.directiveSummary.blocking} blocking · ${task.directiveSummary.required} required · ${task.directiveSummary.conflictCount} conflicts`);
+  if (task.closedReason) lines.push(`closed      ${task.closedReason}`);
+  if (task.description) lines.push("", "DESCRIPTION", ...boundedTextLines(task.description, contentWidth, 10_000));
+  if (task.acceptanceCriteria?.length) lines.push("", `ACCEPTANCE · ${task.acceptanceCriteria.length} criteria`, ...task.acceptanceCriteria.flatMap((criterion) => boundedTextLines(`• ${criterion}`, contentWidth, 10_000)));
+  const reconciliation = reconciliationStatusForWork(task);
+  lines.push("", `RECONCILIATION · ${fullTaskStatusLabel(reconciliation.overall)}`);
+  lines.push(...reconciliation.steps.map((step) => `${step.status === "complete" ? "✓" : step.status === "blocked" ? "!" : "·"} ${step.label}: ${fullTaskStatusLabel(step.status)} · ${step.detail}`));
+  // Wrap every logical line, including metadata and graph details. A long ID,
+  // dependency title, or reconciliation detail must be reachable through the
+  // same viewport offset as the prose sections.
+  return lines.flatMap((line) => boundedTextLines(line, contentWidth, 10_000)).map((line) => fit(line, contentWidth));
 }
 
-function ReconciliationStatus({
-  work,
-  width,
-  maxLines
-}: {
-  readonly work: WorkItemView;
-  readonly width: number;
-  readonly maxLines: number;
-}) {
-  const status = reconciliationStatusForWork(work);
-  const visibleSteps = windowList(status.steps, 0, maxLines);
-  const hidden = visibleSteps.above + visibleSteps.below;
-  return (
-    <Box marginTop={1} flexDirection="column">
-      <Text color={status.overall === "blocked" ? COLOR.danger : status.overall === "pending" ? COLOR.warn : COLOR.faint}>
-        {`RECONCILIATION · ${fullTaskStatusLabel(status.overall)} · ${status.steps.length} steps`}
-      </Text>
-      {visibleSteps.above > 0 ? <Text color={COLOR.faint}>… earlier steps hidden</Text> : null}
-      {visibleSteps.rows.map(({ item: step }) => (
-        <Text key={step.id} wrap="truncate">
-          <Text color={reconciliationColor(step.status)}>
-            {step.status === "complete" ? "✓" : step.status === "blocked" ? "!" : step.status === "pending" ? "·" : "—"}
-          </Text>
-          <Text color={COLOR.text}>{` ${step.label}: `}</Text>
-          <Text color={COLOR.muted}>{fit(`${fullTaskStatusLabel(step.status)} · ${step.detail}`, Math.max(1, width - 18))}</Text>
-        </Text>
-      ))}
-      {hidden > 0 ? <Text color={COLOR.faint}>{`… ${hidden} reconciliation step${hidden === 1 ? "" : "s"} hidden`}</Text> : null}
-    </Box>
-  );
+export function taskDetailMaxScroll(body: RepoTaskDetailBody, width: number, height: number): number {
+  const inner = Math.max(1, Math.floor(height) - 5);
+  const actionLines = body.actions.length > 0 ? 2 : 0;
+  return Math.max(0, buildTaskDetailLines(body, width).length - Math.max(1, inner - actionLines));
 }
 
-export function TaskDetailRoute({
-  body,
-  width,
-  selectedActionIndex,
-  height
-}: {
+export function TaskDetailRoute({ body, width, selectedActionIndex, height, scrollOffset = 0 }: {
   readonly body: RepoTaskDetailBody;
   readonly width: number;
   readonly selectedActionIndex: number;
-  /** Optional until RouteApp passes its measured body height. */
   readonly height?: number;
+  readonly scrollOffset?: number;
 }) {
   const task = body.work;
-  const reservation = reservationDisplay(task);
-  const contentWidth = Math.max(12, width - 4);
-  const detailBudget = Math.max(10, height ?? 18);
-  const sectionCount = Number(Boolean(task.description)) + Number(Boolean(task.acceptanceCriteria?.length)) + Number(body.actions.length > 0) + 1;
-  const sectionLines = Math.max(1, Math.floor(Math.max(4, detailBudget - 8) / sectionCount));
-  const descriptionLines = task.description ? boundedTextLines(task.description, contentWidth, sectionLines) : [];
-  const criteria = task.acceptanceCriteria ?? [];
-  const actionWindow = windowList(body.actions, selectedActionIndex, Math.max(1, sectionLines));
-  const actionHidden = actionWindow.above + actionWindow.below;
-  const enabledActionCount = body.actions.filter((action) => !taskActionDisplay(action, task).disabled).length;
-  const directiveSummary = task.directiveSummary;
-  return (
-    <Pane title={task.title} tone={statusColor(task.status)} width={width}>
-      <Text>
-        <Text color={statusColor(task.status)} bold>
-          {fullTaskStatusLabel(task.status)}
-        </Text>
-        <Text color={COLOR.faint}>{"  ·  "}</Text>
-        <Text color={COLOR.muted}>{task.kind}</Text>
-        <Text color={COLOR.faint}>{"  ·  "}</Text>
-        <Text color={COLOR.muted}>{`${task.priority} priority`}</Text>
-      </Text>
-      <Box marginTop={1} flexDirection="column">
-        <Field label="id" value={task.id} color={COLOR.muted} />
-        <Field label="labels" value={task.labels.length > 0 ? task.labels.join(", ") : "none"} />
-        <Field
-          label="blockers"
-          value={task.activeBlockerIds.length > 0 ? `${task.activeBlockerIds.length} · ${task.activeBlockerIds.join(", ")}` : "none"}
-          color={task.activeBlockerIds.length > 0 ? COLOR.warn : undefined}
-        />
-        <Field label="reservation" value={reservation.label} color={reservation.color} />
-        <Field label="evidence" value={`${task.evidenceCount} · verifications ${task.verificationCount}`} />
-        <Field label="depends on" value={body.dependencyTitles.length > 0 ? body.dependencyTitles.join(", ") : "none"} color={COLOR.muted} />
-        {body.blockerTitles && body.blockerTitles.length > 0 ? <Field label="blocked by" value={body.blockerTitles.join(", ")} color={COLOR.warn} /> : null}
-        {directiveSummary ? (
-          <Field
-            label="directives"
-            value={`${directiveSummary.blocking} blocking · ${directiveSummary.required} required · ${directiveSummary.conflictCount} conflicts`}
-            color={directiveSummary.blocking > 0 || directiveSummary.conflictCount > 0 ? COLOR.warn : COLOR.muted}
-          />
-        ) : null}
-        {task.closedReason ? <Field label="closed reason" value={task.closedReason} color={COLOR.muted} /> : null}
-      </Box>
-      {task.description ? (
-        <Box marginTop={1} flexDirection="column">
-          <Text color={COLOR.faint}>{`DESCRIPTION · ${descriptionLines.length}${descriptionLines.length === sectionLines ? "+" : ""} lines`}</Text>
-          {descriptionLines.map((line, index) => <Text key={index} color={COLOR.text}>{line}</Text>)}
-        </Box>
-      ) : null}
-      {criteria.length > 0 ? (
-        <Box marginTop={1} flexDirection="column">
-          <Text color={COLOR.faint}>{`ACCEPTANCE · ${criteria.length} criteria`}</Text>
-          {criteria.slice(0, sectionLines).map((criterion, index) => (
-            <Text key={index} color={COLOR.text} wrap="truncate">
-              <Text color={COLOR.accent}>• </Text>
-              {fit(criterion, contentWidth)}
-            </Text>
-          ))}
-          {criteria.length > sectionLines ? <Text color={COLOR.faint}>{`… ${criteria.length - sectionLines} criteria hidden`}</Text> : null}
-        </Box>
-      ) : null}
-      {body.actions.length > 0 ? (
-        <Box marginTop={1} flexDirection="column">
-          <Text color={COLOR.faint}>{`ACTIONS · ${enabledActionCount} enabled · ${body.actions.length - enabledActionCount} unavailable`}</Text>
-          {actionWindow.above > 0 ? <Text color={COLOR.faint}>… earlier actions hidden</Text> : null}
-          {actionWindow.rows.map(({ item: action, index }) => {
-            const display = taskActionDisplay(action, task);
-            return (
-              <Text key={action.id} color={display.disabled ? COLOR.faint : index === selectedActionIndex ? COLOR.accent : COLOR.muted} wrap="truncate">
-                {`${index === selectedActionIndex ? "▸ " : "  "}${fit(actionLine(action, task), contentWidth)}`}
-              </Text>
-            );
-          })}
-          {actionHidden > 0 ? <Text color={COLOR.faint}>{`… ${actionHidden} action${actionHidden === 1 ? "" : "s"} hidden; move to inspect`}</Text> : null}
-        </Box>
-      ) : (
-        <Box marginTop={1}>
-          <Text color={COLOR.muted}>ACTIONS · none available in this route state.</Text>
-        </Box>
-      )}
-      <ReconciliationStatus work={task} width={contentWidth} maxLines={sectionLines} />
-    </Pane>
-  );
+  const outerHeight = Math.max(1, Math.floor(height ?? 24));
+  const contentWidth = Math.max(1, width - 4);
+  const inner = Math.max(1, outerHeight - 5);
+  const actionLines = body.actions.length > 0 ? 2 : 0;
+  const viewport = Math.max(1, inner - actionLines);
+  const lines = buildTaskDetailLines(body, width);
+  const offset = Math.max(0, Math.min(Math.floor(scrollOffset), Math.max(0, lines.length - viewport)));
+  const visible = lines.slice(offset, offset + viewport);
+  const enabled = body.actions.filter((action) => !taskActionDisplay(action, task).disabled).length;
+  const selected = body.actions[Math.max(0, Math.min(selectedActionIndex, body.actions.length - 1))];
+  const maxScroll = Math.max(0, lines.length - viewport);
+  return <Pane title={task.title} tone={statusColor(task.status)} width={width} height={height}>
+    <Text color={statusColor(task.status)} wrap="truncate">{fit(`${fullTaskStatusLabel(task.status)} · ${task.kind} · ${task.priority} · ${offset}/${maxScroll}`, contentWidth)}</Text>
+    <Box flexDirection="column" height={viewport}>
+      {visible.map((line, index) => <Text key={index} color={COLOR.text} wrap="truncate">{fit(line, contentWidth)}</Text>)}
+    </Box>
+    <Box flexDirection="column" height={actionLines}>
+      {body.actions.length > 0 ? <Text color={COLOR.faint} wrap="truncate">{fit(`ACTIONS · ${enabled} enabled · ${body.actions.length - enabled} unavailable`, contentWidth)}</Text> : null}
+      {selected ? <Text color={taskActionDisplay(selected, task).disabled ? COLOR.faint : COLOR.accent} wrap="truncate">{fit(`▸ ${actionLine(selected, task)}`, contentWidth)}</Text> : null}
+    </Box>
+  </Pane>;
 }

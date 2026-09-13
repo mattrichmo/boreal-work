@@ -21,6 +21,7 @@ export interface BindingSpec {
 }
 
 // One matcher for both the footer hints and the dispatcher, so they can't drift.
+/** @deprecated The active route shell uses `key-matcher.ts`; retained for legacy App/tests. */
 export function matchToken(token: string, input: string, key: Key): boolean {
   switch (token) {
     case "move":

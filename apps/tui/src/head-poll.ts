@@ -1,5 +1,5 @@
 // Refresh contract: poll the event-log head (seq + hash) on the configured
-// refresh interval (5s by default) while the
+// refresh interval (30s by default) while the
 // shell is focused. Head unchanged -> do nothing. Head advanced -> caller
 // refetches only the current route payload.
 //
@@ -20,7 +20,7 @@ export interface EventLogHead {
   readonly hash: string;
 }
 
-export const DEFAULT_TUI_REFRESH_MS = 5_000;
+export const DEFAULT_TUI_REFRESH_MS = 30_000;
 
 export async function readHead(workspaceRoot: string): Promise<EventLogHead> {
   const paths = resolveWorkspacePaths(workspaceRoot);
@@ -40,7 +40,8 @@ export function normalizeRefreshInterval(intervalMs: number | undefined, default
 export function watchHead(
   workspaceRoot: string,
   onChange: (head: EventLogHead) => void,
-  intervalMs = DEFAULT_TUI_REFRESH_MS
+  intervalMs = DEFAULT_TUI_REFRESH_MS,
+  options: { readonly onTick?: () => void } = {}
 ): () => void {
   let lastHead: EventLogHead | undefined;
   let cancelled = false;
@@ -57,6 +58,7 @@ export function watchHead(
       if (headsDiffer(lastHead, head)) {
         onChange(head);
       }
+      options.onTick?.();
       lastHead = head;
     } catch {
       // Uninitialized workspace or transient read error: skip this tick.

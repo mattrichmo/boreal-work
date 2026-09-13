@@ -21,7 +21,7 @@ describe("active TUI shell lifecycle helpers", () => {
       mouse: true,
       refreshMs: 1250
     });
-    expect(parseTuiArgs([]).refreshMs).toBe(5_000);
+    expect(parseTuiArgs([]).refreshMs).toBe(30_000);
     expect(parseTuiArgs(["--refresh-ms", "0"]).refreshMs).toBe(500);
     expect(() => parseTuiArgs(["--refresh-ms", "nope"])).toThrow("--refresh-ms");
     expect(() => parseTuiArgs(["--registry-root"])).toThrow("--registry-root requires a value");

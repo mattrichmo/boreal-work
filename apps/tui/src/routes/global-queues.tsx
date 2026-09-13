@@ -1,7 +1,7 @@
 import { Box, Text } from "ink";
 
 import type { GlobalWorkQueueItem, GlobalWorkQueuesView, TuiFilterState } from "@boreal/ui-model";
-import { globalRouteState, globalStatusLabels, type GlobalRouteState } from "./global-overview.js";
+import { boundedWarnings, globalRouteState, globalStatusLabels, type GlobalRouteState } from "./global-overview.js";
 import { COLOR, fit, statusColor } from "../theme.js";
 import { Table, type TableColumn, type TableRow } from "../ui.js";
 
@@ -104,7 +104,7 @@ export function GlobalQueuesRoute({
         {`READY ${body.summary.ready}  ·  BLOCKED ${body.summary.blocked}  ·  NEEDS VERIFICATION ${body.summary.needsVerification}`}
       </Text>
       {labels.length > 0 ? <Text color={derivedState.stale ? COLOR.warn : COLOR.faint}>{`DATA STATE · ${labels.join(" · ")}`}</Text> : null}
-      {derivedState.warnings?.map((warning) => <Text key={warning} color={COLOR.warn} wrap="truncate">{`⚠ ${warning}`}</Text>)}
+      {boundedWarnings(derivedState.warnings).map((warning) => <Text key={warning} color={COLOR.warn} wrap="truncate">{`⚠ ${warning}`}</Text>)}
       <Table columns={columns} rows={rows} cursor={cursor} height={Math.max(1, height - (labels.length > 0 ? 7 : 6))} width={width} emptyLabel="No actionable work across linked projects." />
       {selectedItem ? <Text color={COLOR.muted} wrap="truncate">{fit(`TARGET · ${selectedItem.projectRoot} · ${selectedItem.claimCommand ? "claim available" : "open task detail"}`, Math.max(1, width - 2))}</Text> : null}
     </Box>

@@ -20,6 +20,15 @@ describe("tui bounded terminal layout helpers", () => {
     expect(widths[2]).toBeGreaterThan(0);
   });
 
+  it("reserves explicit inter-column gaps", () => {
+    const widths = fitTableColumnWidths([
+      { header: "status", width: 10 },
+      { header: "title", width: 20 },
+      { header: "action", width: 8 }
+    ], 30, 2, 1);
+    expect(2 + widths.reduce((sum, width) => sum + width, 0) + 2).toBeLessThanOrEqual(30);
+  });
+
   it("reserves header and overflow rows before windowing table data", () => {
     expect(tableRowCapacity(20, 8)).toBe(5);
     expect(tableIndicatorLines(20, 8)).toBe(2);

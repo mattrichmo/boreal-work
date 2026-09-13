@@ -32,7 +32,7 @@ The same project state is available through the CLI, MCP server, console, TUI, a
 This is the terminal dashboard using demo data. It reads the same work and reservation records as the CLI.
 
 <p align="center">
-  <img src="docs/assets/boreal-tui.png" alt="Boreal terminal dashboard showing ready, blocked, and active work" width="920">
+  <img src="docs/assets/boreal-tui-dashboard.svg" alt="Boreal terminal dashboard demo preview showing sprint work, status lanes, and keyboard controls" width="920">
 </p>
 
 <p align="center"><sub>Terminal dashboard showing ready, blocked, and active work.</sub></p>

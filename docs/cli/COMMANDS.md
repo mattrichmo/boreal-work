@@ -597,13 +597,15 @@ Options:
 - `--json`: print the bounded data payload instead of launching a UI.
 - `--mouse`: terminal dashboard mouse wheel (off by default; enabling it disables the terminal's native text selection).
 - `--tui`: deprecated and ignored; the terminal dashboard is now the default.
-- `--refresh-ms`: terminal dashboard auto-refresh interval in milliseconds. Defaults to `5000`.
+- `--refresh-ms`: terminal dashboard auto-refresh interval in milliseconds. Defaults to `30000`.
 - `--host`: browser console (`--web`) bind address. Defaults to `127.0.0.1`.
 - `--port`: browser console (`--web`) port number. Defaults to `4318`.
 - `--no-open`: browser console (`--web`): print the URL without launching a browser.
 - `--mode`: `live` for workspace data or `fixture` for demo data. Defaults to `live`.
 - `--live-cache-ttl-ms`: browser console (`--web`) live data cache TTL between route clicks. Defaults to `60000`.
 - `--allow-fixture-fallback`: browser console (`--web`) renders deterministic fixture data with warnings if live data fails. Without this flag, live data failures return an error.
+
+Terminal dashboard interaction: `s` opens the sprint picker on Sprint Board, `f` cycles the route's status filter, `d` toggles the sprint scope view, `/` opens fuzzy search, and `?` opens help. Use `PgUp`/`PgDn` or `g`/`G` to scroll task detail. Automatic refresh defaults to 30 seconds and is completion based; `r` requests an immediate refresh. Overlapping refreshes are coalesced and repeated failures use bounded backoff.
 
 ## `view`
 

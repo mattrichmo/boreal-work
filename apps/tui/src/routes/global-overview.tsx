@@ -52,6 +52,13 @@ function stateLine(state: GlobalRouteState): string | undefined {
   return labels.length > 0 ? `DATA STATE · ${labels.join(" · ")}` : undefined;
 }
 
+/** Keep diagnostics from consuming the list viewport; the selected rows stay
+ * windowed by Table and remain reachable with the cursor. */
+export function boundedWarnings(warnings: readonly string[] | undefined, max = 2): readonly string[] {
+  if (!warnings || warnings.length <= max) return warnings ?? [];
+  return [...warnings.slice(0, Math.max(0, max - 1)), `+ ${warnings.length - Math.max(0, max - 1)} more warnings`];
+}
+
 function overviewColumnWidths(width: number): readonly [number, number, number, number] {
   const total = Math.max(1, width - 2);
   const severity = Math.max(1, Math.min(9, Math.floor(total * 0.18)));
@@ -99,7 +106,7 @@ export function GlobalOverviewRoute({
   const selectedAttention = body.attention[cursor];
   return (
     <Box flexDirection="column">
-      <Box width={Math.max(1, width - 2)} flexWrap="wrap">
+      {width < 60 ? <Text color={COLOR.muted} wrap="truncate">{`PROJECTS ${body.registrySummary.totalProjects} · OK ${body.registrySummary.healthyProjects} · WARN ${body.registrySummary.warningProjects} · ERR ${body.registrySummary.errorProjects} · READY ${body.queueSummary.ready} · BLOCKED ${body.queueSummary.blocked}`}</Text> : <Box width={Math.max(1, width - 2)} flexWrap="wrap">
         <Metric label="projects" value={body.registrySummary.totalProjects} tone={COLOR.muted} />
         <Metric label="ok" value={body.registrySummary.healthyProjects} />
         <Metric label="warn" value={body.registrySummary.warningProjects} tone={COLOR.warn} />
@@ -108,9 +115,9 @@ export function GlobalOverviewRoute({
         <Metric label="stale" value={body.registrySummary.staleProjects} tone={body.registrySummary.staleProjects > 0 ? COLOR.warn : COLOR.faint} />
         <Metric label="ready" value={body.queueSummary.ready} />
         <Metric label="blocked" value={body.queueSummary.blocked} tone={COLOR.warn} />
-      </Box>
+      </Box>}
       {notice ? <Text color={derivedState.stale || derivedState.missing ? COLOR.warn : COLOR.faint}>{notice}</Text> : null}
-      {derivedState.warnings?.map((warning) => <Text key={warning} color={COLOR.warn} wrap="truncate">{`⚠ ${warning}`}</Text>)}
+      {boundedWarnings(derivedState.warnings).map((warning) => <Text key={warning} color={COLOR.warn} wrap="truncate">{`⚠ ${warning}`}</Text>)}
       <Box marginTop={1} flexDirection="column">
         <Text color={COLOR.faint}>{`ATTENTION QUEUE (${body.attention.length}) · ENTER opens the affected project`}</Text>
         <Table columns={columns} rows={rows} cursor={cursor} height={Math.max(1, height - 9)} width={width} emptyLabel="No linked-project findings. Use `bwrk global link <path>` to add a project." />

@@ -1,4 +1,4 @@
-export type ColorMode = "color" | "high-contrast" | "none";
+export type ColorMode = "color" | "light" | "terminal-default" | "high-contrast" | "none";
 
 export interface ColorPalette {
   readonly accent: string;
@@ -23,6 +23,28 @@ const COLOR_PALETTES: Readonly<Record<ColorMode, ColorPalette>> = {
     danger: "#ff9898",
     selectionBg: "#183321",
     barBg: "#0c100d"
+  },
+  light: {
+    accent: "#176b35",
+    accentSoft: "#285f3a",
+    text: "#17221b",
+    muted: "#526158",
+    faint: "#6f7b73",
+    warn: "#855b00",
+    danger: "#a02f2f",
+    selectionBg: "#d9f1df",
+    barBg: "#edf3ee"
+  },
+  "terminal-default": {
+    accent: "green",
+    accentSoft: "brightGreen",
+    text: "",
+    muted: "",
+    faint: "",
+    warn: "yellow",
+    danger: "red",
+    selectionBg: "",
+    barBg: ""
   },
   "high-contrast": {
     accent: "#00ff66",
@@ -54,6 +76,8 @@ export function resolveColorMode(env: Readonly<Record<string, string | undefined
   // NO_COLOR is presence-based by convention, including NO_COLOR="".
   if (Object.prototype.hasOwnProperty.call(env, "NO_COLOR") || env.BOREAL_TUI_NO_COLOR === "1") return "none";
   if (env.BOREAL_TUI_HIGH_CONTRAST === "1" || env.BOREAL_TUI_COLOR_MODE === "high-contrast") return "high-contrast";
+  if (env.BOREAL_TUI_COLOR_MODE === "light") return "light";
+  if (env.BOREAL_TUI_COLOR_MODE === "terminal-default") return "terminal-default";
   return "color";
 }
 
@@ -72,7 +96,7 @@ export function statusColor(status: string): string {
       return COLOR.accentSoft;
     case "verified":
     case "closed":
-      return COLOR.accent;
+      return COLOR.muted;
     case "blocked":
     case "needs_verification":
       return COLOR.warn;

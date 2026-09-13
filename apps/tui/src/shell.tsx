@@ -1,56 +1,42 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 
-import { Box, Text, useApp, useInput, useStdin, useStdout, type Key } from "ink";
-import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
+import { Box, Text, useApp, useInput, useStdin, useStdout, useWindowSize, type Key } from "ink";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState } from "react";
 
 import type { OpenRepoTarget, TuiCommandDescriptor, TuiEnvelope, TuiEntityKind, TuiFilterState } from "@boreal/ui-model";
-import { CommandConfirmPanel } from "./command-panel.js";
-import { DEFAULT_TUI_REFRESH_MS, normalizeRefreshInterval, watchHead } from "./head-poll.js";
-import {
-  loadGlobalOverview,
-  loadGlobalProjects,
-  loadGlobalQueues,
-  loadRepoRollup,
-  loadRepoSprintBoard,
-  loadRepoTaskDetail,
-  invalidateGlobalDashboardCache,
-  type GlobalOverviewBody,
-  type RepoSprintBoardBody,
-  type RepoTaskDetailBody
-} from "./loaders.js";
+import { CommandConfirmPanel, commandPanelMaxScroll } from "./command-panel.js";
+import { DEFAULT_TUI_REFRESH_MS, normalizeRefreshInterval } from "./head-poll.js";
+import { createRefreshScheduler, type RefreshScheduler } from "./refresh-scheduler.js";
+import { buildPaletteItems, searchPalette, type PaletteItem } from "./palette.js";
+import { activeRowIds, loadForFrame, selectedRowCursor, type RouteBody } from "./route-model.js";
+import { FreshnessLine, HelpView, Palette } from "./shell-chrome.js";
+export { selectedRowCursor } from "./route-model.js";
+import { loadRepoRollup, invalidateGlobalDashboardCache } from "./loaders.js";
 import { bindingsForRoute, resolveRouteAction, routeFooterHints } from "./route-bindings.js";
 import { atRoot, breadcrumbs, initialRouteNavState, reduceRouteNav, rootFrame, topFrame } from "./route-nav.js";
 import { GlobalOverviewRoute, type GlobalRouteState } from "./routes/global-overview.js";
 import { GlobalProjectsRoute } from "./routes/global-projects.js";
-import { filteredQueueItems, GlobalQueuesRoute, queueFilterLabel, queueRowAt, QUEUE_FILTER_CYCLE } from "./routes/global-queues.js";
+import { GlobalQueuesRoute, queueFilterLabel, queueRowAt, QUEUE_FILTER_CYCLE } from "./routes/global-queues.js";
 import {
   defaultRollupDisclosure,
   rollupFilterLabel,
   rollupRowAt,
-  visibleRollupRows,
   RepoRollupRoute,
   ROLLUP_FILTER_CYCLE,
   toggleRollupDisclosure,
   type RollupDisclosureState
 } from "./routes/rollup.js";
-import { SprintBoardRoute } from "./routes/sprint-board.js";
-import { TaskDetailRoute, taskActionDisplay } from "./routes/task-detail.js";
+import { SprintBoardRoute, SPRINT_FILTERS, sprintFilterLabel, visibleSprintRows } from "./routes/sprint-board.js";
+import { TaskDetailRoute, taskActionDisplay, taskDetailMaxScroll } from "./routes/task-detail.js";
 import { railFor, routeById, routeByNumberKey, REPO_TASK_DETAIL_ROUTE, type RouteSpec } from "./routes.js";
 import { useAltScreen, wheelFromInput } from "./runtime.js";
 import { COLOR } from "./theme.js";
-import { EmptyState, KeyHints, SectionRail, sectionRailLayout, Table, TopBar, type TableColumn, type TableRow } from "./ui.js";
-import type { ProjectRegistryView, GlobalWorkQueuesView, RepoRollupView } from "@boreal/ui-model";
+import { EmptyState, KeyHints, SectionRail, sectionRailLayout, TopBar } from "./ui.js";
+import type { RepoRollupView } from "@boreal/ui-model";
 
 const execFileAsync = promisify(execFile);
 
-type RouteBody =
-  | { readonly kind: "global.overview"; readonly value: GlobalOverviewBody }
-  | { readonly kind: "global.projects"; readonly value: ProjectRegistryView }
-  | { readonly kind: "global.queues"; readonly value: GlobalWorkQueuesView }
-  | { readonly kind: "repo.rollup"; readonly value: RepoRollupView }
-  | { readonly kind: "repo.sprintBoard"; readonly value: RepoSprintBoardBody }
-  | { readonly kind: "repo.taskDetail"; readonly value: RepoTaskDetailBody };
 
 // Per-route status-facet cycles (decision #6: "f cycles simple enumerated
 // filters per route (status facets only in v1)"). Routes not listed here
@@ -61,6 +47,10 @@ const FILTER_CYCLES: Readonly<Record<string, readonly (TuiFilterState | undefine
 };
 
 function nextFilter(routeId: string, current: TuiFilterState | undefined): TuiFilterState | undefined {
+  if (routeId === "repo.sprintBoard") {
+    const index = SPRINT_FILTERS.findIndex((filter) => filter === sprintFilterLabel(current));
+    return { clauses: current?.clauses ?? [], sort: [], query: SPRINT_FILTERS[(index + 1) % SPRINT_FILTERS.length] };
+  }
   const cycle = FILTER_CYCLES[routeId];
   if (!cycle) return current;
   const index = cycle.findIndex((candidate) => JSON.stringify(candidate) === JSON.stringify(current));
@@ -70,6 +60,7 @@ function nextFilter(routeId: string, current: TuiFilterState | undefined): TuiFi
 function filterLabel(routeId: string, filters: TuiFilterState | undefined): string | undefined {
   if (routeId === "repo.rollup") return rollupFilterLabel(filters);
   if (routeId === "global.queues") return queueFilterLabel(filters);
+  if (routeId === "repo.sprintBoard") return sprintFilterLabel(filters);
   return undefined;
 }
 
@@ -139,70 +130,6 @@ export function formatCommandFailure(error: unknown): string {
   return lines.filter((line) => line.length > 0).join("\n");
 }
 
-async function loadForFrame(
-  workspaceRoot: string,
-  routeId: string,
-  entityId: string | undefined,
-  entityKind?: TuiEntityKind
-): Promise<{ readonly envelope: TuiEnvelope<unknown>; readonly body: RouteBody } | undefined> {
-  switch (routeId) {
-    case "global.overview": {
-      const envelope = await loadGlobalOverview(workspaceRoot);
-      return { envelope, body: { kind: "global.overview", value: envelope.body } };
-    }
-    case "global.projects": {
-      const envelope = await loadGlobalProjects(workspaceRoot);
-      return { envelope, body: { kind: "global.projects", value: envelope.body } };
-    }
-    case "global.queues": {
-      const envelope = await loadGlobalQueues(workspaceRoot);
-      return { envelope, body: { kind: "global.queues", value: envelope.body } };
-    }
-    case "repo.rollup": {
-      const envelope = await loadRepoRollup(workspaceRoot);
-      return { envelope, body: { kind: "repo.rollup", value: envelope.body } };
-    }
-    case "repo.sprintBoard": {
-      const envelope = await loadRepoSprintBoard(workspaceRoot, entityId);
-      return { envelope, body: { kind: "repo.sprintBoard", value: envelope.body } };
-    }
-    case "repo.taskDetail": {
-      if (!entityId) return undefined;
-      const envelope = await loadRepoTaskDetail(workspaceRoot, entityId, entityKind);
-      if (!envelope) return undefined;
-      return { envelope, body: { kind: "repo.taskDetail", value: envelope.body } };
-    }
-    default:
-      return undefined;
-  }
-}
-
-function activeListLength(
-  body: RouteBody | undefined,
-  filters: TuiFilterState | undefined,
-  rollupExpandedIds?: RollupDisclosureState
-): number {
-  if (!body) return 0;
-  switch (body.kind) {
-    case "global.overview":
-      return body.value.attention.length;
-    case "global.projects":
-      return body.value.entries.length;
-    case "global.queues":
-      return filteredQueueItems(body.value, filters).length;
-    case "repo.rollup":
-      // Must match the exact row list the table renders (visibleRollupRows),
-      // not flatRows -- collapsed subtrees are shorter than the full tree,
-      // and the status facet can hide leaves further.
-      return visibleRollupRows(body.value, filters, rollupExpandedIds).length;
-    case "repo.sprintBoard":
-      return body.value.board?.lanes.flatMap((lane) => lane.items).length ?? 0;
-    case "repo.taskDetail":
-      return body.value.actions.length;
-    default:
-      return 0;
-  }
-}
 
 export function RouteApp({
   workspaceRoot,
@@ -219,6 +146,7 @@ export function RouteApp({
 }) {
   const { exit } = useApp();
   const { stdout } = useStdout();
+  const terminalSize = useWindowSize();
   const { isRawModeSupported } = useStdin();
   const interactiveTerminal = process.stdin.isTTY === true && stdout?.isTTY === true;
 
@@ -234,10 +162,15 @@ export function RouteApp({
   const [loadedFrameKey, setLoadedFrameKey] = useState<string | undefined>();
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | undefined>();
-  const [now, setNow] = useState(() => Date.now());
+  const [helpOpen, setHelpOpen] = useState(false);
+  const [helpScroll, setHelpScroll] = useState(0);
+  const [sprintPickerOpen, setSprintPickerOpen] = useState(false);
+  const [searchRollup, setSearchRollup] = useState<{ readonly workspace: string; readonly value: RepoRollupView }>();
+  const [searchError, setSearchError] = useState<string>();
   const [confirming, setConfirming] = useState<TuiCommandDescriptor | undefined>();
   const [commandRunning, setCommandRunning] = useState(false);
   const [commandError, setCommandError] = useState<string | undefined>();
+  const [commandScroll, setCommandScroll] = useState(0);
   const [quitArmed, setQuitArmed] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [paletteQuery, setPaletteQuery] = useState("");
@@ -251,6 +184,15 @@ export function RouteApp({
   const refreshAbortRef = useRef<AbortController | undefined>(undefined);
   const activeRequestKeyRef = useRef<string | undefined>(undefined);
   const loadingRef = useRef(false);
+  const schedulerRef = useRef<RefreshScheduler | undefined>(undefined);
+  const forceNextRefreshRef = useRef(true);
+  const interactionBusyRef = useRef(false);
+  interactionBusyRef.current = paletteOpen || Boolean(confirming) || helpOpen || commandRunning;
+
+  const requestRefresh = useCallback(() => {
+    forceNextRefreshRef.current = true;
+    schedulerRef.current?.request({ immediate: true });
+  }, []);
 
   const frame = topFrame(nav);
   const routeSpec = routeById(frame.routeId);
@@ -266,21 +208,48 @@ export function RouteApp({
   const currentFrameKey = routeRequestKey(requestIdentity);
   const currentBody = loadedFrameKey === currentFrameKey ? body : undefined;
   const currentEnvelope = loadedFrameKey === currentFrameKey ? envelope : undefined;
-  const listLength = activeListLength(currentBody, frame.filters, rollupDisclosure.key === currentFrameKey ? rollupDisclosure.ids : undefined);
   // The stored frame cursor can point past the end right after a filter
   // cycle or a refresh returns fewer rows (nothing clamps it until the next
   // arrow key) -- so render and drill lookups both use this effective,
   // always-in-bounds cursor rather than frame.cursor directly.
-  const effectiveCursor = Math.min(frame.cursor, Math.max(0, listLength - 1));
+  const rowIds = activeRowIds(currentBody, frame.filters, rollupDisclosure.key === currentFrameKey ? rollupDisclosure.ids : undefined);
+  const listLength = rowIds.length;
+  const effectiveCursor = selectedRowCursor(rowIds, frame.selectedRowId, frame.cursor);
+  const selectCursor = useCallback((index: number) => {
+    const cursor = Math.max(0, Math.min(index, rowIds.length - 1));
+    dispatch({ type: "setCursor", cursor, selectedRowId: rowIds[cursor] });
+  }, [rowIds.join("\u0000")]);
+  useLayoutEffect(() => {
+    if (!currentBody) return;
+    const selectedRowId = rowIds[effectiveCursor];
+    if (frame.cursor !== effectiveCursor || frame.selectedRowId !== selectedRowId) {
+      dispatch({ type: "setCursor", cursor: effectiveCursor, selectedRowId });
+    }
+  }, [currentBody, effectiveCursor, frame.cursor, frame.selectedRowId, rowIds.join("\u0000")]);
   const specs = useMemo(() => bindingsForRoute(frame.routeId), [frame.routeId]);
+
+  useEffect(() => {
+    if (!paletteOpen || sprintPickerOpen || nav.current.surface !== "repo") return;
+    let active = true;
+    setSearchError(undefined);
+    void loadRepoRollup(nav.current.workspaceRoot).then((result) => {
+      if (active) setSearchRollup({ workspace: nav.current.workspaceRoot, value: result.body });
+    }).catch((caught: unknown) => { if (active) setSearchError(String(caught)); });
+    return () => { active = false; };
+  }, [paletteOpen, sprintPickerOpen, nav.current.surface, nav.current.workspaceRoot]);
 
   const paletteResults = useMemo(() => {
     if (!paletteOpen) return [];
-    const query = paletteQuery.trim().toLowerCase();
-    return railFor(nav.current.surface).filter(
-      (route) => !route.isStub && (query === "" || route.label.toLowerCase().includes(query))
-    );
-  }, [paletteOpen, paletteQuery, nav.current.surface]);
+    const items = buildPaletteItems({
+      workspaceRoot: nav.current.workspaceRoot,
+      routes: sprintPickerOpen ? [] : railFor(nav.current.surface),
+      rollup: sprintPickerOpen ? undefined : currentBody?.kind === "repo.rollup" ? currentBody.value : searchRollup?.workspace === nav.current.workspaceRoot ? searchRollup.value : undefined,
+      sprintBody: currentBody?.kind === "repo.sprintBoard" ? currentBody.value : undefined,
+      projects: currentBody?.kind === "global.projects" ? currentBody.value : undefined,
+      queues: currentBody?.kind === "global.queues" ? currentBody.value : undefined
+    });
+    return searchPalette(sprintPickerOpen ? items.filter((item) => item.kind === "sprint") : items, paletteQuery);
+  }, [paletteOpen, paletteQuery, sprintPickerOpen, currentBody, searchRollup, nav.current.surface, nav.current.workspaceRoot]);
 
   const refresh = useCallback(async ({ force = false }: { readonly force?: boolean } = {}) => {
     const identity: RefreshRequestIdentity = {
@@ -308,7 +277,7 @@ export function RouteApp({
     // under a newly selected breadcrumb.
     setError(undefined);
     try {
-      const result = await abortable(loadForFrame(identity.workspaceRoot, identity.routeId, identity.entityId, frame.entity?.kind), controller.signal);
+      const result = await abortable(loadForFrame(identity.workspaceRoot, identity.routeId, identity.entityId, frame.entity?.kind, controller.signal), controller.signal);
       if (!isRefreshCurrent(generation, refreshGenerationRef.current, controller.signal)) return;
       if (result) {
         setEnvelope(result.envelope);
@@ -322,12 +291,12 @@ export function RouteApp({
       if (!isRefreshCurrent(generation, refreshGenerationRef.current, controller.signal)) return;
       if (caught instanceof Error && caught.name === "AbortError") return;
       setError(caught instanceof Error ? caught.message : String(caught));
+      throw caught;
     } finally {
       if (isRefreshCurrent(generation, refreshGenerationRef.current, controller.signal)) {
         loadingRef.current = false;
         activeRequestKeyRef.current = undefined;
         setLoading(false);
-        setNow(Date.now());
       }
     }
   }, [frame.entity?.id, frame.entity?.kind, frame.routeId, nav.current.surface, nav.current.workspaceRoot, registryRoot, unsupportedRoute]);
@@ -345,7 +314,8 @@ export function RouteApp({
   useEffect(() => {
     setConfirming(undefined);
     setCommandError(undefined);
-    void refresh({ force: true });
+    setHelpOpen(false);
+    setSprintPickerOpen(false);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [nav.current.surface, nav.current.workspaceRoot, frame.routeId, frame.entity?.id, frame.entity?.kind, registryRoot]);
 
@@ -378,16 +348,27 @@ export function RouteApp({
     }
   }, [currentBody, frame.cursor, frame.entity?.id, frame.entity?.kind]);
 
-  // Refresh contract: watch the event-log head for the current workspace;
-  // an advanced seq refetches only the current route payload.
+  // Time-based revalidation also updates reservation expiry when no event is written.
+  // One scheduler owns initial, manual and automatic refreshes for this route.
   useEffect(() => {
-    const intervalMs = normalizeRefreshInterval(refreshMs);
-    if (nav.current.surface === "repo") {
-      return watchHead(nav.current.workspaceRoot, () => void refresh({ force: true }), intervalMs);
-    }
-    const timer = setInterval(() => void refresh(), intervalMs);
-    return () => clearInterval(timer);
-  }, [nav.current.surface, nav.current.workspaceRoot, refresh, refreshMs]);
+    const scheduler = createRefreshScheduler({
+      intervalMs: normalizeRefreshInterval(refreshMs),
+      onRefresh: () => {
+        if (!forceNextRefreshRef.current && interactionBusyRef.current) return;
+        forceNextRefreshRef.current = false;
+        return refresh({ force: true });
+      }
+    });
+    schedulerRef.current = scheduler;
+    forceNextRefreshRef.current = true;
+    scheduler.start();
+    scheduler.request({ immediate: true });
+    return () => {
+      scheduler.stop();
+      refreshAbortRef.current?.abort();
+      if (schedulerRef.current === scheduler) schedulerRef.current = undefined;
+    };
+  }, [refresh, refreshMs]);
 
   useEffect(() => {
     return () => {
@@ -396,11 +377,6 @@ export function RouteApp({
       loadingRef.current = false;
       activeRequestKeyRef.current = undefined;
     };
-  }, []);
-
-  useEffect(() => {
-    const timer = setInterval(() => setNow(Date.now()), 1000);
-    return () => clearInterval(timer);
   }, []);
 
   const requestQuit = useCallback(() => {
@@ -432,18 +408,19 @@ export function RouteApp({
           killSignal: "SIGTERM"
         });
         setConfirming(undefined);
-        await refresh({ force: true });
+        requestRefresh();
       } catch (caught) {
         setCommandError(formatCommandFailure(caught));
       } finally {
         setCommandRunning(false);
       }
     },
-    [currentEnvelope, error, loading, refresh, unsupportedRoute]
+    [currentEnvelope, error, loading, requestRefresh, unsupportedRoute]
   );
 
   const closePalette = useCallback(() => {
     setPaletteOpen(false);
+    setSprintPickerOpen(false);
     setPaletteQuery("");
     setPaletteCursor(0);
   }, []);
@@ -459,6 +436,26 @@ export function RouteApp({
         stack: [rootFrame(route.id, route.label)]
       }
     });
+  }
+
+  function openPaletteItem(item: PaletteItem): void {
+    if (item.kind === "route") {
+      const route = routeById(item.routeId);
+      if (route) jumpToRoute(route);
+    } else if (nav.current.surface === "global") {
+      dispatch({ type: "openRepo", target: {
+        projectId: item.projectId ?? item.entity?.projectId ?? item.workspaceRoot,
+        projectName: item.entity?.projectName ?? item.label,
+        projectRoot: item.workspaceRoot,
+        initialRoute: item.kind === "project" ? "repo.rollup" : item.routeId,
+        initialEntity: item.kind === "project" ? undefined : item.entity,
+        returnToGlobalFrame: frame
+      } });
+    } else {
+      const target = { routeId: item.routeId, title: item.label, entity: item.entity, cursor: 0 };
+      if (sprintPickerOpen) dispatch({ type: "jump", session: { ...nav.current, stack: [...nav.current.stack.slice(0, -1), target] } });
+      else dispatch({ type: "push", frame: target });
+    }
   }
 
   const handleDrill = useCallback((): void => {
@@ -489,7 +486,7 @@ export function RouteApp({
       return;
     }
     if (currentBody.kind === "repo.sprintBoard") {
-      const task = currentBody.value.board?.lanes.flatMap((lane) => lane.items)[effectiveCursor];
+      const task = visibleSprintRows(currentBody.value, frame.filters)[effectiveCursor];
       if (!task) return;
       const entityKind: TuiEntityKind = task.kind === "issue"
         ? "issue"
@@ -524,7 +521,8 @@ export function RouteApp({
         } else {
           setCommandError(undefined);
         }
-        setConfirming(action);
+        setCommandScroll(0);
+        setConfirming(display.disabled ? { ...action, disabled: true, disabledReason: display.reason } : action);
       }
       return;
     }
@@ -588,10 +586,25 @@ export function RouteApp({
         requestQuit();
         return;
       }
+      if (helpOpen) {
+        if (key.escape || input === "?") setHelpOpen(false);
+        else if (key.downArrow || key.pageDown || input === "j") setHelpScroll((current) => current + 1);
+        else if (key.upArrow || key.pageUp || input === "k") setHelpScroll((current) => Math.max(0, current - 1));
+        return;
+      }
       if (confirming) {
         if (key.escape) {
           setConfirming(undefined);
           setCommandError(undefined);
+          return;
+        }
+        if (key.pageUp || key.pageDown || key.upArrow || key.downArrow || input === "g" || input === "G") {
+          const columns = stdout?.columns ?? 100;
+          const railWidth = sectionRailLayout(columns).width;
+          const width = Math.max(1, columns - 2 - (railWidth ? railWidth + 1 : 0));
+          const max = commandPanelMaxScroll(confirming, width, Math.max(0, (stdout?.rows ?? 24) - 5), commandError);
+          const delta = key.pageUp || key.upArrow ? -1 : 1;
+          setCommandScroll((current) => input === "g" ? 0 : input === "G" ? max : Math.max(0, Math.min(max, current + delta)));
           return;
         }
         if (key.return && !commandRunning) {
@@ -605,8 +618,8 @@ export function RouteApp({
           return;
         }
         if (key.return) {
-          const route = paletteResults[paletteCursor];
-          if (route) jumpToRoute(route);
+          const item = paletteResults[paletteCursor];
+          if (item) openPaletteItem(item);
           closePalette();
           return;
         }
@@ -623,7 +636,7 @@ export function RouteApp({
           setPaletteCursor((current) => Math.max(current - 1, 0));
           return;
         }
-        if (input && input.length === 1 && !key.ctrl && !key.meta) {
+        if (/^[^\u0000-\u001f\u007f]+$/u.test(input) && !key.ctrl && !key.meta) {
           setPaletteQuery((current) => current + input);
           setPaletteCursor(0);
         }
@@ -631,10 +644,29 @@ export function RouteApp({
       }
       const wheel = mouse ? wheelFromInput(input) : undefined;
       if (wheel) {
-        dispatch({
-          type: "setCursor",
-          cursor: Math.max(0, Math.min(frame.cursor + (wheel === "up" ? -1 : 1), Math.max(0, listLength - 1)))
-        });
+        selectCursor(effectiveCursor + (wheel === "up" ? -1 : 1));
+        return;
+      }
+      if (input === "?") { setHelpScroll(0); setHelpOpen(true); return; }
+      if (input === "s" && currentBody?.kind === "repo.sprintBoard") {
+        setSprintPickerOpen(true); setPaletteOpen(true); setPaletteQuery(""); setPaletteCursor(0); return;
+      }
+      if (input === "d" && currentBody?.kind === "repo.sprintBoard") {
+        const scopes = ["all", "assigned", "dependencies"];
+        const scope = frame.filters?.clauses.find((clause) => clause.field === "scope")?.value ?? "all";
+        dispatch({ type: "setFilters", filters: { query: sprintFilterLabel(frame.filters), sort: [], clauses: [{ field: "scope", operator: "is", value: scopes[(scopes.indexOf(scope) + 1) % scopes.length] }] } });
+        return;
+      }
+      if (key.pageUp || key.pageDown || input === "g" || input === "G") {
+        const step = Math.max(1, (stdout?.rows ?? 24) - 14);
+        if (currentBody?.kind === "repo.taskDetail") {
+          const width = Math.max(1, (stdout?.columns ?? 100) - 2 - (sectionRailLayout(stdout?.columns ?? 100).width ? sectionRailLayout(stdout?.columns ?? 100).width + 1 : 0));
+          const max = taskDetailMaxScroll(currentBody.value, width, Math.max(0, (stdout?.rows ?? 24) - 5));
+          dispatch({ type: "setScroll", offset: input === "g" ? 0 : input === "G" ? max : Math.min(max, (frame.scrollOffset ?? 0) + (key.pageUp ? -step : step)) });
+        } else {
+          const cursor = input === "g" ? 0 : input === "G" ? listLength - 1 : effectiveCursor + (key.pageUp ? -step : step);
+          selectCursor(cursor);
+        }
         return;
       }
       const action = resolveRouteAction(specs, input, key);
@@ -652,7 +684,7 @@ export function RouteApp({
         return;
       }
       if (action === "refresh") {
-        void refresh({ force: true });
+        requestRefresh();
         return;
       }
       if (action === "search") {
@@ -690,22 +722,20 @@ export function RouteApp({
       }
       if (action === "move") {
         const delta = key.upArrow || input === "k" ? -1 : 1;
-        dispatch({ type: "setCursor", cursor: Math.max(0, Math.min(frame.cursor + delta, Math.max(0, listLength - 1))) });
+        selectCursor(effectiveCursor + delta);
         return;
       }
       if (action === "drill") {
         handleDrill();
       }
     },
-    [closePalette, commandRunning, confirming, currentBody, frame, handleDrill, listLength, mouse, nav, paletteCursor, paletteOpen, paletteResults, refresh, requestQuit, specs]
+    [closePalette, commandError, commandRunning, confirming, currentBody, effectiveCursor, frame, handleDrill, helpOpen, listLength, mouse, nav, paletteCursor, paletteOpen, paletteResults, requestRefresh, requestQuit, runDescriptor, selectCursor, specs, sprintPickerOpen, stdout]
   );
 
-  const rows = stdout?.rows ?? 24;
-  const columns = stdout?.columns ?? 100;
-  const bodyHeight = Math.max(6, rows - 6);
+  const { rows, columns } = terminalSize;
+  const bodyHeight = Math.max(0, rows - 5);
   const railLayout = sectionRailLayout(columns);
-  const bodyWidth = Math.max(12, columns - 2 - (railLayout.width > 0 ? railLayout.width + 1 : 0));
-  const ageSec = currentEnvelope ? Math.max(0, Math.round((now - new Date(currentEnvelope.generatedAt).getTime()) / 1000)) : undefined;
+  const bodyWidth = Math.max(1, columns - 2 - (railLayout.width > 0 ? railLayout.width + 1 : 0));
   const stale = currentEnvelope?.stale ?? false;
   const warningCount = currentEnvelope?.warnings.length ?? 0;
   const blocked = actionsBlocked(unsupportedRoute, loading, error, currentEnvelope);
@@ -735,41 +765,41 @@ export function RouteApp({
         ]
       : quitArmed
         ? [{ keys: "q/^c", label: "press again to quit" }]
-        : routeHints;
+        : [
+            { keys: "?", label: "help" },
+            { keys: "⏎", label: frame.routeId === REPO_TASK_DETAIL_ROUTE ? "action" : "open" },
+            { keys: "esc", label: "back" },
+            { keys: "r", label: "refresh" },
+            { keys: "/", label: "search" },
+            { keys: "q", label: "quit" },
+            ...(frame.routeId === "repo.sprintBoard" ? [{ keys: "s", label: "sprint" }, { keys: "f/d", label: "view/scope" }] : [])
+          ];
+
+  if (rows < 8 || columns < 24) return <Box width={columns} height={rows} overflow="hidden"><Text wrap="truncate">Resize terminal (24×8 minimum). q quits.</Text>{isRawModeSupported ? <KeyBindings onKey={handleKey} /> : null}</Box>;
 
   return (
-    <Box flexDirection="column" width={columns} height={rows}>
+    <Box flexDirection="column" width={columns} height={rows} overflow="hidden">
       {interactiveTerminal ? <AltScreenLifecycle enableMouse={mouse && isRawModeSupported} /> : null}
       {isRawModeSupported ? <KeyBindings onKey={handleKey} /> : null}
-      <TopBar crumbs={breadcrumbs(nav)} right={loading ? "↻" : ""} width={columns} />
+      <TopBar crumbs={breadcrumbs(nav)} right={`Auto ${Math.round(normalizeRefreshInterval(refreshMs) / 1000)}s${loading ? " ↻" : ""}`} width={columns} />
       <Box paddingX={1}>
-        <Text color={COLOR.faint} wrap="truncate">
-          {`${nav.current.surface} · ${nav.current.workspaceRoot}`}
-          {currentFilterLabel ? `  ·  filter: ${currentFilterLabel}` : ""}
-          {stale ? "  ·  STALE" : ""}
-          {warningCount > 0 ? `  ·  ${warningCount} warning${warningCount === 1 ? "" : "s"}` : ""}
-          {ageSec !== undefined ? `  ·  data: ${ageSec}s old` : ""}
-        </Text>
+        <FreshnessLine generatedAt={currentEnvelope?.generatedAt} label={nav.current.projectName ?? nav.current.workspaceRoot.split("/").filter(Boolean).at(-1) ?? nav.current.surface} filter={currentFilterLabel} error={error} stale={stale} warnings={warningCount} blocked={blocked && !loading} width={columns - 2} />
       </Box>
-      <Box flexGrow={1} paddingX={1} paddingY={1}>
+      <Box height={bodyHeight + 2} paddingX={1} paddingY={1} overflow="hidden">
         <SectionRail sections={rail} active={frame.routeId} width={columns} />
-        <Box flexDirection="column" flexGrow={1}>
-          {error ? <Text color={COLOR.danger}>{`! ${error}`}</Text> : null}
-          {currentEnvelope?.warnings.map((warning) => <Text key={warning} color={COLOR.warn} wrap="truncate">{`⚠ ${warning}`}</Text>)}
-          {blocked && !loading && !error && !unsupportedRoute ? (
-            <Text color={COLOR.warn}>Read-only: refresh and resolve warnings before running state-changing actions.</Text>
-          ) : null}
-          {confirming ? (
-            <CommandConfirmPanel descriptor={confirming} running={commandRunning} error={commandError} width={bodyWidth} />
+        <Box flexDirection="column" width={bodyWidth} height={bodyHeight} overflow="hidden">
+          {helpOpen ? (
+            <HelpView width={bodyWidth} height={bodyHeight} hints={routeHints} workspace={nav.current.workspaceRoot} scrollOffset={helpScroll} diagnostics={[...(error ? [error] : []), ...(currentEnvelope?.warnings ?? [])]} />
+          ) : confirming ? (
+            <CommandConfirmPanel descriptor={confirming} running={commandRunning} error={commandError} width={bodyWidth} height={bodyHeight} scrollOffset={commandScroll} />
           ) : paletteOpen ? (
-            <Palette query={paletteQuery} results={paletteResults} cursor={paletteCursor} height={bodyHeight} width={bodyWidth} />
+            <Palette query={paletteQuery} results={paletteResults} cursor={paletteCursor} height={bodyHeight} width={bodyWidth} title={sprintPickerOpen ? "Choose sprint" : searchError ? "Search unavailable; showing loaded items" : "Search work and routes"} />
           ) : error && !currentBody ? (
             <EmptyState title={unsupportedRoute ? "Unsupported route" : "Data unavailable"} lines={[error, "Press r to retry or esc to return."]} width={bodyWidth} />
           ) : !currentBody ? (
             <Text color={COLOR.muted}>Loading…</Text>
           ) : (
-            <Box flexDirection="column">
-              {loading ? <Text color={COLOR.muted}>Revalidating…</Text> : null}
+            <Box flexDirection="column" height={bodyHeight} overflow="hidden">
               <RouteBodyView
                 body={currentBody}
                 cursor={effectiveCursor}
@@ -778,6 +808,7 @@ export function RouteApp({
                 filters={frame.filters}
                 envelope={currentEnvelope}
                 expandedIds={rollupDisclosure.key === currentFrameKey ? rollupDisclosure.ids : undefined}
+                scrollOffset={frame.scrollOffset ?? 0}
               />
             </Box>
           )}
@@ -793,6 +824,7 @@ function AltScreenLifecycle({ enableMouse }: { readonly enableMouse: boolean }):
   return null;
 }
 
+
 function actionsBlocked(
   unsupportedRoute: boolean,
   loading: boolean,
@@ -807,40 +839,13 @@ function hasTruncation(truncated: TuiEnvelope<unknown>["truncated"] | undefined)
 }
 
 function KeyBindings({ onKey }: { readonly onKey: (input: string, key: Key) => void }) {
-  useInput(onKey, { isActive: true });
+  const latest = useRef(onKey);
+  latest.current = onKey;
+  const handleInput = useCallback((input: string, key: Key) => latest.current(input, key), []);
+  useInput(handleInput, { isActive: true });
   return null;
 }
 
-function Palette({
-  query,
-  results,
-  cursor,
-  height,
-  width
-}: {
-  readonly query: string;
-  readonly results: readonly RouteSpec[];
-  readonly cursor: number;
-  readonly height: number;
-  readonly width: number;
-}) {
-  const columns: readonly TableColumn[] = [{ header: "route", width: Math.max(20, width - 4) }];
-  const rows: readonly TableRow[] = results.map((route) => ({ key: route.id, cells: [{ text: route.label, color: COLOR.text }] }));
-  return (
-    <Box flexDirection="column">
-      <Text>
-        <Text color={COLOR.accent} bold>
-          {"❯ "}
-        </Text>
-        <Text color={COLOR.text}>{query}</Text>
-        <Text color={COLOR.accent}>▌</Text>
-      </Text>
-      <Box marginTop={1}>
-        <Table columns={columns} rows={rows} cursor={cursor} height={height - 3} width={width} emptyLabel="No matching routes." />
-      </Box>
-    </Box>
-  );
-}
 
 function RouteBodyView({
   body,
@@ -849,7 +854,8 @@ function RouteBodyView({
   width,
   filters,
   envelope,
-  expandedIds
+  expandedIds,
+  scrollOffset
 }: {
   readonly body: RouteBody;
   readonly cursor: number;
@@ -858,6 +864,7 @@ function RouteBodyView({
   readonly filters?: TuiFilterState;
   readonly envelope?: TuiEnvelope<unknown>;
   readonly expandedIds?: RollupDisclosureState;
+  readonly scrollOffset: number;
 }) {
   const state: GlobalRouteState | undefined = envelope
     ? { stale: envelope.stale, truncated: hasTruncation(envelope.truncated), warnings: envelope.warnings }
@@ -872,9 +879,9 @@ function RouteBodyView({
     case "repo.rollup":
       return <RepoRollupRoute body={body.value} cursor={cursor} height={height} width={width} filters={filters} expandedIds={expandedIds} />;
     case "repo.sprintBoard":
-      return <SprintBoardRoute body={body.value} cursor={cursor} height={height} width={width} />;
+      return <SprintBoardRoute body={body.value} cursor={cursor} height={height} width={width} filters={filters} />;
     case "repo.taskDetail":
-      return <TaskDetailRoute body={body.value} width={width} height={height} selectedActionIndex={cursor} />;
+      return <TaskDetailRoute body={body.value} width={width} height={height} selectedActionIndex={cursor} scrollOffset={scrollOffset} />;
     default:
       return <EmptyState title="Planned" lines={["This route is out of v1 scope.", "See docs/architecture/TUI_SURFACE_CONTRACTS.md."]} />;
   }

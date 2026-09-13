@@ -34,6 +34,8 @@ export interface TableColumn {
   readonly align?: "left" | "right";
   /** The smallest useful width before this column is hidden as a fallback. */
   readonly minWidth?: number;
+  /** Larger values are hidden first when readable minimums cannot fit. */
+  readonly priority?: number;
 }
 
 export interface TableCell {
@@ -56,36 +58,34 @@ export interface TableRow {
 export function fitTableColumnWidths(
   columns: readonly TableColumn[],
   availableWidth: number,
-  gutterWidth = 2
+  gutterWidth = 2,
+  gapWidth = 1
 ): readonly number[] {
-  const budget = Math.max(0, Math.floor(availableWidth) - Math.max(0, Math.floor(gutterWidth)));
+  const available = Math.max(0, Math.floor(availableWidth) - Math.max(0, Math.floor(gutterWidth)));
+  const gap = Math.max(0, Math.floor(gapWidth));
   const widths = columns.map((column) => Math.max(1, Math.floor(column.width)));
   const minimums = columns.map((column, index) => Math.min(widths[index] ?? 1, Math.max(1, Math.floor(column.minWidth ?? 1))));
+  const visible = new Set(columns.map((_, index) => index));
+  const gapBudget = (): number => Math.max(0, visible.size - 1) * gap;
+  // Remove a secondary column completely before violating its readable minimum.
+  while (visible.size > 1 && [...visible].reduce((sum, index) => sum + (minimums[index] ?? 1), 0) + gapBudget() > available) {
+    const remove = [...visible].sort((a, b) => (columns[b]?.priority ?? b) - (columns[a]?.priority ?? a) || b - a)[0];
+    if (remove === undefined) break;
+    visible.delete(remove);
+    widths[remove] = 0;
+  }
+  const budget = Math.max(0, available - gapBudget());
   let total = widths.reduce((sum, width) => sum + width, 0);
-
   while (total > budget) {
-    let candidate = -1;
-    let spare = 0;
-    for (let index = 0; index < widths.length; index += 1) {
-      const width = widths[index] ?? 0;
-      const minimum = minimums[index] ?? 1;
-      if (width - minimum > spare) {
-        candidate = index;
-        spare = width - minimum;
-      }
+    const candidate = [...visible].sort((a, b) => ((widths[b] ?? 0) - (minimums[b] ?? 1)) - ((widths[a] ?? 0) - (minimums[a] ?? 1)))[0];
+    if (candidate === undefined) break;
+    if ((widths[candidate] ?? 0) <= (minimums[candidate] ?? 1)) {
+      // A terminal smaller than one useful column still gets a bounded identity.
+      widths[candidate] = Math.max(0, (widths[candidate] ?? 0) - (total - budget));
+      break;
     }
-    if (candidate < 0) break;
     widths[candidate] = (widths[candidate] ?? 0) - 1;
     total -= 1;
-  }
-
-  // If the terminal cannot hold the minimum width of every column, hide
-  // columns from the right. A zero width is filtered at render time, so it
-  // cannot create an invisible-but-overflowing Ink Box.
-  for (let index = widths.length - 1; total > budget && index >= 0; index -= 1) {
-    const removable = Math.min(widths[index] ?? 0, total - budget);
-    widths[index] = (widths[index] ?? 0) - removable;
-    total -= removable;
   }
   return widths;
 }
@@ -127,7 +127,8 @@ export function Table({
   const tableHeight = Math.max(0, Math.floor(height));
   const tableWidth = terminalWidth(width ?? stdout?.columns, 100);
   const gutterWidth = Math.min(2, tableWidth);
-  const columnWidths = fitTableColumnWidths(columns, tableWidth, gutterWidth);
+  const columnGap = 1;
+  const columnWidths = fitTableColumnWidths(columns, tableWidth, gutterWidth, columnGap);
   const visibleColumns = columns.flatMap((column, index) => {
     const fittedWidth = columnWidths[index] ?? 0;
     return fittedWidth > 0 ? [{ column, index, width: fittedWidth }] : [];
@@ -145,7 +146,7 @@ export function Table({
           <Text>{fit("", gutterWidth)}</Text>
         </Box>
         {visibleColumns.map(({ column, index, width: fittedWidth }) => (
-          <Box key={index} width={fittedWidth}>
+          <Box key={index} width={fittedWidth} marginLeft={index === visibleColumns[0]?.index ? 0 : columnGap}>
             <Text color={COLOR.faint}>{fit(column.header.toUpperCase(), fittedWidth, column.align)}</Text>
           </Box>
         ))}
@@ -164,7 +165,7 @@ export function Table({
             {visibleColumns.map(({ column, index: columnIndex, width: fittedWidth }) => {
               const cell = item.cells[columnIndex];
               return (
-                <Box key={columnIndex} width={fittedWidth}>
+                <Box key={columnIndex} width={fittedWidth} marginLeft={columnIndex === visibleColumns[0]?.index ? 0 : columnGap}>
                   <Text color={cell?.color ?? COLOR.text} bold={cell?.bold || selected}>
                     {fit(cell?.text ?? "", fittedWidth, column.align)}
                   </Text>
@@ -243,7 +244,8 @@ export function SectionRail({
       {sections.map((section) => {
         const isActive = section.id === active;
         const marker = isActive ? "▍ " : "  ";
-        const label = layout.compact && layout.width < 8 ? `${marker}${section.key}` : `${marker}${section.label} ${section.key}`;
+        const name = section.label === "Sprint Board" ? "Sprints" : section.label;
+        const label = layout.compact && layout.width < 8 ? `${marker}${section.key}` : `${marker}${name} ${section.key}`;
         return (
           <Text key={section.id} color={isActive ? COLOR.accent : COLOR.muted} bold={isActive}>
             {fit(label, layout.width)}
@@ -254,9 +256,9 @@ export function SectionRail({
   );
 }
 
-export function Pane({ title, tone = COLOR.accent, width, children }: { readonly title?: string; readonly tone?: string; readonly width?: number; readonly children: ReactNode }) {
+export function Pane({ title, tone = COLOR.accent, width, height, children }: { readonly title?: string; readonly tone?: string; readonly width?: number; readonly height?: number; readonly children: ReactNode }) {
   return (
-    <Box flexDirection="column" borderStyle="round" borderColor={tone} paddingX={1} width={width}>
+    <Box flexDirection="column" borderStyle="round" borderColor={tone} paddingX={1} width={width} height={height}>
       {title ? (
         <Text color={tone} bold wrap="truncate">
           {title}
@@ -267,11 +269,12 @@ export function Pane({ title, tone = COLOR.accent, width, children }: { readonly
   );
 }
 
-export function Field({ label, value, color }: { readonly label: string; readonly value: string; readonly color?: string }) {
+export function Field({ label, value, color, width }: { readonly label: string; readonly value: string; readonly color?: string; readonly width?: number }) {
+  const valueWidth = width === undefined ? undefined : Math.max(1, Math.floor(width) - 12);
   return (
     <Text wrap="truncate">
-      <Text color={COLOR.faint}>{fit(label, 11)}</Text>
-      <Text color={color ?? COLOR.text}>{value}</Text>
+      <Text color={COLOR.faint}>{fit(label, 11)} </Text>
+      <Text color={color ?? COLOR.text}>{valueWidth === undefined ? value : fit(value, valueWidth)}</Text>
     </Text>
   );
 }

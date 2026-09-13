@@ -16,6 +16,7 @@ import {
   loadRepoSprintBoard,
   loadRepoTaskDetail,
   loadRoute,
+  selectScopedWorkItems,
   TuiCliLoadError
 } from "../../apps/tui/src/loaders.js";
 import { activeReservationViewsByWorkId } from "../../apps/tui/src/repo-store.js";
@@ -182,6 +183,19 @@ describe("global route loaders: fixture JSON parsing", () => {
 });
 
 describe("repo route loaders: direct store read", () => {
+  it("filters large worksets before building selected board views", () => {
+    const selected = createWorkItem({ title: "Selected", kind: "task", actor, now: "2026-01-01T00:00:00.000Z" });
+    const unrelated = Array.from({ length: 1_000 }, (_, index) => ({
+      ...selected,
+      meta: { ...selected.meta, id: `bw_work_unrelated_${index}` as WorkId },
+      title: `Unrelated ${index}`
+    }));
+    const workItems = [selected, ...unrelated];
+    const result = selectScopedWorkItems(workItems, new Set([selected.meta.id]));
+    expect(result).toHaveLength(1);
+    expect(result[0]?.meta.id).toBe(selected.meta.id);
+  });
+
   it("loadRepoRollup returns a stable envelope over a real workspace store", async () => {
     const rootDir = await makeTempWorkspace();
     const store = new FileBorealStore({ rootDir });
@@ -284,6 +298,27 @@ describe("repo route loaders: direct store read", () => {
     const envelope = await loadRepoSprintBoard(rootDir);
     expect(envelope.body.selectedSprintId).toBe(first.meta.id);
     expect(envelope.body.board?.sprint.id).toBe(first.meta.id);
+  });
+
+  it("loads parent-only nested sprint scope and excludes unrelated work", async () => {
+    const rootDir = await makeTempWorkspace();
+    const store = new FileBorealStore({ rootDir });
+    const sprint = createWorkItem({ title: "Sprint", kind: "sprint", actor, now: "2026-01-01T00:00:00.000Z" });
+    const phase = createWorkItem({ title: "Phase", kind: "milestone", parentId: sprint.meta.id, actor, now: "2026-01-01T00:00:01.000Z" });
+    const task = createWorkItem({ title: "Scoped task", kind: "task", parentId: phase.meta.id, actor, now: "2026-01-01T00:00:02.000Z" });
+    const unrelated = createWorkItem({ title: "Unrelated task", kind: "task", actor, now: "2026-01-01T00:00:03.000Z" });
+    await store.write(async (writer) => {
+      await writer.putWorkItem(sprint);
+      await writer.putWorkItem(phase);
+      await writer.putWorkItem(task);
+      await writer.putWorkItem(unrelated);
+    });
+
+    const envelope = await loadRepoSprintBoard(rootDir, sprint.meta.id);
+    expect(envelope.body.sprints.find((row) => row.view.id === sprint.meta.id)?.scopeCount).toBe(2);
+    expect(envelope.body.board?.lanes.flatMap((lane) => lane.items).map((item) => item.id).sort()).toEqual([phase.meta.id, task.meta.id].sort());
+    expect(envelope.body.assignedWorkIds?.sort()).toEqual([phase.meta.id, task.meta.id].sort());
+    expect(envelope.body.dependencyWorkIds).toEqual([]);
   });
 
   it("honors route surface and entity kind while preserving issue identity", async () => {

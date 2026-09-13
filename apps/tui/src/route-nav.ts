@@ -9,6 +9,11 @@
 
 import type { OpenRepoTarget, TuiEntityRef, TuiFilterState, TuiNavFrame, TuiSurfaceKind } from "@boreal/ui-model";
 
+export interface RouteFrame extends TuiNavFrame {
+  readonly selectedRowId?: string;
+  readonly scrollOffset?: number;
+}
+
 export interface RouteSession {
   readonly surface: TuiSurfaceKind;
   readonly workspaceRoot: string;
@@ -17,7 +22,7 @@ export interface RouteSession {
   readonly projectId?: string;
   readonly projectName?: string;
   /** Always at least one frame; the last entry is the active screen. */
-  readonly stack: readonly TuiNavFrame[];
+  readonly stack: readonly RouteFrame[];
 }
 
 export interface RouteNavState {
@@ -33,7 +38,8 @@ export interface RouteNavState {
 export type RouteNavAction =
   | { readonly type: "push"; readonly frame: TuiNavFrame }
   | { readonly type: "pop" }
-  | { readonly type: "setCursor"; readonly cursor: number }
+  | { readonly type: "setCursor"; readonly cursor: number; readonly selectedRowId?: string }
+  | { readonly type: "setScroll"; readonly offset: number }
   | { readonly type: "setFilters"; readonly filters: TuiFilterState | undefined }
   | { readonly type: "openRepo"; readonly target: OpenRepoTarget }
   | { readonly type: "jump"; readonly session: RouteSession };
@@ -46,7 +52,7 @@ export function initialRouteNavState(surface: TuiSurfaceKind, workspaceRoot: str
   return { current: { surface, workspaceRoot, stack: [rootFrame(routeId, title)] } };
 }
 
-export function topFrame(state: RouteNavState): TuiNavFrame {
+export function topFrame(state: RouteNavState): RouteFrame {
   const frame = state.current.stack[state.current.stack.length - 1];
   if (!frame) {
     throw new Error("RouteNavState.current.stack must never be empty");
@@ -58,7 +64,7 @@ export function atRoot(state: RouteNavState): boolean {
   return state.current.stack.length <= 1;
 }
 
-function replaceTopOf(session: RouteSession, frame: TuiNavFrame): RouteSession {
+function replaceTopOf(session: RouteSession, frame: RouteFrame): RouteSession {
   return { ...session, stack: [...session.stack.slice(0, -1), frame] };
 }
 
@@ -79,7 +85,9 @@ export function reduceRouteNav(state: RouteNavState, action: RouteNavAction): Ro
       return state;
     }
     case "setCursor":
-      return { ...state, current: replaceTopOf(state.current, { ...topFrame(state), cursor: action.cursor }) };
+      return { ...state, current: replaceTopOf(state.current, { ...topFrame(state), cursor: action.cursor, selectedRowId: action.selectedRowId }) };
+    case "setScroll":
+      return { ...state, current: replaceTopOf(state.current, { ...topFrame(state), scrollOffset: Math.max(0, action.offset) }) };
     case "setFilters":
       return { ...state, current: replaceTopOf(state.current, { ...topFrame(state), filters: action.filters }) };
     case "openRepo": {

@@ -5,6 +5,7 @@ import {
   buildRepoRollupView,
   childWorkIds,
   computeScopeIds,
+  computeScopeProvenance,
   type RollupNodeView
 } from "@boreal/ui-model";
 import type { GraphEdge, GraphEdgeId, WorkId, WorkItem } from "@boreal/core";
@@ -127,6 +128,44 @@ describe("tui-contracts: scope/child derivation", () => {
     expect(childWorkIds(sprint, edges)).toEqual(["bw_task_1"]);
     const scope = computeScopeIds(sprint.meta.id, byId, edges);
     expect([...scope].sort()).toEqual(["bw_task_1", "bw_task_2"]);
+  });
+
+  it("includes explicit parent descendants, excludes unrelated work, and terminates on cycles", () => {
+    const sprint = work({ id: "bw_sprint_parent", title: "Sprint", kind: "sprint", status: "in_progress" });
+    const phase = work({ id: "bw_phase_parent", title: "Phase", kind: "milestone", status: "ready", parentId: sprint.meta.id });
+    const task = work({ id: "bw_task_parent", title: "Task", kind: "task", status: "ready", parentId: phase.meta.id });
+    const dependency = work({ id: "bw_task_dependency", title: "Dependency", kind: "task", status: "ready", dependencyIds: [task.meta.id] });
+    const unrelated = work({ id: "bw_task_unrelated", title: "Unrelated", kind: "task", status: "ready" });
+    const byId = new Map([sprint, phase, task, dependency, unrelated].map((item) => [item.meta.id, item]));
+    const scope = computeScopeIds(sprint.meta.id, byId, []);
+    expect([...scope].sort()).toEqual([phase.meta.id, task.meta.id]);
+
+    const provenance = computeScopeProvenance(sprint.meta.id, byId, []);
+    expect([...provenance.assignedWorkIds].sort()).toEqual([phase.meta.id, task.meta.id]);
+    expect([...provenance.dependencyWorkIds]).toEqual([]);
+
+    const cycleA = work({ id: "bw_task_cycle_a", title: "Cycle A", kind: "task", status: "ready", dependencyIds: ["bw_task_cycle_b"] });
+    const cycleB = work({ id: "bw_task_cycle_b", title: "Cycle B", kind: "task", status: "ready", dependencyIds: [cycleA.meta.id, sprint.meta.id] });
+    const cycleRoot = { ...sprint, dependencyIds: [cycleA.meta.id] };
+    const cycleMap = new Map([cycleRoot, cycleA, cycleB].map((item) => [item.meta.id, item]));
+    expect(computeScopeIds(cycleRoot.meta.id, cycleMap, []).size).toBe(2);
+    expect(computeScopeIds(sprint.meta.id, cycleMap, []).has(sprint.meta.id)).toBe(false);
+  });
+
+  it("partitions nested dependency-container scope without overlap", () => {
+    const sprint = work({ id: "bw_sprint_partition", title: "Sprint", kind: "sprint", status: "in_progress", dependencyIds: ["bw_milestone_dependency"] });
+    const dependency = work({ id: "bw_milestone_dependency", title: "Dependency phase", kind: "milestone", status: "ready" });
+    const dependencyTask = work({ id: "bw_task_dependency", title: "Dependency task", kind: "task", status: "ready", parentId: dependency.meta.id });
+    const assigned = work({ id: "bw_task_assigned", title: "Assigned task", kind: "task", status: "ready", parentId: sprint.meta.id });
+    const byId = new Map([sprint, dependency, dependencyTask, assigned].map((item) => [item.meta.id, item]));
+    const scope = computeScopeIds(sprint.meta.id, byId, []);
+    const provenance = computeScopeProvenance(sprint.meta.id, byId, []);
+    const assignedIds = new Set(provenance.assignedWorkIds);
+    const dependencyIds = new Set(provenance.dependencyWorkIds);
+    expect([...assignedIds].sort()).toEqual([assigned.meta.id]);
+    expect([...dependencyIds].sort()).toEqual([dependency.meta.id, dependencyTask.meta.id]);
+    expect([...assignedIds].some((id) => dependencyIds.has(id))).toBe(false);
+    expect(new Set([...assignedIds, ...dependencyIds])).toEqual(new Set(scope));
   });
 });
 

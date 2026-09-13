@@ -43,7 +43,7 @@ import {
   type WorkStatus
 } from "@boreal/core";
 import { writeTextFileAtomic, type BorealReader } from "@boreal/storage";
-import { buildSprintBoardView, toWorkItemView, type WorkItemView } from "@boreal/ui-model";
+import { buildSprintBoardView, childWorkIds, computeScopeIds, toWorkItemView, type WorkItemView } from "@boreal/ui-model";
 
 import { flagValue, flagValues, hasFlag, requiredFlag, type ParsedArgs } from "../args.js";
 import { boundedTable, type BoundedTableColumn } from "../cli-ui.js";
@@ -1859,25 +1859,8 @@ async function buildSprintScope(
     const evidenceByWork = recordsByWorkSubject(evidence);
     const verificationsByWork = recordsByWorkSubject(verifications);
     const directChildIds = sprintDirectChildIds(sprint, workItems, graphEdges);
-    const descendants: WorkItem[] = [];
-    const visited = new Set<string>();
-    const visit = (workId: string): void => {
-      if (visited.has(workId)) {
-        return;
-      }
-      const work = workById.get(workId as WorkId);
-      if (!work) {
-        return;
-      }
-      visited.add(workId);
-      descendants.push(work);
-      for (const childId of sprintDirectChildIds(work, workItems, graphEdges)) {
-        visit(childId);
-      }
-    };
-    for (const childId of directChildIds) {
-      visit(childId);
-    }
+    const scopeIds = computeScopeIds(sprint.meta.id, workById, graphEdges);
+    const descendants = [...scopeIds].map((id) => workById.get(id as WorkId)).filter(isWorkItem);
     const limitedDescendants = descendants.slice(0, limit);
     const directChildren = directChildIds
       .map((id) => workById.get(id))
@@ -1896,29 +1879,11 @@ async function buildSprintScope(
 }
 
 function sprintScopeMemberIds(sprint: WorkItem, workItems: readonly WorkItem[], graphEdges: readonly GraphEdge[]): ReadonlySet<WorkId> {
-  const ids = new Set<WorkId>();
-  const workById = new Map(workItems.map((work) => [work.meta.id, work]));
-  const visit = (work: WorkItem): void => {
-    for (const childId of sprintDirectChildIds(work, workItems, graphEdges)) {
-      if (ids.has(childId)) {
-        continue;
-      }
-      ids.add(childId);
-      const child = workById.get(childId);
-      if (child) {
-        visit(child);
-      }
-    }
-  };
-  visit(sprint);
-  return ids;
+  return computeScopeIds(sprint.meta.id, new Map(workItems.map((work) => [work.meta.id, work])), graphEdges) as ReadonlySet<WorkId>;
 }
 
 function sprintDirectChildIds(work: WorkItem, workItems: readonly WorkItem[], graphEdges: readonly GraphEdge[]): readonly WorkId[] {
-  return uniqueWorkIds([
-    ...dependencyIdsForWork(work, graphEdges),
-    ...workItems.filter((item) => item.parentId === work.meta.id).map((item) => item.meta.id)
-  ]);
+  return uniqueWorkIds(childWorkIds({ ...work, dependencyIds: dependencyIdsForWork(work, graphEdges) }, graphEdges, workItems) as readonly WorkId[]);
 }
 
 function uniqueWorkIds(ids: readonly WorkId[]): readonly WorkId[] {

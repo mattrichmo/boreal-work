@@ -3,7 +3,7 @@ import { createElement } from "react";
 import { fileURLToPath } from "node:url";
 import { basename, resolve } from "node:path";
 
-import { resolveWorkspaceRoot } from "./load.js";
+import { resolveWorkspaceRoot } from "./workspace.js";
 import { DEFAULT_TUI_REFRESH_MS, normalizeRefreshInterval } from "./head-poll.js";
 import { RouteApp } from "./shell.js";
 
@@ -83,7 +83,7 @@ function printHelp(): void {
       "Projects / Queues surface; without it, opens the repo Roll-Up / Sprint",
       "Board / Task Detail surface for the current workspace.",
       "",
-      "Keys: 1-3 sections · ↑↓/jk move · ⏎ open/run · esc back · r refresh · q quit",
+      "Keys: 1-3 sections · ↑↓/jk move · ⏎ open/run · esc back · r refresh · / search · ? help · q quit",
       ""
     ].join("\n")
   );

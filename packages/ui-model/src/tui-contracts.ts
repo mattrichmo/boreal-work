@@ -307,15 +307,15 @@ const TERMINAL_STATUSES = new Set<WorkStatus>(["verified", "closed", "cancelled"
 
 /**
  * Same derivation the CLI's sprint scope traversal uses
- * (`apps/cli/src/commands/shared.ts#dependencyIdsForWork` /
- * `apps/tui/src/load.ts#childWorkIds`): a work item's scope children are its
- * `dependencyIds` plus anything that `blocks` it via a graph edge. Kept as a
- * single shared implementation so the roll-up tree, sprint board, and CLI
- * scope commands can't drift into two different membership definitions.
+ * (`apps/cli/src/commands/sprint.ts#sprintDirectChildIds`): a work item's
+ * scope children are explicit `parentId` children, dependency IDs, and
+ * anything that `blocks` it via a graph edge. Kept as a single shared
+ * implementation so the roll-up tree and sprint board cannot drift from the
+ * CLI scope contract.
  */
-export function childWorkIds(work: WorkItem, graphEdges: readonly GraphEdge[]): readonly string[] {
+export function childWorkIds(work: WorkItem, graphEdges: readonly GraphEdge[], workItems: readonly WorkItem[] = [work]): readonly string[] {
   const blockersByTarget = buildBlockerIndex(graphEdges);
-  return childWorkIdsWithIndex(work, blockersByTarget);
+  return childWorkIdsWithIndex(work, blockersByTarget, buildParentIndex(workItems));
 }
 
 function buildBlockerIndex(graphEdges: readonly GraphEdge[]): ReadonlyMap<string, readonly string[]> {
@@ -330,8 +330,24 @@ function buildBlockerIndex(graphEdges: readonly GraphEdge[]): ReadonlyMap<string
   return blockersByTarget;
 }
 
-function childWorkIdsWithIndex(work: WorkItem, blockersByTarget: ReadonlyMap<string, readonly string[]>): readonly string[] {
+function buildParentIndex(workItems: readonly WorkItem[]): ReadonlyMap<string, readonly string[]> {
+  const childrenByParent = new Map<string, string[]>();
+  for (const work of workItems) {
+    if (!work.parentId) continue;
+    const children = childrenByParent.get(work.parentId) ?? [];
+    children.push(work.meta.id);
+    childrenByParent.set(work.parentId, children);
+  }
+  return childrenByParent;
+}
+
+function childWorkIdsWithIndex(
+  work: WorkItem,
+  blockersByTarget: ReadonlyMap<string, readonly string[]>,
+  childrenByParent: ReadonlyMap<string, readonly string[]>
+): readonly string[] {
   const ids = new Set<string>(work.dependencyIds);
+  for (const childId of childrenByParent.get(work.meta.id) ?? []) ids.add(childId);
   for (const blockerId of blockersByTarget.get(work.meta.id) ?? []) ids.add(blockerId);
   return [...ids];
 }
@@ -341,26 +357,51 @@ export function computeScopeIds(
   byId: ReadonlyMap<string, WorkItem>,
   graphEdges: readonly GraphEdge[]
 ): ReadonlySet<string> {
-  return computeScopeIdsWithIndex(rootId, byId, buildBlockerIndex(graphEdges));
+  return computeScopeIdsWithIndex(rootId, byId, buildBlockerIndex(graphEdges), buildParentIndex([...byId.values()]));
+}
+
+export interface ScopeProvenance {
+  readonly assignedWorkIds: ReadonlySet<string>;
+  readonly dependencyWorkIds: ReadonlySet<string>;
+}
+
+/** Returns the two membership paths that make up a sprint scope. */
+export function computeScopeProvenance(
+  rootId: string,
+  byId: ReadonlyMap<string, WorkItem>,
+  graphEdges: readonly GraphEdge[]
+): ScopeProvenance {
+  const childrenByParent = buildParentIndex([...byId.values()]);
+  const scopeIds = computeScopeIds(rootId, byId, graphEdges);
+  const assignedWorkIds = new Set<string>();
+  const visitAssigned = (workId: string): void => {
+    if (!scopeIds.has(workId) || assignedWorkIds.has(workId)) return;
+    assignedWorkIds.add(workId);
+    for (const childId of childrenByParent.get(workId) ?? []) visitAssigned(childId);
+  };
+  for (const childId of childrenByParent.get(rootId) ?? []) visitAssigned(childId);
+  const dependencyWorkIds = new Set([...scopeIds].filter((workId) => !assignedWorkIds.has(workId)));
+  return { assignedWorkIds, dependencyWorkIds };
 }
 
 function computeScopeIdsWithIndex(
   rootId: string,
   byId: ReadonlyMap<string, WorkItem>,
-  blockersByTarget: ReadonlyMap<string, readonly string[]>
+  blockersByTarget: ReadonlyMap<string, readonly string[]>,
+  childrenByParent: ReadonlyMap<string, readonly string[]>
 ): ReadonlySet<string> {
   const visited = new Set<string>();
   const visit = (workId: string): void => {
-    if (visited.has(workId) || !byId.has(workId)) return;
+    if (workId === rootId || visited.has(workId) || !byId.has(workId)) return;
     visited.add(workId);
     const work = byId.get(workId);
     if (work) {
-      for (const childId of childWorkIdsWithIndex(work, blockersByTarget)) visit(childId);
+      for (const childId of childWorkIdsWithIndex(work, blockersByTarget, childrenByParent)) visit(childId);
     }
   };
   const root = byId.get(rootId);
   if (root) {
-    for (const childId of childWorkIdsWithIndex(root, blockersByTarget)) visit(childId);
+    for (const childId of childWorkIdsWithIndex(root, blockersByTarget, childrenByParent)) visit(childId);
   }
   return visited;
 }
@@ -390,6 +431,7 @@ export function buildRepoRollupView(input: {
 }): RepoRollupView {
   const byId = new Map<string, WorkItem>(input.work.map((work) => [work.meta.id, work]));
   const blockersByTarget = buildBlockerIndex(input.graphEdges);
+  const childrenByParent = buildParentIndex(input.work);
   const explicitParentOf = new Map<string, string>();
   for (const work of input.work) {
     if (work.parentId && byId.has(work.parentId)) {
@@ -401,7 +443,7 @@ export function buildRepoRollupView(input: {
   const sprintOwnerOf = new Map<string, string>();
   for (const work of input.work) {
     if (work.kind !== "sprint") continue;
-    const scope = computeScopeIdsWithIndex(work.meta.id, byId, blockersByTarget);
+    const scope = computeScopeIdsWithIndex(work.meta.id, byId, blockersByTarget, buildParentIndex(input.work));
     for (const memberId of scope) {
       if (explicitParentOf.has(memberId) || sprintOwnerOf.has(memberId) || memberId === work.meta.id) continue;
       sprintOwnerOf.set(memberId, work.meta.id);
@@ -477,7 +519,7 @@ export function buildRepoRollupView(input: {
     }
     blockerSummaryInFlight.add(nodeId);
     const node = byId.get(nodeId);
-    const own = node ? childWorkIdsWithIndex(node, blockersByTarget).filter((id) => {
+    const own = node ? childWorkIdsWithIndex(node, blockersByTarget, childrenByParent).filter((id) => {
       const dep = byId.get(id);
       return dep ? !TERMINAL_STATUSES.has(dep.status) : true;
     }) : [];

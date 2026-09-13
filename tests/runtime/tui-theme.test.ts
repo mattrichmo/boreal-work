@@ -51,4 +51,12 @@ describe("tui color modes", () => {
     expect(createColorPalette("none").accent).toBe("");
     expect(createColorPalette("high-contrast").faint).not.toBe(createColorPalette("color").faint);
   });
+
+  it("supports light and terminal-default palettes while preserving NO_COLOR precedence", () => {
+    expect(resolveColorMode({ BOREAL_TUI_COLOR_MODE: "light" })).toBe("light");
+    expect(resolveColorMode({ BOREAL_TUI_COLOR_MODE: "terminal-default" })).toBe("terminal-default");
+    expect(resolveColorMode({ NO_COLOR: "", BOREAL_TUI_COLOR_MODE: "light" })).toBe("none");
+    expect(createColorPalette("light").selectionBg).not.toBe("");
+    expect(createColorPalette("terminal-default").accent).toBe("green");
+  });
 });

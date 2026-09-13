@@ -14,6 +14,7 @@ import {
   buildTuiEnvelope,
   toWorkItemView,
   computeScopeIds,
+  computeScopeProvenance,
   type GlobalWorkQueuesView,
   type ProjectRegistryView,
   type ProjectRegistryEntry,
@@ -50,6 +51,7 @@ const TUI_CLAIM_PURPOSE = "Claim from Boreal TUI";
 interface CliJsonOptions<T> {
   readonly expectedSchemaVersion?: string;
   readonly validate?: (value: unknown) => value is T;
+  readonly signal?: AbortSignal;
 }
 
 async function runCliJson<T>(
@@ -60,7 +62,8 @@ async function runCliJson<T>(
     const { stdout } = await execFileAsync(process.env.BOREAL_TUI_CLI ?? "bwrk", [...args, "--json"], {
       maxBuffer: 32 * 1024 * 1024,
       timeout: 30_000,
-      killSignal: "SIGTERM"
+      killSignal: "SIGTERM",
+      signal: options.signal
     });
     if (stdout.trim().length === 0) return { error: "CLI returned empty JSON output" };
     const parsed: unknown = JSON.parse(stdout);
@@ -140,23 +143,28 @@ export function invalidateGlobalDashboardCache(workspaceRoot?: string): void {
   }
 }
 
-async function loadDashboardGlobal(workspaceRoot: string): Promise<{ readonly payload?: DashboardGlobalPayload; readonly error?: string }> {
+async function loadDashboardGlobal(workspaceRoot: string, signal?: AbortSignal): Promise<{ readonly payload?: DashboardGlobalPayload; readonly error?: string }> {
+  signal?.throwIfAborted();
   const key = globalPayloadCacheKey(workspaceRoot);
   const cached = globalPayloadCache.get(key);
   if (cached?.payload && Date.now() - cached.loadedAt < GLOBAL_PAYLOAD_CACHE_TTL_MS) return { payload: cached.payload };
-  if (cached?.pending) return cached.pending;
+  // A request tied to a route refresh must not join a shared pending request:
+  // aborting that request would otherwise hand an AbortError to a successor
+  // refresh that arrived just after navigation.
+  if (cached?.pending && !signal) return cached.pending;
 
   const pending = (async () => {
     const result = await runCliJson<DashboardGlobalPayload>(["dashboard", "global", "--workspace", workspaceRoot, "--no-cache-write"], {
       expectedSchemaVersion: DASHBOARD_GLOBAL_SCHEMA_VERSION,
-      validate: isDashboardGlobalPayload
+      validate: isDashboardGlobalPayload,
+      signal
     });
     if (result.error) return { error: result.error };
     if (!result.data) return { error: "CLI returned no global dashboard payload" };
-    globalPayloadCache.set(key, { loadedAt: Date.now(), payload: result.data });
+    if (!signal?.aborted) globalPayloadCache.set(key, { loadedAt: Date.now(), payload: result.data });
     return { payload: result.data };
   })();
-  globalPayloadCache.set(key, { loadedAt: Date.now(), pending });
+  if (!signal) globalPayloadCache.set(key, { loadedAt: Date.now(), pending });
   try {
     return await pending;
   } finally {
@@ -177,8 +185,10 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-async function requireDashboardGlobal(workspaceRoot: string): Promise<DashboardGlobalPayload> {
-  const { payload, error } = await loadDashboardGlobal(workspaceRoot);
+async function requireDashboardGlobal(workspaceRoot: string, signal?: AbortSignal): Promise<DashboardGlobalPayload> {
+  signal?.throwIfAborted();
+  const { payload, error } = await loadDashboardGlobal(workspaceRoot, signal);
+  signal?.throwIfAborted();
   if (!payload) throw new TuiCliLoadError(error ?? "CLI returned no dashboard payload");
   return payload;
 }
@@ -263,8 +273,8 @@ export function globalOverviewBodyFromPayload(payload: DashboardGlobalPayload): 
   };
 }
 
-export async function loadGlobalOverview(workspaceRoot: string): Promise<TuiEnvelope<GlobalOverviewBody>> {
-  const payload = await requireDashboardGlobal(workspaceRoot);
+export async function loadGlobalOverview(workspaceRoot: string, signal?: AbortSignal): Promise<TuiEnvelope<GlobalOverviewBody>> {
+  const payload = await requireDashboardGlobal(workspaceRoot, signal);
   const metadata = globalEnvelopeMetadata(payload);
   return buildTuiEnvelope({
     surface: "global",
@@ -276,8 +286,8 @@ export async function loadGlobalOverview(workspaceRoot: string): Promise<TuiEnve
   });
 }
 
-export async function loadGlobalProjects(workspaceRoot: string): Promise<TuiEnvelope<ProjectRegistryView>> {
-  const payload = await requireDashboardGlobal(workspaceRoot);
+export async function loadGlobalProjects(workspaceRoot: string, signal?: AbortSignal): Promise<TuiEnvelope<ProjectRegistryView>> {
+  const payload = await requireDashboardGlobal(workspaceRoot, signal);
   const metadata = globalEnvelopeMetadata(payload);
   return buildTuiEnvelope({
     surface: "global",
@@ -289,8 +299,8 @@ export async function loadGlobalProjects(workspaceRoot: string): Promise<TuiEnve
   });
 }
 
-export async function loadGlobalQueues(workspaceRoot: string): Promise<TuiEnvelope<GlobalWorkQueuesView>> {
-  const payload = await requireDashboardGlobal(workspaceRoot);
+export async function loadGlobalQueues(workspaceRoot: string, signal?: AbortSignal): Promise<TuiEnvelope<GlobalWorkQueuesView>> {
+  const payload = await requireDashboardGlobal(workspaceRoot, signal);
   const metadata = globalEnvelopeMetadata(payload);
   return buildTuiEnvelope({
     surface: "global",
@@ -374,6 +384,13 @@ export interface RepoSprintBoardBody {
   readonly activeSprintId?: string;
   readonly selectedSprintId?: string;
   readonly board?: SprintBoardView;
+  readonly assignedWorkIds?: readonly string[];
+  readonly dependencyWorkIds?: readonly string[];
+}
+
+/** Selects only board members before the comparatively expensive view build. */
+export function selectScopedWorkItems(workItems: readonly WorkItem[], scopeIds: ReadonlySet<string>): readonly WorkItem[] {
+  return workItems.filter((work) => scopeIds.has(work.meta.id));
 }
 
 export async function loadRepoSprintBoard(
@@ -395,13 +412,6 @@ export async function loadRepoSprintBoard(
   const now = new Date(generatedAt);
   const byId = new Map<string, WorkItem>(graph.items.map((item) => [item.meta.id, item]));
   const reservationsByWorkId = activeReservationViewsByWorkId(graph.reservations, now, preferredReservationIds(graph.items));
-  const views = graph.items.map((work) => toWorkItemView({
-    work,
-    dependencies: graph.items,
-    graphEdges: graph.graphEdges,
-    reservation: reservationsByWorkId.get(work.meta.id)
-  }));
-  const viewById = new Map(views.map((view) => [view.id, view]));
   const activeProjectionSprintId = graph.activeSprintId;
   const sprintItems = graph.items.filter((item) => item.kind === "sprint");
   if (selectedSprintId && !sprintItems.some((sprint) => sprint.meta.id === selectedSprintId)) {
@@ -409,7 +419,12 @@ export async function loadRepoSprintBoard(
   }
   const sprints: RepoSprintRow[] = sprintItems
     .map((sprintItem) => {
-      const view = viewById.get(sprintItem.meta.id) ?? toWorkItemView({ work: sprintItem });
+      const view = toWorkItemView({
+        work: sprintItem,
+        dependencies: graph.items,
+        graphEdges: graph.graphEdges,
+        reservation: reservationsByWorkId.get(sprintItem.meta.id)
+      });
       const scope = computeScopeIds(sprintItem.meta.id, byId, graph.graphEdges);
       return { view, scopeCount: scope.size, active: sprintItem.meta.id === activeProjectionSprintId };
     })
@@ -420,12 +435,25 @@ export async function loadRepoSprintBoard(
   // deterministic row rather than rendering an unreachable empty board.
   const target = selectedSprintId ?? activeProjectionSprintId ?? sprints[0]?.view.id;
   let board: SprintBoardView | undefined;
+  let provenance: ReturnType<typeof computeScopeProvenance> | undefined;
   if (target) {
     const sprintItem = byId.get(target);
-    const sprintView = viewById.get(target);
-    if (sprintItem && sprintView) {
+    if (sprintItem) {
+      const sprintView = toWorkItemView({
+        work: sprintItem,
+        dependencies: graph.items,
+        graphEdges: graph.graphEdges,
+        reservation: reservationsByWorkId.get(target)
+      });
       const scope = computeScopeIds(target, byId, graph.graphEdges);
-      const scopedViews = views.filter((view) => scope.has(view.id));
+      provenance = computeScopeProvenance(target, byId, graph.graphEdges);
+      const scopedViews = selectScopedWorkItems(graph.items, scope)
+        .map((work) => toWorkItemView({
+          work,
+          dependencies: graph.items,
+          graphEdges: graph.graphEdges,
+          reservation: reservationsByWorkId.get(work.meta.id)
+        }));
       board = buildSprintBoardView({
         sprint: sprintView,
         work: scopedViews,
@@ -452,7 +480,16 @@ export async function loadRepoSprintBoard(
     surface: "repo",
     workspaceRoot,
     generatedAt,
-    body: { sprints, activeSprintId: activeProjectionSprintId, selectedSprintId: target, board }
+    body: {
+      sprints,
+      activeSprintId: activeProjectionSprintId,
+      selectedSprintId: target,
+      board,
+      ...(provenance ? {
+        assignedWorkIds: [...provenance.assignedWorkIds],
+        dependencyWorkIds: [...provenance.dependencyWorkIds]
+      } : {})
+    }
   });
 }
 
@@ -532,15 +569,15 @@ export async function loadRepoTaskDetail(
 // Dispatch.
 // ---------------------------------------------------------------------------
 
-export async function loadRoute(request: TuiRouteRequest): Promise<TuiEnvelope<unknown>> {
+export async function loadRoute(request: TuiRouteRequest, signal?: AbortSignal): Promise<TuiEnvelope<unknown>> {
   validateRouteRequest(request);
   switch (request.routeId) {
     case "global.overview":
-      return loadGlobalOverview(request.workspaceRoot);
+      return loadGlobalOverview(request.workspaceRoot, signal);
     case "global.projects":
-      return loadGlobalProjects(request.workspaceRoot);
+      return loadGlobalProjects(request.workspaceRoot, signal);
     case "global.queues":
-      return loadGlobalQueues(request.workspaceRoot);
+      return loadGlobalQueues(request.workspaceRoot, signal);
     case "repo.rollup":
       return loadRepoRollup(request.workspaceRoot);
     case "repo.sprintBoard":

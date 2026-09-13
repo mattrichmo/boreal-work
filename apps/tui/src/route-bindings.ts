@@ -1,11 +1,10 @@
-// Binding specs for the v1 route shell. Reuses bindings.ts#matchToken (a
-// generic token matcher, not tied to the legacy TuiScreen type) so the
-// footer hints and the dispatcher can't drift apart, same as the legacy
-// four-section shell.
+// Binding specs for the v1 route shell. The matcher is isolated from the
+// retired screen-specific binding table so the active shell has no legacy
+// implementation dependency.
 
 import type { Key } from "ink";
 
-import { matchToken } from "./bindings.js";
+import { matchToken } from "./key-matcher.js";
 
 export type RouteActionId =
   | "move"
@@ -40,7 +39,7 @@ const FILTER: RouteBindingSpec = { token: "f", action: "filter", hint: { keys: "
 const QUIT: RouteBindingSpec = { token: "q", action: "quit", hint: { keys: "q", label: "quit" } };
 const SECTIONS: RouteBindingSpec = { token: "numberKey", action: "numberKey:0", hint: { keys: "1-9", label: "sections" } };
 
-const FILTERABLE_ROUTES = new Set(["repo.rollup", "global.queues"]);
+const FILTERABLE_ROUTES = new Set(["repo.rollup", "repo.sprintBoard", "global.queues"]);
 const PROJECT_DRILL_ROUTES = new Set(["global.projects"]);
 const WORK_DRILL_ROUTES = new Set(["global.queues", "repo.sprintBoard"]);
 const FINDING_DRILL_ROUTES = new Set(["global.overview"]);
