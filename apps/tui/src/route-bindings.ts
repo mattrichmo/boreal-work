@@ -9,6 +9,9 @@ import { matchToken } from "./key-matcher.js";
 export type RouteActionId =
   | "move"
   | "drill"
+  | "toggleDisclosure"
+  | "expand"
+  | "collapse"
   | "back"
   | "search"
   | "refresh"
@@ -27,7 +30,10 @@ export interface RouteBindingSpec {
 const MOVE: RouteBindingSpec = { token: "move", action: "move", hint: { keys: "↑↓/jk", label: "move" } };
 const DRILL_PROJECT: RouteBindingSpec = { token: "drill", action: "drill", hint: { keys: "⏎", label: "open project" } };
 const DRILL_WORK: RouteBindingSpec = { token: "drill", action: "drill", hint: { keys: "⏎", label: "open work" } };
-const DRILL_ROLLUP: RouteBindingSpec = { token: "drill", action: "drill", hint: { keys: "⏎", label: "open/expand" } };
+const DRILL_ROLLUP: RouteBindingSpec = { token: "drillRollup", action: "drill", hint: { keys: "⏎", label: "open" } };
+const TOGGLE_DISCLOSURE: RouteBindingSpec = { token: "toggleDisclosure", action: "toggleDisclosure", hint: { keys: "space", label: "fold" } };
+const EXPAND_DISCLOSURE: RouteBindingSpec = { token: "expandDisclosure", action: "expand", hint: { keys: "→/l", label: "expand" } };
+const COLLAPSE_DISCLOSURE: RouteBindingSpec = { token: "collapseDisclosure", action: "collapse", hint: { keys: "←/h", label: "collapse" } };
 const DRILL_FINDING: RouteBindingSpec = { token: "drill", action: "drill", hint: { keys: "⏎", label: "open finding" } };
 const DRILL_ACTION: RouteBindingSpec = { token: "drill", action: "drill", hint: { keys: "⏎", label: "run action" } };
 const PREVIOUS_SPRINT: RouteBindingSpec = { token: "[", action: "previousSprint", hint: { keys: "[", label: "previous sprint" } };
@@ -52,7 +58,7 @@ const SECTION_ROUTES = new Set(["global.overview", "global.projects", "global.qu
 export function bindingsForRoute(routeId: string): readonly RouteBindingSpec[] {
   const specs: RouteBindingSpec[] = [MOVE];
   if (PROJECT_DRILL_ROUTES.has(routeId)) specs.push(DRILL_PROJECT);
-  if (routeId === "repo.rollup") specs.push(DRILL_ROLLUP);
+  if (routeId === "repo.rollup") specs.push(TOGGLE_DISCLOSURE, EXPAND_DISCLOSURE, COLLAPSE_DISCLOSURE, DRILL_ROLLUP);
   else if (WORK_DRILL_ROUTES.has(routeId)) specs.push(DRILL_WORK);
   if (FINDING_DRILL_ROUTES.has(routeId)) specs.push(DRILL_FINDING);
   if (ACTION_DRILL_ROUTES.has(routeId)) specs.push(DRILL_ACTION);

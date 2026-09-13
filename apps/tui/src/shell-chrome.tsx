@@ -17,7 +17,14 @@ export function FreshnessLine({ generatedAt, label, filter, error, stale, warnin
 }
 
 export function HelpView({ width, height, hints, workspace, scrollOffset, diagnostics }: { readonly width: number; readonly height: number; readonly hints: readonly { readonly keys: string; readonly label: string }[]; readonly workspace: string; readonly scrollOffset: number; readonly diagnostics: readonly string[] }) {
-  const lines = ["PgUp/PgDn page or scroll details · g/G first/last", "s choose sprint · f status · d assigned/dependency scope", "↑↓ select action in details · Enter confirms", ...hints.map((hint) => `${hint.keys}  ${hint.label}`), "q or Ctrl-C twice quits", `Workspace: ${workspace}`, ...diagnostics.map((message) => `Diagnostic: ${message}`)].flatMap((line) => boundedTextLines(line, width, Number.MAX_SAFE_INTEGER));
+  const lines = [
+    "↑↓/jk move · Enter open or confirm · Space fold/collapse",
+    "←/→ fold one level · PgUp/PgDn scroll · g/G top/bottom",
+    "f filters · / search · r refresh · q or Ctrl-C twice quits",
+    ...hints.map((hint) => `${hint.keys}  ${hint.label}`),
+    `Workspace: ${workspace}`,
+    ...diagnostics.map((message) => `Diagnostic: ${message}`)
+  ].flatMap((line) => boundedTextLines(line, width, Number.MAX_SAFE_INTEGER));
   const offset = Math.min(scrollOffset, Math.max(0, lines.length - Math.max(1, height - 1)));
   return <Box flexDirection="column" width={width} height={height} overflow="hidden"><Text color={COLOR.text} wrap="truncate">{fit("Help · ↑↓ scroll · Esc closes", width)}</Text>{lines.slice(offset, offset + height - 1).map((line, index) => <Text key={index} color={COLOR.muted} wrap="truncate">{fit(line, width)}</Text>)}</Box>;
 }

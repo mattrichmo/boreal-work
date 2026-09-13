@@ -1,5 +1,5 @@
 import { Box, Text } from "ink";
-import type { TuiCommandDescriptor, WorkItemView } from "@boreal/ui-model";
+import type { TuiCommandDescriptor, WorkCompletionView, WorkItemView } from "@boreal/ui-model";
 
 import type { RepoTaskDetailBody } from "../loaders.js";
 import { reconciliationStatusForWork } from "../reconciliation.js";
@@ -70,23 +70,38 @@ export function boundedTextLines(value: string, width: number, maxLines: number)
   const chunks = value.split(/\r?\n/).flatMap((line) => {
     if (line.length === 0) return [""];
     const parts: string[] = [];
-    let part = "";
-    for (const character of graphemeClusters(line)) {
-      if (part.length > 0 && cellWidth(`${part}${character}`) > maxWidth) {
-        parts.push(part);
-        part = "";
+    let remaining = line.trimStart();
+    while (remaining.length > 0) {
+      const characters = graphemeClusters(remaining);
+      let end = 0;
+      while (end < characters.length && cellWidth(characters.slice(0, end + 1).join("")) <= maxWidth) end += 1;
+      if (end === 0) end = 1;
+      let breakAt = end;
+      // Prefer a word boundary when one is available. Long identifiers and
+      // URLs still split at the cell boundary so every line remains bounded.
+      if (end < characters.length) {
+        let whitespace = -1;
+        for (let index = end - 1; index >= 0; index -= 1) {
+          if (/\s/u.test(characters[index] ?? "")) {
+            whitespace = index;
+            break;
+          }
+        }
+        if (whitespace > 0) breakAt = whitespace;
       }
-      part += character;
+      const part = characters.slice(0, breakAt).join("").trimEnd();
+      if (part.length > 0) parts.push(part);
+      remaining = characters.slice(breakAt).join("").trimStart();
     }
-    if (part.length > 0) parts.push(part);
     return parts;
   });
   if (chunks.length <= lineLimit) return chunks;
   const visible = chunks.slice(0, lineLimit);
   const last = visible.at(-1) ?? "";
+  const suffixWidth = Math.max(0, maxWidth - 1);
   let suffix = "";
-  for (const character of Array.from(last)) {
-    if (cellWidth(`${suffix}${character}`) > Math.max(0, maxWidth - 1)) break;
+  for (const character of graphemeClusters(last)) {
+    if (cellWidth(`${suffix}${character}`) > suffixWidth) break;
     suffix += character;
   }
   visible[visible.length - 1] = `${suffix}…`;
@@ -114,6 +129,37 @@ export function buildTaskDetailLines(body: RepoTaskDetailBody, width: number): r
   if (body.blockerTitles?.length) lines.push(`blocked by  ${body.blockerTitles.join(", ")}`);
   if (task.directiveSummary) lines.push(`directives   ${task.directiveSummary.blocking} blocking · ${task.directiveSummary.required} required · ${task.directiveSummary.conflictCount} conflicts`);
   if (task.closedReason) lines.push(`closed      ${task.closedReason}`);
+  const completion: WorkCompletionView | undefined = task.completion;
+  if (task.status === "closed" || task.status === "verified" || task.status === "cancelled") {
+    lines.push("", "COMPLETION");
+    if (task.closedAt) lines.push(`completed   ${task.closedAt}`);
+    if (!completion || (!completion.summary && completion.evidence.length === 0 && completion.verifications.length === 0)) {
+      lines.push("No closeout summary recorded.");
+    } else {
+      if (completion.summary) {
+        lines.push(`outcome     ${completion.summary.outcome}`);
+        lines.push(...boundedTextLines(`summary     ${completion.summary.title}`, contentWidth, 10_000));
+        lines.push(...boundedTextLines(completion.summary.body, contentWidth, 10_000));
+        if (completion.summary.completedWork.length > 0) {
+          lines.push("completed work");
+          for (const item of completion.summary.completedWork) {
+            lines.push(...boundedTextLines(`• ${item.title} · ${item.outcome}: ${item.notes}`, contentWidth, 10_000));
+          }
+        }
+        if (completion.summary.commitShas.length > 0) lines.push(`commits     ${completion.summary.commitShas.join(", ")}`);
+        if (completion.summary.dirtyPathNotes.length > 0) {
+          lines.push("working tree notes");
+          for (const note of completion.summary.dirtyPathNotes) lines.push(...boundedTextLines(`• ${note}`, contentWidth, 10_000));
+        }
+        if (completion.summary.artifactUri) lines.push(...boundedTextLines(`artifact    ${completion.summary.artifactUri}`, contentWidth, 10_000));
+      }
+      lines.push(`proof       ${completion.evidence.length} evidence · ${completion.verifications.length} verifications`);
+      if (completion.evidence.length > 0) lines.push("evidence");
+      for (const evidence of completion.evidence) lines.push(...boundedTextLines(`• ${evidence.kind} · ${evidence.outcome}: ${evidence.summary}`, contentWidth, 10_000));
+      if (completion.verifications.length > 0) lines.push("verifications");
+      for (const verification of completion.verifications) lines.push(...boundedTextLines(`• ${verification.verdict}${verification.notes ? `: ${verification.notes}` : ""}`, contentWidth, 10_000));
+    }
+  }
   if (task.description) lines.push("", "DESCRIPTION", ...boundedTextLines(task.description, contentWidth, 10_000));
   if (task.acceptanceCriteria?.length) lines.push("", `ACCEPTANCE · ${task.acceptanceCriteria.length} criteria`, ...task.acceptanceCriteria.flatMap((criterion) => boundedTextLines(`• ${criterion}`, contentWidth, 10_000)));
   const reconciliation = reconciliationStatusForWork(task);
@@ -150,10 +196,13 @@ export function TaskDetailRoute({ body, width, selectedActionIndex, height, scro
   const enabled = body.actions.filter((action) => !taskActionDisplay(action, task).disabled).length;
   const selected = body.actions[Math.max(0, Math.min(selectedActionIndex, body.actions.length - 1))];
   const maxScroll = Math.max(0, lines.length - viewport);
+  const above = offset;
+  const below = Math.max(0, maxScroll - offset);
+  const scrollLabel = maxScroll > 0 ? `↑ ${above} above · ↓ ${below} below` : "all content visible";
   return <Pane title={task.title} tone={statusColor(task.status)} width={width} height={height}>
-    <Text color={statusColor(task.status)} wrap="truncate">{fit(`${fullTaskStatusLabel(task.status)} · ${task.kind} · ${task.priority} · ${offset}/${maxScroll}`, contentWidth)}</Text>
+    <Text color={statusColor(task.status)} wrap="truncate">{fit(`${fullTaskStatusLabel(task.status)} · ${task.kind} · ${task.priority} · ${scrollLabel}`, contentWidth)}</Text>
     <Box flexDirection="column" height={viewport}>
-      {visible.map((line, index) => <Text key={index} color={COLOR.text} wrap="truncate">{fit(line, contentWidth)}</Text>)}
+      {visible.map((line, index) => <Text key={index} color={/^(DESCRIPTION|ACCEPTANCE|RECONCILIATION|COMPLETION|ACTIONS)/u.test(line) ? COLOR.accent : COLOR.text} bold={/^(DESCRIPTION|ACCEPTANCE|RECONCILIATION|COMPLETION|ACTIONS)/u.test(line)} wrap="truncate">{fit(line, contentWidth)}</Text>)}
     </Box>
     <Box flexDirection="column" height={actionLines}>
       {body.actions.length > 0 ? <Text color={COLOR.faint} wrap="truncate">{fit(`ACTIONS · ${enabled} enabled · ${body.actions.length - enabled} unavailable`, contentWidth)}</Text> : null}

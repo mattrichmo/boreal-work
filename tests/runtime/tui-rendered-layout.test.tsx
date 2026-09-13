@@ -40,6 +40,38 @@ describe("rendered terminal layout bounds", () => {
     expect(output).toContain("criterion 11");
   });
 
+  it("renders closeout information for completed work", () => {
+    const body = {
+      ...detail(),
+      work: work({
+        status: "closed",
+        closedAt: "2026-09-12T22:00:00.000Z",
+        description: "Implemented the change.",
+        completion: {
+          summary: {
+            id: "summary-test",
+            status: "final",
+            outcome: "completed",
+            title: "The change was implemented and verified.",
+            body: "Verified the final behavior.",
+            completedWork: [],
+            evidenceIds: [],
+            verificationIds: [],
+            commitShas: [],
+            dirtyPathNotes: [],
+            generatedAt: "2026-09-12T22:00:00.000Z"
+          },
+          evidence: [{ id: "evidence-test", kind: "test", outcome: "passed", summary: "Focused test suite", observedAt: "2026-09-12T22:00:00.000Z" }],
+          verifications: [{ id: "verification-test", verdict: "passed", evidenceIds: [], verifiedAt: "2026-09-12T22:00:00.000Z", notes: "Looks good" }]
+        }
+      })
+    } as Parameters<typeof TaskDetailRoute>[0]["body"];
+    const output = renderToString(createElement(TaskDetailRoute, { body, width: 63, height: 24, selectedActionIndex: 0, scrollOffset: 0 }), { columns: 63, rows: 24 });
+    expect(output).toContain("COMPLETION");
+    expect(output).toContain("passed");
+    expect(output).toContain("The change was implemented");
+  });
+
   it("bounds sprint board output across representative terminal sizes", () => {
     const item = work();
     const board = { sprint: work({ id: "sprint", kind: "sprint", title: "Sprint" }), phases: [], lanes: ["draft", "ready", "blocked", "in_progress", "needs_verification", "verified"].map((id, lane) => ({ id, title: id, items: [{ ...item, id: `task-${lane}` }], count: 1 })), summary: { sprintId: "sprint", taskCount: 6, phaseCount: 0, activeBlockerCount: 0, total: 6, open: 6, ready: 1, blocked: 0, inProgress: 0, needsVerification: 0, verified: 0, closed: 0, cancelled: 0 } } as never;

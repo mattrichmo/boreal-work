@@ -29,9 +29,9 @@ import {
   type WorkItemView,
   type WorkReservationView
 } from "@boreal/ui-model";
-import type { WorkItem } from "@boreal/core";
+import type { AgentSummaryRecord, WorkItem } from "@boreal/core";
 
-import { activeReservationViewsByWorkId, readRepoWorkGraph, reservationViewFrom } from "./repo-store.js";
+import { activeReservationViewsByWorkId, readRepoTaskCloseoutRecords, readRepoWorkGraph, reservationViewFrom } from "./repo-store.js";
 
 const execFileAsync = promisify(execFile);
 const DASHBOARD_GLOBAL_SCHEMA_VERSION = "boreal.cli.dashboard.global.v1";
@@ -370,7 +370,12 @@ export async function loadRepoRollup(workspaceRoot: string): Promise<TuiEnvelope
     reservationsByWorkId,
     actionsForWork: (work) => rollupActionsForWork(workspaceRoot, work, reservationsByWorkId.get(work.meta.id))
   });
-  return buildTuiEnvelope({ surface: "repo", workspaceRoot, generatedAt, body });
+  const warnings = body.warnings.length > 0
+    ? [
+        `Roll-up has ${body.warnings.length} unparented work item(s) matching multiple sprint scopes. Set an explicit parent with 'bwrk work edit <work-ref> --parent <sprint-ref>'.`
+      ]
+    : [];
+  return buildTuiEnvelope({ surface: "repo", workspaceRoot, generatedAt, body, warnings });
 }
 
 export interface RepoSprintRow {
@@ -500,6 +505,23 @@ export interface RepoTaskDetailBody {
   readonly actions: readonly TuiCommandDescriptor[];
 }
 
+function latestCloseoutSummary(
+  summaries: readonly AgentSummaryRecord[],
+  target: WorkItem
+): AgentSummaryRecord | undefined {
+  return summaries
+    .filter((summary) =>
+      (summary.status === "final" || summary.status === "forced") &&
+      (summary.subjectType === "work" || summary.subjectType === target.kind)
+    )
+    .sort((left, right) => {
+      const generated = right.generatedAt.localeCompare(left.generatedAt);
+      if (generated !== 0) return generated;
+      const updated = right.meta.updatedAt.localeCompare(left.meta.updatedAt);
+      return updated !== 0 ? updated : right.meta.id.localeCompare(left.meta.id);
+    })[0];
+}
+
 export async function loadRepoTaskDetail(
   workspaceRoot: string,
   workId: string,
@@ -515,11 +537,15 @@ export async function loadRepoTaskDetail(
   const byId = new Map<string, WorkItem>(graph.items.map((item) => [item.meta.id, item]));
   const reservationsByWorkId = activeReservationViewsByWorkId(graph.reservations, new Date(generatedAt), preferredReservationIds(graph.items));
   const reservation = reservationsByWorkId.get(target.meta.id);
+  const closeout = await readRepoTaskCloseoutRecords(workspaceRoot, target.meta.id);
   const view = toWorkItemView({
     work: target,
     dependencies: graph.items,
     graphEdges: graph.graphEdges,
-    reservation
+    reservation,
+    evidence: closeout.evidence,
+    verifications: closeout.verifications,
+    agentSummary: latestCloseoutSummary(closeout.summaries, target)
   });
   const dependencyTitles = target.dependencyIds.map((id) => byId.get(id)?.title ?? id);
   const blockerTitles = graph.graphEdges

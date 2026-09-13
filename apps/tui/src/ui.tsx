@@ -189,6 +189,13 @@ export function TopBar({ crumbs, right, width }: { readonly crumbs: readonly str
   const leftWidth = Math.max(0, contentWidth - rightWidth - (right ? 1 : 0));
   const leftText = ["❄ boreal", ...crumbs.map((crumb, index) => `${index === 0 ? "  " : "  › "}${crumb}`)].join("");
   const leftFits = cellWidth(leftText) <= leftWidth;
+  // Keep the current entity visible when a deep route competes with the
+  // refresh indicator. Truncating the left side hides the context the user
+  // actually navigated to (especially task titles), so collapse the middle
+  // breadcrumb segments first.
+  const compactLeftText = crumbs.length > 1
+    ? [`❄ boreal`, "  …  › ", crumbs.at(-1)].join("")
+    : leftText;
 
   return (
     <Box backgroundColor={COLOR.barBg} paddingX={1} width={totalWidth}>
@@ -205,7 +212,7 @@ export function TopBar({ crumbs, right, width }: { readonly crumbs: readonly str
             ))}
           </>
         ) : (
-          <Text color={COLOR.text}>{fit(leftText, leftWidth)}</Text>
+          <Text color={COLOR.text}>{fit(cellWidth(compactLeftText) <= leftWidth ? compactLeftText : leftText, leftWidth)}</Text>
         )}
       </Box>
       {right ? <Text color={COLOR.faint}>{fit(right, rightWidth)}</Text> : null}

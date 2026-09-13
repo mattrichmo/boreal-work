@@ -48,8 +48,14 @@ describe("route bindings: footer hints come from the same specs the dispatcher u
     const specs = bindingsForRoute("repo.rollup");
     const hints = routeFooterHints(specs);
     expect(hints.some((hint) => hint.keys === "f" && hint.label === "filter")).toBe(true);
+    expect(hints).toContainEqual({ keys: "space", label: "fold" });
+    expect(hints).toContainEqual({ keys: "→/l", label: "expand" });
+    expect(hints).toContainEqual({ keys: "←/h", label: "collapse" });
     expect(resolveRouteAction(specs, "f", key())).toBe("filter");
     expect(resolveRouteAction(specs, "", key({ return: true }))).toBe("drill");
+    expect(resolveRouteAction(specs, " ", key())).toBe("toggleDisclosure");
+    expect(resolveRouteAction(specs, "", key({ rightArrow: true }))).toBe("expand");
+    expect(resolveRouteAction(specs, "", key({ leftArrow: true }))).toBe("collapse");
     expect(resolveRouteAction(specs, "5", key())).toBe("numberKey:5");
   });
 
@@ -116,6 +122,41 @@ describe("rollup status facet", () => {
     expect(visibleRollupRows(body, ROLLUP_FILTER_CYCLE[1]).map((n) => n.id).sort()).toEqual(["cancelled", "open"]);
     expect(visibleRollupRows(body, ROLLUP_FILTER_CYCLE[2]).map((n) => n.id)).toEqual(["open"]);
     expect(rollupFilterLabel(ROLLUP_FILTER_CYCLE[2])).toBe("open only");
+  });
+
+  it("retains only milestones that have open descendants for the milestone preset", () => {
+    const openTask = node({ id: "open-task", workStatus: "ready" });
+    const closedTask = node({ id: "closed-task", workStatus: "closed" });
+    const openMilestone: RollupNodeView = {
+      ...node({ id: "open-milestone", kind: "milestone", childIds: [openTask.id] }),
+      entity: { kind: "milestone", id: "open-milestone", workspaceRoot: "/repo", label: "open-milestone" }
+    };
+    const closedMilestone: RollupNodeView = {
+      ...node({ id: "closed-milestone", kind: "milestone", childIds: [closedTask.id] }),
+      entity: { kind: "milestone", id: "closed-milestone", workspaceRoot: "/repo", label: "closed-milestone" }
+    };
+    const root: RollupNodeView = { ...node({ id: "__root__" }), kind: "project", childIds: [openMilestone.id, closedMilestone.id], depth: 0 };
+    const body: RepoRollupView = {
+      generatedAt: "2026-01-01T00:00:00.000Z",
+      workspaceRoot: "/repo",
+      root,
+      flatRows: [root, openMilestone, openTask, closedMilestone, closedTask],
+      summary: {
+        totalNodes: 4,
+        milestones: 2,
+        sprints: 0,
+        tasks: 2,
+        open: 1,
+        blocked: 0,
+        needsVerification: 0,
+        closed: 1,
+        cancelled: 0,
+        activeReservations: 0
+      }
+    };
+    const preset = ROLLUP_FILTER_CYCLE.find((filter) => rollupFilterLabel(filter) === "milestones with open work");
+    expect(preset).toBeDefined();
+    expect(visibleRollupRows(body, preset, new Set()).map((row) => row.id)).toEqual([openMilestone.id]);
   });
 });
 

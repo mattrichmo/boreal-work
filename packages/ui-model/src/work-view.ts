@@ -1,5 +1,6 @@
 import {
   hasOpenReconciliationObligations,
+  type AgentSummaryRecord,
   type ContextPack,
   type EvidenceRecord,
   type GraphEdge,
@@ -47,7 +48,9 @@ export interface WorkItemView {
   readonly reconciliationObligations?: WorkItem["reconciliationObligations"];
   readonly activeReservationId?: string;
   readonly activeReservation?: WorkReservationView;
+  readonly closedAt?: WorkItem["closedAt"];
   readonly closedReason?: string;
+  readonly completion?: WorkCompletionView;
   readonly git?: WorkItem["git"];
   readonly contextSummary?: string;
   readonly directiveSummary?: WorkDirectiveSummaryView;
@@ -59,6 +62,48 @@ export interface WorkReservationView {
   readonly reservedAt?: string;
   readonly expiresAt?: string;
   readonly expired?: boolean;
+}
+
+/** A deliberately small, render-safe projection of an agent closeout summary. */
+export interface WorkAgentSummaryView {
+  readonly id: AgentSummaryRecord["meta"]["id"];
+  readonly status: AgentSummaryRecord["status"];
+  readonly outcome: AgentSummaryRecord["outcome"];
+  readonly title: string;
+  readonly body: string;
+  readonly completedWork: AgentSummaryRecord["completedWork"];
+  readonly evidenceIds: readonly string[];
+  readonly verificationIds: readonly string[];
+  readonly commitShas: readonly string[];
+  readonly dirtyPathNotes: readonly string[];
+  readonly artifactUri?: string;
+  readonly generatedAt: AgentSummaryRecord["generatedAt"];
+  readonly forceReasonCode?: AgentSummaryRecord["forceReasonCode"];
+  readonly forceComment?: string;
+}
+
+export interface WorkEvidenceView {
+  readonly id: EvidenceRecord["meta"]["id"];
+  readonly kind: EvidenceRecord["kind"];
+  readonly summary: string;
+  readonly outcome: EvidenceRecord["outcome"];
+  readonly command?: string;
+  readonly uri?: string;
+  readonly observedAt: EvidenceRecord["observedAt"];
+}
+
+export interface WorkVerificationView {
+  readonly id: VerificationRecord["meta"]["id"];
+  readonly verdict: VerificationRecord["verdict"];
+  readonly evidenceIds: readonly string[];
+  readonly verifiedAt: VerificationRecord["verifiedAt"];
+  readonly notes?: string;
+}
+
+export interface WorkCompletionView {
+  readonly summary?: WorkAgentSummaryView;
+  readonly evidence: readonly WorkEvidenceView[];
+  readonly verifications: readonly WorkVerificationView[];
 }
 
 export type WorkDirectiveSeverity = "advisory" | "required" | "blocking";
@@ -145,6 +190,7 @@ export function toWorkItemView(input: {
   readonly contextPack?: ContextPack;
   readonly reservation?: WorkReservationView;
   readonly directiveSummary?: WorkDirectiveSummaryView;
+  readonly agentSummary?: AgentSummaryRecord;
 }): WorkItemView {
   const dependencyIds = input.work.dependencyIds;
   const dependencies = input.dependencies;
@@ -190,16 +236,65 @@ export function toWorkItemView(input: {
     dependencyIds,
     activeBlockerIds,
     blockedBy: activeBlockerIds,
-    evidenceCount: input.evidence?.length ?? input.work.evidenceIds.length,
-    verificationCount: input.verifications?.length ?? input.work.verificationIds.length,
+    // Preserve the persisted reference count when a legacy or partially
+    // migrated store cannot return every closeout record.
+    evidenceCount: input.evidence ? Math.max(input.evidence.length, input.work.evidenceIds.length) : input.work.evidenceIds.length,
+    verificationCount: input.verifications ? Math.max(input.verifications.length, input.work.verificationIds.length) : input.work.verificationIds.length,
     requiredCloseoutGates: input.work.requiredCloseoutGates ?? [],
     reconciliationObligations: input.work.reconciliationObligations,
     activeReservationId: input.reservation?.id ?? input.work.reservationId,
     activeReservation: input.reservation,
+    closedAt: input.work.closedAt,
     closedReason: input.work.closedReason,
+    completion: buildCompletionView(input),
     git: input.work.git,
     contextSummary: input.contextPack?.summary,
     directiveSummary: input.directiveSummary
+  };
+}
+
+function buildCompletionView(input: {
+  readonly evidence?: readonly EvidenceRecord[];
+  readonly verifications?: readonly VerificationRecord[];
+  readonly agentSummary?: AgentSummaryRecord;
+}): WorkCompletionView | undefined {
+  const evidence = (input.evidence ?? []).map((record) => ({
+    id: record.meta.id,
+    kind: record.kind,
+    summary: record.summary,
+    outcome: record.outcome,
+    command: record.command,
+    uri: record.uri,
+    observedAt: record.observedAt
+  }));
+  const verifications = (input.verifications ?? []).map((record) => ({
+    id: record.meta.id,
+    verdict: record.verdict,
+    evidenceIds: record.evidenceIds,
+    verifiedAt: record.verifiedAt,
+    notes: record.notes
+  }));
+  const summary = input.agentSummary;
+  if (!summary && evidence.length === 0 && verifications.length === 0) return undefined;
+  return {
+    summary: summary ? {
+      id: summary.meta.id,
+      status: summary.status,
+      outcome: summary.outcome,
+      title: summary.title,
+      body: summary.body,
+      completedWork: summary.completedWork,
+      evidenceIds: summary.evidenceIds,
+      verificationIds: summary.verificationIds,
+      commitShas: summary.commitShas,
+      dirtyPathNotes: summary.dirtyPathNotes,
+      artifactUri: summary.artifactUri,
+      generatedAt: summary.generatedAt,
+      forceReasonCode: summary.forceReasonCode,
+      forceComment: summary.forceComment
+    } : undefined,
+    evidence,
+    verifications
   };
 }
 

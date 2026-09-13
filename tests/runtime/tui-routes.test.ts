@@ -85,12 +85,12 @@ describe("route-local project/global UX helpers", () => {
     if (!milestoneNode) return;
 
     const defaults = defaultRollupDisclosure(body);
-    expect(defaults.has(milestone.meta.id)).toBe(true);
+    expect(defaults.has(milestone.meta.id)).toBe(false);
     expect(hiddenRollupDescendantCount(milestoneNode, byId, new Set())).toBe(1);
     expect(visibleRollupRows(body, undefined, new Set()).map((node) => node.id)).toEqual([milestone.meta.id]);
     const expanded = toggleRollupDisclosure(new Set(), milestone.meta.id);
     expect(visibleRollupRows(body, undefined, expanded).map((node) => node.id)).toEqual([milestone.meta.id, task.meta.id]);
-    expect(rollupNodeCanOpen(milestoneNode)).toBe(false);
+    expect(rollupNodeCanOpen(milestoneNode)).toBe(true);
     expect(fullRollupStatusLabel("needs_verification")).toBe("needs verification");
   });
 
@@ -132,6 +132,14 @@ describe("route-local project/global UX helpers", () => {
     expect(taskActionDisplay(action, task)).toMatchObject({ disabled: true });
     expect(taskActionDisplay(action, view({ activeReservationId: "bw_reservation_unhydrated" }))).toMatchObject({ disabled: true });
     expect(fullTaskStatusLabel("needs_verification")).toBe("needs verification");
+  });
+
+  it("prefers readable word boundaries before splitting long prose", () => {
+    expect(boundedTextLines("A long task title should remain readable", 18, 20)).toEqual([
+      "A long task title",
+      "should remain",
+      "readable"
+    ]);
   });
 
   it("surfaces global data-quality state and preserves full queue status labels", () => {

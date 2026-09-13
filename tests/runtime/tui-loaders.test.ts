@@ -4,7 +4,17 @@ import { join } from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
 
-import type { ActorRef, AgentReservation, GraphEdge, RuntimeEvent, WorkId } from "@boreal/core";
+import type {
+  ActorRef,
+  AgentReservation,
+  AgentSummaryRecord,
+  EvidenceRecord,
+  GraphEdge,
+  RuntimeEvent,
+  VerificationRecord,
+  WorkId
+} from "@boreal/core";
+import { createRecordMeta, deterministicId } from "@boreal/core";
 import { FileBorealStore, ObjectDirBorealStore } from "@boreal/storage";
 import { createWorkItem } from "@boreal/work-engine";
 import type { DashboardGlobalPayload } from "../../apps/tui/src/loaders.js";
@@ -235,6 +245,96 @@ describe("repo route loaders: direct store read", () => {
 
     const missing = await loadRepoTaskDetail(rootDir, "bw_work_doesnotexist" as WorkId);
     expect(missing).toBeUndefined();
+  });
+
+  it("loads closeout summaries, evidence, verification metadata, and closure fields for completed work", async () => {
+    const rootDir = await makeTempWorkspace();
+    const store = new FileBorealStore({ rootDir });
+    const task = {
+      ...createWorkItem({ title: "Completed task", kind: "task", actor, now: "2026-01-01T00:00:00.000Z" }),
+      status: "closed" as const,
+      closedAt: "2026-01-01T01:00:00.000Z",
+      closedReason: "Validated in production"
+    };
+    const evidenceId = deterministicId<EvidenceRecord["meta"]["id"]>("evidence", { task: task.meta.id, kind: "test" });
+    const verificationId = deterministicId<VerificationRecord["meta"]["id"]>("verification", { task: task.meta.id });
+    const summaryId = deterministicId<AgentSummaryRecord["meta"]["id"]>("summary", { task: task.meta.id });
+    const evidence = {
+      meta: createRecordMeta({ id: evidenceId, now: "2026-01-01T00:55:00.000Z", actor }),
+      subjectId: task.meta.id,
+      subjectType: "work",
+      kind: "test",
+      summary: "The focused TUI tests pass.",
+      outcome: "passed",
+      command: "vitest run tests/runtime/tui-loaders.test.ts",
+      observedAt: "2026-01-01T00:55:00.000Z"
+    } as unknown as EvidenceRecord;
+    const verification = {
+      meta: createRecordMeta({ id: verificationId, now: "2026-01-01T00:58:00.000Z", actor }),
+      subjectId: task.meta.id,
+      subjectType: "work",
+      verdict: "passed",
+      evidenceIds: [evidence.meta.id],
+      verifiedAt: "2026-01-01T00:58:00.000Z",
+      notes: "Closeout evidence is current."
+    } as unknown as VerificationRecord;
+    const summary = {
+      meta: createRecordMeta({ id: summaryId, now: "2026-01-01T01:00:01.000Z", actor }),
+      subjectId: task.meta.id,
+      subjectType: "work",
+      summaryKind: "task",
+      status: "final",
+      outcome: "completed",
+      title: "Completed task closeout",
+      body: "Implemented and verified the completed task.",
+      completedWork: [{ workId: task.meta.id, title: task.title, outcome: "completed", notes: "All acceptance criteria were met." }],
+      evidenceIds: [evidence.meta.id],
+      verificationIds: [verification.meta.id],
+      commitShas: ["abc1234"],
+      dirtyPathNotes: [],
+      childSummaryIds: [],
+      artifactUri: "agent-summaries/completed-task.md",
+      generatedAt: "2026-01-01T01:00:00.000Z"
+    } as unknown as AgentSummaryRecord;
+    await store.write(async (writer) => {
+      await writer.putWorkItem(task);
+      await writer.putEvidence(evidence);
+      await writer.putVerification(verification);
+      await writer.putAgentSummary(summary);
+    });
+
+    const envelope = await loadRepoTaskDetail(rootDir, task.meta.id);
+    expect(envelope?.body.work).toMatchObject({
+      closedAt: task.closedAt,
+      closedReason: task.closedReason,
+      evidenceCount: 1,
+      verificationCount: 1
+    });
+    expect(envelope?.body.work.completion?.summary).toMatchObject({
+      title: summary.title,
+      body: summary.body,
+      outcome: "completed",
+      commitShas: ["abc1234"]
+    });
+    expect(envelope?.body.work.completion?.evidence[0]).toMatchObject({ id: evidence.meta.id, summary: evidence.summary });
+    expect(envelope?.body.work.completion?.verifications[0]).toMatchObject({ id: verification.meta.id, verdict: "passed" });
+  });
+
+  it("leaves completion summary absent when legacy closed work has no closeout records", async () => {
+    const rootDir = await makeTempWorkspace();
+    const store = new ObjectDirBorealStore({ rootDir });
+    const task = {
+      ...createWorkItem({ title: "Legacy completed task", kind: "task", actor, now: "2026-01-01T00:00:00.000Z" }),
+      status: "closed" as const,
+      closedAt: "2026-01-01T01:00:00.000Z",
+      closedReason: "Closed before closeout summaries were enabled"
+    };
+    await store.write((writer) => writer.putWorkItem(task));
+
+    const envelope = await loadRepoTaskDetail(rootDir, task.meta.id);
+    expect(envelope?.body.work.closedAt).toBe(task.closedAt);
+    expect(envelope?.body.work.closedReason).toBe(task.closedReason);
+    expect(envelope?.body.work.completion).toBeUndefined();
   });
 
   it("attaches canonical reservation ownership/expiry to task detail and avoids direct close for live claims", async () => {

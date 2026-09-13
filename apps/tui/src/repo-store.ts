@@ -21,7 +21,10 @@ import {
   deterministicId,
   resolveWorkspacePaths,
   type AgentReservation,
+  type AgentSummaryRecord,
+  type EvidenceRecord,
   type GraphEdge,
+  type VerificationRecord,
   type ProjectionId,
   type ProjectionRecord,
   type RuntimeEvent,
@@ -40,6 +43,15 @@ export interface RepoWorkGraph {
   readonly reservations: readonly AgentReservation[];
   /** The active sprint resolved from the same store snapshot as the graph. */
   readonly activeSprintId?: WorkId;
+}
+
+/** Closeout records are fetched only when the task-detail route is opened.
+ * Keeping this separate from `readRepoWorkGraph` prevents roll-up refreshes
+ * from loading every summary and evidence record in a workspace. */
+export interface RepoTaskCloseoutRecords {
+  readonly summaries: readonly AgentSummaryRecord[];
+  readonly evidence: readonly EvidenceRecord[];
+  readonly verifications: readonly VerificationRecord[];
 }
 
 const ACTIVE_SPRINT_PROJECTION_KIND = "active-sprint";
@@ -96,6 +108,24 @@ export async function readRepoWorkGraph(workspaceRoot: string): Promise<RepoWork
     const activeProjection = selectActiveSprintProjection(projections);
     const activeSprintId = activeSprintIdFromProjection(activeProjection) ?? activeSprintIdFromEvents(await reader.listEvents());
     return { initialized: true, items, graphEdges, reservations, activeSprintId };
+  });
+}
+
+export async function readRepoTaskCloseoutRecords(
+  workspaceRoot: string,
+  workId: string
+): Promise<RepoTaskCloseoutRecords> {
+  const storageKind = await resolveRepoStorageKind(workspaceRoot);
+  if (!storageKind) return { summaries: [], evidence: [], verifications: [] };
+  const store: BorealStore =
+    storageKind === "objects-v1" ? new ObjectDirBorealStore({ rootDir: workspaceRoot }) : new FileBorealStore({ rootDir: workspaceRoot });
+  return store.read(async (reader) => {
+    const [summaries, evidence, verifications] = await Promise.all([
+      reader.listAgentSummariesForSubject(workId),
+      reader.listEvidenceForSubject(workId),
+      reader.listVerificationsForSubject(workId)
+    ]);
+    return { summaries, evidence, verifications };
   });
 }
 

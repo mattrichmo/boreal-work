@@ -46,6 +46,10 @@ const FILTER_CYCLES: Readonly<Record<string, readonly (TuiFilterState | undefine
   "global.queues": QUEUE_FILTER_CYCLE
 };
 
+function rollupParentRowId(body: { readonly flatRows: readonly { readonly id: string; readonly childIds: readonly string[] }[] }, nodeId: string): string | undefined {
+  return body.flatRows.find((candidate) => candidate.childIds.includes(nodeId))?.id;
+}
+
 function nextFilter(routeId: string, current: TuiFilterState | undefined): TuiFilterState | undefined {
   if (routeId === "repo.sprintBoard") {
     const index = SPRINT_FILTERS.findIndex((filter) => filter === sprintFilterLabel(current));
@@ -465,15 +469,10 @@ export function RouteApp({
       const node = rollupRowAt(currentBody.value, effectiveCursor, frame.filters, expandedIds);
       if (!node) return;
       if (node.kind === "milestone") {
-        if (node.childIds.length > 0) {
-          setRollupDisclosure((current) => ({
-            key: currentFrameKey,
-            ids: toggleRollupDisclosure(current.key === currentFrameKey ? current.ids : defaultRollupDisclosure(currentBody.value), node.id),
-            knownIds: current.key === currentFrameKey ? current.knownIds : new Set(currentBody.value.flatRows.map((candidate) => candidate.id))
-          }));
-        } else {
-          dispatch({ type: "push", frame: { routeId: "repo.taskDetail", title: node.title, cursor: 0, entity: node.entity } });
-        }
+        // Enter opens the milestone overview. Disclosure is deliberately a
+        // separate Space/arrow action so opening a populated milestone never
+        // unexpectedly floods the roll-up table.
+        dispatch({ type: "push", frame: { routeId: "repo.taskDetail", title: node.title, cursor: 0, entity: node.entity } });
         return;
       }
       if (node.kind === "sprint") {
@@ -695,6 +694,48 @@ export function RouteApp({
         dispatch({ type: "setFilters", filters: nextFilter(frame.routeId, frame.filters) });
         return;
       }
+      if (action === "toggleDisclosure" || action === "expand" || action === "collapse") {
+        if (currentBody?.kind !== "repo.rollup") return;
+        const expandedIds = rollupDisclosure.key === currentFrameKey
+          ? rollupDisclosure.ids
+          : defaultRollupDisclosure(currentBody.value);
+        const node = rollupRowAt(currentBody.value, effectiveCursor, frame.filters, expandedIds);
+        if (!node || node.childIds.length === 0) {
+          // Preserve the former l/Right affordance for leaf work while using
+          // the same keys as disclosure controls for actual tree containers.
+          if (node && action === "expand") {
+            handleDrill();
+            return;
+          }
+          if (action === "collapse") {
+            const parentId = node ? rollupParentRowId(currentBody.value, node.id) : undefined;
+            const parentIndex = parentId ? rowIds.indexOf(parentId) : -1;
+            if (parentIndex >= 0) selectCursor(parentIndex);
+          }
+          return;
+        }
+        const expanded = expandedIds.has(node.id);
+        if ((action === "expand" && expanded) || (action === "collapse" && !expanded)) {
+          if (action === "collapse") {
+            const parentId = rollupParentRowId(currentBody.value, node.id);
+            const parentIndex = parentId ? rowIds.indexOf(parentId) : -1;
+            if (parentIndex >= 0) selectCursor(parentIndex);
+          }
+          return;
+        }
+        setRollupDisclosure((current) => ({
+          key: currentFrameKey,
+          ids: action === "toggleDisclosure"
+            ? toggleRollupDisclosure(expandedIds, node.id)
+            : action === "expand"
+              ? new Set([...expandedIds, node.id])
+              : new Set([...expandedIds].filter((id) => id !== node.id)),
+          knownIds: current.key === currentFrameKey
+            ? current.knownIds
+            : new Set(currentBody.value.flatRows.map((candidate) => candidate.id))
+        }));
+        return;
+      }
       const actionName = action as string;
       if (actionName === "previousSprint" || actionName === "nextSprint") {
         if (currentBody?.kind !== "repo.sprintBoard" || currentBody.value.sprints.length === 0) return;
@@ -747,7 +788,7 @@ export function RouteApp({
     .filter((hint) => hint.label !== "sections" || sectionHint !== undefined)
     .map((hint) => {
       if (hint.label === "sections" && sectionHint) return { ...hint, keys: sectionHint };
-      if (frame.routeId === REPO_TASK_DETAIL_ROUTE && hint.label === "open") return { ...hint, label: "run" };
+      if (frame.routeId === REPO_TASK_DETAIL_ROUTE && (hint.label === "open" || hint.label === "run action")) return { ...hint, label: "action" };
       return hint;
     });
 
@@ -767,12 +808,11 @@ export function RouteApp({
         ? [{ keys: "q/^c", label: "press again to quit" }]
         : [
             { keys: "?", label: "help" },
-            { keys: "⏎", label: frame.routeId === REPO_TASK_DETAIL_ROUTE ? "action" : "open" },
-            { keys: "esc", label: "back" },
-            { keys: "r", label: "refresh" },
-            { keys: "/", label: "search" },
-            { keys: "q", label: "quit" },
-            ...(frame.routeId === "repo.sprintBoard" ? [{ keys: "s", label: "sprint" }, { keys: "f/d", label: "view/scope" }] : [])
+            ...routeHints,
+            ...(frame.routeId === "repo.sprintBoard" ? [{ keys: "s", label: "sprint" }, { keys: "d", label: "scope" }] : []),
+            ...(frame.routeId === REPO_TASK_DETAIL_ROUTE
+              ? [{ keys: "PgUp/PgDn", label: "scroll" }, { keys: "g/G", label: "top/bottom" }]
+              : [])
           ];
 
   if (rows < 8 || columns < 24) return <Box width={columns} height={rows} overflow="hidden"><Text wrap="truncate">Resize terminal (24×8 minimum). q quits.</Text>{isRawModeSupported ? <KeyBindings onKey={handleKey} /> : null}</Box>;
