@@ -148,6 +148,23 @@ export class FileEventLog {
     return this.readAll();
   }
 
+  /**
+   * Find the newest matching event without materializing or verifying the
+   * complete history. This is intentionally a narrow read primitive for
+   * projections used by read-only surfaces; callers that need an integrity
+   * decision must continue to use `readAll()` / `verify()`.
+   */
+  async findLatestEvent(predicate: (event: RuntimeEvent) => boolean): Promise<RuntimeEvent | undefined> {
+    return withFileLock(`${this.path}.lock`, DEFAULT_FILE_LOCK_OPTIONS, async () => {
+      const paths = [...(await this.archivePaths()), this.path].reverse();
+      for (const path of paths) {
+        const event = await readLatestEventFromPath(path, predicate);
+        if (event) return event;
+      }
+      return undefined;
+    });
+  }
+
   async archiveInfo(): Promise<readonly EventLogArchiveInfo[]> {
     return withFileLock(`${this.path}.lock`, DEFAULT_FILE_LOCK_OPTIONS, async () => {
       const archives: EventLogArchiveInfo[] = [];
@@ -781,6 +798,56 @@ async function appendTextFileDurable(path: string, content: string): Promise<voi
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+const TAIL_READ_CHUNK_BYTES = 256 * 1024;
+
+async function readLatestEventFromPath(
+  path: string,
+  predicate: (event: RuntimeEvent) => boolean
+): Promise<RuntimeEvent | undefined> {
+  const stats = await stat(path).catch((error) => {
+    if (isNodeError(error) && error.code === "ENOENT") return undefined;
+    throw error;
+  });
+  if (!stats || stats.size === 0) return undefined;
+
+  const handle = await open(path, "r");
+  let end = stats.size;
+  let carry = "";
+  try {
+    while (end > 0) {
+      const length = Math.min(TAIL_READ_CHUNK_BYTES, end);
+      const start = end - length;
+      const buffer = Buffer.allocUnsafe(length);
+      await handle.read(buffer, 0, length, start);
+      const lines = `${buffer.toString("utf8")}${carry}`.split("\n");
+      const firstCompleteLine = start === 0 ? 0 : 1;
+      for (let index = lines.length - 1; index >= firstCompleteLine; index -= 1) {
+        const line = lines[index]?.trim();
+        if (!line) continue;
+        try {
+          const entry = normalizeEntry(JSON.parse(line));
+          if (entry.kind !== "event" || !isRecord(entry.record)) continue;
+          const event = entry.record as RuntimeEvent;
+          // Most entries are irrelevant to the projection lookup. Avoid
+          // running the full event validator on every historical record.
+          if (!predicate(event)) continue;
+          if (runtimeEventSchemaIssues(event, "eventLog.tail.record").length > 0) continue;
+          return event;
+        } catch {
+          // A concurrent append cannot happen while the event-log lock is
+          // held. Ignore an unreadable line here and leave full verification
+          // to readAll(), which reports corruption precisely.
+        }
+      }
+      carry = start === 0 ? "" : lines[0] ?? "";
+      end = start;
+    }
+  } finally {
+    await handle.close();
+  }
+  return undefined;
 }
 
 function isNodeError(error: unknown): error is NodeJS.ErrnoException {

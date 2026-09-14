@@ -29,7 +29,7 @@ import {
   selectScopedWorkItems,
   TuiCliLoadError
 } from "../../apps/tui/src/loaders.js";
-import { activeReservationViewsByWorkId } from "../../apps/tui/src/repo-store.js";
+import { activeReservationViewsByWorkId, readRepoWorkGraph } from "../../apps/tui/src/repo-store.js";
 import { toWorkItemView, type WorkDirectiveSummaryView } from "@boreal/ui-model";
 
 const actor: ActorRef = { id: "tui-loader-test", kind: "agent" };
@@ -387,6 +387,17 @@ describe("repo route loaders: direct store read", () => {
     expect(envelope.body.activeSprintId).toBe(active.meta.id);
     expect(envelope.body.selectedSprintId).toBe(active.meta.id);
     expect(envelope.body.sprints.find((sprint) => sprint.view.id === active.meta.id)?.active).toBe(true);
+  });
+
+  it("invalidates the cached object graph when a work record changes", async () => {
+    const rootDir = await makeTempWorkspace();
+    const store = new ObjectDirBorealStore({ rootDir });
+    const task = createWorkItem({ title: "Before", actor, now: "2026-01-01T00:00:00.000Z" });
+    await store.write((writer) => writer.putWorkItem(task));
+
+    expect((await readRepoWorkGraph(rootDir)).items[0]?.title).toBe("Before");
+    await store.write((writer) => writer.putWorkItem({ ...task, title: "After" }));
+    expect((await readRepoWorkGraph(rootDir)).items[0]?.title).toBe("After");
   });
 
   it("selects the first deterministic sprint when no active sprint projection exists", async () => {

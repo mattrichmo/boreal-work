@@ -33,8 +33,10 @@ import {
 } from "@boreal/ui-model";
 import type { AgentSummaryRecord, GraphEdge, WorkItem } from "@boreal/core";
 
-import { activeReservationViewsByWorkId, readRepoTaskCloseoutRecords, readRepoWorkGraph, reservationViewFrom } from "./repo-store.js";
+import { activeReservationViewsByWorkId, invalidateRepoReadCache, readRepoTaskCloseoutRecords, readRepoWorkGraph, reservationViewFrom } from "./repo-store.js";
 import { displayStatusForNode } from "./status-display.js";
+
+export { invalidateRepoReadCache };
 
 const execFileAsync = promisify(execFile);
 const DASHBOARD_GLOBAL_SCHEMA_VERSION = "boreal.cli.dashboard.global.v1";
@@ -373,12 +375,15 @@ export async function loadRepoRollup(workspaceRoot: string): Promise<TuiEnvelope
     reservationsByWorkId,
     actionsForWork: (work) => rollupActionsForWork(workspaceRoot, work, reservationsByWorkId.get(work.meta.id))
   });
-  const warnings = body.warnings.length > 0
-    ? [
+  const warnings = [
+    ...(body.warnings.length > 0
+      ? [
         `Roll-up has ${body.warnings.length} unparented work item(s) matching multiple sprint scopes. Set an explicit parent with 'bwrk work edit <work-ref> --parent <sprint-ref>'.`
       ]
-    : [];
-  return buildTuiEnvelope({ surface: "repo", workspaceRoot, generatedAt, body, warnings });
+      : []),
+    ...(graph.warning ? [graph.warning] : [])
+  ];
+  return buildTuiEnvelope({ surface: "repo", workspaceRoot, generatedAt, stale: graph.stale, body, warnings });
 }
 
 export type RepoNowLane = "in flight" | "attention" | "next";
@@ -443,9 +448,9 @@ function nowScopeForNode(node: RollupNodeView, byId: ReadonlyMap<string, RollupN
  * second hierarchy. It reuses the roll-up projection so all sections agree on
  * status, blockers, progress, and entity identity. */
 export async function loadRepoNow(workspaceRoot: string): Promise<TuiEnvelope<RepoNowBody>> {
-  const [rollup, sprintBoard] = await Promise.all([
+  const [rollup, sprintSummary] = await Promise.all([
     loadRepoRollup(workspaceRoot),
-    loadRepoSprintBoard(workspaceRoot)
+    loadRepoCurrentSprint(workspaceRoot)
   ]);
   const nodes = leafWorkNodes(rollup.body);
   const byId = new Map(rollup.body.flatRows.map((node) => [node.id, node]));
@@ -476,8 +481,7 @@ export async function loadRepoNow(workspaceRoot: string): Promise<TuiEnvelope<Re
     ...allRows.filter((row) => row.lane === "attention").slice(0, 10),
     ...allRows.filter((row) => row.lane === "next").slice(0, 8)
   ];
-  const currentSprint = sprintBoard.body.sprints.find((sprint) => sprint.active) ??
-    sprintBoard.body.sprints.find((sprint) => sprint.view.id === sprintBoard.body.selectedSprintId);
+  const currentSprint = sprintSummary.currentSprint;
   const scopeByKey = new Map<string, RepoNowScope>();
   for (const row of allRows) {
     for (const scope of [
@@ -491,12 +495,12 @@ export async function loadRepoNow(workspaceRoot: string): Promise<TuiEnvelope<Re
     }
   }
   const scopes = [...scopeByKey.values()].sort((left, right) => left.kind.localeCompare(right.kind) || left.title.localeCompare(right.title) || left.id.localeCompare(right.id));
-  const warnings = [...new Set([...rollup.warnings, ...sprintBoard.warnings])];
+  const warnings = [...new Set([...rollup.warnings, ...sprintSummary.warnings])];
   return buildTuiEnvelope({
     surface: "repo",
     workspaceRoot,
     generatedAt: rollup.generatedAt,
-    stale: rollup.stale || sprintBoard.stale,
+    stale: rollup.stale || sprintSummary.stale,
     warnings,
     body: {
       currentSprint,
@@ -626,8 +630,8 @@ export async function loadRepoOps(workspaceRoot: string): Promise<TuiEnvelope<Re
     surface: "repo",
     workspaceRoot,
     generatedAt: rollup.generatedAt,
-    stale: rollup.stale || !graph.initialized,
-    warnings: rollup.warnings,
+    stale: rollup.stale || graph.stale || !graph.initialized,
+    warnings: [...rollup.warnings, ...(graph.warning ? [graph.warning] : [])],
     body: { reservations, historicalReservationCount: allReservations.length - reservations.length, warnings: rollup.warnings, summary: rollup.body.summary }
   });
 }
@@ -648,6 +652,51 @@ export interface RepoSprintBoardBody {
   readonly board?: SprintBoardView;
   readonly assignedWorkIds?: readonly string[];
   readonly dependencyWorkIds?: readonly string[];
+}
+
+interface RepoCurrentSprintSummary {
+  readonly currentSprint?: RepoSprintRow;
+  readonly stale?: boolean;
+  readonly warnings: readonly string[];
+}
+
+/**
+ * Now only needs the current sprint headline. Do not build every sprint board
+ * and every scoped task just to render that one line; the full board remains
+ * available when the operator opens Sprints or drills into a sprint.
+ */
+async function loadRepoCurrentSprint(workspaceRoot: string): Promise<RepoCurrentSprintSummary> {
+  const graph = await readRepoWorkGraph(workspaceRoot);
+  if (!graph.initialized) return { warnings: [] };
+  const generatedAt = new Date().toISOString();
+  const byId = new Map<string, WorkItem>(graph.items.map((item) => [item.meta.id, item]));
+  const reservationsByWorkId = activeReservationViewsByWorkId(graph.reservations, new Date(generatedAt), preferredReservationIds(graph.items));
+  const sprints = graph.items
+    .filter((item) => item.kind === "sprint")
+    .sort((left, right) => Number(right.meta.id === graph.activeSprintId) - Number(left.meta.id === graph.activeSprintId) || left.title.localeCompare(right.title));
+  const sprint = sprints[0];
+  if (!sprint) return { stale: graph.stale, warnings: graph.warning ? [graph.warning] : [] };
+  const view = toWorkItemView({
+    work: sprint,
+    dependencies: graph.items,
+    graphEdges: graph.graphEdges,
+    reservation: reservationsByWorkId.get(sprint.meta.id)
+  });
+  const scope = computeScopeIds(sprint.meta.id, byId, graph.graphEdges);
+  const scopedWork = graph.items.filter((work) => scope.has(work.meta.id) && work.meta.id !== sprint.meta.id);
+  const doneCount = scopedWork.filter((work) => work.status === "closed" || work.status === "verified").length;
+  return {
+    currentSprint: {
+      view,
+      scopeCount: scope.size,
+      doneCount,
+      openCount: scopedWork.length - doneCount,
+      blockedCount: scopedWork.filter((work) => work.status === "blocked").length,
+      active: sprint.meta.id === graph.activeSprintId
+    },
+    stale: graph.stale,
+    warnings: graph.warning ? [graph.warning] : []
+  };
 }
 
 /** Selects only board members before the comparatively expensive view build. */
@@ -752,6 +801,8 @@ export async function loadRepoSprintBoard(
     surface: "repo",
     workspaceRoot,
     generatedAt,
+    stale: graph.stale,
+    warnings: graph.warning ? [graph.warning] : [],
     body: {
       sprints,
       activeSprintId: activeProjectionSprintId,
@@ -995,6 +1046,8 @@ export async function loadRepoTaskDetail(
     surface: "repo",
     workspaceRoot,
     generatedAt,
+    stale: graph.stale,
+    warnings: graph.warning ? [graph.warning] : [],
     body: {
       work: view,
       dependencyTitles,

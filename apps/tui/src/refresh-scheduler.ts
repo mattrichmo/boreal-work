@@ -14,6 +14,8 @@ export interface RefreshSchedulerOptions {
   readonly onError?: (error: unknown) => void;
   /** Maximum delay after repeated failures. Defaults to two minutes. */
   readonly maxBackoffMs?: number;
+  /** Optional short retry base for transient read failures such as a writer lock. */
+  readonly failureRetryMs?: number;
   readonly setTimeout?: typeof globalThis.setTimeout;
   readonly clearTimeout?: typeof globalThis.clearTimeout;
 }
@@ -28,6 +30,9 @@ export interface RefreshScheduler {
 export function createRefreshScheduler(options: RefreshSchedulerOptions): RefreshScheduler {
   const intervalMs = Math.max(500, Math.floor(options.intervalMs));
   const maxBackoffMs = Math.max(intervalMs, Math.floor(options.maxBackoffMs ?? 120_000));
+  const failureRetryMs = options.failureRetryMs === undefined
+    ? undefined
+    : Math.max(100, Math.floor(options.failureRetryMs));
   const scheduleTimeout = options.setTimeout ?? globalThis.setTimeout;
   const cancelTimeout = options.clearTimeout ?? globalThis.clearTimeout;
   let timer: ReturnType<typeof globalThis.setTimeout> | undefined;
@@ -45,7 +50,8 @@ export function createRefreshScheduler(options: RefreshSchedulerOptions): Refres
 
   const delayAfterFailure = (): number => {
     if (failures === 0) return intervalMs;
-    return Math.min(maxBackoffMs, intervalMs * 2 ** Math.min(failures - 1, 16));
+    const base = failureRetryMs ?? intervalMs;
+    return Math.min(maxBackoffMs, base * 2 ** Math.min(failures - 1, 16));
   };
 
   const schedule = (delayMs: number): void => {
@@ -81,7 +87,7 @@ export function createRefreshScheduler(options: RefreshSchedulerOptions): Refres
           schedule(delayAfterFailure());
         }
       } else {
-        schedule(wasImmediate ? intervalMs : delayAfterFailure());
+        schedule(failures > 0 ? delayAfterFailure() : wasImmediate ? intervalMs : delayAfterFailure());
       }
     }
   };

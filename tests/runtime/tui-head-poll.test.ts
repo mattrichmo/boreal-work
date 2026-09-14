@@ -93,6 +93,32 @@ describe("tui head polling", () => {
     scheduler.stop();
   });
 
+  it("retries transient failures quickly when a writer temporarily owns the workspace", async () => {
+    const delays: number[] = [];
+    let calls = 0;
+    const scheduler = createRefreshScheduler({
+      intervalMs: 30_000,
+      failureRetryMs: 250,
+      maxBackoffMs: 2_000,
+      onRefresh: () => {
+        calls += 1;
+        throw new Error("Boreal runtime state is locked by another writer");
+      },
+      onError: () => undefined,
+      setTimeout: ((callback: () => void, delay?: number) => {
+        delays.push(delay ?? 0);
+        return 1 as unknown as ReturnType<typeof setTimeout>;
+      }) as typeof setTimeout
+    });
+    scheduler.start();
+    scheduler.request({ immediate: true });
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(calls).toBe(1);
+    expect(delays).toEqual([30_000, 250]);
+    scheduler.stop();
+  });
+
   it("cancels a scheduled refresh when stopped", async () => {
     let callback: (() => void) | undefined;
     let calls = 0;

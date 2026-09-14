@@ -14,7 +14,7 @@
 // workspace against the CLI's own default `objects-v1` storage.
 
 import { existsSync } from "node:fs";
-import { readFile } from "node:fs/promises";
+import { readFile, stat } from "node:fs/promises";
 import { join } from "node:path";
 
 import {
@@ -43,6 +43,9 @@ export interface RepoWorkGraph {
   readonly reservations: readonly AgentReservation[];
   /** The active sprint resolved from the same store snapshot as the graph. */
   readonly activeSprintId?: WorkId;
+  /** True when a writer prevented a fresh read and this is the last snapshot. */
+  readonly stale?: boolean;
+  readonly warning?: string;
 }
 
 /** Closeout records are fetched only when the task-detail route is opened.
@@ -52,6 +55,72 @@ export interface RepoTaskCloseoutRecords {
   readonly summaries: readonly AgentSummaryRecord[];
   readonly evidence: readonly EvidenceRecord[];
   readonly verifications: readonly VerificationRecord[];
+}
+
+const TUI_READ_LOCK_OPTIONS = {
+  // A visualizer should yield quickly to a writer and retry rather than hold
+  // the screen hostage for the storage layer's ten-second command timeout.
+  waitTimeoutMs: 750,
+  staleAfterMs: 60_000,
+  retryDelayMs: 25
+} as const;
+const OBJECT_STORE_REVISION_FILE = "objects-revision.json";
+
+const repoStoreCache = new Map<string, { readonly kind: RepoStorageKind; readonly store: BorealStore }>();
+const repoGraphCache = new Map<string, {
+  readonly kind: RepoStorageKind;
+  readonly signature: string;
+  readonly graph?: RepoWorkGraph;
+  readonly pending?: Promise<RepoWorkGraph>;
+}>();
+
+function repoCacheKey(workspaceRoot: string, kind: RepoStorageKind): string {
+  return `${kind}\u0000${workspaceRoot}`;
+}
+
+function repoStoreFor(workspaceRoot: string, kind: RepoStorageKind): BorealStore {
+  const key = repoCacheKey(workspaceRoot, kind);
+  const existing = repoStoreCache.get(key);
+  if (existing) return existing.store;
+  const store: BorealStore = kind === "objects-v1"
+    ? new ObjectDirBorealStore({ rootDir: workspaceRoot, lock: TUI_READ_LOCK_OPTIONS })
+    : new FileBorealStore({ rootDir: workspaceRoot, lock: TUI_READ_LOCK_OPTIONS });
+  repoStoreCache.set(key, { kind, store });
+  return store;
+}
+
+async function storageSignature(workspaceRoot: string, kind: RepoStorageKind): Promise<string> {
+  const paths = resolveWorkspacePaths(workspaceRoot);
+  const trackedPaths = kind === "objects-v1"
+    ? [paths.eventLogFile, paths.objectsDir, join(paths.runtimeDir, OBJECT_STORE_REVISION_FILE)]
+    : [paths.stateFile, paths.eventLogFile];
+  const rows = await Promise.all(trackedPaths.map(async (path) => {
+    const details = await stat(path).catch((error) => {
+      if (isNodeError(error) && error.code === "ENOENT") return undefined;
+      throw error;
+    });
+    return details
+      ? `${path}:${details.dev}:${details.ino}:${details.size}:${details.mtimeMs}:${details.ctimeMs}`
+      : `${path}:missing`;
+  }));
+  return rows.join("|");
+}
+
+function isNodeError(error: unknown): error is NodeJS.ErrnoException {
+  return typeof error === "object" && error !== null && "code" in error;
+}
+
+function isWriterConflict(error: unknown): boolean {
+  if (!error || typeof error !== "object") return false;
+  const code = "code" in error ? (error as { readonly code?: unknown }).code : undefined;
+  const message = error instanceof Error ? error.message : String(error);
+  return code === "BOREAL_CONFLICT" || message.includes("locked by another writer");
+}
+
+export function invalidateRepoReadCache(workspaceRoot?: string): void {
+  for (const key of repoGraphCache.keys()) {
+    if (!workspaceRoot || key.endsWith(`\u0000${workspaceRoot}`)) repoGraphCache.delete(key);
+  }
 }
 
 const ACTIVE_SPRINT_PROJECTION_KIND = "active-sprint";
@@ -93,22 +162,63 @@ export async function readRepoWorkGraph(workspaceRoot: string): Promise<RepoWork
   if (!storageKind) {
     return { initialized: false, items: [], graphEdges: [], reservations: [] };
   }
-  const store: BorealStore =
-    storageKind === "objects-v1" ? new ObjectDirBorealStore({ rootDir: workspaceRoot }) : new FileBorealStore({ rootDir: workspaceRoot });
-  // Keep all related reads inside one store transaction. The file and object
-  // stores lock per `read()` call, so separate calls can otherwise observe a
-  // writer between the item, edge, and reservation reads.
-  return store.read(async (reader) => {
-    const [items, graphEdges, reservations, projections] = await Promise.all([
-      reader.listWorkItems(),
-      reader.listGraphEdges(),
-      reader.listReservations(),
-      reader.listProjections()
-    ]);
-    const activeProjection = selectActiveSprintProjection(projections);
-    const activeSprintId = activeSprintIdFromProjection(activeProjection) ?? activeSprintIdFromEvents(await reader.listEvents());
-    return { initialized: true, items, graphEdges, reservations, activeSprintId };
-  });
+  const key = repoCacheKey(workspaceRoot, storageKind);
+  const signature = await storageSignature(workspaceRoot, storageKind);
+  const cached = repoGraphCache.get(key);
+  if (cached?.graph && cached.signature === signature) return cached.graph;
+  if (cached?.pending) return cached.pending;
+
+  const store = repoStoreFor(workspaceRoot, storageKind);
+  const previousGraph = cached?.graph;
+  let pending: Promise<RepoWorkGraph> | undefined;
+  pending = (async () => {
+    try {
+      const graph = store instanceof ObjectDirBorealStore
+        ? await store.readGraphSnapshot()
+        : await store.read(async (reader) => {
+            const [items, graphEdges, reservations, projections] = await Promise.all([
+              reader.listWorkItems(),
+              reader.listGraphEdges(),
+              reader.listReservations(),
+              reader.listProjections()
+            ]);
+            const activeProjection = selectActiveSprintProjection(projections);
+            const activeSprintId = activeSprintIdFromProjection(activeProjection) ?? activeSprintIdFromEvents(await reader.listEvents());
+            return { items, graphEdges, reservations, activeSprintId };
+          });
+      const result: RepoWorkGraph = {
+        initialized: true,
+        items: "workItems" in graph ? graph.workItems : graph.items,
+        graphEdges: graph.graphEdges,
+        reservations: graph.reservations,
+        ...(graph.activeSprintId ? { activeSprintId: graph.activeSprintId } : {})
+      };
+      repoGraphCache.set(key, { kind: storageKind, signature: await storageSignature(workspaceRoot, storageKind), graph: result });
+      return result;
+    } catch (error) {
+      if (previousGraph && isWriterConflict(error)) {
+        const stale: RepoWorkGraph = {
+          ...previousGraph,
+          stale: true,
+          warning: "Boreal is being updated; showing the last successful snapshot while retrying."
+        };
+        repoGraphCache.set(key, { kind: storageKind, signature: cached?.signature ?? signature, graph: stale });
+        return stale;
+      }
+      throw error;
+    } finally {
+      const current = repoGraphCache.get(key);
+      if (current && current.pending === pending) {
+        repoGraphCache.set(key, {
+          kind: current.kind,
+          signature: current.signature,
+          ...(current.graph ? { graph: current.graph } : {})
+        });
+      }
+    }
+  })();
+  repoGraphCache.set(key, { kind: storageKind, signature, graph: previousGraph, pending });
+  return pending as Promise<RepoWorkGraph>;
 }
 
 export async function readRepoTaskCloseoutRecords(
@@ -117,8 +227,10 @@ export async function readRepoTaskCloseoutRecords(
 ): Promise<RepoTaskCloseoutRecords> {
   const storageKind = await resolveRepoStorageKind(workspaceRoot);
   if (!storageKind) return { summaries: [], evidence: [], verifications: [] };
-  const store: BorealStore =
-    storageKind === "objects-v1" ? new ObjectDirBorealStore({ rootDir: workspaceRoot }) : new FileBorealStore({ rootDir: workspaceRoot });
+  const store = repoStoreFor(workspaceRoot, storageKind);
+  if (store instanceof ObjectDirBorealStore) {
+    return store.readTaskCloseout(workId);
+  }
   return store.read(async (reader) => {
     const [summaries, evidence, verifications] = await Promise.all([
       reader.listAgentSummariesForSubject(workId),

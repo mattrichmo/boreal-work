@@ -24,9 +24,15 @@ import {
   runtimeOperationSchemaIssues,
   verificationRecordSchemaIssues,
   workItemSchemaIssues,
+  type AgentReservation,
+  type AgentSummaryRecord,
+  type EvidenceRecord,
+  type GraphEdge,
   type RuntimeEvent,
   type RuntimeOperation,
   type SchemaValidationIssue,
+  type VerificationRecord,
+  type WorkId,
   type WorkItem
 } from "@boreal/core";
 
@@ -64,6 +70,22 @@ export interface ObjectDirBorealStoreOptions {
   readonly sqlite?: NodeSqliteModule;
 }
 
+export interface ObjectGraphSnapshot {
+  readonly workItems: readonly WorkItem[];
+  readonly graphEdges: readonly GraphEdge[];
+  readonly reservations: readonly AgentReservation[];
+  readonly activeSprintId?: WorkId;
+}
+
+export interface ObjectTaskCloseoutSnapshot {
+  readonly summaries: readonly AgentSummaryRecord[];
+  readonly evidence: readonly EvidenceRecord[];
+  readonly verifications: readonly VerificationRecord[];
+}
+
+/** Disposable revision marker used by read-only consumers to detect object updates. */
+export const OBJECT_STORE_REVISION_FILE = "objects-revision.json";
+
 type PersistedObjectSection = Exclude<StoreSectionName, "events" | "operations" | "projections" | "contextPacks">;
 
 interface ObjectSectionDefinition {
@@ -95,10 +117,18 @@ const SECTION_BY_NAME = new Map<StoreSectionName, ObjectSectionDefinition>(
   OBJECT_SECTIONS.map((definition) => [definition.section, definition])
 );
 
+function objectSection(section: PersistedObjectSection): ObjectSectionDefinition {
+  const definition = SECTION_BY_NAME.get(section);
+  if (!definition) throw new Error(`Object-store section is not configured: ${section}`);
+  return definition;
+}
+
 export class ObjectDirBorealStore implements BorealStore {
   readonly rootDir: string;
   readonly objectsDir: string;
   readonly eventLogFile: string;
+  readonly objectRevisionFile: string;
+  readonly activeSprintProjectionFile: string;
   readonly objectIndexFile: string;
   readonly lockDir: string;
   readonly lockOptions: FileLockOptions;
@@ -112,6 +142,8 @@ export class ObjectDirBorealStore implements BorealStore {
     this.rootDir = paths.rootDir;
     this.objectsDir = paths.objectsDir;
     this.eventLogFile = paths.eventLogFile;
+    this.objectRevisionFile = join(paths.runtimeDir, OBJECT_STORE_REVISION_FILE);
+    this.activeSprintProjectionFile = join(paths.runtimeDir, "active-sprint.json");
     this.objectIndexFile = objectIndexPath(paths.rootDir);
     this.lockDir = paths.stateLockDir;
     this.lockOptions = normalizeFileLockOptions(options.lock);
@@ -149,6 +181,45 @@ export class ObjectDirBorealStore implements BorealStore {
     });
   }
 
+  /**
+   * Read the data needed by graph-oriented visualizers without constructing a
+   * complete in-memory snapshot or parsing the entire event history.
+   */
+  async readGraphSnapshot(): Promise<ObjectGraphSnapshot> {
+    return withFileLock(this.lockDir, this.lockOptions, async () => {
+      await this.recoverTransactions();
+      const [workItems, graphEdges, reservations] = await Promise.all([
+        this.loadObjectSection(objectSection("workItems")),
+        this.loadObjectSection(objectSection("graphEdges")),
+        this.loadObjectSection(objectSection("reservations"))
+      ]);
+      const activeSprintId = await this.readActiveSprintProjection() ?? await this.findLatestActiveSprintId();
+      return {
+        workItems: workItems as readonly WorkItem[],
+        graphEdges: graphEdges as readonly GraphEdge[],
+        reservations: reservations as readonly AgentReservation[],
+        ...(activeSprintId?.startsWith("bw_work_") ? { activeSprintId: activeSprintId as WorkId } : {})
+      };
+    });
+  }
+
+  /** Read only the closeout sections needed by an opened task detail view. */
+  async readTaskCloseout(workId: string): Promise<ObjectTaskCloseoutSnapshot> {
+    return withFileLock(this.lockDir, this.lockOptions, async () => {
+      await this.recoverTransactions();
+      const [summaries, evidence, verifications] = await Promise.all([
+        this.loadObjectSection(objectSection("agentSummaries")),
+        this.loadObjectSection(objectSection("evidence")),
+        this.loadObjectSection(objectSection("verifications"))
+      ]);
+      return {
+        summaries: (summaries as readonly AgentSummaryRecord[]).filter((record) => record.subjectId === workId),
+        evidence: (evidence as readonly EvidenceRecord[]).filter((record) => record.subjectId === workId),
+        verifications: (verifications as readonly VerificationRecord[]).filter((record) => record.subjectId === workId)
+      };
+    });
+  }
+
   private async writeOnce<T>(operation: (writer: BorealWriter) => Promise<T> | T): Promise<T> {
     await this.assertSafePaths();
     return withFileLock(this.lockDir, this.lockOptions, async () => {
@@ -168,8 +239,10 @@ export class ObjectDirBorealStore implements BorealStore {
         pendingLogRecords
       });
       await this.persistObjectChanges(changes);
+      if (graphChangesPresent(changes)) await this.persistObjectRevision();
       let journal = await updateTransactionJournal(transaction.path, transaction.journal, "state_written");
       await this.appendMissingLogRecords(pendingLogRecords);
+      await this.persistActiveSprintProjection(pendingLogRecords);
       journal = await updateTransactionJournal(transaction.path, journal, "log_written");
       try {
         const nextHead = await this.#eventLog.head();
@@ -219,8 +292,10 @@ export class ObjectDirBorealStore implements BorealStore {
       try {
         if (journal.changes) {
           await this.persistObjectChanges(journal.changes);
+          if (graphChangesPresent(journal.changes)) await this.persistObjectRevision();
         }
         await this.appendMissingLogRecords(journal.pendingLogRecords);
+        await this.persistActiveSprintProjection(journal.pendingLogRecords);
         await removeTransactionJournal(path);
       } catch (error) {
         throw toRecoveryRequiredError(error, {
@@ -248,6 +323,66 @@ export class ObjectDirBorealStore implements BorealStore {
       }
       await this.#eventLog.append(pending.kind, pending.record);
       existing.add(key);
+    }
+  }
+
+  private async readActiveSprintProjection(): Promise<WorkId | undefined> {
+    try {
+      await assertRealPathInside(this.rootDir, this.activeSprintProjectionFile);
+      const value = await readJsonFile(this.activeSprintProjectionFile, {
+        schemaName: "boreal.object-store.active-sprint",
+        expectedObject: true,
+        maxBytes: 16 * 1024
+      });
+      const sprintId = isRecord(value) ? value.sprintId : undefined;
+      return typeof sprintId === "string" && sprintId.startsWith("bw_work_") ? sprintId as WorkId : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  private async findLatestActiveSprintId(): Promise<WorkId | undefined> {
+    const event = await this.#eventLog.findLatestEvent((candidate) =>
+      candidate.type === "sprint.activated" && candidate.subjectType === "sprint"
+    );
+    const sprintId = event?.payload.sprintId;
+    const resolved = typeof sprintId === "string" ? sprintId : event?.subjectId;
+    return resolved?.startsWith("bw_work_") ? resolved as WorkId : undefined;
+  }
+
+  private async persistActiveSprintProjection(records: readonly PendingLogRecord[]): Promise<void> {
+    const activation = records
+      .filter((record) => record.kind === "event")
+      .at(-1);
+    if (!activation || activation.kind !== "event") return;
+    const event = activation.record as RuntimeEvent;
+    if (event.type !== "sprint.activated") return;
+    const sprintId = typeof event.payload.sprintId === "string"
+      ? event.payload.sprintId
+      : event.subjectId;
+    if (!sprintId.startsWith("bw_work_")) return;
+    try {
+      await writeTextFileAtomic(this.activeSprintProjectionFile, `${JSON.stringify({
+        schemaVersion: "boreal.object-store.active-sprint.v1",
+        sprintId,
+        eventId: event.meta.id,
+        updatedAt: event.meta.updatedAt
+      })}\n`);
+    } catch {
+      // This is a disposable read optimization; the event log remains the
+      // canonical fallback when the projection cannot be written.
+    }
+  }
+
+  private async persistObjectRevision(): Promise<void> {
+    try {
+      await writeTextFileAtomic(this.objectRevisionFile, `${JSON.stringify({
+        schemaVersion: "boreal.object-store.revision.v1",
+        revision: `${Date.now()}-${process.pid}-${Math.random().toString(16).slice(2)}`
+      })}\n`);
+    } catch {
+      // This marker is only a cache invalidation hint; object files remain the
+      // canonical source of truth if the hint cannot be updated.
     }
   }
 
@@ -392,6 +527,8 @@ export class ObjectDirBorealStore implements BorealStore {
   private async assertSafePaths(): Promise<void> {
     await assertRealPathInside(this.rootDir, this.objectsDir);
     await assertRealPathInside(this.rootDir, this.eventLogFile);
+    await assertRealPathInside(this.rootDir, this.objectRevisionFile);
+    await assertRealPathInside(this.rootDir, this.activeSprintProjectionFile);
     await assertRealPathInside(this.rootDir, this.objectIndexFile);
     await assertRealPathInside(this.rootDir, this.lockDir);
     await assertRealPathInside(this.rootDir, transactionDirectory(this.rootDir));
@@ -409,6 +546,10 @@ function validateRecord(definition: ObjectSectionDefinition, id: string, record:
       issueCount: issues.length
     });
   }
+}
+
+function graphChangesPresent(changes: readonly StoreChange[]): boolean {
+  return changes.some((change) => change.section === "workItems" || change.section === "graphEdges" || change.section === "reservations");
 }
 
 function snapshotFromLogEntries(entries: readonly EventLogEntry[]): Pick<StoreSnapshot, "events" | "operations"> {

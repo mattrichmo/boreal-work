@@ -50,6 +50,23 @@ describe("object directory store", () => {
     });
   });
 
+  it("loads graph views without materializing the full event snapshot", async () => {
+    const rootDir = await makeTempWorkspace();
+    const store = new ObjectDirBorealStore({ rootDir });
+    const sprintId = "bw_work_00000000000a" as WorkId;
+
+    await store.write(async (writer) => {
+      await writer.putWorkItem(sampleWorkItem(sprintId));
+      await writer.putEvent(sprintActivatedEvent(sprintId));
+    });
+
+    const graph = await store.readGraphSnapshot();
+    expect(graph.workItems.map((item) => item.meta.id)).toEqual([sprintId]);
+    expect(graph.graphEdges).toEqual([]);
+    expect(graph.reservations).toEqual([]);
+    expect(graph.activeSprintId).toBe(sprintId);
+  });
+
   it("a write touches only mutated record files", async () => {
     const rootDir = await makeTempWorkspace();
     const store = new ObjectDirBorealStore({ rootDir });
@@ -204,5 +221,20 @@ function sampleEvent(id: EventId): RuntimeEvent {
     subjectId: "bw_work_00000000000a",
     subjectType: "work",
     payload: {}
+  } satisfies RuntimeEvent);
+}
+
+function sprintActivatedEvent(sprintId: WorkId): RuntimeEvent {
+  return withContentHash({
+    meta: createRecordMeta({
+      id: "bw_event_000000000002" as EventId,
+      now: "2026-01-01T00:00:00.000Z",
+      actor,
+      tags: ["event"]
+    }),
+    type: "sprint.activated",
+    subjectId: sprintId,
+    subjectType: "sprint",
+    payload: { sprintId }
   } satisfies RuntimeEvent);
 }

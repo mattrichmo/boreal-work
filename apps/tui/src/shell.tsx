@@ -523,6 +523,8 @@ export function RouteApp({
   useEffect(() => {
     const scheduler = createRefreshScheduler({
       intervalMs: normalizeRefreshInterval(refreshMs),
+      failureRetryMs: 500,
+      maxBackoffMs: 5_000,
       onRefresh: () => {
         if (livePaused) return;
         if (!forceNextRefreshRef.current && interactionBusyRef.current) return;
@@ -1376,7 +1378,7 @@ export function RouteApp({
           ) : paletteOpen ? (
             <Palette query={paletteQuery} results={paletteResults} cursor={paletteCursor} height={bodyHeight} width={bodyWidth} title={sprintPickerOpen ? "Choose sprint" : paletteMode === "command" ? "Command palette" : paletteMode === "batch" ? "Batch actions" : paletteMode === "now-scope" ? "Filter Now by milestone or sprint" : searchError ? "Search unavailable; showing loaded items" : "Search work and routes"} />
           ) : error && !currentBody ? (
-            <EmptyState title={unsupportedRoute ? "Unsupported route" : "Data unavailable"} lines={[error, "Press r to retry or esc to return."]} width={bodyWidth} />
+            <EmptyState title={unsupportedRoute ? "Unsupported route" : error.includes("locked by another writer") ? "Workspace busy" : "Data unavailable"} lines={[error, "Retrying automatically; press r to retry or esc to return."]} width={bodyWidth} />
           ) : !currentBody ? (
             <Text color={COLOR.muted}>Loading…</Text>
           ) : (
