@@ -6,7 +6,14 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const repoRoot = path.dirname(fileURLToPath(import.meta.url));
-const DEFAULT_OUTPUT_DIR = "/scratch/reference-zips";
+const SYSTEM_OUTPUT_DIR = "/scratch/reference-zips";
+const LOCAL_OUTPUT_DIR = path.join(repoRoot, "scratch", "reference-zips");
+
+function defaultOutputDirectory() {
+  return existsSync("/scratch") ? SYSTEM_OUTPUT_DIR : LOCAL_OUTPUT_DIR;
+}
+
+const DEFAULT_OUTPUT_DIR = defaultOutputDirectory();
 const legacyRoot = process.env.BOREAL_V1_ARCHIVE_ROOT
   ? path.resolve(process.env.BOREAL_V1_ARCHIVE_ROOT)
   : path.join(repoRoot, "v1");
@@ -16,6 +23,9 @@ function usage() {
 
 Creates timestamped read-only reference archives for the canonical v2 tree and
 the local legacy v1 reference tree when it is available.
+
+The preferred output is /scratch/reference-zips. On systems without a writable
+/scratch directory, output falls back to ./scratch/reference-zips.
 
 Options:
   --output-dir PATH  Directory for generated archives
@@ -67,6 +77,16 @@ function parseArguments(argv) {
 const outputDir = parseArguments(process.argv.slice(2));
 const generatedAt = new Date();
 const archiveTimestamp = generatedAt.toISOString().replace(/[-:.]/g, "");
+
+if (
+  DEFAULT_OUTPUT_DIR === LOCAL_OUTPUT_DIR &&
+  !process.env.BOREAL_ZIP_OUTPUT_DIR &&
+  !process.argv.slice(2).some((argument) => argument === "--output-dir" || argument.startsWith("--output-dir="))
+) {
+  console.warn(
+    `System /scratch is unavailable; using repository-local output: ${outputDir}`,
+  );
+}
 
 const TEXT_EXTENSIONS = new Set([
   ".json",
