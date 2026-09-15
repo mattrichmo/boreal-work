@@ -9,7 +9,7 @@ const repoRoot = path.dirname(fileURLToPath(import.meta.url));
 const outputDir = path.join(repoRoot, "reference-zips");
 const legacyRoot = process.env.BOREAL_V1_ARCHIVE_ROOT
   ? path.resolve(process.env.BOREAL_V1_ARCHIVE_ROOT)
-  : path.resolve(repoRoot, "..", "boreal-work-v1-archive-2026-09-15");
+  : path.join(repoRoot, "v1");
 
 const TEXT_EXTENSIONS = new Set([
   ".json",

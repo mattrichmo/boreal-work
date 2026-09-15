@@ -1,4 +1,5 @@
 /target/
+/v1/
 /test-project/*
 !/test-project/AGENTS.md
 !/test-project/README.md
