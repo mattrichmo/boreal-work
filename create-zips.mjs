@@ -6,10 +6,67 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const repoRoot = path.dirname(fileURLToPath(import.meta.url));
-const outputDir = path.join(repoRoot, "reference-zips");
+const DEFAULT_OUTPUT_DIR = "/scratch/reference-zips";
 const legacyRoot = process.env.BOREAL_V1_ARCHIVE_ROOT
   ? path.resolve(process.env.BOREAL_V1_ARCHIVE_ROOT)
   : path.join(repoRoot, "v1");
+
+function usage() {
+  return `Usage: node create-zips.mjs [--output-dir PATH]
+
+Creates timestamped read-only reference archives for the canonical v2 tree and
+the local legacy v1 reference tree when it is available.
+
+Options:
+  --output-dir PATH  Directory for generated archives
+                     (default: ${DEFAULT_OUTPUT_DIR})
+  --help             Show this help
+
+Environment:
+  BOREAL_ZIP_OUTPUT_DIR  Overrides the default output directory
+  BOREAL_V1_ARCHIVE_ROOT Overrides the local v1 source directory
+`;
+}
+
+function parseArguments(argv) {
+  let outputDir = process.env.BOREAL_ZIP_OUTPUT_DIR ?? DEFAULT_OUTPUT_DIR;
+
+  for (let index = 0; index < argv.length; index += 1) {
+    const argument = argv[index];
+
+    if (argument === "--help" || argument === "-h") {
+      console.log(usage());
+      process.exit(0);
+    }
+
+    if (argument === "--output-dir") {
+      const value = argv[index + 1];
+      if (!value || value.startsWith("-")) {
+        throw new Error("--output-dir requires a path");
+      }
+      outputDir = value;
+      index += 1;
+      continue;
+    }
+
+    if (argument.startsWith("--output-dir=")) {
+      const value = argument.slice("--output-dir=".length);
+      if (!value) {
+        throw new Error("--output-dir requires a path");
+      }
+      outputDir = value;
+      continue;
+    }
+
+    throw new Error(`unknown argument: ${argument}`);
+  }
+
+  return path.resolve(outputDir);
+}
+
+const outputDir = parseArguments(process.argv.slice(2));
+const generatedAt = new Date();
+const archiveTimestamp = generatedAt.toISOString().replace(/[-:.]/g, "");
 
 const TEXT_EXTENSIONS = new Set([
   ".json",
@@ -251,7 +308,7 @@ function indexFor(spec, files) {
   return `# ${spec.title}\n\n` +
     `This archive is a read-only reference snapshot for another agent. ` +
     `It is intentionally source-oriented and is not intended to be run directly.\n\n` +
-    `Generated: ${new Date().toISOString()}\n` +
+    `Generated: ${generatedAt.toISOString()}\n` +
     `Source root: ${spec.sourceLabel}\n` +
     `Included files: ${files.length}\n` +
     `Compression: ZIP/Deflate level 9\n\n` +
@@ -277,7 +334,10 @@ async function buildArchive(spec) {
   const files = await collectFiles(sourceRoot, spec.selector);
   const stagingRoot = await mkdtemp(path.join(tmpdir(), `boreal-${spec.id}-`));
   const archiveRoot = path.join(stagingRoot, spec.archiveDirectory);
-  const outputPath = path.join(outputDir, `${spec.id}-reference.zip`);
+  const outputPath = path.join(
+    outputDir,
+    `${spec.id}-reference-${archiveTimestamp}.zip`,
+  );
 
   try {
     await mkdir(archiveRoot, { recursive: true });
@@ -355,7 +415,5 @@ for (const spec of specs) {
 }
 
 for (const result of results) {
-  console.log(
-    `Created ${path.relative(repoRoot, result.outputPath)} (${result.fileCount} source files)`,
-  );
+  console.log(`Created ${result.outputPath} (${result.fileCount} source files)`);
 }
