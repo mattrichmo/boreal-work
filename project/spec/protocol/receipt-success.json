@@ -1,0 +1,21 @@
+{
+  "schema_version": "boreal.receipt.v1",
+  "fixture_id": "receipt.success.v1",
+  "receipt_id": "receipt_01J8V2RECEIPT00000000001",
+  "operation_id": "op_evidence_01J8V2RECEIPT0000001",
+  "subject": {"work_id":"work_task_001","attempt_id":"attempt_001","fence":1,"gate_id":"gate_verification_001"},
+  "executable": "./scripts/check-task",
+  "argv": ["./scripts/check-task","--json"],
+  "cwd": "/workspace/projects/demo",
+  "exit_code": 0,
+  "started_at": "2026-09-14T22:20:00Z",
+  "ended_at": "2026-09-14T22:20:02Z",
+  "source_snapshot_hash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "config_identity": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "environment_fingerprint": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+  "output_digest": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+  "output_ref": null,
+  "coverage": {"kind":"verification","profile_id":"focused","profile_version":"v1"},
+  "attestation": "boreal_witnessed",
+  "result": "passed"
+}

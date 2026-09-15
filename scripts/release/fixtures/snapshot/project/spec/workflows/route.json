@@ -1,0 +1,9 @@
+{
+  "schema_version": "boreal.workflow_asset.v1",
+  "asset_version": "1",
+  "ref": "boreal.workflow.route.v1",
+  "kind": "route",
+  "allowed_commands": ["status"],
+  "typed_inputs": [],
+  "finish_criteria": ["response emitted"]
+}

@@ -1,0 +1,13 @@
+{
+  "schema_version": "boreal.workflow_asset.v1",
+  "asset_version": "1.0.0",
+  "ref": "boreal.workflow.context.v1",
+  "kind": "context",
+  "title": "Build a bounded project context capsule",
+  "refs": {"route": "boreal.workflow.route.v1", "health": "boreal.workflow.health.v1", "memory": "boreal.workflow.memory.v1"},
+  "allowed_commands": ["bwrk prime --json", "bwrk agent status --json", "bwrk context show --json"],
+  "typed_inputs": [{"name": "project_id", "type": "project_id", "required": true, "source": "session", "validation": "project_scope"}, {"name": "project_revision", "type": "revision", "required": true, "source": "store_snapshot", "validation": "monotonic"}, {"name": "session_id", "type": "session_id", "required": true, "source": "credential", "validation": "one_current_execution"}, {"name": "source_snapshot_hash", "type": "sha256", "required": true, "source": "source_engine", "validation": "digest_format"}, {"name": "memory_refs", "type": "bounded_reference_array", "required": false, "source": "retrieval", "validation": "project_scoped_and_digest_checked"}],
+  "finish_criteria": [{"id": "context.revision", "type": "single_project_revision", "required": true}, {"id": "context.bounded", "type": "bounded_payload", "required": true}, {"id": "context.provenance", "type": "source_and_config_identity", "required": true}],
+  "next_refs": ["boreal.workflow.plan.v1", "boreal.workflow.claim.v1", "boreal.workflow.handoff.v1"],
+  "state_transition_owner": "boreal.application.v2"
+}

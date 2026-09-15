@@ -1,0 +1,16 @@
+{
+  "schema_version": "boreal.source_version.v1",
+  "source_version_id": "srcv_001",
+  "project_id": "project_demo",
+  "origin": "docs/decision.md",
+  "access_scope": "project",
+  "content_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "media_type": "text/markdown",
+  "byte_count": 128,
+  "captured_at": "2026-09-14T22:00:00Z",
+  "parser_identity": "boreal-source-parser.v1",
+  "configuration_identity": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "availability": "available",
+  "citation": {"kind":"git_path","path":"docs/decision.md","revision":"abc123","line_start":4,"line_end":9},
+  "blob": {"digest":"sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","byte_count":128,"media_type":"text/markdown","verified":true}
+}

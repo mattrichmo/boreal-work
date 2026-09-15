@@ -1,8 +1,0 @@
-schema_version: boreal.skill.v1
-system: boreal
-skill: boreal-project-context
-display_name: Boreal Project Context
-workflows:
-  - boreal.workflow.retrieve-project-context.v1
-  - boreal.workflow.retrieve-work-state.v1
-  - boreal.workflow.retrieve-decision-history.v1

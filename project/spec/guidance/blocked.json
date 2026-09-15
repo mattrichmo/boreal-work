@@ -1,0 +1,14 @@
+{
+  "schema_version": "boreal.agent_guidance.v1",
+  "fixture_id": "guidance.blocked.v1",
+  "request": {"goal": null, "work_id": "work_blocked_001", "session_id": "session_agent_001"},
+  "operation_id": "op_guidance_blocked_001",
+  "project_revision": 104,
+  "context": {"mode": "recover", "project_id": "project_demo", "actor_id": "agent_001", "harness_id": "harness_fixture", "session_id": "session_agent_001"},
+  "status": {"state": "blocked", "work_id": "work_blocked_001", "summary": "A hard operator decision is open; prerequisite_open(work_prerequisite_001) is also retained."},
+  "requirements": [{"id": "hold_security_001", "kind": "operator_decision", "severity": "blocking", "state": "open", "reason": "operator_decision_required"}, {"id": "dependency_work_prerequisite_001", "kind": "dependency", "severity": "advisory", "state": "open", "reason": "prerequisite_open(work_prerequisite_001)"}],
+  "next_action": {"directive_id": "recovery.blocked@v1", "severity": "blocking", "title": "Resolve the hard work block", "instruction": "Ask the authorized operator to resolve the named hard block; do not claim or bypass it.", "subject": {"type": "work", "id": "work_blocked_001"}, "safe_argv": ["bwrk", "work", "show", "work_blocked_001", "--project", "project_demo", "--revision", "104", "--json"], "cwd": "/workspace/projects/demo", "runner": "boreal_cli", "shell": false},
+  "provenance": {"registry_version": "directives.v1", "registry_path": "project/spec/guidance/directive-registry.json", "gap_codes": ["operator_decision_required", "prerequisite_open"], "workflow_refs": ["boreal.workflow.health.v1", "boreal.workflow.route.v1"], "source_snapshot_hash": "sha256:5555555555555555555555555555555555555555555555555555555555555555", "config_identity": "sha256:2222222222222222222222222222222222222222222222222222222222222222"},
+  "selection_key": "blocking|operator_decision_required|work_blocked_001|recovery.blocked@v1|guidance.blocked.v1",
+  "error": null
+}

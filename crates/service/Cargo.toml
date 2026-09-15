@@ -1,0 +1,9 @@
+[package]
+name = "boreal-service"
+version = "0.2.0"
+edition = "2021"
+license = "MIT"
+description = "Dependency-light local service runtime primitives for Boreal v2"
+
+[lib]
+path = "src/lib.rs"

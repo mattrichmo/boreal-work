@@ -1,0 +1,13 @@
+[package]
+name = "boreal-application"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+boreal-domain = { path = "../domain" }
+boreal-store = { path = "../store" }
+serde_json = "1"
+
+[dev-dependencies]
+boreal-service = { path = "../service" }

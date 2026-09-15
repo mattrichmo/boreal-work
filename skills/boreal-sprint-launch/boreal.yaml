@@ -1,6 +1,0 @@
-schema_version: boreal.skill.v1
-system: boreal
-skill: boreal-sprint-launch
-display_name: Boreal Sprint Launch
-workflows:
-  - boreal.workflow.launch-sprint.v1

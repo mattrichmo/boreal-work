@@ -1,0 +1,10 @@
+[package]
+name = "boreal-protocol"
+version = "0.2.0"
+edition = "2021"
+license = "MIT"
+description = "Versioned JSON protocol types for Boreal v2"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

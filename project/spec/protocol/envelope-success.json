@@ -1,0 +1,26 @@
+{
+  "api_version": "2",
+  "schema_version": "boreal.protocol.envelope.v1",
+  "operation_id": "op_claim_01J8V2CLAIM000000000000001",
+  "revision": 43,
+  "as_of": "2026-09-14T22:04:00Z",
+  "next_status_change_at": "2026-09-14T22:34:00Z",
+  "transport": "ok",
+  "outcome": "changed",
+  "data": {
+    "kind": "claim",
+    "work_id": "work_task_b",
+    "attempt_id": "attempt_01J8V2ATTEMPT00000000001",
+    "fence": 7,
+    "session_id": "session_local_agent_01",
+    "claimed_at": "2026-09-14T22:04:00Z",
+    "lease_deadline": "2026-09-14T22:34:00Z",
+    "max_attempt_deadline": "2026-09-15T00:04:00Z",
+    "deadline_source": "default_time_limit_2h",
+    "lease_source": "default_lease_ttl_30m",
+    "display_status": "claimed",
+    "claimable_for_actor": false
+  },
+  "detail_ref": null,
+  "error": null
+}

@@ -1,0 +1,14 @@
+{
+  "schema_version": "boreal.agent_guidance.v1",
+  "fixture_id": "guidance.paused.v1",
+  "request": {"goal": null, "work_id": "work_paused_001", "session_id": "session_agent_001"},
+  "operation_id": "op_guidance_paused_001",
+  "project_revision": 108,
+  "context": {"mode": "policy_hold", "project_id": "project_demo", "actor_id": "agent_001", "harness_id": "harness_fixture", "session_id": "session_agent_001"},
+  "status": {"state": "paused", "work_id": "work_paused_001", "summary": "An explicit policy hold prevents automatic claim even though prerequisites are closed."},
+  "requirements": [{"id": "policy_pause_001", "kind": "policy_hold", "severity": "blocking", "state": "open", "reason": "dispatch.paused"}],
+  "next_action": {"directive_id": "operator.resume@v1", "severity": "blocking", "title": "Resume the paused work item", "instruction": "An authorized operator must remove the explicit policy hold before this work can be claimed.", "subject": {"type": "work", "id": "work_paused_001"}, "safe_argv": ["bwrk", "work", "resume", "work_paused_001", "--operator-reason", "release_hold", "--operation-id", "op_resume_paused_001", "--json"], "cwd": "/workspace/projects/demo", "runner": "boreal_cli", "shell": false},
+  "provenance": {"registry_version": "directives.v1", "registry_path": "project/spec/guidance/directive-registry.json", "gap_codes": ["dispatch.paused"], "workflow_refs": ["boreal.workflow.route.v1", "boreal.workflow.plan.v1"], "source_snapshot_hash": "sha256:9999999999999999999999999999999999999999999999999999999999999999", "config_identity": "sha256:2222222222222222222222222222222222222222222222222222222222222222"},
+  "selection_key": "blocking|dispatch.paused|work_paused_001|operator.resume@v1|guidance.paused.v1",
+  "error": null
+}

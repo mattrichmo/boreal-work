@@ -1,0 +1,24 @@
+{
+  "api_version": "2",
+  "schema_version": "boreal.protocol.envelope.v1",
+  "operation_id": "op_status_01J8V2UNAVAILABLE000000001",
+  "revision": null,
+  "as_of": "2026-09-14T22:10:00Z",
+  "next_status_change_at": null,
+  "transport": "error",
+  "outcome": "failed",
+  "data": null,
+  "detail_ref": null,
+  "error": {
+    "code": "service_unavailable",
+    "message": "No compatible local project service is available.",
+    "retryable": true,
+    "service_state": "starting_or_stopped",
+    "retry_after_ms": 1000,
+    "offline_mode_allowed": true,
+    "recovery": {
+      "action": "retry_or_start_service",
+      "safe_argv": ["bwrk", "init", "--json"]
+    }
+  }
+}

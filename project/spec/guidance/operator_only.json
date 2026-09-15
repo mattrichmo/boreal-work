@@ -1,0 +1,14 @@
+{
+  "schema_version": "boreal.agent_guidance.v1",
+  "fixture_id": "guidance.operator-only.v1",
+  "request": {"goal": null, "work_id": "work_operator_001", "session_id": "session_agent_001"},
+  "operation_id": "op_guidance_operator_001",
+  "project_revision": 107,
+  "context": {"mode": "operator_required", "project_id": "project_demo", "actor_id": "agent_001", "harness_id": "harness_fixture", "session_id": "session_agent_001"},
+  "status": {"state": "ready", "work_id": "work_operator_001", "dispatch_policy": "operator_only", "summary": "The work is eligible only for an authorized operator."},
+  "requirements": [{"id": "policy_operator_001", "kind": "authority", "severity": "blocking", "state": "open", "reason": "dispatch.operator_only"}],
+  "next_action": {"directive_id": "operator.claim@v1", "severity": "blocking", "title": "Obtain operator authorization", "instruction": "An authorized operator must claim or explicitly resume this operator-only work item.", "subject": {"type": "work", "id": "work_operator_001"}, "safe_argv": ["bwrk", "work", "claim", "work_operator_001", "--actor-role", "operator", "--operator-reason", "planned_maintenance", "--operation-id", "op_operator_claim_001", "--json"], "cwd": "/workspace/projects/demo", "runner": "boreal_cli", "shell": false},
+  "provenance": {"registry_version": "directives.v1", "registry_path": "project/spec/guidance/directive-registry.json", "gap_codes": ["dispatch.operator_only"], "workflow_refs": ["boreal.workflow.route.v1", "boreal.workflow.plan.v1", "boreal.workflow.health.v1"], "source_snapshot_hash": "sha256:8888888888888888888888888888888888888888888888888888888888888888", "config_identity": "sha256:2222222222222222222222222222222222222222222222222222222222222222"},
+  "selection_key": "blocking|dispatch.operator_only|work_operator_001|operator.claim@v1|guidance.operator-only.v1",
+  "error": null
+}

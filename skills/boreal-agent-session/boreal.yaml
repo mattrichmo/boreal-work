@@ -1,6 +1,0 @@
-schema_version: boreal.skill.v1
-system: boreal
-skill: boreal-agent-session
-display_name: Boreal Agent Session
-workflows:
-  - boreal.workflow.agent-session.v1

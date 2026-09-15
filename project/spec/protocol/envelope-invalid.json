@@ -1,0 +1,35 @@
+{
+  "api_version": "2",
+  "schema_version": "boreal.protocol.envelope.v1",
+  "operation_id": "op_claim_01J8V2INVALID000000000001",
+  "revision": null,
+  "as_of": "2026-09-14T22:09:00Z",
+  "next_status_change_at": null,
+  "transport": "ok",
+  "outcome": "rejected",
+  "data": null,
+  "detail_ref": null,
+  "error": {
+    "code": "invalid_argument",
+    "message": "The command contains invalid arguments.",
+    "retryable": false,
+    "fields": [
+      {
+        "path": "time_limit",
+        "reason_code": "duration_invalid",
+        "expected": "positive integer followed by ms, s, m, h, or d",
+        "received": "forever"
+      },
+      {
+        "path": "lease_ttl",
+        "reason_code": "mutually_exclusive_aliases",
+        "expected": "at most one of --ttl and --lease-ttl",
+        "received": ["--ttl", "2h", "--lease-ttl", "15m"]
+      }
+    ],
+    "recovery": {
+      "action": "show_help",
+      "safe_argv": ["bwrk", "help", "work claim"]
+    }
+  }
+}

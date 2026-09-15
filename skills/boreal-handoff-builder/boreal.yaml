@@ -1,8 +1,0 @@
-schema_version: boreal.skill.v1
-system: boreal
-skill: boreal-handoff-builder
-display_name: Boreal Handoff Builder
-workflows:
-  - boreal.workflow.build-handoff.v1
-  - boreal.workflow.session-closeout.v1
-  - boreal.workflow.project-closeout.v1

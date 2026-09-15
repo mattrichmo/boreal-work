@@ -1,0 +1,28 @@
+{
+  "api_version": "2",
+  "schema_version": "boreal.protocol.envelope.v1",
+  "operation_id": "op_receipt_01J8V2STALE00000000000001",
+  "revision": 48,
+  "as_of": "2026-09-14T22:08:00Z",
+  "next_status_change_at": "2026-09-14T22:20:00Z",
+  "transport": "ok",
+  "outcome": "rejected",
+  "data": {
+    "kind": "stale_write",
+    "work_id": "work_task_b",
+    "current_attempt_id": "attempt_01J8V2ATTEMPT00000000002",
+    "current_fence": 8
+  },
+  "detail_ref": null,
+  "error": {
+    "code": "stale_fence",
+    "message": "The receipt belongs to a replaced or expired attempt fence.",
+    "retryable": false,
+    "provided_attempt_id": "attempt_01J8V2ATTEMPT00000000001",
+    "provided_fence": 7,
+    "recovery": {
+      "action": "read_current_attempt",
+      "safe_argv": ["bwrk", "work", "show", "work_task_b", "--json"]
+    }
+  }
+}

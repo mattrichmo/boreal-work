@@ -1,0 +1,14 @@
+{
+  "schema_version": "boreal.agent_guidance.v1",
+  "fixture_id": "guidance.ready.v1",
+  "request": {"goal": "implement", "work_id": "work_ready_001", "session_id": "session_agent_001"},
+  "operation_id": "op_guidance_ready_001",
+  "project_revision": 101,
+  "context": {"mode": "claim", "project_id": "project_demo", "actor_id": "agent_001", "harness_id": "harness_fixture", "session_id": "session_agent_001"},
+  "status": {"state": "ready", "work_id": "work_ready_001", "summary": "Prerequisites are closed and no hard hold or attempt prevents claim."},
+  "requirements": [],
+  "next_action": {"directive_id": "work.claim@v1", "severity": "required", "title": "Claim the ready work item", "instruction": "Claim the selected work item with the supplied revision and typed session identity.", "subject": {"type": "work", "id": "work_ready_001"}, "safe_argv": ["bwrk", "work", "claim", "work_ready_001", "--session", "session_agent_001", "--actor", "agent_001", "--operation-id", "op_claim_ready_001", "--expected-revision", "101", "--lease-ttl", "30m", "--time-limit", "2h", "--json"], "cwd": "/workspace/projects/demo", "runner": "boreal_cli", "shell": false},
+  "provenance": {"registry_version": "directives.v1", "registry_path": "project/spec/guidance/directive-registry.json", "gap_codes": ["work.ready"], "workflow_refs": ["boreal.workflow.claim.v1"], "source_snapshot_hash": "sha256:1111111111111111111111111111111111111111111111111111111111111111", "config_identity": "sha256:2222222222222222222222222222222222222222222222222222222222222222"},
+  "selection_key": "required|work.ready|work_ready_001|work.claim@v1|guidance.ready.v1",
+  "error": null
+}

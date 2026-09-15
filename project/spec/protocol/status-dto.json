@@ -1,0 +1,15 @@
+{
+  "schema_version": "boreal.status.v1",
+  "fixture_id": "status.conditional.v1",
+  "work_id": "work_blocked_001",
+  "display_status": "blocked",
+  "lifecycle": "active",
+  "reason_codes": ["prerequisite_open:work_a", "operator_decision_required"],
+  "claimable_for_actor": false,
+  "next_action": null,
+  "attempt": null,
+  "gates": {"open": [], "satisfied": []},
+  "dependency": {"prerequisites": [{"work_id":"work_a","display_status":"complete","satisfies_default":false}]},
+  "as_of": "2026-09-14T22:12:00Z",
+  "next_status_change_at": null
+}

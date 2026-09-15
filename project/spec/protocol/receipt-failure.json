@@ -1,0 +1,22 @@
+{
+  "schema_version": "boreal.receipt.v1",
+  "fixture_id": "receipt.failed-stale-retained.v1",
+  "receipt_id": "receipt_01J8V2RECEIPT00000000002",
+  "operation_id": "op_evidence_01J8V2RECEIPT0000002",
+  "subject": {"work_id":"work_task_001","attempt_id":"attempt_old","fence":1,"gate_id":"gate_verification_001"},
+  "executable": "./scripts/check-task",
+  "argv": ["./scripts/check-task","--json"],
+  "cwd": "/workspace/projects/demo",
+  "exit_code": 1,
+  "started_at": "2026-09-14T22:10:00Z",
+  "ended_at": "2026-09-14T22:10:01Z",
+  "source_snapshot_hash": "sha256:oldoldoldoldoldoldoldoldoldoldoldoldoldoldoldoldoldoldoldoldoldold",
+  "config_identity": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "environment_fingerprint": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+  "output_digest": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+  "output_ref": null,
+  "coverage": {"kind":"verification","profile_id":"focused","profile_version":"v1"},
+  "attestation": "boreal_witnessed",
+  "result": "stale",
+  "retention": "immutable_queryable_history"
+}

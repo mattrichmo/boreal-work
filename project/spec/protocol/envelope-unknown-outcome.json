@@ -1,0 +1,23 @@
+{
+  "api_version": "2",
+  "schema_version": "boreal.protocol.envelope.v1",
+  "operation_id": "op_finish_01J8V2UNKNOWN00000000001",
+  "revision": 51,
+  "as_of": "2026-09-14T22:11:00Z",
+  "next_status_change_at": null,
+  "transport": "error",
+  "outcome": "unknown",
+  "data": null,
+  "detail_ref": null,
+  "error": {
+    "code": "unknown_outcome",
+    "message": "The mutation result was not observed after transport interruption.",
+    "retryable": false,
+    "readback_required": true,
+    "operation_id": "op_finish_01J8V2UNKNOWN00000000001",
+    "recovery": {
+      "action": "read_operation_before_retry",
+      "safe_argv": ["bwrk", "operation", "show", "op_finish_01J8V2UNKNOWN00000000001", "--json"]
+    }
+  }
+}

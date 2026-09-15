@@ -1,0 +1,15 @@
+{
+  "schema_version": "boreal.dependency_fixture.v1",
+  "fixture_version": "p0-03.v2",
+  "default_policy": "closed-only.v1",
+  "cases": [
+    {"id":"D01","prerequisite":"work_a","state":"complete","expect_dependent":"queued","satisfies":false},
+    {"id":"D02","prerequisite":"work_a","state":"verified","expect_dependent":"queued","satisfies":false},
+    {"id":"D03","prerequisite":"work_a","state":"cancelled","expect_dependent":"queued","satisfies":false,"disposition":"replacement_or_authorized_waiver"},
+    {"id":"D04","prerequisite":"work_a","state":"closed","expect_dependent":"ready","satisfies":true},
+    {"id":"D05","prerequisite":"work_a","state":"closed","dependent_hard_block":true,"expect_dependent":"blocked","satisfies":true,"retained_reasons":["operator_decision_required"]},
+    {"id":"D06","edge":"work_a->work_b->work_c","operation":"close work_a","expect":"only work_b released; work_c remains queued until work_b closes"},
+    {"id":"D07","edge":"work_a->work_a","operation":"dep add","expect":"rejected","error":"dependency_cycle"}
+  ],
+  "parent_rule": "hierarchy containment is separate from dependency edges"
+}

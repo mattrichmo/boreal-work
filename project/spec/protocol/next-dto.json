@@ -1,0 +1,56 @@
+{
+  "api_version": "2",
+  "schema_version": "boreal.protocol.envelope.v1",
+  "operation_id": "op_next_01J8V2NEXT000000000000001",
+  "revision": 43,
+  "as_of": "2026-09-14T22:15:00Z",
+  "next_status_change_at": null,
+  "transport": "ok",
+  "outcome": "unchanged",
+  "data": {
+    "kind": "agent_next",
+    "next_schema_version": "boreal.agent_next.v1",
+    "mode": "discover",
+    "selection": "ready_work",
+    "status": {
+      "display_status": "ready",
+      "work_id": "work_task_c",
+      "reason_codes": [],
+      "claimable_for_actor": true
+    },
+    "reason": {
+      "code": "ready_work_selected",
+      "message": "One dependency-valid task is available for this actor.",
+      "selection_key": "ready|work_task_c|work.claim@v1"
+    },
+    "next_action": {
+      "directive_id": "work.claim@v1",
+      "severity": "required",
+      "title": "Claim the selected task",
+      "instruction": "Claim the selected task with a fenced attempt.",
+      "subject": {
+        "type": "work",
+        "id": "work_task_c"
+      },
+      "safe_argv": ["bwrk", "agent", "start", "work_task_c", "--json"],
+      "cwd": "/Users/cybertron/Code/boreal-work/boreal-work-v2",
+      "runner": "boreal_cli",
+      "shell": false
+    },
+    "context_refs": [
+      {
+        "type": "work",
+        "id": "work_task_c",
+        "revision": 43
+      },
+      {
+        "type": "work_summary",
+        "id": "work_task_b",
+        "revision": 43
+      }
+    ],
+    "no_goal": true
+  },
+  "detail_ref": null,
+  "error": null
+}

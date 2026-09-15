@@ -1,0 +1,13 @@
+{
+  "schema_version": "boreal.workflow_asset.v1",
+  "asset_version": "1.0.0",
+  "ref": "boreal.workflow.handoff.v1",
+  "kind": "handoff",
+  "title": "Prepare a bounded resume or replacement capsule",
+  "refs": {"route": "boreal.workflow.route.v1", "context": "boreal.workflow.context.v1", "health": "boreal.workflow.health.v1", "memory": "boreal.workflow.memory.v1"},
+  "allowed_commands": ["bwrk agent status --json", "bwrk context show --json", "bwrk agent resume --session <session_id> --json"],
+  "typed_inputs": [{"name": "work_id", "type": "work_id", "required": true, "source": "attempt_or_work", "validation": "project_bound"}, {"name": "attempt_id", "type": "nullable_attempt_id", "required": true, "source": "attempt", "validation": "historical_or_current"}, {"name": "source_refs", "type": "bounded_source_ref_array", "required": false, "source": "context", "validation": "exact_version_citations"}, {"name": "receipt_refs", "type": "bounded_receipt_ref_array", "required": false, "source": "evidence", "validation": "digest_checked"}, {"name": "limitations", "type": "bounded_string_array", "required": true, "source": "summary", "validation": "display_data_only"}],
+  "finish_criteria": [{"id": "handoff.identity", "type": "subject_and_fence_identity", "required": true}, {"id": "handoff.evidence", "type": "retained_receipts_and_limitations", "required": true}, {"id": "handoff.trust", "type": "authored_text_not_executable", "required": true}],
+  "next_refs": ["boreal.workflow.route.v1", "boreal.workflow.claim.v1", "boreal.workflow.finish.v1"],
+  "state_transition_owner": "boreal.application.v2"
+}

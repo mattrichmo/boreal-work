@@ -1,0 +1,10 @@
+[package]
+name = "p5-02-notification-fixture"
+version = "0.2.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+boreal-service = { path = "../../../../crates/service" }
+
+[workspace]

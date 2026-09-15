@@ -1,0 +1,13 @@
+[package]
+name = "boreal-migration"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Explicit reduced JSON migration format for Boreal v2"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

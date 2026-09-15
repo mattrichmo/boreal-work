@@ -1,0 +1,72 @@
+{
+  "schema_version": "boreal.guidance.safe_argv.v1",
+  "argv_policy_version": "safe-argv.v1",
+  "shell": false,
+  "cwd_policy": {
+    "root": "/workspace/projects/demo",
+    "must_be_project_bound": true,
+    "path_arguments_must_be_relative": true
+  },
+  "required_flags": ["--json"],
+  "command_templates": [
+    {
+      "template_id": "work.claim.v1",
+      "runner": "boreal_cli",
+      "argv_shape": ["bwrk", "work", "claim", "<work_id>", "--session", "<session_id>", "--actor", "<actor_id>", "--operation-id", "<operation_id>", "--expected-revision", "<revision>", "--lease-ttl", "<duration>", "--time-limit", "<duration>", "--json"],
+      "typed_inputs": ["work_id", "session_id", "actor_id", "operation_id", "revision", "duration"],
+      "allowed_durations": ["30m", "2h", "4h"],
+      "forbidden": ["shell_metacharacters", "shell_string_parsing", "unscoped_paths"]
+    },
+    {
+      "template_id": "work.show.v1",
+      "runner": "boreal_cli",
+      "argv_shape": ["bwrk", "work", "show", "<work_id>", "--project", "<project_id>", "--revision", "<revision>", "--json"],
+      "typed_inputs": ["work_id", "project_id", "revision"],
+      "forbidden": ["shell_metacharacters", "untyped_command_text"]
+    },
+    {
+      "template_id": "agent.resume.v1",
+      "runner": "boreal_cli",
+      "argv_shape": ["bwrk", "agent", "resume", "--session", "<session_id>", "--attempt", "<attempt_id>", "--fence", "<fence>", "--json"],
+      "typed_inputs": ["session_id", "attempt_id", "fence"],
+      "forbidden": ["replacement_claim", "shell_metacharacters"]
+    },
+    {
+      "template_id": "attempt.review-expiry.v1",
+      "runner": "boreal_cli",
+      "argv_shape": ["bwrk", "agent", "status", "--attempt", "<attempt_id>", "--include-expiry", "--json"],
+      "typed_inputs": ["attempt_id"],
+      "forbidden": ["blind_reclaim", "force_break_lock", "shell_metacharacters"]
+    },
+    {
+      "template_id": "work.claim-operator.v1",
+      "runner": "boreal_cli",
+      "argv_shape": ["bwrk", "work", "claim", "<work_id>", "--actor-role", "operator", "--operator-reason", "<reason_code>", "--operation-id", "<operation_id>", "--json"],
+      "typed_inputs": ["work_id", "reason_code", "operation_id"],
+      "forbidden": ["agent_role", "shell_metacharacters"]
+    },
+    {
+      "template_id": "work.resume.v1",
+      "runner": "boreal_cli",
+      "argv_shape": ["bwrk", "work", "resume", "<work_id>", "--operator-reason", "<reason_code>", "--operation-id", "<operation_id>", "--json"],
+      "typed_inputs": ["work_id", "reason_code", "operation_id"],
+      "forbidden": ["agent_role", "shell_metacharacters"]
+    },
+    {
+      "template_id": "evidence.run.v1",
+      "runner": "bounded_declared_gate",
+      "argv_shape": ["bwrk", "evidence", "run", "<gate_id>", "--work", "<work_id>", "--attempt", "<attempt_id>", "--fence", "<fence>", "--json"],
+      "typed_inputs": ["gate_id", "work_id", "attempt_id", "fence"],
+      "policy_validated": true,
+      "forbidden": ["authored_command_substitution", "shell_metacharacters", "network_without_policy"]
+    },
+    {
+      "template_id": "agent.finish-close.v1",
+      "runner": "boreal_cli",
+      "argv_shape": ["bwrk", "agent", "finish", "--work", "<work_id>", "--attempt", "<attempt_id>", "--fence", "<fence>", "--close", "--operation-id", "<operation_id>", "--expected-revision", "<revision>", "--json"],
+      "typed_inputs": ["work_id", "attempt_id", "fence", "operation_id", "revision"],
+      "requires": ["close_intent", "accepted_required_gates", "matching_source_snapshot", "matching_policy_version"],
+      "forbidden": ["force_without_authority", "prose_only_proof", "shell_metacharacters"]
+    }
+  ]
+}

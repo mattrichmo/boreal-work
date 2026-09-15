@@ -1,0 +1,14 @@
+{
+  "schema_version": "boreal.agent_guidance.v1",
+  "fixture_id": "guidance.open-gate.v1",
+  "request": {"goal": null, "work_id": "work_gate_001", "session_id": "session_agent_001"},
+  "operation_id": "op_guidance_gate_001",
+  "project_revision": 109,
+  "context": {"mode": "verify", "project_id": "project_demo", "actor_id": "agent_001", "harness_id": "harness_fixture", "session_id": "session_agent_001"},
+  "status": {"state": "needs_verification", "work_id": "work_gate_001", "attempt_id": "attempt_gate_001", "fence": 3, "summary": "The close request is retained, but the declared verification gate is open."},
+  "requirements": [{"id": "gate_verification_001", "kind": "verification", "severity": "required", "state": "open", "reason": "gate.verification.unsatisfied"}],
+  "next_action": {"directive_id": "verification.evidence-required@v1", "severity": "required", "title": "Attach passed verification evidence", "instruction": "Run the declared bounded validation gate and attach its structured receipt for the current subject and source snapshot.", "subject": {"type": "work", "id": "work_gate_001"}, "safe_argv": ["bwrk", "evidence", "run", "gate_verification_001", "--work", "work_gate_001", "--attempt", "attempt_gate_001", "--fence", "3", "--json"], "cwd": "/workspace/projects/demo", "runner": "bounded_declared_gate", "shell": false},
+  "provenance": {"registry_version": "directives.v1", "registry_path": "project/spec/guidance/directive-registry.json", "gap_codes": ["gate.verification.unsatisfied"], "workflow_refs": ["boreal.workflow.claim.v1", "boreal.workflow.finish.v1"], "source_snapshot_hash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "config_identity": "sha256:2222222222222222222222222222222222222222222222222222222222222222"},
+  "selection_key": "required|gate.verification.unsatisfied|work_gate_001|verification.evidence-required@v1|guidance.open-gate.v1",
+  "error": null
+}

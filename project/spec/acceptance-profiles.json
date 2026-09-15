@@ -1,0 +1,15 @@
+{
+  "schema_version": "boreal.acceptance_profile.v1",
+  "fixture_version": "p0-03.v2",
+  "profiles": [
+    {"id":"focused","version":"v1","review_gate":false,"required_gates":["checkpoint","verification","audit"],"close_requires":"durable_close_intent"},
+    {"id":"reviewed","version":"v1","review_gate":true,"required_gates":["checkpoint","verification","review","audit"],"close_requires":"durable_close_intent"},
+    {"id":"operator","version":"v1","review_gate":false,"required_gates":["verification","operator_approval","audit"],"close_requires":"durable_close_intent"}
+  ],
+  "rules": {
+    "independent_review": "required only when review_gate=true",
+    "auto_finalize": "only after close intent and last matching receipt/review for same attempt, source snapshot, config, and policy",
+    "invalidators": ["attempt_changed","source_snapshot_changed","policy_version_changed"],
+    "failed_receipts": "immutable and queryable"
+  }
+}

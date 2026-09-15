@@ -1,0 +1,9 @@
+{
+  "fixture_version": "p0-03.v2",
+  "contract_revision": "fixture.p4-05",
+  "api_version": "2",
+  "schema_version": "boreal.sqlite/2",
+  "guidance_version": "boreal.agent_guidance.v1",
+  "workflow_version": "boreal.workflow_asset.v1",
+  "memory_manifest_version": "boreal.memory_manifest.v1"
+}

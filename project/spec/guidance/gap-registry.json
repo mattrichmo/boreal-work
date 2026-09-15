@@ -1,0 +1,83 @@
+{
+  "schema_version": "boreal.guidance.gap_registry.v1",
+  "registry_version": "gaps.v1",
+  "entries": [
+    {
+      "gap_code": "no_goal.ready_work",
+      "severity": "advisory",
+      "subject_type": "work",
+      "directive_id": "work.discover@v1",
+      "resolution": "select_and_claim_ready_work"
+    },
+    {
+      "gap_code": "prerequisite_open",
+      "severity": "advisory",
+      "subject_type": "work",
+      "directive_id": "work.prerequisite@v1",
+      "resolution": "wait_for_accepted_closed_prerequisite"
+    },
+    {
+      "gap_code": "operator_decision_required",
+      "severity": "blocking",
+      "subject_type": "work",
+      "directive_id": "recovery.blocked@v1",
+      "resolution": "authorized_operator_resolves_reason"
+    },
+    {
+      "gap_code": "lease_elapsed",
+      "severity": "blocking",
+      "subject_type": "attempt",
+      "directive_id": "recovery.expired-review@v1",
+      "resolution": "fenced_stop_and_expiry_disposition"
+    },
+    {
+      "gap_code": "hard_budget_elapsed",
+      "severity": "blocking",
+      "subject_type": "attempt",
+      "directive_id": "recovery.expired-review@v1",
+      "resolution": "fenced_stop_and_expiry_disposition"
+    },
+    {
+      "gap_code": "attempt.active",
+      "severity": "required",
+      "subject_type": "attempt",
+      "directive_id": "attempt.resume@v1",
+      "resolution": "resume_current_fenced_attempt"
+    },
+    {
+      "gap_code": "dispatch.operator_only",
+      "severity": "blocking",
+      "subject_type": "work",
+      "directive_id": "operator.claim@v1",
+      "resolution": "operator_claim_or_authorized_resume"
+    },
+    {
+      "gap_code": "dispatch.paused",
+      "severity": "blocking",
+      "subject_type": "work",
+      "directive_id": "operator.resume@v1",
+      "resolution": "authorized_policy_resume"
+    },
+    {
+      "gap_code": "gate.verification.unsatisfied",
+      "severity": "required",
+      "subject_type": "work",
+      "directive_id": "verification.evidence-required@v1",
+      "resolution": "bounded_gate_receipt"
+    },
+    {
+      "gap_code": "finish.ready",
+      "severity": "required",
+      "subject_type": "work",
+      "directive_id": "finish.close@v1",
+      "resolution": "durable_close_intent_and_atomic_finish"
+    },
+    {
+      "gap_code": "no_safe_action",
+      "severity": "advisory",
+      "subject_type": "project",
+      "directive_id": "guidance.idle@v1",
+      "resolution": "wait_for_revision"
+    }
+  ]
+}

@@ -1,0 +1,44 @@
+{
+  "fixture_version": "p0-03.v2",
+  "contract_revision": "2026-09-15.p0-03.1",
+  "api_version": "2",
+  "schema_version": "boreal.sqlite/2",
+  "protocol_version": "boreal.protocol.envelope.v1",
+  "guidance_version": "boreal.agent_guidance.v1",
+  "workflow_version": "boreal.workflow_asset.v1",
+  "memory_manifest_version": "boreal.memory_manifest.v1",
+  "decision_refs": ["D13", "D14", "D15", "D16", "D17", "D18", "D19", "D20", "D21", "D22", "D23", "D24", "D25", "D27", "D28", "D29"],
+  "authoritative_docs": [
+    "../STATUS_MODEL.md",
+    "../INTERFACES.md",
+    "../CLI_COMMANDS.md",
+    "../AGENT_GUIDANCE.md",
+    "../AGENT_LIFECYCLE.md",
+    "../STATE_AND_CONCURRENCY.md"
+  ],
+  "required_paths": [
+    "transition-table.md",
+    "schema-v2.sql",
+    "protocol/protocol-manifest.json",
+    "guidance/directive-registry.json",
+    "guidance/gap-registry.json",
+    "workflows",
+    "memory-manifest.json",
+    "source-version"
+  ],
+  "fixture_sets": {
+    "transition": ["transition-table.md", "clock-and-attempt.json", "dependency.json", "acceptance-profiles.json"],
+    "protocol": ["protocol/"],
+    "guidance": ["guidance/"],
+    "cli": ["cli-contract.json"],
+    "workflow": ["workflows/"],
+    "provenance": ["source-version/example.json", "memory-manifest.json"]
+  },
+  "validation": {
+    "command": "python3 project/spec/validate_contracts.py",
+    "profile": "p0-03-structural",
+    "unknown_json_fields": "ignored_after_validation",
+    "requires": ["json_syntax", "protocol_envelope_fields", "safe_argv_shell_false", "sqlite_schema"],
+    "digest_policy": "manifest_digest_generated_at_reconciliation"
+  }
+}

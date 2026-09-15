@@ -1,0 +1,8 @@
+{
+  "schema_version": "boreal.workflow_package.v1",
+  "package_id": "boreal.core-workflows",
+  "package_version": "1.0.0",
+  "assets": [
+    {"ref": "boreal.workflow.route.v1", "path": "route.json", "kind": "route"}
+  ]
+}

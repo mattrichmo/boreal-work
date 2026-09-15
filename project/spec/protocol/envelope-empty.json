@@ -1,0 +1,29 @@
+{
+  "api_version": "2",
+  "schema_version": "boreal.protocol.envelope.v1",
+  "operation_id": "op_list_01J8V2EMPTY000000000000001",
+  "revision": 43,
+  "as_of": "2026-09-14T22:05:00Z",
+  "next_status_change_at": null,
+  "transport": "ok",
+  "outcome": "unchanged",
+  "data": {
+    "kind": "work_list",
+    "items": [],
+    "page": {
+      "limit": 25,
+      "returned": 0,
+      "has_more": false,
+      "next_cursor": null
+    },
+    "counts": {
+      "matched": 0,
+      "queued": 0,
+      "ready": 0,
+      "blocked": 0,
+      "closed": 0
+    }
+  },
+  "detail_ref": null,
+  "error": null
+}

@@ -1,8 +1,0 @@
-schema_version: boreal.skill.v1
-system: boreal
-skill: boreal-health-doctor
-display_name: Boreal Health Doctor
-workflows:
-  - boreal.workflow.sync-and-doctor.v1
-  - boreal.workflow.ledger-export-import.v1
-  - boreal.workflow.recover-from-failure.v1

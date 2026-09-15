@@ -1,0 +1,13 @@
+{
+  "schema_version": "boreal.workflow_asset.v1",
+  "asset_version": "1.0.0",
+  "ref": "boreal.workflow.plan.v1",
+  "kind": "plan",
+  "title": "Prepare publishable work and acceptance context",
+  "refs": {"route": "boreal.workflow.route.v1", "context": "boreal.workflow.context.v1", "health": "boreal.workflow.health.v1"},
+  "allowed_commands": ["bwrk work create --json", "bwrk work edit --json", "bwrk sprint activate --json", "bwrk dep add --json", "bwrk work ready --json"],
+  "typed_inputs": [{"name": "work_kind", "type": "enum:milestone|sprint|work", "required": true, "source": "typed_request", "validation": "allowed_work_kind"}, {"name": "work_id", "type": "work_id", "required": false, "source": "store", "validation": "project_bound"}, {"name": "parent_id", "type": "nullable_work_id", "required": false, "source": "typed_request", "validation": "acyclic_parent"}, {"name": "acceptance_profile_ref", "type": "workflow_ref", "required": true, "source": "policy", "validation": "packaged_ref"}, {"name": "dependency_ids", "type": "work_id_array", "required": false, "source": "typed_request", "validation": "close_only_edges_by_default"}],
+  "finish_criteria": [{"id": "plan.published", "type": "explicit_launch_readiness", "required": true}, {"id": "plan.graph", "type": "acyclic_typed_dependencies", "required": true}, {"id": "plan.acceptance", "type": "versioned_profile_present", "required": true}],
+  "next_refs": ["boreal.workflow.claim.v1", "boreal.workflow.context.v1"],
+  "state_transition_owner": "boreal.application.v2"
+}

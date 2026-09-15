@@ -1,0 +1,24 @@
+{
+  "api_version": "2",
+  "schema_version": "boreal.protocol.envelope.v1",
+  "operation_id": "op_claim_01J8V2BUSY000000000000001",
+  "revision": 43,
+  "as_of": "2026-09-14T22:07:00Z",
+  "next_status_change_at": null,
+  "transport": "ok",
+  "outcome": "busy",
+  "data": null,
+  "detail_ref": null,
+  "error": {
+    "code": "writer_queue_full",
+    "message": "The project writer queue is at capacity.",
+    "retryable": true,
+    "retry_after_ms": 250,
+    "queue_depth": 32,
+    "operation_preserved": true,
+    "recovery": {
+      "action": "retry_same_operation_id",
+      "safe_argv": ["bwrk", "work", "claim", "work_task_b", "--operation-id", "op_claim_01J8V2BUSY000000000000001", "--json"]
+    }
+  }
+}

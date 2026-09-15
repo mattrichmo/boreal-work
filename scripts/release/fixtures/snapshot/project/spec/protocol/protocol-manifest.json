@@ -1,0 +1,7 @@
+{
+  "fixture_version": "p0-03.v2",
+  "protocol_version": "2",
+  "schemas": {
+    "envelope": "boreal.protocol.envelope.v1"
+  }
+}

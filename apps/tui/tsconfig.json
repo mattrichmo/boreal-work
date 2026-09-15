@@ -1,16 +1,12 @@
 {
-  "extends": "../../tsconfig.base.json",
   "compilerOptions": {
-    "rootDir": "src",
+    "target": "ES2022",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "strict": true,
     "outDir": "dist",
-    "tsBuildInfoFile": "tsconfig.tsbuildinfo",
-    "jsx": "react-jsx"
+    "rootDir": "src",
+    "skipLibCheck": true
   },
-  "include": ["src/**/*.ts", "src/**/*.tsx"],
-  "references": [
-    { "path": "../../packages/core" },
-    { "path": "../../packages/engine" },
-    { "path": "../../packages/storage" },
-    { "path": "../../packages/ui-model" }
-  ]
+  "include": ["src/**/*.ts"]
 }

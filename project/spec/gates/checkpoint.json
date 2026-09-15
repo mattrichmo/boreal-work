@@ -1,0 +1,12 @@
+{
+  "gate_id": "checkpoint",
+  "kind": "checkpoint",
+  "executable": "true",
+  "argv": ["true"],
+  "cwd": ".",
+  "source_snapshot_hash": "sha256:source-fixture-v1",
+  "config_identity": "sha256:config-fixture-v1",
+  "environment_fingerprint": "env-fixture-v1",
+  "observables": ["checkpoint"],
+  "max_runtime_ms": 30000
+}

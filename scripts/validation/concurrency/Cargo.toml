@@ -1,0 +1,12 @@
+[package]
+name = "boreal-v2-concurrency-probe"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[dependencies]
+boreal-application = { path = "../../../crates/application" }
+boreal-domain = { path = "../../../crates/domain" }
+boreal-store = { path = "../../../crates/store" }

@@ -1,0 +1,23 @@
+{
+  "api_version": "2",
+  "schema_version": "boreal.protocol.envelope.v1",
+  "operation_id": "op_edit_01J8V2CONFLICT00000000001",
+  "revision": 44,
+  "as_of": "2026-09-14T22:06:00Z",
+  "next_status_change_at": null,
+  "transport": "ok",
+  "outcome": "conflict",
+  "data": null,
+  "detail_ref": null,
+  "error": {
+    "code": "revision_conflict",
+    "message": "The expected project revision is no longer current.",
+    "retryable": true,
+    "expected_revision": 43,
+    "observed_revision": 44,
+    "recovery": {
+      "action": "resnapshot",
+      "safe_argv": ["bwrk", "agent", "status", "--json"]
+    }
+  }
+}

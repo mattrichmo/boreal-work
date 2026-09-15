@@ -1,0 +1,13 @@
+{
+  "schema_version": "boreal.workflow_asset.v1",
+  "asset_version": "1.0.0",
+  "ref": "boreal.workflow.review.v1",
+  "kind": "review",
+  "title": "Satisfy a declared independent review gate",
+  "refs": {"route": "boreal.workflow.route.v1", "context": "boreal.workflow.context.v1", "finish": "boreal.workflow.finish.v1", "audit": "boreal.workflow.audit.v1"},
+  "allowed_commands": ["bwrk agent guide --json", "bwrk evidence run <gate_id> --json", "bwrk evidence add --json", "bwrk work verify <work_id> --json"],
+  "typed_inputs": [{"name": "work_id", "type": "work_id", "required": true, "source": "attempt", "validation": "project_scope"}, {"name": "gate_id", "type": "gate_id", "required": true, "source": "acceptance_profile", "validation": "review_gate_declared"}, {"name": "reviewer_id", "type": "actor_id", "required": true, "source": "review_session", "validation": "independent_from_attempt_actor"}, {"name": "attempt_id", "type": "attempt_id", "required": true, "source": "attempt", "validation": "subject_match"}, {"name": "fence", "type": "fence", "required": true, "source": "attempt", "validation": "current_fence"}],
+  "finish_criteria": [{"id": "review.profile", "type": "review_gate_is_declared", "required": true}, {"id": "review.independence", "type": "reviewer_is_not_attempt_actor", "required": true}, {"id": "review.receipt", "type": "structured_review_receipt_is_retained", "required": true}],
+  "next_refs": ["boreal.workflow.audit.v1", "boreal.workflow.finish.v1", "boreal.workflow.route.v1"],
+  "state_transition_owner": "boreal.application.v2"
+}

@@ -1,0 +1,14 @@
+{
+  "schema_version": "boreal.gate_diagnostics.v1",
+  "fixture_id": "gate.profile-review-conditional.v1",
+  "work_id": "work_reviewed_001",
+  "profile": {"id":"reviewed","version":"v1","review_gate":true},
+  "gates": [
+    {"gate_id":"gate_checkpoint_001","kind":"checkpoint","required":true,"state":"satisfied"},
+    {"gate_id":"gate_verification_001","kind":"verification","required":true,"state":"satisfied"},
+    {"gate_id":"gate_review_001","kind":"review","required":true,"state":"open"}
+  ],
+  "close_intent": {"state":"open","valid":true},
+  "result": "not_ready",
+  "error": {"code":"review_required","missing":["gate_review_001"],"reviewer_role":"reviewer"}
+}

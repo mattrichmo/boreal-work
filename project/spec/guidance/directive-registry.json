@@ -1,0 +1,140 @@
+{
+  "schema_version": "boreal.guidance.directive_registry.v1",
+  "registry_version": "directives.v1",
+  "registry_id": "boreal.core.directives",
+  "immutable": true,
+  "entries": [
+    {
+      "registry_id": "work.discover@v1",
+      "entry_version": 1,
+      "family": "work",
+      "severity": "advisory",
+      "kind": "discover",
+      "title": "Discover the next eligible work",
+      "instruction": "Review the current project snapshot and claim the selected eligible work through the bounded CLI action.",
+      "trigger_codes": ["no_goal.ready_work"],
+      "command_template_id": "work.claim.v1",
+      "effect": "claim_attempt"
+    },
+    {
+      "registry_id": "work.claim@v1",
+      "entry_version": 1,
+      "family": "work",
+      "severity": "required",
+      "kind": "claim",
+      "title": "Claim the ready work item",
+      "instruction": "Claim the selected work item with the supplied revision and typed session identity.",
+      "trigger_codes": ["work.ready", "work.no_goal_ready"],
+      "command_template_id": "work.claim.v1",
+      "effect": "create_fenced_attempt"
+    },
+    {
+      "registry_id": "work.prerequisite@v1",
+      "entry_version": 1,
+      "family": "work",
+      "severity": "advisory",
+      "kind": "queued",
+      "title": "Inspect the open prerequisite",
+      "instruction": "Inspect the named prerequisite; this work remains queued until its default close-only satisfaction condition is met.",
+      "trigger_codes": ["prerequisite_open"],
+      "command_template_id": "work.show.v1",
+      "effect": "read_context"
+    },
+    {
+      "registry_id": "recovery.blocked@v1",
+      "entry_version": 1,
+      "family": "recovery",
+      "severity": "blocking",
+      "kind": "blocked",
+      "title": "Resolve the hard work block",
+      "instruction": "Ask the authorized operator to resolve the named hard block; do not claim or bypass it.",
+      "trigger_codes": ["operator_decision_required", "integrity_check_required", "unsafe_environment"],
+      "command_template_id": "work.show.v1",
+      "effect": "operator_resolution_required"
+    },
+    {
+      "registry_id": "recovery.expired-review@v1",
+      "entry_version": 1,
+      "family": "recovery",
+      "severity": "blocking",
+      "kind": "expired_review",
+      "title": "Review the expired attempt",
+      "instruction": "Inspect the fenced expired attempt and worktree before an authorized disposition; do not blindly reclaim the work.",
+      "trigger_codes": ["lease_elapsed", "hard_budget_elapsed", "stop_unconfirmed"],
+      "command_template_id": "attempt.review-expiry.v1",
+      "effect": "expiry_review"
+    },
+    {
+      "registry_id": "attempt.resume@v1",
+      "entry_version": 1,
+      "family": "attempt",
+      "severity": "required",
+      "kind": "resume",
+      "title": "Resume the current fenced attempt",
+      "instruction": "Reload the durable attempt and continue through its current safe action; do not claim replacement work.",
+      "trigger_codes": ["attempt.active", "attempt.restart"],
+      "command_template_id": "agent.resume.v1",
+      "effect": "resume_attempt"
+    },
+    {
+      "registry_id": "operator.claim@v1",
+      "entry_version": 1,
+      "family": "operator",
+      "severity": "blocking",
+      "kind": "operator_only",
+      "title": "Obtain operator authorization",
+      "instruction": "An authorized operator must claim or explicitly resume this operator-only work item.",
+      "trigger_codes": ["dispatch.operator_only"],
+      "command_template_id": "work.claim-operator.v1",
+      "effect": "operator_claim_required"
+    },
+    {
+      "registry_id": "operator.resume@v1",
+      "entry_version": 1,
+      "family": "operator",
+      "severity": "blocking",
+      "kind": "paused",
+      "title": "Resume the paused work item",
+      "instruction": "An authorized operator must remove the explicit policy hold before this work can be claimed.",
+      "trigger_codes": ["dispatch.paused"],
+      "command_template_id": "work.resume.v1",
+      "effect": "resume_policy"
+    },
+    {
+      "registry_id": "verification.evidence-required@v1",
+      "entry_version": 1,
+      "family": "verification",
+      "severity": "required",
+      "kind": "evidence",
+      "title": "Attach passed verification evidence",
+      "instruction": "Run the declared bounded validation gate and attach its structured receipt for the current subject and source snapshot.",
+      "trigger_codes": ["gate.verification.unsatisfied", "receipt.stale", "receipt.failed"],
+      "command_template_id": "evidence.run.v1",
+      "effect": "satisfy_verification_gate"
+    },
+    {
+      "registry_id": "finish.close@v1",
+      "entry_version": 1,
+      "family": "finish",
+      "severity": "required",
+      "kind": "finish",
+      "title": "Finalize the verified work",
+      "instruction": "Submit the durable close intent with the current attempt fence and accepted proof; the final transaction will release ownership and close the work.",
+      "trigger_codes": ["finish.ready", "close_intent.pending"],
+      "command_template_id": "agent.finish-close.v1",
+      "effect": "close_work"
+    },
+    {
+      "registry_id": "guidance.idle@v1",
+      "entry_version": 1,
+      "family": "guidance",
+      "severity": "advisory",
+      "kind": "idle",
+      "title": "Remain idle",
+      "instruction": "No safe action is available in this project snapshot; wait for a revision or operator intervention.",
+      "trigger_codes": ["no_safe_action"],
+      "command_template_id": null,
+      "effect": "no_action"
+    }
+  ]
+}

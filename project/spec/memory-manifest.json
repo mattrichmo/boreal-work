@@ -1,0 +1,13 @@
+{
+  "schema_version": "boreal.memory_manifest.v1",
+  "fixture_version": "p0-03.v2",
+  "project_id": "project_demo",
+  "authority": {"operational_state":"sqlite","published_curated_memory":"git_revision","publication_job":"sqlite_outbox"},
+  "source_versions": [{
+    "source_version_id":"srcv_001","origin":"docs/decision.md","access_scope":"project","content_digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","media_type":"text/markdown","byte_count":128,"captured_at":"2026-09-14T22:00:00Z","parser_identity":"boreal-source-parser.v1","availability":"available","citation":{"kind":"git_path","path":"docs/decision.md","revision":"abc123","line_start":4,"line_end":9}
+  }],
+  "entries": [{
+    "memory_entry_id":"mem_001","project_id":"project_demo","state":"published","content_digest":"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","source_citations":["srcv_001"],"author_actor_id":"agent_001","created_at":"2026-09-14T22:01:00Z","updated_at":"2026-09-14T22:02:00Z","related_work_ids":["work_task_001"],"manifest_path":"memory/entries/mem_001.json","git_revision":"def456","blob_refs":[],"provenance_preserved":true
+  }],
+  "publication_failure_example": {"state":"failed","error_code":"git_publish_failed","retryable":true,"source_citations_preserved":true,"sqlite_job_retained":true}
+}

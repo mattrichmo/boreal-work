@@ -1,0 +1,14 @@
+{
+  "schema_version": "boreal.agent_guidance.v1",
+  "fixture_id": "guidance.queued.v1",
+  "request": {"goal": null, "work_id": "work_queued_001", "session_id": "session_agent_001"},
+  "operation_id": "op_guidance_queued_001",
+  "project_revision": 103,
+  "context": {"mode": "wait", "project_id": "project_demo", "actor_id": "agent_001", "harness_id": "harness_fixture", "session_id": "session_agent_001"},
+  "status": {"state": "queued", "work_id": "work_queued_001", "summary": "Normal prerequisite work_prerequisite_001 is open; this is not a hard block."},
+  "requirements": [{"id": "dependency_work_prerequisite_001", "kind": "dependency", "severity": "advisory", "state": "open", "reason": "prerequisite_open(work_prerequisite_001)"}],
+  "next_action": {"directive_id": "work.prerequisite@v1", "severity": "advisory", "title": "Inspect the open prerequisite", "instruction": "Inspect the named prerequisite; this work remains queued until its default close-only satisfaction condition is met.", "subject": {"type": "work", "id": "work_prerequisite_001"}, "safe_argv": ["bwrk", "work", "show", "work_prerequisite_001", "--project", "project_demo", "--revision", "103", "--json"], "cwd": "/workspace/projects/demo", "runner": "boreal_cli", "shell": false},
+  "provenance": {"registry_version": "directives.v1", "registry_path": "project/spec/guidance/directive-registry.json", "gap_codes": ["prerequisite_open"], "workflow_refs": ["boreal.workflow.route.v1", "boreal.workflow.context.v1"], "source_snapshot_hash": "sha256:4444444444444444444444444444444444444444444444444444444444444444", "config_identity": "sha256:2222222222222222222222222222222222222222222222222222222222222222"},
+  "selection_key": "advisory|prerequisite_open|work_prerequisite_001|work.prerequisite@v1|guidance.queued.v1",
+  "error": null
+}

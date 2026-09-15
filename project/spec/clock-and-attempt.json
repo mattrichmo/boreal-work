@@ -1,0 +1,19 @@
+{
+  "schema_version": "boreal.clock_attempt.v1",
+  "fixture_version": "p0-03.v2",
+  "clock": {"kind":"virtual_authoritative","claimed_at":"2026-09-14T10:00:00Z","default_time_limit":"2h","default_lease_ttl":"30m","lease_deadline":"2026-09-14T10:30:00Z","hard_deadline":"2026-09-14T12:00:00Z"},
+  "cases": [
+    {"id":"C01","as_of":"2026-09-14T10:14:59Z","operation":"heartbeat","expect":"lease_healthy_hard_deadline_unchanged"},
+    {"id":"C02","as_of":"2026-09-14T10:29:59Z","operation":"read","expect":"lease_healthy"},
+    {"id":"C03","as_of":"2026-09-14T10:30:00Z","operation":"renew","expect":"expired_review","reason":"lease_elapsed"},
+    {"id":"C04","as_of":"2026-09-14T11:59:59Z","operation":"heartbeat","expect":"hard_deadline_unchanged"},
+    {"id":"C05","as_of":"2026-09-14T12:00:00Z","operation":"read","expect":"expired_review","reason":"hard_budget_elapsed"},
+    {"id":"C06","as_of":"2026-09-14T12:00:01Z","operation":"finish_old_fence","expect":"rejected","error":"stale_fence"},
+    {"id":"C07","as_of":"2026-09-14T11:00:00Z","operation":"read_after_backward_clock","expect":"fence_remains_invalid"},
+    {"id":"C08","as_of":"2026-09-14T12:03:00Z","operation":"late_sweeper","expect":"one_idempotent_expiry_event"},
+    {"id":"C09","as_of":"2026-09-14T12:00:00Z","operation":"finish_race","expect":"one_fenced_winner"},
+    {"id":"C10","as_of":"2026-09-14T12:00:00Z","operation":"renew_race","expect":"expiry_wins_hard_budget"},
+    {"id":"C11","as_of":"2026-09-14T11:30:00Z","operation":"restart_resume","expect":"same_attempt_and_fence"},
+    {"id":"C12","as_of":"2026-09-14T12:03:00Z","operation":"duplicate_timer","expect":"unchanged_second_result"}
+  ]
+}

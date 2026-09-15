@@ -1,0 +1,80 @@
+{
+  "fixture_version": "p0-03.v2",
+  "protocol_version": "2",
+  "schemas": {
+    "envelope": "boreal.protocol.envelope.v1",
+    "status": "boreal.status.v1",
+    "list": "boreal.list.v1",
+    "agent_guide": "boreal.agent_guidance.v1",
+    "agent_next": "boreal.agent_next.v1",
+    "receipt": "boreal.receipt.v1",
+    "gate_diagnostics": "boreal.gate_diagnostics.v1",
+    "error_registry": "boreal.errors.v1"
+  },
+  "envelope": {
+    "required_fields": [
+      "api_version",
+      "schema_version",
+      "operation_id",
+      "revision",
+      "as_of",
+      "next_status_change_at",
+      "transport",
+      "outcome",
+      "data",
+      "detail_ref",
+      "error"
+    ],
+    "api_version": "2",
+    "transport_values": ["ok", "error"],
+    "outcome_values": ["changed", "unchanged", "rejected", "conflict", "busy", "failed", "unknown"],
+    "revision_rule": "An integer committed project revision when a project snapshot is observed; null when no service revision was observed, including a transport-decoded validation rejection before project lookup.",
+    "operation_id_pattern": "^op_[A-Za-z0-9._-]+$",
+    "as_of": "Authoritative service/store clock in RFC3339 UTC.",
+    "next_status_change_at": "RFC3339 UTC timestamp or null; derived from the same snapshot clock."
+  },
+  "identity_rules": {
+    "project_revision_owner": "SQLite canonical project state",
+    "clock_owner": "local Rust service or the same application in offline maintenance mode",
+    "attempt_identity": ["work_id", "attempt_id", "fence", "session_id"],
+    "mutation_identity": ["operation_id", "expected_revision", "attempt_fence"],
+    "default_hard_time_limit": "2h from claimed_at",
+    "default_lease_ttl": "30m renewable ownership lease fixture",
+    "legacy_lease_alias": "--ttl is accepted only as an alias for --lease-ttl",
+    "hard_budget_rule": "Heartbeats and lease renewal never extend max_attempt_deadline.",
+    "dependency_satisfaction": "Only accepted closed results satisfy a default prerequisite edge.",
+    "review_rule": "Independent review is required only when the versioned acceptance profile contains a review gate."
+  },
+  "bounds": {
+    "routine_response_target_bytes": {
+      "minimum": 2048,
+      "maximum": 8192,
+      "workload": "three active agents"
+    },
+    "max_inline_items": 100,
+    "max_inline_requirements": 32,
+    "max_inline_reason_codes": 32,
+    "max_inline_argv_items": 32,
+    "max_inline_output_bytes": 65536,
+    "detail_reference_required_above_bytes": 65536,
+    "unknown_fields": "ignored after validation and never interpreted as policy"
+  },
+  "fixture_index": [
+    "envelope-success.json",
+    "envelope-empty.json",
+    "envelope-conflict.json",
+    "envelope-busy.json",
+    "envelope-stale.json",
+    "envelope-invalid.json",
+    "envelope-service-unavailable.json",
+    "envelope-unknown-outcome.json",
+    "status-dto.json",
+    "list-dto.json",
+    "guide-dto.json",
+    "next-dto.json",
+    "receipt-success.json",
+    "receipt-failure.json",
+    "gate-diagnostics.json",
+    "error-registry.json"
+  ]
+}

@@ -1,9 +1,0 @@
-schema_version: boreal.skill.v1
-system: boreal
-skill: boreal-work-execution
-display_name: Boreal Work Execution
-workflows:
-  - boreal.workflow.claim-and-finish-work.v1
-  - boreal.workflow.closeout-work.v1
-  - boreal.workflow.checkpoint-git-state.v1
-  - boreal.workflow.link-dependencies.v1

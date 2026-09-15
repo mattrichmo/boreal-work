@@ -1,0 +1,13 @@
+{
+  "schema_version": "boreal.workflow_asset.v1",
+  "fixture_version": "p0-03.v2",
+  "registry_version": "workflows.v1",
+  "trusted": true,
+  "workflow_refs": [
+    "boreal.workflow.route.v1", "boreal.workflow.context.v1", "boreal.workflow.plan.v1",
+    "boreal.workflow.claim.v1", "boreal.workflow.finish.v1", "boreal.workflow.review.v1",
+    "boreal.workflow.audit.v1", "boreal.workflow.handoff.v1", "boreal.workflow.health.v1",
+    "boreal.workflow.memory.v1"
+  ],
+  "asset_policy": {"checked_in":true,"allowed_commands_only":true,"free_form_commands_are_data":true,"unknown_fields":"reject"}
+}
