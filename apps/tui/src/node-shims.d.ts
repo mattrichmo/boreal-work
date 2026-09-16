@@ -28,9 +28,23 @@ declare const process: {
   readonly argv: readonly string[];
   readonly stdin: {
     readonly isTTY?: boolean;
+    setRawMode?(enabled: boolean): void;
+    resume?(): void;
+    pause?(): void;
+    on(event: "data", listener: (chunk: string | Uint8Array) => void): void;
+    off(event: "data", listener: (chunk: string | Uint8Array) => void): void;
     [Symbol.asyncIterator](): AsyncIterator<string | Uint8Array>;
   };
-  readonly stdout: { write(value: string): boolean };
+  readonly stdout: {
+    readonly isTTY?: boolean;
+    readonly columns?: number;
+    readonly rows?: number;
+    write(value: string): boolean;
+    on(event: "resize", listener: () => void): void;
+    off(event: "resize", listener: () => void): void;
+  };
   readonly stderr: { write(value: string): boolean };
+  on(signal: "SIGINT" | "SIGTERM" | "SIGHUP", listener: () => void): void;
+  off(signal: "SIGINT" | "SIGTERM" | "SIGHUP", listener: () => void): void;
   exitCode?: number;
 };

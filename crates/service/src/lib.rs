@@ -24,14 +24,16 @@ mod transport;
 #[cfg(unix)]
 pub use application_route::{
     ApplicationCommandHandler, ApplicationRequest, ApplicationResponse, ApplicationRoute,
-    ApplicationRouteConfig, APPLICATION_API_VERSION, APPLICATION_SCHEMA_VERSION,
+    ApplicationRouteConfig, ConcurrentApplicationCommandHandler, APPLICATION_API_VERSION,
+    APPLICATION_SCHEMA_VERSION,
 };
 pub use busy::BusyOutcome;
 pub use election::{ElectionError, ProjectElection};
 #[cfg(unix)]
 pub use host::{
     ServiceHost, ServiceHostConfig, ServiceHostConfigError, ServiceHostError, ServiceHostExit,
-    ServiceHostHandle, ServiceHostReport, DEFAULT_HOST_IO_TIMEOUT,
+    ServiceHostHandle, ServiceHostHooks, ServiceHostReport, DEFAULT_DISPATCH_CAPACITY,
+    DEFAULT_DISPATCH_WORKERS, DEFAULT_HOST_IO_TIMEOUT, DEFAULT_MAINTENANCE_INTERVAL,
 };
 pub use metrics::{WriterMetrics, WriterMetricsSnapshot};
 pub use notifications::{
@@ -43,7 +45,8 @@ pub use queue::{
 };
 pub use read_pool::{BoundedReadPool, ReadPool, ReadPoolConfigError, ReadPoolError};
 pub use recovery::{
-    OperationError, OperationPhase, OperationRecord, OperationRecovery, RecoveryReport,
+    OperationError, OperationPhase, OperationRecord, OperationRecovery, RecoveryBackend,
+    RecoveryBackendError, RecoveryEntry, RecoveryReport,
 };
 pub use runtime::{
     BoundedWriter, ServiceRuntime, ServiceRuntimeConfigError, WriterExecutionError, WriterRuntime,

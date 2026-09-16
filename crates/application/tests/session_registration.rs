@@ -11,7 +11,7 @@ fn work(project_id: &ProjectId) -> WorkItem {
     WorkItem {
         id: WorkId::new("w1"),
         project_id: project_id.clone(),
-        kind: WorkKind::Milestone,
+        kind: WorkKind::Task,
         parent_id: None,
         title: "Session-bound work".to_owned(),
         description: String::new(),

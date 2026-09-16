@@ -43,6 +43,27 @@ fn draft(entry_id: &str) -> Draft {
     .unwrap()
 }
 
+fn manifest_entry_from(
+    draft: &Draft,
+    receipt: &boreal_memory::PublicationReceipt,
+    operation_id: &str,
+) -> ManifestEntry {
+    ManifestEntry {
+        memory_entry_id: draft.entry_id.clone(),
+        project_id: draft.project_id.clone(),
+        state: PublicationState::Published,
+        content_digest: receipt.identity.content_digest.clone(),
+        source_citations: draft
+            .citations
+            .iter()
+            .map(|citation| citation.source_version_id.clone())
+            .collect(),
+        manifest_path: format!("notes/{}.md", draft.entry_id),
+        operation_id: operation_id.into(),
+        provenance_preserved: true,
+    }
+}
+
 fn remove(path: &Path) {
     let _ = fs::remove_dir_all(path);
 }
@@ -101,6 +122,185 @@ fn markdown_manifest_and_identity_are_byte_stable() {
         .file_name()
         .to_string_lossy()
         .contains(".tmp-")));
+    remove(&path);
+}
+
+#[test]
+fn publication_appends_updates_and_retries_old_operations_without_loss() {
+    let path = test_root("merge-publication");
+    let publisher = Publisher::new(MemoryRoot::new(&path).unwrap()).unwrap();
+    let first_draft = draft("entry-1").review(true);
+    let first = publisher.publish(&first_draft, "operation-a").unwrap();
+    let second_draft = draft("entry-2").review(true);
+    // A fresh publisher must treat the clean committed manifest as its base,
+    // not as a human edit that conflicts with appending another entry.
+    let second_publisher = Publisher::new(MemoryRoot::new(&path).unwrap()).unwrap();
+    let second = second_publisher
+        .publish(&second_draft, "operation-b")
+        .unwrap();
+    assert_ne!(first.git_revision, second.git_revision);
+
+    let imported = validate_fresh_clone(&path, "project-1").unwrap();
+    assert_eq!(imported.entries.len(), 2);
+    assert!(imported
+        .entries
+        .iter()
+        .any(|entry| entry.memory_entry_id == "entry-1"));
+    assert!(imported
+        .entries
+        .iter()
+        .any(|entry| entry.memory_entry_id == "entry-2"));
+
+    let mut updated = first_draft.clone();
+    updated.body = "An updated cited body.".into();
+    let base = validate_fresh_clone(&path, "project-1")
+        .unwrap()
+        .manifest_identity;
+    let update = publisher
+        .publish_with_expected_base(&updated, "operation-a-update", Some(&base))
+        .unwrap();
+    assert!(!update.duplicate);
+    assert_ne!(update.git_revision, second.git_revision);
+    let imported = validate_fresh_clone(&path, "project-1").unwrap();
+    assert_eq!(imported.entries.len(), 2);
+    assert_eq!(
+        imported
+            .entries
+            .iter()
+            .find(|entry| entry.memory_entry_id == "entry-1")
+            .unwrap()
+            .operation_id,
+        "operation-a-update"
+    );
+
+    // Replaying the original operation after later publications must resolve
+    // its original receipt; it must not roll the current entry back.
+    let retry = publisher.publish(&first_draft, "operation-a").unwrap();
+    assert!(retry.duplicate);
+    assert_eq!(retry.git_revision, first.git_revision);
+    assert_eq!(retry.identity, first.identity);
+    let imported = validate_fresh_clone(&path, "project-1").unwrap();
+    assert_eq!(imported.entries.len(), 2);
+    assert_eq!(
+        imported
+            .entries
+            .iter()
+            .find(|entry| entry.memory_entry_id == "entry-1")
+            .unwrap()
+            .operation_id,
+        "operation-a-update"
+    );
+    remove(&path);
+}
+
+#[test]
+fn expected_base_rejects_conflicting_concurrent_publishers() {
+    let path = test_root("expected-base");
+    let _initialized = Publisher::new(MemoryRoot::new(&path).unwrap()).unwrap();
+    let barrier = Arc::new(Barrier::new(2));
+    let mut workers = Vec::new();
+    for (entry_id, operation_id) in [("entry-a", "operation-a"), ("entry-b", "operation-b")] {
+        let path = path.clone();
+        let barrier = Arc::clone(&barrier);
+        workers.push(thread::spawn(move || {
+            let publisher = Publisher::new(MemoryRoot::new(&path).unwrap()).unwrap();
+            barrier.wait();
+            publisher.publish_with_expected_base(
+                &draft(entry_id).review(true),
+                operation_id,
+                Some(""),
+            )
+        }));
+    }
+    let results = workers
+        .into_iter()
+        .map(|worker| worker.join().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        results.iter().filter(|result| result.is_ok()).count(),
+        1,
+        "results: {results:?}"
+    );
+    assert_eq!(
+        results
+            .iter()
+            .filter(|result| matches!(result, Err(PublishError::Conflict(_))))
+            .count(),
+        1,
+        "results: {results:?}"
+    );
+    assert_eq!(
+        validate_fresh_clone(&path, "project-1")
+            .unwrap()
+            .entries
+            .len(),
+        1
+    );
+    remove(&path);
+}
+
+#[test]
+fn interrupted_merged_publication_is_recovered_and_committed_once() {
+    let path = test_root("merged-restart");
+    let publisher = Publisher::new(MemoryRoot::new(&path).unwrap()).unwrap();
+    let first_draft = draft("entry-1").review(true);
+    let first = publisher.publish(&first_draft, "operation-a").unwrap();
+    let second_draft = draft("entry-2").review(true);
+    let second_identity = publication_identity(&second_draft, "operation-b").unwrap();
+    let manifest = PublicationManifest::new(
+        "project-1",
+        "operation-b",
+        manifest_entry_from(&first_draft, &first, "operation-a"),
+    )
+    .unwrap()
+    .merge_entry(
+        "operation-b",
+        manifest_entry_from(
+            &second_draft,
+            &boreal_memory::PublicationReceipt {
+                state: PublicationState::Published,
+                identity: second_identity,
+                git_revision: String::new(),
+                duplicate: false,
+            },
+            "operation-b",
+        ),
+    )
+    .unwrap();
+    fs::write(
+        publisher.root().entry_path("entry-2").unwrap(),
+        render_markdown(&second_draft)
+            .unwrap()
+            .replace("state: accepted", "state: published"),
+    )
+    .unwrap();
+    fs::write(publisher.root().manifest_path(), render_manifest(&manifest)).unwrap();
+    let staged = Command::new("git")
+        .args([
+            "-C",
+            path.to_str().unwrap(),
+            "add",
+            "--",
+            "manifest.json",
+            "notes/entry-2.md",
+        ])
+        .output()
+        .unwrap();
+    assert!(staged.status.success(), "git add failed: {:?}", staged);
+
+    let restarted = Publisher::new(MemoryRoot::new(&path).unwrap()).unwrap();
+    let receipt = restarted.publish(&second_draft, "operation-b").unwrap();
+    assert!(!receipt.duplicate);
+    assert_eq!(
+        validate_fresh_clone(&path, "project-1")
+            .unwrap()
+            .entries
+            .len(),
+        2
+    );
+    let retry = restarted.publish(&second_draft, "operation-b").unwrap();
+    assert!(retry.duplicate);
+    assert_eq!(retry.git_revision, receipt.git_revision);
     remove(&path);
 }
 
@@ -209,7 +409,6 @@ fn publication_retry_removes_only_abandoned_publisher_temps() {
 fn concurrent_same_operation_publication_has_one_commit_identity() {
     let path = test_root("concurrent-publication");
     let accepted = Arc::new(draft("entry-1").review(true));
-    let _initialized = Publisher::new(MemoryRoot::new(&path).unwrap()).unwrap();
     let barrier = Arc::new(Barrier::new(8));
     let mut workers = Vec::new();
     for _ in 0..8 {
@@ -217,9 +416,9 @@ fn concurrent_same_operation_publication_has_one_commit_identity() {
         let accepted = Arc::clone(&accepted);
         let barrier = Arc::clone(&barrier);
         workers.push(thread::spawn(move || {
-            let publisher = Publisher::new(MemoryRoot::new(&path).unwrap()).unwrap();
             barrier.wait();
-            publisher.publish(&accepted, "operation-concurrent")
+            Publisher::new(MemoryRoot::new(&path).unwrap())
+                .and_then(|publisher| publisher.publish(&accepted, "operation-concurrent"))
         }));
     }
 
@@ -248,6 +447,62 @@ fn concurrent_same_operation_publication_has_one_commit_identity() {
         }),
         "results: {results:?}"
     );
+    remove(&path);
+}
+
+#[test]
+fn concurrent_distinct_publications_serialize_without_lost_entries() {
+    let path = test_root("concurrent-distinct-publications");
+    let barrier = Arc::new(Barrier::new(6));
+    let mut workers = Vec::new();
+    for index in 0..6 {
+        let path = path.clone();
+        let barrier = Arc::clone(&barrier);
+        workers.push(thread::spawn(move || {
+            let entry_id = format!("entry-{index}");
+            let operation_id = format!("operation-{index}");
+            barrier.wait();
+            Publisher::new(MemoryRoot::new(&path).unwrap()).and_then(|publisher| {
+                publisher.publish(&draft(&entry_id).review(true), &operation_id)
+            })
+        }));
+    }
+
+    let results = workers
+        .into_iter()
+        .map(|worker| worker.join().unwrap())
+        .collect::<Vec<_>>();
+    assert!(results.iter().all(Result::is_ok), "results: {results:?}");
+    let imported = validate_fresh_clone(&path, "project-1").unwrap();
+    assert_eq!(imported.entries.len(), 6);
+    for index in 0..6 {
+        assert!(imported
+            .entries
+            .iter()
+            .any(|entry| entry.memory_entry_id == format!("entry-{index}")));
+    }
+    remove(&path);
+}
+
+#[test]
+fn publication_preserves_uncommitted_human_edits_to_managed_notes() {
+    let path = test_root("human-managed-edit");
+    let publisher = Publisher::new(MemoryRoot::new(&path).unwrap()).unwrap();
+    let first = draft("entry-1").review(true);
+    publisher.publish(&first, "operation-a").unwrap();
+
+    let note_path = path.join("notes/entry-1.md");
+    let mut human_text = fs::read_to_string(&note_path).unwrap();
+    human_text.push_str("\nHuman edit that must survive.\n");
+    fs::write(&note_path, &human_text).unwrap();
+
+    let mut update = first;
+    update.body = "Publisher update.".into();
+    assert!(matches!(
+        publisher.publish(&update, "operation-a-update"),
+        Err(PublishError::Conflict(_))
+    ));
+    assert_eq!(fs::read_to_string(note_path).unwrap(), human_text);
     remove(&path);
 }
 

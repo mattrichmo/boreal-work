@@ -3,7 +3,8 @@
 use boreal_domain::{ActorId, HarnessId, OperationId, ProjectId, SessionId, TimestampMs};
 use boreal_store::SessionRecord;
 
-use crate::{ApplicationError, OperationResult, WorkApplication};
+use crate::{canonical_request_digest, ApplicationError, OperationResult, WorkApplication};
+use serde_json::{json, Value};
 
 pub use boreal_store::{
     SessionRegistrationRequest as StoreSessionRegistrationRequest, SessionRegistrationResult,
@@ -31,7 +32,16 @@ impl SessionRegistrationRequest {
         operation_id: OperationId,
         started_at: TimestampMs,
     ) -> Self {
-        let request_digest = format!("sha256:{}", operation_id.as_str());
+        let request_digest = canonical_request_digest(
+            "session.register/v1",
+            json!({
+                "project_id": project_id.as_str(),
+                "session_id": session_id.as_str(),
+                "actor_id": actor_id.as_str(),
+                "harness_id": harness_id.as_str(),
+                "expected_project_revision": Value::Null,
+            }),
+        );
         Self {
             project_id,
             session_id,
@@ -91,7 +101,16 @@ impl WorkApplication<'_> {
             session_id: SessionId::new(session_id),
             actor_id: ActorId::new(actor_id),
             harness_id: HarnessId::new(harness_id),
-            request_digest: format!("sha256:{operation_id}"),
+            request_digest: canonical_request_digest(
+                "session.register/v1",
+                json!({
+                    "project_id": project_id.as_str(),
+                    "session_id": session_id,
+                    "actor_id": actor_id,
+                    "harness_id": harness_id,
+                    "expected_project_revision": Value::Null,
+                }),
+            ),
             operation_id,
             expected_project_revision: None,
             started_at: parse_stamp(started_at)?,

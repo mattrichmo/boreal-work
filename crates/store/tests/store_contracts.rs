@@ -3,8 +3,9 @@ use boreal_domain::{
 };
 use boreal_store::{
     AttemptMutationKind, AttemptMutationRequest, AuditEventRecord, CloseIntentRequest,
-    ConstraintKind, GateStateUpdateRequest, OperationOutcome, OperationRecord, ReceiptAttestation,
-    ReceiptInsertRequest, ReceiptOutcome, ReviewDecision, ReviewInsertRequest, SnapshotRevision,
+    ConstraintKind, EvidenceExecutionAdmissionRequest, GateStateUpdateRequest, OperationOutcome,
+    OperationRecord, ReceiptAcceptanceExpectation, ReceiptAttestation, ReceiptInsertRequest,
+    ReceiptOutcome, ReceiptSubmissionKind, ReviewDecision, ReviewInsertRequest, SnapshotRevision,
     SqliteStore, StoreError, SCHEMA_VERSION,
 };
 
@@ -131,10 +132,60 @@ fn receipt_request(
         subject_json: format!("{{\"work_id\":\"{work_id}\"}}"),
         coverage_json: "{}".into(),
         attestation: ReceiptAttestation::BorealWitnessed,
+        submission_kind: ReceiptSubmissionKind::WitnessedExecutor,
+        acceptance: gate_id.map(|gate_id| ReceiptAcceptanceExpectation {
+            work_id: work_id.into(),
+            attempt_id: "a1".into(),
+            fence,
+            source_version_id: None,
+            config_identity: "config".into(),
+            profile_id: "default".into(),
+            profile_version: 1,
+            gate_id: gate_id.into(),
+            gate_kind: boreal_domain::GateKind::Verification,
+            gate_required: true,
+            requires_attestation: true,
+        }),
         result,
         rejection_code: None,
         created_at: "t1".into(),
     }
+}
+
+fn admit_execution(store: &SqliteStore, request: &ReceiptInsertRequest) {
+    store
+        .execute_batch(&format!(
+            "UPDATE attempt SET state = 'running', accepted_at = COALESCE(accepted_at, 't0')
+             WHERE attempt_id = '{}'",
+            request.attempt_id.replace('\'', "''")
+        ))
+        .unwrap();
+    let acceptance = request.acceptance.as_ref().unwrap();
+    store
+        .admit_evidence_execution(EvidenceExecutionAdmissionRequest {
+            operation_id: request.operation_id.clone(),
+            project_id: request.project_id.clone(),
+            work_id: request.work_id.clone(),
+            attempt_id: request.attempt_id.clone(),
+            fence: request.fence,
+            gate_id: request.gate_id.clone().unwrap(),
+            actor_id: request.actor_id.clone(),
+            session_id: request.session_id.clone(),
+            request_digest: format!("sha256:execution:{}", request.operation_id),
+            artifact_ref: format!("artifact:execution:{}", request.operation_id),
+            source_version_id: request.source_version_id.clone(),
+            config_identity: request.config_identity.clone(),
+            profile_id: acceptance.profile_id.clone(),
+            profile_version: acceptance.profile_version,
+            admitted_at: "t0".into(),
+        })
+        .unwrap();
+    store
+        .start_evidence_execution(&request.operation_id, "t0")
+        .unwrap();
+    store
+        .finish_evidence_execution(&request.operation_id, "t0", Some(request.exit_code))
+        .unwrap();
 }
 
 fn review_request(operation_id: &str, reviewer_actor_id: &str) -> ReviewInsertRequest {
@@ -919,6 +970,175 @@ fn receipt_subject_and_fence_failures_are_retained_as_historical_facts() {
     );
 }
 
+fn proof_store() -> SqliteStore {
+    let store = store();
+    base(&store);
+    store
+        .execute_batch(
+            "INSERT INTO source_version
+             (source_version_id, project_id, origin, access_scope, content_digest,
+              media_type, byte_count, captured_at, parser_identity, availability, citation_json)
+             VALUES ('source-1', 'p1', 'one', 'project', 'sha256:one',
+                     'text/plain', 1, 't0', 'parser/1', 'available', '[]');
+             INSERT INTO source_version
+             (source_version_id, project_id, origin, access_scope, content_digest,
+              media_type, byte_count, captured_at, parser_identity, availability, citation_json)
+             VALUES ('source-2', 'p1', 'two', 'project', 'sha256:two',
+                     'text/plain', 1, 't0', 'parser/1', 'available', '[]');
+             INSERT INTO gate
+             (gate_id, work_id, profile_id, profile_version, kind, required, subject_ref, updated_at)
+             VALUES ('verification', 'w1', 'default', 1, 'verification', 1, '', 't0');",
+        )
+        .unwrap();
+    attempt(&store, "a1", "w1", "s1", 1);
+    store
+        .execute_batch("UPDATE attempt SET source_version_id = 'source-1' WHERE attempt_id = 'a1'")
+        .unwrap();
+    store
+}
+
+fn proof_receipt(receipt_id: &str, operation_id: &str) -> ReceiptInsertRequest {
+    let mut request = receipt_request(
+        receipt_id,
+        "w1",
+        1,
+        operation_id,
+        Some("verification"),
+        ReceiptOutcome::Passed,
+    );
+    request.source_version_id = Some("source-1".into());
+    request.acceptance.as_mut().unwrap().source_version_id = Some("source-1".into());
+    request
+}
+
+#[test]
+fn receipt_commit_rechecks_current_source_config_and_profile_context() {
+    for (case, mutation, expected_code) in [
+        (
+            "old-attempt",
+            "UPDATE attempt SET current = 0, state = 'released', terminal_at = 't1', terminal_reason = 'test' WHERE attempt_id = 'a1'",
+            "receipt_attempt_not_current",
+        ),
+        (
+            "source",
+            "UPDATE attempt SET source_version_id = 'source-2' WHERE attempt_id = 'a1'",
+            "receipt_source_mismatch",
+        ),
+        (
+            "config",
+            "UPDATE attempt SET config_identity = 'changed' WHERE attempt_id = 'a1'",
+            "receipt_config_mismatch",
+        ),
+        (
+            "profile",
+            "INSERT INTO acceptance_profile VALUES ('changed', 1, 'sha256:changed', '{}', 't0'); UPDATE work_item SET acceptance_profile_id = 'changed' WHERE work_id = 'w1'",
+            "receipt_policy_mismatch",
+        ),
+    ] {
+        let store = proof_store();
+        let request = proof_receipt(&format!("receipt-{case}"), &format!("operation-{case}"));
+        admit_execution(&store, &request);
+        store.execute_batch(mutation).unwrap();
+        assert!(store.insert_receipt(&request).is_err(), "{case} must reject");
+        let retained = store.receipt(&request.receipt_id).unwrap().unwrap();
+        assert_eq!(retained.result, ReceiptOutcome::Rejected, "{case}");
+        assert_eq!(retained.rejection_code.as_deref(), Some(expected_code), "{case}");
+        assert_ne!(
+            store
+                .gate("p1", "w1", "verification")
+                .unwrap()
+                .unwrap()
+                .state,
+            GateState::Satisfied,
+            "{case} must not satisfy the gate"
+        );
+    }
+}
+
+#[test]
+fn receipt_commit_rejects_wrong_gate_and_forged_witness_without_satisfaction() {
+    let store = proof_store();
+    let mut wrong_gate = proof_receipt("receipt-wrong-gate", "operation-wrong-gate");
+    wrong_gate.gate_id = Some("other-gate".into());
+    wrong_gate.acceptance.as_mut().unwrap().gate_id = "other-gate".into();
+    assert!(store.insert_receipt(&wrong_gate).is_err());
+    assert_eq!(
+        store
+            .receipt("receipt-wrong-gate")
+            .unwrap()
+            .unwrap()
+            .rejection_code
+            .as_deref(),
+        Some("receipt_subject_mismatch")
+    );
+
+    let mut forged = proof_receipt("receipt-forged", "operation-forged");
+    forged.submission_kind = ReceiptSubmissionKind::ExternalImport;
+    assert!(store.insert_receipt(&forged).is_err());
+    assert_eq!(
+        store
+            .receipt("receipt-forged")
+            .unwrap()
+            .unwrap()
+            .rejection_code
+            .as_deref(),
+        Some("witnessed_receipt_import_denied")
+    );
+    assert_ne!(
+        store
+            .gate("p1", "w1", "verification")
+            .unwrap()
+            .unwrap()
+            .state,
+        GateState::Satisfied
+    );
+}
+
+#[test]
+fn receipt_replay_binds_the_complete_canonical_request() {
+    let store = proof_store();
+    let request = proof_receipt("receipt-replay", "operation-replay");
+    admit_execution(&store, &request);
+    store.insert_receipt(&request).unwrap();
+    assert_eq!(
+        store
+            .evidence_execution(&request.operation_id)
+            .unwrap()
+            .unwrap()
+            .state,
+        boreal_store::EvidenceExecutionState::ReceiptCommitted
+    );
+    assert!(store.insert_receipt(&request).unwrap().replayed);
+
+    let mut changed = request.clone();
+    changed.output_digest = Some("sha256:different".into());
+    assert!(matches!(
+        store.insert_receipt(&changed),
+        Err(StoreError::Conflict(_))
+    ));
+}
+
+#[test]
+fn witnessed_receipt_requires_durable_exited_execution() {
+    let store = proof_store();
+    let request = proof_receipt("receipt-no-admission", "operation-no-admission");
+    assert!(store.insert_receipt(&request).is_err());
+    let retained = store.receipt(&request.receipt_id).unwrap().unwrap();
+    assert_eq!(retained.result, ReceiptOutcome::Rejected);
+    assert_eq!(
+        retained.rejection_code.as_deref(),
+        Some("witnessed_execution_not_admitted")
+    );
+    assert_ne!(
+        store
+            .gate("p1", "w1", "verification")
+            .unwrap()
+            .unwrap()
+            .state,
+        GateState::Satisfied
+    );
+}
+
 #[test]
 fn failed_receipt_is_retained_and_explained_by_gate_diagnostics() {
     let store = store();
@@ -931,16 +1151,16 @@ fn failed_receipt_is_retained_and_explained_by_gate_diagnostics() {
         )
         .unwrap();
 
-    let result = store
-        .insert_receipt(receipt_request(
-            "r-failed",
-            "w1",
-            1,
-            "op-failed-receipt",
-            Some("verification"),
-            ReceiptOutcome::Failed,
-        ))
-        .unwrap();
+    let request = receipt_request(
+        "r-failed",
+        "w1",
+        1,
+        "op-failed-receipt",
+        Some("verification"),
+        ReceiptOutcome::Failed,
+    );
+    admit_execution(&store, &request);
+    let result = store.insert_receipt(request).unwrap();
     assert!(!result.replayed);
     assert_eq!(result.receipt.result, ReceiptOutcome::Failed);
     assert_eq!(store.receipt("r-failed").unwrap().unwrap().exit_code, 1);
@@ -1107,20 +1327,19 @@ fn close_intent_is_idempotent_readable_and_rejects_then_finalizes_with_audit() {
         OperationOutcome::Rejected
     );
 
-    store
-        .update_gate_state(&GateStateUpdateRequest {
-            project_id: "p1".into(),
-            work_id: "w1".into(),
-            gate_id: "verification".into(),
-            state: GateState::Satisfied,
-            actor_id: "agent-1".into(),
-            session_id: Some("s1".into()),
-            operation_id: "op-close-gate".into(),
-            request_digest: "sha256:close-gate".into(),
-            expected_project_revision: None,
-            updated_at: "t2".into(),
-        })
-        .unwrap();
+    // A work-level gate projection cannot satisfy a current attempt by
+    // itself. Record proof bound to this exact attempt/fence instead.
+    let mut proof = receipt_request(
+        "receipt-close-verification",
+        "w1",
+        1,
+        "op-close-gate",
+        Some("verification"),
+        ReceiptOutcome::Passed,
+    );
+    proof.attestation = ReceiptAttestation::ExternalAttested;
+    proof.submission_kind = ReceiptSubmissionKind::ExternalImport;
+    store.insert_receipt(proof).unwrap();
     let finalized = store
         .finalize_close_intent(close_request("op-close-finalize", "ci-1"))
         .unwrap();

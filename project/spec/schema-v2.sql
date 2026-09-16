@@ -2,7 +2,6 @@
 -- One local project database; application mutations use short WAL transactions.
 PRAGMA foreign_keys = ON;
 PRAGMA journal_mode = WAL;
-PRAGMA user_version = 2;
 
 CREATE TABLE project (
   project_id TEXT PRIMARY KEY,
@@ -62,6 +61,7 @@ CREATE TABLE work_item (
   parent_id TEXT,
   lifecycle TEXT NOT NULL DEFAULT 'draft' CHECK (lifecycle IN ('draft','open','closed','cancelled')),
   dispatch_policy TEXT NOT NULL DEFAULT 'automatic' CHECK (dispatch_policy IN ('automatic','operator_only','paused')),
+  priority INTEGER NOT NULL DEFAULT 0 CHECK (priority >= 0 AND priority <= 255),
   retry_not_before TEXT,
   acceptance_profile_id TEXT NOT NULL,
   acceptance_profile_version INTEGER NOT NULL,
@@ -81,6 +81,7 @@ CREATE TABLE work_item (
   CHECK (parent_id IS NULL OR parent_id <> work_id)
 );
 CREATE INDEX work_item_project ON work_item(project_id, lifecycle, dispatch_policy);
+CREATE INDEX work_item_project_id ON work_item(project_id, work_id);
 CREATE INDEX work_item_parent ON work_item(parent_id);
 
 CREATE TRIGGER work_parent_kind_guard BEFORE INSERT ON work_item
@@ -113,6 +114,20 @@ BEGIN
   SELECT RAISE(ABORT, 'invalid_parent_kind');
 END;
 
+CREATE TRIGGER work_parent_retype_guard BEFORE UPDATE OF kind ON work_item
+WHEN EXISTS (
+  SELECT 1 FROM work_item child
+  WHERE child.project_id = NEW.project_id
+    AND child.parent_id = NEW.work_id
+    AND NOT (
+      (NEW.kind = 'milestone' AND child.kind = 'sprint')
+      OR (NEW.kind = 'sprint' AND child.kind = 'task')
+    )
+)
+BEGIN
+  SELECT RAISE(ABORT, 'invalid_parent_kind');
+END;
+
 CREATE TABLE dependency (
   project_id TEXT NOT NULL REFERENCES project(project_id),
   prerequisite_id TEXT NOT NULL,
@@ -131,6 +146,22 @@ CREATE TABLE dependency (
          OR (exception_reason IS NOT NULL AND approved_by IS NOT NULL))
 );
 CREATE INDEX dependency_dependent ON dependency(dependent_id);
+
+CREATE TRIGGER dependency_no_cycle BEFORE INSERT ON dependency
+WHEN EXISTS (
+  WITH RECURSIVE reachable(work_id) AS (
+    SELECT NEW.dependent_id
+    UNION
+    SELECT d.dependent_id
+    FROM dependency d
+    JOIN reachable r ON r.work_id = d.prerequisite_id
+    WHERE d.project_id = NEW.project_id
+  )
+  SELECT 1 FROM reachable WHERE work_id = NEW.prerequisite_id
+)
+BEGIN
+  SELECT RAISE(ABORT, 'dependency_cycle');
+END;
 
 CREATE TABLE attempt (
   attempt_id TEXT PRIMARY KEY,
@@ -181,6 +212,22 @@ CREATE TABLE reservation (
   CHECK ((state = 'active') = (released_at IS NULL))
 );
 CREATE UNIQUE INDEX reservation_current_work ON reservation(work_id) WHERE state = 'active';
+
+CREATE TABLE work_hold (
+  hold_id TEXT PRIMARY KEY,
+  work_id TEXT NOT NULL REFERENCES work_item(work_id),
+  reason_code TEXT NOT NULL CHECK (trim(reason_code) <> ''),
+  actor_id TEXT REFERENCES actor(actor_id),
+  created_at TEXT NOT NULL,
+  resolved_at TEXT,
+  resolved_by TEXT REFERENCES actor(actor_id),
+  resolution_reason TEXT,
+  CHECK (resolved_at IS NULL OR resolved_by IS NOT NULL),
+  CHECK (resolved_at IS NULL OR resolution_reason IS NOT NULL)
+);
+CREATE INDEX work_hold_active ON work_hold(work_id) WHERE resolved_at IS NULL;
+CREATE INDEX attempt_work_current ON attempt(work_id, current, attempt_id);
+CREATE INDEX attempt_session_current ON attempt(session_id, current, attempt_id);
 
 CREATE TABLE gate (
   gate_id TEXT PRIMARY KEY,
@@ -242,6 +289,37 @@ CREATE TABLE receipt (
 );
 CREATE INDEX receipt_subject ON receipt(work_id, attempt_id, fence, result);
 
+-- External command execution has a lifecycle separate from receipt
+-- persistence.  An operation is admitted here before any process can be
+-- launched.  Incomplete entries are intentionally fail-closed: a retry reads
+-- the journal and must reconcile the unknown outcome instead of launching the
+-- command a second time.
+CREATE TABLE evidence_execution (
+  operation_id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL REFERENCES project(project_id),
+  work_id TEXT NOT NULL REFERENCES work_item(work_id),
+  attempt_id TEXT NOT NULL REFERENCES attempt(attempt_id),
+  fence INTEGER NOT NULL CHECK (fence > 0),
+  gate_id TEXT NOT NULL REFERENCES gate(gate_id),
+  actor_id TEXT NOT NULL REFERENCES actor(actor_id),
+  session_id TEXT REFERENCES session(session_id),
+  request_digest TEXT NOT NULL,
+  artifact_ref TEXT NOT NULL UNIQUE,
+  state TEXT NOT NULL CHECK (state IN ('admitted','running','exited','receipt_committed','unknown')),
+  admitted_at TEXT NOT NULL,
+  started_at TEXT,
+  exited_at TEXT,
+  exit_code INTEGER,
+  receipt_id TEXT REFERENCES receipt(receipt_id),
+  failure_code TEXT,
+  FOREIGN KEY (work_id, fence) REFERENCES attempt(work_id, fence),
+  CHECK (state <> 'running' OR started_at IS NOT NULL),
+  CHECK (state NOT IN ('exited','receipt_committed') OR exited_at IS NOT NULL),
+  CHECK (state <> 'receipt_committed' OR receipt_id IS NOT NULL)
+);
+CREATE INDEX evidence_execution_subject
+  ON evidence_execution(work_id, attempt_id, fence, state);
+
 CREATE TABLE review (
   review_id TEXT PRIMARY KEY,
   work_id TEXT NOT NULL REFERENCES work_item(work_id),
@@ -268,7 +346,7 @@ CREATE TABLE summary (
   profile_id TEXT NOT NULL,
   profile_version INTEGER NOT NULL,
   body_digest TEXT NOT NULL,
-  body_size INTEGER NOT NULL CHECK (body_size >= 0),
+  body_size INTEGER NOT NULL CHECK (body_size > 0 AND body_size <= 65536),
   current INTEGER NOT NULL DEFAULT 1 CHECK (current IN (0,1)),
   created_at TEXT NOT NULL,
   FOREIGN KEY (work_id, fence) REFERENCES attempt(work_id, fence),
@@ -379,3 +457,7 @@ WHEN EXISTS (
 BEGIN
   SELECT RAISE(ABORT, 'reviewer_cannot_review_own_attempt');
 END;
+
+-- Set only after every object above has been created successfully. The store
+-- applies this file inside a transaction for fresh databases.
+PRAGMA user_version = 2;

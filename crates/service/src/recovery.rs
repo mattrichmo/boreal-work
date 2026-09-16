@@ -55,10 +55,73 @@ pub struct RecoveryReport {
     pub unknown: Vec<String>,
 }
 
+/// A storage-neutral snapshot of an operation that was durable before the
+/// service process started.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RecoveryEntry {
+    pub operation_id: String,
+    pub phase: OperationPhase,
+    pub revision: Option<u64>,
+}
+
+impl RecoveryEntry {
+    pub fn new(
+        operation_id: impl Into<String>,
+        phase: OperationPhase,
+        revision: Option<u64>,
+    ) -> Self {
+        Self {
+            operation_id: operation_id.into(),
+            phase,
+            revision,
+        }
+    }
+}
+
+/// Error returned by an application/store recovery adapter.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RecoveryBackendError {
+    message: String,
+}
+
+impl RecoveryBackendError {
+    pub fn new(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+        }
+    }
+
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+}
+
+impl fmt::Display for RecoveryBackendError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for RecoveryBackendError {}
+
+/// Adapter boundary for durable operation recovery.
+///
+/// The service does not inspect a database or decide application policy. An
+/// application adapter supplies incomplete durable operations and persists
+/// the transition of an in-flight operation to `Unknown` before the host
+/// accepts new work. Implementations should use a short transaction and must
+/// never delete or force-complete a live owner's attempt.
+pub trait RecoveryBackend: Send + Sync + 'static {
+    fn load_incomplete(&self) -> Result<Vec<RecoveryEntry>, RecoveryBackendError>;
+
+    fn mark_unknown(&self, operation_id: &str) -> Result<(), RecoveryBackendError>;
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum OperationError {
     InvalidId,
     Duplicate(OperationRecord),
+    HydrationConflict { operation_id: String },
 }
 
 impl fmt::Display for OperationError {
@@ -70,6 +133,12 @@ impl fmt::Display for OperationError {
                 "operation {:?} already exists in phase {:?}",
                 record.operation_id, record.phase
             ),
+            Self::HydrationConflict { operation_id } => {
+                write!(
+                    formatter,
+                    "durable recovery conflicts for operation {operation_id:?}"
+                )
+            }
         }
     }
 }
@@ -113,6 +182,38 @@ impl OperationRecovery {
                 recovered: false,
             },
         );
+        Ok(())
+    }
+
+    /// Hydrate process-side state from the application's durable operation
+    /// projection before a host begins accepting requests.
+    pub fn hydrate<I>(&self, entries: I) -> Result<(), OperationError>
+    where
+        I: IntoIterator<Item = RecoveryEntry>,
+    {
+        let mut records = self
+            .records
+            .lock()
+            .expect("operation journal mutex poisoned");
+        for entry in entries {
+            validate_operation_id(&entry.operation_id)?;
+            let hydrated = OperationRecord {
+                operation_id: entry.operation_id.clone(),
+                phase: entry.phase,
+                ticket: None,
+                revision: entry.revision,
+                recovered: false,
+            };
+            if let Some(existing) = records.get(&entry.operation_id) {
+                if existing.phase != hydrated.phase || existing.revision != hydrated.revision {
+                    return Err(OperationError::HydrationConflict {
+                        operation_id: entry.operation_id,
+                    });
+                }
+                continue;
+            }
+            records.insert(entry.operation_id, hydrated);
+        }
         Ok(())
     }
 
@@ -161,6 +262,17 @@ impl OperationRecovery {
         }
     }
 
+    pub(crate) fn mark_unknown(&self, operation_id: &str) {
+        if let Some(record) = self
+            .records
+            .lock()
+            .expect("operation journal mutex poisoned")
+            .get_mut(operation_id)
+        {
+            record.phase = OperationPhase::Unknown;
+        }
+    }
+
     pub(crate) fn remove(&self, operation_id: &str) {
         self.records
             .lock()
@@ -203,10 +315,19 @@ impl OperationRecovery {
                     record.recovered = true;
                     report.unknown.push(record.operation_id.clone());
                 }
-                OperationPhase::Committed | OperationPhase::Failed | OperationPhase::Unknown => {}
+                OperationPhase::Committed | OperationPhase::Failed => {}
+                OperationPhase::Unknown => report.unknown.push(record.operation_id.clone()),
             }
         }
         report
+    }
+}
+
+fn validate_operation_id(operation_id: &str) -> Result<(), OperationError> {
+    if operation_id.trim().is_empty() || operation_id.chars().any(char::is_control) {
+        Err(OperationError::InvalidId)
+    } else {
+        Ok(())
     }
 }
 

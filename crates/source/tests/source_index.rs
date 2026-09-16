@@ -150,6 +150,57 @@ fn retrieval_respects_result_and_excerpt_bounds() {
 }
 
 #[test]
+fn retrieval_never_serves_derived_text_after_blob_loss_or_tampering() {
+    let root = test_root("retrieval-integrity");
+    let catalog = SourceCatalog::with_filesystem(&root);
+    let version = catalog
+        .capture(
+            "project-a",
+            "docs/integrity.md",
+            b"canonical bytes must remain available",
+            "text/markdown",
+        )
+        .unwrap();
+    catalog
+        .parse_and_index(&version, DEFAULT_PARSER_IDENTITY)
+        .unwrap();
+    let store = boreal_source::FilesystemBlobStore::new(&root);
+    fs::remove_file(store.blob_path(&version.content_digest).unwrap()).unwrap();
+    assert_eq!(
+        catalog.retrieve(&RetrievalRequest::new("project-a", "canonical")),
+        Err(SourceError::MissingBlob)
+    );
+
+    catalog
+        .capture(
+            "project-a",
+            "docs/tampered.md",
+            b"tamper detection remains explicit",
+            "text/markdown",
+        )
+        .unwrap();
+    let tampered = catalog
+        .list_versions(Some("project-a"))
+        .unwrap()
+        .into_iter()
+        .find(|candidate| candidate.origin == "docs/tampered.md")
+        .unwrap();
+    catalog
+        .parse_and_index(&tampered, DEFAULT_PARSER_IDENTITY)
+        .unwrap();
+    fs::write(
+        store.blob_path(&tampered.content_digest).unwrap(),
+        b"not the captured bytes",
+    )
+    .unwrap();
+    assert_eq!(
+        catalog.retrieve(&RetrievalRequest::new("project-a", "tamper")),
+        Err(SourceError::DigestMismatch)
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn doctor_distinguishes_missing_and_corrupt_blobs_and_repair_keeps_them() {
     let root = test_root("doctor");
     let catalog = SourceCatalog::with_filesystem(&root);

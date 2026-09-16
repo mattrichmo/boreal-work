@@ -1,0 +1,61 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  rust:
+    name: Rust checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+      - name: Check contracts
+        run: python3 project/spec/validate_contracts.py
+      - name: Test workspace
+        run: cargo test --workspace --locked
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+  tui:
+    name: TypeScript TUI checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install pinned compiler
+        run: npm install --global typescript@5.4.5
+      - name: Typecheck
+        run: npm run typecheck --prefix apps/tui
+      - name: Test and build
+        run: npm test --prefix apps/tui
+
+  release-identity:
+    name: Release identity checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate release identity
+        run: python3 scripts/release/test_release_identity.py
+
+  package-smoke:
+    name: Package and install smoke test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install pinned TUI compiler
+        run: npm install --global typescript@5.4.5
+      - name: Build and install a clean prefix
+        run: scripts/release/package-smoke.sh

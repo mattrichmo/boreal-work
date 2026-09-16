@@ -7,15 +7,13 @@ use std::{
     io::{self, Write},
     path::{Component, Path, PathBuf},
     process::Command,
-    sync::Mutex,
+    thread,
     time::{SystemTime, UNIX_EPOCH},
 };
 
 pub const MANIFEST_SCHEMA_VERSION: &str = "boreal.memory_manifest.v1";
 pub const ENTRY_SCHEMA_VERSION: &str = "boreal.memory_entry.v1";
 pub const INDEX_SCHEMA_VERSION: &str = "boreal.memory_index.v1";
-
-static PUBLICATION_LOCK: Mutex<()> = Mutex::new(());
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Citation {
@@ -187,6 +185,18 @@ impl MemoryRoot {
         self.path.join("manifest.json")
     }
 
+    fn lock_path(&self) -> PathBuf {
+        let name = self
+            .path
+            .file_name()
+            .map(|value| value.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "memory".into());
+        self.path
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join(format!("{}.publication.lock", name))
+    }
+
     pub fn entry_path(&self, entry_id: &str) -> Result<PathBuf, MemoryError> {
         validate_segment(entry_id)?;
         self.checked_child(Path::new("notes").join(format!("{}.md", entry_id)))
@@ -257,12 +267,63 @@ impl PublicationManifest {
                 "entry project or state does not match manifest".into(),
             ));
         }
+        Self::with_entries(project_id, operation_id, vec![entry])
+    }
+
+    pub fn with_entries(
+        project_id: &str,
+        operation_id: &str,
+        entries: Vec<ManifestEntry>,
+    ) -> Result<Self, MemoryError> {
+        validate_segment(project_id)?;
+        validate_segment(operation_id)?;
+        if entries.is_empty() {
+            return Err(MemoryError::InvalidManifest(
+                "manifest has no entries".into(),
+            ));
+        }
+        let mut ids = Vec::with_capacity(entries.len());
+        for entry in &entries {
+            if entry.project_id != project_id || entry.state != PublicationState::Published {
+                return Err(MemoryError::InvalidManifest(
+                    "entry project or state does not match manifest".into(),
+                ));
+            }
+            if ids.iter().any(|id| id == &entry.memory_entry_id) {
+                return Err(MemoryError::InvalidManifest(
+                    "manifest contains duplicate entry identities".into(),
+                ));
+            }
+            ids.push(entry.memory_entry_id.clone());
+        }
         Ok(Self {
             project_id: project_id.to_owned(),
             operation_id: operation_id.to_owned(),
             manifest_identity: String::new(),
-            entries: vec![entry],
+            entries,
         })
+    }
+
+    /// Merge one reviewed publication into this manifest. Existing entries are
+    /// replaced by identity so an update creates a new Git revision without
+    /// dropping any other published entry.
+    pub fn merge_entry(
+        &self,
+        operation_id: &str,
+        entry: ManifestEntry,
+    ) -> Result<Self, MemoryError> {
+        validate_segment(operation_id)?;
+        validate_manifest_entry(&self.project_id, &entry)?;
+        let mut entries = self.entries.clone();
+        if let Some(existing) = entries
+            .iter_mut()
+            .find(|existing| existing.memory_entry_id == entry.memory_entry_id)
+        {
+            *existing = entry;
+        } else {
+            entries.push(entry);
+        }
+        Self::with_entries(&self.project_id, operation_id, entries)
     }
 
     pub fn identity(&self) -> String {
@@ -391,6 +452,11 @@ pub struct Publisher {
 
 impl Publisher {
     pub fn new(root: MemoryRoot) -> Result<Self, PublishError> {
+        // Construction may create the managed directories and initialize the
+        // Git repository. Those are publication-root mutations too, so they
+        // must use the same cross-process exclusion as `publish`; otherwise
+        // concurrent constructors can race inside `create_dir` or `git init`.
+        let _publication_lock = PublicationLock::acquire(&root)?;
         root.prepare().map_err(io_publish)?;
         ensure_git_repository(root.path())?;
         Ok(Self { root })
@@ -405,13 +471,25 @@ impl Publisher {
         draft: &Draft,
         operation_id: &str,
     ) -> Result<PublicationReceipt, PublishError> {
-        let _publication_guard = PUBLICATION_LOCK
-            .lock()
-            .map_err(|_| PublishError::Io("publication mutex was poisoned".into()))?;
+        self.publish_with_expected_base(draft, operation_id, None)
+    }
+
+    /// Publish against an optional expected manifest identity. `None` keeps
+    /// the convenience behavior of accepting the current base; `Some("")`
+    /// explicitly means that the root must not have a manifest. A non-empty
+    /// value must equal the current canonical manifest identity.
+    pub fn publish_with_expected_base(
+        &self,
+        draft: &Draft,
+        operation_id: &str,
+        expected_manifest_identity: Option<&str>,
+    ) -> Result<PublicationReceipt, PublishError> {
+        let _publication_lock = PublicationLock::acquire(&self.root)?;
         if draft.state != DraftState::Accepted {
             return Err(PublishError::DraftNotAccepted);
         }
         self.root.prepare().map_err(io_publish)?;
+        ensure_git_repository(self.root.path())?;
         validate_segment(operation_id)?;
         let markdown = render_published_markdown(draft)?;
         let content_digest = digest(markdown.as_bytes());
@@ -421,7 +499,61 @@ impl Publisher {
             content_digest.clone(),
             PublicationState::Published,
         );
-        let manifest = PublicationManifest::new(&draft.project_id, operation_id, entry)?;
+        let note_path = self.root.entry_path(&draft.entry_id).map_err(io_publish)?;
+        let manifest_path = self.root.manifest_path();
+        cleanup_publication_temps(self.root.path(), &note_path, &manifest_path)
+            .map_err(io_publish_io)?;
+        if let Some(receipt) = replay_committed_publication(&self.root, &entry)? {
+            let status = git_output(
+                self.root.path(),
+                &["status", "--porcelain", "--untracked-files=all"],
+            )?;
+            if !status.trim().is_empty() {
+                return Err(PublishError::Conflict(
+                    "managed memory root has uncommitted changes".into(),
+                ));
+            }
+            return Ok(receipt);
+        }
+        let current = read_worktree_manifest(&self.root)?;
+        let current_identity = current.as_ref().map(PublicationManifest::identity);
+        if let Some(expected) = expected_manifest_identity {
+            let actual = current_identity.as_deref().unwrap_or_default();
+            if actual != expected {
+                return Err(PublishError::Conflict(format!(
+                    "publication base changed: expected {}, found {}",
+                    if expected.is_empty() {
+                        "<empty>"
+                    } else {
+                        expected
+                    },
+                    if actual.is_empty() { "<empty>" } else { actual },
+                )));
+            }
+        }
+
+        let existing_entry = current.as_ref().and_then(|manifest| {
+            manifest
+                .entries
+                .iter()
+                .find(|candidate| candidate.memory_entry_id == entry.memory_entry_id)
+        });
+        let retrying_existing = existing_entry.is_some_and(|existing| {
+            existing.operation_id == entry.operation_id
+                && manifest_entries_equivalent(existing, &entry)
+        });
+        if let Some(existing) = existing_entry {
+            if existing.operation_id == entry.operation_id && !retrying_existing {
+                return Err(PublishError::Conflict(
+                    "publication operation was already used for different entry content".into(),
+                ));
+            }
+        }
+        let manifest = match current.as_ref() {
+            Some(current) if retrying_existing => current.clone(),
+            Some(current) => current.merge_entry(operation_id, entry.clone())?,
+            None => PublicationManifest::new(&draft.project_id, operation_id, entry.clone())?,
+        };
         let identity = PublicationIdentity {
             project_id: draft.project_id.clone(),
             entry_id: draft.entry_id.clone(),
@@ -430,10 +562,6 @@ impl Publisher {
             manifest_identity: manifest.identity(),
         };
         let manifest_text = render_manifest(&manifest);
-        let note_path = self.root.entry_path(&draft.entry_id).map_err(io_publish)?;
-        let manifest_path = self.root.manifest_path();
-        cleanup_publication_temps(self.root.path(), &note_path, &manifest_path)
-            .map_err(io_publish_io)?;
 
         let status = git_output(
             self.root.path(),
@@ -444,34 +572,37 @@ impl Publisher {
             && note_path.exists()
             && fs::read_to_string(&manifest_path).map_err(io_publish_io)? == manifest_text
             && fs::read_to_string(&note_path).map_err(io_publish_io)? == markdown;
-        if !status.trim().is_empty() && !status_only_managed(&status, &note_name) {
+        let status_is_clean = status.trim().is_empty();
+        let exact_interrupted_publication =
+            !status_is_clean && files_match && status_only_managed(&status, &note_name);
+        if !status_is_clean && !exact_interrupted_publication {
             return Err(PublishError::Conflict(
                 "managed memory root has uncommitted changes".into(),
             ));
         }
-        if manifest_path.exists() || note_path.exists() {
-            if files_match && status.trim().is_empty() {
-                let revision = git_output(self.root.path(), &["rev-parse", "HEAD"])?;
-                return Ok(PublicationReceipt {
-                    state: PublicationState::Published,
-                    identity,
-                    git_revision: revision.trim().to_owned(),
-                    duplicate: true,
-                });
-            }
-            if !files_match {
-                return Err(PublishError::Conflict(
-                    "existing memory files do not match the requested publication identity".into(),
-                ));
-            }
-        } else if !status.trim().is_empty() {
+        if files_match && status_is_clean {
+            let revision = git_output(self.root.path(), &["rev-parse", "HEAD"])?;
+            return Ok(PublicationReceipt {
+                state: PublicationState::Published,
+                identity,
+                git_revision: revision.trim().to_owned(),
+                duplicate: true,
+            });
+        }
+        let note_matches = note_path.exists()
+            && fs::read_to_string(&note_path).map_err(io_publish_io)? == markdown;
+        let replacing_existing_entry = existing_entry.is_some()
+            && existing_entry.is_some_and(|existing| existing.operation_id != operation_id);
+        if note_path.exists() && !note_matches && !replacing_existing_entry {
             return Err(PublishError::Conflict(
-                "managed memory root has unexpected staged changes".into(),
+                "existing memory note does not match the requested publication".into(),
             ));
         }
 
-        atomic_write(&note_path, markdown.as_bytes()).map_err(io_publish_io)?;
-        atomic_write(&manifest_path, manifest_text.as_bytes()).map_err(io_publish_io)?;
+        if !files_match {
+            atomic_write(&note_path, markdown.as_bytes()).map_err(io_publish_io)?;
+            atomic_write(&manifest_path, manifest_text.as_bytes()).map_err(io_publish_io)?;
+        }
         git_output(
             self.root.path(),
             &["add", "--", "manifest.json", note_name.as_str()],
@@ -530,6 +661,143 @@ impl Publisher {
         report.git_revision = git_checked_out_revision(self.root.path())?;
         Ok(report)
     }
+}
+
+/// Cross-process publication exclusion. The lock lives beside the managed
+/// Git repository so it can never appear as a staged memory file. We do not
+/// remove a lock owned by another process: a stale lock is an explicit
+/// operator/recovery condition rather than a reason to risk concurrent Git
+/// writes.
+struct PublicationLock {
+    path: PathBuf,
+}
+
+impl PublicationLock {
+    fn acquire(root: &MemoryRoot) -> Result<Self, PublishError> {
+        let path = root.lock_path();
+        let mut file = None;
+        for _ in 0..5_000 {
+            match OpenOptions::new().write(true).create_new(true).open(&path) {
+                Ok(value) => {
+                    file = Some(value);
+                    break;
+                }
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                    thread::sleep(std::time::Duration::from_millis(2));
+                }
+                Err(error) => return Err(PublishError::Io(error.to_string())),
+            }
+        }
+        let mut file = file.ok_or_else(|| {
+            PublishError::Conflict(
+                "another publication owns the memory root lock; retry after it exits".into(),
+            )
+        })?;
+        let owner = format!("pid={}\n", std::process::id());
+        if let Err(error) = file
+            .write_all(owner.as_bytes())
+            .and_then(|_| file.sync_all())
+        {
+            let _ = fs::remove_file(&path);
+            return Err(PublishError::Io(error.to_string()));
+        }
+        Ok(Self { path })
+    }
+}
+
+impl Drop for PublicationLock {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.path);
+    }
+}
+
+fn read_worktree_manifest(root: &MemoryRoot) -> Result<Option<PublicationManifest>, PublishError> {
+    let path = root.manifest_path();
+    if !path.exists() {
+        return Ok(None);
+    }
+    let text = fs::read_to_string(&path).map_err(io_publish_io)?;
+    parse_existing_manifest(&text).map(Some)
+}
+
+fn parse_existing_manifest(text: &str) -> Result<PublicationManifest, PublishError> {
+    let parsed = parse_manifest(text).map_err(|error| {
+        PublishError::Conflict(format!("existing manifest is invalid: {error}"))
+    })?;
+    let manifest = parsed.into_manifest().map_err(|error| {
+        PublishError::Conflict(format!("existing manifest is invalid: {error}"))
+    })?;
+    for entry in &manifest.entries {
+        validate_manifest_entry(&manifest.project_id, entry).map_err(|error| {
+            PublishError::Conflict(format!("existing manifest is invalid: {error}"))
+        })?;
+    }
+    if manifest.identity() != manifest.manifest_identity {
+        return Err(PublishError::Conflict(
+            "existing manifest identity does not match its canonical content".into(),
+        ));
+    }
+    Ok(manifest)
+}
+
+/// Resolve an already committed operation before considering a new mutation.
+/// The manifest's top-level operation identifies the commit produced for that
+/// logical publication; entry operation fields alone persist into later
+/// manifests and therefore cannot identify the original receipt.
+fn replay_committed_publication(
+    root: &MemoryRoot,
+    requested: &ManifestEntry,
+) -> Result<Option<PublicationReceipt>, PublishError> {
+    let commit_count = git_output(root.path(), &["rev-list", "--all", "--count"])?;
+    if commit_count.trim() == "0" {
+        return Ok(None);
+    }
+    let revisions = git_output(
+        root.path(),
+        &[
+            "log",
+            "--reverse",
+            "--format=%H",
+            "HEAD",
+            "--",
+            "manifest.json",
+        ],
+    )?;
+    let mut replay = None;
+    for revision in revisions.lines().filter(|revision| !revision.is_empty()) {
+        let text = git_output(root.path(), &["show", &format!("{revision}:manifest.json")])?;
+        let manifest = parse_existing_manifest(&text)?;
+        if manifest.operation_id != requested.operation_id {
+            continue;
+        }
+        let exact_entry = manifest.entries.iter().any(|entry| {
+            entry.operation_id == requested.operation_id
+                && manifest_entries_equivalent(entry, requested)
+        });
+        if !exact_entry {
+            return Err(PublishError::Conflict(
+                "publication operation was already used for different entry content".into(),
+            ));
+        }
+        if replay.is_some() {
+            return Err(PublishError::Conflict(
+                "publication operation resolves to more than one committed manifest".into(),
+            ));
+        }
+        replay = Some(PublicationReceipt {
+            state: PublicationState::Published,
+            identity: PublicationIdentity {
+                project_id: requested.project_id.clone(),
+                entry_id: requested.memory_entry_id.clone(),
+                content_digest: requested.content_digest.clone(),
+                operation_id: requested.operation_id.clone(),
+                manifest_identity: manifest.manifest_identity,
+            },
+            git_revision: revision.to_owned(),
+            duplicate: true,
+        });
+    }
+    Ok(replay)
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1393,6 +1661,56 @@ fn manifest_entry(
     }
 }
 
+fn validate_manifest_entry(project_id: &str, entry: &ManifestEntry) -> Result<(), MemoryError> {
+    validate_segment(&entry.memory_entry_id)?;
+    validate_segment(&entry.project_id)?;
+    validate_segment(&entry.operation_id)?;
+    if entry.project_id != project_id {
+        return Err(MemoryError::InvalidManifest(
+            "entry project does not match manifest".into(),
+        ));
+    }
+    if entry.state != PublicationState::Published || !entry.provenance_preserved {
+        return Err(MemoryError::InvalidManifest(
+            "published manifest entries must preserve provenance".into(),
+        ));
+    }
+    let expected_path = format!("notes/{}.md", entry.memory_entry_id);
+    let path = Path::new(&entry.manifest_path);
+    if entry.manifest_path != expected_path || path.is_absolute() || has_parent_component(path) {
+        return Err(MemoryError::InvalidPath);
+    }
+    if entry.source_citations.is_empty()
+        || entry
+            .source_citations
+            .iter()
+            .any(|citation| citation.is_empty())
+    {
+        return Err(MemoryError::MissingCitation);
+    }
+    Ok(())
+}
+
+fn manifest_entries_equivalent(left: &ManifestEntry, right: &ManifestEntry) -> bool {
+    if left.memory_entry_id != right.memory_entry_id
+        || left.project_id != right.project_id
+        || left.state != right.state
+        || left.content_digest != right.content_digest
+        || left.manifest_path != right.manifest_path
+        || left.operation_id != right.operation_id
+        || left.provenance_preserved != right.provenance_preserved
+    {
+        return false;
+    }
+    let mut left_citations = left.source_citations.clone();
+    let mut right_citations = right.source_citations.clone();
+    left_citations.sort();
+    left_citations.dedup();
+    right_citations.sort();
+    right_citations.dedup();
+    left_citations == right_citations
+}
+
 fn canonical_manifest_without_identity(manifest: &PublicationManifest) -> String {
     let mut entries = manifest.entries.clone();
     entries.sort_by(|left, right| left.memory_entry_id.cmp(&right.memory_entry_id));
@@ -1573,13 +1891,109 @@ fn json_string(value: &str) -> String {
     output
 }
 
-fn digest(bytes: &[u8]) -> String {
-    let mut hash: u64 = 0xcbf29ce484222325;
-    for byte in bytes {
-        hash = (hash ^ u64::from(*byte)).wrapping_mul(0x100000001b3);
+/// Stable content identity used by manifests, notes, and derived indexes.
+///
+/// This small dependency-free interface is intentionally kept local until the
+/// workspace can provide one shared digest crate without changing the
+/// bootstrap lockfile. It uses the same `sha256:<lowercase-hex>` identity
+/// shape as the source and protocol contracts; FNV is not suitable for
+/// provenance or publication identities.
+pub fn content_digest(bytes: &[u8]) -> String {
+    let mut state = [
+        0x6a09e667_u32,
+        0xbb67ae85_u32,
+        0x3c6ef372_u32,
+        0xa54ff53a_u32,
+        0x510e527f_u32,
+        0x9b05688c_u32,
+        0x1f83d9ab_u32,
+        0x5be0cd19_u32,
+    ];
+    let bit_length = (bytes.len() as u64).wrapping_mul(8);
+    let padded_len = (bytes.len() + 9).div_ceil(64) * 64;
+    let mut padded = Vec::with_capacity(padded_len);
+    padded.extend_from_slice(bytes);
+    padded.push(0x80);
+    padded.resize(padded_len - 8, 0);
+    padded.extend_from_slice(&bit_length.to_be_bytes());
+
+    for chunk in padded.chunks_exact(64) {
+        let mut words = [0_u32; 64];
+        for (index, word) in words[..16].iter_mut().enumerate() {
+            let offset = index * 4;
+            *word = u32::from_be_bytes([
+                chunk[offset],
+                chunk[offset + 1],
+                chunk[offset + 2],
+                chunk[offset + 3],
+            ]);
+        }
+        for index in 16..64 {
+            let s0 = words[index - 15].rotate_right(7)
+                ^ words[index - 15].rotate_right(18)
+                ^ (words[index - 15] >> 3);
+            let s1 = words[index - 2].rotate_right(17)
+                ^ words[index - 2].rotate_right(19)
+                ^ (words[index - 2] >> 10);
+            words[index] = words[index - 16]
+                .wrapping_add(s0)
+                .wrapping_add(words[index - 7])
+                .wrapping_add(s1);
+        }
+
+        let mut working = state;
+        for (index, constant) in SHA256_ROUND_CONSTANTS.iter().enumerate() {
+            let s1 = working[4].rotate_right(6)
+                ^ working[4].rotate_right(11)
+                ^ working[4].rotate_right(25);
+            let choice = (working[4] & working[5]) ^ ((!working[4]) & working[6]);
+            let temp1 = working[7]
+                .wrapping_add(s1)
+                .wrapping_add(choice)
+                .wrapping_add(*constant)
+                .wrapping_add(words[index]);
+            let s0 = working[0].rotate_right(2)
+                ^ working[0].rotate_right(13)
+                ^ working[0].rotate_right(22);
+            let majority =
+                (working[0] & working[1]) ^ (working[0] & working[2]) ^ (working[1] & working[2]);
+            let temp2 = s0.wrapping_add(majority);
+            working[7] = working[6];
+            working[6] = working[5];
+            working[5] = working[4];
+            working[4] = working[3].wrapping_add(temp1);
+            working[3] = working[2];
+            working[2] = working[1];
+            working[1] = working[0];
+            working[0] = temp1.wrapping_add(temp2);
+        }
+        for index in 0..8 {
+            state[index] = state[index].wrapping_add(working[index]);
+        }
     }
-    format!("fnv1a64:{:016x}", hash)
+
+    let mut hex = String::with_capacity(71);
+    hex.push_str("sha256:");
+    for word in state {
+        hex.push_str(&format!("{word:08x}"));
+    }
+    hex
 }
+
+fn digest(bytes: &[u8]) -> String {
+    content_digest(bytes)
+}
+
+const SHA256_ROUND_CONSTANTS: [u32; 64] = [
+    0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+    0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+    0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+    0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+    0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+    0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+    0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+    0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
+];
 
 fn io_publish(error: MemoryError) -> PublishError {
     PublishError::Io(error.to_string())
@@ -1747,6 +2161,15 @@ impl<'a> JsonParser<'a> {
                         b'n' => result.push('\n'),
                         b'r' => result.push('\r'),
                         b't' => result.push('\t'),
+                        b'u' => {
+                            let code_point = self.take_hex_code_point()?;
+                            let character = char::from_u32(code_point).ok_or_else(|| {
+                                ImportError::InvalidManifest(
+                                    "invalid Unicode escape in JSON string".into(),
+                                )
+                            })?;
+                            result.push(character);
+                        }
                         _ => {
                             return Err(ImportError::InvalidManifest(
                                 "unsupported JSON escape".into(),
@@ -1759,7 +2182,21 @@ impl<'a> JsonParser<'a> {
                         "control byte in JSON string".into(),
                     ))
                 }
-                byte => result.push(byte as char),
+                _byte => {
+                    let start = self.position - 1;
+                    let remaining = &self.bytes[start..];
+                    let character = std::str::from_utf8(remaining)
+                        .map_err(|_| {
+                            ImportError::InvalidManifest("invalid UTF-8 in JSON string".into())
+                        })?
+                        .chars()
+                        .next()
+                        .ok_or_else(|| {
+                            ImportError::InvalidManifest("invalid JSON string".into())
+                        })?;
+                    self.position = start + character.len_utf8();
+                    result.push(character);
+                }
             }
         }
         Err(ImportError::InvalidManifest(
@@ -1774,6 +2211,29 @@ impl<'a> JsonParser<'a> {
         } else {
             false
         }
+    }
+
+    fn take_hex_code_point(&mut self) -> Result<u32, ImportError> {
+        let mut value = 0_u32;
+        for _ in 0..4 {
+            let byte =
+                self.bytes.get(self.position).copied().ok_or_else(|| {
+                    ImportError::InvalidManifest("truncated Unicode escape".into())
+                })?;
+            self.position += 1;
+            let digit = match byte {
+                b'0'..=b'9' => u32::from(byte - b'0'),
+                b'a'..=b'f' => u32::from(byte - b'a' + 10),
+                b'A'..=b'F' => u32::from(byte - b'A' + 10),
+                _ => {
+                    return Err(ImportError::InvalidManifest(
+                        "invalid Unicode escape".into(),
+                    ))
+                }
+            };
+            value = (value << 4) | digit;
+        }
+        Ok(value)
     }
 
     fn consume(&mut self, expected: u8) -> bool {
@@ -1841,6 +2301,13 @@ fn parse_manifest(text: &str) -> Result<ParsedManifest, ImportError> {
 }
 
 impl ParsedManifest {
+    fn into_manifest(self) -> Result<PublicationManifest, MemoryError> {
+        let mut manifest =
+            PublicationManifest::with_entries(&self.project_id, &self.operation_id, self.entries)?;
+        manifest.manifest_identity = self.manifest_identity;
+        Ok(manifest)
+    }
+
     fn identity(&self) -> String {
         PublicationManifest {
             project_id: self.project_id.clone(),

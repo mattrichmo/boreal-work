@@ -26,6 +26,66 @@ working v1 command with meaningful user impact requires an explicit
 keep/rework/defer disposition in the P0-04 parity inventory; omission is not
 approval to delete the behavior.
 
+## Current dashboard composition
+
+The current v2 snapshot has a composed, one-command dashboard path. From a
+project directory with an existing `.boreal/boreal.sqlite`, the normal user
+entry point is:
+
+```sh
+bwrk dashboard
+```
+
+The accepted context forms are `bwrk dashboard [PROJECT]`,
+`bwrk dashboard --project PROJECT`, and `bwrk dashboard --db PATH` with the
+same actor, harness, session, and optional work context flags shown in the
+CLI help. In interactive mode the CLI resolves the existing database and
+project, starts a private supervised Rust service, launches the packaged or
+development TUI, forwards the TUI result, and attempts to clean up the managed
+runtime. Normal-exit cleanup is covered by the current launcher smoke tests;
+cleanup/readiness behavior across every startup and signal failure path is
+still release hardening.
+No separate `service run` terminal is required for ordinary dashboard use.
+
+`bwrk dashboard --json` is the non-interactive branch. It reads the canonical
+derived status projection and emits the versioned envelope without launching a
+TUI or private service. The database must already exist; dashboard is not an
+initialization command. Without an explicit project, the current launcher
+checks `BOREAL_PROJECT`/`BOREAL_PROJECT_ID`, metadata files beside the selected
+database (`project-id`, `project`, or `project.json`), and then accepts the
+database only when it contains exactly one project. Multiple or ambiguous
+identifiers require `--project`. It does not yet search the current directory
+and its ancestors for project metadata when `--db` points elsewhere.
+
+`bwrk view` is an implemented exact top-level compatibility alias for
+`bwrk dashboard`; use `bwrk view --project PROJECT` when selecting a project.
+The positional `view PROJECT` form is not part of the current parser surface.
+`bwrk dashboard --socket PATH` is rejected because dashboard owns its private
+endpoint and does not attach to or reuse an already-running service. Do not
+run a separate `service run` against the same database while launching
+dashboard. Use `service run` plus a separately connected client only for a
+shared-agent or protocol-debugging session.
+
+The direct TUI invocation is a developer/debug seam, not the normal product
+entry point. It requires an already-running service and an explicit socket,
+for example:
+
+```sh
+npm --prefix apps/tui run start -- \
+  --socket /path/to/service.sock \
+  --project PROJECT \
+  --actor ACTOR \
+  --harness HARNESS \
+  --session SESSION \
+  --interactive
+```
+
+The TUI remains a client of the Rust service and never opens SQLite directly.
+The dashboard command currently supplies the composition and cleanup that this
+developer path leaves to the caller. A working dashboard command does not
+claim that the full v1 sprint, history, source, memory, or operator surface has
+already been ported; those capabilities retain their dispositions below.
+
 ## Non-negotiable command behavior
 
 - Every `--json` result uses one versioned envelope with transport outcome,
@@ -168,13 +228,15 @@ provenance must survive migration.
 | `bwrk doctor` / `bwrk doctor skills` | Keep spelling | Read-only health diagnostics by default; explicit idempotent repair cannot weaken integrity. |
 | `bwrk sync status` | Keep spelling | Read-only collaboration/projection health, distinct from agent or sprint status. |
 | `bwrk sync refresh` | Keep spelling | Explicit derived-artifact refresh without claiming to repair canonical corruption. |
-| `bwrk dashboard` | Keep spelling | Human/TUI project overview from the same revisioned read model. |
+| `bwrk dashboard [PROJECT]` | Keep spelling | One-terminal human/TUI project overview from the same revisioned read model; interactive mode privately supervises the service/TUI, while `--json` is a direct non-interactive status read. |
 
 `bwrk install` is a v1 alias/convenience family for setup and adapter/skill
 installation; retain the relevant compatibility behavior, not a second
-initializer. `bwrk view` aliases `dashboard`. `directives compile/render/explain`
-and acknowledgement/debug tooling belong in the P0 parity matrix and can be
-ported with the directive registry, but are not routine agent steps.
+initializer. `bwrk view` is the implemented exact top-level alias for
+`dashboard`; its positional-project form is not currently accepted.
+`directives compile/render/explain` and acknowledgement/debug tooling belong
+in the P0 parity matrix and can be ported with the directive registry, but are
+not routine agent steps.
 
 ## New v2 commands or API operations—not observed v1 paths
 

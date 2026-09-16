@@ -3,6 +3,14 @@ name = "boreal-cli"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+description = "Boreal Work v2 command-line client and local service host"
+repository = "https://github.com/mattrichmo/boreal-work"
+homepage = "https://github.com/mattrichmo/boreal-work"
+readme = "../../README.md"
+
+[[bin]]
+name = "bwrk"
+path = "src/main.rs"
 
 [dependencies]
 boreal-application = { path = "../application" }

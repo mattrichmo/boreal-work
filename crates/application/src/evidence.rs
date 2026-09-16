@@ -351,6 +351,33 @@ impl ReceiptPayload {
         expected: &ReceiptExpectation,
     ) -> Result<(), EvidenceValidationError> {
         self.validate()?;
+        self.validate_context_for(expected)?;
+        if expected.gate.requires_attestation && !self.attestation.is_gate_trusted() {
+            return Err(EvidenceValidationError::new(
+                EvidenceErrorCode::ReceiptAttestationMissing,
+            ));
+        }
+        self.validate_observables(expected)?;
+        self.validate_passed_result()
+    }
+
+    /// Validate an imported fact against the current subject and policy
+    /// context without granting it witnessed authority. Imported failed facts
+    /// remain retainable even when their attestation or observable claims are
+    /// not trusted; the durable façade must downgrade an untrusted `Passed`
+    /// result before persisting it.
+    pub fn validate_for_import(
+        &self,
+        expected: &ReceiptExpectation,
+    ) -> Result<(), EvidenceValidationError> {
+        self.validate()?;
+        self.validate_context_for(expected)
+    }
+
+    fn validate_context_for(
+        &self,
+        expected: &ReceiptExpectation,
+    ) -> Result<(), EvidenceValidationError> {
         if self.work_id != expected.work_id {
             return Err(EvidenceValidationError::new(
                 EvidenceErrorCode::ReceiptSubjectMismatch,
@@ -393,11 +420,13 @@ impl ReceiptPayload {
                 ));
             }
         }
-        if expected.gate.requires_attestation && !self.attestation.is_gate_trusted() {
-            return Err(EvidenceValidationError::new(
-                EvidenceErrorCode::ReceiptAttestationMissing,
-            ));
-        }
+        Ok(())
+    }
+
+    fn validate_observables(
+        &self,
+        expected: &ReceiptExpectation,
+    ) -> Result<(), EvidenceValidationError> {
         if expected.gate.required_observables.iter().any(|required| {
             !self
                 .coverage
@@ -409,6 +438,10 @@ impl ReceiptPayload {
                 EvidenceErrorCode::ReceiptObservableMissing,
             ));
         }
+        Ok(())
+    }
+
+    fn validate_passed_result(&self) -> Result<(), EvidenceValidationError> {
         if self.result == ReceiptResult::Passed && self.exit_code != 0 {
             return Err(EvidenceValidationError::new(
                 EvidenceErrorCode::ReceiptExitNonzero,
@@ -825,6 +858,32 @@ pub struct SummaryPayload {
     pub body_size: u64,
 }
 
+impl SummaryPayload {
+    pub fn validate(&self) -> Result<(), EvidenceValidationError> {
+        if self.summary_id.trim().is_empty()
+            || self.work_id.as_str().trim().is_empty()
+            || self.attempt_id.as_str().trim().is_empty()
+            || self.fence.get() == 0
+            || self.source_snapshot_hash.as_str().trim().is_empty()
+            || self.config_identity.as_str().trim().is_empty()
+            || self.profile_id.as_str().trim().is_empty()
+            || self
+                .profile_version
+                .parse::<u64>()
+                .ok()
+                .is_none_or(|version| version == 0)
+            || self.body_size == 0
+            || self.body_size > MAX_OUTPUT_BYTES
+            || !valid_summary_digest(&self.body_digest)
+        {
+            return Err(EvidenceValidationError::new(
+                EvidenceErrorCode::SummaryInvalid,
+            ));
+        }
+        Ok(())
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CloseIntent {
     pub work_id: WorkId,
@@ -846,6 +905,11 @@ pub struct CloseoutInput {
     pub source_snapshot_hash: SourceVersionId,
     pub config_identity: ConfigIdentity,
     pub policy_version: String,
+    /// Immutable receipt facts for the current attempt. `gates` is retained
+    /// as a compatibility/read-model field, but close readiness must be
+    /// derived from these receipts rather than trusting caller-supplied gate
+    /// states.
+    pub receipts: Vec<ReceiptPayload>,
     pub gates: Vec<AcceptanceGateResult>,
     pub review: Option<ReviewDecisionRequest>,
     pub summary: Option<SummaryPayload>,
@@ -856,6 +920,7 @@ pub type CloseReadinessInput = CloseoutInput;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum CloseoutGap {
+    AttemptNotCurrent,
     AttemptNotVerifying,
     StaleFence,
     GateUnsatisfied(GateId),
@@ -870,6 +935,7 @@ pub enum CloseoutGap {
 impl CloseoutGap {
     pub fn code(&self) -> &'static str {
         match self {
+            Self::AttemptNotCurrent => "attempt_not_current",
             Self::AttemptNotVerifying => "attempt_not_verifying",
             Self::StaleFence => "stale_fence",
             Self::GateUnsatisfied(_) => "gate_unsatisfied",
@@ -919,6 +985,9 @@ pub fn evaluate_close_readiness(
     if input.attempt.work_id != input.work_id || input.attempt.fence != input.expected_fence {
         gaps.push(CloseoutGap::StaleFence);
     }
+    if !input.attempt.current {
+        gaps.push(CloseoutGap::AttemptNotCurrent);
+    }
     if !matches!(
         input.attempt.phase,
         AttemptPhase::Verifying | AttemptPhase::Completed
@@ -935,10 +1004,17 @@ pub fn evaluate_close_readiness(
         }
     }
 
+    let base = ReceiptExpectationBase {
+        work_id: input.work_id.clone(),
+        attempt_id: input.attempt.attempt_id.clone(),
+        fence: input.expected_fence,
+        source_snapshot_hash: input.source_snapshot_hash.clone(),
+        config_identity: input.config_identity.clone(),
+    };
+    let evaluated = evaluate_acceptance(&input.definition, &input.receipts, &base)?;
     let mut definitions = input.definition.gates.clone();
     definitions.sort_by(|left, right| left.id.cmp(&right.id));
-    let mut results = input.gates.clone();
-    results.sort_by(|left, right| left.gate_id.cmp(&right.gate_id));
+    let results = evaluated.gates;
     for gate in definitions.iter().filter(|gate| gate.required) {
         if Some(gate.id.clone()) == review_gate.map(|value| value.id.clone()) {
             match &input.review {
@@ -1010,7 +1086,7 @@ fn close_intent_matches(intent: &CloseIntent, input: &CloseoutInput) -> bool {
 }
 
 fn summary_matches(summary: &SummaryPayload, input: &CloseoutInput) -> bool {
-    !summary.summary_id.is_empty()
+    summary.validate().is_ok()
         && summary.work_id == input.work_id
         && summary.attempt_id == input.attempt.attempt_id
         && summary.fence == input.expected_fence
@@ -1018,7 +1094,15 @@ fn summary_matches(summary: &SummaryPayload, input: &CloseoutInput) -> bool {
         && summary.config_identity == input.config_identity
         && summary.profile_id == input.definition.id
         && summary.profile_version == input.definition.version
-        && !summary.body_digest.is_empty()
+}
+
+fn valid_summary_digest(value: &str) -> bool {
+    value.strip_prefix("sha256:").is_some_and(|digest| {
+        digest.len() == 64
+            && digest
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+    })
 }
 
 fn close_gap_id(gap: &CloseoutGap) -> &str {
@@ -1084,12 +1168,14 @@ pub enum EvidenceErrorCode {
     ReceiptPolicyMismatch,
     ReceiptCommandMismatch,
     ReceiptAttestationMissing,
+    WitnessedReceiptImportDenied,
     ReceiptObservableMissing,
     ReceiptExitNonzero,
     ReviewGateNotRequired,
     ReviewerRoleDenied,
     ReviewerCannotReviewOwnAttempt,
     ReviewInvalid,
+    SummaryInvalid,
 }
 
 impl EvidenceErrorCode {
@@ -1108,12 +1194,14 @@ impl EvidenceErrorCode {
             Self::ReceiptPolicyMismatch => "receipt_policy_mismatch",
             Self::ReceiptCommandMismatch => "receipt_command_mismatch",
             Self::ReceiptAttestationMissing => "receipt_attestation_missing",
+            Self::WitnessedReceiptImportDenied => "witnessed_receipt_import_denied",
             Self::ReceiptObservableMissing => "receipt_observable_missing",
             Self::ReceiptExitNonzero => "receipt_exit_nonzero",
             Self::ReviewGateNotRequired => "review_gate_not_required",
             Self::ReviewerRoleDenied => "role_denied",
             Self::ReviewerCannotReviewOwnAttempt => "reviewer_cannot_review_own_attempt",
             Self::ReviewInvalid => "review_invalid",
+            Self::SummaryInvalid => "summary_invalid",
         }
     }
 }
@@ -1124,7 +1212,7 @@ pub struct EvidenceValidationError {
 }
 
 impl EvidenceValidationError {
-    const fn new(code: EvidenceErrorCode) -> Self {
+    pub(crate) const fn new(code: EvidenceErrorCode) -> Self {
         Self { code }
     }
 
@@ -1177,6 +1265,9 @@ impl std::fmt::Display for EvidenceValidationError {
             EvidenceErrorCode::ReceiptAttestationMissing => {
                 "The receipt lacks the required executor attestation."
             }
+            EvidenceErrorCode::WitnessedReceiptImportDenied => {
+                "A witnessed receipt must be committed by the trusted execution path."
+            }
             EvidenceErrorCode::ReceiptObservableMissing => {
                 "The receipt does not contain the required observable coverage."
             }
@@ -1192,6 +1283,9 @@ impl std::fmt::Display for EvidenceValidationError {
             }
             EvidenceErrorCode::ReviewInvalid => {
                 "The review decision is missing a required typed field."
+            }
+            EvidenceErrorCode::SummaryInvalid => {
+                "The summary is missing a required field or has an invalid body digest or size."
             }
         })
     }
@@ -1285,6 +1379,24 @@ mod tests {
             attestation: ExecutorAttestation::BorealWitnessed,
             result,
         }
+    }
+
+    fn passed_receipts(definition: &AcceptanceDefinition) -> Vec<ReceiptPayload> {
+        definition
+            .gates
+            .iter()
+            .enumerate()
+            .map(|(index, gate)| {
+                let mut value = receipt(ReceiptResult::Passed);
+                value.receipt_id = ReceiptId::new(format!("receipt-{}", gate.id.as_str()));
+                value.gate_id = gate.id.clone();
+                value.coverage.kind = gate.kind;
+                value.coverage.profile_id = definition.id.clone();
+                value.coverage.profile_version = definition.version.clone();
+                value.operation_id = OperationId::new(format!("operation-{index}"));
+                value
+            })
+            .collect()
     }
 
     fn run_request() -> EvidenceRunRequest {
@@ -1489,7 +1601,8 @@ mod tests {
             config_identity: ConfigIdentity::new("config-1"),
             profile_id: definition.id.clone(),
             profile_version: definition.version.clone(),
-            body_digest: "sha256:summary".to_owned(),
+            body_digest: "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+                .to_owned(),
             body_size: 10,
         }
     }
@@ -1505,6 +1618,7 @@ mod tests {
             source_snapshot_hash: SourceVersionId::new("source-1"),
             config_identity: ConfigIdentity::new("config-1"),
             policy_version: "v1".to_owned(),
+            receipts: vec![],
             gates: vec![],
             review: None,
             summary: None,
@@ -1513,6 +1627,7 @@ mod tests {
         let not_ready = evaluate_close_readiness(&input).unwrap();
         assert!(!not_ready.is_ready());
         assert_eq!(not_ready.gaps[0].code(), "close_intent_missing");
+        input.receipts = passed_receipts(&definition);
         input.gates = definition
             .gates
             .iter()
@@ -1596,6 +1711,7 @@ mod tests {
             source_snapshot_hash: SourceVersionId::new("source-1"),
             config_identity: ConfigIdentity::new("config-1"),
             policy_version: "v1".to_owned(),
+            receipts: passed_receipts(&definition),
             gates,
             review: None,
             summary: Some(summary(&definition)),

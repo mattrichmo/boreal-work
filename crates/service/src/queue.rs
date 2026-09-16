@@ -140,24 +140,34 @@ impl<T> FairWriterQueue<T> {
 
     /// Admit one item without waiting for a writer.
     pub fn try_push(&self, item: T) -> Result<QueueTicket, EnqueueError> {
+        self.try_push_recoverable(item).map_err(|(error, _)| error)
+    }
+
+    /// Admit one item without waiting, returning the item on rejection.
+    ///
+    /// Network-facing dispatchers use this form so a typed busy response can
+    /// still be written to a just-accepted connection when the bounded queue
+    /// is saturated.
+    pub fn try_push_recoverable(&self, item: T) -> Result<QueueTicket, (EnqueueError, T)> {
         let mut state = self.state.lock().expect("writer queue mutex poisoned");
         if state.closed {
-            return Err(EnqueueError::Closed);
+            return Err((EnqueueError::Closed, item));
         }
         if state.items.len() == self.capacity {
-            return Err(EnqueueError::Busy(BusyOutcome::WriterQueueFull {
-                capacity: self.capacity,
-                depth: state.items.len(),
-                retry_after_ms: 1,
-            }));
+            return Err((
+                EnqueueError::Busy(BusyOutcome::WriterQueueFull {
+                    capacity: self.capacity,
+                    depth: state.items.len(),
+                    retry_after_ms: 1,
+                }),
+                item,
+            ));
         }
 
-        let ticket = QueueTicket(
-            state
-                .next_ticket
-                .checked_add(1)
-                .ok_or(EnqueueError::TicketExhausted)?,
-        );
+        let Some(next_ticket) = state.next_ticket.checked_add(1) else {
+            return Err((EnqueueError::TicketExhausted, item));
+        };
+        let ticket = QueueTicket(next_ticket);
         state.next_ticket += 1;
         state.items.push_back(QueuedWrite {
             ticket,

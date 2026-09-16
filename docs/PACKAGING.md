@@ -1,5 +1,40 @@
 # P4-05 packaging and release identity
 
+The public package is a platform-specific `bwrk` archive containing the Rust
+CLI/service host and the compiled TypeScript TUI. Homebrew and the direct
+installer consume the same GitHub Release archive.
+
+## Build a release archive
+
+From the repository root, with Rust, Node.js, npm, and `tsc` available:
+
+```sh
+python3 scripts/release/build_release.py \
+  --version 0.2.0 \
+  --target aarch64-apple-darwin \
+  --output-dir /tmp/boreal-release
+```
+
+The builder runs the locked Rust release build and `npm run build` for the TUI,
+then stages this install layout:
+
+```text
+bin/bwrk
+lib/boreal/tui/*.js
+share/boreal/release.json
+share/boreal/LICENSE
+```
+
+It creates a normalized `bwrk-vX.Y.Z-TARGET.tar.gz`, a per-target release
+manifest, and `SHA256SUMS`. The archive metadata is normalized so two builds
+of the same staged payload produce the same archive bytes.
+
+The complete local build/install check is:
+
+```sh
+scripts/release/package-smoke.sh
+```
+
 The release helper in `scripts/release/release_identity.py` is a dependency-
 light, standard-library-only boundary for the checked-in v2 contract assets.
 It produces a deterministic JSON identity with no clock, host, or build-path
@@ -18,7 +53,7 @@ The manifest records these versioned components:
 | `directive` | `project/spec/guidance/directive-registry.json` | checked-in guidance assets |
 | `workflow` | `project/spec/workflows/package.json` | checked-in workflow assets |
 
-## Exact commands
+## Contract identity commands
 
 Run these commands from the v2 package root (the repository root). Keep the
 generated release manifest outside the checkout when checking a working tree;
@@ -70,18 +105,17 @@ rm -rf "$staging_dir"
 
 ## Scope and limitations
 
-This is the bounded P4-05 identity/install rehearsal, not a complete release
-pipeline. It does not compile Rust, hash platform binaries, resolve a TUI
-package, create archives, sign artifacts, contact a registry, update a live
-installation, pause active attempts, or migrate a project database. It does
-not prove service restart, upgrade compatibility, migration rollback, or
-cross-platform executable behavior. Cargo's workspace package version is read
-from `Cargo.toml`, while `Cargo.lock`, source code, generated build output, and
-the TUI are outside this asset identity by design and must be covered by the
-later combined release gate.
+`release_identity.py` remains the dependency-light contract-asset identity
+boundary; it intentionally does not hash generated binaries or TUI output.
+`build_release.py` adds those generated assets, records Rust/Node/TypeScript
+toolchain versions, and creates the archive. The current process still does
+not sign artifacts, contact a registry, publish a Homebrew tap automatically,
+pause active attempts during an upgrade, or migrate a project database.
+Those behaviors remain part of the P4/P5 compatibility and cutover gates.
 
-The simulation is deliberately not an installer: its live target and rollback
-backup are synthetic directories inside a caller-created temp directory. A
-real install/update implementation must add atomic executable replacement,
-active-attempt compatibility checks, backups, interruption recovery, signing,
-and platform-specific tests before P4-05/P5 cutover can be closed.
+The identity simulation is deliberately not a live installer: its target and
+rollback backup are synthetic directories inside a caller-created temp
+directory. `install.sh` is the real archive installer and performs a bounded,
+backup-preserving replacement under the selected prefix. Active-attempt
+compatibility checks, signing, and full platform-specific upgrade/recovery
+tests remain release-gate work.

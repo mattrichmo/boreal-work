@@ -1,9 +1,9 @@
 use boreal_application::{
-    guide_checked, AcceptanceGateDefinition, ApplicationError, AttemptPolicy, AttemptRequest,
-    BoundedExecutionResult, CommandSpec, EndAttemptRequest, EvidenceExecutionOutcome,
-    EvidenceRunRequest, ExecutorAttestation, LivenessMetadata, OperationResult, ReceiptCoverage,
-    ReceiptExpectation, ReceiptPayload, SessionRegistrationRequest, SqliteAttemptAdapter,
-    WorkApplication,
+    canonical_request_digest, guide_checked, sha256_content_digest, AcceptanceGateDefinition,
+    ApplicationError, AttemptPolicy, AttemptRequest, BoundedExecutionResult, CommandSpec,
+    EndAttemptRequest, EvidenceExecutionOutcome, EvidenceRunRequest, ExecutorAttestation,
+    LivenessMetadata, OperationResult, ReceiptCoverage, ReceiptExpectation, ReceiptPayload,
+    SessionRegistrationRequest, SqliteAttemptAdapter, SummaryPayload, WorkApplication,
 };
 use boreal_domain::{
     AcceptanceProfile, ActorId, AttemptId, AttemptPhase, ConfigIdentity, DispatchPolicy, Fence,
@@ -22,13 +22,18 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use std::{
     env, fs,
-    io::Read,
+    io::{Read, Write},
     path::{Path, PathBuf},
-    process::{Command, ExitCode, Stdio},
+    process::{Command, ExitCode, ExitStatus, Stdio},
+    sync::{
+        atomic::{AtomicBool, AtomicU64, Ordering},
+        Arc,
+    },
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
+mod dashboard;
 mod service;
 
 const SCHEMA: &str = include_str!("../../../project/spec/schema-v2.sql");
@@ -38,7 +43,28 @@ const DEFAULT_HARNESS: &str = "cli";
 const DEFAULT_SESSION: &str = "session-cli";
 const MAX_GATE_RUNTIME_MS: u64 = 30_000;
 const GATE_COMMANDS_DIR: &str = "gates";
-const HELP: &str = "bwrk v2\n\nUsage:\n  bwrk init <project> [--db PATH] [--json]\n  bwrk service run --db PATH --socket PATH [--max-requests N] [--json]\n  bwrk status <project> [--limit N] [--offset N] [--socket PATH] [--db PATH] [--json]\n  bwrk dashboard <project> [--db PATH] [--json]\n  bwrk work create <project> <work-id> <title> [--db PATH] [--json]\n  bwrk work list <project> [--limit N] [--offset N] [--db PATH] [--json]\n  bwrk work show <project> <work-id> [--db PATH] [--json]\n  bwrk work claim <project> <work-id> [--session SESSION_ID] [--lease-ttl DURATION] [--time-limit DURATION] [--socket PATH] [--db PATH] [--json]\n  bwrk agent guide [--project PROJECT] [--work WORK_ID] [--json]\n  bwrk next [--project PROJECT] [--work WORK_ID] [--json]\n  bwrk agent start [WORK_ID] [--project PROJECT] [--session SESSION_ID] [--lease-ttl DURATION] [--time-limit DURATION] [--socket PATH] [--json]\n  bwrk agent resume --project PROJECT --session SESSION_ID --attempt ATTEMPT_ID [--json]\n  bwrk agent release WORK_ID --project PROJECT --attempt ATTEMPT_ID --fence N [--socket PATH] [--reason CODE] [--json]\n  bwrk agent finish WORK_ID --close --project PROJECT --attempt ATTEMPT_ID --fence N --receipt PATH [--socket PATH] [--json]\n  bwrk agent finish WORK_ID --release --project PROJECT --attempt ATTEMPT_ID --fence N [--socket PATH] [--reason CODE] [--json]\n  bwrk evidence run --project PROJECT --work WORK_ID --gate GATE_ID [--attempt ATTEMPT_ID --fence N] [--json]\n  bwrk evidence add --project PROJECT --work WORK_ID --gate GATE_ID --receipt PATH [--json]";
+static OPERATION_COUNTER: AtomicU64 = AtomicU64::new(0);
+const HELP: &str = r#"bwrk v2
+
+Usage:
+  bwrk init <project> [--db PATH] [--json]
+  bwrk service run --db PATH --socket PATH [--max-requests N] [--json]
+  bwrk status <project> [--limit N] [--offset N] [--socket PATH] [--db PATH] [--json]
+  bwrk dashboard [PROJECT] [--project PROJECT] [--db PATH] [--actor ID] [--harness ID] [--session ID] [--json]
+  bwrk work create <project> <work-id> <title> [--kind milestone|sprint|task] [--parent WORK_ID] [--priority N] [--description TEXT] [--db PATH] [--json]
+  bwrk work list <project> [--limit N] [--offset N] [--db PATH] [--json]
+  bwrk work show <project> <work-id> [--db PATH] [--json]
+  bwrk work claim <project> <work-id> [--session SESSION_ID] [--lease-ttl DURATION] [--time-limit DURATION] [--socket PATH] [--db PATH] [--json]
+  bwrk agent guide [--project PROJECT] [--work WORK_ID] [--json]
+  bwrk next [--project PROJECT] [--work WORK_ID] [--json]
+  bwrk agent start [WORK_ID] [--project PROJECT] [--session SESSION_ID] [--lease-ttl DURATION] [--time-limit DURATION] [--socket PATH] [--json]
+  bwrk agent resume --project PROJECT --session SESSION_ID --attempt ATTEMPT_ID [--json]
+  bwrk agent release WORK_ID --project PROJECT --attempt ATTEMPT_ID --fence N [--socket PATH] [--reason CODE] [--json]
+  bwrk agent finish WORK_ID --close --project PROJECT --attempt ATTEMPT_ID --fence N --receipt PATH --summary PATH [--socket PATH] [--json]
+  bwrk agent finish WORK_ID --release --project PROJECT --attempt ATTEMPT_ID --fence N [--socket PATH] [--reason CODE] [--json]
+  bwrk evidence run --project PROJECT --work WORK_ID --gate GATE_ID [--attempt ATTEMPT_ID --fence N] [--json]
+  bwrk evidence add --project PROJECT --work WORK_ID --gate GATE_ID --receipt PATH [--json]
+  bwrk operation show PROJECT OPERATION_ID [--socket PATH] [--json]"#;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct CliOptions {
@@ -56,6 +82,7 @@ struct CliOptions {
     work: Option<String>,
     gate: Option<String>,
     receipt: Option<String>,
+    summary: Option<String>,
     reason: Option<String>,
     lease_ttl_ms: Option<u64>,
     time_limit_ms: Option<u64>,
@@ -66,6 +93,12 @@ struct CliOptions {
     limit: Option<u64>,
     offset: Option<u64>,
     max_requests: Option<usize>,
+    kind: Option<String>,
+    parent: Option<String>,
+    description: Option<String>,
+    priority: Option<u8>,
+    source_version: Option<String>,
+    config_identity: Option<String>,
     positionals: Vec<String>,
 }
 
@@ -86,6 +119,7 @@ impl Default for CliOptions {
             work: None,
             gate: None,
             receipt: None,
+            summary: None,
             reason: None,
             lease_ttl_ms: None,
             time_limit_ms: None,
@@ -96,6 +130,12 @@ impl Default for CliOptions {
             limit: None,
             offset: None,
             max_requests: None,
+            kind: None,
+            parent: None,
+            description: None,
+            priority: None,
+            source_version: None,
+            config_identity: None,
             positionals: Vec::new(),
         }
     }
@@ -148,41 +188,57 @@ fn main() -> ExitCode {
         return ExitCode::SUCCESS;
     }
     if args.iter().any(|arg| arg == "--version") {
-        println!("bwrk {API_VERSION}");
+        println!("bwrk {} (api {})", env!("CARGO_PKG_VERSION"), API_VERSION);
         return ExitCode::SUCCESS;
     }
     let json_output = args.iter().any(|arg| arg == "--json");
+    let interactive_dashboard =
+        !json_output && parse(&args).is_ok_and(|parsed| parsed.path == ["dashboard"]);
     let operation = operation_id(&args);
-    match run(&args) {
+    match run_with_operation(&args, &operation) {
         Ok(result) => {
+            let has_data = result.data.is_some();
+            let application_error = result_protocol_error(&result, &operation);
             if json_output {
                 print_envelope(
                     operation,
                     result.revision,
                     result.outcome,
                     result.data,
-                    None,
+                    application_error.clone(),
                 );
-            } else if let Some(data) = result.data {
-                println!("{}", serde_json::to_string_pretty(&data).unwrap());
-            } else {
-                println!("ok");
+            } else if !interactive_dashboard {
+                if let Some(data) = result.data {
+                    println!("{}", serde_json::to_string_pretty(&data).unwrap());
+                }
             }
-            ExitCode::SUCCESS
+            if result.outcome.is_success() {
+                if !json_output && !has_data && !interactive_dashboard {
+                    println!("ok");
+                }
+                ExitCode::SUCCESS
+            } else {
+                if !json_output {
+                    let error = application_error
+                        .as_ref()
+                        .expect("unsuccessful outcomes require a protocol error");
+                    eprintln!("error [{}]: {}", error.code, error.message);
+                }
+                let code = application_error
+                    .as_ref()
+                    .map_or_else(|| outcome_error_code(result.outcome), |error| error.code);
+                ExitCode::from(exit_code(code))
+            }
         }
         Err(error) => {
             if json_output {
-                print_envelope(
-                    operation,
-                    None,
-                    error.outcome,
-                    None,
-                    Some(ProtocolError::new(
-                        error.code,
-                        error.message,
-                        is_retryable(error.code),
-                    )),
-                );
+                let mut protocol_error =
+                    ProtocolError::new(error.code, error.message, is_retryable(error.code));
+                if error.outcome == ApplicationOutcome::Unknown {
+                    protocol_error.operation_id = Some(operation.clone());
+                    protocol_error.readback_required = Some(true);
+                }
+                print_envelope(operation, None, error.outcome, None, Some(protocol_error));
             } else {
                 eprintln!("error [{}]: {}", error.code, error.message);
             }
@@ -216,14 +272,29 @@ fn print_envelope(
     println!("{encoded}");
 }
 
+#[cfg(test)]
 fn run(args: &[String]) -> Result<CliResult, CliError> {
-    let parsed = parse(args)?;
     let operation = operation_id(args);
+    run_with_operation(args, &operation)
+}
+
+fn run_with_operation(args: &[String], operation: &str) -> Result<CliResult, CliError> {
+    let parsed = parse(args)?;
     if parsed.path == ["service", "run"] {
-        return service::run_service(&parsed, &operation);
+        return service::run_service(&parsed, operation);
     }
-    if parsed.options.socket.is_some() && service::supports(&parsed) {
-        return service::request(&parsed, &operation);
+    if parsed.path == ["dashboard"] {
+        return dashboard::run_dashboard(&parsed);
+    }
+    if parsed.options.socket.is_some() {
+        if service::supports(&parsed) {
+            return service::request(&parsed, operation);
+        }
+        return Err(CliError::with(
+            ErrorCode::UnknownCommandNamespace,
+            ApplicationOutcome::Rejected,
+            "the requested command is not available through the selected service socket",
+        ));
     }
     let path = PathBuf::from(&parsed.options.db);
     ensure_db_parent(&path)?;
@@ -239,7 +310,7 @@ fn run(args: &[String]) -> Result<CliResult, CliError> {
                 "cli",
                 "CLI agent",
                 &now(),
-                operation,
+                operation.to_owned(),
             )
             .map_err(map_application_error)?;
         return Ok(changed(result.snapshot_revision, None));
@@ -247,7 +318,7 @@ fn run(args: &[String]) -> Result<CliResult, CliError> {
     let store = SqliteStore::open(&path, SCHEMA).map_err(map_store_error)?;
     let app = WorkApplication::new(&store);
     let adapter = SqliteAttemptAdapter::new(&store);
-    dispatch(&parsed, &operation, &app, &adapter, &store)
+    dispatch(&parsed, operation, &app, &adapter, &store)
 }
 
 fn dispatch<A: boreal_application::AttemptLifecycleAdapter>(
@@ -259,9 +330,7 @@ fn dispatch<A: boreal_application::AttemptLifecycleAdapter>(
 ) -> Result<CliResult, CliError> {
     let path = parsed.path.iter().map(String::as_str).collect::<Vec<_>>();
     match path.as_slice() {
-        [command] if *command == "status" || *command == "prime" || *command == "dashboard" => {
-            list_result(parsed, app)
-        }
+        [command] if *command == "status" || *command == "prime" => status_result(parsed, store),
         ["work", "list"] => list_result(parsed, app),
         ["work", "show"] => show_work_result(parsed, app, store),
         ["work", "create"] => create_work_result(parsed, app, operation),
@@ -310,6 +379,7 @@ fn dispatch<A: boreal_application::AttemptLifecycleAdapter>(
             AttemptOperation::Release,
         ),
         ["agent", "finish"] => finish_result(parsed, app, adapter, operation, store),
+        ["operation", "show"] => operation_show_result(parsed, store),
         ["next"] | ["agent", "next"] => next_result(parsed, app, store),
         ["evidence", "add"] => evidence_add_result(parsed, app),
         ["evidence", "run"] => evidence_run_result(
@@ -349,6 +419,7 @@ fn parse(args: &[String]) -> Result<ParsedCommand, CliError> {
         work: None,
         gate: None,
         receipt: None,
+        summary: None,
         reason: None,
         lease_ttl_ms: None,
         time_limit_ms: None,
@@ -359,6 +430,12 @@ fn parse(args: &[String]) -> Result<ParsedCommand, CliError> {
         limit: None,
         offset: None,
         max_requests: None,
+        kind: None,
+        parent: None,
+        description: None,
+        priority: None,
+        source_version: None,
+        config_identity: None,
         positionals: Vec::new(),
     };
     let mut path = Vec::new();
@@ -417,6 +494,7 @@ fn parse(args: &[String]) -> Result<ParsedCommand, CliError> {
                 | "--work"
                 | "--gate"
                 | "--receipt"
+                | "--summary"
                 | "--reason"
                 | "--operator-reason"
                 | "--reviewer"
@@ -425,7 +503,13 @@ fn parse(args: &[String]) -> Result<ParsedCommand, CliError> {
                 | "--time-limit"
                 | "--limit"
                 | "--offset"
-                | "--max-requests" => Some(option_value(args, &mut index, canonical)?),
+                | "--max-requests"
+                | "--kind"
+                | "--parent"
+                | "--description"
+                | "--priority"
+                | "--source-version"
+                | "--config-identity" => Some(option_value(args, &mut index, canonical)?),
                 _ => None,
             };
             match canonical {
@@ -460,6 +544,7 @@ fn parse(args: &[String]) -> Result<ParsedCommand, CliError> {
                 "--work" => options.work = Some(value.unwrap()),
                 "--gate" => options.gate = Some(value.unwrap()),
                 "--receipt" => options.receipt = Some(value.unwrap()),
+                "--summary" => options.summary = Some(value.unwrap()),
                 "--reason" | "--operator-reason" => options.reason = Some(value.unwrap()),
                 "--reviewer" => {
                     let _ = value;
@@ -487,6 +572,24 @@ fn parse(args: &[String]) -> Result<ParsedCommand, CliError> {
                         CliError::invalid("--max-requests is too large for this platform")
                     })?);
                 }
+                "--kind" => {
+                    let kind = value.unwrap();
+                    if !matches!(kind.as_str(), "milestone" | "sprint" | "task") {
+                        return Err(CliError::invalid(
+                            "--kind must be milestone, sprint, or task",
+                        ));
+                    }
+                    options.kind = Some(kind);
+                }
+                "--parent" => options.parent = Some(value.unwrap()),
+                "--description" => options.description = Some(value.unwrap()),
+                "--priority" => {
+                    options.priority = Some(value.unwrap().parse().map_err(|_| {
+                        CliError::invalid("--priority must be an integer from 0 to 255")
+                    })?);
+                }
+                "--source-version" => options.source_version = Some(value.unwrap()),
+                "--config-identity" => options.config_identity = Some(value.unwrap()),
                 _ => return Err(CliError::invalid(format!("unknown option: {name}"))),
             }
             index += 1;
@@ -521,6 +624,9 @@ fn parse(args: &[String]) -> Result<ParsedCommand, CliError> {
             options.positionals.extend(path.drain(3..));
             path.truncate(2);
         }
+    }
+    if path.as_slice() == ["view"] {
+        path[0] = "dashboard".to_owned();
     }
     if options.lease_ttl_ms.is_none() {
         options.lease_ttl_ms = Some(AttemptPolicy::default().default_lease_ttl_ms);
@@ -644,6 +750,152 @@ fn list_result(parsed: &ParsedCommand, app: &WorkApplication<'_>) -> Result<CliR
     )
 }
 
+/// The direct status/prime view is the same derived projection exposed by the
+/// service. Raw work listing remains available through `work list`, but an
+/// operator-facing status command must include dependency, gate, ownership,
+/// and clock decisions from one coherent snapshot.
+fn status_result(parsed: &ParsedCommand, store: &SqliteStore) -> Result<CliResult, CliError> {
+    let project = ProjectId::new(project_argument(parsed, 0)?);
+    let snapshot = boreal_application::project_status_from_store(
+        store,
+        &project,
+        &boreal_domain::ActorContext {
+            actor_id: ActorId::new(parsed.options.actor.clone()),
+            role: boreal_domain::ActorRole::Agent,
+        },
+        TimestampMs::from_millis(now_ms_u64()),
+        parsed.options.limit.unwrap_or(100),
+        parsed.options.offset.unwrap_or(0),
+    )
+    .map_err(|message| {
+        CliError::with(
+            ErrorCode::ServiceUnavailable,
+            ApplicationOutcome::Failed,
+            message,
+        )
+    })?;
+    let items = snapshot
+        .items
+        .iter()
+        .map(status_item_json)
+        .collect::<Vec<_>>();
+    let counts = &snapshot.counts;
+    bounded_result(
+        Some(json!({
+            "command": "status",
+            "contract_version": snapshot.contract_version,
+            "project_id": snapshot.project_id.as_str(),
+            "project_revision": snapshot.project_revision.0,
+            "revision": snapshot.project_revision.0,
+            "as_of": stamp(snapshot.as_of.as_millis()),
+            "next_status_change_at": snapshot.next_status_change_at.map(|value| stamp(value.as_millis())),
+            "limit": snapshot.limit,
+            "offset": snapshot.offset,
+            "total": snapshot.total,
+            "has_more": snapshot.has_more(),
+            "next_offset": snapshot.next_offset(),
+            "counts": {
+                "matched": counts.total,
+                "total": counts.total,
+                "draft": counts.draft,
+                "queued": counts.queued,
+                "ready": counts.ready,
+                "claimed": counts.claimed,
+                "in_progress": counts.in_progress,
+                "needs_verification": counts.needs_verification,
+                "awaiting_review": counts.awaiting_review,
+                "complete": counts.complete,
+                "closed": counts.closed,
+                "blocked": counts.blocked,
+                "paused": counts.paused,
+                "retry_wait": counts.retry_wait,
+                "expired_review": counts.expired_review,
+                "cancelled": counts.cancelled,
+            },
+            "items": items,
+        })),
+        Some(snapshot.project_revision.0),
+    )
+}
+
+fn status_item_json(item: &boreal_application::StatusWork) -> Value {
+    let gates = item
+        .gates
+        .gates
+        .iter()
+        .map(|gate| {
+            json!({
+                "gate_id": gate.gate_id.as_str(),
+                "kind": format!("{:?}", gate.kind).to_ascii_lowercase(),
+                "required": gate.required,
+                "state": format!("{:?}", gate.state).to_ascii_lowercase(),
+                "receipt_id": gate.receipt_id,
+                "reason": gate.reason,
+            })
+        })
+        .collect::<Vec<_>>();
+    let (open, satisfied): (Vec<_>, Vec<_>) = gates
+        .into_iter()
+        .partition(|gate| gate["state"] != "satisfied");
+    let attempt = item.attempt.as_ref().map(|attempt| {
+        json!({
+            "attempt_id": attempt.attempt_id.as_str(),
+            "fence": attempt.fence.get(),
+            "phase": format!("{:?}", attempt.phase).to_ascii_lowercase(),
+            "actor_id": attempt.actor_id.as_str(),
+            "harness_id": attempt.harness_id.as_ref().map(|value| value.as_str()),
+            "session_id": attempt.session_id.as_ref().map(|value| value.as_str()),
+            "lease_deadline": stamp(attempt.lease_deadline.as_millis()),
+            "hard_deadline": stamp(attempt.max_attempt_deadline.as_millis()),
+        })
+    });
+    json!({
+        "work_id": item.work.id.as_str(),
+        "project_id": item.work.project_id.as_str(),
+        "kind": format!("{:?}", item.work.kind).to_ascii_lowercase(),
+        "parent_id": item.work.parent_id.as_ref().map(|value| value.as_str()),
+        "title": item.work.title,
+        "description": item.work.description,
+        "lifecycle": format!("{:?}", item.work.lifecycle).to_ascii_lowercase(),
+        "priority": item.work.priority,
+        "dispatch_policy": format!("{:?}", item.work.dispatch_policy).to_ascii_lowercase(),
+        "status": status_name(item.display_status()),
+        "display_status": status_name(item.display_status()),
+        "claimable": item.decision.claimable_for_actor,
+        "claimable_for_actor": item.decision.claimable_for_actor,
+        "reason_codes": item.decision.reason_codes.iter().map(|reason| reason.stable_code()).collect::<Vec<_>>(),
+        "next_status_change_at": item.decision.next_status_change_at.map(|value| stamp(value.as_millis())),
+        "attempt": attempt,
+        "gates": { "open": open, "satisfied": satisfied },
+        "dependency": {
+            "prerequisites": item.dependency_blockers.iter().map(|blocker| json!({
+                "work_id": blocker.work_id.as_str(),
+                "display_status": status_name(blocker.display_status),
+                "satisfies_default": blocker.satisfies_default,
+            })).collect::<Vec<_>>(),
+        },
+    })
+}
+
+fn status_name(status: boreal_domain::DerivedStatus) -> &'static str {
+    match status {
+        boreal_domain::DerivedStatus::Draft => "draft",
+        boreal_domain::DerivedStatus::Queued => "queued",
+        boreal_domain::DerivedStatus::Ready => "ready",
+        boreal_domain::DerivedStatus::Claimed => "claimed",
+        boreal_domain::DerivedStatus::InProgress => "in_progress",
+        boreal_domain::DerivedStatus::NeedsVerification => "needs_verification",
+        boreal_domain::DerivedStatus::AwaitingReview => "awaiting_review",
+        boreal_domain::DerivedStatus::Complete => "complete",
+        boreal_domain::DerivedStatus::Closed => "closed",
+        boreal_domain::DerivedStatus::Blocked => "blocked",
+        boreal_domain::DerivedStatus::Paused => "paused",
+        boreal_domain::DerivedStatus::RetryWait => "retry_wait",
+        boreal_domain::DerivedStatus::ExpiredReview => "expired_review",
+        boreal_domain::DerivedStatus::Cancelled => "cancelled",
+    }
+}
+
 fn show_work_result(
     parsed: &ParsedCommand,
     app: &WorkApplication<'_>,
@@ -663,33 +915,146 @@ fn show_work_result(
     )
 }
 
+fn operation_show_result(
+    parsed: &ParsedCommand,
+    store: &SqliteStore,
+) -> Result<CliResult, CliError> {
+    let project = project_argument(parsed, 0)?;
+    let operation_index = usize::from(parsed.options.project.is_none());
+    let operation_id = parsed
+        .options
+        .positionals
+        .get(operation_index)
+        .ok_or_else(|| CliError::invalid("missing operation identifier"))?;
+    let operation = store.operation(operation_id).map_err(map_store_error)?;
+    let execution = store
+        .evidence_execution(operation_id)
+        .map_err(map_store_error)?;
+    if operation.is_none() && execution.is_none() {
+        return Err(CliError::with(
+            ErrorCode::NotFound,
+            ApplicationOutcome::Rejected,
+            format!("operation not found: {operation_id}"),
+        ));
+    }
+    if let Some(operation) = &operation {
+        if operation.project_id != project {
+            return Err(CliError::with(
+                ErrorCode::InvalidArgument,
+                ApplicationOutcome::Rejected,
+                "operation does not belong to the selected project",
+            ));
+        }
+    }
+    let operation_json = operation.clone().map(|operation| {
+        json!({
+            "operation_id": operation.operation_id,
+            "project_id": operation.project_id,
+            "command": operation.command,
+            "actor_id": operation.actor_id,
+            "session_id": operation.session_id,
+            "attempt_id": operation.attempt_id,
+            "fence": operation.fence,
+            "request_digest": operation.request_digest,
+            "outcome": format!("{:?}", operation.outcome).to_ascii_lowercase(),
+            "result": serde_json::from_str::<Value>(&operation.result_json)
+                .unwrap_or(Value::String(operation.result_json)),
+            "revision": operation.revision,
+            "created_at": operation.created_at,
+            "completed_at": operation.completed_at,
+        })
+    });
+    let execution_json = execution.map(|execution| {
+        json!({
+            "operation_id": execution.operation_id,
+            "project_id": execution.project_id,
+            "work_id": execution.work_id,
+            "attempt_id": execution.attempt_id,
+            "fence": execution.fence,
+            "gate_id": execution.gate_id,
+            "actor_id": execution.actor_id,
+            "session_id": execution.session_id,
+            "request_digest": execution.request_digest,
+            "artifact_ref": execution.artifact_ref,
+            "state": format!("{:?}", execution.state).to_ascii_lowercase(),
+            "admitted_at": execution.admitted_at,
+            "started_at": execution.started_at,
+            "exited_at": execution.exited_at,
+            "exit_code": execution.exit_code,
+            "receipt_id": execution.receipt_id,
+            "failure_code": execution.failure_code,
+        })
+    });
+    let outcome = if execution_json
+        .as_ref()
+        .is_some_and(|value| value["state"] != "receipt_committed")
+    {
+        ApplicationOutcome::Unknown
+    } else {
+        operation
+            .as_ref()
+            .map(|value| match value.outcome {
+                boreal_store::OperationOutcome::Changed => ApplicationOutcome::Changed,
+                boreal_store::OperationOutcome::Unchanged => ApplicationOutcome::Unchanged,
+                boreal_store::OperationOutcome::Rejected => ApplicationOutcome::Rejected,
+                boreal_store::OperationOutcome::Conflict => ApplicationOutcome::Conflict,
+                boreal_store::OperationOutcome::Busy => ApplicationOutcome::Busy,
+                boreal_store::OperationOutcome::Failed => ApplicationOutcome::Failed,
+                boreal_store::OperationOutcome::Unknown => ApplicationOutcome::Unknown,
+            })
+            .unwrap_or(ApplicationOutcome::Unknown)
+    };
+    bounded_result(
+        Some(json!({
+            "operation": operation_json,
+            "execution": execution_json,
+            "readback_required": outcome == ApplicationOutcome::Unknown,
+        })),
+        operation.as_ref().map(|value| value.revision),
+    )
+    .map(|mut result| {
+        result.outcome = outcome;
+        result
+    })
+}
+
 fn create_work_result(
     parsed: &ParsedCommand,
     app: &WorkApplication<'_>,
     operation: &str,
 ) -> Result<CliResult, CliError> {
     let project = ProjectId::new(project_argument(parsed, 0)?);
+    let positional_offset = usize::from(parsed.options.project.is_none());
     let work_id = parsed
         .options
         .positionals
-        .get(1)
+        .get(positional_offset)
         .cloned()
         .ok_or_else(|| CliError::invalid("missing work identifier"))?;
     let title = parsed
         .options
         .positionals
-        .get(2)
+        .get(positional_offset + 1)
         .cloned()
         .ok_or_else(|| CliError::invalid("missing work title"))?;
+    // A newly-created work item is executable by default. Containers remain
+    // explicit (`--kind milestone|sprint`) so the scheduler never presents a
+    // planning container as an agent task by accident.
+    let kind = match parsed.options.kind.as_deref().unwrap_or("task") {
+        "milestone" => WorkKind::Milestone,
+        "sprint" => WorkKind::Sprint,
+        "task" => WorkKind::Task,
+        _ => unreachable!("parser validates work kind"),
+    };
     let work = WorkItem {
         id: WorkId::new(work_id),
         project_id: project,
-        kind: WorkKind::Milestone,
-        parent_id: None,
+        kind,
+        parent_id: parsed.options.parent.clone().map(WorkId::new),
         title,
-        description: String::new(),
+        description: parsed.options.description.clone().unwrap_or_default(),
         lifecycle: PersistedLifecycle::Open,
-        priority: 0,
+        priority: parsed.options.priority.unwrap_or(0),
         dispatch_policy: DispatchPolicy::Automatic,
         hard_holds: Vec::new(),
         acceptance_profile: AcceptanceProfile::focused(),
@@ -747,7 +1112,7 @@ fn claim_result<A: boreal_application::AttemptLifecycleAdapter>(
         parsed.options.expected_revision,
     )?;
     let result = app
-        .claim(
+        .claim_with_context(
             &project,
             &work_id,
             &parsed.options.actor,
@@ -760,6 +1125,12 @@ fn claim_result<A: boreal_application::AttemptLifecycleAdapter>(
             &stamp(claimed_at.as_millis()),
             &stamp(deadlines.lease_deadline.as_millis()),
             &stamp(deadlines.hard_deadline.as_millis()),
+            parsed.options.source_version.as_deref(),
+            parsed
+                .options
+                .config_identity
+                .as_deref()
+                .unwrap_or("unknown"),
         )
         .map_err(map_application_error)?;
     let snapshot = adapter
@@ -788,7 +1159,37 @@ fn start_result<A: boreal_application::AttemptLifecycleAdapter>(
     store: &SqliteStore,
 ) -> Result<CliResult, CliError> {
     let project = ProjectId::new(project_argument(parsed, 0)?);
-    let work_id = work_argument(parsed, 0)?;
+    // Goal-less start resumes this session's current attempt first. If no
+    // attempt is resumable, choose from the same canonical status projection
+    // used by `next`; claim_result still performs the atomic claim/recheck.
+    let Some(work_id) = parsed
+        .options
+        .work
+        .clone()
+        .or_else(|| parsed.options.positionals.first().cloned())
+        .or(find_session_work(
+            store,
+            &project,
+            &parsed.options.actor,
+            &parsed.options.session,
+        )?)
+        .or(select_claimable_work(
+            store,
+            &project,
+            &parsed.options.actor,
+        )?)
+    else {
+        return Ok(CliResult {
+            outcome: ApplicationOutcome::Unchanged,
+            revision: Some(store_revision(store, &project)?),
+            data: Some(json!({
+                "phase": "idle",
+                "reason": "no_ready_work",
+                "message": "no resumable or claimable task is available",
+                "next_action": null,
+            })),
+        });
+    };
     if let Some(current) = store
         .current_attempt_for_work(project.as_str(), &work_id)
         .map_err(map_store_error)?
@@ -811,6 +1212,8 @@ fn start_result<A: boreal_application::AttemptLifecycleAdapter>(
             &parsed.options,
             snapshot.fence,
             &sub_operation(operation, "resume"),
+            "attempt.accept/v1",
+            None,
         )?;
         let result = match snapshot.phase {
             AttemptPhase::Claimed => {
@@ -827,6 +1230,8 @@ fn start_result<A: boreal_application::AttemptLifecycleAdapter>(
                     &parsed.options,
                     accepted_snapshot.fence,
                     &sub_operation(operation, "start"),
+                    "attempt.start/v1",
+                    None,
                 )?;
                 let started = app
                     .start(adapter, started_request)
@@ -872,7 +1277,9 @@ fn start_result<A: boreal_application::AttemptLifecycleAdapter>(
             .map_err(|error| map_application_error(ApplicationError::from(error)))?;
         return attempt_result(result, &updated, store, &project);
     }
-    let result = claim_result(parsed, app, adapter, operation, store)?;
+    let mut selected = parsed.clone();
+    selected.options.work = Some(work_id.clone());
+    let result = claim_result(&selected, app, adapter, operation, store)?;
     let attempt_id = result
         .data
         .as_ref()
@@ -900,6 +1307,8 @@ fn start_result<A: boreal_application::AttemptLifecycleAdapter>(
                 &parsed.options,
                 snapshot.fence,
                 &sub_operation(operation, "accept"),
+                "attempt.accept/v1",
+                None,
             )?,
         )
         .map_err(map_application_error)?;
@@ -916,6 +1325,8 @@ fn start_result<A: boreal_application::AttemptLifecycleAdapter>(
                 &parsed.options,
                 accepted_snapshot.fence,
                 &sub_operation(operation, "start"),
+                "attempt.start/v1",
+                None,
             )?,
         )
         .map_err(map_application_error)?;
@@ -925,6 +1336,7 @@ fn start_result<A: boreal_application::AttemptLifecycleAdapter>(
         ApplicationOutcome::Unchanged
     };
     let mut data = attempt_json(&started.value, &accepted_snapshot);
+    data["work_id"] = json!(work_id);
     data["phase"] = Value::String("running".to_owned());
     bounded_result(Some(data), Some(started.snapshot_revision)).map(|mut value| {
         value.outcome = outcome;
@@ -943,7 +1355,15 @@ fn resume_result(
         .attempt
         .clone()
         .or_else(|| {
-            find_session_work(store, &project, &parsed.options.actor).and_then(|work| {
+            find_session_work(
+                store,
+                &project,
+                &parsed.options.actor,
+                &parsed.options.session,
+            )
+            .ok()
+            .flatten()
+            .and_then(|work| {
                 store
                     .current_attempt_for_work(project.as_str(), &work)
                     .ok()
@@ -975,11 +1395,12 @@ fn guide_result(
     store: &SqliteStore,
 ) -> Result<CliResult, CliError> {
     let project = ProjectId::new(project_argument(parsed, 0)?);
-    let selected = parsed
-        .options
-        .work
-        .clone()
-        .or_else(|| find_session_work(store, &project, &parsed.options.actor));
+    let selected = parsed.options.work.clone().or(find_session_work(
+        store,
+        &project,
+        &parsed.options.actor,
+        &parsed.options.session,
+    )?);
     selected.map_or_else(
         || guide_idle(parsed, store, &project),
         |work| guide_for_work(parsed, app, store, &project, &work, false),
@@ -992,8 +1413,13 @@ fn next_result(
     store: &SqliteStore,
 ) -> Result<CliResult, CliError> {
     let project = ProjectId::new(project_argument(parsed, 0)?);
-    if let Some(work) = find_session_work(store, &project, &parsed.options.actor)
-        .or_else(|| parsed.options.work.clone())
+    if let Some(work) = find_session_work(
+        store,
+        &project,
+        &parsed.options.actor,
+        &parsed.options.session,
+    )?
+    .or_else(|| parsed.options.work.clone())
     {
         let result = guide_for_work(parsed, app, store, &project, &work, false)?;
         let guide: AgentGuideDto = serde_json::from_value(result.data.ok_or_else(|| {
@@ -1012,14 +1438,30 @@ fn next_result(
         })?;
         return next_from_guide(parsed, result.revision, guide);
     }
-    let page = app
-        .list_work(&project, 100, 0)
-        .map_err(map_application_error)?;
-    if let Some(item) = page
+    let snapshot = boreal_application::project_status_from_store(
+        store,
+        &project,
+        &boreal_domain::ActorContext {
+            actor_id: ActorId::new(parsed.options.actor.clone()),
+            role: boreal_domain::ActorRole::Agent,
+        },
+        TimestampMs::from_millis(now_ms_u64()),
+        1_000,
+        0,
+    )
+    .map_err(|message| {
+        CliError::with(
+            ErrorCode::GuidanceUnavailable,
+            ApplicationOutcome::Failed,
+            message,
+        )
+    })?;
+    if let Some(item) = snapshot
         .items
         .into_iter()
-        .find(|item| item.lifecycle == "open" && item.dispatch_policy == "automatic")
+        .find(|item| item.work.kind == WorkKind::Task && item.decision.claimable_for_actor)
     {
+        let work_id = item.work.id.as_str().to_owned();
         let next = AgentNextDto {
             kind: "agent_next".to_owned(),
             next_schema_version: schema::NEXT.to_owned(),
@@ -1027,29 +1469,38 @@ fn next_result(
             selection: "ready_work".to_owned(),
             status: NextStatusDto {
                 display_status: "ready".to_owned(),
-                work_id: Some(item.work_id.clone()),
-                reason_codes: Vec::new(),
+                work_id: Some(work_id.clone()),
+                reason_codes: item
+                    .decision
+                    .reason_codes
+                    .iter()
+                    .map(|reason| format!("{reason:?}").to_ascii_lowercase())
+                    .collect(),
                 claimable_for_actor: true,
             },
             reason: NextReasonDto {
                 code: "ready_work_selected".to_owned(),
                 message: "One open automatic work item is available for this actor.".to_owned(),
-                selection_key: format!("ready|{}|agent.start@v1", item.work_id),
+                selection_key: format!("ready|{}|agent.start@v1", work_id),
             },
             next_action: Some(start_action(
                 &parsed.options,
                 &project,
-                &item.work_id,
-                page.revision.0,
+                &work_id,
+                snapshot.project_revision.0,
             )),
             context_refs: vec![ContextRefDto {
                 reference_type: "work".to_owned(),
-                id: item.work_id,
-                revision: page.revision.0,
+                id: work_id,
+                revision: snapshot.project_revision.0,
             }],
             no_goal: parsed.options.work.is_none(),
         };
-        return typed_result(ApplicationOutcome::Unchanged, Some(page.revision.0), next);
+        return typed_result(
+            ApplicationOutcome::Unchanged,
+            Some(snapshot.project_revision.0),
+            next,
+        );
     }
     let next = AgentNextDto {
         kind: "agent_next".to_owned(),
@@ -1071,7 +1522,11 @@ fn next_result(
         context_refs: Vec::new(),
         no_goal: parsed.options.work.is_none(),
     };
-    typed_result(ApplicationOutcome::Unchanged, Some(page.revision.0), next)
+    typed_result(
+        ApplicationOutcome::Unchanged,
+        Some(snapshot.project_revision.0),
+        next,
+    )
 }
 
 fn guide_for_work(
@@ -1082,31 +1537,15 @@ fn guide_for_work(
     work_id: &str,
     resume: bool,
 ) -> Result<CliResult, CliError> {
-    let page = app
-        .list_work(project, 100, 0)
+    let work = app
+        .show_work(project, work_id)
         .map_err(map_application_error)?;
-    let work = page
-        .items
-        .iter()
-        .find(|item| item.work_id == work_id)
-        .ok_or_else(|| {
-            CliError::with(
-                ErrorCode::NotFound,
-                ApplicationOutcome::Rejected,
-                format!("work not found: {work_id}"),
-            )
-        })?;
+    let revision = store_revision(store, project)?;
     let current = store
         .current_attempt_for_work(project.as_str(), work_id)
         .map_err(map_store_error)?;
-    let (display_status, state, attempt_id, fence, reason_codes, next_action) = guide_state(
-        parsed,
-        project,
-        work,
-        current.as_ref(),
-        page.revision.0,
-        resume,
-    )?;
+    let (display_status, state, attempt_id, fence, reason_codes, next_action) =
+        guide_state(parsed, project, &work, current.as_ref(), revision, resume)?;
     let dto = AgentGuideDto {
         kind: "agent_guide".to_owned(),
         guide_schema_version: schema::GUIDANCE.to_owned(),
@@ -1121,7 +1560,7 @@ fn guide_for_work(
             actor_id: parsed.options.actor.clone(),
             harness_id: Some(parsed.options.harness.clone()),
             session_id: Some(parsed.options.session.clone()),
-            project_revision: page.revision.0,
+            project_revision: revision,
         },
         status: GuidanceStatusDto {
             state,
@@ -1158,9 +1597,9 @@ fn guide_for_work(
                 "boreal.workflow.finish.v1".to_owned(),
             ],
         },
-        selection_key: format!("{}|{}|agent.guide@v1", work_id, page.revision.0),
+        selection_key: format!("{}|{}|agent.guide@v1", work_id, revision),
     };
-    typed_result(ApplicationOutcome::Unchanged, Some(page.revision.0), dto)
+    typed_result(ApplicationOutcome::Unchanged, Some(revision), dto)
 }
 
 type GuideState = (
@@ -1365,6 +1804,17 @@ enum AttemptOperation {
     Submit,
 }
 
+impl AttemptOperation {
+    fn command_identity(self) -> &'static str {
+        match self {
+            Self::Accept => "attempt.accept/v1",
+            Self::Heartbeat => "attempt.heartbeat/v1",
+            Self::Release => "attempt.release/v1",
+            Self::Submit => "attempt.submit/v1",
+        }
+    }
+}
+
 fn attempt_mutation_result<A: boreal_application::AttemptLifecycleAdapter>(
     parsed: &ParsedCommand,
     app: &WorkApplication<'_>,
@@ -1391,6 +1841,8 @@ fn attempt_mutation_result<A: boreal_application::AttemptLifecycleAdapter>(
         &parsed.options,
         Fence::new(fence),
         operation,
+        kind.command_identity(),
+        parsed.options.reason.as_deref(),
     )?;
     let result = match kind {
         AttemptOperation::Accept => app
@@ -1521,29 +1973,32 @@ fn finish_result<A: boreal_application::AttemptLifecycleAdapter>(
             TimestampMs::from_millis(now_ms_u64()),
         )
         .map_err(map_application_error)?;
-    let finalized = app
-        .finalize_close(
-            &parsed.options.actor,
-            Some(parsed.options.session.as_str()),
-            &intent,
-            None,
-            TimestampMs::from_millis(now_ms_u64()),
+    let diagnostics = store
+        .gate_diagnostics(
+            parsed
+                .options
+                .project
+                .as_deref()
+                .ok_or_else(|| CliError::invalid("agent finish --close requires --project"))?,
+            &work_id,
+            expected_attempt,
+            expected_fence,
         )
-        .map_err(map_application_error)?;
-    let outcome = if finalized.close_intent.state == boreal_store::CloseIntentState::Finalized {
-        ApplicationOutcome::Changed
-    } else {
-        ApplicationOutcome::Rejected
-    };
+        .map_err(map_store_error)?;
+    if diagnostics.missing.is_empty() {
+        return Err(CliError::invalid(
+            "proof-gated close requires typed summary/review facts; use the service finish workflow",
+        ));
+    }
     bounded_result(
         Some(json!({
             "attempt": submitted.data,
             "receipt_id": receipt.receipt_id.as_str(),
             "receipt_replayed": receipt_result.replayed,
             "close_intent": format!("{:?}", requested.close_intent.state).to_ascii_lowercase(),
-            "close_state": format!("{:?}", finalized.close_intent.state).to_ascii_lowercase(),
-            "close_replayed": finalized.replayed,
-            "gates": finalized.diagnostics.map(|diagnostics| json!({
+            "close_state": "open",
+            "close_replayed": false,
+            "gates": json!({
                 "missing": diagnostics.missing,
                 "gates": diagnostics.gates.into_iter().map(|gate| json!({
                     "gate_id": gate.gate_id,
@@ -1553,12 +2008,12 @@ fn finish_result<A: boreal_application::AttemptLifecycleAdapter>(
                     "receipt_id": gate.receipt_id,
                     "reason": gate.reason,
                 })).collect::<Vec<_>>(),
-            })),
+            }),
         })),
-        Some(finalized.revision),
+        Some(diagnostics.revision),
     )
     .map(|mut result| {
-        result.outcome = outcome;
+        result.outcome = ApplicationOutcome::Rejected;
         result
     })
 }
@@ -1628,6 +2083,106 @@ fn evidence_run_result<A: boreal_application::AttemptLifecycleAdapter>(
         .gate
         .clone()
         .ok_or_else(|| CliError::invalid("evidence run requires --gate"))?;
+    // Completed-operation replay is checked before reading declarations,
+    // creating artifacts, or launching an external process. A separate
+    // durable admitted/running state is still required to close the crash
+    // window between this check and receipt commit.
+    if let Some(existing) = store.operation(operation).map_err(map_store_error)? {
+        if existing.command != "receipt.insert" {
+            return Err(CliError::with(
+                ErrorCode::OperationConflict,
+                ApplicationOutcome::Conflict,
+                "operation id is already bound to another command",
+            ));
+        }
+        let replayed = store
+            .read_receipt_operation(project.as_str(), operation)
+            .map_err(map_store_error)?
+            .ok_or_else(|| {
+                CliError::with(
+                    ErrorCode::UnknownOutcome,
+                    ApplicationOutcome::Unknown,
+                    "receipt operation exists but its result is unavailable",
+                )
+            })?;
+        let gate_matches = replayed.receipt.gate_id.as_deref().is_some_and(|stored| {
+            stored == gate_id.as_str()
+                || stored
+                    .strip_prefix(&format!("{}:", work_id))
+                    .is_some_and(|short| short == gate_id.as_str())
+        });
+        if replayed.receipt.work_id.as_str() != work_id
+            || !gate_matches
+            || parsed
+                .options
+                .attempt
+                .as_deref()
+                .is_some_and(|attempt| attempt != replayed.receipt.attempt_id)
+            || parsed
+                .options
+                .fence
+                .is_some_and(|fence| fence != replayed.receipt.fence)
+        {
+            return Err(CliError::with(
+                ErrorCode::OperationConflict,
+                ApplicationOutcome::Conflict,
+                "operation id is already bound to a different evidence target",
+            ));
+        }
+        // The operation was durably completed even when the command itself
+        // failed. Replay reports an unchanged transport/application state and
+        // preserves the receipt result in the bounded payload.
+        let outcome = ApplicationOutcome::Unchanged;
+        return bounded_result(
+            Some(json!({
+                "receipt_id": replayed.receipt.receipt_id,
+                "operation_id": replayed.receipt.operation_id,
+                "result": format!("{:?}", replayed.receipt.result).to_ascii_lowercase(),
+                "replayed": true,
+            })),
+            Some(replayed.revision),
+        )
+        .map(|mut result| {
+            result.outcome = outcome;
+            result
+        });
+    }
+    if let Some(execution) = store
+        .evidence_execution(operation)
+        .map_err(map_store_error)?
+    {
+        let target_matches = execution.project_id == project.as_str()
+            && execution.work_id == work_id
+            && (execution.gate_id == gate_id
+                || execution
+                    .gate_id
+                    .strip_prefix(&format!("{}:", work_id))
+                    .is_some_and(|short| short == gate_id))
+            && parsed
+                .options
+                .attempt
+                .as_deref()
+                .is_none_or(|attempt| attempt == execution.attempt_id)
+            && parsed
+                .options
+                .fence
+                .is_none_or(|fence| fence == execution.fence);
+        if !target_matches {
+            return Err(CliError::with(
+                ErrorCode::OperationConflict,
+                ApplicationOutcome::Conflict,
+                "operation id is already bound to a different evidence execution",
+            ));
+        }
+        return Err(CliError::with(
+            ErrorCode::UnknownOutcome,
+            ApplicationOutcome::Unknown,
+            format!(
+                "evidence operation {operation} is {:?}; it will not be launched again (artifact_ref={}, read back or reconcile this operation, or use a new operation id)",
+                execution.state, execution.artifact_ref
+            ),
+        ));
+    }
     let declaration = read_gate_declaration(gate_root, &gate_id)?;
     let attempt_record = store
         .current_attempt_for_work(project.as_str(), &work_id)
@@ -1745,17 +2300,28 @@ fn evidence_run_result<A: boreal_application::AttemptLifecycleAdapter>(
             required_observables: declaration.observables.clone(),
         },
     };
-    let output_dir = gate_root.parent().unwrap_or(gate_root).join("evidence");
-    fs::create_dir_all(&output_dir).map_err(|error| {
+    // Keep artifacts scoped to the gate declaration root as well as the
+    // operation. This prevents independent databases/tests that reuse a
+    // human-readable operation ID from sharing mutable filesystem paths.
+    let artifact_namespace = sha256_content_digest(
+        format!("{}:{}", project.as_str(), gate_root.to_string_lossy()).as_bytes(),
+    )
+    .replace(':', "-");
+    let output_dir = gate_root
+        .parent()
+        .unwrap_or(gate_root)
+        .join("evidence")
+        .join(artifact_namespace);
+    let artifact_stem = sha256_content_digest(operation.as_bytes()).replace(':', "-");
+    let output_path = output_dir.join(format!("{artifact_stem}.out"));
+    let artifact_ref = output_path.with_extension("combined");
+    let workspace_root = env::current_dir().map_err(|error| {
         CliError::with(
-            ErrorCode::ServiceUnavailable,
-            ApplicationOutcome::Failed,
-            error.to_string(),
+            ErrorCode::ReceiptInvalid,
+            ApplicationOutcome::Rejected,
+            format!("workspace root is unavailable: {error}"),
         )
     })?;
-    let artifact_stem = fnv_digest(operation.as_bytes());
-    let output_path = output_dir.join(format!("{artifact_stem}.out"));
-    let execution = execute_gate_command(&declaration, &output_path, gate_root.parent())?;
     let request = EvidenceRunRequest {
         receipt_id: ReceiptId::new(format!("receipt-{operation}")),
         operation_id: OperationId::new(operation),
@@ -1764,14 +2330,61 @@ fn evidence_run_result<A: boreal_application::AttemptLifecycleAdapter>(
         environment_fingerprint: declaration.environment_fingerprint.clone(),
         attestation: ExecutorAttestation::BorealWitnessed,
     };
+    let admission = app
+        .admit_witnessed_execution(
+            &parsed.options.actor,
+            Some(parsed.options.session.as_str()),
+            &request,
+            &artifact_ref.to_string_lossy(),
+            TimestampMs::from_millis(now_ms_u64()),
+        )
+        .map_err(map_application_error)?;
+    if admission.replayed {
+        return Err(CliError::with(
+            ErrorCode::UnknownOutcome,
+            ApplicationOutcome::Unknown,
+            format!(
+                "evidence operation {operation} was already admitted as {:?}; it will not be launched again",
+                admission.execution.state
+            ),
+        ));
+    }
+    if let Err(error) = fs::create_dir_all(&output_dir) {
+        let _ = app.mark_witnessed_execution_unknown(operation, "artifact_directory_failed");
+        return Err(CliError::with(
+            ErrorCode::UnknownOutcome,
+            ApplicationOutcome::Unknown,
+            format!("evidence execution was admitted but artifact setup failed: {error}"),
+        ));
+    }
+    app.start_witnessed_execution(operation, TimestampMs::from_millis(now_ms_u64()))
+        .map_err(map_application_error)?;
+    let execution = match execute_gate_command(&declaration, &output_path, Some(&workspace_root)) {
+        Ok(execution) => execution,
+        Err(error) => {
+            let _ =
+                app.mark_witnessed_execution_unknown(operation, "executor_failed_before_receipt");
+            return Err(CliError::with(
+                ErrorCode::UnknownOutcome,
+                ApplicationOutcome::Unknown,
+                format!(
+                    "evidence operation was admitted and may have launched; automatic retry is disabled: {}",
+                    error.message
+                ),
+            ));
+        }
+    };
+    app.finish_witnessed_execution(operation, execution.exit_code, execution.ended_at)
+        .map_err(map_application_error)?;
     let result = app
         .build_bounded_evidence_receipt(&request, &execution)
         .map_err(map_application_error)?;
     let inserted = app
-        .record_receipt(
+        .record_witnessed_execution(
             &parsed.options.actor,
             Some(parsed.options.session.as_str()),
-            &result.receipt,
+            &request,
+            &result,
             parsed.options.expected_revision,
             TimestampMs::from_millis(now_ms_u64()),
         )
@@ -1799,6 +2412,8 @@ fn evidence_run_result<A: boreal_application::AttemptLifecycleAdapter>(
         "environment_fingerprint": result.receipt.environment_fingerprint,
         "output_digest": result.receipt.output_digest.unwrap_or_default(),
         "output_ref": result.receipt.output_ref,
+        "stdout_ref": output_path.to_string_lossy(),
+        "stderr_ref": output_path.with_extension("err").to_string_lossy(),
         "coverage": {
             "kind": format!("{:?}", result.receipt.coverage.kind).to_ascii_lowercase(),
             "profile_id": result.receipt.coverage.profile_id.as_str(),
@@ -1832,7 +2447,11 @@ fn evidence_run_result<A: boreal_application::AttemptLifecycleAdapter>(
             "gate_id": inserted.receipt.gate_id,
             "result": format!("{:?}", inserted.receipt.result).to_ascii_lowercase(),
             "execution_outcome": format!("{:?}", result.outcome).to_ascii_lowercase(),
+            "output_digest": inserted.receipt.output_digest,
             "output_ref": inserted.receipt.output_ref,
+            "stdout_ref": output_path,
+            "stderr_ref": output_path.with_extension("err"),
+            "observables": result.receipt.coverage.observables,
             "receipt_path": receipt_path,
             "replayed": inserted.replayed,
         })),
@@ -1945,28 +2564,39 @@ fn execute_gate_command(
             "gate cwd escapes the project root",
         ));
     }
-    let stdout = fs::File::create(output_path).map_err(|error| {
-        CliError::with(
-            ErrorCode::ServiceUnavailable,
-            ApplicationOutcome::Failed,
-            error.to_string(),
-        )
-    })?;
+    // Capture each stream into its own create-new artifact. The capture
+    // workers enforce the aggregate bound before bytes reach disk, rather
+    // than allowing an external command to fill an unbounded file first.
+    let stdout_file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(output_path)
+        .map_err(|error| {
+            CliError::with(
+                ErrorCode::ServiceUnavailable,
+                ApplicationOutcome::Failed,
+                error.to_string(),
+            )
+        })?;
     let stderr_path = output_path.with_extension("err");
-    let stderr = fs::File::create(&stderr_path).map_err(|error| {
-        CliError::with(
-            ErrorCode::ServiceUnavailable,
-            ApplicationOutcome::Failed,
-            error.to_string(),
-        )
-    })?;
+    let stderr_file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&stderr_path)
+        .map_err(|error| {
+            CliError::with(
+                ErrorCode::ServiceUnavailable,
+                ApplicationOutcome::Failed,
+                error.to_string(),
+            )
+        })?;
     let started_at = TimestampMs::from_millis(now_ms_u64());
     let mut child = Command::new(&command.executable)
         .args(command.argv.iter().skip(1))
         .current_dir(&cwd)
         .stdin(Stdio::null())
-        .stdout(Stdio::from(stdout))
-        .stderr(Stdio::from(stderr))
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
         .spawn()
         .map_err(|error| {
             CliError::with(
@@ -1975,67 +2605,146 @@ fn execute_gate_command(
                 format!("declared gate could not start: {error}"),
             )
         })?;
+    let stdout_reader = child.stdout.take().ok_or_else(|| {
+        CliError::with(
+            ErrorCode::ServiceUnavailable,
+            ApplicationOutcome::Failed,
+            "declared gate stdout pipe was unavailable",
+        )
+    })?;
+    let stderr_reader = child.stderr.take().ok_or_else(|| {
+        CliError::with(
+            ErrorCode::ServiceUnavailable,
+            ApplicationOutcome::Failed,
+            "declared gate stderr pipe was unavailable",
+        )
+    })?;
+    let captured_bytes = Arc::new(AtomicU64::new(0));
+    let output_exceeded = Arc::new(AtomicBool::new(false));
+    let capture_failed = Arc::new(AtomicBool::new(false));
+    let stdout_thread = spawn_capture_worker(
+        stdout_reader,
+        stdout_file,
+        Arc::clone(&captured_bytes),
+        Arc::clone(&output_exceeded),
+        Arc::clone(&capture_failed),
+    );
+    let stderr_thread = spawn_capture_worker(
+        stderr_reader,
+        stderr_file,
+        Arc::clone(&captured_bytes),
+        Arc::clone(&output_exceeded),
+        Arc::clone(&capture_failed),
+    );
     let deadline = Instant::now() + Duration::from_millis(declaration.max_runtime_ms.unwrap_or(1));
     let mut timed_out = false;
+    let child_status: Option<ExitStatus>;
     loop {
-        if child
-            .try_wait()
-            .map_err(|error| {
-                CliError::with(
+        if output_exceeded.load(Ordering::Acquire) || capture_failed.load(Ordering::Acquire) {
+            let _ = child.kill();
+            child_status = child.wait().ok();
+            break;
+        }
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                child_status = Some(status);
+                break;
+            }
+            Ok(None) => {}
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = stdout_thread.join();
+                let _ = stderr_thread.join();
+                return Err(CliError::with(
                     ErrorCode::ServiceUnavailable,
                     ApplicationOutcome::Failed,
                     error.to_string(),
-                )
-            })?
-            .is_some()
-        {
-            break;
+                ));
+            }
         }
         if Instant::now() >= deadline {
             let _ = child.kill();
-            let _ = child.wait();
+            child_status = child.wait().ok();
             timed_out = true;
             break;
         }
         thread::sleep(Duration::from_millis(5));
     }
+    let stdout_capture = stdout_thread.join().map_err(|_| {
+        CliError::with(
+            ErrorCode::ServiceUnavailable,
+            ApplicationOutcome::Failed,
+            "stdout capture worker panicked",
+        )
+    })?;
+    let stderr_capture = stderr_thread.join().map_err(|_| {
+        CliError::with(
+            ErrorCode::ServiceUnavailable,
+            ApplicationOutcome::Failed,
+            "stderr capture worker panicked",
+        )
+    })?;
+    if let Some(error) = stdout_capture.err().or(stderr_capture.err()) {
+        return Err(CliError::with(
+            ErrorCode::ServiceUnavailable,
+            ApplicationOutcome::Failed,
+            error,
+        ));
+    }
     let ended_at = TimestampMs::from_millis(now_ms_u64());
-    let mut output = Vec::new();
-    fs::File::open(output_path)
-        .and_then(|mut file| file.read_to_end(&mut output))
-        .map_err(|error| {
-            CliError::with(
-                ErrorCode::ServiceUnavailable,
-                ApplicationOutcome::Failed,
-                error.to_string(),
-            )
-        })?;
-    let mut error_output = Vec::new();
-    fs::File::open(&stderr_path)
-        .and_then(|mut file| file.read_to_end(&mut error_output))
-        .map_err(|error| {
-            CliError::with(
-                ErrorCode::ServiceUnavailable,
-                ApplicationOutcome::Failed,
-                error.to_string(),
-            )
-        })?;
-    output.extend_from_slice(&error_output);
-    if output.len() as u64 > boreal_application::MAX_OUTPUT_BYTES {
+    let mut output = read_bounded_file(output_path, boreal_application::MAX_OUTPUT_BYTES)?;
+    let mut error_output = read_bounded_file(&stderr_path, boreal_application::MAX_OUTPUT_BYTES)?;
+    let output_size = output.len().saturating_add(error_output.len()) as u64;
+    if output_exceeded.load(Ordering::Acquire) || output_size > boreal_application::MAX_OUTPUT_BYTES
+    {
         return Err(CliError::with(
             ErrorCode::ReceiptInvalid,
             ApplicationOutcome::Rejected,
             "declared gate output exceeds the bounded limit",
         ));
     }
+    output.append(&mut error_output);
+    let observables = declaration
+        .observables
+        .iter()
+        .filter(|observable| !observable.is_empty())
+        .filter(|observable| {
+            output
+                .windows(observable.len())
+                .any(|window| window == observable.as_bytes())
+        })
+        .cloned()
+        .collect();
+    let combined_path = output_path.with_extension("combined");
+    let mut combined = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&combined_path)
+        .map_err(|error| {
+            CliError::with(
+                ErrorCode::ServiceUnavailable,
+                ApplicationOutcome::Failed,
+                error.to_string(),
+            )
+        })?;
+    combined.write_all(&output).map_err(|error| {
+        CliError::with(
+            ErrorCode::ServiceUnavailable,
+            ApplicationOutcome::Failed,
+            error.to_string(),
+        )
+    })?;
+    combined.sync_all().map_err(|error| {
+        CliError::with(
+            ErrorCode::ServiceUnavailable,
+            ApplicationOutcome::Failed,
+            error.to_string(),
+        )
+    })?;
     let outcome = if timed_out {
         EvidenceExecutionOutcome::TimedOut
-    } else if child
-        .try_wait()
-        .ok()
-        .flatten()
-        .is_some_and(|status| status.success())
-    {
+    } else if child_status.is_some_and(|status| status.success()) {
         EvidenceExecutionOutcome::Passed
     } else {
         EvidenceExecutionOutcome::Failed
@@ -2043,31 +2752,106 @@ fn execute_gate_command(
     let exit_code = if timed_out {
         None
     } else {
-        child
-            .try_wait()
-            .ok()
-            .flatten()
-            .and_then(|status| status.code())
+        child_status.and_then(|status| status.code())
     };
-    let _ = fs::remove_file(stderr_path);
     Ok(BoundedExecutionResult {
         outcome,
         exit_code,
         started_at,
         ended_at,
         output_size_bytes: output.len() as u64,
-        output_digest: Some(fnv_digest(&output)),
-        output_ref: Some(output_path.to_string_lossy().into_owned()),
-        observables: declaration.observables.clone(),
+        output_digest: Some(sha256_content_digest(&output)),
+        output_ref: Some(combined_path.to_string_lossy().into_owned()),
+        observables,
     })
 }
 
-fn fnv_digest(bytes: &[u8]) -> String {
-    let mut hash = 0xcbf29ce484222325_u64;
-    for byte in bytes {
-        hash = (hash ^ u64::from(*byte)).wrapping_mul(0x100000001b3);
+fn spawn_capture_worker<R>(
+    mut reader: R,
+    mut file: fs::File,
+    captured_bytes: Arc<AtomicU64>,
+    output_exceeded: Arc<AtomicBool>,
+    capture_failed: Arc<AtomicBool>,
+) -> thread::JoinHandle<Result<(), String>>
+where
+    R: Read + Send + 'static,
+{
+    thread::spawn(move || {
+        let mut buffer = [0_u8; 8 * 1024];
+        loop {
+            let read = match reader.read(&mut buffer) {
+                Ok(read) => read,
+                Err(error) => {
+                    capture_failed.store(true, Ordering::Release);
+                    return Err(error.to_string());
+                }
+            };
+            if read == 0 {
+                break;
+            }
+            let retained = reserve_output_bytes(
+                &captured_bytes,
+                read,
+                boreal_application::MAX_OUTPUT_BYTES,
+                &output_exceeded,
+            );
+            if retained > 0 {
+                if let Err(error) = file.write_all(&buffer[..retained]) {
+                    capture_failed.store(true, Ordering::Release);
+                    return Err(error.to_string());
+                }
+            }
+        }
+        file.sync_all().map_err(|error| {
+            capture_failed.store(true, Ordering::Release);
+            error.to_string()
+        })
+    })
+}
+
+fn reserve_output_bytes(
+    captured_bytes: &AtomicU64,
+    incoming: usize,
+    limit: u64,
+    output_exceeded: &AtomicBool,
+) -> usize {
+    loop {
+        let current = captured_bytes.load(Ordering::Acquire);
+        if current >= limit {
+            output_exceeded.store(true, Ordering::Release);
+            return 0;
+        }
+        let available = limit - current;
+        let retained = available.min(incoming as u64) as usize;
+        if captured_bytes
+            .compare_exchange(
+                current,
+                current + retained as u64,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .is_ok()
+        {
+            if retained < incoming {
+                output_exceeded.store(true, Ordering::Release);
+            }
+            return retained;
+        }
     }
-    format!("fnv1a64:{hash:016x}")
+}
+
+fn read_bounded_file(path: &Path, limit: u64) -> Result<Vec<u8>, CliError> {
+    let mut output = Vec::new();
+    fs::File::open(path)
+        .and_then(|file| file.take(limit.saturating_add(1)).read_to_end(&mut output))
+        .map_err(|error| {
+            CliError::with(
+                ErrorCode::ServiceUnavailable,
+                ApplicationOutcome::Failed,
+                error.to_string(),
+            )
+        })?;
+    Ok(output)
 }
 
 fn read_receipt(parsed: &ParsedCommand) -> Result<ReceiptPayload, CliError> {
@@ -2099,6 +2883,41 @@ fn read_receipt(parsed: &ParsedCommand) -> Result<ReceiptPayload, CliError> {
             )
         })?;
     receipt_from_dto(dto)
+}
+
+fn read_summary_body(parsed: &ParsedCommand) -> Result<String, CliError> {
+    let path = parsed
+        .options
+        .summary
+        .as_deref()
+        .ok_or_else(|| CliError::invalid("agent finish --close requires --summary PATH"))?;
+    let bytes = read_bounded_file(Path::new(path), boreal_store::MAX_SUMMARY_BODY_BYTES)?;
+    if bytes.is_empty() {
+        return Err(CliError::invalid("summary body must not be empty"));
+    }
+    if bytes.len() as u64 > boreal_store::MAX_SUMMARY_BODY_BYTES {
+        return Err(CliError::invalid("summary body exceeds the 64 KiB bound"));
+    }
+    String::from_utf8(bytes).map_err(|_| CliError::invalid("summary body must be valid UTF-8 text"))
+}
+
+fn summary_payload(receipt: &ReceiptPayload, body: &str, operation: &str) -> SummaryPayload {
+    SummaryPayload {
+        summary_id: format!(
+            "summary-{}-{}",
+            receipt.attempt_id,
+            operation.strip_prefix("op_").unwrap_or(operation)
+        ),
+        work_id: receipt.work_id.clone(),
+        attempt_id: receipt.attempt_id.clone(),
+        fence: receipt.fence,
+        source_snapshot_hash: receipt.source_snapshot_hash.clone(),
+        config_identity: receipt.config_identity.clone(),
+        profile_id: receipt.coverage.profile_id.clone(),
+        profile_version: receipt.coverage.profile_version.clone(),
+        body_digest: sha256_content_digest(body.as_bytes()),
+        body_size: body.len() as u64,
+    }
 }
 
 fn receipt_from_dto(dto: boreal_protocol::models::ReceiptDto) -> Result<ReceiptPayload, CliError> {
@@ -2170,6 +2989,7 @@ fn receipt_from_dto(dto: boreal_protocol::models::ReceiptDto) -> Result<ReceiptP
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn attempt_request(
     project: &ProjectId,
     work_id: &str,
@@ -2177,7 +2997,22 @@ fn attempt_request(
     options: &CliOptions,
     fence: Fence,
     operation: &str,
+    command: &str,
+    reason: Option<&str>,
 ) -> Result<AttemptRequest, CliError> {
+    let request_digest = canonical_request_digest(
+        command,
+        json!({
+            "project_id": project.as_str(),
+            "work_id": work_id,
+            "attempt_id": attempt_id.as_str(),
+            "actor_id": options.actor,
+            "harness_id": options.harness,
+            "session_id": options.session,
+            "fence": fence.get(),
+            "reason": reason,
+        }),
+    );
     Ok(AttemptRequest::new(
         project.clone(),
         WorkId::new(work_id),
@@ -2187,7 +3022,7 @@ fn attempt_request(
         Some(SessionId::new(options.session.clone())),
         fence,
         OperationId::new(operation),
-        request_digest(operation, project, work_id, attempt_id.as_str()),
+        request_digest,
         TimestampMs::from_millis(now_ms_u64()),
     ))
 }
@@ -2198,8 +3033,10 @@ fn attempt_result(
     store: &SqliteStore,
     project: &ProjectId,
 ) -> Result<CliResult, CliError> {
+    let mut data = attempt_json(&result.value, snapshot);
+    data["work_id"] = json!(snapshot.work_id.as_str());
     bounded_result(
-        Some(attempt_json(&result.value, snapshot)),
+        Some(data),
         Some(
             result
                 .snapshot_revision
@@ -2375,7 +3212,16 @@ fn register_session_if_requested(
         actor_id: ActorId::new(options.actor.clone()),
         harness_id: HarnessId::new(options.harness.clone()),
         operation_id: OperationId::new(sub_operation(operation, "session")),
-        request_digest: format!("sha256:{}_session", operation),
+        request_digest: canonical_request_digest(
+            "session.register/v1",
+            json!({
+                "project_id": project.as_str(),
+                "session_id": options.session,
+                "actor_id": options.actor,
+                "harness_id": options.harness,
+                "started_at": started_at.as_millis(),
+            }),
+        ),
         expected_project_revision: expected_revision,
         started_at,
     };
@@ -2385,19 +3231,48 @@ fn register_session_if_requested(
     Ok(Some(registered.snapshot_revision))
 }
 
-fn find_session_work(store: &SqliteStore, project: &ProjectId, actor: &str) -> Option<String> {
-    store
-        .list_work(project.as_str(), 100, 0)
-        .ok()?
+fn find_session_work(
+    store: &SqliteStore,
+    project: &ProjectId,
+    actor: &str,
+    session: &str,
+) -> Result<Option<String>, CliError> {
+    let attempt = store
+        .current_attempt_for_session(project.as_str(), session)
+        .map_err(map_store_error)?;
+    Ok(attempt
+        .filter(|attempt| attempt.actor_id == actor)
+        .map(|attempt| attempt.work_id))
+}
+
+fn select_claimable_work(
+    store: &SqliteStore,
+    project: &ProjectId,
+    actor: &str,
+) -> Result<Option<String>, CliError> {
+    let snapshot = boreal_application::project_status_from_store(
+        store,
+        project,
+        &boreal_domain::ActorContext {
+            actor_id: ActorId::new(actor.to_owned()),
+            role: boreal_domain::ActorRole::Agent,
+        },
+        TimestampMs::from_millis(now_ms_u64()),
+        1_000,
+        0,
+    )
+    .map_err(|message| {
+        CliError::with(
+            ErrorCode::GuidanceUnavailable,
+            ApplicationOutcome::Failed,
+            message,
+        )
+    })?;
+    Ok(snapshot
         .items
         .into_iter()
-        .find_map(|item| {
-            store
-                .current_attempt_for_work(project.as_str(), &item.work_id)
-                .ok()?
-                .filter(|attempt| attempt.actor_id == actor)
-                .map(|_| item.work_id)
-        })
+        .find(|item| item.work.kind == WorkKind::Task && item.decision.claimable_for_actor)
+        .map(|item| item.work.id.as_str().to_owned()))
 }
 
 fn phase_status(phase: AttemptPhase) -> &'static str {
@@ -2415,7 +3290,15 @@ fn phase_status(phase: AttemptPhase) -> &'static str {
 }
 
 fn request_digest(operation: &str, project: &ProjectId, work: &str, attempt: &str) -> String {
-    format!("sha256:{operation}:{project}:{work}:{attempt}")
+    canonical_request_digest(
+        "attempt.transition/v1",
+        json!({
+            "operation_id": operation,
+            "project_id": project.as_str(),
+            "work_id": work,
+            "attempt_id": attempt,
+        }),
+    )
 }
 
 fn sub_operation(operation: &str, suffix: &str) -> String {
@@ -2437,72 +3320,86 @@ fn operation_id(args: &[String]) -> String {
     if let Some(value) = option(args, "--operation-id") {
         return value;
     }
-    let raw = semantic_args(args).join("_");
-    let safe = raw
-        .chars()
-        .map(|character| {
-            if character.is_ascii_alphanumeric() || matches!(character, '.' | '_' | '-') {
-                character
-            } else {
-                '_'
-            }
-        })
-        .collect::<String>();
-    if safe.len() <= 200 {
-        format!("op_cli_{safe}")
-    } else {
-        format!("op_cli_{}", fnv_digest(raw.as_bytes()).replace(':', "_"))
+    let sequence = OPERATION_COUNTER.fetch_add(1, Ordering::Relaxed);
+    format!(
+        "op_cli_{}_{}_{}",
+        now_ms_u64(),
+        std::process::id(),
+        sequence
+    )
+}
+
+fn outcome_name(outcome: ApplicationOutcome) -> &'static str {
+    match outcome {
+        ApplicationOutcome::Changed => "changed",
+        ApplicationOutcome::Unchanged => "unchanged",
+        ApplicationOutcome::Rejected => "rejected",
+        ApplicationOutcome::Conflict => "conflict",
+        ApplicationOutcome::Busy => "busy",
+        ApplicationOutcome::Failed => "failed",
+        ApplicationOutcome::Unknown => "unknown",
     }
 }
 
-fn semantic_args(args: &[String]) -> Vec<String> {
-    let value_options = [
-        "--db",
-        "--socket",
-        "--operation-id",
-        "--expected-revision",
-        "--revision",
-        "--project",
-        "--actor",
-        "--harness",
-        "--session",
-        "--attempt",
-        "--fence",
-        "--work",
-        "--gate",
-        "--receipt",
-        "--reason",
-        "--operator-reason",
-        "--reviewer",
-        "--lease-ttl",
-        "--ttl",
-        "--time-limit",
-        "--limit",
-        "--offset",
-        "--max-requests",
-    ];
-    let mut result = Vec::new();
-    let mut index = 0;
-    while index < args.len() {
-        if args[index] == "--json" {
-            index += 1;
-        } else if value_options.contains(&args[index].as_str()) {
-            if !matches!(
-                args[index].as_str(),
-                "--db" | "--socket" | "--operation-id" | "--receipt"
-            ) {
-                result.push(args[index].clone());
-                if let Some(value) = args.get(index + 1) {
-                    result.push(value.clone());
-                }
-            }
-            index += 2;
-        } else {
-            result.push(args[index].clone());
-            index += 1;
-        }
+fn outcome_error_code(outcome: ApplicationOutcome) -> ErrorCode {
+    match outcome {
+        ApplicationOutcome::Rejected => ErrorCode::GateUnsatisfied,
+        ApplicationOutcome::Conflict => ErrorCode::OperationConflict,
+        ApplicationOutcome::Busy => ErrorCode::ServiceBusy,
+        ApplicationOutcome::Failed => ErrorCode::ServiceUnavailable,
+        ApplicationOutcome::Unknown => ErrorCode::UnknownOutcome,
+        ApplicationOutcome::Changed | ApplicationOutcome::Unchanged => ErrorCode::InvalidArgument,
     }
-    result
+}
+
+/// Build the protocol error for an application result without discarding the
+/// result's revision or bounded obligation data. Most unsuccessful results are
+/// returned as `CliError`; proof-gated close is intentionally a bounded
+/// `CliResult` so callers can inspect the exact missing obligations.
+fn result_protocol_error(result: &CliResult, operation: &str) -> Option<ProtocolError> {
+    if result.outcome.is_success() {
+        return None;
+    }
+
+    let (code, message) = match result.outcome {
+        ApplicationOutcome::Rejected => {
+            let missing = result
+                .data
+                .as_ref()
+                .and_then(|data| data.pointer("/gates/missing"))
+                .and_then(Value::as_array)
+                .map(|values| values.iter().filter_map(Value::as_str).collect::<Vec<_>>())
+                .unwrap_or_default();
+            if missing.is_empty() {
+                (
+                    ErrorCode::GateUnsatisfied,
+                    "application request was rejected".to_owned(),
+                )
+            } else {
+                (
+                    ErrorCode::GateUnsatisfied,
+                    format!(
+                        "close requirements remain unsatisfied: {}; inspect data.gates.missing and submit current proof before retrying",
+                        missing.join(", ")
+                    ),
+                )
+            }
+        }
+        outcome => {
+            let code = outcome_error_code(outcome);
+            (
+                code,
+                format!("application outcome: {}", outcome_name(outcome)),
+            )
+        }
+    };
+    let mut error = ProtocolError::new(code, message, is_retryable(code));
+    error.observed_revision = result.revision;
+    if result.outcome == ApplicationOutcome::Unknown {
+        error.operation_id = Some(operation.to_owned());
+        error.readback_required = Some(true);
+    }
+    Some(error)
 }
 
 fn option(args: &[String], name: &str) -> Option<String> {
@@ -2728,6 +3625,7 @@ fn is_retryable(code: ErrorCode) -> bool {
             | ErrorCode::VerificationRequired
             | ErrorCode::ReviewRequired
             | ErrorCode::CloseIntentMissing
+            | ErrorCode::GateUnsatisfied
     )
 }
 
@@ -2780,6 +3678,34 @@ mod tests {
     }
 
     #[test]
+    fn parser_allows_dashboard_project_discovery_and_explicit_context() {
+        let discovered = parse(&args(&["dashboard", "--json"])).unwrap();
+        assert_eq!(discovered.path, vec!["dashboard"]);
+        assert_eq!(discovered.options.project, None);
+
+        let explicit = parse(&args(&[
+            "dashboard",
+            "--project",
+            "project-1",
+            "--actor",
+            "operator-1",
+            "--harness",
+            "terminal",
+            "--session",
+            "session-1",
+        ]))
+        .unwrap();
+        assert_eq!(explicit.path, vec!["dashboard"]);
+        assert_eq!(explicit.options.project.as_deref(), Some("project-1"));
+        assert_eq!(explicit.options.actor, "operator-1");
+        assert_eq!(explicit.options.harness, "terminal");
+        assert_eq!(explicit.options.session, "session-1");
+
+        let view = parse(&args(&["view", "--json"])).unwrap();
+        assert_eq!(view.path, vec!["dashboard"]);
+    }
+
+    #[test]
     fn parser_rejects_ambiguous_lease_aliases_and_bad_duration() {
         let both = parse(&args(&[
             "work",
@@ -2805,7 +3731,7 @@ mod tests {
     }
 
     #[test]
-    fn operation_ids_ignore_json_and_database_rendering_flags() {
+    fn operation_ids_are_fresh_unless_explicitly_retried() {
         let first = operation_id(&args(&[
             "agent",
             "start",
@@ -2825,8 +3751,24 @@ mod tests {
             "/tmp/b.sqlite",
             "--json",
         ]));
-        assert_eq!(first, second);
+        assert_ne!(first, second);
         assert!(first.starts_with("op_"));
+        let retry = operation_id(&args(&[
+            "agent",
+            "start",
+            "w",
+            "--operation-id",
+            "op-retry-1",
+        ]));
+        let retry_again = operation_id(&args(&[
+            "agent",
+            "start",
+            "w",
+            "--operation-id",
+            "op-retry-1",
+        ]));
+        assert_eq!(retry, "op-retry-1");
+        assert_eq!(retry, retry_again);
     }
 
     #[test]
@@ -2851,7 +3793,7 @@ mod tests {
             "--receipt",
             "/tmp/second/evidence.json",
         ]));
-        assert_eq!(first, second);
+        assert_ne!(first, second);
 
         let long_value = "x".repeat(300);
         let bounded = operation_id(&args(&["work", "show", &long_value]));
@@ -2868,6 +3810,63 @@ mod tests {
         assert_eq!(exit_code(ErrorCode::StaleFence), 5);
         assert_eq!(exit_code(ErrorCode::ExpiredReview), 7);
         assert_eq!(exit_code(ErrorCode::UnknownOutcome), 11);
+    }
+
+    #[test]
+    fn every_application_outcome_has_a_consistent_error_and_exit_contract() {
+        for outcome in [ApplicationOutcome::Changed, ApplicationOutcome::Unchanged] {
+            let result = CliResult {
+                outcome,
+                revision: Some(4),
+                data: Some(json!({"selection": "none"})),
+            };
+            assert!(result_protocol_error(&result, "op_success").is_none());
+        }
+
+        for (outcome, expected_code, expected_exit) in [
+            (ApplicationOutcome::Rejected, ErrorCode::GateUnsatisfied, 7),
+            (
+                ApplicationOutcome::Conflict,
+                ErrorCode::OperationConflict,
+                4,
+            ),
+            (ApplicationOutcome::Busy, ErrorCode::ServiceBusy, 6),
+            (ApplicationOutcome::Failed, ErrorCode::ServiceUnavailable, 9),
+            (ApplicationOutcome::Unknown, ErrorCode::UnknownOutcome, 11),
+        ] {
+            let result = CliResult {
+                outcome,
+                revision: Some(9),
+                data: Some(json!({"obligation": "preserved"})),
+            };
+            let error = result_protocol_error(&result, "op_outcome_contract")
+                .expect("unsuccessful outcome has a protocol error");
+            assert_eq!(error.code, expected_code);
+            assert_eq!(error.observed_revision, Some(9));
+            assert_eq!(exit_code(error.code), expected_exit);
+            if outcome == ApplicationOutcome::Unknown {
+                assert_eq!(error.operation_id.as_deref(), Some("op_outcome_contract"));
+                assert_eq!(error.readback_required, Some(true));
+            }
+        }
+    }
+
+    #[test]
+    fn rejected_close_error_names_preserved_gate_obligations() {
+        let result = CliResult {
+            outcome: ApplicationOutcome::Rejected,
+            revision: Some(17),
+            data: Some(json!({
+                "close_state": "open",
+                "gates": {"missing": ["work:checkpoint", "work:summary"]}
+            })),
+        };
+        let error = result_protocol_error(&result, "op_rejected_close").unwrap();
+        assert_eq!(error.code, ErrorCode::GateUnsatisfied);
+        assert_eq!(error.observed_revision, Some(17));
+        assert!(error.retryable);
+        assert!(error.message.contains("work:checkpoint"));
+        assert!(error.message.contains("work:summary"));
     }
 
     #[test]
@@ -2974,6 +3973,101 @@ mod tests {
     }
 
     #[test]
+    fn no_goal_start_selects_and_starts_a_claimable_task() {
+        let path =
+            env::temp_dir().join(format!("boreal-cli-no-goal-start-{}.sqlite", now_ms_u64()));
+        let db = path.to_string_lossy().to_string();
+        let _ = fs::remove_file(&path);
+
+        run(&args(&["init", "p", "--db", &db])).expect("project initializes");
+        run(&args(&[
+            "work",
+            "create",
+            "p",
+            "ready-work",
+            "task",
+            "--db",
+            &db,
+        ]))
+        .expect("task creates");
+
+        let result = run(&args(&[
+            "agent",
+            "start",
+            "--project",
+            "p",
+            "--actor",
+            "agent-1",
+            "--harness",
+            "cli",
+            "--session",
+            "session-no-goal-start",
+            "--db",
+            &db,
+            "--json",
+        ]))
+        .expect("goal-less start selects a task");
+        let data = result.data.expect("start data");
+        assert_eq!(data["work_id"], "ready-work");
+        assert_eq!(data["phase"], "running");
+        assert_eq!(data["replayed"], false);
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn direct_status_uses_derived_hierarchy_and_readiness() {
+        let path =
+            env::temp_dir().join(format!("boreal-cli-derived-status-{}.sqlite", now_ms_u64()));
+        let db = path.to_string_lossy().to_string();
+        let _ = fs::remove_file(&path);
+
+        run(&args(&["init", "p", "--db", &db])).expect("project initializes");
+        run(&args(&[
+            "work",
+            "create",
+            "p",
+            "container",
+            "Planning container",
+            "--kind",
+            "milestone",
+            "--db",
+            &db,
+        ]))
+        .expect("milestone creates");
+        run(&args(&[
+            "work",
+            "create",
+            "p",
+            "task",
+            "Executable task",
+            "--db",
+            &db,
+        ]))
+        .expect("task creates");
+
+        let result =
+            run(&args(&["status", "p", "--db", &db, "--json"])).expect("derived status succeeds");
+        let status = result.data.expect("status data");
+        let items = status["items"].as_array().expect("status items");
+        let container = items
+            .iter()
+            .find(|item| item["work_id"] == "container")
+            .expect("container row");
+        assert_eq!(container["kind"], "milestone");
+        assert_eq!(container["display_status"], "blocked");
+        assert_eq!(container["claimable_for_actor"], false);
+        let task = items
+            .iter()
+            .find(|item| item["work_id"] == "task")
+            .expect("task row");
+        assert_eq!(task["kind"], "task");
+        assert_eq!(task["claimable_for_actor"], true);
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
     fn direct_claim_validates_work_before_registering_a_session() {
         let path = env::temp_dir().join(format!(
             "boreal-cli-session-preflight-{}.sqlite",
@@ -3041,6 +4135,15 @@ mod tests {
                          'text/markdown', 1, 'unix-ms:0', 'parser/1', 'available', '[]');",
             )
             .expect("source snapshot registers");
+        SqliteStore::open(&db_path, SCHEMA)
+            .expect("database reopens for proof context")
+            .execute_batch(&format!(
+                "UPDATE attempt
+                     SET source_version_id = 'source-1', config_identity = 'config-1'
+                     WHERE attempt_id = '{}';",
+                attempt_id
+            ))
+            .expect("attempt proof context binds");
         fs::write(
             &receipt_path,
             serde_json::to_string(&json!({
@@ -3060,8 +4163,8 @@ mod tests {
                 "environment_fingerprint": "env-1",
                 "output_digest": "output-1",
                 "output_ref": null,
-                "coverage": {"kind": "verification", "profile_id": "focused", "profile_version": "v1"},
-                "attestation": "boreal_witnessed",
+                "coverage": {"kind": "verification", "profile_id": "focused", "profile_version": "1"},
+                "attestation": "external_attested",
                 "result": "passed",
                 "retention": null,
             }))

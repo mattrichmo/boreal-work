@@ -69,18 +69,25 @@ let export = source_plan.materialize_export()?;
 ```
 
 `SourceProvenance` records the legacy format/version, the optional source
-`as_of_ms`, and a stable content fingerprint. `MigrationDocument::canonicalized`
-sorts every collection before export, so equivalent source row order produces
-the same JSON. Import actions are ordered by stable collection families and
-use the explicit `reject_existing` conflict policy; they are a description for
-an integrator, not writes performed by this crate.
+`as_of_ms`, and a SHA-256 fingerprint of the exact input bytes. The fingerprint
+uses the same `sha256:<64 lowercase hex>` representation as the source engine.
+`MigrationDocument::canonicalized` sorts every collection before export, so
+equivalent source row order produces the same JSON. Import actions are ordered
+by stable collection families and use the explicit `reject_existing` conflict
+policy; they are a description for an integrator, not writes performed by this
+crate.
 
 Materialization is all-or-nothing. Unsupported fields, unsupported retention
 semantics, ambiguous aliases, or failed validation are retained in the
-`ImportReport`; an unready `ImportPlan` contains zero actions and
-`materialize_export` returns `MaterializationError::NotReady`. Consequently a
-store adapter cannot accidentally apply a partial plan. Failed records and
-their raw details remain reportable rather than being discarded.
+`ImportReport`; an unready `ImportPlan` contains zero actions and `apply`,
+`verify`, and `materialize_export` return `MaterializationError::NotReady`.
+Consequently a store adapter cannot accidentally apply a partial plan. Failed
+records and their raw details remain reportable rather than being discarded.
+`LegacyImportPlan::verify` additionally round-trips the canonical document,
+checks its SHA-256 identity, and reports exact section counts/action count for
+an adapter's expected-base and post-apply checks. These operations remain
+side-effect free; a later store adapter owns transactions, checkpoints,
+rollback, and durable operation IDs.
 
 The crate does not write v2 store rows, publish memory, fetch Git data, resolve
 legacy aliases, or infer unsupported lifecycle/dependency semantics. Those

@@ -9,6 +9,7 @@ mod status;
 mod evidence;
 mod evidence_store;
 mod guidance;
+mod operation_identity;
 mod session;
 mod sqlite_adapter;
 mod workflow_assets;
@@ -19,6 +20,8 @@ pub use evidence::*;
 pub use guidance::{
     guide, guide_checked, Directive, DirectiveSeverity, DirectiveValidationError, GuidanceContext,
 };
+pub use operation_identity::{canonical_request_digest, sha256_content_digest};
+use serde_json::json;
 pub use session::{
     SessionRegistrationRequest, SessionRegistrationResult, StoreSessionRegistrationRequest,
 };
@@ -123,6 +126,16 @@ impl<'a> WorkApplication<'a> {
         operation_id: impl Into<String>,
     ) -> Result<OperationResult<()>, ApplicationError> {
         let operation_id = operation_id.into();
+        let request_digest = canonical_request_digest(
+            "project.init/v1",
+            json!({
+                "project_id": project_id.as_str(),
+                "actor_id": actor_id,
+                "actor_role": actor_role,
+                "credential_ref": credential_ref,
+                "display_name": display_name,
+            }),
+        );
         let mutation = self.store.initialize_project(
             project_id.as_str(),
             actor_id,
@@ -130,7 +143,7 @@ impl<'a> WorkApplication<'a> {
             credential_ref,
             display_name,
             &operation_id,
-            &format!("sha256:{operation_id}"),
+            &request_digest,
             now,
         )?;
         Ok(OperationResult {
@@ -162,24 +175,53 @@ impl<'a> WorkApplication<'a> {
                 "project and title are required".to_owned(),
             ));
         }
-        if work.parent_id.is_none() && !matches!(work.kind, boreal_domain::WorkKind::Milestone) {
+        if work.parent_id.is_none()
+            && !matches!(
+                work.kind,
+                boreal_domain::WorkKind::Milestone | boreal_domain::WorkKind::Task
+            )
+        {
             return Err(ApplicationError::Invalid(
-                "sprints and tasks require a parent".to_owned(),
+                "sprints require a parent; root work must be a milestone or task".to_owned(),
             ));
         }
         let operation_id = operation_id.into();
+        let request_digest = canonical_request_digest(
+            "work.create/v1",
+            json!({
+                "project_id": work.project_id.as_str(),
+                "work_id": work.id.as_str(),
+                "actor_id": actor_id,
+                "kind": format!("{:?}", work.kind).to_ascii_lowercase(),
+                "parent_id": work.parent_id.as_ref().map(|id| id.as_str()),
+                "title": work.title,
+                "description": work.description,
+                "lifecycle": format!("{:?}", work.lifecycle).to_ascii_lowercase(),
+                "priority": work.priority,
+                "dispatch_policy": format!("{:?}", work.dispatch_policy).to_ascii_lowercase(),
+                "hard_holds": work.hard_holds.iter().map(|hold| hold.stable_code()).collect::<Vec<_>>(),
+                "acceptance_profile": {
+                    "id": work.acceptance_profile.id.as_str(),
+                    "version": work.acceptance_profile.version,
+                    "gates": work.acceptance_profile.gates.iter().map(|gate| json!({
+                        "id": gate.id.as_str(),
+                        "kind": format!("{:?}", gate.kind).to_ascii_lowercase(),
+                        "required": gate.required,
+                        "state": format!("{:?}", gate.state).to_ascii_lowercase(),
+                    })).collect::<Vec<_>>(),
+                },
+            }),
+        );
         let mutation = self.store.create_work_operation(
             work,
             actor_id,
             &operation_id,
-            &format!("sha256:{operation_id}"),
+            &request_digest,
             now,
         )?;
-        let page = self.store.list_work(work.project_id.as_str(), 1_000, 0)?;
-        let value = page
-            .items
-            .into_iter()
-            .find(|item| item.work_id == work.id.as_str())
+        let value = self
+            .store
+            .work(work.project_id.as_str(), work.id.as_str())?
             .ok_or_else(|| ApplicationError::Invalid("created work was not readable".to_owned()))?;
         Ok(OperationResult {
             operation_id,
@@ -203,10 +245,8 @@ impl<'a> WorkApplication<'a> {
         project_id: &ProjectId,
         work_id: &str,
     ) -> Result<WorkRecord, ApplicationError> {
-        let page = self.store.list_work(project_id.as_str(), 1_000, 0)?;
-        page.items
-            .into_iter()
-            .find(|item| item.work_id == work_id)
+        self.store
+            .work(project_id.as_str(), work_id)?
             .ok_or_else(|| {
                 ApplicationError::Store(StoreError::NotFound {
                     entity: "work",
@@ -248,13 +288,22 @@ impl<'a> WorkApplication<'a> {
             ));
         }
         let operation_id = operation_id.into();
+        let request_digest = canonical_request_digest(
+            "dependency.add/v1",
+            json!({
+                "project_id": project_id.as_str(),
+                "prerequisite_id": prerequisite_id,
+                "dependent_id": dependent_id,
+                "actor_id": actor_id,
+            }),
+        );
         let mutation = self.store.add_dependency_operation(
             project_id.as_str(),
             prerequisite_id,
             dependent_id,
             actor_id,
             &operation_id,
-            &format!("sha256:{operation_id}"),
+            &request_digest,
             now,
         )?;
         Ok(OperationResult {
@@ -281,7 +330,43 @@ impl<'a> WorkApplication<'a> {
         lease_deadline: &str,
         max_attempt_deadline: &str,
     ) -> Result<OperationResult<ClaimResult>, ApplicationError> {
-        let value = self.store.claim_work(
+        self.claim_with_context(
+            project_id,
+            work_id,
+            actor_id,
+            harness_id,
+            session_id,
+            attempt_id,
+            operation_id,
+            request_digest,
+            expected_revision,
+            claimed_at,
+            lease_deadline,
+            max_attempt_deadline,
+            None,
+            "unknown",
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn claim_with_context(
+        &self,
+        project_id: &ProjectId,
+        work_id: &str,
+        actor_id: &str,
+        harness_id: &str,
+        session_id: Option<&str>,
+        attempt_id: &str,
+        operation_id: &str,
+        request_digest: &str,
+        expected_revision: Option<u64>,
+        claimed_at: &str,
+        lease_deadline: &str,
+        max_attempt_deadline: &str,
+        source_version_id: Option<&str>,
+        config_identity: &str,
+    ) -> Result<OperationResult<ClaimResult>, ApplicationError> {
+        let value = self.store.claim_work_with_context(
             project_id.as_str(),
             work_id,
             actor_id,
@@ -294,6 +379,8 @@ impl<'a> WorkApplication<'a> {
             claimed_at,
             lease_deadline,
             max_attempt_deadline,
+            source_version_id,
+            config_identity,
         )?;
         Ok(OperationResult {
             operation_id: operation_id.to_owned(),
@@ -330,7 +417,7 @@ mod tests {
         let work = WorkItem {
             id: boreal_domain::WorkId::new("w1"),
             project_id: project.clone(),
-            kind: WorkKind::Milestone,
+            kind: WorkKind::Task,
             parent_id: None,
             title: "M1".into(),
             description: String::new(),

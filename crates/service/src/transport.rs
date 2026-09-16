@@ -12,8 +12,6 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 #[cfg(unix)]
-use std::os::unix::fs::PermissionsExt;
-#[cfg(unix)]
 use std::os::unix::net::{UnixListener, UnixStream};
 
 /// Default maximum encoded JSON body size, excluding the four-byte prefix.
@@ -137,6 +135,7 @@ pub enum ProtocolErrorCode {
     UnknownField,
     InvalidField,
     InvalidPayload,
+    Busy,
     UnknownErrorCode,
 }
 
@@ -150,6 +149,7 @@ impl ProtocolErrorCode {
             Self::UnknownField => "unknown_field",
             Self::InvalidField => "invalid_field",
             Self::InvalidPayload => "invalid_payload",
+            Self::Busy => "busy",
             Self::UnknownErrorCode => "unknown_error_code",
         }
     }
@@ -163,6 +163,7 @@ impl ProtocolErrorCode {
             "unknown_field" => Self::UnknownField,
             "invalid_field" => Self::InvalidField,
             "invalid_payload" => Self::InvalidPayload,
+            "busy" => Self::Busy,
             "unknown_error_code" => Self::UnknownErrorCode,
             _ => return None,
         })
@@ -180,6 +181,7 @@ impl fmt::Display for ProtocolErrorCode {
 pub struct ProtocolError {
     code: ProtocolErrorCode,
     message: String,
+    busy: Option<crate::BusyOutcome>,
 }
 
 impl ProtocolError {
@@ -187,6 +189,15 @@ impl ProtocolError {
         Self {
             code,
             message: message.into(),
+            busy: None,
+        }
+    }
+
+    pub fn with_busy(outcome: crate::BusyOutcome) -> Self {
+        Self {
+            code: ProtocolErrorCode::Busy,
+            message: outcome.to_string(),
+            busy: Some(outcome),
         }
     }
 
@@ -196,6 +207,10 @@ impl ProtocolError {
 
     pub fn message(&self) -> &str {
         &self.message
+    }
+
+    pub fn busy_outcome(&self) -> Option<&crate::BusyOutcome> {
+        self.busy.as_ref()
     }
 }
 
@@ -407,6 +422,18 @@ pub struct UnixSocketServer {
     config: TransportConfig,
 }
 
+/// One accepted client connection detached from the listener.
+///
+/// The host uses this handoff to read a bounded request on the acceptor and
+/// then queue application execution on a worker. Keeping the stream with the
+/// request preserves correlation and lets a worker write the response without
+/// holding up unrelated accepts.
+#[cfg(unix)]
+pub(crate) struct UnixSocketConnection {
+    stream: UnixStream,
+    config: TransportConfig,
+}
+
 #[cfg(unix)]
 impl UnixSocketServer {
     pub fn bind(path: impl AsRef<Path>, config: TransportConfig) -> Result<Self, TransportError> {
@@ -414,17 +441,10 @@ impl UnixSocketServer {
         let socket_path = path.as_ref().to_owned();
         require_absolute_socket_path(&socket_path)?;
         let listener = UnixListener::bind(&socket_path).map_err(map_io(IoOperation::Read))?;
-        if let Err(error) = fs::set_permissions(&socket_path, fs::Permissions::from_mode(0o600)) {
-            // macOS does not permit chmod on a live Unix-domain socket. In
-            // that case retain the mode supplied by bind/umask; callers are
-            // expected to place the endpoint in the private runtime
-            // directory created by the election primitive.
-            if error.kind() != io::ErrorKind::PermissionDenied {
-                drop(listener);
-                let _ = fs::remove_file(&socket_path);
-                return Err(TransportError::Io(error));
-            }
-        }
+        // Unix socket permissions are established by the process umask and
+        // the private runtime directory. macOS rejects chmod(2) on a live
+        // socket with EPERM, so do not turn a successfully bound endpoint
+        // into a failed service merely because its mode cannot be rewritten.
         Ok(Self {
             listener,
             socket_path,
@@ -444,6 +464,20 @@ impl UnixSocketServer {
         self.listener
             .set_nonblocking(nonblocking)
             .map_err(map_io(IoOperation::Read))
+    }
+
+    /// Accept one client without dispatching its application request.
+    pub(crate) fn try_accept(&self) -> Result<Option<UnixSocketConnection>, TransportError> {
+        let (stream, _) = match self.listener.accept() {
+            Ok(connection) => connection,
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => return Ok(None),
+            Err(error) => return Err(TransportError::Accept(error)),
+        };
+        configure_stream(&stream, &self.config)?;
+        Ok(Some(UnixSocketConnection {
+            stream,
+            config: self.config.clone(),
+        }))
     }
 
     /// Accept one client, dispatch one request, and write one response.
@@ -466,22 +500,39 @@ impl UnixSocketServer {
     where
         F: FnOnce(JsonRequest) -> Result<JsonResponse, ProtocolError>,
     {
-        let (mut stream, _) = match self.listener.accept() {
-            Ok(connection) => connection,
-            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                return Ok(ServeOnceOutcome::WouldBlock)
-            }
-            Err(error) => return Err(TransportError::Accept(error)),
+        let Some(mut connection) = self.try_accept()? else {
+            return Ok(ServeOnceOutcome::WouldBlock);
         };
-        configure_stream(&stream, &self.config)?;
-        let request = read_request(&mut stream, &self.config)?;
+        let request = connection.read_request()?;
         let response = match handler(request.clone()) {
             Ok(response) => response,
             Err(error) => JsonResponse::failure(request.request_id(), error)
                 .map_err(TransportError::Protocol)?,
         };
-        write_frame(&mut stream, &self.config, &encode_response(&response))?;
+        connection.write_response(&response)?;
         Ok(ServeOnceOutcome::Served)
+    }
+}
+
+#[cfg(unix)]
+impl UnixSocketConnection {
+    pub(crate) fn read_request(&mut self) -> Result<JsonRequest, TransportError> {
+        let body = read_frame(&mut self.stream, &self.config)?;
+        decode_request(&body).map_err(TransportError::Protocol)
+    }
+
+    pub(crate) fn write_response(mut self, response: &JsonResponse) -> Result<(), TransportError> {
+        write_frame(&mut self.stream, &self.config, &encode_response(response))
+    }
+
+    pub(crate) fn write_protocol_error(
+        self,
+        request_id: &str,
+        error: ProtocolError,
+    ) -> Result<(), TransportError> {
+        let response = JsonResponse::failure(request_id.to_owned(), error)
+            .map_err(TransportError::Protocol)?;
+        self.write_response(&response)
     }
 }
 
@@ -587,15 +638,6 @@ fn ensure_frame_size(size: usize, config: &TransportConfig) -> Result<(), Transp
 }
 
 #[cfg(unix)]
-fn read_request<R: Read>(
-    reader: &mut R,
-    config: &TransportConfig,
-) -> Result<JsonRequest, TransportError> {
-    let body = read_frame(reader, config)?;
-    decode_request(&body).map_err(TransportError::Protocol)
-}
-
-#[cfg(unix)]
 fn read_response<R: Read>(
     reader: &mut R,
     config: &TransportConfig,
@@ -630,6 +672,10 @@ fn encode_response(response: &JsonResponse) -> String {
         encoded.push_str(&quote_json_string(error.code.as_str()));
         encoded.push_str(",\"message\":");
         encoded.push_str(&quote_json_string(&error.message));
+        if let Some(busy) = error.busy_outcome() {
+            encoded.push_str(",\"busy\":");
+            encoded.push_str(&encode_busy_outcome(busy));
+        }
         encoded.push('}');
     }
     encoded.push('}');
@@ -663,7 +709,7 @@ fn decode_response(body: &str) -> Result<JsonResponse, ProtocolError> {
         }
         (None, Some(error)) => {
             let error_fields = parse_envelope(error.value.as_bytes())?;
-            reject_unknown_fields(&error_fields, &["code", "message"])?;
+            reject_unknown_fields(&error_fields, &["code", "message", "busy"])?;
             let code = required_string(&error_fields, "code")?;
             let code = ProtocolErrorCode::from_str(&code).ok_or_else(|| {
                 ProtocolError::new(
@@ -672,7 +718,16 @@ fn decode_response(body: &str) -> Result<JsonResponse, ProtocolError> {
                 )
             })?;
             let message = required_string(&error_fields, "message")?;
-            JsonResponse::failure(request_id, ProtocolError::new(code, message)).map_err(|error| {
+            let busy = error_fields
+                .iter()
+                .find(|field| field.name == "busy")
+                .map(|field| decode_busy_outcome(field.value))
+                .transpose()?;
+            let error = match busy {
+                Some(busy) => ProtocolError::with_busy(busy),
+                None => ProtocolError::new(code, message),
+            };
+            JsonResponse::failure(request_id, error).map_err(|error| {
                 ProtocolError::new(ProtocolErrorCode::InvalidEnvelope, error.to_string())
             })
         }
@@ -681,6 +736,105 @@ fn decode_response(body: &str) -> Result<JsonResponse, ProtocolError> {
             "response requires payload or error",
         )),
     }
+}
+
+fn encode_busy_outcome(outcome: &crate::BusyOutcome) -> String {
+    match outcome {
+        crate::BusyOutcome::WriterQueueFull {
+            capacity,
+            depth,
+            retry_after_ms,
+        } => format!(
+            "{{\"kind\":\"writer_queue_full\",\"capacity\":{capacity},\"depth\":{depth},\"retry_after_ms\":{retry_after_ms}}}"
+        ),
+        crate::BusyOutcome::ReadPoolFull {
+            capacity,
+            depth,
+            retry_after_ms,
+        } => format!(
+            "{{\"kind\":\"read_pool_full\",\"capacity\":{capacity},\"depth\":{depth},\"retry_after_ms\":{retry_after_ms}}}"
+        ),
+        crate::BusyOutcome::DispatchQueueFull {
+            capacity,
+            depth,
+            retry_after_ms,
+        } => format!(
+            "{{\"kind\":\"dispatch_queue_full\",\"capacity\":{capacity},\"depth\":{depth},\"retry_after_ms\":{retry_after_ms}}}"
+        ),
+        crate::BusyOutcome::ProjectAlreadyOwned {
+            project_id,
+            owner_id,
+        } => format!(
+            "{{\"kind\":\"project_already_owned\",\"project_id\":{},\"owner_id\":{}}}",
+            quote_json_string(project_id),
+            owner_id
+                .as_deref()
+                .map(quote_json_string)
+                .unwrap_or_else(|| "null".to_owned())
+        ),
+    }
+}
+
+fn decode_busy_outcome(raw: &str) -> Result<crate::BusyOutcome, ProtocolError> {
+    let fields = parse_envelope(raw.as_bytes())?;
+    let kind = required_string(&fields, "kind")?;
+    match kind.as_str() {
+        "writer_queue_full" => Ok(crate::BusyOutcome::WriterQueueFull {
+            capacity: required_usize(&fields, "capacity")?,
+            depth: required_usize(&fields, "depth")?,
+            retry_after_ms: required_u64(&fields, "retry_after_ms")?,
+        }),
+        "read_pool_full" => Ok(crate::BusyOutcome::ReadPoolFull {
+            capacity: required_usize(&fields, "capacity")?,
+            depth: required_usize(&fields, "depth")?,
+            retry_after_ms: required_u64(&fields, "retry_after_ms")?,
+        }),
+        "dispatch_queue_full" => Ok(crate::BusyOutcome::DispatchQueueFull {
+            capacity: required_usize(&fields, "capacity")?,
+            depth: required_usize(&fields, "depth")?,
+            retry_after_ms: required_u64(&fields, "retry_after_ms")?,
+        }),
+        "project_already_owned" => {
+            let owner = fields
+                .iter()
+                .find(|field| field.name == "owner_id")
+                .ok_or_else(|| {
+                    ProtocolError::new(ProtocolErrorCode::MissingField, "missing \"owner_id\"")
+                })?;
+            let owner_id = if owner.value == "null" {
+                None
+            } else {
+                Some(parse_json_string_value(owner.value)?)
+            };
+            Ok(crate::BusyOutcome::ProjectAlreadyOwned {
+                project_id: required_string(&fields, "project_id")?,
+                owner_id,
+            })
+        }
+        _ => Err(ProtocolError::new(
+            ProtocolErrorCode::InvalidField,
+            "unknown busy outcome kind",
+        )),
+    }
+}
+
+fn required_u64(fields: &[Field<'_>], name: &str) -> Result<u64, ProtocolError> {
+    let value = required_raw_value(fields, name)?;
+    value.parse::<u64>().map_err(|_| {
+        ProtocolError::new(
+            ProtocolErrorCode::InvalidField,
+            format!("field {name:?} must be a non-negative integer"),
+        )
+    })
+}
+
+fn required_usize(fields: &[Field<'_>], name: &str) -> Result<usize, ProtocolError> {
+    required_u64(fields, name)?.try_into().map_err(|_| {
+        ProtocolError::new(
+            ProtocolErrorCode::InvalidField,
+            format!("field {name:?} is too large"),
+        )
+    })
 }
 
 fn validate_request_id(request_id: &str) -> Result<(), ProtocolError> {
@@ -1043,19 +1197,24 @@ fn parse_hex_quad(value: &[u8], start: usize) -> Result<u32, ProtocolError> {
 mod tests {
     use super::*;
     use std::fs;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::thread;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    static SOCKET_COUNTER: AtomicU64 = AtomicU64::new(0);
 
     fn temp_socket_path() -> PathBuf {
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("clock is after Unix epoch")
             .as_nanos();
+        let counter = SOCKET_COUNTER.fetch_add(1, Ordering::Relaxed);
         // The managed macOS test sandbox may deny Unix-domain sockets below
         // its per-process temp directory; /private/tmp is the documented
         // writable local runtime area.
         PathBuf::from(format!(
-            "/private/tmp/boreal-service-transport-{nonce}.sock"
+            "/private/tmp/boreal-service-transport-{}-{nonce}-{counter}.sock",
+            std::process::id()
         ))
     }
 

@@ -5,7 +5,7 @@ export LC_ALL=C
 
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
 PACKAGE_ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd -P)
-BIN="$PACKAGE_ROOT/target/debug/boreal-cli"
+BIN="$PACKAGE_ROOT/target/debug/bwrk"
 TEMP_BASE=${TMPDIR:-/tmp}
 SMOKE_DIR=$(mktemp -d "${TEMP_BASE%/}/boreal-v2-service-smoke.XXXXXX")
 DB="$SMOKE_DIR/work.sqlite"

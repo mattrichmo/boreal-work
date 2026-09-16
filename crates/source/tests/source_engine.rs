@@ -147,3 +147,19 @@ fn traversal_and_cross_project_versions_are_rejected() {
         Err(SourceError::ScopeViolation)
     );
 }
+
+#[test]
+fn failed_catalog_flush_does_not_leave_an_in_memory_source_reference() {
+    let root = test_root("flush-rollback");
+    let catalog_path = root.join("catalog.json");
+    let catalog = SourceCatalog::with_persistent_filesystem(&root).unwrap();
+    // Block the atomic replacement target so persistence fails after the blob
+    // has been verified and before metadata becomes durable.
+    fs::create_dir(&catalog_path).unwrap();
+    assert!(matches!(
+        catalog.capture("project-a", "docs/a.md", b"bytes", "text/plain"),
+        Err(SourceError::Storage(_))
+    ));
+    assert_eq!(catalog.version_count().unwrap(), 0);
+    fs::remove_dir_all(root).unwrap();
+}

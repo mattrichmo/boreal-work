@@ -15,6 +15,7 @@
 /.boreal/
 /reference-zips/
 /scratch/
+/release-artifacts/
 *.DS_Store
 *.db
 *.db-shm

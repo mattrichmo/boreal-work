@@ -829,6 +829,7 @@ pub enum ReasonCode {
     RetryNotBefore(TimestampMs),
     Eligible,
     OperatorOnly,
+    NonExecutableContainer,
     LeaseElapsed,
     HardBudgetElapsed,
 }
@@ -851,6 +852,7 @@ impl ReasonCode {
             Self::RetryNotBefore(at) => format!("retry_not_before({at})"),
             Self::Eligible => "eligible".to_owned(),
             Self::OperatorOnly => "operator_only".to_owned(),
+            Self::NonExecutableContainer => "non_executable_container".to_owned(),
             Self::LeaseElapsed => "lease_elapsed".to_owned(),
             Self::HardBudgetElapsed => "hard_budget_elapsed".to_owned(),
         }
@@ -1045,6 +1047,13 @@ pub fn evaluate_status(context: StatusContext<'_>) -> StatusDecision {
                 Some(DomainAction::PublishWork),
                 ReasonCode::NotPublished,
             )
+        } else if work.kind != WorkKind::Task && attempt.is_none() {
+            (
+                DerivedStatus::Blocked,
+                false,
+                None,
+                ReasonCode::NonExecutableContainer,
+            )
         } else if let Some(current) = attempt {
             match current.phase {
                 AttemptPhase::Claimed => (
@@ -1151,6 +1160,14 @@ fn eligible_tuple(
     work: &WorkItem,
     actor: &ActorContext,
 ) -> (DerivedStatus, bool, Option<DomainAction>, ReasonCode) {
+    if work.kind != WorkKind::Task {
+        return (
+            DerivedStatus::Blocked,
+            false,
+            None,
+            ReasonCode::NonExecutableContainer,
+        );
+    }
     match work.dispatch_policy {
         DispatchPolicy::Automatic => (
             DerivedStatus::Ready,
@@ -1212,10 +1229,11 @@ fn evaluate_gates(
     }
 }
 
-/// Validates the fixed milestone → sprint → task containment hierarchy.
+/// Validates the schema-2 milestone → sprint → task containment hierarchy.
+/// Root milestones and root tasks are allowed; only task rows are executable.
 pub fn validate_parent(child: &WorkItem, parent: Option<&WorkItem>) -> Result<(), DomainError> {
     let Some(parent) = parent else {
-        if child.kind == WorkKind::Milestone {
+        if matches!(child.kind, WorkKind::Milestone | WorkKind::Task) {
             return Ok(());
         }
         return Err(DomainError::ParentRequired {

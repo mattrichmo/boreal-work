@@ -19,7 +19,7 @@ command -v bwrk
 bwrk --version
 ```
 
-The result must point inside this directory and report `bwrk 2`. Never use
+The result must point inside this directory and report `bwrk 0.2.0 (api 2)`. Never use
 `/Users/cybertron/.local/bin/bwrk`; that is the legacy v1 command.
 
 ## State boundary

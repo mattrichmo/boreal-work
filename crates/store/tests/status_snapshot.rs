@@ -8,7 +8,7 @@ fn store() -> SqliteStore {
 }
 
 fn work(project_id: &str, id: &str) -> WorkItem {
-    WorkItem::new(project_id.into(), id.into(), WorkKind::Milestone, None, id).open()
+    WorkItem::new(project_id.into(), id.into(), WorkKind::Task, None, id).open()
 }
 
 #[test]

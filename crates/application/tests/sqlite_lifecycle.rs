@@ -1,14 +1,14 @@
 use boreal_application::{
-    AttemptRequest, EndAttemptRequest, ExecutorAttestation, HeartbeatAttemptRequest,
-    LivenessMetadata, ReceiptCoverage, ReceiptPayload, RenewLeaseAttemptRequest,
-    SqliteAttemptAdapter, WorkApplication,
+    AcceptanceDefinition, AttemptRequest, EndAttemptRequest, ExecutorAttestation,
+    HeartbeatAttemptRequest, LivenessMetadata, ReceiptCoverage, ReceiptPayload,
+    RenewLeaseAttemptRequest, SqliteAttemptAdapter, SummaryPayload, WorkApplication,
 };
 use boreal_domain::{
     AcceptanceProfile, ActorId, AttemptId, ConfigIdentity, DispatchPolicy, Fence, GateId, GateKind,
     HarnessId, OperationId, PersistedLifecycle, ProfileId, ProjectId, ReceiptResult,
     SourceVersionId, TimestampMs, WorkId, WorkItem, WorkKind,
 };
-use boreal_store::SqliteStore;
+use boreal_store::{SqliteStore, SummaryInsertRequest};
 
 const SCHEMA: &str = include_str!("../../../project/spec/schema-v2.sql");
 
@@ -53,7 +53,10 @@ fn passed_receipt(gate_id: &str, gate_kind: GateKind, operation_id: &str) -> Rec
             profile_version: "1".to_owned(),
             observables: Vec::new(),
         },
-        attestation: ExecutorAttestation::BorealWitnessed,
+        // This fixture represents imported, externally attested evidence.
+        // Trusted Boreal-witnessed receipts are only admitted through the
+        // bounded executor path, not the JSON import façade.
+        attestation: ExecutorAttestation::ExternalAttested,
         result: ReceiptResult::Passed,
     }
 }
@@ -77,7 +80,7 @@ fn sqlite_adapter_persists_fenced_lifecycle_and_replays() {
         &WorkItem {
             id: WorkId::new("w1"),
             project_id: project.clone(),
-            kind: WorkKind::Milestone,
+            kind: WorkKind::Task,
             parent_id: None,
             title: "Lifecycle".to_owned(),
             description: String::new(),
@@ -171,7 +174,7 @@ fn accepted_receipts_drive_durable_proof_gated_closeout() {
         &WorkItem {
             id: WorkId::new("w-close"),
             project_id: project.clone(),
-            kind: WorkKind::Milestone,
+            kind: WorkKind::Task,
             parent_id: None,
             title: "Closeout".to_owned(),
             description: String::new(),
@@ -226,8 +229,15 @@ fn accepted_receipts_drive_durable_proof_gated_closeout() {
                  'text/markdown', 1, 'unix-ms:0', 'parser/1', 'available', '[]');",
         )
         .unwrap();
+    store
+        .execute_batch(
+            "UPDATE attempt
+             SET source_version_id = 'source-1', config_identity = 'config-1'
+             WHERE attempt_id = 'a-close';",
+        )
+        .unwrap();
 
-    for (gate, kind, operation) in [
+    let receipts: Vec<_> = [
         ("checkpoint", GateKind::Checkpoint, "op-receipt-checkpoint"),
         (
             "verification",
@@ -235,15 +245,13 @@ fn accepted_receipts_drive_durable_proof_gated_closeout() {
             "op-receipt-verification",
         ),
         ("summary", GateKind::Summary, "op-receipt-summary"),
-    ] {
-        app.record_receipt(
-            "agent-1",
-            None,
-            &passed_receipt(gate, kind, operation),
-            None,
-            TimestampMs(4),
-        )
-        .unwrap();
+    ]
+    .into_iter()
+    .map(|(gate, kind, operation)| passed_receipt(gate, kind, operation))
+    .collect();
+    for receipt in &receipts {
+        app.record_receipt("agent-1", None, receipt, None, TimestampMs(4))
+            .unwrap();
     }
     let intent = boreal_application::CloseIntent {
         work_id: WorkId::new("w-close"),
@@ -257,8 +265,69 @@ fn accepted_receipts_drive_durable_proof_gated_closeout() {
     };
     app.request_close("agent-1", None, &intent, None, TimestampMs(5))
         .unwrap();
+    let closeout = boreal_application::CloseoutInput {
+        definition: AcceptanceDefinition::focused(),
+        work_id: WorkId::new("w-close"),
+        attempt: boreal_application::AttemptSnapshot {
+            project_id: ProjectId::new("p-close"),
+            work_id: WorkId::new("w-close"),
+            attempt_id: AttemptId::new("a-close"),
+            actor_id: ActorId::new("agent-1"),
+            harness_id: Some(HarnessId::new("luna")),
+            session_id: None,
+            fence: Fence::new(1),
+            phase: boreal_domain::AttemptPhase::Verifying,
+            claimed_at: TimestampMs(0),
+            accepted_at: Some(TimestampMs(1)),
+            lease_deadline: TimestampMs(1_800_000),
+            hard_deadline: TimestampMs(7_200_000),
+            current: true,
+        },
+        expected_fence: Fence::new(1),
+        source_snapshot_hash: SourceVersionId::new("source-1"),
+        config_identity: ConfigIdentity::new("config-1"),
+        policy_version: "1".to_owned(),
+        receipts,
+        gates: Vec::new(),
+        review: None,
+        summary: Some(SummaryPayload {
+            summary_id: "summary-close".to_owned(),
+            work_id: WorkId::new("w-close"),
+            attempt_id: AttemptId::new("a-close"),
+            fence: Fence::new(1),
+            source_snapshot_hash: SourceVersionId::new("source-1"),
+            config_identity: ConfigIdentity::new("config-1"),
+            profile_id: ProfileId::new("focused"),
+            profile_version: "1".to_owned(),
+            body_digest: "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+                .to_owned(),
+            body_size: 1,
+        }),
+        close_intent: Some(intent.clone()),
+    };
+    store
+        .insert_summary(SummaryInsertRequest {
+            project_id: "p-close".to_owned(),
+            actor_id: "agent-1".to_owned(),
+            session_id: None,
+            expected_project_revision: None,
+            summary_id: "summary-close".to_owned(),
+            work_id: "w-close".to_owned(),
+            attempt_id: "a-close".to_owned(),
+            fence: 1,
+            source_version_id: "source-1".to_owned(),
+            config_identity: "config-1".to_owned(),
+            profile_id: "focused".to_owned(),
+            profile_version: 1,
+            body_digest: "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+                .to_owned(),
+            body_size: 1,
+            operation_id: "op-summary-close".to_owned(),
+            created_at: "unix-ms:5".to_owned(),
+        })
+        .unwrap();
     let finalized = app
-        .finalize_close("agent-1", None, &intent, None, TimestampMs(6))
+        .finalize_close_checked("agent-1", None, &closeout, None, TimestampMs(6))
         .unwrap();
     assert_eq!(
         finalized.close_intent.state,
@@ -307,7 +376,7 @@ fn acceptance_gates_are_namespaced_per_work() {
                 &WorkItem {
                     id: WorkId::new(work_id),
                     project_id: ProjectId::new("p-gates"),
-                    kind: WorkKind::Milestone,
+                    kind: WorkKind::Task,
                     parent_id: None,
                     title: work_id.to_owned(),
                     description: String::new(),

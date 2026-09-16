@@ -109,7 +109,9 @@ impl BoundedWriter {
             .register(operation_id.clone())
             .map_err(|error| match error {
                 OperationError::Duplicate(record) => WriterExecutionError::Duplicate(record),
-                OperationError::InvalidId => WriterExecutionError::InvalidOperation,
+                OperationError::InvalidId | OperationError::HydrationConflict { .. } => {
+                    WriterExecutionError::InvalidOperation
+                }
             })?;
         let (sender, receiver) = mpsc::sync_channel(1);
         let job = WriteJob {

@@ -61,6 +61,22 @@ pub trait ApplicationCommandHandler {
         -> Result<ApplicationResponse, ProtocolError>;
 }
 
+/// A handler that is safe to invoke concurrently from bounded service
+/// workers.
+///
+/// The legacy [`ApplicationCommandHandler`] contract is intentionally kept
+/// for adapters that still own a mutable, request-at-a-time handler. New
+/// service compositions should implement this trait when application work can
+/// be shared safely (typically through application-owned interior
+/// synchronization). The service host then keeps slow application work off
+/// its accept loop without knowing anything about storage or policy.
+pub trait ConcurrentApplicationCommandHandler: Send + Sync + 'static {
+    fn handle_concurrent(
+        &self,
+        request: ApplicationRequest,
+    ) -> Result<ApplicationResponse, ProtocolError>;
+}
+
 pub struct ApplicationRoute<H> {
     handler: H,
     config: ApplicationRouteConfig,
@@ -107,6 +123,44 @@ impl<H> ApplicationRoute<H> {
         let response = self.handler.handle(application_request)?;
         let payload = encode_response(&response)?;
         JsonResponse::success(request_id, payload)
+    }
+
+    pub(crate) fn dispatch_concurrent(
+        &self,
+        request: JsonRequest,
+    ) -> Result<JsonResponse, ProtocolError>
+    where
+        H: ConcurrentApplicationCommandHandler,
+    {
+        let request_id = request.request_id().to_owned();
+        if request.payload().len() > self.config.max_payload_size {
+            return Err(route_error(
+                ProtocolErrorCode::InvalidPayload,
+                format!(
+                    "application payload is {} bytes; maximum is {}",
+                    request.payload().len(),
+                    self.config.max_payload_size
+                ),
+            ));
+        }
+        let application_request = decode_request(&request_id, request.payload())?;
+        let response = self.handler.handle_concurrent(application_request)?;
+        let payload = encode_response(&response)?;
+        JsonResponse::success(request_id, payload)
+    }
+
+    pub(crate) fn operation_id_for(&self, request: &JsonRequest) -> Result<String, ProtocolError> {
+        if request.payload().len() > self.config.max_payload_size {
+            return Err(route_error(
+                ProtocolErrorCode::InvalidPayload,
+                format!(
+                    "application payload is {} bytes; maximum is {}",
+                    request.payload().len(),
+                    self.config.max_payload_size
+                ),
+            ));
+        }
+        Ok(decode_request(request.request_id(), request.payload())?.operation_id)
     }
 
     pub fn serve_once(&mut self, server: &UnixSocketServer) -> Result<(), crate::TransportError>

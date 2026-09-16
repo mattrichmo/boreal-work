@@ -1,10 +1,18 @@
 # Boreal Work v2
 
-Clean, authoritative project/work tracking core for:
+Clean, authoritative project/work tracking core. The currently implemented
+compatibility hierarchy is:
 
 ```text
 milestone -> sprint -> task -> claim/release -> complete -> dashboard
 ```
+
+The next work-model boundary separates decomposition from scheduling:
+projects own milestone/task trees, while sprints become scheduled cycle
+instances and notes/discoveries/revisit reminders live in a distinct intake
+pipeline. See [the reviewed work-model contract](project/spec/WORK_MODEL_V2.md)
+for invariants, migration rules, and phased acceptance tests. That contract is
+not a claim that schema version 3 has already shipped.
 
 This repository is now the canonical v2 workspace. The legacy implementation
 is preserved in Git history under the `v1-archive-pre-v2-cutover` tag and the
@@ -57,11 +65,32 @@ do not instantiate them in the legacy `bwrk` workspace.
   engine.
 - Small product surface before optional integrations.
 
+## Installation
+
+The v2 release is distributed as a platform-specific CLI/TUI archive. See
+[the installation guide](docs/INSTALL.md) for Homebrew, direct tagged installs,
+manual archive installation, and the Rust source-build fallback. The repository
+does not currently publish a v2 release artifact until the documented release
+gates pass.
+
 ## Build
 
 ```sh
 cargo check
 ```
+
+For the packaged local sandbox, run `./scripts/prepare-test-project.sh`, enter
+`test-project`, source `.boreal/activate.sh`, and launch the composed dashboard
+with one command:
+
+```sh
+bwrk dashboard test-project --db "$BOREAL_TEST_DB"
+```
+
+The command privately supervises the Rust service and packaged TypeScript TUI;
+normal dashboard use does not require a second terminal or a user-managed
+server. `bwrk service run` remains available for shared-agent and diagnostic
+operation.
 
 The crates are deliberately dependency-light at this stage. Runtime and UI
 dependencies should be added only when their boundary is settled.

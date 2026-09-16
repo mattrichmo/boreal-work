@@ -20,7 +20,7 @@ fn work(id: &str) -> WorkItem {
     WorkItem::new(
         "p".into(),
         id.into(),
-        boreal_domain::WorkKind::Milestone,
+        boreal_domain::WorkKind::Task,
         None,
         id,
     )

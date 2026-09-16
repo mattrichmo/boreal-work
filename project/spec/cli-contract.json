@@ -3,7 +3,7 @@
   "contract": "boreal.cli.v1",
   "program": "bwrk",
   "protocol_version": "2",
-  "status": "frozen fixture; implementation is not implied",
+  "status": "frozen behavioral fixture; current implementation notes are scoped to the dashboard slice",
   "json_rule": "Every command invoked with --json returns boreal.protocol.envelope.v1. Human output is a rendering of the same DTO and never a second transition path.",
   "grammar": {
     "invocation": "bwrk [GLOBAL_OPTIONS] PATH [PATH_OPTIONS] [--json]",
@@ -79,7 +79,7 @@
   "aliases": [
     {"path": "status", "canonical_path": "prime", "disposition": "keep_spelling", "meaning": "v1 compatibility alias; never active status"},
     {"path": "start", "canonical_path": "agent start", "disposition": "keep_spelling", "meaning": "safe claim-or-resume entry point"},
-    {"path": "view", "canonical_path": "dashboard", "disposition": "keep_spelling", "meaning": "dashboard view"},
+    {"path": "view", "canonical_path": "dashboard", "disposition": "keep_spelling", "meaning": "implemented exact top-level dashboard alias; use --project for the alias when selecting a project"},
     {"path": "capture", "canonical_path": "raw add", "disposition": "keep_spelling", "meaning": "raw immutable intake"},
     {"path": "install", "canonical_path": "setup", "disposition": "keep_behavior", "meaning": "setup and adapter installation compatibility"},
     {"path": "done <WORK_REF>", "canonical_path": "agent finish <WORK_REF> --close", "disposition": "keep_behavior", "meaning": "only after the same structured gates and close intent pass"},
@@ -226,7 +226,7 @@
       {"path": "doctor skills", "syntax": "bwrk doctor skills", "disposition": "keep_spelling", "action": "read", "output": "diagnostic", "exit_profile": "read"},
       {"path": "sync status", "syntax": "bwrk sync status", "disposition": "keep_spelling", "action": "read", "output": "sync", "exit_profile": "read"},
       {"path": "sync refresh", "syntax": "bwrk sync refresh", "disposition": "keep_spelling", "action": "mutate", "output": "sync", "exit_profile": "mutation"},
-      {"path": "dashboard", "syntax": "bwrk dashboard", "disposition": "keep_spelling", "action": "read", "output": "dashboard", "exit_profile": "read"}
+      {"path": "dashboard", "syntax": "bwrk dashboard [PROJECT | --project PROJECT] [--db PATH] [--actor ID] [--harness ID] [--session ID] [--work WORK_ID] [--json]", "disposition": "keep_spelling", "action": "read", "output": "dashboard", "exit_profile": "read"}
     ]
   },
   "v2_core_additions": [
@@ -237,6 +237,47 @@
     {"path": "work finish", "syntax": "bwrk work finish WORK_REF --attempt ATTEMPT_ID --fence N --summary SUMMARY_ID", "output": "work", "exit_profile": "fenced_mutation", "rule": "low-level primitive; normal user path is agent finish --close"},
     {"path": "operation show OPERATION_ID", "syntax": "bwrk operation show OPERATION_ID", "output": "operation", "exit_profile": "read", "rule": "readback required before retrying unknown mutation outcome"}
   ],
+  "dashboard_runtime": {
+    "status": "current implementation slice",
+    "interactive": {
+      "syntax": "bwrk dashboard [PROJECT | --project PROJECT] [--db PATH] [--actor ID] [--harness ID] [--session ID] [--work WORK_ID]",
+      "requires": "stdin and stdout must both be interactive terminals",
+      "behavior": "opens an existing database, resolves one project, starts a private supervised Rust service and one TUI child, then returns the TUI outcome",
+      "service_ownership": "the launcher owns the private service and endpoint for the dashboard session; users do not start service run separately",
+      "cleanup": "the launcher supervises the service and TUI and attempts to terminate managed children and remove its private endpoint on exit; normal-exit cleanup is tested, but all signal/startup failure paths are not yet a release guarantee",
+      "socket_option": "--socket is rejected because dashboard owns its private endpoint"
+    },
+    "json": {
+      "syntax": "bwrk dashboard [PROJECT | --project PROJECT] [--db PATH] --json",
+      "behavior": "returns the canonical derived status envelope without starting the TUI or a private service",
+      "requires": "the database already exists; dashboard does not initialize a project"
+    },
+    "database": {
+      "default": ".boreal/boreal.sqlite relative to the current working directory",
+      "override": "--db PATH",
+      "must_exist": true
+    },
+    "project_resolution": {
+      "order": [
+        "--project PROJECT",
+        "positional PROJECT compatibility form",
+        "BOREAL_PROJECT or BOREAL_PROJECT_ID, or project-id/project/project.json beside the selected database",
+        "exactly one project in the selected database"
+      ],
+      "ambiguity": "multiple metadata identifiers or multiple database projects require an explicit project",
+      "current_limit": "the current implementation does not walk the working directory or its ancestors for project metadata when --db points elsewhere"
+    },
+    "tui_invocation": {
+      "user_path": "use bwrk dashboard; it manages the service/TUI composition",
+      "developer_path": "apps/tui/dist/entrypoint.js or npm --prefix apps/tui run start with an explicitly running service socket",
+      "database_authority": "the TUI is service-backed and does not read SQLite directly",
+      "packaging": "a packaged installation supplies the compiled TUI beside the v2 CLI; a development checkout may resolve its built dist entrypoint or TypeScript runner"
+    },
+    "not_implied": [
+      "dashboard does not attach to an already-running service through --socket",
+      "the dashboard command does not imply that every planned sprint, history, source, memory, or operator route is implemented"
+    ]
+  },
   "cross_command_rules": [
     "Mutating commands require an operation_id; the client may generate one before transport and must reuse it on retry.",
     "Fenced mutations require current attempt_id and fence when acting on an existing attempt; expected_revision is rechecked in the same Rust transaction.",

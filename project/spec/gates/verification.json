@@ -1,8 +1,8 @@
 {
   "gate_id": "verification",
   "kind": "verification",
-  "executable": "true",
-  "argv": ["true"],
+  "executable": "printf",
+  "argv": ["printf", "verification"],
   "cwd": ".",
   "source_snapshot_hash": "sha256:source-fixture-v1",
   "config_identity": "sha256:config-fixture-v1",

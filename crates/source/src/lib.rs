@@ -26,6 +26,8 @@ pub const DEFAULT_MAX_PARSE_BYTES: usize = 4 * 1024 * 1024;
 pub const DEFAULT_MAX_PARSE_CHUNKS: usize = 100_000;
 pub const DEFAULT_MAX_CHUNK_BYTES: usize = 16 * 1024;
 pub const DEFAULT_MAX_RETRIEVAL_EXCERPT_BYTES: usize = 4 * 1024;
+/// Canonical content identity shared with the migration boundary.
+pub const DIGEST_ALGORITHM: &str = "sha256";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum Availability {
@@ -381,7 +383,12 @@ fn write_temp_and_install(
 
     let written = fs::read(temp_path).map_err(storage_error)?;
     verify_bytes(expected_digest, bytes.len(), &written)?;
-    fs::rename(temp_path, final_path).map_err(storage_error)
+    fs::rename(temp_path, final_path).map_err(storage_error)?;
+    sync_directory(
+        final_path
+            .parent()
+            .ok_or_else(|| SourceError::Storage("blob path has no parent".to_owned()))?,
+    )
 }
 
 #[derive(Clone, Default)]
@@ -454,6 +461,10 @@ struct PersistedIndexedSource {
 pub struct SourceCatalog {
     blobs: Arc<dyn BlobStore>,
     state: Mutex<CatalogState>,
+    /// Serializes metadata mutations within one catalog instance. The state
+    /// snapshot is persisted only after the mutation, so this guard also lets
+    /// us roll back in-memory metadata if an atomic catalog replacement fails.
+    mutation_lock: Mutex<()>,
     citation_limits: CitationLimits,
     state_file: Option<PathBuf>,
 }
@@ -472,6 +483,7 @@ impl SourceCatalog {
         Self {
             blobs: Arc::new(store),
             state: Mutex::new(CatalogState::default()),
+            mutation_lock: Mutex::new(()),
             citation_limits: CitationLimits::default(),
             state_file: None,
         }
@@ -497,6 +509,7 @@ impl SourceCatalog {
         Ok(Self {
             blobs: Arc::new(FilesystemBlobStore::new(&root)),
             state: Mutex::new(state),
+            mutation_lock: Mutex::new(()),
             citation_limits: CitationLimits::default(),
             state_file: Some(state_file),
         })
@@ -514,6 +527,7 @@ impl SourceCatalog {
         bytes: &[u8],
         media_type: &str,
     ) -> Result<SourceVersion, SourceError> {
+        let _mutation_guard = lock(&self.mutation_lock)?;
         validate_project_id(project_id)?;
         validate_origin(origin)?;
         if media_type.trim().is_empty() {
@@ -546,20 +560,26 @@ impl SourceCatalog {
             availability: Availability::Available,
             parser_identity: None,
         };
-        let existing = {
+        let (existing, inserted) = {
             let mut state = lock(&self.state)?;
             if let Some(existing) = state.versions.get(&key) {
-                Some(existing.clone())
+                (Some(existing.clone()), false)
             } else {
-                state.versions.insert(key, version.clone());
+                state.versions.insert(key.clone(), version.clone());
                 state.source_revision = state.source_revision.saturating_add(1);
-                None
+                (None, true)
             }
         };
         if let Some(existing) = existing {
             return self.current_snapshot(existing);
         }
-        self.persist_state()?;
+        if let Err(error) = self.persist_state() {
+            let mut state = lock(&self.state)?;
+            if inserted && state.versions.remove(&key).is_some() {
+                state.source_revision = state.source_revision.saturating_sub(1);
+            }
+            return Err(error);
+        }
         Ok(version)
     }
 
@@ -627,6 +647,7 @@ impl SourceCatalog {
         parser: &str,
         input_version_id: &str,
     ) -> Result<SourceVersion, SourceError> {
+        let _mutation_guard = lock(&self.mutation_lock)?;
         if parser.trim().is_empty() {
             return Err(SourceError::EmptyParser);
         }
@@ -639,6 +660,7 @@ impl SourceCatalog {
             version.source_version_id.clone(),
         );
         let mut state = lock(&self.state)?;
+        let before = state.clone();
         let updated = state
             .versions
             .get_mut(&key)
@@ -646,7 +668,10 @@ impl SourceCatalog {
         updated.parser_identity = Some(parser.to_owned());
         let result = updated.clone();
         drop(state);
-        self.persist_state()?;
+        if let Err(error) = self.persist_state() {
+            *lock(&self.state)? = before;
+            return Err(error);
+        }
         Ok(result)
     }
 
@@ -670,6 +695,7 @@ impl SourceCatalog {
         parser: &str,
         limits: ParserLimits,
     ) -> Result<ParseReport, SourceError> {
+        let _mutation_guard = lock(&self.mutation_lock)?;
         if parser.trim().is_empty() {
             return Err(SourceError::EmptyParser);
         }
@@ -683,6 +709,7 @@ impl SourceCatalog {
         let parsed = parse_bytes(&bytes, &stored.media_type, limits);
         let key = (stored.project_id.clone(), stored.source_version_id.clone());
         let mut state = lock(&self.state)?;
+        let before = state.clone();
         let current = state
             .versions
             .get_mut(&key)
@@ -763,7 +790,10 @@ impl SourceCatalog {
             }
         };
         drop(state);
-        self.persist_state()?;
+        if let Err(error) = self.persist_state() {
+            *lock(&self.state)? = before;
+            return Err(error);
+        }
         Ok(report)
     }
 
@@ -801,6 +831,7 @@ impl SourceCatalog {
                 {
                     continue;
                 }
+                let mut matching = false;
                 for (ordinal, chunk) in indexed.chunks.iter().enumerate() {
                     let score = terms
                         .iter()
@@ -812,6 +843,7 @@ impl SourceCatalog {
                         })
                         .count();
                     if score > 0 {
+                        matching = true;
                         candidates.push((
                             score,
                             source_version_id.clone(),
@@ -819,6 +851,13 @@ impl SourceCatalog {
                             chunk.clone(),
                         ));
                     }
+                }
+                // An index is derived data. Verify the canonical blob only if
+                // this version contributes a hit; unrelated damaged history
+                // must not make an otherwise valid scoped query unreadable.
+                if matching {
+                    self.blobs
+                        .read_verified(&version.content_digest, version.byte_count)?;
                 }
             }
             (
@@ -1171,7 +1210,8 @@ impl SourceCatalog {
             file.write_all(&bytes).map_err(storage_error)?;
             file.flush().map_err(storage_error)?;
             file.sync_all().map_err(storage_error)?;
-            fs::rename(&temp, path).map_err(storage_error)
+            fs::rename(&temp, path).map_err(storage_error)?;
+            sync_directory(parent)
         })();
         if result.is_err() {
             let _ = fs::remove_file(&temp);
@@ -1428,6 +1468,24 @@ fn storage_error(error: io::Error) -> SourceError {
     SourceError::Storage(error.to_string())
 }
 
+#[cfg(unix)]
+fn sync_directory(path: &Path) -> Result<(), SourceError> {
+    OpenOptions::new()
+        .read(true)
+        .open(path)
+        .map_err(storage_error)?
+        .sync_all()
+        .map_err(storage_error)
+}
+
+#[cfg(not(unix))]
+fn sync_directory(_path: &Path) -> Result<(), SourceError> {
+    // Windows does not provide the same directory fsync contract through the
+    // standard library. The file itself is flushed and atomically renamed;
+    // callers still receive explicit errors from either operation.
+    Ok(())
+}
+
 fn reject_symlink(path: &Path) -> Result<(), SourceError> {
     match fs::symlink_metadata(path) {
         Ok(metadata) if metadata.file_type().is_symlink() => Err(SourceError::ScopeViolation),
@@ -1591,7 +1649,8 @@ pub fn content_digest(bytes: &[u8]) -> String {
     }
 
     let mut hex = String::with_capacity(71);
-    hex.push_str("sha256:");
+    hex.push_str(DIGEST_ALGORITHM);
+    hex.push(':');
     for word in state {
         hex.push_str(&format!("{word:08x}"));
     }

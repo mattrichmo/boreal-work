@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-BIN="$ROOT/target/debug/boreal-cli"
+BIN="$ROOT/target/debug/bwrk"
 TMP=$(mktemp -d "${TMPDIR:-/tmp}/boreal-guided-closeout.XXXXXX")
 DB="$TMP/boreal.sqlite"
 SOCKET="$TMP/boreal.sock"
@@ -42,11 +42,14 @@ sessions=(guided-session-a guided-session-b guided-session-c)
 attempts=()
 fences=()
 receipts=()
+summaries=()
 
 for i in "${!works[@]}"; do
   work="${works[$i]}"
   session="${sessions[$i]}"
-  claim=$(service work claim guided-project "$work" --session "$session")
+  claim=$(service work claim guided-project "$work" --session "$session" \
+    --source-version sha256:source-fixture-v1 \
+    --config-identity sha256:config-fixture-v1)
   attempts[$i]=$(jq -er '.data.attempt_id' <<<"$claim")
   fences[$i]=$(jq -er '.data.fence' <<<"$claim")
   service agent start "$work" --project guided-project --session "$session" >/dev/null
@@ -59,12 +62,14 @@ for i in "${!works[@]}"; do
     [[ "$gate" == "verification" ]] && verification="$result"
   done
   receipts[$i]=$(jq -er '.data.receipt_path' <<<"$verification")
+  summaries[$i]="$TMP/$work-summary.md"
+  printf 'Completed %s with current checkpoint and verification evidence.\n' "$work" >"${summaries[$i]}"
 done
 
 for i in "${!works[@]}"; do
   work="${works[$i]}"
   session="${sessions[$i]}"
-  if finish=$(service agent finish "$work" --close --project guided-project --session "$session" --attempt "${attempts[$i]}" --fence "${fences[$i]}" --receipt "${receipts[$i]}"); then
+  if finish=$(service agent finish "$work" --close --project guided-project --session "$session" --attempt "${attempts[$i]}" --fence "${fences[$i]}" --receipt "${receipts[$i]}" --summary "${summaries[$i]}"); then
     echo "$finish"
   else
     echo "$finish" >&2

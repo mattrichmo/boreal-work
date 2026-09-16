@@ -338,12 +338,87 @@ fn materialization_carries_source_provenance_and_explicit_integrator_actions() {
     assert_eq!(export.provenance.source_format, LEGACY_FORMAT);
     assert_eq!(export.provenance.source_version, LEGACY_FORMAT_VERSION);
     assert_eq!(export.provenance.as_of_ms, Some(42));
-    assert!(export.provenance.source_fingerprint.starts_with("fnv1a64:"));
+    assert!(export.provenance.source_fingerprint.starts_with("sha256:"));
+    assert_eq!(export.provenance.source_fingerprint.len(), 71);
     assert!(export.import_plan.ready);
     assert_eq!(export.import_plan.actions.len(), 2);
     assert_eq!(export.import_plan.actions[0].collection, "project");
     assert_eq!(export.import_plan.actions[1].id, "w1");
     assert_eq!(export.document_json, export_json(&export.document).unwrap());
+}
+
+#[test]
+fn plan_apply_and_verify_are_side_effect_free_and_report_exact_counts() {
+    let plan = import_legacy_json(
+        r#"{
+          "format": "boreal.legacy.records", "version": 1,
+          "project": {"id": "p1", "name": "P"},
+          "work_items": [{"id": "w1", "kind": "task", "title": "T"}],
+          "failures": [{"id": "f1", "work_id": "w1", "code": "timeout", "reason": "stopped"}]
+        }"#,
+    )
+    .unwrap();
+
+    let applied = plan.apply().unwrap();
+    let verification = plan.verify().unwrap();
+    assert!(verification.ready);
+    assert_eq!(verification.counts.work, applied.work.len());
+    assert_eq!(verification.counts.failures, 1);
+    assert_eq!(verification.action_count, 3);
+    assert_eq!(verification.issue_count, 0);
+    assert_eq!(
+        verification.document_fingerprint.as_deref(),
+        Some(applied.content_digest().as_str())
+    );
+    assert_eq!(
+        verification.source_fingerprint,
+        plan.provenance.source_fingerprint
+    );
+}
+
+#[test]
+fn invalid_dependency_and_parent_cycles_are_rejected_before_actions() {
+    let dependency_cycle = r#"{
+      "format": "boreal.v2.migration", "version": 1,
+      "project": {"id": "p1", "name": "P"},
+      "work": [
+        {"id": "a", "project_id": "p1", "kind": "task", "title": "A", "lifecycle": "open"},
+        {"id": "b", "project_id": "p1", "kind": "task", "title": "B", "lifecycle": "open"}
+      ],
+      "dependencies": [
+        {"from_work_id": "a", "to_work_id": "b", "kind": "closed_only"},
+        {"from_work_id": "b", "to_work_id": "a", "kind": "closed_only"}
+      ]
+    }"#;
+    let report = import_json(dependency_cycle).unwrap();
+    assert!(report.document.is_none());
+    assert!(report.unsupported.iter().any(|issue| {
+        issue.record_type == "document"
+            && issue.reason.contains("dependency graph contains a cycle")
+    }));
+
+    let parent_cycle = r#"{
+      "format": "boreal.v2.migration", "version": 1,
+      "project": {"id": "p1", "name": "P"},
+      "work": [
+        {"id": "m", "project_id": "p1", "kind": "milestone", "title": "M", "parent_id": "s", "lifecycle": "open"},
+        {"id": "s", "project_id": "p1", "kind": "sprint", "title": "S", "parent_id": "m", "lifecycle": "open"}
+      ]
+    }"#;
+    let plan = import_json(parent_cycle).unwrap();
+    assert!(plan.document.is_none());
+    assert!(plan
+        .unsupported
+        .iter()
+        .any(|issue| issue.record_type == "document"));
+}
+
+#[test]
+fn digest_matches_source_engine_wire_vector() {
+    assert_eq!(
+        boreal_migration::content_digest(b"abc"),
+        "sha256:ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+    );
 }
 
 #[test]

@@ -19,6 +19,12 @@ pub enum BusyOutcome {
         depth: usize,
         retry_after_ms: u64,
     },
+    /// The bounded application dispatch queue has no available slot.
+    DispatchQueueFull {
+        capacity: usize,
+        depth: usize,
+        retry_after_ms: u64,
+    },
     /// Another local service process currently owns this project.
     ProjectAlreadyOwned {
         project_id: String,
@@ -37,7 +43,8 @@ impl BusyOutcome {
     pub const fn retry_after_ms(&self) -> Option<u64> {
         match self {
             Self::WriterQueueFull { retry_after_ms, .. }
-            | Self::ReadPoolFull { retry_after_ms, .. } => Some(*retry_after_ms),
+            | Self::ReadPoolFull { retry_after_ms, .. }
+            | Self::DispatchQueueFull { retry_after_ms, .. } => Some(*retry_after_ms),
             Self::ProjectAlreadyOwned { .. } => None,
         }
     }
@@ -61,6 +68,14 @@ impl fmt::Display for BusyOutcome {
             } => write!(
                 formatter,
                 "read pool is full ({depth}/{capacity}); retry after {retry_after_ms} ms"
+            ),
+            Self::DispatchQueueFull {
+                capacity,
+                depth,
+                retry_after_ms,
+            } => write!(
+                formatter,
+                "application dispatch queue is full ({depth}/{capacity}); retry after {retry_after_ms} ms"
             ),
             Self::ProjectAlreadyOwned {
                 project_id,

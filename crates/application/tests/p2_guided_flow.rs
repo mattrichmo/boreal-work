@@ -61,7 +61,7 @@ fn work(project: &ProjectId, id: &str) -> WorkItem {
     WorkItem {
         id: WorkId::new(id),
         project_id: project.clone(),
-        kind: WorkKind::Milestone,
+        kind: WorkKind::Task,
         parent_id: None,
         title: format!("guided flow {id}"),
         description: String::new(),

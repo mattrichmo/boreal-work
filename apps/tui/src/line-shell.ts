@@ -1,20 +1,31 @@
-import { ActionResult, MountedView, Route } from "./client.js";
+import {
+  ActionResult,
+  CreateProjectDraftInput,
+  CreateWorkDraftInput,
+  MountedView,
+  Route,
+  WorkKind,
+} from "./client.js";
 import { renderMountedView } from "./terminal.js";
 
 export interface LineShellController {
   view(): MountedView;
   refresh(): Promise<MountedView>;
   navigate(route: Route): MountedView;
-  claim(work_id: string, actor_id: string, options?: { harness_id?: string; session_id?: string }): Promise<ActionResult<unknown>>;
-  acceptStart(work_id: string, options?: { session_id?: string }): Promise<ActionResult<unknown>>;
+  createProject(input: CreateProjectDraftInput): Promise<ActionResult<unknown>>;
+  createWork(input: CreateWorkDraftInput): Promise<ActionResult<unknown>>;
+  claim(work_id: string): Promise<ActionResult<unknown>>;
+  acceptStart(work_id: string): Promise<ActionResult<unknown>>;
   addEvidence(work_id: string, evidence: unknown): Promise<ActionResult<unknown>>;
   finish(work_id: string, summary?: string): Promise<ActionResult<unknown>>;
   release(work_id: string, reason?: string): Promise<ActionResult<unknown>>;
 }
 
 export type MutationLineCommand =
-  | { kind: "mutation"; action: "claim"; actor_id: string; harness_id?: string; session_id?: string }
-  | { kind: "mutation"; action: "accept_start"; session_id?: string }
+  | { kind: "mutation"; action: "create_project"; input: CreateProjectDraftInput }
+  | { kind: "mutation"; action: "create_work"; input: CreateWorkDraftInput }
+  | { kind: "mutation"; action: "claim" }
+  | { kind: "mutation"; action: "accept_start" }
   | { kind: "mutation"; action: "evidence"; evidence: unknown }
   | { kind: "mutation"; action: "finish"; summary?: string }
   | { kind: "mutation"; action: "release"; reason?: string };
@@ -30,6 +41,11 @@ export type LineCommand =
   | { kind: "empty" }
   | { kind: "invalid"; input: string; message: string }
   | { kind: "unknown"; input: string };
+
+export interface LineShellOptions {
+  /** Periodic revision-bound refresh for an interactive dashboard session. */
+  readonly auto_refresh_ms?: number;
+}
 
 function invalid(input: string, message: string): LineCommand {
   return { kind: "invalid", input, message };
@@ -65,28 +81,57 @@ export function parseLineCommand(input: string): LineCommand {
   if (command === "help") return { kind: "help" };
   if (command === "refresh") return { kind: "refresh" };
   if (command === "quit" || command === "exit") return { kind: "quit" };
-  if (command === "select" && args.length === 1 && args[0]) return { kind: "select", work_id: args[0] };
+  if ((command === "select" || command === "show") && args.length === 1 && args[0]) return { kind: "select", work_id: args[0] };
   if (command === "confirm" && args.length === 0) return { kind: "confirm" };
   if (command === "cancel" && args.length === 0) return { kind: "cancel" };
-  if (command === "claim") {
-    const parsed = parseOptions(value, args, new Set(["--session", "--harness"]));
+  if (command === "create-project") {
+    const parsed = parseOptions(value, args, new Set(["--role", "--credential", "--display-name"]));
     if ("kind" in parsed) return parsed;
     if (parsed.positional.length !== 1 || !parsed.positional[0]) {
-      return invalid(value, "usage: claim ACTOR_ID [--session SESSION_ID] [--harness HARNESS_ID]");
+      return invalid(value, "usage: create-project PROJECT_ID [--role ROLE] [--credential REF] [--display-name NAME]");
     }
     return {
       kind: "mutation",
-      action: "claim",
-      actor_id: parsed.positional[0],
-      session_id: parsed.values["--session"],
-      harness_id: parsed.values["--harness"],
+      action: "create_project",
+      input: {
+        project_id: parsed.positional[0],
+        actor_role: parsed.values["--role"],
+        credential_ref: parsed.values["--credential"],
+        display_name: parsed.values["--display-name"],
+      },
     };
   }
-  if (command === "accept-start" || command === "start") {
-    const parsed = parseOptions(value, args, new Set(["--session"]));
+  if (command === "create-work") {
+    const parsed = parseOptions(value, args, new Set(["--parent", "--priority"]));
     if ("kind" in parsed) return parsed;
-    if (parsed.positional.length !== 0) return invalid(value, "usage: accept-start [--session SESSION_ID]");
-    return { kind: "mutation", action: "accept_start", session_id: parsed.values["--session"] };
+    const [work_id, rawKind, ...titleParts] = parsed.positional;
+    if (!work_id || !rawKind || titleParts.length === 0 || !["milestone", "sprint", "task"].includes(rawKind)) {
+      return invalid(value, "usage: create-work WORK_ID milestone|sprint|task TITLE [--parent WORK_ID] [--priority 0..255]");
+    }
+    const priorityValue = parsed.values["--priority"];
+    const priority = priorityValue === undefined ? undefined : Number(priorityValue);
+    if (priority !== undefined && (!Number.isInteger(priority) || priority < 0 || priority > 255)) {
+      return invalid(value, "--priority must be an integer between 0 and 255");
+    }
+    return {
+      kind: "mutation",
+      action: "create_work",
+      input: {
+        work_id,
+        kind: rawKind as WorkKind,
+        title: titleParts.join(" "),
+        parent_id: parsed.values["--parent"] ?? null,
+        priority,
+      },
+    };
+  }
+  if (command === "claim") {
+    if (args.length !== 0) return invalid(value, "usage: claim");
+    return { kind: "mutation", action: "claim" };
+  }
+  if (command === "accept-start" || command === "start") {
+    if (args.length !== 0) return invalid(value, "usage: accept-start");
+    return { kind: "mutation", action: "accept_start" };
   }
   if (command === "evidence") {
     const encoded = value.slice(command.length).trim();
@@ -108,17 +153,20 @@ export function parseLineCommand(input: string): LineCommand {
 }
 
 export function lineShellHelp(): string {
-  return "commands: help | refresh | select WORK_ID | claim ACTOR_ID [--session ID] [--harness ID] | accept-start [--session ID] | evidence JSON | finish [SUMMARY] | release [REASON] | confirm | cancel | quit\n";
+  return "commands: help | refresh | select WORK_ID | create-project PROJECT_ID | create-work WORK_ID KIND TITLE [--parent ID] | claim | accept-start | evidence RECEIPT_JSON | finish | release [REASON] | confirm | cancel | quit\n";
 }
 
 interface PendingMutation {
-  readonly work_id: string;
+  readonly target: string;
+  readonly work_id?: string;
   readonly command: MutationLineCommand;
 }
 
 function mutationEffect(command: MutationLineCommand): string {
   switch (command.action) {
-    case "claim": return `claim attempt for actor=${command.actor_id}`;
+    case "create_project": return "initialize the mounted project and operator identity";
+    case "create_work": return `create ${command.input.kind} '${command.input.work_id}'`;
+    case "claim": return "claim attempt for the mounted actor, harness, and session";
     case "accept_start": return "accept the current claimed attempt";
     case "evidence": return "attach structured evidence to the current attempt";
     case "finish": return "finish and request proof-gated close";
@@ -130,12 +178,12 @@ function confirmationPrompt(view: MountedView, pending: PendingMutation): string
   const revision = view.monitoring?.revision ?? null;
   const attempt = view.selected_work?.attempt;
   const fence = attempt ? `${attempt.attempt_id}@${attempt.fence}` : "none";
-  return `tui: confirm ${pending.command.action} work=${pending.work_id} effect=${mutationEffect(pending.command)} expected_revision=${revision ?? "none"} attempt_fence=${fence}; enter confirm or cancel\n`;
+  return `tui: confirm ${pending.command.action} target=${pending.target} effect=${mutationEffect(pending.command)} expected_revision=${revision ?? "none"} attempt_fence=${fence}; enter confirm or cancel\n`;
 }
 
 function resultLine(pending: PendingMutation, result: ActionResult<unknown>): string {
   const envelope = result.envelope;
-  const prefix = `tui: ${pending.command.action} work=${pending.work_id} operation=${envelope.operation_id} revision=${envelope.revision ?? "none"} outcome=${envelope.outcome}`;
+  const prefix = `tui: ${pending.command.action} target=${pending.target} operation=${envelope.operation_id} revision=${envelope.revision ?? "none"} outcome=${envelope.outcome}`;
   if (result.ok) return `${prefix}\n`;
   const retry = envelope.outcome === "unknown" ? "; operation readback is required before retrying" : "";
   return `${prefix} failed code=${result.error.code}: ${result.error.message}${retry}\n`;
@@ -143,20 +191,18 @@ function resultLine(pending: PendingMutation, result: ActionResult<unknown>): st
 
 async function executeMutation(controller: LineShellController, pending: PendingMutation): Promise<ActionResult<unknown>> {
   switch (pending.command.action) {
-    case "claim":
-      return controller.claim(pending.work_id, pending.command.actor_id, {
-        session_id: pending.command.session_id,
-        harness_id: pending.command.harness_id,
-      });
-    case "accept_start": return controller.acceptStart(pending.work_id, { session_id: pending.command.session_id });
-    case "evidence": return controller.addEvidence(pending.work_id, pending.command.evidence);
-    case "finish": return controller.finish(pending.work_id, pending.command.summary);
-    case "release": return controller.release(pending.work_id, pending.command.reason);
+    case "create_project": return controller.createProject(pending.command.input);
+    case "create_work": return controller.createWork(pending.command.input);
+    case "claim": return controller.claim(pending.work_id!);
+    case "accept_start": return controller.acceptStart(pending.work_id!);
+    case "evidence": return controller.addEvidence(pending.work_id!, pending.command.evidence);
+    case "finish": return controller.finish(pending.work_id!, pending.command.summary);
+    case "release": return controller.release(pending.work_id!, pending.command.reason);
   }
 }
 
-function errorLine(action: string, work_id: string, error: unknown): string {
-  return `tui: ${action} work=${work_id} failed: ${error instanceof Error ? error.message : String(error)}\n`;
+function errorLine(action: string, target: string, error: unknown): string {
+  return `tui: ${action} target=${target} failed: ${error instanceof Error ? error.message : String(error)}\n`;
 }
 
 /** Small deterministic operator loop with a separate confirmation step for every mutation. */
@@ -164,72 +210,94 @@ export async function runLineShell(
   lines: AsyncIterable<string>,
   controller: LineShellController,
   write: (value: string) => void,
+  options: LineShellOptions = {},
 ): Promise<void> {
   let pending: PendingMutation | null = null;
-  for await (const line of lines) {
-    const command = parseLineCommand(line);
-    if (pending && command.kind !== "confirm" && command.kind !== "cancel") {
-      if (command.kind === "quit") return;
-      write("tui: confirmation pending; enter confirm or cancel\n");
-      continue;
-    }
-    if (command.kind === "confirm") {
-      if (!pending) {
-        write("tui: no mutation is awaiting confirmation\n");
+  const refreshMs = options.auto_refresh_ms === undefined ? 0 : Math.max(500, Math.floor(options.auto_refresh_ms));
+  const timer = refreshMs > 0 ? setInterval(() => {
+    if (pending) return;
+    void controller.refresh()
+      .then((view) => write(`\n[tui] revision update\n${renderMountedView(view)}`))
+      .catch((error) => write(`tui: automatic refresh failed: ${error instanceof Error ? error.message : String(error)}\n`));
+  }, refreshMs) : undefined;
+  try {
+    for await (const line of lines) {
+      const command = parseLineCommand(line);
+      if (pending && command.kind !== "confirm" && command.kind !== "cancel") {
+        if (command.kind === "quit") return;
+        write("tui: confirmation pending; enter confirm or cancel\n");
         continue;
       }
-      const current = pending;
-      pending = null;
-      try {
-        const result = await executeMutation(controller, current);
-        write(resultLine(current, result));
-        if (result.ok) write(renderMountedView(controller.view()));
-      } catch (error) {
-        write(errorLine(current.command.action, current.work_id, error));
-      }
-      continue;
-    }
-    if (command.kind === "cancel") {
-      if (pending) {
-        write(`tui: cancelled ${pending.command.action} for work=${pending.work_id}\n`);
+      if (command.kind === "confirm") {
+        if (!pending) {
+          write("tui: no mutation is awaiting confirmation\n");
+          continue;
+        }
+        const current = pending;
         pending = null;
-      } else {
-        write("tui: no mutation is awaiting confirmation\n");
-      }
-      continue;
-    }
-    switch (command.kind) {
-      case "empty": break;
-      case "help": write(lineShellHelp()); break;
-      case "refresh":
         try {
-          write(renderMountedView(await controller.refresh()));
+          const result = await executeMutation(controller, current);
+          write(resultLine(current, result));
+          if (result.ok) write(renderMountedView(controller.view()));
         } catch (error) {
-          write(`tui: refresh failed: ${error instanceof Error ? error.message : String(error)}\n`);
+          write(errorLine(current.command.action, current.target, error));
         }
-        break;
-      case "select": {
-        const current = controller.view();
-        if (!current.monitoring?.items.some((item) => item.work_id === command.work_id)) {
-          write(`tui: work '${command.work_id}' is not present in the current snapshot\n`);
+        continue;
+      }
+      if (command.kind === "cancel") {
+        if (pending) {
+          write(`tui: cancelled ${pending.command.action} for target=${pending.target}\n`);
+          pending = null;
+        } else {
+          write("tui: no mutation is awaiting confirmation\n");
+        }
+        continue;
+      }
+      switch (command.kind) {
+        case "empty": break;
+        case "help": write(lineShellHelp()); break;
+        case "refresh":
+          try {
+            write(renderMountedView(await controller.refresh()));
+          } catch (error) {
+            write(`tui: refresh failed: ${error instanceof Error ? error.message : String(error)}\n`);
+          }
+          break;
+        case "select": {
+          const current = controller.view();
+          if (!current.monitoring?.items.some((item) => item.work_id === command.work_id)) {
+            write(`tui: work '${command.work_id}' is not present in the current snapshot\n`);
+            break;
+          }
+          write(renderMountedView(controller.navigate({ kind: "work", project_id: current.route.project_id, work_id: command.work_id })));
           break;
         }
-        write(renderMountedView(controller.navigate({ kind: "work", project_id: current.route.project_id, work_id: command.work_id })));
-        break;
-      }
-      case "mutation": {
-        const current = controller.view();
-        if (!current.selected_work || current.route.kind !== "work" || current.route.work_id !== current.selected_work.work_id) {
-          write(`tui: ${command.action} requires a selected work item\n`);
+        case "mutation": {
+          const current = controller.view();
+          if (command.action === "create_project") {
+            pending = { target: command.input.project_id, command };
+            write(confirmationPrompt(current, pending));
+            break;
+          }
+          if (command.action === "create_work") {
+            pending = { target: command.input.work_id, command };
+            write(confirmationPrompt(current, pending));
+            break;
+          }
+          if (!current.selected_work || current.route.kind !== "work" || current.route.work_id !== current.selected_work.work_id) {
+            write(`tui: ${command.action} requires a selected work item\n`);
+            break;
+          }
+          pending = { target: current.selected_work.work_id, work_id: current.selected_work.work_id, command };
+          write(confirmationPrompt(current, pending));
           break;
         }
-        pending = { work_id: current.selected_work.work_id, command };
-        write(confirmationPrompt(current, pending));
-        break;
+        case "quit": return;
+        case "invalid": write(`tui: invalid command '${command.input}': ${command.message}\n`); break;
+        case "unknown": write(`tui: unknown command '${command.input}'. ${lineShellHelp()}`); break;
       }
-      case "quit": return;
-      case "invalid": write(`tui: invalid command '${command.input}': ${command.message}\n`); break;
-      case "unknown": write(`tui: unknown command '${command.input}'. ${lineShellHelp()}`); break;
     }
+  } finally {
+    if (timer !== undefined) clearInterval(timer);
   }
 }

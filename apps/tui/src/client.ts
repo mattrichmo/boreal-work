@@ -130,6 +130,7 @@ export interface RevisionedStatusResponse {
 export interface MonitoringModel {
   revision: number;
   as_of: string;
+  next_status_change_at: string | null;
   total: number;
   counts: MonitoringCounts;
   items: StatusItem[];
@@ -158,6 +159,22 @@ export interface FramedTransport {
 
 export interface ServiceClientConfig {
   max_payload_bytes?: number;
+  project_id?: string;
+  actor_id?: string;
+  harness_id?: string;
+  session_id?: string;
+  notifications?: RefreshNotificationSource;
+}
+
+export interface RefreshNotification {
+  kind: "revision" | "deadline";
+  revision?: number;
+  next_status_change_at?: string | null;
+}
+
+/** Optional push seam. The Unix request/response transport does not provide it yet. */
+export interface RefreshNotificationSource {
+  subscribe(listener: (notification: RefreshNotification) => void): () => void;
 }
 
 export interface StatusReadOptions {
@@ -177,28 +194,86 @@ export class TuiTransportError extends Error {
   }
 }
 
-export type WorkKind = "milestone" | "sprint" | "task" | string;
+export type WorkKind = "milestone" | "sprint" | "task";
+export type DispatchPolicy = "automatic" | "operator_only" | "paused";
+
+export interface AcceptanceProfileInput {
+  id: string;
+  version: string;
+}
 
 export interface CreateProjectInput {
-  project_id?: string;
-  name: string;
-  description?: string;
+  project_id: string;
+  actor_id: string;
+  actor_role: string;
+  credential_ref: string;
+  display_name: string;
 }
 
 export interface CreateWorkInput {
   project_id: string;
+  work_id: string;
+  actor_id: string;
+  kind: WorkKind;
+  title: string;
+  parent_id: string | null;
+  description: string;
+  priority: number;
+  dispatch_policy: DispatchPolicy;
+  hard_holds: string[];
+  acceptance_profile: AcceptanceProfileInput;
+}
+
+interface CreateProjectWireInput {
+  project_id: string;
+  actor_id: string;
+  actor_role: string;
+  credential_ref: string;
+  name: string;
+}
+
+interface CreateWorkWireInput {
+  project_id: string;
+  work_id: string;
+  actor_id: string;
+  kind: WorkKind;
+  title: string;
+  parent_id: string | null;
+  description: string;
+  priority: number;
+  dispatch: DispatchPolicy;
+  profile: string;
+}
+
+export interface CreateProjectDraftInput {
+  project_id: string;
+  actor_role?: string;
+  credential_ref?: string;
+  display_name?: string;
+}
+
+export interface CreateWorkDraftInput {
+  work_id: string;
   kind: WorkKind;
   title: string;
   parent_id?: string | null;
   description?: string;
+  priority?: number;
+  dispatch_policy?: DispatchPolicy;
+  hard_holds?: string[];
+  acceptance_profile?: AcceptanceProfileInput;
 }
 
 export interface ClaimInput {
   project_id: string;
   work_id: string;
   actor_id: string;
-  harness_id?: string;
-  session_id?: string;
+  harness_id: string;
+  session_id: string;
+  attempt_id: string;
+  claimed_at: string;
+  lease_deadline: string;
+  hard_deadline: string;
 }
 
 export interface AcceptStartInput {
@@ -206,7 +281,9 @@ export interface AcceptStartInput {
   work_id: string;
   attempt_id: string;
   fence: number;
-  session_id?: string;
+  actor_id: string;
+  harness_id: string;
+  session_id: string;
 }
 
 export interface EvidenceInput {
@@ -214,7 +291,10 @@ export interface EvidenceInput {
   work_id: string;
   attempt_id: string;
   fence: number;
-  evidence: unknown;
+  actor_id: string;
+  harness_id: string;
+  session_id: string;
+  receipt: unknown;
 }
 
 export interface FinishInput {
@@ -222,8 +302,16 @@ export interface FinishInput {
   work_id: string;
   attempt_id: string;
   fence: number;
+  actor_id: string;
+  harness_id: string;
+  session_id: string;
   close?: boolean;
   summary?: string;
+  receipt: unknown;
+}
+
+interface FinishWireInput extends Omit<FinishInput, "summary"> {
+  summary_body: string;
 }
 
 export interface ReleaseInput {
@@ -231,10 +319,14 @@ export interface ReleaseInput {
   work_id: string;
   attempt_id: string;
   fence: number;
+  actor_id: string;
+  harness_id: string;
+  session_id: string;
   reason?: string;
 }
 
 export interface VersionedServiceApi extends StatusReader {
+  readonly notifications?: RefreshNotificationSource;
   createProject(request: RequestEnvelope<CreateProjectInput>): Promise<Envelope<unknown>>;
   createWork(request: RequestEnvelope<CreateWorkInput>): Promise<Envelope<unknown>>;
   claim(request: RequestEnvelope<ClaimInput>): Promise<Envelope<unknown>>;
@@ -271,7 +363,7 @@ export interface StaleRevisionDisplay {
 }
 
 export interface ControllerNotice {
-  kind: "stale_revision" | "error" | "busy";
+  kind: "stale_revision" | "error" | "busy" | "unknown";
   message: string;
   stale?: StaleRevisionDisplay;
   error?: TuiServiceError;
@@ -316,6 +408,16 @@ export class TuiServiceError extends Error {
     return ["stale_revision", "revision_conflict", "stale_context", "stale_fence", "stale_receipt"]
       .includes(this.code);
   }
+
+  get unknown(): boolean {
+    return this.envelope.outcome === "unknown" || this.code === "unknown_outcome";
+  }
+}
+
+export interface PendingOperation {
+  operation_id: string;
+  action: TuiAction;
+  work_id?: string;
 }
 
 export type ActionResult<T> =
@@ -460,20 +562,32 @@ function normalizeStatusItem(value: unknown): StatusItem {
     satisfied: (gates.satisfied as unknown[]).map(normalizeGate),
   } : undefined;
   let attempt: AttemptSummary | null = null;
-  if (value.attempt !== undefined && value.attempt !== null) {
-    if (!isObject(value.attempt) || typeof value.attempt.attempt_id !== "string") {
+  const rawAttempt = value.attempt ?? (
+    typeof value.attempt_id === "string"
+      ? { attempt_id: value.attempt_id, fence: value.fence, phase: value.phase }
+      : undefined
+  );
+  if (rawAttempt !== undefined && rawAttempt !== null) {
+    if (!isObject(rawAttempt) || typeof rawAttempt.attempt_id !== "string") {
       throw new ProtocolEnvelopeError("attempt summary must contain attempt_id");
     }
-    const fence = asNumber(value.attempt.fence, "attempt.fence");
+    const fence = asNumber(rawAttempt.fence, "attempt.fence");
     if (!Number.isInteger(fence)) throw new ProtocolEnvelopeError("attempt.fence must be an integer");
+    const phase = typeof rawAttempt.phase === "string"
+      ? rawAttempt.phase
+      : statusValue === "claimed"
+        ? "claimed"
+        : ["in_progress", "running", "accepted"].includes(statusValue)
+          ? "running"
+          : undefined;
     attempt = {
-      attempt_id: value.attempt.attempt_id,
+      attempt_id: rawAttempt.attempt_id,
       fence,
-      phase: typeof value.attempt.phase === "string" ? value.attempt.phase : undefined,
-      actor_id: typeof value.attempt.actor_id === "string" || value.attempt.actor_id === null ? value.attempt.actor_id : undefined,
-      session_id: typeof value.attempt.session_id === "string" || value.attempt.session_id === null ? value.attempt.session_id : undefined,
-      lease_deadline: typeof value.attempt.lease_deadline === "string" || value.attempt.lease_deadline === null ? value.attempt.lease_deadline : undefined,
-      hard_deadline: typeof value.attempt.hard_deadline === "string" || value.attempt.hard_deadline === null ? value.attempt.hard_deadline : undefined,
+      phase,
+      actor_id: typeof rawAttempt.actor_id === "string" || rawAttempt.actor_id === null ? rawAttempt.actor_id : undefined,
+      session_id: typeof rawAttempt.session_id === "string" || rawAttempt.session_id === null ? rawAttempt.session_id : undefined,
+      lease_deadline: typeof rawAttempt.lease_deadline === "string" || rawAttempt.lease_deadline === null ? rawAttempt.lease_deadline : undefined,
+      hard_deadline: typeof rawAttempt.hard_deadline === "string" || rawAttempt.hard_deadline === null ? rawAttempt.hard_deadline : undefined,
     };
   }
   return {
@@ -565,7 +679,12 @@ export function validateEnvelope<T>(value: unknown): Envelope<T> {
   };
 }
 
-function failureEnvelope(operation_id: string, code: string, message: string): Envelope<never> {
+function failureEnvelope(
+  operation_id: string,
+  code: string,
+  message: string,
+  outcome: "failed" | "unknown" = "failed",
+): Envelope<never> {
   return {
     api_version: API_VERSION,
     schema_version: ENVELOPE_SCHEMA,
@@ -574,10 +693,16 @@ function failureEnvelope(operation_id: string, code: string, message: string): E
     as_of: new Date().toISOString(),
     next_status_change_at: null,
     transport: "error",
-    outcome: "failed",
+    outcome,
     data: null,
     detail_ref: null,
-    error: { code, message, retryable: true, operation_id },
+    error: {
+      code,
+      message,
+      retryable: outcome === "failed",
+      operation_id,
+      ...(outcome === "unknown" ? { operation_preserved: true, readback_required: true } : {}),
+    },
   };
 }
 
@@ -593,6 +718,47 @@ function validateStatusReadOptions(options: StatusReadOptions): StatusReadOption
     throw new ProtocolEnvelopeError("project_id must be a string");
   }
   return { cursor_revision: cursor_revision === undefined ? null : cursor_revision, project_id: options.project_id, limit, offset };
+}
+
+function requiredString(value: unknown, field: string): string {
+  if (typeof value !== "string" || value.trim().length === 0) {
+    throw new ProtocolEnvelopeError(`${field} must be a non-empty string`);
+  }
+  return value;
+}
+
+function validateCreateProjectInput(input: CreateProjectInput): void {
+  requiredString(input.project_id, "create_project.project_id");
+  requiredString(input.actor_id, "create_project.actor_id");
+  requiredString(input.actor_role, "create_project.actor_role");
+  requiredString(input.credential_ref, "create_project.credential_ref");
+  requiredString(input.display_name, "create_project.display_name");
+}
+
+function validateCreateWorkInput(input: CreateWorkInput): void {
+  requiredString(input.project_id, "create_work.project_id");
+  requiredString(input.work_id, "create_work.work_id");
+  requiredString(input.actor_id, "create_work.actor_id");
+  requiredString(input.title, "create_work.title");
+  if (!["milestone", "sprint", "task"].includes(input.kind)) {
+    throw new ProtocolEnvelopeError("create_work.kind must be milestone, sprint, or task");
+  }
+  if (input.parent_id !== null) requiredString(input.parent_id, "create_work.parent_id");
+  if (!Number.isInteger(input.priority) || input.priority < 0 || input.priority > 255) {
+    throw new ProtocolEnvelopeError("create_work.priority must be an integer between 0 and 255");
+  }
+  if (!["automatic", "operator_only", "paused"].includes(input.dispatch_policy)) {
+    throw new ProtocolEnvelopeError("create_work.dispatch_policy is invalid");
+  }
+  if (!Array.isArray(input.hard_holds)) {
+    throw new ProtocolEnvelopeError("create_work.hard_holds must be an array");
+  }
+  if (input.hard_holds.length > 0) {
+    throw new ProtocolEnvelopeError("create_work.hard_holds are not supported by the current Rust create_work route");
+  }
+  if (!isObject(input.acceptance_profile)) throw new ProtocolEnvelopeError("create_work.acceptance_profile is required");
+  requiredString(input.acceptance_profile.id, "create_work.acceptance_profile.id");
+  requiredString(input.acceptance_profile.version, "create_work.acceptance_profile.version");
 }
 
 function outerResponse(value: unknown, operation_id: string): unknown {
@@ -619,9 +785,19 @@ function outerResponse(value: unknown, operation_id: string): unknown {
  */
 export class VersionedServiceClient implements VersionedServiceApi {
   private readonly max_payload_bytes: number;
+  private readonly project_id?: string;
+  private readonly actor_id?: string;
+  private readonly harness_id?: string;
+  private readonly session_id?: string;
+  readonly notifications?: RefreshNotificationSource;
 
   constructor(private readonly transport: FramedTransport, config: ServiceClientConfig = {}) {
     this.max_payload_bytes = config.max_payload_bytes ?? DEFAULT_MAX_PAYLOAD_BYTES;
+    this.project_id = config.project_id;
+    this.actor_id = config.actor_id;
+    this.harness_id = config.harness_id;
+    this.session_id = config.session_id;
+    this.notifications = config.notifications;
     if (!Number.isInteger(this.max_payload_bytes) || this.max_payload_bytes <= 0) {
       throw new ProtocolEnvelopeError("payload limit must be a positive integer");
     }
@@ -629,10 +805,16 @@ export class VersionedServiceClient implements VersionedServiceApi {
 
   readStatus(options: StatusReadOptions = {}): Promise<Envelope<RevisionedStatusResponse>> {
     const bounded = validateStatusReadOptions(options);
+    const project_id = bounded.project_id ?? this.project_id;
+    if (!project_id) throw new ProtocolEnvelopeError("status requires project_id");
+    if (!this.actor_id) throw new ProtocolEnvelopeError("status requires actor_id");
     const data = {
       command: "status",
       cursor_revision: bounded.cursor_revision,
-      project_id: bounded.project_id,
+      project_id,
+      actor_id: this.actor_id,
+      harness_id: this.harness_id,
+      session_id: this.session_id,
       limit: bounded.limit,
       offset: bounded.offset,
     };
@@ -640,40 +822,86 @@ export class VersionedServiceClient implements VersionedServiceApi {
   }
 
   createProject(request: RequestEnvelope<CreateProjectInput>): Promise<Envelope<unknown>> {
-    return this.call<unknown, CreateProjectInput>("create_project", request);
+    const validated = validateRequestEnvelope<CreateProjectInput>(request);
+    validateCreateProjectInput(validated.data);
+    const wireRequest: RequestEnvelope<CreateProjectWireInput> = {
+      ...validated,
+      data: {
+        project_id: validated.data.project_id,
+        actor_id: validated.data.actor_id,
+        actor_role: validated.data.actor_role,
+        credential_ref: validated.data.credential_ref,
+        name: validated.data.display_name,
+      },
+    };
+    return this.call<unknown, CreateProjectWireInput>("create_project", wireRequest, true);
   }
 
   createWork(request: RequestEnvelope<CreateWorkInput>): Promise<Envelope<unknown>> {
-    return this.call<unknown, CreateWorkInput>("create_work", request);
+    const validated = validateRequestEnvelope<CreateWorkInput>(request);
+    validateCreateWorkInput(validated.data);
+    const wireRequest: RequestEnvelope<CreateWorkWireInput> = {
+      ...validated,
+      data: {
+        project_id: validated.data.project_id,
+        work_id: validated.data.work_id,
+        actor_id: validated.data.actor_id,
+        kind: validated.data.kind,
+        title: validated.data.title,
+        parent_id: validated.data.parent_id,
+        description: validated.data.description,
+        priority: validated.data.priority,
+        dispatch: validated.data.dispatch_policy,
+        profile: validated.data.acceptance_profile.id,
+      },
+    };
+    return this.call<unknown, CreateWorkWireInput>("create_work", wireRequest, true);
   }
 
   claim(request: RequestEnvelope<ClaimInput>): Promise<Envelope<unknown>> {
-    return this.call<unknown, ClaimInput>("claim", request);
+    return this.call<unknown, ClaimInput>("claim", request, true);
   }
 
   acceptStart(request: RequestEnvelope<AcceptStartInput>): Promise<Envelope<unknown>> {
-    return this.call<unknown, AcceptStartInput>("start", request);
+    return this.call<unknown, AcceptStartInput>("start", request, true);
   }
 
   addEvidence(request: RequestEnvelope<EvidenceInput>): Promise<Envelope<unknown>> {
-    return this.call<unknown, EvidenceInput>("evidence", request);
+    return this.call<unknown, EvidenceInput>("evidence_add", request, true);
   }
 
   finish(request: RequestEnvelope<FinishInput>): Promise<Envelope<unknown>> {
-    return this.call<unknown, FinishInput>("finish", request);
+    const summary = request.data.summary?.trim();
+    if (!summary) throw new ProtocolEnvelopeError("finish_close requires a non-empty typed summary");
+    const wireRequest: RequestEnvelope<FinishWireInput> = {
+      ...request,
+      data: {
+        ...request.data,
+        summary_body: summary,
+      },
+    };
+    delete (wireRequest.data as Partial<FinishInput>).summary;
+    return this.call<unknown, FinishWireInput>("finish_close", wireRequest, true);
   }
 
   release(request: RequestEnvelope<ReleaseInput>): Promise<Envelope<unknown>> {
-    return this.call<unknown, ReleaseInput>("release", request);
+    return this.call<unknown, ReleaseInput>("release", request, true);
   }
 
   close(): void | Promise<void> {
     return this.transport.close?.();
   }
 
-  private async call<Response, Request>(command: string, request: RequestEnvelope<Request>): Promise<Envelope<Response>> {
+  private async call<Response, Request>(command: string, request: RequestEnvelope<Request>, mutation = false): Promise<Envelope<Response>> {
     const validated = validateRequestEnvelope(request);
-    const data = isObject(validated.data) ? { ...validated.data, command } : validated.data;
+    const data = isObject(validated.data) ? {
+      ...validated.data,
+      command,
+      ...(this.project_id && !validated.data.project_id ? { project_id: this.project_id } : {}),
+      ...(this.actor_id && !validated.data.actor_id ? { actor_id: this.actor_id } : {}),
+      ...(this.harness_id && !validated.data.harness_id ? { harness_id: this.harness_id } : {}),
+      ...(this.session_id && !validated.data.session_id ? { session_id: this.session_id } : {}),
+    } : validated.data;
     if (!isObject(data)) throw new ProtocolEnvelopeError("service command data must be an object");
     if (validated.expected_revision !== null) data.expected_revision = validated.expected_revision;
     if (validated.attempt_id !== null) data.attempt_id = validated.attempt_id;
@@ -692,22 +920,31 @@ export class VersionedServiceClient implements VersionedServiceApi {
     try {
       responseFrame = await this.transport.roundTrip(encodeJsonFrame(new TextDecoder().decode(encoded), this.max_payload_bytes));
     } catch (error) {
-      return failureEnvelope(validated.operation_id, "service_unavailable", String(error));
+      return failureEnvelope(
+        validated.operation_id,
+        mutation ? "unknown_outcome" : "service_unavailable",
+        mutation
+          ? `mutation delivery is unknown; read operation ${validated.operation_id} before retrying: ${String(error)}`
+          : String(error),
+        mutation ? "unknown" : "failed",
+      ) as Envelope<Response>;
     }
-    let decoded: string;
     try {
-      decoded = decodeJsonFrame(responseFrame, this.max_payload_bytes);
+      const decoded = decodeJsonFrame(responseFrame, this.max_payload_bytes);
+      const parsed = JSON.parse(decoded) as unknown;
+      return validateEnvelope<Response>(outerResponse(parsed, validated.operation_id));
     } catch (error) {
-      if (error instanceof ProtocolEnvelopeError) throw error;
-      throw new ProtocolEnvelopeError(String(error));
+      if (!mutation) {
+        if (error instanceof ProtocolEnvelopeError) throw error;
+        throw new ProtocolEnvelopeError(String(error));
+      }
+      return failureEnvelope(
+        validated.operation_id,
+        "unknown_outcome",
+        `mutation response could not be validated; read operation ${validated.operation_id} before retrying: ${error instanceof Error ? error.message : String(error)}`,
+        "unknown",
+      ) as Envelope<Response>;
     }
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(decoded);
-    } catch (error) {
-      throw new ProtocolEnvelopeError(`service response is not valid JSON: ${String(error)}`);
-    }
-    return validateEnvelope<Response>(outerResponse(parsed, validated.operation_id));
   }
 }
 
@@ -722,18 +959,20 @@ export function buildMonitoringModel(envelope: Envelope<RevisionedStatusResponse
   if (responseRevision !== undefined && responseRevision !== validated.revision) {
     throw new ProtocolEnvelopeError("monitoring response mixes revisions");
   }
-  if (validated.data.as_of !== undefined && validated.data.as_of !== validated.as_of) {
-    throw new ProtocolEnvelopeError("monitoring response mixes as_of timestamps");
-  }
+  // The envelope timestamp is the single snapshot timestamp. Some service
+  // implementations also echo `data.as_of`; tolerate an independently read
+  // echo and never reject a valid snapshot because the two clocks were sampled
+  // at different instants.
   const total = validated.data.counts?.matched ?? validated.data.total ?? items.length;
   asNumber(total, "total");
   return {
     revision: validated.revision,
     as_of: validated.as_of,
+    next_status_change_at: validated.next_status_change_at ?? null,
     total,
     counts: normalizeCounts(validated.data.counts, items, total),
     items: items.slice(0, MAX_INLINE_ITEMS),
-    truncated: items.length > MAX_INLINE_ITEMS,
+    truncated: items.length > MAX_INLINE_ITEMS || total > items.length,
   };
 }
 
@@ -764,9 +1003,15 @@ export class RevisionRefreshCoordinator {
     if (observedRevision !== undefined) {
       asNumber(observedRevision, "observed_revision");
       if (this.revision !== null && observedRevision === this.revision && this.model) return Promise.resolve(this.model);
-      const missed = this.revision !== null && observedRevision > this.revision + 1;
+      const missed = this.revision !== null
+        && (observedRevision < this.revision || observedRevision > this.revision + 1);
       return this.refresh({ resnapshot: missed });
     }
+    return this.refresh();
+  }
+
+  /** A deadline notification must refresh even when no database revision changed. */
+  notifyDeadline(): Promise<StatusView> {
     return this.refresh();
   }
 
@@ -814,13 +1059,23 @@ function gateIsOpen(item: StatusItem): boolean {
 }
 
 /** The presentation policy mirrors service-provided status; it never derives claimability. */
-export function actionAvailability(item: StatusItem, busy: ReadonlySet<TuiAction> = new Set()): ActionAvailability[] {
+export interface ActionAvailabilityContext {
+  /** The current service route requires a receipt before finish_close. */
+  receipt_available?: boolean;
+}
+
+export function actionAvailability(
+  item: StatusItem,
+  busy: ReadonlySet<TuiAction> = new Set(),
+  context: ActionAvailabilityContext = {},
+): ActionAvailability[] {
   const status = statusOf(item);
   const blocked = status === "blocked";
   const queued = status === "queued";
   const expired = status === "expired_review";
   const gateOpen = gateIsOpen(item);
   const hasAttempt = !!item.attempt;
+  const receiptAvailable = context.receipt_available !== false;
   const accepted = (hasAttempt && ["accepted", "running", "in_progress", "verifying"].includes(item.attempt?.phase ?? ""))
     || ["accepted", "running", "in_progress"].includes(status);
   const disabled = (action: TuiAction, reason: string | null, enabled: boolean, confirmation = true): ActionAvailability => ({
@@ -833,7 +1088,7 @@ export function actionAvailability(item: StatusItem, busy: ReadonlySet<TuiAction
     disabled("claim", blocked ? "work is blocked" : queued ? "waiting for prerequisite" : expired ? "expiry requires review" : item.claimable ? null : "work is not claimable at this revision", item.claimable && !blocked && !queued && !expired),
     disabled("accept_start", blocked ? "work is blocked" : queued ? "waiting for prerequisite" : expired ? "expiry requires review" : hasAttempt && status === "claimed" ? null : "a claimed attempt is required", hasAttempt && status === "claimed" && !blocked && !queued && !expired),
     disabled("evidence", blocked ? "work is blocked" : queued ? "waiting for prerequisite" : expired ? "expiry requires review" : accepted ? null : "an accepted attempt is required", accepted && !blocked && !queued && !expired),
-    disabled("finish", blocked ? "work is blocked" : queued ? "waiting for prerequisite" : expired ? "expiry requires review" : gateOpen ? "required gate is open" : accepted ? null : "an accepted attempt is required", accepted && !blocked && !queued && !expired && !gateOpen),
+    disabled("finish", blocked ? "work is blocked" : queued ? "waiting for prerequisite" : expired ? "expiry requires review" : gateOpen ? "required gate is open" : !receiptAvailable ? "a current receipt is required" : accepted ? null : "an accepted attempt is required", accepted && !blocked && !queued && !expired && !gateOpen && receiptAvailable),
     disabled("release", blocked ? "work is blocked" : queued ? "waiting for prerequisite" : expired ? "expiry requires review" : hasAttempt ? null : "a current attempt is required", hasAttempt && !blocked && !queued && !expired),
   ];
 }
@@ -847,6 +1102,22 @@ export interface MountedView {
   notice: ControllerNotice | null;
   stale_revision: StaleRevisionDisplay | null;
   busy_actions: TuiAction[];
+  pending_operations: PendingOperation[];
+}
+
+export interface TuiWorkflowContext {
+  project_id: string;
+  actor_id: string;
+  harness_id: string;
+  session_id: string;
+  now?: () => Date;
+  lease_ttl_ms?: number;
+  hard_deadline_ms?: number;
+}
+
+export interface TuiWorkflowControllerOptions {
+  context: TuiWorkflowContext;
+  notifications?: RefreshNotificationSource;
 }
 
 let operationSequence = 0;
@@ -854,6 +1125,10 @@ let operationSequence = 0;
 function operationId(): string {
   operationSequence += 1;
   return `op_tui_${Date.now().toString(36)}_${operationSequence}`;
+}
+
+function attemptId(): string {
+  return `attempt_tui_${Date.now().toString(36)}_${operationSequence + 1}`;
 }
 
 function requestEnvelope<T>(operation_id: string, data: T, revision: number | null, attempt_id: string | null = null, attempt_fence: number | null = null): RequestEnvelope<T> {
@@ -870,25 +1145,55 @@ function requestEnvelope<T>(operation_id: string, data: T, revision: number | nu
 
 export class TuiWorkflowController {
   private readonly refreshCoordinator: RevisionRefreshCoordinator;
+  private readonly receipts = new Map<string, { attempt_id: string; fence: number; receipt: unknown }>();
   private model: MonitoringModel | null = null;
   private mounted = false;
   private route: Route = { kind: "monitoring" };
   private notice: ControllerNotice | null = null;
   private readonly busy = new Set<TuiAction>();
+  private readonly pending = new Map<string, PendingOperation>();
+  private readonly context: TuiWorkflowContext;
+  private readonly notifications?: RefreshNotificationSource;
+  private unsubscribeNotifications: (() => void) | null = null;
 
-  constructor(private readonly service: VersionedServiceApi) {
+  constructor(private readonly service: VersionedServiceApi, options: TuiWorkflowControllerOptions) {
     this.refreshCoordinator = new RevisionRefreshCoordinator(service);
+    if (!options?.context) throw new ProtocolEnvelopeError("mounted controller requires a persistent context");
+    for (const [field, value] of Object.entries(options.context)) {
+      if (["project_id", "actor_id", "harness_id", "session_id"].includes(field)
+        && (typeof value !== "string" || value.trim().length === 0)) {
+        throw new ProtocolEnvelopeError(`mounted context requires ${field}`);
+      }
+    }
+    this.context = { ...options.context };
+    this.notifications = options.notifications ?? service.notifications;
   }
 
-  async mount(route: Route = { kind: "monitoring" }): Promise<MountedView> {
+  async mount(route?: Route): Promise<MountedView> {
+    const mountedRoute = route ?? { kind: "monitoring", project_id: this.context.project_id };
+    if (mountedRoute.project_id && mountedRoute.project_id !== this.context.project_id) {
+      throw new ProtocolEnvelopeError("route project_id does not match the mounted project context");
+    }
     this.mounted = true;
-    this.route = route;
+    this.route = { ...mountedRoute, project_id: this.context.project_id };
+    if (!this.unsubscribeNotifications && this.notifications) {
+      this.unsubscribeNotifications = this.notifications.subscribe((notification) => {
+        const refresh = notification.kind === "deadline"
+          ? this.notifyDeadline()
+          : this.notifyRevision(notification.revision);
+        void refresh.catch((error) => {
+          this.notice = { kind: "error", message: error instanceof Error ? error.message : String(error) };
+        });
+      });
+    }
     await this.refresh();
     return this.view();
   }
 
   unmount(): void {
     this.mounted = false;
+    this.unsubscribeNotifications?.();
+    this.unsubscribeNotifications = null;
   }
 
   view(): MountedView {
@@ -902,15 +1207,19 @@ export class TuiWorkflowController {
       route: { ...this.route },
       monitoring: this.model,
       selected_work: selected,
-      actions: [...creationActions, ...(selected ? actionAvailability(selected, this.busy) : [])],
+      actions: [...creationActions, ...(selected ? actionAvailability(selected, this.busy, { receipt_available: this.currentReceipt(selected) !== undefined }) : [])],
       notice: this.notice,
       stale_revision: this.notice?.stale ?? null,
       busy_actions: [...this.busy],
+      pending_operations: [...this.pending.values()],
     };
   }
 
   navigate(route: Route): MountedView {
-    this.route = route;
+    if (route.project_id && route.project_id !== this.context.project_id) {
+      throw new ProtocolEnvelopeError("route project_id does not match the mounted project context");
+    }
+    this.route = { ...route, project_id: this.context.project_id };
     return this.view();
   }
 
@@ -928,49 +1237,98 @@ export class TuiWorkflowController {
     });
   }
 
+  notifyDeadline(): Promise<MountedView> {
+    return this.refreshCoordinator.notifyDeadline().then((model) => {
+      this.model = model;
+      return this.view();
+    });
+  }
+
   actionAvailability(work_id: string): ActionAvailability[] {
-    return actionAvailability(this.item(work_id), this.busy);
+    const item = this.item(work_id);
+    return actionAvailability(item, this.busy, { receipt_available: this.currentReceipt(item) !== undefined });
   }
 
-  async createProject(input: CreateProjectInput): Promise<ActionResult<unknown>> {
-    const result = await this.mutate("create_project", (id, revision) => this.service.createProject(requestEnvelope(id, input, revision)), undefined);
+  async createProject(input: CreateProjectDraftInput): Promise<ActionResult<unknown>> {
+    if (input.project_id !== this.context.project_id) {
+      throw new ProtocolEnvelopeError("create_project must target the mounted project context");
+    }
+    const request: CreateProjectInput = {
+      project_id: input.project_id,
+      actor_id: this.actor(),
+      actor_role: input.actor_role ?? "operator",
+      credential_ref: input.credential_ref ?? `tui:${this.harness()}`,
+      display_name: input.display_name ?? this.actor(),
+    };
+    const result = await this.mutate("create_project", (id, revision) => this.service.createProject(requestEnvelope(id, request, revision)), undefined);
     if (result.ok) {
-      const data = isObject(result.data) ? result.data : {};
-      const project_id = typeof data.project_id === "string" ? data.project_id : typeof data.id === "string" ? data.id : input.project_id;
-      if (project_id) this.route = { kind: "project", project_id };
+      this.route = { kind: "project", project_id: request.project_id };
     }
     return result;
   }
 
-  async createWork(input: CreateWorkInput): Promise<ActionResult<unknown>> {
-    const result = await this.mutate("create_work", (id, revision) => this.service.createWork(requestEnvelope(id, input, revision)), undefined);
+  async createWork(input: CreateWorkDraftInput): Promise<ActionResult<unknown>> {
+    if (!Number.isInteger(input.priority ?? 0) || (input.priority ?? 0) < 0 || (input.priority ?? 0) > 255) {
+      throw new ProtocolEnvelopeError("create_work priority must be an integer between 0 and 255");
+    }
+    const request: CreateWorkInput = {
+      project_id: this.context.project_id,
+      work_id: input.work_id,
+      actor_id: this.actor(),
+      kind: input.kind,
+      title: input.title,
+      parent_id: input.parent_id ?? null,
+      description: input.description ?? "",
+      priority: input.priority ?? 0,
+      dispatch_policy: input.dispatch_policy ?? "automatic",
+      hard_holds: [...(input.hard_holds ?? [])],
+      acceptance_profile: input.acceptance_profile ?? { id: "focused", version: "1" },
+    };
+    const result = await this.mutate("create_work", (id, revision) => this.service.createWork(requestEnvelope(id, request, revision)), undefined);
     if (result.ok) {
-      const data = isObject(result.data) ? result.data : {};
-      const work_id = typeof data.work_id === "string" ? data.work_id : typeof data.id === "string" ? data.id : undefined;
-      if (work_id) this.route = { kind: "work", project_id: input.project_id, work_id };
+      this.route = { kind: "work", project_id: request.project_id, work_id: request.work_id };
     }
     return result;
   }
 
-  async claim(work_id: string, actor_id: string, options: { harness_id?: string; session_id?: string } = {}): Promise<ActionResult<unknown>> {
+  async claim(work_id: string): Promise<ActionResult<unknown>> {
     const item = this.item(work_id);
     this.requireAction(item, "claim");
-    const input: ClaimInput = { project_id: this.projectId(work_id), work_id, actor_id, ...options };
+    const now = this.now();
+    const input: ClaimInput = {
+      project_id: this.projectId(work_id),
+      work_id,
+      actor_id: this.actor(),
+      harness_id: this.harness(),
+      session_id: this.session(),
+      attempt_id: attemptId(),
+      claimed_at: now.toISOString(),
+      lease_deadline: new Date(now.getTime() + (this.context.lease_ttl_ms ?? 30 * 60 * 1000)).toISOString(),
+      hard_deadline: new Date(now.getTime() + (this.context.hard_deadline_ms ?? 2 * 60 * 60 * 1000)).toISOString(),
+    };
     return this.mutate("claim", (id, revision) => this.service.claim(requestEnvelope(id, input, revision)), work_id);
   }
 
-  async acceptStart(work_id: string, options: { session_id?: string } = {}): Promise<ActionResult<unknown>> {
+  async acceptStart(work_id: string): Promise<ActionResult<unknown>> {
     const item = this.item(work_id);
     this.requireAction(item, "accept_start");
     const attempt = item.attempt;
     if (!attempt) throw new ActionDisabledError("accept_start", "a current attempt is required", work_id);
-    const input: AcceptStartInput = { project_id: this.projectId(work_id), work_id, attempt_id: attempt.attempt_id, fence: attempt.fence, ...options };
+    const input: AcceptStartInput = {
+      project_id: this.projectId(work_id),
+      work_id,
+      attempt_id: attempt.attempt_id,
+      fence: attempt.fence,
+      actor_id: this.actor(),
+      harness_id: this.harness(),
+      session_id: this.session(),
+    };
     return this.mutate("accept_start", (id, revision) => this.service.acceptStart(requestEnvelope(id, input, revision, attempt.attempt_id, attempt.fence)), work_id);
   }
 
   /** Alias for callers that use the shorter lifecycle verb. */
-  start(work_id: string, options: { session_id?: string } = {}): Promise<ActionResult<unknown>> {
-    return this.acceptStart(work_id, options);
+  start(work_id: string): Promise<ActionResult<unknown>> {
+    return this.acceptStart(work_id);
   }
 
   async addEvidence(work_id: string, evidence: unknown): Promise<ActionResult<unknown>> {
@@ -978,8 +1336,19 @@ export class TuiWorkflowController {
     this.requireAction(item, "evidence");
     const attempt = item.attempt;
     if (!attempt) throw new ActionDisabledError("evidence", "a current attempt is required", work_id);
-    const input: EvidenceInput = { project_id: this.projectId(work_id), work_id, attempt_id: attempt.attempt_id, fence: attempt.fence, evidence };
-    return this.mutate("evidence", (id, revision) => this.service.addEvidence(requestEnvelope(id, input, revision, attempt.attempt_id, attempt.fence)), work_id);
+    const input: EvidenceInput = {
+      project_id: this.projectId(work_id),
+      work_id,
+      attempt_id: attempt.attempt_id,
+      fence: attempt.fence,
+      actor_id: this.actor(),
+      harness_id: this.harness(),
+      session_id: this.session(),
+      receipt: evidence,
+    };
+    const result = await this.mutate("evidence", (id, revision) => this.service.addEvidence(requestEnvelope(id, input, revision, attempt.attempt_id, attempt.fence)), work_id);
+    if (result.ok) this.receipts.set(work_id, { attempt_id: attempt.attempt_id, fence: attempt.fence, receipt: evidence });
+    return result;
   }
 
   evidence(work_id: string, evidence: unknown): Promise<ActionResult<unknown>> {
@@ -991,8 +1360,28 @@ export class TuiWorkflowController {
     this.requireAction(item, "finish");
     const attempt = item.attempt;
     if (!attempt) throw new ActionDisabledError("finish", "a current attempt is required", work_id);
-    const input: FinishInput = { project_id: this.projectId(work_id), work_id, attempt_id: attempt.attempt_id, fence: attempt.fence, close: true, summary };
-    return this.mutate("finish", (id, revision) => this.service.finish(requestEnvelope(id, input, revision, attempt.attempt_id, attempt.fence)), work_id);
+    const storedReceipt = this.receipts.get(work_id);
+    if (!storedReceipt || storedReceipt.attempt_id !== attempt.attempt_id || storedReceipt.fence !== attempt.fence) {
+      throw new ActionDisabledError("finish", "a current receipt is required", work_id);
+    }
+    if (!summary?.trim()) {
+      throw new ActionDisabledError("finish", "a non-empty typed summary is required", work_id);
+    }
+    const input: FinishInput = {
+      project_id: this.projectId(work_id),
+      work_id,
+      attempt_id: attempt.attempt_id,
+      fence: attempt.fence,
+      actor_id: this.actor(),
+      harness_id: this.harness(),
+      session_id: this.session(),
+      close: true,
+      summary,
+      receipt: storedReceipt.receipt,
+    };
+    const result = await this.mutate("finish", (id, revision) => this.service.finish(requestEnvelope(id, input, revision, attempt.attempt_id, attempt.fence)), work_id);
+    if (result.ok) this.receipts.delete(work_id);
+    return result;
   }
 
   async release(work_id: string, reason?: string): Promise<ActionResult<unknown>> {
@@ -1000,7 +1389,16 @@ export class TuiWorkflowController {
     this.requireAction(item, "release");
     const attempt = item.attempt;
     if (!attempt) throw new ActionDisabledError("release", "a current attempt is required", work_id);
-    const input: ReleaseInput = { project_id: this.projectId(work_id), work_id, attempt_id: attempt.attempt_id, fence: attempt.fence, reason };
+    const input: ReleaseInput = {
+      project_id: this.projectId(work_id),
+      work_id,
+      attempt_id: attempt.attempt_id,
+      fence: attempt.fence,
+      actor_id: this.actor(),
+      harness_id: this.harness(),
+      session_id: this.session(),
+      reason,
+    };
     return this.mutate("release", (id, revision) => this.service.release(requestEnvelope(id, input, revision, attempt.attempt_id, attempt.fence)), work_id);
   }
 
@@ -1011,11 +1409,37 @@ export class TuiWorkflowController {
   }
 
   private projectId(work_id: string): string {
-    return this.route.project_id ?? (this.model?.items.find((item) => item.work_id === work_id) as StatusItem & { project_id?: string } | undefined)?.project_id ?? "";
+    const itemProject = (this.model?.items.find((item) => item.work_id === work_id) as StatusItem & { project_id?: string } | undefined)?.project_id;
+    if (itemProject && itemProject !== this.context.project_id) {
+      throw new ProtocolEnvelopeError("work project_id does not match the mounted project context");
+    }
+    return this.context.project_id;
+  }
+
+  private currentReceipt(item: StatusItem): unknown | undefined {
+    const stored = this.receipts.get(item.work_id);
+    if (!stored || !item.attempt || stored.attempt_id !== item.attempt.attempt_id || stored.fence !== item.attempt.fence) return undefined;
+    return stored.receipt;
+  }
+
+  private now(): Date {
+    return this.context.now?.() ?? new Date();
+  }
+
+  private actor(): string {
+    return this.context.actor_id;
+  }
+
+  private harness(): string {
+    return this.context.harness_id;
+  }
+
+  private session(): string {
+    return this.context.session_id;
   }
 
   private requireAction(item: StatusItem, action: TuiAction): void {
-    const available = actionAvailability(item, this.busy).find((entry) => entry.action === action);
+    const available = actionAvailability(item, this.busy, { receipt_available: this.currentReceipt(item) !== undefined }).find((entry) => entry.action === action);
     if (!available?.enabled) throw new ActionDisabledError(action, available?.reason ?? "action unavailable", item.work_id);
   }
 
@@ -1032,7 +1456,14 @@ export class TuiWorkflowController {
         return result;
       }
       const error = new TuiServiceError(envelope.error?.code ?? "unknown", envelope.error?.message ?? "service rejected operation", envelope.operation_id, envelope as Envelope<unknown>);
-      if (error.stale) {
+      if (error.unknown) {
+        this.pending.set(envelope.operation_id, { operation_id: envelope.operation_id, action, ...(work_id ? { work_id } : {}) });
+        this.notice = {
+          kind: "unknown",
+          message: `${error.message} Read operation ${envelope.operation_id} before retrying.`,
+          error,
+        };
+      } else if (error.stale) {
         this.notice = {
           kind: "stale_revision",
           message: error.message,
@@ -1048,7 +1479,7 @@ export class TuiWorkflowController {
         };
         if (this.mounted) {
           try {
-            await this.refreshCoordinator.refresh({ resnapshot: true });
+            await this.refresh();
           } catch {
             // Preserve the typed stale result when the recovery read is unavailable.
           }
@@ -1066,6 +1497,6 @@ export class TuiWorkflowController {
 /** Explicit name for consumers that mount the workflow controller in a TUI shell. */
 export class MountedWorkflowController extends TuiWorkflowController {}
 
-export function createMountedWorkflowController(service: VersionedServiceApi): MountedWorkflowController {
-  return new MountedWorkflowController(service);
+export function createMountedWorkflowController(service: VersionedServiceApi, context: TuiWorkflowContext): MountedWorkflowController {
+  return new MountedWorkflowController(service, { context });
 }

@@ -509,7 +509,7 @@ mod tests {
     }
 
     fn work(id: &str) -> WorkItem {
-        WorkItem::new("project".into(), id.into(), WorkKind::Milestone, None, id).open()
+        WorkItem::new("project".into(), id.into(), WorkKind::Task, None, id).open()
     }
 
     fn input(id: &str) -> StatusWorkInput {

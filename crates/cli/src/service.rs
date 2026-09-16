@@ -14,11 +14,14 @@ pub(crate) fn supports(parsed: &ParsedCommand) -> bool {
             .map(String::as_str)
             .collect::<Vec<_>>()
             .as_slice(),
-        ["status"]
+        ["init"]
+            | ["status"]
+            | ["work", "create"]
             | ["work", "claim"]
             | ["agent", "start"]
             | ["agent", "release"]
             | ["evidence", "run"]
+            | ["operation", "show"]
     ) || (path == &["agent".to_owned(), "finish".to_owned()]
         && (parsed.options.release || (parsed.options.close && parsed.options.receipt.is_some())))
         || (path == &["evidence".to_owned(), "add".to_owned()] && parsed.options.receipt.is_some())
@@ -52,12 +55,49 @@ mod unix {
     use boreal_domain::{ActorContext, ActorRole};
     use boreal_protocol::{schema, Envelope, ProtocolError as WireError, TransportOutcome};
     use boreal_service::{
-        ApplicationCommandHandler, ApplicationRequest, ApplicationResponse, JsonRequest,
-        ServiceHost, ServiceHostConfig, TransportConfig, UnixSocketClient, APPLICATION_API_VERSION,
-        APPLICATION_SCHEMA_VERSION,
+        ApplicationCommandHandler, ApplicationRequest, ApplicationResponse,
+        ConcurrentApplicationCommandHandler, JsonRequest, OperationPhase, RecoveryBackend,
+        RecoveryBackendError, RecoveryEntry, ServiceHost, ServiceHostConfig, TransportConfig,
+        TransportError, UnixSocketClient, APPLICATION_API_VERSION, APPLICATION_SCHEMA_VERSION,
+    };
+    use boreal_store::{
+        OperationOutcome as StoreOperationOutcome, OperationRecord, ReceiptAttestation,
+        ReceiptOutcome, ReceiptRecord,
     };
 
     const SERVICE_REQUEST_ID: &str = "cli-service-request";
+
+    #[derive(Clone, Debug)]
+    struct SqliteRecoveryBackend {
+        database: PathBuf,
+    }
+
+    impl RecoveryBackend for SqliteRecoveryBackend {
+        fn load_incomplete(&self) -> Result<Vec<RecoveryEntry>, RecoveryBackendError> {
+            let store = SqliteStore::open(&self.database, SCHEMA)
+                .map_err(|error| RecoveryBackendError::new(error.to_string()))?;
+            store
+                .list_incomplete_evidence_executions()
+                .map(|records| {
+                    records
+                        .into_iter()
+                        .map(|record| {
+                            RecoveryEntry::new(record.operation_id, OperationPhase::InFlight, None)
+                        })
+                        .collect()
+                })
+                .map_err(|error| RecoveryBackendError::new(error.to_string()))
+        }
+
+        fn mark_unknown(&self, operation_id: &str) -> Result<(), RecoveryBackendError> {
+            let store = SqliteStore::open(&self.database, SCHEMA)
+                .map_err(|error| RecoveryBackendError::new(error.to_string()))?;
+            store
+                .mark_evidence_execution_unknown(operation_id, "service_restart_recovery")
+                .map(|_| ())
+                .map_err(|error| RecoveryBackendError::new(error.to_string()))
+        }
+    }
 
     pub(crate) fn run_service(
         parsed: &ParsedCommand,
@@ -68,9 +108,14 @@ mod unix {
             .socket
             .as_deref()
             .ok_or_else(|| CliError::invalid("service run requires --socket PATH"))?;
+        let _signals = signal::SignalGuard::install().map_err(|error| {
+            CliError::with(
+                ErrorCode::ServiceUnavailable,
+                ApplicationOutcome::Failed,
+                format!("cannot install service signal handlers: {error}"),
+            )
+        })?;
         let db = PathBuf::from(&parsed.options.db);
-        ensure_db_parent(&db)?;
-        let store = SqliteStore::open(&db, SCHEMA).map_err(map_store_error)?;
         let config = ServiceHostConfig::default()
             .with_max_requests(parsed.options.max_requests)
             .map_err(|error| {
@@ -80,26 +125,29 @@ mod unix {
                     error.to_string(),
                 )
             })?;
-        let gate_root = db
-            .parent()
-            .unwrap_or(std::path::Path::new("."))
-            .join(super::GATE_COMMANDS_DIR);
-        let host = ServiceHost::bind(socket, ServiceCommandHandler { store, gate_root }, config)
-            .map_err(|error| {
-                CliError::with(
-                    ErrorCode::ServiceUnavailable,
-                    ApplicationOutcome::Failed,
-                    error.to_string(),
-                )
-            })?;
+        let host = bind_service_host(&db, Path::new(socket), config)?;
         let endpoint = host.socket_path().to_string_lossy().into_owned();
-        let handle = host.start().map_err(|error| {
+        let handle = host.start_concurrent().map_err(|error| {
             CliError::with(
                 ErrorCode::ServiceUnavailable,
                 ApplicationOutcome::Failed,
                 error.to_string(),
             )
         })?;
+        // The host sets this flag both when it reaches a natural request
+        // limit and when shutdown() is requested. Polling it lets service run
+        // preserve --max-requests while still reacting to SIGINT/SIGTERM
+        // without moving ownership of the non-cloneable host handle.
+        loop {
+            if signal::take_pending() != 0 {
+                handle.shutdown();
+                break;
+            }
+            if handle.is_shutdown_requested() {
+                break;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
         let report = handle.join().map_err(|error| {
             CliError::with(
                 ErrorCode::ServiceUnavailable,
@@ -118,6 +166,63 @@ mod unix {
                 "recovered_operations": report.recovery().queued.len()
                     + report.recovery().unknown.len(),
             })),
+        })
+    }
+
+    /// Compose the production service boundary around a canonical database
+    /// identity. Each bounded dispatch worker opens its own SQLite connection;
+    /// `SqliteStore` is intentionally not shared across threads.
+    pub(super) fn bind_service_host(
+        db: &Path,
+        socket: &Path,
+        config: ServiceHostConfig,
+    ) -> Result<ServiceHost<ConcurrentServiceCommandHandler>, CliError> {
+        ensure_db_parent(db)?;
+        // Initialize or validate the schema before binding the endpoint. The
+        // request workers subsequently open independent connections to this
+        // same canonical database.
+        drop(SqliteStore::open(db, SCHEMA).map_err(map_store_error)?);
+        let canonical_db = fs::canonicalize(db).map_err(|error| {
+            CliError::with(
+                ErrorCode::ServiceUnavailable,
+                ApplicationOutcome::Failed,
+                format!("service database identity is unavailable: {error}"),
+            )
+        })?;
+        let gate_root = canonical_db
+            .parent()
+            .unwrap_or(Path::new("."))
+            .join(super::GATE_COMMANDS_DIR);
+        let runtime_dir = canonical_db
+            .parent()
+            .unwrap_or(Path::new("."))
+            .join(".boreal-service-runtime");
+        let database_identity = format!("database:{}", canonical_db.to_string_lossy());
+        let owner_id = format!(
+            "process:{}:{}",
+            std::process::id(),
+            sha256_content_digest(socket.to_string_lossy().as_bytes())
+        );
+        ServiceHost::bind(
+            socket,
+            ConcurrentServiceCommandHandler {
+                database: canonical_db.clone(),
+                gate_root,
+            },
+            config,
+        )
+        .map(|host| {
+            host.with_project_election(runtime_dir, database_identity, owner_id)
+                .with_recovery_backend(SqliteRecoveryBackend {
+                    database: canonical_db.clone(),
+                })
+        })
+        .map_err(|error| {
+            CliError::with(
+                ErrorCode::ServiceUnavailable,
+                ApplicationOutcome::Failed,
+                error.to_string(),
+            )
         })
     }
 
@@ -150,13 +255,81 @@ mod unix {
                     error.to_string(),
                 )
             })?;
-        let response = client.request(request).map_err(|error| {
-            CliError::with(
-                ErrorCode::ServiceUnavailable,
-                ApplicationOutcome::Failed,
-                error.to_string(),
-            )
-        })?;
+        let response = match client.request(request) {
+            Ok(response) => response,
+            Err(TransportError::RemoteProtocol(error))
+                if recovered_unknown_duplicate(parsed, &error) =>
+            {
+                // The host journal must reject a second admission for a
+                // recovered operation. Read back through a fresh request
+                // operation so the caller receives the application's typed
+                // Unknown/readback result rather than a generic duplicate
+                // protocol error. The original operation remains the durable
+                // identity and is never retried or relaunched.
+                let readback_operation = format!(
+                    "op_service_readback_{}_{}_{}",
+                    std::process::id(),
+                    now_ms_u64(),
+                    OPERATION_COUNTER.fetch_add(1, Ordering::Relaxed)
+                );
+                let project = project_argument(parsed, 0)?;
+                let readback_payload = json!({
+                    "api_version": APPLICATION_API_VERSION,
+                    "schema_version": APPLICATION_SCHEMA_VERSION,
+                    "operation_id": readback_operation,
+                    "data": {
+                        "command": "operation_show",
+                        "project_id": project,
+                        "actor_id": parsed.options.actor,
+                        "harness_id": parsed.options.harness,
+                        "session_id": parsed.options.session,
+                        "target_operation_id": operation,
+                        "operation_id": readback_operation,
+                    },
+                });
+                let readback_request = JsonRequest::new(
+                    format!("{SERVICE_REQUEST_ID}-readback"),
+                    readback_payload.to_string(),
+                )
+                .map_err(|error| {
+                    CliError::with(
+                        ErrorCode::ProtocolMismatch,
+                        ApplicationOutcome::Failed,
+                        error.to_string(),
+                    )
+                })?;
+                let mut readback_client =
+                    UnixSocketClient::connect(socket, TransportConfig::default()).map_err(
+                        |error| {
+                            CliError::with(
+                                ErrorCode::ServiceUnavailable,
+                                ApplicationOutcome::Failed,
+                                error.to_string(),
+                            )
+                        },
+                    )?;
+                readback_client
+                    .request(readback_request)
+                    .map_err(|readback_error| {
+                        CliError::with(
+                            ErrorCode::ServiceUnavailable,
+                            ApplicationOutcome::Failed,
+                            format!(
+                                "recovered operation readback failed after duplicate {:?}: {}",
+                                error.message(),
+                                readback_error
+                            ),
+                        )
+                    })?
+            }
+            Err(error) => {
+                return Err(CliError::with(
+                    ErrorCode::ServiceUnavailable,
+                    ApplicationOutcome::Failed,
+                    error.to_string(),
+                ));
+            }
+        };
         let payload = response.payload().ok_or_else(|| {
             CliError::with(
                 ErrorCode::ProtocolMismatch,
@@ -204,6 +377,19 @@ mod unix {
             )
         })?;
         if let Some(error) = envelope.error {
+            // A durable operation readback deliberately carries an Unknown
+            // application outcome together with bounded state data. Preserve
+            // that data so the caller can inspect the operation instead of
+            // turning a potentially delivered mutation into a generic
+            // transport failure. Other error envelopes without data remain
+            // ordinary CLI errors.
+            if envelope.outcome == ApplicationOutcome::Unknown && envelope.data.is_some() {
+                return Ok(CliResult {
+                    outcome: envelope.outcome,
+                    revision: envelope.revision,
+                    data: envelope.data,
+                });
+            }
             return Err(CliError::with(error.code, envelope.outcome, error.message));
         }
         Ok(CliResult {
@@ -211,6 +397,77 @@ mod unix {
             revision: envelope.revision,
             data: envelope.data,
         })
+    }
+
+    fn recovered_unknown_duplicate(
+        parsed: &ParsedCommand,
+        error: &boreal_service::ProtocolError,
+    ) -> bool {
+        parsed.path == ["evidence".to_owned(), "run".to_owned()]
+            && error.code() == boreal_service::ProtocolErrorCode::InvalidField
+            && error.message().contains("phase Unknown")
+    }
+
+    #[cfg(unix)]
+    mod signal {
+        use std::{
+            io,
+            os::raw::c_int,
+            sync::atomic::{AtomicI32, Ordering},
+        };
+
+        pub(super) const SIGINT: c_int = 2;
+        pub(super) const SIGTERM: c_int = 15;
+        const SIGNAL_ERROR: usize = usize::MAX;
+        static PENDING: AtomicI32 = AtomicI32::new(0);
+
+        // POSIX signal handlers may only perform async-signal-safe work. The
+        // handler records the number; run_service performs the host shutdown
+        // and join on its ordinary Rust control path.
+        unsafe extern "C" {
+            fn signal(signal: c_int, handler: usize) -> usize;
+        }
+
+        extern "C" fn record(signal_number: c_int) {
+            PENDING.store(signal_number, Ordering::SeqCst);
+        }
+
+        pub(super) struct SignalGuard {
+            previous: [(c_int, usize); 2],
+        }
+
+        impl SignalGuard {
+            pub(super) fn install() -> io::Result<Self> {
+                PENDING.store(0, Ordering::SeqCst);
+                let mut previous = [(0, 0); 2];
+                for (slot, signal_number) in previous.iter_mut().zip([SIGINT, SIGTERM]) {
+                    let handler = unsafe { signal(signal_number, record as usize) };
+                    if handler == SIGNAL_ERROR {
+                        for (installed, old_handler) in previous.iter().copied() {
+                            if installed != 0 {
+                                unsafe { signal(installed, old_handler) };
+                            }
+                        }
+                        return Err(io::Error::last_os_error());
+                    }
+                    *slot = (signal_number, handler);
+                }
+                Ok(Self { previous })
+            }
+        }
+
+        impl Drop for SignalGuard {
+            fn drop(&mut self) {
+                for (signal_number, handler) in self.previous {
+                    unsafe { signal(signal_number, handler) };
+                }
+                PENDING.store(0, Ordering::SeqCst);
+            }
+        }
+
+        pub(super) fn take_pending() -> c_int {
+            PENDING.swap(0, Ordering::SeqCst)
+        }
     }
 
     pub(super) fn request_data(parsed: &ParsedCommand, operation: &str) -> Result<Value, CliError> {
@@ -223,30 +480,72 @@ mod unix {
             "session_id": parsed.options.session,
         });
         match path.as_slice() {
+            ["init"] => {
+                data["command"] = json!("create_project");
+                data["name"] = json!(project);
+                data["description"] = json!("");
+                data["actor_role"] = json!(parsed.options.actor_role.as_deref().unwrap_or("agent"));
+                data["credential_ref"] = json!("cli");
+            }
             ["status"] => {
                 data["command"] = json!("status");
                 data["limit"] = json!(parsed.options.limit.unwrap_or(100));
                 data["offset"] = json!(parsed.options.offset.unwrap_or(0));
             }
+            ["work", "create"] => {
+                let positional_offset = usize::from(parsed.options.project.is_none());
+                let work_id = parsed
+                    .options
+                    .positionals
+                    .get(positional_offset)
+                    .cloned()
+                    .ok_or_else(|| CliError::invalid("missing work identifier"))?;
+                let title = parsed
+                    .options
+                    .positionals
+                    .get(positional_offset + 1)
+                    .cloned()
+                    .ok_or_else(|| CliError::invalid("missing work title"))?;
+                data["command"] = json!("create_work");
+                data["work_id"] = json!(work_id);
+                data["kind"] = json!(parsed.options.kind.as_deref().unwrap_or("task"));
+                data["parent_id"] = parsed
+                    .options
+                    .parent
+                    .clone()
+                    .map_or(Value::Null, Value::String);
+                data["title"] = json!(title);
+                data["description"] = json!(parsed.options.description.as_deref().unwrap_or(""));
+                data["priority"] = json!(parsed.options.priority.unwrap_or(0));
+                data["dispatch"] = json!("automatic");
+                data["profile"] = json!("focused");
+            }
             ["work", "claim"] => {
                 data["command"] = json!("claim");
                 data["work_id"] = json!(work_argument(parsed, 1)?);
-                let at = now_ms_u64();
-                let deadlines = AttemptPolicy::default()
-                    .deadlines(
-                        TimestampMs::from_millis(at),
-                        parsed.options.lease_ttl_ms,
-                        parsed.options.time_limit_ms,
-                    )
-                    .map_err(|error| CliError::invalid(error.to_string()))?;
                 data["attempt_id"] = json!(parsed
                     .options
                     .attempt
                     .clone()
                     .unwrap_or_else(|| attempt_id_for(operation)));
-                data["claimed_at"] = json!(stamp(at));
-                data["lease_deadline"] = json!(stamp(deadlines.lease_deadline.as_millis()));
-                data["hard_deadline"] = json!(stamp(deadlines.hard_deadline.as_millis()));
+                data["lease_ttl_ms"] = parsed
+                    .options
+                    .lease_ttl_ms
+                    .map_or(Value::Null, |value| json!(value));
+                data["hard_time_limit_ms"] = parsed
+                    .options
+                    .time_limit_ms
+                    .map_or(Value::Null, |value| json!(value));
+                data["source_version_id"] = parsed
+                    .options
+                    .source_version
+                    .clone()
+                    .map_or(Value::Null, Value::String);
+                data["config_identity"] = json!(parsed
+                    .options
+                    .config_identity
+                    .as_deref()
+                    .unwrap_or("unknown"));
                 data["expected_revision"] = parsed
                     .options
                     .expected_revision
@@ -254,23 +553,29 @@ mod unix {
             }
             ["agent", "start"] => {
                 data["command"] = json!("start");
-                data["work_id"] = json!(work_argument(parsed, 0)?);
-                let at = now_ms_u64();
-                let deadlines = AttemptPolicy::default()
-                    .deadlines(
-                        TimestampMs::from_millis(at),
-                        parsed.options.lease_ttl_ms,
-                        parsed.options.time_limit_ms,
-                    )
-                    .map_err(|error| CliError::invalid(error.to_string()))?;
-                data["attempt_id"] = json!(parsed
+                data["work_id"] = parsed
+                    .options
+                    .work
+                    .clone()
+                    .or_else(|| parsed.options.positionals.first().cloned())
+                    .map_or(Value::Null, Value::String);
+                data["attempt_id"] = parsed
                     .options
                     .attempt
                     .clone()
-                    .unwrap_or_else(|| attempt_id_for(operation)));
-                data["claimed_at"] = json!(stamp(at));
-                data["lease_deadline"] = json!(stamp(deadlines.lease_deadline.as_millis()));
-                data["hard_deadline"] = json!(stamp(deadlines.hard_deadline.as_millis()));
+                    .map_or(Value::Null, Value::String);
+                data["fence"] = parsed
+                    .options
+                    .fence
+                    .map_or(Value::Null, |value| json!(value));
+                data["lease_ttl_ms"] = parsed
+                    .options
+                    .lease_ttl_ms
+                    .map_or(Value::Null, |value| json!(value));
+                data["hard_time_limit_ms"] = parsed
+                    .options
+                    .time_limit_ms
+                    .map_or(Value::Null, |value| json!(value));
                 data["expected_revision"] = parsed
                     .options
                     .expected_revision
@@ -313,6 +618,7 @@ mod unix {
                     .expected_revision
                     .map_or(Value::Null, |value| json!(value));
                 data["receipt"] = receipt_dto_value(parsed)?;
+                data["summary_body"] = json!(read_summary_body(parsed)?);
             }
             ["evidence", "add"] if parsed.options.receipt.is_some() => {
                 data["command"] = json!("evidence_add");
@@ -344,6 +650,15 @@ mod unix {
                     .expected_revision
                     .map_or(Value::Null, |value| json!(value));
             }
+            ["operation", "show"] => {
+                let operation_index = usize::from(parsed.options.project.is_none());
+                data["command"] = json!("operation_show");
+                data["target_operation_id"] = json!(parsed
+                    .options
+                    .positionals
+                    .get(operation_index)
+                    .ok_or_else(|| CliError::invalid("missing operation identifier"))?);
+            }
             _ => {
                 return Err(CliError::invalid(
                     "this command is not available through the local service",
@@ -357,6 +672,35 @@ mod unix {
     pub(super) struct ServiceCommandHandler {
         pub(super) store: SqliteStore,
         pub(super) gate_root: PathBuf,
+    }
+
+    /// Thread-safe production adapter for the bounded concurrent host.
+    ///
+    /// The handler contains only immutable connection metadata. A worker opens
+    /// its own SQLite connection and then delegates to the same application
+    /// handler used by the request-at-a-time tests and compatibility path.
+    pub(super) struct ConcurrentServiceCommandHandler {
+        database: PathBuf,
+        gate_root: PathBuf,
+    }
+
+    impl ConcurrentApplicationCommandHandler for ConcurrentServiceCommandHandler {
+        fn handle_concurrent(
+            &self,
+            request: ApplicationRequest,
+        ) -> Result<ApplicationResponse, boreal_service::ProtocolError> {
+            let store = SqliteStore::open(&self.database, SCHEMA).map_err(|error| {
+                boreal_service::ProtocolError::new(
+                    boreal_service::ProtocolErrorCode::InvalidPayload,
+                    format!("service database is unavailable: {error}"),
+                )
+            })?;
+            ServiceCommandHandler {
+                store,
+                gate_root: self.gate_root.clone(),
+            }
+            .handle(request)
+        }
     }
 
     impl ApplicationCommandHandler for ServiceCommandHandler {
@@ -401,11 +745,88 @@ mod unix {
         }
     }
 
-    type ServiceResult = Result<(ApplicationOutcome, Option<u64>, Option<Value>), CliError>;
+    type ServicePayload = (ApplicationOutcome, Option<u64>, Option<Value>);
+    type ServiceResult = Result<ServicePayload, CliError>;
+
+    #[derive(Debug, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct CreateProjectRequest {
+        command: String,
+        #[serde(default)]
+        project_id: Option<String>,
+        name: String,
+        #[serde(default)]
+        description: String,
+        actor_id: String,
+        #[serde(default = "default_actor_role")]
+        actor_role: String,
+        #[serde(default = "default_credential_ref")]
+        credential_ref: String,
+        #[serde(default, rename = "harness_id")]
+        _harness_id: Option<String>,
+        #[serde(default, rename = "session_id")]
+        _session_id: Option<String>,
+        #[serde(default, rename = "expected_revision")]
+        _expected_revision: Option<u64>,
+        #[serde(default, rename = "operation_id")]
+        _operation_id: Option<String>,
+    }
+
+    #[derive(Debug, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct CreateWorkRequest {
+        command: String,
+        project_id: String,
+        #[serde(default)]
+        work_id: Option<String>,
+        kind: String,
+        #[serde(default)]
+        parent_id: Option<String>,
+        title: String,
+        #[serde(default)]
+        description: String,
+        #[serde(default)]
+        priority: u8,
+        #[serde(default = "default_dispatch", alias = "dispatch_policy")]
+        dispatch: String,
+        #[serde(
+            default = "default_profile",
+            alias = "acceptance_profile",
+            alias = "profile_id"
+        )]
+        profile: String,
+        actor_id: String,
+        #[serde(default, rename = "harness_id")]
+        _harness_id: Option<String>,
+        #[serde(default, rename = "session_id")]
+        _session_id: Option<String>,
+        #[serde(default, rename = "expected_revision")]
+        _expected_revision: Option<u64>,
+        #[serde(default, rename = "operation_id")]
+        _operation_id: Option<String>,
+    }
+
+    fn default_actor_role() -> String {
+        "agent".to_owned()
+    }
+
+    fn default_credential_ref() -> String {
+        "service".to_owned()
+    }
+
+    fn default_dispatch() -> String {
+        "automatic".to_owned()
+    }
+
+    fn default_profile() -> String {
+        "focused".to_owned()
+    }
 
     impl ServiceCommandHandler {
         fn dispatch(&mut self, request: &ApplicationRequest, data: &Value) -> ServiceResult {
             match request.command.as_str() {
+                "create_project" => self.create_project(data, &request.operation_id),
+                "create_work" => self.create_work(data, &request.operation_id),
                 "status" => self.status(data),
                 "claim" => self.claim(data, &request.operation_id),
                 "start" => self.start(data, &request.operation_id),
@@ -413,12 +834,120 @@ mod unix {
                 "finish_close" => self.finish_close(data, &request.operation_id),
                 "evidence_add" => self.evidence_add(data),
                 "evidence_run" => self.evidence_run(data, &request.operation_id),
+                "operation_show" => self.operation_show(data),
                 command => Err(CliError::with(
                     ErrorCode::UnknownCommandNamespace,
                     ApplicationOutcome::Rejected,
                     format!("service does not implement command {command:?}"),
                 )),
             }
+        }
+
+        pub(super) fn create_project(&mut self, data: &Value, operation: &str) -> ServiceResult {
+            let request: CreateProjectRequest = serde_json::from_value(data.clone())
+                .map_err(|error| invalid_service_dto("create_project", error))?;
+            if request.command != "create_project" {
+                return Err(CliError::invalid(
+                    "create_project request command does not match its route",
+                ));
+            }
+            let name = required_trimmed(request.name, "name")?;
+            let actor = required_trimmed(request.actor_id, "actor_id")?;
+            let actor_role = parse_actor_role(&request.actor_role)?;
+            let credential_ref = required_trimmed(request.credential_ref, "credential_ref")?;
+            let project_id = match request.project_id {
+                Some(project_id) => required_trimmed(project_id, "project_id")?,
+                None => generated_subject_id("project", operation),
+            };
+            let result = WorkApplication::new(&self.store)
+                .init_project(
+                    &ProjectId::new(project_id.clone()),
+                    &actor,
+                    actor_role,
+                    &credential_ref,
+                    &name,
+                    &now(),
+                    operation,
+                )
+                .map_err(map_application_error)?;
+            Ok((
+                if result.changed {
+                    ApplicationOutcome::Changed
+                } else {
+                    ApplicationOutcome::Unchanged
+                },
+                Some(result.snapshot_revision),
+                Some(json!({
+                    "project_id": project_id,
+                    "name": name,
+                    "description": request.description,
+                    "replayed": !result.changed,
+                })),
+            ))
+        }
+
+        pub(super) fn create_work(&mut self, data: &Value, operation: &str) -> ServiceResult {
+            let request: CreateWorkRequest = serde_json::from_value(data.clone())
+                .map_err(|error| invalid_service_dto("create_work", error))?;
+            if request.command != "create_work" {
+                return Err(CliError::invalid(
+                    "create_work request command does not match its route",
+                ));
+            }
+            let project_id = required_trimmed(request.project_id, "project_id")?;
+            let actor_id = required_trimmed(request.actor_id, "actor_id")?;
+            let title = required_trimmed(request.title, "title")?;
+            let work_id = match request.work_id {
+                Some(work_id) => required_trimmed(work_id, "work_id")?,
+                None => generated_subject_id("work", operation),
+            };
+            let kind = parse_work_kind(&request.kind)?;
+            let dispatch_policy = parse_dispatch_policy(&request.dispatch)?;
+            let acceptance_profile = parse_acceptance_profile(&request.profile)?;
+            let parent_id = request
+                .parent_id
+                .map(|parent_id| required_trimmed(parent_id, "parent_id"))
+                .transpose()?
+                .map(WorkId::new);
+            let work = WorkItem {
+                id: WorkId::new(work_id.clone()),
+                project_id: ProjectId::new(project_id.clone()),
+                kind,
+                parent_id,
+                title,
+                description: request.description,
+                lifecycle: PersistedLifecycle::Open,
+                priority: request.priority,
+                dispatch_policy,
+                hard_holds: Vec::new(),
+                acceptance_profile,
+            };
+            let result = WorkApplication::new(&self.store)
+                .create_work_as(&work, &actor_id, &now(), operation)
+                .map_err(map_application_error)?;
+            Ok((
+                if result.changed {
+                    ApplicationOutcome::Changed
+                } else {
+                    ApplicationOutcome::Unchanged
+                },
+                Some(result.snapshot_revision),
+                Some(json!({
+                    "project_id": result.value.project_id,
+                    "work_id": result.value.work_id,
+                    "kind": result.value.kind,
+                    "parent_id": result.value.parent_id,
+                    "title": result.value.title,
+                    "description": result.value.description,
+                    "priority": result.value.priority,
+                    "dispatch_policy": result.value.dispatch_policy,
+                    "profile": {
+                        "id": work.acceptance_profile.id.as_str(),
+                        "version": work.acceptance_profile.version,
+                    },
+                    "replayed": !result.changed,
+                })),
+            ))
         }
 
         fn status(&self, data: &Value) -> ServiceResult {
@@ -429,21 +958,16 @@ mod unix {
             };
             let limit = optional_u64(data, "limit")?.unwrap_or(100);
             let offset = optional_u64(data, "offset")?.unwrap_or(0);
-            let snapshot = project_status_from_store(
-                &self.store,
-                &project,
-                &actor,
-                TimestampMs::from_millis(now_ms_u64()),
-                limit,
-                offset,
-            )
-            .map_err(|message| {
-                CliError::with(
-                    ErrorCode::ServiceUnavailable,
-                    ApplicationOutcome::Failed,
-                    message,
-                )
-            })?;
+            let as_of = TimestampMs::from_millis(now_ms_u64());
+            let snapshot =
+                project_status_from_store(&self.store, &project, &actor, as_of, limit, offset)
+                    .map_err(|message| {
+                        CliError::with(
+                            ErrorCode::ServiceUnavailable,
+                            ApplicationOutcome::Failed,
+                            message,
+                        )
+                    })?;
             let items = snapshot
                 .items
                 .iter()
@@ -492,7 +1016,26 @@ mod unix {
             let actor = string(data, "actor_id")?;
             let harness = string(data, "harness_id")?;
             let session = string(data, "session_id")?;
-            let claimed_at = TimestampMs::from_millis(parse_timestamp(data, "claimed_at")?);
+            // Absolute client clocks are deliberately ignored. The service
+            // owns the admission instant and derives both deadlines from
+            // bounded duration inputs under the shared attempt policy.
+            let claimed_at = TimestampMs::from_millis(now_ms_u64());
+            let lease_ttl_ms = optional_u64(data, "lease_ttl_ms")?;
+            let hard_time_limit_ms =
+                optional_duration(data, "hard_time_limit_ms", "time_limit_ms")?;
+            let deadlines = AttemptPolicy::default()
+                .deadlines(claimed_at, lease_ttl_ms, hard_time_limit_ms)
+                .map_err(|error| map_application_error(ApplicationError::from(error)))?;
+            let claim_digest = claim_request_digest(
+                data,
+                &project,
+                &work_id,
+                &actor,
+                &harness,
+                &session,
+                lease_ttl_ms,
+                hard_time_limit_ms,
+            )?;
             let app = WorkApplication::new(&self.store);
             // Resolve the project/work FK path before attempting session
             // registration. Actor FK validation remains inside the atomic
@@ -509,7 +1052,7 @@ mod unix {
                 optional_u64(data, "expected_revision")?,
             )?;
             let result = app
-                .claim(
+                .claim_with_context(
                     &project,
                     &work_id,
                     &actor,
@@ -517,11 +1060,15 @@ mod unix {
                     Some(&session),
                     &string(data, "attempt_id")?,
                     operation,
-                    &format!("sha256:{operation}"),
+                    &claim_digest,
                     registered_revision,
-                    &string(data, "claimed_at")?,
-                    &string(data, "lease_deadline")?,
-                    &string(data, "hard_deadline")?,
+                    &stamp(claimed_at.as_millis()),
+                    &stamp(deadlines.lease_deadline.as_millis()),
+                    &stamp(deadlines.hard_deadline.as_millis()),
+                    optional_string(data, "source_version_id")?.as_deref(),
+                    data.get("config_identity")
+                        .and_then(Value::as_str)
+                        .unwrap_or("unknown"),
                 )
                 .map_err(map_application_error)?;
             let adapter = SqliteAttemptAdapter::new(&self.store);
@@ -549,10 +1096,80 @@ mod unix {
 
         pub(super) fn start(&mut self, data: &Value, operation: &str) -> ServiceResult {
             let project = ProjectId::new(string(data, "project_id")?);
-            let work_id = string(data, "work_id")?;
             let actor = string(data, "actor_id")?;
             let harness = string(data, "harness_id")?;
             let session = string(data, "session_id")?;
+            let requested_work_id = optional_string(data, "work_id")?;
+            let requested_attempt_id = optional_string(data, "attempt_id")?;
+            let requested_fence = request_fence(data)?;
+            let stored_work_id = self
+                .store
+                .operation(operation)
+                .map_err(map_store_error)?
+                .and_then(|record| {
+                    serde_json::from_str::<Value>(&record.result_json)
+                        .ok()
+                        .and_then(|value| {
+                            value
+                                .get("work_id")
+                                .and_then(Value::as_str)
+                                .map(str::to_owned)
+                        })
+                });
+            let Some(work_id) = requested_work_id
+                .clone()
+                .or_else(|| {
+                    self.store
+                        .current_attempt_for_session(project.as_str(), &session)
+                        .ok()
+                        .flatten()
+                        .filter(|attempt| {
+                            attempt.actor_id == actor
+                                && attempt.harness_id.as_deref() == Some(harness.as_str())
+                        })
+                        .map(|attempt| attempt.work_id)
+                })
+                .or(stored_work_id)
+                .or(select_claimable_work(&self.store, &project, &actor)?)
+            else {
+                return Ok((
+                    ApplicationOutcome::Unchanged,
+                    Some(
+                        self.store
+                            .project_revision(project.as_str())
+                            .map_err(map_store_error)?
+                            .0,
+                    ),
+                    Some(json!({
+                        "phase": "idle",
+                        "reason": "no_ready_work",
+                        "message": "no resumable or claimable task is available",
+                        "next_action": null,
+                    })),
+                ));
+            };
+            let request_digest = start_request_digest(
+                data,
+                &project,
+                requested_work_id.as_deref().unwrap_or("<auto>"),
+                &actor,
+                &harness,
+                &session,
+                requested_attempt_id.as_deref(),
+                requested_fence,
+            )?;
+            if let Some(replayed) = self.replay_start_operation(
+                operation,
+                &project,
+                &work_id,
+                &actor,
+                &session,
+                requested_attempt_id.as_deref(),
+                &request_digest,
+            )? {
+                return Ok(replayed);
+            }
+            let outer_started_at = now();
             let current = self
                 .store
                 .current_attempt_for_work(project.as_str(), &work_id)
@@ -568,9 +1185,32 @@ mod unix {
                         "the current attempt is owned by another actor, harness, or session",
                     ));
                 }
+                if requested_attempt_id
+                    .as_deref()
+                    .is_some_and(|attempt_id| current.attempt_id != attempt_id)
+                {
+                    return Err(CliError::with(
+                        ErrorCode::AttemptConflict,
+                        ApplicationOutcome::Conflict,
+                        "the requested attempt does not match the current attempt",
+                    ));
+                }
+                if requested_fence.is_some_and(|fence| fence != current.fence) {
+                    return Err(CliError::with(
+                        ErrorCode::StaleFence,
+                        ApplicationOutcome::Conflict,
+                        "the requested fence does not match the current attempt",
+                    ));
+                }
                 (current.attempt_id, current.fence)
             } else {
-                let (_, _, _) = self.claim(data, operation)?;
+                let claim_operation = sub_operation(operation, "claim");
+                let mut claim_data = data.clone();
+                claim_data["work_id"] = json!(work_id);
+                claim_data["attempt_id"] = json!(requested_attempt_id
+                    .clone()
+                    .unwrap_or_else(|| attempt_id_for(operation)));
+                let (_, _, _) = self.claim(&claim_data, &claim_operation)?;
                 let claimed = self
                     .store
                     .current_attempt_for_work(project.as_str(), &work_id)
@@ -587,21 +1227,23 @@ mod unix {
             let app = WorkApplication::new(&self.store);
             let adapter = SqliteAttemptAdapter::new(&self.store);
             let attempt = AttemptId::new(attempt_id);
-            let request = attempt_request_from_data(
-                data,
-                &project,
-                &work_id,
-                &attempt,
-                Fence::new(fence),
-                &sub_operation(operation, "start"),
-            )?;
             let snapshot = adapter
                 .current_attempt(&project, &attempt)
                 .map_err(|error| map_application_error(ApplicationError::from(error)))?;
             let mut last = None;
             if snapshot.phase == AttemptPhase::Claimed {
                 let accepted = app
-                    .accept(&adapter, request.clone())
+                    .accept(
+                        &adapter,
+                        attempt_request_from_data(
+                            data,
+                            &project,
+                            &work_id,
+                            &attempt,
+                            Fence::new(fence),
+                            &sub_operation(operation, "accept"),
+                        )?,
+                    )
                     .map_err(map_application_error)?;
                 last = Some(accepted);
             }
@@ -618,7 +1260,7 @@ mod unix {
                             &work_id,
                             &attempt,
                             Fence::new(fence),
-                            operation,
+                            &sub_operation(operation, "start"),
                         )?,
                     )
                     .map_err(map_application_error)?;
@@ -627,22 +1269,108 @@ mod unix {
             let current = adapter
                 .current_attempt(&project, &attempt)
                 .map_err(|error| map_application_error(ApplicationError::from(error)))?;
-            let result = last.ok_or_else(|| {
-                CliError::with(
+            let (outcome, revision) = if let Some(result) = last {
+                (
+                    if result.changed {
+                        ApplicationOutcome::Changed
+                    } else {
+                        ApplicationOutcome::Unchanged
+                    },
+                    result.snapshot_revision,
+                )
+            } else if matches!(
+                current.phase,
+                AttemptPhase::Running | AttemptPhase::Verifying
+            ) {
+                (
+                    ApplicationOutcome::Unchanged,
+                    self.store
+                        .project_revision(project.as_str())
+                        .map_err(map_store_error)?
+                        .0,
+                )
+            } else {
+                return Err(CliError::with(
                     ErrorCode::AttemptConflict,
                     ApplicationOutcome::Conflict,
-                    "attempt is not startable",
-                )
-            })?;
-            Ok((
-                if result.changed {
-                    ApplicationOutcome::Changed
-                } else {
-                    ApplicationOutcome::Unchanged
-                },
-                Some(result.snapshot_revision),
-                Some(attempt_snapshot_json(&current)),
-            ))
+                    "attempt is not startable or resumable",
+                ));
+            };
+            let result_data = start_result_json(&current, operation);
+            self.store
+                .append_operation(&OperationRecord {
+                    operation_id: operation.to_owned(),
+                    project_id: project.as_str().to_owned(),
+                    command: "agent_start".to_owned(),
+                    actor_id: actor,
+                    session_id: Some(session),
+                    expected_revision: optional_u64(data, "expected_revision")?,
+                    attempt_id: Some(current.attempt_id.as_str().to_owned()),
+                    fence: Some(current.fence.get()),
+                    request_digest,
+                    outcome: if outcome == ApplicationOutcome::Changed {
+                        StoreOperationOutcome::Changed
+                    } else {
+                        StoreOperationOutcome::Unchanged
+                    },
+                    result_json: result_data.to_string(),
+                    revision,
+                    created_at: outer_started_at,
+                    completed_at: Some(now()),
+                })
+                .map_err(map_store_error)?;
+            Ok((outcome, Some(revision), Some(result_data)))
+        }
+
+        #[allow(clippy::too_many_arguments)]
+        fn replay_start_operation(
+            &self,
+            operation: &str,
+            project: &ProjectId,
+            work_id: &str,
+            actor: &str,
+            session: &str,
+            attempt_id: Option<&str>,
+            request_digest: &str,
+        ) -> Result<Option<ServicePayload>, CliError> {
+            let Some(existing) = self.store.operation(operation).map_err(map_store_error)? else {
+                return Ok(None);
+            };
+            if existing.command != "agent_start"
+                || existing.project_id != project.as_str()
+                || existing.actor_id != actor
+                || existing.session_id.as_deref() != Some(session)
+                || attempt_id
+                    .is_some_and(|attempt_id| existing.attempt_id.as_deref() != Some(attempt_id))
+                || existing.request_digest != request_digest
+            {
+                return Err(CliError::with(
+                    ErrorCode::OperationConflict,
+                    ApplicationOutcome::Conflict,
+                    "start operation was already used with another command or request",
+                ));
+            }
+            let mut result: Value =
+                serde_json::from_str(&existing.result_json).map_err(|error| {
+                    CliError::with(
+                        ErrorCode::ProtocolMismatch,
+                        ApplicationOutcome::Failed,
+                        format!("stored start result is invalid: {error}"),
+                    )
+                })?;
+            if result.get("work_id").and_then(Value::as_str) != Some(work_id) {
+                return Err(CliError::with(
+                    ErrorCode::ProtocolMismatch,
+                    ApplicationOutcome::Failed,
+                    "stored start result has the wrong work subject",
+                ));
+            }
+            result["replayed"] = json!(true);
+            Ok(Some((
+                ApplicationOutcome::Unchanged,
+                Some(existing.revision),
+                Some(result),
+            )))
         }
 
         fn release(&mut self, data: &Value, operation: &str) -> ServiceResult {
@@ -741,6 +1469,20 @@ mod unix {
             Ok((result.outcome, result.revision, result.data))
         }
 
+        fn operation_show(&mut self, data: &Value) -> ServiceResult {
+            let project = string(data, "project_id")?;
+            let target_operation = string(data, "target_operation_id")?;
+            let parsed = ParsedCommand {
+                path: vec!["operation".to_owned(), "show".to_owned()],
+                options: CliOptions {
+                    positionals: vec![project, target_operation],
+                    ..CliOptions::default()
+                },
+            };
+            let result = super::super::operation_show_result(&parsed, &self.store)?;
+            Ok((result.outcome, result.revision, result.data))
+        }
+
         pub(super) fn finish_close(&mut self, data: &Value, operation: &str) -> ServiceResult {
             let project = ProjectId::new(string(data, "project_id")?);
             let work_id = string(data, "work_id")?;
@@ -775,15 +1517,28 @@ mod unix {
                 ));
             }
             let app = WorkApplication::new(&self.store);
-            let receipt_result = app
-                .record_receipt(
+            let receipt_replayed = if receipt.attestation == ExecutorAttestation::BorealWitnessed {
+                self.validate_witnessed_receipt_readback(&project, &work_id, &receipt)?;
+                true
+            } else {
+                app.record_receipt(
                     &actor,
                     Some(&session),
                     &receipt,
                     optional_u64(data, "expected_revision")?,
                     TimestampMs::from_millis(now_ms_u64()),
                 )
-                .map_err(map_application_error)?;
+                .map_err(map_application_error)?
+                .replayed
+            };
+            let summary_body = string(data, "summary_body")?;
+            if summary_body.is_empty()
+                || summary_body.len() as u64 > boreal_store::MAX_SUMMARY_BODY_BYTES
+            {
+                return Err(CliError::invalid(
+                    "finish_close summary_body must contain at most 64 KiB of UTF-8 text",
+                ));
+            }
             let adapter = SqliteAttemptAdapter::new(&self.store);
             let submitted = app
                 .submit(
@@ -798,6 +1553,17 @@ mod unix {
                     )?,
                 )
                 .map_err(map_application_error)?;
+            let summary = summary_payload(&receipt, &summary_body, operation);
+            let summary_result = app
+                .record_summary(
+                    &actor,
+                    Some(&session),
+                    &summary,
+                    &sub_operation(operation, "summary"),
+                    None,
+                    TimestampMs::from_millis(now_ms_u64()),
+                )
+                .map_err(map_application_error)?;
             let intent = boreal_application::CloseIntent {
                 work_id: receipt.work_id.clone(),
                 attempt_id: receipt.attempt_id.clone(),
@@ -806,7 +1572,7 @@ mod unix {
                 config_identity: receipt.config_identity.clone(),
                 profile_id: receipt.coverage.profile_id.clone(),
                 profile_version: receipt.coverage.profile_version.clone(),
-                summary_id: None,
+                summary_id: Some(summary.summary_id.clone()),
             };
             let requested = app
                 .request_close(
@@ -818,33 +1584,36 @@ mod unix {
                 )
                 .map_err(map_application_error)?;
             let finalized = app
-                .finalize_close(
+                .finalize_close_current(
                     &actor,
                     Some(&session),
                     &intent,
                     None,
                     TimestampMs::from_millis(now_ms_u64()),
+                    &sub_operation(operation, "finalize"),
                 )
                 .map_err(map_application_error)?;
-            let outcome =
-                if finalized.close_intent.state == boreal_store::CloseIntentState::Finalized {
-                    ApplicationOutcome::Changed
-                } else {
-                    ApplicationOutcome::Rejected
-                };
+            let diagnostics = finalized.diagnostics.as_ref();
+            let outcome = if diagnostics.is_some() {
+                ApplicationOutcome::Rejected
+            } else {
+                ApplicationOutcome::Changed
+            };
             Ok((
                 outcome,
                 Some(finalized.revision),
                 Some(json!({
                     "attempt": attempt_mutation_json(&submitted.value),
                     "receipt_id": receipt.receipt_id.as_str(),
-                    "receipt_replayed": receipt_result.replayed,
+                    "receipt_replayed": receipt_replayed,
+                    "summary_id": summary.summary_id,
+                    "summary_replayed": summary_result.replayed,
                     "close_intent": format!("{:?}", requested.close_intent.state).to_ascii_lowercase(),
                     "close_state": format!("{:?}", finalized.close_intent.state).to_ascii_lowercase(),
                     "close_replayed": finalized.replayed,
-                    "gates": finalized.diagnostics.map(|diagnostics| json!({
-                        "missing": diagnostics.missing,
-                        "gates": diagnostics.gates.into_iter().map(|gate| json!({
+                    "gates": diagnostics.map(|value| json!({
+                        "missing": value.missing,
+                        "gates": value.gates.iter().map(|gate| json!({
                             "gate_id": gate.gate_id,
                             "kind": format!("{:?}", gate.kind).to_ascii_lowercase(),
                             "required": gate.required,
@@ -855,6 +1624,94 @@ mod unix {
                     })),
                 })),
             ))
+        }
+
+        /// A `boreal_witnessed` payload is a readback reference, never an
+        /// import request. The bounded executor already committed the trusted
+        /// receipt and its operation/audit facts. Require exact agreement with
+        /// those immutable facts before allowing finish to advance the attempt.
+        fn validate_witnessed_receipt_readback(
+            &self,
+            project: &ProjectId,
+            work_id: &str,
+            receipt: &ReceiptPayload,
+        ) -> Result<(), CliError> {
+            receipt
+                .validate()
+                .map_err(|error| map_application_error(ApplicationError::from(error)))?;
+            let invalid = || {
+                CliError::with(
+                    ErrorCode::ReceiptInvalid,
+                    ApplicationOutcome::Rejected,
+                    "witnessed receipt does not match its durable execution fact",
+                )
+            };
+            let durable = self
+                .store
+                .receipt(receipt.receipt_id.as_str())
+                .map_err(map_store_error)?
+                .ok_or_else(invalid)?;
+            let canonical_gate = self
+                .store
+                .gate_id_for_work(project.as_str(), work_id, receipt.gate_id.as_str())
+                .map_err(|_| invalid())?;
+            let argv: Vec<String> =
+                serde_json::from_str(&durable.argv_json).map_err(|_| invalid())?;
+            let subject: Value =
+                serde_json::from_str(&durable.subject_json).map_err(|_| invalid())?;
+            let coverage: Value =
+                serde_json::from_str(&durable.coverage_json).map_err(|_| invalid())?;
+            let coverage_kind = format!("{:?}", receipt.coverage.kind);
+
+            if !witnessed_receipt_subject_matches(
+                &durable,
+                project,
+                work_id,
+                receipt,
+                &canonical_gate,
+            ) || durable.executable != receipt.executable
+                || argv != receipt.argv
+                || durable.cwd != receipt.cwd
+                || durable.exit_code != receipt.exit_code
+                || durable.started_at != stamp(receipt.started_at.as_millis())
+                || durable.ended_at != stamp(receipt.ended_at.as_millis())
+                || durable.environment_fingerprint != receipt.environment_fingerprint
+                || subject.get("work_id").and_then(Value::as_str) != Some(receipt.work_id.as_str())
+                || subject.get("attempt_id").and_then(Value::as_str)
+                    != Some(receipt.attempt_id.as_str())
+                || subject.get("fence").and_then(Value::as_u64) != Some(receipt.fence.get())
+                || subject.get("gate_id").and_then(Value::as_str) != Some(receipt.gate_id.as_str())
+                || coverage.get("kind").and_then(Value::as_str) != Some(coverage_kind.as_str())
+                || coverage.get("profile_id").and_then(Value::as_str)
+                    != Some(receipt.coverage.profile_id.as_str())
+                || coverage.get("profile_version").and_then(Value::as_str)
+                    != Some(receipt.coverage.profile_version.as_str())
+            {
+                return Err(invalid());
+            }
+
+            let operation = self
+                .store
+                .read_receipt_operation(project.as_str(), receipt.operation_id.as_str())
+                .map_err(|_| invalid())?
+                .ok_or_else(invalid)?;
+            if operation.receipt != durable {
+                return Err(invalid());
+            }
+            let audit = self
+                .store
+                .audit_event(receipt.operation_id.as_str())
+                .map_err(map_store_error)?
+                .ok_or_else(invalid)?;
+            if audit.project_id != project.as_str()
+                || audit.event_type != "receipt.recorded"
+                || audit.subject_type != "receipt"
+                || audit.subject_id != receipt.receipt_id.as_str()
+                || audit.fence != Some(receipt.fence.get())
+            {
+                return Err(invalid());
+            }
+            Ok(())
         }
 
         #[allow(clippy::too_many_arguments)]
@@ -875,7 +1732,16 @@ mod unix {
                 actor_id: ActorId::new(actor),
                 harness_id: HarnessId::new(harness),
                 operation_id: OperationId::new(sub_operation(operation, "session")),
-                request_digest: format!("sha256:{operation}_session"),
+                request_digest: canonical_request_digest(
+                    "session.register/v1",
+                    json!({
+                        "project_id": project.as_str(),
+                        "session_id": session,
+                        "actor_id": actor,
+                        "harness_id": harness,
+                        "started_at": started_at.as_millis(),
+                    }),
+                ),
                 expected_project_revision: expected_revision,
                 started_at,
             };
@@ -886,6 +1752,32 @@ mod unix {
         }
     }
 
+    fn witnessed_receipt_subject_matches(
+        durable: &ReceiptRecord,
+        project: &ProjectId,
+        work_id: &str,
+        receipt: &ReceiptPayload,
+        canonical_gate: &str,
+    ) -> bool {
+        durable.project_id == project.as_str()
+            && durable.work_id == work_id
+            && durable.work_id == receipt.work_id.as_str()
+            && durable.attempt_id == receipt.attempt_id.as_str()
+            && durable.fence == receipt.fence.get()
+            && durable.operation_id == receipt.operation_id.as_str()
+            && durable.gate_id.as_deref() == Some(canonical_gate)
+            && durable.source_version_id.as_deref() == Some(receipt.source_snapshot_hash.as_str())
+            && durable.config_identity == receipt.config_identity.as_str()
+            && durable.output_digest == receipt.output_digest
+            && durable.output_ref == receipt.output_ref
+            && durable.attestation == ReceiptAttestation::BorealWitnessed
+            && match receipt.result {
+                ReceiptResult::Passed => durable.result == ReceiptOutcome::Passed,
+                ReceiptResult::Failed => durable.result == ReceiptOutcome::Failed,
+                ReceiptResult::Stale => durable.result == ReceiptOutcome::Stale,
+            }
+    }
+
     fn make_envelope(
         operation: &str,
         outcome: ApplicationOutcome,
@@ -893,12 +1785,45 @@ mod unix {
         data: Option<Value>,
         error: Option<WireError>,
     ) -> Envelope<Value> {
+        let as_of = data
+            .as_ref()
+            .and_then(|value| value.get("as_of"))
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .unwrap_or_else(now);
+        let error = error.or_else(|| {
+            if outcome.is_success() {
+                return None;
+            }
+            let code = crate::outcome_error_code(outcome);
+            let mut error = WireError::new(
+                code,
+                match outcome {
+                    ApplicationOutcome::Unknown => {
+                        "operation outcome is unknown; read back the durable operation"
+                    }
+                    ApplicationOutcome::Rejected => "application request was rejected",
+                    ApplicationOutcome::Conflict => "application request conflicted",
+                    ApplicationOutcome::Busy => "application request is busy",
+                    ApplicationOutcome::Failed => "application request failed",
+                    ApplicationOutcome::Changed | ApplicationOutcome::Unchanged => {
+                        "application request completed"
+                    }
+                },
+                crate::is_retryable(code),
+            );
+            if outcome == ApplicationOutcome::Unknown {
+                error.operation_id = Some(operation.to_owned());
+                error.readback_required = Some(true);
+            }
+            Some(error)
+        });
         Envelope {
             api_version: API_VERSION.to_owned(),
             schema_version: schema::ENVELOPE.to_owned(),
             operation_id: operation.to_owned(),
             revision,
-            as_of: now(),
+            as_of,
             next_status_change_at: None,
             transport: TransportOutcome::Ok,
             outcome,
@@ -916,18 +1841,158 @@ mod unix {
         fence: Fence,
         operation: &str,
     ) -> Result<AttemptRequest, CliError> {
+        let actor_id = string(data, "actor_id")?;
+        let harness_id = string(data, "harness_id")?;
+        let session_id = string(data, "session_id")?;
+        let request_digest = canonical_request_digest(
+            "attempt.transition/v1",
+            json!({
+                "project_id": project.as_str(),
+                "work_id": work_id,
+                "attempt_id": attempt.as_str(),
+                "actor_id": actor_id,
+                "harness_id": harness_id,
+                "session_id": session_id,
+                "fence": fence.get(),
+            }),
+        );
         Ok(AttemptRequest::new(
             project.clone(),
             WorkId::new(work_id),
             attempt.clone(),
-            ActorId::new(string(data, "actor_id")?),
-            Some(HarnessId::new(string(data, "harness_id")?)),
-            Some(SessionId::new(string(data, "session_id")?)),
+            ActorId::new(actor_id),
+            Some(HarnessId::new(harness_id)),
+            Some(SessionId::new(session_id)),
             fence,
             OperationId::new(operation),
-            format!("sha256:{operation}"),
+            request_digest,
             TimestampMs::from_millis(now_ms_u64()),
         ))
+    }
+
+    fn start_result_json(snapshot: &AttemptSnapshot, operation: &str) -> Value {
+        let mut value = attempt_snapshot_json(snapshot);
+        value["work_id"] = json!(snapshot.work_id.as_str());
+        value["replayed"] = json!(false);
+        value["child_operations"] = json!({
+            "claim": sub_operation(operation, "claim"),
+            "accept": sub_operation(operation, "accept"),
+            "start": sub_operation(operation, "start"),
+        });
+        value
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn claim_request_digest(
+        data: &Value,
+        project: &ProjectId,
+        work_id: &str,
+        actor: &str,
+        harness: &str,
+        session: &str,
+        lease_ttl_ms: Option<u64>,
+        hard_time_limit_ms: Option<u64>,
+    ) -> Result<String, CliError> {
+        Ok(canonical_request_digest(
+            "attempt.claim/v1",
+            json!({
+                "project_id": project.as_str(),
+                "work_id": work_id,
+                "attempt_id": string(data, "attempt_id")?,
+                "actor_id": actor,
+                "harness_id": harness,
+                "session_id": session,
+                "expected_revision": optional_u64(data, "expected_revision")?,
+                "lease_ttl_ms": lease_ttl_ms,
+                "hard_time_limit_ms": hard_time_limit_ms,
+                "source_version_id": optional_string(data, "source_version_id")?,
+                "config_identity": data.get("config_identity").and_then(Value::as_str).unwrap_or("unknown"),
+            }),
+        ))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn start_request_digest(
+        data: &Value,
+        project: &ProjectId,
+        work_id: &str,
+        actor: &str,
+        harness: &str,
+        session: &str,
+        attempt_id: Option<&str>,
+        fence: Option<u64>,
+    ) -> Result<String, CliError> {
+        Ok(canonical_request_digest(
+            "agent.start/v1",
+            json!({
+                "project_id": project.as_str(),
+                "work_id": work_id,
+                "attempt_id": attempt_id,
+                "actor_id": actor,
+                "harness_id": harness,
+                "session_id": session,
+                "fence": fence,
+                "expected_revision": optional_u64(data, "expected_revision")?,
+                "lease_ttl_ms": optional_u64(data, "lease_ttl_ms")?,
+                "hard_time_limit_ms": optional_duration(data, "hard_time_limit_ms", "time_limit_ms")?,
+            }),
+        ))
+    }
+
+    fn select_claimable_work(
+        store: &SqliteStore,
+        project: &ProjectId,
+        actor: &str,
+    ) -> Result<Option<String>, CliError> {
+        let snapshot = project_status_from_store(
+            store,
+            project,
+            &ActorContext {
+                actor_id: ActorId::new(actor.to_owned()),
+                role: ActorRole::Agent,
+            },
+            TimestampMs::from_millis(now_ms_u64()),
+            1_000,
+            0,
+        )
+        .map_err(|message| {
+            CliError::with(
+                ErrorCode::GuidanceUnavailable,
+                ApplicationOutcome::Failed,
+                message,
+            )
+        })?;
+        Ok(snapshot
+            .items
+            .into_iter()
+            .find(|item| item.work.kind == WorkKind::Task && item.decision.claimable_for_actor)
+            .map(|item| item.work.id.as_str().to_owned()))
+    }
+
+    fn optional_duration(
+        data: &Value,
+        canonical: &str,
+        alias: &str,
+    ) -> Result<Option<u64>, CliError> {
+        let canonical_value = optional_u64(data, canonical)?;
+        let alias_value = optional_u64(data, alias)?;
+        if canonical_value.is_some() && alias_value.is_some() && canonical_value != alias_value {
+            return Err(CliError::invalid(format!(
+                "service fields {canonical} and {alias} disagree"
+            )));
+        }
+        Ok(canonical_value.or(alias_value))
+    }
+
+    fn request_fence(data: &Value) -> Result<Option<u64>, CliError> {
+        let fence = optional_u64(data, "fence")?;
+        let envelope_fence = optional_u64(data, "attempt_fence")?;
+        if fence.is_some() && envelope_fence.is_some() && fence != envelope_fence {
+            return Err(CliError::invalid(
+                "service fields fence and attempt_fence disagree",
+            ));
+        }
+        Ok(fence.or(envelope_fence))
     }
 
     fn attempt_snapshot_json(snapshot: &AttemptSnapshot) -> Value {
@@ -956,6 +2021,76 @@ mod unix {
 
     fn format_status<T: std::fmt::Debug>(status: T) -> String {
         format!("{status:?}").to_ascii_lowercase()
+    }
+
+    fn invalid_service_dto(command: &str, error: serde_json::Error) -> CliError {
+        CliError::invalid(format!("invalid {command} request: {error}"))
+    }
+
+    fn required_trimmed(value: String, field: &str) -> Result<String, CliError> {
+        let value = value.trim();
+        if value.is_empty() {
+            Err(CliError::invalid(format!(
+                "service request requires {field}"
+            )))
+        } else {
+            Ok(value.to_owned())
+        }
+    }
+
+    fn generated_subject_id(prefix: &str, operation: &str) -> String {
+        let normalized = operation
+            .chars()
+            .map(|character| {
+                if character.is_ascii_alphanumeric() || matches!(character, '-' | '_') {
+                    character
+                } else {
+                    '_'
+                }
+            })
+            .collect::<String>();
+        format!("{prefix}_{normalized}")
+    }
+
+    fn parse_actor_role(value: &str) -> Result<&str, CliError> {
+        match value {
+            "agent" | "reviewer" | "operator" | "publisher" => Ok(value),
+            _ => Err(CliError::invalid(format!(
+                "unknown create_project actor role: {value}"
+            ))),
+        }
+    }
+
+    fn parse_work_kind(value: &str) -> Result<WorkKind, CliError> {
+        match value {
+            "milestone" => Ok(WorkKind::Milestone),
+            "sprint" => Ok(WorkKind::Sprint),
+            "task" => Ok(WorkKind::Task),
+            _ => Err(CliError::invalid(format!(
+                "unknown create_work kind: {value}"
+            ))),
+        }
+    }
+
+    fn parse_dispatch_policy(value: &str) -> Result<DispatchPolicy, CliError> {
+        match value {
+            "automatic" => Ok(DispatchPolicy::Automatic),
+            "operator_only" => Ok(DispatchPolicy::OperatorOnly),
+            "paused" => Ok(DispatchPolicy::Paused),
+            _ => Err(CliError::invalid(format!(
+                "unknown create_work dispatch policy: {value}"
+            ))),
+        }
+    }
+
+    fn parse_acceptance_profile(value: &str) -> Result<AcceptanceProfile, CliError> {
+        match value {
+            "focused" => Ok(AcceptanceProfile::focused()),
+            "reviewed" => Ok(AcceptanceProfile::reviewed()),
+            _ => Err(CliError::invalid(format!(
+                "unknown create_work acceptance profile: {value}"
+            ))),
+        }
     }
 
     fn string(data: &Value, field: &str) -> Result<String, CliError> {
@@ -992,11 +2127,6 @@ mod unix {
                 CliError::invalid(format!("service field {field} must be an integer"))
             }),
         }
-    }
-
-    fn parse_timestamp(data: &Value, field: &str) -> Result<u64, CliError> {
-        parse_stamp_ms(&string(data, field)?)
-            .ok_or_else(|| CliError::invalid(format!("service field {field} must use unix-ms:N")))
     }
 
     fn receipt_dto_value(parsed: &ParsedCommand) -> Result<Value, CliError> {
@@ -1043,12 +2173,17 @@ mod unix {
 #[cfg(unix)]
 #[allow(dead_code, unused_imports)]
 mod tests {
-    use super::unix::ServiceCommandHandler;
+    use super::unix::{bind_service_host, request_data, ServiceCommandHandler};
     use super::*;
     use boreal_protocol::Envelope;
     use boreal_service::{
-        JsonRequest, ServiceHost, ServiceHostConfig, ServiceHostExit, TransportConfig,
+        ApplicationCommandHandler, ApplicationRequest, BusyOutcome, ElectionError, JsonRequest,
+        ServiceHost, ServiceHostConfig, ServiceHostError, ServiceHostExit, TransportConfig,
         TransportError, UnixSocketClient, APPLICATION_API_VERSION, APPLICATION_SCHEMA_VERSION,
+    };
+    use std::sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
     };
 
     fn temp_path(kind: &str) -> PathBuf {
@@ -1077,7 +2212,7 @@ mod tests {
             &WorkItem {
                 id: WorkId::new("service-work"),
                 project_id: project,
-                kind: WorkKind::Milestone,
+                kind: WorkKind::Task,
                 parent_id: None,
                 title: "Service work".to_owned(),
                 description: String::new(),
@@ -1101,6 +2236,351 @@ mod tests {
 
     fn make_handler_at(store: SqliteStore, gate_root: PathBuf) -> ServiceCommandHandler {
         ServiceCommandHandler { store, gate_root }
+    }
+
+    fn witnessed_finish_fixture(kind: &str) -> (ServiceCommandHandler, Value, PathBuf, String) {
+        let root = temp_path(kind);
+        let gate_root = root.join("gates");
+        fs::create_dir_all(&gate_root).expect("witnessed gate directory creates");
+        fs::write(
+            gate_root.join("verification.json"),
+            serde_json::to_vec(&json!({
+                "gate_id": "verification",
+                "kind": "verification",
+                "executable": "true",
+                "argv": ["true"],
+                "cwd": ".",
+                "source_snapshot_hash": "source-witnessed-finish",
+                "config_identity": "config-witnessed-finish",
+                "environment_fingerprint": "env-witnessed-finish",
+                "observables": [],
+                "max_runtime_ms": 1_000,
+            }))
+            .expect("witnessed gate declaration serializes"),
+        )
+        .expect("witnessed gate declaration writes");
+
+        let store = seed_store(&root.join("state.sqlite"));
+        let mut handler = make_handler_at(store, gate_root);
+        handler
+            .claim(
+                &json!({
+                    "command": "claim",
+                    "project_id": "service-project",
+                    "work_id": "service-work",
+                    "actor_id": DEFAULT_ACTOR,
+                    "harness_id": DEFAULT_HARNESS,
+                    "session_id": "session-witnessed-finish",
+                    "attempt_id": "attempt-witnessed-finish",
+                    "expected_revision": 2,
+                }),
+                "op_service_witnessed_claim",
+            )
+            .expect("witnessed finish claim succeeds");
+        handler
+            .start(
+                &json!({
+                    "command": "start",
+                    "project_id": "service-project",
+                    "work_id": "service-work",
+                    "actor_id": DEFAULT_ACTOR,
+                    "harness_id": DEFAULT_HARNESS,
+                    "session_id": "session-witnessed-finish",
+                    "attempt_id": "attempt-witnessed-finish",
+                    "fence": 1,
+                }),
+                "op_service_witnessed_start",
+            )
+            .expect("witnessed finish attempt starts");
+        handler
+            .store
+            .execute_batch(
+                "INSERT INTO source_version
+                 (source_version_id, project_id, origin, access_scope, content_digest,
+                  media_type, byte_count, captured_at, parser_identity, availability, citation_json)
+                 VALUES ('source-witnessed-finish', 'service-project', 'fixture.md', 'project',
+                         'sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc',
+                         'text/markdown', 1, 'unix-ms:0', 'parser/1', 'available', '[]');
+                 UPDATE attempt
+                 SET source_version_id = 'source-witnessed-finish',
+                     config_identity = 'config-witnessed-finish'
+                 WHERE attempt_id = 'attempt-witnessed-finish';",
+            )
+            .expect("witnessed finish proof context binds");
+
+        let evidence_operation = "op_service_witnessed_evidence".to_owned();
+        let evidence = handler
+            .evidence_run(
+                &json!({
+                    "command": "evidence_run",
+                    "project_id": "service-project",
+                    "work_id": "service-work",
+                    "actor_id": DEFAULT_ACTOR,
+                    "harness_id": DEFAULT_HARNESS,
+                    "session_id": "session-witnessed-finish",
+                    "attempt_id": "attempt-witnessed-finish",
+                    "fence": 1,
+                    "gate_id": "verification",
+                }),
+                &evidence_operation,
+            )
+            .expect("witnessed evidence run succeeds");
+        assert_eq!(evidence.0, ApplicationOutcome::Changed);
+        let receipt_path = evidence.2.as_ref().expect("evidence data")["receipt_path"]
+            .as_str()
+            .expect("evidence receipt path");
+        let receipt: Value = serde_json::from_str(
+            &fs::read_to_string(receipt_path).expect("witnessed receipt is readable"),
+        )
+        .expect("witnessed receipt is JSON");
+        let finish = json!({
+            "command": "finish_close",
+            "project_id": "service-project",
+            "work_id": "service-work",
+            "actor_id": DEFAULT_ACTOR,
+            "harness_id": DEFAULT_HARNESS,
+            "session_id": "session-witnessed-finish",
+            "attempt_id": "attempt-witnessed-finish",
+            "fence": 1,
+            "expected_revision": Value::Null,
+            "receipt": receipt,
+            "summary_body": "Completed the witnessed verification fixture.",
+        });
+        (handler, finish, root, evidence_operation)
+    }
+
+    fn application_envelope(
+        handler: &mut ServiceCommandHandler,
+        operation_id: &str,
+        data: Value,
+    ) -> Envelope<Value> {
+        let command = data["command"]
+            .as_str()
+            .expect("test request has a command")
+            .to_owned();
+        let response = handler
+            .handle(ApplicationRequest {
+                request_id: format!("request-{operation_id}"),
+                api_version: APPLICATION_API_VERSION.to_owned(),
+                schema_version: APPLICATION_SCHEMA_VERSION.to_owned(),
+                operation_id: operation_id.to_owned(),
+                command,
+                data: data.to_string(),
+            })
+            .expect("application handler returns an envelope");
+        serde_json::from_str(&response.data).expect("application envelope is valid JSON")
+    }
+
+    #[test]
+    fn service_supports_project_and_work_creation_cli_routes() {
+        let init = ParsedCommand {
+            path: vec!["init".to_owned()],
+            options: CliOptions::default(),
+        };
+        let create_work = ParsedCommand {
+            path: vec!["work".to_owned(), "create".to_owned()],
+            options: CliOptions::default(),
+        };
+        assert!(supports(&init));
+        assert!(supports(&create_work));
+    }
+
+    #[test]
+    fn cli_creation_routes_build_authoritative_service_dtos() {
+        let init = super::super::parse(&[
+            "init".to_owned(),
+            "dto-project".to_owned(),
+            "--socket".to_owned(),
+            "service.sock".to_owned(),
+            "--actor".to_owned(),
+            "creator".to_owned(),
+        ])
+        .expect("init parses");
+        let init_data = request_data(&init, "op-create-project-dto").expect("init DTO builds");
+        assert_eq!(init_data["command"], "create_project");
+        assert_eq!(init_data["project_id"], "dto-project");
+        assert_eq!(init_data["name"], "dto-project");
+        assert_eq!(init_data["actor_id"], "creator");
+        assert!(init_data.get("created_at").is_none());
+
+        let create = super::super::parse(&[
+            "work".to_owned(),
+            "create".to_owned(),
+            "dto-project".to_owned(),
+            "dto-sprint".to_owned(),
+            "DTO sprint".to_owned(),
+            "--kind".to_owned(),
+            "sprint".to_owned(),
+            "--parent".to_owned(),
+            "dto-milestone".to_owned(),
+            "--description".to_owned(),
+            "typed route".to_owned(),
+            "--priority".to_owned(),
+            "9".to_owned(),
+            "--socket".to_owned(),
+            "service.sock".to_owned(),
+            "--actor".to_owned(),
+            "creator".to_owned(),
+        ])
+        .expect("work create parses");
+        let create_data =
+            request_data(&create, "op-create-work-dto").expect("work creation DTO builds");
+        assert_eq!(create_data["command"], "create_work");
+        assert_eq!(create_data["project_id"], "dto-project");
+        assert_eq!(create_data["work_id"], "dto-sprint");
+        assert_eq!(create_data["kind"], "sprint");
+        assert_eq!(create_data["parent_id"], "dto-milestone");
+        assert_eq!(create_data["description"], "typed route");
+        assert_eq!(create_data["priority"], 9);
+        assert_eq!(create_data["dispatch"], "automatic");
+        assert_eq!(create_data["profile"], "focused");
+        assert!(create_data.get("created_at").is_none());
+    }
+
+    #[test]
+    fn service_create_routes_preserve_typed_fields_and_replay() {
+        let db = temp_path("create-routes.sqlite");
+        let store = SqliteStore::open(&db, SCHEMA).expect("temporary schema opens");
+        let mut handler = make_handler(store);
+        let project_request = json!({
+            "command": "create_project",
+            "project_id": "created-project",
+            "name": "Created project",
+            "description": "service-created fixture",
+            "actor_id": "creator",
+            "actor_role": "operator",
+            "credential_ref": "test",
+        });
+        let created_project = application_envelope(
+            &mut handler,
+            "op-service-create-project",
+            project_request.clone(),
+        );
+        assert_eq!(created_project.outcome, ApplicationOutcome::Changed);
+        assert_eq!(created_project.revision, Some(1));
+        assert_eq!(
+            created_project.data.as_ref().unwrap()["project_id"],
+            "created-project"
+        );
+        assert_eq!(created_project.data.as_ref().unwrap()["replayed"], false);
+
+        let replayed_project =
+            application_envelope(&mut handler, "op-service-create-project", project_request);
+        assert_eq!(replayed_project.outcome, ApplicationOutcome::Unchanged);
+        assert_eq!(replayed_project.revision, Some(1));
+        assert_eq!(replayed_project.data.as_ref().unwrap()["replayed"], true);
+
+        let milestone_request = json!({
+            "command": "create_work",
+            "project_id": "created-project",
+            "work_id": "milestone-created",
+            "kind": "milestone",
+            "parent_id": null,
+            "title": "Created milestone",
+            "description": "root work",
+            "priority": 4,
+            "dispatch": "operator_only",
+            "profile": "reviewed",
+            "actor_id": "creator",
+        });
+        let created_work = application_envelope(
+            &mut handler,
+            "op-service-create-work",
+            milestone_request.clone(),
+        );
+        assert_eq!(created_work.outcome, ApplicationOutcome::Changed);
+        assert_eq!(created_work.revision, Some(2));
+        let data = created_work.data.as_ref().expect("created work data");
+        assert_eq!(data["work_id"], "milestone-created");
+        assert_eq!(data["kind"], "milestone");
+        assert_eq!(data["description"], "root work");
+        assert_eq!(data["priority"], 4);
+        assert_eq!(data["dispatch_policy"], "operator_only");
+        assert_eq!(data["profile"]["id"], "reviewed");
+
+        let replayed_work =
+            application_envelope(&mut handler, "op-service-create-work", milestone_request);
+        assert_eq!(replayed_work.outcome, ApplicationOutcome::Unchanged);
+        assert_eq!(replayed_work.revision, Some(2));
+        assert_eq!(replayed_work.data.as_ref().unwrap()["replayed"], true);
+
+        let snapshot = handler
+            .store
+            .read_project_status("created-project")
+            .expect("created project status reads");
+        assert_eq!(snapshot.works.len(), 1);
+        assert_eq!(snapshot.works[0].work.priority, 4);
+        assert_eq!(
+            snapshot.works[0].work.dispatch_policy,
+            DispatchPolicy::OperatorOnly
+        );
+        assert_eq!(
+            snapshot.works[0].work.acceptance_profile.id.as_str(),
+            "reviewed"
+        );
+        assert!(snapshot.works[0].work.acceptance_profile.requires_review());
+        let _ = fs::remove_file(db);
+    }
+
+    #[test]
+    fn service_create_work_rejects_unknown_kind_and_missing_parent() {
+        let db = temp_path("create-invalid.sqlite");
+        let store = SqliteStore::open(&db, SCHEMA).expect("temporary schema opens");
+        let mut handler = make_handler(store);
+        let project = application_envelope(
+            &mut handler,
+            "op-service-invalid-project",
+            json!({
+                "command": "create_project",
+                "project_id": "invalid-project",
+                "name": "Invalid fixture",
+                "actor_id": "creator",
+            }),
+        );
+        assert_eq!(project.outcome, ApplicationOutcome::Changed);
+
+        let invalid_kind = application_envelope(
+            &mut handler,
+            "op-service-invalid-kind",
+            json!({
+                "command": "create_work",
+                "project_id": "invalid-project",
+                "work_id": "unknown-kind",
+                "kind": "note",
+                "title": "Unknown kind",
+                "actor_id": "creator",
+            }),
+        );
+        assert_eq!(invalid_kind.outcome, ApplicationOutcome::Rejected);
+        assert_eq!(
+            invalid_kind.error.as_ref().unwrap().code,
+            ErrorCode::InvalidArgument
+        );
+
+        let missing_parent = application_envelope(
+            &mut handler,
+            "op-service-missing-parent",
+            json!({
+                "command": "create_work",
+                "project_id": "invalid-project",
+                "work_id": "orphan-sprint",
+                "kind": "sprint",
+                "title": "Orphan sprint",
+                "actor_id": "creator",
+            }),
+        );
+        assert_eq!(missing_parent.outcome, ApplicationOutcome::Rejected);
+        assert_eq!(
+            missing_parent.error.as_ref().unwrap().code,
+            ErrorCode::InvalidArgument
+        );
+        assert!(missing_parent
+            .error
+            .as_ref()
+            .unwrap()
+            .message
+            .contains("require a parent"));
+        let _ = fs::remove_file(db);
     }
 
     #[test]
@@ -1158,6 +2638,11 @@ mod tests {
             .expect("response contains the typed CLI envelope");
         envelope.validate().expect("response envelope validates");
         assert_eq!(envelope.outcome, ApplicationOutcome::Unchanged);
+        assert_eq!(
+            envelope.as_of,
+            envelope.data.as_ref().unwrap()["as_of"],
+            "status data and envelope must share one snapshot clock",
+        );
         assert_eq!(envelope.data.as_ref().unwrap()["total"], 1);
         assert_eq!(
             envelope.data.as_ref().unwrap()["items"][0]["work_id"],
@@ -1167,6 +2652,327 @@ mod tests {
         assert_eq!(report.exit(), ServiceHostExit::RequestLimit);
         let _ = fs::remove_file(db);
         let _ = fs::remove_file(socket);
+    }
+
+    #[test]
+    fn bounded_service_creates_project_and_work_over_the_real_socket_route() {
+        let db = temp_path("cs.sqlite");
+        let socket = temp_path("cs.sock");
+        let store = SqliteStore::open(&db, SCHEMA).expect("temporary schema opens");
+        let host = match ServiceHost::bind(
+            &socket,
+            make_handler(store),
+            ServiceHostConfig::default()
+                .with_max_requests(Some(2))
+                .expect("positive request bound"),
+        ) {
+            Ok(host) => host,
+            Err(error) if socket_unavailable_in_sandbox(&error.to_string()) => return,
+            Err(error) => panic!("service host binds in a temporary directory: {error}"),
+        };
+        let handle = host.start().expect("service host starts");
+
+        let project = socket_envelope(
+            &socket,
+            "request-create-project",
+            "op_create_project_socket",
+            json!({
+                "command": "create_project",
+                "project_id": "socket-project",
+                "name": "Socket project",
+                "actor_id": "socket-creator",
+            }),
+        );
+        let Some(project) = project else {
+            handle.shutdown();
+            let _ = handle.join();
+            return;
+        };
+        assert_eq!(project.outcome, ApplicationOutcome::Changed);
+        assert_eq!(
+            project.data.as_ref().unwrap()["project_id"],
+            "socket-project"
+        );
+
+        let work = socket_envelope(
+            &socket,
+            "request-create-work",
+            "op_create_work_socket",
+            json!({
+                "command": "create_work",
+                "project_id": "socket-project",
+                "kind": "milestone",
+                "title": "Generated identifier work",
+                "description": "created across the framed transport",
+                "priority": 3,
+                "dispatch": "paused",
+                "profile": "focused",
+                "actor_id": "socket-creator",
+            }),
+        )
+        .expect("socket remains available for create_work");
+        assert_eq!(work.outcome, ApplicationOutcome::Changed);
+        assert_eq!(work.data.as_ref().unwrap()["priority"], 3);
+        assert_eq!(work.data.as_ref().unwrap()["dispatch_policy"], "paused");
+        assert_eq!(
+            work.data.as_ref().unwrap()["work_id"],
+            "work_op_create_work_socket"
+        );
+
+        let report = handle.join().expect("bounded service host exits");
+        assert_eq!(report.exit(), ServiceHostExit::RequestLimit);
+        let _ = fs::remove_file(db);
+        let _ = fs::remove_file(socket);
+    }
+
+    #[test]
+    fn production_composition_keeps_status_responsive_during_slow_evidence() {
+        let root = temp_path("production-concurrent");
+        fs::create_dir_all(&root).expect("temporary service root creates");
+        let db = root.join("boreal.sqlite");
+        let socket = PathBuf::from(format!(
+            "/tmp/boreal-pc-{}-{}.sock",
+            std::process::id(),
+            now_ms_u64()
+        ));
+        let gate_root = root.join(super::GATE_COMMANDS_DIR);
+        fs::create_dir_all(&gate_root).expect("gate directory creates");
+        fs::write(
+            gate_root.join("verification.json"),
+            serde_json::to_vec(&json!({
+                "gate_id": "verification",
+                "kind": "verification",
+                "executable": "sleep",
+                "argv": ["sleep", "1"],
+                "cwd": ".",
+                "source_snapshot_hash": "source-production-concurrent",
+                "config_identity": "config-production-concurrent",
+                "environment_fingerprint": "env-production-concurrent",
+                "observables": [],
+                "max_runtime_ms": 2_000,
+            }))
+            .expect("gate declaration serializes"),
+        )
+        .expect("gate declaration writes");
+
+        let store = seed_store(&db);
+        let mut handler = make_handler_at(store, gate_root);
+        handler
+            .claim(
+                &json!({
+                    "command": "claim",
+                    "project_id": "service-project",
+                    "work_id": "service-work",
+                    "actor_id": DEFAULT_ACTOR,
+                    "harness_id": DEFAULT_HARNESS,
+                    "session_id": "session-production-concurrent",
+                    "attempt_id": "attempt-production-concurrent",
+                    "expected_revision": 2,
+                }),
+                "op_production_concurrent_claim",
+            )
+            .expect("evidence fixture claim succeeds");
+        handler
+            .start(
+                &json!({
+                    "command": "start",
+                    "project_id": "service-project",
+                    "work_id": "service-work",
+                    "actor_id": DEFAULT_ACTOR,
+                    "harness_id": DEFAULT_HARNESS,
+                    "session_id": "session-production-concurrent",
+                    "attempt_id": "attempt-production-concurrent",
+                    "fence": 1,
+                }),
+                "op_production_concurrent_start",
+            )
+            .expect("evidence fixture attempt starts");
+        handler
+            .store
+            .execute_batch(
+                "INSERT INTO source_version
+                 (source_version_id, project_id, origin, access_scope, content_digest,
+                  media_type, byte_count, captured_at, parser_identity, availability, citation_json)
+                 VALUES ('source-production-concurrent', 'service-project', 'fixture.md', 'project',
+                         'sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc',
+                         'text/markdown', 1, 'unix-ms:0', 'parser/1', 'available', '[]');
+                 UPDATE attempt
+                 SET source_version_id = 'source-production-concurrent',
+                     config_identity = 'config-production-concurrent'
+                 WHERE attempt_id = 'attempt-production-concurrent';",
+            )
+            .expect("attempt proof context binds");
+        drop(handler);
+
+        let host = match bind_service_host(
+            &db,
+            &socket,
+            ServiceHostConfig::default()
+                .with_max_requests(Some(2))
+                .expect("request bound is valid"),
+        ) {
+            Ok(host) => host,
+            Err(error) if socket_unavailable_in_sandbox(&error.message) => {
+                let _ = fs::remove_dir_all(root);
+                return;
+            }
+            Err(error) => panic!("production service composition binds: {error:?}"),
+        };
+        let running = host
+            .start_concurrent()
+            .expect("production concurrent service starts");
+        let evidence_completed = Arc::new(AtomicBool::new(false));
+        let evidence_completed_thread = Arc::clone(&evidence_completed);
+        let evidence_socket = socket.clone();
+        let evidence = thread::spawn(move || {
+            let started = Instant::now();
+            let result = socket_envelope(
+                &evidence_socket,
+                "request-production-evidence",
+                "op_production_concurrent_evidence",
+                json!({
+                    "command": "evidence_run",
+                    "project_id": "service-project",
+                    "work_id": "service-work",
+                    "actor_id": DEFAULT_ACTOR,
+                    "harness_id": DEFAULT_HARNESS,
+                    "session_id": "session-production-concurrent",
+                    "attempt_id": "attempt-production-concurrent",
+                    "fence": 1,
+                    "gate_id": "verification",
+                }),
+            );
+            evidence_completed_thread.store(true, Ordering::Release);
+            (result, started.elapsed())
+        });
+
+        let evidence_dir = root.join("evidence");
+        let wait_deadline = Instant::now() + Duration::from_secs(2);
+        while !evidence_dir.exists() && Instant::now() < wait_deadline {
+            thread::sleep(Duration::from_millis(5));
+        }
+        assert!(evidence_dir.exists(), "slow evidence reached execution");
+        assert!(
+            !evidence_completed.load(Ordering::Acquire),
+            "slow evidence must still be running before status"
+        );
+
+        let status_started = Instant::now();
+        let status = socket_envelope(
+            &socket,
+            "request-production-status",
+            "op_production_concurrent_status",
+            json!({
+                "command": "status",
+                "project_id": "service-project",
+                "actor_id": DEFAULT_ACTOR,
+                "harness_id": DEFAULT_HARNESS,
+                "session_id": "session-production-concurrent",
+                "limit": 10,
+                "offset": 0,
+            }),
+        )
+        .expect("status request returns while evidence is running");
+        assert_eq!(status.outcome, ApplicationOutcome::Unchanged);
+        assert!(
+            status_started.elapsed() < Duration::from_millis(500),
+            "status should not wait for the one-second evidence command"
+        );
+
+        let (evidence_result, evidence_elapsed) = evidence.join().expect("evidence thread joins");
+        let evidence_result = evidence_result.expect("evidence response is returned");
+        assert_eq!(evidence_result.outcome, ApplicationOutcome::Changed);
+        assert!(evidence_elapsed >= Duration::from_millis(900));
+        let report = running.join().expect("bounded production host exits");
+        assert_eq!(report.exit(), ServiceHostExit::RequestLimit);
+        assert_eq!(report.served_requests(), 2);
+        let _ = fs::remove_file(socket);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn production_composition_elects_one_owner_for_same_database_across_sockets() {
+        let root = temp_path("production-election");
+        fs::create_dir_all(&root).expect("temporary service root creates");
+        let db = root.join("boreal.sqlite");
+        let nonce = now_ms_u64();
+        let first_socket = PathBuf::from(format!(
+            "/tmp/boreal-pe1-{}-{nonce}.sock",
+            std::process::id()
+        ));
+        let second_socket = PathBuf::from(format!(
+            "/tmp/boreal-pe2-{}-{nonce}.sock",
+            std::process::id()
+        ));
+        let first = match bind_service_host(&db, &first_socket, ServiceHostConfig::default()) {
+            Ok(host) => host,
+            Err(error) if socket_unavailable_in_sandbox(&error.message) => {
+                let _ = fs::remove_dir_all(root);
+                return;
+            }
+            Err(error) => panic!("first production service binds: {error:?}"),
+        }
+        .start_concurrent()
+        .expect("first production service wins election");
+
+        let second = bind_service_host(&db, &second_socket, ServiceHostConfig::default())
+            .expect("second endpoint binds before election");
+        match second.start_concurrent() {
+            Err(ServiceHostError::Election(ElectionError::Busy(
+                BusyOutcome::ProjectAlreadyOwned { project_id, .. },
+            ))) => assert!(project_id.starts_with("database:")),
+            other => panic!(
+                "expected same-database election conflict, got {}",
+                if other.is_ok() {
+                    "a running host"
+                } else {
+                    "another error"
+                }
+            ),
+        }
+
+        first.shutdown();
+        first.join().expect("first production service stops");
+        let _ = fs::remove_file(first_socket);
+        let _ = fs::remove_file(second_socket);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    fn socket_envelope(
+        socket: &Path,
+        request_id: &str,
+        operation_id: &str,
+        data: Value,
+    ) -> Option<Envelope<Value>> {
+        let payload = json!({
+            "api_version": APPLICATION_API_VERSION,
+            "schema_version": APPLICATION_SCHEMA_VERSION,
+            "operation_id": operation_id,
+            "data": data,
+        });
+        let request = JsonRequest::new(request_id, payload.to_string())
+            .expect("socket request is valid JSON");
+        let mut client = match UnixSocketClient::connect(socket, TransportConfig::default()) {
+            Ok(client) => client,
+            Err(TransportError::Io(error))
+                if error.kind() == std::io::ErrorKind::PermissionDenied
+                    || error.to_string().contains("Operation not permitted") =>
+            {
+                return None
+            }
+            Err(error) => panic!("service client connects in a temporary directory: {error}"),
+        };
+        let response = client.request(request).expect("service returns a response");
+        let outer: Value = serde_json::from_str(
+            response
+                .payload()
+                .expect("response contains an outer application payload"),
+        )
+        .expect("outer payload is JSON");
+        Some(
+            serde_json::from_value(outer["data"].clone())
+                .expect("response contains a typed application envelope"),
+        )
     }
 
     fn socket_unavailable_in_sandbox(message: &str) -> bool {
@@ -1209,6 +3015,322 @@ mod tests {
             .expect("claim persisted its attempt");
         assert_eq!(attempt.session_id.as_deref(), Some("session-deterministic"));
         assert_eq!(attempt.actor_id, DEFAULT_ACTOR);
+        let _ = fs::remove_file(db);
+    }
+
+    #[test]
+    fn service_claim_uses_its_clock_and_duration_inputs() {
+        let db = temp_path("claim-clock.sqlite");
+        let store = seed_store(&db);
+        let mut handler = make_handler(store);
+        let before = now_ms_u64();
+        let data = json!({
+            "command": "claim",
+            "project_id": "service-project",
+            "work_id": "service-work",
+            "actor_id": DEFAULT_ACTOR,
+            "harness_id": DEFAULT_HARNESS,
+            "session_id": "session-service-clock",
+            "attempt_id": "attempt-service-clock",
+            "claimed_at": "unix-ms:1",
+            "lease_deadline": "unix-ms:2",
+            "hard_deadline": "unix-ms:3",
+            "lease_ttl_ms": 5_000,
+            "hard_time_limit_ms": 10_000,
+            "expected_revision": 2,
+        });
+        handler
+            .claim(&data, "op_service_clock_claim")
+            .expect("service-owned claim succeeds");
+        let after = now_ms_u64();
+        let attempt = handler
+            .store
+            .current_attempt_for_work("service-project", "service-work")
+            .expect("attempt read succeeds")
+            .expect("claim persisted its attempt");
+        let claimed_at = parse_stamp_ms(&attempt.claimed_at).expect("claimed_at is a stamp");
+        let lease_deadline =
+            parse_stamp_ms(&attempt.lease_deadline).expect("lease deadline is a stamp");
+        let hard_deadline =
+            parse_stamp_ms(&attempt.hard_deadline).expect("hard deadline is a stamp");
+        assert!((before..=after).contains(&claimed_at));
+        assert_ne!(claimed_at, 1, "the forged client clock must be ignored");
+        assert_eq!(lease_deadline, claimed_at + 5_000);
+        assert_eq!(hard_deadline, claimed_at + 10_000);
+        let _ = fs::remove_file(db);
+    }
+
+    #[test]
+    fn claim_then_cli_start_without_attempt_or_fence_resumes_owned_attempt() {
+        let db = temp_path("claim-then-start.sqlite");
+        let store = seed_store(&db);
+        let mut handler = make_handler(store);
+        handler
+            .claim(
+                &json!({
+                    "command": "claim",
+                    "project_id": "service-project",
+                    "work_id": "service-work",
+                    "actor_id": DEFAULT_ACTOR,
+                    "harness_id": DEFAULT_HARNESS,
+                    "session_id": "session-claim-then-start",
+                    "attempt_id": "attempt-claimed-first",
+                    "expected_revision": 2,
+                }),
+                "op_service_claim_first",
+            )
+            .expect("claim succeeds");
+
+        let parsed = super::super::parse(&[
+            "agent".to_owned(),
+            "start".to_owned(),
+            "service-work".to_owned(),
+            "--project".to_owned(),
+            "service-project".to_owned(),
+            "--session".to_owned(),
+            "session-claim-then-start".to_owned(),
+            "--socket".to_owned(),
+            "service.sock".to_owned(),
+        ])
+        .expect("agent start parses without explicit attempt context");
+        let start_data = request_data(&parsed, "op_service_start_after_claim")
+            .expect("start DTO builds without manufacturing an attempt");
+        assert!(start_data["attempt_id"].is_null());
+        assert!(start_data["fence"].is_null());
+
+        let started = handler
+            .start(&start_data, "op_service_start_after_claim")
+            .expect("start resolves the caller-owned current attempt");
+        assert_eq!(started.0, ApplicationOutcome::Changed);
+        let data = started.2.expect("start result data");
+        assert_eq!(data["attempt_id"], "attempt-claimed-first");
+        assert_eq!(data["fence"], 1);
+        assert_eq!(data["phase"], "running");
+        let _ = fs::remove_file(db);
+    }
+
+    #[test]
+    fn service_start_without_work_selects_a_claimable_task() {
+        let db = temp_path("goal-less-service-start.sqlite");
+        let store = seed_store(&db);
+        let mut handler = make_handler(store);
+        let data = json!({
+            "command": "start",
+            "project_id": "service-project",
+            "actor_id": DEFAULT_ACTOR,
+            "harness_id": DEFAULT_HARNESS,
+            "session_id": "session-goal-less-service-start",
+            "lease_ttl_ms": 60_000,
+            "hard_time_limit_ms": 120_000,
+            "expected_revision": 2,
+        });
+
+        let started = handler
+            .start(&data, "op_goal_less_service_start")
+            .expect("service start selects a task");
+        assert_eq!(started.0, ApplicationOutcome::Changed);
+        let result = started.2.expect("start result data");
+        assert_eq!(result["work_id"], "service-work");
+        assert_eq!(result["phase"], "running");
+        assert_eq!(
+            handler
+                .store
+                .current_attempt_for_work("service-project", "service-work")
+                .expect("attempt reads")
+                .expect("attempt exists")
+                .session_id
+                .as_deref(),
+            Some("session-goal-less-service-start")
+        );
+        let _ = fs::remove_file(db);
+    }
+
+    #[test]
+    fn fresh_service_start_has_typed_children_and_coherent_outer_replay() {
+        let db = temp_path("fresh-start.sqlite");
+        let store = seed_store(&db);
+        let mut handler = make_handler(store);
+        let data = json!({
+            "command": "start",
+            "project_id": "service-project",
+            "work_id": "service-work",
+            "actor_id": DEFAULT_ACTOR,
+            "harness_id": DEFAULT_HARNESS,
+            "session_id": "session-fresh-start",
+            "lease_ttl_ms": 60_000,
+            "hard_time_limit_ms": 120_000,
+            "expected_revision": 2,
+        });
+        let first = handler
+            .start(&data, "op_service_fresh_start")
+            .expect("fresh start succeeds");
+        assert_eq!(first.0, ApplicationOutcome::Changed);
+        let first_data = first.2.as_ref().expect("fresh start data");
+        assert_eq!(first_data["phase"], "running");
+        assert_eq!(first_data["replayed"], false);
+        assert_eq!(
+            first_data["child_operations"],
+            json!({
+                "claim": "op_service_fresh_start_claim",
+                "accept": "op_service_fresh_start_accept",
+                "start": "op_service_fresh_start_start",
+            })
+        );
+        for child in [
+            "op_service_fresh_start_claim",
+            "op_service_fresh_start_accept",
+            "op_service_fresh_start_start",
+        ] {
+            assert!(handler
+                .store
+                .operation(child)
+                .expect("child operation reads")
+                .is_some());
+        }
+        let outer = handler
+            .store
+            .operation("op_service_fresh_start")
+            .expect("outer operation reads")
+            .expect("outer operation persists");
+        assert_eq!(outer.command, "agent_start");
+        assert_eq!(
+            outer.attempt_id.as_deref(),
+            Some("attempt_cli_service_fresh_start")
+        );
+
+        let replay = handler
+            .start(&data, "op_service_fresh_start")
+            .expect("outer start replays");
+        assert_eq!(replay.0, ApplicationOutcome::Unchanged);
+        assert_eq!(replay.1, first.1);
+        let replay_data = replay.2.expect("replay data");
+        assert_eq!(replay_data["phase"], "running");
+        assert_eq!(replay_data["attempt_id"], "attempt_cli_service_fresh_start");
+        assert_eq!(replay_data["replayed"], true);
+        let _ = fs::remove_file(db);
+    }
+
+    #[test]
+    fn fresh_service_start_recovers_after_its_claim_child_commits() {
+        let db = temp_path("partial-fresh-start.sqlite");
+        let store = seed_store(&db);
+        let mut handler = make_handler(store);
+        let data = json!({
+            "command": "start",
+            "project_id": "service-project",
+            "work_id": "service-work",
+            "actor_id": DEFAULT_ACTOR,
+            "harness_id": DEFAULT_HARNESS,
+            "session_id": "session-partial-start",
+            "attempt_id": "attempt-partial-start",
+            "lease_ttl_ms": 60_000,
+            "hard_time_limit_ms": 120_000,
+            "expected_revision": 2,
+        });
+        handler
+            .claim(&data, "op_service_partial_start_claim")
+            .expect("claim child commits before simulated crash");
+        assert!(handler
+            .store
+            .operation("op_service_partial_start")
+            .expect("outer lookup succeeds")
+            .is_none());
+
+        let recovered = handler
+            .start(&data, "op_service_partial_start")
+            .expect("outer start resumes its own partial claim without a client fence");
+        assert_eq!(recovered.0, ApplicationOutcome::Changed);
+        assert_eq!(recovered.2.as_ref().unwrap()["phase"], "running");
+        assert!(handler
+            .store
+            .operation("op_service_partial_start")
+            .expect("outer lookup succeeds")
+            .is_some());
+        let _ = fs::remove_file(db);
+    }
+
+    #[test]
+    fn running_and_verifying_start_resume_requires_full_identity_and_fence() {
+        let db = temp_path("start-resume.sqlite");
+        let store = seed_store(&db);
+        let mut handler = make_handler(store);
+        handler
+            .start(
+                &json!({
+                    "command": "start",
+                    "project_id": "service-project",
+                    "work_id": "service-work",
+                    "actor_id": DEFAULT_ACTOR,
+                    "harness_id": DEFAULT_HARNESS,
+                    "session_id": "session-resume",
+                    "attempt_id": "attempt-resume",
+                    "expected_revision": 2,
+                }),
+                "op_service_resume_setup",
+            )
+            .expect("setup attempt starts");
+
+        let resume = json!({
+            "command": "start",
+            "project_id": "service-project",
+            "work_id": "service-work",
+            "actor_id": DEFAULT_ACTOR,
+            "harness_id": DEFAULT_HARNESS,
+            "session_id": "session-resume",
+            "attempt_id": "attempt-resume",
+            "fence": 1,
+        });
+        let running = handler
+            .start(&resume, "op_service_resume_running")
+            .expect("running attempt resumes unchanged");
+        assert_eq!(running.0, ApplicationOutcome::Unchanged);
+        assert_eq!(running.2.as_ref().unwrap()["phase"], "running");
+
+        for (operation, field, value, expected_code) in [
+            (
+                "op_service_resume_wrong_actor",
+                "actor_id",
+                json!("other-actor"),
+                ErrorCode::AttemptConflict,
+            ),
+            (
+                "op_service_resume_wrong_harness",
+                "harness_id",
+                json!("other-harness"),
+                ErrorCode::AttemptConflict,
+            ),
+            (
+                "op_service_resume_wrong_session",
+                "session_id",
+                json!("other-session"),
+                ErrorCode::AttemptConflict,
+            ),
+            (
+                "op_service_resume_wrong_fence",
+                "fence",
+                json!(2),
+                ErrorCode::StaleFence,
+            ),
+        ] {
+            let mut invalid = resume.clone();
+            invalid[field] = value;
+            let error = handler
+                .start(&invalid, operation)
+                .expect_err("mismatched resume context is rejected");
+            assert_eq!(error.code, expected_code);
+        }
+
+        handler
+            .store
+            .execute_batch(
+                "UPDATE attempt SET state = 'verifying' WHERE attempt_id = 'attempt-resume';",
+            )
+            .expect("fixture enters verifying");
+        let verifying = handler
+            .start(&resume, "op_service_resume_verifying")
+            .expect("verifying attempt resumes unchanged");
+        assert_eq!(verifying.0, ApplicationOutcome::Unchanged);
+        assert_eq!(verifying.2.as_ref().unwrap()["phase"], "verifying");
         let _ = fs::remove_file(db);
     }
 
@@ -1258,6 +3380,14 @@ mod tests {
                          'text/markdown', 1, 'unix-ms:0', 'parser/1', 'available', '[]');",
             )
             .expect("source snapshot registers");
+        handler
+            .store
+            .execute_batch(
+                "UPDATE attempt
+                 SET source_version_id = 'source-finish', config_identity = 'config-1'
+                 WHERE attempt_id = 'attempt-finish';",
+            )
+            .expect("attempt proof context binds");
         let finish = json!({
             "command": "finish_close",
             "project_id": "service-project",
@@ -1268,6 +3398,7 @@ mod tests {
             "attempt_id": "attempt-finish",
             "fence": 1,
             "expected_revision": Value::Null,
+            "summary_body": "Completed service finish fixture.",
             "receipt": {
                 "schema_version": "boreal.receipt.v1",
                 "receipt_id": "receipt-service-finish",
@@ -1285,7 +3416,7 @@ mod tests {
                 "output_digest": "digest-1",
                 "output_ref": null,
                 "coverage": {"kind": "verification", "profile_id": "focused", "profile_version": "1"},
-                "attestation": "boreal_witnessed",
+                "attestation": "external_attested",
                 "result": "passed",
                 "retention": null,
             }
@@ -1302,12 +3433,143 @@ mod tests {
             .expect("missing gate list")
             .iter()
             .any(|gate| gate.as_str().is_some_and(|id| id.ends_with(":checkpoint"))));
-        assert!(data["gates"]["missing"]
+        assert!(!data["gates"]["missing"]
             .as_array()
             .expect("missing gate list")
             .iter()
             .any(|gate| gate.as_str().is_some_and(|id| id.ends_with(":summary"))));
         let _ = fs::remove_file(db);
+    }
+
+    #[test]
+    fn witnessed_run_finish_reads_back_receipt_and_reaches_closeout_diagnostics() {
+        let (mut handler, finish, root, evidence_operation) =
+            witnessed_finish_fixture("witnessed-finish-readback");
+        let receipt_id = finish["receipt"]["receipt_id"]
+            .as_str()
+            .expect("finish has a receipt id");
+        let durable_before = handler
+            .store
+            .receipt(receipt_id)
+            .expect("receipt read succeeds")
+            .expect("witnessed receipt is durable");
+        let operation_before = handler
+            .store
+            .operation(&evidence_operation)
+            .expect("operation read succeeds")
+            .expect("witnessed operation is durable");
+        let audit_before = handler
+            .store
+            .audit_event(&evidence_operation)
+            .expect("audit read succeeds")
+            .expect("witnessed audit is durable");
+
+        let result = handler
+            .finish_close(&finish, "op_service_witnessed_finish")
+            .expect("witnessed readback reaches authoritative close diagnostics");
+        assert_eq!(result.0, ApplicationOutcome::Rejected);
+        let data = result.2.expect("finish diagnostics");
+        assert_eq!(data["receipt_replayed"], true);
+        assert_eq!(data["close_state"], "open");
+        assert!(!data["gates"]["missing"]
+            .as_array()
+            .expect("missing gate list")
+            .iter()
+            .any(|gate| gate.as_str().is_some_and(|id| id.ends_with(":summary"))));
+
+        assert_eq!(
+            handler
+                .store
+                .receipt(receipt_id)
+                .expect("receipt reread succeeds")
+                .expect("receipt remains durable"),
+            durable_before,
+            "finish must not insert or alter the witnessed receipt",
+        );
+        assert_eq!(
+            handler
+                .store
+                .operation(&evidence_operation)
+                .expect("operation reread succeeds")
+                .expect("operation remains durable"),
+            operation_before,
+            "finish must not alter the receipt operation",
+        );
+        assert_eq!(
+            handler
+                .store
+                .audit_event(&evidence_operation)
+                .expect("audit reread succeeds")
+                .expect("audit remains durable"),
+            audit_before,
+            "finish must not append or alter the receipt audit fact",
+        );
+        drop(handler);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn witnessed_finish_rejects_missing_or_mismatched_durable_receipts() {
+        let (mut handler, finish, root, _) = witnessed_finish_fixture("witnessed-finish-forgery");
+        let mut cases = Vec::new();
+
+        let mut forged = finish.clone();
+        forged["receipt"]["receipt_id"] = json!("receipt-missing-witnessed");
+        cases.push(("missing receipt", forged));
+        let mutations = [
+            ("project", "/project_id", json!("another-project")),
+            ("work", "/receipt/subject/work_id", json!("another-work")),
+            (
+                "attempt",
+                "/receipt/subject/attempt_id",
+                json!("another-attempt"),
+            ),
+            ("fence", "/receipt/subject/fence", json!(2)),
+            ("gate", "/receipt/subject/gate_id", json!("summary")),
+            (
+                "operation",
+                "/receipt/operation_id",
+                json!("op_forged_witnessed"),
+            ),
+            (
+                "source",
+                "/receipt/source_snapshot_hash",
+                json!("source-forged"),
+            ),
+            ("config", "/receipt/config_identity", json!("config-forged")),
+            (
+                "output digest",
+                "/receipt/output_digest",
+                json!("sha256:forged"),
+            ),
+            (
+                "output reference",
+                "/receipt/output_ref",
+                json!("/tmp/forged-output"),
+            ),
+            ("result", "/receipt/result", json!("failed")),
+        ];
+        for (label, pointer, value) in mutations {
+            let mut forged = finish.clone();
+            *forged.pointer_mut(pointer).expect("fixture pointer exists") = value;
+            cases.push((label, forged));
+        }
+
+        for (index, (label, forged)) in cases.into_iter().enumerate() {
+            let error = handler
+                .finish_close(&forged, &format!("op_reject_witnessed_{index}"))
+                .expect_err(label);
+            assert_eq!(error.code, ErrorCode::ReceiptInvalid, "{label}");
+            assert_eq!(error.outcome, ApplicationOutcome::Rejected, "{label}");
+        }
+        let attempt = handler
+            .store
+            .current_attempt_for_work("service-project", "service-work")
+            .expect("attempt read succeeds")
+            .expect("attempt remains current");
+        assert_eq!(attempt.phase, AttemptPhase::Running);
+        drop(handler);
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
@@ -1380,6 +3642,14 @@ mod tests {
                          'text/markdown', 1, 'unix-ms:0', 'parser/1', 'available', '[]');",
             )
             .expect("source snapshot registers");
+        handler
+            .store
+            .execute_batch(
+                "UPDATE attempt
+                 SET source_version_id = 'source-evidence-failure', config_identity = 'config-evidence-failure'
+                 WHERE attempt_id = 'attempt-evidence-failure';",
+            )
+            .expect("attempt proof context binds");
 
         let request = json!({
             "command": "evidence_run",
@@ -1406,7 +3676,6 @@ mod tests {
         assert_eq!(replay.0, ApplicationOutcome::Unchanged);
         assert_eq!(replay.2.as_ref().unwrap()["result"], "failed");
         assert_eq!(replay.2.as_ref().unwrap()["replayed"], true);
-
         let _ = fs::remove_file(db);
         let _ = fs::remove_dir_all(gate_root);
     }
@@ -1440,6 +3709,7 @@ mod tests {
     #[test]
     fn finish_close_routes_a_bounded_receipt_close_payload() {
         let receipt_path = temp_path("finish-receipt.json");
+        let summary_path = temp_path("finish-summary.md");
         fs::write(
             &receipt_path,
             serde_json::to_vec(&json!({
@@ -1459,13 +3729,18 @@ mod tests {
                 "output_digest": "digest-1",
                 "output_ref": null,
                 "coverage": {"kind": "verification", "profile_id": "focused", "profile_version": "1"},
-                "attestation": "boreal_witnessed",
+                "attestation": "external_attested",
                 "result": "passed",
                 "retention": null,
             }))
             .expect("finish receipt serializes"),
         )
         .expect("finish receipt writes");
+        fs::write(
+            &summary_path,
+            "Completed work-1 with current verification evidence.\n",
+        )
+        .expect("finish summary writes");
         let parsed = parse(&[
             "agent".to_owned(),
             "finish".to_owned(),
@@ -1481,6 +3756,8 @@ mod tests {
             "3".to_owned(),
             "--receipt".to_owned(),
             receipt_path.to_string_lossy().into_owned(),
+            "--summary".to_owned(),
+            summary_path.to_string_lossy().into_owned(),
             "--socket".to_owned(),
             "/tmp/boreal.sock".to_owned(),
         ])
@@ -1493,7 +3770,11 @@ mod tests {
         assert_eq!(data["attempt_id"], "attempt-1");
         assert_eq!(data["fence"], 3);
         assert_eq!(data["receipt"]["subject"]["gate_id"], "verification");
+        assert!(data["summary_body"]
+            .as_str()
+            .is_some_and(|body| body.contains("Completed work-1")));
         let _ = fs::remove_file(receipt_path);
+        let _ = fs::remove_file(summary_path);
     }
 
     #[test]

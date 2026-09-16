@@ -105,7 +105,7 @@ fn registration_and_claim_enforce_actor_harness_and_project_scope() {
     let work = WorkItem {
         id: WorkId::new("w1"),
         project_id: ProjectId::new("p1"),
-        kind: WorkKind::Milestone,
+        kind: WorkKind::Task,
         parent_id: None,
         title: "Session-bound claim".to_owned(),
         description: String::new(),
@@ -168,7 +168,7 @@ fn claim_rejects_unknown_or_inactive_session_before_writing_attempt() {
     let work = WorkItem {
         id: WorkId::new("w1"),
         project_id: ProjectId::new("p1"),
-        kind: WorkKind::Milestone,
+        kind: WorkKind::Task,
         parent_id: None,
         title: "Session validation".to_owned(),
         description: String::new(),

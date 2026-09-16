@@ -5,7 +5,10 @@
 //! report and a reduced document, but does not write to a database, filesystem,
 //! Git repository, or memory bank.
 
-use std::{collections::BTreeMap, fmt};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fmt,
+};
 
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::Value;
@@ -14,6 +17,10 @@ pub const FORMAT: &str = "boreal.v2.migration";
 pub const FORMAT_VERSION: u32 = 1;
 pub const LEGACY_FORMAT: &str = "boreal.legacy.records";
 pub const LEGACY_FORMAT_VERSION: u32 = 1;
+/// Digest format used for migration provenance and deterministic documents.
+/// This is intentionally the same `sha256:<64 lowercase hex>` wire format as
+/// the source engine, so adapters can compare identities without translation.
+pub const DIGEST_ALGORITHM: &str = "sha256";
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct MigrationDocument {
@@ -112,6 +119,29 @@ impl MigrationDocument {
             }
         }
 
+        // Parent links are a separate containment graph from dependencies.
+        // Validate the whole chain so a malformed import cannot leave a
+        // permanently unresolvable hierarchy behind a shallow self-edge check.
+        let parent_by_child: BTreeMap<&str, &str> = self
+            .work
+            .iter()
+            .filter_map(|work| {
+                work.parent_id
+                    .as_deref()
+                    .map(|parent| (work.id.as_str(), parent))
+            })
+            .collect();
+        for work in &self.work {
+            let mut path = BTreeSet::new();
+            let mut current = Some(work.id.as_str());
+            while let Some(id) = current {
+                if !path.insert(id) {
+                    return Err(ValidationError::ParentCycle(id.to_owned()));
+                }
+                current = parent_by_child.get(id).copied();
+            }
+        }
+
         validate_unique("attempt", self.attempts.iter().map(|record| &record.id))?;
         validate_unique(
             "reservation",
@@ -139,7 +169,44 @@ impl MigrationDocument {
             }
         }
 
+        let mut dependency_edges = BTreeSet::new();
+        let mut dependency_adjacency: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+        for dependency in &self.dependencies {
+            if dependency.from_work_id == dependency.to_work_id {
+                return Err(ValidationError::DependencyCycle(
+                    dependency.from_work_id.clone(),
+                ));
+            }
+            if !dependency_edges.insert((
+                dependency.from_work_id.as_str(),
+                dependency.to_work_id.as_str(),
+            )) {
+                return Err(ValidationError::DuplicateDependency {
+                    from: dependency.from_work_id.clone(),
+                    to: dependency.to_work_id.clone(),
+                });
+            }
+            dependency_adjacency
+                .entry(dependency.from_work_id.as_str())
+                .or_default()
+                .push(dependency.to_work_id.as_str());
+        }
+        if let Some(cycle) = dependency_cycle(&work_ids, &dependency_adjacency) {
+            return Err(ValidationError::DependencyCycle(cycle));
+        }
+
         for attempt in &self.attempts {
+            if attempt.id.is_empty() {
+                return Err(ValidationError::EmptyIdentifier("attempt.id"));
+            }
+            if attempt.actor_id.is_empty() {
+                return Err(ValidationError::EmptyIdentifier("attempt.actor_id"));
+            }
+            if attempt.hard_deadline_ms < attempt.claimed_at_ms
+                || attempt.lease_expires_at_ms < attempt.claimed_at_ms
+            {
+                return Err(ValidationError::InvalidAttemptTiming(attempt.id.clone()));
+            }
             if !work_ids.contains_key(&attempt.work_id) {
                 return Err(ValidationError::MissingReference {
                     record: "attempt.work_id",
@@ -147,9 +214,36 @@ impl MigrationDocument {
                 });
             }
         }
+        let mut active_work = BTreeMap::new();
+        let mut active_sessions = BTreeMap::new();
+        for attempt in self
+            .attempts
+            .iter()
+            .filter(|attempt| attempt_is_active(attempt.phase))
+        {
+            if let Some(previous) = active_work.insert(&attempt.work_id, &attempt.id) {
+                return Err(ValidationError::ActiveAttemptConflict {
+                    scope: "work",
+                    first: previous.clone(),
+                    second: attempt.id.clone(),
+                });
+            }
+            if let Some(session_id) = attempt.session_id.as_deref() {
+                if let Some(previous) = active_sessions.insert(session_id, &attempt.id) {
+                    return Err(ValidationError::ActiveAttemptConflict {
+                        scope: "session",
+                        first: previous.clone(),
+                        second: attempt.id.clone(),
+                    });
+                }
+            }
+        }
         for reservation in &self.reservations {
             if reservation.id.is_empty() {
                 return Err(ValidationError::EmptyIdentifier("reservation.id"));
+            }
+            if reservation.owner_id.is_empty() {
+                return Err(ValidationError::EmptyIdentifier("reservation.owner_id"));
             }
             if !self
                 .attempts
@@ -164,6 +258,9 @@ impl MigrationDocument {
         }
 
         for evidence in &self.evidence {
+            if evidence.id.is_empty() {
+                return Err(ValidationError::EmptyIdentifier("evidence.id"));
+            }
             if !work_ids.contains_key(&evidence.work_id) {
                 return Err(ValidationError::MissingReference {
                     record: "evidence.work_id",
@@ -172,6 +269,9 @@ impl MigrationDocument {
             }
         }
         for failure in &self.failures {
+            if failure.id.is_empty() {
+                return Err(ValidationError::EmptyIdentifier("failure.id"));
+            }
             if !work_ids.contains_key(&failure.work_id) {
                 return Err(ValidationError::MissingReference {
                     record: "failure.work_id",
@@ -192,6 +292,9 @@ impl MigrationDocument {
             }
         }
         for summary in &self.summaries {
+            if summary.id.is_empty() {
+                return Err(ValidationError::EmptyIdentifier("summary.id"));
+            }
             if !work_ids.contains_key(&summary.work_id) {
                 return Err(ValidationError::MissingReference {
                     record: "summary.work_id",
@@ -212,6 +315,9 @@ impl MigrationDocument {
             }
         }
         for memory in &self.memory {
+            if memory.id.is_empty() {
+                return Err(ValidationError::EmptyIdentifier("memory.id"));
+            }
             if memory.project_id != self.project.id {
                 return Err(ValidationError::WrongProject {
                     record: "memory",
@@ -220,6 +326,9 @@ impl MigrationDocument {
             }
         }
         for git in &self.git {
+            if git.id.is_empty() {
+                return Err(ValidationError::EmptyIdentifier("git.id"));
+            }
             if git.project_id != self.project.id {
                 return Err(ValidationError::WrongProject {
                     record: "git",
@@ -264,6 +373,43 @@ impl MigrationDocument {
         document.git.sort_by(|left, right| left.id.cmp(&right.id));
         document
     }
+
+    /// Counts are intentionally derived from the validated document rather
+    /// than from a target store. They let an adapter verify a dry-run without
+    /// implying that this crate has applied any writes.
+    pub fn counts(&self) -> MigrationCounts {
+        MigrationCounts {
+            work: self.work.len(),
+            dependencies: self.dependencies.len(),
+            attempts: self.attempts.len(),
+            reservations: self.reservations.len(),
+            evidence: self.evidence.len(),
+            failures: self.failures.len(),
+            summaries: self.summaries.len(),
+            memory: self.memory.len(),
+            git: self.git.len(),
+        }
+    }
+
+    /// Digest of the canonical serialized document, suitable for an
+    /// integrator's expected-base/readback check.
+    pub fn content_digest(&self) -> String {
+        let encoded = export_json(self).expect("MigrationDocument is serializable");
+        content_digest(encoded.as_bytes())
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub struct MigrationCounts {
+    pub work: usize,
+    pub dependencies: usize,
+    pub attempts: usize,
+    pub reservations: usize,
+    pub evidence: usize,
+    pub failures: usize,
+    pub summaries: usize,
+    pub memory: usize,
+    pub git: usize,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -468,9 +614,9 @@ pub struct ImportReport {
 }
 
 /// Facts about the source snapshot carried across the migration boundary.
-/// `source_fingerprint` is a stable, non-cryptographic content fingerprint;
-/// an integrator may replace or supplement it with a stronger digest from its
-/// source system before committing rows.
+/// `source_fingerprint` is the SHA-256 digest of the exact input bytes. It is
+/// not a claim that the source bytes are trusted; it only makes the import
+/// intent and later readback unambiguous.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct SourceProvenance {
     pub source_format: String,
@@ -499,6 +645,19 @@ pub struct ImportPlan {
     pub ready: bool,
     pub actions: Vec<ImportAction>,
     pub report: ImportReport,
+}
+
+/// Side-effect-free verification output for an import plan. A store adapter
+/// can persist this alongside its own operation record and compare the
+/// document digest before applying any actions.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ImportVerification {
+    pub ready: bool,
+    pub source_fingerprint: String,
+    pub document_fingerprint: Option<String>,
+    pub counts: MigrationCounts,
+    pub action_count: usize,
+    pub issue_count: usize,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -588,12 +747,36 @@ impl From<serde_json::Error> for ImportError {
 pub enum ValidationError {
     InvalidHeader(&'static str),
     EmptyIdentifier(&'static str),
-    WrongProject { record: &'static str, id: String },
-    DuplicateIdentifier { record: &'static str, id: String },
+    WrongProject {
+        record: &'static str,
+        id: String,
+    },
+    DuplicateIdentifier {
+        record: &'static str,
+        id: String,
+    },
     SelfParent(String),
-    MissingReference { record: &'static str, id: String },
+    ParentCycle(String),
+    MissingReference {
+        record: &'static str,
+        id: String,
+    },
     NonClosedDependency(String),
-    InvalidParentKind { parent: String, child: String },
+    DependencyCycle(String),
+    DuplicateDependency {
+        from: String,
+        to: String,
+    },
+    InvalidParentKind {
+        parent: String,
+        child: String,
+    },
+    InvalidAttemptTiming(String),
+    ActiveAttemptConflict {
+        scope: &'static str,
+        first: String,
+        second: String,
+    },
 }
 
 impl fmt::Display for ValidationError {
@@ -608,14 +791,34 @@ impl fmt::Display for ValidationError {
                 write!(formatter, "duplicate {record} identifier: {id}")
             }
             Self::SelfParent(id) => write!(formatter, "work cannot parent itself: {id}"),
+            Self::ParentCycle(id) => write!(formatter, "work hierarchy contains a cycle at: {id}"),
             Self::MissingReference { record, id } => {
                 write!(formatter, "missing {record} reference: {id}")
             }
             Self::NonClosedDependency(id) => {
                 write!(formatter, "dependency is not close-only: {id}")
             }
+            Self::DependencyCycle(id) => {
+                write!(formatter, "dependency graph contains a cycle at: {id}")
+            }
+            Self::DuplicateDependency { from, to } => {
+                write!(formatter, "duplicate dependency: {from} -> {to}")
+            }
             Self::InvalidParentKind { parent, child } => {
                 write!(formatter, "invalid parent kind for {child} under {parent}")
+            }
+            Self::InvalidAttemptTiming(id) => {
+                write!(formatter, "attempt deadlines precede claim time: {id}")
+            }
+            Self::ActiveAttemptConflict {
+                scope,
+                first,
+                second,
+            } => {
+                write!(
+                    formatter,
+                    "active attempt conflict for {scope}: {first} and {second}"
+                )
             }
         }
     }
@@ -625,6 +828,54 @@ impl std::error::Error for ValidationError {}
 
 pub fn export_json(document: &MigrationDocument) -> Result<String, serde_json::Error> {
     serde_json::to_string_pretty(&document.canonicalized())
+}
+
+fn attempt_is_active(phase: AttemptPhase) -> bool {
+    matches!(
+        phase,
+        AttemptPhase::Reserved
+            | AttemptPhase::Accepted
+            | AttemptPhase::InProgress
+            | AttemptPhase::Submitted
+    )
+}
+
+fn dependency_cycle<'a>(
+    work_ids: &BTreeMap<String, ()>,
+    adjacency: &BTreeMap<&'a str, Vec<&'a str>>,
+) -> Option<String> {
+    fn visit<'a>(
+        id: &'a str,
+        adjacency: &BTreeMap<&'a str, Vec<&'a str>>,
+        visiting: &mut BTreeSet<&'a str>,
+        visited: &mut BTreeSet<&'a str>,
+    ) -> Option<String> {
+        if visiting.contains(id) {
+            return Some(id.to_owned());
+        }
+        if !visited.insert(id) {
+            return None;
+        }
+        visiting.insert(id);
+        if let Some(children) = adjacency.get(id) {
+            for child in children {
+                if let Some(cycle) = visit(child, adjacency, visiting, visited) {
+                    return Some(cycle);
+                }
+            }
+        }
+        visiting.remove(id);
+        None
+    }
+
+    let mut visiting = BTreeSet::new();
+    let mut visited = BTreeSet::new();
+    for id in work_ids.keys().map(String::as_str) {
+        if let Some(cycle) = visit(id, adjacency, &mut visiting, &mut visited) {
+            return Some(cycle);
+        }
+    }
+    None
 }
 
 pub fn import_json(input: &str) -> Result<ImportReport, ImportError> {
@@ -956,6 +1207,41 @@ impl LegacyImportPlan {
         Ok(document)
     }
 
+    /// Apply the validated plan to an in-memory document. This is deliberately
+    /// named separately from a store apply: it performs no I/O and cannot
+    /// mutate a target project.
+    pub fn apply(&self) -> Result<MigrationDocument, MaterializationError> {
+        if !self.is_ready() {
+            return Err(MaterializationError::NotReady(Box::new(self.import_plan())));
+        }
+        self.materialize_in_memory()
+            .map(|document| document.canonicalized())
+            .map_err(MaterializationError::Validation)
+    }
+
+    /// Verify readiness, deterministic serialization, counts, and action
+    /// coverage before a later adapter performs its own transaction. No
+    /// target state is opened or changed here.
+    pub fn verify(&self) -> Result<ImportVerification, MaterializationError> {
+        let document = self.apply()?;
+        let plan = self.import_plan();
+        let encoded = export_json(&document).map_err(MaterializationError::Json)?;
+        let round_trip = import_json(&encoded).map_err(MaterializationError::Import)?;
+        if round_trip.document.as_ref() != Some(&document) || !round_trip.is_lossless() {
+            return Err(MaterializationError::Verification(
+                "canonical migration document did not round-trip losslessly".to_owned(),
+            ));
+        }
+        Ok(ImportVerification {
+            ready: plan.ready,
+            source_fingerprint: self.provenance.source_fingerprint.clone(),
+            document_fingerprint: Some(content_digest(encoded.as_bytes())),
+            counts: document.counts(),
+            action_count: plan.actions.len(),
+            issue_count: plan.report.issue_count(),
+        })
+    }
+
     /// Build the complete write description without performing any writes.
     pub fn import_plan(&self) -> ImportPlan {
         let ready = self.is_ready();
@@ -986,10 +1272,7 @@ impl LegacyImportPlan {
         if !self.is_ready() {
             return Err(MaterializationError::NotReady(Box::new(self.import_plan())));
         }
-        let document = self
-            .materialize_in_memory()
-            .map_err(MaterializationError::Validation)?
-            .canonicalized();
+        let document = self.apply()?;
         let document_json = export_json(&document).map_err(MaterializationError::Json)?;
         Ok(MigrationExport {
             provenance: self.provenance.clone(),
@@ -1005,6 +1288,8 @@ pub enum MaterializationError {
     NotReady(Box<ImportPlan>),
     Validation(ValidationError),
     Json(serde_json::Error),
+    Import(ImportError),
+    Verification(String),
 }
 
 impl fmt::Display for MaterializationError {
@@ -1017,6 +1302,10 @@ impl fmt::Display for MaterializationError {
             ),
             Self::Validation(error) => write!(formatter, "migration validation failed: {error}"),
             Self::Json(error) => write!(formatter, "could not encode migration export: {error}"),
+            Self::Import(error) => write!(formatter, "could not verify migration export: {error}"),
+            Self::Verification(error) => {
+                write!(formatter, "migration verification failed: {error}")
+            }
         }
     }
 }
@@ -1096,15 +1385,105 @@ fn action(collection: &str, id: String) -> ImportAction {
 }
 
 fn source_fingerprint(input: &str) -> String {
-    // FNV-1a is used here solely as a stable provenance token without adding
-    // a crypto dependency to this dependency-light boundary crate.
-    let mut hash = 0xcbf29ce484222325_u64;
-    for byte in input.as_bytes() {
-        hash ^= u64::from(*byte);
-        hash = hash.wrapping_mul(0x100000001b3);
-    }
-    format!("fnv1a64:{hash:016x}")
+    content_digest(input.as_bytes())
 }
+
+/// Return the canonical `sha256:<64 lowercase hex>` identity used by source
+/// and migration provenance. Kept dependency-free so the migration boundary
+/// remains usable during bootstrap; the test vector protects interoperability
+/// with the source engine's implementation.
+pub fn content_digest(bytes: &[u8]) -> String {
+    let mut state = [
+        0x6a09e667_u32,
+        0xbb67ae85_u32,
+        0x3c6ef372_u32,
+        0xa54ff53a_u32,
+        0x510e527f_u32,
+        0x9b05688c_u32,
+        0x1f83d9ab_u32,
+        0x5be0cd19_u32,
+    ];
+    let bit_length = (bytes.len() as u64).wrapping_mul(8);
+    let padded_len = (bytes.len() + 9).div_ceil(64) * 64;
+    let mut padded = Vec::with_capacity(padded_len);
+    padded.extend_from_slice(bytes);
+    padded.push(0x80);
+    padded.resize(padded_len - 8, 0);
+    padded.extend_from_slice(&bit_length.to_be_bytes());
+
+    for chunk in padded.chunks_exact(64) {
+        let mut words = [0_u32; 64];
+        for (index, word) in words[..16].iter_mut().enumerate() {
+            let offset = index * 4;
+            *word = u32::from_be_bytes([
+                chunk[offset],
+                chunk[offset + 1],
+                chunk[offset + 2],
+                chunk[offset + 3],
+            ]);
+        }
+        for index in 16..64 {
+            let s0 = words[index - 15].rotate_right(7)
+                ^ words[index - 15].rotate_right(18)
+                ^ (words[index - 15] >> 3);
+            let s1 = words[index - 2].rotate_right(17)
+                ^ words[index - 2].rotate_right(19)
+                ^ (words[index - 2] >> 10);
+            words[index] = words[index - 16]
+                .wrapping_add(s0)
+                .wrapping_add(words[index - 7])
+                .wrapping_add(s1);
+        }
+        let mut working = state;
+        for (index, constant) in SHA256_ROUND_CONSTANTS.iter().enumerate() {
+            let s1 = working[4].rotate_right(6)
+                ^ working[4].rotate_right(11)
+                ^ working[4].rotate_right(25);
+            let choice = (working[4] & working[5]) ^ ((!working[4]) & working[6]);
+            let temp1 = working[7]
+                .wrapping_add(s1)
+                .wrapping_add(choice)
+                .wrapping_add(*constant)
+                .wrapping_add(words[index]);
+            let s0 = working[0].rotate_right(2)
+                ^ working[0].rotate_right(13)
+                ^ working[0].rotate_right(22);
+            let majority =
+                (working[0] & working[1]) ^ (working[0] & working[2]) ^ (working[1] & working[2]);
+            let temp2 = s0.wrapping_add(majority);
+            working[7] = working[6];
+            working[6] = working[5];
+            working[5] = working[4];
+            working[4] = working[3].wrapping_add(temp1);
+            working[3] = working[2];
+            working[2] = working[1];
+            working[1] = working[0];
+            working[0] = temp1.wrapping_add(temp2);
+        }
+        for index in 0..8 {
+            state[index] = state[index].wrapping_add(working[index]);
+        }
+    }
+
+    let mut digest = String::with_capacity(71);
+    digest.push_str(DIGEST_ALGORITHM);
+    digest.push(':');
+    for word in state {
+        digest.push_str(&format!("{word:08x}"));
+    }
+    digest
+}
+
+const SHA256_ROUND_CONSTANTS: [u32; 64] = [
+    0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+    0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+    0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+    0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+    0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+    0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+    0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+    0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
+];
 
 #[derive(Debug)]
 pub enum LegacyImportError {
