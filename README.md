@@ -67,11 +67,38 @@ do not instantiate them in the legacy `bwrk` workspace.
 
 ## Installation
 
-The v2 release is distributed as a platform-specific CLI/TUI archive. See
-[the installation guide](docs/INSTALL.md) for Homebrew, direct tagged installs,
-manual archive installation, and the Rust source-build fallback. The repository
-does not currently publish a v2 release artifact until the documented release
-gates pass.
+### Install the CLI now from this checkout
+
+This installs the `bwrk` executable globally under Cargo's user bin directory
+(`~/.cargo/bin`):
+
+```sh
+cargo install --path crates/cli --bin bwrk --locked
+```
+
+Make sure `~/.cargo/bin` is on `PATH`. This path provides the Rust CLI/service
+but not the compiled dashboard TUI.
+
+### Install the complete local CLI + TUI package
+
+With Rust, Node.js, npm, and `tsc` available, build and install the current
+checkout into `~/.local`:
+
+```sh
+target="$(rustc -vV | sed -n 's/^host: //p')"
+python3 scripts/release/build_release.py \
+  --version 0.2.0 \
+  --target "$target" \
+  --output-dir /tmp/boreal-release
+sh install.sh \
+  --archive "/tmp/boreal-release/bwrk-v0.2.0-$target.tar.gz" \
+  --prefix "$HOME/.local"
+```
+
+Add `~/.local/bin` to `PATH` if needed. For the normal release workflow,
+[the installation guide](docs/INSTALL.md) covers Homebrew and the tagged
+GitHub installer. No tagged v2 archive is published yet; pushing `v0.2.0`
+will trigger the release workflow.
 
 ## Build
 
