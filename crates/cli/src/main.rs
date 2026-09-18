@@ -24,7 +24,7 @@ use std::{
     env, fs,
     io::{Read, Write},
     path::{Path, PathBuf},
-    process::{Command, ExitCode, ExitStatus, Stdio},
+    process::{Child, Command, ExitCode, ExitStatus, Stdio},
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
         Arc,
@@ -33,6 +33,10 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
+
+mod command_registry;
 mod dashboard;
 mod service;
 
@@ -47,6 +51,9 @@ static OPERATION_COUNTER: AtomicU64 = AtomicU64::new(0);
 const HELP: &str = r#"bwrk v2
 
 Usage:
+  bwrk commands [PATH] [--json]
+  bwrk help [PATH] [--json]
+  bwrk version [--json]
   bwrk init <project> [--db PATH] [--json]
   bwrk service run --db PATH --socket PATH [--max-requests N] [--json]
   bwrk status <project> [--limit N] [--offset N] [--socket PATH] [--db PATH] [--json]
@@ -55,15 +62,25 @@ Usage:
   bwrk work list <project> [--limit N] [--offset N] [--db PATH] [--json]
   bwrk work show <project> <work-id> [--db PATH] [--json]
   bwrk work claim <project> <work-id> [--session SESSION_ID] [--lease-ttl DURATION] [--time-limit DURATION] [--socket PATH] [--db PATH] [--json]
+  bwrk work accept <project> <work-id> --attempt ATTEMPT_ID --fence N [--socket PATH] [--db PATH] [--json]
+  bwrk work heartbeat <project> <work-id> --attempt ATTEMPT_ID --fence N [--socket PATH] [--db PATH] [--json]
+  bwrk work renew <project> <work-id> --attempt ATTEMPT_ID --fence N [--lease-ttl DURATION] [--socket PATH] [--db PATH] [--json]
+  bwrk work release <project> <work-id> --attempt ATTEMPT_ID --fence N [--socket PATH] [--db PATH] [--json]
+  bwrk work finish <project> <work-id> --attempt ATTEMPT_ID --fence N [--socket PATH] [--db PATH] [--json]
   bwrk agent guide [--project PROJECT] [--work WORK_ID] [--json]
   bwrk next [--project PROJECT] [--work WORK_ID] [--json]
+  bwrk agent status [--project PROJECT] [--session SESSION_ID] [--json]
   bwrk agent start [WORK_ID] [--project PROJECT] [--session SESSION_ID] [--lease-ttl DURATION] [--time-limit DURATION] [--socket PATH] [--json]
   bwrk agent resume --project PROJECT --session SESSION_ID --attempt ATTEMPT_ID [--json]
+  bwrk agent heartbeat --project PROJECT --work WORK_ID --attempt ATTEMPT_ID --fence N [--socket PATH] [--json]
+  bwrk agent renew --project PROJECT --work WORK_ID --attempt ATTEMPT_ID --fence N [--lease-ttl DURATION] [--socket PATH] [--json]
   bwrk agent release WORK_ID --project PROJECT --attempt ATTEMPT_ID --fence N [--socket PATH] [--reason CODE] [--json]
   bwrk agent finish WORK_ID --close --project PROJECT --attempt ATTEMPT_ID --fence N --receipt PATH --summary PATH [--socket PATH] [--json]
   bwrk agent finish WORK_ID --release --project PROJECT --attempt ATTEMPT_ID --fence N [--socket PATH] [--reason CODE] [--json]
   bwrk evidence run --project PROJECT --work WORK_ID --gate GATE_ID [--attempt ATTEMPT_ID --fence N] [--json]
   bwrk evidence add --project PROJECT --work WORK_ID --gate GATE_ID --receipt PATH [--json]
+  bwrk session start --project PROJECT --session SESSION_ID --harness HARNESS_ID [--json]
+  bwrk session show --project PROJECT --session SESSION_ID [--json]
   bwrk operation show PROJECT OPERATION_ID [--socket PATH] [--json]"#;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -283,6 +300,9 @@ fn run_with_operation(args: &[String], operation: &str) -> Result<CliResult, Cli
     if parsed.path == ["service", "run"] {
         return service::run_service(&parsed, operation);
     }
+    if command_registry::is_registry_path(&parsed.path) {
+        return command_registry::result(&parsed);
+    }
     if parsed.path == ["dashboard"] {
         return dashboard::run_dashboard(&parsed);
     }
@@ -359,6 +379,14 @@ fn dispatch<A: boreal_application::AttemptLifecycleAdapter>(
             store,
             AttemptOperation::Release,
         ),
+        ["work", "renew"] => attempt_mutation_result(
+            parsed,
+            app,
+            adapter,
+            operation,
+            store,
+            AttemptOperation::Renew,
+        ),
         ["work", "finish"] => attempt_mutation_result(
             parsed,
             app,
@@ -370,6 +398,23 @@ fn dispatch<A: boreal_application::AttemptLifecycleAdapter>(
         ["agent", "guide"] => guide_result(parsed, app, store),
         ["agent", "resume"] => resume_result(parsed, app, store),
         ["agent", "start"] => start_result(parsed, app, adapter, operation, store),
+        ["agent", "status"] => status_result(parsed, store),
+        ["agent", "heartbeat"] => attempt_mutation_result(
+            parsed,
+            app,
+            adapter,
+            operation,
+            store,
+            AttemptOperation::Heartbeat,
+        ),
+        ["agent", "renew"] => attempt_mutation_result(
+            parsed,
+            app,
+            adapter,
+            operation,
+            store,
+            AttemptOperation::Renew,
+        ),
         ["agent", "release"] => attempt_mutation_result(
             parsed,
             app,
@@ -393,6 +438,8 @@ fn dispatch<A: boreal_application::AttemptLifecycleAdapter>(
                 .unwrap_or(Path::new("."))
                 .join(GATE_COMMANDS_DIR),
         ),
+        ["session", "start"] => session_start_result(parsed, app, operation),
+        ["session", "show"] => session_show_result(parsed, app),
         _ => Err(CliError::invalid(format!(
             "unknown command path: {}",
             parsed.path.join(" ")
@@ -593,6 +640,17 @@ fn parse(args: &[String]) -> Result<ParsedCommand, CliError> {
                 _ => return Err(CliError::invalid(format!("unknown option: {name}"))),
             }
             index += 1;
+        } else if path
+            .first()
+            .map(String::as_str)
+            .is_some_and(|value| matches!(value, "commands" | "help"))
+        {
+            // Discovery paths are deliberately variadic. This lets the
+            // registry answer questions about a concrete route such as
+            // `help work create` without teaching the parser every future
+            // command namespace.
+            path.push(arg.clone());
+            index += 1;
         } else if path.len() < 2 && !matches!(path.first().map(String::as_str), Some("init")) {
             path.push(arg.clone());
             index += 1;
@@ -642,9 +700,15 @@ fn validate_command(path: &[String], options: &CliOptions) -> Result<(), CliErro
     let path = path.iter().map(String::as_str).collect::<Vec<_>>();
     let positionals = options.positionals.len();
     let valid = match path.as_slice() {
+        ["version"] => options.positionals.is_empty(),
+        _ if matches!(path.first().copied(), Some("commands" | "help")) => {
+            options.positionals.is_empty()
+        }
         ["agent", "guide"] | ["agent", "resume"] | ["next"] | ["agent", "next"] => positionals == 0,
         ["agent", "start"] => positionals <= 1,
         ["agent", "release"] | ["agent", "finish"] => positionals == 1,
+        ["agent", "status"] => positionals == 0,
+        ["agent", "heartbeat"] | ["agent", "renew"] => positionals == 0 && options.work.is_some(),
         ["evidence", "run"] => positionals == 0 && options.work.is_some() && options.gate.is_some(),
         ["evidence", "add"] => {
             positionals == 0
@@ -660,12 +724,38 @@ fn validate_command(path: &[String], options: &CliOptions) -> Result<(), CliErro
             path.join(" ")
         )));
     }
-    if matches!(path.as_slice(), ["evidence", "run"] | ["evidence", "add"])
-        && options.attempt.is_some() != options.fence.is_some()
+    if matches!(
+        path.as_slice(),
+        ["evidence", "run"]
+            | ["evidence", "add"]
+            | ["work", "accept"]
+            | ["work", "heartbeat"]
+            | ["work", "renew"]
+            | ["work", "release"]
+            | ["work", "finish"]
+            | ["agent", "heartbeat"]
+            | ["agent", "renew"]
+            | ["agent", "release"]
+            | ["agent", "finish"]
+    ) && options.attempt.is_some() != options.fence.is_some()
     {
         return Err(CliError::invalid(
             "--attempt and --fence must be supplied together",
         ));
+    }
+    if matches!(
+        path.as_slice(),
+        ["work", "accept"]
+            | ["work", "heartbeat"]
+            | ["work", "renew"]
+            | ["work", "release"]
+            | ["work", "finish"]
+    ) && options.positionals.len() < usize::from(options.project.is_none()) + 1
+    {
+        return Err(CliError::invalid(format!(
+            "{} requires a work identifier",
+            path.join(" ")
+        )));
     }
     Ok(())
 }
@@ -908,9 +998,22 @@ fn show_work_result(
         .map_err(map_application_error)?;
     let revision = store_revision(store, &project)?;
     bounded_result(
-        Some(
-            json!({"work_id": item.work_id, "kind": item.kind, "lifecycle": item.lifecycle, "title": item.title, "description": item.description}),
-        ),
+        Some(json!({
+            "work_id": item.work_id,
+            "project_id": item.project_id,
+            "kind": item.kind,
+            "parent_id": item.parent_id,
+            "lifecycle": item.lifecycle,
+            "dispatch_policy": item.dispatch_policy,
+            "priority": item.priority,
+                "hard_holds": item
+                    .hard_holds
+                    .iter()
+                    .map(|hold| hold.stable_code())
+                    .collect::<Vec<_>>(),
+            "title": item.title,
+            "description": item.description,
+        })),
         Some(revision),
     )
 }
@@ -1016,6 +1119,95 @@ fn operation_show_result(
         result.outcome = outcome;
         result
     })
+}
+
+fn session_start_result(
+    parsed: &ParsedCommand,
+    app: &WorkApplication<'_>,
+    operation: &str,
+) -> Result<CliResult, CliError> {
+    let project_id = ProjectId::new(project_argument(parsed, 0)?);
+    let started_at = TimestampMs::from_millis(now_ms_u64());
+    let session_id = SessionId::new(parsed.options.session.clone());
+    let actor_id = ActorId::new(parsed.options.actor.clone());
+    let harness_id = HarnessId::new(parsed.options.harness.clone());
+    let expected_revision = parsed.options.expected_revision;
+    let request_digest = canonical_request_digest(
+        "session.register/v1",
+        json!({
+            "project_id": project_id.as_str(),
+            "session_id": session_id.as_str(),
+            "actor_id": actor_id.as_str(),
+            "harness_id": harness_id.as_str(),
+            "expected_project_revision": expected_revision,
+        }),
+    );
+    let request = SessionRegistrationRequest {
+        project_id,
+        session_id,
+        actor_id,
+        harness_id,
+        operation_id: OperationId::new(operation),
+        request_digest,
+        expected_project_revision: expected_revision,
+        started_at,
+    };
+    let result = app
+        .register_session(&request)
+        .map_err(map_application_error)?;
+    bounded_result(
+        Some(json!({
+            "project_id": result.value.project_id,
+            "session_id": result.value.session_id,
+            "actor_id": result.value.actor_id,
+            "harness_id": result.value.harness_id,
+            "state": format!("{:?}", result.value.state).to_ascii_lowercase(),
+            "started_at": result.value.started_at,
+            "ended_at": result.value.ended_at,
+            "registration_operation_id": result.value.registration_operation_id,
+            "replayed": !result.changed,
+        })),
+        Some(result.snapshot_revision),
+    )
+    .map(|mut value| {
+        value.outcome = if result.changed {
+            ApplicationOutcome::Changed
+        } else {
+            ApplicationOutcome::Unchanged
+        };
+        value
+    })
+}
+
+fn session_show_result(
+    parsed: &ParsedCommand,
+    app: &WorkApplication<'_>,
+) -> Result<CliResult, CliError> {
+    let project_id = ProjectId::new(project_argument(parsed, 0)?);
+    let session_id = SessionId::new(parsed.options.session.clone());
+    let session = app
+        .session(&project_id, &session_id)
+        .map_err(map_application_error)?
+        .ok_or_else(|| {
+            CliError::with(
+                ErrorCode::NotFound,
+                ApplicationOutcome::Rejected,
+                format!("session not found: {}", session_id.as_str()),
+            )
+        })?;
+    bounded_result(
+        Some(json!({
+            "project_id": session.project_id,
+            "session_id": session.session_id,
+            "actor_id": session.actor_id,
+            "harness_id": session.harness_id,
+            "state": format!("{:?}", session.state).to_ascii_lowercase(),
+            "started_at": session.started_at,
+            "ended_at": session.ended_at,
+            "registration_operation_id": session.registration_operation_id,
+        })),
+        Some(session.revision),
+    )
 }
 
 fn create_work_result(
@@ -1800,6 +1992,7 @@ fn next_from_guide(
 enum AttemptOperation {
     Accept,
     Heartbeat,
+    Renew,
     Release,
     Submit,
 }
@@ -1809,6 +2002,7 @@ impl AttemptOperation {
         match self {
             Self::Accept => "attempt.accept/v1",
             Self::Heartbeat => "attempt.heartbeat/v1",
+            Self::Renew => "attempt.renew/v1",
             Self::Release => "attempt.release/v1",
             Self::Submit => "attempt.submit/v1",
         }
@@ -1824,7 +2018,14 @@ fn attempt_mutation_result<A: boreal_application::AttemptLifecycleAdapter>(
     kind: AttemptOperation,
 ) -> Result<CliResult, CliError> {
     let project = ProjectId::new(project_argument(parsed, 0)?);
-    let work_id = work_argument(parsed, 0)?;
+    let work_index = if parsed.path.first().is_some_and(|value| value == "work")
+        && parsed.options.project.is_none()
+    {
+        1
+    } else {
+        0
+    };
+    let work_id = work_argument(parsed, work_index)?;
     let attempt_id = parsed
         .options
         .attempt
@@ -1854,6 +2055,18 @@ fn attempt_mutation_result<A: boreal_application::AttemptLifecycleAdapter>(
                 boreal_application::HeartbeatAttemptRequest {
                     attempt: request,
                     liveness: LivenessMetadata::empty(),
+                },
+            )
+            .map_err(map_application_error)?,
+        AttemptOperation::Renew => app
+            .renew_lease(
+                adapter,
+                boreal_application::RenewLeaseAttemptRequest {
+                    attempt: request,
+                    lease_ttl_ms: parsed
+                        .options
+                        .lease_ttl_ms
+                        .ok_or_else(|| CliError::invalid("lease renewal requires --lease-ttl"))?,
                 },
             )
             .map_err(map_application_error)?,
@@ -2054,10 +2267,19 @@ struct GateDeclaration {
     source_snapshot_hash: String,
     config_identity: String,
     environment_fingerprint: String,
+    /// Names copied from the invoking environment. The default is a small,
+    /// non-secret compatibility set; declarations may narrow or extend it
+    /// with explicitly named, non-sensitive variables.
+    #[serde(default = "default_environment_allowlist")]
+    environment_allowlist: Vec<String>,
     #[serde(default)]
     observables: Vec<String>,
     #[serde(default = "default_gate_runtime_ms")]
     max_runtime_ms: Option<u64>,
+    /// SHA-256 of the exact declaration bytes. This is diagnostic provenance;
+    /// it is never used as a substitute for the durable gate policy identity.
+    #[serde(skip)]
+    policy_identity: String,
 }
 
 fn default_gate_cwd() -> String {
@@ -2066,6 +2288,20 @@ fn default_gate_cwd() -> String {
 
 fn default_gate_runtime_ms() -> Option<u64> {
     Some(MAX_GATE_RUNTIME_MS)
+}
+
+fn default_environment_allowlist() -> Vec<String> {
+    // PATH is needed by declarations that invoke a name rather than an
+    // absolute executable. Locale and temp variables are useful to ordinary
+    // build tools and do not contain credentials by convention. HOME is
+    // intentionally excluded because it can expose user configuration and
+    // credential stores.
+    [
+        "PATH", "LANG", "LC_ALL", "LC_CTYPE", "TMPDIR", "TMP", "TEMP", "CI",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect()
 }
 
 fn evidence_run_result<A: boreal_application::AttemptLifecycleAdapter>(
@@ -2184,6 +2420,15 @@ fn evidence_run_result<A: boreal_application::AttemptLifecycleAdapter>(
         ));
     }
     let declaration = read_gate_declaration(gate_root, &gate_id)?;
+    let canonical_gate_root = gate_root.canonicalize().map_err(|error| {
+        CliError::with(
+            ErrorCode::ReceiptInvalid,
+            ApplicationOutcome::Rejected,
+            format!("gate policy root is unavailable: {error}"),
+        )
+    })?;
+    let prepared_environment = prepare_gate_environment(&declaration)?;
+    let workspace_root = resolve_workspace_root(&canonical_gate_root)?;
     let attempt_record = store
         .current_attempt_for_work(project.as_str(), &work_id)
         .map_err(map_store_error)?
@@ -2304,30 +2549,28 @@ fn evidence_run_result<A: boreal_application::AttemptLifecycleAdapter>(
     // operation. This prevents independent databases/tests that reuse a
     // human-readable operation ID from sharing mutable filesystem paths.
     let artifact_namespace = sha256_content_digest(
-        format!("{}:{}", project.as_str(), gate_root.to_string_lossy()).as_bytes(),
+        format!(
+            "{}:{}",
+            project.as_str(),
+            canonical_gate_root.to_string_lossy()
+        )
+        .as_bytes(),
     )
     .replace(':', "-");
-    let output_dir = gate_root
+    let output_dir = canonical_gate_root
         .parent()
-        .unwrap_or(gate_root)
+        .unwrap_or(&canonical_gate_root)
         .join("evidence")
         .join(artifact_namespace);
     let artifact_stem = sha256_content_digest(operation.as_bytes()).replace(':', "-");
     let output_path = output_dir.join(format!("{artifact_stem}.out"));
     let artifact_ref = output_path.with_extension("combined");
-    let workspace_root = env::current_dir().map_err(|error| {
-        CliError::with(
-            ErrorCode::ReceiptInvalid,
-            ApplicationOutcome::Rejected,
-            format!("workspace root is unavailable: {error}"),
-        )
-    })?;
     let request = EvidenceRunRequest {
         receipt_id: ReceiptId::new(format!("receipt-{operation}")),
         operation_id: OperationId::new(operation),
         expectation,
         cwd: declaration.cwd.clone(),
-        environment_fingerprint: declaration.environment_fingerprint.clone(),
+        environment_fingerprint: prepared_environment.fingerprint.clone(),
         attestation: ExecutorAttestation::BorealWitnessed,
     };
     let admission = app
@@ -2359,7 +2602,12 @@ fn evidence_run_result<A: boreal_application::AttemptLifecycleAdapter>(
     }
     app.start_witnessed_execution(operation, TimestampMs::from_millis(now_ms_u64()))
         .map_err(map_application_error)?;
-    let execution = match execute_gate_command(&declaration, &output_path, Some(&workspace_root)) {
+    let execution = match execute_gate_command(
+        &declaration,
+        &output_path,
+        Some(&workspace_root),
+        &prepared_environment.variables,
+    ) {
         Ok(execution) => execution,
         Err(error) => {
             let _ =
@@ -2410,6 +2658,9 @@ fn evidence_run_result<A: boreal_application::AttemptLifecycleAdapter>(
         "source_snapshot_hash": result.receipt.source_snapshot_hash.as_str(),
         "config_identity": result.receipt.config_identity.as_str(),
         "environment_fingerprint": result.receipt.environment_fingerprint,
+        "declared_environment_fingerprint": declaration.environment_fingerprint,
+        "environment_allowlist": prepared_environment.names,
+        "gate_policy_identity": declaration.policy_identity,
         "output_digest": result.receipt.output_digest.unwrap_or_default(),
         "output_ref": result.receipt.output_ref,
         "stdout_ref": output_path.to_string_lossy(),
@@ -2492,13 +2743,14 @@ fn read_gate_declaration(gate_root: &Path, gate_id: &str) -> Result<GateDeclarat
             "declared gate policy exceeds the inline bound",
         ));
     }
-    let declaration: GateDeclaration = serde_json::from_str(&text).map_err(|error| {
+    let mut declaration: GateDeclaration = serde_json::from_str(&text).map_err(|error| {
         CliError::with(
             ErrorCode::ReceiptInvalid,
             ApplicationOutcome::Rejected,
             error.to_string(),
         )
     })?;
+    validate_environment_policy(&declaration.environment_allowlist)?;
     if declaration.gate_id != gate_id
         || declaration.max_runtime_ms.unwrap_or(1) == 0
         || declaration.max_runtime_ms.unwrap_or(1) > MAX_GATE_RUNTIME_MS
@@ -2509,7 +2761,150 @@ fn read_gate_declaration(gate_root: &Path, gate_id: &str) -> Result<GateDeclarat
             "declared gate policy identity or runtime is invalid",
         ));
     }
+    declaration.policy_identity = sha256_content_digest(text.as_bytes());
     Ok(declaration)
+}
+
+fn validate_environment_policy(names: &[String]) -> Result<(), CliError> {
+    if names.len() > 64 {
+        return Err(CliError::with(
+            ErrorCode::UnsafeCommand,
+            ApplicationOutcome::Rejected,
+            "gate environment allowlist exceeds the 64-variable limit",
+        ));
+    }
+    let mut seen = Vec::with_capacity(names.len());
+    for name in names {
+        if !valid_environment_name(name) {
+            return Err(CliError::with(
+                ErrorCode::UnsafeCommand,
+                ApplicationOutcome::Rejected,
+                format!("gate environment name is invalid: {name:?}"),
+            ));
+        }
+        if is_sensitive_environment_name(name) {
+            return Err(CliError::with(
+                ErrorCode::UnsafeCommand,
+                ApplicationOutcome::Rejected,
+                format!("gate environment name is sensitive and cannot be inherited: {name}"),
+            ));
+        }
+        if seen.iter().any(|existing: &String| existing == name) {
+            return Err(CliError::with(
+                ErrorCode::ReceiptPolicyMismatch,
+                ApplicationOutcome::Rejected,
+                format!("gate environment allowlist contains a duplicate: {name}"),
+            ));
+        }
+        seen.push(name.clone());
+    }
+    Ok(())
+}
+
+fn valid_environment_name(name: &str) -> bool {
+    let mut characters = name.chars();
+    matches!(characters.next(), Some(value) if value == '_' || value.is_ascii_uppercase())
+        && characters
+            .all(|value| value == '_' || value.is_ascii_uppercase() || value.is_ascii_digit())
+}
+
+fn is_sensitive_environment_name(name: &str) -> bool {
+    let upper = name.to_ascii_uppercase();
+    [
+        "SECRET",
+        "TOKEN",
+        "PASSWORD",
+        "PASSWD",
+        "PRIVATE",
+        "API_KEY",
+        "CREDENTIAL",
+        "AUTH",
+        "COOKIE",
+        "BEARER",
+    ]
+    .iter()
+    .any(|marker| upper.contains(marker))
+}
+
+struct PreparedEnvironment {
+    variables: Vec<(String, String)>,
+    names: Vec<String>,
+    fingerprint: String,
+}
+
+fn prepare_gate_environment(
+    declaration: &GateDeclaration,
+) -> Result<PreparedEnvironment, CliError> {
+    validate_environment_policy(&declaration.environment_allowlist)?;
+    let mut names = declaration.environment_allowlist.clone();
+    names.sort();
+    let mut variables = Vec::with_capacity(names.len());
+    let mut missing = Vec::new();
+    for name in &names {
+        match env::var_os(name) {
+            Some(value) => {
+                let value = value.into_string().map_err(|_| {
+                    CliError::with(
+                        ErrorCode::UnsafeCommand,
+                        ApplicationOutcome::Rejected,
+                        format!("gate environment value is not valid UTF-8: {name}"),
+                    )
+                })?;
+                variables.push((name.clone(), value));
+            }
+            None => missing.push(name.clone()),
+        }
+    }
+    let fingerprint = canonical_request_digest(
+        "gate.environment/v1",
+        json!({
+            "allowlist": names,
+            "present": variables,
+            "missing": missing,
+        }),
+    );
+    Ok(PreparedEnvironment {
+        variables,
+        names,
+        fingerprint,
+    })
+}
+
+fn resolve_workspace_root(gate_root: &Path) -> Result<PathBuf, CliError> {
+    let storage_root = gate_root.parent().ok_or_else(|| {
+        CliError::with(
+            ErrorCode::ReceiptInvalid,
+            ApplicationOutcome::Rejected,
+            "gate policy has no storage root",
+        )
+    })?;
+    let candidate = {
+        // The standard layout is <workspace>/.boreal/{boreal.sqlite,gates}.
+        // Test and explicitly external layouts use <workspace>/{db,gates}.
+        if storage_root
+            .file_name()
+            .is_some_and(|name| name == ".boreal")
+        {
+            storage_root.parent().unwrap_or(storage_root).to_path_buf()
+        } else {
+            storage_root.to_path_buf()
+        }
+    };
+    let root = candidate.canonicalize().map_err(|error| {
+        CliError::with(
+            ErrorCode::ReceiptInvalid,
+            ApplicationOutcome::Rejected,
+            format!("workspace root is unavailable: {error}"),
+        )
+    })?;
+    if !root.is_dir() {
+        return Err(CliError::with(
+            ErrorCode::ReceiptInvalid,
+            ApplicationOutcome::Rejected,
+            "workspace root is not a directory",
+        ));
+    }
+    Ok(root)
 }
 
 fn parse_gate_kind(value: &str) -> Result<GateKind, CliError> {
@@ -2528,7 +2923,15 @@ fn execute_gate_command(
     declaration: &GateDeclaration,
     output_path: &Path,
     project_root: Option<&Path>,
+    environment: &[(String, String)],
 ) -> Result<BoundedExecutionResult, CliError> {
+    if !cfg!(unix) {
+        return Err(CliError::with(
+            ErrorCode::UnsupportedPlatform,
+            ApplicationOutcome::Failed,
+            "witnessed gate execution is fail-closed on platforms without process-group cleanup",
+        ));
+    }
     let command = CommandSpec::new(declaration.executable.clone(), declaration.argv.clone());
     command
         .validate()
@@ -2591,34 +2994,46 @@ fn execute_gate_command(
             )
         })?;
     let started_at = TimestampMs::from_millis(now_ms_u64());
-    let mut child = Command::new(&command.executable)
+    let mut process = Command::new(&command.executable);
+    process
         .args(command.argv.iter().skip(1))
         .current_dir(&cwd)
+        .env_clear()
+        .envs(environment.iter().map(|(name, value)| (name, value)))
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|error| {
-            CliError::with(
-                ErrorCode::ReceiptInvalid,
-                ApplicationOutcome::Rejected,
-                format!("declared gate could not start: {error}"),
-            )
-        })?;
-    let stdout_reader = child.stdout.take().ok_or_else(|| {
+        .stderr(Stdio::piped());
+    #[cfg(unix)]
+    process.process_group(0);
+    let mut child = process.spawn().map_err(|error| {
         CliError::with(
-            ErrorCode::ServiceUnavailable,
-            ApplicationOutcome::Failed,
-            "declared gate stdout pipe was unavailable",
+            ErrorCode::ReceiptInvalid,
+            ApplicationOutcome::Rejected,
+            format!("declared gate could not start: {error}"),
         )
     })?;
-    let stderr_reader = child.stderr.take().ok_or_else(|| {
-        CliError::with(
-            ErrorCode::ServiceUnavailable,
-            ApplicationOutcome::Failed,
-            "declared gate stderr pipe was unavailable",
-        )
-    })?;
+    let stdout_reader = match child.stdout.take() {
+        Some(reader) => reader,
+        None => {
+            let _ = terminate_gate_process(&mut child);
+            return Err(CliError::with(
+                ErrorCode::ServiceUnavailable,
+                ApplicationOutcome::Failed,
+                "declared gate stdout pipe was unavailable",
+            ));
+        }
+    };
+    let stderr_reader = match child.stderr.take() {
+        Some(reader) => reader,
+        None => {
+            let _ = terminate_gate_process(&mut child);
+            return Err(CliError::with(
+                ErrorCode::ServiceUnavailable,
+                ApplicationOutcome::Failed,
+                "declared gate stderr pipe was unavailable",
+            ));
+        }
+    };
     let captured_bytes = Arc::new(AtomicU64::new(0));
     let output_exceeded = Arc::new(AtomicBool::new(false));
     let capture_failed = Arc::new(AtomicBool::new(false));
@@ -2641,8 +3056,7 @@ fn execute_gate_command(
     let child_status: Option<ExitStatus>;
     loop {
         if output_exceeded.load(Ordering::Acquire) || capture_failed.load(Ordering::Acquire) {
-            let _ = child.kill();
-            child_status = child.wait().ok();
+            child_status = terminate_gate_process(&mut child).status;
             break;
         }
         match child.try_wait() {
@@ -2652,8 +3066,7 @@ fn execute_gate_command(
             }
             Ok(None) => {}
             Err(error) => {
-                let _ = child.kill();
-                let _ = child.wait();
+                let _ = terminate_gate_process(&mut child);
                 let _ = stdout_thread.join();
                 let _ = stderr_thread.join();
                 return Err(CliError::with(
@@ -2664,8 +3077,7 @@ fn execute_gate_command(
             }
         }
         if Instant::now() >= deadline {
-            let _ = child.kill();
-            child_status = child.wait().ok();
+            child_status = terminate_gate_process(&mut child).status;
             timed_out = true;
             break;
         }
@@ -2704,18 +3116,17 @@ fn execute_gate_command(
             "declared gate output exceeds the bounded limit",
         ));
     }
-    output.append(&mut error_output);
     let observables = declaration
         .observables
         .iter()
         .filter(|observable| !observable.is_empty())
         .filter(|observable| {
-            output
-                .windows(observable.len())
-                .any(|window| window == observable.as_bytes())
+            contains_bytes(&output, observable.as_bytes())
+                || contains_bytes(&error_output, observable.as_bytes())
         })
         .cloned()
         .collect();
+    output.append(&mut error_output);
     let combined_path = output_path.with_extension("combined");
     let mut combined = fs::OpenOptions::new()
         .write(true)
@@ -2742,6 +3153,9 @@ fn execute_gate_command(
             error.to_string(),
         )
     })?;
+    seal_artifact(output_path)?;
+    seal_artifact(&stderr_path)?;
+    seal_artifact(&combined_path)?;
     let outcome = if timed_out {
         EvidenceExecutionOutcome::TimedOut
     } else if child_status.is_some_and(|status| status.success()) {
@@ -2764,6 +3178,86 @@ fn execute_gate_command(
         output_ref: Some(combined_path.to_string_lossy().into_owned()),
         observables,
     })
+}
+
+fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {
+    !needle.is_empty()
+        && haystack
+            .windows(needle.len())
+            .any(|window| window == needle)
+}
+
+/// Seal artifacts after their complete contents and digest have been written.
+/// `create_new` plus the operation-specific path prevents the runner itself
+/// from replacing an existing artifact. Filesystem permissions are defense in
+/// depth only; the same OS user can still deliberately change them.
+fn seal_artifact(path: &Path) -> Result<(), CliError> {
+    let mut permissions = fs::metadata(path)
+        .map_err(|error| {
+            CliError::with(
+                ErrorCode::ServiceUnavailable,
+                ApplicationOutcome::Failed,
+                format!(
+                    "cannot inspect evidence artifact {}: {error}",
+                    path.display()
+                ),
+            )
+        })?
+        .permissions();
+    permissions.set_readonly(true);
+    fs::set_permissions(path, permissions).map_err(|error| {
+        CliError::with(
+            ErrorCode::ServiceUnavailable,
+            ApplicationOutcome::Failed,
+            format!("cannot seal evidence artifact {}: {error}", path.display()),
+        )
+    })
+}
+
+struct GateTermination {
+    status: Option<ExitStatus>,
+}
+
+fn terminate_gate_process(child: &mut Child) -> GateTermination {
+    #[cfg(unix)]
+    {
+        let process_id = child.id();
+        // The child is placed in its own process group before spawn. A TERM
+        // grace period lets cooperative tools flush diagnostics; KILL then
+        // covers descendants that ignore TERM or keep the pipes open.
+        let _ = runner_process::send_group(process_id, runner_process::SIGTERM);
+        let grace_deadline = Instant::now() + Duration::from_millis(150);
+        loop {
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    // The direct child may exit before its descendants. Send
+                    // the hard stop after reaping it while the group id is
+                    // still the operation's immutable process id.
+                    let _ = runner_process::send_group(process_id, runner_process::SIGKILL);
+                    return GateTermination {
+                        status: Some(status),
+                    };
+                }
+                Ok(None) if Instant::now() < grace_deadline => {
+                    thread::sleep(Duration::from_millis(5));
+                }
+                Ok(None) | Err(_) => break,
+            }
+        }
+        let _ = runner_process::send_group(process_id, runner_process::SIGKILL);
+        GateTermination {
+            status: child.wait().ok(),
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        // execute_gate_command rejects non-Unix platforms before spawn. This
+        // fallback is defensive if a future caller bypasses that guard.
+        let _ = child.kill();
+        GateTermination {
+            status: child.wait().ok(),
+        }
+    }
 }
 
 fn spawn_capture_worker<R>(
@@ -3644,6 +4138,28 @@ fn stamp(milliseconds: u64) -> String {
 }
 fn parse_stamp_ms(value: &str) -> Option<u64> {
     value.strip_prefix("unix-ms:")?.parse().ok()
+}
+
+#[cfg(unix)]
+mod runner_process {
+    use std::os::raw::c_int;
+
+    pub(super) const SIGTERM: c_int = 15;
+    pub(super) const SIGKILL: c_int = 9;
+
+    unsafe extern "C" {
+        fn kill(process: c_int, signal: c_int) -> c_int;
+    }
+
+    pub(super) fn send_group(process_id: u32, signal: c_int) -> bool {
+        let Ok(process_id) = c_int::try_from(process_id) else {
+            return false;
+        };
+        // Negative pid addresses the process group created by
+        // CommandExt::process_group(0), never an unrelated process selected
+        // by executable name.
+        unsafe { kill(-process_id, signal) == 0 }
+    }
 }
 
 #[cfg(test)]

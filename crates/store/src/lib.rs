@@ -11,11 +11,15 @@ use boreal_domain::{
 };
 use serde_json::{json, Value};
 use std::borrow::Borrow;
+use std::collections::BTreeMap;
 use std::ffi::{CStr, CString, NulError};
 use std::fmt;
 use std::os::raw::{c_char, c_int, c_void};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::ptr;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+use std::time::Duration;
 
 pub const SCHEMA_VERSION: i64 = 2;
 pub const STATUS_CONTRACT_VERSION: &str = "boreal.work-status/2";
@@ -112,12 +116,15 @@ const SQLITE_DONE: c_int = 101;
 const SQLITE_NULL: c_int = 5;
 const SQLITE_OPEN_READWRITE: c_int = 0x0000_0002;
 const SQLITE_OPEN_CREATE: c_int = 0x0000_0004;
+const SQLITE_OPEN_READONLY: c_int = 0x0000_0001;
 const SQLITE_OPEN_FULLMUTEX: c_int = 0x0001_0000;
 
 #[allow(non_camel_case_types)]
 type sqlite3 = c_void;
 #[allow(non_camel_case_types)]
 type sqlite3_stmt = c_void;
+#[allow(non_camel_case_types)]
+type sqlite3_backup = c_void;
 type SqliteDestructor = unsafe extern "C" fn(*mut c_void);
 
 // SQLite is a system library on the supported desktop platforms. Keeping this
@@ -132,6 +139,9 @@ unsafe extern "C" {
     ) -> c_int;
     fn sqlite3_close(database: *mut sqlite3) -> c_int;
     fn sqlite3_errmsg(database: *mut sqlite3) -> *const c_char;
+    fn sqlite3_libversion() -> *const c_char;
+    fn sqlite3_sourceid() -> *const c_char;
+    fn sqlite3_compileoption_get(index: c_int) -> *const c_char;
     fn sqlite3_busy_timeout(database: *mut sqlite3, milliseconds: c_int) -> c_int;
     fn sqlite3_exec(
         database: *mut sqlite3,
@@ -165,6 +175,16 @@ unsafe extern "C" {
     fn sqlite3_column_int64(statement: *mut sqlite3_stmt, index: c_int) -> i64;
     fn sqlite3_column_type(statement: *mut sqlite3_stmt, index: c_int) -> c_int;
     fn sqlite3_column_text(statement: *mut sqlite3_stmt, index: c_int) -> *const u8;
+    fn sqlite3_backup_init(
+        destination: *mut sqlite3,
+        destination_name: *const c_char,
+        source: *mut sqlite3,
+        source_name: *const c_char,
+    ) -> *mut sqlite3_backup;
+    fn sqlite3_backup_step(backup: *mut sqlite3_backup, pages: c_int) -> c_int;
+    fn sqlite3_backup_finish(backup: *mut sqlite3_backup) -> c_int;
+    fn sqlite3_backup_remaining(backup: *mut sqlite3_backup) -> c_int;
+    fn sqlite3_backup_pagecount(backup: *mut sqlite3_backup) -> c_int;
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -419,6 +439,98 @@ pub struct MutationResult {
     pub operation_id: String,
     pub revision: u64,
     pub replayed: bool,
+}
+
+/// Counters captured at the store boundary for one or more operations.
+///
+/// These are deliberately low-level measurements rather than claims about
+/// SQLite's internal lock scheduler. `statements_prepared` counts prepared
+/// statements, `batch_calls` counts `sqlite3_exec` batches, `rows_returned`
+/// counts rows observed by the Rust adapter, and `text_bytes_read` counts
+/// decoded SQLite text bytes. Callers can reset the counters immediately
+/// before a read and snapshot them immediately afterward.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct SqliteQueryMetrics {
+    pub statements_prepared: u64,
+    pub batch_calls: u64,
+    pub rows_returned: u64,
+    pub text_bytes_read: u64,
+}
+
+#[derive(Debug, Default)]
+struct SqliteQueryMetricsAtomic {
+    statements_prepared: AtomicU64,
+    batch_calls: AtomicU64,
+    rows_returned: AtomicU64,
+    text_bytes_read: AtomicU64,
+}
+
+impl SqliteQueryMetricsAtomic {
+    fn reset(&self) {
+        self.statements_prepared.store(0, Ordering::Relaxed);
+        self.batch_calls.store(0, Ordering::Relaxed);
+        self.rows_returned.store(0, Ordering::Relaxed);
+        self.text_bytes_read.store(0, Ordering::Relaxed);
+    }
+
+    fn snapshot(&self) -> SqliteQueryMetrics {
+        SqliteQueryMetrics {
+            statements_prepared: self.statements_prepared.load(Ordering::Relaxed),
+            batch_calls: self.batch_calls.load(Ordering::Relaxed),
+            rows_returned: self.rows_returned.load(Ordering::Relaxed),
+            text_bytes_read: self.text_bytes_read.load(Ordering::Relaxed),
+        }
+    }
+}
+
+/// Identity of the SQLite library linked by the running process.
+///
+/// This is runtime data, not the version of the Rust crate. It is intended for
+/// `doctor`, `version`, release evidence, and support diagnostics.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SqliteRuntimeIdentity {
+    pub libversion: String,
+    pub source_id: String,
+    pub compile_options: Vec<String>,
+}
+
+impl SqliteRuntimeIdentity {
+    /// Parses SQLite's `major.minor.patch` version into a comparable tuple.
+    pub fn version_tuple(&self) -> Option<(u64, u64, u64)> {
+        let mut parts = self.libversion.split('.');
+        let major = parts.next()?.parse().ok()?;
+        let minor = parts.next()?.parse().ok()?;
+        let patch = parts
+            .next()
+            .and_then(|value| {
+                value
+                    .split(|character: char| !character.is_ascii_digit())
+                    .next()
+            })
+            .and_then(|value| value.parse().ok())?;
+        Some((major, minor, patch))
+    }
+
+    pub fn at_least(&self, required: (u64, u64, u64)) -> bool {
+        self.version_tuple()
+            .is_some_and(|actual| actual >= required)
+    }
+
+    pub fn as_json(&self) -> Value {
+        json!({
+            "libversion": self.libversion,
+            "source_id": self.source_id,
+            "compile_options": self.compile_options,
+        })
+    }
+}
+
+/// Result of a SQLite online-backup operation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SqliteBackupReport {
+    pub source_page_count: u64,
+    pub pages_copied: u64,
+    pub busy_retries: u64,
 }
 
 /// The durable session state values accepted by schema v2.
@@ -949,6 +1061,8 @@ pub type AttemptCommandKind = AttemptMutationKind;
 #[derive(Debug)]
 pub struct SqliteStore {
     database: *mut sqlite3,
+    database_path: Option<PathBuf>,
+    query_metrics: Arc<SqliteQueryMetricsAtomic>,
 }
 
 unsafe impl Send for SqliteStore {}
@@ -956,9 +1070,9 @@ unsafe impl Send for SqliteStore {}
 impl SqliteStore {
     /// Opens a database and applies the supplied versioned schema on a fresh DB.
     pub fn open(path: impl AsRef<Path>, schema_sql: &str) -> Result<Self, StoreError> {
+        let path = path.as_ref();
         let filename = CString::new(
-            path.as_ref()
-                .to_str()
+            path.to_str()
                 .ok_or_else(|| StoreError::Invalid("database path is not UTF-8".to_owned()))?,
         )?;
         let mut database = ptr::null_mut();
@@ -978,7 +1092,11 @@ impl SqliteStore {
             return Err(message);
         }
 
-        let store = Self { database };
+        let store = Self {
+            database,
+            database_path: (path != Path::new(":memory:")).then(|| path.to_path_buf()),
+            query_metrics: Arc::new(SqliteQueryMetricsAtomic::default()),
+        };
         unsafe { sqlite3_busy_timeout(store.database, 250) };
         store.execute_batch("PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL;")?;
         store.apply_schema(schema_sql)?;
@@ -1000,6 +1118,135 @@ impl SqliteStore {
             ))
         })?;
         Self::open(path, &schema)
+    }
+
+    /// Returns the identity of the SQLite library linked by this process.
+    /// This must be reported alongside release evidence because the store uses
+    /// the host library rather than embedding a Rust-managed SQLite runtime.
+    pub fn sqlite_runtime_identity(&self) -> SqliteRuntimeIdentity {
+        sqlite_runtime_identity()
+    }
+
+    /// Clears adapter-level SQL counters. This is intended for benchmark and
+    /// diagnostics boundaries; it does not affect SQLite or application state.
+    pub fn reset_query_metrics(&self) {
+        self.query_metrics.reset();
+    }
+
+    /// Snapshots adapter-level SQL counters since the last reset.
+    pub fn query_metrics(&self) -> SqliteQueryMetrics {
+        self.query_metrics.snapshot()
+    }
+
+    /// Copies a live database into a new destination using SQLite's online
+    /// backup API. Existing destinations are rejected to avoid an accidental
+    /// overwrite; callers should choose a new staging/snapshot path.
+    pub fn backup_to(
+        &self,
+        destination: impl AsRef<Path>,
+    ) -> Result<SqliteBackupReport, StoreError> {
+        let destination = destination.as_ref();
+        if destination == Path::new(":memory:") {
+            return Err(StoreError::Invalid(
+                "SQLite backup destination must be a filesystem path".to_owned(),
+            ));
+        }
+        if destination.exists() {
+            return Err(StoreError::Conflict(format!(
+                "SQLite backup destination already exists: {}",
+                destination.display()
+            )));
+        }
+        if self
+            .database_path
+            .as_ref()
+            .is_some_and(|source| same_path(source, destination))
+        {
+            return Err(StoreError::Invalid(
+                "SQLite backup destination must differ from the source".to_owned(),
+            ));
+        }
+        let filename = CString::new(
+            destination
+                .to_str()
+                .ok_or_else(|| StoreError::Invalid("backup path is not UTF-8".to_owned()))?,
+        )?;
+        let mut target = ptr::null_mut();
+        let result = unsafe {
+            sqlite3_open_v2(
+                filename.as_ptr(),
+                &mut target,
+                SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX,
+                ptr::null(),
+            )
+        };
+        if result != SQLITE_OK {
+            let error = database_error(target, result);
+            if !target.is_null() {
+                unsafe { sqlite3_close(target) };
+            }
+            return Err(error);
+        }
+        unsafe { sqlite3_busy_timeout(target, 1_000) };
+        let report = backup_database(self.database, target);
+        let close_result = unsafe { sqlite3_close(target) };
+        if close_result != SQLITE_OK && report.is_ok() {
+            return Err(database_error(self.database, close_result));
+        }
+        report
+    }
+
+    /// Restores this store from a source database using SQLite's online backup
+    /// API. The caller must ensure that no application transaction is active;
+    /// this method never runs lifecycle logic or advances a project revision.
+    pub fn restore_from(&self, source: impl AsRef<Path>) -> Result<SqliteBackupReport, StoreError> {
+        let source = source.as_ref();
+        if source == Path::new(":memory:") {
+            return Err(StoreError::Invalid(
+                "SQLite restore source must be a filesystem path".to_owned(),
+            ));
+        }
+        if self
+            .database_path
+            .as_ref()
+            .is_some_and(|destination| same_path(destination, source))
+        {
+            return Err(StoreError::Invalid(
+                "SQLite restore source must differ from the destination".to_owned(),
+            ));
+        }
+        let filename = CString::new(
+            source
+                .to_str()
+                .ok_or_else(|| StoreError::Invalid("restore path is not UTF-8".to_owned()))?,
+        )?;
+        let mut input = ptr::null_mut();
+        let result = unsafe {
+            sqlite3_open_v2(
+                filename.as_ptr(),
+                &mut input,
+                SQLITE_OPEN_READONLY | SQLITE_OPEN_FULLMUTEX,
+                ptr::null(),
+            )
+        };
+        if result != SQLITE_OK {
+            let error = database_error(input, result);
+            if !input.is_null() {
+                unsafe { sqlite3_close(input) };
+            }
+            return Err(error);
+        }
+        unsafe { sqlite3_busy_timeout(input, 1_000) };
+        let destination_name = CString::new("main")?;
+        // The source handle is closed after backup_database returns. The
+        // destination is this store's already-open connection.
+        let report =
+            backup_database_from_named(input, self.database, &destination_name, &destination_name);
+        let close_result = unsafe { sqlite3_close(input) };
+        if close_result != SQLITE_OK && report.is_ok() {
+            return Err(database_error(self.database, close_result));
+        }
+        report
     }
 
     pub fn create_project(&self, project_id: &str, now: &str) -> Result<(), StoreError> {
@@ -1896,6 +2143,12 @@ impl SqliteStore {
                 _ => return Err(StoreError::Corrupt("missing work total".to_owned())),
             };
 
+            // These two relations are independent of each work row. Fetching
+            // them once keeps the canonical read consistent while removing
+            // two avoidable N+1 query families from large status snapshots.
+            let current_attempts = self.current_attempts_for_project(project_id)?;
+            let active_holds = self.active_hard_holds_for_project(project_id)?;
+
             let mut rows = self.prepare(
                 "SELECT work_id, project_id, kind, parent_id, lifecycle,
                         dispatch_policy, retry_not_before, priority,
@@ -1907,15 +2160,18 @@ impl SqliteStore {
             let mut works = Vec::with_capacity(total as usize);
             while rows.step()? == SQLITE_ROW {
                 let work_id = rows.column_text(0)?;
-                let current_attempt = self.current_attempt_for_work(project_id, &work_id)?;
+                let current_attempt = current_attempts.get(&work_id).cloned();
                 let diagnostics = match current_attempt.as_ref() {
-                    Some(attempt) => self.gate_diagnostics(
+                    Some(attempt) => self.gate_diagnostics_at_revision(
                         project_id,
                         &work_id,
-                        &attempt.attempt_id,
-                        attempt.fence,
+                        Some(&attempt.attempt_id),
+                        Some(attempt.fence),
+                        revision.0,
                     )?,
-                    None => self.gate_diagnostics_for_work(project_id, &work_id)?,
+                    None => self.gate_diagnostics_at_revision(
+                        project_id, &work_id, None, None, revision.0,
+                    )?,
                 };
                 let gates = diagnostics
                     .gates
@@ -1939,7 +2195,7 @@ impl SqliteStore {
                         StoreError::Corrupt(format!("work {work_id} has priority outside u8 range"))
                     })?,
                     dispatch_policy: parse_dispatch_policy(&rows.column_text(5)?)?,
-                    hard_holds: self.active_hard_holds(&work_id)?,
+                    hard_holds: active_holds.get(&work_id).cloned().unwrap_or_default(),
                     acceptance_profile: AcceptanceProfile {
                         id: ProfileId::new(rows.column_text(8)?),
                         version: rows.column_u64(9)?.to_string(),
@@ -2281,6 +2537,53 @@ impl SqliteStore {
             });
         }
         Ok(attempt)
+    }
+
+    fn current_attempts_for_project(
+        &self,
+        project_id: &str,
+    ) -> Result<BTreeMap<String, AttemptRecord>, StoreError> {
+        let mut statement = self.prepare(
+            "SELECT wi.project_id, a.work_id, a.attempt_id, a.actor_id,
+                    a.harness_id, a.session_id, a.fence, a.current, a.state,
+                    a.claimed_at, a.accepted_at, a.lease_deadline,
+                    a.max_attempt_deadline, a.last_heartbeat_at,
+                    a.last_checkpoint_at, a.review_required_after_expiry,
+                    a.stop_requested_at, a.stop_acknowledged_at, a.terminal_at,
+                    a.terminal_reason, a.source_version_id, a.config_identity,
+                    a.binary_identity, a.protocol_version, a.schema_version
+             FROM attempt a JOIN work_item wi ON wi.work_id = a.work_id
+             WHERE wi.project_id = ?1 AND a.current = 1
+             ORDER BY a.work_id, a.attempt_id",
+        )?;
+        statement.bind_text(1, project_id)?;
+        let mut attempts = BTreeMap::new();
+        while statement.step()? == SQLITE_ROW {
+            let attempt = self.attempt_from_statement(&statement)?;
+            attempts.insert(attempt.work_id.clone(), attempt);
+        }
+        Ok(attempts)
+    }
+
+    fn active_hard_holds_for_project(
+        &self,
+        project_id: &str,
+    ) -> Result<BTreeMap<String, Vec<ReasonCode>>, StoreError> {
+        let mut statement = self.prepare(
+            "SELECT wh.work_id, wh.reason_code
+             FROM work_hold wh JOIN work_item wi ON wi.work_id = wh.work_id
+             WHERE wi.project_id = ?1 AND wh.resolved_at IS NULL
+             ORDER BY wh.work_id, wh.hold_id",
+        )?;
+        statement.bind_text(1, project_id)?;
+        let mut holds = BTreeMap::new();
+        while statement.step()? == SQLITE_ROW {
+            holds
+                .entry(statement.column_text(0)?)
+                .or_insert_with(Vec::new)
+                .push(ReasonCode::HardHold(statement.column_text(1)?));
+        }
+        Ok(holds)
     }
 
     /// Reads the current attempt by its work subject. This is the bounded
@@ -2828,7 +3131,14 @@ impl SqliteStore {
         if statement.step()? != SQLITE_ROW {
             return Ok(None);
         }
-        Ok(Some(AttemptRecord {
+        Ok(Some(self.attempt_from_statement(&statement)?))
+    }
+
+    fn attempt_from_statement(
+        &self,
+        statement: &Statement<'_>,
+    ) -> Result<AttemptRecord, StoreError> {
+        Ok(AttemptRecord {
             project_id: statement.column_text(0)?,
             work_id: statement.column_text(1)?,
             attempt_id: statement.column_text(2)?,
@@ -2854,7 +3164,7 @@ impl SqliteStore {
             binary_identity: statement.column_text(22)?,
             protocol_version: statement.column_text(23)?,
             schema_version: statement.column_u64(24)?,
-        }))
+        })
     }
 
     fn next_fence(&self, work_id: &str) -> Result<u64, StoreError> {
@@ -2954,6 +3264,9 @@ impl SqliteStore {
     /// Runs a migration or test/setup batch. Lifecycle decisions remain outside
     /// this boundary; this method only executes transactional SQL.
     pub fn execute_batch(&self, sql: &str) -> Result<(), StoreError> {
+        self.query_metrics
+            .batch_calls
+            .fetch_add(1, Ordering::Relaxed);
         let sql = CString::new(sql)?;
         let mut error = ptr::null_mut();
         let result = unsafe {
@@ -4862,6 +5175,17 @@ impl SqliteStore {
         fence: Option<u64>,
     ) -> Result<GateDiagnostics, StoreError> {
         let revision = self.project_revision(project_id)?.0;
+        self.gate_diagnostics_at_revision(project_id, work_id, attempt_id, fence, revision)
+    }
+
+    fn gate_diagnostics_at_revision(
+        &self,
+        project_id: &str,
+        work_id: &str,
+        attempt_id: Option<&str>,
+        fence: Option<u64>,
+        revision: u64,
+    ) -> Result<GateDiagnostics, StoreError> {
         let mut statement = self.prepare(
             "SELECT g.gate_id, g.kind, g.required, g.state
              FROM gate g JOIN work_item wi ON wi.work_id = g.work_id
@@ -5264,6 +5588,9 @@ impl SqliteStore {
     }
 
     fn prepare(&self, sql: &str) -> Result<Statement<'_>, StoreError> {
+        self.query_metrics
+            .statements_prepared
+            .fetch_add(1, Ordering::Relaxed);
         Statement::new(self, sql)
     }
 
@@ -5412,7 +5739,14 @@ impl<'a> Statement<'a> {
     fn step(&mut self) -> Result<c_int, StoreError> {
         let result = unsafe { sqlite3_step(self.statement) };
         match result {
-            SQLITE_ROW | SQLITE_DONE => Ok(result),
+            SQLITE_ROW => {
+                self.store
+                    .query_metrics
+                    .rows_returned
+                    .fetch_add(1, Ordering::Relaxed);
+                Ok(result)
+            }
+            SQLITE_DONE => Ok(result),
             _ => Err(database_error(self.store.database, result)),
         }
     }
@@ -5462,9 +5796,14 @@ impl<'a> Statement<'a> {
         if value.is_null() {
             return Err(StoreError::Corrupt("SQLite returned NULL text".to_owned()));
         }
-        Ok(unsafe { CStr::from_ptr(value.cast()) }
+        let text = unsafe { CStr::from_ptr(value.cast()) }
             .to_string_lossy()
-            .into_owned())
+            .into_owned();
+        self.store
+            .query_metrics
+            .text_bytes_read
+            .fetch_add(text.len() as u64, Ordering::Relaxed);
+        Ok(text)
     }
 
     fn column_optional_text(&self, index: c_int) -> Result<Option<String>, StoreError> {
@@ -5472,11 +5811,14 @@ impl<'a> Statement<'a> {
         if value.is_null() {
             Ok(None)
         } else {
-            Ok(Some(
-                unsafe { CStr::from_ptr(value.cast()) }
-                    .to_string_lossy()
-                    .into_owned(),
-            ))
+            let text = unsafe { CStr::from_ptr(value.cast()) }
+                .to_string_lossy()
+                .into_owned();
+            self.store
+                .query_metrics
+                .text_bytes_read
+                .fetch_add(text.len() as u64, Ordering::Relaxed);
+            Ok(Some(text))
         }
     }
 }
@@ -5487,6 +5829,114 @@ impl Drop for Statement<'_> {
             unsafe { sqlite3_finalize(self.statement) };
         }
     }
+}
+
+/// Returns the process-wide SQLite runtime identity without opening a
+/// database. Adapters use this for `version`, `doctor`, and release gates so
+/// a binary cannot hide which host library it links at runtime.
+pub fn sqlite_runtime_identity() -> SqliteRuntimeIdentity {
+    let libversion = unsafe { sqlite_text_pointer(sqlite3_libversion()) };
+    let source_id = unsafe { sqlite_text_pointer(sqlite3_sourceid()) };
+    let mut compile_options = Vec::new();
+    let mut index = 0;
+    loop {
+        let option = unsafe { sqlite3_compileoption_get(index) };
+        if option.is_null() {
+            break;
+        }
+        compile_options.push(unsafe { sqlite_text_pointer(option) });
+        index += 1;
+    }
+    SqliteRuntimeIdentity {
+        libversion,
+        source_id,
+        compile_options,
+    }
+}
+
+unsafe fn sqlite_text_pointer(pointer: *const c_char) -> String {
+    if pointer.is_null() {
+        String::new()
+    } else {
+        CStr::from_ptr(pointer).to_string_lossy().into_owned()
+    }
+}
+
+fn normalized_path(path: &Path) -> Option<PathBuf> {
+    if path.exists() {
+        std::fs::canonicalize(path).ok()
+    } else {
+        let parent = path.parent()?.canonicalize().ok()?;
+        Some(parent.join(path.file_name()?))
+    }
+}
+
+fn same_path(left: &Path, right: &Path) -> bool {
+    normalized_path(left)
+        .zip(normalized_path(right))
+        .is_some_and(|(a, b)| a == b)
+}
+
+fn backup_database(
+    source: *mut sqlite3,
+    destination: *mut sqlite3,
+) -> Result<SqliteBackupReport, StoreError> {
+    let main = CString::new("main").expect("static SQLite database name has no NUL");
+    backup_database_from_named(source, destination, &main, &main)
+}
+
+fn backup_database_from_named(
+    source: *mut sqlite3,
+    destination: *mut sqlite3,
+    source_name: &CString,
+    destination_name: &CString,
+) -> Result<SqliteBackupReport, StoreError> {
+    let backup = unsafe {
+        sqlite3_backup_init(
+            destination,
+            destination_name.as_ptr(),
+            source,
+            source_name.as_ptr(),
+        )
+    };
+    if backup.is_null() {
+        return Err(database_error(destination, SQLITE_ERROR));
+    }
+
+    let mut busy_retries = 0_u64;
+    let result = loop {
+        let step = unsafe { sqlite3_backup_step(backup, 256) };
+        match step {
+            SQLITE_DONE => break Ok(()),
+            SQLITE_OK => continue,
+            SQLITE_BUSY | SQLITE_LOCKED => {
+                busy_retries = busy_retries.saturating_add(1);
+                if busy_retries > 10_000 {
+                    break Err(StoreError::Busy(
+                        "SQLite online backup remained busy after 10,000 retries".to_owned(),
+                    ));
+                }
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            code => break Err(database_error(destination, code)),
+        }
+    };
+    // SQLite reports the source page count once the backup has stepped at
+    // least once; before that it may legitimately be zero for a new handle.
+    let source_page_count = unsafe { sqlite3_backup_pagecount(backup) };
+    let remaining = unsafe { sqlite3_backup_remaining(backup) };
+    let finish = unsafe { sqlite3_backup_finish(backup) };
+    result?;
+    if finish != SQLITE_OK {
+        return Err(database_error(destination, finish));
+    }
+    let total = u64::try_from(source_page_count).unwrap_or(0);
+    let remaining = u64::try_from(remaining).unwrap_or(0);
+    Ok(SqliteBackupReport {
+        source_page_count: total,
+        pages_copied: total.saturating_sub(remaining),
+        busy_retries,
+    })
 }
 
 fn finish_transaction<T>(

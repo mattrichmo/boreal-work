@@ -6,6 +6,11 @@
 
 use std::{cmp::Ordering, fmt, str::FromStr};
 
+/// Version-3 work-model value objects and pure validators.  This module is
+/// additive: schema-2 rows and lifecycle APIs remain available until a store
+/// migration and capability negotiation are integrated by the owning lanes.
+pub mod work_model_v3;
+
 /// The default immutable attempt budget, measured from `claimed_at`.
 pub const DEFAULT_HARD_TIME_LIMIT_MS: u64 = 2 * 60 * 60 * 1_000;
 /// The initial renewable ownership lease fixture.

@@ -13,6 +13,11 @@ use std::{
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::Value;
 
+/// Additive schema-3 work-model migration contracts.  This module is a
+/// dry-run/format boundary; it does not write SQLite, alter existing v2
+/// rows, or transfer proof authority.
+pub mod work_model_v3;
+
 pub const FORMAT: &str = "boreal.v2.migration";
 pub const FORMAT_VERSION: u32 = 1;
 pub const LEGACY_FORMAT: &str = "boreal.legacy.records";

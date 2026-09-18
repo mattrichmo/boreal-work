@@ -16,10 +16,25 @@ pub(crate) fn supports(parsed: &ParsedCommand) -> bool {
             .as_slice(),
         ["init"]
             | ["status"]
+            | ["prime"]
             | ["work", "create"]
             | ["work", "claim"]
+            | ["work", "accept"]
+            | ["work", "heartbeat"]
+            | ["work", "renew"]
+            | ["work", "release"]
+            | ["work", "finish"]
             | ["agent", "start"]
+            | ["agent", "status"]
+            | ["agent", "guide"]
+            | ["agent", "resume"]
+            | ["agent", "next"]
+            | ["next"]
+            | ["agent", "heartbeat"]
+            | ["agent", "renew"]
             | ["agent", "release"]
+            | ["session", "start"]
+            | ["session", "show"]
             | ["evidence", "run"]
             | ["operation", "show"]
     ) || (path == &["agent".to_owned(), "finish".to_owned()]
@@ -487,7 +502,7 @@ mod unix {
                 data["actor_role"] = json!(parsed.options.actor_role.as_deref().unwrap_or("agent"));
                 data["credential_ref"] = json!("cli");
             }
-            ["status"] => {
+            ["status"] | ["prime"] | ["agent", "status"] => {
                 data["command"] = json!("status");
                 data["limit"] = json!(parsed.options.limit.unwrap_or(100));
                 data["offset"] = json!(parsed.options.offset.unwrap_or(0));
@@ -550,6 +565,105 @@ mod unix {
                     .options
                     .expected_revision
                     .map_or(Value::Null, |value| json!(value));
+            }
+            ["work", "accept"]
+            | ["work", "heartbeat"]
+            | ["work", "renew"]
+            | ["work", "release"]
+            | ["work", "finish"] => {
+                let work_index = if parsed.options.project.is_none() {
+                    1
+                } else {
+                    0
+                };
+                data["work_id"] = json!(work_argument(parsed, work_index)?);
+                data["attempt_id"] = json!(parsed
+                    .options
+                    .attempt
+                    .clone()
+                    .ok_or_else(|| CliError::invalid("fenced mutation requires --attempt"))?);
+                data["fence"] = json!(parsed
+                    .options
+                    .fence
+                    .ok_or_else(|| CliError::invalid("fenced mutation requires --fence"))?);
+                data["expected_revision"] = parsed
+                    .options
+                    .expected_revision
+                    .map_or(Value::Null, |value| json!(value));
+                data["lease_ttl_ms"] = parsed
+                    .options
+                    .lease_ttl_ms
+                    .map_or(Value::Null, |value| json!(value));
+                data["command"] = json!(match path.as_slice() {
+                    ["work", "accept"] => "accept",
+                    ["work", "heartbeat"] => "heartbeat",
+                    ["work", "renew"] => "renew",
+                    ["work", "release"] => "release",
+                    ["work", "finish"] => "submit",
+                    _ => unreachable!(),
+                });
+                data["reason"] = parsed
+                    .options
+                    .reason
+                    .clone()
+                    .map_or(Value::Null, Value::String);
+            }
+            ["agent", "heartbeat"] | ["agent", "renew"] => {
+                data["work_id"] = json!(parsed
+                    .options
+                    .work
+                    .clone()
+                    .ok_or_else(|| CliError::invalid("agent lifecycle route requires --work"))?);
+                data["attempt_id"] = json!(parsed
+                    .options
+                    .attempt
+                    .clone()
+                    .ok_or_else(|| CliError::invalid("fenced mutation requires --attempt"))?);
+                data["fence"] = json!(parsed
+                    .options
+                    .fence
+                    .ok_or_else(|| CliError::invalid("fenced mutation requires --fence"))?);
+                data["expected_revision"] = parsed
+                    .options
+                    .expected_revision
+                    .map_or(Value::Null, |value| json!(value));
+                data["lease_ttl_ms"] = parsed
+                    .options
+                    .lease_ttl_ms
+                    .map_or(Value::Null, |value| json!(value));
+                data["command"] = json!(if path[1] == "heartbeat" {
+                    "heartbeat"
+                } else {
+                    "renew"
+                });
+            }
+            ["agent", "guide"] | ["agent", "resume"] | ["agent", "next"] | ["next"] => {
+                data["command"] = json!(match path.as_slice() {
+                    ["agent", "guide"] => "guide",
+                    ["agent", "resume"] => "resume",
+                    ["agent", "next"] | ["next"] => "next",
+                    _ => unreachable!(),
+                });
+                data["work_id"] = parsed
+                    .options
+                    .work
+                    .clone()
+                    .map_or(Value::Null, Value::String);
+                data["attempt_id"] = parsed
+                    .options
+                    .attempt
+                    .clone()
+                    .map_or(Value::Null, Value::String);
+            }
+            ["session", "start"] => {
+                data["command"] = json!("session_start");
+                data["expected_revision"] = parsed
+                    .options
+                    .expected_revision
+                    .map_or(Value::Null, |value| json!(value));
+            }
+            ["session", "show"] => {
+                data["command"] = json!("session_show");
             }
             ["agent", "start"] => {
                 data["command"] = json!("start");
@@ -830,11 +944,36 @@ mod unix {
                 "status" => self.status(data),
                 "claim" => self.claim(data, &request.operation_id),
                 "start" => self.start(data, &request.operation_id),
+                "guide" => self.guidance(data, "guide"),
+                "resume" => self.guidance(data, "resume"),
+                "next" => self.guidance(data, "next"),
+                "accept" => self.attempt_transition(
+                    data,
+                    &request.operation_id,
+                    super::super::AttemptOperation::Accept,
+                ),
+                "heartbeat" => self.attempt_transition(
+                    data,
+                    &request.operation_id,
+                    super::super::AttemptOperation::Heartbeat,
+                ),
+                "renew" => self.attempt_transition(
+                    data,
+                    &request.operation_id,
+                    super::super::AttemptOperation::Renew,
+                ),
+                "submit" => self.attempt_transition(
+                    data,
+                    &request.operation_id,
+                    super::super::AttemptOperation::Submit,
+                ),
                 "release" => self.release(data, &request.operation_id),
                 "finish_close" => self.finish_close(data, &request.operation_id),
                 "evidence_add" => self.evidence_add(data),
                 "evidence_run" => self.evidence_run(data, &request.operation_id),
                 "operation_show" => self.operation_show(data),
+                "session_start" => self.session_start(data, &request.operation_id),
+                "session_show" => self.session_show(data),
                 command => Err(CliError::with(
                     ErrorCode::UnknownCommandNamespace,
                     ApplicationOutcome::Rejected,
@@ -948,6 +1087,55 @@ mod unix {
                     "replayed": !result.changed,
                 })),
             ))
+        }
+
+        fn guidance(&mut self, data: &Value, route: &str) -> ServiceResult {
+            let parsed = parsed_context_command(data, route)?;
+            let app = WorkApplication::new(&self.store);
+            let result = match route {
+                "guide" => super::super::guide_result(&parsed, &app, &self.store),
+                "resume" => super::super::resume_result(&parsed, &app, &self.store),
+                "next" => super::super::next_result(&parsed, &app, &self.store),
+                _ => unreachable!("service guidance route is validated before dispatch"),
+            }?;
+            Ok((result.outcome, result.revision, result.data))
+        }
+
+        fn attempt_transition(
+            &mut self,
+            data: &Value,
+            operation: &str,
+            kind: super::super::AttemptOperation,
+        ) -> ServiceResult {
+            let parsed = parsed_attempt_command(data, kind)?;
+            let app = WorkApplication::new(&self.store);
+            let adapter = SqliteAttemptAdapter::new(&self.store);
+            let result = super::super::attempt_mutation_result(
+                &parsed,
+                &app,
+                &adapter,
+                operation,
+                &self.store,
+                kind,
+            )?;
+            Ok((result.outcome, result.revision, result.data))
+        }
+
+        fn session_start(&mut self, data: &Value, operation: &str) -> ServiceResult {
+            let parsed = parsed_context_command(data, "session_start")?;
+            let result = super::super::session_start_result(
+                &parsed,
+                &WorkApplication::new(&self.store),
+                operation,
+            )?;
+            Ok((result.outcome, result.revision, result.data))
+        }
+
+        fn session_show(&mut self, data: &Value) -> ServiceResult {
+            let parsed = parsed_context_command(data, "session_show")?;
+            let result =
+                super::super::session_show_result(&parsed, &WorkApplication::new(&self.store))?;
+            Ok((result.outcome, result.revision, result.data))
         }
 
         fn status(&self, data: &Value) -> ServiceResult {
@@ -1967,6 +2155,59 @@ mod unix {
             .into_iter()
             .find(|item| item.work.kind == WorkKind::Task && item.decision.claimable_for_actor)
             .map(|item| item.work.id.as_str().to_owned()))
+    }
+
+    fn parsed_context_command(data: &Value, route: &str) -> Result<ParsedCommand, CliError> {
+        let path = match route {
+            "guide" => vec!["agent".to_owned(), "guide".to_owned()],
+            "resume" => vec!["agent".to_owned(), "resume".to_owned()],
+            "next" => vec!["agent".to_owned(), "next".to_owned()],
+            "session_start" => vec!["session".to_owned(), "start".to_owned()],
+            "session_show" => vec!["session".to_owned(), "show".to_owned()],
+            _ => {
+                return Err(CliError::invalid(format!(
+                    "unknown service context route: {route}"
+                )))
+            }
+        };
+        let mut options = CliOptions {
+            project: Some(string(data, "project_id")?),
+            actor: string(data, "actor_id")?,
+            harness: string(data, "harness_id")?,
+            session: string(data, "session_id")?,
+            work: optional_string(data, "work_id")?,
+            attempt: optional_string(data, "attempt_id")?,
+            expected_revision: optional_u64(data, "expected_revision")?,
+            ..CliOptions::default()
+        };
+        options.positionals = Vec::new();
+        Ok(ParsedCommand { path, options })
+    }
+
+    fn parsed_attempt_command(
+        data: &Value,
+        _kind: super::super::AttemptOperation,
+    ) -> Result<ParsedCommand, CliError> {
+        let mut options = CliOptions {
+            project: Some(string(data, "project_id")?),
+            actor: string(data, "actor_id")?,
+            harness: string(data, "harness_id")?,
+            session: string(data, "session_id")?,
+            work: Some(string(data, "work_id")?),
+            attempt: Some(string(data, "attempt_id")?),
+            fence: Some(required_u64(data, "fence")?),
+            expected_revision: optional_u64(data, "expected_revision")?,
+            lease_ttl_ms: optional_u64(data, "lease_ttl_ms")?,
+            reason: optional_string(data, "reason")?,
+            ..CliOptions::default()
+        };
+        if options.lease_ttl_ms.is_none() {
+            options.lease_ttl_ms = Some(AttemptPolicy::default().default_lease_ttl_ms);
+        }
+        Ok(ParsedCommand {
+            path: vec!["agent".to_owned(), "lifecycle".to_owned()],
+            options,
+        })
     }
 
     fn optional_duration(
