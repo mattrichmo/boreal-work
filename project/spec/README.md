@@ -31,6 +31,8 @@ checked-in fixture families are:
   registries, and the exact safe-argv policy;
 - `workflows/` for packaged core route/context/plan/claim/finish/handoff/
   health/memory refs and finish criteria;
+- repository `skills/` for the harness-neutral Codex/Claude adapters bound to
+  those trusted workflow refs;
 - `source-version/` and `memory-manifest.json` for provenance and Git
   publication authority.
 

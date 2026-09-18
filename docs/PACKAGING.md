@@ -52,6 +52,7 @@ The manifest records these versioned components:
 | `memory` | `project/spec/memory-manifest.json` | memory manifest |
 | `directive` | `project/spec/guidance/directive-registry.json` | checked-in guidance assets |
 | `workflow` | `project/spec/workflows/package.json` | checked-in workflow assets |
+| `skill` | `skills/manifest.json` | harness-neutral Codex/Claude skill adapters |
 
 ## Contract identity commands
 

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Boreal v2 Finish"
+  short_description: "Verify evidence and close or release work"
+  default_prompt: "Use $boreal-finish to verify and close or release Boreal work safely."

@@ -45,7 +45,7 @@ def test_manifest_is_reproducible() -> None:
         assert output_a.read_bytes() == output_b.read_bytes()
         value = json.loads(output_a.read_text(encoding="utf-8"))
         assert value["manifest_version"] == "boreal.release_manifest.v1"
-        assert set(value["versions"]) == {"protocol", "schema", "memory", "directive", "workflow"}
+        assert set(value["versions"]) == {"protocol", "schema", "memory", "directive", "workflow", "skill"}
         assert value["snapshot_identity"].startswith("sha256:")
         assert sum(len(component["assets"]) for component in value["components"].values()) >= 8
 

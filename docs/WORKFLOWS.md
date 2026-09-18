@@ -5,6 +5,23 @@ boundary for Boreal v2's core route, context, planning, claim, finish, review,
 audit, handoff, health, and memory workflows. It is package data, not a
 second state machine.
 
+## Harness-neutral skill adapters
+
+The checked-in adapters at `skills/` are the v2 skill surface for Codex and
+Claude. `skills/manifest.json` binds each thin adapter to exactly one trusted
+workflow ref in the core package. The adapter owns routing instructions and
+harness metadata; the Rust application owns context, eligibility, lifecycle,
+attempt/fence, evidence, review, publication, and recovery transitions.
+
+Each adapter contains:
+
+- `SKILL.md` for the shared workflow instructions consumed by either harness;
+- `boreal.yaml` for the package/ref and v2 authority declaration; and
+- `agents/openai.yaml` for Codex presentation metadata.
+
+The Claude-facing contract is the same `SKILL.md` and `boreal.yaml` source;
+there is no second Claude-specific workflow implementation.
+
 ## Validation
 
 Run the standalone validator from the v2 package root:
@@ -12,6 +29,7 @@ Run the standalone validator from the v2 package root:
 ```text
 python3 project/spec/workflows/validator.py
 python3 project/spec/workflows/validator.py --self-test
+python3 scripts/validation/skill_package.py
 ```
 
 The validator is dependency-free and fail-closed. It checks:
@@ -30,6 +48,10 @@ The validator is dependency-free and fail-closed. It checks:
 
 It never executes an `allowed_commands` value. Those strings are safe command
 shapes for guidance/rendering, not shell scripts.
+
+The skill-package validator is dependency-free and checks that every adapter
+has matching frontmatter, v2 metadata, Codex presentation metadata, and a
+workflow ref present in the trusted workflow package.
 
 ## Authority and parity mapping
 

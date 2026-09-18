@@ -1,0 +1,4 @@
+interface:
+  display_name: "Boreal v2 Plan"
+  short_description: "Plan milestones, sprints, and tasks"
+  default_prompt: "Use $boreal-plan to create or refine a Boreal v2 work structure."

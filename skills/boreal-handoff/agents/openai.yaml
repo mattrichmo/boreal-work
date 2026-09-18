@@ -1,0 +1,4 @@
+interface:
+  display_name: "Boreal v2 Handoff"
+  short_description: "Create durable session and work handoffs"
+  default_prompt: "Use $boreal-handoff to prepare a durable Boreal session or work handoff."

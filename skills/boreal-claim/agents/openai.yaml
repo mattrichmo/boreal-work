@@ -1,0 +1,4 @@
+interface:
+  display_name: "Boreal v2 Claim"
+  short_description: "Claim and checkpoint one fenced attempt"
+  default_prompt: "Use $boreal-claim to accept or checkpoint one fenced Boreal work attempt."

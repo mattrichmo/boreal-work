@@ -1,0 +1,23 @@
+{
+  "schema_version": "boreal.skill_package.v2",
+  "package_id": "boreal.core-skills",
+  "package_version": "1.0.0",
+  "workflow_package": {
+    "package_id": "boreal.core-workflows",
+    "package_version": "1.0.0"
+  },
+  "harnesses": ["codex", "claude"],
+  "state_authority": "boreal.application.v2",
+  "skills": [
+    {"name": "boreal-route", "path": "boreal-route", "workflows": ["boreal.workflow.route.v1"]},
+    {"name": "boreal-context", "path": "boreal-context", "workflows": ["boreal.workflow.context.v1"]},
+    {"name": "boreal-plan", "path": "boreal-plan", "workflows": ["boreal.workflow.plan.v1"]},
+    {"name": "boreal-claim", "path": "boreal-claim", "workflows": ["boreal.workflow.claim.v1"]},
+    {"name": "boreal-finish", "path": "boreal-finish", "workflows": ["boreal.workflow.finish.v1"]},
+    {"name": "boreal-review", "path": "boreal-review", "workflows": ["boreal.workflow.review.v1"]},
+    {"name": "boreal-audit", "path": "boreal-audit", "workflows": ["boreal.workflow.audit.v1"]},
+    {"name": "boreal-handoff", "path": "boreal-handoff", "workflows": ["boreal.workflow.handoff.v1"]},
+    {"name": "boreal-health", "path": "boreal-health", "workflows": ["boreal.workflow.health.v1"]},
+    {"name": "boreal-memory", "path": "boreal-memory", "workflows": ["boreal.workflow.memory.v1"]}
+  ]
+}

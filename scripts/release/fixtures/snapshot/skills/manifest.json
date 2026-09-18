@@ -1,0 +1,12 @@
+{
+  "schema_version": "boreal.skill_package.v2",
+  "package_id": "boreal.core-skills",
+  "package_version": "1.0.0",
+  "workflow_package": {
+    "package_id": "boreal.core-workflows",
+    "package_version": "1.0.0"
+  },
+  "harnesses": ["codex", "claude"],
+  "state_authority": "boreal.application.v2",
+  "skills": []
+}

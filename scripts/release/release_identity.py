@@ -2,7 +2,7 @@
 """Build and verify a deterministic Boreal v2 release identity.
 
 The checker intentionally uses only the Python standard library.  It hashes a
-small, explicit set of checked-in contract and workflow assets; it does not
+small, explicit set of checked-in contract, workflow, and skill assets; it does not
 build binaries or mutate a live Boreal project.
 """
 
@@ -62,6 +62,12 @@ COMPONENTS: dict[str, dict[str, Any]] = {
         "version_field": ("package_version",),
         "schema_field": ("schema_version",),
         "asset_roots": ("project/spec/workflows",),
+    },
+    "skill": {
+        "version_file": "skills/manifest.json",
+        "version_field": ("package_version",),
+        "schema_field": ("schema_version",),
+        "asset_roots": ("skills",),
     },
 }
 
@@ -197,6 +203,7 @@ def build_manifest(root: Path) -> dict[str, Any]:
     memory = read_json(root, "project/spec/memory-manifest.json")
     directives = read_json(root, "project/spec/guidance/directive-registry.json")
     workflows = read_json(root, "project/spec/workflows/package.json")
+    skills = read_json(root, "skills/manifest.json")
 
     versions = {
         "protocol": {
@@ -218,6 +225,10 @@ def build_manifest(root: Path) -> dict[str, Any]:
         "workflow": {
             "version": field(workflows, COMPONENTS["workflow"]["version_field"], "workflow package"),
             "schema": field(workflows, COMPONENTS["workflow"]["schema_field"], "workflow package"),
+        },
+        "skill": {
+            "version": field(skills, COMPONENTS["skill"]["version_field"], "skill package"),
+            "schema": field(skills, COMPONENTS["skill"]["schema_field"], "skill package"),
         },
     }
 

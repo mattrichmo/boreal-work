@@ -219,6 +219,10 @@ function selectV2(relativePath) {
     return isTextFile(relativePath);
   }
 
+  if (relativePath.startsWith("skills/")) {
+    return isTextFile(relativePath);
+  }
+
   return false;
 }
 
@@ -375,6 +379,10 @@ const specs = [
       "crates/cli/src/main.rs",
       "project/spec/schema-v3.sql",
       "project/build-plan/README.md",
+      "skills/manifest.json",
+      "skills/boreal-plan/SKILL.md",
+      "skills/boreal-plan/boreal.yaml",
+      "skills/boreal-plan/agents/openai.yaml",
       "scripts/release/fixtures/snapshot/project/spec/schema-v2.sql",
       "scripts/release/build_release.py",
       "packaging/homebrew/boreal.rb.template",

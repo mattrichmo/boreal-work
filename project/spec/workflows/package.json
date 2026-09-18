@@ -2,7 +2,7 @@
   "schema_version": "boreal.workflow_package.v1",
   "package_id": "boreal.core-workflows",
   "package_version": "1.0.0",
-  "asset_identity": "sha256:114472e433f74cd5faea8eee75bf0f735127f08fb2212ca18e18609f275d3823",
+  "asset_identity": "sha256:3402fd57a473bfccd10888465eb1c714ecda6e7a9af45fdd70589d06b44380d5",
   "state_authority": "boreal.application.v2",
   "execution_model": "one_action_per_guidance_response",
   "assets": [
