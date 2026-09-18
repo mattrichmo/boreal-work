@@ -142,6 +142,45 @@ impl WorkApplication<'_> {
             harness_id.as_str(),
         )?)
     }
+
+    /// End a durable session after the caller has explicitly made sure it has
+    /// no live work. The store repeats that check in the same transaction so a
+    /// read-then-write race cannot abandon a current fenced attempt.
+    pub fn end_session_as(
+        &self,
+        project_id: &ProjectId,
+        session_id: &str,
+        actor_id: &str,
+        expected_project_revision: Option<u64>,
+        ended_at: &str,
+        operation_id: impl Into<String>,
+    ) -> Result<OperationResult<SessionRecord>, ApplicationError> {
+        let operation_id = operation_id.into();
+        let request_digest = canonical_request_digest(
+            "session.end/v1",
+            json!({
+                "project_id": project_id.as_str(),
+                "session_id": session_id,
+                "actor_id": actor_id,
+                "expected_project_revision": expected_project_revision,
+            }),
+        );
+        let result = self.store_ref().end_session(
+            project_id.as_str(),
+            session_id,
+            actor_id,
+            &operation_id,
+            &request_digest,
+            expected_project_revision,
+            ended_at,
+        )?;
+        Ok(OperationResult {
+            operation_id,
+            snapshot_revision: result.revision,
+            changed: !result.replayed,
+            value: result.session,
+        })
+    }
 }
 
 fn stamp(value: TimestampMs) -> String {

@@ -9,18 +9,28 @@ mod status;
 mod evidence;
 mod evidence_store;
 mod guidance;
+mod hierarchy;
+mod intake;
+mod knowledge;
 mod operation_identity;
+mod planning_v3;
 mod session;
 mod sqlite_adapter;
 mod workflow_assets;
 
 use boreal_domain::{validate_parent, ProjectId, WorkItem};
-use boreal_store::{ClaimResult, SqliteStore, StoreError, WorkPage, WorkRecord};
+use boreal_store::{
+    ClaimResult, SqliteStore, StoreError, WorkEditInput, WorkHoldAddInput, WorkPage, WorkRecord,
+};
 pub use evidence::*;
 pub use guidance::{
     guide, guide_checked, Directive, DirectiveSeverity, DirectiveValidationError, GuidanceContext,
 };
+pub use hierarchy::*;
+pub use intake::*;
+pub use knowledge::*;
 pub use operation_identity::{canonical_request_digest, sha256_content_digest};
+pub use planning_v3::*;
 use serde_json::json;
 pub use session::{
     SessionRegistrationRequest, SessionRegistrationResult, StoreSessionRegistrationRequest,
@@ -29,6 +39,15 @@ pub use sqlite_adapter::SqliteAttemptAdapter;
 pub use status::*;
 use std::fmt;
 pub use workflow_assets::{WorkflowAsset, WorkflowAssetError, WorkflowRegistry};
+// Re-export the v3 planning vocabulary at the application boundary so CLI,
+// service adapters, and integration tests do not reach through the adapter
+// layer into the domain crate for request/response types.
+pub use boreal_domain::work_model_v3::{
+    CycleAssignment, CycleAssignmentState, CycleId, CycleInstance, CycleLifecycle, CycleSeries,
+    CycleSeriesLifecycle, CycleTemplate, DecompositionKind, ExecutionMode, FoldPolicy, GapPolicy,
+    IntakeBucket, IntakeBucketId, IntakeItem, IntakeItemId, IntakeKind, IntakeLifecycle,
+    IntakePromotion, PromotionId, PromotionTargetKind, TimeResolution, WorkNode,
+};
 
 pub use runtime::{
     AcceptAttemptRequest, AttemptAdapterError, AttemptCommand, AttemptCommandKind,
@@ -53,6 +72,7 @@ pub enum ApplicationError {
     AttemptAdapter(AttemptAdapterError),
     AttemptPolicy(AttemptPolicyError),
     Evidence(EvidenceValidationError),
+    Planning(PlanningError),
     Invalid(String),
 }
 
@@ -63,6 +83,7 @@ impl fmt::Display for ApplicationError {
             Self::AttemptAdapter(error) => error.fmt(formatter),
             Self::AttemptPolicy(error) => error.fmt(formatter),
             Self::Evidence(error) => error.fmt(formatter),
+            Self::Planning(error) => error.fmt(formatter),
             Self::Invalid(message) => formatter.write_str(message),
         }
     }
@@ -85,6 +106,12 @@ impl From<AttemptAdapterError> for ApplicationError {
 impl From<AttemptPolicyError> for ApplicationError {
     fn from(error: AttemptPolicyError) -> Self {
         Self::AttemptPolicy(error)
+    }
+}
+
+impl From<PlanningError> for ApplicationError {
+    fn from(error: PlanningError) -> Self {
+        Self::Planning(error)
     }
 }
 
@@ -311,6 +338,256 @@ impl<'a> WorkApplication<'a> {
             snapshot_revision: mutation.revision,
             changed: !mutation.replayed,
             value: (),
+        })
+    }
+
+    /// Revision-checked dependency mutation used by public planning routes.
+    /// The legacy adapter above remains available for compatibility callers;
+    /// new mutations should provide an expected project revision.
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_dependency_as_checked(
+        &self,
+        project_id: &ProjectId,
+        prerequisite_id: &str,
+        dependent_id: &str,
+        actor_id: &str,
+        expected_revision: Option<u64>,
+        now: &str,
+        operation_id: impl Into<String>,
+    ) -> Result<OperationResult<()>, ApplicationError> {
+        if prerequisite_id == dependent_id {
+            return Err(ApplicationError::Invalid(
+                "a work item cannot depend on itself".to_owned(),
+            ));
+        }
+        let operation_id = operation_id.into();
+        let request_digest = canonical_request_digest(
+            "dependency.add/v1",
+            json!({
+                "project_id": project_id.as_str(),
+                "prerequisite_id": prerequisite_id,
+                "dependent_id": dependent_id,
+                "actor_id": actor_id,
+                "expected_revision": expected_revision,
+            }),
+        );
+        let mutation = self.store.add_dependency_operation_checked(
+            project_id.as_str(),
+            prerequisite_id,
+            dependent_id,
+            actor_id,
+            &operation_id,
+            &request_digest,
+            expected_revision,
+            now,
+        )?;
+        Ok(OperationResult {
+            operation_id,
+            snapshot_revision: mutation.revision,
+            changed: !mutation.replayed,
+            value: (),
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn edit_work_as(
+        &self,
+        project_id: &ProjectId,
+        work_id: &str,
+        actor_id: &str,
+        parent_id: Option<Option<String>>,
+        title: Option<String>,
+        description: Option<String>,
+        priority: Option<u8>,
+        dispatch_policy: Option<String>,
+        expected_revision: Option<u64>,
+        now: &str,
+        operation_id: impl Into<String>,
+    ) -> Result<OperationResult<WorkRecord>, ApplicationError> {
+        let expected_revision = expected_revision.ok_or_else(|| {
+            ApplicationError::Invalid("work edit requires --expected-revision".to_owned())
+        })?;
+        if actor_id.trim().is_empty() {
+            return Err(ApplicationError::Invalid("actor is required".to_owned()));
+        }
+        if title
+            .as_deref()
+            .is_some_and(|value| value.trim().is_empty())
+        {
+            return Err(ApplicationError::Invalid(
+                "work title cannot be empty".to_owned(),
+            ));
+        }
+        if parent_id.is_none()
+            && title.is_none()
+            && description.is_none()
+            && priority.is_none()
+            && dispatch_policy.is_none()
+        {
+            return Err(ApplicationError::Invalid(
+                "work edit requires at least one changed field".to_owned(),
+            ));
+        }
+        let operation_id = operation_id.into();
+        let request_digest = canonical_request_digest(
+            "work.edit/v1",
+            json!({
+                "project_id": project_id.as_str(), "work_id": work_id,
+                "actor_id": actor_id, "parent_id": parent_id, "title": title,
+                "description": description, "priority": priority,
+                "dispatch_policy": dispatch_policy, "expected_revision": expected_revision,
+            }),
+        );
+        let mutation = self.store.edit_work_operation(
+            &WorkEditInput {
+                project_id: project_id.to_string(),
+                work_id: work_id.to_owned(),
+                parent_id,
+                title,
+                description,
+                priority,
+                dispatch_policy,
+            },
+            actor_id,
+            &operation_id,
+            &request_digest,
+            expected_revision,
+            now,
+        )?;
+        Ok(OperationResult {
+            operation_id,
+            snapshot_revision: mutation.revision,
+            changed: !mutation.replayed,
+            value: self.show_work(project_id, work_id)?,
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn remove_dependency_as(
+        &self,
+        project_id: &ProjectId,
+        prerequisite_id: &str,
+        dependent_id: &str,
+        actor_id: &str,
+        expected_revision: Option<u64>,
+        now: &str,
+        operation_id: impl Into<String>,
+    ) -> Result<OperationResult<()>, ApplicationError> {
+        let expected_revision = expected_revision.ok_or_else(|| {
+            ApplicationError::Invalid("dependency removal requires --expected-revision".to_owned())
+        })?;
+        if prerequisite_id == dependent_id {
+            return Err(ApplicationError::Invalid(
+                "a work item cannot depend on itself".to_owned(),
+            ));
+        }
+        let operation_id = operation_id.into();
+        let request_digest = canonical_request_digest(
+            "dependency.remove/v1",
+            json!({
+                "project_id": project_id.as_str(), "prerequisite_id": prerequisite_id,
+                "dependent_id": dependent_id, "actor_id": actor_id,
+                "expected_revision": expected_revision,
+            }),
+        );
+        let mutation = self.store.remove_dependency_operation(
+            project_id.as_str(),
+            prerequisite_id,
+            dependent_id,
+            actor_id,
+            &operation_id,
+            &request_digest,
+            expected_revision,
+            now,
+        )?;
+        Ok(OperationResult {
+            operation_id,
+            snapshot_revision: mutation.revision,
+            changed: !mutation.replayed,
+            value: (),
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_work_hold_as(
+        &self,
+        project_id: &ProjectId,
+        work_id: &str,
+        reason_code: &str,
+        actor_id: &str,
+        expected_revision: Option<u64>,
+        now: &str,
+        operation_id: impl Into<String>,
+    ) -> Result<OperationResult<WorkRecord>, ApplicationError> {
+        let expected_revision = expected_revision.ok_or_else(|| {
+            ApplicationError::Invalid("hold add requires --expected-revision".to_owned())
+        })?;
+        if reason_code.trim().is_empty() {
+            return Err(ApplicationError::Invalid(
+                "hold reason is required".to_owned(),
+            ));
+        }
+        let operation_id = operation_id.into();
+        let request_digest = canonical_request_digest(
+            "work.hold.add/v1",
+            json!({"project_id": project_id.as_str(), "work_id": work_id, "reason_code": reason_code, "actor_id": actor_id, "expected_revision": expected_revision}),
+        );
+        let mutation = self.store.add_work_hold_operation(
+            &WorkHoldAddInput {
+                project_id: project_id.to_string(),
+                work_id: work_id.to_owned(),
+                reason_code: reason_code.to_owned(),
+            },
+            actor_id,
+            &operation_id,
+            &request_digest,
+            expected_revision,
+            now,
+        )?;
+        Ok(OperationResult {
+            operation_id,
+            snapshot_revision: mutation.revision,
+            changed: !mutation.replayed,
+            value: self.show_work(project_id, work_id)?,
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn resolve_work_hold_as(
+        &self,
+        project_id: &ProjectId,
+        work_id: &str,
+        hold_id: &str,
+        resolution_reason: &str,
+        actor_id: &str,
+        expected_revision: Option<u64>,
+        now: &str,
+        operation_id: impl Into<String>,
+    ) -> Result<OperationResult<WorkRecord>, ApplicationError> {
+        let expected_revision = expected_revision.ok_or_else(|| {
+            ApplicationError::Invalid("hold resolve requires --expected-revision".to_owned())
+        })?;
+        let operation_id = operation_id.into();
+        let request_digest = canonical_request_digest(
+            "work.hold.resolve/v1",
+            json!({"project_id": project_id.as_str(), "work_id": work_id, "hold_id": hold_id, "resolution_reason": resolution_reason, "actor_id": actor_id, "expected_revision": expected_revision}),
+        );
+        let mutation = self.store.resolve_work_hold_operation(
+            project_id.as_str(),
+            work_id,
+            hold_id,
+            actor_id,
+            resolution_reason,
+            &operation_id,
+            &request_digest,
+            expected_revision,
+            now,
+        )?;
+        Ok(OperationResult {
+            operation_id,
+            snapshot_revision: mutation.revision,
+            changed: !mutation.replayed,
+            value: self.show_work(project_id, work_id)?,
         })
     }
 

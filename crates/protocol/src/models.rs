@@ -6,6 +6,42 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Common project/actor context carried by planning and operator routes.
+///
+/// The application owns authorization and revision checks; this DTO only
+/// freezes the wire vocabulary shared by the CLI, service, and TUI adapters.
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub struct RouteContextDto {
+    pub project_id: String,
+    pub actor_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub harness_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_revision: Option<u64>,
+}
+
+/// Versioned payload for the public dependency-add route.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct DependencyAddDto {
+    pub project_id: String,
+    pub prerequisite_id: String,
+    pub dependent_id: String,
+    pub actor_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_revision: Option<u64>,
+}
+
+/// Bounded read-only operator diagnostic request.
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub struct DoctorDto {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actor_id: Option<String>,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct StatusDto {
     pub schema_version: String,
@@ -346,5 +382,26 @@ mod tests {
         let guide: AgentGuideDto = serde_json::from_value(envelope.data.unwrap()).unwrap();
         assert_eq!(guide.kind, "agent_guide");
         assert!(!guide.next_action.unwrap().shell);
+    }
+
+    #[test]
+    fn planning_route_dtos_round_trip_with_optional_context() {
+        let dependency = DependencyAddDto {
+            project_id: "project-1".to_owned(),
+            prerequisite_id: "task-a".to_owned(),
+            dependent_id: "task-b".to_owned(),
+            actor_id: "agent-1".to_owned(),
+            expected_revision: Some(7),
+        };
+        let encoded = serde_json::to_value(&dependency).unwrap();
+        let decoded: DependencyAddDto = serde_json::from_value(encoded).unwrap();
+        assert_eq!(decoded, dependency);
+
+        let doctor: DoctorDto = serde_json::from_value(serde_json::json!({
+            "project_id": "project-1"
+        }))
+        .unwrap();
+        assert_eq!(doctor.project_id.as_deref(), Some("project-1"));
+        assert_eq!(doctor.actor_id, None);
     }
 }

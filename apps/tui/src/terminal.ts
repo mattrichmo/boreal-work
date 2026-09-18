@@ -1,4 +1,4 @@
-import { MountedView, StatusItem, workflowDisplayState } from "./client.js";
+import { DashboardFilter, MountedView, StatusItem, workflowDisplayState } from "./client.js";
 
 export interface RenderOptions {
   readonly width?: number;
@@ -7,6 +7,12 @@ export interface RenderOptions {
   readonly help_visible?: boolean;
   readonly pending_confirmation?: string | null;
   readonly status_message?: string | null;
+  readonly filter?: DashboardFilter;
+  readonly search_query?: string;
+  readonly selected_index?: number;
+  readonly palette_visible?: boolean;
+  readonly search_editing?: boolean;
+  readonly search_buffer?: string;
 }
 
 function boundedDimension(value: number | undefined, fallback: number, minimum: number): number {
@@ -38,6 +44,47 @@ function routeLabel(view: MountedView): string {
   return "NOW / MONITORING";
 }
 
+function filterLabel(filter: DashboardFilter): string {
+  switch (filter) {
+    case "all": return "ALL";
+    case "active": return "ACTIVE";
+    case "expired": return "EXPIRED REVIEW";
+    case "milestones": return "MILESTONES";
+    case "sprints": return "SPRINTS";
+    case "tasks": return "TASKS";
+    default: return filter.toUpperCase();
+  }
+}
+
+function isActive(item: StatusItem): boolean {
+  return ["claimed", "in_progress", "needs_verification", "awaiting_review", "complete"].includes(item.display_status ?? item.status);
+}
+
+function itemMatchesFilter(item: StatusItem, filter: DashboardFilter): boolean {
+  const status = item.display_status ?? item.status;
+  switch (filter) {
+    case "all": return true;
+    case "active": return isActive(item);
+    case "expired": return status === "expired_review";
+    case "milestones": return item.kind === "milestone";
+    case "sprints": return item.kind === "sprint";
+    case "tasks": return item.kind === "task";
+    default: return status === filter;
+  }
+}
+
+function visibleItems(view: MountedView, options: RenderOptions): StatusItem[] {
+  const filter = options.filter ?? "all";
+  const query = options.search_query?.trim().toLocaleLowerCase();
+  return (view.monitoring?.items ?? []).filter((item) => {
+    if (!itemMatchesFilter(item, filter)) return false;
+    if (!query) return true;
+    return [item.work_id, item.title, item.description, item.parent_id, item.kind]
+      .filter((value): value is string => typeof value === "string")
+      .some((value) => value.toLocaleLowerCase().includes(query));
+  });
+}
+
 function stateSummary(view: MountedView, narrow: boolean): string {
   if (!view.monitoring) return "service unavailable";
   const counts = view.monitoring.counts;
@@ -55,15 +102,20 @@ function stateSummary(view: MountedView, narrow: boolean): string {
   ].join("  ");
 }
 
-function renderItem(item: StatusItem, narrow: boolean): string {
+function renderItem(item: StatusItem, narrow: boolean, selected: boolean): string {
   const reason = item.reason_codes.length > 0 ? ` | ${item.reason_codes.join(", ")}` : "";
   const attempt = item.attempt ? ` | attempt ${item.attempt.attempt_id}@${item.attempt.fence}` : "";
   const state = workflowDisplayState(item);
-  if (narrow) return `${state.toUpperCase().padEnd(9)} ${item.work_id}${item.title ? ` | ${item.title}` : ""}`;
-  return `  ${state.toUpperCase().padEnd(17)} ${item.work_id}: ${state}${item.title ? ` | ${item.title}` : ""}${attempt}${reason}`;
+  const marker = selected ? ">" : " ";
+  const kind = item.kind ? `[${item.kind}] ` : "";
+  if (narrow) return `${marker}${state.toUpperCase().padEnd(9)} ${kind}${item.work_id}${item.title ? ` | ${item.title}` : ""}`;
+  const parent = item.parent_id ? ` | parent ${item.parent_id}` : "";
+  const priority = item.priority === undefined ? "" : ` | p${item.priority}`;
+  const due = item.due_at ? ` | due ${item.due_at}` : "";
+  return `${marker} ${state.toUpperCase().padEnd(17)} ${kind}${item.work_id}: ${state}${item.title ? ` | ${item.title}` : ""}${parent}${priority}${due}${attempt}${reason}`;
 }
 
-function renderSelected(item: StatusItem | null, narrow: boolean): string[] {
+function renderSelected(item: StatusItem | null, narrow: boolean, receiptAvailable = false): string[] {
   if (!item) return ["", "SELECTED", narrow ? "  None. Use j/k, Enter." : "  No work selected. Use: select WORK_ID"];
   const lines = ["", "SELECTED", `  ${selectedLabel(item)}`, `  state: ${workflowDisplayState(item)}  claimable: ${item.claimable ? "yes" : "no"}`];
   if (narrow) {
@@ -80,6 +132,27 @@ function renderSelected(item: StatusItem | null, narrow: boolean): string[] {
     if (item.attempt.hard_deadline) lines.push(`  hard deadline: ${item.attempt.hard_deadline}`);
   }
   if (item.gates?.open.length) lines.push(`  open gates: ${item.gates.open.map((gate) => gate.gate_id).join(", ")}`);
+  if (item.gates?.satisfied.length) lines.push(`  satisfied gates: ${item.gates.satisfied.map((gate) => gate.gate_id).join(", ")}`);
+  if (item.kind) lines.push(`  kind: ${item.kind}${item.parent_id ? `  parent: ${item.parent_id}` : ""}`);
+  if (item.priority !== undefined || item.dispatch_policy) {
+    lines.push(`  planning: priority=${item.priority ?? "unknown"} dispatch=${item.dispatch_policy ?? "unknown"}`);
+  }
+  if (item.due_at) lines.push(`  due: ${item.due_at}`);
+  if (item.description) lines.push(`  description: ${item.description}`);
+  if (item.dependencies?.length) {
+    lines.push("  dependencies:", ...item.dependencies.slice(0, 8).map((dependency) =>
+      `    ${dependency.work_id}${dependency.status ? ` [${dependency.status}]` : ""}${dependency.satisfied === undefined ? "" : dependency.satisfied ? " ✓" : " · open"}`));
+    if (item.dependencies.length > 8) lines.push(`    … ${item.dependencies.length - 8} more`);
+  } else if (item.kind === "task") {
+    lines.push("  dependencies: not included by the current status route");
+  }
+  if (item.activity?.length) {
+    lines.push("  recent activity:", ...item.activity.slice(-5).map((event) =>
+      `    ${event.occurred_at ?? "unknown time"} ${event.kind}${event.summary ? ` — ${event.summary}` : ""}`));
+  } else {
+    lines.push("  history: bounded activity route unavailable");
+  }
+  lines.push(`  evidence: ${receiptAvailable ? "current receipt captured in this session" : "no current receipt captured in this session"}`);
   if (item.reason_codes.length) lines.push(`  reasons: ${item.reason_codes.join(", ")}`);
   return lines;
 }
@@ -89,9 +162,12 @@ export function renderMountedView(view: MountedView, options: RenderOptions = {}
   const width = boundedDimension(options.width, 120, 20);
   const height = boundedDimension(options.height, 200, 8);
   const narrow = width < 72;
+  const filter = options.filter ?? "all";
+  const items = visibleItems(view, options);
+  const selectedIndex = Math.min(Math.max(options.selected_index ?? 0, 0), Math.max(items.length - 1, 0));
   const lines = [
     narrow ? "BOREAL WORK" : "BOREAL / WORK DASHBOARD",
-    `${routeLabel(view)}  |  ${view.mounted ? "CONNECTED" : "UNMOUNTED"}`,
+    `${routeLabel(view)}  |  ${view.mounted ? "CONNECTED" : "UNMOUNTED"}  |  ${filterLabel(filter)}`,
   ];
   if (view.monitoring) {
     lines.push(narrow
@@ -100,16 +176,20 @@ export function renderMountedView(view: MountedView, options: RenderOptions = {}
     if (view.monitoring.next_status_change_at && !narrow) lines.push(`next status change ${view.monitoring.next_status_change_at}`);
     lines.push(stateSummary(view, narrow));
     if (view.monitoring.truncated) lines.push("RESULTS TRUNCATED: use a narrower view or detail read");
-    lines.push("", "WORK QUEUE");
+    lines.push("", `WORK QUEUE (${items.length}${view.monitoring.total !== items.length ? ` of ${view.monitoring.total}` : ""})`);
+    if (options.search_query) lines.push(`search: ${options.search_query}`);
     const reservedRows = options.interactive ? 12 : 8;
     const availableRows = Math.max(1, height - lines.length - reservedRows);
-    const visibleItems = view.monitoring.items.slice(0, availableRows);
-    for (const item of visibleItems) {
-      lines.push(renderItem(item, narrow));
+    const pageStart = Math.min(Math.max(selectedIndex - Math.floor(availableRows / 2), 0), Math.max(items.length - availableRows, 0));
+    const pageItems = items.slice(pageStart, pageStart + availableRows);
+    for (const [index, item] of pageItems.entries()) {
+      lines.push(renderItem(item, narrow, pageStart + index === selectedIndex));
     }
-    if (visibleItems.length < view.monitoring.items.length) lines.push(`  … ${view.monitoring.items.length - visibleItems.length} more`);
+    if (pageStart > 0 || pageStart + pageItems.length < items.length) {
+      lines.push(`  … showing ${pageStart + 1}-${pageStart + pageItems.length} of ${items.length}`);
+    }
   }
-  lines.push(...renderSelected(view.selected_work, narrow));
+  lines.push(...renderSelected(view.selected_work, narrow, view.selected_receipt_available));
   if (view.selected_work) {
     const workActions = view.actions.filter((action) => action.action !== "create_project" && action.action !== "create_work");
     if (narrow) {
@@ -120,10 +200,16 @@ export function renderMountedView(view: MountedView, options: RenderOptions = {}
     }
   }
   if (options.pending_confirmation) lines.push("", `CONFIRM: ${options.pending_confirmation}  [y] yes  [n] no`);
+  if (options.search_editing) lines.push("", `SEARCH: ${options.search_buffer ?? ""}_  [enter] apply  [esc] cancel  [backspace] delete`);
+  if (options.palette_visible) {
+    lines.push("", "COMMAND PALETTE", "  1 all   2 ready   3 active   4 blocked   5 expired   6 closed",
+      "  7 milestones   8 sprints   9 tasks   / search   r refresh   ? help",
+      "  edit/dependencies/cycles/intake/source/memory/session recovery: disabled until service routes exist");
+  }
   if (options.help_visible) {
-    lines.push("", "KEYS", "  j/↓ next  k/↑ previous  Enter detail  Esc back", "  r refresh  c claim  s start  f finish  x release  ? help  q quit");
+    lines.push("", "KEYS", "  j/↓ next  k/↑ previous  Enter detail  Esc back", "  1-9 filters  / search  p palette  r refresh", "  c claim  s start  f finish  x release  ? help  q quit");
   } else if (options.interactive) {
-    lines.push("", "j/k move  Enter detail  r refresh  ? help  q quit");
+    lines.push("", "j/k move  1-9 filters  / search  p palette  Enter detail  r refresh  ? help  q quit");
   } else {
     lines.push("", "COMMANDS", "  select WORK_ID  |  refresh  |  claim  |  accept-start  |  evidence  |  finish  |  release  |  quit");
   }
@@ -132,6 +218,11 @@ export function renderMountedView(view: MountedView, options: RenderOptions = {}
       `  ${operation.action}${operation.work_id ? ` work=${operation.work_id}` : ""} operation=${operation.operation_id}`));
   }
   if (view.notice) lines.push("", `NOTICE: ${view.notice.kind}: ${view.notice.message}`);
+  const unavailable = (view.capabilities ?? []).filter((capability) => capability.status === "unavailable");
+  if (unavailable.length && (options.palette_visible || options.help_visible || !options.interactive)) {
+    lines.push("", "SERVICE ROUTES NOT YET AVAILABLE", ...unavailable.slice(0, 5).map((capability) =>
+      `  ${capability.route}: ${capability.reason}`));
+  }
   if (options.status_message) lines.push("", `STATUS: ${options.status_message}`);
   return `${fitHeight(lines.map((line) => clip(line, width)), height).join("\n")}\n`;
 }

@@ -13,7 +13,7 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 
-use crate::{Lifecycle, MigrationDocument, WorkKind};
+use crate::{Lifecycle, LossDisposition, LossLedgerEntry, MigrationDocument, WorkKind};
 
 pub const WORK_MODEL_FORMAT: &str = "boreal.work-model";
 pub const WORK_MODEL_VERSION: u32 = 3;
@@ -812,6 +812,54 @@ impl Schema2UpgradePlan {
     pub fn materialize(&self) -> Result<WorkModelV3Document, V3ValidationError> {
         self.document.validate()?;
         Ok(self.document.clone())
+    }
+
+    /// Return the explicit schema-2 compatibility loss/review ledger. The
+    /// complete source document remains embedded in `compatibility`; these
+    /// entries identify only semantics that must not be silently promoted into
+    /// live v3 execution state.
+    pub fn loss_ledger(&self) -> Vec<LossLedgerEntry> {
+        let compatibility = self.document.compatibility.as_ref();
+        let mut ledger = compatibility
+            .into_iter()
+            .flat_map(|compatibility| {
+                let sprint_entries = compatibility
+                    .retained_sprint_work_ids
+                    .iter()
+                    .map(|id| LossLedgerEntry {
+                        record_type: "work".to_owned(),
+                        record_id: Some(id.clone()),
+                        disposition: LossDisposition::HistoricalOnly,
+                        reason: "legacy sprint remains a compatibility subject until reviewed cycle conversion".to_owned(),
+                        raw: serde_json::json!({"work_id": id, "kind": "sprint"}),
+                    });
+                let proof_entries = compatibility
+                    .proof_subject_work_ids
+                    .iter()
+                    .map(|id| LossLedgerEntry {
+                        record_type: "proof".to_owned(),
+                        record_id: Some(id.clone()),
+                        disposition: LossDisposition::HistoricalOnly,
+                        reason: "historical proof is preserved but not rebound to a v3 attempt".to_owned(),
+                        raw: serde_json::json!({"work_id": id}),
+                    });
+                sprint_entries.chain(proof_entries)
+            })
+            .collect::<Vec<_>>();
+        ledger.sort_by(|left, right| {
+            (
+                left.record_type.as_str(),
+                left.record_id.as_deref().unwrap_or(""),
+            )
+                .cmp(&(
+                    right.record_type.as_str(),
+                    right.record_id.as_deref().unwrap_or(""),
+                ))
+        });
+        ledger.dedup_by(|left, right| {
+            left.record_type == right.record_type && left.record_id == right.record_id
+        });
+        ledger
     }
 }
 

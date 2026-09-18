@@ -17,6 +17,7 @@ boreal-application = { path = "../application" }
 boreal-domain = { path = "../domain" }
 boreal-protocol = { path = "../protocol" }
 boreal-service = { path = "../service" }
+boreal-source = { path = "../source" }
 boreal-store = { path = "../store" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

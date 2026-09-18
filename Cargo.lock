@@ -7,7 +7,10 @@ name = "boreal-application"
 version = "0.2.0"
 dependencies = [
  "boreal-domain",
+ "boreal-memory",
+ "boreal-migration",
  "boreal-service",
+ "boreal-source",
  "boreal-store",
  "serde_json",
 ]
@@ -20,6 +23,7 @@ dependencies = [
  "boreal-domain",
  "boreal-protocol",
  "boreal-service",
+ "boreal-source",
  "boreal-store",
  "serde",
  "serde_json",

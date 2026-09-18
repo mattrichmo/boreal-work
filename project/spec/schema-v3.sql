@@ -1,10 +1,10 @@
 -- Boreal v2 additive work-model extension: boreal.work-model/3.
 --
--- This is a migration artifact, not runtime wiring.  It requires a complete
--- schema-v2 database and leaves every schema-v2 table, trigger, and column
--- unchanged.  The current store still advertises/opens schema version 2;
--- the future migration owner must teach it how to apply and reopen this
--- extension before using user_version 3 in production.
+-- This is an additive migration artifact.  It requires a complete schema-v2
+-- database and leaves every schema-v2 table, trigger, and column unchanged.
+-- The store applies it transactionally and reopens it with explicit v3
+-- contract validation; project rows retain their schema-2 compatibility
+-- version while the database user_version records the installed extension.
 --
 -- The v3 tables deliberately use their own names.  This keeps the existing
 -- v2 WorkItem/Dependency semantics available for compatibility and gives the

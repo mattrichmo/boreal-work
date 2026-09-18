@@ -850,7 +850,9 @@ class FakeFullScreenTerminal implements FullScreenTerminal {
   private readonly resizeListeners = new Set<() => void>();
   private readonly signalListeners = new Map<TerminalSignal, Set<() => void>>();
 
-  dimensions(): { width: number; height: number } { return { width: 44, height: 18 }; }
+  constructor(private readonly width = 44) {}
+
+  dimensions(): { width: number; height: number } { return { width: this.width, height: 18 }; }
   write(value: string): void { this.writes.push(value); }
   setRawMode(enabled: boolean): void { this.rawModes.push(enabled); }
   resume(): void { this.resumed += 1; }
@@ -877,7 +879,7 @@ class FakeFullScreenTerminal implements FullScreenTerminal {
   }
 }
 
-assert(decodeKeys("\u001b[B\u001b[A\r\u0003").join(",") === "down,up,enter,ctrl-c", "full-screen keyboard decoder handles arrows, enter, and Ctrl-C");
+assert(decodeKeys("\u001b[B\u001b[A\r\u0003\u007f").join(",") === "down,up,enter,ctrl-c,backspace", "full-screen keyboard decoder handles arrows, enter, Ctrl-C, and backspace");
 let fullScreenItems = [item("keyboard-task", "ready", { title: "A deliberately long title for narrow terminal clipping" })];
 const fullScreenCalls: Call[] = [];
 const fullScreenService: VersionedServiceApi = {
@@ -919,6 +921,30 @@ assert(fakeTerminal.listenerCount() === 0, "full-screen lifecycle removes data, 
 const narrow = renderMountedView(fullScreenController.view(), { width: 36, height: 12, interactive: true });
 assert(narrow.split("\n").every((line) => line.length <= 36), "narrow renderer clips every visible line to terminal width");
 assert(narrow.split("\n").length <= 13, "narrow renderer bounds output by terminal height");
+
+fullScreenItems = [
+  item("milestone-ui", "queued", { kind: "milestone", title: "Dashboard milestone", parent_id: null }),
+  item("sprint-ui", "active" as StatusItem["status"], { kind: "sprint", title: "Current sprint", parent_id: "milestone-ui" }),
+  item("task-ui", "blocked", { kind: "task", title: "Blocked task", parent_id: "sprint-ui", dependencies: [{ work_id: "upstream", status: "in_progress", satisfied: false }] }),
+];
+await fullScreenController.refresh();
+fullScreenController.navigate({ kind: "work", project_id: "project_test", work_id: "task-ui" });
+const filtered = renderMountedView(fullScreenController.view(), { width: 120, height: 40, filter: "tasks", search_query: "blocked" });
+assert(filtered.includes("WORK QUEUE (1") && filtered.includes("task-ui") && !filtered.includes("[sprint] sprint-ui"), "renderer applies bounded kind and text filters without changing service state");
+assert(filtered.includes("dependencies:") && filtered.includes("upstream"), "work detail renders service-provided dependency context");
+assert(filtered.includes("work.edit: Rust service route is not exposed yet"), "renderer labels unavailable planning routes instead of inventing local mutations");
+
+const filterTerminal = new FakeFullScreenTerminal(120);
+const filterRun = runFullScreen(fullScreenController, filterTerminal, { auto_refresh_ms: 60_000 });
+filterTerminal.emitData("8");
+filterTerminal.emitData("p");
+filterTerminal.emitData("/");
+filterTerminal.emitData("task");
+filterTerminal.emitData("\r");
+filterTerminal.emitData("q");
+await filterRun;
+assert(filterTerminal.writes.some((value) => value.includes("SPRINTS")), "full-screen numeric filter and command palette render the selected sprint view");
+assert(filterTerminal.writes.some((value) => value.includes("search: task")), "full-screen search input is revision-independent presentation state");
 
 const signalTerminal = new FakeFullScreenTerminal();
 const signalledRun = runFullScreen(fullScreenController, signalTerminal, { auto_refresh_ms: 60_000 });

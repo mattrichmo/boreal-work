@@ -8,16 +8,19 @@
 #[cfg(unix)]
 mod application_route;
 mod busy;
+mod control;
 mod election;
 #[cfg(unix)]
 mod host;
 mod metrics;
 mod notifications;
+mod priority_queue;
 mod queue;
 mod read_pool;
 mod recovery;
 mod runtime;
 mod tasks;
+mod timer;
 #[cfg(unix)]
 mod transport;
 
@@ -28,6 +31,9 @@ pub use application_route::{
     APPLICATION_SCHEMA_VERSION,
 };
 pub use busy::BusyOutcome;
+pub use control::{
+    ControlError, ControlPhase, ControlRecord, ControlRequestKind, OperationControl,
+};
 pub use election::{ElectionError, ProjectElection};
 #[cfg(unix)]
 pub use host::{
@@ -40,18 +46,20 @@ pub use notifications::{
     NotificationError, NotificationHub, Replay, RevisionCursor, RevisionNotification, Subscription,
     SubscriptionUpdate,
 };
+pub use priority_queue::{PrioritizedItem, PriorityQueue, QueuePriority, MAX_CONTROL_BURST};
 pub use queue::{
     EnqueueError, FairWriterQueue, QueueConfigError, QueueTicket, QueuedWrite, WriterQueue,
 };
 pub use read_pool::{BoundedReadPool, ReadPool, ReadPoolConfigError, ReadPoolError};
 pub use recovery::{
-    OperationError, OperationPhase, OperationRecord, OperationRecovery, RecoveryBackend,
-    RecoveryBackendError, RecoveryEntry, RecoveryReport,
+    ExecutionReference, OperationError, OperationPhase, OperationRecord, OperationRecovery,
+    RecoveryBackend, RecoveryBackendError, RecoveryDisposition, RecoveryEntry, RecoveryReport,
 };
 pub use runtime::{
     BoundedWriter, ServiceRuntime, ServiceRuntimeConfigError, WriterExecutionError, WriterRuntime,
 };
 pub use tasks::{ReadExecutor, ReadFn, ReadTask, WriteExecutor, WriteFn, WriteTask};
+pub use timer::{TimerError, TimerRegistry};
 #[cfg(unix)]
 pub use transport::{
     IoOperation, JsonRequest, JsonResponse, ProtocolError, ProtocolErrorCode, ServeOnceOutcome,

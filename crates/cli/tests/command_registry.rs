@@ -20,10 +20,16 @@ fn help_lists_available_and_unavailable_work_children() {
         .unwrap()
         .iter()
         .any(|entry| entry["path"] == "work create"));
-    assert_eq!(
-        data["matches"]["unavailable"][0]["code"],
-        "work_edit_not_implemented"
-    );
+    assert!(data["matches"]["available"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|entry| entry["path"] == "work edit"));
+    assert!(!data["matches"]["unavailable"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|entry| entry["path"] == "work edit"));
 }
 
 #[test]
@@ -39,9 +45,26 @@ fn deep_help_resolves_a_concrete_available_route() {
 fn deep_commands_resolves_a_concrete_unavailable_route() {
     let (success, envelope) = invoke(&["commands", "dep", "add", "--json"]);
     assert!(success);
-    let routes = envelope["data"]["unavailable_routes"].as_array().unwrap();
+    let routes = envelope["data"]["available"].as_array().unwrap();
     assert_eq!(routes.len(), 1);
     assert_eq!(routes[0]["path"], "dep add");
+    assert_eq!(routes[0]["direct"], true);
+    assert_eq!(routes[0]["service"], true);
+}
+
+#[test]
+fn commands_expose_revision_checked_planning_mutations() {
+    let (success, envelope) = invoke(&["commands", "work", "--json"]);
+    assert!(success);
+    let paths = envelope["data"]["available"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|entry| entry["path"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert!(paths.contains(&"work hold add"));
+    assert!(paths.contains(&"work hold resolve"));
+    assert!(paths.contains(&"work dispatch set"));
 }
 
 #[test]
@@ -61,20 +84,18 @@ fn version_reports_the_linked_sqlite_runtime_identity() {
 }
 
 #[test]
-fn commands_reports_exact_unavailable_routes_by_namespace() {
+fn commands_reports_source_routes_as_direct_only() {
     let (success, envelope) = invoke(&["commands", "source", "--json"]);
     assert!(success);
     let data = &envelope["data"];
-    assert_eq!(data["available"].as_array().unwrap().len(), 0);
-    let routes = data["unavailable_routes"].as_array().unwrap();
+    let routes = data["available"].as_array().unwrap();
     assert_eq!(routes.len(), 4);
     assert!(routes.iter().all(|route| {
-        route["availability"] == "unavailable"
-            && route["scope"] == "route"
-            && route["adapters"]["direct"] == false
+        route["availability"] == "available"
+            && route["adapters"]["direct"] == true
             && route["adapters"]["service"] == false
-            && route["recovery"]["kind"] == "implementation_gap"
     }));
+    assert!(data["unavailable_routes"].as_array().unwrap().is_empty());
 }
 
 #[test]

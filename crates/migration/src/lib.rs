@@ -618,6 +618,28 @@ pub struct ImportReport {
     pub ambiguous: Vec<ImportIssue>,
 }
 
+/// Explicit disposition for every source record that could not become a
+/// trusted v2 record. The raw issue remains available in `ImportIssue`; this
+/// view is the stable loss ledger consumed by dry-run/apply/verify adapters.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub enum LossDisposition {
+    Unsupported,
+    Ambiguous,
+    HistoricalOnly,
+    Transformed,
+    Preserved,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct LossLedgerEntry {
+    pub record_type: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub record_id: Option<String>,
+    pub disposition: LossDisposition,
+    pub reason: String,
+    pub raw: Value,
+}
+
 /// Facts about the source snapshot carried across the migration boundary.
 /// `source_fingerprint` is the SHA-256 digest of the exact input bytes. It is
 /// not a claim that the source bytes are trusted; it only makes the import
@@ -650,6 +672,7 @@ pub struct ImportPlan {
     pub ready: bool,
     pub actions: Vec<ImportAction>,
     pub report: ImportReport,
+    pub loss_ledger: Vec<LossLedgerEntry>,
 }
 
 /// Side-effect-free verification output for an import plan. A store adapter
@@ -663,6 +686,7 @@ pub struct ImportVerification {
     pub counts: MigrationCounts,
     pub action_count: usize,
     pub issue_count: usize,
+    pub loss_ledger_count: usize,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -680,6 +704,45 @@ impl ImportReport {
 
     pub fn issue_count(&self) -> usize {
         self.unsupported.len() + self.ambiguous.len()
+    }
+
+    /// Return a deterministic, explicit ledger of every non-preserved source
+    /// record. This is derived from the existing report so old migration JSON
+    /// remains compatible while adapters gain one loss-accounting contract.
+    pub fn loss_ledger(&self) -> Vec<LossLedgerEntry> {
+        let mut ledger = self
+            .unsupported
+            .iter()
+            .map(|issue| LossLedgerEntry {
+                record_type: issue.record_type.clone(),
+                record_id: issue.record_id.clone(),
+                disposition: LossDisposition::Unsupported,
+                reason: issue.reason.clone(),
+                raw: issue.raw.clone(),
+            })
+            .chain(self.ambiguous.iter().map(|issue| LossLedgerEntry {
+                record_type: issue.record_type.clone(),
+                record_id: issue.record_id.clone(),
+                disposition: LossDisposition::Ambiguous,
+                reason: issue.reason.clone(),
+                raw: issue.raw.clone(),
+            }))
+            .collect::<Vec<_>>();
+        ledger.sort_by(|left, right| {
+            (
+                left.record_type.as_str(),
+                left.record_id.as_deref().unwrap_or(""),
+                format!("{:?}", left.disposition),
+                left.reason.as_str(),
+            )
+                .cmp(&(
+                    right.record_type.as_str(),
+                    right.record_id.as_deref().unwrap_or(""),
+                    format!("{:?}", right.disposition),
+                    right.reason.as_str(),
+                ))
+        });
+        ledger
     }
 
     pub fn canonicalized(&self) -> Self {
@@ -1244,6 +1307,7 @@ impl LegacyImportPlan {
             counts: document.counts(),
             action_count: plan.actions.len(),
             issue_count: plan.report.issue_count(),
+            loss_ledger_count: plan.loss_ledger.len(),
         })
     }
 
@@ -1267,6 +1331,7 @@ impl LegacyImportPlan {
             ready,
             actions,
             report: self.report.canonicalized(),
+            loss_ledger: self.report.loss_ledger(),
         }
     }
 

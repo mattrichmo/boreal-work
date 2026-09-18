@@ -125,12 +125,57 @@ const COMMANDS: &[CommandSpec] = &[
     },
     CommandSpec {
         path: "work create",
-        syntax: "bwrk work create PROJECT WORK_ID TITLE [--kind milestone|sprint|task] [--parent WORK_ID]",
+        syntax: "bwrk work create PROJECT WORK_ID TITLE [--kind milestone|sprint|task] [--parent WORK_ID] [--priority N] [--description TEXT] [--dispatch automatic|operator_only|paused] [--hold CODE]",
         action: "mutate",
         output: "work",
         direct: true,
         service: true,
         summary: "create typed planning or executable work",
+    },
+    CommandSpec {
+        path: "work edit",
+        syntax: "bwrk work edit PROJECT WORK_ID [--title TEXT] [--description TEXT] [--parent WORK_ID] [--priority N] [--dispatch automatic|operator_only|paused] --expected-revision N",
+        action: "mutate",
+        output: "work",
+        direct: true,
+        service: true,
+        summary: "edit planning fields under an expected project revision",
+    },
+    CommandSpec {
+        path: "dep add",
+        syntax: "bwrk dep add PROJECT PREREQUISITE_ID DEPENDENT_ID [--expected-revision N]",
+        action: "mutate",
+        output: "dependency",
+        direct: true,
+        service: true,
+        summary: "add a close-only dependency with cycle protection",
+    },
+    CommandSpec {
+        path: "dep remove",
+        syntax: "bwrk dep remove PROJECT PREREQUISITE_ID DEPENDENT_ID --expected-revision N",
+        action: "mutate",
+        output: "dependency",
+        direct: true,
+        service: true,
+        summary: "remove one dependency under an expected project revision",
+    },
+    CommandSpec {
+        path: "dep tree",
+        syntax: "bwrk dep tree PROJECT",
+        action: "read",
+        output: "dependency_graph",
+        direct: true,
+        service: false,
+        summary: "read the canonical dependency graph and cycle diagnostics",
+    },
+    CommandSpec {
+        path: "dep cycles",
+        syntax: "bwrk dep cycles PROJECT",
+        action: "read",
+        output: "dependency_graph",
+        direct: true,
+        service: false,
+        summary: "report dependency cycles found in the project snapshot",
     },
     CommandSpec {
         path: "work claim",
@@ -313,6 +358,15 @@ const COMMANDS: &[CommandSpec] = &[
         summary: "read an exact session binding",
     },
     CommandSpec {
+        path: "session end",
+        syntax: "bwrk session end --project PROJECT --session SESSION_ID",
+        action: "mutate",
+        output: "session",
+        direct: true,
+        service: true,
+        summary: "end an idle session without abandoning live work",
+    },
+    CommandSpec {
         path: "operation show",
         syntax: "bwrk operation show PROJECT OPERATION_ID",
         action: "read",
@@ -321,33 +375,138 @@ const COMMANDS: &[CommandSpec] = &[
         service: true,
         summary: "read back a possibly delivered mutation",
     },
+    CommandSpec {
+        path: "doctor",
+        syntax: "bwrk doctor [--project PROJECT] [--db PATH] [--json]",
+        action: "read",
+        output: "doctor",
+        direct: true,
+        service: true,
+        summary: "run bounded read-only database/runtime diagnostics",
+    },
+    CommandSpec {
+        path: "cycle board",
+        syntax: "bwrk cycle board PROJECT CYCLE_ID",
+        action: "read",
+        output: "cycle_board",
+        direct: true,
+        service: false,
+        summary: "show assigned work and lifecycle facts for one materialized cycle",
+    },
+    CommandSpec {
+        path: "cycle report",
+        syntax: "bwrk cycle report PROJECT CYCLE_ID",
+        action: "read",
+        output: "cycle_board",
+        direct: true,
+        service: false,
+        summary: "show the bounded cycle board/report projection",
+    },
+    CommandSpec {
+        path: "intake list",
+        syntax: "bwrk intake list PROJECT",
+        action: "read",
+        output: "intake_items",
+        direct: true,
+        service: true,
+        summary: "list captured intake items with immutable content identities",
+    },
+    CommandSpec {
+        path: "intake show",
+        syntax: "bwrk intake show PROJECT INTAKE_ID",
+        action: "read",
+        output: "intake_item",
+        direct: true,
+        service: true,
+        summary: "read one exact intake item and its content revision",
+    },
+    CommandSpec {
+        path: "intake bucket",
+        syntax: "bwrk intake bucket PROJECT BUCKET_ID NAME",
+        action: "mutate",
+        output: "intake_bucket",
+        direct: true,
+        service: true,
+        summary: "create a named intake bucket through the v3 authority",
+    },
+    CommandSpec {
+        path: "intake capture",
+        syntax: "bwrk intake capture PROJECT INTAKE_ID CONTENT --bucket BUCKET_ID [--kind note|discovery|question|revisit]",
+        action: "mutate",
+        output: "intake_item",
+        direct: true,
+        service: true,
+        summary: "capture an immutable note, discovery, question, or revisit item",
+    },
+    CommandSpec {
+        path: "work hold add",
+        syntax: "bwrk work hold add PROJECT WORK_ID --reason CODE --expected-revision N",
+        action: "mutate",
+        output: "work",
+        direct: true,
+        service: true,
+        summary: "add an operator hold while preserving the hold history",
+    },
+    CommandSpec {
+        path: "work hold resolve",
+        syntax: "bwrk work hold resolve PROJECT WORK_ID HOLD_ID --reason TEXT --expected-revision N",
+        action: "mutate",
+        output: "work",
+        direct: true,
+        service: true,
+        summary: "resolve one active hold with an explicit reason",
+    },
+    CommandSpec {
+        path: "work dispatch set",
+        syntax: "bwrk work dispatch set PROJECT WORK_ID --dispatch automatic|operator_only|paused --expected-revision N",
+        action: "mutate",
+        output: "work",
+        direct: true,
+        service: true,
+        summary: "change dispatch policy under an expected project revision",
+    },
+    CommandSpec {
+        path: "source add",
+        syntax: "bwrk source add PROJECT --input PATH --origin ORIGIN [--media-type TYPE]",
+        action: "mutate",
+        output: "source",
+        direct: true,
+        service: false,
+        summary: "capture and register a bounded immutable source file",
+    },
+    CommandSpec {
+        path: "source show",
+        syntax: "bwrk source show PROJECT SOURCE_VERSION_ID",
+        action: "read",
+        output: "source",
+        direct: true,
+        service: false,
+        summary: "read one exact source version and its registration",
+    },
+    CommandSpec {
+        path: "source list",
+        syntax: "bwrk source list PROJECT [--limit N] [--offset N]",
+        action: "read",
+        output: "sources",
+        direct: true,
+        service: false,
+        summary: "list bounded source versions for a project",
+    },
+    CommandSpec {
+        path: "source verify",
+        syntax: "bwrk source verify PROJECT SOURCE_VERSION_ID",
+        action: "read",
+        output: "source_verification",
+        direct: true,
+        service: false,
+        summary: "verify a source blob against its immutable digest",
+    },
 ];
 
 // These are deliberately not emitted as available command entries. They are
 // typed gaps so clients can explain why an aspirational plan route cannot be
 // used yet, rather than guessing at an adapter or falling back to SQLite.
 const GAPS: &[GapSpec] = &[
-    GapSpec {
-        path: "session end",
-        code: "session_end_not_implemented",
-        summary: "the current store has registration/read semantics but no safe end transition",
-        owner: "lifecycle",
-        scope: "route",
-    },
-    GapSpec {
-        path: "work edit",
-        code: "work_edit_not_implemented",
-        summary: "planning-field edits require the expected-revision mutation adapter",
-        owner: "planning",
-        scope: "route",
-    },
-    GapSpec {
-        path: "dep add|remove|tree|cycles",
-        code: "dependency_routes_not_implemented",
-        summary: "dependency APIs exist below the public adapter but are not exposed here",
-        owner: "planning",
-        scope: "family",
-    },
     GapSpec {
         path: "summary|review",
         code: "closeout_routes_not_implemented",
@@ -356,18 +515,11 @@ const GAPS: &[GapSpec] = &[
         scope: "family",
     },
     GapSpec {
-        path: "source|memory|migration",
+        path: "memory|migration",
         code: "knowledge_routes_not_implemented",
-        summary: "standalone libraries still need application/CLI adapters",
+        summary: "memory and migration still need public application/CLI adapters",
         owner: "integration",
         scope: "family",
-    },
-    GapSpec {
-        path: "doctor",
-        code: "operator_routes_not_implemented",
-        summary: "operator diagnosis and repair need a public bounded adapter",
-        owner: "release",
-        scope: "route",
     },
 ];
 
@@ -377,45 +529,87 @@ const GAPS: &[GapSpec] = &[
 // route such as `dep add` or `source show` appear to be unknown.
 const UNAVAILABLE_ROUTES: &[GapSpec] = &[
     GapSpec {
-        path: "session end",
-        code: "session_end_not_implemented",
-        summary: "the current store has registration/read semantics but no safe end transition",
-        owner: "lifecycle",
-        scope: "route",
-    },
-    GapSpec {
-        path: "work edit",
-        code: "work_edit_not_implemented",
-        summary: "planning-field edits require the expected-revision mutation adapter",
+        path: "cycle create",
+        code: "cycle_create_not_implemented",
+        summary: "cycle persistence is awaiting the complete v3 application/store adapter",
         owner: "planning",
         scope: "route",
     },
     GapSpec {
-        path: "dep add",
-        code: "dependency_add_not_implemented",
-        summary: "dependency mutation is not exposed through the public adapter",
+        path: "cycle activate",
+        code: "cycle_activate_not_implemented",
+        summary: "cycle activation requires a durable expected-revision mutation",
         owner: "planning",
         scope: "route",
     },
     GapSpec {
-        path: "dep remove",
-        code: "dependency_remove_not_implemented",
-        summary: "dependency mutation is not exposed through the public adapter",
+        path: "sprint create",
+        code: "sprint_create_not_implemented",
+        summary: "sprint is a compatibility planning façade awaiting cycle persistence",
         owner: "planning",
         scope: "route",
     },
     GapSpec {
-        path: "dep tree",
-        code: "dependency_tree_not_implemented",
-        summary: "dependency explanation is not exposed through the public adapter",
+        path: "sprint activate",
+        code: "sprint_activate_not_implemented",
+        summary: "sprint activation is awaiting durable cycle assignment semantics",
         owner: "planning",
         scope: "route",
     },
     GapSpec {
-        path: "dep cycles",
-        code: "dependency_cycles_not_implemented",
-        summary: "dependency cycle diagnostics are not exposed through the public adapter",
+        path: "sprint board",
+        code: "sprint_board_not_implemented",
+        summary: "sprint board is awaiting the canonical cycle projection",
         owner: "planning",
+        scope: "route",
+    },
+    GapSpec {
+        path: "sprint report",
+        code: "sprint_report_not_implemented",
+        summary: "sprint report is awaiting the canonical cycle projection",
+        owner: "planning",
+        scope: "route",
+    },
+    GapSpec {
+        path: "intake note",
+        code: "intake_note_not_implemented",
+        summary: "use intake capture --kind note; this compatibility alias is not exposed",
+        owner: "knowledge",
+        scope: "route",
+    },
+    GapSpec {
+        path: "intake discovery",
+        code: "intake_discovery_not_implemented",
+        summary: "use intake capture --kind discovery; this compatibility alias is not exposed",
+        owner: "knowledge",
+        scope: "route",
+    },
+    GapSpec {
+        path: "intake question",
+        code: "intake_question_not_implemented",
+        summary: "use intake capture --kind question; this compatibility alias is not exposed",
+        owner: "knowledge",
+        scope: "route",
+    },
+    GapSpec {
+        path: "intake revisit",
+        code: "intake_revisit_not_implemented",
+        summary: "use intake capture --kind revisit; this compatibility alias is not exposed",
+        owner: "knowledge",
+        scope: "route",
+    },
+    GapSpec {
+        path: "intake promote",
+        code: "intake_promote_not_implemented",
+        summary: "typed intake promotion needs a public application adapter",
+        owner: "knowledge",
+        scope: "route",
+    },
+    GapSpec {
+        path: "intake disposition",
+        code: "intake_disposition_not_implemented",
+        summary: "intake disposition needs a public application adapter",
+        owner: "knowledge",
         scope: "route",
     },
     GapSpec {
@@ -475,34 +669,6 @@ const UNAVAILABLE_ROUTES: &[GapSpec] = &[
         scope: "route",
     },
     GapSpec {
-        path: "source add",
-        code: "source_add_not_implemented",
-        summary: "source ingestion is not exposed through the public adapter",
-        owner: "integration",
-        scope: "route",
-    },
-    GapSpec {
-        path: "source list",
-        code: "source_list_not_implemented",
-        summary: "source listing is not exposed through the public adapter",
-        owner: "integration",
-        scope: "route",
-    },
-    GapSpec {
-        path: "source show",
-        code: "source_show_not_implemented",
-        summary: "source inspection is not exposed through the public adapter",
-        owner: "integration",
-        scope: "route",
-    },
-    GapSpec {
-        path: "source verify",
-        code: "source_verify_not_implemented",
-        summary: "source verification is not exposed through the public adapter",
-        owner: "integration",
-        scope: "route",
-    },
-    GapSpec {
         path: "memory",
         code: "memory_routes_not_implemented",
         summary: "memory draft, review, publication, and search routes need application adapters",
@@ -516,13 +682,6 @@ const UNAVAILABLE_ROUTES: &[GapSpec] = &[
         owner: "integration",
         scope: "family",
     },
-    GapSpec {
-        path: "doctor",
-        code: "operator_routes_not_implemented",
-        summary: "operator diagnosis and repair need a public bounded adapter",
-        owner: "release",
-        scope: "route",
-    },
 ];
 
 pub(crate) fn is_registry_path(path: &[String]) -> bool {
@@ -530,6 +689,14 @@ pub(crate) fn is_registry_path(path: &[String]) -> bool {
         path.first().map(String::as_str),
         Some("commands" | "help" | "version")
     )
+}
+
+/// Returns true only for a route deliberately catalogued as unavailable.
+/// Callers use this to fail closed instead of opening the local database and
+/// accidentally treating a planned route as an offline implementation.
+pub(crate) fn is_unavailable_path(path: &[String]) -> bool {
+    let value = path.join(" ");
+    UNAVAILABLE_ROUTES.iter().any(|entry| entry.path == value)
 }
 
 pub(crate) fn result(parsed: &ParsedCommand) -> Result<CliResult, CliError> {
@@ -696,6 +863,10 @@ fn command_json(command: &CommandSpec) -> Value {
         "output": command.output,
         "direct": command.direct,
         "service": command.service,
+        "adapters": {
+            "direct": command.direct,
+            "service": command.service,
+        },
         "availability": "available",
         "kind": "command",
         "summary": command.summary,
@@ -757,7 +928,14 @@ mod tests {
                 kind: None,
                 parent: None,
                 description: None,
+                title: None,
                 priority: None,
+                dispatch: None,
+                hold: None,
+                bucket: None,
+                input: None,
+                origin: None,
+                media_type: None,
                 source_version: None,
                 config_identity: None,
                 positionals: positionals
@@ -773,8 +951,8 @@ mod tests {
         let result = result(&parsed(&["help", "dep"], &["add"])).unwrap();
         let data = result.data.unwrap();
         assert_eq!(data["path"], "dep add");
-        assert_eq!(data["kind"], "unavailable");
-        assert_eq!(data["gap"]["code"], "dependency_add_not_implemented");
+        assert_eq!(data["kind"], "command");
+        assert_eq!(data["entry"]["path"], "dep add");
     }
 
     #[test]
@@ -791,18 +969,26 @@ mod tests {
         let help = result(&parsed(&["help", "dep"], &[])).unwrap();
         let data = help.data.unwrap();
         assert_eq!(data["kind"], "namespace");
-        assert_eq!(data["matches"]["unavailable"].as_array().unwrap().len(), 4);
+        assert_eq!(data["matches"]["available"].as_array().unwrap().len(), 4);
+        assert_eq!(data["matches"]["unavailable"].as_array().unwrap().len(), 0);
     }
 
     #[test]
-    fn unavailable_routes_are_exact_and_typed() {
-        let result = registry_result(Some("source show")).unwrap();
-        let route = result.data.unwrap()["unavailable_routes"][0].clone();
+    fn source_routes_are_direct_only_and_memory_remains_a_gap() {
+        let source = registry_result(Some("source show")).unwrap();
+        let source_data = source.data.unwrap();
+        let route = source_data["available"][0].clone();
         assert_eq!(route["path"], "source show");
-        assert_eq!(route["availability"], "unavailable");
-        assert_eq!(route["scope"], "route");
-        assert_eq!(route["adapters"]["direct"], false);
-        assert_eq!(route["recovery"]["kind"], "implementation_gap");
+        assert_eq!(route["availability"], "available");
+        assert_eq!(route["adapters"]["direct"], true);
+        assert_eq!(route["adapters"]["service"], false);
+
+        let memory = registry_result(Some("memory")).unwrap();
+        let memory_data = memory.data.unwrap();
+        let gap = memory_data["unavailable_routes"][0].clone();
+        assert_eq!(gap["path"], "memory");
+        assert_eq!(gap["availability"], "unavailable");
+        assert_eq!(gap["recovery"]["kind"], "implementation_gap");
     }
 
     #[test]

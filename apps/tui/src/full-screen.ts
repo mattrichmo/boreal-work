@@ -1,4 +1,4 @@
-import { ActionResult, MountedView, TuiAction } from "./client.js";
+import { ActionResult, DashboardFilter, MountedView, TuiAction } from "./client.js";
 import { LineShellController } from "./line-shell.js";
 import { renderMountedView } from "./terminal.js";
 
@@ -45,7 +45,10 @@ export function decodeKeys(value: string): string[] {
       index += 3;
     } else {
       const key = value[index];
-      keys.push(key === "\r" || key === "\n" ? "enter" : key === "\u001b" ? "escape" : key === "\u0003" ? "ctrl-c" : key);
+      keys.push(key === "\r" || key === "\n" ? "enter"
+        : key === "\u001b" ? "escape"
+          : key === "\u0003" ? "ctrl-c"
+            : key === "\u007f" || key === "\b" ? "backspace" : key);
       index += 1;
     }
   }
@@ -75,6 +78,11 @@ export async function runFullScreen(
   let shutdownTimedOut = false;
   let shutdownReport: string | null = null;
   let helpVisible = false;
+  let paletteVisible = false;
+  let filter: DashboardFilter = "all";
+  let searchQuery = "";
+  let searchEditing = false;
+  let searchBuffer = "";
   let statusMessage: string | null = null;
   let pending: { action: PendingKeyboardAction; work_id: string } | null = null;
   let selectedIndex = Math.max(0, controller.view().monitoring?.items.findIndex((item) => item.work_id === controller.view().route.work_id) ?? 0);
@@ -85,10 +93,29 @@ export async function runFullScreen(
   let finish!: () => void;
   const finished = new Promise<void>((resolve) => { finish = resolve; });
 
+  const filteredItems = (): NonNullable<MountedView["monitoring"]>["items"] => {
+    const items = controller.view().monitoring?.items ?? [];
+    const query = searchQuery.trim().toLocaleLowerCase();
+    return items.filter((item) => {
+      const status = item.display_status ?? item.status;
+      const matchesFilter = filter === "all"
+        || filter === "active" && ["claimed", "in_progress", "needs_verification", "awaiting_review", "complete"].includes(status)
+        || filter === "expired" && status === "expired_review"
+        || ["ready", "queued", "blocked", "closed"].includes(filter) && status === filter
+        || ["milestones", "sprints", "tasks"].includes(filter) && item.kind === filter.slice(0, -1);
+      if (!matchesFilter) return false;
+      if (!query) return true;
+      return [item.work_id, item.title, item.description, item.parent_id, item.kind]
+        .filter((value): value is string => typeof value === "string")
+        .some((value) => value.toLocaleLowerCase().includes(query));
+    });
+  };
+
   const selectedWorkId = (): string | undefined => {
     const view = controller.view();
-    if (view.selected_work) return view.selected_work.work_id;
-    return view.monitoring?.items[selectedIndex]?.work_id;
+    const items = filteredItems();
+    if (view.selected_work && items.some((item) => item.work_id === view.selected_work?.work_id)) return view.selected_work.work_id;
+    return items[selectedIndex]?.work_id;
   };
 
   const redraw = (): void => {
@@ -102,12 +129,18 @@ export async function runFullScreen(
       help_visible: helpVisible,
       pending_confirmation: pending ? `${pending.action} ${pending.work_id}` : null,
       status_message: statusMessage,
+      filter,
+      search_query: searchQuery,
+      selected_index: selectedIndex,
+      palette_visible: paletteVisible,
+      search_editing: searchEditing,
+      search_buffer: searchBuffer,
     }));
   };
 
   const navigate = (delta: number): void => {
     const view = controller.view();
-    const items = view.monitoring?.items ?? [];
+    const items = filteredItems();
     if (items.length === 0) return;
     selectedIndex = (selectedIndex + delta + items.length) % items.length;
     const selected = items[selectedIndex];
@@ -229,6 +262,44 @@ export async function runFullScreen(
       redraw();
       return;
     }
+    if (searchEditing) {
+      if (key === "escape") {
+        searchEditing = false;
+        searchBuffer = "";
+      } else if (key === "enter") {
+        searchQuery = searchBuffer.trim();
+        searchEditing = false;
+        searchBuffer = "";
+        selectedIndex = 0;
+        statusMessage = searchQuery ? `search: ${searchQuery}` : "search cleared";
+      } else if (key === "backspace") {
+        searchBuffer = searchBuffer.slice(0, -1);
+      } else if (key.length === 1 && key >= " ") {
+        searchBuffer += key;
+      }
+      redraw();
+      return;
+    }
+    if (paletteVisible) {
+      const filters: Record<string, DashboardFilter> = {
+        "1": "all", "2": "ready", "3": "active", "4": "blocked", "5": "expired",
+        "6": "closed", "7": "milestones", "8": "sprints", "9": "tasks",
+      };
+      if (filters[key]) {
+        filter = filters[key];
+        selectedIndex = 0;
+        paletteVisible = false;
+        statusMessage = `filter: ${filter}`;
+      } else if (key === "/") {
+        paletteVisible = false;
+        searchEditing = true;
+        searchBuffer = searchQuery;
+      } else if (key === "escape" || key === "p") {
+        paletteVisible = false;
+      }
+      redraw();
+      return;
+    }
     switch (key) {
       case "j": case "down": navigate(1); break;
       case "k": case "up": navigate(-1); break;
@@ -240,6 +311,17 @@ export async function runFullScreen(
       case "escape": controller.navigate({ kind: "monitoring", project_id: controller.view().route.project_id }); break;
       case "r": case "R": enqueue(async () => { await controller.refresh(); statusMessage = "refreshed"; }, "refresh"); return;
       case "?": helpVisible = !helpVisible; break;
+      case "p": case "P": paletteVisible = true; break;
+      case "/": searchEditing = true; searchBuffer = searchQuery; break;
+      case "1": filter = "all"; selectedIndex = 0; break;
+      case "2": filter = "ready"; selectedIndex = 0; break;
+      case "3": filter = "active"; selectedIndex = 0; break;
+      case "4": filter = "blocked"; selectedIndex = 0; break;
+      case "5": filter = "expired"; selectedIndex = 0; break;
+      case "6": filter = "closed"; selectedIndex = 0; break;
+      case "7": filter = "milestones"; selectedIndex = 0; break;
+      case "8": filter = "sprints"; selectedIndex = 0; break;
+      case "9": filter = "tasks"; selectedIndex = 0; break;
       case "c": case "C": stage("claim"); break;
       case "s": case "S": stage("accept_start"); break;
       case "f": case "F": stage("finish"); break;

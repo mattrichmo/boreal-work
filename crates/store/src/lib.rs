@@ -21,7 +21,17 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
+mod knowledge;
+mod work_model_v3;
+pub use knowledge::*;
+pub use work_model_v3::*;
+
 pub const SCHEMA_VERSION: i64 = 2;
+/// The additive hierarchy/intake extension is versioned independently from
+/// the original work-status schema.  The v2 tables remain canonical for
+/// compatibility; v3 tables are an opt-in projection until callers request
+/// the extension explicitly.
+pub const WORK_MODEL_SCHEMA_VERSION: i64 = 3;
 pub const STATUS_CONTRACT_VERSION: &str = "boreal.work-status/2";
 
 const CREATE_WORK_HOLD_TABLE: &str = r#"
@@ -386,6 +396,26 @@ pub struct WorkRecord {
     pub description: String,
 }
 
+/// Fields accepted by the revision-checked planning edit mutation. `None`
+/// means leave a field unchanged; `Some(None)` clears the parent.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WorkEditInput {
+    pub project_id: String,
+    pub work_id: String,
+    pub parent_id: Option<Option<String>>,
+    pub title: Option<String>,
+    pub description: Option<String>,
+    pub priority: Option<u8>,
+    pub dispatch_policy: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WorkHoldAddInput {
+    pub project_id: String,
+    pub work_id: String,
+    pub reason_code: String,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WorkHoldRecord {
     pub hold_id: String,
@@ -573,6 +603,13 @@ pub struct SessionRecord {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SessionRegistrationResult {
+    pub session: SessionRecord,
+    pub revision: u64,
+    pub replayed: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SessionEndResult {
     pub session: SessionRecord,
     pub revision: u64,
     pub replayed: bool,
@@ -1522,6 +1559,143 @@ impl SqliteStore {
         }))
     }
 
+    /// Ends an active session only when it owns no current attempt.  Releasing
+    /// live work is a separate fenced lifecycle mutation; session shutdown
+    /// must never silently transfer or abandon ownership.
+    #[allow(clippy::too_many_arguments)]
+    pub fn end_session(
+        &self,
+        project_id: &str,
+        session_id: &str,
+        actor_id: &str,
+        operation_id: &str,
+        request_digest: &str,
+        expected_project_revision: Option<u64>,
+        ended_at: &str,
+    ) -> Result<SessionEndResult, StoreError> {
+        self.execute_batch("BEGIN IMMEDIATE")?;
+        let result = (|| {
+            if let Some(existing) = self.operation(operation_id)? {
+                if existing.request_digest != request_digest
+                    || existing.project_id != project_id
+                    || existing.command != "session.end"
+                {
+                    return Err(StoreError::Conflict(
+                        "operation request digest mismatch".to_owned(),
+                    ));
+                }
+                let session = self.session(project_id, session_id)?.ok_or_else(|| {
+                    StoreError::Corrupt(
+                        "session end operation refers to a missing session".to_owned(),
+                    )
+                })?;
+                return Ok(SessionEndResult {
+                    session,
+                    revision: existing.revision,
+                    replayed: true,
+                });
+            }
+
+            let session =
+                self.session(project_id, session_id)?
+                    .ok_or_else(|| StoreError::NotFound {
+                        entity: "session",
+                        id: session_id.to_owned(),
+                    })?;
+            if session.actor_id != actor_id {
+                return Err(StoreError::WrongOwner {
+                    expected: session.actor_id,
+                    actual: actor_id.to_owned(),
+                });
+            }
+            if session.state != SessionState::Active {
+                return Err(StoreError::Conflict(format!(
+                    "session {session_id} is not active"
+                )));
+            }
+            if self
+                .current_attempt_for_session(project_id, session_id)?
+                .is_some()
+            {
+                return Err(StoreError::Conflict(
+                    "session owns current work; release or finish it before ending".to_owned(),
+                ));
+            }
+            let current_revision = self.project_revision(project_id)?.0;
+            check_expected_revision(current_revision, expected_project_revision)?;
+
+            let mut update = self.prepare(
+                "UPDATE session SET state = 'ended', ended_at = ?1
+                 WHERE session_id = ?2 AND state = 'active'",
+            )?;
+            update.bind_text(1, ended_at)?;
+            update.bind_text(2, session_id)?;
+            update.run()?;
+            if update.changes()? != 1 {
+                return Err(StoreError::Conflict(format!(
+                    "session {session_id} changed while ending"
+                )));
+            }
+
+            let revision = self.bump_revision_in_transaction(project_id)?;
+            let payload = json_object(json!({
+                "event": "session.ended",
+                "session_id": session_id,
+                "actor_id": actor_id,
+            }))?;
+            self.append_operation(&OperationRecord {
+                operation_id: operation_id.to_owned(),
+                project_id: project_id.to_owned(),
+                command: "session.end".to_owned(),
+                actor_id: actor_id.to_owned(),
+                session_id: Some(session_id.to_owned()),
+                expected_revision: expected_project_revision,
+                attempt_id: None,
+                fence: None,
+                request_digest: request_digest.to_owned(),
+                outcome: OperationOutcome::Changed,
+                result_json: payload.clone(),
+                revision: revision.0,
+                created_at: ended_at.to_owned(),
+                completed_at: Some(ended_at.to_owned()),
+            })?;
+            self.append_audit_event(&AuditEventRecord {
+                project_id: project_id.to_owned(),
+                revision: revision.0,
+                operation_id: operation_id.to_owned(),
+                event_type: "repair.correction".to_owned(),
+                // Schema-2 audit envelopes predate a `session` subject type;
+                // retain the precise session identity in payload while using
+                // the compatible project subject for the envelope.
+                subject_type: "project".to_owned(),
+                subject_id: project_id.to_owned(),
+                actor_id: actor_id.to_owned(),
+                session_id: Some(session_id.to_owned()),
+                fence: None,
+                as_of: ended_at.to_owned(),
+                payload_json: payload,
+            })?;
+            let session = self
+                .session(project_id, session_id)?
+                .ok_or_else(|| StoreError::Corrupt("ended session was not readable".to_owned()))?;
+            Ok(SessionEndResult {
+                session,
+                revision: revision.0,
+                replayed: false,
+            })
+        })();
+        match result {
+            Ok(value) => {
+                self.execute_batch("COMMIT")?;
+                Ok(value)
+            }
+            Err(error) => {
+                let _ = self.execute_batch("ROLLBACK");
+                Err(error)
+            }
+        }
+    }
+
     /// Validates the session binding used by a claim and returns its durable
     /// readback. This is intentionally public so application adapters can use
     /// the same ownership checks before accepting a session-bound operation.
@@ -1997,6 +2171,429 @@ impl SqliteStore {
         }
     }
 
+    /// Apply a planning edit to an existing work row. The operation is
+    /// admitted before any row changes and the expected project revision is
+    /// checked inside the same IMMEDIATE transaction as the update.
+    pub fn edit_work_operation(
+        &self,
+        input: &WorkEditInput,
+        actor_id: &str,
+        operation_id: &str,
+        request_digest: &str,
+        expected_revision: u64,
+        now: &str,
+    ) -> Result<MutationResult, StoreError> {
+        self.execute_batch("BEGIN IMMEDIATE")?;
+        let result = (|| {
+            if let Some(existing) = self.operation(operation_id)? {
+                return replay_mutation_operation(
+                    &input.project_id,
+                    operation_id,
+                    request_digest,
+                    &existing,
+                );
+            }
+            self.require_actor(actor_id)?;
+            let actual = self.project_revision(&input.project_id)?.0;
+            check_expected_revision(actual, Some(expected_revision))?;
+            if self.work(&input.project_id, &input.work_id)?.is_none() {
+                return Err(StoreError::NotFound {
+                    entity: "work",
+                    id: input.work_id.clone(),
+                });
+            }
+            if input.title.as_deref().is_some_and(str::is_empty)
+                || input
+                    .description
+                    .as_deref()
+                    .is_some_and(|description| description.contains('\0'))
+            {
+                return Err(StoreError::Invalid(
+                    "work title/description contains invalid content".to_owned(),
+                ));
+            }
+            if input.parent_id.is_none()
+                && input.title.is_none()
+                && input.description.is_none()
+                && input.priority.is_none()
+                && input.dispatch_policy.is_none()
+            {
+                return Err(StoreError::Invalid(
+                    "work edit requires at least one changed field".to_owned(),
+                ));
+            }
+            if let Some(dispatch) = &input.dispatch_policy {
+                if !matches!(dispatch.as_str(), "automatic" | "operator_only" | "paused") {
+                    return Err(StoreError::Invalid("invalid dispatch policy".to_owned()));
+                }
+            }
+            if let Some(title) = &input.title {
+                let mut update = self.prepare(
+                    "UPDATE work_item SET title = ?1, updated_at = ?2
+                     WHERE project_id = ?3 AND work_id = ?4",
+                )?;
+                update.bind_text(1, title)?;
+                update.bind_text(2, now)?;
+                update.bind_text(3, &input.project_id)?;
+                update.bind_text(4, &input.work_id)?;
+                update.run()?;
+            }
+            if let Some(description) = &input.description {
+                let mut update = self.prepare(
+                    "UPDATE work_item SET description = ?1, updated_at = ?2
+                     WHERE project_id = ?3 AND work_id = ?4",
+                )?;
+                update.bind_text(1, description)?;
+                update.bind_text(2, now)?;
+                update.bind_text(3, &input.project_id)?;
+                update.bind_text(4, &input.work_id)?;
+                update.run()?;
+            }
+            if let Some(parent_id) = &input.parent_id {
+                let mut update = self.prepare(
+                    "UPDATE work_item SET parent_id = ?1, updated_at = ?2
+                     WHERE project_id = ?3 AND work_id = ?4",
+                )?;
+                update.bind_optional_text(1, parent_id.as_deref())?;
+                update.bind_text(2, now)?;
+                update.bind_text(3, &input.project_id)?;
+                update.bind_text(4, &input.work_id)?;
+                update.run()?;
+            }
+            if let Some(priority) = input.priority {
+                let mut update = self.prepare(
+                    "UPDATE work_item SET priority = ?1, updated_at = ?2
+                     WHERE project_id = ?3 AND work_id = ?4",
+                )?;
+                update.bind_i64(1, u64::from(priority))?;
+                update.bind_text(2, now)?;
+                update.bind_text(3, &input.project_id)?;
+                update.bind_text(4, &input.work_id)?;
+                update.run()?;
+            }
+            if let Some(dispatch) = &input.dispatch_policy {
+                let mut update = self.prepare(
+                    "UPDATE work_item SET dispatch_policy = ?1, updated_at = ?2
+                     WHERE project_id = ?3 AND work_id = ?4",
+                )?;
+                update.bind_text(1, dispatch)?;
+                update.bind_text(2, now)?;
+                update.bind_text(3, &input.project_id)?;
+                update.bind_text(4, &input.work_id)?;
+                update.run()?;
+            }
+            let revision = self.bump_revision_in_transaction(&input.project_id)?;
+            let payload = json_object(json!({
+                "work_id": input.work_id,
+                "fields": {
+                    "parent_id": input.parent_id,
+                    "title": input.title,
+                    "description": input.description,
+                    "priority": input.priority,
+                    "dispatch_policy": input.dispatch_policy,
+                }
+            }))?;
+            self.append_operation(&OperationRecord {
+                operation_id: operation_id.to_owned(),
+                project_id: input.project_id.clone(),
+                command: "work.edit".to_owned(),
+                actor_id: actor_id.to_owned(),
+                session_id: None,
+                expected_revision: Some(expected_revision),
+                attempt_id: None,
+                fence: None,
+                request_digest: request_digest.to_owned(),
+                outcome: OperationOutcome::Changed,
+                result_json: payload.clone(),
+                revision: revision.0,
+                created_at: now.to_owned(),
+                completed_at: Some(now.to_owned()),
+            })?;
+            self.append_audit_event(&AuditEventRecord {
+                project_id: input.project_id.clone(),
+                revision: revision.0,
+                operation_id: operation_id.to_owned(),
+                event_type: "repair.correction".to_owned(),
+                subject_type: "work".to_owned(),
+                subject_id: input.work_id.clone(),
+                actor_id: actor_id.to_owned(),
+                session_id: None,
+                fence: None,
+                as_of: now.to_owned(),
+                payload_json: payload,
+            })?;
+            Ok(MutationResult {
+                operation_id: operation_id.to_owned(),
+                revision: revision.0,
+                replayed: false,
+            })
+        })();
+        finish_transaction(self, result)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn remove_dependency_operation(
+        &self,
+        project_id: &str,
+        prerequisite_id: &str,
+        dependent_id: &str,
+        actor_id: &str,
+        operation_id: &str,
+        request_digest: &str,
+        expected_revision: u64,
+        now: &str,
+    ) -> Result<MutationResult, StoreError> {
+        self.execute_batch("BEGIN IMMEDIATE")?;
+        let result = (|| {
+            if let Some(existing) = self.operation(operation_id)? {
+                return replay_mutation_operation(
+                    project_id,
+                    operation_id,
+                    request_digest,
+                    &existing,
+                );
+            }
+            self.require_actor(actor_id)?;
+            let actual = self.project_revision(project_id)?.0;
+            check_expected_revision(actual, Some(expected_revision))?;
+            let mut delete = self.prepare(
+                "DELETE FROM dependency
+                 WHERE project_id = ?1 AND prerequisite_id = ?2 AND dependent_id = ?3",
+            )?;
+            delete.bind_text(1, project_id)?;
+            delete.bind_text(2, prerequisite_id)?;
+            delete.bind_text(3, dependent_id)?;
+            delete.run()?;
+            if delete.changes()? != 1 {
+                return Err(StoreError::NotFound {
+                    entity: "dependency",
+                    id: format!("{prerequisite_id}->{dependent_id}"),
+                });
+            }
+            let revision = self.bump_revision_in_transaction(project_id)?;
+            let payload = json_object(json!({
+                "prerequisite_id": prerequisite_id,
+                "dependent_id": dependent_id,
+            }))?;
+            self.append_operation(&OperationRecord {
+                operation_id: operation_id.to_owned(),
+                project_id: project_id.to_owned(),
+                command: "dependency.remove".to_owned(),
+                actor_id: actor_id.to_owned(),
+                session_id: None,
+                expected_revision: Some(expected_revision),
+                attempt_id: None,
+                fence: None,
+                request_digest: request_digest.to_owned(),
+                outcome: OperationOutcome::Changed,
+                result_json: payload.clone(),
+                revision: revision.0,
+                created_at: now.to_owned(),
+                completed_at: Some(now.to_owned()),
+            })?;
+            self.append_audit_event(&AuditEventRecord {
+                project_id: project_id.to_owned(),
+                revision: revision.0,
+                operation_id: operation_id.to_owned(),
+                event_type: "repair.correction".to_owned(),
+                subject_type: "dependency".to_owned(),
+                subject_id: dependent_id.to_owned(),
+                actor_id: actor_id.to_owned(),
+                session_id: None,
+                fence: None,
+                as_of: now.to_owned(),
+                payload_json: payload,
+            })?;
+            Ok(MutationResult {
+                operation_id: operation_id.to_owned(),
+                revision: revision.0,
+                replayed: false,
+            })
+        })();
+        finish_transaction(self, result)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_work_hold_operation(
+        &self,
+        input: &WorkHoldAddInput,
+        actor_id: &str,
+        operation_id: &str,
+        request_digest: &str,
+        expected_revision: u64,
+        now: &str,
+    ) -> Result<MutationResult, StoreError> {
+        self.execute_batch("BEGIN IMMEDIATE")?;
+        let result = (|| {
+            if let Some(existing) = self.operation(operation_id)? {
+                return replay_mutation_operation(
+                    &input.project_id,
+                    operation_id,
+                    request_digest,
+                    &existing,
+                );
+            }
+            self.require_actor(actor_id)?;
+            let actual = self.project_revision(&input.project_id)?.0;
+            check_expected_revision(actual, Some(expected_revision))?;
+            if self.work(&input.project_id, &input.work_id)?.is_none() {
+                return Err(StoreError::NotFound {
+                    entity: "work",
+                    id: input.work_id.clone(),
+                });
+            }
+            let mut duplicate = self.prepare(
+                "SELECT 1 FROM work_hold WHERE work_id = ?1 AND reason_code = ?2 AND resolved_at IS NULL LIMIT 1",
+            )?;
+            duplicate.bind_text(1, &input.work_id)?;
+            duplicate.bind_text(2, &input.reason_code)?;
+            if duplicate.step()? == SQLITE_ROW {
+                return Err(StoreError::Conflict(
+                    "an active hold with this reason already exists".to_owned(),
+                ));
+            }
+            let hold_id = format!("{operation_id}:hold");
+            let mut insert = self.prepare(
+                "INSERT INTO work_hold (hold_id, work_id, reason_code, actor_id, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+            )?;
+            insert.bind_text(1, &hold_id)?;
+            insert.bind_text(2, &input.work_id)?;
+            insert.bind_text(3, &input.reason_code)?;
+            insert.bind_text(4, actor_id)?;
+            insert.bind_text(5, now)?;
+            insert.run()?;
+            let revision = self.bump_revision_in_transaction(&input.project_id)?;
+            let payload = json_object(
+                json!({"work_id": input.work_id, "hold_id": hold_id, "reason_code": input.reason_code}),
+            )?;
+            self.append_operation(&OperationRecord {
+                operation_id: operation_id.to_owned(),
+                project_id: input.project_id.clone(),
+                command: "work.hold.add".to_owned(),
+                actor_id: actor_id.to_owned(),
+                session_id: None,
+                expected_revision: Some(expected_revision),
+                attempt_id: None,
+                fence: None,
+                request_digest: request_digest.to_owned(),
+                outcome: OperationOutcome::Changed,
+                result_json: payload.clone(),
+                revision: revision.0,
+                created_at: now.to_owned(),
+                completed_at: Some(now.to_owned()),
+            })?;
+            self.append_audit_event(&AuditEventRecord {
+                project_id: input.project_id.clone(),
+                revision: revision.0,
+                operation_id: operation_id.to_owned(),
+                event_type: "repair.correction".to_owned(),
+                subject_type: "hold".to_owned(),
+                subject_id: input.work_id.clone(),
+                actor_id: actor_id.to_owned(),
+                session_id: None,
+                fence: None,
+                as_of: now.to_owned(),
+                payload_json: payload,
+            })?;
+            Ok(MutationResult {
+                operation_id: operation_id.to_owned(),
+                revision: revision.0,
+                replayed: false,
+            })
+        })();
+        finish_transaction(self, result)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn resolve_work_hold_operation(
+        &self,
+        project_id: &str,
+        work_id: &str,
+        hold_id: &str,
+        actor_id: &str,
+        resolution_reason: &str,
+        operation_id: &str,
+        request_digest: &str,
+        expected_revision: u64,
+        now: &str,
+    ) -> Result<MutationResult, StoreError> {
+        self.execute_batch("BEGIN IMMEDIATE")?;
+        let result = (|| {
+            if let Some(existing) = self.operation(operation_id)? {
+                return replay_mutation_operation(
+                    project_id,
+                    operation_id,
+                    request_digest,
+                    &existing,
+                );
+            }
+            self.require_actor(actor_id)?;
+            if resolution_reason.trim().is_empty() {
+                return Err(StoreError::Invalid(
+                    "hold resolution reason is required".to_owned(),
+                ));
+            }
+            let actual = self.project_revision(project_id)?.0;
+            check_expected_revision(actual, Some(expected_revision))?;
+            let mut update = self.prepare(
+                "UPDATE work_hold SET resolved_at = ?1, resolved_by = ?2, resolution_reason = ?3
+                 WHERE hold_id = ?4 AND work_id = ?5 AND resolved_at IS NULL",
+            )?;
+            update.bind_text(1, now)?;
+            update.bind_text(2, actor_id)?;
+            update.bind_text(3, resolution_reason)?;
+            update.bind_text(4, hold_id)?;
+            update.bind_text(5, work_id)?;
+            update.run()?;
+            if update.changes()? != 1 {
+                return Err(StoreError::NotFound {
+                    entity: "active work hold",
+                    id: hold_id.to_owned(),
+                });
+            }
+            let revision = self.bump_revision_in_transaction(project_id)?;
+            let payload = json_object(
+                json!({"work_id": work_id, "hold_id": hold_id, "resolution_reason": resolution_reason}),
+            )?;
+            self.append_operation(&OperationRecord {
+                operation_id: operation_id.to_owned(),
+                project_id: project_id.to_owned(),
+                command: "work.hold.resolve".to_owned(),
+                actor_id: actor_id.to_owned(),
+                session_id: None,
+                expected_revision: Some(expected_revision),
+                attempt_id: None,
+                fence: None,
+                request_digest: request_digest.to_owned(),
+                outcome: OperationOutcome::Changed,
+                result_json: payload.clone(),
+                revision: revision.0,
+                created_at: now.to_owned(),
+                completed_at: Some(now.to_owned()),
+            })?;
+            self.append_audit_event(&AuditEventRecord {
+                project_id: project_id.to_owned(),
+                revision: revision.0,
+                operation_id: operation_id.to_owned(),
+                event_type: "hold.resolved".to_owned(),
+                subject_type: "hold".to_owned(),
+                subject_id: hold_id.to_owned(),
+                actor_id: actor_id.to_owned(),
+                session_id: None,
+                fence: None,
+                as_of: now.to_owned(),
+                payload_json: payload,
+            })?;
+            Ok(MutationResult {
+                operation_id: operation_id.to_owned(),
+                revision: revision.0,
+                replayed: false,
+            })
+        })();
+        finish_transaction(self, result)
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn add_dependency_operation(
         &self,
@@ -2006,6 +2603,30 @@ impl SqliteStore {
         actor_id: &str,
         operation_id: &str,
         request_digest: &str,
+        now: &str,
+    ) -> Result<MutationResult, StoreError> {
+        self.add_dependency_operation_checked(
+            project_id,
+            prerequisite_id,
+            dependent_id,
+            actor_id,
+            operation_id,
+            request_digest,
+            None,
+            now,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_dependency_operation_checked(
+        &self,
+        project_id: &str,
+        prerequisite_id: &str,
+        dependent_id: &str,
+        actor_id: &str,
+        operation_id: &str,
+        request_digest: &str,
+        expected_revision: Option<u64>,
         now: &str,
     ) -> Result<MutationResult, StoreError> {
         self.execute_batch("BEGIN IMMEDIATE")?;
@@ -2022,6 +2643,8 @@ impl SqliteStore {
                     replayed: true,
                 });
             }
+            let current_revision = self.project_revision(project_id)?.0;
+            check_expected_revision(current_revision, expected_revision)?;
             self.add_dependency_in_transaction(project_id, prerequisite_id, dependent_id, now)?;
             let revision = self.bump_revision_in_transaction(project_id)?;
             let payload = json_object(json!({
@@ -3205,9 +3828,17 @@ impl SqliteStore {
         let version = self.schema_version()?;
         match version {
             0 => {
+                if schema_requests_work_model_v3(schema_sql) {
+                    return Err(StoreError::Invalid(
+                        "schema v3 is an additive migration; initialize schema v2 first".to_owned(),
+                    ));
+                }
                 self.execute_batch("BEGIN IMMEDIATE")?;
                 let result = self.execute_batch(schema_sql);
                 finish_transaction(self, result)
+            }
+            SCHEMA_VERSION if schema_requests_work_model_v3(schema_sql) => {
+                self.apply_work_model_v3(schema_sql)
             }
             SCHEMA_VERSION => {
                 self.execute_batch("BEGIN IMMEDIATE")?;
@@ -3223,8 +3854,201 @@ impl SqliteStore {
                     }
                 }
             }
+            WORK_MODEL_SCHEMA_VERSION => self.verify_work_model_v3_contract(),
             found => Err(StoreError::UnsupportedSchema { found }),
         }
+    }
+
+    /// Applies the additive work-model/3 migration to a complete schema-2
+    /// database.  The store owns the transaction even though the standalone
+    /// migration artifact contains BEGIN/COMMIT wrappers, and sets
+    /// `user_version` only after all objects have been created.  On any error
+    /// we explicitly roll back so a syntax or I/O failure cannot leave a
+    /// version-3-labelled partial database behind.
+    pub fn apply_work_model_v3(&self, schema_sql: &str) -> Result<(), StoreError> {
+        match self.schema_version()? {
+            WORK_MODEL_SCHEMA_VERSION => return self.verify_work_model_v3_contract(),
+            SCHEMA_VERSION => {}
+            found => {
+                return Err(StoreError::Invalid(format!(
+                    "work-model/3 requires schema version {SCHEMA_VERSION}, found {found}"
+                )))
+            }
+        }
+        if !schema_requests_work_model_v3(schema_sql) {
+            return Err(StoreError::Invalid(
+                "schema text is not the boreal work-model/3 migration".to_owned(),
+            ));
+        }
+
+        self.execute_batch("BEGIN IMMEDIATE")?;
+        let result = (|| {
+            self.repair_schema_v2()?;
+            self.execute_batch(&strip_transaction_wrappers(schema_sql))?;
+            self.verify_work_model_v3_contract()
+        })();
+        finish_transaction(self, result)
+    }
+
+    /// Opens a complete v2 base and applies the additive v3 extension.  A
+    /// v3 SQL file is intentionally not accepted as a standalone fresh
+    /// schema, because it would omit the canonical v2 lifecycle tables.
+    pub fn open_with_work_model_v3(
+        path: impl AsRef<Path>,
+        schema_v2: &str,
+        schema_v3: &str,
+    ) -> Result<Self, StoreError> {
+        let store = Self::open(path, schema_v2)?;
+        store.apply_work_model_v3(schema_v3)?;
+        Ok(store)
+    }
+
+    /// Returns whether the additive hierarchy/intake tables are installed.
+    /// This is intentionally separate from the v2 status schema version so
+    /// older clients can continue to open and read the base tables.
+    pub fn work_model_v3_enabled(&self) -> Result<bool, StoreError> {
+        if self.schema_version()? != WORK_MODEL_SCHEMA_VERSION {
+            return Ok(false);
+        }
+        Ok(self.verify_work_model_v3_contract().is_ok())
+    }
+
+    /// Downgrades only an empty v3 extension.  Rows are never deleted as an
+    /// implicit compatibility action; callers must export/backup populated
+    /// v3 facts before choosing a destructive migration explicitly.
+    pub fn rollback_work_model_v3(&self) -> Result<(), StoreError> {
+        if self.schema_version()? != WORK_MODEL_SCHEMA_VERSION {
+            return Err(StoreError::Conflict(
+                "work-model/3 is not installed".to_owned(),
+            ));
+        }
+        self.execute_batch("BEGIN IMMEDIATE")?;
+        let result = (|| {
+            for table in [
+                "work_node_v3",
+                "work_dependency_v3",
+                "cycle_series_v3",
+                "cycle_template_v3",
+                "cycle_template_weekday_v3",
+                "cycle_v3",
+                "cycle_assignment_v3",
+                "intake_bucket_v3",
+                "intake_item_v3",
+                "intake_promotion_v3",
+                "container_disposition_v3",
+            ] {
+                let mut statement = self.prepare(&format!("SELECT COUNT(*) FROM {table}"))?;
+                if statement.step()? == SQLITE_ROW && statement.column_i64(0)? != 0 {
+                    return Err(StoreError::Conflict(format!(
+                        "cannot roll back work-model/3 with persisted rows in {table}"
+                    )));
+                }
+            }
+            for table in [
+                "container_disposition_v3",
+                "intake_promotion_v3",
+                "intake_item_v3",
+                "intake_bucket_v3",
+                "cycle_assignment_v3",
+                "cycle_v3",
+                "cycle_template_weekday_v3",
+                "cycle_template_v3",
+                "cycle_series_v3",
+                "work_dependency_v3",
+                "work_node_v3",
+                "work_model_v3_meta",
+            ] {
+                self.execute_batch(&format!("DROP TABLE IF EXISTS {table}"))?;
+            }
+            self.execute_batch("PRAGMA user_version = 2")?;
+            self.verify_schema_contract()
+        })();
+        finish_transaction(self, result)
+    }
+
+    fn verify_work_model_v3_contract(&self) -> Result<(), StoreError> {
+        if self.schema_version()? != WORK_MODEL_SCHEMA_VERSION {
+            return Err(StoreError::Corrupt(
+                "work-model/3 database has an unexpected user_version".to_owned(),
+            ));
+        }
+        self.verify_schema_contract()?;
+        for table in [
+            "work_model_v3_meta",
+            "work_node_v3",
+            "work_dependency_v3",
+            "cycle_series_v3",
+            "cycle_template_v3",
+            "cycle_template_weekday_v3",
+            "cycle_v3",
+            "cycle_assignment_v3",
+            "intake_bucket_v3",
+            "intake_item_v3",
+            "intake_promotion_v3",
+            "container_disposition_v3",
+        ] {
+            if !self.table_exists(table)? {
+                return Err(StoreError::Corrupt(format!(
+                    "work-model/3 is missing required table {table}"
+                )));
+            }
+        }
+        for index in [
+            "work_dependency_v3_dependent",
+            "cycle_assignment_v3_live_work",
+            "container_disposition_v3_subject",
+            "container_disposition_v3_successor",
+        ] {
+            if !self.schema_object_exists("index", index)? {
+                return Err(StoreError::Corrupt(format!(
+                    "work-model/3 is missing required index {index}"
+                )));
+            }
+        }
+        for trigger in [
+            "work_node_v3_kind_guard",
+            "work_node_v3_parent_guard",
+            "work_node_v3_no_cycle",
+            "work_node_v3_identity_guard",
+            "work_node_v3_kind_update_guard",
+            "work_node_v3_parent_update_guard",
+            "work_node_v3_no_cycle_update",
+            "work_dependency_v3_direct_guard",
+            "work_dependency_v3_no_cycle",
+            "cycle_assignment_v3_direct_guard",
+            "cycle_assignment_v3_terminal_guard",
+            "intake_item_v3_revision_guard",
+            "intake_promotion_v3_current_provenance",
+            "intake_promotion_v3_append_only_update",
+            "intake_promotion_v3_append_only_delete",
+            "container_disposition_v3_subject_guard",
+            "container_disposition_v3_chain_guard",
+            "container_disposition_v3_append_only_update",
+            "container_disposition_v3_append_only_delete",
+        ] {
+            if !self.schema_object_exists("trigger", trigger)? {
+                return Err(StoreError::Corrupt(format!(
+                    "work-model/3 is missing required trigger {trigger}"
+                )));
+            }
+        }
+        let mut metadata = self.prepare(
+            "SELECT schema_id, schema_version, base_schema_version,
+                    contract_version
+             FROM work_model_v3_meta
+             WHERE schema_id = 'boreal.work-model'",
+        )?;
+        if metadata.step()? != SQLITE_ROW
+            || metadata.column_text(0)? != "boreal.work-model"
+            || metadata.column_i64(1)? != WORK_MODEL_SCHEMA_VERSION
+            || metadata.column_i64(2)? != SCHEMA_VERSION
+            || metadata.column_text(3)? != "boreal.work-model/3"
+        {
+            return Err(StoreError::Corrupt(
+                "work-model/3 metadata identity is invalid".to_owned(),
+            ));
+        }
+        Ok(())
     }
 
     fn repair_schema_v2(&self) -> Result<(), StoreError> {
@@ -5875,6 +6699,33 @@ fn same_path(left: &Path, right: &Path) -> bool {
     normalized_path(left)
         .zip(normalized_path(right))
         .is_some_and(|(a, b)| a == b)
+}
+
+fn schema_requests_work_model_v3(schema_sql: &str) -> bool {
+    schema_sql.contains("work_model_v3_meta")
+        && schema_sql.contains("boreal.work-model/3")
+        && schema_sql.contains("PRAGMA user_version = 3")
+}
+
+fn strip_transaction_wrappers(sql: &str) -> String {
+    let mut lines = sql.lines().collect::<Vec<_>>();
+    if let Some(index) = lines.iter().position(|line| {
+        matches!(
+            line.trim().trim_end_matches(';').trim(),
+            "BEGIN IMMEDIATE" | "BEGIN"
+        )
+    }) {
+        lines.remove(index);
+    }
+    if let Some(index) = lines.iter().rposition(|line| {
+        matches!(
+            line.trim().trim_end_matches(';').trim(),
+            "COMMIT" | "ROLLBACK"
+        )
+    }) {
+        lines.remove(index);
+    }
+    lines.join("\n")
 }
 
 fn backup_database(

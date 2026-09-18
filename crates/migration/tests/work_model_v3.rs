@@ -225,11 +225,24 @@ fn upgrade_reports_review_and_loss_accounting_for_semantic_conversions() {
         .notes
         .iter()
         .any(|note| note.contains("no store writes")));
+    let ledger = plan.loss_ledger();
+    assert_eq!(ledger.len(), 2);
+    assert!(ledger.iter().any(|entry| {
+        entry.record_type == "work"
+            && entry.record_id.as_deref() == Some("sprint-1")
+            && entry.disposition == boreal_migration::LossDisposition::HistoricalOnly
+    }));
+    assert!(ledger.iter().any(|entry| {
+        entry.record_type == "proof"
+            && entry.record_id.as_deref() == Some("task-1")
+            && entry.disposition == boreal_migration::LossDisposition::HistoricalOnly
+    }));
 
     let clean_plan = plan_schema2_upgrade(&semantically_clean_schema2_document()).unwrap();
     assert!(!clean_plan.review_required);
     assert!(clean_plan.reasons.is_empty());
     assert!(clean_plan.is_lossless());
+    assert!(clean_plan.loss_ledger().is_empty());
 }
 
 #[test]

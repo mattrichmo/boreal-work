@@ -92,6 +92,21 @@ export interface AttemptSummary {
   hard_deadline?: string | null;
 }
 
+export interface DependencySummary {
+  work_id: string;
+  relation?: string;
+  status?: WorkStatus;
+  satisfied?: boolean;
+}
+
+export interface ActivitySummary {
+  event_id?: string;
+  kind: string;
+  occurred_at?: string;
+  actor_id?: string | null;
+  summary?: string;
+}
+
 export interface StatusItem {
   work_id: string;
   project_id?: string;
@@ -103,6 +118,14 @@ export interface StatusItem {
   display_status?: WorkStatus;
   claimable_for_actor?: boolean;
   title?: string;
+  kind?: WorkKind | string;
+  parent_id?: string | null;
+  description?: string;
+  priority?: number;
+  dispatch_policy?: DispatchPolicy | string;
+  due_at?: string | null;
+  dependencies?: DependencySummary[];
+  activity?: ActivitySummary[];
   gates?: { open: GateItem[]; satisfied: GateItem[] };
   attempt?: AttemptSummary | null;
 }
@@ -125,6 +148,10 @@ export interface RevisionedStatusResponse {
   items: StatusItem[];
   counts?: Partial<MonitoringCounts>;
   as_of?: string;
+  project_id?: string;
+  project_name?: string;
+  active_cycle_id?: string | null;
+  active_sprint_id?: string | null;
 }
 
 export interface MonitoringModel {
@@ -135,6 +162,10 @@ export interface MonitoringModel {
   counts: MonitoringCounts;
   items: StatusItem[];
   truncated: boolean;
+  project_id?: string;
+  project_name?: string;
+  active_cycle_id?: string | null;
+  active_sprint_id?: string | null;
 }
 
 /** Backwards-compatible name for the original status groundwork. */
@@ -352,6 +383,35 @@ export interface Route {
   project_id?: string;
   work_id?: string;
 }
+
+/** Presentation-only queue filters. The service remains the authority for status. */
+export type DashboardFilter =
+  | "all" | "ready" | "active" | "blocked" | "expired" | "closed"
+  | "milestones" | "sprints" | "tasks";
+
+export interface DashboardCapability {
+  route: string;
+  label: string;
+  status: "available" | "unavailable";
+  reason: string;
+  owner?: string;
+}
+
+/**
+ * Routes that are intentionally visible before their Rust service DTO exists.
+ * The TUI may display these as disabled integration requests, but must never
+ * implement a local mutation or pretend that a route succeeded.
+ */
+export const DASHBOARD_CAPABILITIES: readonly DashboardCapability[] = [
+  { route: "work.edit", label: "Edit work", status: "unavailable", reason: "Rust service route is not exposed yet", owner: "planning/application" },
+  { route: "dependency.add/remove/tree", label: "Dependencies", status: "unavailable", reason: "Rust graph read/write routes are not exposed yet", owner: "planning/application" },
+  { route: "cycle.create/activate/board", label: "Cycles and sprints", status: "unavailable", reason: "Schema-v3 cycle routes are not exposed yet", owner: "hierarchy/application" },
+  { route: "intake.list/promote", label: "Intake", status: "unavailable", reason: "Intake service adapter is not exposed yet", owner: "knowledge/application" },
+  { route: "source.list/verify", label: "Sources", status: "unavailable", reason: "Source adapter route is not exposed yet", owner: "source/application" },
+  { route: "memory.search/publish", label: "Published memory", status: "unavailable", reason: "Memory adapter route is not exposed yet", owner: "memory/application" },
+  { route: "session.end/recover", label: "Session recovery", status: "unavailable", reason: "Operator lifecycle route is not exposed yet", owner: "runtime/service" },
+  { route: "activity.history", label: "Activity history", status: "unavailable", reason: "Bounded activity route is not exposed yet", owner: "protocol/service" },
+];
 
 export interface StaleRevisionDisplay {
   kind: "stale_revision";
@@ -590,6 +650,38 @@ function normalizeStatusItem(value: unknown): StatusItem {
       hard_deadline: typeof rawAttempt.hard_deadline === "string" || rawAttempt.hard_deadline === null ? rawAttempt.hard_deadline : undefined,
     };
   }
+  const normalizeDependencies = (raw: unknown): DependencySummary[] | undefined => {
+    if (raw === undefined) return undefined;
+    if (!Array.isArray(raw)) throw new ProtocolEnvelopeError("status item dependencies must be an array");
+    return raw.map((dependency) => {
+      if (!isObject(dependency) || typeof dependency.work_id !== "string") {
+        throw new ProtocolEnvelopeError("dependency summary must contain work_id");
+      }
+      return {
+        work_id: dependency.work_id,
+        relation: typeof dependency.relation === "string" ? dependency.relation : undefined,
+        status: typeof dependency.status === "string" ? dependency.status : undefined,
+        satisfied: typeof dependency.satisfied === "boolean" ? dependency.satisfied : undefined,
+      };
+    });
+  };
+  const normalizeActivity = (raw: unknown): ActivitySummary[] | undefined => {
+    if (raw === undefined) return undefined;
+    if (!Array.isArray(raw)) throw new ProtocolEnvelopeError("status item activity must be an array");
+    return raw.map((event) => {
+      if (!isObject(event) || typeof event.kind !== "string") {
+        throw new ProtocolEnvelopeError("activity summary must contain kind");
+      }
+      return {
+        event_id: typeof event.event_id === "string" ? event.event_id : undefined,
+        kind: event.kind,
+        occurred_at: typeof event.occurred_at === "string" ? event.occurred_at : undefined,
+        actor_id: typeof event.actor_id === "string" || event.actor_id === null ? event.actor_id : undefined,
+        summary: typeof event.summary === "string" ? event.summary : undefined,
+      };
+    });
+  };
+  const priority = value.priority === undefined ? undefined : asNumber(value.priority, "priority");
   return {
     work_id: value.work_id,
     project_id: typeof value.project_id === "string" ? value.project_id : undefined,
@@ -600,6 +692,14 @@ function normalizeStatusItem(value: unknown): StatusItem {
     claimable_for_actor: claimableValue,
     next_action: typeof value.next_action === "string" ? value.next_action : null,
     title: typeof value.title === "string" ? value.title : undefined,
+    kind: typeof value.kind === "string" ? value.kind : undefined,
+    parent_id: typeof value.parent_id === "string" || value.parent_id === null ? value.parent_id : undefined,
+    description: typeof value.description === "string" ? value.description : undefined,
+    priority,
+    dispatch_policy: typeof value.dispatch_policy === "string" ? value.dispatch_policy : undefined,
+    due_at: typeof value.due_at === "string" || value.due_at === null ? value.due_at : undefined,
+    dependencies: normalizeDependencies(value.dependencies),
+    activity: normalizeActivity(value.activity),
     gates: normalizedGates,
     attempt,
   };
@@ -973,6 +1073,12 @@ export function buildMonitoringModel(envelope: Envelope<RevisionedStatusResponse
     counts: normalizeCounts(validated.data.counts, items, total),
     items: items.slice(0, MAX_INLINE_ITEMS),
     truncated: items.length > MAX_INLINE_ITEMS || total > items.length,
+    project_id: typeof validated.data.project_id === "string" ? validated.data.project_id : undefined,
+    project_name: typeof validated.data.project_name === "string" ? validated.data.project_name : undefined,
+    active_cycle_id: typeof validated.data.active_cycle_id === "string" || validated.data.active_cycle_id === null
+      ? validated.data.active_cycle_id : undefined,
+    active_sprint_id: typeof validated.data.active_sprint_id === "string" || validated.data.active_sprint_id === null
+      ? validated.data.active_sprint_id : undefined,
   };
 }
 
@@ -1103,6 +1209,8 @@ export interface MountedView {
   stale_revision: StaleRevisionDisplay | null;
   busy_actions: TuiAction[];
   pending_operations: PendingOperation[];
+  capabilities?: readonly DashboardCapability[];
+  selected_receipt_available?: boolean;
 }
 
 export interface TuiWorkflowContext {
@@ -1212,6 +1320,8 @@ export class TuiWorkflowController {
       stale_revision: this.notice?.stale ?? null,
       busy_actions: [...this.busy],
       pending_operations: [...this.pending.values()],
+      capabilities: DASHBOARD_CAPABILITIES,
+      selected_receipt_available: selected ? this.currentReceipt(selected) !== undefined : false,
     };
   }
 

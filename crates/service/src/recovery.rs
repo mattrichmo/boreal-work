@@ -53,6 +53,40 @@ impl OperationRecord {
 pub struct RecoveryReport {
     pub queued: Vec<String>,
     pub unknown: Vec<String>,
+    pub reconciled: Vec<String>,
+}
+
+/// A reference to an external execution admitted by the application before a
+/// service process stopped. The service carries this opaque identity across a
+/// restart; it does not infer that a PID is still the same process.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ExecutionReference {
+    pub run_id: String,
+    pub process_id: Option<u32>,
+    pub process_start_token: Option<String>,
+    pub artifact_ref: Option<String>,
+}
+
+impl ExecutionReference {
+    pub fn new(run_id: impl Into<String>) -> Self {
+        Self {
+            run_id: run_id.into(),
+            process_id: None,
+            process_start_token: None,
+            artifact_ref: None,
+        }
+    }
+
+    pub fn with_process(mut self, process_id: u32, start_token: impl Into<String>) -> Self {
+        self.process_id = Some(process_id);
+        self.process_start_token = Some(start_token.into());
+        self
+    }
+
+    pub fn with_artifact(mut self, artifact_ref: impl Into<String>) -> Self {
+        self.artifact_ref = Some(artifact_ref.into());
+        self
+    }
 }
 
 /// A storage-neutral snapshot of an operation that was durable before the
@@ -62,6 +96,7 @@ pub struct RecoveryEntry {
     pub operation_id: String,
     pub phase: OperationPhase,
     pub revision: Option<u64>,
+    pub execution: Option<ExecutionReference>,
 }
 
 impl RecoveryEntry {
@@ -74,8 +109,25 @@ impl RecoveryEntry {
             operation_id: operation_id.into(),
             phase,
             revision,
+            execution: None,
         }
     }
+
+    pub fn with_execution(mut self, execution: ExecutionReference) -> Self {
+        self.execution = Some(execution);
+        self
+    }
+}
+
+/// Result of asking the durable application adapter to reconcile an admitted
+/// external execution. `Unknown` is the safe default and must not be retried
+/// automatically. A known terminal result is valid only when the adapter has
+/// observed and durably recorded that result.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum RecoveryDisposition {
+    Unknown { reason: String },
+    Committed { revision: Option<u64> },
+    Failed { reason: String },
 }
 
 /// Error returned by an application/store recovery adapter.
@@ -115,6 +167,19 @@ pub trait RecoveryBackend: Send + Sync + 'static {
     fn load_incomplete(&self) -> Result<Vec<RecoveryEntry>, RecoveryBackendError>;
 
     fn mark_unknown(&self, operation_id: &str) -> Result<(), RecoveryBackendError>;
+
+    /// Reconcile an admitted operation using application-owned durable facts
+    /// and any external execution reference. The default is deliberately
+    /// conservative: without an adapter-specific observation, the operation
+    /// remains unknown and must be read back by operation ID.
+    fn reconcile(
+        &self,
+        _entry: &RecoveryEntry,
+    ) -> Result<RecoveryDisposition, RecoveryBackendError> {
+        Ok(RecoveryDisposition::Unknown {
+            reason: "no durable execution reconciliation was available".to_owned(),
+        })
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -306,6 +371,7 @@ impl OperationRecovery {
         let mut report = RecoveryReport {
             queued: Vec::new(),
             unknown: Vec::new(),
+            reconciled: Vec::new(),
         };
         for record in records.values_mut() {
             match record.phase {
@@ -320,6 +386,16 @@ impl OperationRecovery {
             }
         }
         report
+    }
+
+    pub(crate) fn mark_reconciled(&self, operation_id: &str, disposition: &RecoveryDisposition) {
+        match disposition {
+            RecoveryDisposition::Committed { revision } => {
+                self.mark_committed(operation_id, *revision)
+            }
+            RecoveryDisposition::Failed { .. } => self.mark_failed(operation_id),
+            RecoveryDisposition::Unknown { .. } => self.mark_unknown(operation_id),
+        }
     }
 }
 

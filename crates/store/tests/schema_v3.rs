@@ -1,14 +1,36 @@
 //! Executable coverage for the additive `boreal.work-model/3` schema artifact.
 //!
-//! These tests intentionally apply schema-v3.sql manually after schema-v2.
-//! The store runtime is still schema-2-only; this proves the SQL contract and
-//! records the exact invariants the future store/application adapter must
-//! preserve before it advertises version 3.
+//! These tests exercise schema-v3.sql through both the store migration
+//! boundary and direct SQL constraint fixtures.  The v2 tables remain
+//! compatible while the store validates the complete v3 extension.
 
-use boreal_store::SqliteStore;
+use boreal_store::{
+    ContainerDispositionV3Input, CycleAssignmentV3Input, CycleSeriesV3Input, CycleTemplateV3Input,
+    CycleV3Input, IntakeBucketV3Input, IntakeItemV3Input, IntakePromotionV3Input, SqliteStore,
+    StoreError, V3MutationContext, WorkNodeV3Input,
+};
+use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 const SCHEMA_V2: &str = include_str!("../../../project/spec/schema-v2.sql");
 const SCHEMA_V3: &str = include_str!("../../../project/spec/schema-v3.sql");
+
+fn temp_path(label: &str) -> PathBuf {
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("clock before unix epoch")
+        .as_nanos();
+    std::env::temp_dir().join(format!(
+        "boreal-schema-v3-{label}-{}-{stamp}.sqlite",
+        std::process::id()
+    ))
+}
+
+fn remove_sqlite_files(path: &Path) {
+    let _ = std::fs::remove_file(path);
+    let _ = std::fs::remove_file(path.with_extension("sqlite-wal"));
+    let _ = std::fs::remove_file(path.with_extension("sqlite-shm"));
+}
 
 fn store_v3() -> SqliteStore {
     let store = SqliteStore::open_in_memory(SCHEMA_V2).expect("schema-v2 opens");
@@ -17,6 +39,296 @@ fn store_v3() -> SqliteStore {
         .expect("schema-v3 additive migration applies");
     assert_eq!(store.schema_version().unwrap(), 3);
     store
+}
+
+#[test]
+fn runtime_applies_and_reopens_v3_while_accepting_schema2_openers() {
+    let path = temp_path("reopen");
+    remove_sqlite_files(&path);
+    {
+        let store = SqliteStore::open(&path, SCHEMA_V2).expect("schema-v2 opens");
+        assert_eq!(store.schema_version().unwrap(), 2);
+        store
+            .apply_schema(SCHEMA_V3)
+            .expect("runtime applies the additive v3 migration");
+        assert_eq!(store.schema_version().unwrap(), 3);
+        assert!(store.work_model_v3_enabled().unwrap());
+    }
+    {
+        // A schema-2 client can still reopen/read the database.  It sees the
+        // installed extension but does not need to understand its tables.
+        let reopened = SqliteStore::open(&path, SCHEMA_V2).expect("schema-v2 opener reopens v3");
+        assert_eq!(reopened.schema_version().unwrap(), 3);
+        assert!(reopened.work_model_v3_enabled().unwrap());
+    }
+    remove_sqlite_files(&path);
+}
+
+#[test]
+fn failed_v3_migration_rolls_back_without_a_partial_v3_schema() {
+    let path = temp_path("rollback");
+    remove_sqlite_files(&path);
+    let store = SqliteStore::open(&path, SCHEMA_V2).expect("schema-v2 opens");
+    let broken = SCHEMA_V3.replace(
+        "CREATE TABLE cycle_v3",
+        "THIS IS INVALID SQL;\nCREATE TABLE cycle_v3",
+    );
+    assert!(store.apply_schema(&broken).is_err());
+    assert_eq!(store.schema_version().unwrap(), 2);
+    assert!(!store.work_model_v3_enabled().unwrap());
+    assert!(store
+        .execute_batch("SELECT 1 FROM work_model_v3_meta")
+        .is_err());
+    drop(store);
+    remove_sqlite_files(&path);
+}
+
+#[test]
+fn store_v3_mutations_use_revisions_audit_and_typed_replay() {
+    let store = store_v3();
+    seed_base(&store);
+    seed_nodes(&store);
+    let context = |operation_id: &str, request_digest: &str| V3MutationContext {
+        project_id: "p1".to_owned(),
+        actor_id: "agent-1".to_owned(),
+        operation_id: operation_id.to_owned(),
+        request_digest: request_digest.to_owned(),
+        expected_revision: None,
+        now: "t1".to_owned(),
+    };
+
+    let node = WorkNodeV3Input {
+        project_id: "p1".to_owned(),
+        work_id: "direct-a".to_owned(),
+        decomposition_kind: "task".to_owned(),
+        execution_mode: "direct".to_owned(),
+        parent_id: Some("container-1".to_owned()),
+        created_at: "t1".to_owned(),
+        updated_at: "t1".to_owned(),
+    };
+    let first = store
+        .create_work_node_v3(&context("op-node", "sha256:node"), &node)
+        .expect_err("duplicate node should fail after the transaction boundary");
+    assert!(matches!(first, StoreError::Constraint { .. }));
+
+    let series = CycleSeriesV3Input {
+        project_id: "p1".to_owned(),
+        series_id: "series-api".to_owned(),
+        name: "API cycle".to_owned(),
+        lifecycle: "active".to_owned(),
+        timezone: "America/Regina".to_owned(),
+        tzdb_identity: "tzdb-test".to_owned(),
+        created_at: "t1".to_owned(),
+        updated_at: "t1".to_owned(),
+    };
+    let created = store
+        .create_cycle_series_v3(&context("op-series", "sha256:series"), &series)
+        .expect("series mutation is accepted");
+    assert!(!created.replayed);
+    assert_eq!(created.revision, 1);
+    assert_eq!(
+        store
+            .cycle_series_v3("p1", "series-api")
+            .unwrap()
+            .unwrap()
+            .name,
+        "API cycle"
+    );
+
+    let replay = store
+        .create_cycle_series_v3(&context("op-series", "sha256:series"), &series)
+        .expect("same operation replays");
+    assert!(replay.replayed);
+    assert_eq!(replay.revision, created.revision);
+    let changed = store.create_cycle_series_v3(&context("op-series", "sha256:changed"), &series);
+    assert!(matches!(changed, Err(StoreError::Conflict(_))));
+
+    let template = CycleTemplateV3Input {
+        project_id: "p1".to_owned(),
+        template_version_id: "template-api".to_owned(),
+        series_id: "series-api".to_owned(),
+        version: 1,
+        effective_from_slot_ordinal: 0,
+        interval_weeks: 1,
+        anchor_local_date: "2026-09-21".to_owned(),
+        anchor_local_time: "09:00:00".to_owned(),
+        anchor_weekday: 1,
+        recurrence_end_kind: "never".to_owned(),
+        recurrence_end_count: None,
+        recurrence_end_local_date: None,
+        name_pattern: "Cycle {slot}".to_owned(),
+        goal_template: "Ship".to_owned(),
+        timezone: "America/Regina".to_owned(),
+        tzdb_identity: "tzdb-test".to_owned(),
+        gap_policy: "next_valid".to_owned(),
+        fold_policy: "earlier_offset".to_owned(),
+        weekdays: vec![1],
+        created_at: "t1".to_owned(),
+    };
+    store
+        .create_cycle_template_v3(&context("op-template", "sha256:template"), &template)
+        .expect("template mutation is accepted");
+    let cycle = CycleV3Input {
+        project_id: "p1".to_owned(),
+        cycle_id: "cycle-api".to_owned(),
+        series_id: "series-api".to_owned(),
+        template_version_id: "template-api".to_owned(),
+        slot_ordinal: 0,
+        name: "Cycle 0".to_owned(),
+        goal: "Ship".to_owned(),
+        lifecycle: "planned".to_owned(),
+        scheduled_start_utc_ms: 1_790_000_000_000,
+        scheduled_end_utc_ms: Some(1_790_003_600_000),
+        scheduled_start_local: "2026-09-21T09:00:00".to_owned(),
+        scheduled_start_utc_offset_minutes: -360,
+        timezone: "America/Regina".to_owned(),
+        tzdb_identity: "tzdb-test".to_owned(),
+        gap_policy: "next_valid".to_owned(),
+        fold_policy: "earlier_offset".to_owned(),
+        created_at: "t1".to_owned(),
+        updated_at: "t1".to_owned(),
+    };
+    store
+        .create_cycle_v3(&context("op-cycle", "sha256:cycle"), &cycle)
+        .expect("cycle mutation is accepted");
+    store
+        .assign_cycle_work_v3(
+            &context("op-assignment", "sha256:assignment"),
+            &CycleAssignmentV3Input {
+                project_id: "p1".to_owned(),
+                assignment_id: "assignment-api".to_owned(),
+                cycle_id: "cycle-api".to_owned(),
+                work_id: "direct-a".to_owned(),
+                state: "planned".to_owned(),
+                activation_policy: "at_cycle_start".to_owned(),
+                activation_at_utc_ms: None,
+                predecessor_id: None,
+                successor_id: None,
+                created_at: "t1".to_owned(),
+                updated_at: "t1".to_owned(),
+            },
+        )
+        .expect("assignment mutation is accepted");
+    assert_eq!(
+        store.cycle_assignments_v3("p1", "cycle-api").unwrap().len(),
+        1
+    );
+
+    store
+        .create_intake_bucket_v3(
+            &context("op-bucket", "sha256:bucket"),
+            &IntakeBucketV3Input {
+                project_id: "p1".to_owned(),
+                bucket_id: "bucket-api".to_owned(),
+                name: "Inbox".to_owned(),
+                archived: false,
+                created_at: "t1".to_owned(),
+                updated_at: "t1".to_owned(),
+            },
+        )
+        .expect("bucket mutation is accepted");
+    store
+        .create_intake_item_v3(
+            &context("op-intake", "sha256:intake"),
+            &IntakeItemV3Input {
+                project_id: "p1".to_owned(),
+                intake_id: "intake-api".to_owned(),
+                bucket_id: "bucket-api".to_owned(),
+                kind: "discovery".to_owned(),
+                lifecycle: "captured".to_owned(),
+                content: "A useful discovery".to_owned(),
+                content_revision: 1,
+                content_digest: "sha256:intake".to_owned(),
+                captured_at: "t1".to_owned(),
+                updated_at: "t1".to_owned(),
+                revisit_at_utc_ms: None,
+            },
+        )
+        .expect("intake mutation is accepted");
+    assert_eq!(
+        store
+            .intake_item_v3("p1", "intake-api")
+            .unwrap()
+            .unwrap()
+            .content_revision,
+        1
+    );
+    store
+        .promote_intake_v3(
+            &context("op-promotion", "sha256:promotion"),
+            &IntakePromotionV3Input {
+                project_id: "p1".to_owned(),
+                promotion_id: "promotion-api".to_owned(),
+                intake_id: "intake-api".to_owned(),
+                intake_revision: 1,
+                intake_digest: "sha256:intake".to_owned(),
+                target_kind: "draft_work".to_owned(),
+                target_id: "draft-api".to_owned(),
+                actor_id: "agent-1".to_owned(),
+                operation_id: "promotion-child-op".to_owned(),
+                created_at: "t1".to_owned(),
+            },
+        )
+        .expect("promotion mutation is accepted");
+
+    let disposition = ContainerDispositionV3Input {
+        project_id: "p1".to_owned(),
+        disposition_id: "disposition-api".to_owned(),
+        container_work_id: "container-1".to_owned(),
+        descendant_work_id: "direct-a".to_owned(),
+        kind: "accepted_closed".to_owned(),
+        descendant_revision: 1,
+        descendant_outcome_digest: "sha256:outcome".to_owned(),
+        replacement_work_id: None,
+        reason: None,
+        supersedes_id: None,
+        created_at: "t1".to_owned(),
+    };
+    store
+        .append_container_disposition_v3(
+            &context("op-disposition", "sha256:disposition"),
+            &disposition,
+        )
+        .expect("disposition mutation is accepted");
+}
+
+#[test]
+fn populated_v3_extension_refuses_destructive_rollback_but_empty_one_downgrades() {
+    let store = store_v3();
+    seed_base(&store);
+    seed_nodes(&store);
+    let error = store.rollback_work_model_v3().unwrap_err();
+    assert!(matches!(error, StoreError::Conflict(_)));
+
+    let empty = store_v3();
+    empty
+        .rollback_work_model_v3()
+        .expect("empty extension can safely downgrade");
+    assert_eq!(empty.schema_version().unwrap(), 2);
+    assert!(!empty.work_model_v3_enabled().unwrap());
+}
+
+#[test]
+fn online_backup_preserves_the_v3_extension_and_schema2_rows() {
+    let source_path = temp_path("v3-backup-source");
+    let backup_path = temp_path("v3-backup-copy");
+    remove_sqlite_files(&source_path);
+    remove_sqlite_files(&backup_path);
+    {
+        let source = SqliteStore::open_with_work_model_v3(&source_path, SCHEMA_V2, SCHEMA_V3)
+            .expect("v2 base plus v3 extension opens");
+        seed_base(&source);
+        seed_nodes(&source);
+        source.backup_to(&backup_path).expect("v3 backup succeeds");
+    }
+    let backup = SqliteStore::open(&backup_path, SCHEMA_V2).expect("v2-compatible reopen");
+    assert_eq!(backup.schema_version().unwrap(), 3);
+    assert!(backup.work_model_v3_enabled().unwrap());
+    assert!(backup.work("p1", "direct-a").unwrap().is_some());
+    assert!(backup.work_node_v3("p1", "direct-a").unwrap().is_some());
+    drop(backup);
+    remove_sqlite_files(&source_path);
+    remove_sqlite_files(&backup_path);
 }
 
 fn seed_base(store: &SqliteStore) {

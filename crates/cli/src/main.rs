@@ -2,12 +2,14 @@ use boreal_application::{
     canonical_request_digest, guide_checked, sha256_content_digest, AcceptanceGateDefinition,
     ApplicationError, AttemptPolicy, AttemptRequest, BoundedExecutionResult, CommandSpec,
     EndAttemptRequest, EvidenceExecutionOutcome, EvidenceRunRequest, ExecutorAttestation,
-    LivenessMetadata, OperationResult, ReceiptCoverage, ReceiptExpectation, ReceiptPayload,
-    SessionRegistrationRequest, SqliteAttemptAdapter, SummaryPayload, WorkApplication,
+    IntakeBucket, IntakeBucketId, IntakeItem, IntakeItemId, IntakeKind, IntakeLifecycle,
+    KnowledgeApplication, LivenessMetadata, OperationResult, ReceiptCoverage, ReceiptExpectation,
+    ReceiptPayload, SessionRegistrationRequest, SourceCaptureInput, SqliteAttemptAdapter,
+    SummaryPayload, WorkApplication,
 };
 use boreal_domain::{
     AcceptanceProfile, ActorId, AttemptId, AttemptPhase, ConfigIdentity, DispatchPolicy, Fence,
-    GateId, GateKind, HarnessId, OperationId, PersistedLifecycle, ProjectId, ReceiptId,
+    GateId, GateKind, HarnessId, OperationId, PersistedLifecycle, ProjectId, ReasonCode, ReceiptId,
     ReceiptResult, SessionId, SourceVersionId, TimestampMs, WorkId, WorkItem, WorkKind,
 };
 use boreal_protocol::{
@@ -17,6 +19,7 @@ use boreal_protocol::{
     },
     schema, ApplicationOutcome, Envelope, ErrorCode, ProtocolError, TransportOutcome, API_VERSION,
 };
+use boreal_source::SourceCatalog;
 use boreal_store::{AttemptRecord, SqliteStore, StoreError};
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -47,6 +50,7 @@ const DEFAULT_HARNESS: &str = "cli";
 const DEFAULT_SESSION: &str = "session-cli";
 const MAX_GATE_RUNTIME_MS: u64 = 30_000;
 const GATE_COMMANDS_DIR: &str = "gates";
+const MAX_SOURCE_INPUT_BYTES: u64 = 16 * 1024 * 1024;
 static OPERATION_COUNTER: AtomicU64 = AtomicU64::new(0);
 const HELP: &str = r#"bwrk v2
 
@@ -58,7 +62,26 @@ Usage:
   bwrk service run --db PATH --socket PATH [--max-requests N] [--json]
   bwrk status <project> [--limit N] [--offset N] [--socket PATH] [--db PATH] [--json]
   bwrk dashboard [PROJECT] [--project PROJECT] [--db PATH] [--actor ID] [--harness ID] [--session ID] [--json]
-  bwrk work create <project> <work-id> <title> [--kind milestone|sprint|task] [--parent WORK_ID] [--priority N] [--description TEXT] [--db PATH] [--json]
+  bwrk work create <project> <work-id> <title> [--kind milestone|sprint|task] [--parent WORK_ID] [--priority N] [--description TEXT] [--dispatch automatic|operator_only|paused] [--hold CODE] [--db PATH] [--json]
+  bwrk work edit <project> <work-id> [--title TEXT] [--description TEXT] [--parent WORK_ID] [--priority N] [--dispatch automatic|operator_only|paused] --expected-revision N
+  bwrk dep remove <project> <prerequisite-id> <dependent-id> --expected-revision N
+  bwrk work hold add <project> <work-id> --reason CODE --expected-revision N
+  bwrk work hold resolve <project> <work-id> <hold-id> --reason TEXT --expected-revision N
+  bwrk work dispatch set <project> <work-id> --dispatch automatic|operator_only|paused --expected-revision N
+  bwrk dep add <project> <prerequisite-id> <dependent-id> [--expected-revision N] [--db PATH] [--json]
+  bwrk dep tree <project> [--db PATH] [--json]
+  bwrk dep cycles <project> [--db PATH] [--json]
+  bwrk cycle board <project> <cycle-id> [--db PATH] [--json]
+  bwrk cycle report <project> <cycle-id> [--db PATH] [--json]
+  bwrk intake list <project> [--db PATH] [--json]
+  bwrk intake show <project> <intake-id> [--db PATH] [--json]
+  bwrk intake bucket <project> <bucket-id> <name> [--db PATH] [--json]
+  bwrk intake capture <project> <intake-id> <content> --bucket BUCKET [--kind note|discovery|question|revisit] [--db PATH] [--json]
+  bwrk source add <project> --input PATH --origin ORIGIN [--media-type TYPE] [--db PATH] [--json]
+  bwrk source show <project> <source-version-id> [--db PATH] [--json]
+  bwrk source list <project> [--limit N] [--offset N] [--db PATH] [--json]
+  bwrk source verify <project> <source-version-id> [--db PATH] [--json]
+  bwrk doctor [--project PROJECT] [--db PATH] [--json]
   bwrk work list <project> [--limit N] [--offset N] [--db PATH] [--json]
   bwrk work show <project> <work-id> [--db PATH] [--json]
   bwrk work claim <project> <work-id> [--session SESSION_ID] [--lease-ttl DURATION] [--time-limit DURATION] [--socket PATH] [--db PATH] [--json]
@@ -81,6 +104,7 @@ Usage:
   bwrk evidence add --project PROJECT --work WORK_ID --gate GATE_ID --receipt PATH [--json]
   bwrk session start --project PROJECT --session SESSION_ID --harness HARNESS_ID [--json]
   bwrk session show --project PROJECT --session SESSION_ID [--json]
+  bwrk session end --project PROJECT --session SESSION_ID [--expected-revision N] [--json]
   bwrk operation show PROJECT OPERATION_ID [--socket PATH] [--json]"#;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -113,7 +137,14 @@ struct CliOptions {
     kind: Option<String>,
     parent: Option<String>,
     description: Option<String>,
+    title: Option<String>,
     priority: Option<u8>,
+    dispatch: Option<String>,
+    hold: Option<String>,
+    bucket: Option<String>,
+    input: Option<String>,
+    origin: Option<String>,
+    media_type: Option<String>,
     source_version: Option<String>,
     config_identity: Option<String>,
     positionals: Vec<String>,
@@ -150,7 +181,14 @@ impl Default for CliOptions {
             kind: None,
             parent: None,
             description: None,
+            title: None,
             priority: None,
+            dispatch: None,
+            hold: None,
+            bucket: None,
+            input: None,
+            origin: None,
+            media_type: None,
             source_version: None,
             config_identity: None,
             positionals: Vec::new(),
@@ -310,10 +348,19 @@ fn run_with_operation(args: &[String], operation: &str) -> Result<CliResult, Cli
         if service::supports(&parsed) {
             return service::request(&parsed, operation);
         }
+        let message = if command_registry::is_unavailable_path(&parsed.path) {
+            format!(
+                "command route is catalogued but unavailable through the selected service socket: {}; inspect `bwrk commands {}`",
+                parsed.path.join(" "),
+                parsed.path.join(" ")
+            )
+        } else {
+            "the requested command is not available through the selected service socket".to_owned()
+        };
         return Err(CliError::with(
             ErrorCode::UnknownCommandNamespace,
             ApplicationOutcome::Rejected,
-            "the requested command is not available through the selected service socket",
+            message,
         ));
     }
     let path = PathBuf::from(&parsed.options.db);
@@ -354,6 +401,23 @@ fn dispatch<A: boreal_application::AttemptLifecycleAdapter>(
         ["work", "list"] => list_result(parsed, app),
         ["work", "show"] => show_work_result(parsed, app, store),
         ["work", "create"] => create_work_result(parsed, app, operation),
+        ["work", "edit"] => work_edit_result(parsed, app, operation),
+        ["work", "hold", "add"] => work_hold_add_result(parsed, app, operation),
+        ["work", "hold", "resolve"] => work_hold_resolve_result(parsed, app, operation),
+        ["work", "dispatch", "set"] => work_dispatch_set_result(parsed, app, operation),
+        ["dep", "add"] => dependency_add_result(parsed, app, operation),
+        ["dep", "remove"] => dependency_remove_result(parsed, app, operation),
+        ["dep", "tree"] | ["dep", "cycles"] => dependency_graph_result(parsed, app),
+        ["cycle", "board"] | ["cycle", "report"] => cycle_board_result(parsed, app),
+        ["intake", "list"] => intake_list_result(parsed, app),
+        ["intake", "show"] => intake_show_result(parsed, app),
+        ["intake", "bucket"] => intake_bucket_result(parsed, app, operation),
+        ["intake", "capture"] => intake_capture_result(parsed, app, operation),
+        ["source", "add"] => source_add_result(parsed, operation, store),
+        ["source", "show"] => source_show_result(parsed, store),
+        ["source", "list"] => source_list_result(parsed, store),
+        ["source", "verify"] => source_verify_result(parsed, store),
+        ["doctor"] => doctor_result(parsed, store),
         ["work", "claim"] => claim_result(parsed, app, adapter, operation, store),
         ["work", "accept"] => attempt_mutation_result(
             parsed,
@@ -440,6 +504,16 @@ fn dispatch<A: boreal_application::AttemptLifecycleAdapter>(
         ),
         ["session", "start"] => session_start_result(parsed, app, operation),
         ["session", "show"] => session_show_result(parsed, app),
+        ["session", "end"] => session_end_result(parsed, app, operation),
+        _ if command_registry::is_unavailable_path(&parsed.path) => Err(CliError::with(
+            ErrorCode::UnknownCommandNamespace,
+            ApplicationOutcome::Rejected,
+            format!(
+                "command route is catalogued but unavailable: {}; inspect `bwrk commands {}`",
+                parsed.path.join(" "),
+                parsed.path.join(" ")
+            ),
+        )),
         _ => Err(CliError::invalid(format!(
             "unknown command path: {}",
             parsed.path.join(" ")
@@ -480,7 +554,14 @@ fn parse(args: &[String]) -> Result<ParsedCommand, CliError> {
         kind: None,
         parent: None,
         description: None,
+        title: None,
         priority: None,
+        dispatch: None,
+        hold: None,
+        bucket: None,
+        input: None,
+        origin: None,
+        media_type: None,
         source_version: None,
         config_identity: None,
         positionals: Vec::new(),
@@ -554,7 +635,14 @@ fn parse(args: &[String]) -> Result<ParsedCommand, CliError> {
                 | "--kind"
                 | "--parent"
                 | "--description"
+                | "--title"
                 | "--priority"
+                | "--dispatch"
+                | "--hold"
+                | "--bucket"
+                | "--input"
+                | "--origin"
+                | "--media-type"
                 | "--source-version"
                 | "--config-identity" => Some(option_value(args, &mut index, canonical)?),
                 _ => None,
@@ -621,19 +709,65 @@ fn parse(args: &[String]) -> Result<ParsedCommand, CliError> {
                 }
                 "--kind" => {
                     let kind = value.unwrap();
-                    if !matches!(kind.as_str(), "milestone" | "sprint" | "task") {
-                        return Err(CliError::invalid(
-                            "--kind must be milestone, sprint, or task",
-                        ));
+                    let intake_kind = path.as_slice() == ["intake", "capture"];
+                    if (intake_kind
+                        && !matches!(kind.as_str(), "note" | "discovery" | "question" | "revisit"))
+                        || (!intake_kind
+                            && !matches!(kind.as_str(), "milestone" | "sprint" | "task"))
+                    {
+                        return Err(CliError::invalid(if intake_kind {
+                            "--kind must be note, discovery, question, or revisit"
+                        } else {
+                            "--kind must be milestone, sprint, or task"
+                        }));
                     }
                     options.kind = Some(kind);
                 }
                 "--parent" => options.parent = Some(value.unwrap()),
                 "--description" => options.description = Some(value.unwrap()),
+                "--title" => options.title = Some(value.unwrap()),
                 "--priority" => {
                     options.priority = Some(value.unwrap().parse().map_err(|_| {
                         CliError::invalid("--priority must be an integer from 0 to 255")
                     })?);
+                }
+                "--dispatch" => {
+                    let dispatch = value.unwrap();
+                    if !matches!(dispatch.as_str(), "automatic" | "operator_only" | "paused") {
+                        return Err(CliError::invalid(
+                            "--dispatch must be automatic, operator_only, or paused",
+                        ));
+                    }
+                    options.dispatch = Some(dispatch);
+                }
+                "--hold" => {
+                    let hold = value.unwrap();
+                    if hold.trim().is_empty() {
+                        return Err(CliError::invalid("--hold must not be empty"));
+                    }
+                    options.hold = Some(hold);
+                }
+                "--bucket" => {
+                    let bucket = value.unwrap();
+                    if bucket.trim().is_empty() {
+                        return Err(CliError::invalid("--bucket must not be empty"));
+                    }
+                    options.bucket = Some(bucket);
+                }
+                "--input" => options.input = Some(value.unwrap()),
+                "--origin" => {
+                    let origin = value.unwrap();
+                    if origin.trim().is_empty() {
+                        return Err(CliError::invalid("--origin must not be empty"));
+                    }
+                    options.origin = Some(origin);
+                }
+                "--media-type" => {
+                    let media_type = value.unwrap();
+                    if media_type.trim().is_empty() {
+                        return Err(CliError::invalid("--media-type must not be empty"));
+                    }
+                    options.media_type = Some(media_type);
                 }
                 "--source-version" => options.source_version = Some(value.unwrap()),
                 "--config-identity" => options.config_identity = Some(value.unwrap()),
@@ -651,7 +785,12 @@ fn parse(args: &[String]) -> Result<ParsedCommand, CliError> {
             // command namespace.
             path.push(arg.clone());
             index += 1;
-        } else if path.len() < 2 && !matches!(path.first().map(String::as_str), Some("init")) {
+        } else if (path.len() < 2 && !matches!(path.first().map(String::as_str), Some("init")))
+            || (path.len() == 2
+                && ((path.as_slice() == ["work", "hold"]
+                    && matches!(arg.as_str(), "add" | "resolve"))
+                    || (path.as_slice() == ["work", "dispatch"] && arg == "set")))
+        {
             path.push(arg.clone());
             index += 1;
         } else {
@@ -663,7 +802,7 @@ fn parse(args: &[String]) -> Result<ParsedCommand, CliError> {
         options.positionals.extend(path.drain(1..));
     } else if matches!(
         path.first().map(String::as_str),
-        Some("status" | "prime" | "dashboard")
+        Some("status" | "prime" | "dashboard" | "doctor")
     ) && options.project.is_none()
     {
         if let Some(project) = path.get(1).cloned() {
@@ -674,7 +813,7 @@ fn parse(args: &[String]) -> Result<ParsedCommand, CliError> {
         && options.project.is_none()
         && matches!(
             path.get(1).map(String::as_str),
-            Some("create" | "show" | "claim")
+            Some("create" | "show" | "claim" | "edit")
         )
     {
         if let Some(project) = path.get(2).cloned() {
@@ -705,6 +844,35 @@ fn validate_command(path: &[String], options: &CliOptions) -> Result<(), CliErro
             options.positionals.is_empty()
         }
         ["agent", "guide"] | ["agent", "resume"] | ["next"] | ["agent", "next"] => positionals == 0,
+        ["doctor"] | ["session", "end"] => positionals == 0,
+        ["dep", "add"] | ["dep", "remove"] => {
+            positionals == 2 + usize::from(options.project.is_none())
+        }
+        ["work", "edit"] => positionals == 1 + usize::from(options.project.is_none()),
+        ["work", "hold", "add"] | ["work", "dispatch", "set"] => {
+            positionals == 1 + usize::from(options.project.is_none())
+        }
+        ["work", "hold", "resolve"] => positionals == 2 + usize::from(options.project.is_none()),
+        ["dep", "tree"] | ["dep", "cycles"] => {
+            positionals == usize::from(options.project.is_none())
+        }
+        ["cycle", "board"] | ["cycle", "report"] => {
+            positionals == 1 + usize::from(options.project.is_none())
+        }
+        ["intake", "list"] => positionals == usize::from(options.project.is_none()),
+        ["intake", "show"] => positionals == 1 + usize::from(options.project.is_none()),
+        ["intake", "bucket"] | ["intake", "capture"] => {
+            positionals == 2 + usize::from(options.project.is_none())
+        }
+        ["source", "add"] => {
+            positionals == usize::from(options.project.is_none())
+                && options.input.is_some()
+                && options.origin.is_some()
+        }
+        ["source", "list"] => positionals == usize::from(options.project.is_none()),
+        ["source", "show"] | ["source", "verify"] => {
+            positionals == 1 + usize::from(options.project.is_none())
+        }
         ["agent", "start"] => positionals <= 1,
         ["agent", "release"] | ["agent", "finish"] => positionals == 1,
         ["agent", "status"] => positionals == 0,
@@ -837,6 +1005,934 @@ fn list_result(parsed: &ParsedCommand, app: &WorkApplication<'_>) -> Result<CliR
     bounded_result(
         Some(json!({"revision": page.revision.0, "total": page.total, "items": items})),
         Some(page.revision.0),
+    )
+}
+
+fn dependency_add_result(
+    parsed: &ParsedCommand,
+    app: &WorkApplication<'_>,
+    operation: &str,
+) -> Result<CliResult, CliError> {
+    let project = ProjectId::new(project_argument(parsed, 0)?);
+    let offset = usize::from(parsed.options.project.is_none());
+    let prerequisite_id = parsed
+        .options
+        .positionals
+        .get(offset)
+        .cloned()
+        .ok_or_else(|| CliError::invalid("dep add requires a prerequisite work identifier"))?;
+    let dependent_id = parsed
+        .options
+        .positionals
+        .get(offset + 1)
+        .cloned()
+        .ok_or_else(|| CliError::invalid("dep add requires a dependent work identifier"))?;
+    let result = app
+        .add_dependency_as_checked(
+            &project,
+            &prerequisite_id,
+            &dependent_id,
+            &parsed.options.actor,
+            parsed.options.expected_revision,
+            &now(),
+            operation.to_owned(),
+        )
+        .map_err(map_dependency_error)?;
+    bounded_result(
+        Some(json!({
+            "project_id": project.as_str(),
+            "prerequisite_id": prerequisite_id,
+            "dependent_id": dependent_id,
+            "satisfaction_policy": "closed_only",
+            "replayed": !result.changed,
+        })),
+        Some(result.snapshot_revision),
+    )
+    .map(|mut result_view| {
+        result_view.outcome = if result.changed {
+            ApplicationOutcome::Changed
+        } else {
+            ApplicationOutcome::Unchanged
+        };
+        result_view
+    })
+}
+
+fn work_edit_result(
+    parsed: &ParsedCommand,
+    app: &WorkApplication<'_>,
+    operation: &str,
+) -> Result<CliResult, CliError> {
+    let project = ProjectId::new(project_argument(parsed, 0)?);
+    let offset = usize::from(parsed.options.project.is_none());
+    let work_id = parsed
+        .options
+        .positionals
+        .get(offset)
+        .cloned()
+        .ok_or_else(|| CliError::invalid("work edit requires a work identifier"))?;
+    let result = app
+        .edit_work_as(
+            &project,
+            &work_id,
+            &parsed.options.actor,
+            parsed.options.parent.clone().map(Some),
+            parsed.options.title.clone(),
+            parsed.options.description.clone(),
+            parsed.options.priority,
+            parsed.options.dispatch.clone(),
+            parsed.options.expected_revision,
+            &now(),
+            operation.to_owned(),
+        )
+        .map_err(map_application_error)?;
+    bounded_result(
+        Some(json!({
+            "project_id": result.value.project_id,
+            "work_id": result.value.work_id,
+            "title": result.value.title,
+            "description": result.value.description,
+            "priority": result.value.priority,
+            "dispatch_policy": result.value.dispatch_policy,
+            "hard_holds": result.value.hard_holds.iter().map(ReasonCode::stable_code).collect::<Vec<_>>(),
+            "replayed": !result.changed,
+        })),
+        Some(result.snapshot_revision),
+    )
+    .map(|mut view| {
+        view.outcome = if result.changed { ApplicationOutcome::Changed } else { ApplicationOutcome::Unchanged };
+        view
+    })
+}
+
+fn dependency_remove_result(
+    parsed: &ParsedCommand,
+    app: &WorkApplication<'_>,
+    operation: &str,
+) -> Result<CliResult, CliError> {
+    let project = ProjectId::new(project_argument(parsed, 0)?);
+    let offset = usize::from(parsed.options.project.is_none());
+    let prerequisite_id = parsed
+        .options
+        .positionals
+        .get(offset)
+        .cloned()
+        .ok_or_else(|| CliError::invalid("dep remove requires a prerequisite work identifier"))?;
+    let dependent_id = parsed
+        .options
+        .positionals
+        .get(offset + 1)
+        .cloned()
+        .ok_or_else(|| CliError::invalid("dep remove requires a dependent work identifier"))?;
+    let result = app
+        .remove_dependency_as(
+            &project,
+            &prerequisite_id,
+            &dependent_id,
+            &parsed.options.actor,
+            parsed.options.expected_revision,
+            &now(),
+            operation.to_owned(),
+        )
+        .map_err(map_dependency_error)?;
+    bounded_result(
+        Some(json!({
+            "project_id": project.as_str(),
+            "prerequisite_id": prerequisite_id,
+            "dependent_id": dependent_id,
+            "replayed": !result.changed,
+        })),
+        Some(result.snapshot_revision),
+    )
+    .map(|mut view| {
+        view.outcome = if result.changed {
+            ApplicationOutcome::Changed
+        } else {
+            ApplicationOutcome::Unchanged
+        };
+        view
+    })
+}
+
+fn work_hold_add_result(
+    parsed: &ParsedCommand,
+    app: &WorkApplication<'_>,
+    operation: &str,
+) -> Result<CliResult, CliError> {
+    let project = ProjectId::new(project_argument(parsed, 0)?);
+    let offset = usize::from(parsed.options.project.is_none());
+    let work_id = parsed
+        .options
+        .positionals
+        .get(offset)
+        .cloned()
+        .ok_or_else(|| CliError::invalid("work hold add requires a work identifier"))?;
+    let reason = parsed
+        .options
+        .reason
+        .clone()
+        .ok_or_else(|| CliError::invalid("work hold add requires --reason"))?;
+    let result = app
+        .add_work_hold_as(
+            &project,
+            &work_id,
+            &reason,
+            &parsed.options.actor,
+            parsed.options.expected_revision,
+            &now(),
+            operation.to_owned(),
+        )
+        .map_err(map_application_error)?;
+    bounded_result(Some(json!({
+        "project_id": result.value.project_id,
+        "work_id": result.value.work_id,
+        "hard_holds": result.value.hard_holds.iter().map(ReasonCode::stable_code).collect::<Vec<_>>(),
+        "replayed": !result.changed,
+    })), Some(result.snapshot_revision)).map(|mut view| {
+        view.outcome = if result.changed { ApplicationOutcome::Changed } else { ApplicationOutcome::Unchanged };
+        view
+    })
+}
+
+fn work_hold_resolve_result(
+    parsed: &ParsedCommand,
+    app: &WorkApplication<'_>,
+    operation: &str,
+) -> Result<CliResult, CliError> {
+    let project = ProjectId::new(project_argument(parsed, 0)?);
+    let offset = usize::from(parsed.options.project.is_none());
+    let work_id = parsed
+        .options
+        .positionals
+        .get(offset)
+        .cloned()
+        .ok_or_else(|| CliError::invalid("work hold resolve requires a work identifier"))?;
+    let hold_id = parsed
+        .options
+        .positionals
+        .get(offset + 1)
+        .cloned()
+        .ok_or_else(|| CliError::invalid("work hold resolve requires a hold identifier"))?;
+    let reason = parsed
+        .options
+        .reason
+        .clone()
+        .ok_or_else(|| CliError::invalid("work hold resolve requires --reason"))?;
+    let result = app
+        .resolve_work_hold_as(
+            &project,
+            &work_id,
+            &hold_id,
+            &reason,
+            &parsed.options.actor,
+            parsed.options.expected_revision,
+            &now(),
+            operation.to_owned(),
+        )
+        .map_err(map_application_error)?;
+    bounded_result(Some(json!({
+        "project_id": result.value.project_id,
+        "work_id": result.value.work_id,
+        "hard_holds": result.value.hard_holds.iter().map(ReasonCode::stable_code).collect::<Vec<_>>(),
+        "replayed": !result.changed,
+    })), Some(result.snapshot_revision)).map(|mut view| {
+        view.outcome = if result.changed { ApplicationOutcome::Changed } else { ApplicationOutcome::Unchanged };
+        view
+    })
+}
+
+fn work_dispatch_set_result(
+    parsed: &ParsedCommand,
+    app: &WorkApplication<'_>,
+    operation: &str,
+) -> Result<CliResult, CliError> {
+    let project = ProjectId::new(project_argument(parsed, 0)?);
+    let offset = usize::from(parsed.options.project.is_none());
+    let work_id = parsed
+        .options
+        .positionals
+        .get(offset)
+        .cloned()
+        .ok_or_else(|| CliError::invalid("work dispatch set requires a work identifier"))?;
+    let dispatch = parsed
+        .options
+        .dispatch
+        .clone()
+        .ok_or_else(|| CliError::invalid("work dispatch set requires --dispatch"))?;
+    let result = app
+        .edit_work_as(
+            &project,
+            &work_id,
+            &parsed.options.actor,
+            None,
+            None,
+            None,
+            None,
+            Some(dispatch),
+            parsed.options.expected_revision,
+            &now(),
+            operation.to_owned(),
+        )
+        .map_err(map_application_error)?;
+    bounded_result(
+        Some(json!({
+            "project_id": result.value.project_id,
+            "work_id": result.value.work_id,
+            "dispatch_policy": result.value.dispatch_policy,
+            "replayed": !result.changed,
+        })),
+        Some(result.snapshot_revision),
+    )
+    .map(|mut view| {
+        view.outcome = if result.changed {
+            ApplicationOutcome::Changed
+        } else {
+            ApplicationOutcome::Unchanged
+        };
+        view
+    })
+}
+
+fn dependency_graph_result(
+    parsed: &ParsedCommand,
+    app: &WorkApplication<'_>,
+) -> Result<CliResult, CliError> {
+    let project = ProjectId::new(project_argument(parsed, 0)?);
+    let graph = app
+        .dependency_graph(&project)
+        .map_err(map_application_error)?;
+    let edges = graph
+        .edges
+        .iter()
+        .map(|edge| {
+            json!({
+                "prerequisite_id": edge.prerequisite_id,
+                "dependent_id": edge.dependent_id,
+            })
+        })
+        .collect::<Vec<_>>();
+    let cycles = graph
+        .cycles
+        .iter()
+        .map(|cycle| json!(cycle))
+        .collect::<Vec<_>>();
+    bounded_result(
+        Some(json!({
+            "project_id": graph.project_id.as_str(),
+            "revision": graph.revision,
+            "edges": edges,
+            "cycles": cycles,
+            "cycle_count": graph.cycles.len(),
+        })),
+        Some(graph.revision),
+    )
+    .map(|mut result| {
+        result.outcome = ApplicationOutcome::Unchanged;
+        result
+    })
+}
+
+fn cycle_board_result(
+    parsed: &ParsedCommand,
+    app: &WorkApplication<'_>,
+) -> Result<CliResult, CliError> {
+    let project = ProjectId::new(project_argument(parsed, 0)?);
+    let cycle_index = usize::from(parsed.options.project.is_none());
+    let cycle_id = parsed
+        .options
+        .positionals
+        .get(cycle_index)
+        .cloned()
+        .ok_or_else(|| CliError::invalid("cycle board/report requires a cycle identifier"))?;
+    let board = app
+        .cycle_board_v3(&project, &cycle_id)
+        .map_err(map_application_error)?;
+    let assignments = board
+        .assignments
+        .iter()
+        .map(|item| {
+            json!({
+                "assignment_id": item.assignment.assignment_id,
+                "work_id": item.assignment.work_id,
+                "state": item.assignment.state,
+                "activation_policy": item.assignment.activation_policy,
+                "activation_at_utc_ms": item.assignment.activation_at_utc_ms,
+                "work_title": item.work_title,
+                "work_kind": item.work_kind,
+                "work_lifecycle": item.work_lifecycle,
+            })
+        })
+        .collect::<Vec<_>>();
+    let mut state_counts = std::collections::BTreeMap::<String, usize>::new();
+    for assignment in &board.assignments {
+        *state_counts
+            .entry(assignment.assignment.state.clone())
+            .or_default() += 1;
+    }
+    bounded_result(
+        Some(json!({
+            "project_id": board.project_id.as_str(),
+            "revision": board.revision,
+            "cycle": {
+                "cycle_id": board.cycle.cycle_id,
+                "series_id": board.cycle.series_id,
+                "template_version_id": board.cycle.template_version_id,
+                "slot_ordinal": board.cycle.slot_ordinal,
+                "name": board.cycle.name,
+                "goal": board.cycle.goal,
+                "lifecycle": board.cycle.lifecycle,
+                "scheduled_start_utc_ms": board.cycle.scheduled_start_utc_ms,
+                "scheduled_end_utc_ms": board.cycle.scheduled_end_utc_ms,
+                "scheduled_start_local": board.cycle.scheduled_start_local,
+                "timezone": board.cycle.timezone,
+                "tzdb_identity": board.cycle.tzdb_identity,
+            },
+            "assignments": assignments,
+            "counts": state_counts,
+        })),
+        Some(board.revision),
+    )
+    .map(|mut result| {
+        result.outcome = ApplicationOutcome::Unchanged;
+        result
+    })
+}
+
+fn intake_list_result(
+    parsed: &ParsedCommand,
+    app: &WorkApplication<'_>,
+) -> Result<CliResult, CliError> {
+    let project = ProjectId::new(project_argument(parsed, 0)?);
+    let view = app
+        .intake_items_v3(&project)
+        .map_err(map_application_error)?;
+    let items = view.items.iter().map(intake_item_json).collect::<Vec<_>>();
+    bounded_result(
+        Some(json!({
+            "project_id": view.project_id.as_str(),
+            "revision": view.revision,
+            "items": items,
+            "total": view.items.len(),
+        })),
+        Some(view.revision),
+    )
+    .map(|mut result| {
+        result.outcome = ApplicationOutcome::Unchanged;
+        result
+    })
+}
+
+fn intake_show_result(
+    parsed: &ParsedCommand,
+    app: &WorkApplication<'_>,
+) -> Result<CliResult, CliError> {
+    let project = ProjectId::new(project_argument(parsed, 0)?);
+    let intake_index = usize::from(parsed.options.project.is_none());
+    let intake_id = parsed
+        .options
+        .positionals
+        .get(intake_index)
+        .cloned()
+        .ok_or_else(|| CliError::invalid("intake show requires an intake identifier"))?;
+    let view = app
+        .intake_items_v3(&project)
+        .map_err(map_application_error)?;
+    let item = view
+        .items
+        .iter()
+        .find(|item| item.intake_id == intake_id)
+        .ok_or_else(|| {
+            CliError::with(
+                ErrorCode::NotFound,
+                ApplicationOutcome::Rejected,
+                format!("intake item not found: {intake_id}"),
+            )
+        })?;
+    bounded_result(
+        Some(json!({
+            "project_id": view.project_id.as_str(),
+            "revision": view.revision,
+            "item": intake_item_json(item),
+        })),
+        Some(view.revision),
+    )
+    .map(|mut result| {
+        result.outcome = ApplicationOutcome::Unchanged;
+        result
+    })
+}
+
+fn intake_item_json(item: &boreal_store::IntakeItemV3Record) -> Value {
+    json!({
+        "project_id": item.project_id,
+        "intake_id": item.intake_id,
+        "bucket_id": item.bucket_id,
+        "kind": item.kind,
+        "lifecycle": item.lifecycle,
+        "content": item.content,
+        "content_revision": item.content_revision,
+        "content_digest": item.content_digest,
+        "captured_at": item.captured_at,
+        "updated_at": item.updated_at,
+        "revisit_at_utc_ms": item.revisit_at_utc_ms,
+    })
+}
+
+fn intake_bucket_result(
+    parsed: &ParsedCommand,
+    app: &WorkApplication<'_>,
+    operation: &str,
+) -> Result<CliResult, CliError> {
+    let project = ProjectId::new(project_argument(parsed, 0)?);
+    let offset = usize::from(parsed.options.project.is_none());
+    let bucket_id = parsed
+        .options
+        .positionals
+        .get(offset)
+        .cloned()
+        .ok_or_else(|| CliError::invalid("intake bucket requires a bucket identifier"))?;
+    let name = parsed
+        .options
+        .positionals
+        .get(offset + 1)
+        .cloned()
+        .ok_or_else(|| CliError::invalid("intake bucket requires a bucket name"))?;
+    app.ensure_work_model_v3().map_err(map_application_error)?;
+    let bucket = IntakeBucket {
+        id: IntakeBucketId::new(bucket_id.clone()),
+        project_id: project.clone(),
+        name: name.clone(),
+        archived: false,
+    };
+    let revision = app
+        .intake_items_v3(&project)
+        .map_err(map_application_error)?
+        .revision;
+    let scope =
+        boreal_application::PlanningScope::new(project.clone(), parsed.options.actor.clone())
+            .with_session(parsed.options.session.clone())
+            .at_revision(revision);
+    let result = app
+        .create_intake_bucket_v3(&scope, operation.to_owned(), &bucket, &now())
+        .map_err(map_application_error)?;
+    Ok(CliResult {
+        outcome: if result.changed {
+            ApplicationOutcome::Changed
+        } else {
+            ApplicationOutcome::Unchanged
+        },
+        revision: Some(result.snapshot_revision),
+        data: Some(json!({
+            "project_id": project.as_str(),
+            "bucket_id": bucket_id,
+            "name": name,
+            "archived": false,
+            "replayed": !result.changed,
+        })),
+    })
+}
+
+fn intake_capture_result(
+    parsed: &ParsedCommand,
+    app: &WorkApplication<'_>,
+    operation: &str,
+) -> Result<CliResult, CliError> {
+    let project = ProjectId::new(project_argument(parsed, 0)?);
+    let offset = usize::from(parsed.options.project.is_none());
+    let intake_id = parsed
+        .options
+        .positionals
+        .get(offset)
+        .cloned()
+        .ok_or_else(|| CliError::invalid("intake capture requires an intake identifier"))?;
+    let content = parsed
+        .options
+        .positionals
+        .get(offset + 1)
+        .cloned()
+        .ok_or_else(|| CliError::invalid("intake capture requires content"))?;
+    let bucket_id = parsed
+        .options
+        .bucket
+        .clone()
+        .ok_or_else(|| CliError::invalid("intake capture requires --bucket"))?;
+    let kind = match parsed.options.kind.as_deref().unwrap_or("note") {
+        "note" => IntakeKind::Note,
+        "discovery" => IntakeKind::Discovery,
+        "question" => IntakeKind::Question,
+        "revisit" => IntakeKind::Revisit,
+        _ => unreachable!("parser validates intake kind"),
+    };
+    app.ensure_work_model_v3().map_err(map_application_error)?;
+    let captured_at = TimestampMs::from_millis(now_ms_u64());
+    let item = IntakeItem {
+        id: IntakeItemId::new(intake_id.clone()),
+        bucket_id: IntakeBucketId::new(bucket_id.clone()),
+        project_id: project.clone(),
+        kind,
+        lifecycle: IntakeLifecycle::Captured,
+        content: content.clone(),
+        content_revision: 1,
+        content_digest: sha256_content_digest(content.as_bytes()),
+        revisit_at: None,
+    };
+    let revision = app
+        .intake_items_v3(&project)
+        .map_err(map_application_error)?
+        .revision;
+    let scope =
+        boreal_application::PlanningScope::new(project.clone(), parsed.options.actor.clone())
+            .with_session(parsed.options.session.clone())
+            .at_revision(revision);
+    let result = app
+        .create_intake_item_v3(
+            &scope,
+            operation.to_owned(),
+            &item,
+            &stamp(captured_at.as_millis()),
+            &stamp(captured_at.as_millis()),
+        )
+        .map_err(map_application_error)?;
+    Ok(CliResult {
+        outcome: if result.changed {
+            ApplicationOutcome::Changed
+        } else {
+            ApplicationOutcome::Unchanged
+        },
+        revision: Some(result.snapshot_revision),
+        data: Some(json!({
+            "project_id": project.as_str(),
+            "intake_id": intake_id,
+            "bucket_id": bucket_id,
+            "kind": parsed.options.kind.as_deref().unwrap_or("note"),
+            "lifecycle": "captured",
+            "content_revision": 1,
+            "content_digest": item.content_digest,
+            "replayed": !result.changed,
+        })),
+    })
+}
+
+fn source_catalog_root(db_path: &str) -> PathBuf {
+    let db_path = Path::new(db_path);
+    db_path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .map_or_else(
+            || PathBuf::from(".boreal/source"),
+            |parent| parent.join("source"),
+        )
+}
+
+fn source_catalog(root: &Path) -> Result<SourceCatalog, CliError> {
+    fs::create_dir_all(root).map_err(|error| {
+        CliError::with(
+            ErrorCode::ServiceUnavailable,
+            ApplicationOutcome::Failed,
+            format!("unable to initialize source catalog: {error}"),
+        )
+    })?;
+    SourceCatalog::with_persistent_filesystem(root).map_err(map_source_error)
+}
+
+fn source_add_result(
+    parsed: &ParsedCommand,
+    operation: &str,
+    store: &SqliteStore,
+) -> Result<CliResult, CliError> {
+    let project = project_argument(parsed, 0)?;
+    // Validate the relational project before writing catalog state. If this
+    // fails, the command cannot leave an orphan source capture behind.
+    let revision = store_revision(store, &ProjectId::new(project.clone()))?;
+    let input_path = parsed
+        .options
+        .input
+        .as_deref()
+        .ok_or_else(|| CliError::invalid("source add requires --input"))?;
+    let origin = parsed
+        .options
+        .origin
+        .as_deref()
+        .ok_or_else(|| CliError::invalid("source add requires --origin"))?;
+    let metadata = fs::metadata(input_path).map_err(|error| {
+        CliError::with(
+            ErrorCode::NotFound,
+            ApplicationOutcome::Rejected,
+            format!("source input is not readable: {error}"),
+        )
+    })?;
+    if !metadata.is_file() {
+        return Err(CliError::invalid("source --input must name a regular file"));
+    }
+    if metadata.len() > MAX_SOURCE_INPUT_BYTES {
+        return Err(CliError::invalid(format!(
+            "source input exceeds the {} byte bound",
+            MAX_SOURCE_INPUT_BYTES
+        )));
+    }
+    let file = fs::File::open(input_path).map_err(|error| {
+        CliError::with(
+            ErrorCode::NotFound,
+            ApplicationOutcome::Rejected,
+            format!("source input is not readable: {error}"),
+        )
+    })?;
+    let mut bytes = Vec::with_capacity(metadata.len() as usize);
+    file.take(MAX_SOURCE_INPUT_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| {
+            CliError::with(
+                ErrorCode::ServiceUnavailable,
+                ApplicationOutcome::Failed,
+                format!("unable to read source input: {error}"),
+            )
+        })?;
+    if bytes.len() as u64 > MAX_SOURCE_INPUT_BYTES {
+        return Err(CliError::invalid(format!(
+            "source input exceeds the {} byte bound",
+            MAX_SOURCE_INPUT_BYTES
+        )));
+    }
+    let catalog_root = source_catalog_root(&parsed.options.db);
+    let catalog = source_catalog(&catalog_root)?;
+    let app = KnowledgeApplication::new(&catalog);
+    let mut result = app
+        .capture_source(SourceCaptureInput {
+            operation_id: operation.to_owned(),
+            project_id: project.clone(),
+            origin: origin.to_owned(),
+            media_type: parsed
+                .options
+                .media_type
+                .clone()
+                .unwrap_or_else(|| "application/octet-stream".to_owned()),
+            bytes,
+        })
+        .map_err(map_knowledge_error)?;
+    // Preserve the original registration timestamp when a catalog capture is
+    // retried after SQLite committed. It is part of the canonical registration
+    // digest, so using a fresh wall clock here would turn a safe retry into a
+    // false operation conflict.
+    let captured_at = store
+        .source_version(&project, &result.source.source_version_id)
+        .map_err(map_store_error)?
+        .map_or_else(now, |record| record.captured_at);
+    let registration = app
+        .register_captured_source(
+            store,
+            &result.source,
+            &result.operation,
+            &parsed.options.actor,
+            &captured_at,
+        )
+        .map_err(map_knowledge_error)?;
+    result.registration = boreal_application::SourceRegistrationState::StoreCommitted {
+        revision: registration.revision,
+        replayed: registration.replayed,
+    };
+    let registration_revision = registration.revision;
+    let registration_replayed = registration.replayed;
+    bounded_result(
+        Some(json!({
+            "project_id": project,
+            "source": source_json(&result.source),
+            "input": input_path,
+            "catalog_root": catalog_root,
+            "registration": {
+                "state": "store_committed",
+                "revision": registration_revision,
+                "replayed": registration_replayed,
+            },
+            "project_revision_before": revision,
+            "duplicate": result.duplicate,
+            "reused_existing_version": result.reused_existing_version,
+        })),
+        Some(registration_revision),
+    )
+    .map(|mut result| {
+        if registration_replayed {
+            result.outcome = ApplicationOutcome::Unchanged;
+        }
+        result
+    })
+}
+
+fn source_show_result(parsed: &ParsedCommand, store: &SqliteStore) -> Result<CliResult, CliError> {
+    let project = project_argument(parsed, 0)?;
+    let index = usize::from(parsed.options.project.is_none());
+    let source_id = parsed
+        .options
+        .positionals
+        .get(index)
+        .ok_or_else(|| CliError::invalid("source show requires a source version identifier"))?;
+    let project_id = ProjectId::new(project.clone());
+    let revision = store_revision(store, &project_id)?;
+    let catalog_root = source_catalog_root(&parsed.options.db);
+    let catalog = source_catalog(&catalog_root)?;
+    let app = KnowledgeApplication::new(&catalog);
+    let source = app
+        .show_source(&project, source_id)
+        .map_err(map_knowledge_error)?;
+    let registration = store
+        .source_version(&project, source_id)
+        .map_err(map_store_error)?;
+    bounded_result(
+        Some(json!({
+            "project_id": project,
+            "source": source_json(&source),
+            "sqlite_registration": registration.as_ref().map(source_record_json),
+            "catalog_root": catalog_root,
+        })),
+        Some(revision),
+    )
+}
+
+fn source_list_result(parsed: &ParsedCommand, store: &SqliteStore) -> Result<CliResult, CliError> {
+    let project = project_argument(parsed, 0)?;
+    let project_id = ProjectId::new(project.clone());
+    let revision = store_revision(store, &project_id)?;
+    let catalog_root = source_catalog_root(&parsed.options.db);
+    let catalog = source_catalog(&catalog_root)?;
+    let app = KnowledgeApplication::new(&catalog);
+    let all = app
+        .list_sources(Some(&project))
+        .map_err(map_knowledge_error)?;
+    let total = all.len();
+    let offset = parsed.options.offset.unwrap_or(0) as usize;
+    let limit = parsed.options.limit.unwrap_or(50) as usize;
+    let items = all
+        .into_iter()
+        .skip(offset)
+        .take(limit)
+        .map(|source| source_json(&source))
+        .collect::<Vec<_>>();
+    bounded_result(
+        Some(json!({
+            "project_id": project,
+            "items": items,
+            "total": total,
+            "offset": offset,
+            "limit": limit,
+            "has_more": offset.saturating_add(limit) < total,
+            "catalog_root": catalog_root,
+        })),
+        Some(revision),
+    )
+}
+
+fn source_verify_result(
+    parsed: &ParsedCommand,
+    store: &SqliteStore,
+) -> Result<CliResult, CliError> {
+    let project = project_argument(parsed, 0)?;
+    let index = usize::from(parsed.options.project.is_none());
+    let source_id =
+        parsed.options.positionals.get(index).ok_or_else(|| {
+            CliError::invalid("source verify requires a source version identifier")
+        })?;
+    let revision = store_revision(store, &ProjectId::new(project.clone()))?;
+    let catalog_root = source_catalog_root(&parsed.options.db);
+    let catalog = source_catalog(&catalog_root)?;
+    let app = KnowledgeApplication::new(&catalog);
+    let result = app
+        .verify_source(&project, source_id)
+        .map_err(map_knowledge_error)?;
+    let verified_digest = result.verified_digest;
+    let verified = verified_digest.is_some();
+    bounded_result(
+        Some(json!({
+            "project_id": project,
+            "source_version_id": source_id,
+            "availability": format!("{:?}", result.availability).to_ascii_lowercase(),
+            "verified_digest": verified_digest,
+            "byte_count": result.byte_count,
+            "verified": verified,
+        })),
+        Some(revision),
+    )
+}
+
+fn source_json(source: &boreal_source::SourceVersion) -> Value {
+    json!({
+        "project_id": source.project_id.as_str(),
+        "source_version_id": source.source_version_id.as_str(),
+        "origin": source.origin.as_str(),
+        "media_type": source.media_type.as_str(),
+        "byte_count": source.byte_count,
+        "content_digest": source.content_digest.as_str(),
+        "availability": format!("{:?}", source.availability).to_ascii_lowercase(),
+        "parser_identity": source.parser_identity.as_deref(),
+    })
+}
+
+fn source_record_json(record: &boreal_store::SourceVersionRecord) -> Value {
+    json!({
+        "source_version_id": record.source_version_id.as_str(),
+        "project_id": record.project_id.as_str(),
+        "origin": record.origin.as_str(),
+        "access_scope": record.access_scope.as_str(),
+        "content_digest": record.content_digest.as_str(),
+        "media_type": record.media_type.as_str(),
+        "byte_count": record.byte_count,
+        "captured_at": record.captured_at.as_str(),
+        "parser_identity": record.parser_identity.as_str(),
+        "availability": record.availability.as_str(),
+    })
+}
+
+fn map_source_error(error: boreal_source::SourceError) -> CliError {
+    let code = match error {
+        boreal_source::SourceError::ScopeViolation | boreal_source::SourceError::MissingBlob => {
+            ErrorCode::NotFound
+        }
+        boreal_source::SourceError::Storage(_) => ErrorCode::ServiceUnavailable,
+        boreal_source::SourceError::OperationConflict
+        | boreal_source::SourceError::SourceMetadataConflict => ErrorCode::OperationConflict,
+        _ => ErrorCode::InvalidArgument,
+    };
+    CliError::with(code, ApplicationOutcome::Rejected, error.to_string())
+}
+
+fn map_knowledge_error(error: boreal_application::KnowledgeError) -> CliError {
+    match error {
+        boreal_application::KnowledgeError::Store(error) => map_store_error(error),
+        boreal_application::KnowledgeError::Source(error) => map_source_error(error),
+        boreal_application::KnowledgeError::Invalid(message) => CliError::invalid(message),
+        other => CliError::with(
+            ErrorCode::ServiceUnavailable,
+            ApplicationOutcome::Failed,
+            other.to_string(),
+        ),
+    }
+}
+
+/// Read-only operator diagnostics. This deliberately reports the checks that
+/// this adapter can prove; it does not claim to repair application state or
+/// replace the store-owned doctor/recovery implementation.
+fn doctor_result(parsed: &ParsedCommand, store: &SqliteStore) -> Result<CliResult, CliError> {
+    let project = parsed.options.project.clone();
+    let schema_version = store.schema_version().map_err(map_store_error)?;
+    let v3_enabled = store.work_model_v3_enabled().map_err(map_store_error)?;
+    let revision = project
+        .as_deref()
+        .map(|project| store.project_revision(project).map(|revision| revision.0))
+        .transpose()
+        .map_err(map_store_error)?;
+    bounded_result(
+        Some(json!({
+            "project_id": project,
+            "checks": {
+                "database_open": "pass",
+                "schema_version": schema_version,
+                "work_model_v3": if v3_enabled { "enabled" } else { "not_enabled" },
+                "sqlite_runtime": store.sqlite_runtime_identity().as_json(),
+            },
+            "repair": {
+                "available": false,
+                "reason": "doctor is read-only in the CLI adapter; use the application/store recovery route when available"
+            }
+        })),
+        revision,
     )
 }
 
@@ -1210,6 +2306,46 @@ fn session_show_result(
     )
 }
 
+fn session_end_result(
+    parsed: &ParsedCommand,
+    app: &WorkApplication<'_>,
+    operation: &str,
+) -> Result<CliResult, CliError> {
+    let project_id = ProjectId::new(project_argument(parsed, 0)?);
+    let session_id = parsed.options.session.clone();
+    let result = app
+        .end_session_as(
+            &project_id,
+            &session_id,
+            &parsed.options.actor,
+            parsed.options.expected_revision,
+            &now(),
+            operation.to_owned(),
+        )
+        .map_err(map_application_error)?;
+    bounded_result(
+        Some(json!({
+            "project_id": result.value.project_id,
+            "session_id": result.value.session_id,
+            "actor_id": result.value.actor_id,
+            "harness_id": result.value.harness_id,
+            "state": format!("{:?}", result.value.state).to_ascii_lowercase(),
+            "started_at": result.value.started_at,
+            "ended_at": result.value.ended_at,
+            "replayed": !result.changed,
+        })),
+        Some(result.snapshot_revision),
+    )
+    .map(|mut value| {
+        value.outcome = if result.changed {
+            ApplicationOutcome::Changed
+        } else {
+            ApplicationOutcome::Unchanged
+        };
+        value
+    })
+}
+
 fn create_work_result(
     parsed: &ParsedCommand,
     app: &WorkApplication<'_>,
@@ -1247,15 +2383,37 @@ fn create_work_result(
         description: parsed.options.description.clone().unwrap_or_default(),
         lifecycle: PersistedLifecycle::Open,
         priority: parsed.options.priority.unwrap_or(0),
-        dispatch_policy: DispatchPolicy::Automatic,
-        hard_holds: Vec::new(),
+        dispatch_policy: match parsed.options.dispatch.as_deref().unwrap_or("automatic") {
+            "automatic" => DispatchPolicy::Automatic,
+            "operator_only" => DispatchPolicy::OperatorOnly,
+            "paused" => DispatchPolicy::Paused,
+            _ => unreachable!("parser validates dispatch policy"),
+        },
+        hard_holds: parsed
+            .options
+            .hold
+            .clone()
+            .into_iter()
+            .map(ReasonCode::HardHold)
+            .collect(),
         acceptance_profile: AcceptanceProfile::focused(),
     };
     let result = app
         .create_work_as(&work, &parsed.options.actor, &now(), operation.to_owned())
         .map_err(map_application_error)?;
     bounded_result(
-        Some(json!({"work_id": result.value.work_id, "title": result.value.title})),
+        Some(json!({
+            "project_id": result.value.project_id,
+            "work_id": result.value.work_id,
+            "title": result.value.title,
+            "dispatch_policy": result.value.dispatch_policy,
+            "hard_holds": result
+                .value
+                .hard_holds
+                .iter()
+                .map(ReasonCode::stable_code)
+                .collect::<Vec<_>>(),
+        })),
         Some(result.snapshot_revision),
     )
 }
@@ -3941,6 +5099,22 @@ fn map_application_error(error: ApplicationError) -> CliError {
             CliError::with(code, ApplicationOutcome::Rejected, error.to_string())
         }
         ApplicationError::Invalid(message) => CliError::invalid(message),
+        ApplicationError::Planning(error) => CliError::invalid(error.to_string()),
+    }
+}
+
+fn map_dependency_error(error: ApplicationError) -> CliError {
+    match &error {
+        ApplicationError::Store(StoreError::Conflict(message))
+            if message.to_ascii_lowercase().contains("dependency cycle") =>
+        {
+            CliError::with(
+                ErrorCode::DependencyCycle,
+                ApplicationOutcome::Rejected,
+                error.to_string(),
+            )
+        }
+        _ => map_application_error(error),
     }
 }
 
@@ -4244,6 +5418,161 @@ mod tests {
             "0h",
         ]));
         assert_eq!(bad.unwrap_err().code, ErrorCode::InvalidArgument);
+    }
+
+    #[test]
+    fn parser_and_request_context_cover_dependency_and_planning_flags() {
+        let dependency = parse(&args(&[
+            "dep",
+            "add",
+            "project-1",
+            "task-a",
+            "task-b",
+            "--expected-revision",
+            "7",
+        ]))
+        .unwrap();
+        assert_eq!(dependency.path, vec!["dep", "add"]);
+        assert_eq!(dependency.options.project, None);
+        assert_eq!(dependency.options.expected_revision, Some(7));
+        assert_eq!(
+            dependency.options.positionals,
+            vec!["project-1", "task-a", "task-b"]
+        );
+
+        let create = parse(&args(&[
+            "work",
+            "create",
+            "project-1",
+            "task-a",
+            "Task",
+            "--dispatch",
+            "operator_only",
+            "--hold",
+            "waiting-for-review",
+        ]))
+        .unwrap();
+        assert_eq!(create.options.dispatch.as_deref(), Some("operator_only"));
+        assert_eq!(create.options.hold.as_deref(), Some("waiting-for-review"));
+
+        let tree = parse(&args(&["dep", "tree", "project-1"])).unwrap();
+        assert_eq!(tree.path, vec!["dep", "tree"]);
+        assert_eq!(tree.options.positionals, vec!["project-1"]);
+        let cycle = parse(&args(&["dep", "cycles", "project-1"])).unwrap();
+        assert_eq!(cycle.path, vec!["dep", "cycles"]);
+
+        let board = parse(&args(&["cycle", "board", "project-1", "cycle-1"])).unwrap();
+        assert_eq!(board.path, vec!["cycle", "board"]);
+        assert_eq!(board.options.positionals, vec!["project-1", "cycle-1"]);
+
+        let intake = parse(&args(&["intake", "show", "project-1", "intake-1"])).unwrap();
+        assert_eq!(intake.path, vec!["intake", "show"]);
+    }
+
+    #[test]
+    fn explicitly_selected_socket_rejects_direct_only_source_routes() {
+        let error = run_with_operation(
+            &args(&[
+                "source",
+                "show",
+                "project-1",
+                "source-1",
+                "--socket",
+                "/tmp/boreal-unavailable-route.sock",
+            ]),
+            "op_unavailable_route",
+        )
+        .expect_err("direct-only source route must fail closed");
+        assert_eq!(error.code, ErrorCode::UnknownCommandNamespace);
+        assert_eq!(error.outcome, ApplicationOutcome::Rejected);
+        assert!(error
+            .message
+            .contains("not available through the selected service socket"));
+    }
+
+    #[test]
+    fn dependency_add_is_idempotent_and_cycle_failures_are_typed() {
+        let path = env::temp_dir().join(format!("boreal-cli-dependency-{}.sqlite", now_ms_u64()));
+        let db = path.to_string_lossy().to_string();
+        let _ = fs::remove_file(&path);
+
+        run(&args(&["init", "p", "--db", &db])).expect("project initializes");
+        for work in [("a", "A"), ("b", "B")] {
+            run(&args(&["work", "create", "p", work.0, work.1, "--db", &db]))
+                .expect("work creates");
+        }
+        let stale_revision = run(&args(&[
+            "dep",
+            "add",
+            "p",
+            "a",
+            "b",
+            "--expected-revision",
+            "2",
+            "--db",
+            &db,
+        ]))
+        .expect_err("stale dependency revision must be rejected");
+        assert_eq!(stale_revision.code, ErrorCode::StaleRevision);
+        assert_eq!(stale_revision.outcome, ApplicationOutcome::Conflict);
+        let first = run(&args(&[
+            "dep",
+            "add",
+            "p",
+            "a",
+            "b",
+            "--operation-id",
+            "op_dep_add",
+            "--db",
+            &db,
+        ]))
+        .expect("dependency adds");
+        assert_eq!(first.outcome, ApplicationOutcome::Changed);
+        let replay = run(&args(&[
+            "dep",
+            "add",
+            "p",
+            "a",
+            "b",
+            "--operation-id",
+            "op_dep_add",
+            "--db",
+            &db,
+        ]))
+        .expect("dependency replays");
+        assert_eq!(replay.outcome, ApplicationOutcome::Unchanged);
+        assert_eq!(replay.data.as_ref().unwrap()["replayed"], true);
+
+        let tree = run(&args(&["dep", "tree", "p", "--db", &db])).expect("dependency tree reads");
+        assert_eq!(tree.outcome, ApplicationOutcome::Unchanged);
+        assert_eq!(
+            tree.data.as_ref().unwrap()["edges"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(tree.data.as_ref().unwrap()["cycle_count"], 0);
+
+        let cycles =
+            run(&args(&["dep", "cycles", "p", "--db", &db])).expect("dependency cycles reads");
+        assert_eq!(cycles.data.as_ref().unwrap()["cycle_count"], 0);
+
+        let cycle = run(&args(&[
+            "dep",
+            "add",
+            "p",
+            "b",
+            "a",
+            "--operation-id",
+            "op_dep_cycle",
+            "--db",
+            &db,
+        ]))
+        .expect_err("cycle rejects");
+        assert_eq!(cycle.code, ErrorCode::DependencyCycle);
+        assert_eq!(cycle.outcome, ApplicationOutcome::Rejected);
+        let _ = fs::remove_file(path);
     }
 
     #[test]

@@ -9,6 +9,12 @@ use super::*;
 
 pub(crate) fn supports(parsed: &ParsedCommand) -> bool {
     let path = &parsed.path;
+    // A lower-level handler is not enough to advertise a public service
+    // route. Registry gaps remain fail-closed until their DTO and operation
+    // contract are complete; explicit --socket must not bypass that status.
+    if crate::command_registry::is_unavailable_path(path) {
+        return false;
+    }
     matches!(
         path.iter()
             .map(String::as_str)
@@ -18,6 +24,21 @@ pub(crate) fn supports(parsed: &ParsedCommand) -> bool {
             | ["status"]
             | ["prime"]
             | ["work", "create"]
+            | ["work", "edit"]
+            | ["work", "hold", "add"]
+            | ["work", "hold", "resolve"]
+            | ["work", "dispatch", "set"]
+            | ["dep", "add"]
+            | ["dep", "remove"]
+            | ["dep", "tree"]
+            | ["dep", "cycles"]
+            | ["cycle", "board"]
+            | ["cycle", "report"]
+            | ["intake", "list"]
+            | ["intake", "show"]
+            | ["intake", "bucket"]
+            | ["intake", "capture"]
+            | ["doctor"]
             | ["work", "claim"]
             | ["work", "accept"]
             | ["work", "heartbeat"]
@@ -35,6 +56,7 @@ pub(crate) fn supports(parsed: &ParsedCommand) -> bool {
             | ["agent", "release"]
             | ["session", "start"]
             | ["session", "show"]
+            | ["session", "end"]
             | ["evidence", "run"]
             | ["operation", "show"]
     ) || (path == &["agent".to_owned(), "finish".to_owned()]
@@ -67,7 +89,7 @@ pub(crate) fn request(_parsed: &ParsedCommand, _operation: &str) -> Result<CliRe
 mod unix {
     use super::*;
     use boreal_application::{project_status_from_store, AttemptLifecycleAdapter, AttemptSnapshot};
-    use boreal_domain::{ActorContext, ActorRole};
+    use boreal_domain::{ActorContext, ActorRole, ReasonCode};
     use boreal_protocol::{schema, Envelope, ProtocolError as WireError, TransportOutcome};
     use boreal_service::{
         ApplicationCommandHandler, ApplicationRequest, ApplicationResponse,
@@ -487,9 +509,18 @@ mod unix {
 
     pub(super) fn request_data(parsed: &ParsedCommand, operation: &str) -> Result<Value, CliError> {
         let path = parsed.path.iter().map(String::as_str).collect::<Vec<_>>();
-        let project = project_argument(parsed, 0)?;
+        let project = if parsed.path == ["doctor".to_owned()] {
+            parsed
+                .options
+                .project
+                .clone()
+                .or_else(|| parsed.options.positionals.first().cloned())
+                .unwrap_or_default()
+        } else {
+            project_argument(parsed, 0)?
+        };
         let mut data = json!({
-            "project_id": project,
+            "project_id": if project.is_empty() { Value::Null } else { json!(project) },
             "actor_id": parsed.options.actor,
             "harness_id": parsed.options.harness,
             "session_id": parsed.options.session,
@@ -532,8 +563,203 @@ mod unix {
                 data["title"] = json!(title);
                 data["description"] = json!(parsed.options.description.as_deref().unwrap_or(""));
                 data["priority"] = json!(parsed.options.priority.unwrap_or(0));
-                data["dispatch"] = json!("automatic");
+                data["dispatch"] = json!(parsed.options.dispatch.as_deref().unwrap_or("automatic"));
+                data["hold"] = parsed
+                    .options
+                    .hold
+                    .clone()
+                    .map_or(Value::Null, Value::String);
                 data["profile"] = json!("focused");
+            }
+            ["work", "edit"] => {
+                let offset = usize::from(parsed.options.project.is_none());
+                data["command"] = json!("work_edit");
+                data["work_id"] =
+                    json!(parsed.options.positionals.get(offset).ok_or_else(|| {
+                        CliError::invalid("work edit requires a work identifier")
+                    })?);
+                data["parent_id"] = parsed
+                    .options
+                    .parent
+                    .clone()
+                    .map_or(Value::Null, Value::String);
+                data["title"] = parsed
+                    .options
+                    .title
+                    .clone()
+                    .map_or(Value::Null, Value::String);
+                data["description"] = parsed
+                    .options
+                    .description
+                    .clone()
+                    .map_or(Value::Null, Value::String);
+                data["priority"] = parsed
+                    .options
+                    .priority
+                    .map_or(Value::Null, |value| json!(value));
+                data["dispatch_policy"] = parsed
+                    .options
+                    .dispatch
+                    .clone()
+                    .map_or(Value::Null, Value::String);
+                data["expected_revision"] = parsed
+                    .options
+                    .expected_revision
+                    .map_or(Value::Null, |value| json!(value));
+            }
+            ["dep", "add"] => {
+                let offset = usize::from(parsed.options.project.is_none());
+                data["command"] = json!("dependency_add");
+                data["prerequisite_id"] =
+                    json!(parsed.options.positionals.get(offset).ok_or_else(|| {
+                        CliError::invalid("dep add requires a prerequisite work identifier")
+                    })?);
+                data["dependent_id"] =
+                    json!(parsed.options.positionals.get(offset + 1).ok_or_else(|| {
+                        CliError::invalid("dep add requires a dependent work identifier")
+                    })?);
+                data["expected_revision"] = parsed
+                    .options
+                    .expected_revision
+                    .map_or(Value::Null, |value| json!(value));
+            }
+            ["dep", "remove"] => {
+                let offset = usize::from(parsed.options.project.is_none());
+                data["command"] = json!("dependency_remove");
+                data["prerequisite_id"] =
+                    json!(parsed.options.positionals.get(offset).ok_or_else(|| {
+                        CliError::invalid("dep remove requires a prerequisite work identifier")
+                    })?);
+                data["dependent_id"] =
+                    json!(parsed.options.positionals.get(offset + 1).ok_or_else(|| {
+                        CliError::invalid("dep remove requires a dependent work identifier")
+                    })?);
+                data["expected_revision"] = parsed
+                    .options
+                    .expected_revision
+                    .map_or(Value::Null, |value| json!(value));
+            }
+            ["work", "hold", "add"] => {
+                let offset = usize::from(parsed.options.project.is_none());
+                data["command"] = json!("work_hold_add");
+                data["work_id"] =
+                    json!(parsed.options.positionals.get(offset).ok_or_else(|| {
+                        CliError::invalid("work hold add requires a work identifier")
+                    })?);
+                data["reason_code"] = json!(parsed
+                    .options
+                    .reason
+                    .clone()
+                    .ok_or_else(|| CliError::invalid("work hold add requires --reason"))?);
+                data["expected_revision"] = parsed
+                    .options
+                    .expected_revision
+                    .map_or(Value::Null, |value| json!(value));
+            }
+            ["work", "hold", "resolve"] => {
+                let offset = usize::from(parsed.options.project.is_none());
+                data["command"] = json!("work_hold_resolve");
+                data["work_id"] =
+                    json!(parsed.options.positionals.get(offset).ok_or_else(|| {
+                        CliError::invalid("work hold resolve requires a work identifier")
+                    })?);
+                data["hold_id"] =
+                    json!(parsed.options.positionals.get(offset + 1).ok_or_else(|| {
+                        CliError::invalid("work hold resolve requires a hold identifier")
+                    })?);
+                data["resolution_reason"] = json!(parsed
+                    .options
+                    .reason
+                    .clone()
+                    .ok_or_else(|| CliError::invalid("work hold resolve requires --reason"))?);
+                data["expected_revision"] = parsed
+                    .options
+                    .expected_revision
+                    .map_or(Value::Null, |value| json!(value));
+            }
+            ["work", "dispatch", "set"] => {
+                let offset = usize::from(parsed.options.project.is_none());
+                data["command"] = json!("work_dispatch_set");
+                data["work_id"] =
+                    json!(parsed.options.positionals.get(offset).ok_or_else(|| {
+                        CliError::invalid("work dispatch set requires a work identifier")
+                    })?);
+                data["dispatch_policy"] = json!(parsed
+                    .options
+                    .dispatch
+                    .clone()
+                    .ok_or_else(|| CliError::invalid("work dispatch set requires --dispatch"))?);
+                data["expected_revision"] = parsed
+                    .options
+                    .expected_revision
+                    .map_or(Value::Null, |value| json!(value));
+            }
+            ["dep", "tree"] | ["dep", "cycles"] => {
+                data["command"] = json!(if path[1] == "tree" {
+                    "dependency_tree"
+                } else {
+                    "dependency_cycles"
+                });
+            }
+            ["cycle", "board"] | ["cycle", "report"] => {
+                let cycle_index = usize::from(parsed.options.project.is_none());
+                data["command"] = json!(if path[1] == "board" {
+                    "cycle_board"
+                } else {
+                    "cycle_report"
+                });
+                data["cycle_id"] =
+                    json!(parsed.options.positionals.get(cycle_index).ok_or_else(|| {
+                        CliError::invalid("cycle board/report requires a cycle id")
+                    })?);
+            }
+            ["intake", "list"] | ["intake", "show"] => {
+                let intake_index = usize::from(parsed.options.project.is_none());
+                data["command"] = json!("intake_read");
+                if path[1] == "show" {
+                    data["intake_id"] = json!(parsed
+                        .options
+                        .positionals
+                        .get(intake_index)
+                        .ok_or_else(|| CliError::invalid("intake show requires an intake id"))?);
+                }
+            }
+            ["intake", "bucket"] => {
+                let intake_index = usize::from(parsed.options.project.is_none());
+                data["command"] = json!("intake_bucket");
+                data["bucket_id"] = json!(parsed
+                    .options
+                    .positionals
+                    .get(intake_index)
+                    .ok_or_else(|| CliError::invalid("intake bucket requires a bucket id"))?);
+                data["name"] = json!(parsed
+                    .options
+                    .positionals
+                    .get(intake_index + 1)
+                    .ok_or_else(|| CliError::invalid("intake bucket requires a bucket name"))?);
+            }
+            ["intake", "capture"] => {
+                let intake_index = usize::from(parsed.options.project.is_none());
+                data["command"] = json!("intake_capture");
+                data["intake_id"] = json!(parsed
+                    .options
+                    .positionals
+                    .get(intake_index)
+                    .ok_or_else(|| CliError::invalid("intake capture requires an intake id"))?);
+                data["content"] = json!(parsed
+                    .options
+                    .positionals
+                    .get(intake_index + 1)
+                    .ok_or_else(|| CliError::invalid("intake capture requires content"))?);
+                data["bucket_id"] = json!(parsed
+                    .options
+                    .bucket
+                    .clone()
+                    .ok_or_else(|| CliError::invalid("intake capture requires --bucket"))?);
+                data["kind"] = json!(parsed.options.kind.as_deref().unwrap_or("note"));
+            }
+            ["doctor"] => {
+                data["command"] = json!("doctor");
             }
             ["work", "claim"] => {
                 data["command"] = json!("claim");
@@ -664,6 +890,13 @@ mod unix {
             }
             ["session", "show"] => {
                 data["command"] = json!("session_show");
+            }
+            ["session", "end"] => {
+                data["command"] = json!("session_end");
+                data["expected_revision"] = parsed
+                    .options
+                    .expected_revision
+                    .map_or(Value::Null, |value| json!(value));
             }
             ["agent", "start"] => {
                 data["command"] = json!("start");
@@ -903,6 +1136,8 @@ mod unix {
         priority: u8,
         #[serde(default = "default_dispatch", alias = "dispatch_policy")]
         dispatch: String,
+        #[serde(default)]
+        hold: Option<String>,
         #[serde(
             default = "default_profile",
             alias = "acceptance_profile",
@@ -916,6 +1151,24 @@ mod unix {
         _session_id: Option<String>,
         #[serde(default, rename = "expected_revision")]
         _expected_revision: Option<u64>,
+        #[serde(default, rename = "operation_id")]
+        _operation_id: Option<String>,
+    }
+
+    #[derive(Debug, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct DependencyAddRequest {
+        command: String,
+        project_id: String,
+        prerequisite_id: String,
+        dependent_id: String,
+        actor_id: String,
+        #[serde(default)]
+        expected_revision: Option<u64>,
+        #[serde(default, rename = "harness_id")]
+        _harness_id: Option<String>,
+        #[serde(default, rename = "session_id")]
+        _session_id: Option<String>,
         #[serde(default, rename = "operation_id")]
         _operation_id: Option<String>,
     }
@@ -941,6 +1194,20 @@ mod unix {
             match request.command.as_str() {
                 "create_project" => self.create_project(data, &request.operation_id),
                 "create_work" => self.create_work(data, &request.operation_id),
+                "work_edit" => self.work_edit(data, &request.operation_id),
+                "dependency_remove" => self.dependency_remove(data, &request.operation_id),
+                "work_hold_add" => self.work_hold_add(data, &request.operation_id),
+                "work_hold_resolve" => self.work_hold_resolve(data, &request.operation_id),
+                "work_dispatch_set" => self.work_dispatch_set(data, &request.operation_id),
+                "dependency_add" => self.dependency_add(data, &request.operation_id),
+                "dependency_tree" | "dependency_cycles" => {
+                    self.dependency_graph(data, request.command.as_str())
+                }
+                "cycle_board" | "cycle_report" => self.cycle_board(data),
+                "intake_list" | "intake_show" => self.intake_read(data),
+                "intake_bucket" => self.intake_bucket(data, &request.operation_id),
+                "intake_capture" => self.intake_capture(data, &request.operation_id),
+                "doctor" => self.doctor(data),
                 "status" => self.status(data),
                 "claim" => self.claim(data, &request.operation_id),
                 "start" => self.start(data, &request.operation_id),
@@ -974,6 +1241,7 @@ mod unix {
                 "operation_show" => self.operation_show(data),
                 "session_start" => self.session_start(data, &request.operation_id),
                 "session_show" => self.session_show(data),
+                "session_end" => self.session_end(data, &request.operation_id),
                 command => Err(CliError::with(
                     ErrorCode::UnknownCommandNamespace,
                     ApplicationOutcome::Rejected,
@@ -1058,7 +1326,7 @@ mod unix {
                 lifecycle: PersistedLifecycle::Open,
                 priority: request.priority,
                 dispatch_policy,
-                hard_holds: Vec::new(),
+                hard_holds: request.hold.into_iter().map(ReasonCode::HardHold).collect(),
                 acceptance_profile,
             };
             let result = WorkApplication::new(&self.store)
@@ -1085,6 +1353,446 @@ mod unix {
                         "version": work.acceptance_profile.version,
                     },
                     "replayed": !result.changed,
+                })),
+            ))
+        }
+
+        fn work_edit(&mut self, data: &Value, operation: &str) -> ServiceResult {
+            let project = ProjectId::new(string(data, "project_id")?);
+            let work_id = string(data, "work_id")?;
+            let result = WorkApplication::new(&self.store)
+                .edit_work_as(
+                    &project,
+                    &work_id,
+                    &string(data, "actor_id")?,
+                    optional_string(data, "parent_id")?.map(Some),
+                    optional_string(data, "title")?,
+                    optional_string(data, "description")?,
+                    optional_u64(data, "priority")?.map(|value| value as u8),
+                    optional_string(data, "dispatch_policy")?,
+                    optional_u64(data, "expected_revision")?,
+                    &now(),
+                    operation.to_owned(),
+                )
+                .map_err(map_application_error)?;
+            Ok((
+                if result.changed {
+                    ApplicationOutcome::Changed
+                } else {
+                    ApplicationOutcome::Unchanged
+                },
+                Some(result.snapshot_revision),
+                Some(json!({
+                    "command": "work_edit",
+                    "project_id": project.as_str(),
+                    "work_id": result.value.work_id,
+                    "title": result.value.title,
+                    "description": result.value.description,
+                    "priority": result.value.priority,
+                    "dispatch_policy": result.value.dispatch_policy,
+                    "replayed": !result.changed,
+                })),
+            ))
+        }
+
+        fn dependency_remove(&mut self, data: &Value, operation: &str) -> ServiceResult {
+            let project = ProjectId::new(string(data, "project_id")?);
+            let result = WorkApplication::new(&self.store)
+                .remove_dependency_as(
+                    &project,
+                    &string(data, "prerequisite_id")?,
+                    &string(data, "dependent_id")?,
+                    &string(data, "actor_id")?,
+                    optional_u64(data, "expected_revision")?,
+                    &now(),
+                    operation.to_owned(),
+                )
+                .map_err(map_application_error)?;
+            Ok((
+                if result.changed {
+                    ApplicationOutcome::Changed
+                } else {
+                    ApplicationOutcome::Unchanged
+                },
+                Some(result.snapshot_revision),
+                Some(
+                    json!({"command": "dependency_remove", "project_id": project.as_str(), "replayed": !result.changed}),
+                ),
+            ))
+        }
+
+        fn work_hold_add(&mut self, data: &Value, operation: &str) -> ServiceResult {
+            let project = ProjectId::new(string(data, "project_id")?);
+            let work_id = string(data, "work_id")?;
+            let result = WorkApplication::new(&self.store)
+                .add_work_hold_as(
+                    &project,
+                    &work_id,
+                    &string(data, "reason_code")?,
+                    &string(data, "actor_id")?,
+                    optional_u64(data, "expected_revision")?,
+                    &now(),
+                    operation.to_owned(),
+                )
+                .map_err(map_application_error)?;
+            Ok((
+                if result.changed {
+                    ApplicationOutcome::Changed
+                } else {
+                    ApplicationOutcome::Unchanged
+                },
+                Some(result.snapshot_revision),
+                Some(
+                    json!({"command": "work_hold_add", "project_id": project.as_str(), "work_id": work_id, "hard_holds": result.value.hard_holds.iter().map(ReasonCode::stable_code).collect::<Vec<_>>(), "replayed": !result.changed}),
+                ),
+            ))
+        }
+
+        fn work_hold_resolve(&mut self, data: &Value, operation: &str) -> ServiceResult {
+            let project = ProjectId::new(string(data, "project_id")?);
+            let work_id = string(data, "work_id")?;
+            let result = WorkApplication::new(&self.store)
+                .resolve_work_hold_as(
+                    &project,
+                    &work_id,
+                    &string(data, "hold_id")?,
+                    &string(data, "resolution_reason")?,
+                    &string(data, "actor_id")?,
+                    optional_u64(data, "expected_revision")?,
+                    &now(),
+                    operation.to_owned(),
+                )
+                .map_err(map_application_error)?;
+            Ok((
+                if result.changed {
+                    ApplicationOutcome::Changed
+                } else {
+                    ApplicationOutcome::Unchanged
+                },
+                Some(result.snapshot_revision),
+                Some(
+                    json!({"command": "work_hold_resolve", "project_id": project.as_str(), "work_id": work_id, "hard_holds": result.value.hard_holds.iter().map(ReasonCode::stable_code).collect::<Vec<_>>(), "replayed": !result.changed}),
+                ),
+            ))
+        }
+
+        fn work_dispatch_set(&mut self, data: &Value, operation: &str) -> ServiceResult {
+            let project = ProjectId::new(string(data, "project_id")?);
+            let work_id = string(data, "work_id")?;
+            let result = WorkApplication::new(&self.store)
+                .edit_work_as(
+                    &project,
+                    &work_id,
+                    &string(data, "actor_id")?,
+                    None,
+                    None,
+                    None,
+                    None,
+                    Some(string(data, "dispatch_policy")?),
+                    optional_u64(data, "expected_revision")?,
+                    &now(),
+                    operation.to_owned(),
+                )
+                .map_err(map_application_error)?;
+            Ok((
+                if result.changed {
+                    ApplicationOutcome::Changed
+                } else {
+                    ApplicationOutcome::Unchanged
+                },
+                Some(result.snapshot_revision),
+                Some(
+                    json!({"command": "work_dispatch_set", "project_id": project.as_str(), "work_id": work_id, "dispatch_policy": result.value.dispatch_policy, "replayed": !result.changed}),
+                ),
+            ))
+        }
+
+        fn dependency_add(&mut self, data: &Value, operation: &str) -> ServiceResult {
+            let request: DependencyAddRequest = serde_json::from_value(data.clone())
+                .map_err(|error| invalid_service_dto("dependency_add", error))?;
+            if request.command != "dependency_add" {
+                return Err(CliError::invalid(
+                    "dependency_add request command does not match its route",
+                ));
+            }
+            let project = ProjectId::new(required_trimmed(request.project_id, "project_id")?);
+            let prerequisite_id = required_trimmed(request.prerequisite_id, "prerequisite_id")?;
+            let dependent_id = required_trimmed(request.dependent_id, "dependent_id")?;
+            let actor_id = required_trimmed(request.actor_id, "actor_id")?;
+            let result = WorkApplication::new(&self.store)
+                .add_dependency_as_checked(
+                    &project,
+                    &prerequisite_id,
+                    &dependent_id,
+                    &actor_id,
+                    request.expected_revision,
+                    &now(),
+                    operation,
+                )
+                .map_err(map_dependency_error)?;
+            Ok((
+                if result.changed {
+                    ApplicationOutcome::Changed
+                } else {
+                    ApplicationOutcome::Unchanged
+                },
+                Some(result.snapshot_revision),
+                Some(json!({
+                    "project_id": project.as_str(),
+                    "prerequisite_id": prerequisite_id,
+                    "dependent_id": dependent_id,
+                    "satisfaction_policy": "closed_only",
+                    "replayed": !result.changed,
+                })),
+            ))
+        }
+
+        fn dependency_graph(&mut self, data: &Value, command: &str) -> ServiceResult {
+            let project = ProjectId::new(string(data, "project_id")?);
+            let graph = WorkApplication::new(&self.store)
+                .dependency_graph(&project)
+                .map_err(map_application_error)?;
+            let edges = graph
+                .edges
+                .iter()
+                .map(|edge| {
+                    json!({
+                        "prerequisite_id": edge.prerequisite_id,
+                        "dependent_id": edge.dependent_id,
+                    })
+                })
+                .collect::<Vec<_>>();
+            let cycles = graph
+                .cycles
+                .iter()
+                .map(|cycle| json!(cycle))
+                .collect::<Vec<_>>();
+            Ok((
+                ApplicationOutcome::Unchanged,
+                Some(graph.revision),
+                Some(json!({
+                    "command": command,
+                    "project_id": graph.project_id.as_str(),
+                    "revision": graph.revision,
+                    "edges": edges,
+                    "cycles": cycles,
+                    "cycle_count": graph.cycles.len(),
+                })),
+            ))
+        }
+
+        fn cycle_board(&mut self, data: &Value) -> ServiceResult {
+            let project = ProjectId::new(string(data, "project_id")?);
+            let cycle_id = string(data, "cycle_id")?;
+            let board = WorkApplication::new(&self.store)
+                .cycle_board_v3(&project, &cycle_id)
+                .map_err(map_application_error)?;
+            let assignments = board
+                .assignments
+                .iter()
+                .map(|item| {
+                    json!({
+                        "assignment_id": item.assignment.assignment_id,
+                        "work_id": item.assignment.work_id,
+                        "state": item.assignment.state,
+                        "activation_policy": item.assignment.activation_policy,
+                        "activation_at_utc_ms": item.assignment.activation_at_utc_ms,
+                        "work_title": item.work_title,
+                        "work_kind": item.work_kind,
+                        "work_lifecycle": item.work_lifecycle,
+                    })
+                })
+                .collect::<Vec<_>>();
+            Ok((
+                ApplicationOutcome::Unchanged,
+                Some(board.revision),
+                Some(json!({
+                    "command": "cycle_board",
+                    "project_id": board.project_id.as_str(),
+                    "revision": board.revision,
+                    "cycle": {
+                        "cycle_id": board.cycle.cycle_id,
+                        "series_id": board.cycle.series_id,
+                        "template_version_id": board.cycle.template_version_id,
+                        "slot_ordinal": board.cycle.slot_ordinal,
+                        "name": board.cycle.name,
+                        "goal": board.cycle.goal,
+                        "lifecycle": board.cycle.lifecycle,
+                        "scheduled_start_utc_ms": board.cycle.scheduled_start_utc_ms,
+                        "scheduled_end_utc_ms": board.cycle.scheduled_end_utc_ms,
+                        "scheduled_start_local": board.cycle.scheduled_start_local,
+                        "timezone": board.cycle.timezone,
+                        "tzdb_identity": board.cycle.tzdb_identity,
+                    },
+                    "assignments": assignments,
+                })),
+            ))
+        }
+
+        fn intake_read(&mut self, data: &Value) -> ServiceResult {
+            let project = ProjectId::new(string(data, "project_id")?);
+            let view = WorkApplication::new(&self.store)
+                .intake_items_v3(&project)
+                .map_err(map_application_error)?;
+            let item_id = optional_string(data, "intake_id")?;
+            let items = view
+                .items
+                .iter()
+                .filter(|item| item_id.as_deref().is_none_or(|id| id == item.intake_id))
+                .map(super::super::intake_item_json)
+                .collect::<Vec<_>>();
+            if item_id.is_some() && items.is_empty() {
+                return Err(CliError::with(
+                    ErrorCode::NotFound,
+                    ApplicationOutcome::Rejected,
+                    "intake item was not found",
+                ));
+            }
+            Ok((
+                ApplicationOutcome::Unchanged,
+                Some(view.revision),
+                Some(json!({
+                    "command": "intake_read",
+                    "project_id": view.project_id.as_str(),
+                    "revision": view.revision,
+                    "items": items,
+                    "total": view.items.len(),
+                })),
+            ))
+        }
+
+        fn intake_bucket(&mut self, data: &Value, operation: &str) -> ServiceResult {
+            let project = ProjectId::new(string(data, "project_id")?);
+            let bucket_id = IntakeBucketId::new(string(data, "bucket_id")?);
+            let name = string(data, "name")?;
+            let actor = string(data, "actor_id")?;
+            let session = string(data, "session_id")?;
+            let app = WorkApplication::new(&self.store);
+            app.ensure_work_model_v3().map_err(map_application_error)?;
+            let bucket = IntakeBucket {
+                id: bucket_id.clone(),
+                project_id: project.clone(),
+                name: name.clone(),
+                archived: false,
+            };
+            let revision = app
+                .intake_items_v3(&project)
+                .map_err(map_application_error)?
+                .revision;
+            let scope = boreal_application::PlanningScope::new(project.clone(), actor)
+                .with_session(session)
+                .at_revision(revision);
+            let result = app
+                .create_intake_bucket_v3(&scope, operation.to_owned(), &bucket, &now())
+                .map_err(map_application_error)?;
+            Ok((
+                if result.changed {
+                    ApplicationOutcome::Changed
+                } else {
+                    ApplicationOutcome::Unchanged
+                },
+                Some(result.snapshot_revision),
+                Some(json!({
+                    "command": "intake_bucket",
+                    "project_id": project.as_str(),
+                    "bucket_id": bucket_id.as_str(),
+                    "name": name,
+                    "archived": false,
+                    "replayed": !result.changed,
+                })),
+            ))
+        }
+
+        fn intake_capture(&mut self, data: &Value, operation: &str) -> ServiceResult {
+            let project = ProjectId::new(string(data, "project_id")?);
+            let intake_id = IntakeItemId::new(string(data, "intake_id")?);
+            let bucket_id = IntakeBucketId::new(string(data, "bucket_id")?);
+            let content = string(data, "content")?;
+            let kind = parse_intake_kind(&string(data, "kind")?)?;
+            let actor = string(data, "actor_id")?;
+            let session = string(data, "session_id")?;
+            let app = WorkApplication::new(&self.store);
+            app.ensure_work_model_v3().map_err(map_application_error)?;
+            let captured_at = now();
+            let item = IntakeItem {
+                id: intake_id.clone(),
+                bucket_id: bucket_id.clone(),
+                project_id: project.clone(),
+                kind,
+                lifecycle: IntakeLifecycle::Captured,
+                content: content.clone(),
+                content_revision: 1,
+                content_digest: sha256_content_digest(content.as_bytes()),
+                revisit_at: None,
+            };
+            let revision = app
+                .intake_items_v3(&project)
+                .map_err(map_application_error)?
+                .revision;
+            let scope = boreal_application::PlanningScope::new(project.clone(), actor)
+                .with_session(session)
+                .at_revision(revision);
+            let result = app
+                .create_intake_item_v3(
+                    &scope,
+                    operation.to_owned(),
+                    &item,
+                    &captured_at,
+                    &captured_at,
+                )
+                .map_err(map_application_error)?;
+            Ok((
+                if result.changed {
+                    ApplicationOutcome::Changed
+                } else {
+                    ApplicationOutcome::Unchanged
+                },
+                Some(result.snapshot_revision),
+                Some(json!({
+                    "command": "intake_capture",
+                    "project_id": project.as_str(),
+                    "intake_id": intake_id.as_str(),
+                    "bucket_id": bucket_id.as_str(),
+                    "kind": format!("{kind:?}").to_ascii_lowercase(),
+                    "lifecycle": "captured",
+                    "content_revision": 1,
+                    "content_digest": item.content_digest,
+                    "replayed": !result.changed,
+                })),
+            ))
+        }
+
+        fn doctor(&mut self, data: &Value) -> ServiceResult {
+            let project = optional_string(data, "project_id")?;
+            let schema_version = self.store.schema_version().map_err(map_store_error)?;
+            let v3_enabled = self
+                .store
+                .work_model_v3_enabled()
+                .map_err(map_store_error)?;
+            let revision = project
+                .as_deref()
+                .map(|project| {
+                    self.store
+                        .project_revision(project)
+                        .map(|revision| revision.0)
+                })
+                .transpose()
+                .map_err(map_store_error)?;
+            Ok((
+                ApplicationOutcome::Unchanged,
+                revision,
+                Some(json!({
+                    "project_id": project,
+                    "checks": {
+                        "database_open": "pass",
+                        "schema_version": schema_version,
+                        "work_model_v3": if v3_enabled { "enabled" } else { "not_enabled" },
+                        "sqlite_runtime": self.store.sqlite_runtime_identity().as_json(),
+                    },
+                    "repair": {
+                        "available": false,
+                        "reason": "doctor is read-only in the CLI adapter"
+                    }
                 })),
             ))
         }
@@ -1135,6 +1843,16 @@ mod unix {
             let parsed = parsed_context_command(data, "session_show")?;
             let result =
                 super::super::session_show_result(&parsed, &WorkApplication::new(&self.store))?;
+            Ok((result.outcome, result.revision, result.data))
+        }
+
+        fn session_end(&mut self, data: &Value, operation: &str) -> ServiceResult {
+            let parsed = parsed_context_command(data, "session_end")?;
+            let result = super::super::session_end_result(
+                &parsed,
+                &WorkApplication::new(&self.store),
+                operation,
+            )?;
             Ok((result.outcome, result.revision, result.data))
         }
 
@@ -2164,6 +2882,7 @@ mod unix {
             "next" => vec!["agent".to_owned(), "next".to_owned()],
             "session_start" => vec!["session".to_owned(), "start".to_owned()],
             "session_show" => vec!["session".to_owned(), "show".to_owned()],
+            "session_end" => vec!["session".to_owned(), "end".to_owned()],
             _ => {
                 return Err(CliError::invalid(format!(
                     "unknown service context route: {route}"
@@ -2331,6 +3050,16 @@ mod unix {
             _ => Err(CliError::invalid(format!(
                 "unknown create_work acceptance profile: {value}"
             ))),
+        }
+    }
+
+    fn parse_intake_kind(value: &str) -> Result<IntakeKind, CliError> {
+        match value {
+            "note" => Ok(IntakeKind::Note),
+            "discovery" => Ok(IntakeKind::Discovery),
+            "question" => Ok(IntakeKind::Question),
+            "revisit" => Ok(IntakeKind::Revisit),
+            _ => Err(CliError::invalid(format!("unknown intake kind: {value}"))),
         }
     }
 
@@ -2624,6 +3353,115 @@ mod tests {
         };
         assert!(supports(&init));
         assert!(supports(&create_work));
+
+        let dependency = ParsedCommand {
+            path: vec!["dep".to_owned(), "add".to_owned()],
+            options: CliOptions::default(),
+        };
+        let doctor = ParsedCommand {
+            path: vec!["doctor".to_owned()],
+            options: CliOptions::default(),
+        };
+        assert!(supports(&dependency));
+        assert!(supports(&doctor));
+        for path in [
+            vec!["dep".to_owned(), "tree".to_owned()],
+            vec!["dep".to_owned(), "cycles".to_owned()],
+            vec!["cycle".to_owned(), "board".to_owned()],
+            vec!["cycle".to_owned(), "report".to_owned()],
+            vec!["intake".to_owned(), "list".to_owned()],
+            vec!["intake".to_owned(), "show".to_owned()],
+            vec!["intake".to_owned(), "bucket".to_owned()],
+            vec!["intake".to_owned(), "capture".to_owned()],
+        ] {
+            assert!(supports(&ParsedCommand {
+                path,
+                options: CliOptions::default(),
+            }));
+        }
+    }
+
+    #[test]
+    fn planning_service_request_data_preserves_project_and_dependency_context() {
+        let options = CliOptions {
+            project: Some("project-1".to_owned()),
+            positionals: vec!["task-a".to_owned(), "task-b".to_owned()],
+            ..CliOptions::default()
+        };
+        let parsed = ParsedCommand {
+            path: vec!["dep".to_owned(), "add".to_owned()],
+            options,
+        };
+        let data = request_data(&parsed, "op_dep_fixture").expect("dependency request builds");
+        assert_eq!(data["command"], "dependency_add");
+        assert_eq!(data["project_id"], "project-1");
+        assert_eq!(data["prerequisite_id"], "task-a");
+        assert_eq!(data["dependent_id"], "task-b");
+
+        let board = ParsedCommand {
+            path: vec!["cycle".to_owned(), "board".to_owned()],
+            options: CliOptions {
+                project: Some("project-1".to_owned()),
+                positionals: vec!["cycle-1".to_owned()],
+                ..CliOptions::default()
+            },
+        };
+        let board_data =
+            request_data(&board, "op_cycle_board_fixture").expect("cycle board request builds");
+        assert_eq!(board_data["command"], "cycle_board");
+        assert_eq!(board_data["project_id"], "project-1");
+        assert_eq!(board_data["cycle_id"], "cycle-1");
+
+        let intake = ParsedCommand {
+            path: vec!["intake".to_owned(), "show".to_owned()],
+            options: CliOptions {
+                project: Some("project-1".to_owned()),
+                positionals: vec!["intake-1".to_owned()],
+                ..CliOptions::default()
+            },
+        };
+        let intake_data =
+            request_data(&intake, "op_intake_show_fixture").expect("intake show request builds");
+        assert_eq!(intake_data["command"], "intake_read");
+        assert_eq!(intake_data["intake_id"], "intake-1");
+
+        let bucket = ParsedCommand {
+            path: vec!["intake".to_owned(), "bucket".to_owned()],
+            options: CliOptions {
+                project: Some("project-1".to_owned()),
+                positionals: vec!["inbox".to_owned(), "Inbox".to_owned()],
+                ..CliOptions::default()
+            },
+        };
+        let bucket_data = request_data(&bucket, "op_intake_bucket_fixture")
+            .expect("intake bucket request builds");
+        assert_eq!(bucket_data["command"], "intake_bucket");
+        assert_eq!(bucket_data["bucket_id"], "inbox");
+        assert_eq!(bucket_data["name"], "Inbox");
+
+        let capture = ParsedCommand {
+            path: vec!["intake".to_owned(), "capture".to_owned()],
+            options: CliOptions {
+                project: Some("project-1".to_owned()),
+                bucket: Some("inbox".to_owned()),
+                kind: Some("discovery".to_owned()),
+                positionals: vec!["intake-1".to_owned(), "a fact".to_owned()],
+                ..CliOptions::default()
+            },
+        };
+        let capture_data = request_data(&capture, "op_intake_capture_fixture")
+            .expect("intake capture request builds");
+        assert_eq!(capture_data["command"], "intake_capture");
+        assert_eq!(capture_data["bucket_id"], "inbox");
+        assert_eq!(capture_data["kind"], "discovery");
+
+        let doctor = ParsedCommand {
+            path: vec!["doctor".to_owned()],
+            options: CliOptions::default(),
+        };
+        let data = request_data(&doctor, "op_doctor_fixture").expect("doctor request builds");
+        assert_eq!(data["command"], "doctor");
+        assert!(data["project_id"].is_null());
     }
 
     #[test]

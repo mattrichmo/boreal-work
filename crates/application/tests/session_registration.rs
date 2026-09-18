@@ -142,3 +142,44 @@ fn application_claim_surfaces_session_ownership_errors() {
         boreal_application::ApplicationError::Store(StoreError::WrongOwner { .. })
     ));
 }
+
+#[test]
+fn application_ends_idle_session_and_replays_without_abandoning_work() {
+    let (_store, app) = setup();
+    app.register_session_as(
+        &ProjectId::new("p1"),
+        "agent-1",
+        "luna",
+        "session-end",
+        "unix-ms:2",
+        "op-session-end-register",
+    )
+    .unwrap();
+
+    let ended = app
+        .end_session_as(
+            &ProjectId::new("p1"),
+            "session-end",
+            "agent-1",
+            None,
+            "unix-ms:3",
+            "op-session-end",
+        )
+        .unwrap();
+    assert!(ended.changed);
+    assert_eq!(ended.value.state, SessionState::Ended);
+    assert_eq!(ended.value.ended_at.as_deref(), Some("unix-ms:3"));
+
+    let replay = app
+        .end_session_as(
+            &ProjectId::new("p1"),
+            "session-end",
+            "agent-1",
+            None,
+            "unix-ms:3",
+            "op-session-end",
+        )
+        .unwrap();
+    assert!(!replay.changed);
+    assert_eq!(replay.value, ended.value);
+}

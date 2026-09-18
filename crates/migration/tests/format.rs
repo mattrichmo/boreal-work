@@ -167,7 +167,7 @@ fn unsupported_records_are_reported_with_raw_input() {
 
     let report = import_json(input).unwrap();
     assert!(!report.is_lossless());
-    assert_eq!(report.document.unwrap().work.len(), 0);
+    assert_eq!(report.document.as_ref().unwrap().work.len(), 0);
     assert_eq!(report.unsupported.len(), 2);
     assert!(report
         .unsupported
@@ -176,6 +176,11 @@ fn unsupported_records_are_reported_with_raw_input() {
     assert!(report.unsupported.iter().any(|issue| {
         issue.record_type == "top_level" && issue.record_id.as_deref() == Some("future_records")
     }));
+    let ledger = report.loss_ledger();
+    assert_eq!(ledger.len(), 2);
+    assert!(ledger
+        .iter()
+        .all(|entry| { entry.disposition == boreal_migration::LossDisposition::Unsupported }));
 }
 
 #[test]
@@ -344,6 +349,7 @@ fn materialization_carries_source_provenance_and_explicit_integrator_actions() {
     assert_eq!(export.import_plan.actions.len(), 2);
     assert_eq!(export.import_plan.actions[0].collection, "project");
     assert_eq!(export.import_plan.actions[1].id, "w1");
+    assert!(export.import_plan.loss_ledger.is_empty());
     assert_eq!(export.document_json, export_json(&export.document).unwrap());
 }
 
@@ -366,6 +372,7 @@ fn plan_apply_and_verify_are_side_effect_free_and_report_exact_counts() {
     assert_eq!(verification.counts.failures, 1);
     assert_eq!(verification.action_count, 3);
     assert_eq!(verification.issue_count, 0);
+    assert_eq!(verification.loss_ledger_count, 0);
     assert_eq!(
         verification.document_fingerprint.as_deref(),
         Some(applied.content_digest().as_str())
@@ -438,6 +445,11 @@ fn unsupported_input_is_retained_and_cannot_produce_a_partial_plan() {
         .unsupported
         .iter()
         .any(|issue| issue.reason.contains("retention") && issue.raw["retention"] == "forever"));
+    assert_eq!(import_plan.loss_ledger.len(), 1);
+    assert_eq!(
+        import_plan.loss_ledger[0].disposition,
+        boreal_migration::LossDisposition::Unsupported
+    );
     assert!(matches!(
         plan.materialize_export(),
         Err(boreal_migration::MaterializationError::NotReady(report))

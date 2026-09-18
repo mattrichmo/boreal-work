@@ -48,6 +48,50 @@ pub struct SourceVersion {
     pub parser_identity: Option<String>,
 }
 
+/// A complete source registration/capture intent.  The operation ID is owned
+/// by the application boundary and is stable across retries.  The catalog
+/// records the request fingerprint together with the resulting immutable
+/// source version so a retry cannot silently change its origin, media type, or
+/// bytes.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SourceCaptureRequest {
+    pub operation_id: String,
+    pub project_id: String,
+    pub origin: String,
+    pub media_type: String,
+    pub bytes: Vec<u8>,
+}
+
+impl SourceCaptureRequest {
+    pub fn new(
+        operation_id: impl Into<String>,
+        project_id: impl Into<String>,
+        origin: impl Into<String>,
+        media_type: impl Into<String>,
+        bytes: impl Into<Vec<u8>>,
+    ) -> Self {
+        Self {
+            operation_id: operation_id.into(),
+            project_id: project_id.into(),
+            origin: origin.into(),
+            media_type: media_type.into(),
+            bytes: bytes.into(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SourceCaptureReceipt {
+    pub operation_id: String,
+    pub source_version: SourceVersion,
+    /// True only when this exact operation was previously durably recorded.
+    pub duplicate: bool,
+    /// True when a new operation reused an already captured immutable byte
+    /// version.  This is distinct from retry replay and remains explicit to
+    /// the application adapter.
+    pub reused_existing_version: bool,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct Citation {
     pub source_version_id: String,
@@ -217,6 +261,9 @@ pub enum SourceError {
     ExcerptNotFound,
     InvalidRetrievalQuery,
     EmptyParser,
+    EmptyOperation,
+    OperationConflict,
+    SourceMetadataConflict,
     Storage(String),
 }
 
@@ -238,6 +285,13 @@ impl fmt::Display for SourceError {
             }
             Self::InvalidRetrievalQuery => f.write_str("retrieval query or bound is invalid"),
             Self::EmptyParser => f.write_str("parser identity is empty"),
+            Self::EmptyOperation => f.write_str("source operation identity is empty"),
+            Self::OperationConflict => {
+                f.write_str("source operation was already used for different input")
+            }
+            Self::SourceMetadataConflict => {
+                f.write_str("existing source version has different immutable metadata")
+            }
             Self::Storage(message) => write!(f, "blob storage error: {message}"),
         }
     }
@@ -396,8 +450,16 @@ struct CatalogState {
     versions: HashMap<(String, String), SourceVersion>,
     parse_records: HashMap<(String, String), ParseRecord>,
     indexes: HashMap<(String, String), IndexedSource>,
+    capture_operations: HashMap<String, CaptureOperationRecord>,
     source_revision: u64,
     index_revision: u64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct CaptureOperationRecord {
+    request_digest: String,
+    project_id: String,
+    source_version_id: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -440,6 +502,8 @@ struct PersistedCatalogState {
     versions: Vec<SourceVersion>,
     parse_records: Vec<PersistedParseRecord>,
     indexes: Vec<PersistedIndexedSource>,
+    #[serde(default)]
+    capture_operations: Vec<PersistedCaptureOperation>,
     source_revision: u64,
     index_revision: u64,
 }
@@ -458,6 +522,12 @@ struct PersistedIndexedSource {
     indexed: IndexedSource,
 }
 
+#[derive(Serialize, Deserialize)]
+struct PersistedCaptureOperation {
+    operation_id: String,
+    record: CaptureOperationRecord,
+}
+
 pub struct SourceCatalog {
     blobs: Arc<dyn BlobStore>,
     state: Mutex<CatalogState>,
@@ -467,6 +537,7 @@ pub struct SourceCatalog {
     mutation_lock: Mutex<()>,
     citation_limits: CitationLimits,
     state_file: Option<PathBuf>,
+    mutation_lock_file: Option<PathBuf>,
 }
 
 impl Default for SourceCatalog {
@@ -486,6 +557,7 @@ impl SourceCatalog {
             mutation_lock: Mutex::new(()),
             citation_limits: CitationLimits::default(),
             state_file: None,
+            mutation_lock_file: None,
         }
     }
 
@@ -512,6 +584,7 @@ impl SourceCatalog {
             mutation_lock: Mutex::new(()),
             citation_limits: CitationLimits::default(),
             state_file: Some(state_file),
+            mutation_lock_file: Some(root.join("catalog.lock")),
         })
     }
 
@@ -528,59 +601,106 @@ impl SourceCatalog {
         media_type: &str,
     ) -> Result<SourceVersion, SourceError> {
         let _mutation_guard = lock(&self.mutation_lock)?;
-        validate_project_id(project_id)?;
-        validate_origin(origin)?;
-        if media_type.trim().is_empty() {
-            return Err(SourceError::EmptyMediaType);
-        }
-
-        let content_digest = content_digest(bytes);
-        let source_version_id = format!("sv_{project_id}_{content_digest}");
-        let key = (project_id.to_owned(), source_version_id.clone());
-
-        let existing = {
-            let state = lock(&self.state)?;
-            state.versions.get(&key).cloned()
-        };
-        if let Some(existing) = existing {
-            return self.current_snapshot(existing);
-        }
-
-        // The version is not made visible until the adapter has verified the
-        // complete object on disk (or in the fallback memory adapter).
-        self.blobs.put(&content_digest, bytes)?;
-
-        let version = SourceVersion {
-            project_id: project_id.to_owned(),
-            source_version_id,
-            origin: origin.to_owned(),
-            media_type: media_type.to_owned(),
-            byte_count: bytes.len(),
-            content_digest,
-            availability: Availability::Available,
-            parser_identity: None,
-        };
-        let (existing, inserted) = {
-            let mut state = lock(&self.state)?;
-            if let Some(existing) = state.versions.get(&key) {
-                (Some(existing.clone()), false)
-            } else {
-                state.versions.insert(key.clone(), version.clone());
-                state.source_revision = state.source_revision.saturating_add(1);
-                (None, true)
-            }
-        };
-        if let Some(existing) = existing {
-            return self.current_snapshot(existing);
+        let _catalog_lock = self.acquire_persistent_lock()?;
+        self.reload_persistent_state()?;
+        let before = lock(&self.state)?.clone();
+        let (version, inserted) =
+            self.capture_version_locked(project_id, origin, bytes, media_type)?;
+        if !inserted {
+            return Ok(version);
         }
         if let Err(error) = self.persist_state() {
-            let mut state = lock(&self.state)?;
-            if inserted && state.versions.remove(&key).is_some() {
-                state.source_revision = state.source_revision.saturating_sub(1);
-            }
+            *lock(&self.state)? = before;
             return Err(error);
         }
         Ok(version)
+    }
+
+    /// Capture a source through a durable, retryable operation boundary.
+    /// Registration metadata, verified blob visibility, and the source-version
+    /// reference are committed to one catalog snapshot.  A retry with the same
+    /// operation and canonical request returns the original version without a
+    /// second logical source operation; a changed request is rejected.
+    pub fn capture_with_operation(
+        &self,
+        request: &SourceCaptureRequest,
+    ) -> Result<SourceCaptureReceipt, SourceError> {
+        let _mutation_guard = lock(&self.mutation_lock)?;
+        let _catalog_lock = self.acquire_persistent_lock()?;
+        self.reload_persistent_state()?;
+        validate_operation_id(&request.operation_id)?;
+        let request_digest = capture_request_digest(request);
+
+        let existing_operation = lock(&self.state)?
+            .capture_operations
+            .get(&request.operation_id)
+            .cloned();
+        if let Some(record) = existing_operation {
+            if record.request_digest != request_digest {
+                return Err(SourceError::OperationConflict);
+            }
+            let version = lock(&self.state)?
+                .versions
+                .get(&(record.project_id.clone(), record.source_version_id.clone()))
+                .cloned()
+                .ok_or_else(|| {
+                    SourceError::Storage(
+                        "capture operation references a missing source version".to_owned(),
+                    )
+                })?;
+            self.blobs.put(&version.content_digest, &request.bytes)?;
+            return Ok(SourceCaptureReceipt {
+                operation_id: request.operation_id.clone(),
+                source_version: self.current_snapshot(version)?,
+                duplicate: true,
+                reused_existing_version: false,
+            });
+        }
+
+        let before = lock(&self.state)?.clone();
+        let (version, inserted) = self.capture_version_locked(
+            &request.project_id,
+            &request.origin,
+            &request.bytes,
+            &request.media_type,
+        )?;
+        lock(&self.state)?.capture_operations.insert(
+            request.operation_id.clone(),
+            CaptureOperationRecord {
+                request_digest,
+                project_id: version.project_id.clone(),
+                source_version_id: version.source_version_id.clone(),
+            },
+        );
+        if let Err(error) = self.persist_state() {
+            *lock(&self.state)? = before;
+            return Err(error);
+        }
+        Ok(SourceCaptureReceipt {
+            operation_id: request.operation_id.clone(),
+            source_version: version,
+            duplicate: false,
+            reused_existing_version: !inserted,
+        })
+    }
+
+    /// Exact project/version lookup for application adapters.  Presentation
+    /// pagination must never be used as an existence check.
+    pub fn show_version(
+        &self,
+        project_id: &str,
+        source_version_id: &str,
+    ) -> Result<SourceVersion, SourceError> {
+        validate_project_id(project_id)?;
+        if source_version_id.trim().is_empty() {
+            return Err(SourceError::ScopeViolation);
+        }
+        let version = lock(&self.state)?
+            .versions
+            .get(&(project_id.to_owned(), source_version_id.to_owned()))
+            .cloned()
+            .ok_or(SourceError::ScopeViolation)?;
+        self.current_snapshot(version)
     }
 
     pub fn verify(&self, version: &SourceVersion) -> Result<Vec<u8>, SourceError> {
@@ -648,6 +768,8 @@ impl SourceCatalog {
         input_version_id: &str,
     ) -> Result<SourceVersion, SourceError> {
         let _mutation_guard = lock(&self.mutation_lock)?;
+        let _catalog_lock = self.acquire_persistent_lock()?;
+        self.reload_persistent_state()?;
         if parser.trim().is_empty() {
             return Err(SourceError::EmptyParser);
         }
@@ -696,6 +818,8 @@ impl SourceCatalog {
         limits: ParserLimits,
     ) -> Result<ParseReport, SourceError> {
         let _mutation_guard = lock(&self.mutation_lock)?;
+        let _catalog_lock = self.acquire_persistent_lock()?;
+        self.reload_persistent_state()?;
         if parser.trim().is_empty() {
             return Err(SourceError::EmptyParser);
         }
@@ -1148,6 +1272,79 @@ impl SourceCatalog {
         Ok(versions)
     }
 
+    fn capture_version_locked(
+        &self,
+        project_id: &str,
+        origin: &str,
+        bytes: &[u8],
+        media_type: &str,
+    ) -> Result<(SourceVersion, bool), SourceError> {
+        validate_project_id(project_id)?;
+        validate_origin(origin)?;
+        if media_type.trim().is_empty() {
+            return Err(SourceError::EmptyMediaType);
+        }
+
+        let content_digest = content_digest(bytes);
+        let source_version_id = format!("sv_{project_id}_{content_digest}");
+        let key = (project_id.to_owned(), source_version_id.clone());
+        let existing = {
+            let state = lock(&self.state)?;
+            state.versions.get(&key).cloned()
+        };
+        if let Some(existing) = existing {
+            if existing.origin != origin
+                || existing.media_type != media_type
+                || existing.byte_count != bytes.len()
+                || existing.content_digest != content_digest
+            {
+                return Err(SourceError::SourceMetadataConflict);
+            }
+            // A retried registration can repair an orphaned/missing blob from
+            // the caller's exact bytes, while a digest mismatch remains an
+            // explicit corruption error from the blob store.
+            self.blobs.put(&content_digest, bytes)?;
+            return Ok((self.current_snapshot(existing)?, false));
+        }
+
+        // The version is not made visible until the adapter has verified the
+        // complete object on disk (or in the fallback memory adapter).
+        self.blobs.put(&content_digest, bytes)?;
+        let version = SourceVersion {
+            project_id: project_id.to_owned(),
+            source_version_id,
+            origin: origin.to_owned(),
+            media_type: media_type.to_owned(),
+            byte_count: bytes.len(),
+            content_digest,
+            availability: Availability::Available,
+            parser_identity: None,
+        };
+        let mut state = lock(&self.state)?;
+        state.versions.insert(key, version.clone());
+        state.source_revision = state.source_revision.saturating_add(1);
+        Ok((version, true))
+    }
+
+    fn acquire_persistent_lock(&self) -> Result<Option<PersistentCatalogLock>, SourceError> {
+        self.mutation_lock_file
+            .as_deref()
+            .map(PersistentCatalogLock::acquire)
+            .transpose()
+    }
+
+    fn reload_persistent_state(&self) -> Result<(), SourceError> {
+        let Some(path) = &self.state_file else {
+            return Ok(());
+        };
+        if !path.exists() {
+            return Ok(());
+        }
+        let bytes = fs::read(path).map_err(storage_error)?;
+        *lock(&self.state)? = restore_catalog_state(&bytes)?;
+        Ok(())
+    }
+
     fn authorized_version(&self, version: &SourceVersion) -> Result<SourceVersion, SourceError> {
         validate_project_id(&version.project_id)?;
         let key = (
@@ -1238,6 +1435,48 @@ fn lock<T>(mutex: &Mutex<T>) -> Result<MutexGuard<'_, T>, SourceError> {
         .map_err(|_| SourceError::Storage("mutex was poisoned".to_owned()))
 }
 
+struct PersistentCatalogLock {
+    path: PathBuf,
+}
+
+impl PersistentCatalogLock {
+    fn acquire(path: &Path) -> Result<Self, SourceError> {
+        let mut file = None;
+        for _ in 0..5_000 {
+            match OpenOptions::new().write(true).create_new(true).open(path) {
+                Ok(value) => {
+                    file = Some(value);
+                    break;
+                }
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                    std::thread::sleep(std::time::Duration::from_millis(2));
+                }
+                Err(error) => return Err(storage_error(error)),
+            }
+        }
+        let mut file = file.ok_or_else(|| {
+            SourceError::Storage("source catalog lock is busy; retry after the owner exits".into())
+        })?;
+        let owner = format!("pid={}\n", std::process::id());
+        if let Err(error) = file
+            .write_all(owner.as_bytes())
+            .and_then(|_| file.sync_all())
+        {
+            let _ = fs::remove_file(path);
+            return Err(storage_error(error));
+        }
+        Ok(Self {
+            path: path.to_path_buf(),
+        })
+    }
+}
+
+impl Drop for PersistentCatalogLock {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.path);
+    }
+}
+
 fn persisted_state(state: &CatalogState) -> PersistedCatalogState {
     let mut versions = state.versions.values().cloned().collect::<Vec<_>>();
     versions.sort_by(|left, right| {
@@ -1281,6 +1520,18 @@ fn persisted_state(state: &CatalogState) -> PersistedCatalogState {
         versions,
         parse_records,
         indexes,
+        capture_operations: {
+            let mut operations = state
+                .capture_operations
+                .iter()
+                .map(|(operation_id, record)| PersistedCaptureOperation {
+                    operation_id: operation_id.clone(),
+                    record: record.clone(),
+                })
+                .collect::<Vec<_>>();
+            operations.sort_by(|left, right| left.operation_id.cmp(&right.operation_id));
+            operations
+        },
         source_revision: state.source_revision,
         index_revision: state.index_revision,
     }
@@ -1293,6 +1544,7 @@ fn restore_catalog_state(bytes: &[u8]) -> Result<CatalogState, SourceError> {
         versions: HashMap::new(),
         parse_records: HashMap::new(),
         indexes: HashMap::new(),
+        capture_operations: HashMap::new(),
         source_revision: persisted.source_revision,
         index_revision: persisted.index_revision,
     };
@@ -1323,6 +1575,17 @@ fn restore_catalog_state(bytes: &[u8]) -> Result<CatalogState, SourceError> {
             ));
         }
     }
+    for entry in persisted.capture_operations {
+        if state
+            .capture_operations
+            .insert(entry.operation_id, entry.record)
+            .is_some()
+        {
+            return Err(SourceError::Storage(
+                "catalog metadata contains duplicate capture operations".to_owned(),
+            ));
+        }
+    }
     Ok(state)
 }
 
@@ -1331,6 +1594,29 @@ fn validate_optional_project(project_id: Option<&str>) -> Result<(), SourceError
         validate_project_id(project_id)?;
     }
     Ok(())
+}
+
+fn validate_operation_id(operation_id: &str) -> Result<(), SourceError> {
+    if operation_id.trim().is_empty() || operation_id.as_bytes().contains(&0) {
+        return Err(SourceError::EmptyOperation);
+    }
+    Ok(())
+}
+
+fn capture_request_digest(request: &SourceCaptureRequest) -> String {
+    let mut canonical = Vec::new();
+    for field in [
+        request.project_id.as_str(),
+        request.origin.as_str(),
+        request.media_type.as_str(),
+        &content_digest(&request.bytes),
+    ] {
+        canonical.extend_from_slice(field.len().to_string().as_bytes());
+        canonical.push(b':');
+        canonical.extend_from_slice(field.as_bytes());
+        canonical.push(0);
+    }
+    content_digest(&canonical)
 }
 
 fn parse_bytes(

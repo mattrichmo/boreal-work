@@ -6,11 +6,12 @@
 //! not open SQLite or implement any business transition.
 
 use crate::application_route::ConcurrentApplicationCommandHandler;
-use crate::recovery::{RecoveryBackend, RecoveryBackendError};
+use crate::recovery::{RecoveryBackend, RecoveryBackendError, RecoveryDisposition, RecoveryEntry};
 use crate::transport::UnixSocketConnection;
 use crate::{
-    ApplicationCommandHandler, ApplicationRoute, ApplicationRouteConfig, EnqueueError,
-    FairWriterQueue, OperationRecovery, ProjectElection, RecoveryReport, ServeOnceOutcome,
+    ApplicationCommandHandler, ApplicationRoute, ApplicationRouteConfig, ControlError,
+    ControlRecord, EnqueueError, OperationControl, OperationRecovery, PriorityQueue,
+    ProjectElection, QueuePriority, RecoveryReport, ServeOnceOutcome, TimerRegistry,
     TransportConfig, TransportConfigError, TransportError, UnixSocketServer,
 };
 use std::fmt;
@@ -250,6 +251,17 @@ pub trait ServiceHostHooks: Send + Sync + 'static {
     fn on_recovery(&self, _report: &RecoveryReport) {}
 
     fn on_timer(&self) {}
+
+    /// Called with timer keys whose registered deadline has elapsed. The
+    /// application owns the durable reaper transaction and may safely ignore
+    /// a duplicate callback after a crash because the key is only a wake-up
+    /// hint, not proof that a lifecycle transition committed.
+    fn on_deadlines(&self, _keys: &[String]) {}
+
+    /// Called after an external stop/cancel request or confirmation. The
+    /// executor owns process termination; the service never treats a request
+    /// as proof that a child has stopped.
+    fn on_control(&self, _record: &ControlRecord) {}
 }
 
 #[derive(Clone, Debug)]
@@ -329,6 +341,8 @@ pub struct ServiceHost<H> {
     hooks: Option<Arc<dyn ServiceHostHooks>>,
     project_lease: Option<ProjectLeaseConfig>,
     election: Option<ProjectElection>,
+    controls: OperationControl,
+    timers: TimerRegistry,
 }
 
 impl<H> ServiceHost<H> {
@@ -350,6 +364,8 @@ impl<H> ServiceHost<H> {
             hooks: None,
             project_lease: None,
             election: None,
+            controls: OperationControl::new(),
+            timers: TimerRegistry::new(),
         })
     }
 
@@ -368,6 +384,24 @@ impl<H> ServiceHost<H> {
 
     pub fn recovery(&self) -> OperationRecovery {
         self.recovery.clone()
+    }
+
+    pub fn controls(&self) -> OperationControl {
+        self.controls.clone()
+    }
+
+    pub fn timers(&self) -> TimerRegistry {
+        self.timers.clone()
+    }
+
+    pub fn with_controls(mut self, controls: OperationControl) -> Self {
+        self.controls = controls;
+        self
+    }
+
+    pub fn with_timers(mut self, timers: TimerRegistry) -> Self {
+        self.timers = timers;
+        self
     }
 
     /// Attach the application's durable operation projection. It is hydrated
@@ -408,20 +442,44 @@ impl<H> ServiceHost<H> {
     }
 
     fn prepare_start(&mut self) -> Result<RecoveryReport, ServiceHostError> {
+        let mut entries = Vec::new();
         if let Some(backend) = &self.recovery_backend {
-            let entries = backend
+            entries = backend
                 .load_incomplete()
                 .map_err(ServiceHostError::Recovery)?;
             self.recovery
-                .hydrate(entries)
+                .hydrate(entries.clone())
                 .map_err(ServiceHostError::RecoveryJournal)?;
         }
-        let report = self.recovery.recover();
+        let mut report = self.recovery.recover();
         if let Some(backend) = &self.recovery_backend {
-            for operation_id in &report.unknown {
-                backend
-                    .mark_unknown(operation_id)
+            for operation_id in report.unknown.clone() {
+                let entry = entries
+                    .iter()
+                    .find(|entry| entry.operation_id == operation_id)
+                    .cloned()
+                    .unwrap_or_else(|| {
+                        RecoveryEntry::new(
+                            operation_id.clone(),
+                            crate::OperationPhase::Unknown,
+                            None,
+                        )
+                    });
+                let disposition = backend
+                    .reconcile(&entry)
                     .map_err(ServiceHostError::Recovery)?;
+                match &disposition {
+                    RecoveryDisposition::Unknown { .. } => backend
+                        .mark_unknown(&operation_id)
+                        .map_err(ServiceHostError::Recovery)?,
+                    RecoveryDisposition::Committed { .. } | RecoveryDisposition::Failed { .. } => {
+                        self.recovery.mark_reconciled(&operation_id, &disposition);
+                        report
+                            .unknown
+                            .retain(|candidate| candidate != &operation_id);
+                        report.reconciled.push(operation_id);
+                    }
+                }
             }
         }
         if let Some(lease) = &self.project_lease {
@@ -451,7 +509,11 @@ impl<H> ServiceHost<H> {
         let thread_shutdown = Arc::clone(&shutdown);
         let socket_path = host.server.socket_path().to_owned();
         let hooks = host.hooks.clone();
+        let host_hooks = hooks.clone();
         let maintenance_interval = host.config.maintenance_interval;
+        let timers = host.timers.clone();
+        let host_timers = timers.clone();
+        let controls = host.controls.clone();
         let join = thread::Builder::new()
             .name("boreal-service-host".to_owned())
             .spawn(move || {
@@ -460,12 +522,16 @@ impl<H> ServiceHost<H> {
                     recovery_report,
                     hooks,
                     maintenance_interval,
+                    timers,
                 )
             })
             .map_err(|error| ServiceHostError::Transport(TransportError::Io(error)))?;
         Ok(ServiceHostHandle {
             shutdown,
             socket_path,
+            controls,
+            hooks: host_hooks,
+            timers: host_timers,
             join: Some(join),
         })
     }
@@ -486,7 +552,11 @@ impl<H> ServiceHost<H> {
         let thread_shutdown = Arc::clone(&shutdown);
         let socket_path = host.server.socket_path().to_owned();
         let hooks = host.hooks.clone();
+        let host_hooks = hooks.clone();
         let maintenance_interval = host.config.maintenance_interval;
+        let timers = host.timers.clone();
+        let host_timers = timers.clone();
+        let controls = host.controls.clone();
         let join = thread::Builder::new()
             .name("boreal-service-host".to_owned())
             .spawn(move || {
@@ -495,12 +565,16 @@ impl<H> ServiceHost<H> {
                     recovery_report,
                     hooks,
                     maintenance_interval,
+                    timers,
                 )
             })
             .map_err(|error| ServiceHostError::Transport(TransportError::Io(error)))?;
         Ok(ServiceHostHandle {
             shutdown,
             socket_path,
+            controls,
+            hooks: host_hooks,
+            timers: host_timers,
             join: Some(join),
         })
     }
@@ -511,6 +585,7 @@ impl<H> ServiceHost<H> {
         recovery: RecoveryReport,
         hooks: Option<Arc<dyn ServiceHostHooks>>,
         maintenance_interval: Duration,
+        timers: TimerRegistry,
     ) -> Result<ServiceHostReport, ServiceHostError>
     where
         H: ApplicationCommandHandler,
@@ -526,6 +601,7 @@ impl<H> ServiceHost<H> {
             hooks,
             maintenance_interval,
             report.recovery.clone(),
+            timers.clone(),
         );
         loop {
             if shutdown.load(Ordering::Acquire) {
@@ -548,6 +624,7 @@ impl<H> ServiceHost<H> {
                 Ok(ServeOnceOutcome::WouldBlock) => thread::sleep(self.config.poll_interval),
                 Err(TransportError::Accept(error)) => {
                     shutdown.store(true, Ordering::Release);
+                    timers.wake();
                     maintenance.join();
                     return Err(ServiceHostError::Transport(TransportError::Accept(error)));
                 }
@@ -560,6 +637,7 @@ impl<H> ServiceHost<H> {
             }
         }
         shutdown.store(true, Ordering::Release);
+        timers.wake();
         maintenance.join();
         Ok(report)
     }
@@ -570,6 +648,7 @@ impl<H> ServiceHost<H> {
         recovery: RecoveryReport,
         hooks: Option<Arc<dyn ServiceHostHooks>>,
         maintenance_interval: Duration,
+        timers: TimerRegistry,
     ) -> Result<ServiceHostReport, ServiceHostError>
     where
         H: ConcurrentApplicationCommandHandler,
@@ -585,6 +664,7 @@ impl<H> ServiceHost<H> {
             hooks,
             maintenance_interval,
             report.recovery.clone(),
+            timers.clone(),
         );
         let route = Arc::new(self.route);
         let mut dispatch = ConcurrentDispatch::new(
@@ -638,6 +718,7 @@ impl<H> ServiceHost<H> {
                 Err(TransportError::Accept(error)) => {
                     dispatch.shutdown();
                     shutdown.store(true, Ordering::Release);
+                    timers.wake();
                     maintenance.join();
                     return Err(ServiceHostError::Transport(TransportError::Accept(error)));
                 }
@@ -646,6 +727,7 @@ impl<H> ServiceHost<H> {
         }
         dispatch.shutdown();
         shutdown.store(true, Ordering::Release);
+        timers.wake();
         maintenance.join();
         Ok(report)
     }
@@ -665,7 +747,7 @@ struct DispatchReject {
 }
 
 struct ConcurrentDispatch<H> {
-    queue: Arc<FairWriterQueue<DispatchJob>>,
+    queue: Arc<PriorityQueue<DispatchJob>>,
     workers: Vec<JoinHandle<()>>,
     route: Arc<ApplicationRoute<H>>,
     recovery: OperationRecovery,
@@ -681,7 +763,7 @@ where
         worker_count: usize,
         capacity: usize,
     ) -> Result<Self, crate::QueueConfigError> {
-        let queue = Arc::new(FairWriterQueue::<DispatchJob>::with_capacity(capacity)?);
+        let queue = Arc::new(PriorityQueue::<DispatchJob>::with_capacity(capacity)?);
         let workers = (0..worker_count)
             .map(|index| {
                 let queue = Arc::clone(&queue);
@@ -742,9 +824,12 @@ where
         request: crate::JsonRequest,
         connection: UnixSocketConnection,
     ) -> Result<(), DispatchReject> {
-        let operation_id = match self.route.operation_id_for(&request) {
-            Ok(operation_id) => operation_id,
-            Err(error) => {
+        let (operation_id, priority) = match (
+            self.route.operation_id_for(&request),
+            self.route.command_for(&request),
+        ) {
+            (Ok(operation_id), Ok(command)) => (operation_id, dispatch_priority(&command)),
+            (Err(error), _) | (_, Err(error)) => {
                 return Err(DispatchReject {
                     connection,
                     request_id: request.request_id().to_owned(),
@@ -776,11 +861,14 @@ where
                 busy: None,
             });
         }
-        if let Err((error, job)) = self.queue.try_push_recoverable(DispatchJob {
-            request,
-            connection,
-            operation_id: operation_id.clone(),
-        }) {
+        if let Err((error, job)) = self.queue.try_push_recoverable(
+            DispatchJob {
+                request,
+                connection,
+                operation_id: operation_id.clone(),
+            },
+            priority,
+        ) {
             self.recovery.remove(&operation_id);
             let busy = match error {
                 EnqueueError::Busy(crate::BusyOutcome::WriterQueueFull {
@@ -819,6 +907,18 @@ where
     }
 }
 
+fn dispatch_priority(command: &str) -> QueuePriority {
+    match command {
+        // These operations are needed to observe or stop an admitted run and
+        // must not wait behind a long verifier or a queue of ordinary writes.
+        "status" | "service_status" | "health" | "operation_show" | "operation_list"
+        | "heartbeat" | "renew" | "release" | "cancel" | "stop" | "reconcile" => {
+            QueuePriority::Control
+        }
+        _ => QueuePriority::Normal,
+    }
+}
+
 struct MaintenanceWorker {
     join: Option<JoinHandle<()>>,
 }
@@ -829,6 +929,7 @@ impl MaintenanceWorker {
         hooks: Option<Arc<dyn ServiceHostHooks>>,
         interval: Duration,
         recovery: RecoveryReport,
+        timers: TimerRegistry,
     ) -> Self {
         let Some(hooks) = hooks else {
             return Self { join: None };
@@ -841,11 +942,25 @@ impl MaintenanceWorker {
                 // the periodic interval. Short-lived hosts and request-limited
                 // test/process modes must not skip expiry reconciliation just
                 // because their first request arrives immediately.
-                hooks.on_timer();
+                let tick = |hooks: &Arc<dyn ServiceHostHooks>| {
+                    let due = timers.due(std::time::Instant::now());
+                    if !due.is_empty() {
+                        hooks.on_deadlines(&due);
+                    }
+                    hooks.on_timer();
+                };
+                tick(&hooks);
                 while !shutdown.load(Ordering::Acquire) {
-                    thread::sleep(interval);
+                    let wait = timers
+                        .next_deadline()
+                        .map(|deadline| {
+                            deadline.saturating_duration_since(std::time::Instant::now())
+                        })
+                        .unwrap_or(interval)
+                        .min(interval);
+                    timers.wait(wait);
                     if !shutdown.load(Ordering::Acquire) {
-                        hooks.on_timer();
+                        tick(&hooks);
                     }
                 }
             })
@@ -864,16 +979,68 @@ impl MaintenanceWorker {
 pub struct ServiceHostHandle {
     shutdown: Arc<AtomicBool>,
     socket_path: PathBuf,
+    controls: OperationControl,
+    hooks: Option<Arc<dyn ServiceHostHooks>>,
+    timers: TimerRegistry,
     join: Option<JoinHandle<Result<ServiceHostReport, ServiceHostError>>>,
 }
 
 impl ServiceHostHandle {
     pub fn shutdown(&self) {
         self.shutdown.store(true, Ordering::Release);
+        self.timers.wake();
     }
 
     pub fn is_shutdown_requested(&self) -> bool {
         self.shutdown.load(Ordering::Acquire)
+    }
+
+    pub fn controls(&self) -> OperationControl {
+        self.controls.clone()
+    }
+
+    pub fn timers(&self) -> TimerRegistry {
+        self.timers.clone()
+    }
+
+    pub fn request_cancel(
+        &self,
+        operation_id: impl Into<String>,
+        reason: impl Into<String>,
+    ) -> Result<ControlRecord, ControlError> {
+        let record = self.controls.request_cancel(operation_id, reason)?;
+        if let Some(hooks) = &self.hooks {
+            hooks.on_control(&record);
+        }
+        Ok(record)
+    }
+
+    pub fn request_stop(
+        &self,
+        operation_id: impl Into<String>,
+        reason: impl Into<String>,
+    ) -> Result<ControlRecord, ControlError> {
+        let record = self.controls.request_stop(operation_id, reason)?;
+        if let Some(hooks) = &self.hooks {
+            hooks.on_control(&record);
+        }
+        Ok(record)
+    }
+
+    pub fn confirm_stopped(&self, operation_id: &str) -> Result<ControlRecord, ControlError> {
+        let record = self.controls.confirm_stopped(operation_id)?;
+        if let Some(hooks) = &self.hooks {
+            hooks.on_control(&record);
+        }
+        Ok(record)
+    }
+
+    pub fn mark_stop_unknown(&self, operation_id: &str) -> Result<ControlRecord, ControlError> {
+        let record = self.controls.mark_unknown(operation_id)?;
+        if let Some(hooks) = &self.hooks {
+            hooks.on_control(&record);
+        }
+        Ok(record)
     }
 
     pub fn socket_path(&self) -> &Path {
@@ -889,6 +1056,7 @@ impl ServiceHostHandle {
 impl Drop for ServiceHostHandle {
     fn drop(&mut self) {
         self.shutdown();
+        self.timers.wake();
         if let Some(join) = self.join.take() {
             if join.thread().id() != thread::current().id() {
                 let _ = join.join();
@@ -901,10 +1069,10 @@ impl Drop for ServiceHostHandle {
 mod tests {
     use super::*;
     use crate::{
-        ApplicationRequest, ApplicationResponse, ConcurrentApplicationCommandHandler, JsonRequest,
-        OperationPhase, ProtocolError, RecoveryBackend, RecoveryBackendError, RecoveryEntry,
-        ServiceHostHooks, TransportError, UnixSocketClient, APPLICATION_API_VERSION,
-        APPLICATION_SCHEMA_VERSION,
+        ApplicationRequest, ApplicationResponse, ConcurrentApplicationCommandHandler,
+        ExecutionReference, JsonRequest, OperationPhase, ProtocolError, RecoveryBackend,
+        RecoveryBackendError, RecoveryDisposition, RecoveryEntry, ServiceHostHooks, TimerRegistry,
+        TransportError, UnixSocketClient, APPLICATION_API_VERSION, APPLICATION_SCHEMA_VERSION,
     };
     use std::io;
     use std::sync::{
@@ -960,10 +1128,38 @@ mod tests {
         }
     }
 
+    #[derive(Clone)]
+    struct PriorityHandler {
+        entered: Arc<Barrier>,
+        release: Arc<Barrier>,
+        seen: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl ConcurrentApplicationCommandHandler for PriorityHandler {
+        fn handle_concurrent(
+            &self,
+            request: ApplicationRequest,
+        ) -> Result<ApplicationResponse, ProtocolError> {
+            self.seen.lock().unwrap().push(request.command.clone());
+            if request.command == "slow" {
+                self.entered.wait();
+                self.release.wait();
+            }
+            Ok(ApplicationResponse {
+                api_version: APPLICATION_API_VERSION.to_owned(),
+                schema_version: APPLICATION_SCHEMA_VERSION.to_owned(),
+                operation_id: request.operation_id,
+                data: format!(r#"{{"command":"{}","ok":true}}"#, request.command),
+            })
+        }
+    }
+
     #[derive(Clone, Default)]
     struct TestRecoveryBackend {
         entries: Arc<Mutex<Vec<RecoveryEntry>>>,
         unknown: Arc<Mutex<Vec<String>>>,
+        reconciled: Arc<Mutex<Vec<String>>>,
+        commit_reconciled: bool,
     }
 
     impl RecoveryBackend for TestRecoveryBackend {
@@ -975,12 +1171,31 @@ mod tests {
             self.unknown.lock().unwrap().push(operation_id.to_owned());
             Ok(())
         }
+
+        fn reconcile(
+            &self,
+            entry: &RecoveryEntry,
+        ) -> Result<RecoveryDisposition, RecoveryBackendError> {
+            self.reconciled
+                .lock()
+                .unwrap()
+                .push(entry.operation_id.clone());
+            if self.commit_reconciled {
+                Ok(RecoveryDisposition::Committed { revision: Some(91) })
+            } else {
+                Ok(RecoveryDisposition::Unknown {
+                    reason: "test backend cannot observe the external run".to_owned(),
+                })
+            }
+        }
     }
 
     #[derive(Clone, Default)]
     struct TestHooks {
         recovered: Arc<AtomicUsize>,
         ticks: Arc<AtomicUsize>,
+        deadlines: Arc<Mutex<Vec<String>>>,
+        controls: Arc<Mutex<Vec<crate::ControlRecord>>>,
     }
 
     impl ServiceHostHooks for TestHooks {
@@ -990,6 +1205,14 @@ mod tests {
 
         fn on_timer(&self) {
             self.ticks.fetch_add(1, Ordering::Relaxed);
+        }
+
+        fn on_deadlines(&self, keys: &[String]) {
+            self.deadlines.lock().unwrap().extend(keys.iter().cloned());
+        }
+
+        fn on_control(&self, record: &crate::ControlRecord) {
+            self.controls.lock().unwrap().push(record.clone());
         }
     }
 
@@ -1265,6 +1488,78 @@ mod tests {
     }
 
     #[test]
+    fn control_plane_request_jumps_queued_work_with_one_worker() {
+        let path = socket_path("priority");
+        let entered = Arc::new(Barrier::new(2));
+        let release = Arc::new(Barrier::new(2));
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let handler = PriorityHandler {
+            entered: Arc::clone(&entered),
+            release: Arc::clone(&release),
+            seen: Arc::clone(&seen),
+        };
+        let config = ServiceHostConfig::default()
+            .with_dispatch_workers(1)
+            .unwrap()
+            .with_dispatch_capacity(4)
+            .unwrap();
+        let Some(host) = bind_or_skip(&path, handler, config) else {
+            return;
+        };
+        let running = host.start_concurrent().unwrap();
+
+        let slow_path = path.clone();
+        let slow = thread::spawn(move || {
+            let mut client =
+                UnixSocketClient::connect(&slow_path, TransportConfig::default()).unwrap();
+            client.request(request_command("slow-request", "op_priority_slow", "slow"))
+        });
+        entered.wait();
+
+        let normal_one_path = path.clone();
+        let normal_one = thread::spawn(move || {
+            let mut client =
+                UnixSocketClient::connect(&normal_one_path, TransportConfig::default()).unwrap();
+            client.request(request_command(
+                "normal-one",
+                "op_priority_normal_one",
+                "work_create",
+            ))
+        });
+        let normal_two_path = path.clone();
+        let normal_two = thread::spawn(move || {
+            let mut client =
+                UnixSocketClient::connect(&normal_two_path, TransportConfig::default()).unwrap();
+            client.request(request_command(
+                "normal-two",
+                "op_priority_normal_two",
+                "evidence_run",
+            ))
+        });
+        thread::sleep(Duration::from_millis(20));
+
+        let status_path = path.clone();
+        let status = thread::spawn(move || {
+            let mut client =
+                UnixSocketClient::connect(&status_path, TransportConfig::default()).unwrap();
+            client.request(request("status-request", "op_priority_status"))
+        });
+        thread::sleep(Duration::from_millis(20));
+
+        release.wait();
+        slow.join().unwrap().unwrap();
+        assert!(status.join().unwrap().unwrap().payload().is_some());
+        normal_one.join().unwrap().unwrap();
+        normal_two.join().unwrap().unwrap();
+        running.shutdown();
+        running.join().unwrap();
+
+        let seen = seen.lock().unwrap().clone();
+        assert_eq!(seen.first().map(String::as_str), Some("slow"));
+        assert_eq!(seen.get(1).map(String::as_str), Some("status"));
+    }
+
+    #[test]
     fn host_hydrates_durable_operations_and_marks_in_flight_unknown_before_serving() {
         let path = socket_path("durable-recovery");
         let backend = TestRecoveryBackend {
@@ -1273,6 +1568,8 @@ mod tests {
                 RecoveryEntry::new("op_in_flight", OperationPhase::InFlight, None),
             ])),
             unknown: Arc::new(Mutex::new(Vec::new())),
+            reconciled: Arc::new(Mutex::new(Vec::new())),
+            commit_reconciled: false,
         };
         let hooks = TestHooks::default();
         let config = ServiceHostConfig::default()
@@ -1296,8 +1593,107 @@ mod tests {
         assert_eq!(report.recovery().queued, vec!["op_queued"]);
         assert_eq!(report.recovery().unknown, vec!["op_in_flight"]);
         assert_eq!(&*backend.unknown.lock().unwrap(), &["op_in_flight"]);
+        assert_eq!(&*backend.reconciled.lock().unwrap(), &["op_in_flight"]);
         assert_eq!(hooks.recovered.load(Ordering::Relaxed), 1);
         assert!(hooks.ticks.load(Ordering::Relaxed) > 0);
+    }
+
+    #[test]
+    fn restart_reconciles_admitted_execution_reference_only_when_backend_proves_terminal_state() {
+        let path = socket_path("durable-reconciled");
+        let backend = TestRecoveryBackend {
+            entries: Arc::new(Mutex::new(vec![RecoveryEntry::new(
+                "op_reconciled",
+                OperationPhase::InFlight,
+                None,
+            )
+            .with_execution(
+                ExecutionReference::new("run-1")
+                    .with_process(42, "process-start-1")
+                    .with_artifact("artifact-1"),
+            )])),
+            unknown: Arc::new(Mutex::new(Vec::new())),
+            reconciled: Arc::new(Mutex::new(Vec::new())),
+            commit_reconciled: true,
+        };
+        let config = ServiceHostConfig::default()
+            .with_max_requests(Some(1))
+            .unwrap();
+        let Some(host) = bind_or_skip(&path, CountingHandler::default(), config) else {
+            return;
+        };
+        let running = host.with_recovery_backend(backend.clone()).start().unwrap();
+        let mut client = client_or_skip(&path).expect("reconciled host accepts requests");
+        client
+            .request(request("reconcile-request", "op_probe_reconcile"))
+            .unwrap();
+        let report = running.join().unwrap();
+        assert!(report.recovery().unknown.is_empty());
+        assert_eq!(report.recovery().reconciled, vec!["op_reconciled"]);
+        assert_eq!(&*backend.unknown.lock().unwrap(), &[] as &[String]);
+        assert_eq!(&*backend.reconciled.lock().unwrap(), &["op_reconciled"]);
+    }
+
+    #[test]
+    fn deadline_callbacks_wake_before_maintenance_interval_and_shutdown_wakes_promptly() {
+        let path = socket_path("deadline");
+        let hooks = TestHooks::default();
+        let timers = TimerRegistry::new();
+        timers
+            .schedule(
+                "attempt-deadline",
+                std::time::Instant::now() + Duration::from_millis(15),
+            )
+            .unwrap();
+        let config = ServiceHostConfig::default()
+            .with_maintenance_interval(Duration::from_secs(5))
+            .unwrap();
+        let Some(host) = bind_or_skip(&path, CountingHandler::default(), config) else {
+            return;
+        };
+        let running = host
+            .with_timers(timers)
+            .with_hooks(hooks.clone())
+            .start()
+            .unwrap();
+        for _ in 0..100 {
+            if !hooks.deadlines.lock().unwrap().is_empty() {
+                break;
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(&*hooks.deadlines.lock().unwrap(), &["attempt-deadline"]);
+        let started = std::time::Instant::now();
+        running.shutdown();
+        running.join().unwrap();
+        assert!(started.elapsed() < Duration::from_millis(500));
+    }
+
+    #[test]
+    fn stop_request_is_not_confirmation_and_hooks_receive_both_states() {
+        let path = socket_path("control");
+        let hooks = TestHooks::default();
+        let Some(host) = bind_or_skip(
+            &path,
+            CountingHandler::default(),
+            ServiceHostConfig::default(),
+        ) else {
+            return;
+        };
+        let running = host.with_hooks(hooks.clone()).start().unwrap();
+        let requested = running
+            .request_stop("op_control", "expired attempt")
+            .unwrap();
+        assert_eq!(requested.phase, crate::ControlPhase::Requested);
+        assert_eq!(
+            running.controls().get("op_control").unwrap().phase,
+            crate::ControlPhase::Requested
+        );
+        let confirmed = running.confirm_stopped("op_control").unwrap();
+        assert_eq!(confirmed.phase, crate::ControlPhase::Confirmed);
+        assert_eq!(hooks.controls.lock().unwrap().len(), 2);
+        running.shutdown();
+        running.join().unwrap();
     }
 
     #[test]

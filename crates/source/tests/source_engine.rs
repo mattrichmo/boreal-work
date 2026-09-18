@@ -1,11 +1,11 @@
-use boreal_source::{Availability, SourceCatalog, SourceError};
+use boreal_source::{Availability, SourceCaptureRequest, SourceCatalog, SourceError};
 use std::{
     collections::HashSet,
     fs,
     path::PathBuf,
     sync::{
         atomic::{AtomicU64, Ordering},
-        Arc,
+        Arc, Barrier,
     },
     thread,
 };
@@ -162,4 +162,104 @@ fn failed_catalog_flush_does_not_leave_an_in_memory_source_reference() {
     ));
     assert_eq!(catalog.version_count().unwrap(), 0);
     fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn capture_operation_is_durable_idempotent_and_rejects_changed_retry_payloads() {
+    let root = test_root("capture-operation");
+    let request = SourceCaptureRequest::new(
+        "capture-op-1",
+        "project-a",
+        "docs/a.md",
+        "text/markdown",
+        b"operation bytes".to_vec(),
+    );
+    let catalog = SourceCatalog::with_persistent_filesystem(&root).unwrap();
+    let first = catalog.capture_with_operation(&request).unwrap();
+    assert!(!first.duplicate);
+    assert!(!first.reused_existing_version);
+
+    let blob_store = boreal_source::FilesystemBlobStore::new(&root);
+    fs::remove_file(
+        blob_store
+            .blob_path(&first.source_version.content_digest)
+            .unwrap(),
+    )
+    .unwrap();
+    let retry = catalog.capture_with_operation(&request).unwrap();
+    assert!(retry.duplicate);
+    assert_eq!(retry.source_version, first.source_version);
+    assert_eq!(retry.source_version.availability, Availability::Available);
+
+    let changed = SourceCaptureRequest::new(
+        "capture-op-1",
+        "project-a",
+        "docs/a.md",
+        "text/markdown",
+        b"changed bytes".to_vec(),
+    );
+    assert_eq!(
+        catalog.capture_with_operation(&changed),
+        Err(SourceError::OperationConflict)
+    );
+
+    drop(catalog);
+    let restarted = SourceCatalog::with_persistent_filesystem(&root).unwrap();
+    let restarted_retry = restarted.capture_with_operation(&request).unwrap();
+    assert!(restarted_retry.duplicate);
+    assert_eq!(restarted_retry.source_version, first.source_version);
+    assert_eq!(
+        restarted
+            .show_version("project-a", &first.source_version.source_version_id)
+            .unwrap(),
+        first.source_version
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn persistent_catalog_instances_merge_operation_commits_under_cross_process_lock() {
+    let root = test_root("capture-operation-concurrent");
+    let barrier = Arc::new(Barrier::new(2));
+    let mut workers = Vec::new();
+    for (operation, origin, bytes) in [
+        ("capture-op-a", "docs/a.md", b"alpha".to_vec()),
+        ("capture-op-b", "docs/b.md", b"beta".to_vec()),
+    ] {
+        let root = root.clone();
+        let barrier = Arc::clone(&barrier);
+        workers.push(thread::spawn(move || {
+            let catalog = SourceCatalog::with_persistent_filesystem(&root).unwrap();
+            barrier.wait();
+            catalog
+                .capture_with_operation(&SourceCaptureRequest::new(
+                    operation,
+                    "project-a",
+                    origin,
+                    "text/plain",
+                    bytes,
+                ))
+                .unwrap();
+        }));
+    }
+    for worker in workers {
+        worker.join().unwrap();
+    }
+    let catalog = SourceCatalog::with_persistent_filesystem(&root).unwrap();
+    assert_eq!(catalog.version_count().unwrap(), 2);
+    assert_eq!(catalog.list_versions(Some("project-a")).unwrap().len(), 2);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn identical_bytes_with_conflicting_immutable_origin_are_not_relabelled() {
+    let catalog = SourceCatalog::default();
+    let first = catalog
+        .capture("project-a", "docs/a.md", b"same", "text/plain")
+        .unwrap();
+    assert_eq!(
+        catalog.capture("project-a", "docs/b.md", b"same", "text/plain"),
+        Err(SourceError::SourceMetadataConflict)
+    );
+    assert_eq!(catalog.verify(&first).unwrap(), b"same");
 }

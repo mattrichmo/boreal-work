@@ -647,6 +647,13 @@ impl Publisher {
     }
 
     pub fn reimport(&self, project_id: &str) -> Result<ImportReport, ImportError> {
+        // Reimport observes the same managed worktree that publication
+        // mutates.  Serializing the read/validation prevents a caller from
+        // accepting a half-written manifest or racing a publication's
+        // expected-base check.  We never remove a live lock; a busy root is a
+        // visible retry condition.
+        let _publication_lock = PublicationLock::acquire(&self.root)
+            .map_err(|error| ImportError::Git(error.to_string()))?;
         let status = git_output(
             self.root.path(),
             &["status", "--porcelain", "--untracked-files=all"],

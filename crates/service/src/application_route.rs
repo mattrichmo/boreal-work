@@ -163,6 +163,20 @@ impl<H> ApplicationRoute<H> {
         Ok(decode_request(request.request_id(), request.payload())?.operation_id)
     }
 
+    pub(crate) fn command_for(&self, request: &JsonRequest) -> Result<String, ProtocolError> {
+        if request.payload().len() > self.config.max_payload_size {
+            return Err(route_error(
+                ProtocolErrorCode::InvalidPayload,
+                format!(
+                    "application payload is {} bytes; maximum is {}",
+                    request.payload().len(),
+                    self.config.max_payload_size
+                ),
+            ));
+        }
+        Ok(decode_request(request.request_id(), request.payload())?.command)
+    }
+
     pub fn serve_once(&mut self, server: &UnixSocketServer) -> Result<(), crate::TransportError>
     where
         H: ApplicationCommandHandler,

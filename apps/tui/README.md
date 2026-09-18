@@ -88,6 +88,23 @@ y / Enter   confirm         n / Esc     cancel
 q / Ctrl-C  quit
 ```
 
+The full-screen dashboard also supports presentation-only queue navigation:
+
+```text
+1 all       2 ready       3 active       4 blocked      5 expired review
+6 closed    7 milestones  8 sprints      9 tasks        / search
+p command palette
+```
+
+These filters and the bounded text search operate on one immutable service
+snapshot; they do not recalculate claimability or mutate status locally. The
+selected row shows service-provided hierarchy, planning, dependency, gate,
+attempt, deadline, and activity fields when the status route includes them.
+Missing Rust routes such as work editing, dependency mutation, cycle
+activation, intake promotion, source/memory operations, and session recovery
+are rendered as typed unavailable capabilities. The TUI never substitutes a
+local database write or a CLI subprocess for those routes.
+
 When `--interactive` is used without a TTY, the deterministic line shell is
 retained for scripts and tests. It supports `help`, `refresh`, `select`,
 `create-project`, `create-work`, `claim`, `accept-start`, `evidence`, `finish`,
