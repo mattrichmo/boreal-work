@@ -67,17 +67,26 @@ do not instantiate them in the legacy `bwrk` workspace.
 
 ## Installation
 
-### Install the CLI now from this checkout
+### Install `bwrk` globally from this checkout
 
-This installs the `bwrk` executable globally under Cargo's user bin directory
-(`~/.cargo/bin`):
+From the repository root, install the current Rust CLI into Cargo's user bin
+directory (`~/.cargo/bin`):
 
 ```sh
 cargo install --path crates/cli --bin bwrk --locked
+bwrk --version
 ```
 
-Make sure `~/.cargo/bin` is on `PATH`. This path provides the Rust CLI/service
-but not the compiled dashboard TUI.
+Make sure `~/.cargo/bin` is on `PATH`. To replace an existing install with the
+current checkout, add `--force`:
+
+```sh
+cargo install --path crates/cli --bin bwrk --locked --force
+```
+
+This installs the Rust CLI/service globally, but does not install the compiled
+dashboard TUI. Use the complete package below when you want interactive
+`bwrk dashboard` support.
 
 ### Install the complete local CLI + TUI package
 
