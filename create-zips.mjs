@@ -94,15 +94,19 @@ const TEXT_EXTENSIONS = new Set([
   ".mjs",
   ".md",
   ".py",
+  ".rb",
   ".rs",
   ".sh",
   ".sql",
+  ".template",
   ".toml",
   ".ts",
   ".tsx",
   ".yaml",
   ".yml",
 ]);
+
+const TEXT_FILENAMES = new Set([".gitattributes", ".gitignore", ".gitkeep"]);
 
 const V1_ROOT_FILES = new Set([
   "INSTALL.md",
@@ -140,8 +144,13 @@ const V2_ROOT_FILES = new Set([
   "AGENT_HANDOFF.md",
   "Cargo.lock",
   "Cargo.toml",
+  ".gitignore",
+  ".gitattributes",
+  "LICENSE",
   "MASTER_PLAN.md",
   "README.md",
+  "create-zips.mjs",
+  "install.sh",
 ]);
 
 const V2_PROJECT_FILES = new Set([
@@ -161,16 +170,15 @@ const V2_PROJECT_FILES = new Set([
   "project/WORKFLOW_PARITY.md",
 ]);
 
-const V2_MILESTONE_FILES = new Set([
-  "milestones/M01-v2-product/README.md",
-]);
-
 function extensionOf(relativePath) {
   return path.extname(relativePath).toLowerCase();
 }
 
 function isTextFile(relativePath) {
-  return TEXT_EXTENSIONS.has(extensionOf(relativePath));
+  return (
+    TEXT_FILENAMES.has(path.basename(relativePath)) ||
+    TEXT_EXTENSIONS.has(extensionOf(relativePath))
+  );
 }
 
 function isExcluded(relativePath) {
@@ -191,7 +199,6 @@ function isExcluded(relativePath) {
   }
 
   if (
-    relativePath.startsWith("scripts/release/fixtures/") ||
     relativePath.includes("/results/") ||
     relativePath.startsWith("test-project/")
   ) {
@@ -237,39 +244,37 @@ function selectV2(relativePath) {
     return true;
   }
 
-  if (V2_MILESTONE_FILES.has(relativePath)) {
-    return true;
-  }
-
-  if (
-    relativePath.startsWith("milestones/M01-v2-product/sprints/") &&
-    path.basename(relativePath) === "SPRINT.md"
-  ) {
-    return true;
+  // Preserve the full file-based execution plan, including future milestones
+  // and sprint handoffs. Generated/runtime state is still filtered above.
+  if (relativePath.startsWith("milestones/")) {
+    return isTextFile(relativePath);
   }
 
   if (relativePath.startsWith("crates/")) {
     return isTextFile(relativePath);
   }
 
-  if (relativePath.startsWith("apps/tui/src/")) {
+  // Keep the complete text-only TUI tree, including the service smoke
+  // fixture.  `isExcluded` removes dist/node_modules and other generated
+  // output before this selector is reached.
+  if (relativePath.startsWith("apps/tui/")) {
     return isTextFile(relativePath);
   }
 
-  if (
-    relativePath === "apps/tui/README.md" ||
-    relativePath === "apps/tui/package.json" ||
-    relativePath === "apps/tui/tsconfig.json"
-  ) {
-    return true;
-  }
-
-  if (relativePath.startsWith("project/spec/")) {
+  // The v3 hierarchy, migration, release, and agent-dispatch contracts live
+  // throughout project/, not only in project/spec.  Preserve every tracked
+  // text document there so an archive can be audited or rebuilt from the
+  // reference snapshot without the live repository.
+  if (relativePath.startsWith("project/")) {
     return isTextFile(relativePath);
   }
 
-  if (relativePath.startsWith("project/legacy-map/")) {
-    return extensionOf(relativePath) === ".md";
+  if (relativePath.startsWith(".github/")) {
+    return isTextFile(relativePath);
+  }
+
+  if (relativePath.startsWith("packaging/")) {
+    return isTextFile(relativePath);
   }
 
   if (relativePath.startsWith("docs/")) {
@@ -308,6 +313,18 @@ async function collectFiles(root, selector) {
 
   await visit(root);
   return results;
+}
+
+function assertRequiredFiles(spec, files) {
+  if (!spec.requiredPaths) return;
+
+  const selected = new Set(files);
+  const missing = spec.requiredPaths.filter((relativePath) => !selected.has(relativePath));
+  if (missing.length > 0) {
+    throw new Error(
+      `archive ${spec.id} is missing required files:\n${missing.map((file) => `- ${file}`).join("\n")}`,
+    );
+  }
 }
 
 function groupedFileList(files) {
@@ -352,6 +369,7 @@ async function buildArchive(spec) {
     throw new Error(`source directory does not exist: ${sourceRoot}`);
   }
   const files = await collectFiles(sourceRoot, spec.selector);
+  assertRequiredFiles(spec, files);
   const stagingRoot = await mkdtemp(path.join(tmpdir(), `boreal-${spec.id}-`));
   const archiveRoot = path.join(stagingRoot, spec.archiveDirectory);
   const outputPath = path.join(
@@ -419,10 +437,31 @@ const specs = [
     archiveDirectory: "boreal-v2",
     sourceLabel: "repository root (the Rust/TUI v2 implementation)",
     selector: selectV2,
+    requiredPaths: [
+      "Cargo.toml",
+      "Cargo.lock",
+      ".gitattributes",
+      "LICENSE",
+      "create-zips.mjs",
+      "install.sh",
+      ".github/workflows/ci.yml",
+      "apps/tui/src/client.ts",
+      "apps/tui/smoke/service-smoke.mjs",
+      "crates/domain/src/work_model_v3.rs",
+      "crates/store/src/work_model_v3.rs",
+      "crates/application/src/planning_v3.rs",
+      "crates/application/src/knowledge.rs",
+      "crates/cli/src/main.rs",
+      "project/spec/schema-v3.sql",
+      "project/build-plan/README.md",
+      "scripts/release/fixtures/snapshot/project/spec/schema-v2.sql",
+      "scripts/release/build_release.py",
+      "packaging/homebrew/boreal.rb.template",
+    ],
     included:
-      "Rust crates and manifests, TUI source/configuration, executable contract specifications, selected architecture/state documentation, milestone sprint definitions, and validation/release scripts.",
+      "The complete text-only v3 source snapshot: Rust crates and tests, TUI source/configuration/smoke fixtures, project contracts and build plan, architecture/review records, release fixtures and packaging metadata, CI, and validation/release scripts.",
     excluded:
-      "build-plan review history, release fixtures, validation result files, compiled TUI output, and test-project runtime state",
+      "compiled TUI output, Rust/Node build output, validation result files, caches, and test-project runtime state",
   },
 ];
 
