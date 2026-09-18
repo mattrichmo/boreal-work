@@ -435,7 +435,7 @@ const specs = [
     title: "Boreal v2 code reference",
     sourceDirectory: ".",
     archiveDirectory: "boreal-v2",
-    sourceLabel: "repository root (the Rust/TUI v2 implementation)",
+    sourceLabel: "repository root (the refactored Rust/TUI v2 implementation)",
     selector: selectV2,
     requiredPaths: [
       "Cargo.toml",
@@ -459,7 +459,7 @@ const specs = [
       "packaging/homebrew/boreal.rb.template",
     ],
     included:
-      "The complete text-only v3 source snapshot: Rust crates and tests, TUI source/configuration/smoke fixtures, project contracts and build plan, architecture/review records, release fixtures and packaging metadata, CI, and validation/release scripts.",
+      "The complete text-only v2 source snapshot after the hierarchy and knowledge refactor: Rust crates and tests, TUI source/configuration/smoke fixtures, project contracts and build plan, architecture/review records, release fixtures and packaging metadata, CI, and validation/release scripts.",
     excluded:
       "compiled TUI output, Rust/Node build output, validation result files, caches, and test-project runtime state",
   },
