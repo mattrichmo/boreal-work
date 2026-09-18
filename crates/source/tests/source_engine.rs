@@ -1,4 +1,4 @@
-use boreal_source::{Availability, SourceCaptureRequest, SourceCatalog, SourceError};
+use boreal_source::{Availability, BlobStore, SourceCaptureRequest, SourceCatalog, SourceError};
 use std::{
     collections::HashSet,
     fs,
@@ -262,4 +262,52 @@ fn identical_bytes_with_conflicting_immutable_origin_are_not_relabelled() {
         Err(SourceError::SourceMetadataConflict)
     );
     assert_eq!(catalog.verify(&first).unwrap(), b"same");
+}
+
+#[cfg(unix)]
+#[test]
+fn filesystem_blob_store_rejects_symlinked_roots_directories_and_objects() {
+    use std::os::unix::fs::symlink;
+
+    let root = test_root("blob-symlink-root");
+    let outside = test_root("blob-symlink-root-target");
+    let linked_root = root.join("linked-root");
+    symlink(&outside, &linked_root).unwrap();
+    let linked_store = boreal_source::FilesystemBlobStore::new(&linked_root);
+    let digest = boreal_source::content_digest(b"protected");
+    assert_eq!(
+        linked_store.put(&digest, b"protected"),
+        Err(SourceError::ScopeViolation)
+    );
+
+    let directory_root = root.join("directory-root");
+    fs::create_dir_all(&directory_root).unwrap();
+    let linked_blobs = directory_root.join("blobs");
+    symlink(&outside, &linked_blobs).unwrap();
+    let directory_store = boreal_source::FilesystemBlobStore::new(&directory_root);
+    assert_eq!(
+        directory_store.put(&digest, b"protected"),
+        Err(SourceError::ScopeViolation)
+    );
+
+    let object_root = root.join("object-root");
+    fs::create_dir_all(object_root.join("blobs")).unwrap();
+    let outside_object = outside.join("object");
+    fs::write(&outside_object, b"protected").unwrap();
+    let object_path = object_root
+        .join("blobs")
+        .join(digest.strip_prefix("sha256:").unwrap());
+    symlink(&outside_object, &object_path).unwrap();
+    let object_store = boreal_source::FilesystemBlobStore::new(&object_root);
+    assert_eq!(
+        object_store.read_verified(&digest, b"protected".len()),
+        Err(SourceError::ScopeViolation)
+    );
+    assert_eq!(
+        object_store.put(&digest, b"protected"),
+        Err(SourceError::ScopeViolation)
+    );
+
+    fs::remove_dir_all(root).unwrap();
+    fs::remove_dir_all(outside).unwrap();
 }

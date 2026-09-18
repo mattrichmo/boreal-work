@@ -1,0 +1,258 @@
+{
+  "matrix_version": "boreal.creation-scenarios/1",
+  "fixtures": [
+    "basic-hierarchy",
+    "linear-chain",
+    "diamond-graph",
+    "mixed-status",
+    "timer-expiry",
+    "evidence-closeout",
+    "concurrency-race",
+    "large-history",
+    "restart-recovery"
+  ],
+  "families": [
+    {
+      "id": "workspace",
+      "coverage": "black_box:bootstrap.registry",
+      "checks": [
+        "fresh project initialization",
+        "idempotent initialization",
+        "existing canonical database is not reset",
+        "explicit and inferred project selection",
+        "missing/unknown project errors",
+        "v2 binary, protocol, schema, and registry identity",
+        "database integrity and isolated fixture state"
+      ]
+    },
+    {
+      "id": "hierarchy_creation",
+      "coverage": "black_box:hierarchy.create-and-validate",
+      "checks": [
+        "root milestone creation",
+        "sprint under milestone",
+        "task under sprint",
+        "multiple children and sibling ordering",
+        "invalid root sprint",
+        "missing/wrong/cross-project parent",
+        "duplicate work ID",
+        "invalid kind/title/priority inputs",
+        "description, dispatch policy, and acceptance profile fields",
+        "work list/show hierarchy and rollups"
+      ]
+    },
+    {
+      "id": "planning_revisions",
+      "coverage": "black_box:planning.attributes-and-revisions",
+      "checks": [
+        "mutable title/description/priority edits",
+        "expected revision success",
+        "stale revision rejection without a write",
+        "hard hold add and status impact",
+        "hold resolution with reason",
+        "paused/operator-only dispatch policy",
+        "planning mutation audit and operation identity"
+      ]
+    },
+    {
+      "id": "dependency_graph",
+      "coverage": "black_box:dependencies.long-chain-and-cycle",
+      "checks": [
+        "linear chains at configurable depth",
+        "fan-out and fan-in",
+        "diamond graph",
+        "disconnected graphs",
+        "duplicate edge",
+        "self-cycle and indirect cycle rejection",
+        "dependency removal",
+        "queued versus blocked status",
+        "atomic downstream readiness after close",
+        "long-chain propagation and graph report bounds"
+      ]
+    },
+    {
+      "id": "agent_lifecycle",
+      "coverage": "black_box:lifecycle.claim-lease-proof-release plus native runtime tests",
+      "checks": [
+        "no-goal guide and next action",
+        "ready claim",
+        "claimed-but-not-accepted state",
+        "accept/start transition",
+        "one current attempt per work/session",
+        "wrong actor/harness/session rejection",
+        "competing claim race",
+        "heartbeat versus durable checkpoint",
+        "renewable lease",
+        "release and reclaim",
+        "monotonic fencing",
+        "stale fence/revision rejection",
+        "resume after interruption",
+        "idempotent lifecycle replay"
+      ]
+    },
+    {
+      "id": "timers_deadlines",
+      "coverage": "native application/service timer tests plus fault-clock matrix",
+      "checks": [
+        "default two-hour hard budget",
+        "explicit hard time limit",
+        "renewable lease separate from hard budget",
+        "exact lease boundary",
+        "exact hard-deadline boundary",
+        "heartbeat does not extend hard budget",
+        "late timer still expires on read",
+        "next_status_change_at",
+        "expiry_pending and fenced stop",
+        "expired_review resolution",
+        "restart reloads deadline state",
+        "due date overdue badge does not steal ownership"
+      ]
+    },
+    {
+      "id": "evidence_execution",
+      "coverage": "black_box:evidence.closeout-and-replay plus CLI evidence hardening tests",
+      "checks": [
+        "checkpoint/verification/summary gate declarations",
+        "successful bounded command",
+        "nonzero exit and failed evidence retention",
+        "stdout/stderr/combined artifact capture",
+        "empty/invalid JSON output",
+        "missing or oversized receipt",
+        "wrong subject/attempt/fence",
+        "wrong source/config/profile identity",
+        "stale receipt rejection",
+        "duplicate evidence operation replay",
+        "timeout and descendant termination",
+        "sensitive environment rejection"
+      ]
+    },
+    {
+      "id": "closeout_review",
+      "coverage": "native proof-boundary/closeout tests plus service guided-closeout smoke",
+      "checks": [
+        "finish without required proof",
+        "durable close intent",
+        "typed summary requirement",
+        "independent review actor requirement",
+        "review finding creates repair obligation",
+        "service-routed close",
+        "direct CLI witnessed-receipt boundary",
+        "complete does not satisfy dependents",
+        "closed atomically satisfies dependents",
+        "release preserves evidence and history",
+        "reopen preserves prior closeout"
+      ]
+    },
+    {
+      "id": "reports_metrics",
+      "coverage": "native status projection/store snapshots plus black-box status reads",
+      "checks": [
+        "empty and populated status",
+        "stable pagination and ordering",
+        "status counts equal returned items",
+        "draft/queued/ready/active/blocked/expired/closed separation",
+        "milestone and sprint rollups",
+        "dependency blocker explanations",
+        "throughput and cycle-time measurements",
+        "wait/active/retry/expiry/review metrics",
+        "critical-path and longest-chain metrics",
+        "bounded routine response size"
+      ]
+    },
+    {
+      "id": "audit_logging",
+      "coverage": "command JSONL logs plus store contract/planning/audit tests",
+      "checks": [
+        "operation ID correlation",
+        "monotonic revision correlation",
+        "actor/harness/session identity",
+        "attempt/fence identity",
+        "authoritative timestamps",
+        "source/config snapshot identity",
+        "failed operations retained",
+        "duplicate mutations do not duplicate semantic events",
+        "unknown outcomes retain readback identity",
+        "logs redact secrets and preserve bounded payloads"
+      ]
+    },
+    {
+      "id": "service_protocol",
+      "coverage": "black_box:service.restart-and-bounded-reads plus service host/transport tests",
+      "checks": [
+        "direct and service-routed result equivalence",
+        "socket startup/readiness",
+        "bounded request shutdown",
+        "socket cleanup",
+        "disconnect/reconnect",
+        "malformed frame and protocol version errors",
+        "unknown fields and payload bounds",
+        "duplicate/out-of-order notifications",
+        "missed cursor resnapshot",
+        "restart preserves queued work and fences in-flight work"
+      ]
+    },
+    {
+      "id": "tui",
+      "coverage": "npm --prefix apps/tui test plus dashboard/service smoke",
+      "checks": [
+        "TUI never reads SQLite",
+        "TUI never spawns one CLI per refresh",
+        "all/ready/active/blocked/expired/closed filters",
+        "milestone/sprint/task filters",
+        "dependency/gate/attempt/deadline detail",
+        "manual refresh and revision display",
+        "deadline-triggered refresh",
+        "mutation confirmation",
+        "unknown mutation readback",
+        "clean shutdown and terminal restoration"
+      ]
+    },
+    {
+      "id": "concurrency_recovery",
+      "coverage": "native concurrency/fault/security matrices",
+      "checks": [
+        "concurrent unique creates",
+        "duplicate create race",
+        "dependency mutation race",
+        "parent close versus child claim",
+        "finish versus release race",
+        "expiry versus finish race",
+        "readers during writes",
+        "crash before/after commit",
+        "unknown operation readback",
+        "WAL backup/restore",
+        "no forced live-lock break"
+      ]
+    },
+    {
+      "id": "scale_endurance",
+      "coverage": "creation --chain-length plus concurrency/status/release benchmarks",
+      "checks": [
+        "10/100/1000/10000 work items",
+        "10/100/1000 chain depth",
+        "wide fan-out and fan-in",
+        "large audit history",
+        "many active/expired attempts",
+        "1/3/10/30/50 worker matrix",
+        "TUI-off versus TUI-on throughput",
+        "p50/p95/max latency, lock proxy, payload size, and database growth"
+      ]
+    },
+    {
+      "id": "security_compatibility",
+      "coverage": "security probe plus command registry and migration/release tests",
+      "checks": [
+        "project and actor role boundaries",
+        "operator-only actions",
+        "path traversal rejection",
+        "shell injection treated as data",
+        "malformed JSON and size limits",
+        "private socket permissions",
+        "secret redaction",
+        "trusted directives only",
+        "legacy status/dependency/evidence mapping",
+        "explicit unsupported-route and migration reporting"
+      ]
+    }
+  ]
+}

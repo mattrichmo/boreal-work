@@ -4,6 +4,14 @@ set -euo pipefail
 # Early P5 boundary probe. The Rust harness is generated only in a fresh
 # temporary directory and is removed on exit; no repository source is edited.
 
+ONLINE=false
+if [[ "${1:-}" == "--online" ]]; then
+  ONLINE=true
+elif [[ "${1:-}" != "" ]]; then
+  echo "usage: $0 [--online]" >&2
+  exit 2
+fi
+
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 V2_ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/../../.." && pwd)
 FIXTURE_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/boreal-v2-security.XXXXXX")
@@ -429,4 +437,8 @@ print("PASS workflow-shell-boundary: allowlisted bwrk command data contains no e
 PY
 
 printf '%s\n' 'Security probe: compiled boundary checks'
-(cd "$FIXTURE_ROOT" && BOREAL_SECURITY_FIXTURE="$FIXTURE_ROOT" cargo run --quiet --manifest-path "$FIXTURE_ROOT/probe/Cargo.toml" --offline)
+if [[ "$ONLINE" == true ]]; then
+  (cd "$FIXTURE_ROOT" && BOREAL_SECURITY_FIXTURE="$FIXTURE_ROOT" cargo run --quiet --manifest-path "$FIXTURE_ROOT/probe/Cargo.toml")
+else
+  (cd "$FIXTURE_ROOT" && BOREAL_SECURITY_FIXTURE="$FIXTURE_ROOT" cargo run --quiet --manifest-path "$FIXTURE_ROOT/probe/Cargo.toml" --offline)
+fi

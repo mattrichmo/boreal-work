@@ -55,6 +55,14 @@ fn project_status_read_is_revisioned_and_contains_graph_attempt_and_gates() {
             "unix-ms:3",
         )
         .unwrap();
+    assert_eq!(
+        store
+            .operation("op-dependency")
+            .unwrap()
+            .unwrap()
+            .expected_revision,
+        Some(3)
+    );
     store
         .claim_work(
             "p1",

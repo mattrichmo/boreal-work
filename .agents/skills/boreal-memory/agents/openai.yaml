@@ -1,0 +1,4 @@
+interface:
+  display_name: "Boreal v2 Memory"
+  short_description: "Ingest, cite, and publish curated memory"
+  default_prompt: "Use $boreal-memory to ingest or retrieve Boreal source and curated memory safely."

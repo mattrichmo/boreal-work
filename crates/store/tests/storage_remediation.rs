@@ -119,7 +119,8 @@ fn legacy_v2_schema_is_repaired_atomically_and_survives_restart() {
         std::process::id()
     ));
     remove_sqlite_files(&path);
-    let store = SqliteStore::open(&path, &legacy).unwrap();
+    let store = SqliteStore::open_for_migration(&path).unwrap();
+    store.execute_batch(&legacy).unwrap();
     seed_project(&store);
     seed_work(&store, "w1", "task", None);
 
@@ -139,6 +140,200 @@ fn legacy_v2_schema_is_repaired_atomically_and_survives_restart() {
     assert_eq!(store.schema_version().unwrap(), SCHEMA_VERSION);
     assert!(store.work("p1", "w1").unwrap().is_some());
     remove_sqlite_files(&path);
+}
+
+#[test]
+fn established_open_does_not_repair_until_explicit_migration() {
+    let legacy = legacy_schema();
+    let path = std::env::temp_dir().join(format!(
+        "boreal-store-{}-open-no-repair.sqlite",
+        std::process::id()
+    ));
+    remove_sqlite_files(&path);
+    let store = SqliteStore::open_for_migration(&path).unwrap();
+    store.execute_batch(&legacy).unwrap();
+    assert!(store.work_holds("missing").is_err());
+    drop(store);
+    assert!(SqliteStore::open(&path, SCHEMA).is_err());
+    remove_sqlite_files(&path);
+}
+
+#[test]
+fn same_version_schema_drift_fails_closed_at_open() {
+    let path = std::env::temp_dir().join(format!(
+        "boreal-store-{}-same-version-drift.sqlite",
+        std::process::id()
+    ));
+    remove_sqlite_files(&path);
+    let store = SqliteStore::open_for_migration(&path).unwrap();
+    store
+        .execute_batch(
+            "CREATE TABLE project (
+                 project_id TEXT PRIMARY KEY,
+                 project_revision INTEGER NOT NULL DEFAULT 0
+             );
+             PRAGMA user_version = 2;",
+        )
+        .unwrap();
+    drop(store);
+    assert!(SqliteStore::open(&path, SCHEMA).is_err());
+    remove_sqlite_files(&path);
+}
+
+#[test]
+fn read_only_open_does_not_run_schema_repair_or_take_write_setup() {
+    let path = std::env::temp_dir().join(format!(
+        "boreal-store-{}-readonly-open.sqlite",
+        std::process::id()
+    ));
+    remove_sqlite_files(&path);
+    {
+        let store = SqliteStore::open(&path, SCHEMA).unwrap();
+        seed_project(&store);
+        seed_work(&store, "w1", "task", None);
+    }
+    let store = SqliteStore::open_read_only(&path).unwrap();
+    store.reset_query_metrics();
+    let status = store.read_project_status("p1").unwrap();
+    assert_eq!(status.total, 1);
+    let metrics = store.query_metrics();
+    assert_eq!(metrics.batch_calls, 2, "read path should only begin/commit");
+    remove_sqlite_files(&path);
+}
+
+#[test]
+fn read_only_status_survives_a_held_writer_transaction() {
+    let path = std::env::temp_dir().join(format!(
+        "boreal-store-{}-readonly-writer.sqlite",
+        std::process::id()
+    ));
+    remove_sqlite_files(&path);
+    {
+        let store = SqliteStore::open(&path, SCHEMA).unwrap();
+        seed_project(&store);
+        seed_work(&store, "w1", "task", None);
+        store.execute_batch("BEGIN IMMEDIATE").unwrap();
+        let reader = SqliteStore::open_read_only(&path).unwrap();
+        let status = reader.read_project_status("p1").unwrap();
+        assert_eq!(status.total, 1);
+        store.execute_batch("ROLLBACK").unwrap();
+    }
+    remove_sqlite_files(&path);
+}
+
+#[test]
+fn checked_work_creation_rejects_stale_revision_without_writing() {
+    let store = SqliteStore::open_in_memory(SCHEMA).unwrap();
+    seed_project(&store);
+    store
+        .execute_batch(
+            "INSERT INTO actor VALUES ('agent-1', 'agent', 'cred-1', 'Agent', 't0');
+             INSERT INTO acceptance_profile VALUES ('focused', 1, 'sha256:policy', '{}', 't0');",
+        )
+        .unwrap();
+    let first = work("w-first", 0, Vec::new());
+    store
+        .create_work_operation_checked(
+            &first,
+            "agent-1",
+            "op-first",
+            "sha256:op-first",
+            Some(0),
+            "t1",
+        )
+        .unwrap();
+    let stale = work("w-stale", 0, Vec::new());
+    let error = store
+        .create_work_operation_checked(
+            &stale,
+            "agent-1",
+            "op-stale",
+            "sha256:op-stale",
+            Some(0),
+            "t2",
+        )
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        StoreError::StaleRevision {
+            expected: 0,
+            actual: 1
+        }
+    ));
+    assert!(store.work("p1", "w-stale").unwrap().is_none());
+    assert!(store.operation("op-stale").unwrap().is_none());
+}
+
+#[test]
+fn status_gate_queries_are_batched_for_large_projects() {
+    let store = SqliteStore::open_in_memory(SCHEMA).unwrap();
+    seed_project(&store);
+    for index in 0..250 {
+        seed_work(&store, &format!("w-{index:04}"), "task", None);
+    }
+    store.reset_query_metrics();
+    let status = store.read_project_status("p1").unwrap();
+    let metrics = store.query_metrics();
+    assert_eq!(status.works.len(), 250);
+    assert!(
+        metrics.statements_prepared < 20,
+        "status prepared {} statements; expected fixed-size relation reads",
+        metrics.statements_prepared
+    );
+}
+
+#[test]
+fn claimable_candidates_use_keyset_continuation_beyond_first_page() {
+    let store = SqliteStore::open_in_memory(SCHEMA).unwrap();
+    seed_project(&store);
+    for index in 0..1_101 {
+        seed_work(&store, &format!("w-{index:04}"), "task", None);
+    }
+    let first = store
+        .claimable_work_candidates("p1", "t1", 1_000, None)
+        .unwrap();
+    assert_eq!(first.len(), 1_000);
+    let second = store
+        .claimable_work_candidates("p1", "t1", 1_000, first.last().map(String::as_str))
+        .unwrap();
+    assert_eq!(second.len(), 101);
+    assert_eq!(second.last().map(String::as_str), Some("w-1100"));
+}
+
+#[test]
+fn execution_only_operation_readback_is_project_scoped() {
+    let store = SqliteStore::open_in_memory(SCHEMA).unwrap();
+    seed_project(&store);
+    seed_work(&store, "w-exec", "task", None);
+    store
+        .execute_batch(
+            "INSERT INTO actor VALUES ('agent-1', 'agent', 'cred-1', 'Agent', 't0');
+             INSERT INTO attempt (
+                 attempt_id, work_id, actor_id, harness_id, fence, current, state,
+                 claimed_at, accepted_at, lease_deadline, max_attempt_deadline,
+                 config_identity, binary_identity, protocol_version, schema_version
+             ) VALUES ('attempt-exec', 'w-exec', 'agent-1', 'harness-1', 1, 1,
+                       'running', 't0', 't0', 't1', 't2', 'config', 'binary', '2', 2);
+             INSERT INTO gate (
+                 gate_id, work_id, profile_id, profile_version, kind, required,
+                 state, subject_ref, updated_at
+             ) VALUES ('w-exec:checkpoint', 'w-exec', 'default', 1,
+                       'checkpoint', 1, 'open', '', 't0');
+             INSERT INTO evidence_execution (
+                 operation_id, project_id, work_id, attempt_id, fence, gate_id,
+                 actor_id, request_digest, artifact_ref, state, admitted_at
+             ) VALUES ('op-exec', 'p1', 'w-exec', 'attempt-exec', 1,
+                       'w-exec:checkpoint', 'agent-1', 'sha256:req', 'artifact-1',
+                       'admitted', 't0');",
+        )
+        .unwrap();
+    let readback = store.operation_readback("p1", "op-exec").unwrap().unwrap();
+    assert!(readback.operation.is_none());
+    assert_eq!(readback.execution.unwrap().project_id, "p1");
+    assert!(matches!(
+        store.operation_readback("p2", "op-exec"),
+        Err(StoreError::WrongSubject { .. })
+    ));
 }
 
 #[test]

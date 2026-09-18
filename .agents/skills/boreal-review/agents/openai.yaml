@@ -1,0 +1,4 @@
+interface:
+  display_name: "Boreal v2 Review"
+  short_description: "Review candidates using typed evidence and gates"
+  default_prompt: "Use $boreal-review to evaluate a Boreal review candidate and record the safe decision."

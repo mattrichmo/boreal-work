@@ -107,7 +107,7 @@ def asset_record(stage: Path, relative: str) -> dict[str, Any]:
 
 
 def collect_assets(stage: Path) -> list[dict[str, Any]]:
-    paths = ["bin/bwrk", "share/boreal/LICENSE"]
+    paths = ["bin/bwrk", "share/boreal/LICENSE", "share/boreal/install.sh"]
     tui_root = stage / "lib/boreal/tui"
     if not (tui_root / "entrypoint.js").is_file():
         raise ReleaseBuildError("compiled TUI entrypoint is missing from the staged release")
@@ -314,6 +314,8 @@ def main() -> int:
             destination.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(source, destination)
     shutil.copy2(root / "LICENSE", stage / "share/boreal/LICENSE")
+    shutil.copy2(root / "install.sh", stage / "share/boreal/install.sh")
+    (stage / "share/boreal/install.sh").chmod(0o755)
 
     contract_file = output_dir / f"{archive_base}.contracts.json"
     try:

@@ -9,8 +9,31 @@ permissions:
   contents: write
 
 jobs:
+  preflight:
+    name: Release preflight
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install pinned TUI compiler
+        run: npm install --global typescript@5.4.5
+      - name: Install system smoke dependencies
+        run: sudo apt-get update && sudo apt-get install --yes jq sqlite3
+      - name: Test validation runner
+        run: python3 -m unittest scripts/validation/test_run_full_suite.py
+      - name: Run strict release validation
+        run: >-
+          python3 scripts/validation/run_full_suite.py
+          --profile full
+          --strict
+          --online
+
   build:
     name: Build ${{ matrix.target }}
+    needs: preflight
     strategy:
       fail-fast: false
       matrix:
@@ -77,3 +100,22 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh release create "$GITHUB_REF_NAME" upload/* --title "Boreal $GITHUB_REF_NAME" --generate-notes
+      - name: Publish Homebrew formula
+        if: ${{ env.HOMEBREW_TAP_TOKEN != '' }}
+        env:
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          tap_dir="$(mktemp -d)"
+          trap 'rm -rf "$tap_dir"' EXIT
+          git clone "https://x-access-token:${HOMEBREW_TAP_TOKEN}@github.com/mattrichmo/homebrew-tap.git" "$tap_dir"
+          mkdir -p "$tap_dir/Formula"
+          cp upload/boreal.rb "$tap_dir/Formula/boreal.rb"
+          git -C "$tap_dir" config user.name "github-actions[bot]"
+          git -C "$tap_dir" config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if git -C "$tap_dir" diff --quiet -- Formula/boreal.rb; then
+            echo "Homebrew formula is already current."
+          else
+            git -C "$tap_dir" add Formula/boreal.rb
+            git -C "$tap_dir" commit -m "boreal $GITHUB_REF_NAME"
+            git -C "$tap_dir" push origin HEAD
+          fi

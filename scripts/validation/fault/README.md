@@ -10,6 +10,13 @@ Run from the v2 root:
 python3 scripts/validation/fault/run_matrix.py
 ```
 
+Use `--online` on a fresh CI runner when the Cargo registry is not already
+cached:
+
+```text
+python3 scripts/validation/fault/run_matrix.py --online
+```
+
 Outputs are written beside the harness:
 
 - `results/latest.json`: machine-readable run metadata, every cell, command,
@@ -19,6 +26,9 @@ Outputs are written beside the harness:
 
 The matrix is intentionally bounded. It reuses existing application/store/
 service tests and fixtures, and includes a direct public-API fixture for
-duplicate and out-of-order notification publication. Passing a cell proves
-only the named deterministic behavior; it is not a full fault-injection,
+duplicate and out-of-order notification publication plus a real SIGKILL
+stale-socket restart case. The CLI evidence regression also uses a bounded
+debug-only failpoint immediately after durable admission and verifies that
+service restart marks the operation unknown before serving requests. Passing a
+cell proves only the named deterministic behavior; it is not a full
 multi-process, clock-skew, or release gate.

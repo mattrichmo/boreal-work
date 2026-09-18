@@ -602,6 +602,7 @@ impl<H> ServiceHost<H> {
             maintenance_interval,
             report.recovery.clone(),
             timers.clone(),
+            self.controls.clone(),
         );
         loop {
             if shutdown.load(Ordering::Acquire) {
@@ -665,6 +666,7 @@ impl<H> ServiceHost<H> {
             maintenance_interval,
             report.recovery.clone(),
             timers.clone(),
+            self.controls.clone(),
         );
         let route = Arc::new(self.route);
         let mut dispatch = ConcurrentDispatch::new(
@@ -747,10 +749,18 @@ struct DispatchReject {
 }
 
 struct ConcurrentDispatch<H> {
-    queue: Arc<PriorityQueue<DispatchJob>>,
+    queues: DispatchQueues,
     workers: Vec<JoinHandle<()>>,
     route: Arc<ApplicationRoute<H>>,
     recovery: OperationRecovery,
+}
+
+enum DispatchQueues {
+    Shared(Arc<PriorityQueue<DispatchJob>>),
+    Split {
+        control: Arc<PriorityQueue<DispatchJob>>,
+        normal: Arc<PriorityQueue<DispatchJob>>,
+    },
 }
 
 impl<H> ConcurrentDispatch<H>
@@ -763,56 +773,107 @@ where
         worker_count: usize,
         capacity: usize,
     ) -> Result<Self, crate::QueueConfigError> {
-        let queue = Arc::new(PriorityQueue::<DispatchJob>::with_capacity(capacity)?);
-        let workers = (0..worker_count)
-            .map(|index| {
-                let queue = Arc::clone(&queue);
-                let route = Arc::clone(&route);
-                let recovery = recovery.clone();
-                thread::Builder::new()
-                    .name(format!("boreal-service-dispatch-{index}"))
-                    .spawn(move || {
-                        while let Some(job) = queue.pop() {
-                            let job = job.into_inner();
-                            recovery.mark_in_flight(&job.operation_id);
-                            let request_id = job.request.request_id().to_owned();
-                            let result =
-                                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                                    route.dispatch_concurrent(job.request)
-                                }));
-                            match result {
-                                Ok(Ok(response)) => {
-                                    recovery.mark_committed(&job.operation_id, None);
-                                    if job.connection.write_response(&response).is_err() {
-                                        recovery.mark_unknown(&job.operation_id);
-                                    }
-                                }
-                                Ok(Err(error)) => {
-                                    recovery.mark_failed(&job.operation_id);
-                                    let _ = job.connection.write_protocol_error(&request_id, error);
-                                }
-                                Err(_) => {
-                                    recovery.mark_failed(&job.operation_id);
-                                    let _ = job.connection.write_protocol_error(
-                                        &request_id,
-                                        crate::ProtocolError::new(
-                                            crate::ProtocolErrorCode::InvalidPayload,
-                                            "application handler panicked",
-                                        ),
-                                    );
-                                }
-                            }
-                        }
-                    })
-                    .expect("service dispatch worker thread can be created")
-            })
-            .collect();
+        let split = worker_count > 1 && capacity > 1;
+        let (queues, workers) = if split {
+            let control_capacity = (capacity / 4).max(1).min(capacity - 1);
+            let normal_capacity = capacity - control_capacity;
+            let control = Arc::new(
+                PriorityQueue::<DispatchJob>::with_capacity_and_control_reserve(
+                    control_capacity,
+                    0,
+                )?,
+            );
+            let normal = Arc::new(
+                PriorityQueue::<DispatchJob>::with_capacity_and_control_reserve(
+                    normal_capacity,
+                    0,
+                )?,
+            );
+            let mut workers = Vec::with_capacity(worker_count);
+            workers.push(Self::spawn_worker(
+                "boreal-service-control-dispatch".to_owned(),
+                Arc::clone(&control),
+                Arc::clone(&route),
+                recovery.clone(),
+            ));
+            for index in 0..worker_count - 1 {
+                workers.push(Self::spawn_worker(
+                    format!("boreal-service-dispatch-{index}"),
+                    Arc::clone(&normal),
+                    Arc::clone(&route),
+                    recovery.clone(),
+                ));
+            }
+            (DispatchQueues::Split { control, normal }, workers)
+        } else {
+            let reserve = usize::from(capacity > 1);
+            let queue = Arc::new(
+                PriorityQueue::<DispatchJob>::with_capacity_and_control_reserve(capacity, reserve)?,
+            );
+            let workers = (0..worker_count)
+                .map(|index| {
+                    Self::spawn_worker(
+                        format!("boreal-service-dispatch-{index}"),
+                        Arc::clone(&queue),
+                        Arc::clone(&route),
+                        recovery.clone(),
+                    )
+                })
+                .collect();
+            (DispatchQueues::Shared(queue), workers)
+        };
         Ok(Self {
-            queue,
+            queues,
             workers,
             route,
             recovery,
         })
+    }
+
+    fn spawn_worker(
+        name: String,
+        queue: Arc<PriorityQueue<DispatchJob>>,
+        route: Arc<ApplicationRoute<H>>,
+        recovery: OperationRecovery,
+    ) -> JoinHandle<()> {
+        thread::Builder::new()
+            .name(name)
+            .spawn(move || {
+                while let Some(job) = queue.pop() {
+                    let job = job.into_inner();
+                    recovery.mark_in_flight(&job.operation_id);
+                    let request_id = job.request.request_id().to_owned();
+                    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        route.dispatch_concurrent(job.request)
+                    }));
+                    match result {
+                        Ok(Ok(response)) => {
+                            recovery.mark_committed(&job.operation_id, None);
+                            if job.connection.write_response(&response).is_err() {
+                                recovery.mark_unknown(&job.operation_id);
+                            } else {
+                                // The application/store owns durable replay. The host retains
+                                // only active or uncertain admission state.
+                                recovery.remove(&job.operation_id);
+                            }
+                        }
+                        Ok(Err(error)) => {
+                            recovery.mark_failed(&job.operation_id);
+                            let _ = job.connection.write_protocol_error(&request_id, error);
+                            recovery.remove(&job.operation_id);
+                        }
+                        Err(_) => {
+                            // A handler may panic after the application has
+                            // committed durable state but before the response
+                            // crossed the socket. Closing the connection and
+                            // retaining Unknown forces operation-ID readback;
+                            // returning a failure would make a retry unsafe.
+                            recovery.mark_unknown(&job.operation_id);
+                        }
+                    }
+                }
+            })
+            .expect("service dispatch worker thread can be created")
     }
 
     // A rejection owns the accepted stream so the caller can return a
@@ -838,7 +899,7 @@ where
                 })
             }
         };
-        if let Err(error) = self.recovery.register(operation_id.clone()) {
+        if let Err(error) = self.recovery.admit(operation_id.clone()) {
             let error = match error {
                 crate::OperationError::Duplicate(record) => crate::ProtocolError::new(
                     crate::ProtocolErrorCode::InvalidField,
@@ -861,7 +922,12 @@ where
                 busy: None,
             });
         }
-        if let Err((error, job)) = self.queue.try_push_recoverable(
+        let queue = match (&self.queues, priority) {
+            (DispatchQueues::Shared(queue), _) => queue,
+            (DispatchQueues::Split { control, .. }, QueuePriority::Control) => control,
+            (DispatchQueues::Split { normal, .. }, QueuePriority::Normal) => normal,
+        };
+        if let Err((error, job)) = queue.try_push_recoverable(
             DispatchJob {
                 request,
                 connection,
@@ -883,8 +949,8 @@ where
                 EnqueueError::Busy(outcome) => outcome,
                 EnqueueError::Closed | EnqueueError::TicketExhausted => {
                     crate::BusyOutcome::DispatchQueueFull {
-                        capacity: self.queue.capacity(),
-                        depth: self.queue.len(),
+                        capacity: queue.capacity(),
+                        depth: self.queue_depth(),
                         retry_after_ms: 1,
                     }
                 }
@@ -900,9 +966,22 @@ where
     }
 
     fn shutdown(&mut self) {
-        self.queue.close();
+        match &self.queues {
+            DispatchQueues::Shared(queue) => queue.close(),
+            DispatchQueues::Split { control, normal } => {
+                control.close();
+                normal.close();
+            }
+        }
         for worker in self.workers.drain(..) {
             let _ = worker.join();
+        }
+    }
+
+    fn queue_depth(&self) -> usize {
+        match &self.queues {
+            DispatchQueues::Shared(queue) => queue.len(),
+            DispatchQueues::Split { control, normal } => control.len() + normal.len(),
         }
     }
 }
@@ -930,26 +1009,42 @@ impl MaintenanceWorker {
         interval: Duration,
         recovery: RecoveryReport,
         timers: TimerRegistry,
+        controls: OperationControl,
     ) -> Self {
-        let Some(hooks) = hooks else {
-            return Self { join: None };
-        };
         let join = thread::Builder::new()
             .name("boreal-service-maintenance".to_owned())
             .spawn(move || {
-                hooks.on_recovery(&recovery);
+                if let Some(hooks) = &hooks {
+                    hooks.on_recovery(&recovery);
+                }
                 // Perform one deterministic startup sweep before waiting for
                 // the periodic interval. Short-lived hosts and request-limited
                 // test/process modes must not skip expiry reconciliation just
                 // because their first request arrives immediately.
-                let tick = |hooks: &Arc<dyn ServiceHostHooks>| {
+                let tick = || {
                     let due = timers.due(std::time::Instant::now());
-                    if !due.is_empty() {
-                        hooks.on_deadlines(&due);
+                    for operation_id in &due {
+                        // A deadline creates a stop intent, never a stop
+                        // confirmation. The application/executor must still
+                        // observe and confirm the external process outcome.
+                        if let Ok(record) =
+                            controls.request_stop(operation_id.clone(), "service deadline elapsed")
+                        {
+                            if let Some(hooks) = &hooks {
+                                hooks.on_control(&record);
+                            }
+                        }
                     }
-                    hooks.on_timer();
+                    if !due.is_empty() {
+                        if let Some(hooks) = &hooks {
+                            hooks.on_deadlines(&due);
+                        }
+                    }
+                    if let Some(hooks) = &hooks {
+                        hooks.on_timer();
+                    }
                 };
-                tick(&hooks);
+                tick();
                 while !shutdown.load(Ordering::Acquire) {
                     let wait = timers
                         .next_deadline()
@@ -960,7 +1055,7 @@ impl MaintenanceWorker {
                         .min(interval);
                     timers.wait(wait);
                     if !shutdown.load(Ordering::Acquire) {
-                        tick(&hooks);
+                        tick();
                     }
                 }
             })
@@ -1074,7 +1169,9 @@ mod tests {
         RecoveryBackendError, RecoveryDisposition, RecoveryEntry, ServiceHostHooks, TimerRegistry,
         TransportError, UnixSocketClient, APPLICATION_API_VERSION, APPLICATION_SCHEMA_VERSION,
     };
-    use std::io;
+    use std::io::{self, Write};
+    use std::net::Shutdown;
+    use std::os::unix::net::UnixStream;
     use std::sync::{
         atomic::{AtomicUsize, Ordering},
         Arc, Barrier, Mutex,
@@ -1102,11 +1199,85 @@ mod tests {
         }
     }
 
+    impl ConcurrentApplicationCommandHandler for CountingHandler {
+        fn handle_concurrent(
+            &self,
+            request: ApplicationRequest,
+        ) -> Result<ApplicationResponse, ProtocolError> {
+            self.seen.lock().unwrap().push(request.request_id.clone());
+            Ok(ApplicationResponse {
+                api_version: APPLICATION_API_VERSION.to_owned(),
+                schema_version: APPLICATION_SCHEMA_VERSION.to_owned(),
+                operation_id: request.operation_id,
+                data: format!(r#"{{"command":"{}","ok":true}}"#, request.command),
+            })
+        }
+    }
+
     #[derive(Clone)]
     struct SlowConcurrentHandler {
         entered: Arc<Barrier>,
         release: Arc<Barrier>,
         calls: Arc<AtomicUsize>,
+    }
+
+    #[derive(Clone)]
+    struct SaturatingHandler {
+        blocked: Arc<AtomicUsize>,
+        entered: Arc<Barrier>,
+        release: Arc<Barrier>,
+    }
+
+    impl ConcurrentApplicationCommandHandler for SaturatingHandler {
+        fn handle_concurrent(
+            &self,
+            request: ApplicationRequest,
+        ) -> Result<ApplicationResponse, ProtocolError> {
+            if self.blocked.fetch_add(1, Ordering::Relaxed) < 2 {
+                self.entered.wait();
+                self.release.wait();
+            }
+            Ok(ApplicationResponse {
+                api_version: APPLICATION_API_VERSION.to_owned(),
+                schema_version: APPLICATION_SCHEMA_VERSION.to_owned(),
+                operation_id: request.operation_id,
+                data: format!(r#"{{"command":"{}","ok":true}}"#, request.command),
+            })
+        }
+    }
+
+    #[derive(Clone, Default)]
+    struct PanicHandler;
+
+    impl ConcurrentApplicationCommandHandler for PanicHandler {
+        fn handle_concurrent(
+            &self,
+            _request: ApplicationRequest,
+        ) -> Result<ApplicationResponse, ProtocolError> {
+            panic!("simulated handler panic after admission")
+        }
+    }
+
+    #[derive(Clone)]
+    struct ResponseGateHandler {
+        entered: Arc<Barrier>,
+        release: Arc<Barrier>,
+    }
+
+    impl ConcurrentApplicationCommandHandler for ResponseGateHandler {
+        fn handle_concurrent(
+            &self,
+            request: ApplicationRequest,
+        ) -> Result<ApplicationResponse, ProtocolError> {
+            self.entered.wait();
+            self.release.wait();
+            Ok(ApplicationResponse {
+                api_version: APPLICATION_API_VERSION.to_owned(),
+                schema_version: APPLICATION_SCHEMA_VERSION.to_owned(),
+                operation_id: request.operation_id,
+                data: r#"{"command":"response-gated","ok":true}"#.to_owned(),
+            })
+        }
     }
 
     impl ConcurrentApplicationCommandHandler for SlowConcurrentHandler {
@@ -1428,6 +1599,154 @@ mod tests {
     }
 
     #[test]
+    fn control_lane_has_execution_capacity_when_all_normal_workers_are_busy() {
+        let path = socket_path("reserved-control-lane");
+        let entered = Arc::new(Barrier::new(2));
+        let release = Arc::new(Barrier::new(2));
+        let handler = SlowConcurrentHandler {
+            entered: Arc::clone(&entered),
+            release: Arc::clone(&release),
+            calls: Arc::new(AtomicUsize::new(0)),
+        };
+        let config = ServiceHostConfig::default()
+            .with_dispatch_workers(2)
+            .unwrap()
+            .with_dispatch_capacity(4)
+            .unwrap();
+        let Some(host) = bind_or_skip(&path, handler, config) else {
+            return;
+        };
+        let running = host.start_concurrent().unwrap();
+
+        let first_path = path.clone();
+        let first = thread::spawn(move || {
+            let mut client = UnixSocketClient::connect(&first_path, TransportConfig::default())
+                .expect("first client connects");
+            client.request(request_command("slow", "op_lane_slow", "slow"))
+        });
+        entered.wait();
+        let queued_path = path.clone();
+        let queued = thread::spawn(move || {
+            let mut client = UnixSocketClient::connect(&queued_path, TransportConfig::default())
+                .expect("queued client connects");
+            client.request(request_command("queued", "op_lane_queued", "slow-queued"))
+        });
+        thread::sleep(Duration::from_millis(20));
+
+        let started = std::time::Instant::now();
+        let mut control = client_or_skip(&path).expect("control client connects");
+        control
+            .request(request("control", "op_lane_status"))
+            .expect("reserved control worker should respond");
+        assert!(started.elapsed() < Duration::from_millis(100));
+
+        release.wait();
+        first.join().unwrap().unwrap();
+        queued.join().unwrap().unwrap();
+        running.shutdown();
+        running.join().unwrap();
+    }
+
+    #[test]
+    fn composed_dispatch_saturation_keeps_control_admissible_and_reports_lane_capacity() {
+        let path = socket_path("composed-saturation");
+        let entered = Arc::new(Barrier::new(3));
+        let release = Arc::new(Barrier::new(3));
+        let handler = SaturatingHandler {
+            blocked: Arc::new(AtomicUsize::new(0)),
+            entered: Arc::clone(&entered),
+            release: Arc::clone(&release),
+        };
+        let config = ServiceHostConfig::default()
+            .with_dispatch_workers(3)
+            .unwrap()
+            .with_dispatch_capacity(4)
+            .unwrap();
+        let Some(host) = bind_or_skip(&path, handler, config) else {
+            return;
+        };
+        let recovery = host.recovery();
+        let running = host.start_concurrent().unwrap();
+
+        let mut clients = Vec::new();
+        for index in 0..2 {
+            let slow_path = path.clone();
+            clients.push(thread::spawn(move || {
+                let mut client = UnixSocketClient::connect(&slow_path, TransportConfig::default())
+                    .expect("normal worker client connects");
+                client.request(request_command(
+                    &format!("slow-{index}"),
+                    &format!("op_saturation_slow_{index}"),
+                    "slow",
+                ))
+            }));
+        }
+        // Both normal workers must be inside the handler before queueing the
+        // remaining normal requests, otherwise this test would not prove
+        // saturation of the composed host.
+        entered.wait();
+
+        for index in 2..5 {
+            let queued_path = path.clone();
+            clients.push(thread::spawn(move || {
+                let mut client =
+                    UnixSocketClient::connect(&queued_path, TransportConfig::default())
+                        .expect("queued normal client connects");
+                client.request(request_command(
+                    &format!("queued-{index}"),
+                    &format!("op_saturation_queued_{index}"),
+                    "queued",
+                ))
+            }));
+        }
+
+        for _ in 0..10_000 {
+            if recovery.records().len() == 5 {
+                break;
+            }
+            thread::yield_now();
+        }
+        assert_eq!(recovery.records().len(), 5);
+
+        let mut busy_client = client_or_skip(&path).expect("overflow client connects");
+        let error = busy_client
+            .request(request_command(
+                "normal-overflow",
+                "op_saturation_overflow",
+                "overflow",
+            ))
+            .expect_err("the normal lane is full");
+        assert!(matches!(
+            error,
+            TransportError::RemoteProtocol(error)
+                if error.code() == crate::ProtocolErrorCode::Busy
+                    && error.busy_outcome()
+                        == Some(&crate::BusyOutcome::DispatchQueueFull {
+                            capacity: 3,
+                            depth: 3,
+                            retry_after_ms: 1,
+                        })
+        ));
+
+        let started = std::time::Instant::now();
+        let mut control = client_or_skip(&path).expect("control client connects");
+        control
+            .request(request("saturated-status", "op_saturation_status"))
+            .expect("control lane remains responsive");
+        assert!(started.elapsed() < Duration::from_millis(100));
+
+        release.wait();
+        for client in clients {
+            client
+                .join()
+                .expect("normal client thread joins")
+                .expect("normal request completes");
+        }
+        running.shutdown();
+        running.join().unwrap();
+    }
+
+    #[test]
     fn concurrent_dispatch_queue_returns_structured_busy_without_dropping_correlation() {
         let path = socket_path("concurrent-busy");
         let entered = Arc::new(Barrier::new(2));
@@ -1485,6 +1804,182 @@ mod tests {
         queued.join().unwrap().unwrap();
         running.shutdown();
         running.join().unwrap();
+    }
+
+    #[test]
+    fn active_duplicate_is_rejected_without_invoking_the_handler_twice() {
+        let path = socket_path("active-duplicate");
+        let entered = Arc::new(Barrier::new(2));
+        let release = Arc::new(Barrier::new(2));
+        let handler = SlowConcurrentHandler {
+            entered: Arc::clone(&entered),
+            release: Arc::clone(&release),
+            calls: Arc::new(AtomicUsize::new(0)),
+        };
+        let config = ServiceHostConfig::default()
+            .with_dispatch_workers(1)
+            .unwrap()
+            .with_dispatch_capacity(2)
+            .unwrap();
+        let Some(host) = bind_or_skip(&path, handler.clone(), config) else {
+            return;
+        };
+        let running = host.start_concurrent().unwrap();
+        let first_path = path.clone();
+        let first = thread::spawn(move || {
+            let mut client = UnixSocketClient::connect(&first_path, TransportConfig::default())
+                .expect("first client connects");
+            client.request(request_command("first", "op_active_duplicate", "slow"))
+        });
+        entered.wait();
+
+        let mut duplicate = client_or_skip(&path).expect("duplicate client connects");
+        let error = duplicate
+            .request(request_command("duplicate", "op_active_duplicate", "slow"))
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            TransportError::RemoteProtocol(error)
+                if error.code() == crate::ProtocolErrorCode::InvalidField
+                    && error.message().contains("phase InFlight")
+        ));
+
+        release.wait();
+        first.join().unwrap().unwrap();
+        assert_eq!(handler.calls.load(Ordering::Relaxed), 1);
+        running.shutdown();
+        running.join().unwrap();
+    }
+
+    #[test]
+    fn handler_panic_is_unknown_and_closes_response_boundary() {
+        let path = socket_path("panic-unknown");
+        let config = ServiceHostConfig::default()
+            .with_max_requests(Some(1))
+            .unwrap();
+        let Some(host) = bind_or_skip(&path, PanicHandler, config) else {
+            return;
+        };
+        let recovery = host.recovery();
+        let running = host.start_concurrent().unwrap();
+        let mut client = client_or_skip(&path).expect("panic client connects");
+        let error = client
+            .request(request("panic", "op_handler_panic"))
+            .expect_err("a panicked handler has no trustworthy response");
+        assert!(matches!(error, TransportError::UnexpectedEof));
+        let report = running.join().unwrap();
+        assert_eq!(report.served_requests(), 1);
+        assert_eq!(
+            recovery
+                .get("op_handler_panic")
+                .expect("panic remains in the recovery journal")
+                .phase(),
+            OperationPhase::Unknown
+        );
+    }
+
+    #[test]
+    fn response_write_failure_is_unknown_and_survives_host_shutdown() {
+        let path = socket_path("response-write-failure");
+        let entered = Arc::new(Barrier::new(2));
+        let release = Arc::new(Barrier::new(2));
+        let handler = ResponseGateHandler {
+            entered: Arc::clone(&entered),
+            release: Arc::clone(&release),
+        };
+        let config = ServiceHostConfig::default()
+            .with_max_requests(Some(1))
+            .unwrap();
+        let Some(host) = bind_or_skip(&path, handler, config) else {
+            return;
+        };
+        let recovery = host.recovery();
+        let running = host.start_concurrent().unwrap();
+
+        let mut stream = UnixStream::connect(&path).expect("raw response client connects");
+        let request = request("drop-response", "op_response_write_failure");
+        let body = format!(
+            "{{\"request_id\":\"{}\",\"payload\":{}}}",
+            request.request_id(),
+            request.payload()
+        );
+        stream
+            .write_all(&(body.len() as u32).to_be_bytes())
+            .expect("raw request prefix writes");
+        stream
+            .write_all(body.as_bytes())
+            .expect("raw request body writes");
+
+        // Do not close until the application handler has consumed the
+        // request. This makes the later response write the first operation
+        // that observes the peer disappearing.
+        entered.wait();
+        stream
+            .shutdown(Shutdown::Both)
+            .expect("raw response client shuts down");
+        drop(stream);
+        release.wait();
+
+        let report = running.join().unwrap();
+        assert_eq!(report.served_requests(), 1);
+        assert_eq!(
+            recovery
+                .get("op_response_write_failure")
+                .expect("failed response remains readable")
+                .phase(),
+            OperationPhase::Unknown
+        );
+    }
+
+    #[test]
+    fn terminal_duplicate_is_dispatched_for_application_owned_replay() {
+        let path = socket_path("terminal-duplicate");
+        let handler = CountingHandler::default();
+        let seen = Arc::clone(&handler.seen);
+        let config = ServiceHostConfig::default()
+            .with_max_requests(Some(2))
+            .unwrap();
+        let Some(host) = bind_or_skip(&path, handler, config) else {
+            return;
+        };
+        let running = host.start_concurrent().unwrap();
+        let mut first_client = client_or_skip(&path).expect("first client connects");
+        first_client
+            .request(request("first", "op_terminal_duplicate"))
+            .unwrap();
+        let mut replay_client = client_or_skip(&path).expect("replay client connects");
+        replay_client
+            .request(request("replay", "op_terminal_duplicate"))
+            .unwrap();
+        let report = running.join().unwrap();
+        assert_eq!(report.served_requests(), 2);
+        assert_eq!(&*seen.lock().unwrap(), &["first", "replay"]);
+    }
+
+    #[test]
+    fn completed_read_operations_do_not_accumulate_in_the_transient_journal() {
+        let path = socket_path("bounded-completed");
+        let handler = CountingHandler::default();
+        let config = ServiceHostConfig::default()
+            .with_max_requests(Some(64))
+            .unwrap();
+        let Some(host) = bind_or_skip(&path, handler, config) else {
+            return;
+        };
+        let recovery = host.recovery();
+        let running = host.start_concurrent().unwrap();
+        for index in 0..64 {
+            let mut client = client_or_skip(&path).expect("client connects");
+            client
+                .request(request(
+                    &format!("read-{index}"),
+                    &format!("op_read_{index}"),
+                ))
+                .unwrap();
+        }
+        let report = running.join().unwrap();
+        assert_eq!(report.served_requests(), 64);
+        assert!(recovery.records().is_empty());
     }
 
     #[test]
@@ -1663,6 +2158,12 @@ mod tests {
             thread::sleep(Duration::from_millis(5));
         }
         assert_eq!(&*hooks.deadlines.lock().unwrap(), &["attempt-deadline"]);
+        let control = running
+            .controls()
+            .get("attempt-deadline")
+            .expect("deadline creates stop intent");
+        assert_eq!(control.phase, crate::ControlPhase::Requested);
+        assert_eq!(control.reason, "service deadline elapsed");
         let started = std::time::Instant::now();
         running.shutdown();
         running.join().unwrap();

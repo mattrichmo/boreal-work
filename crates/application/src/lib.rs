@@ -19,6 +19,7 @@ mod sqlite_adapter;
 mod workflow_assets;
 
 use boreal_domain::{validate_parent, ProjectId, WorkItem};
+pub use boreal_store::OperationReadback;
 use boreal_store::{
     ClaimResult, SqliteStore, StoreError, WorkEditInput, WorkHoldAddInput, WorkPage, WorkRecord,
 };
@@ -190,10 +191,54 @@ impl<'a> WorkApplication<'a> {
         self.create_work_as(work, "agent-1", now, operation_id)
     }
 
+    pub fn create_work_checked(
+        &self,
+        work: &WorkItem,
+        expected_revision: Option<u64>,
+        now: &str,
+        operation_id: impl Into<String>,
+    ) -> Result<OperationResult<WorkRecord>, ApplicationError> {
+        self.create_work_as_checked(work, "agent-1", expected_revision, now, operation_id)
+    }
+
     pub fn create_work_as(
         &self,
         work: &WorkItem,
         actor_id: &str,
+        now: &str,
+        operation_id: impl Into<String>,
+    ) -> Result<OperationResult<WorkRecord>, ApplicationError> {
+        self.create_work_as_with_expected(work, actor_id, None, now, operation_id)
+    }
+
+    /// Revision-checked work creation for callers operating from a status
+    /// snapshot. The expected revision is part of the operation digest and is
+    /// enforced again by the store transaction.
+    pub fn create_work_as_checked(
+        &self,
+        work: &WorkItem,
+        actor_id: &str,
+        expected_revision: Option<u64>,
+        now: &str,
+        operation_id: impl Into<String>,
+    ) -> Result<OperationResult<WorkRecord>, ApplicationError> {
+        let expected_revision = expected_revision.ok_or_else(|| {
+            ApplicationError::Invalid("work creation requires --expected-revision".to_owned())
+        })?;
+        self.create_work_as_with_expected(
+            work,
+            actor_id,
+            Some(expected_revision),
+            now,
+            operation_id,
+        )
+    }
+
+    fn create_work_as_with_expected(
+        &self,
+        work: &WorkItem,
+        actor_id: &str,
+        expected_revision: Option<u64>,
         now: &str,
         operation_id: impl Into<String>,
     ) -> Result<OperationResult<WorkRecord>, ApplicationError> {
@@ -213,37 +258,39 @@ impl<'a> WorkApplication<'a> {
             ));
         }
         let operation_id = operation_id.into();
-        let request_digest = canonical_request_digest(
-            "work.create/v1",
-            json!({
-                "project_id": work.project_id.as_str(),
-                "work_id": work.id.as_str(),
-                "actor_id": actor_id,
-                "kind": format!("{:?}", work.kind).to_ascii_lowercase(),
-                "parent_id": work.parent_id.as_ref().map(|id| id.as_str()),
-                "title": work.title,
-                "description": work.description,
-                "lifecycle": format!("{:?}", work.lifecycle).to_ascii_lowercase(),
-                "priority": work.priority,
-                "dispatch_policy": format!("{:?}", work.dispatch_policy).to_ascii_lowercase(),
-                "hard_holds": work.hard_holds.iter().map(|hold| hold.stable_code()).collect::<Vec<_>>(),
-                "acceptance_profile": {
-                    "id": work.acceptance_profile.id.as_str(),
-                    "version": work.acceptance_profile.version,
-                    "gates": work.acceptance_profile.gates.iter().map(|gate| json!({
-                        "id": gate.id.as_str(),
-                        "kind": format!("{:?}", gate.kind).to_ascii_lowercase(),
-                        "required": gate.required,
-                        "state": format!("{:?}", gate.state).to_ascii_lowercase(),
-                    })).collect::<Vec<_>>(),
-                },
-            }),
-        );
-        let mutation = self.store.create_work_operation(
+        let mut request = json!({
+            "project_id": work.project_id.as_str(),
+            "work_id": work.id.as_str(),
+            "actor_id": actor_id,
+            "kind": format!("{:?}", work.kind).to_ascii_lowercase(),
+            "parent_id": work.parent_id.as_ref().map(|id| id.as_str()),
+            "title": work.title,
+            "description": work.description,
+            "lifecycle": format!("{:?}", work.lifecycle).to_ascii_lowercase(),
+            "priority": work.priority,
+            "dispatch_policy": format!("{:?}", work.dispatch_policy).to_ascii_lowercase(),
+            "hard_holds": work.hard_holds.iter().map(|hold| hold.stable_code()).collect::<Vec<_>>(),
+            "acceptance_profile": {
+                "id": work.acceptance_profile.id.as_str(),
+                "version": work.acceptance_profile.version,
+                "gates": work.acceptance_profile.gates.iter().map(|gate| json!({
+                    "id": gate.id.as_str(),
+                    "kind": format!("{:?}", gate.kind).to_ascii_lowercase(),
+                    "required": gate.required,
+                    "state": format!("{:?}", gate.state).to_ascii_lowercase(),
+                })).collect::<Vec<_>>(),
+            },
+        });
+        if let Some(expected_revision) = expected_revision {
+            request["expected_revision"] = json!(expected_revision);
+        }
+        let request_digest = canonical_request_digest("work.create/v1", request);
+        let mutation = self.store.create_work_operation_checked(
             work,
             actor_id,
             &operation_id,
             &request_digest,
+            expected_revision,
             now,
         )?;
         let value = self
@@ -265,6 +312,21 @@ impl<'a> WorkApplication<'a> {
         offset: u64,
     ) -> Result<WorkPage, ApplicationError> {
         Ok(self.store.list_work(project_id.as_str(), limit, offset)?)
+    }
+
+    /// Bounded keyset candidates for guided selection. Claiming remains an
+    /// atomic store operation, so callers must treat these IDs as hints and
+    /// handle a concurrent claim conflict normally.
+    pub fn claimable_work_candidates(
+        &self,
+        project_id: &ProjectId,
+        now: &str,
+        limit: u64,
+        after_work_id: Option<&str>,
+    ) -> Result<Vec<String>, ApplicationError> {
+        Ok(self
+            .store
+            .claimable_work_candidates(project_id.as_str(), now, limit, after_work_id)?)
     }
 
     pub fn show_work(
@@ -315,22 +377,34 @@ impl<'a> WorkApplication<'a> {
             ));
         }
         let operation_id = operation_id.into();
-        let request_digest = canonical_request_digest(
-            "dependency.add/v1",
-            json!({
-                "project_id": project_id.as_str(),
-                "prerequisite_id": prerequisite_id,
-                "dependent_id": dependent_id,
-                "actor_id": actor_id,
-            }),
+        let existing = self.store.operation(&operation_id)?;
+        let expected_revision = existing
+            .as_ref()
+            .and_then(|operation| operation.expected_revision)
+            .unwrap_or(self.store.project_revision(project_id.as_str())?.0);
+        let request_digest = existing.map_or_else(
+            || {
+                canonical_request_digest(
+                    "dependency.add/v1",
+                    json!({
+                        "project_id": project_id.as_str(),
+                        "prerequisite_id": prerequisite_id,
+                        "dependent_id": dependent_id,
+                        "actor_id": actor_id,
+                        "expected_revision": expected_revision,
+                    }),
+                )
+            },
+            |operation| operation.request_digest,
         );
-        let mutation = self.store.add_dependency_operation(
+        let mutation = self.store.add_dependency_operation_checked(
             project_id.as_str(),
             prerequisite_id,
             dependent_id,
             actor_id,
             &operation_id,
             &request_digest,
+            Some(expected_revision),
             now,
         )?;
         Ok(OperationResult {
@@ -339,6 +413,20 @@ impl<'a> WorkApplication<'a> {
             changed: !mutation.replayed,
             value: (),
         })
+    }
+
+    /// Project-scoped durable operation/evidence readback. An evidence
+    /// execution may be present before its parent operation, so callers must
+    /// use this combined authority rather than assuming the operation row
+    /// exists first.
+    pub fn operation_readback(
+        &self,
+        project_id: &ProjectId,
+        operation_id: &str,
+    ) -> Result<Option<OperationReadback>, ApplicationError> {
+        Ok(self
+            .store
+            .operation_readback(project_id.as_str(), operation_id)?)
     }
 
     /// Revision-checked dependency mutation used by public planning routes.
@@ -360,17 +448,37 @@ impl<'a> WorkApplication<'a> {
                 "a work item cannot depend on itself".to_owned(),
             ));
         }
+        // A missing revision is treated as "use the current snapshot", not
+        // as an unguarded write. The store rechecks this value under its
+        // transaction and persists it on the operation record.
         let operation_id = operation_id.into();
-        let request_digest = canonical_request_digest(
-            "dependency.add/v1",
-            json!({
-                "project_id": project_id.as_str(),
-                "prerequisite_id": prerequisite_id,
-                "dependent_id": dependent_id,
-                "actor_id": actor_id,
-                "expected_revision": expected_revision,
-            }),
-        );
+        let existing = self.store.operation(&operation_id)?;
+        let supplied_revision = expected_revision;
+        let expected_revision = supplied_revision
+            .or_else(|| {
+                existing
+                    .as_ref()
+                    .and_then(|operation| operation.expected_revision)
+            })
+            .unwrap_or(self.store.project_revision(project_id.as_str())?.0);
+        let request_digest = existing
+            .as_ref()
+            .filter(|_| supplied_revision.is_none())
+            .map_or_else(
+                || {
+                    canonical_request_digest(
+                        "dependency.add/v1",
+                        json!({
+                            "project_id": project_id.as_str(),
+                            "prerequisite_id": prerequisite_id,
+                            "dependent_id": dependent_id,
+                            "actor_id": actor_id,
+                            "expected_revision": expected_revision,
+                        }),
+                    )
+                },
+                |operation| operation.request_digest.clone(),
+            );
         let mutation = self.store.add_dependency_operation_checked(
             project_id.as_str(),
             prerequisite_id,
@@ -378,7 +486,7 @@ impl<'a> WorkApplication<'a> {
             actor_id,
             &operation_id,
             &request_digest,
-            expected_revision,
+            Some(expected_revision),
             now,
         )?;
         Ok(OperationResult {

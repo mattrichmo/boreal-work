@@ -35,6 +35,14 @@ python3 scripts/validation/release_performance.py \
 The output JSON is an evidence artifact and should be kept outside the
 checkout unless intentionally captured as a release record.
 
+Fresh CI runners can opt into normal Cargo dependency resolution with
+`--online`; local runs remain offline by default for reproducibility:
+
+```sh
+python3 scripts/validation/release_performance.py --online \
+  --output /tmp/boreal-release-performance-online.json
+```
+
 Release CI can make the floor fail closed:
 
 ```sh

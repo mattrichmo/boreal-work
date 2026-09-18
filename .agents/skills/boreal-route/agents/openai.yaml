@@ -1,0 +1,4 @@
+interface:
+  display_name: "Boreal v2 Route"
+  short_description: "Route requests through trusted Boreal workflows"
+  default_prompt: "Use $boreal-route to select the safe next Boreal v2 action."

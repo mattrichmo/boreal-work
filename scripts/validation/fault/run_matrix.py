@@ -117,6 +117,24 @@ CELLS = [
         "evidence": "Service host rebinds its endpoint and reports in-flight recovery.",
     },
     {
+        "id": "restart.sigkill_stale_socket_recovery",
+        "family": "restart_recovery",
+        "kind": "rust_test",
+        "package": "boreal-cli",
+        "test": "service_run_recovers_a_stale_socket_after_sigkill_without_breaking_live_service",
+        "args": ["--test", "service_signal_recovery"],
+        "evidence": "A real service process killed with SIGKILL leaves a stale socket and the next owner recovers it without unlinking a live endpoint.",
+    },
+    {
+        "id": "restart.evidence_admission_crash_recovery",
+        "family": "restart_recovery",
+        "kind": "rust_test",
+        "package": "boreal-cli",
+        "test": "failpoint_after_admission_recovers_as_unknown_on_service_restart",
+        "args": ["--test", "evidence_executor_regressions"],
+        "evidence": "A deterministic post-admission process crash is reconciled to unknown before the service accepts work.",
+    },
+    {
         "id": "bounded.guided_flow_recovery",
         "family": "bounded_fault_outcomes",
         "kind": "rust_test",
@@ -141,26 +159,29 @@ def digest(path: Path) -> str:
     return "sha256:" + h.hexdigest()
 
 
-def run_rust(cell: dict) -> dict:
-    command = ["cargo", "test", "--locked", "--offline", "-p", cell["package"], *cell["args"], cell["test"]]
+def run_rust(cell: dict, *, online: bool) -> dict:
+    network_args = [] if online else ["--offline"]
+    command = ["cargo", "test", "--locked", *network_args, "-p", cell["package"], *cell["args"], cell["test"]]
     # Cargo's `--` is not needed for a named test filter; keep the command
     # entirely stable so the result can be compared across repeated runs.
     started = datetime.now(timezone.utc).isoformat()
     proc = subprocess.run(command, cwd=ROOT, text=True, capture_output=True, timeout=180)
     output = (proc.stdout + proc.stderr).strip()
+    skipped = "BOREAL_VALIDATION_SKIP:" in output
     return {
         **cell,
         "command": command,
         "started_at": started,
         "exit_code": proc.returncode,
-        "status": "pass" if proc.returncode == 0 else "fail",
+        "status": "skip" if skipped else "pass" if proc.returncode == 0 else "fail",
         "output_tail": output[-1600:],
     }
 
 
-def run_fixture(cell: dict) -> dict:
+def run_fixture(cell: dict, *, online: bool) -> dict:
+    network_args = [] if online else ["--offline"]
     command = [
-        "cargo", "run", "--locked", "--offline", "--manifest-path",
+        "cargo", "run", "--locked", *network_args, "--manifest-path",
         str(HERE / "notification-fixture" / "Cargo.toml"),
     ]
     proc = subprocess.run(command, cwd=ROOT, text=True, capture_output=True, timeout=180)
@@ -181,11 +202,11 @@ def report(data: dict) -> str:
     gaps = "\n".join(f"- {gap}" for gap in data["gaps"])
     return f"""# P5-02 fault/clock/reorder evidence
 
-Status: **early matrix passed** ({data['pass_count']}/{data['cell_count']} cells); this is not a release gate.
+Status: **early matrix** ({data['pass_count']} pass, {data['skip_count']} skip, {data['fail_count']} fail of {data['cell_count']} cells); this is not a release gate.
 
 Run identity: `{data['run_id']}`
 Workspace: `{data['workspace_digest']}`
-Tool command profile: `cargo test --locked --offline`, named tests, sequential execution.
+Tool command profile: `{data['command_profile']}`, named tests, sequential execution.
 
 ## Cells
 
@@ -209,11 +230,16 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--report", type=Path, default=REPORT)
     parser.add_argument("--results", type=Path, default=RESULTS / "latest.json")
+    parser.add_argument("--online", action="store_true", help="allow Cargo to resolve dependencies from the network")
     args = parser.parse_args()
     cells = []
     for cell in CELLS:
         try:
-            cells.append(run_fixture(cell) if cell["kind"] == "rust_fixture" else run_rust(cell))
+            cells.append(
+                run_fixture(cell, online=args.online)
+                if cell["kind"] == "rust_fixture"
+                else run_rust(cell, online=args.online)
+            )
         except (subprocess.TimeoutExpired, OSError) as exc:
             cells.append({**cell, "status": "fail", "exit_code": None, "error": str(exc)})
     data = {
@@ -221,14 +247,18 @@ def main() -> int:
         "run_id": "p5-02-early-" + digest(HERE / "notification-fixture")[:16].removeprefix("sha256:"),
         "started_at": datetime.now(timezone.utc).isoformat(),
         "workspace_digest": digest(ROOT),
+        "command_profile": "cargo test --locked with network resolution"
+        if args.online
+        else "cargo test --locked --offline",
         "cell_count": len(cells),
         "pass_count": sum(c["status"] == "pass" for c in cells),
         "fail_count": sum(c["status"] == "fail" for c in cells),
+        "skip_count": sum(c["status"] == "skip" for c in cells),
         "cells": cells,
         "gaps": [
             "No production fault injector or virtual-clock runner exists; exact expiry is covered only through controlled-clock Rust tests.",
             "The reorder cell validates the public NotificationHub contract in a local fixture, not a real delayed/reordered socket notification stream.",
-            "No OS/process crash is injected during a committed write; host/recovery behavior is exercised by deterministic service tests only.",
+            "The evidence failpoint covers the admission boundary; no crash is injected during a committed receipt write, and no external process kill is coordinated with a live command.",
             "No multi-process clock-skew, network/socket drop, queue saturation, or randomized/property-based fault matrix is covered.",
             "Full P5 independent review, release/cutover evidence, and broader P3/P4 acceptance remain outside this early harness.",
         ],
@@ -236,7 +266,9 @@ def main() -> int:
     args.results.parent.mkdir(parents=True, exist_ok=True)
     args.results.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n")
     args.report.write_text(report(data))
-    print(json.dumps({k: data[k] for k in ("run_id", "cell_count", "pass_count", "fail_count")}, sort_keys=True))
+    if data["skip_count"]:
+        print("BOREAL_VALIDATION_SKIP: one or more fault cells could not run in this environment")
+    print(json.dumps({k: data[k] for k in ("run_id", "cell_count", "pass_count", "fail_count", "skip_count")}, sort_keys=True))
     return 0 if data["fail_count"] == 0 else 1
 
 

@@ -23,3 +23,12 @@
 *.tmp
 **/__pycache__/
 *.pyc
+
+# Boreal managed local runtime
+.boreal/runtime/
+.boreal/cache/
+.boreal/tmp/
+.boreal/results/
+.boreal/gates/
+.boreal/boreal.sqlite
+.boreal/boreal.sqlite-*

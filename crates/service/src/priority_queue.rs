@@ -54,19 +54,36 @@ struct State<T> {
 /// responsive while preserving eventual progress for queued mutations.
 pub struct PriorityQueue<T> {
     capacity: usize,
+    control_reserve: usize,
     state: Mutex<State<T>>,
     available: Condvar,
 }
 
 pub const MAX_CONTROL_BURST: usize = 8;
+pub const DEFAULT_CONTROL_RESERVE: usize = 1;
 
 impl<T> PriorityQueue<T> {
     pub fn with_capacity(capacity: usize) -> Result<Self, crate::QueueConfigError> {
+        Self::with_capacity_and_control_reserve(capacity, DEFAULT_CONTROL_RESERVE.min(capacity))
+    }
+
+    /// Construct a queue with slots reserved for control traffic. Normal
+    /// traffic may use the non-reserved portion; control traffic may use the
+    /// complete bounded queue. A zero reserve is useful for the explicit
+    /// single-lane compatibility configuration.
+    pub fn with_capacity_and_control_reserve(
+        capacity: usize,
+        control_reserve: usize,
+    ) -> Result<Self, crate::QueueConfigError> {
         if capacity == 0 {
             return Err(crate::QueueConfigError::ZeroCapacity);
         }
+        if control_reserve > capacity {
+            return Err(crate::QueueConfigError::ControlReserveExceedsCapacity);
+        }
         Ok(Self {
             capacity,
+            control_reserve,
             state: Mutex::new(State {
                 next_ticket: 0,
                 control: VecDeque::new(),
@@ -100,11 +117,16 @@ impl<T> PriorityQueue<T> {
         if state.closed {
             return Err((EnqueueError::Closed, item));
         }
-        if state.control.len() + state.normal.len() >= self.capacity {
+        let depth = state.control.len() + state.normal.len();
+        let full = match priority {
+            QueuePriority::Control => depth >= self.capacity,
+            QueuePriority::Normal => depth >= self.capacity.saturating_sub(self.control_reserve),
+        };
+        if full {
             return Err((
                 EnqueueError::Busy(BusyOutcome::WriterQueueFull {
                     capacity: self.capacity,
-                    depth: state.control.len() + state.normal.len(),
+                    depth,
                     retry_after_ms: 1,
                 }),
                 item,
@@ -162,6 +184,7 @@ impl<T> fmt::Debug for PriorityQueue<T> {
         formatter
             .debug_struct("PriorityQueue")
             .field("capacity", &self.capacity)
+            .field("control_reserve", &self.control_reserve)
             .field("depth", &self.len())
             .finish()
     }
@@ -227,5 +250,27 @@ mod tests {
         assert!(queue.pop().is_some());
         assert!(queue.pop().is_some());
         assert!(queue.pop().is_none());
+    }
+
+    #[test]
+    fn control_reserve_remains_admissible_when_normal_lane_is_full() {
+        let queue = PriorityQueue::with_capacity_and_control_reserve(3, 1).unwrap();
+        queue
+            .try_push_recoverable("normal-1", QueuePriority::Normal)
+            .unwrap();
+        queue
+            .try_push_recoverable("normal-2", QueuePriority::Normal)
+            .unwrap();
+        assert!(matches!(
+            queue.try_push_recoverable("normal-3", QueuePriority::Normal),
+            Err((
+                EnqueueError::Busy(BusyOutcome::WriterQueueFull { depth: 2, .. }),
+                "normal-3"
+            ))
+        ));
+        queue
+            .try_push_recoverable("control", QueuePriority::Control)
+            .unwrap();
+        assert_eq!(queue.pop().unwrap().into_inner(), "control");
     }
 }

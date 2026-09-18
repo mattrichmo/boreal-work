@@ -62,6 +62,64 @@ fn passed_receipt(gate_id: &str, gate_kind: GateKind, operation_id: &str) -> Rec
 }
 
 #[test]
+fn checked_work_creation_uses_snapshot_revision_in_application_boundary() {
+    let store = SqliteStore::open_in_memory(SCHEMA).unwrap();
+    let app = WorkApplication::new(&store);
+    let project = ProjectId::new("p-create-check");
+    app.init_project(
+        &project,
+        "agent-1",
+        "agent",
+        "cred",
+        "Agent",
+        "unix-ms:0",
+        "op-init-create-check",
+    )
+    .unwrap();
+    let revision = store.project_revision(project.as_str()).unwrap().0;
+    let work = WorkItem::new(
+        project.clone(),
+        WorkId::new("w-create-check"),
+        WorkKind::Task,
+        None,
+        "checked create",
+    )
+    .open();
+    app.create_work_as_checked(
+        &work,
+        "agent-1",
+        Some(revision),
+        "unix-ms:1",
+        "op-create-check",
+    )
+    .unwrap();
+    let stale = WorkItem::new(
+        project.clone(),
+        WorkId::new("w-create-stale"),
+        WorkKind::Task,
+        None,
+        "stale create",
+    )
+    .open();
+    assert!(matches!(
+        app.create_work_as_checked(
+            &stale,
+            "agent-1",
+            Some(revision),
+            "unix-ms:2",
+            "op-create-stale",
+        ),
+        Err(boreal_application::ApplicationError::Store(
+            boreal_store::StoreError::StaleRevision { .. }
+        ))
+    ));
+    assert!(store
+        .work(project.as_str(), "w-create-stale")
+        .unwrap()
+        .is_none());
+}
+
+#[test]
 fn sqlite_adapter_persists_fenced_lifecycle_and_replays() {
     let store = SqliteStore::open_in_memory(SCHEMA).unwrap();
     let app = WorkApplication::new(&store);

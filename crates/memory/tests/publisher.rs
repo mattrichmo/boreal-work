@@ -1,8 +1,9 @@
 use boreal_memory::{
     publication_identity, rebuild_index, render_manifest, render_markdown, validate_fresh_clone,
-    Citation, Draft, DraftState, FindingCode, ImportError, IndexLag, ManifestEntry,
-    MemoryAuthority, MemoryDoctor, MemoryRoot, PublicationManifest, PublicationState, PublishError,
-    Publisher, RetentionPolicy, RetrievalQuery, SourceTrust,
+    validate_import, Citation, Draft, DraftState, FindingCode, ImportError, IndexLag,
+    ManifestEntry, MemoryAuthority, MemoryDoctor, MemoryRoot, PublicationManifest,
+    PublicationRecoveryState, PublicationState, PublishError, Publisher, RetentionPolicy,
+    RetrievalQuery, SourceTrust,
 };
 use std::{
     fs,
@@ -354,6 +355,29 @@ fn staged_publication_recovers_after_restart_without_changing_provenance() {
     assert_eq!(receipt.state, PublicationState::Published);
     assert!(!receipt.duplicate);
     assert_eq!(receipt.identity, identity);
+    let recovery = restarted.recovery_status().unwrap();
+    assert_eq!(recovery.state, PublicationRecoveryState::Committed);
+    assert_eq!(
+        recovery.git_revision.as_deref(),
+        Some(receipt.git_revision.as_str())
+    );
+    let root_name = path.file_name().unwrap().to_string_lossy();
+    fs::write(
+        path.parent()
+            .unwrap()
+            .join(format!(".{root_name}.publication-recovery")),
+        format!(
+            "schema=1\nstate=staged\noperation_id={}\nmanifest_identity={}\nnote_name=notes/entry-1.md\ngit_revision=\n",
+            operation_id, identity.manifest_identity
+        ),
+    )
+    .unwrap();
+    let reconciled = restarted.recovery_status().unwrap();
+    assert_eq!(reconciled.state, PublicationRecoveryState::Committed);
+    assert_eq!(
+        reconciled.git_revision.as_deref(),
+        Some(receipt.git_revision.as_str())
+    );
 
     let imported = restarted.reimport("project-1").unwrap();
     assert_eq!(imported.entries.len(), 1);
@@ -373,6 +397,202 @@ fn staged_publication_recovers_after_restart_without_changing_provenance() {
     assert!(retry.duplicate);
     assert_eq!(retry.identity, receipt.identity);
     assert_eq!(retry.git_revision, receipt.git_revision);
+    remove(&path);
+}
+
+#[test]
+fn staged_human_edit_requires_reconciliation_and_is_not_overwritten() {
+    let path = test_root("staged-human-edit");
+    let accepted = draft("entry-1").review(true);
+    let operation_id = "operation-staged-human-edit";
+    let publisher = Publisher::new(MemoryRoot::new(&path).unwrap()).unwrap();
+    let identity = publication_identity(&accepted, operation_id).unwrap();
+    let markdown = render_markdown(&accepted)
+        .unwrap()
+        .replace("state: accepted", "state: published");
+    let manifest = PublicationManifest::new(
+        "project-1",
+        operation_id,
+        ManifestEntry {
+            memory_entry_id: "entry-1".into(),
+            project_id: "project-1".into(),
+            state: PublicationState::Published,
+            content_digest: identity.content_digest.clone(),
+            source_citations: vec!["source-1".into()],
+            manifest_path: "notes/entry-1.md".into(),
+            operation_id: operation_id.into(),
+            provenance_preserved: true,
+        },
+    )
+    .unwrap();
+    fs::write(publisher.root().entry_path("entry-1").unwrap(), &markdown).unwrap();
+    fs::write(publisher.root().manifest_path(), render_manifest(&manifest)).unwrap();
+    let staged = Command::new("git")
+        .args([
+            "-C",
+            path.to_str().unwrap(),
+            "add",
+            "--",
+            "manifest.json",
+            "notes/entry-1.md",
+        ])
+        .output()
+        .unwrap();
+    assert!(staged.status.success(), "git add failed: {staged:?}");
+
+    let human_text = format!("{markdown}\nHuman staged/worktree edit.\n");
+    fs::write(path.join("notes/entry-1.md"), &human_text).unwrap();
+    let root_name = path.file_name().unwrap().to_string_lossy();
+    fs::write(
+        path.parent()
+            .unwrap()
+            .join(format!(".{root_name}.publication-recovery")),
+        format!(
+            "schema=1\nstate=staged\noperation_id={}\nmanifest_identity={}\nnote_name=notes/entry-1.md\ngit_revision=\n",
+            operation_id, identity.manifest_identity
+        ),
+    )
+    .unwrap();
+
+    assert!(matches!(
+        publisher.publish(&accepted, operation_id),
+        Err(PublishError::Conflict(message)) if message.contains("publication recovery note bytes")
+    ));
+    assert_eq!(
+        fs::read_to_string(path.join("notes/entry-1.md")).unwrap(),
+        human_text
+    );
+    remove(&path);
+}
+
+#[test]
+fn files_prepared_with_tampered_staged_bytes_requires_reconciliation() {
+    let path = test_root("prepared-staged-tamper");
+    let accepted = draft("entry-1").review(true);
+    let operation_id = "operation-prepared-staged-tamper";
+    let publisher = Publisher::new(MemoryRoot::new(&path).unwrap()).unwrap();
+    let identity = publication_identity(&accepted, operation_id).unwrap();
+    let markdown = render_markdown(&accepted)
+        .unwrap()
+        .replace("state: accepted", "state: published");
+    let manifest = PublicationManifest::new(
+        "project-1",
+        operation_id,
+        ManifestEntry {
+            memory_entry_id: "entry-1".into(),
+            project_id: "project-1".into(),
+            state: PublicationState::Published,
+            content_digest: identity.content_digest.clone(),
+            source_citations: vec!["source-1".into()],
+            manifest_path: "notes/entry-1.md".into(),
+            operation_id: operation_id.into(),
+            provenance_preserved: true,
+        },
+    )
+    .unwrap();
+    fs::write(publisher.root().entry_path("entry-1").unwrap(), &markdown).unwrap();
+    fs::write(publisher.root().manifest_path(), render_manifest(&manifest)).unwrap();
+    let staged = Command::new("git")
+        .args([
+            "-C",
+            path.to_str().unwrap(),
+            "add",
+            "--",
+            "manifest.json",
+            "notes/entry-1.md",
+        ])
+        .output()
+        .unwrap();
+    assert!(staged.status.success(), "git add failed: {staged:?}");
+
+    fs::write(path.join("notes/entry-1.md"), b"tampered staged bytes\n").unwrap();
+    let staged_tamper = Command::new("git")
+        .args(["-C", path.to_str().unwrap(), "add", "--", "notes/entry-1.md"])
+        .output()
+        .unwrap();
+    assert!(
+        staged_tamper.status.success(),
+        "git add tampered note failed: {staged_tamper:?}"
+    );
+    fs::write(path.join("notes/entry-1.md"), &markdown).unwrap();
+
+    let root_name = path.file_name().unwrap().to_string_lossy();
+    fs::write(
+        path.parent()
+            .unwrap()
+            .join(format!(".{root_name}.publication-recovery")),
+        format!(
+            "schema=1\nstate=files_prepared\noperation_id={}\nmanifest_identity={}\nnote_name=notes/entry-1.md\ngit_revision=\n",
+            operation_id, identity.manifest_identity
+        ),
+    )
+    .unwrap();
+
+    assert_eq!(
+        publisher.recovery_status().unwrap().state,
+        PublicationRecoveryState::ReconciliationRequired
+    );
+    assert_eq!(
+        fs::read_to_string(path.join("notes/entry-1.md")).unwrap(),
+        markdown
+    );
+    remove(&path);
+}
+
+#[test]
+fn replay_rejects_a_committed_manifest_with_a_tampered_note() {
+    let path = test_root("committed-note-tamper");
+    let accepted = draft("entry-1").review(true);
+    let publisher = Publisher::new(MemoryRoot::new(&path).unwrap()).unwrap();
+    let receipt = publisher
+        .publish(&accepted, "operation-note-tamper")
+        .unwrap();
+    fs::write(path.join("notes/entry-1.md"), b"tampered committed note\n").unwrap();
+    let staged = Command::new("git")
+        .args([
+            "-C",
+            path.to_str().unwrap(),
+            "add",
+            "--",
+            "notes/entry-1.md",
+        ])
+        .output()
+        .unwrap();
+    assert!(staged.status.success(), "git add failed: {staged:?}");
+    let amended = Command::new("git")
+        .args([
+            "-C",
+            path.to_str().unwrap(),
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.invalid",
+            "commit",
+            "--amend",
+            "--no-edit",
+            "--no-verify",
+            "--no-gpg-sign",
+        ])
+        .output()
+        .unwrap();
+    assert!(amended.status.success(), "git amend failed: {amended:?}");
+    assert_eq!(
+        publisher.recovery_status().unwrap().state,
+        PublicationRecoveryState::ReconciliationRequired
+    );
+    assert!(matches!(
+        publisher.publish(&accepted, "operation-note-tamper"),
+        Err(PublishError::Conflict(message))
+            if message.contains("manifest or note failed identity verification")
+    ));
+    let current_revision = Command::new("git")
+        .args(["-C", path.to_str().unwrap(), "rev-parse", "HEAD"])
+        .output()
+        .unwrap();
+    assert_ne!(
+        receipt.git_revision,
+        String::from_utf8_lossy(&current_revision.stdout).trim()
+    );
     remove(&path);
 }
 
@@ -503,6 +723,178 @@ fn publication_preserves_uncommitted_human_edits_to_managed_notes() {
         Err(PublishError::Conflict(_))
     ));
     assert_eq!(fs::read_to_string(note_path).unwrap(), human_text);
+    assert_eq!(
+        publisher.recovery_status().unwrap().state,
+        PublicationRecoveryState::ReconciliationRequired
+    );
+    remove(&path);
+}
+
+#[test]
+fn dead_publication_lock_is_recovered_but_unknown_lock_is_preserved() {
+    let path = test_root("lock-recovery");
+    let lock = path.parent().unwrap().join(format!(
+        "{}.publication.lock",
+        path.file_name().unwrap().to_string_lossy()
+    ));
+    fs::write(&lock, "pid=2147483647\ntoken=dead\n").unwrap();
+    let publisher = Publisher::new(MemoryRoot::new(&path).unwrap()).unwrap();
+    assert!(!lock.exists());
+    publisher
+        .publish(&draft("entry-1").review(true), "operation-lock-recovery")
+        .unwrap();
+
+    fs::write(
+        &lock,
+        format!("pid={}\ntoken=live-owner\n", std::process::id()),
+    )
+    .unwrap();
+    let result = Publisher::new(MemoryRoot::new(&path).unwrap());
+    assert!(matches!(result, Err(PublishError::Conflict(_))));
+    assert!(lock.exists(), "an unverified lock must never be removed");
+    fs::remove_file(lock).unwrap();
+    remove(&path);
+}
+
+#[cfg(unix)]
+#[test]
+fn import_and_doctor_reject_a_symlinked_manifest() {
+    use std::os::unix::fs::symlink;
+
+    let path = test_root("manifest-symlink");
+    let publisher = Publisher::new(MemoryRoot::new(&path).unwrap()).unwrap();
+    publisher
+        .publish(&draft("entry-1").review(true), "operation-manifest-symlink")
+        .unwrap();
+
+    let outside = test_root("manifest-symlink-target").join("manifest.json");
+    fs::write(&outside, b"outside manifest bytes").unwrap();
+    let manifest = path.join("manifest.json");
+    fs::remove_file(&manifest).unwrap();
+    symlink(&outside, &manifest).unwrap();
+
+    assert_eq!(
+        validate_import(&path, "project-1"),
+        Err(ImportError::InvalidPath)
+    );
+    let report = MemoryDoctor::inspect(&path, "project-1");
+    assert!(report
+        .findings
+        .iter()
+        .any(|finding| finding.code == FindingCode::InvalidManifest));
+
+    remove(&path);
+    remove(outside.parent().unwrap());
+}
+
+#[cfg(unix)]
+#[test]
+fn managed_git_hooks_and_global_configuration_cannot_run_during_publication() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let path = test_root("hook-boundary");
+    let publisher = Publisher::new(MemoryRoot::new(&path).unwrap()).unwrap();
+    let hook_dir = path.join(".git/hooks");
+    fs::create_dir_all(&hook_dir).unwrap();
+    let marker = path.join("hook-ran");
+    let hook = hook_dir.join("pre-commit");
+    fs::write(
+        &hook,
+        format!(
+            "#!/bin/sh\nprintf hook-ran > {}\nexit 1\n",
+            marker.display()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
+
+    let filter_marker = path.join("filter-ran");
+    let filter = path.join(".git/filter.sh");
+    fs::write(
+        &filter,
+        format!(
+            "#!/bin/sh\nprintf filter-ran > {}\ncat\n",
+            filter_marker.display()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&filter, fs::Permissions::from_mode(0o755)).unwrap();
+    let signer_marker = path.join("signer-ran");
+    let signer = path.join(".git/signer.sh");
+    fs::write(
+        &signer,
+        format!(
+            "#!/bin/sh\nprintf signer-ran > {}\nexit 1\n",
+            signer_marker.display()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&signer, fs::Permissions::from_mode(0o755)).unwrap();
+    fs::write(
+        path.join(".gitattributes"),
+        "manifest.json filter=boreal\nnotes/*.md filter=boreal\n",
+    )
+    .unwrap();
+    for (key, value) in [
+        ("filter.boreal.clean", filter.to_str().unwrap()),
+        ("filter.boreal.smudge", filter.to_str().unwrap()),
+        ("filter.boreal.required", "true"),
+        ("gpg.program", signer.to_str().unwrap()),
+        ("commit.gpgSign", "true"),
+    ] {
+        let configured = Command::new("git")
+            .args(["-C", path.to_str().unwrap(), "config", key, value])
+            .output()
+            .unwrap();
+        assert!(
+            configured.status.success(),
+            "git config failed: {configured:?}"
+        );
+    }
+    let setup_add = Command::new("git")
+        .args(["-C", path.to_str().unwrap(), "add", ".gitattributes"])
+        .output()
+        .unwrap();
+    assert!(setup_add.status.success(), "git add failed: {setup_add:?}");
+    let setup_commit = Command::new("git")
+        .args([
+            "-C",
+            path.to_str().unwrap(),
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.invalid",
+            "commit",
+            "--no-verify",
+            "--no-gpg-sign",
+            "-m",
+            "setup",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        setup_commit.status.success(),
+        "setup commit failed: {setup_commit:?}"
+    );
+    let _ = fs::remove_file(&filter_marker);
+    let _ = fs::remove_file(&signer_marker);
+
+    let receipt = publisher
+        .publish(&draft("entry-1").review(true), "operation-hook-boundary")
+        .unwrap();
+    assert_eq!(receipt.state, PublicationState::Published);
+    assert!(
+        !marker.exists(),
+        "repository hook escaped the publication boundary"
+    );
+    assert!(
+        !filter_marker.exists(),
+        "repository filters escaped the publication boundary"
+    );
+    assert!(
+        !signer_marker.exists(),
+        "repository signing helper escaped the publication boundary"
+    );
     remove(&path);
 }
 

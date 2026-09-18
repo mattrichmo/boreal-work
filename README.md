@@ -29,8 +29,10 @@ curl -fsSL https://raw.githubusercontent.com/mattrichmo/boreal-work/refs/heads/m
 Keep the `| sh` at the end: without it, `curl` only prints the installer
 script and does not install anything.
 
-The same command is both the install and update command. After installation,
-run the project setup wizard from the repository you want Boreal to manage:
+The same command is both the install and update command. Release-installed v2
+builds also support `bwrk update` and the v1-compatible
+`bwrk upgrade --machine`. After installation, run the project setup wizard
+from the repository you want Boreal to manage:
 
 ```sh
 cd your-project

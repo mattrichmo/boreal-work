@@ -14,6 +14,7 @@ else
   PREFIX=""
 fi
 REQUESTED_VERSION="${BOREAL_VERSION:-}"
+AUTO_SELECTED_RELEASE=0
 LOCAL_ARCHIVE=""
 SOURCE_INSTALL=0
 SOURCE_REF="${BOREAL_SOURCE_REF:-main}"
@@ -187,6 +188,7 @@ else
   esac
 
   if [ -z "$REQUESTED_VERSION" ]; then
+    AUTO_SELECTED_RELEASE=1
     if ! latest_url=$(curl -fsSL -o /dev/null -w '%{url_effective}' "https://github.com/$REPOSITORY/releases/latest"); then
       bootstrap_from_source
     fi
@@ -199,6 +201,15 @@ else
 
   ARCHIVE_NAME="bwrk-v${REQUESTED_VERSION}-${TARGET}.tar.gz"
   ARCHIVE_PATH=""
+fi
+
+if [ "$AUTO_SELECTED_RELEASE" -eq 1 ]; then
+  RELEASE_URL="https://github.com/$REPOSITORY/releases/download/v${REQUESTED_VERSION}"
+  if ! curl -fsSL -o /dev/null "$RELEASE_URL/$ARCHIVE_NAME" \
+    || ! curl -fsSL -o /dev/null "$RELEASE_URL/SHA256SUMS"; then
+    echo "No compatible v2 release was found for ${REQUESTED_VERSION}; building the source ref ${SOURCE_REF} instead ..." >&2
+    bootstrap_from_source
+  fi
 fi
 
 if [ -z "$REQUESTED_VERSION" ]; then
@@ -229,6 +240,7 @@ cleanup() {
     rm -rf "$PREFIX/lib/boreal/tui" 2>/dev/null || true
     rm -f "$PREFIX/share/boreal/release.json" 2>/dev/null || true
     rm -f "$PREFIX/share/boreal/LICENSE" 2>/dev/null || true
+    rm -f "$PREFIX/share/boreal/install.sh" 2>/dev/null || true
     if [ -e "$BACKUP_ROOT/bin/bwrk" ]; then
       mv "$BACKUP_ROOT/bin/bwrk" "$PREFIX/bin/bwrk" 2>/dev/null || true
     fi
@@ -240,6 +252,9 @@ cleanup() {
     fi
     if [ -f "$BACKUP_ROOT/share/boreal/LICENSE" ]; then
       mv "$BACKUP_ROOT/share/boreal/LICENSE" "$PREFIX/share/boreal/LICENSE" 2>/dev/null || true
+    fi
+    if [ -f "$BACKUP_ROOT/share/boreal/install.sh" ]; then
+      mv "$BACKUP_ROOT/share/boreal/install.sh" "$PREFIX/share/boreal/install.sh" 2>/dev/null || true
     fi
   fi
   if [ -n "$INSTALL_STAGE" ]; then rm -rf "$INSTALL_STAGE"; fi
@@ -289,6 +304,8 @@ PACKAGE_ROOT="$TEMP_ROOT/$ARCHIVE_ROOT_NAME"
 [ ! -L "$PACKAGE_ROOT/share/boreal/release.json" ] || die "release manifest must not be a symlink"
 [ -s "$PACKAGE_ROOT/share/boreal/LICENSE" ] || die "release archive has no license"
 [ ! -L "$PACKAGE_ROOT/share/boreal/LICENSE" ] || die "release license must not be a symlink"
+[ -s "$PACKAGE_ROOT/share/boreal/install.sh" ] || die "release archive has no updater"
+[ ! -L "$PACKAGE_ROOT/share/boreal/install.sh" ] || die "release updater must not be a symlink"
 
 mkdir -p "$PREFIX/bin" "$PREFIX/lib/boreal" "$PREFIX/share/boreal"
 INSTALL_STAGE=$(mktemp -d "$PREFIX/.bwrk-install.XXXXXX")
@@ -298,6 +315,8 @@ chmod 755 "$INSTALL_STAGE/bin/bwrk"
 cp -R "$PACKAGE_ROOT/lib/boreal/tui" "$INSTALL_STAGE/lib/boreal/tui"
 cp "$PACKAGE_ROOT/share/boreal/release.json" "$INSTALL_STAGE/share/boreal/release.json"
 cp "$PACKAGE_ROOT/share/boreal/LICENSE" "$INSTALL_STAGE/share/boreal/LICENSE"
+cp "$PACKAGE_ROOT/share/boreal/install.sh" "$INSTALL_STAGE/share/boreal/install.sh"
+chmod 755 "$INSTALL_STAGE/share/boreal/install.sh"
 
 BACKUP_ROOT="$PREFIX/.bwrk-backup.$$"
 mkdir -p "$BACKUP_ROOT/bin" "$BACKUP_ROOT/lib/boreal" "$BACKUP_ROOT/share/boreal"
@@ -306,10 +325,12 @@ if [ -e "$PREFIX/bin/bwrk" ] || [ -L "$PREFIX/bin/bwrk" ]; then mv "$PREFIX/bin/
 if [ -e "$PREFIX/lib/boreal/tui" ] || [ -L "$PREFIX/lib/boreal/tui" ]; then mv "$PREFIX/lib/boreal/tui" "$BACKUP_ROOT/lib/boreal/tui"; fi
 if [ -e "$PREFIX/share/boreal/release.json" ] || [ -L "$PREFIX/share/boreal/release.json" ]; then mv "$PREFIX/share/boreal/release.json" "$BACKUP_ROOT/share/boreal/release.json"; fi
 if [ -e "$PREFIX/share/boreal/LICENSE" ] || [ -L "$PREFIX/share/boreal/LICENSE" ]; then mv "$PREFIX/share/boreal/LICENSE" "$BACKUP_ROOT/share/boreal/LICENSE"; fi
+if [ -e "$PREFIX/share/boreal/install.sh" ] || [ -L "$PREFIX/share/boreal/install.sh" ]; then mv "$PREFIX/share/boreal/install.sh" "$BACKUP_ROOT/share/boreal/install.sh"; fi
 mv "$INSTALL_STAGE/bin/bwrk" "$PREFIX/bin/bwrk"
 mv "$INSTALL_STAGE/lib/boreal/tui" "$PREFIX/lib/boreal/tui"
 mv "$INSTALL_STAGE/share/boreal/release.json" "$PREFIX/share/boreal/release.json"
 mv "$INSTALL_STAGE/share/boreal/LICENSE" "$PREFIX/share/boreal/LICENSE"
+mv "$INSTALL_STAGE/share/boreal/install.sh" "$PREFIX/share/boreal/install.sh"
 ROLLBACK_NEEDED=0
 
 echo "Boreal ${REQUESTED_VERSION} installed to $PREFIX"

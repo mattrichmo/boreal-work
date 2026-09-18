@@ -13,11 +13,26 @@ export interface RenderOptions {
   readonly palette_visible?: boolean;
   readonly search_editing?: boolean;
   readonly search_buffer?: string;
+  readonly summary_editing?: boolean;
+  readonly summary_buffer?: string;
 }
 
 function boundedDimension(value: number | undefined, fallback: number, minimum: number): number {
   if (value === undefined || !Number.isFinite(value)) return fallback;
   return Math.max(minimum, Math.floor(value));
+}
+
+/** Remove terminal-control and bidi characters from service/user text. */
+export function sanitizeTerminalText(value: string): string {
+  return Array.from(value, (character) => {
+    const codePoint = character.codePointAt(0) ?? 0;
+    if ((codePoint >= 0 && codePoint <= 0x1f) || (codePoint >= 0x7f && codePoint <= 0x9f)
+      || (codePoint >= 0x202a && codePoint <= 0x202e)
+      || (codePoint >= 0x2066 && codePoint <= 0x2069)) {
+      return "�";
+    }
+    return character;
+  }).join("");
 }
 
 function clip(line: string, width: number): string {
@@ -201,15 +216,16 @@ export function renderMountedView(view: MountedView, options: RenderOptions = {}
   }
   if (options.pending_confirmation) lines.push("", `CONFIRM: ${options.pending_confirmation}  [y] yes  [n] no`);
   if (options.search_editing) lines.push("", `SEARCH: ${options.search_buffer ?? ""}_  [enter] apply  [esc] cancel  [backspace] delete`);
+  if (options.summary_editing) lines.push("", `FINISH SUMMARY: ${options.summary_buffer ?? ""}_  [enter] continue  [esc] cancel`);
   if (options.palette_visible) {
     lines.push("", "COMMAND PALETTE", "  1 all   2 ready   3 active   4 blocked   5 expired   6 closed",
       "  7 milestones   8 sprints   9 tasks   / search   r refresh   ? help",
       "  edit/dependencies/cycles/intake/source/memory/session recovery: disabled until service routes exist");
   }
   if (options.help_visible) {
-    lines.push("", "KEYS", "  j/↓ next  k/↑ previous  Enter detail  Esc back", "  1-9 filters  / search  p palette  r refresh", "  c claim  s start  f finish  x release  ? help  q quit");
+    lines.push("", "KEYS", "  j/↓ next  k/↑ previous  Enter detail  Esc back", "  1-9 filters  / search  p palette  r refresh  ] next page", "  c claim  s start  f finish  x release  ? help  q quit");
   } else if (options.interactive) {
-    lines.push("", "j/k move  1-9 filters  / search  p palette  Enter detail  r refresh  ? help  q quit");
+    lines.push("", "j/k move  1-9 filters  / search  p palette  Enter detail  r refresh  ] next page  ? help  q quit");
   } else {
     lines.push("", "COMMANDS", "  select WORK_ID  |  refresh  |  claim  |  accept-start  |  evidence  |  finish  |  release  |  quit");
   }
@@ -224,5 +240,5 @@ export function renderMountedView(view: MountedView, options: RenderOptions = {}
       `  ${capability.route}: ${capability.reason}`));
   }
   if (options.status_message) lines.push("", `STATUS: ${options.status_message}`);
-  return `${fitHeight(lines.map((line) => clip(line, width)), height).join("\n")}\n`;
+  return `${fitHeight(lines.map((line) => clip(sanitizeTerminalText(line), width)), height).join("\n")}\n`;
 }

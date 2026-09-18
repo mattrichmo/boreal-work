@@ -8,14 +8,18 @@
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
     fmt,
-    fs::{self, OpenOptions},
-    io::{self, Write},
+    fs::{self, File, OpenOptions},
+    io::{self, Read, Write},
     path::{Component, Path, PathBuf},
     sync::{
         atomic::{AtomicU64, Ordering},
         Arc, Mutex, MutexGuard,
     },
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
+
+#[cfg(unix)]
+use std::os::fd::AsRawFd;
 
 use serde::{Deserialize, Serialize};
 
@@ -26,6 +30,7 @@ pub const DEFAULT_MAX_PARSE_BYTES: usize = 4 * 1024 * 1024;
 pub const DEFAULT_MAX_PARSE_CHUNKS: usize = 100_000;
 pub const DEFAULT_MAX_CHUNK_BYTES: usize = 16 * 1024;
 pub const DEFAULT_MAX_RETRIEVAL_EXCERPT_BYTES: usize = 4 * 1024;
+const CATALOG_LOCK_WAIT: Duration = Duration::from_secs(10);
 /// Canonical content identity shared with the migration boundary.
 pub const DIGEST_ALGORITHM: &str = "sha256";
 
@@ -368,7 +373,12 @@ impl FilesystemBlobStore {
 
     pub fn blob_path(&self, digest: &str) -> Result<PathBuf, SourceError> {
         let hex = digest_hex(digest).ok_or(SourceError::ScopeViolation)?;
-        Ok(self.root.join("blobs").join(hex))
+        let blob_dir = self.root.join("blobs");
+        reject_symlink(&self.root)?;
+        reject_symlink(&blob_dir)?;
+        let path = blob_dir.join(hex);
+        reject_symlink(&path)?;
+        Ok(path)
     }
 }
 
@@ -379,6 +389,8 @@ impl BlobStore for FilesystemBlobStore {
         verify_input(expected_digest, bytes)?;
         let _write_guard = lock(&self.write_lock)?;
         let blob_dir = self.root.join("blobs");
+        reject_symlink(&self.root)?;
+        reject_symlink(&blob_dir)?;
         fs::create_dir_all(&blob_dir).map_err(storage_error)?;
         let final_path = self.blob_path(expected_digest)?;
 
@@ -425,6 +437,7 @@ fn write_temp_and_install(
     expected_digest: &str,
     bytes: &[u8],
 ) -> Result<(), SourceError> {
+    reject_symlink(final_path)?;
     let mut file = OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -571,7 +584,9 @@ impl SourceCatalog {
     /// metadata/index mutation.
     pub fn with_persistent_filesystem(root: impl AsRef<Path>) -> Result<Self, SourceError> {
         let root = root.as_ref().to_path_buf();
+        reject_symlink(&root)?;
         let state_file = root.join("catalog.json");
+        reject_symlink(&state_file)?;
         let state = if state_file.exists() {
             let bytes = fs::read(&state_file).map_err(storage_error)?;
             restore_catalog_state(&bytes)?
@@ -820,6 +835,24 @@ impl SourceCatalog {
         let _mutation_guard = lock(&self.mutation_lock)?;
         let _catalog_lock = self.acquire_persistent_lock()?;
         self.reload_persistent_state()?;
+        let before = lock(&self.state)?.clone();
+        let report = self.parse_and_index_state_locked(version, parser, limits)?;
+        if let Err(error) = self.persist_state() {
+            *lock(&self.state)? = before;
+            return Err(error);
+        }
+        Ok(report)
+    }
+
+    /// Update one derived index while the caller owns the catalog mutation
+    /// boundary. This deliberately does not persist; a repair/rebuild must
+    /// compose all derived-row changes into one durable snapshot.
+    fn parse_and_index_state_locked(
+        &self,
+        version: &SourceVersion,
+        parser: &str,
+        limits: ParserLimits,
+    ) -> Result<ParseReport, SourceError> {
         if parser.trim().is_empty() {
             return Err(SourceError::EmptyParser);
         }
@@ -833,7 +866,6 @@ impl SourceCatalog {
         let parsed = parse_bytes(&bytes, &stored.media_type, limits);
         let key = (stored.project_id.clone(), stored.source_version_id.clone());
         let mut state = lock(&self.state)?;
-        let before = state.clone();
         let current = state
             .versions
             .get_mut(&key)
@@ -913,11 +945,6 @@ impl SourceCatalog {
                 }
             }
         };
-        drop(state);
-        if let Err(error) = self.persist_state() {
-            *lock(&self.state)? = before;
-            return Err(error);
-        }
         Ok(report)
     }
 
@@ -1147,7 +1174,28 @@ impl SourceCatalog {
     /// source bytes or erases failed parse records.
     pub fn repair(&self, project_id: Option<&str>) -> Result<RepairReport, SourceError> {
         validate_optional_project(project_id)?;
+        let _mutation_guard = lock(&self.mutation_lock)?;
+        let _catalog_lock = self.acquire_persistent_lock()?;
+        self.reload_persistent_state()?;
+        self.repair_locked(project_id, false)
+    }
+
+    fn repair_locked(
+        &self,
+        project_id: Option<&str>,
+        reset_indexes: bool,
+    ) -> Result<RepairReport, SourceError> {
+        let before = lock(&self.state)?.clone();
         let versions = self.versions_for(project_id)?;
+        let version_keys: BTreeSet<_> = versions
+            .iter()
+            .map(|version| {
+                (
+                    version.project_id.clone(),
+                    version.source_version_id.clone(),
+                )
+            })
+            .collect();
         let mut report = RepairReport {
             project_id: project_id.map(str::to_owned),
             attempted: 0,
@@ -1164,8 +1212,31 @@ impl SourceCatalog {
                 failed_versions: 0,
             },
         };
+
+        if reset_indexes {
+            let mut state = lock(&self.state)?;
+            let keys: Vec<_> = state
+                .indexes
+                .keys()
+                .filter(|key| project_id.is_none_or(|project| key.0 == project))
+                .cloned()
+                .collect();
+            if !keys.is_empty() {
+                for key in keys {
+                    state.indexes.remove(&key);
+                }
+                state.index_revision = state.index_revision.saturating_add(1);
+            }
+        }
+
         for version in versions {
-            let available = self.availability(&version)? == Availability::Available;
+            let available = match self.availability(&version) {
+                Ok(availability) => availability == Availability::Available,
+                Err(error) => {
+                    *lock(&self.state)? = before;
+                    return Err(error);
+                }
+            };
             if !available {
                 report.skipped_unavailable += 1;
                 continue;
@@ -1174,7 +1245,7 @@ impl SourceCatalog {
                 .parser_identity
                 .as_deref()
                 .unwrap_or(DEFAULT_PARSER_IDENTITY);
-            let before = self.index_status(project_id)?.index_revision;
+            let before_index = lock(&self.state)?.index_revision;
             let had_current = {
                 let state = lock(&self.state)?;
                 let key = (
@@ -1187,20 +1258,25 @@ impl SourceCatalog {
                 })
             };
             report.attempted += 1;
-            let parsed = self.parse_and_index(&version, parser)?;
+            let parsed = match self.parse_and_index_state_locked(
+                &version,
+                parser,
+                ParserLimits::default(),
+            ) {
+                Ok(parsed) => parsed,
+                Err(error) => {
+                    *lock(&self.state)? = before;
+                    return Err(error);
+                }
+            };
             if parsed.state == ParseState::Failed {
                 report.failed += 1;
-            } else if had_current && before == parsed.index_revision {
+            } else if had_current && before_index == parsed.index_revision {
                 report.unchanged += 1;
             } else {
                 report.repaired += 1;
             }
         }
-        let version_keys: BTreeSet<_> = self
-            .versions_for(project_id)?
-            .into_iter()
-            .map(|version| (version.project_id, version.source_version_id))
-            .collect();
         let mut state = lock(&self.state)?;
         let orphans: Vec<_> = state
             .indexes
@@ -1219,7 +1295,10 @@ impl SourceCatalog {
         }
         report.status = index_status_locked(&state, project_id);
         drop(state);
-        self.persist_state()?;
+        if let Err(error) = self.persist_state() {
+            *lock(&self.state)? = before;
+            return Err(error);
+        }
         Ok(report)
     }
 
@@ -1227,21 +1306,10 @@ impl SourceCatalog {
     /// blobs, and failed parse history remain intact.
     pub fn rebuild_index(&self, project_id: Option<&str>) -> Result<RepairReport, SourceError> {
         validate_optional_project(project_id)?;
-        let mut state = lock(&self.state)?;
-        let keys: Vec<_> = state
-            .indexes
-            .keys()
-            .filter(|key| project_id.is_none_or(|project| key.0 == project))
-            .cloned()
-            .collect();
-        if !keys.is_empty() {
-            for key in keys {
-                state.indexes.remove(&key);
-            }
-            state.index_revision = state.index_revision.saturating_add(1);
-        }
-        drop(state);
-        self.repair(project_id)
+        let _mutation_guard = lock(&self.mutation_lock)?;
+        let _catalog_lock = self.acquire_persistent_lock()?;
+        self.reload_persistent_state()?;
+        self.repair_locked(project_id, true)
     }
 
     pub fn list_versions(
@@ -1437,19 +1505,30 @@ fn lock<T>(mutex: &Mutex<T>) -> Result<MutexGuard<'_, T>, SourceError> {
 
 struct PersistentCatalogLock {
     path: PathBuf,
+    owner: String,
+    _file: File,
 }
 
 impl PersistentCatalogLock {
     fn acquire(path: &Path) -> Result<Self, SourceError> {
+        reject_symlink(path)?;
+        let deadline = Instant::now() + CATALOG_LOCK_WAIT;
+        let owner = format!("pid={}\ntoken={}\n", std::process::id(), unique_stamp());
         let mut file = None;
-        for _ in 0..5_000 {
+        while Instant::now() < deadline {
             match OpenOptions::new().write(true).create_new(true).open(path) {
                 Ok(value) => {
                     file = Some(value);
                     break;
                 }
                 Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
-                    std::thread::sleep(std::time::Duration::from_millis(2));
+                    // A lock is recoverable only when its owner PID is
+                    // definitively gone. Unknown or permission-denied owner
+                    // state stays busy; no live lock is force-broken.
+                    if try_reap_dead_catalog_lock(path) {
+                        continue;
+                    }
+                    std::thread::sleep(Duration::from_millis(2));
                 }
                 Err(error) => return Err(storage_error(error)),
             }
@@ -1457,24 +1536,151 @@ impl PersistentCatalogLock {
         let mut file = file.ok_or_else(|| {
             SourceError::Storage("source catalog lock is busy; retry after the owner exits".into())
         })?;
-        let owner = format!("pid={}\n", std::process::id());
+        lock_file_exclusive(&file).map_err(storage_error)?;
         if let Err(error) = file
             .write_all(owner.as_bytes())
             .and_then(|_| file.sync_all())
         {
-            let _ = fs::remove_file(path);
+            remove_owned_catalog_lock(path, &owner);
             return Err(storage_error(error));
         }
         Ok(Self {
             path: path.to_path_buf(),
+            owner,
+            _file: file,
         })
     }
 }
 
 impl Drop for PersistentCatalogLock {
     fn drop(&mut self) {
-        let _ = fs::remove_file(&self.path);
+        remove_owned_catalog_lock(&self.path, &self.owner);
     }
+}
+
+#[cfg(test)]
+fn catalog_lock_owner_is_definitely_dead(path: &Path) -> bool {
+    let Ok(contents) = fs::read_to_string(path) else {
+        return false;
+    };
+    catalog_lock_owner_contents_is_definitely_dead(&contents)
+}
+
+fn catalog_lock_owner_contents_is_definitely_dead(contents: &str) -> bool {
+    let mut pid = None;
+    let mut token = None;
+    for line in contents.lines() {
+        let Some((key, value)) = line.split_once('=') else {
+            return false;
+        };
+        match key {
+            "pid" if pid.is_none() => {
+                let Ok(value) = value.parse::<u32>() else {
+                    return false;
+                };
+                pid = Some(value);
+            }
+            "token" if token.is_none() && !value.is_empty() => token = Some(value),
+            _ => return false,
+        }
+    }
+    match (pid, token) {
+        (Some(pid), Some(_)) => process_is_definitely_dead(pid),
+        _ => false,
+    }
+}
+
+/// Reap a stale lock only after taking an advisory lock on the exact inode
+/// that was inspected. Writers hold this advisory lock until their catalog
+/// mutation ends, so a compliant reaper cannot unlink a replacement lock.
+fn try_reap_dead_catalog_lock(path: &Path) -> bool {
+    let mut file = match OpenOptions::new().read(true).write(true).open(path) {
+        Ok(file) => file,
+        Err(_) => return false,
+    };
+    match try_lock_file_exclusive(&file) {
+        Ok(true) => {}
+        Ok(false) | Err(_) => return false,
+    }
+    let mut contents = String::new();
+    if file.read_to_string(&mut contents).is_err()
+        || !catalog_lock_owner_contents_is_definitely_dead(&contents)
+    {
+        return false;
+    }
+    fs::remove_file(path).is_ok()
+}
+
+#[cfg(unix)]
+unsafe extern "C" {
+    fn flock(file_descriptor: i32, operation: i32) -> i32;
+}
+
+#[cfg(unix)]
+fn lock_file_exclusive(file: &File) -> io::Result<()> {
+    const LOCK_EX: i32 = 2;
+    let result = unsafe { flock(file.as_raw_fd(), LOCK_EX) };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+#[cfg(not(unix))]
+fn lock_file_exclusive(_file: &File) -> io::Result<()> {
+    Ok(())
+}
+
+#[cfg(unix)]
+fn try_lock_file_exclusive(file: &File) -> io::Result<bool> {
+    const LOCK_EX: i32 = 2;
+    const LOCK_NB: i32 = 4;
+    let result = unsafe { flock(file.as_raw_fd(), LOCK_EX | LOCK_NB) };
+    if result == 0 {
+        return Ok(true);
+    }
+    match io::Error::last_os_error().raw_os_error() {
+        Some(11) | Some(35) => Ok(false),
+        _ => Err(io::Error::last_os_error()),
+    }
+}
+
+#[cfg(not(unix))]
+fn try_lock_file_exclusive(_file: &File) -> io::Result<bool> {
+    Ok(true)
+}
+
+fn remove_owned_catalog_lock(path: &Path, expected: &str) {
+    if fs::read_to_string(path).ok().as_deref() == Some(expected) {
+        let _ = fs::remove_file(path);
+    }
+}
+
+#[cfg(unix)]
+fn process_is_definitely_dead(pid: u32) -> bool {
+    unsafe extern "C" {
+        fn kill(pid: i32, signal: i32) -> i32;
+    }
+    if pid == 0 || pid > i32::MAX as u32 {
+        return false;
+    }
+    if unsafe { kill(pid as i32, 0) } == 0 {
+        return false;
+    }
+    std::io::Error::last_os_error().raw_os_error() == Some(3)
+}
+
+#[cfg(not(unix))]
+fn process_is_definitely_dead(_pid: u32) -> bool {
+    false
+}
+
+fn unique_stamp() -> u128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos()
 }
 
 fn persisted_state(state: &CatalogState) -> PersistedCatalogState {
@@ -1985,5 +2191,17 @@ mod tests {
             catalog.cite(&version, "line:1", &oversized),
             Err(SourceError::CitationTooLarge)
         );
+    }
+
+    #[test]
+    fn malformed_catalog_lock_is_not_proven_stale() {
+        let path = std::env::temp_dir().join(format!(
+            "boreal-source-malformed-lock-{}-{}",
+            std::process::id(),
+            unique_stamp()
+        ));
+        fs::write(&path, b"pid=2147483647\n").unwrap();
+        assert!(!catalog_lock_owner_is_definitely_dead(&path));
+        let _ = fs::remove_file(path);
     }
 }

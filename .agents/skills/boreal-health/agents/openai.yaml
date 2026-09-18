@@ -1,0 +1,4 @@
+interface:
+  display_name: "Boreal v2 Health"
+  short_description: "Diagnose and recover Boreal service health"
+  default_prompt: "Use $boreal-health to diagnose a Boreal subsystem and run one safe recovery action."

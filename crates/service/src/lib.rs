@@ -46,7 +46,9 @@ pub use notifications::{
     NotificationError, NotificationHub, Replay, RevisionCursor, RevisionNotification, Subscription,
     SubscriptionUpdate,
 };
-pub use priority_queue::{PrioritizedItem, PriorityQueue, QueuePriority, MAX_CONTROL_BURST};
+pub use priority_queue::{
+    PrioritizedItem, PriorityQueue, QueuePriority, DEFAULT_CONTROL_RESERVE, MAX_CONTROL_BURST,
+};
 pub use queue::{
     EnqueueError, FairWriterQueue, QueueConfigError, QueueTicket, QueuedWrite, WriterQueue,
 };
@@ -64,5 +66,5 @@ pub use timer::{TimerError, TimerRegistry};
 pub use transport::{
     IoOperation, JsonRequest, JsonResponse, ProtocolError, ProtocolErrorCode, ServeOnceOutcome,
     TransportConfig, TransportConfigError, TransportError, UnixSocketClient, UnixSocketServer,
-    DEFAULT_MAX_FRAME_SIZE,
+    DEFAULT_CLIENT_IO_TIMEOUT, DEFAULT_MAX_FRAME_SIZE,
 };

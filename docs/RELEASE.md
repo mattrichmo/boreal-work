@@ -44,9 +44,9 @@ has completed and restores them if the replacement fails.
 3. Let GitHub Actions build the supported macOS/Linux target matrix.
 4. Publish the archives, per-archive release manifests, `SHA256SUMS`, and
    release notes to GitHub Releases.
-5. Render `packaging/homebrew/boreal.rb.template` with
-   `scripts/release/render_homebrew_formula.py` and update
-   `mattrichmo/homebrew-tap`.
+5. Confirm `mattrichmo/homebrew-tap` exists and this repository has the
+   `HOMEBREW_TAP_TOKEN` Actions secret; the release workflow renders and
+   publishes `Formula/boreal.rb` automatically.
 6. Run the clean-prefix install smoke test and verify `bwrk dashboard` on each
    supported platform with Node.js installed.
 

@@ -25,7 +25,9 @@ payloads. It retains project/actor/harness/session context and emits the
 current service route names (`create_project`, `create_work`, `evidence_add`,
 and `finish_close`). Project creation maps the ergonomic `display_name` input
 to Rust's canonical `name` field. Work creation maps dispatch and acceptance
-profile inputs to Rust's `dispatch` and string `profile` fields. Non-empty
+profile inputs to Rust's `dispatch` and string `profile` fields, while
+preserving the requested profile version as the optional `profile_version`
+field for version-aware service adapters. Non-empty
 hard holds are rejected until that route supports them, rather than silently
 discarded. Status reads
 carry a `cursor_revision`; the envelope `as_of` is the authoritative snapshot
@@ -48,8 +50,16 @@ request.
 
 Proof-gated finish also requires a non-empty typed summary. The line interface
 accepts `finish <summary>` and maps it to the Rust `summary_body` field. The
-full-screen keyboard view refuses to invent summary text and directs the
-operator to the line interface until an editor/prompt is added.
+full-screen keyboard view now provides a typed summary prompt. If the service
+does not expose the optional durable receipt readback seam, Finish remains
+disabled after restart; the TUI does not treat a gate `receipt_id` as a receipt
+payload.
+
+The controller consumes optional `readOperation` and `readReceipt` adapters.
+`operation_show` is available in the current service route, but a durable full
+receipt-payload route is not yet mounted there. Until that backend seam is
+available, callers must provide the receipt in the current session or the
+service must include an optional typed `receipt` field in status detail.
 
 ## Node entrypoint
 
@@ -92,7 +102,7 @@ The full-screen dashboard also supports presentation-only queue navigation:
 
 ```text
 1 all       2 ready       3 active       4 blocked      5 expired review
-6 closed    7 milestones  8 sprints      9 tasks        / search
+6 closed    7 milestones  8 sprints      9 tasks        / search  ] next page
 p command palette
 ```
 

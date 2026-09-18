@@ -1,0 +1,4 @@
+interface:
+  display_name: "Boreal v2 Context"
+  short_description: "Build bounded project and work context"
+  default_prompt: "Use $boreal-context to retrieve bounded, revision-aware Boreal context."

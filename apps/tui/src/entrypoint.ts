@@ -98,7 +98,6 @@ export async function interactiveMountAndRenderWithTerminal(
 }
 
 function processTerminal(): FullScreenTerminal {
-  const decoder = new TextDecoder();
   return {
     is_tty: process.stdin.isTTY === true && process.stdout.isTTY === true,
     dimensions: () => ({ width: process.stdout.columns ?? 120, height: process.stdout.rows ?? 40 }),
@@ -107,9 +106,7 @@ function processTerminal(): FullScreenTerminal {
     resume: () => { process.stdin.resume?.(); },
     pause: () => { process.stdin.pause?.(); },
     onData(listener) {
-      const wrapped = (chunk: string | Uint8Array): void => {
-        listener(typeof chunk === "string" ? chunk : decoder.decode(chunk));
-      };
+      const wrapped = (chunk: string | Uint8Array): void => { listener(chunk); };
       process.stdin.on("data", wrapped);
       return () => { process.stdin.off("data", wrapped); };
     },

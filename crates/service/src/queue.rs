@@ -65,12 +65,16 @@ impl std::error::Error for EnqueueError {}
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum QueueConfigError {
     ZeroCapacity,
+    ControlReserveExceedsCapacity,
 }
 
 impl fmt::Display for QueueConfigError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::ZeroCapacity => formatter.write_str("writer queue capacity must be positive"),
+            Self::ControlReserveExceedsCapacity => {
+                formatter.write_str("control reserve cannot exceed queue capacity")
+            }
         }
     }
 }

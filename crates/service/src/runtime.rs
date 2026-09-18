@@ -18,6 +18,9 @@ pub enum WriterExecutionError<E> {
     Queue(EnqueueError),
     Duplicate(OperationRecord),
     InvalidOperation,
+    /// The task crossed an execution boundary without producing a result.
+    /// The application must read the durable operation back before retrying.
+    Unknown,
     WorkerStopped,
     Task(E),
 }
@@ -33,6 +36,9 @@ impl<E: fmt::Display> fmt::Display for WriterExecutionError<E> {
             ),
             Self::InvalidOperation => {
                 formatter.write_str("operation ID must be non-empty and safe")
+            }
+            Self::Unknown => {
+                formatter.write_str("write outcome is unknown; read back the operation")
             }
             Self::WorkerStopped => formatter.write_str("writer worker stopped"),
             Self::Task(error) => write!(formatter, "write task failed: {error}"),
@@ -106,7 +112,7 @@ impl BoundedWriter {
     ) -> Result<T::Output, WriterExecutionError<T::Error>> {
         let operation_id = operation_id.into();
         self.recovery
-            .register(operation_id.clone())
+            .admit(operation_id.clone())
             .map_err(|error| match error {
                 OperationError::Duplicate(record) => WriterExecutionError::Duplicate(record),
                 OperationError::InvalidId | OperationError::HydrationConflict { .. } => {
@@ -122,7 +128,10 @@ impl BoundedWriter {
                 let result = match result {
                     Ok(Ok(output)) => Ok(output),
                     Ok(Err(error)) => Err(WriterExecutionError::Task(error)),
-                    Err(_) => Err(WriterExecutionError::WorkerStopped),
+                    // A panic can happen after an application transaction has
+                    // committed but before the result reached the caller.
+                    // It is therefore never safe to classify this as failed.
+                    Err(_) => Err(WriterExecutionError::Unknown),
                 };
                 let _ = sender.send(result);
             }),
@@ -139,18 +148,32 @@ impl BoundedWriter {
         match receiver.recv() {
             Ok(Ok(output)) => {
                 self.recovery.mark_committed(&operation_id, None);
+                self.recovery.remove(&operation_id);
                 Ok(output)
             }
+            Ok(Err(WriterExecutionError::Unknown)) => {
+                self.recovery.mark_unknown(&operation_id);
+                Err(WriterExecutionError::Unknown)
+            }
             Ok(Err(WriterExecutionError::WorkerStopped)) => {
-                self.recovery.mark_failed(&operation_id);
+                // A stopped worker produced no durable result. Preserve the
+                // admission record for operation-ID readback.
+                self.recovery.mark_unknown(&operation_id);
                 Err(WriterExecutionError::WorkerStopped)
             }
             Ok(Err(WriterExecutionError::Task(error))) => {
                 self.recovery.mark_failed(&operation_id);
+                self.recovery.remove(&operation_id);
                 Err(WriterExecutionError::Task(error))
             }
-            Ok(Err(other)) => Err(other),
-            Err(_) => Err(WriterExecutionError::WorkerStopped),
+            Ok(Err(other)) => {
+                self.recovery.remove(&operation_id);
+                Err(other)
+            }
+            Err(_) => {
+                self.recovery.mark_unknown(&operation_id);
+                Err(WriterExecutionError::Unknown)
+            }
         }
     }
 }
@@ -281,5 +304,42 @@ mod tests {
         assert_eq!(metrics.completed, 2);
         assert!(metrics.queue_wait >= metrics.max_queue_wait);
         assert!(metrics.writer_hold >= metrics.max_writer_hold);
+    }
+
+    #[test]
+    fn completed_writer_operation_ids_are_active_only() {
+        let writer = BoundedWriter::new(1).unwrap();
+        assert_eq!(
+            writer
+                .execute("op_runtime_replay", WriteFn(|| Ok::<_, ()>(1)))
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            writer
+                .execute("op_runtime_replay", WriteFn(|| Ok::<_, ()>(2)))
+                .unwrap(),
+            2
+        );
+        assert!(writer.recovery().records().is_empty());
+    }
+
+    #[test]
+    fn panicking_write_task_is_unknown_and_retained_for_readback() {
+        let writer = BoundedWriter::new(1).unwrap();
+        let result = writer.execute(
+            "op_runtime_panic",
+            WriteFn(|| -> Result<(), ()> { panic!("simulated post-commit panic") }),
+        );
+
+        assert!(matches!(result, Err(WriterExecutionError::Unknown)));
+        assert_eq!(
+            writer
+                .recovery()
+                .get("op_runtime_panic")
+                .expect("unknown operation is retained")
+                .phase(),
+            crate::OperationPhase::Unknown
+        );
     }
 }

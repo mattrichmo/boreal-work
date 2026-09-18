@@ -88,6 +88,7 @@ pub(crate) fn request(_parsed: &ParsedCommand, _operation: &str) -> Result<CliRe
 #[cfg(unix)]
 mod unix {
     use super::*;
+    use std::os::unix::{fs::FileTypeExt, net::UnixStream};
     use boreal_application::{project_status_from_store, AttemptLifecycleAdapter, AttemptSnapshot};
     use boreal_domain::{ActorContext, ActorRole, ReasonCode};
     use boreal_protocol::{schema, Envelope, ProtocolError as WireError, TransportOutcome};
@@ -95,7 +96,8 @@ mod unix {
         ApplicationCommandHandler, ApplicationRequest, ApplicationResponse,
         ConcurrentApplicationCommandHandler, JsonRequest, OperationPhase, RecoveryBackend,
         RecoveryBackendError, RecoveryEntry, ServiceHost, ServiceHostConfig, TransportConfig,
-        TransportError, UnixSocketClient, APPLICATION_API_VERSION, APPLICATION_SCHEMA_VERSION,
+        ServiceHostHooks, TimerRegistry, TransportError, UnixSocketClient,
+        APPLICATION_API_VERSION, APPLICATION_SCHEMA_VERSION,
     };
     use boreal_store::{
         OperationOutcome as StoreOperationOutcome, OperationRecord, ReceiptAttestation,
@@ -134,6 +136,145 @@ mod unix {
                 .map(|_| ())
                 .map_err(|error| RecoveryBackendError::new(error.to_string()))
         }
+    }
+
+    /// The host owns timer delivery and stop intent; this adapter deliberately
+    /// does not perform lifecycle transitions from a callback. A deadline
+    /// creates a stop request in the service host, while the application/store
+    /// still require an executor acknowledgement before expiry is terminal.
+    #[derive(Clone, Debug, Default)]
+    struct ProductionServiceHooks;
+
+    impl ServiceHostHooks for ProductionServiceHooks {}
+
+    fn schedule_current_attempt_deadlines(database: &Path, timers: &TimerRegistry) {
+        let Ok(store) = SqliteStore::open(database, SCHEMA) else {
+            return;
+        };
+        let Ok(projects) = store.list_project_ids() else {
+            return;
+        };
+        for project in projects {
+            let mut offset = 0_u64;
+            loop {
+                let Ok(page) = store.list_work(&project, 1_000, offset) else {
+                    break;
+                };
+                for work in &page.items {
+                    let Ok(Some(attempt)) =
+                        store.current_attempt_for_work(&project, &work.work_id)
+                    else {
+                        continue;
+                    };
+                    if attempt.phase.is_terminal() {
+                        continue;
+                    }
+                    let Some(deadline_ms) = [
+                        super::super::parse_stamp_ms(&attempt.lease_deadline),
+                        super::super::parse_stamp_ms(&attempt.hard_deadline),
+                    ]
+                    .into_iter()
+                    .flatten()
+                    .min()
+                    else {
+                        continue;
+                    };
+                    let delay_ms = deadline_ms.saturating_sub(super::super::now_ms_u64());
+                    let key = format!(
+                        "attempt-deadline:{project}:{}:{}",
+                        attempt.attempt_id, attempt.fence
+                    );
+                    let _ = timers.schedule(
+                        key,
+                        Instant::now() + Duration::from_millis(delay_ms),
+                    );
+                }
+                if page.items.len() < 1_000 {
+                    break;
+                }
+                offset = offset.saturating_add(page.items.len() as u64);
+            }
+        }
+    }
+
+    fn schedule_deadline_from_response(
+        timers: &TimerRegistry,
+        request_data: &Value,
+        response: &ApplicationResponse,
+    ) {
+        if !matches!(
+            request_data.get("command").and_then(Value::as_str),
+            Some("claim" | "start" | "renew")
+        ) {
+            return;
+        }
+        let Ok(envelope) = serde_json::from_str::<Value>(&response.data) else {
+            return;
+        };
+        let Some(data) = envelope.get("data") else {
+            return;
+        };
+        let Some(project) = request_data.get("project_id").and_then(Value::as_str) else {
+            return;
+        };
+        let Some(attempt_id) = data.get("attempt_id").and_then(Value::as_str) else {
+            return;
+        };
+        let Some(fence) = data.get("fence").and_then(Value::as_u64) else {
+            return;
+        };
+        let Some(deadline_ms) = [
+            data.get("lease_deadline").and_then(Value::as_str),
+            data.get("hard_deadline").and_then(Value::as_str),
+        ]
+        .into_iter()
+        .flatten()
+        .filter_map(super::super::parse_stamp_ms)
+        .min()
+        else {
+            return;
+        };
+        let delay_ms = deadline_ms.saturating_sub(super::super::now_ms_u64());
+        let _ = timers.schedule(
+            attempt_deadline_key(project, attempt_id, fence),
+            Instant::now() + Duration::from_millis(delay_ms),
+        );
+    }
+
+    fn cancel_deadline_from_response(
+        timers: &TimerRegistry,
+        request_data: &Value,
+        response: &ApplicationResponse,
+    ) {
+        if !matches!(
+            request_data.get("command").and_then(Value::as_str),
+            Some("release" | "submit" | "finish_close")
+        ) {
+            return;
+        }
+        let Ok(envelope) = serde_json::from_str::<Value>(&response.data) else {
+            return;
+        };
+        if !matches!(
+            envelope.get("outcome").and_then(Value::as_str),
+            Some("changed" | "unchanged")
+        ) {
+            return;
+        }
+        let Some(project) = request_data.get("project_id").and_then(Value::as_str) else {
+            return;
+        };
+        let Some(attempt_id) = request_data.get("attempt_id").and_then(Value::as_str) else {
+            return;
+        };
+        let Some(fence) = request_data.get("fence").and_then(Value::as_u64) else {
+            return;
+        };
+        timers.cancel(&attempt_deadline_key(project, attempt_id, fence));
+    }
+
+    fn attempt_deadline_key(project: &str, attempt_id: &str, fence: u64) -> String {
+        format!("attempt-deadline:{project}:{attempt_id}:{fence}")
     }
 
     pub(crate) fn run_service(
@@ -203,6 +344,7 @@ mod unix {
                 "recovered_operations": report.recovery().queued.len()
                     + report.recovery().unknown.len(),
             })),
+            ..CliResult::default()
         })
     }
 
@@ -215,6 +357,7 @@ mod unix {
         config: ServiceHostConfig,
     ) -> Result<ServiceHost<ConcurrentServiceCommandHandler>, CliError> {
         ensure_db_parent(db)?;
+        recover_stale_socket(socket)?;
         // Initialize or validate the schema before binding the endpoint. The
         // request workers subsequently open independent connections to this
         // same canonical database.
@@ -240,11 +383,15 @@ mod unix {
             std::process::id(),
             sha256_content_digest(socket.to_string_lossy().as_bytes())
         );
+        let timers = TimerRegistry::new();
+        schedule_current_attempt_deadlines(&canonical_db, &timers);
+        let hooks = ProductionServiceHooks;
         ServiceHost::bind(
             socket,
             ConcurrentServiceCommandHandler {
                 database: canonical_db.clone(),
                 gate_root,
+                timers: timers.clone(),
             },
             config,
         )
@@ -253,6 +400,8 @@ mod unix {
                 .with_recovery_backend(SqliteRecoveryBackend {
                     database: canonical_db.clone(),
                 })
+                .with_timers(timers)
+                .with_hooks(hooks)
         })
         .map_err(|error| {
             CliError::with(
@@ -261,6 +410,54 @@ mod unix {
                 error.to_string(),
             )
         })
+    }
+
+    /// Remove only an unowned Unix-socket pathname. A successful connection
+    /// proves that another service owns the endpoint, so live services are
+    /// never displaced during stale-endpoint recovery.
+    fn recover_stale_socket(socket: &Path) -> Result<(), CliError> {
+        let metadata = match fs::symlink_metadata(socket) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => {
+                return Err(CliError::with(
+                    ErrorCode::ServiceUnavailable,
+                    ApplicationOutcome::Failed,
+                    format!("cannot inspect service socket {}: {error}", socket.display()),
+                ));
+            }
+        };
+        if !metadata.file_type().is_socket() {
+            return Ok(())
+        }
+        match UnixStream::connect(socket) {
+            Ok(_) => Err(CliError::with(
+                ErrorCode::ServiceBusy,
+                ApplicationOutcome::Busy,
+                format!("service endpoint already in use: {}", socket.display()),
+            )),
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::ConnectionRefused
+                        | std::io::ErrorKind::NotFound
+                        | std::io::ErrorKind::TimedOut
+                ) => fs::remove_file(socket).map_err(|remove_error| {
+                    CliError::with(
+                        ErrorCode::ServiceUnavailable,
+                        ApplicationOutcome::Failed,
+                        format!(
+                            "cannot remove stale service socket {}: {remove_error}",
+                            socket.display()
+                        ),
+                    )
+                }),
+            Err(error) => Err(CliError::with(
+                ErrorCode::ServiceUnavailable,
+                ApplicationOutcome::Failed,
+                format!("cannot verify service socket {}: {error}", socket.display()),
+            )),
+        }
     }
 
     pub(crate) fn request(parsed: &ParsedCommand, operation: &str) -> Result<CliResult, CliError> {
@@ -284,8 +481,11 @@ mod unix {
                     error.to_string(),
                 )
             })?;
+        let transport_config = TransportConfig::default()
+            .with_read_timeout(Some(Duration::from_secs(30)))
+            .with_write_timeout(Some(Duration::from_secs(10)));
         let mut client =
-            UnixSocketClient::connect(socket, TransportConfig::default()).map_err(|error| {
+            UnixSocketClient::connect(socket, transport_config.clone()).map_err(|error| {
                 CliError::with(
                     ErrorCode::ServiceUnavailable,
                     ApplicationOutcome::Failed,
@@ -336,7 +536,7 @@ mod unix {
                     )
                 })?;
                 let mut readback_client =
-                    UnixSocketClient::connect(socket, TransportConfig::default()).map_err(
+                    UnixSocketClient::connect(socket, transport_config.clone()).map_err(
                         |error| {
                             CliError::with(
                                 ErrorCode::ServiceUnavailable,
@@ -360,6 +560,22 @@ mod unix {
                     })?
             }
             Err(error) => {
+                if let TransportError::RemoteProtocol(error) = error {
+                    return Err(CliError::with(
+                        ErrorCode::ProtocolMismatch,
+                        ApplicationOutcome::Failed,
+                        error.to_string(),
+                    ));
+                }
+                // Once the request has been handed to `request`, a write,
+                // timeout, EOF, or correlation failure cannot prove that the
+                // service did not commit it. Preserve the original operation
+                // identity and force readback instead of offering a fresh-ID
+                // retry. Connection failure before this call remains a
+                // proven-not-admitted ServiceUnavailable above.
+                if is_mutating_command(parsed) {
+                    return Err(CliError::unknown_delivery(operation, error.to_string()));
+                }
                 return Err(CliError::with(
                     ErrorCode::ServiceUnavailable,
                     ApplicationOutcome::Failed,
@@ -431,7 +647,14 @@ mod unix {
                     detail_ref: envelope.detail_ref,
                 });
             }
-            return Err(CliError::with(error.code, envelope.outcome, error.message));
+            return Err(CliError::from_envelope(
+                error,
+                envelope.outcome,
+                Some(envelope.operation_id.as_str()),
+                Some(envelope.as_of),
+                envelope.next_status_change_at,
+                envelope.detail_ref,
+            ));
         }
         Ok(CliResult {
             outcome: envelope.outcome,
@@ -442,6 +665,18 @@ mod unix {
             next_status_change_at: envelope.next_status_change_at,
             detail_ref: envelope.detail_ref,
         })
+    }
+
+    fn is_mutating_command(parsed: &ParsedCommand) -> bool {
+        let path = parsed.path.iter().map(String::as_str).collect::<Vec<_>>();
+        !matches!(
+            path.as_slice(),
+            ["status"] | ["prime"] | ["doctor"] | ["operation", "show"]
+        ) && !matches!(path.as_slice(), ["agent", "status"] | ["session", "show"])
+            && !matches!(path.as_slice(), ["work", "list"] | ["work", "show"])
+            && !matches!(path.as_slice(), ["intake", "list"] | ["intake", "show"])
+            && !matches!(path.as_slice(), ["dep", "tree"] | ["dep", "cycles"])
+            && !matches!(path.as_slice(), ["cycle", "board"] | ["cycle", "report"])
     }
 
     fn recovered_unknown_duplicate(
@@ -540,6 +775,10 @@ mod unix {
                 data["description"] = json!("");
                 data["actor_role"] = json!(parsed.options.actor_role.as_deref().unwrap_or("agent"));
                 data["credential_ref"] = json!("cli");
+                data["expected_revision"] = parsed
+                    .options
+                    .expected_revision
+                    .map_or(Value::Null, |value| json!(value));
             }
             ["status"] | ["prime"] | ["agent", "status"] => {
                 data["command"] = json!("status");
@@ -578,6 +817,11 @@ mod unix {
                     .clone()
                     .map_or(Value::Null, Value::String);
                 data["profile"] = json!("focused");
+                data["profile_version"] = json!("1");
+                data["expected_revision"] = parsed
+                    .options
+                    .expected_revision
+                    .map_or(Value::Null, |value| json!(value));
             }
             ["work", "edit"] => {
                 let offset = usize::from(parsed.options.project.is_none());
@@ -723,7 +967,11 @@ mod unix {
             }
             ["intake", "list"] | ["intake", "show"] => {
                 let intake_index = usize::from(parsed.options.project.is_none());
-                data["command"] = json!("intake_read");
+                data["command"] = json!(if path[1] == "list" {
+                    "intake_list"
+                } else {
+                    "intake_show"
+                });
                 if path[1] == "show" {
                     data["intake_id"] = json!(parsed
                         .options
@@ -745,6 +993,10 @@ mod unix {
                     .positionals
                     .get(intake_index + 1)
                     .ok_or_else(|| CliError::invalid("intake bucket requires a bucket name"))?);
+                data["expected_revision"] = parsed
+                    .options
+                    .expected_revision
+                    .map_or(Value::Null, |value| json!(value));
             }
             ["intake", "capture"] => {
                 let intake_index = usize::from(parsed.options.project.is_none());
@@ -765,6 +1017,10 @@ mod unix {
                     .clone()
                     .ok_or_else(|| CliError::invalid("intake capture requires --bucket"))?);
                 data["kind"] = json!(parsed.options.kind.as_deref().unwrap_or("note"));
+                data["expected_revision"] = parsed
+                    .options
+                    .expected_revision
+                    .map_or(Value::Null, |value| json!(value));
             }
             ["doctor"] => {
                 data["command"] = json!("doctor");
@@ -1037,6 +1293,7 @@ mod unix {
     pub(super) struct ConcurrentServiceCommandHandler {
         database: PathBuf,
         gate_root: PathBuf,
+        timers: TimerRegistry,
     }
 
     impl ConcurrentApplicationCommandHandler for ConcurrentServiceCommandHandler {
@@ -1050,11 +1307,21 @@ mod unix {
                     format!("service database is unavailable: {error}"),
                 )
             })?;
-            ServiceCommandHandler {
+            let request_data = serde_json::from_str::<Value>(&request.data).ok();
+            let command = request.command.clone();
+            let response = ServiceCommandHandler {
                 store,
                 gate_root: self.gate_root.clone(),
             }
-            .handle(request)
+            .handle(request)?;
+            if let Some(request_data) = request_data.as_ref() {
+                if matches!(command.as_str(), "claim" | "start" | "renew") {
+                    schedule_deadline_from_response(&self.timers, request_data, &response);
+                } else if matches!(command.as_str(), "release" | "submit" | "finish_close") {
+                    cancel_deadline_from_response(&self.timers, request_data, &response);
+                }
+            }
+            Ok(response)
         }
     }
 
@@ -1074,17 +1341,22 @@ mod unix {
                 Ok((outcome, revision, value)) => {
                     make_envelope(&request.operation_id, outcome, revision, value, None)
                 }
-                Err(error) => make_envelope(
-                    &request.operation_id,
-                    error.outcome,
-                    None,
-                    None,
-                    Some(WireError::new(
-                        error.code,
-                        error.message,
-                        is_retryable(error.code),
-                    )),
-                ),
+                Err(error) => {
+                    let wire_error = error.protocol_error.clone().unwrap_or_else(|| {
+                        WireError::new(
+                            error.code,
+                            error.message.clone(),
+                            is_retryable(error.code),
+                        )
+                    });
+                    make_envelope(
+                        &request.operation_id,
+                        error.outcome,
+                        None,
+                        None,
+                        Some(wire_error),
+                    )
+                }
             };
             Ok(ApplicationResponse {
                 api_version: APPLICATION_API_VERSION.to_owned(),
@@ -1121,8 +1393,8 @@ mod unix {
         _harness_id: Option<String>,
         #[serde(default, rename = "session_id")]
         _session_id: Option<String>,
-        #[serde(default, rename = "expected_revision")]
-        _expected_revision: Option<u64>,
+        #[serde(default)]
+        expected_revision: Option<u64>,
         #[serde(default, rename = "operation_id")]
         _operation_id: Option<String>,
     }
@@ -1152,13 +1424,15 @@ mod unix {
             alias = "profile_id"
         )]
         profile: String,
+        #[serde(default = "default_profile_version", alias = "acceptance_profile_version")]
+        profile_version: String,
         actor_id: String,
         #[serde(default, rename = "harness_id")]
         _harness_id: Option<String>,
         #[serde(default, rename = "session_id")]
         _session_id: Option<String>,
         #[serde(default, rename = "expected_revision")]
-        _expected_revision: Option<u64>,
+        expected_revision: Option<u64>,
         #[serde(default, rename = "operation_id")]
         _operation_id: Option<String>,
     }
@@ -1195,6 +1469,10 @@ mod unix {
 
     fn default_profile() -> String {
         "focused".to_owned()
+    }
+
+    fn default_profile_version() -> String {
+        "1".to_owned()
     }
 
     impl ServiceCommandHandler {
@@ -1266,6 +1544,11 @@ mod unix {
                     "create_project request command does not match its route",
                 ));
             }
+            if request.expected_revision.is_some() {
+                return Err(CliError::invalid(
+                    "project creation does not yet expose an atomic expected-revision store contract",
+                ));
+            }
             let name = required_trimmed(request.name, "name")?;
             let actor = required_trimmed(request.actor_id, "actor_id")?;
             let actor_role = parse_actor_role(&request.actor_role)?;
@@ -1318,7 +1601,14 @@ mod unix {
             };
             let kind = parse_work_kind(&request.kind)?;
             let dispatch_policy = parse_dispatch_policy(&request.dispatch)?;
-            let acceptance_profile = parse_acceptance_profile(&request.profile)?;
+            let mut acceptance_profile = parse_acceptance_profile(&request.profile)?;
+            if request.profile_version != "1" {
+                return Err(CliError::invalid(format!(
+                    "unsupported acceptance profile version {:?}; supported versions: 1",
+                    request.profile_version
+                )));
+            }
+            acceptance_profile.version = request.profile_version;
             let parent_id = request
                 .parent_id
                 .map(|parent_id| required_trimmed(parent_id, "parent_id"))
@@ -1337,9 +1627,18 @@ mod unix {
                 hard_holds: request.hold.into_iter().map(ReasonCode::HardHold).collect(),
                 acceptance_profile,
             };
-            let result = WorkApplication::new(&self.store)
-                .create_work_as(&work, &actor_id, &now(), operation)
-                .map_err(map_application_error)?;
+            let app = WorkApplication::new(&self.store);
+            let result = match request.expected_revision {
+                Some(expected_revision) => app.create_work_as_checked(
+                    &work,
+                    &actor_id,
+                    Some(expected_revision),
+                    &now(),
+                    operation,
+                ),
+                None => app.create_work_as(&work, &actor_id, &now(), operation),
+            }
+            .map_err(map_application_error)?;
             Ok((
                 if result.changed {
                     ApplicationOutcome::Changed
@@ -1360,6 +1659,12 @@ mod unix {
                         "id": work.acceptance_profile.id.as_str(),
                         "version": work.acceptance_profile.version,
                     },
+                    "hard_holds": result
+                        .value
+                        .hard_holds
+                        .iter()
+                        .map(ReasonCode::stable_code)
+                        .collect::<Vec<_>>(),
                     "replayed": !result.changed,
                 })),
             ))
@@ -1376,7 +1681,13 @@ mod unix {
                     optional_string(data, "parent_id")?.map(Some),
                     optional_string(data, "title")?,
                     optional_string(data, "description")?,
-                    optional_u64(data, "priority")?.map(|value| value as u8),
+                    optional_u64(data, "priority")?
+                        .map(|value| {
+                            u8::try_from(value).map_err(|_| {
+                                CliError::invalid("priority must be an integer from 0 to 255")
+                            })
+                        })
+                        .transpose()?,
                     optional_string(data, "dispatch_policy")?,
                     optional_u64(data, "expected_revision")?,
                     &now(),
@@ -1656,16 +1967,31 @@ mod unix {
                     "intake item was not found",
                 ));
             }
-            Ok((
-                ApplicationOutcome::Unchanged,
-                Some(view.revision),
-                Some(json!({
-                    "command": "intake_read",
+            let command = data
+                .get("command")
+                .and_then(Value::as_str)
+                .filter(|command| matches!(*command, "intake_list" | "intake_show"))
+                .unwrap_or("intake_list");
+            let response = if command == "intake_show" {
+                json!({
+                    "command": command,
+                    "project_id": view.project_id.as_str(),
+                    "revision": view.revision,
+                    "item": items.into_iter().next(),
+                })
+            } else {
+                json!({
+                    "command": command,
                     "project_id": view.project_id.as_str(),
                     "revision": view.revision,
                     "items": items,
                     "total": view.items.len(),
-                })),
+                })
+            };
+            Ok((
+                ApplicationOutcome::Unchanged,
+                Some(view.revision),
+                Some(response),
             ))
         }
 
@@ -1689,7 +2015,7 @@ mod unix {
                 .revision;
             let scope = boreal_application::PlanningScope::new(project.clone(), actor)
                 .with_session(session)
-                .at_revision(revision);
+                .at_revision(optional_u64(data, "expected_revision")?.unwrap_or(revision));
             let result = app
                 .create_intake_bucket_v3(&scope, operation.to_owned(), &bucket, &now())
                 .map_err(map_application_error)?;
@@ -1739,7 +2065,7 @@ mod unix {
                 .revision;
             let scope = boreal_application::PlanningScope::new(project.clone(), actor)
                 .with_session(session)
-                .at_revision(revision);
+                .at_revision(optional_u64(data, "expected_revision")?.unwrap_or(revision));
             let result = app
                 .create_intake_item_v3(
                     &scope,
@@ -1882,45 +2208,16 @@ mod unix {
                             message,
                         )
                     })?;
-            let items = snapshot
-                .items
-                .iter()
-                .map(|item| {
-                    json!({
-                        "work_id": item.work.id.as_str(),
-                        "title": item.work.title,
-                        "display_status": format_status(item.display_status()),
-                        "claimable_for_actor": item.decision.claimable_for_actor,
-                        "reason_codes": item.decision.reason_codes.iter().map(|reason| format!("{reason:?}")).collect::<Vec<_>>(),
-                        "attempt_id": item.attempt.as_ref().map(|attempt| attempt.attempt_id.as_str()),
-                        "fence": item.attempt.as_ref().map(|attempt| attempt.fence.get()),
-                    })
-                })
-                .collect::<Vec<_>>();
             Ok((
                 ApplicationOutcome::Unchanged,
                 Some(snapshot.project_revision.0),
-                Some(json!({
-                    "command": "status",
-                    "contract_version": snapshot.contract_version,
-                    "project_id": snapshot.project_id.as_str(),
-                    "project_revision": snapshot.project_revision.0,
-                    "as_of": stamp(snapshot.as_of.as_millis()),
-                    "limit": snapshot.limit,
-                    "offset": snapshot.offset,
-                    "total": snapshot.total,
-                    "has_more": snapshot.has_more(),
-                    "next_offset": snapshot.next_offset(),
-                    "counts": {
-                        "total": snapshot.counts.total,
-                        "ready": snapshot.counts.ready,
-                        "queued": snapshot.counts.queued,
-                        "blocked": snapshot.counts.blocked,
-                        "in_progress": snapshot.counts.in_progress,
-                        "closed": snapshot.counts.closed,
-                    },
-                    "items": items,
-                })),
+                Some(super::super::status_snapshot_json(
+                    &snapshot,
+                    Some(json!({
+                        "readback_required": false,
+                        "service_state": "ready",
+                    })),
+                )),
             ))
         }
 
@@ -2332,7 +2629,7 @@ mod unix {
             let result = WorkApplication::new(&self.store)
                 .record_receipt(
                     &string(data, "actor_id")?,
-                    None,
+                    Some(&string(data, "session_id")?),
                     &receipt,
                     optional_u64(data, "expected_revision")?,
                     TimestampMs::from_millis(now_ms_u64()),
@@ -2430,6 +2727,11 @@ mod unix {
                     "receipt attempt or fence does not match the finish target",
                 ));
             }
+            // Read and validate all pure closeout inputs before admitting any
+            // receipt or advancing the attempt. A bad summary must not leave
+            // a partially committed finish behind.
+            let summary_body = read_summary_body_from_data(data)?;
+            let summary = summary_payload(&receipt, &summary_body, operation);
             let app = WorkApplication::new(&self.store);
             let receipt_replayed = if receipt.attestation == ExecutorAttestation::BorealWitnessed {
                 self.validate_witnessed_receipt_readback(&project, &work_id, &receipt)?;
@@ -2445,14 +2747,6 @@ mod unix {
                 .map_err(map_application_error)?
                 .replayed
             };
-            let summary_body = string(data, "summary_body")?;
-            if summary_body.is_empty()
-                || summary_body.len() as u64 > boreal_store::MAX_SUMMARY_BODY_BYTES
-            {
-                return Err(CliError::invalid(
-                    "finish_close summary_body must contain at most 64 KiB of UTF-8 text",
-                ));
-            }
             let adapter = SqliteAttemptAdapter::new(&self.store);
             let submitted = app
                 .submit(
@@ -2467,7 +2761,6 @@ mod unix {
                     )?,
                 )
                 .map_err(map_application_error)?;
-            let summary = summary_payload(&receipt, &summary_body, operation);
             let summary_result = app
                 .record_summary(
                     &actor,
@@ -2513,10 +2806,7 @@ mod unix {
             } else {
                 ApplicationOutcome::Changed
             };
-            Ok((
-                outcome,
-                Some(finalized.revision),
-                Some(json!({
+            let close_data = json!({
                     "attempt": attempt_mutation_json(&submitted.value),
                     "receipt_id": receipt.receipt_id.as_str(),
                     "receipt_replayed": receipt_replayed,
@@ -2536,7 +2826,24 @@ mod unix {
                             "reason": gate.reason,
                         })).collect::<Vec<_>>(),
                     })),
-                })),
+                });
+            super::super::append_finish_parent_operation(
+                &self.store,
+                operation,
+                &project,
+                &actor,
+                &session,
+                attempt.as_str(),
+                fence.get(),
+                optional_u64(data, "expected_revision")?,
+                outcome,
+                finalized.revision,
+                &close_data,
+            )?;
+            Ok((
+                outcome,
+                Some(finalized.revision),
+                Some(close_data),
             ))
         }
 
@@ -2732,19 +3039,49 @@ mod unix {
             }
             Some(error)
         });
-        Envelope {
+        let next_status_change_at = data
+            .as_ref()
+            .and_then(|value| value.get("next_status_change_at"))
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        let mut envelope = Envelope {
             api_version: API_VERSION.to_owned(),
             schema_version: schema::ENVELOPE.to_owned(),
             operation_id: operation.to_owned(),
             revision,
             as_of,
-            next_status_change_at: None,
+            next_status_change_at,
             transport: TransportOutcome::Ok,
             outcome,
             data,
             detail_ref: None,
             error,
+        };
+        if serde_json::to_vec(&envelope)
+            .is_ok_and(|bytes| bytes.len() > MAX_JSON_BYTES)
+        {
+            let size = serde_json::to_vec(&envelope)
+                .map(|bytes| bytes.len() as u64)
+                .unwrap_or_default();
+            envelope.data = None;
+            envelope.detail_ref = Some(DetailReference {
+                uri: Some(format!("operation:{operation}")),
+                digest: None,
+                size_bytes: Some(size),
+                expires_at: None,
+            });
         }
+        envelope
+    }
+
+    fn read_summary_body_from_data(data: &Value) -> Result<String, CliError> {
+        let body = string(data, "summary_body")?;
+        if body.is_empty() || body.len() as u64 > boreal_store::MAX_SUMMARY_BODY_BYTES {
+            return Err(CliError::invalid(
+                "finish_close summary_body must contain at most 64 KiB of UTF-8 text",
+            ));
+        }
+        Ok(body)
     }
 
     fn attempt_request_from_data(
@@ -3430,7 +3767,7 @@ mod tests {
         };
         let intake_data =
             request_data(&intake, "op_intake_show_fixture").expect("intake show request builds");
-        assert_eq!(intake_data["command"], "intake_read");
+        assert_eq!(intake_data["command"], "intake_show");
         assert_eq!(intake_data["intake_id"], "intake-1");
 
         let bucket = ParsedCommand {
@@ -3470,6 +3807,175 @@ mod tests {
         let data = request_data(&doctor, "op_doctor_fixture").expect("doctor request builds");
         assert_eq!(data["command"], "doctor");
         assert!(data["project_id"].is_null());
+    }
+
+    #[test]
+    fn service_status_uses_the_complete_canonical_status_dto() {
+        let db = temp_path("status-dto");
+        let store = seed_store(&db);
+        let mut handler = make_handler(store);
+        let envelope = application_envelope(
+            &mut handler,
+            "op_service_status_dto",
+            json!({
+                "command": "status",
+                "project_id": "service-project",
+                "actor_id": DEFAULT_ACTOR,
+                "limit": 100,
+                "offset": 0,
+            }),
+        );
+        let data = envelope.data.expect("status data");
+        assert_eq!(data["command"], "status");
+        assert_eq!(data["items"][0]["kind"], "task");
+        assert_eq!(data["items"][0]["lifecycle"], "open");
+        assert_eq!(data["items"][0]["display_status"], "ready");
+        assert!(data["items"][0]["reason_codes"].is_array());
+        assert!(data["items"][0]["gates"]["open"].is_array());
+        assert!(data["items"][0]["dependencies"].is_array());
+        assert!(data["counts"]["needs_verification"].is_number());
+        assert!(data["timing"]["as_of"].as_str().is_some());
+        assert_eq!(data["recovery"]["readback_required"], false);
+        assert!(!data.to_string().contains("inprogress"));
+        let _ = fs::remove_file(db);
+    }
+
+    #[test]
+    fn intake_read_response_preserves_the_dispatched_route_discriminant() {
+        let db = temp_path("intake-discriminant");
+        let store = seed_store(&db);
+        let mut handler = make_handler(store);
+        WorkApplication::new(&handler.store)
+            .ensure_work_model_v3()
+            .expect("v3 intake schema enables");
+        for command in ["intake_list", "intake_show"] {
+            let envelope = application_envelope(
+                &mut handler,
+                &format!("op_{command}"),
+                json!({
+                    "command": command,
+                    "project_id": "service-project",
+                }),
+            );
+            assert_eq!(envelope.data.expect("intake response")["command"], command);
+        }
+        let _ = fs::remove_file(db);
+    }
+
+    #[test]
+    fn create_project_expected_revision_is_rejected_before_side_effects() {
+        let db = temp_path("create-project-revision");
+        let store = SqliteStore::open(&db, SCHEMA).expect("temporary schema opens");
+        let mut handler = make_handler(store);
+        let error = handler
+            .create_project(
+                &json!({
+                    "command": "create_project",
+                    "project_id": "precondition-project",
+                    "name": "Precondition project",
+                    "actor_id": DEFAULT_ACTOR,
+                    "expected_revision": 7,
+                }),
+                "op_create_project_revision",
+            )
+            .expect_err("project creation must reject unsupported preconditions");
+        assert_eq!(error.code, ErrorCode::InvalidArgument);
+        assert!(!handler
+            .store
+            .list_project_ids()
+            .expect("project list reads")
+            .iter()
+            .any(|project| project == "precondition-project"));
+        let _ = fs::remove_file(db);
+    }
+
+    #[test]
+    fn create_work_acceptance_profile_version_is_preserved_and_validated() {
+        let db = temp_path("profile-version");
+        let store = seed_store(&db);
+        let mut handler = make_handler(store);
+        let mut request = json!({
+            "command": "create_work",
+            "project_id": "service-project",
+            "work_id": "profile-version-work",
+            "kind": "task",
+            "title": "Profile version work",
+            "actor_id": DEFAULT_ACTOR,
+            "profile": "focused",
+            "profile_version": "1",
+        });
+        let (_, _, data) = handler
+            .create_work(&request, "op_profile_version")
+            .expect("supported profile version creates work");
+        assert_eq!(data.expect("create work data")["profile"]["version"], "1");
+
+        request["work_id"] = json!("unsupported-profile-version-work");
+        request["profile_version"] = json!("999");
+        let error = handler
+            .create_work(&request, "op_profile_version_unsupported")
+            .expect_err("unsupported profile version is rejected");
+        assert_eq!(error.code, ErrorCode::InvalidArgument);
+        let _ = fs::remove_file(db);
+    }
+
+    #[test]
+    fn operation_readback_includes_the_durable_receipt_payload() {
+        let (mut handler, _finish, root, evidence_operation) =
+            witnessed_finish_fixture("operation-receipt-readback");
+        let envelope = application_envelope(
+            &mut handler,
+            "op_operation_receipt_readback",
+            json!({
+                "command": "operation_show",
+                "project_id": "service-project",
+                "target_operation_id": evidence_operation,
+            }),
+        );
+        let data = envelope.data.expect("operation readback data");
+        assert_eq!(data["receipt"]["schema_version"], "boreal.receipt.v1");
+        assert!(data["receipt"]["receipt_id"].as_str().is_some());
+        assert_eq!(data["receipt"]["subject"]["work_id"], "service-work");
+        assert!(data["execution"]["receipt"].is_object());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn production_host_attaches_deadline_timers_and_control_hooks() {
+        let db = temp_path("production-hooks");
+        let store = seed_store(&db);
+        let mut handler = make_handler(store);
+        handler
+            .claim(
+                &json!({
+                    "command": "claim",
+                    "project_id": "service-project",
+                    "work_id": "service-work",
+                    "actor_id": DEFAULT_ACTOR,
+                    "harness_id": DEFAULT_HARNESS,
+                    "session_id": DEFAULT_SESSION,
+                    "attempt_id": "attempt-production-hooks",
+                    "expected_revision": 2,
+                    "lease_ttl_ms": 1_000,
+                    "hard_time_limit_ms": 2_000,
+                }),
+                "op_production_hooks_claim",
+            )
+            .expect("attempt claim succeeds");
+        drop(handler);
+        let socket = PathBuf::from(format!("/private/tmp/bw-hooks-{}.sock", now_ms_u64()));
+        let host = match bind_service_host(&db, &socket, ServiceHostConfig::default()) {
+            Ok(host) => host,
+            Err(error) if socket_unavailable_in_sandbox(&error.message) => {
+                let _ = fs::remove_file(db);
+                return;
+            }
+            Err(error) => panic!("production host binds: {error:?}"),
+        };
+        assert!(!host.timers().is_empty());
+        assert!(host.config().maintenance_interval().as_millis() > 0);
+        drop(host);
+        let _ = fs::remove_file(db);
+        let _ = fs::remove_file(socket);
     }
 
     #[test]
@@ -3668,6 +4174,66 @@ mod tests {
             .message
             .contains("require a parent"));
         let _ = fs::remove_file(db);
+    }
+
+    #[test]
+    fn service_boundary_rejects_wrapped_priority_and_accepts_checked_creation() {
+        let db = temp_path("boundary-validation.sqlite");
+        let mut handler = make_handler(seed_store(&db));
+        let priority_error = application_envelope(
+            &mut handler,
+            "op-invalid-priority",
+            json!({
+                    "command": "work_edit",
+                    "project_id": "service-project",
+                    "work_id": "service-work",
+                    "actor_id": DEFAULT_ACTOR,
+                    "priority": 256,
+                }),
+        );
+        assert_eq!(
+            priority_error.error.as_ref().map(|error| error.code),
+            Some(ErrorCode::InvalidArgument)
+        );
+
+        let revision_result = application_envelope(
+            &mut handler,
+            "op-checked-create-revision",
+            json!({
+                    "command": "create_work",
+                    "project_id": "service-project",
+                    "work_id": "revision-work",
+                    "kind": "task",
+                    "title": "Revision guarded work",
+                    "actor_id": DEFAULT_ACTOR,
+                    "expected_revision": 2,
+                }),
+        );
+        assert!(revision_result.error.is_none());
+        assert_eq!(revision_result.outcome, ApplicationOutcome::Changed);
+        assert_eq!(
+            revision_result.data.expect("created work")["work_id"],
+            "revision-work"
+        );
+        let _ = fs::remove_file(db);
+    }
+
+    #[test]
+    fn service_envelope_replaces_oversized_inline_data_with_operation_reference() {
+        let envelope = super::unix::make_envelope(
+            "op-oversized-envelope",
+            ApplicationOutcome::Changed,
+            Some(7),
+            Some(Value::String("x".repeat(MAX_JSON_BYTES))),
+            None,
+        );
+        let encoded = serde_json::to_vec(&envelope).expect("envelope serializes");
+        assert!(encoded.len() <= MAX_JSON_BYTES);
+        assert!(envelope.data.is_none());
+        assert_eq!(
+            envelope.detail_ref.as_ref().and_then(|reference| reference.uri.as_deref()),
+            Some("operation:op-oversized-envelope")
+        );
     }
 
     #[test]
@@ -4915,6 +5481,7 @@ mod tests {
         assert_eq!(data["command"], "evidence_add");
         assert!(data["receipt"].is_object());
         assert_eq!(data["receipt"]["receipt_id"], "receipt-service");
+        assert_eq!(data["session_id"], DEFAULT_SESSION);
         assert!(!data.to_string().contains(&receipt_path));
         let _ = fs::remove_file(receipt_path);
     }

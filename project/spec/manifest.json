@@ -18,6 +18,7 @@
   ],
   "required_paths": [
     "transition-table.md",
+    "conformance.json",
     "schema-v2.sql",
     "protocol/protocol-manifest.json",
     "guidance/directive-registry.json",
@@ -27,7 +28,7 @@
     "source-version"
   ],
   "fixture_sets": {
-    "transition": ["transition-table.md", "clock-and-attempt.json", "dependency.json", "acceptance-profiles.json"],
+    "transition": ["transition-table.md", "clock-and-attempt.json", "dependency.json", "acceptance-profiles.json", "conformance.json"],
     "protocol": ["protocol/"],
     "guidance": ["guidance/"],
     "cli": ["cli-contract.json"],

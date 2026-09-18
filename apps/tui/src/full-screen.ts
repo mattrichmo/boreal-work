@@ -15,7 +15,7 @@ export interface FullScreenTerminal {
   setRawMode?(enabled: boolean): void;
   resume?(): void;
   pause?(): void;
-  onData(listener: (value: string) => void): () => void;
+  onData(listener: (value: string | Uint8Array) => void): () => void;
   onResize(listener: () => void): () => void;
   onSignal(signal: TerminalSignal, listener: () => void): () => void;
 }
@@ -33,26 +33,50 @@ type QueuedWork = {
   readonly run: () => Promise<void>;
 };
 
-export function decodeKeys(value: string): string[] {
-  const keys: string[] = [];
-  for (let index = 0; index < value.length;) {
-    const sequence = value.slice(index, index + 3);
-    if (sequence === "\u001b[A") {
-      keys.push("up");
-      index += 3;
-    } else if (sequence === "\u001b[B") {
-      keys.push("down");
-      index += 3;
-    } else {
-      const key = value[index];
-      keys.push(key === "\r" || key === "\n" ? "enter"
-        : key === "\u001b" ? "escape"
-          : key === "\u0003" ? "ctrl-c"
-            : key === "\u007f" || key === "\b" ? "backspace" : key);
-      index += 1;
-    }
+/** Chunk-safe terminal decoder. Incomplete escape/UTF-8 sequences stay buffered. */
+export class StreamingKeyDecoder {
+  private readonly utf8 = new TextDecoder("utf-8", { fatal: false });
+  private pending = "";
+
+  push(value: string | Uint8Array): string[] {
+    this.pending += typeof value === "string" ? value : this.utf8.decode(value, { stream: true });
+    return this.parse(false);
   }
-  return keys;
+
+  flush(): string[] {
+    this.pending += this.utf8.decode();
+    return this.parse(true);
+  }
+
+  private parse(flush: boolean): string[] {
+    const keys: string[] = [];
+    let index = 0;
+    for (; index < this.pending.length;) {
+      const remaining = this.pending.slice(index);
+      if (remaining.startsWith("\u001b[A")) {
+        keys.push("up"); index += 3; continue;
+      }
+      if (remaining.startsWith("\u001b[B")) {
+        keys.push("down"); index += 3; continue;
+      }
+      if (remaining[0] === "\u001b" && !flush && "\u001b[A".startsWith(remaining)) break;
+      const codePoint = remaining.codePointAt(0);
+      if (codePoint === undefined) break;
+      const key = String.fromCodePoint(codePoint);
+      keys.push(codePoint === 13 || codePoint === 10 ? "enter"
+        : codePoint === 27 ? "escape"
+          : codePoint === 3 ? "ctrl-c"
+            : codePoint === 127 || codePoint === 8 ? "backspace" : key);
+      index += key.length;
+    }
+    this.pending = this.pending.slice(index);
+    return keys;
+  }
+}
+
+export function decodeKeys(value: string): string[] {
+  const decoder = new StreamingKeyDecoder();
+  return decoder.push(value).concat(decoder.flush());
 }
 
 function actionResultMessage(action: PendingKeyboardAction, result: ActionResult<unknown>): string {
@@ -84,11 +108,16 @@ export async function runFullScreen(
   let searchEditing = false;
   let searchBuffer = "";
   let statusMessage: string | null = null;
-  let pending: { action: PendingKeyboardAction; work_id: string } | null = null;
+  let pending: { action: PendingKeyboardAction; work_id: string; summary?: string } | null = null;
+  let summaryEditing = false;
+  let summaryBuffer = "";
   let selectedIndex = Math.max(0, controller.view().monitoring?.items.findIndex((item) => item.work_id === controller.view().route.work_id) ?? 0);
   let work = Promise.resolve();
   let activeWork: QueuedWork | null = null;
   const queuedMutations = new Set<string>();
+  let refreshQueued = false;
+  let refreshActive = false;
+  let refreshDirty = false;
   let timer: ReturnType<typeof setInterval> | undefined;
   let finish!: () => void;
   const finished = new Promise<void>((resolve) => { finish = resolve; });
@@ -135,6 +164,8 @@ export async function runFullScreen(
       palette_visible: paletteVisible,
       search_editing: searchEditing,
       search_buffer: searchBuffer,
+      summary_editing: summaryEditing,
+      summary_buffer: summaryBuffer,
     }));
   };
 
@@ -169,6 +200,28 @@ export async function runFullScreen(
     }).then(redraw);
   };
 
+  const enqueueRefresh = (): void => {
+    if (!acceptingInput) return;
+    if (refreshActive || refreshQueued) {
+      refreshDirty = true;
+      return;
+    }
+    refreshQueued = true;
+    enqueue(async () => {
+      refreshQueued = false;
+      refreshActive = true;
+      try {
+        await controller.refresh();
+      } finally {
+        refreshActive = false;
+        if (refreshDirty && acceptingInput) {
+          refreshDirty = false;
+          enqueueRefresh();
+        }
+      }
+    }, "refresh");
+  };
+
   const executePending = async (): Promise<void> => {
     const current = pending;
     pending = null;
@@ -177,7 +230,7 @@ export async function runFullScreen(
     switch (current.action) {
       case "claim": result = await controller.claim(current.work_id); break;
       case "accept_start": result = await controller.acceptStart(current.work_id); break;
-      case "finish": throw new Error("finish requires a typed summary; use `finish <summary>` in the line interface");
+      case "finish": result = await controller.finish(current.work_id, current.summary); break;
       case "release": result = await controller.release(current.work_id, "dashboard_operator"); break;
     }
     statusMessage = actionResultMessage(current.action, result);
@@ -192,6 +245,12 @@ export async function runFullScreen(
     const availability = controller.view().actions.find((entry) => entry.action === action);
     if (!availability?.enabled) {
       statusMessage = `${action} unavailable: ${availability?.reason ?? "action is not available"}`;
+      return;
+    }
+    if (action === "finish") {
+      summaryEditing = true;
+      summaryBuffer = "";
+      statusMessage = "type a closeout summary, then press Enter";
       return;
     }
     pending = { action, work_id };
@@ -247,17 +306,24 @@ export async function runFullScreen(
 
   const handleKey = (key: string): void => {
     if (closed || !acceptingInput) return;
-    if (key === "q" || key === "Q" || key === "ctrl-c") {
-      stop();
-      return;
-    }
-    if (pending) {
-      if (key === "y" || key === "Y" || key === "enter") {
-        enqueue(executePending, `mutation ${pending.action} ${pending.work_id}`, true);
-      }
-      else if (key === "n" || key === "N" || key === "escape") {
-        statusMessage = `cancelled ${pending.action}`;
-        pending = null;
+    if (key === "ctrl-c") { stop(); return; }
+    if (summaryEditing) {
+      if (key === "escape") {
+        summaryEditing = false;
+        summaryBuffer = "";
+        statusMessage = "finish cancelled";
+      } else if (key === "enter") {
+        if (!summaryBuffer.trim()) statusMessage = "finish summary must not be empty";
+        else {
+          const work_id = selectedWorkId();
+          if (work_id) pending = { action: "finish", work_id, summary: summaryBuffer.trim() };
+          summaryEditing = false;
+          summaryBuffer = "";
+        }
+      } else if (key === "backspace") {
+        summaryBuffer = summaryBuffer.slice(0, -1);
+      } else if (key.length > 0 && key >= " ") {
+        summaryBuffer += key;
       }
       redraw();
       return;
@@ -274,8 +340,23 @@ export async function runFullScreen(
         statusMessage = searchQuery ? `search: ${searchQuery}` : "search cleared";
       } else if (key === "backspace") {
         searchBuffer = searchBuffer.slice(0, -1);
-      } else if (key.length === 1 && key >= " ") {
+      } else if (key.length > 0 && key >= " ") {
         searchBuffer += key;
+      }
+      redraw();
+      return;
+    }
+    if (key === "q" || key === "Q") {
+      stop();
+      return;
+    }
+    if (pending) {
+      if (key === "y" || key === "Y" || key === "enter") {
+        enqueue(executePending, `mutation ${pending.action} ${pending.work_id}`, true);
+      }
+      else if (key === "n" || key === "N" || key === "escape") {
+        statusMessage = `cancelled ${pending.action}`;
+        pending = null;
       }
       redraw();
       return;
@@ -309,7 +390,11 @@ export async function runFullScreen(
         break;
       }
       case "escape": controller.navigate({ kind: "monitoring", project_id: controller.view().route.project_id }); break;
-      case "r": case "R": enqueue(async () => { await controller.refresh(); statusMessage = "refreshed"; }, "refresh"); return;
+      case "r": case "R": enqueue(async () => { await controller.refresh(); statusMessage = "refreshed"; }, "manual refresh"); return;
+      case "]":
+        if (controller.nextPage) enqueue(async () => { await controller.nextPage?.(); statusMessage = "next page"; }, "next page");
+        else statusMessage = "pagination is unavailable from this service adapter";
+        break;
       case "?": helpVisible = !helpVisible; break;
       case "p": case "P": paletteVisible = true; break;
       case "/": searchEditing = true; searchBuffer = searchQuery; break;
@@ -333,13 +418,14 @@ export async function runFullScreen(
 
   const disposers: Array<() => void> = [];
   const refreshMs = options.auto_refresh_ms === undefined ? 5_000 : Math.max(500, Math.floor(options.auto_refresh_ms));
-  timer = setInterval(() => enqueue(async () => { await controller.refresh(); }, "refresh"), refreshMs);
+  timer = setInterval(enqueueRefresh, refreshMs);
 
   try {
     terminal.write(ENTER_ALT_SCREEN);
     terminal.setRawMode?.(true);
     terminal.resume?.();
-    disposers.push(terminal.onData((value) => decodeKeys(value).forEach(handleKey)));
+    const keyDecoder = new StreamingKeyDecoder();
+    disposers.push(terminal.onData((value) => keyDecoder.push(value).forEach(handleKey)));
     disposers.push(terminal.onResize(redraw));
     for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"] as const) {
       disposers.push(terminal.onSignal(signal, stop));

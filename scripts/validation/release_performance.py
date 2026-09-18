@@ -65,11 +65,18 @@ def markers(output: str, kind: str) -> list[dict[str, Any]]:
     return [json.loads(value) for value in MARKERS[kind].findall(output)]
 
 
-def cargo_test(test: str, *, release: bool = False, ignored: bool = False) -> dict[str, Any]:
+def cargo_test(
+    test: str,
+    *,
+    release: bool = False,
+    ignored: bool = False,
+    online: bool = False,
+) -> dict[str, Any]:
     command = ["cargo", "test", "-p", "boreal-store", "--test", test]
     if release:
         command.append("--release")
-    command.extend(["--offline"])
+    if not online:
+        command.append("--offline")
     if ignored:
         command.extend(["--", "--ignored", "--nocapture"])
     elif test == "release_acceptance":
@@ -90,6 +97,7 @@ def main() -> int:
         help="comma-separated ignored benchmark sizes (default: 10000,100000)",
     )
     parser.add_argument("--release", action="store_true", help="run native probes in release mode")
+    parser.add_argument("--online", action="store_true", help="allow Cargo to resolve dependencies from the network")
     parser.add_argument("--skip-benchmark", action="store_true")
     parser.add_argument(
         "--skip-doctor",
@@ -141,7 +149,7 @@ def main() -> int:
     }
 
     for test, label in (("release_acceptance", "runtime/schema acceptance"), ("schema_v3", "schema-v3 migration"), ("runtime_backup", "backup/restore")):
-        result = cargo_test(test, release=args.release)
+        result = cargo_test(test, release=args.release, online=args.online)
         evidence["checks"].append({"label": label, "status": "pass", "command": result["command"]})
         if test == "release_acceptance":
             combined = result["stdout"] + result["stderr"]
@@ -163,9 +171,10 @@ def main() -> int:
             }
         )
     else:
-        doctor = run(
-            ["cargo", "test", "-p", "boreal-cli", "--test", "release_acceptance", "--offline"]
-        )
+        doctor_command = ["cargo", "test", "-p", "boreal-cli", "--test", "release_acceptance"]
+        if not args.online:
+            doctor_command.append("--offline")
+        doctor = run(doctor_command)
         evidence["checks"].append(
             {
                 "label": "public doctor and bounded-status acceptance",
@@ -180,7 +189,9 @@ def main() -> int:
         command = ["cargo", "test", "-p", "boreal-store", "--test", "release_acceptance"]
         if args.release:
             command.append("--release")
-        command.extend(["--offline", "--", "--ignored", "--nocapture"])
+        if not args.online:
+            command.append("--offline")
+        command.extend(["--", "--ignored", "--nocapture"])
         result = run(command, env=env)
         records = markers(result["stdout"] + result["stderr"], "benchmark")
         if len(records) != 1:

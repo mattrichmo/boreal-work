@@ -110,9 +110,12 @@ rm -rf "$staging_dir"
 boundary; it intentionally does not hash generated binaries or TUI output.
 `build_release.py` adds those generated assets, records Rust/Node/TypeScript
 toolchain versions, and creates the archive. The current process still does
-not sign artifacts, contact a registry, publish a Homebrew tap automatically,
-pause active attempts during an upgrade, or migrate a project database.
-Those behaviors remain part of the P4/P5 compatibility and cutover gates.
+not sign artifacts, contact a registry, pause active attempts during an
+upgrade, or migrate a project database. When the public tap and
+`HOMEBREW_TAP_TOKEN` are configured, the release workflow publishes the
+rendered Homebrew formula automatically; otherwise the formula remains a
+checked-in packaging template. The remaining behaviors are part of the P4/P5
+compatibility and cutover gates.
 
 The identity simulation is deliberately not a live installer: its target and
 rollback backup are synthetic directories inside a caller-created temp

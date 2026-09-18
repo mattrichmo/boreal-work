@@ -80,6 +80,14 @@ fn planning_mutations_are_revision_checked_audited_and_replayable() {
     let added = app
         .add_dependency_as(&project, "a", "b", "operator", "t6", "op-dependency")
         .unwrap();
+    assert_eq!(
+        store
+            .operation("op-dependency")
+            .unwrap()
+            .unwrap()
+            .expected_revision,
+        Some(dependency_revision)
+    );
     let removed = app
         .remove_dependency_as(
             &project,

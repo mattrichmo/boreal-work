@@ -5,6 +5,7 @@ use serde_json::Value;
 use std::{
     fs,
     os::raw::c_int,
+    os::unix::net::UnixStream,
     path::{Path, PathBuf},
     process::{Child, Command, Output, Stdio},
     thread,
@@ -43,6 +44,89 @@ fn service_run_handles_sigterm_and_removes_socket() {
     });
     assert_eq!(envelope["data"]["service"], "stopped");
     assert_socket_removed(&socket);
+}
+
+#[test]
+fn service_run_recovers_a_stale_socket_after_sigkill_without_breaking_live_service() {
+    let temp = TempDir::new("service-sigkill");
+    let database = temp.path().join("boreal.sqlite");
+    let socket = short_socket_path("sigkill");
+    let Some(mut child) = start_service(temp.path(), &database, &socket) else {
+        return;
+    };
+
+    let competing = Command::new(binary())
+        .current_dir(temp.path())
+        .args(["service", "run", "--db"])
+        .arg(&database)
+        .args(["--socket"])
+        .arg(&socket)
+        .args(["--json"])
+        .output()
+        .expect("competing service launches");
+    assert!(
+        !competing.status.success(),
+        "a live service endpoint was replaced"
+    );
+    assert!(
+        text(&competing).contains("already in use"),
+        "competing service did not report live ownership: {}",
+        text(&competing)
+    );
+    assert!(
+        UnixStream::connect(&socket).is_ok(),
+        "the original live service endpoint must remain connectable"
+    );
+
+    // SIGKILL prevents the service's Drop cleanup, so the pathname is a
+    // realistic stale endpoint for the next process to inspect.
+    terminate_if_running(&mut child, SIGKILL);
+    assert!(
+        socket.exists(),
+        "SIGKILL should leave a stale socket pathname"
+    );
+
+    let Some(restarted) = start_service(temp.path(), &database, &socket) else {
+        return;
+    };
+    let output = stop_service(restarted, &socket, SIGTERM);
+    assert!(
+        output.status.success(),
+        "restarted service did not shut down cleanly: {}",
+        text(&output)
+    );
+}
+
+#[test]
+fn direct_mutation_is_rejected_while_the_service_owns_the_database() {
+    let temp = TempDir::new("service-direct-owner");
+    let database = temp.path().join("boreal.sqlite");
+    let socket = short_socket_path("direct-owner");
+    let Some(service) = start_service(temp.path(), &database, &socket) else {
+        return;
+    };
+
+    let direct = Command::new(binary())
+        .current_dir(temp.path())
+        .args([
+            "init",
+            "direct-owner-project",
+            "--actor",
+            "direct-owner-agent",
+            "--operation-id",
+            "op-direct-owner-init",
+            "--db",
+        ])
+        .arg(&database)
+        .args(["--json"])
+        .output()
+        .expect("direct mutation launches");
+    let _ = stop_service(service, &socket, SIGTERM);
+
+    assert!(!direct.status.success(), "direct mutation bypassed ownership");
+    let envelope = json(&direct);
+    assert_eq!(envelope["error"]["code"], "service_busy");
+    assert_eq!(envelope["outcome"], "busy");
 }
 
 #[test]
@@ -204,7 +288,7 @@ fn start_service(root: &Path, database: &Path, socket: &Path) -> Option<Child> {
         .expect("service launches");
 
     for _ in 0..300 {
-        if socket.exists() {
+        if socket.exists() && UnixStream::connect(socket).is_ok() {
             return Some(child);
         }
         if child.try_wait().expect("service status reads").is_some() {

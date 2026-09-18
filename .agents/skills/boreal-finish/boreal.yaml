@@ -1,0 +1,10 @@
+schema_version: boreal.skill.v2
+system: boreal
+skill: boreal-finish
+display_name: Boreal v2 Finish
+workflow_package: boreal.core-workflows
+workflow_package_version: 1.0.0
+state_authority: boreal.application.v2
+harness_neutral: true
+workflows:
+  - boreal.workflow.finish.v1

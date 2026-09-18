@@ -358,6 +358,15 @@ pub struct OperationRecord {
     pub completed_at: Option<String>,
 }
 
+/// A project-scoped operation readback. Evidence executions are durable
+/// sidecars and may exist before their parent operation row, so both records
+/// are independently checked before being returned.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OperationReadback {
+    pub operation: Option<OperationRecord>,
+    pub execution: Option<EvidenceExecutionRecord>,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AuditEventRecord {
     pub project_id: String,
@@ -462,6 +471,24 @@ pub struct ProjectStatusRead {
     pub total: u64,
     pub works: Vec<StatusWorkRecord>,
     pub dependencies: Vec<StatusDependencyRecord>,
+}
+
+#[derive(Clone, Debug)]
+struct StatusGateRow {
+    work_id: String,
+    gate_id: String,
+    profile_id: String,
+    profile_version: u64,
+    kind: GateKind,
+    required: bool,
+    state: GateState,
+}
+
+#[derive(Clone, Debug)]
+struct StatusReceiptFact {
+    receipt_id: String,
+    result: ReceiptOutcome,
+    rejection_code: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1105,8 +1132,55 @@ pub struct SqliteStore {
 unsafe impl Send for SqliteStore {}
 
 impl SqliteStore {
-    /// Opens a database and applies the supplied versioned schema on a fresh DB.
+    /// Opens a database and applies the supplied versioned schema only when it
+    /// is fresh. Existing databases are opened without compatibility repair;
+    /// callers that need additive repair must invoke [`apply_schema`]
+    /// explicitly under the owning migration boundary.
     pub fn open(path: impl AsRef<Path>, schema_sql: &str) -> Result<Self, StoreError> {
+        let store = Self::open_connection(path, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE)?;
+        match store.schema_version()? {
+            0 => store.apply_schema(schema_sql)?,
+            SCHEMA_VERSION => store.verify_schema_contract()?,
+            WORK_MODEL_SCHEMA_VERSION => store.verify_work_model_v3_contract()?,
+            found => return Err(StoreError::UnsupportedSchema { found }),
+        }
+        Ok(store)
+    }
+
+    /// Opens an existing database without claiming that its same-version
+    /// schema is complete. This is reserved for an explicit migration/repair
+    /// boundary; normal readers and writers must use [`Self::open`], which
+    /// fails closed when the contract is incomplete.
+    pub fn open_for_migration(path: impl AsRef<Path>) -> Result<Self, StoreError> {
+        let store = Self::open_connection(path, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE)?;
+        match store.schema_version()? {
+            0 | SCHEMA_VERSION | WORK_MODEL_SCHEMA_VERSION => Ok(store),
+            found => Err(StoreError::UnsupportedSchema { found }),
+        }
+    }
+
+    /// Opens an established database for read-only work. This path never
+    /// enables WAL or runs schema DDL, so status/readback callers cannot take
+    /// a writer lock merely by opening a connection.
+    pub fn open_read_only(path: impl AsRef<Path>) -> Result<Self, StoreError> {
+        let store = Self::open_connection(path, SQLITE_OPEN_READONLY)?;
+        match store.schema_version()? {
+            SCHEMA_VERSION => {
+                store.verify_schema_contract()?;
+                Ok(store)
+            }
+            WORK_MODEL_SCHEMA_VERSION => {
+                store.verify_work_model_v3_contract()?;
+                Ok(store)
+            }
+            0 => Err(StoreError::Invalid(
+                "read-only database is not initialized".to_owned(),
+            )),
+            found => Err(StoreError::UnsupportedSchema { found }),
+        }
+    }
+
+    fn open_connection(path: impl AsRef<Path>, flags: c_int) -> Result<Self, StoreError> {
         let path = path.as_ref();
         let filename = CString::new(
             path.to_str()
@@ -1117,7 +1191,7 @@ impl SqliteStore {
             sqlite3_open_v2(
                 filename.as_ptr(),
                 &mut database,
-                SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX,
+                flags | SQLITE_OPEN_FULLMUTEX,
                 ptr::null(),
             )
         };
@@ -1135,8 +1209,10 @@ impl SqliteStore {
             query_metrics: Arc::new(SqliteQueryMetricsAtomic::default()),
         };
         unsafe { sqlite3_busy_timeout(store.database, 250) };
-        store.execute_batch("PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL;")?;
-        store.apply_schema(schema_sql)?;
+        store.execute_batch("PRAGMA foreign_keys = ON;")?;
+        if flags & SQLITE_OPEN_READONLY == 0 {
+            store.execute_batch("PRAGMA journal_mode = WAL;")?;
+        }
         Ok(store)
     }
 
@@ -1325,7 +1401,6 @@ impl SqliteStore {
                     replayed: true,
                 });
             }
-            self.create_project(project_id, now)?;
             self.ensure_actor(actor_id, actor_role, credential_ref, display_name, now)?;
             self.ensure_acceptance_profile("focused", 1, "sha256:focused", "{}", now)?;
             if self
@@ -1972,6 +2047,63 @@ impl SqliteStore {
         Ok(Some(self.work_record_from_statement(&statement)?))
     }
 
+    /// Returns a bounded continuation page of claim candidates. This is an
+    /// indexed, keyset-paginated lookup for adapter selection; the canonical
+    /// claim transaction still rechecks eligibility under its write lock.
+    /// Callers must continue with the returned last ID rather than treating a
+    /// first page as an existence boundary.
+    pub fn claimable_work_candidates(
+        &self,
+        project_id: &str,
+        now: &str,
+        limit: u64,
+        after_work_id: Option<&str>,
+    ) -> Result<Vec<String>, StoreError> {
+        if limit == 0 || limit > 1_000 {
+            return Err(StoreError::Invalid(
+                "claimable candidate limit must be 1..=1000".to_owned(),
+            ));
+        }
+        let mut statement = self.prepare(
+            "SELECT wi.work_id
+             FROM work_item wi
+             WHERE wi.project_id = ?1
+               AND wi.lifecycle = 'open'
+               AND wi.kind = 'task'
+               AND wi.dispatch_policy = 'automatic'
+               AND (wi.retry_not_before IS NULL OR wi.retry_not_before <= ?2)
+               AND (?3 IS NULL OR wi.work_id > ?3)
+               AND NOT EXISTS (
+                 SELECT 1 FROM attempt a
+                 WHERE a.work_id = wi.work_id AND a.current = 1
+               )
+               AND NOT EXISTS (
+                 SELECT 1 FROM work_hold h
+                 WHERE h.work_id = wi.work_id AND h.resolved_at IS NULL
+               )
+               AND NOT EXISTS (
+                 SELECT 1 FROM dependency d
+                 JOIN work_item blocker
+                   ON blocker.project_id = d.project_id
+                  AND blocker.work_id = d.prerequisite_id
+                 WHERE d.project_id = wi.project_id
+                   AND d.dependent_id = wi.work_id
+                   AND blocker.lifecycle <> 'closed'
+               )
+             ORDER BY wi.work_id
+             LIMIT ?4",
+        )?;
+        statement.bind_text(1, project_id)?;
+        statement.bind_text(2, now)?;
+        statement.bind_optional_text(3, after_work_id)?;
+        statement.bind_i64(4, limit)?;
+        let mut ids = Vec::new();
+        while statement.step()? == SQLITE_ROW {
+            ids.push(statement.column_text(0)?);
+        }
+        Ok(ids)
+    }
+
     pub fn work_holds(&self, work_id: &str) -> Result<Vec<WorkHoldRecord>, StoreError> {
         let mut statement = self.prepare(
             "SELECT hold_id, work_id, reason_code, actor_id, created_at,
@@ -2071,9 +2203,36 @@ impl SqliteStore {
         dependent_id: &str,
         now: &str,
     ) -> Result<(), StoreError> {
+        let expected_revision = self.project_revision(project_id)?.0;
+        self.add_dependency_checked(
+            project_id,
+            prerequisite_id,
+            dependent_id,
+            expected_revision,
+            now,
+        )
+    }
+
+    /// Adds a dependency only if the project is still at the caller's
+    /// observed revision. The legacy convenience method above captures its
+    /// revision immediately before entering this same transaction, so there
+    /// is no unguarded dependency write path.
+    pub fn add_dependency_checked(
+        &self,
+        project_id: &str,
+        prerequisite_id: &str,
+        dependent_id: &str,
+        expected_revision: u64,
+        now: &str,
+    ) -> Result<(), StoreError> {
         self.execute_batch("BEGIN IMMEDIATE")?;
-        let result =
-            self.add_dependency_in_transaction(project_id, prerequisite_id, dependent_id, now);
+        let result = (|| {
+            check_expected_revision(
+                self.project_revision(project_id)?.0,
+                Some(expected_revision),
+            )?;
+            self.add_dependency_in_transaction(project_id, prerequisite_id, dependent_id, now)
+        })();
         finish_transaction(self, result)
     }
 
@@ -2137,6 +2296,22 @@ impl SqliteStore {
         request_digest: &str,
         now: &str,
     ) -> Result<MutationResult, StoreError> {
+        self.create_work_operation_checked(work, actor_id, operation_id, request_digest, None, now)
+    }
+
+    /// Creates work while enforcing the caller's snapshot revision inside the
+    /// write transaction. `None` is retained only for compatibility callers;
+    /// new adapters should provide the revision they observed and include it
+    /// in their request digest.
+    pub fn create_work_operation_checked(
+        &self,
+        work: &WorkItem,
+        actor_id: &str,
+        operation_id: &str,
+        request_digest: &str,
+        expected_project_revision: Option<u64>,
+        now: &str,
+    ) -> Result<MutationResult, StoreError> {
         self.execute_batch("BEGIN IMMEDIATE")?;
         let result = (|| {
             if let Some(existing) = self.operation(operation_id)? {
@@ -2151,6 +2326,10 @@ impl SqliteStore {
                     replayed: true,
                 });
             }
+            check_expected_revision(
+                self.project_revision(work.project_id.as_str())?.0,
+                expected_project_revision,
+            )?;
             self.create_work_in_transaction(work, now)?;
             let revision = self.bump_revision_in_transaction(work.project_id.as_str())?;
             let payload = json_object(json!({"work_id": work.id.as_str()}))?;
@@ -2160,7 +2339,7 @@ impl SqliteStore {
                 command: "work.create".to_owned(),
                 actor_id: actor_id.to_owned(),
                 session_id: None,
-                expected_revision: None,
+                expected_revision: expected_project_revision,
                 attempt_id: None,
                 fence: None,
                 request_digest: request_digest.to_owned(),
@@ -2635,6 +2814,7 @@ impl SqliteStore {
         request_digest: &str,
         now: &str,
     ) -> Result<MutationResult, StoreError> {
+        let expected_revision = self.project_revision(project_id)?.0;
         self.add_dependency_operation_checked(
             project_id,
             prerequisite_id,
@@ -2642,7 +2822,7 @@ impl SqliteStore {
             actor_id,
             operation_id,
             request_digest,
-            None,
+            Some(expected_revision),
             now,
         )
     }
@@ -2674,7 +2854,8 @@ impl SqliteStore {
                 });
             }
             let current_revision = self.project_revision(project_id)?.0;
-            check_expected_revision(current_revision, expected_revision)?;
+            let expected_revision = expected_revision.unwrap_or(current_revision);
+            check_expected_revision(current_revision, Some(expected_revision))?;
             self.add_dependency_in_transaction(project_id, prerequisite_id, dependent_id, now)?;
             let revision = self.bump_revision_in_transaction(project_id)?;
             let payload = json_object(json!({
@@ -2687,7 +2868,7 @@ impl SqliteStore {
                 command: "dependency.add".to_owned(),
                 actor_id: actor_id.to_owned(),
                 session_id: None,
-                expected_revision: None,
+                expected_revision: Some(expected_revision),
                 attempt_id: None,
                 fence: None,
                 request_digest: request_digest.to_owned(),
@@ -2801,6 +2982,11 @@ impl SqliteStore {
             // two avoidable N+1 query families from large status snapshots.
             let current_attempts = self.current_attempts_for_project(project_id)?;
             let active_holds = self.active_hard_holds_for_project(project_id)?;
+            let gate_diagnostics = self.status_gate_diagnostics_for_project(
+                project_id,
+                &current_attempts,
+                revision.0,
+            )?;
 
             let mut rows = self.prepare(
                 "SELECT work_id, project_id, kind, parent_id, lifecycle,
@@ -2814,18 +3000,21 @@ impl SqliteStore {
             while rows.step()? == SQLITE_ROW {
                 let work_id = rows.column_text(0)?;
                 let current_attempt = current_attempts.get(&work_id).cloned();
-                let diagnostics = match current_attempt.as_ref() {
-                    Some(attempt) => self.gate_diagnostics_at_revision(
-                        project_id,
-                        &work_id,
-                        Some(&attempt.attempt_id),
-                        Some(attempt.fence),
-                        revision.0,
-                    )?,
-                    None => self.gate_diagnostics_at_revision(
-                        project_id, &work_id, None, None, revision.0,
-                    )?,
-                };
+                let diagnostics =
+                    gate_diagnostics
+                        .get(&work_id)
+                        .cloned()
+                        .unwrap_or_else(|| GateDiagnostics {
+                            project_id: project_id.to_owned(),
+                            work_id: work_id.clone(),
+                            attempt_id: current_attempt
+                                .as_ref()
+                                .map(|attempt| attempt.attempt_id.clone()),
+                            fence: current_attempt.as_ref().map(|attempt| attempt.fence),
+                            revision: revision.0,
+                            gates: Vec::new(),
+                            missing: Vec::new(),
+                        });
                 let gates = diagnostics
                     .gates
                     .iter()
@@ -3237,6 +3426,215 @@ impl SqliteStore {
                 .push(ReasonCode::HardHold(statement.column_text(1)?));
         }
         Ok(holds)
+    }
+
+    /// Loads all status gate facts for a project in bounded relation scans.
+    /// Persisted gate rows, current-attempt receipts, reviews, and summaries
+    /// are fetched in batches; the per-work status loop only combines already
+    /// materialized facts. This keeps ordinary status reads from preparing a
+    /// gate query for every work item while retaining the attempt/fence proof
+    /// rules used by [`gate_diagnostics_at_revision`].
+    fn status_gate_diagnostics_for_project(
+        &self,
+        project_id: &str,
+        current_attempts: &BTreeMap<String, AttemptRecord>,
+        revision: u64,
+    ) -> Result<BTreeMap<String, GateDiagnostics>, StoreError> {
+        let mut gate_rows = Vec::new();
+        let mut statement = self.prepare(
+            "SELECT g.work_id, g.gate_id, g.profile_id, g.profile_version,
+                    g.kind, g.required, g.state
+             FROM gate g JOIN work_item wi ON wi.work_id = g.work_id
+             WHERE wi.project_id = ?1
+             ORDER BY g.work_id, g.gate_id",
+        )?;
+        statement.bind_text(1, project_id)?;
+        while statement.step()? == SQLITE_ROW {
+            gate_rows.push(StatusGateRow {
+                work_id: statement.column_text(0)?,
+                gate_id: statement.column_text(1)?,
+                profile_id: statement.column_text(2)?,
+                profile_version: statement.column_u64(3)?,
+                kind: parse_gate_kind(&statement.column_text(4)?)?,
+                required: statement.column_i64(5)? == 1,
+                state: parse_gate_state(&statement.column_text(6)?)?,
+            });
+        }
+
+        let mut receipts = BTreeMap::<(String, String, u64, String), StatusReceiptFact>::new();
+        let mut statement = self.prepare(
+            "SELECT r.work_id, r.attempt_id, r.fence, r.gate_id,
+                    r.receipt_id, r.result, r.rejection_code
+             FROM receipt r
+             JOIN work_item wi ON wi.work_id = r.work_id
+             JOIN attempt a ON a.work_id = r.work_id
+                           AND a.attempt_id = r.attempt_id
+                           AND a.fence = r.fence
+                           AND a.current = 1
+             WHERE wi.project_id = ?1 AND r.gate_id IS NOT NULL
+             ORDER BY r.work_id, r.attempt_id, r.fence, r.gate_id,
+                      r.ended_at DESC, r.receipt_id DESC",
+        )?;
+        statement.bind_text(1, project_id)?;
+        while statement.step()? == SQLITE_ROW {
+            let key = (
+                statement.column_text(0)?,
+                statement.column_text(1)?,
+                statement.column_u64(2)?,
+                statement.column_text(3)?,
+            );
+            receipts.entry(key).or_insert(StatusReceiptFact {
+                receipt_id: statement.column_text(4)?,
+                result: parse_receipt_outcome(&statement.column_text(5)?)?,
+                rejection_code: statement.column_optional_text(6)?,
+            });
+        }
+
+        let mut reviews = BTreeMap::<(String, String, u64, String), bool>::new();
+        let mut statement = self.prepare(
+            "SELECT r.work_id, r.attempt_id, r.fence, r.gate_id,
+                    r.decision
+             FROM review r
+             JOIN work_item wi ON wi.work_id = r.work_id
+             JOIN attempt a ON a.work_id = r.work_id
+                           AND a.attempt_id = r.attempt_id
+                           AND a.fence = r.fence
+                           AND a.current = 1
+             WHERE wi.project_id = ?1 AND r.gate_id IS NOT NULL
+             ORDER BY r.work_id, r.attempt_id, r.fence, r.gate_id,
+                      r.created_at DESC, r.review_id DESC",
+        )?;
+        statement.bind_text(1, project_id)?;
+        while statement.step()? == SQLITE_ROW {
+            let key = (
+                statement.column_text(0)?,
+                statement.column_text(1)?,
+                statement.column_u64(2)?,
+                statement.column_text(3)?,
+            );
+            let accepted =
+                parse_review_decision(&statement.column_text(4)?)? == ReviewDecision::Accepted;
+            reviews.entry(key).or_insert(accepted);
+        }
+
+        let mut summaries = BTreeMap::<String, SummaryRecord>::new();
+        let mut statement = self.prepare(
+            "SELECT s.summary_id, wi.project_id, s.work_id, s.attempt_id,
+                    s.fence, s.subject_ref, s.source_version_id,
+                    s.config_identity, s.profile_id, s.profile_version,
+                    s.body_digest, s.body_size, s.current, s.created_at
+             FROM summary s
+             JOIN work_item wi ON wi.work_id = s.work_id
+             JOIN attempt a ON a.work_id = s.work_id
+                           AND a.attempt_id = s.attempt_id
+                           AND a.fence = s.fence
+                           AND a.current = 1
+             WHERE wi.project_id = ?1 AND s.current = 1
+             ORDER BY s.work_id, s.created_at DESC, s.summary_id DESC",
+        )?;
+        statement.bind_text(1, project_id)?;
+        while statement.step()? == SQLITE_ROW {
+            let work_id = statement.column_text(2)?;
+            summaries
+                .entry(work_id)
+                .or_insert(summary_from_statement(&statement)?);
+        }
+
+        let mut diagnostics = BTreeMap::new();
+        for row in gate_rows {
+            let (attempt_id, fence) = current_attempts
+                .get(&row.work_id)
+                .map(|attempt| (Some(attempt.attempt_id.as_str()), Some(attempt.fence)))
+                .unwrap_or((None, None));
+            let entry = diagnostics
+                .entry(row.work_id.clone())
+                .or_insert_with(|| GateDiagnostics {
+                    project_id: project_id.to_owned(),
+                    work_id: row.work_id.clone(),
+                    attempt_id: attempt_id.map(str::to_owned),
+                    fence,
+                    revision,
+                    gates: Vec::new(),
+                    missing: Vec::new(),
+                });
+
+            let (state, receipt_id, reason) = match (attempt_id, fence) {
+                (Some(attempt_id), Some(fence)) => {
+                    let key = (
+                        row.work_id.clone(),
+                        attempt_id.to_owned(),
+                        fence,
+                        row.gate_id.clone(),
+                    );
+                    if let Some(receipt) = receipts.get(&key) {
+                        let state = if receipt.result == ReceiptOutcome::Passed
+                            && receipt.rejection_code.is_none()
+                        {
+                            GateState::Satisfied
+                        } else {
+                            GateState::Failed
+                        };
+                        let reason = receipt.rejection_code.clone().or_else(|| {
+                            (receipt.result != ReceiptOutcome::Passed)
+                                .then(|| receipt_outcome_name(receipt.result).to_owned())
+                        });
+                        (state, Some(receipt.receipt_id.clone()), reason)
+                    } else {
+                        let review_key = (
+                            row.work_id.clone(),
+                            attempt_id.to_owned(),
+                            fence,
+                            row.gate_id.clone(),
+                        );
+                        let review_satisfied = row.kind == GateKind::Review
+                            && reviews.get(&review_key).copied().unwrap_or(false);
+                        let summary_satisfied = row.kind == GateKind::Summary
+                            && summaries.get(&row.work_id).is_some_and(|summary| {
+                                let Some(attempt) = current_attempts.get(&row.work_id) else {
+                                    return false;
+                                };
+                                summary.attempt_id == attempt_id
+                                    && summary.fence == fence
+                                    && summary.source_version_id
+                                        == attempt.source_version_id.clone().unwrap_or_default()
+                                    && summary.config_identity == attempt.config_identity
+                                    && summary.profile_id == row.profile_id
+                                    && summary.profile_version == row.profile_version
+                                    && summary.body_size > 0
+                                    && summary.body_size <= MAX_SUMMARY_BODY_BYTES
+                                    && valid_sha256_digest(&summary.body_digest)
+                            });
+                        if review_satisfied || summary_satisfied {
+                            (GateState::Satisfied, None, None)
+                        } else {
+                            (
+                                GateState::Open,
+                                None,
+                                Some("current_proof_missing".to_owned()),
+                            )
+                        }
+                    }
+                }
+                _ => (row.state, None, None),
+            };
+            entry.gates.push(GateDiagnostic {
+                gate_id: row.gate_id,
+                kind: row.kind,
+                required: row.required,
+                state,
+                receipt_id,
+                reason,
+            });
+        }
+        for entry in diagnostics.values_mut() {
+            entry.missing = entry
+                .gates
+                .iter()
+                .filter(|gate| gate.required && gate.state != GateState::Satisfied)
+                .map(|gate| gate.gate_id.clone())
+                .collect();
+        }
+        Ok(diagnostics)
     }
 
     /// Reads the current attempt by its work subject. This is the bounded
@@ -3864,7 +4262,10 @@ impl SqliteStore {
                     ));
                 }
                 self.execute_batch("BEGIN IMMEDIATE")?;
-                let result = self.execute_batch(schema_sql);
+                let result = (|| {
+                    self.execute_batch(schema_sql)?;
+                    self.verify_schema_contract()
+                })();
                 finish_transaction(self, result)
             }
             SCHEMA_VERSION if schema_requests_work_model_v3(schema_sql) => {
@@ -4297,6 +4698,48 @@ impl SqliteStore {
             revision: statement.column_u64(11)?,
             created_at: statement.column_text(12)?,
             completed_at: statement.column_optional_text(13)?,
+        }))
+    }
+
+    /// Reads an operation and/or evidence execution only within the requested
+    /// project. This closes the execution-only gap where an admitted sidecar
+    /// exists before the parent operation is committed.
+    pub fn operation_readback(
+        &self,
+        project_id: &str,
+        operation_id: &str,
+    ) -> Result<Option<OperationReadback>, StoreError> {
+        let operation = self.operation(operation_id)?;
+        let execution = self.evidence_execution(operation_id)?;
+        if operation.is_none() && execution.is_none() {
+            return Ok(None);
+        }
+        if let Some(operation) = &operation {
+            if operation.project_id != project_id {
+                return Err(StoreError::WrongSubject {
+                    expected: project_id.to_owned(),
+                    actual: operation.project_id.clone(),
+                });
+            }
+        }
+        if let Some(execution) = &execution {
+            if execution.project_id != project_id {
+                return Err(StoreError::WrongSubject {
+                    expected: project_id.to_owned(),
+                    actual: execution.project_id.clone(),
+                });
+            }
+        }
+        if let (Some(operation), Some(execution)) = (&operation, &execution) {
+            if operation.project_id != execution.project_id {
+                return Err(StoreError::Corrupt(
+                    "operation and evidence execution project scopes disagree".to_owned(),
+                ));
+            }
+        }
+        Ok(Some(OperationReadback {
+            operation,
+            execution,
         }))
     }
 

@@ -21,10 +21,20 @@ bwrk --version
 The final `| sh` is required. Without it, `curl` only prints the installer
 script to the terminal.
 
-Before the first v2 release is published, this command builds the `main`
-source ref. That fallback needs Git, Rust, Node.js, npm, Python, and `tsc`.
-Once a release exists, it downloads and verifies the matching platform archive
-without requiring the Rust toolchain. Run the command again to update.
+If GitHub's latest release is an older incompatible package, the installer
+automatically falls back to the `main` source ref rather than failing on a
+missing v2 archive. That fallback needs Git, Rust, Node.js, npm, Python, and
+`tsc`. Once a v2 release exists, it downloads and verifies the matching
+platform archive without requiring the Rust toolchain. Run the command again
+to update.
+
+After the first v2 release, installed release builds also support the shorter
+update commands:
+
+```sh
+bwrk update
+bwrk upgrade --machine
+```
 
 To pin a release in automation:
 
@@ -67,11 +77,12 @@ content is preserved while managed metadata and skill files are reconciled.
 
 ## Homebrew
 
-After the personal tap is published:
+After the public tap is published:
 
 ```sh
 brew tap mattrichmo/tap
 brew install boreal
+brew upgrade boreal
 ```
 
 The formula installs the CLI and TUI and supplies Node.js for
@@ -98,7 +109,7 @@ cargo install --git https://github.com/mattrichmo/boreal-work.git \
 This builds only the Rust executable; use a release archive or Homebrew for a
 complete CLI + TUI install.
 
-The current v2 binary does not yet expose v1's `bwrk upgrade --machine`
-subcommand. Re-running the installer command above is the supported install
-and update operation; project databases are intentionally left untouched by
-that operation.
+Older v2 archives may not contain the updater. Run the official installer once
+to replace one of those archives; subsequent `bwrk update` and
+`bwrk upgrade --machine` calls use the packaged, verified installer. Project
+databases are intentionally left untouched by machine updates.

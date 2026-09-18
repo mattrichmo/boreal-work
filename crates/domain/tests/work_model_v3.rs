@@ -91,6 +91,158 @@ fn dependencies_are_direct_task_only_and_acyclic() {
 }
 
 #[test]
+fn generated_dependency_sequences_match_reference_dag() {
+    // This is a deterministic property-style test without adding a runtime
+    // dependency: the small reference graph decides whether an edge is legal,
+    // then the domain validator must agree for every generated prefix.
+    fn reaches(
+        edges: &[(boreal_domain::WorkId, boreal_domain::WorkId)],
+        from: &boreal_domain::WorkId,
+        target: &boreal_domain::WorkId,
+    ) -> bool {
+        let mut pending = vec![from.clone()];
+        let mut visited = HashSet::new();
+        while let Some(current) = pending.pop() {
+            if !visited.insert(current.clone()) {
+                continue;
+            }
+            if &current == target {
+                return true;
+            }
+            pending.extend(
+                edges
+                    .iter()
+                    .filter(|(blocker, _)| blocker == &current)
+                    .map(|(_, blocked)| blocked.clone()),
+            );
+        }
+        false
+    }
+
+    struct DeterministicRng(u64);
+    impl DeterministicRng {
+        fn next(&mut self, upper: usize) -> usize {
+            self.0 = self
+                .0
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1);
+            (self.0 as usize) % upper
+        }
+    }
+
+    for seed in 1..=64u64 {
+        let mut rng = DeterministicRng(seed);
+        let count = 2 + rng.next(12);
+        let nodes = (0..count)
+            .map(|index| {
+                WorkNode::task(
+                    project(),
+                    work(&format!("generated-{seed}-{index}")),
+                    ExecutionMode::Direct,
+                    None,
+                    "generated",
+                )
+            })
+            .collect::<Vec<_>>();
+        let mut accepted = Vec::<DirectDependency>::new();
+        let mut reference = Vec::<(WorkId, WorkId)>::new();
+
+        for _ in 0..256 {
+            let blocker = nodes[rng.next(nodes.len())].id.clone();
+            let blocked = nodes[rng.next(nodes.len())].id.clone();
+            let expected = blocker != blocked
+                && !reference.contains(&(blocker.clone(), blocked.clone()))
+                && !reaches(&reference, &blocked, &blocker);
+            let mut candidate = accepted.clone();
+            candidate.push(DirectDependency {
+                blocker_id: blocker.clone(),
+                blocked_id: blocked.clone(),
+            });
+            let actual = validate_direct_dependencies(&nodes, &candidate).is_ok();
+            assert_eq!(actual, expected, "seed={seed} edge={blocker}->{blocked}");
+            if expected {
+                accepted.push(DirectDependency {
+                    blocker_id: blocker.clone(),
+                    blocked_id: blocked.clone(),
+                });
+                reference.push((blocker, blocked));
+            }
+        }
+    }
+}
+
+#[test]
+fn generated_intake_lifecycle_sequences_match_reference_model() {
+    struct DeterministicRng(u64);
+    impl DeterministicRng {
+        fn next(&mut self, upper: usize) -> usize {
+            self.0 = self
+                .0
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1);
+            (self.0 as usize) % upper
+        }
+    }
+
+    let states = [
+        IntakeLifecycle::Captured,
+        IntakeLifecycle::Triaged,
+        IntakeLifecycle::Deferred,
+        IntakeLifecycle::Resolved,
+        IntakeLifecycle::Archived,
+    ];
+    let allowed = |from: IntakeLifecycle, to: IntakeLifecycle| {
+        matches!(
+            (from, to),
+            (
+                IntakeLifecycle::Captured,
+                IntakeLifecycle::Triaged | IntakeLifecycle::Deferred | IntakeLifecycle::Archived
+            ) | (
+                IntakeLifecycle::Triaged,
+                IntakeLifecycle::Deferred | IntakeLifecycle::Resolved | IntakeLifecycle::Archived
+            ) | (
+                IntakeLifecycle::Deferred,
+                IntakeLifecycle::Triaged | IntakeLifecycle::Resolved | IntakeLifecycle::Archived
+            ) | (
+                IntakeLifecycle::Resolved,
+                IntakeLifecycle::Triaged | IntakeLifecycle::Archived
+            ) | (IntakeLifecycle::Archived, IntakeLifecycle::Triaged)
+        )
+    };
+
+    for seed in 1..=64u64 {
+        let mut rng = DeterministicRng(seed);
+        let mut item = IntakeItem {
+            id: IntakeItemId::new(format!("generated-intake-{seed}")),
+            bucket_id: IntakeBucketId::new("inbox"),
+            project_id: project(),
+            kind: IntakeKind::Note,
+            lifecycle: IntakeLifecycle::Captured,
+            content: "generated".into(),
+            content_revision: 1,
+            content_digest: "sha256:generated".into(),
+            revisit_at: None,
+        };
+        for _ in 0..128 {
+            let next = states[rng.next(states.len())];
+            let has_revisit = rng.next(2) == 1;
+            item.revisit_at = has_revisit.then(|| TimestampMs::from_millis(500));
+            let expected =
+                allowed(item.lifecycle, next) && (next != IntakeLifecycle::Deferred || has_revisit);
+            let actual = item.transition(next).is_ok();
+            assert_eq!(
+                actual, expected,
+                "seed={seed} {:?}->{next:?}",
+                item.lifecycle
+            );
+            if actual {
+                assert_eq!(item.lifecycle, next);
+            }
+        }
+    }
+}
+
+#[test]
 fn schedule_distinguishes_availability_due_and_terminal_badges() {
     let schedule = WorkSchedule {
         not_before_at: Some(TimestampMs::from_millis(100)),

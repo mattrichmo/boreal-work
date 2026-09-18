@@ -84,6 +84,7 @@ pub(super) fn run_dashboard(parsed: &ParsedCommand) -> Result<CliResult, CliErro
             outcome: ApplicationOutcome::Unchanged,
             revision: None,
             data: None,
+            ..CliResult::default()
         })
     }
     #[cfg(not(unix))]
@@ -670,6 +671,11 @@ fn interrupted_error(signal_number: i32) -> CliError {
         outcome: ApplicationOutcome::Failed,
         message: format!("dashboard interrupted by signal {signal_number}"),
         exit: u8::try_from(128_i32.saturating_add(signal_number)).unwrap_or(1),
+        transport: TransportOutcome::Ok,
+        as_of: None,
+        next_status_change_at: None,
+        detail_ref: None,
+        protocol_error: None,
     }
 }
 
@@ -711,6 +717,11 @@ fn tui_status(status: ExitStatus) -> Result<(), CliError> {
             outcome: ApplicationOutcome::Failed,
             message: format!("Boreal TUI exited with {status}"),
             exit,
+            transport: TransportOutcome::Ok,
+            as_of: None,
+            next_status_change_at: None,
+            detail_ref: None,
+            protocol_error: None,
         })
     }
 }

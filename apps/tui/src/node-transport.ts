@@ -30,6 +30,13 @@ interface RustTransportResponse {
   readonly error?: RustTransportError;
 }
 
+type UnixSocket = ReturnType<typeof createConnection>;
+
+interface ActiveRoundTrip {
+  readonly socket: UnixSocket;
+  readonly abort: (error: Error) => void;
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -53,6 +60,8 @@ function appendBytes(left: Uint8Array, right: Uint8Array): Uint8Array {
 export class UnixSocketFramedTransport implements FramedTransport {
   private readonly max_payload_bytes: number;
   private readonly timeout_ms: number;
+  private readonly active_round_trips = new Set<ActiveRoundTrip>();
+  private closed = false;
 
   constructor(private readonly socket_path: string, options: UnixSocketTransportOptions = {}) {
     this.max_payload_bytes = options.max_payload_bytes ?? DEFAULT_MAX_PAYLOAD_BYTES;
@@ -67,6 +76,7 @@ export class UnixSocketFramedTransport implements FramedTransport {
   }
 
   roundTrip(request: Uint8Array): Promise<Uint8Array> {
+    if (this.closed) return Promise.reject(new ProtocolEnvelopeError("Unix socket transport is closed"));
     const wrapped = this.wrapRequest(request);
     return new Promise<Uint8Array>((resolve, reject) => {
       let received: Uint8Array = new Uint8Array(0);
@@ -76,14 +86,35 @@ export class UnixSocketFramedTransport implements FramedTransport {
           if (error) fail(error);
         });
       });
+      let activeRoundTrip: ActiveRoundTrip;
+
+      const detachAndDestroy = (): void => {
+        // The local Node shim intentionally exposes only the transport surface;
+        // removeAllListeners is used here to detach every late event before the
+        // half-open socket is destroyed.
+        const detachableSocket = socket as UnixSocket & {
+          removeAllListeners(): UnixSocket;
+        };
+        detachableSocket.removeAllListeners();
+        socket.destroy();
+      };
 
       const finish = (callback: () => void): void => {
         if (settled) return;
         settled = true;
+        this.active_round_trips.delete(activeRoundTrip);
         callback();
         socket.end();
       };
-      const fail = (error: unknown): void => finish(() => reject(error instanceof Error ? error : new Error(String(error))));
+      const fail = (error: unknown): void => {
+        if (settled) return;
+        settled = true;
+        this.active_round_trips.delete(activeRoundTrip);
+        detachAndDestroy();
+        reject(error instanceof Error ? error : new Error(String(error)));
+      };
+      activeRoundTrip = { socket, abort: (error) => fail(error) };
+      this.active_round_trips.add(activeRoundTrip);
       const consume = (): void => {
         if (received.length < FRAME_HEADER_BYTES) return;
         const payloadLength = new DataView(received.buffer, received.byteOffset, received.byteLength).getUint32(0, false);
@@ -114,7 +145,11 @@ export class UnixSocketFramedTransport implements FramedTransport {
   }
 
   close(): void {
-    // Connections are deliberately closed after each completed round-trip.
+    if (this.closed) return;
+    this.closed = true;
+    for (const activeRoundTrip of [...this.active_round_trips]) {
+      activeRoundTrip.abort(new Error("Unix socket transport closed"));
+    }
   }
 
   private wrapRequest(request: Uint8Array): { request_id: string; frame: Uint8Array } {

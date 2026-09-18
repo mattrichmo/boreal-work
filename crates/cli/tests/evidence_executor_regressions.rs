@@ -11,10 +11,11 @@ use serde_json::{json, Value};
 use std::{
     fs,
     os::unix::fs::PermissionsExt,
+    os::unix::net::UnixStream,
     path::{Path, PathBuf},
-    process::{Command, Output},
+    process::{Child, Command, Output, Stdio},
     thread,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 const SCHEMA: &str = include_str!("../../../project/spec/schema-v2.sql");
@@ -177,6 +178,84 @@ fn completed_evidence_operation_replays_without_relaunching_or_reading_policy() 
     assert_eq!(replay_envelope["outcome"], "unchanged");
     assert_eq!(replay_envelope["data"]["replayed"], true);
     assert_eq!(fs::read(launch_count).unwrap(), b"x");
+}
+
+#[test]
+fn failpoint_after_admission_recovers_as_unknown_on_service_restart() {
+    let fixture = Fixture::new("fault-after-admission", false);
+    let launch_count = fixture.root.join("launch-count.txt");
+    let count_literal = shell_literal(&launch_count);
+    fixture.executable(
+        "fault-command",
+        &format!("#!/bin/sh\nprintf x >> {count_literal}\nprintf should-not-run\n"),
+    );
+    fixture.write_gate(
+        "./fault-command",
+        vec!["./fault-command"],
+        vec!["should-not-run"],
+        30_000,
+        None,
+    );
+
+    let crashed =
+        fixture.evidence_run_with_failpoint("op_fault_after_admission", "after_evidence_admission");
+    assert!(
+        !crashed.status.success(),
+        "failpoint process unexpectedly succeeded: {}",
+        text(&crashed)
+    );
+    assert!(
+        !launch_count.exists(),
+        "the command must not launch before admission recovery"
+    );
+
+    let store = SqliteStore::open(&fixture.database, SCHEMA).unwrap();
+    let execution = store
+        .evidence_execution("op_fault_after_admission")
+        .unwrap()
+        .expect("the admission must survive the process crash");
+    assert_eq!(
+        format!("{:?}", execution.state).to_ascii_lowercase(),
+        "admitted"
+    );
+    drop(store);
+
+    let socket = std::env::temp_dir().join(format!(
+        "boreal-evidence-recovery-{}.sock",
+        std::process::id()
+    ));
+    let _ = fs::remove_file(&socket);
+    let Some(mut service) = start_recovery_service(&fixture.root, &fixture.database, &socket)
+    else {
+        return;
+    };
+    let deadline = Instant::now() + Duration::from_secs(3);
+    let execution = loop {
+        let store = SqliteStore::open(&fixture.database, SCHEMA).unwrap();
+        let execution = store
+            .evidence_execution("op_fault_after_admission")
+            .unwrap()
+            .expect("recovered execution remains queryable");
+        if format!("{:?}", execution.state).to_ascii_lowercase() == "unknown" {
+            break execution;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "service restart did not reconcile the admitted execution"
+        );
+        thread::sleep(Duration::from_millis(10));
+    };
+    assert_eq!(
+        format!("{:?}", execution.state).to_ascii_lowercase(),
+        "unknown"
+    );
+    assert_eq!(
+        execution.failure_code.as_deref(),
+        Some("service_restart_recovery")
+    );
+    let _ = service.kill();
+    let _ = service.wait();
+    let _ = fs::remove_file(socket);
 }
 
 struct Fixture {
@@ -361,6 +440,35 @@ impl Fixture {
         ])
     }
 
+    fn evidence_run_with_failpoint(&self, operation: &str, failpoint: &str) -> Output {
+        Command::new(binary())
+            .current_dir(&self.root)
+            .args([
+                "evidence",
+                "run",
+                "--project",
+                PROJECT,
+                "--work",
+                WORK,
+                "--gate",
+                "verification",
+                "--actor",
+                ACTOR,
+                "--harness",
+                HARNESS,
+                "--session",
+                SESSION,
+                "--operation-id",
+                operation,
+                "--db",
+            ])
+            .arg(&self.database)
+            .args(["--json"])
+            .env("BOREAL_VALIDATION_FAILPOINT", failpoint)
+            .output()
+            .unwrap()
+    }
+
     fn run(&self, args: &[&str]) -> Output {
         Command::new(binary())
             .current_dir(&self.root)
@@ -378,6 +486,34 @@ impl Drop for Fixture {
 
 fn binary() -> &'static str {
     env!("CARGO_BIN_EXE_bwrk")
+}
+
+fn start_recovery_service(root: &Path, database: &Path, socket: &Path) -> Option<Child> {
+    let child = Command::new(binary())
+        .current_dir(root)
+        .args(["service", "run", "--db"])
+        .arg(database)
+        .args(["--socket"])
+        .arg(socket)
+        .args(["--json"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    for _ in 0..300 {
+        if socket.exists() && UnixStream::connect(socket).is_ok() {
+            return Some(child);
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    let output = child.wait_with_output().unwrap();
+    let output_text = text(&output).to_ascii_lowercase();
+    if output_text.contains("operation not permitted") || output_text.contains("eperm") {
+        eprintln!("BOREAL_VALIDATION_SKIP: Unix socket creation is unavailable");
+        None
+    } else {
+        panic!("recovery service did not become ready: {}", text(&output));
+    }
 }
 
 fn assert_success(output: &Output, command: &str) {

@@ -46,3 +46,16 @@ It checks JSON syntax, required envelope fields and outcome/error pairing,
 trusted directive references, `shell: false` safe actions, required fixture
 families, and that SQLite accepts `schema-v2.sql`. It is a P0-03 structural
 check, not the independent P0-05 review or P0-07 transition/property gate.
+
+The fixture-to-test conformance gate is separate because it needs Cargo:
+
+```sh
+python3 scripts/validation/spec_conformance.py
+python3 scripts/validation/spec_conformance.py --run
+```
+
+It requires every T/I/C/D fixture ID to appear in
+`conformance.json` and every mapped selector to remain in the workspace test
+set. `--run` executes each unique selector explicitly. The aggregate suite
+uses the faster traceability check because its preceding workspace test already
+executes the complete mapped test set.

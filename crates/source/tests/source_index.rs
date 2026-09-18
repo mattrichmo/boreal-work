@@ -5,7 +5,11 @@ use boreal_source::{
 use std::{
     fs,
     path::PathBuf,
-    sync::atomic::{AtomicU64, Ordering},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc, Barrier,
+    },
+    thread,
 };
 
 static TEST_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -360,6 +364,25 @@ fn persistent_restart_keeps_old_citation_after_recapture_with_new_bytes() {
 }
 
 #[test]
+fn persistent_catalog_recovers_a_proven_stale_lock_without_losing_capture() {
+    let root = test_root("stale-lock");
+    fs::write(root.join("catalog.lock"), "pid=2147483647\ntoken=dead\n").unwrap();
+    let catalog = SourceCatalog::with_persistent_filesystem(&root).unwrap();
+    let version = catalog
+        .capture(
+            "project-a",
+            "docs/stale-lock.md",
+            b"stale lock recovery",
+            "text/markdown",
+        )
+        .unwrap();
+    assert_eq!(version.availability, Availability::Available);
+    assert!(!root.join("catalog.lock").exists());
+    assert_eq!(catalog.version_count().unwrap(), 1);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn repair_rebuilds_derived_index_and_second_repair_is_stable() {
     let catalog = SourceCatalog::default();
     let version = catalog
@@ -403,6 +426,68 @@ fn repair_rebuilds_derived_index_and_second_repair_is_stable() {
         catalog.doctor(Some("project-a")).unwrap().findings,
         Vec::new()
     );
+}
+
+#[test]
+fn persistent_repair_and_capture_share_one_mutation_snapshot() {
+    let root = test_root("repair-capture-boundary");
+    let seed = SourceCatalog::with_persistent_filesystem(&root).unwrap();
+    let original = seed
+        .capture(
+            "project-a",
+            "docs/original.md",
+            b"original repairable source",
+            "text/markdown",
+        )
+        .unwrap();
+    drop(seed);
+
+    let repairer = Arc::new(SourceCatalog::with_persistent_filesystem(&root).unwrap());
+    let capturer = Arc::new(SourceCatalog::with_persistent_filesystem(&root).unwrap());
+    let barrier = Arc::new(Barrier::new(2));
+
+    let repair_thread = {
+        let repairer = Arc::clone(&repairer);
+        let barrier = Arc::clone(&barrier);
+        thread::spawn(move || {
+            barrier.wait();
+            repairer.repair(Some("project-a")).unwrap()
+        })
+    };
+    let capture_thread = {
+        let capturer = Arc::clone(&capturer);
+        let barrier = Arc::clone(&barrier);
+        thread::spawn(move || {
+            barrier.wait();
+            capturer
+                .capture(
+                    "project-a",
+                    "docs/concurrent.md",
+                    b"concurrent source",
+                    "text/markdown",
+                )
+                .unwrap()
+        })
+    };
+    repair_thread.join().unwrap();
+    capture_thread.join().unwrap();
+
+    let restarted = SourceCatalog::with_persistent_filesystem(&root).unwrap();
+    assert_eq!(restarted.version_count().unwrap(), 2);
+    assert_eq!(
+        restarted.verify(&original).unwrap(),
+        b"original repairable source"
+    );
+    let response = restarted
+        .retrieve(&RetrievalRequest::new("project-a", "original repairable"))
+        .unwrap();
+    assert_eq!(response.hits.len(), 1);
+    assert!(
+        response.lag <= 1,
+        "only the concurrent source may remain unindexed"
+    );
+
+    fs::remove_dir_all(root).unwrap();
 }
 
 #[test]

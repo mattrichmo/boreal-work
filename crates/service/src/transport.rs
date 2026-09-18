@@ -12,10 +12,16 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 #[cfg(unix)]
+use std::net::Shutdown;
+#[cfg(unix)]
 use std::os::unix::net::{UnixListener, UnixStream};
 
 /// Default maximum encoded JSON body size, excluding the four-byte prefix.
 pub const DEFAULT_MAX_FRAME_SIZE: usize = 1024 * 1024;
+/// Fallback used by clients that receive the compatibility `None` timeout
+/// configuration. Callers can still provide a shorter command-specific
+/// timeout explicitly; no production client is allowed to wait forever.
+pub const DEFAULT_CLIENT_IO_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// A read or write operation used in timeout errors.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -381,6 +387,7 @@ impl From<io::Error> for TransportError {
 pub struct UnixSocketClient {
     stream: UnixStream,
     config: TransportConfig,
+    closed: bool,
 }
 
 #[cfg(unix)]
@@ -393,24 +400,63 @@ impl UnixSocketClient {
         let path = path.as_ref();
         require_absolute_socket_path(path)?;
         let stream = UnixStream::connect(path).map_err(map_io(IoOperation::Read))?;
-        configure_stream(&stream, &config)?;
-        Ok(Self { stream, config })
+        let mut client_config = config;
+        if client_config.read_timeout.is_none() {
+            client_config.read_timeout = Some(DEFAULT_CLIENT_IO_TIMEOUT);
+        }
+        if client_config.write_timeout.is_none() {
+            client_config.write_timeout = Some(DEFAULT_CLIENT_IO_TIMEOUT);
+        }
+        configure_stream(&stream, &client_config)?;
+        Ok(Self {
+            stream,
+            config: client_config,
+            closed: false,
+        })
     }
 
     /// Send one request and return only a response with the same request ID.
     pub fn request(&mut self, request: JsonRequest) -> Result<JsonResponse, TransportError> {
-        write_frame(&mut self.stream, &self.config, &encode_request(&request))?;
-        let response = read_response(&mut self.stream, &self.config)?;
-        if response.request_id() != request.request_id() {
-            return Err(TransportError::CorrelationMismatch {
-                expected: request.request_id().to_owned(),
-                actual: response.request_id().to_owned(),
-            });
+        if self.closed {
+            return Err(TransportError::Io(io::Error::new(
+                io::ErrorKind::NotConnected,
+                "Unix socket client is closed",
+            )));
         }
-        if let Some(error) = response.error().cloned() {
-            return Err(TransportError::RemoteProtocol(error));
+        let result = (|| {
+            write_frame(&mut self.stream, &self.config, &encode_request(&request))?;
+            let response = read_response(&mut self.stream, &self.config)?;
+            if response.request_id() != request.request_id() {
+                return Err(TransportError::CorrelationMismatch {
+                    expected: request.request_id().to_owned(),
+                    actual: response.request_id().to_owned(),
+                });
+            }
+            if let Some(error) = response.error().cloned() {
+                return Err(TransportError::RemoteProtocol(error));
+            }
+            Ok(response)
+        })();
+        if result.is_err() {
+            self.close();
         }
-        Ok(response)
+        result
+    }
+
+    /// Close the connection immediately, including a peer that keeps its
+    /// write half open after a timeout or completed response.
+    pub fn close(&mut self) {
+        if !self.closed {
+            self.closed = true;
+            let _ = self.stream.shutdown(Shutdown::Both);
+        }
+    }
+}
+
+#[cfg(unix)]
+impl Drop for UnixSocketClient {
+    fn drop(&mut self) {
+        self.close();
     }
 }
 
@@ -533,6 +579,13 @@ impl UnixSocketConnection {
         let response = JsonResponse::failure(request_id.to_owned(), error)
             .map_err(TransportError::Protocol)?;
         self.write_response(&response)
+    }
+}
+
+#[cfg(unix)]
+impl Drop for UnixSocketConnection {
+    fn drop(&mut self) {
+        let _ = self.stream.shutdown(Shutdown::Both);
     }
 }
 
@@ -1197,9 +1250,11 @@ fn parse_hex_quad(value: &[u8], start: usize) -> Result<u32, ProtocolError> {
 mod tests {
     use super::*;
     use std::fs;
+    use std::io::Read;
+    use std::os::unix::net::UnixListener;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::thread;
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     static SOCKET_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -1355,5 +1410,45 @@ mod tests {
         ));
         server_thread.join().unwrap().unwrap();
         let _ = fs::remove_file(socket_path);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn timed_out_client_shuts_down_a_half_open_peer() {
+        let socket_path = temp_socket_path();
+        let listener = match UnixListener::bind(&socket_path) {
+            Ok(listener) => listener,
+            Err(error) if error.kind() == io::ErrorKind::PermissionDenied => return,
+            Err(error) => panic!("listener bind failed: {error}"),
+        };
+        let server_thread = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("peer should connect");
+            let mut request = [0_u8; 4];
+            stream
+                .read_exact(&mut request)
+                .expect("client should send the frame prefix");
+            thread::sleep(Duration::from_millis(75));
+            let mut rest = Vec::new();
+            stream
+                .read_to_end(&mut rest)
+                .expect("peer should observe the client shutdown");
+            true
+        });
+
+        let config = TransportConfig::default()
+            .with_read_timeout(Some(Duration::from_millis(10)))
+            .with_write_timeout(Some(Duration::from_millis(10)));
+        let mut client = UnixSocketClient::connect(&socket_path, config).expect("client connects");
+        let error = client
+            .request(JsonRequest::new("timeout", r#"{"op":"wait"}"#).unwrap())
+            .unwrap_err();
+        assert!(matches!(error, TransportError::Timeout(IoOperation::Read)));
+        assert!(matches!(
+            client.request(JsonRequest::new("after-close", "null").unwrap()),
+            Err(TransportError::Io(error)) if error.kind() == io::ErrorKind::NotConnected
+        ));
+        assert!(server_thread.join().unwrap());
+        fs::remove_file(&socket_path).expect("raw listener socket is removed by the test");
+        assert!(!socket_path.exists());
     }
 }

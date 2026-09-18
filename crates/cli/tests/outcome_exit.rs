@@ -40,6 +40,7 @@ fn rejected_close_preserves_revision_and_gate_obligations_with_exit_seven() {
     fs::create_dir_all(&root).unwrap();
     let database = root.join("boreal.sqlite");
     let receipt = root.join("receipt.json");
+    let summary = root.join("summary.txt");
     assert_success(run(&root, ["init", "p", "--db", path(&database), "--json"]));
     assert_success(run(
         &root,
@@ -123,6 +124,7 @@ fn rejected_close_preserves_revision_and_gate_obligations_with_exit_seven() {
         .unwrap(),
     )
     .unwrap();
+    fs::write(&summary, "The required checkpoint is still open.").unwrap();
 
     let output = run(
         &root,
@@ -141,6 +143,8 @@ fn rejected_close_preserves_revision_and_gate_obligations_with_exit_seven() {
             &fence.to_string(),
             "--receipt",
             path(&receipt),
+            "--summary",
+            path(&summary),
             "--db",
             path(&database),
             "--json",

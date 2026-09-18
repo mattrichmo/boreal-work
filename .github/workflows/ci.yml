@@ -59,3 +59,25 @@ jobs:
         run: npm install --global typescript@5.4.5
       - name: Build and install a clean prefix
         run: scripts/release/package-smoke.sh
+
+  system-validation:
+    name: Full system validation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install pinned TUI compiler
+        run: npm install --global typescript@5.4.5
+      - name: Install system smoke dependencies
+        run: sudo apt-get update && sudo apt-get install --yes jq sqlite3
+      - name: Test validation runner
+        run: python3 -m unittest scripts/validation/test_run_full_suite.py
+      - name: Run strict full validation
+        run: >-
+          python3 scripts/validation/run_full_suite.py
+          --profile full
+          --strict
+          --online

@@ -17,10 +17,14 @@ use boreal_protocol::{
         AgentGuideDto, AgentNextDto, ContextRefDto, GuidanceContextDto, GuidanceProvenanceDto,
         GuidanceStatusDto, NextActionDto, NextReasonDto, NextStatusDto, RequirementDto, SubjectDto,
     },
-    schema, ApplicationOutcome, Envelope, ErrorCode, ProtocolError, TransportOutcome, API_VERSION,
+    schema, ApplicationOutcome, DetailReference, Envelope, ErrorCode, ProtocolError,
+    TransportOutcome, API_VERSION,
 };
 use boreal_source::SourceCatalog;
-use boreal_store::{AttemptRecord, SqliteStore, StoreError};
+use boreal_store::{
+    AttemptRecord, EvidenceExecutionState, OperationOutcome as StoreOperationOutcome,
+    OperationRecord, ReceiptAttestation, ReceiptOutcome, ReceiptRecord, SqliteStore, StoreError,
+};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::{
@@ -43,9 +47,11 @@ mod command_registry;
 mod dashboard;
 mod setup;
 mod service;
+mod update;
 
 const SCHEMA: &str = include_str!("../../../project/spec/schema-v2.sql");
 const MAX_JSON_BYTES: usize = boreal_protocol::bounds::MAX_INLINE_OUTPUT_BYTES;
+const ENVELOPE_METADATA_BUDGET: usize = 4096;
 const DEFAULT_ACTOR: &str = "agent-1";
 const DEFAULT_HARNESS: &str = "cli";
 const DEFAULT_SESSION: &str = "session-cli";
@@ -62,6 +68,8 @@ Usage:
   bwrk init [PROJECT] [--interactive|--yes] [--agents codex,claude] [--project-root PATH] [--db PATH] [--dry-run] [--json]
   bwrk setup [PROJECT] [--yes] [--agents codex,claude] [--project-root PATH] [--db PATH] [--dry-run] [--json]
   bwrk install [PROJECT] [--yes] [--agents codex,claude] [--project-root PATH] [--db PATH] [--dry-run] [--json]
+  bwrk update [--json]
+  bwrk upgrade --machine [--json]  (alias for update)
   bwrk service run --db PATH --socket PATH [--max-requests N] [--json]
   bwrk status <project> [--limit N] [--offset N] [--socket PATH] [--db PATH] [--json]
   bwrk dashboard [PROJECT] [--project PROJECT] [--db PATH] [--actor ID] [--harness ID] [--session ID] [--json]
@@ -133,6 +141,7 @@ struct CliOptions {
     json: bool,
     close: bool,
     release: bool,
+    machine: bool,
     include_expiry: bool,
     limit: Option<u64>,
     offset: Option<u64>,
@@ -189,6 +198,7 @@ impl Default for CliOptions {
             json: false,
             close: false,
             release: false,
+            machine: false,
             include_expiry: false,
             limit: None,
             offset: None,
@@ -224,6 +234,11 @@ struct CliError {
     outcome: ApplicationOutcome,
     message: String,
     exit: u8,
+    transport: TransportOutcome,
+    as_of: Option<String>,
+    next_status_change_at: Option<String>,
+    detail_ref: Option<DetailReference>,
+    protocol_error: Option<ProtocolError>,
 }
 
 impl CliError {
@@ -241,7 +256,58 @@ impl CliError {
             outcome,
             message: message.into(),
             exit: exit_code(code),
+            transport: TransportOutcome::Ok,
+            as_of: None,
+            next_status_change_at: None,
+            detail_ref: None,
+            protocol_error: None,
         }
+    }
+
+    fn from_envelope(
+        error: ProtocolError,
+        outcome: ApplicationOutcome,
+        operation_id: Option<&str>,
+        as_of: Option<String>,
+        next_status_change_at: Option<String>,
+        detail_ref: Option<DetailReference>,
+    ) -> Self {
+        let mut value = Self::with(error.code, outcome, error.message.clone());
+        value.as_of = as_of;
+        value.next_status_change_at = next_status_change_at;
+        value.detail_ref = detail_ref;
+        value.protocol_error = Some(error);
+        if outcome == ApplicationOutcome::Unknown {
+            if let Some(protocol_error) = value.protocol_error.as_mut() {
+                protocol_error.readback_required = Some(true);
+                if protocol_error.operation_id.is_none() {
+                    protocol_error.operation_id = operation_id.map(str::to_owned);
+                }
+                if protocol_error.operation_preserved.is_none() {
+                    protocol_error.operation_preserved = Some(true);
+                }
+            }
+        }
+        value
+    }
+
+    fn unknown_delivery(operation: &str, message: impl Into<String>) -> Self {
+        let mut error = ProtocolError::new(
+            ErrorCode::UnknownOutcome,
+            message.into(),
+            false,
+        );
+        error.operation_id = Some(operation.to_owned());
+        error.operation_preserved = Some(true);
+        error.readback_required = Some(true);
+        let mut value = Self::with(
+            ErrorCode::UnknownOutcome,
+            ApplicationOutcome::Unknown,
+            error.message.clone(),
+        );
+        value.transport = TransportOutcome::Error;
+        value.protocol_error = Some(error);
+        value
     }
 }
 
@@ -272,15 +338,73 @@ impl Default for CliResult {
 
 fn main() -> ExitCode {
     let args = env::args().skip(1).collect::<Vec<_>>();
-    if args.is_empty() || args.iter().any(|arg| arg == "--help" || arg == "-h") {
+    if args.is_empty() {
         println!("{HELP}");
         return ExitCode::SUCCESS;
     }
-    if args.iter().any(|arg| arg == "--version") {
-        println!("bwrk {} (api {})", env!("CARGO_PKG_VERSION"), API_VERSION);
-        return ExitCode::SUCCESS;
-    }
     let json_output = args.iter().any(|arg| arg == "--json");
+    let discovery = args.iter().any(|arg| matches!(arg.as_str(), "--help" | "-h" | "--version"));
+    if discovery {
+        let wants_version = args.iter().any(|arg| arg == "--version");
+        let has_data_operand = args.iter().enumerate().any(|(index, arg)| {
+            index > 0 && !arg.starts_with('-') && !matches!(arg.as_str(), "help" | "version")
+        });
+        if !json_output && !has_data_operand {
+            if wants_version {
+                println!("bwrk {} (api {})", env!("CARGO_PKG_VERSION"), API_VERSION);
+            } else {
+                println!("{HELP}");
+            }
+            return ExitCode::SUCCESS;
+        }
+        if json_output && !has_data_operand {
+            let data = if wants_version {
+                json!({
+                    "command": "version",
+                    "version": env!("CARGO_PKG_VERSION"),
+                    "api_version": API_VERSION,
+                })
+            } else {
+                json!({ "command": "help", "text": HELP })
+            };
+            print_envelope(
+                operation_id(&args),
+                None,
+                ApplicationOutcome::Changed,
+                Some(data),
+                None,
+                None,
+                None,
+                TransportOutcome::Ok,
+                None,
+            );
+            return ExitCode::SUCCESS;
+        }
+        if has_data_operand {
+            let message = "help/version flags must be a command discovery request, not a data operand";
+            if json_output {
+                let error = CliError::invalid(message);
+                print_envelope(
+                    operation_id(&args),
+                    None,
+                    error.outcome,
+                    None,
+                    error.as_of,
+                    error.next_status_change_at,
+                    error.detail_ref,
+                    error.transport,
+                    error.protocol_error.or_else(|| Some(ProtocolError::new(
+                        error.code,
+                        error.message.clone(),
+                        false,
+                    ))),
+                );
+                return ExitCode::from(error.exit);
+            }
+            eprintln!("error [{}]: {message}", ErrorCode::InvalidArgument);
+            return ExitCode::from(exit_code(ErrorCode::InvalidArgument));
+        }
+    }
     let interactive_dashboard =
         !json_output && parse(&args).is_ok_and(|parsed| parsed.path == ["dashboard"]);
     let operation = operation_id(&args);
@@ -294,6 +418,10 @@ fn main() -> ExitCode {
                     result.revision,
                     result.outcome,
                     result.data,
+                    result.as_of,
+                    result.next_status_change_at,
+                    result.detail_ref,
+                    TransportOutcome::Ok,
                     application_error.clone(),
                 );
             } else if !interactive_dashboard {
@@ -329,7 +457,17 @@ fn main() -> ExitCode {
                     protocol_error.operation_id = Some(operation.clone());
                     protocol_error.readback_required = Some(true);
                 }
-                print_envelope(operation, None, error.outcome, None, Some(protocol_error));
+                print_envelope(
+                    operation,
+                    None,
+                    error.outcome,
+                    None,
+                    error.as_of,
+                    error.next_status_change_at,
+                    error.detail_ref,
+                    error.transport,
+                    error.protocol_error.or(Some(protocol_error)),
+                );
             } else {
                 eprintln!("error [{}]: {}", error.code, error.message);
             }
@@ -343,6 +481,10 @@ fn print_envelope(
     revision: Option<u64>,
     outcome: ApplicationOutcome,
     data: Option<Value>,
+    as_of: Option<String>,
+    next_status_change_at: Option<String>,
+    detail_ref: Option<DetailReference>,
+    transport: TransportOutcome,
     error: Option<ProtocolError>,
 ) {
     let envelope = Envelope {
@@ -350,16 +492,80 @@ fn print_envelope(
         schema_version: schema::ENVELOPE.to_owned(),
         operation_id,
         revision,
-        as_of: now(),
-        next_status_change_at: None,
-        transport: TransportOutcome::Ok,
+        as_of: as_of.unwrap_or_else(now),
+        next_status_change_at,
+        transport,
         outcome,
         data,
-        detail_ref: None,
+        detail_ref,
         error,
     };
-    let encoded = serde_json::to_string(&envelope).unwrap();
-    debug_assert!(encoded.len() <= MAX_JSON_BYTES);
+    let encoded = serde_json::to_string(&envelope).unwrap_or_else(|_| "{}".to_owned());
+    let encoded = if encoded.len() <= MAX_JSON_BYTES {
+        encoded
+    } else {
+        // A committed result must not be relabeled as failed because its
+        // presentation exceeded the inline bound. Keep the operation and
+        // revision visible and replace only the oversized inline body with a
+        // durable-operation reference.
+        let fallback = Envelope {
+            api_version: API_VERSION.to_owned(),
+            schema_version: schema::ENVELOPE.to_owned(),
+            operation_id: envelope.operation_id.clone(),
+            revision: envelope.revision,
+            as_of: envelope.as_of.clone(),
+            next_status_change_at: envelope.next_status_change_at.clone(),
+            transport: envelope.transport,
+            outcome: envelope.outcome,
+            data: None::<Value>,
+            detail_ref: Some(DetailReference {
+                uri: Some(format!("operation:{}", envelope.operation_id)),
+                digest: None,
+                size_bytes: Some(encoded.len() as u64),
+                expires_at: None,
+            }),
+            error: envelope.error.clone(),
+        };
+        let fallback = serde_json::to_string(&fallback).unwrap_or_else(|_| "{}".to_owned());
+        if fallback.len() <= MAX_JSON_BYTES {
+            fallback
+        } else {
+            // Error metadata is also untrusted input at this boundary. Keep
+            // the typed code and recovery identity, but cap a pathological
+            // message/field payload so the outer envelope remains valid.
+            let minimal_error = envelope.error.clone().map(|error| {
+                let mut value = ProtocolError::new(
+                    error.code,
+                    error.message.chars().take(256).collect::<String>(),
+                    error.retryable,
+                );
+                value.operation_id = error.operation_id;
+                value.operation_preserved = error.operation_preserved;
+                value.readback_required = error.readback_required;
+                value
+            });
+            let operation_id = envelope.operation_id.clone();
+            let minimal = Envelope {
+                api_version: API_VERSION.to_owned(),
+                schema_version: schema::ENVELOPE.to_owned(),
+                operation_id: operation_id.clone(),
+                revision: envelope.revision,
+                as_of: envelope.as_of,
+                next_status_change_at: envelope.next_status_change_at,
+                transport: envelope.transport,
+                outcome: envelope.outcome,
+                data: None::<Value>,
+                detail_ref: Some(DetailReference {
+                    uri: Some(format!("operation:{operation_id}")),
+                    digest: None,
+                    size_bytes: Some(encoded.len() as u64),
+                    expires_at: None,
+                }),
+                error: minimal_error,
+            };
+            serde_json::to_string(&minimal).unwrap_or_else(|_| "{}".to_owned())
+        }
+    };
     println!("{encoded}");
 }
 
@@ -380,8 +586,18 @@ fn run_with_operation(args: &[String], operation: &str) -> Result<CliResult, Cli
     if parsed.path == ["dashboard"] {
         return dashboard::run_dashboard(&parsed);
     }
+    if parsed.path.len() == 1
+        && matches!(parsed.path[0].as_str(), "update" | "upgrade")
+    {
+        return update::run(&parsed);
+    }
     let setup_command = setup::is_setup_command(&parsed.path);
     let setup_requested = setup::should_setup(&parsed);
+    if setup_command && parsed.options.expected_revision.is_some() {
+        return Err(CliError::invalid(
+            "project creation does not yet expose an atomic expected-revision store contract",
+        ));
+    }
     if ((setup_command && parsed.path[0] != "init") || setup_requested)
         && parsed.options.socket.is_some()
     {
@@ -433,7 +649,7 @@ fn run_with_operation(args: &[String], operation: &str) -> Result<CliResult, Cli
     } else {
         parsed.clone()
     };
-    let direct_owner = direct_database_owner(&path, &owner_parsed)?;
+    let _database_owner = direct_database_owner(&path, &owner_parsed)?;
     if setup_command {
         let project = if let Some(plan) = setup_plan.as_ref() {
             plan.project_id.clone()
@@ -471,7 +687,6 @@ fn run_with_operation(args: &[String], operation: &str) -> Result<CliResult, Cli
         } else {
             (None, None)
         };
-        drop(direct_owner);
         return Ok(CliResult {
             outcome,
             revision: Some(result.snapshot_revision),
@@ -483,9 +698,7 @@ fn run_with_operation(args: &[String], operation: &str) -> Result<CliResult, Cli
     let store = SqliteStore::open(&path, SCHEMA).map_err(map_store_error)?;
     let app = WorkApplication::new(&store);
     let adapter = SqliteAttemptAdapter::new(&store);
-    let result = dispatch(&parsed, operation, &app, &adapter, &store);
-    drop(direct_owner);
-    result
+    dispatch(&parsed, operation, &app, &adapter, &store)
 }
 
 fn dispatch<A: boreal_application::AttemptLifecycleAdapter>(
@@ -647,6 +860,7 @@ fn parse(args: &[String]) -> Result<ParsedCommand, CliError> {
         json: false,
         close: false,
         release: false,
+        machine: false,
         include_expiry: false,
         limit: None,
         offset: None,
@@ -683,6 +897,14 @@ fn parse(args: &[String]) -> Result<ParsedCommand, CliError> {
         }
         if arg == "--release" {
             options.release = true;
+            index += 1;
+            continue;
+        }
+        if arg == "--machine" {
+            if path.as_slice() != ["upgrade"] {
+                return Err(CliError::invalid("--machine is only valid with `bwrk upgrade`"));
+            }
+            options.machine = true;
             index += 1;
             continue;
         }
@@ -786,7 +1008,12 @@ fn parse(args: &[String]) -> Result<ParsedCommand, CliError> {
                 "--session" => options.session = value.unwrap(),
                 "--operation-id" => options.operation_id = Some(value.unwrap()),
                 "--expected-revision" => {
-                    options.expected_revision = Some(parse_revision(&value.unwrap())?)
+                    let revision = parse_revision(&value.unwrap())?;
+                    if options.expected_revision.replace(revision).is_some() {
+                        return Err(CliError::invalid(
+                            "--revision and --expected-revision may be supplied only once",
+                        ));
+                    }
                 }
                 "--attempt" => options.attempt = Some(value.unwrap()),
                 "--fence" => {
@@ -964,6 +1191,9 @@ fn validate_command(path: &[String], options: &CliOptions) -> Result<(), CliErro
     let positionals = options.positionals.len();
     let valid = match path.as_slice() {
         ["version"] => options.positionals.is_empty(),
+        ["update"] => options.positionals.is_empty() && !options.machine,
+        ["upgrade"] => options.positionals.is_empty() && options.machine,
+        ["init"] | ["setup"] | ["install"] => positionals <= 1,
         _ if matches!(path.first().copied(), Some("commands" | "help")) => {
             options.positionals.is_empty()
         }
@@ -1054,7 +1284,9 @@ fn validate_command(path: &[String], options: &CliOptions) -> Result<(), CliErro
 
 fn option_value(args: &[String], index: &mut usize, name: &str) -> Result<String, CliError> {
     let current = args.get(*index).map(String::as_str);
-    if current != Some(name) && !(name == "--lease-ttl" && current == Some("--ttl")) {
+    let alias_matches = (name == "--lease-ttl" && current == Some("--ttl"))
+        || (name == "--expected-revision" && current == Some("--revision"));
+    if current != Some(name) && !alias_matches {
         return Err(CliError::invalid(format!("expected option {name}")));
     }
     let value = args
@@ -1533,6 +1765,7 @@ fn intake_list_result(
     let items = view.items.iter().map(intake_item_json).collect::<Vec<_>>();
     bounded_result(
         Some(json!({
+            "command": "intake_list",
             "project_id": view.project_id.as_str(),
             "revision": view.revision,
             "items": items,
@@ -1574,6 +1807,7 @@ fn intake_show_result(
         })?;
     bounded_result(
         Some(json!({
+            "command": "intake_show",
             "project_id": view.project_id.as_str(),
             "revision": view.revision,
             "item": intake_item_json(item),
@@ -1607,6 +1841,9 @@ fn intake_bucket_result(
     app: &WorkApplication<'_>,
     operation: &str,
 ) -> Result<CliResult, CliError> {
+    // The v3 application/store path owns the optimistic-concurrency check;
+    // preserve the caller's revision instead of replacing it with a fresh
+    // read taken by this adapter.
     let project = ProjectId::new(project_argument(parsed, 0)?);
     let offset = usize::from(parsed.options.project.is_none());
     let bucket_id = parsed
@@ -1735,6 +1972,7 @@ fn intake_capture_result(
             "content_digest": item.content_digest,
             "replayed": !result.changed,
         })),
+        ..CliResult::default()
     })
 }
 
@@ -2085,48 +2323,62 @@ fn status_result(parsed: &ParsedCommand, store: &SqliteStore) -> Result<CliResul
             message,
         )
     })?;
-    let items = snapshot
-        .items
-        .iter()
-        .map(status_item_json)
-        .collect::<Vec<_>>();
-    let counts = &snapshot.counts;
     bounded_result(
-        Some(json!({
-            "command": "status",
-            "contract_version": snapshot.contract_version,
-            "project_id": snapshot.project_id.as_str(),
-            "project_revision": snapshot.project_revision.0,
-            "revision": snapshot.project_revision.0,
-            "as_of": stamp(snapshot.as_of.as_millis()),
-            "next_status_change_at": snapshot.next_status_change_at.map(|value| stamp(value.as_millis())),
-            "limit": snapshot.limit,
-            "offset": snapshot.offset,
-            "total": snapshot.total,
-            "has_more": snapshot.has_more(),
-            "next_offset": snapshot.next_offset(),
-            "counts": {
-                "matched": counts.total,
-                "total": counts.total,
-                "draft": counts.draft,
-                "queued": counts.queued,
-                "ready": counts.ready,
-                "claimed": counts.claimed,
-                "in_progress": counts.in_progress,
-                "needs_verification": counts.needs_verification,
-                "awaiting_review": counts.awaiting_review,
-                "complete": counts.complete,
-                "closed": counts.closed,
-                "blocked": counts.blocked,
-                "paused": counts.paused,
-                "retry_wait": counts.retry_wait,
-                "expired_review": counts.expired_review,
-                "cancelled": counts.cancelled,
-            },
-            "items": items,
-        })),
+        Some(status_snapshot_json(&snapshot, None)),
         Some(snapshot.project_revision.0),
     )
+    .map(|mut result| {
+        result.outcome = ApplicationOutcome::Unchanged;
+        result
+    })
+}
+
+fn status_snapshot_json(
+    snapshot: &boreal_application::StatusSnapshot,
+    recovery: Option<Value>,
+) -> Value {
+    let counts = &snapshot.counts;
+    json!({
+        "command": "status",
+        "contract_version": snapshot.contract_version,
+        "project_id": snapshot.project_id.as_str(),
+        "project_revision": snapshot.project_revision.0,
+        "revision": snapshot.project_revision.0,
+        "as_of": stamp(snapshot.as_of.as_millis()),
+        "next_status_change_at": snapshot.next_status_change_at.map(|value| stamp(value.as_millis())),
+        "limit": snapshot.limit,
+        "offset": snapshot.offset,
+        "total": snapshot.total,
+        "has_more": snapshot.has_more(),
+        "next_offset": snapshot.next_offset(),
+        "counts": {
+            "matched": counts.total,
+            "total": counts.total,
+            "draft": counts.draft,
+            "queued": counts.queued,
+            "ready": counts.ready,
+            "claimed": counts.claimed,
+            "in_progress": counts.in_progress,
+            "needs_verification": counts.needs_verification,
+            "awaiting_review": counts.awaiting_review,
+            "complete": counts.complete,
+            "closed": counts.closed,
+            "blocked": counts.blocked,
+            "paused": counts.paused,
+            "retry_wait": counts.retry_wait,
+            "expired_review": counts.expired_review,
+            "cancelled": counts.cancelled,
+        },
+        "items": snapshot.items.iter().map(status_item_json).collect::<Vec<_>>(),
+        "timing": {
+            "as_of": stamp(snapshot.as_of.as_millis()),
+            "next_status_change_at": snapshot.next_status_change_at.map(|value| stamp(value.as_millis())),
+        },
+        "recovery": recovery.unwrap_or_else(|| json!({
+            "readback_required": false,
+            "service_state": "ready",
+        })),
+    })
 }
 
 fn status_item_json(item: &boreal_application::StatusWork) -> Value {
@@ -2137,9 +2389,9 @@ fn status_item_json(item: &boreal_application::StatusWork) -> Value {
         .map(|gate| {
             json!({
                 "gate_id": gate.gate_id.as_str(),
-                "kind": format!("{:?}", gate.kind).to_ascii_lowercase(),
+                "kind": gate_kind_name(gate.kind),
                 "required": gate.required,
-                "state": format!("{:?}", gate.state).to_ascii_lowercase(),
+                "state": gate_state_name(gate.state),
                 "receipt_id": gate.receipt_id,
                 "reason": gate.reason,
             })
@@ -2152,7 +2404,7 @@ fn status_item_json(item: &boreal_application::StatusWork) -> Value {
         json!({
             "attempt_id": attempt.attempt_id.as_str(),
             "fence": attempt.fence.get(),
-            "phase": format!("{:?}", attempt.phase).to_ascii_lowercase(),
+            "phase": attempt_phase_name(attempt.phase),
             "actor_id": attempt.actor_id.as_str(),
             "harness_id": attempt.harness_id.as_ref().map(|value| value.as_str()),
             "session_id": attempt.session_id.as_ref().map(|value| value.as_str()),
@@ -2163,29 +2415,116 @@ fn status_item_json(item: &boreal_application::StatusWork) -> Value {
     json!({
         "work_id": item.work.id.as_str(),
         "project_id": item.work.project_id.as_str(),
-        "kind": format!("{:?}", item.work.kind).to_ascii_lowercase(),
+        "kind": work_kind_name(item.work.kind),
         "parent_id": item.work.parent_id.as_ref().map(|value| value.as_str()),
         "title": item.work.title,
         "description": item.work.description,
-        "lifecycle": format!("{:?}", item.work.lifecycle).to_ascii_lowercase(),
+        "lifecycle": lifecycle_name(item.work.lifecycle),
         "priority": item.work.priority,
-        "dispatch_policy": format!("{:?}", item.work.dispatch_policy).to_ascii_lowercase(),
+        "dispatch_policy": dispatch_policy_name(item.work.dispatch_policy),
         "status": status_name(item.display_status()),
         "display_status": status_name(item.display_status()),
         "claimable": item.decision.claimable_for_actor,
         "claimable_for_actor": item.decision.claimable_for_actor,
         "reason_codes": item.decision.reason_codes.iter().map(|reason| reason.stable_code()).collect::<Vec<_>>(),
+        "next_action": item.decision.next_action.map(domain_action_name),
         "next_status_change_at": item.decision.next_status_change_at.map(|value| stamp(value.as_millis())),
         "attempt": attempt,
         "gates": { "open": open, "satisfied": satisfied },
+        "dependencies": item.dependency_blockers.iter().map(|blocker| json!({
+                "work_id": blocker.work_id.as_str(),
+                "display_status": status_name(blocker.display_status),
+                "status": status_name(blocker.display_status),
+                "satisfies_default": blocker.satisfies_default,
+                "satisfied": blocker.satisfies_default,
+            })).collect::<Vec<_>>(),
         "dependency": {
             "prerequisites": item.dependency_blockers.iter().map(|blocker| json!({
                 "work_id": blocker.work_id.as_str(),
                 "display_status": status_name(blocker.display_status),
+                "status": status_name(blocker.display_status),
                 "satisfies_default": blocker.satisfies_default,
+                "satisfied": blocker.satisfies_default,
             })).collect::<Vec<_>>(),
         },
     })
+}
+
+fn lifecycle_name(value: PersistedLifecycle) -> &'static str {
+    match value {
+        PersistedLifecycle::Draft => "draft",
+        PersistedLifecycle::Open => "open",
+        PersistedLifecycle::Closed => "closed",
+        PersistedLifecycle::Cancelled => "cancelled",
+    }
+}
+
+fn work_kind_name(value: WorkKind) -> &'static str {
+    match value {
+        WorkKind::Milestone => "milestone",
+        WorkKind::Sprint => "sprint",
+        WorkKind::Task => "task",
+    }
+}
+
+fn dispatch_policy_name(value: DispatchPolicy) -> &'static str {
+    match value {
+        DispatchPolicy::Automatic => "automatic",
+        DispatchPolicy::OperatorOnly => "operator_only",
+        DispatchPolicy::Paused => "paused",
+    }
+}
+
+fn gate_kind_name(value: boreal_domain::GateKind) -> &'static str {
+    match value {
+        boreal_domain::GateKind::Checkpoint => "checkpoint",
+        boreal_domain::GateKind::Verification => "verification",
+        boreal_domain::GateKind::Review => "review",
+        boreal_domain::GateKind::OperatorApproval => "operator_approval",
+        boreal_domain::GateKind::Summary => "summary",
+        boreal_domain::GateKind::Audit => "audit",
+    }
+}
+
+fn gate_state_name(value: boreal_domain::GateState) -> &'static str {
+    match value {
+        boreal_domain::GateState::Open => "open",
+        boreal_domain::GateState::Satisfied => "satisfied",
+        boreal_domain::GateState::Failed => "failed",
+    }
+}
+
+fn attempt_phase_name(value: AttemptPhase) -> &'static str {
+    match value {
+        AttemptPhase::Claimed => "claimed",
+        AttemptPhase::Accepted => "accepted",
+        AttemptPhase::Running => "running",
+        AttemptPhase::Verifying => "verifying",
+        AttemptPhase::ExpiryPending => "expiry_pending",
+        AttemptPhase::Completed => "completed",
+        AttemptPhase::Failed => "failed",
+        AttemptPhase::Released => "released",
+        AttemptPhase::Expired => "expired",
+        AttemptPhase::Cancelled => "cancelled",
+    }
+}
+
+fn domain_action_name(value: boreal_domain::DomainAction) -> &'static str {
+    match value {
+        boreal_domain::DomainAction::PublishWork => "publish_work",
+        boreal_domain::DomainAction::Claim => "claim",
+        boreal_domain::DomainAction::AcceptAttempt => "accept_attempt",
+        boreal_domain::DomainAction::ResumeAttempt => "resume_attempt",
+        boreal_domain::DomainAction::ProvideEvidence => "provide_evidence",
+        boreal_domain::DomainAction::RequestReview => "request_review",
+        boreal_domain::DomainAction::FinishClose => "finish_close",
+        boreal_domain::DomainAction::WaitForPrerequisite => "wait_for_prerequisite",
+        boreal_domain::DomainAction::ResolveHold => "resolve_hold",
+        boreal_domain::DomainAction::ResumePolicy => "resume_policy",
+        boreal_domain::DomainAction::WaitUntil => "wait_until",
+        boreal_domain::DomainAction::ReviewExpiry => "review_expiry",
+        boreal_domain::DomainAction::RequestOperatorClaim => "request_operator_claim",
+    }
 }
 
 fn status_name(status: boreal_domain::DerivedStatus) -> &'static str {
@@ -2255,6 +2594,11 @@ fn operation_show_result(
         .evidence_execution(operation_id)
         .map_err(map_store_error)?;
     if operation.is_none() && execution.is_none() {
+        if let Some(partial) = finish_parent_readback(store, &project, operation_id)? {
+            return Ok(partial);
+        }
+    }
+    if operation.is_none() && execution.is_none() {
         return Err(CliError::with(
             ErrorCode::NotFound,
             ApplicationOutcome::Rejected,
@@ -2270,6 +2614,50 @@ fn operation_show_result(
             ));
         }
     }
+    if let Some(execution) = &execution {
+        if execution.project_id != project {
+            return Err(CliError::with(
+                ErrorCode::InvalidArgument,
+                ApplicationOutcome::Rejected,
+                "evidence execution does not belong to the selected project",
+            ));
+        }
+        if operation.as_ref().is_some_and(|operation| {
+            operation.project_id != execution.project_id
+        }) {
+            return Err(CliError::with(
+                ErrorCode::ProtocolMismatch,
+                ApplicationOutcome::Failed,
+                "operation and evidence execution project scopes disagree",
+            ));
+        }
+    }
+    let receipt_id = execution
+        .as_ref()
+        .and_then(|value| value.receipt_id.clone())
+        .or_else(|| {
+            operation.as_ref().and_then(|value| {
+                serde_json::from_str::<Value>(&value.result_json)
+                    .ok()
+                    .and_then(|result| {
+                        result
+                            .get("receipt_id")
+                            .and_then(Value::as_str)
+                            .or_else(|| {
+                                result
+                                    .get("receipt")
+                                    .and_then(|receipt| receipt.get("receipt_id"))
+                                    .and_then(Value::as_str)
+                            })
+                            .map(ToOwned::to_owned)
+                    })
+            })
+        });
+    let receipt = receipt_id
+        .as_deref()
+        .map(|value| store.receipt(value).map_err(map_store_error))
+        .transpose()?
+        .flatten();
     let operation_json = operation.clone().map(|operation| {
         json!({
             "operation_id": operation.operation_id,
@@ -2288,7 +2676,7 @@ fn operation_show_result(
             "completed_at": operation.completed_at,
         })
     });
-    let execution_json = execution.map(|execution| {
+    let execution_json = execution.as_ref().map(|execution| {
         json!({
             "operation_id": execution.operation_id,
             "project_id": execution.project_id,
@@ -2300,18 +2688,19 @@ fn operation_show_result(
             "session_id": execution.session_id,
             "request_digest": execution.request_digest,
             "artifact_ref": execution.artifact_ref,
-            "state": format!("{:?}", execution.state).to_ascii_lowercase(),
+            "state": evidence_execution_state_name(execution.state),
             "admitted_at": execution.admitted_at,
             "started_at": execution.started_at,
             "exited_at": execution.exited_at,
             "exit_code": execution.exit_code,
             "receipt_id": execution.receipt_id,
             "failure_code": execution.failure_code,
+            "receipt": receipt.as_ref().map(receipt_record_json),
         })
     });
-    let outcome = if execution_json
+    let outcome = if execution
         .as_ref()
-        .is_some_and(|value| value["state"] != "receipt_committed")
+        .is_some_and(|value| !matches!(value.state, EvidenceExecutionState::ReceiptCommitted))
     {
         ApplicationOutcome::Unknown
     } else {
@@ -2332,6 +2721,8 @@ fn operation_show_result(
         Some(json!({
             "operation": operation_json,
             "execution": execution_json,
+            "receipt_id": receipt.as_ref().map(|value| value.receipt_id.as_str()),
+            "receipt": receipt.as_ref().map(receipt_record_json),
             "readback_required": outcome == ApplicationOutcome::Unknown,
         })),
         operation.as_ref().map(|value| value.revision),
@@ -2340,6 +2731,104 @@ fn operation_show_result(
         result.outcome = outcome;
         result
     })
+}
+
+fn receipt_record_json(receipt: &ReceiptRecord) -> Value {
+    json!({
+        "schema_version": "boreal.receipt.v1",
+        "fixture_id": Value::Null,
+        "receipt_id": receipt.receipt_id,
+        "operation_id": receipt.operation_id,
+        "subject": {
+            "work_id": receipt.work_id,
+            "attempt_id": receipt.attempt_id,
+            "fence": receipt.fence,
+            "gate_id": receipt.gate_id.clone().unwrap_or_default(),
+        },
+        "executable": receipt.executable,
+        "argv": serde_json::from_str::<Value>(&receipt.argv_json).unwrap_or_else(|_| json!([])),
+        "cwd": receipt.cwd,
+        "exit_code": receipt.exit_code,
+        "started_at": receipt.started_at,
+        "ended_at": receipt.ended_at,
+        "source_snapshot_hash": receipt.source_version_id,
+        "config_identity": receipt.config_identity,
+        "environment_fingerprint": receipt.environment_fingerprint,
+        "output_digest": receipt.output_digest.clone().unwrap_or_default(),
+        "output_ref": receipt.output_ref,
+        "coverage": serde_json::from_str::<Value>(&receipt.coverage_json)
+            .unwrap_or_else(|_| json!({})),
+        "attestation": match receipt.attestation {
+            ReceiptAttestation::BorealWitnessed => "boreal_witnessed",
+            ReceiptAttestation::ExternalAttested => "external_attested",
+            ReceiptAttestation::SelfReported => "self_reported",
+            ReceiptAttestation::Unknown => "unknown",
+        },
+        "result": match receipt.result {
+            ReceiptOutcome::Passed => "passed",
+            ReceiptOutcome::Failed => "failed",
+            ReceiptOutcome::Rejected => "rejected",
+            ReceiptOutcome::Unknown => "unknown",
+            ReceiptOutcome::Stale => "stale",
+        },
+        "retention": Value::Null,
+        "rejection_code": receipt.rejection_code,
+        "created_at": receipt.created_at,
+    })
+}
+
+fn finish_parent_readback(
+    store: &SqliteStore,
+    project: &str,
+    operation_id: &str,
+) -> Result<Option<CliResult>, CliError> {
+    let mut stages = serde_json::Map::new();
+    let mut revision = None;
+    for suffix in ["submit", "summary", "finalize"] {
+        let child_id = sub_operation(operation_id, suffix);
+        if let Some(child) = store.operation(&child_id).map_err(map_store_error)? {
+            if child.project_id != project {
+                return Err(CliError::with(
+                    ErrorCode::InvalidArgument,
+                    ApplicationOutcome::Rejected,
+                    "finish child operation does not belong to the selected project",
+                ));
+            }
+            revision = Some(revision.unwrap_or(0).max(child.revision));
+            stages.insert(
+                suffix.to_owned(),
+                json!({
+                    "operation_id": child.operation_id,
+                    "outcome": format!("{:?}", child.outcome).to_ascii_lowercase(),
+                    "revision": child.revision,
+                    "result": serde_json::from_str::<Value>(&child.result_json).unwrap_or(Value::String(child.result_json)),
+                }),
+            );
+        }
+    }
+    if stages.is_empty() {
+        return Ok(None);
+    }
+    let mut result = bounded_result(
+        Some(json!({
+            "parent_operation_id": operation_id,
+            "stages": stages,
+            "readback_required": true,
+        })),
+        revision,
+    )?;
+    result.outcome = ApplicationOutcome::Unknown;
+    Ok(Some(result))
+}
+
+fn evidence_execution_state_name(state: EvidenceExecutionState) -> &'static str {
+    match state {
+        EvidenceExecutionState::Admitted => "admitted",
+        EvidenceExecutionState::Running => "running",
+        EvidenceExecutionState::Exited => "exited",
+        EvidenceExecutionState::ReceiptCommitted => "receipt_committed",
+        EvidenceExecutionState::Unknown => "unknown",
+    }
 }
 
 fn session_start_result(
@@ -2523,24 +3012,49 @@ fn create_work_result(
             .collect(),
         acceptance_profile: AcceptanceProfile::focused(),
     };
-    let result = app
-        .create_work_as(&work, &parsed.options.actor, &now(), operation.to_owned())
-        .map_err(map_application_error)?;
+    let result = match parsed.options.expected_revision {
+        Some(expected_revision) => app.create_work_as_checked(
+            &work,
+            &parsed.options.actor,
+            Some(expected_revision),
+            &now(),
+            operation.to_owned(),
+        ),
+        None => app.create_work_as(&work, &parsed.options.actor, &now(), operation.to_owned()),
+    }
+    .map_err(map_application_error)?;
     bounded_result(
         Some(json!({
             "project_id": result.value.project_id,
             "work_id": result.value.work_id,
+            "kind": result.value.kind,
+            "parent_id": result.value.parent_id,
             "title": result.value.title,
+            "description": result.value.description,
+            "priority": result.value.priority,
             "dispatch_policy": result.value.dispatch_policy,
+            "profile": {
+                "id": work.acceptance_profile.id.as_str(),
+                "version": work.acceptance_profile.version,
+            },
             "hard_holds": result
                 .value
                 .hard_holds
                 .iter()
                 .map(ReasonCode::stable_code)
                 .collect::<Vec<_>>(),
+            "replayed": !result.changed,
         })),
         Some(result.snapshot_revision),
     )
+    .map(|mut view| {
+        view.outcome = if result.changed {
+            ApplicationOutcome::Changed
+        } else {
+            ApplicationOutcome::Unchanged
+        };
+        view
+    })
 }
 
 fn claim_result<A: boreal_application::AttemptLifecycleAdapter>(
@@ -2663,6 +3177,7 @@ fn start_result<A: boreal_application::AttemptLifecycleAdapter>(
                 "message": "no resumable or claimable task is available",
                 "next_action": null,
             })),
+            ..CliResult::default()
         });
     };
     if let Some(current) = store
@@ -3401,6 +3916,7 @@ fn finish_result<A: boreal_application::AttemptLifecycleAdapter>(
             AttemptOperation::Release,
         );
     }
+    let project = project_argument(parsed, 0)?;
     let work_id = work_argument(parsed, 0)?;
     let expected_attempt = parsed
         .options
@@ -3433,6 +3949,10 @@ fn finish_result<A: boreal_application::AttemptLifecycleAdapter>(
             "receipt fence does not match --fence",
         ));
     }
+    // Validate every file/input before the first durable write. The summary
+    // is part of the closeout identity, not a post-receipt presentation step.
+    let summary_body = read_summary_body(parsed)?;
+    let summary = summary_payload(&receipt, &summary_body, operation);
     let receipt_result = app
         .record_receipt(
             &parsed.options.actor,
@@ -3440,8 +3960,61 @@ fn finish_result<A: boreal_application::AttemptLifecycleAdapter>(
             &receipt,
             parsed.options.expected_revision,
             TimestampMs::from_millis(now_ms_u64()),
-        )
-        .map_err(map_application_error)?;
+        );
+    let receipt_replayed = match receipt_result {
+        Ok(result) => result.replayed,
+        Err(error) if receipt.attestation == ExecutorAttestation::BorealWitnessed => {
+            let import_denied = matches!(
+                &error,
+                ApplicationError::Evidence(validation)
+                    if validation.code()
+                        == boreal_application::EvidenceErrorCode::WitnessedReceiptImportDenied
+            );
+            if !import_denied {
+                return Err(map_application_error(error));
+            }
+            // Witnessed receipts are already authoritative facts created by
+            // evidence run. Direct closeout may read them back, but may never
+            // import a second witnessed fact through the external-ingest API.
+            let durable = store
+                .receipt(receipt.receipt_id.as_str())
+                .map_err(map_store_error)?
+                .ok_or_else(|| {
+                    CliError::with(
+                        ErrorCode::ReceiptInvalid,
+                        ApplicationOutcome::Rejected,
+                        "witnessed receipt is not durably readable; use service readback",
+                    )
+                })?;
+            let durable_result_matches = match receipt.result {
+                ReceiptResult::Passed => durable.result == ReceiptOutcome::Passed,
+                ReceiptResult::Failed => durable.result == ReceiptOutcome::Failed,
+                ReceiptResult::Stale => durable.result == ReceiptOutcome::Stale,
+            };
+            if durable.project_id != project
+                || durable.work_id != receipt.work_id.as_str()
+                || durable.attempt_id != receipt.attempt_id.as_str()
+                || durable.fence != receipt.fence.get()
+                || durable.operation_id != receipt.operation_id.as_str()
+                || durable.gate_id.as_deref() != Some(receipt.gate_id.as_str())
+                || durable.source_version_id.as_deref()
+                    != Some(receipt.source_snapshot_hash.as_str())
+                || durable.config_identity != receipt.config_identity.as_str()
+                || durable.output_digest != receipt.output_digest
+                || durable.output_ref != receipt.output_ref
+                || durable.attestation != ReceiptAttestation::BorealWitnessed
+                || !durable_result_matches
+            {
+                return Err(CliError::with(
+                    ErrorCode::ReceiptInvalid,
+                    ApplicationOutcome::Rejected,
+                    "witnessed receipt does not match its durable execution fact",
+                ));
+            }
+            true
+        }
+        Err(error) => return Err(map_application_error(error)),
+    };
     let submitted = attempt_mutation_result(
         parsed,
         app,
@@ -3450,6 +4023,16 @@ fn finish_result<A: boreal_application::AttemptLifecycleAdapter>(
         store,
         AttemptOperation::Submit,
     )?;
+    let summary_result = app
+        .record_summary(
+            &parsed.options.actor,
+            Some(parsed.options.session.as_str()),
+            &summary,
+            &sub_operation(operation, "summary"),
+            None,
+            TimestampMs::from_millis(now_ms_u64()),
+        )
+        .map_err(map_application_error)?;
     let intent = boreal_application::CloseIntent {
         work_id: receipt.work_id.clone(),
         attempt_id: receipt.attempt_id.clone(),
@@ -3458,7 +4041,7 @@ fn finish_result<A: boreal_application::AttemptLifecycleAdapter>(
         config_identity: receipt.config_identity.clone(),
         profile_id: receipt.coverage.profile_id.clone(),
         profile_version: receipt.coverage.profile_version.clone(),
-        summary_id: None,
+        summary_id: Some(summary.summary_id.clone()),
     };
     let requested = app
         .request_close(
@@ -3469,34 +4052,34 @@ fn finish_result<A: boreal_application::AttemptLifecycleAdapter>(
             TimestampMs::from_millis(now_ms_u64()),
         )
         .map_err(map_application_error)?;
-    let diagnostics = store
-        .gate_diagnostics(
-            parsed
-                .options
-                .project
-                .as_deref()
-                .ok_or_else(|| CliError::invalid("agent finish --close requires --project"))?,
-            &work_id,
-            expected_attempt,
-            expected_fence,
-        )
-        .map_err(map_store_error)?;
-    if diagnostics.missing.is_empty() {
-        return Err(CliError::invalid(
-            "proof-gated close requires typed summary/review facts; use the service finish workflow",
-        ));
-    }
-    bounded_result(
-        Some(json!({
+    let finalized = app
+        .finalize_close_current(
+            &parsed.options.actor,
+            Some(parsed.options.session.as_str()),
+            &intent,
+            None,
+            TimestampMs::from_millis(now_ms_u64()),
+            &sub_operation(operation, "finalize"),
+    )
+        .map_err(map_application_error)?;
+    let diagnostics = finalized.diagnostics.as_ref();
+    let close_outcome = if diagnostics.is_some() {
+        ApplicationOutcome::Rejected
+    } else {
+        ApplicationOutcome::Changed
+    };
+    let close_data = json!({
             "attempt": submitted.data,
             "receipt_id": receipt.receipt_id.as_str(),
-            "receipt_replayed": receipt_result.replayed,
+            "receipt_replayed": receipt_replayed,
+            "summary_id": summary.summary_id,
+            "summary_replayed": summary_result.replayed,
             "close_intent": format!("{:?}", requested.close_intent.state).to_ascii_lowercase(),
-            "close_state": "open",
-            "close_replayed": false,
-            "gates": json!({
+            "close_state": format!("{:?}", finalized.close_intent.state).to_ascii_lowercase(),
+            "close_replayed": finalized.replayed,
+            "gates": diagnostics.map(|diagnostics| json!({
                 "missing": diagnostics.missing,
-                "gates": diagnostics.gates.into_iter().map(|gate| json!({
+                "gates": diagnostics.gates.iter().map(|gate| json!({
                     "gate_id": gate.gate_id,
                     "kind": format!("{:?}", gate.kind).to_ascii_lowercase(),
                     "required": gate.required,
@@ -3504,12 +4087,23 @@ fn finish_result<A: boreal_application::AttemptLifecycleAdapter>(
                     "receipt_id": gate.receipt_id,
                     "reason": gate.reason,
                 })).collect::<Vec<_>>(),
-            }),
-        })),
-        Some(diagnostics.revision),
-    )
-    .map(|mut result| {
-        result.outcome = ApplicationOutcome::Rejected;
+            })),
+        });
+    append_finish_parent_operation(
+        store,
+        operation,
+        &ProjectId::new(project),
+        &parsed.options.actor,
+        &parsed.options.session,
+        expected_attempt,
+        expected_fence,
+        parsed.options.expected_revision,
+        close_outcome,
+        finalized.revision,
+        &close_data,
+    )?;
+    bounded_result(Some(close_data), Some(finalized.revision)).map(|mut result| {
+        result.outcome = close_outcome;
         result
     })
 }
@@ -3525,7 +4119,7 @@ fn evidence_add_result(
     let result = app
         .record_receipt(
             &parsed.options.actor,
-            None,
+            Some(parsed.options.session.as_str()),
             &receipt,
             parsed.options.expected_revision,
             TimestampMs::from_millis(now_ms_u64()),
@@ -3875,6 +4469,7 @@ fn evidence_run_result<A: boreal_application::AttemptLifecycleAdapter>(
             ),
         ));
     }
+    validation_failpoint("after_evidence_admission");
     if let Err(error) = fs::create_dir_all(&output_dir) {
         let _ = app.mark_witnessed_execution_unknown(operation, "artifact_directory_failed");
         return Err(CliError::with(
@@ -3885,6 +4480,7 @@ fn evidence_run_result<A: boreal_application::AttemptLifecycleAdapter>(
     }
     app.start_witnessed_execution(operation, TimestampMs::from_millis(now_ms_u64()))
         .map_err(map_application_error)?;
+    validation_failpoint("after_evidence_start");
     let execution = match execute_gate_command(
         &declaration,
         &output_path,
@@ -3907,6 +4503,7 @@ fn evidence_run_result<A: boreal_application::AttemptLifecycleAdapter>(
     };
     app.finish_witnessed_execution(operation, execution.exit_code, execution.ended_at)
         .map_err(map_application_error)?;
+    validation_failpoint("after_evidence_exit");
     let result = app
         .build_bounded_evidence_receipt(&request, &execution)
         .map_err(map_application_error)?;
@@ -3957,23 +4554,29 @@ fn evidence_run_result<A: boreal_application::AttemptLifecycleAdapter>(
         "result": format!("{:?}", result.receipt.result).to_ascii_lowercase(),
         "retention": Value::Null,
     });
-    fs::write(
-        &receipt_path,
-        serde_json::to_vec(&receipt_json).map_err(|error| {
-            CliError::with(
-                ErrorCode::ReceiptInvalid,
-                ApplicationOutcome::Rejected,
-                error.to_string(),
-            )
-        })?,
-    )
-    .map_err(|error| {
-        CliError::with(
-            ErrorCode::ServiceUnavailable,
-            ApplicationOutcome::Failed,
-            error.to_string(),
-        )
-    })?;
+    let export = match serde_json::to_vec(&receipt_json) {
+        Ok(bytes) => match write_receipt_sidecar(&receipt_path, &bytes) {
+            Ok(()) => json!({
+                "status": "exported",
+                "path": receipt_path,
+                "retryable": false,
+            }),
+            Err(message) => json!({
+                "status": "committed_export_failed",
+                "path": receipt_path,
+                "retryable": true,
+                "code": "receipt_sidecar_export_failed",
+                "message": message,
+            }),
+        },
+        Err(error) => json!({
+            "status": "committed_export_failed",
+            "path": receipt_path,
+            "retryable": false,
+            "code": "receipt_sidecar_serialization_failed",
+            "message": error.to_string(),
+        }),
+    };
     bounded_result(
         Some(json!({
             "receipt_id": inserted.receipt.receipt_id,
@@ -3987,6 +4590,7 @@ fn evidence_run_result<A: boreal_application::AttemptLifecycleAdapter>(
             "stderr_ref": output_path.with_extension("err"),
             "observables": result.receipt.coverage.observables,
             "receipt_path": receipt_path,
+            "export": export,
             "replayed": inserted.replayed,
         })),
         Some(inserted.revision),
@@ -3999,6 +4603,38 @@ fn evidence_run_result<A: boreal_application::AttemptLifecycleAdapter>(
         };
         result
     })
+}
+
+fn write_receipt_sidecar(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    let temporary = path.with_extension(format!(
+        "json.tmp-{}-{}",
+        std::process::id(),
+        OPERATION_COUNTER.fetch_add(1, Ordering::Relaxed)
+    ));
+    let result = (|| {
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)
+            .map_err(|error| error.to_string())?;
+        file.write_all(bytes).map_err(|error| error.to_string())?;
+        file.sync_all().map_err(|error| error.to_string())?;
+        fs::rename(&temporary, path).map_err(|error| error.to_string())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    result
+}
+
+/// Deterministic crash points used only by the validation harness. They are
+/// compiled out of optimized release binaries so a production invocation
+/// cannot be made to abort by an inherited test environment variable.
+fn validation_failpoint(name: &str) {
+    if cfg!(debug_assertions) && env::var("BOREAL_VALIDATION_FAILPOINT").as_deref() == Ok(name) {
+        eprintln!("BOREAL_VALIDATION_FAILPOINT reached: {name}");
+        std::process::abort();
+    }
 }
 
 fn read_gate_declaration(gate_root: &Path, gate_id: &str) -> Result<GateDeclaration, CliError> {
@@ -4295,6 +4931,7 @@ fn execute_gate_command(
             format!("declared gate could not start: {error}"),
         )
     })?;
+    let process_group_id = child.id();
     let stdout_reader = match child.stdout.take() {
         Some(reader) => reader,
         None => {
@@ -4365,6 +5002,14 @@ fn execute_gate_command(
             break;
         }
         thread::sleep(Duration::from_millis(5));
+    }
+    if child_status.is_some() && !timed_out {
+        // A parent exit is not process-tree completion: descendants can keep
+        // either inherited pipe open forever. Terminate the operation group
+        // before joining capture workers so the declared runtime also bounds
+        // output drain. The process group was created exclusively for this
+        // verifier invocation.
+        terminate_gate_descendants(process_group_id);
     }
     let stdout_capture = stdout_thread.join().map_err(|_| {
         CliError::with(
@@ -4542,6 +5187,16 @@ fn terminate_gate_process(child: &mut Child) -> GateTermination {
         }
     }
 }
+
+#[cfg(unix)]
+fn terminate_gate_descendants(process_group_id: u32) {
+    let _ = runner_process::send_group(process_group_id, runner_process::SIGTERM);
+    thread::sleep(Duration::from_millis(25));
+    let _ = runner_process::send_group(process_group_id, runner_process::SIGKILL);
+}
+
+#[cfg(not(unix))]
+fn terminate_gate_descendants(_process_group_id: u32) {}
 
 fn spawn_capture_worker<R>(
     mut reader: R,
@@ -4941,7 +5596,7 @@ fn bounded_result(data: Option<Value>, revision: Option<u64>) -> Result<CliResul
                 )
             })?
             .len()
-            > MAX_JSON_BYTES
+            > MAX_JSON_BYTES.saturating_sub(ENVELOPE_METADATA_BUDGET)
         {
             return Err(CliError::with(
                 ErrorCode::InvalidArgument,
@@ -4954,15 +5609,53 @@ fn bounded_result(data: Option<Value>, revision: Option<u64>) -> Result<CliResul
         outcome: ApplicationOutcome::Changed,
         revision,
         data,
+        ..CliResult::default()
     })
 }
 
-fn changed(revision: u64, data: Option<Value>) -> CliResult {
-    CliResult {
-        outcome: ApplicationOutcome::Changed,
-        revision: Some(revision),
-        data,
+fn append_finish_parent_operation(
+    store: &SqliteStore,
+    operation: &str,
+    project: &ProjectId,
+    actor: &str,
+    session: &str,
+    attempt: &str,
+    fence: u64,
+    expected_revision: Option<u64>,
+    outcome: ApplicationOutcome,
+    revision: u64,
+    result: &Value,
+) -> Result<(), CliError> {
+    if store.operation(operation).map_err(map_store_error)?.is_some() {
+        return Ok(());
     }
+    let outcome = match outcome {
+        ApplicationOutcome::Changed => StoreOperationOutcome::Changed,
+        ApplicationOutcome::Unchanged => StoreOperationOutcome::Unchanged,
+        ApplicationOutcome::Rejected => StoreOperationOutcome::Rejected,
+        ApplicationOutcome::Conflict => StoreOperationOutcome::Conflict,
+        ApplicationOutcome::Busy => StoreOperationOutcome::Busy,
+        ApplicationOutcome::Failed => StoreOperationOutcome::Failed,
+        ApplicationOutcome::Unknown => StoreOperationOutcome::Unknown,
+    };
+    store
+        .append_operation(&OperationRecord {
+            operation_id: operation.to_owned(),
+            project_id: project.as_str().to_owned(),
+            command: "finish_close".to_owned(),
+            actor_id: actor.to_owned(),
+            session_id: Some(session.to_owned()),
+            expected_revision,
+            attempt_id: Some(attempt.to_owned()),
+            fence: Some(fence),
+            request_digest: canonical_request_digest("finish.close/v1", result.clone()),
+            outcome,
+            result_json: result.to_string(),
+            revision,
+            created_at: now(),
+            completed_at: Some(now()),
+        })
+        .map_err(map_store_error)
 }
 
 fn store_revision(store: &SqliteStore, project: &ProjectId) -> Result<u64, CliError> {
@@ -5199,6 +5892,75 @@ fn ensure_db_parent(path: &Path) -> Result<(), CliError> {
         })?;
     }
     Ok(())
+}
+
+/// Direct mode is an explicitly safe offline mode: it must hold the same
+/// database-identity election used by the local service for the entire
+/// application operation. This prevents a direct CLI process from silently
+/// racing an elected service owner.
+fn direct_database_owner(
+    path: &Path,
+    parsed: &ParsedCommand,
+) -> Result<Option<boreal_service::ProjectElection>, CliError> {
+    let project = if parsed.path == ["doctor"] && parsed.options.project.is_none() {
+        None
+    } else {
+        Some(project_argument(parsed, 0)?)
+    };
+    let Some(project) = project else {
+        return Ok(None);
+    };
+    let canonical_db = if path.exists() {
+        fs::canonicalize(path).map_err(|error| {
+            CliError::with(
+                ErrorCode::ServiceUnavailable,
+                ApplicationOutcome::Failed,
+                format!("database identity is unavailable: {error}"),
+            )
+        })?
+    } else {
+        let parent = path.parent().unwrap_or(Path::new("."));
+        let parent = fs::canonicalize(parent).map_err(|error| {
+            CliError::with(
+                ErrorCode::ServiceUnavailable,
+                ApplicationOutcome::Failed,
+                format!("database parent identity is unavailable: {error}"),
+            )
+        })?;
+        parent.join(path.file_name().ok_or_else(|| {
+            CliError::invalid("database path must name a database file")
+        })?)
+    };
+    let runtime_dir = canonical_db
+        .parent()
+        .unwrap_or(Path::new("."))
+        .join(".boreal-service-runtime");
+    let database_identity = format!("database:{}", canonical_db.to_string_lossy());
+    let owner_id = format!(
+        "direct-process:{}:{}",
+        std::process::id(),
+        sha256_content_digest(database_identity.as_bytes())
+    );
+    boreal_service::ProjectElection::try_acquire(&runtime_dir, database_identity, owner_id)
+        .map(Some)
+        .map_err(|error| {
+            let outcome = match error {
+                boreal_service::ElectionError::Busy(_) => ApplicationOutcome::Busy,
+                _ => ApplicationOutcome::Failed,
+            };
+            let code = if outcome == ApplicationOutcome::Busy {
+                ErrorCode::ServiceBusy
+            } else {
+                ErrorCode::ServiceUnavailable
+            };
+            CliError::with(
+                code,
+                outcome,
+                format!(
+                    "direct offline mode could not acquire database owner for project {project}: {error}"
+                ),
+            )
+        })
 }
 
 fn map_application_error(error: ApplicationError) -> CliError {
@@ -5493,6 +6255,18 @@ mod tests {
     }
 
     #[test]
+    fn parser_supports_release_machine_update_alias() {
+        let update = parse(&args(&["update", "--json"])).expect("update parses");
+        assert_eq!(update.path, vec!["update"]);
+        assert!(!update.options.machine);
+
+        let upgrade = parse(&args(&["upgrade", "--machine", "--json"]))
+            .expect("machine upgrade parses");
+        assert_eq!(upgrade.path, vec!["upgrade"]);
+        assert!(upgrade.options.machine);
+    }
+
+    #[test]
     fn parser_allows_dashboard_project_discovery_and_explicit_context() {
         let discovered = parse(&args(&["dashboard", "--json"])).unwrap();
         assert_eq!(discovered.path, vec!["dashboard"]);
@@ -5543,6 +6317,90 @@ mod tests {
             "0h",
         ]));
         assert_eq!(bad.unwrap_err().code, ErrorCode::InvalidArgument);
+    }
+
+    #[test]
+    fn revision_alias_preserves_the_expected_revision_precondition() {
+        let canonical = parse(&args(&[
+            "intake",
+            "bucket",
+            "project-1",
+            "bucket-1",
+            "Inbox",
+            "--expected-revision",
+            "7",
+        ]))
+        .expect("canonical revision parses");
+        let alias = parse(&args(&[
+            "intake",
+            "bucket",
+            "project-1",
+            "bucket-1",
+            "Inbox",
+            "--revision",
+            "7",
+        ]))
+        .expect("revision alias parses");
+        assert_eq!(
+            alias.options.expected_revision,
+            canonical.options.expected_revision
+        );
+        let duplicate = parse(&args(&[
+            "intake",
+            "bucket",
+            "project-1",
+            "bucket-1",
+            "Inbox",
+            "--revision",
+            "7",
+            "--expected-revision",
+            "7",
+        ]))
+        .expect_err("duplicate revision spellings must not silently overwrite");
+        assert_eq!(duplicate.code, ErrorCode::InvalidArgument);
+    }
+
+    #[test]
+    fn evidence_execution_state_readback_uses_protocol_terminal_names() {
+        assert_eq!(
+            evidence_execution_state_name(EvidenceExecutionState::ReceiptCommitted),
+            "receipt_committed"
+        );
+        assert_eq!(
+            evidence_execution_state_name(EvidenceExecutionState::Admitted),
+            "admitted"
+        );
+        assert_eq!(
+            evidence_execution_state_name(EvidenceExecutionState::Unknown),
+            "unknown"
+        );
+    }
+
+    #[test]
+    fn bounded_results_reserve_space_for_the_outer_envelope() {
+        let near_bound = Value::String("x".repeat(
+            // JSON string encoding contributes opening/closing quotes in
+            // addition to the payload bytes.
+            MAX_JSON_BYTES.saturating_sub(ENVELOPE_METADATA_BUDGET + 2),
+        ));
+        assert!(bounded_result(Some(near_bound), None).is_ok());
+        let over_bound = Value::String("x".repeat(
+            MAX_JSON_BYTES.saturating_sub(ENVELOPE_METADATA_BUDGET) + 1,
+        ));
+        let error = bounded_result(Some(over_bound), None)
+            .expect_err("data must leave room for envelope metadata");
+        assert_eq!(error.code, ErrorCode::InvalidArgument);
+    }
+
+    #[test]
+    fn receipt_sidecar_failure_is_reported_without_erasing_durable_state() {
+        let path = env::temp_dir().join(format!("boreal-cli-sidecar-dir-{}", now_ms_u64()));
+        let _ = fs::remove_dir_all(&path);
+        fs::create_dir_all(&path).expect("sidecar conflict directory creates");
+        let error = write_receipt_sidecar(&path, b"receipt")
+            .expect_err("a directory target must not be treated as an exported receipt");
+        assert!(!error.is_empty());
+        let _ = fs::remove_dir_all(path);
     }
 
     #[test]
@@ -5789,6 +6647,7 @@ mod tests {
                 outcome,
                 revision: Some(4),
                 data: Some(json!({"selection": "none"})),
+                ..CliResult::default()
             };
             assert!(result_protocol_error(&result, "op_success").is_none());
         }
@@ -5808,6 +6667,7 @@ mod tests {
                 outcome,
                 revision: Some(9),
                 data: Some(json!({"obligation": "preserved"})),
+                ..CliResult::default()
             };
             let error = result_protocol_error(&result, "op_outcome_contract")
                 .expect("unsuccessful outcome has a protocol error");
@@ -5830,6 +6690,7 @@ mod tests {
                 "close_state": "open",
                 "gates": {"missing": ["work:checkpoint", "work:summary"]}
             })),
+            ..CliResult::default()
         };
         let error = result_protocol_error(&result, "op_rejected_close").unwrap();
         assert_eq!(error.code, ErrorCode::GateUnsatisfied);
@@ -6018,6 +6879,7 @@ mod tests {
 
         let result =
             run(&args(&["status", "p", "--db", &db, "--json"])).expect("derived status succeeds");
+        assert_eq!(result.outcome, ApplicationOutcome::Unchanged);
         let status = result.data.expect("status data");
         let items = status["items"].as_array().expect("status items");
         let container = items
@@ -6071,10 +6933,14 @@ mod tests {
         let db_path = env::temp_dir().join(format!("boreal-cli-finish-{}.sqlite", now_ms_u64()));
         let receipt_path =
             env::temp_dir().join(format!("boreal-cli-receipt-{}.json", now_ms_u64()));
+        let summary_path =
+            env::temp_dir().join(format!("boreal-cli-summary-{}.md", now_ms_u64()));
         let db = db_path.to_string_lossy().to_string();
         let receipt_file = receipt_path.to_string_lossy().to_string();
+        let summary_file = summary_path.to_string_lossy().to_string();
         let _ = fs::remove_file(&db_path);
         let _ = fs::remove_file(&receipt_path);
+        let _ = fs::remove_file(&summary_path);
 
         run(&args(&["init", "p", "--db", &db])).expect("project initializes");
         run(&args(&["work", "create", "p", "w", "task", "--db", &db])).expect("work creates");
@@ -6141,6 +7007,8 @@ mod tests {
             .expect("receipt serializes"),
         )
         .expect("receipt writes");
+        fs::write(&summary_path, "Finish remains open pending the required checkpoint.")
+            .expect("summary writes");
 
         let finished = run(&args(&[
             "agent",
@@ -6157,6 +7025,8 @@ mod tests {
             &fence.to_string(),
             "--receipt",
             &receipt_file,
+            "--summary",
+            &summary_file,
             "--db",
             &db,
         ]))
@@ -6170,7 +7040,7 @@ mod tests {
             .expect("missing gate list")
             .iter()
             .any(|gate| gate.as_str().is_some_and(|id| id.ends_with(":checkpoint"))));
-        assert!(data["gates"]["missing"]
+        assert!(!data["gates"]["missing"]
             .as_array()
             .expect("missing gate list")
             .iter()
@@ -6178,5 +7048,6 @@ mod tests {
 
         let _ = fs::remove_file(db_path);
         let _ = fs::remove_file(receipt_path);
+        let _ = fs::remove_file(summary_path);
     }
 }

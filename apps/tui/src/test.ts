@@ -17,6 +17,7 @@ import {
   actionAvailability,
   buildStatusView,
   contextualAction,
+  normalizeStateSpelling,
   validateEnvelope,
   validateRequestEnvelope,
   workflowDisplayState,
@@ -26,8 +27,8 @@ import { unlinkSync } from "node:fs";
 import { UnixSocketFramedTransport } from "./node-transport.js";
 import { mountAndRender, parseTerminalArgs } from "./entrypoint.js";
 import { lineShellHelp, parseLineCommand, runLineShell } from "./line-shell.js";
-import { FullScreenTerminal, TerminalSignal, decodeKeys, runFullScreen } from "./full-screen.js";
-import { renderMountedView } from "./terminal.js";
+import { FullScreenTerminal, StreamingKeyDecoder, TerminalSignal, decodeKeys, runFullScreen } from "./full-screen.js";
+import { renderMountedView, sanitizeTerminalText } from "./terminal.js";
 
 function assert(condition: unknown, message: string): asserts condition {
   if (!condition) throw new Error(message);
@@ -45,6 +46,19 @@ function assertExactKeys(value: Record<string, unknown>, expected: readonly stri
   assert(JSON.stringify(actualKeys) === JSON.stringify(expectedKeys), `${message}: ${actualKeys.join(", ")}`);
 }
 
+let operationSequence = 0;
+let socketSequence = 0;
+
+function nextOperationId(revision: number | null): string {
+  operationSequence += 1;
+  return `op_test_${revision ?? "none"}_${operationSequence}`;
+}
+
+function nextSocketPath(prefix: string): string {
+  socketSequence += 1;
+  return `/tmp/${prefix}-${Date.now()}-${socketSequence}-${Math.random().toString(36).slice(2)}.sock`;
+}
+
 async function throwsAsync(action: () => Promise<unknown>, expected: string): Promise<void> {
   let error: unknown;
   try { await action(); } catch (caught) { error = caught; }
@@ -56,7 +70,7 @@ function envelope<T>(revision: number | null, data: T | null, outcome: Envelope<
   return {
     api_version: API_VERSION,
     schema_version: ENVELOPE_SCHEMA,
-    operation_id: `op_test_${revision ?? "none"}_${Math.random().toString(36).slice(2, 7)}`,
+    operation_id: nextOperationId(revision),
     revision,
     as_of: asOf,
     next_status_change_at: null,
@@ -327,9 +341,10 @@ const createWorkWire = transport.requests[5].data as Record<string, unknown>;
 assert(createWorkWire.command === "create_work", "work creation uses the create_work service route");
 assert(createWorkWire.work_id === "wire-created" && createWorkWire.parent_id === "sprint-1" && createWorkWire.priority === 7, "work creation carries complete typed planning fields");
 assert(createWorkWire.dispatch === "automatic" && createWorkWire.profile === "focused", "work creation maps ergonomic policy inputs to Rust strings");
+assert(createWorkWire.profile_version === "1", "work creation preserves the acceptance profile version");
 assert(createWorkWire.dispatch_policy === undefined && createWorkWire.acceptance_profile === undefined && createWorkWire.hard_holds === undefined, "work creation omits unsupported or non-canonical fields");
 assertExactKeys(createWorkWire, [
-  "actor_id", "command", "description", "dispatch", "expected_revision", "harness_id", "kind", "parent_id", "priority", "profile", "project_id", "session_id", "title", "work_id",
+  "actor_id", "command", "description", "dispatch", "expected_revision", "harness_id", "kind", "parent_id", "priority", "profile", "profile_version", "project_id", "session_id", "title", "work_id",
 ], "work creation emits only the exact Rust DTO fields");
 
 throws(() => wireClient.createWork({
@@ -720,7 +735,7 @@ assert(pendingReads === 1, "burst made one service read");
 resolvePending?.(monitoring(31, []));
 await burst;
 
-const socketPath = `/tmp/boreal-tui-test-${Date.now()}-${Math.random().toString(36).slice(2)}.sock`;
+const socketPath = nextSocketPath("boreal-tui-test");
 const socketOuterRequests: Array<Record<string, unknown>> = [];
 const fakeServer = createServer((socket) => {
   let frame = new Uint8Array(0);
@@ -786,7 +801,104 @@ try {
   try { unlinkSync(socketPath); } catch { /* server cleanup already removed it */ }
 }
 
-const reconnectSocketPath = `/tmp/boreal-tui-reconnect-${Date.now()}-${Math.random().toString(36).slice(2)}.sock`;
+const timeoutSocketPath = nextSocketPath("boreal-tui-timeout");
+let timeoutPeerClosed = false;
+let timeoutPeerClosedResolve: (() => void) | undefined;
+const timeoutPeerClosedSignal = new Promise<void>((resolve) => { timeoutPeerClosedResolve = resolve; });
+let timeoutPeerAcceptedResolve: (() => void) | undefined;
+const timeoutPeerAccepted = new Promise<void>((resolve) => { timeoutPeerAcceptedResolve = resolve; });
+let timeoutPeerSocket: Parameters<Parameters<typeof createServer>[0]>[0] | undefined;
+const timeoutServer = createServer((socket) => {
+  timeoutPeerSocket = socket;
+  timeoutPeerAcceptedResolve?.();
+  socket.on("data", () => { /* drain the request so peer teardown is observable */ });
+  socket.on("close", () => {
+    timeoutPeerClosed = true;
+    timeoutPeerClosedResolve?.();
+  });
+});
+await new Promise<void>((resolve, reject) => {
+  timeoutServer.on("error", reject);
+  timeoutServer.listen(timeoutSocketPath, resolve);
+});
+try {
+  const timeoutTransport = new UnixSocketFramedTransport(timeoutSocketPath, { max_payload_bytes: 4096, timeout_ms: 200 });
+  let timedOut = false;
+  let timeoutMessage = "";
+  const pendingTimeout = timeoutTransport.roundTrip(encodeJsonFrame(JSON.stringify({
+    api_version: API_VERSION,
+    schema_version: ENVELOPE_SCHEMA,
+    operation_id: "op_transport_timeout",
+    data: { command: "status" },
+  }), 4096));
+  await timeoutPeerAccepted;
+  try {
+    await pendingTimeout;
+  } catch (error) {
+    timedOut = true;
+    timeoutMessage = error instanceof Error ? error.message : String(error);
+  }
+  assert(timedOut, "Unix transport rejects a timed-out response");
+  assert(timeoutMessage.includes("timed out"), "Unix transport reports a timeout rather than an unrelated connection failure");
+  await Promise.race([
+    timeoutPeerClosedSignal,
+    new Promise<never>((_, reject) => setTimeout(() => reject(new Error("timed-out peer did not close")), 1_000)),
+  ]);
+  assert(timeoutPeerClosed, "Unix transport destroys the timed-out peer connection");
+} finally {
+  timeoutPeerSocket?.destroy();
+  await new Promise<void>((resolve, reject) => timeoutServer.close((error) => error ? reject(error) : resolve()));
+  try { unlinkSync(timeoutSocketPath); } catch { /* server cleanup already removed it */ }
+}
+
+const closeSocketPath = nextSocketPath("boreal-tui-close");
+let closePeerClosed = false;
+let closePeerClosedResolve: (() => void) | undefined;
+const closePeerClosedSignal = new Promise<void>((resolve) => { closePeerClosedResolve = resolve; });
+let closePeerAcceptedResolve: (() => void) | undefined;
+const closePeerAccepted = new Promise<void>((resolve) => { closePeerAcceptedResolve = resolve; });
+let closePeerSocket: Parameters<Parameters<typeof createServer>[0]>[0] | undefined;
+const closeServer = createServer((socket) => {
+  closePeerSocket = socket;
+  closePeerAcceptedResolve?.();
+  socket.on("data", () => { /* drain the request so peer teardown is observable */ });
+  socket.on("close", () => {
+    closePeerClosed = true;
+    closePeerClosedResolve?.();
+  });
+});
+await new Promise<void>((resolve, reject) => {
+  closeServer.on("error", reject);
+  closeServer.listen(closeSocketPath, resolve);
+});
+try {
+  const closeTransport = new UnixSocketFramedTransport(closeSocketPath, { max_payload_bytes: 4096, timeout_ms: 5_000 });
+  const pendingRequest = closeTransport.roundTrip(encodeJsonFrame(JSON.stringify({
+    api_version: API_VERSION,
+    schema_version: ENVELOPE_SCHEMA,
+    operation_id: "op_transport_close",
+    data: { command: "status" },
+  }), 4096));
+  await closePeerAccepted;
+  closeTransport.close();
+  closeTransport.close();
+  let closedRejected = false;
+  try { await pendingRequest; } catch { closedRejected = true; }
+  assert(closedRejected, "Unix transport rejects an active request when closed");
+  await closePeerClosedSignal;
+  assert(closePeerClosed, "Unix transport closes the active peer connection");
+  let subsequentRejected = false;
+  try {
+    await closeTransport.roundTrip(new Uint8Array([0, 0, 0, 0]));
+  } catch { subsequentRejected = true; }
+  assert(subsequentRejected, "Unix transport remains closed after an idempotent close");
+} finally {
+  closePeerSocket?.destroy();
+  await new Promise<void>((resolve, reject) => closeServer.close((error) => error ? reject(error) : resolve()));
+  try { unlinkSync(closeSocketPath); } catch { /* server cleanup already removed it */ }
+}
+
+const reconnectSocketPath = nextSocketPath("boreal-tui-reconnect");
 let reconnectConnections = 0;
 const reconnectServer = createServer((socket) => {
   reconnectConnections += 1;
@@ -939,12 +1051,12 @@ const filterRun = runFullScreen(fullScreenController, filterTerminal, { auto_ref
 filterTerminal.emitData("8");
 filterTerminal.emitData("p");
 filterTerminal.emitData("/");
-filterTerminal.emitData("task");
+filterTerminal.emitData("query");
 filterTerminal.emitData("\r");
 filterTerminal.emitData("q");
 await filterRun;
 assert(filterTerminal.writes.some((value) => value.includes("SPRINTS")), "full-screen numeric filter and command palette render the selected sprint view");
-assert(filterTerminal.writes.some((value) => value.includes("search: task")), "full-screen search input is revision-independent presentation state");
+assert(filterTerminal.writes.some((value) => value.includes("search: query")), "full-screen search input accepts shortcut characters while focused");
 
 const signalTerminal = new FakeFullScreenTerminal();
 const signalledRun = runFullScreen(fullScreenController, signalTerminal, { auto_refresh_ms: 60_000 });
@@ -1019,4 +1131,173 @@ assert(timedOutOperationId !== null, "timeout test starts a mutation with an ope
 assert(timedOutTerminal.writes.at(-1)?.includes("outcome unknown") === true, "shutdown reports an unknown mutation outcome after the drain deadline");
 assert(timedOutTerminal.listenerCount() === 0 && timedOutTerminal.rawModes.join(",") === "true,false", "timed-out mutation still restores terminal state");
 
-console.log("TUI mounted workflow, protocol/error, monitoring, disabled-action, and refresh tests passed");
+const fullDtoEnvelope = envelope(110, {
+  contract_version: "boreal.work-status/2",
+  project_id: "project_test",
+  project_revision: 110,
+  as_of: "2026-09-14T22:10:00Z",
+  limit: 2,
+  offset: 0,
+  total: 3,
+  has_more: true,
+  next_offset: 2,
+  counts: { total: 3, ready: 1, in_progress: 1 },
+  items: [
+    {
+      work_id: "dto-running",
+      project_id: "project_test",
+      display_status: "running",
+      claimable_for_actor: false,
+      reason_codes: [],
+      next_action: null,
+      lifecycle: "in-progress",
+      kind: "task",
+      title: "dto",
+      attempt_id: "attempt-dto",
+      fence: 4,
+      phase: "accepted",
+      dependency: { prerequisites: [{ work_id: "upstream", display_status: "needs-verification", satisfies_default: false }] },
+      gates: { open: [{ gate_id: "optional", kind: "review", required: false, state: "open", receipt_id: null }], satisfied: [] },
+    },
+    item("dto-ready", "ready"),
+  ],
+}, "unchanged");
+fullDtoEnvelope.next_status_change_at = "2026-09-14T22:11:00Z";
+fullDtoEnvelope.timing = { admitted_at: "2026-09-14T22:10:00Z", elapsed_ms: 4 };
+fullDtoEnvelope.recovery = { action: "operation_show", readback_required: false };
+const fullDto = buildStatusView(fullDtoEnvelope as unknown as Envelope<RevisionedStatusResponse>);
+assert(normalizeStateSpelling("needs-Verification") === "needs_verification", "service state spellings normalize to snake_case");
+assert(fullDto.items[0].status === "in_progress" && fullDto.items[0].lifecycle === "in_progress", "full status DTO preserves normalized display and lifecycle state");
+assert(fullDto.items[0].dependencies?.[0].status === "needs_verification", "nested dependency DTO is reachable");
+assert(fullDto.items[0].gates?.open[0].required === false && fullDto.has_more && fullDto.next_offset === 2, "optional gate and pagination metadata are preserved");
+assert(fullDto.next_status_change_at === fullDtoEnvelope.next_status_change_at && fullDto.timing?.elapsed_ms === 4, "snapshot timing and next deadline survive validation");
+assert(fullDto.recovery?.action === "operation_show", "structured recovery metadata survives validation");
+assert(actionAvailability({ ...fullDto.items[0], attempt: { attempt_id: "attempt-dto", fence: 4, phase: "accepted" } }, new Set(), { receipt_available: true }).find((entry) => entry.action === "finish")?.enabled === true, "optional open gates do not disable finish");
+
+const hostileText = renderMountedView({
+  mounted: true,
+  route: { kind: "work", project_id: "project_test", work_id: "hostile" },
+  monitoring: buildStatusView(monitoring(111, [item("hostile", "ready", { title: "safe\u001b]52;c;clipboard\u0007\nnext", description: "line\rbreak" })])),
+  selected_work: item("hostile", "ready", { title: "safe\u001b]52;c;clipboard\u0007\nnext" }),
+  actions: actionAvailability(item("hostile", "ready")),
+  notice: null,
+  stale_revision: null,
+  busy_actions: [],
+  pending_operations: [],
+});
+assert(!hostileText.includes("\u001b") && !hostileText.includes("\u0007"), "renderer strips terminal control bytes from untrusted text");
+assert(sanitizeTerminalText("a\u202Ebc").includes("�"), "renderer strips bidi control characters");
+
+const decoder = new StreamingKeyDecoder();
+assert(decoder.push("\u001b").length === 0 && JSON.stringify(decoder.push("[A")) === JSON.stringify(["up"]), "streaming decoder joins split arrow escape sequences");
+const snowmanBytes = new TextEncoder().encode("☃");
+assert(decoder.push(snowmanBytes.slice(0, 1)).length === 0 && decoder.push(snowmanBytes.slice(1)).join("") === "☃", "streaming decoder joins split UTF-8 characters");
+
+let pagedReads: Array<{ offset?: number; work_id?: string }> = [];
+const pageOne = Array.from({ length: 100 }, (_, index) => item(`page-${String(index).padStart(3, "0")}`, "ready"));
+const paginationService: VersionedServiceApi = {
+  ...service,
+  async readStatus(options) {
+    pagedReads.push({ offset: options?.offset, work_id: options?.work_id });
+    const offset = options?.offset ?? 0;
+    return envelope(120, {
+      project_id: "project_test",
+      total: 101,
+      limit: 100,
+      offset,
+      has_more: offset === 0,
+      next_offset: offset === 0 ? 100 : null,
+      counts: { total: 101, ready: 101 },
+      items: offset === 0 ? pageOne : [item("page-100", "ready")],
+    }, "unchanged");
+  },
+};
+const pagedController = new MountedWorkflowController(paginationService, { context: tuiContext });
+const pagedView = await pagedController.mount({ kind: "work", project_id: "project_test", work_id: "page-100" });
+assert(pagedView.selected_work?.work_id === "page-100" && pagedReads.length === 2 && pagedReads[1].offset === 100, "deep-linked records beyond the first page are reachable");
+
+let unknownAttempts = 0;
+const readbackService: VersionedServiceApi = {
+  ...service,
+  async readStatus() { return monitoring(130, [item("readback-task", "ready")]); },
+  async claim(request) {
+    unknownAttempts += 1;
+    if (unknownAttempts === 1) return envelope(130, null, "unknown", {
+      code: "unknown_outcome", message: "response lost", operation_id: request.operation_id,
+      operation_preserved: true, readback_required: true,
+    });
+    return envelope(131, { committed: true }, "changed");
+  },
+  async readOperation() { return envelope(131, { operation: { outcome: "changed" }, readback_required: false }, "changed"); },
+};
+const readbackController = new MountedWorkflowController(readbackService, { context: tuiContext });
+await readbackController.mount({ kind: "work", project_id: "project_test", work_id: "readback-task" });
+const unknownClaim = await readbackController.claim("readback-task");
+assert(!unknownClaim.ok, "unknown mutation is returned as a non-success result");
+await throwsAsync(() => readbackController.claim("readback-task"), "unknown outcome");
+const preservedOperation = unknownClaim.error.operation_id;
+await readbackController.readback(preservedOperation);
+assert(readbackController.view().pending_operations.length === 0, "durable operation readback resolves the preserved operation identity");
+assert((await readbackController.claim("readback-task")).ok && unknownAttempts === 2, "a retry is possible only after readback resolves the original operation");
+
+let hydratedReceipt: unknown;
+let finishSummary = "";
+const durableReceipt = { receipt_id: "receipt-durable", result: "passed" };
+const receiptService: VersionedServiceApi = {
+  ...service,
+  async readStatus() { return monitoring(140, [item("receipt-task", "in_progress", {
+    attempt: { attempt_id: "attempt-durable", fence: 8, phase: "accepted" },
+  })]); },
+  async readReceipt() {
+    return envelope(140, { work_id: "receipt-task", attempt_id: "attempt-durable", fence: 8, receipt: durableReceipt }, "changed");
+  },
+  async finish(request) {
+    hydratedReceipt = request.data.receipt;
+    finishSummary = request.data.summary ?? "";
+    return envelope(141, { closed: true }, "changed");
+  },
+};
+const receiptController = new MountedWorkflowController(receiptService, { context: tuiContext });
+const receiptView = await receiptController.mount({ kind: "work", project_id: "project_test", work_id: "receipt-task" });
+assert(receiptView.selected_receipt_available === true, "mounted controller rehydrates a durable receipt after restart/navigation");
+assert((await receiptController.finish("receipt-task", "durable closeout")).ok && hydratedReceipt === durableReceipt && finishSummary === "durable closeout", "finish uses the rehydrated receipt payload");
+
+let refreshReads = 0;
+const refreshFailureService: VersionedServiceApi = {
+  ...service,
+  async readStatus() {
+    refreshReads += 1;
+    if (refreshReads > 1) throw new Error("refresh unavailable");
+    return monitoring(150, [item("refresh-task", "ready")]);
+  },
+  async claim() { return envelope(151, { committed: true }, "changed"); },
+};
+const refreshFailureController = new MountedWorkflowController(refreshFailureService, { context: tuiContext });
+await refreshFailureController.mount({ kind: "work", project_id: "project_test", work_id: "refresh-task" });
+const committedDespiteRefreshFailure = await refreshFailureController.claim("refresh-task");
+assert(committedDespiteRefreshFailure.ok && refreshFailureController.view().notice?.message.includes("mutation committed") === true, "refresh failure does not mask a committed mutation");
+
+let fullScreenFinishSummary = "";
+const finishScreenService: VersionedServiceApi = {
+  ...service,
+  async readStatus() { return monitoring(160, [item("finish-screen", "in_progress", {
+    attempt: { attempt_id: "attempt-screen", fence: 2, phase: "accepted" },
+    receipt: { receipt_id: "receipt-screen", result: "passed" },
+  })]); },
+  async finish(request) { fullScreenFinishSummary = request.data.summary ?? ""; return envelope(161, null, "changed"); },
+};
+const finishScreenController = new MountedWorkflowController(finishScreenService, { context: tuiContext });
+await finishScreenController.mount({ kind: "monitoring", project_id: "project_test" });
+const finishScreenTerminal = new FakeFullScreenTerminal(120);
+const finishScreenRun = runFullScreen(finishScreenController, finishScreenTerminal, { auto_refresh_ms: 60_000 });
+finishScreenTerminal.emitData("\r");
+finishScreenTerminal.emitData("f");
+finishScreenTerminal.emitData("done q");
+finishScreenTerminal.emitData("\r");
+finishScreenTerminal.emitData("y");
+await new Promise<void>((resolve) => setTimeout(resolve, 0));
+finishScreenTerminal.emitData("q");
+await finishScreenRun;
+assert(fullScreenFinishSummary === "done q", "full-screen Finish edits and submits a typed summary instead of throwing");
+
+console.log("TUI mounted workflow, protocol/error, monitoring, disabled-action, pagination, recovery, terminal, and refresh tests passed");

@@ -82,12 +82,18 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--iterations", type=int, default=5)
     parser.add_argument("--output", type=Path, default=HERE / "results" / "latest.json")
+    parser.add_argument(
+        "--online",
+        action="store_true",
+        help="allow Cargo to resolve dependencies from the network",
+    )
     args = parser.parse_args()
     if args.iterations < 1:
         parser.error("--iterations must be positive")
 
+    cargo_network_args = [] if args.online else ["--offline"]
     subprocess.run(
-        ["cargo", "build", "--manifest-path", str(MANIFEST), "--release", "--locked", "--offline"],
+        ["cargo", "build", "--manifest-path", str(MANIFEST), "--release", "--locked", *cargo_network_args],
         cwd=V2_ROOT,
         check=True,
     )

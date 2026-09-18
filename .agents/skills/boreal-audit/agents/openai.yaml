@@ -1,0 +1,4 @@
+interface:
+  display_name: "Boreal v2 Audit"
+  short_description: "Audit work, evidence, gates, and operations"
+  default_prompt: "Use $boreal-audit to produce a bounded, evidence-backed Boreal audit."

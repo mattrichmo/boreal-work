@@ -19,6 +19,7 @@ export interface LineShellController {
   addEvidence(work_id: string, evidence: unknown): Promise<ActionResult<unknown>>;
   finish(work_id: string, summary?: string): Promise<ActionResult<unknown>>;
   release(work_id: string, reason?: string): Promise<ActionResult<unknown>>;
+  nextPage?(): Promise<MountedView>;
 }
 
 export type MutationLineCommand =

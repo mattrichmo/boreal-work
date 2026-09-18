@@ -239,6 +239,31 @@ def validate_transition_cases() -> tuple[int, int, int]:
     return legal, illegal, len(clock_ids) + len(dependency_ids)
 
 
+def validate_conformance_matrix() -> int:
+    matrix = load_json(ROOT / "conformance.json")
+    if matrix.get("schema_version") != "boreal.conformance.v1":
+        fail("conformance.json: unsupported schema_version")
+    transition = (ROOT / "transition-table.md").read_text()
+    expected = set(re.findall(r"\| ((?:T|I)\d+) \|", transition))
+    clock = load_json(ROOT / "clock-and-attempt.json")
+    dependency = load_json(ROOT / "dependency.json")
+    expected.update(case.get("id") for case in clock.get("cases", []))
+    expected.update(case.get("id") for case in dependency.get("cases", []))
+    entries = matrix.get("entries", [])
+    identifiers = [entry.get("id") for entry in entries]
+    if any(not entry.get("id") or not entry.get("selector") for entry in entries):
+        fail("conformance.json: every entry needs an id and selector")
+    if len(set(identifiers)) != len(identifiers):
+        fail("conformance.json: fixture IDs must be unique")
+    observed = set(identifiers)
+    if observed != expected:
+        fail(
+            "conformance.json: fixture IDs differ from source fixtures; "
+            f"missing={sorted(expected - observed)}, extra={sorted(observed - expected)}"
+        )
+    return len(entries)
+
+
 def main() -> int:
     try:
         manifest = load_json(ROOT / "manifest.json")
@@ -253,11 +278,12 @@ def main() -> int:
         workflow_count = validate_workflows()
         validate_cross_fixture_semantics()
         legal_count, illegal_count, scenario_count = validate_transition_cases()
+        conformance_count = validate_conformance_matrix()
         validate_schema()
     except ValueError as exc:
         print(f"FAIL: {exc}", file=sys.stderr)
         return 1
-    print(f"PASS: {envelope_count} protocol envelopes, {guidance_count} guidance fixtures, {workflow_count} workflow assets, {legal_count} legal/{illegal_count} illegal transition vectors, {scenario_count} clock/dependency cases, SQLite schema parsed")
+    print(f"PASS: {envelope_count} protocol envelopes, {guidance_count} guidance fixtures, {workflow_count} workflow assets, {legal_count} legal/{illegal_count} illegal transition vectors, {scenario_count} clock/dependency cases, {conformance_count} conformance mappings, SQLite schema parsed")
     return 0
 
 
