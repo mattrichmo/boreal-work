@@ -1,0 +1,260 @@
+{
+  "schema": "boreal.validation.tui-forensic-closeout.v1",
+  "generated_at": "2026-09-18T23:47:36.472Z",
+  "status": "pass",
+  "gates": {
+    "V04": {
+      "status": "pass",
+      "seen_states": [
+        "blocked",
+        "in_progress",
+        "ready"
+      ],
+      "seen_kinds": [
+        "milestone",
+        "sprint",
+        "task"
+      ],
+      "seen_gates": [
+        "checkpoint",
+        "summary",
+        "verification"
+      ],
+      "observations": [
+        {
+          "label": "initial",
+          "work_id": "matrix-milestone",
+          "kind": "milestone",
+          "parent_id": null,
+          "state": "blocked",
+          "gates_open": [
+            "matrix-milestone:checkpoint",
+            "matrix-milestone:summary",
+            "matrix-milestone:verification"
+          ],
+          "gates_satisfied": [],
+          "has_attempt": false,
+          "has_deadlines": false,
+          "revision": 5,
+          "as_of": "unix-ms:1789775255835",
+          "recovery_readback_required": false
+        },
+        {
+          "label": "initial",
+          "work_id": "matrix-sprint",
+          "kind": "sprint",
+          "parent_id": "matrix-milestone",
+          "state": "blocked",
+          "gates_open": [
+            "matrix-sprint:checkpoint",
+            "matrix-sprint:summary",
+            "matrix-sprint:verification"
+          ],
+          "gates_satisfied": [],
+          "has_attempt": false,
+          "has_deadlines": false,
+          "revision": 5,
+          "as_of": "unix-ms:1789775255835",
+          "recovery_readback_required": false
+        },
+        {
+          "label": "initial",
+          "work_id": "matrix-task",
+          "kind": "task",
+          "parent_id": "matrix-sprint",
+          "state": "ready",
+          "gates_open": [
+            "matrix-task:checkpoint",
+            "matrix-task:summary",
+            "matrix-task:verification"
+          ],
+          "gates_satisfied": [],
+          "has_attempt": false,
+          "has_deadlines": false,
+          "revision": 5,
+          "as_of": "unix-ms:1789775255835",
+          "recovery_readback_required": false
+        },
+        {
+          "label": "running",
+          "work_id": "matrix-milestone",
+          "kind": "milestone",
+          "parent_id": null,
+          "state": "blocked",
+          "gates_open": [
+            "matrix-milestone:checkpoint",
+            "matrix-milestone:summary",
+            "matrix-milestone:verification"
+          ],
+          "gates_satisfied": [],
+          "has_attempt": false,
+          "has_deadlines": false,
+          "revision": 9,
+          "as_of": "unix-ms:1789775255853",
+          "recovery_readback_required": false
+        },
+        {
+          "label": "running",
+          "work_id": "matrix-sprint",
+          "kind": "sprint",
+          "parent_id": "matrix-milestone",
+          "state": "blocked",
+          "gates_open": [
+            "matrix-sprint:checkpoint",
+            "matrix-sprint:summary",
+            "matrix-sprint:verification"
+          ],
+          "gates_satisfied": [],
+          "has_attempt": false,
+          "has_deadlines": false,
+          "revision": 9,
+          "as_of": "unix-ms:1789775255853",
+          "recovery_readback_required": false
+        },
+        {
+          "label": "running",
+          "work_id": "matrix-task",
+          "kind": "task",
+          "parent_id": "matrix-sprint",
+          "state": "in_progress",
+          "gates_open": [
+            "matrix-task:checkpoint",
+            "matrix-task:summary",
+            "matrix-task:verification"
+          ],
+          "gates_satisfied": [],
+          "has_attempt": true,
+          "has_deadlines": true,
+          "revision": 9,
+          "as_of": "unix-ms:1789775255853",
+          "recovery_readback_required": false
+        }
+      ]
+    },
+    "V06": {
+      "status": "pass",
+      "fault_boundaries": [
+        {
+          "failpoint": "after_evidence_admission",
+          "work_id": "fault-admission",
+          "operation_id": "op_forensic_tui_fault_after_evidence_admission_10",
+          "client_exit": 11,
+          "readback_outcome": "unknown",
+          "execution_state": "unknown"
+        },
+        {
+          "failpoint": "after_evidence_start",
+          "work_id": "fault-start",
+          "operation_id": "op_forensic_tui_fault_after_evidence_start_14",
+          "client_exit": 11,
+          "readback_outcome": "unknown",
+          "execution_state": "unknown"
+        },
+        {
+          "failpoint": "after_evidence_exit",
+          "work_id": "fault-exit",
+          "operation_id": "op_forensic_tui_fault_after_evidence_exit_18",
+          "client_exit": 11,
+          "readback_outcome": "unknown",
+          "execution_state": "unknown"
+        }
+      ],
+      "full_screen": {
+        "finish_operation_id": "op_tui_mu7lz691_9",
+        "notice": "mutation committed at revision 36; refresh unavailable: monitoring response has no revisioned data",
+        "terminal_output_bytes": 60714,
+        "receipt_dto_raw_coverage_kind": "Verification (normalized to verification)"
+      },
+      "finish_readback": {
+        "execution": null,
+        "operation": {
+          "actor_id": "forensic-tui-agent",
+          "attempt_id": "attempt-closeout-task",
+          "command": "finish_close",
+          "completed_at": "unix-ms:1789775256430",
+          "created_at": "unix-ms:1789775256430",
+          "fence": 1,
+          "operation_id": "op_tui_mu7lz691_9",
+          "outcome": "changed",
+          "project_id": "forensic-tui-project",
+          "request_digest": "sha256:8d001a9405302740c4e62cdbd219fee7c2690ac180b0146e541b9081ee3bace9",
+          "result": {
+            "attempt": {
+              "attempt_id": "attempt-closeout-task",
+              "current": false,
+              "fence": 1,
+              "hard_deadline": "unix-ms:1789782456209",
+              "lease_deadline": "unix-ms:1789777056209",
+              "phase": "verifying",
+              "replayed": false
+            },
+            "close_intent": "open",
+            "close_replayed": false,
+            "close_state": "finalized",
+            "gates": null,
+            "receipt_id": "receipt-op_forensic_tui_close_verification_23",
+            "receipt_replayed": true,
+            "summary_id": "summary-attempt-closeout-task-tui_mu7lz691_9",
+            "summary_replayed": false
+          },
+          "revision": 36,
+          "session_id": "session-closeout-task"
+        },
+        "readback_required": false,
+        "receipt": {
+          "argv": [
+            "/usr/bin/printf",
+            "verification-forensic-pass\\n"
+          ],
+          "attestation": "boreal_witnessed",
+          "config_identity": "config-forensic-tui",
+          "coverage": {
+            "kind": "Verification",
+            "observables": [
+              "verification"
+            ],
+            "profile_id": "focused",
+            "profile_version": "1"
+          },
+          "created_at": "unix-ms:1789775256338",
+          "cwd": ".",
+          "ended_at": "unix-ms:1789775256335",
+          "environment_fingerprint": "sha256:5052590c81fab3b7c2fdf3394e45808c84aae56628f15f41d25211cb793d47c7",
+          "executable": "/usr/bin/printf",
+          "exit_code": 0,
+          "fixture_id": null,
+          "operation_id": "op_forensic_tui_close_verification_23",
+          "output_digest": "sha256:c5e1ee7b41b870262d7b1b6cc7803a46c54e9d9d30a16ea7bb5c3b38132a2ffd",
+          "output_ref": "/private/var/folders/hm/p8b2n4p900q3vn5qtvdtg0hw0000gn/T/boreal-forensic-tui-S8xxg6/evidence/sha256-86c3df343bca599151cf38c6d290c38428af6d0a5822057ce1dab83fc07849b0/sha256-bf4d0a1972c6718eec52f942627a900e396bd641c564e4f38010e928b911046d.combined",
+          "receipt_id": "receipt-op_forensic_tui_close_verification_23",
+          "rejection_code": null,
+          "result": "passed",
+          "retention": null,
+          "schema_version": "boreal.receipt.v1",
+          "source_snapshot_hash": "sv_forensic-tui-project_sha256:b089b5a6c50943df241ca69298e61751c9ff20a314b7d69503b8e9523f722151",
+          "started_at": "unix-ms:1789775256298",
+          "subject": {
+            "attempt_id": "attempt-closeout-task",
+            "fence": 1,
+            "gate_id": "closeout-task:verification",
+            "work_id": "closeout-task"
+          }
+        },
+        "receipt_id": "receipt-op_forensic_tui_close_verification_23"
+      }
+    },
+    "V07": {
+      "status": "pass",
+      "committed_status": "closed",
+      "refresh_notice": "mutation committed at revision 36; refresh unavailable: monitoring response has no revisioned data",
+      "finish_operation_id": "op_tui_mu7lz691_9"
+    }
+  },
+  "fixture": {
+    "service": "real bwrk Unix socket",
+    "database": "isolated temporary SQLite fixture",
+    "product_client": "apps/tui/dist/client.js",
+    "full_screen": "apps/tui/dist/full-screen.js"
+  },
+  "limitations": []
+}

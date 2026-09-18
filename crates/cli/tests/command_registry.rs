@@ -53,6 +53,23 @@ fn deep_commands_resolves_a_concrete_unavailable_route() {
 }
 
 #[test]
+fn commands_catalogue_v3_routes_as_unavailable_future_capabilities() {
+    let (success, envelope) = invoke(&["commands", "intake", "--json"]);
+    assert!(success);
+    let unavailable = envelope["data"]["unavailable_routes"]
+        .as_array()
+        .unwrap();
+    assert!(unavailable
+        .iter()
+        .any(|route| route["path"] == "intake capture"
+            && route["code"] == "work_model_v3_not_enabled"));
+    assert!(envelope["data"]["available"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+}
+
+#[test]
 fn commands_expose_revision_checked_planning_mutations() {
     let (success, envelope) = invoke(&["commands", "work", "--json"]);
     assert!(success);

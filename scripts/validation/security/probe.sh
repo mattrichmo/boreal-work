@@ -442,3 +442,6 @@ if [[ "$ONLINE" == true ]]; then
 else
   (cd "$FIXTURE_ROOT" && BOREAL_SECURITY_FIXTURE="$FIXTURE_ROOT" cargo run --quiet --manifest-path "$FIXTURE_ROOT/probe/Cargo.toml" --offline)
 fi
+
+printf '%s\n' 'Security probe: production V12 envelope and committed-sidecar checks'
+python3 "$SCRIPT_DIR/v12_envelope.py"

@@ -23,6 +23,7 @@ pub(crate) fn supports(parsed: &ParsedCommand) -> bool {
         ["init"]
             | ["status"]
             | ["prime"]
+            | ["work", "show"]
             | ["work", "create"]
             | ["work", "edit"]
             | ["work", "hold", "add"]
@@ -32,12 +33,6 @@ pub(crate) fn supports(parsed: &ParsedCommand) -> bool {
             | ["dep", "remove"]
             | ["dep", "tree"]
             | ["dep", "cycles"]
-            | ["cycle", "board"]
-            | ["cycle", "report"]
-            | ["intake", "list"]
-            | ["intake", "show"]
-            | ["intake", "bucket"]
-            | ["intake", "capture"]
             | ["doctor"]
             | ["work", "claim"]
             | ["work", "accept"]
@@ -197,7 +192,7 @@ mod unix {
         }
     }
 
-    fn schedule_deadline_from_response(
+    pub(super) fn schedule_deadline_from_response(
         timers: &TimerRegistry,
         request_data: &Value,
         response: &ApplicationResponse,
@@ -241,7 +236,7 @@ mod unix {
         );
     }
 
-    fn cancel_deadline_from_response(
+    pub(super) fn cancel_deadline_from_response(
         timers: &TimerRegistry,
         request_data: &Value,
         response: &ApplicationResponse,
@@ -273,7 +268,7 @@ mod unix {
         timers.cancel(&attempt_deadline_key(project, attempt_id, fence));
     }
 
-    fn attempt_deadline_key(project: &str, attempt_id: &str, fence: u64) -> String {
+    pub(super) fn attempt_deadline_key(project: &str, attempt_id: &str, fence: u64) -> String {
         format!("attempt-deadline:{project}:{attempt_id}:{fence}")
     }
 
@@ -294,7 +289,7 @@ mod unix {
             )
         })?;
         let db = PathBuf::from(&parsed.options.db);
-        let config = ServiceHostConfig::default()
+        let mut config = ServiceHostConfig::default()
             .with_max_requests(parsed.options.max_requests)
             .map_err(|error| {
                 CliError::with(
@@ -303,6 +298,24 @@ mod unix {
                     error.to_string(),
                 )
             })?;
+        if let Some(workers) = parsed.options.dispatch_workers {
+            config = config.with_dispatch_workers(workers).map_err(|error| {
+                CliError::with(
+                    ErrorCode::InvalidArgument,
+                    ApplicationOutcome::Rejected,
+                    error.to_string(),
+                )
+            })?;
+        }
+        if let Some(capacity) = parsed.options.dispatch_capacity {
+            config = config.with_dispatch_capacity(capacity).map_err(|error| {
+                CliError::with(
+                    ErrorCode::InvalidArgument,
+                    ApplicationOutcome::Rejected,
+                    error.to_string(),
+                )
+            })?;
+        }
         let host = bind_service_host(&db, Path::new(socket), config)?;
         let endpoint = host.socket_path().to_string_lossy().into_owned();
         let handle = host.start_concurrent().map_err(|error| {
@@ -785,6 +798,15 @@ mod unix {
                 data["limit"] = json!(parsed.options.limit.unwrap_or(100));
                 data["offset"] = json!(parsed.options.offset.unwrap_or(0));
             }
+            ["work", "show"] => {
+                let work_index = usize::from(parsed.options.project.is_none());
+                data["command"] = json!("work_show");
+                data["work_id"] = json!(parsed
+                    .options
+                    .positionals
+                    .get(work_index)
+                    .ok_or_else(|| CliError::invalid("work show requires a work identifier"))?);
+            }
             ["work", "create"] => {
                 let positional_offset = usize::from(parsed.options.project.is_none());
                 let work_id = parsed
@@ -952,75 +974,6 @@ mod unix {
                 } else {
                     "dependency_cycles"
                 });
-            }
-            ["cycle", "board"] | ["cycle", "report"] => {
-                let cycle_index = usize::from(parsed.options.project.is_none());
-                data["command"] = json!(if path[1] == "board" {
-                    "cycle_board"
-                } else {
-                    "cycle_report"
-                });
-                data["cycle_id"] =
-                    json!(parsed.options.positionals.get(cycle_index).ok_or_else(|| {
-                        CliError::invalid("cycle board/report requires a cycle id")
-                    })?);
-            }
-            ["intake", "list"] | ["intake", "show"] => {
-                let intake_index = usize::from(parsed.options.project.is_none());
-                data["command"] = json!(if path[1] == "list" {
-                    "intake_list"
-                } else {
-                    "intake_show"
-                });
-                if path[1] == "show" {
-                    data["intake_id"] = json!(parsed
-                        .options
-                        .positionals
-                        .get(intake_index)
-                        .ok_or_else(|| CliError::invalid("intake show requires an intake id"))?);
-                }
-            }
-            ["intake", "bucket"] => {
-                let intake_index = usize::from(parsed.options.project.is_none());
-                data["command"] = json!("intake_bucket");
-                data["bucket_id"] = json!(parsed
-                    .options
-                    .positionals
-                    .get(intake_index)
-                    .ok_or_else(|| CliError::invalid("intake bucket requires a bucket id"))?);
-                data["name"] = json!(parsed
-                    .options
-                    .positionals
-                    .get(intake_index + 1)
-                    .ok_or_else(|| CliError::invalid("intake bucket requires a bucket name"))?);
-                data["expected_revision"] = parsed
-                    .options
-                    .expected_revision
-                    .map_or(Value::Null, |value| json!(value));
-            }
-            ["intake", "capture"] => {
-                let intake_index = usize::from(parsed.options.project.is_none());
-                data["command"] = json!("intake_capture");
-                data["intake_id"] = json!(parsed
-                    .options
-                    .positionals
-                    .get(intake_index)
-                    .ok_or_else(|| CliError::invalid("intake capture requires an intake id"))?);
-                data["content"] = json!(parsed
-                    .options
-                    .positionals
-                    .get(intake_index + 1)
-                    .ok_or_else(|| CliError::invalid("intake capture requires content"))?);
-                data["bucket_id"] = json!(parsed
-                    .options
-                    .bucket
-                    .clone()
-                    .ok_or_else(|| CliError::invalid("intake capture requires --bucket"))?);
-                data["kind"] = json!(parsed.options.kind.as_deref().unwrap_or("note"));
-                data["expected_revision"] = parsed
-                    .options
-                    .expected_revision
-                    .map_or(Value::Null, |value| json!(value));
             }
             ["doctor"] => {
                 data["command"] = json!("doctor");
@@ -1495,6 +1448,7 @@ mod unix {
                 "intake_capture" => self.intake_capture(data, &request.operation_id),
                 "doctor" => self.doctor(data),
                 "status" => self.status(data),
+                "work_show" => self.work_show(data),
                 "claim" => self.claim(data, &request.operation_id),
                 "start" => self.start(data, &request.operation_id),
                 "guide" => self.guidance(data, "guide"),
@@ -2199,6 +2153,14 @@ mod unix {
             let limit = optional_u64(data, "limit")?.unwrap_or(100);
             let offset = optional_u64(data, "offset")?.unwrap_or(0);
             let as_of = TimestampMs::from_millis(now_ms_u64());
+            // Validation-only instrumentation. It is opt-in so ordinary
+            // status DTOs do not expose adapter internals, while the V11
+            // production client can measure the exact service-side read
+            // boundary without dynamic-library interposition.
+            let include_query_metrics = std::env::var_os("BOREAL_QUERY_METRICS").is_some();
+            if include_query_metrics {
+                self.store.reset_query_metrics();
+            }
             let snapshot =
                 project_status_from_store(&self.store, &project, &actor, as_of, limit, offset)
                     .map_err(|message| {
@@ -2208,16 +2170,57 @@ mod unix {
                             message,
                         )
                     })?;
+            let mut status = super::super::status_snapshot_json(
+                &snapshot,
+                Some(json!({
+                    "readback_required": false,
+                    "service_state": "ready",
+                })),
+            );
+            if include_query_metrics {
+                let metrics = self.store.query_metrics();
+                status["service_query_metrics"] = json!({
+                    "statements_prepared": metrics.statements_prepared,
+                    "batch_calls": metrics.batch_calls,
+                    "rows_returned": metrics.rows_returned,
+                    "text_bytes_read": metrics.text_bytes_read,
+                });
+            }
             Ok((
                 ApplicationOutcome::Unchanged,
                 Some(snapshot.project_revision.0),
-                Some(super::super::status_snapshot_json(
-                    &snapshot,
-                    Some(json!({
-                        "readback_required": false,
-                        "service_state": "ready",
-                    })),
-                )),
+                Some(status),
+            ))
+        }
+
+        fn work_show(&self, data: &Value) -> ServiceResult {
+            let project = ProjectId::new(string(data, "project_id")?);
+            let work_id = string(data, "work_id")?;
+            let app = WorkApplication::new(&self.store);
+            let item = app.show_work(&project, &work_id).map_err(map_application_error)?;
+            let revision = self
+                .store
+                .project_revision(project.as_str())
+                .map_err(map_store_error)?;
+            Ok((
+                ApplicationOutcome::Unchanged,
+                Some(revision.0),
+                Some(json!({
+                    "work_id": item.work_id,
+                    "project_id": item.project_id,
+                    "kind": item.kind,
+                    "parent_id": item.parent_id,
+                    "lifecycle": item.lifecycle,
+                    "dispatch_policy": item.dispatch_policy,
+                    "priority": item.priority,
+                    "hard_holds": item
+                        .hard_holds
+                        .iter()
+                        .map(|hold| hold.stable_code())
+                        .collect::<Vec<_>>(),
+                    "title": item.title,
+                    "description": item.description,
+                })),
             ))
         }
 
@@ -3492,9 +3495,10 @@ mod tests {
     use super::*;
     use boreal_protocol::Envelope;
     use boreal_service::{
-        ApplicationCommandHandler, ApplicationRequest, BusyOutcome, ElectionError, JsonRequest,
-        ServiceHost, ServiceHostConfig, ServiceHostError, ServiceHostExit, TransportConfig,
-        TransportError, UnixSocketClient, APPLICATION_API_VERSION, APPLICATION_SCHEMA_VERSION,
+        ApplicationCommandHandler, ApplicationRequest, ApplicationResponse, BusyOutcome,
+        ElectionError, JsonRequest, ServiceHost, ServiceHostConfig, ServiceHostError,
+        ServiceHostExit, TimerRegistry, TransportConfig, TransportError, UnixSocketClient,
+        APPLICATION_API_VERSION, APPLICATION_SCHEMA_VERSION,
     };
     use std::sync::{
         atomic::{AtomicBool, Ordering},
@@ -3696,8 +3700,13 @@ mod tests {
             path: vec!["work".to_owned(), "create".to_owned()],
             options: CliOptions::default(),
         };
+        let show_work = ParsedCommand {
+            path: vec!["work".to_owned(), "show".to_owned()],
+            options: CliOptions::default(),
+        };
         assert!(supports(&init));
         assert!(supports(&create_work));
+        assert!(supports(&show_work));
 
         let dependency = ParsedCommand {
             path: vec!["dep".to_owned(), "add".to_owned()],
@@ -3712,12 +3721,6 @@ mod tests {
         for path in [
             vec!["dep".to_owned(), "tree".to_owned()],
             vec!["dep".to_owned(), "cycles".to_owned()],
-            vec!["cycle".to_owned(), "board".to_owned()],
-            vec!["cycle".to_owned(), "report".to_owned()],
-            vec!["intake".to_owned(), "list".to_owned()],
-            vec!["intake".to_owned(), "show".to_owned()],
-            vec!["intake".to_owned(), "bucket".to_owned()],
-            vec!["intake".to_owned(), "capture".to_owned()],
         ] {
             assert!(supports(&ParsedCommand {
                 path,
@@ -3743,62 +3746,19 @@ mod tests {
         assert_eq!(data["prerequisite_id"], "task-a");
         assert_eq!(data["dependent_id"], "task-b");
 
-        let board = ParsedCommand {
-            path: vec!["cycle".to_owned(), "board".to_owned()],
+        let show = ParsedCommand {
+            path: vec!["work".to_owned(), "show".to_owned()],
             options: CliOptions {
                 project: Some("project-1".to_owned()),
-                positionals: vec!["cycle-1".to_owned()],
+                positionals: vec!["task-a".to_owned()],
                 ..CliOptions::default()
             },
         };
-        let board_data =
-            request_data(&board, "op_cycle_board_fixture").expect("cycle board request builds");
-        assert_eq!(board_data["command"], "cycle_board");
-        assert_eq!(board_data["project_id"], "project-1");
-        assert_eq!(board_data["cycle_id"], "cycle-1");
-
-        let intake = ParsedCommand {
-            path: vec!["intake".to_owned(), "show".to_owned()],
-            options: CliOptions {
-                project: Some("project-1".to_owned()),
-                positionals: vec!["intake-1".to_owned()],
-                ..CliOptions::default()
-            },
-        };
-        let intake_data =
-            request_data(&intake, "op_intake_show_fixture").expect("intake show request builds");
-        assert_eq!(intake_data["command"], "intake_show");
-        assert_eq!(intake_data["intake_id"], "intake-1");
-
-        let bucket = ParsedCommand {
-            path: vec!["intake".to_owned(), "bucket".to_owned()],
-            options: CliOptions {
-                project: Some("project-1".to_owned()),
-                positionals: vec!["inbox".to_owned(), "Inbox".to_owned()],
-                ..CliOptions::default()
-            },
-        };
-        let bucket_data = request_data(&bucket, "op_intake_bucket_fixture")
-            .expect("intake bucket request builds");
-        assert_eq!(bucket_data["command"], "intake_bucket");
-        assert_eq!(bucket_data["bucket_id"], "inbox");
-        assert_eq!(bucket_data["name"], "Inbox");
-
-        let capture = ParsedCommand {
-            path: vec!["intake".to_owned(), "capture".to_owned()],
-            options: CliOptions {
-                project: Some("project-1".to_owned()),
-                bucket: Some("inbox".to_owned()),
-                kind: Some("discovery".to_owned()),
-                positionals: vec!["intake-1".to_owned(), "a fact".to_owned()],
-                ..CliOptions::default()
-            },
-        };
-        let capture_data = request_data(&capture, "op_intake_capture_fixture")
-            .expect("intake capture request builds");
-        assert_eq!(capture_data["command"], "intake_capture");
-        assert_eq!(capture_data["bucket_id"], "inbox");
-        assert_eq!(capture_data["kind"], "discovery");
+        let show_data = request_data(&show, "op_work_show_fixture")
+            .expect("work show request builds");
+        assert_eq!(show_data["command"], "work_show");
+        assert_eq!(show_data["project_id"], "project-1");
+        assert_eq!(show_data["work_id"], "task-a");
 
         let doctor = ParsedCommand {
             path: vec!["doctor".to_owned()],
@@ -3976,6 +3936,58 @@ mod tests {
         drop(host);
         let _ = fs::remove_file(db);
         let _ = fs::remove_file(socket);
+    }
+
+    #[test]
+    fn production_timer_updates_on_renew_and_clears_terminal_attempts() {
+        let timers = TimerRegistry::new();
+        let request = json!({
+            "command": "renew",
+            "project_id": "service-project",
+            "attempt_id": "attempt-timer",
+            "fence": 1,
+        });
+        let old_key = super::unix::attempt_deadline_key("service-project", "attempt-timer", 1);
+        timers
+            .schedule(old_key.clone(), Instant::now() + Duration::from_millis(5))
+            .expect("initial deadline schedules");
+        let old_deadline = timers.next_deadline().expect("initial deadline exists");
+        let response = ApplicationResponse {
+            api_version: APPLICATION_API_VERSION.to_owned(),
+            schema_version: APPLICATION_SCHEMA_VERSION.to_owned(),
+            operation_id: "op-renew".to_owned(),
+            data: serde_json::to_string(&json!({
+                "outcome": "changed",
+                "data": {
+                    "attempt_id": "attempt-timer",
+                    "fence": 1,
+                    "lease_deadline": stamp(now_ms_u64() + 60_000),
+                    "hard_deadline": stamp(now_ms_u64() + 120_000),
+                }
+            }))
+            .expect("renew response serializes"),
+        };
+        super::unix::schedule_deadline_from_response(&timers, &request, &response);
+        assert!(timers.next_deadline().expect("renewed deadline exists") > old_deadline);
+
+        let terminal_request = json!({
+            "command": "release",
+            "project_id": "service-project",
+            "attempt_id": "attempt-timer",
+            "fence": 1,
+        });
+        let terminal_response = ApplicationResponse {
+            api_version: APPLICATION_API_VERSION.to_owned(),
+            schema_version: APPLICATION_SCHEMA_VERSION.to_owned(),
+            operation_id: "op-release".to_owned(),
+            data: serde_json::to_string(&json!({
+                "outcome": "changed",
+                "data": {"phase": "released"}
+            }))
+            .expect("release response serializes"),
+        };
+        super::unix::cancel_deadline_from_response(&timers, &terminal_request, &terminal_response);
+        assert!(timers.is_empty());
     }
 
     #[test]
@@ -4173,6 +4185,62 @@ mod tests {
             .unwrap()
             .message
             .contains("require a parent"));
+        let _ = fs::remove_file(db);
+    }
+
+    #[test]
+    fn service_work_show_returns_the_same_exact_projection_as_direct_reads() {
+        let db = temp_path("work-show.sqlite");
+        let store = SqliteStore::open(&db, SCHEMA).expect("temporary schema opens");
+        let mut handler = make_handler(store);
+        let project = application_envelope(
+            &mut handler,
+            "op-service-show-project",
+            json!({
+                "command": "create_project",
+                "project_id": "show-project",
+                "name": "Show fixture",
+                "actor_id": "creator",
+            }),
+        );
+        assert_eq!(project.outcome, ApplicationOutcome::Changed);
+        let created = application_envelope(
+            &mut handler,
+            "op-service-show-work-create",
+            json!({
+                "command": "create_work",
+                "project_id": "show-project",
+                "work_id": "show-task",
+                "kind": "task",
+                "title": "Shown task",
+                "description": "service exact read",
+                "priority": 7,
+                "dispatch": "paused",
+                "profile": "focused",
+                "actor_id": "creator",
+            }),
+        );
+        assert_eq!(created.outcome, ApplicationOutcome::Changed);
+
+        let shown = application_envelope(
+            &mut handler,
+            "op-service-show-work",
+            json!({
+                "command": "work_show",
+                "project_id": "show-project",
+                "work_id": "show-task",
+                "actor_id": "creator",
+            }),
+        );
+        assert_eq!(shown.outcome, ApplicationOutcome::Unchanged);
+        assert_eq!(shown.revision, Some(2));
+        let data = shown.data.as_ref().expect("work show data");
+        assert_eq!(data["work_id"], "show-task");
+        assert_eq!(data["kind"], "task");
+        assert_eq!(data["title"], "Shown task");
+        assert_eq!(data["description"], "service exact read");
+        assert_eq!(data["priority"], 7);
+        assert_eq!(data["dispatch_policy"], "paused");
         let _ = fs::remove_file(db);
     }
 

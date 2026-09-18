@@ -1,6 +1,6 @@
 # Boreal v2 — Current-State Closeout and Convergence Plan
 
-Status: active closeout/convergence plan; C0 truth freeze and C1 remediation are in progress, 2026-09-18
+Status: active closeout/convergence plan; C0 truth freeze, C1/C2 remediation, C3 authority decision, and C4 validation are complete; current work is C5 release closure, 2026-09-18
 Repository: `/Users/cybertron/Code/boreal-work`  
 Planning depth: granular, multi-agent, dependency-aware
 
@@ -41,9 +41,10 @@ dirty-path manifest and assign exclusive ownership of every dirty path.
 
 The checked-in workspace database `.boreal/boreal.sqlite` is only a bootstrap
 database: after the required project-context probe it contains the
-`boreal-work` project at revision 1, with no work rows. It is not evidence of a
-live project migration or of the target hierarchy. The probe was a project
-initialization read/context operation; no planning work was created there.
+`boreal-work` project at revision 1, with no work or plan rows. It is not
+evidence of a live project migration or of the target hierarchy. The probe was
+a project initialization read/context operation; no planning work was created
+there.
 
 The focused closeout fixture
 `test-project/.boreal/creation-suite-ndv9yyvy/.boreal/boreal.sqlite` reports:
@@ -130,22 +131,23 @@ focused evidence:
 
 The following are not closed by those fixes:
 
-- `[~]` The persisted database remains schema/user version 2 with
-  `milestone → sprint → task`; v3 decomposition/cycle/intake code is additive
-  and not yet the database authority. C3 must make an explicit v2 authority
-  decision and either mount or defer each public route.
-- `[~]` Base direct/service DTO parity for create, status, and intake route
-  discriminants now has focused CLI tests, but a live socket matrix and one
-  shared projection path remain. The normal v2 schema still does not enable
-  the v3 intake tables, so those routes must remain explicitly unavailable.
+- `[x]` The persisted database remains schema/user version 2 with
+  `milestone → sprint → task`; C3 explicitly selected this as the sole
+  current authority. The additive v3 decomposition/cycle/intake routes are
+  catalogued as unavailable and cannot install or mutate a v2 database.
+- `[x]` Supported direct/service DTO parity for create, status, and `work
+  show` now has focused tests plus live V11 service evidence. The normal v2
+  schema does not enable the v3 intake tables, so those routes remain
+  explicitly unavailable rather than pretending to be live.
 - `[x]` TUI transport remediation now tracks active requests, destroys
   timed-out/failed sockets, rejects new requests after close, and makes close
   idempotent; typecheck, npm tests, and collision-resistant socket coverage
   pass. Real service-backed TUI and PTY evidence remain separate gates.
 - `[~]` Service runtime unknown-outcome handling and composed queue-saturation
-  evidence are now fixed and focused-revalidated. CLI-owned deadline/stop
-  reconciliation, renew rescheduling, terminal timer cancellation, durable
-  receipt sidecar state, and restart-mounted TUI receipt readback remain open.
+  evidence are now fixed and focused-revalidated. CLI timer composition now
+  reschedules on renew and cancels terminal attempt deadlines; durable
+  deadline/stop reconciliation, receipt sidecar state, and restart-mounted
+  TUI receipt readback remain open.
 - `[~]` Store/application residual: full-graph status reads remain a bounded-
   semantics follow-up; no implicit change is allowed while rollup and
   dependency semantics are still being reviewed.
@@ -163,26 +165,69 @@ The following are not closed by those fixes:
   repair/rebuild under one rollback-capable mutation boundary. Focused tests
   and scoped Clippy pass; Windows, kill-injection, and ancestor-symlink races
   remain environment-unverified.
-- `[ ]` The full forensic matrix is not green: production-composed V01–V12
-  gates and a final coordinator commit are still required. The local system
-  SQLite is 3.43.2, below the 3.51.3 release floor; the installed Homebrew
-  SQLite 3.53.4 satisfies the gate when the binary is built with
+- `[x]` V12 production security evidence now covers exact 65,535/65,536/65,537
+  envelope boundaries, UTF-8 expansion, and receipt-committed readback after
+  sidecar export failure. The security probe passes with live socket access.
+- `[x]` V10 production host evidence now proves queue saturation under the
+  default 256-request workload, reserved control progress, fake-clock expiry
+  (`claimed → expired_review`), and SIGTERM/socket cleanup. Smaller ad-hoc
+  workloads can complete too quickly to observe `service_busy`; release runs
+  must use the harness default.
+- `[x]` V11 production-client evidence reaches ordered items 101 and 1001,
+  records valid service-side query metrics (`10` prepared statements for each
+  page), proves service-routed `work show`, and proves SIGTERM/socket cleanup.
+  The metric is emitted by the elected `SqliteStore` boundary under an
+  explicit validation flag; no dynamic SQLite interposer is used.
+- `[x]` V04/V06/V07 live TUI evidence now covers the status DTO matrix,
+  restart/readback fault boundaries through full-screen closeout, typed
+  summary preservation, and committed mutation visibility when refresh fails.
+  The socket-capable rerun passes; restricted environments must retain the
+  explicit socket limitation.
+- `[x]` V01/V02/V03/V05/V08/V09 C4-A production service evidence now passes:
+  restart replay and changed-payload conflict, execution-state readback,
+  fault boundaries, same/wrong-session ownership, inherited-pipe/SIGTERM
+  cleanup, and direct-mutation election rejection are all exercised through
+  the built `bwrk` service boundary.
+- `[x]` The individual production forensic gates V01–V12 are green, including
+  the corrected V03 boundary harness, the rebuilt V11 client, and the V09
+  distinction between service-owned mutations and unavailable future routes.
+  The current strict full aggregate is `18 pass / 0 skip / 0 fail` against the
+  rebuilt managed-SQLite binary. A final coordinator commit and release
+  disposition remain required. The local system SQLite is 3.43.2, below the
+  3.51.3 release floor; the installed
+  Homebrew SQLite 3.53.4 satisfies the gate when the binary is built with
   `RUSTFLAGS='-Lnative=/opt/homebrew/opt/sqlite/lib'`. This is a release
   environment prerequisite, not a reason to weaken the floor. A passing
   focused test is not release closure.
 
-The latest strict aggregate before the current service-runtime agent result is
-`17 pass / 0 skip / 1 fail`. The 17 passing checks include workspace tests, TUI and PTY, creation,
+The superseded managed-socket strict aggregate before the current V11 and
+route changes was `17 pass / 0 skip / 1 fail`; that artifact is stale and must
+not be called current green evidence. A repeat under the current sandbox produced
+`13 pass / 4 skip / 1 fail` because Unix-socket creation was denied for TUI,
+service-transport, PTY, and guided-closeout; that is an environment result,
+not a product regression. The current managed full aggregate is `18 pass / 0
+skip / 0 fail`, including workspace tests, TUI and PTY, creation,
 protocol/spec conformance, mutation contracts, service transport, the 16-worker
 process race, 10-round process soak, fault/clock/reorder, concurrency,
 security, release performance under SQLite 3.53.4, packaging, and guided
-closeout. The single failure is `forensic-audit`, which reports all twelve
-production-composed scenarios as unavailable rather than silently converting
-partial unit evidence into release passes.
+closeout. No validation gate is currently failing; only final disposition,
+dirty-path explanation, and coordinator commit remain.
 
 ## 2. Target state
 
-The target release remains Boreal v2. The intended work model is:
+The current release target remains Boreal v2. Its authoritative live work
+model is:
+
+```text
+project namespace
+└── milestone → sprint → task
+    ├── dependency edges
+    ├── attempts and leases
+    └── evidence, review, and closeout
+```
+
+The intended refined model is recorded as a future v2 capability, not as live
+database truth:
 
 ```text
 project namespace
@@ -209,8 +254,10 @@ The following must remain separate:
 - a dependency edge answers “what blocks what?”;
 - an attempt/evidence record answers “what execution and proof occurred?”
 
-If the product keeps the word “sprint,” it should be a user-facing cycle
-facade, not a third work kind and not a parent of tasks.
+If the future model keeps the word “sprint,” it should be a user-facing cycle
+facade, not a third work kind and not a parent of tasks. Ideas and findings
+belong to the future intake layer until explicitly promoted to accepted work;
+they are not current `work_item.kind` values.
 
 The transition from the current compatibility database to this target must be
 explicit. Do not silently dual-write or let read commands invent a migration.
@@ -227,6 +274,53 @@ Do not:
 - add broad new product features while production closeout is incomplete;
 - mark a finding fixed because a unit test passed without final-host evidence;
 - create or close work through the unavailable/incorrect `bwrk` workflow route.
+
+## 3A. Version and hierarchy convergence decision
+
+The clean current-state label is:
+
+```text
+release/runtime/API: v2
+persisted user schema: v2
+live creation authority: milestone → sprint → task
+refactored decomposition/cycle/intake implementation: additive, not live authority
+```
+
+The word “v3” in source names describes the newer refactor’s model boundary;
+it does not mean the application has shipped a v3 runtime or schema. C3 has
+now made the current-state decision explicit:
+
+1. **Option B is selected for this release.** Keep schema v2 and
+   `milestone → sprint → task` as the sole persisted authority.
+2. Keep the additive decomposition/cycle/intake implementation as future
+   groundwork. Its public routes are unavailable and must not auto-install
+   the additive schema or mutate a v2 database.
+3. Preserve the v3-named source/tests as migration groundwork until a separate
+   serialized migration sprint defines one canonical authority, maps legacy
+   sprints to cycles without inventing history, and proves unified create/read/
+   assignment/intake routes.
+4. Normalize names only after behavior and authority are settled. The release
+   label remains v2; the source names are not evidence of a shipped v3.
+
+### 3B. Future refinement migration sprint (explicitly not current release work)
+
+The requested richer hierarchy belongs here, after the v2 closeout. It must be
+one serialized migration decision rather than another parallel refactor:
+
+| Lane | Exclusive scope | Deliverable |
+| --- | --- | --- |
+| F1 model/terminology steward | `crates/domain/src/work_model_v3.rs`, model specs | Decide whether “sprint” is the UI name for a cycle; define typed `idea`/`finding` intake kinds and promotion into accepted milestone/task work. |
+| F2 migration/data steward | schema-v3 migration, mapping tool, populated fixtures | Map existing v2 milestones/sprints/tasks without inventing parentage or history; preserve IDs, attempts, evidence, and failed states; prove rollback/rebuild. |
+| F3 application/store/API steward | v3 application/store adapters and versioned routes | Implement one transaction and one authority for create/read/assignment/promotion; no dual writes or read-time materialization. |
+| F4 validation/TUI steward | migration fixtures, route matrix, TUI/service compatibility checks | Validate old/new fixtures, promotion provenance, revision/lease behavior, restart/readback, and bounded status performance. |
+
+F1 is serial. F2 and F3 may work in parallel only after F1 freezes the
+terminology and mapping contract; F4 starts after both produce a testable
+boundary. The migration sprint exits only when one schema/version is
+authoritative, every intake promotion retains source provenance, old v2 data
+has a deterministic mapping or explicit quarantine, and the public route
+catalog plus rollback/rebuild evidence are complete. Until then, ideas and
+findings remain intake records and are not `work_item.kind` values.
 
 ## 4. Multi-agent operating rules
 
@@ -409,17 +503,18 @@ tests, `crates/application/src/hierarchy.rs`,
 selected canonical schema/migration files.  
 **No parallel edits:** schema, domain model, or migration files.
 
-Make one explicit decision:
+Make one explicit decision. For this closeout, the decision is already made:
 
 ```text
 Option A: promote the refactored decomposition/cycle/intake model into v2;
 Option B: keep it as an explicitly unavailable future adapter.
 ```
 
-Given the current product direction, Option A is the target, but it must be
-implemented as one authoritative model rather than a v2 work-item table plus
-a parallel projection. If a pre-release reset is safe, rebuild fixtures. If
-not, write and test one explicit materializer.
+Option B is selected for the current release. Do not change the canonical
+schema or materialize a parallel projection in C3. The work of this sprint is
+to make the deferral truthful: catalog v3-dependent routes as unavailable,
+prevent them from opening or mutating a v2 database, and add negative
+evidence. Option A becomes a separately authorized migration sprint.
 
 Required invariants:
 
@@ -437,11 +532,11 @@ Required invariants:
 fixtures, and `test-project/**` fixture data.  
 **Depends on:** C3-A contract decision.
 
-Produce creation scenarios for both the current compatibility fixture and the
-target v2 model. If the root database remains empty, prefer deterministic
-fixture rebuild over a fake production migration. If preserving old fixture
-data, prove the mapping from sprint parents to cycles and milestone/task
-decomposition.
+Produce creation scenarios for the current v2 compatibility fixture and
+negative scenarios proving that v3-dependent routes do not install tables or
+change revisions. Do not create a fake production migration in this sprint.
+Preserve the populated fixture as evidence of the live v2 hierarchy. The
+legacy-sprint-to-cycle mapping remains a future migration decision.
 
 #### C3-C — Public-route reviewer
 
@@ -453,9 +548,10 @@ promotion/disposition, and truthful availability metadata.
 This reviewer does not edit the high-conflict adapters. Findings return to the
 named C2 or C3 owner for repair.
 
-**Exit gate:** one persisted authority is documented, the populated fixture
-truth is either intentionally preserved or transformed, and every advertised
-hierarchy route has a real implementation or explicit unavailable status.
+**Exit gate:** schema v2 and the populated fixture are documented as the sole
+current authority, v3-dependent routes have explicit unavailable status, no
+unavailable route changes the database, and every advertised current v2 route
+has a real implementation.
 
 ### C4 — Independent production validation
 
@@ -465,10 +561,10 @@ repair product source.
 
 | Lane | Exclusive paths | Evidence |
 | --- | --- | --- |
-| C4-A host/fault | `scripts/validation/process/**`, `scripts/validation/fault/**`, mutation fixtures | V01–V07, duplicate/replay, unknown delivery, crash/readback, finish-stage recovery |
-| C4-B concurrency/soak/performance | `scripts/validation/concurrency/**`, `scripts/validation/soak/**`, `scripts/validation/status/**`, performance reports | V08–V10, claim races, queue saturation, read-under-writer, page/scan/query budgets |
+| C4-A host/fault | `scripts/validation/process/**`, `scripts/validation/fault/**`, mutation fixtures | V01–V03, V05, V08–V09; duplicate/replay, unknown delivery, crash/readback, finish-stage recovery |
+| C4-B concurrency/soak/performance | `scripts/validation/concurrency/**`, `scripts/validation/soak/**`, `scripts/validation/status/**`, performance reports | V10–V11; claim races, queue saturation, read-under-writer, page/scan/query budgets |
 | C4-C TUI/PTY | `scripts/validation/tui/**` and TUI fixture files only | actual service socket, full-screen Finish, restart hydration, page-two navigation, input decoding |
-| C4-D security/publication | `scripts/validation/security/**`, publication-specific reports | V11–V12, terminal sanitization, hooks/configuration, lock ownership, tamper recovery |
+| C4-D security/publication | `scripts/validation/security/**`, publication-specific reports | V12, terminal sanitization, hooks/configuration, lock ownership, tamper recovery |
 
 Every failed check must include the owning source lane, reproduction command,
 source snapshot, and whether it blocks C5.
@@ -482,16 +578,17 @@ metadata. No implementation agent edits these files during C5.
 
 Tasks:
 
-1. Rerun the complete validation matrix against the final integrated commit.
-2. Refresh BW-01–BW-37 and V01–V12 status after the final CLI rework.
-3. Resolve every finding as `fixed`, `no_change`, or approved `deferred` with
-   owner, user impact, and follow-up gate.
-4. Confirm the release identity, schema/API/protocol versions, and hierarchy
-   terminology are consistent.
-5. Run standalone/package/install and unfamiliar-agent closeout journeys.
-6. Create one coordinator commit only after the worktree contains no
+1. `[x]` Rerun the complete validation matrix against the current integrated
+   snapshot: strict full suite `18 pass / 0 skip / 0 fail`.
+2. `[x]` Refresh BW-01–BW-37 and V01–V12 after the final CLI rework; no finding
+   remains `open` in the current closure ledger.
+3. `[~]` Confirm the release identity, schema/API/protocol versions, and
+   hierarchy terminology are consistent in the final release decision.
+4. `[x]` Run package/install, TUI/PTY, guided-closeout, and unfamiliar-agent
+   validation journeys through the full suite.
+5. `[~]` Create one coordinator commit only after the worktree contains no
    unexplained product or validation changes.
-7. Record the final decision: `ship`, `ship with approved deferrals`, or
+6. `[~]` Record the final decision: `ship`, `ship with approved deferrals`, or
    `do not ship`.
 
 ## 7. Dependency and concurrency graph
@@ -575,33 +672,46 @@ This plan is complete only when:
 
 ## 10. Current next action
 
-C0 is partially complete and C1 has started on the existing dirty snapshot:
+C0 truth freeze, the main C1/C2 remediation wave, the C3 authority decision,
+and C4 validation are complete on the existing dirty snapshot. C5 release
+closure remains:
 
 - `[x]` C0-01: source history, database truth, and authority-file integrity
   are captured in this plan.
-- `[~]` C0-02: the finding ledger is refreshed from the independent validator
-  reports; the generated forensic ledger still needs a final coordinator
-  reconciliation.
-- `[~]` C0-03: v2 remains the runtime/schema release label, but the refined
-  hierarchy authority and the role of the additive v3 model are still an
-  explicit C3 decision, not an implicit migration.
-- `[~]` C0-04: focused Rust, TUI, contract, recovery, and managed SQLite
-  release-floor baselines are green; full production-composed gates remain
-  open.
+- `[x]` C0-02: the finding ledger is reconciled against the independent
+  validator reports; only final coordinator disposition remains open.
+- `[x]` C0-03: v2 remains the runtime/schema release label, and Option B is
+  explicit: the refined v3-named model is future groundwork, not an implicit
+  migration or current authority.
+- `[x]` C0-04: focused Rust, TUI, contract, recovery, and managed SQLite
+  release-floor baselines are green, and the full production-composed
+  aggregate is green.
 - `[x]` C1-A remediation slice: direct ownership, checked creation, stale
   socket recovery, unknown-outcome metadata, and false-flake transport tests
   are fixed and focused revalidated.
 - `[x]` C1-A service-runtime slice: unknown post-commit/panic outcomes,
   response-boundary retention, and composed normal/control queue saturation
   are fixed and focused-revalidated by the service-runtime owner.
-- `[~]` C1-A remaining: CLI-owned deadline/stop reconciliation, renew
-  rescheduling, terminal timer cancellation, and production readback of the
-  durable stop result.
+- `[x]` C1-A CLI timer composition: renew responses replace the attempt
+  deadline and successful release/submit/close responses cancel it.
+- `[~]` C1-A remaining: durable deadline/stop reconciliation and production
+  readback of the durable stop result.
 - `[x]` C1-B store/application remediation: revision enforcement, schema
   fail-closed behavior, migration-only opening, and application boundary
   proofs are focused-revalidated.
-- `[~]` C1-C and adapter parity: shared DTO/projection parity remains under
-  review; no schema authority change is allowed yet.
+- `[x]` C1-C/C2 adapter parity for supported v2 routes is reconciled; v3-only
+  routes are explicitly unavailable and covered by negative no-mutation
+  evidence.
+- `[x]` C3 authority convergence: schema/user v2 and
+  `milestone → sprint → task` are the sole current authority; the additive
+  v3-named model is future migration groundwork.
+- `[x]` C4 individual validation: V01–V12 pass on their current focused or
+  managed-host probes, including V03 and V11.
+- `[x]` C4 aggregate: the strict full suite is `18 pass / 0 skip / 0 fail`
+  against the rebuilt managed-SQLite binary.
+- `[~]` C5 closure: refresh the ledger with this final aggregate, explain all
+  dirty/untracked paths, record approved BW-34/BW-35 host deferrals, and make
+  the final ship/deferral decision in one coordinator commit.
 
 ### Active concurrent wave
 
@@ -611,29 +721,66 @@ re-runs the combined checks:
 
 | Lane | Owner scope | Current state | Integration gate |
 | --- | --- | --- | --- |
-| C1-A service runtime | `crates/service/src/**`, `crates/service/tests/**` | runtime remediation complete; combined host probes open | service tests, workspace tests, then production host probes |
-| C1-B store/application | `crates/store/**`, `crates/application/**` | remediation complete; full-graph status semantics remain a review item | stale-revision, bounded reads, continuation, project scope, and sidecar checks |
-| C2-B TUI transport | `apps/tui/src/node-transport.ts` and matching TUI tests | transport hardening complete; live gates open | typecheck, npm tests, real service/TUI smoke, PTY where available |
+| C1-A service runtime | `crates/service/src/**`, `crates/service/tests/**` | runtime remediation and production host probes pass; durable deadline/stop reconciliation remains a tracked follow-up | service tests, workspace tests, and V10/closeout host evidence |
+| C1-B store/application | `crates/store/**`, `crates/application/**` | remediation complete; full-graph status semantics remain a bounded review item | stale-revision, bounded reads, continuation, project scope, and sidecar checks |
+| C2-B TUI transport | `apps/tui/src/node-transport.ts` and matching TUI tests | transport hardening and socket/PTY evidence pass; restricted-host limitations remain explicit | typecheck, npm tests, service/TUI smoke, and PTY |
 | C2-C memory/source | `crates/memory/**`, `crates/source/**`, matching tests | hardening complete; environment limits recorded | lock/symlink/repair tests and publication recovery checks |
 
 The coordinator retains exclusive ownership of `crates/cli/**`, the plan and
 finding ledgers, shared release/validation manifests, and the hierarchy
-authority decision. No agent may begin C3 schema/model work while this wave
-is unresolved. The next safe merge order is service-runtime report, then the
-store/application and adapter reports, followed by a single combined test
-run; only after that may production validation and the authority decision
-start.
+authority decision. The C1/C2 implementation wave is now integrated as the
+current dirty snapshot; remaining concurrent work is validation-only. Any
+future schema/model migration must use the separately serialized refinement
+sprint below, not reopen the current release authority.
 
-The next safe concurrent wave is:
+The independent forensic wave ran with disjoint validation ownership:
+
+| Lane | Exclusive validation paths | Gates |
+| --- | --- | --- |
+| C4-A host/fault | `scripts/validation/process/**`, `scripts/validation/fault/**`, mutation fixtures | V01–V03, V05, V08–V09 pass |
+| C4-B scale/concurrency | `scripts/validation/concurrency/**`, `scripts/validation/soak/**`, status/scale fixtures | V10 and V11 pass; aggregate included in 18/0/0 full suite |
+| C4-C TUI/PTY | `scripts/validation/tui/**` and TUI fixture files | V04, V06–V07 pass |
+| C4-D security/bytes | `scripts/validation/security/**` and byte-boundary fixtures | V12 pass |
+
+These agents produced evidence only. The coordinator wired their production
+checks into `scripts/validation/forensic_audit.py`; the current managed run
+reports V01–V12 green and the full suite reports `18 pass / 0 skip / 0 fail`.
+Remaining environment limitations are retained as explicit BW-34/BW-35
+deferrals rather than hidden by the aggregate.
+
+The next safe concurrent wave is validation/review only:
 
 ```text
-C1-B store/application
 C1-C protocol fixtures (read-only until the shared DTO decision is frozen)
-C2-B TUI transport
-C2-C memory/source
+C2-A CLI/service composition (coordinator-owned)
+C3-C public-route review (read-only; no schema/model edits)
 ```
 
-C2-A owns the high-conflict CLI/service composition after the C1 contract
-snapshot. C2-B can proceed in parallel against the frozen DTO fixtures. C2-C
-owns memory/source hardening. C3 and C4 must not be treated as evidence that
-the v3 model is already live in the database.
+C2-A owns the high-conflict CLI/service composition in the current snapshot;
+no new C2 implementation edits are needed for this closeout. C3-C may review
+the public hierarchy routes read-only. C3 and C4 must not be treated as
+evidence that the v3 model is already live in the database. The coordinator
+owns the final aggregate, ledger, and release-disposition work after the
+successful V11 rebuild.
+
+### C5 dirty-path manifest and handoff
+
+This is the current uncommitted ownership map. It is intentionally recorded
+before any final commit so a later agent does not overwrite another lane's
+work:
+
+| Owner | Dirty paths | Disposition |
+| --- | --- | --- |
+| Coordinator | `CURRENT_V2_CLOSEOUT_PLAN.md`, `crates/cli/src/**`, `crates/cli/tests/command_registry.rs`, `scripts/validation/forensic_audit.py` | Integrated v2 service-route parity, v3-route truthfulness, no-mutation gating, and aggregate wiring. |
+| C4-A host/fault | `scripts/validation/process/forensic_service.py`, `scripts/validation/fault/socket_boundaries.py` | Production V01–V03, V05, V08–V09 validators; V09 accepts unavailable future routes separately from service-owned mutation rejection. |
+| C4-B scale/concurrency | `scripts/validation/concurrency/**`, `scripts/validation/status/**` | V10/V11 production validators and documentation; V11 uses opt-in `SqliteStore` metrics, not dynamic interposition. |
+| C4-C TUI/PTY | `scripts/validation/tui/**` | Live TUI/PTY evidence and closeout reports. |
+| C4-D security/publication | `scripts/validation/security/**` | V12 envelope/publication boundary evidence. |
+| C2-C memory/source | `memory/` | Existing project memory publication/reconciliation state; preserve and review as a separate publication set. |
+
+The full strict evidence is recorded in
+`scripts/validation/results/full-suite.latest.md` and reports `18 pass / 0
+skip / 0 fail`. The ignored scratch ledger is
+`scratch/Boreal_Work_Forensic_Audit_Closure.md`. C5 must either commit these
+owned paths together after review or document why a path is intentionally
+excluded; no path should be reset or deleted as cleanup.

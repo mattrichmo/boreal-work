@@ -70,7 +70,7 @@ Usage:
   bwrk install [PROJECT] [--yes] [--agents codex,claude] [--project-root PATH] [--db PATH] [--dry-run] [--json]
   bwrk update [--json]
   bwrk upgrade --machine [--json]  (alias for update)
-  bwrk service run --db PATH --socket PATH [--max-requests N] [--json]
+  bwrk service run --db PATH --socket PATH [--max-requests N] [--dispatch-workers N] [--dispatch-capacity N] [--json]
   bwrk status <project> [--limit N] [--offset N] [--socket PATH] [--db PATH] [--json]
   bwrk dashboard [PROJECT] [--project PROJECT] [--db PATH] [--actor ID] [--harness ID] [--session ID] [--json]
   bwrk work create <project> <work-id> <title> [--kind milestone|sprint|task] [--parent WORK_ID] [--priority N] [--description TEXT] [--dispatch automatic|operator_only|paused] [--hold CODE] [--db PATH] [--json]
@@ -82,12 +82,6 @@ Usage:
   bwrk dep add <project> <prerequisite-id> <dependent-id> [--expected-revision N] [--db PATH] [--json]
   bwrk dep tree <project> [--db PATH] [--json]
   bwrk dep cycles <project> [--db PATH] [--json]
-  bwrk cycle board <project> <cycle-id> [--db PATH] [--json]
-  bwrk cycle report <project> <cycle-id> [--db PATH] [--json]
-  bwrk intake list <project> [--db PATH] [--json]
-  bwrk intake show <project> <intake-id> [--db PATH] [--json]
-  bwrk intake bucket <project> <bucket-id> <name> [--db PATH] [--json]
-  bwrk intake capture <project> <intake-id> <content> --bucket BUCKET [--kind note|discovery|question|revisit] [--db PATH] [--json]
   bwrk source add <project> --input PATH --origin ORIGIN [--media-type TYPE] [--db PATH] [--json]
   bwrk source show <project> <source-version-id> [--db PATH] [--json]
   bwrk source list <project> [--limit N] [--offset N] [--db PATH] [--json]
@@ -146,6 +140,8 @@ struct CliOptions {
     limit: Option<u64>,
     offset: Option<u64>,
     max_requests: Option<usize>,
+    dispatch_workers: Option<usize>,
+    dispatch_capacity: Option<usize>,
     kind: Option<String>,
     parent: Option<String>,
     description: Option<String>,
@@ -203,6 +199,8 @@ impl Default for CliOptions {
             limit: None,
             offset: None,
             max_requests: None,
+            dispatch_workers: None,
+            dispatch_capacity: None,
             kind: None,
             parent: None,
             description: None,
@@ -583,6 +581,17 @@ fn run_with_operation(args: &[String], operation: &str) -> Result<CliResult, Cli
     if command_registry::is_registry_path(&parsed.path) {
         return command_registry::result(&parsed);
     }
+    if command_registry::is_unavailable_path(&parsed.path) {
+        return Err(CliError::with(
+            ErrorCode::UnknownCommandNamespace,
+            ApplicationOutcome::Rejected,
+            format!(
+                "command route is catalogued but unavailable: {}; inspect `bwrk commands {}`",
+                parsed.path.join(" "),
+                parsed.path.join(" ")
+            ),
+        ));
+    }
     if parsed.path == ["dashboard"] {
         return dashboard::run_dashboard(&parsed);
     }
@@ -865,6 +874,8 @@ fn parse(args: &[String]) -> Result<ParsedCommand, CliError> {
         limit: None,
         offset: None,
         max_requests: None,
+        dispatch_workers: None,
+        dispatch_capacity: None,
         kind: None,
         parent: None,
         description: None,
@@ -970,6 +981,8 @@ fn parse(args: &[String]) -> Result<ParsedCommand, CliError> {
                 | "--limit"
                 | "--offset"
                 | "--max-requests"
+                | "--dispatch-workers"
+                | "--dispatch-capacity"
                 | "--kind"
                 | "--parent"
                 | "--description"
@@ -1052,6 +1065,18 @@ fn parse(args: &[String]) -> Result<ParsedCommand, CliError> {
                     let value = parse_revision(&value.unwrap())?;
                     options.max_requests = Some(usize::try_from(value).map_err(|_| {
                         CliError::invalid("--max-requests is too large for this platform")
+                    })?);
+                }
+                "--dispatch-workers" => {
+                    let value = parse_revision(&value.unwrap())?;
+                    options.dispatch_workers = Some(usize::try_from(value).map_err(|_| {
+                        CliError::invalid("--dispatch-workers is too large for this platform")
+                    })?);
+                }
+                "--dispatch-capacity" => {
+                    let value = parse_revision(&value.unwrap())?;
+                    options.dispatch_capacity = Some(usize::try_from(value).map_err(|_| {
+                        CliError::invalid("--dispatch-capacity is too large for this platform")
                     })?);
                 }
                 "--kind" => {
@@ -6267,6 +6292,25 @@ mod tests {
     }
 
     #[test]
+    fn parser_supports_service_dispatch_bounds() {
+        let parsed = parse(&args(&[
+            "service",
+            "run",
+            "--db",
+            "fixture.sqlite",
+            "--socket",
+            "fixture.sock",
+            "--dispatch-workers",
+            "1",
+            "--dispatch-capacity",
+            "2",
+        ]))
+        .expect("service dispatch bounds parse");
+        assert_eq!(parsed.options.dispatch_workers, Some(1));
+        assert_eq!(parsed.options.dispatch_capacity, Some(2));
+    }
+
+    #[test]
     fn parser_allows_dashboard_project_discovery_and_explicit_context() {
         let discovered = parse(&args(&["dashboard", "--json"])).unwrap();
         assert_eq!(discovered.path, vec!["dashboard"]);
@@ -6471,6 +6515,32 @@ mod tests {
         assert!(error
             .message
             .contains("not available through the selected service socket"));
+    }
+
+    #[test]
+    fn v3_routes_are_unavailable_without_opening_or_mutating_a_v2_database() {
+        let path = env::temp_dir().join(format!("boreal-cli-v3-gap-{}.sqlite", now_ms_u64()));
+        let db = path.to_string_lossy().to_string();
+        let _ = fs::remove_file(&path);
+
+        let error = run(&args(&[
+            "intake",
+            "capture",
+            "project-1",
+            "intake-1",
+            "observation",
+            "--bucket",
+            "inbox",
+            "--db",
+            &db,
+            "--json",
+        ]))
+        .expect_err("v3 intake capture must be unavailable in v2");
+        assert_eq!(error.code, ErrorCode::UnknownCommandNamespace);
+        assert_eq!(error.outcome, ApplicationOutcome::Rejected);
+        assert!(!path.exists(), "unavailable route opened a database");
+
+        let _ = fs::remove_file(path);
     }
 
     #[test]

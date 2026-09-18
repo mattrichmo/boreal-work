@@ -42,3 +42,23 @@ measurement. Workers are Rust threads sharing one process and one fresh DB;
 the result records `os_processes: 1`. It is not evidence for multi-process
 fairness, crash recovery, TUI rendering, source/memory throughput, or release
 capacity.
+
+## C4-B production-host evidence
+
+Run the V10 production-composition probe with:
+
+```sh
+python3 production_host.py --bin ../../../../target/debug/bwrk
+```
+
+The probe starts `bwrk service run`, drives separate `bwrk` clients through
+the Unix socket, records typed `service_busy` results while normal work fills
+the bounded dispatch lanes, measures a control `status` response, advances an
+optional macOS realtime-clock interposer for expiry projection, and verifies
+SIGTERM/socket cleanup. The result is written to
+`results/production-host.latest.json`.
+
+The fake-clock component is intentionally optional: non-macOS hosts retain an
+explicit unavailable result. The production host currently has no durable
+deadline-reconciliation proof exposed through its CLI, so the report does not
+claim that missing gate.

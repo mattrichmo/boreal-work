@@ -5,8 +5,8 @@ The audit deliberately asks for production-composition scenarios.  Existing
 unit, application, and TUI checks are useful partial evidence, but they are
 not silently promoted to a complete V01-V12 pass.  A scenario is ``pass``
 only when all of its commands pass *and* the declared complete gate exists;
-otherwise it is ``unavailable`` (or ``skip`` when the environment prevents a
-check from running).  The default exit status is non-zero for either state.
+    otherwise it is ``unavailable`` (or ``skip`` when the environment prevents a
+    check from running).  The default exit status is non-zero for either state.
 """
 
 from __future__ import annotations
@@ -47,6 +47,14 @@ def cargo_args(*parts: str, online: bool) -> tuple[str, ...]:
     return ("cargo", "test", "--locked", *network_args, *parts)
 
 
+def production_gate(script: str, *args: str) -> tuple[str, ...]:
+    return ("python3", script, "--bin", str(ROOT / "target" / "debug" / "bwrk"), *args)
+
+
+def tui_production_gate() -> tuple[str, ...]:
+    return ("node", "scripts/validation/tui/forensic_closeout.mjs")
+
+
 def scenarios(*, online: bool) -> tuple[Scenario, ...]:
     return (
         Scenario(
@@ -62,6 +70,7 @@ def scenarios(*, online: bool) -> tuple[Scenario, ...]:
                     "public CLI create replay",
                     cargo_args("-p", "boreal-cli", "--test", "hierarchy_public", "public_cli_replays_identical_work_create_as_unchanged", online=online),
                 ),
+                Check("production gate V01", production_gate("scripts/validation/process/forensic_service.py", "--only", "V01")),
             ),
             "A real bwrk service host must replay the same ID across restart and reject a changed payload with one durable effect.",
         ),
@@ -78,6 +87,7 @@ def scenarios(*, online: bool) -> tuple[Scenario, ...]:
                     "restart evidence readback",
                     cargo_args("-p", "boreal-cli", "--test", "service_signal_recovery", "recovered_evidence_retry_returns_unknown_readback_instead_of_duplicate_protocol_error", online=online),
                 ),
+                Check("production gate V02", production_gate("scripts/validation/process/forensic_service.py", "--only", "V02")),
             ),
             "A matrix must cover admitted, running, exited, receipt_committed, and unknown rows through service readback.",
         ),
@@ -94,6 +104,7 @@ def scenarios(*, online: bool) -> tuple[Scenario, ...]:
                     "TUI unknown-operation handling",
                     ("npm", "test", "--prefix", "apps/tui"),
                 ),
+                Check("production gate V03", production_gate("scripts/validation/fault/socket_boundaries.py")),
             ),
             "A faulting socket harness must drop at four delivery boundaries and prove no fresh-ID retry is offered.",
         ),
@@ -107,6 +118,7 @@ def scenarios(*, online: bool) -> tuple[Scenario, ...]:
                     "CLI bounded status acceptance",
                     cargo_args("-p", "boreal-cli", "--test", "release_acceptance", "doctor_reports_schema_runtime_and_bounded_status_payload", online=online),
                 ),
+                Check("production gate V04", tui_production_gate()),
             ),
             "The live socket DTO fixture suite must cover every derived state, kind, gate, timestamp, and recovery field.",
         ),
@@ -123,6 +135,7 @@ def scenarios(*, online: bool) -> tuple[Scenario, ...]:
                     "witness/import distinction",
                     cargo_args("-p", "boreal-application", "--test", "proof_boundary", "imported_witness_label_is_rejected_but_failed_evidence_is_retained", online=online),
                 ),
+                Check("production gate V05", production_gate("scripts/validation/process/forensic_service.py", "--only", "V05")),
             ),
             "The service route must prove same-session success and wrong-session failure with the actual request adapter.",
         ),
@@ -140,6 +153,7 @@ def scenarios(*, online: bool) -> tuple[Scenario, ...]:
                     cargo_args("-p", "boreal-store", "--test", "store_contracts", "close_intent_is_idempotent_readable_and_rejects_then_finalizes_with_audit", online=online),
                 ),
                 Check("mounted TUI workflow tests", ("npm", "test", "--prefix", "apps/tui")),
+                Check("production gate V06", tui_production_gate()),
             ),
             "The real CLI and full-screen path must fault between every stage, restart, read the parent operation, and complete with a typed summary.",
         ),
@@ -153,6 +167,7 @@ def scenarios(*, online: bool) -> tuple[Scenario, ...]:
                     "operation readback contract",
                     cargo_args("-p", "boreal-cli", "--test", "operation_readback_contract", "operation_show_reads_completed_create_operation", online=online),
                 ),
+                Check("production gate V07", tui_production_gate()),
             ),
             "A production controller fault test must separate committed action receipts from stale-view refresh errors.",
         ),
@@ -169,6 +184,7 @@ def scenarios(*, online: bool) -> tuple[Scenario, ...]:
                     "service signal cleanup",
                     cargo_args("-p", "boreal-cli", "--test", "service_signal_recovery", "service_run_handles_sigterm_and_removes_socket", online=online),
                 ),
+                Check("production gate V08", production_gate("scripts/validation/process/forensic_service.py", "--only", "V08")),
             ),
             "A parent-exit/inherited-pipe fixture must prove bounded completion and zero owned descendants across cancellation and SIGTERM.",
         ),
@@ -182,6 +198,7 @@ def scenarios(*, online: bool) -> tuple[Scenario, ...]:
                     cargo_args("-p", "boreal-cli", "--test", "service_signal_recovery", "service_run_recovers_a_stale_socket_after_sigkill_without_breaking_live_service", online=online),
                 ),
                 Check("command registry availability", cargo_args("-p", "boreal-cli", "--test", "command_registry", "commands_reports_source_routes_as_direct_only", online=online)),
+                Check("production gate V09", production_gate("scripts/validation/process/forensic_service.py", "--only", "V09")),
             ),
             "Every direct mutation must reject or explicitly enter an approved offline mode while an elected host owns the project.",
         ),
@@ -192,6 +209,7 @@ def scenarios(*, online: bool) -> tuple[Scenario, ...]:
             (
                 Check("service runtime unit tests", cargo_args("-p", "boreal-service", "--lib", online=online)),
                 Check("guided lifecycle clock tests", cargo_args("-p", "boreal-application", "--test", "p2_guided_flow", "p2_guided_flow_claims_three_harnesses_and_fences_recovery", online=online)),
+                Check("production gate V10", production_gate("scripts/validation/concurrency/production_host.py")),
             ),
             "A production host test must use a fake clock, saturate workers and the normal queue, and measure typed control latency and stop proof.",
         ),
@@ -206,6 +224,7 @@ def scenarios(*, online: bool) -> tuple[Scenario, ...]:
                     "status scale benchmark",
                     cargo_args("-p", "boreal-store", "--test", "release_acceptance", "--", "--ignored", "--nocapture", "status_read_release_benchmark_10k_100k", online=online),
                 ),
+                Check("production gate V11", production_gate("scripts/validation/status/production_client.py")),
             ),
             "A complete gate must reach eligible item 1001 and exact work 101/1001 through the production client with query-count evidence.",
         ),
@@ -216,6 +235,7 @@ def scenarios(*, online: bool) -> tuple[Scenario, ...]:
             (
                 Check("bounded evidence capture", cargo_args("-p", "boreal-cli", "--test", "evidence_runner_hardening", "evidence_run_caps_capture_before_an_unbounded_file_can_grow", online=online)),
                 Check("TUI framing and payload tests", ("npm", "test", "--prefix", "apps/tui")),
+                Check("production gate V12", ("python3", "scripts/validation/security/v12_envelope.py")),
             ),
             "A byte-accurate 65535/65536/65537 envelope matrix must include Unicode expansion and a sidecar-export failure after receipt commit.",
         ),
@@ -291,7 +311,7 @@ def markdown(result: dict[str, Any]) -> str:
         "",
         f"Overall: **{result['status']}**; pass **{result['counts']['pass']}**, skip **{result['counts']['skip']}**, unavailable **{result['counts']['unavailable']}**, fail **{result['counts']['fail']}**.",
         "",
-        "A scenario is green only when its exact production-composition gate is implemented and every listed check passes. Partial checks are retained as evidence but leave the scenario `unavailable`.",
+        "A scenario is green only when its exact production-composition gate is implemented and every listed check passes. Partial checks are retained as evidence and cannot establish a pass by themselves.",
         "",
         "| Scenario | Status | Findings | Checks | Missing complete gate |",
         "| --- | --- | --- | --- | --- |",
@@ -326,7 +346,13 @@ def main() -> int:
         for check in scenario.checks:
             if check.command not in cache:
                 cache[check.command] = run_command(check, log_dir=log_dir, online=args.online)
-            checks.append(cache[check.command])
+            observed = dict(cache[check.command])
+            # A shared command (notably the live TUI gate) may serve several
+            # scenarios. Keep its execution cache, but preserve the scenario
+            # label in each report so V04/V06/V07 cannot be misattributed to
+            # whichever scenario happened to run it first.
+            observed["label"] = check.label
+            checks.append(observed)
         check_statuses = {item["status"] for item in checks}
         if "fail" in check_statuses:
             status = "fail"
@@ -335,7 +361,10 @@ def main() -> int:
         elif "unavailable" in check_statuses:
             status = "unavailable"
         else:
-            status = "unavailable"  # No current check is allowed to imply the complete gate.
+            has_production_gate = any(
+                item["label"].startswith("production gate") for item in checks
+            )
+            status = "pass" if has_production_gate else "unavailable"
         records.append(
             {
                 "id": scenario.scenario_id,
@@ -344,7 +373,7 @@ def main() -> int:
                 "status": status,
                 "checks": checks,
                 "complete_gate": scenario.complete_gate,
-                "complete": False,
+                "complete": status == "pass",
             }
         )
     counts = {status: sum(item["status"] == status for item in records) for status in ("pass", "skip", "unavailable", "fail")}
@@ -359,7 +388,7 @@ def main() -> int:
         "scenarios": records,
         "log_dir": str(log_dir),
         "limitations": [
-            "The runner does not claim a V01-V12 pass from partial unit, application, or TUI tests.",
+            "A V01-V12 pass requires the named production gate in addition to its partial unit/application/TUI checks.",
             "A complete scenario requires a test through the actual bwrk service composition and its declared fault/scale boundary.",
             "Environment skips remain visible and are release-blocking unless an explicit non-release exploratory override is used.",
         ],
