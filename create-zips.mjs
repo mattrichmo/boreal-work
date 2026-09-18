@@ -14,15 +14,12 @@ function defaultOutputDirectory() {
 }
 
 const DEFAULT_OUTPUT_DIR = defaultOutputDirectory();
-const legacyRoot = process.env.BOREAL_V1_ARCHIVE_ROOT
-  ? path.resolve(process.env.BOREAL_V1_ARCHIVE_ROOT)
-  : path.join(repoRoot, "v1");
 
 function usage() {
   return `Usage: node create-zips.mjs [--output-dir PATH]
 
-Creates timestamped read-only reference archives for the canonical v2 tree and
-the local legacy v1 reference tree when it is available.
+Creates one timestamped, stripped-down read-only review archive for the
+current refactored v2 tree.
 
 The preferred output is /scratch/reference-zips. On systems without a writable
 /scratch directory, output falls back to ./scratch/reference-zips.
@@ -34,7 +31,6 @@ Options:
 
 Environment:
   BOREAL_ZIP_OUTPUT_DIR  Overrides the default output directory
-  BOREAL_V1_ARCHIVE_ROOT Overrides the local v1 source directory
 `;
 }
 
@@ -108,37 +104,6 @@ const TEXT_EXTENSIONS = new Set([
 
 const TEXT_FILENAMES = new Set([".gitattributes", ".gitignore", ".gitkeep"]);
 
-const V1_ROOT_FILES = new Set([
-  "INSTALL.md",
-  "README.md",
-  "package.json",
-  "pnpm-workspace.yaml",
-  "tsconfig.base.json",
-  "tsconfig.json",
-  "vitest.config.ts",
-]);
-
-const V1_DOC_FILES = new Set([
-  "docs/cli/COMMANDS.md",
-  "docs/concepts.md",
-  "docs/getting-started.md",
-  "docs/product/GLOBAL_MANAGER_DESIGN.md",
-  "docs/product/PRODUCT_CONTRACT.md",
-  "docs/product/V1_WORKFLOWS.md",
-  "docs/architecture/AGENT_DIRECTIVES.md",
-  "docs/architecture/CLI_TUI_RUNTIME_BOUNDARY.md",
-  "docs/architecture/CLI_UX.md",
-  "docs/architecture/CLOSEOUT_GATE_CONTRACT.md",
-  "docs/architecture/COMPATIBILITY_POLICY.md",
-  "docs/architecture/DAEMON.md",
-  "docs/architecture/EVIDENCE_TRUST.md",
-  "docs/architecture/MCP_DAEMON_BOUNDARY.md",
-  "docs/architecture/MCP_SERVER.md",
-  "docs/architecture/RUNTIME.md",
-  "docs/architecture/SKILLS_AND_WORKFLOWS.md",
-  "docs/architecture/TUI_SURFACE_CONTRACTS.md",
-]);
-
 const V2_ROOT_FILES = new Set([
   "AGENTS.md",
   "AGENT_HANDOFF.md",
@@ -208,37 +173,6 @@ function isExcluded(relativePath) {
   return false;
 }
 
-function selectV1(relativePath) {
-  if (V1_ROOT_FILES.has(relativePath) || V1_DOC_FILES.has(relativePath)) {
-    return true;
-  }
-
-  if (relativePath.startsWith("apps/") || relativePath.startsWith("packages/")) {
-    return (
-      (relativePath.includes("/src/") && isTextFile(relativePath)) ||
-      /^(apps|packages)\/[^/]+\/(package\.json|tsconfig\.json)$/.test(relativePath)
-    );
-  }
-
-  if (relativePath.startsWith("schemas/") && extensionOf(relativePath) === ".json") {
-    return true;
-  }
-
-  if (relativePath.startsWith("workflows/") && extensionOf(relativePath) === ".md") {
-    return true;
-  }
-
-  if (relativePath.startsWith("skills/")) {
-    return ["SKILL.md", "boreal.yaml", "openai.yaml"].includes(path.basename(relativePath));
-  }
-
-  if (relativePath.startsWith("tests/") || relativePath.startsWith("tools/")) {
-    return isTextFile(relativePath);
-  }
-
-  return false;
-}
-
 function selectV2(relativePath) {
   if (V2_ROOT_FILES.has(relativePath) || V2_PROJECT_FILES.has(relativePath)) {
     return true;
@@ -261,10 +195,10 @@ function selectV2(relativePath) {
     return isTextFile(relativePath);
   }
 
-  // The v3 hierarchy, migration, release, and agent-dispatch contracts live
-  // throughout project/, not only in project/spec.  Preserve every tracked
-  // text document there so an archive can be audited or rebuilt from the
-  // reference snapshot without the live repository.
+  // The refactored hierarchy, migration, release, and agent-dispatch
+  // contracts live throughout project/, not only in project/spec. Preserve
+  // every text document there so reviewers have the complete v2 contract
+  // packet without the live repository.
   if (relativePath.startsWith("project/")) {
     return isTextFile(relativePath);
   }
@@ -278,7 +212,7 @@ function selectV2(relativePath) {
   }
 
   if (relativePath.startsWith("docs/")) {
-    return extensionOf(relativePath) === ".md";
+    return isTextFile(relativePath);
   }
 
   if (relativePath.startsWith("scripts/")) {
@@ -417,19 +351,6 @@ async function buildArchive(spec) {
 }
 
 const specs = [
-  {
-    id: "boreal-v1",
-    title: "Boreal v1 code reference",
-    sourceRoot: legacyRoot,
-    archiveDirectory: "boreal-v1",
-    sourceLabel: "the sibling v1 archive (the legacy TypeScript implementation)",
-    optional: true,
-    selector: selectV1,
-    included:
-      "Active TypeScript application and package source, schemas, workflow/skill definitions, tests, tooling, build manifests, and selected architecture/product documentation.",
-    excluded:
-      "the broad historical/audit documentation set, examples/templates, and the nested memory repository",
-  },
   {
     id: "boreal-v2",
     title: "Boreal v2 code reference",
