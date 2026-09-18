@@ -425,6 +425,10 @@ mod unix {
                     outcome: envelope.outcome,
                     revision: envelope.revision,
                     data: envelope.data,
+                    human: None,
+                    as_of: Some(envelope.as_of),
+                    next_status_change_at: envelope.next_status_change_at,
+                    detail_ref: envelope.detail_ref,
                 });
             }
             return Err(CliError::with(error.code, envelope.outcome, error.message));
@@ -433,6 +437,10 @@ mod unix {
             outcome: envelope.outcome,
             revision: envelope.revision,
             data: envelope.data,
+            human: None,
+            as_of: Some(envelope.as_of),
+            next_status_change_at: envelope.next_status_change_at,
+            detail_ref: envelope.detail_ref,
         })
     }
 
@@ -2684,7 +2692,7 @@ mod unix {
             }
     }
 
-    fn make_envelope(
+    pub(super) fn make_envelope(
         operation: &str,
         outcome: ApplicationOutcome,
         revision: Option<u64>,

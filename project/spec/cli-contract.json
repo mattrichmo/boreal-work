@@ -216,8 +216,8 @@
       {"path": "search index", "syntax": "bwrk search index", "disposition": "keep_spelling", "action": "mutate", "output": "search", "exit_profile": "mutation"}
     ],
     "setup_workflows_health": [
-      {"path": "init", "syntax": "bwrk init [--path PATH]", "disposition": "keep_spelling", "action": "mutate", "output": "diagnostic", "exit_profile": "mutation"},
-      {"path": "setup", "syntax": "bwrk setup [--path PATH]", "disposition": "keep_spelling", "action": "mutate", "output": "diagnostic", "exit_profile": "mutation"},
+      {"path": "init", "syntax": "bwrk init [PROJECT] [--interactive|--yes] [--agents codex,claude] [--project-root PATH] [--db PATH] [--dry-run] [--json]", "disposition": "keep_spelling", "action": "mutate", "output": "project_setup", "exit_profile": "mutation"},
+      {"path": "setup", "syntax": "bwrk setup [PROJECT] [--yes] [--agents codex,claude] [--project-root PATH] [--db PATH] [--dry-run] [--json]", "disposition": "keep_spelling", "action": "mutate", "output": "project_setup", "exit_profile": "mutation"},
       {"path": "workflows list", "syntax": "bwrk workflows list [--limit N]", "disposition": "keep_spelling", "action": "read", "output": "workflow", "exit_profile": "read"},
       {"path": "workflows show WORKFLOW_REF", "syntax": "bwrk workflows show WORKFLOW_REF", "disposition": "keep_spelling", "action": "read", "output": "workflow", "exit_profile": "read"},
       {"path": "directives list", "syntax": "bwrk directives list [--limit N]", "disposition": "keep_spelling", "action": "read", "output": "workflow", "exit_profile": "read"},

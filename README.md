@@ -67,47 +67,81 @@ do not instantiate them in the legacy `bwrk` workspace.
 
 ## Installation
 
-### Install `bwrk` globally from this checkout
+### Install or update `bwrk`
 
-From the repository root, install the current Rust CLI into Cargo's user bin
-directory (`~/.cargo/bin`):
+The same command installs a new CLI or updates an existing one. It installs the
+CLI and compiled dashboard TUI into `~/.local`; rerun it whenever you want to
+update:
 
-```sh
-cargo install --path crates/cli --bin bwrk --locked
+```bash
+curl -fsSL https://raw.githubusercontent.com/mattrichmo/boreal-work/main/install.sh \
+  | sh
 bwrk --version
 ```
 
-Make sure `~/.cargo/bin` is on `PATH`. To replace an existing install with the
-current checkout, add `--force`:
+Add `~/.local/bin` to `PATH` if the installer reports that it is missing. The
+installer preserves the existing project databases and replaces the installed
+CLI/TUI as one update. Before the first v2 release is published, the same
+command automatically builds the `main` source ref; that fallback requires
+Git, Rust, Node.js, npm, Python, and `tsc`. After a release is published, it
+downloads and verifies the platform archive instead.
 
-```sh
-cargo install --path crates/cli --bin bwrk --locked --force
+To install a specific published version, pin both the installer script and
+release version:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/mattrichmo/boreal-work/v0.2.0/install.sh \
+  | BOREAL_VERSION=0.2.0 sh
 ```
 
-This installs the Rust CLI/service globally, but does not install the compiled
-dashboard TUI. Use the complete package below when you want interactive
-`bwrk dashboard` support.
-
-### Install the complete local CLI + TUI package
-
-With Rust, Node.js, npm, and `tsc` available, build and install the current
-checkout into `~/.local`:
+For a source checkout, install/update the current checkout with:
 
 ```sh
-target="$(rustc -vV | sed -n 's/^host: //p')"
-python3 scripts/release/build_release.py \
-  --version 0.2.0 \
-  --target "$target" \
-  --output-dir /tmp/boreal-release
-sh install.sh \
-  --archive "/tmp/boreal-release/bwrk-v0.2.0-$target.tar.gz" \
-  --prefix "$HOME/.local"
+./install.sh --from-source
 ```
 
-Add `~/.local/bin` to `PATH` if needed. For the normal release workflow,
-[the installation guide](docs/INSTALL.md) covers Homebrew and the tagged
-GitHub installer. No tagged v2 archive is published yet; pushing `v0.2.0`
-will trigger the release workflow.
+### Developer-only Rust CLI install
+
+If you only need the Rust executable and not the dashboard TUI, Cargo can
+install it into `~/.cargo/bin`:
+
+```sh
+cargo install --path crates/cli --bin bwrk --locked
+```
+
+This developer path does not install the compiled dashboard TUI. See
+[the installation guide](docs/INSTALL.md) for pinned releases, Homebrew, and
+packaging details.
+
+### Set up a project
+
+From the repository you want Boreal to manage, run:
+
+```sh
+cd your-project
+bwrk init
+```
+
+The setup screen asks whether to install the project skills for Codex, Claude,
+or both, then creates the local `.boreal/` project binding, `memory/` tree,
+Git-safe runtime files, and selected agent skills. The project name defaults to
+the current folder name; pass one explicitly when needed:
+
+```sh
+bwrk init my-project
+```
+
+For scripts and CI, use the recommended Codex setup without prompts. Repeat it
+after installing a newer `bwrk`; managed files and skills are reconciled
+without replacing your existing memory notes:
+
+```sh
+bwrk init --yes
+bwrk init --agents codex,claude --yes
+```
+
+`bwrk setup` and `bwrk install` are compatibility aliases. Use `--dry-run` to
+review the plan without writing files, or `--json` for automation.
 
 ## Build
 

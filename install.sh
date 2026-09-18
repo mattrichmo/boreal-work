@@ -1,8 +1,9 @@
 #!/bin/sh
 set -eu
 
-# Install a tagged Boreal release without requiring Rust or npm.  The archive
-# is the release artifact; this script only selects, verifies, and installs it.
+# Install or update Boreal from a verified release archive.  When no release is
+# published yet, --from-source (and the stdin bootstrap fallback) builds the
+# current source checkout/repository and installs the same archive layout.
 
 REPOSITORY="${BOREAL_REPOSITORY:-mattrichmo/boreal-work}"
 if [ -n "${BOREAL_PREFIX:-}" ]; then
@@ -14,10 +15,23 @@ else
 fi
 REQUESTED_VERSION="${BOREAL_VERSION:-}"
 LOCAL_ARCHIVE=""
+SOURCE_INSTALL=0
+SOURCE_REF="${BOREAL_SOURCE_REF:-main}"
+SCRIPT_DIR=""
+RUNNING_FROM_STDIN=1
 TEMP_ROOT=""
 INSTALL_STAGE=""
 BACKUP_ROOT=""
 ROLLBACK_NEEDED=0
+
+case "${0##*/}" in
+  install.sh)
+    if [ -f "$0" ]; then
+      SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
+      RUNNING_FROM_STDIN=0
+    fi
+    ;;
+esac
 
 die() {
   echo "boreal install: $*" >&2
@@ -27,14 +41,21 @@ die() {
 usage() {
   cat <<'EOF'
 Usage: install.sh [--version VERSION] [--prefix PATH] [--archive PATH]
+                  [--from-source] [--ref REF]
 
-Downloads and installs a tagged Boreal release. The default prefix is
-~/.local; use --prefix /usr/local when a system-wide installation is desired.
+Installs or updates Boreal. The default prefix is ~/.local; use
+--prefix /usr/local when a system-wide installation is desired. Running the
+script again replaces the existing CLI and TUI atomically.
+
+With no arguments, the script installs the latest verified release. If this
+script is piped from GitHub before a release exists, it falls back to building
+the requested source ref. Use --from-source to select that path explicitly.
 
 Environment:
   BOREAL_VERSION       release version, for example 0.2.0
   BOREAL_PREFIX        installation prefix
   BOREAL_REPOSITORY    GitHub owner/repository
+  BOREAL_SOURCE_REF    source branch or tag, default main
 EOF
 }
 
@@ -55,6 +76,15 @@ while [ "$#" -gt 0 ]; do
       LOCAL_ARCHIVE=$2
       shift 2
       ;;
+    --from-source)
+      SOURCE_INSTALL=1
+      shift
+      ;;
+    --ref)
+      [ "$#" -ge 2 ] || die "--ref requires a value"
+      SOURCE_REF=$2
+      shift 2
+      ;;
     --help|-h)
       usage
       exit 0
@@ -64,6 +94,64 @@ while [ "$#" -gt 0 ]; do
       ;;
   esac
 done
+
+bootstrap_from_source() {
+  source_root=""
+  source_temp=""
+  source_target=""
+  source_version=""
+  source_output=""
+  source_archive=""
+
+  if [ "$RUNNING_FROM_STDIN" -eq 0 ] \
+    && [ -f "$SCRIPT_DIR/Cargo.toml" ] \
+    && [ -d "$SCRIPT_DIR/crates/cli" ] \
+    && [ -d "$SCRIPT_DIR/apps/tui" ]; then
+    source_root=$SCRIPT_DIR
+    echo "Building Boreal from the current checkout ..."
+  else
+    command -v git >/dev/null 2>&1 || die "--from-source requires git"
+    source_temp=$(mktemp -d "${TMPDIR:-/tmp}/boreal-source-install.XXXXXX")
+    trap 'rm -rf "$source_temp"' EXIT HUP INT TERM
+    echo "Fetching Boreal source ($SOURCE_REF) ..."
+    git clone --quiet --depth 1 --branch "$SOURCE_REF" \
+      "https://github.com/$REPOSITORY.git" "$source_temp/src" \
+      || die "could not fetch Boreal source ref: $SOURCE_REF"
+    source_root="$source_temp/src"
+  fi
+
+  for tool in cargo rustc node npm python3 tsc; do
+    command -v "$tool" >/dev/null 2>&1 || die "--from-source requires $tool on PATH"
+  done
+
+  source_target=$(rustc -vV | sed -n 's/^host: //p')
+  [ -n "$source_target" ] || die "could not determine the Rust host target"
+  source_version=$(sed -n \
+    '/^\[workspace\.package\]/,/^\[/{s/^version[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p;}' \
+    "$source_root/Cargo.toml")
+  [ -n "$source_version" ] || die "could not determine the Boreal workspace version"
+  source_output=$(mktemp -d "${TMPDIR:-/tmp}/boreal-source-release.XXXXXX")
+  trap 'rm -rf "$source_temp" "$source_output"' EXIT HUP INT TERM
+
+  cargo build --manifest-path "$source_root/Cargo.toml" \
+    --release --locked -p boreal-cli --bin bwrk
+  npm --prefix "$source_root/apps/tui" run build
+  python3 "$source_root/scripts/release/build_release.py" \
+    --root "$source_root" \
+    --version "$source_version" \
+    --output-dir "$source_output" \
+    --skip-build
+
+  source_archive="$source_output/bwrk-v${source_version}-${source_target}.tar.gz"
+  [ -f "$source_archive" ] || die "source build did not produce a release archive"
+  set +e
+  sh "$source_root/install.sh" --archive "$source_archive" --prefix "$PREFIX"
+  status=$?
+  set -e
+  rm -rf "$source_temp" "$source_output"
+  trap - EXIT HUP INT TERM
+  exit "$status"
+}
 
 case "$PREFIX" in
   ""|/)
@@ -75,6 +163,8 @@ if [ -n "$LOCAL_ARCHIVE" ]; then
   [ -f "$LOCAL_ARCHIVE" ] || die "archive does not exist: $LOCAL_ARCHIVE"
   ARCHIVE_PATH=$(CDPATH= cd -- "$(dirname -- "$LOCAL_ARCHIVE")" && pwd -P)/$(basename -- "$LOCAL_ARCHIVE")
   ARCHIVE_NAME=$(basename -- "$ARCHIVE_PATH")
+elif [ "$SOURCE_INSTALL" -eq 1 ]; then
+  bootstrap_from_source
 else
   command -v curl >/dev/null 2>&1 || die "curl is required to download a release"
   [ -n "${HOME:-}" ] || [ -n "${BOREAL_PREFIX:-}" ] || die "HOME is unset; pass --prefix"
@@ -97,7 +187,9 @@ else
   esac
 
   if [ -z "$REQUESTED_VERSION" ]; then
-    latest_url=$(curl -fsSL -o /dev/null -w '%{url_effective}' "https://github.com/$REPOSITORY/releases/latest")
+    if ! latest_url=$(curl -fsSL -o /dev/null -w '%{url_effective}' "https://github.com/$REPOSITORY/releases/latest"); then
+      bootstrap_from_source
+    fi
     latest_tag=${latest_url##*/}
     [ -n "$latest_tag" ] || die "could not determine the latest GitHub release"
     REQUESTED_VERSION=${latest_tag#v}

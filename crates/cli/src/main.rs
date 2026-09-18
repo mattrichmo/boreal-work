@@ -41,6 +41,7 @@ use std::os::unix::process::CommandExt;
 
 mod command_registry;
 mod dashboard;
+mod setup;
 mod service;
 
 const SCHEMA: &str = include_str!("../../../project/spec/schema-v2.sql");
@@ -58,7 +59,9 @@ Usage:
   bwrk commands [PATH] [--json]
   bwrk help [PATH] [--json]
   bwrk version [--json]
-  bwrk init <project> [--db PATH] [--json]
+  bwrk init [PROJECT] [--interactive|--yes] [--agents codex,claude] [--project-root PATH] [--db PATH] [--dry-run] [--json]
+  bwrk setup [PROJECT] [--yes] [--agents codex,claude] [--project-root PATH] [--db PATH] [--dry-run] [--json]
+  bwrk install [PROJECT] [--yes] [--agents codex,claude] [--project-root PATH] [--db PATH] [--dry-run] [--json]
   bwrk service run --db PATH --socket PATH [--max-requests N] [--json]
   bwrk status <project> [--limit N] [--offset N] [--socket PATH] [--db PATH] [--json]
   bwrk dashboard [PROJECT] [--project PROJECT] [--db PATH] [--actor ID] [--harness ID] [--session ID] [--json]
@@ -147,7 +150,19 @@ struct CliOptions {
     media_type: Option<String>,
     source_version: Option<String>,
     config_identity: Option<String>,
+    setup: SetupCliOptions,
     positionals: Vec<String>,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+struct SetupCliOptions {
+    interactive: bool,
+    yes: bool,
+    dry_run: bool,
+    agents: Option<String>,
+    project_root: Option<String>,
+    memory_layout: Option<String>,
+    install_root: Option<String>,
 }
 
 impl Default for CliOptions {
@@ -191,6 +206,7 @@ impl Default for CliOptions {
             media_type: None,
             source_version: None,
             config_identity: None,
+            setup: SetupCliOptions::default(),
             positionals: Vec::new(),
         }
     }
@@ -234,6 +250,24 @@ struct CliResult {
     outcome: ApplicationOutcome,
     revision: Option<u64>,
     data: Option<Value>,
+    human: Option<String>,
+    as_of: Option<String>,
+    next_status_change_at: Option<String>,
+    detail_ref: Option<DetailReference>,
+}
+
+impl Default for CliResult {
+    fn default() -> Self {
+        Self {
+            outcome: ApplicationOutcome::Changed,
+            revision: None,
+            data: None,
+            human: None,
+            as_of: None,
+            next_status_change_at: None,
+            detail_ref: None,
+        }
+    }
 }
 
 fn main() -> ExitCode {
@@ -263,12 +297,14 @@ fn main() -> ExitCode {
                     application_error.clone(),
                 );
             } else if !interactive_dashboard {
-                if let Some(data) = result.data {
+                if let Some(human) = result.human.as_deref() {
+                    print!("{human}");
+                } else if let Some(data) = result.data {
                     println!("{}", serde_json::to_string_pretty(&data).unwrap());
                 }
             }
             if result.outcome.is_success() {
-                if !json_output && !has_data && !interactive_dashboard {
+                if !json_output && !has_data && result.human.is_none() && !interactive_dashboard {
                     println!("ok");
                 }
                 ExitCode::SUCCESS
@@ -344,6 +380,15 @@ fn run_with_operation(args: &[String], operation: &str) -> Result<CliResult, Cli
     if parsed.path == ["dashboard"] {
         return dashboard::run_dashboard(&parsed);
     }
+    let setup_command = setup::is_setup_command(&parsed.path);
+    let setup_requested = setup::should_setup(&parsed);
+    if ((setup_command && parsed.path[0] != "init") || setup_requested)
+        && parsed.options.socket.is_some()
+    {
+        return Err(CliError::invalid(
+            "project setup runs in the local project folder; omit --socket",
+        ));
+    }
     if parsed.options.socket.is_some() {
         if service::supports(&parsed) {
             return service::request(&parsed, operation);
@@ -363,10 +408,38 @@ fn run_with_operation(args: &[String], operation: &str) -> Result<CliResult, Cli
             message,
         ));
     }
-    let path = PathBuf::from(&parsed.options.db);
+    let setup_plan = if setup_requested {
+        Some(setup::prepare(&parsed)?)
+    } else {
+        None
+    };
+    if setup_plan.as_ref().is_some_and(|plan| plan.dry_run) {
+        let plan = setup_plan.as_ref().expect("setup plan exists for dry-run");
+        return Ok(CliResult {
+            outcome: ApplicationOutcome::Unchanged,
+            data: parsed.options.json.then(|| setup::plan_value(plan)),
+            human: (!parsed.options.json).then(|| setup::render(plan, None)),
+            ..CliResult::default()
+        });
+    }
+    let path = setup_plan
+        .as_ref()
+        .map_or_else(|| PathBuf::from(&parsed.options.db), |plan| plan.database.clone());
     ensure_db_parent(&path)?;
-    if parsed.path == ["init"] {
-        let project = project_argument(&parsed, 0)?;
+    let owner_parsed = if let Some(plan) = setup_plan.as_ref() {
+        let mut owner = parsed.clone();
+        owner.options.positionals = vec![plan.project_id.clone()];
+        owner
+    } else {
+        parsed.clone()
+    };
+    let direct_owner = direct_database_owner(&path, &owner_parsed)?;
+    if setup_command {
+        let project = if let Some(plan) = setup_plan.as_ref() {
+            plan.project_id.clone()
+        } else {
+            project_argument(&parsed, 0)?
+        };
         let store = SqliteStore::open(&path, SCHEMA).map_err(map_store_error)?;
         let app = WorkApplication::new(&store);
         let result = app
@@ -380,12 +453,39 @@ fn run_with_operation(args: &[String], operation: &str) -> Result<CliResult, Cli
                 operation.to_owned(),
             )
             .map_err(map_application_error)?;
-        return Ok(changed(result.snapshot_revision, None));
+        let mut outcome = if result.changed {
+            ApplicationOutcome::Changed
+        } else {
+            ApplicationOutcome::Unchanged
+        };
+        let (data, human) = if let Some(plan) = setup_plan.as_ref() {
+            let setup_result = setup::apply(plan)?;
+            if setup_result.changed {
+                outcome = ApplicationOutcome::Changed;
+            }
+            let value = setup::result_value(plan, &setup_result);
+            (
+                parsed.options.json.then_some(value),
+                (!parsed.options.json).then(|| setup::render(plan, Some(&setup_result))),
+            )
+        } else {
+            (None, None)
+        };
+        drop(direct_owner);
+        return Ok(CliResult {
+            outcome,
+            revision: Some(result.snapshot_revision),
+            data,
+            human,
+            ..CliResult::default()
+        });
     }
     let store = SqliteStore::open(&path, SCHEMA).map_err(map_store_error)?;
     let app = WorkApplication::new(&store);
     let adapter = SqliteAttemptAdapter::new(&store);
-    dispatch(&parsed, operation, &app, &adapter, &store)
+    let result = dispatch(&parsed, operation, &app, &adapter, &store);
+    drop(direct_owner);
+    result
 }
 
 fn dispatch<A: boreal_application::AttemptLifecycleAdapter>(
@@ -564,6 +664,7 @@ fn parse(args: &[String]) -> Result<ParsedCommand, CliError> {
         media_type: None,
         source_version: None,
         config_identity: None,
+        setup: SetupCliOptions::default(),
         positionals: Vec::new(),
     };
     let mut path = Vec::new();
@@ -587,6 +688,21 @@ fn parse(args: &[String]) -> Result<ParsedCommand, CliError> {
         }
         if arg == "--include-expiry" {
             options.include_expiry = true;
+            index += 1;
+            continue;
+        }
+        if arg == "--interactive" {
+            options.setup.interactive = true;
+            index += 1;
+            continue;
+        }
+        if arg == "--yes" {
+            options.setup.yes = true;
+            index += 1;
+            continue;
+        }
+        if arg == "--dry-run" {
+            options.setup.dry_run = true;
             index += 1;
             continue;
         }
@@ -644,7 +760,11 @@ fn parse(args: &[String]) -> Result<ParsedCommand, CliError> {
                 | "--origin"
                 | "--media-type"
                 | "--source-version"
-                | "--config-identity" => Some(option_value(args, &mut index, canonical)?),
+                | "--config-identity"
+                | "--agents"
+                | "--project-root"
+                | "--memory-layout"
+                | "--install-root" => Some(option_value(args, &mut index, canonical)?),
                 _ => None,
             };
             match canonical {
@@ -771,6 +891,10 @@ fn parse(args: &[String]) -> Result<ParsedCommand, CliError> {
                 }
                 "--source-version" => options.source_version = Some(value.unwrap()),
                 "--config-identity" => options.config_identity = Some(value.unwrap()),
+                "--agents" => options.setup.agents = Some(value.unwrap()),
+                "--project-root" => options.setup.project_root = Some(value.unwrap()),
+                "--memory-layout" => options.setup.memory_layout = Some(value.unwrap()),
+                "--install-root" => options.setup.install_root = Some(value.unwrap()),
                 _ => return Err(CliError::invalid(format!("unknown option: {name}"))),
             }
             index += 1;
@@ -798,7 +922,7 @@ fn parse(args: &[String]) -> Result<ParsedCommand, CliError> {
             index += 1;
         }
     }
-    if path.first().is_some_and(|value| value == "init") {
+    if path.first().is_some_and(|value| matches!(value.as_str(), "init" | "setup" | "install")) {
         options.positionals.extend(path.drain(1..));
     } else if matches!(
         path.first().map(String::as_str),
@@ -1511,7 +1635,7 @@ fn intake_bucket_result(
     let scope =
         boreal_application::PlanningScope::new(project.clone(), parsed.options.actor.clone())
             .with_session(parsed.options.session.clone())
-            .at_revision(revision);
+            .at_revision(parsed.options.expected_revision.unwrap_or(revision));
     let result = app
         .create_intake_bucket_v3(&scope, operation.to_owned(), &bucket, &now())
         .map_err(map_application_error)?;
@@ -1529,6 +1653,7 @@ fn intake_bucket_result(
             "archived": false,
             "replayed": !result.changed,
         })),
+        ..CliResult::default()
     })
 }
 
@@ -1583,7 +1708,7 @@ fn intake_capture_result(
     let scope =
         boreal_application::PlanningScope::new(project.clone(), parsed.options.actor.clone())
             .with_session(parsed.options.session.clone())
-            .at_revision(revision);
+            .at_revision(parsed.options.expected_revision.unwrap_or(revision));
     let result = app
         .create_intake_item_v3(
             &scope,

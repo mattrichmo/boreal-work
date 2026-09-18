@@ -62,12 +62,30 @@ const COMMANDS: &[CommandSpec] = &[
     },
     CommandSpec {
         path: "init",
-        syntax: "bwrk init PROJECT [--db PATH] [--json]",
+        syntax: "bwrk init [PROJECT] [--interactive|--yes] [--agents codex,claude] [--project-root PATH] [--db PATH] [--dry-run] [--json]",
         action: "mutate",
         output: "project",
         direct: true,
         service: true,
-        summary: "initialize a project through the application boundary",
+        summary: "initialize and scaffold a project; prompts for agent skill targets in a terminal",
+    },
+    CommandSpec {
+        path: "setup",
+        syntax: "bwrk setup [PROJECT] [--yes] [--agents codex,claude] [--project-root PATH] [--db PATH] [--dry-run] [--json]",
+        action: "mutate",
+        output: "project_setup",
+        direct: true,
+        service: false,
+        summary: "recommended project setup alias for init",
+    },
+    CommandSpec {
+        path: "install",
+        syntax: "bwrk install [PROJECT] [--yes] [--agents codex,claude] [--project-root PATH] [--db PATH] [--dry-run] [--json]",
+        action: "mutate",
+        output: "project_setup",
+        direct: true,
+        service: false,
+        summary: "compatibility alias for project setup",
     },
     CommandSpec {
         path: "status",
@@ -938,6 +956,7 @@ mod tests {
                 media_type: None,
                 source_version: None,
                 config_identity: None,
+                setup: SetupCliOptions::default(),
                 positionals: positionals
                     .iter()
                     .map(|value| (*value).to_owned())

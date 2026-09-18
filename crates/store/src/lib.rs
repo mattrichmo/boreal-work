@@ -1328,6 +1328,36 @@ impl SqliteStore {
             self.create_project(project_id, now)?;
             self.ensure_actor(actor_id, actor_role, credential_ref, display_name, now)?;
             self.ensure_acceptance_profile("focused", 1, "sha256:focused", "{}", now)?;
+            if self
+                .list_project_ids()?
+                .iter()
+                .any(|existing| existing == project_id)
+            {
+                let revision = self.project_revision(project_id)?;
+                let payload = json_object(json!({"project_id": project_id}))?;
+                self.append_operation(&OperationRecord {
+                    operation_id: operation_id.to_owned(),
+                    project_id: project_id.to_owned(),
+                    command: "project.init".to_owned(),
+                    actor_id: actor_id.to_owned(),
+                    session_id: None,
+                    expected_revision: None,
+                    attempt_id: None,
+                    fence: None,
+                    request_digest: request_digest.to_owned(),
+                    outcome: OperationOutcome::Unchanged,
+                    result_json: payload,
+                    revision: revision.0,
+                    created_at: now.to_owned(),
+                    completed_at: Some(now.to_owned()),
+                })?;
+                return Ok(MutationResult {
+                    operation_id: operation_id.to_owned(),
+                    revision: revision.0,
+                    replayed: true,
+                });
+            }
+            self.create_project(project_id, now)?;
             let revision = self.bump_revision_in_transaction(project_id)?;
             let payload = json_object(json!({"project_id": project_id}))?;
             self.append_operation(&OperationRecord {
