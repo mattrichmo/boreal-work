@@ -18,6 +18,27 @@ This repository is now the canonical v2 workspace. The legacy implementation
 is preserved in Git history under the `v1-archive-pre-v2-cutover` tag and the
 `archive/v1-pre-v2-cutover` branch; it is not part of the active runtime.
 
+## Quick start
+
+Install `bwrk` and its dashboard TUI globally for your user:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/mattrichmo/boreal-work/main/install.sh | sh
+```
+
+The same command is both the install and update command. After installation,
+run the project setup wizard from the repository you want Boreal to manage:
+
+```sh
+cd your-project
+bwrk init
+```
+
+Choose Codex, Claude, or both in the wizard. To set up or update a project
+without prompts, use `bwrk init --yes`; existing memory content is preserved.
+See [Installation](#installation) for pinned releases, source installs, and
+prefix options.
+
 ## Structure
 
 ```text
@@ -69,9 +90,9 @@ do not instantiate them in the legacy `bwrk` workspace.
 
 ### Install or update `bwrk`
 
-The same command installs a new CLI or updates an existing one. It installs the
-CLI and compiled dashboard TUI into `~/.local`; rerun it whenever you want to
-update:
+The installer installs the CLI and compiled dashboard TUI into `~/.local`.
+Rerun the same command whenever you want to update an existing installation;
+project databases and memory are kept in their project folders:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/mattrichmo/boreal-work/main/install.sh \
@@ -79,12 +100,11 @@ curl -fsSL https://raw.githubusercontent.com/mattrichmo/boreal-work/main/install
 bwrk --version
 ```
 
-Add `~/.local/bin` to `PATH` if the installer reports that it is missing. The
-installer preserves the existing project databases and replaces the installed
-CLI/TUI as one update. Before the first v2 release is published, the same
-command automatically builds the `main` source ref; that fallback requires
-Git, Rust, Node.js, npm, Python, and `tsc`. After a release is published, it
-downloads and verifies the platform archive instead.
+Add `~/.local/bin` to `PATH` if the installer reports that it is missing. Before
+the first v2 release is published, the command automatically builds the `main`
+source ref; that fallback requires Git, Rust, Node.js, npm, Python, and `tsc`.
+After a release is published, it downloads and verifies the platform archive
+instead.
 
 To install a specific published version, pin both the installer script and
 release version:
@@ -131,9 +151,9 @@ the current folder name; pass one explicitly when needed:
 bwrk init my-project
 ```
 
-For scripts and CI, use the recommended Codex setup without prompts. Repeat it
-after installing a newer `bwrk`; managed files and skills are reconciled
-without replacing your existing memory notes:
+For scripts and CI, use setup without prompts. Repeat it after installing a
+newer `bwrk`; managed files and skills are reconciled without replacing your
+existing memory notes:
 
 ```sh
 bwrk init --yes
