@@ -14,7 +14,7 @@ update an existing installation. It installs the CLI and compiled dashboard
 TUI under `~/.local`, and keeps project databases outside the install:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/mattrichmo/boreal-work/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/mattrichmo/boreal-work/refs/heads/main/install.sh | sh
 bwrk --version
 ```
 
