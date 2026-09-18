@@ -26,6 +26,9 @@ Install `bwrk` and its dashboard TUI globally for your user:
 curl -fsSL https://raw.githubusercontent.com/mattrichmo/boreal-work/main/install.sh | sh
 ```
 
+Keep the `| sh` at the end: without it, `curl` only prints the installer
+script and does not install anything.
+
 The same command is both the install and update command. After installation,
 run the project setup wizard from the repository you want Boreal to manage:
 
@@ -95,8 +98,7 @@ Rerun the same command whenever you want to update an existing installation;
 project databases and memory are kept in their project folders:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/mattrichmo/boreal-work/main/install.sh \
-  | sh
+curl -fsSL https://raw.githubusercontent.com/mattrichmo/boreal-work/main/install.sh | sh
 bwrk --version
 ```
 

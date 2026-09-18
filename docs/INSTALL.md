@@ -14,10 +14,12 @@ update an existing installation. It installs the CLI and compiled dashboard
 TUI under `~/.local`, and keeps project databases outside the install:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/mattrichmo/boreal-work/main/install.sh \
-  | sh
+curl -fsSL https://raw.githubusercontent.com/mattrichmo/boreal-work/main/install.sh | sh
 bwrk --version
 ```
+
+The final `| sh` is required. Without it, `curl` only prints the installer
+script to the terminal.
 
 Before the first v2 release is published, this command builds the `main`
 source ref. That fallback needs Git, Rust, Node.js, npm, Python, and `tsc`.
