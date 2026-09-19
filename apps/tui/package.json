@@ -11,7 +11,10 @@
   "scripts": {
     "build": "tsc",
     "typecheck": "tsc --noEmit",
-    "test": "tsc && node dist/test.js",
-    "start": "tsc && node dist/entrypoint.js"
+    "test": "tsc && node dist/test.js && node --test tests/*.test.mjs",
+    "start": "tsc && node dist/entrypoint.js",
+    "test:premium": "tsc && node --test tests/*.test.mjs",
+    "build:installer": "tsc && node ../../scripts/build-installer.mjs",
+    "verify:installer": "node ../../scripts/build-installer.mjs --check"
   }
 }

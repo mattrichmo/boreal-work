@@ -1,0 +1,142 @@
+import type { DashboardFilter, MountedView, StatusItem, TuiAction } from "../client.js";
+import type { Theme } from "./screen.js";
+export const FILTERS: readonly {
+    id: DashboardFilter;
+    label: string;
+    key: string;
+}[] = [
+    { id: "all", label: "All work", key: "1" }, { id: "ready", label: "Ready", key: "2" },
+    { id: "active", label: "In progress", key: "3" }, { id: "blocked", label: "Blocked", key: "4" },
+    { id: "expired", label: "Needs review", key: "5" }, { id: "closed", label: "Closed", key: "6" },
+    { id: "milestones", label: "Milestones", key: "7" }, { id: "sprints", label: "Sprints", key: "8" },
+    { id: "tasks", label: "Tasks", key: "9" },
+];
+export const ACTION_NAMES: Record<TuiAction, string> = { create_project: "Initialize project", create_work: "Create work", claim: "Claim work", accept_start: "Start work", evidence: "Attach evidence", finish: "Finish & close", release: "Release claim" };
+export type Focus = "navigation" | "queue" | "inspector";
+export type Sort = "service" | "priority" | "title";
+export interface FormField {
+    name: string;
+    label: string;
+    value: string;
+    hint: string;
+    choices?: readonly string[];
+    required?: boolean;
+}
+export type Modal = {
+    kind: "search";
+    value: string;
+} | {
+    kind: "palette";
+    value: string;
+    index: number;
+} | {
+    kind: "help";
+    offset: number;
+} | {
+    kind: "form";
+    action: "create_work" | "evidence" | "finish" | "release";
+    workId?: string;
+    fields: FormField[];
+    index: number;
+    error?: string;
+} | {
+    kind: "confirm";
+    action: TuiAction;
+    workId?: string;
+    payload: unknown;
+    revision: number | null;
+    attempt: string | null;
+    summary: string;
+    details: string[];
+    offset?: number;
+};
+export interface DashboardState {
+    filter: DashboardFilter;
+    query: string;
+    selectedId?: string;
+    focus: Focus;
+    navIndex: number;
+    inspectorTab: number;
+    inspectorOffset: number;
+    detailOnly: boolean;
+    sort: Sort;
+    frozen: boolean;
+    status: string;
+    error: boolean;
+    busy: string | null;
+    theme: Theme;
+    ascii: boolean;
+    modal: Modal | null;
+}
+export function initialState(view: MountedView, theme: Theme = "dark", ascii = false): DashboardState {
+    return { filter: "all", query: "", selectedId: view.route.work_id ?? view.monitoring?.items[0]?.work_id,
+        focus: "queue", navIndex: 0, inspectorTab: 0, inspectorOffset: 0, detailOnly: false, sort: "service", frozen: false,
+        status: "Ready. Select work to inspect its next available action.", error: false, busy: null, theme, ascii, modal: null };
+}
+export function itemStatus(item: StatusItem): string { return item.display_status ?? item.status; }
+export function matches(item: StatusItem, filter: DashboardFilter): boolean {
+    const s = itemStatus(item);
+    if (filter === "all")
+        return true;
+    if (filter === "active")
+        return ["claimed", "in_progress", "needs_verification", "awaiting_review", "complete"].includes(s);
+    if (filter === "expired")
+        return s === "expired_review";
+    if (["milestones", "sprints", "tasks"].includes(filter))
+        return item.kind === filter.slice(0, -1);
+    return s === filter;
+}
+export function visibleItems(view: MountedView, state: Pick<DashboardState, "filter" | "query" | "sort">): StatusItem[] {
+    const q = state.query.trim().toLocaleLowerCase();
+    const rows = (view.monitoring?.items ?? []).filter(i => matches(i, state.filter) && (!q || [i.work_id, i.title, i.description, i.parent_id, i.kind, i.attempt?.actor_id].some(v => v?.toLocaleLowerCase().includes(q))));
+    if (state.sort === "priority")
+        rows.sort((a, b) => (b.priority ?? 0) - (a.priority ?? 0) || a.work_id.localeCompare(b.work_id));
+    if (state.sort === "title")
+        rows.sort((a, b) => (a.title ?? a.work_id).localeCompare(b.title ?? b.work_id));
+    return rows;
+}
+export function reconcileSelection(view: MountedView, state: DashboardState): StatusItem | undefined {
+    const items = visibleItems(view, state);
+    if (!items.some(i => i.work_id === state.selectedId))
+        state.selectedId = items[0]?.work_id;
+    return items.find(i => i.work_id === state.selectedId);
+}
+export interface PaletteCommand {
+    id: string;
+    label: string;
+    hint: string;
+    disabled?: boolean;
+}
+export function paletteCommands(view: MountedView, state: DashboardState): PaletteCommand[] {
+    const commands: PaletteCommand[] = [
+        ...FILTERS.map(f => ({ id: `filter:${f.id}`, label: f.label, hint: `View · ${f.key}` })),
+        { id: "search", label: "Search loaded work", hint: "/" }, { id: "refresh", label: "Refresh snapshot", hint: "r" },
+        { id: "page", label: "Load next service page", hint: "]", disabled: !view.monitoring?.has_more },
+        { id: "freeze", label: state.frozen ? "Resume live refresh" : "Pause live refresh", hint: "F" },
+        { id: "readback", label: "Resolve pending operation", hint: "u · read only", disabled: !view.pending_operations.length },
+        ...(["create_work", "claim", "accept_start", "evidence", "finish", "release"] as const).map(a => {
+            const rule = view.actions.find(r => r.action === a);
+            return { id: `action:${a}`, label: ACTION_NAMES[a], hint: rule?.enabled ? "Action · confirmation required" : rule?.reason ?? "Select work first", disabled: !rule?.enabled };
+        }),
+        { id: "theme", label: "Switch colour theme", hint: "T · dark / light / mono" },
+        { id: "help", label: "Keyboard reference", hint: "?" }, { id: "quit", label: "Quit dashboard", hint: "q" },
+    ];
+    const query = state.modal?.kind === "palette" ? state.modal.value.trim().toLocaleLowerCase() : "";
+    return commands.filter(c => !query || `${c.label} ${c.hint}`.toLocaleLowerCase().includes(query));
+}
+export function actionForm(action: "create_work" | "evidence" | "finish" | "release", workId?: string): Extract<Modal, {
+    kind: "form";
+}> {
+    const field = (name: string, label: string, hint: string, required = true, value = ""): FormField => ({ name, label, hint, required, value });
+    const fields: FormField[] = action === "create_work" ? [
+        field("work_id", "Work identifier", "A unique, stable identifier. For example: task-104."),
+        { ...field("kind", "Kind", "Left / Right cycles the work kind.", true, "task"), choices: ["task", "sprint", "milestone"] },
+        field("title", "Title", "Describe the outcome, not just the activity."),
+        field("parent_id", "Parent identifier", "Optional existing sprint or milestone identifier.", false),
+        field("priority", "Priority", "0–255. Higher values are scheduled first.", false, "0"),
+        field("description", "Description", "Optional context for the person or agent doing the work.", false),
+    ] : action === "evidence" ? [field("receipt", "Receipt JSON", "Paste a real receipt object. No evidence is generated or fabricated here.")]
+        : action === "finish" ? [field("summary", "Closeout summary", "Explain what changed and how it was verified.")]
+            : [field("reason", "Release reason", "Explain why this claim is being released.", true, "Released by operator")];
+    return { kind: "form", action, workId, fields, index: 0 };
+}

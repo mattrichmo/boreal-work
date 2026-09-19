@@ -320,7 +320,7 @@ pub(super) fn prepare(parsed: &ParsedCommand) -> Result<SetupPlan, CliError> {
     } else {
         PathBuf::from(&parsed.options.db)
     };
-    let memory_layout = parsed
+    let mut memory_layout = parsed
         .options
         .setup
         .memory_layout
@@ -333,7 +333,31 @@ pub(super) fn prepare(parsed: &ParsedCommand) -> Result<SetupPlan, CliError> {
         ));
     }
 
-    let agents = choose_agents(&parsed.options.setup, parsed.options.json)?;
+    let interactive = is_interactive(&parsed.options.setup, parsed.options.json);
+    if interactive && (!io::stdin().is_terminal() || !io::stdout().is_terminal()) {
+        return Err(CliError::invalid(
+            "--interactive requires a TTY; use --yes or --agents for automation",
+        ));
+    }
+    let selected = if interactive {
+        premium_setup_choices(
+            parsed,
+            &project_root,
+            &project_id,
+            &database,
+            &memory_layout,
+        )?
+    } else {
+        None
+    };
+    let used_premium_wizard = selected.is_some();
+    let agents = match selected {
+        Some(choices) => {
+            memory_layout = choices.memory_layout;
+            choices.agents
+        }
+        None => choose_agents(&parsed.options.setup, parsed.options.json)?,
+    };
     let skill_roots = skill_roots(
         &project_root,
         &agents,
@@ -350,10 +374,119 @@ pub(super) fn prepare(parsed: &ParsedCommand) -> Result<SetupPlan, CliError> {
         skill_roots,
         dry_run: parsed.options.setup.dry_run,
     };
-    if is_interactive(&parsed.options.setup, parsed.options.json) {
+    if interactive && !used_premium_wizard {
         confirm_plan(&plan)?;
     }
     Ok(plan)
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PremiumSetupChoices {
+    confirmed: bool,
+    agents: Vec<String>,
+    memory_layout: String,
+}
+
+/// A thin human-facing chooser. The Node wizard is embedded in this binary, not
+/// fetched or resolved from the current project. It never writes project data.
+/// A missing/unsupported Node runtime falls back to the existing line prompts.
+fn premium_setup_choices(
+    parsed: &ParsedCommand,
+    project_root: &Path,
+    project_id: &str,
+    database: &Path,
+    memory_layout: &str,
+) -> Result<Option<PremiumSetupChoices>, CliError> {
+    if env::var_os("BOREAL_PLAIN").is_some() || matches!(env::var("TERM").as_deref(), Ok("dumb")) {
+        return Ok(None);
+    }
+    let node = env::var_os("BOREAL_NODE").unwrap_or_else(|| "node".into());
+    let probe = Command::new(&node)
+        .args([
+            "-e",
+            "const n=+process.versions.node.split('.')[0];process.exit(n>=20&&n<27?0:1)",
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+    if !matches!(probe, Ok(status) if status.success()) {
+        eprintln!("Boreal: Node.js 20–26 is unavailable; using plain setup prompts.");
+        return Ok(None);
+    }
+    let agents = match parsed.options.setup.agents.as_deref() {
+        Some(value) => parse_agents(value)?,
+        None => vec!["codex".to_owned()],
+    };
+    let install_root = parsed.options.setup.install_root.as_deref().map(|value| {
+        let path = PathBuf::from(value);
+        if path.is_absolute() {
+            path
+        } else {
+            project_root.join(path)
+        }
+    });
+    let initial = json!({
+        "project_id": project_id,
+        "project_root": project_root,
+        "database": database,
+        "memory_root": project_root.join("memory"),
+        "memory_layout": memory_layout,
+        "agents": agents,
+        "agents_locked": parsed.options.setup.agents.is_some(),
+        "memory_locked": parsed.options.setup.memory_layout.is_some(),
+        "install_root": install_root,
+    });
+    let output = Command::new(&node)
+        .arg("-e")
+        .arg(include_str!("../../../apps/tui/installer/wizard.cjs"))
+        .arg("project")
+        .arg(initial.to_string())
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .output()
+        .map_err(|error| setup_error(format!("cannot start setup interface: {error}")))?;
+    if !output.status.success() {
+        return Err(CliError::with(
+            ErrorCode::InvalidArgument,
+            ApplicationOutcome::Rejected,
+            "setup cancelled or interface failed; no project setup was applied",
+        ));
+    }
+    if output.stdout.len() > 8_192 {
+        return Err(setup_error(
+            "setup interface returned an oversized selection".to_owned(),
+        ));
+    }
+    let mut selection: PremiumSetupChoices = serde_json::from_slice(&output.stdout)
+        .map_err(|error| setup_error(format!("invalid setup interface result: {error}")))?;
+    if !selection.confirmed {
+        return Err(setup_error("setup was not confirmed".to_owned()));
+    }
+    selection.agents = parse_agents(&selection.agents.join(","))?;
+    if !matches!(selection.memory_layout.as_str(), "child" | "in-repo") {
+        return Err(CliError::invalid(
+            "setup interface returned an unsupported memory layout",
+        ));
+    }
+    // Explicit CLI choices remain authoritative even if a UI regression occurs.
+    if let Some(value) = parsed.options.setup.agents.as_deref() {
+        if selection.agents != parse_agents(value)? {
+            return Err(CliError::invalid(
+                "setup interface changed an explicit --agents value",
+            ));
+        }
+    }
+    if let Some(value) = parsed.options.setup.memory_layout.as_deref() {
+        if selection.memory_layout != value {
+            return Err(CliError::invalid(
+                "setup interface changed an explicit --memory-layout value",
+            ));
+        }
+    }
+    Ok(Some(selection))
 }
 
 pub(super) fn apply(plan: &SetupPlan) -> Result<SetupResult, CliError> {
@@ -478,57 +611,70 @@ pub(super) fn result_value(plan: &SetupPlan, result: &SetupResult) -> Value {
 }
 
 pub(super) fn render(plan: &SetupPlan, result: Option<&SetupResult>) -> String {
+    let safe = |value: String| {
+        value
+            .chars()
+            .map(|c| {
+                if c.is_control() || matches!(c as u32, 0x202a..=0x202e | 0x2066..=0x2069) {
+                    '�'
+                } else {
+                    c
+                }
+            })
+            .collect::<String>()
+    };
     let mut lines = vec![
-        "╭────────────────────────────────────────────────────────────╮".to_owned(),
-        boxed_row(if result.is_some() {
-            "Boreal setup complete"
-        } else {
-            "Boreal setup plan"
-        }),
-        "├────────────────────────────────────────────────────────────┤".to_owned(),
-        boxed_row(&format!("Project  {}", plan.project_id)),
-        boxed_row(&format!("Folder   {}", plan.project_root.display())),
-        boxed_row(&format!("Agents   {}", plan.agents.join(", "))),
-        boxed_row(&format!(
-            "Memory   {} ({})",
-            plan.memory_root.display(),
+        String::new(),
+        "  BOREAL / WORK".to_owned(),
+        format!(
+            "  {}",
+            if result.is_some() {
+                "Boreal setup complete"
+            } else {
+                "Boreal setup plan"
+            }
+        ),
+        String::new(),
+        format!("  Project   {}", safe(plan.project_id.clone())),
+        format!(
+            "  Folder    {}",
+            safe(plan.project_root.display().to_string())
+        ),
+        format!("  Database  {}", safe(plan.database.display().to_string())),
+        format!("  Agents    {}", plan.agents.join(", ")),
+        format!(
+            "  Memory    {} ({})",
+            safe(plan.memory_root.display().to_string()),
             plan.memory_layout
-        )),
+        ),
     ];
+    for (agent, root) in &plan.skill_roots {
+        lines.push(format!(
+            "  Skills    {} → {}",
+            agent,
+            safe(root.display().to_string())
+        ));
+    }
     if let Some(result) = result {
-        lines.extend([
-            "├────────────────────────────────────────────────────────────┤".to_owned(),
-            boxed_row(&format!(
-                "Files    {} created, {} updated, {} existing",
-                result.created_files.len(),
-                result.updated_files.len(),
-                result.existing_files.len()
-            )),
-            boxed_row(&format!("Skills   {} adapter files installed", result.skill_files)),
-            boxed_row(&format!("Memory   {}", result.memory_git)),
-            "╰────────────────────────────────────────────────────────────╯".to_owned(),
-            String::new(),
-            "Ready. Run `bwrk dashboard` to open the project, or `bwrk status <project> --json` to verify it."
-                .to_owned(),
-        ]);
+        lines.push(String::new());
+        lines.push(format!(
+            "  Files     {} created · {} updated · {} preserved",
+            result.created_files.len(),
+            result.updated_files.len(),
+            result.existing_files.len()
+        ));
+        lines.push(format!(
+            "  Adapters  {} skill files installed",
+            result.skill_files
+        ));
+        lines.push(format!("  Memory    {}", result.memory_git));
+        lines.push(String::new());
+        lines.push("  Next      bwrk dashboard".to_owned());
     } else {
-        lines.extend([
-            "├────────────────────────────────────────────────────────────┤".to_owned(),
-            boxed_row("No files will be written."),
-            "╰────────────────────────────────────────────────────────────╯".to_owned(),
-        ]);
+        lines.push(String::new());
+        lines.push("  No files will be written until setup is applied.".to_owned());
     }
     format!("{}\n", lines.join("\n"))
-}
-
-fn boxed_row(value: &str) -> String {
-    let original_length = value.chars().count();
-    let mut value = value.chars().take(58).collect::<String>();
-    if original_length > 58 {
-        value.pop();
-        value.push('…');
-    }
-    format!("│ {value:<58} │")
 }
 
 fn resolve_project_root(options: &SetupCliOptions) -> Result<PathBuf, CliError> {

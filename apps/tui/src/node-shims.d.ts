@@ -25,9 +25,13 @@ declare module "node:fs" {
 }
 
 declare const process: {
+  readonly env: Record<string, string | undefined>;
   readonly argv: readonly string[];
   readonly stdin: {
     readonly isTTY?: boolean;
+    readonly isRaw?: boolean;
+    on(event: "end", listener: () => void): void;
+    off(event: "end", listener: () => void): void;
     setRawMode?(enabled: boolean): void;
     resume?(): void;
     pause?(): void;
