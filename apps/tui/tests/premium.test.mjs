@@ -102,8 +102,8 @@ for (const [width, height] of [[1, 1], [30, 10], [44, 14], [60, 20], [80, 24], [
     });
 }
 test('breakpoints remove panes, not contents, and narrow inspector is a full view', () => {
-    assert.ok(dashboardLayout(132, 40).rail);
-    assert.ok(dashboardLayout(100, 32).inspector);
+    assert.ok(dashboardLayout(144, 40).rail);
+    assert.ok(dashboardLayout(104, 32).inspector);
     assert.equal(dashboardLayout(80, 24).inspector, undefined);
     const v = fixtureView(), s = initialState(v);
     s.detailOnly = true;
@@ -325,7 +325,7 @@ test('existing-command protection follows the edited destination', () => {
 test('compact review must be scrolled before final confirmation', () => {
     const s = project({ project_root: '/workspace/' + 'nested/'.repeat(15), database: '/workspace/' + 'nested/'.repeat(15) + '.boreal/boreal.sqlite' });
     s.step = 3;
-    bounded(renderWizard(s, 60, 24));
+    bounded(renderWizard(s, 40, 8));
     assert.ok(s.maxOffset > 0);
     assert.equal(applyWizardKey(s, 'enter'), 'continue');
     assert.match(s.error, /Scroll/);

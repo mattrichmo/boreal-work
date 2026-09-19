@@ -1,4 +1,5 @@
 import type { DashboardFilter, MountedView, StatusItem, TuiAction } from "../client.js";
+import type { Density } from "./layout.js";
 import type { Theme } from "./screen.js";
 export const FILTERS: readonly {
     id: DashboardFilter;
@@ -18,6 +19,7 @@ export interface FormField {
     name: string;
     label: string;
     value: string;
+    cursor?: number;
     hint: string;
     choices?: readonly string[];
     required?: boolean;
@@ -25,12 +27,20 @@ export interface FormField {
 export type Modal = {
     kind: "search";
     value: string;
+    cursor?: number;
 } | {
     kind: "palette";
     value: string;
+    cursor?: number;
+    scope?: "views";
     index: number;
 } | {
     kind: "help";
+    offset: number;
+} | {
+    kind: "message";
+    title: string;
+    text: string;
     offset: number;
 } | {
     kind: "form";
@@ -49,6 +59,7 @@ export type Modal = {
     summary: string;
     details: string[];
     offset?: number;
+    reviewError?: string;
 };
 export interface DashboardState {
     filter: DashboardFilter;
@@ -64,6 +75,8 @@ export interface DashboardState {
     status: string;
     error: boolean;
     busy: string | null;
+    density: Density;
+    zen: boolean;
     theme: Theme;
     ascii: boolean;
     modal: Modal | null;
@@ -71,7 +84,7 @@ export interface DashboardState {
 export function initialState(view: MountedView, theme: Theme = "dark", ascii = false): DashboardState {
     return { filter: "all", query: "", selectedId: view.route.work_id ?? view.monitoring?.items[0]?.work_id,
         focus: "queue", navIndex: 0, inspectorTab: 0, inspectorOffset: 0, detailOnly: false, sort: "service", frozen: false,
-        status: "Ready. Select work to inspect its next available action.", error: false, busy: null, theme, ascii, modal: null };
+        status: "Ready. Select work to inspect its next available action.", error: false, busy: null, density: "auto", zen: false, theme, ascii, modal: null };
 }
 export function itemStatus(item: StatusItem): string { return item.display_status ?? item.status; }
 export function matches(item: StatusItem, filter: DashboardFilter): boolean {
@@ -110,6 +123,11 @@ export interface PaletteCommand {
 export function paletteCommands(view: MountedView, state: DashboardState): PaletteCommand[] {
     const commands: PaletteCommand[] = [
         ...FILTERS.map(f => ({ id: `filter:${f.id}`, label: f.label, hint: `View · ${f.key}` })),
+        { id: "views", label: "Switch work view", hint: "v / 1–9" },
+        { id: "density", label: `Display density: ${state.density}`, hint: "d · auto / compact / comfortable" },
+        { id: "zen", label: state.zen ? "Restore responsive panes" : "Focus on one pane", hint: "z" },
+        { id: "status", label: "Read full status / error", hint: "!" },
+        { id: "redraw", label: "Redraw terminal", hint: "Ctrl-L" },
         { id: "search", label: "Search loaded work", hint: "/" }, { id: "refresh", label: "Refresh snapshot", hint: "r" },
         { id: "page", label: "Load next service page", hint: "]", disabled: !view.monitoring?.has_more },
         { id: "freeze", label: state.frozen ? "Resume live refresh" : "Pause live refresh", hint: "F" },
@@ -122,7 +140,7 @@ export function paletteCommands(view: MountedView, state: DashboardState): Palet
         { id: "help", label: "Keyboard reference", hint: "?" }, { id: "quit", label: "Quit dashboard", hint: "q" },
     ];
     const query = state.modal?.kind === "palette" ? state.modal.value.trim().toLocaleLowerCase() : "";
-    return commands.filter(c => !query || `${c.label} ${c.hint}`.toLocaleLowerCase().includes(query));
+    return commands.filter(c => (state.modal?.kind !== "palette" || state.modal.scope !== "views" || c.id.startsWith("filter:")) && (!query || `${c.label} ${c.hint}`.toLocaleLowerCase().includes(query)));
 }
 export function actionForm(action: "create_work" | "evidence" | "finish" | "release", workId?: string): Extract<Modal, {
     kind: "form";

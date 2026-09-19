@@ -5,10 +5,10 @@ import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const check = process.argv.includes('--check');
-const modules = ['cells', 'screen', 'keys'].map(name => readFileSync(resolve(root, `apps/tui/dist/ui/${name}.js`), 'utf8')
+const modules = ['cells', 'screen', 'keys', 'layout', 'input', 'terminal-size'].map(name => readFileSync(resolve(root, `apps/tui/dist/ui/${name}.js`), 'utf8')
     .replace(/^import .*;\n/gm, '').replace(/^export \{.*\};?\n/gm, '').replace(/^export /gm, ''));
 const body = readFileSync(resolve(root, 'apps/tui/installer/wizard-body.cjs'), 'utf8');
-const generated = `// GENERATED: scripts/build-installer.mjs. Edit wizard-body.cjs or src/ui, not this file.\n'use strict';\n${modules.join('\n')}\n${body}`;
+const generated = `// GENERATED: scripts/build-installer.mjs. Edit wizard-body.cjs or src/ui, not this file.\n'use strict';\nconst {openSync: openTerminalFd, closeSync: closeTerminalFd} = require('node:fs');\nconst {WriteStream: TerminalSizeStream} = require('node:tty');\n${modules.join('\n')}\n${body}`;
 const target = resolve(root, 'apps/tui/installer/wizard.cjs');
 if (check) {
     if (readFileSync(target, 'utf8') !== generated)

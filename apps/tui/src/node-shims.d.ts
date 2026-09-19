@@ -22,6 +22,18 @@ declare module "node:net" {
 
 declare module "node:fs" {
   export function unlinkSync(path: string): void;
+  export function openSync(path: string, flags: string): number;
+  export function closeSync(fd: number): void;
+}
+
+declare module "node:tty" {
+  export class WriteStream {
+    constructor(fd: number);
+    readonly columns?: number;
+    readonly rows?: number;
+    on(event: "error", listener: () => void): this;
+    destroy(): this;
+  }
 }
 
 declare const process: {
@@ -48,7 +60,7 @@ declare const process: {
     off(event: "resize", listener: () => void): void;
   };
   readonly stderr: { write(value: string): boolean };
-  on(signal: "SIGINT" | "SIGTERM" | "SIGHUP", listener: () => void): void;
-  off(signal: "SIGINT" | "SIGTERM" | "SIGHUP", listener: () => void): void;
+  on(signal: "SIGINT" | "SIGTERM" | "SIGHUP" | "SIGWINCH", listener: () => void): void;
+  off(signal: "SIGINT" | "SIGTERM" | "SIGHUP" | "SIGWINCH", listener: () => void): void;
   exitCode?: number;
 };

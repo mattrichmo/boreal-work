@@ -1,106 +1,130 @@
 import type { MountedView, StatusItem } from "../client.js";
-import { clip, fit, wrap, wrapWords, inputTail, cellWidth } from "./cells.js";
-import { Screen, type Rect, type Tone, rightLabel } from "./screen.js";
-import { ACTION_NAMES, FILTERS, itemStatus, paletteCommands, visibleItems, type DashboardState } from "./model.js";
+import { clip, fit, wrap, wrapWords, cellWidth } from "./cells.js";
+import { Screen, type Rect, type Tone } from "./screen.js";
+import { inputDisplay } from "./input.js";
+import { resolveViewport, chromeFor, paneViewport, dialogViewport, adaptiveHint, windowStart, type Density, type Chrome } from "./layout.js";
+import { ACTION_NAMES, FILTERS, itemStatus, paletteCommands, visibleItems, type DashboardState, type Modal } from "./model.js";
 const LABELS: Record<string, string> = { in_progress: "In progress", needs_verification: "Verification", awaiting_review: "Awaiting review", expired_review: "Review needed", retry_wait: "Retry wait" };
 const label = (s: string) => LABELS[s] ?? s.replaceAll("_", " ").replace(/^./, c => c.toUpperCase());
 const tone = (s: string): Tone => s === "ready" || s === "closed" ? "good" : ["blocked", "expired_review", "cancelled"].includes(s) ? "danger" : ["queued", "needs_verification", "awaiting_review"].includes(s) ? "warn" : "accent";
 export interface DashboardLayout {
-    rail?: Rect;
-    queue: Rect;
-    inspector?: Rect;
-    body: Rect;
-    visibleRows: number;
+    rail?: Rect; queue: Rect; inspector?: Rect; body: Rect; visibleRows: number;
+    chrome: Chrome; mode: "three-pane" | "split" | "stacked" | "single"; footerRows: number;
 }
-export function dashboardLayout(width: number, height: number, detailOnly = false): DashboardLayout {
-    const top = height >= 20 ? 7 : 5, bottom = 3;
-    const body = { x: 1, y: top, width: Math.max(1, width - 2), height: Math.max(2, height - top - bottom) };
-    const rail = width >= 124 && !detailOnly ? { ...body, width: 21 } : undefined;
+export function dashboardLayout(width: number, height: number, detailOnly = false, density: Density = "auto", zen = false): DashboardLayout {
+    ({ width, height } = resolveViewport({ width, height }));
+    const chrome = chromeFor(width, height, density);
+    const footerRows = height >= 8 ? 2 : height >= 3 ? 1 : 0;
+    const top = chrome === "comfortable" ? 6 : chrome === "standard" ? 4 : height >= 10 ? 2 : height >= 4 ? 1 : 0;
+    const margin = chrome === "comfortable" || chrome === "standard" ? 1 : 0;
+    const body = { x: margin, y: top, width: Math.max(1, width - margin * 2), height: Math.max(1, height - top - footerRows) };
+    const rail = width >= 136 && height >= 26 && chrome !== "compact" && !detailOnly && !zen ? { ...body, width: 21 } : undefined;
     const x = rail ? rail.x + rail.width + 1 : body.x;
-    const available = width - x - 1;
-    const inspector = width >= 100 && !detailOnly ? { x: width - Math.min(44, Math.floor(width * .33)) - 1, y: body.y, width: Math.min(44, Math.floor(width * .33)), height: body.height } : undefined;
-    const queue = { x, y: body.y, width: inspector ? inspector.x - x - 1 : available, height: body.height };
-    return { rail, queue, inspector, body, visibleRows: Math.max(1, body.height - 4) };
+    let queue: Rect = { ...body, x, width: body.x + body.width - x }, inspector: Rect | undefined;
+    let mode: DashboardLayout["mode"] = "single";
+    if (!detailOnly && !zen && width >= 104 && height >= 10) {
+        const iw = Math.min(58, Math.max(34, Math.floor(queue.width * .38)));
+        inspector = { x: body.x + body.width - iw, y: body.y, width: iw, height: body.height };
+        queue = { ...queue, width: inspector.x - x - 1 };
+        mode = rail ? "three-pane" : "split";
+    } else if (!detailOnly && !zen && width >= 76 && height >= 32 && density !== "compact") {
+        const qh = Math.floor(body.height * .55);
+        queue = { ...queue, height: qh };
+        inspector = { ...body, y: body.y + qh + 1, height: body.height - qh - 1 };
+        mode = "stacked";
+    }
+    return { rail, queue, inspector, body, chrome, mode, footerRows, visibleRows: paneViewport(queue, chrome).height };
 }
-function heading(screen: Screen, view: MountedView, state: DashboardState): void {
-    const m = view.monitoring;
-    screen.text(2, 1, "BOREAL", "accent");
-    screen.text(9, 1, "/ WORK", "heading");
-    const health = state.busy ? `BUSY · ${state.busy}` : view.notice?.kind === "error" || view.stale_revision ? "STALE · r retry" : state.error ? "ATTENTION" : state.frozen ? "PAUSED" : m ? "LIVE" : "CONNECTING";
-    if (screen.width >= 72)
-        rightLabel(screen, 1, health, state.error ? "danger" : state.frozen ? "warn" : "good");
-    screen.text(2, 2, clip(`${m?.project_name ?? view.route.project_id ?? "Project"}  /  ${FILTERS.find(f => f.id === state.filter)?.label.toUpperCase() ?? "ALL WORK"}`, screen.width - 4), "muted");
-    screen.rule(1, 3, screen.width - 2, state.ascii);
-    if (screen.height >= 20) {
-        const c = m?.counts;
-        const metrics = [`READY ${c?.ready ?? "—"}`, `ACTIVE ${c?.in_progress ?? "—"}`, `BLOCKED ${c?.blocked ?? "—"}`, `REVIEW ${c?.expired_review ?? "—"}`, `CLOSED ${c?.closed ?? "—"}`];
-        const step = Math.max(1, Math.floor((screen.width - 4) / metrics.length));
-        metrics.forEach((v, i) => screen.text(2 + i * step, 4, clip(v, step - 1), i === 2 || i === 3 ? "warn" : i === 0 ? "good" : "text"));
-        const scope = `${m?.total ?? 0} total · ${m?.items.length ?? 0} on this page${m?.has_more ? " · more available: ]" : ""}`;
-        screen.text(2, 5, clip(scope, screen.width >= 100 ? screen.width - 51 : screen.width - 4), "muted");
-        if (screen.width >= 100)
-            rightLabel(screen, 5, `revision ${m?.revision ?? "—"} · ${m?.as_of?.slice(11, 19) ?? "not loaded"}`, "muted");
+/** When a pane no longer fits, preserve its focus as a full view, not a hidden pane. */
+export function inspectorRect(layout: DashboardLayout, state: DashboardState): Rect | undefined {
+    return state.detailOnly || (state.focus === "inspector" && !layout.inspector) ? layout.body : layout.inspector;
+}
+function leftRight(screen: Screen, y: number, left: string, right: string, leftTone: Tone = "text", rightTone: Tone = "muted", x = 1, width = screen.width - 2): void {
+    const rw = cellWidth(right);
+    if (rw + 8 < width) {
+        screen.text(x, y, clip(left, width - rw - 2), leftTone, width - rw - 2);
+        screen.text(x + width - rw, y, right, rightTone, rw);
+    } else screen.text(x, y, clip(left, width), leftTone, width);
+}
+function health(view: MountedView, state: DashboardState): string {
+    return state.busy ? `BUSY ${state.busy}` : view.notice?.kind === "error" || view.stale_revision ? "STALE / r retry" : state.error ? "ATTENTION" : state.frozen ? "PAUSED" : view.monitoring ? "LIVE" : "CONNECTING";
+}
+function heading(screen: Screen, view: MountedView, state: DashboardState, l: DashboardLayout): void {
+    if (!l.body.y) return;
+    const m = view.monitoring, c = m?.counts;
+    const filter = FILTERS.find(f => f.id === state.filter)?.label ?? "All work";
+    const project = m?.project_name ?? view.route.project_id ?? "Project";
+    const hp = health(view, state), ht: Tone = hp.startsWith("STALE") || state.error ? "danger" : state.frozen ? "warn" : "good";
+    const brand = screen.width < 36 ? `BW / ${filter}` : `BOREAL / WORK  ${l.chrome === "comfortable" ? "" : `/ ${project}`}`;
+    leftRight(screen, 0, brand, hp, "accent", ht);
+    if (l.body.y < 2) return;
+    const scope = `${m?.items.length ?? 0}/${m?.total ?? 0} loaded${m?.has_more ? "  ] more" : ""}`;
+    if (l.chrome === "compact" || l.chrome === "micro") {
+        const summary = screen.width >= 92 ? `${filter}  ·  READY ${c?.ready ?? "-"}  ACTIVE ${c?.in_progress ?? "-"}  BLOCKED ${c?.blocked ?? "-"}` : `${filter} · v views`;
+        leftRight(screen, 1, summary, scope, "muted");
+    } else {
+        leftRight(screen, 1, `${project}  /  ${filter.toUpperCase()}`, `${l.mode} · ${state.density}`, "muted");
+        if (l.chrome === "comfortable") {
+            screen.rule(1, 2, screen.width - 2, state.ascii);
+            const metrics = [`READY ${c?.ready ?? "—"}`, `ACTIVE ${c?.in_progress ?? "—"}`, `BLOCKED ${c?.blocked ?? "—"}`, `REVIEW ${c?.expired_review ?? "—"}`, `CLOSED ${c?.closed ?? "—"}`];
+            const step = Math.floor((screen.width - 4) / metrics.length);
+            metrics.forEach((v, i) => screen.text(2 + i * step, 3, clip(v, step - 1), i === 2 || i === 3 ? "warn" : i === 0 ? "good" : "text", step - 1));
+            leftRight(screen, 4, scope, `revision ${m?.revision ?? "—"} · ${m?.as_of?.slice(11, 19) ?? "not loaded"}`, "muted");
+        } else { leftRight(screen, 2, scope, `revision ${m?.revision ?? "—"}`, "muted"); screen.rule(1, 3, screen.width - 2, state.ascii); }
     }
 }
-function rail(screen: Screen, r: Rect, view: MountedView, state: DashboardState): void {
+function rail(screen: Screen, r: Rect, state: DashboardState): void {
     screen.box(r, "WORKSPACE", state.focus === "navigation", state.ascii);
-    FILTERS.forEach((f, index) => {
-        const active = f.id === state.filter;
-        const selected = state.focus === "navigation" && state.navIndex === index;
-        const y = r.y + 2 + index;
-        if (y >= r.y + r.height - 2)
-            return;
-        screen.text(r.x + 1, y, fit(`${active ? ">" : " "} ${f.key} ${f.label}`, r.width - 2), selected ? "selected" : active ? "accent" : "text");
+    const capacity = Math.max(1, r.height - 4), start = windowStart(state.navIndex, FILTERS.length, capacity);
+    FILTERS.slice(start, start + capacity).forEach((f, i) => {
+        const active = f.id === state.filter, focused = state.focus === "navigation" && state.navIndex === start + i;
+        screen.text(r.x + 1, r.y + 2 + i, fit(`${active ? ">" : " "} ${f.key} ${f.label}`, r.width - 2), focused ? "selected" : active ? "accent" : "text", r.width - 2);
     });
     if (r.height >= 17) {
-        screen.text(r.x + 2, r.y + r.height - 5, "LOCAL VIEW", "muted");
-        screen.text(r.x + 2, r.y + r.height - 4, `Sort: ${state.sort}`, "text", r.width - 4);
-        screen.text(r.x + 2, r.y + r.height - 3, state.frozen ? "Refresh paused" : "Refresh every 5s", state.frozen ? "warn" : "muted", r.width - 4);
+        screen.text(r.x + 2, r.y + r.height - 5, "DISPLAY", "muted", r.width - 4);
+        screen.text(r.x + 2, r.y + r.height - 4, `d ${state.density} density`, "text", r.width - 4);
+        screen.text(r.x + 2, r.y + r.height - 3, "z focus · v views", "muted", r.width - 4);
     }
 }
-function queue(screen: Screen, r: Rect, view: MountedView, state: DashboardState): void {
+function queue(screen: Screen, r: Rect, view: MountedView, state: DashboardState, chrome: Chrome): void {
     const items = visibleItems(view, state), index = Math.max(0, items.findIndex(i => i.work_id === state.selectedId));
-    const capacity = Math.max(1, r.height - 4), start = Math.min(Math.max(0, index - Math.floor(capacity / 2)), Math.max(0, items.length - capacity));
-    screen.box(r, `WORK QUEUE (${items.length})`, state.focus === "queue", state.ascii);
-    const inner = r.width - 4, stateWidth = inner >= 62 ? 15 : inner >= 38 ? 12 : 9;
-    const idWidth = inner >= 84 ? 15 : inner >= 60 ? 12 : 0;
-    const kindWidth = inner >= 100 ? 10 : 0;
-    const titleWidth = Math.max(1, inner - stateWidth - idWidth - kindWidth - 2);
-    screen.text(r.x + 2, r.y + 1, fit("", 2) + fit("WORK", titleWidth) + fit("STATE", stateWidth) + (idWidth ? fit("ID", idWidth) : "") + (kindWidth ? fit("KIND", kindWidth) : ""), "muted", inner);
+    const p = paneViewport(r, chrome), start = windowStart(index, items.length, p.height);
+    const position = `${items.length ? index + 1 : 0}/${items.length}${view.monitoring?.has_more ? " ]" : ""}`;
+    if (p.boxed) {
+        screen.box(r, `WORK QUEUE (${items.length})`, state.focus === "queue", state.ascii);
+        screen.text(r.x + 2, r.y + r.height - 1, clip(` ${position} · ${state.query ? `search: ${state.query}` : `${state.sort} order`} `, r.width - 4), "muted", r.width - 4);
+    } else if (r.height > 1) leftRight(screen, r.y, `WORK QUEUE${state.query ? ` / ${state.query}` : ""}`, position, state.focus === "queue" ? "accent" : "heading", "muted", r.x, r.width);
+    const sw = p.width >= 58 ? 15 : p.width >= 34 ? 11 : p.width >= 22 ? 7 : 0;
+    const iw = p.width >= 78 ? 14 : 0, kw = p.width >= 110 ? 10 : 0;
+    const pw = p.width >= 94 ? 5 : 0, ow = p.width >= 125 ? 14 : 0, gap = sw ? 1 : 0;
+    const tw = Math.max(1, p.width - 2 - sw - iw - kw - pw - ow - gap);
+    if (!p.boxed && r.height > 1 && p.width >= 58) screen.text(p.x, r.y, fit(`WORK QUEUE (${position})`, 2 + tw + gap) + fit("STATE", sw) + fit("ID", iw) + fit("PRI", pw) + fit("KIND", kw) + fit("OWNER", ow), state.focus === "queue" ? "accent" : "heading", p.width);
+    if (p.boxed) screen.text(p.x, r.y + 1, "  " + fit("WORK", tw + gap) + fit("STATE", sw) + fit("ID", iw) + fit("PRI", pw) + fit("KIND", kw) + fit("OWNER", ow), "muted", p.width);
     if (!items.length) {
-        const empty = state.query ? "No work matches this search." : "No work in this view.";
-        screen.text(r.x + 2, r.y + 3, clip(empty, inner), "heading");
-        if (r.height > 6)
-            screen.text(r.x + 2, r.y + 4, clip(view.monitoring?.has_more ? "Search is page-local. ] loads more work." : "Press n to create work, or 1 for all work.", inner), "muted");
+        screen.text(p.x, p.y, clip(state.query ? "No search matches" : "No work in this view", p.width), "heading", p.width);
+        if (p.height > 1) screen.text(p.x, p.y + 1, clip(view.monitoring?.has_more ? "] next page · v views" : "n new work · v views", p.width), "muted", p.width);
     }
-    items.slice(start, start + capacity).forEach((item, i) => {
-        const selected = item.work_id === state.selectedId, y = r.y + 2 + i;
-        const title = item.title ?? item.work_id;
-        const marker = selected ? "> " : "  ";
-        const rowTone: Tone = selected ? "selected" : "text";
-        screen.text(r.x + 1, y, " ".repeat(r.width - 2), rowTone);
-        screen.text(r.x + 2, y, marker + fit(title, titleWidth), rowTone, titleWidth + 2);
-        screen.text(r.x + titleWidth + 4, y, fit(label(itemStatus(item)), stateWidth), selected ? "selected" : tone(itemStatus(item)), stateWidth);
-        let x = r.x + titleWidth + 4 + stateWidth;
-        if (idWidth) {
-            screen.text(x, y, fit(item.work_id, idWidth), selected ? "selected" : "muted", idWidth);
-            x += idWidth;
-        }
-        if (kindWidth)
-            screen.text(x, y, fit(item.kind ?? "work", kindWidth), selected ? "selected" : "muted", kindWidth);
+    items.slice(start, start + p.height).forEach((item, i) => {
+        const selected = item.work_id === state.selectedId, rt: Tone = selected ? "selected" : "text", y = p.y + i;
+        screen.text(p.x, y, fit(`${selected ? "> " : "  "}${clip(item.title ?? item.work_id, tw)}`, p.width), rt, p.width);
+        const stateLabel = sw < 10 ? ({ in_progress: "Active", needs_verification: "Verify", expired_review: "Review", awaiting_review: "Review" }[itemStatus(item)] ?? label(itemStatus(item))) : label(itemStatus(item));
+        let x = p.x + 2 + tw + gap;
+        screen.text(x, y, fit(stateLabel, sw), selected ? "selected" : tone(itemStatus(item)), sw); x += sw;
+        screen.text(x, y, fit(item.work_id, iw), selected ? "selected" : "muted", iw); x += iw;
+        screen.text(x, y, fit(item.priority ?? "—", pw), selected ? "selected" : "muted", pw); x += pw;
+        screen.text(x, y, fit(item.kind ?? "work", kw), selected ? "selected" : "muted", kw); x += kw;
+        screen.text(x, y, fit(item.attempt?.actor_id ?? "—", ow), selected ? "selected" : "muted", ow);
     });
-    const info = ` ${items.length ? index + 1 : 0}/${items.length} · ${state.query ? `search: ${state.query}` : `${state.sort} order`}${view.monitoring?.has_more ? " · ] more" : ""} `;
-    screen.text(r.x + 2, r.y + r.height - 1, clip(info, r.width - 4), "muted", r.width - 4);
 }
 interface DetailLine {
     text: string;
     tone?: Tone;
 }
-export function detailLines(item: StatusItem | undefined, view: MountedView, tab: number, width: number): DetailLine[] {
+export function detailLines(item: StatusItem | undefined, view: MountedView, tab: number, width: number, compact = false): DetailLine[] {
     if (!item)
         return [{ text: "Nothing selected", tone: "heading" }, { text: "Select work in the queue." }];
     const lines: DetailLine[] = [];
-    const add = (text: string, t: Tone = "text") => wrapWords(text, width).forEach(text => lines.push({ text, tone: t }));
+    const add = (text: string, t: Tone = "text") => { if (!compact || text) wrapWords(text, width).forEach(text => lines.push({ text, tone: t })); };
     if (tab === 1) {
         add("ACCEPTANCE GATES", "heading");
         if (!item.gates)
@@ -140,6 +164,7 @@ export function detailLines(item: StatusItem | undefined, view: MountedView, tab
         add(item.work_id, "muted");
         add("");
         add(`${label(itemStatus(item))} · ${item.kind ?? "work"}`, tone(itemStatus(item)));
+        if (compact) add(`Next: ${item.next_action ? label(item.next_action) : "No next action supplied."}`, "accent");
         if (item.priority !== undefined)
             add(`Priority  ${item.priority}`);
         if (item.parent_id)
@@ -147,8 +172,8 @@ export function detailLines(item: StatusItem | undefined, view: MountedView, tab
         if (item.due_at)
             add(`Due       ${item.due_at}`, "warn");
         add("");
-        add("NEXT ACTION", "heading");
-        add(item.next_action ? label(item.next_action) : "No next action supplied.", "accent");
+        if (!compact) { add("NEXT ACTION", "heading");
+            add(item.next_action ? label(item.next_action) : "No next action supplied.", "accent"); }
         if (item.reason_codes.length)
             add(item.reason_codes.map(label).join(" · "), "warn");
         if (item.description) {
@@ -182,108 +207,108 @@ export function detailLines(item: StatusItem | undefined, view: MountedView, tab
     }
     return lines;
 }
-function inspector(screen: Screen, r: Rect, view: MountedView, state: DashboardState): void {
-    const item = visibleItems(view, state).find(i => i.work_id === state.selectedId);
-    screen.box(r, "INSPECTOR", state.focus === "inspector", state.ascii);
-    const tabs = ["Overview", "Gates", "Activity"], tabWidth = Math.floor((r.width - 4) / 3);
-    tabs.forEach((t, i) => screen.text(r.x + 2 + i * tabWidth, r.y + 1, fit(t, tabWidth), state.inspectorTab === i ? "accent" : "muted", tabWidth));
-    const lines = detailLines(item, view, state.inspectorTab, r.width - 4), capacity = Math.max(1, r.height - 4);
-    const offset = Math.min(state.inspectorOffset, Math.max(0, lines.length - capacity));
-    lines.slice(offset, offset + capacity).forEach((line, i) => screen.text(r.x + 2, r.y + 3 + i, line.text, line.tone ?? "text", r.width - 4));
-    screen.text(r.x + 2, r.y + r.height - 1, clip(` ${offset + 1}–${Math.min(lines.length, offset + capacity)} / ${lines.length} · Tab focus · ← → tabs `, r.width - 4), "muted", r.width - 4);
+function inspector(screen: Screen, r: Rect, view: MountedView, state: DashboardState, chrome: Chrome): void {
+    const p = paneViewport(r, chrome), item = visibleItems(view, state).find(i => i.work_id === state.selectedId);
+    const tabs = ["Overview", "Gates", "Activity"], current = tabs[state.inspectorTab];
+    const lines = detailLines(item, view, state.inspectorTab, p.width, chrome === "compact" || chrome === "micro");
+    const offset = Math.min(state.inspectorOffset, Math.max(0, lines.length - p.height));
+    if (p.boxed) {
+        screen.box(r, "INSPECTOR", state.focus === "inspector", state.ascii);
+        screen.text(p.x, r.y + 1, clip(tabs.map((t, i) => i === state.inspectorTab ? `[${t}]` : t).join(" "), p.width), "accent", p.width);
+        screen.text(p.x, r.y + r.height - 1, clip(` ${offset + 1}-${Math.min(lines.length, offset + p.height)}/${lines.length} · ←→ tabs · Esc back `, p.width), "muted", p.width);
+    } else if (r.height > 1) leftRight(screen, r.y, `INSPECTOR / ${current}`, `${offset + 1}/${lines.length}`, state.focus === "inspector" ? "accent" : "heading", "muted", r.x, r.width);
+    lines.slice(offset, offset + p.height).forEach((line, i) => screen.text(p.x, p.y + i, line.text, line.tone ?? "text", p.width));
 }
 export const HELP = [
     "NAVIGATION", "↑ ↓ / j k   Move in the focused pane", "Tab / Shift-Tab   Change pane focus", "Enter   Open inspector / activate choice", "Esc   Close dialog, leave detail, or clear search", "Home / End   First / last work item", "Page Up / Down   Move a page, or scroll inspector", "1–9   Switch work view", "]   Load next service page", "[   Return to first service page", "o   Cycle service / priority / title ordering", "", "FIND & INSPECT", "/   Search this loaded service page", "p / Ctrl-K / :   Search commands", "← → in inspector   Overview / Gates / Activity", "F   Pause / resume periodic refresh (resumes at page one)", "r   Refresh from the first service page", "T   Dark / light / monochrome", "", "ACTIONS (confirmation required)", "n   Create task, sprint, or milestone", "c   Claim selected work", "s   Start selected claim", "e   Attach a real receipt JSON object", "f   Finish with a closeout summary", "x   Release claim with a reason", "u   Read back the first unknown operation (no retry)", "", "INPUT & EXIT", "Tab   Next form field; arrows change a choice", "Ctrl-U   Clear the focused input", "Bracketed paste never activates keyboard commands", "q   Quit outside dialogs; Ctrl-C / Ctrl-D exits", "", "DATA BOUNDARIES", "Counts above are service totals; filters/search apply to the loaded page.", "Missing history, dependencies, or capabilities are labelled, never fabricated.", "No automatic replay of an operation whose outcome is unknown.", "Mouse tracking is intentionally off, preserving terminal text selection.",
 ];
+export function currentNotice(view: MountedView, state: DashboardState): string {
+    const pending = view.pending_operations.length ? `${view.pending_operations.length} UNKNOWN OPERATION(S) · u read back. ` : "";
+    return pending + (view.notice?.kind === "error" ? view.notice.message : state.status || view.notice?.message || "Ready");
+}
+export function confirmationLines(m: Extract<Modal, {kind: "confirm"}>, width: number): string[] {
+    return [`CONFIRM: ${m.action} ${m.workId ?? "new work"}`, m.summary, ...m.details, `Snapshot revision: ${m.revision ?? "unknown"}`, m.attempt ? `Attempt: ${m.attempt}` : "", "This changes shared project state. Nothing is sent until confirmed."].filter(Boolean).flatMap(s => wrapWords(s, width));
+}
+export function modalDocument(view: MountedView, state: DashboardState, width: number, height: number): { lines: string[]; capacity: number; maximum: number } {
+    const m = state.modal, p = dialogViewport(width, height, m?.kind === "confirm" ? 22 : 26).body;
+    let lines: string[] = [];
+    if (m?.kind === "confirm") lines = confirmationLines(m, p.width);
+    if (m?.kind === "help") {
+        const l = dashboardLayout(width, height, state.detailOnly, state.density, state.zen);
+        lines = [`TERMINAL ${width}×${height} / ${l.mode} / ${l.chrome}`, `Density ${state.density} · Theme ${state.theme} · ${state.zen ? "Focus view" : "Adaptive panes"}`, "", "DISPLAY & RECOVERY", "v  Switch work view (all nine views)", "d  Cycle auto / compact / comfortable density", "z  Toggle a focused, single-pane workspace", "i  Toggle full-view inspector", "!  Read the full status or error", "Ctrl-L  Repaint the terminal", "F1 / ?  Help at every size", "", ...HELP].flatMap(t => wrapWords(t, p.width));
+    }
+    if (m?.kind === "message") lines = wrapWords(m.text, p.width);
+    return { lines, capacity: p.height, maximum: Math.max(0, lines.length - p.height) };
+}
 function modal(screen: Screen, view: MountedView, state: DashboardState): void {
-    const m = state.modal;
-    if (!m)
-        return;
-    // De-emphasize the underlying workspace while the dialog owns keyboard focus.
-    for (const row of screen.cells)
-        for (const cell of row)
-            cell.tone = "muted";
-    const width = Math.min(88, screen.width - 4), height = Math.min(screen.height - 4, m.kind === "confirm" ? 17 : m.kind === "search" ? 9 : m.kind === "form" ? (m.action === "evidence" ? 24 : 18) : 26);
-    const r = { x: Math.floor((screen.width - width) / 2), y: Math.floor((screen.height - height) / 2), width, height };
-    screen.fill(r);
-    const w = width - 6, x = r.x + 3, y = r.y + 2;
-    const title = m.kind === "form" ? ACTION_NAMES[m.action] : m.kind === "confirm" ? "REVIEW ACTION" : m.kind === "palette" ? "COMMAND PALETTE" : m.kind === "help" ? "KEYBOARD REFERENCE" : "SEARCH WORK";
-    screen.box(r, title, true, state.ascii);
-    const foot = (s: string) => screen.text(x, r.y + height - 2, clip(s, w), "muted", w);
+    const m = state.modal; if (!m) return;
+    for (const row of screen.cells) for (const c of row) c.tone = "muted";
+    const desired = m.kind === "confirm" ? 22 : m.kind === "search" ? 9 : m.kind === "form" ? 18 : 26;
+    const d = dialogViewport(screen.width, screen.height, desired), p = d.body;
+    screen.fill(d.rect);
+    const title = m.kind === "form" ? ACTION_NAMES[m.action] : m.kind === "confirm" ? "REVIEW ACTION" : m.kind === "palette" ? m.scope === "views" ? "SWITCH VIEW" : "COMMAND PALETTE" : m.kind === "help" ? "KEYBOARD REFERENCE" : m.kind === "message" ? m.title : "SEARCH WORK";
+    if (d.boxed) screen.box(d.rect, title, true, state.ascii);
+    else if (d.rect.height >= 3) screen.text(p.x, d.titleY, clip(title, p.width), "accent", p.width);
+    const foot = (text: string, tone: Tone = "muted") => { if (d.rect.height >= 2) screen.text(p.x, d.footerY, fit(text, p.width), tone, p.width); };
     if (m.kind === "search") {
-        screen.text(x, y, "Search titles, identifiers, parents and owners.", "muted", w);
-        screen.text(x, y + 2, `/ ${inputTail(m.value, w - 4)}▏`, "accent", w);
-        screen.text(x, y + 3, "Search only covers the currently loaded page.", "muted", w);
-        foot("Enter apply · Ctrl-U clear · Esc cancel");
-    }
-    else if (m.kind === "palette") {
-        screen.text(x, y, `> ${inputTail(m.value, w - 4)}▏`, "accent", w);
-        const commands = paletteCommands(view, state), capacity = height - 7, index = Math.min(m.index, Math.max(0, commands.length - 1));
-        const start = Math.min(Math.max(0, index - Math.floor(capacity / 2)), Math.max(0, commands.length - capacity));
-        commands.slice(start, start + capacity).forEach((c, i) => screen.text(x, y + 2 + i, fit(`${start + i === index ? ">" : " "} ${c.disabled ? "· " : ""}${c.label}`, w), start + i === index ? "selected" : c.disabled ? "muted" : "text", w));
-        const chosen = commands[index];
-        if (chosen)
-            screen.text(x, r.y + height - 3, clip(chosen.hint, w), chosen.disabled ? "warn" : "muted", w);
-        foot("↑ ↓ choose · Enter run · Esc close");
-    }
-    else if (m.kind === "help") {
-        const all = HELP.flatMap(l => wrap(l, w)), capacity = height - 4, offset = Math.min(m.offset, Math.max(0, all.length - capacity));
-        all.slice(offset, offset + capacity).forEach((line, i) => screen.text(x, y + i, line, /^[A-Z &()]+$/.test(line) ? "accent" : "text", w));
-        foot(`↑ ↓ scroll · ${offset + 1}/${all.length} · Esc close`);
-    }
-    else if (m.kind === "form") {
-        const field = m.fields[m.index];
-        screen.text(x, y, `${m.index + 1} / ${m.fields.length}   ${field.label}${field.required ? " *" : ""}`, "heading", w);
-        const compact = height < 18, inputY = compact ? y + 3 : y + 5;
-        const hints = wrap(field.hint, w);
-        hints.slice(0, compact ? 1 : 2).forEach((t, i) => screen.text(x, y + (compact ? 1 : 2) + i, t, "muted", w));
-        if (field.choices) {
-            field.choices.forEach((choice, i) => screen.text(x, inputY + i, `${field.value === choice ? ">" : " "} ${choice}`, field.value === choice ? "accent" : "muted", w));
+        screen.text(p.x, p.y, inputDisplay(m.value, m.cursor, p.width, state.ascii), "accent", p.width);
+        if (p.height > 2) screen.text(p.x, p.y + 2, clip("Search titles, IDs, parents and owners on this loaded page.", p.width), "muted", p.width);
+        foot(adaptiveHint(p.width, "Enter apply · ←→ edit · Ctrl-U clear · Esc cancel", "Enter apply · Esc back", "Enter / Esc"));
+    } else if (m.kind === "palette") {
+        const commands = paletteCommands(view, state), index = Math.min(m.index, Math.max(0, commands.length - 1));
+        const hasInput = p.height >= 2, hasHint = p.height >= 5;
+        const capacity = Math.max(1, p.height - (hasInput ? 1 : 0) - (hasHint ? 1 : 0)), start = windowStart(index, commands.length, capacity);
+        if (hasInput) screen.text(p.x, p.y, `> ${inputDisplay(m.value, m.cursor, p.width - 2, state.ascii)}`, "accent", p.width);
+        commands.slice(start, start + capacity).forEach((c, i) => screen.text(p.x, p.y + (hasInput ? 1 : 0) + i, fit(`${start + i === index ? ">" : " "} ${c.disabled ? "[x] " : ""}${c.label}`, p.width), start + i === index ? "selected" : c.disabled ? "muted" : "text", p.width));
+        if (!commands.length) screen.text(p.x, p.y + (hasInput ? 1 : 0), "No matching commands", "muted", p.width);
+        if (hasHint && commands[index]) screen.text(p.x, p.y + p.height - 1, clip(commands[index].hint, p.width), commands[index].disabled ? "warn" : "muted", p.width);
+        foot(adaptiveHint(p.width, `↑↓ choose · Enter run · Esc close · ${index + 1}/${commands.length}`, "↑↓ Enter · Esc back", "↑↓ Enter Esc"));
+    } else if (m.kind === "form") {
+        const f = m.fields[m.index], hasLabel = p.height >= 2;
+        if (hasLabel) screen.text(p.x, p.y, clip(`${m.index + 1}/${m.fields.length} ${f.label}${f.required ? " *" : ""}`, p.width), "heading", p.width);
+        const inputY = p.y + (hasLabel ? 1 : 0), room = Math.max(1, p.height - (hasLabel ? 1 : 0));
+        const errorRows = m.error && room >= 2 ? 1 : 0;
+        const hints = room >= 4 ? wrapWords(f.hint, p.width).slice(0, 2) : [];
+        const inputRows = Math.max(1, room - hints.length - errorRows);
+        if (f.choices) {
+            const chosen = Math.max(0, f.choices.indexOf(f.value)), start = windowStart(chosen, f.choices.length, inputRows);
+            f.choices.slice(start, start + inputRows).forEach((choice, i) => screen.text(p.x, inputY + i, fit(`${start + i === chosen ? ">" : " "} ${choice}`, p.width), start + i === chosen ? "selected" : "text", p.width));
+        } else {
+            // Keep the caret visible regardless of field length or dialog height.
+            screen.text(p.x, inputY, inputDisplay(f.value, f.cursor, p.width, state.ascii), "accent", p.width);
+            if (inputRows > 2 && (cellWidth(f.value) > p.width || f.value.includes("\n"))) wrapWords(f.value, p.width).slice(-inputRows + 1).forEach((t, i) => screen.text(p.x, inputY + 1 + i, t, "muted", p.width));
         }
-        else {
-            const maxRows = Math.max(1, r.y + height - 3 - inputY), rows = wrap(field.value, w - 2);
-            const rendered = rows.slice(-maxRows);
-            rendered.forEach((s, i) => screen.text(x, inputY + i, (s || " ") + (i === rendered.length - 1 ? "▏" : ""), "accent", w));
-        }
-        if (m.error)
-            screen.text(x, r.y + height - 4, clip(m.error, w), "danger", w);
-        foot("Enter next / review · Tab field · Ctrl-U clear · Esc cancel");
-    }
-    else {
-        const detail = [`CONFIRM: ${m.action} ${m.workId ?? "new work"}`, "", m.summary, ...m.details, `Snapshot revision: ${m.revision ?? "unknown"}`, m.attempt ? `Attempt: ${m.attempt}` : "", "This changes shared project state. Nothing is sent until confirmed."].filter(Boolean).flatMap(s => wrap(s, w));
-        const capacity = height - 5, offset = Math.min(m.offset ?? 0, Math.max(0, detail.length - capacity));
-        detail.slice(offset, offset + capacity).forEach((t, i) => screen.text(x, y + i, t, i === 0 && offset === 0 ? "accent" : "text", w));
-        foot(detail.length > capacity ? "↑↓ scroll · Enter confirm · Esc cancel" : "Enter / y confirm · Esc / n cancel");
+        hints.forEach((t, i) => screen.text(p.x, p.y + p.height - errorRows - hints.length + i, t, "muted", p.width));
+        if (m.error && errorRows) screen.text(p.x, p.y + p.height - 1, clip(m.error, p.width), "danger", p.width);
+        foot(m.error && !errorRows ? clip(m.error, p.width) : adaptiveHint(p.width, "Enter next / review · Tab field · ←→ edit · Ctrl-U clear · Esc cancel", "Enter next · Tab field · Esc cancel", "Enter Tab Esc"), m.error ? "danger" : "muted");
+    } else {
+        const doc = modalDocument(view, state, screen.width, screen.height);
+        const offset = Math.min(m.offset ?? 0, doc.maximum);
+        doc.lines.slice(offset, offset + doc.capacity).forEach((t, i) => screen.text(p.x, p.y + i, t, m.kind === "confirm" && offset + i === 0 ? "accent" : "text", p.width));
+        if (m.kind === "confirm") {
+            const action = offset < doc.maximum ? "Enter next page" : "Enter confirm";
+            foot(m.reviewError ? clip(m.reviewError, p.width) : adaptiveHint(p.width, `${action} · ↑↓ / End scroll · Esc cancel · ${offset + 1}/${doc.lines.length}`, `${action} · Esc cancel`, offset < doc.maximum ? "Enter more / Esc" : "Enter yes / Esc"), offset < doc.maximum ? "warn" : "accent");
+        } else foot(adaptiveHint(p.width, `↑↓ / PgUp PgDn scroll · ${offset + 1}-${Math.min(doc.lines.length, offset + doc.capacity)}/${doc.lines.length} · Esc close`, "↑↓ scroll · Esc back", "↑↓ Esc"));
     }
 }
-/** Real screen grid, not a browser-style mockup. Every glyph is cell-bounded. */
+/** All viewport sizes render real content. Destructive confirmations need >=4 rows. */
 export function renderDashboard(view: MountedView, state: DashboardState, width: number, height: number): Screen {
-    width = Math.max(1, Math.min(500, Math.floor(width) || 80));
-    height = Math.max(1, Math.min(200, Math.floor(height) || 24));
-    const screen = new Screen(width, height);
-    if (width < 44 || height < 14) {
-        screen.text(1, 1, "BOREAL / WORK", "accent");
-        screen.text(1, 3, `Terminal ${width}×${height}.`, "warn");
-        screen.text(1, 4, "Resize to at least 44×14.", "muted");
-        screen.text(1, Math.min(height - 1, 6), "q quit · Ctrl-C exit", "muted");
-        return screen;
+    ({ width, height } = resolveViewport({ width, height }));
+    const screen = new Screen(width, height), l = dashboardLayout(width, height, state.detailOnly, state.density, state.zen);
+    heading(screen, view, state, l);
+    const detail = inspectorRect(l, state), onlyDetail = state.detailOnly || (state.focus === "inspector" && !l.inspector);
+    if (onlyDetail && detail) inspector(screen, detail, view, state, l.chrome);
+    else { if (l.rail) rail(screen, l.rail, state); queue(screen, l.queue, view, state, l.chrome); if (detail) inspector(screen, detail, view, state, l.chrome); }
+    if (l.footerRows >= 2) {
+        const nt: Tone = state.error || view.notice?.kind === "error" ? "danger" : view.pending_operations.length ? "warn" : "muted";
+        leftRight(screen, height - 2, currentNotice(view, state), "! full status", nt, "muted", 0, width);
     }
-    heading(screen, view, state);
-    const layout = dashboardLayout(width, height, state.detailOnly);
-    if (state.detailOnly)
-        inspector(screen, layout.body, view, state);
-    else {
-        if (layout.rail)
-            rail(screen, layout.rail, view, state);
-        queue(screen, layout.queue, view, state);
-        if (layout.inspector)
-            inspector(screen, layout.inspector, view, state);
+    if (l.footerRows) {
+        const keys = state.focus === "inspector" || onlyDetail
+            ? adaptiveHint(width, "↑↓ scroll  ←→ tabs  Tab pane  Esc queue  i expand  p commands  ? help  q quit", "↑↓ scroll  ←→ tabs  Esc back  ? help  q quit", "↑↓ ←→ Esc  ?  q")
+            : adaptiveHint(width, "↑↓ move  Tab pane  Enter inspect  v views  / search  p commands  d density  z focus  ? help  q quit", "↑↓ move  Enter inspect  v views  / search  p commands  ? help  q quit", "↑↓ Enter  v views  / find  ? help  q quit", "↑↓ Enter v / ? q");
+        screen.text(0, height - 1, fit(keys, width), "text", width);
     }
-    const notice = view.notice?.kind === "error" ? view.notice.message : state.status || view.notice?.message || "Ready";
-    const pending = view.pending_operations.length ? `${view.pending_operations.length} UNKNOWN OPERATION(S) · u read back · ` : "";
-    screen.text(2, height - 3, clip(pending + notice, width - 4), state.error ? "danger" : pending ? "warn" : "muted", width - 4);
-    const keys = width >= 100 ? "↑↓ move  Tab pane  Enter inspect  / search  p commands  n new  r refresh  ? help  q quit" : "↑↓ move  Enter inspect  / search  p commands  ? help  q quit";
-    screen.text(2, height - 2, clip(keys, width - 4), "text", width - 4);
     modal(screen, view, state);
     return screen;
 }

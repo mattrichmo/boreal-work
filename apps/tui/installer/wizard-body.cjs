@@ -17,7 +17,8 @@ function createWizardState(mode, initial) {
     if (!['project', 'machine'].includes(mode))
         throw new Error('Unknown wizard mode.');
     const steps = mode === 'project' ? ['Welcome', 'Agent tools', 'Memory', 'Review'] : ['Welcome', 'Destination', 'Components', 'Source', 'Review'];
-    return { mode, initial, steps, step: 0, cursor: 0, error: '', scroll: 0, maxOffset: 0,
+    return { mode, initial, steps, step: 0, cursor: 0, error: '', scroll: 0, maxOffset: 0, pageSize: 1,
+        density: 'auto', theme: 'dark', ascii: false, help: false, helpScroll: 0, helpMax: 0, prefixCursor: undefined,
         prefix: initial.prefix || '', source: initial.source || 'release',
         agents: Array.isArray(initial.agents) ? [...initial.agents] : ['codex'],
         memory_layout: initial.memory_layout || 'child', dashboard: initial.dashboard !== false,
@@ -83,6 +84,22 @@ function applyWizardKey(s, key) {
     if (key === 'ctrl-c' || key === 'ctrl-d')
         return 'cancel';
     const page = s.steps[s.step], rows = choices(s);
+    if (key === 'f1' || (key === '?' && page !== 'Destination')) {
+        s.help = !s.help; s.helpScroll = 0; return 'continue';
+    }
+    if (s.help) {
+        if (key === 'escape' || key === 'q') s.help = false;
+        else if (['down', 'j', 'page-down', 'enter'].includes(key)) s.helpScroll = Math.min(s.helpMax, s.helpScroll + (key === 'page-down' || key === 'enter' ? s.pageSize : 1));
+        else if (['up', 'k', 'page-up'].includes(key)) s.helpScroll = Math.max(0, s.helpScroll - (key === 'page-up' ? s.pageSize : 1));
+        else if (key === 'end') s.helpScroll = s.helpMax;
+        else if (key === 'home') s.helpScroll = 0;
+        return 'continue';
+    }
+    if (key === '!' && page !== 'Destination') { s.help = true; s.helpScroll = 0; return 'continue'; }
+    if (key === 'd' && page !== 'Destination') { s.density = cycleDensity(s.density); return 'continue'; }
+    if (key === 'T' && page !== 'Destination' && !s.forceMono) { s.theme = s.theme === 'dark' ? 'light' : s.theme === 'light' ? 'mono' : 'dark'; return 'continue'; }
+    if (key === 'a' && page === 'Agent tools' && !s.initial.agents_locked && !s.initial.install_root) { s.agents = ['codex', 'claude']; s.error = ''; }
+
     if (key === 'escape') {
         if (s.step === 0)
             return 'cancel';
@@ -99,23 +116,18 @@ function applyWizardKey(s, key) {
         if (key === 'up' || key === 'k')
             s.scroll = Math.max(0, s.scroll - 1);
         if (key === 'page-down')
-            s.scroll = Math.min(s.maxOffset, s.scroll + 6);
+            s.scroll = Math.min(s.maxOffset, s.scroll + s.pageSize);
         if (key === 'page-up')
-            s.scroll = Math.max(0, s.scroll - 6);
+            s.scroll = Math.max(0, s.scroll - s.pageSize);
         if (key === 'end')
             s.scroll = s.maxOffset;
         if (key === 'home')
             s.scroll = 0;
     }
     if (page === 'Destination') {
-        if (key === 'backspace')
-            s.prefix = eraseLast(s.prefix);
-        else if (key === 'ctrl-u')
-            s.prefix = '';
-        else if (key.startsWith('paste:'))
-            s.prefix = (s.prefix + key.slice(6).replace(/[\u0000-\u001f\u007f-\u009f]/gu, '')).slice(0, 4096);
-        else if (Array.from(key).length === 1)
-            s.prefix = (s.prefix + key).slice(0, 4096);
+        const edited = editInput(s.prefix, s.prefixCursor, key, 4096);
+        s.prefix = edited.value; s.prefixCursor = edited.cursor;
+        if (!['enter', 'ctrl-l'].includes(key)) s.error = '';
     }
     else {
         if (key === 'q')
@@ -124,7 +136,12 @@ function applyWizardKey(s, key) {
             s.cursor = (s.cursor + 1) % Math.max(1, rows.length);
         if (key === 'up' || key === 'k' || key === 'shift-tab')
             s.cursor = (s.cursor + Math.max(1, rows.length) - 1) % Math.max(1, rows.length);
+        if (key === 'home' && rows.length) s.cursor = 0;
+        if (key === 'end' && rows.length) s.cursor = rows.length - 1;
+        if (key === 'page-down' && rows.length) s.cursor = Math.min(rows.length - 1, s.cursor + s.pageSize);
+        if (key === 'page-up' && rows.length) s.cursor = Math.max(0, s.cursor - s.pageSize);
         if ([' ', 'left', 'right'].includes(key) && rows[s.cursor]) {
+            s.error = '';
             const row = rows[s.cursor];
             if (row.locked)
                 s.error = 'This choice was fixed by a command-line option or is required.';
@@ -143,8 +160,10 @@ function applyWizardKey(s, key) {
         if (s.error)
             return 'continue';
         if (s.step === s.steps.length - 1) {
+            if (s.viewport && (s.viewport.width < 12 || s.viewport.height < 4)) { s.error = 'More space is needed to review safely. Ctrl-C cancels.'; return 'continue'; }
             if (s.scroll < s.maxOffset) {
                 s.error = 'Scroll to the end of the review (End / ↓) before confirming.';
+                s.scroll = Math.min(s.maxOffset, s.scroll + s.pageSize);
                 return 'continue';
             }
             return 'submit';
@@ -161,102 +180,146 @@ function projectTargets(s) {
     const root = s.initial.project_root;
     return s.agents.map(agent => s.initial.install_root || path.join(root, agent === 'codex' ? '.agents/skills' : '.claude/skills'));
 }
-function renderWizard(s, width = 100, height = 36) {
-    width = Math.max(1, Math.min(300, Math.floor(width)));
-    height = Math.max(1, Math.min(120, Math.floor(height)));
-    const screen = new Screen(width, height);
-    if (width < 48 || height < 18) {
-        screen.text(2, 2, 'BOREAL / WORK', 'accent');
-        screen.text(2, 4, 'Resize to at least 48×18.', 'warn');
-        screen.text(2, 6, 'Ctrl-C cancels without installing.', 'muted');
-        return screen;
-    }
-    const contentWidth = Math.min(92, width - 6), x = Math.floor((width - contentWidth) / 2);
-    const large = height >= 32 && width >= 76, compact = height < 24;
-    let y = compact ? 1 : 2;
-    if (large) {
-        wordmark().forEach((line, i) => screen.text(x, y + i, line, 'accent', contentWidth));
-        y += 6;
-    }
-    else {
-        screen.text(x, y, 'BOREAL / WORK', 'accent');
-        y += 2;
-    }
-    if (!compact) {
-        screen.text(x, y, s.mode === 'project' ? 'PROJECT SETUP  /  make this repository agent-ready' : 'INSTALLATION  /  a workspace for deliberate work', 'muted', contentWidth);
-        y += 2;
-    }
-    const stepper = s.steps.map((step, i) => `${i < s.step ? '✓' : i + 1} ${step}`).join('   ');
-    screen.text(x, y, clip(stepper, contentWidth), 'muted', contentWidth);
-    y += 2;
-    screen.rule(x, y, contentWidth);
-    y += 2;
+/** The wizard gives up decoration before content. A wide-short panel is not small. */
+function wizardLayout(width, height, s) {
+    ({ width, height } = resolveViewport({ width, height }));
+    const chrome = chromeFor(width, height, s.density);
+    const large = s.step === 0 && !s.help && height >= 32 && width >= 76 && s.density !== 'compact';
+    const top = large ? 10 : height >= 22 ? 4 : height >= 10 ? 2 : height >= 4 ? 1 : 0;
+    const footer = height >= 8 ? 2 : height >= 3 ? 1 : 0;
+    const padding = width >= 60 ? 2 : width >= 36 ? 1 : 0;
+    const totalWidth = Math.min(144, Math.max(1, width - padding * 2)), x = Math.floor((width - totalWidth) / 2);
+    const side = width >= 120 && height >= 14 && !s.help ? 28 : 0;
+    const body = { x, y: top, width: totalWidth - (side ? side + 3 : 0), height: Math.max(1, height - top - footer) };
+    return { width, height, chrome, large, top, footer, x, totalWidth, body,
+        rail: side ? { x: x + totalWidth - side, y: top, width: side, height: body.height } : undefined };
+}
+function wizardDocument(s) {
     const page = s.steps[s.step];
-    screen.text(x, y, `${String(s.step + 1).padStart(2, '0')}   ${page.toUpperCase()}`, 'heading', contentWidth);
-    y += 2;
-    const bottom = height - 5, available = Math.max(1, bottom - y);
-    let lines = [];
-    if (page === 'Welcome')
-        lines = s.mode === 'project' ? [
-            ['A clear place for plans, progress and proof.', 'heading'],
-            ['', 'text'], [s.initial.project_id, 'accent'], [s.initial.project_root, 'muted'],
-            ['', 'text'], ['Choose agent adapters and a memory layout.', 'text'],
-            ['Review exact destinations before anything is written.', 'text'],
-            ['Existing memory content is preserved by the Rust setup engine.', 'muted'],
-        ] : [
-            ['Your work. One focused terminal workspace.', 'heading'], ['', 'text'],
-            ['Install the command-line engine and choose your dashboard.', 'text'],
-            ['A release install does not create or modify project databases.', 'muted'],
-            ['No sudo, no shell-profile edits, no surprise source build.', 'muted'],
-            ['', 'text'], ['You will review the destination and all changes before installing.', 'text'],
+    if (s.help) {
+        const focused = choices(s)[s.cursor];
+        return [
+            [s.error ? `ATTENTION: ${s.error}` : 'KEYBOARD & DISPLAY', s.error ? 'danger' : 'heading'],
+            ...(focused ? [[focused.label, 'heading'], [focused.hint, 'text'], [focused.locked ? 'Required or fixed by command-line options.' : 'Space changes this choice.', 'muted']] : []),
+            ['↑↓ / Tab: choose. Space: toggle. Enter: next screen.', 'text'],
+            ['Review: Enter pages through the document before confirmation.', 'text'],
+            ['Home / End, Page Up / Down: navigate choices or scroll text.', 'text'],
+            ['Esc: back. Ctrl-C / Ctrl-D: cancel without starting installation.', 'text'],
+            ['Prefix: ←→, Home, End, Delete, Backspace. Ctrl-U clears; Ctrl-W deletes a word.', 'text'],
+            ['F1: help, also while editing a path. ? opens help outside text fields.', 'text'],
+            ['a: select both agent tools (unless a CLI option fixes the choice).', 'text'],
+            ['d: auto / compact / comfortable density. T: colour theme. Outside text fields only.', 'text'],
+            ['Ctrl-L: repaint. !: read the full error / choice description.', 'text'],
+            [`Terminal ${s.viewport?.width}×${s.viewport?.height}. Layout reflows without losing choices.`, 'muted'],
+            ['Nothing is installed until the final review is confirmed.', 'warn'],
         ];
-    else if (page === 'Destination')
-        lines = [
-            ['Installation prefix', 'muted'], [`${inputTail(s.prefix, contentWidth - 2)}▏`, 'accent'], ['', 'text'],
-            ['The command is installed under <prefix>/bin/bwrk.', 'text'],
-            ['Use a separate prefix to keep an existing v1 installation.', 'warn'],
-            ['Type to edit · Ctrl-U clears the path.', 'muted'],
-        ];
-    else if (page === 'Review') {
-        if (s.mode === 'project')
-            lines = [
-                ['PROJECT', 'muted'], [`${s.initial.project_id} · ${s.initial.project_root}`, 'text'],
-                ['DATABASE', 'muted'], [s.initial.database, 'text'],
-                ['MEMORY', 'muted'], [`${s.initial.memory_root} · ${s.memory_layout}`, 'text'],
-                ['AGENT SKILLS', 'muted'], ...projectTargets(s).map(t => [t, 'accent']),
-                ['', 'text'], ['Managed metadata and skills may be reconciled; memory content is preserved.', 'warn'],
-            ];
-        else
-            lines = [
-                ['DESTINATION', 'muted'], [s.prefix, 'accent'],
-                ['INSTALL', 'muted'], [`CLI${s.dashboard ? ' + dashboard' : ' only'}${s.verify ? ' · verify bwrk --version' : ''}`, 'text'],
-                ['SOURCE', 'muted'], [s.initial.archive || (s.source === 'source' ? `Build source ref ${s.initial.ref || 'main'}` : s.initial.version ? `Release ${s.initial.version}` : 'Latest verified release'), 'text'],
-                ['', 'text'], [s.replace_existing ? 'Existing unrecognized command replacement authorized.' : 'Existing unrecognized commands are protected.', 'warn'],
-                ['No project database or shell profile will be changed.', 'muted'],
-            ];
     }
-    else {
-        const rows = choices(s), maxRows = Math.max(1, Math.floor((available - 1) / 3)), start = Math.max(0, s.cursor - maxRows + 1);
-        rows.slice(start, start + maxRows).forEach((row, i) => {
-            const selected = start + i === s.cursor;
-            lines.push([`${selected ? '>' : ' '} [${row.on ? 'x' : ' '}] ${row.label}${row.locked ? '  (fixed)' : ''}`, selected ? 'selected' : 'text']);
-            lines.push([`        ${row.hint}`, 'muted']);
-            lines.push(['', 'text']);
+    if (page === 'Welcome') return s.mode === 'project' ? [
+        ['A clear place for plans, progress and proof.', 'heading'],
+        [s.initial.project_id, 'accent'], [s.initial.project_root, 'muted'], ['','text'],
+        ['Choose agent adapters and a memory layout.', 'text'],
+        ['Review exact destinations before anything is written.', 'text'],
+        ['Existing memory content is preserved by the Rust setup engine.', 'muted'],
+    ] : [
+        ['Your work. One focused terminal workspace.', 'heading'], ['','text'],
+        ['Install the command-line engine and choose your dashboard.', 'text'],
+        ['A release install does not create or modify project databases.', 'muted'],
+        ['No sudo, no shell-profile edits, no surprise source build.', 'muted'],
+        ['You will review all destinations and choices before installing.', 'text'],
+    ];
+    if (page === 'Review') return s.mode === 'project' ? [
+        ['PROJECT', 'muted'], [s.initial.project_id, 'heading'], [s.initial.project_root, 'text'],
+        ['DATABASE', 'muted'], [s.initial.database, 'text'],
+        ['MEMORY', 'muted'], [`${s.initial.memory_root} · ${s.memory_layout}`, 'text'],
+        ['AGENT SKILLS', 'muted'], ...projectTargets(s).map(t => [t, 'accent']),
+        ['Managed metadata and skills may be reconciled; memory content is preserved.', 'warn'],
+    ] : [
+        ['DESTINATION', 'muted'], [s.prefix.trim(), 'accent'],
+        ['INSTALL', 'muted'], [`CLI${s.dashboard ? ' + dashboard' : ' only'}${s.verify ? ' · verify bwrk --version' : ''}`, 'text'],
+        ['SOURCE', 'muted'], [s.initial.archive || (s.source === 'source' ? `Build source ref ${s.initial.ref || 'main'}` : s.initial.version ? `Release ${s.initial.version}` : 'Latest verified release'), 'text'],
+        [s.replace_existing ? 'Existing unrecognized command replacement authorized.' : 'Existing unrecognized commands are protected.', 'warn'],
+        ['No project database or shell profile will be changed.', 'muted'],
+    ];
+    return [];
+}
+function renderWizard(s, width = 100, height = 36) {
+    const l = wizardLayout(width, height, s);
+    ({ width, height } = l);
+    s.viewport = { width, height };
+    const screen = new Screen(width, height), p = l.body, page = s.steps[s.step];
+    const rows = choices(s), multi = page === 'Agent tools' || page === 'Components';
+    const pageName = s.help ? 'HELP / DETAILS' : page.toUpperCase();
+    const step = `${s.step + 1}/${s.steps.length} ${pageName}`;
+    if (l.large) {
+        wordmark().forEach((line, i) => screen.text(l.x, i + 1, line, 'accent', l.totalWidth));
+        screen.text(l.x, 7, s.mode === 'project' ? 'PROJECT SETUP / MAKE THIS REPOSITORY AGENT-READY' : 'INSTALLATION / A WORKSPACE FOR DELIBERATE WORK', 'muted', l.totalWidth);
+        screen.text(l.x, 8, step, 'heading', l.totalWidth);
+    } else if (l.top) {
+        const compactTitle = width < 48 ? `${s.step + 1}/${s.steps.length} ${s.help ? 'Help' : page}` : `BOREAL / WORK  ·  ${step}`;
+        screen.text(l.x, 0, clip(compactTitle, l.totalWidth), 'accent', l.totalWidth);
+        if (l.top >= 4) {
+            screen.text(l.x, 1, s.mode === 'project' ? 'PROJECT SETUP  /  adapters · memory · review' : 'INSTALLATION  /  destination · components · source', 'muted', l.totalWidth);
+            const steps = s.steps.map((name, i) => i === s.step ? `[${i + 1} ${name}]` : `${i < s.step ? (s.ascii ? '+' : '✓') : i + 1} ${name}`).join('  ');
+            screen.text(l.x, 2, cellWidth(steps) <= l.totalWidth ? steps : step, 'heading', l.totalWidth);
+            screen.rule(l.x, 3, l.totalWidth, s.ascii);
+        } else if (l.top >= 2) screen.text(l.x, 1, s.mode === 'project' ? `PROJECT  ${s.initial.project_id}` : 'INSTALLATION  /  no changes before confirmation', 'muted', l.totalWidth);
+    }
+    if (l.rail) {
+        const r = l.rail;
+        for (let y = r.y; y < r.y + r.height; y++) screen.text(r.x - 2, y, s.ascii ? '|' : '│', 'border', 1);
+        screen.text(r.x, r.y, 'SETUP PLAN', 'heading', r.width);
+        s.steps.forEach((name, i) => { if (i + 2 < r.height) screen.text(r.x, r.y + 2 + i, clip(`${i === s.step ? '>' : i < s.step ? '+' : ' '} ${i + 1} ${name}`, r.width), i === s.step ? 'accent' : 'muted', r.width); });
+        if (r.height >= 10) {
+            screen.text(r.x, r.y + r.height - 2, `${width}×${height} / ${l.chrome}`, 'muted', r.width);
+            screen.text(r.x, r.y + r.height - 1, 'd density · ? help', 'muted', r.width);
+        }
+    }
+    let position = 'No changes before confirmation.', hint = '', offset = 0, documentLength = 0;
+    s.pageSize = p.height;
+    if (s.help || page === 'Welcome' || page === 'Review') {
+        const wrapped = wizardDocument(s).flatMap(([text, tone]) => wrapWords(text, p.width).map(text => ({ text, tone })));
+        documentLength = wrapped.length;
+        const max = Math.max(0, wrapped.length - p.height);
+        if (s.help) { s.helpMax = max; s.helpScroll = Math.min(s.helpScroll, max); offset = s.helpScroll; }
+        else { s.maxOffset = max; s.scroll = Math.min(s.scroll, max); offset = s.scroll; }
+        wrapped.slice(offset, offset + p.height).forEach((line, i) => screen.text(p.x, p.y + i, line.text, line.tone, p.width));
+        if (max) position = `${offset + 1}-${Math.min(wrapped.length, offset + p.height)}/${wrapped.length} · ↑↓ / End scroll`;
+    } else if (page === 'Destination') {
+        s.maxOffset = 0; s.scroll = 0;
+        screen.text(p.x, p.y, inputDisplay(s.prefix, s.prefixCursor, p.width, s.ascii), 'accent', p.width);
+        if (p.height > 2) {
+            const hints = ['Installation prefix. The command goes in <prefix>/bin/bwrk.', 'Use a separate prefix to keep an existing installation.', '←→ edit · Home/End · Ctrl-U clear · F1 help'];
+            hints.flatMap(t => wrapWords(t, p.width)).slice(0, p.height - 2).forEach((t, i) => screen.text(p.x, p.y + 2 + i, t, 'muted', p.width));
+        }
+        position = 'Prefix · ←→ edit · Ctrl-U clear · F1 help';
+    } else {
+        s.maxOffset = 0; s.scroll = 0;
+        const roomy = l.chrome === 'comfortable' || l.chrome === 'standard';
+        const stride = roomy && p.height >= rows.length * 3 + 2 ? 3 : p.height >= rows.length * 2 + 1 ? 2 : 1;
+        const hintRows = stride === 1 && p.height >= 4 ? Math.min(2, Math.max(0, p.height - rows.length)) : 0;
+        const capacity = Math.max(1, Math.floor((p.height - hintRows) / stride));
+        s.pageSize = capacity;
+        const start = windowStart(s.cursor, rows.length, capacity);
+        rows.slice(start, start + capacity).forEach((row, i) => {
+            const selected = start + i === s.cursor, prefix = `${selected ? '>' : ' '} ${multi ? '[' : '('}${row.on ? 'x' : ' '}${multi ? ']' : ')'} `;
+            const y = p.y + i * stride;
+            screen.text(p.x, y, fit(prefix + row.label + (row.locked ? ' [fixed]' : ''), p.width), selected ? 'selected' : 'text', p.width);
+            if (stride > 1) screen.text(p.x + 6, y + 1, clip(row.hint, p.width - 6), 'muted', p.width - 6);
         });
-        if (page === 'Source' && s.source === 'source')
-            lines.push(['Builds trusted source. Release verification does not apply to a source checkout.', 'warn']);
+        if (hintRows && rows[s.cursor]) {
+            const focused = rows[s.cursor];
+            wrapWords(`${focused.locked ? 'FIXED · ' : ''}${focused.hint}`, p.width).slice(0, hintRows).forEach((t, i) => screen.text(p.x, p.y + p.height - hintRows + i, t, focused.locked ? 'warn' : 'muted', p.width));
+        }
+        position = `Choice ${s.cursor + 1}/${rows.length}${multi ? ` · ${rows.filter(r => r.on).length} selected` : ''} · ? details`;
     }
-    const wrapped = lines.flatMap(([text, tone]) => wrapWords(text, contentWidth).map(text => ({ text, tone })));
-    s.maxOffset = choices(s).length ? 0 : Math.max(0, wrapped.length - available);
-    s.scroll = Math.min(s.scroll, s.maxOffset);
-    wrapped.slice(s.scroll, s.scroll + available).forEach((l, i) => screen.text(x, y + i, l.text, l.tone, contentWidth));
-    if (s.error)
-        screen.text(x, height - 5, clip(s.error, contentWidth), 'danger', contentWidth);
-    screen.rule(x, height - 4, contentWidth);
-    const action = page === 'Review' ? (s.mode === 'project' ? 'Enter apply setup' : 'Enter install') : 'Enter continue';
-    screen.text(x, height - 3, clip(`${action}   ${choices(s).length ? '↑↓ select · Space toggle   ' : ''}Esc back · Ctrl-C cancel`, contentWidth), 'text', contentWidth);
-    const position = s.maxOffset ? `↑↓ / End scroll · ${s.scroll + 1}–${Math.min(wrapped.length, s.scroll + available)} / ${wrapped.length}` : choices(s).length ? `Choice ${s.cursor + 1} / ${choices(s).length}` : 'No changes before confirmation.';
-    screen.text(x, height - 2, `${s.step + 1} / ${s.steps.length}   ${position}`, 'muted', contentWidth);
+    if (s.help) hint = adaptiveHint(l.totalWidth, '↑↓ / PgUp PgDn scroll · Esc close · Ctrl-C cancel', '↑↓ scroll · Esc close', '↑↓ Esc');
+    else if (rows.length) hint = adaptiveHint(l.totalWidth, '↑↓ select · Space toggle · Enter continue · Esc back · Ctrl-C cancel · ? help', '↑↓ Space toggle · Enter next · Esc back · ^C cancel', '↑↓ Space · Enter · Esc', 'Space Enter Esc');
+    else if (page === 'Review') {
+        const action = s.scroll < s.maxOffset ? 'Enter next page' : s.mode === 'project' ? 'Enter apply setup' : 'Enter install';
+        hint = adaptiveHint(l.totalWidth, `${action} · ↑↓ / End scroll · Esc back · Ctrl-C cancel`, `${action} · Esc back`, s.scroll < s.maxOffset ? 'Enter more / Esc' : 'Enter apply / Esc');
+    } else hint = adaptiveHint(l.totalWidth, 'Enter continue · Esc back · Ctrl-C cancel · F1 help', 'Enter next · Esc back · ^C cancel', 'Enter / Esc / ^C');
+    if (l.footer >= 2) screen.text(l.x, height - 2, clip(s.error && !s.help ? `${s.error} (! / F1 details)` : position, l.totalWidth), s.error && !s.help ? 'danger' : 'muted', l.totalWidth);
+    if (l.footer) screen.text(l.x, height - 1, fit(height < 4 && s.error ? s.error : hint, l.totalWidth), page === 'Review' && !s.help ? 'accent' : 'text', l.totalWidth);
     return screen;
 }
 function machineInitial(args) {
@@ -267,11 +330,12 @@ function machineInitial(args) {
 async function runWizard(args) {
     const mode = args[0], initial = mode === 'project' ? JSON.parse(args[1]) : machineInitial(args.slice(1));
     const state = createWizardState(mode, initial);
-    let input, output, closed = false, settled = false, escapeTimer;
+    let input, output, inputFd, outputFd, closed = false, settled = false, escapeTimer, disposeSize;
     const cleanup = () => {
         if (closed)
             return;
         closed = true;
+        disposeSize?.();
         if (escapeTimer)
             clearTimeout(escapeTimer);
         try {
@@ -287,23 +351,29 @@ async function runWizard(args) {
         output?.removeAllListeners();
         input?.destroy();
         output?.destroy();
+        // The tty handles own reopened descriptors; release our originals too.
+        for (const fd of [inputFd, outputFd]) { if (fd !== undefined) { try { fs.closeSync(fd); } catch {} } }
+        inputFd = outputFd = undefined;
     };
     try {
-        input = new tty.ReadStream(fs.openSync('/dev/tty', 'r'));
-        output = new tty.WriteStream(fs.openSync('/dev/tty', 'w'));
+        inputFd = fs.openSync('/dev/tty', 'r');
+        input = new tty.ReadStream(inputFd);
+        outputFd = fs.openSync('/dev/tty', 'w');
+        output = new tty.WriteStream(outputFd);
         if (!input.isTTY || !output.isTTY)
             throw new Error('An interactive terminal is required. Use --yes for automation.');
         const writer = new FrameWriter(value => output.write(value)), decoder = new StreamingKeyDecoder();
-        const theme = process.env.NO_COLOR !== undefined || process.env.BOREAL_THEME === 'mono' ? 'mono' : process.env.BOREAL_THEME === 'light' ? 'light' : 'dark';
-        const draw = () => { if (!closed)
-            writer.paint(renderWizard(state, output.columns || 80, output.rows || 24), theme); };
+        state.forceMono = process.env.NO_COLOR !== undefined;
+        state.theme = state.forceMono || process.env.BOREAL_THEME === 'mono' ? 'mono' : process.env.BOREAL_THEME === 'light' ? 'light' : 'dark';
+        state.ascii = process.env.BOREAL_ASCII === '1';
+        state.density = ['auto', 'compact', 'comfortable'].includes(process.env.BOREAL_TUI_DENSITY) ? process.env.BOREAL_TUI_DENSITY : 'auto';
+        const sizes = new TerminalSizeTracker(() => ({ width: output.columns, height: output.rows }));
+        const draw = () => { if (!closed) { const size = sizes.dimensions(); writer.paint(renderWizard(state, size.width, size.height), state.theme); } };
         const result = await new Promise((resolve, reject) => {
             const onKey = key => {
                 if (closed || settled)
                     return;
-                const small = (output.columns || 80) < 48 || (output.rows || 24) < 18;
-                if (small && !['ctrl-c', 'ctrl-d'].includes(key))
-                    return;
+                if (key === 'ctrl-l') { writer.invalidate(); draw(); return; }
                 const action = applyWizardKey(state, key);
                 if (action === 'cancel') {
                     settled = true;
@@ -327,7 +397,7 @@ async function runWizard(args) {
                 if (decoder.awaitingEscape)
                     escapeTimer = setTimeout(() => decoder.flushEscape().forEach(onKey), 35);
             });
-            output.on('resize', () => { writer.invalidate(); draw(); });
+
             const cancel = () => { settled = true; resolve(null); };
             process.once('SIGINT', cancel);
             process.once('SIGTERM', cancel);
@@ -336,6 +406,7 @@ async function runWizard(args) {
             output.write('\x1b[?1049h\x1b[?25l\x1b[?7l\x1b[?2004h');
             input.setRawMode(true);
             input.resume();
+            disposeSize = sizes.subscribe(() => { writer.invalidate(); draw(); });
             draw();
         });
         cleanup();
@@ -352,7 +423,7 @@ async function runWizard(args) {
         state.disposeSignals?.();
     }
 }
-module.exports = { createWizardState, applyWizardKey, renderWizard, wizardResult, validateWizard, wordmark, choices };
+module.exports = { createWizardState, applyWizardKey, renderWizard, wizardResult, validateWizard, wordmark, choices, wizardLayout, wizardDocument };
 if (require.main === module || process.argv[1] === 'project') {
     const args = process.argv[1] === 'project' ? process.argv.slice(1) : process.argv.slice(2);
     runWizard(args).catch(error => { process.stderr.write(`Boreal setup: ${safeText(error.message)}\n`); process.exitCode = 1; });

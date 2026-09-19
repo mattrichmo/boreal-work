@@ -1,5 +1,5 @@
 /** Buffered UTF-8/CSI parser. Unknown escape sequences are swallowed, not typed. */
-const CSI: Record<string, string> = { A: "up", B: "down", C: "right", D: "left", H: "home", F: "end", Z: "shift-tab", "1~": "home", "4~": "end", "7~": "home", "8~": "end", "3~": "delete", "5~": "page-up", "6~": "page-down" };
+const CSI: Record<string, string> = { P: "f1", "11~": "f1", A: "up", B: "down", C: "right", D: "left", H: "home", F: "end", Z: "shift-tab", "1~": "home", "4~": "end", "7~": "home", "8~": "end", "3~": "delete", "5~": "page-up", "6~": "page-down" };
 export class StreamingKeyDecoder {
     private decoder = new TextDecoder();
     private pending = "";
@@ -95,6 +95,12 @@ export class StreamingKeyDecoder {
                 result.push("ctrl-d");
             else if (code === 9)
                 result.push("tab");
+            else if (code === 1) result.push("ctrl-a");
+            else if (code === 2) result.push("ctrl-b");
+            else if (code === 5) result.push("ctrl-e");
+            else if (code === 6) result.push("ctrl-f");
+            else if (code === 12) result.push("ctrl-l");
+            else if (code === 23) result.push("ctrl-w");
             else if (code === 11)
                 result.push("ctrl-k");
             else if (code === 21)

@@ -4,6 +4,8 @@ import { UnixSocketFramedTransport } from "./node-transport.js";
 import { renderMountedView } from "./terminal.js";
 import { runLineShell } from "./line-shell.js";
 import { FullScreenTerminal, TerminalSignal, runFullScreen } from "./full-screen.js";
+import { TerminalSizeTracker } from "./ui/terminal-size.js";
+import type { Density } from "./ui/layout.js";
 export interface TerminalLaunchOptions {
     readonly socket: string;
     readonly project: string;
@@ -16,6 +18,7 @@ export interface TerminalLaunchOptions {
     readonly plain?: boolean;
     readonly theme?: "dark" | "light" | "mono";
     readonly ascii?: boolean;
+    readonly density?: Density;
 }
 function flagValue(argv: readonly string[], flag: string): string | undefined {
     const index = argv.indexOf(flag);
@@ -43,7 +46,9 @@ export function parseTerminalArgs(argv: readonly string[]): TerminalLaunchOption
     if (!["dark", "light", "mono"].includes(selectedTheme))
         throw new Error("--theme must be dark, light, or mono");
     const theme = argv.includes("--no-color") || process.env.NO_COLOR !== undefined ? "mono" : selectedTheme as "dark" | "light" | "mono";
-    return { theme, plain: argv.includes("--plain") || process.env.TERM === "dumb" || process.env.BOREAL_PLAIN !== undefined, ascii: argv.includes("--ascii"), socket, project, actor, harness, session, work: flagValue(argv, "--work"), timeout_ms, interactive: argv.includes("--interactive") };
+    const density = flagValue(argv, "--density") ?? process.env.BOREAL_TUI_DENSITY ?? "auto";
+    if (!["auto", "compact", "comfortable"].includes(density)) throw new Error("--density must be auto, compact, or comfortable");
+    return { density: density as Density, theme, plain: argv.includes("--plain") || process.env.TERM === "dumb" || process.env.BOREAL_PLAIN !== undefined, ascii: argv.includes("--ascii") || process.env.BOREAL_ASCII === "1", socket, project, actor, harness, session, work: flagValue(argv, "--work"), timeout_ms, interactive: argv.includes("--interactive") };
 }
 export async function mountAndRender(options: TerminalLaunchOptions, write: (value: string) => void): Promise<void> {
     const transport = new UnixSocketFramedTransport(options.socket, { timeout_ms: options.timeout_ms });
@@ -88,7 +93,7 @@ export async function interactiveMountAndRenderWithTerminal(options: TerminalLau
     try {
         const view = await controller.mount({ kind: options.work ? "work" : "monitoring", project_id: options.project, work_id: options.work });
         if (terminal.is_tty && !options.plain) {
-            await runFullScreen(controller, terminal, { auto_refresh_ms: 5000, theme: options.theme, ascii: options.ascii });
+            await runFullScreen(controller, terminal, { auto_refresh_ms: 5000, theme: options.theme, ascii: options.ascii, density: options.density });
         }
         else {
             write(renderMountedView(view));
@@ -100,10 +105,11 @@ export async function interactiveMountAndRenderWithTerminal(options: TerminalLau
         await client.close();
     }
 }
-function processTerminal(): FullScreenTerminal {
+export function processTerminal(): FullScreenTerminal {
+    const geometry = new TerminalSizeTracker(() => ({ width: process.stdout.columns, height: process.stdout.rows }));
     return {
         is_tty: process.stdin.isTTY === true && process.stdout.isTTY === true,
-        dimensions: () => ({ width: process.stdout.columns ?? 120, height: process.stdout.rows ?? 40 }),
+        dimensions: () => geometry.dimensions(),
         write: (value) => { process.stdout.write(value); },
         was_raw: process.stdin.isRaw === true,
         setRawMode: (enabled) => { process.stdin.setRawMode?.(enabled); },
@@ -119,8 +125,7 @@ function processTerminal(): FullScreenTerminal {
             return () => { process.stdin.off("end", listener); };
         },
         onResize(listener) {
-            process.stdout.on("resize", listener);
-            return () => { process.stdout.off("resize", listener); };
+            return geometry.subscribe(listener);
         },
         onSignal(signal: TerminalSignal, listener: () => void) {
             process.on(signal, listener);
@@ -130,7 +135,7 @@ function processTerminal(): FullScreenTerminal {
 }
 export async function main(argv: readonly string[] = process.argv.slice(2)): Promise<void> {
     if (argv.includes("--help") || argv.includes("-h")) {
-        process.stdout.write("Usage: bwrk-tui --socket PATH --project PROJECT [--actor ID] [--harness ID] [--session ID] [--work WORK] [--timeout-ms N] [--interactive] [--plain] [--theme dark|light|mono] [--no-color] [--ascii]\n");
+        process.stdout.write("Usage: bwrk-tui --socket PATH --project PROJECT [--actor ID] [--harness ID] [--session ID] [--work WORK] [--timeout-ms N] [--interactive] [--plain] [--theme dark|light|mono] [--no-color] [--ascii] [--density auto|compact|comfortable]\n");
         return;
     }
     try {

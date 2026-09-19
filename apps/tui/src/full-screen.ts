@@ -1,9 +1,11 @@
 import type { ActionResult, CreateWorkDraftInput, MountedView, TuiAction } from "./client.js";
 import type { LineShellController } from "./line-shell.js";
-import { eraseLast, safeText } from "./ui/cells.js";
+import { safeText } from "./ui/cells.js";
 import { FrameWriter, type Theme } from "./ui/screen.js";
-import { renderDashboard, dashboardLayout, detailLines } from "./ui/dashboard.js";
+import { renderDashboard, dashboardLayout, detailLines, inspectorRect, modalDocument, currentNotice } from "./ui/dashboard.js";
 import { initialState, reconcileSelection, visibleItems, FILTERS, ACTION_NAMES, actionForm, paletteCommands, type Modal, type DashboardState } from "./ui/model.js";
+import { paneViewport, cycleDensity, type Density } from "./ui/layout.js";
+import { editInput } from "./ui/input.js";
 import { StreamingKeyDecoder } from "./ui/keys.js";
 export { StreamingKeyDecoder, decodeKeys } from "./ui/keys.js";
 export type TerminalSignal = "SIGINT" | "SIGTERM" | "SIGHUP";
@@ -29,6 +31,7 @@ export interface FullScreenOptions {
     readonly shutdown_drain_ms?: number;
     readonly theme?: Theme;
     readonly ascii?: boolean;
+    readonly density?: Density;
 }
 type Confirm = Extract<Modal, {
     kind: "confirm";
@@ -50,6 +53,7 @@ export async function runFullScreen(controller: ExtendedController, terminal: Fu
     if (!terminal.is_tty)
         throw new Error("full-screen mode requires an interactive TTY");
     const state = initialState(controller.view(), options.theme ?? "dark", options.ascii ?? false);
+    state.density = options.density ?? "auto";
     const writer = new FrameWriter(value => terminal.write(value));
     const decoder = new StreamingKeyDecoder();
     let accepting = true, closed = false, shutdownTimedOut = false;
@@ -81,6 +85,8 @@ export async function runFullScreen(controller: ExtendedController, terminal: Fu
             return;
         syncSelection();
         const { width, height } = terminal.dimensions();
+        const l = dashboardLayout(width, height, state.detailOnly, state.density, state.zen);
+        if (!l.rail && state.focus === "navigation") state.focus = "queue";
         writer.paint(renderDashboard(controller.view(), state, width, height), state.theme);
     };
     const message = (text: string, error = false): void => { state.status = safeText(text); state.error = error; };
@@ -135,11 +141,12 @@ export async function runFullScreen(controller: ExtendedController, terminal: Fu
         if (state.focus === "navigation")
             state.navIndex = Math.max(0, Math.min(FILTERS.length - 1, state.navIndex + delta));
         else if (state.focus === "inspector" || state.detailOnly) {
-            const size = terminal.dimensions(), layout = dashboardLayout(size.width, size.height, state.detailOnly);
-            const rect = state.detailOnly ? layout.body : layout.inspector;
+            const size = terminal.dimensions(), layout = dashboardLayout(size.width, size.height, state.detailOnly, state.density, state.zen);
+            const rect = inspectorRect(layout, state);
             if (rect) {
                 const selected = visibleItems(controller.view(), state).find(i => i.work_id === state.selectedId);
-                const maximum = Math.max(0, detailLines(selected, controller.view(), state.inspectorTab, rect.width - 4).length - Math.max(1, rect.height - 4));
+                const pane = paneViewport(rect, layout.chrome);
+                const maximum = Math.max(0, detailLines(selected, controller.view(), state.inspectorTab, pane.width, layout.chrome === "compact" || layout.chrome === "micro").length - pane.height);
                 state.inspectorOffset = Math.max(0, Math.min(maximum, state.inspectorOffset + delta));
             }
         }
@@ -321,6 +328,24 @@ export async function runFullScreen(controller: ExtendedController, terminal: Fu
             return;
         }
         switch (id) {
+            case "views":
+                state.modal = { kind: "palette", value: "", index: state.navIndex, scope: "views" };
+                break;
+            case "density":
+                state.density = cycleDensity(state.density);
+                message(`Density: ${state.density}. Geometry still takes priority in short terminals.`);
+                break;
+            case "zen":
+                state.zen = !state.zen;
+                if (state.focus === "navigation") state.focus = "queue";
+                message(state.zen ? "Focus view. z restores responsive panes." : "Responsive panes restored.");
+                break;
+            case "status":
+                state.modal = { kind: "message", title: "STATUS / RECOVERY", text: currentNotice(controller.view(), state), offset: 0 };
+                break;
+            case "redraw":
+                writer.invalidate();
+                break;
             case "search":
                 state.modal = { kind: "search", value: state.query };
                 break;
@@ -373,37 +398,29 @@ export async function runFullScreen(controller: ExtendedController, terminal: Fu
             message("Cancelled. No action was submitted.");
             return;
         }
-        if (m.kind === "confirm") {
-            if (key === "enter" || key === "y" || key === "Y") {
-                // Consume the exact draft now. Duplicate Enter cannot enqueue it again.
-                if (mutationQueued)
+        if (m.kind === "confirm" || m.kind === "help" || m.kind === "message") {
+            const size = terminal.dimensions(), doc = modalDocument(controller.view(), state, size.width, size.height);
+            m.offset = Math.max(0, Math.min(m.offset ?? 0, doc.maximum));
+            if (m.kind === "confirm" && ["enter", "y", "Y"].includes(key)) {
+                if (size.width < 12 || size.height < 4) {
+                    m.reviewError = "More space is needed to review this action safely.";
                     return;
+                }
+                m.reviewError = undefined;
+                if (m.offset < doc.maximum) {
+                    m.offset = Math.min(doc.maximum, m.offset + doc.capacity);
+                    return; // Enter pages first; it never confirms hidden content.
+                }
+                if (mutationQueued) return;
                 state.modal = null;
                 mutationQueued = true;
-                enqueue(ACTION_NAMES[m.action], async () => { try {
-                    await execute(m);
-                }
-                finally {
-                    mutationQueued = false;
-                } }, true);
-            }
-            else if (key === "n" || key === "N")
-                state.modal = null;
-            else if (["down", "j", "page-down"].includes(key))
-                m.offset = Math.min(10000, (m.offset ?? 0) + (key === "page-down" ? 8 : 1));
-            else if (["up", "k", "page-up"].includes(key))
-                m.offset = Math.max(0, (m.offset ?? 0) - (key === "page-up" ? 8 : 1));
-            else if (key === "home")
-                m.offset = 0;
-            return;
-        }
-        if (m.kind === "help") {
-            if (["down", "j", "page-down"].includes(key))
-                m.offset += key === "page-down" ? 10 : 1;
-            if (["up", "k", "page-up"].includes(key))
-                m.offset = Math.max(0, m.offset - (key === "page-up" ? 10 : 1));
-            if (key === "home")
-                m.offset = 0;
+                enqueue(ACTION_NAMES[m.action], async () => { try { await execute(m); }
+                    finally { mutationQueued = false; } }, true);
+            } else if (m.kind === "confirm" && ["n", "N"].includes(key)) state.modal = null;
+            else if (["down", "j", "page-down"].includes(key)) m.offset = Math.min(doc.maximum, m.offset + (key === "page-down" ? doc.capacity : 1));
+            else if (["up", "k", "page-up"].includes(key)) m.offset = Math.max(0, m.offset - (key === "page-up" ? doc.capacity : 1));
+            else if (key === "home") m.offset = 0;
+            else if (key === "end") m.offset = doc.maximum;
             return;
         }
         if (m.kind === "form") {
@@ -426,20 +443,19 @@ export async function runFullScreen(controller: ExtendedController, terminal: Fu
             }
             if (field.choices)
                 return;
-            if (key === "backspace")
-                field.value = eraseLast(field.value);
-            else if (key === "ctrl-u")
-                field.value = "";
-            else if (key.startsWith("paste:"))
-                field.value = (field.value + key.slice(6).replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/gu, " ")).slice(0, field.name === "receipt" ? 262144 : 8192);
-            else if (Array.from(key).length === 1)
-                field.value = (field.value + key).slice(0, field.name === "receipt" ? 262144 : 8192);
+            const edited = editInput(field.value, field.cursor, key, field.name === "receipt" ? 262144 : 8192, true);
+            field.value = edited.value;
+            field.cursor = edited.cursor;
             m.error = undefined;
             return;
         }
         if (m.kind === "palette") {
-            if (key === "down" || key === "up") {
-                m.index = Math.max(0, Math.min(paletteCommands(controller.view(), state).length - 1, m.index + (key === "down" ? 1 : -1)));
+            if (["down", "up", "tab", "shift-tab", "page-up", "page-down"].includes(key) || (!m.value && ["home", "end"].includes(key))) {
+                const count = paletteCommands(controller.view(), state).length;
+                const size = terminal.dimensions(), page = Math.max(1, size.height - 5);
+                if (key === "home") m.index = 0;
+                else if (key === "end") m.index = Math.max(0, count - 1);
+                else m.index = Math.max(0, Math.min(count - 1, m.index + (["up", "shift-tab", "page-up"].includes(key) ? -1 : 1) * (key.startsWith("page-") ? page : 1)));
                 return;
             }
             if (key === "/" && !m.value) {
@@ -462,14 +478,8 @@ export async function runFullScreen(controller: ExtendedController, terminal: Fu
             message(state.query ? `search: ${state.query}` : "Search cleared.");
             return;
         }
-        if (key === "backspace")
-            m.value = eraseLast(m.value);
-        else if (key === "ctrl-u")
-            m.value = "";
-        else if (key.startsWith("paste:"))
-            m.value = (m.value + safeText(key.slice(6)).replaceAll("�", " ")).slice(0, 512);
-        else if (Array.from(key).length === 1)
-            m.value = (m.value + key).slice(0, 512);
+        const edited = editInput(m.value, m.cursor, key, 512);
+        m.value = edited.value; m.cursor = edited.cursor;
         if (m.kind === "palette")
             m.index = 0;
     };
@@ -480,6 +490,7 @@ export async function runFullScreen(controller: ExtendedController, terminal: Fu
             stop();
             return;
         }
+        if (key === "ctrl-l") { writer.invalidate(); redraw(); return; }
         if (state.modal) {
             editModal(key);
             redraw();
@@ -490,14 +501,14 @@ export async function runFullScreen(controller: ExtendedController, terminal: Fu
             return;
         }
         const size = terminal.dimensions();
-        if (size.width < 44 || size.height < 14)
-            return;
         if (key.startsWith("paste:")) {
             message("Paste ignored outside an input field.");
             redraw();
             return;
         }
-        const page = dashboardLayout(size.width, size.height, state.detailOnly).visibleRows;
+        const currentLayout = dashboardLayout(size.width, size.height, state.detailOnly, state.density, state.zen);
+        const currentInspector = inspectorRect(currentLayout, state);
+        const page = state.focus === "inspector" && currentInspector ? paneViewport(currentInspector, currentLayout.chrome).height : currentLayout.visibleRows;
         if (FILTERS.some(f => f.key === key)) {
             setFilter(FILTERS.find(f => f.key === key)!.id);
             redraw();
@@ -521,15 +532,18 @@ export async function runFullScreen(controller: ExtendedController, terminal: Fu
             case "home":
                 if (state.focus === "inspector")
                     state.inspectorOffset = 0;
+                else if (state.focus === "navigation") state.navIndex = 0;
                 else
                     state.selectedId = visibleItems(controller.view(), state)[0]?.work_id;
                 break;
             case "end":
-                state.selectedId = visibleItems(controller.view(), state).at(-1)?.work_id;
+                if (state.focus === "inspector") move(Number.MAX_SAFE_INTEGER);
+                else if (state.focus === "navigation") state.navIndex = FILTERS.length - 1;
+                else state.selectedId = visibleItems(controller.view(), state).at(-1)?.work_id;
                 break;
             case "tab":
             case "shift-tab": {
-                const layout = dashboardLayout(size.width, size.height, state.detailOnly);
+                const layout = dashboardLayout(size.width, size.height, state.detailOnly, state.density, state.zen);
                 const focus: DashboardState["focus"][] = state.detailOnly ? ["inspector"] : [...(layout.rail ? ["navigation" as const] : []), "queue", ...(layout.inspector ? ["inspector" as const] : [])];
                 state.focus = focus[(Math.max(0, focus.indexOf(state.focus)) + (key === "tab" ? 1 : -1) + focus.length) % focus.length];
                 break;
@@ -540,11 +554,11 @@ export async function runFullScreen(controller: ExtendedController, terminal: Fu
                     state.inspectorTab = (state.inspectorTab + (key === "right" ? 1 : 2)) % 3;
                     state.inspectorOffset = 0;
                 }
-                else if (key === "left" && size.width >= 124)
+                else if (key === "left" && currentLayout.rail)
                     state.focus = "navigation";
                 else if (key === "right") {
                     state.focus = "inspector";
-                    state.detailOnly = size.width < 100;
+                    state.detailOnly = false;
                 }
                 break;
             case "enter":
@@ -552,7 +566,7 @@ export async function runFullScreen(controller: ExtendedController, terminal: Fu
                     setFilter(FILTERS[state.navIndex].id);
                 else if (state.selectedId) {
                     state.focus = "inspector";
-                    state.detailOnly = size.width < 100;
+                    state.detailOnly = false;
                     syncSelection();
                 }
                 break;
@@ -575,6 +589,23 @@ export async function runFullScreen(controller: ExtendedController, terminal: Fu
             case "ctrl-k":
                 state.modal = { kind: "palette", value: "", index: 0 };
                 break;
+            case "v":
+                runCommand("views");
+                break;
+            case "d":
+                runCommand("density");
+                break;
+            case "z":
+                runCommand("zen");
+                break;
+            case "!":
+                runCommand("status");
+                break;
+            case "i":
+                state.detailOnly = !state.detailOnly;
+                state.focus = state.detailOnly ? "inspector" : "queue";
+                break;
+            case "f1":
             case "?":
                 state.modal = { kind: "help", offset: 0 };
                 break;
@@ -637,11 +668,11 @@ export async function runFullScreen(controller: ExtendedController, terminal: Fu
                 escapeTimer = setTimeout(() => decoder.flushEscape().forEach(handleKey), 35);
         }));
         disposers.push(terminal.onResize(() => {
-            const { width } = terminal.dimensions();
-            if (width < 124 && state.focus === "navigation")
-                state.focus = "queue";
-            if (width < 100 && state.focus === "inspector")
-                state.detailOnly = true;
+            const size = terminal.dimensions();
+            const l = dashboardLayout(size.width, size.height, state.detailOnly, state.density, state.zen);
+            if (!l.rail && state.focus === "navigation") state.focus = "queue";
+            // Inspector focus is retained. The renderer temporarily promotes it to a
+            // full view, and returns it to its split pane when space becomes available.
             writer.invalidate();
             redraw();
         }));
