@@ -24,6 +24,12 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[3]
+# These are service-boundary query-count ceilings, not row/payload ceilings.
+# The canonical status projection currently reads the full work graph, so its
+# row and text counters intentionally remain observable rather than being
+# mistaken for bounded database work.
+MAX_PREPARED_STATEMENTS = 16
+MAX_BATCH_CALLS = 4
 
 
 def parse_envelope(completed: subprocess.CompletedProcess[str]) -> dict:
@@ -218,6 +224,19 @@ def paged_status(
     actual = items[0].get("work_id") if len(items) == 1 else None
     metrics = data.get("service_query_metrics") or {}
     queries = metrics.get("statements_prepared", 0)
+    batches = metrics.get("batch_calls", 0)
+    query_budget = {
+        "max_statements_prepared": MAX_PREPARED_STATEMENTS,
+        "max_batch_calls": MAX_BATCH_CALLS,
+        "within_budget": (
+            isinstance(queries, int)
+            and isinstance(batches, int)
+            and queries > 0
+            and batches > 0
+            and queries <= MAX_PREPARED_STATEMENTS
+            and batches <= MAX_BATCH_CALLS
+        ),
+    }
     return {
         "offset": offset,
         "limit": data.get("limit"),
@@ -229,6 +248,7 @@ def paged_status(
         "elapsed_ms": round(elapsed_ms, 3),
         "service_query_metrics": metrics,
         "service_sqlite_prepare_count": queries,
+        "query_budget": query_budget,
         "transport_outcome": envelope.get("outcome"),
         "error": envelope.get("error"),
         "production_boundary": "bwrk status client -> Unix socket -> elected bwrk service -> SqliteStore",
@@ -373,14 +393,15 @@ def main() -> int:
             "status": "pass"
             if page_101["exact_ordinal_reached"]
             and page_1001["exact_ordinal_reached"]
-            and page_101["service_sqlite_prepare_count"] > 0
-            and page_1001["service_sqlite_prepare_count"] > 0
+            and page_101["query_budget"]["within_budget"]
+            and page_1001["query_budget"]["within_budget"]
             and exact_route_result["status"] == "available"
             and stop["status"] == "pass"
             else "incomplete",
             "reason": (
-                "ordinal reachability, service-side query evidence, and public "
-                "work show service routing are real"
+                "ordinal reachability, service-side query evidence within the "
+                "declared query-count budget, and public work show service "
+                "routing are real"
                 if exact_route_result["status"] == "available"
                 else "ordinal reachability or public work show service evidence is incomplete"
             ),

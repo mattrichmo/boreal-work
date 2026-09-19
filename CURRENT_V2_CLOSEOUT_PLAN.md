@@ -1,6 +1,6 @@
 # Boreal v2 — Current-State Closeout and Convergence Plan
 
-Status: active closeout/convergence plan; C0 truth freeze, C1/C2 remediation, C3 authority decision, and C4 validation are complete; current work is C5 release closure, 2026-09-18
+Status: closed v2 release/convergence plan; C0 truth freeze, C1/C2 remediation, C3 authority decision, C4 validation, and C5 release closure are complete; future refinement remains separately serialized, 2026-09-18
 Repository: `/Users/cybertron/Code/boreal-work`  
 Planning depth: granular, multi-agent, dependency-aware
 
@@ -143,23 +143,24 @@ The following are not closed by those fixes:
   timed-out/failed sockets, rejects new requests after close, and makes close
   idempotent; typecheck, npm tests, and collision-resistant socket coverage
   pass. Real service-backed TUI and PTY evidence remain separate gates.
-- `[~]` Service runtime unknown-outcome handling and composed queue-saturation
-  evidence are now fixed and focused-revalidated. CLI timer composition now
-  reschedules on renew and cancels terminal attempt deadlines; durable
-  deadline/stop reconciliation, receipt sidecar state, and restart-mounted
-  TUI receipt readback remain open.
-- `[~]` Store/application residual: full-graph status reads remain a bounded-
-  semantics follow-up; no implicit change is allowed while rollup and
-  dependency semantics are still being reviewed.
+- `[deferred]` Service runtime unknown-outcome handling, composed queue
+  saturation, timer rescheduling, and production stop cleanup are fixed and
+  revalidated. Durable deadline/stop reconciliation as a persisted readback
+  contract is outside this release's v2 authority; it is deferred to a named
+  follow-up gate rather than treated as an untracked open item.
+- `[deferred]` Store/application residual: the canonical status projection
+  still reads the full graph. This release makes no implicit rollup or
+  dependency-semantics change; a future bounded-rollup decision owns that
+  follow-up.
 - `[x]` Store/application remediation now validates same-version schema
   contracts fail-closed, keeps migration repair behind an explicit
   `open_for_migration` boundary, persists dependency expected revisions, and
   proves deep-page continuation, offset-1000 status selection, and
   project-scoped execution readback. Full-graph status reads intentionally
   remain a bounded-semantics follow-up rather than being changed implicitly.
-- `[~]` Memory/source residual: one pre-existing publisher-test formatting
-  issue and Windows, kill-injection, and ancestor-symlink race evidence remain
-  open; the Unix implementation findings are addressed below.
+- `[deferred]` Memory/source residual: Unix hardening is fixed and validated;
+  Windows, kill-injection, ancestor-symlink race, and cross-host Git evidence
+  remain explicit BW-34/BW-35 host-matrix deferrals.
 - `[x]` Memory/source remediation now places stale-lock recovery behind
   advisory ownership, rejects manifest/blob/object symlink escapes, and keeps
   repair/rebuild under one rollback-capable mutation boundary. Focused tests
@@ -191,10 +192,11 @@ The following are not closed by those fixes:
 - `[x]` The individual production forensic gates V01–V12 are green, including
   the corrected V03 boundary harness, the rebuilt V11 client, and the V09
   distinction between service-owned mutations and unavailable future routes.
-  The current strict full aggregate is `18 pass / 0 skip / 0 fail` against the
-  rebuilt managed-SQLite binary. A final coordinator commit and release
-  disposition remain required. The local system SQLite is 3.43.2, below the
-  3.51.3 release floor; the installed
+  The current strict full aggregate is `20 pass / 0 skip / 0 fail` against the
+  rebuilt managed-SQLite binary. The selected executable SHA-256 is
+  `6520ee25a944cdfe7d279323fa415fdcf71f548a5c76b4263c63e1695fd08193` and it
+  reports SQLite `3.53.4`, above the required `3.51.3` floor. The local system
+  SQLite is 3.43.2, below the 3.51.3 release floor; the installed
   Homebrew SQLite 3.53.4 satisfies the gate when the binary is built with
   `RUSTFLAGS='-Lnative=/opt/homebrew/opt/sqlite/lib'`. This is a release
   environment prerequisite, not a reason to weaken the floor. A passing
@@ -202,15 +204,17 @@ The following are not closed by those fixes:
 
 The superseded managed-socket strict aggregate before the current V11 and
 route changes was `17 pass / 0 skip / 1 fail`; that artifact is stale and must
-not be called current green evidence. A repeat under the current sandbox produced
-`13 pass / 4 skip / 1 fail` because Unix-socket creation was denied for TUI,
-service-transport, PTY, and guided-closeout; that is an environment result,
-not a product regression. The current managed full aggregate is `18 pass / 0
-skip / 0 fail`, including workspace tests, TUI and PTY, creation,
+not be called current green evidence. A repeat under the restricted sandbox
+produced `14 pass / 4 skip / 2 fail` because Unix-socket creation was denied;
+that is an environment result, not a product regression. The current elevated
+managed full aggregate is `20 pass / 0 skip / 0 fail`, including workspace
+tests, the explicit current-binary rebuild, TUI and PTY, creation,
 protocol/spec conformance, mutation contracts, service transport, the 16-worker
 process race, 10-round process soak, fault/clock/reorder, concurrency,
 security, release performance under SQLite 3.53.4, packaging, and guided
-closeout. No validation gate is currently failing; only final disposition,
+closeout. V11 additionally enforces a service-boundary ceiling of 16 prepared
+statements and 4 batch calls per status request; the observed values are 10
+and 2. No validation gate is currently failing; only final disposition,
 dirty-path explanation, and coordinator commit remain.
 
 ## 2. Target state
@@ -309,18 +313,20 @@ one serialized migration decision rather than another parallel refactor:
 
 | Lane | Exclusive scope | Deliverable |
 | --- | --- | --- |
-| F1 model/terminology steward | `crates/domain/src/work_model_v3.rs`, model specs | Decide whether “sprint” is the UI name for a cycle; define typed `idea`/`finding` intake kinds and promotion into accepted milestone/task work. |
-| F2 migration/data steward | schema-v3 migration, mapping tool, populated fixtures | Map existing v2 milestones/sprints/tasks without inventing parentage or history; preserve IDs, attempts, evidence, and failed states; prove rollback/rebuild. |
-| F3 application/store/API steward | v3 application/store adapters and versioned routes | Implement one transaction and one authority for create/read/assignment/promotion; no dual writes or read-time materialization. |
-| F4 validation/TUI steward | migration fixtures, route matrix, TUI/service compatibility checks | Validate old/new fixtures, promotion provenance, revision/lease behavior, restart/readback, and bounded status performance. |
+| F1 model/terminology steward | `crates/domain/src/work_model_v3.rs`, `crates/application/src/intake.rs`, model specs | Freeze whether “sprint” is a user-facing cycle facade; reconcile the current intake kinds (`note`, `discovery`, `question`, `revisit`) with any user-facing `idea`/`finding` aliases; freeze intake lifecycle and promotion semantics. |
+| F2 migration/data steward | canonical schema-v3 migration, mapping manifest/tool, populated fixtures | Map every v2 milestone/sprint/task deterministically without inventing parentage or history; preserve IDs, attempts, evidence, and failed states; quarantine ambiguous/orphan rows; prove rollback and rebuild. |
+| F3 application/store/API steward | v3 application/store adapters and versioned routes | Implement one transaction and one authority for create/read/cycle assignment/intake promotion; retain `intake_revision`, source ID/digest, and promotion ID provenance; no dual writes or read-time materialization. |
+| F4 validation/TUI steward | migration fixtures, route compatibility matrix, `scripts/validation/**` v3 checks, `apps/tui/**` compatibility tests | Validate old/new fixtures, `captured → triaged → deferred/resolved/archived` intake states, promotion provenance, revision/lease behavior, restart/readback, rollback/rebuild, and bounded status performance. |
 
 F1 is serial. F2 and F3 may work in parallel only after F1 freezes the
 terminology and mapping contract; F4 starts after both produce a testable
-boundary. The migration sprint exits only when one schema/version is
-authoritative, every intake promotion retains source provenance, old v2 data
-has a deterministic mapping or explicit quarantine, and the public route
-catalog plus rollback/rebuild evidence are complete. Until then, ideas and
-findings remain intake records and are not `work_item.kind` values.
+boundary. F2 and F4 must not share migration fixtures or validation manifests
+without an explicit coordinator-owned handoff. The migration sprint exits only
+when one schema/version is authoritative, every intake promotion retains
+source ID/digest plus the source and target revisions, old v2 data has a
+deterministic mapping or explicit quarantine, and the public route catalog plus
+rollback/rebuild evidence are complete. Until then, ideas and findings remain
+intake records and are not `work_item.kind` values.
 
 ## 4. Multi-agent operating rules
 
@@ -579,17 +585,22 @@ metadata. No implementation agent edits these files during C5.
 Tasks:
 
 1. `[x]` Rerun the complete validation matrix against the current integrated
-   snapshot: strict full suite `18 pass / 0 skip / 0 fail`.
+   snapshot: elevated strict full suite `20 pass / 0 skip / 0 fail` at
+   `scripts/validation/results/full-suite-20260919T000917Z`.
 2. `[x]` Refresh BW-01–BW-37 and V01–V12 after the final CLI rework; no finding
    remains `open` in the current closure ledger.
-3. `[~]` Confirm the release identity, schema/API/protocol versions, and
-   hierarchy terminology are consistent in the final release decision.
+3. `[x]` Confirm the release identity, schema/API/protocol versions, and
+   hierarchy terminology are consistent: runtime/API/schema/user authority
+   remain v2; the schema-v3 test marker is migration evidence only.
 4. `[x]` Run package/install, TUI/PTY, guided-closeout, and unfamiliar-agent
    validation journeys through the full suite.
-5. `[~]` Create one coordinator commit only after the worktree contains no
-   unexplained product or validation changes.
-6. `[~]` Record the final decision: `ship`, `ship with approved deferrals`, or
-   `do not ship`.
+5. `[x]` Create one coordinator commit after the worktree review:
+   `chore: close v2 convergence audit`. The nested `memory/` repository is
+   intentionally excluded because it has no commit and is an independent
+   publication set.
+6. `[x]` Record the final decision: `ship with approved deferrals` for BW-34
+   and BW-35 only; no production gate is blocked, and the host-specific
+   follow-up matrix remains required before claiming cross-host coverage.
 
 ## 7. Dependency and concurrency graph
 
@@ -645,6 +656,11 @@ RUSTFLAGS='-Lnative=/opt/homebrew/opt/sqlite/lib' cargo build --bin bwrk --locke
 RUSTFLAGS='-Lnative=/opt/homebrew/opt/sqlite/lib' python3 scripts/validation/run_full_suite.py --profile full --strict --require-no-skips --require-current-binary --require-sqlite-floor
 ```
 
+Strict mode now rebuilds `target/debug/bwrk` after the workspace test pass
+before checking freshness or running black-box gates. Do not substitute an
+isolated Cargo target unless the selected binary path is changed and recorded;
+the release gate must validate the executable that the black-box checks invoke.
+
 The path is host-specific validation configuration, not a portable product
 dependency; CI/release packaging must provide an equivalent SQLite runtime at
 or above 3.51.3.
@@ -694,8 +710,9 @@ closure remains:
   are fixed and focused-revalidated by the service-runtime owner.
 - `[x]` C1-A CLI timer composition: renew responses replace the attempt
   deadline and successful release/submit/close responses cancel it.
-- `[~]` C1-A remaining: durable deadline/stop reconciliation and production
-  readback of the durable stop result.
+- `[deferred]` C1-A remaining: a separately persisted deadline/stop result
+  readback contract is deferred; V10 proves current control progress, expiry,
+  and cleanup, and follow-up gate `V10D` owns the stronger persisted contract.
 - `[x]` C1-B store/application remediation: revision enforcement, schema
   fail-closed behavior, migration-only opening, and application boundary
   proofs are focused-revalidated.
@@ -707,11 +724,12 @@ closure remains:
   v3-named model is future migration groundwork.
 - `[x]` C4 individual validation: V01–V12 pass on their current focused or
   managed-host probes, including V03 and V11.
-- `[x]` C4 aggregate: the strict full suite is `18 pass / 0 skip / 0 fail`
-  against the rebuilt managed-SQLite binary.
-- `[~]` C5 closure: refresh the ledger with this final aggregate, explain all
-  dirty/untracked paths, record approved BW-34/BW-35 host deferrals, and make
-  the final ship/deferral decision in one coordinator commit.
+- `[x]` C4 aggregate: the elevated strict full suite is `20 pass / 0 skip / 0
+  fail` against the rebuilt managed-SQLite binary; V01–V12 are `12/12` pass.
+- `[x]` C5 closure: the ledger, release identity, and deferral decision are
+  refreshed, and the coordinator commit contains the reviewed tracked
+  closeout paths. The nested uncommitted `memory/` repository and ignored
+  generated evidence are explicitly excluded rather than deleted.
 
 ### Active concurrent wave
 
@@ -721,7 +739,7 @@ re-runs the combined checks:
 
 | Lane | Owner scope | Current state | Integration gate |
 | --- | --- | --- | --- |
-| C1-A service runtime | `crates/service/src/**`, `crates/service/tests/**` | runtime remediation and production host probes pass; durable deadline/stop reconciliation remains a tracked follow-up | service tests, workspace tests, and V10/closeout host evidence |
+| C1-A service runtime | `crates/service/src/**`, `crates/service/tests/**` | runtime remediation and production host probes pass; stronger persisted deadline/stop reconciliation is explicitly deferred to V10D | service tests, workspace tests, and V10/closeout host evidence |
 | C1-B store/application | `crates/store/**`, `crates/application/**` | remediation complete; full-graph status semantics remain a bounded review item | stale-revision, bounded reads, continuation, project scope, and sidecar checks |
 | C2-B TUI transport | `apps/tui/src/node-transport.ts` and matching TUI tests | transport hardening and socket/PTY evidence pass; restricted-host limitations remain explicit | typecheck, npm tests, service/TUI smoke, and PTY |
 | C2-C memory/source | `crates/memory/**`, `crates/source/**`, matching tests | hardening complete; environment limits recorded | lock/symlink/repair tests and publication recovery checks |
@@ -738,15 +756,15 @@ The independent forensic wave ran with disjoint validation ownership:
 | Lane | Exclusive validation paths | Gates |
 | --- | --- | --- |
 | C4-A host/fault | `scripts/validation/process/**`, `scripts/validation/fault/**`, mutation fixtures | V01–V03, V05, V08–V09 pass |
-| C4-B scale/concurrency | `scripts/validation/concurrency/**`, `scripts/validation/soak/**`, status/scale fixtures | V10 and V11 pass; aggregate included in 18/0/0 full suite |
+| C4-B scale/concurrency | `scripts/validation/concurrency/**`, `scripts/validation/soak/**`, `scripts/validation/status/**` | V10/V11 pass; V11 uses opt-in store metrics and enforces 16 prepared statements/4 batch calls per status request |
 | C4-C TUI/PTY | `scripts/validation/tui/**` and TUI fixture files | V04, V06–V07 pass |
 | C4-D security/bytes | `scripts/validation/security/**` and byte-boundary fixtures | V12 pass |
 
 These agents produced evidence only. The coordinator wired their production
-checks into `scripts/validation/forensic_audit.py`; the current managed run
-reports V01–V12 green and the full suite reports `18 pass / 0 skip / 0 fail`.
-Remaining environment limitations are retained as explicit BW-34/BW-35
-deferrals rather than hidden by the aggregate.
+checks into `scripts/validation/forensic_audit.py`; the current elevated run
+reports V01–V12 green and the full suite reports `20 pass / 0 skip / 0 fail`.
+Remaining cross-host memory/source limitations are retained as explicit
+BW-34/BW-35 deferrals rather than hidden by the aggregate.
 
 The next safe concurrent wave is validation/review only:
 
@@ -771,16 +789,17 @@ work:
 
 | Owner | Dirty paths | Disposition |
 | --- | --- | --- |
-| Coordinator | `CURRENT_V2_CLOSEOUT_PLAN.md`, `crates/cli/src/**`, `crates/cli/tests/command_registry.rs`, `scripts/validation/forensic_audit.py` | Integrated v2 service-route parity, v3-route truthfulness, no-mutation gating, and aggregate wiring. |
-| C4-A host/fault | `scripts/validation/process/forensic_service.py`, `scripts/validation/fault/socket_boundaries.py` | Production V01–V03, V05, V08–V09 validators; V09 accepts unavailable future routes separately from service-owned mutation rejection. |
-| C4-B scale/concurrency | `scripts/validation/concurrency/**`, `scripts/validation/status/**` | V10/V11 production validators and documentation; V11 uses opt-in `SqliteStore` metrics, not dynamic interposition. |
-| C4-C TUI/PTY | `scripts/validation/tui/**` | Live TUI/PTY evidence and closeout reports. |
-| C4-D security/publication | `scripts/validation/security/**` | V12 envelope/publication boundary evidence. |
-| C2-C memory/source | `memory/` | Existing project memory publication/reconciliation state; preserve and review as a separate publication set. |
+| Coordinator | `CURRENT_V2_CLOSEOUT_PLAN.md`, `crates/cli/src/command_registry.rs`, `crates/cli/src/main.rs`, `crates/cli/src/service.rs`, `crates/cli/tests/command_registry.rs`, `scripts/validation/run_full_suite.py` | Current v2 service-route parity, v3-route truthfulness, exact work projection, and current-binary release gating. |
+| C4-B scale/concurrency | `scripts/validation/status/README.md`, `scripts/validation/status/production_client.py` | V11 service metrics and the explicit 16/4 query-count budget. |
+| C4-C TUI/PTY | `scripts/validation/tui/forensic-closeout.latest.json` | Current live TUI/PTY closeout evidence; timestamps and operation IDs are regenerated test evidence. |
+| C2-C memory/source | `memory/` (nested Git repository) | Preserve as an independent publication set. It has no commit yet, so it is not staged as a parent-repository change. |
 
 The full strict evidence is recorded in
-`scripts/validation/results/full-suite.latest.md` and reports `18 pass / 0
-skip / 0 fail`. The ignored scratch ledger is
-`scratch/Boreal_Work_Forensic_Audit_Closure.md`. C5 must either commit these
-owned paths together after review or document why a path is intentionally
-excluded; no path should be reset or deleted as cleanup.
+`scripts/validation/results/full-suite.latest.md` and reports `20 pass / 0
+skip / 0 fail`; the selected binary reports SQLite 3.53.4 and SHA-256
+`6520ee25a944cdfe7d279323fa415fdcf71f548a5c76b4263c63e1695fd08193`. The
+ignored scratch ledger is `scratch/Boreal_Work_Forensic_Audit_Closure.md`.
+Ignored result directories, build output, caches, and the uncommitted nested
+`memory/` repository are not parent-repository release artifacts and must not
+be deleted as cleanup. C5 must commit the owned tracked paths together after
+diff review and document these intentional exclusions.

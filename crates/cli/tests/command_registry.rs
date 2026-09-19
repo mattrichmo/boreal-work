@@ -53,6 +53,20 @@ fn deep_commands_resolves_a_concrete_unavailable_route() {
 }
 
 #[test]
+fn commands_report_dependency_reads_as_service_capable() {
+    let (success, envelope) = invoke(&["commands", "dep", "--json"]);
+    assert!(success);
+    let available = envelope["data"]["available"].as_array().unwrap();
+    for path in ["dep add", "dep remove", "dep tree", "dep cycles"] {
+        let route = available
+            .iter()
+            .find(|entry| entry["path"] == path)
+            .unwrap_or_else(|| panic!("missing route {path}"));
+        assert_eq!(route["adapters"]["service"], true, "{path}");
+    }
+}
+
+#[test]
 fn commands_catalogue_v3_routes_as_unavailable_future_capabilities() {
     let (success, envelope) = invoke(&["commands", "intake", "--json"]);
     assert!(success);

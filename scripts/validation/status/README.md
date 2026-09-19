@@ -14,6 +14,12 @@ store-boundary prepared-statement, row, and text-byte counters. This avoids
 dynamic-library interposition and measures the actual elected service without
 altering its SQLite dependency.
 
+The gate also requires each status request to stay within the declared
+service-boundary query-count budget: at most 16 prepared statements and 4
+batch calls. Row and text-byte counters remain reported because the current
+canonical status projection reads the full work graph; they are not presented
+as bounded database work.
+
 The public service registry exposes `work show`; the harness verifies that the
 route returns the target item through the elected service and never falls
 back to direct database access. The generated result is written to

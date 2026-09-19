@@ -24,6 +24,7 @@ use boreal_source::SourceCatalog;
 use boreal_store::{
     AttemptRecord, EvidenceExecutionState, OperationOutcome as StoreOperationOutcome,
     OperationRecord, ReceiptAttestation, ReceiptOutcome, ReceiptRecord, SqliteStore, StoreError,
+    WorkRecord,
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -2571,6 +2572,25 @@ fn status_name(status: boreal_domain::DerivedStatus) -> &'static str {
     }
 }
 
+pub(crate) fn work_projection_json(item: &WorkRecord) -> Value {
+    json!({
+        "work_id": item.work_id,
+        "project_id": item.project_id,
+        "kind": item.kind,
+        "parent_id": item.parent_id,
+        "lifecycle": item.lifecycle,
+        "dispatch_policy": item.dispatch_policy,
+        "priority": item.priority,
+        "hard_holds": item
+            .hard_holds
+            .iter()
+            .map(|hold| hold.stable_code())
+            .collect::<Vec<_>>(),
+        "title": item.title,
+        "description": item.description,
+    })
+}
+
 fn show_work_result(
     parsed: &ParsedCommand,
     app: &WorkApplication<'_>,
@@ -2582,25 +2602,7 @@ fn show_work_result(
         .show_work(&project, &work_id)
         .map_err(map_application_error)?;
     let revision = store_revision(store, &project)?;
-    bounded_result(
-        Some(json!({
-            "work_id": item.work_id,
-            "project_id": item.project_id,
-            "kind": item.kind,
-            "parent_id": item.parent_id,
-            "lifecycle": item.lifecycle,
-            "dispatch_policy": item.dispatch_policy,
-            "priority": item.priority,
-                "hard_holds": item
-                    .hard_holds
-                    .iter()
-                    .map(|hold| hold.stable_code())
-                    .collect::<Vec<_>>(),
-            "title": item.title,
-            "description": item.description,
-        })),
-        Some(revision),
-    )
+    bounded_result(Some(work_projection_json(&item)), Some(revision))
 }
 
 fn operation_show_result(

@@ -1442,10 +1442,6 @@ mod unix {
                 "dependency_tree" | "dependency_cycles" => {
                     self.dependency_graph(data, request.command.as_str())
                 }
-                "cycle_board" | "cycle_report" => self.cycle_board(data),
-                "intake_list" | "intake_show" => self.intake_read(data),
-                "intake_bucket" => self.intake_bucket(data, &request.operation_id),
-                "intake_capture" => self.intake_capture(data, &request.operation_id),
                 "doctor" => self.doctor(data),
                 "status" => self.status(data),
                 "work_show" => self.work_show(data),
@@ -1854,6 +1850,9 @@ mod unix {
             ))
         }
 
+        // Retained as future adapter groundwork; no public service dispatch
+        // reaches v3 handlers while schema v2 is the live authority.
+        #[allow(dead_code)]
         fn cycle_board(&mut self, data: &Value) -> ServiceResult {
             let project = ProjectId::new(string(data, "project_id")?);
             let cycle_id = string(data, "cycle_id")?;
@@ -1902,6 +1901,7 @@ mod unix {
             ))
         }
 
+        #[allow(dead_code)]
         fn intake_read(&mut self, data: &Value) -> ServiceResult {
             let project = ProjectId::new(string(data, "project_id")?);
             let view = WorkApplication::new(&self.store)
@@ -1949,6 +1949,7 @@ mod unix {
             ))
         }
 
+        #[allow(dead_code)]
         fn intake_bucket(&mut self, data: &Value, operation: &str) -> ServiceResult {
             let project = ProjectId::new(string(data, "project_id")?);
             let bucket_id = IntakeBucketId::new(string(data, "bucket_id")?);
@@ -1991,6 +1992,7 @@ mod unix {
             ))
         }
 
+        #[allow(dead_code)]
         fn intake_capture(&mut self, data: &Value, operation: &str) -> ServiceResult {
             let project = ProjectId::new(string(data, "project_id")?);
             let intake_id = IntakeItemId::new(string(data, "intake_id")?);
@@ -2205,22 +2207,7 @@ mod unix {
             Ok((
                 ApplicationOutcome::Unchanged,
                 Some(revision.0),
-                Some(json!({
-                    "work_id": item.work_id,
-                    "project_id": item.project_id,
-                    "kind": item.kind,
-                    "parent_id": item.parent_id,
-                    "lifecycle": item.lifecycle,
-                    "dispatch_policy": item.dispatch_policy,
-                    "priority": item.priority,
-                    "hard_holds": item
-                        .hard_holds
-                        .iter()
-                        .map(|hold| hold.stable_code())
-                        .collect::<Vec<_>>(),
-                    "title": item.title,
-                    "description": item.description,
-                })),
+                Some(super::super::work_projection_json(&item)),
             ))
         }
 
@@ -3801,24 +3788,58 @@ mod tests {
     }
 
     #[test]
-    fn intake_read_response_preserves_the_dispatched_route_discriminant() {
+    fn unavailable_v3_service_routes_are_rejected_without_schema_mutation() {
         let db = temp_path("intake-discriminant");
-        let store = seed_store(&db);
-        let mut handler = make_handler(store);
-        WorkApplication::new(&handler.store)
-            .ensure_work_model_v3()
-            .expect("v3 intake schema enables");
-        for command in ["intake_list", "intake_show"] {
+        let mut handler = make_handler(seed_store(&db));
+        let before_revision = handler
+            .store
+            .project_revision("service-project")
+            .expect("project revision reads")
+            .0;
+        assert_eq!(handler.store.schema_version().expect("schema version reads"), 2);
+        assert!(!handler
+            .store
+            .work_model_v3_enabled()
+            .expect("v3 capability reads"));
+
+        for (index, command) in [
+            "cycle_board",
+            "cycle_report",
+            "intake_list",
+            "intake_show",
+            "intake_bucket",
+            "intake_capture",
+        ]
+        .into_iter()
+        .enumerate()
+        {
             let envelope = application_envelope(
                 &mut handler,
-                &format!("op_{command}"),
+                &format!("op_unavailable_v3_{index}"),
                 json!({
                     "command": command,
                     "project_id": "service-project",
                 }),
             );
-            assert_eq!(envelope.data.expect("intake response")["command"], command);
+            assert_eq!(envelope.outcome, ApplicationOutcome::Rejected);
+            assert_eq!(
+                envelope.error.as_ref().map(|error| error.code),
+                Some(ErrorCode::UnknownCommandNamespace)
+            );
         }
+        assert_eq!(handler.store.schema_version().expect("schema version reads"), 2);
+        assert!(!handler
+            .store
+            .work_model_v3_enabled()
+            .expect("v3 capability reads"));
+        assert_eq!(
+            handler
+                .store
+                .project_revision("service-project")
+                .expect("project revision reads")
+                .0,
+            before_revision
+        );
         let _ = fs::remove_file(db);
     }
 
@@ -4235,12 +4256,10 @@ mod tests {
         assert_eq!(shown.outcome, ApplicationOutcome::Unchanged);
         assert_eq!(shown.revision, Some(2));
         let data = shown.data.as_ref().expect("work show data");
-        assert_eq!(data["work_id"], "show-task");
-        assert_eq!(data["kind"], "task");
-        assert_eq!(data["title"], "Shown task");
-        assert_eq!(data["description"], "service exact read");
-        assert_eq!(data["priority"], 7);
-        assert_eq!(data["dispatch_policy"], "paused");
+        let direct = WorkApplication::new(&handler.store)
+            .show_work(&ProjectId::new("show-project"), "show-task")
+            .expect("direct work show");
+        assert_eq!(data, &super::super::work_projection_json(&direct));
         let _ = fs::remove_file(db);
     }
 

@@ -201,7 +201,7 @@ const COMMANDS: &[CommandSpec] = &[
         action: "read",
         output: "dependency_graph",
         direct: true,
-        service: false,
+        service: true,
         summary: "read the canonical dependency graph and cycle diagnostics",
     },
     CommandSpec {
@@ -210,7 +210,7 @@ const COMMANDS: &[CommandSpec] = &[
         action: "read",
         output: "dependency_graph",
         direct: true,
-        service: false,
+        service: true,
         summary: "report dependency cycles found in the project snapshot",
     },
     CommandSpec {

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import platform
 import subprocess
@@ -163,6 +164,52 @@ def binary_freshness(binary: Path) -> dict[str, Any]:
     }
 
 
+def binary_runtime_check(
+    binary: Path, log_dir: Path, *, require_sqlite_floor: bool
+) -> dict[str, Any]:
+    """Prove the selected executable's actual SQLite runtime, not a test crate's."""
+    result = run_check(
+        "binary-runtime",
+        [str(binary), "version", "--json"],
+        log_dir,
+    )
+    result["binary_sha256"] = (
+        hashlib.sha256(binary.read_bytes()).hexdigest() if binary.exists() else None
+    )
+    if result["status"] != "pass":
+        return result
+    try:
+        lines = [
+            line for line in (log_dir / "binary-runtime.stdout.log")
+            .read_text(encoding="utf-8")
+            .splitlines()
+            if line.strip()
+        ]
+        envelope = json.loads(lines[-1])
+        runtime = envelope["data"]["sqlite_runtime"]
+        libversion = str(runtime["libversion"])
+        version = tuple(int(part) for part in libversion.split(".")[:3])
+    except (IndexError, KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
+        result["status"] = "fail"
+        result["exit_code"] = 2
+        result["reason"] = f"selected binary did not report a parseable SQLite runtime: {error}"
+        return result
+    meets_floor = version >= (3, 51, 3)
+    result["sqlite_runtime"] = {
+        "libversion": libversion,
+        "source_id": runtime.get("source_id"),
+        "meets_floor": meets_floor,
+        "required_floor": "3.51.3",
+    }
+    if require_sqlite_floor and not meets_floor:
+        result["status"] = "fail"
+        result["exit_code"] = 2
+        result["reason"] = (
+            f"selected binary links SQLite {libversion}, below the required 3.51.3 release floor"
+        )
+    return result
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--profile", choices=("smoke", "full"), default="smoke")
@@ -249,6 +296,19 @@ def main() -> int:
         )
     )
     if args.require_current_binary:
+        # `cargo test --workspace` does not guarantee that the bwrk binary
+        # target is rebuilt. Build it explicitly after the test pass so the
+        # executable used by every black-box gate is current and inherits the
+        # caller's release-link configuration (including RUSTFLAGS for the
+        # declared SQLite floor).
+        checks.append(
+            run_check(
+                "binary-build",
+                ["cargo", "build", "--bin", "bwrk", "--locked", *cargo_network_args],
+                log_dir,
+                timeout_seconds=args.timeout_seconds,
+            )
+        )
         binary_path_ok = binary.resolve() == current_binary.resolve() and binary.exists()
         checks.append(
             {
@@ -264,6 +324,14 @@ def main() -> int:
             }
         )
     checks.append(binary_freshness(binary))
+    if args.require_sqlite_floor:
+        checks.append(
+            binary_runtime_check(
+                binary,
+                log_dir,
+                require_sqlite_floor=True,
+            )
+        )
     checks.append(
         run_check(
             "tui",

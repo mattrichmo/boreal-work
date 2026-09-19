@@ -1,6 +1,6 @@
 {
   "schema": "boreal.validation.tui-forensic-closeout.v1",
-  "generated_at": "2026-09-18T23:47:36.472Z",
+  "generated_at": "2026-09-19T00:09:49.156Z",
   "status": "pass",
   "gates": {
     "V04": {
@@ -36,7 +36,7 @@
           "has_attempt": false,
           "has_deadlines": false,
           "revision": 5,
-          "as_of": "unix-ms:1789775255835",
+          "as_of": "unix-ms:1789776588553",
           "recovery_readback_required": false
         },
         {
@@ -54,7 +54,7 @@
           "has_attempt": false,
           "has_deadlines": false,
           "revision": 5,
-          "as_of": "unix-ms:1789775255835",
+          "as_of": "unix-ms:1789776588553",
           "recovery_readback_required": false
         },
         {
@@ -72,7 +72,7 @@
           "has_attempt": false,
           "has_deadlines": false,
           "revision": 5,
-          "as_of": "unix-ms:1789775255835",
+          "as_of": "unix-ms:1789776588553",
           "recovery_readback_required": false
         },
         {
@@ -90,7 +90,7 @@
           "has_attempt": false,
           "has_deadlines": false,
           "revision": 9,
-          "as_of": "unix-ms:1789775255853",
+          "as_of": "unix-ms:1789776588572",
           "recovery_readback_required": false
         },
         {
@@ -108,7 +108,7 @@
           "has_attempt": false,
           "has_deadlines": false,
           "revision": 9,
-          "as_of": "unix-ms:1789775255853",
+          "as_of": "unix-ms:1789776588572",
           "recovery_readback_required": false
         },
         {
@@ -126,7 +126,7 @@
           "has_attempt": true,
           "has_deadlines": true,
           "revision": 9,
-          "as_of": "unix-ms:1789775255853",
+          "as_of": "unix-ms:1789776588572",
           "recovery_readback_required": false
         }
       ]
@@ -160,7 +160,7 @@
         }
       ],
       "full_screen": {
-        "finish_operation_id": "op_tui_mu7lz691_9",
+        "finish_operation_id": "op_tui_mu7mrqk1_9",
         "notice": "mutation committed at revision 36; refresh unavailable: monitoring response has no revisioned data",
         "terminal_output_bytes": 60714,
         "receipt_dto_raw_coverage_kind": "Verification (normalized to verification)"
@@ -171,20 +171,20 @@
           "actor_id": "forensic-tui-agent",
           "attempt_id": "attempt-closeout-task",
           "command": "finish_close",
-          "completed_at": "unix-ms:1789775256430",
-          "created_at": "unix-ms:1789775256430",
+          "completed_at": "unix-ms:1789776589113",
+          "created_at": "unix-ms:1789776589113",
           "fence": 1,
-          "operation_id": "op_tui_mu7lz691_9",
+          "operation_id": "op_tui_mu7mrqk1_9",
           "outcome": "changed",
           "project_id": "forensic-tui-project",
-          "request_digest": "sha256:8d001a9405302740c4e62cdbd219fee7c2690ac180b0146e541b9081ee3bace9",
+          "request_digest": "sha256:09f5c5eac51d342dc307a5bb2339ea580ad82c6f24f91222c371fd65e61b999f",
           "result": {
             "attempt": {
               "attempt_id": "attempt-closeout-task",
               "current": false,
               "fence": 1,
-              "hard_deadline": "unix-ms:1789782456209",
-              "lease_deadline": "unix-ms:1789777056209",
+              "hard_deadline": "unix-ms:1789783788917",
+              "lease_deadline": "unix-ms:1789778388917",
               "phase": "verifying",
               "replayed": false
             },
@@ -194,7 +194,7 @@
             "gates": null,
             "receipt_id": "receipt-op_forensic_tui_close_verification_23",
             "receipt_replayed": true,
-            "summary_id": "summary-attempt-closeout-task-tui_mu7lz691_9",
+            "summary_id": "summary-attempt-closeout-task-tui_mu7mrqk1_9",
             "summary_replayed": false
           },
           "revision": 36,
@@ -216,23 +216,23 @@
             "profile_id": "focused",
             "profile_version": "1"
           },
-          "created_at": "unix-ms:1789775256338",
+          "created_at": "unix-ms:1789776589023",
           "cwd": ".",
-          "ended_at": "unix-ms:1789775256335",
+          "ended_at": "unix-ms:1789776589020",
           "environment_fingerprint": "sha256:5052590c81fab3b7c2fdf3394e45808c84aae56628f15f41d25211cb793d47c7",
           "executable": "/usr/bin/printf",
           "exit_code": 0,
           "fixture_id": null,
           "operation_id": "op_forensic_tui_close_verification_23",
           "output_digest": "sha256:c5e1ee7b41b870262d7b1b6cc7803a46c54e9d9d30a16ea7bb5c3b38132a2ffd",
-          "output_ref": "/private/var/folders/hm/p8b2n4p900q3vn5qtvdtg0hw0000gn/T/boreal-forensic-tui-S8xxg6/evidence/sha256-86c3df343bca599151cf38c6d290c38428af6d0a5822057ce1dab83fc07849b0/sha256-bf4d0a1972c6718eec52f942627a900e396bd641c564e4f38010e928b911046d.combined",
+          "output_ref": "/private/var/folders/hm/p8b2n4p900q3vn5qtvdtg0hw0000gn/T/boreal-forensic-tui-is3PCK/evidence/sha256-6698db83f0e1d22c8cbc46a0c7df89465db667c55a7189231f06f49c6eda8758/sha256-bf4d0a1972c6718eec52f942627a900e396bd641c564e4f38010e928b911046d.combined",
           "receipt_id": "receipt-op_forensic_tui_close_verification_23",
           "rejection_code": null,
           "result": "passed",
           "retention": null,
           "schema_version": "boreal.receipt.v1",
           "source_snapshot_hash": "sv_forensic-tui-project_sha256:b089b5a6c50943df241ca69298e61751c9ff20a314b7d69503b8e9523f722151",
-          "started_at": "unix-ms:1789775256298",
+          "started_at": "unix-ms:1789776588988",
           "subject": {
             "attempt_id": "attempt-closeout-task",
             "fence": 1,
@@ -247,7 +247,7 @@
       "status": "pass",
       "committed_status": "closed",
       "refresh_notice": "mutation committed at revision 36; refresh unavailable: monitoring response has no revisioned data",
-      "finish_operation_id": "op_tui_mu7lz691_9"
+      "finish_operation_id": "op_tui_mu7mrqk1_9"
     }
   },
   "fixture": {
