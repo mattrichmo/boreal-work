@@ -123,6 +123,11 @@ function renderItem(item: StatusItem, narrow: boolean, selected: boolean): strin
   const state = workflowDisplayState(item);
   const marker = selected ? ">" : " ";
   const kind = item.kind ? `[${item.kind}] ` : "";
+  if (item.diagnostic) {
+    const state = "CORRUPT";
+    if (narrow) return `${marker}${state.padEnd(9)} ${kind}${item.work_id}${item.title ? ` | ${item.title}` : ""}`;
+    return `${marker} ${state.padEnd(17)} ${kind}${item.work_id}: unreadable record | ${item.diagnostic.code}`;
+  }
   if (narrow) return `${marker}${state.toUpperCase().padEnd(9)} ${kind}${item.work_id}${item.title ? ` | ${item.title}` : ""}`;
   const parent = item.parent_id ? ` | parent ${item.parent_id}` : "";
   const priority = item.priority === undefined ? "" : ` | p${item.priority}`;
@@ -133,6 +138,10 @@ function renderItem(item: StatusItem, narrow: boolean, selected: boolean): strin
 function renderSelected(item: StatusItem | null, narrow: boolean, receiptAvailable = false): string[] {
   if (!item) return ["", "SELECTED", narrow ? "  None. Use j/k, Enter." : "  No work selected. Use: select WORK_ID"];
   const lines = ["", "SELECTED", `  ${selectedLabel(item)}`, `  state: ${workflowDisplayState(item)}  claimable: ${item.claimable ? "yes" : "no"}`];
+  if (item.diagnostic) {
+    lines.push(`  CORRUPT: ${item.diagnostic.code}`, `  ${item.diagnostic.detail}`, "  actions: unavailable until the record is repaired");
+    return lines;
+  }
   if (narrow) {
     if (item.next_action) lines.push(`  next: ${item.next_action}`);
     if (item.gates?.open.length) lines.push(`  gates: ${item.gates.open.map((gate) => gate.gate_id).join(", ")}`);

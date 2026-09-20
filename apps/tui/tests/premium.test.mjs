@@ -295,7 +295,7 @@ test('explicit CLI choices cannot be changed by the wizard', () => {
 test('custom skill root rejects ambiguous multi-agent setup', () => {
     const s = project({ agents: ['codex', 'claude'], install_root: '/workspace/custom' });
     s.step = 1;
-    assert.match(validateWizard(s), /one agent/);
+    assert.match(validateWizard(s), /one assistant/);
 });
 test('prefix validation rejects relative, root, normalized root and control characters', () => {
     for (const prefix of ['relative', '/', '/tmp/..', '/tmp/bad\x1bpath']) {
@@ -314,7 +314,7 @@ test('existing-command protection follows the edited destination', () => {
         s.step = 2;
         assert.ok(choices(s).some(c => c.id === 'replace_existing'));
         s.step = 4;
-        assert.match(validateWizard(s), /Existing unrecognized/);
+        assert.match(validateWizard(s), /not recognized/);
         s.replace_existing = true;
         assert.equal(validateWizard(s), '');
     }

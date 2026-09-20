@@ -457,6 +457,17 @@ pub struct StatusWorkRecord {
     pub gate_diagnostics: GateDiagnostics,
 }
 
+/// A bounded, read-only diagnostic for a canonical work row that could not be
+/// decoded into the domain model. The row is kept out of lifecycle decisions,
+/// but remains visible to callers so one bad record cannot hide healthy work.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StatusRecordDiagnostic {
+    pub work_id: String,
+    pub title: Option<String>,
+    pub code: String,
+    pub detail: String,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct StatusDependencyRecord {
     pub prerequisite_id: WorkId,
@@ -470,6 +481,7 @@ pub struct ProjectStatusRead {
     pub revision: SnapshotRevision,
     pub total: u64,
     pub works: Vec<StatusWorkRecord>,
+    pub diagnostics: Vec<StatusRecordDiagnostic>,
     pub dependencies: Vec<StatusDependencyRecord>,
 }
 
@@ -2997,6 +3009,7 @@ impl SqliteStore {
             )?;
             rows.bind_text(1, project_id)?;
             let mut works = Vec::with_capacity(total as usize);
+            let mut record_diagnostics = Vec::new();
             while rows.step()? == SQLITE_ROW {
                 let work_id = rows.column_text(0)?;
                 let current_attempt = current_attempts.get(&work_id).cloned();
@@ -3025,31 +3038,44 @@ impl SqliteStore {
                         state: gate.state,
                     })
                     .collect();
-                let work = WorkItem {
-                    id: WorkId::new(work_id.clone()),
-                    project_id: ProjectId::new(rows.column_text(1)?),
-                    kind: parse_work_kind(&rows.column_text(2)?)?,
-                    parent_id: rows.column_optional_text(3)?.map(WorkId::new),
-                    title: rows.column_text(10)?,
-                    description: rows.column_text(11)?,
-                    lifecycle: parse_lifecycle(&rows.column_text(4)?)?,
-                    priority: u8::try_from(rows.column_u64(7)?).map_err(|_| {
-                        StoreError::Corrupt(format!("work {work_id} has priority outside u8 range"))
-                    })?,
-                    dispatch_policy: parse_dispatch_policy(&rows.column_text(5)?)?,
-                    hard_holds: active_holds.get(&work_id).cloned().unwrap_or_default(),
-                    acceptance_profile: AcceptanceProfile {
-                        id: ProfileId::new(rows.column_text(8)?),
-                        version: rows.column_u64(9)?.to_string(),
-                        gates,
-                    },
-                };
-                works.push(StatusWorkRecord {
-                    work,
-                    retry_not_before: rows.column_optional_text(6)?,
-                    current_attempt,
-                    gate_diagnostics: diagnostics,
-                });
+                let title = rows.column_text(10).ok();
+                let work = (|| {
+                    Ok::<WorkItem, StoreError>(WorkItem {
+                        id: WorkId::new(work_id.clone()),
+                        project_id: ProjectId::new(rows.column_text(1)?),
+                        kind: parse_work_kind(&rows.column_text(2)?)?,
+                        parent_id: rows.column_optional_text(3)?.map(WorkId::new),
+                        title: rows.column_text(10)?,
+                        description: rows.column_text(11)?,
+                        lifecycle: parse_lifecycle(&rows.column_text(4)?)?,
+                        priority: u8::try_from(rows.column_u64(7)?).map_err(|_| {
+                            StoreError::Corrupt(format!(
+                                "work {work_id} has priority outside u8 range"
+                            ))
+                        })?,
+                        dispatch_policy: parse_dispatch_policy(&rows.column_text(5)?)?,
+                        hard_holds: active_holds.get(&work_id).cloned().unwrap_or_default(),
+                        acceptance_profile: AcceptanceProfile {
+                            id: ProfileId::new(rows.column_text(8)?),
+                            version: rows.column_u64(9)?.to_string(),
+                            gates,
+                        },
+                    })
+                })();
+                match work {
+                    Ok(work) => works.push(StatusWorkRecord {
+                        work,
+                        retry_not_before: rows.column_optional_text(6)?,
+                        current_attempt,
+                        gate_diagnostics: diagnostics,
+                    }),
+                    Err(error) => record_diagnostics.push(StatusRecordDiagnostic {
+                        work_id,
+                        title,
+                        code: "corrupt_record".to_owned(),
+                        detail: error.to_string(),
+                    }),
+                }
             }
 
             let mut dependencies = Vec::new();
@@ -3072,6 +3098,7 @@ impl SqliteStore {
                 revision,
                 total,
                 works,
+                diagnostics: record_diagnostics,
                 dependencies,
             })
         })();

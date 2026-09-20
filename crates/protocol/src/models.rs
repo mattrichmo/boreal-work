@@ -51,6 +51,8 @@ pub struct StatusDto {
     pub lifecycle: String,
     #[serde(default)]
     pub reason_codes: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub diagnostics: Vec<StatusDiagnosticDto>,
     pub claimable_for_actor: bool,
     pub next_action: Option<NextActionDto>,
     pub attempt: Option<AttemptDto>,
@@ -60,6 +62,17 @@ pub struct StatusDto {
     pub dependency: DependencyDto,
     pub as_of: String,
     pub next_status_change_at: Option<String>,
+}
+
+/// Bounded record-level read diagnostic. A diagnostic is not lifecycle state
+/// and must never be used as permission to mutate the underlying record.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct StatusDiagnosticDto {
+    pub work_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    pub code: String,
+    pub detail: String,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
@@ -133,6 +146,8 @@ pub struct ListDto {
     pub kind: String,
     #[serde(default)]
     pub items: Vec<ListItemDto>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub diagnostics: Vec<StatusDiagnosticDto>,
     pub page: PageDto,
     pub counts: CountsDto,
     pub source_revision: u64,

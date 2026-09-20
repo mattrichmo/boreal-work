@@ -155,6 +155,14 @@ export interface StatusItem {
   lifecycle?: WorkStatus;
   receipt?: unknown;
   receipt_id?: string | null;
+  diagnostic?: StatusDiagnostic;
+}
+
+export interface StatusDiagnostic {
+  work_id: string;
+  title?: string | null;
+  code: string;
+  detail: string;
 }
 
 export interface MonitoringCounts {
@@ -173,6 +181,7 @@ export interface RevisionedStatusResponse {
   revision?: number;
   total?: number;
   items: StatusItem[];
+  diagnostics?: StatusDiagnostic[];
   counts?: Partial<MonitoringCounts>;
   as_of?: string;
   project_id?: string;
@@ -196,6 +205,7 @@ export interface MonitoringModel {
   total: number;
   counts: MonitoringCounts;
   items: StatusItem[];
+  diagnostics: StatusDiagnostic[];
   truncated: boolean;
   project_id?: string;
   project_name?: string;
@@ -798,6 +808,22 @@ function normalizeStatusItem(value: unknown): StatusItem {
   };
 }
 
+function normalizeDiagnostics(value: unknown): StatusDiagnostic[] {
+  if (value === undefined || value === null) return [];
+  if (!Array.isArray(value)) throw new ProtocolEnvelopeError("status diagnostics must be an array");
+  return value.map((entry) => {
+    if (!isObject(entry) || typeof entry.work_id !== "string" || typeof entry.code !== "string" || typeof entry.detail !== "string") {
+      throw new ProtocolEnvelopeError("status diagnostic has invalid fields");
+    }
+    return {
+      work_id: entry.work_id,
+      title: typeof entry.title === "string" || entry.title === null ? entry.title : undefined,
+      code: entry.code,
+      detail: entry.detail,
+    };
+  });
+}
+
 function emptyCounts(): MonitoringCounts {
   return { matched: 0, queued: 0, ready: 0, blocked: 0, in_progress: 0, expired_review: 0, closed: 0 };
 }
@@ -1181,6 +1207,20 @@ export function buildMonitoringModel(envelope: Envelope<RevisionedStatusResponse
   }
   if (!Array.isArray(validated.data.items)) throw new ProtocolEnvelopeError("monitoring items must be an array");
   const items = validated.data.items.map(normalizeStatusItem);
+  const diagnostics = normalizeDiagnostics(validated.data.diagnostics);
+  const diagnosticItems: StatusItem[] = diagnostics.map((diagnostic) => ({
+    work_id: diagnostic.work_id,
+    status: "corrupt",
+    display_status: "corrupt",
+    reason_codes: [diagnostic.code],
+    claimable: false,
+    claimable_for_actor: false,
+    next_action: null,
+    title: diagnostic.title ?? `${diagnostic.work_id} · unreadable record`,
+    kind: "work",
+    diagnostic,
+  }));
+  const displayItems = [...items, ...diagnosticItems];
   const responseRevision = validated.data.revision;
   if (responseRevision !== undefined && responseRevision !== validated.revision) {
     throw new ProtocolEnvelopeError("monitoring response mixes revisions");
@@ -1193,13 +1233,13 @@ export function buildMonitoringModel(envelope: Envelope<RevisionedStatusResponse
   // implementations also echo `data.as_of`; tolerate an independently read
   // echo and never reject a valid snapshot because the two clocks were sampled
   // at different instants.
-  const total = validated.data.counts?.matched ?? validated.data.counts?.total ?? validated.data.total ?? items.length;
+  const total = validated.data.total ?? validated.data.counts?.matched ?? validated.data.counts?.total ?? displayItems.length;
   asNumber(total, "total");
   const limit = validated.data.limit === undefined ? MAX_INLINE_ITEMS : asNumber(validated.data.limit, "limit");
   const offset = validated.data.offset === undefined ? 0 : asNumber(validated.data.offset, "offset");
-  const hasMore = validated.data.has_more ?? offset + items.length < total;
+  const hasMore = validated.data.has_more ?? offset + displayItems.length < total;
   const nextOffset = validated.data.next_offset === undefined
-    ? (hasMore ? offset + items.length : null)
+    ? (hasMore ? offset + displayItems.length : null)
     : validated.data.next_offset;
   const itemDeadline = items
     .map((item) => item.next_status_change_at)
@@ -1210,9 +1250,10 @@ export function buildMonitoringModel(envelope: Envelope<RevisionedStatusResponse
     as_of: validated.as_of,
     next_status_change_at: validated.next_status_change_at ?? validated.data.next_status_change_at ?? itemDeadline,
     total,
-    counts: normalizeCounts(validated.data.counts, items, total),
-    items: items.slice(0, MAX_INLINE_ITEMS),
-    truncated: items.length > MAX_INLINE_ITEMS || hasMore || total > items.length,
+    counts: normalizeCounts(validated.data.counts, displayItems, total),
+    items: displayItems.slice(0, MAX_INLINE_ITEMS),
+    diagnostics,
+    truncated: displayItems.length > MAX_INLINE_ITEMS || hasMore || total > displayItems.length,
     project_id: typeof validated.data.project_id === "string" ? validated.data.project_id : undefined,
     project_name: typeof validated.data.project_name === "string" ? validated.data.project_name : undefined,
     active_cycle_id: typeof validated.data.active_cycle_id === "string" || validated.data.active_cycle_id === null
@@ -1343,6 +1384,10 @@ export function actionAvailability(
         : reason,
     requires_confirmation: confirmation,
   });
+  if (item.diagnostic) {
+    return (["claim", "accept_start", "evidence", "finish", "release"] as const).map((action) =>
+      disabled(action, `unavailable: ${item.diagnostic?.code ?? "corrupt record"}`, false));
+  }
   return [
     disabled("claim", blocked ? "work is blocked" : queued ? "waiting for prerequisite" : expired ? "expiry requires review" : item.claimable ? null : "work is not claimable at this revision", item.claimable && !blocked && !queued && !expired),
     disabled("accept_start", blocked ? "work is blocked" : queued ? "waiting for prerequisite" : expired ? "expiry requires review" : hasAttempt && status === "claimed" ? null : "a claimed attempt is required", hasAttempt && status === "claimed" && !blocked && !queued && !expired),

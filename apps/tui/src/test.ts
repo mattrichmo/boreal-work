@@ -125,6 +125,17 @@ assert(view.as_of === initialEnvelope.as_of, "single as_of");
 assert(view.total === 2 && view.counts.queued === 1 && view.counts.ready === 1, "monitoring counts");
 assert(contextualAction(view.items[0]) === "wait for prerequisite", "queued action");
 assert(contextualAction(view.items[1]) === "claim", "ready action");
+const degradedEnvelope = {
+  ...monitoring(5, [item("healthy", "ready")]),
+  data: {
+    ...monitoring(5, [item("healthy", "ready")]).data!,
+    diagnostics: [{ work_id: "broken-sprint", title: "Release train", code: "corrupt_record", detail: "unknown work kind: sprint-ish" }],
+  },
+} as Envelope<RevisionedStatusResponse>;
+const degraded = buildStatusView(degradedEnvelope);
+assert(degraded.diagnostics.length === 1 && degraded.items.some((entry) => entry.diagnostic?.code === "corrupt_record"), "corrupt records remain visible as diagnostics");
+const brokenRecord = degraded.items.find((entry) => entry.diagnostic);
+assert(!!brokenRecord && actionAvailability(brokenRecord).every((entry) => !entry.enabled), "corrupt records disable mutations");
 throws(() => validateEnvelope({ ...initialEnvelope, api_version: "1" }));
 throws(() => validateEnvelope({ ...initialEnvelope, outcome: "rejected", error: null }));
 const skewedAsOf = {

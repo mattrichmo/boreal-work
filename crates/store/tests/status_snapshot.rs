@@ -127,3 +127,46 @@ fn project_status_read_is_revisioned_and_contains_graph_attempt_and_gates() {
     assert_eq!(w1.work.acceptance_profile.gates[0].state, GateState::Open);
     assert_eq!(AcceptanceProfile::focused().gates.len(), 3);
 }
+
+#[test]
+fn malformed_work_row_is_reported_without_hiding_healthy_rows() {
+    let store = store();
+    store
+        .initialize_project(
+            "p1",
+            "agent-1",
+            "agent",
+            "credential",
+            "Agent",
+            "op-init",
+            "sha256:op-init",
+            "unix-ms:0",
+        )
+        .unwrap();
+    for (id, operation) in [("healthy", "op-healthy"), ("broken", "op-broken")] {
+        store
+            .create_work_operation(
+                &work("p1", id),
+                "agent-1",
+                operation,
+                &format!("sha256:{operation}"),
+                "unix-ms:1",
+            )
+            .unwrap();
+    }
+    store
+        .execute_batch(
+            "PRAGMA ignore_check_constraints = ON;
+             UPDATE work_item SET kind = 'not-a-work-kind' WHERE work_id = 'broken';
+             PRAGMA ignore_check_constraints = OFF;",
+        )
+        .unwrap();
+
+    let snapshot = store.read_project_status("p1").unwrap();
+    assert_eq!(snapshot.total, 2);
+    assert_eq!(snapshot.works.len(), 1);
+    assert_eq!(snapshot.works[0].work.id.as_str(), "healthy");
+    assert_eq!(snapshot.diagnostics.len(), 1);
+    assert_eq!(snapshot.diagnostics[0].work_id, "broken");
+    assert_eq!(snapshot.diagnostics[0].code, "corrupt_record");
+}

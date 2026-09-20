@@ -4,9 +4,9 @@ import { Screen, type Rect, type Tone } from "./screen.js";
 import { inputDisplay } from "./input.js";
 import { resolveViewport, chromeFor, paneViewport, dialogViewport, adaptiveHint, windowStart, type Density, type Chrome } from "./layout.js";
 import { ACTION_NAMES, FILTERS, itemStatus, paletteCommands, visibleItems, type DashboardState, type Modal } from "./model.js";
-const LABELS: Record<string, string> = { in_progress: "In progress", needs_verification: "Verification", awaiting_review: "Awaiting review", expired_review: "Review needed", retry_wait: "Retry wait" };
+const LABELS: Record<string, string> = { in_progress: "In progress", needs_verification: "Verification", awaiting_review: "Awaiting review", expired_review: "Review needed", retry_wait: "Retry wait", corrupt: "Unreadable" };
 const label = (s: string) => LABELS[s] ?? s.replaceAll("_", " ").replace(/^./, c => c.toUpperCase());
-const tone = (s: string): Tone => s === "ready" || s === "closed" ? "good" : ["blocked", "expired_review", "cancelled"].includes(s) ? "danger" : ["queued", "needs_verification", "awaiting_review"].includes(s) ? "warn" : "accent";
+const tone = (s: string): Tone => s === "ready" || s === "closed" ? "good" : ["blocked", "expired_review", "cancelled", "corrupt"].includes(s) ? "danger" : ["queued", "needs_verification", "awaiting_review"].includes(s) ? "warn" : "accent";
 export interface DashboardLayout {
     rail?: Rect; queue: Rect; inspector?: Rect; body: Rect; visibleRows: number;
     chrome: Chrome; mode: "three-pane" | "split" | "stacked" | "single"; footerRows: number;
@@ -176,6 +176,13 @@ export function detailLines(item: StatusItem | undefined, view: MountedView, tab
             add(item.next_action ? label(item.next_action) : "No next action supplied.", "accent"); }
         if (item.reason_codes.length)
             add(item.reason_codes.map(label).join(" · "), "warn");
+        if (item.diagnostic) {
+            add("");
+            add("RECORD INTEGRITY", "heading");
+            add("Unreadable record · no actions are available.", "danger");
+            add(item.diagnostic.code, "danger");
+            add(item.diagnostic.detail, "muted");
+        }
         if (item.description) {
             add("");
             add("DESCRIPTION", "heading");

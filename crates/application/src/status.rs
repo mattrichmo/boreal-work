@@ -10,7 +10,7 @@ use boreal_domain::{
     DependencyPolicy, DerivedStatus, GateId, GateKind, GateRequirement, GateState, Revision,
     RollupCounts, StatusContext, StatusDecision, TimestampMs, WorkId, WorkItem,
 };
-use boreal_store::{SqliteStore, StatusWorkRecord};
+use boreal_store::{SqliteStore, StatusRecordDiagnostic, StatusWorkRecord};
 use std::{collections::BTreeMap, fmt};
 
 pub const STATUS_CONTRACT_VERSION: &str = "boreal.work-status/2";
@@ -165,12 +165,16 @@ pub struct StatusSnapshot {
     pub total: u64,
     pub counts: RollupCounts,
     pub items: Vec<StatusWork>,
+    pub diagnostics: Vec<StatusRecordDiagnostic>,
     pub next_status_change_at: Option<TimestampMs>,
 }
 
 impl StatusSnapshot {
     pub fn has_more(&self) -> bool {
-        self.offset.saturating_add(self.items.len() as u64) < self.total
+        self.offset
+            .saturating_add(self.items.len() as u64)
+            .saturating_add(self.diagnostics.len() as u64)
+            < self.total
     }
 
     pub fn next_offset(&self) -> Option<u64> {
@@ -366,6 +370,7 @@ pub fn project_status(
         total,
         counts,
         items,
+        diagnostics: Vec::new(),
         next_status_change_at,
     })
 }
@@ -392,21 +397,50 @@ pub fn project_status_from_store(
     let persisted = store
         .read_project_status(project_id.as_str())
         .map_err(|error| error.to_string())?;
-    let inputs = persisted
-        .works
+    let mut diagnostics = persisted.diagnostics.clone();
+    let mut inputs = Vec::with_capacity(persisted.works.len());
+    for row in &persisted.works {
+        match status_input_from_store_row(row) {
+            Ok(input) => inputs.push(input),
+            Err(detail) => diagnostics.push(StatusRecordDiagnostic {
+                work_id: row.work.id.to_string(),
+                title: Some(row.work.title.clone()),
+                code: "corrupt_record".to_owned(),
+                detail,
+            }),
+        }
+    }
+    let known_work = inputs
         .iter()
-        .map(status_input_from_store_row)
-        .collect::<Result<Vec<_>, _>>()?;
+        .map(|input| input.work.id.clone())
+        .collect::<std::collections::BTreeSet<_>>();
     let dependencies = persisted
         .dependencies
         .iter()
-        .map(|edge| DependencyInput {
-            prerequisite_id: edge.prerequisite_id.clone(),
-            dependent_id: edge.dependent_id.clone(),
-            policy: edge.policy,
+        .filter_map(|edge| {
+            if known_work.contains(&edge.prerequisite_id)
+                && known_work.contains(&edge.dependent_id)
+            {
+                Some(DependencyInput {
+                    prerequisite_id: edge.prerequisite_id.clone(),
+                    dependent_id: edge.dependent_id.clone(),
+                    policy: edge.policy,
+                })
+            } else {
+                diagnostics.push(StatusRecordDiagnostic {
+                    work_id: edge.dependent_id.to_string(),
+                    title: None,
+                    code: "orphaned_dependency".to_owned(),
+                    detail: format!(
+                        "dependency references a work record that could not be read (prerequisite {})",
+                        edge.prerequisite_id
+                    ),
+                });
+                None
+            }
         })
         .collect::<Vec<_>>();
-    project_status(
+    let mut snapshot = project_status(
         project_id,
         actor,
         as_of,
@@ -416,7 +450,10 @@ pub fn project_status_from_store(
         limit,
         offset,
     )
-    .map_err(|error| error.to_string())
+    .map_err(|error| error.to_string())?;
+    snapshot.total = persisted.total;
+    snapshot.diagnostics = diagnostics;
+    Ok(snapshot)
 }
 
 fn status_input_from_store_row(row: &StatusWorkRecord) -> Result<StatusWorkInput, String> {

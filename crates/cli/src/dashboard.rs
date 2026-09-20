@@ -7,7 +7,6 @@
 use super::*;
 use serde::Deserialize;
 use std::{
-    collections::BTreeSet,
     io::IsTerminal,
     process::{Child, ExitStatus},
     sync::atomic::{AtomicU64, Ordering},
@@ -21,13 +20,22 @@ use boreal_service::{
 
 const SERVICE_START_TIMEOUT: Duration = Duration::from_secs(5);
 const CHILD_EXIT_GRACE: Duration = Duration::from_secs(2);
-const PROJECT_ENV_KEYS: [&str; 2] = ["BOREAL_PROJECT", "BOREAL_PROJECT_ID"];
-const PROJECT_METADATA_FILES: [&str; 3] = ["project-id", "project", "project.json"];
+const DEFAULT_DATABASE: &str = ".boreal/boreal.sqlite";
 static DASHBOARD_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Deserialize)]
 struct ProjectMetadata {
     project_id: String,
+    project_root: PathBuf,
+    database: PathBuf,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct DashboardContext {
+    metadata_path: Option<PathBuf>,
+    project_root: Option<PathBuf>,
+    project_id: String,
+    database: PathBuf,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -47,7 +55,6 @@ pub(super) fn run_dashboard(parsed: &ParsedCommand) -> Result<CliResult, CliErro
             "dashboard manages its own private service; omit --socket",
         ));
     }
-    let database = existing_database_path(Path::new(&parsed.options.db))?;
     let current_dir = env::current_dir().map_err(|error| {
         CliError::with(
             ErrorCode::ServiceUnavailable,
@@ -55,13 +62,15 @@ pub(super) fn run_dashboard(parsed: &ParsedCommand) -> Result<CliResult, CliErro
             format!("cannot resolve the working directory: {error}"),
         )
     })?;
+    let context = resolve_dashboard_context(parsed, &current_dir)?;
+    let database = existing_database_path(&context.database)?;
     let store = SqliteStore::open(&database, SCHEMA).map_err(map_store_error)?;
     let project_ids = store.list_project_ids().map_err(map_store_error)?;
-    let metadata_ids = local_project_metadata(&database, &current_dir)?;
     let project = resolve_project_id(
         parsed.options.project.as_deref(),
-        &metadata_ids,
+        &context.project_id,
         &project_ids,
+        &database,
     )?;
 
     if parsed.options.json {
@@ -104,7 +113,7 @@ fn existing_database_path(path: &Path) -> Result<PathBuf, CliError> {
             ErrorCode::NotFound,
             ApplicationOutcome::Failed,
             format!(
-                "Boreal database not found at {}; run `bwrk init PROJECT` or pass --db PATH",
+                "Boreal database not found at {}; run `bwrk init` in this project directory or pass --db PATH --project PROJECT",
                 path.display()
             ),
         ));
@@ -118,120 +127,185 @@ fn existing_database_path(path: &Path) -> Result<PathBuf, CliError> {
     })
 }
 
-fn local_project_metadata(database: &Path, current_dir: &Path) -> Result<Vec<String>, CliError> {
-    let mut values = BTreeSet::new();
-    for key in PROJECT_ENV_KEYS {
-        if let Some(value) = env::var_os(key) {
-            let value = value.to_string_lossy().trim().to_owned();
-            if !value.is_empty() {
-                values.insert(value);
+fn resolve_dashboard_context(
+    parsed: &ParsedCommand,
+    current_dir: &Path,
+) -> Result<DashboardContext, CliError> {
+    let metadata_path = nearest_project_metadata(current_dir);
+    let (metadata, project_root) = match metadata_path.as_ref() {
+        Some(path) => {
+            let encoded = fs::read_to_string(path).map_err(|error| {
+                CliError::with(
+                    ErrorCode::InvalidArgument,
+                    ApplicationOutcome::Rejected,
+                    format!("cannot read project metadata {}: {error}", path.display()),
+                )
+            })?;
+            let metadata = serde_json::from_str::<ProjectMetadata>(&encoded).map_err(|error| {
+                CliError::with(
+                    ErrorCode::InvalidArgument,
+                    ApplicationOutcome::Rejected,
+                    format!("invalid project metadata {}: {error}", path.display()),
+                )
+            })?;
+            if metadata.project_id.trim().is_empty() {
+                return Err(CliError::invalid(format!(
+                    "project metadata {} has an empty project identifier; run `bwrk init` to repair it",
+                    path.display()
+                )));
             }
+            if metadata.project_root.as_os_str().is_empty() {
+                return Err(CliError::invalid(format!(
+                    "project metadata {} has an empty project root; run `bwrk init` to repair it",
+                    path.display()
+                )));
+            }
+            if metadata.database.as_os_str().is_empty() {
+                return Err(CliError::invalid(format!(
+                    "project metadata {} has an empty database path; run `bwrk init` to repair it",
+                    path.display()
+                )));
+            }
+            let metadata_root = path.parent().and_then(Path::parent).ok_or_else(|| {
+                CliError::invalid(format!(
+                    "project metadata path is malformed: {}",
+                    path.display()
+                ))
+            })?;
+            let project_root = fs::canonicalize(resolve_context_path(
+                &metadata.project_root,
+                metadata_root,
+            ))
+            .map_err(|error| {
+                CliError::with(
+                    ErrorCode::NotFound,
+                    ApplicationOutcome::Failed,
+                    format!(
+                        "project folder from {} is unavailable; run `bwrk init` to repair this project context: {error}",
+                        path.display()
+                    ),
+                )
+            })?;
+            let current_dir = fs::canonicalize(current_dir).map_err(|error| {
+                CliError::with(
+                    ErrorCode::ServiceUnavailable,
+                    ApplicationOutcome::Failed,
+                    format!("cannot resolve the working directory: {error}"),
+                )
+            })?;
+            let metadata_root = fs::canonicalize(metadata_root).map_err(|error| {
+                CliError::with(
+                    ErrorCode::InvalidArgument,
+                    ApplicationOutcome::Rejected,
+                    format!("project metadata directory is unavailable: {error}"),
+                )
+            })?;
+            if metadata_root != project_root || !current_dir.starts_with(&project_root) {
+                return Err(CliError::invalid(format!(
+                    "project metadata {} is not bound to the current project; run `bwrk init` in this project",
+                    path.display()
+                )));
+            }
+            if parsed.options.db == DEFAULT_DATABASE && parsed.options.project.is_none() {
+                let metadata_database = resolve_context_path(&metadata.database, &project_root);
+                if !metadata_database.starts_with(&project_root) {
+                    return Err(CliError::invalid(format!(
+                        "project metadata {} points outside this project to {}; pass --db PATH --project PROJECT explicitly or run `bwrk init` to repair it",
+                        path.display(),
+                        metadata_database.display()
+                    )));
+                }
+            }
+            (Some(metadata), Some(project_root))
         }
-    }
+        None if parsed.options.db == DEFAULT_DATABASE => {
+            return Err(CliError::with(
+                ErrorCode::NotFound,
+                ApplicationOutcome::Failed,
+                "this folder is not initialized for Boreal; run `bwrk init` before starting the dashboard",
+            ));
+        }
+        None => (None, None),
+    };
 
-    let state_root = database.parent().unwrap_or_else(|| Path::new("."));
-    let mut roots = current_dir
-        .ancestors()
-        .map(Path::to_owned)
-        .collect::<Vec<_>>();
-    if !roots.iter().any(|root| root == state_root) {
-        roots.push(state_root.to_owned());
-    }
-    let mut metadata_paths = BTreeSet::new();
-    for root in roots {
-        for candidate in PROJECT_METADATA_FILES
-            .iter()
-            .map(|name| root.join(name))
-            .chain(
-                PROJECT_METADATA_FILES
-                    .iter()
-                    .map(|name| root.join(".boreal").join(name)),
-            )
-        {
-            metadata_paths.insert(candidate);
-        }
-    }
-    for path in metadata_paths {
-        if !path.is_file() {
-            continue;
-        }
-        let encoded = fs::read_to_string(&path).map_err(|error| {
-            CliError::with(
-                ErrorCode::InvalidArgument,
-                ApplicationOutcome::Rejected,
-                format!("cannot read project metadata {}: {error}", path.display()),
-            )
-        })?;
-        let value = if path.file_name().and_then(|name| name.to_str()) == Some("project.json") {
-            serde_json::from_str::<ProjectMetadata>(&encoded)
-                .map_err(|error| {
-                    CliError::with(
-                        ErrorCode::InvalidArgument,
-                        ApplicationOutcome::Rejected,
-                        format!("invalid project metadata {}: {error}", path.display()),
-                    )
-                })?
-                .project_id
+    let database = if parsed.options.db == DEFAULT_DATABASE {
+        let project_root = project_root
+            .as_ref()
+            .expect("default database requires project metadata");
+        if parsed.options.project.is_some() {
+            project_root.join(DEFAULT_DATABASE)
         } else {
-            encoded.trim().to_owned()
-        };
-        if value.is_empty() {
-            return Err(CliError::invalid(format!(
-                "project metadata {} has an empty project identifier",
-                path.display()
-            )));
+            let metadata = metadata
+                .as_ref()
+                .expect("default database requires metadata");
+            resolve_context_path(&metadata.database, project_root)
         }
-        values.insert(value);
+    } else {
+        absolute_from_current(Path::new(&parsed.options.db), current_dir)
+    };
+
+    Ok(DashboardContext {
+        metadata_path,
+        project_root,
+        project_id: metadata
+            .map(|value| value.project_id.trim().to_owned())
+            .unwrap_or_default(),
+        database,
+    })
+}
+
+fn nearest_project_metadata(current_dir: &Path) -> Option<PathBuf> {
+    current_dir
+        .ancestors()
+        .map(|root| root.join(".boreal/project.json"))
+        .find(|candidate| candidate.is_file())
+}
+
+fn resolve_context_path(path: &Path, project_root: &Path) -> PathBuf {
+    if path.is_absolute() {
+        path.to_owned()
+    } else {
+        project_root.join(path)
     }
-    Ok(values.into_iter().collect())
+}
+
+fn absolute_from_current(path: &Path, current_dir: &Path) -> PathBuf {
+    if path.is_absolute() {
+        path.to_owned()
+    } else {
+        current_dir.join(path)
+    }
 }
 
 fn resolve_project_id(
     explicit: Option<&str>,
-    metadata_ids: &[String],
+    metadata_id: &str,
     database_ids: &[String],
+    database: &Path,
 ) -> Result<String, CliError> {
     if let Some(project) = explicit {
-        return require_known_project(project, database_ids, "explicit --project");
+        return require_known_project(project, database_ids, "explicit --project", database);
     }
-
-    match metadata_ids {
-        [project] => return require_known_project(project, database_ids, "local metadata"),
-        [] => {}
-        projects => {
-            return Err(CliError::invalid(format!(
-                "local project metadata is ambiguous ({}); pass --project PROJECT",
-                projects.join(", ")
-            )))
-        }
-    }
-
-    match database_ids {
-        [project] => Ok(project.clone()),
-        [] => Err(CliError::with(
+    if metadata_id.is_empty() {
+        return Err(CliError::with(
             ErrorCode::NotFound,
             ApplicationOutcome::Failed,
-            "the Boreal database contains no projects; run `bwrk init PROJECT`",
-        )),
-        projects => {
-            let visible = projects.iter().take(8).cloned().collect::<Vec<_>>();
-            let suffix = if projects.len() > visible.len() {
-                format!(", … ({} total)", projects.len())
-            } else {
-                String::new()
-            };
-            Err(CliError::invalid(format!(
-                "the Boreal database contains multiple projects ({}{suffix}); pass --project PROJECT",
-                visible.join(", ")
-            )))
-        }
+            "no initialized project context was found; pass --project PROJECT with --db PATH",
+        ));
     }
+    require_known_project(
+        metadata_id,
+        database_ids,
+        "local project metadata",
+        database,
+    )
 }
 
 fn require_known_project(
     project: &str,
     database_ids: &[String],
     source: &str,
+    database: &Path,
 ) -> Result<String, CliError> {
     if database_ids.iter().any(|candidate| candidate == project) {
         Ok(project.to_owned())
@@ -239,7 +313,10 @@ fn require_known_project(
         Err(CliError::with(
             ErrorCode::NotFound,
             ApplicationOutcome::Failed,
-            format!("project {project:?} selected by {source} is not present in the database"),
+            format!(
+                "project {project:?} selected by {source} is not present in database {}; run `bwrk init` to repair this project context",
+                database.display()
+            ),
         ))
     }
 }
@@ -989,37 +1066,36 @@ mod tests {
     use super::*;
 
     #[test]
-    fn project_resolution_prefers_explicit_then_metadata_then_single_database_project() {
+    fn project_resolution_prefers_explicit_then_bound_metadata() {
         let projects = vec!["alpha".to_owned(), "beta".to_owned()];
         assert_eq!(
-            resolve_project_id(Some("beta"), &["alpha".to_owned()], &projects).unwrap(),
+            resolve_project_id(Some("beta"), "alpha", &projects, Path::new("db.sqlite")).unwrap(),
             "beta"
         );
         assert_eq!(
-            resolve_project_id(None, &["alpha".to_owned()], &projects).unwrap(),
+            resolve_project_id(None, "alpha", &projects, Path::new("db.sqlite")).unwrap(),
             "alpha"
-        );
-        assert_eq!(
-            resolve_project_id(None, &[], &["only".to_owned()]).unwrap(),
-            "only"
         );
     }
 
     #[test]
-    fn project_resolution_reports_ambiguous_and_stale_metadata() {
+    fn project_resolution_rejects_stale_metadata_and_singleton_fallback() {
         let projects = vec!["alpha".to_owned(), "beta".to_owned()];
-        let ambiguous = resolve_project_id(None, &[], &projects).unwrap_err();
-        assert_eq!(ambiguous.code, ErrorCode::InvalidArgument);
-        assert!(ambiguous.message.contains("multiple projects"));
-
-        let stale = resolve_project_id(None, &["missing".to_owned()], &projects).unwrap_err();
+        let stale =
+            resolve_project_id(None, "missing", &projects, Path::new("db.sqlite")).unwrap_err();
         assert_eq!(stale.code, ErrorCode::NotFound);
-        assert!(stale.message.contains("local metadata"));
+        assert!(stale.message.contains("local project metadata"));
 
-        let conflicting =
-            resolve_project_id(None, &["alpha".to_owned(), "beta".to_owned()], &projects)
+        let no_metadata =
+            resolve_project_id(None, "", &["only".to_owned()], Path::new("db.sqlite")).unwrap_err();
+        assert_eq!(no_metadata.code, ErrorCode::NotFound);
+        assert!(no_metadata.message.contains("initialized project context"));
+
+        let missing_explicit =
+            resolve_project_id(Some("missing"), "alpha", &projects, Path::new("db.sqlite"))
                 .unwrap_err();
-        assert!(conflicting.message.contains("metadata is ambiguous"));
+        assert_eq!(missing_explicit.code, ErrorCode::NotFound);
+        assert!(missing_explicit.message.contains("explicit --project"));
     }
 
     #[test]

@@ -131,7 +131,7 @@ class ResponsivePtyTests(unittest.TestCase):
         s, result = self.project(0,0)
         try:
             self.assertIn('BOREAL', visible(s)); s.resize(40,8)
-            self.assertIn('1/4 Welcome', visible(s)); s.send(b'\r'); self.assertIn('Agent tools', visible(s))
+            self.assertIn('1/4 Welcome', visible(s)); s.send(b'\r'); self.assertIn('Assistants', visible(s))
             self.cancel(s,result)
         finally: s.close()
 
@@ -139,7 +139,7 @@ class ResponsivePtyTests(unittest.TestCase):
         s, result = self.project(190,16)
         try:
             s.send(b'\r'); self.assertIn('190×16', visible(s))
-            s.resize(0,0); self.assertIn('190×16', visible(s)); self.assertIn('Agent tools', visible(s))
+            s.resize(0,0); self.assertIn('190×16', visible(s)); self.assertIn('Assistants', visible(s))
             s.resize(120,14); self.assertIn('120×14', visible(s)); self.cancel(s,result)
         finally: s.close()
 
@@ -172,7 +172,7 @@ class ResponsivePtyTests(unittest.TestCase):
                 w,h=(24,6) if i%2 else (160,40)
                 fcntl.ioctl(s.fd,termios.TIOCSWINSZ,struct.pack('HHHH',h,w,0,0))
                 os.kill(s.pid,signal.SIGWINCH)
-            s.resize(190,12); s.send(b'\r'); self.assertIn('AGENT TOOLS',visible(s)); self.cancel(s,result)
+            s.resize(190,12); s.send(b'\r'); self.assertIn('ASSISTANTS',visible(s)); self.cancel(s,result)
         finally: s.close()
 
     @unittest.skipUnless(Path('/proc/self/fd').exists(),'Linux descriptor accounting')

@@ -2377,9 +2377,16 @@ fn status_snapshot_json(
         "total": snapshot.total,
         "has_more": snapshot.has_more(),
         "next_offset": snapshot.next_offset(),
+        "diagnostics": snapshot.diagnostics.iter().map(|diagnostic| json!({
+            "work_id": diagnostic.work_id,
+            "title": diagnostic.title,
+            "code": diagnostic.code,
+            "detail": diagnostic.detail,
+            "display_status": "corrupt",
+        })).collect::<Vec<_>>(),
         "counts": {
-            "matched": counts.total,
-            "total": counts.total,
+            "matched": snapshot.total,
+            "total": snapshot.total,
             "draft": counts.draft,
             "queued": counts.queued,
             "ready": counts.ready,
@@ -2394,6 +2401,7 @@ fn status_snapshot_json(
             "retry_wait": counts.retry_wait,
             "expired_review": counts.expired_review,
             "cancelled": counts.cancelled,
+            "degraded": snapshot.diagnostics.len(),
         },
         "items": snapshot.items.iter().map(status_item_json).collect::<Vec<_>>(),
         "timing": {

@@ -16,7 +16,7 @@ function wordmark(word = 'BOREAL-WORK') { return [0, 1, 2, 3, 4].map(row => Arra
 function createWizardState(mode, initial) {
     if (!['project', 'machine'].includes(mode))
         throw new Error('Unknown wizard mode.');
-    const steps = mode === 'project' ? ['Welcome', 'Agent tools', 'Memory', 'Review'] : ['Welcome', 'Destination', 'Components', 'Source', 'Review'];
+    const steps = mode === 'project' ? ['Welcome', 'Assistants', 'Project memory', 'Review'] : ['Welcome', 'Destination', 'Components', 'Source', 'Review'];
     return { mode, initial, steps, step: 0, cursor: 0, error: '', scroll: 0, maxOffset: 0, pageSize: 1,
         density: 'auto', theme: 'dark', ascii: false, help: false, helpScroll: 0, helpMax: 0, prefixCursor: undefined,
         prefix: initial.prefix || '', source: initial.source || 'release',
@@ -30,22 +30,22 @@ function machineCollision(s) {
 }
 function choices(s) {
     const page = s.steps[s.step];
-    if (page === 'Agent tools')
+    if (page === 'Assistants')
         return [
-            { id: 'codex', label: 'Codex', hint: '.agents/skills · Boreal agent skills', on: s.agents.includes('codex'), locked: s.initial.agents_locked },
-            { id: 'claude', label: 'Claude', hint: '.claude/skills · Boreal agent skills', on: s.agents.includes('claude'), locked: s.initial.agents_locked },
+            { id: 'codex', label: 'Codex', hint: '.agents/skills · Boreal support for Codex', on: s.agents.includes('codex'), locked: s.initial.agents_locked },
+            { id: 'claude', label: 'Claude', hint: '.claude/skills · Boreal support for Claude', on: s.agents.includes('claude'), locked: s.initial.agents_locked },
         ];
     if (page === 'Components')
         return [
-            { id: 'cli', label: 'Boreal command-line engine', hint: 'Required · bwrk and release metadata', on: true, locked: true },
-            { id: 'dashboard', label: 'Interactive work dashboard', hint: 'Human-facing TUI · requires Node.js 20–26', on: s.dashboard },
-            { id: 'verify', label: 'Verify the installed command', hint: 'Run staged bwrk --version before publishing', on: s.verify },
-            ...(machineCollision(s) ? [{ id: 'replace_existing', label: 'Replace the existing unrecognized bwrk', hint: 'Unchecked by default. A separate prefix retains v1.', on: s.replace_existing }] : []),
+            { id: 'cli', label: 'Boreal command', hint: 'Required · installs bwrk', on: true, locked: true },
+            { id: 'dashboard', label: 'Interactive work dashboard', hint: 'Terminal dashboard · requires Node.js 20–26', on: s.dashboard },
+            { id: 'verify', label: 'Verify the installed command', hint: 'Run bwrk --version before finishing', on: s.verify },
+            ...(machineCollision(s) ? [{ id: 'replace_existing', label: 'Replace an existing bwrk installation', hint: 'Off by default. Use a separate folder to keep the old version.', on: s.replace_existing }] : []),
         ];
-    if (page === 'Memory')
+    if (page === 'Project memory')
         return [
-            { id: 'child', label: 'Separate memory repository', hint: 'memory/ gets its own Git repository (default)', on: s.memory_layout === 'child', locked: s.initial.memory_locked },
-            { id: 'in-repo', label: 'Keep memory in this repository', hint: 'Memory is versioned alongside the project', on: s.memory_layout === 'in-repo', locked: s.initial.memory_locked },
+            { id: 'child', label: 'Store memory separately', hint: 'Keeps project memory in its own Git repository (default)', on: s.memory_layout === 'child', locked: s.initial.memory_locked },
+            { id: 'in-repo', label: 'Store memory with this project', hint: 'Commits memory alongside your project files', on: s.memory_layout === 'in-repo', locked: s.initial.memory_locked },
         ];
     if (page === 'Source')
         return s.initial.archive ? [{ id: 'archive', label: 'Local release archive', hint: s.initial.archive, on: true, locked: true }] : [
@@ -66,12 +66,12 @@ function validateWizard(s) {
             return 'Installation path cannot contain control characters.';
         const collision = fs.existsSync(path.join(prefix, 'bin/bwrk')) && !fs.existsSync(path.join(prefix, 'share/boreal/release.json'));
         if (page === 'Review' && collision && !s.replace_existing)
-            return 'Existing unrecognized bwrk: choose another destination or authorize replacement.';
+            return 'An existing bwrk installation is not recognized here. Choose another folder or allow replacement.';
     }
-    if ((page === 'Agent tools' || page === 'Review') && s.mode === 'project' && !s.agents.length)
-        return 'Choose at least one agent tool.';
+    if ((page === 'Assistants' || page === 'Review') && s.mode === 'project' && !s.agents.length)
+        return 'Choose at least one assistant.';
     if (s.mode === 'project' && s.initial.install_root && s.agents.length > 1)
-        return 'A custom skill directory supports one agent only.';
+        return 'A custom support folder can only be used for one assistant.';
     return '';
 }
 function wizardResult(s) {
@@ -98,7 +98,7 @@ function applyWizardKey(s, key) {
     if (key === '!' && page !== 'Destination') { s.help = true; s.helpScroll = 0; return 'continue'; }
     if (key === 'd' && page !== 'Destination') { s.density = cycleDensity(s.density); return 'continue'; }
     if (key === 'T' && page !== 'Destination' && !s.forceMono) { s.theme = s.theme === 'dark' ? 'light' : s.theme === 'light' ? 'mono' : 'dark'; return 'continue'; }
-    if (key === 'a' && page === 'Agent tools' && !s.initial.agents_locked && !s.initial.install_root) { s.agents = ['codex', 'claude']; s.error = ''; }
+    if (key === 'a' && page === 'Assistants' && !s.initial.agents_locked && !s.initial.install_root) { s.agents = ['codex', 'claude']; s.error = ''; }
 
     if (key === 'escape') {
         if (s.step === 0)
@@ -144,10 +144,10 @@ function applyWizardKey(s, key) {
             s.error = '';
             const row = rows[s.cursor];
             if (row.locked)
-                s.error = 'This choice was fixed by a command-line option or is required.';
-            else if (page === 'Agent tools')
+                s.error = 'This choice is required or fixed by a command-line option.';
+            else if (page === 'Assistants')
                 s.agents = s.agents.includes(row.id) ? s.agents.filter(a => a !== row.id) : [...s.agents, row.id];
-            else if (page === 'Memory')
+            else if (page === 'Project memory')
                 s.memory_layout = row.id;
             else if (page === 'Source')
                 s.source = row.id;
@@ -160,9 +160,9 @@ function applyWizardKey(s, key) {
         if (s.error)
             return 'continue';
         if (s.step === s.steps.length - 1) {
-            if (s.viewport && (s.viewport.width < 12 || s.viewport.height < 4)) { s.error = 'More space is needed to review safely. Ctrl-C cancels.'; return 'continue'; }
+            if (s.viewport && (s.viewport.width < 12 || s.viewport.height < 4)) { s.error = 'The window is too small to review safely. Resize it or press Ctrl-C to cancel.'; return 'continue'; }
             if (s.scroll < s.maxOffset) {
-                s.error = 'Scroll to the end of the review (End / ↓) before confirming.';
+                s.error = 'Scroll to the end of the summary (End / ↓) before confirming.';
                 s.scroll = Math.min(s.maxOffset, s.scroll + s.pageSize);
                 return 'continue';
             }
@@ -200,29 +200,29 @@ function wizardDocument(s) {
         const focused = choices(s)[s.cursor];
         return [
             [s.error ? `ATTENTION: ${s.error}` : 'KEYBOARD & DISPLAY', s.error ? 'danger' : 'heading'],
-            ...(focused ? [[focused.label, 'heading'], [focused.hint, 'text'], [focused.locked ? 'Required or fixed by command-line options.' : 'Space changes this choice.', 'muted']] : []),
+            ...(focused ? [[focused.label, 'heading'], [focused.hint, 'text'], [focused.locked ? 'Required or fixed by a command-line option.' : 'Space changes this choice.', 'muted']] : []),
             ['↑↓ / Tab: choose. Space: toggle. Enter: next screen.', 'text'],
-            ['Review: Enter pages through the document before confirmation.', 'text'],
+            ['Review: Enter moves through the full summary before confirmation.', 'text'],
             ['Home / End, Page Up / Down: navigate choices or scroll text.', 'text'],
-            ['Esc: back. Ctrl-C / Ctrl-D: cancel without starting installation.', 'text'],
-            ['Prefix: ←→, Home, End, Delete, Backspace. Ctrl-U clears; Ctrl-W deletes a word.', 'text'],
+            [`Esc: go back. Ctrl-C / Ctrl-D: cancel without ${s.mode === 'project' ? 'changing the project' : 'starting installation'}.`, 'text'],
+            ...(s.mode === 'machine' ? [['Prefix: ←→, Home, End, Delete, Backspace. Ctrl-U clears; Ctrl-W deletes a word.', 'text']] : []),
             ['F1: help, also while editing a path. ? opens help outside text fields.', 'text'],
-            ['a: select both agent tools (unless a CLI option fixes the choice).', 'text'],
+            ...(s.mode === 'project' ? [['a: select both assistants (unless a command-line option fixes the choice).', 'text']] : []),
             ['d: auto / compact / comfortable density. T: colour theme. Outside text fields only.', 'text'],
             ['Ctrl-L: repaint. !: read the full error / choice description.', 'text'],
             [`Terminal ${s.viewport?.width}×${s.viewport?.height}. Layout reflows without losing choices.`, 'muted'],
-            ['Nothing is installed until the final review is confirmed.', 'warn'],
+            [s.mode === 'project' ? 'No project files are changed until you confirm.' : 'Nothing is installed until the final review is confirmed.', 'warn'],
         ];
     }
     if (page === 'Welcome') return s.mode === 'project' ? [
-        ['A clear place for plans, progress and proof.', 'heading'],
+        ['Keep your work, notes, and project history in one place.', 'heading'],
         [s.initial.project_id, 'accent'], [s.initial.project_root, 'muted'], ['','text'],
-        ['Choose agent adapters and a memory layout.', 'text'],
-        ['Review exact destinations before anything is written.', 'text'],
-        ['Existing memory content is preserved by the Rust setup engine.', 'muted'],
+        ['Choose which assistants to configure and where project memory should live.', 'text'],
+        ['Review every destination before Boreal changes the project.', 'text'],
+        ['Existing memory content is preserved.', 'muted'],
     ] : [
         ['Your work. One focused terminal workspace.', 'heading'], ['','text'],
-        ['Install the command-line engine and choose your dashboard.', 'text'],
+        ['Install the Boreal command and choose your dashboard.', 'text'],
         ['A release install does not create or modify project databases.', 'muted'],
         ['No sudo, no shell-profile edits, no surprise source build.', 'muted'],
         ['You will review all destinations and choices before installing.', 'text'],
@@ -231,14 +231,14 @@ function wizardDocument(s) {
         ['PROJECT', 'muted'], [s.initial.project_id, 'heading'], [s.initial.project_root, 'text'],
         ['DATABASE', 'muted'], [s.initial.database, 'text'],
         ['MEMORY', 'muted'], [`${s.initial.memory_root} · ${s.memory_layout}`, 'text'],
-        ['AGENT SKILLS', 'muted'], ...projectTargets(s).map(t => [t, 'accent']),
-        ['Managed metadata and skills may be reconciled; memory content is preserved.', 'warn'],
+        ['ASSISTANT SUPPORT', 'muted'], ...projectTargets(s).map(t => [t, 'accent']),
+        ['Boreal may update project settings and assistant support files. Existing memory content is preserved.', 'warn'],
     ] : [
         ['DESTINATION', 'muted'], [s.prefix.trim(), 'accent'],
         ['INSTALL', 'muted'], [`CLI${s.dashboard ? ' + dashboard' : ' only'}${s.verify ? ' · verify bwrk --version' : ''}`, 'text'],
         ['SOURCE', 'muted'], [s.initial.archive || (s.source === 'source' ? `Build source ref ${s.initial.ref || 'main'}` : s.initial.version ? `Release ${s.initial.version}` : 'Latest verified release'), 'text'],
-        [s.replace_existing ? 'Existing unrecognized command replacement authorized.' : 'Existing unrecognized commands are protected.', 'warn'],
-        ['No project database or shell profile will be changed.', 'muted'],
+        [s.replace_existing ? 'The existing command will be replaced.' : 'Existing commands are protected.', 'warn'],
+        ['This installs the command only; project files and shell settings are not changed.', 'muted'],
     ];
     return [];
 }
@@ -247,18 +247,18 @@ function renderWizard(s, width = 100, height = 36) {
     ({ width, height } = l);
     s.viewport = { width, height };
     const screen = new Screen(width, height), p = l.body, page = s.steps[s.step];
-    const rows = choices(s), multi = page === 'Agent tools' || page === 'Components';
+    const rows = choices(s), multi = page === 'Assistants' || page === 'Components';
     const pageName = s.help ? 'HELP / DETAILS' : page.toUpperCase();
     const step = `${s.step + 1}/${s.steps.length} ${pageName}`;
     if (l.large) {
         wordmark().forEach((line, i) => screen.text(l.x, i + 1, line, 'accent', l.totalWidth));
-        screen.text(l.x, 7, s.mode === 'project' ? 'PROJECT SETUP / MAKE THIS REPOSITORY AGENT-READY' : 'INSTALLATION / A WORKSPACE FOR DELIBERATE WORK', 'muted', l.totalWidth);
+        screen.text(l.x, 7, s.mode === 'project' ? 'PROJECT SETUP / CONFIGURE THIS PROJECT FOR BOREAL' : 'INSTALLATION / A WORKSPACE FOR DELIBERATE WORK', 'muted', l.totalWidth);
         screen.text(l.x, 8, step, 'heading', l.totalWidth);
     } else if (l.top) {
         const compactTitle = width < 48 ? `${s.step + 1}/${s.steps.length} ${s.help ? 'Help' : page}` : `BOREAL / WORK  ·  ${step}`;
         screen.text(l.x, 0, clip(compactTitle, l.totalWidth), 'accent', l.totalWidth);
         if (l.top >= 4) {
-            screen.text(l.x, 1, s.mode === 'project' ? 'PROJECT SETUP  /  adapters · memory · review' : 'INSTALLATION  /  destination · components · source', 'muted', l.totalWidth);
+            screen.text(l.x, 1, s.mode === 'project' ? 'PROJECT SETUP  /  assistants · memory · review' : 'INSTALLATION  /  destination · components · source', 'muted', l.totalWidth);
             const steps = s.steps.map((name, i) => i === s.step ? `[${i + 1} ${name}]` : `${i < s.step ? (s.ascii ? '+' : '✓') : i + 1} ${name}`).join('  ');
             screen.text(l.x, 2, cellWidth(steps) <= l.totalWidth ? steps : step, 'heading', l.totalWidth);
             screen.rule(l.x, 3, l.totalWidth, s.ascii);
@@ -315,7 +315,7 @@ function renderWizard(s, width = 100, height = 36) {
     if (s.help) hint = adaptiveHint(l.totalWidth, '↑↓ / PgUp PgDn scroll · Esc close · Ctrl-C cancel', '↑↓ scroll · Esc close', '↑↓ Esc');
     else if (rows.length) hint = adaptiveHint(l.totalWidth, '↑↓ select · Space toggle · Enter continue · Esc back · Ctrl-C cancel · ? help', '↑↓ Space toggle · Enter next · Esc back · ^C cancel', '↑↓ Space · Enter · Esc', 'Space Enter Esc');
     else if (page === 'Review') {
-        const action = s.scroll < s.maxOffset ? 'Enter next page' : s.mode === 'project' ? 'Enter apply setup' : 'Enter install';
+        const action = s.scroll < s.maxOffset ? 'Enter next page' : s.mode === 'project' ? 'Enter set up project' : 'Enter install';
         hint = adaptiveHint(l.totalWidth, `${action} · ↑↓ / End scroll · Esc back · Ctrl-C cancel`, `${action} · Esc back`, s.scroll < s.maxOffset ? 'Enter more / Esc' : 'Enter apply / Esc');
     } else hint = adaptiveHint(l.totalWidth, 'Enter continue · Esc back · Ctrl-C cancel · F1 help', 'Enter next · Esc back · ^C cancel', 'Enter / Esc / ^C');
     if (l.footer >= 2) screen.text(l.x, height - 2, clip(s.error && !s.help ? `${s.error} (! / F1 details)` : position, l.totalWidth), s.error && !s.help ? 'danger' : 'muted', l.totalWidth);

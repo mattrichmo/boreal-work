@@ -412,7 +412,7 @@ fn premium_setup_choices(
         .stderr(Stdio::null())
         .status();
     if !matches!(probe, Ok(status) if status.success()) {
-        eprintln!("Boreal: Node.js 20–26 is unavailable; using plain setup prompts.");
+        eprintln!("Boreal: Node.js 20–26 is unavailable; using the basic setup prompts.");
         return Ok(None);
     }
     let agents = match parsed.options.setup.agents.as_deref() {
@@ -447,42 +447,42 @@ fn premium_setup_choices(
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
         .output()
-        .map_err(|error| setup_error(format!("cannot start setup interface: {error}")))?;
+        .map_err(|error| setup_error(format!("cannot start project setup: {error}")))?;
     if !output.status.success() {
         return Err(CliError::with(
             ErrorCode::InvalidArgument,
             ApplicationOutcome::Rejected,
-            "setup cancelled or interface failed; no project setup was applied",
+            "project setup was cancelled or could not start; no changes were applied",
         ));
     }
     if output.stdout.len() > 8_192 {
         return Err(setup_error(
-            "setup interface returned an oversized selection".to_owned(),
+            "setup screen returned an oversized selection".to_owned(),
         ));
     }
     let mut selection: PremiumSetupChoices = serde_json::from_slice(&output.stdout)
-        .map_err(|error| setup_error(format!("invalid setup interface result: {error}")))?;
+        .map_err(|error| setup_error(format!("invalid setup screen result: {error}")))?;
     if !selection.confirmed {
-        return Err(setup_error("setup was not confirmed".to_owned()));
+        return Err(setup_error("project setup was not confirmed".to_owned()));
     }
     selection.agents = parse_agents(&selection.agents.join(","))?;
     if !matches!(selection.memory_layout.as_str(), "child" | "in-repo") {
         return Err(CliError::invalid(
-            "setup interface returned an unsupported memory layout",
+            "setup screen returned an unsupported memory choice",
         ));
     }
     // Explicit CLI choices remain authoritative even if a UI regression occurs.
     if let Some(value) = parsed.options.setup.agents.as_deref() {
         if selection.agents != parse_agents(value)? {
             return Err(CliError::invalid(
-                "setup interface changed an explicit --agents value",
+                "project setup changed an explicit assistant choice",
             ));
         }
     }
     if let Some(value) = parsed.options.setup.memory_layout.as_deref() {
         if selection.memory_layout != value {
             return Err(CliError::invalid(
-                "setup interface changed an explicit --memory-layout value",
+                "project setup changed an explicit memory choice",
             ));
         }
     }
@@ -645,7 +645,11 @@ pub(super) fn render(plan: &SetupPlan, result: Option<&SetupResult>) -> String {
         format!(
             "  Memory    {} ({})",
             safe(plan.memory_root.display().to_string()),
-            plan.memory_layout
+            if plan.memory_layout == "child" {
+                "separate repository"
+            } else {
+                "this repository"
+            }
         ),
     ];
     for (agent, root) in &plan.skill_roots {
@@ -664,7 +668,7 @@ pub(super) fn render(plan: &SetupPlan, result: Option<&SetupResult>) -> String {
             result.existing_files.len()
         ));
         lines.push(format!(
-            "  Adapters  {} skill files installed",
+            "  Support   {} assistant support files installed",
             result.skill_files
         ));
         lines.push(format!("  Memory    {}", result.memory_git));
@@ -672,7 +676,7 @@ pub(super) fn render(plan: &SetupPlan, result: Option<&SetupResult>) -> String {
         lines.push("  Next      bwrk dashboard".to_owned());
     } else {
         lines.push(String::new());
-        lines.push("  No files will be written until setup is applied.".to_owned());
+        lines.push("  No project files will be changed until setup is confirmed.".to_owned());
     }
     format!("{}\n", lines.join("\n"))
 }
@@ -709,7 +713,7 @@ fn choose_agents(options: &SetupCliOptions, json_output: bool) -> Result<Vec<Str
     println!("╭────────────────────────────────────────────────────────────╮");
     println!("│ Boreal project setup                                       │");
     println!("├────────────────────────────────────────────────────────────┤");
-    println!("│ Choose the agent tools that should receive Boreal skills.  │");
+    println!("│ Choose which assistants should receive Boreal support.     │");
     println!("│   1) Codex   (recommended)                                 │");
     println!("│   2) Claude                                               │");
     println!("│   3) Both                                                  │");
