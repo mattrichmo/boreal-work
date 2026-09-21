@@ -19,7 +19,10 @@ use boreal_service::{
 };
 
 const SERVICE_START_TIMEOUT: Duration = Duration::from_secs(5);
-const CHILD_EXIT_GRACE: Duration = Duration::from_secs(2);
+const SERVICE_EXIT_GRACE: Duration = Duration::from_secs(2);
+// The TUI drains in-flight work for up to ten seconds before restoring its
+// terminal. Leave a small margin so the launcher does not SIGKILL it first.
+const TUI_EXIT_GRACE: Duration = Duration::from_secs(12);
 const DEFAULT_DATABASE: &str = ".boreal/boreal.sqlite";
 static DASHBOARD_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -362,9 +365,14 @@ fn launch_dashboard(
         let service_child = service_command
             .spawn()
             .map_err(process_error("start the private Boreal service"))?;
-        let mut service = ManagedChild::new("service", service_child);
-        if let Err(error) = wait_for_service(&mut service, &service_socket, project) {
-            let termination = service.terminate(signal::SIGTERM, CHILD_EXIT_GRACE);
+        let mut service = ManagedChild::new("service", service_child, true, SERVICE_EXIT_GRACE);
+        if let Err(error) = wait_for_service(
+            &mut service,
+            &service_socket,
+            project,
+            parsed.options.actor.as_str(),
+        ) {
+            let termination = service.terminate(signal::SIGTERM, SERVICE_EXIT_GRACE);
             return combine_dashboard_results(
                 Err(error),
                 termination,
@@ -401,8 +409,9 @@ fn launch_dashboard(
             .arg("--interactive")
             .stdin(Stdio::inherit())
             .stdout(Stdio::inherit())
-            .stderr(Stdio::inherit())
-            .process_group(0);
+            .stderr(Stdio::inherit());
+        // Keep the TUI in the launcher's foreground process group so
+        // terminal job control does not stop it when it reads stdin.
         if let Some(work) = &parsed.options.work {
             tui_command.arg("--work").arg(work);
         }
@@ -410,7 +419,7 @@ fn launch_dashboard(
             Ok(child) => child,
             Err(error) => {
                 let spawn_error = process_error("start the Boreal TUI")(error);
-                let termination = service.terminate(signal::SIGTERM, CHILD_EXIT_GRACE);
+                let termination = service.terminate(signal::SIGTERM, SERVICE_EXIT_GRACE);
                 return combine_dashboard_results(
                     Err(spawn_error),
                     termination,
@@ -418,10 +427,10 @@ fn launch_dashboard(
                 );
             }
         };
-        let mut tui_process = ManagedChild::new("TUI", tui_child);
+        let mut tui_process = ManagedChild::new("TUI", tui_child, false, TUI_EXIT_GRACE);
 
         let outcome = supervise(&mut service, &mut tui_process);
-        let termination = service.terminate(signal::SIGTERM, CHILD_EXIT_GRACE);
+        let termination = service.terminate(signal::SIGTERM, SERVICE_EXIT_GRACE);
         combine_dashboard_results(outcome, termination, "private Boreal service shutdown")
     })();
     let cleanup = service_socket_guard.cleanup();
@@ -638,6 +647,7 @@ fn wait_for_service(
     service: &mut ManagedChild,
     socket: &Path,
     project: &str,
+    actor: &str,
 ) -> Result<(), CliError> {
     let deadline = Instant::now() + SERVICE_START_TIMEOUT;
     let mut last_probe_error = None;
@@ -656,7 +666,7 @@ fn wait_for_service(
             return Err(interrupted_error(pending));
         }
         if socket.exists() {
-            match probe_service(socket, project) {
+            match probe_service(socket, project, actor) {
                 Ok(()) => return Ok(()),
                 Err(error) => last_probe_error = Some(error),
             }
@@ -683,7 +693,7 @@ fn wait_for_service(
 }
 
 #[cfg(unix)]
-fn probe_service(socket: &Path, project: &str) -> Result<(), String> {
+fn probe_service(socket: &Path, project: &str, actor: &str) -> Result<(), String> {
     let operation = format!(
         "op_dashboard_ready_{}_{}",
         std::process::id(),
@@ -696,7 +706,7 @@ fn probe_service(socket: &Path, project: &str) -> Result<(), String> {
         "data": {
             "command": "status",
             "project_id": project,
-            "actor_id": "dashboard-readiness",
+            "actor_id": actor,
             "harness_id": "dashboard-readiness",
             "session_id": "dashboard-readiness",
             "limit": 1,
@@ -763,7 +773,7 @@ fn supervise(service: &mut ManagedChild, tui: &mut ManagedChild) -> Result<(), C
             return tui_status(status);
         }
         if let Some(status) = service.try_wait()? {
-            let _ = tui.terminate(signal::SIGTERM, CHILD_EXIT_GRACE);
+            let _ = tui.terminate(signal::SIGTERM, TUI_EXIT_GRACE);
             return Err(CliError::with(
                 ErrorCode::ServiceUnavailable,
                 ApplicationOutcome::Failed,
@@ -772,8 +782,8 @@ fn supervise(service: &mut ManagedChild, tui: &mut ManagedChild) -> Result<(), C
         }
         let pending = signal::take_pending();
         if pending != 0 {
-            let _ = tui.terminate(pending, CHILD_EXIT_GRACE);
-            let _ = service.terminate(pending, CHILD_EXIT_GRACE);
+            let _ = tui.terminate(pending, TUI_EXIT_GRACE);
+            let _ = service.terminate(pending, SERVICE_EXIT_GRACE);
             return Err(interrupted_error(pending));
         }
         thread::sleep(Duration::from_millis(25));
@@ -818,15 +828,24 @@ fn process_error(action: &'static str) -> impl FnOnce(std::io::Error) -> CliErro
 struct ManagedChild {
     label: &'static str,
     child: Child,
+    process_group: bool,
+    shutdown_grace: Duration,
     exited: bool,
 }
 
 #[cfg(unix)]
 impl ManagedChild {
-    fn new(label: &'static str, child: Child) -> Self {
+    fn new(
+        label: &'static str,
+        child: Child,
+        process_group: bool,
+        shutdown_grace: Duration,
+    ) -> Self {
         Self {
             label,
             child,
+            process_group,
+            shutdown_grace,
             exited: false,
         }
     }
@@ -844,7 +863,11 @@ impl ManagedChild {
         if self.exited || self.try_wait()?.is_some() {
             return Ok(());
         }
-        signal::send_to_group(self.child.id(), signal);
+        if self.process_group {
+            signal::send_to_group(self.child.id(), signal);
+        } else {
+            signal::send_to_process(self.child.id(), signal);
+        }
         let deadline = Instant::now() + grace;
         while Instant::now() < deadline {
             if self.try_wait()?.is_some() {
@@ -867,7 +890,7 @@ impl ManagedChild {
 impl Drop for ManagedChild {
     fn drop(&mut self) {
         if !self.exited {
-            let _ = self.terminate(signal::SIGTERM, Duration::from_millis(250));
+            let _ = self.terminate(signal::SIGTERM, self.shutdown_grace);
         }
         let _ = self.label;
     }
@@ -1056,6 +1079,14 @@ mod signal {
         if let Ok(group) = c_int::try_from(process_id) {
             unsafe {
                 kill(-group, signal_number);
+            }
+        }
+    }
+
+    pub(super) fn send_to_process(process_id: u32, signal_number: c_int) {
+        if let Ok(process) = c_int::try_from(process_id) {
+            unsafe {
+                kill(process, signal_number);
             }
         }
     }

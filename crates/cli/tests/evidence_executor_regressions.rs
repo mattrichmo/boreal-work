@@ -236,7 +236,7 @@ fn failpoint_after_admission_recovers_as_unknown_on_service_restart() {
             .evidence_execution("op_fault_after_admission")
             .unwrap()
             .expect("recovered execution remains queryable");
-        if format!("{:?}", execution.state).to_ascii_lowercase() == "unknown" {
+        if format!("{:?}", execution.state).eq_ignore_ascii_case("unknown") {
             break execution;
         }
         assert!(

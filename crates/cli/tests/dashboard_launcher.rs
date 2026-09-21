@@ -3,15 +3,18 @@
 use serde_json::Value;
 use std::{
     fs::{self, File},
-    io::{self, Read},
+    io::{self, Read, Write},
     os::{
         fd::{FromRawFd, RawFd},
-        raw::{c_char, c_int, c_void},
+        raw::{c_char, c_int, c_ulong, c_void},
     },
     path::{Path, PathBuf},
     process::{Command, ExitStatus, Stdio},
     time::{SystemTime, UNIX_EPOCH},
 };
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+use std::os::unix::process::CommandExt;
 
 #[cfg_attr(target_os = "linux", link(name = "util"))]
 unsafe extern "C" {
@@ -52,7 +55,7 @@ fn one_command_dashboard_supervises_private_service_and_tui() {
 
     let initialized = Command::new(binary())
         .current_dir(&root)
-        .args(["init", "project-smoke", "--db"])
+        .args(["init", "project-smoke", "--actor", "bootstrap", "--db"])
         .arg(&database)
         .arg("--json")
         .output()
@@ -61,7 +64,7 @@ fn one_command_dashboard_supervises_private_service_and_tui() {
 
     let successful_dashboard =
         dashboard_command(&root, &database, &fixture, &socket_log, &invocation_log, 0);
-    let successful = run_in_pty(successful_dashboard);
+    let successful = run_in_pty(successful_dashboard, None);
     if successful.stderr.contains("Operation not permitted")
         || successful.stderr.contains("Permission denied")
     {
@@ -104,7 +107,7 @@ fn one_command_dashboard_supervises_private_service_and_tui() {
         "--project",
         "project-smoke",
         "--actor",
-        "agent-1",
+        "bootstrap",
         "--harness",
         "tui",
         "--session",
@@ -113,23 +116,42 @@ fn one_command_dashboard_supervises_private_service_and_tui() {
         assert!(invocation.lines().any(|line| line == expected));
     }
 
+    let mut interactive_dashboard =
+        dashboard_command(&root, &database, &fixture, &socket_log, &invocation_log, 0);
+    interactive_dashboard.env("BOREAL_DASHBOARD_WAIT_FOR_INPUT", "1");
+    let interactive = run_in_pty(interactive_dashboard, Some(b"q"));
+    assert!(
+        interactive.status.success(),
+        "interactive dashboard failed: {}",
+        interactive.stderr
+    );
+    assert!(interactive.stdout.contains("fixture-tui-input"));
+    assert!(
+        !interactive.stdout.contains("fixture-sigttin"),
+        "TUI was stopped by terminal job control: {:?}",
+        interactive.stdout
+    );
+
     let failing_dashboard =
         dashboard_command(&root, &database, &fixture, &socket_log, &invocation_log, 23);
-    let failed = run_in_pty(failing_dashboard);
+    let failed = run_in_pty(failing_dashboard, None);
     assert_eq!(failed.status.code(), Some(23), "stderr: {}", failed.stderr);
     let failed_socket = PathBuf::from(fs::read_to_string(&socket_log).unwrap().trim());
     assert!(!failed_socket.exists());
     assert!(!failed_socket.parent().unwrap().exists());
     assert_no_process_uses(&failed_socket);
 
-    let discovered = run_in_pty(dashboard_command_without_project(
-        &nested_workspace,
-        &database,
-        &fixture,
-        &socket_log,
-        &invocation_log,
-        0,
-    ));
+    let discovered = run_in_pty(
+        dashboard_command_without_project(
+            &nested_workspace,
+            &database,
+            &fixture,
+            &socket_log,
+            &invocation_log,
+            0,
+        ),
+        None,
+    );
     assert!(
         discovered.status.success(),
         "dashboard metadata discovery failed: {}",
@@ -149,7 +171,14 @@ fn one_command_dashboard_supervises_private_service_and_tui() {
         .current_dir(&root)
         .env("BOREAL_TUI_ENTRYPOINT", &fixture)
         .env("BOREAL_DASHBOARD_INVOCATION_LOG", &invocation_log)
-        .args(["dashboard", "--project", "project-smoke", "--db"])
+        .args([
+            "dashboard",
+            "--project",
+            "project-smoke",
+            "--actor",
+            "bootstrap",
+            "--db",
+        ])
         .arg(&database)
         .arg("--json")
         .output()
@@ -228,8 +257,25 @@ client.on("data", (chunk) => {
   }
   fs.writeFileSync(process.env.BOREAL_DASHBOARD_SOCKET_LOG, `${socketPath}\n`);
   process.stdout.write("fixture-tui\n");
-  client.end();
-  process.exit(Number(process.env.BOREAL_DASHBOARD_FIXTURE_EXIT));
+  const finish = (marker) => {
+    if (marker) process.stdout.write(`${marker}\n`);
+    process.stdin.setRawMode?.(false);
+    client.end();
+    process.exit(Number(process.env.BOREAL_DASHBOARD_FIXTURE_EXIT));
+  };
+  if (process.env.BOREAL_DASHBOARD_WAIT_FOR_INPUT === "1") {
+    process.on("SIGTTIN", () => {
+      process.stdout.write("fixture-sigttin\n");
+      process.exit(96);
+    });
+    process.stdin.setRawMode?.(true);
+    process.stdin.resume();
+    process.stdin.on("data", (chunk) => {
+      if (chunk.toString().includes("q")) finish("fixture-tui-input");
+    });
+  } else {
+    finish();
+  }
 });
 client.on("error", (error) => {
   console.error(error);
@@ -255,7 +301,14 @@ fn dashboard_command(
         .env("BOREAL_DASHBOARD_SOCKET_LOG", socket_log)
         .env("BOREAL_DASHBOARD_INVOCATION_LOG", invocation_log)
         .env("BOREAL_DASHBOARD_FIXTURE_EXIT", exit.to_string())
-        .args(["dashboard", "--project", "project-smoke", "--db"])
+        .args([
+            "dashboard",
+            "--project",
+            "project-smoke",
+            "--actor",
+            "bootstrap",
+            "--db",
+        ])
         .arg(database);
     command
 }
@@ -275,12 +328,12 @@ fn dashboard_command_without_project(
         .env("BOREAL_DASHBOARD_SOCKET_LOG", socket_log)
         .env("BOREAL_DASHBOARD_INVOCATION_LOG", invocation_log)
         .env("BOREAL_DASHBOARD_FIXTURE_EXIT", exit.to_string())
-        .args(["dashboard", "--db"])
+        .args(["dashboard", "--actor", "bootstrap", "--db"])
         .arg(database);
     command
 }
 
-fn run_in_pty(mut command: Command) -> PtyOutput {
+fn run_in_pty(mut command: Command, input: Option<&[u8]>) -> PtyOutput {
     let mut master: RawFd = -1;
     let mut slave: RawFd = -1;
     let opened = unsafe {
@@ -300,8 +353,30 @@ fn run_in_pty(mut command: Command) -> PtyOutput {
         .stdin(Stdio::from(stdin))
         .stdout(Stdio::from(slave))
         .stderr(Stdio::piped());
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    unsafe {
+        command.pre_exec(|| {
+            if setsid() == -1 {
+                return Err(io::Error::last_os_error());
+            }
+            if ioctl(0, TIOCSCTTY, 0) == -1 {
+                return Err(io::Error::last_os_error());
+            }
+            if tcsetpgrp(0, getpgrp()) == -1 {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+
+    let mut input_writer = input.map(|_| master.try_clone().unwrap());
     let child = command.spawn().unwrap();
     drop(command);
+    if let (Some(writer), Some(input)) = (input_writer.as_mut(), input) {
+        writer.write_all(input).unwrap();
+    }
+    drop(input_writer);
     let reader = std::thread::spawn(move || {
         let mut stdout = Vec::new();
         read_pty_to_end(&mut master, &mut stdout).unwrap();
@@ -341,3 +416,16 @@ fn assert_no_process_uses(socket: &Path) {
         socket.display()
     );
 }
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+unsafe extern "C" {
+    fn setsid() -> c_int;
+    fn getpgrp() -> c_int;
+    fn ioctl(fd: c_int, request: c_ulong, ...) -> c_int;
+    fn tcsetpgrp(fd: c_int, pgrp: c_int) -> c_int;
+}
+
+#[cfg(target_os = "linux")]
+const TIOCSCTTY: c_ulong = 0x540e;
+#[cfg(target_os = "macos")]
+const TIOCSCTTY: c_ulong = 0x2000_7461;

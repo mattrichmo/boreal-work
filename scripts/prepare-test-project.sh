@@ -59,17 +59,23 @@ if [ ! -s "$tui_dist/entrypoint.js" ]; then
 fi
 
 echo "Installing the compiled dashboard TUI"
-mkdir -p "$tui_install_root"
-cp -R "$tui_dist/." "$tui_install_root/"
+tui_stage=$(mktemp -d "$lib_root/.tui-stage.XXXXXX")
+cleanup_tui_stage() {
+  if [ -n "${tui_stage:-}" ] && [ -d "$tui_stage" ]; then
+    rm -rf "$tui_stage"
+  fi
+}
+trap cleanup_tui_stage EXIT
+cp -R "$tui_dist/." "$tui_stage/"
 
-if [ ! -s "$tui_install_root/entrypoint.js" ]; then
-  echo "packaged dashboard entrypoint is missing or empty: $tui_install_root/entrypoint.js" >&2
+if [ ! -s "$tui_stage/entrypoint.js" ]; then
+  echo "packaged dashboard entrypoint is missing or empty: $tui_stage/entrypoint.js" >&2
   exit 1
 fi
 
 find "$tui_dist" -type f -print | while IFS= read -r source_file; do
   relative_path=${source_file#"$tui_dist"/}
-  installed_file="$tui_install_root/$relative_path"
+  installed_file="$tui_stage/$relative_path"
   if [ ! -f "$installed_file" ]; then
     echo "packaged dashboard artifact is missing: $installed_file" >&2
     exit 1
@@ -79,6 +85,13 @@ find "$tui_dist" -type f -print | while IFS= read -r source_file; do
     exit 1
   fi
 done
+
+if [ -e "$tui_install_root" ]; then
+  rm -rf "$tui_install_root"
+fi
+mv "$tui_stage" "$tui_install_root"
+tui_stage=
+trap - EXIT
 
 echo "Building Boreal v2 CLI"
 cargo build --release --locked --offline -p boreal-cli --manifest-path "$workspace_root/Cargo.toml"
@@ -93,9 +106,18 @@ install -m 755 "$release_binary" "$local_versioned_binary"
 
 if [ ! -f "$database" ]; then
   echo "Initializing test-project database"
-  "$local_versioned_binary" init test-project --db "$database" --actor bootstrap --json
+  "$local_versioned_binary" init test-project \
+    --project-root "$project_root" \
+    --db "$database" \
+    --actor agent-1 \
+    --json >/dev/null
+  status_actor=agent-1
 else
   echo "Keeping existing test-project database"
+  status_actor=agent-1
+  if ! "$local_versioned_binary" status test-project --db "$database" --actor "$status_actor" --json >/dev/null 2>&1; then
+    status_actor=bootstrap
+  fi
 fi
 
 version=$("$local_versioned_binary" --version)
@@ -115,7 +137,10 @@ if ! cmp -s "$release_binary" "$local_versioned_binary"; then
 fi
 
 echo "Checking local status projection"
-"$local_versioned_binary" status test-project --db "$database" --json >/dev/null
+if ! "$local_versioned_binary" status test-project --db "$database" --actor "$status_actor" --json >/dev/null; then
+  echo "unable to read the test-project status projection as actor $status_actor" >&2
+  exit 1
+fi
 
 if command -v sqlite3 >/dev/null 2>&1; then
   integrity=$(sqlite3 "$database" 'PRAGMA integrity_check;')

@@ -1103,6 +1103,10 @@ drainingTerminal.emitSignal("SIGTERM");
 drainingTerminal.emitData("c");
 await new Promise<void>((resolve) => setTimeout(resolve, 10));
 assert(!drainingCompleted, "shutdown waits for an in-flight mutation instead of closing immediately");
+assert(
+  drainingTerminal.rawModes.join(",") === "true,false",
+  "shutdown restores raw terminal mode before draining completes",
+);
 const drainingResult = envelope(91, null, "unknown", {
   code: "unknown_outcome",
   message: "response lost after admission",

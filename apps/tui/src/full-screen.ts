@@ -56,7 +56,7 @@ export async function runFullScreen(controller: ExtendedController, terminal: Fu
     state.density = options.density ?? "auto";
     const writer = new FrameWriter(value => terminal.write(value));
     const decoder = new StreamingKeyDecoder();
-    let accepting = true, closed = false, shutdownTimedOut = false;
+    let accepting = true, closed = false, shutdownTimedOut = false, terminalRestored = false;
     let work = Promise.resolve(), active: {
         label: string;
         mutation: boolean;
@@ -74,6 +74,18 @@ export async function runFullScreen(controller: ExtendedController, terminal: Fu
     const finished = new Promise<void>(resolve => { finish = resolve; });
     let shutdown: Promise<void> | null = null, shutdownReport: string | null = null;
     const disposers: Array<() => void> = [];
+    const restoreTerminal = (): void => {
+        if (terminalRestored)
+            return;
+        terminalRestored = true;
+        try {
+            terminal.setRawMode?.(terminal.was_raw ?? false);
+        }
+        finally {
+            terminal.pause?.();
+            terminal.write("\x1b[?2004l\x1b[?7h\x1b[?25h\x1b[?1049l");
+        }
+    };
     const syncSelection = (): void => {
         const selected = reconcileSelection(controller.view(), state);
         const current = controller.view().route;
@@ -299,6 +311,11 @@ export async function runFullScreen(controller: ExtendedController, terminal: Fu
             clearInterval(refreshTimer);
         if (escapeTimer)
             clearTimeout(escapeTimer);
+        // Restore terminal ownership before waiting for in-flight service work.
+        // The launcher may need to supervise this process during the bounded
+        // drain, and the operator must never be left in raw/alternate-screen
+        // mode while that happens.
+        restoreTerminal();
         shutdown = (async () => {
             let timer: ReturnType<typeof setTimeout> | undefined;
             const drained = await Promise.race([work.then(() => true, () => true), new Promise<boolean>(resolve => { timer = setTimeout(() => resolve(false), options.shutdown_drain_ms ?? 10000); })]);
@@ -698,13 +715,7 @@ export async function runFullScreen(controller: ExtendedController, terminal: Fu
                 dispose();
             }
             catch { /* Continue restoring the other terminal resources. */ }
-        try {
-            terminal.setRawMode?.(terminal.was_raw ?? false);
-        }
-        finally {
-            terminal.pause?.();
-            terminal.write("\x1b[?2004l\x1b[?7h\x1b[?25h\x1b[?1049l");
-        }
+        restoreTerminal();
         if (shutdownReport)
             terminal.write(safeText(shutdownReport) + "\n");
     }

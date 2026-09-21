@@ -5,13 +5,22 @@ use std::{
 };
 
 fn temp_project() -> std::path::PathBuf {
-    let stamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("clock is after epoch")
-        .as_nanos();
-    let path = std::env::temp_dir().join(format!("boreal-cli-project-{}-{stamp}", std::process::id()));
-    fs::create_dir_all(&path).expect("temporary project creates");
-    path
+    for attempt in 0..64_u32 {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock is after epoch")
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "boreal-cli-project-{}-{stamp}-{attempt}",
+            std::process::id()
+        ));
+        match fs::create_dir(&path) {
+            Ok(()) => return path,
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => panic!("temporary project creates: {error}"),
+        }
+    }
+    panic!("temporary project name did not become unique");
 }
 
 #[test]
