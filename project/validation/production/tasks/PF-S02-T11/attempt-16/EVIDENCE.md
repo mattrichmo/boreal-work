@@ -25,23 +25,21 @@ The application runtime tests cover:
 - idempotent resource acknowledgement; and
 - foreign-project rejection for resource acknowledgement.
 
-The external-job test's explicit non-`Drop` adapter drops were replaced by a
-lexical scope so strict all-target application Clippy is clean without
-changing the replay or readback assertions.
+The current combined external-job test tree already uses lexical adapter
+scopes, so strict all-target application Clippy remains clean without an
+attempt-16 change to that test file.
 
 ## Source identity
 
 SHA-256 after validation:
 
 ```text
-a818b07c1e118f50dbe84edb0e4cc5d0c35ebc7fdd3d58fc106c9f09e8dc8e74  crates/application/src/runtime.rs
-ddfbe915bb95a6150905d9cbd899db26ee94a7a187e186ba4d4a9c2f0f7b4ccb  crates/application/tests/production_external_jobs.rs
+f0b30ecb26d3ad0ac373ce5de0559006a04ae92d5ea663ac3a95862e9e9951be  crates/application/src/runtime.rs
 ```
 
-These hashes identify the files in the combined dirty tree, not an accepted
-commit. The test file also contains earlier PF-S02-T11 combined-tree changes;
-the steward's local lint repair is intentionally limited to its restart-test
-adapter lifetime scope.
+This hash identifies the runtime file in the combined dirty tree, not an
+accepted commit. The runtime file includes the identity-bound façade and its
+focused tests; other application/store changes remain combined-tree work.
 
 ## Validation conclusion
 
@@ -49,4 +47,3 @@ The attempt-21R application Clippy blocker is resolved without a dead-code
 allow and without weakening identity, replay, project isolation, or resource
 acknowledgement semantics. This is evidence for the bounded application
 surface only; it is not acceptance of PF-S02-T11 or the production release.
-

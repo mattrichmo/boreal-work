@@ -10,7 +10,6 @@ resolved. No acceptance ledger, plan state, commit, or push was changed.
 ## Changed paths
 
 - `crates/application/src/runtime.rs`
-- `crates/application/tests/production_external_jobs.rs`
 - `project/validation/production/tasks/PF-S02-T11/attempt-16/`
 
 ## Result
@@ -39,6 +38,4 @@ Review the exact combined tree and confirm:
    route;
 2. released resolution cannot use the unbound adapter;
 3. operation replay and canonical resource acknowledgement remain store-owned;
-4. the external-job lexical scope change is test-only and behavior-preserving;
-5. the existing full-store fixture remediation is handled separately.
-
+4. the existing full-store fixture remediation is handled separately.

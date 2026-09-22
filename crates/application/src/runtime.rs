@@ -933,42 +933,84 @@ impl WorkApplication<'_> {
     /// operation, request digest, project lineage, recovery fence, audit
     /// event, and resource acknowledgement in the same authoritative flow.
     ///
-    /// The request type is kept in this module until the service route is
-    /// exposed from the application façade. Callers must not fall back to the
-    /// legacy project-id-only store resolution for `released` outcomes.
+    /// The identity-bound store envelope is the public input boundary.
+    /// Callers must not fall back to the legacy project-id-only store
+    /// resolution for `released` outcomes.
     pub fn resolve_attempt_recovery_with_identity(
         &self,
-        identity: &IdentityContext,
-        request: &RecoveryResolveRequest,
-    ) -> Result<AttemptRecoveryResolution, ApplicationError> {
-        AttemptRecoveryAdapter::new_with_identity(self.store, identity)
-            .resolve(request)
+        input: &IdentityBoundRecoveryResolutionInput,
+    ) -> Result<RecoveryObligationRecord, ApplicationError> {
+        let request = RecoveryResolveRequest {
+            project_id: input.resolution.project_id.clone(),
+            obligation_id: input.resolution.obligation_id.clone(),
+            operation_id: input.operation_id.clone(),
+            request_digest: input.request_digest.clone(),
+            resolution_id: input.resolution.resolution_id.clone(),
+            actor_id: input.resolution.actor_id.clone(),
+            outcome: input.resolution.outcome.clone(),
+            reason: input.resolution.reason.clone(),
+            resource_state: input.resolution.resource_state.clone(),
+            at: input.resolution.at.clone(),
+            expected_project_revision: input.expected_project_revision,
+            session_id: input.session_id.clone(),
+        };
+        AttemptRecoveryAdapter::new_with_identity(self.store, &input.context)
+            .resolve(&request)
+            .map(|resolution| resolution.record().clone())
             .map_err(ApplicationError::from)
     }
 
     /// Request physical resource release while retaining the project/database
     /// identity check. A request only moves a canonical reservation to
     /// `release_pending`; it never makes the resource reusable by itself.
+    #[allow(clippy::too_many_arguments)]
     pub fn request_resource_release_with_identity(
         &self,
         identity: &IdentityContext,
-        request: &ResourceReleaseRequest,
+        project_id: &str,
+        reservation_id: &str,
+        event_id: &str,
+        actor_id: &str,
+        evidence_ref: &str,
+        at: &str,
     ) -> Result<ResourceReservationRecord, ApplicationError> {
+        let request = ResourceReleaseRequest {
+            project_id: project_id.to_owned(),
+            reservation_id: reservation_id.to_owned(),
+            event_id: event_id.to_owned(),
+            actor_id: actor_id.to_owned(),
+            evidence_ref: evidence_ref.to_owned(),
+            at: at.to_owned(),
+        };
         AttemptRecoveryAdapter::new_with_identity(self.store, identity)
-            .request_resource_release(request)
+            .request_resource_release(&request)
             .map_err(ApplicationError::from)
     }
 
     /// Acknowledge the exact pending release through the identity-bound
     /// adapter. The store verifies the reservation subject, pending event,
     /// evidence, and idempotent acknowledgement before making it reusable.
+    #[allow(clippy::too_many_arguments)]
     pub fn acknowledge_resource_release_with_identity(
         &self,
         identity: &IdentityContext,
-        request: &ResourceReleaseRequest,
+        project_id: &str,
+        reservation_id: &str,
+        event_id: &str,
+        actor_id: &str,
+        evidence_ref: &str,
+        at: &str,
     ) -> Result<ResourceReservationRecord, ApplicationError> {
+        let request = ResourceReleaseRequest {
+            project_id: project_id.to_owned(),
+            reservation_id: reservation_id.to_owned(),
+            event_id: event_id.to_owned(),
+            actor_id: actor_id.to_owned(),
+            evidence_ref: evidence_ref.to_owned(),
+            at: at.to_owned(),
+        };
         AttemptRecoveryAdapter::new_with_identity(self.store, identity)
-            .acknowledge_resource_release(request)
+            .acknowledge_resource_release(&request)
             .map_err(ApplicationError::from)
     }
 
@@ -1368,16 +1410,32 @@ mod tests {
             expected_project_revision: None,
             session_id: None,
         };
+        let input = IdentityBoundRecoveryResolutionInput {
+            context: identity.clone(),
+            operation_id: request.operation_id.clone(),
+            request_digest: request.request_digest.clone(),
+            expected_project_revision: request.expected_project_revision,
+            session_id: request.session_id.clone(),
+            resolution: RecoveryResolutionInput {
+                project_id: request.project_id.clone(),
+                obligation_id: request.obligation_id.clone(),
+                resolution_id: request.resolution_id.clone(),
+                actor_id: request.actor_id.clone(),
+                outcome: request.outcome.clone(),
+                reason: request.reason.clone(),
+                resource_state: request.resource_state.clone(),
+                at: request.at.clone(),
+            },
+        };
         let resolved = app
-            .resolve_attempt_recovery_with_identity(&identity, &request)
+            .resolve_attempt_recovery_with_identity(&input)
             .expect("identity-bound recovery resolves");
-        assert!(resolved.is_resolved());
+        assert_eq!(resolved.state, "resolved");
         let replay = app
-            .resolve_attempt_recovery_with_identity(&identity, &request)
+            .resolve_attempt_recovery_with_identity(&input)
             .expect("same recovery operation replays");
-        assert!(replay.is_resolved());
         assert_eq!(
-            replay.record().resolution_id.as_deref(),
+            replay.resolution_id.as_deref(),
             Some("runtime-recovery-resolution")
         );
 
@@ -1389,9 +1447,9 @@ mod tests {
             Err(StoreError::Conflict(message)) if message.contains("authenticated identity-bound")
         ));
 
-        let mut foreign = request;
-        foreign.project_id = "foreign-project".to_owned();
-        let foreign_result = app.resolve_attempt_recovery_with_identity(&identity, &foreign);
+        let mut foreign = input;
+        foreign.resolution.project_id = "foreign-project".to_owned();
+        let foreign_result = app.resolve_attempt_recovery_with_identity(&foreign);
         assert!(matches!(
             foreign_result,
             Err(ApplicationError::Store(StoreError::WrongSubject { .. }))
@@ -1460,7 +1518,15 @@ mod tests {
             at: "unix-ms:4".to_owned(),
         };
         let pending = app
-            .request_resource_release_with_identity(&identity, &release_request)
+            .request_resource_release_with_identity(
+                &identity,
+                &release_request.project_id,
+                &release_request.reservation_id,
+                &release_request.event_id,
+                &release_request.actor_id,
+                &release_request.evidence_ref,
+                &release_request.at,
+            )
             .expect("identity-bound release request records pending state");
         assert_eq!(pending.state, "release_pending");
 
@@ -1469,11 +1535,27 @@ mod tests {
             ..release_request.clone()
         };
         let released = app
-            .acknowledge_resource_release_with_identity(&identity, &acknowledgement)
+            .acknowledge_resource_release_with_identity(
+                &identity,
+                &acknowledgement.project_id,
+                &acknowledgement.reservation_id,
+                &acknowledgement.event_id,
+                &acknowledgement.actor_id,
+                &acknowledgement.evidence_ref,
+                &acknowledgement.at,
+            )
             .expect("identity-bound release acknowledgement commits");
         assert_eq!(released.state, "released");
         let replay = app
-            .acknowledge_resource_release_with_identity(&identity, &acknowledgement)
+            .acknowledge_resource_release_with_identity(
+                &identity,
+                &acknowledgement.project_id,
+                &acknowledgement.reservation_id,
+                &acknowledgement.event_id,
+                &acknowledgement.actor_id,
+                &acknowledgement.evidence_ref,
+                &acknowledgement.at,
+            )
             .expect("same acknowledgement replays idempotently");
         assert_eq!(
             replay.release_ack_id.as_deref(),
@@ -1482,7 +1564,15 @@ mod tests {
 
         let mut foreign = acknowledgement;
         foreign.project_id = "foreign-project".to_owned();
-        let foreign_result = app.acknowledge_resource_release_with_identity(&identity, &foreign);
+        let foreign_result = app.acknowledge_resource_release_with_identity(
+            &identity,
+            &foreign.project_id,
+            &foreign.reservation_id,
+            &foreign.event_id,
+            &foreign.actor_id,
+            &foreign.evidence_ref,
+            &foreign.at,
+        );
         assert!(matches!(
             foreign_result,
             Err(ApplicationError::Store(StoreError::WrongSubject { .. }))
