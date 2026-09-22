@@ -12,7 +12,7 @@ use boreal_domain::{
     TimestampMs, WorkId, DEFAULT_HARD_TIME_LIMIT_MS, DEFAULT_LEASE_TTL_MS,
 };
 use boreal_store::{
-    identity::{IdentityContext, IdentityStore},
+    identity::{IdentityContext, IdentityError, IdentityStore},
     recovery::{
         IdentityBoundRecoveryResolutionInput, RecoveryObligationRecord, RecoveryResolutionInput,
         ResourceReservationRecord,
@@ -336,6 +336,9 @@ pub struct ResourceReleaseRequest {
     pub at: String,
 }
 
+const STANDALONE_RESOURCE_RELEASE_CONFLICT: &str =
+    "standalone identity-bound resource release requires the canonical terminal store route";
+
 /// Store-backed adapter for expiry, stop, and resource recovery. The
 /// identity-bound constructor is the production path; the unbound constructor
 /// remains useful for isolated schema fixtures and intentionally cannot repair
@@ -346,6 +349,7 @@ pub struct AttemptRecoveryAdapter<'a> {
 }
 
 impl<'a> AttemptRecoveryAdapter<'a> {
+    #[cfg(test)]
     pub const fn new(store: &'a SqliteStore) -> Self {
         Self {
             store,
@@ -419,6 +423,11 @@ impl<'a> AttemptRecoveryAdapter<'a> {
         &self,
         request: &ResourceReleaseRequest,
     ) -> Result<ResourceReservationRecord, StoreError> {
+        if self.identity.is_some() {
+            return Err(StoreError::Conflict(
+                STANDALONE_RESOURCE_RELEASE_CONFLICT.to_owned(),
+            ));
+        }
         self.validate_project(&request.project_id)?;
         self.store.request_resource_release(
             &request.project_id,
@@ -434,6 +443,11 @@ impl<'a> AttemptRecoveryAdapter<'a> {
         &self,
         request: &ResourceReleaseRequest,
     ) -> Result<ResourceReservationRecord, StoreError> {
+        if self.identity.is_some() {
+            return Err(StoreError::Conflict(
+                STANDALONE_RESOURCE_RELEASE_CONFLICT.to_owned(),
+            ));
+        }
         self.validate_project(&request.project_id)?;
         self.store.acknowledge_resource_release(
             &request.project_id,
@@ -923,7 +937,8 @@ impl WorkApplication<'_> {
             recovery_obligation_id(operation_id.as_str(), kind).ok_or_else(|| {
                 ApplicationError::Invalid("attempt command has no recovery obligation".to_owned())
             })?;
-        AttemptRecoveryAdapter::new(self.store)
+        let identity = self.recovery_identity(project_id.as_str())?;
+        AttemptRecoveryAdapter::new_with_identity(self.store, &identity)
             .readback(project_id.as_str(), &obligation_id)
             .map_err(ApplicationError::from)
     }
@@ -960,58 +975,42 @@ impl WorkApplication<'_> {
             .map_err(ApplicationError::from)
     }
 
-    /// Request physical resource release while retaining the project/database
-    /// identity check. A request only moves a canonical reservation to
-    /// `release_pending`; it never makes the resource reusable by itself.
-    #[allow(clippy::too_many_arguments)]
+    /// Standalone resource release is intentionally unavailable at this
+    /// application boundary. The store's identity-bound resource transaction
+    /// is not exposed here, so a preflight followed by the legacy mutation
+    /// would permit a rebind/restore race. The canonical terminal attempt
+    /// transaction requests release, and identity-bound recovery resolution
+    /// acknowledges it.
     pub fn request_resource_release_with_identity(
         &self,
         identity: &IdentityContext,
-        project_id: &str,
-        reservation_id: &str,
-        event_id: &str,
-        actor_id: &str,
-        evidence_ref: &str,
-        at: &str,
+        request: &ResourceReleaseRequest,
     ) -> Result<ResourceReservationRecord, ApplicationError> {
-        let request = ResourceReleaseRequest {
-            project_id: project_id.to_owned(),
-            reservation_id: reservation_id.to_owned(),
-            event_id: event_id.to_owned(),
-            actor_id: actor_id.to_owned(),
-            evidence_ref: evidence_ref.to_owned(),
-            at: at.to_owned(),
-        };
         AttemptRecoveryAdapter::new_with_identity(self.store, identity)
-            .request_resource_release(&request)
+            .request_resource_release(request)
             .map_err(ApplicationError::from)
     }
 
-    /// Acknowledge the exact pending release through the identity-bound
-    /// adapter. The store verifies the reservation subject, pending event,
-    /// evidence, and idempotent acknowledgement before making it reusable.
-    #[allow(clippy::too_many_arguments)]
+    /// Standalone acknowledgement is intentionally unavailable for the same
+    /// reason as [`Self::request_resource_release_with_identity`]. Use the
+    /// identity-bound recovery resolution path, whose store transaction
+    /// verifies the pending release and makes it reusable atomically.
     pub fn acknowledge_resource_release_with_identity(
         &self,
         identity: &IdentityContext,
-        project_id: &str,
-        reservation_id: &str,
-        event_id: &str,
-        actor_id: &str,
-        evidence_ref: &str,
-        at: &str,
+        request: &ResourceReleaseRequest,
     ) -> Result<ResourceReservationRecord, ApplicationError> {
-        let request = ResourceReleaseRequest {
-            project_id: project_id.to_owned(),
-            reservation_id: reservation_id.to_owned(),
-            event_id: event_id.to_owned(),
-            actor_id: actor_id.to_owned(),
-            evidence_ref: evidence_ref.to_owned(),
-            at: at.to_owned(),
-        };
         AttemptRecoveryAdapter::new_with_identity(self.store, identity)
-            .acknowledge_resource_release(&request)
+            .acknowledge_resource_release(request)
             .map_err(ApplicationError::from)
+    }
+
+    fn recovery_identity(&self, project_id: &str) -> Result<IdentityContext, ApplicationError> {
+        IdentityStore::new(self.store)
+            .context(project_id)
+            .map_err(|error| {
+                ApplicationError::Store(StoreError::Conflict(format!("recovery identity: {error}")))
+            })
     }
 
     fn run_attempt<A: AttemptLifecycleAdapter>(
@@ -1095,33 +1094,47 @@ impl WorkApplication<'_> {
         let resources = self
             .store
             .list_live_resources(request.project_id.as_str(), None, 500)?;
-        for resource in resources.into_iter().filter(|resource| {
+        let identity = match IdentityStore::new(self.store).context(request.project_id.as_str()) {
+            Ok(identity) => Some(identity),
+            // Schema-v2 compatibility fixtures may expose a resource table
+            // without the production database/project identity boundary. Do
+            // not use the unbound release API in that case: leave the
+            // resource unreconciled until a canonical production opener can
+            // supply identity context.
+            Err(IdentityError::Invalid { field, .. }) if field == "database_identity" => None,
+            Err(error) => {
+                return Err(ApplicationError::Store(StoreError::Conflict(format!(
+                    "terminal resource release identity: {error}"
+                ))));
+            }
+        };
+        let Some(identity) = identity.as_ref() else {
+            return Ok(());
+        };
+        let recovery = AttemptRecoveryAdapter::new_with_identity(self.store, identity)
+            .readback(request.project_id.as_str(), &obligation_id)
+            .map_err(ApplicationError::from)?;
+        let recovery_record = recovery.record();
+        if recovery_record.attempt_id.as_deref() != Some(request.attempt_id.as_str())
+            || recovery_record.fence != Some(request.fence.get())
+        {
+            return Err(ApplicationError::AttemptAdapter(
+                AttemptAdapterError::UnknownOutcome(
+                    "terminal recovery obligation does not match the attempt fence".to_owned(),
+                ),
+            ));
+        }
+        if let Some(resource) = resources.into_iter().find(|resource| {
             resource.attempt_id == request.attempt_id.as_str()
                 && resource.fence == request.fence.get()
                 && matches!(resource.state.as_str(), "active" | "unknown")
         }) {
-            let release_request = ResourceReleaseRequest {
-                project_id: request.project_id.as_str().to_owned(),
-                reservation_id: resource.reservation_id.clone(),
-                event_id: format!(
-                    "{}:resource-release-request:{}",
-                    request.operation_id, resource.reservation_id
-                ),
-                actor_id: request.actor_id.as_str().to_owned(),
-                // This is the durable request identity, not a claim that the
-                // physical resource has already been released.
-                evidence_ref: request.operation_id.as_str().to_owned(),
-                at: format!("unix-ms:{}", request.at.as_millis()),
-            };
-            AttemptRecoveryAdapter::new(self.store)
-                .request_resource_release(&release_request)
-                .map_err(|error| {
-                    ApplicationError::AttemptAdapter(AttemptAdapterError::UnknownOutcome(
-                        format!(
-                            "attempt mutation committed but resource release request readback is unknown: {error}"
-                        ),
-                    ))
-                })?;
+            return Err(ApplicationError::AttemptAdapter(
+                AttemptAdapterError::UnknownOutcome(format!(
+                    "canonical terminal resource release was not durably admitted for {}: {}",
+                    resource.reservation_id, STANDALONE_RESOURCE_RELEASE_CONFLICT
+                )),
+            ));
         }
         Ok(())
     }
@@ -1457,7 +1470,7 @@ mod tests {
     }
 
     #[test]
-    fn identity_bound_resource_acknowledgement_is_idempotent_and_project_scoped() {
+    fn standalone_identity_bound_resource_helpers_fail_closed() {
         let store = SqliteStore::open_in_memory(PRODUCTION_SCHEMA).expect("production schema");
         let app = WorkApplication::new(&store);
         let project = ProjectId::new("runtime-resource-project");
@@ -1517,9 +1530,25 @@ mod tests {
             evidence_ref: "runtime-stop-evidence".to_owned(),
             at: "unix-ms:4".to_owned(),
         };
-        let pending = app
-            .request_resource_release_with_identity(
-                &identity,
+        let request_error = app
+            .request_resource_release_with_identity(&identity, &release_request)
+            .expect_err("standalone release request must fail closed");
+        assert!(matches!(
+            request_error,
+            ApplicationError::Store(StoreError::Conflict(message))
+                if message == STANDALONE_RESOURCE_RELEASE_CONFLICT
+        ));
+        assert_eq!(
+            store
+                .resource_reservation(project.as_str(), &release_request.reservation_id)
+                .expect("resource reads")
+                .expect("claimed resource exists")
+                .state,
+            "active"
+        );
+
+        store
+            .request_resource_release(
                 &release_request.project_id,
                 &release_request.reservation_id,
                 &release_request.event_id,
@@ -1527,56 +1556,28 @@ mod tests {
                 &release_request.evidence_ref,
                 &release_request.at,
             )
-            .expect("identity-bound release request records pending state");
-        assert_eq!(pending.state, "release_pending");
+            .expect("test prepares the pending canonical obligation");
 
         let acknowledgement = ResourceReleaseRequest {
             event_id: "runtime-resource-release-ack".to_owned(),
             ..release_request.clone()
         };
-        let released = app
-            .acknowledge_resource_release_with_identity(
-                &identity,
-                &acknowledgement.project_id,
-                &acknowledgement.reservation_id,
-                &acknowledgement.event_id,
-                &acknowledgement.actor_id,
-                &acknowledgement.evidence_ref,
-                &acknowledgement.at,
-            )
-            .expect("identity-bound release acknowledgement commits");
-        assert_eq!(released.state, "released");
-        let replay = app
-            .acknowledge_resource_release_with_identity(
-                &identity,
-                &acknowledgement.project_id,
-                &acknowledgement.reservation_id,
-                &acknowledgement.event_id,
-                &acknowledgement.actor_id,
-                &acknowledgement.evidence_ref,
-                &acknowledgement.at,
-            )
-            .expect("same acknowledgement replays idempotently");
-        assert_eq!(
-            replay.release_ack_id.as_deref(),
-            Some("runtime-resource-release-ack")
-        );
-
-        let mut foreign = acknowledgement;
-        foreign.project_id = "foreign-project".to_owned();
-        let foreign_result = app.acknowledge_resource_release_with_identity(
-            &identity,
-            &foreign.project_id,
-            &foreign.reservation_id,
-            &foreign.event_id,
-            &foreign.actor_id,
-            &foreign.evidence_ref,
-            &foreign.at,
-        );
+        let acknowledgement_error = app
+            .acknowledge_resource_release_with_identity(&identity, &acknowledgement)
+            .expect_err("standalone release acknowledgement must fail closed");
         assert!(matches!(
-            foreign_result,
-            Err(ApplicationError::Store(StoreError::WrongSubject { .. }))
+            acknowledgement_error,
+            ApplicationError::Store(StoreError::Conflict(message))
+                if message == STANDALONE_RESOURCE_RELEASE_CONFLICT
         ));
+        assert_eq!(
+            store
+                .resource_reservation(project.as_str(), &acknowledgement.reservation_id)
+                .expect("resource reads")
+                .expect("pending resource exists")
+                .state,
+            "release_pending"
+        );
     }
 
     #[derive(Default)]

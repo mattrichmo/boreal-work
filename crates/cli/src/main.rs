@@ -1,11 +1,12 @@
 use boreal_application::{
     canonical_request_digest, guide_checked, sha256_content_digest, AcceptanceGateDefinition,
-    ApplicationError, AttemptPolicy, AttemptRequest, BoundedExecutionResult, CommandSpec,
-    EndAttemptRequest, EvidenceExecutionOutcome, EvidenceRunRequest, ExecutorAttestation,
-    IntakeBucket, IntakeBucketId, IntakeItem, IntakeItemId, IntakeKind, IntakeLifecycle,
-    KnowledgeApplication, LivenessMetadata, OperationResult, ReceiptCoverage, ReceiptExpectation,
-    ReceiptPayload, SessionRegistrationRequest, SourceCaptureInput, SqliteAttemptAdapter,
-    SummaryPayload, WorkApplication, WorkflowRegistry,
+    ApplicationError, AttemptPolicy, AttemptRequest, AuthenticatedOperationJournal,
+    BoundedExecutionResult, CommandSpec, EndAttemptRequest, EvidenceExecutionOutcome,
+    EvidenceRunRequest, ExecutorAttestation, IntakeBucket, IntakeBucketId, IntakeItem,
+    IntakeItemId, IntakeKind, IntakeLifecycle, KnowledgeApplication, LivenessMetadata,
+    OperationResult, ReceiptCoverage, ReceiptExpectation, ReceiptPayload,
+    SessionRegistrationRequest, SourceCaptureInput, SqliteAttemptAdapter, SummaryPayload,
+    WorkApplication, WorkflowRegistry,
 };
 use boreal_domain::{
     AcceptanceProfile, ActorId, AttemptId, AttemptPhase, ConfigIdentity, DispatchPolicy, Fence,
@@ -25,9 +26,9 @@ use boreal_protocol::{
 use boreal_source::SourceCatalog;
 use boreal_store::identity::{IdentityError, IdentityStore, WorkspaceBinding};
 use boreal_store::{
-    AttemptRecord, EvidenceExecutionState, OperationOutcome as StoreOperationOutcome,
-    OperationRecord, ReceiptAttestation, ReceiptOutcome, ReceiptRecord, SqliteStore, StoreError,
-    WorkRecord,
+    AttemptRecord, AuditEventRecord, EvidenceExecutionState,
+    OperationOutcome as StoreOperationOutcome, OperationRecord, ReceiptAttestation, ReceiptOutcome,
+    ReceiptRecord, SqliteStore, StoreError, WorkRecord,
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -54,6 +55,7 @@ mod setup;
 mod update;
 
 const SCHEMA: &str = include_str!("../../../project/spec/schema-v2.sql");
+const PRODUCTION_SCHEMA: &str = include_str!("../../../project/spec/schema-production.sql");
 const MAX_JSON_BYTES: usize = boreal_protocol::bounds::MAX_INLINE_OUTPUT_BYTES;
 const ENVELOPE_METADATA_BUDGET: usize = 4096;
 const DEFAULT_ACTOR: &str = "agent-1";
@@ -604,7 +606,17 @@ fn run_with_operation(args: &[String], operation: &str) -> Result<CliResult, Cli
         return dashboard::run_dashboard(&parsed);
     }
     if parsed.path.len() == 1 && matches!(parsed.path[0].as_str(), "update" | "upgrade") {
-        return update::run(&parsed);
+        if parsed.options.socket.is_some() {
+            if service::supports(&parsed) {
+                return service::request(&parsed, operation);
+            }
+            return Err(CliError::with(
+                ErrorCode::UnknownCommandNamespace,
+                ApplicationOutcome::Rejected,
+                "the requested update command is not available through the selected service socket",
+            ));
+        }
+        return service::run_update(&parsed, operation);
     }
     let setup_command = setup::is_setup_command(&parsed.path);
     let setup_requested = setup::should_setup(&parsed);
@@ -4078,6 +4090,10 @@ fn finish_result<A: boreal_application::AttemptLifecycleAdapter>(
         );
     }
     let project = project_argument(parsed, 0)?;
+    let context = IdentityStore::new(store)
+        .context(&project)
+        .map_err(map_identity_error)?;
+    let journal = app.authenticated_operation_journal(&context);
     let work_id = work_argument(parsed, 0)?;
     let expected_attempt = parsed
         .options
@@ -4114,6 +4130,33 @@ fn finish_result<A: boreal_application::AttemptLifecycleAdapter>(
     // is part of the closeout identity, not a post-receipt presentation step.
     let summary_body = read_summary_body(parsed)?;
     let summary = summary_payload(&receipt, &summary_body, operation);
+    let parent_request_digest = finish_close_request_digest(
+        &ProjectId::new(project.clone()),
+        &work_id,
+        expected_attempt,
+        expected_fence,
+        &parsed.options.actor,
+        &parsed.options.session,
+        parsed.options.expected_revision,
+        &receipt,
+        &summary_body,
+    );
+    let result_operation = finish_result_operation_id(operation);
+    ensure_finish_parent_intent(
+        &journal,
+        operation,
+        &ProjectId::new(project.clone()),
+        &parsed.options.actor,
+        &parsed.options.session,
+        expected_attempt,
+        expected_fence,
+        parsed.options.expected_revision,
+        &parent_request_digest,
+        &result_operation,
+    )?;
+    if let Some(readback) = finish_result_readback(&journal, operation, &result_operation)? {
+        return Ok(readback);
+    }
     let receipt_result = app.record_receipt(
         &parsed.options.actor,
         Some(parsed.options.session.as_str()),
@@ -4249,9 +4292,10 @@ fn finish_result<A: boreal_application::AttemptLifecycleAdapter>(
             })).collect::<Vec<_>>(),
         })),
     });
-    append_finish_parent_operation(
-        store,
+    append_finish_result_operation(
+        &journal,
         operation,
+        &result_operation,
         &ProjectId::new(project),
         &parsed.options.actor,
         &parsed.options.session,
@@ -4259,7 +4303,7 @@ fn finish_result<A: boreal_application::AttemptLifecycleAdapter>(
         expected_fence,
         parsed.options.expected_revision,
         close_outcome,
-        finalized.revision,
+        &parent_request_digest,
         &close_data,
     )?;
     bounded_result(Some(close_data), Some(finalized.revision)).map(|mut result| {
@@ -5864,27 +5908,45 @@ fn bounded_result(data: Option<Value>, revision: Option<u64>) -> Result<CliResul
     })
 }
 
-fn append_finish_parent_operation(
-    store: &SqliteStore,
-    operation: &str,
+fn finish_close_request_digest(
     project: &ProjectId,
-    actor: &str,
-    session: &str,
+    work_id: &str,
     attempt: &str,
     fence: u64,
+    actor: &str,
+    session: &str,
     expected_revision: Option<u64>,
-    outcome: ApplicationOutcome,
-    revision: u64,
-    result: &Value,
-) -> Result<(), CliError> {
-    if store
-        .operation(operation)
-        .map_err(map_store_error)?
-        .is_some()
-    {
-        return Ok(());
-    }
-    let outcome = match outcome {
+    receipt: &ReceiptPayload,
+    summary_body: &str,
+) -> String {
+    canonical_request_digest(
+        "finish.close/v2",
+        json!({
+            "project_id": project.as_str(),
+            "work_id": work_id,
+            "attempt_id": attempt,
+            "fence": fence,
+            "actor_id": actor,
+            "session_id": session,
+            "expected_revision": expected_revision,
+            "receipt_id": receipt.receipt_id.as_str(),
+            "receipt_operation_id": receipt.operation_id.as_str(),
+            "gate_id": receipt.gate_id.as_str(),
+            "source_snapshot_hash": receipt.source_snapshot_hash.as_str(),
+            "config_identity": receipt.config_identity.as_str(),
+            "output_digest": receipt.output_digest,
+            "output_ref": receipt.output_ref,
+            "summary": summary_body,
+        }),
+    )
+}
+
+fn finish_result_operation_id(operation: &str) -> String {
+    format!("{}:result", operation)
+}
+
+fn finish_store_outcome(outcome: ApplicationOutcome) -> StoreOperationOutcome {
+    match outcome {
         ApplicationOutcome::Changed => StoreOperationOutcome::Changed,
         ApplicationOutcome::Unchanged => StoreOperationOutcome::Unchanged,
         ApplicationOutcome::Rejected => StoreOperationOutcome::Rejected,
@@ -5892,25 +5954,228 @@ fn append_finish_parent_operation(
         ApplicationOutcome::Busy => StoreOperationOutcome::Busy,
         ApplicationOutcome::Failed => StoreOperationOutcome::Failed,
         ApplicationOutcome::Unknown => StoreOperationOutcome::Unknown,
-    };
-    store
-        .append_operation(&OperationRecord {
-            operation_id: operation.to_owned(),
-            project_id: project.as_str().to_owned(),
-            command: "finish_close".to_owned(),
-            actor_id: actor.to_owned(),
-            session_id: Some(session.to_owned()),
-            expected_revision,
-            attempt_id: Some(attempt.to_owned()),
-            fence: Some(fence),
-            request_digest: canonical_request_digest("finish.close/v1", result.clone()),
-            outcome,
-            result_json: result.to_string(),
-            revision,
-            created_at: now(),
-            completed_at: Some(now()),
-        })
-        .map_err(map_store_error)
+    }
+}
+
+fn finish_application_outcome(outcome: StoreOperationOutcome) -> ApplicationOutcome {
+    match outcome {
+        StoreOperationOutcome::Changed => ApplicationOutcome::Changed,
+        StoreOperationOutcome::Unchanged => ApplicationOutcome::Unchanged,
+        StoreOperationOutcome::Rejected => ApplicationOutcome::Rejected,
+        StoreOperationOutcome::Conflict => ApplicationOutcome::Conflict,
+        StoreOperationOutcome::Busy => ApplicationOutcome::Busy,
+        StoreOperationOutcome::Failed => ApplicationOutcome::Failed,
+        StoreOperationOutcome::Unknown => ApplicationOutcome::Unknown,
+    }
+}
+
+fn ensure_finish_parent_intent(
+    journal: &AuthenticatedOperationJournal<'_>,
+    operation: &str,
+    project: &ProjectId,
+    actor: &str,
+    session: &str,
+    attempt: &str,
+    fence: u64,
+    expected_revision: Option<u64>,
+    request_digest: &str,
+    result_operation: &str,
+) -> Result<(), CliError> {
+    if let Some(readback) = journal.readback(operation).map_err(map_application_error)? {
+        let existing = readback.operation.ok_or_else(|| {
+            CliError::with(
+                ErrorCode::ProtocolMismatch,
+                ApplicationOutcome::Failed,
+                "finish_close parent operation has no durable outcome",
+            )
+        })?;
+        if existing.project_id != project.as_str()
+            || existing.command != "finish_close"
+            || existing.actor_id != actor
+            || existing.session_id.as_deref() != Some(session)
+            || existing.expected_revision != expected_revision
+            || existing.attempt_id.as_deref() != Some(attempt)
+            || existing.fence != Some(fence)
+            || existing.request_digest != request_digest
+        {
+            return Err(CliError::with(
+                ErrorCode::OperationConflict,
+                ApplicationOutcome::Conflict,
+                "finish_close operation ID was reused with a different immutable request",
+            ));
+        }
+        return Ok(());
+    }
+    let created_at = now();
+    let payload = json!({
+        "state": "pending",
+        "parent_operation_id": operation,
+        "result_operation_id": result_operation,
+        "request_digest": request_digest,
+        "readback_required": true,
+    })
+    .to_string();
+    journal
+        .append(
+            OperationRecord {
+                operation_id: operation.to_owned(),
+                project_id: project.as_str().to_owned(),
+                command: "finish_close".to_owned(),
+                actor_id: actor.to_owned(),
+                session_id: Some(session.to_owned()),
+                expected_revision,
+                attempt_id: Some(attempt.to_owned()),
+                fence: Some(fence),
+                request_digest: request_digest.to_owned(),
+                outcome: StoreOperationOutcome::Busy,
+                result_json: payload.clone(),
+                revision: 0,
+                created_at: created_at.clone(),
+                completed_at: None,
+            },
+            AuditEventRecord {
+                project_id: project.as_str().to_owned(),
+                revision: 0,
+                operation_id: operation.to_owned(),
+                event_type: "close.requested".to_owned(),
+                subject_type: "attempt".to_owned(),
+                subject_id: attempt.to_owned(),
+                actor_id: actor.to_owned(),
+                session_id: Some(session.to_owned()),
+                fence: Some(fence),
+                as_of: created_at,
+                payload_json: payload,
+            },
+        )
+        .map(|_| ())
+        .map_err(map_application_error)
+}
+
+fn finish_result_from_operation(operation: &OperationRecord) -> Result<CliResult, CliError> {
+    if matches!(
+        operation.outcome,
+        StoreOperationOutcome::Busy | StoreOperationOutcome::Unknown
+    ) {
+        return Err(CliError::with(
+            ErrorCode::UnknownOutcome,
+            ApplicationOutcome::Unknown,
+            "finish_close result is still pending readback",
+        ));
+    }
+    let value: Value = serde_json::from_str(&operation.result_json).map_err(|error| {
+        CliError::with(
+            ErrorCode::ProtocolMismatch,
+            ApplicationOutcome::Failed,
+            format!("finish_close result is invalid JSON: {error}"),
+        )
+    })?;
+    let data = value.get("close").cloned().unwrap_or(value);
+    let mut result = bounded_result(Some(data), Some(operation.revision))?;
+    result.outcome = finish_application_outcome(operation.outcome);
+    Ok(result)
+}
+
+fn finish_result_readback(
+    journal: &AuthenticatedOperationJournal<'_>,
+    operation: &str,
+    result_operation: &str,
+) -> Result<Option<CliResult>, CliError> {
+    if let Some(readback) = journal
+        .readback(result_operation)
+        .map_err(map_application_error)?
+    {
+        let record = readback.operation.ok_or_else(|| {
+            CliError::with(
+                ErrorCode::ProtocolMismatch,
+                ApplicationOutcome::Failed,
+                "finish_close result operation has no durable outcome",
+            )
+        })?;
+        if record.command != "finish_close.result" {
+            return Err(CliError::with(
+                ErrorCode::ProtocolMismatch,
+                ApplicationOutcome::Failed,
+                "finish_close result operation has an unexpected command",
+            ));
+        }
+        return finish_result_from_operation(&record).map(Some);
+    }
+    if let Some(readback) = journal.readback(operation).map_err(map_application_error)? {
+        if let Some(record) = readback.operation {
+            if !matches!(
+                record.outcome,
+                StoreOperationOutcome::Busy | StoreOperationOutcome::Unknown
+            ) {
+                return finish_result_from_operation(&record).map(Some);
+            }
+        }
+    }
+    Ok(None)
+}
+
+fn append_finish_result_operation(
+    journal: &AuthenticatedOperationJournal<'_>,
+    parent_operation: &str,
+    result_operation: &str,
+    project: &ProjectId,
+    actor: &str,
+    session: &str,
+    attempt: &str,
+    fence: u64,
+    expected_revision: Option<u64>,
+    outcome: ApplicationOutcome,
+    parent_request_digest: &str,
+    result: &Value,
+) -> Result<(), CliError> {
+    let created_at = now();
+    let result_json = json!({
+        "parent_operation_id": parent_operation,
+        "close": result,
+    })
+    .to_string();
+    let request_digest = canonical_request_digest(
+        "finish.close.result/v1",
+        json!({
+            "parent_operation_id": parent_operation,
+            "parent_request_digest": parent_request_digest,
+        }),
+    );
+    journal
+        .append(
+            OperationRecord {
+                operation_id: result_operation.to_owned(),
+                project_id: project.as_str().to_owned(),
+                command: "finish_close.result".to_owned(),
+                actor_id: actor.to_owned(),
+                session_id: Some(session.to_owned()),
+                expected_revision,
+                attempt_id: Some(attempt.to_owned()),
+                fence: Some(fence),
+                request_digest,
+                outcome: finish_store_outcome(outcome),
+                result_json: result_json.clone(),
+                // The journal allocates a fresh revision so its audit row
+                // cannot collide with the lifecycle mutation's audit row.
+                revision: 0,
+                created_at: created_at.clone(),
+                completed_at: Some(created_at.clone()),
+            },
+            AuditEventRecord {
+                project_id: project.as_str().to_owned(),
+                revision: 0,
+                operation_id: result_operation.to_owned(),
+                event_type: "close.completed".to_owned(),
+                subject_type: "attempt".to_owned(),
+                subject_id: attempt.to_owned(),
+                actor_id: actor.to_owned(),
+                session_id: Some(session.to_owned()),
+                fence: Some(fence),
+                as_of: created_at,
+                payload_json: result_json,
+            },
+        )
+        .map(|_| ())
+        .map_err(map_application_error)
 }
 
 fn store_revision(store: &SqliteStore, project: &ProjectId) -> Result<u64, CliError> {

@@ -900,6 +900,8 @@ impl SqliteStore {
         }
         self.execute_batch("BEGIN IMMEDIATE")?;
         let result = (|| {
+            let session_id =
+                self.v3_authenticated_session_id(&context.project_id, &context.actor_id)?;
             if let Some(existing) = self.operation(&context.operation_id)? {
                 if existing.project_id != context.project_id
                     || existing.command != command
@@ -909,6 +911,13 @@ impl SqliteStore {
                         "operation request digest mismatch".to_owned(),
                     ));
                 }
+                ensure_v3_replay_identity(
+                    &existing,
+                    context,
+                    session_id.as_deref(),
+                    subject_type,
+                    subject_id,
+                )?;
                 return Ok(MutationResult {
                     operation_id: context.operation_id.clone(),
                     revision: existing.revision,
@@ -930,7 +939,7 @@ impl SqliteStore {
                     project_id: context.project_id.clone(),
                     command: command.to_owned(),
                     actor_id: context.actor_id.clone(),
-                    session_id: None,
+                    session_id: session_id.clone(),
                     expected_revision: context.expected_revision,
                     attempt_id: None,
                     fence: None,
@@ -952,7 +961,7 @@ impl SqliteStore {
                     subject_type: "operation".to_owned(),
                     subject_id: context.operation_id.clone(),
                     actor_id: context.actor_id.clone(),
-                    session_id: None,
+                    session_id,
                     fence: None,
                     as_of: context.now.clone(),
                     payload_json: payload,
@@ -975,6 +984,93 @@ impl SqliteStore {
             }
         }
     }
+
+    /// Resolve the authenticated session bound to this project and actor
+    /// through its durable `session.register` operation. The v3 context
+    /// predates an explicit session field, so an unambiguous active
+    /// registration is the only safe compatibility path. Ambiguity fails
+    /// closed rather than selecting an arbitrary session.
+    fn v3_authenticated_session_id(
+        &self,
+        project_id: &str,
+        actor_id: &str,
+    ) -> Result<Option<String>, StoreError> {
+        let mut statement = self.prepare(
+            "SELECT DISTINCT session.session_id
+             FROM session
+             JOIN operation registration
+               ON registration.session_id = session.session_id
+              AND registration.command = 'session.register'
+              AND registration.project_id = ?1
+             WHERE session.actor_id = ?2
+               AND session.state = 'active'
+             ORDER BY session.session_id",
+        )?;
+        statement.bind_text(1, project_id)?;
+        statement.bind_text(2, actor_id)?;
+
+        let mut resolved = None;
+        while statement.step()? == SQLITE_ROW {
+            let session_id = statement.column_text(0)?;
+            if resolved.is_some() {
+                return Err(StoreError::Conflict(
+                    "v3 mutation has multiple active authenticated sessions; refusing to select one"
+                        .to_owned(),
+                ));
+            }
+            resolved = Some(session_id);
+        }
+        Ok(resolved)
+    }
+}
+
+fn ensure_v3_replay_identity(
+    existing: &OperationRecord,
+    context: &V3MutationContext,
+    session_id: Option<&str>,
+    subject_type: &str,
+    subject_id: &str,
+) -> Result<(), StoreError> {
+    if existing.actor_id != context.actor_id {
+        return Err(StoreError::WrongOwner {
+            expected: existing.actor_id.clone(),
+            actual: context.actor_id.clone(),
+        });
+    }
+    if existing.session_id.as_deref() != session_id {
+        return Err(StoreError::Conflict(
+            "operation ID was reused with a different authenticated session".to_owned(),
+        ));
+    }
+    if existing.expected_revision != context.expected_revision {
+        return Err(StoreError::Conflict(
+            "operation ID was reused with a different expected revision".to_owned(),
+        ));
+    }
+
+    let existing_subject = serde_json::from_str::<serde_json::Value>(&existing.result_json)
+        .map_err(|error| {
+            StoreError::Corrupt(format!("v3 operation result is invalid JSON: {error}"))
+        })?
+        .as_object()
+        .and_then(|payload| {
+            Some((
+                payload.get("subject_type")?.as_str()?.to_owned(),
+                payload.get("subject_id")?.as_str()?.to_owned(),
+            ))
+        })
+        .ok_or_else(|| {
+            StoreError::Corrupt(
+                "v3 operation result is missing its semantic subject identity".to_owned(),
+            )
+        })?;
+    if existing_subject.0 != subject_type || existing_subject.1 != subject_id {
+        return Err(StoreError::WrongSubject {
+            expected: format!("{subject_type}/{subject_id}"),
+            actual: format!("{}/{}", existing_subject.0, existing_subject.1),
+        });
+    }
+    Ok(())
 }
 
 fn ensure_project(expected: &str, actual: &str) -> Result<(), StoreError> {

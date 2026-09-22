@@ -5,7 +5,13 @@
 //! details such as socket paths and local receipt filenames do not belong in
 //! the request payload; their immutable content identities do.
 
+use boreal_store::{
+    identity::IdentityContext, AuditEventRecord, OperationReadback, OperationRecord, SqliteStore,
+    StoreError,
+};
 use serde_json::{Map, Value};
+
+use crate::{ApplicationError, WorkApplication};
 
 const DIGEST_PREFIX: &str = "sha256:";
 
@@ -25,6 +31,86 @@ pub fn canonical_request_digest(command: &str, payload: Value) -> String {
 /// Content identity for immutable bytes referenced by proof and summary facts.
 pub fn sha256_content_digest(bytes: &[u8]) -> String {
     format!("{DIGEST_PREFIX}{}", hex(&sha256(bytes)))
+}
+
+/// Application-owned port for consequential operation journal access.
+///
+/// The caller must provide the authenticated, project/database/workspace-bound
+/// context obtained by the adapter's authentication/session boundary. There
+/// is deliberately no constructor that accepts only a project identifier, and
+/// every append/readback is delegated to the store's identity-bound journal.
+/// This keeps CLI and service handlers from accidentally falling back to an
+/// unbound operation write or lookup.
+pub struct AuthenticatedOperationJournal<'a> {
+    store: &'a SqliteStore,
+    identity: &'a IdentityContext,
+}
+
+impl<'a> AuthenticatedOperationJournal<'a> {
+    pub(crate) const fn new(store: &'a SqliteStore, identity: &'a IdentityContext) -> Self {
+        Self { store, identity }
+    }
+
+    pub fn project_id(&self) -> &str {
+        &self.identity.project_id
+    }
+
+    pub fn append(
+        &self,
+        operation: OperationRecord,
+        audit: AuditEventRecord,
+    ) -> Result<OperationReadback, ApplicationError> {
+        if operation.project_id != self.identity.project_id {
+            return Err(ApplicationError::Store(StoreError::WrongSubject {
+                expected: self.identity.project_id.clone(),
+                actual: operation.project_id,
+            }));
+        }
+        if audit.project_id != self.identity.project_id {
+            return Err(ApplicationError::Store(StoreError::WrongSubject {
+                expected: self.identity.project_id.clone(),
+                actual: audit.project_id,
+            }));
+        }
+        self.store
+            .append_identity_operation_audit(self.identity, operation, audit)
+            .map_err(ApplicationError::from)
+    }
+
+    /// Read an operation in the authenticated project without requiring the
+    /// caller to guess its immutable fields. This is for recovery/subject
+    /// discovery; replay validation must still compare the returned record to
+    /// the complete request identity before reusing it.
+    pub fn readback(
+        &self,
+        operation_id: &str,
+    ) -> Result<Option<OperationReadback>, ApplicationError> {
+        boreal_store::operations::OperationJournal::new(self.store)
+            .readback_in_context(self.identity, operation_id)
+            .map_err(ApplicationError::from)
+    }
+
+    /// Reads the audit envelope through the same project/database identity as
+    /// the operation readback. Finish-close recovery uses this to distinguish
+    /// its immutable intent/result pair from an unrelated operation that was
+    /// given a colliding identifier.
+    pub fn audit_event(
+        &self,
+        operation_id: &str,
+    ) -> Result<Option<AuditEventRecord>, ApplicationError> {
+        boreal_store::operations::OperationJournal::new(self.store)
+            .audit_event_in_context(self.identity, operation_id)
+            .map_err(ApplicationError::from)
+    }
+}
+
+impl WorkApplication<'_> {
+    pub fn authenticated_operation_journal<'a>(
+        &'a self,
+        identity: &'a IdentityContext,
+    ) -> AuthenticatedOperationJournal<'a> {
+        AuthenticatedOperationJournal::new(self.store, identity)
+    }
 }
 
 fn canonicalize(value: Value) -> Value {

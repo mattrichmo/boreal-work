@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const SCHEMA: &str = include_str!("../../../project/spec/schema-v2.sql");
+const PRODUCTION_SCHEMA: &str = include_str!("../../../project/spec/schema-production.sql");
 
 fn temp_path(label: &str) -> PathBuf {
     let stamp = SystemTime::now()
@@ -94,6 +95,25 @@ fn online_backup_and_restore_round_trip_live_database() {
     remove_sqlite_files(&source_path);
     remove_sqlite_files(&backup_path);
     remove_sqlite_files(&restored_path);
+}
+
+#[test]
+fn canonical_production_backup_and_restore_require_external_job_boundary() {
+    let store = SqliteStore::open_in_memory(PRODUCTION_SCHEMA).expect("production opens");
+
+    let backup = store.backup_to(std::env::temp_dir().join("boreal-production-backup.sqlite"));
+    assert!(matches!(
+        backup,
+        Err(StoreError::Conflict(message))
+            if message.contains("identity-bound external-job admission")
+    ));
+
+    let restore = store.restore_from(std::env::temp_dir().join("boreal-production-restore.sqlite"));
+    assert!(matches!(
+        restore,
+        Err(StoreError::Conflict(message))
+            if message.contains("restore-epoch reconciliation")
+    ));
 }
 
 #[test]

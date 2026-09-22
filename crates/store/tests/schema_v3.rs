@@ -5,9 +5,10 @@
 //! compatible while the store validates the complete v3 extension.
 
 use boreal_store::{
-    ContainerDispositionV3Input, CycleAssignmentV3Input, CycleSeriesV3Input, CycleTemplateV3Input,
-    CycleV3Input, IntakeBucketV3Input, IntakeItemV3Input, IntakePromotionV3Input, SqliteStore,
-    StoreError, V3MutationContext, WorkNodeV3Input,
+    AuditEventRecord, ContainerDispositionV3Input, CycleAssignmentV3Input, CycleSeriesV3Input,
+    CycleTemplateV3Input, CycleV3Input, IntakeBucketV3Input, IntakeItemV3Input,
+    IntakePromotionV3Input, OperationOutcome, OperationRecord, SessionRegistrationRequest,
+    SqliteStore, StoreError, V3MutationContext, WorkNodeV3Input,
 };
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -39,6 +40,108 @@ fn open_v2_fixture(path: impl AsRef<Path>) -> SqliteStore {
         .expect("raw schema-v2 fixture applies");
     assert_eq!(store.schema_version().unwrap(), 2);
     store
+}
+
+fn historical_schema_v2() -> String {
+    let historical = SCHEMA_V2.replace(
+        "'attempt.expired','evidence.verifier.admitted','expiry.resolved'",
+        "'attempt.expired','expiry.resolved'",
+    );
+    assert_ne!(
+        historical, SCHEMA_V2,
+        "fixture must represent the prior v2 schema"
+    );
+    historical
+}
+
+fn seed_audit_subject(store: &SqliteStore) {
+    store
+        .execute_batch(
+            "INSERT INTO project VALUES ('migration-project', 2, 'boreal.work-status/2', 0, 't0', 't0');
+             INSERT INTO actor VALUES ('migration-actor', 'agent', 'credential', 'Migration actor', 't0');",
+        )
+        .expect("migration audit subject seeds");
+}
+
+fn append_verifier_audit(store: &SqliteStore, operation_id: &str) -> Result<(), StoreError> {
+    let operation = OperationRecord {
+        operation_id: operation_id.to_owned(),
+        project_id: "migration-project".to_owned(),
+        command: "evidence.verifier".to_owned(),
+        actor_id: "migration-actor".to_owned(),
+        session_id: None,
+        expected_revision: None,
+        attempt_id: None,
+        fence: None,
+        request_digest: format!("sha256:{operation_id}"),
+        outcome: OperationOutcome::Changed,
+        result_json: "{}".to_owned(),
+        revision: 1,
+        created_at: "t1".to_owned(),
+        completed_at: Some("t1".to_owned()),
+    };
+    store.append_operation(&operation)?;
+    store.append_audit_event(&AuditEventRecord {
+        project_id: operation.project_id,
+        revision: operation.revision,
+        operation_id: operation.operation_id,
+        event_type: "evidence.verifier.admitted".to_owned(),
+        subject_type: "project".to_owned(),
+        subject_id: "migration-project".to_owned(),
+        actor_id: operation.actor_id,
+        session_id: operation.session_id,
+        fence: operation.fence,
+        as_of: "t1".to_owned(),
+        payload_json: "{}".to_owned(),
+    })
+}
+
+#[test]
+fn historical_v2_audit_check_is_repaired_before_production_migration() {
+    let path = temp_path("historical-audit");
+    remove_sqlite_files(&path);
+    let store = SqliteStore::open_for_migration(&path).expect("migration fixture opens");
+    store
+        .execute_batch(&historical_schema_v2())
+        .expect("historical schema-v2 fixture applies");
+    seed_audit_subject(&store);
+    assert_eq!(store.schema_version().unwrap(), 2);
+
+    store
+        .migrate_production()
+        .expect("historical v2 migrates with the repaired audit contract");
+    assert_eq!(store.schema_version().unwrap(), 3);
+    append_verifier_audit(&store, "migration-verifier-event")
+        .expect("repaired audit check accepts verifier admission");
+    assert_eq!(
+        store
+            .audit_event("migration-verifier-event")
+            .unwrap()
+            .unwrap()
+            .event_type,
+        "evidence.verifier.admitted"
+    );
+    drop(store);
+    remove_sqlite_files(&path);
+}
+
+#[test]
+fn historical_v2_audit_repair_rolls_back_with_a_failed_migration() {
+    let store = SqliteStore::open_for_migration(":memory:").expect("migration fixture opens");
+    store
+        .execute_batch(&historical_schema_v2())
+        .expect("historical schema-v2 fixture applies");
+    seed_audit_subject(&store);
+    let broken = SCHEMA_V3.replace(
+        "CREATE TABLE cycle_v3",
+        "THIS IS INVALID SQL;\nCREATE TABLE cycle_v3",
+    );
+
+    assert!(store.apply_work_model_v3(&broken).is_err());
+    assert_eq!(store.schema_version().unwrap(), 2);
+    let error = append_verifier_audit(&store, "rolled-back-verifier-event")
+        .expect_err("rolled-back repair must not make the old check appear upgraded");
+    assert!(matches!(error, StoreError::Constraint { .. }), "{error:?}");
 }
 
 fn store_v3() -> SqliteStore {
@@ -150,7 +253,10 @@ fn store_v3_mutations_use_revisions_audit_and_typed_replay() {
     assert!(replay.replayed);
     assert_eq!(replay.revision, created.revision);
     let changed = store.create_cycle_series_v3(&context("op-series", "sha256:changed"), &series);
-    assert!(matches!(changed, Err(StoreError::Conflict(_))));
+    assert!(matches!(
+        changed,
+        Err(StoreError::Conflict(message)) if message == "operation request digest mismatch"
+    ));
 
     let template = CycleTemplateV3Input {
         project_id: "p1".to_owned(),
@@ -299,6 +405,107 @@ fn store_v3_mutations_use_revisions_audit_and_typed_replay() {
             &disposition,
         )
         .expect("disposition mutation is accepted");
+}
+
+#[test]
+fn v3_replay_requires_actor_session_subject_and_revision_identity() {
+    let store = store_v3();
+    seed_base(&store);
+    store
+        .ensure_actor("agent-2", "agent", "credential-agent-2", "Agent 2", "t0")
+        .expect("second actor fixture inserts");
+    store
+        .register_session(SessionRegistrationRequest {
+            project_id: "p1".to_owned(),
+            session_id: "session-1".to_owned(),
+            actor_id: "agent-1".to_owned(),
+            harness_id: "test".to_owned(),
+            operation_id: "session-register-1".to_owned(),
+            request_digest: "sha256:session-register-1".to_owned(),
+            expected_project_revision: None,
+            started_at: "t1".to_owned(),
+        })
+        .expect("authenticated session registers");
+
+    let context = |actor_id: &str, expected_revision: Option<u64>| V3MutationContext {
+        project_id: "p1".to_owned(),
+        actor_id: actor_id.to_owned(),
+        operation_id: "op-identity".to_owned(),
+        request_digest: "sha256:identity".to_owned(),
+        expected_revision,
+        now: "t2".to_owned(),
+    };
+    let series = CycleSeriesV3Input {
+        project_id: "p1".to_owned(),
+        series_id: "series-identity".to_owned(),
+        name: "Identity cycle".to_owned(),
+        lifecycle: "active".to_owned(),
+        timezone: "America/Regina".to_owned(),
+        tzdb_identity: "tzdb-test".to_owned(),
+        created_at: "t2".to_owned(),
+        updated_at: "t2".to_owned(),
+    };
+
+    let first = store
+        .create_cycle_series_v3(&context("agent-1", Some(1)), &series)
+        .expect("initial v3 mutation commits");
+    assert!(!first.replayed);
+    let replay = store
+        .create_cycle_series_v3(&context("agent-1", Some(1)), &series)
+        .expect("exact v3 identity replays");
+    assert!(replay.replayed);
+    assert_eq!(replay.revision, first.revision);
+    let operation = store.operation("op-identity").unwrap().unwrap();
+    assert_eq!(operation.actor_id, "agent-1");
+    assert_eq!(operation.session_id.as_deref(), Some("session-1"));
+    assert_eq!(operation.expected_revision, Some(1));
+    assert_eq!(
+        store
+            .audit_event("op-identity")
+            .unwrap()
+            .unwrap()
+            .session_id
+            .as_deref(),
+        Some("session-1")
+    );
+    assert_eq!(store.project_revision("p1").unwrap().0, first.revision);
+
+    let actor_drift = store.create_cycle_series_v3(&context("agent-2", Some(1)), &series);
+    assert!(matches!(actor_drift, Err(StoreError::WrongOwner { .. })));
+
+    let revision_drift = store.create_cycle_series_v3(&context("agent-1", Some(0)), &series);
+    assert!(matches!(revision_drift, Err(StoreError::Conflict(_))));
+
+    let mut target_drift = series.clone();
+    target_drift.series_id = "series-other".to_owned();
+    let target_drift = store.create_cycle_series_v3(&context("agent-1", Some(1)), &target_drift);
+    assert!(matches!(target_drift, Err(StoreError::WrongSubject { .. })));
+
+    store
+        .end_session(
+            "p1",
+            "session-1",
+            "agent-1",
+            "session-end-1",
+            "sha256:session-end-1",
+            None,
+            "t3",
+        )
+        .expect("original session ends");
+    store
+        .register_session(SessionRegistrationRequest {
+            project_id: "p1".to_owned(),
+            session_id: "session-2".to_owned(),
+            actor_id: "agent-1".to_owned(),
+            harness_id: "test".to_owned(),
+            operation_id: "session-register-2".to_owned(),
+            request_digest: "sha256:session-register-2".to_owned(),
+            expected_project_revision: None,
+            started_at: "t4".to_owned(),
+        })
+        .expect("replacement session registers");
+    let session_drift = store.create_cycle_series_v3(&context("agent-1", Some(1)), &series);
+    assert!(matches!(session_drift, Err(StoreError::Conflict(_))));
 }
 
 #[test]

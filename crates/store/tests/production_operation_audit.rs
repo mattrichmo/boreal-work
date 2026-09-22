@@ -47,6 +47,24 @@ fn initialized_store() -> (SqliteStore, boreal_store::identity::IdentityContext)
     (store, context)
 }
 
+fn dependency_store() -> SqliteStore {
+    let (store, _context) = initialized_store();
+    store
+        .execute_batch(
+            "INSERT INTO work_item
+               (work_id, project_id, kind, lifecycle, dispatch_policy,
+                acceptance_profile_id, acceptance_profile_version, title,
+                description, created_at, updated_at)
+             VALUES
+               ('prerequisite', 'p1', 'task', 'open', 'automatic',
+                'focused', 1, 'Prerequisite', '', 'unix-ms:3', 'unix-ms:3'),
+               ('dependent', 'p1', 'task', 'open', 'automatic',
+                'focused', 1, 'Dependent', '', 'unix-ms:3', 'unix-ms:3')",
+        )
+        .expect("dependency targets insert");
+    store
+}
+
 fn operation(
     operation_id: &str,
     outcome: OperationOutcome,
@@ -175,6 +193,97 @@ fn crash_after_commit_before_response_replays_one_operation_and_audit() {
         journal.replay_in_context(&context, &identity),
         Err(StoreError::Conflict(message)) if message.contains("operation identity")
     ));
+}
+
+#[test]
+fn dependency_add_convenience_retry_uses_original_expected_revision() {
+    let store = dependency_store();
+
+    let first = store
+        .add_dependency_operation(
+            "p1",
+            "prerequisite",
+            "dependent",
+            "agent-1",
+            "op-dependency-replay",
+            "sha256:dependency-replay",
+            "unix-ms:4",
+        )
+        .expect("dependency add commits");
+    assert!(!first.replayed);
+    assert_eq!(first.revision, 2);
+    assert_eq!(store.project_revision("p1").unwrap().0, 2);
+
+    let replay = store
+        .add_dependency_operation(
+            "p1",
+            "prerequisite",
+            "dependent",
+            "agent-1",
+            "op-dependency-replay",
+            "sha256:dependency-replay",
+            "unix-ms:5",
+        )
+        .expect("exact dependency retry replays");
+    assert!(replay.replayed);
+    assert_eq!(replay.operation_id, first.operation_id);
+    assert_eq!(replay.revision, first.revision);
+    assert_eq!(
+        store
+            .operation("op-dependency-replay")
+            .unwrap()
+            .unwrap()
+            .expected_revision,
+        Some(1)
+    );
+    assert_eq!(store.project_revision("p1").unwrap().0, 2);
+    assert!(store.audit_event("op-dependency-replay").unwrap().is_some());
+}
+
+#[test]
+fn dependency_add_convenience_retry_rejects_changed_payload() {
+    let store = dependency_store();
+    store
+        .add_dependency_operation(
+            "p1",
+            "prerequisite",
+            "dependent",
+            "agent-1",
+            "op-dependency-payload",
+            "sha256:dependency-original",
+            "unix-ms:4",
+        )
+        .expect("dependency add commits");
+
+    let error = store
+        .add_dependency_operation(
+            "p1",
+            "prerequisite",
+            "dependent",
+            "agent-1",
+            "op-dependency-payload",
+            "sha256:dependency-changed",
+            "unix-ms:5",
+        )
+        .expect_err("changed payload cannot reuse operation ID");
+    assert!(matches!(
+        error,
+        StoreError::Conflict(message)
+            if message.contains("another immutable identity")
+    ));
+    assert_eq!(store.project_revision("p1").unwrap().0, 2);
+    assert_eq!(
+        store
+            .operation("op-dependency-payload")
+            .unwrap()
+            .unwrap()
+            .request_digest,
+        "sha256:dependency-original"
+    );
+    assert!(store
+        .audit_event("op-dependency-payload")
+        .unwrap()
+        .is_some());
 }
 
 #[test]

@@ -402,7 +402,7 @@ CREATE TABLE audit_event (
   project_id TEXT NOT NULL REFERENCES project(project_id),
   revision INTEGER NOT NULL CHECK (revision > 0),
   operation_id TEXT NOT NULL UNIQUE REFERENCES operation(operation_id),
-  event_type TEXT NOT NULL CHECK (event_type IN ('work.created','work.published','work.closed','work.blocked','work.paused','work.resumed','work.cancelled','work.reopened','attempt.claimed','attempt.accepted','attempt.started','attempt.submitted','attempt.released','attempt.failed','attempt.expiry_pending','attempt.expired','expiry.resolved','lease.renewed','receipt.recorded','receipt.rejected','review.accepted','review.rejected','close.requested','gate.satisfied','hold.resolved','repair.correction','repair.supersession')),
+  event_type TEXT NOT NULL CHECK (event_type IN ('work.created','work.published','work.closed','work.blocked','work.paused','work.resumed','work.cancelled','work.reopened','attempt.claimed','attempt.accepted','attempt.started','attempt.submitted','attempt.released','attempt.failed','attempt.expiry_pending','attempt.expired','evidence.verifier.admitted','expiry.resolved','lease.renewed','receipt.recorded','receipt.rejected','review.accepted','review.rejected','close.requested','close.completed','gate.satisfied','hold.resolved','repair.correction','repair.supersession')),
   subject_type TEXT NOT NULL CHECK (subject_type IN ('work','attempt','receipt','review','gate','hold','dependency','summary','operation','project')),
   subject_id TEXT NOT NULL,
   actor_id TEXT NOT NULL REFERENCES actor(actor_id),
@@ -827,6 +827,13 @@ CREATE INDEX boreal_external_job_project_stage
 CREATE INDEX boreal_external_job_readback
   ON boreal_external_job(project_id, operation_id)
   WHERE stage IN ('side_effect_started','side_effect_finished','readback_required');
+CREATE TRIGGER boreal_external_job_identity_guard
+BEFORE UPDATE OF job_id, operation_id, project_id, subject_type, subject_id,
+  kind, request_digest, source_identity, config_identity, actor_id,
+  session_id, deadline, created_at ON boreal_external_job
+BEGIN
+  SELECT RAISE(ABORT, 'external_job_identity_append_only');
+END;
 
 -- A pinned requirement snapshot is immutable policy for one project/work
 -- proof revision. It is separate from gate observations: deleting or

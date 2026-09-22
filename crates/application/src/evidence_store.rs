@@ -5,21 +5,25 @@ use boreal_domain::{
     ReceiptResult, SourceVersionId, TimestampMs, WorkId,
 };
 use boreal_store::{
-    CloseIntentRequest, CloseIntentResult, EvidenceExecutionAdmissionRequest,
-    EvidenceExecutionAdmissionResult, EvidenceExecutionRecord, ReceiptAcceptanceExpectation,
-    ReceiptAttestation, ReceiptInsertRequest, ReceiptInsertResult, ReceiptOutcome, ReceiptRecord,
-    ReceiptSubmissionKind, ReviewDecision as StoreReviewDecision, ReviewInsertRequest, StoreError,
-    SummaryInsertRequest, SummaryInsertResult,
+    identity::{IdentityContext, IdentityError, IdentityStore},
+    AuditEventRecord, CloseIntentRequest, CloseIntentResult, EvidenceExecutionAdmissionRequest,
+    EvidenceExecutionAdmissionResult, EvidenceExecutionRecord, OperationOutcome, OperationRecord,
+    ReceiptAcceptanceExpectation, ReceiptAttestation, ReceiptInsertRequest, ReceiptInsertResult,
+    ReceiptOutcome, ReceiptRecord, ReceiptSubmissionKind, ReviewDecision as StoreReviewDecision,
+    ReviewInsertRequest, StoreError, SummaryInsertRequest, SummaryInsertResult,
 };
 use serde_json::{json, Value};
 
 use crate::{
     canonical_request_digest, validate_review_decision, AcceptanceDefinition, AcceptanceEvaluation,
     AcceptanceGateDefinition, ApplicationError, CloseIntent, CloseoutInput, EvidenceErrorCode,
-    EvidenceRunRequest, EvidenceRunResult, ReceiptExpectation, ReceiptExpectationBase,
-    ReceiptPayload, ReviewDecision, ReviewDecisionRequest, SqliteStore, SummaryPayload,
-    WorkApplication,
+    EvidenceRunRequest, EvidenceRunResult, ExternalEffectAcquisition, ExternalEffectAdapter,
+    ExternalEffectReadback, ExternalEffectRequest, ExternalEffectResolution, ExternalJobKind,
+    ReceiptExpectation, ReceiptExpectationBase, ReceiptPayload, ReviewDecision,
+    ReviewDecisionRequest, SqliteStore, SummaryPayload, WorkApplication,
 };
+
+const VERIFIER_JOB_PREFIX: &str = "verifier:";
 
 impl WorkApplication<'_> {
     pub fn record_receipt(
@@ -80,6 +84,7 @@ impl WorkApplication<'_> {
         now: TimestampMs,
     ) -> Result<EvidenceExecutionAdmissionResult, ApplicationError> {
         let project_id = self.project_for_work(request.expectation.work_id.as_str())?;
+        let identity = self.identity_context(&project_id)?;
         let gate_id = self.store().gate_id_for_work(
             &project_id,
             request.expectation.work_id.as_str(),
@@ -114,30 +119,89 @@ impl WorkApplication<'_> {
                 })),
                 "cwd": request.cwd,
                 "environment_fingerprint": request.environment_fingerprint,
-                "artifact_ref": artifact_ref,
+                "artifact_binding": artifact_binding(
+                    artifact_ref,
+                    request.expectation.source_snapshot_hash.as_str(),
+                ),
             }),
         );
-        Ok(self
-            .store()
-            .admit_evidence_execution(EvidenceExecutionAdmissionRequest {
-                operation_id: request.operation_id.as_str().to_owned(),
-                project_id,
-                work_id: request.expectation.work_id.as_str().to_owned(),
-                attempt_id: request.expectation.attempt_id.as_str().to_owned(),
-                fence: request.expectation.fence.get(),
-                gate_id,
-                actor_id: actor_id.to_owned(),
-                session_id: session_id.map(str::to_owned),
-                request_digest,
-                artifact_ref: artifact_ref.to_owned(),
-                source_version_id: Some(
-                    request.expectation.source_snapshot_hash.as_str().to_owned(),
-                ),
-                config_identity: request.expectation.config_identity.as_str().to_owned(),
-                profile_id: request.expectation.profile_id.as_str().to_owned(),
-                profile_version,
-                admitted_at: stamp(now),
-            })?)
+        let external_operation_id = verifier_operation_id(request.operation_id.as_str());
+        let external_request = ExternalEffectRequest {
+            job_id: verifier_job_id(request.operation_id.as_str()),
+            operation_id: external_operation_id.clone(),
+            project_id: project_id.clone(),
+            subject_type: "work".to_owned(),
+            subject_id: request.expectation.work_id.as_str().to_owned(),
+            kind: ExternalJobKind::Verifier.as_str().to_owned(),
+            request_digest: request_digest.clone(),
+            source_identity: Some(request.expectation.source_snapshot_hash.as_str().to_owned()),
+            config_identity: Some(request.expectation.config_identity.as_str().to_owned()),
+            actor_id: actor_id.to_owned(),
+            session_id: session_id.map(str::to_owned),
+            deadline: None,
+            created_at: stamp(now),
+        };
+
+        let payload = json!({
+            "event": "evidence.verifier.admitted",
+            "job_id": external_request.job_id,
+            "kind": external_request.kind,
+            "request_digest": external_request.request_digest,
+            "source_identity": external_request.source_identity,
+            "config_identity": external_request.config_identity,
+            "artifact_ref": artifact_ref,
+            "artifact_binding": artifact_binding(
+                artifact_ref,
+                request.expectation.source_snapshot_hash.as_str(),
+            ),
+        })
+        .to_string();
+        self.append_verifier_admission_journal(
+            identity.as_ref(),
+            &external_request,
+            &payload,
+            request.expectation.attempt_id.as_str(),
+            request.expectation.fence.get(),
+            &stamp(now),
+        )?;
+
+        if let Some(identity) = identity.as_ref() {
+            ExternalEffectAdapter::new_with_identity(self.store(), identity)
+                .admit(&external_request)?;
+        } else {
+            // Schema-v2 fixtures do not have a canonical identity boundary.
+            // Keep their compatibility path explicit and never manufacture a
+            // context merely to make the production API appear available.
+            ExternalEffectAdapter::new(self.store()).admit(&external_request)?;
+        }
+
+        // Keep the evidence row last.  The journal and external-job sidecar
+        // are the durable pending/readback state during this boundary.  If
+        // the store rejects the semantic admission, no evidence execution
+        // row can remain without its operation, audit event, and job.
+        let admitted =
+            self.store()
+                .admit_evidence_execution(EvidenceExecutionAdmissionRequest {
+                    operation_id: request.operation_id.as_str().to_owned(),
+                    project_id,
+                    work_id: request.expectation.work_id.as_str().to_owned(),
+                    attempt_id: request.expectation.attempt_id.as_str().to_owned(),
+                    fence: request.expectation.fence.get(),
+                    gate_id,
+                    actor_id: actor_id.to_owned(),
+                    session_id: session_id.map(str::to_owned),
+                    request_digest,
+                    artifact_ref: artifact_ref.to_owned(),
+                    source_version_id: Some(
+                        request.expectation.source_snapshot_hash.as_str().to_owned(),
+                    ),
+                    config_identity: request.expectation.config_identity.as_str().to_owned(),
+                    profile_id: request.expectation.profile_id.as_str().to_owned(),
+                    profile_version,
+                    admitted_at: stamp(now),
+                })?;
+
+        Ok(admitted)
     }
 
     pub fn start_witnessed_execution(
@@ -145,9 +209,42 @@ impl WorkApplication<'_> {
         operation_id: &str,
         now: TimestampMs,
     ) -> Result<EvidenceExecutionRecord, ApplicationError> {
-        Ok(self
+        let existing = self
             .store()
-            .start_evidence_execution(operation_id, &stamp(now))?)
+            .evidence_execution(operation_id)?
+            .ok_or_else(|| StoreError::NotFound {
+                entity: "evidence_execution",
+                id: operation_id.to_owned(),
+            })?;
+        let at = stamp(now);
+        let Some(identity) = self.identity_context(&existing.project_id)? else {
+            return Ok(self.store().start_evidence_execution(operation_id, &at)?);
+        };
+        let adapter = ExternalEffectAdapter::new_with_identity(self.store(), &identity);
+        match adapter.start_acquisition(
+            &existing.project_id,
+            &verifier_job_id(operation_id),
+            &at,
+        )? {
+            ExternalEffectAcquisition::Won(_) => {
+                adapter.mark_side_effect_started(
+                    &existing.project_id,
+                    &verifier_job_id(operation_id),
+                    &verifier_side_effect_ref(operation_id),
+                    &at,
+                )?;
+                Ok(self.store().start_evidence_execution(operation_id, &at)?)
+            }
+            ExternalEffectAcquisition::AlreadyRunning(_)
+            | ExternalEffectAcquisition::Pending(_)
+            | ExternalEffectAcquisition::Terminal(_)
+            | ExternalEffectAcquisition::Conflict { .. } => {
+                Err(ApplicationError::Store(StoreError::Conflict(
+                    "verifier external job was not acquired; external spawn is not authorized"
+                        .to_owned(),
+                )))
+            }
+        }
     }
 
     pub fn finish_witnessed_execution(
@@ -156,9 +253,35 @@ impl WorkApplication<'_> {
         exit_code: Option<i32>,
         now: TimestampMs,
     ) -> Result<EvidenceExecutionRecord, ApplicationError> {
-        Ok(self
+        let existing = self
             .store()
-            .finish_evidence_execution(operation_id, &stamp(now), exit_code)?)
+            .evidence_execution(operation_id)?
+            .ok_or_else(|| StoreError::NotFound {
+                entity: "evidence_execution",
+                id: operation_id.to_owned(),
+            })?;
+        let at = stamp(now);
+        let identity = self.identity_context(&existing.project_id)?;
+        if let Some(identity) = identity.as_ref() {
+            ExternalEffectAdapter::new_with_identity(self.store(), identity).readback(
+                &existing.project_id,
+                &verifier_operation_id(operation_id),
+                &existing.request_digest,
+            )?;
+        }
+        let execution = self
+            .store()
+            .finish_evidence_execution(operation_id, &at, exit_code)?;
+        let Some(identity) = identity else {
+            return Ok(execution);
+        };
+        self.transition_verifier_to_readback(
+            &identity,
+            &execution,
+            &at,
+            "verifier execution finished without attributable reconciliation",
+        )?;
+        Ok(execution)
     }
 
     pub fn mark_witnessed_execution_unknown(
@@ -166,9 +289,61 @@ impl WorkApplication<'_> {
         operation_id: &str,
         failure_code: &str,
     ) -> Result<EvidenceExecutionRecord, ApplicationError> {
-        Ok(self
+        let existing = self
             .store()
-            .mark_evidence_execution_unknown(operation_id, failure_code)?)
+            .evidence_execution(operation_id)?
+            .ok_or_else(|| StoreError::NotFound {
+                entity: "evidence_execution",
+                id: operation_id.to_owned(),
+            })?;
+        let identity = self.identity_context(&existing.project_id)?;
+        if let Some(identity) = identity.as_ref() {
+            ExternalEffectAdapter::new_with_identity(self.store(), identity).readback(
+                &existing.project_id,
+                &verifier_operation_id(operation_id),
+                &existing.request_digest,
+            )?;
+        }
+        let execution = self
+            .store()
+            .mark_evidence_execution_unknown(operation_id, failure_code)?;
+        let Some(identity) = identity else {
+            return Ok(execution);
+        };
+        self.transition_verifier_to_readback(
+            &identity,
+            &execution,
+            &execution.admitted_at,
+            failure_code,
+        )?;
+        Ok(execution)
+    }
+
+    pub fn readback_witnessed_execution(
+        &self,
+        operation_id: &str,
+    ) -> Result<ExternalEffectResolution, ApplicationError> {
+        let execution = self
+            .store()
+            .evidence_execution(operation_id)?
+            .ok_or_else(|| StoreError::NotFound {
+                entity: "evidence_execution",
+                id: operation_id.to_owned(),
+            })?;
+        let identity = self
+            .identity_context(&execution.project_id)?
+            .ok_or_else(|| {
+                StoreError::Conflict(
+                    "witnessed verifier readback requires a canonical project identity".to_owned(),
+                )
+            })?;
+        Ok(
+            ExternalEffectAdapter::new_with_identity(self.store(), &identity).readback(
+                &execution.project_id,
+                &verifier_operation_id(operation_id),
+                &execution.request_digest,
+            )?,
+        )
     }
 
     /// Record a receipt produced by the trusted bounded execution adapter.
@@ -192,11 +367,51 @@ impl WorkApplication<'_> {
                 crate::EvidenceValidationError::new(EvidenceErrorCode::ReceiptAttestationMissing),
             ));
         }
+        if result.receipt.receipt_id != request.receipt_id
+            || result.receipt.operation_id != request.operation_id
+        {
+            return Err(ApplicationError::Evidence(
+                crate::EvidenceValidationError::new(EvidenceErrorCode::ReceiptSubjectMismatch),
+            ));
+        }
         result
             .receipt
             .validate_for(&request.expectation)
             .map_err(ApplicationError::from)?;
         self.ensure_current_context(&result.receipt, &request.expectation, actor_id, session_id)?;
+        let project_id = self.project_for_work(request.expectation.work_id.as_str())?;
+        // Recheck the caller's snapshot before reconciling the verifier job.
+        // If receipt persistence is already known to be impossible, leave
+        // the external job in its readback state; a reconciled job is never
+        // itself an accepted proof and the receipt remains the acceptance
+        // boundary.
+        if let Some(expected) = expected_project_revision {
+            let actual = self.store().project_revision(&project_id)?.0;
+            if expected != actual {
+                return Err(ApplicationError::Store(StoreError::StaleRevision {
+                    expected,
+                    actual,
+                }));
+            }
+        }
+        if let Some(identity) = self.identity_context(&project_id)? {
+            let execution = self
+                .store()
+                .evidence_execution(request.operation_id.as_str())?
+                .ok_or_else(|| StoreError::NotFound {
+                    entity: "evidence_execution",
+                    id: request.operation_id.as_str().to_owned(),
+                })?;
+            let resolution = self.reconcile_verifier(&identity, &execution, result, &stamp(now))?;
+            if !resolution.is_resolved() {
+                return Err(ApplicationError::Store(StoreError::Conflict(
+                    "verifier readback is still pending; receipt cannot be accepted".to_owned(),
+                )));
+            }
+        }
+        // The verifier job resolution above is never itself proof. The
+        // receipt insert is the acceptance boundary, and its transaction
+        // must durably move the execution to receipt_committed.
         self.insert_receipt(
             actor_id,
             session_id,
@@ -870,6 +1085,236 @@ impl WorkApplication<'_> {
             .project_for_work(work_id)
             .map_err(ApplicationError::from)
     }
+
+    fn identity_context(
+        &self,
+        project_id: &str,
+    ) -> Result<Option<IdentityContext>, ApplicationError> {
+        match IdentityStore::new(self.store()).context(project_id) {
+            Ok(identity) => Ok(Some(identity)),
+            Err(IdentityError::Invalid { field, .. }) if field == "database_identity" => {
+                if self.store().is_canonical_production() {
+                    return Err(ApplicationError::Store(StoreError::Conflict(
+                        "canonical production verifier requires database identity".to_owned(),
+                    )));
+                }
+                Ok(None)
+            }
+            Err(error) => Err(ApplicationError::Store(StoreError::Conflict(format!(
+                "witnessed verifier identity: {error}"
+            )))),
+        }
+    }
+
+    fn append_verifier_admission_journal(
+        &self,
+        identity: Option<&IdentityContext>,
+        request: &ExternalEffectRequest,
+        payload_json: &str,
+        attempt_id: &str,
+        fence: u64,
+        at: &str,
+    ) -> Result<(), ApplicationError> {
+        let operation = OperationRecord {
+            operation_id: request.operation_id.clone(),
+            project_id: request.project_id.clone(),
+            command: "evidence.verifier".to_owned(),
+            actor_id: request.actor_id.clone(),
+            session_id: request.session_id.clone(),
+            expected_revision: None,
+            attempt_id: Some(attempt_id.to_owned()),
+            fence: Some(fence),
+            request_digest: request.request_digest.clone(),
+            outcome: OperationOutcome::Busy,
+            result_json: payload_json.to_owned(),
+            revision: 0,
+            created_at: at.to_owned(),
+            completed_at: None,
+        };
+        let audit = AuditEventRecord {
+            project_id: request.project_id.clone(),
+            revision: 0,
+            operation_id: request.operation_id.clone(),
+            event_type: "evidence.verifier.admitted".to_owned(),
+            subject_type: request.subject_type.clone(),
+            subject_id: request.subject_id.clone(),
+            actor_id: request.actor_id.clone(),
+            session_id: request.session_id.clone(),
+            fence: Some(fence),
+            as_of: at.to_owned(),
+            payload_json: payload_json.to_owned(),
+        };
+
+        if let Some(identity) = identity {
+            self.store()
+                .append_identity_operation_audit(identity, operation, audit)?;
+            return Ok(());
+        }
+
+        // Noncanonical schema-v2 fixtures do not have the database identity
+        // seam, but they still receive the same operation/audit envelope so
+        // the legacy fallback cannot create an execution row without a
+        // durable journal companion. Replays validate the immutable fields
+        // before returning instead of attempting a duplicate insert.
+        if let Some(existing) = self.store().operation(&request.operation_id)? {
+            if existing.project_id != operation.project_id
+                || existing.command != operation.command
+                || existing.actor_id != operation.actor_id
+                || existing.session_id != operation.session_id
+                || existing.attempt_id != operation.attempt_id
+                || existing.fence != operation.fence
+                || existing.request_digest != operation.request_digest
+            {
+                return Err(ApplicationError::Store(StoreError::Conflict(
+                    "verifier operation was reused with another immutable identity".to_owned(),
+                )));
+            }
+            let existing_audit = self
+                .store()
+                .audit_event(&request.operation_id)?
+                .ok_or_else(|| {
+                    StoreError::Corrupt("verifier operation is missing its audit event".to_owned())
+                })?;
+            if existing_audit.subject_type != audit.subject_type
+                || existing_audit.subject_id != audit.subject_id
+            {
+                return Err(ApplicationError::Store(StoreError::WrongSubject {
+                    expected: format!("{}/{}", audit.subject_type, audit.subject_id),
+                    actual: format!(
+                        "{}/{}",
+                        existing_audit.subject_type, existing_audit.subject_id
+                    ),
+                }));
+            }
+            return Ok(());
+        }
+
+        let revision = self.store().next_revision(&request.project_id)?.0;
+        let mut operation = operation;
+        let mut audit = audit;
+        operation.revision = revision;
+        audit.revision = revision;
+        self.store().append_operation(&operation)?;
+        self.store().append_audit_event(&audit)?;
+        Ok(())
+    }
+
+    fn transition_verifier_to_readback(
+        &self,
+        identity: &IdentityContext,
+        execution: &EvidenceExecutionRecord,
+        at: &str,
+        reason: &str,
+    ) -> Result<ExternalEffectResolution, ApplicationError> {
+        let adapter = ExternalEffectAdapter::new_with_identity(self.store(), identity);
+        let job_id = verifier_job_id(&execution.operation_id);
+        let external_operation_id = verifier_operation_id(&execution.operation_id);
+        let resolution = adapter.readback(
+            &execution.project_id,
+            &external_operation_id,
+            &execution.request_digest,
+        )?;
+        match resolution {
+            ExternalEffectResolution::Pending(job) if job.stage == "admitted" => {
+                Ok(adapter.fail(&execution.project_id, &job_id, at, reason)?)
+            }
+            ExternalEffectResolution::Pending(job) if job.stage == "running" => {
+                adapter.mark_side_effect_started(
+                    &execution.project_id,
+                    &job_id,
+                    &verifier_side_effect_ref(&execution.operation_id),
+                    at,
+                )?;
+                Ok(adapter.mark_readback_required(
+                    &execution.project_id,
+                    &job_id,
+                    &verifier_side_effect_ref(&execution.operation_id),
+                    at,
+                )?)
+            }
+            ExternalEffectResolution::ReadbackRequired(job)
+                if job.stage == "side_effect_started" || job.stage == "side_effect_finished" =>
+            {
+                Ok(adapter.mark_readback_required(
+                    &execution.project_id,
+                    &job_id,
+                    &verifier_side_effect_ref(&execution.operation_id),
+                    at,
+                )?)
+            }
+            ExternalEffectResolution::ReadbackRequired(job) => {
+                Ok(ExternalEffectResolution::ReadbackRequired(job))
+            }
+            other => Ok(other),
+        }
+    }
+
+    fn reconcile_verifier(
+        &self,
+        identity: &IdentityContext,
+        execution: &EvidenceExecutionRecord,
+        result: &EvidenceRunResult,
+        at: &str,
+    ) -> Result<ExternalEffectResolution, ApplicationError> {
+        let adapter = ExternalEffectAdapter::new_with_identity(self.store(), identity);
+        let job_id = verifier_job_id(&execution.operation_id);
+        let external_operation_id = verifier_operation_id(&execution.operation_id);
+        let side_effect_ref = verifier_side_effect_ref(&execution.operation_id);
+        let resolution = self.transition_verifier_to_readback(
+            identity,
+            execution,
+            at,
+            "verifier execution did not acquire",
+        )?;
+        if resolution.is_resolved() {
+            return Ok(resolution);
+        }
+        if !resolution.is_readback_required() {
+            return Err(ApplicationError::Store(StoreError::Conflict(
+                "verifier job is not attributable for receipt reconciliation".to_owned(),
+            )));
+        }
+        Ok(adapter.reconcile_readback(&ExternalEffectReadback {
+            project_id: execution.project_id.clone(),
+            job_id,
+            operation_id: external_operation_id,
+            request_digest: execution.request_digest.clone(),
+            side_effect_ref,
+            result_digest: canonical_request_digest(
+                "evidence.verifier.result/v1",
+                json!({
+                    "receipt_id": result.receipt.receipt_id.as_str(),
+                    "result": format!("{:?}", result.outcome),
+                    "exit_code": result.receipt.exit_code,
+                    "output_digest": result.receipt.output_digest,
+                    "output_ref": result.receipt.output_ref,
+                }),
+            ),
+            observed_at: at.to_owned(),
+        })?)
+    }
+}
+
+fn verifier_job_id(operation_id: &str) -> String {
+    format!("{VERIFIER_JOB_PREFIX}{operation_id}")
+}
+
+fn verifier_operation_id(operation_id: &str) -> String {
+    format!("{VERIFIER_JOB_PREFIX}{operation_id}")
+}
+
+fn verifier_side_effect_ref(operation_id: &str) -> String {
+    format!("verifier-run:{operation_id}")
+}
+
+fn artifact_binding(artifact_ref: &str, source_identity: &str) -> Value {
+    json!({
+        "mode": "reference_only",
+        "content_bound": false,
+        "reference": artifact_ref,
+        "source_identity": source_identity,
+        "diagnostic": "artifact bytes were not supplied at verifier admission; the reference is not a content digest",
+    })
 }
 
 fn close_request_digest(
@@ -1046,4 +1491,503 @@ fn parse_stamp(value: &str) -> Result<TimestampMs, ApplicationError> {
 
 fn stamp(value: TimestampMs) -> String {
     format!("unix-ms:{}", value.as_millis())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::CommandSpec;
+    use boreal_domain::{
+        AcceptanceProfile, ConfigIdentity, DispatchPolicy, PersistedLifecycle, ProjectId, WorkId,
+        WorkItem, WorkKind,
+    };
+    use boreal_store::{
+        identity::{DatabaseIdentity, IdentityStore, WorkspaceBinding},
+        EvidenceExecutionState,
+    };
+
+    const FIXTURE_SCHEMA: &str = include_str!("../../../project/spec/schema-v2.sql");
+    const PRODUCTION_SCHEMA: &str = include_str!("../../../project/spec/schema-production.sql");
+
+    fn verifier_work(project_id: &ProjectId) -> WorkItem {
+        WorkItem {
+            id: WorkId::new("verifier-work"),
+            project_id: project_id.clone(),
+            kind: WorkKind::Task,
+            parent_id: None,
+            title: "verifier work".to_owned(),
+            description: String::new(),
+            lifecycle: PersistedLifecycle::Open,
+            priority: 0,
+            dispatch_policy: DispatchPolicy::Automatic,
+            hard_holds: Vec::new(),
+            acceptance_profile: AcceptanceProfile::focused(),
+        }
+    }
+
+    fn verifier_request(operation_id: &str) -> EvidenceRunRequest {
+        EvidenceRunRequest {
+            receipt_id: ReceiptId::new(format!("receipt-{operation_id}")),
+            operation_id: boreal_domain::OperationId::new(operation_id),
+            expectation: ReceiptExpectation {
+                work_id: WorkId::new("verifier-work"),
+                attempt_id: AttemptId::new("verifier-attempt"),
+                fence: Fence::new(1),
+                source_snapshot_hash: SourceVersionId::new("source-one"),
+                config_identity: ConfigIdentity::new("config-one"),
+                profile_id: ProfileId::new("focused"),
+                profile_version: "1".to_owned(),
+                gate: AcceptanceGateDefinition::required(
+                    GateId::new("verification"),
+                    GateKind::Verification,
+                ),
+            },
+            cwd: "/tmp/verifier-work".to_owned(),
+            environment_fingerprint: "env-one".to_owned(),
+            attestation: crate::ExecutorAttestation::BorealWitnessed,
+        }
+    }
+
+    fn legacy_verifier_setup() -> (SqliteStore, ProjectId) {
+        let store = SqliteStore::open_in_memory(FIXTURE_SCHEMA).expect("open fixture store");
+        let app = WorkApplication::new(&store);
+        let project = ProjectId::new("verifier-fixture-project");
+        app.init_project(
+            &project,
+            "agent-one",
+            "agent",
+            "credential",
+            "Verifier fixture",
+            "unix-ms:1",
+            "op-verifier-init",
+        )
+        .expect("initialize fixture project");
+        app.create_work_as(
+            &verifier_work(&project),
+            "agent-one",
+            "unix-ms:2",
+            "op-verifier-work",
+        )
+        .expect("create verifier work");
+        store
+            .execute_batch(&format!(
+                "INSERT INTO source_version
+                 (source_version_id, project_id, origin, access_scope, content_digest,
+                  media_type, byte_count, captured_at, parser_identity, availability, citation_json)
+                 VALUES ('source-one', '{}', 'fixture', 'project',
+                         'sha256:source-one', 'text/plain', 0, 'unix-ms:2',
+                         'verifier-test/1', 'available', '[]');",
+                project.as_str()
+            ))
+            .expect("insert verifier source");
+        app.claim_with_context(
+            &project,
+            "verifier-work",
+            "agent-one",
+            "verifier-harness",
+            None,
+            "verifier-attempt",
+            "op-verifier-claim",
+            "sha256:verifier-claim",
+            None,
+            "unix-ms:1000",
+            "unix-ms:2000",
+            "unix-ms:3000",
+            Some("source-one"),
+            "config-one",
+        )
+        .expect("claim verifier work");
+        store
+            .execute_batch(
+                "UPDATE attempt SET state = 'running', accepted_at = 'unix-ms:1001'
+                 WHERE attempt_id = 'verifier-attempt'",
+            )
+            .expect("put fixture attempt in running phase");
+        (store, project)
+    }
+
+    fn production_verifier_setup() -> (SqliteStore, ProjectId) {
+        let store =
+            SqliteStore::open_in_memory(PRODUCTION_SCHEMA).expect("open production verifier store");
+        let project = ProjectId::new("verifier-production-project");
+        store
+            .create_project(project.as_str(), "unix-ms:0")
+            .expect("create production project");
+        store
+            .ensure_actor(
+                "agent-one",
+                "agent",
+                "credential",
+                "Verifier agent",
+                "unix-ms:0",
+            )
+            .expect("create verifier actor");
+        IdentityStore::new(&store)
+            .install(
+                &DatabaseIdentity::new("verifier-database", 1).expect("database identity"),
+                "unix-ms:1",
+            )
+            .expect("install database identity");
+        IdentityStore::new(&store)
+            .bind_project(
+                project.as_str(),
+                &WorkspaceBinding::new(
+                    "/tmp/verifier-production",
+                    "/tmp/verifier-production",
+                    "sha256:verifier-workspace",
+                )
+                .expect("workspace binding"),
+                "unix-ms:1",
+            )
+            .expect("bind production project");
+        let app = WorkApplication::new(&store);
+        app.create_work_as(
+            &verifier_work(&project),
+            "agent-one",
+            "unix-ms:2",
+            "op-verifier-production-work",
+        )
+        .expect("create production verifier work");
+        store
+            .execute_batch(&format!(
+                "INSERT INTO source_version
+                 (source_version_id, project_id, origin, access_scope, content_digest,
+                  media_type, byte_count, captured_at, parser_identity, availability, citation_json)
+                 VALUES ('source-one', '{}', 'fixture', 'project',
+                         'sha256:source-one', 'text/plain', 0, 'unix-ms:2',
+                         'verifier-test/1', 'available', '[]');",
+                project.as_str()
+            ))
+            .expect("insert production verifier source");
+        app.claim_with_context(
+            &project,
+            "verifier-work",
+            "agent-one",
+            "verifier-harness",
+            None,
+            "verifier-attempt",
+            "op-verifier-production-claim",
+            "sha256:verifier-production-claim",
+            None,
+            "unix-ms:1000",
+            "unix-ms:2000",
+            "unix-ms:3000",
+            Some("source-one"),
+            "config-one",
+        )
+        .expect("claim production verifier work");
+        store
+            .execute_batch(
+                "UPDATE attempt SET state = 'running', accepted_at = 'unix-ms:1001'
+                 WHERE attempt_id = 'verifier-attempt'",
+            )
+            .expect("put production attempt in running phase");
+        (store, project)
+    }
+
+    fn finished_production_execution<'a>(
+        store: &'a SqliteStore,
+        project: &ProjectId,
+        operation_id: &str,
+    ) -> (WorkApplication<'a>, EvidenceRunRequest, EvidenceRunResult) {
+        finished_production_execution_with_artifact(
+            store,
+            project,
+            operation_id,
+            "artifact://verifier-output",
+        )
+    }
+
+    fn finished_production_execution_with_artifact<'a>(
+        store: &'a SqliteStore,
+        project: &ProjectId,
+        operation_id: &str,
+        artifact_ref: &str,
+    ) -> (WorkApplication<'a>, EvidenceRunRequest, EvidenceRunResult) {
+        let app = WorkApplication::new(store);
+        let mut request = verifier_request(operation_id);
+        request.expectation.gate.command = Some(CommandSpec::new("true", vec!["true".to_owned()]));
+        let admission = app
+            .admit_witnessed_execution(
+                "agent-one",
+                None,
+                &request,
+                artifact_ref,
+                TimestampMs::from_millis(1100),
+            )
+            .expect("admit witnessed execution");
+        assert!(!admission.replayed);
+        app.start_witnessed_execution(operation_id, TimestampMs::from_millis(1200))
+            .expect("start witnessed execution");
+        app.finish_witnessed_execution(operation_id, Some(0), TimestampMs::from_millis(1300))
+            .expect("finish witnessed execution");
+        let result = app
+            .build_bounded_evidence_receipt(
+                &request,
+                &crate::BoundedExecutionResult {
+                    outcome: crate::EvidenceExecutionOutcome::Passed,
+                    exit_code: Some(0),
+                    started_at: TimestampMs::from_millis(1200),
+                    ended_at: TimestampMs::from_millis(1300),
+                    output_size_bytes: 1,
+                    output_digest: Some("sha256:verifier-output".to_owned()),
+                    output_ref: Some(artifact_ref.to_owned()),
+                    observables: Vec::new(),
+                },
+            )
+            .expect("build witnessed receipt");
+        assert_eq!(project.as_str(), "verifier-production-project");
+        (app, request, result)
+    }
+
+    #[test]
+    fn canonical_missing_database_identity_fails_closed() {
+        let store = SqliteStore::open_in_memory(PRODUCTION_SCHEMA).expect("open production store");
+        let application = WorkApplication::new(&store);
+
+        assert!(store.is_canonical_production());
+        assert!(matches!(
+            application.identity_context("project-without-database-identity"),
+            Err(ApplicationError::Store(StoreError::Conflict(message)))
+                if message.contains("canonical production verifier requires database identity")
+        ));
+    }
+
+    #[test]
+    fn noncanonical_fixture_missing_database_identity_keeps_legacy_fallback() {
+        let store = SqliteStore::open_in_memory(FIXTURE_SCHEMA).expect("open fixture store");
+        let application = WorkApplication::new(&store);
+
+        assert!(!store.is_canonical_production());
+        assert!(application
+            .identity_context("fixture-project")
+            .expect("fixture identity lookup")
+            .is_none());
+    }
+
+    #[test]
+    fn artifact_reference_is_explicitly_not_claimed_as_content_digest() {
+        let binding = artifact_binding("artifact://verifier-output", "source-one");
+        assert_eq!(binding["mode"], "reference_only");
+        assert_eq!(binding["content_bound"], false);
+        assert_eq!(binding["reference"], "artifact://verifier-output");
+        assert!(binding["diagnostic"]
+            .as_str()
+            .expect("reference diagnostic")
+            .contains("not a content digest"));
+        assert!(binding.get("artifact_digest").is_none());
+    }
+
+    #[test]
+    fn verifier_admission_failure_leaves_no_execution_without_journal_and_job() {
+        let (store, project) = legacy_verifier_setup();
+        let app = WorkApplication::new(&store);
+        let request = verifier_request("op-verifier-admission-order");
+
+        let error = app.admit_witnessed_execution(
+            "agent-one",
+            None,
+            &request,
+            "artifact://verifier-output",
+            TimestampMs::from_millis(4_000),
+        );
+        assert!(matches!(
+            error,
+            Err(ApplicationError::Store(StoreError::HardDeadlineElapsed))
+        ));
+        assert!(store
+            .evidence_execution(request.operation_id.as_str())
+            .expect("read execution")
+            .is_none());
+        assert!(store
+            .operation("verifier:op-verifier-admission-order")
+            .expect("read verifier operation")
+            .is_some());
+        assert!(store
+            .audit_event("verifier:op-verifier-admission-order")
+            .expect("read verifier audit")
+            .is_some());
+        assert!(store
+            .external_job(project.as_str(), "verifier:op-verifier-admission-order")
+            .expect("read verifier job")
+            .is_some());
+    }
+
+    #[test]
+    fn verifier_source_change_stays_readback_pending_without_receipt() {
+        let (store, project) = production_verifier_setup();
+        let (app, request, result) =
+            finished_production_execution(&store, &project, "op-verifier-source-change");
+        store
+            .execute_batch(
+                "INSERT INTO source_version
+                 (source_version_id, project_id, origin, access_scope, content_digest,
+                  media_type, byte_count, captured_at, parser_identity, availability, citation_json)
+                 VALUES ('source-two', 'verifier-production-project', 'fixture', 'project',
+                         'sha256:source-two', 'text/plain', 0, 'unix-ms:1300',
+                         'verifier-test/1', 'available', '[]');
+                 UPDATE attempt SET source_version_id = 'source-two'
+                 WHERE attempt_id = 'verifier-attempt'",
+            )
+            .expect("change source context");
+
+        let error = app.record_witnessed_execution(
+            "agent-one",
+            None,
+            &request,
+            &result,
+            None,
+            TimestampMs::from_millis(1_400),
+        );
+        assert!(matches!(
+            error,
+            Err(ApplicationError::Evidence(
+                crate::EvidenceValidationError { .. }
+            )) | Err(ApplicationError::Store(StoreError::Conflict(_)))
+                | Err(ApplicationError::Store(StoreError::Invalid(_)))
+        ));
+        assert!(store
+            .receipt(request.receipt_id.as_str())
+            .expect("read receipt")
+            .is_none());
+        let context = IdentityStore::new(&store)
+            .context(project.as_str())
+            .expect("read production identity");
+        let job = ExternalEffectAdapter::new_with_identity(&store, &context)
+            .readback(
+                project.as_str(),
+                "verifier:op-verifier-source-change",
+                &store
+                    .evidence_execution(request.operation_id.as_str())
+                    .expect("read execution")
+                    .expect("execution remains durable")
+                    .request_digest,
+            )
+            .expect("read verifier job");
+        assert_eq!(job.record().stage, "readback_required");
+    }
+
+    #[test]
+    fn verifier_revision_conflict_does_not_reconcile_before_receipt_persistence() {
+        let (store, project) = production_verifier_setup();
+        let (app, request, result) =
+            finished_production_execution(&store, &project, "op-verifier-revision-pending");
+        let expected = store
+            .project_revision(project.as_str())
+            .expect("project revision")
+            .0;
+
+        let error = app.record_witnessed_execution(
+            "agent-one",
+            None,
+            &request,
+            &result,
+            Some(expected + 1),
+            TimestampMs::from_millis(1_400),
+        );
+        assert!(matches!(
+            error,
+            Err(ApplicationError::Store(StoreError::StaleRevision { .. }))
+        ));
+        assert!(store
+            .receipt(request.receipt_id.as_str())
+            .expect("read pending receipt")
+            .is_none());
+        let context = IdentityStore::new(&store)
+            .context(project.as_str())
+            .expect("read production identity");
+        let pending = ExternalEffectAdapter::new_with_identity(&store, &context)
+            .readback(
+                project.as_str(),
+                "verifier:op-verifier-revision-pending",
+                &store
+                    .evidence_execution(request.operation_id.as_str())
+                    .expect("read execution")
+                    .expect("execution remains durable")
+                    .request_digest,
+            )
+            .expect("read pending verifier job");
+        assert_eq!(pending.record().stage, "readback_required");
+
+        let recorded = app
+            .record_witnessed_execution(
+                "agent-one",
+                None,
+                &request,
+                &result,
+                None,
+                TimestampMs::from_millis(1_500),
+            )
+            .expect("retry persists receipt after readback");
+        assert!(!recorded.replayed);
+        assert!(store
+            .receipt(request.receipt_id.as_str())
+            .expect("read recorded receipt")
+            .is_some());
+        let reconciled = ExternalEffectAdapter::new_with_identity(&store, &context)
+            .readback(
+                project.as_str(),
+                "verifier:op-verifier-revision-pending",
+                &store
+                    .evidence_execution(request.operation_id.as_str())
+                    .expect("read execution after retry")
+                    .expect("execution after retry")
+                    .request_digest,
+            )
+            .expect("read reconciled verifier job");
+        assert_eq!(reconciled.record().stage, "reconciled");
+    }
+
+    #[test]
+    fn verifier_receipt_failure_does_not_commit_execution_without_receipt() {
+        let (store, project) = production_verifier_setup();
+        let (first_app, first_request, first_result) = finished_production_execution_with_artifact(
+            &store,
+            &project,
+            "op-verifier-first-receipt",
+            "artifact://verifier-first",
+        );
+        first_app
+            .record_witnessed_execution(
+                "agent-one",
+                None,
+                &first_request,
+                &first_result,
+                None,
+                TimestampMs::from_millis(1_400),
+            )
+            .expect("persist first receipt");
+
+        let (second_app, mut second_request, mut second_result) =
+            finished_production_execution_with_artifact(
+                &store,
+                &project,
+                "op-verifier-duplicate-receipt",
+                "artifact://verifier-second",
+            );
+        second_request.receipt_id = first_request.receipt_id.clone();
+        second_result.receipt.receipt_id = second_request.receipt_id.clone();
+
+        assert!(second_app
+            .record_witnessed_execution(
+                "agent-one",
+                None,
+                &second_request,
+                &second_result,
+                None,
+                TimestampMs::from_millis(1_500),
+            )
+            .is_err());
+
+        let execution = store
+            .evidence_execution(second_request.operation_id.as_str())
+            .expect("read second execution")
+            .expect("second execution remains durable");
+        assert_eq!(execution.state, EvidenceExecutionState::Exited);
+        assert!(execution.receipt_id.is_none());
+        assert!(store
+            .operation(second_request.operation_id.as_str())
+            .expect("read failed receipt operation")
+            .is_none());
+    }
 }

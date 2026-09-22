@@ -434,9 +434,13 @@ fn remove_sqlite_files(path: &Path) {
 }
 
 fn install_v2_fixture(path: &Path) -> SqliteStore {
+    install_v2_fixture_with_schema(path, SCHEMA_V2)
+}
+
+fn install_v2_fixture_with_schema(path: &Path, schema: &str) -> SqliteStore {
     let store = SqliteStore::open_for_migration(path).expect("fixture database opens");
     store
-        .execute_batch(SCHEMA_V2)
+        .execute_batch(schema)
         .expect("raw schema-v2 fixture installs");
     store
         .execute_batch(
@@ -459,6 +463,122 @@ fn install_v2_fixture(path: &Path) -> SqliteStore {
         )
         .expect("legacy rows install");
     store
+}
+
+fn historical_schema_v2_without_verifier_admission() -> String {
+    SCHEMA_V2.replace(
+        "'attempt.expired','evidence.verifier.admitted','expiry.resolved'",
+        "'attempt.expired','expiry.resolved'",
+    )
+}
+
+#[test]
+fn historical_v2_audit_event_check_is_repaired_and_preserves_rows() {
+    let path = temp_database_path("historical-audit-repair");
+    let historical_schema = historical_schema_v2_without_verifier_admission();
+    {
+        let store = install_v2_fixture_with_schema(&path, &historical_schema);
+        store
+            .execute_batch(
+                "INSERT INTO operation
+                    (operation_id, project_id, command, actor_id, session_id,
+                     expected_revision, attempt_id, fence, request_digest, outcome,
+                     result_json, revision, created_at)
+                 VALUES ('legacy-audit', 'p1', 'work.create', 'agent-1', NULL,
+                         NULL, NULL, NULL, 'sha256:legacy', 'changed', '{}', 1, 't0');
+                 INSERT INTO audit_event
+                    (project_id, revision, operation_id, event_type, subject_type,
+                     subject_id, actor_id, session_id, fence, as_of, payload_json)
+                 VALUES ('p1', 1, 'legacy-audit', 'work.created', 'work', 'task-1',
+                         'agent-1', NULL, NULL, 't0', '{}');",
+            )
+            .expect("historical audit row installs");
+        drop(store);
+    }
+
+    let error = SqliteStore::open(&path, &historical_schema)
+        .expect_err("ordinary open must not accept the incomplete historical contract");
+    assert!(matches!(
+        error,
+        boreal_store::StoreError::Corrupt(message)
+            if message.contains("audit_event CHECK")
+    ));
+
+    let store = SqliteStore::open_for_migration(&path).expect("historical database reopens");
+    store
+        .apply_schema(SCHEMA_V2)
+        .expect("current v2 schema repairs historical audit constraint");
+    assert!(store
+        .audit_event("legacy-audit")
+        .expect("preserved audit row reads")
+        .is_some());
+
+    store
+        .execute_batch(
+            "INSERT INTO operation
+                (operation_id, project_id, command, actor_id, session_id,
+                 expected_revision, attempt_id, fence, request_digest, outcome,
+                 result_json, revision, created_at)
+             VALUES ('verifier-audit', 'p1', 'evidence.verifier', 'agent-1', NULL,
+                     NULL, NULL, NULL, 'sha256:verifier', 'busy', '{}', 2, 't1');
+             INSERT INTO audit_event
+                (project_id, revision, operation_id, event_type, subject_type,
+                 subject_id, actor_id, session_id, fence, as_of, payload_json)
+             VALUES ('p1', 2, 'verifier-audit', 'evidence.verifier.admitted',
+                     'operation', 'verifier-audit', 'agent-1', NULL, NULL, 't1', '{}');",
+        )
+        .expect("repaired audit table accepts verifier admission");
+    assert!(store
+        .execute_batch(
+            "UPDATE audit_event SET payload_json = 'changed' WHERE operation_id = 'legacy-audit';"
+        )
+        .is_err());
+
+    drop(store);
+    remove_sqlite_files(&path);
+}
+
+#[test]
+fn historical_v2_audit_repair_rolls_back_with_failed_production_upgrade() {
+    let path = temp_database_path("historical-audit-rollback");
+    let historical_schema = historical_schema_v2_without_verifier_admission();
+    {
+        let store = install_v2_fixture_with_schema(&path, &historical_schema);
+        store
+            .execute_batch(
+                "INSERT INTO operation
+                    (operation_id, project_id, command, actor_id, session_id,
+                     expected_revision, attempt_id, fence, request_digest, outcome,
+                     result_json, revision, created_at)
+                 VALUES ('rollback-audit', 'p1', 'evidence.verifier', 'agent-1', NULL,
+                         NULL, NULL, NULL, 'sha256:rollback', 'busy', '{}', 1, 't0');
+                 CREATE TABLE work_model_v3_meta (sentinel TEXT NOT NULL);",
+            )
+            .expect("rollback fixture installs");
+        drop(store);
+    }
+
+    assert!(SqliteStore::open(&path, PRODUCTION_SCHEMA).is_err());
+
+    let store = SqliteStore::open_for_migration(&path).expect("failed upgrade reopens");
+    assert!(
+        store
+            .execute_batch(
+                "INSERT INTO audit_event
+                (project_id, revision, operation_id, event_type, subject_type,
+                 subject_id, actor_id, session_id, fence, as_of, payload_json)
+             VALUES ('p1', 1, 'rollback-audit', 'evidence.verifier.admitted',
+                     'operation', 'rollback-audit', 'agent-1', NULL, NULL, 't1', '{}');",
+            )
+            .is_err(),
+        "failed production upgrade must roll back the audit rebuild"
+    );
+    assert!(store
+        .execute_batch("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'audit_event';")
+        .is_ok());
+
+    drop(store);
+    remove_sqlite_files(&path);
 }
 
 fn install_v3_fixture(path: &Path) -> SqliteStore {

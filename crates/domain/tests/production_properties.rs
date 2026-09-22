@@ -50,7 +50,7 @@ const ORACLE_STATUS_CONTRACT: &str = "boreal.work-status/3";
 const ORACLE_TRANSITION_CONTRACT: &str = "boreal.work-transition/2";
 const ORACLE_FIXTURE_REVISION: &str = "m02-candidate.1";
 const ORACLE_SOURCE_RECORD: &str =
-    include_str!("../../../project/validation/production/domain/PF-S03-T10-ORACLE-SOURCE.md");
+    include_str!("../../../project/validation/production/domain/PF-S03-T08-ORACLE-SOURCE.md");
 
 // Keep the artifact binding self-contained in this test target.  The domain
 // crate intentionally has no hashing dependency; this small SHA-256
@@ -170,6 +170,16 @@ fn assert_artifact_digest(path: &str, actual: &[u8]) {
         sha256_hex(actual),
         expected,
         "normative artifact drift: {path}"
+    );
+}
+
+fn assert_transition_table_row(id: &str) {
+    let row_prefix = format!("| {id} |");
+    assert!(
+        include_str!("../../../project/spec/transition-table.md")
+            .lines()
+            .any(|line| line.starts_with(&row_prefix)),
+        "missing normative transition row {id}"
     );
 }
 
@@ -1052,6 +1062,35 @@ fn oracle_identity_and_minimal_counterexample_replay_are_explicit() {
     assert_artifact_digest(
         "project/spec/production/reason-registry.json",
         include_bytes!("../../../project/spec/production/reason-registry.json"),
+    );
+    assert_artifact_digest(
+        "project/validation/production/domain/PF-S03-T08-ORACLE.md",
+        include_bytes!("../../../project/validation/production/domain/PF-S03-T08-ORACLE.md"),
+    );
+    assert_artifact_digest("crates/domain/src/lib.rs", include_bytes!("../src/lib.rs"));
+    assert_artifact_digest(
+        "crates/domain/src/status_evaluator.rs",
+        include_bytes!("../src/status_evaluator.rs"),
+    );
+    assert_artifact_digest(
+        "crates/domain/src/actions.rs",
+        include_bytes!("../src/actions.rs"),
+    );
+    assert_artifact_digest(
+        "crates/domain/src/decision_inputs.rs",
+        include_bytes!("../src/decision_inputs.rs"),
+    );
+    assert_artifact_digest(
+        "crates/domain/src/dependencies.rs",
+        include_bytes!("../src/dependencies.rs"),
+    );
+    assert_artifact_digest(
+        "crates/domain/src/time_policy.rs",
+        include_bytes!("../src/time_policy.rs"),
+    );
+    assert_artifact_digest(
+        "crates/domain/tests/production_properties.rs",
+        include_bytes!("production_properties.rs"),
     );
 
     let original = StatusCase {
@@ -2783,6 +2822,129 @@ fn proof_and_receipt_subjects_fail_closed_for_foreign_history() {
     );
 }
 
+#[test]
+fn normative_illegal_vectors_i04_i06_i08_have_distinct_semantics() {
+    // I04: a current fenced attempt is an incumbent, so a second claim is
+    // denied by the current derived status and the denial retains that
+    // attempt identity.  The persistent session race remains service-only.
+    let incumbent = action_facts_with_execution(ActorRole::Agent, AttemptPhase::Claimed);
+    let incumbent_attempt = incumbent
+        .execution
+        .as_present()
+        .expect("I04 incumbent execution")
+        .attempt
+        .clone();
+    let claim_denial = action_denial_for(
+        &incumbent,
+        DerivedStatus::Claimed,
+        &[ReasonCode::AttemptUnaccepted],
+        ActionKind::Claim,
+    );
+    assert_eq!(
+        claim_denial,
+        ActionDenialReason::StatusDenied(DerivedStatus::Claimed)
+    );
+    let claim_descriptor = evaluate_actions(&ActionEvaluationInput::new(
+        &incumbent,
+        DerivedStatus::Claimed,
+        &[ReasonCode::AttemptUnaccepted],
+    ))
+    .denial(ActionKind::Claim)
+    .expect("I04 claim denial")
+    .descriptor
+    .clone();
+    assert_eq!(claim_descriptor.attempt, Some(incumbent_attempt));
+
+    // I06: an executor cannot satisfy an independent-review gate by reviewing
+    // its own attempt; the positive control proves that actor inequality is
+    // the semantic distinction, not merely the presence of a review row.
+    let self_review = ReviewRecord {
+        reviewer_actor_id: ActorId::new("agent"),
+        attempt_actor_id: ActorId::new("agent"),
+        accepted: true,
+    };
+    assert_eq!(
+        validate_independent_review(&self_review),
+        Err(DomainError::ReviewerCannotReviewOwnAttempt)
+    );
+    assert_eq!(
+        validate_independent_review(&ReviewRecord {
+            reviewer_actor_id: ActorId::new("reviewer"),
+            attempt_actor_id: ActorId::new("agent"),
+            accepted: true,
+        }),
+        Ok(())
+    );
+
+    // I08: complete/verified/cancelled are not accepted closed outcomes. The
+    // typed unmet reason and retained raw observation are both asserted; an
+    // exact accepted closed identity is the positive control.
+    let project = boreal_domain::ProjectId::new("project");
+    let predecessor = WorkId::new("predecessor");
+    let successor = WorkId::new("successor");
+    let edge = CanonicalDependencyEdge::closed_only(
+        DependencyId::new("i08-edge"),
+        project.clone(),
+        predecessor.clone(),
+        successor.clone(),
+        EntityRevision::new(4),
+    );
+    let graph = validate_dependency_graph(
+        project.clone(),
+        &[
+            DependencyEndpoint::direct_task(project.clone(), predecessor.clone()),
+            DependencyEndpoint::direct_task(project.clone(), successor),
+        ],
+        std::slice::from_ref(&edge),
+    )
+    .expect("I08 dependency fixture");
+    let predecessor_identity = EntityIdentity::new(project, predecessor, EntityRevision::new(4));
+
+    for outcome in [
+        UpstreamOutcome::Complete,
+        UpstreamOutcome::Verified,
+        UpstreamOutcome::Cancelled,
+    ] {
+        let evaluation = evaluate_dependencies(
+            &graph,
+            &[DependencyObservation {
+                edge_id: edge.id.clone(),
+                edge_revision: edge.revision,
+                predecessor: predecessor_identity.clone(),
+                outcome: outcome.clone(),
+                waiver: None,
+            }],
+            EntityRevision::new(5),
+        )
+        .expect("I08 observation evaluates");
+        assert_eq!(
+            evaluation.edges[0].satisfaction,
+            EdgeSatisfaction::Unmet {
+                reason: UnmetReason::NotAcceptedClosedOutcome,
+            },
+            "I08 outcome={outcome:?}"
+        );
+        assert_eq!(evaluation.edges[0].raw_observations[0].outcome, outcome);
+    }
+
+    let accepted = evaluate_dependencies(
+        &graph,
+        &[DependencyObservation {
+            edge_id: edge.id,
+            edge_revision: EntityRevision::new(4),
+            predecessor: predecessor_identity.clone(),
+            outcome: UpstreamOutcome::Closed(ClosedOutcome::Accepted {
+                identity: predecessor_identity,
+                proof_generation: ProofRevision::new(9),
+            }),
+            waiver: None,
+        }],
+        EntityRevision::new(5),
+    )
+    .expect("I08 accepted closed observation");
+    assert!(accepted.satisfied());
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum VectorLayer {
     PureDomain,
@@ -2820,7 +2982,7 @@ const ILLEGAL_VECTOR_MAP: [(&str, VectorLayer); 15] = [
     ("I04", VectorLayer::PureDomain),
     ("I05", VectorLayer::PureDomain),
     ("I06", VectorLayer::PureDomain),
-    ("I07", VectorLayer::ServiceOnlyBoundary),
+    ("I07", VectorLayer::PureDomain),
     ("I08", VectorLayer::PureDomain),
     ("I09", VectorLayer::PureDomain),
     ("I10", VectorLayer::PureDomain),
@@ -2870,6 +3032,24 @@ const ILLEGAL_VECTOR_BINDINGS: [(&str, &str); 15] = [
     ("I15", "dependency cycle"),
 ];
 
+fn assert_service_only_boundary(id: &str, table_phrase: &str) {
+    assert_eq!(
+        LEGAL_VECTOR_MAP
+            .iter()
+            .chain(ILLEGAL_VECTOR_MAP.iter())
+            .find(|(vector_id, _)| *vector_id == id)
+            .map(|(_, layer)| *layer),
+        Some(VectorLayer::ServiceOnlyBoundary),
+        "vector {id} must remain an explicit service-only boundary"
+    );
+    assert!(
+        include_str!("../../../project/spec/transition-table.md")
+            .lines()
+            .any(|line| line.starts_with(&format!("| {id} |")) && line.contains(table_phrase)),
+        "service-only vector {id} is not tied to its normative row"
+    );
+}
+
 #[test]
 fn normative_t_and_i_vectors_are_complete_and_layered() {
     let legal = LEGAL_VECTOR_MAP
@@ -2896,7 +3076,7 @@ fn normative_t_and_i_vectors_are_complete_and_layered() {
             .iter()
             .filter(|(_, layer)| *layer == VectorLayer::ServiceOnlyBoundary)
             .count(),
-        2
+        1
     );
     assert_eq!(LEGAL_VECTOR_BINDINGS.len(), LEGAL_VECTOR_MAP.len());
     assert_eq!(ILLEGAL_VECTOR_BINDINGS.len(), ILLEGAL_VECTOR_MAP.len());
@@ -2915,6 +3095,11 @@ fn normative_t_and_i_vectors_are_complete_and_layered() {
             *map_layer == VectorLayer::PureDomain || *map_layer == VectorLayer::ServiceOnlyBoundary
         );
     }
+    for (id, _) in LEGAL_VECTOR_MAP.iter().chain(ILLEGAL_VECTOR_MAP.iter()) {
+        assert_transition_table_row(id);
+    }
+    assert_service_only_boundary("T18", "resolve expiry");
+    assert_service_only_boundary("I14", "Reused operation ID");
 
     // Pure-domain vector anchors. The complete ID crosswalk above is kept in
     // sync with the companion oracle document; these calls prove the anchor
@@ -3285,6 +3470,562 @@ fn normative_pure_vectors_have_semantic_positive_and_negative_results() {
     )); // I15
 
     // I06/I08 are covered by the independent-review and accepted-close
-    // evaluators above; I07/I14 and T18 are service/transaction boundaries
-    // and remain explicitly out of pure-domain acceptance.
+    // evaluators above; I14 and T18 remain explicit service/transaction
+    // boundaries rather than fabricated pure-domain persistence.
+}
+
+#[test]
+fn every_normative_vector_executes_a_distinct_semantic_assertion() {
+    for (id, _) in LEGAL_VECTOR_MAP {
+        assert_transition_table_row(id);
+    }
+    for (id, _) in ILLEGAL_VECTOR_MAP {
+        assert_transition_table_row(id);
+    }
+
+    // T01: publication changes only the persisted lifecycle.
+    assert_eq!(
+        transition_lifecycle(PersistedLifecycle::Draft, WorkOperation::Publish),
+        Ok(PersistedLifecycle::Open)
+    );
+
+    // T02: claim creates a fenced, leased attempt in the claimed phase.
+    let claimed = Attempt::claim(
+        WorkId::new("t02-work"),
+        AttemptId::new("t02-attempt"),
+        ActorId::new("agent"),
+        Fence::new(1),
+        TimestampMs(10),
+        Some(30),
+        Some(120),
+    )
+    .unwrap();
+    assert_eq!(claimed.phase, AttemptPhase::Claimed);
+    assert_eq!(claimed.lease_deadline, TimestampMs(40));
+    assert_eq!(claimed.max_attempt_deadline, TimestampMs(130));
+
+    // T03: only a claimed attempt can be accepted.
+    let mut accepted = claimed.clone();
+    assert_eq!(
+        transition_attempt(
+            &mut accepted,
+            AttemptOperation::Accept {
+                at: TimestampMs(11),
+            },
+        ),
+        Ok(())
+    );
+    assert_eq!(accepted.phase, AttemptPhase::Accepted);
+    assert_eq!(accepted.accepted_at, Some(TimestampMs(11)));
+
+    // T04: acceptance is the precondition for starting execution.
+    assert_eq!(
+        transition_attempt(&mut accepted, AttemptOperation::Start),
+        Ok(())
+    );
+    assert_eq!(accepted.phase, AttemptPhase::Running);
+
+    // T05: running execution submits into verification.
+    assert_eq!(
+        transition_attempt(&mut accepted, AttemptOperation::Submit),
+        Ok(())
+    );
+    assert_eq!(accepted.phase, AttemptPhase::Verifying);
+
+    // T06: a receipt is bound to the exact work, attempt, and fence.
+    let receipt = ReceiptIdentity {
+        receipt_id: "t06-receipt".into(),
+        operation_id: "t06-operation".into(),
+        subject: ReceiptSubject {
+            work_id: WorkId::new("t02-work"),
+            attempt_id: AttemptId::new("t02-attempt"),
+            fence: Fence::new(1),
+            gate_id: GateId::new("verification"),
+        },
+        source_snapshot: "source".into(),
+        config_identity: ConfigIdentity::new("config"),
+        policy_version: "policy".into(),
+    };
+    assert_eq!(
+        validate_receipt_subject(
+            &receipt,
+            &WorkId::new("t02-work"),
+            &AttemptId::new("t02-attempt"),
+            Fence::new(1),
+        ),
+        Ok(())
+    );
+
+    // T07: an independent reviewer is accepted as a distinct actor.
+    assert_eq!(
+        validate_independent_review(&ReviewRecord {
+            reviewer_actor_id: ActorId::new("reviewer"),
+            attempt_actor_id: ActorId::new("agent"),
+            accepted: true,
+        }),
+        Ok(())
+    );
+
+    // T08: matching proof, satisfied gates, and close intent make closeout
+    // ready; the persisted terminal write remains outside this layer.
+    let focused = AcceptanceProfile::focused();
+    let mut close_attempt = accepted.clone();
+    close_attempt.phase = AttemptPhase::Completed;
+    let satisfied = focused
+        .gates
+        .iter()
+        .cloned()
+        .map(GateRequirement::satisfied)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        evaluate_close(
+            &focused,
+            &satisfied,
+            None,
+            true,
+            &close_attempt,
+            Fence::new(1),
+        ),
+        CloseReadiness::ReadyToClose
+    );
+
+    // T09: a close request with an unsatisfied proof gate remains open.
+    let mut incomplete = satisfied.clone();
+    incomplete[1].state = GateState::Open;
+    assert!(matches!(
+        evaluate_close(
+            &focused,
+            &incomplete,
+            None,
+            true,
+            &close_attempt,
+            Fence::new(1),
+        ),
+        CloseReadiness::NotReady { gaps } if gaps.contains(&CloseGap::GateUnsatisfied)
+    ));
+
+    // T10: release is an explicit terminal attempt outcome, not success.
+    let mut released = Attempt::claim(
+        WorkId::new("t10-work"),
+        AttemptId::new("t10-attempt"),
+        ActorId::new("agent"),
+        Fence::new(1),
+        TimestampMs(0),
+        Some(20),
+        Some(50),
+    )
+    .unwrap();
+    assert_eq!(
+        transition_attempt(&mut released, AttemptOperation::Release),
+        Ok(())
+    );
+    assert_eq!(released.phase, AttemptPhase::Released);
+
+    // T11: failure preserves a failed attempt rather than completing it.
+    let mut failed = Attempt::claim(
+        WorkId::new("t11-work"),
+        AttemptId::new("t11-attempt"),
+        ActorId::new("agent"),
+        Fence::new(1),
+        TimestampMs(0),
+        Some(20),
+        Some(50),
+    )
+    .unwrap();
+    transition_attempt(&mut failed, AttemptOperation::Accept { at: TimestampMs(1) }).unwrap();
+    transition_attempt(&mut failed, AttemptOperation::Start).unwrap();
+    assert_eq!(
+        transition_attempt(&mut failed, AttemptOperation::Fail),
+        Ok(())
+    );
+    assert_eq!(failed.phase, AttemptPhase::Failed);
+
+    // T12: an explicit hold takes precedence over ordinary dispatch.
+    let mut held = open_work("t12-work", PersistedLifecycle::Open);
+    held.hard_holds = vec![ReasonCode::HardHold("operator_decision_required".into())];
+    let holder = ActorContext {
+        actor_id: ActorId::new("agent"),
+        role: ActorRole::Agent,
+    };
+    let held_status = evaluate_status(boreal_domain::StatusContext::new(
+        &held,
+        &[],
+        None,
+        &held.acceptance_profile.gates,
+        &holder,
+        TimestampMs(10),
+        Revision(1),
+    ));
+    assert_eq!(held_status.display_status, DerivedStatus::Blocked);
+
+    // T13: pause is removed explicitly before ready can be derived again.
+    let mut paused = open_work("t13-work", PersistedLifecycle::Open);
+    paused.dispatch_policy = DispatchPolicy::Paused;
+    let paused_status = evaluate_status(boreal_domain::StatusContext::new(
+        &paused,
+        &[],
+        None,
+        &paused.acceptance_profile.gates,
+        &holder,
+        TimestampMs(10),
+        Revision(1),
+    ));
+    assert_eq!(paused_status.display_status, DerivedStatus::Paused);
+    paused.dispatch_policy = DispatchPolicy::Automatic;
+    let resumed_status = evaluate_status(boreal_domain::StatusContext::new(
+        &paused,
+        &[],
+        None,
+        &paused.acceptance_profile.gates,
+        &holder,
+        TimestampMs(10),
+        Revision(1),
+    ));
+    assert_eq!(resumed_status.display_status, DerivedStatus::Ready);
+
+    // T14: cancellation is an explicit persisted lifecycle transition.
+    assert_eq!(
+        transition_lifecycle(PersistedLifecycle::Open, WorkOperation::Cancel),
+        Ok(PersistedLifecycle::Cancelled)
+    );
+
+    // T15: reopening a terminal lifecycle is explicit and returns to open.
+    assert_eq!(
+        transition_lifecycle(PersistedLifecycle::Closed, WorkOperation::Reopen),
+        Ok(PersistedLifecycle::Open)
+    );
+
+    // T16: equality at the lease deadline is an expiry observation.
+    let expiring = Attempt::claim(
+        WorkId::new("t16-work"),
+        AttemptId::new("t16-attempt"),
+        ActorId::new("agent"),
+        Fence::new(1),
+        TimestampMs(0),
+        Some(10),
+        Some(100),
+    )
+    .unwrap();
+    assert_eq!(
+        expiring.expiry_reason(TimestampMs(10)),
+        Some(ExpiryReason::LeaseElapsed)
+    );
+
+    // T17: expiry is a two-step state transition.
+    let mut expired = expiring;
+    expired.phase = AttemptPhase::Running;
+    transition_attempt(&mut expired, AttemptOperation::ExpiryPending).unwrap();
+    assert_eq!(expired.phase, AttemptPhase::ExpiryPending);
+    transition_attempt(&mut expired, AttemptOperation::Expire).unwrap();
+    assert_eq!(expired.phase, AttemptPhase::Expired);
+
+    // T18: resolving expiry persists an operator disposition and therefore
+    // remains a service boundary. The pure layer proves the terminal expiry
+    // fact and deliberately does not fabricate the missing persistence step.
+    assert_service_only_boundary("T18", "resolve expiry");
+    assert_eq!(expired.phase, AttemptPhase::Expired);
+
+    // I01: derived labels cannot be persisted.
+    assert_eq!(
+        reject_derived_status_write(DerivedStatus::Ready),
+        Err(DomainError::DerivedStatusReadOnly {
+            status: DerivedStatus::Ready,
+        })
+    );
+
+    // I02: neither draft nor queued work is claimable.
+    let facts = action_facts(ActorRole::Agent);
+    for status in [DerivedStatus::Draft, DerivedStatus::Queued] {
+        assert_eq!(
+            action_denial_for(
+                &facts,
+                status,
+                &[ReasonCode::NotPublished],
+                ActionKind::Claim
+            ),
+            ActionDenialReason::StatusDenied(status)
+        );
+    }
+
+    // I03: hold, pause, retry, and expiry all deny claim independently.
+    for status in [
+        DerivedStatus::Blocked,
+        DerivedStatus::Paused,
+        DerivedStatus::RetryWait,
+        DerivedStatus::ExpiredReview,
+    ] {
+        assert_eq!(
+            action_denial_for(&facts, status, &[ReasonCode::Eligible], ActionKind::Claim),
+            ActionDenialReason::StatusDenied(status)
+        );
+    }
+
+    // I04: a second attempt request carries a different fence/identity and
+    // is rejected as stale; this is distinct from merely observing Claimed.
+    let incumbent = action_facts_with_execution(ActorRole::Agent, AttemptPhase::Running);
+    let action_input = ActionEvaluationInput::new(
+        &incumbent,
+        DerivedStatus::InProgress,
+        &[ReasonCode::AttemptActive],
+    );
+    let action_decision = evaluate_actions(&action_input);
+    let submit = action_decision
+        .allowed
+        .iter()
+        .find(|descriptor| descriptor.action == ActionKind::Submit)
+        .expect("I04 incumbent submit descriptor");
+    let mut parallel_request = submit.request();
+    parallel_request.attempt = Some(AttemptIdentity::new(
+        AttemptId::new("parallel-attempt"),
+        AttemptFence::new(2),
+    ));
+    let observed_attempt = parallel_request.attempt.clone();
+    match evaluate_action(&action_input, &parallel_request) {
+        ActionAuthorization::Denied(denied) => assert_eq!(
+            denied.reason,
+            ActionDenialReason::StaleFence {
+                expected: submit.attempt.clone(),
+                observed: observed_attempt,
+            }
+        ),
+        ActionAuthorization::Allowed(_) => panic!("I04 parallel attempt was allowed"),
+    }
+
+    // I05: proof gaps deny close even when a close intent is supplied.
+    let mut proof_gaps = focused.gates.clone();
+    proof_gaps[1].state = GateState::Open;
+    assert!(matches!(
+        evaluate_close(
+            &focused,
+            &proof_gaps,
+            None,
+            true,
+            &close_attempt,
+            Fence::new(1),
+        ),
+        CloseReadiness::NotReady { gaps } if gaps.contains(&CloseGap::GateUnsatisfied)
+    ));
+
+    // I06: review-profile close requires an independent accepted decision;
+    // no review and self-review produce different typed close gaps.
+    let reviewed = AcceptanceProfile::reviewed();
+    let mut review_gaps = reviewed.gates.clone();
+    for gate in &mut review_gaps {
+        gate.state = GateState::Satisfied;
+        if gate.kind == GateKind::Review {
+            gate.state = GateState::Open;
+        }
+    }
+    assert!(matches!(
+        evaluate_close(
+            &reviewed,
+            &review_gaps,
+            None,
+            true,
+            &close_attempt,
+            Fence::new(1),
+        ),
+        CloseReadiness::NotReady { gaps } if gaps.contains(&CloseGap::ReviewRequired)
+    ));
+    assert!(matches!(
+        evaluate_close(
+            &reviewed,
+            &review_gaps,
+            Some(&ReviewRecord {
+                reviewer_actor_id: ActorId::new("agent"),
+                attempt_actor_id: ActorId::new("agent"),
+                accepted: true,
+            }),
+            true,
+            &close_attempt,
+            Fence::new(1),
+        ),
+        CloseReadiness::NotReady { gaps } if gaps.contains(&CloseGap::ReviewRejected)
+    ));
+    assert_eq!(
+        evaluate_close(
+            &reviewed,
+            &review_gaps,
+            Some(&ReviewRecord {
+                reviewer_actor_id: ActorId::new("reviewer"),
+                attempt_actor_id: ActorId::new("agent"),
+                accepted: true,
+            }),
+            true,
+            &close_attempt,
+            Fence::new(1),
+        ),
+        CloseReadiness::ReadyToClose
+    );
+
+    // I07: complete work still needs a close intent.
+    assert!(matches!(
+        evaluate_close(
+            &focused,
+            &satisfied,
+            None,
+            false,
+            &close_attempt,
+            Fence::new(1),
+        ),
+        CloseReadiness::NotReady { gaps } if gaps.contains(&CloseGap::CloseIntentMissing)
+    ));
+
+    // I08: non-closed upstream outcomes remain unmet, with their raw facts
+    // retained; the accepted identity is the distinct positive control.
+    let project = boreal_domain::ProjectId::new("i08-project");
+    let predecessor = WorkId::new("i08-predecessor");
+    let edge = CanonicalDependencyEdge::closed_only(
+        DependencyId::new("i08-edge-distinct"),
+        project.clone(),
+        predecessor.clone(),
+        WorkId::new("i08-successor"),
+        EntityRevision::new(4),
+    );
+    let graph = validate_dependency_graph(
+        project.clone(),
+        &[
+            DependencyEndpoint::direct_task(project.clone(), predecessor.clone()),
+            DependencyEndpoint::direct_task(project.clone(), WorkId::new("i08-successor")),
+        ],
+        std::slice::from_ref(&edge),
+    )
+    .unwrap();
+    let predecessor_identity = EntityIdentity::new(project, predecessor, EntityRevision::new(4));
+    for outcome in [
+        UpstreamOutcome::Complete,
+        UpstreamOutcome::Verified,
+        UpstreamOutcome::Cancelled,
+    ] {
+        let evaluation = evaluate_dependencies(
+            &graph,
+            &[DependencyObservation {
+                edge_id: edge.id.clone(),
+                edge_revision: edge.revision,
+                predecessor: predecessor_identity.clone(),
+                outcome: outcome.clone(),
+                waiver: None,
+            }],
+            EntityRevision::new(5),
+        )
+        .unwrap();
+        assert_eq!(
+            evaluation.edges[0].satisfaction,
+            EdgeSatisfaction::Unmet {
+                reason: UnmetReason::NotAcceptedClosedOutcome,
+            },
+            "I08 outcome={outcome:?}"
+        );
+        assert_eq!(evaluation.edges[0].raw_observations[0].outcome, outcome);
+    }
+
+    // I09: expiry recovery is available, while blind claim remains denied.
+    let agent = action_facts(ActorRole::Agent);
+    let operator = action_facts(ActorRole::Operator);
+    assert_eq!(
+        action_denial_for(
+            &agent,
+            DerivedStatus::ExpiredReview,
+            &[ReasonCode::ExpiryReviewRequired],
+            ActionKind::Claim,
+        ),
+        ActionDenialReason::StatusDenied(DerivedStatus::ExpiredReview)
+    );
+    assert_action_allowed(
+        &operator,
+        DerivedStatus::ExpiredReview,
+        &[ReasonCode::ExpiryReviewRequired],
+        ActionKind::Recover,
+    );
+
+    // I10: old fences are rejected without altering the expected fence.
+    assert_eq!(
+        validate_fence(Fence::new(1), Fence::new(2)),
+        Err(DomainError::StaleFence)
+    );
+
+    // I11: a receipt for another work item is a subject mismatch.
+    let mut foreign = receipt.clone();
+    foreign.subject.work_id = WorkId::new("foreign-work");
+    assert_eq!(
+        validate_receipt_subject(
+            &foreign,
+            &WorkId::new("t02-work"),
+            &AttemptId::new("t02-attempt"),
+            Fence::new(1),
+        ),
+        Err(DomainError::ReceiptSubjectMismatch)
+    );
+
+    // I12: lease expiry rejects both heartbeat and renewal, and renewal never
+    // changes the immutable hard budget.
+    let mut deadline = Attempt::claim(
+        WorkId::new("i12-work"),
+        AttemptId::new("i12-attempt"),
+        ActorId::new("agent"),
+        Fence::new(1),
+        TimestampMs(0),
+        Some(10),
+        Some(20),
+    )
+    .unwrap();
+    let hard_deadline = deadline.max_attempt_deadline;
+    assert_eq!(
+        deadline.heartbeat(deadline.lease_deadline),
+        Err(DomainError::LeaseExpired)
+    );
+    assert_eq!(
+        deadline.renew_lease(deadline.lease_deadline, 100),
+        Err(DomainError::LeaseExpired)
+    );
+    assert_eq!(deadline.max_attempt_deadline, hard_deadline);
+
+    // I13: role denial and self-review are separate authority checks.
+    assert!(matches!(
+        action_denial_for(
+            &action_facts(ActorRole::Reviewer),
+            DerivedStatus::Ready,
+            &[ReasonCode::Eligible],
+            ActionKind::Claim,
+        ),
+        ActionDenialReason::RoleDenied { .. }
+    ));
+    assert_eq!(
+        validate_independent_review(&ReviewRecord {
+            reviewer_actor_id: ActorId::new("agent"),
+            attempt_actor_id: ActorId::new("agent"),
+            accepted: true,
+        }),
+        Err(DomainError::ReviewerCannotReviewOwnAttempt)
+    );
+
+    // I14: operation replay/digest conflict requires the persistent journal;
+    // no pure-domain fake operation result is substituted.
+    assert_service_only_boundary("I14", "operation ID");
+
+    // I15: a graph cycle is rejected before dependency evaluation.
+    let nodes = [
+        WorkItem::new(
+            "i15-project".into(),
+            WorkId::new("a"),
+            WorkKind::Task,
+            None,
+            "a",
+        ),
+        WorkItem::new(
+            "i15-project".into(),
+            WorkId::new("b"),
+            WorkKind::Task,
+            None,
+            "b",
+        ),
+    ];
+    let cycle = [
+        BlockingDependency::new(WorkId::new("a"), WorkId::new("b")),
+        BlockingDependency::new(WorkId::new("b"), WorkId::new("a")),
+    ];
+    assert!(matches!(
+        validate_dependencies(&nodes, &cycle),
+        Err(DomainError::DependencyCycle { .. })
+    ));
 }

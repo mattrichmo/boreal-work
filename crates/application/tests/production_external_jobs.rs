@@ -1,13 +1,19 @@
 use boreal_application::{
-    ExternalEffectAdapter, ExternalEffectObservation, ExternalEffectReadback,
-    ExternalEffectRequest, ExternalEffectResolution, WorkApplication,
+    AttemptAdapterError, AttemptCommand, AttemptCommandKind, AttemptLifecycleAdapter,
+    AttemptMutation, AttemptRequest, AttemptSnapshot, EndAttemptRequest, ExternalEffectAdapter,
+    ExternalEffectObservation, ExternalEffectReadback, ExternalEffectRequest,
+    ExternalEffectResolution, SqliteAttemptAdapter, WorkApplication,
 };
 use boreal_domain::{
-    AcceptanceProfile, DispatchPolicy, PersistedLifecycle, ProjectId, WorkId, WorkItem, WorkKind,
+    AcceptanceProfile, ActorId, AttemptId, AttemptPhase, DispatchPolicy, Fence, HarnessId,
+    OperationId, PersistedLifecycle, ProjectId, TimestampMs, WorkId, WorkItem, WorkKind,
 };
 use boreal_store::{
     identity::{DatabaseIdentity, IdentityContext, IdentityStore, WorkspaceBinding},
     operations::{OperationBundle, OperationJournal},
+    recovery::{
+        IdentityBoundRecoveryResolutionInput, RecoveryObligationInput, RecoveryResolutionInput,
+    },
     AuditEventRecord, OperationOutcome, OperationRecord, SqliteStore, StoreError,
 };
 use std::{
@@ -165,6 +171,46 @@ fn bound_request(project: &ProjectId) -> ExternalEffectRequest {
     request.session_id = None;
     request.request_digest = "sha256:bound-external-job".to_owned();
     request
+}
+
+struct TerminalAdapter {
+    snapshot: AttemptSnapshot,
+}
+
+impl AttemptLifecycleAdapter for TerminalAdapter {
+    fn current_attempt(
+        &self,
+        _project_id: &ProjectId,
+        _attempt_id: &AttemptId,
+    ) -> Result<AttemptSnapshot, AttemptAdapterError> {
+        Ok(self.snapshot.clone())
+    }
+
+    fn transact_attempt(
+        &self,
+        command: AttemptCommand,
+    ) -> Result<AttemptMutation, AttemptAdapterError> {
+        Ok(AttemptMutation {
+            operation_id: command.operation_id,
+            request_digest: command.request_digest,
+            attempt_id: command.attempt_id,
+            fence: command.fence,
+            phase: AttemptPhase::Released,
+            lease_deadline: command.expected_lease_deadline,
+            hard_deadline: command.expected_hard_deadline,
+            revision: 1,
+            changed: true,
+            replayed: false,
+        })
+    }
+
+    fn read_attempt_operation(
+        &self,
+        _project_id: &ProjectId,
+        _operation_id: &OperationId,
+    ) -> Result<Option<AttemptMutation>, AttemptAdapterError> {
+        Ok(None)
+    }
 }
 
 #[test]
@@ -412,6 +458,261 @@ fn identity_bound_adapter_uses_current_store_authority() {
         legacy.admit(&request),
         Err(StoreError::Conflict(message)) if message.contains("identity-bound API")
     ));
+}
+
+#[test]
+fn terminal_release_uses_canonical_identity_bound_recovery() {
+    let store = SqliteStore::open_in_memory(PRODUCTION_SCHEMA).expect("open terminal store");
+    let project = ProjectId::new("project-terminal-release");
+    store
+        .create_project(project.as_str(), "unix-ms:0")
+        .expect("terminal project creates");
+    store
+        .ensure_actor("agent-1", "agent", "credential", "Agent 1", "unix-ms:0")
+        .expect("terminal actor creates");
+    let identities = IdentityStore::new(&store);
+    identities
+        .install(
+            &DatabaseIdentity::new("database-terminal-release", 1)
+                .expect("terminal database identity"),
+            "unix-ms:1",
+        )
+        .expect("terminal identity installs");
+    let context = IdentityStore::new(&store)
+        .bind_project(
+            project.as_str(),
+            &WorkspaceBinding::new(
+                "/tmp/boreal-terminal-release",
+                "/tmp/boreal-terminal-release",
+                "sha256:terminal-release",
+            )
+            .expect("terminal workspace binding"),
+            "unix-ms:1",
+        )
+        .expect("terminal project binds");
+    let app = WorkApplication::new(&store);
+    app.create_work_as(
+        &work(&project),
+        "agent-1",
+        "unix-ms:2",
+        "op-create-terminal-release",
+    )
+    .expect("create terminal-release work");
+    app.claim(
+        &project,
+        "work-external-job",
+        "agent-1",
+        "harness-terminal",
+        None,
+        "attempt-terminal-release",
+        "op-claim-terminal-release",
+        "sha256:claim-terminal-release",
+        None,
+        "unix-ms:1000",
+        "unix-ms:1800000",
+        "unix-ms:7200000",
+    )
+    .expect("claim terminal-release attempt");
+
+    let adapter = SqliteAttemptAdapter::new(&store);
+    let terminal = app
+        .release(
+            &adapter,
+            EndAttemptRequest {
+                attempt: AttemptRequest::new(
+                    project.clone(),
+                    WorkId::new("work-external-job"),
+                    AttemptId::new("attempt-terminal-release"),
+                    ActorId::new("agent-1"),
+                    Some(HarnessId::new("harness-terminal")),
+                    None,
+                    Fence::new(1),
+                    OperationId::new("op-terminal-release"),
+                    "sha256:terminal-release",
+                    TimestampMs(2000),
+                ),
+                reason: Some("terminal release regression".to_owned()),
+            },
+        )
+        .expect("terminal release is recorded with canonical recovery");
+    assert_eq!(terminal.value.phase, boreal_domain::AttemptPhase::Released);
+
+    let reservation = store
+        .resource_reservation(&project.to_string(), "resource:attempt-terminal-release")
+        .expect("canonical resource reads")
+        .expect("canonical resource exists");
+    assert_eq!(reservation.state, "release_pending");
+
+    let recovery = app
+        .attempt_recovery_readback(
+            &project,
+            &OperationId::new("op-terminal-release"),
+            AttemptCommandKind::Release,
+        )
+        .expect("terminal recovery reads back");
+    assert!(recovery.is_readback_required());
+
+    let resolution = IdentityBoundRecoveryResolutionInput {
+        context: context.clone(),
+        operation_id: "op-resolve-terminal-release".to_owned(),
+        request_digest: "sha256:resolve-terminal-release".to_owned(),
+        expected_project_revision: None,
+        session_id: None,
+        resolution: RecoveryResolutionInput {
+            project_id: project.to_string(),
+            obligation_id: "op-terminal-release:recovery:resource-unknown".to_owned(),
+            resolution_id: "resolution-terminal-release".to_owned(),
+            actor_id: "agent-1".to_owned(),
+            outcome: "resource_released".to_owned(),
+            reason: "terminal resource release was read back".to_owned(),
+            resource_state: "released".to_owned(),
+            at: "unix-ms:3000".to_owned(),
+        },
+    };
+    let resolved = app
+        .resolve_attempt_recovery_with_identity(&resolution)
+        .expect("identity-bound recovery acknowledges canonical release");
+    assert_eq!(resolved.state, "resolved");
+    assert_eq!(
+        store
+            .resource_reservation(&project.to_string(), "resource:attempt-terminal-release")
+            .expect("released resource reads")
+            .expect("released resource exists")
+            .state,
+        "released"
+    );
+
+    let replay = app
+        .resolve_attempt_recovery_with_identity(&resolution)
+        .expect("same recovery operation replays");
+    assert_eq!(replay.resolution_id, resolved.resolution_id);
+
+    let mut foreign = resolution;
+    foreign.resolution.project_id = "foreign-project".to_owned();
+    assert!(matches!(
+        app.resolve_attempt_recovery_with_identity(&foreign),
+        Err(boreal_application::ApplicationError::Store(
+            StoreError::WrongSubject { .. }
+        ))
+    ));
+}
+
+#[test]
+fn terminal_release_fallback_fails_closed_without_canonical_store_mutation() {
+    let store = SqliteStore::open_in_memory(PRODUCTION_SCHEMA).expect("open fallback store");
+    let project = ProjectId::new("project-terminal-fallback");
+    store
+        .create_project(project.as_str(), "unix-ms:0")
+        .expect("fallback project creates");
+    store
+        .ensure_actor("agent-1", "agent", "credential", "Agent 1", "unix-ms:0")
+        .expect("fallback actor creates");
+    IdentityStore::new(&store)
+        .install(
+            &DatabaseIdentity::new("database-terminal-fallback", 1)
+                .expect("fallback database identity"),
+            "unix-ms:1",
+        )
+        .expect("fallback identity installs");
+    let _context = IdentityStore::new(&store)
+        .bind_project(
+            project.as_str(),
+            &WorkspaceBinding::new(
+                "/tmp/boreal-terminal-fallback",
+                "/tmp/boreal-terminal-fallback",
+                "sha256:terminal-fallback",
+            )
+            .expect("fallback workspace binding"),
+            "unix-ms:1",
+        )
+        .expect("fallback project binds");
+    let app = WorkApplication::new(&store);
+    app.create_work_as(
+        &work(&project),
+        "agent-1",
+        "unix-ms:2",
+        "op-create-terminal-fallback",
+    )
+    .expect("create fallback work");
+    app.claim(
+        &project,
+        "work-external-job",
+        "agent-1",
+        "harness-terminal",
+        None,
+        "attempt-terminal-fallback",
+        "op-claim-terminal-fallback",
+        "sha256:claim-terminal-fallback",
+        None,
+        "unix-ms:1000",
+        "unix-ms:1800000",
+        "unix-ms:7200000",
+    )
+    .expect("claim fallback attempt");
+    store
+        .create_recovery_obligation(&RecoveryObligationInput {
+            obligation_id: "op-terminal-fallback:recovery:resource-unknown".to_owned(),
+            project_id: project.as_str().to_owned(),
+            work_id: "work-external-job".to_owned(),
+            attempt_id: Some("attempt-terminal-fallback".to_owned()),
+            fence: Some(1),
+            reason: "resource_unknown".to_owned(),
+            resource_state: "unknown".to_owned(),
+            owner_actor_id: Some("agent-1".to_owned()),
+            next_action: "acknowledge terminal resource release".to_owned(),
+            created_at: "unix-ms:2000".to_owned(),
+        })
+        .expect("fallback recovery obligation creates");
+
+    let adapter = TerminalAdapter {
+        snapshot: AttemptSnapshot {
+            project_id: project.clone(),
+            work_id: WorkId::new("work-external-job"),
+            attempt_id: AttemptId::new("attempt-terminal-fallback"),
+            actor_id: ActorId::new("agent-1"),
+            harness_id: Some(HarnessId::new("harness-terminal")),
+            session_id: None,
+            fence: Fence::new(1),
+            phase: AttemptPhase::Running,
+            claimed_at: TimestampMs(1000),
+            accepted_at: Some(TimestampMs(1001)),
+            lease_deadline: TimestampMs(1800000),
+            hard_deadline: TimestampMs(7200000),
+            current: true,
+        },
+    };
+    let release_result = app.release(
+        &adapter,
+        EndAttemptRequest {
+            attempt: AttemptRequest::new(
+                project.clone(),
+                WorkId::new("work-external-job"),
+                AttemptId::new("attempt-terminal-fallback"),
+                ActorId::new("agent-1"),
+                Some(HarnessId::new("harness-terminal")),
+                None,
+                Fence::new(1),
+                OperationId::new("op-terminal-fallback"),
+                "sha256:terminal-fallback",
+                TimestampMs(2000),
+            ),
+            reason: Some("fallback terminal release".to_owned()),
+        },
+    );
+    assert!(matches!(
+        release_result,
+        Err(boreal_application::ApplicationError::AttemptAdapter(
+            AttemptAdapterError::UnknownOutcome(message)
+        )) if message.contains("canonical terminal resource release was not durably admitted")
+    ));
+    assert_eq!(
+        store
+            .resource_reservation(project.as_str(), "resource:attempt-terminal-fallback")
+            .expect("fallback resource reads")
+            .expect("fallback resource exists")
+            .state,
+        "active"
+    );
 }
 
 #[test]

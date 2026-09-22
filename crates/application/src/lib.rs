@@ -30,7 +30,9 @@ pub use guidance::{
 pub use hierarchy::*;
 pub use intake::*;
 pub use knowledge::*;
-pub use operation_identity::{canonical_request_digest, sha256_content_digest};
+pub use operation_identity::{
+    canonical_request_digest, sha256_content_digest, AuthenticatedOperationJournal,
+};
 pub use planning_v3::*;
 use serde_json::json;
 pub use session::{

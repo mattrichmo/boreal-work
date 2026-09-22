@@ -1,11 +1,16 @@
+use boreal_memory::publisher as durable_publication;
 use boreal_memory::{
-    publication_identity, rebuild_index, render_manifest, render_markdown, validate_fresh_clone,
-    validate_import, Citation, Draft, DraftState, FindingCode, ImportError, IndexLag,
-    ManifestEntry, MemoryAuthority, MemoryDoctor, MemoryRoot, PublicationManifest,
+    publication_identity, publication_side_effect_ref, rebuild_index,
+    reconciled_publication_observation, render_manifest, render_markdown, validate_fresh_clone,
+    validate_import, validate_publication_request, Citation, Draft, DraftState, FindingCode,
+    ImportError, IndexLag, ManifestEntry, MemoryAuthority, MemoryDoctor, MemoryRoot,
+    PublicationIdentity, PublicationJobObservation, PublicationManifest, PublicationRecovery,
     PublicationRecoveryState, PublicationState, PublishError, Publisher, RetentionPolicy,
     RetrievalQuery, SourceTrust,
 };
+
 use std::{
+    cell::{Cell, RefCell},
     fs,
     io::Write,
     path::{Path, PathBuf},
@@ -1089,4 +1094,382 @@ fn retention_only_bounds_the_derived_index_and_preserves_published_memory() {
     assert!(validate_fresh_clone(&path, "project-1").is_ok());
     assert!(path.join("notes/entry-1.md").exists());
     remove(&path);
+}
+
+struct DurablePublicationJobs {
+    record: RefCell<durable_publication::PublicationJobRecord>,
+    events: RefCell<Vec<&'static str>>,
+}
+
+impl DurablePublicationJobs {
+    fn new(state: durable_publication::PublicationJobState) -> Self {
+        let request = durable_publication_request();
+        Self::from_request(state, &request)
+    }
+
+    fn from_request(
+        state: durable_publication::PublicationJobState,
+        request: &durable_publication::PublicationJobRequest,
+    ) -> Self {
+        Self {
+            record: RefCell::new(durable_publication::PublicationJobRecord {
+                project_id: request.project_id.clone(),
+                operation_id: request.operation_id.clone(),
+                request_digest: request.request_digest.clone(),
+                entry_id: request.entry_id.clone(),
+                content_digest: request.content_digest.clone(),
+                manifest_identity: request.manifest_identity.clone(),
+                memory_root_identity: request.memory_root_identity.clone(),
+                state,
+                side_effect_ref: None,
+                git_revision: None,
+                result_digest: None,
+                error: None,
+            }),
+            events: RefCell::new(Vec::new()),
+        }
+    }
+
+    fn snapshot(&self) -> durable_publication::PublicationJobRecord {
+        self.record.borrow().clone()
+    }
+}
+
+impl durable_publication::PublicationJobPort for DurablePublicationJobs {
+    fn register(
+        &self,
+        request: &durable_publication::PublicationJobRequest,
+    ) -> Result<durable_publication::PublicationJobRecord, String> {
+        self.events.borrow_mut().push("register");
+        let record = self.snapshot();
+        if record.project_id != request.project_id
+            || record.operation_id != request.operation_id
+            || record.request_digest != request.request_digest
+            || record.entry_id != request.entry_id
+            || record.content_digest != request.content_digest
+            || record.manifest_identity != request.manifest_identity
+            || record.memory_root_identity != request.memory_root_identity
+        {
+            return Err("publication identity mismatch".into());
+        }
+        Ok(record)
+    }
+
+    fn acquire(
+        &self,
+        request: &durable_publication::PublicationJobRequest,
+        _started_at: &str,
+    ) -> Result<durable_publication::PublicationJobAcquisition, String> {
+        self.events.borrow_mut().push("acquire");
+        let mut record = self.record.borrow_mut();
+        if record.operation_id != request.operation_id {
+            return Err("publication operation mismatch".into());
+        }
+        if record.state == durable_publication::PublicationJobState::Registered {
+            record.state = durable_publication::PublicationJobState::Running;
+        }
+        Ok(durable_publication::PublicationJobAcquisition::Won(
+            record.clone(),
+        ))
+    }
+
+    fn mark_readback_required(
+        &self,
+        request: &durable_publication::PublicationJobRequest,
+        side_effect_ref: &str,
+    ) -> Result<durable_publication::PublicationJobRecord, String> {
+        self.events.borrow_mut().push("mark_readback");
+        let mut record = self.record.borrow_mut();
+        if record.operation_id != request.operation_id {
+            return Err("publication operation mismatch".into());
+        }
+        record.state = durable_publication::PublicationJobState::ReadbackRequired;
+        record.side_effect_ref = Some(side_effect_ref.into());
+        Ok(record.clone())
+    }
+
+    fn readback(
+        &self,
+        request: &durable_publication::PublicationJobRequest,
+    ) -> Result<durable_publication::PublicationJobRecord, String> {
+        self.events.borrow_mut().push("readback");
+        let record = self.snapshot();
+        if record.operation_id != request.operation_id {
+            return Err("publication operation mismatch".into());
+        }
+        Ok(record)
+    }
+
+    fn reconcile(
+        &self,
+        request: &durable_publication::PublicationJobRequest,
+        readback: &durable_publication::PublicationJobReadback,
+    ) -> Result<durable_publication::PublicationJobRecord, String> {
+        self.events.borrow_mut().push("reconcile");
+        let mut record = self.record.borrow_mut();
+        if record.operation_id != request.operation_id {
+            return Err("publication operation mismatch".into());
+        }
+        record.state = durable_publication::PublicationJobState::Reconciled;
+        record.side_effect_ref = Some(readback.side_effect_ref.clone());
+        record.git_revision = Some(readback.git_revision.clone());
+        record.result_digest = Some(readback.result_digest.clone());
+        Ok(record.clone())
+    }
+
+    fn reject(
+        &self,
+        request: &durable_publication::PublicationJobRequest,
+        reason: &str,
+    ) -> Result<durable_publication::PublicationJobRecord, String> {
+        self.events.borrow_mut().push("reject");
+        let mut record = self.record.borrow_mut();
+        if record.operation_id != request.operation_id {
+            return Err("publication operation mismatch".into());
+        }
+        record.state = durable_publication::PublicationJobState::Rejected;
+        record.error = Some(reason.into());
+        Ok(record.clone())
+    }
+
+    fn fail(
+        &self,
+        request: &durable_publication::PublicationJobRequest,
+        side_effect_ref: Option<&str>,
+        reason: &str,
+    ) -> Result<durable_publication::PublicationJobRecord, String> {
+        self.events.borrow_mut().push("fail");
+        let mut record = self.record.borrow_mut();
+        if record.operation_id != request.operation_id {
+            return Err("publication operation mismatch".into());
+        }
+        record.state = durable_publication::PublicationJobState::Failed;
+        record.side_effect_ref = side_effect_ref.map(str::to_owned);
+        record.error = Some(reason.into());
+        Ok(record.clone())
+    }
+}
+
+fn durable_publication_request() -> durable_publication::PublicationJobRequest {
+    durable_publication::PublicationJobRequest {
+        project_id: "project-1".into(),
+        operation_id: "operation-1".into(),
+        request_digest: "sha256:request".into(),
+        entry_id: "entry-1".into(),
+        content_digest: "sha256:content".into(),
+        manifest_identity: "sha256:manifest".into(),
+        memory_root_identity: "sha256:root".into(),
+        actor_id: "actor-1".into(),
+        session_id: Some("session-1".into()),
+        source_identity: Some("source-1".into()),
+        config_identity: Some("config-1".into()),
+        deadline: Some("unix-ms:3".into()),
+        created_at: "unix-ms:1".into(),
+    }
+}
+
+#[test]
+fn publication_identity_helpers_are_available_to_application_adapters() {
+    let request = durable_publication_request();
+    let expected = PublicationIdentity {
+        project_id: request.project_id.clone(),
+        entry_id: request.entry_id.clone(),
+        content_digest: request.content_digest.clone(),
+        operation_id: request.operation_id.clone(),
+        manifest_identity: request.manifest_identity.clone(),
+    };
+    validate_publication_request(&request, &expected).unwrap();
+
+    let recovery = PublicationRecovery {
+        state: PublicationRecoveryState::Committed,
+        operation_id: Some(request.operation_id.clone()),
+        manifest_identity: Some(request.manifest_identity.clone()),
+        git_revision: Some("revision-1".into()),
+        detail: "verified committed publication".into(),
+    };
+    assert_eq!(
+        publication_side_effect_ref(&request, &recovery),
+        "git:revision-1"
+    );
+    assert!(matches!(
+        reconciled_publication_observation(&request, &recovery, "unix-ms:4"),
+        Ok(PublicationJobObservation::Reconciled {
+            git_revision,
+            manifest_identity,
+            ..
+        }) if git_revision == "revision-1" && manifest_identity == request.manifest_identity
+    ));
+}
+
+#[test]
+fn publisher_root_routes_git_through_durable_admission_and_readback() {
+    let path = test_root("durable-root");
+    let publisher = Publisher::new(MemoryRoot::new(&path).unwrap()).unwrap();
+    let accepted = draft("entry-1").review(true);
+    let operation_id = "operation-durable-root";
+    let identity = publication_identity(&accepted, operation_id).unwrap();
+    let request = durable_publication::PublicationJobRequest {
+        project_id: identity.project_id.clone(),
+        operation_id: identity.operation_id.clone(),
+        request_digest: "sha256:request-durable-root".into(),
+        entry_id: identity.entry_id.clone(),
+        content_digest: identity.content_digest.clone(),
+        manifest_identity: identity.manifest_identity.clone(),
+        memory_root_identity: "sha256:root-durable-root".into(),
+        actor_id: "actor-1".into(),
+        session_id: Some("session-1".into()),
+        source_identity: Some("source-1".into()),
+        config_identity: Some("config-1".into()),
+        deadline: Some("unix-ms:100".into()),
+        created_at: "unix-ms:1".into(),
+    };
+    let jobs = DurablePublicationJobs::from_request(
+        durable_publication::PublicationJobState::Registered,
+        &request,
+    );
+
+    let first = publisher
+        .publish_with_durable_job(&jobs, &request, "unix-ms:2", "unix-ms:3", &accepted, None)
+        .unwrap();
+    assert!(first.is_resolved());
+    assert_eq!(
+        jobs.events.borrow().as_slice(),
+        ["register", "acquire", "reconcile"]
+    );
+    let revision = first.record().git_revision.clone().unwrap();
+    assert_eq!(first.record().manifest_identity, request.manifest_identity);
+    assert!(publisher
+        .publication_readback(operation_id)
+        .unwrap()
+        .is_resolved());
+
+    let second = publisher
+        .publish_with_durable_job(&jobs, &request, "unix-ms:4", "unix-ms:5", &accepted, None)
+        .unwrap();
+    assert!(second.is_resolved());
+    assert_eq!(
+        second.record().git_revision.as_deref(),
+        Some(revision.as_str())
+    );
+    assert_eq!(
+        jobs.events.borrow().as_slice(),
+        ["register", "acquire", "reconcile", "register", "readback"]
+    );
+    assert_eq!(
+        validate_fresh_clone(&path, "project-1")
+            .unwrap()
+            .entries
+            .len(),
+        1
+    );
+    remove(&path);
+}
+
+#[test]
+fn durable_publication_replay_does_not_repeat_git_effect() {
+    let jobs = DurablePublicationJobs::new(durable_publication::PublicationJobState::Registered);
+    let calls = Cell::new(0_u8);
+    let request = durable_publication_request();
+    let first = durable_publication::run_with_durable_job(&jobs, &request, "unix-ms:2", |_| {
+        calls.set(calls.get() + 1);
+        Ok(durable_publication::PublicationJobObservation::Reconciled {
+            side_effect_ref: "git:revision-1".into(),
+            git_revision: "revision-1".into(),
+            result_digest: request.content_digest.clone(),
+            manifest_identity: request.manifest_identity.clone(),
+            observed_at: "unix-ms:3".into(),
+        })
+    })
+    .unwrap();
+    let second = durable_publication::run_with_durable_job(&jobs, &request, "unix-ms:3", |_| {
+        calls.set(calls.get() + 1);
+        Err("replay must not invoke Git".into())
+    })
+    .unwrap();
+
+    assert!(first.is_resolved());
+    assert!(second.is_resolved());
+    assert_eq!(calls.get(), 1);
+    assert_eq!(
+        jobs.events.borrow().as_slice(),
+        ["register", "acquire", "reconcile", "register", "readback"]
+    );
+}
+
+#[test]
+fn durable_publication_running_replay_requires_readback_without_git_retry() {
+    let jobs = DurablePublicationJobs::new(durable_publication::PublicationJobState::Running);
+    let calls = Cell::new(0_u8);
+    let outcome = durable_publication::run_with_durable_job(
+        &jobs,
+        &durable_publication_request(),
+        "unix-ms:2",
+        |_| {
+            calls.set(calls.get() + 1);
+            Err("running replay must not invoke Git".into())
+        },
+    )
+    .unwrap();
+
+    assert!(!outcome.is_resolved());
+    assert_eq!(calls.get(), 0);
+    assert_eq!(jobs.events.borrow().as_slice(), ["register", "readback"]);
+}
+
+#[test]
+fn durable_publication_unknown_callback_preserves_original_readback() {
+    let jobs = DurablePublicationJobs::new(durable_publication::PublicationJobState::Registered);
+    let outcome = durable_publication::run_with_durable_job(
+        &jobs,
+        &durable_publication_request(),
+        "unix-ms:2",
+        |_| Err("Git response was interrupted".into()),
+    )
+    .unwrap();
+
+    assert!(matches!(
+        outcome,
+        durable_publication::PublicationJobOutcome::ReadbackRequired(_)
+    ));
+    assert_eq!(
+        jobs.events.borrow().as_slice(),
+        ["register", "acquire", "readback"]
+    );
+}
+
+#[test]
+fn durable_publication_rejects_unbounded_identity_before_admission() {
+    let jobs = DurablePublicationJobs::new(durable_publication::PublicationJobState::Registered);
+    let mut request = durable_publication_request();
+    request.entry_id = "x".repeat(4 * 1024 + 1);
+    let error = durable_publication::run_with_durable_job(&jobs, &request, "unix-ms:2", |_| {
+        panic!("oversized publication reached Git")
+    })
+    .expect_err("oversized publication identity must be rejected");
+
+    assert!(error.contains("entry identity"));
+    assert!(jobs.events.borrow().is_empty());
+}
+
+#[test]
+fn durable_publication_rejects_readback_for_the_wrong_manifest() {
+    let jobs = DurablePublicationJobs::new(durable_publication::PublicationJobState::Registered);
+    let request = durable_publication_request();
+    let error = durable_publication::run_with_durable_job(&jobs, &request, "unix-ms:2", |_| {
+        Ok(durable_publication::PublicationJobObservation::Reconciled {
+            side_effect_ref: "git:revision-1".into(),
+            git_revision: "revision-1".into(),
+            result_digest: request.content_digest.clone(),
+            manifest_identity: "sha256:other-manifest".into(),
+            observed_at: "unix-ms:3".into(),
+        })
+    })
+    .expect_err("foreign manifest readback must not reconcile");
+
+    assert!(error.contains("readback identity"));
+    assert!(!jobs
+        .record
+        .borrow()
+        .state
+        .eq(&durable_publication::PublicationJobState::Reconciled));
 }

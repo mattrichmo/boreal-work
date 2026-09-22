@@ -55,10 +55,22 @@ pub const WORK_MODEL_SCHEMA_VERSION: i64 = 3;
 pub const STATUS_CONTRACT_VERSION: &str = "boreal.work-status/2";
 pub const PRODUCTION_SCHEMA_ID: &str = "boreal.sqlite";
 pub const PRODUCTION_SCHEMA_CONTRACT_VERSION: &str = "boreal.work-model/3";
+const MISSING_VERIFIER_AUDIT_EVENT: &str =
+    "schema version 2 audit_event CHECK is missing evidence.verifier.admitted";
+const MISSING_CLOSE_COMPLETED_AUDIT_EVENT: &str =
+    "schema version 2 audit_event CHECK is missing close.completed";
 
 const PRODUCTION_SCHEMA_SQL: &str = include_str!("../../../project/spec/schema-production.sql");
 const LEGACY_SCHEMA_V2_SQL: &str = include_str!("../../../project/spec/schema-v2.sql");
 const WORK_MODEL_SCHEMA_V3_SQL: &str = include_str!("../../../project/spec/schema-v3.sql");
+
+const PRODUCTION_EXTERNAL_JOB_IDENTITY_TRIGGER_SQL: &str = r#"
+CREATE TRIGGER IF NOT EXISTS boreal_external_job_identity_guard
+BEFORE UPDATE OF job_id, operation_id, project_id, subject_type, subject_id,
+  kind, request_digest, source_identity, config_identity, actor_id,
+  session_id, deadline, created_at ON boreal_external_job
+BEGIN SELECT RAISE(ABORT, 'external_job_identity_append_only'); END;
+"#;
 
 const PRODUCTION_VERIFY_SQL: &str = r#"
 CREATE TEMP TABLE boreal_production_verify (sentinel INTEGER NOT NULL CHECK (sentinel = 1));
@@ -196,6 +208,43 @@ WHEN EXISTS (
 )
 BEGIN
   SELECT RAISE(ABORT, 'dependency_cycle');
+END;
+"#;
+
+const REPAIR_AUDIT_EVENT_VERIFIER_CHECK: &str = r#"
+DROP TRIGGER IF EXISTS audit_append_only_update;
+DROP TRIGGER IF EXISTS audit_append_only_delete;
+DROP INDEX IF EXISTS audit_revision;
+CREATE TABLE audit_event_repair (
+  event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+  project_id TEXT NOT NULL REFERENCES project(project_id),
+  revision INTEGER NOT NULL CHECK (revision > 0),
+  operation_id TEXT NOT NULL UNIQUE REFERENCES operation(operation_id),
+  event_type TEXT NOT NULL CHECK (event_type IN ('work.created','work.published','work.closed','work.blocked','work.paused','work.resumed','work.cancelled','work.reopened','attempt.claimed','attempt.accepted','attempt.started','attempt.submitted','attempt.released','attempt.failed','attempt.expiry_pending','attempt.expired','evidence.verifier.admitted','expiry.resolved','lease.renewed','receipt.recorded','receipt.rejected','review.accepted','review.rejected','close.requested','close.completed','gate.satisfied','hold.resolved','repair.correction','repair.supersession')),
+  subject_type TEXT NOT NULL CHECK (subject_type IN ('work','attempt','receipt','review','gate','hold','dependency','summary','operation','project')),
+  subject_id TEXT NOT NULL,
+  actor_id TEXT NOT NULL REFERENCES actor(actor_id),
+  session_id TEXT REFERENCES session(session_id),
+  fence INTEGER CHECK (fence IS NULL OR fence > 0),
+  as_of TEXT NOT NULL,
+  payload_json TEXT NOT NULL,
+  UNIQUE (project_id, revision)
+);
+INSERT INTO audit_event_repair (
+  event_id, project_id, revision, operation_id, event_type, subject_type,
+  subject_id, actor_id, session_id, fence, as_of, payload_json
+)
+SELECT event_id, project_id, revision, operation_id, event_type, subject_type,
+       subject_id, actor_id, session_id, fence, as_of, payload_json
+FROM audit_event;
+DROP TABLE audit_event;
+ALTER TABLE audit_event_repair RENAME TO audit_event;
+CREATE INDEX audit_revision ON audit_event(project_id, revision);
+CREATE TRIGGER audit_append_only_update BEFORE UPDATE ON audit_event BEGIN
+  SELECT RAISE(ABORT, 'audit_append_only');
+END;
+CREATE TRIGGER audit_append_only_delete BEFORE DELETE ON audit_event BEGIN
+  SELECT RAISE(ABORT, 'audit_append_only');
 END;
 "#;
 
@@ -1342,6 +1391,12 @@ impl SqliteStore {
         Self::open(":memory:", schema_sql)
     }
 
+    /// Reports whether this handle was opened through the exact canonical
+    /// production schema boundary.
+    pub fn is_canonical_production(&self) -> bool {
+        self.canonical_production
+    }
+
     pub fn open_with_schema_file(
         path: impl AsRef<Path>,
         schema_path: impl AsRef<Path>,
@@ -1368,16 +1423,6 @@ impl SqliteStore {
             // gap) could be observed only after repair DDL had committed.
             store_try_acquire_migration_lock(self)?;
             if let Err(error) = production_preflight(self) {
-                store_release_migration_lock(self);
-                return Err(error);
-            }
-            // Older v2 databases may be structurally valid enough to identify
-            // themselves but still lack additive objects repaired by the
-            // historical setup path. Complete that repair atomically before
-            // the ordered v2 -> v3 runner records its ledger entry. A failed
-            // repair leaves the legacy database unchanged and never lets the
-            // production migration advertise a partial target.
-            if let Err(error) = self.repair_schema_v2() {
                 store_release_migration_lock(self);
                 return Err(error);
             }
@@ -1444,6 +1489,7 @@ impl SqliteStore {
             return Err(error);
         }
         let result = (|| {
+            self.execute_batch(PRODUCTION_EXTERNAL_JOB_IDENTITY_TRIGGER_SQL)?;
             self.execute_batch(PRODUCTION_METADATA_SCHEMA_SQL)?;
             self.execute_batch(&format!(
                 "INSERT INTO {SCHEMA_IDENTITY_TABLE}
@@ -1680,6 +1726,7 @@ impl SqliteStore {
             "boreal_pinned_requirement_immutable_delete",
             "boreal_pinned_requirement_gate_immutable_update",
             "boreal_pinned_requirement_gate_immutable_delete",
+            "boreal_external_job_identity_guard",
         ] {
             if !self.schema_object_exists("trigger", trigger)? {
                 return Err(StoreError::Corrupt(format!(
@@ -1767,6 +1814,12 @@ impl SqliteStore {
         &self,
         destination: impl AsRef<Path>,
     ) -> Result<SqliteBackupReport, StoreError> {
+        if self.canonical_production {
+            return Err(StoreError::Conflict(
+                "canonical production backup requires identity-bound external-job admission and readback"
+                    .to_owned(),
+            ));
+        }
         let destination = destination.as_ref();
         if destination == Path::new(":memory:") {
             return Err(StoreError::Invalid(
@@ -1819,9 +1872,18 @@ impl SqliteStore {
     }
 
     /// Restores this store from a source database using SQLite's online backup
-    /// API. The caller must ensure that no application transaction is active;
-    /// this method never runs lifecycle logic or advances a project revision.
+    /// API. This compatibility helper is intentionally unavailable for
+    /// canonical production stores: an in-place restore must be admitted as a
+    /// durable external job, validate the source manifest, and advance the
+    /// restore epoch before the restored store is exposed. The caller must
+    /// ensure that no application transaction is active for legacy fixtures.
     pub fn restore_from(&self, source: impl AsRef<Path>) -> Result<SqliteBackupReport, StoreError> {
+        if self.canonical_production {
+            return Err(StoreError::Conflict(
+                "canonical production restore requires identity-bound admission, source consistency, and restore-epoch reconciliation"
+                    .to_owned(),
+            ));
+        }
         let source = source.as_ref();
         if source == Path::new(":memory:") {
             return Err(StoreError::Invalid(
@@ -1898,39 +1960,19 @@ impl SqliteStore {
     ) -> Result<MutationResult, StoreError> {
         self.execute_batch("BEGIN IMMEDIATE")?;
         let result = (|| {
-            if let Some(existing) = self.operation(operation_id)? {
-                if existing.request_digest != request_digest {
-                    return Err(StoreError::Conflict(
-                        "operation request digest mismatch".to_owned(),
-                    ));
-                }
-                if existing.project_id != project_id
-                    || existing.command != "project.init"
-                    || existing.actor_id != actor_id
-                {
-                    return Err(StoreError::Conflict(
-                        "project initialization operation identity mismatch".to_owned(),
-                    ));
-                }
-                if self.canonical_production {
-                    let context =
-                        self.operation_identity_context(project_id)?
-                            .ok_or_else(|| {
-                                StoreError::Corrupt(
-                                    "canonical production operation has no identity context"
-                                        .to_owned(),
-                                )
-                            })?;
-                    let identity = operations::OperationIdentity::from_record(&existing, None);
-                    operations::OperationJournal::new(self)
-                        .replay_in_context(&context, &identity)?
-                        .ok_or_else(|| {
-                            StoreError::Corrupt(
-                                "canonical production initialization replay is unreadable"
-                                    .to_owned(),
-                            )
-                        })?;
-                }
+            if let Some(existing) = self.preflight_operation_replay(
+                project_id,
+                operation_id,
+                "project.init",
+                actor_id,
+                None,
+                None,
+                None,
+                None,
+                request_digest,
+                "project",
+                project_id,
+            )? {
                 return Ok(MutationResult {
                     operation_id: operation_id.to_owned(),
                     revision: existing.revision,
@@ -2031,8 +2073,19 @@ impl SqliteStore {
 
         self.execute_batch("BEGIN IMMEDIATE")?;
         let result = (|| {
-            if let Some(existing) = self.operation(&request.operation_id)? {
-                validate_session_registration_operation(request, &existing)?;
+            if let Some(existing) = self.preflight_operation_replay(
+                &request.project_id,
+                &request.operation_id,
+                "session.register",
+                &request.actor_id,
+                Some(&request.session_id),
+                request.expected_project_revision,
+                None,
+                None,
+                &request.request_digest,
+                "project",
+                &request.project_id,
+            )? {
                 let session = self
                     .session(&request.project_id, &request.session_id)?
                     .ok_or_else(|| {
@@ -2216,15 +2269,19 @@ impl SqliteStore {
     ) -> Result<SessionEndResult, StoreError> {
         self.execute_batch("BEGIN IMMEDIATE")?;
         let result = (|| {
-            if let Some(existing) = self.operation(operation_id)? {
-                if existing.request_digest != request_digest
-                    || existing.project_id != project_id
-                    || existing.command != "session.end"
-                {
-                    return Err(StoreError::Conflict(
-                        "operation request digest mismatch".to_owned(),
-                    ));
-                }
+            if let Some(existing) = self.preflight_operation_replay(
+                project_id,
+                operation_id,
+                "session.end",
+                actor_id,
+                Some(session_id),
+                expected_project_revision,
+                None,
+                None,
+                request_digest,
+                "project",
+                project_id,
+            )? {
                 let session = self.session(project_id, session_id)?.ok_or_else(|| {
                     StoreError::Corrupt(
                         "session end operation refers to a missing session".to_owned(),
@@ -2935,12 +2992,19 @@ impl SqliteStore {
     ) -> Result<MutationResult, StoreError> {
         self.execute_batch("BEGIN IMMEDIATE")?;
         let result = (|| {
-            if let Some(existing) = self.operation(operation_id)? {
-                if existing.request_digest != request_digest {
-                    return Err(StoreError::Conflict(
-                        "operation request digest mismatch".to_owned(),
-                    ));
-                }
+            if let Some(existing) = self.preflight_operation_replay(
+                work.project_id.as_str(),
+                operation_id,
+                "work.create",
+                actor_id,
+                None,
+                expected_project_revision,
+                None,
+                None,
+                request_digest,
+                "work",
+                work.id.as_str(),
+            )? {
                 return Ok(MutationResult {
                     operation_id: operation_id.to_owned(),
                     revision: existing.revision,
@@ -3016,13 +3080,24 @@ impl SqliteStore {
     ) -> Result<MutationResult, StoreError> {
         self.execute_batch("BEGIN IMMEDIATE")?;
         let result = (|| {
-            if let Some(existing) = self.operation(operation_id)? {
-                return replay_mutation_operation(
-                    &input.project_id,
-                    operation_id,
-                    request_digest,
-                    &existing,
-                );
+            if let Some(existing) = self.preflight_operation_replay(
+                &input.project_id,
+                operation_id,
+                "work.edit",
+                actor_id,
+                None,
+                Some(expected_revision),
+                None,
+                None,
+                request_digest,
+                "work",
+                &input.work_id,
+            )? {
+                return Ok(MutationResult {
+                    operation_id: existing.operation_id,
+                    revision: existing.revision,
+                    replayed: true,
+                });
             }
             self.require_actor(actor_id)?;
             let actual = self.project_revision(&input.project_id)?.0;
@@ -3178,13 +3253,24 @@ impl SqliteStore {
     ) -> Result<MutationResult, StoreError> {
         self.execute_batch("BEGIN IMMEDIATE")?;
         let result = (|| {
-            if let Some(existing) = self.operation(operation_id)? {
-                return replay_mutation_operation(
-                    project_id,
-                    operation_id,
-                    request_digest,
-                    &existing,
-                );
+            if let Some(existing) = self.preflight_operation_replay(
+                project_id,
+                operation_id,
+                "dependency.remove",
+                actor_id,
+                None,
+                Some(expected_revision),
+                None,
+                None,
+                request_digest,
+                "dependency",
+                dependent_id,
+            )? {
+                return Ok(MutationResult {
+                    operation_id: existing.operation_id,
+                    revision: existing.revision,
+                    replayed: true,
+                });
             }
             self.require_actor(actor_id)?;
             let actual = self.project_revision(project_id)?.0;
@@ -3260,13 +3346,24 @@ impl SqliteStore {
     ) -> Result<MutationResult, StoreError> {
         self.execute_batch("BEGIN IMMEDIATE")?;
         let result = (|| {
-            if let Some(existing) = self.operation(operation_id)? {
-                return replay_mutation_operation(
-                    &input.project_id,
-                    operation_id,
-                    request_digest,
-                    &existing,
-                );
+            if let Some(existing) = self.preflight_operation_replay(
+                &input.project_id,
+                operation_id,
+                "work.hold.add",
+                actor_id,
+                None,
+                Some(expected_revision),
+                None,
+                None,
+                request_digest,
+                "hold",
+                &input.work_id,
+            )? {
+                return Ok(MutationResult {
+                    operation_id: existing.operation_id,
+                    revision: existing.revision,
+                    replayed: true,
+                });
             }
             self.require_actor(actor_id)?;
             let actual = self.project_revision(&input.project_id)?.0;
@@ -3357,18 +3454,24 @@ impl SqliteStore {
     ) -> Result<MutationResult, StoreError> {
         self.execute_batch("BEGIN IMMEDIATE")?;
         let result = (|| {
-            if let Some(existing) = self.operation(operation_id)? {
-                if existing.actor_id != actor_id || existing.command != "work.hold.resolve" {
-                    return Err(StoreError::Conflict(
-                        "operation actor or command differs".to_owned(),
-                    ));
-                }
-                return replay_mutation_operation(
-                    project_id,
-                    operation_id,
-                    request_digest,
-                    &existing,
-                );
+            if let Some(existing) = self.preflight_operation_replay(
+                project_id,
+                operation_id,
+                "work.hold.resolve",
+                actor_id,
+                None,
+                Some(expected_revision),
+                None,
+                None,
+                request_digest,
+                "hold",
+                hold_id,
+            )? {
+                return Ok(MutationResult {
+                    operation_id: existing.operation_id,
+                    revision: existing.revision,
+                    replayed: true,
+                });
             }
             if self.actor_context(actor_id)?.role != boreal_domain::ActorRole::Operator {
                 return Err(StoreError::Conflict(
@@ -3459,7 +3562,16 @@ impl SqliteStore {
         request_digest: &str,
         now: &str,
     ) -> Result<MutationResult, StoreError> {
-        let expected_revision = self.project_revision(project_id)?.0;
+        // An operation retry must use the revision captured by the original
+        // operation.  Re-reading the current project revision here would make
+        // an exact retry conflict after the first dependency mutation bumped
+        // the revision.  The checked path still performs the authoritative
+        // identity, digest, subject, and revision checks inside its write
+        // transaction.
+        let expected_revision = match self.operation(operation_id)? {
+            Some(existing) => existing.expected_revision,
+            None => Some(self.project_revision(project_id)?.0),
+        };
         self.add_dependency_operation_checked(
             project_id,
             prerequisite_id,
@@ -3467,7 +3579,7 @@ impl SqliteStore {
             actor_id,
             operation_id,
             request_digest,
-            Some(expected_revision),
+            expected_revision,
             now,
         )
     }
@@ -3486,20 +3598,27 @@ impl SqliteStore {
     ) -> Result<MutationResult, StoreError> {
         self.execute_batch("BEGIN IMMEDIATE")?;
         let result = (|| {
-            if let Some(existing) = self.operation(operation_id)? {
-                if existing.request_digest != request_digest {
-                    return Err(StoreError::Conflict(
-                        "operation request digest mismatch".to_owned(),
-                    ));
-                }
+            let current_revision = self.project_revision(project_id)?.0;
+            let expected_revision = expected_revision.unwrap_or(current_revision);
+            if let Some(existing) = self.preflight_operation_replay(
+                project_id,
+                operation_id,
+                "dependency.add",
+                actor_id,
+                None,
+                Some(expected_revision),
+                None,
+                None,
+                request_digest,
+                "dependency",
+                dependent_id,
+            )? {
                 return Ok(MutationResult {
-                    operation_id: operation_id.to_owned(),
+                    operation_id: existing.operation_id,
                     revision: existing.revision,
                     replayed: true,
                 });
             }
-            let current_revision = self.project_revision(project_id)?.0;
-            let expected_revision = expected_revision.unwrap_or(current_revision);
             check_expected_revision(current_revision, Some(expected_revision))?;
             self.add_dependency_in_transaction(project_id, prerequisite_id, dependent_id, now)?;
             let revision = self.bump_revision_in_transaction(project_id)?;
@@ -3807,23 +3926,19 @@ impl SqliteStore {
         source_version_id: Option<&str>,
         config_identity: &str,
     ) -> Result<ClaimResult, StoreError> {
-        if let Some(existing) = self.operation(operation_id)? {
-            return self.replay_claim(
-                project_id,
-                work_id,
-                actor_id,
-                harness_id,
-                session_id,
-                request_digest,
-                &existing,
-            );
-        }
-
         self.execute_batch("BEGIN IMMEDIATE")?;
         let result = (|| {
             // Re-read the operation after acquiring the write lock. This closes
             // the race where two retries both observed a missing operation.
-            if let Some(existing) = self.operation(operation_id)? {
+            if let Some(existing) = self.preflight_claim_replay(
+                project_id,
+                operation_id,
+                actor_id,
+                session_id,
+                attempt_id,
+                expected_revision,
+                request_digest,
+            )? {
                 return self.replay_claim(
                     project_id,
                     work_id,
@@ -4407,7 +4522,22 @@ impl SqliteStore {
         let request = request.borrow();
         self.execute_batch("BEGIN IMMEDIATE")?;
         let result = (|| {
-            if let Some(existing) = self.operation(&request.operation_id)? {
+            let command = format!("attempt.{}", mutation_name(&request.mutation));
+            if let Some(existing) = self.preflight_operation_replay(
+                &request.project_id,
+                &request.operation_id,
+                &command,
+                &request.actor_id,
+                request.session_id.as_deref(),
+                request
+                    .expected_project_revision
+                    .or(request.expected_work_revision),
+                Some(&request.attempt_id),
+                Some(request.fence),
+                &request.request_digest,
+                "attempt",
+                &request.attempt_id,
+            )? {
                 return self.replay_attempt_operation(request, &existing);
             }
 
@@ -5264,6 +5394,16 @@ impl SqliteStore {
                 "schema version 2 is missing required table work_item".to_owned(),
             ));
         }
+        if !self.table_exists("audit_event")? {
+            return Err(StoreError::Corrupt(
+                "schema version 2 is missing required table audit_event".to_owned(),
+            ));
+        }
+        if !self.audit_event_accepts("evidence.verifier.admitted")?
+            || !self.audit_event_accepts("close.completed")?
+        {
+            self.execute_batch(REPAIR_AUDIT_EVENT_VERIFIER_CHECK)?;
+        }
         if !self.table_has_column("work_item", "priority")? {
             self.execute_batch(
                 "ALTER TABLE work_item ADD COLUMN priority INTEGER NOT NULL DEFAULT 0
@@ -5278,6 +5418,22 @@ impl SqliteStore {
              CREATE INDEX IF NOT EXISTS attempt_session_current ON attempt(session_id, current, attempt_id);",
         )?;
         self.execute_batch(REPAIR_SCHEMA_TRIGGERS)
+    }
+
+    fn execute_migration_sql(&self, sql: &str) -> Result<(), StoreError> {
+        // The migration runner stages its ledger row in a short transaction
+        // before applying the target schema. Repair the legacy v2 base only
+        // when the runner enters that target-schema transaction; doing it in
+        // the staging transaction would make a later migration failure leave
+        // the repair committed. The explicit apply_schema/apply_work_model_v3
+        // paths own their repair transaction directly and do not pass through
+        // this marker.
+        if self.schema_version()? == SCHEMA_VERSION
+            && sql.contains("CREATE TABLE work_model_v3_meta")
+        {
+            self.repair_schema_v2()?;
+        }
+        self.execute_batch(sql)
     }
 
     pub fn schema_version(&self) -> Result<i64, StoreError> {
@@ -5467,6 +5623,122 @@ impl SqliteStore {
                 self.append_audit_event(&audit)
             }
         }
+    }
+
+    /// Admit a root operation at the same identity boundary used by the
+    /// operation journal.  The older root methods used a request digest-only
+    /// replay check, which allowed an operation ID to be reused with a
+    /// different actor, command, session, fence, or subject.  This helper is
+    /// deliberately read-only: callers invoke it after opening their caller-
+    /// owned transaction and before any semantic row mutation.
+    #[allow(clippy::too_many_arguments)]
+    fn preflight_operation_replay(
+        &self,
+        project_id: &str,
+        operation_id: &str,
+        command: &str,
+        actor_id: &str,
+        session_id: Option<&str>,
+        expected_revision: Option<u64>,
+        attempt_id: Option<&str>,
+        fence: Option<u64>,
+        request_digest: &str,
+        subject_type: &str,
+        subject_id: &str,
+    ) -> Result<Option<OperationRecord>, StoreError> {
+        let context = self.operation_identity_context(project_id)?;
+        let Some(existing) = self.operation(operation_id)? else {
+            return Ok(None);
+        };
+        if existing.project_id != project_id
+            || existing.command != command
+            || existing.actor_id != actor_id
+            || existing.session_id.as_deref() != session_id
+            || existing.expected_revision != expected_revision
+            || existing.attempt_id.as_deref() != attempt_id
+            || existing.fence != fence
+            || existing.request_digest != request_digest
+        {
+            return Err(StoreError::Conflict(format!(
+                "operation {operation_id} was already used with another immutable identity"
+            )));
+        }
+
+        if let Some(context) = context {
+            let identity = operations::OperationIdentity::from_record(
+                &existing,
+                Some((subject_type.to_owned(), subject_id.to_owned())),
+            );
+            operations::OperationJournal::new(self)
+                .replay_in_context(&context, &identity)?
+                .ok_or_else(|| {
+                    StoreError::Corrupt(
+                        "operation exists but identity-bound replay returned no result".to_owned(),
+                    )
+                })?;
+        } else if let Some(audit) = self.audit_event(operation_id)? {
+            if audit.subject_type != subject_type || audit.subject_id != subject_id {
+                return Err(StoreError::WrongSubject {
+                    expected: format!("{subject_type}/{subject_id}"),
+                    actual: format!("{}/{}", audit.subject_type, audit.subject_id),
+                });
+            }
+        }
+        Ok(Some(existing))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn preflight_claim_replay(
+        &self,
+        project_id: &str,
+        operation_id: &str,
+        actor_id: &str,
+        session_id: Option<&str>,
+        attempt_id: &str,
+        expected_revision: Option<u64>,
+        request_digest: &str,
+    ) -> Result<Option<OperationRecord>, StoreError> {
+        let context = self.operation_identity_context(project_id)?;
+        let Some(existing) = self.operation(operation_id)? else {
+            return Ok(None);
+        };
+        if existing.project_id != project_id
+            || existing.command != "work.claim"
+            || existing.actor_id != actor_id
+            || existing.session_id.as_deref() != session_id
+            || existing.expected_revision != expected_revision
+            || existing.attempt_id.as_deref() != Some(attempt_id)
+            || existing.request_digest != request_digest
+        {
+            return Err(StoreError::Conflict(format!(
+                "operation {operation_id} was already used with another immutable identity"
+            )));
+        }
+        let subject = existing.attempt_id.clone().ok_or_else(|| {
+            StoreError::Corrupt("claim operation has no attempt identity".to_owned())
+        })?;
+        if let Some(context) = context {
+            let identity = operations::OperationIdentity::from_record(
+                &existing,
+                Some(("attempt".to_owned(), subject)),
+            );
+            operations::OperationJournal::new(self)
+                .replay_in_context(&context, &identity)?
+                .ok_or_else(|| {
+                    StoreError::Corrupt(
+                        "claim operation exists but identity-bound replay returned no result"
+                            .to_owned(),
+                    )
+                })?;
+        } else if let Some(audit) = self.audit_event(operation_id)? {
+            if audit.subject_type != "attempt" || audit.subject_id != subject {
+                return Err(StoreError::WrongSubject {
+                    expected: format!("attempt/{subject}"),
+                    actual: format!("{}/{}", audit.subject_type, audit.subject_id),
+                });
+            }
+        }
+        Ok(Some(existing))
     }
 
     /// Appends an identity-bound operation and audit event inside a caller-owned
@@ -6021,13 +6293,22 @@ impl SqliteStore {
         let request = request.borrow();
         validate_receipt_request(request)?;
         let replay_digest = canonical_receipt_request(request)?;
-        if let Some(existing) = self.operation(&request.operation_id)? {
-            return self.replay_receipt_operation(request, &replay_digest, &existing);
-        }
 
         self.execute_batch("BEGIN IMMEDIATE")?;
         let result = (|| {
-            if let Some(existing) = self.operation(&request.operation_id)? {
+            if let Some(existing) = self.preflight_operation_replay(
+                &request.project_id,
+                &request.operation_id,
+                "receipt.insert",
+                &request.actor_id,
+                request.session_id.as_deref(),
+                request.expected_project_revision,
+                Some(&request.attempt_id),
+                Some(request.fence),
+                &replay_digest,
+                "receipt",
+                &request.receipt_id,
+            )? {
                 return self
                     .replay_receipt_operation(request, &replay_digest, &existing)
                     .map(|value| (value, None));
@@ -6225,23 +6506,26 @@ impl SqliteStore {
         request: impl Borrow<GateStateUpdateRequest>,
     ) -> Result<MutationResult, StoreError> {
         let request = request.borrow();
-        if let Some(existing) = self.operation(&request.operation_id)? {
-            return replay_mutation_operation(
-                &request.project_id,
-                &request.operation_id,
-                &request.request_digest,
-                &existing,
-            );
-        }
         self.execute_batch("BEGIN IMMEDIATE")?;
         let result = (|| {
-            if let Some(existing) = self.operation(&request.operation_id)? {
-                return replay_mutation_operation(
-                    &request.project_id,
-                    &request.operation_id,
-                    &request.request_digest,
-                    &existing,
-                );
+            if let Some(existing) = self.preflight_operation_replay(
+                &request.project_id,
+                &request.operation_id,
+                "gate.update",
+                &request.actor_id,
+                request.session_id.as_deref(),
+                request.expected_project_revision,
+                None,
+                None,
+                &request.request_digest,
+                "gate",
+                &request.gate_id,
+            )? {
+                return Ok(MutationResult {
+                    operation_id: existing.operation_id,
+                    revision: existing.revision,
+                    replayed: true,
+                });
             }
             check_expected_revision(
                 self.project_revision(&request.project_id)?.0,
@@ -6368,23 +6652,26 @@ impl SqliteStore {
         request: impl Borrow<ReviewInsertRequest>,
     ) -> Result<MutationResult, StoreError> {
         let request = request.borrow();
-        if let Some(existing) = self.operation(&request.operation_id)? {
-            return replay_mutation_operation(
-                &request.project_id,
-                &request.operation_id,
-                &request.request_digest,
-                &existing,
-            );
-        }
         self.execute_batch("BEGIN IMMEDIATE")?;
         let result = (|| {
-            if let Some(existing) = self.operation(&request.operation_id)? {
-                return replay_mutation_operation(
-                    &request.project_id,
-                    &request.operation_id,
-                    &request.request_digest,
-                    &existing,
-                );
+            if let Some(existing) = self.preflight_operation_replay(
+                &request.project_id,
+                &request.operation_id,
+                "review.insert",
+                &request.actor_id,
+                request.session_id.as_deref(),
+                request.expected_project_revision,
+                Some(&request.attempt_id),
+                Some(request.fence),
+                &request.request_digest,
+                "review",
+                &request.review_id,
+            )? {
+                return Ok(MutationResult {
+                    operation_id: existing.operation_id,
+                    revision: existing.revision,
+                    replayed: true,
+                });
             }
             check_expected_revision(
                 self.project_revision(&request.project_id)?.0,
@@ -6526,13 +6813,22 @@ impl SqliteStore {
         let request = request.borrow();
         validate_summary_request(request)?;
         let replay_digest = canonical_summary_request(request)?;
-        if let Some(existing) = self.operation(&request.operation_id)? {
-            return self.replay_summary_operation(request, &replay_digest, &existing);
-        }
 
         self.execute_batch("BEGIN IMMEDIATE")?;
         let result = (|| {
-            if let Some(existing) = self.operation(&request.operation_id)? {
+            if let Some(existing) = self.preflight_operation_replay(
+                &request.project_id,
+                &request.operation_id,
+                "summary.insert",
+                &request.actor_id,
+                request.session_id.as_deref(),
+                request.expected_project_revision,
+                Some(&request.attempt_id),
+                Some(request.fence),
+                &replay_digest,
+                "summary",
+                &request.summary_id,
+            )? {
                 return self.replay_summary_operation(request, &replay_digest, &existing);
             }
             check_expected_revision(
@@ -6691,12 +6987,21 @@ impl SqliteStore {
         request: impl Borrow<CloseIntentRequest>,
     ) -> Result<CloseIntentResult, StoreError> {
         let request = request.borrow();
-        if let Some(existing) = self.operation(&request.operation_id)? {
-            return self.replay_close_operation(request, &existing);
-        }
         self.execute_batch("BEGIN IMMEDIATE")?;
         let result = (|| {
-            if let Some(existing) = self.operation(&request.operation_id)? {
+            if let Some(existing) = self.preflight_operation_replay(
+                &request.project_id,
+                &request.operation_id,
+                "close.create",
+                &request.actor_id,
+                request.session_id.as_deref(),
+                request.expected_project_revision,
+                Some(&request.attempt_id),
+                Some(request.fence),
+                &request.request_digest,
+                "work",
+                &request.work_id,
+            )? {
                 return self.replay_close_operation(request, &existing);
             }
             self.validate_close_subject(request)?;
@@ -6785,12 +7090,21 @@ impl SqliteStore {
         request: impl Borrow<CloseIntentRequest>,
     ) -> Result<CloseIntentResult, StoreError> {
         let request = request.borrow();
-        if let Some(existing) = self.operation(&request.operation_id)? {
-            return self.replay_close_operation(request, &existing);
-        }
         self.execute_batch("BEGIN IMMEDIATE")?;
         let result = (|| {
-            if let Some(existing) = self.operation(&request.operation_id)? {
+            if let Some(existing) = self.preflight_operation_replay(
+                &request.project_id,
+                &request.operation_id,
+                "close.finalize",
+                &request.actor_id,
+                request.session_id.as_deref(),
+                request.expected_project_revision,
+                Some(&request.attempt_id),
+                Some(request.fence),
+                &request.request_digest,
+                "work",
+                &request.work_id,
+            )? {
                 return self.replay_close_operation(request, &existing);
             }
             check_expected_revision(
@@ -6938,12 +7252,21 @@ impl SqliteStore {
                 "close intent rejection code must not be empty".to_owned(),
             ));
         }
-        if let Some(existing) = self.operation(&request.operation_id)? {
-            return self.replay_close_operation(request, &existing);
-        }
         self.execute_batch("BEGIN IMMEDIATE")?;
         let result = (|| {
-            if let Some(existing) = self.operation(&request.operation_id)? {
+            if let Some(existing) = self.preflight_operation_replay(
+                &request.project_id,
+                &request.operation_id,
+                "close.reject",
+                &request.actor_id,
+                request.session_id.as_deref(),
+                request.expected_project_revision,
+                Some(&request.attempt_id),
+                Some(request.fence),
+                &request.request_digest,
+                "work",
+                &request.work_id,
+            )? {
                 return self.replay_close_operation(request, &existing);
             }
             check_expected_revision(
@@ -7913,7 +8236,34 @@ impl SqliteStore {
                 )));
             }
         }
+        if !self.audit_event_accepts("evidence.verifier.admitted")? {
+            return Err(StoreError::Corrupt(MISSING_VERIFIER_AUDIT_EVENT.to_owned()));
+        }
+        if !self.audit_event_accepts("close.completed")? {
+            return Err(StoreError::Corrupt(
+                MISSING_CLOSE_COMPLETED_AUDIT_EVENT.to_owned(),
+            ));
+        }
         Ok(())
+    }
+
+    fn audit_event_accepts(&self, event_type: &str) -> Result<bool, StoreError> {
+        let mut statement = self.prepare(
+            "SELECT sql FROM sqlite_master
+             WHERE type = 'table' AND name = 'audit_event'",
+        )?;
+        if statement.step()? != SQLITE_ROW {
+            return Ok(false);
+        }
+        let definition = statement.column_text(0)?.to_ascii_lowercase();
+        Ok(definition.contains(&format!("'{event_type}'").to_ascii_lowercase()))
+    }
+
+    fn verify_v2_identity_for_migration(&self) -> Result<(), StoreError> {
+        match self.verify_schema_contract() {
+            Err(StoreError::Corrupt(message)) if is_repairable_v2_contract_gap(&message) => Ok(()),
+            result => result,
+        }
     }
 
     fn schema_object_exists(&self, object_type: &str, name: &str) -> Result<bool, StoreError> {
@@ -8005,7 +8355,7 @@ impl MigrationBackend for SqliteStore {
 
         match version {
             SCHEMA_VERSION => {
-                self.verify_schema_contract()?;
+                self.verify_v2_identity_for_migration()?;
                 Ok(SchemaIdentity {
                     schema_id: PRODUCTION_SCHEMA_ID.to_owned(),
                     schema_version: SCHEMA_VERSION,
@@ -8154,7 +8504,7 @@ impl MigrationBackend for SqliteStore {
     }
 
     fn execute(&mut self, sql: &str) -> Result<(), Self::Error> {
-        self.execute_batch(sql)
+        self.execute_migration_sql(sql)
     }
 
     fn read_ledger(&mut self) -> Result<Vec<MigrationLedgerEntry>, Self::Error> {
@@ -8245,7 +8595,7 @@ impl MigrationBackend for &SqliteStore {
     }
 
     fn execute(&mut self, sql: &str) -> Result<(), Self::Error> {
-        (*self).execute_batch(sql)
+        (*self).execute_migration_sql(sql)
     }
 
     fn read_ledger(&mut self) -> Result<Vec<MigrationLedgerEntry>, Self::Error> {
@@ -8294,7 +8644,7 @@ fn store_schema_identity(store: &SqliteStore) -> Result<SchemaIdentity, StoreErr
 
     match version {
         SCHEMA_VERSION => {
-            store.verify_schema_contract()?;
+            store.verify_v2_identity_for_migration()?;
             Ok(SchemaIdentity {
                 schema_id: PRODUCTION_SCHEMA_ID.to_owned(),
                 schema_version: SCHEMA_VERSION,
@@ -8531,7 +8881,11 @@ fn production_migration_plan() -> Result<MigrationPlan, MigrationError> {
         "work-model-2-to-3",
         SCHEMA_VERSION,
         WORK_MODEL_SCHEMA_VERSION,
-        runner_schema_sql(WORK_MODEL_SCHEMA_V3_SQL),
+        format!(
+            "{}\n{}",
+            runner_schema_sql(WORK_MODEL_SCHEMA_V3_SQL),
+            PRODUCTION_EXTERNAL_JOB_IDENTITY_TRIGGER_SQL
+        ),
         r#"
 CREATE TEMP TABLE boreal_production_precondition (sentinel INTEGER NOT NULL CHECK (sentinel = 1));
 INSERT INTO boreal_production_precondition
@@ -8604,6 +8958,24 @@ fn map_migration_error(error: MigrationError) -> StoreError {
 fn is_production_schema_request(schema_sql: &str) -> bool {
     let requested = schema_sql.trim();
     requested == LEGACY_SCHEMA_V2_SQL.trim() || requested == PRODUCTION_SCHEMA_SQL.trim()
+}
+
+fn is_repairable_v2_contract_gap(message: &str) -> bool {
+    matches!(
+        message,
+        "schema version 2 is missing required table work_hold"
+            | "schema version 2 is missing required table evidence_execution"
+            | "schema version 2 table work_item is missing required column priority"
+            | "schema version 2 is missing required index work_item_project_id"
+            | "schema version 2 is missing required index attempt_work_current"
+            | "schema version 2 is missing required index attempt_session_current"
+            | "schema version 2 is missing required index work_hold_active"
+            | "schema version 2 is missing required index evidence_execution_subject"
+            | "schema version 2 is missing required trigger work_parent_retype_guard"
+            | "schema version 2 is missing required trigger dependency_no_cycle"
+            | MISSING_VERIFIER_AUDIT_EVENT
+            | MISSING_CLOSE_COMPLETED_AUDIT_EVENT
+    )
 }
 
 fn is_canonical_production_schema_request(schema_sql: &str) -> bool {
@@ -9047,42 +9419,6 @@ fn validate_session_registration_request(
         }
     }
     Ok(())
-}
-
-fn validate_session_registration_operation(
-    request: &SessionRegistrationRequest,
-    operation: &OperationRecord,
-) -> Result<(), StoreError> {
-    if operation.command != "session.register"
-        || operation.project_id != request.project_id
-        || operation.actor_id != request.actor_id
-        || operation.session_id.as_deref() != Some(request.session_id.as_str())
-        || operation.request_digest != request.request_digest
-    {
-        return Err(StoreError::Conflict(format!(
-            "operation {} was already used with another request",
-            request.operation_id
-        )));
-    }
-    Ok(())
-}
-
-fn replay_mutation_operation(
-    project_id: &str,
-    operation_id: &str,
-    request_digest: &str,
-    operation: &OperationRecord,
-) -> Result<MutationResult, StoreError> {
-    if operation.project_id != project_id || operation.request_digest != request_digest {
-        return Err(StoreError::Conflict(format!(
-            "operation {operation_id} was already used with another request"
-        )));
-    }
-    Ok(MutationResult {
-        operation_id: operation.operation_id.clone(),
-        revision: operation.revision,
-        replayed: true,
-    })
 }
 
 fn validate_receipt_request(request: &ReceiptInsertRequest) -> Result<(), StoreError> {

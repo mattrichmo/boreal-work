@@ -6,8 +6,8 @@
 //! a process restart.  It intentionally does not copy blobs into SQLite.
 
 use super::{
-    json_object, MutationResult, OperationOutcome, OperationRecord, SqliteStore, StoreError,
-    SQLITE_ROW,
+    json_object, AuditEventRecord, MutationResult, OperationOutcome, OperationRecord, SqliteStore,
+    StoreError, SQLITE_ROW,
 };
 use serde_json::json;
 
@@ -64,17 +64,24 @@ impl SqliteStore {
         validate_registration(input)?;
         self.execute_batch("BEGIN IMMEDIATE")?;
         let result = (|| {
-            if let Some(existing) = self.operation(&input.operation_id)? {
-                if existing.command != "source.register"
-                    || existing.project_id != input.project_id
-                    || existing.actor_id != input.actor_id
-                    || existing.request_digest != input.request_digest
-                {
-                    return Err(StoreError::Conflict(format!(
-                        "operation {} was already used with another source registration",
-                        input.operation_id
-                    )));
-                }
+            // Replay must be resolved against the authenticated project and
+            // immutable request identity before the source row is read or
+            // written. Canonical bound projects take the identity-aware
+            // journal path; noncanonical schema-v2 fixtures retain the
+            // compatibility subject check in this shared root helper.
+            if let Some(existing) = self.preflight_operation_replay(
+                &input.project_id,
+                &input.operation_id,
+                "source.register",
+                &input.actor_id,
+                None,
+                None,
+                None,
+                None,
+                &input.request_digest,
+                "project",
+                &input.project_id,
+            )? {
                 let source_id =
                     super::json_string_field(&existing.result_json, "source_version_id")?;
                 let source = self
@@ -137,7 +144,7 @@ impl SqliteStore {
                 "source_version_id": input.source_version_id,
                 "content_digest": input.content_digest,
             }))?;
-            self.append_operation(&OperationRecord {
+            let operation = OperationRecord {
                 operation_id: input.operation_id.clone(),
                 project_id: input.project_id.clone(),
                 command: "source.register".to_owned(),
@@ -156,10 +163,27 @@ impl SqliteStore {
                 revision,
                 created_at: input.captured_at.clone(),
                 completed_at: Some(input.captured_at.clone()),
-            })?;
-            // The v2 audit enum predates source registration.  The operation
-            // row is the authoritative durable source-registration record;
-            // do not mislabel it as a work or evidence event.
+            };
+            // The v2 audit vocabulary predates source registration. Keep the
+            // attribution explicit and bounded under the registered generic
+            // repair event until a versioned source-specific event is added
+            // by the schema/protocol owner.
+            self.append_operation_audit_in_transaction(
+                operation,
+                AuditEventRecord {
+                    project_id: input.project_id.clone(),
+                    revision,
+                    operation_id: input.operation_id.clone(),
+                    event_type: "repair.correction".to_owned(),
+                    subject_type: "project".to_owned(),
+                    subject_id: input.project_id.clone(),
+                    actor_id: input.actor_id.clone(),
+                    session_id: None,
+                    fence: None,
+                    as_of: input.captured_at.clone(),
+                    payload_json: payload,
+                },
+            )?;
             Ok(SourceVersionRegistrationResult {
                 mutation: MutationResult {
                     operation_id: input.operation_id.clone(),
@@ -314,5 +338,112 @@ fn ensure_same_source(
             "source version {} has different immutable metadata",
             input.source_version_id
         )))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{SourceVersionRegistrationInput, SqliteStore};
+    use crate::identity::{DatabaseIdentity, IdentityStore, WorkspaceBinding};
+    use crate::StoreError;
+
+    const PRODUCTION_SCHEMA: &str = include_str!("../../../project/spec/schema-production.sql");
+
+    fn bound_store() -> SqliteStore {
+        let store =
+            SqliteStore::open_in_memory(PRODUCTION_SCHEMA).expect("production schema opens");
+        store
+            .create_project("knowledge-project", "unix-ms:0")
+            .expect("project creates");
+        store
+            .ensure_actor(
+                "knowledge-agent",
+                "agent",
+                "credential-knowledge",
+                "Knowledge Agent",
+                "unix-ms:0",
+            )
+            .expect("actor creates");
+        IdentityStore::new(&store)
+            .install(
+                &DatabaseIdentity::new("knowledge-database", 1).expect("database identity"),
+                "unix-ms:1",
+            )
+            .expect("identity schema installs");
+        IdentityStore::new(&store)
+            .bind_project(
+                "knowledge-project",
+                &WorkspaceBinding::new(
+                    "/tmp/boreal-knowledge",
+                    "/tmp/boreal-knowledge",
+                    "sha256:knowledge-binding",
+                )
+                .expect("workspace binding"),
+                "unix-ms:1",
+            )
+            .expect("project binds");
+        store
+    }
+
+    fn input(operation_id: &str, request_digest: &str) -> SourceVersionRegistrationInput {
+        SourceVersionRegistrationInput {
+            operation_id: operation_id.to_owned(),
+            project_id: "knowledge-project".to_owned(),
+            actor_id: "knowledge-agent".to_owned(),
+            source_version_id: "source-knowledge-1".to_owned(),
+            origin: "notes/knowledge.md".to_owned(),
+            access_scope: "project".to_owned(),
+            content_digest: "sha256:knowledge-content".to_owned(),
+            media_type: "text/markdown".to_owned(),
+            byte_count: 17,
+            captured_at: "unix-ms:2".to_owned(),
+            parser_identity: "parser/knowledge-1".to_owned(),
+            availability: "available".to_owned(),
+            citation_json: "[]".to_owned(),
+            request_digest: request_digest.to_owned(),
+        }
+    }
+
+    #[test]
+    fn source_registration_uses_identity_bound_audit_replay_boundary() {
+        let store = bound_store();
+        let request = input("source-knowledge-op", "sha256:knowledge-request");
+
+        let first = store
+            .register_source_version(&request)
+            .expect("source registration commits");
+        assert!(!first.mutation.replayed);
+        let audit = store
+            .audit_event(&request.operation_id)
+            .expect("audit readback succeeds")
+            .expect("source registration has audit");
+        assert_eq!(audit.project_id, request.project_id);
+        assert_eq!(audit.operation_id, request.operation_id);
+        assert_eq!(audit.actor_id, request.actor_id);
+        assert_eq!(audit.event_type, "repair.correction");
+        assert_eq!(audit.subject_type, "project");
+        assert_eq!(audit.subject_id, request.project_id);
+        assert!(audit.payload_json.contains("source-knowledge-1"));
+
+        let replay = store
+            .register_source_version(&request)
+            .expect("exact retry replays");
+        assert!(replay.mutation.replayed);
+        assert_eq!(replay.mutation.revision, first.mutation.revision);
+        assert_eq!(store.project_revision(&request.project_id).unwrap().0, 1);
+
+        let mut changed = request.clone();
+        changed.request_digest = "sha256:changed-request".to_owned();
+        assert!(matches!(
+            store.register_source_version(&changed),
+            Err(StoreError::Conflict(message)) if message.contains("immutable identity")
+        ));
+        assert_eq!(
+            store
+                .list_source_versions(&request.project_id, 10, 0)
+                .unwrap()
+                .len(),
+            1
+        );
     }
 }

@@ -1,7 +1,8 @@
 # PF-S03-T08 pure-domain oracle
 
 The executable target `crates/domain/tests/production_properties.rs` is bound
-to the accepted policy artifacts rather than to an implementation branch:
+to the accepted policy artifacts and the T08-owned source record
+`PF-S03-T08-ORACLE-SOURCE.md`, rather than to an implementation branch:
 
 | Identity | Value |
 | --- | --- |
@@ -9,7 +10,7 @@ to the accepted policy artifacts rather than to an implementation branch:
 | Transition contract | `boreal.work-transition/2` |
 | Fixture revision | `m02-candidate.1` |
 | Accepted contract source | `784a41b3802c29a76721c55eef2e9493283396c2` |
-| Input HEAD for repair attempt 3 | `b543d41008301f7745c899e95f5cb7203ca64917` |
+| Current committed source revision at attempt-4 start | `0d9611a017d5dc167e92fe79e8d65756fbac2d5a` |
 | Contract manifest SHA-256 | `131a0f2028629dab2ac372159cd19d67d33326e23085a8f1956fcbed3a155aa` |
 | Status/actions SHA-256 | `b2b41ffd640811118e2c8f0ac0ba9c60d79cc46ccc73135cdcf609ae384b3a94` |
 | Transition table SHA-256 | `4a22bceb49b8d40d96a872f2ae3aed8b79a81d5636339c609914a05b3a2a9d38` |
@@ -41,14 +42,29 @@ look like a passing property run.
   expiry stability, terminal stability, and explicit closed/cancelled reopen
   transitions are covered.
 - The transition crosswalk names every normative `T01`–`T18` and `I01`–`I15`
-  vector. Pure transitions are exercised through public domain functions;
-  service-only operation identity, revision, audit, close-intent, and external
-  resource rows remain explicitly labeled as service boundaries.
+  vector and checks that each ID exists in the normative transition table.
+  Each pure-domain row executes a distinct transition, status, action,
+  deadline, review, receipt, or dependency assertion. In particular, I04
+  denies a claim while retaining the incumbent fenced attempt, I06 rejects
+  self-review while accepting an independent reviewer, and I08 rejects
+  complete/verified/cancelled prerequisites with the typed unmet reason while
+  retaining each raw observation. Service-only operation identity, revision,
+  audit, close-intent, replay, and external-resource rows remain explicitly
+  bounded rather than simulated.
 - Close-only dependency vectors accept only an exact accepted closed identity
   and proof generation. Complete, verified, cancelled, failed, unaccepted,
   revoked, mismatched, unreadable, corrupt, stale, invalid-revision, and
   out-of-window waiver observations remain unmet while raw observations are
   retained.
+- Schedule semantics use the existing pure-domain decision values at before,
+  equality, and activation boundaries. No public status/3 serializer is
+  introduced or advertised; status/2 compatibility remains `queued` plus the
+  scheduled-start reason and a non-claimable action before activation.
+
+If coordinator integration changes the committed `HEAD` or any bound bytes,
+the source record's `current_source_revision` and affected `artifact::`
+hashes must be regenerated, then the focused target and attempt-4 evidence
+must be rerun on that exact tree.
 
 This is pure-domain evidence only. It does not claim store transactions,
 authenticated service behavior, operation replay/readback, genuine verifier

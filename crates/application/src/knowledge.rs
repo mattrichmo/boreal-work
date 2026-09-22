@@ -16,8 +16,11 @@
 use std::{fmt, path::Path};
 
 use boreal_memory::{
-    rebuild_index, Citation as MemoryCitation, Draft, DraftState, IndexError, MemoryError,
-    MemoryIndex, PublicationReceipt, PublishError, Publisher, RetrievalQuery, RetrievalResponse,
+    publication_identity, rebuild_index, Citation as MemoryCitation, Draft, DraftState, IndexError,
+    MemoryError, MemoryIndex, PublicationJobAcquisition, PublicationJobOutcome, PublicationJobPort,
+    PublicationJobReadback, PublicationJobRecord, PublicationJobRequest, PublicationJobState,
+    PublicationReceipt, PublicationState, PublishError, Publisher, RetrievalQuery,
+    RetrievalResponse,
 };
 use boreal_migration::{
     content_digest as migration_content_digest, export_json, import_json, import_legacy_json,
@@ -33,11 +36,17 @@ use boreal_source::{
 use serde_json::json;
 
 use boreal_store::{
+    identity::IdentityContext,
+    jobs::{ExternalJobInput, ExternalJobRecord},
     SourceVersionRecord, SourceVersionRegistrationInput, SourceVersionRegistrationResult,
     SqliteStore,
 };
 
-use crate::{canonical_request_digest, sha256_content_digest};
+use crate::{
+    canonical_request_digest, sha256_content_digest, ExternalEffectAcquisition,
+    ExternalEffectAdapter, ExternalEffectReadback, ExternalEffectRequest, ExternalEffectResolution,
+    ExternalJobKind,
+};
 
 /// A stable description of how far a knowledge operation reached.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -154,6 +163,14 @@ pub struct MemoryReviewInput {
 pub struct MemoryPublishInput {
     pub operation_id: String,
     pub expected_manifest_identity: Option<String>,
+    pub actor_id: String,
+    pub session_id: Option<String>,
+    pub deadline: Option<String>,
+    pub created_at: String,
+    pub started_at: String,
+    pub observed_at: String,
+    pub source_identity: Option<String>,
+    pub config_identity: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -169,7 +186,18 @@ pub struct ReviewedMemory {
 pub struct MemoryPublicationResult {
     pub operation: KnowledgeOperation,
     pub provenance: KnowledgeProvenance,
-    pub receipt: PublicationReceipt,
+    pub state: MemoryPublicationState,
+    pub job: PublicationJobRecord,
+    pub receipt: Option<PublicationReceipt>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MemoryPublicationState {
+    Pending,
+    ReadbackRequired,
+    Reconciled,
+    Rejected,
+    Failed,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -644,40 +672,129 @@ impl<'a> KnowledgeApplication<'a> {
 
     pub fn publish_memory(
         &self,
+        store: &SqliteStore,
+        identity: &IdentityContext,
         publisher: &Publisher,
         reviewed: &ReviewedMemory,
         input: MemoryPublishInput,
     ) -> Result<MemoryPublicationResult, KnowledgeError> {
         require_operation(&input.operation_id)?;
+        if identity.project_id != reviewed.draft.project_id {
+            return Err(KnowledgeError::Invalid(
+                "memory publication identity does not match the reviewed project".to_owned(),
+            ));
+        }
         if !reviewed.accepted || reviewed.draft.state != DraftState::Accepted {
             return Err(KnowledgeError::Invalid(
                 "only an accepted memory review may be published".to_owned(),
             ));
         }
-        let receipt = publisher.publish_with_expected_base(
-            &reviewed.draft,
-            &input.operation_id,
-            input.expected_manifest_identity.as_deref(),
-        )?;
+        let expected_identity = publication_identity(&reviewed.draft, &input.operation_id)
+            .map_err(PublishError::from)?;
+        let memory_root_identity = publisher.root().path().to_string_lossy().into_owned();
+        let source_identity = input.source_identity.clone().or_else(|| {
+            reviewed
+                .provenance
+                .source_version_id
+                .clone()
+                .or_else(|| reviewed.provenance.source_digest.clone())
+        });
+        let request_digest = canonical_request_digest(
+            "memory.publish/v2",
+            json!({
+                "project_id": reviewed.draft.project_id,
+                "entry_id": reviewed.draft.entry_id,
+                "content_digest": expected_identity.content_digest,
+                "manifest_identity": expected_identity.manifest_identity,
+                "memory_root_identity": memory_root_identity,
+                "expected_manifest_identity": input.expected_manifest_identity,
+                "review_operation_id": reviewed.operation.operation_id,
+                "actor_id": input.actor_id,
+                "session_id": input.session_id,
+                "deadline": input.deadline,
+                "created_at": input.created_at,
+                "started_at": input.started_at,
+                "observed_at": input.observed_at,
+                "source_identity": source_identity,
+                "config_identity": input.config_identity,
+            }),
+        );
+        let request = PublicationJobRequest {
+            project_id: reviewed.draft.project_id.clone(),
+            operation_id: input.operation_id.clone(),
+            request_digest: request_digest.clone(),
+            entry_id: reviewed.draft.entry_id.clone(),
+            content_digest: expected_identity.content_digest.clone(),
+            manifest_identity: expected_identity.manifest_identity.clone(),
+            memory_root_identity,
+            actor_id: input.actor_id.clone(),
+            session_id: input.session_id.clone(),
+            source_identity,
+            config_identity: input.config_identity.clone(),
+            deadline: input.deadline.clone(),
+            created_at: input.created_at.clone(),
+        };
+        let duplicate = store
+            .external_job_by_operation_with_identity(identity, &input.operation_id)?
+            .is_some();
+        let jobs = StorePublicationJobPort::new(store, identity, input.observed_at.clone());
+        let outcome = publisher
+            .publish_with_durable_job(
+                &jobs,
+                &request,
+                &input.started_at,
+                &input.observed_at,
+                &reviewed.draft,
+                input.expected_manifest_identity.as_deref(),
+            )
+            .map_err(KnowledgeError::Invalid)?;
+        let job = outcome.record().clone();
         let mut provenance = reviewed.provenance.clone();
-        provenance.git_revision = Some(receipt.git_revision.clone());
-        provenance.content_digest = Some(receipt.identity.content_digest.clone());
+        provenance.content_digest = Some(request.content_digest.clone());
+        if let Some(git_revision) = job.git_revision.clone() {
+            provenance.git_revision = Some(git_revision);
+        }
+        let (state, receipt) = match outcome {
+            PublicationJobOutcome::Reconciled(record) => {
+                let git_revision = record.git_revision.clone().ok_or_else(|| {
+                    KnowledgeError::Invalid(
+                        "reconciled memory publication has no Git revision".to_owned(),
+                    )
+                })?;
+                let receipt = PublicationReceipt {
+                    state: PublicationState::Published,
+                    identity: boreal_memory::PublicationIdentity {
+                        project_id: request.project_id.clone(),
+                        entry_id: request.entry_id.clone(),
+                        content_digest: request.content_digest.clone(),
+                        operation_id: request.operation_id.clone(),
+                        manifest_identity: request.manifest_identity.clone(),
+                    },
+                    git_revision,
+                    duplicate,
+                };
+                (MemoryPublicationState::Reconciled, Some(receipt))
+            }
+            PublicationJobOutcome::Pending(_) => (MemoryPublicationState::Pending, None),
+            PublicationJobOutcome::ReadbackRequired(_) => {
+                (MemoryPublicationState::ReadbackRequired, None)
+            }
+            PublicationJobOutcome::Rejected(_) => (MemoryPublicationState::Rejected, None),
+            PublicationJobOutcome::Failed(_) => (MemoryPublicationState::Failed, None),
+        };
         Ok(MemoryPublicationResult {
             operation: KnowledgeOperation {
                 operation_id: input.operation_id,
-                request_digest: canonical_request_digest(
-                    "memory.publish/v1",
-                    json!({
-                        "project_id": reviewed.draft.project_id,
-                        "entry_id": reviewed.draft.entry_id,
-                        "content_digest": receipt.identity.content_digest,
-                        "expected_manifest_identity": input.expected_manifest_identity,
-                        "review_operation_id": reviewed.operation.operation_id,
-                    }),
-                ),
-                durability: KnowledgeDurability::GitCommit,
+                request_digest,
+                durability: if state == MemoryPublicationState::Reconciled {
+                    KnowledgeDurability::GitCommit
+                } else {
+                    KnowledgeDurability::InMemory
+                },
             },
             provenance,
+            state,
+            job,
             receipt,
         })
     }
@@ -885,6 +1002,305 @@ impl<'a> KnowledgeApplication<'a> {
                 "live_store_materialization_requires_store_adapter".to_owned()
             ],
         })
+    }
+}
+
+/// Store-backed implementation of the memory crate's publication port.
+///
+/// The memory crate owns the Git callback, while this adapter owns the
+/// identity-bound durable admission/readback record.  Keeping this bridge in
+/// the application crate prevents a publication caller from selecting the
+/// legacy store API or invoking Git before the external job is admitted.
+struct StorePublicationJobPort<'a> {
+    store: &'a SqliteStore,
+    identity: &'a IdentityContext,
+    adapter: ExternalEffectAdapter<'a>,
+    observed_at: String,
+}
+
+impl<'a> StorePublicationJobPort<'a> {
+    fn new(store: &'a SqliteStore, identity: &'a IdentityContext, observed_at: String) -> Self {
+        Self {
+            store,
+            identity,
+            adapter: ExternalEffectAdapter::new_with_identity(store, identity),
+            observed_at,
+        }
+    }
+
+    fn external_request(request: &PublicationJobRequest) -> ExternalEffectRequest {
+        ExternalEffectRequest {
+            job_id: request.operation_id.clone(),
+            operation_id: request.operation_id.clone(),
+            project_id: request.project_id.clone(),
+            subject_type: "project".to_owned(),
+            subject_id: request.project_id.clone(),
+            kind: ExternalJobKind::MemoryPublication.as_str().to_owned(),
+            request_digest: request.request_digest.clone(),
+            source_identity: request.source_identity.clone(),
+            config_identity: request.config_identity.clone(),
+            actor_id: request.actor_id.clone(),
+            session_id: request.session_id.clone(),
+            deadline: request.deadline.clone(),
+            created_at: request.created_at.clone(),
+        }
+    }
+
+    fn store_input(request: &PublicationJobRequest) -> ExternalJobInput {
+        let external = Self::external_request(request);
+        ExternalJobInput {
+            job_id: external.job_id,
+            operation_id: external.operation_id,
+            project_id: external.project_id,
+            subject_type: external.subject_type,
+            subject_id: external.subject_id,
+            kind: external.kind,
+            request_digest: external.request_digest,
+            source_identity: external.source_identity,
+            config_identity: external.config_identity,
+            actor_id: external.actor_id,
+            session_id: external.session_id,
+            deadline: external.deadline,
+            created_at: external.created_at,
+        }
+    }
+
+    fn record(
+        &self,
+        request: &PublicationJobRequest,
+        record: &ExternalJobRecord,
+    ) -> Result<PublicationJobRecord, String> {
+        let external = Self::external_request(request);
+        if record.job_id != external.job_id
+            || record.operation_id != external.operation_id
+            || record.project_id != external.project_id
+            || record.subject_type != external.subject_type
+            || record.subject_id != external.subject_id
+            || record.kind != external.kind
+            || record.request_digest != external.request_digest
+            || record.source_identity != external.source_identity
+            || record.config_identity != external.config_identity
+            || record.actor_id != external.actor_id
+            || record.session_id != external.session_id
+            || record.deadline != external.deadline
+        {
+            return Err(
+                "memory publication external-job identity does not match the request".to_owned(),
+            );
+        }
+        let state = match record.stage.as_str() {
+            "registered" => PublicationJobState::Registered,
+            "admitted" => PublicationJobState::Admitted,
+            "running" => PublicationJobState::Running,
+            "side_effect_started" => PublicationJobState::SideEffectStarted,
+            "side_effect_finished" => PublicationJobState::SideEffectFinished,
+            "readback_required" => PublicationJobState::ReadbackRequired,
+            "committed" => PublicationJobState::Committed,
+            "reconciled" => PublicationJobState::Reconciled,
+            "rejected" => PublicationJobState::Rejected,
+            "failed" => PublicationJobState::Failed,
+            "cancel_requested" => PublicationJobState::CancelRequested,
+            other => return Err(format!("unsupported memory publication job stage: {other}")),
+        };
+        let git_revision = record
+            .side_effect_ref
+            .as_deref()
+            .and_then(|reference| reference.strip_prefix("git:"))
+            .map(str::to_owned);
+        Ok(PublicationJobRecord {
+            project_id: request.project_id.clone(),
+            operation_id: request.operation_id.clone(),
+            request_digest: request.request_digest.clone(),
+            entry_id: request.entry_id.clone(),
+            content_digest: request.content_digest.clone(),
+            manifest_identity: request.manifest_identity.clone(),
+            memory_root_identity: request.memory_root_identity.clone(),
+            state,
+            side_effect_ref: record.side_effect_ref.clone(),
+            git_revision,
+            result_digest: record.result_digest.clone(),
+            error: record.error_message.clone(),
+        })
+    }
+
+    fn resolution_record(
+        &self,
+        request: &PublicationJobRequest,
+        resolution: &ExternalEffectResolution,
+    ) -> Result<PublicationJobRecord, String> {
+        self.record(request, resolution.record())
+    }
+
+    fn store_error(error: boreal_store::StoreError) -> String {
+        error.to_string()
+    }
+}
+
+impl PublicationJobPort for StorePublicationJobPort<'_> {
+    fn register(&self, request: &PublicationJobRequest) -> Result<PublicationJobRecord, String> {
+        let registration = self
+            .store
+            .register_external_job_with_identity(self.identity, &Self::store_input(request))
+            .map_err(Self::store_error)?;
+        let record = self.record(request, &registration.job)?;
+        if record.state == PublicationJobState::Registered {
+            self.adapter
+                .admit(&Self::external_request(request))
+                .map_err(Self::store_error)?;
+        }
+        Ok(record)
+    }
+
+    fn acquire(
+        &self,
+        request: &PublicationJobRequest,
+        started_at: &str,
+    ) -> Result<PublicationJobAcquisition, String> {
+        match self
+            .adapter
+            .start_acquisition(&request.project_id, &request.operation_id, started_at)
+            .map_err(Self::store_error)?
+        {
+            ExternalEffectAcquisition::Won(record) => Ok(PublicationJobAcquisition::Won(
+                self.record(request, &record)?,
+            )),
+            ExternalEffectAcquisition::AlreadyRunning(record) => Ok(
+                PublicationJobAcquisition::AlreadyRunning(self.record(request, &record)?),
+            ),
+            ExternalEffectAcquisition::Pending(record) => Ok(PublicationJobAcquisition::Pending(
+                self.record(request, &record)?,
+            )),
+            ExternalEffectAcquisition::Terminal(resolution) => Ok(
+                PublicationJobAcquisition::Terminal(self.resolution_record(request, &resolution)?),
+            ),
+            ExternalEffectAcquisition::Conflict { current, reason } => {
+                Ok(PublicationJobAcquisition::Conflict {
+                    current: current
+                        .as_ref()
+                        .map(|record| self.record(request, record))
+                        .transpose()?,
+                    reason,
+                })
+            }
+        }
+    }
+
+    fn mark_readback_required(
+        &self,
+        request: &PublicationJobRequest,
+        side_effect_ref: &str,
+    ) -> Result<PublicationJobRecord, String> {
+        self.adapter
+            .mark_side_effect_started(
+                &request.project_id,
+                &request.operation_id,
+                side_effect_ref,
+                &self.observed_at,
+            )
+            .map_err(Self::store_error)?;
+        let resolution = self
+            .adapter
+            .mark_readback_required(
+                &request.project_id,
+                &request.operation_id,
+                side_effect_ref,
+                &self.observed_at,
+            )
+            .map_err(Self::store_error)?;
+        self.resolution_record(request, &resolution)
+    }
+
+    fn readback(&self, request: &PublicationJobRequest) -> Result<PublicationJobRecord, String> {
+        let resolution = self
+            .adapter
+            .readback(
+                &request.project_id,
+                &request.operation_id,
+                &request.request_digest,
+            )
+            .map_err(Self::store_error)?;
+        self.resolution_record(request, &resolution)
+    }
+
+    fn reconcile(
+        &self,
+        request: &PublicationJobRequest,
+        readback: &PublicationJobReadback,
+    ) -> Result<PublicationJobRecord, String> {
+        self.adapter
+            .mark_side_effect_started(
+                &request.project_id,
+                &request.operation_id,
+                &readback.side_effect_ref,
+                &readback.observed_at,
+            )
+            .map_err(Self::store_error)?;
+        self.adapter
+            .mark_readback_required(
+                &request.project_id,
+                &request.operation_id,
+                &readback.side_effect_ref,
+                &readback.observed_at,
+            )
+            .map_err(Self::store_error)?;
+        let resolution = self
+            .adapter
+            .reconcile_readback(&ExternalEffectReadback {
+                project_id: readback.project_id.clone(),
+                job_id: request.operation_id.clone(),
+                operation_id: readback.operation_id.clone(),
+                request_digest: readback.request_digest.clone(),
+                side_effect_ref: readback.side_effect_ref.clone(),
+                result_digest: readback.result_digest.clone(),
+                observed_at: readback.observed_at.clone(),
+            })
+            .map_err(Self::store_error)?;
+        self.resolution_record(request, &resolution)
+    }
+
+    fn reject(
+        &self,
+        request: &PublicationJobRequest,
+        reason: &str,
+    ) -> Result<PublicationJobRecord, String> {
+        let resolution = self
+            .adapter
+            .reject(
+                &request.project_id,
+                &request.operation_id,
+                &self.observed_at,
+                reason,
+            )
+            .map_err(Self::store_error)?;
+        self.resolution_record(request, &resolution)
+    }
+
+    fn fail(
+        &self,
+        request: &PublicationJobRequest,
+        side_effect_ref: Option<&str>,
+        reason: &str,
+    ) -> Result<PublicationJobRecord, String> {
+        if let Some(side_effect_ref) = side_effect_ref {
+            self.adapter
+                .mark_side_effect_started(
+                    &request.project_id,
+                    &request.operation_id,
+                    side_effect_ref,
+                    &self.observed_at,
+                )
+                .map_err(Self::store_error)?;
+        }
+        let resolution = self
+            .adapter
+            .fail(
+                &request.project_id,
+                &request.operation_id,
+                &self.observed_at,
+                reason,
+            )
+            .map_err(Self::store_error)?;
+        self.resolution_record(request, &resolution)
     }
 }
 

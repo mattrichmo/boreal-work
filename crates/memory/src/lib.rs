@@ -2,6 +2,17 @@
 //!
 //! This crate deliberately has no persistence or serialization dependencies.
 
+/// Durable admission and readback boundary for the Git publication side
+/// effect.  The application/store owner supplies the `PublicationJobPort`;
+/// this crate owns the only callback path that may invoke the Git publisher.
+pub mod publisher;
+
+pub use publisher::{
+    run_with_durable_job, PublicationJobAcquisition, PublicationJobObservation,
+    PublicationJobOutcome, PublicationJobPort, PublicationJobReadback, PublicationJobRecord,
+    PublicationJobRequest, PublicationJobState,
+};
+
 use std::{
     collections::BTreeMap,
     fs::{self, File, OpenOptions},
@@ -540,6 +551,111 @@ impl Publisher {
         read_publication_journal(&self.root)
     }
 
+    /// Publish one accepted draft only after the canonical durable job port
+    /// admits the operation and this caller wins the `admitted -> running`
+    /// transition.  The Git callback is never invoked for replay, a losing
+    /// acquisition, or an already-running operation.  A successful callback
+    /// is still unresolved until the memory journal and committed Git bytes
+    /// are read back and match the admitted identity.
+    ///
+    /// The existing `publish` and `publish_with_expected_base` methods remain
+    /// available for compatibility with lower-level callers.  Application
+    /// publication routes must use this method so durable admission and
+    /// external-effect readback cannot be bypassed.
+    pub fn publish_with_durable_job<J>(
+        &self,
+        jobs: &J,
+        request: &PublicationJobRequest,
+        started_at: &str,
+        observed_at: &str,
+        draft: &Draft,
+        expected_manifest_identity: Option<&str>,
+    ) -> Result<PublicationJobOutcome, String>
+    where
+        J: PublicationJobPort,
+    {
+        let expected = self
+            .publication_request_identity(draft, &request.operation_id)
+            .map_err(|error| error.to_string())?;
+        validate_publication_request(request, &expected)?;
+        if draft.state != DraftState::Accepted {
+            return Err("only an accepted memory draft may enter publication admission".into());
+        }
+
+        let request = request.clone();
+        let observed_at = observed_at.to_owned();
+        let expected_manifest_identity = expected_manifest_identity.map(str::to_owned);
+        run_with_durable_job(jobs, &request, started_at, |_running| {
+            let receipt = match self.publish_with_expected_base(
+                draft,
+                &request.operation_id,
+                expected_manifest_identity.as_deref(),
+            ) {
+                Ok(receipt) => receipt,
+                Err(publish_error) => {
+                    // A Git process can commit before its response is lost.
+                    // Only the publisher's own verified readback may turn
+                    // that uncertainty into reconciliation.
+                    return match self.publication_readback(&request.operation_id) {
+                        Ok(PublicationReadback::Reconciled(recovery)) => {
+                            reconciled_publication_observation(&request, &recovery, &observed_at)
+                        }
+                        Ok(PublicationReadback::ReadbackRequired(recovery)) => {
+                            Ok(PublicationJobObservation::ReadbackRequired {
+                                side_effect_ref: publication_side_effect_ref(&request, &recovery),
+                            })
+                        }
+                        Ok(PublicationReadback::NoPublication) => Err(publish_error.to_string()),
+                        Err(readback_error) => Err(format!(
+                            "{}; publication readback failed: {}",
+                            publish_error, readback_error
+                        )),
+                    };
+                }
+            };
+
+            if receipt.identity.project_id != request.project_id
+                || receipt.identity.entry_id != request.entry_id
+                || receipt.identity.operation_id != request.operation_id
+                || receipt.identity.content_digest != request.content_digest
+                || receipt.identity.manifest_identity != request.manifest_identity
+            {
+                return Err(
+                    "publisher receipt identity does not match the admitted publication request"
+                        .into(),
+                );
+            }
+
+            match self.publication_readback(&request.operation_id) {
+                Ok(PublicationReadback::Reconciled(recovery)) => {
+                    if recovery.manifest_identity.as_deref()
+                        != Some(request.manifest_identity.as_str())
+                        || recovery.git_revision.as_deref() != Some(receipt.git_revision.as_str())
+                    {
+                        return Err(
+                            "publisher readback identity does not match the publication receipt"
+                                .into(),
+                        );
+                    }
+                    Ok(PublicationJobObservation::Reconciled {
+                        side_effect_ref: format!("git:{}", receipt.git_revision),
+                        git_revision: receipt.git_revision,
+                        result_digest: receipt.identity.content_digest,
+                        manifest_identity: receipt.identity.manifest_identity,
+                        observed_at: observed_at.clone(),
+                    })
+                }
+                Ok(PublicationReadback::ReadbackRequired(recovery)) => {
+                    Ok(PublicationJobObservation::ReadbackRequired {
+                        side_effect_ref: publication_side_effect_ref(&request, &recovery),
+                    })
+                }
+                Ok(PublicationReadback::NoPublication) => Ok(PublicationJobObservation::Pending),
+                Err(error) => Err(error.to_string()),
+            }
+        })
+    }
+
     /// Read back the durable publication journal for one operation. A
     /// committed state is reported as reconciled only after the journal
     /// reader has verified the manifest/note bytes and Git revision. All
@@ -575,6 +691,33 @@ impl Publisher {
         operation_id: &str,
     ) -> Result<PublicationReceipt, PublishError> {
         self.publish_with_expected_base(draft, operation_id, None)
+    }
+
+    fn publication_request_identity(
+        &self,
+        draft: &Draft,
+        operation_id: &str,
+    ) -> Result<PublicationIdentity, PublishError> {
+        validate_segment(operation_id)?;
+        let content = render_published_markdown(draft)?;
+        let content_digest = digest(content.as_bytes());
+        let entry = manifest_entry(
+            draft,
+            operation_id,
+            content_digest.clone(),
+            PublicationState::Published,
+        );
+        let manifest = match read_worktree_manifest(&self.root)? {
+            Some(current) => current.merge_entry(operation_id, entry)?,
+            None => PublicationManifest::new(&draft.project_id, operation_id, entry)?,
+        };
+        Ok(PublicationIdentity {
+            project_id: draft.project_id.clone(),
+            entry_id: draft.entry_id.clone(),
+            content_digest,
+            operation_id: operation_id.to_owned(),
+            manifest_identity: manifest.identity(),
+        })
     }
 
     /// Publish against an optional expected manifest identity. `None` keeps
@@ -806,6 +949,63 @@ impl Publisher {
         report.git_revision = git_checked_out_revision(self.root.path())?;
         Ok(report)
     }
+}
+
+/// Validate the identity fields that bind an admitted durable publication job
+/// to the accepted draft and its computed manifest.
+pub fn validate_publication_request(
+    request: &PublicationJobRequest,
+    expected: &PublicationIdentity,
+) -> Result<(), String> {
+    if request.project_id != expected.project_id
+        || request.operation_id != expected.operation_id
+        || request.entry_id != expected.entry_id
+        || request.content_digest != expected.content_digest
+        || request.manifest_identity != expected.manifest_identity
+    {
+        return Err("publication request identity does not match the accepted memory draft".into());
+    }
+    Ok(())
+}
+
+/// Convert a verified publisher readback into the only observation that may
+/// authorize durable reconciliation.
+pub fn reconciled_publication_observation(
+    request: &PublicationJobRequest,
+    recovery: &PublicationRecovery,
+    observed_at: &str,
+) -> Result<PublicationJobObservation, String> {
+    let manifest_identity = recovery
+        .manifest_identity
+        .clone()
+        .ok_or_else(|| "reconciled publication readback has no manifest identity".to_owned())?;
+    let git_revision = recovery
+        .git_revision
+        .clone()
+        .ok_or_else(|| "reconciled publication readback has no Git revision".to_owned())?;
+    if manifest_identity != request.manifest_identity {
+        return Err("reconciled publication manifest identity does not match request".into());
+    }
+    Ok(PublicationJobObservation::Reconciled {
+        side_effect_ref: format!("git:{git_revision}"),
+        git_revision,
+        result_digest: request.content_digest.clone(),
+        manifest_identity,
+        observed_at: observed_at.to_owned(),
+    })
+}
+
+/// Return a bounded, attributable reference for a publication effect that is
+/// still pending readback.
+pub fn publication_side_effect_ref(
+    request: &PublicationJobRequest,
+    recovery: &PublicationRecovery,
+) -> String {
+    recovery
+        .git_revision
+        .as_deref()
+        .map(|revision| format!("git:{revision}"))
+        .unwrap_or_else(|| format!("memory-publication:{}", request.operation_id))
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

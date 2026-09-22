@@ -56,6 +56,8 @@ pub(crate) fn supports(parsed: &ParsedCommand) -> bool {
             | ["session", "end"]
             | ["evidence", "run"]
             | ["operation", "show"]
+            | ["update"]
+            | ["upgrade"]
     ) || (path == &["agent".to_owned(), "finish".to_owned()]
         && (parsed.options.release || (parsed.options.close && parsed.options.receipt.is_some())))
         || (path == &["evidence".to_owned(), "add".to_owned()] && parsed.options.receipt.is_some())
@@ -82,10 +84,23 @@ pub(crate) fn request(_parsed: &ParsedCommand, _operation: &str) -> Result<CliRe
     ))
 }
 
+#[cfg(not(unix))]
+pub(crate) fn run_update(_parsed: &ParsedCommand, _operation: &str) -> Result<CliResult, CliError> {
+    Err(CliError::with(
+        ErrorCode::UnsupportedPlatform,
+        ApplicationOutcome::Failed,
+        "the local update route requires the canonical Unix service/runtime integration",
+    ))
+}
+
 #[cfg(unix)]
 mod unix {
     use super::*;
-    use boreal_application::{project_status_from_store, AttemptLifecycleAdapter, AttemptSnapshot};
+    use boreal_application::{
+        canonical_request_digest, project_status_from_store, sha256_content_digest,
+        AttemptLifecycleAdapter, AttemptSnapshot, ExternalEffectAcquisition, ExternalEffectAdapter,
+        ExternalEffectReadback, ExternalEffectResolution,
+    };
     use boreal_domain::{ActorContext, ActorRole, ReasonCode};
     use boreal_protocol::{schema, Envelope, ProtocolError as WireError, TransportOutcome};
     use boreal_service::{
@@ -96,12 +111,530 @@ mod unix {
         APPLICATION_SCHEMA_VERSION,
     };
     use boreal_store::{
-        OperationOutcome as StoreOperationOutcome, OperationRecord, ReceiptAttestation,
-        ReceiptOutcome, ReceiptRecord,
+        identity::{IdentityContext, IdentityStore},
+        jobs::{ExternalJobInput, ExternalJobRecord},
+        AuditEventRecord, OperationOutcome as StoreOperationOutcome, OperationRecord,
+        ReceiptAttestation, ReceiptOutcome, ReceiptRecord,
     };
     use std::os::unix::{fs::FileTypeExt, net::UnixStream};
 
     const SERVICE_REQUEST_ID: &str = "cli-service-request";
+    // The v2 audit vocabulary has no installation subject. The update target
+    // remains the immutable subject id while the operation subject type keeps
+    // registration inside the store's current identity vocabulary.
+    const UPDATE_SUBJECT_TYPE: &str = "operation";
+
+    struct StoreUpdateJobPort<'a> {
+        store: &'a SqliteStore,
+        identity: IdentityContext,
+    }
+
+    impl StoreUpdateJobPort<'_> {
+        fn input(&self, request: &update::UpdateJobRequest) -> ExternalJobInput {
+            ExternalJobInput {
+                job_id: format!("update:{}", request.operation_id),
+                operation_id: request.operation_id.clone(),
+                project_id: request.project_id.clone(),
+                subject_type: UPDATE_SUBJECT_TYPE.to_owned(),
+                subject_id: request.target_identity.clone(),
+                kind: "update".to_owned(),
+                request_digest: request.request_digest.clone(),
+                source_identity: request.source_identity.clone(),
+                config_identity: request.config_identity.clone(),
+                actor_id: request.actor_id.clone(),
+                session_id: request.session_id.clone(),
+                deadline: request.deadline.clone(),
+                created_at: request.created_at.clone(),
+            }
+        }
+
+        fn adapter(&self) -> ExternalEffectAdapter<'_> {
+            ExternalEffectAdapter::new_with_identity(self.store, &self.identity)
+        }
+
+        fn record(&self, record: ExternalJobRecord) -> update::UpdateJobRecord {
+            let target_identity = record.subject_id.clone();
+            update::UpdateJobRecord {
+                project_id: record.project_id,
+                operation_id: record.operation_id,
+                request_digest: record.request_digest,
+                target_identity: target_identity.clone(),
+                state: update_state(&record.stage),
+                version: if record.stage == "reconciled" {
+                    installed_version(&target_identity)
+                } else {
+                    None
+                },
+                side_effect_ref: record.side_effect_ref,
+                result_digest: record.result_digest,
+                error: record.error_message,
+            }
+        }
+
+        fn resolution_record(
+            &self,
+            resolution: ExternalEffectResolution,
+        ) -> update::UpdateJobRecord {
+            self.record(resolution.record().clone())
+        }
+    }
+
+    impl update::UpdateJobPort for StoreUpdateJobPort<'_> {
+        fn register(
+            &self,
+            request: &update::UpdateJobRequest,
+        ) -> Result<update::UpdateJobRecord, String> {
+            self.store
+                .register_external_job_with_identity(&self.identity, &self.input(request))
+                .map(|registration| self.record(registration.job))
+                .map_err(|error| error.to_string())
+        }
+
+        fn acquire(
+            &self,
+            request: &update::UpdateJobRequest,
+            started_at: &str,
+        ) -> Result<update::UpdateJobAcquisition, String> {
+            let adapter = self.adapter();
+            let job_id = format!("update:{}", request.operation_id);
+            adapter
+                .start_acquisition(&request.project_id, &job_id, started_at)
+                .map(|acquisition| match acquisition {
+                    ExternalEffectAcquisition::Won(record) => {
+                        update::UpdateJobAcquisition::Won(self.record(record))
+                    }
+                    ExternalEffectAcquisition::AlreadyRunning(record) => {
+                        update::UpdateJobAcquisition::AlreadyRunning(self.record(record))
+                    }
+                    ExternalEffectAcquisition::Pending(record) => {
+                        update::UpdateJobAcquisition::Pending(self.record(record))
+                    }
+                    ExternalEffectAcquisition::Terminal(resolution) => {
+                        update::UpdateJobAcquisition::Terminal(self.resolution_record(resolution))
+                    }
+                    ExternalEffectAcquisition::Conflict { current, reason } => {
+                        update::UpdateJobAcquisition::Conflict {
+                            current: current.map(|record| self.record(record)),
+                            reason,
+                        }
+                    }
+                })
+                .map_err(|error| error.to_string())
+        }
+
+        fn mark_readback_required(
+            &self,
+            request: &update::UpdateJobRequest,
+            side_effect_ref: &str,
+        ) -> Result<update::UpdateJobRecord, String> {
+            let adapter = self.adapter();
+            let job_id = format!("update:{}", request.operation_id);
+            adapter
+                .mark_side_effect_started(
+                    &request.project_id,
+                    &job_id,
+                    side_effect_ref,
+                    &request.created_at,
+                )
+                .and_then(|_| {
+                    adapter.mark_readback_required(
+                        &request.project_id,
+                        &job_id,
+                        side_effect_ref,
+                        &request.created_at,
+                    )
+                })
+                .map(|resolution| self.resolution_record(resolution))
+                .map_err(|error| error.to_string())
+        }
+
+        fn readback(
+            &self,
+            request: &update::UpdateJobRequest,
+        ) -> Result<update::UpdateJobRecord, String> {
+            self.adapter()
+                .readback(
+                    &request.project_id,
+                    &request.operation_id,
+                    &request.request_digest,
+                )
+                .map(|resolution| self.resolution_record(resolution))
+                .map_err(|error| error.to_string())
+        }
+
+        fn reconcile(
+            &self,
+            request: &update::UpdateJobRequest,
+            readback: &update::UpdateJobReadback,
+        ) -> Result<update::UpdateJobRecord, String> {
+            let adapter = self.adapter();
+            let job_id = format!("update:{}", request.operation_id);
+            adapter
+                .mark_side_effect_started(
+                    &request.project_id,
+                    &job_id,
+                    &readback.side_effect_ref,
+                    &readback.observed_at,
+                )
+                .and_then(|_| {
+                    adapter.mark_readback_required(
+                        &request.project_id,
+                        &job_id,
+                        &readback.side_effect_ref,
+                        &readback.observed_at,
+                    )
+                })
+                .and_then(|_| {
+                    adapter.reconcile_readback(&ExternalEffectReadback {
+                        project_id: readback.project_id.clone(),
+                        job_id,
+                        operation_id: readback.operation_id.clone(),
+                        request_digest: readback.request_digest.clone(),
+                        side_effect_ref: readback.side_effect_ref.clone(),
+                        result_digest: readback.result_digest.clone(),
+                        observed_at: readback.observed_at.clone(),
+                    })
+                })
+                .map(|resolution| self.resolution_record(resolution))
+                .map_err(|error| error.to_string())
+        }
+
+        fn reject(
+            &self,
+            request: &update::UpdateJobRequest,
+            reason: &str,
+        ) -> Result<update::UpdateJobRecord, String> {
+            let job_id = format!("update:{}", request.operation_id);
+            self.adapter()
+                .reject(&request.project_id, &job_id, &request.created_at, reason)
+                .map(|resolution| self.resolution_record(resolution))
+                .map_err(|error| error.to_string())
+        }
+    }
+
+    fn update_state(stage: &str) -> update::UpdateJobState {
+        match stage {
+            "registered" => update::UpdateJobState::Registered,
+            "admitted" => update::UpdateJobState::Admitted,
+            "running" => update::UpdateJobState::Running,
+            "side_effect_started" => update::UpdateJobState::SideEffectStarted,
+            "side_effect_finished" => update::UpdateJobState::SideEffectFinished,
+            "readback_required" => update::UpdateJobState::ReadbackRequired,
+            "committed" => update::UpdateJobState::Committed,
+            "reconciled" => update::UpdateJobState::Reconciled,
+            "rejected" => update::UpdateJobState::Rejected,
+            "failed" => update::UpdateJobState::Failed,
+            "cancel_requested" => update::UpdateJobState::CancelRequested,
+            _ => update::UpdateJobState::Pending,
+        }
+    }
+
+    fn update_target_identity() -> Result<String, CliError> {
+        let executable = env::current_exe().map_err(|error| {
+            CliError::with(
+                ErrorCode::UnsupportedTarget,
+                ApplicationOutcome::Rejected,
+                format!("could not locate the running bwrk executable: {error}"),
+            )
+        })?;
+        let executable = executable.canonicalize().unwrap_or(executable);
+        Ok(format!("binary:{}", executable.to_string_lossy()))
+    }
+
+    fn update_target_paths(target_identity: &str) -> Result<(PathBuf, PathBuf), String> {
+        let path = target_identity
+            .strip_prefix("binary:")
+            .filter(|path| !path.trim().is_empty())
+            .ok_or_else(|| {
+                "update target identity is not a canonical binary identity".to_owned()
+            })?;
+        let binary = PathBuf::from(path);
+        let prefix = binary
+            .parent()
+            .and_then(Path::parent)
+            .map(PathBuf::from)
+            .ok_or_else(|| "update target identity has no installation prefix".to_owned())?;
+        Ok((binary, prefix.join("share/boreal/release.json")))
+    }
+
+    fn installed_version(target_identity: &str) -> Option<String> {
+        let (_, manifest) = update_target_paths(target_identity).ok()?;
+        let bytes = fs::read(manifest).ok()?;
+        serde_json::from_slice::<Value>(&bytes)
+            .ok()?
+            .get("version")
+            .and_then(Value::as_str)
+            .filter(|version| !version.trim().is_empty())
+            .map(ToOwned::to_owned)
+    }
+
+    fn installed_update_observation(
+        running: &update::UpdateJobRecord,
+        side_effect_ref: &str,
+    ) -> Result<update::UpdateJobObservation, String> {
+        let expected_side_effect = format!(
+            "installer:{}",
+            sha256_content_digest(running.target_identity.as_bytes())
+        );
+        if side_effect_ref != expected_side_effect {
+            return Err(
+                "update side-effect reference does not match the admitted target".to_owned(),
+            );
+        }
+        let (binary, manifest) = update_target_paths(&running.target_identity)?;
+        let binary_metadata = fs::symlink_metadata(&binary)
+            .map_err(|error| format!("updated binary readback failed: {error}"))?;
+        if !binary_metadata.file_type().is_file() {
+            return Err("updated binary readback is not a regular file".to_owned());
+        }
+        let manifest_metadata = fs::symlink_metadata(&manifest)
+            .map_err(|error| format!("release manifest readback failed: {error}"))?;
+        if !manifest_metadata.file_type().is_file() {
+            return Err("release manifest readback is not a regular file".to_owned());
+        }
+        if manifest_metadata.len() > 1024 * 1024 {
+            return Err("release manifest readback exceeds the 1 MiB bound".to_owned());
+        }
+        let manifest_bytes = fs::read(&manifest)
+            .map_err(|error| format!("release manifest readback failed: {error}"))?;
+        let manifest_json: Value = serde_json::from_slice(&manifest_bytes)
+            .map_err(|error| format!("release manifest readback is invalid JSON: {error}"))?;
+        let version = manifest_json
+            .get("version")
+            .and_then(Value::as_str)
+            .filter(|version| !version.trim().is_empty())
+            .ok_or_else(|| "release manifest readback omitted a version".to_owned())?;
+        let expected_binary_digest = manifest_json
+            .pointer("/binary/sha256")
+            .and_then(Value::as_str)
+            .filter(|digest| !digest.trim().is_empty())
+            .ok_or_else(|| "release manifest readback omitted binary.sha256".to_owned())?;
+        let binary_bytes = fs::read(&binary)
+            .map_err(|error| format!("updated binary readback failed: {error}"))?;
+        let actual_binary_digest = sha256_content_digest(&binary_bytes);
+        if expected_binary_digest != actual_binary_digest {
+            return Err(
+                "release manifest binary digest does not match the installed binary".to_owned(),
+            );
+        }
+        Ok(update::UpdateJobObservation::Reconciled {
+            side_effect_ref: side_effect_ref.to_owned(),
+            result_digest: sha256_content_digest(&manifest_bytes),
+            version: version.to_owned(),
+            observed_at: now(),
+        })
+    }
+
+    fn update_request_digest(
+        project: &str,
+        target_identity: &str,
+        actor_id: &str,
+        session_id: Option<&str>,
+        source_identity: Option<&str>,
+        config_identity: Option<&str>,
+    ) -> String {
+        canonical_request_digest(
+            "update/v1",
+            json!({
+                "project_id": project,
+                "target_identity": target_identity,
+                "actor_id": actor_id,
+                "session_id": session_id,
+                "source_identity": source_identity,
+                "config_identity": config_identity,
+            }),
+        )
+    }
+
+    fn admit_update_operation(
+        store: &SqliteStore,
+        identity: &IdentityContext,
+        request: &update::UpdateJobRequest,
+    ) -> Result<(), CliError> {
+        let result = json!({
+            "command": "update",
+            "project_id": request.project_id,
+            "operation_id": request.operation_id,
+            "request_digest": request.request_digest,
+            "target_identity": request.target_identity,
+            "state": "pending",
+            "readback_required": true,
+        });
+        let operation = OperationRecord {
+            operation_id: request.operation_id.clone(),
+            project_id: request.project_id.clone(),
+            command: "update".to_owned(),
+            actor_id: request.actor_id.clone(),
+            session_id: request.session_id.clone(),
+            expected_revision: None,
+            attempt_id: None,
+            fence: None,
+            request_digest: request.request_digest.clone(),
+            outcome: StoreOperationOutcome::Unknown,
+            result_json: result.to_string(),
+            revision: 0,
+            created_at: request.created_at.clone(),
+            completed_at: None,
+        };
+        let audit = AuditEventRecord {
+            project_id: request.project_id.clone(),
+            revision: 0,
+            operation_id: request.operation_id.clone(),
+            event_type: "repair.correction".to_owned(),
+            subject_type: UPDATE_SUBJECT_TYPE.to_owned(),
+            subject_id: request.target_identity.clone(),
+            actor_id: request.actor_id.clone(),
+            session_id: request.session_id.clone(),
+            fence: None,
+            as_of: request.created_at.clone(),
+            payload_json: result.to_string(),
+        };
+        store
+            .append_identity_operation_audit(identity, operation, audit)
+            .map(|_| ())
+            .map_err(super::super::map_store_error)
+    }
+
+    fn resolve_update_project(
+        store: &SqliteStore,
+        requested: Option<&str>,
+    ) -> Result<String, CliError> {
+        if let Some(project) = requested.filter(|project| !project.trim().is_empty()) {
+            return Ok(project.to_owned());
+        }
+        let projects = store
+            .list_project_ids()
+            .map_err(super::super::map_store_error)?;
+        match projects.as_slice() {
+            [project] => Ok(project.clone()),
+            [] => Err(CliError::with(
+                ErrorCode::NotFound,
+                ApplicationOutcome::Rejected,
+                "update requires an initialized project",
+            )),
+            _ => Err(CliError::invalid(
+                "update requires --project when the database contains multiple projects",
+            )),
+        }
+    }
+
+    fn update_result(
+        store: &SqliteStore,
+        request: &update::UpdateJobRequest,
+        outcome: &update::UpdateJobOutcome,
+    ) -> Result<CliResult, CliError> {
+        let record = outcome.record();
+        let revision = store
+            .project_revision(&request.project_id)
+            .map_err(super::super::map_store_error)?
+            .0;
+        let data = json!({
+            "command": "update",
+            "project_id": record.project_id,
+            "operation_id": record.operation_id,
+            "request_digest": record.request_digest,
+            "target_identity": record.target_identity,
+            "state": format!("{:?}", record.state).to_ascii_lowercase(),
+            "version": record.version,
+            "side_effect_ref": record.side_effect_ref,
+            "result_digest": record.result_digest,
+            "error": record.error,
+            "readback_required": !outcome.is_resolved(),
+        });
+        let mut result = bounded_result(Some(data), Some(revision))?;
+        result.outcome = match outcome {
+            update::UpdateJobOutcome::Reconciled(_) => ApplicationOutcome::Changed,
+            update::UpdateJobOutcome::Rejected(_) => ApplicationOutcome::Rejected,
+            update::UpdateJobOutcome::Failed(record) if record.side_effect_ref.is_none() => {
+                ApplicationOutcome::Failed
+            }
+            update::UpdateJobOutcome::Pending(_)
+            | update::UpdateJobOutcome::ReadbackRequired(_)
+            | update::UpdateJobOutcome::Failed(_) => ApplicationOutcome::Unknown,
+        };
+        Ok(result)
+    }
+
+    fn run_update_with_store(
+        parsed: &ParsedCommand,
+        operation: &str,
+        store: &SqliteStore,
+        project: String,
+    ) -> Result<CliResult, CliError> {
+        let identity = IdentityStore::new(store)
+            .context(&project)
+            .map_err(super::super::map_identity_error)?;
+        store
+            .ensure_external_job_schema()
+            .map_err(super::super::map_store_error)?;
+        let target_identity = update_target_identity()?;
+        let source_identity = parsed.options.source_version.clone();
+        let config_identity = Some(
+            parsed
+                .options
+                .config_identity
+                .clone()
+                .unwrap_or_else(|| "unknown".to_owned()),
+        );
+        let request = update::UpdateJobRequest {
+            project_id: project.clone(),
+            operation_id: operation.to_owned(),
+            request_digest: update_request_digest(
+                &project,
+                &target_identity,
+                &parsed.options.actor,
+                Some(&parsed.options.session),
+                source_identity.as_deref(),
+                config_identity.as_deref(),
+            ),
+            target_identity,
+            actor_id: parsed.options.actor.clone(),
+            session_id: Some(parsed.options.session.clone()),
+            source_identity,
+            config_identity,
+            deadline: None,
+            created_at: now(),
+        };
+        admit_update_operation(store, &identity, &request)?;
+        let jobs = StoreUpdateJobPort { store, identity };
+        let outcome = update::run_with_durable_job(&jobs, &request, &now(), |running| {
+            match update::execute_installer(parsed, running)? {
+                update::UpdateJobObservation::ReadbackRequired { side_effect_ref } => {
+                    installed_update_observation(running, &side_effect_ref)
+                }
+                observation => Ok(observation),
+            }
+        })
+        .map_err(|error| {
+            CliError::with(
+                ErrorCode::ServiceUnavailable,
+                ApplicationOutcome::Unknown,
+                error,
+            )
+        })?;
+        update_result(store, &request, &outcome)
+    }
+
+    pub(crate) fn run_update(
+        parsed: &ParsedCommand,
+        operation: &str,
+    ) -> Result<CliResult, CliError> {
+        let path = PathBuf::from(&parsed.options.db);
+        if !path.exists() {
+            return Err(CliError::with(
+                ErrorCode::NotFound,
+                ApplicationOutcome::Rejected,
+                format!("database does not exist: {}", path.display()),
+            ));
+        }
+        let store = SqliteStore::open(&path, super::super::PRODUCTION_SCHEMA)
+            .map_err(super::super::map_store_error)?;
+        let project = resolve_update_project(&store, parsed.options.project.as_deref())?;
+        let mut routed = parsed.clone();
+        routed.options.project = Some(project.clone());
+        let _owner = super::super::direct_database_owner(&path, &routed)?;
+        run_update_with_store(&routed, operation, &store, project)
+    }
 
     #[derive(Clone, Debug)]
     struct SqliteRecoveryBackend {
@@ -787,6 +1320,8 @@ mod unix {
                 .clone()
                 .or_else(|| parsed.options.positionals.first().cloned())
                 .unwrap_or_default()
+        } else if matches!(path.as_slice(), ["update"] | ["upgrade"]) {
+            parsed.options.project.clone().unwrap_or_default()
         } else {
             project_argument(parsed, 0)?
         };
@@ -1000,6 +1535,19 @@ mod unix {
             }
             ["doctor"] => {
                 data["command"] = json!("doctor");
+            }
+            ["update"] | ["upgrade"] => {
+                data["command"] = json!("update");
+                data["source_identity"] = parsed
+                    .options
+                    .source_version
+                    .clone()
+                    .map_or(Value::Null, Value::String);
+                data["config_identity"] = json!(parsed
+                    .options
+                    .config_identity
+                    .as_deref()
+                    .unwrap_or("unknown"));
             }
             ["work", "claim"] => {
                 data["command"] = json!("claim");
@@ -1277,7 +1825,12 @@ mod unix {
             &self,
             request: ApplicationRequest,
         ) -> Result<ApplicationResponse, boreal_service::ProtocolError> {
-            let store = SqliteStore::open(&self.database, SCHEMA).map_err(|error| {
+            let schema = if request.command == "update" {
+                super::super::PRODUCTION_SCHEMA
+            } else {
+                SCHEMA
+            };
+            let store = SqliteStore::open(&self.database, schema).map_err(|error| {
                 boreal_service::ProtocolError::new(
                     boreal_service::ProtocolErrorCode::InvalidPayload,
                     format!("service database is unavailable: {error}"),
@@ -1498,6 +2051,7 @@ mod unix {
                 "finish_close" => self.finish_close(data, &request.operation_id),
                 "evidence_add" => self.evidence_add(data),
                 "evidence_run" => self.evidence_run(data, &request.operation_id),
+                "update" => self.update(data, &request.operation_id),
                 "operation_show" => self.operation_show(data),
                 "session_start" => self.session_start(data, &request.operation_id),
                 "session_show" => self.session_show(data),
@@ -2367,20 +2921,30 @@ mod unix {
             let requested_work_id = optional_string(data, "work_id")?;
             let requested_attempt_id = optional_string(data, "attempt_id")?;
             let requested_fence = request_fence(data)?;
-            let stored_work_id = self
-                .store
-                .operation(operation)
-                .map_err(map_store_error)?
-                .and_then(|record| {
-                    serde_json::from_str::<Value>(&record.result_json)
-                        .ok()
-                        .and_then(|value| {
-                            value
-                                .get("work_id")
-                                .and_then(Value::as_str)
-                                .map(str::to_owned)
-                        })
-                });
+            // A start request is consequential even when it only resumes an
+            // already-running attempt. Require the authenticated project
+            // binding before discovering or mutating any operation/attempt.
+            let stored_work_id = {
+                let identity = IdentityStore::new(&self.store)
+                    .context(project.as_str())
+                    .map_err(super::super::map_identity_error)?;
+                let app = WorkApplication::new(&self.store);
+                let journal = app.authenticated_operation_journal(&identity);
+                journal
+                    .readback(operation)
+                    .map_err(map_application_error)?
+                    .and_then(|readback| readback.operation)
+                    .and_then(|record| {
+                        serde_json::from_str::<Value>(&record.result_json)
+                            .ok()
+                            .and_then(|value| {
+                                value
+                                    .get("work_id")
+                                    .and_then(Value::as_str)
+                                    .map(str::to_owned)
+                            })
+                    })
+            };
             let Some(work_id) = requested_work_id
                 .clone()
                 .or_else(|| {
@@ -2430,6 +2994,8 @@ mod unix {
                 &actor,
                 &session,
                 requested_attempt_id.as_deref(),
+                optional_u64(data, "expected_revision")?,
+                requested_fence,
                 &request_digest,
             )? {
                 return Ok(replayed);
@@ -2534,7 +3100,7 @@ mod unix {
             let current = adapter
                 .current_attempt(&project, &attempt)
                 .map_err(|error| map_application_error(ApplicationError::from(error)))?;
-            let (outcome, revision) = if let Some(result) = last {
+            let (outcome, _revision) = if let Some(result) = last {
                 (
                     if result.changed {
                         ApplicationOutcome::Changed
@@ -2562,29 +3128,64 @@ mod unix {
                 ));
             };
             let result_data = start_result_json(&current, operation);
-            self.store
-                .append_operation(&OperationRecord {
-                    operation_id: operation.to_owned(),
-                    project_id: project.as_str().to_owned(),
-                    command: "agent_start".to_owned(),
-                    actor_id: actor,
-                    session_id: Some(session),
-                    expected_revision: optional_u64(data, "expected_revision")?,
-                    attempt_id: Some(current.attempt_id.as_str().to_owned()),
-                    fence: Some(current.fence.get()),
-                    request_digest,
-                    outcome: if outcome == ApplicationOutcome::Changed {
-                        StoreOperationOutcome::Changed
-                    } else {
-                        StoreOperationOutcome::Unchanged
+            let created_at = outer_started_at;
+            let identity = IdentityStore::new(&self.store)
+                .context(project.as_str())
+                .map_err(super::super::map_identity_error)?;
+            let app = WorkApplication::new(&self.store);
+            let journal = app.authenticated_operation_journal(&identity);
+            let result_json = result_data.to_string();
+            let parent_readback = journal
+                .append(
+                    OperationRecord {
+                        operation_id: operation.to_owned(),
+                        project_id: project.as_str().to_owned(),
+                        command: "agent_start".to_owned(),
+                        actor_id: actor.clone(),
+                        session_id: Some(session.clone()),
+                        expected_revision: optional_u64(data, "expected_revision")?,
+                        attempt_id: Some(current.attempt_id.as_str().to_owned()),
+                        fence: Some(current.fence.get()),
+                        request_digest,
+                        outcome: if outcome == ApplicationOutcome::Changed {
+                            StoreOperationOutcome::Changed
+                        } else {
+                            StoreOperationOutcome::Unchanged
+                        },
+                        result_json: result_json.clone(),
+                        // The parent journal owns a distinct audit revision;
+                        // the lifecycle child operations already consumed the
+                        // semantic mutation revision.
+                        revision: 0,
+                        created_at: created_at.clone(),
+                        completed_at: Some(created_at.clone()),
                     },
-                    result_json: result_data.to_string(),
-                    revision,
-                    created_at: outer_started_at,
-                    completed_at: Some(now()),
-                })
-                .map_err(map_store_error)?;
-            Ok((outcome, Some(revision), Some(result_data)))
+                    AuditEventRecord {
+                        project_id: project.as_str().to_owned(),
+                        revision: 0,
+                        operation_id: operation.to_owned(),
+                        event_type: "attempt.started".to_owned(),
+                        subject_type: "attempt".to_owned(),
+                        subject_id: current.attempt_id.as_str().to_owned(),
+                        actor_id: actor,
+                        session_id: Some(session),
+                        fence: Some(current.fence.get()),
+                        as_of: created_at,
+                        payload_json: result_json,
+                    },
+                )
+                .map_err(map_application_error)?;
+            let parent_revision = parent_readback
+                .operation
+                .map(|operation| operation.revision)
+                .ok_or_else(|| {
+                    CliError::with(
+                        ErrorCode::ProtocolMismatch,
+                        ApplicationOutcome::Failed,
+                        "agent_start journal readback is missing its operation outcome",
+                    )
+                })?;
+            Ok((outcome, Some(parent_revision), Some(result_data)))
         }
 
         #[allow(clippy::too_many_arguments)]
@@ -2596,17 +3197,33 @@ mod unix {
             actor: &str,
             session: &str,
             attempt_id: Option<&str>,
+            expected_revision: Option<u64>,
+            requested_fence: Option<u64>,
             request_digest: &str,
         ) -> Result<Option<ServicePayload>, CliError> {
-            let Some(existing) = self.store.operation(operation).map_err(map_store_error)? else {
+            let identity = IdentityStore::new(&self.store)
+                .context(project.as_str())
+                .map_err(super::super::map_identity_error)?;
+            let app = WorkApplication::new(&self.store);
+            let journal = app.authenticated_operation_journal(&identity);
+            let Some(readback) = journal.readback(operation).map_err(map_application_error)? else {
                 return Ok(None);
             };
+            let existing = readback.operation.ok_or_else(|| {
+                CliError::with(
+                    ErrorCode::ProtocolMismatch,
+                    ApplicationOutcome::Failed,
+                    "start operation readback is missing its operation outcome",
+                )
+            })?;
             if existing.command != "agent_start"
                 || existing.project_id != project.as_str()
                 || existing.actor_id != actor
                 || existing.session_id.as_deref() != Some(session)
+                || existing.expected_revision != expected_revision
                 || attempt_id
                     .is_some_and(|attempt_id| existing.attempt_id.as_deref() != Some(attempt_id))
+                || requested_fence.is_some_and(|fence| existing.fence != Some(fence))
                 || existing.request_digest != request_digest
             {
                 return Err(CliError::with(
@@ -2748,6 +3365,33 @@ mod unix {
             Ok((result.outcome, result.revision, result.data))
         }
 
+        fn update(&mut self, data: &Value, operation: &str) -> ServiceResult {
+            let project = resolve_update_project(
+                &self.store,
+                data.get("project_id").and_then(Value::as_str),
+            )?;
+            let parsed = ParsedCommand {
+                path: vec!["update".to_owned()],
+                options: CliOptions {
+                    project: Some(project.clone()),
+                    actor: string(data, "actor_id")?,
+                    harness: string(data, "harness_id")?,
+                    session: string(data, "session_id")?,
+                    source_version: optional_string(data, "source_identity")?,
+                    config_identity: Some(
+                        data.get("config_identity")
+                            .and_then(Value::as_str)
+                            .unwrap_or("unknown")
+                            .to_owned(),
+                    ),
+                    operation_id: Some(operation.to_owned()),
+                    ..CliOptions::default()
+                },
+            };
+            let result = run_update_with_store(&parsed, operation, &self.store, project)?;
+            Ok((result.outcome, result.revision, result.data))
+        }
+
         pub(super) fn finish_close(&mut self, data: &Value, operation: &str) -> ServiceResult {
             let project = ProjectId::new(string(data, "project_id")?);
             let work_id = string(data, "work_id")?;
@@ -2781,14 +3425,54 @@ mod unix {
                     "receipt attempt or fence does not match the finish target",
                 ));
             }
+            let witnessed_receipt = receipt.attestation == ExecutorAttestation::BorealWitnessed;
+            if witnessed_receipt {
+                self.validate_witnessed_receipt_readback(&project, &work_id, &receipt)?;
+            }
+            // Validate the authenticated project binding before any receipt,
+            // attempt, summary, or close mutation can commit. The witnessed
+            // receipt readback above is pure and deliberately runs first so a
+            // foreign or mismatched durable fact is reported as ReceiptInvalid.
+            let identity = IdentityStore::new(&self.store)
+                .context(project.as_str())
+                .map_err(super::super::map_identity_error)?;
             // Read and validate all pure closeout inputs before admitting any
             // receipt or advancing the attempt. A bad summary must not leave
             // a partially committed finish behind.
             let summary_body = read_summary_body_from_data(data)?;
             let summary = summary_payload(&receipt, &summary_body, operation);
             let app = WorkApplication::new(&self.store);
-            let receipt_replayed = if receipt.attestation == ExecutorAttestation::BorealWitnessed {
-                self.validate_witnessed_receipt_readback(&project, &work_id, &receipt)?;
+            let journal = app.authenticated_operation_journal(&identity);
+            let parent_request_digest = super::super::finish_close_request_digest(
+                &project,
+                &work_id,
+                attempt.as_str(),
+                fence.get(),
+                &actor,
+                &session,
+                optional_u64(data, "expected_revision")?,
+                &receipt,
+                &summary_body,
+            );
+            let result_operation = super::super::finish_result_operation_id(operation);
+            super::super::ensure_finish_parent_intent(
+                &journal,
+                operation,
+                &project,
+                &actor,
+                &session,
+                attempt.as_str(),
+                fence.get(),
+                optional_u64(data, "expected_revision")?,
+                &parent_request_digest,
+                &result_operation,
+            )?;
+            if let Some(readback) =
+                super::super::finish_result_readback(&journal, operation, &result_operation)?
+            {
+                return Ok((readback.outcome, readback.revision, readback.data));
+            }
+            let receipt_replayed = if witnessed_receipt {
                 true
             } else {
                 app.record_receipt(
@@ -2881,9 +3565,10 @@ mod unix {
                     })).collect::<Vec<_>>(),
                 })),
             });
-            super::super::append_finish_parent_operation(
-                &self.store,
+            super::super::append_finish_result_operation(
+                &journal,
                 operation,
+                &result_operation,
                 &project,
                 &actor,
                 &session,
@@ -2891,7 +3576,7 @@ mod unix {
                 fence.get(),
                 optional_u64(data, "expected_revision")?,
                 outcome,
-                finalized.revision,
+                &parent_request_digest,
                 &close_data,
             )?;
             Ok((outcome, Some(finalized.revision), Some(close_data)))
@@ -3595,6 +4280,32 @@ mod tests {
             "op_service_work",
         )
         .expect("work creates");
+        let identity = boreal_store::identity::IdentityStore::new(&store);
+        let database_identity = match identity.database_identity() {
+            Ok(database_identity) => Some(database_identity),
+            Err(boreal_store::identity::IdentityError::Store(
+                boreal_store::StoreError::Invalid(message),
+            )) if message.contains("no such table") => None,
+            Err(error) => panic!("store database identity: {error}"),
+        };
+        if let Some(database_identity) = database_identity {
+            identity
+                .install(&database_identity, "unix-ms:1")
+                .expect("identity schema installs");
+            let workspace_root = env::temp_dir()
+                .canonicalize()
+                .expect("test workspace root canonicalizes");
+            let workspace_text = workspace_root.to_string_lossy().into_owned();
+            let binding = boreal_store::identity::WorkspaceBinding::new(
+                workspace_text.clone(),
+                workspace_text,
+                "sha256:service-test-workspace",
+            )
+            .expect("test workspace binding");
+            identity
+                .bind_project("service-project", &binding, "unix-ms:1")
+                .expect("project identity binds");
+        }
         store
     }
 
@@ -5266,6 +5977,26 @@ mod tests {
             .expect("missing gate list")
             .iter()
             .any(|gate| gate.as_str().is_some_and(|id| id.ends_with(":summary"))));
+        let replay = handler
+            .finish_close(&finish, "op_service_finish_close")
+            .expect("finish close replays its durable result");
+        assert_eq!(replay.0, ApplicationOutcome::Rejected);
+        assert_eq!(
+            replay.2.expect("replayed finish data")["close_state"],
+            "open"
+        );
+        let parent = handler
+            .store
+            .operation("op_service_finish_close")
+            .expect("parent operation reads")
+            .expect("parent intent exists");
+        assert_eq!(parent.outcome, boreal_store::OperationOutcome::Busy);
+        let result = handler
+            .store
+            .operation("op_service_finish_close:result")
+            .expect("result operation reads")
+            .expect("result operation exists");
+        assert_eq!(result.command, "finish_close.result");
         let _ = fs::remove_file(db);
     }
 
@@ -5663,4 +6394,4 @@ mod tests {
 }
 
 #[cfg(unix)]
-pub(crate) use unix::{request, run_service};
+pub(crate) use unix::{request, run_service, run_update};
