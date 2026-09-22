@@ -402,6 +402,22 @@ impl<'a> OperationJournal<'a> {
             .map(|event| audit::redacted_event(&event))
             .transpose()
     }
+
+    /// Reads an audit event only through the current project/database
+    /// identity. The operation ID remains the indexed lookup key; the
+    /// identity readback prevents a caller from using an unscoped audit
+    /// lookup to observe another project's operation history.
+    pub fn audit_event_in_context(
+        &self,
+        context: &IdentityContext,
+        operation_id: &str,
+    ) -> Result<Option<crate::AuditEventRecord>, StoreError> {
+        let readback = self.readback_in_context(context, operation_id)?;
+        if readback.is_none() {
+            return Ok(None);
+        }
+        self.audit_event(operation_id)
+    }
 }
 
 fn bounded_operation(operation: &OperationRecord) -> Result<OperationRecord, StoreError> {
@@ -445,6 +461,12 @@ fn validate_audit_identity_fields(audit: &AuditEventRecord) -> Result<(), StoreE
             "audit fence must be greater than zero".to_owned(),
         ));
     }
+    if audit.revision == 0 {
+        return Err(StoreError::Invalid(
+            "audit revision must be greater than zero".to_owned(),
+        ));
+    }
+    audit::validate_event_identity(&audit.event_type, &audit.subject_type)?;
     audit::redacted_payload(&audit.payload_json).map(|_| ())
 }
 

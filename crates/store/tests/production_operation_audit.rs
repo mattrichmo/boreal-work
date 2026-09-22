@@ -126,7 +126,7 @@ fn register_or_replay(
 }
 
 #[test]
-fn commit_before_response_replays_one_operation_and_audit() {
+fn crash_after_commit_before_response_replays_one_operation_and_audit() {
     let (store, context) = initialized_store();
     let bundle = OperationBundle::new(
         operation(
@@ -272,6 +272,154 @@ fn audit_failure_rolls_back_operation_and_identity() {
         .operation(&context, "op-atomic")
         .unwrap()
         .is_none());
+}
+
+#[test]
+fn semantic_mutation_and_audit_persistence_failure_roll_back_together() {
+    let (store, context) = initialized_store();
+    store
+        .execute_batch(
+            "INSERT INTO work_item
+               (work_id, project_id, kind, lifecycle, dispatch_policy,
+                acceptance_profile_id, acceptance_profile_version, title,
+                description, created_at, updated_at)
+             VALUES ('work-audit-atomic', 'p1', 'task', 'open', 'automatic',
+                     'focused', 1, 'Atomic audit target', '', 'unix-ms:0', 'unix-ms:0')",
+        )
+        .expect("target inserts");
+
+    let original = OperationBundle::new(
+        operation(
+            "op-audit-revision",
+            OperationOutcome::Changed,
+            2,
+            "agent-1",
+            "sha256:audit-revision",
+            Some("unix-ms:11"),
+        ),
+        Some(audit(
+            "op-audit-revision",
+            2,
+            "agent-1",
+            r#"{"state":"original"}"#,
+        )),
+    );
+    commit_bundle(&store, &context, &original).expect("original operation commits");
+
+    let before = store
+        .work("p1", "work-audit-atomic")
+        .expect("target reads")
+        .expect("target exists")
+        .dispatch_policy;
+    let failed = OperationBundle::new(
+        operation(
+            "op-audit-conflict",
+            OperationOutcome::Changed,
+            2,
+            "agent-1",
+            "sha256:audit-conflict",
+            Some("unix-ms:12"),
+        ),
+        Some(audit(
+            "op-audit-conflict",
+            2,
+            "agent-1",
+            r#"{"state":"conflicts with the original audit revision"}"#,
+        )),
+    );
+
+    store
+        .execute_batch("BEGIN IMMEDIATE")
+        .expect("transaction begins");
+    store
+        .execute_batch(
+            "UPDATE work_item
+             SET dispatch_policy = 'paused', updated_at = 'unix-ms:12'
+             WHERE project_id = 'p1' AND work_id = 'work-audit-atomic'",
+        )
+        .expect("semantic mutation is staged");
+    let error = OperationJournal::new(&store)
+        .append_in_transaction_with_identity(&context, &failed)
+        .expect_err("duplicate audit revision must fail the bundle");
+    assert!(matches!(error, StoreError::Constraint { .. }));
+    store
+        .execute_batch("ROLLBACK")
+        .expect("failed bundle rolls back its caller-owned transaction");
+
+    assert_eq!(
+        store
+            .work("p1", "work-audit-atomic")
+            .expect("target rereads")
+            .expect("target remains")
+            .dispatch_policy,
+        before
+    );
+    assert!(!store
+        .operation_exists("op-audit-conflict")
+        .expect("failed operation is absent"));
+    assert!(IdentityStore::new(&store)
+        .operation(&context, "op-audit-conflict")
+        .expect("failed identity readback")
+        .is_none());
+    assert_eq!(
+        store
+            .audit_event("op-audit-revision")
+            .expect("original audit reads")
+            .expect("original audit remains")
+            .payload_json,
+        r#"{"state":"original"}"#
+    );
+}
+
+#[test]
+fn rejected_action_is_recorded_without_target_mutation() {
+    let (store, context) = initialized_store();
+    store
+        .execute_batch(
+            "INSERT INTO work_item
+               (work_id, project_id, kind, lifecycle, dispatch_policy,
+                acceptance_profile_id, acceptance_profile_version, title,
+                description, created_at, updated_at)
+             VALUES ('work-rejected', 'p1', 'task', 'open', 'automatic',
+                     'focused', 1, 'Rejected target', '', 'unix-ms:0', 'unix-ms:0')",
+        )
+        .expect("target inserts");
+    let before = store.work("p1", "work-rejected").unwrap().unwrap();
+    let bundle = OperationBundle::new(
+        operation(
+            "op-rejected-recorded",
+            OperationOutcome::Rejected,
+            2,
+            "agent-1",
+            "sha256:rejected-recorded",
+            Some("unix-ms:11"),
+        ),
+        Some(audit(
+            "op-rejected-recorded",
+            2,
+            "agent-1",
+            r#"{"reason":"operator_required","mutated":false}"#,
+        )),
+    );
+
+    assert_eq!(
+        register_or_replay(&store, &context, &bundle)
+            .expect("rejected disposition commits")
+            .clone(),
+        OperationRegistration::Committed
+    );
+    let after = store.work("p1", "work-rejected").unwrap().unwrap();
+    assert_eq!(after.lifecycle, before.lifecycle);
+    assert_eq!(after.dispatch_policy, before.dispatch_policy);
+    assert_eq!(
+        store
+            .operation("op-rejected-recorded")
+            .unwrap()
+            .unwrap()
+            .outcome,
+        OperationOutcome::Rejected
+    );
+    assert!(store.audit_event("op-rejected-recorded").unwrap().is_some());
 }
 
 #[test]
@@ -557,6 +705,61 @@ fn register_or_replay_returns_one_bounded_original_outcome() {
 }
 
 #[test]
+fn exact_duplicate_payload_replays_without_a_second_audit_event() {
+    let (store, context) = initialized_store();
+    let bundle = OperationBundle::new(
+        operation(
+            "op-duplicate-payload",
+            OperationOutcome::Changed,
+            2,
+            "agent-1",
+            "sha256:duplicate-payload",
+            Some("unix-ms:11"),
+        ),
+        Some(audit(
+            "op-duplicate-payload",
+            2,
+            "agent-1",
+            r#"{"result":"same request"}"#,
+        )),
+    );
+
+    assert_eq!(
+        register_or_replay(&store, &context, &bundle).expect("first request commits"),
+        OperationRegistration::Committed
+    );
+    let original = store
+        .operation("op-duplicate-payload")
+        .unwrap()
+        .expect("operation exists");
+    let original_audit = store
+        .audit_event("op-duplicate-payload")
+        .unwrap()
+        .expect("audit exists");
+
+    let replay =
+        register_or_replay(&store, &context, &bundle).expect("exact duplicate payload replays");
+    let OperationRegistration::Replayed(readback) = replay else {
+        panic!("expected exact duplicate to replay");
+    };
+    assert_eq!(readback.operation, Some(original.clone()));
+    assert_eq!(
+        store
+            .audit_event_in_context(&context, "op-duplicate-payload")
+            .unwrap(),
+        Some(original_audit)
+    );
+    assert_eq!(
+        store
+            .operation("op-duplicate-payload")
+            .unwrap()
+            .expect("operation remains")
+            .request_digest,
+        original.request_digest
+    );
+}
+
+#[test]
 fn register_or_replay_rejects_digest_conflict_without_a_second_outcome() {
     let (store, context) = initialized_store();
     let first = OperationBundle::new(
@@ -609,6 +812,80 @@ fn register_or_replay_rejects_digest_conflict_without_a_second_outcome() {
             .payload_json,
         r#"{"reason":"original"}"#
     );
+}
+
+#[test]
+fn register_or_replay_rejects_actor_and_project_boundary_crossing() {
+    let (store, context) = initialized_store();
+    let first = OperationBundle::new(
+        operation(
+            "op-boundary",
+            OperationOutcome::Rejected,
+            2,
+            "agent-1",
+            "sha256:boundary",
+            Some("unix-ms:11"),
+        ),
+        Some(audit(
+            "op-boundary",
+            2,
+            "agent-1",
+            r#"{"reason":"boundary"}"#,
+        )),
+    );
+    register_or_replay(&store, &context, &first).expect("first boundary operation commits");
+
+    let mut actor_changed = first.operation.clone();
+    actor_changed.actor_id = "agent-2".to_owned();
+    let mut actor_audit = first.audit.clone().unwrap();
+    actor_audit.actor_id = "agent-2".to_owned();
+    let error = register_or_replay(
+        &store,
+        &context,
+        &OperationBundle::new(actor_changed, Some(actor_audit)),
+    )
+    .expect_err("actor change must conflict");
+    assert!(
+        matches!(error, StoreError::Conflict(message) if message.contains("immutable identity"))
+    );
+
+    store
+        .ensure_actor("agent-2", "agent", "credential-2", "Agent 2", "unix-ms:20")
+        .expect("foreign actor creates");
+    store
+        .create_project("p2", "unix-ms:20")
+        .expect("foreign project creates");
+    let foreign_context = IdentityStore::new(&store)
+        .bind_project(
+            "p2",
+            &WorkspaceBinding::new("/tmp/boreal-p2", "/tmp/boreal-p2", "sha256:binding-p2")
+                .expect("foreign binding is valid"),
+            "unix-ms:21",
+        )
+        .expect("foreign project binds");
+    let mut foreign_operation = first.operation.clone();
+    foreign_operation.project_id = "p2".to_owned();
+    foreign_operation.actor_id = "agent-2".to_owned();
+    let mut foreign_audit = first.audit.unwrap();
+    foreign_audit.project_id = "p2".to_owned();
+    foreign_audit.actor_id = "agent-2".to_owned();
+    let error = register_or_replay(
+        &store,
+        &foreign_context,
+        &OperationBundle::new(foreign_operation, Some(foreign_audit)),
+    )
+    .expect_err("project boundary crossing must not read or reuse p1 operation");
+    assert!(
+        matches!(error, StoreError::Conflict(message) if message.contains("operation identity"))
+    );
+    assert!(matches!(
+        OperationJournal::new(&store).readback_in_context(&foreign_context, "op-boundary"),
+        Err(StoreError::Conflict(message)) if message.contains("operation identity")
+    ));
+    assert!(OperationJournal::new(&store)
+        .audit_event_in_context(&context, "op-boundary")
+        .unwrap()
+        .is_some());
 }
 
 #[test]

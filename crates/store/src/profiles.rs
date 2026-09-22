@@ -137,9 +137,14 @@ impl ProfileVersion {
                 "acceptance profile definition is required".to_owned(),
             ));
         }
-        serde_json::from_str::<Value>(&self.definition_json).map_err(|_| {
+        let definition = serde_json::from_str::<Value>(&self.definition_json).map_err(|_| {
             StoreError::Invalid("acceptance profile definition is not JSON".to_owned())
         })?;
+        if !definition.is_object() {
+            return Err(StoreError::Invalid(
+                "acceptance profile definition must be an object".to_owned(),
+            ));
+        }
         if self.created_at.trim().is_empty() {
             return Err(StoreError::Invalid(
                 "acceptance profile created_at is required".to_owned(),
@@ -205,10 +210,15 @@ impl GateRequirementDeclaration {
         })?;
         let gate_id = required_string(object, "id", &format!("gate {index} id"))?;
         let kind = required_string(object, "kind", &format!("gate {gate_id} kind"))?;
-        let required = object
-            .get("required")
-            .and_then(Value::as_bool)
-            .unwrap_or(true);
+        let required = match object.get("required") {
+            None => true,
+            Some(Value::Bool(required)) => *required,
+            Some(_) => {
+                return Err(StoreError::Invalid(format!(
+                    "acceptance profile gate {gate_id} required flag is not boolean"
+                )))
+            }
+        };
         let verifier_policy = profile
             .get("verifier_policy")
             .and_then(Value::as_str)
@@ -218,17 +228,24 @@ impl GateRequirementDeclaration {
             .get("subject_rules")
             .cloned()
             .unwrap_or_else(|| Value::Object(Map::new()));
-        let observable_rules = profile
-            .get("required_observables")
-            .and_then(Value::as_array)
-            .map(|values| {
-                values
-                    .iter()
-                    .filter_map(Value::as_str)
-                    .map(str::to_owned)
-                    .collect()
-            })
-            .unwrap_or_default();
+        let observable_rules = match profile.get("required_observables") {
+            None => Vec::new(),
+            Some(Value::Array(values)) => values
+                .iter()
+                .map(|value| {
+                    value.as_str().map(str::to_owned).ok_or_else(|| {
+                        StoreError::Invalid(format!(
+                            "acceptance profile gate {gate_id} required observable is not a string"
+                        ))
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()?,
+            Some(_) => {
+                return Err(StoreError::Invalid(
+                    "acceptance profile required_observables is not an array".to_owned(),
+                ))
+            }
+        };
         let review_policy = profile
             .get("review_policy")
             .cloned()
@@ -502,6 +519,7 @@ impl PinnedRequirements {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn from_stored_row(
         project_id: String,
         work_id: String,
@@ -804,11 +822,11 @@ impl<'a> ProfileStore<'a> {
         self.store.execute_batch(PINNED_REQUIREMENTS_SCHEMA_SQL)
     }
 
-    /// Compatibility registration for existing callers. The root integration
-    /// must replace its current conflict-blind insert with the immutable
-    /// `ProfileRegistry` check and durable pinned-requirement write.
+    /// Compatibility registration for existing callers. Validate the complete
+    /// immutable profile before delegating to the root's transaction-owned
+    /// profile persistence and legacy reconstruction boundary.
     pub fn register(&self, profile: &ProfileVersion) -> Result<(), StoreError> {
-        profile.validate_shape()?;
+        self.validate_for_immutable_registration(profile)?;
         self.store.ensure_acceptance_profile(
             &profile.profile_id,
             profile.version,
@@ -822,7 +840,14 @@ impl<'a> ProfileStore<'a> {
         &self,
         profile: &ProfileVersion,
     ) -> Result<(), StoreError> {
-        profile.validate_content_digest()
+        profile.validate_content_digest()?;
+        if profile.canonical_definition()? == "{}" {
+            return Err(StoreError::Conflict(format!(
+                "acceptance profile {}/{} has no authoritative definition",
+                profile.profile_id, profile.version
+            )));
+        }
+        Ok(())
     }
 
     /// Persists one immutable requirement snapshot for a project/work proof
@@ -875,6 +900,7 @@ impl<'a> ProfileStore<'a> {
                 requirements.project_id, requirements.work_id, requirements.proof_revision
             )));
         }
+        self.validate_persisted_profile(&requirements.profile)?;
 
         let mut header = self.store.prepare(
             "INSERT INTO boreal_pinned_requirement
@@ -955,7 +981,7 @@ impl<'a> ProfileStore<'a> {
         if statement.step()? != SQLITE_ROW {
             return Ok(None);
         }
-        Ok(Some(PinnedRequirements::from_stored_row(
+        let requirements = PinnedRequirements::from_stored_row(
             statement.column_text(0)?,
             statement.column_text(1)?,
             statement.column_u64(2)?,
@@ -966,7 +992,141 @@ impl<'a> ProfileStore<'a> {
             statement.column_text(7)?,
             statement.column_text(8)?,
             statement.column_text(9)?,
-        )?))
+        )?;
+        self.validate_persisted_profile(&requirements.profile)?;
+        self.validate_pinned_requirement_children(&requirements)?;
+        Ok(Some(requirements))
+    }
+
+    fn validate_persisted_profile(&self, identity: &ProfileIdentity) -> Result<(), StoreError> {
+        let mut statement = self.store.prepare(
+            "SELECT policy_digest, definition_json
+             FROM acceptance_profile
+             WHERE profile_id = ?1 AND version = ?2",
+        )?;
+        statement.bind_text(1, &identity.profile_id)?;
+        statement.bind_i64(2, identity.version)?;
+        if statement.step()? != SQLITE_ROW {
+            return Err(StoreError::Corrupt(format!(
+                "pinned requirements reference missing acceptance profile {}/{}",
+                identity.profile_id, identity.version
+            )));
+        }
+        let stored_digest = statement.column_text(0)?;
+        let stored_definition = statement.column_text(1)?;
+        let profile = ProfileVersion::new(
+            identity.profile_id.clone(),
+            identity.version,
+            stored_digest,
+            stored_definition,
+            "persisted",
+        )
+        .map_err(|error| {
+            StoreError::Corrupt(format!("acceptance profile is malformed: {error}"))
+        })?;
+        if profile.canonical_definition()? == "{}" {
+            return Err(StoreError::Corrupt(format!(
+                "acceptance profile {}/{} is quarantined: legacy definition is empty",
+                identity.profile_id, identity.version
+            )));
+        }
+        profile.validate_content_digest().map_err(|error| {
+            StoreError::Corrupt(format!(
+                "acceptance profile {}/{} content is not immutable: {error}",
+                identity.profile_id, identity.version
+            ))
+        })?;
+        if profile.policy_digest != identity.policy_digest {
+            return Err(StoreError::Corrupt(format!(
+                "pinned requirements profile digest drift for {}/{}: pinned {}, stored {}",
+                identity.profile_id,
+                identity.version,
+                identity.policy_digest,
+                profile.policy_digest
+            )));
+        }
+        Ok(())
+    }
+
+    fn validate_pinned_requirement_children(
+        &self,
+        requirements: &PinnedRequirements,
+    ) -> Result<(), StoreError> {
+        let expected: BTreeMap<_, _> = requirements
+            .declarations
+            .iter()
+            .map(|declaration| (declaration.requirement_id.clone(), declaration))
+            .collect();
+        let expected_provenance = canonical_value(&serde_json::json!({
+            "profile_id": requirements.provenance.profile_id,
+            "profile_version": requirements.provenance.profile_version,
+            "profile_digest": requirements.provenance.profile_digest,
+            "resolved_at": requirements.provenance.resolved_at,
+            "source": requirements.provenance.source,
+        }));
+        let mut seen = BTreeSet::new();
+        let mut statement = self.store.prepare(
+            "SELECT requirement_id, gate_id, kind, required, subject_kind,
+                    profile_id, profile_version, profile_digest, provenance_json,
+                    declaration_json
+             FROM boreal_pinned_requirement_gate
+             WHERE project_id = ?1 AND work_id = ?2 AND proof_revision = ?3
+             ORDER BY requirement_id",
+        )?;
+        statement.bind_text(1, &requirements.project_id)?;
+        statement.bind_text(2, &requirements.work_id)?;
+        statement.bind_i64(3, requirements.proof_revision)?;
+        while statement.step()? == SQLITE_ROW {
+            let requirement_id = statement.column_text(0)?;
+            let expected_declaration = *expected.get(&requirement_id).ok_or_else(|| {
+                StoreError::Corrupt(format!(
+                    "pinned requirement child {requirement_id} is not in the immutable header"
+                ))
+            })?;
+            let child_subject = statement.column_text(4)?;
+            let child_profile_id = statement.column_text(5)?;
+            let child_profile_version = statement.column_u64(6)?;
+            let child_profile_digest = statement.column_text(7)?;
+            let child_provenance = canonical_json(&statement.column_text(8)?).map_err(|error| {
+                StoreError::Corrupt(format!(
+                    "pinned requirement {requirement_id} provenance is malformed: {error}"
+                ))
+            })?;
+            let child_declaration: Value = serde_json::from_str(&statement.column_text(9)?)
+                .map_err(|_| {
+                    StoreError::Corrupt(format!(
+                        "pinned requirement {requirement_id} declaration is malformed"
+                    ))
+                })?;
+            let child_declaration =
+                GateRequirementDeclaration::from_persisted_value(&child_declaration, 0)?;
+            if !seen.insert(requirement_id.clone())
+                || child_declaration != *expected_declaration
+                || statement.column_text(1)? != expected_declaration.gate_id
+                || statement.column_text(2)? != expected_declaration.kind
+                || (statement.column_i64(3)? == 1) != expected_declaration.required
+                || child_subject != requirements.subject_kind.as_str()
+                || child_profile_id != requirements.profile.profile_id
+                || child_profile_version != requirements.profile.version
+                || child_profile_digest != requirements.profile.policy_digest
+                || child_provenance != expected_provenance
+            {
+                return Err(StoreError::Corrupt(format!(
+                    "pinned requirement child {requirement_id} drifted from its immutable header"
+                )));
+            }
+        }
+        if seen.len() != expected.len() {
+            let missing = expected
+                .keys()
+                .find(|requirement_id| !seen.contains(*requirement_id))
+                .cloned()
+                .unwrap_or_else(|| "unknown".to_owned());
+            return Err(StoreError::Corrupt(format!(
+                "pinned requirement child {missing} is missing from the immutable declaration set"
+            )));
+        }
+        Ok(())
     }
 }
 

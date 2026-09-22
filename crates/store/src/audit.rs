@@ -12,6 +12,67 @@ const MAX_STRING_BYTES: usize = 4096;
 const MAX_ARRAY_ITEMS: usize = 256;
 const MAX_NESTING_DEPTH: usize = 32;
 
+const EVENT_TYPES: &[&str] = &[
+    "work.created",
+    "work.published",
+    "work.closed",
+    "work.blocked",
+    "work.paused",
+    "work.resumed",
+    "work.cancelled",
+    "work.reopened",
+    "attempt.claimed",
+    "attempt.accepted",
+    "attempt.started",
+    "attempt.submitted",
+    "attempt.released",
+    "attempt.failed",
+    "attempt.expiry_pending",
+    "attempt.expired",
+    "expiry.resolved",
+    "lease.renewed",
+    "receipt.recorded",
+    "receipt.rejected",
+    "review.accepted",
+    "review.rejected",
+    "close.requested",
+    "gate.satisfied",
+    "hold.resolved",
+    "repair.correction",
+    "repair.supersession",
+];
+
+const SUBJECT_TYPES: &[&str] = &[
+    "work",
+    "attempt",
+    "receipt",
+    "review",
+    "gate",
+    "hold",
+    "dependency",
+    "summary",
+    "operation",
+    "project",
+];
+
+/// Validates the schema-owned identity vocabulary before an operation row is
+/// inserted. SQLite constraints remain authoritative, but prevalidation keeps
+/// malformed audit metadata from creating a partial in-transaction bundle
+/// for callers that forget to handle an error before their rollback boundary.
+pub fn validate_event_identity(event_type: &str, subject_type: &str) -> Result<(), StoreError> {
+    if !EVENT_TYPES.contains(&event_type) {
+        return Err(StoreError::Invalid(format!(
+            "audit event type is not registered: {event_type}"
+        )));
+    }
+    if !SUBJECT_TYPES.contains(&subject_type) {
+        return Err(StoreError::Invalid(format!(
+            "audit subject type is not registered: {subject_type}"
+        )));
+    }
+    Ok(())
+}
+
 /// Redacts likely credential and secret fields case-insensitively.
 pub fn redact_value(value: &Value) -> Value {
     redact_value_at_depth(value, 0)

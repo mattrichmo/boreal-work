@@ -1,6 +1,6 @@
 use boreal_application::{
-    ExternalEffectAdapter, ExternalEffectReadback, ExternalEffectRequest, ExternalEffectResolution,
-    WorkApplication,
+    ExternalEffectAdapter, ExternalEffectObservation, ExternalEffectReadback,
+    ExternalEffectRequest, ExternalEffectResolution, WorkApplication,
 };
 use boreal_domain::{
     AcceptanceProfile, DispatchPolicy, PersistedLifecycle, ProjectId, WorkId, WorkItem, WorkKind,
@@ -9,6 +9,11 @@ use boreal_store::{
     identity::{DatabaseIdentity, IdentityContext, IdentityStore, WorkspaceBinding},
     operations::{OperationBundle, OperationJournal},
     AuditEventRecord, OperationOutcome, OperationRecord, SqliteStore, StoreError,
+};
+use std::{
+    fs,
+    path::Path,
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 const SCHEMA: &str = include_str!("../../../project/spec/schema-v2.sql");
@@ -73,7 +78,12 @@ fn request(project_id: &ProjectId) -> ExternalEffectRequest {
 }
 
 fn bound_setup() -> (SqliteStore, IdentityContext, ProjectId) {
-    let store = SqliteStore::open_in_memory(PRODUCTION_SCHEMA).expect("open production store");
+    bound_setup_with_store(
+        SqliteStore::open_in_memory(PRODUCTION_SCHEMA).expect("open production store"),
+    )
+}
+
+fn bound_setup_with_store(store: SqliteStore) -> (SqliteStore, IdentityContext, ProjectId) {
     let project = ProjectId::new("project-bound-external-job");
     store
         .create_project(project.as_str(), "unix-ms:0")
@@ -81,12 +91,16 @@ fn bound_setup() -> (SqliteStore, IdentityContext, ProjectId) {
     store
         .ensure_actor("agent-1", "agent", "credential", "Agent 1", "unix-ms:0")
         .expect("actor creates");
-    IdentityStore::new(&store)
-        .install(
-            &DatabaseIdentity::new("database-bound-external-job", 1).expect("database identity"),
-            "unix-ms:1",
-        )
-        .expect("identity installs");
+    let identities = IdentityStore::new(&store);
+    if identities.database_identity().is_err() {
+        identities
+            .install(
+                &DatabaseIdentity::new("database-bound-external-job", 1)
+                    .expect("database identity"),
+                "unix-ms:1",
+            )
+            .expect("identity installs");
+    }
     let binding = WorkspaceBinding::new(
         "/tmp/boreal-bound-external-job",
         "/tmp/boreal-bound-external-job",
@@ -136,6 +150,17 @@ fn bound_setup() -> (SqliteStore, IdentityContext, ProjectId) {
         .expect("operation and audit commit");
     store.execute_batch("COMMIT").expect("transaction commits");
     (store, context, project)
+}
+
+fn bound_request(project: &ProjectId) -> ExternalEffectRequest {
+    let mut request = request(project);
+    request.job_id = "job-bound-external".to_owned();
+    request.operation_id = "op-bound-external-job".to_owned();
+    request.subject_type = "project".to_owned();
+    request.subject_id = project.as_str().to_owned();
+    request.session_id = None;
+    request.request_digest = "sha256:bound-external-job".to_owned();
+    request
 }
 
 #[test]
@@ -341,13 +366,7 @@ fn external_effect_rejects_empty_admission_identity() {
 #[test]
 fn identity_bound_adapter_uses_current_store_authority() {
     let (store, context, project) = bound_setup();
-    let mut request = request(&project);
-    request.job_id = "job-bound-external".to_owned();
-    request.operation_id = "op-bound-external-job".to_owned();
-    request.subject_type = "project".to_owned();
-    request.subject_id = project.as_str().to_owned();
-    request.session_id = None;
-    request.request_digest = "sha256:bound-external-job".to_owned();
+    let request = bound_request(&project);
     let adapter = ExternalEffectAdapter::new_with_identity(&store, &context);
 
     let admitted = adapter.admit(&request).expect("identity-bound admit");
@@ -389,4 +408,139 @@ fn identity_bound_adapter_uses_current_store_authority() {
         legacy.admit(&request),
         Err(StoreError::Conflict(message)) if message.contains("identity-bound API")
     ));
+}
+
+#[test]
+fn external_effect_execute_admits_before_external_work_and_reconciles() {
+    let (store, project) = setup();
+    let adapter = ExternalEffectAdapter::new(&store);
+    let mut request = request(&project);
+    request.job_id = "job-execute-verifier".to_owned();
+    request.operation_id = "op-execute-verifier".to_owned();
+
+    let outcome = adapter
+        .execute(&request, "unix-ms:4", |running| {
+            assert_eq!(running.stage, "running");
+            assert_eq!(running.operation_id, request.operation_id);
+            assert_eq!(running.project_id, request.project_id);
+            Ok(ExternalEffectObservation::Reconciled {
+                side_effect_ref: "process:execute-verifier".to_owned(),
+                result_digest: "sha256:execute-result".to_owned(),
+                observed_at: "unix-ms:7".to_owned(),
+            })
+        })
+        .expect("execute and reconcile verifier job");
+
+    assert!(matches!(outcome, ExternalEffectResolution::Reconciled(_)));
+    assert!(outcome.is_resolved());
+    assert_eq!(
+        outcome.record().side_effect_ref.as_deref(),
+        Some("process:execute-verifier")
+    );
+}
+
+#[test]
+fn external_effect_execute_pending_remains_unresolved_for_readback() {
+    let (store, project) = setup();
+    let adapter = ExternalEffectAdapter::new(&store);
+    let mut request = request(&project);
+    request.job_id = "job-pending-verifier".to_owned();
+    request.operation_id = "op-pending-verifier".to_owned();
+
+    let outcome = adapter
+        .execute(&request, "unix-ms:4", |_| {
+            Ok(ExternalEffectObservation::Pending)
+        })
+        .expect("leave verifier job pending");
+
+    assert!(outcome.is_pending());
+    assert!(!outcome.is_resolved());
+    assert!(matches!(
+        adapter
+            .readback(
+                &request.project_id,
+                &request.operation_id,
+                &request.request_digest,
+            )
+            .expect("read back pending verifier job"),
+        ExternalEffectResolution::Pending(_)
+    ));
+}
+
+#[test]
+fn external_effect_execute_rejects_without_claiming_external_success() {
+    let (store, project) = setup();
+    let adapter = ExternalEffectAdapter::new(&store);
+    let mut request = request(&project);
+    request.job_id = "job-rejected-verifier".to_owned();
+    request.operation_id = "op-rejected-verifier".to_owned();
+
+    let admitted = adapter.admit(&request).expect("admit verifier job");
+    assert!(matches!(admitted, ExternalEffectResolution::Pending(_)));
+    let outcome = adapter
+        .reject(
+            &request.project_id,
+            &request.job_id,
+            "unix-ms:5",
+            "verifier policy denied execution",
+        )
+        .expect("record rejected verifier job");
+
+    assert!(outcome.is_rejected());
+    assert!(!outcome.is_resolved());
+    assert_eq!(
+        outcome.record().error_message.as_deref(),
+        Some("verifier policy denied execution")
+    );
+}
+
+#[test]
+fn external_effect_restart_preserves_running_job_for_readback() {
+    let path = std::env::temp_dir().join(format!(
+        "boreal-t11-external-restart-{}-{}.db",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos()
+    ));
+    let (store, context, project) = bound_setup_with_store(
+        SqliteStore::open(&path, PRODUCTION_SCHEMA).expect("open restart store"),
+    );
+    let adapter = ExternalEffectAdapter::new_with_identity(&store, &context);
+    let request = bound_request(&project);
+    adapter.admit(&request).expect("register durable job");
+    adapter
+        .start(project.as_str(), &request.job_id, "unix-ms:4")
+        .expect("start durable job");
+    drop(adapter);
+    drop(context);
+    drop(store);
+
+    let reopened = SqliteStore::open(&path, PRODUCTION_SCHEMA).expect("reopen restart store");
+    let reopened_context = IdentityStore::new(&reopened)
+        .context(project.as_str())
+        .expect("read identity after restart");
+    let restarted = ExternalEffectAdapter::new_with_identity(&reopened, &reopened_context);
+    let readback = restarted
+        .readback(
+            project.as_str(),
+            &request.operation_id,
+            &request.request_digest,
+        )
+        .expect("read back running job after restart");
+    assert!(readback.is_pending());
+    assert_eq!(readback.record().stage, "running");
+
+    drop(restarted);
+    drop(reopened_context);
+    drop(reopened);
+    for suffix in ["", "-wal", "-shm"] {
+        let candidate = if suffix.is_empty() {
+            path.clone()
+        } else {
+            Path::new(&format!("{}{}", path.display(), suffix)).to_path_buf()
+        };
+        let _ = fs::remove_file(candidate);
+    }
 }

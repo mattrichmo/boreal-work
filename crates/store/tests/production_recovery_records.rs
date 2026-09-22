@@ -7,10 +7,13 @@
 
 use boreal_store::{
     identity::{DatabaseIdentity, IdentityStore, WorkspaceBinding},
-    jobs, recovery, SqliteStore,
+    jobs, recovery, AttemptMutationKind, AttemptMutationRequest, SqliteStore,
 };
+use std::path::Path;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 const SCHEMA: &str = include_str!("../../../project/spec/schema-v2.sql");
+const PRODUCTION_SCHEMA: &str = include_str!("../../../project/spec/schema-production.sql");
 
 fn store() -> SqliteStore {
     let store = SqliteStore::open_in_memory(SCHEMA).expect("schema opens");
@@ -28,7 +31,10 @@ fn store() -> SqliteStore {
         .expect("project initializes");
     store
         .execute_batch(
-            "INSERT INTO work_item
+            "INSERT OR IGNORE INTO acceptance_profile
+             (profile_id, version, policy_digest, definition_json, created_at)
+             VALUES ('focused', 1, 'sha256:focused', '{}', 'unix-ms:0');
+             INSERT INTO work_item
              (work_id, project_id, kind, lifecycle, dispatch_policy,
               acceptance_profile_id, acceptance_profile_version, title,
               description, created_at, updated_at)
@@ -114,6 +120,48 @@ fn job(id: &str) -> jobs::ExternalJobInput {
     }
 }
 
+fn production_file_store(path: &Path) -> SqliteStore {
+    let store = SqliteStore::open(path, PRODUCTION_SCHEMA).expect("production database opens");
+    store
+        .create_project("p1", "unix-ms:0")
+        .expect("project creates");
+    store
+        .ensure_actor(
+            "operator-1",
+            "operator",
+            "credential-1",
+            "Operator",
+            "unix-ms:0",
+        )
+        .expect("actor creates");
+    store
+        .execute_batch(
+            "INSERT INTO acceptance_profile
+             (profile_id, version, policy_digest, definition_json, created_at)
+             VALUES ('focused', 1, 'sha256:focused', '{}', 'unix-ms:0');
+             INSERT INTO work_item
+             (work_id, project_id, kind, lifecycle, dispatch_policy,
+              acceptance_profile_id, acceptance_profile_version, title,
+              description, created_at, updated_at)
+             VALUES ('w1', 'p1', 'task', 'open', 'automatic', 'focused', 1,
+                     'Restart recovery work', '', 'unix-ms:0', 'unix-ms:0');
+             INSERT INTO session
+             (session_id, actor_id, harness_id, state, started_at, ended_at)
+             VALUES ('session-1', 'operator-1', 'harness-1', 'unknown', 'unix-ms:0', NULL);
+             INSERT INTO attempt
+             (attempt_id, work_id, actor_id, harness_id, session_id, fence,
+              current, state, claimed_at, accepted_at, lease_deadline,
+              max_attempt_deadline, review_required_after_expiry,
+              config_identity, binary_identity, protocol_version, schema_version)
+             VALUES ('a1', 'w1', 'operator-1', 'harness-1', 'session-1', 1,
+                     0, 'expired', 'unix-ms:0', 'unix-ms:0', 'unix-ms:2000',
+                     'unix-ms:4000', 1, 'config-1', 'binary-1',
+                     'boreal.protocol/2', 2);",
+        )
+        .expect("restart fixture rows insert");
+    store
+}
+
 #[test]
 fn cleared_current_attempt_retains_unresolved_recovery() {
     let store = store();
@@ -133,6 +181,46 @@ fn cleared_current_attempt_retains_unresolved_recovery() {
             .collect::<Vec<_>>(),
         vec!["ob-1"]
     );
+}
+
+#[test]
+fn canonical_expiry_mutation_persists_recovery_before_clearing_current() {
+    let store = store();
+    let result = store
+        .apply_attempt_mutation(&AttemptMutationRequest {
+            project_id: "p1".to_owned(),
+            work_id: "w1".to_owned(),
+            attempt_id: "a1".to_owned(),
+            actor_id: "operator-1".to_owned(),
+            harness_id: Some("harness-1".to_owned()),
+            session_id: Some("session-1".to_owned()),
+            fence: 1,
+            operation_id: "op-expire-recovery".to_owned(),
+            request_digest: "sha256:op-expire-recovery".to_owned(),
+            at: "unix-ms:4000".to_owned(),
+            expected_project_revision: None,
+            expected_work_revision: None,
+            expected_attempt_revision: None,
+            expected_phase: Some(boreal_domain::AttemptPhase::Running),
+            expected_lease_deadline: None,
+            expected_hard_deadline: None,
+            mutation: AttemptMutationKind::Expire {
+                stop_confirmed: true,
+            },
+            reason: Some("runtime stopped after hard deadline".to_owned()),
+        })
+        .expect("canonical expiry commits");
+    assert_eq!(result.phase, boreal_domain::AttemptPhase::Expired);
+    assert!(matches!(
+        store.current_attempt("p1", "a1"),
+        Err(boreal_store::StoreError::NotFound { .. })
+    ));
+    let obligations = store
+        .list_unresolved_recovery_obligations("p1", None, 10)
+        .expect("expiry recovery reads back");
+    assert_eq!(obligations.len(), 1);
+    assert_eq!(obligations[0].attempt_id.as_deref(), Some("a1"));
+    assert_eq!(obligations[0].reason, "expired");
 }
 
 #[test]
@@ -260,6 +348,57 @@ fn crash_after_external_effect_requires_readback_and_replays_idempotently() {
 }
 
 #[test]
+fn readback_marker_is_retry_safe_after_finished_effect_and_preserves_identity() {
+    let store = store();
+    let input = job("job-finished");
+    store.register_external_job(&input).expect("register job");
+    for (from, to, side_effect_ref) in [
+        ("registered", "admitted", None),
+        ("admitted", "running", None),
+        ("running", "side_effect_started", Some("verifier-run-2")),
+        (
+            "side_effect_started",
+            "side_effect_finished",
+            Some("verifier-run-2"),
+        ),
+    ] {
+        store
+            .advance_external_job(&jobs::ExternalJobTransitionInput {
+                project_id: "p1".to_owned(),
+                job_id: "job-finished".to_owned(),
+                expected_stage: from.to_owned(),
+                next_stage: to.to_owned(),
+                at: format!("unix-ms:{to}"),
+                side_effect_ref: side_effect_ref.map(str::to_owned),
+                result_digest: None,
+                error_message: None,
+            })
+            .expect("effect transition");
+    }
+    let first = store
+        .mark_external_job_readback_required("p1", "job-finished", "verifier-run-2", "unix-ms:5")
+        .expect("mark finished effect for readback");
+    let replay = store
+        .mark_external_job_readback_required("p1", "job-finished", "verifier-run-2", "unix-ms:6")
+        .expect("repeat readback marker");
+    assert_eq!(replay, first, "retry must read back the original marker");
+    assert!(matches!(
+        store.advance_external_job(&jobs::ExternalJobTransitionInput {
+            project_id: "p1".to_owned(),
+            job_id: "job-finished".to_owned(),
+            expected_stage: "readback_required".to_owned(),
+            next_stage: "reconciled".to_owned(),
+            at: "unix-ms:7".to_owned(),
+            side_effect_ref: Some("different-effect".to_owned()),
+            result_digest: Some("sha256:result".to_owned()),
+            error_message: None,
+        }),
+        Err(boreal_store::StoreError::Conflict(message))
+            if message.contains("side-effect identity")
+    ));
+}
+
+#[test]
 fn terminal_attempt_and_recovery_decisions_are_retained() {
     let store = store();
     store
@@ -282,6 +421,122 @@ fn terminal_attempt_and_recovery_decisions_are_retained() {
     let history = store.recovery_decisions("p1", "ob-1", 10).unwrap();
     assert_eq!(history.len(), 1);
     assert_eq!(history[0].reason, "process group confirmed stopped");
+}
+
+#[test]
+fn resource_release_requires_acknowledgement_and_is_retry_safe() {
+    let store = store();
+    store
+        .reserve_resource(&recovery::ResourceReservationInput {
+            reservation_id: "res-ack".to_owned(),
+            project_id: "p1".to_owned(),
+            work_id: "w1".to_owned(),
+            attempt_id: "a1".to_owned(),
+            fence: 1,
+            resource_key: "worktree:/tmp/ack".to_owned(),
+            resource_kind: "worktree".to_owned(),
+            owner_actor_id: "agent-1".to_owned(),
+            created_at: "unix-ms:1".to_owned(),
+        })
+        .expect("resource reserves");
+    let pending = store
+        .request_resource_release(
+            "p1",
+            "res-ack",
+            "release-request-1",
+            "operator-1",
+            "stop-request-1",
+            "unix-ms:2",
+        )
+        .expect("release request persists");
+    assert_eq!(pending.state, "release_pending");
+    assert_eq!(
+        store.list_live_resources("p1", None, 10).unwrap().len(),
+        1,
+        "unacknowledged resources remain unavailable"
+    );
+    let pending_replay = store
+        .request_resource_release(
+            "p1",
+            "res-ack",
+            "release-request-1",
+            "operator-1",
+            "stop-request-1",
+            "unix-ms:3",
+        )
+        .expect("duplicate release request reads back");
+    assert_eq!(pending_replay, pending);
+    let released = store
+        .acknowledge_resource_release(
+            "p1",
+            "res-ack",
+            "release-ack-1",
+            "operator-1",
+            "process-stopped-1",
+            "unix-ms:4",
+        )
+        .expect("release acknowledgement persists");
+    assert_eq!(released.state, "released");
+    assert_eq!(released.release_ack_id.as_deref(), Some("release-ack-1"));
+    let ack_replay = store
+        .acknowledge_resource_release(
+            "p1",
+            "res-ack",
+            "release-ack-1",
+            "operator-1",
+            "process-stopped-1",
+            "unix-ms:5",
+        )
+        .expect("duplicate acknowledgement reads back");
+    assert_eq!(ack_replay, released);
+    assert!(store
+        .list_live_resources("p1", None, 10)
+        .unwrap()
+        .is_empty());
+}
+
+#[test]
+fn unresolved_recovery_survives_production_restart() {
+    let suffix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("clock after epoch")
+        .as_nanos();
+    let path = std::env::temp_dir().join(format!(
+        "boreal-production-recovery-{}-{suffix}.sqlite",
+        std::process::id()
+    ));
+    {
+        let store = production_file_store(&path);
+        store
+            .create_recovery_obligation(&recovery::RecoveryObligationInput {
+                obligation_id: "ob-restart".to_owned(),
+                project_id: "p1".to_owned(),
+                work_id: "w1".to_owned(),
+                attempt_id: Some("a1".to_owned()),
+                fence: Some(1),
+                reason: "expired".to_owned(),
+                resource_state: "unknown".to_owned(),
+                owner_actor_id: Some("operator-1".to_owned()),
+                next_action: "reconcile_stop".to_owned(),
+                created_at: "unix-ms:1".to_owned(),
+            })
+            .expect("recovery obligation persists before crash");
+    }
+    let reopened = SqliteStore::open(&path, PRODUCTION_SCHEMA).expect("production restarts");
+    let obligations = reopened
+        .list_unresolved_recovery_obligations("p1", None, 10)
+        .expect("restart reads unresolved recovery");
+    assert_eq!(obligations.len(), 1);
+    assert_eq!(obligations[0].obligation_id, "ob-restart");
+    assert_eq!(obligations[0].resource_state, "unknown");
+    assert!(matches!(
+        reopened.current_attempt("p1", "a1"),
+        Err(boreal_store::StoreError::NotFound { .. })
+    ));
+    drop(reopened);
+    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_file(path.with_extension("sqlite-wal"));
+    let _ = std::fs::remove_file(path.with_extension("sqlite-shm"));
 }
 
 #[test]

@@ -654,54 +654,38 @@ impl SqliteStore {
         &self,
         input: &ResourceReservationInput,
     ) -> Result<ResourceReservationRecord, StoreError> {
-        validate_resource_input(input)?;
-        let expected_project = self.project_for_work(&input.work_id)?;
-        if expected_project != input.project_id {
-            return Err(StoreError::WrongSubject {
-                expected: input.project_id.clone(),
-                actual: expected_project,
-            });
-        }
-        let attempt = self
-            .attempt_record(&input.attempt_id, false)?
-            .ok_or_else(|| StoreError::NotFound {
-                entity: "attempt",
-                id: input.attempt_id.clone(),
-            })?;
-        if attempt.project_id != input.project_id
-            || attempt.work_id != input.work_id
-            || attempt.fence != input.fence
-        {
-            return Err(StoreError::WrongSubject {
-                expected: format!("{}/{}/{}", input.project_id, input.work_id, input.fence),
-                actual: format!(
-                    "{}/{}/{}",
-                    attempt.project_id, attempt.work_id, attempt.fence
-                ),
-            });
-        }
-        with_transaction(self, || {
-            let mut statement = self.prepare(
-                "INSERT INTO boreal_resource_reservation
-                 (reservation_id, project_id, work_id, attempt_id, fence, resource_key,
-                  resource_kind, state, owner_actor_id, created_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'active', ?8, ?9)",
-            )?;
-            statement.bind_text(1, &input.reservation_id)?;
-            statement.bind_text(2, &input.project_id)?;
-            statement.bind_text(3, &input.work_id)?;
-            statement.bind_text(4, &input.attempt_id)?;
-            statement.bind_i64(5, input.fence)?;
-            statement.bind_text(6, &input.resource_key)?;
-            statement.bind_text(7, &input.resource_kind)?;
-            statement.bind_text(8, &input.owner_actor_id)?;
-            statement.bind_text(9, &input.created_at)?;
-            statement.run()?;
-            self.resource_reservation(&input.project_id, &input.reservation_id)?
-                .ok_or_else(|| {
-                    StoreError::Corrupt("resource reservation disappeared after insert".to_owned())
-                })
-        })
+        validate_resource_reservation_subject(self, input)?;
+        with_transaction(self, || self.reserve_resource_in_transaction(input))
+    }
+
+    /// Inserts the durable resource reservation inside a caller-owned
+    /// lifecycle transaction. Claim uses this form so attempt ownership and
+    /// resource ownership cannot commit independently.
+    pub(crate) fn reserve_resource_in_transaction(
+        &self,
+        input: &ResourceReservationInput,
+    ) -> Result<ResourceReservationRecord, StoreError> {
+        validate_resource_reservation_subject(self, input)?;
+        let mut statement = self.prepare(
+            "INSERT INTO boreal_resource_reservation
+             (reservation_id, project_id, work_id, attempt_id, fence, resource_key,
+              resource_kind, state, owner_actor_id, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'active', ?8, ?9)",
+        )?;
+        statement.bind_text(1, &input.reservation_id)?;
+        statement.bind_text(2, &input.project_id)?;
+        statement.bind_text(3, &input.work_id)?;
+        statement.bind_text(4, &input.attempt_id)?;
+        statement.bind_i64(5, input.fence)?;
+        statement.bind_text(6, &input.resource_key)?;
+        statement.bind_text(7, &input.resource_kind)?;
+        statement.bind_text(8, &input.owner_actor_id)?;
+        statement.bind_text(9, &input.created_at)?;
+        statement.run()?;
+        self.resource_reservation(&input.project_id, &input.reservation_id)?
+            .ok_or_else(|| {
+                StoreError::Corrupt("resource reservation disappeared after insert".to_owned())
+            })
     }
 
     pub fn resource_reservation(
@@ -742,43 +726,78 @@ impl SqliteStore {
             require_text(value, label)?;
         }
         with_transaction(self, || {
-            let current = self
-                .resource_reservation(project_id, reservation_id)?
-                .ok_or_else(|| StoreError::NotFound {
-                    entity: "resource_reservation",
-                    id: reservation_id.to_owned(),
-                })?;
-            if current.state == "released" {
-                return Err(StoreError::Conflict(
-                    "released resource cannot be released again".to_owned(),
-                ));
-            }
-            self.insert_release_event(&ResourceReleaseEventInput {
-                event_id,
+            self.request_resource_release_in_transaction(
                 project_id,
                 reservation_id,
-                state: "requested",
+                event_id,
                 actor_id,
                 evidence_ref,
                 at,
-            })?;
-            let mut update = self.prepare(
-                "UPDATE boreal_resource_reservation
-                 SET state = 'release_pending', release_requested_at = ?1
-                 WHERE project_id = ?2 AND reservation_id = ?3
-                   AND state IN ('active','unknown')",
-            )?;
-            update.bind_text(1, at)?;
-            update.bind_text(2, project_id)?;
-            update.bind_text(3, reservation_id)?;
-            update.run()?;
-            self.resource_reservation(project_id, reservation_id)?
-                .ok_or_else(|| {
-                    StoreError::Corrupt(
-                        "resource reservation disappeared after release request".to_owned(),
-                    )
-                })
+            )
         })
+    }
+
+    pub(crate) fn request_resource_release_in_transaction(
+        &self,
+        project_id: &str,
+        reservation_id: &str,
+        event_id: &str,
+        actor_id: &str,
+        evidence_ref: &str,
+        at: &str,
+    ) -> Result<ResourceReservationRecord, StoreError> {
+        let current = self
+            .resource_reservation(project_id, reservation_id)?
+            .ok_or_else(|| StoreError::NotFound {
+                entity: "resource_reservation",
+                id: reservation_id.to_owned(),
+            })?;
+        if current.state == "released" {
+            return Err(StoreError::Conflict(
+                "released resource cannot be released again".to_owned(),
+            ));
+        }
+        if current.state == "release_pending" {
+            return if self.release_event_matches(
+                project_id,
+                reservation_id,
+                event_id,
+                "requested",
+                actor_id,
+                evidence_ref,
+            )? {
+                Ok(current)
+            } else {
+                Err(StoreError::Conflict(
+                    "resource release is already pending with another request".to_owned(),
+                ))
+            };
+        }
+        self.insert_release_event(&ResourceReleaseEventInput {
+            event_id,
+            project_id,
+            reservation_id,
+            state: "requested",
+            actor_id,
+            evidence_ref,
+            at,
+        })?;
+        let mut update = self.prepare(
+            "UPDATE boreal_resource_reservation
+             SET state = 'release_pending', release_requested_at = ?1
+             WHERE project_id = ?2 AND reservation_id = ?3
+               AND state IN ('active','unknown')",
+        )?;
+        update.bind_text(1, at)?;
+        update.bind_text(2, project_id)?;
+        update.bind_text(3, reservation_id)?;
+        update.run()?;
+        self.resource_reservation(project_id, reservation_id)?
+            .ok_or_else(|| {
+                StoreError::Corrupt(
+                    "resource reservation disappeared after release request".to_owned(),
+                )
+            })
     }
 
     pub fn acknowledge_resource_release(
@@ -799,44 +818,79 @@ impl SqliteStore {
             require_text(value, label)?;
         }
         with_transaction(self, || {
-            let current = self
-                .resource_reservation(project_id, reservation_id)?
-                .ok_or_else(|| StoreError::NotFound {
-                    entity: "resource_reservation",
-                    id: reservation_id.to_owned(),
-                })?;
-            if current.state != "release_pending" {
-                return Err(StoreError::Conflict(format!(
-                    "resource release requires release_pending, got {}",
-                    current.state
-                )));
-            }
-            self.insert_release_event(&ResourceReleaseEventInput {
-                event_id: ack_id,
+            self.acknowledge_resource_release_in_transaction(
                 project_id,
                 reservation_id,
-                state: "acknowledged",
+                ack_id,
                 actor_id,
                 evidence_ref,
                 at,
-            })?;
-            let mut update = self.prepare(
-                "UPDATE boreal_resource_reservation
-                 SET state = 'released', released_at = ?1, release_ack_id = ?2
-                 WHERE project_id = ?3 AND reservation_id = ?4 AND state = 'release_pending'",
-            )?;
-            update.bind_text(1, at)?;
-            update.bind_text(2, ack_id)?;
-            update.bind_text(3, project_id)?;
-            update.bind_text(4, reservation_id)?;
-            update.run()?;
-            self.resource_reservation(project_id, reservation_id)?
-                .ok_or_else(|| {
-                    StoreError::Corrupt(
-                        "resource reservation disappeared after acknowledgement".to_owned(),
-                    )
-                })
+            )
         })
+    }
+
+    pub(crate) fn acknowledge_resource_release_in_transaction(
+        &self,
+        project_id: &str,
+        reservation_id: &str,
+        ack_id: &str,
+        actor_id: &str,
+        evidence_ref: &str,
+        at: &str,
+    ) -> Result<ResourceReservationRecord, StoreError> {
+        let current = self
+            .resource_reservation(project_id, reservation_id)?
+            .ok_or_else(|| StoreError::NotFound {
+                entity: "resource_reservation",
+                id: reservation_id.to_owned(),
+            })?;
+        if current.state == "released" {
+            return if self.release_event_matches(
+                project_id,
+                reservation_id,
+                ack_id,
+                "acknowledged",
+                actor_id,
+                evidence_ref,
+            )? {
+                Ok(current)
+            } else {
+                Err(StoreError::Conflict(
+                    "released resource has a different acknowledgement".to_owned(),
+                ))
+            };
+        }
+        if current.state != "release_pending" {
+            return Err(StoreError::Conflict(format!(
+                "resource release requires release_pending, got {}",
+                current.state
+            )));
+        }
+        self.insert_release_event(&ResourceReleaseEventInput {
+            event_id: ack_id,
+            project_id,
+            reservation_id,
+            state: "acknowledged",
+            actor_id,
+            evidence_ref,
+            at,
+        })?;
+        let mut update = self.prepare(
+            "UPDATE boreal_resource_reservation
+             SET state = 'released', released_at = ?1, release_ack_id = ?2
+             WHERE project_id = ?3 AND reservation_id = ?4 AND state = 'release_pending'",
+        )?;
+        update.bind_text(1, at)?;
+        update.bind_text(2, ack_id)?;
+        update.bind_text(3, project_id)?;
+        update.bind_text(4, reservation_id)?;
+        update.run()?;
+        self.resource_reservation(project_id, reservation_id)?
+            .ok_or_else(|| {
+                StoreError::Corrupt(
+                    "resource reservation disappeared after acknowledgement".to_owned(),
+                )
+            })
     }
 
     pub fn list_live_resources(
@@ -882,6 +936,31 @@ impl SqliteStore {
         statement.bind_text(6, input.evidence_ref)?;
         statement.bind_text(7, input.at)?;
         statement.run()
+    }
+
+    fn release_event_matches(
+        &self,
+        project_id: &str,
+        reservation_id: &str,
+        event_id: &str,
+        state: &str,
+        actor_id: &str,
+        evidence_ref: &str,
+    ) -> Result<bool, StoreError> {
+        let mut statement = self.prepare(
+            "SELECT reservation_id, project_id, state, actor_id, evidence_ref
+             FROM boreal_resource_release_event
+             WHERE event_id = ?1",
+        )?;
+        statement.bind_text(1, event_id)?;
+        if statement.step()? != SQLITE_ROW {
+            return Ok(false);
+        }
+        Ok(statement.column_text(0)? == reservation_id
+            && statement.column_text(1)? == project_id
+            && statement.column_text(2)? == state
+            && statement.column_text(3)? == actor_id
+            && statement.column_text(4)? == evidence_ref)
     }
 }
 
@@ -1049,6 +1128,41 @@ fn validate_resource_input(input: &ResourceReservationInput) -> Result<(), Store
         return Err(StoreError::Invalid(
             "resource fence must be positive".to_owned(),
         ));
+    }
+    Ok(())
+}
+
+fn validate_resource_reservation_subject(
+    store: &SqliteStore,
+    input: &ResourceReservationInput,
+) -> Result<(), StoreError> {
+    validate_resource_input(input)?;
+    let expected_project = store.project_for_work(&input.work_id)?;
+    if expected_project != input.project_id {
+        return Err(StoreError::WrongSubject {
+            expected: input.project_id.clone(),
+            actual: expected_project,
+        });
+    }
+    let attempt = store
+        .attempt_record(&input.attempt_id, false)?
+        .ok_or_else(|| StoreError::NotFound {
+            entity: "attempt",
+            id: input.attempt_id.clone(),
+        })?;
+    if attempt.project_id != input.project_id
+        || attempt.work_id != input.work_id
+        || attempt.fence != input.fence
+    {
+        return Err(StoreError::WrongSubject {
+            expected: format!("{}/{}/{}", input.project_id, input.work_id, input.fence),
+            actual: format!("{}/{}/{}", attempt.project_id, attempt.work_id, attempt.fence),
+        });
+    }
+    if !attempt.current {
+        return Err(StoreError::NotCurrent {
+            attempt_id: input.attempt_id.clone(),
+        });
     }
     Ok(())
 }

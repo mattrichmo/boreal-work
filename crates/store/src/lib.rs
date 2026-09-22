@@ -3892,6 +3892,18 @@ impl SqliteStore {
             reservation.bind_text(5, lease_deadline)?;
             reservation.run()?;
 
+            self.reserve_resource_in_transaction(&recovery::ResourceReservationInput {
+                reservation_id: format!("resource:{attempt_id}"),
+                project_id: project_id.to_owned(),
+                work_id: work_id.to_owned(),
+                attempt_id: attempt_id.to_owned(),
+                fence,
+                resource_key: format!("work:{project_id}:{work_id}"),
+                resource_kind: "execution_worktree".to_owned(),
+                owner_actor_id: actor_id.to_owned(),
+                created_at: claimed_at.to_owned(),
+            })?;
+
             let revision = self.bump_revision_in_transaction(project_id)?;
             let operation = OperationRecord {
                 operation_id: operation_id.to_owned(),
@@ -5372,15 +5384,108 @@ impl SqliteStore {
         operation: OperationRecord,
         audit: AuditEventRecord,
     ) -> Result<(), StoreError> {
-        if let Some(context) = self.operation_identity_context(&operation.project_id)? {
-            operations::OperationJournal::new(self).append_in_transaction_with_identity(
-                &context,
-                &operations::OperationBundle::new(operation, Some(audit)),
-            )
-        } else {
-            self.append_operation(&operation)?;
-            self.append_audit_event(&audit)
+        match self.operation_identity_context(&operation.project_id)? {
+            Some(context) => operations::OperationJournal::new(self)
+                .append_in_transaction_with_identity(
+                    &context,
+                    &operations::OperationBundle::new(operation, Some(audit)),
+                ),
+            None if self.canonical_production => Err(StoreError::Corrupt(
+                "canonical production operation requires project identity binding".to_owned(),
+            )),
+            None => {
+                // Noncanonical schema-v2 fixtures retain the historical
+                // compatibility boundary. They are not production authority;
+                // canonical opens fail closed above when identity is absent.
+                self.append_operation(&operation)?;
+                self.append_audit_event(&audit)
+            }
         }
+    }
+
+    /// Appends an identity-bound operation and audit event inside a caller-owned
+    /// transaction. A zero revision allocates the next project revision while
+    /// holding that transaction, so adapter-owned composite operations cannot
+    /// reuse the semantic mutation's audit revision.
+    pub fn append_identity_operation_audit_in_transaction(
+        &self,
+        context: &identity::IdentityContext,
+        mut operation: OperationRecord,
+        mut audit: AuditEventRecord,
+    ) -> Result<OperationReadback, StoreError> {
+        let journal = operations::OperationJournal::new(self);
+        let identity = operations::OperationIdentity::from_record(
+            &operation,
+            Some((audit.subject_type.clone(), audit.subject_id.clone())),
+        );
+        if let Some(readback) = journal.replay_in_context(context, &identity)? {
+            return Ok(readback);
+        }
+        let revision = if operation.revision == 0 {
+            self.bump_revision_in_transaction(&operation.project_id)?.0
+        } else {
+            operation.revision
+        };
+        operation.revision = revision;
+        if audit.revision == 0 {
+            audit.revision = revision;
+        }
+        if audit.revision != revision {
+            return Err(StoreError::Conflict(
+                "operation and audit revision identities disagree".to_owned(),
+            ));
+        }
+        journal.append_in_transaction_with_identity(
+            context,
+            &operations::OperationBundle::new(operation, Some(audit)),
+        )?;
+        journal
+            .replay_in_context(context, &identity)?
+            .ok_or_else(|| {
+                StoreError::Corrupt("identity-bound operation has no durable readback".to_owned())
+            })
+    }
+
+    /// Opens the caller-owned identity operation transaction for adapters that
+    /// have no semantic rows to include in their own transaction.
+    pub fn append_identity_operation_audit(
+        &self,
+        context: &identity::IdentityContext,
+        operation: OperationRecord,
+        audit: AuditEventRecord,
+    ) -> Result<OperationReadback, StoreError> {
+        self.execute_batch("BEGIN IMMEDIATE")?;
+        let result = self.append_identity_operation_audit_in_transaction(context, operation, audit);
+        match result {
+            Ok(value) => {
+                self.execute_batch("COMMIT")?;
+                Ok(value)
+            }
+            Err(error) => {
+                let _ = self.execute_batch("ROLLBACK");
+                Err(error)
+            }
+        }
+    }
+
+    /// Identity-bound audit readback for adapters that must not use an
+    /// operation-only lookup.
+    pub fn audit_event_in_context(
+        &self,
+        context: &identity::IdentityContext,
+        operation_id: &str,
+    ) -> Result<Option<AuditEventRecord>, StoreError> {
+        operations::OperationJournal::new(self).audit_event_in_context(context, operation_id)
+    }
+
+    /// Identity-bound replay preflight used by composite adapter operations
+    /// before they invoke child lifecycle mutations.
+    pub fn operation_replay_in_context(
+        &self,
+        context: &identity::IdentityContext,
+        identity: &operations::OperationIdentity,
+    ) -> Result<Option<OperationReadback>, StoreError> {
+        operations::OperationJournal::new(self).replay_in_context(context, identity)
     }
 
     fn project_identity_is_bound(&self, project_id: &str) -> Result<bool, StoreError> {

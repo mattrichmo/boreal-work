@@ -272,10 +272,26 @@ impl SqliteStore {
         side_effect_ref: &str,
         at: &str,
     ) -> Result<ExternalJobRecord, StoreError> {
+        require_text(side_effect_ref, "external side-effect reference")?;
+        let current =
+            self.external_job(project_id, job_id)?
+                .ok_or_else(|| StoreError::NotFound {
+                    entity: "external_job",
+                    id: job_id.to_owned(),
+                })?;
+        if current.stage == "readback_required" {
+            return if current.side_effect_ref.as_deref() == Some(side_effect_ref) {
+                Ok(current)
+            } else {
+                Err(StoreError::Conflict(
+                    "external readback side-effect identity changed during replay".to_owned(),
+                ))
+            };
+        }
         self.advance_external_job(&ExternalJobTransitionInput {
             project_id: project_id.to_owned(),
             job_id: job_id.to_owned(),
-            expected_stage: "side_effect_started".to_owned(),
+            expected_stage: current.stage,
             next_stage: "readback_required".to_owned(),
             at: at.to_owned(),
             side_effect_ref: Some(side_effect_ref.to_owned()),
@@ -291,12 +307,28 @@ impl SqliteStore {
         side_effect_ref: &str,
         at: &str,
     ) -> Result<ExternalJobRecord, StoreError> {
+        require_text(side_effect_ref, "external side-effect reference")?;
+        let current = self
+            .external_job_with_identity(context, job_id)?
+            .ok_or_else(|| StoreError::NotFound {
+                entity: "external_job",
+                id: job_id.to_owned(),
+            })?;
+        if current.stage == "readback_required" {
+            return if current.side_effect_ref.as_deref() == Some(side_effect_ref) {
+                Ok(current)
+            } else {
+                Err(StoreError::Conflict(
+                    "external readback side-effect identity changed during replay".to_owned(),
+                ))
+            };
+        }
         self.advance_external_job_with_identity(
             context,
             &ExternalJobTransitionInput {
                 project_id: context.project_id.clone(),
                 job_id: job_id.to_owned(),
-                expected_stage: "side_effect_started".to_owned(),
+                expected_stage: current.stage,
                 next_stage: "readback_required".to_owned(),
                 at: at.to_owned(),
                 side_effect_ref: Some(side_effect_ref.to_owned()),
@@ -439,6 +471,42 @@ fn advance_external_job_row(
             "external job stage changed: expected {}, actual {}",
             input.expected_stage, current.stage
         )));
+    }
+    if let (Some(existing), Some(candidate)) = (
+        current.side_effect_ref.as_deref(),
+        input.side_effect_ref.as_deref(),
+    ) {
+        if existing != candidate {
+            return Err(StoreError::Conflict(
+                "external side-effect identity cannot be changed".to_owned(),
+            ));
+        }
+    }
+    if let (Some(existing), Some(candidate)) = (
+        current.result_digest.as_deref(),
+        input.result_digest.as_deref(),
+    ) {
+        if existing != candidate {
+            return Err(StoreError::Conflict(
+                "external result identity cannot be changed".to_owned(),
+            ));
+        }
+    }
+    if input.next_stage == "readback_required"
+        && current.side_effect_ref.is_none()
+        && input.side_effect_ref.is_none()
+    {
+        return Err(StoreError::Invalid(
+            "readback-required job must retain a side-effect reference".to_owned(),
+        ));
+    }
+    if matches!(input.next_stage.as_str(), "committed" | "reconciled")
+        && current.result_digest.is_none()
+        && input.result_digest.is_none()
+    {
+        return Err(StoreError::Invalid(
+            "terminal external job state requires a result digest".to_owned(),
+        ));
     }
     let started_at = if current.started_at.is_some() {
         current.started_at.as_deref()

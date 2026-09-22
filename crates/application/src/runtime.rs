@@ -11,7 +11,14 @@ use boreal_domain::{
     ActorId, AttemptId, AttemptPhase, Fence, HarnessId, OperationId, ProjectId, SessionId,
     TimestampMs, WorkId, DEFAULT_HARD_TIME_LIMIT_MS, DEFAULT_LEASE_TTL_MS,
 };
-use boreal_store::StoreError;
+use boreal_store::{
+    identity::{IdentityContext, IdentityStore},
+    recovery::{
+        IdentityBoundRecoveryResolutionInput, RecoveryObligationRecord, RecoveryResolutionInput,
+        ResourceReservationRecord,
+    },
+    SqliteStore, StoreError,
+};
 
 use crate::{ApplicationError, OperationResult, WorkApplication};
 
@@ -271,6 +278,220 @@ impl std::error::Error for AttemptAdapterError {}
 impl From<StoreError> for AttemptAdapterError {
     fn from(error: StoreError) -> Self {
         Self::Store(error)
+    }
+}
+
+/// Durable recovery is deliberately a readback state machine. An unresolved
+/// obligation is never reported as a successful release or expiry.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum AttemptRecoveryResolution {
+    Pending(RecoveryObligationRecord),
+    ReadbackRequired(RecoveryObligationRecord),
+    Reconciled(RecoveryObligationRecord),
+    Rejected(RecoveryObligationRecord),
+}
+
+impl AttemptRecoveryResolution {
+    pub fn record(&self) -> &RecoveryObligationRecord {
+        match self {
+            Self::Pending(record)
+            | Self::ReadbackRequired(record)
+            | Self::Reconciled(record)
+            | Self::Rejected(record) => record,
+        }
+    }
+
+    pub const fn is_resolved(&self) -> bool {
+        matches!(self, Self::Reconciled(_))
+    }
+
+    pub const fn is_readback_required(&self) -> bool {
+        matches!(self, Self::ReadbackRequired(_))
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RecoveryResolveRequest {
+    pub project_id: String,
+    pub obligation_id: String,
+    pub operation_id: String,
+    pub request_digest: String,
+    pub resolution_id: String,
+    pub actor_id: String,
+    pub outcome: String,
+    pub reason: String,
+    pub resource_state: String,
+    pub at: String,
+    pub expected_project_revision: Option<u64>,
+    pub session_id: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ResourceReleaseRequest {
+    pub project_id: String,
+    pub reservation_id: String,
+    pub event_id: String,
+    pub actor_id: String,
+    pub evidence_ref: String,
+    pub at: String,
+}
+
+/// Store-backed adapter for expiry, stop, and resource recovery. The
+/// identity-bound constructor is the production path; the unbound constructor
+/// remains useful for isolated schema fixtures and intentionally cannot repair
+/// a project identity boundary.
+pub struct AttemptRecoveryAdapter<'a> {
+    store: &'a SqliteStore,
+    identity: Option<&'a IdentityContext>,
+}
+
+impl<'a> AttemptRecoveryAdapter<'a> {
+    pub const fn new(store: &'a SqliteStore) -> Self {
+        Self {
+            store,
+            identity: None,
+        }
+    }
+
+    pub const fn new_with_identity(store: &'a SqliteStore, identity: &'a IdentityContext) -> Self {
+        Self {
+            store,
+            identity: Some(identity),
+        }
+    }
+
+    pub fn readback(
+        &self,
+        project_id: &str,
+        obligation_id: &str,
+    ) -> Result<AttemptRecoveryResolution, StoreError> {
+        self.validate_project(project_id)?;
+        let record = self
+            .store
+            .recovery_obligation(project_id, obligation_id)?
+            .ok_or_else(|| StoreError::NotFound {
+                entity: "recovery_obligation",
+                id: obligation_id.to_owned(),
+            })?;
+        Ok(recovery_resolution(record))
+    }
+
+    pub fn resolve(
+        &self,
+        request: &RecoveryResolveRequest,
+    ) -> Result<AttemptRecoveryResolution, StoreError> {
+        self.validate_project(&request.project_id)?;
+        let input = RecoveryResolutionInput {
+            project_id: request.project_id.clone(),
+            obligation_id: request.obligation_id.clone(),
+            resolution_id: request.resolution_id.clone(),
+            actor_id: request.actor_id.clone(),
+            outcome: request.outcome.clone(),
+            reason: request.reason.clone(),
+            resource_state: request.resource_state.clone(),
+            at: request.at.clone(),
+        };
+        let record = if let Some(identity) = self.identity {
+            let result = self.store.resolve_recovery_obligation_with_identity(
+                &IdentityBoundRecoveryResolutionInput {
+                    context: identity.clone(),
+                    operation_id: request.operation_id.clone(),
+                    request_digest: request.request_digest.clone(),
+                    expected_project_revision: request.expected_project_revision,
+                    session_id: request.session_id.clone(),
+                    resolution: input,
+                },
+            )?;
+            result.obligation
+        } else {
+            self.store.resolve_recovery_obligation(&input)?
+        };
+        Ok(recovery_resolution(record))
+    }
+
+    pub fn request_resource_release(
+        &self,
+        request: &ResourceReleaseRequest,
+    ) -> Result<ResourceReservationRecord, StoreError> {
+        self.validate_project(&request.project_id)?;
+        self.store.request_resource_release(
+            &request.project_id,
+            &request.reservation_id,
+            &request.event_id,
+            &request.actor_id,
+            &request.evidence_ref,
+            &request.at,
+        )
+    }
+
+    pub fn acknowledge_resource_release(
+        &self,
+        request: &ResourceReleaseRequest,
+    ) -> Result<ResourceReservationRecord, StoreError> {
+        self.validate_project(&request.project_id)?;
+        self.store.acknowledge_resource_release(
+            &request.project_id,
+            &request.reservation_id,
+            &request.event_id,
+            &request.actor_id,
+            &request.evidence_ref,
+            &request.at,
+        )
+    }
+
+    fn validate_project(&self, project_id: &str) -> Result<(), StoreError> {
+        if project_id.trim().is_empty() {
+            return Err(StoreError::Invalid(
+                "recovery project id must not be empty".to_owned(),
+            ));
+        }
+        if let Some(identity) = self.identity {
+            let current = IdentityStore::new(self.store)
+                .context(&identity.project_id)
+                .map_err(|error| StoreError::Conflict(format!("recovery identity: {error}")))?;
+            if current != *identity {
+                return Err(StoreError::Conflict(
+                    "recovery identity context is stale".to_owned(),
+                ));
+            }
+            if identity.project_id != project_id {
+                return Err(StoreError::WrongSubject {
+                    expected: identity.project_id.clone(),
+                    actual: project_id.to_owned(),
+                });
+            }
+        }
+        Ok(())
+    }
+}
+
+pub fn recovery_obligation_id(operation_id: &str, kind: AttemptCommandKind) -> Option<String> {
+    let reason = match kind {
+        AttemptCommandKind::Expire { .. } => "expired",
+        AttemptCommandKind::Fail => "failed",
+        AttemptCommandKind::Release => "resource_unknown",
+        AttemptCommandKind::Cancel { .. } => "cancel_requested",
+        AttemptCommandKind::Accept
+        | AttemptCommandKind::Start
+        | AttemptCommandKind::Heartbeat
+        | AttemptCommandKind::RenewLease { .. }
+        | AttemptCommandKind::Submit => return None,
+    };
+    Some(format!(
+        "{}:recovery:{}",
+        operation_id,
+        reason.replace('_', "-")
+    ))
+}
+
+fn recovery_resolution(record: RecoveryObligationRecord) -> AttemptRecoveryResolution {
+    match record.state.as_str() {
+        "resolved" => AttemptRecoveryResolution::Reconciled(record),
+        "superseded" => AttemptRecoveryResolution::Rejected(record),
+        _ if record.resource_state == "unknown" || record.resource_state == "release_pending" => {
+            AttemptRecoveryResolution::ReadbackRequired(record)
+        }
+        _ => AttemptRecoveryResolution::Pending(record),
     }
 }
 
@@ -682,6 +903,25 @@ impl WorkApplication<'_> {
         )
     }
 
+    /// Read the recovery obligation created by the canonical store for a
+    /// terminal attempt. This is deliberately a separate readback API: a
+    /// terminal lifecycle mutation is not evidence that its process or
+    /// resources are safe to reuse.
+    pub fn attempt_recovery_readback(
+        &self,
+        project_id: &ProjectId,
+        operation_id: &OperationId,
+        kind: AttemptCommandKind,
+    ) -> Result<AttemptRecoveryResolution, ApplicationError> {
+        let obligation_id =
+            recovery_obligation_id(operation_id.as_str(), kind).ok_or_else(|| {
+                ApplicationError::Invalid("attempt command has no recovery obligation".to_owned())
+            })?;
+        AttemptRecoveryAdapter::new(self.store)
+            .readback(project_id.as_str(), &obligation_id)
+            .map_err(ApplicationError::from)
+    }
+
     fn run_attempt<A: AttemptLifecycleAdapter>(
         &self,
         adapter: &A,
@@ -720,7 +960,12 @@ impl WorkApplication<'_> {
             reason,
         };
         match adapter.transact_attempt(command) {
-            Ok(result) => Ok(operation_result(result)),
+            Ok(result) => {
+                if recovery_obligation_id(request.operation_id.as_str(), kind).is_some() {
+                    self.request_terminal_resource_readback(&request, kind)?;
+                }
+                Ok(operation_result(result))
+            }
             Err(AttemptAdapterError::UnknownOutcome(message)) => {
                 let operation_id = request.operation_id.clone();
                 match adapter.read_attempt_operation(&request.project_id, &operation_id)? {
@@ -733,6 +978,60 @@ impl WorkApplication<'_> {
             }
             Err(error) => Err(error.into()),
         }
+    }
+
+    fn request_terminal_resource_readback(
+        &self,
+        request: &AttemptRequest,
+        kind: AttemptCommandKind,
+    ) -> Result<(), ApplicationError> {
+        let Some(obligation_id) = recovery_obligation_id(request.operation_id.as_str(), kind)
+        else {
+            return Ok(());
+        };
+        if self
+            .store
+            .recovery_obligation(request.project_id.as_str(), &obligation_id)?
+            .is_none()
+        {
+            // Non-store test adapters may implement the lifecycle contract
+            // without a durable recovery sidecar. Do not synthesize one here;
+            // the canonical adapter/store integration remains the authority.
+            return Ok(());
+        }
+
+        let resources = self
+            .store
+            .list_live_resources(request.project_id.as_str(), None, 500)?;
+        for resource in resources.into_iter().filter(|resource| {
+            resource.attempt_id == request.attempt_id.as_str()
+                && resource.fence == request.fence.get()
+                && matches!(resource.state.as_str(), "active" | "unknown")
+        }) {
+            let release_request = ResourceReleaseRequest {
+                project_id: request.project_id.as_str().to_owned(),
+                reservation_id: resource.reservation_id.clone(),
+                event_id: format!(
+                    "{}:resource-release-request:{}",
+                    request.operation_id, resource.reservation_id
+                ),
+                actor_id: request.actor_id.as_str().to_owned(),
+                // This is the durable request identity, not a claim that the
+                // physical resource has already been released.
+                evidence_ref: request.operation_id.as_str().to_owned(),
+                at: format!("unix-ms:{}", request.at.as_millis()),
+            };
+            AttemptRecoveryAdapter::new(self.store)
+                .request_resource_release(&release_request)
+                .map_err(|error| {
+                    ApplicationError::AttemptAdapter(AttemptAdapterError::UnknownOutcome(
+                        format!(
+                            "attempt mutation committed but resource release request readback is unknown: {error}"
+                        ),
+                    ))
+                })?;
+        }
+        Ok(())
     }
 }
 
@@ -867,6 +1166,58 @@ mod tests {
             ),
             Err(AttemptPolicyError::NotExpired)
         );
+    }
+
+    fn recovery_record(state: &str, resource_state: &str) -> RecoveryObligationRecord {
+        RecoveryObligationRecord {
+            obligation_id: "op-expire:recovery:expired".to_owned(),
+            project_id: "p1".to_owned(),
+            work_id: "w1".to_owned(),
+            attempt_id: Some("a1".to_owned()),
+            fence: Some(7),
+            reason: "expired".to_owned(),
+            state: state.to_owned(),
+            resource_state: resource_state.to_owned(),
+            owner_actor_id: Some("agent-1".to_owned()),
+            next_action: "read back stopped runtime".to_owned(),
+            created_at: "unix-ms:20".to_owned(),
+            resolved_at: (state == "resolved").then(|| "unix-ms:21".to_owned()),
+            resolved_by: (state == "resolved").then(|| "agent-1".to_owned()),
+            resolution_id: (state == "resolved").then(|| "resolution-1".to_owned()),
+        }
+    }
+
+    #[test]
+    fn recovery_mapping_keeps_expiry_and_resource_disposition_unresolved() {
+        assert_eq!(
+            recovery_obligation_id(
+                "op-expire",
+                AttemptCommandKind::Expire {
+                    confirmation: StopConfirmation::AdapterAcknowledged,
+                }
+            ),
+            Some("op-expire:recovery:expired".to_owned())
+        );
+        assert_eq!(
+            recovery_obligation_id("op-release", AttemptCommandKind::Release),
+            Some("op-release:recovery:resource-unknown".to_owned())
+        );
+        assert_eq!(
+            recovery_obligation_id("op-submit", AttemptCommandKind::Submit),
+            None
+        );
+
+        let unresolved = recovery_resolution(recovery_record("unresolved", "unknown"));
+        assert!(unresolved.is_readback_required());
+        assert!(!unresolved.is_resolved());
+
+        let resolved = recovery_resolution(recovery_record("resolved", "released"));
+        assert!(resolved.is_resolved());
+        assert!(!resolved.is_readback_required());
+
+        let superseded = recovery_resolution(recovery_record("superseded", "unknown"));
+        assert!(!superseded.is_resolved());
+        assert!(!superseded.is_readback_required());
     }
 
     #[derive(Default)]

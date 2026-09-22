@@ -1,8 +1,9 @@
 //! Focused PF-S02-T04 contract coverage.
 //!
-//! These tests exercise the public profile/requirement module. Durable root
-//! registration is intentionally not hidden behind a test-local module; its
-//! shared `SqliteStore` integration request is recorded in the task handoff.
+//! These tests exercise the public profile/requirement module and its current
+//! SQLite integration. Observed gate rows and immutable declaration rows are
+//! deliberately mutated in isolated fixtures so deletion and drift are
+//! proven as fail-closed readback outcomes.
 
 use boreal_domain::{WorkItem, WorkKind};
 use boreal_store::profiles::{
@@ -11,8 +12,28 @@ use boreal_store::profiles::{
     RegistrationOutcome, RequirementFinding, RequirementSubjectKind,
 };
 use boreal_store::{SqliteStore, StoreError};
+use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 const SCHEMA: &str = include_str!("../../../project/spec/schema-v2.sql");
+const PRODUCTION_SCHEMA: &str = include_str!("../../../project/spec/schema-production.sql");
+
+fn temp_path(label: &str) -> PathBuf {
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("clock before unix epoch")
+        .as_nanos();
+    std::env::temp_dir().join(format!(
+        "boreal-profile-requirements-{label}-{}-{stamp}.sqlite",
+        std::process::id()
+    ))
+}
+
+fn remove_sqlite_files(path: &Path) {
+    let _ = std::fs::remove_file(path);
+    let _ = std::fs::remove_file(path.with_extension("sqlite-wal"));
+    let _ = std::fs::remove_file(path.with_extension("sqlite-shm"));
+}
 
 fn initialized_store() -> SqliteStore {
     let store = SqliteStore::open_in_memory(SCHEMA).expect("schema opens");
@@ -43,6 +64,19 @@ fn task_definition(gate: &str) -> String {
     format!(
         r#"{{"required_observables":["exit_status"],"gates":[{{"id":"{gate}","kind":"verification","required":true}},{{"id":"audit","kind":"audit","required":false}}],"review_policy":{{"required":false}},"subject_rules":{{"work_id":"exact"}}}}"#
     )
+}
+
+fn insert_work(store: &SqliteStore, work_id: &str, profile_id: &str, version: u64) {
+    store
+        .execute_batch(&format!(
+            "INSERT INTO work_item
+               (work_id, project_id, kind, lifecycle, dispatch_policy,
+                acceptance_profile_id, acceptance_profile_version, title,
+                description, created_at, updated_at)
+             VALUES ('{work_id}', 'p1', 'task', 'open', 'automatic',
+                     '{profile_id}', {version}, 'Profile test work', '', 't1', 't1');"
+        ))
+        .expect("work inserts");
 }
 
 #[test]
@@ -193,6 +227,24 @@ fn empty_legacy_definition_requires_authoritative_reconstruction_or_quarantine()
             code: "legacy_profile_definition_ambiguous",
         }
     );
+
+    let store = initialized_store();
+    let provisional = ProfileVersion::new("legacy", 1, "sha256:placeholder", "{}", "t0")
+        .expect("empty legacy shape is parseable");
+    let legacy = ProfileVersion::from_canonical_definition(
+        "legacy",
+        1,
+        provisional
+            .computed_digest()
+            .expect("legacy digest computes"),
+        "{}",
+        "t0",
+    )
+    .expect("legacy digest is internally consistent");
+    assert!(matches!(
+        ProfileStore::new(&store).register(&legacy),
+        Err(StoreError::Conflict(message)) if message.contains("no authoritative definition")
+    ));
 }
 
 #[test]
@@ -204,6 +256,41 @@ fn malformed_or_unverified_profile_content_is_rejected() {
     assert!(matches!(
         ProfileVersion::new("bad", 1, "sha256:ok", "not-json", "t0"),
         Err(StoreError::Invalid(message)) if message.contains("not JSON")
+    ));
+    assert!(matches!(
+        ProfileVersion::new("bad", 1, "sha256:wrong", "[]", "t0"),
+        Err(StoreError::Invalid(message)) if message.contains("must be an object")
+    ));
+    let malformed_definition =
+        r#"{"gates":[{"id":"verification","kind":"verification","required":"yes"}]}"#;
+    let provisional =
+        ProfileVersion::new("bad", 1, "sha256:placeholder", malformed_definition, "t0")
+            .expect("malformed gate field is still JSON");
+    let malformed = ProfileVersion::from_canonical_definition(
+        "bad",
+        1,
+        provisional.computed_digest().expect("digest computes"),
+        malformed_definition,
+        "t0",
+    )
+    .expect("digest-bound malformed profile constructs");
+    assert!(matches!(
+        PinnedRequirements::resolve(&malformed, "p1", "bad-work", 1, RequirementSubjectKind::Task, "t0"),
+        Err(StoreError::Invalid(message)) if message.contains("required flag is not boolean")
+    ));
+
+    let store = initialized_store();
+    let unverified = ProfileVersion::new(
+        "unverified",
+        1,
+        "sha256:wrong",
+        task_definition("verification"),
+        "t0",
+    )
+    .expect("shape-only construction is available for the rejection test");
+    assert!(matches!(
+        ProfileStore::new(&store).register(&unverified),
+        Err(StoreError::Conflict(message)) if message.contains("digest drift")
     ));
 }
 
@@ -364,4 +451,180 @@ fn root_work_creation_pins_requirements_and_survives_gate_deletion() {
         .missing
         .iter()
         .any(|gate| gate.ends_with(":verification")));
+}
+
+#[test]
+fn sibling_work_items_keep_distinct_pinned_versions_durably() {
+    let store = initialized_store();
+    let version_one = profile("sibling", 1, &task_definition("verification"));
+    let version_two = profile("sibling", 2, &task_definition("verification-v2"));
+    let store_api = ProfileStore::new(&store);
+    store_api
+        .register(&version_one)
+        .expect("sibling v1 registers");
+    store_api
+        .register(&version_two)
+        .expect("sibling v2 registers");
+    insert_work(&store, "sibling-v1", "sibling", 1);
+    insert_work(&store, "sibling-v2", "sibling", 2);
+
+    let first = PinnedRequirements::resolve(
+        &version_one,
+        "p1",
+        "sibling-v1",
+        1,
+        RequirementSubjectKind::Task,
+        "t1",
+    )
+    .expect("v1 requirements resolve");
+    let second = PinnedRequirements::resolve(
+        &version_two,
+        "p1",
+        "sibling-v2",
+        1,
+        RequirementSubjectKind::Task,
+        "t1",
+    )
+    .expect("v2 requirements resolve");
+    store_api
+        .persist_pinned_requirements(&first)
+        .expect("v1 requirements persist");
+    store_api
+        .persist_pinned_requirements(&second)
+        .expect("v2 requirements persist");
+
+    let first_read = store_api
+        .read_pinned_requirements("p1", "sibling-v1", 1)
+        .expect("v1 readback")
+        .expect("v1 pin exists");
+    let second_read = store_api
+        .read_pinned_requirements("p1", "sibling-v2", 1)
+        .expect("v2 readback")
+        .expect("v2 pin exists");
+    assert_eq!(first_read.profile.version, 1);
+    assert_eq!(second_read.profile.version, 2);
+    assert_ne!(first_read.resolved_digest, second_read.resolved_digest);
+}
+
+#[test]
+fn pinned_requirements_survive_canonical_database_restart() {
+    let path = temp_path("restart");
+    remove_sqlite_files(&path);
+    let profile = profile("restart", 1, &task_definition("verification"));
+    let requirements = PinnedRequirements::resolve(
+        &profile,
+        "p1",
+        "restart-work",
+        1,
+        RequirementSubjectKind::Task,
+        "t1",
+    )
+    .expect("restart requirements resolve");
+    {
+        let store = SqliteStore::open(&path, PRODUCTION_SCHEMA).expect("production opens");
+        store
+            .create_project("p1", "t0")
+            .expect("production project creates");
+        let store_api = ProfileStore::new(&store);
+        store_api.register(&profile).expect("profile registers");
+        insert_work(&store, "restart-work", "restart", 1);
+        store_api
+            .persist_pinned_requirements(&requirements)
+            .expect("requirements persist");
+    }
+    {
+        let reopened = SqliteStore::open(&path, PRODUCTION_SCHEMA).expect("production reopens");
+        let restored = ProfileStore::new(&reopened)
+            .read_pinned_requirements("p1", "restart-work", 1)
+            .expect("restart readback")
+            .expect("pinned requirements survive restart");
+        assert_eq!(restored, requirements);
+    }
+    remove_sqlite_files(&path);
+}
+
+#[test]
+fn missing_pinned_child_is_detected_instead_of_reducing_requirements() {
+    let store = initialized_store();
+    let pinned_profile = profile("missing-child", 1, &task_definition("verification"));
+    let store_api = ProfileStore::new(&store);
+    store_api
+        .register(&pinned_profile)
+        .expect("profile registers");
+    insert_work(&store, "missing-child-work", "missing-child", 1);
+    let requirements = PinnedRequirements::resolve(
+        &pinned_profile,
+        "p1",
+        "missing-child-work",
+        1,
+        RequirementSubjectKind::Task,
+        "t1",
+    )
+    .expect("requirements resolve");
+    store_api
+        .persist_pinned_requirements(&requirements)
+        .expect("requirements persist");
+    store
+        .execute_batch(
+            "DROP TRIGGER boreal_pinned_requirement_gate_immutable_delete;
+             DELETE FROM boreal_pinned_requirement_gate
+              WHERE project_id = 'p1' AND work_id = 'missing-child-work'
+                AND requirement_id = 'verification@verification';",
+        )
+        .expect("corruption fixture deletes one child");
+
+    assert!(matches!(
+        store_api.read_pinned_requirements("p1", "missing-child-work", 1),
+        Err(StoreError::Corrupt(message))
+            if message.contains("missing from the immutable declaration set")
+    ));
+}
+
+#[test]
+fn malformed_pinned_profile_and_child_content_is_quarantined_on_readback() {
+    let store = initialized_store();
+    let pinned_profile = profile("malformed", 1, &task_definition("verification"));
+    let store_api = ProfileStore::new(&store);
+    store_api
+        .register(&pinned_profile)
+        .expect("profile registers");
+    insert_work(&store, "malformed-work", "malformed", 1);
+    let requirements = PinnedRequirements::resolve(
+        &pinned_profile,
+        "p1",
+        "malformed-work",
+        1,
+        RequirementSubjectKind::Task,
+        "t1",
+    )
+    .expect("requirements resolve");
+    store_api
+        .persist_pinned_requirements(&requirements)
+        .expect("requirements persist");
+
+    store
+        .execute_batch(
+            "DROP TRIGGER boreal_pinned_requirement_gate_immutable_update;
+             UPDATE boreal_pinned_requirement_gate
+                SET declaration_json = 'not-json'
+              WHERE project_id = 'p1' AND work_id = 'malformed-work'
+                AND requirement_id = 'verification@verification';",
+        )
+        .expect("child corruption fixture updates declaration");
+    assert!(matches!(
+        store_api.read_pinned_requirements("p1", "malformed-work", 1),
+        Err(StoreError::Corrupt(message)) if message.contains("declaration is malformed")
+    ));
+
+    store
+        .execute_batch(
+            "UPDATE acceptance_profile
+                SET definition_json = 'not-json'
+              WHERE profile_id = 'malformed' AND version = 1;",
+        )
+        .expect("profile corruption fixture updates definition");
+    assert!(matches!(
+        store_api.read_pinned_requirements("p1", "malformed-work", 1),
+        Err(StoreError::Corrupt(message)) if message.contains("acceptance profile is malformed")
+    ));
 }

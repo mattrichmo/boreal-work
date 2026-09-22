@@ -23,6 +23,31 @@ pub const MAX_COMMAND_BYTES: usize = 16 * 1024;
 pub const MAX_OUTPUT_BYTES: u64 = 64 * 1024;
 pub const MAX_TEXT_LENGTH: usize = 4_096;
 pub const MAX_OBSERVABLES: usize = 32;
+pub const MAX_EXTERNAL_IDENTITY_BYTES: usize = 4_096;
+
+/// The supported external-job categories share one durable identity and
+/// readback protocol. The adapter remains agnostic about how a verifier,
+/// backup, publication, or update performs its side effect.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ExternalJobKind {
+    Verifier,
+    Evidence,
+    Backup,
+    MemoryPublication,
+    Update,
+}
+
+impl ExternalJobKind {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Verifier => "verifier",
+            Self::Evidence => "evidence",
+            Self::Backup => "backup",
+            Self::MemoryPublication => "memory_publication",
+            Self::Update => "update",
+        }
+    }
+}
 
 /// The durable identity used when an application adapter invokes an external
 /// verifier or other side-effecting worker.  The store job is registered
@@ -60,6 +85,11 @@ impl ExternalEffectRequest {
         ] {
             if value.trim().is_empty() {
                 return Err(StoreError::Invalid(format!("{label} must not be empty")));
+            }
+            if value.len() > MAX_EXTERNAL_IDENTITY_BYTES {
+                return Err(StoreError::Invalid(format!(
+                    "{label} exceeds the external identity limit"
+                )));
             }
         }
         Ok(())
@@ -127,6 +157,40 @@ impl ExternalEffectResolution {
             | Self::Failed(record) => record,
         }
     }
+
+    pub fn is_pending(&self) -> bool {
+        matches!(self, Self::Pending(_))
+    }
+
+    pub fn is_readback_required(&self) -> bool {
+        matches!(self, Self::ReadbackRequired(_))
+    }
+
+    pub fn is_rejected(&self) -> bool {
+        matches!(self, Self::Rejected(_))
+    }
+}
+
+/// Observation returned by the adapter that actually performs an external
+/// effect. `Pending` intentionally carries no invented side-effect identity;
+/// the durable job remains readable by operation ID after a restart.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ExternalEffectObservation {
+    Reconciled {
+        side_effect_ref: String,
+        result_digest: String,
+        observed_at: String,
+    },
+    ReadbackRequired {
+        side_effect_ref: String,
+        observed_at: String,
+    },
+    Pending,
+    Failed {
+        side_effect_ref: Option<String>,
+        reason: String,
+        observed_at: String,
+    },
 }
 
 /// Application-owned adapter for the durable external-job/readback seam.
@@ -172,10 +236,99 @@ impl<'a> ExternalEffectAdapter<'a> {
                 .register_external_job(&request.as_store_input())?
         };
         if registration.job.stage == "registered" {
-            let job = self.transition(&registration.job, "admitted", None, None, None)?;
+            let job = self.transition(&registration.job, "admitted", None, None, None, None)?;
             Ok(ExternalEffectResolution::Pending(job))
         } else {
             Ok(resolve_stage(registration.job))
+        }
+    }
+
+    /// Admit and run one external effect. The callback is invoked only after
+    /// the durable job has reached `running`. A callback that cannot provide
+    /// attributable readback leaves the job pending; it cannot manufacture a
+    /// successful receipt or a committed outcome.
+    pub fn execute<F>(
+        &self,
+        request: &ExternalEffectRequest,
+        started_at: &str,
+        execute: F,
+    ) -> Result<ExternalEffectResolution, StoreError>
+    where
+        F: FnOnce(&ExternalJobRecord) -> Result<ExternalEffectObservation, StoreError>,
+    {
+        let admitted = self.admit(request)?;
+        let running = match admitted {
+            ExternalEffectResolution::Pending(job) if job.stage == "admitted" => {
+                self.start(&request.project_id, &request.job_id, started_at)?
+            }
+            other => other,
+        };
+        let job = running.record().clone();
+        if !matches!(running, ExternalEffectResolution::Pending(_)) || job.stage != "running" {
+            return Ok(running);
+        }
+
+        match execute(&job)? {
+            ExternalEffectObservation::Pending => Ok(ExternalEffectResolution::Pending(job)),
+            ExternalEffectObservation::ReadbackRequired {
+                side_effect_ref,
+                observed_at,
+            } => {
+                self.mark_side_effect_started(
+                    &request.project_id,
+                    &request.job_id,
+                    &side_effect_ref,
+                    &observed_at,
+                )?;
+                self.mark_readback_required(
+                    &request.project_id,
+                    &request.job_id,
+                    &side_effect_ref,
+                    &observed_at,
+                )
+            }
+            ExternalEffectObservation::Reconciled {
+                side_effect_ref,
+                result_digest,
+                observed_at,
+            } => {
+                self.mark_side_effect_started(
+                    &request.project_id,
+                    &request.job_id,
+                    &side_effect_ref,
+                    &observed_at,
+                )?;
+                self.mark_readback_required(
+                    &request.project_id,
+                    &request.job_id,
+                    &side_effect_ref,
+                    &observed_at,
+                )?;
+                self.reconcile_readback(&ExternalEffectReadback {
+                    project_id: request.project_id.clone(),
+                    job_id: request.job_id.clone(),
+                    operation_id: request.operation_id.clone(),
+                    request_digest: request.request_digest.clone(),
+                    side_effect_ref,
+                    result_digest,
+                    observed_at,
+                })
+            }
+            ExternalEffectObservation::Failed {
+                side_effect_ref,
+                reason,
+                observed_at,
+            } => {
+                if let Some(side_effect_ref) = side_effect_ref {
+                    self.mark_side_effect_started(
+                        &request.project_id,
+                        &request.job_id,
+                        &side_effect_ref,
+                        &observed_at,
+                    )?;
+                }
+                self.fail(&request.project_id, &request.job_id, &observed_at, &reason)
+            }
         }
     }
 
@@ -185,9 +338,10 @@ impl<'a> ExternalEffectAdapter<'a> {
         job_id: &str,
         at: &str,
     ) -> Result<ExternalEffectResolution, StoreError> {
+        self.validate_project(project_id)?;
         let job = self.require_job(project_id, job_id)?;
         let job = if job.stage == "admitted" {
-            self.transition(&job, "running", Some(at), None, None)?
+            self.transition(&job, "running", Some(at), None, None, None)?
         } else {
             job
         };
@@ -202,6 +356,7 @@ impl<'a> ExternalEffectAdapter<'a> {
         at: &str,
     ) -> Result<ExternalEffectResolution, StoreError> {
         require_external_text(side_effect_ref, "external side-effect reference")?;
+        self.validate_project(project_id)?;
         let job = self.require_job(project_id, job_id)?;
         let job = if job.stage == "running" {
             self.transition(
@@ -209,6 +364,7 @@ impl<'a> ExternalEffectAdapter<'a> {
                 "side_effect_started",
                 Some(at),
                 Some(side_effect_ref),
+                None,
                 None,
             )?
         } else if job.stage == "side_effect_started"
@@ -231,6 +387,7 @@ impl<'a> ExternalEffectAdapter<'a> {
         at: &str,
     ) -> Result<ExternalEffectResolution, StoreError> {
         require_external_text(side_effect_ref, "external side-effect reference")?;
+        self.validate_project(project_id)?;
         let job = if let Some(identity) = self.identity {
             self.store
                 .mark_external_job_readback_required_with_identity(
@@ -250,6 +407,42 @@ impl<'a> ExternalEffectAdapter<'a> {
         Ok(ExternalEffectResolution::ReadbackRequired(job))
     }
 
+    pub fn reject(
+        &self,
+        project_id: &str,
+        job_id: &str,
+        at: &str,
+        reason: &str,
+    ) -> Result<ExternalEffectResolution, StoreError> {
+        require_external_text(at, "external rejection timestamp")?;
+        require_external_text(reason, "external rejection reason")?;
+        self.validate_project(project_id)?;
+        let job = self.require_job(project_id, job_id)?;
+        if job.stage == "rejected" {
+            return Ok(ExternalEffectResolution::Rejected(job));
+        }
+        let job = self.transition(&job, "rejected", Some(at), None, None, Some(reason))?;
+        Ok(ExternalEffectResolution::Rejected(job))
+    }
+
+    pub fn fail(
+        &self,
+        project_id: &str,
+        job_id: &str,
+        at: &str,
+        reason: &str,
+    ) -> Result<ExternalEffectResolution, StoreError> {
+        require_external_text(at, "external failure timestamp")?;
+        require_external_text(reason, "external failure reason")?;
+        self.validate_project(project_id)?;
+        let job = self.require_job(project_id, job_id)?;
+        if job.stage == "failed" {
+            return Ok(ExternalEffectResolution::Failed(job));
+        }
+        let job = self.transition(&job, "failed", Some(at), None, None, Some(reason))?;
+        Ok(ExternalEffectResolution::Failed(job))
+    }
+
     pub fn reconcile_readback(
         &self,
         readback: &ExternalEffectReadback,
@@ -265,6 +458,7 @@ impl<'a> ExternalEffectAdapter<'a> {
         ] {
             require_external_text(value, label)?;
         }
+        self.validate_project(&readback.project_id)?;
         let job = self.require_job(&readback.project_id, &readback.job_id)?;
         if job.operation_id != readback.operation_id
             || job.request_digest != readback.request_digest
@@ -298,6 +492,7 @@ impl<'a> ExternalEffectAdapter<'a> {
             Some(&readback.observed_at),
             None,
             Some(&readback.result_digest),
+            None,
         )?;
         Ok(ExternalEffectResolution::Reconciled(job))
     }
@@ -309,6 +504,7 @@ impl<'a> ExternalEffectAdapter<'a> {
         request_digest: &str,
     ) -> Result<ExternalEffectResolution, StoreError> {
         require_external_text(request_digest, "external request digest")?;
+        self.validate_project(project_id)?;
         let job = if let Some(identity) = self.identity {
             self.store
                 .external_job_by_operation_with_identity(identity, operation_id)?
@@ -347,6 +543,7 @@ impl<'a> ExternalEffectAdapter<'a> {
         at: Option<&str>,
         side_effect_ref: Option<&str>,
         result_digest: Option<&str>,
+        error_message: Option<&str>,
     ) -> Result<ExternalJobRecord, StoreError> {
         let input = ExternalJobTransitionInput {
             project_id: job.project_id.clone(),
@@ -356,7 +553,7 @@ impl<'a> ExternalEffectAdapter<'a> {
             at: at.unwrap_or(&job.updated_at).to_owned(),
             side_effect_ref: side_effect_ref.map(str::to_owned),
             result_digest: result_digest.map(str::to_owned),
-            error_message: None,
+            error_message: error_message.map(str::to_owned),
         };
         if let Some(identity) = self.identity {
             self.store
@@ -364,6 +561,19 @@ impl<'a> ExternalEffectAdapter<'a> {
         } else {
             self.store.advance_external_job(&input)
         }
+    }
+
+    fn validate_project(&self, project_id: &str) -> Result<(), StoreError> {
+        require_external_text(project_id, "external project id")?;
+        if let Some(identity) = self.identity {
+            if identity.project_id != project_id {
+                return Err(StoreError::WrongSubject {
+                    expected: identity.project_id.clone(),
+                    actual: project_id.to_owned(),
+                });
+            }
+        }
+        Ok(())
     }
 }
 
