@@ -736,11 +736,10 @@ pub struct ProfileStore<'a> {
     store: &'a SqliteStore,
 }
 
-/// The durable pinned-requirement tables are additive so older v2 databases
-/// can install this seam before the canonical migration wiring is available.
-/// The production schema carries the same DDL; the idempotent installer here
-/// is deliberately limited to this module and does not make it authoritative
-/// for the rest of the store.
+/// Compatibility DDL retained only for explicitly noncanonical schema-v2 test
+/// fixtures. Canonical production opens install these objects through the
+/// ordered migration boundary in `schema-production.sql`; profile reads and
+/// production writes never execute this batch.
 const PINNED_REQUIREMENTS_SCHEMA_SQL: &str = r#"
 CREATE TABLE IF NOT EXISTS boreal_pinned_requirement (
   project_id TEXT NOT NULL,
@@ -816,10 +815,64 @@ impl<'a> ProfileStore<'a> {
         Self { store }
     }
 
-    /// Installs only the additive pinned-requirement tables. The production
-    /// migration/open path must still own ordered schema registration.
+    /// Verifies that the ordered production opener installed the immutable
+    /// requirement schema. This method is intentionally read-only: a status
+    /// read must never create tables or triggers as a side effect.
     pub fn ensure_pinned_requirements_schema(&self) -> Result<(), StoreError> {
-        self.store.execute_batch(PINNED_REQUIREMENTS_SCHEMA_SQL)
+        self.require_pinned_requirements_schema()
+    }
+
+    fn ensure_pinned_requirements_schema_for_write(&self) -> Result<(), StoreError> {
+        let installed = self.pinned_requirements_schema_installed()?;
+        if !installed {
+            if self.store.canonical_production {
+                return Err(StoreError::Corrupt(
+                    "canonical production schema is missing pinned requirement tables".to_owned(),
+                ));
+            }
+            // Noncanonical schema-v2 callers are compatibility fixtures only.
+            // They may opt into the additive seam on first write, but all
+            // subsequent reads still verify the complete schema without DDL.
+            self.store.execute_batch(PINNED_REQUIREMENTS_SCHEMA_SQL)?;
+        }
+        self.require_pinned_requirements_schema()
+    }
+
+    fn require_pinned_requirements_schema(&self) -> Result<(), StoreError> {
+        if !self.pinned_requirements_schema_installed()? {
+            return Err(StoreError::Corrupt(
+                "pinned requirement schema is not installed through the production opener"
+                    .to_owned(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn pinned_requirements_schema_installed(&self) -> Result<bool, StoreError> {
+        for table in [
+            "boreal_pinned_requirement",
+            "boreal_pinned_requirement_gate",
+        ] {
+            if !self.store.table_exists(table)? {
+                return Ok(false);
+            }
+        }
+        for index in ["boreal_pinned_requirement_project"] {
+            if !self.store.schema_object_exists("index", index)? {
+                return Ok(false);
+            }
+        }
+        for trigger in [
+            "boreal_pinned_requirement_immutable_update",
+            "boreal_pinned_requirement_immutable_delete",
+            "boreal_pinned_requirement_gate_immutable_update",
+            "boreal_pinned_requirement_gate_immutable_delete",
+        ] {
+            if !self.store.schema_object_exists("trigger", trigger)? {
+                return Ok(false);
+            }
+        }
+        Ok(true)
     }
 
     /// Compatibility registration for existing callers. Validate the complete
@@ -871,7 +924,7 @@ impl<'a> ProfileStore<'a> {
         requirements: &PinnedRequirements,
     ) -> Result<PinnedRequirementsOutcome, StoreError> {
         requirements.validate_for_persistence()?;
-        self.ensure_pinned_requirements_schema()?;
+        self.ensure_pinned_requirements_schema_for_write()?;
         let declarations_json = canonical_value(&Value::Array(
             requirements
                 .declarations

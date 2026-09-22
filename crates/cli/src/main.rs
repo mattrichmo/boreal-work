@@ -2687,6 +2687,9 @@ fn status_name(status: boreal_domain::DerivedStatus) -> &'static str {
     match status {
         boreal_domain::DerivedStatus::Draft => "draft",
         boreal_domain::DerivedStatus::Queued => "queued",
+        // Status/2 compatibility: status/3 scheduled work remains queued and
+        // retains its scheduled_start reason in the surrounding projection.
+        boreal_domain::DerivedStatus::Scheduled => "queued",
         boreal_domain::DerivedStatus::Ready => "ready",
         boreal_domain::DerivedStatus::Claimed => "claimed",
         boreal_domain::DerivedStatus::InProgress => "in_progress",
@@ -6481,6 +6484,15 @@ mod tests {
     use super::*;
     fn args(values: &[&str]) -> Vec<String> {
         values.iter().map(|value| (*value).to_owned()).collect()
+    }
+
+    #[test]
+    fn status_name_maps_scheduled_to_status_two_queued() {
+        assert_eq!(
+            status_name(boreal_domain::DerivedStatus::Scheduled),
+            "queued"
+        );
+        assert_eq!(status_name(boreal_domain::DerivedStatus::Ready), "ready");
     }
 
     #[test]

@@ -4,10 +4,11 @@
 //! persistence primitives. It deliberately does not decide lifecycle status;
 //! that belongs to the domain/application layer.
 
+use boreal_domain::work_model_v3::WorkSchedule;
 use boreal_domain::{
     AcceptanceProfile, AttemptPhase, BlockingDependency, DependencyPolicy, DispatchPolicy,
     GateKind, GateRequirement, GateState, PersistedLifecycle, ProfileId, ProjectId, ReasonCode,
-    Reservation, WorkId, WorkItem, WorkKind,
+    Reservation, TimestampMs, WorkId, WorkItem, WorkKind,
 };
 use serde_json::{json, Value};
 use std::borrow::Borrow;
@@ -538,6 +539,13 @@ pub struct WorkPage {
 pub struct StatusWorkRecord {
     pub work: WorkItem,
     pub retry_not_before: Option<String>,
+    /// Canonical work schedule when a persisted schedule projection is
+    /// available. Retry timing is deliberately not converted into a work
+    /// schedule.
+    pub schedule: Option<WorkSchedule>,
+    /// Earliest live cycle-assignment activation instant for this work, when
+    /// the v3 planning projection provides one.
+    pub activation_at: Option<TimestampMs>,
     pub current_attempt: Option<AttemptRecord>,
     pub gate_diagnostics: GateDiagnostics,
 }
@@ -3632,6 +3640,7 @@ impl SqliteStore {
         let active_holds = self.active_hard_holds_for_project(project_id)?;
         let gate_diagnostics =
             self.status_gate_diagnostics_for_project(project_id, &current_attempts, revision.0)?;
+        let mut planning_facts = self.status_planning_facts_for_project(project_id)?;
 
         let mut rows = self.prepare(
             "SELECT work_id, project_id, kind, parent_id, lifecycle,
@@ -3673,7 +3682,10 @@ impl SqliteStore {
                 .collect();
             let title = rows.column_text(10).ok();
             let work = (|| {
-                Ok::<WorkItem, StoreError>(WorkItem {
+                let (schedule, activation_at) = planning_facts
+                    .remove(&work_id)
+                    .unwrap_or(Ok((None, None)))?;
+                let work = WorkItem {
                     id: WorkId::new(work_id.clone()),
                     project_id: ProjectId::new(rows.column_text(1)?),
                     kind: parse_work_kind(&rows.column_text(2)?)?,
@@ -3691,12 +3703,15 @@ impl SqliteStore {
                         version: rows.column_u64(9)?.to_string(),
                         gates,
                     },
-                })
+                };
+                Ok::<_, StoreError>((work, schedule, activation_at))
             })();
             match work {
-                Ok(work) => works.push(StatusWorkRecord {
+                Ok((work, schedule, activation_at)) => works.push(StatusWorkRecord {
                     work,
                     retry_not_before: rows.column_optional_text(6)?,
+                    schedule,
+                    activation_at,
                     current_attempt,
                     gate_diagnostics: diagnostics,
                 }),
@@ -4852,9 +4867,60 @@ impl SqliteStore {
                 reservation.bind_text(2, &request.at)?;
                 reservation.bind_text(3, &request.attempt_id)?;
                 reservation.run()?;
+
+                // Keep the legacy row as a compatibility projection only.
+                // Canonical production reservations enter the durable release
+                // protocol and remain release-pending until an owner supplies
+                // a real acknowledgement.
+                self.request_canonical_resource_release_in_transaction(
+                    &request.project_id,
+                    &request.attempt_id,
+                    request.fence,
+                    &request.operation_id,
+                    &request.actor_id,
+                    &request.at,
+                )?;
             }
         }
         Ok((phase, event_type(&request.mutation)))
+    }
+
+    fn request_canonical_resource_release_in_transaction(
+        &self,
+        project_id: &str,
+        attempt_id: &str,
+        fence: u64,
+        operation_id: &str,
+        actor_id: &str,
+        at: &str,
+    ) -> Result<(), StoreError> {
+        if !self.table_exists("boreal_resource_reservation")? {
+            // Historical schema-v2 fixtures do not have the canonical
+            // reservation tables and retain the legacy projection only.
+            return Ok(());
+        }
+
+        let reservation_id = format!("resource:{attempt_id}");
+        if self
+            .resource_reservation(project_id, &reservation_id)?
+            .is_none()
+        {
+            if self.canonical_production {
+                return Err(StoreError::Corrupt(format!(
+                    "canonical attempt {attempt_id} has no resource reservation"
+                )));
+            }
+            return Ok(());
+        }
+        self.request_resource_release_in_transaction(
+            project_id,
+            &reservation_id,
+            &format!("{operation_id}:resource-release"),
+            actor_id,
+            &format!("attempt-terminal:{attempt_id}:{fence}"),
+            at,
+        )?;
+        Ok(())
     }
 
     fn attempt_record(
@@ -7660,7 +7726,36 @@ impl SqliteStore {
         )?;
         reservation.bind_text(1, &request.at)?;
         reservation.bind_text(2, &request.attempt_id)?;
-        reservation.run()
+        reservation.run()?;
+
+        // Closing ends execution ownership, but it does not prove that the
+        // physical worktree/resource has been released. Preserve that fact in
+        // the canonical release protocol and retain a recovery obligation
+        // until the release is acknowledged.
+        if self.table_exists("boreal_resource_reservation")? {
+            self.request_canonical_resource_release_in_transaction(
+                &request.project_id,
+                &request.attempt_id,
+                request.fence,
+                &request.operation_id,
+                &request.actor_id,
+                &request.at,
+            )?;
+            self.create_recovery_obligation_in_transaction(&recovery::RecoveryObligationInput {
+                obligation_id: format!("{}:recovery:close-finalize", request.operation_id),
+                project_id: request.project_id.clone(),
+                work_id: request.work_id.clone(),
+                attempt_id: Some(request.attempt_id.clone()),
+                fence: Some(request.fence),
+                reason: "resource_unknown".to_owned(),
+                resource_state: "release_pending".to_owned(),
+                owner_actor_id: Some(request.actor_id.clone()),
+                next_action: "acknowledge resource release before reusing the execution resource"
+                    .to_owned(),
+                created_at: request.at.clone(),
+            })?;
+        }
+        Ok(())
     }
 
     fn replay_receipt_operation(

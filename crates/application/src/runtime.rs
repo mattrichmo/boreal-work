@@ -381,6 +381,12 @@ impl<'a> AttemptRecoveryAdapter<'a> {
         request: &RecoveryResolveRequest,
     ) -> Result<AttemptRecoveryResolution, StoreError> {
         self.validate_project(&request.project_id)?;
+        if self.identity.is_none() && request.resource_state == "released" {
+            return Err(StoreError::Conflict(
+                "released recovery resolution requires an authenticated identity-bound resource acknowledgement"
+                    .to_owned(),
+            ));
+        }
         let input = RecoveryResolutionInput {
             project_id: request.project_id.clone(),
             obligation_id: request.obligation_id.clone(),
@@ -922,6 +928,50 @@ impl WorkApplication<'_> {
             .map_err(ApplicationError::from)
     }
 
+    /// Resolve a terminal-attempt recovery obligation through the production
+    /// identity boundary. The adapter's identity-bound store path keeps the
+    /// operation, request digest, project lineage, recovery fence, audit
+    /// event, and resource acknowledgement in the same authoritative flow.
+    ///
+    /// The request type is kept in this module until the service route is
+    /// exposed from the application façade. Callers must not fall back to the
+    /// legacy project-id-only store resolution for `released` outcomes.
+    pub fn resolve_attempt_recovery_with_identity(
+        &self,
+        identity: &IdentityContext,
+        request: &RecoveryResolveRequest,
+    ) -> Result<AttemptRecoveryResolution, ApplicationError> {
+        AttemptRecoveryAdapter::new_with_identity(self.store, identity)
+            .resolve(request)
+            .map_err(ApplicationError::from)
+    }
+
+    /// Request physical resource release while retaining the project/database
+    /// identity check. A request only moves a canonical reservation to
+    /// `release_pending`; it never makes the resource reusable by itself.
+    pub fn request_resource_release_with_identity(
+        &self,
+        identity: &IdentityContext,
+        request: &ResourceReleaseRequest,
+    ) -> Result<ResourceReservationRecord, ApplicationError> {
+        AttemptRecoveryAdapter::new_with_identity(self.store, identity)
+            .request_resource_release(request)
+            .map_err(ApplicationError::from)
+    }
+
+    /// Acknowledge the exact pending release through the identity-bound
+    /// adapter. The store verifies the reservation subject, pending event,
+    /// evidence, and idempotent acknowledgement before making it reusable.
+    pub fn acknowledge_resource_release_with_identity(
+        &self,
+        identity: &IdentityContext,
+        request: &ResourceReleaseRequest,
+    ) -> Result<ResourceReservationRecord, ApplicationError> {
+        AttemptRecoveryAdapter::new_with_identity(self.store, identity)
+            .acknowledge_resource_release(request)
+            .map_err(ApplicationError::from)
+    }
+
     fn run_attempt<A: AttemptLifecycleAdapter>(
         &self,
         adapter: &A,
@@ -1047,8 +1097,18 @@ fn operation_result(result: AttemptMutation) -> OperationResult<AttemptMutation>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use boreal_domain::{AttemptPhase, Fence};
+    use boreal_domain::{
+        AcceptanceProfile, AttemptPhase, DispatchPolicy, Fence, PersistedLifecycle, WorkItem,
+        WorkKind,
+    };
+    use boreal_store::{
+        identity::{DatabaseIdentity, IdentityStore, WorkspaceBinding},
+        recovery::RecoveryObligationInput,
+        SqliteStore,
+    };
     use std::cell::RefCell;
+
+    const PRODUCTION_SCHEMA: &str = include_str!("../../../project/spec/schema-production.sql");
 
     fn snapshot(phase: AttemptPhase) -> AttemptSnapshot {
         AttemptSnapshot {
@@ -1218,6 +1278,215 @@ mod tests {
         let superseded = recovery_resolution(recovery_record("superseded", "unknown"));
         assert!(!superseded.is_resolved());
         assert!(!superseded.is_readback_required());
+    }
+
+    fn test_identity(store: &SqliteStore, project_id: &str) -> IdentityContext {
+        IdentityStore::new(store)
+            .install(
+                &DatabaseIdentity::new("runtime-test-database", 1)
+                    .expect("database identity is valid"),
+                "unix-ms:1",
+            )
+            .expect("database identity installs");
+        IdentityStore::new(store)
+            .bind_project(
+                project_id,
+                &WorkspaceBinding::new(
+                    "/tmp/boreal-runtime-test",
+                    "/tmp/boreal-runtime-test",
+                    "sha256:runtime-test-binding",
+                )
+                .expect("workspace binding is valid"),
+                "unix-ms:2",
+            )
+            .expect("project identity binds")
+    }
+
+    #[test]
+    fn identity_bound_recovery_entry_point_replays_and_rejects_unbound_release() {
+        let store = SqliteStore::open_in_memory(PRODUCTION_SCHEMA).expect("production schema");
+        let project = ProjectId::new("runtime-recovery-project");
+        store
+            .create_project(project.as_str(), "unix-ms:1")
+            .expect("project creates");
+        store
+            .ensure_actor(
+                "runtime-actor",
+                "agent",
+                "credential-runtime",
+                "Runtime actor",
+                "unix-ms:1",
+            )
+            .expect("actor creates");
+        let identity = test_identity(&store, project.as_str());
+        let app = WorkApplication::new(&store);
+        app.create_work_as(
+            &WorkItem {
+                id: WorkId::new("runtime-recovery-work"),
+                project_id: project.clone(),
+                kind: WorkKind::Task,
+                parent_id: None,
+                title: "runtime recovery work".to_owned(),
+                description: String::new(),
+                lifecycle: PersistedLifecycle::Open,
+                priority: 0,
+                dispatch_policy: DispatchPolicy::Automatic,
+                hard_holds: Vec::new(),
+                acceptance_profile: AcceptanceProfile::focused(),
+            },
+            "runtime-actor",
+            "unix-ms:3",
+            "op-runtime-recovery-work",
+        )
+        .expect("work creates");
+        store
+            .create_recovery_obligation(&RecoveryObligationInput {
+                obligation_id: "op-runtime-recovery:recovery:expired".to_owned(),
+                project_id: project.as_str().to_owned(),
+                work_id: "runtime-recovery-work".to_owned(),
+                attempt_id: None,
+                fence: None,
+                reason: "expired".to_owned(),
+                resource_state: "unknown".to_owned(),
+                owner_actor_id: Some("runtime-actor".to_owned()),
+                next_action: "read back the stopped runtime".to_owned(),
+                created_at: "unix-ms:4".to_owned(),
+            })
+            .expect("recovery obligation creates");
+
+        let request = RecoveryResolveRequest {
+            project_id: project.as_str().to_owned(),
+            obligation_id: "op-runtime-recovery:recovery:expired".to_owned(),
+            operation_id: "op-runtime-recovery-resolve".to_owned(),
+            request_digest: "sha256:op-runtime-recovery-resolve".to_owned(),
+            resolution_id: "runtime-recovery-resolution".to_owned(),
+            actor_id: "runtime-actor".to_owned(),
+            outcome: "runtime_stopped".to_owned(),
+            reason: "the expired runtime was observed stopped".to_owned(),
+            resource_state: "unknown".to_owned(),
+            at: "unix-ms:5".to_owned(),
+            expected_project_revision: None,
+            session_id: None,
+        };
+        let resolved = app
+            .resolve_attempt_recovery_with_identity(&identity, &request)
+            .expect("identity-bound recovery resolves");
+        assert!(resolved.is_resolved());
+        let replay = app
+            .resolve_attempt_recovery_with_identity(&identity, &request)
+            .expect("same recovery operation replays");
+        assert!(replay.is_resolved());
+        assert_eq!(
+            replay.record().resolution_id.as_deref(),
+            Some("runtime-recovery-resolution")
+        );
+
+        let mut released = request.clone();
+        released.resource_state = "released".to_owned();
+        let unbound = AttemptRecoveryAdapter::new(&store).resolve(&released);
+        assert!(matches!(
+            unbound,
+            Err(StoreError::Conflict(message)) if message.contains("authenticated identity-bound")
+        ));
+
+        let mut foreign = request;
+        foreign.project_id = "foreign-project".to_owned();
+        let foreign_result = app.resolve_attempt_recovery_with_identity(&identity, &foreign);
+        assert!(matches!(
+            foreign_result,
+            Err(ApplicationError::Store(StoreError::WrongSubject { .. }))
+        ));
+    }
+
+    #[test]
+    fn identity_bound_resource_acknowledgement_is_idempotent_and_project_scoped() {
+        let store = SqliteStore::open_in_memory(PRODUCTION_SCHEMA).expect("production schema");
+        let app = WorkApplication::new(&store);
+        let project = ProjectId::new("runtime-resource-project");
+        store
+            .create_project(project.as_str(), "unix-ms:1")
+            .expect("project creates");
+        store
+            .ensure_actor(
+                "runtime-owner",
+                "agent",
+                "credential-owner",
+                "Runtime owner",
+                "unix-ms:1",
+            )
+            .expect("actor creates");
+        let identity = test_identity(&store, project.as_str());
+        app.create_work_as(
+            &WorkItem {
+                id: WorkId::new("runtime-resource-work"),
+                project_id: project.clone(),
+                kind: WorkKind::Task,
+                parent_id: None,
+                title: "runtime resource work".to_owned(),
+                description: String::new(),
+                lifecycle: PersistedLifecycle::Open,
+                priority: 0,
+                dispatch_policy: DispatchPolicy::Automatic,
+                hard_holds: Vec::new(),
+                acceptance_profile: AcceptanceProfile::focused(),
+            },
+            "runtime-owner",
+            "unix-ms:2",
+            "op-runtime-resource-work",
+        )
+        .expect("work creates");
+        app.claim(
+            &project,
+            "runtime-resource-work",
+            "runtime-owner",
+            "runtime-harness",
+            None,
+            "runtime-resource-attempt",
+            "op-runtime-resource-claim",
+            "sha256:op-runtime-resource-claim",
+            None,
+            "unix-ms:1000",
+            "unix-ms:1100",
+            "unix-ms:1200",
+        )
+        .expect("attempt claims");
+
+        let release_request = ResourceReleaseRequest {
+            project_id: project.as_str().to_owned(),
+            reservation_id: "resource:runtime-resource-attempt".to_owned(),
+            event_id: "runtime-resource-release-request".to_owned(),
+            actor_id: "runtime-owner".to_owned(),
+            evidence_ref: "runtime-stop-evidence".to_owned(),
+            at: "unix-ms:4".to_owned(),
+        };
+        let pending = app
+            .request_resource_release_with_identity(&identity, &release_request)
+            .expect("identity-bound release request records pending state");
+        assert_eq!(pending.state, "release_pending");
+
+        let acknowledgement = ResourceReleaseRequest {
+            event_id: "runtime-resource-release-ack".to_owned(),
+            ..release_request.clone()
+        };
+        let released = app
+            .acknowledge_resource_release_with_identity(&identity, &acknowledgement)
+            .expect("identity-bound release acknowledgement commits");
+        assert_eq!(released.state, "released");
+        let replay = app
+            .acknowledge_resource_release_with_identity(&identity, &acknowledgement)
+            .expect("same acknowledgement replays idempotently");
+        assert_eq!(
+            replay.release_ack_id.as_deref(),
+            Some("runtime-resource-release-ack")
+        );
+
+        let mut foreign = acknowledgement;
+        foreign.project_id = "foreign-project".to_owned();
+        let foreign_result = app.acknowledge_resource_release_with_identity(&identity, &foreign);
+        assert!(matches!(
+            foreign_result,
+            Err(ApplicationError::Store(StoreError::WrongSubject { .. }))
+        ));
     }
 
     #[derive(Default)]

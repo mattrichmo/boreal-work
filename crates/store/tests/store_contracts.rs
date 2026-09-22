@@ -2,12 +2,15 @@ use boreal_domain::{
     AttemptPhase, GateState, PersistedLifecycle, ProjectId, WorkId, WorkItem, WorkKind,
 };
 use boreal_store::{
-    recovery::RecoveryResolutionInput, AttemptMutationKind, AttemptMutationRequest,
-    AuditEventRecord, CloseIntentRequest, ConstraintKind, EvidenceExecutionAdmissionRequest,
-    GateStateUpdateRequest, OperationOutcome, OperationRecord, ReceiptAcceptanceExpectation,
-    ReceiptAttestation, ReceiptInsertRequest, ReceiptOutcome, ReceiptSubmissionKind,
-    ReviewDecision, ReviewInsertRequest, SnapshotRevision, SqliteStore, StoreError,
-    WORK_MODEL_SCHEMA_VERSION,
+    identity::{DatabaseIdentity, IdentityStore, WorkspaceBinding},
+    recovery::{
+        IdentityBoundRecoveryResolutionInput, RecoveryResolutionInput, ResourceReservationInput,
+    },
+    AttemptMutationKind, AttemptMutationRequest, AuditEventRecord, CloseIntentRequest,
+    ConstraintKind, EvidenceExecutionAdmissionRequest, GateStateUpdateRequest, OperationOutcome,
+    OperationRecord, ReceiptAcceptanceExpectation, ReceiptAttestation, ReceiptInsertRequest,
+    ReceiptOutcome, ReceiptSubmissionKind, ReviewDecision, ReviewInsertRequest, SnapshotRevision,
+    SqliteStore, StoreError, WORK_MODEL_SCHEMA_VERSION,
 };
 
 const SCHEMA: &str = include_str!("../../../project/spec/schema-v2.sql");
@@ -62,6 +65,28 @@ fn remove_sqlite_files(path: &std::path::Path) {
     let _ = std::fs::remove_file(path);
     let _ = std::fs::remove_file(path.with_extension("sqlite-wal"));
     let _ = std::fs::remove_file(path.with_extension("sqlite-shm"));
+}
+
+fn recovery_context(store: &SqliteStore) -> boreal_store::identity::IdentityContext {
+    let identities = IdentityStore::new(store);
+    identities
+        .install(
+            &DatabaseIdentity::new("database-store-contracts", 1).expect("valid database identity"),
+            "t0",
+        )
+        .expect("identity schema installs");
+    identities
+        .bind_project(
+            "p1",
+            &WorkspaceBinding::new(
+                "/tmp/boreal-store-contracts",
+                "/tmp/boreal-store-contracts",
+                "sha256:store-contracts",
+            )
+            .expect("valid workspace binding"),
+            "t0",
+        )
+        .expect("project binds")
 }
 
 fn mutation(
@@ -849,6 +874,22 @@ fn expiry_and_cancel_are_fenced_and_release_the_reservation() {
     let store = store();
     base(&store);
     attempt(&store, "a1", "w1", "s1", 1);
+    store
+        .ensure_recovery_schema()
+        .expect("recovery/resource schema installs");
+    store
+        .reserve_resource(&ResourceReservationInput {
+            reservation_id: "resource:a1".into(),
+            project_id: "p1".into(),
+            work_id: "w1".into(),
+            attempt_id: "a1".into(),
+            fence: 1,
+            resource_key: "work:p1:w1".into(),
+            resource_kind: "execution_worktree".into(),
+            owner_actor_id: "agent-1".into(),
+            created_at: "t0".into(),
+        })
+        .expect("canonical resource reservation persists");
 
     let not_expired = mutation(
         "a1",
@@ -907,18 +948,62 @@ fn expiry_and_cancel_are_fenced_and_release_the_reservation() {
         .claimable_work_candidates("p1", "unix-ms:3", 10, None)
         .expect("candidate read")
         .is_empty());
-    store
-        .resolve_recovery_obligation(&RecoveryResolutionInput {
-            project_id: "p1".into(),
-            obligation_id: "op-expire:recovery:expired".into(),
-            resolution_id: "resolution-expire".into(),
-            actor_id: "agent-1".into(),
-            outcome: "runtime_stopped".into(),
-            reason: "the expired runtime was observed stopped".into(),
-            resource_state: "released".into(),
-            at: "unix-ms:2".into(),
+    let plain_release = store.resolve_recovery_obligation(&RecoveryResolutionInput {
+        project_id: "p1".into(),
+        obligation_id: "op-expire:recovery:expired".into(),
+        resolution_id: "resolution-expire".into(),
+        actor_id: "agent-1".into(),
+        outcome: "runtime_stopped".into(),
+        reason: "the expired runtime was observed stopped".into(),
+        resource_state: "released".into(),
+        at: "unix-ms:2".into(),
+    });
+    assert!(matches!(
+        plain_release,
+        Err(StoreError::Conflict(message)) if message.contains("identity-bound")
+    ));
+    assert_eq!(
+        store
+            .resource_reservation("p1", "resource:a1")
+            .expect("canonical resource read")
+            .expect("canonical reservation exists")
+            .state,
+        "release_pending"
+    );
+
+    let context = recovery_context(&store);
+    let expected_revision = store.project_revision("p1").unwrap().0;
+    let authenticated_release = store
+        .resolve_recovery_obligation_with_identity(&IdentityBoundRecoveryResolutionInput {
+            context,
+            operation_id: "op-expire-recovery-release".into(),
+            request_digest: "sha256:op-expire-recovery-release".into(),
+            expected_project_revision: Some(expected_revision),
+            session_id: Some("s1".into()),
+            resolution: RecoveryResolutionInput {
+                project_id: "p1".into(),
+                obligation_id: "op-expire:recovery:expired".into(),
+                resolution_id: "resolution-expire-authenticated".into(),
+                actor_id: "agent-1".into(),
+                outcome: "runtime_stopped".into(),
+                reason: "the expired runtime was observed stopped".into(),
+                resource_state: "released".into(),
+                at: "unix-ms:2".into(),
+            },
         })
-        .expect("expiry recovery is explicitly resolved");
+        .expect("authenticated expiry recovery is explicitly resolved");
+    assert!(!authenticated_release.replayed);
+    assert_eq!(authenticated_release.obligation.state, "resolved");
+    assert_eq!(authenticated_release.obligation.resource_state, "released");
+    let released_resource = store
+        .resource_reservation("p1", "resource:a1")
+        .expect("released resource read")
+        .expect("canonical reservation exists");
+    assert_eq!(released_resource.state, "released");
+    assert_eq!(
+        released_resource.release_ack_id.as_deref(),
+        Some("resource:a1:release-ack:resolution-expire-authenticated")
+    );
 
     // A replacement claim then receives the next monotonic fence.
     let replacement = store
@@ -931,7 +1016,7 @@ fn expiry_and_cancel_are_fenced_and_release_the_reservation() {
             "a2",
             "op-claim-2",
             "sha256:claim-2",
-            Some(1),
+            Some(2),
             "unix-ms:3",
             "unix-ms:4",
             "unix-ms:5",

@@ -1,9 +1,10 @@
 //! One pure decision over canonical inputs. Reads and transactional claim
 //! authorization both call this function; adapters must not repair its result.
 use crate::{
-    ActorContext, ActorRole, AttemptPhase, CurrentAttempt, DerivedStatus, DispatchPolicy,
-    DomainAction, GateId, GateKind, GateRequirement, GateState, PersistedLifecycle, ReasonCode,
-    StatusContext, StatusDecision, WorkItem, WorkKind,
+    time_policy::evaluate_schedule as evaluate_time_schedule, ActorContext, ActorRole,
+    AttemptPhase, CurrentAttempt, DerivedStatus, DispatchPolicy, DomainAction, GateId, GateKind,
+    GateRequirement, GateState, PersistedLifecycle, ReasonCode, StatusContext, StatusDecision,
+    WorkItem, WorkKind,
 };
 
 type PrimaryDecision = (DerivedStatus, bool, Option<DomainAction>, ReasonCode);
@@ -36,8 +37,44 @@ pub fn evaluate_status(context: StatusContext<'_>) -> StatusDecision {
         });
     let retry_at = context.retry_not_before.filter(|at| *at > context.as_of);
 
+    // A schedule and a cycle/assignment activation are independent canonical
+    // dispatch constraints.  The earliest future instant wins the primary
+    // scheduled reason, while all other facts remain secondary reasons.  An
+    // invalid schedule is fail-closed as an intervention fact; it is never
+    // treated as an immediately claimable work item.
+    let schedule_decision = context.schedule.map(|schedule| {
+        evaluate_time_schedule(schedule, context.as_of, work.lifecycle.is_terminal())
+    });
+    let schedule_invalid = schedule_decision.as_ref().is_some_and(Result::is_err);
+    let work_schedule_at = if work.lifecycle.is_terminal() {
+        None
+    } else {
+        schedule_decision
+            .as_ref()
+            .and_then(|result| result.as_ref().ok())
+            .filter(|decision| decision.scheduled)
+            .and_then(|_| context.schedule.and_then(|schedule| schedule.not_before_at))
+            .filter(|at| *at > context.as_of)
+    };
+    let activation_at = if work.lifecycle.is_terminal() {
+        None
+    } else {
+        context.activation_at.filter(|at| *at > context.as_of)
+    };
+    let scheduled_at = [work_schedule_at, activation_at]
+        .into_iter()
+        .flatten()
+        .min();
+    let schedule_next_change_at = schedule_decision
+        .as_ref()
+        .and_then(|result| result.as_ref().ok())
+        .and_then(|decision| decision.next_change_at);
+
     let mut reasons = Vec::new();
     let mut hard_reasons = work.hard_holds.clone();
+    if schedule_invalid {
+        hard_reasons.push(ReasonCode::HardHold("schedule_invalid".into()));
+    }
 
     let mut prerequisites = context
         .prerequisites
@@ -166,6 +203,9 @@ pub fn evaluate_status(context: StatusContext<'_>) -> StatusDecision {
     if let Some(at) = retry_at {
         reasons.push(ReasonCode::RetryNotBefore(at));
     }
+    if let Some(at) = scheduled_at {
+        reasons.push(ReasonCode::ScheduledStart(at));
+    }
     if expiry_pending {
         reasons.push(ReasonCode::ExpiryReviewRequired);
     }
@@ -258,6 +298,12 @@ pub fn evaluate_status(context: StatusContext<'_>) -> StatusDecision {
                 Some(DomainAction::WaitUntil),
                 ReasonCode::RetryNotBefore(at),
             )
+        } else if let Some(at) = scheduled_at {
+            pending(
+                DerivedStatus::Scheduled,
+                Some(DomainAction::WaitUntil),
+                ReasonCode::ScheduledStart(at),
+            )
         } else if let Some(reason) = prerequisites.first() {
             pending(
                 DerivedStatus::Queued,
@@ -287,6 +333,8 @@ pub fn evaluate_status(context: StatusContext<'_>) -> StatusDecision {
             .into_iter()
             .flat_map(|current| [current.lease_deadline, current.max_attempt_deadline])
             .chain(retry_at)
+            .chain(scheduled_at)
+            .chain(schedule_next_change_at)
             .filter(|at| *at > context.as_of)
             .min()
     };

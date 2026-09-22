@@ -412,7 +412,7 @@ fn terminal_attempt_and_recovery_decisions_are_retained() {
             actor_id: "operator-1".to_owned(),
             outcome: "stopped".to_owned(),
             reason: "process group confirmed stopped".to_owned(),
-            resource_state: "released".to_owned(),
+            resource_state: "unknown".to_owned(),
             at: "unix-ms:5".to_owned(),
         })
         .unwrap();
@@ -496,6 +496,123 @@ fn resource_release_requires_acknowledgement_and_is_retry_safe() {
 }
 
 #[test]
+fn released_recovery_resolution_acknowledges_exact_bound_resource() {
+    let store = store();
+    let context = bound_context(&store);
+    store
+        .reserve_resource(&recovery::ResourceReservationInput {
+            reservation_id: "resource:a1".to_owned(),
+            project_id: "p1".to_owned(),
+            work_id: "w1".to_owned(),
+            attempt_id: "a1".to_owned(),
+            fence: 1,
+            resource_key: "work:p1:w1".to_owned(),
+            resource_kind: "execution_worktree".to_owned(),
+            owner_actor_id: "operator-1".to_owned(),
+            created_at: "unix-ms:1".to_owned(),
+        })
+        .expect("canonical resource reserves");
+    store
+        .request_resource_release(
+            "p1",
+            "resource:a1",
+            "op-terminal:resource-release",
+            "operator-1",
+            "attempt-terminal:a1:1",
+            "unix-ms:2",
+        )
+        .expect("terminal release request persists");
+    store
+        .create_recovery_obligation(&obligation("ob-release-bound"))
+        .expect("bound recovery obligation persists");
+
+    let plain = store.resolve_recovery_obligation(&recovery::RecoveryResolutionInput {
+        project_id: "p1".to_owned(),
+        obligation_id: "ob-release-bound".to_owned(),
+        resolution_id: "decision-plain-release".to_owned(),
+        actor_id: "operator-1".to_owned(),
+        outcome: "stopped".to_owned(),
+        reason: "plain resolution must not acknowledge a resource".to_owned(),
+        resource_state: "released".to_owned(),
+        at: "unix-ms:3".to_owned(),
+    });
+    assert!(matches!(
+        plain,
+        Err(boreal_store::StoreError::Conflict(message))
+            if message.contains("identity-bound")
+    ));
+    assert_eq!(
+        store
+            .recovery_obligation("p1", "ob-release-bound")
+            .unwrap()
+            .unwrap()
+            .state,
+        "unresolved"
+    );
+
+    let input = recovery::IdentityBoundRecoveryResolutionInput {
+        context: context.clone(),
+        operation_id: "op-bound-resource-release".to_owned(),
+        request_digest: "sha256:bound-resource-release".to_owned(),
+        expected_project_revision: Some(store.project_revision("p1").unwrap().0),
+        session_id: Some("session-1".to_owned()),
+        resolution: recovery::RecoveryResolutionInput {
+            project_id: "p1".to_owned(),
+            obligation_id: "ob-release-bound".to_owned(),
+            resolution_id: "decision-bound-resource-release".to_owned(),
+            actor_id: "operator-1".to_owned(),
+            outcome: "stopped".to_owned(),
+            reason: "runtime stop was independently confirmed".to_owned(),
+            resource_state: "released".to_owned(),
+            at: "unix-ms:4".to_owned(),
+        },
+    };
+    let first = store
+        .resolve_recovery_obligation_with_identity(&input)
+        .expect("authenticated release acknowledges the bound resource");
+    assert!(!first.replayed);
+    assert_eq!(first.obligation.state, "resolved");
+    assert_eq!(first.obligation.resource_state, "released");
+    let resource = store
+        .resource_reservation("p1", "resource:a1")
+        .unwrap()
+        .unwrap();
+    assert_eq!(resource.state, "released");
+    assert_eq!(
+        resource.release_ack_id.as_deref(),
+        Some("resource:a1:release-ack:decision-bound-resource-release")
+    );
+    assert!(store
+        .list_live_resources("p1", None, 10)
+        .unwrap()
+        .is_empty());
+
+    let replay = store
+        .resolve_recovery_obligation_with_identity(&input)
+        .expect("exact authenticated resolution replays");
+    assert!(replay.replayed);
+    assert_eq!(replay.obligation, first.obligation);
+    assert_eq!(
+        store
+            .recovery_decisions("p1", "ob-release-bound", 10)
+            .unwrap()
+            .len(),
+        1
+    );
+
+    let mut foreign_reservation = input;
+    foreign_reservation.operation_id = "op-bound-resource-release-foreign".to_owned();
+    foreign_reservation.request_digest = "sha256:bound-resource-release-foreign".to_owned();
+    foreign_reservation.resolution.resolution_id =
+        "decision-bound-resource-release-foreign".to_owned();
+    foreign_reservation.resolution.project_id = "foreign-project".to_owned();
+    assert!(matches!(
+        store.resolve_recovery_obligation_with_identity(&foreign_reservation),
+        Err(boreal_store::StoreError::WrongSubject { .. })
+    ));
+}
+
+#[test]
 fn unresolved_recovery_survives_production_restart() {
     let suffix = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -560,7 +677,7 @@ fn identity_bound_recovery_resolution_is_revisioned_audited_and_idempotent() {
             actor_id: "operator-1".to_owned(),
             outcome: "stopped".to_owned(),
             reason: "process group confirmed stopped".to_owned(),
-            resource_state: "released".to_owned(),
+            resource_state: "unknown".to_owned(),
             at: "unix-ms:5".to_owned(),
         },
     };

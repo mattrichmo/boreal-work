@@ -142,7 +142,7 @@ fn profile_seam_validates_identity_and_definition_before_registration() {
     let profile = profiles::ProfileVersion::new(
         "seam-profile",
         1,
-        "sha256:seam-policy",
+        "sha256:04937b08e17caa0326307286452067bee4354acde865e7890753f8ad8a88bd4a",
         r#"{"gates":[{"kind":"verification","required":true}]}"#,
         "unix-ms:1",
     )
@@ -161,7 +161,8 @@ fn profile_seam_validates_identity_and_definition_before_registration() {
     assert!(!same.matches(&profiles::ProfileIdentity {
         profile_id: "seam-profile".to_owned(),
         version: 2,
-        policy_digest: "sha256:seam-policy".to_owned(),
+        policy_digest: "sha256:04937b08e17caa0326307286452067bee4354acde865e7890753f8ad8a88bd4a"
+            .to_owned(),
     }));
 }
 

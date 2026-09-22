@@ -5,7 +5,7 @@
 //! include the seed and case index, which is the minimal counterexample needed
 //! to reproduce a failing pure-domain rule.
 
-use std::collections::BTreeSet;
+use std::{collections::BTreeSet, fmt::Write as _, path::Path, process::Command};
 
 use boreal_domain::actions::{
     all_action_kinds, evaluate_action, evaluate_actions, ActionAuthorization, ActionDenialReason,
@@ -49,16 +49,129 @@ const SEEDS: [u64; 4] = [0x5eed_0001, 0x5eed_0029, 0x5eed_00a7, 0x5eed_01f3];
 const ORACLE_STATUS_CONTRACT: &str = "boreal.work-status/3";
 const ORACLE_TRANSITION_CONTRACT: &str = "boreal.work-transition/2";
 const ORACLE_FIXTURE_REVISION: &str = "m02-candidate.1";
-const ORACLE_SOURCE_REVISION: &str = "784a41b3802c29a76721c55eef2e9493283396c2";
-const ORACLE_STATUS_POLICY_SHA256: &str =
-    "b2b41ffd640811118e2c8f0ac0ba9c60d79cc46ccc73135cdcf609ae384b3a94";
-const ORACLE_TRANSITION_POLICY_SHA256: &str =
-    "4a22bceb49b8d40d96a872f2ae3aed8b79a81d5636339c609914a05b3a2a9d38";
-const ORACLE_REASON_REGISTRY_SHA256: &str =
-    "fb47a166efc1bcef7b94300e638ff67bf45b24dc1767dcd4475301525946ce70";
-const ORACLE_CONTRACT_MANIFEST_SHA256: &str =
-    "131a0f2028629dab2ac372159cd19d67d33326e23085a8f1956fcbed3a155aa";
-const ORACLE_INPUT_HEAD: &str = "b543d41008301f7745c899e95f5cb7203ca64917";
+const ORACLE_SOURCE_RECORD: &str =
+    include_str!("../../../project/validation/production/domain/PF-S03-T10-ORACLE-SOURCE.md");
+
+// Keep the artifact binding self-contained in this test target.  The domain
+// crate intentionally has no hashing dependency; this small SHA-256
+// implementation lets the oracle compare the actual included policy bytes
+// with the digest recorded by the accepted contract manifest.
+fn sha256_hex(bytes: &[u8]) -> String {
+    const INITIAL: [u32; 8] = [
+        0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab,
+        0x5be0cd19,
+    ];
+    const K: [u32; 64] = [
+        0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4,
+        0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe,
+        0x9bdc06a7, 0xc19bf174, 0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f,
+        0x4a7484aa, 0x5cb0a9dc, 0x76f988da, 0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7,
+        0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967, 0x27b70a85, 0x2e1b2138, 0x4d2c6dfc,
+        0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85, 0xa2bfe8a1, 0xa81a664b,
+        0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070, 0x19a4c116,
+        0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+        0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7,
+        0xc67178f2,
+    ];
+    let mut message = bytes.to_vec();
+    message.push(0x80);
+    while message.len() % 64 != 56 {
+        message.push(0);
+    }
+    message.extend_from_slice(&(bytes.len() as u64 * 8).to_be_bytes());
+
+    let mut state = INITIAL;
+    for chunk in message.chunks_exact(64) {
+        let mut schedule = [0u32; 64];
+        for (word, encoded) in schedule[..16].iter_mut().zip(chunk.chunks_exact(4)) {
+            *word = u32::from_be_bytes([encoded[0], encoded[1], encoded[2], encoded[3]]);
+        }
+        for index in 16..64 {
+            let s0 = schedule[index - 15].rotate_right(7)
+                ^ schedule[index - 15].rotate_right(18)
+                ^ (schedule[index - 15] >> 3);
+            let s1 = schedule[index - 2].rotate_right(17)
+                ^ schedule[index - 2].rotate_right(19)
+                ^ (schedule[index - 2] >> 10);
+            schedule[index] = schedule[index - 16]
+                .wrapping_add(s0)
+                .wrapping_add(schedule[index - 7])
+                .wrapping_add(s1);
+        }
+        let mut working = state;
+        for (index, constant) in K.iter().enumerate() {
+            let s1 = working[4].rotate_right(6)
+                ^ working[4].rotate_right(11)
+                ^ working[4].rotate_right(25);
+            let choose = (working[4] & working[5]) ^ ((!working[4]) & working[6]);
+            let temp1 = working[7]
+                .wrapping_add(s1)
+                .wrapping_add(choose)
+                .wrapping_add(*constant)
+                .wrapping_add(schedule[index]);
+            let s0 = working[0].rotate_right(2)
+                ^ working[0].rotate_right(13)
+                ^ working[0].rotate_right(22);
+            let majority =
+                (working[0] & working[1]) ^ (working[0] & working[2]) ^ (working[1] & working[2]);
+            let temp2 = s0.wrapping_add(majority);
+            working[7] = working[6];
+            working[6] = working[5];
+            working[5] = working[4];
+            working[4] = working[3].wrapping_add(temp1);
+            working[3] = working[2];
+            working[2] = working[1];
+            working[1] = working[0];
+            working[0] = temp1.wrapping_add(temp2);
+        }
+        for (slot, value) in state.iter_mut().zip(working) {
+            *slot = slot.wrapping_add(value);
+        }
+    }
+    let mut hex = String::with_capacity(64);
+    for word in state {
+        write!(&mut hex, "{word:08x}").expect("writing to String cannot fail");
+    }
+    hex
+}
+
+fn oracle_field(name: &str) -> &str {
+    ORACLE_SOURCE_RECORD
+        .lines()
+        .find_map(|line| line.strip_prefix(name).map(str::trim))
+        .and_then(|value| value.strip_prefix('`'))
+        .and_then(|value| value.strip_suffix('`'))
+        .map(str::trim)
+        .unwrap_or_else(|| panic!("missing oracle source field {name:?}"))
+}
+
+fn current_git_head() -> String {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let output = Command::new("git")
+        .args([
+            "-C",
+            root.to_str().expect("repository path is UTF-8"),
+            "rev-parse",
+            "HEAD",
+        ])
+        .output()
+        .expect("git must be available for source-bound oracle validation");
+    assert!(output.status.success(), "git rev-parse failed: {output:?}");
+    String::from_utf8(output.stdout)
+        .expect("git revision is UTF-8")
+        .trim()
+        .to_owned()
+}
+
+fn assert_artifact_digest(path: &str, actual: &[u8]) {
+    let field = format!("artifact::{path} =");
+    let expected = oracle_field(&field);
+    assert_eq!(
+        sha256_hex(actual),
+        expected,
+        "normative artifact drift: {path}"
+    );
+}
 
 #[derive(Clone, Copy)]
 struct Generator(u64);
@@ -906,43 +1019,39 @@ fn oracle_identity_and_minimal_counterexample_replay_are_explicit() {
     assert_eq!(ORACLE_STATUS_CONTRACT, "boreal.work-status/3");
     assert_eq!(ORACLE_TRANSITION_CONTRACT, "boreal.work-transition/2");
     assert_eq!(ORACLE_FIXTURE_REVISION, "m02-candidate.1");
-    assert_eq!(
-        ORACLE_SOURCE_REVISION,
-        "784a41b3802c29a76721c55eef2e9493283396c2"
-    );
-    assert_eq!(
-        ORACLE_INPUT_HEAD,
-        "b543d41008301f7745c899e95f5cb7203ca64917"
-    );
-    assert_eq!(
-        ORACLE_CONTRACT_MANIFEST_SHA256,
-        "131a0f2028629dab2ac372159cd19d67d33326e23085a8f1956fcbed3a155aa"
-    );
-    assert_eq!(
-        ORACLE_STATUS_POLICY_SHA256,
-        "b2b41ffd640811118e2c8f0ac0ba9c60d79cc46ccc73135cdcf609ae384b3a94"
-    );
-    assert_eq!(
-        ORACLE_TRANSITION_POLICY_SHA256,
-        "4a22bceb49b8d40d96a872f2ae3aed8b79a81d5636339c609914a05b3a2a9d38"
-    );
-    assert_eq!(
-        ORACLE_REASON_REGISTRY_SHA256,
-        "fb47a166efc1bcef7b94300e638ff67bf45b24dc1767dcd4475301525946ce70"
-    );
-    assert!(
-        include_str!("../../../project/spec/production/contract-manifest.json")
-            .contains("boreal.production-contract/1")
-    );
+    let manifest = include_str!("../../../project/spec/production/contract-manifest.json");
+    assert!(manifest.contains("boreal.production-contract/1"));
+    assert!(manifest.contains(&format!(
+        "\"revision\": \"{}\"",
+        oracle_field("accepted_contract_source_revision:")
+    )));
     assert!(
         include_str!("../../../project/spec/production/status-and-actions.md")
-            .contains("boreal.work-status/3")
+            .contains(ORACLE_STATUS_CONTRACT)
     );
     assert!(include_str!("../../../project/spec/transition-table.md")
-        .contains("boreal.work-transition/2"));
+        .contains(ORACLE_TRANSITION_CONTRACT));
     assert!(
         include_str!("../../../project/spec/production/reason-registry.json")
             .contains("scheduled_start")
+    );
+
+    assert_eq!(current_git_head(), oracle_field("current_source_revision:"));
+    assert_artifact_digest(
+        "project/spec/production/contract-manifest.json",
+        include_bytes!("../../../project/spec/production/contract-manifest.json"),
+    );
+    assert_artifact_digest(
+        "project/spec/production/status-and-actions.md",
+        include_bytes!("../../../project/spec/production/status-and-actions.md"),
+    );
+    assert_artifact_digest(
+        "project/spec/transition-table.md",
+        include_bytes!("../../../project/spec/transition-table.md"),
+    );
+    assert_artifact_digest(
+        "project/spec/production/reason-registry.json",
+        include_bytes!("../../../project/spec/production/reason-registry.json"),
     );
 
     let original = StatusCase {
@@ -1338,6 +1447,7 @@ fn every_lifecycle_transition_pair_and_derived_write_is_exhaustive() {
         DerivedStatus::Blocked,
         DerivedStatus::Paused,
         DerivedStatus::RetryWait,
+        DerivedStatus::Scheduled,
         DerivedStatus::ExpiredReview,
         DerivedStatus::Cancelled,
     ] {
@@ -1971,6 +2081,7 @@ fn action_status_matrix_and_typed_stale_denials_are_explicit() {
         DerivedStatus::Blocked,
         DerivedStatus::Paused,
         DerivedStatus::RetryWait,
+        DerivedStatus::Scheduled,
         DerivedStatus::ExpiredReview,
         DerivedStatus::Cancelled,
     ];
@@ -2315,6 +2426,7 @@ fn actor_action_decisions_are_total_deterministic_and_round_trip_descriptors() {
         DerivedStatus::Blocked,
         DerivedStatus::Paused,
         DerivedStatus::RetryWait,
+        DerivedStatus::Scheduled,
         DerivedStatus::ExpiredReview,
         DerivedStatus::Cancelled,
     ];
@@ -2389,10 +2501,83 @@ fn status_three_schedule_and_compatibility_predicate_are_exact_at_boundaries() {
     assert_eq!(at_start.next_change_at, Some(TimestampMs(200)));
     assert!(!terminal.overdue);
 
+    let work = WorkItem::new(
+        "project".into(),
+        WorkId::new("scheduled-work"),
+        WorkKind::Task,
+        None,
+        "scheduled work",
+    )
+    .open();
+    let actor = ActorContext {
+        actor_id: boreal_domain::ActorId::new("agent"),
+        role: ActorRole::Agent,
+    };
+    let gates = work.acceptance_profile.gates.clone();
+    let before_start = evaluate_status(
+        boreal_domain::StatusContext::new(
+            &work,
+            &[],
+            None,
+            &gates,
+            &actor,
+            TimestampMs(99),
+            Revision(4),
+        )
+        .with_schedule(schedule)
+        .with_activation_at(TimestampMs(120)),
+    );
+    assert_eq!(before_start.display_status, DerivedStatus::Scheduled);
+    assert_eq!(
+        before_start.primary_reason,
+        ReasonCode::ScheduledStart(TimestampMs(100))
+    );
+    assert_eq!(before_start.next_action, Some(DomainAction::WaitUntil));
+    assert_eq!(before_start.next_status_change_at, Some(TimestampMs(100)));
+    assert!(!before_start.claimable_for_actor);
+
+    let at_work_start = evaluate_status(
+        boreal_domain::StatusContext::new(
+            &work,
+            &[],
+            None,
+            &gates,
+            &actor,
+            TimestampMs(100),
+            Revision(4),
+        )
+        .with_schedule(schedule)
+        .with_activation_at(TimestampMs(120)),
+    );
+    assert_eq!(at_work_start.display_status, DerivedStatus::Scheduled);
+    assert_eq!(
+        at_work_start.primary_reason,
+        ReasonCode::ScheduledStart(TimestampMs(120))
+    );
+    assert_eq!(at_work_start.next_status_change_at, Some(TimestampMs(120)));
+
+    let at_activation = evaluate_status(
+        boreal_domain::StatusContext::new(
+            &work,
+            &[],
+            None,
+            &gates,
+            &actor,
+            TimestampMs(120),
+            Revision(4),
+        )
+        .with_schedule(schedule)
+        .with_activation_at(TimestampMs(120)),
+    );
+    assert_eq!(at_activation.display_status, DerivedStatus::Ready);
+    assert_eq!(at_activation.primary_reason, ReasonCode::Eligible);
+    assert_eq!(at_activation.next_status_change_at, Some(TimestampMs(200)));
+    assert!(at_activation.claimable_for_actor);
+
     // status/3 exposes `scheduled`; a status/2-compatible projection is
     // queued plus a scheduled-start reason and must never claim early.
     let facts = action_facts(ActorRole::Agent);
-    let reasons = [ReasonCode::RetryNotBefore(TimestampMs(100))];
+    let reasons = [ReasonCode::ScheduledStart(TimestampMs(100))];
     assert!(matches!(
         action_denial_for(&facts, DerivedStatus::Queued, &reasons, ActionKind::Claim),
         ActionDenialReason::StatusDenied(DerivedStatus::Queued)
@@ -2820,4 +3005,286 @@ fn normative_t_and_i_vectors_are_complete_and_layered() {
         Err(DomainError::StaleFence)
     ); // I10
     assert_eq!(validate_dependencies(&[], &[]), Ok(())); // I15 anchor's non-cycle half
+}
+
+#[test]
+fn normative_pure_vectors_have_semantic_positive_and_negative_results() {
+    // T01–T07: the executable attempt path is a deterministic pure-domain
+    // transition sequence. Store transactions and operation readback remain
+    // outside this target.
+    let mut attempt = Attempt::claim(
+        WorkId::new("work"),
+        AttemptId::new("attempt"),
+        ActorId::new("agent"),
+        Fence::new(1),
+        TimestampMs(0),
+        Some(100),
+        Some(200),
+    )
+    .unwrap(); // T02: claim creates a claimed attempt.
+    assert_eq!(attempt.phase, AttemptPhase::Claimed);
+    transition_attempt(
+        &mut attempt,
+        AttemptOperation::Accept { at: TimestampMs(1) },
+    )
+    .unwrap(); // T03: accept.
+    transition_attempt(&mut attempt, AttemptOperation::Start).unwrap(); // T04: start.
+    transition_attempt(&mut attempt, AttemptOperation::Submit).unwrap(); // T05: submit.
+    transition_attempt(&mut attempt, AttemptOperation::RecordReceipt).unwrap(); // T06: receipt.
+    transition_attempt(&mut attempt, AttemptOperation::AcceptReview).unwrap(); // T07: review.
+    assert_eq!(attempt.phase, AttemptPhase::Completed);
+
+    // T08/T09: proof and close intent are distinct; a completed attempt with
+    // no close intent is still not ready to close, while a gap is preserved.
+    assert!(matches!(
+        evaluate_close(
+            &AcceptanceProfile::focused(),
+            &AcceptanceProfile::focused().gates,
+            None,
+            false,
+            &attempt,
+            Fence::new(1),
+        ),
+        CloseReadiness::NotReady { gaps }
+            if gaps.contains(&CloseGap::CloseIntentMissing)
+    ));
+    let mut unsatisfied = AcceptanceProfile::focused().gates;
+    unsatisfied[1].state = GateState::Open;
+    assert!(matches!(
+        evaluate_close(
+            &AcceptanceProfile::focused(),
+            &unsatisfied,
+            None,
+            true,
+            &attempt,
+            Fence::new(1),
+        ),
+        CloseReadiness::NotReady { gaps }
+            if gaps.contains(&CloseGap::GateUnsatisfied)
+    ));
+
+    // T10/T11: release and failure are terminal attempt outcomes and do not
+    // masquerade as accepted completion.
+    let mut released = Attempt::claim(
+        WorkId::new("work"),
+        AttemptId::new("released"),
+        ActorId::new("agent"),
+        Fence::new(2),
+        TimestampMs(0),
+        Some(100),
+        Some(200),
+    )
+    .unwrap();
+    transition_attempt(&mut released, AttemptOperation::Release).unwrap();
+    assert_eq!(released.phase, AttemptPhase::Released);
+    let mut failed = Attempt::claim(
+        WorkId::new("work"),
+        AttemptId::new("failed"),
+        ActorId::new("agent"),
+        Fence::new(3),
+        TimestampMs(0),
+        Some(100),
+        Some(200),
+    )
+    .unwrap();
+    transition_attempt(&mut failed, AttemptOperation::Accept { at: TimestampMs(1) }).unwrap();
+    transition_attempt(&mut failed, AttemptOperation::Start).unwrap();
+    transition_attempt(&mut failed, AttemptOperation::Fail).unwrap();
+    assert_eq!(failed.phase, AttemptPhase::Failed);
+
+    // T12–T15: intervention, pause/resume, cancellation, and reopen remain
+    // explicit lifecycle facts rather than writable display labels.
+    let mut held = open_work("held", PersistedLifecycle::Open);
+    held.hard_holds = vec![ReasonCode::HardHold("operator_decision_required".into())];
+    let actor = ActorContext {
+        actor_id: ActorId::new("agent"),
+        role: ActorRole::Agent,
+    };
+    let held_decision = evaluate_status(boreal_domain::StatusContext::new(
+        &held,
+        &[],
+        None,
+        &held.acceptance_profile.gates,
+        &actor,
+        TimestampMs(10),
+        Revision(1),
+    ));
+    assert_eq!(held_decision.display_status, DerivedStatus::Blocked); // T12
+    let mut paused = held.clone();
+    paused.hard_holds.clear();
+    paused.dispatch_policy = DispatchPolicy::Paused;
+    let paused_decision = evaluate_status(boreal_domain::StatusContext::new(
+        &paused,
+        &[],
+        None,
+        &paused.acceptance_profile.gates,
+        &actor,
+        TimestampMs(10),
+        Revision(1),
+    ));
+    assert_eq!(paused_decision.display_status, DerivedStatus::Paused); // T13
+    paused.dispatch_policy = DispatchPolicy::Automatic;
+    let resumed_decision = evaluate_status(boreal_domain::StatusContext::new(
+        &paused,
+        &[],
+        None,
+        &paused.acceptance_profile.gates,
+        &actor,
+        TimestampMs(10),
+        Revision(1),
+    ));
+    assert_eq!(resumed_decision.display_status, DerivedStatus::Ready);
+    assert_eq!(
+        transition_lifecycle(PersistedLifecycle::Open, WorkOperation::Cancel),
+        Ok(PersistedLifecycle::Cancelled)
+    ); // T14
+    assert_eq!(
+        transition_lifecycle(PersistedLifecycle::Closed, WorkOperation::Reopen),
+        Ok(PersistedLifecycle::Open)
+    ); // T15
+
+    // T16/T17: expiry is a two-step recovery obligation, never a blind retry.
+    let mut expiring = Attempt::claim(
+        WorkId::new("work"),
+        AttemptId::new("expiring"),
+        ActorId::new("agent"),
+        Fence::new(4),
+        TimestampMs(0),
+        Some(10),
+        Some(100),
+    )
+    .unwrap();
+    transition_attempt(&mut expiring, AttemptOperation::ExpiryPending).unwrap();
+    assert_eq!(expiring.phase, AttemptPhase::ExpiryPending);
+    transition_attempt(&mut expiring, AttemptOperation::Expire).unwrap();
+    assert_eq!(expiring.phase, AttemptPhase::Expired);
+
+    // I01–I03 and I09: derived labels, draft/queued work, holds, pause,
+    // retry, and expiry cannot be used as a claim authority.
+    for status in [
+        DerivedStatus::Draft,
+        DerivedStatus::Queued,
+        DerivedStatus::Blocked,
+        DerivedStatus::Paused,
+        DerivedStatus::RetryWait,
+        DerivedStatus::Scheduled,
+        DerivedStatus::ExpiredReview,
+    ] {
+        assert!(matches!(
+            action_denial_for(
+                &action_facts(ActorRole::Agent),
+                status,
+                &[ReasonCode::Eligible],
+                ActionKind::Claim,
+            ),
+            ActionDenialReason::StatusDenied(actual) if actual == status
+        ));
+    }
+    assert_eq!(
+        reject_derived_status_write(DerivedStatus::Scheduled),
+        Err(DomainError::DerivedStatusReadOnly {
+            status: DerivedStatus::Scheduled
+        })
+    );
+
+    // I04/I10/I11/I12/I13/I15: foreign/current fences, proof identity,
+    // deadlines, role independence, and dependency cycles are rejected by
+    // the pure validators.
+    let current = Attempt::claim(
+        WorkId::new("work"),
+        AttemptId::new("current"),
+        ActorId::new("agent"),
+        Fence::new(5),
+        TimestampMs(0),
+        Some(10),
+        Some(20),
+    )
+    .unwrap();
+    let current_status = evaluate_status(boreal_domain::StatusContext::new(
+        &open_work("work", PersistedLifecycle::Open),
+        &[],
+        Some(&current),
+        &AcceptanceProfile::focused().gates,
+        &actor,
+        TimestampMs(1),
+        Revision(1),
+    ));
+    assert_eq!(current_status.display_status, DerivedStatus::Claimed); // I04
+    assert_eq!(
+        validate_fence(Fence::new(4), Fence::new(5)),
+        Err(DomainError::StaleFence)
+    ); // I10
+    assert_eq!(
+        validate_independent_review(&ReviewRecord {
+            reviewer_actor_id: ActorId::new("same"),
+            attempt_actor_id: ActorId::new("same"),
+            accepted: true,
+        }),
+        Err(DomainError::ReviewerCannotReviewOwnAttempt)
+    ); // I13
+    let mut deadline = current.clone();
+    assert!(deadline.heartbeat(deadline.lease_deadline).is_err()); // I12
+
+    let mut foreign_receipt = ReceiptIdentity {
+        receipt_id: "receipt".into(),
+        operation_id: "operation".into(),
+        subject: ReceiptSubject {
+            work_id: WorkId::new("other-work"),
+            attempt_id: AttemptId::new("current"),
+            fence: Fence::new(5),
+            gate_id: GateId::new("verification"),
+        },
+        source_snapshot: "source".into(),
+        config_identity: ConfigIdentity::new("config"),
+        policy_version: "policy".into(),
+    };
+    assert_eq!(
+        validate_receipt_subject(
+            &foreign_receipt,
+            &WorkId::new("work"),
+            &AttemptId::new("current"),
+            Fence::new(5),
+        ),
+        Err(DomainError::ReceiptSubjectMismatch)
+    ); // I11
+    foreign_receipt.subject.work_id = WorkId::new("work");
+    foreign_receipt.subject.fence = Fence::new(4);
+    assert_eq!(
+        validate_receipt_subject(
+            &foreign_receipt,
+            &WorkId::new("work"),
+            &AttemptId::new("current"),
+            Fence::new(5),
+        ),
+        Err(DomainError::StaleFence)
+    );
+
+    let nodes = [
+        WorkItem::new(
+            "project".into(),
+            WorkId::new("a"),
+            WorkKind::Task,
+            None,
+            "a",
+        ),
+        WorkItem::new(
+            "project".into(),
+            WorkId::new("b"),
+            WorkKind::Task,
+            None,
+            "b",
+        ),
+    ];
+    let cycle = [
+        BlockingDependency::new(WorkId::new("a"), WorkId::new("b")),
+        BlockingDependency::new(WorkId::new("b"), WorkId::new("a")),
+    ];
+    assert!(matches!(
+        validate_dependencies(&nodes, &cycle),
+        Err(DomainError::DependencyCycle { .. })
+    )); // I15
+
+    // I06/I08 are covered by the independent-review and accepted-close
+    // evaluators above; I07/I14 and T18 are service/transaction boundaries
+    // and remain explicitly out of pure-domain acceptance.
 }

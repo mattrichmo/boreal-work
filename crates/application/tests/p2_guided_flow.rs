@@ -18,7 +18,11 @@ use boreal_service::{
     JsonRequest,
 };
 use boreal_service::{BoundedWriter, OperationPhase, WriteFn};
-use boreal_store::{recovery::RecoveryResolutionInput, SqliteStore};
+use boreal_store::{
+    identity::{DatabaseIdentity, IdentityStore, WorkspaceBinding},
+    recovery::{IdentityBoundRecoveryResolutionInput, RecoveryResolutionInput},
+    SqliteStore, StoreError,
+};
 use serde_json::{json, Value};
 use std::sync::{Arc, Barrier};
 use std::thread;
@@ -197,6 +201,28 @@ fn p2_guided_flow_claims_three_harnesses_and_fences_recovery() {
         "op_init_guided",
     )
     .expect("project initialization succeeds");
+    let identity = {
+        let identities = IdentityStore::new(&store);
+        identities
+            .install(
+                &DatabaseIdentity::new("database-p2-guided", 1).expect("database identity"),
+                &clock.stamp(),
+            )
+            .expect("database identity installs");
+        let identity = identities
+            .bind_project(
+                project.as_str(),
+                &WorkspaceBinding::new(
+                    "/tmp/boreal-p2-guided",
+                    "/tmp/boreal-p2-guided",
+                    "sha256:p2-guided-binding",
+                )
+                .expect("workspace binding"),
+                &clock.stamp(),
+            )
+            .expect("project identity binds");
+        identity
+    };
     for actor in [
         "actor-red",
         "actor-blue",
@@ -344,18 +370,83 @@ fn p2_guided_flow_claims_three_harnesses_and_fences_recovery() {
 
     // The store retains the expiry obligation after fencing the old attempt;
     // replacement becomes eligible only after an explicit recovery decision.
+    let plain_resolution = store.resolve_recovery_obligation(&RecoveryResolutionInput {
+        project_id: project.as_str().to_owned(),
+        obligation_id: "op_expire_blue:recovery:expired".to_owned(),
+        resolution_id: "resolve_expire_blue_plain".to_owned(),
+        actor_id: "actor-blue".to_owned(),
+        outcome: "runtime_stopped".to_owned(),
+        reason: "the expired harness was observed stopped".to_owned(),
+        resource_state: "released".to_owned(),
+        at: TestClock::new(1_021).stamp(),
+    });
+    assert!(matches!(
+        plain_resolution,
+        Err(StoreError::Conflict(message)) if message.contains("authenticated")
+    ));
+    assert_eq!(
+        store
+            .resource_reservation(project.as_str(), "resource:attempt-blue-1")
+            .expect("canonical reservation reads")
+            .expect("canonical reservation exists")
+            .state,
+        "release_pending"
+    );
+
+    let mismatched_resolution =
+        store.resolve_recovery_obligation_with_identity(&IdentityBoundRecoveryResolutionInput {
+            context: identity.clone(),
+            operation_id: "op_resolve_expire_blue_wrong_project".to_owned(),
+            request_digest: "sha256:op_resolve_expire_blue_wrong_project".to_owned(),
+            expected_project_revision: None,
+            session_id: None,
+            resolution: RecoveryResolutionInput {
+                project_id: "foreign-project".to_owned(),
+                obligation_id: "op_expire_blue:recovery:expired".to_owned(),
+                resolution_id: "resolve_expire_blue_wrong_project".to_owned(),
+                actor_id: "actor-blue".to_owned(),
+                outcome: "runtime_stopped".to_owned(),
+                reason: "foreign project must not release the resource".to_owned(),
+                resource_state: "released".to_owned(),
+                at: TestClock::new(1_021).stamp(),
+            },
+        });
+    assert!(matches!(
+        mismatched_resolution,
+        Err(StoreError::WrongSubject { .. })
+    ));
+
+    let expected_revision = store
+        .project_revision(project.as_str())
+        .expect("project revision reads")
+        .0;
     store
-        .resolve_recovery_obligation(&RecoveryResolutionInput {
-            project_id: project.as_str().to_owned(),
-            obligation_id: "op_expire_blue:recovery:expired".to_owned(),
-            resolution_id: "resolve_expire_blue".to_owned(),
-            actor_id: "actor-blue".to_owned(),
-            outcome: "runtime_stopped".to_owned(),
-            reason: "the expired harness was observed stopped".to_owned(),
-            resource_state: "released".to_owned(),
-            at: TestClock::new(1_021).stamp(),
+        .resolve_recovery_obligation_with_identity(&IdentityBoundRecoveryResolutionInput {
+            context: identity,
+            operation_id: "op_resolve_expire_blue".to_owned(),
+            request_digest: "sha256:op_resolve_expire_blue".to_owned(),
+            expected_project_revision: Some(expected_revision),
+            session_id: None,
+            resolution: RecoveryResolutionInput {
+                project_id: project.as_str().to_owned(),
+                obligation_id: "op_expire_blue:recovery:expired".to_owned(),
+                resolution_id: "resolve_expire_blue".to_owned(),
+                actor_id: "actor-blue".to_owned(),
+                outcome: "runtime_stopped".to_owned(),
+                reason: "the expired harness was observed stopped".to_owned(),
+                resource_state: "released".to_owned(),
+                at: TestClock::new(1_021).stamp(),
+            },
         })
-        .expect("expiry recovery is explicitly resolved before replacement");
+        .expect("authenticated expiry recovery acknowledges the exact release");
+    assert_eq!(
+        store
+            .resource_reservation(project.as_str(), "resource:attempt-blue-1")
+            .expect("canonical reservation reads")
+            .expect("canonical reservation exists")
+            .state,
+        "released"
+    );
 
     let replacement = claim(
         &app,

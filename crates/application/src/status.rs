@@ -5,6 +5,7 @@
 //! supplies the graph, attempt, gate, and pagination context to the pure
 //! domain evaluators and never persists the resulting status.
 
+use boreal_domain::work_model_v3::WorkSchedule;
 use boreal_domain::{
     dependency_satisfied, evaluate_rollup, evaluate_status, ActorContext, Attempt, CurrentAttempt,
     DependencyPolicy, DerivedStatus, GateId, GateKind, GateRequirement, GateState, Revision,
@@ -22,6 +23,11 @@ pub const MAX_STATUS_ROWS: u64 = 1_000;
 pub struct StatusWorkInput {
     pub work: WorkItem,
     pub retry_not_before: Option<TimestampMs>,
+    /// Canonical calendar availability. This is never inferred from retry
+    /// timing or from a presentation-layer field.
+    pub schedule: Option<WorkSchedule>,
+    /// Canonical cycle/assignment activation resolved by the store.
+    pub activation_at: Option<TimestampMs>,
     pub current_attempt: Option<Attempt>,
     pub gates: Vec<GateRequirement>,
     pub gate_reasons: Vec<GateReason>,
@@ -33,6 +39,8 @@ impl StatusWorkInput {
         Self {
             work,
             retry_not_before: None,
+            schedule: None,
+            activation_at: None,
             current_attempt: None,
             gates,
             gate_reasons: Vec::new(),
@@ -145,8 +153,16 @@ pub struct StatusWork {
 }
 
 impl StatusWork {
-    pub fn display_status(&self) -> DerivedStatus {
+    /// Status/3 value retained in the domain decision for newer adapters.
+    pub fn status3_display_status(&self) -> DerivedStatus {
         self.decision.display_status
+    }
+
+    /// Compatibility status exposed by this status/2 application read model.
+    /// Scheduled work is queued for older consumers, but its typed
+    /// `scheduled_start` reason and non-claimable action remain intact.
+    pub fn display_status(&self) -> DerivedStatus {
+        status2_display_status(self.decision.display_status)
     }
 
     pub fn current_attempt(&self) -> Option<&CurrentAttempt> {
@@ -297,13 +313,15 @@ pub fn project_status(
             as_of,
             project_revision,
             retry_not_before: input.retry_not_before,
+            schedule: input.schedule,
+            activation_at: input.activation_at,
             affected_dependents: &affected_dependents[index],
         });
         all.push(decision);
     }
 
     let decisions = all.to_vec();
-    let counts = evaluate_rollup(&decisions);
+    let counts = status2_rollup(&decisions);
     let next_status_change_at = decisions
         .iter()
         .filter_map(|decision| decision.next_status_change_at)
@@ -324,7 +342,9 @@ pub fn project_status(
                     (!dependency_satisfied(*policy, &prerequisite.work)).then(|| {
                         DependencyBlocker {
                             work_id: prerequisite.work.id.clone(),
-                            display_status: all[*prerequisite_index].display_status,
+                            display_status: status2_display_status(
+                                all[*prerequisite_index].display_status,
+                            ),
                             satisfies_default: dependency_satisfied(
                                 DependencyPolicy::ClosedOnly,
                                 &prerequisite.work,
@@ -445,6 +465,8 @@ fn status_input_from_store_row(row: &StatusWorkRecord) -> Result<StatusWorkInput
     input.retry_not_before = row
         .status_retry_not_before()
         .map_err(|error| error.to_string())?;
+    input.schedule = row.schedule;
+    input.activation_at = row.activation_at;
     input.gates = row
         .gate_diagnostics
         .gates
@@ -471,6 +493,20 @@ fn status_input_from_store_row(row: &StatusWorkRecord) -> Result<StatusWorkInput
     Ok(input)
 }
 
+fn status2_display_status(status: DerivedStatus) -> DerivedStatus {
+    match status {
+        DerivedStatus::Scheduled => DerivedStatus::Queued,
+        other => other,
+    }
+}
+
+fn status2_rollup(decisions: &[StatusDecision]) -> RollupCounts {
+    let mut counts = evaluate_rollup(decisions);
+    counts.queued = counts.queued.saturating_add(counts.scheduled);
+    counts.scheduled = 0;
+    counts
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -489,6 +525,121 @@ mod tests {
 
     fn input(id: &str) -> StatusWorkInput {
         StatusWorkInput::new(work(id))
+    }
+
+    #[test]
+    fn scheduled_domain_decision_maps_to_queued_for_status_two() {
+        let mut scheduled = input("scheduled");
+        scheduled.schedule = Some(WorkSchedule {
+            not_before_at: Some(TimestampMs(100)),
+            due_at: None,
+            target_start_at: None,
+            target_end_at: None,
+        });
+        scheduled.activation_at = Some(TimestampMs(120));
+
+        let before_start = project_status(
+            &"project".into(),
+            &actor(),
+            TimestampMs(50),
+            Revision(7),
+            &[scheduled.clone()],
+            &[],
+            10,
+            0,
+        )
+        .unwrap();
+        let before = &before_start.items[0];
+        assert_eq!(before.status3_display_status(), DerivedStatus::Scheduled);
+        assert_eq!(before.display_status(), DerivedStatus::Queued);
+        assert_eq!(
+            before.decision.primary_reason.stable_code(),
+            "scheduled_start(100)"
+        );
+        assert!(!before.decision.claimable_for_actor);
+        assert_eq!(before_start.counts.queued, 1);
+        assert_eq!(before_start.counts.scheduled, 0);
+        assert_eq!(before_start.next_status_change_at, Some(TimestampMs(100)));
+
+        let at_work_start = project_status(
+            &"project".into(),
+            &actor(),
+            TimestampMs(100),
+            Revision(7),
+            &[scheduled],
+            &[],
+            10,
+            0,
+        )
+        .unwrap();
+        let at = &at_work_start.items[0];
+        assert_eq!(at.status3_display_status(), DerivedStatus::Scheduled);
+        assert_eq!(at.display_status(), DerivedStatus::Queued);
+        assert_eq!(
+            at.decision.primary_reason.stable_code(),
+            "scheduled_start(120)"
+        );
+        assert!(!at.decision.claimable_for_actor);
+        assert_eq!(at_work_start.next_status_change_at, Some(TimestampMs(120)));
+    }
+
+    #[test]
+    fn store_row_planning_facts_reach_the_domain_context() {
+        let work_item = work("stored-scheduled");
+        let gate_rows = work_item
+            .acceptance_profile
+            .gates
+            .iter()
+            .map(|gate| boreal_store::GateDiagnostic {
+                gate_id: gate.id.to_string(),
+                kind: gate.kind,
+                required: gate.required,
+                state: GateState::Open,
+                receipt_id: None,
+                reason: None,
+            })
+            .collect();
+        let row = StatusWorkRecord {
+            work: work_item,
+            retry_not_before: None,
+            schedule: Some(WorkSchedule {
+                not_before_at: Some(TimestampMs(80)),
+                due_at: None,
+                target_start_at: None,
+                target_end_at: None,
+            }),
+            activation_at: Some(TimestampMs(120)),
+            current_attempt: None,
+            gate_diagnostics: boreal_store::GateDiagnostics {
+                project_id: "project".to_owned(),
+                work_id: "stored-scheduled".to_owned(),
+                attempt_id: None,
+                fence: None,
+                revision: 3,
+                gates: gate_rows,
+                missing: Vec::new(),
+            },
+        };
+        let input = status_input_from_store_row(&row).expect("canonical planning facts decode");
+        assert_eq!(input.schedule, row.schedule);
+        assert_eq!(input.activation_at, row.activation_at);
+
+        let snapshot = project_status(
+            &"project".into(),
+            &actor(),
+            TimestampMs(10),
+            Revision(3),
+            &[input],
+            &[],
+            10,
+            0,
+        )
+        .unwrap();
+        assert_eq!(
+            snapshot.items[0].decision.primary_reason.stable_code(),
+            "scheduled_start(80)"
+        );
+        assert!(!snapshot.items[0].decision.claimable_for_actor);
     }
 
     #[test]

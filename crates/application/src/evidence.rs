@@ -171,6 +171,33 @@ impl ExternalEffectResolution {
     }
 }
 
+/// Result of trying to acquire the one callback permission for an admitted
+/// external job.  The winning transition is distinct from merely observing
+/// a job that another caller already started.  This distinction is the
+/// at-most-once boundary for verifiers, installers, backups, and publication
+/// adapters.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ExternalEffectAcquisition {
+    /// This caller atomically changed `admitted` to `running` and may invoke
+    /// the external callback exactly once.
+    Won(ExternalJobRecord),
+    /// Another caller owns the running boundary.  The observer must not
+    /// invoke the callback and should use readback for any later result.
+    AlreadyRunning(ExternalJobRecord),
+    /// The job has not crossed the running boundary, or is otherwise still
+    /// pending without granting this caller callback authority.
+    Pending(ExternalJobRecord),
+    /// The job has a terminal/readback state that must be returned to the
+    /// caller rather than retried as a new external effect.
+    Terminal(ExternalEffectResolution),
+    /// The compare-and-transition lost a race or could not establish a safe
+    /// current classification.  No callback authority is granted.
+    Conflict {
+        current: Option<ExternalJobRecord>,
+        reason: String,
+    },
+}
+
 /// Observation returned by the adapter that actually performs an external
 /// effect. `Pending` intentionally carries no invented side-effect identity;
 /// the durable job remains readable by operation ID after a restart.
@@ -227,6 +254,13 @@ impl<'a> ExternalEffectAdapter<'a> {
         &self,
         request: &ExternalEffectRequest,
     ) -> Result<ExternalEffectResolution, StoreError> {
+        self.admit_with_replay(request)
+    }
+
+    fn admit_with_replay(
+        &self,
+        request: &ExternalEffectRequest,
+    ) -> Result<ExternalEffectResolution, StoreError> {
         request.validate()?;
         let registration = if let Some(identity) = self.identity {
             self.store
@@ -257,16 +291,22 @@ impl<'a> ExternalEffectAdapter<'a> {
         F: FnOnce(&ExternalJobRecord) -> Result<ExternalEffectObservation, StoreError>,
     {
         let admitted = self.admit(request)?;
-        let running = match admitted {
+        let job = match admitted {
             ExternalEffectResolution::Pending(job) if job.stage == "admitted" => {
-                self.start(&request.project_id, &request.job_id, started_at)?
+                match self.start_acquisition(&request.project_id, &request.job_id, started_at)? {
+                    ExternalEffectAcquisition::Won(job) => job,
+                    ExternalEffectAcquisition::AlreadyRunning(job)
+                    | ExternalEffectAcquisition::Pending(job) => {
+                        return Ok(ExternalEffectResolution::Pending(job));
+                    }
+                    ExternalEffectAcquisition::Terminal(resolution) => return Ok(resolution),
+                    ExternalEffectAcquisition::Conflict { reason, .. } => {
+                        return Err(StoreError::Conflict(reason));
+                    }
+                }
             }
-            other => other,
+            other => return Ok(other),
         };
-        let job = running.record().clone();
-        if !matches!(running, ExternalEffectResolution::Pending(_)) || job.stage != "running" {
-            return Ok(running);
-        }
 
         match execute(&job)? {
             ExternalEffectObservation::Pending => Ok(ExternalEffectResolution::Pending(job)),
@@ -338,14 +378,47 @@ impl<'a> ExternalEffectAdapter<'a> {
         job_id: &str,
         at: &str,
     ) -> Result<ExternalEffectResolution, StoreError> {
+        match self.start_acquisition(project_id, job_id, at)? {
+            ExternalEffectAcquisition::Won(job)
+            | ExternalEffectAcquisition::AlreadyRunning(job)
+            | ExternalEffectAcquisition::Pending(job) => Ok(resolve_stage(job)),
+            ExternalEffectAcquisition::Terminal(resolution) => Ok(resolution),
+            ExternalEffectAcquisition::Conflict { reason, .. } => Err(StoreError::Conflict(reason)),
+        }
+    }
+
+    /// Attempts the sole durable `admitted -> running` acquisition.  A
+    /// compare-and-transition conflict is re-read and classified before it is
+    /// returned, so a caller that lost to another process can never be
+    /// mistaken for the owner.  Only [`ExternalEffectAcquisition::Won`]
+    /// authorizes an external callback.
+    pub fn start_acquisition(
+        &self,
+        project_id: &str,
+        job_id: &str,
+        at: &str,
+    ) -> Result<ExternalEffectAcquisition, StoreError> {
         self.validate_project(project_id)?;
         let job = self.require_job(project_id, job_id)?;
-        let job = if job.stage == "admitted" {
-            self.transition(&job, "running", Some(at), None, None, None)?
-        } else {
-            job
-        };
-        Ok(resolve_stage(job))
+        if job.stage != "admitted" {
+            return Ok(classify_acquisition_observation(job));
+        }
+
+        match self.transition(&job, "running", Some(at), None, None, None) {
+            Ok(running) => Ok(ExternalEffectAcquisition::Won(running)),
+            Err(StoreError::Conflict(reason)) => {
+                let current = self.require_job(project_id, job_id)?;
+                if current.stage == "admitted" {
+                    Ok(ExternalEffectAcquisition::Conflict {
+                        current: Some(current),
+                        reason,
+                    })
+                } else {
+                    Ok(classify_acquisition_observation(current))
+                }
+            }
+            Err(error) => Err(error),
+        }
     }
 
     pub fn mark_side_effect_started(
@@ -595,6 +668,30 @@ fn resolve_stage(job: ExternalJobRecord) -> ExternalEffectResolution {
         "rejected" => ExternalEffectResolution::Rejected(job),
         "failed" => ExternalEffectResolution::Failed(job),
         _ => ExternalEffectResolution::Pending(job),
+    }
+}
+
+fn classify_acquisition_observation(job: ExternalJobRecord) -> ExternalEffectAcquisition {
+    // Match against an owned stage snapshot so the fallback can move the
+    // complete job into the conflict result without retaining a borrow into
+    // the record. This is classification only; callback authority still
+    // comes exclusively from `ExternalEffectAcquisition::Won`.
+    let stage = job.stage.clone();
+    match stage.as_str() {
+        "running" => ExternalEffectAcquisition::AlreadyRunning(job),
+        "registered" | "admitted" => ExternalEffectAcquisition::Pending(job),
+        "side_effect_started"
+        | "side_effect_finished"
+        | "readback_required"
+        | "reconciled"
+        | "committed"
+        | "rejected"
+        | "failed"
+        | "cancel_requested" => ExternalEffectAcquisition::Terminal(resolve_stage(job)),
+        stage => ExternalEffectAcquisition::Conflict {
+            current: Some(job),
+            reason: format!("external job has unclassifiable acquisition stage: {stage}"),
+        },
     }
 }
 

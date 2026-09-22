@@ -564,12 +564,20 @@ fn missing_pinned_child_is_detected_instead_of_reducing_requirements() {
     store_api
         .persist_pinned_requirements(&requirements)
         .expect("requirements persist");
+    // Bypass the immutable trigger only to model an owned corruption event;
+    // restore the schema guard before readback so the assertion exercises the
+    // missing declaration diagnostic rather than the earlier schema check.
     store
         .execute_batch(
             "DROP TRIGGER boreal_pinned_requirement_gate_immutable_delete;
              DELETE FROM boreal_pinned_requirement_gate
               WHERE project_id = 'p1' AND work_id = 'missing-child-work'
-                AND requirement_id = 'verification@verification';",
+                AND requirement_id = 'verification@verification';
+             CREATE TRIGGER boreal_pinned_requirement_gate_immutable_delete
+               BEFORE DELETE ON boreal_pinned_requirement_gate
+             BEGIN
+               SELECT RAISE(ABORT, 'pinned_requirement_gate_immutable');
+             END;",
         )
         .expect("corruption fixture deletes one child");
 
@@ -602,13 +610,21 @@ fn malformed_pinned_profile_and_child_content_is_quarantined_on_readback() {
         .persist_pinned_requirements(&requirements)
         .expect("requirements persist");
 
+    // Bypass the immutable trigger only to model an owned corruption event;
+    // restore the schema guard before readback so the assertion exercises the
+    // malformed declaration diagnostic rather than the earlier schema check.
     store
         .execute_batch(
             "DROP TRIGGER boreal_pinned_requirement_gate_immutable_update;
              UPDATE boreal_pinned_requirement_gate
                 SET declaration_json = 'not-json'
               WHERE project_id = 'p1' AND work_id = 'malformed-work'
-                AND requirement_id = 'verification@verification';",
+                AND requirement_id = 'verification@verification';
+             CREATE TRIGGER boreal_pinned_requirement_gate_immutable_update
+               BEFORE UPDATE ON boreal_pinned_requirement_gate
+             BEGIN
+               SELECT RAISE(ABORT, 'pinned_requirement_gate_immutable');
+             END;",
         )
         .expect("child corruption fixture updates declaration");
     assert!(matches!(

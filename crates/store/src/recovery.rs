@@ -412,6 +412,12 @@ impl SqliteStore {
             require_text(value, "recovery resolution")?;
         }
         require_resource_state(&input.resource_state)?;
+        if input.resource_state == "released" {
+            return Err(StoreError::Conflict(
+                "released recovery resolution requires an authenticated identity-bound resource acknowledgement"
+                    .to_owned(),
+            ));
+        }
         with_transaction(self, || {
             let current = self
                 .recovery_obligation(&input.project_id, &input.obligation_id)?
@@ -525,6 +531,14 @@ impl SqliteStore {
 
             let actual_revision = self.project_revision(&input.resolution.project_id)?.0;
             super::check_expected_revision(actual_revision, input.expected_project_revision)?;
+            let release_ack_id = if input.resolution.resource_state == "released" {
+                Some(self.acknowledge_recovery_resource_release_in_transaction(
+                    &current,
+                    &input.resolution,
+                )?)
+            } else {
+                None
+            };
             let revision = self.bump_revision_in_transaction(&input.resolution.project_id)?;
 
             let mut decision = self.prepare(
@@ -573,7 +587,7 @@ impl SqliteStore {
                 fence: current.fence,
                 request_digest: input.request_digest.clone(),
                 outcome: OperationOutcome::Changed,
-                result_json: resolution_result_json(input, revision.0),
+                result_json: resolution_result_json(input, revision.0, release_ack_id.as_deref()),
                 revision: revision.0,
                 created_at: input.resolution.at.clone(),
                 completed_at: Some(input.resolution.at.clone()),
@@ -589,7 +603,7 @@ impl SqliteStore {
                 session_id: input.session_id.clone(),
                 fence: current.fence,
                 as_of: input.resolution.at.clone(),
-                payload_json: resolution_result_json(input, revision.0),
+                payload_json: resolution_result_json(input, revision.0, release_ack_id.as_deref()),
             };
             journal.append_in_transaction_with_identity(
                 &input.context,
@@ -615,6 +629,98 @@ impl SqliteStore {
                 replayed: false,
             })
         })
+    }
+
+    /// A released recovery decision is also the authenticated acknowledgement
+    /// of the exact canonical resource release requested by the terminal
+    /// attempt mutation.  Keep this in the same transaction as the decision:
+    /// resolving the obligation alone must never make a live resource
+    /// reusable.
+    fn acknowledge_recovery_resource_release_in_transaction(
+        &self,
+        obligation: &RecoveryObligationRecord,
+        resolution: &RecoveryResolutionInput,
+    ) -> Result<String, StoreError> {
+        let attempt_id = obligation.attempt_id.as_deref().ok_or_else(|| {
+            StoreError::Conflict(
+                "released recovery resolution requires a bound attempt identity".to_owned(),
+            )
+        })?;
+        let fence = obligation.fence.ok_or_else(|| {
+            StoreError::Conflict(
+                "released recovery resolution requires a bound attempt fence".to_owned(),
+            )
+        })?;
+        if !self.table_exists("boreal_resource_reservation")?
+            || !self.table_exists("boreal_resource_release_event")?
+        {
+            return Err(StoreError::Corrupt(
+                "canonical resource release schema is unavailable".to_owned(),
+            ));
+        }
+
+        let reservation_id = format!("resource:{attempt_id}");
+        let reservation = self
+            .resource_reservation(&obligation.project_id, &reservation_id)?
+            .ok_or_else(|| {
+                StoreError::Conflict(format!(
+                    "canonical resource reservation is missing for attempt {attempt_id}"
+                ))
+            })?;
+        if reservation.project_id != obligation.project_id
+            || reservation.work_id != obligation.work_id
+            || reservation.attempt_id != attempt_id
+        {
+            return Err(StoreError::WrongSubject {
+                expected: format!(
+                    "{}/{}/{}",
+                    obligation.project_id, obligation.work_id, attempt_id
+                ),
+                actual: format!(
+                    "{}/{}/{}",
+                    reservation.project_id, reservation.work_id, reservation.attempt_id
+                ),
+            });
+        }
+        if reservation.fence != fence {
+            return Err(StoreError::StaleFence {
+                expected: fence,
+                actual: reservation.fence,
+            });
+        }
+        if reservation.state != "release_pending" {
+            return Err(StoreError::Conflict(format!(
+                "canonical resource {} is not awaiting release acknowledgement: {}",
+                reservation_id, reservation.state
+            )));
+        }
+
+        let expected_evidence = format!("attempt-terminal:{attempt_id}:{fence}");
+        let (_, evidence_ref) =
+            self.pending_release_event(&obligation.project_id, &reservation_id)?;
+        if evidence_ref != expected_evidence {
+            return Err(StoreError::Conflict(format!(
+                "canonical resource release evidence does not match attempt {attempt_id}/{fence}"
+            )));
+        }
+
+        let ack_id = format!(
+            "resource:{attempt_id}:release-ack:{}",
+            resolution.resolution_id
+        );
+        let ack_evidence = format!(
+            "recovery:{}:{}",
+            obligation.obligation_id, resolution.resolution_id
+        );
+        self.acknowledge_resource_release_in_transaction(
+            &obligation.project_id,
+            &reservation_id,
+            &ack_id,
+            &resolution.actor_id,
+            &ack_evidence,
+            &resolution.at,
+        )?;
+        Ok(ack_id)
     }
 
     pub fn recovery_decisions(
@@ -962,6 +1068,34 @@ impl SqliteStore {
             && statement.column_text(3)? == actor_id
             && statement.column_text(4)? == evidence_ref)
     }
+
+    fn pending_release_event(
+        &self,
+        project_id: &str,
+        reservation_id: &str,
+    ) -> Result<(String, String), StoreError> {
+        let mut statement = self.prepare(
+            "SELECT event_id, evidence_ref
+             FROM boreal_resource_release_event
+             WHERE project_id = ?1 AND reservation_id = ?2 AND state = 'requested'
+             ORDER BY created_at, event_id LIMIT 2",
+        )?;
+        statement.bind_text(1, project_id)?;
+        statement.bind_text(2, reservation_id)?;
+        if statement.step()? != SQLITE_ROW {
+            return Err(StoreError::Conflict(format!(
+                "canonical resource {reservation_id} has no pending release event"
+            )));
+        }
+        let event_id = statement.column_text(0)?;
+        let evidence_ref = statement.column_text(1)?;
+        if statement.step()? == SQLITE_ROW {
+            return Err(StoreError::Conflict(format!(
+                "canonical resource {reservation_id} has ambiguous pending release events"
+            )));
+        }
+        Ok((event_id, evidence_ref))
+    }
 }
 
 struct ResourceReleaseEventInput<'a> {
@@ -1070,13 +1204,18 @@ fn recovery_operation_identity(
     }
 }
 
-fn resolution_result_json(input: &IdentityBoundRecoveryResolutionInput, revision: u64) -> String {
+fn resolution_result_json(
+    input: &IdentityBoundRecoveryResolutionInput,
+    revision: u64,
+    release_ack_id: Option<&str>,
+) -> String {
     serde_json::json!({
         "obligation_id": input.resolution.obligation_id,
         "resolution_id": input.resolution.resolution_id,
         "outcome": input.resolution.outcome,
         "resource_state": input.resolution.resource_state,
         "reason": input.resolution.reason,
+        "resource_release_ack_id": release_ack_id,
         "revision": revision,
     })
     .to_string()
@@ -1156,7 +1295,10 @@ fn validate_resource_reservation_subject(
     {
         return Err(StoreError::WrongSubject {
             expected: format!("{}/{}/{}", input.project_id, input.work_id, input.fence),
-            actual: format!("{}/{}/{}", attempt.project_id, attempt.work_id, attempt.fence),
+            actual: format!(
+                "{}/{}/{}",
+                attempt.project_id, attempt.work_id, attempt.fence
+            ),
         });
     }
     if !attempt.current {

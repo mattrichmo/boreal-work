@@ -2,10 +2,15 @@
 //! All status policy remains in boreal_domain::evaluate_status. No SQL WHERE
 //! clause, adapter, or persisted display field decides eligibility here.
 use super::*;
+use boreal_domain::work_model_v3::WorkSchedule;
 use boreal_domain::{
     evaluate_status, ActorContext, ActorId, ActorRole, Attempt, DeadlineSource, Fence, Revision,
     StatusContext, StatusDecision, TimestampMs,
 };
+use std::convert::TryFrom;
+
+type PlanningFactsResult = Result<(Option<WorkSchedule>, Option<TimestampMs>), StoreError>;
+type ProjectPlanningFacts = BTreeMap<String, PlanningFactsResult>;
 
 pub(crate) fn canonical_status_timestamp(value: &str) -> Result<TimestampMs, StoreError> {
     let digits = value
@@ -66,6 +71,105 @@ impl StatusWorkRecord {
 }
 
 impl SqliteStore {
+    /// Loads the planning facts that are shared by every row in a project
+    /// status snapshot.  The value is a per-work result so a malformed
+    /// activation timestamp is quarantined with its work row instead of
+    /// aborting healthy siblings.  An empty map means the optional v3 planning
+    /// tables are not installed, which preserves the legacy no-facts result.
+    pub(crate) fn status_planning_facts_for_project(
+        &self,
+        project_id: &str,
+    ) -> Result<ProjectPlanningFacts, StoreError> {
+        if !self.table_exists("cycle_assignment_v3")? || !self.table_exists("cycle_v3")? {
+            return Ok(BTreeMap::new());
+        }
+
+        let mut statement = self.prepare(
+            "SELECT ca.work_id,
+                    MIN(CASE ca.activation_policy
+                          WHEN 'explicit_not_before' THEN ca.activation_at_utc_ms
+                          WHEN 'at_cycle_start' THEN cycle.scheduled_start_utc_ms
+                          ELSE NULL
+                        END)
+             FROM cycle_assignment_v3 ca
+             JOIN cycle_v3 cycle
+               ON cycle.project_id = ca.project_id
+              AND cycle.cycle_id = ca.cycle_id
+             WHERE ca.project_id = ?1
+               AND ca.state IN ('planned', 'committed')
+             GROUP BY ca.work_id
+             ORDER BY ca.work_id",
+        )?;
+        statement.bind_text(1, project_id)?;
+
+        let mut facts = BTreeMap::new();
+        while statement.step()? == SQLITE_ROW {
+            let work_id = statement.column_text(0)?;
+            let activation = match statement.column_optional_signed_i64(1)? {
+                Some(value) => u64::try_from(value)
+                    .map(TimestampMs)
+                    .map(Some)
+                    .map_err(|_| {
+                        StoreError::Corrupt(format!(
+                            "negative planning activation timestamp for work {work_id}: {value}"
+                        ))
+                    }),
+                None => Ok(None),
+            };
+            facts.insert(
+                work_id,
+                activation.map(|activation_at| (None, activation_at)),
+            );
+        }
+        Ok(facts)
+    }
+
+    /// Reads only canonical v3 planning facts that can affect availability.
+    /// Work-level schedule fields are not yet persisted in the store's v2
+    /// projection, so they remain absent rather than being inferred from a
+    /// retry timestamp. Live assignments contribute their earliest explicit
+    /// activation or cycle-start instant.
+    #[allow(dead_code)]
+    pub(crate) fn status_planning_facts(
+        &self,
+        project_id: &str,
+        work_id: &str,
+    ) -> Result<(Option<WorkSchedule>, Option<TimestampMs>), StoreError> {
+        if !self.table_exists("cycle_assignment_v3")? || !self.table_exists("cycle_v3")? {
+            return Ok((None, None));
+        }
+        let mut statement = self.prepare(
+            "SELECT MIN(CASE ca.activation_policy
+                              WHEN 'explicit_not_before' THEN ca.activation_at_utc_ms
+                              WHEN 'at_cycle_start' THEN cycle.scheduled_start_utc_ms
+                              ELSE NULL
+                         END)
+             FROM cycle_assignment_v3 ca
+             JOIN cycle_v3 cycle
+               ON cycle.project_id = ca.project_id
+              AND cycle.cycle_id = ca.cycle_id
+             WHERE ca.project_id = ?1
+               AND ca.work_id = ?2
+               AND ca.state IN ('planned', 'committed')",
+        )?;
+        statement.bind_text(1, project_id)?;
+        statement.bind_text(2, work_id)?;
+        if statement.step()? != SQLITE_ROW {
+            return Err(StoreError::Corrupt(
+                "planning activation query returned no aggregate row".to_owned(),
+            ));
+        }
+        let activation_at = statement
+            .column_optional_signed_i64(0)?
+            .map(|value| {
+                u64::try_from(value).map(TimestampMs).map_err(|_| {
+                    StoreError::Corrupt(format!("negative planning activation timestamp: {value}"))
+                })
+            })
+            .transpose()?;
+        Ok((None, activation_at))
+    }
+
     /// Role comes from durable authority, never from a caller-supplied role flag.
     pub fn actor_context(&self, actor_id: &str) -> Result<ActorContext, StoreError> {
         let mut row = self.prepare("SELECT role FROM actor WHERE actor_id = ?1")?;
@@ -152,6 +256,8 @@ impl SqliteStore {
             as_of,
             project_revision: Revision(snapshot.revision.0),
             retry_not_before: row.status_retry_not_before()?,
+            schedule: row.schedule,
+            activation_at: row.activation_at,
             affected_dependents: &dependents,
         }))
     }

@@ -6,6 +6,8 @@
 
 use std::{fmt, str::FromStr};
 
+use crate::work_model_v3::WorkSchedule;
+
 pub mod acceptance;
 pub mod actions;
 pub mod decision_inputs;
@@ -208,6 +210,9 @@ pub enum DerivedStatus {
     Blocked,
     Paused,
     RetryWait,
+    /// Published work whose declared work/cycle activation instant is still
+    /// in the future. This is distinct from ordinary prerequisite waiting.
+    Scheduled,
     ExpiredReview,
     Cancelled,
 }
@@ -843,6 +848,8 @@ pub enum ReasonCode {
     PrerequisiteOpen(WorkId),
     Paused,
     RetryNotBefore(TimestampMs),
+    /// A declared work or cycle activation instant has not arrived.
+    ScheduledStart(TimestampMs),
     Eligible,
     OperatorOnly,
     NonExecutableContainer,
@@ -874,6 +881,7 @@ impl ReasonCode {
             Self::PrerequisiteOpen(id) => format!("prerequisite_open({id})"),
             Self::Paused => "paused".to_owned(),
             Self::RetryNotBefore(at) => format!("retry_not_before({at})"),
+            Self::ScheduledStart(at) => format!("scheduled_start({at})"),
             Self::Eligible => "eligible".to_owned(),
             Self::OperatorOnly => "operator_only".to_owned(),
             Self::NonExecutableContainer => "non_executable_container".to_owned(),
@@ -951,6 +959,7 @@ pub struct RollupCounts {
     pub blocked: usize,
     pub paused: usize,
     pub retry_wait: usize,
+    pub scheduled: usize,
     pub expired_review: usize,
     pub cancelled: usize,
 }
@@ -971,6 +980,7 @@ impl RollupCounts {
             DerivedStatus::Blocked => self.blocked += 1,
             DerivedStatus::Paused => self.paused += 1,
             DerivedStatus::RetryWait => self.retry_wait += 1,
+            DerivedStatus::Scheduled => self.scheduled += 1,
             DerivedStatus::ExpiredReview => self.expired_review += 1,
             DerivedStatus::Cancelled => self.cancelled += 1,
         }
@@ -994,6 +1004,12 @@ pub struct StatusContext<'a> {
     pub as_of: TimestampMs,
     pub project_revision: Revision,
     pub retry_not_before: Option<TimestampMs>,
+    /// Optional canonical work schedule. `not_before_at` is a blocking
+    /// availability constraint; target start/end remain planning metadata.
+    pub schedule: Option<WorkSchedule>,
+    /// Resolved cycle/assignment activation instant, when planning has
+    /// supplied one. It is a second canonical constraint, not a UI hint.
+    pub activation_at: Option<TimestampMs>,
     pub affected_dependents: &'a [WorkId],
 }
 
@@ -1016,8 +1032,20 @@ impl<'a> StatusContext<'a> {
             as_of,
             project_revision,
             retry_not_before: None,
+            schedule: None,
+            activation_at: None,
             affected_dependents: &[],
         }
+    }
+
+    pub fn with_schedule(mut self, schedule: WorkSchedule) -> Self {
+        self.schedule = Some(schedule);
+        self
+    }
+
+    pub fn with_activation_at(mut self, activation_at: TimestampMs) -> Self {
+        self.activation_at = Some(activation_at);
+        self
     }
 }
 
@@ -1434,6 +1462,8 @@ mod tests {
             as_of: TimestampMs(1),
             project_revision: Revision(1),
             retry_not_before: None,
+            schedule: None,
+            activation_at: None,
             affected_dependents: &[],
         });
         assert_eq!(status.display_status, DerivedStatus::Complete);

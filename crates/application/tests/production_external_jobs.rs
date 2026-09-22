@@ -13,6 +13,10 @@ use boreal_store::{
 use std::{
     fs,
     path::Path,
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc, Barrier,
+    },
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -468,6 +472,139 @@ fn external_effect_execute_pending_remains_unresolved_for_readback() {
 }
 
 #[test]
+fn external_effect_replay_does_not_invoke_running_side_effect_twice() {
+    use std::cell::Cell;
+
+    let (store, project) = setup();
+    let adapter = ExternalEffectAdapter::new(&store);
+    let mut request = request(&project);
+    request.job_id = "job-replay-running".to_owned();
+    request.operation_id = "op-replay-running".to_owned();
+    let callback_count = Cell::new(0);
+
+    let first = adapter
+        .execute(&request, "unix-ms:4", |_| {
+            callback_count.set(callback_count.get() + 1);
+            Ok(ExternalEffectObservation::Pending)
+        })
+        .expect("start the first external effect");
+    assert!(first.is_pending());
+    assert_eq!(first.record().stage, "running");
+
+    let replay = adapter
+        .execute(&request, "unix-ms:5", |_| {
+            callback_count.set(callback_count.get() + 1);
+            Ok(ExternalEffectObservation::Pending)
+        })
+        .expect("read back the running external effect");
+    assert!(replay.is_pending());
+    assert_eq!(replay.record().stage, "running");
+    assert_eq!(callback_count.get(), 1);
+}
+
+#[test]
+fn external_effect_competing_callers_invoke_only_the_winning_callback() {
+    let path = std::env::temp_dir().join(format!(
+        "boreal-t11-external-race-{}-{}.db",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos()
+    ));
+
+    let seed = SqliteStore::open(&path, SCHEMA).expect("open race seed store");
+    let app = WorkApplication::new(&seed);
+    let project = ProjectId::new("project-external-race");
+    app.init_project(
+        &project,
+        "agent-1",
+        "agent",
+        "credential",
+        "External race",
+        "unix-ms:1",
+        "op-init-external-race",
+    )
+    .expect("initialize race project");
+    app.create_work_as(
+        &WorkItem {
+            id: WorkId::new("work-external-race"),
+            project_id: project.clone(),
+            kind: WorkKind::Task,
+            parent_id: None,
+            title: "external race test".to_owned(),
+            description: String::new(),
+            lifecycle: PersistedLifecycle::Open,
+            priority: 0,
+            dispatch_policy: DispatchPolicy::Automatic,
+            hard_holds: Vec::new(),
+            acceptance_profile: AcceptanceProfile::focused(),
+        },
+        "agent-1",
+        "unix-ms:2",
+        "op-create-external-race",
+    )
+    .expect("create race work");
+    let mut request = request(&project);
+    request.job_id = "job-external-race".to_owned();
+    request.operation_id = "op-external-race".to_owned();
+    request.subject_id = "work-external-race".to_owned();
+    ExternalEffectAdapter::new(&seed)
+        .admit(&request)
+        .expect("admit race job before competing starts");
+    drop(seed);
+
+    let left_store = SqliteStore::open(&path, SCHEMA).expect("open left race store");
+    let right_store = SqliteStore::open(&path, SCHEMA).expect("open right race store");
+    let barrier = Arc::new(Barrier::new(2));
+    let callback_count = Arc::new(AtomicUsize::new(0));
+
+    let (left, right) = std::thread::scope(|scope| {
+        let left_barrier = Arc::clone(&barrier);
+        let left_count = Arc::clone(&callback_count);
+        let left_request = request.clone();
+        let left_handle = scope.spawn(move || {
+            let adapter = ExternalEffectAdapter::new(&left_store);
+            left_barrier.wait();
+            adapter.execute(&left_request, "unix-ms:4", |_| {
+                left_count.fetch_add(1, Ordering::SeqCst);
+                Ok(ExternalEffectObservation::Pending)
+            })
+        });
+
+        let right_barrier = Arc::clone(&barrier);
+        let right_count = Arc::clone(&callback_count);
+        let right_request = request.clone();
+        let right_handle = scope.spawn(move || {
+            let adapter = ExternalEffectAdapter::new(&right_store);
+            right_barrier.wait();
+            adapter.execute(&right_request, "unix-ms:4", |_| {
+                right_count.fetch_add(1, Ordering::SeqCst);
+                Ok(ExternalEffectObservation::Pending)
+            })
+        });
+
+        (
+            left_handle.join().expect("left competing caller completes"),
+            right_handle
+                .join()
+                .expect("right competing caller completes"),
+        )
+    });
+
+    for outcome in [left, right] {
+        let outcome = outcome.expect("competing caller reads durable running state");
+        assert!(outcome.is_pending());
+        assert_eq!(outcome.record().stage, "running");
+    }
+    assert_eq!(callback_count.load(Ordering::SeqCst), 1);
+
+    let _ = fs::remove_file(&path);
+    let _ = fs::remove_file(path.with_extension("db-wal"));
+    let _ = fs::remove_file(path.with_extension("db-shm"));
+}
+
+#[test]
 fn external_effect_execute_rejects_without_claiming_external_success() {
     let (store, project) = setup();
     let adapter = ExternalEffectAdapter::new(&store);
@@ -507,14 +644,14 @@ fn external_effect_restart_preserves_running_job_for_readback() {
     let (store, context, project) = bound_setup_with_store(
         SqliteStore::open(&path, PRODUCTION_SCHEMA).expect("open restart store"),
     );
-    let adapter = ExternalEffectAdapter::new_with_identity(&store, &context);
     let request = bound_request(&project);
-    adapter.admit(&request).expect("register durable job");
-    adapter
-        .start(project.as_str(), &request.job_id, "unix-ms:4")
-        .expect("start durable job");
-    drop(adapter);
-    drop(context);
+    {
+        let adapter = ExternalEffectAdapter::new_with_identity(&store, &context);
+        adapter.admit(&request).expect("register durable job");
+        adapter
+            .start(project.as_str(), &request.job_id, "unix-ms:4")
+            .expect("start durable job");
+    }
     drop(store);
 
     let reopened = SqliteStore::open(&path, PRODUCTION_SCHEMA).expect("reopen restart store");
@@ -532,8 +669,6 @@ fn external_effect_restart_preserves_running_job_for_readback() {
     assert!(readback.is_pending());
     assert_eq!(readback.record().stage, "running");
 
-    drop(restarted);
-    drop(reopened_context);
     drop(reopened);
     for suffix in ["", "-wal", "-shm"] {
         let candidate = if suffix.is_empty() {
